@@ -3000,6 +3000,7 @@ mod tests {
         let operand = summary_with_operations(false, false, false);
         Rc::new(SummaryNode {
             expr: SummaryExpr::BinaryOp {
+                timing: asap_types::post_asap::ExecutionTiming::ReadTime,
                 lhs: Rc::clone(&operand),
                 rhs: operand,
                 operator: asap_types::post_asap::BinaryOperator {

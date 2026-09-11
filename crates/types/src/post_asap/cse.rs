@@ -31,13 +31,15 @@ fn same_node(left: &SummaryNode, right: &SummaryNode) -> bool {
                 lhs: al,
                 rhs: ar,
                 operator: ao,
+                timing: at,
             },
             BinaryOp {
                 lhs: bl,
                 rhs: br,
                 operator: bo,
+                timing: bt,
             },
-        ) => Rc::ptr_eq(al, bl) && Rc::ptr_eq(ar, br) && ao == bo,
+        ) => Rc::ptr_eq(al, bl) && Rc::ptr_eq(ar, br) && ao == bo && at == bt,
         (
             CandidateTopK {
                 candidates: ac,
@@ -411,6 +413,7 @@ mod tests {
                 for _ in 0..24 {
                     current = Rc::new(SummaryNode {
                         expr: SummaryExpr::BinaryOp {
+                            timing: super::super::ExecutionTiming::ReadTime,
                             lhs: Rc::clone(&current),
                             rhs: current,
                             operator: super::super::BinaryOperator {
