@@ -379,3 +379,126 @@ mod struct_field_tests {
             .is_err());
     }
 }
+
+/// Canonical element lookup over a declared Map or List. Map lookup retains its
+/// existing key/default contract. List lookup is one-based, supports negative
+/// indices, and returns the declared element default when a dynamic index is
+/// out of range. Literal zero is conservatively rejected because native array
+/// behavior depends on whether the input array is constant. Nullable containers
+/// are unsupported; nullable indices produce nullable results.
+pub fn element_access_type(
+    args: &[super::QueryExpr],
+    schema: &super::Schema,
+) -> Result<(DataType, bool), String> {
+    use super::{QueryExpr, ScalarValue};
+    let [input, index] = args else {
+        return Err("element access requires a collection and index".into());
+    };
+    let source = input.scalar_type(schema).map_err(|e| e.to_string())?;
+    let key = index.scalar_type(schema).map_err(|e| e.to_string())?;
+    match &source.0 {
+        DataType::Map { .. } => MapScalarFunction::Access.output_type(&[source, key]),
+        DataType::List { element } => {
+            if source.1 {
+                return Err("nullable List container access is unsupported".into());
+            }
+            if !matches!(key.0, DataType::Int64 | DataType::Null) {
+                return Err("List index must have integer type".into());
+            }
+            if matches!(index, QueryExpr::Literal(ScalarValue::Int64(0))) {
+                return Err(
+                    "literal zero List index is unsupported without constant-array proof".into(),
+                );
+            }
+            Ok((
+                element.dtype.clone(),
+                element.nullable || key.1 || key.0 == DataType::Null,
+            ))
+        }
+        _ => Err("element access requires a Map or List".into()),
+    }
+}
+
+#[cfg(test)]
+mod element_access_tests {
+    use super::*;
+    use crate::pre_asap::{Column, QueryExpr, ScalarValue, Schema};
+    fn access(index: QueryExpr) -> QueryExpr {
+        QueryExpr::FunctionCall {
+            name: "asap_element_access".into(),
+            args: vec![QueryExpr::Column(0), index],
+        }
+    }
+    #[test]
+    fn list_index_preserves_nested_element_metadata() {
+        let element = DataType::Struct {
+            fields: vec![
+                Column::new("ts", DataType::Int64, false),
+                Column::new("value", DataType::Float64, true),
+            ],
+        };
+        let schema = Schema::new(vec![
+            Column::new(
+                "samples",
+                DataType::List {
+                    element: Box::new(Column::new("item", element.clone(), false)),
+                },
+                false,
+            ),
+            Column::new("i", DataType::Int64, true),
+        ]);
+        for index in [1, -1, 100] {
+            assert_eq!(
+                access(QueryExpr::Literal(ScalarValue::Int64(index)))
+                    .scalar_type(&schema)
+                    .unwrap(),
+                (element.clone(), false)
+            );
+        }
+        assert_eq!(
+            access(QueryExpr::Column(1)).scalar_type(&schema).unwrap(),
+            (element.clone(), true)
+        );
+        assert!(access(QueryExpr::Literal(ScalarValue::Int64(0)))
+            .scalar_type(&schema)
+            .is_err());
+        assert!(access(QueryExpr::Literal(ScalarValue::Float64(1.0)))
+            .scalar_type(&schema)
+            .is_err());
+        let nested = QueryExpr::FunctionCall {
+            name: "asap_struct_field".into(),
+            args: vec![
+                access(QueryExpr::Literal(ScalarValue::Int64(1))),
+                QueryExpr::Literal(ScalarValue::Int64(2)),
+            ],
+        };
+        assert_eq!(
+            nested.scalar_type(&schema).unwrap(),
+            (DataType::Float64, true)
+        );
+        let roundtrip: QueryExpr =
+            serde_json::from_value(serde_json::to_value(&nested).unwrap()).unwrap();
+        assert_eq!(roundtrip, nested);
+    }
+    #[test]
+    fn generic_map_lookup_reuses_legacy_signature() {
+        let schema = Schema::new(vec![Column::new(
+            "m",
+            DataType::Map {
+                key: Box::new(DataType::Utf8),
+                value: Box::new(DataType::Int64),
+                value_nullable: false,
+            },
+            false,
+        )]);
+        let key = QueryExpr::Literal(ScalarValue::Utf8("k".into()));
+        let legacy = QueryExpr::FunctionCall {
+            name: "asap_map_access".into(),
+            args: vec![QueryExpr::Column(0), key.clone()],
+        };
+        assert_eq!(
+            access(key).scalar_type(&schema).unwrap(),
+            legacy.scalar_type(&schema).unwrap()
+        );
+    }
+}
