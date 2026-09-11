@@ -22,7 +22,8 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  # A delayed draft synchronize event must not cancel ready-for-review tests.
+  group: ${{ github.workflow }}-${{ github.ref }}-draft-${{ github.event.pull_request.draft }}
   cancel-in-progress: true
 
 env:
