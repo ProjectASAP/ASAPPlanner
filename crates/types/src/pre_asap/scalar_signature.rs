@@ -253,3 +253,129 @@ mod projection_tests {
         .is_err());
     }
 }
+
+/// Resolve the bounded canonical `asap_struct_field(struct, selector)` operation.
+/// Selectors are positive 1-based literal ordinals or exact literal field names.
+/// The existing Struct fields remain the sole authority for type/nullability.
+/// Dynamic/negative/defaulted selectors and nullable containers are intentionally
+/// unsupported here; this is not a claim of complete native tupleElement support.
+pub fn struct_field_type(
+    args: &[super::QueryExpr],
+    schema: &super::Schema,
+) -> Result<(DataType, bool), String> {
+    use super::{QueryExpr, ScalarValue};
+    let [input, selector] = args else {
+        return Err("struct field access requires a struct and constant selector".into());
+    };
+    let (dtype, nullable) = input
+        .scalar_type(schema)
+        .map_err(|error| error.to_string())?;
+    if nullable {
+        return Err("nullable struct container access is unsupported".into());
+    }
+    let DataType::Struct { fields } = dtype else {
+        return Err("struct field access requires a Struct input".into());
+    };
+    let field = match selector {
+        QueryExpr::Literal(ScalarValue::Int64(index)) if *index > 0 => usize::try_from(*index - 1)
+            .ok()
+            .and_then(|index| fields.get(index))
+            .ok_or("struct field ordinal is out of bounds")?,
+        QueryExpr::Literal(ScalarValue::Utf8(name)) => {
+            let mut matches = fields.iter().filter(|field| field.name == *name);
+            let field = matches.next().ok_or("struct field name does not exist")?;
+            if matches.next().is_some() {
+                return Err("struct field name is ambiguous".into());
+            }
+            field
+        }
+        _ => {
+            return Err(
+                "struct field selector must be a positive ordinal or field-name literal".into(),
+            )
+        }
+    };
+    Ok((field.dtype.clone(), field.nullable))
+}
+
+#[cfg(test)]
+mod struct_field_tests {
+    use super::*;
+    use crate::pre_asap::{Column, QueryExpr, ScalarValue, Schema};
+    fn schema() -> Schema {
+        Schema::new(vec![Column::new(
+            "record",
+            DataType::Struct {
+                fields: vec![
+                    Column::new("ts", DataType::Int64, false),
+                    Column::new(
+                        "values",
+                        DataType::List {
+                            element: Box::new(Column::new("item", DataType::Float64, true)),
+                        },
+                        true,
+                    ),
+                ],
+            },
+            false,
+        )])
+    }
+    fn access(selector: QueryExpr) -> QueryExpr {
+        QueryExpr::FunctionCall {
+            name: "asap_struct_field".into(),
+            args: vec![QueryExpr::Column(0), selector],
+        }
+    }
+    #[test]
+    fn field_access_reuses_nested_field_type_and_nullability() {
+        let schema = schema();
+        assert_eq!(
+            access(QueryExpr::Literal(ScalarValue::Int64(1)))
+                .scalar_type(&schema)
+                .unwrap(),
+            (DataType::Int64, false)
+        );
+        let named = access(QueryExpr::Literal(ScalarValue::Utf8("values".into())));
+        let ordinal = access(QueryExpr::Literal(ScalarValue::Int64(2)));
+        assert_eq!(
+            named.scalar_type(&schema).unwrap(),
+            ordinal.scalar_type(&schema).unwrap()
+        );
+        assert_eq!(
+            named.scalar_type(&schema).unwrap(),
+            (
+                DataType::List {
+                    element: Box::new(Column::new("item", DataType::Float64, true))
+                },
+                true
+            )
+        );
+        let roundtrip: QueryExpr =
+            serde_json::from_str(&serde_json::to_string(&named).unwrap()).unwrap();
+        assert_eq!(roundtrip, named);
+    }
+    #[test]
+    fn unsupported_field_access_is_an_error_not_placeholder_typing() {
+        for selector in [
+            QueryExpr::Column(0),
+            QueryExpr::Literal(ScalarValue::Int64(0)),
+            QueryExpr::Literal(ScalarValue::Int64(-1)),
+            QueryExpr::Literal(ScalarValue::Int64(3)),
+            QueryExpr::Literal(ScalarValue::Utf8("missing".into())),
+        ] {
+            assert!(access(selector).scalar_type(&schema()).is_err());
+        }
+        let mut ambiguous = schema();
+        if let DataType::Struct { fields } = &mut ambiguous.columns[0].dtype {
+            fields.push(Column::new("ts", DataType::Utf8, false));
+        }
+        assert!(access(QueryExpr::Literal(ScalarValue::Utf8("ts".into())))
+            .scalar_type(&ambiguous)
+            .is_err());
+        let mut nullable = schema();
+        nullable.columns[0].nullable = true;
+        assert!(access(QueryExpr::Literal(ScalarValue::Int64(1)))
+            .scalar_type(&nullable)
+            .is_err());
+    }
+}
