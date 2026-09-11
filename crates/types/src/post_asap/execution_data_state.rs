@@ -52,17 +52,15 @@ use crate::pre_asap::query_expr::{aggregate_output_schema, QueryExprError};
 use crate::pre_asap::schema::{Column, Schema};
 
 /// When a post-ASAP value is produced.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Default, Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize,
+)]
 pub enum ExecutionTiming {
     MaintenanceTime,
+    #[default]
     ReadTime,
 }
 
-impl Default for ExecutionTiming {
-    fn default() -> Self {
-        Self::ReadTime
-    }
-}
 impl ExecutionTiming {
     pub fn is_read_time(&self) -> bool {
         *self == Self::ReadTime
