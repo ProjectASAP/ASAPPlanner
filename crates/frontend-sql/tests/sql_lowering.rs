@@ -2232,3 +2232,28 @@ async fn original_o11y_modulo_queries_keep_remaining_child_gaps_visible() {
         );
     }
 }
+
+#[tokio::test]
+async fn clickhouse_modulo_preserves_projection_names_and_outer_references() {
+    for (sql, name) in [
+        ("SELECT modulo(bytes, 3) FROM metrics", "modulo(bytes, 3)"),
+        (
+            "SELECT modulo(bytes, 3) AS remainder FROM metrics",
+            "remainder",
+        ),
+        (
+            "SELECT \"modulo(bytes, 3)\" FROM (SELECT modulo(bytes, 3) FROM metrics) t",
+            "modulo(bytes, 3)",
+        ),
+    ] {
+        let query = lower_sql_dialect(
+            sql,
+            &catalog(),
+            SqlDialect::ClickhouseSQL,
+            AccuracyTarget::Exact,
+        )
+        .await
+        .unwrap();
+        assert_eq!(query.output_schema().unwrap().columns[0].name, name);
+    }
+}
