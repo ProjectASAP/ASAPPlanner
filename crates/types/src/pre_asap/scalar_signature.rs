@@ -117,12 +117,6 @@ fn common_type(left: &DataType, right: &DataType) -> Result<DataType, String> {
     if *left == DataType::Null {
         return Ok(right.clone());
     }
-    if matches!(
-        (left, right),
-        (DataType::Int64, DataType::Float64) | (DataType::Float64, DataType::Int64)
-    ) {
-        return Ok(DataType::Float64);
-    }
     Err(format!(
         "incompatible map scalar types: {left:?} and {right:?}"
     ))
@@ -180,6 +174,15 @@ mod tests {
             .is_err());
         assert!(MapScalarFunction::Concat
             .output_type(&[(DataType::Int64, false)])
+            .is_err());
+        // ClickHouse can choose Variant(Float64, Int64), not lossless Float64.
+        assert!(MapScalarFunction::Construct
+            .output_type(&[
+                (DataType::Utf8, false),
+                (DataType::Int64, false),
+                (DataType::Utf8, false),
+                (DataType::Float64, false),
+            ])
             .is_err());
     }
 }
