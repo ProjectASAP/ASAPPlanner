@@ -38,6 +38,7 @@ pub mod cse;
 pub mod expr_ir;
 pub mod query_expr;
 pub mod resolve;
+pub mod scalar_signature;
 pub mod schema;
 
 pub use agg_intent::{
