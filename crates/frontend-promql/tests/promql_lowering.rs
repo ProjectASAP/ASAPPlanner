@@ -20,19 +20,41 @@ fn lower(q: &str) -> QueryExpr {
 
 #[test]
 fn newly_parsed_metricsql_reducers_fail_closed_without_lowering_semantics() {
+    let query = "entropy_over_time(cpu_usage[5m])";
+    promql_parser::parser::parse(query)
+        .unwrap_or_else(|error| panic!("pinned parser must accept {query:?}: {error}"));
+    assert!(
+        matches!(
+            lower_promql(query, AccuracyTarget::Exact),
+            Err(LoweringError::UnsupportedFunction(_))
+        ),
+        "{query:?} must remain exact-only until the lowerer defines its semantics"
+    );
+}
+
+#[test]
+fn distinct_over_time_preserves_cardinality_accuracy_and_nested_windows() {
+    // Distinct counts sample values, not samples or series; all lowering routes
+    // retain the caller's accuracy requirement, including subquery arguments.
     for query in [
-        "distinct_over_time(cpu_usage[5m])",
-        "entropy_over_time(cpu_usage[5m])",
+        "distinct_over_time(cpu_usage{job=\"worker\"}[5m] offset 1h)",
+        "distinct_over_time((cpu_usage + 1)[5m:1m])",
+        "sum by(job)(distinct_over_time(cpu_usage[5m]))",
     ] {
-        promql_parser::parser::parse(query)
-            .unwrap_or_else(|error| panic!("pinned parser must accept {query:?}: {error}"));
-        assert!(
-            matches!(
-                lower_promql(query, AccuracyTarget::Exact),
-                Err(LoweringError::UnsupportedFunction(_))
-            ),
-            "{query:?} must remain exact-only until the lowerer defines its semantics"
-        );
+        for accuracy in [AccuracyTarget::Exact, AccuracyTarget::Epsilon(0.02)] {
+            let tree = lower_promql(query, accuracy.clone()).unwrap();
+            let mut intents = Vec::new();
+            collect_intents(&tree, &mut intents);
+            assert!(
+                intents.iter().any(|intent| matches!(
+                    intent, AggIntent::Cardinality { accuracy: actual, .. } if actual == &accuracy
+                )),
+                "{query}: {tree:?}"
+            );
+            assert!(!intents
+                .iter()
+                .any(|intent| matches!(intent, AggIntent::Count { .. })));
+        }
     }
 }
 
