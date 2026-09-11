@@ -72,6 +72,8 @@ impl Column {
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DataType {
+    /// Bottom type for NULL-only values and empty collection elements.
+    Null,
     /// 64-bit signed integer. Counter columns, group-cardinality outputs.
     Int64,
     /// 64-bit IEEE-754 float. Quantile / Avg / Sum-over-floats output.

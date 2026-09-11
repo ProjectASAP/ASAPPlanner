@@ -1,0 +1,242 @@
+//! Shared type rules for structural map scalar expressions.
+//! Execution must separately implement the documented ordering/default semantics.
+use super::schema::DataType;
+
+/// Names are resolved once against this closed builtin set; unknown functions
+/// remain outside these type rules. Map access keeps the first duplicate key
+/// and returns the value type's default when the key is absent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MapScalarFunction {
+    Construct,
+    Concat,
+    Access,
+}
+impl MapScalarFunction {
+    pub fn from_name(name: &str) -> Option<Self> {
+        match name.to_ascii_lowercase().as_str() {
+            "map" => Some(Self::Construct),
+            "mapconcat" => Some(Self::Concat),
+            "asap_map_access" => Some(Self::Access),
+            _ => None,
+        }
+    }
+    pub fn output_type(self, args: &[(DataType, bool)]) -> Result<(DataType, bool), String> {
+        match self {
+            Self::Construct => {
+                if args.len() % 2 != 0 {
+                    return Err("map construction requires key/value pairs".into());
+                }
+                let mut key = DataType::Null;
+                let mut value = DataType::Null;
+                let mut value_nullable = false;
+                for pair in args.chunks_exact(2) {
+                    if pair[0].1 || pair[0].0 == DataType::Null {
+                        return Err("map keys must be non-null".into());
+                    }
+                    key = common_type(&key, &pair[0].0)?;
+                    value = common_type(&value, &pair[1].0)?;
+                    value_nullable |= pair[1].1 || pair[1].0 == DataType::Null;
+                }
+                Ok((
+                    DataType::Map {
+                        key: Box::new(key),
+                        value: Box::new(value),
+                        value_nullable,
+                    },
+                    false,
+                ))
+            }
+            Self::Concat => {
+                if args.is_empty() {
+                    return Err("map concatenation requires at least one map".into());
+                }
+                let mut key = DataType::Null;
+                let mut value = DataType::Null;
+                let mut value_nullable = false;
+                for (argument, nullable) in args {
+                    if *nullable {
+                        return Err("nullable map containers are unsupported".into());
+                    }
+                    let DataType::Map {
+                        key: k,
+                        value: v,
+                        value_nullable: n,
+                    } = argument
+                    else {
+                        return Err("map concatenation requires map arguments".into());
+                    };
+                    key = common_type(&key, k)?;
+                    value = common_type(&value, v)?;
+                    value_nullable |= *n;
+                }
+                Ok((
+                    DataType::Map {
+                        key: Box::new(key),
+                        value: Box::new(value),
+                        value_nullable,
+                    },
+                    false,
+                ))
+            }
+            Self::Access => {
+                let [(map, map_nullable), (index, index_nullable)] = args else {
+                    return Err("map access requires a map and key".into());
+                };
+                if *map_nullable {
+                    return Err("nullable map containers are unsupported".into());
+                }
+                let DataType::Map {
+                    key,
+                    value,
+                    value_nullable,
+                } = map
+                else {
+                    return Err("map access requires a map".into());
+                };
+                if **key != DataType::Null
+                    && *index != DataType::Null
+                    && common_type(key, index)? != **key
+                {
+                    return Err("map lookup key requires a lossy or unsupported coercion".into());
+                }
+                Ok((
+                    (**value).clone(),
+                    *value_nullable
+                        || *index_nullable
+                        || *index == DataType::Null
+                        || **value == DataType::Null,
+                ))
+            }
+        }
+    }
+}
+fn common_type(left: &DataType, right: &DataType) -> Result<DataType, String> {
+    if left == right || *right == DataType::Null {
+        return Ok(left.clone());
+    }
+    if *left == DataType::Null {
+        return Ok(right.clone());
+    }
+    if matches!(
+        (left, right),
+        (DataType::Int64, DataType::Float64) | (DataType::Float64, DataType::Int64)
+    ) {
+        return Ok(DataType::Float64);
+    }
+    Err(format!(
+        "incompatible map scalar types: {left:?} and {right:?}"
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn empty_map_is_bottom_typed_and_concat_resolves_it() {
+        let empty = MapScalarFunction::Construct.output_type(&[]).unwrap();
+        assert_eq!(
+            empty,
+            (
+                DataType::Map {
+                    key: Box::new(DataType::Null),
+                    value: Box::new(DataType::Null),
+                    value_nullable: false
+                },
+                false
+            )
+        );
+        let concrete = MapScalarFunction::Construct
+            .output_type(&[(DataType::Utf8, false), (DataType::Int64, false)])
+            .unwrap();
+        assert_eq!(
+            MapScalarFunction::Concat
+                .output_type(&[empty, concrete.clone()])
+                .unwrap(),
+            concrete
+        );
+    }
+    #[test]
+    fn nullable_lookup_and_invalid_signatures_are_explicit() {
+        let map = MapScalarFunction::Construct
+            .output_type(&[(DataType::Utf8, false), (DataType::Int64, true)])
+            .unwrap();
+        assert_eq!(
+            MapScalarFunction::Access
+                .output_type(&[map, (DataType::Utf8, false)])
+                .unwrap(),
+            (DataType::Int64, true)
+        );
+        let nonnull = MapScalarFunction::Construct
+            .output_type(&[(DataType::Utf8, false), (DataType::Int64, false)])
+            .unwrap();
+        assert_eq!(
+            MapScalarFunction::Access
+                .output_type(&[nonnull, (DataType::Utf8, true)])
+                .unwrap(),
+            (DataType::Int64, true)
+        );
+        assert!(MapScalarFunction::Construct
+            .output_type(&[(DataType::Utf8, true), (DataType::Int64, false)])
+            .is_err());
+        assert!(MapScalarFunction::Concat
+            .output_type(&[(DataType::Int64, false)])
+            .is_err());
+    }
+}
+
+#[cfg(test)]
+mod projection_tests {
+    use super::*;
+    use crate::pre_asap::{Column, ProjectItem, QueryExpr, ScalarValue, Schema, Source};
+    use std::rc::Rc;
+    fn project(expr: QueryExpr) -> QueryExpr {
+        QueryExpr::Project {
+            cols: vec![ProjectItem {
+                alias: Some("result".into()),
+                expr,
+            }],
+            qualifier: None,
+            child: Rc::new(QueryExpr::Scan {
+                source: Source::Table {
+                    table_ref: "t".into(),
+                },
+                predicates: vec![],
+                schema: Schema::new(vec![
+                    Column::new("k", DataType::Utf8, false),
+                    Column::new("v", DataType::Int64, true),
+                ]),
+            }),
+        }
+    }
+    #[test]
+    fn canonical_projection_uses_map_signature_and_rejects_invalid_arity() {
+        let map = QueryExpr::FunctionCall {
+            name: "map".into(),
+            args: vec![QueryExpr::Column(0), QueryExpr::Column(1)],
+        };
+        let schema = project(map.clone()).output_schema().unwrap();
+        assert_eq!(
+            schema.columns[0].dtype,
+            DataType::Map {
+                key: Box::new(DataType::Utf8),
+                value: Box::new(DataType::Int64),
+                value_nullable: true
+            }
+        );
+        assert!(!schema.columns[0].nullable);
+        let lookup = QueryExpr::FunctionCall {
+            name: "asap_map_access".into(),
+            args: vec![map, QueryExpr::Literal(ScalarValue::Utf8("missing".into()))],
+        };
+        assert_eq!(
+            project(lookup).output_schema().unwrap().columns[0],
+            Column::new("result", DataType::Int64, true)
+        );
+        assert!(project(QueryExpr::FunctionCall {
+            name: "map".into(),
+            args: vec![QueryExpr::Column(0)]
+        })
+        .output_schema()
+        .is_err());
+    }
+}

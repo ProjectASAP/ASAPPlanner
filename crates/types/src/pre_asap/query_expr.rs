@@ -52,6 +52,8 @@ impl ColState for ColumnRef {
 /// Errors from schema derivation over a canonical tree.
 #[derive(Debug, Error)]
 pub enum QueryExprError {
+    #[error("invalid scalar function signature: {0}")]
+    InvalidScalarSignature(String),
     #[error("by-column id {0} out of range (input has {1} columns)")]
     InvalidGroupByColumn(ColumnId, usize),
     #[error("Concat requires at least one child")]
@@ -1200,7 +1202,7 @@ impl QueryExpr<ColumnId> {
                     .iter()
                     .enumerate()
                     .map(|(i, item)| {
-                        let (dtype, nullable) = infer_expr_type(&item.expr, &in_schema);
+                        let (dtype, nullable) = infer_expr_type(&item.expr, &in_schema)?;
                         let name = item
                             .alias
                             .clone()
@@ -1209,12 +1211,12 @@ impl QueryExpr<ColumnId> {
                         // A derived table re-qualifies its output columns with
                         // its alias, so `t.col` (and a join over two derived
                         // tables) resolves to the right relation.
-                        match qualifier {
+                        Ok(match qualifier {
                             Some(q) => c.with_table(q),
                             None => c,
-                        }
+                        })
                     })
-                    .collect();
+                    .collect::<Result<Vec<_>, QueryExprError>>()?;
                 let time_index = columns.iter().position(|c| c.name == "ts");
                 let unique_keys = in_schema
                     .unique_keys
@@ -1636,8 +1638,11 @@ fn without_output_schema(
 /// (post-ASAP binding refines with a real function/type registry). `expr`
 /// must be one of the scalar variants (issue #205) — an operator variant here
 /// is a construction bug, not a shape this needs to handle silently.
-fn infer_expr_type(expr: &QueryExpr<ColumnId>, schema: &Schema) -> (DataType, bool) {
-    match expr {
+fn infer_expr_type(
+    expr: &QueryExpr<ColumnId>,
+    schema: &Schema,
+) -> Result<(DataType, bool), QueryExprError> {
+    Ok(match expr {
         QueryExpr::Column(id) => schema
             .columns
             .get(*id)
@@ -1648,7 +1653,7 @@ fn infer_expr_type(expr: &QueryExpr<ColumnId>, schema: &Schema) -> (DataType, bo
             ScalarValue::Float64(_) => (DataType::Float64, false),
             ScalarValue::Utf8(_) => (DataType::Utf8, false),
             ScalarValue::Boolean(_) => (DataType::Bool, false),
-            ScalarValue::Null => (DataType::Float64, true),
+            ScalarValue::Null => (DataType::Null, true),
         },
         // Boolean-valued expressions (SQL three-valued logic → nullable).
         QueryExpr::Compare { .. }
@@ -1659,8 +1664,8 @@ fn infer_expr_type(expr: &QueryExpr<ColumnId>, schema: &Schema) -> (DataType, bo
         | QueryExpr::IsNotNull(_)
         | QueryExpr::InList { .. } => (DataType::Bool, true),
         QueryExpr::Arithmetic { left, right, .. } => {
-            let (lt, ln) = infer_expr_type(left, schema);
-            let (rt, rn) = infer_expr_type(right, schema);
+            let (lt, ln) = infer_expr_type(left, schema)?;
+            let (rt, rn) = infer_expr_type(right, schema)?;
             let dtype = if matches!(lt, DataType::Int64) && matches!(rt, DataType::Int64) {
                 DataType::Int64
             } else {
@@ -1669,24 +1674,40 @@ fn infer_expr_type(expr: &QueryExpr<ColumnId>, schema: &Schema) -> (DataType, bo
             (dtype, ln || rn)
         }
         QueryExpr::Cast { to, try_cast, expr } => {
-            let (_, nullable) = infer_expr_type(expr, schema);
+            let (_, nullable) = infer_expr_type(expr, schema)?;
             (to.clone(), *try_cast || nullable)
         }
-        // No function/type registry here — default permissive.
-        QueryExpr::FunctionCall { .. } => (DataType::Float64, true),
+        QueryExpr::FunctionCall { name, args } => {
+            if let Some(function) = super::scalar_signature::MapScalarFunction::from_name(name) {
+                let arguments = args
+                    .iter()
+                    .map(|arg| infer_expr_type(arg, schema))
+                    .collect::<Result<Vec<_>, _>>()?;
+                function
+                    .output_type(&arguments)
+                    .map_err(QueryExprError::InvalidScalarSignature)?
+            } else {
+                // Legacy unknown functions retain their existing policy.
+                (DataType::Float64, true)
+            }
+        }
         QueryExpr::Case {
             branches,
             else_expr,
             ..
-        } => branches
-            .first()
-            .map(|(_, then)| (infer_expr_type(then, schema).0, true))
-            .or_else(|| else_expr.as_ref().map(|e| infer_expr_type(e, schema)))
-            .unwrap_or((DataType::Float64, true)),
+        } => {
+            if let Some((_, then)) = branches.first() {
+                (infer_expr_type(then, schema)?.0, true)
+            } else if let Some(other) = else_expr {
+                infer_expr_type(other, schema)?
+            } else {
+                (DataType::Null, true)
+            }
+        }
         other => {
             unreachable!("infer_expr_type called on a non-scalar QueryExpr variant: {other:?}")
         }
-    }
+    })
 }
 
 /// Default output-column name for a projection item with no explicit alias:

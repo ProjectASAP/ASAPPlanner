@@ -63,6 +63,7 @@ pub(super) fn scalar_value_to_asap(sv: &DfScalarValue) -> Result<ScalarValue, Lo
 /// Arrow → the canonical `DataType` (used for `CAST` targets). Deliberately narrow.
 pub(super) fn arrow_to_dtype(dt: &ArrowDataType) -> Result<DataType, LoweringError> {
     match dt {
+        ArrowDataType::Null => Ok(DataType::Null),
         ArrowDataType::Int64
         | ArrowDataType::Int32
         | ArrowDataType::Int16
@@ -116,6 +117,7 @@ pub(super) fn arrow_to_dtype(dt: &ArrowDataType) -> Result<DataType, LoweringErr
 /// The canonical `DataType` → Arrow (for registering catalog tables with DataFusion).
 pub(super) fn dtype_to_arrow(dt: &DataType) -> ArrowDataType {
     match dt {
+        DataType::Null => ArrowDataType::Null,
         DataType::Int64 => ArrowDataType::Int64,
         DataType::Float64 => ArrowDataType::Float64,
         DataType::Utf8 => ArrowDataType::Utf8,
@@ -245,5 +247,23 @@ mod collection_tests {
             )),
         };
         assert_eq!(arrow_to_dtype(&dtype_to_arrow(&dtype)).unwrap(), dtype);
+    }
+}
+
+#[cfg(test)]
+mod bottom_map_tests {
+    use super::*;
+    #[test]
+    fn empty_map_bottom_types_roundtrip_without_string_defaults() {
+        let (map, nullable) = asap_types::pre_asap::scalar_signature::MapScalarFunction::Construct
+            .output_type(&[])
+            .unwrap();
+        assert!(!nullable);
+        let arrow = dtype_to_arrow(&map);
+        assert_eq!(arrow_to_dtype(&arrow).unwrap(), map);
+        assert_eq!(
+            arrow_to_dtype(&ArrowDataType::Null).unwrap(),
+            DataType::Null
+        );
     }
 }
