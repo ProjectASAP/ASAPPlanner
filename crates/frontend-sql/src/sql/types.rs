@@ -71,6 +71,25 @@ pub(super) fn arrow_to_dtype(dt: &ArrowDataType) -> Result<DataType, LoweringErr
         ArrowDataType::Utf8 | ArrowDataType::LargeUtf8 => Ok(DataType::Utf8),
         ArrowDataType::Boolean => Ok(DataType::Bool),
         ArrowDataType::Timestamp(_, _) => Ok(DataType::Timestamp),
+        ArrowDataType::List(element) => Ok(DataType::List {
+            element: Box::new(Column::new(
+                element.name(),
+                arrow_to_dtype(element.data_type())?,
+                element.is_nullable(),
+            )),
+        }),
+        ArrowDataType::Struct(fields) => Ok(DataType::Struct {
+            fields: fields
+                .iter()
+                .map(|field| {
+                    Ok(Column::new(
+                        field.name(),
+                        arrow_to_dtype(field.data_type())?,
+                        field.is_nullable(),
+                    ))
+                })
+                .collect::<Result<Vec<_>, LoweringError>>()?,
+        }),
         ArrowDataType::Map(entries, _) => {
             let ArrowDataType::Struct(fields) = entries.data_type() else {
                 return Err(LoweringError::UnsupportedFeature(
@@ -101,6 +120,18 @@ pub(super) fn dtype_to_arrow(dt: &DataType) -> ArrowDataType {
         DataType::Float64 => ArrowDataType::Float64,
         DataType::Utf8 => ArrowDataType::Utf8,
         DataType::Bool => ArrowDataType::Boolean,
+        DataType::List { element } => ArrowDataType::List(std::sync::Arc::new(Field::new(
+            &element.name,
+            dtype_to_arrow(&element.dtype),
+            element.nullable,
+        ))),
+        DataType::Struct { fields } => ArrowDataType::Struct(
+            fields
+                .iter()
+                .map(|field| Field::new(&field.name, dtype_to_arrow(&field.dtype), field.nullable))
+                .collect::<Vec<_>>()
+                .into(),
+        ),
         DataType::Map {
             key,
             value,
@@ -154,5 +185,65 @@ mod tests {
         assert_eq!(arrow_to_dtype(&dtype_to_arrow(&map)).unwrap(), map);
         let encoded = serde_json::to_string(&map).unwrap();
         assert_eq!(serde_json::from_str::<DataType>(&encoded).unwrap(), map);
+    }
+}
+
+#[cfg(test)]
+mod collection_tests {
+    use super::*;
+    #[test]
+    fn nested_collections_preserve_field_names_order_and_nullability() {
+        let dtype = DataType::Struct {
+            fields: vec![
+                Column::new(
+                    "samples",
+                    DataType::List {
+                        element: Box::new(Column::new(
+                            "sample",
+                            DataType::Struct {
+                                fields: vec![
+                                    Column::new("timestamp", DataType::Timestamp, false),
+                                    Column::new("value", DataType::Float64, true),
+                                    Column::new(
+                                        "labels",
+                                        DataType::Map {
+                                            key: Box::new(DataType::Utf8),
+                                            value: Box::new(DataType::List {
+                                                element: Box::new(Column::new(
+                                                    "label_value",
+                                                    DataType::Utf8,
+                                                    false,
+                                                )),
+                                            }),
+                                            value_nullable: true,
+                                        },
+                                        true,
+                                    ),
+                                ],
+                            },
+                            true,
+                        )),
+                    },
+                    false,
+                ),
+                Column::new("optional", DataType::Int64, true),
+            ],
+        };
+        let arrow = dtype_to_arrow(&dtype);
+        assert_eq!(arrow_to_dtype(&arrow).unwrap(), dtype);
+        assert_eq!(dtype_to_arrow(&arrow_to_dtype(&arrow).unwrap()), arrow);
+        let encoded = serde_json::to_string(&dtype).unwrap();
+        assert_eq!(serde_json::from_str::<DataType>(&encoded).unwrap(), dtype);
+    }
+    #[test]
+    fn empty_struct_and_nonnullable_list_element_roundtrip() {
+        let dtype = DataType::List {
+            element: Box::new(Column::new(
+                "empty",
+                DataType::Struct { fields: vec![] },
+                false,
+            )),
+        };
+        assert_eq!(arrow_to_dtype(&dtype_to_arrow(&dtype)).unwrap(), dtype);
     }
 }

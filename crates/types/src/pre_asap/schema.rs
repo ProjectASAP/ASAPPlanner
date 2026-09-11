@@ -34,9 +34,8 @@ pub struct Column {
     /// produce label-name + the synthetic `value` / `timestamp` columns;
     /// SQL leaves carry their `information_schema` names.
     pub name: String,
-    /// Column data type. Kept narrow here (`Int64` / `Float64` / `Utf8` /
-    /// `Bool` / `Timestamp`); `Sketch(...)` is a post-ASAP-only addition
-    /// (design.md §6.4) and is intentionally absent here.
+    /// Logical scalar or collection type. Sketch state remains a post-ASAP
+    /// concern and is intentionally absent here.
     pub dtype: DataType,
     /// Whether NULL values are allowed in this column. PromQL value
     /// columns are non-nullable; SQL columns inherit their DDL nullability.
@@ -84,6 +83,11 @@ pub enum DataType {
     /// Wall-clock timestamp. PromQL leaves carry exactly one of these
     /// (the `time_index` column); SQL leaves may or may not.
     Timestamp,
+    /// Variable-length sequence. The existing column contract preserves the
+    /// element field name, type, and nullability. Nested fields are unqualified.
+    List { element: Box<Column> },
+    /// Ordered named fields, including each field's independent nullability.
+    Struct { fields: Vec<Column> },
     /// SQL map entries with non-null keys and explicitly nullable values.
     Map {
         key: Box<DataType>,
