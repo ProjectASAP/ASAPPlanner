@@ -2344,3 +2344,52 @@ async fn arg_selector_result_schema_tracks_selected_argument() {
         assert_eq!(schema.columns[0].nullable, nullable);
     }
 }
+
+#[tokio::test]
+async fn clickhouse_list_element_uses_canonical_typed_access() {
+    let catalog = SqlCatalog::new().with_table(
+        "t",
+        Schema::new(vec![
+            Column::new(
+                "samples",
+                DataType::List {
+                    element: Box::new(Column::new("item", DataType::Int64, false)),
+                },
+                false,
+            ),
+            Column::new("index", DataType::Int64, true),
+        ]),
+    );
+    for (sql, nullable) in [
+        ("SELECT samples[1] AS selected FROM t", false),
+        ("SELECT arrayElement(samples, -1) AS selected FROM t", false),
+        ("SELECT samples[index] AS selected FROM t", true),
+    ] {
+        let query = lower_sql_dialect(
+            sql,
+            &catalog,
+            SqlDialect::ClickhouseSQL,
+            AccuracyTarget::Exact,
+        )
+        .await
+        .unwrap();
+        let output = query.output_schema().unwrap();
+        assert_eq!(output.columns[0].dtype, DataType::Int64);
+        assert_eq!(output.columns[0].nullable, nullable);
+        let serialized = serde_json::to_string(&query).unwrap();
+        assert!(serialized.contains("asap_element_access"), "{serialized}");
+    }
+    for sql in ["SELECT samples[0] FROM t", "SELECT samples['bad'] FROM t"] {
+        assert!(
+            lower_sql_dialect(
+                sql,
+                &catalog,
+                SqlDialect::ClickhouseSQL,
+                AccuracyTarget::Exact
+            )
+            .await
+            .is_err(),
+            "{sql}"
+        );
+    }
+}

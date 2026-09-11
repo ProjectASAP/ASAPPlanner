@@ -1,7 +1,8 @@
 //! DataFusion planning adapters. Types come from the canonical signature rules;
 //! physical evaluation deliberately remains the query engine's responsibility.
-use super::types::{arrow_to_dtype, dtype_to_arrow};
-use asap_types::pre_asap::scalar_signature::MapScalarFunction;
+use super::types::{arrow_to_dtype, dtype_to_arrow, scalar_value_to_asap};
+use asap_types::pre_asap::scalar_signature::{element_access_type, MapScalarFunction};
+use asap_types::pre_asap::{Column, QueryExpr, Schema};
 use datafusion::arrow::datatypes::DataType;
 use datafusion::common::{DataFusionError, ExprSchema, Result};
 use datafusion::logical_expr::{
@@ -37,7 +38,12 @@ struct MapPlanningFunction {
     signature: Signature,
 }
 impl MapPlanningFunction {
-    fn output(&self, args: &[DataType], nullable: &[bool]) -> Result<(DataType, bool)> {
+    fn output(
+        &self,
+        args: &[DataType],
+        nullable: &[bool],
+        expressions: Option<&[Expr]>,
+    ) -> Result<(DataType, bool)> {
         let inputs = args
             .iter()
             .zip(nullable)
@@ -47,10 +53,36 @@ impl MapPlanningFunction {
                     .map_err(|e| DataFusionError::Plan(e.to_string()))
             })
             .collect::<Result<Vec<_>>>()?;
-        let (dtype, nullable) = self
-            .function
-            .output_type(&inputs)
-            .map_err(DataFusionError::Plan)?;
+        let (dtype, nullable) = if self.name == "arrayelement" {
+            // DataFusion asks for argument-dependent types before canonical
+            // expression binding. Reuse the shared resolver over typed argument
+            // slots; final canonical binding also validates literal selectors.
+            let schema = Schema::new(
+                inputs
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, (dtype, nullable))| {
+                        Column::new(format!("argument_{index}"), dtype, nullable)
+                    })
+                    .collect(),
+            );
+            let args = (0..schema.columns.len())
+                .map(|index| {
+                    if let Some(Expr::Literal(value)) = expressions.and_then(|args| args.get(index))
+                    {
+                        scalar_value_to_asap(value)
+                            .map(QueryExpr::Literal)
+                            .map_err(|error| DataFusionError::Plan(error.to_string()))
+                    } else {
+                        Ok(QueryExpr::Column(index))
+                    }
+                })
+                .collect::<Result<Vec<_>>>()?;
+            element_access_type(&args, &schema)
+        } else {
+            self.function.output_type(&inputs)
+        }
+        .map_err(DataFusionError::Plan)?;
         Ok((dtype_to_arrow(&dtype), nullable))
     }
 }
@@ -71,6 +103,7 @@ impl ScalarUDFImpl for MapPlanningFunction {
                 .iter()
                 .map(|dtype| *dtype == DataType::Null)
                 .collect::<Vec<_>>(),
+            None,
         )
         .map(|output| output.0)
     }
@@ -84,7 +117,8 @@ impl ScalarUDFImpl for MapPlanningFunction {
             .iter()
             .map(|arg| arg.nullable(schema))
             .collect::<Result<Vec<_>>>()?;
-        self.output(types, &nullable).map(|output| output.0)
+        self.output(types, &nullable, Some(args))
+            .map(|output| output.0)
     }
     fn is_nullable(&self, args: &[Expr], schema: &dyn ExprSchema) -> bool {
         let types = args
@@ -97,7 +131,7 @@ impl ScalarUDFImpl for MapPlanningFunction {
             .collect::<Result<Vec<_>>>();
         match (types, nullable) {
             (Ok(types), Ok(nullable)) => self
-                .output(&types, &nullable)
+                .output(&types, &nullable, Some(args))
                 .map(|out| out.1)
                 .unwrap_or(true),
             _ => true,
