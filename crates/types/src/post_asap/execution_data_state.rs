@@ -421,7 +421,8 @@ fn visit(
                 ExecutionTiming::ReadTime => ExecutionDataState::READ_ROWS,
             };
             let s = produced_data_state(&child.expr).unwrap_or(required);
-            let exact_readout = *timing == ExecutionTiming::ReadTime
+            let exact_readout = (*timing == ExecutionTiming::ReadTime
+                || matches!(operation, ValueOperation::FinalizeExactAccumulator))
                 && s == ExecutionDataState::MAINTENANCE_SUMMARY
                 && is_exact_accumulator_state(&child.schema).is_ok();
             if s != required && !exact_readout {
