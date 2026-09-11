@@ -2136,3 +2136,124 @@ async fn grouped_map_column_preserves_map_type() {
     .unwrap();
     assert_eq!(query.output_schema().unwrap().columns[0].dtype, map);
 }
+
+#[tokio::test]
+async fn clickhouse_modulo_uses_native_arithmetic_types_and_nullability() {
+    let catalog = SqlCatalog::new().with_table(
+        "numbers",
+        Schema::new(vec![
+            Column::new("i", DataType::Int64, false),
+            Column::new("n", DataType::Int64, true),
+            Column::new("f", DataType::Float64, false),
+        ]),
+    );
+    for (call, native) in [
+        ("modulo(i, 3)", "i % 3"),
+        ("modulo(n, -3)", "n % -3"),
+        ("modulo(f, 2.5)", "f % 2.5"),
+        ("modulo(-7, 3)", "-7 % 3"),
+        ("modulo(i, 0)", "i % 0"),
+        ("modulo(modulo(i, 5), 2)", "(i % 5) % 2"),
+    ] {
+        let function = lower_sql_dialect(
+            &format!("SELECT {call} AS value FROM numbers"),
+            &catalog,
+            SqlDialect::ClickhouseSQL,
+            AccuracyTarget::Exact,
+        )
+        .await
+        .unwrap();
+        let operator = lower_sql_dialect(
+            &format!("SELECT {native} AS value FROM numbers"),
+            &catalog,
+            SqlDialect::ClickhouseSQL,
+            AccuracyTarget::Exact,
+        )
+        .await
+        .unwrap();
+        assert_eq!(function, operator, "{call}");
+        assert_eq!(
+            function.output_schema().unwrap(),
+            operator.output_schema().unwrap()
+        );
+    }
+    let nullable = lower_sql_dialect(
+        "SELECT modulo(n, 3) AS value FROM numbers",
+        &catalog,
+        SqlDialect::ClickhouseSQL,
+        AccuracyTarget::Exact,
+    )
+    .await
+    .unwrap()
+    .output_schema()
+    .unwrap();
+    assert_eq!(nullable.columns[0].dtype, DataType::Int64);
+    assert!(nullable.columns[0].nullable);
+}
+
+#[tokio::test]
+async fn original_o11y_modulo_queries_keep_remaining_child_gaps_visible() {
+    let catalog = SqlCatalog::new().with_table(
+        "raw_samples",
+        Schema::new(vec![
+            Column::new("metric", DataType::Utf8, false),
+            Column::new("ts_ms", DataType::Int64, false),
+            Column::new("value", DataType::Float64, false),
+            Column::new(
+                "labels",
+                DataType::Map {
+                    key: Box::new(DataType::Utf8),
+                    value: Box::new(DataType::Utf8),
+                    value_nullable: false,
+                },
+                false,
+            ),
+        ]),
+    );
+    for sql in [
+        include_str!("data/o11y_q10.sql"),
+        include_str!("data/o11y_q27.sql"),
+    ] {
+        let error = lower_sql_dialect(
+            sql,
+            &catalog,
+            SqlDialect::ClickhouseSQL,
+            AccuracyTarget::Exact,
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+        assert!(!error.contains("Invalid function 'modulo'"), "{error}");
+        assert!(
+            error.contains("map does not support zero arguments")
+                || error.contains("Map Access")
+                || error.contains("Invalid function"),
+            "unexpected remaining gap: {error}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn clickhouse_modulo_preserves_projection_names_and_outer_references() {
+    for (sql, name) in [
+        ("SELECT modulo(bytes, 3) FROM metrics", "modulo(bytes, 3)"),
+        (
+            "SELECT modulo(bytes, 3) AS remainder FROM metrics",
+            "remainder",
+        ),
+        (
+            "SELECT \"modulo(bytes, 3)\" FROM (SELECT modulo(bytes, 3) FROM metrics) t",
+            "modulo(bytes, 3)",
+        ),
+    ] {
+        let query = lower_sql_dialect(
+            sql,
+            &catalog(),
+            SqlDialect::ClickhouseSQL,
+            AccuracyTarget::Exact,
+        )
+        .await
+        .unwrap();
+        assert_eq!(query.output_schema().unwrap().columns[0].name, name);
+    }
+}
