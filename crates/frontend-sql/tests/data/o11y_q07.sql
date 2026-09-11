@@ -1,0 +1,1 @@
+SELECT mapConcat(labels,map('__name__','user_service_cache_refresh_lag_seconds')) AS labels, argMax(value,ts_ms) AS value FROM raw_samples WHERE metric='user_service_cache_refresh_lag_seconds' AND ts_ms>1788891296000-300000 AND ts_ms<=1788891296000 GROUP BY labels ORDER BY labels

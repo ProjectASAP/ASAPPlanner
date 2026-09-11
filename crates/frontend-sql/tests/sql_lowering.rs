@@ -2192,7 +2192,7 @@ async fn clickhouse_modulo_uses_native_arithmetic_types_and_nullability() {
 }
 
 #[tokio::test]
-async fn original_o11y_modulo_queries_keep_remaining_child_gaps_visible() {
+async fn original_o11y_map_queries_lower_with_typed_results() {
     let catalog = SqlCatalog::new().with_table(
         "raw_samples",
         Schema::new(vec![
@@ -2213,22 +2213,25 @@ async fn original_o11y_modulo_queries_keep_remaining_child_gaps_visible() {
     for sql in [
         include_str!("data/o11y_q10.sql"),
         include_str!("data/o11y_q27.sql"),
+        include_str!("data/o11y_q07.sql"),
+        include_str!("data/o11y_q09.sql"),
+        include_str!("data/o11y_q12.sql"),
     ] {
-        let error = lower_sql_dialect(
+        let query = lower_sql_dialect(
             sql,
             &catalog,
             SqlDialect::ClickhouseSQL,
             AccuracyTarget::Exact,
         )
         .await
-        .unwrap_err()
-        .to_string();
-        assert!(!error.contains("Invalid function 'modulo'"), "{error}");
+        .unwrap_or_else(|e| panic!("{sql}: {e}"));
+        let schema = query.output_schema().unwrap();
         assert!(
-            error.contains("map does not support zero arguments")
-                || error.contains("Map Access")
-                || error.contains("Invalid function"),
-            "unexpected remaining gap: {error}"
+            schema
+                .columns
+                .iter()
+                .any(|column| matches!(column.dtype, DataType::Map { .. })),
+            "{schema:?}"
         );
     }
 }
@@ -2256,4 +2259,44 @@ async fn clickhouse_modulo_preserves_projection_names_and_outer_references() {
         .unwrap();
         assert_eq!(query.output_schema().unwrap().columns[0].name, name);
     }
+}
+
+#[tokio::test]
+async fn clickhouse_map_access_keeps_generated_names_and_rejects_variant_coercion() {
+    let catalog = SqlCatalog::new().with_table(
+        "t",
+        Schema::new(vec![
+            Column::new(
+                "labels",
+                DataType::Map {
+                    key: Box::new(DataType::Utf8),
+                    value: Box::new(DataType::Utf8),
+                    value_nullable: false,
+                },
+                false,
+            ),
+            Column::new("integer", DataType::Int64, false),
+            Column::new("floating", DataType::Float64, false),
+        ]),
+    );
+    let query = lower_sql_dialect(
+        "SELECT labels['job'] FROM t",
+        &catalog,
+        SqlDialect::ClickhouseSQL,
+        AccuracyTarget::Exact,
+    )
+    .await
+    .unwrap();
+    let output = query.output_schema().unwrap();
+    assert_eq!(output.columns[0].name, "arrayElement(labels, 'job')");
+    assert_eq!(output.columns[0].dtype, DataType::Utf8);
+    assert!(!output.columns[0].nullable);
+    assert!(lower_sql_dialect(
+        "SELECT map('a', integer, 'b', floating) FROM t",
+        &catalog,
+        SqlDialect::ClickhouseSQL,
+        AccuracyTarget::Exact
+    )
+    .await
+    .is_err());
 }
