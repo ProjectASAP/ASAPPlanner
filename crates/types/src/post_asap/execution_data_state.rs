@@ -23,7 +23,7 @@
 //! | `SummaryEstimate.summary_input` | `MAINTENANCE_SUMMARY` (any family). Produces `READ_ROWS`. |
 //! | `SummaryJoin.outer/inner` | `MAINTENANCE_ROWS` or `MAINTENANCE_SUMMARY`; never a read-time data_state. |
 //! | `SummarySubtract`/`SummaryDelete`/`SummaryMerge` | `MAINTENANCE_SUMMARY`. |
-//! | `ValueOperation.child` with `MaintenanceTime` | `MAINTENANCE_ROWS`. Produces `MAINTENANCE_ROWS`. |
+//! | `ValueOperation.child` with `MaintenanceTime` | `MAINTENANCE_ROWS`; explicit `FinalizeExactAccumulator` also accepts exact accumulator state. Produces `MAINTENANCE_ROWS`. |
 //! | `ValueOperation.child` with `ReadTime` | `READ_ROWS`. Produces `READ_ROWS`. |
 //!
 //! ## `KeepPreAsap` declares its data_state through the derivation
