@@ -1,0 +1,1 @@
+SELECT map() AS labels, sum(value) AS value FROM (SELECT labels,argMax(value,ts_ms) AS value FROM raw_samples WHERE metric='backend_process_resident_memory_bytes' AND ts_ms>1788891296000-300000 AND ts_ms<=1788891296000 GROUP BY labels)

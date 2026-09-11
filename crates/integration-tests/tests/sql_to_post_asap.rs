@@ -789,3 +789,33 @@ async fn sql_exact_workload_binds_accumulators_not_sketches() {
         "avg has no mergeable accumulator — stays logical"
     );
 }
+
+#[tokio::test]
+async fn map_projection_export_preserves_unsupported_child_boundary() {
+    let pre = Rc::new(lower_sql_dialect(
+        "SELECT map('job', t.service) AS labels, t.avg_bytes FROM (SELECT service, AVG(bytes) AS avg_bytes FROM metrics GROUP BY service) t WHERE t.avg_bytes > 100",
+        &catalog(), SqlDialect::ClickhouseSQL, AccuracyTarget::Exact,
+    ).await.unwrap());
+    let space = search_workload(vec![("map_query", pre)]);
+    let root = space
+        .global_selection(&DefaultCostModel)
+        .materialize(&space.roots[0].1)
+        .unwrap()
+        .unwrap();
+    let executable = compile_executable_dag(&root).unwrap();
+    assert!(executable.nodes.iter().any(|node| matches!(&node.payload,
+        ExecutableOperatorPayload::Value { operation: ValueOperation::Project { cols, .. }, .. }
+        if cols.iter().any(|item| matches!(&item.expr, QueryExpr::FunctionCall { name, .. } if name == "map"))
+    )));
+    let mut node = root.as_ref();
+    loop {
+        match &node.expr {
+            SummaryExpr::ValueOperation { child, .. } => node = child,
+            SummaryExpr::KeepPreAsap(child) => {
+                assert!(matches!(child.as_ref(), QueryExpr::BinaryOp { .. }));
+                break;
+            }
+            other => panic!("unexpected map/fallback composition: {other:?}"),
+        }
+    }
+}
