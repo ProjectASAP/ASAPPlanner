@@ -68,8 +68,8 @@ use asap_types::workload::SqlDialect;
 use crate::error::SqlError as LoweringError;
 
 mod clickhouse_ast;
-mod expr;
 mod collection_planning;
+mod expr;
 mod types;
 
 pub use types::SqlCatalog;
