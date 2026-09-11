@@ -1140,6 +1140,12 @@ pub type UnresolvedQueryExpr = QueryExpr<ColumnRef>;
 // Same reasoning as `AggIntent`'s `output_column`/`requires`/`is_per_series`
 // (#205): a schema-shaped property that is only meaningful post-binding.
 impl QueryExpr<ColumnId> {
+    /// Infer a scalar expression against its input relation using the same
+    /// canonical rules as projection schema derivation.
+    pub fn scalar_type(&self, input: &Schema) -> Result<(DataType, bool), QueryExprError> {
+        infer_expr_type(self, input)
+    }
+
     /// Output schema of the root of a canonical tree.
     pub fn output_schema(&self) -> Result<Schema, QueryExprError> {
         match self {
