@@ -84,6 +84,12 @@ pub enum DataType {
     /// Wall-clock timestamp. PromQL leaves carry exactly one of these
     /// (the `time_index` column); SQL leaves may or may not.
     Timestamp,
+    /// SQL map entries with non-null keys and explicitly nullable values.
+    Map {
+        key: Box<DataType>,
+        value: Box<DataType>,
+        value_nullable: bool,
+    },
 }
 
 /// Per-edge pre-ASAP IR schema. Flowing between any two operators, on every

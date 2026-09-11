@@ -2110,3 +2110,29 @@ async fn count_preserves_non_null_inputs_and_rejects_erased_null_semantics() {
         );
     }
 }
+
+/// A native SQL map grouping key retains its typed key/value schema.
+#[tokio::test]
+async fn grouped_map_column_preserves_map_type() {
+    let map = DataType::Map {
+        key: Box::new(DataType::Utf8),
+        value: Box::new(DataType::Utf8),
+        value_nullable: false,
+    };
+    let catalog = SqlCatalog::new().with_table(
+        "raw_samples",
+        Schema::new(vec![
+            col("labels", map.clone()),
+            col("value", DataType::Float64),
+        ]),
+    );
+    let query = lower_sql_dialect(
+        "SELECT labels, max(value) AS value FROM raw_samples GROUP BY labels ORDER BY labels",
+        &catalog,
+        SqlDialect::ClickhouseSQL,
+        AccuracyTarget::Exact,
+    )
+    .await
+    .unwrap();
+    assert_eq!(query.output_schema().unwrap().columns[0].dtype, map);
+}

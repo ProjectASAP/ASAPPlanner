@@ -71,6 +71,23 @@ pub(super) fn arrow_to_dtype(dt: &ArrowDataType) -> Result<DataType, LoweringErr
         ArrowDataType::Utf8 | ArrowDataType::LargeUtf8 => Ok(DataType::Utf8),
         ArrowDataType::Boolean => Ok(DataType::Bool),
         ArrowDataType::Timestamp(_, _) => Ok(DataType::Timestamp),
+        ArrowDataType::Map(entries, _) => {
+            let ArrowDataType::Struct(fields) = entries.data_type() else {
+                return Err(LoweringError::UnsupportedFeature(
+                    "map entries must be a struct".into(),
+                ));
+            };
+            if fields.len() != 2 || fields[0].is_nullable() {
+                return Err(LoweringError::UnsupportedFeature(
+                    "map entries require a non-null key and a value".into(),
+                ));
+            }
+            Ok(DataType::Map {
+                key: Box::new(arrow_to_dtype(fields[0].data_type())?),
+                value: Box::new(arrow_to_dtype(fields[1].data_type())?),
+                value_nullable: fields[1].is_nullable(),
+            })
+        }
         other => Err(LoweringError::UnsupportedFeature(format!(
             "Arrow type: {other:?}"
         ))),
@@ -84,6 +101,24 @@ pub(super) fn dtype_to_arrow(dt: &DataType) -> ArrowDataType {
         DataType::Float64 => ArrowDataType::Float64,
         DataType::Utf8 => ArrowDataType::Utf8,
         DataType::Bool => ArrowDataType::Boolean,
+        DataType::Map {
+            key,
+            value,
+            value_nullable,
+        } => ArrowDataType::Map(
+            std::sync::Arc::new(Field::new(
+                "entries",
+                ArrowDataType::Struct(
+                    vec![
+                        Field::new("key", dtype_to_arrow(key), false),
+                        Field::new("value", dtype_to_arrow(value), *value_nullable),
+                    ]
+                    .into(),
+                ),
+                false,
+            )),
+            false,
+        ),
         DataType::Timestamp => {
             ArrowDataType::Timestamp(datafusion::arrow::datatypes::TimeUnit::Millisecond, None)
         }
@@ -98,4 +133,26 @@ pub(super) fn schema_to_arrow(schema: &Schema) -> ArrowSchema {
         .map(|c: &Column| Field::new(&c.name, dtype_to_arrow(&c.dtype), c.nullable))
         .collect();
     ArrowSchema::new(fields)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Nested map values and value nullability survive catalog registration.
+    #[test]
+    fn nested_map_schema_round_trip() {
+        let map = DataType::Map {
+            key: Box::new(DataType::Utf8),
+            value: Box::new(DataType::Map {
+                key: Box::new(DataType::Int64),
+                value: Box::new(DataType::Float64),
+                value_nullable: true,
+            }),
+            value_nullable: false,
+        };
+        assert_eq!(arrow_to_dtype(&dtype_to_arrow(&map)).unwrap(), map);
+        let encoded = serde_json::to_string(&map).unwrap();
+        assert_eq!(serde_json::from_str::<DataType>(&encoded).unwrap(), map);
+    }
 }
