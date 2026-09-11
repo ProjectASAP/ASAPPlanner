@@ -203,7 +203,7 @@ pub(super) fn df_expr_to_unresolved(expr: &Expr) -> Result<Unresolved, LoweringE
             let args: Result<Vec<_>, _> = sf.args.iter().map(df_expr_to_unresolved).collect();
             Ok(Unresolved::FunctionCall {
                 name: if sf.func.name().eq_ignore_ascii_case("arrayelement") {
-                    "asap_map_access".into()
+                    "asap_element_access".into()
                 } else {
                     sf.func.name().to_string()
                 },
