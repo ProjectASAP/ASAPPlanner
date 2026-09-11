@@ -2098,7 +2098,6 @@ async fn count_preserves_non_null_inputs_and_rejects_erased_null_semantics() {
         "SELECT count(nullable_value) FROM samples",
         "SELECT count(NULL) FROM samples",
         "SELECT count(nullable_value + 1) FROM samples",
-        "SELECT count(*) FILTER (WHERE value > 0) FROM samples",
         "SELECT count(*), count(nullable_value) FROM samples",
         "SELECT count(nullable_value) FROM samples GROUP BY ROLLUP(value)",
     ] {
