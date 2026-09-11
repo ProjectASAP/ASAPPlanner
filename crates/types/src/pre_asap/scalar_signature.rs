@@ -365,6 +365,13 @@ mod struct_field_tests {
         ] {
             assert!(access(selector).scalar_type(&schema()).is_err());
         }
+        let mut ambiguous = schema();
+        if let DataType::Struct { fields } = &mut ambiguous.columns[0].dtype {
+            fields.push(Column::new("ts", DataType::Utf8, false));
+        }
+        assert!(access(QueryExpr::Literal(ScalarValue::Utf8("ts".into())))
+            .scalar_type(&ambiguous)
+            .is_err());
         let mut nullable = schema();
         nullable.columns[0].nullable = true;
         assert!(access(QueryExpr::Literal(ScalarValue::Int64(1)))
