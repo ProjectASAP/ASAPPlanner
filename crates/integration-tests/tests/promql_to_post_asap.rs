@@ -943,3 +943,41 @@ fn nested_summary_explicitly_finalizes_exact_child_at_maintenance_time() {
         .any(|field| matches!(field.dtype, SummaryFamilyType::Plain(DataType::Float64))));
     compile_executable_dag(&plan).expect("explicit boundary is a valid executable DAG");
 }
+
+#[test]
+fn exact_binary_maintenance_has_explicit_timing_and_legacy_wire_default() {
+    use asap_types::post_asap::{ExecutableOperatorPayload, ExecutionTiming};
+    for (query, expected) in [
+        (
+            "quantile(0.9, sum_over_time(m[1m]) + sum_over_time(n[1m]))",
+            ExecutionTiming::MaintenanceTime,
+        ),
+        (
+            "sum_over_time(m[1m]) + sum_over_time(n[1m])",
+            ExecutionTiming::ReadTime,
+        ),
+    ] {
+        let input = lower_promql(query, AccuracyTarget::Epsilon(0.05)).unwrap();
+        let search = search_workload(vec![("q", Rc::new(input))]);
+        let choice = search.global_selection(&DefaultCostModel);
+        let plan = choice.materialize(&search.roots[0].1).unwrap().unwrap();
+        let dag = compile_executable_dag(&plan).unwrap();
+        let payload = dag
+            .nodes
+            .iter()
+            .find_map(|node| {
+                matches!(node.payload, ExecutableOperatorPayload::Binary { .. })
+                    .then_some(&node.payload)
+            })
+            .unwrap();
+        assert!(
+            matches!(payload, ExecutableOperatorPayload::Binary { timing, .. } if *timing == expected)
+        );
+        let wire = serde_json::to_value(payload).unwrap();
+        if expected == ExecutionTiming::ReadTime {
+            assert!(wire.get("timing").is_none());
+        }
+        let restored: ExecutableOperatorPayload = serde_json::from_value(wire).unwrap();
+        assert_eq!(&restored, payload);
+    }
+}

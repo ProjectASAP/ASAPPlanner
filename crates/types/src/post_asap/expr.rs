@@ -1,3 +1,4 @@
+use super::ExecutionTiming;
 use std::rc::Rc;
 
 use super::guarantee::ResultGuarantee;
@@ -120,6 +121,7 @@ pub enum SummaryExpr {
     /// This keeps realizable summary/readout leaves visible instead of
     /// hiding the complete expression inside `KeepPreAsap`.
     BinaryOp {
+        timing: ExecutionTiming,
         lhs: Rc<SummaryNode>,
         rhs: Rc<SummaryNode>,
         operator: BinaryOperator,

@@ -1796,6 +1796,7 @@ fn realize_binary(
 
     Ok(Some(Rc::new(SummaryNode {
         expr: SummaryExpr::BinaryOp {
+            timing: ExecutionTiming::ReadTime,
             lhs: lhs_node,
             rhs: rhs_node,
             operator: asap_types::post_asap::BinaryOperator {
@@ -2178,6 +2179,56 @@ fn realize_physical_summary_input(
 
 /// Emit `SummaryAgg` (recursively binding the child), plus the
 /// `SummaryEstimate` readout when `estimate` is set.
+// Retain the exact expression and schema while placing its value production
+// on the update path. Read-time consumers keep their original shared nodes.
+fn maintenance_exact_values(node: Rc<SummaryNode>) -> Rc<SummaryNode> {
+    let expr = match &node.expr {
+        SummaryExpr::BinaryOp {
+            lhs, rhs, operator, ..
+        } if operator.vector_match.is_none()
+            && matches!(
+                operator.kind,
+                asap_types::pre_asap::BinaryOpKind::Arithmetic(_)
+            )
+            && node
+                .guarantee
+                .as_ref()
+                .is_some_and(ResultGuarantee::is_exact) =>
+        {
+            SummaryExpr::BinaryOp {
+                lhs: maintenance_exact_values(lhs.clone()),
+                rhs: maintenance_exact_values(rhs.clone()),
+                operator: operator.clone(),
+                timing: ExecutionTiming::MaintenanceTime,
+            }
+        }
+        SummaryExpr::ValueOperation {
+            child,
+            operation: ValueOperation::FinalizeExactAccumulator,
+            ..
+        } if matches!(
+            child.expr,
+            SummaryExpr::SummaryAgg {
+                family: SummaryFamilyType::ExactAggregate(..),
+                ..
+            }
+        ) =>
+        {
+            SummaryExpr::ValueOperation {
+                child: child.clone(),
+                operation: ValueOperation::FinalizeExactAccumulator,
+                timing: ExecutionTiming::MaintenanceTime,
+            }
+        }
+        _ => return node,
+    };
+    Rc::new(SummaryNode {
+        expr,
+        schema: node.schema.clone(),
+        guarantee: node.guarantee.clone(),
+    })
+}
+
 #[allow(clippy::too_many_arguments)]
 fn construct_summary_agg(
     node: &QueryExpr,
@@ -2241,6 +2292,7 @@ fn construct_summary_agg(
     // an exact scalar accumulator currently stores its value directly.
     let bound_child =
         finalize_exact_accumulator_at(bound_child, &input.child, ExecutionTiming::MaintenanceTime)?;
+    let bound_child = maintenance_exact_values(bound_child);
 
     // ── Guarantee (issue #172) ──────────────────────────────────────────
     // Derived *before* the node exists, so an illegal composition is never

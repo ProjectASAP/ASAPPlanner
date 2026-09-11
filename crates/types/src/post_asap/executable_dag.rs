@@ -70,6 +70,8 @@ pub enum ExecutableOperatorPayload {
         expression: QueryExpr,
     },
     Binary {
+        #[serde(default, skip_serializing_if = "ExecutionTiming::is_read_time")]
+        timing: ExecutionTiming,
         operator: BinaryOperator,
     },
     CandidateTopK {
@@ -444,7 +446,10 @@ pub fn compile_executable_dag_with_node_ids(
             SummaryExpr::KeepPreAsap(expression) => ExecutableOperatorPayload::Fallback {
                 expression: (**expression).clone(),
             },
-            SummaryExpr::BinaryOp { operator, .. } => ExecutableOperatorPayload::Binary {
+            SummaryExpr::BinaryOp {
+                operator, timing, ..
+            } => ExecutableOperatorPayload::Binary {
+                timing: *timing,
                 operator: operator.clone(),
             },
             SummaryExpr::CandidateTopK {

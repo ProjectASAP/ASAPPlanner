@@ -52,13 +52,19 @@ use crate::pre_asap::query_expr::{aggregate_output_schema, QueryExprError};
 use crate::pre_asap::schema::{Column, Schema};
 
 /// When a post-ASAP value is produced.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Default, Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize,
+)]
 pub enum ExecutionTiming {
     MaintenanceTime,
+    #[default]
     ReadTime,
 }
 
 impl ExecutionTiming {
+    pub fn is_read_time(&self) -> bool {
+        *self == Self::ReadTime
+    }
     pub fn as_str(self) -> &'static str {
         match self {
             Self::MaintenanceTime => "maintenance_time",
@@ -188,6 +194,8 @@ pub enum ExecutionDataStateError {
     /// nothing maintains state above it, so its output is never read.
     #[error("A maintenance-time value operation cannot be a plan root: its update-path output feeds nothing")]
     MaintenanceRowsAtRoot,
+    #[error("unsupported maintenance binary schema or operator")]
+    InvalidMaintenanceBinary,
     /// An `ExactOperation` whose input columns are not all `Plain` at its
     /// declared data_state.
     #[error("exact operator consumes non-plain column {column:?} ({dtype})")]
@@ -223,9 +231,13 @@ impl ExecutionDataStateAssignment {
 pub fn produced_data_state(expr: &SummaryExpr) -> Option<ExecutionDataState> {
     Some(match expr {
         SummaryExpr::KeepPreAsap(_) => return None,
-        SummaryExpr::BinaryOp { .. }
-        | SummaryExpr::CandidateTopK { .. }
-        | SummaryExpr::RelationalJoin { .. } => ExecutionDataState::READ_ROWS,
+        SummaryExpr::BinaryOp { timing, .. } => ExecutionDataState {
+            timing: *timing,
+            primitive: DataPrimitive::Raw,
+        },
+        SummaryExpr::CandidateTopK { .. } | SummaryExpr::RelationalJoin { .. } => {
+            ExecutionDataState::READ_ROWS
+        }
         SummaryExpr::SummaryAgg { .. }
         | SummaryExpr::SummaryJoin { .. }
         | SummaryExpr::SummarySubtract { .. }
@@ -312,11 +324,45 @@ fn visit(
 
     match &node.expr {
         SummaryExpr::KeepPreAsap(_) => Ok(()),
-        SummaryExpr::BinaryOp { lhs, rhs, .. } => {
+        SummaryExpr::BinaryOp {
+            lhs,
+            rhs,
+            timing,
+            operator,
+        } => {
+            if *timing == ExecutionTiming::MaintenanceTime {
+                use crate::pre_asap::{BinaryOpKind, DataType};
+                if operator.vector_match.is_some()
+                    || !matches!(operator.kind, BinaryOpKind::Arithmetic(_))
+                    || lhs.schema != rhs.schema
+                    || lhs.schema != node.schema
+                    || !node.schema.fields.iter().all(|field| {
+                        !field.nullable
+                            && matches!(
+                                field.dtype,
+                                SummaryFamilyType::Plain(DataType::Float64 | DataType::Timestamp)
+                            )
+                    })
+                    || node
+                        .schema
+                        .fields
+                        .iter()
+                        .filter(|field| {
+                            matches!(field.dtype, SummaryFamilyType::Plain(DataType::Float64))
+                        })
+                        .count()
+                        != 1
+                {
+                    return Err(ExecutionDataStateError::InvalidMaintenanceBinary);
+                }
+            }
+            let expected = ExecutionDataState {
+                timing: *timing,
+                primitive: DataPrimitive::Raw,
+            };
             for input in [lhs, rhs] {
-                let state =
-                    produced_data_state(&input.expr).unwrap_or(ExecutionDataState::READ_ROWS);
-                if state != ExecutionDataState::READ_ROWS {
+                let state = produced_data_state(&input.expr).unwrap_or(expected);
+                if state != expected {
                     return Err(ExecutionDataStateError::IllegalChildDataState {
                         edge: "BinaryOp operand",
                         child: state,
@@ -453,9 +499,16 @@ pub fn assigned_child_data_state(parent: &SummaryExpr, child: &SummaryNode) -> E
         SummaryExpr::ValueOperation {
             timing: ExecutionTiming::ReadTime,
             ..
+        }
+        | SummaryExpr::BinaryOp {
+            timing: ExecutionTiming::ReadTime,
+            ..
         } => ExecutionDataState::READ_ROWS,
         SummaryExpr::KeepPreAsap(_)
-        | SummaryExpr::BinaryOp { .. }
+        | SummaryExpr::BinaryOp {
+            timing: ExecutionTiming::MaintenanceTime,
+            ..
+        }
         | SummaryExpr::CandidateTopK { .. }
         | SummaryExpr::RelationalJoin { .. }
         | SummaryExpr::SummaryAgg { .. }
