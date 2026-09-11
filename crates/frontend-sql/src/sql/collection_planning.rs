@@ -17,7 +17,7 @@ pub(super) fn register(context: &SessionContext) {
         ("mapconcat", MapScalarFunction::Concat),
         ("arrayelement", MapScalarFunction::Access),
     ] {
-        context.register_udf(ScalarUDF::from(MapPlanningFunction {
+        context.register_udf(ScalarUDF::from(CollectionPlanningFunction {
             name,
             function,
             signature: match function {
@@ -32,12 +32,12 @@ pub(super) fn register(context: &SessionContext) {
     }
 }
 #[derive(Debug)]
-struct MapPlanningFunction {
+struct CollectionPlanningFunction {
     name: &'static str,
     function: MapScalarFunction,
     signature: Signature,
 }
-impl MapPlanningFunction {
+impl CollectionPlanningFunction {
     fn output(
         &self,
         args: &[DataType],
@@ -86,7 +86,7 @@ impl MapPlanningFunction {
         Ok((dtype_to_arrow(&dtype), nullable))
     }
 }
-impl ScalarUDFImpl for MapPlanningFunction {
+impl ScalarUDFImpl for CollectionPlanningFunction {
     fn as_any(&self) -> &dyn std::any::Any {
         self
     }
@@ -138,7 +138,7 @@ impl ScalarUDFImpl for MapPlanningFunction {
         }
     }
     fn invoke_batch(&self, _args: &[ColumnarValue], _number_rows: usize) -> Result<ColumnarValue> {
-        Err(DataFusionError::NotImplemented("map planning adapter cannot execute; use a capable query engine or external exact subtree".into()))
+        Err(DataFusionError::NotImplemented("collection planning adapter cannot execute; use a capable query engine or external exact subtree".into()))
     }
 }
 
@@ -147,7 +147,7 @@ mod tests {
     use super::*;
     #[test]
     fn planning_adapter_explicitly_refuses_physical_execution() {
-        let adapter = MapPlanningFunction {
+        let adapter = CollectionPlanningFunction {
             name: "map",
             function: MapScalarFunction::Construct,
             signature: Signature::any(0, Volatility::Immutable),

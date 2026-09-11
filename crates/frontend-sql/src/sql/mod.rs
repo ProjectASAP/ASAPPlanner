@@ -69,7 +69,7 @@ use crate::error::SqlError as LoweringError;
 
 mod clickhouse_ast;
 mod expr;
-mod map_planning;
+mod collection_planning;
 mod types;
 
 pub use types::SqlCatalog;
@@ -201,7 +201,7 @@ impl<'a> SqlLowerer<'a> {
         let config = SessionConfig::new().set_str("datafusion.sql_parser.dialect", dialect_name);
         let ctx = SessionContext::new_with_config(config);
         if matches!(self.dialect, SqlDialect::ClickhouseSQL) {
-            map_planning::register(&ctx);
+            collection_planning::register(&ctx);
         }
         // A catalog key like "bgp.bgp_updates" schema-qualifies the table
         // (e.g. a ClickHouse database name). DataFusion requires the parent
