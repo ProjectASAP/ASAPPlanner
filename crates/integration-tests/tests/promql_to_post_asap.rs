@@ -744,6 +744,15 @@ fn promql_quantile_of_rate_binds_kll_over_rate_accumulator() {
         )
     );
 
+    let SummaryExpr::ValueOperation {
+        child,
+        operation: ValueOperation::FinalizeExactAccumulator,
+        timing: asap_types::post_asap::ExecutionTiming::MaintenanceTime,
+    } = &child.expr
+    else {
+        panic!("rate needs a maintenance readout");
+    };
+
     // The rate: exact counter-reset-aware accumulator, per-series (labels
     // and time axis preserved), no estimate wrapper. `rate(...)` has no
     // grouping concept at all — every entity stays its own summary.
@@ -874,4 +883,63 @@ fn promql_sum_of_count_over_time_is_composed_by_default_search() {
         QueryExpr::TimeRange { range, child }
             if range.as_secs() == 300 && matches!(child.as_ref(), QueryExpr::Scan { .. })
     ));
+}
+
+#[test]
+fn nested_summary_explicitly_finalizes_exact_child_at_maintenance_time() {
+    // Real workload selection must expose the state-to-value edge; an outer
+    // sketch must not interpret exact accumulator bytes as input samples.
+    let pre = Rc::new(
+        lower_promql(
+            "quantile(0.9, sum_over_time(m[1m]))",
+            AccuracyTarget::Epsilon(0.05),
+        )
+        .unwrap(),
+    );
+    let space = search_workload(vec![("query", pre)]);
+    let selected = space.global_selection(&DefaultCostModel);
+    let plan = selected.materialize(&space.roots[0].1).unwrap().unwrap();
+    let SummaryExpr::SummaryEstimate { summary_input, .. } = &plan.expr else {
+        panic!("expected selected quantile summary");
+    };
+    let SummaryExpr::SummaryAgg { child, .. } = &summary_input.expr else {
+        panic!("expected maintained outer summary");
+    };
+    let SummaryExpr::ValueOperation {
+        child: source,
+        operation,
+        timing,
+    } = &child.expr
+    else {
+        panic!(
+            "missing explicit accumulator finalization: {:?}",
+            child.expr
+        );
+    };
+    assert!(matches!(
+        operation,
+        ValueOperation::FinalizeExactAccumulator
+    ));
+    assert_eq!(
+        *timing,
+        asap_types::post_asap::ExecutionTiming::MaintenanceTime
+    );
+    assert!(matches!(
+        source.expr,
+        SummaryExpr::SummaryAgg {
+            family: SummaryFamilyType::ExactAggregate(ExactKind::Sum, _),
+            ..
+        }
+    ));
+    assert!(child
+        .schema
+        .fields
+        .iter()
+        .all(|field| matches!(field.dtype, SummaryFamilyType::Plain(_))));
+    assert!(child
+        .schema
+        .fields
+        .iter()
+        .any(|field| matches!(field.dtype, SummaryFamilyType::Plain(DataType::Float64))));
+    compile_executable_dag(&plan).expect("explicit boundary is a valid executable DAG");
 }

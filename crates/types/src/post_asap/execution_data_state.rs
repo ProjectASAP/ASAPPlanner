@@ -23,7 +23,7 @@
 //! | `SummaryEstimate.summary_input` | `MAINTENANCE_SUMMARY` (any family). Produces `READ_ROWS`. |
 //! | `SummaryJoin.outer/inner` | `MAINTENANCE_ROWS` or `MAINTENANCE_SUMMARY`; never a read-time data_state. |
 //! | `SummarySubtract`/`SummaryDelete`/`SummaryMerge` | `MAINTENANCE_SUMMARY`. |
-//! | `ValueOperation.child` with `MaintenanceTime` | `MAINTENANCE_ROWS`. Produces `MAINTENANCE_ROWS`. |
+//! | `ValueOperation.child` with `MaintenanceTime` | `MAINTENANCE_ROWS`; explicit `FinalizeExactAccumulator` also accepts exact accumulator state. Produces `MAINTENANCE_ROWS`. |
 //! | `ValueOperation.child` with `ReadTime` | `READ_ROWS`. Produces `READ_ROWS`. |
 //!
 //! ## `KeepPreAsap` declares its data_state through the derivation
@@ -421,7 +421,8 @@ fn visit(
                 ExecutionTiming::ReadTime => ExecutionDataState::READ_ROWS,
             };
             let s = produced_data_state(&child.expr).unwrap_or(required);
-            let exact_readout = *timing == ExecutionTiming::ReadTime
+            let exact_readout = (*timing == ExecutionTiming::ReadTime
+                || matches!(operation, ValueOperation::FinalizeExactAccumulator))
                 && s == ExecutionDataState::MAINTENANCE_SUMMARY
                 && is_exact_accumulator_state(&child.schema).is_ok();
             if s != required && !exact_readout {

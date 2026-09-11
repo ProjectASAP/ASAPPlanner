@@ -226,7 +226,7 @@ fn names(node: &SummaryNode) -> Vec<&str> {
 // ── step 1: pin every already-supported exact-accumulator nesting ───────
 
 #[test]
-fn every_exact_accumulator_nests_directly_under_an_outer_sketch() {
+fn every_exact_accumulator_is_finalized_before_an_outer_sketch() {
     use std::time::Duration;
     let cases: Vec<(Rc<QueryExpr>, ExactKind)> = vec![
         (
@@ -297,12 +297,20 @@ fn every_exact_accumulator_nests_directly_under_an_outer_sketch() {
         let SummaryExpr::SummaryAgg { child, .. } = &summary_input.expr else {
             panic!("expected outer SummaryAgg");
         };
+        let SummaryExpr::ValueOperation {
+            child,
+            operation: asap_types::post_asap::ValueOperation::FinalizeExactAccumulator,
+            timing: ExecutionTiming::MaintenanceTime,
+        } = &child.expr
+        else {
+            panic!("{kind:?}: missing maintenance finalization");
+        };
         assert!(
             matches!(
                 &child.expr,
                 SummaryExpr::SummaryAgg { family: SummaryFamilyType::ExactAggregate(k, _), .. } if *k == kind
             ),
-            "{kind:?}: expected the exact accumulator directly under the outer sketch, got {:?}",
+            "{kind:?}: expected the exact accumulator under its finalization, got {:?}",
             child.expr
         );
         validate_execution_data_states(root).expect("accumulator state composes under maintenance");

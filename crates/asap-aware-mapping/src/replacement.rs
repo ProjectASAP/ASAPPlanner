@@ -1818,6 +1818,14 @@ fn finalize_exact_accumulator(
     node: Rc<SummaryNode>,
     logical_output: &QueryExpr,
 ) -> Result<Rc<SummaryNode>, ImplementError> {
+    finalize_exact_accumulator_at(node, logical_output, ExecutionTiming::ReadTime)
+}
+
+fn finalize_exact_accumulator_at(
+    node: Rc<SummaryNode>,
+    logical_output: &QueryExpr,
+    timing: ExecutionTiming,
+) -> Result<Rc<SummaryNode>, ImplementError> {
     let is_exact_state = matches!(
         node.expr,
         SummaryExpr::SummaryAgg {
@@ -1838,7 +1846,7 @@ fn finalize_exact_accumulator(
         expr: SummaryExpr::ValueOperation {
             child: node,
             operation: ValueOperation::FinalizeExactAccumulator,
-            timing: ExecutionTiming::ReadTime,
+            timing,
         },
         schema,
         guarantee,
@@ -2228,6 +2236,11 @@ fn construct_summary_agg(
     }
 
     let bound_child = realize_child_with(&input.child, models, child_target)?;
+    // A maintained parent consumes finalized values, never the child's
+    // accumulator representation. Keep the read boundary explicit even when
+    // an exact scalar accumulator currently stores its value directly.
+    let bound_child =
+        finalize_exact_accumulator_at(bound_child, &input.child, ExecutionTiming::MaintenanceTime)?;
 
     // ── Guarantee (issue #172) ──────────────────────────────────────────
     // Derived *before* the node exists, so an illegal composition is never
@@ -7954,6 +7967,14 @@ mod tests {
             family,
             SummaryFamilyType::Sketch(kind, _) if kind.algorithm() == &SketchAlgorithm::Kll
         ));
+        let SummaryExpr::ValueOperation {
+            child,
+            operation: ValueOperation::FinalizeExactAccumulator,
+            timing: ExecutionTiming::MaintenanceTime,
+        } = &child.expr
+        else {
+            panic!("expected explicit maintenance readout");
+        };
         let SummaryExpr::SummaryAgg {
             family: inner_family,
             child: leaf,
