@@ -2074,3 +2074,39 @@ async fn current_timestamp_lowers_to_typed_current_timestamp_leaf() {
     let schema = cols[0].expr.output_schema().expect("timestamp schema");
     assert_eq!(schema.columns[0].dtype, DataType::Timestamp);
 }
+
+#[tokio::test]
+async fn count_preserves_non_null_inputs_and_rejects_erased_null_semantics() {
+    let catalog = SqlCatalog::new().with_table(
+        "samples",
+        Schema::new(vec![
+            Column::new("nullable_value", DataType::Float64, true),
+            Column::new("value", DataType::Float64, false),
+        ]),
+    );
+    for sql in [
+        "SELECT count(*) FROM samples",
+        "SELECT count(1) FROM samples",
+        "SELECT count(value) FROM samples",
+        "SELECT count(value + 1) FROM samples",
+    ] {
+        lower_sql(sql, &catalog, AccuracyTarget::Exact)
+            .await
+            .unwrap_or_else(|error| panic!("{sql}: {error}"));
+    }
+    for sql in [
+        "SELECT count(nullable_value) FROM samples",
+        "SELECT count(NULL) FROM samples",
+        "SELECT count(nullable_value + 1) FROM samples",
+        "SELECT count(*), count(nullable_value) FROM samples",
+        "SELECT count(nullable_value) FROM samples GROUP BY ROLLUP(value)",
+    ] {
+        let error = lower_sql(sql, &catalog, AccuracyTarget::Exact)
+            .await
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("explicit per-aggregate"),
+            "{sql}: {error}"
+        );
+    }
+}

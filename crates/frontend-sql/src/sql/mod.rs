@@ -41,9 +41,9 @@ use datafusion::logical_expr::expr::AggregateFunction;
 use datafusion::logical_expr::expr_rewriter::FunctionRewrite;
 use datafusion::logical_expr::function::{PartitionEvaluatorArgs, WindowUDFFieldArgs};
 use datafusion::logical_expr::{
-    self, lit, AggregateUDF, Case, Distinct, Expr, JoinType, LogicalPlan, PartitionEvaluator,
-    ScalarUDF, ScalarUDFImpl, Signature, SimpleAggregateUDF, TypeSignature, Volatility,
-    WindowFrameBound as DfWindowFrameBound, WindowFrameUnits as DfWindowFrameUnits,
+    self, lit, AggregateUDF, Case, Distinct, Expr, ExprSchemable, JoinType, LogicalPlan,
+    PartitionEvaluator, ScalarUDF, ScalarUDFImpl, Signature, SimpleAggregateUDF, TypeSignature,
+    Volatility, WindowFrameBound as DfWindowFrameBound, WindowFrameUnits as DfWindowFrameUnits,
     WindowFunctionDefinition, WindowUDF, WindowUDFImpl,
 };
 use datafusion::optimizer::analyzer::function_rewrite::ApplyFunctionRewrites;
@@ -714,6 +714,29 @@ impl<'a> SqlLowerer<'a> {
 
     fn lower_aggregate(&self, agg: &logical_expr::Aggregate) -> Result<Unresolved, LoweringError> {
         let input = self.lower_plan(&agg.input)?;
+        // Canonical Count counts rows and has no nullable argument or FILTER.
+        // Check the original typed expression before derived-column rewriting
+        // erases the argument's nullability.
+        for expression in &agg.aggr_expr {
+            if let Expr::AggregateFunction(function) = unalias(expression) {
+                if function.func.name().eq_ignore_ascii_case("count") && !function.distinct {
+                    let nullable = function
+                        .args
+                        .iter()
+                        .try_fold(false, |nullable, argument| {
+                            argument
+                                .nullable(agg.input.schema().as_ref())
+                                .map(|next| nullable || next)
+                        })
+                        .map_err(|error| LoweringError::UnsupportedFeature(error.to_string()))?;
+                    if nullable || function.filter.is_some() {
+                        return Err(LoweringError::UnsupportedFeature(
+                            "COUNT of a nullable expression or with FILTER requires explicit per-aggregate null/filter semantics".into(),
+                        ));
+                    }
+                }
+            }
+        }
 
         if agg.aggr_expr.iter().any(is_temporal_aggregate) {
             return self.lower_temporal_aggregate(agg, input);
