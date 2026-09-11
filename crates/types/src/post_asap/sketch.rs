@@ -45,6 +45,8 @@ pub enum ExactParams {
 /// [`SketchKind::new`] is where that classification is made.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum SketchAlgorithm {
+    /// Universal frequency-vector summary with shared statistic readouts.
+    UnivMon,
     /// KLL quantile sketch (mergeable, ε-accurate rank queries).
     Kll,
     /// Count-Min Sketch (mergeable, (ε,δ)-accurate frequency queries).
@@ -74,6 +76,12 @@ pub enum SketchAlgorithm {
 /// deployment-specific stage ever sees the plan.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum SketchParams {
+    UnivMon {
+        heap_size: u32,
+        sketch_rows: u32,
+        sketch_cols: u32,
+        layers: u8,
+    },
     Kll {
         k: u32,
     },
@@ -112,6 +120,7 @@ pub enum SketchParams {
 /// The query category served by a committed sketch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum SketchCategory {
+    Universal,
     Quantile,
     Cardinality,
     Frequency,
@@ -150,6 +159,7 @@ impl SketchKind {
         let valid_params = matches!(
             (&algorithm, &params),
             (SketchAlgorithm::Kll, SketchParams::Kll { .. })
+                | (SketchAlgorithm::UnivMon, SketchParams::UnivMon { .. })
                 | (SketchAlgorithm::DDSketch, SketchParams::DDSketch { .. })
                 | (SketchAlgorithm::Hll, SketchParams::Hll { .. })
                 | (SketchAlgorithm::Theta, SketchParams::Theta { .. })
@@ -173,6 +183,7 @@ impl SketchKind {
             "SketchKind parameter mismatch: algorithm={algorithm:?}, params={params:?}"
         );
         let category = match algorithm {
+            SketchAlgorithm::UnivMon => SketchCategory::Universal,
             SketchAlgorithm::Kll | SketchAlgorithm::DDSketch => SketchCategory::Quantile,
             SketchAlgorithm::Hll | SketchAlgorithm::Theta | SketchAlgorithm::Kmv => {
                 SketchCategory::Cardinality
@@ -330,10 +341,10 @@ pub enum StatModelParams {
 /// Not yet modeled: `HydraUnivMon`. The paper's own named "Hydra-sketch" is
 /// really the universal-sketch composition (L layers of Count-Sketch plus a
 /// heavy-hitter heap, Theorems 1+2 combined) estimating entropy/L1-norm/
-/// L2-norm/cardinality/frequency-moments as one instance. That needs new
-/// `AggIntent`/category vocabulary this crate doesn't have yet (no
-/// `Entropy`/`L1Norm`/`L2Norm` intents) and is deliberately out of scope
-/// here — see issue #256's follow-up.
+/// L2-norm/cardinality/frequency-moments as one instance. Standalone UnivMon
+/// and its frequency readouts are represented here, but sharing a Hydra
+/// grid across populations still needs its own collision/error contract;
+/// standalone support does not establish that contract.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum HydraKind {
     /// Hydra over a KLL-family quantile sketch. See this type's own doc:
@@ -587,6 +598,10 @@ pub enum SummaryInputExpr {
 /// What to extract from a built summary. Carried by `SummaryEstimate`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum SketchQuery {
+    /// sqrt(sum_v frequency(v)^2), not the norm of numeric input values.
+    FrequencyL2,
+    /// Shannon entropy of the value-frequency distribution, in bits.
+    FrequencyEntropy,
     /// Extract the value at quantile rank `q` ∈ (0, 1].
     Quantile { q: f64 },
     /// Estimated count / frequency. `key` names which column is being

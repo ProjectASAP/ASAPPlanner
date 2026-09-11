@@ -225,6 +225,10 @@ impl DefaultAccuracyModel {
         query: &SketchQuery,
     ) -> Option<ResultGuarantee> {
         let (metric, bound, delta) = match params {
+            SketchParams::UnivMon { .. } => {
+                return matches!(query, SketchQuery::PointCount { value: None, .. })
+                    .then(|| ResultGuarantee::exact("univmon_unit_update_total"));
+            }
             // Apache DataSketches' single-sided KLL fit is the empirical 99th
             // percentile normalized rank error for quantile/rank queries.
             // Tighter confidence needs an amplification contract.
@@ -280,6 +284,7 @@ impl DefaultAccuracyModel {
         let provenance = vec![GuaranteeSource::SketchReadout {
             algorithm: format!("{algorithm:?}"),
             contract: match params {
+                SketchParams::UnivMon { .. } => unreachable!("handled before bounded estimators"),
                 SketchParams::Kll { .. } => "apache_datasketches_kll_empirical_99_a9b42755072b",
                 SketchParams::DDSketch { .. } => "ddsketch_relative_error_alpha_v1",
                 SketchParams::Hll { .. } => "generic_hll_rse_only_no_confidence_v1",

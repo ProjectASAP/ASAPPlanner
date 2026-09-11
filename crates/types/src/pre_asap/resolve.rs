@@ -547,6 +547,14 @@ fn resolve_agg_intent(
             col: col(c)?,
             accuracy: accuracy.clone(),
         },
+        AggIntent::FrequencyL2 { col: c, accuracy } => AggIntent::FrequencyL2 {
+            col: col(c)?,
+            accuracy: accuracy.clone(),
+        },
+        AggIntent::FrequencyEntropy { col: c, accuracy } => AggIntent::FrequencyEntropy {
+            col: col(c)?,
+            accuracy: accuracy.clone(),
+        },
         AggIntent::Rate => AggIntent::Rate,
         AggIntent::IRate => AggIntent::IRate,
         AggIntent::Increase => AggIntent::Increase,

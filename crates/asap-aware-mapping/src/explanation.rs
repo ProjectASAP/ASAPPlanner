@@ -406,6 +406,13 @@ fn shared_subexpr_finding_reason(group: &MemoGroup) -> Option<String> {
 /// `SketchKind`/`SketchAlgorithm` for a finding's `reason` text), so unlike
 /// `replacement.rs`'s counterpart this returns `bool`, not the kind itself.
 fn is_sketch_realization(node: &SummaryNode) -> bool {
+    if node
+        .guarantee
+        .as_ref()
+        .is_some_and(|guarantee| guarantee.is_exact())
+    {
+        return false;
+    }
     match &node.expr {
         SummaryExpr::SummaryEstimate { summary_input, .. } => is_sketch_realization(summary_input),
         SummaryExpr::SummaryAgg { family, .. } => matches!(family, SummaryFamilyType::Sketch(..)),
