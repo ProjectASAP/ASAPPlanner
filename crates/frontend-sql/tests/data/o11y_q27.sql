@@ -1,0 +1,1 @@
+SELECT map('job',job) labels,avg(value) value FROM (SELECT labels['job'] job,ts_ms,sum(value) value FROM raw_samples WHERE metric='backend_process_resident_memory_bytes' AND ts_ms+4000>=1788891296000-21600000 AND ts_ms+4000<=1788891296000 AND modulo(ts_ms+4000,60000)=0 GROUP BY job,ts_ms) GROUP BY job ORDER BY value DESC,job LIMIT 3

@@ -67,6 +67,7 @@ use asap_types::workload::SqlDialect;
 
 use crate::error::SqlError as LoweringError;
 
+mod clickhouse_ast;
 mod expr;
 mod types;
 
@@ -140,7 +141,7 @@ impl<'a> SqlLowerer<'a> {
     /// `Cardinality`) as it is built.
     ///
     /// The `AccuracyGuard` installs *after* the only `.await` point
-    /// (`ctx.sql`) — `lower_plan` itself is synchronous, so once it starts
+    /// (DataFusion statement planning) — `lower_plan` itself is synchronous, so once it starts
     /// there is no further suspension point that could move this task to a
     /// different OS thread out from under a thread-local set beforehand.
     ///
@@ -170,8 +171,16 @@ impl<'a> SqlLowerer<'a> {
         accuracy: &AccuracyTarget,
     ) -> Result<Unresolved, LoweringError> {
         let ctx = self.build_context()?;
-        let df = ctx.sql(sql).await?;
-        let plan = df.into_unoptimized_plan();
+        let plan = if matches!(self.dialect, SqlDialect::ClickhouseSQL) {
+            let state = ctx.state();
+            let mut statement = state.sql_to_statement(sql, "ClickHouse")?;
+            if let datafusion::sql::parser::Statement::Statement(ast) = &mut statement {
+                clickhouse_ast::normalize(ast);
+            }
+            state.statement_to_plan(statement).await?
+        } else {
+            ctx.sql(sql).await?.into_unoptimized_plan()
+        };
         let rewriter = ApplyFunctionRewrites::new(vec![Arc::new(ClickHouseBuiltinRewrite)]);
         let plan = rewriter.analyze(plan, ctx.state().options())?;
         let _guard = AccuracyGuard::install(accuracy.clone());

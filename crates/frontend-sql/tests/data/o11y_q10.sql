@@ -1,0 +1,1 @@
+SELECT map() labels,max(value) value FROM (SELECT ts_ms,sum(value) value FROM raw_samples WHERE metric='backend_process_resident_memory_bytes' AND ts_ms>=1788891296000-21600000 AND ts_ms<=1788891296000 AND modulo(1788891296000-ts_ms,60000)=0 GROUP BY ts_ms)
