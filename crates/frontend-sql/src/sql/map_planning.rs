@@ -103,7 +103,7 @@ impl ScalarUDFImpl for MapPlanningFunction {
             _ => true,
         }
     }
-    fn invoke(&self, _args: &[ColumnarValue]) -> Result<ColumnarValue> {
+    fn invoke_batch(&self, _args: &[ColumnarValue], _number_rows: usize) -> Result<ColumnarValue> {
         Err(DataFusionError::NotImplemented("map planning adapter cannot execute; use a capable query engine or external exact subtree".into()))
     }
 }
@@ -119,7 +119,7 @@ mod tests {
             signature: Signature::any(0, Volatility::Immutable),
         };
         assert!(matches!(
-            adapter.invoke(&[]),
+            adapter.invoke_batch(&[], 1),
             Err(DataFusionError::NotImplemented(_))
         ));
         let result = adapter.return_type(&[]).unwrap();

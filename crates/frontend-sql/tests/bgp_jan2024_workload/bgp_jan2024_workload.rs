@@ -198,8 +198,8 @@ async fn corpus_lowering_matches_the_pinned_aggregate_tally() {
     // entry, so the query still fails at the first unknown-function name it
     // hits, just no longer `laginframe`. Out of scope for #267, same as
     // `splitByChar`'s array-indexing companion gap above.
-    expect(Category::Lowered, 151);
-    expect(Category::Plan, 34);
+    expect(Category::Lowered, 152);
+    expect(Category::Plan, 40);
     expect(Category::Schema, 0);
     expect(Category::Parse, 0);
     // One query that used to fail at `uniqExact` (`Plan`) now clears that
@@ -208,7 +208,9 @@ async fn corpus_lowering_matches_the_pinned_aggregate_tally() {
     // to hit a second, pre-existing gap: map/array index access. Plus the
     // `splitByChar`/other array-index companion gap noted above (issue
     // #230).
-    expect(Category::NotImplemented, 7);
+    // Typed Map access lowers one prior gap; six array accesses now fail
+    // during typed planning because the Map adapter rejects array inputs.
+    expect(Category::NotImplemented, 0);
     expect(Category::UnsupportedFeature, 6);
     // Two `toStartOfInterval(...)` queries -- see the `toStartOfInterval`
     // note above; a pre-existing `INTERVAL`-literal conversion gap, not a
