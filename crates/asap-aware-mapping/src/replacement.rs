@@ -1366,6 +1366,15 @@ impl<'a> SketchAlgorithmStrategy<'a> {
     /// differs — see [`realize_child_with`]).
     fn propose_with(&self, root: &Rc<QueryExpr>, intent_override: Option<&AggIntent>) -> Proposals {
         let mut proposals = Proposals::default();
+        if let Ok(Some(node)) = exact_topk_over_temporal_values(root, self.models) {
+            proposals.candidates.push(ReplacementSubDAG {
+                replacement: Replacement::Summary(node),
+                strategy: "SketchAlgorithmStrategy",
+                provenance: ReplacementProvenance::SummaryImplementation,
+                rationale: "select exact Top-K from independently maintained temporal values"
+                    .into(),
+            });
+        }
         if intent_override.is_none() {
             if let Some(rewritten) = crate::rewrite::temporal_average_rewrite(root) {
                 if let Ok(node) = realize_child_with(&rewritten, self.models, None) {
@@ -1674,6 +1683,62 @@ pub(crate) fn realize_child(
 /// re-splitting for its own approximate children) under the allocated
 /// budget. A child whose declared target is `Exact` keeps it: an allocation
 /// never approximates something the caller declared exact.
+fn exact_topk_over_temporal_values(
+    root: &Rc<QueryExpr>,
+    models: Models<'_>,
+) -> Result<Option<Rc<SummaryNode>>, ImplementError> {
+    let QueryExpr::Aggregate {
+        reduction,
+        measures,
+        output_names,
+        having: None,
+        child,
+    } = root.as_ref()
+    else {
+        return Ok(None);
+    };
+    if !matches!(measures.as_slice(), [AggIntent::TopK { .. }]) {
+        return Ok(None);
+    }
+    let QueryExpr::Aggregate {
+        reduction: Reduction::PerEntity,
+        child: input,
+        ..
+    } = child.as_ref()
+    else {
+        return Ok(None);
+    };
+    if !matches!(input.as_ref(), QueryExpr::TimeRange { .. }) {
+        return Ok(None);
+    }
+    let values = realize_child_with(child, models, Some(&AccuracyTarget::Exact))?;
+    if matches!(values.expr, SummaryExpr::KeepPreAsap(_))
+        || !values
+            .guarantee
+            .as_ref()
+            .is_some_and(ResultGuarantee::is_exact)
+    {
+        return Ok(None);
+    }
+    let values = finalize_exact_accumulator(values, child)?;
+    let node = Rc::new(SummaryNode {
+        guarantee: values.guarantee.clone(),
+        schema: lift(&root.output_schema()?),
+        expr: SummaryExpr::ValueOperation {
+            child: values,
+            operation: ValueOperation::Exact(ExactOperation::Aggregate {
+                reduction: reduction.clone(),
+                measures: measures.clone(),
+                output_names: output_names.clone(),
+                having: None,
+            }),
+            timing: ExecutionTiming::ReadTime,
+        },
+    });
+    validate_execution_data_states_at(&node, ExecutionDataState::READ_ROWS)?;
+    Ok(Some(node))
+}
+
 pub(crate) fn realize_child_with(
     root: &Rc<QueryExpr>,
     models: Models<'_>,
@@ -5643,6 +5708,31 @@ mod tests {
     }
 
     // A ratio needs a value-error certificate for the expression, not two rank bounds.
+    // Exact Top-K consumes the Planner's maintained temporal values.
+    #[test]
+    fn exact_temporal_topk_has_a_maintained_value_candidate() {
+        for query in [
+            "topk(5, sum_over_time(a[5m]))",
+            "topk by(job)(5, count_over_time(a[5m]))",
+        ] {
+            let root =
+                Rc::new(asap_frontend_promql::lower_promql(query, AccuracyTarget::Exact).unwrap());
+            let models = Models::with_default_accuracy(&crate::cost_model::DefaultCostModel);
+            let node = exact_topk_over_temporal_values(&root, models)
+                .unwrap()
+                .expect("exact Top-K candidate");
+            assert!(node.guarantee.as_ref().unwrap().is_exact());
+            assert!(matches!(
+                node.expr,
+                SummaryExpr::ValueOperation {
+                    operation: ValueOperation::Exact(ExactOperation::Aggregate { .. }),
+                    ..
+                }
+            ));
+            asap_types::post_asap::compile_executable_dag(&node).unwrap();
+        }
+    }
+
     #[test]
     fn quantile_ratio_has_a_sized_relative_value_candidate() {
         let target = AccuracyTarget::EpsilonDelta {
