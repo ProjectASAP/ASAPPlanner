@@ -253,7 +253,7 @@ fn every_exact_accumulator_is_finalized_before_an_outer_sketch() {
                 AggIntent::Min { col: None },
                 Rc::new(metric_scan(&["zone"])),
             ),
-            ExactKind::MinMax,
+            ExactKind::Min,
         ),
         (
             agg(

@@ -414,7 +414,7 @@ fn promql_binary_arithmetic_preserves_both_scalar_operand_orders() {
 
 #[test]
 fn promql_binary_arithmetic_falls_back_as_a_whole_for_unsupported_arm() {
-    let root = lower_and_realize("rate(a[1m]) + avg_over_time(b[1m])");
+    let root = lower_and_realize("rate(a[1m]) + stddev_over_time(b[1m])");
     assert!(matches!(root.expr, SummaryExpr::KeepPreAsap(_)));
 }
 
