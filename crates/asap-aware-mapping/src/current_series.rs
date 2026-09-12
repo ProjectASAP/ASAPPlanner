@@ -37,17 +37,23 @@ fn recognize(
             having: None,
             ..
         } => {
-            let [AggIntent::Quantile { q, col, .. }] = measures.as_slice() else {
+            let [intent] = measures.as_slice() else {
                 return None;
             };
-            if !q.is_finite() {
-                return None;
-            }
+            let (col, readout) = match intent {
+                AggIntent::Quantile { q, col, .. } if q.is_finite() => {
+                    (*col, CurrentSeriesReadout::Quantile { q: *q })
+                }
+                AggIntent::Sum { col } => (*col, CurrentSeriesReadout::Sum),
+                AggIntent::Count { .. } => (None, CurrentSeriesReadout::Count),
+                AggIntent::Avg { col } => (*col, CurrentSeriesReadout::Average),
+                _ => return None,
+            };
             let schema = child.output_schema().ok()?;
             if col.is_some_and(|c| schema.columns.get(c).is_none_or(|c| c.name != "value")) {
                 return None;
             }
-            (child, grouping, CurrentSeriesReadout::Quantile { q: *q })
+            (child, grouping, readout)
         }
         QueryExpr::Limit {
             n,
@@ -162,6 +168,9 @@ impl CurrentSeriesStrategy {
                         CurrentSeriesReadout::TopK { k } => {
                             population.max_k = population.max_k.max(k)
                         }
+                        CurrentSeriesReadout::Sum
+                        | CurrentSeriesReadout::Count
+                        | CurrentSeriesReadout::Average => {}
                     }
                 }
             }
@@ -212,6 +221,28 @@ mod tests {
             asap_frontend_promql::lower_promql(q, asap_types::types::AccuracyTarget::Exact)
                 .unwrap(),
         )
+    }
+
+    // Instant scalar aggregations share the same retractable series population.
+    #[test]
+    fn instant_sum_count_average_are_typed_current_series_candidates() {
+        let roots: Vec<_> = [
+            "sum(a)",
+            "count(a)",
+            "avg(a)",
+            "sum by(job)(a)",
+            "count by(job)(a)",
+            "avg by(job)(a)",
+        ]
+        .map(lower)
+        .into();
+        let rule = CurrentSeriesStrategy::new(&roots);
+        for root in roots {
+            let candidate = rule
+                .candidate(&root)
+                .expect("current-series rule candidate");
+            compile_executable_dag(&candidate).expect("typed executable DAG");
+        }
     }
 
     // Different readout parameters retain one shared maintenance producer in the DAG.

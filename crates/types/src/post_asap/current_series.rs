@@ -32,6 +32,9 @@ pub enum CurrentSeriesMatch {
 pub enum CurrentSeriesReadout {
     Quantile { q: f64 },
     TopK { k: usize },
+    Sum,
+    Count,
+    Average,
 }
 
 impl CurrentSeriesPopulation {
@@ -99,6 +102,9 @@ impl CurrentSeriesPopulation {
         match readout {
             CurrentSeriesReadout::Quantile { q } => self.quantiles && q.is_finite(),
             CurrentSeriesReadout::TopK { k } => *k <= self.max_k,
+            CurrentSeriesReadout::Sum
+            | CurrentSeriesReadout::Count
+            | CurrentSeriesReadout::Average => true,
         }
     }
 }

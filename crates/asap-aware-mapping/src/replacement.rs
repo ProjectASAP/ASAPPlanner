@@ -5626,7 +5626,7 @@ mod tests {
             ),
             // exact mergeable accumulators
             (A::Sum { col: None }, Acc(E::Sum)),
-            (A::Min { col: None }, Acc(E::MinMax)),
+            (A::Min { col: None }, Acc(E::Min)),
             (A::Max { col: None }, Acc(E::MinMax)),
             (A::Rate, Acc(E::Rate)),
             (A::IRate, Acc(E::IRate)),

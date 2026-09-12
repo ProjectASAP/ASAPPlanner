@@ -26,20 +26,12 @@
 //! that reshaping — see "Non-goals" below for why it does not also decide
 //! whether the reshaping is worth it.
 //!
-//! ## Scope: `by(...)` grouping only (issue #253's own scope note)
+//! ## Scope
 //!
-//! [`AvgToSumOverCountStrategy::matches`] additionally requires
-//! `Reduction::Reduce(by)` with `by` an ordinary (non-`without`) grouping —
-//! narrower than [`SketchAlgorithmStrategy`]'s `bindable_intent`, which is
-//! `Reduction`-agnostic. Two concrete reasons, not stylistic ones:
+//! Ordinary `by(...)` averages use a schema-preserving projection. Temporal
+//! Float64 averages use two independent per-entity accumulators and direct
+//! division, preserving open series labels and the single-measure invariant.
 //!
-//! - **`Reduction::PerEntity`** (`rate`/`increase`/`*_over_time`) is
-//!   single-measure by construction —
-//!   [`aggregate_output_schema`](asap_types::pre_asap::query_expr::aggregate_output_schema)
-//!   `debug_assert!`s exactly one measure for it. This rewrite's entire
-//!   point is introducing a *second* measure (`Count` alongside `Sum`)
-//!   under the same node, which would violate that invariant outright, not
-//!   just drift a schema detail.
 //! - **`without(...)` grouping** leaves an `Aggregate`'s own output schema
 //!   *open* (`closed: false`, see `without_output_schema`), while the
 //!   `Project` this strategy always wraps the rewrite in forces
@@ -135,7 +127,54 @@ fn avg_rewrite_target(node: &QueryExpr) -> Option<(usize, Option<ColumnId>)> {
 /// types a `Div` of two `Int64` operands as `Int64` — the explicit operand
 /// `Cast` is what keeps both the division and rewritten `avg` column
 /// `Float64` the way the original always was, not an incidental extra step).
+fn temporal_average_rewrite(root: &Rc<QueryExpr>) -> Option<Rc<QueryExpr>> {
+    let QueryExpr::Aggregate {
+        reduction: Reduction::PerEntity,
+        measures,
+        child,
+        having: None,
+        ..
+    } = root.as_ref()
+    else {
+        return None;
+    };
+    let [AggIntent::Avg { col }] = measures.as_slice() else {
+        return None;
+    };
+    if !matches!(child.as_ref(), QueryExpr::TimeRange { .. }) {
+        return None;
+    }
+    let schema = child.output_schema().ok()?;
+    let value = schema
+        .columns
+        .get(col.or_else(|| schema.column_id("value"))?)?;
+    if value.nullable || value.dtype != DataType::Float64 {
+        return None;
+    }
+    let aggregate = |intent| {
+        Rc::new(QueryExpr::Aggregate {
+            reduction: Reduction::PerEntity,
+            measures: vec![intent],
+            output_names: vec![],
+            having: None,
+            child: Rc::clone(child),
+        })
+    };
+    let rewritten = Rc::new(QueryExpr::BinaryOp {
+        op: BinaryOpKind::Arithmetic(ArithmeticOpKind::Div),
+        lhs: aggregate(AggIntent::Sum { col: *col }),
+        rhs: aggregate(AggIntent::Count {
+            accuracy: AccuracyTarget::Exact,
+        }),
+        vector_match: None,
+    });
+    (root.output_schema().ok()? == rewritten.output_schema().ok()?).then_some(rewritten)
+}
+
 fn build_rewrite(root: &Rc<QueryExpr>) -> Option<Rc<QueryExpr>> {
+    if let Some(rewritten) = temporal_average_rewrite(root) {
+        return Some(rewritten);
+    }
     let (group_count, col) = avg_rewrite_target(root)?;
     let QueryExpr::Aggregate {
         reduction,
@@ -316,6 +355,7 @@ pub use SemanticEquivalentRewriteStrategy as AvgToSumOverCountStrategy;
 impl ReplacementStrategy for SemanticEquivalentRewriteStrategy {
     fn matches(&self, target: &TargetSubDAG<'_>) -> bool {
         avg_rewrite_target(target.root).is_some()
+            || temporal_average_rewrite(target.root).is_some()
             || composed_aggregate_rewrite(target.root).is_some()
     }
 
@@ -376,6 +416,31 @@ mod tests {
             having: None,
             child: Rc::new(child),
         }
+    }
+
+    // Temporal averages expose two single-measure children without closing labels.
+    #[test]
+    fn temporal_average_rewrite_preserves_schema_and_exposes_sum_count() {
+        let root = Rc::new(
+            asap_frontend_promql::lower_promql(
+                "avg_over_time(a{job=\"api\"}[5m])",
+                AccuracyTarget::Exact,
+            )
+            .unwrap(),
+        );
+        let rewrites = SemanticEquivalentRewriteStrategy.replacements(&TargetSubDAG::new(&root));
+        let rewritten = rewrites
+            .iter()
+            .find_map(|r| match &r.replacement {
+                Replacement::Rewrite(q) => Some(q),
+                _ => None,
+            })
+            .expect("temporal average rewrite");
+        assert_eq!(
+            root.output_schema().unwrap(),
+            rewritten.output_schema().unwrap()
+        );
+        assert!(matches!(rewritten.as_ref(), QueryExpr::BinaryOp { .. }));
     }
 
     // ── matches ──────────────────────────────────────────────────────────

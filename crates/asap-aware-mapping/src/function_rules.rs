@@ -15,7 +15,11 @@ pub(crate) fn function_rules(intent: &AggIntent) -> Option<FunctionRules> {
             CompositionOperator::ExactSum,
             Some((ExactKind::Sum, ExactParams::Sum)),
         ),
-        AggIntent::Min { .. } | AggIntent::Max { .. } => (
+        AggIntent::Min { .. } => (
+            CompositionOperator::ExactExtremum,
+            Some((ExactKind::Min, ExactParams::Min)),
+        ),
+        AggIntent::Max { .. } => (
             CompositionOperator::ExactExtremum,
             Some((ExactKind::MinMax, ExactParams::MinMax)),
         ),
@@ -38,4 +42,21 @@ pub(crate) fn function_rules(intent: &AggIntent) -> Option<FunctionRules> {
         accuracy,
         accumulator,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    // The maintained extrema state must encode the direction independently of query text.
+    #[test]
+    fn minimum_and_maximum_have_distinct_accumulator_contracts() {
+        assert_ne!(
+            function_rules(&AggIntent::Min { col: None })
+                .unwrap()
+                .accumulator,
+            function_rules(&AggIntent::Max { col: None })
+                .unwrap()
+                .accumulator
+        );
+    }
 }
