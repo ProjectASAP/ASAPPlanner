@@ -194,6 +194,7 @@ pub mod exact_composition;
 pub mod explanation;
 mod function_rules;
 pub mod grouping;
+pub mod pane_sharing;
 pub mod physical_operator_statistics;
 pub mod physical_plan_cost_model;
 pub mod query_physical_lowering;
