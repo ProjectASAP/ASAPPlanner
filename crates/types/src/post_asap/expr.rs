@@ -25,6 +25,15 @@ pub enum ExactOperation {
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[non_exhaustive]
 pub enum ValueOperation {
+    /// Replace each series' current value, retract stale/expired values, and
+    /// retain the full population so removing a TopK member can promote another.
+    MaintainCurrentSeries {
+        population: super::current_series::CurrentSeriesPopulation,
+    },
+    /// Read one quantile or TopK prefix from the maintained current population.
+    ReadCurrentSeries {
+        readout: super::current_series::CurrentSeriesReadout,
+    },
     Exact(ExactOperation),
     /// Read an exact accumulator's state as its finalized scalar value.
     ///
