@@ -716,6 +716,43 @@ impl AccuracyModel for DefaultAccuracyModel {
         let same_metric = |metric: ErrorMetric| approximate.iter().all(|g| g.metric == metric);
 
         match op {
+            CompositionOperator::CheckedRelativeDivision => {
+                if inputs.len() != 2 || local.is_some() || !same_metric(ErrorMetric::RelativeValue)
+                {
+                    return Err(unsupported(
+                        "checked division requires two exact/relative-value operands".into(),
+                    ));
+                }
+                let a = inputs[0]
+                    .bound
+                    .evaluate()
+                    .ok_or_else(|| unsupported("unknown numerator bound".into()))?;
+                let b = inputs[1]
+                    .bound
+                    .evaluate()
+                    .ok_or_else(|| unsupported("unknown denominator bound".into()))?;
+                if !(0.0..1.0).contains(&b) || a < 0.0 || !a.is_finite() {
+                    return Err(unsupported("invalid relative division bounds".into()));
+                }
+                Ok(ResultGuarantee {
+                    metric: ErrorMetric::RelativeValue,
+                    bound: BoundExpr::Constant {
+                        value: (a + b) / (1.0 - b) + 4.0 * f64::EPSILON,
+                    },
+                    failure_probability: ProbabilityExpr::UnionBound {
+                        terms: inputs
+                            .iter()
+                            .map(|g| g.failure_probability.clone())
+                            .collect(),
+                    },
+                    provenance: composed_provenance(
+                        op,
+                        inputs,
+                        &ResultGuarantee::exact("checked floating-point division"),
+                        "checked_relative_division_union_bound",
+                    ),
+                })
+            }
             CompositionOperator::ApproximateAggregate => {
                 let local = local.ok_or_else(|| {
                     unsupported("approximate operator has no local guarantee to compose".into())
@@ -953,6 +990,25 @@ mod tests {
     use super::*;
     use asap_types::post_asap::{GroupingStrategy, SketchKind};
     use asap_types::workload::{DataDistribution, DataWorkload, Evidence, EvidenceSource};
+
+    // Rank error cannot certify a numeric ratio; a same-sketch identity is not cancellation evidence.
+    #[test]
+    fn checked_division_propagates_value_bounds_and_rejects_rank_bounds() {
+        let op = CompositionOperator::CheckedRelativeDivision;
+        let inputs = [rel(0.01), rel(0.01)];
+        let g = DefaultAccuracyModel
+            .propagate(&op, &inputs, None, &Default::default())
+            .unwrap();
+        assert!((g.bound.evaluate().unwrap() - 0.02 / 0.99).abs() < 1e-14);
+        let mut rank = inputs[0].clone();
+        rank.metric = ErrorMetric::Rank;
+        assert!(DefaultAccuracyModel
+            .propagate(&op, &[rank.clone(), rank], None, &Default::default())
+            .is_err());
+        assert!(DefaultAccuracyModel
+            .propagate(&op, &[rel(0.01), rel(1.0)], None, &Default::default())
+            .is_err());
+    }
 
     fn abs(bound: f64, delta: f64) -> ResultGuarantee {
         ResultGuarantee {

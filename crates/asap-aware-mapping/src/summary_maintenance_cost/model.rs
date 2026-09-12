@@ -3004,6 +3004,7 @@ mod tests {
                 lhs: Rc::clone(&operand),
                 rhs: operand,
                 operator: asap_types::post_asap::BinaryOperator {
+                    checked_relative_division: false,
                     kind: asap_types::pre_asap::BinaryOpKind::Arithmetic(
                         asap_types::pre_asap::ArithmeticOpKind::Add,
                     ),

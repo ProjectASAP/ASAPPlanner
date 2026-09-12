@@ -328,10 +328,10 @@ fn sum_by_groups_via_positional_aggregate() {
 }
 
 #[test]
-fn count_is_cardinality() {
+fn count_counts_series() {
     assert!(has(&ok("count(up)"), |i| matches!(
         i,
-        AggIntent::Cardinality { .. }
+        AggIntent::Count { .. }
     )));
 }
 
@@ -718,22 +718,21 @@ fn double_unary_negation_nests() {
 }
 
 #[test]
-fn count_maps_to_cardinality_and_inherits_accuracy() {
-    // SEMANTICS (review #2): PromQL `count by (...)` counts distinct series → the
-    // `Cardinality` intent. The workload's AccuracyTarget threads onto it:
+fn count_maps_to_count_and_inherits_accuracy() {
+    // PromQL counts vector elements, including series with identical values.
+    // The workload accuracy target is preserved on the Count intent:
     // `Exact` stays exact (no silent HLL substitution); an approximate target is
     // carried through for post-ASAP binding to honor. This pins the
-    // intentional count→Cardinality mapping and its accuracy gating.
+    // count mapping and its accuracy gating.
     let exact = lower_promql("count by (job) (up)", AccuracyTarget::Exact).unwrap();
     assert!(
         has(&exact, |i| matches!(
             i,
-            AggIntent::Cardinality {
-                col: None,
+            AggIntent::Count {
                 accuracy: AccuracyTarget::Exact
             }
         )),
-        "count→Cardinality must stay Exact under AccuracyTarget::Exact, got {:?}",
+        "count→Count must stay Exact under AccuracyTarget::Exact, got {:?}",
         intents(&exact)
     );
 
@@ -741,12 +740,11 @@ fn count_maps_to_cardinality_and_inherits_accuracy() {
     assert!(
         has(&approx, |i| matches!(
             i,
-            AggIntent::Cardinality {
-                col: None,
+            AggIntent::Count {
                 accuracy: AccuracyTarget::Epsilon(e)
             } if (*e - 0.01).abs() < 1e-9
         )),
-        "count→Cardinality must carry the approximate target, got {:?}",
+        "count→Count must carry the approximate target, got {:?}",
         intents(&approx)
     );
 }
@@ -2072,7 +2070,7 @@ fn limitk_by_carries_the_grouping_and_composes_in_a_set_op() {
     // the PromqlSeriesSample must be preserved under the set op (it must lower, not reject).
     assert!(has(
         &ok("count(limitk(2, http_requests) and http_requests)"),
-        |i| matches!(i, AggIntent::Cardinality { .. })
+        |i| matches!(i, AggIntent::Count { .. })
     ));
 }
 

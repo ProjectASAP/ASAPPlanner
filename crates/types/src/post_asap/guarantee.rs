@@ -212,6 +212,9 @@ impl ProbabilityExpr {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum CompositionOperator {
+    /// Relative division with runtime finite/nonzero/range checks. For operand
+    /// bounds a,b the ratio bound is (a+b)/(1-b), with b < 1.
+    CheckedRelativeDivision,
     /// An approximate summary built over its inputs' (approximate) values
     /// — the sketch-over-sketch case. Its own `local` guarantee composes
     /// with the inputs' under a same-metric rule.
