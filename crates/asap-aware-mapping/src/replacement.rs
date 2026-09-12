@@ -1366,6 +1366,17 @@ impl<'a> SketchAlgorithmStrategy<'a> {
     /// differs — see [`realize_child_with`]).
     fn propose_with(&self, root: &Rc<QueryExpr>, intent_override: Option<&AggIntent>) -> Proposals {
         let mut proposals = Proposals::default();
+        if intent_override.is_none() {
+            if let Some(rewritten) = crate::rewrite::temporal_average_rewrite(root) {
+                if let Ok(node) = realize_child_with(&rewritten, self.models, None) {
+                    proposals.candidates.push(ReplacementSubDAG {
+                        replacement: Replacement::Summary(node), strategy: "SemanticEquivalentRewriteStrategy",
+                        provenance: ReplacementProvenance::SummaryImplementation,
+                        rationale: "realize the temporal average rewrite as independently maintained sum and count states".into(),
+                    });
+                }
+            }
+        }
         if intent_override.is_none() && is_supported_exact_binary(root) {
             if let Ok(Some(node)) = realize_binary(root, self.models, None) {
                 proposals.candidates.push(ReplacementSubDAG {
