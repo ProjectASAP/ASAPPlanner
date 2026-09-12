@@ -198,6 +198,8 @@ pub enum ExecutionDataStateError {
     MaintenanceRowsAtRoot,
     #[error("unsupported maintenance binary schema or operator")]
     InvalidMaintenanceBinary,
+    #[error("checked relative division requires a read-time division operator")]
+    InvalidCheckedDivision,
     /// An `ExactOperation` whose input columns are not all `Plain` at its
     /// declared data_state.
     #[error("exact operator consumes non-plain column {column:?} ({dtype})")]
@@ -332,6 +334,17 @@ fn visit(
             timing,
             operator,
         } => {
+            if operator.checked_relative_division
+                && (*timing != ExecutionTiming::ReadTime
+                    || !matches!(
+                        operator.kind,
+                        crate::pre_asap::BinaryOpKind::Arithmetic(
+                            crate::pre_asap::ArithmeticOpKind::Div
+                        )
+                    ))
+            {
+                return Err(ExecutionDataStateError::InvalidCheckedDivision);
+            }
             if *timing == ExecutionTiming::MaintenanceTime {
                 use crate::pre_asap::{BinaryOpKind, DataType};
                 if operator.vector_match.is_some()

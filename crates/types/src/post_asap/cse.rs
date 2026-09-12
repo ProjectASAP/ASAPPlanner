@@ -417,6 +417,7 @@ mod tests {
                             lhs: Rc::clone(&current),
                             rhs: current,
                             operator: super::super::BinaryOperator {
+                                checked_relative_division: false,
                                 kind: crate::pre_asap::BinaryOpKind::Arithmetic(
                                     crate::pre_asap::ArithmeticOpKind::Add,
                                 ),

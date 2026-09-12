@@ -1668,6 +1668,9 @@ pub(crate) fn realize_child_with(
     models: Models<'_>,
     end_to_end_target: Option<&AccuracyTarget>,
 ) -> Result<Rc<SummaryNode>, ImplementError> {
+    if let Some(rewritten) = crate::rewrite::temporal_average_rewrite(root) {
+        return realize_child_with(&rewritten, models, end_to_end_target);
+    }
     if let Some(composed) = realize_binary(root, models, end_to_end_target)? {
         return Ok(composed);
     }
@@ -1704,6 +1707,118 @@ pub(crate) fn realize_child_with(
     }
 }
 
+// The logical rule sizes DDSketch operands against the final expression budget.
+// It never converts a rank certificate into a value certificate.
+fn relative_division_candidate(
+    root: &Rc<QueryExpr>,
+    models: Models<'_>,
+    target: Option<&AccuracyTarget>,
+) -> Result<Option<Rc<SummaryNode>>, ImplementError> {
+    let QueryExpr::BinaryOp {
+        op: BinaryOpKind::Arithmetic(asap_types::pre_asap::ArithmeticOpKind::Div),
+        lhs,
+        rhs,
+        vector_match: None,
+    } = root.as_ref()
+    else {
+        return Ok(None);
+    };
+    let target = target
+        .or_else(|| bindable_intent(lhs).and_then(accuracy_target))
+        .or_else(|| bindable_intent(rhs).and_then(accuracy_target));
+    let Some(target) = target else {
+        return Ok(None);
+    };
+    let epsilon = match target {
+        AccuracyTarget::Exact => return Ok(None),
+        AccuracyTarget::Epsilon(e) => *e,
+        AccuracyTarget::EpsilonDelta { epsilon, .. } => *epsilon,
+    };
+    if !epsilon.is_finite() || epsilon <= 1e-12 {
+        return Ok(None);
+    }
+    let alpha = (epsilon - 8.0 * f64::EPSILON) / (2.0 + epsilon);
+    let local_target = AccuracyTarget::Epsilon(alpha);
+    let operand = |expr: &Rc<QueryExpr>,
+                   layer: usize|
+     -> Result<Option<Rc<SummaryNode>>, ImplementError> {
+        if let Some(intent @ AggIntent::Quantile { .. }) = bindable_intent(expr) {
+            if matches!(accuracy_target(intent), Some(AccuracyTarget::Exact)) {
+                return Ok(None);
+            }
+            let intent = override_accuracy(intent, &local_target);
+            for implementation in implementations_for_with(&intent, models.cost) {
+                if !matches!(&implementation, Implementation::Sketch(kind) if kind.algorithm() == &SketchAlgorithm::DDSketch)
+                {
+                    continue;
+                }
+                if let Ok(node) = construct_summary_with(
+                    expr,
+                    &intent,
+                    implementation,
+                    models,
+                    None,
+                    Some(GuaranteeSource::BudgetAllocation {
+                        allocator: "RelativeDivisionAllocator".into(),
+                        layer,
+                        layer_count: 2,
+                        local_target: local_target.clone(),
+                        end_to_end_target: target.clone(),
+                    }),
+                ) {
+                    return Ok(Some(node));
+                }
+            }
+            return Ok(None);
+        }
+        let node = realize_child_with(expr, models, None)?;
+        Ok(node
+            .guarantee
+            .as_ref()
+            .is_some_and(ResultGuarantee::is_exact)
+            .then_some(node))
+    };
+    let (Some(left), Some(right)) = (operand(lhs, 0)?, operand(rhs, 1)?) else {
+        return Ok(None);
+    };
+    let left = finalize_exact_accumulator(left, lhs)?;
+    let right = finalize_exact_accumulator(right, rhs)?;
+    let Some(inputs) = [left.guarantee.clone(), right.guarantee.clone()]
+        .into_iter()
+        .collect::<Option<Vec<_>>>()
+    else {
+        return Ok(None);
+    };
+    if inputs.iter().all(ResultGuarantee::is_exact) {
+        return Ok(None);
+    }
+    let Ok(guarantee) = models.accuracy.propagate(
+        &CompositionOperator::CheckedRelativeDivision,
+        &inputs,
+        None,
+        &Default::default(),
+    ) else {
+        return Ok(None);
+    };
+    if !models.accuracy.satisfies(&guarantee, target) {
+        return Ok(None);
+    }
+    Ok(Some(Rc::new(SummaryNode {
+        expr: SummaryExpr::BinaryOp {
+            timing: ExecutionTiming::ReadTime,
+            lhs: left,
+            rhs: right,
+            operator: asap_types::post_asap::BinaryOperator {
+                checked_relative_division: true,
+                kind: BinaryOpKind::Arithmetic(asap_types::pre_asap::ArithmeticOpKind::Div),
+                vector_match: None,
+            },
+        },
+        schema: lift(&root.output_schema()?),
+        guarantee: Some(guarantee),
+    })))
+}
+
 /// Preserve an exact arithmetic root while allowing each vector operand to
 /// select its own summary implementation. If either vector arm cannot be
 /// accelerated, return `None` so the caller keeps the whole query exact;
@@ -1726,6 +1841,9 @@ fn realize_binary(
         return Ok(None);
     }
 
+    if let Some(candidate) = relative_division_candidate(root, models, end_to_end_target)? {
+        return Ok(Some(candidate));
+    }
     let lhs_scalar = is_promql_scalar(lhs);
     let rhs_scalar = is_promql_scalar(rhs);
     if lhs_scalar && rhs_scalar {
@@ -1800,6 +1918,7 @@ fn realize_binary(
             lhs: lhs_node,
             rhs: rhs_node,
             operator: asap_types::post_asap::BinaryOperator {
+                checked_relative_division: false,
                 kind: op.clone(),
                 vector_match: vector_match.clone(),
             },
@@ -5510,6 +5629,28 @@ mod tests {
             op: asap_types::pre_asap::CompareOpKind::Eq,
             right: Rc::new(QueryExpr::Column(right)),
         }))
+    }
+
+    // A ratio needs a value-error certificate for the expression, not two rank bounds.
+    #[test]
+    fn quantile_ratio_has_a_sized_relative_value_candidate() {
+        let target = AccuracyTarget::EpsilonDelta {
+            epsilon: 0.01,
+            delta: 0.01,
+        };
+        for query in [
+            "quantile_over_time(0.5,a[5m]) / quantile_over_time(0.9,a[5m])",
+            "avg_over_time(a[5m]) / quantile_over_time(0.5,a[5m])",
+        ] {
+            let root = Rc::new(asap_frontend_promql::lower_promql(query, target.clone()).unwrap());
+            let models = Models::with_default_accuracy(&crate::cost_model::DefaultCostModel);
+            let node = realize_binary(&root, models, Some(&target))
+                .unwrap()
+                .expect("ratio candidate");
+            let guarantee = node.guarantee.as_ref().expect("ratio guarantee");
+            assert_eq!(guarantee.metric, ErrorMetric::RelativeValue);
+            assert!(DefaultAccuracyModel.satisfies(guarantee, &target));
+        }
     }
 
     #[test]

@@ -127,7 +127,7 @@ fn avg_rewrite_target(node: &QueryExpr) -> Option<(usize, Option<ColumnId>)> {
 /// types a `Div` of two `Int64` operands as `Int64` — the explicit operand
 /// `Cast` is what keeps both the division and rewritten `avg` column
 /// `Float64` the way the original always was, not an incidental extra step).
-fn temporal_average_rewrite(root: &Rc<QueryExpr>) -> Option<Rc<QueryExpr>> {
+pub(crate) fn temporal_average_rewrite(root: &Rc<QueryExpr>) -> Option<Rc<QueryExpr>> {
     let QueryExpr::Aggregate {
         reduction: Reduction::PerEntity,
         measures,
