@@ -1697,7 +1697,13 @@ fn exact_topk_over_temporal_values(
     else {
         return Ok(None);
     };
-    if !matches!(measures.as_slice(), [AggIntent::TopK { .. }]) {
+    if !matches!(
+        measures.as_slice(),
+        [AggIntent::TopK {
+            accuracy: AccuracyTarget::Exact,
+            ..
+        }]
+    ) {
         return Ok(None);
     }
     let QueryExpr::Aggregate {
