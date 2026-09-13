@@ -65,15 +65,14 @@ fn q06_sum_by_job() {
     );
 }
 
-// #7 — PromQL `count` is cross-series cardinality, not per-sample Count
+// #7 — PromQL `count` counts vector elements regardless of sample values.
 #[test]
-fn q07_count_is_cardinality() {
+fn q07_count_is_row_count() {
     assert_eq!(
         lower("count(http_requests_total)"),
         agg(
             vec![],
-            AggIntent::Cardinality {
-                col: None,
+            AggIntent::Count {
                 accuracy: AccuracyTarget::Exact
             },
             scan("http_requests_total", &[]),
