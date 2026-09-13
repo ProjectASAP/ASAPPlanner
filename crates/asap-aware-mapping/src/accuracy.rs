@@ -541,7 +541,7 @@ impl DefaultAccuracyModel {
         }
         let mut provenance = Vec::new();
         let count = row_count(stats, &mut provenance);
-        let exact_local = ResultGuarantee::exact("ExactAggregate(MinMax)");
+        let exact_local = ResultGuarantee::exact("ExactAggregate(Max)");
         provenance.extend(composed_provenance(
             op,
             inputs,

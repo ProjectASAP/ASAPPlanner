@@ -632,7 +632,7 @@ pub trait ReplacementStrategy {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Implementation {
     /// An exact **mergeable** accumulator (partial state ≡ the value
-    /// itself: `Sum` / `Count` / `MinMax` / `Rate` / `Increase`). The
+    /// itself: `Sum` / `Count` / `Min` / `Max` / `Rate` / `Increase`). The
     /// built state *is* the answer already — no `SummaryEstimate` readout
     /// step.
     ExactAggregate {
@@ -5921,7 +5921,7 @@ mod tests {
             // exact mergeable accumulators
             (A::Sum { col: None }, Acc(E::Sum)),
             (A::Min { col: None }, Acc(E::Min)),
-            (A::Max { col: None }, Acc(E::MinMax)),
+            (A::Max { col: None }, Acc(E::Max)),
             (A::Rate, Acc(E::Rate)),
             (A::IRate, Acc(E::IRate)),
             (A::Increase, Acc(E::Increase)),
