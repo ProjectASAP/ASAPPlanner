@@ -380,6 +380,45 @@ fn count_over_rate_keeps_both_levels() {
     ));
 }
 
+#[test]
+fn count_over_distinct_over_time_collapses_to_one_cardinality() {
+    // `count(v)` is a row count, but `count(distinct_over_time(v[w]))` is the
+    // distinct-count idiom -- a single merged cardinality reduced by the outer
+    // `by`, not a count of the series that happen to have one. Keeping it as
+    // one Aggregate is what lets mergeable cardinality state answer it across
+    // sources.
+    for (query, reduction) in [
+        (
+            "count(distinct_over_time(unique_users[5m]))",
+            Reduction::by(Vec::new()),
+        ),
+        (
+            "count by (job) (distinct_over_time(unique_users[5m]))",
+            Reduction::by(vec![2]),
+        ),
+    ] {
+        let qe = lower(query);
+        let QueryExpr::Aggregate {
+            measures,
+            reduction: actual,
+            child,
+            ..
+        } = &qe
+        else {
+            panic!("expected a single Aggregate{{Cardinality}}, got {qe:?}");
+        };
+        assert!(
+            matches!(measures.as_slice(), [AggIntent::Cardinality { .. }]),
+            "{query}: {measures:?}"
+        );
+        assert_eq!(actual, &reduction, "{query}");
+        assert!(
+            !matches!(child.as_ref(), QueryExpr::Aggregate { .. }),
+            "{query}: the two levels must collapse into one, got {child:?}"
+        );
+    }
+}
+
 // ── count / cardinality ───────────────────────────────────────────────────────
 
 #[test]
