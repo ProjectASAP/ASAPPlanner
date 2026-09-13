@@ -404,3 +404,19 @@ replace those failures with zero cost or structural node counting.
 
 See [Analytical resource cost](analytical-resource-cost.md) for the resource
 formulas, evidence validation, comparison-scope rules, and calibration model.
+
+## Conditional temporal-average lowering
+
+`avg_over_time(a[5m])` can expose independently maintained sum and count
+components, but their division is conditional. Two finite samples of `1e308`
+have a finite average even though their sum overflows. Planner therefore emits
+a read-time `BinaryOperator` with `checked_finite_division=true` and never exports
+this temporal transformation as an unconditional pre-ASAP rewrite.
+
+The backend lowers the guard to `FiniteDiv`: operands and quotient must be finite,
+and the divisor must be nonzero. Failure executes the original average query.
+Zero and subnormal averages remain valid accelerated results. This guard is
+distinct from `checked_relative_division`, whose relative-error certificate also
+requires a normal result; setting both guards or attaching a guard to a non-division
+operator is invalid. Compilers must preserve this typed condition rather than
+recovering average semantics from query text.

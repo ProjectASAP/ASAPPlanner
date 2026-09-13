@@ -14,6 +14,24 @@ ASAP-aware mapping should support several largely orthogonal dimensions of optim
 
 Some of these are described below with examples.
 
+## Shared maintained population rule
+
+A maintained population is the multiset of qualifying input records represented
+by state retained across query evaluations. Membership updates and aggregate
+readouts are separate operations. This lets different quantiles, TopK limits and
+scalar aggregates share one producer when their input semantics agree.
+
+`MaintainedPopulationStrategy` recognizes supported Aggregate or Sort/Limit
+sub-DAGs and emits `MaintainPopulation -> ReadPopulation` candidates. For example,
+`quantile(0.5, a)`, `quantile(0.99, a)`, `topk(1, a)` and `topk(5, a)` can share one
+current-series population and a maximum-k cache of five. SQL table-row consumers
+use the same rule with a different membership contract; they do not become
+latest-series queries.
+
+See [the rule specification](maintained-populations.md) for the definition,
+matching conditions, sharing identity, exactness requirements, SQL examples,
+compiler capability checks and relation to UnivMon/sketch readouts.
+
 ## Using a subpopulation sketch
 
 Queries often compute the same statistic over many subpopulations:

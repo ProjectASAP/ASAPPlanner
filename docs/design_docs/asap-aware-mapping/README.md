@@ -41,6 +41,7 @@ budgets; deployment belongs to a later stage.
 - **Replacement Sub-DAG**: A candidate post-ASAP sub-DAG to replace a target sub-DAG. For example, a quantile aggregation may have KLL, DDSketch, and exact aggregation as alternatives.
 - **ReplacementStrategy**: A rule to recognize a target Sub-DAG and produces one or more valid replacement Sub-DAGs.
 - **Candidate Plan**: A complete post-ASAP plan formed by choosing compatible ReplacementStrategies across the plan.
+- **Maintained population**: A multiset of qualifying records retained across evaluations and updated as members enter, change, leave or expire; multiple readouts can share this state.
 - **Cost Model**: A model used to compare valid candidate plans according to criteria such as storage, update cost, query latency, and accuracy.
 
 The distinction between **ReplacementStrategy** and **Candidate Plan** is important. A ReplacementStrategy is a local choice at one decision point, while a candidate plan is a complete plan that combines choices across all relevant decision points.
@@ -88,6 +89,8 @@ The design is split into focused documents:
   combines, checks, costs, and ranks alternatives across a workload.
 - [Optimizations](optimizations.md) describes summary selection, parameterization,
   subpopulation and time organization, roll-ups, sharing, semantic rewrites, and hybrid execution.
+- [Shared maintained population rule](maintained-populations.md) defines population membership,
+  SQL/PromQL input contracts, sharing preconditions, the replacement DAG, and deployment obligations.
 - [Summary properties](summary_properties.md) lists the capabilities used to determine whether
   summaries and optimizations can be composed safely.
 - [End-to-end accuracy guarantees](end-to-end-accuracy-guarantees.md) specifies the typed
