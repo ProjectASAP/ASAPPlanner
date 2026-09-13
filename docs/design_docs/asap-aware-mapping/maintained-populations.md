@@ -127,10 +127,16 @@ unsupported semantics or exhausted resources must not produce a partial result
 advertised as exact. The backend's current-series implementation rejects evaluations
 older than retained state and falls back while coverage is insufficient.
 
-At the PR #404/#700 implementation boundary, current-series populations are deployable;
-SQL `Rows` candidates are representable but require a table-update/deletion executor.
-Existing SQL window-summary compilation is separate. The SQL executor work is being
-implemented separately; this design does not treat it as already shipped.
+The backend has separate executors for current-series membership and SQL table
+snapshots. Its SQL `Rows` executor polls a complete ClickHouse scan and atomically
+replaces the row multiset. Multiple quantile/TopK readouts share one background
+maintenance task and committed epoch, including after table updates and deletes.
+The deployment must explicitly configure the source database, refresh interval,
+maximum snapshot age and resource budget; each SQL request must accept that age
+bound. Missing, failed or stale snapshots use native execution. This is bounded-stale
+snapshot maintenance, not a database change log or implicit transaction freshness.
+Existing SQL window-summary compilation remains separate. Complete cost selection
+must price every scan/transfer, reconciliation, residency, readout and fallback.
 
 ## Relation to sketch rules and other optimizations
 
@@ -153,8 +159,11 @@ rules rather than by converting UnivMon into an exact `MaintainPopulation` node.
 - PromQL quantiles, TopK limits and scalar readouts share only compatible populations.
 - SQL frontend tests cover shared quantiles/scalar readouts/maximum k, separation
   by grouping and filters, preservation of projections, and invalid value-column rejection.
-- Backend admission rejects a table-row producer when only a current-series executor
-  is available.
+- Backend admission requires the matching SQL executor and explicit snapshot policy;
+  a table-row producer can never use the remote-write current-series executor.
+- ClickHouse integration compares quantile endpoints/interpolation, Sum, Avg, Count
+  and multiple TopK limits across inserts, updates, single-member deletion and an
+  empty table, including native result metadata and freshness/failure fallback.
 - Process tests compare current-series replacements and expiry with Prometheus 3.5.
 - The UnivMon process test installs one compatible materialization for all three
   readouts and checks that missing entropy evidence does not disable the L2 path.
