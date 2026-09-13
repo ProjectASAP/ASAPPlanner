@@ -158,3 +158,25 @@ async fn malformed_table_population_fails_validation() {
     *value_column = 1;
     assert!(compile_executable_dag(&candidate).is_err());
 }
+
+// SQL ORDER BY value DESC LIMIT k uses the same maximum-k state contract.
+#[tokio::test]
+async fn sql_topk_limits_share_maximum_k() {
+    let roots = vec![
+        aggregate("SELECT * FROM samples ORDER BY latency DESC LIMIT 1").await,
+        aggregate("SELECT * FROM samples ORDER BY latency DESC LIMIT 5").await,
+    ];
+    let rule = MaintainedPopulationStrategy::new(&roots);
+    let plans = share_common_summary_subtrees(
+        roots
+            .iter()
+            .enumerate()
+            .map(|(i, r)| (i, rule.candidate(r).expect("SQL topk")))
+            .collect(),
+    );
+    for (_, plan) in &plans {
+        compile_executable_dag(plan).unwrap();
+        assert_eq!(population(plan).1.max_k, 5);
+        assert!(Rc::ptr_eq(population(&plans[0].1).0, population(plan).0));
+    }
+}
