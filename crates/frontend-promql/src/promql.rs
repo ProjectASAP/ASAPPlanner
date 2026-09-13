@@ -46,7 +46,6 @@
 //! | `group` / `offset` / `@` / `info` | **rejected** — distinct semantics with no intent-algebra representation yet (`info` label-join → #84) |
 //! | `OUTER by (dims) (…)` | `Aggregate.reduction = Reduce(by = dims)` (generic `topk by`/`bottomk` grouping → `Sort.partition_by`) |
 //! | `count by (d) (…)` | `Aggregate{[Count], …}` |
-//! | `count by (d) (distinct_over_time(v[w]))` | `Aggregate{[Cardinality], …}` — the distinct-count idiom; one merged cardinality, not a count of series |
 //! | `group(v)` / `count_values("l", v)` | `Aggregate{[Group]}` (constant 1) / `Aggregate{[CountValues{l}]}` (group-by-value + count, new label `l`) — issue #49 |
 //! | `limitk(k, v)` / `limit_ratio(r, v)` | `PromqlSeriesSample{LimitK(k) \| LimitRatio(r)}` — series-sampling selection, whole series kept unchanged (issue #86) |
 //! | `topk(k, count_over_time(…))` / `topk(k, sum_over_time(…))` | `Aggregate{[TopK{k}]}` (heavy-hitter intent) over the explicit inner `Aggregate{[Count/Sum]}` |
@@ -1455,21 +1454,6 @@ fn build(inner: Inner, keys: Vec<ColumnRef>, outer: Outer) -> Result<Unresolved>
                     accuracy: current_accuracy(),
                 },
             ),
-            // `count(distinct_over_time(v[w]))` is the distinct-count
-            // idiom: one cardinality over the window, reduced by the outer
-            // `by`. Nesting the two aggregates instead would count *series*
-            // that have a distinct-count -- an answer nobody writes this
-            // expression for, and one that throws away the mergeability of
-            // the cardinality state underneath. `count(v)` on its own stays
-            // a row count.
-            Some(InnerFunc::Cardinality) => windowed_reduce(
-                inner,
-                keys,
-                AggIntent::Cardinality {
-                    col: None,
-                    accuracy: current_accuracy(),
-                },
-            ),
             Some(f) => {
                 let inner_i = inner_intent(f);
                 let inner_agg = windowed_aggregate(inner, vec![], inner_i);
@@ -1631,30 +1615,6 @@ fn windowed_aggregate(
         // A single empty entry — never an override — so the resolver keeps
         // PromQL's intent-keyed output names ("sum", "quantile_0_99", …)
         // instead.
-        output_names: vec![String::new()],
-        having: None,
-        child: Rc::new(child),
-    }
-}
-
-/// [`windowed_aggregate`] for a collapsed two-level form, where an explicit
-/// outer aggregator supplies the grouping. [`reduction_for`]'s range-child
-/// rule would read the surviving `TimeRange` as "one row per series" and
-/// answer `PerEntity`, which is right for a bare `distinct_over_time(v[w])`
-/// but wrong once the user wrote `count(...)` around it: that is a real
-/// cross-series reduction, and an empty `by` means reduce everything.
-fn windowed_reduce(inner: Inner, keys: Vec<ColumnRef>, intent: AggIntent<ColumnRef>) -> Unresolved {
-    let base = filtered_source(inner.metric, inner.matchers, inner.shift);
-    let child = match inner.window {
-        Some(w) => Unresolved::TimeRange {
-            range: w,
-            child: Rc::new(base),
-        },
-        None => base,
-    };
-    Unresolved::Aggregate {
-        reduction: Reduction::Reduce(GroupKeys::by(keys)),
-        measures: vec![intent],
         output_names: vec![String::new()],
         having: None,
         child: Rc::new(child),

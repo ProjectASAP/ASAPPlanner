@@ -381,40 +381,50 @@ fn count_over_rate_keeps_both_levels() {
 }
 
 #[test]
-fn count_over_distinct_over_time_collapses_to_one_cardinality() {
-    // `count(v)` is a row count, but `count(distinct_over_time(v[w]))` is the
-    // distinct-count idiom -- a single merged cardinality reduced by the outer
-    // `by`, not a count of the series that happen to have one. Keeping it as
-    // one Aggregate is what lets mergeable cardinality state answer it across
-    // sources.
+fn count_over_distinct_over_time_preserves_both_aggregates() {
+    // One series with window samples [1, 2] produces one distinct-count
+    // result (value 2). The outer count counts that one series, yielding 1.
     for (query, reduction) in [
         (
             "count(distinct_over_time(unique_users[5m]))",
-            Reduction::by(Vec::new()),
+            Reduction::by(vec![]),
         ),
         (
             "count by (job) (distinct_over_time(unique_users[5m]))",
             Reduction::by(vec![2]),
         ),
     ] {
-        let qe = lower(query);
+        let tree = lower(query);
         let QueryExpr::Aggregate {
             measures,
             reduction: actual,
             child,
             ..
-        } = &qe
+        } = &tree
         else {
-            panic!("expected a single Aggregate{{Cardinality}}, got {qe:?}");
+            panic!("expected outer Count: {tree:?}");
+        };
+        assert!(
+            matches!(measures.as_slice(), [AggIntent::Count { .. }]),
+            "{query}: {tree:?}"
+        );
+        assert_eq!(actual, &reduction, "{query}");
+        let QueryExpr::Aggregate {
+            measures,
+            reduction,
+            child,
+            ..
+        } = child.as_ref()
+        else {
+            panic!("expected inner per-series Cardinality: {tree:?}");
         };
         assert!(
             matches!(measures.as_slice(), [AggIntent::Cardinality { .. }]),
-            "{query}: {measures:?}"
+            "{query}: {tree:?}"
         );
-        assert_eq!(actual, &reduction, "{query}");
+        assert_eq!(reduction, &Reduction::PerEntity, "{query}");
         assert!(
-            !matches!(child.as_ref(), QueryExpr::Aggregate { .. }),
-            "{query}: the two levels must collapse into one, got {child:?}"
+            matches!(child.as_ref(), QueryExpr::TimeRange { range, .. } if range.as_secs() == 300)
         );
     }
 }
