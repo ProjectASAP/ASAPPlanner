@@ -198,7 +198,7 @@ pub enum ExecutionDataStateError {
     MaintenanceRowsAtRoot,
     #[error("unsupported maintenance binary schema or operator")]
     InvalidMaintenanceBinary,
-    #[error("checked relative division requires a read-time division operator")]
+    #[error("checked division requires one valid guard on a read-time division operator")]
     InvalidCheckedDivision,
     /// An `ExactOperation` whose input columns are not all `Plain` at its
     /// declared data_state.
@@ -334,14 +334,15 @@ fn visit(
             timing,
             operator,
         } => {
-            if operator.checked_relative_division
-                && (*timing != ExecutionTiming::ReadTime
-                    || !matches!(
-                        operator.kind,
-                        crate::pre_asap::BinaryOpKind::Arithmetic(
-                            crate::pre_asap::ArithmeticOpKind::Div
-                        )
-                    ))
+            if (operator.checked_relative_division && operator.checked_finite_division)
+                || (operator.checked_relative_division || operator.checked_finite_division)
+                    && (*timing != ExecutionTiming::ReadTime
+                        || !matches!(
+                            operator.kind,
+                            crate::pre_asap::BinaryOpKind::Arithmetic(
+                                crate::pre_asap::ArithmeticOpKind::Div
+                            )
+                        ))
             {
                 return Err(ExecutionDataStateError::InvalidCheckedDivision);
             }

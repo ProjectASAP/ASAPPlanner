@@ -263,6 +263,11 @@ pub struct BinaryOperator {
     /// relative-value division certificate, including floating-point range.
     #[serde(default)]
     pub checked_relative_division: bool,
+    /// Conditional exact rewrites (such as temporal average from sum/count)
+    /// require finite operands and quotient. Zero/subnormal results are valid;
+    /// overflow must fall back to the original query rather than emit infinity.
+    #[serde(default)]
+    pub checked_finite_division: bool,
     pub kind: BinaryOpKind,
     /// `None` is the only currently supported vector/vector matching mode.
     /// The field is retained so execution never has to recover semantics by

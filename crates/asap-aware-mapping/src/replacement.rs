@@ -1376,14 +1376,13 @@ impl<'a> SketchAlgorithmStrategy<'a> {
             });
         }
         if intent_override.is_none() {
-            if let Some(rewritten) = crate::rewrite::temporal_average_rewrite(root) {
-                if let Ok(node) = realize_child_with(&rewritten, self.models, None) {
-                    proposals.candidates.push(ReplacementSubDAG {
-                        replacement: Replacement::Summary(node), strategy: "SemanticEquivalentRewriteStrategy",
-                        provenance: ReplacementProvenance::SummaryImplementation,
-                        rationale: "realize the temporal average rewrite as independently maintained sum and count states".into(),
-                    });
-                }
+            if let Ok(Some(node)) = realize_temporal_average(root, self.models, None) {
+                proposals.candidates.push(ReplacementSubDAG {
+                    replacement: Replacement::Summary(node),
+                    strategy: "SketchAlgorithmStrategy",
+                    provenance: ReplacementProvenance::SummaryImplementation,
+                    rationale: "read temporal average from sum/count only within the finite arithmetic domain; otherwise execute the original average".into(),
+                });
             }
         }
         if intent_override.is_none() && is_supported_exact_binary(root) {
@@ -1745,13 +1744,30 @@ fn exact_topk_over_temporal_values(
     Ok(Some(node))
 }
 
+fn realize_temporal_average(
+    root: &Rc<QueryExpr>,
+    models: Models<'_>,
+    target: Option<&AccuracyTarget>,
+) -> Result<Option<Rc<SummaryNode>>, ImplementError> {
+    let Some(components) = crate::rewrite::temporal_average_components(root) else {
+        return Ok(None);
+    };
+    let mut node = realize_child_with(&components, models, target)?;
+    let SummaryExpr::BinaryOp { operator, .. } = &mut Rc::make_mut(&mut node).expr else {
+        return Ok(None);
+    };
+    operator.checked_finite_division = true;
+    validate_execution_data_states_at(&node, ExecutionDataState::READ_ROWS)?;
+    Ok(Some(node))
+}
+
 pub(crate) fn realize_child_with(
     root: &Rc<QueryExpr>,
     models: Models<'_>,
     end_to_end_target: Option<&AccuracyTarget>,
 ) -> Result<Rc<SummaryNode>, ImplementError> {
-    if let Some(rewritten) = crate::rewrite::temporal_average_rewrite(root) {
-        return realize_child_with(&rewritten, models, end_to_end_target);
+    if let Some(node) = realize_temporal_average(root, models, end_to_end_target)? {
+        return Ok(node);
     }
     if let Some(composed) = realize_binary(root, models, end_to_end_target)? {
         return Ok(composed);
@@ -1892,6 +1908,7 @@ fn relative_division_candidate(
             rhs: right,
             operator: asap_types::post_asap::BinaryOperator {
                 checked_relative_division: true,
+                checked_finite_division: false,
                 kind: BinaryOpKind::Arithmetic(asap_types::pre_asap::ArithmeticOpKind::Div),
                 vector_match: None,
             },
@@ -2001,6 +2018,7 @@ fn realize_binary(
             rhs: rhs_node,
             operator: asap_types::post_asap::BinaryOperator {
                 checked_relative_division: false,
+                checked_finite_division: false,
                 kind: op.clone(),
                 vector_match: vector_match.clone(),
             },
@@ -5711,6 +5729,34 @@ mod tests {
             op: asap_types::pre_asap::CompareOpKind::Eq,
             right: Rc::new(QueryExpr::Column(right)),
         }))
+    }
+
+    // Finite samples can overflow a sum although their native average is finite.
+    #[test]
+    fn temporal_average_requires_finite_division_guard() {
+        let root = Rc::new(
+            asap_frontend_promql::lower_promql("avg_over_time(a[5m])", AccuracyTarget::Exact)
+                .unwrap(),
+        );
+        let candidates =
+            SketchAlgorithmStrategy::default_cost_model().replacements(&TargetSubDAG::new(&root));
+        let operator = candidates
+            .iter()
+            .find_map(|c| match &c.replacement {
+                Replacement::Summary(node) => match &node.expr {
+                    SummaryExpr::BinaryOp { operator, .. } => Some(operator),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .expect("maintained average candidate");
+        assert!(operator.checked_finite_division);
+        assert!(
+            crate::rewrite::SemanticEquivalentRewriteStrategy
+                .replacements(&TargetSubDAG::new(&root))
+                .is_empty(),
+            "an unconditional pre-ASAP rewrite would bypass the runtime guard"
+        );
     }
 
     // A ratio needs a value-error certificate for the expression, not two rank bounds.

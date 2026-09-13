@@ -29,8 +29,8 @@
 //! ## Scope
 //!
 //! Ordinary `by(...)` averages use a schema-preserving projection. Temporal
-//! Float64 averages use two independent per-entity accumulators and direct
-//! division, preserving open series labels and the single-measure invariant.
+//! Float64 temporal averages require a typed finite-division guard; their
+//! sum/count components are never exported as an unconditional logical rewrite.
 //!
 //! - **`without(...)` grouping** leaves an `Aggregate`'s own output schema
 //!   *open* (`closed: false`, see `without_output_schema`), while the
@@ -127,7 +127,9 @@ fn avg_rewrite_target(node: &QueryExpr) -> Option<(usize, Option<ColumnId>)> {
 /// types a `Div` of two `Int64` operands as `Int64` — the explicit operand
 /// `Cast` is what keeps both the division and rewritten `avg` column
 /// `Float64` the way the original always was, not an incidental extra step).
-pub(crate) fn temporal_average_rewrite(root: &Rc<QueryExpr>) -> Option<Rc<QueryExpr>> {
+// These are conditional physical components, never an unconditional Rewrite.
+// The caller must attach the finite-division execution guard before admission.
+pub(crate) fn temporal_average_components(root: &Rc<QueryExpr>) -> Option<Rc<QueryExpr>> {
     let QueryExpr::Aggregate {
         reduction: Reduction::PerEntity,
         measures,
@@ -172,9 +174,6 @@ pub(crate) fn temporal_average_rewrite(root: &Rc<QueryExpr>) -> Option<Rc<QueryE
 }
 
 fn build_rewrite(root: &Rc<QueryExpr>) -> Option<Rc<QueryExpr>> {
-    if let Some(rewritten) = temporal_average_rewrite(root) {
-        return Some(rewritten);
-    }
     let (group_count, col) = avg_rewrite_target(root)?;
     let QueryExpr::Aggregate {
         reduction,
@@ -355,7 +354,6 @@ pub use SemanticEquivalentRewriteStrategy as AvgToSumOverCountStrategy;
 impl ReplacementStrategy for SemanticEquivalentRewriteStrategy {
     fn matches(&self, target: &TargetSubDAG<'_>) -> bool {
         avg_rewrite_target(target.root).is_some()
-            || temporal_average_rewrite(target.root).is_some()
             || composed_aggregate_rewrite(target.root).is_some()
     }
 
@@ -420,7 +418,7 @@ mod tests {
 
     // Temporal averages expose two single-measure children without closing labels.
     #[test]
-    fn temporal_average_rewrite_preserves_schema_and_exposes_sum_count() {
+    fn temporal_average_components_preserves_schema_and_exposes_sum_count() {
         let root = Rc::new(
             asap_frontend_promql::lower_promql(
                 "avg_over_time(a{job=\"api\"}[5m])",
@@ -428,14 +426,11 @@ mod tests {
             )
             .unwrap(),
         );
-        let rewrites = SemanticEquivalentRewriteStrategy.replacements(&TargetSubDAG::new(&root));
-        let rewritten = rewrites
-            .iter()
-            .find_map(|r| match &r.replacement {
-                Replacement::Rewrite(q) => Some(q),
-                _ => None,
-            })
-            .expect("temporal average rewrite");
+        assert!(SemanticEquivalentRewriteStrategy
+            .replacements(&TargetSubDAG::new(&root))
+            .is_empty());
+        let rewritten =
+            temporal_average_components(&root).expect("conditional sum/count components");
         assert_eq!(
             root.output_schema().unwrap(),
             rewritten.output_schema().unwrap()
