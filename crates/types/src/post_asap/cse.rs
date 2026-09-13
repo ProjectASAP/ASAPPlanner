@@ -418,6 +418,7 @@ mod tests {
                             rhs: current,
                             operator: super::super::BinaryOperator {
                                 checked_relative_division: false,
+                                checked_finite_division: false,
                                 kind: crate::pre_asap::BinaryOpKind::Arithmetic(
                                     crate::pre_asap::ArithmeticOpKind::Add,
                                 ),
