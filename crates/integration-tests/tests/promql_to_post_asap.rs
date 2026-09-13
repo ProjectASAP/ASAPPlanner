@@ -14,8 +14,8 @@ use asap_aware_mapping::accuracy::{
 use asap_aware_mapping::cost_model::DefaultCostModel;
 use asap_aware_mapping::replacement::{keep_pre_asap, ImplementError};
 use asap_aware_mapping::{
-    search_workload, Replacement, ReplacementStrategy, ReplacementSubDAG, SketchAlgorithmStrategy,
-    TargetSubDAG,
+    search_workload, search_workload_with_targets, AccuracyModel, Replacement, ReplacementStrategy,
+    ReplacementSubDAG, SketchAlgorithmStrategy, TargetSubDAG,
 };
 use asap_frontend_promql::lower_promql;
 use asap_types::post_asap::{
@@ -446,6 +446,59 @@ fn promql_binary_arithmetic_never_relabels_approximate_children_as_exact() {
     assert!(
         root.guarantee.is_none(),
         "unknown composed error must fail closed"
+    );
+}
+
+#[test]
+fn ddsketch_quantile_ratio_meets_the_shared_relative_error_target() {
+    // A DDSketch supplies deterministic relative-value error for every
+    // quantile readout.  For a/b, sizing both sketches to ε/(2+ε) bounds
+    // the result by ε: (1+α)/(1-α)-1 <= ε.
+    let target = AccuracyTarget::EpsilonDelta {
+        epsilon: 0.01,
+        delta: 0.01,
+    };
+    let query = Rc::new(
+        lower_promql(
+            "quantile_over_time(0.9, data[5m]) / quantile_over_time(0.5, data[5m])",
+            target.clone(),
+        )
+        .expect("lowering failed"),
+    );
+
+    let space = search_workload_with_targets(
+        vec![("ratio", query, Some(target.clone()))],
+        &asap_aware_mapping::default_strategies(),
+        &DefaultAccuracyModel,
+    );
+    let root = &space.roots[0].1;
+    let selected = space.global_selection(&DefaultCostModel);
+    let chosen = selected
+        .for_target(root)
+        .and_then(|selection| selection.chosen.as_ref())
+        .expect("the certified DDSketch ratio should be selectable");
+    let Replacement::Summary(node) = &chosen.replacement else {
+        panic!("expected a summary candidate")
+    };
+    let guarantee = node.guarantee.as_ref().expect("ratio guarantee");
+    assert_eq!(guarantee.failure_probability.evaluate(), Some(0.0));
+    assert!(
+        DefaultAccuracyModel.satisfies(guarantee, &target),
+        "ratio guarantee should satisfy the requested target: {guarantee:?}"
+    );
+
+    let shared =
+        asap_types::post_asap::share_common_summary_subtrees(vec![("ratio", node.clone())]);
+    let SummaryExpr::BinaryOp { lhs, rhs, .. } = &shared[0].1.expr else {
+        panic!("expected binary ratio")
+    };
+    let producer = |readout: &Rc<SummaryNode>| match &readout.expr {
+        SummaryExpr::SummaryEstimate { summary_input, .. } => Rc::clone(summary_input),
+        other => panic!("expected DDSketch readout, got {other:?}"),
+    };
+    assert!(
+        Rc::ptr_eq(&producer(lhs), &producer(rhs)),
+        "the two quantile readouts should share one DDSketch producer"
     );
 }
 

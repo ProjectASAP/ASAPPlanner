@@ -230,6 +230,10 @@ pub enum CompositionOperator {
     /// *value* (`max` of the input bounds) but does not identify which key
     /// is the true winner.
     ExactExtremum,
+    /// Exact division of two relative-value estimates. For numerator bound
+    /// `a` and denominator bound `b < 1`, the output bound is
+    /// `(a + b) / (1 - b)`.
+    ExactDivision,
     /// PromQL `rate`: reset correction plus range-boundary extrapolation.
     CounterRate,
     /// PromQL `irate`: reset-aware slope over the final two samples.

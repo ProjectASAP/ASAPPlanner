@@ -565,6 +565,74 @@ impl DefaultAccuracyModel {
             provenance,
         })
     }
+
+    /// Exact division of two relative-value estimates. If the numerator is
+    /// within `a` and the denominator within `b`, their ratio is within
+    /// `(a + b) / (1 - b)`. DDSketch supplies those deterministic bounds.
+    fn exact_division(
+        op: &CompositionOperator,
+        inputs: &[ResultGuarantee],
+    ) -> Result<ResultGuarantee, AccuracyError> {
+        let unsupported = |reason: String| AccuracyError::UnsupportedComposition {
+            operator: op.clone(),
+            input_metrics: inputs.iter().map(|g| g.metric).collect(),
+            local_metric: None,
+            reason,
+        };
+        if inputs.len() != 2
+            || inputs
+                .iter()
+                .any(|input| input.metric != ErrorMetric::RelativeValue)
+        {
+            return Err(unsupported(
+                "division needs exactly two RelativeValue guarantees".into(),
+            ));
+        }
+        let Some(numerator) = inputs[0].bound.evaluate() else {
+            return Err(unsupported(
+                "numerator relative bound is unavailable".into(),
+            ));
+        };
+        let Some(denominator) = inputs[1].bound.evaluate() else {
+            return Err(unsupported(
+                "denominator relative bound is unavailable".into(),
+            ));
+        };
+        if !(numerator.is_finite()
+            && denominator.is_finite()
+            && numerator >= 0.0
+            && (0.0..1.0).contains(&denominator))
+        {
+            return Err(unsupported(
+                "division needs finite non-negative bounds and a denominator bound below one"
+                    .into(),
+            ));
+        }
+        Ok(ResultGuarantee {
+            metric: ErrorMetric::RelativeValue,
+            bound: BoundExpr::Constant {
+                value: (numerator + denominator) / (1.0 - denominator),
+            },
+            failure_probability: ProbabilityExpr::UnionBound {
+                terms: inputs
+                    .iter()
+                    .map(|input| input.failure_probability.clone())
+                    .collect(),
+            },
+            provenance: inputs
+                .iter()
+                .enumerate()
+                .map(|(input_index, guarantee)| GuaranteeSource::ChildGuarantee {
+                    input_index,
+                    guarantee: Box::new(guarantee.clone()),
+                })
+                .chain(std::iter::once(GuaranteeSource::CompositionStep {
+                    operator: op.clone(),
+                    rule: "relative_division".into(),
+                }))
+                .collect(),
+        })
+    }
 }
 
 /// `stats.input_row_count` as a bound factor, or an `Unknown` leaf (recorded
@@ -772,6 +840,7 @@ impl AccuracyModel for DefaultAccuracyModel {
             CompositionOperator::ExactSum => Self::exact_sum(op, inputs, stats),
             CompositionOperator::ExactAverage => Self::exact_average(op, inputs, stats),
             CompositionOperator::ExactExtremum => Self::exact_extremum(op, inputs, stats),
+            CompositionOperator::ExactDivision => Self::exact_division(op, inputs),
             CompositionOperator::CounterRate
             | CompositionOperator::InstantCounterRate
             | CompositionOperator::CounterIncrease => Err(unsupported(

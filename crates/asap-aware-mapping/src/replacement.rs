@@ -360,7 +360,7 @@ use asap_types::post_asap::{
 use asap_types::post_asap::{AccuracyError, CompositionOperator, GuaranteeSource, ResultGuarantee};
 use asap_types::pre_asap::agg_intent::{agg_is_mergeable, AggIntent};
 use asap_types::pre_asap::cse::{share_common_subtrees, structural_hash, HashCache};
-use asap_types::pre_asap::expr_ir::ColumnRef;
+use asap_types::pre_asap::expr_ir::{ArithmeticOpKind, ColumnRef};
 use asap_types::pre_asap::query_expr::{
     BinaryOpKind, Predicate, QueryExpr, QueryExprError, Reduction,
 };
@@ -1735,7 +1735,21 @@ fn realize_binary(
     let mut lhs_node = realize_binary_operand(lhs, models, None)?;
     let mut rhs_node = realize_binary_operand(rhs, models, None)?;
 
-    if let Some(target) = end_to_end_target {
+    let direct_ddsketch_ratio = matches!(op, BinaryOpKind::Arithmetic(ArithmeticOpKind::Div))
+        && shared_quantile_target(lhs, rhs).is_some();
+    let ratio_target = end_to_end_target
+        .cloned()
+        .or_else(|| shared_quantile_target(lhs, rhs));
+
+    if direct_ddsketch_ratio {
+        if let Some(target) = ratio_target
+            .as_ref()
+            .and_then(ddsketch_ratio_operand_target)
+        {
+            lhs_node = realize_ddsketch_quantile_operand(lhs, models, &target)?;
+            rhs_node = realize_ddsketch_quantile_operand(rhs, models, &target)?;
+        }
+    } else if let Some(target) = end_to_end_target {
         let operand_guarantees = [lhs_node.guarantee.as_ref(), rhs_node.guarantee.as_ref()];
         if operand_guarantees.iter().any(Option::is_none) {
             return Ok(None);
@@ -1789,10 +1803,30 @@ fn realize_binary(
     lhs_node = finalize_exact_accumulator(lhs_node, lhs)?;
     rhs_node = finalize_exact_accumulator(rhs_node, rhs)?;
 
-    let guarantee = [lhs_node.guarantee.as_ref(), rhs_node.guarantee.as_ref()]
-        .into_iter()
-        .all(|guarantee| guarantee.is_some_and(ResultGuarantee::is_exact))
-        .then(|| ResultGuarantee::exact("BinaryOp over exact operands"));
+    let guarantee = if matches!(op, BinaryOpKind::Arithmetic(ArithmeticOpKind::Div))
+        && is_ddsketch_quantile_readout(&lhs_node)
+        && is_ddsketch_quantile_readout(&rhs_node)
+    {
+        [lhs_node.guarantee.clone(), rhs_node.guarantee.clone()]
+            .into_iter()
+            .collect::<Option<Vec<_>>>()
+            .and_then(|inputs| {
+                models
+                    .accuracy
+                    .propagate(
+                        &CompositionOperator::ExactDivision,
+                        &inputs,
+                        None,
+                        &crate::accuracy::PropagationStats::default(),
+                    )
+                    .ok()
+            })
+    } else {
+        [lhs_node.guarantee.as_ref(), rhs_node.guarantee.as_ref()]
+            .into_iter()
+            .all(|guarantee| guarantee.is_some_and(ResultGuarantee::is_exact))
+            .then(|| ResultGuarantee::exact("BinaryOp over exact operands"))
+    };
 
     Ok(Some(Rc::new(SummaryNode {
         expr: SummaryExpr::BinaryOp {
@@ -1870,6 +1904,78 @@ fn is_promql_scalar(expr: &QueryExpr) -> bool {
         expr,
         QueryExpr::PromqlScalarBridge(_) | QueryExpr::Literal(_)
     )
+}
+
+/// Both direct quantile operands inherit the workload target during PromQL
+/// lowering. Reuse that one target for the ratio rather than interpreting it
+/// as two independent error budgets.
+fn shared_quantile_target(lhs: &QueryExpr, rhs: &QueryExpr) -> Option<AccuracyTarget> {
+    let quantile_target = |expr: &QueryExpr| match bindable_intent(expr) {
+        Some(AggIntent::Quantile { accuracy, .. }) => Some(accuracy.clone()),
+        _ => None,
+    };
+    let lhs = quantile_target(lhs)?;
+    let rhs = quantile_target(rhs)?;
+    (lhs == rhs).then_some(lhs)
+}
+
+/// For `a / b`, two DDSketches with the same relative bound `alpha` produce
+/// at most `2 * alpha / (1 - alpha)` relative error. Inverting that bound
+/// gives `alpha = epsilon / (2 + epsilon)`.
+fn ddsketch_ratio_operand_target(target: &AccuracyTarget) -> Option<AccuracyTarget> {
+    let tighten =
+        |epsilon: f64| (epsilon.is_finite() && epsilon > 0.0).then_some(epsilon / (2.0 + epsilon));
+    match target {
+        AccuracyTarget::Exact => None,
+        AccuracyTarget::Epsilon(epsilon) => tighten(*epsilon).map(AccuracyTarget::Epsilon),
+        AccuracyTarget::EpsilonDelta { epsilon, delta } => {
+            tighten(*epsilon).map(|epsilon| AccuracyTarget::EpsilonDelta {
+                epsilon,
+                delta: *delta,
+            })
+        }
+    }
+}
+
+fn is_ddsketch_quantile_readout(node: &SummaryNode) -> bool {
+    let SummaryExpr::SummaryEstimate {
+        summary_input,
+        query: PostAsapSketchQuery::Quantile { .. },
+    } = &node.expr
+    else {
+        return false;
+    };
+    matches!(
+        &summary_input.expr,
+        SummaryExpr::SummaryAgg {
+            family: SummaryFamilyType::Sketch(kind, _),
+            ..
+        } if kind.algorithm() == &SketchAlgorithm::DDSketch
+    )
+}
+
+/// A direct ratio has an operator-specific DDSketch proof, so it must select
+/// DDSketch rather than the cost model's generally preferred KLL candidate.
+fn realize_ddsketch_quantile_operand(
+    operand: &Rc<QueryExpr>,
+    models: Models<'_>,
+    target: &AccuracyTarget,
+) -> Result<Rc<SummaryNode>, ImplementError> {
+    let intent = bindable_intent(operand).and_then(|intent| match intent {
+        AggIntent::Quantile { .. } => Some(override_accuracy(intent, target)),
+        _ => None,
+    });
+    let Some(intent) = intent else {
+        return realize_binary_operand(operand, models, Some(target));
+    };
+    let (epsilon, delta) = accuracy_budget(target);
+    let implementation = Implementation::Sketch(SketchKind::new(
+        SketchAlgorithm::DDSketch,
+        models
+            .cost
+            .size_params(SketchAlgorithm::DDSketch, &intent, epsilon, delta),
+    ));
+    construct_summary_with(operand, &intent, implementation, models, None, None)
 }
 
 fn realize_binary_operand(
