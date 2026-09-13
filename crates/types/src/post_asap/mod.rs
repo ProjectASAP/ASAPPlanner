@@ -28,11 +28,11 @@
 //! — see `asap_aware_mapping::grouping`'s module docs for why.
 
 pub mod cse;
-pub mod current_series;
 pub mod executable_dag;
 pub mod execution_data_state;
 pub mod expr;
 pub mod guarantee;
+pub mod maintained_population;
 pub mod query_time;
 pub mod schema;
 pub mod sketch;

@@ -1,16 +1,14 @@
-//! Semantic contract for a retractable population of current PromQL series values.
+//! Language-independent maintained populations and their readouts.
 //! Resource limits, ingestion placement and data structures belong to the executor.
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CurrentSeriesPopulation {
+pub struct CurrentSeriesInput {
     pub metric: String,
     pub matchers: Vec<CurrentSeriesMatcher>,
     pub grouping: Vec<String>,
     pub without: bool,
     pub lookback_ms: u64,
-    pub max_k: usize,
-    pub quantiles: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -29,7 +27,7 @@ pub enum CurrentSeriesMatch {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub enum CurrentSeriesReadout {
+pub enum PopulationReadout {
     Quantile { q: f64 },
     TopK { k: usize },
     Sum,
@@ -37,7 +35,7 @@ pub enum CurrentSeriesReadout {
     Average,
 }
 
-impl CurrentSeriesPopulation {
+impl CurrentSeriesInput {
     /// Verify the named contract against the canonical maintenance input.
     pub fn matches_input(&self, input: &crate::pre_asap::QueryExpr) -> bool {
         use crate::pre_asap::{CompareOpKind, DataType, QueryExpr, ScalarValue, Source};
@@ -98,13 +96,50 @@ impl CurrentSeriesPopulation {
         matchers.dedup();
         self.matchers == matchers && self.grouping.windows(2).all(|w| w[0] < w[1])
     }
-    pub fn supports(&self, readout: &CurrentSeriesReadout) -> bool {
+}
+
+/// Membership is part of state identity. Table rows must never acquire implicit
+/// latest-per-series selection, stale markers, or a PromQL lookback.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum PopulationInput {
+    CurrentSeries(CurrentSeriesInput),
+    Rows {
+        input: std::rc::Rc<crate::pre_asap::QueryExpr>,
+        value_column: usize,
+        grouping: crate::pre_asap::GroupKeys,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MaintainedPopulation {
+    pub input: PopulationInput,
+    pub max_k: usize,
+    pub quantiles: bool,
+}
+
+impl MaintainedPopulation {
+    pub fn matches_input(&self, input: &crate::pre_asap::QueryExpr) -> bool {
+        match &self.input {
+            PopulationInput::CurrentSeries(spec) => spec.matches_input(input),
+            PopulationInput::Rows {
+                input: expected,
+                value_column,
+                grouping,
+            } => {
+                use crate::pre_asap::{DataType, QueryExpr, Source};
+                expected.as_ref() == input
+                    && matches!(input, QueryExpr::Scan { source: Source::Table { .. }, schema, .. }
+                        if schema.closed && schema.columns.get(*value_column).is_some_and(|c| c.dtype == DataType::Float64 && !c.nullable)
+                            && !grouping.is_without() && grouping.keys().iter().all(|k| *k < schema.columns.len()))
+            }
+        }
+    }
+
+    pub fn supports(&self, readout: &PopulationReadout) -> bool {
         match readout {
-            CurrentSeriesReadout::Quantile { q } => self.quantiles && q.is_finite(),
-            CurrentSeriesReadout::TopK { k } => *k <= self.max_k,
-            CurrentSeriesReadout::Sum
-            | CurrentSeriesReadout::Count
-            | CurrentSeriesReadout::Average => true,
+            PopulationReadout::Quantile { q } => self.quantiles && q.is_finite(),
+            PopulationReadout::TopK { k } => *k <= self.max_k,
+            PopulationReadout::Sum | PopulationReadout::Count | PopulationReadout::Average => true,
         }
     }
 }

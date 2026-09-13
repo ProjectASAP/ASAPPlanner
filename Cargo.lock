@@ -350,6 +350,7 @@ dependencies = [
 name = "asap-frontend-sql"
 version = "0.1.0"
 dependencies = [
+ "asap-aware-mapping",
  "asap-sql-function-catalog",
  "asap-types",
  "datafusion",

@@ -255,4 +255,4 @@ pub use summary_maintenance_lifecycle::{
 };
 pub use topk_reuse::TopKLimitReuseStrategy;
 
-pub mod current_series;
+pub mod maintained_population;

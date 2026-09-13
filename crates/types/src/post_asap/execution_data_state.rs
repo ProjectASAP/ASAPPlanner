@@ -153,8 +153,8 @@ impl ExecutionDataStateEdge {
 /// it expects, and so tests can assert the *reason* a plan was rejected.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum ExecutionDataStateError {
-    #[error("invalid current-series maintenance/readout contract")]
-    InvalidCurrentSeries,
+    #[error("invalid maintained-population maintenance/readout contract")]
+    InvalidMaintainedPopulation,
     /// A query-time value (`SummaryEstimate` / read-time `ValueOperation` output)
     /// placed beneath a maintained summary — the one shape issue #171's
     /// data_state split exists to make unrepresentable.
@@ -477,19 +477,19 @@ fn visit(
             operation,
             timing,
         } => {
-            let valid_current = match operation {
-                ValueOperation::MaintainCurrentSeries { population } => {
+            let valid_population = match operation {
+                ValueOperation::MaintainPopulation { population } => {
                     *timing == ExecutionTiming::MaintenanceTime
                         && matches!(&child.expr, SummaryExpr::KeepPreAsap(input) if population.matches_input(input))
                 }
-                ValueOperation::ReadCurrentSeries { readout } => {
+                ValueOperation::ReadPopulation { readout } => {
                     *timing == ExecutionTiming::ReadTime
-                        && matches!(&child.expr, SummaryExpr::ValueOperation { operation: ValueOperation::MaintainCurrentSeries { population }, timing: ExecutionTiming::MaintenanceTime, .. } if population.supports(readout))
+                        && matches!(&child.expr, SummaryExpr::ValueOperation { operation: ValueOperation::MaintainPopulation { population }, timing: ExecutionTiming::MaintenanceTime, .. } if population.supports(readout))
                 }
                 _ => true,
             };
-            if !valid_current {
-                return Err(ExecutionDataStateError::InvalidCurrentSeries);
+            if !valid_population {
+                return Err(ExecutionDataStateError::InvalidMaintainedPopulation);
             }
             let required = match timing {
                 ExecutionTiming::MaintenanceTime => ExecutionDataState::MAINTENANCE_ROWS,
@@ -500,17 +500,17 @@ fn visit(
                 || matches!(operation, ValueOperation::FinalizeExactAccumulator))
                 && s == ExecutionDataState::MAINTENANCE_SUMMARY
                 && is_exact_accumulator_state(&child.schema).is_ok();
-            let current_readout = matches!(operation, ValueOperation::ReadCurrentSeries { .. })
+            let population_readout = matches!(operation, ValueOperation::ReadPopulation { .. })
                 && *timing == ExecutionTiming::ReadTime
                 && matches!(
                     &child.expr,
                     SummaryExpr::ValueOperation {
-                        operation: ValueOperation::MaintainCurrentSeries { .. },
+                        operation: ValueOperation::MaintainPopulation { .. },
                         timing: ExecutionTiming::MaintenanceTime,
                         ..
                     }
                 );
-            if s != required && !exact_readout && !current_readout {
+            if s != required && !exact_readout && !population_readout {
                 return Err(ExecutionDataStateError::IllegalChildDataState {
                     edge: ExecutionDataStateEdge::ValueOperationChild.describe(),
                     child: s,
