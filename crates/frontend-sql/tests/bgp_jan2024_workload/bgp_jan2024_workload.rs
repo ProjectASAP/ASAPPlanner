@@ -198,8 +198,9 @@ async fn corpus_lowering_matches_the_pinned_aggregate_tally() {
     // entry, so the query still fails at the first unknown-function name it
     // hits, just no longer `laginframe`. Out of scope for #267, same as
     // `splitByChar`'s array-indexing companion gap above.
-    expect(Category::Lowered, 152);
-    expect(Category::Plan, 40);
+    // Parametric quantile syntax now lowers the AS-path percentile query.
+    expect(Category::Lowered, 153);
+    expect(Category::Plan, 39);
     expect(Category::Schema, 0);
     expect(Category::Parse, 0);
     // One query that used to fail at `uniqExact` (`Plan`) now clears that
