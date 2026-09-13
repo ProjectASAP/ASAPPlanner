@@ -2121,9 +2121,11 @@ fn extract_percentile_q(args: &[Expr]) -> Result<f64, LoweringError> {
     let q = match args.get(1) {
         Some(Expr::Literal(DfScalarValue::Float64(Some(q)))) => *q,
         Some(Expr::Literal(DfScalarValue::Float32(Some(q)))) => *q as f64,
+        Some(Expr::Literal(DfScalarValue::Int64(Some(q)))) => *q as f64,
+        Some(Expr::Literal(DfScalarValue::UInt64(Some(q)))) => *q as f64,
         _ => {
             return Err(LoweringError::InvalidExpression(
-                "percentile value must be a float literal (2nd arg)".into(),
+                "percentile value must be a numeric literal (2nd arg)".into(),
             ))
         }
     };

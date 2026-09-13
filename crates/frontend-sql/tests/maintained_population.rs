@@ -192,6 +192,8 @@ async fn clickhouse_parametric_quantiles_share_population() {
     for q in [
         "SELECT quantile(0.5)(latency) FROM samples",
         "SELECT quantileExactInclusive(0.9)(latency) FROM samples",
+        "SELECT quantileExactInclusive(0)(latency) FROM samples",
+        "SELECT quantileExactInclusive(1)(latency) FROM samples",
     ] {
         let root = asap_frontend_sql::lower_sql_dialect(
             q,
@@ -224,4 +226,29 @@ async fn clickhouse_parametric_quantiles_share_population() {
     )
     .await
     .is_err());
+}
+
+// DataFusion qualifiers and COUNT's internal literal must not leak into native SQL result names.
+#[tokio::test]
+async fn clickhouse_population_aggregate_names_match_native() {
+    let catalog = SqlCatalog::new().with_table(
+        "samples",
+        Schema::new(vec![Column::new("value", DataType::Float64, false)]),
+    );
+    for (query, name) in [
+        ("SELECT sum(value) FROM samples", "sum(value)"),
+        ("SELECT avg(value) FROM samples", "avg(value)"),
+        ("SELECT count(*) FROM samples", "count()"),
+        ("SELECT count(1) FROM samples", "count(1)"),
+    ] {
+        let root = asap_frontend_sql::lower_sql_dialect(
+            query,
+            &catalog,
+            asap_types::workload::SqlDialect::ClickhouseSQL,
+            AccuracyTarget::Exact,
+        )
+        .await
+        .unwrap();
+        assert_eq!(root.output_schema().unwrap().columns[0].name, name);
+    }
 }

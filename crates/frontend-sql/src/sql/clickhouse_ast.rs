@@ -31,6 +31,9 @@ pub(super) fn normalize(statement: &mut Statement) {
                                                     .to_ascii_lowercase()
                                                     .as_str(),
                                                 "modulo"
+                                                    | "sum"
+                                                    | "avg"
+                                                    | "count"
                                                     | "quantile"
                                                     | "quantileexactinclusive"
                                                     | "map"
@@ -42,7 +45,7 @@ pub(super) fn normalize(statement: &mut Statement) {
                                     ControlFlow::Continue(())
                                 });
                                 if changed {
-                                    let alias = Ident::with_quote('"', expr.to_string());
+                                    let alias = Ident::with_quote('"', native_result_name(expr));
                                     let value = std::mem::replace(
                                         expr,
                                         Expr::Value(datafusion::sql::sqlparser::ast::Value::Null),
@@ -190,4 +193,25 @@ fn normalize_quantile(expr: &mut Expr) {
         clauses: vec![],
         args,
     });
+}
+
+fn native_result_name(expr: &Expr) -> String {
+    let mut named = expr.clone();
+    let _: ControlFlow<()> = visit_expressions_mut(&mut named, |node| {
+        if let Expr::Function(function) = node {
+            if function.name.0.len() == 1 && function.name.0[0].value.eq_ignore_ascii_case("count")
+            {
+                if let FunctionArguments::List(arguments) = &mut function.args {
+                    if matches!(
+                        arguments.args.as_slice(),
+                        [FunctionArg::Unnamed(FunctionArgExpr::Wildcard)]
+                    ) {
+                        arguments.args.clear();
+                    }
+                }
+            }
+        }
+        ControlFlow::Continue(())
+    });
+    named.to_string()
 }
