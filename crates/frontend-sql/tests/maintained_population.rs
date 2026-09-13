@@ -180,3 +180,48 @@ async fn sql_topk_limits_share_maximum_k() {
         assert!(Rc::ptr_eq(population(&plans[0].1).0, population(plan).0));
     }
 }
+
+// ClickHouse parametric quantiles enter the same typed rule with their public column names intact.
+#[tokio::test]
+async fn clickhouse_parametric_quantiles_share_population() {
+    let catalog = SqlCatalog::new().with_table(
+        "samples",
+        Schema::new(vec![Column::new("latency", DataType::Float64, false)]),
+    );
+    let mut roots = Vec::new();
+    for q in [
+        "SELECT quantile(0.5)(latency) FROM samples",
+        "SELECT quantileExactInclusive(0.9)(latency) FROM samples",
+    ] {
+        let root = asap_frontend_sql::lower_sql_dialect(
+            q,
+            &catalog,
+            asap_types::workload::SqlDialect::ClickhouseSQL,
+            AccuracyTarget::Exact,
+        )
+        .await
+        .unwrap();
+        assert!(root.output_schema().unwrap().columns[0]
+            .name
+            .to_lowercase()
+            .contains("quantile"));
+        roots.push(Rc::new(root));
+    }
+    let rule = MaintainedPopulationStrategy::new(&roots);
+    let plans = roots
+        .iter()
+        .map(|r| rule.candidate(r).unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(population(&plans[0]).1, population(&plans[1]).1);
+    for plan in plans {
+        compile_executable_dag(&plan).unwrap();
+    }
+    assert!(asap_frontend_sql::lower_sql_dialect(
+        "SELECT quantileExact(0.5)(latency) FROM samples",
+        &catalog,
+        asap_types::workload::SqlDialect::ClickhouseSQL,
+        AccuracyTarget::Exact
+    )
+    .await
+    .is_err());
+}

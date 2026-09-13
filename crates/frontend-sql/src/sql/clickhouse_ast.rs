@@ -31,6 +31,8 @@ pub(super) fn normalize(statement: &mut Statement) {
                                                     .to_ascii_lowercase()
                                                     .as_str(),
                                                 "modulo"
+                                                    | "quantile"
+                                                    | "quantileexactinclusive"
                                                     | "map"
                                                     | "mapconcat"
                                                     | "arrayelement"
@@ -64,6 +66,7 @@ pub(super) fn normalize(statement: &mut Statement) {
     let _: ControlFlow<()> = statement.visit(&mut PreserveNames);
     let _: ControlFlow<()> = visit_expressions_mut(statement, |expr| {
         normalize_map_access(expr);
+        normalize_quantile(expr);
         let Expr::Function(function) = expr else {
             return ControlFlow::Continue(());
         };
@@ -136,4 +139,55 @@ fn normalize_map_access(expression: &mut Expr) -> bool {
     }
     *expression = input;
     true
+}
+
+// Both spellings use inclusive linear interpolation; quantileExact's discrete
+// rank convention is deliberately not rewritten to this intent.
+fn normalize_quantile(expr: &mut Expr) {
+    let Expr::Function(function) = expr else {
+        return;
+    };
+    if function.name.0.len() != 1
+        || function.name.0[0].quote_style.is_some()
+        || !matches!(
+            function.name.0[0].value.to_ascii_lowercase().as_str(),
+            "quantile" | "quantileexactinclusive"
+        )
+        || function.filter.is_some()
+        || function.over.is_some()
+        || function.null_treatment.is_some()
+        || !function.within_group.is_empty()
+    {
+        return;
+    }
+    let (FunctionArguments::List(parameters), FunctionArguments::List(arguments)) =
+        (&function.parameters, &function.args)
+    else {
+        return;
+    };
+    if parameters.duplicate_treatment.is_some()
+        || arguments.duplicate_treatment.is_some()
+        || !parameters.clauses.is_empty()
+        || !arguments.clauses.is_empty()
+    {
+        return;
+    }
+    let (
+        [FunctionArg::Unnamed(FunctionArgExpr::Expr(q))],
+        [FunctionArg::Unnamed(FunctionArgExpr::Expr(value))],
+    ) = (parameters.args.as_slice(), arguments.args.as_slice())
+    else {
+        return;
+    };
+    let args = vec![
+        FunctionArg::Unnamed(FunctionArgExpr::Expr(value.clone())),
+        FunctionArg::Unnamed(FunctionArgExpr::Expr(q.clone())),
+    ];
+    function.name = ObjectName(vec![Ident::new("approx_percentile_cont")]);
+    function.parameters = FunctionArguments::None;
+    function.args = FunctionArguments::List(FunctionArgumentList {
+        duplicate_treatment: None,
+        clauses: vec![],
+        args,
+    });
 }
