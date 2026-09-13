@@ -2128,7 +2128,12 @@ fn realize_value_frequency_summary_input(
     _reduction: &Reduction,
     child: &Rc<QueryExpr>,
 ) -> PhysicalSummaryInputRuleResult {
-    if !matches!(family, SummaryFamilyType::Sketch(kind, _) if kind.algorithm() == &SketchAlgorithm::UnivMon)
+    // Frequency counts hash sample values as items but add one per observation.
+    // Using the sample as a weight would turn counts into sums and admit signed CMS updates.
+    if !matches!(family, SummaryFamilyType::Sketch(kind, _)
+        if kind.algorithm() == &SketchAlgorithm::UnivMon
+            || (matches!(intent, AggIntent::Count { .. })
+                && matches!(kind.algorithm(), SketchAlgorithm::Cms | SketchAlgorithm::CountSketch)))
     {
         return PhysicalSummaryInputRuleResult::NotApplicable;
     }
@@ -7979,7 +7984,7 @@ mod tests {
     }
 
     /// Issue #163, case 2: an aggregation operator explicitly invoked with
-    /// no `by(...)` (e.g. `count(hll_metric)`) realizes to `SummaryAgg {
+    /// no grouping keys realizes to `SummaryAgg {
     /// reduction: Reduce(vec![]), .. }` — byte-identical `by: []` to the
     /// previous test at the old `Vec<ColumnId>` shape; `reduction` is what
     /// tells them apart now.

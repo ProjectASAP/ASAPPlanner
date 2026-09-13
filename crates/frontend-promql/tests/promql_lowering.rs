@@ -371,12 +371,9 @@ fn count_over_rate_keeps_both_levels() {
         measures, child, ..
     } = &qe
     else {
-        panic!("expected outer Aggregate{{Cardinality}}, got {qe:?}");
+        panic!("expected outer Aggregate{{Count}}, got {qe:?}");
     };
-    assert!(matches!(
-        measures.as_slice(),
-        [AggIntent::Cardinality { .. }]
-    ));
+    assert!(matches!(measures.as_slice(), [AggIntent::Count { .. }]));
     assert!(matches!(
         child.as_ref(),
         QueryExpr::Aggregate { measures, .. } if matches!(measures.as_slice(), [AggIntent::Rate])
@@ -384,6 +381,32 @@ fn count_over_rate_keeps_both_levels() {
 }
 
 // ── count / cardinality ───────────────────────────────────────────────────────
+
+// Both selector fast paths and recursive vector expressions count rows, not values.
+#[test]
+fn count_never_lowers_to_distinct_sample_values() {
+    for query in [
+        "count(up)",
+        "count by (job) (up)",
+        "count without (instance) (up)",
+        "count(up + 1)",
+        "count(count_over_time(up[5m]))",
+        "count_over_time(up[5m])",
+    ] {
+        let tree = lower(query);
+        let intents = all_intents(&tree);
+        assert!(
+            intents.iter().any(|i| matches!(i, AggIntent::Count { .. })),
+            "{query}: {tree:?}"
+        );
+        assert!(
+            !intents
+                .iter()
+                .any(|i| matches!(i, AggIntent::Cardinality { .. })),
+            "{query}: {tree:?}"
+        );
+    }
+}
 
 #[test]
 fn count_over_time_is_count_intent() {
@@ -399,9 +422,9 @@ fn count_over_time_is_count_intent() {
 }
 
 #[test]
-fn outer_count_is_cardinality() {
+fn outer_count_counts_series() {
     // `count by (symbol) (count_over_time(...))`: inner per-series sample count
-    // over the window (label-preserving), outer cross-series cardinality grouped
+    // over the window (label-preserving), outer cross-series row count grouped
     // on a positional `Aggregate.by`. Leaf = [ts, value, symbol] → symbol = col 2.
     let qe = lower("count by (symbol) (count_over_time(financial_last_trade_price[5m]))");
     let QueryExpr::Aggregate {
@@ -414,16 +437,13 @@ fn outer_count_is_cardinality() {
         panic!("expected outer Aggregate grouped by symbol, got {qe:?}");
     };
     assert_eq!(reduction, &Reduction::by(vec![2]));
-    assert!(matches!(
-        measures.as_slice(),
-        [AggIntent::Cardinality { .. }]
-    ));
+    assert!(matches!(measures.as_slice(), [AggIntent::Count { .. }]));
     // Inner: Aggregate{Count} over TimeRange (per-series count_over_time).
     let QueryExpr::Aggregate {
         measures, child, ..
     } = child.as_ref()
     else {
-        panic!("expected Aggregate (count_over_time) under the cardinality, got {child:?}");
+        panic!("expected Aggregate (count_over_time) under the outer count, got {child:?}");
     };
     assert!(matches!(measures.as_slice(), [AggIntent::Count { .. }]));
     assert!(matches!(child.as_ref(), QueryExpr::TimeRange { .. }));

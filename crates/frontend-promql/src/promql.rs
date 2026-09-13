@@ -45,7 +45,7 @@
 //! | `info(v, [selector])` | `PromqlInfoEnrich{selector}` — label-enrichment join against the info metric(s); join keys resolved during post-ASAP binding (issue #84) |
 //! | `group` / `offset` / `@` / `info` | **rejected** — distinct semantics with no intent-algebra representation yet (`info` label-join → #84) |
 //! | `OUTER by (dims) (…)` | `Aggregate.reduction = Reduce(by = dims)` (generic `topk by`/`bottomk` grouping → `Sort.partition_by`) |
-//! | `count by (d) (…)` | `Aggregate{[Cardinality], …}` |
+//! | `count by (d) (…)` | `Aggregate{[Count], …}` |
 //! | `group(v)` / `count_values("l", v)` | `Aggregate{[Group]}` (constant 1) / `Aggregate{[CountValues{l}]}` (group-by-value + count, new label `l`) — issue #49 |
 //! | `limitk(k, v)` / `limit_ratio(r, v)` | `PromqlSeriesSample{LimitK(k) \| LimitRatio(r)}` — series-sampling selection, whole series kept unchanged (issue #86) |
 //! | `topk(k, count_over_time(…))` / `topk(k, sum_over_time(…))` | `Aggregate{[TopK{k}]}` (heavy-hitter intent) over the explicit inner `Aggregate{[Count/Sum]}` |
@@ -590,14 +590,7 @@ fn build_over_subtree(outer: Outer, keys: Vec<ColumnRef>, child: Unresolved) -> 
         // `walk_aggregate` always passes a real aggregator; `None` can't occur.
         Outer::None => child,
         Outer::Plain(intent) => outer_aggregate(keys, outer_intent(&intent), child),
-        Outer::Count => outer_aggregate(
-            keys,
-            AggIntent::Cardinality {
-                col: None,
-                accuracy: current_accuracy(),
-            },
-            child,
-        ),
+        Outer::Count => outer_aggregate(keys, count(), child),
         Outer::CountValues { label } => {
             outer_aggregate(keys, AggIntent::CountValues { label }, child)
         }
@@ -1448,11 +1441,11 @@ fn build(inner: Inner, keys: Vec<ColumnRef>, outer: Outer) -> Result<Unresolved>
             }
         }),
         Outer::Count => Ok(match &inner.func {
-            None => windowed_aggregate(inner, keys, cardinality()),
+            None => windowed_aggregate(inner, keys, count()),
             Some(f) => {
                 let inner_i = inner_intent(f);
                 let inner_agg = windowed_aggregate(inner, vec![], inner_i);
-                outer_aggregate(keys, cardinality(), inner_agg)
+                outer_aggregate(keys, count(), inner_agg)
             }
         }),
         Outer::CountValues { label } => Ok(match &inner.func {
@@ -1648,11 +1641,9 @@ fn filtered_source(metric: String, matchers: Vec<Unresolved>, shift: TimeShift) 
     }
 }
 
-/// `count(v)` / `count by (…) (v)` — SQL `COUNT(DISTINCT col)`'s PromQL
-/// counterpart, over the (always implicit) sample value.
-fn cardinality() -> AggIntent<ColumnRef> {
-    AggIntent::Cardinality {
-        col: None,
+/// Count vector elements regardless of their sample values.
+fn count() -> AggIntent<ColumnRef> {
+    AggIntent::Count {
         accuracy: current_accuracy(),
     }
 }
