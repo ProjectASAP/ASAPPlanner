@@ -13,10 +13,10 @@ pub enum ExactKind {
     Sum,
     /// Exact count accumulator (mergeable by addition).
     Count,
-    /// Exact min/max accumulator (mergeable by comparison).
-    MinMax,
-    /// Exact minimum, distinct from the legacy maximum accumulator.
+    /// Exact minimum accumulator (mergeable by comparison).
     Min,
+    /// Exact maximum accumulator (mergeable by comparison).
+    Max,
     /// Exact increase accumulator (counter-reset-aware delta).
     Increase,
     /// Rate accumulator (increase / time window duration).
@@ -33,9 +33,8 @@ pub enum ExactKind {
 pub enum ExactParams {
     Sum,
     Count,
-    MinMax,
-    /// Exact minimum, distinct from the legacy maximum accumulator.
     Min,
+    Max,
     Increase,
     Rate,
     IRate,

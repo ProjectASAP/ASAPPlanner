@@ -261,7 +261,7 @@ fn every_exact_accumulator_is_finalized_before_an_outer_sketch() {
                 AggIntent::Max { col: None },
                 Rc::new(metric_scan(&["zone"])),
             ),
-            ExactKind::MinMax,
+            ExactKind::Max,
         ),
         (
             per_entity(
@@ -616,8 +616,8 @@ fn readout_under_maintenance_is_rejected_at_construction() {
         expr: SummaryExpr::SummaryAgg {
             child: post,
             family: SummaryFamilyType::ExactAggregate(
-                ExactKind::MinMax,
-                asap_types::post_asap::ExactParams::MinMax,
+                ExactKind::Max,
+                asap_types::post_asap::ExactParams::Max,
             ),
             input: SummaryUpdate::column(asap_types::pre_asap::ColumnRef::SampleValue),
             reduction: Reduction::by(vec![]),

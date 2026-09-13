@@ -21,7 +21,7 @@ pub(crate) fn function_rules(intent: &AggIntent) -> Option<FunctionRules> {
         ),
         AggIntent::Max { .. } => (
             CompositionOperator::ExactExtremum,
-            Some((ExactKind::MinMax, ExactParams::MinMax)),
+            Some((ExactKind::Max, ExactParams::Max)),
         ),
         AggIntent::Avg { .. } => (CompositionOperator::ExactAverage, None),
         AggIntent::Rate => (

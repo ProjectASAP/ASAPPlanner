@@ -143,7 +143,7 @@ fn bindable_grouped_aggregate(
 /// reasoning behind each arm. `None` for any intent this module does not
 /// (yet) know a correct combinator for — including every intent
 /// `agg_is_mergeable` permits but this module doesn't specifically handle
-/// (`Rate`, and everything outside the `Sum`/`Count`/`MinMax`/`Increase`
+/// (`Rate`, and everything outside the `Sum`/`Count`/`Min`/`Max`/`Increase`
 /// vocabulary `agg_is_mergeable`'s own doc names) — so `is_legal_rollup_source`
 /// (which calls this) is *strictly narrower* than `agg_is_mergeable` alone,
 /// deliberately: `agg_is_mergeable` answers "does *some* partial-state merge
