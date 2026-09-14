@@ -2193,6 +2193,8 @@ pub enum AnalyticalCostError {
     UnsupportedCandidate,
     #[error("query operator has no physical implementation in the analytical model")]
     UnsupportedQueryOperator,
+    #[error("multi-measure per-entity aggregates have no physical implementation; lower each measure separately")]
+    UnsupportedMultiMeasurePerEntity,
     #[error("inconsistent operator statistics: {0}")]
     InconsistentOperatorStatistics(&'static str),
     #[error("summary operation {0} has no lifecycle-aware cost formula")]

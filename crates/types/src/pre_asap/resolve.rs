@@ -609,6 +609,65 @@ mod tests {
         BinaryOpKind, QueryExpr, Source, VectorMatch, VectorMatchKind,
     };
 
+    /// Parent expressions can resolve every named per-entity measure after binding.
+    #[test]
+    fn resolves_multiple_per_entity_measure_outputs() {
+        use crate::pre_asap::query_expr::ProjectItem;
+        let aggregate = QueryExpr::Aggregate {
+            reduction: Reduction::PerEntity,
+            measures: vec![
+                AggIntent::Sum {
+                    col: Some(ColumnRef::SampleValue),
+                },
+                AggIntent::Count {
+                    accuracy: crate::types::AccuracyTarget::Exact,
+                },
+            ],
+            output_names: vec!["total".into(), "samples".into()],
+            having: None,
+            child: Rc::new(QueryExpr::Scan {
+                source: Source::TimeSeries {
+                    metric: "latency".into(),
+                },
+                predicates: vec![],
+                schema: Some(crate::pre_asap::schema::Schema::new(vec![
+                    crate::pre_asap::schema::Column::new(
+                        "value",
+                        crate::pre_asap::schema::DataType::Float64,
+                        false,
+                    ),
+                ])),
+            }),
+        };
+        let query = QueryExpr::Project {
+            cols: vec![
+                ProjectItem {
+                    alias: None,
+                    expr: QueryExpr::Column(ColumnRef::Named("total".into())),
+                },
+                ProjectItem {
+                    alias: None,
+                    expr: QueryExpr::Column(ColumnRef::Named("samples".into())),
+                },
+            ],
+            qualifier: None,
+            child: Rc::new(aggregate),
+        };
+        let output = resolve_root(&query).unwrap().output_schema().unwrap();
+        assert_eq!(
+            output
+                .columns
+                .iter()
+                .map(|c| c.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["total", "samples"]
+        );
+        assert!(output
+            .columns
+            .iter()
+            .all(|c| c.dtype == crate::pre_asap::schema::DataType::Float64));
+    }
+
     /// `resolve_root` over a `BinaryOp { <vector>, PromqlScalarBridge, vector_match }`
     /// (issue #220): the bridged scalar operand resolves through the same
     /// generic walk as every other node (its `Literal` child has no
