@@ -207,8 +207,14 @@ mod tests {
     /// registers back as `Date32` — the documented narrowing.
     #[test]
     fn both_arrow_date_widths_bridge_to_date() {
-        assert_eq!(arrow_to_dtype(&ArrowDataType::Date32).unwrap(), DataType::Date);
-        assert_eq!(arrow_to_dtype(&ArrowDataType::Date64).unwrap(), DataType::Date);
+        assert_eq!(
+            arrow_to_dtype(&ArrowDataType::Date32).unwrap(),
+            DataType::Date
+        );
+        assert_eq!(
+            arrow_to_dtype(&ArrowDataType::Date64).unwrap(),
+            DataType::Date
+        );
         assert_eq!(dtype_to_arrow(&DataType::Date), ArrowDataType::Date32);
     }
 
@@ -220,21 +226,33 @@ mod tests {
 
         assert_eq!(
             scalar_value_to_asap(&DfScalarValue::IntervalYearMonth(Some(14))).unwrap(),
-            ScalarValue::Interval { months: 14, days: 0, nanos: 0 }
+            ScalarValue::Interval {
+                months: 14,
+                days: 0,
+                nanos: 0
+            }
         );
         assert_eq!(
             scalar_value_to_asap(&DfScalarValue::IntervalDayTime(Some(IntervalDayTime::new(
                 30, 500
             ))))
             .unwrap(),
-            ScalarValue::Interval { months: 0, days: 30, nanos: 500_000_000 }
+            ScalarValue::Interval {
+                months: 0,
+                days: 30,
+                nanos: 500_000_000
+            }
         );
         assert_eq!(
             scalar_value_to_asap(&DfScalarValue::IntervalMonthDayNano(Some(
                 IntervalMonthDayNano::new(1, 2, 3)
             )))
             .unwrap(),
-            ScalarValue::Interval { months: 1, days: 2, nanos: 3 }
+            ScalarValue::Interval {
+                months: 1,
+                days: 2,
+                nanos: 3
+            }
         );
     }
 

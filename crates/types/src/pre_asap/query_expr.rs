@@ -1792,11 +1792,17 @@ mod tests {
         };
 
         assert_eq!(
-            shift(0, ArithmeticOpKind::Add).scalar_type(&schema).unwrap().0,
+            shift(0, ArithmeticOpKind::Add)
+                .scalar_type(&schema)
+                .unwrap()
+                .0,
             DataType::Timestamp
         );
         assert_eq!(
-            shift(1, ArithmeticOpKind::Sub).scalar_type(&schema).unwrap().0,
+            shift(1, ArithmeticOpKind::Sub)
+                .scalar_type(&schema)
+                .unwrap()
+                .0,
             DataType::Date
         );
         assert_eq!(
