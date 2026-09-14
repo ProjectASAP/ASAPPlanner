@@ -590,13 +590,7 @@ fn build_over_subtree(outer: Outer, keys: Vec<ColumnRef>, child: Unresolved) -> 
         // `walk_aggregate` always passes a real aggregator; `None` can't occur.
         Outer::None => child,
         Outer::Plain(intent) => outer_aggregate(keys, outer_intent(&intent), child),
-        Outer::Count => outer_aggregate(
-            keys,
-            AggIntent::Count {
-                accuracy: current_accuracy(),
-            },
-            child,
-        ),
+        Outer::Count => outer_aggregate(keys, count(), child),
         Outer::CountValues { label } => {
             outer_aggregate(keys, AggIntent::CountValues { label }, child)
         }
@@ -737,7 +731,7 @@ fn walk_histogram_quantiles(call: &Call) -> Result<Unresolved> {
     let sketchable = histogram_arg_is_sketchable(vec_expr);
     let branches = (2..call.args.args.len())
         .map(|i| {
-            let phi = quantile_param(num_arg(call, i)?)?;
+            let phi = bounded_quantile_param(num_arg(call, i)?)?;
             let intent = if sketchable {
                 AggIntent::Quantile {
                     col: None,
@@ -1447,23 +1441,11 @@ fn build(inner: Inner, keys: Vec<ColumnRef>, outer: Outer) -> Result<Unresolved>
             }
         }),
         Outer::Count => Ok(match &inner.func {
-            None => windowed_aggregate(
-                inner,
-                keys,
-                AggIntent::Count {
-                    accuracy: current_accuracy(),
-                },
-            ),
+            None => windowed_aggregate(inner, keys, count()),
             Some(f) => {
                 let inner_i = inner_intent(f);
                 let inner_agg = windowed_aggregate(inner, vec![], inner_i);
-                outer_aggregate(
-                    keys,
-                    AggIntent::Count {
-                        accuracy: current_accuracy(),
-                    },
-                    inner_agg,
-                )
+                outer_aggregate(keys, count(), inner_agg)
             }
         }),
         Outer::CountValues { label } => Ok(match &inner.func {
@@ -1656,6 +1638,13 @@ fn filtered_source(metric: String, matchers: Vec<Unresolved>, shift: TimeShift) 
             shift,
             child: Rc::new(scan),
         }
+    }
+}
+
+/// Count vector elements regardless of their sample values.
+fn count() -> AggIntent<ColumnRef> {
+    AggIntent::Count {
+        accuracy: current_accuracy(),
     }
 }
 
@@ -2021,10 +2010,14 @@ fn ratio_param(agg: &AggregateExpr) -> Result<f64> {
     Ok(r.clamp(-1.0, 1.0))
 }
 
-/// Quantile φ — must be a finite value in `[0, 1]`. Rejects NaN/∞ and
-/// out-of-range φ (which would otherwise propagate into a bogus intent and
-/// output-column name like `quantile_NaN`).
+/// Preserve the full Prometheus quantile parameter domain, including special values.
 fn quantile_param(q: f64) -> Result<f64> {
+    // Prometheus returns NaN/-Inf/+Inf for these parameters at execution time.
+    Ok(q)
+}
+
+// The non-standard histogram_quantiles extension keeps its bounded label contract.
+fn bounded_quantile_param(q: f64) -> Result<f64> {
     if q.is_finite() && (0.0..=1.0).contains(&q) {
         Ok(q)
     } else {

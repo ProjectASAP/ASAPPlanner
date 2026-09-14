@@ -10,12 +10,13 @@ use std::rc::Rc;
 
 use asap_aware_mapping::accuracy::{
     AccuracyEvidenceProvider, DefaultAccuracyModel, EqualSplitAllocator, PropagationStats,
+    QuantileInputDomain,
 };
 use asap_aware_mapping::cost_model::DefaultCostModel;
 use asap_aware_mapping::replacement::{keep_pre_asap, ImplementError};
 use asap_aware_mapping::{
-    search_workload, Replacement, ReplacementStrategy, ReplacementSubDAG, SketchAlgorithmStrategy,
-    TargetSubDAG,
+    search_workload, search_workload_with_targets, AccuracyModel, Replacement, ReplacementStrategy,
+    ReplacementSubDAG, SketchAlgorithmStrategy, TargetSubDAG,
 };
 use asap_frontend_promql::lower_promql;
 use asap_types::post_asap::{
@@ -446,6 +447,66 @@ fn promql_binary_arithmetic_never_relabels_approximate_children_as_exact() {
     assert!(
         root.guarantee.is_none(),
         "unknown composed error must fail closed"
+    );
+}
+
+#[test]
+fn ddsketch_quantile_ratio_meets_the_shared_relative_error_target() {
+    // Enforced finite, positive, nonempty windows justify both DDSketch
+    // interpolation bounds and a nonzero denominator. Shared state does not
+    // require independence for the deterministic ratio bound.
+    let target = AccuracyTarget::EpsilonDelta {
+        epsilon: 0.01,
+        delta: 0.01,
+    };
+    let query = Rc::new(
+        lower_promql(
+            "quantile_over_time(0.9, data[5m]) / quantile_over_time(0.5, data[5m])",
+            target.clone(),
+        )
+        .expect("lowering failed"),
+    );
+
+    let evidence = FixtureQuantileDomain {
+        lower: 1.0,
+        upper: 100.0,
+    };
+    let space = search_workload_with_targets(
+        vec![("ratio", query, Some(target.clone()))],
+        &asap_aware_mapping::replacement::default_strategies_with_evidence(
+            &DefaultCostModel,
+            &evidence,
+        ),
+        &DefaultAccuracyModel,
+    );
+    let root = &space.roots[0].1;
+    let selected = space.global_selection(&DefaultCostModel);
+    let chosen = selected
+        .for_target(root)
+        .and_then(|selection| selection.chosen.as_ref())
+        .expect("the certified DDSketch ratio should be selectable");
+    let Replacement::Summary(node) = &chosen.replacement else {
+        panic!("expected a summary candidate")
+    };
+    let guarantee = node.guarantee.as_ref().expect("ratio guarantee");
+    assert_eq!(guarantee.failure_probability.evaluate(), Some(0.0));
+    assert!(
+        DefaultAccuracyModel.satisfies(guarantee, &target),
+        "ratio guarantee should satisfy the requested target: {guarantee:?}"
+    );
+
+    let shared =
+        asap_types::post_asap::share_common_summary_subtrees(vec![("ratio", node.clone())]);
+    let SummaryExpr::BinaryOp { lhs, rhs, .. } = &shared[0].1.expr else {
+        panic!("expected binary ratio")
+    };
+    let producer = |readout: &Rc<SummaryNode>| match &readout.expr {
+        SummaryExpr::SummaryEstimate { summary_input, .. } => Rc::clone(summary_input),
+        other => panic!("expected DDSketch readout, got {other:?}"),
+    };
+    assert!(
+        Rc::ptr_eq(&producer(lhs), &producer(rhs)),
+        "the two quantile readouts should share one DDSketch producer"
     );
 }
 
@@ -979,5 +1040,193 @@ fn exact_binary_maintenance_has_explicit_timing_and_legacy_wire_default() {
         }
         let restored: ExecutableOperatorPayload = serde_json::from_value(wire).unwrap();
         assert_eq!(&restored, payload);
+    }
+}
+
+/// A workload accuracy target is not evidence about signs, zeros or finite values.
+#[test]
+fn ddsketch_ratio_without_domain_proof_stays_exact() {
+    let pre = lower_promql(
+        "quantile_over_time(0.9, data[5m]) / quantile_over_time(0.5, data[5m])",
+        AccuracyTarget::Epsilon(0.01),
+    )
+    .unwrap();
+    let root = realize(&pre).unwrap();
+    assert!(
+        matches!(root.expr, SummaryExpr::KeepPreAsap(_)),
+        "unproven ratio was certified: {root:?}"
+    );
+    let space = search_workload_with_targets(
+        vec![(
+            "unproven",
+            Rc::new(pre),
+            Some(AccuracyTarget::Epsilon(0.01)),
+        )],
+        &asap_aware_mapping::default_strategies(),
+        &DefaultAccuracyModel,
+    );
+    let selection = space.global_selection(&DefaultCostModel);
+    if let Some(chosen) = selection
+        .for_target(&space.roots[0].1)
+        .and_then(|s| s.chosen.as_ref())
+    {
+        if let Replacement::Summary(node) = &chosen.replacement {
+            assert!(
+                node.guarantee.as_ref().is_some_and(|g| g.is_exact()),
+                "workload search selected an unproven approximate ratio"
+            );
+        }
+    }
+}
+
+struct FixtureQuantileDomain {
+    lower: f64,
+    upper: f64,
+}
+impl AccuracyEvidenceProvider for FixtureQuantileDomain {
+    fn quantile_input_domain(&self, _: &QueryExpr) -> Option<QuantileInputDomain> {
+        Some(QuantileInputDomain {
+            lower: self.lower,
+            upper: self.upper,
+            max_samples: 1000,
+            contract: "enforced nonempty finite fixture window".into(),
+        })
+    }
+}
+
+/// Unknown, zero, mixed-sign, nonfinite and zero-mapped domains cannot certify a ratio.
+#[test]
+fn ddsketch_ratio_rejects_unsafe_domains() {
+    for (lower, upper) in [
+        (0., 0.),
+        (-1., 1.001),
+        (0., 100.),
+        (f64::NAN, 100.),
+        (1., f64::INFINITY),
+        (2., 1.),
+        (f64::MIN_POSITIVE / 2., f64::MIN_POSITIVE / 2.),
+    ] {
+        let evidence = FixtureQuantileDomain { lower, upper };
+        let pre = Rc::new(
+            lower_promql(
+                "quantile_over_time(0.9, data[5m]) / quantile_over_time(0.5, data[5m])",
+                AccuracyTarget::Epsilon(0.01),
+            )
+            .unwrap(),
+        );
+        let strategy = SketchAlgorithmStrategy::with_models_and_evidence(
+            &DefaultCostModel,
+            &DefaultAccuracyModel,
+            &EqualSplitAllocator,
+            &evidence,
+        );
+        let replacements = strategy.replacements(&TargetSubDAG::new(&pre));
+        assert!(
+            replacements.is_empty(),
+            "unsafe domain [{lower}, {upper}] got {replacements:?}"
+        );
+    }
+}
+
+/// The committed planner alpha is exercised against the pinned sketch implementation.
+#[test]
+fn ddsketch_ratio_bound_holds_for_signed_pinned_sketch_readouts() {
+    for sign in [-1., 1.] {
+        let evidence = FixtureQuantileDomain {
+            lower: if sign < 0. { -100. } else { 1. },
+            upper: if sign < 0. { -1. } else { 100. },
+        };
+        let pre = Rc::new(
+            lower_promql(
+                "quantile_over_time(0.9, data[5m]) / quantile_over_time(0.5, data[5m])",
+                AccuracyTarget::Epsilon(0.01),
+            )
+            .unwrap(),
+        );
+        let strategy = SketchAlgorithmStrategy::with_models_and_evidence(
+            &DefaultCostModel,
+            &DefaultAccuracyModel,
+            &EqualSplitAllocator,
+            &evidence,
+        );
+        let candidates = strategy.replacements(&TargetSubDAG::new(&pre));
+        let Replacement::Summary(node) = &candidates[0].replacement else {
+            panic!("summary")
+        };
+        let SummaryExpr::BinaryOp { lhs, rhs, .. } = &node.expr else {
+            panic!("ratio")
+        };
+        let alpha = |node: &SummaryNode| {
+            let SummaryExpr::SummaryEstimate { summary_input, .. } = &node.expr else {
+                panic!("readout")
+            };
+            let SummaryExpr::SummaryAgg {
+                family: SummaryFamilyType::Sketch(kind, _),
+                ..
+            } = &summary_input.expr
+            else {
+                panic!("sketch")
+            };
+            let SketchParams::DDSketch { alpha } = kind.params() else {
+                panic!("DDSketch")
+            };
+            *alpha
+        };
+        assert_eq!(alpha(lhs), alpha(rhs));
+        let bound = node.guarantee.as_ref().unwrap().bound.evaluate().unwrap();
+        for values in [
+            vec![sign; 30],
+            (1..=100).map(|i| sign * i as f64).collect(),
+            vec![sign, sign, sign, sign * 30., sign * 100.],
+        ] {
+            let mut sorted = values.clone();
+            sorted.sort_by(f64::total_cmp);
+            let exact = |q: f64| {
+                let r = q * (sorted.len() - 1) as f64;
+                sorted[r.floor() as usize] * (1. - r.fract())
+                    + sorted[r.ceil() as usize] * r.fract()
+            };
+            let mut sketch = asap_sketchlib::DdSketch::new(alpha(lhs));
+            for v in values {
+                sketch.try_update(v).unwrap();
+            }
+            let want = exact(0.9) / exact(0.5);
+            let got = sketch.quantile_interpolated(0.9).unwrap()
+                / sketch.quantile_interpolated(0.5).unwrap();
+            assert!((got - want).abs() / want.abs() <= bound + 1e-12);
+        }
+    }
+}
+
+/// Empty or overlarge population contracts cannot promise a supported readout.
+#[test]
+fn ddsketch_ratio_requires_a_supported_population_size() {
+    struct PopulationEvidence(u64);
+    impl AccuracyEvidenceProvider for PopulationEvidence {
+        fn quantile_input_domain(&self, _: &QueryExpr) -> Option<QuantileInputDomain> {
+            Some(QuantileInputDomain {
+                lower: 1.,
+                upper: 10.,
+                max_samples: self.0,
+                contract: "enforced fixture count and range".into(),
+            })
+        }
+    }
+    let pre = Rc::new(
+        lower_promql(
+            "quantile_over_time(0.9, data[5m]) / quantile_over_time(0.5, data[5m])",
+            AccuracyTarget::Epsilon(0.01),
+        )
+        .unwrap(),
+    );
+    for count in [0, (1u64 << 53) + 1] {
+        let evidence = PopulationEvidence(count);
+        let strategy = SketchAlgorithmStrategy::with_models_and_evidence(
+            &DefaultCostModel,
+            &DefaultAccuracyModel,
+            &EqualSplitAllocator,
+            &evidence,
+        );
+        assert!(strategy.replacements(&TargetSubDAG::new(&pre)).is_empty());
     }
 }

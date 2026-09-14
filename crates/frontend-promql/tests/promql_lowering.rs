@@ -371,7 +371,7 @@ fn count_over_rate_keeps_both_levels() {
         measures, child, ..
     } = &qe
     else {
-        panic!("expected outer Aggregate{{Cardinality}}, got {qe:?}");
+        panic!("expected outer Aggregate{{Count}}, got {qe:?}");
     };
     assert!(matches!(measures.as_slice(), [AggIntent::Count { .. }]));
     assert!(matches!(
@@ -431,6 +431,32 @@ fn count_over_distinct_over_time_preserves_both_aggregates() {
 
 // ── count / cardinality ───────────────────────────────────────────────────────
 
+// Both selector fast paths and recursive vector expressions count rows, not values.
+#[test]
+fn count_never_lowers_to_distinct_sample_values() {
+    for query in [
+        "count(up)",
+        "count by (job) (up)",
+        "count without (instance) (up)",
+        "count(up + 1)",
+        "count(count_over_time(up[5m]))",
+        "count_over_time(up[5m])",
+    ] {
+        let tree = lower(query);
+        let intents = all_intents(&tree);
+        assert!(
+            intents.iter().any(|i| matches!(i, AggIntent::Count { .. })),
+            "{query}: {tree:?}"
+        );
+        assert!(
+            !intents
+                .iter()
+                .any(|i| matches!(i, AggIntent::Cardinality { .. })),
+            "{query}: {tree:?}"
+        );
+    }
+}
+
 #[test]
 fn count_over_time_is_count_intent() {
     let qe = lower("count_over_time(m[5m])");
@@ -445,9 +471,9 @@ fn count_over_time_is_count_intent() {
 }
 
 #[test]
-fn outer_count_counts_vector_elements() {
+fn outer_count_counts_series() {
     // `count by (symbol) (count_over_time(...))`: inner per-series sample count
-    // over the window (label-preserving), outer cross-series cardinality grouped
+    // over the window (label-preserving), outer cross-series row count grouped
     // on a positional `Aggregate.by`. Leaf = [ts, value, symbol] → symbol = col 2.
     let qe = lower("count by (symbol) (count_over_time(financial_last_trade_price[5m]))");
     let QueryExpr::Aggregate {
@@ -466,7 +492,7 @@ fn outer_count_counts_vector_elements() {
         measures, child, ..
     } = child.as_ref()
     else {
-        panic!("expected Aggregate (count_over_time) under the cardinality, got {child:?}");
+        panic!("expected Aggregate (count_over_time) under the outer count, got {child:?}");
     };
     assert!(matches!(measures.as_slice(), [AggIntent::Count { .. }]));
     assert!(matches!(child.as_ref(), QueryExpr::TimeRange { .. }));
@@ -778,15 +804,18 @@ fn fractional_or_negative_topk_k_is_rejected() {
 }
 
 #[test]
-fn out_of_range_quantile_phi_is_rejected() {
-    // φ outside [0,1] would otherwise yield a bogus `quantile_1_5` column.
-    assert!(lower_promql("quantile(1.5, up)", AccuracyTarget::Exact).is_err());
-    assert!(lower_promql("quantile_over_time(1.5, m[5m])", AccuracyTarget::Exact).is_err());
-    assert!(lower_promql(
+fn out_of_range_quantile_phi_is_accepted() {
+    // Prometheus defines out-of-range phi results; lowering must preserve it.
+    for query in [
+        "quantile(1.5, up)",
+        "quantile_over_time(1.5, m[5m])",
         "histogram_quantile(2.0, rate(b[5m]))",
-        AccuracyTarget::Exact
-    )
-    .is_err());
+    ] {
+        assert!(
+            lower_promql(query, AccuracyTarget::Exact).is_ok(),
+            "{query}"
+        );
+    }
 }
 
 #[test]

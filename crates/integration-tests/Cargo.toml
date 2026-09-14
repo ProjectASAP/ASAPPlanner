@@ -10,6 +10,6 @@ asap-frontend-sql = { path = "../frontend-sql" }
 asap-aware-mapping = { path = "../asap-aware-mapping" }
 
 [dev-dependencies]
-asap_sketchlib = { git = "https://github.com/ProjectASAP/asap_sketchlib", rev = "da3635a80f8f854d47b772d49d5a9e5fb6927d8e" }
+asap_sketchlib = { workspace = true }
 serde_json = "1"
 tokio = { version = "1", features = ["rt", "macros", "rt-multi-thread"] }

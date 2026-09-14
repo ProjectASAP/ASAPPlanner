@@ -12,3 +12,6 @@ members = [
 ]
 exclude = ["crates/metricsql-parser-vendored"]
 resolver = "2"
+
+[workspace.dependencies]
+asap_sketchlib = { git = "https://github.com/ProjectASAP/asap_sketchlib", rev = "da3635a80f8f854d47b772d49d5a9e5fb6927d8e" }

@@ -77,11 +77,51 @@ use asap_types::post_asap::{
 use asap_types::pre_asap::AggIntent;
 use asap_types::types::AccuracyTarget;
 
+/// An enforced domain for every sample of a direct quantile operand, in every
+/// evaluation window. The provider promises a nonempty population containing
+/// only finite values in this interval. Sampled min/max statistics are not a
+/// proof: the contract must be enforced by the source or execution layer.
+#[derive(Debug, Clone, PartialEq)]
+pub struct QuantileInputDomain {
+    pub lower: f64,
+    pub upper: f64,
+    /// Upper bound on samples per evaluation, matching the pinned readout's
+    /// exact Float64 rank limit. The population must also be nonempty.
+    pub max_samples: u64,
+    pub contract: String,
+}
+
+impl QuantileInputDomain {
+    pub(crate) fn supports_ddsketch(&self, alpha: f64) -> bool {
+        if !alpha.is_finite()
+            || alpha <= 0.0
+            || alpha >= 1.0
+            || !self.lower.is_finite()
+            || !self.upper.is_finite()
+            || self.lower > self.upper
+            || self.max_samples == 0
+            || self.max_samples > (1u64 << 53)
+            || self.contract.trim().is_empty()
+        {
+            return false;
+        }
+        let (min, max) = asap_sketchlib::sketches::ddsketch::ddsketch_indexable_bounds(alpha);
+        // Same-sign interpolation preserves relative error. Zero alone is
+        // exact; an interval touching zero also admits tiny zero-mapped values.
+        (self.lower >= min && self.upper <= max)
+            || (self.upper <= -min && self.lower >= -max)
+            || (self.lower == 0.0 && self.upper == 0.0)
+    }
+}
+
 /// Statistics a propagation rule may consult. Every field is optional and
 /// defaults to "unknown": a rule that needs a missing statistic emits a
 /// [`BoundExpr::Unknown`] leaf (or rejects) rather than guessing.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct PropagationStats {
+    /// Certified finite ranges for the true numerator and denominator values.
+    /// Quantile ratios obtain these from their enforced input domains.
+    pub division_operand_domains: Option<[QuantileInputDomain; 2]>,
     /// Provenance for supplied evidence (source, observation identity, etc.).
     pub evidence_provenance: Vec<GuaranteeSource>,
     /// Whether every input value is known to be non-negative — required by
@@ -113,6 +153,15 @@ pub struct PropagationStats {
 
 /// Supplies typed planning-time evidence required by propagation rules.
 pub trait AccuracyEvidenceProvider {
+    /// Proof scoped to this complete quantile expression, including its source,
+    /// filters, grouping and window. `None` means unknown, including emptiness.
+    fn quantile_input_domain(
+        &self,
+        _operand: &asap_types::pre_asap::query_expr::QueryExpr,
+    ) -> Option<QuantileInputDomain> {
+        None
+    }
+
     fn propagation_stats(
         &self,
         _op: &CompositionOperator,
@@ -565,6 +614,128 @@ impl DefaultAccuracyModel {
             provenance,
         })
     }
+
+    /// Exact division of two relative-value estimates. If the numerator is
+    /// within `a` and the denominator within `b`, their ratio is within
+    /// `(a + b) / (1 - b)`. DDSketch supplies those deterministic bounds.
+    fn exact_division(
+        op: &CompositionOperator,
+        inputs: &[ResultGuarantee],
+        stats: &PropagationStats,
+    ) -> Result<ResultGuarantee, AccuracyError> {
+        let unsupported = |reason: String| AccuracyError::UnsupportedComposition {
+            operator: op.clone(),
+            input_metrics: inputs.iter().map(|g| g.metric).collect(),
+            local_metric: None,
+            reason,
+        };
+        if inputs.len() != 2
+            || inputs
+                .iter()
+                .any(|input| input.metric != ErrorMetric::RelativeValue)
+        {
+            return Err(unsupported(
+                "division needs exactly two RelativeValue guarantees".into(),
+            ));
+        }
+        let Some(numerator) = inputs[0].bound.evaluate() else {
+            return Err(unsupported(
+                "numerator relative bound is unavailable".into(),
+            ));
+        };
+        let Some(denominator) = inputs[1].bound.evaluate() else {
+            return Err(unsupported(
+                "denominator relative bound is unavailable".into(),
+            ));
+        };
+        if !(numerator.is_finite()
+            && denominator.is_finite()
+            && numerator >= 0.0
+            && (0.0..1.0).contains(&denominator))
+        {
+            return Err(unsupported(
+                "division needs finite non-negative bounds and a denominator bound below one"
+                    .into(),
+            ));
+        }
+        let Some(domains) = &stats.division_operand_domains else {
+            return Err(unsupported(
+                "division needs finite operand domains and a nonzero denominator proof".into(),
+            ));
+        };
+        for domain in domains {
+            if !domain.lower.is_finite()
+                || !domain.upper.is_finite()
+                || domain.lower > domain.upper
+                || domain.contract.trim().is_empty()
+            {
+                return Err(unsupported("invalid division operand domain".into()));
+            }
+        }
+        if domains[1].lower <= 0.0 && domains[1].upper >= 0.0 {
+            return Err(unsupported("denominator domain includes zero".into()));
+        }
+        // Keep the true and perturbed quotients finite and out of the
+        // subnormal range, where Float64 division loses relative accuracy.
+        // A nonzero numerator interval touching zero cannot prove this.
+        let num = &domains[0];
+        if num.lower <= 0.0 && num.upper >= 0.0 && (num.lower != 0.0 || num.upper != 0.0) {
+            return Err(unsupported(
+                "numerator domain cannot exclude underflow near zero".into(),
+            ));
+        }
+        for n in [num.lower, num.upper] {
+            for d in [domains[1].lower, domains[1].upper] {
+                for nf in [1.0 - numerator, 1.0 + numerator] {
+                    for df in [1.0 - denominator, 1.0 + denominator] {
+                        let quotient = (n * nf) / (d * df);
+                        if !(n * nf).is_finite()
+                            || !(d * df).is_finite()
+                            || !quotient.is_finite()
+                            || (n != 0.0 && quotient.abs() < f64::MIN_POSITIVE)
+                        {
+                            return Err(unsupported(
+                                "division may overflow or underflow Float64".into(),
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+        Ok(ResultGuarantee {
+            metric: ErrorMetric::RelativeValue,
+            bound: BoundExpr::Constant {
+                value: (numerator + denominator) / (1.0 - denominator),
+            },
+            failure_probability: ProbabilityExpr::UnionBound {
+                terms: inputs
+                    .iter()
+                    .map(|input| input.failure_probability.clone())
+                    .collect(),
+            },
+            provenance: inputs
+                .iter()
+                .enumerate()
+                .map(|(input_index, guarantee)| GuaranteeSource::ChildGuarantee {
+                    input_index,
+                    guarantee: Box::new(guarantee.clone()),
+                })
+                .chain(domains.iter().enumerate().map(|(input_index, domain)| {
+                    GuaranteeSource::InputValueDomain {
+                        input_index,
+                        lower: domain.lower,
+                        upper: domain.upper,
+                        max_samples: domain.max_samples,
+                        contract: domain.contract.clone(),
+                    }
+                }))
+                .chain(std::iter::once(GuaranteeSource::CompositionStep {
+                    operator: op.clone(),
+                    rule: "relative_division".into(),
+                }))
+                .collect(),
+        })
+    }
 }
 
 /// `stats.input_row_count` as a bound factor, or an `Unknown` leaf (recorded
@@ -809,6 +980,7 @@ impl AccuracyModel for DefaultAccuracyModel {
             CompositionOperator::ExactSum => Self::exact_sum(op, inputs, stats),
             CompositionOperator::ExactAverage => Self::exact_average(op, inputs, stats),
             CompositionOperator::ExactExtremum => Self::exact_extremum(op, inputs, stats),
+            CompositionOperator::ExactDivision => Self::exact_division(op, inputs, stats),
             CompositionOperator::CounterRate
             | CompositionOperator::InstantCounterRate
             | CompositionOperator::CounterIncrease => Err(unsupported(
@@ -1025,6 +1197,96 @@ mod tests {
             bound: BoundExpr::Constant { value: bound },
             failure_probability: ProbabilityExpr::Zero,
             provenance: vec![],
+        }
+    }
+
+    fn domain(lower: f64, upper: f64) -> QuantileInputDomain {
+        QuantileInputDomain {
+            lower,
+            upper,
+            max_samples: 1000,
+            contract: "enforced test population".into(),
+        }
+    }
+
+    /// Relative bounds alone do not establish that a quotient is defined.
+    #[test]
+    fn relative_division_requires_operand_domains() {
+        assert!(DefaultAccuracyModel
+            .propagate(
+                &CompositionOperator::ExactDivision,
+                &[rel(0.01), rel(0.01)],
+                None,
+                &PropagationStats::default()
+            )
+            .is_err());
+    }
+
+    /// The algebra works for either sign and records the domain contracts.
+    #[test]
+    fn relative_division_preserves_asymmetric_bound_and_domain_provenance() {
+        for denominator in [domain(1., 10.), domain(-10., -1.)] {
+            let stats = PropagationStats {
+                division_operand_domains: Some([domain(-20., -2.), denominator]),
+                ..Default::default()
+            };
+            let got = DefaultAccuracyModel
+                .propagate(
+                    &CompositionOperator::ExactDivision,
+                    &[rel(0.02), rel(0.03)],
+                    None,
+                    &stats,
+                )
+                .unwrap();
+            assert!((got.bound.evaluate().unwrap() - 0.05 / 0.97).abs() < 1e-14);
+            assert_eq!(got.failure_probability.evaluate(), Some(0.));
+            assert_eq!(
+                got.provenance
+                    .iter()
+                    .filter(|p| matches!(p, GuaranteeSource::InputValueDomain { .. }))
+                    .count(),
+                2
+            );
+        }
+    }
+
+    /// Zero, nonfinite and unrepresentable quotients fail closed even with a supplied range.
+    #[test]
+    fn relative_division_rejects_zero_special_and_extreme_domains() {
+        for domains in [
+            [domain(1., 2.), domain(0., 0.)],
+            [domain(1., 2.), domain(-1., 1.)],
+            [domain(f64::NAN, 2.), domain(1., 2.)],
+            [domain(1., 2.), domain(1., f64::INFINITY)],
+            [domain(1e250, 1e250), domain(1e-250, 1e-250)],
+            [domain(1e-250, 1e-250), domain(1e250, 1e250)],
+        ] {
+            let stats = PropagationStats {
+                division_operand_domains: Some(domains),
+                ..Default::default()
+            };
+            assert!(DefaultAccuracyModel
+                .propagate(
+                    &CompositionOperator::ExactDivision,
+                    &[rel(0.01), rel(0.01)],
+                    None,
+                    &stats
+                )
+                .is_err());
+        }
+        let stats = PropagationStats {
+            division_operand_domains: Some([domain(1., 2.), domain(1., 2.)]),
+            ..Default::default()
+        };
+        for bound in [1., f64::NAN, f64::INFINITY, -0.1] {
+            assert!(DefaultAccuracyModel
+                .propagate(
+                    &CompositionOperator::ExactDivision,
+                    &[rel(0.01), rel(bound)],
+                    None,
+                    &stats
+                )
+                .is_err());
         }
     }
 

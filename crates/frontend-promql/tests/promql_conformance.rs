@@ -328,7 +328,7 @@ fn sum_by_groups_via_positional_aggregate() {
 }
 
 #[test]
-fn count_counts_series() {
+fn count_is_row_count() {
     assert!(has(&ok("count(up)"), |i| matches!(
         i,
         AggIntent::Count { .. }
@@ -719,11 +719,7 @@ fn double_unary_negation_nests() {
 
 #[test]
 fn count_maps_to_count_and_inherits_accuracy() {
-    // PromQL counts vector elements, including series with identical values.
-    // The workload accuracy target is preserved on the Count intent:
-    // `Exact` stays exact (no silent HLL substitution); an approximate target is
-    // carried through for post-ASAP binding to honor. This pins the
-    // count mapping and its accuracy gating.
+    // Counts preserve the workload accuracy target without counting distinct values.
     let exact = lower_promql("count by (job) (up)", AccuracyTarget::Exact).unwrap();
     assert!(
         has(&exact, |i| matches!(
@@ -732,7 +728,7 @@ fn count_maps_to_count_and_inherits_accuracy() {
                 accuracy: AccuracyTarget::Exact
             }
         )),
-        "count→Count must stay Exact under AccuracyTarget::Exact, got {:?}",
+        "Count must stay Exact under AccuracyTarget::Exact, got {:?}",
         intents(&exact)
     );
 
@@ -744,7 +740,7 @@ fn count_maps_to_count_and_inherits_accuracy() {
                 accuracy: AccuracyTarget::Epsilon(e)
             } if (*e - 0.01).abs() < 1e-9
         )),
-        "count→Count must carry the approximate target, got {:?}",
+        "Count must carry the approximate target, got {:?}",
         intents(&approx)
     );
 }
