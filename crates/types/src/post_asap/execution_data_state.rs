@@ -153,6 +153,8 @@ impl ExecutionDataStateEdge {
 /// it expects, and so tests can assert the *reason* a plan was rejected.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum ExecutionDataStateError {
+    #[error("invalid maintained-population maintenance/readout contract")]
+    InvalidMaintainedPopulation,
     /// A query-time value (`SummaryEstimate` / read-time `ValueOperation` output)
     /// placed beneath a maintained summary — the one shape issue #171's
     /// data_state split exists to make unrepresentable.
@@ -196,6 +198,8 @@ pub enum ExecutionDataStateError {
     MaintenanceRowsAtRoot,
     #[error("unsupported maintenance binary schema or operator")]
     InvalidMaintenanceBinary,
+    #[error("checked division requires one valid guard on a read-time division operator")]
+    InvalidCheckedDivision,
     /// An `ExactOperation` whose input columns are not all `Plain` at its
     /// declared data_state.
     #[error("exact operator consumes non-plain column {column:?} ({dtype})")]
@@ -330,6 +334,18 @@ fn visit(
             timing,
             operator,
         } => {
+            if (operator.checked_relative_division && operator.checked_finite_division)
+                || (operator.checked_relative_division || operator.checked_finite_division)
+                    && (*timing != ExecutionTiming::ReadTime
+                        || !matches!(
+                            operator.kind,
+                            crate::pre_asap::BinaryOpKind::Arithmetic(
+                                crate::pre_asap::ArithmeticOpKind::Div
+                            )
+                        ))
+            {
+                return Err(ExecutionDataStateError::InvalidCheckedDivision);
+            }
             if *timing == ExecutionTiming::MaintenanceTime {
                 use crate::pre_asap::{BinaryOpKind, DataType};
                 if operator.vector_match.is_some()
@@ -462,6 +478,20 @@ fn visit(
             operation,
             timing,
         } => {
+            let valid_population = match operation {
+                ValueOperation::MaintainPopulation { population } => {
+                    *timing == ExecutionTiming::MaintenanceTime
+                        && matches!(&child.expr, SummaryExpr::KeepPreAsap(input) if population.matches_input(input))
+                }
+                ValueOperation::ReadPopulation { readout } => {
+                    *timing == ExecutionTiming::ReadTime
+                        && matches!(&child.expr, SummaryExpr::ValueOperation { operation: ValueOperation::MaintainPopulation { population }, timing: ExecutionTiming::MaintenanceTime, .. } if population.supports(readout))
+                }
+                _ => true,
+            };
+            if !valid_population {
+                return Err(ExecutionDataStateError::InvalidMaintainedPopulation);
+            }
             let required = match timing {
                 ExecutionTiming::MaintenanceTime => ExecutionDataState::MAINTENANCE_ROWS,
                 ExecutionTiming::ReadTime => ExecutionDataState::READ_ROWS,
@@ -471,7 +501,17 @@ fn visit(
                 || matches!(operation, ValueOperation::FinalizeExactAccumulator))
                 && s == ExecutionDataState::MAINTENANCE_SUMMARY
                 && is_exact_accumulator_state(&child.schema).is_ok();
-            if s != required && !exact_readout {
+            let population_readout = matches!(operation, ValueOperation::ReadPopulation { .. })
+                && *timing == ExecutionTiming::ReadTime
+                && matches!(
+                    &child.expr,
+                    SummaryExpr::ValueOperation {
+                        operation: ValueOperation::MaintainPopulation { .. },
+                        timing: ExecutionTiming::MaintenanceTime,
+                        ..
+                    }
+                );
+            if s != required && !exact_readout && !population_readout {
                 return Err(ExecutionDataStateError::IllegalChildDataState {
                     edge: ExecutionDataStateEdge::ValueOperationChild.describe(),
                     child: s,

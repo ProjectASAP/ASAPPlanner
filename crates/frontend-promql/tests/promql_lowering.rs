@@ -380,6 +380,55 @@ fn count_over_rate_keeps_both_levels() {
     ));
 }
 
+#[test]
+fn count_over_distinct_over_time_preserves_both_aggregates() {
+    // One series with window samples [1, 2] produces one distinct-count
+    // result (value 2). The outer count counts that one series, yielding 1.
+    for (query, reduction) in [
+        (
+            "count(distinct_over_time(unique_users[5m]))",
+            Reduction::by(vec![]),
+        ),
+        (
+            "count by (job) (distinct_over_time(unique_users[5m]))",
+            Reduction::by(vec![2]),
+        ),
+    ] {
+        let tree = lower(query);
+        let QueryExpr::Aggregate {
+            measures,
+            reduction: actual,
+            child,
+            ..
+        } = &tree
+        else {
+            panic!("expected outer Count: {tree:?}");
+        };
+        assert!(
+            matches!(measures.as_slice(), [AggIntent::Count { .. }]),
+            "{query}: {tree:?}"
+        );
+        assert_eq!(actual, &reduction, "{query}");
+        let QueryExpr::Aggregate {
+            measures,
+            reduction,
+            child,
+            ..
+        } = child.as_ref()
+        else {
+            panic!("expected inner per-series Cardinality: {tree:?}");
+        };
+        assert!(
+            matches!(measures.as_slice(), [AggIntent::Cardinality { .. }]),
+            "{query}: {tree:?}"
+        );
+        assert_eq!(reduction, &Reduction::PerEntity, "{query}");
+        assert!(
+            matches!(child.as_ref(), QueryExpr::TimeRange { range, .. } if range.as_secs() == 300)
+        );
+    }
+}
+
 // ── count / cardinality ───────────────────────────────────────────────────────
 
 // Both selector fast paths and recursive vector expressions count rows, not values.

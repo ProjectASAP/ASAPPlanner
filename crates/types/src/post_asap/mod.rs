@@ -32,6 +32,7 @@ pub mod executable_dag;
 pub mod execution_data_state;
 pub mod expr;
 pub mod guarantee;
+pub mod maintained_population;
 pub mod query_time;
 pub mod schema;
 pub mod sketch;

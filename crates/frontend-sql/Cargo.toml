@@ -16,6 +16,7 @@ datafusion = "43"
 serde_json = "1"
 
 [dev-dependencies]
+asap-aware-mapping = { path = "../asap-aware-mapping" }
 tokio = { version = "1", features = ["rt", "macros", "rt-multi-thread"] }
 # bgp_jan2024_workload corpus is sourced verbatim as YAML (ASAPQuery PR #561)
 # rather than transcribed into the flat .sql shape the other corpora use.

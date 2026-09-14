@@ -632,7 +632,7 @@ pub trait ReplacementStrategy {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Implementation {
     /// An exact **mergeable** accumulator (partial state ≡ the value
-    /// itself: `Sum` / `Count` / `MinMax` / `Rate` / `Increase`). The
+    /// itself: `Sum` / `Count` / `Min` / `Max` / `Rate` / `Increase`). The
     /// built state *is* the answer already — no `SummaryEstimate` readout
     /// step.
     ExactAggregate {
@@ -1366,6 +1366,25 @@ impl<'a> SketchAlgorithmStrategy<'a> {
     /// differs — see [`realize_child_with`]).
     fn propose_with(&self, root: &Rc<QueryExpr>, intent_override: Option<&AggIntent>) -> Proposals {
         let mut proposals = Proposals::default();
+        if let Ok(Some(node)) = exact_topk_over_temporal_values(root, self.models) {
+            proposals.candidates.push(ReplacementSubDAG {
+                replacement: Replacement::Summary(node),
+                strategy: "SketchAlgorithmStrategy",
+                provenance: ReplacementProvenance::SummaryImplementation,
+                rationale: "select exact Top-K from independently maintained temporal values"
+                    .into(),
+            });
+        }
+        if intent_override.is_none() {
+            if let Ok(Some(node)) = realize_temporal_average(root, self.models, None) {
+                proposals.candidates.push(ReplacementSubDAG {
+                    replacement: Replacement::Summary(node),
+                    strategy: "SketchAlgorithmStrategy",
+                    provenance: ReplacementProvenance::SummaryImplementation,
+                    rationale: "read temporal average from sum/count only within the finite arithmetic domain; otherwise execute the original average".into(),
+                });
+            }
+        }
         if intent_override.is_none() && is_supported_exact_binary(root) {
             if let Ok(Some(node)) = realize_binary(root, self.models, None) {
                 proposals.candidates.push(ReplacementSubDAG {
@@ -1663,11 +1682,93 @@ pub(crate) fn realize_child(
 /// re-splitting for its own approximate children) under the allocated
 /// budget. A child whose declared target is `Exact` keeps it: an allocation
 /// never approximates something the caller declared exact.
+fn exact_topk_over_temporal_values(
+    root: &Rc<QueryExpr>,
+    models: Models<'_>,
+) -> Result<Option<Rc<SummaryNode>>, ImplementError> {
+    let QueryExpr::Aggregate {
+        reduction,
+        measures,
+        output_names,
+        having: None,
+        child,
+    } = root.as_ref()
+    else {
+        return Ok(None);
+    };
+    if !matches!(
+        measures.as_slice(),
+        [AggIntent::TopK {
+            accuracy: AccuracyTarget::Exact,
+            ..
+        }]
+    ) {
+        return Ok(None);
+    }
+    let QueryExpr::Aggregate {
+        reduction: Reduction::PerEntity,
+        child: input,
+        ..
+    } = child.as_ref()
+    else {
+        return Ok(None);
+    };
+    if !matches!(input.as_ref(), QueryExpr::TimeRange { .. }) {
+        return Ok(None);
+    }
+    let values = realize_child_with(child, models, Some(&AccuracyTarget::Exact))?;
+    if matches!(values.expr, SummaryExpr::KeepPreAsap(_))
+        || !values
+            .guarantee
+            .as_ref()
+            .is_some_and(ResultGuarantee::is_exact)
+    {
+        return Ok(None);
+    }
+    let values = finalize_exact_accumulator(values, child)?;
+    let node = Rc::new(SummaryNode {
+        guarantee: values.guarantee.clone(),
+        schema: lift(&root.output_schema()?),
+        expr: SummaryExpr::ValueOperation {
+            child: values,
+            operation: ValueOperation::Exact(ExactOperation::Aggregate {
+                reduction: reduction.clone(),
+                measures: measures.clone(),
+                output_names: output_names.clone(),
+                having: None,
+            }),
+            timing: ExecutionTiming::ReadTime,
+        },
+    });
+    validate_execution_data_states_at(&node, ExecutionDataState::READ_ROWS)?;
+    Ok(Some(node))
+}
+
+fn realize_temporal_average(
+    root: &Rc<QueryExpr>,
+    models: Models<'_>,
+    target: Option<&AccuracyTarget>,
+) -> Result<Option<Rc<SummaryNode>>, ImplementError> {
+    let Some(components) = crate::rewrite::temporal_average_components(root) else {
+        return Ok(None);
+    };
+    let mut node = realize_child_with(&components, models, target)?;
+    let SummaryExpr::BinaryOp { operator, .. } = &mut Rc::make_mut(&mut node).expr else {
+        return Ok(None);
+    };
+    operator.checked_finite_division = true;
+    validate_execution_data_states_at(&node, ExecutionDataState::READ_ROWS)?;
+    Ok(Some(node))
+}
+
 pub(crate) fn realize_child_with(
     root: &Rc<QueryExpr>,
     models: Models<'_>,
     end_to_end_target: Option<&AccuracyTarget>,
 ) -> Result<Rc<SummaryNode>, ImplementError> {
+    if let Some(node) = realize_temporal_average(root, models, end_to_end_target)? {
+        return Ok(node);
+    }
     if let Some(composed) = realize_binary(root, models, end_to_end_target)? {
         return Ok(composed);
     }
@@ -1818,6 +1919,20 @@ fn realize_binary(
             }
         }
     }
+    // Only the domain-proven ratio path may consume approximate operands.
+    // Runtime finite/nonzero checks alone do not establish quantile error bounds.
+    if ratio_domains.is_none()
+        && matches!(op, BinaryOpKind::Arithmetic(ArithmeticOpKind::Div))
+        && [&lhs_node, &rhs_node].iter().any(|node| {
+            !node
+                .guarantee
+                .as_ref()
+                .is_some_and(ResultGuarantee::is_exact)
+        })
+    {
+        return Ok(None);
+    }
+
     let lhs_accelerated = lhs_scalar || !matches!(lhs_node.expr, SummaryExpr::KeepPreAsap(_));
     let rhs_accelerated = rhs_scalar || !matches!(rhs_node.expr, SummaryExpr::KeepPreAsap(_));
     if !lhs_accelerated || !rhs_accelerated {
@@ -1866,6 +1981,8 @@ fn realize_binary(
             lhs: lhs_node,
             rhs: rhs_node,
             operator: asap_types::post_asap::BinaryOperator {
+                checked_relative_division: false,
+                checked_finite_division: false,
                 kind: op.clone(),
                 vector_match: vector_match.clone(),
             },
@@ -2332,8 +2449,15 @@ fn realize_physical_summary_input(
 /// `SummaryEstimate` readout when `estimate` is set.
 // Retain the exact expression and schema while placing its value production
 // on the update path. Read-time consumers keep their original shared nodes.
-fn maintenance_exact_values(node: Rc<SummaryNode>) -> Rc<SummaryNode> {
+fn maintenance_exact_values(node: Rc<SummaryNode>) -> Option<Rc<SummaryNode>> {
     let expr = match &node.expr {
+        // These guards can fall back at read time, but cannot recover a parent
+        // sketch after an invalid value has entered its maintained state.
+        SummaryExpr::BinaryOp { operator, .. }
+            if operator.checked_finite_division || operator.checked_relative_division =>
+        {
+            return None;
+        }
         SummaryExpr::BinaryOp {
             lhs, rhs, operator, ..
         } if operator.vector_match.is_none()
@@ -2347,8 +2471,8 @@ fn maintenance_exact_values(node: Rc<SummaryNode>) -> Rc<SummaryNode> {
                 .is_some_and(ResultGuarantee::is_exact) =>
         {
             SummaryExpr::BinaryOp {
-                lhs: maintenance_exact_values(lhs.clone()),
-                rhs: maintenance_exact_values(rhs.clone()),
+                lhs: maintenance_exact_values(lhs.clone())?,
+                rhs: maintenance_exact_values(rhs.clone())?,
                 operator: operator.clone(),
                 timing: ExecutionTiming::MaintenanceTime,
             }
@@ -2371,13 +2495,13 @@ fn maintenance_exact_values(node: Rc<SummaryNode>) -> Rc<SummaryNode> {
                 timing: ExecutionTiming::MaintenanceTime,
             }
         }
-        _ => return node,
+        _ => return Some(node),
     };
-    Rc::new(SummaryNode {
+    Some(Rc::new(SummaryNode {
         expr,
         schema: node.schema.clone(),
         guarantee: node.guarantee.clone(),
-    })
+    }))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2443,7 +2567,10 @@ fn construct_summary_agg(
     // an exact scalar accumulator currently stores its value directly.
     let bound_child =
         finalize_exact_accumulator_at(bound_child, &input.child, ExecutionTiming::MaintenanceTime)?;
-    let bound_child = maintenance_exact_values(bound_child);
+    let bound_child = match maintenance_exact_values(bound_child) {
+        Some(child) => child,
+        None => keep_pre_asap(&input.child)?,
+    };
 
     // ── Guarantee (issue #172) ──────────────────────────────────────────
     // Derived *before* the node exists, so an illegal composition is never
@@ -5663,6 +5790,78 @@ mod tests {
         }))
     }
 
+    // Finite samples can overflow a sum although their native average is finite.
+    #[test]
+    fn temporal_average_requires_finite_division_guard() {
+        let root = Rc::new(
+            asap_frontend_promql::lower_promql("avg_over_time(a[5m])", AccuracyTarget::Exact)
+                .unwrap(),
+        );
+        let candidates =
+            SketchAlgorithmStrategy::default_cost_model().replacements(&TargetSubDAG::new(&root));
+        let operator = candidates
+            .iter()
+            .find_map(|c| match &c.replacement {
+                Replacement::Summary(node) => match &node.expr {
+                    SummaryExpr::BinaryOp { operator, .. } => Some(operator),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .expect("maintained average candidate");
+        assert!(operator.checked_finite_division);
+        assert!(
+            crate::rewrite::SemanticEquivalentRewriteStrategy
+                .replacements(&TargetSubDAG::new(&root))
+                .is_empty(),
+            "an unconditional pre-ASAP rewrite would bypass the runtime guard"
+        );
+    }
+
+    // Exact Top-K consumes the Planner's maintained temporal values.
+    #[test]
+    fn exact_temporal_topk_has_a_maintained_value_candidate() {
+        for query in [
+            "topk(5, sum_over_time(a[5m]))",
+            "topk by(job)(5, count_over_time(a[5m]))",
+        ] {
+            let root =
+                Rc::new(asap_frontend_promql::lower_promql(query, AccuracyTarget::Exact).unwrap());
+            let models = Models::with_default_accuracy(&crate::cost_model::DefaultCostModel);
+            let node = exact_topk_over_temporal_values(&root, models)
+                .unwrap()
+                .expect("exact Top-K candidate");
+            assert!(node.guarantee.as_ref().unwrap().is_exact());
+            assert!(matches!(
+                node.expr,
+                SummaryExpr::ValueOperation {
+                    operation: ValueOperation::Exact(ExactOperation::Aggregate { .. }),
+                    ..
+                }
+            ));
+            asap_types::post_asap::compile_executable_dag(&node).unwrap();
+        }
+    }
+
+    // Runtime division guards do not establish the input quantiles' error bounds.
+    #[test]
+    fn quantile_ratio_without_input_proof_keeps_native_execution() {
+        let target = AccuracyTarget::EpsilonDelta {
+            epsilon: 0.01,
+            delta: 0.01,
+        };
+        for query in [
+            "quantile_over_time(0.5,a[5m]) / quantile_over_time(0.9,a[5m])",
+            "avg_over_time(a[5m]) / quantile_over_time(0.5,a[5m])",
+        ] {
+            let root = Rc::new(asap_frontend_promql::lower_promql(query, target.clone()).unwrap());
+            let models = Models::with_default_accuracy(&crate::cost_model::DefaultCostModel);
+            assert!(realize_binary(&root, models, Some(&target))
+                .unwrap()
+                .is_none());
+        }
+    }
+
     #[test]
     fn relational_join_predicate_requires_and_normalizes_cross_input_columns() {
         let forward = normalize_cross_input_equi_predicate(&equi_pred(1, 3), 2, 4)
@@ -5777,8 +5976,8 @@ mod tests {
             ),
             // exact mergeable accumulators
             (A::Sum { col: None }, Acc(E::Sum)),
-            (A::Min { col: None }, Acc(E::MinMax)),
-            (A::Max { col: None }, Acc(E::MinMax)),
+            (A::Min { col: None }, Acc(E::Min)),
+            (A::Max { col: None }, Acc(E::Max)),
             (A::Rate, Acc(E::Rate)),
             (A::IRate, Acc(E::IRate)),
             (A::Increase, Acc(E::Increase)),

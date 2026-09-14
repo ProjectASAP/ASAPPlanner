@@ -25,6 +25,15 @@ pub enum ExactOperation {
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[non_exhaustive]
 pub enum ValueOperation {
+    /// Maintain the full declared population, including membership changes,
+    /// so removing a TopK member can promote another.
+    MaintainPopulation {
+        population: super::maintained_population::MaintainedPopulation,
+    },
+    /// Read an aggregate or TopK prefix from the maintained population.
+    ReadPopulation {
+        readout: super::maintained_population::PopulationReadout,
+    },
     Exact(ExactOperation),
     /// Read an exact accumulator's state as its finalized scalar value.
     ///
@@ -249,6 +258,16 @@ pub enum SummaryExpr {
 /// All semantics owned by a post-ASAP binary operator.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct BinaryOperator {
+    /// Execute division only for finite operands, a nonzero divisor, and a
+    /// normal finite result; otherwise use exact execution. Required by the
+    /// relative-value division certificate, including floating-point range.
+    #[serde(default)]
+    pub checked_relative_division: bool,
+    /// Conditional exact rewrites (such as temporal average from sum/count)
+    /// require finite operands and quotient. Zero/subnormal results are valid;
+    /// overflow must fall back to the original query rather than emit infinity.
+    #[serde(default)]
+    pub checked_finite_division: bool,
     pub kind: BinaryOpKind,
     /// `None` is the only currently supported vector/vector matching mode.
     /// The field is retained so execution never has to recover semantics by

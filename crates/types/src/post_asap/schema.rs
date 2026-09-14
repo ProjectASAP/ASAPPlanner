@@ -24,7 +24,7 @@ pub enum SummaryFamilyType {
     /// pre-ASAP `DataType` (`Int64`/`Float64`/`Utf8`/`Bool`/`Timestamp`),
     /// passed through unchanged from a pre-ASAP edge.
     Plain(DataType),
-    /// Exact, mergeable accumulator state (`Sum`/`Count`/`MinMax`/`Rate`/
+    /// Exact, mergeable accumulator state (`Sum`/`Count`/`Min`/`Max`/`Rate`/
     /// `Increase`) — the partial state *is* the value; no readout needed.
     ExactAggregate(ExactKind, ExactParams),
     /// Approximate sketch state (KLL/CMS/HLL/…), read out via a
