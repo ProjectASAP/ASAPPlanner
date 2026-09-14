@@ -26,33 +26,13 @@
 //! that reshaping — see "Non-goals" below for why it does not also decide
 //! whether the reshaping is worth it.
 //!
-//! ## Scope: `by(...)` grouping only (issue #253's own scope note)
+//! ## Scope
 //!
-//! [`AvgToSumOverCountStrategy::matches`] additionally requires
-//! `Reduction::Reduce(by)` with `by` an ordinary (non-`without`) grouping —
-//! narrower than [`SketchAlgorithmStrategy`]'s `bindable_intent`, which is
-//! `Reduction`-agnostic. Two concrete reasons, not stylistic ones:
-//!
-//! - **`Reduction::PerEntity`** (`rate`/`increase`/`*_over_time`) is
-//!   single-measure by construction —
-//!   [`aggregate_output_schema`](asap_types::pre_asap::query_expr::aggregate_output_schema)
-//!   `debug_assert!`s exactly one measure for it. This rewrite's entire
-//!   point is introducing a *second* measure (`Count` alongside `Sum`)
-//!   under the same node, which would violate that invariant outright, not
-//!   just drift a schema detail.
-//! - **`without(...)` grouping** leaves an `Aggregate`'s own output schema
-//!   *open* (`closed: false`, see `without_output_schema`), while the
-//!   `Project` this strategy always wraps the rewrite in forces
-//!   `closed: true` (see `QueryExpr::output_schema`'s `Project` arm). Under
-//!   `without(...)` the rewritten form's `closed` flag would silently flip
-//!   relative to the original — exactly the kind of schema drift this
-//!   module exists to avoid.
-//!
-//! Both are follow-ups (issue #253 itself scopes to "the concrete case in
-//! Peilin's comment"), not correctness bugs in what ships here — a node
-//! outside this scope simply doesn't `match`, the same "safe but
-//! uninformative" fallback [`SketchAlgorithmStrategy`]/[`SharedSubtreeStrategy`]
-//! already use for shapes they don't have an opinion on.
+//! Ordinary `by(...)` averages and per-entity range averages with non-null
+//! inputs are eligible. Per-entity sum and count already emit Float64 samples
+//! and preserve open label schemas, so they can be divided directly.
+//! `without(...)` remains excluded because the grouped cast projection closes
+//! its input schema. Nullable inputs are excluded because Count means COUNT(*).
 //!
 //! ## Non-goals (mirrors [`replacement`]'s own discipline)
 //!
@@ -76,9 +56,8 @@ use asap_types::types::AccuracyTarget;
 use crate::replacement::{Replacement, ReplacementStrategy, ReplacementSubDAG, TargetSubDAG};
 
 /// The shape [`AvgToSumOverCountStrategy`] rewrites: a single `Avg{col}`
-/// measure, no `HAVING`, grouped with an ordinary `by(...)` reduction (see
-/// the module docs' "Scope" for why `without(...)`/`PerEntity` are
-/// excluded). Returns the grouping key count and the summed column so
+/// measure, no `HAVING`, with ordinary grouping or per-entity reduction.
+/// Returns the grouping key count (zero for per-entity) and summed column so
 /// [`build_rewrite`] doesn't have to re-match.
 fn avg_rewrite_target(node: &QueryExpr) -> Option<(usize, Option<ColumnId>)> {
     let QueryExpr::Aggregate {
@@ -91,12 +70,11 @@ fn avg_rewrite_target(node: &QueryExpr) -> Option<(usize, Option<ColumnId>)> {
     else {
         return None;
     };
-    let Reduction::Reduce(by) = reduction else {
-        return None;
+    let by = match reduction {
+        Reduction::Reduce(by) if !by.is_without() => Some(by),
+        Reduction::PerEntity => None,
+        _ => return None,
     };
-    if by.is_without() {
-        return None;
-    }
     let [AggIntent::Avg { col }] = measures.as_slice() else {
         return None;
     };
@@ -107,19 +85,25 @@ fn avg_rewrite_target(node: &QueryExpr) -> Option<(usize, Option<ColumnId>)> {
     let input_schema = child.output_schema().ok()?;
     let value_col = col
         .or_else(|| input_schema.column_id("value"))
-        .or_else(|| (0..input_schema.columns.len()).find(|i| !by.contains(i)))?;
+        .or_else(|| by.and_then(|by| (0..input_schema.columns.len()).find(|i| !by.contains(i))))?;
     if input_schema.columns.get(value_col)?.nullable {
         return None;
     }
-    Some((by.keys().len(), *col))
+    if matches!(reduction, Reduction::PerEntity)
+        && (input_schema.column_id("value") != Some(value_col)
+            || input_schema.columns[value_col].dtype != DataType::Float64)
+    {
+        return None;
+    }
+    Some((by.map_or(0, |by| by.keys().len()), *col))
 }
 
-/// Build the rewritten `Project{ cast(sum) } / Aggregate{ Count }` tree for
+/// Build `Sum / Count` (with a cast projection for grouped aggregates) for
 /// `root`, or `None` if `root` isn't [`avg_rewrite_target`]'s shape. `Sum` and
 /// `Count` deliberately live in separate, single-measure aggregates so the
 /// replacement fixpoint discovers each as an independently bindable target.
 ///
-/// The `Project`'s leading `by.len()` items are bare `Column(i)`
+/// For grouped aggregates, the `Project`'s leading `by.len()` items are bare `Column(i)`
 /// pass-throughs of the grouping keys — identical in name/type to the
 /// original `Avg` aggregate's own leading columns, since both aggregates
 /// share the same `reduction`/`child` and only differ in `measures`
@@ -177,6 +161,17 @@ fn build_rewrite(root: &Rc<QueryExpr>) -> Option<Rc<QueryExpr>> {
         having: None,
         child: Rc::clone(child),
     });
+
+    if matches!(reduction, Reduction::PerEntity) {
+        // Both branches retain the same series identity, time axis and open
+        // labels. Range Count emits Float64, and absent ranges produce no pair.
+        return Some(Rc::new(QueryExpr::BinaryOp {
+            op: BinaryOpKind::Arithmetic(ArithmeticOpKind::Div),
+            lhs: sum_agg,
+            rhs: count_agg,
+            vector_match: None,
+        }));
+    }
 
     let sum_idx = group_count;
     let mut cols: Vec<ProjectItem> = (0..group_count)
@@ -463,18 +458,45 @@ mod tests {
         assert!(AvgToSumOverCountStrategy.replacements(&target).is_empty());
     }
 
+    /// Range division preserves the original timestamp, labels and sample schema.
     #[test]
-    fn does_not_match_a_per_entity_avg_aggregate() {
+    fn per_entity_avg_rewrite_preserves_open_series_schema() {
         let q = Rc::new(QueryExpr::Aggregate {
             reduction: Reduction::PerEntity,
             measures: vec![AggIntent::Avg { col: None }],
             output_names: vec![],
             having: None,
-            child: Rc::new(metric_scan(&[])),
+            child: Rc::new(QueryExpr::TimeRange {
+                range: Duration::from_secs(300),
+                child: Rc::new(metric_scan(&["job", "instance"])),
+            }),
         });
         let target = TargetSubDAG::new(&q);
-        assert!(!AvgToSumOverCountStrategy.matches(&target));
-        assert!(AvgToSumOverCountStrategy.replacements(&target).is_empty());
+        assert!(AvgToSumOverCountStrategy.matches(&target));
+        let rewritten = build_rewrite(&q).unwrap();
+        assert_eq!(
+            rewritten.output_schema().unwrap(),
+            q.output_schema().unwrap()
+        );
+    }
+
+    /// COUNT(*) cannot replace the denominator of a nullable sample average.
+    #[test]
+    fn per_entity_nullable_or_non_sample_average_is_not_rewritten() {
+        for (nullable, column) in [(true, None), (false, Some(2)), (false, Some(99))] {
+            let mut scan = metric_scan(&["job"]);
+            if let QueryExpr::Scan { schema, .. } = &mut scan {
+                schema.columns[1].nullable = nullable;
+            }
+            let root = Rc::new(QueryExpr::Aggregate {
+                reduction: Reduction::PerEntity,
+                measures: vec![AggIntent::Avg { col: column }],
+                output_names: vec![],
+                having: None,
+                child: Rc::new(scan),
+            });
+            assert!(build_rewrite(&root).is_none());
+        }
     }
 
     #[test]
