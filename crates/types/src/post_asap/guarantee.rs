@@ -232,7 +232,8 @@ pub enum CompositionOperator {
     ExactExtremum,
     /// Exact division of two relative-value estimates. For numerator bound
     /// `a` and denominator bound `b < 1`, the output bound is
-    /// `(a + b) / (1 - b)`.
+    /// `(a + b) / (1 - b)`, requiring finite operand domains, a nonzero
+    /// denominator, and representable true and estimated quotients.
     ExactDivision,
     /// PromQL `rate`: reset correction plus range-boundary extrapolation.
     CounterRate,
@@ -253,6 +254,15 @@ pub enum CompositionOperator {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum GuaranteeSource {
+    /// Enforced finite input range and nonempty-window contract used by a
+    /// quantile-ratio certificate. This is not an observed sample min/max.
+    InputValueDomain {
+        input_index: usize,
+        lower: f64,
+        upper: f64,
+        max_samples: u64,
+        contract: String,
+    },
     /// Deterministic exact computation — zero error by construction.
     Exact {
         /// What made it exact (e.g. `"ExactAggregate(Sum)"`,

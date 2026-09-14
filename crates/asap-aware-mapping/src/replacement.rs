@@ -1741,13 +1741,37 @@ fn realize_binary(
         .cloned()
         .or_else(|| shared_quantile_target(lhs, rhs));
 
+    let mut ratio_domains = None;
     if direct_ddsketch_ratio {
         if let Some(target) = ratio_target
             .as_ref()
             .and_then(ddsketch_ratio_operand_target)
         {
+            let Some(domains) = models
+                .evidence
+                .quantile_input_domain(lhs)
+                .zip(models.evidence.quantile_input_domain(rhs))
+                .map(|(lhs, rhs)| [lhs, rhs])
+            else {
+                return Ok(None);
+            };
+            let (alpha, _) = accuracy_budget(&target);
+            if domains
+                .iter()
+                .any(|domain| !domain.supports_ddsketch(alpha))
+            {
+                return Ok(None);
+            }
             lhs_node = realize_ddsketch_quantile_operand(lhs, models, &target)?;
             rhs_node = realize_ddsketch_quantile_operand(rhs, models, &target)?;
+            for (domain, node) in domains.iter().zip([&lhs_node, &rhs_node]) {
+                if !ddsketch_quantile_alpha(node)
+                    .is_some_and(|alpha| domain.supports_ddsketch(alpha))
+                {
+                    return Ok(None);
+                }
+            }
+            ratio_domains = Some(domains);
         }
     } else if let Some(target) = end_to_end_target {
         let operand_guarantees = [lhs_node.guarantee.as_ref(), rhs_node.guarantee.as_ref()];
@@ -1804,8 +1828,9 @@ fn realize_binary(
     rhs_node = finalize_exact_accumulator(rhs_node, rhs)?;
 
     let guarantee = if matches!(op, BinaryOpKind::Arithmetic(ArithmeticOpKind::Div))
-        && is_ddsketch_quantile_readout(&lhs_node)
-        && is_ddsketch_quantile_readout(&rhs_node)
+        && direct_ddsketch_ratio
+        && ddsketch_quantile_alpha(&lhs_node).is_some()
+        && ddsketch_quantile_alpha(&rhs_node).is_some()
     {
         [lhs_node.guarantee.clone(), rhs_node.guarantee.clone()]
             .into_iter()
@@ -1817,7 +1842,10 @@ fn realize_binary(
                         &CompositionOperator::ExactDivision,
                         &inputs,
                         None,
-                        &crate::accuracy::PropagationStats::default(),
+                        &crate::accuracy::PropagationStats {
+                            division_operand_domains: ratio_domains,
+                            ..Default::default()
+                        },
                     )
                     .ok()
             })
@@ -1827,6 +1855,10 @@ fn realize_binary(
             .all(|guarantee| guarantee.is_some_and(ResultGuarantee::is_exact))
             .then(|| ResultGuarantee::exact("BinaryOp over exact operands"))
     };
+
+    if direct_ddsketch_ratio && guarantee.is_none() {
+        return Ok(None);
+    }
 
     Ok(Some(Rc::new(SummaryNode {
         expr: SummaryExpr::BinaryOp {
@@ -1911,7 +1943,11 @@ fn is_promql_scalar(expr: &QueryExpr) -> bool {
 /// as two independent error budgets.
 fn shared_quantile_target(lhs: &QueryExpr, rhs: &QueryExpr) -> Option<AccuracyTarget> {
     let quantile_target = |expr: &QueryExpr| match bindable_intent(expr) {
-        Some(AggIntent::Quantile { accuracy, .. }) => Some(accuracy.clone()),
+        Some(AggIntent::Quantile { accuracy, q, .. })
+            if q.is_finite() && (0.0..=1.0).contains(q) =>
+        {
+            Some(accuracy.clone())
+        }
         _ => None,
     };
     let lhs = quantile_target(lhs)?;
@@ -1937,21 +1973,25 @@ fn ddsketch_ratio_operand_target(target: &AccuracyTarget) -> Option<AccuracyTarg
     }
 }
 
-fn is_ddsketch_quantile_readout(node: &SummaryNode) -> bool {
+fn ddsketch_quantile_alpha(node: &SummaryNode) -> Option<f64> {
     let SummaryExpr::SummaryEstimate {
         summary_input,
         query: PostAsapSketchQuery::Quantile { .. },
     } = &node.expr
     else {
-        return false;
+        return None;
     };
-    matches!(
-        &summary_input.expr,
-        SummaryExpr::SummaryAgg {
-            family: SummaryFamilyType::Sketch(kind, _),
-            ..
-        } if kind.algorithm() == &SketchAlgorithm::DDSketch
-    )
+    let SummaryExpr::SummaryAgg {
+        family: SummaryFamilyType::Sketch(kind, _),
+        ..
+    } = &summary_input.expr
+    else {
+        return None;
+    };
+    match (kind.algorithm(), kind.params()) {
+        (SketchAlgorithm::DDSketch, SketchParams::DDSketch { alpha }) => Some(*alpha),
+        _ => None,
+    }
 }
 
 /// A direct ratio has an operator-specific DDSketch proof, so it must select
