@@ -52,6 +52,8 @@ impl ColState for ColumnRef {
 /// Errors from schema derivation over a canonical tree.
 #[derive(Debug, Error)]
 pub enum QueryExprError {
+    #[error("invalid per-entity aggregate: {0}")]
+    InvalidPerEntityAggregate(String),
     #[error("invalid scalar function signature: {0}")]
     InvalidScalarSignature(String),
     #[error("by-column id {0} out of range (input has {1} columns)")]
@@ -1484,8 +1486,14 @@ fn per_series_reduction_schema(input: &Schema, agg: &AggIntent) -> Schema {
 ///
 /// `Reduction::PerEntity` selects the label-preserving
 /// [`per_series_reduction_schema`] (`rate`/`increase`/`*_over_time`) instead
-/// of the cross-series `by ++ measures` shape. Which one applies is read directly
-/// off `reduction` — decided once, at construction, by whoever built the
+/// of the cross-series `by ++ measures` shape. Multiple measures replace the
+/// value slot with the first measure and append the rest, preserving label and
+/// timestamp positions. Names come from output overrides or the intents and
+/// must be distinct from one another and retained columns; all samples are Float64.
+/// Frontends resolving named multi-measure outputs should supply a scan schema:
+/// usage-derived binding may otherwise infer those names as input labels, which
+/// this validation rejects as collisions.
+/// Which shape applies is read directly off `reduction` — decided once, at construction, by whoever built the
 /// `Aggregate` node (issue #165) — not re-derived here from `by`/child shape.
 pub fn aggregate_output_schema(
     in_schema: &Schema,
@@ -1495,12 +1503,57 @@ pub fn aggregate_output_schema(
 ) -> Result<Schema, QueryExprError> {
     let by = match reduction {
         Reduction::PerEntity => {
-            debug_assert_eq!(
-                measures.len(),
-                1,
-                "a per-entity reduction is single-aggregate"
-            );
-            return Ok(per_series_reduction_schema(in_schema, &measures[0]));
+            if measures.is_empty() {
+                return Err(QueryExprError::InvalidPerEntityAggregate(
+                    "at least one measure is required".into(),
+                ));
+            }
+            if measures.len() == 1 {
+                return Ok(per_series_reduction_schema(in_schema, &measures[0]));
+            }
+            let invalid = |message: &str| QueryExprError::InvalidPerEntityAggregate(message.into());
+            let vi = in_schema
+                .column_id("value")
+                .ok_or_else(|| invalid("multiple measures require an input value column"))?;
+            if in_schema.time_index == Some(vi) {
+                return Err(invalid("the value column cannot be the timestamp"));
+            }
+            if output_names.len() > measures.len() {
+                return Err(invalid("more output names than measures"));
+            }
+            let mut output = in_schema.clone();
+            let mut names: std::collections::HashSet<String> = in_schema
+                .columns
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| *i != vi)
+                .map(|(_, c)| c.name.clone())
+                .collect();
+            for (i, measure) in measures.iter().enumerate() {
+                if matches!(measure, AggIntent::CountValues { .. }) {
+                    return Err(invalid("count_values changes series identity and cannot be combined with other measures"));
+                }
+                let input = in_schema
+                    .columns
+                    .get(measure.input_col().unwrap_or(vi))
+                    .ok_or_else(|| invalid("measure input column is out of range"))?;
+                let mut column = measure.output_column(input);
+                if let Some(name) = output_names.get(i).filter(|n| !n.is_empty()) {
+                    column.name = name.clone();
+                }
+                if !names.insert(column.name.clone()) {
+                    return Err(invalid("measure names must be unique and must not collide with labels or timestamp"));
+                }
+                column.dtype = DataType::Float64;
+                if i == 0 {
+                    output.columns[vi] = column;
+                } else {
+                    output.columns.push(column);
+                }
+            }
+            // A computed sample cannot retain a uniqueness proof about raw values.
+            output.unique_keys.retain(|key| !key.contains(&vi));
+            return Ok(output);
         }
         Reduction::Reduce(by) => by,
     };
@@ -2194,6 +2247,80 @@ mod tests {
         };
         let back: TimeShift = serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
         assert_eq!(back, s);
+    }
+
+    /// Multiple measures retain series metadata and expose separate named float samples.
+    #[test]
+    fn per_entity_multiple_measures_preserve_schema() {
+        let input = Schema::with_time_index(
+            vec![
+                col("ts", DataType::Timestamp, false),
+                col("value", DataType::Float64, false),
+                col("job", DataType::Utf8, true),
+            ],
+            0,
+            vec![vec![0, 2]],
+        );
+        let measures = vec![
+            AggIntent::Sum { col: None },
+            AggIntent::Count {
+                accuracy: crate::types::AccuracyTarget::Exact,
+            },
+        ];
+        let output =
+            aggregate_output_schema(&input, &Reduction::PerEntity, &measures, &[]).unwrap();
+        assert_eq!(
+            output
+                .columns
+                .iter()
+                .map(|c| c.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["ts", "sum", "job", "count"]
+        );
+        assert_eq!(output.time_index, input.time_index);
+        assert_eq!(output.unique_keys, input.unique_keys);
+        assert_eq!(output.closed, input.closed);
+        assert_eq!(output.columns[1].dtype, DataType::Float64);
+        assert_eq!(output.columns[3].dtype, DataType::Float64);
+    }
+
+    /// Invalid or ambiguous multi-measure shapes fail instead of losing outputs.
+    #[test]
+    fn per_entity_measure_names_are_validated() {
+        let input = Schema::new(vec![
+            col("value", DataType::Float64, false),
+            col("job", DataType::Utf8, true),
+        ]);
+        let measures = vec![AggIntent::Sum { col: None }, AggIntent::Sum { col: None }];
+        for names in [
+            vec![],
+            vec!["a".into(), "a".into()],
+            vec!["job".into(), "b".into()],
+        ] {
+            assert!(
+                aggregate_output_schema(&input, &Reduction::PerEntity, &measures, &names).is_err()
+            );
+        }
+        let output = aggregate_output_schema(
+            &input,
+            &Reduction::PerEntity,
+            &measures,
+            &["first".into(), "second".into()],
+        )
+        .unwrap();
+        assert_eq!(output.column_id("first"), Some(0));
+        assert_eq!(output.column_id("second"), Some(2));
+        assert!(aggregate_output_schema(&input, &Reduction::PerEntity, &[], &[]).is_err());
+        assert!(aggregate_output_schema(
+            &input,
+            &Reduction::PerEntity,
+            &[
+                AggIntent::Sum { col: Some(99) },
+                AggIntent::Sum { col: None }
+            ],
+            &[]
+        )
+        .is_err());
     }
 
     #[test]

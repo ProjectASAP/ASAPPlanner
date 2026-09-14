@@ -292,7 +292,7 @@ pub fn lower_query_physical_dag(
                     }
                     if matches!(reduction, asap_types::pre_asap::Reduction::PerEntity) {
                         if measures.len() != 1 {
-                            return Err(AnalyticalCostError::UnsupportedQueryOperator);
+                            return Err(AnalyticalCostError::UnsupportedMultiMeasurePerEntity);
                         }
                         let accumulator_count = u64::try_from(measures.len())
                             .map_err(|_| AnalyticalCostError::Overflow)?;
@@ -2483,6 +2483,42 @@ mod tests {
                 cardinality: PromqlVectorCardinality::ManyToOne,
                 build_side: Some(HashJoinBuildSide::Right),
             })
+        ));
+    }
+
+    /// Multi-measure schemas must not silently lower to a single accumulator.
+    #[test]
+    fn multi_measure_per_entity_lowering_is_explicitly_unsupported() {
+        use asap_types::pre_asap::{
+            AggIntent, Column, DataType, QueryExpr, Reduction, Schema, Source,
+        };
+        let source = Source::TimeSeries {
+            metric: "requests".into(),
+        };
+        let root = Rc::new(QueryExpr::Aggregate {
+            reduction: Reduction::PerEntity,
+            measures: vec![
+                AggIntent::Sum { col: None },
+                AggIntent::Count {
+                    accuracy: asap_types::types::AccuracyTarget::Exact,
+                },
+            ],
+            output_names: vec![],
+            having: None,
+            child: Rc::new(QueryExpr::Scan {
+                source: source.clone(),
+                predicates: vec![],
+                schema: Schema::new(vec![Column::new("value", DataType::Float64, false)]),
+            }),
+        });
+        let provided = HashMap::new();
+        assert!(matches!(
+            lower_query_physical_dag(
+                &root,
+                &scope(vec![coverage(source, vec![])]),
+                &scripted(&provided)
+            ),
+            Err(AnalyticalCostError::UnsupportedMultiMeasurePerEntity)
         ));
     }
 
