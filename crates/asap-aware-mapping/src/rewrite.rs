@@ -28,9 +28,11 @@
 //!
 //! ## Scope
 //!
-//! Ordinary `by(...)` averages and per-entity range averages with non-null
-//! inputs are eligible. Per-entity sum and count already emit Float64 samples
-//! and preserve open label schemas, so they can be divided directly.
+//! Ordinary `by(...)` averages with non-null inputs are eligible.
+//! Per-entity range averages are excluded: even finite Float64 samples can
+//! overflow SUM while AVG remains finite. A future decomposition needs a
+//! proven arithmetic domain or an overflow-safe execution path; schema
+//! compatibility alone cannot establish semantic equivalence.
 //! `without(...)` remains excluded because the grouped cast projection closes
 //! its input schema. Nullable inputs are excluded because Count means COUNT(*).
 //!
@@ -56,8 +58,8 @@ use asap_types::types::AccuracyTarget;
 use crate::replacement::{Replacement, ReplacementStrategy, ReplacementSubDAG, TargetSubDAG};
 
 /// The shape [`AvgToSumOverCountStrategy`] rewrites: a single `Avg{col}`
-/// measure, no `HAVING`, with ordinary grouping or per-entity reduction.
-/// Returns the grouping key count (zero for per-entity) and summed column so
+/// measure, no `HAVING`, with ordinary grouping.
+/// Returns the grouping key count and summed column so
 /// [`build_rewrite`] doesn't have to re-match.
 fn avg_rewrite_target(node: &QueryExpr) -> Option<(usize, Option<ColumnId>)> {
     let QueryExpr::Aggregate {
@@ -71,8 +73,7 @@ fn avg_rewrite_target(node: &QueryExpr) -> Option<(usize, Option<ColumnId>)> {
         return None;
     };
     let by = match reduction {
-        Reduction::Reduce(by) if !by.is_without() => Some(by),
-        Reduction::PerEntity => None,
+        Reduction::Reduce(by) if !by.is_without() => by,
         _ => return None,
     };
     let [AggIntent::Avg { col }] = measures.as_slice() else {
@@ -85,17 +86,11 @@ fn avg_rewrite_target(node: &QueryExpr) -> Option<(usize, Option<ColumnId>)> {
     let input_schema = child.output_schema().ok()?;
     let value_col = col
         .or_else(|| input_schema.column_id("value"))
-        .or_else(|| by.and_then(|by| (0..input_schema.columns.len()).find(|i| !by.contains(i))))?;
+        .or_else(|| (0..input_schema.columns.len()).find(|i| !by.contains(i)))?;
     if input_schema.columns.get(value_col)?.nullable {
         return None;
     }
-    if matches!(reduction, Reduction::PerEntity)
-        && (input_schema.column_id("value") != Some(value_col)
-            || input_schema.columns[value_col].dtype != DataType::Float64)
-    {
-        return None;
-    }
-    Some((by.map_or(0, |by| by.keys().len()), *col))
+    Some((by.keys().len(), *col))
 }
 
 /// Build `Sum / Count` (with a cast projection for grouped aggregates) for
@@ -161,17 +156,6 @@ fn build_rewrite(root: &Rc<QueryExpr>) -> Option<Rc<QueryExpr>> {
         having: None,
         child: Rc::clone(child),
     });
-
-    if matches!(reduction, Reduction::PerEntity) {
-        // Both branches retain the same series identity, time axis and open
-        // labels. Range Count emits Float64, and absent ranges produce no pair.
-        return Some(Rc::new(QueryExpr::BinaryOp {
-            op: BinaryOpKind::Arithmetic(ArithmeticOpKind::Div),
-            lhs: sum_agg,
-            rhs: count_agg,
-            vector_match: None,
-        }));
-    }
 
     let sum_idx = group_count;
     let mut cols: Vec<ProjectItem> = (0..group_count)
@@ -458,9 +442,9 @@ mod tests {
         assert!(AvgToSumOverCountStrategy.replacements(&target).is_empty());
     }
 
-    /// Range division preserves the original timestamp, labels and sample schema.
+    /// Matching schemas do not make range SUM/COUNT safe for unbounded samples.
     #[test]
-    fn per_entity_avg_rewrite_preserves_open_series_schema() {
+    fn per_entity_avg_rewrite_is_rejected_without_arithmetic_proof() {
         let q = Rc::new(QueryExpr::Aggregate {
             reduction: Reduction::PerEntity,
             measures: vec![AggIntent::Avg { col: None }],
@@ -472,12 +456,9 @@ mod tests {
             }),
         });
         let target = TargetSubDAG::new(&q);
-        assert!(AvgToSumOverCountStrategy.matches(&target));
-        let rewritten = build_rewrite(&q).unwrap();
-        assert_eq!(
-            rewritten.output_schema().unwrap(),
-            q.output_schema().unwrap()
-        );
+        assert!(!AvgToSumOverCountStrategy.matches(&target));
+        assert!(AvgToSumOverCountStrategy.replacements(&target).is_empty());
+        assert!(build_rewrite(&q).is_none());
     }
 
     /// COUNT(*) cannot replace the denominator of a nullable sample average.
