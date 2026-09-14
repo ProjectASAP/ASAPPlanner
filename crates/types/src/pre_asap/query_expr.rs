@@ -1663,6 +1663,7 @@ fn infer_expr_type(
     schema: &Schema,
 ) -> Result<(DataType, bool), QueryExprError> {
     Ok(match expr {
+        QueryExpr::CurrentTimestamp => (DataType::Timestamp, false),
         QueryExpr::Column(id) => schema
             .columns
             .get(*id)
@@ -1684,9 +1685,21 @@ fn infer_expr_type(
         | QueryExpr::IsNull(_)
         | QueryExpr::IsNotNull(_)
         | QueryExpr::InList { .. } => (DataType::Bool, true),
-        QueryExpr::Arithmetic { left, right, .. } => {
+        QueryExpr::Arithmetic { op, left, right } => {
             let (lt, ln) = infer_expr_type(left, schema)?;
             let (rt, rn) = infer_expr_type(right, schema)?;
+            // Temporal subtraction yields a fixed duration with a unit, not a
+            // calendar interval or a floating-point number. Until the IR can
+            // preserve that unit, fail instead of publishing a numeric schema.
+            if matches!(op, ArithmeticOpKind::Sub)
+                && matches!(lt, DataType::Date | DataType::Timestamp)
+                && matches!(rt, DataType::Date | DataType::Timestamp)
+            {
+                return Err(QueryExprError::InvalidScalarSignature(
+                    "temporal subtraction produces an unsupported duration type".into(),
+                ));
+            }
+
             // Operand order is not checked: the orders that are not valid SQL
             // (`Interval - Timestamp`) are rejected by the planner upstream, so
             // a pair rule stays as small as the numeric one it sits beside.

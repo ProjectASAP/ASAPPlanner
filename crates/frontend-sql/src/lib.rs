@@ -51,6 +51,11 @@ pub async fn lower_sql_dialect(
         .lower(query, &accuracy)
         .await?;
     let resolved = resolve_root(&unresolved)?;
+    // Binding resolves names; schema inference also checks result types such
+    // as temporal subtraction, whose duration unit the IR cannot represent.
+    resolved
+        .output_schema()
+        .map_err(|error| SqlError::InvalidExpression(error.to_string()))?;
     Ok(resolved)
 }
 

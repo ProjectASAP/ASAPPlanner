@@ -91,6 +91,7 @@ pub(super) fn arrow_to_dtype(dt: &ArrowDataType) -> Result<DataType, LoweringErr
         ArrowDataType::Boolean => Ok(DataType::Bool),
         ArrowDataType::Timestamp(_, _) => Ok(DataType::Timestamp),
         ArrowDataType::Date32 | ArrowDataType::Date64 => Ok(DataType::Date),
+        ArrowDataType::Interval(_) => Ok(DataType::Interval),
         ArrowDataType::List(element) => Ok(DataType::List {
             element: Box::new(Column::new(
                 element.name(),
@@ -216,6 +217,26 @@ mod tests {
             DataType::Date
         );
         assert_eq!(dtype_to_arrow(&DataType::Date), ArrowDataType::Date32);
+    }
+
+    /// Every Arrow interval width shares the canonical calendar interval type.
+    #[test]
+    fn interval_types_round_trip_through_the_catalog_bridge() {
+        use datafusion::arrow::datatypes::IntervalUnit;
+        for unit in [
+            IntervalUnit::YearMonth,
+            IntervalUnit::DayTime,
+            IntervalUnit::MonthDayNano,
+        ] {
+            assert_eq!(
+                arrow_to_dtype(&ArrowDataType::Interval(unit)).unwrap(),
+                DataType::Interval
+            );
+        }
+        assert_eq!(
+            arrow_to_dtype(&dtype_to_arrow(&DataType::Interval)).unwrap(),
+            DataType::Interval
+        );
     }
 
     /// All three of DataFusion's interval scalars carry into the one canonical
