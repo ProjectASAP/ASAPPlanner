@@ -8,6 +8,7 @@ edition = "2021"
 # asap-types (L3 intent algebra + L4 sketch-bound IR) — never depends on a
 # front end.
 [dependencies]
+asap_sketchlib = { workspace = true }
 asap-types = { path = "../types" }
 thiserror = "2"
 serde = { version = "1", features = ["derive"] }
