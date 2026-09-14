@@ -1805,119 +1805,6 @@ pub(crate) fn realize_child_with(
     }
 }
 
-// The logical rule sizes DDSketch operands against the final expression budget.
-// It never converts a rank certificate into a value certificate.
-fn relative_division_candidate(
-    root: &Rc<QueryExpr>,
-    models: Models<'_>,
-    target: Option<&AccuracyTarget>,
-) -> Result<Option<Rc<SummaryNode>>, ImplementError> {
-    let QueryExpr::BinaryOp {
-        op: BinaryOpKind::Arithmetic(asap_types::pre_asap::ArithmeticOpKind::Div),
-        lhs,
-        rhs,
-        vector_match: None,
-    } = root.as_ref()
-    else {
-        return Ok(None);
-    };
-    let target = target
-        .or_else(|| bindable_intent(lhs).and_then(accuracy_target))
-        .or_else(|| bindable_intent(rhs).and_then(accuracy_target));
-    let Some(target) = target else {
-        return Ok(None);
-    };
-    let epsilon = match target {
-        AccuracyTarget::Exact => return Ok(None),
-        AccuracyTarget::Epsilon(e) => *e,
-        AccuracyTarget::EpsilonDelta { epsilon, .. } => *epsilon,
-    };
-    if !epsilon.is_finite() || epsilon <= 1e-12 {
-        return Ok(None);
-    }
-    let alpha = (epsilon - 8.0 * f64::EPSILON) / (2.0 + epsilon);
-    let local_target = AccuracyTarget::Epsilon(alpha);
-    let operand = |expr: &Rc<QueryExpr>,
-                   layer: usize|
-     -> Result<Option<Rc<SummaryNode>>, ImplementError> {
-        if let Some(intent @ AggIntent::Quantile { .. }) = bindable_intent(expr) {
-            if matches!(accuracy_target(intent), Some(AccuracyTarget::Exact)) {
-                return Ok(None);
-            }
-            let intent = override_accuracy(intent, &local_target);
-            for implementation in implementations_for_with(&intent, models.cost) {
-                if !matches!(&implementation, Implementation::Sketch(kind) if kind.algorithm() == &SketchAlgorithm::DDSketch)
-                {
-                    continue;
-                }
-                if let Ok(node) = construct_summary_with(
-                    expr,
-                    &intent,
-                    implementation,
-                    models,
-                    None,
-                    Some(GuaranteeSource::BudgetAllocation {
-                        allocator: "RelativeDivisionAllocator".into(),
-                        layer,
-                        layer_count: 2,
-                        local_target: local_target.clone(),
-                        end_to_end_target: target.clone(),
-                    }),
-                ) {
-                    return Ok(Some(node));
-                }
-            }
-            return Ok(None);
-        }
-        let node = realize_child_with(expr, models, None)?;
-        Ok(node
-            .guarantee
-            .as_ref()
-            .is_some_and(ResultGuarantee::is_exact)
-            .then_some(node))
-    };
-    let (Some(left), Some(right)) = (operand(lhs, 0)?, operand(rhs, 1)?) else {
-        return Ok(None);
-    };
-    let left = finalize_exact_accumulator(left, lhs)?;
-    let right = finalize_exact_accumulator(right, rhs)?;
-    let Some(inputs) = [left.guarantee.clone(), right.guarantee.clone()]
-        .into_iter()
-        .collect::<Option<Vec<_>>>()
-    else {
-        return Ok(None);
-    };
-    if inputs.iter().all(ResultGuarantee::is_exact) {
-        return Ok(None);
-    }
-    let Ok(guarantee) = models.accuracy.propagate(
-        &CompositionOperator::CheckedRelativeDivision,
-        &inputs,
-        None,
-        &Default::default(),
-    ) else {
-        return Ok(None);
-    };
-    if !models.accuracy.satisfies(&guarantee, target) {
-        return Ok(None);
-    }
-    Ok(Some(Rc::new(SummaryNode {
-        expr: SummaryExpr::BinaryOp {
-            timing: ExecutionTiming::ReadTime,
-            lhs: left,
-            rhs: right,
-            operator: asap_types::post_asap::BinaryOperator {
-                checked_relative_division: true,
-                checked_finite_division: false,
-                kind: BinaryOpKind::Arithmetic(asap_types::pre_asap::ArithmeticOpKind::Div),
-                vector_match: None,
-            },
-        },
-        schema: lift(&root.output_schema()?),
-        guarantee: Some(guarantee),
-    })))
-}
-
 /// Preserve an exact arithmetic root while allowing each vector operand to
 /// select its own summary implementation. If either vector arm cannot be
 /// accelerated, return `None` so the caller keeps the whole query exact;
@@ -1940,9 +1827,6 @@ fn realize_binary(
         return Ok(None);
     }
 
-    if let Some(candidate) = relative_division_candidate(root, models, end_to_end_target)? {
-        return Ok(Some(candidate));
-    }
     let lhs_scalar = is_promql_scalar(lhs);
     let rhs_scalar = is_promql_scalar(rhs);
     if lhs_scalar && rhs_scalar {
@@ -1951,6 +1835,21 @@ fn realize_binary(
 
     let mut lhs_node = realize_binary_operand(lhs, models, None)?;
     let mut rhs_node = realize_binary_operand(rhs, models, None)?;
+
+    // A finite quotient does not establish the operand quantiles' relative
+    // bounds (interpolation across zero can cancel). Without an input-domain
+    // proof, retain native division rather than certify approximate operands.
+    if matches!(
+        op,
+        BinaryOpKind::Arithmetic(asap_types::pre_asap::ArithmeticOpKind::Div)
+    ) && [&lhs_node, &rhs_node].iter().any(|node| {
+        !node
+            .guarantee
+            .as_ref()
+            .is_some_and(ResultGuarantee::is_exact)
+    }) {
+        return Ok(None);
+    }
 
     if let Some(target) = end_to_end_target {
         let operand_guarantees = [lhs_node.guarantee.as_ref(), rhs_node.guarantee.as_ref()];
@@ -2400,8 +2299,15 @@ fn realize_physical_summary_input(
 /// `SummaryEstimate` readout when `estimate` is set.
 // Retain the exact expression and schema while placing its value production
 // on the update path. Read-time consumers keep their original shared nodes.
-fn maintenance_exact_values(node: Rc<SummaryNode>) -> Rc<SummaryNode> {
+fn maintenance_exact_values(node: Rc<SummaryNode>) -> Option<Rc<SummaryNode>> {
     let expr = match &node.expr {
+        // These guards can fall back at read time, but cannot recover a parent
+        // sketch after an invalid value has entered its maintained state.
+        SummaryExpr::BinaryOp { operator, .. }
+            if operator.checked_finite_division || operator.checked_relative_division =>
+        {
+            return None;
+        }
         SummaryExpr::BinaryOp {
             lhs, rhs, operator, ..
         } if operator.vector_match.is_none()
@@ -2415,8 +2321,8 @@ fn maintenance_exact_values(node: Rc<SummaryNode>) -> Rc<SummaryNode> {
                 .is_some_and(ResultGuarantee::is_exact) =>
         {
             SummaryExpr::BinaryOp {
-                lhs: maintenance_exact_values(lhs.clone()),
-                rhs: maintenance_exact_values(rhs.clone()),
+                lhs: maintenance_exact_values(lhs.clone())?,
+                rhs: maintenance_exact_values(rhs.clone())?,
                 operator: operator.clone(),
                 timing: ExecutionTiming::MaintenanceTime,
             }
@@ -2439,13 +2345,13 @@ fn maintenance_exact_values(node: Rc<SummaryNode>) -> Rc<SummaryNode> {
                 timing: ExecutionTiming::MaintenanceTime,
             }
         }
-        _ => return node,
+        _ => return Some(node),
     };
-    Rc::new(SummaryNode {
+    Some(Rc::new(SummaryNode {
         expr,
         schema: node.schema.clone(),
         guarantee: node.guarantee.clone(),
-    })
+    }))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2511,7 +2417,10 @@ fn construct_summary_agg(
     // an exact scalar accumulator currently stores its value directly.
     let bound_child =
         finalize_exact_accumulator_at(bound_child, &input.child, ExecutionTiming::MaintenanceTime)?;
-    let bound_child = maintenance_exact_values(bound_child);
+    let bound_child = match maintenance_exact_values(bound_child) {
+        Some(child) => child,
+        None => keep_pre_asap(&input.child)?,
+    };
 
     // ── Guarantee (issue #172) ──────────────────────────────────────────
     // Derived *before* the node exists, so an illegal composition is never
@@ -5759,7 +5668,6 @@ mod tests {
         );
     }
 
-    // A ratio needs a value-error certificate for the expression, not two rank bounds.
     // Exact Top-K consumes the Planner's maintained temporal values.
     #[test]
     fn exact_temporal_topk_has_a_maintained_value_candidate() {
@@ -5785,8 +5693,9 @@ mod tests {
         }
     }
 
+    // Runtime division guards do not establish the input quantiles' error bounds.
     #[test]
-    fn quantile_ratio_has_a_sized_relative_value_candidate() {
+    fn quantile_ratio_without_input_proof_keeps_native_execution() {
         let target = AccuracyTarget::EpsilonDelta {
             epsilon: 0.01,
             delta: 0.01,
@@ -5797,12 +5706,9 @@ mod tests {
         ] {
             let root = Rc::new(asap_frontend_promql::lower_promql(query, target.clone()).unwrap());
             let models = Models::with_default_accuracy(&crate::cost_model::DefaultCostModel);
-            let node = realize_binary(&root, models, Some(&target))
+            assert!(realize_binary(&root, models, Some(&target))
                 .unwrap()
-                .expect("ratio candidate");
-            let guarantee = node.guarantee.as_ref().expect("ratio guarantee");
-            assert_eq!(guarantee.metric, ErrorMetric::RelativeValue);
-            assert!(DefaultAccuracyModel.satisfies(guarantee, &target));
+                .is_none());
         }
     }
 

@@ -148,6 +148,19 @@ does not establish a cardinality or L2 bound. This is the same separation of
 population/state identity from readout identity, implemented by the existing sketch
 rules rather than by converting UnivMon into an exact `MaintainPopulation` node.
 
+Quantile division requires evidence that the individual readouts satisfy their
+relative-error bounds. Finite operands, a nonzero divisor and a normal quotient
+alone do not provide that evidence: interpolation between negative and positive
+samples can cancel. The sketch strategy therefore retains native division when
+an operand is approximate and no input-domain proof is available.
+
+The sum/count rewrite of temporal average uses a read-time finite-division guard.
+When an outer maintained sketch consumes that average, the planner retains the
+native average expression as its maintenance input. It cannot move a read-time
+fallback guard into the update path, where a failed update could already have
+contaminated the outer state. This also applies to arithmetic containing a guarded
+average; the outer sketch candidate remains available.
+
 ## Acceptance evidence
 
 - PromQL quantiles, TopK limits and scalar readouts share only compatible populations.
