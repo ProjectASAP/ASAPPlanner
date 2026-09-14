@@ -16,7 +16,7 @@
 // SQL queries run against a fixed `metrics(ts, service, region, latency,
 // bytes)` catalog — the same table used in cross_language.rs and topk_ir.rs.
 
-use asap_devtools::{lower_promql, lower_sql, SqlCatalog};
+use asap_devtools::{lower_promql_with_data_ingestion_interval, lower_sql, SqlCatalog};
 use asap_types::pre_asap::schema::{Column, DataType, Schema};
 use asap_types::types::AccuracyTarget;
 use std::io::Read;
@@ -44,7 +44,18 @@ fn catalog() -> SqlCatalog {
 
 #[tokio::main]
 async fn main() {
-    let input = match std::env::args().nth(1) {
+    let mut args = std::env::args().skip(1);
+    assert_eq!(
+        args.next().as_deref(),
+        Some("--data-ingestion-interval-ms"),
+        "usage: show_pre_asap_ir --data-ingestion-interval-ms <ms> [queries.txt]"
+    );
+    let interval_ms = args
+        .next()
+        .expect("missing interval")
+        .parse()
+        .expect("interval must be an unsigned integer");
+    let input = match args.next() {
         Some(path) => {
             std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("failed to read {path}: {e}"))
         }
@@ -70,7 +81,11 @@ async fn main() {
                 Err(e) => println!("ERR: {e}"),
             }
         } else if let Some(q) = line.strip_prefix("promql>") {
-            match lower_promql(q.trim(), AccuracyTarget::Exact) {
+            match lower_promql_with_data_ingestion_interval(
+                q.trim(),
+                AccuracyTarget::Exact,
+                interval_ms,
+            ) {
                 Ok(qe) => println!("{qe:#?}"),
                 Err(e) => println!("ERR: {e}"),
             }

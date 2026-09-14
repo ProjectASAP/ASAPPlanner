@@ -3,7 +3,7 @@
 // Lowers every topk-shaped query from the design discussion and prints the
 // resulting pre-ASAP IR. Used for interactive exploration; not a test.
 
-use asap_devtools::{lower_promql, lower_sql, SqlCatalog};
+use asap_devtools::{lower_promql_with_data_ingestion_interval, lower_sql, SqlCatalog};
 use asap_types::pre_asap::schema::{Column, DataType, Schema};
 use asap_types::types::AccuracyTarget;
 
@@ -49,7 +49,7 @@ async fn show_sql(label: &str, query: &str) {
 fn show_promql(label: &str, query: &str) {
     println!("━━━ {label} ━━━");
     println!("{query}");
-    match lower_promql(query, AccuracyTarget::Exact) {
+    match lower_promql_with_data_ingestion_interval(query, AccuracyTarget::Exact, 1_000) {
         Ok(qe) => println!("{qe:#?}"),
         Err(e) => println!("ERR: {e}"),
     }

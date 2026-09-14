@@ -17,9 +17,10 @@
 
 #![allow(non_snake_case)]
 
-use asap_frontend_promql::lower_promql;
+mod support;
 use asap_types::pre_asap::QueryExpr;
 use asap_types::types::AccuracyTarget;
+use support::lower_promql;
 
 fn lo(q: &str) -> QueryExpr {
     lower_promql(q, AccuracyTarget::Exact).unwrap_or_else(|e| panic!("{q:?} should lower: {e}"))

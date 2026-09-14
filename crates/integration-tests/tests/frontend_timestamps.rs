@@ -1,7 +1,7 @@
 //! Cross-frontend evaluation-time semantics (issues #46 and #184).
 
-use asap_frontend_promql::lower_promql;
 use asap_frontend_sql::{lower_sql, SqlCatalog};
+use asap_integration_tests::fixtures::lower_promql;
 use asap_types::pre_asap::schema::{Column, DataType, Schema};
 use asap_types::pre_asap::QueryExpr;
 use asap_types::types::AccuracyTarget;

@@ -18,7 +18,6 @@ use asap_types::workload::{DurationMs, QueryLanguage, QueryWorkload};
 
 pub use error::PromqlError;
 pub use histogram::{HistogramCatalog, HistogramKind};
-pub use promql::PromqlLowerer;
 
 /// Lower every normalized PromQL workload entry to a plan-ready `QueryExpr`.
 ///
@@ -26,6 +25,20 @@ pub use promql::PromqlLowerer;
 /// injected around each bare instant selector. Explicit range selectors keep
 /// their query-specified range.
 pub fn lower_promql_workload(workload: &QueryWorkload) -> Result<Vec<QueryExpr>, PromqlError> {
+    lower_promql_workload_inner(workload)
+}
+
+/// Like [`lower_promql_workload`], but uses `histograms` to distinguish classic
+/// bucket interpolation from generic sketchable quantiles.
+pub fn lower_promql_workload_with_histograms(
+    workload: &QueryWorkload,
+    histograms: HistogramCatalog,
+) -> Result<Vec<QueryExpr>, PromqlError> {
+    let _guard = histogram::CatalogGuard::install(histograms);
+    lower_promql_workload_inner(workload)
+}
+
+fn lower_promql_workload_inner(workload: &QueryWorkload) -> Result<Vec<QueryExpr>, PromqlError> {
     if !matches!(workload.language, QueryLanguage::PromQL) {
         return Err(PromqlError::WrongLanguage(format!(
             "{:?}",
@@ -43,7 +56,7 @@ pub fn lower_promql_workload(workload: &QueryWorkload) -> Result<Vec<QueryExpr>,
     workload
         .entries()
         .map(|entry| {
-            let unresolved = PromqlLowerer::lower_with_ingestion_interval(
+            let unresolved = promql::PromqlLowerer::lower_with_ingestion_interval(
                 &entry.query.0,
                 &entry.requirements.accuracy.target(),
                 std::time::Duration::from_millis(interval_ms),

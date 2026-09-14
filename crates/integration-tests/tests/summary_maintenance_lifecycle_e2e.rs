@@ -12,16 +12,16 @@ use asap_aware_mapping::{
     SummaryMaintenanceCapabilities, SummaryMaintenanceLifecycleCapabilities,
     SummaryMaintenanceLifecycleCostInputs, SummaryMaintenanceLifecycleRejection, WorkloadDemand,
 };
-use asap_frontend_promql::lower_promql_batch;
+use asap_frontend_promql::lower_promql_workload;
 use asap_types::post_asap::{
     EvaluationSchedule, SummaryMaintenanceLifecycle, SummaryMaintenanceMode, SummaryNode,
 };
 use asap_types::pre_asap::agg_intent::AggIntent;
 use asap_types::types::AccuracyTarget;
 use asap_types::workload::{
-    AccuracyRequirement, BatchEntry, DataArrival, DataWorkload, Evidence, EvidenceSource,
-    Predictability, Query, QueryLanguage, QueryRequirements, QueryTimeScope, QueryWorkload, Rate,
-    RepeatedDemand, RepeatingEntry, RepetitionInterval, TimeSelection,
+    AccuracyRequirement, BatchEntry, DataArrival, DataWorkload, DurationMs, Evidence,
+    EvidenceSource, Predictability, Query, QueryLanguage, QueryRequirements, QueryTimeScope,
+    QueryWorkload, Rate, RepeatedDemand, RepeatingEntry, RepetitionInterval, TimeSelection,
 };
 
 const NOW_MS: u64 = 1_000_000;
@@ -104,6 +104,10 @@ fn dashboard_workload() -> QueryWorkload {
                 observed_at_ms: Some(NOW_MS),
                 valid_for_ms: Some(60_000),
             },
+            data_ingestion_interval: Evidence {
+                value: Some(DurationMs(1_000)),
+                ..Default::default()
+            },
             ..DataWorkload::default()
         }),
     }
@@ -114,11 +118,11 @@ fn promql_dashboard_materializes_continuous_summary_with_explained_rejections() 
     let workload = dashboard_workload();
     workload.validate().unwrap();
 
-    let lowered = lower_promql_batch(&workload)
+    let lowered = lower_promql_workload(&workload)
+        .expect("valid PromQL workload")
         .into_iter()
         .next()
-        .expect("one normalized workload entry")
-        .expect("valid PromQL");
+        .expect("one normalized workload entry");
     let root = Rc::new(lowered);
     let strategies = asap_aware_mapping::default_strategies_with(&FullyCostedRuntime);
     let space = search_workload_with(vec![("dashboard", Rc::clone(&root))], &strategies);

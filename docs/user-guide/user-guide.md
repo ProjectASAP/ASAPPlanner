@@ -135,13 +135,36 @@ Lower a query string with a front end. Front ends never depend on each other or 
 pull only the one you need.
 
 ```rust
-use asap_frontend_promql::lower_promql;
+use asap_frontend_promql::lower_promql_workload;
 use asap_types::types::AccuracyTarget;
+use asap_types::workload::{
+    AccuracyRequirement, BatchEntry, DataWorkload, DurationMs, Evidence, Predictability, Query,
+    QueryLanguage, QueryRequirements, QueryWorkload, TimeSelection,
+};
 
-let pre_asap = lower_promql(
-    "quantile(0.99, rate(http_requests_total[5m]))",
-    AccuracyTarget::Epsilon(0.01),
-)?; // QueryExpr
+let workload = QueryWorkload {
+    language: QueryLanguage::PromQL,
+    query_batch: Some(vec![BatchEntry {
+        query: Query("quantile(0.99, rate(http_requests_total[5m]))".into()),
+        requirements: QueryRequirements {
+            accuracy: AccuracyRequirement::Explicit(AccuracyTarget::Epsilon(0.01)),
+            ..Default::default()
+        },
+        predictability: Predictability::Unknown,
+        invocations: 1,
+        execute_at: None,
+        time_selection: TimeSelection::default(),
+    }]),
+    repeating_queries: None,
+    data_workload: Some(DataWorkload {
+        data_ingestion_interval: Evidence {
+            value: Some(DurationMs(1_000)),
+            ..Default::default()
+        },
+        ..Default::default()
+    }),
+};
+let pre_asap = lower_promql_workload(&workload)?; // Vec<QueryExpr>
 ```
 
 (SQL: `asap_frontend_sql::lower_sql(query, &catalog, accuracy).await` — needs a `SqlCatalog`

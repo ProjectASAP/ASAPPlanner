@@ -80,7 +80,7 @@ use crate::error::PromqlError as LoweringError;
 type Result<T> = std::result::Result<T, LoweringError>;
 
 /// Parses and lowers (→ the canonical, unresolved tree) a PromQL query string.
-pub struct PromqlLowerer;
+pub(crate) struct PromqlLowerer;
 
 #[derive(Debug, Clone)]
 enum Outer {
@@ -172,26 +172,6 @@ struct Inner {
 const MAX_DEPTH: usize = 256;
 
 impl PromqlLowerer {
-    /// Lower `query` to the canonical Unresolved tree, threading `accuracy` onto every
-    /// approximate intent (`Count`, `Quantile`, `Cardinality`, `TopK`) as it is
-    /// built — this front end constructs the canonical shape directly (issue
-    /// #179), so accuracy is baked in here rather than threaded through a
-    /// later, separate converter pass. `accuracy` rides the same ambient,
-    /// thread-local mechanism as `histogram::CatalogGuard`
-    /// — synchronous, one-query-at-a-time lowering, injected into the deep
-    /// `walk` recursion without a parameter on every one of its ~30 mutually
-    /// recursive signatures; consulted only at the handful of sites that build
-    /// an accuracy-bearing `AggIntent`.
-    pub fn lower(query: &str, accuracy: &AccuracyTarget) -> Result<Unresolved> {
-        let _guard = AccuracyGuard::install(accuracy.clone());
-        let ast = parser::parse(query).map_err(LoweringError::Parse)?;
-        // Reject over-deep nesting up front, so the (mutually-recursive) walk
-        // below cannot blow the stack. The check itself recurses at most
-        // `MAX_DEPTH` frames before erroring, so it is bounded too.
-        check_depth(&ast, MAX_DEPTH)?;
-        walk(&ast)
-    }
-
     pub(crate) fn lower_with_ingestion_interval(
         query: &str,
         accuracy: &AccuracyTarget,
@@ -396,7 +376,7 @@ fn range_fn_over_subquery(call: &Call) -> Result<Option<Unresolved>> {
             "increase" => InnerFunc::Increase,
             _ => unreachable!(),
         };
-        return Ok(Some(outer_aggregate(
+        return Ok(Some(per_series_aggregate(
             vec![],
             inner_intent(&inner),
             walk(arg_expr)?,
@@ -444,7 +424,7 @@ fn range_fn_over_subquery(call: &Call) -> Result<Option<Unresolved>> {
     if !is_subquery(arg_expr) {
         return Ok(None);
     }
-    Ok(Some(outer_aggregate(
+    Ok(Some(per_series_aggregate(
         vec![],
         inner_intent(&inner),
         walk(arg_expr)?,
@@ -777,7 +757,7 @@ fn walk_histogram_quantiles(call: &Call) -> Result<Unresolved> {
                 AggIntent::HistogramQuantile { q: phi }
             };
             let child = walk(vec_expr)?;
-            let reduction = reduction_for(&[], &intent, &child);
+            let reduction = reduction_for(&[], intent.is_per_series());
             let quantile = Unresolved::Aggregate {
                 reduction,
                 measures: vec![intent],
@@ -1583,22 +1563,13 @@ fn build(inner: Inner, keys: Vec<ColumnRef>, outer: Outer) -> Result<Unresolved>
 }
 
 /// Decide `PerEntity` vs `Reduce(by)` for a canonical `Aggregate`, entirely
-/// from local, already-in-scope information (issue #179's "local,
-/// context-free structural rewriting"): the keys list, the intent's own
-/// `is_per_series` flag, and whether the child being wrapped is already a
-/// range/subquery marker — no schema needed. `without()` is applied
+/// from local PromQL semantics: the keys and whether this operation preserves
+/// each input series. It never infers entity reduction from the child tree's
+/// temporal shape. `without()` is applied
 /// separately, post-hoc, by `mark_without` — see its doc for why that's still
 /// correct here.
-fn reduction_for(
-    keys: &[ColumnRef],
-    intent: &AggIntent<ColumnRef>,
-    child: &Unresolved,
-) -> Reduction<ColumnRef> {
-    let is_range_child = matches!(
-        child,
-        Unresolved::TimeRange { .. } | Unresolved::PromqlSubquery { .. }
-    );
-    if keys.is_empty() && (intent.is_per_series() || is_range_child) {
+fn reduction_for(keys: &[ColumnRef], per_entity: bool) -> Reduction<ColumnRef> {
+    if keys.is_empty() && per_entity {
         Reduction::PerEntity
     } else {
         Reduction::Reduce(GroupKeys::by(keys.to_vec()))
@@ -1623,12 +1594,17 @@ fn windowed_aggregate(
             range: w,
             child: Rc::new(base),
         },
-        None => Unresolved::TimeRange {
-            range: current_ingestion_interval(),
-            child: Rc::new(base),
-        },
+        None => base,
     };
-    let reduction = reduction_for(&keys, &intent, &child);
+    let reduction = reduction_for(&keys, inner.window.is_some() || intent.is_per_series());
+    let child = if inner.window.is_none() {
+        Unresolved::TimeRange {
+            range: current_ingestion_interval(),
+            child: Rc::new(child),
+        }
+    } else {
+        child
+    };
     Unresolved::Aggregate {
         reduction,
         measures: vec![intent],
@@ -1649,7 +1625,26 @@ fn outer_aggregate(
     intent: AggIntent<ColumnRef>,
     child: Unresolved,
 ) -> Unresolved {
-    let reduction = reduction_for(&keys, &intent, &child);
+    let reduction = reduction_for(&keys, intent.is_per_series());
+    Unresolved::Aggregate {
+        reduction,
+        measures: vec![intent],
+        output_names: vec![String::new()],
+        having: None,
+        child: Rc::new(child),
+    }
+}
+
+/// A temporal range function over a subquery consumes each series' subquery
+/// samples independently. Unlike an ordinary outer aggregate, this cannot be
+/// inferred from the intent: `max` is cross-series in `max(v)`, but per-series
+/// in `max_over_time(v[...])`.
+fn per_series_aggregate(
+    keys: Vec<ColumnRef>,
+    intent: AggIntent<ColumnRef>,
+    child: Unresolved,
+) -> Unresolved {
+    let reduction = reduction_for(&keys, true);
     Unresolved::Aggregate {
         reduction,
         measures: vec![intent],

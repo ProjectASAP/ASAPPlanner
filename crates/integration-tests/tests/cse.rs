@@ -25,7 +25,7 @@
 use std::rc::Rc;
 
 use asap_aware_mapping::{search_workload, Replacement};
-use asap_frontend_promql::lower_promql;
+use asap_integration_tests::fixtures::lower_promql;
 use asap_types::pre_asap::query_expr::QueryExpr;
 use asap_types::types::AccuracyTarget;
 

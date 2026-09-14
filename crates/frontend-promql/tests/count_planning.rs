@@ -2,12 +2,13 @@
 use std::rc::Rc;
 
 use asap_aware_mapping::{Replacement, ReplacementStrategy, SketchAlgorithmStrategy, TargetSubDAG};
-use asap_frontend_promql::lower_promql;
+mod support;
 use asap_types::post_asap::{
     compile_executable_dag, ExactKind, ExecutableOperatorPayload, NonNegativeWeightProof,
     SketchAlgorithm, SummaryExpr, SummaryFamilyType, SummaryInputExpr, WeightDomain,
 };
 use asap_types::types::AccuracyTarget;
+use support::lower_promql;
 
 // Exact series and temporal counts must select a count accumulator, not distinct or sum.
 #[test]
@@ -111,7 +112,10 @@ fn aggregate_fixture(query: &str, series: &[Vec<f64>]) -> Vec<f64> {
     match child.as_ref() {
         QueryExpr::Scan { .. } => assert!(series.iter().all(|samples| samples.len() == 1)),
         QueryExpr::TimeRange { range, child } => {
-            assert_eq!(range.as_secs(), 300);
+            assert!(matches!(range.as_secs(), 1 | 300));
+            if range.as_secs() == 1 {
+                assert!(series.iter().all(|samples| samples.len() == 1));
+            }
             assert!(matches!(child.as_ref(), QueryExpr::Scan { .. }));
         }
         other => panic!("unsupported fixture input: {other:?}"),

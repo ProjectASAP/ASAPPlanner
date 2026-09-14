@@ -890,7 +890,7 @@ mod tests {
         agg_intent::AggIntent, Column, ColumnRef, DataType, QueryExpr, Reduction, Schema, Source,
     };
     use asap_types::workload::{
-        DataWorkload, Evidence, EvidenceSource, Predictability, Query, QueryLanguage,
+        DataWorkload, DurationMs, Evidence, EvidenceSource, Predictability, Query, QueryLanguage,
         QueryRecurrence, QueryRequirements, QueryTimeScope, QueryWorkload, QueryWorkloadEntry,
         Rate, RepeatedDemand, RepeatingEntry, RepetitionInterval, TimeSelection,
     };
@@ -1152,6 +1152,10 @@ mod tests {
             }]),
             data_workload: Some(DataWorkload {
                 arrival: DataArrival::ContinuouslyIngesting,
+                data_ingestion_interval: Evidence {
+                    value: Some(DurationMs(1_000)),
+                    ..Default::default()
+                },
                 ingestion_rate: Evidence {
                     value: Some(Rate(2.0)),
                     source: EvidenceSource::Declared,
@@ -3090,6 +3094,10 @@ mod tests {
             }]),
             data_workload: Some(DataWorkload {
                 arrival: DataArrival::ContinuouslyIngesting,
+                data_ingestion_interval: Evidence {
+                    value: Some(DurationMs(1_000)),
+                    ..Default::default()
+                },
                 ingestion_rate: Evidence {
                     value: Some(Rate(2.0)),
                     source: EvidenceSource::Declared,
