@@ -731,7 +731,7 @@ fn walk_histogram_quantiles(call: &Call) -> Result<Unresolved> {
     let sketchable = histogram_arg_is_sketchable(vec_expr);
     let branches = (2..call.args.args.len())
         .map(|i| {
-            let phi = quantile_param(num_arg(call, i)?)?;
+            let phi = bounded_quantile_param(num_arg(call, i)?)?;
             let intent = if sketchable {
                 AggIntent::Quantile {
                     col: None,
@@ -2010,10 +2010,14 @@ fn ratio_param(agg: &AggregateExpr) -> Result<f64> {
     Ok(r.clamp(-1.0, 1.0))
 }
 
-/// Quantile φ — must be a finite value in `[0, 1]`. Rejects NaN/∞ and
-/// out-of-range φ (which would otherwise propagate into a bogus intent and
-/// output-column name like `quantile_NaN`).
+/// Preserve the full Prometheus quantile parameter domain, including special values.
 fn quantile_param(q: f64) -> Result<f64> {
+    // Prometheus returns NaN/-Inf/+Inf for these parameters at execution time.
+    Ok(q)
+}
+
+// The non-standard histogram_quantiles extension keeps its bounded label contract.
+fn bounded_quantile_param(q: f64) -> Result<f64> {
     if q.is_finite() && (0.0..=1.0).contains(&q) {
         Ok(q)
     } else {

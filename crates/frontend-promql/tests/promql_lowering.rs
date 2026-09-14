@@ -755,15 +755,18 @@ fn fractional_or_negative_topk_k_is_rejected() {
 }
 
 #[test]
-fn out_of_range_quantile_phi_is_rejected() {
-    // φ outside [0,1] would otherwise yield a bogus `quantile_1_5` column.
-    assert!(lower_promql("quantile(1.5, up)", AccuracyTarget::Exact).is_err());
-    assert!(lower_promql("quantile_over_time(1.5, m[5m])", AccuracyTarget::Exact).is_err());
-    assert!(lower_promql(
+fn out_of_range_quantile_phi_is_accepted() {
+    // Prometheus defines out-of-range phi results; lowering must preserve it.
+    for query in [
+        "quantile(1.5, up)",
+        "quantile_over_time(1.5, m[5m])",
         "histogram_quantile(2.0, rate(b[5m]))",
-        AccuracyTarget::Exact
-    )
-    .is_err());
+    ] {
+        assert!(
+            lower_promql(query, AccuracyTarget::Exact).is_ok(),
+            "{query}"
+        );
+    }
 }
 
 #[test]
