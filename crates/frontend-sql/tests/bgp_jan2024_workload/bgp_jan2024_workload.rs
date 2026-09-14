@@ -198,7 +198,10 @@ async fn corpus_lowering_matches_the_pinned_aggregate_tally() {
     // entry, so the query still fails at the first unknown-function name it
     // hits, just no longer `laginframe`. Out of scope for #267, same as
     // `splitByChar`'s array-indexing companion gap above.
-    expect(Category::Lowered, 152);
+    // 152 -> 154: `ScalarValue::Interval` (this branch) converts the
+    // `INTERVAL x unit` literal the two `toStartOfInterval(...)` queries
+    // carry, which the note above recorded as an open companion gap.
+    expect(Category::Lowered, 154);
     expect(Category::Plan, 40);
     expect(Category::Schema, 0);
     expect(Category::Parse, 0);
@@ -212,8 +215,8 @@ async fn corpus_lowering_matches_the_pinned_aggregate_tally() {
     // during typed planning because the Map adapter rejects array inputs.
     expect(Category::NotImplemented, 0);
     expect(Category::UnsupportedFeature, 6);
-    // Two `toStartOfInterval(...)` queries -- see the `toStartOfInterval`
-    // note above; a pre-existing `INTERVAL`-literal conversion gap, not a
-    // ClickHouse scalar-builtin catalog gap.
-    expect(Category::Other, 2);
+    // Was 2: the two `toStartOfInterval(...)` queries whose `INTERVAL`-literal
+    // conversion gap the `toStartOfInterval` note above describes. Both now
+    // lower end to end and are counted in `Lowered`.
+    expect(Category::Other, 0);
 }

@@ -53,6 +53,24 @@ pub(super) fn scalar_value_to_asap(sv: &DfScalarValue) -> Result<ScalarValue, Lo
             Ok(ScalarValue::Utf8(s.clone()))
         }
         DfScalarValue::Boolean(Some(b)) => Ok(ScalarValue::Boolean(*b)),
+        // All three of DataFusion's interval scalars land on one canonical
+        // shape; the narrower two simply leave the fields they do not carry
+        // at zero.
+        DfScalarValue::IntervalYearMonth(Some(months)) => Ok(ScalarValue::Interval {
+            months: *months,
+            days: 0,
+            nanos: 0,
+        }),
+        DfScalarValue::IntervalDayTime(Some(v)) => Ok(ScalarValue::Interval {
+            months: 0,
+            days: v.days,
+            nanos: i64::from(v.milliseconds) * 1_000_000,
+        }),
+        DfScalarValue::IntervalMonthDayNano(Some(v)) => Ok(ScalarValue::Interval {
+            months: v.months,
+            days: v.days,
+            nanos: v.nanoseconds,
+        }),
         _ if sv.is_null() => Ok(ScalarValue::Null),
         _ => Err(LoweringError::InvalidExpression(format!(
             "unsupported scalar: {sv:?}"
@@ -72,6 +90,7 @@ pub(super) fn arrow_to_dtype(dt: &ArrowDataType) -> Result<DataType, LoweringErr
         ArrowDataType::Utf8 | ArrowDataType::LargeUtf8 => Ok(DataType::Utf8),
         ArrowDataType::Boolean => Ok(DataType::Bool),
         ArrowDataType::Timestamp(_, _) => Ok(DataType::Timestamp),
+        ArrowDataType::Date32 | ArrowDataType::Date64 => Ok(DataType::Date),
         ArrowDataType::List(element) => Ok(DataType::List {
             element: Box::new(Column::new(
                 element.name(),
@@ -155,6 +174,18 @@ pub(super) fn dtype_to_arrow(dt: &DataType) -> ArrowDataType {
         DataType::Timestamp => {
             ArrowDataType::Timestamp(datafusion::arrow::datatypes::TimeUnit::Millisecond, None)
         }
+        // Deliberately narrowing: `Date64` lowers to `DataType::Date` and comes
+        // back as `Date32`. Both spell the same calendar date and nothing in
+        // the planner reads the width; a catalog that wants `Date64` back would
+        // need a second variant carrying no planning information.
+        DataType::Date => ArrowDataType::Date32,
+        // Only reachable through a hand-built schema: `Interval` types a
+        // literal, and no catalog declares a column with it. Mapped to the
+        // same three-field shape `ScalarValue::Interval` carries rather than
+        // left to panic.
+        DataType::Interval => {
+            ArrowDataType::Interval(datafusion::arrow::datatypes::IntervalUnit::MonthDayNano)
+        }
     }
 }
 
@@ -171,6 +202,59 @@ pub(super) fn schema_to_arrow(schema: &Schema) -> ArrowSchema {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Both Arrow date widths bridge to the one canonical `Date`, and it
+    /// registers back as `Date32` — the documented narrowing.
+    #[test]
+    fn both_arrow_date_widths_bridge_to_date() {
+        assert_eq!(
+            arrow_to_dtype(&ArrowDataType::Date32).unwrap(),
+            DataType::Date
+        );
+        assert_eq!(
+            arrow_to_dtype(&ArrowDataType::Date64).unwrap(),
+            DataType::Date
+        );
+        assert_eq!(dtype_to_arrow(&DataType::Date), ArrowDataType::Date32);
+    }
+
+    /// All three of DataFusion's interval scalars carry into the one canonical
+    /// three-field shape, with the fields they do not spell left at zero.
+    #[test]
+    fn every_datafusion_interval_scalar_carries_across() {
+        use datafusion::arrow::datatypes::{IntervalDayTime, IntervalMonthDayNano};
+
+        assert_eq!(
+            scalar_value_to_asap(&DfScalarValue::IntervalYearMonth(Some(14))).unwrap(),
+            ScalarValue::Interval {
+                months: 14,
+                days: 0,
+                nanos: 0
+            }
+        );
+        assert_eq!(
+            scalar_value_to_asap(&DfScalarValue::IntervalDayTime(Some(IntervalDayTime::new(
+                30, 500
+            ))))
+            .unwrap(),
+            ScalarValue::Interval {
+                months: 0,
+                days: 30,
+                nanos: 500_000_000
+            }
+        );
+        assert_eq!(
+            scalar_value_to_asap(&DfScalarValue::IntervalMonthDayNano(Some(
+                IntervalMonthDayNano::new(1, 2, 3)
+            )))
+            .unwrap(),
+            ScalarValue::Interval {
+                months: 1,
+                days: 2,
+                nanos: 3
+            }
+        );
+    }
 
     /// Nested map values and value nullability survive catalog registration.
     #[test]

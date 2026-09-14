@@ -29,6 +29,10 @@ name = "synthetic_packet_trace"
 path = "tests/data_quality_check/synthetic_packet_trace.rs"
 
 [[test]]
+name = "tpch_deequ"
+path = "tests/data_quality_check/tpch_deequ.rs"
+
+[[test]]
 name = "netflow"
 path = "tests/netflow/netflow.rs"
 
