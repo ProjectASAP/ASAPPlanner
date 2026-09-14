@@ -47,6 +47,15 @@ pub enum ScalarValue {
     Utf8(String),
     Boolean(bool),
     Null,
+    /// A calendar duration, in Arrow's three independent fields. Not collapsed
+    /// into one nanosecond count: a month is not a fixed number of nanoseconds,
+    /// so `INTERVAL '1' MONTH` has no faithful scalar form. DataFusion's three
+    /// interval scalars (`YearMonth`, `DayTime`, `MonthDayNano`) all lower here.
+    Interval {
+        months: i32,
+        days: i32,
+        nanos: i64,
+    },
 }
 
 /// Binary comparison operators.
