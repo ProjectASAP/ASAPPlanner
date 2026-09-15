@@ -822,7 +822,7 @@ pub(crate) fn implementations_for_with(
         AggIntent::Avg { .. }
         | AggIntent::StdDev { .. }
         | AggIntent::Variance { .. }
-        | AggIntent::Bivariate { .. } => {
+        | AggIntent::PearsonCorr { .. } => {
             vec![Implementation::PassThrough]
         }
 
@@ -6067,12 +6067,8 @@ mod tests {
 
     // Correlation must never acquire a single-input sketch or scalar accumulator.
     #[test]
-    fn bivariate_aggregate_keeps_exact_paired_input() {
-        let intent = AggIntent::Bivariate {
-            op: asap_types::pre_asap::BivariateAggOp::Correlation,
-            left: 0,
-            right: 1,
-        };
+    fn pearson_corr_keeps_exact_paired_input() {
+        let intent = AggIntent::PearsonCorr { left: 0, right: 1 };
         assert!(matches!(
             implementations_for_with(&intent, &crate::cost_model::DefaultCostModel).as_slice(),
             [Implementation::PassThrough]

@@ -1069,14 +1069,10 @@ mod tests {
 
     // Both paired operands must be plain; an unrelated state column is not an input.
     #[test]
-    fn bivariate_aggregate_checks_both_operand_states() {
+    fn pearson_corr_checks_both_operand_states() {
         let operation = ValueOperation::Exact(ExactOperation::Aggregate {
             reduction: Reduction::by(vec![]),
-            measures: vec![AggIntent::Bivariate {
-                op: crate::pre_asap::BivariateAggOp::Correlation,
-                left: 0,
-                right: 1,
-            }],
+            measures: vec![AggIntent::PearsonCorr { left: 0, right: 1 }],
             output_names: vec![],
             having: None,
         });

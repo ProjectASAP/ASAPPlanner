@@ -1,8 +1,8 @@
-//! Two-input aggregates retain paired arguments through SQL lowering and exact planning.
+//! Correlation retains both arguments through SQL lowering and exact planning.
 use std::rc::Rc;
 
 use asap_frontend_sql::{lower_sql, SqlCatalog};
-use asap_types::pre_asap::{AggIntent, BivariateAggOp, Column, DataType, QueryExpr, Schema};
+use asap_types::pre_asap::{AggIntent, Column, DataType, QueryExpr, Schema};
 use asap_types::types::AccuracyTarget;
 
 fn catalog() -> SqlCatalog {
@@ -45,14 +45,7 @@ async fn corr_materializes_both_arguments() {
     ] {
         let query = lower(sql).await;
         let (measures, child) = aggregate(&query);
-        assert_eq!(
-            measures,
-            &[AggIntent::Bivariate {
-                op: BivariateAggOp::Correlation,
-                left: 0,
-                right: 1,
-            }]
-        );
+        assert_eq!(measures, &[AggIntent::PearsonCorr { left: 0, right: 1 }]);
         let QueryExpr::Project { cols, .. } = child else {
             panic!("derived inputs")
         };
@@ -87,7 +80,7 @@ async fn corr_coexists_with_grouping_having_and_other_measures() {
     let (measures, child) = aggregate(&query);
     let pair = measures
         .iter()
-        .find(|m| matches!(m, AggIntent::Bivariate { .. }))
+        .find(|m| matches!(m, AggIntent::PearsonCorr { .. }))
         .unwrap();
     let schema = child.output_schema().unwrap();
     for id in pair.input_cols() {

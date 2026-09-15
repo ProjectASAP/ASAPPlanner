@@ -40,14 +40,6 @@ use crate::types::AccuracyTarget;
 #[serde(tag = "kind", rename_all = "snake_case")]
 #[serde(bound(serialize = "C: Serialize", deserialize = "C: Deserialize<'de>"))]
 pub enum AggIntent<C = ColumnId> {
-    /// A reduction over paired values from two explicit input columns.
-    /// Operation semantics live in `BivariateAggOp`; both references participate
-    /// in binding and dependency tracking, unlike an opaque extension payload.
-    Bivariate {
-        op: BivariateAggOp,
-        left: C,
-        right: C,
-    },
     // ── Data-model-agnostic ──────────────────────────────────────────────
     Count {
         accuracy: AccuracyTarget,
@@ -80,6 +72,13 @@ pub enum AggIntent<C = ColumnId> {
         #[serde(default)]
         col: Option<C>,
         population: bool,
+    },
+    /// Pearson correlation — SQL `CORR(left, right)`. The only aggregate with
+    /// two value inputs; both references take part in binding and dependency
+    /// tracking, so neither is reachable through `input_col`.
+    PearsonCorr {
+        left: C,
+        right: C,
     },
     /// φ-quantile of `col`. SQL `approx_percentile_cont(col, φ)` and
     /// `median(col)` (φ=0.5); PromQL `quantile(φ, …)` leaves `col` as `None`
@@ -288,15 +287,6 @@ pub enum AggIntent<C = ColumnId> {
     },
 }
 
-/// Operations supported by the two-input aggregate shape. New operations
-/// must define their output type and exact/summary realization explicitly.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum BivariateAggOp {
-    /// Pearson correlation over pairs where both inputs are non-null.
-    Correlation,
-}
-
 /// Time / calendar accessor functions (issue #46), evaluated over a timestamp.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "fn", rename_all = "snake_case")]
@@ -489,12 +479,12 @@ impl<C: Clone> AggIntent<C> {
     /// An empty list retains the existing implicit sample/row-count convention.
     pub fn input_cols(&self) -> Vec<C> {
         match self {
-            Self::Bivariate { left, right, .. } => vec![left.clone(), right.clone()],
+            Self::PearsonCorr { left, right } => vec![left.clone(), right.clone()],
             _ => self.input_col().into_iter().collect(),
         }
     }
 
-    /// The explicit input of a single-column reducer. Bivariate aggregates,
+    /// The explicit input of a single-column reducer. `PearsonCorr`,
     /// argument-less aggregates, and implicit PromQL sample inputs return `None`.
     /// Use `input_cols` for dependency tracking; this accessor is for consumers
     /// that have already selected a single-column implementation.
@@ -529,9 +519,9 @@ impl<C: Clone> AggIntent<C> {
             AggIntent::Avg { .. } => col("avg", DataType::Float64, false),
             AggIntent::StdDev { .. } => col("stddev", DataType::Float64, false),
             AggIntent::Variance { .. } => col("variance", DataType::Float64, false),
-            AggIntent::Bivariate { op, .. } => match op {
-                BivariateAggOp::Correlation => col("corr", DataType::Float64, true),
-            },
+            // Nullable: correlation is undefined for fewer than two pairs where
+            // both inputs are non-null, and for a zero-variance input.
+            AggIntent::PearsonCorr { .. } => col("corr", DataType::Float64, true),
             AggIntent::Quantile { q, .. } => col(
                 &format!("quantile_{}", quantile_suffix(*q)),
                 DataType::Float64,
@@ -664,7 +654,7 @@ pub fn agg_is_mergeable(op: &AggIntent) -> bool {
         AggIntent::Avg { .. }
             | AggIntent::StdDev { .. }
             | AggIntent::Variance { .. }
-            | AggIntent::Bivariate { .. }
+            | AggIntent::PearsonCorr { .. }
     )
 }
 
@@ -678,7 +668,7 @@ pub fn agg_is_exact(op: &AggIntent) -> bool {
             | AggIntent::Avg { .. }
             | AggIntent::Min { .. }
             | AggIntent::Max { .. }
-            | AggIntent::Bivariate { .. }
+            | AggIntent::PearsonCorr { .. }
             | AggIntent::Group
             | AggIntent::CountValues { .. }
     )
@@ -733,14 +723,10 @@ mod tests {
         Column::new(name, dtype, false)
     }
 
-    // Paired aggregates expose both dependencies but cannot merge final scalar results.
+    // Correlation exposes both dependencies but cannot merge final scalar results.
     #[test]
-    fn bivariate_aggregate_contract() {
-        let intent = AggIntent::Bivariate {
-            op: BivariateAggOp::Correlation,
-            left: 2,
-            right: 5,
-        };
+    fn pearson_corr_contract() {
+        let intent = AggIntent::PearsonCorr { left: 2, right: 5 };
         assert_eq!(intent.input_cols(), vec![2, 5]);
         assert_eq!(intent.input_col(), None);
         assert!(agg_is_exact(&intent));
@@ -749,8 +735,7 @@ mod tests {
         assert_eq!(output.dtype, DataType::Float64);
         assert!(output.nullable);
         let value = serde_json::to_value(&intent).unwrap();
-        assert_eq!(value["kind"], "bivariate");
-        assert_eq!(value["op"], "correlation");
+        assert_eq!(value["kind"], "pearson_corr");
         assert_eq!(serde_json::from_value::<AggIntent>(value).unwrap(), intent);
     }
 

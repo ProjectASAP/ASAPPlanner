@@ -1637,8 +1637,7 @@ fn lower_agg_intent(expr: &Expr) -> Result<AggIntent<ColumnRef>, LoweringError> 
                             "corr requires two arguments".into(),
                         ));
                     };
-                    AggIntent::Bivariate {
-                        op: asap_types::pre_asap::BivariateAggOp::Correlation,
+                    AggIntent::PearsonCorr {
                         left: expr_to_group_ref(left)?,
                         right: expr_to_group_ref(right)?,
                     }
