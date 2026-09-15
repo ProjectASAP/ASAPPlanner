@@ -1663,6 +1663,7 @@ fn infer_expr_type(
     schema: &Schema,
 ) -> Result<(DataType, bool), QueryExprError> {
     Ok(match expr {
+        QueryExpr::CurrentTimestamp => (DataType::Timestamp, false),
         QueryExpr::Column(id) => schema
             .columns
             .get(*id)
@@ -1674,6 +1675,7 @@ fn infer_expr_type(
             ScalarValue::Utf8(_) => (DataType::Utf8, false),
             ScalarValue::Boolean(_) => (DataType::Bool, false),
             ScalarValue::Null => (DataType::Null, true),
+            ScalarValue::Interval { .. } => (DataType::Interval, false),
         },
         // Boolean-valued expressions (SQL three-valued logic → nullable).
         QueryExpr::Compare { .. }
@@ -1683,13 +1685,39 @@ fn infer_expr_type(
         | QueryExpr::IsNull(_)
         | QueryExpr::IsNotNull(_)
         | QueryExpr::InList { .. } => (DataType::Bool, true),
-        QueryExpr::Arithmetic { left, right, .. } => {
+        QueryExpr::Arithmetic { op, left, right } => {
             let (lt, ln) = infer_expr_type(left, schema)?;
             let (rt, rn) = infer_expr_type(right, schema)?;
-            let dtype = if matches!(lt, DataType::Int64) && matches!(rt, DataType::Int64) {
-                DataType::Int64
-            } else {
-                DataType::Float64
+            // Temporal subtraction yields a fixed duration with a unit, not a
+            // calendar interval or a floating-point number. Until the IR can
+            // preserve that unit, fail instead of publishing a numeric schema.
+            if matches!(op, ArithmeticOpKind::Sub)
+                && matches!(lt, DataType::Date | DataType::Timestamp)
+                && matches!(rt, DataType::Date | DataType::Timestamp)
+            {
+                return Err(QueryExprError::InvalidScalarSignature(
+                    "temporal subtraction produces an unsupported duration type".into(),
+                ));
+            }
+
+            // Operand order is not checked: the orders that are not valid SQL
+            // (`Interval - Timestamp`) are rejected by the planner upstream, so
+            // a pair rule stays as small as the numeric one it sits beside.
+            let dtype = match (&lt, &rt) {
+                // SQL unary minus lowers to -1 * expression, including intervals.
+                (DataType::Int64, DataType::Interval) | (DataType::Interval, DataType::Int64)
+                    if matches!(op, ArithmeticOpKind::Mul) =>
+                {
+                    DataType::Interval
+                }
+                (DataType::Timestamp, DataType::Interval)
+                | (DataType::Interval, DataType::Timestamp) => DataType::Timestamp,
+                (DataType::Date, DataType::Interval) | (DataType::Interval, DataType::Date) => {
+                    DataType::Date
+                }
+                (DataType::Interval, DataType::Interval) => DataType::Interval,
+                (DataType::Int64, DataType::Int64) => DataType::Int64,
+                _ => DataType::Float64,
             };
             (dtype, ln || rn)
         }
@@ -1758,6 +1786,55 @@ mod tests {
 
     fn col(name: &str, dtype: DataType, nullable: bool) -> Column {
         Column::new(name, dtype, nullable)
+    }
+
+    /// Shifting an instant by a duration stays an instant, and shifting a date
+    /// stays a date — neither falls through to the numeric default, which is
+    /// what `l_shipdate + INTERVAL '30' DAY` would otherwise be typed as.
+    #[test]
+    fn interval_arithmetic_keeps_the_temporal_type() {
+        let schema = Schema::new(vec![
+            col("ts", DataType::Timestamp, false),
+            col("d", DataType::Date, false),
+        ]);
+        let thirty_days = || {
+            Rc::new(QueryExpr::Literal(ScalarValue::Interval {
+                months: 0,
+                days: 30,
+                nanos: 0,
+            }))
+        };
+        let shift = |column, op| QueryExpr::Arithmetic {
+            op,
+            left: Rc::new(QueryExpr::Column(column)),
+            right: thirty_days(),
+        };
+
+        assert_eq!(
+            shift(0, ArithmeticOpKind::Add)
+                .scalar_type(&schema)
+                .unwrap()
+                .0,
+            DataType::Timestamp
+        );
+        assert_eq!(
+            shift(1, ArithmeticOpKind::Sub)
+                .scalar_type(&schema)
+                .unwrap()
+                .0,
+            DataType::Date
+        );
+        assert_eq!(
+            QueryExpr::Arithmetic {
+                op: ArithmeticOpKind::Add,
+                left: thirty_days(),
+                right: thirty_days(),
+            }
+            .scalar_type(&schema)
+            .unwrap()
+            .0,
+            DataType::Interval
+        );
     }
 
     fn scan(

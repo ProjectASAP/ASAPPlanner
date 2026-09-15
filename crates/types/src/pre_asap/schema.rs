@@ -85,6 +85,16 @@ pub enum DataType {
     /// Wall-clock timestamp. PromQL leaves carry exactly one of these
     /// (the `time_index` column); SQL leaves may or may not.
     Timestamp,
+    /// The type of a [`ScalarValue::Interval`] — a calendar duration, not an
+    /// instant. Carried so `infer_expr_type` can give an interval literal a
+    /// type and type `Timestamp ± Interval`; no column is ever declared with it.
+    Interval,
+    /// Calendar date with no time-of-day — SQL `DATE`, Arrow `Date32`/`Date64`.
+    /// Distinct from `Timestamp` because a `CAST(… AS DATE)` is a real type
+    /// change DataFusion keeps in the plan: collapsing the two here would make
+    /// the bridge lossy in the one direction (`dtype_to_arrow`) that registers
+    /// catalog tables.
+    Date,
     /// Variable-length sequence. The existing column contract preserves the
     /// element field name, type, and nullability. Nested fields are unqualified.
     List { element: Box<Column> },
