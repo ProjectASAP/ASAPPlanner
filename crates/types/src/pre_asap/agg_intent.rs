@@ -40,6 +40,14 @@ use crate::types::AccuracyTarget;
 #[serde(tag = "kind", rename_all = "snake_case")]
 #[serde(bound(serialize = "C: Serialize", deserialize = "C: Deserialize<'de>"))]
 pub enum AggIntent<C = ColumnId> {
+    /// A reduction over paired values from two explicit input columns.
+    /// Operation semantics live in `BinaryAggOp`; both references participate
+    /// in binding and dependency tracking, unlike an opaque extension payload.
+    Binary {
+        op: BinaryAggOp,
+        left: C,
+        right: C,
+    },
     // ── Data-model-agnostic ──────────────────────────────────────────────
     Count {
         accuracy: AccuracyTarget,
@@ -280,6 +288,15 @@ pub enum AggIntent<C = ColumnId> {
     },
 }
 
+/// Operations supported by the two-input aggregate shape. New operations
+/// must define their output type and exact/summary realization explicitly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BinaryAggOp {
+    /// Pearson correlation over pairs where both inputs are non-null.
+    Correlation,
+}
+
 /// Time / calendar accessor functions (issue #46), evaluated over a timestamp.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "fn", rename_all = "snake_case")]
@@ -468,11 +485,19 @@ impl<C: Clone> AggIntent<C> {
 }
 
 impl<C: Clone> AggIntent<C> {
-    /// The input column this intent reduces, if it carries one. `None` = the
-    /// synthetic time-series sample value (PromQL) or an argument-less
-    /// aggregate (`Count` / `TopK`). Used by schema derivation to resolve each
-    /// reducer's input column, and by `plan::bind` to pick the column a
-    /// summary is built over.
+    /// All explicit value-column dependencies, in argument order.
+    /// An empty list retains the existing implicit sample/row-count convention.
+    pub fn input_cols(&self) -> Vec<C> {
+        match self {
+            Self::Binary { left, right, .. } => vec![left.clone(), right.clone()],
+            _ => self.input_col().into_iter().collect(),
+        }
+    }
+
+    /// The explicit input of a single-column reducer. Binary aggregates,
+    /// argument-less aggregates, and implicit PromQL sample inputs return `None`.
+    /// Use `input_cols` for dependency tracking; this accessor is for consumers
+    /// that have already selected a single-column implementation.
     pub fn input_col(&self) -> Option<C> {
         match self {
             AggIntent::Sum { col }
@@ -504,6 +529,9 @@ impl<C: Clone> AggIntent<C> {
             AggIntent::Avg { .. } => col("avg", DataType::Float64, false),
             AggIntent::StdDev { .. } => col("stddev", DataType::Float64, false),
             AggIntent::Variance { .. } => col("variance", DataType::Float64, false),
+            AggIntent::Binary { op, .. } => match op {
+                BinaryAggOp::Correlation => col("corr", DataType::Float64, true),
+            },
             AggIntent::Quantile { q, .. } => col(
                 &format!("quantile_{}", quantile_suffix(*q)),
                 DataType::Float64,
@@ -628,16 +656,20 @@ pub mod topk {
 
 /// Two instances of this aggregation can be merged
 /// (`agg(A ∪ B) = combine(agg(A), agg(B))`). `Avg` / `StdDev` / `Variance`
-/// need richer partial state than a single value, so they are not mergeable.
+/// and binary correlation need richer partial state than a single value, so
+/// their finalized values are not mergeable.
 pub fn agg_is_mergeable(op: &AggIntent) -> bool {
     !matches!(
         op,
-        AggIntent::Avg { .. } | AggIntent::StdDev { .. } | AggIntent::Variance { .. }
+        AggIntent::Avg { .. }
+            | AggIntent::StdDev { .. }
+            | AggIntent::Variance { .. }
+            | AggIntent::Binary { .. }
     )
 }
 
 /// Whether this op implies `exact_required` — no sketch benefit. The exact
-/// intents are `Sum / Count / Avg / Min / Max`.
+/// intents include `Sum / Count / Avg / Min / Max` and binary correlation.
 pub fn agg_is_exact(op: &AggIntent) -> bool {
     matches!(
         op,
@@ -646,6 +678,7 @@ pub fn agg_is_exact(op: &AggIntent) -> bool {
             | AggIntent::Avg { .. }
             | AggIntent::Min { .. }
             | AggIntent::Max { .. }
+            | AggIntent::Binary { .. }
             | AggIntent::Group
             | AggIntent::CountValues { .. }
     )
@@ -698,6 +731,27 @@ mod tests {
 
     fn c(name: &str, dtype: DataType) -> Column {
         Column::new(name, dtype, false)
+    }
+
+    // Paired aggregates expose both dependencies but cannot merge final scalar results.
+    #[test]
+    fn binary_aggregate_contract() {
+        let intent = AggIntent::Binary {
+            op: BinaryAggOp::Correlation,
+            left: 2,
+            right: 5,
+        };
+        assert_eq!(intent.input_cols(), vec![2, 5]);
+        assert_eq!(intent.input_col(), None);
+        assert!(agg_is_exact(&intent));
+        assert!(!agg_is_mergeable(&intent));
+        let output = intent.output_column(&c("x", DataType::Float64));
+        assert_eq!(output.dtype, DataType::Float64);
+        assert!(output.nullable);
+        let value = serde_json::to_value(&intent).unwrap();
+        assert_eq!(value["kind"], "binary");
+        assert_eq!(value["op"], "correlation");
+        assert_eq!(serde_json::from_value::<AggIntent>(value).unwrap(), intent);
     }
 
     #[test]

@@ -647,13 +647,11 @@ fn check_plain_operands(
         .map(|keys| keys.keys().to_vec())
         .unwrap_or_default();
     for m in measures {
-        if let Some(col) = m.input_col() {
-            referenced.push(col);
-        }
+        referenced.extend(m.input_cols());
     }
     // With no explicit input column (the PromQL sample-value convention)
     // the operator reads every non-key column, so all must be plain.
-    let implicit = measures.iter().any(|m| m.input_col().is_none());
+    let implicit = measures.iter().any(|m| m.input_cols().is_empty());
     for (i, field) in input.fields.iter().enumerate() {
         if !(implicit || referenced.contains(&i)) {
             continue;
@@ -1067,6 +1065,32 @@ mod tests {
             })
         );
         assert!(validate_execution_data_states(&root).is_err());
+    }
+
+    // Both paired operands must be plain; an unrelated state column is not an input.
+    #[test]
+    fn binary_aggregate_checks_both_operand_states() {
+        let operation = ValueOperation::Exact(ExactOperation::Aggregate {
+            reduction: Reduction::by(vec![]),
+            measures: vec![AggIntent::Binary {
+                op: crate::pre_asap::BinaryAggOp::Correlation,
+                left: 0,
+                right: 1,
+            }],
+            output_names: vec![],
+            having: None,
+        });
+        for operand in [0, 1] {
+            let mut input = plain(&["x", "y", "unused"]);
+            input.fields[operand].dtype = kll();
+            assert!(matches!(
+                check_plain_operands(&operation, &input),
+                Err(ExecutionDataStateError::NonPlainOperand { .. })
+            ));
+        }
+        let mut input = plain(&["x", "y", "unused"]);
+        input.fields[2].dtype = kll();
+        check_plain_operands(&operation, &input).unwrap();
     }
 
     #[test]

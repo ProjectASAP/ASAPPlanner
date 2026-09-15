@@ -819,7 +819,10 @@ pub(crate) fn implementations_for_with(
 
         // ── Exact, non-mergeable reducers — richer partial state than a
         //    single value (see `agg_is_mergeable`), so no accumulator form.
-        AggIntent::Avg { .. } | AggIntent::StdDev { .. } | AggIntent::Variance { .. } => {
+        AggIntent::Avg { .. }
+        | AggIntent::StdDev { .. }
+        | AggIntent::Variance { .. }
+        | AggIntent::Binary { .. } => {
             vec![Implementation::PassThrough]
         }
 
@@ -6060,6 +6063,21 @@ mod tests {
                 );
             }
         }
+    }
+
+    // Correlation must never acquire a single-input sketch or scalar accumulator.
+    #[test]
+    fn binary_aggregate_keeps_exact_paired_input() {
+        let intent = AggIntent::Binary {
+            op: asap_types::pre_asap::BinaryAggOp::Correlation,
+            left: 0,
+            right: 1,
+        };
+        assert!(matches!(
+            implementations_for_with(&intent, &crate::cost_model::DefaultCostModel).as_slice(),
+            [Implementation::PassThrough]
+        ));
+        assert!(summary_candidates(&intent).is_empty());
     }
 
     #[test]
