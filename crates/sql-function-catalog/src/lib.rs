@@ -91,6 +91,8 @@ pub enum AggSemantic {
     Min,
     Max,
     Avg,
+    /// Pearson correlation of two numeric value arguments.
+    Correlation,
     /// Sample stddev unless `population`.
     StdDev {
         population: bool,
@@ -126,6 +128,11 @@ pub struct NativeFunction {
 /// when DataFusion (or this front end) accepts more than one spelling for
 /// the same semantic (`avg`/`mean`, `stddev`/`stddev_samp`, ...).
 pub const NATIVE_FUNCTIONS: &[NativeFunction] = &[
+    NativeFunction {
+        name: "corr",
+        arity: Arity::Exact(2),
+        semantic: AggSemantic::Correlation,
+    },
     NativeFunction {
         name: "count",
         arity: Arity::Range { min: 0, max: 1 },
@@ -311,7 +318,7 @@ pub const CLICKHOUSE_BUILTINS: &[ClickHouseBuiltin] = &[
 /// Aggregate function names DataFusion's own planner resolves out of the box
 /// that this catalog deliberately does *not* map to a canonical
 /// [`AggSemantic`] -- either because `AggIntent` has no shape for them
-/// (a multi-column correlation/regression aggregate, a bitwise/boolean
+/// (an unimplemented covariance/regression aggregate, a bitwise/boolean
 /// aggregate, a string concatenation aggregate, ...) or because this front
 /// end already rejects them explicitly elsewhere (`array_agg`, `grouping`).
 ///
@@ -345,10 +352,8 @@ pub const KNOWN_UNMAPPED_NATIVE_FUNCTIONS: &[&str] = &[
     "bit_xor",
     "bool_and",
     "bool_or",
-    // Two-column correlation / linear-regression aggregates -- every
-    // `AggIntent` value reducer takes one input column (`reducer_col` in
-    // `asap-frontend-sql`), so these have no home yet.
-    "corr",
+    // Two-column covariance / regression operations not yet implemented by
+    // `AggIntent::Binary`. Correlation is the first supported operation.
     "covar",
     "covar_pop",
     "covar_samp",
