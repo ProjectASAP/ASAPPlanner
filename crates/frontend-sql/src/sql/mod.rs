@@ -1602,6 +1602,13 @@ fn lower_agg_intent(expr: &Expr) -> Result<AggIntent<ColumnRef>, LoweringError> 
             if let Some(intent) = lower_arg_selector(&name, &agg_fn.args)? {
                 return Ok(intent);
             }
+            // `corr` IS a native DataFusion aggregate — what it lacks is an
+            // `AggSemantic`, since no core `AggIntent` reads two columns.
+            // Handled here for the same reason as the arg selectors above:
+            // the `lookup_native` lookup below has nothing to return for it.
+            if let Some(intent) = lower_corr(&name, &agg_fn.args)? {
+                return Ok(intent);
+            }
             let semantic = asap_sql_function_catalog::lookup_native(&name)
                 .ok_or_else(|| LoweringError::UnsupportedAggregate(name.clone()))?;
             // The canonical intent algebra has no DISTINCT modifier for the
@@ -1773,6 +1780,38 @@ fn lower_arg_selector(
     Ok(Some(AggIntent::Extension {
         ext_kind: ext_kind.to_string(),
         payload: serde_json::json!({ "arg_col": arg_col, "val_col": val_col }),
+    }))
+}
+
+/// Pearson correlation `corr(x, y)` — a two-column statistic.
+///
+/// Every core `AggIntent` reducer folds *one* column (`col: Option<C>`);
+/// correlation reads two and would be the first binary core variant. Per
+/// `AggIntent::Extension`'s own "core only grows for intents ≥2 deployment
+/// models actually use" bar, and a search that found no second model wanting
+/// it — PromQL has no correlation — this lowers to `Extension`, the same
+/// judgement `lower_arg_selector` records for `argMax`/`argMin`.
+///
+/// Both columns are kept as validated bare-column `ColumnRef`s in `payload`
+/// (`reducer_col`'s "no expression arguments" rule, issue #115); core carries
+/// them without resolving them, since `Extension` has no typed column field.
+/// The order is the order written: a later rewrite into co-moments has to tell
+/// x from y.
+fn lower_corr(name: &str, args: &[Expr]) -> Result<Option<AggIntent<ColumnRef>>, LoweringError> {
+    if name != "corr" {
+        return Ok(None);
+    }
+    let [x, y] = args else {
+        unreachable!(
+            "corr's DataFusion signature fixes its arity at 2 -- the planner already rejected              any other argument count before lower_agg_intent runs"
+        );
+    };
+    Ok(Some(AggIntent::Extension {
+        ext_kind: "corr".to_string(),
+        payload: serde_json::json!({
+            "x_col": reducer_col(name, std::slice::from_ref(x))?,
+            "y_col": reducer_col(name, std::slice::from_ref(y))?,
+        }),
     }))
 }
 
