@@ -1704,6 +1704,12 @@ fn infer_expr_type(
             // (`Interval - Timestamp`) are rejected by the planner upstream, so
             // a pair rule stays as small as the numeric one it sits beside.
             let dtype = match (&lt, &rt) {
+                // SQL unary minus lowers to -1 * expression, including intervals.
+                (DataType::Int64, DataType::Interval) | (DataType::Interval, DataType::Int64)
+                    if matches!(op, ArithmeticOpKind::Mul) =>
+                {
+                    DataType::Interval
+                }
                 (DataType::Timestamp, DataType::Interval)
                 | (DataType::Interval, DataType::Timestamp) => DataType::Timestamp,
                 (DataType::Date, DataType::Interval) | (DataType::Interval, DataType::Date) => {

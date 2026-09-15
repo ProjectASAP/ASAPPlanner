@@ -184,6 +184,29 @@ impl<'a> SqlLowerer<'a> {
         };
         let rewriter = ApplyFunctionRewrites::new(vec![Arc::new(ClickHouseBuiltinRewrite)]);
         let plan = rewriter.analyze(plan, ctx.state().options())?;
+        // Output schemas omit predicate and nested-expression types. Check the
+        // typed SQL plan before lowering erases fixed-duration units.
+        plan.apply_with_subqueries(|node| {
+            let mut schema = DFSchema::empty();
+            for input in node.inputs() {
+                schema.merge(input.schema());
+            }
+            schema.merge(node.schema());
+            node.apply_expressions(|expr| {
+                expr.apply(|nested| {
+                    if let Expr::BinaryExpr(binary) = nested {
+                        if binary.op == logical_expr::Operator::Minus
+                            && matches!(nested.get_type(&schema)?, ArrowDataType::Duration(_))
+                        {
+                            return Err(datafusion::common::DataFusionError::Plan(
+                                "temporal subtraction produces an unsupported duration type".into(),
+                            ));
+                        }
+                    }
+                    Ok(TreeNodeRecursion::Continue)
+                })
+            })
+        })?;
         let _guard = AccuracyGuard::install(accuracy.clone());
         self.lower_plan(&plan)
     }

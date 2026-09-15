@@ -60,3 +60,40 @@ async fn interval_cast_lowers_like_interval_literal() {
         );
     }
 }
+
+// Unsupported durations must be rejected even when hidden by another expression.
+#[tokio::test]
+async fn nested_temporal_subtraction_is_rejected() {
+    for query in [
+        "SELECT (d - d) IS NULL FROM t",
+        "SELECT d FROM t WHERE (d - d) IS NULL",
+        "SELECT CASE WHEN true THEN INTERVAL '1 day' ELSE d - d END FROM t",
+        "SELECT d FROM t ORDER BY d - d",
+    ] {
+        let result = lower_sql(query, &catalog(), AccuracyTarget::Exact).await;
+        let error = result.expect_err(&format!("accepted unsupported duration: {query}"));
+        assert!(
+            error.to_string().contains("unsupported duration type"),
+            "{query}: {error}"
+        );
+    }
+}
+
+// Negating a calendar interval must preserve its type, including nonliteral inputs.
+#[tokio::test]
+async fn negative_intervals_keep_their_type() {
+    for query in [
+        "SELECT -INTERVAL '1 day' AS duration FROM t",
+        "SELECT -CAST('1 day' AS INTERVAL) AS duration FROM t",
+        "SELECT -(INTERVAL '1 day' + INTERVAL '2 days') AS duration FROM t",
+    ] {
+        let node = lower_sql(query, &catalog(), AccuracyTarget::Exact)
+            .await
+            .unwrap();
+        assert_eq!(
+            node.output_schema().unwrap().columns[0].dtype,
+            DataType::Interval,
+            "{query}"
+        );
+    }
+}
