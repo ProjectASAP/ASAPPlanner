@@ -97,3 +97,20 @@ async fn negative_intervals_keep_their_type() {
         );
     }
 }
+
+// SQL date literal syntax keeps its date type through projection and shifts.
+#[tokio::test]
+async fn sql_date_literals_keep_their_type() {
+    for query in [
+        "SELECT DATE '2024-02-29' FROM t",
+        "SELECT DATE '1969-12-31' + INTERVAL '1 day' FROM t",
+    ] {
+        let node = lower_sql(query, &catalog(), AccuracyTarget::Exact)
+            .await
+            .unwrap();
+        assert_eq!(
+            node.output_schema().unwrap().columns[0].dtype,
+            DataType::Date
+        );
+    }
+}

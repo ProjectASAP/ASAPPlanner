@@ -2454,3 +2454,33 @@ async fn clickhouse_tuple_element_preserves_declared_field_metadata() {
         );
     }
 }
+
+// A multi-column DISTINCT must not silently count only the first column.
+#[tokio::test]
+async fn composite_distinct_is_rejected() {
+    let cat = SqlCatalog::new().with_table(
+        "t",
+        Schema::new(vec![
+            Column::new("a", DataType::Int64, false),
+            Column::new("b", DataType::Int64, false),
+        ]),
+    );
+    let error = lower_sql(
+        "SELECT COUNT(DISTINCT a, b) FROM t",
+        &cat,
+        AccuracyTarget::Exact,
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        error.to_string().contains("multi-column COUNT(DISTINCT)"),
+        "{error}"
+    );
+    lower_sql(
+        "SELECT COUNT(DISTINCT a) FROM t",
+        &cat,
+        AccuracyTarget::Exact,
+    )
+    .await
+    .unwrap();
+}

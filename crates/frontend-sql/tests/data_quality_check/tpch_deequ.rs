@@ -14,10 +14,9 @@
 //! Two guarantees:
 //!   1. **Totality** — every query returns `Ok` or a clean `LoweringError`,
 //!      never panics.
-//!   2. **Coverage ratchet** — 48 of 50 lower today. The two that do not are
-//!      `corr(x, y)`, which has no `AggIntent` variant: every aggregate intent
-//!      is unary and correlation would be the first binary one. A change that
-//!      drops coverage below 48 trips the ratchet.
+//!   2. **Coverage ratchet** — 47 of 50 lower today. The exact rejected set
+//!      consists of one composite COUNT(DISTINCT) and two correlation checks,
+//!      whose aggregate semantics the canonical IR cannot represent.
 //!
 //! Schema: `lineitem`, the 16 TPC-H columns. The four `DECIMAL(15,2)` columns
 //! are declared `Float64` — the canonical `DataType` has no fixed-point type,
@@ -64,55 +63,41 @@ fn catalog() -> SqlCatalog {
 /// One query per line. Not a `;` split: U-P3p's regex literal
 /// `'^[a-zA-Z ,.:;!?-]+$'` contains a semicolon, and the generator emits
 /// single-line SQL, so the line is the exact statement boundary.
-fn queries() -> Vec<String> {
-    CORPUS
-        .lines()
-        .map(str::trim)
-        .filter(|l| !l.is_empty() && !l.starts_with("--"))
-        .map(str::to_string)
-        .collect()
-}
-
-#[derive(Debug, Default)]
-struct Tally {
-    lowered: usize,
-    rejected: usize,
-    unparseable: usize,
-}
-
-impl Tally {
-    fn total(&self) -> usize {
-        self.lowered + self.rejected + self.unparseable
+fn queries() -> Vec<(&'static str, &'static str)> {
+    let mut id = None;
+    let mut queries = Vec::new();
+    for line in CORPUS.lines().map(str::trim) {
+        if let Some(query_id) = line.strip_prefix("-- U-") {
+            id = Some(query_id);
+        } else if !line.is_empty() && !line.starts_with("--") {
+            queries.push((id.take().expect("each query has an ID"), line));
+        }
     }
+    queries
 }
 
-/// The front end lowers 48 of the 50 warehouse-ingestion checks, and never
-/// panics on any of them.
+// Pin rejected IDs and error reasons so coverage swaps cannot pass the ratchet.
 #[tokio::test]
 async fn lowers_the_warehouse_ingestion_check_set() {
     let cat = catalog();
-    let mut t = Tally::default();
-    for q in queries() {
-        match lower_sql(&q, &cat, AccuracyTarget::Exact).await {
-            Ok(_) => t.lowered += 1,
-            // DataFusion surfaces parse/plan failures as `DataFusion(_)`.
-            Err(LoweringError::DataFusion(_)) => t.unparseable += 1,
-            Err(_) => t.rejected += 1,
+    let queries = queries();
+    assert_eq!(queries.len(), 50);
+    let mut rejected = Vec::new();
+    let mut lowered = 0;
+    for (id, query) in queries {
+        match lower_sql(query, &cat, AccuracyTarget::Exact).await {
+            Ok(_) => lowered += 1,
+            Err(LoweringError::UnsupportedAggregate(reason)) => rejected.push((id, reason)),
+            Err(error) => panic!("unexpected failure for U-{id}: {error}"),
         }
     }
-    eprintln!("tpch_deequ SQL corpus: {t:?}");
-
-    assert_eq!(t.total(), 50, "expected 50 DQC checks, got {t:?}");
-
     assert_eq!(
-        t.unparseable, 0,
-        "some DQC checks failed to parse/plan: {t:?}"
+        rejected,
+        vec![
+            ("P2b", "multi-column COUNT(DISTINCT)".into()),
+            ("P4d", "corr".into()),
+            ("P4l", "corr".into()),
+        ]
     );
-
-    // Coverage ratchet. The 2 that do not lower are the `corr` cells; adding a
-    // binary `AggIntent` would raise this to 50.
-    assert_eq!(
-        t.lowered, 48,
-        "SQL lowering coverage moved off the DQC ratchet: {t:?}"
-    );
+    assert_eq!(lowered, 47);
 }

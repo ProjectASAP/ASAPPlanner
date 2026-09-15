@@ -173,15 +173,8 @@ async fn corpus_lowering_matches_the_pinned_aggregate_tally() {
     // not all -- as the issue itself flags, `splitByChar(...)[-1]`-style
     // calls (and a couple of other array/map-index uses) now plan far enough
     // to hit the same pre-existing map/array-index `NotImplemented` gap, and
-    // two `toStartOfInterval(...)` queries plan far enough to hit a
-    // different pre-existing gap: `types::scalar_value_to_asap` doesn't yet
-    // convert an `INTERVAL x unit` literal (`DfScalarValue::
-    // IntervalMonthDayNano`), so those two land in `Other` via
-    // `LoweringError::InvalidExpression` instead. Both are companion gaps
-    // this issue's scope explicitly doesn't chase down (see its "known
-    // caveat" section) -- getting these functions' *names* to lower to a
-    // structurally correct `FunctionCall` node is what's in scope here, not
-    // array/map indexing or interval-literal conversion.
+    // the two `toStartOfInterval(...)` queries now lower end to end because
+    // interval literal conversion is supported.
     // `argMax` support (issue #232 -- `AggIntent::Extension`, catalog-driven
     // `RewriteKind::PassThrough`) clears the "unknown function: argmax" `Plan`
     // failure for all 3 corpus occurrences: every one has both arguments as
@@ -200,7 +193,7 @@ async fn corpus_lowering_matches_the_pinned_aggregate_tally() {
     // `splitByChar`'s array-indexing companion gap above.
     // 152 -> 154: `ScalarValue::Interval` (this branch) converts the
     // `INTERVAL x unit` literal the two `toStartOfInterval(...)` queries
-    // carry, which the note above recorded as an open companion gap.
+    // carry.
     expect(Category::Lowered, 154);
     expect(Category::Plan, 40);
     expect(Category::Schema, 0);

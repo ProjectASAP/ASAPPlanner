@@ -1636,6 +1636,13 @@ fn lower_agg_intent(expr: &Expr) -> Result<AggIntent<ColumnRef>, LoweringError> 
                     "DISTINCT {name}"
                 )));
             }
+            // Cardinality carries one column; dropping extra DISTINCT arguments
+            // would silently change tuple cardinality into single-column cardinality.
+            if matches!(semantic, AggSemantic::Count) && agg_fn.distinct && agg_fn.args.len() != 1 {
+                return Err(LoweringError::UnsupportedAggregate(
+                    "multi-column COUNT(DISTINCT)".into(),
+                ));
+            }
             // Value reducers (`reducer_col`) require a real column — `SUM(a*b)`
             // is rejected, not silently reduced over a probe column. Quantile
             // and CountDistinct reduce a column too, so they take the same path:
