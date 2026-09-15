@@ -2454,3 +2454,91 @@ async fn clickhouse_tuple_element_preserves_declared_field_metadata() {
         );
     }
 }
+
+// ── `corr(x, y)`: a two-column statistic with no core `AggIntent` shape.
+// Every core reducer folds ONE column (`col: Option<C>`); correlation reads
+// two and would be the first binary core variant. A repo-wide search turned up
+// no second deployment model wanting it — PromQL has no correlation — so per
+// `AggIntent::Extension`'s own "core only grows for intents ≥2 deployment
+// models actually use" bar it lowers to an `Extension`, exactly as `argMax`
+// does. Unlike `argMax` it IS a native DataFusion aggregate; what is missing is
+// an `AggSemantic` for it, which is why `lookup_native` rejected it. ─────────
+
+#[tokio::test]
+async fn corr_lowers_to_an_extension_intent() {
+    let qe = lower("SELECT corr(latency, bytes) AS r FROM metrics").await;
+    let (by, measures) = find_aggregate(&qe).expect("expected an Aggregate");
+    assert!(by.is_empty());
+    assert!(
+        matches!(
+            measures.as_slice(),
+            [AggIntent::Extension { ext_kind, .. }] if ext_kind == "corr"
+        ),
+        "expected Extension {{ ext_kind: \"corr\", .. }}, got {measures:?}"
+    );
+}
+
+#[tokio::test]
+async fn corr_payload_preserves_both_column_names() {
+    // Core never resolves an `Extension`'s payload, so both columns stay as
+    // validated bare-column `ColumnRef`s — and in the order written, since
+    // a later rewrite into co-moments needs to tell the two apart.
+    let qe = lower("SELECT corr(latency, bytes) AS r FROM metrics").await;
+    let (_, measures) = find_aggregate(&qe).expect("expected an Aggregate");
+    let AggIntent::Extension { payload, .. } = &measures[0] else {
+        panic!("expected an Extension intent, got {:?}", measures[0]);
+    };
+    let named = |key: &str| {
+        payload
+            .get(key)
+            .and_then(|c| c.get("Named"))
+            .and_then(|n| n.as_str())
+            .map(str::to_string)
+    };
+    assert_eq!(named("x_col"), Some("latency".to_string()));
+    assert_eq!(named("y_col"), Some("bytes".to_string()));
+}
+
+#[tokio::test]
+async fn corr_over_an_expression_binds_the_derived_column() {
+    // `reducer_col`'s "bare column only" rule (issue #115) exists so an
+    // expression argument is never silently DROPPED. Here nothing is dropped:
+    // `corr` is a native DataFusion aggregate, so the planner materializes
+    // `latency * 2` into the Project below the Aggregate and hands the
+    // aggregate a column reference to it. The payload names that derived
+    // column, which resolves in the child's own output schema — so the
+    // expression is carried, not lost.
+    //
+    // `argMax` behaves differently only because it reaches `lower_agg_intent`
+    // as a stub ClickHouse builtin, before that rewrite applies.
+    let qe = lower("SELECT corr(latency * 2, bytes) AS r FROM metrics").await;
+    let (_, measures) = find_aggregate(&qe).expect("expected an Aggregate");
+    let AggIntent::Extension { payload, .. } = &measures[0] else {
+        panic!("expected an Extension intent, got {:?}", measures[0]);
+    };
+    let x = payload
+        .get("x_col")
+        .and_then(|c| c.get("Named"))
+        .and_then(|n| n.as_str())
+        .expect("x_col is a Named ColumnRef");
+    assert!(
+        x.contains('*'),
+        "expected the derived column carrying `latency * 2`, got {x:?}"
+    );
+}
+
+#[tokio::test]
+async fn corr_output_column_is_a_nullable_float() {
+    // `Extension`'s generic guess is `Utf8` — correct only for a shape core
+    // knows nothing about. Correlation always yields a float, and NULL when
+    // a variance is zero or fewer than two rows contributed, so the schema
+    // says so rather than carrying the placeholder downstream.
+    let qe = lower("SELECT corr(latency, bytes) AS r FROM metrics").await;
+    let schema = qe.output_schema().expect("output schema");
+    let out = schema.columns.last().expect("at least one output column");
+    assert_eq!(out.dtype, DataType::Float64, "got {:?}", schema.columns);
+    assert!(
+        out.nullable,
+        "corr is NULL on zero variance / fewer than 2 rows"
+    );
+}

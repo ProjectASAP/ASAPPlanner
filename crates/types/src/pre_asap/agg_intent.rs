@@ -568,6 +568,14 @@ impl<C: Clone> AggIntent<C> {
             // the column after `kind` and leave the type unconstrained.
             // The owning deployment model is expected to re-derive the
             // real schema itself rather than rely on this generic guess.
+            // Correlation always yields a float, and NULL when a variance is
+            // zero or fewer than two rows contributed — unlike the arg
+            // selectors, whose output type follows the selected column and is
+            // patched in during aggregate schema derivation, this one needs no
+            // schema and so is settled here.
+            AggIntent::Extension { ext_kind, .. } if ext_kind == "corr" => {
+                col("corr", DataType::Float64, true)
+            }
             AggIntent::Extension { ext_kind, .. } => col(ext_kind, DataType::Utf8, true),
         }
     }
