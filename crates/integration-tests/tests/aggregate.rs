@@ -9,8 +9,9 @@
 //! and `having: None`.
 
 use std::rc::Rc;
+use std::time::Duration;
 
-use asap_frontend_promql::lower_promql;
+use asap_integration_tests::fixtures::lower_promql;
 use asap_integration_tests::fixtures::metric_schema;
 use asap_types::pre_asap::{AggIntent, QueryExpr, Reduction, Source};
 use asap_types::types::AccuracyTarget;
@@ -35,7 +36,10 @@ fn agg(by: Vec<usize>, intent: AggIntent, child: QueryExpr) -> QueryExpr {
         measures: vec![intent],
         output_names: vec!["".into()],
         having: None,
-        child: Rc::new(child),
+        child: Rc::new(QueryExpr::TimeRange {
+            range: Duration::from_secs(1),
+            child: Rc::new(child),
+        }),
     }
 }
 

@@ -530,6 +530,9 @@ pub struct Rate(pub f64);
 #[serde(deny_unknown_fields)]
 pub struct DataWorkload {
     pub arrival: DataArrival,
+    /// Cadence at which each PromQL source supplies a sample. PromQL instant
+    /// selectors use this as their explicit selection horizon.
+    pub data_ingestion_interval: Evidence<DurationMs>,
     pub ingestion_volume: Evidence<u64>,
     pub ingestion_rate: Evidence<Rate>,
     pub input_cardinality: Evidence<u64>,
@@ -586,6 +589,19 @@ impl QueryWorkload {
             }
             validate_optional_rate(data.ingestion_rate.value)?;
         }
+        if matches!(self.language, QueryLanguage::PromQL) {
+            let data = self
+                .data_workload
+                .as_ref()
+                .ok_or(WorkloadError::MissingPromqlDataWorkload)?;
+            let interval = data
+                .data_ingestion_interval
+                .value
+                .ok_or(WorkloadError::MissingDataIngestionInterval)?;
+            if interval.0 == 0 {
+                return Err(WorkloadError::ZeroDataIngestionInterval);
+            }
+        }
         Ok(())
     }
 }
@@ -638,6 +654,12 @@ fn validate_rate(rate: Rate) -> Result<Rate, WorkloadError> {
 
 #[derive(Debug, Clone, Copy, PartialEq, thiserror::Error)]
 pub enum WorkloadError {
+    #[error("a PromQL workload requires data_workload")]
+    MissingPromqlDataWorkload,
+    #[error("a PromQL workload requires data_ingestion_interval")]
+    MissingDataIngestionInterval,
+    #[error("data_ingestion_interval must be greater than zero")]
+    ZeroDataIngestionInterval,
     #[error("a one-time query must have at least one invocation")]
     ZeroInvocations,
     #[error("a fixed repetition interval must be greater than zero")]
@@ -665,7 +687,13 @@ mod tests {
             language: QueryLanguage::PromQL,
             query_batch: None,
             repeating_queries: None,
-            data_workload: None,
+            data_workload: Some(DataWorkload {
+                data_ingestion_interval: Evidence {
+                    value: Some(DurationMs(1_000)),
+                    ..Default::default()
+                },
+                ..Default::default()
+            }),
         }
     }
 

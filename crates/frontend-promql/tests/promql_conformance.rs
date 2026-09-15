@@ -33,13 +33,15 @@
 
 use std::time::Duration;
 
-use asap_frontend_promql::{lower_promql, PromqlError as LoweringError};
+use asap_frontend_promql::PromqlError as LoweringError;
+mod support;
 use asap_types::pre_asap::schema::DataType;
 use asap_types::pre_asap::{
     AggIntent, ArithmeticOpKind, AtModifier, BinaryOpKind, CompareOpKind, MathFunc,
     PromQLVectorSetOpKind, QueryExpr, Reduction, SampleKind, Source, TimeFunc,
 };
 use asap_types::types::AccuracyTarget;
+use support::lower_promql;
 
 // ── harness helpers ─────────────────────────────────────────────────────────────
 
@@ -191,8 +193,11 @@ fn promql_scan_schema_is_open() {
     // runtime-only, so the binding schema lists only the (ts, value) floor +
     // referenced labels and may be a subset of the runtime row.
     let qe = ok("node_cpu_seconds_total");
-    let QueryExpr::Scan { schema, .. } = &qe else {
-        panic!("expected a Scan for a bare selector, got {qe:?}");
+    let QueryExpr::TimeRange { child, .. } = &qe else {
+        panic!("expected a TimeRange for a bare selector, got {qe:?}");
+    };
+    let QueryExpr::Scan { schema, .. } = child.as_ref() else {
+        panic!("expected a Scan inside the TimeRange, got {qe:?}");
     };
     assert!(
         !schema.closed,
@@ -324,7 +329,9 @@ fn sum_by_groups_via_positional_aggregate() {
         "group keys resolve to positional ColumnIds"
     );
     assert!(matches!(measures.as_slice(), [AggIntent::Sum { .. }]));
-    assert!(matches!(child.as_ref(), QueryExpr::Scan { .. }));
+    assert!(
+        matches!(child.as_ref(), QueryExpr::TimeRange { child, .. } if matches!(child.as_ref(), QueryExpr::Scan { .. }))
+    );
 }
 
 #[test]
@@ -647,7 +654,7 @@ fn unary_negation_lowers_as_multiply_by_minus_one() {
     };
     assert_eq!(*op, BinaryOpKind::Arithmetic(ArithmeticOpKind::Mul));
     assert!(
-        matches!(lhs.as_ref(), QueryExpr::Scan { .. }),
+        matches!(lhs.as_ref(), QueryExpr::TimeRange { child, .. } if matches!(child.as_ref(), QueryExpr::Scan { .. })),
         "vector on the left"
     );
     assert!(
@@ -756,7 +763,7 @@ fn scalar_literal_operand_lowers_as_binaryop_scalar() {
     };
     assert_eq!(*op, BinaryOpKind::Compare(CompareOpKind::Gt));
     assert!(
-        matches!(lhs.as_ref(), QueryExpr::Scan { .. }),
+        matches!(lhs.as_ref(), QueryExpr::TimeRange { child, .. } if matches!(child.as_ref(), QueryExpr::Scan { .. })),
         "vector on the left"
     );
     assert!(
@@ -1198,7 +1205,10 @@ fn offset_modifier_lowers_to_a_time_shift() {
     // past — a `TimeShift` wrapper over the selector (signed ms; a negative
     // offset shifts forward). Schema is unchanged (the shift only moves *when*).
     let qe = ok("http_requests_total offset 5m");
-    let QueryExpr::TimeShift { shift, child } = &qe else {
+    let QueryExpr::TimeRange { child, .. } = &qe else {
+        panic!("expected an ingestion TimeRange, got {qe:?}");
+    };
+    let QueryExpr::TimeShift { shift, child } = child.as_ref() else {
         panic!("expected a TimeShift, got {qe:?}");
     };
     assert_eq!(shift.offset_ms, 300_000);
@@ -1206,7 +1216,10 @@ fn offset_modifier_lowers_to_a_time_shift() {
     assert!(matches!(child.as_ref(), QueryExpr::Scan { .. }));
 
     // `offset -5m` shifts forward → negative ms.
-    let QueryExpr::TimeShift { shift, .. } = &ok("http_requests_total offset -5m") else {
+    let QueryExpr::TimeRange { child, .. } = &ok("http_requests_total offset -5m") else {
+        panic!("expected an ingestion TimeRange");
+    };
+    let QueryExpr::TimeShift { shift, .. } = child.as_ref() else {
         panic!("expected a TimeShift");
     };
     assert_eq!(shift.offset_ms, -300_000);
@@ -1217,20 +1230,29 @@ fn at_modifier_lowers_to_a_time_shift() {
     // SEMANTICS (PromQL, issue #40): `@ <ts>` pins the evaluation to an absolute
     // instant (PromQL seconds → IR milliseconds); `@ start()` / `@ end()` anchor
     // to the query range bounds.
-    let QueryExpr::TimeShift { shift, .. } = &ok("http_requests_total @ 1609746000") else {
+    let QueryExpr::TimeRange { child, .. } = &ok("http_requests_total @ 1609746000") else {
+        panic!("expected an ingestion TimeRange");
+    };
+    let QueryExpr::TimeShift { shift, .. } = child.as_ref() else {
         panic!("expected a TimeShift for `@ <ts>`");
     };
     assert_eq!(shift.at, Some(AtModifier::Timestamp(1_609_746_000_000)));
     assert_eq!(shift.offset_ms, 0);
 
-    let QueryExpr::TimeShift { shift, .. } = &ok("http_requests_total @ start()") else {
+    let QueryExpr::TimeRange { child, .. } = &ok("http_requests_total @ start()") else {
+        panic!("expected an ingestion TimeRange");
+    };
+    let QueryExpr::TimeShift { shift, .. } = child.as_ref() else {
         panic!("expected a TimeShift for `@ start()`");
     };
     assert_eq!(shift.at, Some(AtModifier::Start));
 
     // Offset and `@` compose: `@ end() offset 5m` carries both.
     let qe = ok("http_requests_total @ end() offset 5m");
-    let QueryExpr::TimeShift { shift, .. } = &qe else {
+    let QueryExpr::TimeRange { child, .. } = &qe else {
+        panic!("expected an ingestion TimeRange, got {qe:?}");
+    };
+    let QueryExpr::TimeShift { shift, .. } = child.as_ref() else {
         panic!("expected a TimeShift, got {qe:?}");
     };
     assert_eq!(shift.at, Some(AtModifier::End));

@@ -26,7 +26,7 @@
 // dag-viewer's Union mode.
 
 use asap_aware_mapping::{explain_replacements, ExplanationKind};
-use asap_devtools::lower_promql;
+use asap_devtools::lower_promql_with_data_ingestion_interval;
 use asap_frontend_sql::{lower_sql_dialect, SqlCatalog};
 use asap_types::pre_asap::schema::{Column, DataType, Schema};
 use asap_types::pre_asap::QueryExpr;
@@ -233,9 +233,24 @@ fn parse_epsilon() -> f64 {
     0.01
 }
 
+fn parse_ingestion_interval() -> u64 {
+    let mut args = std::env::args().skip(1);
+    while let Some(arg) = args.next() {
+        if arg == "--data-ingestion-interval-ms" {
+            return args
+                .next()
+                .expect("--data-ingestion-interval-ms requires a value")
+                .parse()
+                .expect("--data-ingestion-interval-ms must be an unsigned integer");
+        }
+    }
+    panic!("--data-ingestion-interval-ms is required")
+}
+
 #[tokio::main]
 async fn main() {
     let epsilon = parse_epsilon();
+    let interval_ms = parse_ingestion_interval();
     let accuracy = AccuracyTarget::Epsilon(epsilon);
     let mut results = Vec::new();
 
@@ -268,7 +283,7 @@ async fn main() {
         let mut roots = Vec::new();
         let mut failed = 0;
         for (i, q) in promql_lines(corpus).enumerate() {
-            match lower_promql(q, accuracy.clone()) {
+            match lower_promql_with_data_ingestion_interval(q, accuracy.clone(), interval_ms) {
                 Ok(qe) => roots.push((format!("q{i}"), qe)),
                 Err(_) => failed += 1,
             }

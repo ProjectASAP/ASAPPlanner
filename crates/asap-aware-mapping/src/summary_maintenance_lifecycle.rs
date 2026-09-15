@@ -1631,6 +1631,10 @@ mod tests {
     fn at_rest() -> DataWorkload {
         DataWorkload {
             arrival: DataArrival::AtRest,
+            data_ingestion_interval: Evidence {
+                value: Some(DurationMs(1_000)),
+                ..Default::default()
+            },
             ..Default::default()
         }
     }
@@ -1638,6 +1642,10 @@ mod tests {
     fn continuous(observed_at_ms: u64, valid_for_ms: u64) -> DataWorkload {
         DataWorkload {
             arrival: DataArrival::ContinuouslyIngesting,
+            data_ingestion_interval: Evidence {
+                value: Some(DurationMs(1_000)),
+                ..Default::default()
+            },
             ingestion_rate: Evidence {
                 value: Some(Rate(1.0)),
                 source: EvidenceSource::Observed,

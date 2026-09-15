@@ -14,65 +14,124 @@ pub mod promql;
 
 use asap_types::pre_asap::resolve_root;
 use asap_types::pre_asap::QueryExpr;
-use asap_types::types::AccuracyTarget;
-use asap_types::workload::{QueryLanguage, QueryWorkload};
+use asap_types::workload::{DurationMs, QueryLanguage, QueryWorkload};
 
 pub use error::PromqlError;
 pub use histogram::{HistogramCatalog, HistogramKind};
-pub use promql::PromqlLowerer;
 
-/// Lower a single PromQL query string to the canonical, resolved `QueryExpr`.
+/// Lower every normalized PromQL workload entry to a plan-ready `QueryExpr`.
 ///
-/// `accuracy` is threaded onto every approximate intent (`Count`, `Quantile`,
-/// `Cardinality`, `TopK`). The returned tree carries a self-contained `Schema`
-/// on its `Scan`; call [`QueryExpr::output_schema`] for any node's schema.
-///
-/// `histogram_quantile` discrimination uses the structural heuristic; to drive
-/// it from declared sample types instead, use [`lower_promql_with_histograms`].
-pub fn lower_promql(query: &str, accuracy: AccuracyTarget) -> Result<QueryExpr, PromqlError> {
-    let unresolved = PromqlLowerer::lower(query, &accuracy)?;
-    let resolved = resolve_root(&unresolved)?;
-    Ok(resolved)
+/// PromQL workloads must declare a non-zero `data_ingestion_interval`; it is
+/// injected around each bare instant selector. Explicit range selectors keep
+/// their query-specified range.
+pub fn lower_promql_workload(workload: &QueryWorkload) -> Result<Vec<QueryExpr>, PromqlError> {
+    lower_promql_workload_inner(workload)
 }
 
-/// Like [`lower_promql`], but consults `histograms` to decide whether a
-/// `histogram_quantile` argument is sketch-able (generic `Quantile`) or a
-/// classic-bucket interpolation (`HistogramQuantile`) — a type-driven decision
-/// instead of the structural heuristic (issue #79). Metrics absent from the
-/// catalog still fall back to the heuristic.
-pub fn lower_promql_with_histograms(
-    query: &str,
-    accuracy: AccuracyTarget,
+/// Like [`lower_promql_workload`], but uses `histograms` to distinguish classic
+/// bucket interpolation from generic sketchable quantiles.
+pub fn lower_promql_workload_with_histograms(
+    workload: &QueryWorkload,
     histograms: HistogramCatalog,
-) -> Result<QueryExpr, PromqlError> {
+) -> Result<Vec<QueryExpr>, PromqlError> {
     let _guard = histogram::CatalogGuard::install(histograms);
-    lower_promql(query, accuracy)
+    lower_promql_workload_inner(workload)
 }
 
-/// Lower every PromQL batch entry in `workload` to a `QueryExpr`.
-///
-/// One `Result` per entry — errors are per-query, not fatal for the batch.
-/// Returns an empty `Vec` if `workload.query_batch` is absent or empty, and a
-/// `WrongLanguage` error for every entry if the workload language is not PromQL.
-pub fn lower_promql_batch(workload: &QueryWorkload) -> Vec<Result<QueryExpr, PromqlError>> {
-    let entries = match &workload.query_batch {
-        Some(e) if !e.is_empty() => e,
-        _ => return vec![],
-    };
-
+fn lower_promql_workload_inner(workload: &QueryWorkload) -> Result<Vec<QueryExpr>, PromqlError> {
     if !matches!(workload.language, QueryLanguage::PromQL) {
-        let lang = format!("{:?}", workload.language);
-        return entries
-            .iter()
-            .map(|_| Err(PromqlError::WrongLanguage(lang.clone())))
-            .collect();
+        return Err(PromqlError::WrongLanguage(format!(
+            "{:?}",
+            workload.language
+        )));
     }
-
-    entries
-        .iter()
+    workload.validate()?;
+    let DurationMs(interval_ms) = workload
+        .data_workload
+        .as_ref()
+        .expect("validated PromQL workload has data_workload")
+        .data_ingestion_interval
+        .value
+        .expect("validated PromQL workload has data_ingestion_interval");
+    workload
+        .entries()
         .map(|entry| {
-            let accuracy = entry.requirements.accuracy.target();
-            lower_promql(&entry.query.0, accuracy)
+            let unresolved = promql::PromqlLowerer::lower_with_ingestion_interval(
+                &entry.query.0,
+                &entry.requirements.accuracy.target(),
+                std::time::Duration::from_millis(interval_ms),
+            )?;
+            Ok(resolve_root(&unresolved)?)
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use asap_types::pre_asap::QueryExpr;
+    use asap_types::workload::{
+        BatchEntry, DataWorkload, Evidence, Query, QueryRequirements, TimeSelection,
+    };
+
+    use super::*;
+
+    fn workload(query: &str) -> QueryWorkload {
+        QueryWorkload {
+            language: QueryLanguage::PromQL,
+            query_batch: Some(vec![BatchEntry {
+                query: Query(query.into()),
+                requirements: QueryRequirements::default(),
+                predictability: Default::default(),
+                invocations: 1,
+                execute_at: None,
+                time_selection: TimeSelection::default(),
+            }]),
+            repeating_queries: None,
+            data_workload: Some(DataWorkload {
+                data_ingestion_interval: Evidence {
+                    value: Some(DurationMs(1_000)),
+                    ..Default::default()
+                },
+                ..Default::default()
+            }),
+        }
+    }
+
+    #[test]
+    fn instant_selector_uses_declared_ingestion_interval() {
+        let query = lower_promql_workload(&workload("sum by (job) (data)")).unwrap();
+        let QueryExpr::Aggregate { child, .. } = &query[0] else {
+            panic!("expected aggregate")
+        };
+        assert!(
+            matches!(child.as_ref(), QueryExpr::TimeRange { range, child }
+            if *range == Duration::from_secs(1) && matches!(child.as_ref(), QueryExpr::Scan { .. }))
+        );
+    }
+
+    #[test]
+    fn explicit_range_selector_keeps_its_query_range() {
+        let query = lower_promql_workload(&workload("sum_over_time(data[5m])")).unwrap();
+        let QueryExpr::Aggregate { child, .. } = &query[0] else {
+            panic!("expected aggregate")
+        };
+        assert!(
+            matches!(child.as_ref(), QueryExpr::TimeRange { range, child }
+            if *range == Duration::from_secs(300) && matches!(child.as_ref(), QueryExpr::Scan { .. }))
+        );
+    }
+
+    #[test]
+    fn workload_without_interval_fails_loudly() {
+        let mut workload = workload("sum(data)");
+        workload.data_workload = Some(DataWorkload::default());
+        assert!(matches!(
+            lower_promql_workload(&workload),
+            Err(PromqlError::InvalidWorkload(
+                asap_types::workload::WorkloadError::MissingDataIngestionInterval
+            ))
+        ));
+    }
 }

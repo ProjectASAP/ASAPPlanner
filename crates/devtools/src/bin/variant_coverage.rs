@@ -4,7 +4,7 @@
 // resulting QueryExpr trees, and reports which enum variants show up — per
 // corpus, then rolled up globally. Used to find the minimal QueryExpr node set.
 
-use asap_devtools::lower_promql;
+use asap_devtools::lower_promql_with_data_ingestion_interval;
 use asap_frontend_sql::{lower_sql_dialect, SqlCatalog};
 use asap_types::pre_asap::schema::{Column, DataType, Schema};
 use asap_types::pre_asap::QueryExpr;
@@ -247,8 +247,23 @@ fn report(r: &CorpusResult) {
     println!();
 }
 
+fn parse_ingestion_interval() -> u64 {
+    let mut args = std::env::args().skip(1);
+    while let Some(arg) = args.next() {
+        if arg == "--data-ingestion-interval-ms" {
+            return args
+                .next()
+                .expect("--data-ingestion-interval-ms requires a value")
+                .parse()
+                .expect("--data-ingestion-interval-ms must be an unsigned integer");
+        }
+    }
+    panic!("--data-ingestion-interval-ms is required")
+}
+
 #[tokio::main]
 async fn main() {
+    let interval_ms = parse_ingestion_interval();
     let mut results = Vec::new();
 
     // ── PromQL corpora ──
@@ -281,7 +296,7 @@ async fn main() {
         let mut lowered = 0;
         let mut failed = 0;
         for q in promql_lines(corpus) {
-            match lower_promql(q, AccuracyTarget::Exact) {
+            match lower_promql_with_data_ingestion_interval(q, AccuracyTarget::Exact, interval_ms) {
                 Ok(qe) => {
                     walk(&qe, &mut variants);
                     lowered += 1;
