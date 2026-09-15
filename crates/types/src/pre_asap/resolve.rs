@@ -518,7 +518,7 @@ fn resolve_agg_intent(
         AggIntent::Count { accuracy } => AggIntent::Count {
             accuracy: accuracy.clone(),
         },
-        AggIntent::Binary { op, left, right } => AggIntent::Binary {
+        AggIntent::Bivariate { op, left, right } => AggIntent::Bivariate {
             op: *op,
             left: resolve_column_ref(left, schema)?,
             right: resolve_column_ref(right, schema)?,
@@ -616,14 +616,14 @@ mod tests {
 
     // Both sides resolve with qualifiers; an unknown right input is an error.
     #[test]
-    fn resolve_binary_aggregate_inputs() {
-        use crate::pre_asap::{BinaryAggOp, Column, DataType};
+    fn resolve_bivariate_aggregate_inputs() {
+        use crate::pre_asap::{BivariateAggOp, Column, DataType};
         let schema = Schema::new(vec![
             Column::new("x", DataType::Float64, true).with_table("a"),
             Column::new("x", DataType::Float64, true).with_table("b"),
         ]);
-        let intent = AggIntent::Binary {
-            op: BinaryAggOp::Correlation,
+        let intent = AggIntent::Bivariate {
+            op: BivariateAggOp::Correlation,
             left: ColumnRef::Qualified {
                 table: "a".into(),
                 name: "x".into(),
@@ -635,14 +635,14 @@ mod tests {
         };
         assert_eq!(
             resolve_agg_intent(&intent, &schema).unwrap(),
-            AggIntent::Binary {
-                op: BinaryAggOp::Correlation,
+            AggIntent::Bivariate {
+                op: BivariateAggOp::Correlation,
                 left: 0,
                 right: 1,
             }
         );
-        let missing = AggIntent::Binary {
-            op: BinaryAggOp::Correlation,
+        let missing = AggIntent::Bivariate {
+            op: BivariateAggOp::Correlation,
             left: ColumnRef::Qualified {
                 table: "a".into(),
                 name: "x".into(),

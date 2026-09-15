@@ -822,7 +822,7 @@ pub(crate) fn implementations_for_with(
         AggIntent::Avg { .. }
         | AggIntent::StdDev { .. }
         | AggIntent::Variance { .. }
-        | AggIntent::Binary { .. } => {
+        | AggIntent::Bivariate { .. } => {
             vec![Implementation::PassThrough]
         }
 
@@ -6067,9 +6067,9 @@ mod tests {
 
     // Correlation must never acquire a single-input sketch or scalar accumulator.
     #[test]
-    fn binary_aggregate_keeps_exact_paired_input() {
-        let intent = AggIntent::Binary {
-            op: asap_types::pre_asap::BinaryAggOp::Correlation,
+    fn bivariate_aggregate_keeps_exact_paired_input() {
+        let intent = AggIntent::Bivariate {
+            op: asap_types::pre_asap::BivariateAggOp::Correlation,
             left: 0,
             right: 1,
         };

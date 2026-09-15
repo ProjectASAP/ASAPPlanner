@@ -353,7 +353,7 @@ pub const KNOWN_UNMAPPED_NATIVE_FUNCTIONS: &[&str] = &[
     "bool_and",
     "bool_or",
     // Two-column covariance / regression operations not yet implemented by
-    // `AggIntent::Binary`. Correlation is the first supported operation.
+    // `AggIntent::Bivariate`. Correlation is the first supported operation.
     "covar",
     "covar_pop",
     "covar_samp",

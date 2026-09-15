@@ -104,7 +104,7 @@ native-histogram accessors — this list is representative, not exhaustive:
 
 ```text
 Count, Sum(col), Min(col), Max(col), Avg(col), StdDev(col), Variance(col),
-Quantile(col, q), TopK(k), Cardinality(col), Binary(op, left, right) // data-model-agnostic
+Quantile(col, q), TopK(k), Cardinality(col), Bivariate(op, left, right) // data-model-agnostic
 Rate, Increase                                                    // counter derivatives
 Changes, Delta, IDelta, Deriv, Resets,
 PredictLinear(seconds), DoubleExpSmoothing(sf, tf)                // range-vector functions
@@ -113,8 +113,8 @@ HistogramStdVar, HistogramFraction(lo, hi), HistogramQuantile(q)  // native-hist
 Math(func)                                                        // element-wise transform
 ```
 
-`Binary { op, left, right }` represents an aggregate over two value columns;
-`BinaryAggOp::Correlation` is its first operation. Both references resolve to
+`Bivariate { op, left, right }` represents an aggregate over two value columns;
+`BivariateAggOp::Correlation` is its first operation. Both references resolve to
 positional column IDs, and `input_cols()` exposes both dependencies. SQL lowering
 projects both arguments, preserving expressions, casts, and qualified join columns.
 The result of correlation is nullable `Float64`, with pairwise null handling owned
@@ -123,7 +123,7 @@ cannot be combined as scalar rollups, and no sketch or maintained correlation
 accumulator is selected. Physical costing accepts it as a hash aggregate with
 provider-supplied accumulator size.
 
-Further two-input operations can extend `BinaryAggOp` without adding another
+Further two-input operations can extend `BivariateAggOp` without adding another
 argument-carrying aggregate variant. Each needs explicit output and realization
 semantics. SQL `corr` currently rejects `DISTINCT`, aggregate `FILTER`, aggregate
 `ORDER BY`, explicit null treatment, and window usage (`OVER`).

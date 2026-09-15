@@ -380,12 +380,12 @@ mod tests {
 
     // Both binary inputs must seed a usage-derived schema before positional resolution.
     #[test]
-    fn binary_inputs_seed_usage_derived_schema() {
-        use crate::pre_asap::{AggIntent, BinaryAggOp, Reduction};
+    fn bivariate_inputs_seed_usage_derived_schema() {
+        use crate::pre_asap::{AggIntent, BivariateAggOp, Reduction};
         let tree = UnresolvedQueryExpr::Aggregate {
             reduction: Reduction::by(vec![]),
-            measures: vec![AggIntent::Binary {
-                op: BinaryAggOp::Correlation,
+            measures: vec![AggIntent::Bivariate {
+                op: BivariateAggOp::Correlation,
                 left: ColumnRef::Named("x".into()),
                 right: ColumnRef::Named("y".into()),
             }],

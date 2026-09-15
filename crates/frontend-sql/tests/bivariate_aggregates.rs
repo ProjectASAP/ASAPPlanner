@@ -2,7 +2,7 @@
 use std::rc::Rc;
 
 use asap_frontend_sql::{lower_sql, SqlCatalog};
-use asap_types::pre_asap::{AggIntent, BinaryAggOp, Column, DataType, QueryExpr, Schema};
+use asap_types::pre_asap::{AggIntent, BivariateAggOp, Column, DataType, QueryExpr, Schema};
 use asap_types::types::AccuracyTarget;
 
 fn catalog() -> SqlCatalog {
@@ -47,8 +47,8 @@ async fn corr_materializes_both_arguments() {
         let (measures, child) = aggregate(&query);
         assert_eq!(
             measures,
-            &[AggIntent::Binary {
-                op: BinaryAggOp::Correlation,
+            &[AggIntent::Bivariate {
+                op: BivariateAggOp::Correlation,
                 left: 0,
                 right: 1,
             }]
@@ -87,7 +87,7 @@ async fn corr_coexists_with_grouping_having_and_other_measures() {
     let (measures, child) = aggregate(&query);
     let pair = measures
         .iter()
-        .find(|m| matches!(m, AggIntent::Binary { .. }))
+        .find(|m| matches!(m, AggIntent::Bivariate { .. }))
         .unwrap();
     let schema = child.output_schema().unwrap();
     for id in pair.input_cols() {

@@ -1187,8 +1187,8 @@ fn supports_hash_aggregate(
                     | AggIntent::Avg { .. }
                     | AggIntent::StdDev { .. }
                     | AggIntent::Variance { .. }
-                    | AggIntent::Binary {
-                        op: asap_types::pre_asap::BinaryAggOp::Correlation,
+                    | AggIntent::Bivariate {
+                        op: asap_types::pre_asap::BivariateAggOp::Correlation,
                         ..
                     }
                     | AggIntent::Group
@@ -1451,15 +1451,15 @@ mod tests {
     #[test]
     fn correlation_lowers_to_physical_hash_aggregate() {
         use asap_types::pre_asap::{
-            AggIntent, BinaryAggOp, Column, DataType, QueryExpr, Reduction, Schema, Source,
+            AggIntent, BivariateAggOp, Column, DataType, QueryExpr, Reduction, Schema, Source,
         };
         let source = Source::Table {
             table_ref: "pairs".into(),
         };
         let root = Rc::new(QueryExpr::Aggregate {
             reduction: Reduction::by(vec![]),
-            measures: vec![AggIntent::Binary {
-                op: BinaryAggOp::Correlation,
+            measures: vec![AggIntent::Bivariate {
+                op: BivariateAggOp::Correlation,
                 left: 0,
                 right: 1,
             }],

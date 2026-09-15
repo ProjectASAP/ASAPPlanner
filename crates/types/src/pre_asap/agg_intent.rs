@@ -41,10 +41,10 @@ use crate::types::AccuracyTarget;
 #[serde(bound(serialize = "C: Serialize", deserialize = "C: Deserialize<'de>"))]
 pub enum AggIntent<C = ColumnId> {
     /// A reduction over paired values from two explicit input columns.
-    /// Operation semantics live in `BinaryAggOp`; both references participate
+    /// Operation semantics live in `BivariateAggOp`; both references participate
     /// in binding and dependency tracking, unlike an opaque extension payload.
-    Binary {
-        op: BinaryAggOp,
+    Bivariate {
+        op: BivariateAggOp,
         left: C,
         right: C,
     },
@@ -292,7 +292,7 @@ pub enum AggIntent<C = ColumnId> {
 /// must define their output type and exact/summary realization explicitly.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum BinaryAggOp {
+pub enum BivariateAggOp {
     /// Pearson correlation over pairs where both inputs are non-null.
     Correlation,
 }
@@ -489,12 +489,12 @@ impl<C: Clone> AggIntent<C> {
     /// An empty list retains the existing implicit sample/row-count convention.
     pub fn input_cols(&self) -> Vec<C> {
         match self {
-            Self::Binary { left, right, .. } => vec![left.clone(), right.clone()],
+            Self::Bivariate { left, right, .. } => vec![left.clone(), right.clone()],
             _ => self.input_col().into_iter().collect(),
         }
     }
 
-    /// The explicit input of a single-column reducer. Binary aggregates,
+    /// The explicit input of a single-column reducer. Bivariate aggregates,
     /// argument-less aggregates, and implicit PromQL sample inputs return `None`.
     /// Use `input_cols` for dependency tracking; this accessor is for consumers
     /// that have already selected a single-column implementation.
@@ -529,8 +529,8 @@ impl<C: Clone> AggIntent<C> {
             AggIntent::Avg { .. } => col("avg", DataType::Float64, false),
             AggIntent::StdDev { .. } => col("stddev", DataType::Float64, false),
             AggIntent::Variance { .. } => col("variance", DataType::Float64, false),
-            AggIntent::Binary { op, .. } => match op {
-                BinaryAggOp::Correlation => col("corr", DataType::Float64, true),
+            AggIntent::Bivariate { op, .. } => match op {
+                BivariateAggOp::Correlation => col("corr", DataType::Float64, true),
             },
             AggIntent::Quantile { q, .. } => col(
                 &format!("quantile_{}", quantile_suffix(*q)),
@@ -656,7 +656,7 @@ pub mod topk {
 
 /// Two instances of this aggregation can be merged
 /// (`agg(A ∪ B) = combine(agg(A), agg(B))`). `Avg` / `StdDev` / `Variance`
-/// and binary correlation need richer partial state than a single value, so
+/// and correlation need richer partial state than a single value, so
 /// their finalized values are not mergeable.
 pub fn agg_is_mergeable(op: &AggIntent) -> bool {
     !matches!(
@@ -664,12 +664,12 @@ pub fn agg_is_mergeable(op: &AggIntent) -> bool {
         AggIntent::Avg { .. }
             | AggIntent::StdDev { .. }
             | AggIntent::Variance { .. }
-            | AggIntent::Binary { .. }
+            | AggIntent::Bivariate { .. }
     )
 }
 
 /// Whether this op implies `exact_required` — no sketch benefit. The exact
-/// intents include `Sum / Count / Avg / Min / Max` and binary correlation.
+/// intents include `Sum / Count / Avg / Min / Max` and correlation.
 pub fn agg_is_exact(op: &AggIntent) -> bool {
     matches!(
         op,
@@ -678,7 +678,7 @@ pub fn agg_is_exact(op: &AggIntent) -> bool {
             | AggIntent::Avg { .. }
             | AggIntent::Min { .. }
             | AggIntent::Max { .. }
-            | AggIntent::Binary { .. }
+            | AggIntent::Bivariate { .. }
             | AggIntent::Group
             | AggIntent::CountValues { .. }
     )
@@ -735,9 +735,9 @@ mod tests {
 
     // Paired aggregates expose both dependencies but cannot merge final scalar results.
     #[test]
-    fn binary_aggregate_contract() {
-        let intent = AggIntent::Binary {
-            op: BinaryAggOp::Correlation,
+    fn bivariate_aggregate_contract() {
+        let intent = AggIntent::Bivariate {
+            op: BivariateAggOp::Correlation,
             left: 2,
             right: 5,
         };
@@ -749,7 +749,7 @@ mod tests {
         assert_eq!(output.dtype, DataType::Float64);
         assert!(output.nullable);
         let value = serde_json::to_value(&intent).unwrap();
-        assert_eq!(value["kind"], "binary");
+        assert_eq!(value["kind"], "bivariate");
         assert_eq!(value["op"], "correlation");
         assert_eq!(serde_json::from_value::<AggIntent>(value).unwrap(), intent);
     }
