@@ -12,10 +12,9 @@
 //! query corpus that pins the front end against regressions. Two guarantees:
 //!   1. **Totality** — every query returns `Ok` or a clean `LoweringError`,
 //!      never panics.
-//!   2. **Full coverage** — the DataFusion SQL front end lowers **all 70**
-//!      (CTEs, `LAG` window functions, multi-argument `COUNT(DISTINCT …)`,
-//!      `STDDEV_POP`, `HAVING`, `CASE`). A regression that drops any query below
-//!      full coverage trips the ratchet.
+//!   2. **Coverage ratchet** — 61 queries lower; nine composite
+//!      COUNT(DISTINCT) queries are rejected because the IR cannot represent
+//!      tuple cardinality. Successful lowering must not silently drop keys.
 //!
 //! Schema: `packets(srcip, dstip, srcport, dstport, proto, time, pkt_len)`;
 //! flow / 5-tuple = `(srcip, dstip, srcport, dstport, proto)`.
@@ -187,7 +186,7 @@ struct Tally {
 }
 
 #[tokio::test]
-async fn corpus_lowering_is_total_and_fully_supported() {
+async fn corpus_lowering_rejects_only_unsupported_tuple_counts() {
     let cat = catalog();
     let mut t = Tally::default();
     for q in queries() {
@@ -196,7 +195,12 @@ async fn corpus_lowering_is_total_and_fully_supported() {
             Ok(_) => t.lowered += 1,
             // DataFusion surfaces parse/plan failures as `DataFusion(_)`.
             Err(LoweringError::DataFusion(_)) => t.unparseable += 1,
-            Err(_) => t.rejected += 1,
+            Err(LoweringError::UnsupportedAggregate(reason))
+                if reason == "multi-column COUNT(DISTINCT)" =>
+            {
+                t.rejected += 1
+            }
+            Err(error) => panic!("unexpected lowering failure for {q}: {error}"),
         }
     }
     eprintln!("synthetic-packet-trace SQL corpus: {t:?}");
@@ -210,12 +214,8 @@ async fn corpus_lowering_is_total_and_fully_supported() {
         "some DQC queries failed to parse/plan: {t:?}"
     );
 
-    // Full-coverage ratchet: today the SQL front end lowers ALL 70. A change
-    // that can no longer lower some query trips this deliberately.
-    assert_eq!(
-        t.lowered, 70,
-        "SQL lowering coverage regressed below full DQC coverage: {t:?}"
-    );
+    assert_eq!(t.rejected, 9, "expected nine unsupported tuple counts");
+    assert_eq!(t.lowered, 61, "SQL lowering coverage changed: {t:?}");
 }
 
 impl Tally {
@@ -247,21 +247,18 @@ async fn distinct_source_ips_is_cardinality() {
 }
 
 #[tokio::test]
-async fn multi_arg_count_distinct_flow_is_cardinality() {
-    // SP-CD-FLOW — distinct 5-tuples per source port. The multi-column
-    // `COUNT(DISTINCT srcip, dstip, srcport, dstport, proto)` is still one
-    // `Cardinality` (of the tuple), grouped by srcport.
-    let qe = lower(
+async fn multi_arg_count_distinct_flow_is_rejected() {
+    // A single-column Cardinality intent cannot represent a distinct 5-tuple.
+    let error = lower_sql(
         "SELECT srcport, COUNT(DISTINCT srcip, dstip, srcport, dstport, proto) AS n \
          FROM packets GROUP BY srcport ORDER BY n DESC",
+        &catalog(),
+        AccuracyTarget::Exact,
     )
-    .await;
-    let (by, measures) = first_aggregate(&qe).expect("expected an Aggregate");
-    assert_eq!(by.len(), 1, "grouped by srcport");
-    assert!(matches!(
-        measures.as_slice(),
-        [AggIntent::Cardinality { .. }]
-    ));
+    .await
+    .unwrap_err();
+    assert!(matches!(error, LoweringError::UnsupportedAggregate(reason)
+        if reason == "multi-column COUNT(DISTINCT)"));
 }
 
 #[tokio::test]

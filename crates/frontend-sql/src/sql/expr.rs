@@ -38,6 +38,27 @@ pub(super) fn df_expr_to_unresolved(expr: &Expr) -> Result<Unresolved, LoweringE
             None => ColumnRef::Named(col.name.clone()),
         })),
 
+        // Keep Arrow date literals equivalent to SQL CAST('YYYY-MM-DD' AS DATE),
+        // including typed nulls, without adding another canonical scalar variant.
+        Expr::Literal(
+            sv @ (datafusion::common::ScalarValue::Date32(_)
+            | datafusion::common::ScalarValue::Date64(_)),
+        ) => {
+            let text = sv.cast_to(&datafusion::arrow::datatypes::DataType::Utf8)?;
+            // Arrow formats Date64 with a time suffix; the canonical Date has
+            // no time-of-day, just like Date64 catalog registration as Date32.
+            let text = match text {
+                datafusion::common::ScalarValue::Utf8(Some(value)) => {
+                    ScalarValue::Utf8(value.split('T').next().unwrap().to_owned())
+                }
+                other => scalar_value_to_asap(&other)?,
+            };
+            Ok(Unresolved::Cast {
+                expr: Rc::new(Unresolved::Literal(text)),
+                to: asap_types::pre_asap::schema::DataType::Date,
+                try_cast: false,
+            })
+        }
         Expr::Literal(sv) => scalar_value_to_asap(sv).map(Unresolved::Literal),
 
         Expr::Alias(a) => df_expr_to_unresolved(&a.expr),
@@ -266,5 +287,39 @@ pub(super) fn split_disjuncts(expr: &Expr) -> Vec<&Expr> {
             v
         }
         _ => vec![expr],
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use asap_types::pre_asap::schema::DataType;
+    use datafusion::common::ScalarValue as DfScalarValue;
+
+    // Typed Arrow dates normalize to the same typed form as SQL date casts.
+    #[test]
+    fn arrow_date_literals_preserve_value_and_type() {
+        for (value, expected) in [
+            (
+                DfScalarValue::Date32(Some(0)),
+                ScalarValue::Utf8("1970-01-01".into()),
+            ),
+            (
+                DfScalarValue::Date64(Some(-86_400_000)),
+                ScalarValue::Utf8("1969-12-31".into()),
+            ),
+            (DfScalarValue::Date32(None), ScalarValue::Null),
+            (DfScalarValue::Date64(None), ScalarValue::Null),
+        ] {
+            let actual = df_expr_to_unresolved(&Expr::Literal(value)).unwrap();
+            assert_eq!(
+                actual,
+                Unresolved::Cast {
+                    expr: Rc::new(Unresolved::Literal(expected)),
+                    to: DataType::Date,
+                    try_cast: false,
+                }
+            );
+        }
     }
 }

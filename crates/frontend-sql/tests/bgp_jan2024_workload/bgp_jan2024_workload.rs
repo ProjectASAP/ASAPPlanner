@@ -173,15 +173,8 @@ async fn corpus_lowering_matches_the_pinned_aggregate_tally() {
     // not all -- as the issue itself flags, `splitByChar(...)[-1]`-style
     // calls (and a couple of other array/map-index uses) now plan far enough
     // to hit the same pre-existing map/array-index `NotImplemented` gap, and
-    // two `toStartOfInterval(...)` queries plan far enough to hit a
-    // different pre-existing gap: `types::scalar_value_to_asap` doesn't yet
-    // convert an `INTERVAL x unit` literal (`DfScalarValue::
-    // IntervalMonthDayNano`), so those two land in `Other` via
-    // `LoweringError::InvalidExpression` instead. Both are companion gaps
-    // this issue's scope explicitly doesn't chase down (see its "known
-    // caveat" section) -- getting these functions' *names* to lower to a
-    // structurally correct `FunctionCall` node is what's in scope here, not
-    // array/map indexing or interval-literal conversion.
+    // the two `toStartOfInterval(...)` queries now lower end to end because
+    // interval literal conversion is supported.
     // `argMax` support (issue #232 -- `AggIntent::Extension`, catalog-driven
     // `RewriteKind::PassThrough`) clears the "unknown function: argmax" `Plan`
     // failure for all 3 corpus occurrences: every one has both arguments as
@@ -198,7 +191,10 @@ async fn corpus_lowering_matches_the_pinned_aggregate_tally() {
     // entry, so the query still fails at the first unknown-function name it
     // hits, just no longer `laginframe`. Out of scope for #267, same as
     // `splitByChar`'s array-indexing companion gap above.
-    expect(Category::Lowered, 152);
+    // 152 -> 154: `ScalarValue::Interval` (this branch) converts the
+    // `INTERVAL x unit` literal the two `toStartOfInterval(...)` queries
+    // carry.
+    expect(Category::Lowered, 154);
     expect(Category::Plan, 40);
     expect(Category::Schema, 0);
     expect(Category::Parse, 0);
@@ -212,8 +208,8 @@ async fn corpus_lowering_matches_the_pinned_aggregate_tally() {
     // during typed planning because the Map adapter rejects array inputs.
     expect(Category::NotImplemented, 0);
     expect(Category::UnsupportedFeature, 6);
-    // Two `toStartOfInterval(...)` queries -- see the `toStartOfInterval`
-    // note above; a pre-existing `INTERVAL`-literal conversion gap, not a
-    // ClickHouse scalar-builtin catalog gap.
-    expect(Category::Other, 2);
+    // Was 2: the two `toStartOfInterval(...)` queries whose `INTERVAL`-literal
+    // conversion gap the `toStartOfInterval` note above describes. Both now
+    // lower end to end and are counted in `Lowered`.
+    expect(Category::Other, 0);
 }
