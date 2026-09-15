@@ -1187,6 +1187,7 @@ fn supports_hash_aggregate(
                     | AggIntent::Avg { .. }
                     | AggIntent::StdDev { .. }
                     | AggIntent::Variance { .. }
+                    | AggIntent::PearsonCorr { .. }
                     | AggIntent::Group
                     | AggIntent::CountValues { .. }
             )
@@ -1441,6 +1442,56 @@ mod tests {
             bind_info_coverage("info", &selector, &wrong_scope),
             Err(AnalyticalCostError::ScanOutsideComparisonScope(_))
         ));
+    }
+
+    // Correlation can be costed as an exact hash aggregate using provider-supplied state size.
+    #[test]
+    fn correlation_lowers_to_physical_hash_aggregate() {
+        use asap_types::pre_asap::{
+            AggIntent, Column, DataType, QueryExpr, Reduction, Schema, Source,
+        };
+        let source = Source::Table {
+            table_ref: "pairs".into(),
+        };
+        let root = Rc::new(QueryExpr::Aggregate {
+            reduction: Reduction::by(vec![]),
+            measures: vec![AggIntent::PearsonCorr { left: 0, right: 1 }],
+            output_names: vec!["r".into()],
+            having: None,
+            child: Rc::new(QueryExpr::Scan {
+                source: source.clone(),
+                predicates: vec![],
+                schema: Schema::new(vec![
+                    Column::new("x", DataType::Float64, true),
+                    Column::new("y", DataType::Float64, true),
+                ]),
+            }),
+        });
+        let scope = scope(vec![coverage(source, vec![])]);
+        let provided = HashMap::from([
+            (
+                "query-1".into(),
+                evidence(scan_stats(edge(100, 1600), 1600)),
+            ),
+            (
+                "query-0".into(),
+                evidence(OperatorStatistics::HashAggregate {
+                    edges: unary_edges(edge(100, 1600), edge(1, 8)),
+                    group_count: 1,
+                    key_bytes: 0,
+                    accumulator_bytes_per_group: 48,
+                }),
+            ),
+        ]);
+        let dag = lower_query_physical_dag(&root, &scope, &scripted(&provided)).unwrap();
+        assert!(matches!(
+            dag.nodes.last().unwrap().operator,
+            PhysicalOperator::HashAggregate {
+                grouping_key_count: 0,
+                accumulator_count: 1,
+            }
+        ));
+        assert!(estimate_physical_dag(&dag.nodes, &dag.root, &scope, &dag.evidence).is_ok());
     }
 
     #[test]

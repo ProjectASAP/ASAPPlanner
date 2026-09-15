@@ -203,17 +203,14 @@ pub(crate) fn collect_referenced_columns(tree: &UnresolvedQueryExpr) -> Vec<Stri
             push_ref_name(c, out);
         }
     }
-    fn opt_ref(c: &Option<ColumnRef>, out: &mut Vec<String>) {
-        if let Some(c) = c {
-            push_ref_name(c, out);
-        }
-    }
     fn group_keys(g: &super::query_expr::GroupKeys<ColumnRef>, out: &mut Vec<String>) {
         g.keys().iter().for_each(|k| push_ref_name(k, out));
     }
     fn measure_cols(measures: &[super::agg_intent::AggIntent<ColumnRef>], out: &mut Vec<String>) {
         for m in measures {
-            opt_ref(&m.input_col(), out);
+            for c in m.input_cols() {
+                push_ref_name(&c, out);
+            }
         }
     }
     fn walk(node: &UnresolvedQueryExpr, out: &mut Vec<String>) {
@@ -379,6 +376,26 @@ mod tests {
             predicates: vec![],
             schema: None,
         }
+    }
+
+    // Both correlation inputs must seed a usage-derived schema before positional resolution.
+    #[test]
+    fn pearson_corr_inputs_seed_usage_derived_schema() {
+        use crate::pre_asap::{AggIntent, Reduction};
+        let tree = UnresolvedQueryExpr::Aggregate {
+            reduction: Reduction::by(vec![]),
+            measures: vec![AggIntent::PearsonCorr {
+                left: ColumnRef::Named("x".into()),
+                right: ColumnRef::Named("y".into()),
+            }],
+            output_names: vec![],
+            having: None,
+            child: Rc::new(src("m")),
+        };
+        assert_eq!(collect_referenced_columns(&tree), vec!["x", "y"]);
+        let schema = Binder::new().bind(&tree);
+        assert!(schema.column_id("x").is_some());
+        assert!(schema.column_id("y").is_some());
     }
 
     #[test]

@@ -518,6 +518,10 @@ fn resolve_agg_intent(
         AggIntent::Count { accuracy } => AggIntent::Count {
             accuracy: accuracy.clone(),
         },
+        AggIntent::PearsonCorr { left, right } => AggIntent::PearsonCorr {
+            left: resolve_column_ref(left, schema)?,
+            right: resolve_column_ref(right, schema)?,
+        },
         AggIntent::Sum { col: c } => AggIntent::Sum { col: col(c)? },
         AggIntent::Min { col: c } => AggIntent::Min { col: col(c)? },
         AggIntent::Max { col: c } => AggIntent::Max { col: col(c)? },
@@ -608,6 +612,38 @@ mod tests {
     use crate::pre_asap::query_expr::{
         BinaryOpKind, QueryExpr, Source, VectorMatch, VectorMatchKind,
     };
+
+    // Both sides resolve with qualifiers; an unknown right input is an error.
+    #[test]
+    fn resolve_pearson_corr_inputs() {
+        use crate::pre_asap::{Column, DataType};
+        let schema = Schema::new(vec![
+            Column::new("x", DataType::Float64, true).with_table("a"),
+            Column::new("x", DataType::Float64, true).with_table("b"),
+        ]);
+        let intent = AggIntent::PearsonCorr {
+            left: ColumnRef::Qualified {
+                table: "a".into(),
+                name: "x".into(),
+            },
+            right: ColumnRef::Qualified {
+                table: "b".into(),
+                name: "x".into(),
+            },
+        };
+        assert_eq!(
+            resolve_agg_intent(&intent, &schema).unwrap(),
+            AggIntent::PearsonCorr { left: 0, right: 1 }
+        );
+        let missing = AggIntent::PearsonCorr {
+            left: ColumnRef::Qualified {
+                table: "a".into(),
+                name: "x".into(),
+            },
+            right: ColumnRef::Named("missing".into()),
+        };
+        assert!(resolve_agg_intent(&missing, &schema).is_err());
+    }
 
     /// `resolve_root` over a `BinaryOp { <vector>, PromqlScalarBridge, vector_match }`
     /// (issue #220): the bridged scalar operand resolves through the same

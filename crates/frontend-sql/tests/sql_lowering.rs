@@ -2455,6 +2455,16 @@ async fn clickhouse_tuple_element_preserves_declared_field_metadata() {
     }
 }
 
+/// Correlation lowers to a nullable numeric result instead of UnsupportedAggregate.
+#[tokio::test]
+async fn corr_result_is_nullable_float() {
+    let query = lower("SELECT corr(latency, bytes) AS correlation FROM metrics").await;
+    let schema = query.output_schema().unwrap();
+    assert_eq!(schema.columns[0].name, "correlation");
+    assert_eq!(schema.columns[0].dtype, DataType::Float64);
+    assert!(schema.columns[0].nullable);
+}
+
 // A multi-column DISTINCT must not silently count only the first column.
 #[tokio::test]
 async fn composite_distinct_is_rejected() {

@@ -73,6 +73,13 @@ pub enum AggIntent<C = ColumnId> {
         col: Option<C>,
         population: bool,
     },
+    /// Pearson correlation — SQL `CORR(left, right)`. The only aggregate with
+    /// two value inputs; both references take part in binding and dependency
+    /// tracking, so neither is reachable through `input_col`.
+    PearsonCorr {
+        left: C,
+        right: C,
+    },
     /// φ-quantile of `col`. SQL `approx_percentile_cont(col, φ)` and
     /// `median(col)` (φ=0.5); PromQL `quantile(φ, …)` leaves `col` as `None`
     /// (the sample value).
@@ -468,11 +475,19 @@ impl<C: Clone> AggIntent<C> {
 }
 
 impl<C: Clone> AggIntent<C> {
-    /// The input column this intent reduces, if it carries one. `None` = the
-    /// synthetic time-series sample value (PromQL) or an argument-less
-    /// aggregate (`Count` / `TopK`). Used by schema derivation to resolve each
-    /// reducer's input column, and by `plan::bind` to pick the column a
-    /// summary is built over.
+    /// All explicit value-column dependencies, in argument order.
+    /// An empty list retains the existing implicit sample/row-count convention.
+    pub fn input_cols(&self) -> Vec<C> {
+        match self {
+            Self::PearsonCorr { left, right } => vec![left.clone(), right.clone()],
+            _ => self.input_col().into_iter().collect(),
+        }
+    }
+
+    /// The explicit input of a single-column reducer. `PearsonCorr`,
+    /// argument-less aggregates, and implicit PromQL sample inputs return `None`.
+    /// Use `input_cols` for dependency tracking; this accessor is for consumers
+    /// that have already selected a single-column implementation.
     pub fn input_col(&self) -> Option<C> {
         match self {
             AggIntent::Sum { col }
@@ -504,6 +519,9 @@ impl<C: Clone> AggIntent<C> {
             AggIntent::Avg { .. } => col("avg", DataType::Float64, false),
             AggIntent::StdDev { .. } => col("stddev", DataType::Float64, false),
             AggIntent::Variance { .. } => col("variance", DataType::Float64, false),
+            // Nullable: correlation is undefined for fewer than two pairs where
+            // both inputs are non-null, and for a zero-variance input.
+            AggIntent::PearsonCorr { .. } => col("corr", DataType::Float64, true),
             AggIntent::Quantile { q, .. } => col(
                 &format!("quantile_{}", quantile_suffix(*q)),
                 DataType::Float64,
@@ -628,16 +646,20 @@ pub mod topk {
 
 /// Two instances of this aggregation can be merged
 /// (`agg(A ∪ B) = combine(agg(A), agg(B))`). `Avg` / `StdDev` / `Variance`
-/// need richer partial state than a single value, so they are not mergeable.
+/// and correlation need richer partial state than a single value, so
+/// their finalized values are not mergeable.
 pub fn agg_is_mergeable(op: &AggIntent) -> bool {
     !matches!(
         op,
-        AggIntent::Avg { .. } | AggIntent::StdDev { .. } | AggIntent::Variance { .. }
+        AggIntent::Avg { .. }
+            | AggIntent::StdDev { .. }
+            | AggIntent::Variance { .. }
+            | AggIntent::PearsonCorr { .. }
     )
 }
 
 /// Whether this op implies `exact_required` — no sketch benefit. The exact
-/// intents are `Sum / Count / Avg / Min / Max`.
+/// intents include `Sum / Count / Avg / Min / Max` and correlation.
 pub fn agg_is_exact(op: &AggIntent) -> bool {
     matches!(
         op,
@@ -646,6 +668,7 @@ pub fn agg_is_exact(op: &AggIntent) -> bool {
             | AggIntent::Avg { .. }
             | AggIntent::Min { .. }
             | AggIntent::Max { .. }
+            | AggIntent::PearsonCorr { .. }
             | AggIntent::Group
             | AggIntent::CountValues { .. }
     )
@@ -698,6 +721,22 @@ mod tests {
 
     fn c(name: &str, dtype: DataType) -> Column {
         Column::new(name, dtype, false)
+    }
+
+    // Correlation exposes both dependencies but cannot merge final scalar results.
+    #[test]
+    fn pearson_corr_contract() {
+        let intent = AggIntent::PearsonCorr { left: 2, right: 5 };
+        assert_eq!(intent.input_cols(), vec![2, 5]);
+        assert_eq!(intent.input_col(), None);
+        assert!(agg_is_exact(&intent));
+        assert!(!agg_is_mergeable(&intent));
+        let output = intent.output_column(&c("x", DataType::Float64));
+        assert_eq!(output.dtype, DataType::Float64);
+        assert!(output.nullable);
+        let value = serde_json::to_value(&intent).unwrap();
+        assert_eq!(value["kind"], "pearson_corr");
+        assert_eq!(serde_json::from_value::<AggIntent>(value).unwrap(), intent);
     }
 
     #[test]

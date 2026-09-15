@@ -819,7 +819,10 @@ pub(crate) fn implementations_for_with(
 
         // ── Exact, non-mergeable reducers — richer partial state than a
         //    single value (see `agg_is_mergeable`), so no accumulator form.
-        AggIntent::Avg { .. } | AggIntent::StdDev { .. } | AggIntent::Variance { .. } => {
+        AggIntent::Avg { .. }
+        | AggIntent::StdDev { .. }
+        | AggIntent::Variance { .. }
+        | AggIntent::PearsonCorr { .. } => {
             vec![Implementation::PassThrough]
         }
 
@@ -6060,6 +6063,17 @@ mod tests {
                 );
             }
         }
+    }
+
+    // Correlation must never acquire a single-input sketch or scalar accumulator.
+    #[test]
+    fn pearson_corr_keeps_exact_paired_input() {
+        let intent = AggIntent::PearsonCorr { left: 0, right: 1 };
+        assert!(matches!(
+            implementations_for_with(&intent, &crate::cost_model::DefaultCostModel).as_slice(),
+            [Implementation::PassThrough]
+        ));
+        assert!(summary_candidates(&intent).is_empty());
     }
 
     #[test]
