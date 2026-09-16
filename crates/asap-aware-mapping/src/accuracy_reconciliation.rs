@@ -213,7 +213,7 @@ fn same_intent_except_accuracy(a: &AggIntent, b: &AggIntent) -> bool {
             AggIntent::Quantile { col: c2, q: q2, .. },
         ) => c1 == c2 && q1 == q2,
         (AggIntent::TopK { k: k1, .. }, AggIntent::TopK { k: k2, .. }) => k1 == k2,
-        (AggIntent::Cardinality { col: c1, .. }, AggIntent::Cardinality { col: c2, .. }) => {
+        (AggIntent::Cardinality { cols: c1, .. }, AggIntent::Cardinality { cols: c2, .. }) => {
             c1 == c2
         }
         _ => false,

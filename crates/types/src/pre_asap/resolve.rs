@@ -547,8 +547,11 @@ fn resolve_agg_intent(
             k: *k,
             accuracy: accuracy.clone(),
         },
-        AggIntent::Cardinality { col: c, accuracy } => AggIntent::Cardinality {
-            col: col(c)?,
+        AggIntent::Cardinality { cols, accuracy } => AggIntent::Cardinality {
+            cols: cols
+                .iter()
+                .map(|c| resolve_column_ref(c, schema))
+                .collect::<Result<_, _>>()?,
             accuracy: accuracy.clone(),
         },
         AggIntent::FrequencyL2 { col: c, accuracy } => AggIntent::FrequencyL2 {
@@ -641,6 +644,38 @@ mod tests {
                 name: "x".into(),
             },
             right: ColumnRef::Named("missing".into()),
+        };
+        assert!(resolve_agg_intent(&missing, &schema).is_err());
+    }
+
+    // Every leg resolves independently, qualifiers included; one unknown leg
+    // fails rather than silently shortening the tuple.
+    #[test]
+    fn resolve_distinct_tuple_columns() {
+        use crate::pre_asap::{Column, DataType};
+        use crate::types::AccuracyTarget;
+        let schema = Schema::new(vec![
+            Column::new("k", DataType::Int64, true).with_table("a"),
+            Column::new("k", DataType::Int64, true).with_table("b"),
+        ]);
+        let qualified = |table: &str| ColumnRef::Qualified {
+            table: table.into(),
+            name: "k".into(),
+        };
+        let intent = AggIntent::Cardinality {
+            cols: vec![qualified("b"), qualified("a")],
+            accuracy: AccuracyTarget::Exact,
+        };
+        assert_eq!(
+            resolve_agg_intent(&intent, &schema).unwrap(),
+            AggIntent::Cardinality {
+                cols: vec![1, 0],
+                accuracy: AccuracyTarget::Exact,
+            }
+        );
+        let missing = AggIntent::Cardinality {
+            cols: vec![qualified("a"), ColumnRef::Named("missing".into())],
+            accuracy: AccuracyTarget::Exact,
         };
         assert!(resolve_agg_intent(&missing, &schema).is_err());
     }

@@ -722,6 +722,16 @@ pub const DEFAULT_DELTA: f64 = 0.01;
 pub fn summary_candidates(intent: &AggIntent) -> &'static [SketchAlgorithm] {
     match intent {
         AggIntent::Quantile { .. } => &[SketchAlgorithm::Kll, SketchAlgorithm::DDSketch],
+        // A distinct-tuple count hashes the whole tuple as one item
+        // (`SummaryInputExpr::Tuple`), which the distinct-count sketches take
+        // unchanged. UnivMon is dropped there: it estimates frequency moments
+        // over a single value stream, and `realize_value_frequency_summary_input`
+        // would feed it one column of the tuple.
+        AggIntent::Cardinality { cols, .. } if cols.len() > 1 => &[
+            SketchAlgorithm::Hll,
+            SketchAlgorithm::Theta,
+            SketchAlgorithm::Kmv,
+        ],
         AggIntent::Cardinality { .. } => &[
             SketchAlgorithm::Hll,
             SketchAlgorithm::Theta,
@@ -1641,6 +1651,9 @@ fn describe_implementation(intent: &AggIntent, implementation: &Implementation) 
 pub(crate) fn describe_intent(intent: &AggIntent) -> String {
     match intent {
         AggIntent::Quantile { q, .. } => format!("quantile(q={q})"),
+        AggIntent::Cardinality { cols, .. } if cols.len() > 1 => {
+            format!("cardinality (distinct count over {} columns)", cols.len())
+        }
         AggIntent::Cardinality { .. } => "cardinality (distinct count)".to_string(),
         AggIntent::TopK { k, .. } => format!("top-{k} heavy-hitters"),
         AggIntent::Count { .. } => "count".to_string(),
@@ -2408,6 +2421,14 @@ fn realize_value_frequency_summary_input(
             "value frequency input needs a valid schema",
         );
     };
+    // One item per observation is a single value stream. `summary_candidates`
+    // already withholds UnivMon from a distinct-tuple count; refused here too
+    // so the invariant does not rest on that table alone.
+    if intent.input_cols().len() > 1 {
+        return PhysicalSummaryInputRuleResult::Unsupported(
+            "a value-frequency summary reads a single column",
+        );
+    }
     PhysicalSummaryInputRuleResult::Realized(PhysicalSummaryInput {
         child: Rc::clone(child),
         input: SummaryUpdate {
@@ -2444,7 +2465,11 @@ fn realize_physical_summary_input(
     }
     Ok(PhysicalSummaryInput {
         child: Rc::clone(child),
-        input: SummaryUpdate::column(summarised_column(intent, &child_schema)),
+        input: SummaryUpdate {
+            item: None,
+            weight: summarised_input(intent, &child_schema)?,
+            weight_domain: WeightDomain::UnknownOrSigned,
+        },
     })
 }
 
@@ -2890,22 +2915,60 @@ fn summary_col_index(out_schema: &Schema, by: &[usize], per_series: bool) -> usi
     }
 }
 
-/// The column fed into the summary: the intent's positional input column
-/// resolved to a name against the child schema, or the PromQL sample value.
+/// The column fed into a *single-column* summary: the intent's leading
+/// positional input resolved to a name against the child schema, or the PromQL
+/// sample value when it reads none. Callers are responsible for only reaching
+/// here with a one-column intent — [`summarised_input`] is the general form.
 fn summarised_column(intent: &AggIntent, child_schema: &Schema) -> ColumnRef {
     match intent
-        .input_col()
-        .and_then(|id| child_schema.columns.get(id))
+        .input_cols()
+        .first()
+        .and_then(|id| child_schema.columns.get(*id))
     {
-        Some(c) => match &c.table {
-            Some(t) => ColumnRef::Qualified {
-                table: t.clone(),
-                name: c.name.clone(),
-            },
-            None => ColumnRef::Named(c.name.clone()),
-        },
+        Some(c) => column_ref(c),
         None => ColumnRef::SampleValue,
     }
+}
+
+fn column_ref(column: &asap_types::pre_asap::Column) -> ColumnRef {
+    match &column.table {
+        Some(t) => ColumnRef::Qualified {
+            table: t.clone(),
+            name: column.name.clone(),
+        },
+        None => ColumnRef::Named(column.name.clone()),
+    }
+}
+
+/// What the summary consumes per input row. An intent that reads one column (or
+/// none) feeds that column; `COUNT(DISTINCT a, b)` feeds the whole tuple as one
+/// item, so the distinct-count sketch hashes `(a, b)` rather than `a` — the
+/// difference between tuple cardinality and single-column cardinality.
+///
+/// A tuple leg outside the child schema is an error rather than
+/// [`summarised_column`]'s sample-value fallback: a leg has no sample-value
+/// reading, and silently dropping one would under-count.
+fn summarised_input(
+    intent: &AggIntent,
+    child_schema: &Schema,
+) -> Result<SummaryInputExpr, ImplementError> {
+    let cols = intent.input_cols();
+    if cols.len() < 2 {
+        return Ok(SummaryInputExpr::Column(summarised_column(
+            intent,
+            child_schema,
+        )));
+    }
+    let legs = cols
+        .iter()
+        .map(|id| child_schema.columns.get(*id).map(column_ref))
+        .collect::<Option<Vec<_>>>()
+        .ok_or(ImplementError::PhysicalRealization(
+            "a tuple column is outside the input schema",
+        ))?;
+    Ok(SummaryInputExpr::Tuple(
+        legs.into_iter().map(SummaryInputExpr::Column).collect(),
+    ))
 }
 
 /// The `SummaryEstimate` readout for a summary-bound intent.
@@ -5936,6 +5999,13 @@ mod tests {
             (default_quantile(0.99), Sketch(K::Kll)),
             (default_cardinality(), Sketch(K::Hll)),
             (
+                A::Cardinality {
+                    cols: vec![0, 1],
+                    accuracy: eps(0.01),
+                },
+                Sketch(K::Hll),
+            ),
+            (
                 A::Count {
                     accuracy: eps(0.01),
                 },
@@ -5959,7 +6029,14 @@ mod tests {
             ),
             (
                 A::Cardinality {
-                    col: None,
+                    cols: vec![],
+                    accuracy: AccuracyTarget::Exact,
+                },
+                Pass,
+            ),
+            (
+                A::Cardinality {
+                    cols: vec![0, 1],
                     accuracy: AccuracyTarget::Exact,
                 },
                 Pass,
@@ -6529,7 +6606,7 @@ mod tests {
         let q = Rc::new(agg(
             vec![2],
             AggIntent::Cardinality {
-                col: None,
+                cols: vec![],
                 accuracy: AccuracyTarget::EpsilonDelta {
                     epsilon: 0.01,
                     delta: 0.01,
@@ -8350,7 +8427,7 @@ mod tests {
     #[test]
     fn explicit_empty_by_aggregate_realizes_summary_agg_with_reduce_reduction() {
         let intent = AggIntent::Cardinality {
-            col: None,
+            cols: vec![],
             accuracy: AccuracyTarget::Epsilon(0.01),
         };
         let q = agg(vec![], intent, metric_scan(&["job"]));
@@ -8406,39 +8483,45 @@ mod tests {
         assert!(matches!(leaf.expr, SummaryExpr::KeepPreAsap(_)));
     }
 
-    /// Issue #115: the summary is built over the intent's own input column.
-    /// Before `Cardinality`/`Quantile` carried `col`, `summarised_column` always
+    /// Issue #115: the summary is built over the intent's own input columns.
+    /// Before `Cardinality`/`Quantile` carried them, `summarised_input` always
     /// fell through to `ColumnRef::SampleValue`, so an HLL was built over the
-    /// wrong column for every SQL `COUNT(DISTINCT c)`.
+    /// wrong column for every SQL `COUNT(DISTINCT c)`. A distinct-tuple count
+    /// hashes the whole tuple as one item — feeding the sketch a single leg
+    /// would report single-column cardinality instead.
     #[test]
-    fn sketch_realizes_over_the_intents_input_column() {
+    fn sketch_realizes_over_the_intents_input_columns() {
         // `metric_scan(&["job"])` → columns [ts=0, value=1, job=2].
+        let column = |name: &str| SummaryInputExpr::Column(ColumnRef::Named(name.into()));
         let cases = [
-            (Some(2), ColumnRef::Named("job".into())),
-            (Some(1), ColumnRef::Named("value".into())),
+            (vec![2], column("job")),
+            (vec![1], column("value")),
             // PromQL convention: no column ⇒ the synthetic sample value.
-            (None, ColumnRef::SampleValue),
+            (vec![], SummaryInputExpr::Column(ColumnRef::SampleValue)),
+            (
+                vec![1, 2],
+                SummaryInputExpr::Tuple(vec![column("value"), column("job")]),
+            ),
         ];
-        for (col, want) in cases {
+        for (cols, want) in cases {
             let intent = AggIntent::Cardinality {
-                col,
+                cols: cols.clone(),
                 accuracy: AccuracyTarget::Epsilon(0.01),
             };
             let root = realize(&agg(vec![0], intent, metric_scan(&["job"]))).unwrap();
-            let bound = find_summary_col(&root)
-                .unwrap_or_else(|| panic!("expected a SummaryAgg for col={col:?}"));
-            assert_eq!(bound, want, "wrong summarised column for col={col:?}");
+            let bound = find_summary_input(&root)
+                .unwrap_or_else(|| panic!("expected a SummaryAgg for cols={cols:?}"));
+            assert_eq!(bound, want, "wrong summarised input for cols={cols:?}");
         }
     }
 
-    /// The single-column input of the first `SummaryAgg` in the tree.
-    fn find_summary_col(node: &SummaryNode) -> Option<ColumnRef> {
+    /// The update expression of the first `SummaryAgg` in the tree.
+    fn find_summary_input(node: &SummaryNode) -> Option<SummaryInputExpr> {
         match &node.expr {
-            SummaryExpr::SummaryAgg { input, .. } => match &input.weight {
-                SummaryInputExpr::Column(col) if input.item.is_none() => Some(col.clone()),
-                _ => None,
-            },
-            SummaryExpr::SummaryEstimate { summary_input, .. } => find_summary_col(summary_input),
+            SummaryExpr::SummaryAgg { input, .. } if input.item.is_none() => {
+                Some(input.weight.clone())
+            }
+            SummaryExpr::SummaryEstimate { summary_input, .. } => find_summary_input(summary_input),
             _ => None,
         }
     }

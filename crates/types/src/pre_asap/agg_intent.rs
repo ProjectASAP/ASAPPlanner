@@ -26,7 +26,7 @@ use crate::types::AccuracyTarget;
 /// carries only `k` + the accuracy target.
 ///
 /// The single-column reducers (`Sum` / `Min` / `Max` / `Avg` / `StdDev` /
-/// `Variance` / `Quantile` / `Cardinality`) carry `col: Option<C>` — the input
+/// `Variance` / `Quantile`) carry `col: Option<C>` — the input
 /// column they reduce, generic over the column-reference state the same way
 /// [`QueryExpr`](super::query_expr::QueryExpr) is: positional `ColumnId` once
 /// bound (the default, and every existing use of the bare `AggIntent` name),
@@ -35,7 +35,11 @@ use crate::types::AccuracyTarget;
 /// `None` is the PromQL convention "the time-series sample value"; SQL
 /// `SUM(bytes), AVG(latency)` sets distinct `Some(_)`s so a multi-aggregate
 /// node binds each reducer to the right column, and `plan::bind` knows which
-/// column to summarise over (issue #115).
+/// column to summarise over (issue #115). `Cardinality` and `PearsonCorr` read
+/// more than one column, so they carry their own lists; [`input_cols`] is the
+/// arity-agnostic accessor every consumer goes through.
+///
+/// [`input_cols`]: AggIntent::input_cols
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 #[serde(bound(serialize = "C: Serialize", deserialize = "C: Deserialize<'de>"))]
@@ -98,11 +102,14 @@ pub enum AggIntent<C = ColumnId> {
         k: usize,
         accuracy: AccuracyTarget,
     },
-    /// Distinct-value count of `col`. SQL `COUNT(DISTINCT col)`; PromQL
-    /// `count_values` leaves `col` as `None` (the sample value).
+    /// Distinct count over `cols`, in argument order. One column is SQL
+    /// `COUNT(DISTINCT col)`; several count distinct *tuples*
+    /// (`COUNT(DISTINCT a, b)`), which is not the distinct count of any one of
+    /// them. Empty is the PromQL convention "the sample value" — `count_values`
+    /// and `distinct_over_time` leave it so.
     Cardinality {
-        #[serde(default)]
-        col: Option<C>,
+        #[serde(default = "Vec::new")]
+        cols: Vec<C>,
         accuracy: AccuracyTarget,
     },
     /// L2 norm of the frequency vector of distinct input values.
@@ -475,32 +482,29 @@ impl<C: Clone> AggIntent<C> {
 }
 
 impl<C: Clone> AggIntent<C> {
-    /// All explicit value-column dependencies, in argument order.
-    /// An empty list retains the existing implicit sample/row-count convention.
+    /// Every value-column dependency, in argument order. The only accessor:
+    /// an intent's arity is its own business, so no consumer can ask for "the"
+    /// input column of an aggregate that reads two (`PearsonCorr`, a
+    /// distinct-tuple `Cardinality`) and silently receive one leg of it.
+    ///
+    /// An empty list is the implicit input — the PromQL sample value, or an
+    /// argument-less aggregate (`Count` / `TopK`). Schema derivation resolves
+    /// each reducer's input through this, and `plan::bind` picks what a summary
+    /// is built over from it.
     pub fn input_cols(&self) -> Vec<C> {
-        match self {
-            Self::PearsonCorr { left, right } => vec![left.clone(), right.clone()],
-            _ => self.input_col().into_iter().collect(),
-        }
-    }
-
-    /// The explicit input of a single-column reducer. `PearsonCorr`,
-    /// argument-less aggregates, and implicit PromQL sample inputs return `None`.
-    /// Use `input_cols` for dependency tracking; this accessor is for consumers
-    /// that have already selected a single-column implementation.
-    pub fn input_col(&self) -> Option<C> {
         match self {
             AggIntent::Sum { col }
             | AggIntent::Min { col }
             | AggIntent::Max { col }
             | AggIntent::Avg { col }
             | AggIntent::Quantile { col, .. }
-            | AggIntent::Cardinality { col, .. }
             | AggIntent::FrequencyL2 { col, .. }
             | AggIntent::FrequencyEntropy { col, .. }
             | AggIntent::StdDev { col, .. }
-            | AggIntent::Variance { col, .. } => col.clone(),
-            _ => None,
+            | AggIntent::Variance { col, .. } => col.clone().into_iter().collect(),
+            AggIntent::Cardinality { cols, .. } => cols.clone(),
+            AggIntent::PearsonCorr { left, right } => vec![left.clone(), right.clone()],
+            _ => vec![],
         }
     }
 }
@@ -700,7 +704,7 @@ fn accuracy_target_to_f64(t: &AccuracyTarget) -> f64 {
 /// precision p=14.
 pub fn default_cardinality() -> AggIntent {
     AggIntent::Cardinality {
-        col: None,
+        cols: vec![],
         accuracy: AccuracyTarget::Epsilon(1.04 / ((1u64 << 14) as f64).sqrt()),
     }
 }
@@ -728,7 +732,6 @@ mod tests {
     fn pearson_corr_contract() {
         let intent = AggIntent::PearsonCorr { left: 2, right: 5 };
         assert_eq!(intent.input_cols(), vec![2, 5]);
-        assert_eq!(intent.input_col(), None);
         assert!(agg_is_exact(&intent));
         assert!(!agg_is_mergeable(&intent));
         let output = intent.output_column(&c("x", DataType::Float64));
@@ -737,6 +740,24 @@ mod tests {
         let value = serde_json::to_value(&intent).unwrap();
         assert_eq!(value["kind"], "pearson_corr");
         assert_eq!(serde_json::from_value::<AggIntent>(value).unwrap(), intent);
+    }
+
+    // A distinct count over a tuple exposes every leg, and reports the same
+    // output shape as the one-column form — the count of distinct tuples.
+    #[test]
+    fn distinct_tuple_cardinality_contract() {
+        let intent = AggIntent::Cardinality {
+            cols: vec![2, 5],
+            accuracy: AccuracyTarget::Epsilon(0.01),
+        };
+        assert_eq!(intent.input_cols(), vec![2, 5]);
+        assert!(!agg_is_exact(&intent));
+        // HLL/Theta/KMV states combine, unlike `Avg`'s finalized value.
+        assert!(agg_is_mergeable(&intent));
+        assert_eq!(agg_accuracy(&intent), 0.01);
+        let output = intent.output_column(&c("x", DataType::Float64));
+        assert_eq!(output.name, "cardinality");
+        assert_eq!(output.dtype, DataType::Int64);
     }
 
     #[test]
@@ -829,20 +850,19 @@ mod tests {
     }
 
     #[test]
-    fn input_col_tracks_only_reducers() {
-        assert_eq!(AggIntent::Sum { col: Some(3) }.input_col(), Some(3));
-        assert_eq!(
-            AggIntent::<ColumnId>::Avg { col: None }.input_col(),
-            None,
-            "None = PromQL sample value"
+    fn input_cols_tracks_only_reducers() {
+        assert_eq!(AggIntent::Sum { col: Some(3) }.input_cols(), vec![3]);
+        assert!(
+            AggIntent::<ColumnId>::Avg { col: None }
+                .input_cols()
+                .is_empty(),
+            "empty = PromQL sample value"
         );
-        assert_eq!(
-            AggIntent::<ColumnId>::Count {
-                accuracy: AccuracyTarget::Exact
-            }
-            .input_col(),
-            None
-        );
+        assert!(AggIntent::<ColumnId>::Count {
+            accuracy: AccuracyTarget::Exact
+        }
+        .input_cols()
+        .is_empty());
     }
 
     #[test]
@@ -859,7 +879,11 @@ mod tests {
                 accuracy: AccuracyTarget::Epsilon(0.01),
             },
             AggIntent::Cardinality {
-                col: Some(2),
+                cols: vec![2],
+                accuracy: AccuracyTarget::Exact,
+            },
+            AggIntent::Cardinality {
+                cols: vec![2, 3],
                 accuracy: AccuracyTarget::Exact,
             },
             AggIntent::TopK {
@@ -900,7 +924,7 @@ mod tests {
         assert_eq!(
             serde_json::from_str::<AggIntent>(legacy).unwrap(),
             AggIntent::Cardinality {
-                col: None,
+                cols: vec![],
                 accuracy: AccuracyTarget::Exact
             }
         );

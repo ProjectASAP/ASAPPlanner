@@ -5,7 +5,7 @@
 //! the shared `resolve_root` produces the positional, resolved canonical
 //! tree (the same resolver the PromQL path uses).
 
-use asap_frontend_sql::{lower_sql, lower_sql_dialect, SqlCatalog};
+use asap_frontend_sql::{lower_sql, lower_sql_dialect, SqlCatalog, SqlError as LoweringError};
 use asap_types::pre_asap::schema::{Column, DataType, Schema};
 use asap_types::pre_asap::{
     AggIntent, CompareOpKind, GroupKeys, JoinKind, QueryExpr, Reduction, ScalarValue, Source,
@@ -175,7 +175,7 @@ fn reducer_input_names(qe: &QueryExpr) -> (Vec<String>, bool) {
     let schema = child.output_schema().expect("child schema");
     let names = measures
         .iter()
-        .filter_map(|a| a.input_col())
+        .flat_map(|a| a.input_cols())
         .map(|id| schema.columns[id].name.clone())
         .collect();
     (names, matches!(**child, QueryExpr::Project { .. }))
@@ -1169,9 +1169,9 @@ async fn count_distinct_carries_its_input_column() {
         matches!(
             measures.as_slice(),
             [
-                AggIntent::Cardinality { col: Some(1), .. },
-                AggIntent::Cardinality { col: Some(3), .. }
-            ]
+                AggIntent::Cardinality { cols: c1, .. },
+                AggIntent::Cardinality { cols: c2, .. }
+            ] if c1 == &[1] && c2 == &[3]
         ),
         "cardinalities must bind their own column, got {measures:?}"
     );
@@ -1195,8 +1195,8 @@ async fn quantile_and_count_distinct_over_an_expression_bind_the_derived_column(
         let qe = lower(q).await;
         let (_, measures) = find_aggregate(&qe).expect("expected an Aggregate");
         assert!(
-            measures[0].input_col().is_some(),
-            "{q} must bind a column, never `col: None`, got {measures:?}"
+            !measures[0].input_cols().is_empty(),
+            "{q} must bind a column, never the implicit input, got {measures:?}"
         );
         let (names, materialized) = reducer_input_names(&qe);
         assert!(materialized, "{q} expected a materializing Project");
@@ -1366,7 +1366,7 @@ async fn a_shared_expression_is_materialized_once() {
         1,
         "the two reducers should share one derived column"
     );
-    assert_eq!(measures[0].input_col(), measures[1].input_col());
+    assert_eq!(measures[0].input_cols(), measures[1].input_cols());
 }
 
 // ── Issue #118: multi-level grouping expands into one Aggregate per level ───
@@ -2465,9 +2465,56 @@ async fn corr_result_is_nullable_float() {
     assert!(schema.columns[0].nullable);
 }
 
-// A multi-column DISTINCT must not silently count only the first column.
+// A multi-column DISTINCT counts tuples; one column stays the single-column
+// intent, so neither form can be mistaken for the other downstream.
 #[tokio::test]
-async fn composite_distinct_is_rejected() {
+async fn composite_distinct_counts_tuples() {
+    let cat = SqlCatalog::new().with_table(
+        "t",
+        Schema::new(vec![
+            Column::new("a", DataType::Int64, false),
+            Column::new("b", DataType::Int64, false),
+        ]),
+    );
+    let composite = lower_sql(
+        "SELECT COUNT(DISTINCT a, b) FROM t",
+        &cat,
+        AccuracyTarget::Exact,
+    )
+    .await
+    .unwrap();
+    let QueryExpr::Aggregate { measures, .. } =
+        find_aggregate_node(&composite).expect("expected an Aggregate")
+    else {
+        unreachable!()
+    };
+    assert!(
+        matches!(measures.as_slice(), [AggIntent::Cardinality { cols, .. }] if cols == &[0, 1]),
+        "{measures:?}"
+    );
+
+    let single = lower_sql(
+        "SELECT COUNT(DISTINCT a) FROM t",
+        &cat,
+        AccuracyTarget::Exact,
+    )
+    .await
+    .unwrap();
+    let QueryExpr::Aggregate { measures, .. } =
+        find_aggregate_node(&single).expect("expected an Aggregate")
+    else {
+        unreachable!()
+    };
+    assert!(
+        matches!(measures.as_slice(), [AggIntent::Cardinality { cols, .. }] if cols == &[0]),
+        "{measures:?}"
+    );
+}
+
+// An expression argument has no column identity to hash, so it is rejected
+// rather than silently reduced over a probe column.
+#[tokio::test]
+async fn composite_distinct_rejects_expression_arguments() {
     let cat = SqlCatalog::new().with_table(
         "t",
         Schema::new(vec![
@@ -2476,21 +2523,15 @@ async fn composite_distinct_is_rejected() {
         ]),
     );
     let error = lower_sql(
-        "SELECT COUNT(DISTINCT a, b) FROM t",
+        "SELECT COUNT(DISTINCT a, b + 1) FROM t",
         &cat,
         AccuracyTarget::Exact,
     )
     .await
     .unwrap_err();
     assert!(
-        error.to_string().contains("multi-column COUNT(DISTINCT)"),
+        matches!(&error, LoweringError::UnsupportedAggregate(reason)
+            if reason.contains("non-column expression")),
         "{error}"
     );
-    lower_sql(
-        "SELECT COUNT(DISTINCT a) FROM t",
-        &cat,
-        AccuracyTarget::Exact,
-    )
-    .await
-    .unwrap();
 }

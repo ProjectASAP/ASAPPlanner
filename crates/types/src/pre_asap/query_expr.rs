@@ -1553,9 +1553,13 @@ pub fn aggregate_output_schema(
             out_cols.push(cnt);
             continue;
         }
+        // Only the output *type* is read from here, so the leading column is
+        // enough for the multi-column intents: `Cardinality` and `PearsonCorr`
+        // both have a fixed output type that ignores it.
         let in_col = intent
-            .input_col()
-            .and_then(|id| in_schema.columns.get(id))
+            .input_cols()
+            .first()
+            .and_then(|id| in_schema.columns.get(*id))
             .unwrap_or(&probe);
         let mut out = intent.output_column(in_col);
         if let Some((arg, _)) = intent
@@ -1625,9 +1629,13 @@ fn without_output_schema(
         .cloned()
         .unwrap_or_else(|| Column::new("value", DataType::Float64, false));
     for (i, intent) in measures.iter().enumerate() {
+        // Only the output *type* is read from here, so the leading column is
+        // enough for the multi-column intents: `Cardinality` and `PearsonCorr`
+        // both have a fixed output type that ignores it.
         let in_col = intent
-            .input_col()
-            .and_then(|id| in_schema.columns.get(id))
+            .input_cols()
+            .first()
+            .and_then(|id| in_schema.columns.get(*id))
             .unwrap_or(&probe);
         let mut out = intent.output_column(in_col);
         if let Some((arg, _)) = intent
