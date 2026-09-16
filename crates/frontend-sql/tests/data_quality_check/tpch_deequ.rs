@@ -91,13 +91,11 @@ async fn lowers_the_warehouse_ingestion_check_set() {
             Err(error) => panic!("unexpected failure for U-{id}: {error}"),
         }
     }
+    // P4d and P4l are Pearson correlation checks; they lower since `corr`
+    // became `AggIntent::PearsonCorr`.
     assert_eq!(
         rejected,
-        vec![
-            ("P2b", "multi-column COUNT(DISTINCT)".into()),
-            ("P4d", "corr".into()),
-            ("P4l", "corr".into()),
-        ]
+        vec![("P2b", "multi-column COUNT(DISTINCT)".into())]
     );
-    assert_eq!(lowered, 47);
+    assert_eq!(lowered, 49);
 }

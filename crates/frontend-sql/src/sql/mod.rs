@@ -1653,6 +1653,25 @@ fn lower_agg_intent(expr: &Expr) -> Result<AggIntent<ColumnRef>, LoweringError> 
                 reducer_col(&name, args).map(Some)
             };
             Ok(match semantic {
+                AggSemantic::Correlation => {
+                    if agg_fn.filter.is_some()
+                        || agg_fn.order_by.is_some()
+                        || agg_fn.null_treatment.is_some()
+                    {
+                        return Err(LoweringError::UnsupportedAggregate(
+                            "corr with FILTER, ORDER BY, or explicit null treatment".into(),
+                        ));
+                    }
+                    let [left, right] = agg_fn.args.as_slice() else {
+                        return Err(LoweringError::UnsupportedAggregate(
+                            "corr requires two arguments".into(),
+                        ));
+                    };
+                    AggIntent::PearsonCorr {
+                        left: expr_to_group_ref(left)?,
+                        right: expr_to_group_ref(right)?,
+                    }
+                }
                 AggSemantic::Count if agg_fn.distinct => AggIntent::Cardinality {
                     col: col(&agg_fn.args)?,
                     accuracy: current_accuracy(),
@@ -2051,6 +2070,21 @@ impl DerivedCols {
         let Expr::AggregateFunction(agg_fn) = unalias(expr) else {
             return Ok(expr.clone());
         };
+        if matches!(
+            asap_sql_function_catalog::lookup_native(&agg_fn.func.name().to_lowercase()),
+            Some(AggSemantic::Correlation)
+        ) {
+            // Give each value argument its own projected name, including casts
+            // and qualified columns. This retains both inputs and avoids losing
+            // relation qualifiers when the projection becomes an unqualified schema.
+            let mut rewritten = agg_fn.clone();
+            for arg in &mut rewritten.args {
+                let alias = unalias(arg).to_string();
+                self.materialize(alias.clone(), df_expr_to_unresolved(arg)?)?;
+                *arg = Expr::Column(DfColumn::new_unqualified(alias));
+            }
+            return Ok(Expr::AggregateFunction(rewritten));
+        }
         // `COUNT(*)` reduces no column; `agg_col_name` covers bare/aliased/cast
         // columns, so `None` here means the argument really is an expression.
         let counts_rows = agg_fn.func.name().eq_ignore_ascii_case("count") && !agg_fn.distinct;
