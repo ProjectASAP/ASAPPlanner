@@ -232,6 +232,7 @@ semantic information that matters downstream.
 - [Converting a pre-ASAP plan to a post-ASAP plan](docs/design_docs/asap-aware-mapping/README.md)
 - [ASAPPlanner and downstream application boundaries](docs/design_docs/asapplanner-downstream-boundary.md)
 - [Guide on how to use ASAPPlanner](docs/user-guide/user-guide.md)
+- [Public library functions and controls](docs/user-guide/library-functions.md)
 
 # Open questions
 

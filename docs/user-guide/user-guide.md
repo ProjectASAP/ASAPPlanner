@@ -1,8 +1,106 @@
-# User guide: getting the pre-ASAP and post-ASAP IR for a query
+# ASAPPlanner user guide
 
-The `asap-devtools` package provides command-line tools for inspecting the pre-ASAP and post-ASAP IR generated for SQL and PromQL queries.
+ASAPPlanner is a reusable planning library. It translates queries into Pre-ASAP
+IR and produces legal, ranked, deployment-independent Post-ASAP candidates.
+Downstream systems bind those candidates to physical alternatives, make the
+final deployment decision, and execute it. This follows the
+[design overview](../design_docs/README.md).
 
-## 1. Create a query file
+This guide is a short map of the current workflows, not a new unified API.
+Use the [public library functions guide](library-functions.md) for callable
+functions, inputs, defaults and output limitations.
+
+## Choose the output you need
+
+| I want to… | Entry point | Output / valid stopping point |
+| --- | --- | --- |
+| Understand a query's meaning | SQL, PromQL or MetricsQL frontend | Canonical Pre-ASAP `QueryExpr`; no summary candidate search |
+| Explore optimizations | `search_workload` or an explicit-strategy variant | `PlanSpace` containing discovered candidate groups |
+| Compare alternatives | `PlanSpace::cost_sorted` | `RankedGroup`s with candidates and index-aligned costs; not one physical plan |
+| Account for repeated demand | Recurrence-aware ranking | Ranked choices using supplied demand and horizon; no implied incremental runtime support |
+| Evaluate summary-maintenance lifecycles | Lifecycle APIs with workload, capabilities and cost evidence | Lifecycle alternatives, commitments/rejections and available costs |
+| Assemble a compatible semantic choice | `global_selection*`, then materialization | Selected Post-ASAP DAG; optional convenience for downstream integration |
+| Inspect or export an artifact | Devtools or library export functions | A graph or versioned semantic document; serialization adds no deployment guarantee |
+
+These stopping points serve different purposes. You do not need lifecycle analysis
+just to parse a query or inspect candidates. If you intend to deploy state, its
+maintenance lifecycle must be resolved and supported before physical commitment.
+
+The primary handoff is **PlanSpace plus ranked candidates**. Do not take the first
+candidate in every group and assume those choices form a feasible whole-workload
+physical plan. A downstream provider can return complete physical evidence to
+Planner and use `global_selection*` as a whole-plan comparison convenience.
+Planner itself does not install or execute the result.
+
+## What can I control?
+
+| Control | Usually supplied by | Effect |
+| --- | --- | --- |
+| Query and source schema | Application user / frontend integration | Defines the computation and input types |
+| Accuracy requirement | Application user / explicit profile | Restricts legal approximation; cost cannot override it |
+| Query recurrence, predictability and time scope | Workload owner | Determines possible reuse and lifecycle demand |
+| Optimization strategies | Library integrator / strategy developer | Determines which replacement opportunities are explored |
+| Cost and accuracy models | Library integrator | Determines estimates, parameter sizing, guarantee checks and ordering at the stages receiving those models |
+| Data statistics and empirical evidence | Evidence provider | Enables comparisons or guarantees needing those facts |
+| Runtime capabilities | Downstream runtime integrator | Restricts executable lifecycle/state operations |
+| Planning horizon | Application policy / integrator | Makes relevant one-time and rate costs comparable |
+
+Choose strategies with `search_workload_with` or `search_workload_with_targets`.
+Construct them with the intended models: passing a new model only to final ranking
+does not redo earlier parameter sizing. The explicit strategy list is not a full
+pass toggle: current workload search performs canonical sharing/CSE and derives
+workload-dependent rollup automatically. See the library guide for this limitation.
+
+## Required inputs, defaults, and compromises
+
+Required inputs depend on the output you request. Frontend lowering needs query
+text and accuracy; SQL also needs a schema catalog. Candidate search can operate
+on canonical roots without a complete deployment workload. Lifecycle and physical
+cost comparisons require the corresponding demand, capabilities and evidence.
+
+| Omission or default | Meaning and compromise |
+| --- | --- |
+| `QueryRequirements::default()` | Exact accuracy, no response-latency bound; it does not grant permission to approximate |
+| Default search/cost model | Built-in strategies, sizing and structural preferences; not a measured deployment cost prediction |
+| Unknown data workload/evidence | No facts about arrival, distribution or rate are assumed; affected alternatives may be uncosted or unavailable |
+| No planning horizon | Horizon-dependent lifecycle alternatives are unselectable; no arbitrary amortization period is invented |
+| No empirical model/evidence | Only conclusions supported by the remaining models/evidence are available |
+| Default lifecycle capabilities | **All four lifecycle flags are enabled.** Pass actual runtime support explicitly; this is not capability detection |
+
+These are Rust API defaults. They do not mean every corresponding JSON/YAML field
+can be omitted. Nor does constructing requirements automatically apply them to a
+low-level API that never receives them: use the target-aware search path when
+supplying per-root end-to-end accuracy requirements.
+
+A runtime that only supports building fresh summary state from data at rest can
+restrict lifecycle support to ephemeral state. Planner excludes unsupported modes.
+If one legal lifecycle remains, validating and recording it is a complete decision.
+Repeated queries do not imply incremental maintenance. Prepared or shared state
+requires separate runtime support. See the [lifecycle recipe](library-functions.md#lifecycle-and-capabilities).
+
+## Which steps can I skip?
+
+- Stop after lowering when you need Pre-ASAP IR.
+- Stop after search/ranking when downstream needs alternatives.
+- Omit optional strategies or empirical evidence to narrow exploration; retain
+  all semantic and accuracy checks needed for your promised output.
+- Skip lifecycle *search* when only one supported choice exists, but still resolve
+  and validate its contract before deploying state. Current lifecycle functions
+  can do this with restricted capabilities; no dummy argument is needed.
+- Use `global_selection*` only when you want Planner's compatible-choice helper.
+  Downstream can instead consume ranked alternatives and own physical selection.
+- Export only when you need inspection, persistence or a process boundary.
+
+Calling `materialize()` constructs a selected semantic IR graph; it does not
+compute summary data. A later lifecycle pass on that fixed graph does not prove
+that it was the best lifecycle-aware choice among the original candidates.
+
+## Inspect a query from the command line
+
+Run these commands from the repository root. They are inspection tools; their
+demonstration defaults are not the configuration of your downstream deployment.
+
+### Create a query file
 
 Create a text file containing one query per line. Prefix each query with `sql>` or `promql>`.
 
@@ -15,7 +113,7 @@ sql> SELECT service, COUNT(*) FROM metrics GROUP BY service
 
 Blank lines and lines beginning with `#` are ignored.
 
-## 2. Show the pre-ASAP IR
+### Show the Pre-ASAP IR
 
 Run:
 
@@ -47,7 +145,7 @@ The corresponding SQL corpus analysis is:
 cargo run -p asap-devtools --bin analyze_corpora -- --sql-corpora --out-dir artifacts/sql_pre_asap
 ```
 
-## 3. Show the post-ASAP IR
+### Inspect a representative Post-ASAP IR
 
 Run:
 
@@ -61,9 +159,13 @@ Or through stdin:
 cargo run -p asap-devtools --bin show_post_asap_ir < queries.txt
 ```
 
-`show_post_asap_ir` uses an approximation target of ε = 0.01 so that the output can exercise sketch-based implementations rather than only exact aggregation.
+`show_post_asap_ir` uses an approximation target of ε = 0.01 and displays a
+representative binding using the sketch strategy. It does not show the complete
+ranked workload candidate set or choose a deployment lifecycle. Its SQL examples
+use a fixed demonstration catalog, not your database schema. Use the library
+workflow below to retain alternatives and provide your own models.
 
-## Other useful commands
+## More inspection commands
 
 ### Export a query DAG
 
@@ -113,94 +215,11 @@ Print representative queries covering the pre-ASAP IR variants:
 cargo run -p asap-devtools --example canonical_examples
 ```
 
-## As a library
 
-These crates are not published to crates.io—depend on them by path (inside this workspace) or by Git:
+## Next steps
 
-```toml
-# from another crate in this workspace
-asap-frontend-promql = { path = "../frontend-promql" }   # or asap-frontend-sql
-asap-aware-mapping = { path = "../asap-aware-mapping" }
-asap-types = { path = "../types" }
-
-# from an external codebase
-asap-frontend-promql = { git = "https://github.com/ProjectASAP/ASAPPlanner", package = "asap-frontend-promql" }
-asap-aware-mapping = { git = "https://github.com/ProjectASAP/ASAPPlanner", package = "asap-aware-mapping" }
-asap-types = { git = "https://github.com/ProjectASAP/ASAPPlanner", package = "asap-types" }
-```
-
-### Step 1 — get the pre-ASAP IR
-
-Lower a query string with a front end. Front ends never depend on each other or on the binder —
-pull only the one you need.
-
-```rust
-use asap_frontend_promql::lower_promql;
-use asap_types::types::AccuracyTarget;
-
-let pre_asap = lower_promql(
-    "quantile(0.99, rate(http_requests_total[5m]))",
-    AccuracyTarget::Epsilon(0.01),
-)?; // QueryExpr
-```
-
-(SQL: `asap_frontend_sql::lower_sql(query, &catalog, accuracy).await` — needs a `SqlCatalog`
-describing your tables; see `crates/devtools/src/bin/show_pre_asap_ir.rs` for a worked example.)
-
-`AccuracyTarget` travels with the query, not the crate — pass `Exact` for no approximation
-allowed, `Epsilon(e)` / `EpsilonDelta{epsilon, delta}` otherwise.
-
-### Step 2 — get the post-ASAP IR
-
-Feed the `QueryExpr` to `asap-aware-mapping`. This crate depends only on `asap-types`, never on a
-front end, so it's agnostic to which language produced the tree. There is no "bind me one tree"
-entry point: `SketchAlgorithmStrategy::replacements()` always returns every valid candidate for a
-target, ranked, and you take the one you want.
-
-```rust
-use asap_aware_mapping::{Replacement, ReplacementStrategy, ReplacementSubDAG, SketchAlgorithmStrategy, TargetSubDAG};
-use std::rc::Rc;
-
-let root = Rc::new(pre_asap);
-let target = TargetSubDAG::new(&root);
-let candidates = SketchAlgorithmStrategy::default_cost_model().replacements(&target);
-
-// Take the cost-model-preferred candidate — the common case.
-let Some(ReplacementSubDAG { replacement: Replacement::Summary(post_asap), .. }) =
-    candidates.into_iter().next()
-else {
-    // No candidate (e.g. the node isn't a bindable Aggregate) — fall back to
-    // `asap_aware_mapping::replacement::keep_pre_asap(&root)`, the same conservative
-    // pass-through this crate's own dispatch uses.
-    panic!("no candidate for this target");
-};
-// post_asap: Rc<SummaryNode> — the SummaryExpr DAG
-```
-
-`SketchAlgorithmStrategy::new(&dyn CostModel)` (vs. `default_cost_model()`) is the extension point for
-a deployment that wants its own candidate ranking or parameter sizing instead of this crate's
-built-in static preference order (`DefaultCostModel` — what `default_cost_model()` uses).
-See the `CostModel` trait doc in `crates/asap-aware-mapping/src/cost_model.rs` for its overridable
-hooks (`rank_candidates`, `size_params`, `realize_extension`, …).
-
-To see every root of a whole workload at once — including the candidates CSE-shared subtrees get
-(a shared subtree's `MemoGroup` carries both the "share" and "recompute independently" options,
-ranked by `CostModel::cse_share_decision`) — use `asap_aware_mapping::search_workload`/
-`search_workload_with` instead; unlike the single-target path above, these return every discovered
-site's full candidate list (a `PlanSpace`), not one picked winner. Committing to one final,
-physically-materialized `SummaryNode` per shared subtree is out of this crate's scope — that's a
-downstream deployment's call, once it also knows where each candidate would be placed.
-
-### Reading the result
-
-Match on `post_asap.expr` (a `SummaryExpr`):
-
-- `KeepPreAsap(Box<QueryExpr>)` — this subtree wasn't rewritten; execute it exactly.
-- `SummaryAgg { summary, params, .. }` — an exact accumulator (`summary.is_exact()`) or an
-  approximate sketch, sized to the query's `AccuracyTarget`.
-- `SummaryEstimate { summary_input, query }` — wraps a sketch `SummaryAgg`; `query` is what to
-  read out of it (`Quantile`, `Cardinality`, `TopK`, `PointCount`).
-
-`docs/design_docs/asap-aware-mapping/README.md` has the conceptual background (why this layer exists, what an
-"implementation" is); `docs/design_docs/pre-asap-ir.md` / `docs/design_docs/post-asap-ir.md` are the node-by-node IR
-reference.
+- [Public library functions and recipes](library-functions.md)
+- [Design overview and Planner/downstream boundary](../design_docs/README.md)
+- [Pre-ASAP IR](../design_docs/pre-asap-ir.md)
+- [Post-ASAP IR](../design_docs/post-asap-ir.md)
+- [Workload demand and summary lifecycle](../design_docs/asap-aware-mapping/workload-demand-and-summary-lifecycle.md)
