@@ -88,12 +88,24 @@
     gap: 0.35rem;
     white-space: nowrap;
   }
+  /* The bulk-selection chip sits outside the scrolling strip: with fifty
+     queries, a control inside #tabs would be scrolled off exactly when it is
+     most needed. */
+  #tabsRow {
+    display: flex;
+    align-items: flex-end;
+    gap: 0.25rem;
+    padding: 0.4rem 0.75rem 0;
+    border-bottom: 1px solid var(--border);
+  }
   #tabs {
     display: flex;
     gap: 0.25rem;
     overflow-x: auto;
-    padding: 0.4rem 0.75rem 0;
-    border-bottom: 1px solid var(--border);
+    flex: 1;
+    /* Without this the flex child refuses to shrink and the strip never
+       scrolls -- it pushes the row wider instead. */
+    min-width: 0;
   }
   .tab {
     padding: 0.4rem 0.8rem;
@@ -109,6 +121,8 @@
   .tab.active { color: var(--fg); background: var(--bg); font-weight: 600; }
   .tab.checkTab { display: flex; align-items: center; gap: 0.35rem; cursor: default; }
   .tab.checkTab input { cursor: pointer; }
+  .tab.allTab { font-weight: 600; }
+  .tab.allTab[hidden] { display: none; }
   .modeToggle { display: flex; gap: 0.3rem; }
   #plannerPanel {
     display: none;
@@ -465,7 +479,14 @@
   </div>
 </div>
 
-<div id="tabs"></div>
+<div id="tabsRow">
+  <label class="tab checkTab allTab" id="selectAllTab"
+         title="Select or deselect every query. Unlike Clear all, this keeps the loaded workload.">
+    <input id="selectAllToggle" type="checkbox" />
+    All
+  </label>
+  <div id="tabs"></div>
+</div>
 <div id="scopePicker"></div>
 
 <div id="main">

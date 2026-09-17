@@ -174,6 +174,28 @@ class RenderTests(unittest.TestCase):
         self.assertIsNotNone(m, "embedded-workload <script> tag not found")
         self.assertEqual(json.loads(m.group(1)), prepare_workload(workload))
 
+    def test_standalone_export_carries_the_bulk_selection_control(self):
+        """A generated page gets Select-all for free: render.py inlines the
+        markup and viewer.js verbatim, so neither fix needs its own step."""
+        html = render({"queries": [named_graph("q1"), named_graph("q2")]})
+        self.assertIn('id="selectAllToggle"', html)
+        self.assertIn("function bulkSelectionState(", html)
+        # And it must stay a selection control, not a second Clear all: the
+        # embedded workload is parsed once at load, so dropping `queries`
+        # from a generated page is unrecoverable without a reload.
+        self.assertNotRegex(
+            html, r"selectAllToggle\.addEventListener[^}]*queries = \[\]"
+        )
+
+    def test_standalone_export_lanes_are_pannable(self):
+        """Dragging the lane background pans the viewport in the generated
+        page too -- `grabbable: false` alone made it a dead zone."""
+        html = render({"queries": [named_graph("q1")]})
+        lanes = re.findall(r"classes: 'laneParent'[^}]*}", html)
+        self.assertEqual(len(lanes), 2, "expected the union and single-query lanes")
+        for lane in lanes:
+            self.assertIn("pannable: true", lane)
+
     def test_render_does_not_mutate_callers_workload(self):
         workload = {"queries": [named_graph("q1")]}
         original = json.loads(json.dumps(workload))
@@ -346,7 +368,7 @@ class ViewerCacheTests(unittest.TestCase):
         source = (HERE / "viewer.js").read_text()
         for name in ["escapeHtml", "formatCostUnit", "formatBaselineRef",
                      "formatCostNumber", "renderCostAnnotation",
-                     "computeSelectionWorkloadCost"]:
+                     "computeSelectionWorkloadCost", "bulkSelectionState"]:
             function = re.search(r"^function " + name + r"\(.*?^}", source, re.M | re.S)
             self.assertIsNotNone(function, name)
             self.js.eval(function.group(0))
@@ -364,6 +386,55 @@ class ViewerCacheTests(unittest.TestCase):
             "baseline_cost": annotation(10, profile),
             "selected_cost": annotation(4, selected_profile or profile),
         }}]}}
+
+    def test_bulk_selection_distinguishes_none_some_and_all(self):
+        """The checkbox has three states to show, and `indeterminate` is the
+        one a plain checkbox cannot: with fifty queries, "some" is normal."""
+        cases = {
+            # (queries, selected): (hidden, checked, indeterminate)
+            (0, 0): (True, False, False),      # nothing loaded
+            (50, 0): (False, False, False),    # after Deselect all
+            (50, 1): (False, False, True),     # the default single selection
+            (50, 49): (False, False, True),
+            (50, 50): (False, True, False),    # after Select all
+            (1, 1): (False, True, False),      # a one-query workload is "all"
+        }
+        for (count, selected), expected in cases.items():
+            with self.subTest(queries=count, selected=selected):
+                state = self.js.call("bulkSelectionState", count, selected)
+                self.assertEqual(
+                    (state["hidden"], state["checked"], state["indeterminate"]),
+                    expected,
+                )
+
+    def test_empty_render_resets_bulk_selection(self):
+        """Initial load and Clear all hide and reset the bulk checkbox."""
+        source = (HERE / "viewer.js").read_text()
+        self.js.eval("""
+            function element() {
+                return {style: {}, classList: {remove() {}, toggle() {}}};
+            }
+            let queries = [], participants = new Set(), cy = null;
+            const tabsEl = element(), scopePickerEl = element(),
+                emptyEl = element(), cyOuterEl = element(),
+                sidepanel = element(), sideResizeHandle = element(),
+                selectAllTab = element(), selectAllToggle = element();
+        """)
+        for name in ["render", "renderTabs"]:
+            function = re.search(r"^function " + name + r"\(.*?^}", source, re.M | re.S)
+            self.assertIsNotNone(function, name)
+            self.js.eval(function.group(0))
+        for checked, indeterminate in [(False, False), (True, False), (False, True)]:
+            with self.subTest(checked=checked, indeterminate=indeterminate):
+                self.js.eval(f"""
+                    selectAllTab.hidden = false;
+                    selectAllToggle.checked = {json.dumps(checked)};
+                    selectAllToggle.indeterminate = {json.dumps(indeterminate)};
+                    render();
+                """)
+                self.assertTrue(self.js.eval("selectAllTab.hidden"))
+                self.assertFalse(self.js.eval("selectAllToggle.checked"))
+                self.assertFalse(self.js.eval("selectAllToggle.indeterminate"))
 
     def test_cache_profile_and_inputs_are_rendered(self):
         """The sidebar exposes the assumptions behind a cache-adjusted cost."""

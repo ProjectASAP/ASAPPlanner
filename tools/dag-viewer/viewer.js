@@ -47,6 +47,8 @@ const fileInput = document.getElementById('fileInput');
 const clearBtn = document.getElementById('clearBtn');
 const highlightToggle = document.getElementById('highlightToggle');
 const tabsEl = document.getElementById('tabs');
+const selectAllTab = document.getElementById('selectAllTab');
+const selectAllToggle = document.getElementById('selectAllToggle');
 const scopePickerEl = document.getElementById('scopePicker');
 const cyOuterEl = document.getElementById('cyOuter');
 const cyEl = document.getElementById('cy');
@@ -72,6 +74,21 @@ clearBtn.addEventListener('click', () => {
   queries = [];
   activeIndex = -1;
   participants = new Set();
+  render();
+});
+// Selection only. `Clear all` above drops the loaded workload itself, which on
+// a render.py page cannot be undone — its embedded workload is parsed once, at
+// load — so the two stay separate controls rather than one overloaded button.
+//
+// A tri-state checkbox rather than two buttons: "some selected" is a real
+// third state with fifty queries, and `indeterminate` is what shows it. The
+// browser resolves a click on an indeterminate box to `checked = true`, so
+// "partially selected" clicks through to select-all, which is the useful
+// direction.
+selectAllToggle.addEventListener('change', () => {
+  participants = selectAllToggle.checked
+    ? new Set(queries.map((_, index) => index))
+    : new Set();
   render();
 });
 highlightToggle.addEventListener('change', () => {
@@ -157,8 +174,8 @@ function getParticipants() {
 }
 
 function render() {
+  renderTabs();
   if (queries.length === 0) {
-    tabsEl.innerHTML = '';
     scopePickerEl.classList.remove('visible');
     emptyEl.style.display = 'flex';
     cyOuterEl.style.display = 'none';
@@ -172,13 +189,37 @@ function render() {
   sidepanel.style.display = 'block';
   sideResizeHandle.style.display = 'block';
 
-  renderTabs();
-
   renderPrePostAsap();
   renderLegend();
 }
 
+// The three states the bulk-selection checkbox has to distinguish: none,
+// some, all. `indeterminate` is the only one of the three that a plain
+// checkbox cannot show on its own, and it is the common case with a
+// fifty-query workload. Pure, so it can be tested without a DOM.
+function bulkSelectionState(queryCount, selectedCount) {
+  const all = queryCount > 0 && selectedCount === queryCount;
+  return {
+    // Nothing loaded: the control would claim a selection that has no
+    // queries to apply to.
+    hidden: queryCount === 0,
+    checked: all,
+    indeterminate: selectedCount > 0 && !all,
+  };
+}
+
 function renderTabs() {
+  // Derived from `participants` on every render rather than tracked by the
+  // change handler: every other path that writes the selection (file load,
+  // `Clear all`, renderPlannerWorkload, an individual chip) also lands in
+  // `render`, and a control that only followed its own clicks would drift
+  // out of step with them.
+  const bulk = bulkSelectionState(queries.length, participants.size);
+  selectAllTab.hidden = bulk.hidden;
+  selectAllToggle.checked = bulk.checked;
+  selectAllToggle.indeterminate = bulk.indeterminate;
+  selectAllTab.classList.toggle('active', bulk.checked);
+
   tabsEl.innerHTML = '';
   // Checkboxes choose the single query or workload to union.
   queries.forEach((q, i) => {
@@ -534,7 +575,13 @@ function unionStageLaneElements(stage, chosen, laneCost) {
   const entries = new Map();
   const edges = new Map();
   const elements = [
-    { data: { id: laneId, label: laneCostLabel(`${stage === 'pre' ? 'pre-ASAP' : 'post-ASAP'} · workload union`, laneCost, stage), isLane: true }, classes: 'laneParent', selectable: false, grabbable: false },
+    // `pannable: true`: a drag starting on the lane's own background pans the
+    // viewport. `grabbable: false` alone made it a dead zone — cytoscape
+    // begins a pan only when the element under the pointer is `pannable()`,
+    // which defaults to false for nodes, and the lane covers most of the
+    // canvas once the graph is zoomed past the viewport. Still not grabbable:
+    // cytoscape overrides `grabbable` for a pannable node.
+    { data: { id: laneId, label: laneCostLabel(`${stage === 'pre' ? 'pre-ASAP' : 'post-ASAP'} · workload union`, laneCost, stage), isLane: true }, classes: 'laneParent', selectable: false, grabbable: false, pannable: true },
   ];
 
   chosen.forEach((qIdx) => {
@@ -602,7 +649,8 @@ function laneElements(laneId, laneLabel, graph, query, stage, laneCost) {
   // makes these keys differ from the lookup below.
   const edgeCostByPair = new Map((graph.edge_annotations || []).map((edge) => [`${edge.from}\u0000${edge.to}`, edge.cost]));
   const elements = [
-    { data: { id: laneId, label: laneCostLabel(laneLabel, laneCost, stage), isLane: true }, classes: 'laneParent', selectable: false, grabbable: false },
+    // Pannable for the same reason as the union lane above.
+    { data: { id: laneId, label: laneCostLabel(laneLabel, laneCost, stage), isLane: true }, classes: 'laneParent', selectable: false, grabbable: false, pannable: true },
   ];
   for (const node of nodes) {
     elements.push({
