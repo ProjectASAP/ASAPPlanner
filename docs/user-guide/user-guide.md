@@ -61,7 +61,7 @@ Or through stdin:
 cargo run -p asap-devtools --bin show_post_asap_ir < queries.txt
 ```
 
-`show_post_asap_ir` uses an approximation target of ε = 0.01 so that the output can exercise sketch-based implementations rather than only exact aggregation.
+`show_post_asap_ir` uses an approximation target of ε = 0.01 so that the output can exercise sketch-based implementations rather than only exact aggregation. It prints every available post-ASAP candidate for each query, numbered in cost-model order. If no candidate is available, it prints the pre-ASAP fallback as candidate 1.
 
 ## Other useful commands
 
