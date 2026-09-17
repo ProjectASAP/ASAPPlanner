@@ -1,8 +1,35 @@
-# User guide: getting the pre-ASAP and post-ASAP IR for a query
+# ASAPPlanner CLI user guide
 
-The `asap-devtools` package provides command-line tools for inspecting the pre-ASAP and post-ASAP IR generated for SQL and PromQL queries.
+Use the `asap-devtools` commands to inspect query IR, export graphs, and inspect
+corpus coverage. These commands do not deploy or execute a physical plan.
 
-## 1. Create a query file
+To develop an application using the Rust library, start with
+[Library API: definitions, options, and examples](../developer_docs/library-api.md).
+That guide explains how to choose strategies and models, rank candidates, and
+work with lifecycle capabilities.
+
+## Choose a command
+
+Run from the repository root with Rust/Cargo installed. Cargo builds the selected
+tool on first use.
+
+| Command (`cargo run -p asap-devtools --bin … -- …`) | Input / options | Result |
+| --- | --- | --- |
+| `show_pre_asap_ir queries.txt` | File path, or stdin when omitted | Prints canonical Pre-ASAP IR |
+| `show_post_asap_ir queries.txt` | Same query file format | Prints a representative Post-ASAP binding using a fixed approximate target; not all ranked alternatives |
+| `dag_export --promql "<query>"` | One PromQL expression | Exports a query graph for inspection |
+| `dag_export --sql "<query>"` | One SQL expression using the tool's catalog | Exports a query graph for inspection |
+| `analyze_corpora --corpora --out-dir <dir>` | Repository PromQL corpora, output directory | Writes successful/error IR dumps and summary reports |
+| `analyze_corpora --sql-corpora --out-dir <dir>` | Repository SQL corpora, output directory | Writes SQL corpus reports |
+| `variant_coverage` | Repository corpora | Reports Pre-ASAP IR variant coverage |
+| `sketch_coverage --epsilon 0.01` | Repository corpora; epsilon defaults to `0.01` | Reports sketch/reuse opportunities among successfully lowered queries |
+
+## Inspect a query from the command line
+
+Run these commands from the repository root. They are inspection tools; their
+demonstration defaults are not the configuration of your downstream deployment.
+
+### Create a query file
 
 Create a text file containing one query per line. Prefix each query with `sql>` or `promql>`.
 
@@ -15,7 +42,7 @@ sql> SELECT service, COUNT(*) FROM metrics GROUP BY service
 
 Blank lines and lines beginning with `#` are ignored.
 
-## 2. Show the pre-ASAP IR
+### Show the Pre-ASAP IR
 
 Run:
 
@@ -47,7 +74,7 @@ The corresponding SQL corpus analysis is:
 cargo run -p asap-devtools --bin analyze_corpora -- --sql-corpora --out-dir artifacts/sql_pre_asap
 ```
 
-## 3. Show the post-ASAP IR
+### Inspect a representative Post-ASAP IR
 
 Run:
 
@@ -61,9 +88,13 @@ Or through stdin:
 cargo run -p asap-devtools --bin show_post_asap_ir < queries.txt
 ```
 
-`show_post_asap_ir` uses an approximation target of ε = 0.01 so that the output can exercise sketch-based implementations rather than only exact aggregation.
+`show_post_asap_ir` uses an approximation target of ε = 0.01 and displays a
+representative binding using the sketch strategy. It does not show the complete
+ranked workload candidate set or choose a deployment lifecycle. Its SQL examples
+use a fixed demonstration catalog, not your database schema. Use the library
+workflow below to retain alternatives and provide your own models.
 
-## Other useful commands
+## More inspection commands
 
 ### Export a query DAG
 
@@ -113,94 +144,10 @@ Print representative queries covering the pre-ASAP IR variants:
 cargo run -p asap-devtools --example canonical_examples
 ```
 
-## As a library
 
-These crates are not published to crates.io—depend on them by path (inside this workspace) or by Git:
+## Library development and design
 
-```toml
-# from another crate in this workspace
-asap-frontend-promql = { path = "../frontend-promql" }   # or asap-frontend-sql
-asap-aware-mapping = { path = "../asap-aware-mapping" }
-asap-types = { path = "../types" }
-
-# from an external codebase
-asap-frontend-promql = { git = "https://github.com/ProjectASAP/ASAPPlanner", package = "asap-frontend-promql" }
-asap-aware-mapping = { git = "https://github.com/ProjectASAP/ASAPPlanner", package = "asap-aware-mapping" }
-asap-types = { git = "https://github.com/ProjectASAP/ASAPPlanner", package = "asap-types" }
-```
-
-### Step 1 — get the pre-ASAP IR
-
-Lower a query string with a front end. Front ends never depend on each other or on the binder —
-pull only the one you need.
-
-```rust
-use asap_frontend_promql::lower_promql;
-use asap_types::types::AccuracyTarget;
-
-let pre_asap = lower_promql(
-    "quantile(0.99, rate(http_requests_total[5m]))",
-    AccuracyTarget::Epsilon(0.01),
-)?; // QueryExpr
-```
-
-(SQL: `asap_frontend_sql::lower_sql(query, &catalog, accuracy).await` — needs a `SqlCatalog`
-describing your tables; see `crates/devtools/src/bin/show_pre_asap_ir.rs` for a worked example.)
-
-`AccuracyTarget` travels with the query, not the crate — pass `Exact` for no approximation
-allowed, `Epsilon(e)` / `EpsilonDelta{epsilon, delta}` otherwise.
-
-### Step 2 — get the post-ASAP IR
-
-Feed the `QueryExpr` to `asap-aware-mapping`. This crate depends only on `asap-types`, never on a
-front end, so it's agnostic to which language produced the tree. There is no "bind me one tree"
-entry point: `SketchAlgorithmStrategy::replacements()` always returns every valid candidate for a
-target, ranked, and you take the one you want.
-
-```rust
-use asap_aware_mapping::{Replacement, ReplacementStrategy, ReplacementSubDAG, SketchAlgorithmStrategy, TargetSubDAG};
-use std::rc::Rc;
-
-let root = Rc::new(pre_asap);
-let target = TargetSubDAG::new(&root);
-let candidates = SketchAlgorithmStrategy::default_cost_model().replacements(&target);
-
-// Take the cost-model-preferred candidate — the common case.
-let Some(ReplacementSubDAG { replacement: Replacement::Summary(post_asap), .. }) =
-    candidates.into_iter().next()
-else {
-    // No candidate (e.g. the node isn't a bindable Aggregate) — fall back to
-    // `asap_aware_mapping::replacement::keep_pre_asap(&root)`, the same conservative
-    // pass-through this crate's own dispatch uses.
-    panic!("no candidate for this target");
-};
-// post_asap: Rc<SummaryNode> — the SummaryExpr DAG
-```
-
-`SketchAlgorithmStrategy::new(&dyn CostModel)` (vs. `default_cost_model()`) is the extension point for
-a deployment that wants its own candidate ranking or parameter sizing instead of this crate's
-built-in static preference order (`DefaultCostModel` — what `default_cost_model()` uses).
-See the `CostModel` trait doc in `crates/asap-aware-mapping/src/cost_model.rs` for its overridable
-hooks (`rank_candidates`, `size_params`, `realize_extension`, …).
-
-To see every root of a whole workload at once — including the candidates CSE-shared subtrees get
-(a shared subtree's `MemoGroup` carries both the "share" and "recompute independently" options,
-ranked by `CostModel::cse_share_decision`) — use `asap_aware_mapping::search_workload`/
-`search_workload_with` instead; unlike the single-target path above, these return every discovered
-site's full candidate list (a `PlanSpace`), not one picked winner. Committing to one final,
-physically-materialized `SummaryNode` per shared subtree is out of this crate's scope — that's a
-downstream deployment's call, once it also knows where each candidate would be placed.
-
-### Reading the result
-
-Match on `post_asap.expr` (a `SummaryExpr`):
-
-- `KeepPreAsap(Box<QueryExpr>)` — this subtree wasn't rewritten; execute it exactly.
-- `SummaryAgg { summary, params, .. }` — an exact accumulator (`summary.is_exact()`) or an
-  approximate sketch, sized to the query's `AccuracyTarget`.
-- `SummaryEstimate { summary_input, query }` — wraps a sketch `SummaryAgg`; `query` is what to
-  read out of it (`Quantile`, `Cardinality`, `TopK`, `PointCount`).
-
-`docs/design_docs/asap-aware-mapping/README.md` has the conceptual background (why this layer exists, what an
-"implementation" is); `docs/design_docs/pre-asap-ir.md` / `docs/design_docs/post-asap-ir.md` are the node-by-node IR
-reference.
+- [Library API definitions and examples](../developer_docs/library-api.md)
+- [Design overview](../design_docs/README.md)
+- [Pre-ASAP IR reference](../design_docs/pre-asap-ir.md)
+- [Post-ASAP IR reference](../design_docs/post-asap-ir.md)
