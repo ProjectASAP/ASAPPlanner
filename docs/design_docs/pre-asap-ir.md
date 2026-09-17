@@ -113,7 +113,7 @@ HistogramStdVar, HistogramFraction(lo, hi), HistogramQuantile(q)  // native-hist
 Math(func)                                                        // element-wise transform
 ```
 
-`PearsonCorr { left, right }` is the only measure with two value inputs. Both
+`PearsonCorr { left, right }` has two value inputs. Both
 references resolve to positional column IDs, and `input_cols()` exposes both
 dependencies. SQL lowering projects both arguments, preserving
 expressions, casts, and qualified join columns. The result is nullable `Float64`,
@@ -126,7 +126,10 @@ it as a hash aggregate with provider-supplied accumulator size.
 SQL `COUNT(DISTINCT col)`; several count distinct *tuples*
 (`COUNT(DISTINCT a, b)`), which is not the distinct count of any one of them.
 Empty is the PromQL convention "the sample value" (`count_values`,
-`distinct_over_time`).
+`distinct_over_time`). Serialized intents reject unknown fields: legacy
+`Cardinality` payloads containing `col` must be migrated to `cols` before loading
+(`col: n` becomes `cols: [n]`, and `col: null` becomes `cols: []`). Omitting both
+fields still selects the implicit sample input.
 
 `input_cols()` is the only column accessor on `AggIntent` — an intent's arity is
 its own business, so no consumer can ask for "the" input column of an aggregate

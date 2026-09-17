@@ -2535,3 +2535,23 @@ async fn composite_distinct_rejects_expression_arguments() {
         "{error}"
     );
 }
+
+// DISTINCT inputs survive projections introduced by sibling aggregates.
+#[tokio::test]
+async fn distinct_with_derived_sibling() {
+    let catalog = SqlCatalog::new().with_table(
+        "t",
+        Schema::new(vec![
+            Column::new("a", DataType::Int64, false),
+            Column::new("b", DataType::Int64, false),
+        ]),
+    );
+    for sql in [
+        "SELECT count(DISTINCT a), sum(b + 1) FROM t",
+        "SELECT count(DISTINCT a, b), sum(b + 1) FROM t",
+        "SELECT count(DISTINCT a, b), corr(a,b) FROM t",
+    ] {
+        let result = lower_sql(sql, &catalog, AccuracyTarget::Exact).await;
+        assert!(result.is_ok(), "{sql}: {result:?}");
+    }
+}

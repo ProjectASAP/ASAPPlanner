@@ -41,7 +41,7 @@ use crate::types::AccuracyTarget;
 ///
 /// [`input_cols`]: AggIntent::input_cols
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 #[serde(bound(serialize = "C: Serialize", deserialize = "C: Deserialize<'de>"))]
 pub enum AggIntent<C = ColumnId> {
     // ── Data-model-agnostic ──────────────────────────────────────────────
@@ -894,6 +894,21 @@ mod tests {
             let json = serde_json::to_string(&v).unwrap();
             let back: AggIntent = serde_json::from_str(&json).unwrap();
             assert_eq!(v, back);
+        }
+    }
+
+    // Legacy explicit inputs must fail instead of becoming implicit sample inputs.
+    #[test]
+    fn cardinality_rejects_legacy_col_payloads() {
+        for payload in [
+            r#"{"kind":"cardinality","col":2,"accuracy":"Exact"}"#,
+            r#"{"kind":"cardinality","col":null,"accuracy":"Exact"}"#,
+            r#"{"kind":"cardinality","col":2,"cols":[1],"accuracy":"Exact"}"#,
+        ] {
+            assert!(
+                serde_json::from_str::<AggIntent>(payload).is_err(),
+                "{payload}"
+            );
         }
     }
 
