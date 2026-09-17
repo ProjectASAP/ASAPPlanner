@@ -16,7 +16,7 @@ tool on first use.
 | Command (`cargo run -p asap-devtools --bin … -- …`) | Input / options | Result |
 | --- | --- | --- |
 | `show_pre_asap_ir queries.txt` | File path, or stdin when omitted | Prints canonical Pre-ASAP IR |
-| `show_post_asap_ir queries.txt` | Same query file format | Prints a representative Post-ASAP binding using a fixed approximate target; not all ranked alternatives |
+| `show_post_asap_ir queries.txt` | Same query file format | Prints all sketch-strategy Post-ASAP candidates using a fixed approximate target, in cost-model order |
 | `dag_export --promql "<query>"` | One PromQL expression | Exports a query graph for inspection |
 | `dag_export --sql "<query>"` | One SQL expression using the tool's catalog | Exports a query graph for inspection |
 | `analyze_corpora --corpora --out-dir <dir>` | Repository PromQL corpora, output directory | Writes successful/error IR dumps and summary reports |
@@ -74,7 +74,7 @@ The corresponding SQL corpus analysis is:
 cargo run -p asap-devtools --bin analyze_corpora -- --sql-corpora --out-dir artifacts/sql_pre_asap
 ```
 
-### Inspect a representative Post-ASAP IR
+### Inspect Post-ASAP IR candidates
 
 Run:
 
@@ -93,8 +93,9 @@ available binding from the sketch strategy for each query, numbered in cost-mode
 order. If no candidate is available, it prints the pre-ASAP fallback as candidate
 1. It does not show the complete ranked workload candidate set or choose a
 deployment lifecycle. Its SQL examples use a fixed demonstration catalog, not
-your database schema. Use the library workflow below to retain workload
-alternatives and provide your own models.
+your database schema. Use the
+[library workflow](../developer_docs/library-api.md) to retain workload alternatives
+and provide your own models.
 
 ## More inspection commands
 
