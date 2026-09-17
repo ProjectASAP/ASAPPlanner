@@ -478,7 +478,7 @@ mod tests {
             .implementation
             .contains("SYNTHETIC"));
         let schema: serde_json::Value = serde_json::from_str(include_str!(
-            "../../../docs/developer_docs/offline-sketch-evidence.schema.json"
+            "../../../docs/reference/offline-sketch-evidence.schema.json"
         ))
         .unwrap();
         assert_eq!(
