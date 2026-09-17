@@ -2,7 +2,7 @@
 
 This guide explains how to implement, extend, and validate the end-to-end
 accuracy model. Read the
-[design document](../design_docs/asap-aware-mapping/end-to-end-accuracy-guarantees.md)
+[design document](../proposals/asap-aware-mapping/end-to-end-accuracy-guarantees.md)
 first. The
 design document owns architectural decisions and correctness invariants; this
 guide owns concrete interfaces, formulas, evidence requirements, and developer
@@ -31,7 +31,7 @@ guarantees are combined. `AccuracyTarget` is the requirement; `ResultGuarantee`
 is the evidence produced for one concrete candidate.
 
 The design document's
-[end-to-end example](../design_docs/asap-aware-mapping/end-to-end-accuracy-guarantees.md#end-to-end-example)
+[end-to-end example](../proposals/asap-aware-mapping/end-to-end-accuracy-guarantees.md#end-to-end-example)
 is the canonical numeric walkthrough from allocation through legality
 checking.
 

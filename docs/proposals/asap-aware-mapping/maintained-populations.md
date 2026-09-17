@@ -1,5 +1,7 @@
 # Shared maintained population rule
 
+> Status: proposal. Verify implementation and tests before relying on this rule as current behavior.
+
 ## Definition and motivation
 
 A **population** is the multiset of records that an aggregation is defined over,

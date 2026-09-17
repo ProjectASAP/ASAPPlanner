@@ -402,7 +402,7 @@ unlowered logical operations, inconsistent edges, or different comparison
 scopes make the complete candidate unavailable. The integration must never
 replace those failures with zero cost or structural node counting.
 
-See [Analytical resource cost](analytical-resource-cost.md) for the resource
+See [Analytical resource cost](../proposals/asap-aware-mapping/analytical-resource-cost.md) for the resource
 formulas, evidence validation, comparison-scope rules, and calibration model.
 
 ## Conditional temporal-average lowering

@@ -1,5 +1,7 @@
 # UnivMon frequency summaries
 
+> Status: research proposal. This is not a current API or implementation contract.
+
 This contract is for Planner and runtime developers implementing shared
 frequency statistics. One UnivMon state describes the frequency vector of
 input values in one population and time window. For samples `[2, 2, 5]`, the

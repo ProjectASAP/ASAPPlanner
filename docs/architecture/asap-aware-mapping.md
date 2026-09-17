@@ -83,30 +83,30 @@ Rank and select post-ASAP plans
 
 The design is split into focused documents:
 
-- [Key concepts](key_concepts.md) defines target sub-DAGs, replacement sub-DAGs,
+- [Key concepts](../concepts/asap-aware-mapping.md) defines target sub-DAGs, replacement sub-DAGs,
   replacement strategies, candidate plans, and the cost model.
-- [Searching over plans](searching_over_plans.md) explains how the planner preserves,
+- [Searching over plans](asap-aware-plan-search.md) explains how the planner preserves,
   combines, checks, costs, and ranks alternatives across a workload.
-- [Optimizations](optimizations.md) describes summary selection, parameterization,
+- [Optimizations](../proposals/asap-aware-mapping/optimizations.md) describes summary selection, parameterization,
   subpopulation and time organization, roll-ups, sharing, semantic rewrites, and hybrid execution.
-- [Shared maintained population rule](maintained-populations.md) defines population membership,
+- [Shared maintained population rule](../proposals/asap-aware-mapping/maintained-populations.md) defines population membership,
   SQL/PromQL input contracts, sharing preconditions, the replacement DAG, and deployment obligations.
-- [Summary properties](summary_properties.md) lists the capabilities used to determine whether
+- [Summary properties](../proposals/asap-aware-mapping/summary-properties.md) lists the capabilities used to determine whether
   summaries and optimizations can be composed safely.
-- [End-to-end accuracy guarantees](end-to-end-accuracy-guarantees.md) specifies the typed
+- [End-to-end accuracy guarantees](../proposals/asap-aware-mapping/end-to-end-accuracy-guarantees.md) specifies the typed
   guarantee IR, sketch contracts, composition rules, target checking, and fail-closed boundaries.
-- [Analytical resource cost](analytical-resource-cost.md) defines CPU, retained-memory,
+- [Analytical resource cost](../proposals/asap-aware-mapping/analytical-resource-cost.md) defines CPU, retained-memory,
   and scan-I/O formulas, calibration, planner ranking, and fail-closed behavior.
 - [Physical plan integration](physical-plan-integration.md) defines how pre-ASAP and
   post-ASAP logical plans lower into the physical operator DAG consumed by statistics
   resolution and analytical costing.
-- [ASAPPlanner and downstream application boundaries](../asapplanner-downstream-boundary.md)
+- [ASAPPlanner and downstream application boundaries](planner-downstream-boundary.md)
   separates planner-owned search and selection from downstream physical
   implementation, deployment, and execution.
-- [Query workloads, data workloads, and summary lifecycle maintenance](workload-demand-and-summary-lifecycle.md) separates
+- [Query workloads, data workloads, and summary lifecycle maintenance](../proposals/asap-aware-mapping/workload-demand-and-summary-lifecycle.md) separates
   query-workload properties from data-workload properties and defines ephemeral, prepared,
   shared, and continuously maintained summary-state alternatives.
-- [Explainability](explainability.md) describes how the planner reports available replacements
+- [Explainability](../reference/replacement-explanations.md) describes how the planner reports available replacements
   using the same candidate space it optimizes.
 
 ---

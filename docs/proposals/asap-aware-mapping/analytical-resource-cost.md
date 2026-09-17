@@ -1,5 +1,7 @@
 # Analytical resource cost model
 
+> Status: proposal. Verify implementation and evidence support before treating this model as current behavior.
+
 ## Purpose and boundaries
 
 This document defines an analytical estimation method over evidenced physical
@@ -260,7 +262,7 @@ unavailable.
 ### Operator vocabulary and source of truth
 
 The complete logical-to-physical boundary is specified in
-[Physical plan integration](physical-plan-integration.md). This section
+[Physical plan integration](../../architecture/physical-plan-integration.md). This section
 summarizes the part required by the resource estimator.
 
 `PhysicalOperator` is the source of truth for the cost model's operator
@@ -883,7 +885,7 @@ whole. The planner does not mix individual nodes from different alternatives.
 
 The ownership of planner-visible realization selection versus downstream
 implementation and deployment is defined in
-[ASAPPlanner and downstream application boundaries](../asapplanner-downstream-boundary.md).
+[ASAPPlanner and downstream application boundaries](../../architecture/planner-downstream-boundary.md).
 This document defines only how complete alternatives are costed.
 
 A retained summary bootstraps every active window, consumes arriving rows, and
@@ -987,7 +989,7 @@ abstract per-summary `SummaryWindowFramework` assignment by comparing complete
 `StreamingWindowFrameworkCandidate` evidence bundles. Component ownership,
 including the distinction between a window primitive and its concrete runtime
 implementation, is defined in
-[ASAPPlanner and downstream application boundaries](../asapplanner-downstream-boundary.md).
+[ASAPPlanner and downstream application boundaries](../../architecture/planner-downstream-boundary.md).
 
 ## Accuracy evidence remains separate from cost
 
@@ -1171,12 +1173,12 @@ available, that candidate is unavailable rather than costed as in-memory.
 
 The physical-plan adapter can also estimate explicitly evidenced disk/object
 request counts using the optional storage profile. See
-[storage operation estimates](../../developer_docs/storage-operation-costs.md)
+[storage operation estimates](../../reference/storage-operation-costs.md)
 for units, formulas, evidence requirements, and calibration.
 
 The physical-plan adapter supports explicit network and materialization
 boundaries through optional deployment evidence. See
-[physical boundary estimates](../../developer_docs/physical-boundary-costs.md)
+[physical boundary estimates](../../reference/physical-boundary-costs.md)
 for kinds, execution multiplicity, evidence, and calibration.
 
 An estimate is unavailable when required evidence, a physical formula, or a

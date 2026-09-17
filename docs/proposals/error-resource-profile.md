@@ -1,5 +1,7 @@
 # Error–Resource Profile (ERP)
 
+> Status: proposal. This document describes a planned model; it is not, by itself, a statement of current supported behavior.
+
 ## Status
 
 ERP v1 is a discrete, shape- and distribution-conditioned profile exchanged between

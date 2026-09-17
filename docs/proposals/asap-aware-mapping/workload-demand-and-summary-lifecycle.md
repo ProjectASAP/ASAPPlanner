@@ -1,5 +1,7 @@
 # Design: Query Workloads, Data Workloads, and Summary Lifecycle Maintenance
 
+> Status: proposal. This document describes a target design, not a promise of implemented behavior.
+
 ## Audience and context
 
 This document is for ASAPPlanner designers, architects, researchers, and

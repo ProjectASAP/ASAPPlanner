@@ -11,4 +11,4 @@ Much (all?) of this design is motivated by sketches. As we integrate other primi
 - SummaryMerge: merge two or more summaries
 - SummarySubtract: subtract one summary from another
 - SummaryDelete: delete a raw data item from a summary
-- SummaryJoin: join two summaries based on "foreign-key" of the summaries, the resulting summary can estimate statistics 
+- SummaryJoin: join two summaries based on "foreign-key" of the summaries, the resulting summary can estimate statistics

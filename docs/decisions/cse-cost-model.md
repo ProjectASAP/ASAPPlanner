@@ -1,5 +1,7 @@
 # CSE sharing: rule-based vs. cost-based framework (issue #237)
 
+> Status: accepted decision for the implementation described here.
+
 ## Context
 
 [`asap_types::pre_asap::cse::share_common_subtrees`](../../crates/types/src/pre_asap/cse.rs)

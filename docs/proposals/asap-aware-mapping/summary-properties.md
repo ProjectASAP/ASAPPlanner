@@ -1,5 +1,7 @@
 # Summary properties to model
 
+> Status: design exploration. Verify implementation support before relying on a property in planning.
+
 To determine whether transformations are valid, ASAP-aware mapping needs a common description of summary capabilities.
 
 Important properties include:

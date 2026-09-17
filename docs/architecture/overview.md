@@ -139,16 +139,16 @@ whole-plan comparison as a convenience. That is an iterative specialization of
 the same boundary, not a requirement that the reusable Planner hide the ranked
 candidate set from downstream consumers.
 
-## Detailed designs
+## Further reading
 
-- [Parsing and canonicalization](parse_and_canonicalize.md)
-- [Pre-ASAP IR](pre-asap-ir.md)
-- [Post-ASAP IR](post-asap-ir.md)
-- [ASAP-aware mapping](asap-aware-mapping/README.md)
-- [Accuracy guarantees](asap-aware-mapping/end-to-end-accuracy-guarantees.md)
-- [Workload demand and summary lifecycle](asap-aware-mapping/workload-demand-and-summary-lifecycle.md)
-- [Physical-plan integration](asap-aware-mapping/physical-plan-integration.md)
-- [Analytical resource cost](asap-aware-mapping/analytical-resource-cost.md)
-- [Searching over plans](asap-aware-mapping/searching_over_plans.md)
-- [Explainability](asap-aware-mapping/explainability.md)
-- [ASAPPlanner and downstream application boundaries](asapplanner-downstream-boundary.md)
+- [Parsing and canonicalization](parse-and-canonicalize.md)
+- [Pre-ASAP IR](../concepts/pre-asap-ir.md)
+- [Post-ASAP IR](../concepts/post-asap-ir.md)
+- [ASAP-aware mapping](asap-aware-mapping.md)
+- [Accuracy guarantees](../proposals/asap-aware-mapping/end-to-end-accuracy-guarantees.md)
+- [Workload demand and summary lifecycle](../proposals/asap-aware-mapping/workload-demand-and-summary-lifecycle.md)
+- [Physical-plan integration](physical-plan-integration.md)
+- [Analytical resource cost](../proposals/asap-aware-mapping/analytical-resource-cost.md)
+- [Searching over plans](asap-aware-plan-search.md)
+- [Explainability](../reference/replacement-explanations.md)
+- [ASAPPlanner and downstream application boundaries](planner-downstream-boundary.md)

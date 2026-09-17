@@ -1,5 +1,7 @@
 # Pre-ASAP IR
 
+This is the detailed node reference. Start with the [Pre-ASAP IR concept](../concepts/pre-asap-ir.md) for purpose and the compact catalog.
+
 The goal of the pre-ASAP IR is represent operations from different query languages in a single representation, and make it easier to analyze how/where ASAP primitives can be used.
 Only operations that are semantically relevant to answering the query and selecting an ASAP primitive need to become first-class nodes here.
 

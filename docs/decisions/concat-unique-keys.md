@@ -1,5 +1,7 @@
 # `Concat` and `unique_keys`: the discriminator override (issue #228)
 
+> Status: accepted decision for the implementation described here.
+
 > **Update**: the investigation below found no current call site paying for a
 > redundant `Dedup` that this override would remove, and the original version
 > of this document recommended deferring Option 1 on that basis. The repo
