@@ -23,7 +23,7 @@ integration.
 
 1. Read the [ASAP-aware mapping architecture](develop_docs/asap-aware-mapping-architecture.md).
 2. Consult [mapping contracts](develop_docs/asap-aware-mapping-contracts.md).
-3. Choose a focused task from [Extend ASAP-aware mapping](develop_docs/extend-asap-aware-mapping.md).
+3. Follow [Extend ASAP-aware mapping](develop_docs/extend-asap-aware-mapping.md).
 
 ## Understand a design
 

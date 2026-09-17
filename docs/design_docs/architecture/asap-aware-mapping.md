@@ -1,48 +1,189 @@
-# ASAP-aware mapping
+# ASAP-Aware Mapping
 
-ASAP-aware mapping explores ways to answer exact query intent with summaries,
-sharing, roll-ups and semantic rewrites. Its output preserves eligible
-alternatives so callers can compare compatible choices across a workload.
-See the [system overview](README.md) for the full pipeline and ownership boundary,
-and [mapping concepts](../concepts/asap-aware-mapping.md) for vocabulary.
+## Overview
 
-## Why choices interact
+ASAP-aware mapping decides **whether and how a query intent can be answered using summaries instead of scanning raw data**.
 
-A percentile intent may admit KLL, DDSketch, or exact execution, subject to the
-requested guarantee. A locally cheaper algorithm may prevent sharing with
-another query. Similarly, sharing a parent changes the effective demand on its
-children. Independent rankings are useful views, but do not themselves define a
-compatible whole-workload plan.
+Given a logical query plan, the mapping layer explores alternative plans that may use sketches, exact summaries, shared computation, roll-ups, semantic rewrites, or combinations of these techniques.
 
-The [candidate-search design](asap-aware-plan-search.md) explains this dependency
-structure. Accuracy and semantic legality constrain candidates before cost can
-prefer one. Lack of proof keeps an approximate alternative unavailable; it does
-not authorize weakening the query requirement.
+The input is a **pre-ASAP plan** describing what the query wants to compute. The output is a set of **candidate post-ASAP plans** describing different valid ways to realize that computation.
 
-## Design invariants
+For example, a percentile query might be answered by:
 
-- Preserve the supported legal alternatives through ranking. Cost preferences
-  cannot remove a semantically useful choice during rule enumeration.
-- Keep semantic legality, accuracy proof, and cost evidence explicit and distinct.
-- Preserve sharing identity and parent/child compatibility during selection.
-- Carry summary algorithms, parameters and execution contracts into the output;
-  downstream physical binding must preserve those decisions.
-- Derive explanations from the same candidate space and rejection data.
+```text
+Quantile(latency, 0.99)
 
-Planner exposes optional coordinated selection and semantic materialization APIs.
-It does not deploy state, assign machines, or execute queries. Physical and
-lifecycle comparisons require their corresponding capability and cost evidence;
-see the [downstream boundary](planner-downstream-boundary.md).
+        ↓
 
-## Detailed designs and implementation
+KLL
+DDSketch
+exact aggregation
+```
 
-- [Accuracy guarantees](../proposals/asap-aware-mapping/end-to-end-accuracy-guarantees.md)
-- [Analytical resource cost](../proposals/asap-aware-mapping/analytical-resource-cost.md)
-- [Workload demand and summary lifecycle](../proposals/asap-aware-mapping/workload-demand-and-summary-lifecycle.md)
-- [Shared maintained populations](../proposals/asap-aware-mapping/maintained-populations.md)
-- [Physical-plan integration](physical-plan-integration.md)
-- [Optimization dimensions](../proposals/asap-aware-mapping/optimizations.md) and [summary properties](../proposals/asap-aware-mapping/summary-properties.md)
-- [Code architecture](../../develop_docs/asap-aware-mapping-architecture.md), [contracts](../../develop_docs/asap-aware-mapping-contracts.md), and [extension tasks](../../develop_docs/extend-asap-aware-mapping.md)
+Which alternative is preferable depends on requirements such as accuracy, latency, storage, update cost, and the surrounding query workload.
 
-The proposal collection includes implemented mechanisms and open extensions;
-read each document's implementation status before relying on a capability.
+ASAP-aware mapping therefore answers two questions:
+
+1. **What transformations are valid?**
+2. **What combinations of alternatives form useful candidate plans?**
+
+It estimates CPU work, retained memory, and scan I/O for supported summary
+alternatives, but does **not** allocate machines or enforce physical resource
+budgets; deployment belongs to a later stage.
+
+---
+
+## Glossary
+
+- **Pre-ASAP plan**: The logical query plan before ASAP-aware optimizations are considered.
+- **Post-ASAP plan**: A logical plan that includes one or more ASAP-aware choices, such as summaries, sharing, roll-ups, or semantic rewrites.
+- **Target Sub-DAG**: A sub-DAG of the pre-ASAP plan which is a candidate to be replaced by a post-ASAP sub-DAG
+- **Replacement Sub-DAG**: A candidate post-ASAP sub-DAG to replace a target sub-DAG. For example, a quantile aggregation may have KLL, DDSketch, and exact aggregation as alternatives.
+- **ReplacementStrategy**: A rule to recognize a target Sub-DAG and produces one or more valid replacement Sub-DAGs.
+- **Candidate Plan**: A complete post-ASAP plan formed by choosing compatible replacement alternatives across the plan.
+- **Maintained population**: A multiset of qualifying records retained across evaluations and updated as members enter, change, leave or expire; multiple readouts can share this state.
+- **Cost Model**: A model used to compare valid candidate plans according to criteria such as storage, update cost, query latency, and accuracy.
+
+The distinction between **ReplacementStrategy** and **Candidate Plan** is important. A ReplacementStrategy generates alternatives at a decision point, while a candidate plan is a complete plan that combines choices across all relevant decision points.
+
+---
+
+# High-level Design
+
+ASAP-aware mapping follows this flow:
+
+```text
+Pre-ASAP query plan
+        |
+        v
+Discover target sub-DAGs
+        |
+        v
+Generate valid replacement sub-DAGs
+        |
+        v
+Check compatibility between replacement sub-DAGs
+        |
+        v
+Build search space of candidate plans
+        |
+        v
+Apply accuracy and semantic constraints
+        |
+        v
+Estimate costs of candidate plans
+        |
+        v
+Rank and select post-ASAP plans
+```
+
+---
+
+## Detailed design
+
+The design is split into focused documents:
+
+- [Key concepts](../concepts/asap-aware-mapping.md) defines target sub-DAGs, replacement sub-DAGs,
+  replacement strategies, candidate plans, and the cost model.
+- [Searching over plans](asap-aware-plan-search.md) explains how the planner preserves,
+  combines, checks, costs, and ranks alternatives across a workload.
+- [Optimizations](../proposals/asap-aware-mapping/optimizations.md) describes summary selection, parameterization,
+  subpopulation and time organization, roll-ups, sharing, semantic rewrites, and hybrid execution.
+- [Shared maintained population rule](../proposals/asap-aware-mapping/maintained-populations.md) defines population membership,
+  SQL/PromQL input contracts, sharing preconditions, the replacement DAG, and deployment obligations.
+- [Summary properties](../proposals/asap-aware-mapping/summary-properties.md) lists the capabilities used to determine whether
+  summaries and optimizations can be composed safely.
+- [End-to-end accuracy guarantees](../proposals/asap-aware-mapping/end-to-end-accuracy-guarantees.md) specifies the typed
+  guarantee IR, sketch contracts, composition rules, target checking, and fail-closed boundaries.
+- [Analytical resource cost](../proposals/asap-aware-mapping/analytical-resource-cost.md) defines CPU, retained-memory,
+  and scan-I/O formulas, calibration, planner ranking, and fail-closed behavior.
+- [Physical plan integration](physical-plan-integration.md) defines how pre-ASAP and
+  post-ASAP logical plans lower into the physical operator DAG consumed by statistics
+  resolution and analytical costing.
+- [ASAPPlanner and downstream application boundaries](planner-downstream-boundary.md)
+  separates planner-owned search and selection from downstream physical
+  implementation, deployment, and execution.
+- [Query workloads, data workloads, and summary lifecycle maintenance](../proposals/asap-aware-mapping/workload-demand-and-summary-lifecycle.md) separates
+  query-workload properties from data-workload properties and defines ephemeral, prepared,
+  shared, and continuously maintained summary-state alternatives.
+- [Explainability](../../develop_docs/replacement-explanations.md) describes how the planner reports available replacements
+  using the same candidate space it optimizes.
+
+---
+
+# Goals, Design Principles, and Non-Goals
+
+## Goals
+
+The mapping layer should support three capabilities.
+
+### 1. Discover valid alternatives
+
+For each relevant part of a query plan, determine which exact or approximate realizations preserve the query's required semantics.
+
+For example:
+
+```text
+DistinctCount(user_id)
+    → exact distinct counting
+    → HyperLogLog
+
+Quantile(latency, 0.99)
+    → exact quantile
+    → KLL
+    → DDSketch
+```
+
+A query intent may therefore have more than one valid alternative.
+
+### 2. Explore interactions between alternatives
+
+Optimization choices cannot always be made independently.
+
+For example, the best summary for one aggregation may depend on:
+
+- whether the result can be shared with another query,
+- whether multiple group-by levels can be computed through roll-up,
+- whether subpopulations share one summary or use separate summaries,
+- whether a semantic rewrite exposes additional sharing,
+- whether time windows can reuse common state,
+- and whether another transformation changes the cost of maintaining the summary.
+
+ASAP-aware mapping should therefore reason about **candidate plans as a whole**, rather than greedily choosing the best alternative at each node.
+
+### 3. Explainability
+
+The same information used to construct candidate plans should also answer questions such as:
+
+- Can this aggregation use a sketch?
+- Which summary families are valid?
+- Can these two computations share work?
+- Can one group-by result be rolled up into another?
+- Can a semantic rewrite expose additional reuse?
+- Where in the query plan are these opportunities available?
+
+---
+
+## Design Principles
+
+The design should follow several principles.
+
+1. Avoid premature optimization: Do not commit to one sketch, rewrite, or sharing decision before interactions with the rest of the plan are visible.
+2. Separate legality from cost: Transformation logic determines what is valid. The cost model determines what is desirable.
+3. Do not force approximation: Approximation is an option, not an assumption.
+4. Model optimization dimensions independently: Summary family, summary parameters, grouping strategy, time organization, sharing, and semantic rewrites should be composable dimensions whenever possible.
+5. Make planner explainable: The planner should be able to explain which optimizations are possible and where they apply based on the same candidate space used for optimization.
+6. Make summary capabilities explicit: Properties such as mergeability, subtractability, deletion support, time awareness, and composability should drive transformation legality.
+
+## Non-Goals
+
+ASAP-aware mapping is not responsible for:
+
+- assigning CPU cores,
+- assigning memory budgets to execution nodes,
+- choosing machine placement,
+- scheduling execution,
+- managing runtime admission control,
+- or performing low-level execution tuning.
+
+Those decisions belong to later physical planning or runtime layers.
