@@ -2,7 +2,7 @@
 
 Audience: developers embedding ASAPPlanner or adding strategies/models. This is
 a compact reference for the public workflow APIs at revision `e7fdb24`, not an
-exhaustive symbol reference. The [CLI guide](../user-guide/user-guide.md) covers command-line inspection; the [design overview](../design_docs/README.md) defines ownership.
+exhaustive symbol reference. The [CLI guide](../user_guide_docs/run-a-query.md) covers command-line inspection; the [design overview](../design_docs/architecture/README.md) defines ownership.
 
 ASAPPlanner's primary output is `PlanSpace` plus ranked legal candidates.
 Downstream owns physical binding and commitment. Selection/materialization helpers
@@ -609,4 +609,4 @@ cargo doc -p asap-aware-mapping -p asap-types --no-deps
 - [Cost models](../../crates/asap-aware-mapping/src/cost_model.rs)
 - [Lifecycle APIs](../../crates/asap-aware-mapping/src/summary_maintenance_lifecycle.rs)
 - [Workload types](../../crates/types/src/workload.rs)
-- [Downstream boundary](../design_docs/asapplanner-downstream-boundary.md)
+- [Downstream boundary](../design_docs/architecture/planner-downstream-boundary.md)

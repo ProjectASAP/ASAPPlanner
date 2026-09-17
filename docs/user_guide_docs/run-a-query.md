@@ -4,7 +4,7 @@ Use the `asap-devtools` commands to inspect query IR, export graphs, and inspect
 corpus coverage. These commands do not deploy or execute a physical plan.
 
 To develop an application using the Rust library, start with
-[Library API: definitions, options, and examples](../developer_docs/library-api.md).
+[Library API: definitions, options, and examples](../develop_docs/library-api.md).
 That guide explains how to choose strategies and models, rank candidates, and
 work with lifecycle capabilities.
 
@@ -40,7 +40,11 @@ promql> quantile(0.99, rate(http_requests_total[5m]))
 sql> SELECT service, COUNT(*) FROM metrics GROUP BY service
 ```
 
-Blank lines and lines beginning with `#` are ignored.
+Blank lines and lines beginning with `#` are ignored. The two file/stdin tools
+accept `sql>` and `promql>`; MetricsQL is available through the library frontend.
+SQL examples use the fixed catalog
+`metrics(ts: Timestamp, service: Utf8, region: Utf8, latency: Float64, bytes: Int64)`.
+For your own schema, provide a `SqlCatalog` through the library API.
 
 ### Show the Pre-ASAP IR
 
@@ -94,8 +98,13 @@ order. If no candidate is available, it prints the pre-ASAP fallback as candidat
 1. It does not show the complete ranked workload candidate set or choose a
 deployment lifecycle. Its SQL examples use a fixed demonstration catalog, not
 your database schema. Use the
-[library workflow](../developer_docs/library-api.md) to retain workload alternatives
+[library workflow](../develop_docs/library-api.md) to retain workload alternatives
 and provide your own models.
+
+Each input line is followed by its debug IR or an `ERR:` message. Post-ASAP
+output may contain summary state, readouts or exact `KeepPreAsap` work. An
+approximate target permits approximation; it does not guarantee a legal sketch.
+The tool prints plans, not query results.
 
 ## More inspection commands
 
@@ -150,7 +159,7 @@ cargo run -p asap-devtools --example canonical_examples
 
 ## Library development and design
 
-- [Library API definitions and examples](../developer_docs/library-api.md)
+- [Library API definitions and examples](../develop_docs/library-api.md)
 - [Design overview](../design_docs/README.md)
-- [Pre-ASAP IR reference](../design_docs/pre-asap-ir.md)
-- [Post-ASAP IR reference](../design_docs/post-asap-ir.md)
+- [Pre-ASAP IR reference](../develop_docs/pre-asap-ir.md)
+- [Post-ASAP IR reference](../design_docs/concepts/post-asap-ir.md)
