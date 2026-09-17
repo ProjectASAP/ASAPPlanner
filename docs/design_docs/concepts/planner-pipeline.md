@@ -1,6 +1,6 @@
 # Planner pipeline
 
-ASAPPlanner accepts a workload of source-language queries and produces a set of legal, ranked logical alternatives. It does not select, deploy, or execute the final physical plan.
+ASAPPlanner accepts a workload of source-language queries and produces a set of legal, ranked logical alternatives. Optional APIs coordinate semantic selection and materialization; downstream systems commit, deploy, and execute the physical plan.
 
     SQL / PromQL / MetricsQL queries
             | parse and canonicalize

@@ -133,11 +133,13 @@ serving, and operational feedback. Their physical planning can reorder
 candidates because it has evidence that the reusable Planner does not, but it
 must not silently change Planner-owned semantics.
 
-When a downstream provider supplies complete physical alternatives and evidence
-back to Planner, `global_selection*` APIs can perform the final compatible
-whole-plan comparison as a convenience. That is an iterative specialization of
-the same boundary, not a requirement that the reusable Planner hide the ranked
-candidate set from downstream consumers.
+`PlanSpace::global_selection` optionally coordinates structural choices across
+groups; `GlobalSelection::materialize` constructs the selected semantic DAG.
+Those plain APIs do not require complete physical evidence and do not establish
+physical feasibility. Recurrence and lifecycle-aware variants use their supplied
+workload and evidence contracts. See the [library guide](../../develop_docs/library-api.md#optional-whole-plan-selection-and-materialization)
+for the distinction. Downstream may consume the ranked candidates directly and
+retains responsibility for physical commitment.
 
 ## Further reading
 

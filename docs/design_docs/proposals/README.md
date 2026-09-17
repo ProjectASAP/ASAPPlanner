@@ -1,8 +1,8 @@
 # Proposals and research designs
 
-These documents describe evolving designs, research directions, and work that
-may not yet be implemented. Check each document's status before treating it as
-current behavior.
+These documents record evolving designs and research directions. Some mechanisms
+are implemented; status notes and support limits distinguish them from proposed
+extensions. A design document is not a promise of downstream runtime support.
 
 - [Error–Resource Profile](error-resource-profile.md)
 - [ASAPQuery rule coverage](asapquery-rule-coverage.md)

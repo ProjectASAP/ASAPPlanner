@@ -1,6 +1,9 @@
 # Error–Resource Profile (ERP)
 
-> Status: proposal. This document describes a planned model; it is not, by itself, a statement of current supported behavior.
+> Status: implemented ERP v1 with proposed extensions. The
+> [ERP module](../../../crates/asap-aware-mapping/src/erp.rs) consumes discrete
+> empirical profiles; benchmark observations are not worst-case accuracy proofs.
+> See the status, supported selection modes and remaining work below.
 
 ## Status
 

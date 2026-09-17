@@ -1,6 +1,10 @@
 # Design: End-to-End Accuracy Guarantees
 
-> Status: proposal. The [developer reference](end-to-end-accuracy-guarantees-developer-guide.md) describes current implementation contracts.
+> Status: partially implemented design. Typed guarantees, supported composition
+> rules and accuracy gating are implemented. Empirical-input and combined
+> parameter configuration remain extensions as described below. The
+> [implementation companion](end-to-end-accuracy-guarantees-developer-guide.md)
+> describes current contracts and validation.
 
 ## Audience and context
 
@@ -16,10 +20,11 @@ commands live in the
 document is the authority for architectural decisions and correctness
 invariants; the developer guide is the authority for implementing them.
 
-ASAPPlanner is a mathematical planner. It does not execute sketches or import a
-sketch runtime. The planner derives guarantees from committed parameters and
-keeps data- or runtime-dependent quantities symbolic. A serving system may
-later provide observations that instantiate those symbols, but unavailable
+ASAPPlanner does not execute query workloads. It imports the pinned
+`asap_sketchlib` mapping bounds for DDSketch certification, while guarantee
+algebra and candidate legality remain planner-owned. The planner derives guarantees
+from committed parameters and keeps data- or runtime-dependent quantities
+symbolic. A serving system may later provide observations that instantiate those symbols, but unavailable
 evidence must never be replaced with an optimistic value.
 
 The design has one governing rule:
@@ -135,10 +140,9 @@ machine-readable guarantee that satisfies its accuracy target. The model must
 also distinguish incompatible error metrics and preserve the evidence used to
 reach its decision.
 
-This design does not execute sketches, import a sketch runtime, assume
-statistical independence, or prove arbitrary nonlinear and cross-metric
-composition. It does not introduce another correctness policy alongside
-`AccuracyTarget`.
+This design does not execute query workloads, assume statistical independence,
+or prove arbitrary nonlinear and cross-metric composition. It does not introduce
+another correctness policy alongside `AccuracyTarget`.
 
 ## Heilmeier questions used by this design
 
@@ -413,7 +417,9 @@ that an algorithm achieves it.
 ### Planner and runtime boundary
 
 The guarantee algebra and parameter-derived contracts live in ASAPPlanner. They
-do not require the planner to link to `asap_sketchlib`.
+do not require executing sketches during planning. DDSketch ratio certification
+uses the pinned `asap_sketchlib` mapping-bound helper; other guarantee algebra
+remains in Planner.
 
 Runtime or planning-time observations are still useful for quantities that are
 not fixed by static parameters:
@@ -466,8 +472,9 @@ a candidate was rejected.
 - **Treat missing evidence as zero:** rejected because it silently converts an
   unproved candidate into a valid one.
 - **Assume independent errors:** rejected; the default uses union bounds.
-- **Require a runtime library dependency:** rejected because parameter-derived
-  planning contracts and runtime observations have different lifecycles.
+- **Require runtime execution for every guarantee:** rejected because
+  parameter-derived contracts and runtime observations have different lifecycles.
+  Reusing a pinned mapping-bound helper does not require executing a query.
 - **Copy the inner guarantee onto Hydra:** rejected because it omits shared-grid
   collisions.
 - **Use a point-frequency guarantee for TopK:** rejected because it does not

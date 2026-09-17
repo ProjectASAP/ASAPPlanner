@@ -1,6 +1,10 @@
 # Analytical resource cost model
 
-> Status: proposal. Verify implementation and evidence support before treating this model as current behavior.
+> Status: implemented model with explicit support limits. The
+> [analytical estimator](../../../../crates/asap-aware-mapping/src/analytical_cost.rs)
+> and physical/streaming adapters implement supported evidenced comparisons.
+> Unsupported operators, arrival modes and missing evidence remain unavailable;
+> proposed extensions are not implied by the implemented formulas.
 
 ## Purpose and boundaries
 

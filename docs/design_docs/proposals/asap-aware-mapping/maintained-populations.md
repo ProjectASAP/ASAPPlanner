@@ -1,6 +1,10 @@
 # Shared maintained population rule
 
-> Status: proposal. Verify implementation and tests before relying on this rule as current behavior.
+> Status: planner rule implemented; deployment support is conditional. See
+> [MaintainedPopulationStrategy](../../../../crates/asap-aware-mapping/src/maintained_population.rs).
+> A deployment must provide the membership, freshness, state and operation
+> capabilities described below. Planner representation alone does not implement
+> population maintenance in a runtime.
 
 ## Definition and motivation
 

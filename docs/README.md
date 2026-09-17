@@ -13,11 +13,17 @@ Choose the path that matches what you need to do.
 
 Follow [Run and inspect a query](user_guide_docs/run-a-query.md). Tool-specific setup stays with the tool, including the [DAG viewer instructions](../tools/dag-viewer/RUNNING.md).
 
+## Embed the library
+
+Use [Public library functions and examples](develop_docs/library-api.md) for
+frontend lowering, workload search, ranking, optional selection and lifecycle
+integration.
+
 ## Extend the planner
 
 1. Read the [ASAP-aware mapping architecture](develop_docs/asap-aware-mapping-architecture.md).
 2. Consult [mapping contracts](develop_docs/asap-aware-mapping-contracts.md).
-3. Follow [Extend ASAP-aware mapping](develop_docs/extend-asap-aware-mapping.md).
+3. Choose a focused task from [Extend ASAP-aware mapping](develop_docs/extend-asap-aware-mapping.md).
 
 ## Understand a design
 
