@@ -30,4 +30,4 @@ Maintained state, exact or approximate, that can answer some query intent more e
 
 ## Physical plan
 
-A concrete execution and deployment choice: algorithms, storage, placement, and topology. Physical plans are owned by downstream systems.
+A concrete execution and deployment choice: runtime topology of data lifecycle stages, placement of computation, transmission, storage. Physical plans are owned by downstream systems.
