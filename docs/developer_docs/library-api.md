@@ -2,7 +2,7 @@
 
 Audience: developers embedding ASAPPlanner or adding strategies/models. This is
 a compact reference for the public workflow APIs at revision `e7fdb24`, not an
-exhaustive symbol reference. The [CLI guide](user-guide.md) covers command-line inspection; the [design overview](../design_docs/README.md) defines ownership.
+exhaustive symbol reference. The [CLI guide](../user-guide/user-guide.md) covers command-line inspection; the [design overview](../design_docs/README.md) defines ownership.
 
 ASAPPlanner's primary output is `PlanSpace` plus ranked legal candidates.
 Downstream owns physical binding and commitment. Selection/materialization helpers
