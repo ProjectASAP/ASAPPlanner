@@ -103,6 +103,22 @@ example, see [the CLI frontend example](../../crates/devtools/src/bin/show_pre_a
 
 ## Generate and rank candidates
 
+### What is a group?
+
+A **group** (`MemoGroup`) collects implementation alternatives for one query
+subexpression discovered by search. It is not a SQL `GROUP BY` group or a group
+of input rows. A `PlanSpace` contains these groups and the workload's query roots.
+
+For example, a supported `quantile(0.99, latency)` subexpression may have multiple
+legal summary implementations. Those alternatives belong to the same group
+because they are choices for the same computation. Another subexpression has its
+own group. If two queries reference a shared subexpression, they can consume the
+same group's result instead of requiring independent computation.
+
+`cost_sorted()` returns a `RankedGroup` for each group: the target subexpression,
+its candidates in ranked order, and a cost entry aligned with each candidate.
+It keeps the alternatives available; it does not select an entire workload plan.
+
 ### API definition
 
 ```text
@@ -485,6 +501,43 @@ but does not make the earlier selection lifecycle-optimal. An application may
 consume ranked candidates and perform this comparison downstream instead.
 
 ## Optional whole-plan selection and materialization
+
+### What does global selection mean?
+
+`global_selection()` coordinates implementation choices **across the groups in
+the workload DAG**. Here, “global” describes that cross-group scope. It does not
+mean a proven globally optimal solution over every possible physical plan, nor
+selection across every machine in a deployment.
+
+Consider this conceptual dependency graph:
+
+```text
+Q1 --+
+     +--> A --> B
+Q2 --+
+
+A's group: alternatives for computing A
+B's group: alternatives for computing B
+```
+
+Both queries need A, and computing A needs B. Choosing to compute A once and
+share it, versus recomputing it for each consumer, changes how many evaluations
+of B are needed. That can change which choice for B is preferable.
+
+`cost_sorted()` ranks each group's alternatives using that group's recorded
+consumer count. `global_selection()` accounts for ancestor sharing decisions
+when deriving effective usage counts, and keeps coupled parent/child composition
+choices consistent. The result records coordinated choices; `materialize()` then
+constructs the selected semantic DAG while preserving shared nodes.
+
+| Operation | Question answered | Result |
+| --- | --- | --- |
+| `cost_sorted()` | How are the alternatives ranked for each subexpression? | All ranked alternatives per group |
+| `global_selection()` | Which compatible choices should be used together, accounting for sharing and dependencies? | A coordinated selection across groups under the supplied model |
+
+Plain `global_selection()` does not automatically perform lifecycle planning or
+establish physical deployment feasibility. Use the corresponding evidence-aware
+workflow for those decisions. Downstream still owns physical commitment.
 
 | Method on `PlanSpace` / `GlobalSelection` | Behavior |
 | --- | --- |
