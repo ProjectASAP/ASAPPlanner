@@ -9,7 +9,7 @@ formats, evidence, and verification workflows.
 - [Extend ASAP-aware mapping](extend-asap-aware-mapping.md)
 - [Pre-ASAP IR reference](pre-asap-ir.md)
 - [Post-ASAP IR](../design_docs/concepts/post-asap-ir.md)
-- [Accuracy implementation companion](../design_docs/proposals/asap-aware-mapping/end-to-end-accuracy-guarantees-developer-guide.md)
+- [Accuracy implementation companion](end-to-end-accuracy-guarantees.md)
 - [DDSketch ratio certification](../design_docs/proposals/asap-aware-mapping/ddsketch-quantile-ratios.md)
 - [Offline sketch evidence](offline-sketch-evidence.md)
 - [Metrics-observability corpora](metrics-observability-corpora.md)

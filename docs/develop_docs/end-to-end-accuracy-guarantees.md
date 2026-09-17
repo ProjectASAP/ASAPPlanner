@@ -2,7 +2,7 @@
 
 This guide explains how to implement, extend, and validate the end-to-end
 accuracy model. Read the
-[design document](end-to-end-accuracy-guarantees.md)
+[design document](../design_docs/proposals/asap-aware-mapping/end-to-end-accuracy-guarantees.md)
 first. The
 design document owns architectural decisions and correctness invariants; this
 guide owns concrete interfaces, formulas, evidence requirements, and developer
@@ -31,7 +31,7 @@ guarantees are combined. `AccuracyTarget` is the requirement; `ResultGuarantee`
 is the evidence produced for one concrete candidate.
 
 The design document's
-[end-to-end example](end-to-end-accuracy-guarantees.md#end-to-end-example)
+[end-to-end example](../design_docs/proposals/asap-aware-mapping/end-to-end-accuracy-guarantees.md#end-to-end-example)
 is the canonical numeric walkthrough from allocation through legality
 checking.
 
@@ -231,7 +231,7 @@ with probability at most `1/3`. Zero or even depth has no modeled guarantee.
 
 ASAPPlanner contains the guarantee algebra and parameter-derived contracts.
 It imports pinned `asap_sketchlib` DDSketch mapping bounds for ratio certification;
-see [DDSketch ratio certification](ddsketch-quantile-ratios.md). This dependency
+see [DDSketch ratio certification](../design_docs/proposals/asap-aware-mapping/ddsketch-quantile-ratios.md). This dependency
 does not make Planner a query executor. Data- or runtime-dependent evidence enters
 through an `AccuracyEvidenceProvider`, is exposed to propagation as typed
 `PropagationStats`, and is recorded in provenance. `NoAccuracyEvidence` is the

@@ -50,6 +50,6 @@ summary family supports incremental maintenance.
 A `SummaryNode` carries its expression, schema and optional result guarantee.
 State and query values have different contracts. Exact operations over
 approximate readouts still require composed accuracy guarantees. See the
-[accuracy implementation companion](../proposals/asap-aware-mapping/end-to-end-accuracy-guarantees-developer-guide.md)
+[accuracy implementation companion](../../develop_docs/end-to-end-accuracy-guarantees.md)
 and [physical-plan integration](../architecture/physical-plan-integration.md)
 for the corresponding correctness and realization requirements.

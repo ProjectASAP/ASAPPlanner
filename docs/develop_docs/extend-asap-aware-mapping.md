@@ -791,7 +791,7 @@ composition rules. Supply typed evidence and budget allocation where required.
 Missing or insufficient proof must keep the candidate ineligible before cost
 ranking; preserve exact fallback and structured rejection information.
 
-See the [accuracy implementation companion](../design_docs/proposals/asap-aware-mapping/end-to-end-accuracy-guarantees-developer-guide.md)
+See the [accuracy implementation companion](end-to-end-accuracy-guarantees.md)
 for formulas and evidence requirements. For a new algorithm, also update its
 parameter, readout, schema and serialization definitions in `asap-types`.
 
