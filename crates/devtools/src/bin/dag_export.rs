@@ -18,6 +18,10 @@
 //   cargo run -p asap-lower --bin dag_export -- \
 //       --epsilon 0.01 --sql "SELECT quantile(0.99, latency) FROM metrics" --name p99
 //
+// `--post-asap` needs one of two cost sources to rank with, and does
+// nothing without either (see `--default-cost` and `--planner-cost-json`
+// below).
+//
 // `--post-asap` is optional and off by default. When passed, this binary
 // additionally runs `asap_aware_mapping::replacement::search_workload` (this
 // binary took no strategies of its own — `default_strategies()` already
@@ -46,8 +50,26 @@
 // `post_graph` is `None`, both skipped from the JSON entirely in that
 // case). E.g.:
 //   cargo run -p asap-lower --bin dag_export -- \
-//       --post-asap --epsilon 0.01 \
+//       --post-asap --default-cost --epsilon 0.01 \
 //       --sql "SELECT quantile(0.95, latency) FROM metrics" --name q1
+//
+// `--default-cost` and `--planner-cost-json` are the two mutually exclusive
+// ways to give `--post-asap` a cost model, and they differ in what the
+// export is allowed to claim:
+//
+//   - `--planner-cost-json <doc>` supplies complete deployment-owned
+//     physical-plan evidence. It both ranks the candidates and is exported:
+//     every decision carries a calibrated `CostUnits` annotation.
+//   - `--default-cost` ranks with `asap_aware_mapping::cost_model::
+//     DefaultCostModel` — structural node counts, owning no deployment
+//     evidence. The structure of the result is real (which replacements the
+//     search found, which one won per group, what the merged post-ASAP DAG
+//     looks like); the numbers are not exported at all. Every decision's
+//     cost is `CostSource::Unavailable` with `value: None`, which the viewer
+//     renders as "Not estimated". Use it to see what ASAPPlanner does with a
+//     workload before there is a deployment to measure.
+//
+// Absent both, `--post-asap` exports the raw plan only.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -58,7 +80,6 @@ use asap_aware_mapping::analytical_cost::{
     cache_hit_ratios, AnalyticalCostError, EvidenceBackedPhysicalDag as PhysicalDag,
     PhysicalNodeEvidence, ResourceCalibration, ANALYTICAL_COST_MODEL_VERSION,
 };
-#[cfg(test)]
 use asap_aware_mapping::cost_model::DefaultCostModel;
 use asap_aware_mapping::cost_model::{Cost, CostModel};
 use asap_aware_mapping::physical_operator_statistics::ComparisonScope;
@@ -765,6 +786,11 @@ struct ParsedArgs {
     progress: bool,
     table_schemas: Vec<String>,
     planner_cost: Option<PlannerCostDocument>,
+    /// `--default-cost`: rank the `--post-asap` search with
+    /// [`DefaultCostModel`] and export no cost at all. Mutually exclusive
+    /// with `planner_cost`, which both ranks *and* is exported — see this
+    /// file's top-of-file usage doc for why the two can't be combined.
+    default_cost: bool,
     topk_margin: Option<TopKMarginEvidence>,
 }
 
@@ -814,6 +840,10 @@ impl AccuracyEvidenceProvider for TopKMarginEvidence {
 }
 
 fn parse_args() -> ParsedArgs {
+    parse_args_from(std::env::args().skip(1))
+}
+
+fn parse_args_from(argv: impl Iterator<Item = String>) -> ParsedArgs {
     let mut entries: Vec<(String, Lang, String)> = Vec::new();
     let mut pending: Option<(Lang, String)> = None;
     let mut accuracy = AccuracyTarget::Exact;
@@ -821,8 +851,9 @@ fn parse_args() -> ParsedArgs {
     let mut progress = false;
     let mut table_schemas = Vec::new();
     let mut planner_cost_json = None;
+    let mut default_cost = false;
     let mut topk_margin_json = None;
-    let mut args = std::env::args().skip(1);
+    let mut args = argv;
 
     fn flush(entries: &mut Vec<(String, Lang, String)>, pending: &mut Option<(Lang, String)>) {
         if let Some((lang, query)) = pending.take() {
@@ -871,6 +902,9 @@ fn parse_args() -> ParsedArgs {
                         .expect("planner cost evidence requires a JSON document"),
                 );
             }
+            "--default-cost" => {
+                default_cost = true;
+            }
             "--topk-margin-json" => {
                 topk_margin_json = Some(
                     args.next()
@@ -881,6 +915,17 @@ fn parse_args() -> ParsedArgs {
         }
     }
     flush(&mut entries, &mut pending);
+    // Rejected rather than given a precedence order: the two flags disagree
+    // about what the export may claim, not just about which model ranks, so
+    // silently preferring one would make the exported costs depend on an
+    // argument order the caller never stated.
+    if default_cost && planner_cost_json.is_some() {
+        panic!(
+            "--default-cost and --planner-cost-json are mutually exclusive: --default-cost ranks \
+             with structural node counts and exports no cost, --planner-cost-json exports \
+             deployment-owned costs"
+        );
+    }
     let planner_cost = planner_cost_json
         .map(|raw| parse_planner_cost_document(&raw).unwrap_or_else(|error| panic!("{error}")));
     let topk_margin = topk_margin_json.map(|raw| {
@@ -898,6 +943,7 @@ fn parse_args() -> ParsedArgs {
         progress,
         table_schemas,
         planner_cost,
+        default_cost,
         topk_margin,
     }
 }
@@ -1420,13 +1466,14 @@ async fn main() {
         progress,
         table_schemas,
         planner_cost,
+        default_cost,
         topk_margin,
     } = parse_args();
     let sql_catalog = catalog(&table_schemas);
     let planner_started = Instant::now();
     if entries.is_empty() {
         eprintln!(
-            "usage: dag_export --sql \"<query>\" [--name <label>] [--epsilon <f64>] [--post-asap] ..."
+            "usage: dag_export --sql \"<query>\" [--name <label>] [--epsilon <f64>] [--post-asap [--default-cost | --planner-cost-json <doc>]] ..."
         );
         std::process::exit(1);
     }
@@ -1498,6 +1545,9 @@ async fn main() {
     }
 
     if post_asap {
+        let accuracy_evidence = topk_margin
+            .as_ref()
+            .map(|evidence| evidence as &dyn AccuracyEvidenceProvider);
         let results = if let Some(document) = planner_cost.as_ref() {
             let model = ExportPlannerCostModel { document };
             run_post_asap_with_progress(
@@ -1505,13 +1555,30 @@ async fn main() {
                 progress,
                 &model,
                 Some(&model),
-                topk_margin
-                    .as_ref()
-                    .map(|evidence| evidence as &dyn AccuracyEvidenceProvider),
+                accuracy_evidence,
+            )
+        } else if default_cost {
+            // Ranks with structural node counts, exports no cost:
+            // `export_model: None` makes every decision's annotations
+            // `winner_cost_annotations()` — `CostSource::Unavailable`,
+            // `value: None`. `DefaultCostModel`'s number decides which
+            // candidate wins and is then discarded, never serialized, so
+            // the export claims a decision but no cost for it.
+            //
+            // `--topk-margin-json` still applies: it is accuracy evidence,
+            // orthogonal to which cost model ranks.
+            run_post_asap_with_progress(
+                &lowered_queries,
+                progress,
+                &DefaultCostModel,
+                None,
+                accuracy_evidence,
             )
         } else {
             eprintln!(
-                "dag_export: --post-asap requires complete deployment-owned physical-plan evidence; exporting the raw plan only"
+                "dag_export: --post-asap needs a cost model; pass --planner-cost-json for \
+                 deployment-owned costs, or --default-cost to rank structurally and export \
+                 the decisions without costs. Exporting the raw plan only"
             );
             raw_only_post_asap_results()
         };
@@ -2606,6 +2673,63 @@ mod tests {
         assert!(results.post_graphs.is_empty());
     }
 
+    fn argv(args: &[&str]) -> impl Iterator<Item = String> {
+        args.iter()
+            .map(|arg| arg.to_string())
+            .collect::<Vec<_>>()
+            .into_iter()
+    }
+
+    /// `--default-cost` is a cost *source* for `--post-asap`, not a second
+    /// way to spell the evidence document: it parses on its own and leaves
+    /// `planner_cost` empty, which is what keeps every exported cost
+    /// `Unavailable`.
+    #[test]
+    fn default_cost_parses_as_a_standalone_post_asap_cost_source() {
+        let parsed = parse_args_from(argv(&[
+            "--post-asap",
+            "--default-cost",
+            "--sql",
+            "SELECT COUNT(*) FROM metrics",
+            "--name",
+            "q1",
+        ]));
+        assert!(parsed.post_asap);
+        assert!(parsed.default_cost);
+        assert!(parsed.planner_cost.is_none());
+        assert_eq!(parsed.entries.len(), 1);
+    }
+
+    /// Absent the flag, nothing changes: `--post-asap` alone still reaches
+    /// `main`'s raw-only branch.
+    #[test]
+    fn default_cost_is_off_unless_asked_for() {
+        let parsed = parse_args_from(argv(&["--post-asap", "--sql", "SELECT 1", "--name", "q1"]));
+        assert!(!parsed.default_cost);
+        assert!(parsed.planner_cost.is_none());
+    }
+
+    #[test]
+    #[should_panic(expected = "mutually exclusive")]
+    fn default_cost_and_planner_cost_evidence_cannot_be_combined() {
+        parse_args_from(argv(&[
+            "--post-asap",
+            "--default-cost",
+            "--planner-cost-json",
+            r#"{"evidence_version":"v1","calibration":{},"targets":[]}"#,
+        ]));
+    }
+
+    /// The rejection is on the flag pair itself, not on the document
+    /// parsing: an unparseable document paired with `--default-cost` must
+    /// still report the conflict rather than a JSON error, so the caller is
+    /// told which argument to drop.
+    #[test]
+    #[should_panic(expected = "mutually exclusive")]
+    fn the_flag_conflict_is_reported_before_the_document_is_parsed() {
+        parse_args_from(argv(&["--default-cost", "--planner-cost-json", "not json"]));
+    }
+
     #[test]
     fn compact_analytical_payload_has_an_explicit_migration_error() {
         let error = parse_planner_cost_document(r#"{"inputs":{"group_count":10}}"#)
@@ -2941,6 +3065,68 @@ mod tests {
     /// alternative strategy of its own, so its *only* candidate is
     /// `keep_pre_asap`'s conservative fallback: `Replacement::Summary`
     /// wrapping the *entire target* as `SummaryExpr::KeepPreAsap`).
+    /// The `--default-cost` contract, end to end on the code path `main`
+    /// takes for it (`DefaultCostModel` ranking, `export_model: None`): the
+    /// structure must be real — replacements found, a merged `post_graph`
+    /// per query — while every cost stays `Unavailable` with no value, so
+    /// the viewer shows "Not estimated" and the structural ranking number
+    /// never escapes as if it were a measured cost.
+    #[tokio::test]
+    async fn default_cost_exports_real_structure_and_no_costs() {
+        let cat = default_catalog();
+        let query = lower_sql(
+            "SELECT service, AVG(latency) FROM metrics GROUP BY service",
+            &cat,
+            AccuracyTarget::Epsilon(0.01),
+        )
+        .await
+        .unwrap();
+        let lowered = vec![(
+            "q1".to_string(),
+            "SELECT service, AVG(latency) FROM metrics GROUP BY service".to_string(),
+            query,
+        )];
+
+        let results = run_post_asap(&lowered);
+
+        assert!(
+            !results.replacements.is_empty(),
+            "the search itself must still run under --default-cost"
+        );
+        assert!(results
+            .post_graphs
+            .iter()
+            .all(|(_, graph)| !graph.nodes.is_empty()));
+
+        for (_, replacement) in &results.replacements {
+            for annotation in [
+                replacement.baseline_cost.as_ref(),
+                replacement.selected_cost.as_ref(),
+                replacement.benefit.as_ref(),
+            ] {
+                let annotation = annotation.expect("every replacement carries all three costs");
+                assert!(
+                    annotation.value.is_none(),
+                    "--default-cost must not export a value: {annotation:?}"
+                );
+                assert_eq!(annotation.source, CostSource::Unavailable);
+            }
+            assert!(
+                replacement.cost.is_nan(),
+                "the legacy scalar must stay unusable, not fall back to a structural count"
+            );
+        }
+
+        // Absent a value, the per-query aggregation `main` runs degrades to
+        // an unavailable summary rather than a number or an error.
+        for (_, graph) in &results.post_graphs {
+            for (_, baseline, selected) in decision_cost_entries(graph) {
+                assert_eq!(baseline.source, CostSource::Unavailable);
+                assert_eq!(selected.source, CostSource::Unavailable);
+            }
+        }
+    }
+
     /// `run_post_asap` must not treat that as a real winner: splicing it
     /// into `export_post_asap` would recurse forever, since `find_winner`
     /// re-checks every node inside a spliced `KeepPreAsap` payload by
