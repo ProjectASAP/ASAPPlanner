@@ -1,6 +1,6 @@
 # Design: End-to-End Accuracy Guarantees
 
-> Status: proposal. The [developer reference](../../../develop_docs/end-to-end-accuracy-guarantees.md) describes current implementation contracts.
+> Status: proposal. The [developer reference](end-to-end-accuracy-guarantees-developer-guide.md) describes current implementation contracts.
 
 ## Audience and context
 
@@ -12,7 +12,7 @@ model, not its scope boundary.
 
 Implementation contracts, sketch formulas, extension steps, and validation
 commands live in the
-[developer guide](../../../develop_docs/end-to-end-accuracy-guarantees.md). This
+[developer guide](end-to-end-accuracy-guarantees-developer-guide.md). This
 document is the authority for architectural decisions and correctness
 invariants; the developer guide is the authority for implementing them.
 
@@ -305,7 +305,7 @@ Hydra must include both its inner error and shared-grid collision error.
 
 The concrete interfaces, formulas, evidence fields, and extension procedure
 are defined in the
-[developer guide](../../../develop_docs/end-to-end-accuracy-guarantees.md).
+[developer guide](end-to-end-accuracy-guarantees-developer-guide.md).
 
 ### Parameter-configuration modes
 
@@ -497,7 +497,7 @@ Tests must cover every registered local contract and composition rule, their
 invalid and unknown boundaries, target checking after parameter clamps,
 rejection before cost ranking, and exported guarantee or rejection data. The
 detailed test matrix and repository validation commands are maintained in the
-[developer guide](../../../develop_docs/end-to-end-accuracy-guarantees.md#validation).
+[developer guide](end-to-end-accuracy-guarantees-developer-guide.md#validation).
 
 ## Risks, rollout, and exit criteria
 
