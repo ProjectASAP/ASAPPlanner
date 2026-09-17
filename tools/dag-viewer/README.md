@@ -6,6 +6,11 @@ The viewer has one visualization mode: **Pre/Post-ASAP**.
 - Select multiple queries to see two workload-union DAGs: one pre-ASAP union
   and one post-ASAP union. Nodes with the same exporter-assigned workload
   identity are collapsed while query roots and ownership are retained.
+- The **All** checkbox left of the query strip selects or deselects every
+  query at once, and shows an indeterminate state while only some are
+  selected. It changes the selection only; **Clear all** in the header is a
+  different operation and discards the loaded workload itself.
+- Drag anywhere on the canvas to pan, including on a lane's own background.
 - Pre-ASAP nodes show only their original IR content.
 - Post-ASAP nodes show their translated IR content and the explicit planner
   decision carried by that node.
