@@ -1173,12 +1173,12 @@ available, that candidate is unavailable rather than costed as in-memory.
 
 The physical-plan adapter can also estimate explicitly evidenced disk/object
 request counts using the optional storage profile. See
-[storage operation estimates](../../reference/storage-operation-costs.md)
+[storage operation estimates](../../../develop_docs/storage-operation-costs.md)
 for units, formulas, evidence requirements, and calibration.
 
 The physical-plan adapter supports explicit network and materialization
 boundaries through optional deployment evidence. See
-[physical boundary estimates](../../reference/physical-boundary-costs.md)
+[physical boundary estimates](../../../develop_docs/physical-boundary-costs.md)
 for kinds, execution multiplicity, evidence, and calibration.
 
 An estimate is unavailable when required evidence, a physical formula, or a

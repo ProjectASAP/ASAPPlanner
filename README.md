@@ -4,10 +4,10 @@ ASAPPlanner turns SQL, PromQL, and MetricsQL query workloads into legal candidat
 
 ## Start here
 
-- New to the repository? Read the [planner pipeline](docs/concepts/planner-pipeline.md), then the [glossary](docs/concepts/glossary.md).
-- Want to run a query? Follow [Run and inspect a query](docs/guides/run-a-query.md).
-- Extending Planner? Start with the [ASAP-aware mapping architecture](docs/architecture/asap-aware-mapping-implementation.md), then [extend ASAP-aware mapping](docs/guides/extend-asap-aware-mapping.md).
-- Evaluating a design? Browse the [architecture](docs/architecture/README.md), [decisions](docs/decisions/README.md), and [proposals](docs/proposals/README.md).
+- New to the repository? Read the [planner pipeline](docs/design_docs/concepts/planner-pipeline.md), then the [glossary](docs/design_docs/concepts/glossary.md).
+- Want to run a query? Follow [Run and inspect a query](docs/user_guide_docs/run-a-query.md).
+- Extending Planner? Start with the [ASAP-aware mapping architecture](docs/develop_docs/asap-aware-mapping-architecture.md), then [extend ASAP-aware mapping](docs/develop_docs/extend-asap-aware-mapping.md).
+- Evaluating a design? Browse the [design documentation](docs/design_docs/README.md), [developer documentation](docs/develop_docs/README.md), and [user guides](docs/user_guide_docs/README.md).
 
 The [documentation map](docs/README.md) gives each audience a complete reading path.
 

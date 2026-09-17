@@ -2,7 +2,7 @@
 
 Pre-ASAP IR is ASAPPlanner's exact, language-independent representation of query intent. It deliberately contains no summary or sketch choice. Equivalent SQL, PromQL, and future-language queries should produce the same intent shape when they mean the same thing.
 
-Only semantics that affect correctness, summary applicability, or cost become first-class nodes. For field definitions, invariants, and examples, use the [Pre-ASAP IR reference](../reference/pre-asap-ir.md).
+Only semantics that affect correctness, summary applicability, or cost become first-class nodes. For field definitions, invariants, and examples, use the [Pre-ASAP IR reference](../../develop_docs/pre-asap-ir.md).
 
 ## Node catalog
 

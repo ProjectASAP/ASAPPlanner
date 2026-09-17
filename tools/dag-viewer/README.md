@@ -140,7 +140,7 @@ identifies the immutable catalog/runtime generation. A missing `value`
 planner export keeps CPU operations, peak memory, scan bytes, coefficients,
 and workload statistics in `inputs`. Without complete physical evidence, the
 annotation is `Unavailable`; structural node counts are never substituted.
-See the [analytical model design](../../docs/proposals/asap-aware-mapping/analytical-resource-cost.md).
+See the [analytical model design](../../docs/design_docs/proposals/asap-aware-mapping/analytical-resource-cost.md).
 
 The checked-in viewer fixture makes its illustrative comparison reproducible.
 It models 100 evaluations of 100 million 64-byte rows with 100,000 groups.

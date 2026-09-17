@@ -8,17 +8,17 @@ one logical operation—not a selected workload plan or a deployed executable.
 Read it to understand how strategies, implementations, and costing interact.
 
 For procedural work—adding a `ReplacementStrategy`, changing a `CostModel`, or
-writing the expected tests—use [Extend ASAP-aware mapping](../guides/extend-asap-aware-mapping.md).
+writing the expected tests—use [Extend ASAP-aware mapping](extend-asap-aware-mapping.md).
 
 For the higher-level motivation and replacement-plan-search design, see the
-[ASAP-aware mapping overview](asap-aware-mapping.md). Current interfaces are
-defined in [mapping contracts](../reference/asap-aware-mapping-contracts.md).
+[ASAP-aware mapping overview](../design_docs/architecture/asap-aware-mapping.md). Current interfaces are
+defined in [mapping contracts](asap-aware-mapping-contracts.md).
 
 Names such as `MyStrategy`, `MyCostModel`, and `PreferDDSketch` are
 illustrative; they do not ship with this crate. Samples that use real public
 types and functions follow the APIs exported by `asap-aware-mapping`.
 
-If you only need to find the right extension point, start with the [extension map](../guides/extend-asap-aware-mapping.md#7-current-extension-map). If you are implementing a strategy, read this mental model, the [mapping contracts](../reference/asap-aware-mapping-contracts.md), and the [extension guide](../guides/extend-asap-aware-mapping.md).
+If you only need to find the right extension point, start with the [extension map](extend-asap-aware-mapping.md#7-current-extension-map). If you are implementing a strategy, read this mental model, the [mapping contracts](asap-aware-mapping-contracts.md), and the [extension guide](extend-asap-aware-mapping.md).
 
 ---
 
@@ -43,7 +43,7 @@ A cost model should answer:
 
 > Given valid choices, which choices are preferable, and how should they be parameterized?
 
-Do not put cost-based pruning into a `ReplacementStrategy`. A strategy must enumerate every valid alternative, even when the default cost model clearly prefers one. See [Rule 2](../guides/extend-asap-aware-mapping.md#rule-2-enumerate-do-not-rank).
+Do not put cost-based pruning into a `ReplacementStrategy`. A strategy must enumerate every valid alternative, even when the default cost model clearly prefers one. See [Rule 2](extend-asap-aware-mapping.md#rule-2-enumerate-do-not-rank).
 
 ---
 

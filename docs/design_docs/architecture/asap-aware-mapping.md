@@ -106,7 +106,7 @@ The design is split into focused documents:
 - [Query workloads, data workloads, and summary lifecycle maintenance](../proposals/asap-aware-mapping/workload-demand-and-summary-lifecycle.md) separates
   query-workload properties from data-workload properties and defines ephemeral, prepared,
   shared, and continuously maintained summary-state alternatives.
-- [Explainability](../reference/replacement-explanations.md) describes how the planner reports available replacements
+- [Explainability](../../develop_docs/replacement-explanations.md) describes how the planner reports available replacements
   using the same candidate space it optimizes.
 
 ---

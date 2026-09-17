@@ -1,7 +1,7 @@
 # Extend ASAP-aware mapping
 
-Use this guide after reading the [mapping architecture](../architecture/asap-aware-mapping-implementation.md)
-and consulting the [mapping contracts](../reference/asap-aware-mapping-contracts.md).
+Use this guide after reading the [mapping architecture](asap-aware-mapping-architecture.md)
+and consulting the [mapping contracts](asap-aware-mapping-contracts.md).
 
 ## Add or change planner behavior
 

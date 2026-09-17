@@ -1,8 +1,8 @@
 # ASAP-Aware Mapping contracts
 
 This reference defines the current public concepts and interface contracts used
-by ASAP-aware mapping. Read the [architecture](../architecture/asap-aware-mapping-implementation.md)
-first; use the [extension guide](../guides/extend-asap-aware-mapping.md) when changing one.
+by ASAP-aware mapping. Read the [architecture](asap-aware-mapping-architecture.md)
+first; use the [extension guide](extend-asap-aware-mapping.md) when changing one.
 
 ## Interfaces and definitions
 

@@ -150,5 +150,5 @@ candidate set from downstream consumers.
 - [Physical-plan integration](physical-plan-integration.md)
 - [Analytical resource cost](../proposals/asap-aware-mapping/analytical-resource-cost.md)
 - [Searching over plans](asap-aware-plan-search.md)
-- [Explainability](../reference/replacement-explanations.md)
+- [Explainability](../../develop_docs/replacement-explanations.md)
 - [ASAPPlanner and downstream application boundaries](planner-downstream-boundary.md)

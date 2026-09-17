@@ -4,7 +4,7 @@ Use the `asap-devtools` commands to inspect query IR, export graphs, and inspect
 corpus coverage. These commands do not deploy or execute a physical plan.
 
 To develop an application using the Rust library, start with
-[Library API: definitions, options, and examples](../reference/library-api.md).
+[Library API: definitions, options, and examples](../develop_docs/library-api.md).
 That guide explains how to choose strategies and models, rank candidates, and
 work with lifecycle capabilities.
 
@@ -150,7 +150,7 @@ cargo run -p asap-devtools --example canonical_examples
 
 ## Library development and design
 
-- [Library API definitions and examples](../reference/library-api.md)
+- [Library API definitions and examples](../develop_docs/library-api.md)
 - [Design overview](../design_docs/README.md)
 - [Pre-ASAP IR reference](../design_docs/pre-asap-ir.md)
 - [Post-ASAP IR reference](../design_docs/post-asap-ir.md)
