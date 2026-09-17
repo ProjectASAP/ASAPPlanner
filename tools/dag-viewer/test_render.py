@@ -407,6 +407,35 @@ class ViewerCacheTests(unittest.TestCase):
                     expected,
                 )
 
+    def test_empty_render_resets_bulk_selection(self):
+        """Initial load and Clear all hide and reset the bulk checkbox."""
+        source = (HERE / "viewer.js").read_text()
+        self.js.eval("""
+            function element() {
+                return {style: {}, classList: {remove() {}, toggle() {}}};
+            }
+            let queries = [], participants = new Set(), cy = null;
+            const tabsEl = element(), scopePickerEl = element(),
+                emptyEl = element(), cyOuterEl = element(),
+                sidepanel = element(), sideResizeHandle = element(),
+                selectAllTab = element(), selectAllToggle = element();
+        """)
+        for name in ["render", "renderTabs"]:
+            function = re.search(r"^function " + name + r"\(.*?^}", source, re.M | re.S)
+            self.assertIsNotNone(function, name)
+            self.js.eval(function.group(0))
+        for checked, indeterminate in [(False, False), (True, False), (False, True)]:
+            with self.subTest(checked=checked, indeterminate=indeterminate):
+                self.js.eval(f"""
+                    selectAllTab.hidden = false;
+                    selectAllToggle.checked = {json.dumps(checked)};
+                    selectAllToggle.indeterminate = {json.dumps(indeterminate)};
+                    render();
+                """)
+                self.assertTrue(self.js.eval("selectAllTab.hidden"))
+                self.assertFalse(self.js.eval("selectAllToggle.checked"))
+                self.assertFalse(self.js.eval("selectAllToggle.indeterminate"))
+
     def test_cache_profile_and_inputs_are_rendered(self):
         """The sidebar exposes the assumptions behind a cache-adjusted cost."""
         annotation = self.query("warm-cache-v1")["post_graph"]["nodes"][0]["decision"]["baseline_cost"]

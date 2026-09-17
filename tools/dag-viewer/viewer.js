@@ -174,8 +174,8 @@ function getParticipants() {
 }
 
 function render() {
+  renderTabs();
   if (queries.length === 0) {
-    tabsEl.innerHTML = '';
     scopePickerEl.classList.remove('visible');
     emptyEl.style.display = 'flex';
     cyOuterEl.style.display = 'none';
@@ -188,8 +188,6 @@ function render() {
   cyOuterEl.style.display = 'block';
   sidepanel.style.display = 'block';
   sideResizeHandle.style.display = 'block';
-
-  renderTabs();
 
   renderPrePostAsap();
   renderLegend();
