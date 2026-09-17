@@ -266,13 +266,33 @@ Module-qualified paths below are relative to `asap_aware_mapping`.
 | Parameter | Available value / constructor | Meaning |
 | --- | --- | --- |
 | `&dyn CostModel` | `DefaultCostModel` | Built-in ordering/sizing and structural estimates; no measured deployment guarantee |
-| `&dyn CostModel` | `empirical_cost::EmpiricalCostModel::new(provider)` | Uses supplied empirical evidence; does not invent missing measurements |
-| `&dyn CostModel` | `physical_plan_cost_model::PhysicalPlanCostModel::new(&provider, calibration)?` | Costs physical alternatives supplied by a downstream provider; requires valid resource calibration/evidence |
+| `&dyn CostModel` | `empirical_cost::EmpiricalCostModel::new(provider)` | Offline sketch-benchmark model: ranks algorithms using matching offline measurements and supplies partial lifecycle costs |
+| `&dyn CostModel` | `physical_plan_cost_model::PhysicalPlanCostModel::new(&provider, calibration)?` | Deployment-specific physical-plan model: compares complete physical alternatives using provider evidence and resource calibration; evidence may be offline or online |
 | `&dyn AccuracyModel` | `DefaultAccuracyModel` | Built-in guarantee rules and satisfaction checks |
 | `&dyn AccuracyBudgetAllocator` | `EqualSplitAllocator` | Built-in allocation of composition accuracy budgets |
 | `&dyn AccuracyEvidenceProvider` | `NoAccuracyEvidence` | No extra planning-time statistics; evidence-dependent claims remain unavailable |
 | `&dyn AccuracyEvidenceProvider` | `WorkloadAccuracyEvidence { data: &data, now_ms }` | Uses fresh data-workload evidence at the planning time |
 | Any provider trait above | Your implementation | Supplies alternative models/evidence under the same contracts |
+
+### Offline measurements versus physical-plan costing
+
+These models differ in scope, not simply in whether they are offline or online.
+
+| Model | Evidence and comparison | Missing evidence / limits |
+| --- | --- | --- |
+| `EmpiricalCostModel` | Offline sketch benchmarks matched to exact parameters, distribution, environment and validity interval; current algorithm ranking uses measured update CPU nanoseconds | If the measurements required for ranking are incomplete, preserves the incoming algorithm order. Supplies partial build/update lifecycle costs; `estimate_cost()` still uses `DefaultCostModel` structural scores |
+| `PhysicalPlanCostModel` | A downstream provider supplies a consistent evidence snapshot and complete physical alternatives; calibration converts modeled resource quantities into comparable costs | A candidate with incomplete evidence is unavailable, without structural-cost fallback. Current candidate admission also requires it to cost less than the raw alternative |
+
+`PhysicalPlanCostModel` does not collect online telemetry itself. Its provider
+may supply offline estimates/calibration or evidence derived from online
+observations. Therefore, “offline sketch-benchmark model” and “physical-plan cost
+model” describe their roles more accurately than “offline model” and “online model.”
+
+For example, a sketch with the lowest measured update cost can rank first under
+`EmpiricalCostModel`, while its complete execution plan can still cost more than
+another sketch or raw execution under `PhysicalPlanCostModel`. Offline error
+measurements alone do not authorize smaller sketch parameters or replace formal
+accuracy guarantees.
 
 ### Example: configure all sketch-strategy providers
 
