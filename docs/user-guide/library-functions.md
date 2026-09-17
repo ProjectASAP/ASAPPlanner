@@ -2,12 +2,24 @@
 
 Audience: developers embedding ASAPPlanner or adding strategies/models. This is
 a compact reference for the public workflow APIs at revision `e7fdb24`, not an
-exhaustive symbol reference. The [user guide](user-guide.md) explains which exit
-point to choose; the [design overview](../design_docs/README.md) defines ownership.
+exhaustive symbol reference. The [CLI guide](user-guide.md) covers command-line inspection; the [design overview](../design_docs/README.md) defines ownership.
 
 ASAPPlanner's primary output is `PlanSpace` plus ranked legal candidates.
 Downstream owns physical binding and commitment. Selection/materialization helpers
 do not deploy a plan, and a serializable DAG is not evidence of runtime readiness.
+
+## Choose a library workflow
+
+| Desired result | Calls | Example |
+| --- | --- | --- |
+| Pre-ASAP IR | Frontend `lower_*` | [Lower a query](#lower-a-query-into-pre-asap-ir) |
+| All ranked candidates | `search_workload_with_targets` -> `cost_sorted` | [Generate and rank](#generate-and-rank-candidates) |
+| Custom optimization set | Construct `Vec<Box<dyn ReplacementStrategy>>`, then search | [Strategies and models](#choose-strategies-and-models) |
+| Lifecycle-aware comparison | Lifecycle-aware selection -> lifecycle materialization | [Lifecycle recipe](#lifecycle-and-capabilities) |
+| Selected semantic DAG / export | `global_selection` -> `materialize` -> export | [Selection example](#optional-whole-plan-selection-and-materialization) |
+
+Each recipe ends at a different artifact. Use only the stages needed for that
+artifact, while preserving the checks required by its intended consumer.
 
 ## Dependencies
 
@@ -39,7 +51,81 @@ not imply complete support. For mixed one-time/repeating workloads, use normaliz
 `QueryWorkload::entries()` and the appropriate single-query frontend, preserving
 entry-to-root associations for later workload-aware operations.
 
+### Definition and example
+
+PromQL's public signature (types are imported from their respective crates):
+
+```text
+lower_promql(query: &str, accuracy: AccuracyTarget)
+    -> Result<QueryExpr, PromqlError>
+```
+
+`query` and `accuracy` are required. These are the accuracy argument's choices:
+
+| Value | Meaning | Example |
+| --- | --- | --- |
+| `AccuracyTarget::Exact` | No approximation permitted | Exact aggregation/unchanged-query alternatives only |
+| `AccuracyTarget::Epsilon(e)` | An epsilon error requirement interpreted by the relevant accuracy rule | `Epsilon(0.01)` |
+| `AccuracyTarget::EpsilonDelta { epsilon, delta }` | Error requirement with a failure-probability bound | `{ epsilon: 0.01, delta: 0.05 }` |
+
+Epsilon does not mean the same error quantity for every statistic. Inspect the
+candidate's guarantee and its error metric; a target is a requirement, not proof
+that a supported candidate exists.
+
+```rust
+use asap_frontend_promql::lower_promql;
+use asap_types::types::AccuracyTarget;
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let pre_asap = lower_promql("sum(latency)", AccuracyTarget::Exact)?;
+    println!("{pre_asap:#?}");
+    Ok(())
+}
+```
+
+For SQL, the corresponding signatures are:
+
+```text
+async lower_sql(query: &str, catalog: &SqlCatalog, accuracy: AccuracyTarget)
+    -> Result<QueryExpr, SqlError>
+async lower_sql_dialect(query: &str, catalog: &SqlCatalog,
+    dialect: SqlDialect, accuracy: AccuracyTarget) -> Result<QueryExpr, SqlError>
+```
+
+| `SqlDialect` value | Current behavior |
+| --- | --- |
+| `DataFusionSQL` | Default of `lower_sql`; uses DataFusion's supported SQL |
+| `ClickhouseSQL` | Supported ClickHouse subset; not all ClickHouse functions |
+| `ElasticSQL` | Returns `UnsupportedDialect` |
+
+The catalog is required and describes your tables. For a complete schema-building
+example, see [the CLI frontend example](../../crates/devtools/src/bin/show_pre_asap_ir.rs).
+
 ## Generate and rank candidates
+
+### API definition
+
+```text
+search_workload_with_targets<'s, Id>(
+    roots: Vec<(Id, Rc<QueryExpr>, Option<AccuracyTarget>)>,
+    strategies: &[Box<dyn ReplacementStrategy + 's>],
+    accuracy_model: &dyn AccuracyModel,
+) -> PlanSpace<Id>
+
+PlanSpace::cost_sorted(&self, cost_model: &dyn CostModel)
+    -> Vec<RankedGroup<'_>>
+```
+
+| Argument | Choices / meaning | Required? |
+| --- | --- | --- |
+| `roots` | One tuple per query: caller ID, canonical IR, and root target | Yes |
+| Root target | `Some(AccuracyTarget::…)` applies an explicit end-to-end requirement; `None` adds no explicit root target | Tuple field required; value optional |
+| `strategies` | Default factory output or an explicit strategy vector; see option tables below | Yes; even an empty vector does not disable automatic workload strategies |
+| `accuracy_model` | `DefaultAccuracyModel` or a custom `AccuracyModel` implementation | Yes |
+| Ranking `cost_model` | `DefaultCostModel` or an evidence-backed/custom `CostModel` | Yes |
+
+### Example
+
 
 The following complete Rust example lowers one query, supplies an explicit root
 accuracy target, and prints every ranked candidate instead of selecting a winner.
@@ -90,29 +176,141 @@ before physical selection; do not treat their presence as deployment permission.
 
 ## Choose strategies and models
 
-`default_strategies()` creates the built-in set. `default_strategies_with(model)`
-constructs a model-aware set; the sets are not guaranteed to be identical apart
-from their cost model (the current rewrite strategy differs). For exact control
-over the supplied context-free strategies, construct a slice explicitly:
+### Strategy options
+
+The `strategies` argument takes Rust objects implementing `ReplacementStrategy`,
+not string names or a closed enum. These built-in context-free choices can be
+combined in one vector; each proposes candidates where its applicability checks
+pass. An omitted strategy contributes no proposals of its own.
+
+| Value to put inside `Box::new(...)` | Meaning | In default factories? |
+| --- | --- | --- |
+| `SketchAlgorithmStrategy::new(&model)` | Enumerates supported exact/sketch implementations and parameter choices for aggregate targets | Yes |
+| `HydraGroupingStrategy::new(&model)` | Considers a shared multi-subpopulation structure for supported grouped sketch families, subject to accuracy evidence | Yes |
+| `SharedSubtreeStrategy` | Proposes sharing versus independent recomputation at reused subtrees | Yes |
+| `SemanticEquivalentRewriteStrategy` | Proposes supported equivalent aggregate rewrites, including decomposing average into sum/count | Yes |
+| `ExactCompositionStrategy::new(&model)` | Proposes supported exact operations around summary readouts or in maintenance | Yes |
+| Your `ReplacementStrategy` implementation | Adds domain-specific legal replacement proposals | No |
+
+`AvgToSumOverCountStrategy` is an alias for `SemanticEquivalentRewriteStrategy`
+at this revision; it is not a separate narrow rewrite to enable alongside it.
+
+The following are derived automatically from the workload by `search_workload*`:
+
+| Automatic behavior | Meaning | Can the strategy vector disable it? |
+| --- | --- | --- |
+| Canonical sharing/CSE | Interns structurally equal input subexpressions | No |
+| `RollupStrategy` | Proposes compatible reuse across grouping granularities | No |
+| `AccuracyReconciliationStrategy` | Proposes compatible sharing across different accuracy requirements | No |
+| `TopKLimitReuseStrategy` | Proposes reuse among compatible top-k limits | No |
+
+The current API does not expose a universal enable/disable flag for every pass.
+For inspecting only one strategy at one target, use
+`ReplacementStrategy::replacements(&TargetSubDAG)`; this does not perform the
+whole-workload search. Selecting a strategy does not force its candidate to win.
+
+### Factory choices
+
+```text
+default_strategies() -> Vec<Box<dyn ReplacementStrategy>>
+default_strategies_with<'a>(cost_model: &'a dyn CostModel)
+    -> Vec<Box<dyn ReplacementStrategy + 'a>>
+replacement::default_strategies_with_evidence<'a>(
+    cost_model: &'a dyn CostModel, evidence: &'a dyn AccuracyEvidenceProvider,
+) -> Vec<Box<dyn ReplacementStrategy + 'a>>
+```
+
+| Factory | Use when | Models used |
+| --- | --- | --- |
+| `default_strategies()` | Exploring with built-in defaults | Built-in cost/accuracy/allocation defaults |
+| `default_strategies_with(&model)` | Supplying deployment-specific costing/sizing | Supplied cost model; default accuracy/allocation |
+| `default_strategies_with_evidence(&model, &evidence)` | Supplying planning-time accuracy evidence as well | Supplied cost and evidence; default accuracy/allocation |
+| Explicit vector | Controlling which context-free strategies are supplied | Models passed into each constructor |
+
+### Example: supply two strategies and run search
+
+```rust
+use std::rc::Rc;
+use asap_frontend_promql::lower_promql;
+use asap_aware_mapping::{
+    search_workload_with_targets, DefaultAccuracyModel, DefaultCostModel,
+    ReplacementStrategy, SketchAlgorithmStrategy, SharedSubtreeStrategy,
+};
+use asap_types::types::AccuracyTarget;
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let accuracy = AccuracyTarget::Epsilon(0.01);
+    let root = Rc::new(lower_promql("quantile(0.99, latency)", accuracy.clone())?);
+    let model = DefaultCostModel;
+    let strategies: Vec<Box<dyn ReplacementStrategy + '_>> = vec![
+        Box::new(SketchAlgorithmStrategy::new(&model)),
+        Box::new(SharedSubtreeStrategy),
+    ];
+    let space = search_workload_with_targets(
+        vec![("q1", root, Some(accuracy))], &strategies, &DefaultAccuracyModel,
+    );
+    println!("{:#?}", space.cost_sorted(&model));
+    Ok(())
+}
+```
+
+This omits Hydra and semantic/exact-composition strategies from the supplied
+vector. Automatic workload strategies still run. Omitting an optimization does
+not waive semantic or accuracy requirements.
+
+### Model and evidence options
+
+Traits permit custom implementations; the following are concrete built-in options.
+Module-qualified paths below are relative to `asap_aware_mapping`.
+
+| Parameter | Available value / constructor | Meaning |
+| --- | --- | --- |
+| `&dyn CostModel` | `DefaultCostModel` | Built-in ordering/sizing and structural estimates; no measured deployment guarantee |
+| `&dyn CostModel` | `empirical_cost::EmpiricalCostModel::new(provider)` | Uses supplied empirical evidence; does not invent missing measurements |
+| `&dyn CostModel` | `physical_plan_cost_model::PhysicalPlanCostModel::new(&provider, calibration)?` | Costs physical alternatives supplied by a downstream provider; requires valid resource calibration/evidence |
+| `&dyn AccuracyModel` | `DefaultAccuracyModel` | Built-in guarantee rules and satisfaction checks |
+| `&dyn AccuracyBudgetAllocator` | `EqualSplitAllocator` | Built-in allocation of composition accuracy budgets |
+| `&dyn AccuracyEvidenceProvider` | `NoAccuracyEvidence` | No extra planning-time statistics; evidence-dependent claims remain unavailable |
+| `&dyn AccuracyEvidenceProvider` | `WorkloadAccuracyEvidence { data: &data, now_ms }` | Uses fresh data-workload evidence at the planning time |
+| Any provider trait above | Your implementation | Supplies alternative models/evidence under the same contracts |
+
+### Example: configure all sketch-strategy providers
 
 ```rust
 use asap_aware_mapping::{
-    DefaultCostModel, ReplacementStrategy, SketchAlgorithmStrategy,
-    SharedSubtreeStrategy,
+    DefaultAccuracyModel, DefaultCostModel, EqualSplitAllocator,
+    NoAccuracyEvidence, ReplacementStrategy, SketchAlgorithmStrategy,
 };
-let model = DefaultCostModel;
-let strategies: Vec<Box<dyn ReplacementStrategy + '_>> = vec![
-    Box::new(SketchAlgorithmStrategy::new(&model)),
-    Box::new(SharedSubtreeStrategy),
-];
-// Pass &strategies to search_workload_with[_targets].
+
+fn main() {
+    let cost = DefaultCostModel;
+    let accuracy = DefaultAccuracyModel;
+    let allocation = EqualSplitAllocator;
+    let evidence = NoAccuracyEvidence;
+    let strategies: Vec<Box<dyn ReplacementStrategy + '_>> = vec![Box::new(
+        SketchAlgorithmStrategy::with_models_and_evidence(
+            &cost, &accuracy, &allocation, &evidence,
+        ),
+    )];
+    // Use &strategies and &accuracy in search_workload_with_targets.
+    println!("{} explicitly configured strategy", strategies.len());
+}
 ```
 
-This restricts supplied strategies; it is not a switch disabling all other search
-behavior. Workload search still performs canonical sharing/CSE and automatically
-derives workload-dependent rollup. There is currently no single public policy
-object that toggles every internal pass. Omitting a strategy may remove useful
-candidates but must not waive legality or accuracy requirements.
+Constructor definition:
+
+```text
+SketchAlgorithmStrategy::with_models_and_evidence(
+    cost_model: &dyn CostModel,
+    accuracy_model: &dyn AccuracyModel,
+    allocator: &dyn AccuracyBudgetAllocator,
+    evidence: &dyn AccuracyEvidenceProvider,
+) -> SketchAlgorithmStrategy
+```
+
+All provider arguments are required for this constructor. They must outlive the
+strategy vector. `SketchAlgorithmStrategy::new(&cost_model)` is the shorter
+constructor using default accuracy/allocation and no extra evidence.
 
 | Extension point | What it controls | What it cannot establish alone |
 | --- | --- | --- |
@@ -158,24 +356,97 @@ Two capabilities are distinct: the runtime can orchestrate a lifecycle, and the
 chosen summary representation supports the required state operations. Both must
 hold. Workload legality and known cost evidence can further restrict alternatives.
 
-For a runtime that can build fresh state for each invocation and retire it, but
-cannot prepare, retain for reuse, or incrementally maintain state:
+### API definition and options
 
-```rust
-use asap_aware_mapping::SummaryMaintenanceLifecycleCapabilities;
-let capabilities = SummaryMaintenanceLifecycleCapabilities {
-    supports_ephemeral: true,
-    supports_prepared: false,
-    supports_shared: false,
-    supports_continuously_maintained: false,
-};
+```text
+global_selection_with_summary_maintenance_lifecycles<'a, Id>(
+    space: &'a PlanSpace<Id>, workload: &QueryWorkload,
+    root_workload_entries: &[usize], now_ms: u64, horizon: Option<Horizon>,
+    capabilities: SummaryMaintenanceLifecycleCapabilities, cost_model: &dyn CostModel,
+) -> Result<GlobalSelection<'a>, SummaryMaintenanceLifecycleSelectionError>
+
+materialize_with_summary_maintenance_lifecycles(
+    selection: &GlobalSelection<'_>, target: &Rc<QueryExpr>,
+    demand: WorkloadDemand<'_>, now_ms: u64, horizon: Option<Horizon>,
+    capabilities: SummaryMaintenanceLifecycleCapabilities, cost_model: &dyn CostModel,
+) -> Result<Option<SummaryMaintenanceLifecyclePlan>, MaterializeSummaryMaintenanceLifecycleError>
 ```
 
-Pass this value to the lifecycle functions along with real demand and a model.
-It is meaningful input, not a dummy argument. Data-at-rest alone does not determine
-whether preparation or retained reuse is supported. A singleton legal alternative
-can be validated and recorded without a meaningful search; unknown cost inputs
-still prevent unsupported cost claims.
+| Argument | Values / requirements |
+| --- | --- |
+| `space`, `workload` | Actual candidate space and its workload; keep their root associations |
+| `root_workload_entries` | One normalized workload entry index for each `space.roots` entry |
+| `target` | A root from `space.roots`, after canonical sharing |
+| `demand` | `WorkloadDemand::new(&workload, &indices)` for the entries consuming that target |
+| `now_ms` | Actual planning time in Unix milliseconds for evidence freshness |
+| `horizon` | `Some(Horizon(seconds))` with positive finite seconds, or `None` when horizon-dependent comparisons are unavailable |
+| `capabilities` | Explicit Boolean fields below; several may be true |
+| `cost_model` | A model supplying required lifecycle and raw-comparison evidence; default structural estimates are not enough |
+
+| Capability field | `true` permits consideration of… | `false` means… |
+| --- | --- | --- |
+| `supports_ephemeral` | Fresh build per invocation, retired afterward | Exclude that lifecycle |
+| `supports_prepared` | Build before a predictable execution and retain until it | Exclude that lifecycle |
+| `supports_shared` | Retain state for multiple reads | Exclude that lifecycle |
+| `supports_continuously_maintained` | Keep state current as updates arrive | Exclude that lifecycle |
+
+All flags default to true; integrations should pass real support. Enabling a
+flag does not override workload, algorithm-operation or evidence checks.
+
+### Example: lifecycle-aware planning for a batch-only runtime
+
+This helper takes the real workload and cost provider from your application.
+It supports one searched root mapped to one workload entry, and returns a typed
+plan/error rather than making up costs. For a shared root consumed by several
+entries, construct demand using all applicable indices.
+
+```rust
+use asap_aware_mapping::{
+    global_selection_with_summary_maintenance_lifecycles,
+    materialize_with_summary_maintenance_lifecycles, CostModel, Horizon, PlanSpace,
+    SummaryMaintenanceLifecycleCapabilities, SummaryMaintenanceLifecyclePlan,
+    WorkloadDemand,
+};
+use asap_types::workload::QueryWorkload;
+
+fn plan_batch_root(
+    space: &PlanSpace<&str>,
+    workload: &QueryWorkload,
+    entry_index: usize,
+    now_ms: u64,
+    horizon: Option<Horizon>,
+    model: &dyn CostModel,
+) -> Result<Option<SummaryMaintenanceLifecyclePlan>, Box<dyn std::error::Error>> {
+    if space.roots.len() != 1 {
+        return Err("this example requires exactly one root".into());
+    }
+    let capabilities = SummaryMaintenanceLifecycleCapabilities {
+        supports_ephemeral: true,
+        supports_prepared: false,
+        supports_shared: false,
+        supports_continuously_maintained: false,
+    };
+    let indices = [entry_index];
+    let selection = global_selection_with_summary_maintenance_lifecycles(
+        space, workload, &indices, now_ms, horizon, capabilities, model,
+    )?;
+    let plan = materialize_with_summary_maintenance_lifecycles(
+        &selection, &space.roots[0].1, WorkloadDemand::new(workload, &indices),
+        now_ms, horizon, capabilities, model,
+    )?;
+    if let Some(plan) = &plan {
+        println!("raw_recompute={}, deployments={:#?}",
+            plan.selected_raw_recompute, plan.deployments);
+    }
+    Ok(plan)
+}
+```
+
+Use this helper with the `space` built by the search example and the corresponding
+workload/provider. No incremental lifecycle is permitted, but unknown evidence
+can still prevent choosing summary state. If only one legal alternative remains,
+recording it is a complete lifecycle decision. Data-at-rest alone does not imply
+that prepared or retained shared state is supported.
 
 | Function | Inputs | Output / promise |
 | --- | --- | --- |
@@ -206,6 +477,37 @@ when that target is absent. A downstream integration can use these convenience
 APIs when its supplied model/evidence supports the intended comparison. Neither
 plain structural selection nor taking each group's first candidate substitutes
 for checking complete physical alternatives and deployment constraints.
+
+### API definition and example
+
+```text
+PlanSpace::global_selection(&self, cost_model: &dyn CostModel) -> GlobalSelection<'_>
+GlobalSelection::materialize(&self, target: &Rc<QueryExpr>)
+    -> Result<Option<Rc<SummaryNode>>, ImplementError>
+```
+
+For structural inspection only, this complete example selects a semantic root
+and exports its inspection graph. It performs no lifecycle or deployment planning.
+Use lifecycle-aware selection above when the comparison needs those decisions.
+
+```rust
+use std::rc::Rc;
+use asap_frontend_promql::lower_promql;
+use asap_aware_mapping::{search_workload, DefaultCostModel};
+use asap_types::types::AccuracyTarget;
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let root = Rc::new(lower_promql("sum(latency)", AccuracyTarget::Exact)?);
+    let space = search_workload(vec![("q1", root)]);
+    let selection = space.global_selection(&DefaultCostModel);
+    // Search may canonicalize roots; use the root returned by PlanSpace.
+    if let Some(summary) = selection.materialize(&space.roots[0].1)? {
+        let graph = asap_types::dag_export::export_summary(&summary);
+        println!("{graph:#?}");
+    }
+    Ok(())
+}
+```
 
 ## Export and explain
 

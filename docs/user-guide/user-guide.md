@@ -1,99 +1,28 @@
-# ASAPPlanner user guide
+# ASAPPlanner CLI user guide
 
-ASAPPlanner is a reusable planning library. It translates queries into Pre-ASAP
-IR and produces legal, ranked, deployment-independent Post-ASAP candidates.
-Downstream systems bind those candidates to physical alternatives, make the
-final deployment decision, and execute it. This follows the
-[design overview](../design_docs/README.md).
+Use the `asap-devtools` commands to inspect query IR, export graphs, and inspect
+corpus coverage. These commands do not deploy or execute a physical plan.
 
-This guide is a short map of the current workflows, not a new unified API.
-Use the [public library functions guide](library-functions.md) for callable
-functions, inputs, defaults and output limitations.
+To develop an application using the Rust library, start with
+[Library API: definitions, options, and examples](library-functions.md).
+That guide explains how to choose strategies and models, rank candidates, and
+work with lifecycle capabilities.
 
-## Choose the output you need
+## Choose a command
 
-| I want to… | Entry point | Output / valid stopping point |
+Run from the repository root with Rust/Cargo installed. Cargo builds the selected
+tool on first use.
+
+| Command (`cargo run -p asap-devtools --bin … -- …`) | Input / options | Result |
 | --- | --- | --- |
-| Understand a query's meaning | SQL, PromQL or MetricsQL frontend | Canonical Pre-ASAP `QueryExpr`; no summary candidate search |
-| Explore optimizations | `search_workload` or an explicit-strategy variant | `PlanSpace` containing discovered candidate groups |
-| Compare alternatives | `PlanSpace::cost_sorted` | `RankedGroup`s with candidates and index-aligned costs; not one physical plan |
-| Account for repeated demand | Recurrence-aware ranking | Ranked choices using supplied demand and horizon; no implied incremental runtime support |
-| Evaluate summary-maintenance lifecycles | Lifecycle APIs with workload, capabilities and cost evidence | Lifecycle alternatives, commitments/rejections and available costs |
-| Assemble a compatible semantic choice | `global_selection*`, then materialization | Selected Post-ASAP DAG; optional convenience for downstream integration |
-| Inspect or export an artifact | Devtools or library export functions | A graph or versioned semantic document; serialization adds no deployment guarantee |
-
-These stopping points serve different purposes. You do not need lifecycle analysis
-just to parse a query or inspect candidates. If you intend to deploy state, its
-maintenance lifecycle must be resolved and supported before physical commitment.
-
-The primary handoff is **PlanSpace plus ranked candidates**. Do not take the first
-candidate in every group and assume those choices form a feasible whole-workload
-physical plan. A downstream provider can return complete physical evidence to
-Planner and use `global_selection*` as a whole-plan comparison convenience.
-Planner itself does not install or execute the result.
-
-## What can I control?
-
-| Control | Usually supplied by | Effect |
-| --- | --- | --- |
-| Query and source schema | Application user / frontend integration | Defines the computation and input types |
-| Accuracy requirement | Application user / explicit profile | Restricts legal approximation; cost cannot override it |
-| Query recurrence, predictability and time scope | Workload owner | Determines possible reuse and lifecycle demand |
-| Optimization strategies | Library integrator / strategy developer | Determines which replacement opportunities are explored |
-| Cost and accuracy models | Library integrator | Determines estimates, parameter sizing, guarantee checks and ordering at the stages receiving those models |
-| Data statistics and empirical evidence | Evidence provider | Enables comparisons or guarantees needing those facts |
-| Runtime capabilities | Downstream runtime integrator | Restricts executable lifecycle/state operations |
-| Planning horizon | Application policy / integrator | Makes relevant one-time and rate costs comparable |
-
-Choose strategies with `search_workload_with` or `search_workload_with_targets`.
-Construct them with the intended models: passing a new model only to final ranking
-does not redo earlier parameter sizing. The explicit strategy list is not a full
-pass toggle: current workload search performs canonical sharing/CSE and derives
-workload-dependent rollup automatically. See the library guide for this limitation.
-
-## Required inputs, defaults, and compromises
-
-Required inputs depend on the output you request. Frontend lowering needs query
-text and accuracy; SQL also needs a schema catalog. Candidate search can operate
-on canonical roots without a complete deployment workload. Lifecycle and physical
-cost comparisons require the corresponding demand, capabilities and evidence.
-
-| Omission or default | Meaning and compromise |
-| --- | --- |
-| `QueryRequirements::default()` | Exact accuracy, no response-latency bound; it does not grant permission to approximate |
-| Default search/cost model | Built-in strategies, sizing and structural preferences; not a measured deployment cost prediction |
-| Unknown data workload/evidence | No facts about arrival, distribution or rate are assumed; affected alternatives may be uncosted or unavailable |
-| No planning horizon | Horizon-dependent lifecycle alternatives are unselectable; no arbitrary amortization period is invented |
-| No empirical model/evidence | Only conclusions supported by the remaining models/evidence are available |
-| Default lifecycle capabilities | **All four lifecycle flags are enabled.** Pass actual runtime support explicitly; this is not capability detection |
-
-These are Rust API defaults. They do not mean every corresponding JSON/YAML field
-can be omitted. Nor does constructing requirements automatically apply them to a
-low-level API that never receives them: use the target-aware search path when
-supplying per-root end-to-end accuracy requirements.
-
-A runtime that only supports building fresh summary state from data at rest can
-restrict lifecycle support to ephemeral state. Planner excludes unsupported modes.
-If one legal lifecycle remains, validating and recording it is a complete decision.
-Repeated queries do not imply incremental maintenance. Prepared or shared state
-requires separate runtime support. See the [lifecycle recipe](library-functions.md#lifecycle-and-capabilities).
-
-## Which steps can I skip?
-
-- Stop after lowering when you need Pre-ASAP IR.
-- Stop after search/ranking when downstream needs alternatives.
-- Omit optional strategies or empirical evidence to narrow exploration; retain
-  all semantic and accuracy checks needed for your promised output.
-- Skip lifecycle *search* when only one supported choice exists, but still resolve
-  and validate its contract before deploying state. Current lifecycle functions
-  can do this with restricted capabilities; no dummy argument is needed.
-- Use `global_selection*` only when you want Planner's compatible-choice helper.
-  Downstream can instead consume ranked alternatives and own physical selection.
-- Export only when you need inspection, persistence or a process boundary.
-
-Calling `materialize()` constructs a selected semantic IR graph; it does not
-compute summary data. A later lifecycle pass on that fixed graph does not prove
-that it was the best lifecycle-aware choice among the original candidates.
+| `show_pre_asap_ir queries.txt` | File path, or stdin when omitted | Prints canonical Pre-ASAP IR |
+| `show_post_asap_ir queries.txt` | Same query file format | Prints a representative Post-ASAP binding using a fixed approximate target; not all ranked alternatives |
+| `dag_export --promql "<query>"` | One PromQL expression | Exports a query graph for inspection |
+| `dag_export --sql "<query>"` | One SQL expression using the tool's catalog | Exports a query graph for inspection |
+| `analyze_corpora --corpora --out-dir <dir>` | Repository PromQL corpora, output directory | Writes successful/error IR dumps and summary reports |
+| `analyze_corpora --sql-corpora --out-dir <dir>` | Repository SQL corpora, output directory | Writes SQL corpus reports |
+| `variant_coverage` | Repository corpora | Reports Pre-ASAP IR variant coverage |
+| `sketch_coverage --epsilon 0.01` | Repository corpora; epsilon defaults to `0.01` | Reports sketch/reuse opportunities among successfully lowered queries |
 
 ## Inspect a query from the command line
 
@@ -216,10 +145,9 @@ cargo run -p asap-devtools --example canonical_examples
 ```
 
 
-## Next steps
+## Library development and design
 
-- [Public library functions and recipes](library-functions.md)
-- [Design overview and Planner/downstream boundary](../design_docs/README.md)
-- [Pre-ASAP IR](../design_docs/pre-asap-ir.md)
-- [Post-ASAP IR](../design_docs/post-asap-ir.md)
-- [Workload demand and summary lifecycle](../design_docs/asap-aware-mapping/workload-demand-and-summary-lifecycle.md)
+- [Library API definitions and examples](library-functions.md)
+- [Design overview](../design_docs/README.md)
+- [Pre-ASAP IR reference](../design_docs/pre-asap-ir.md)
+- [Post-ASAP IR reference](../design_docs/post-asap-ir.md)
