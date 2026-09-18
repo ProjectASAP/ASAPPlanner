@@ -369,11 +369,13 @@ It is the recommended workflow for deployment decisions.
 
 ---
 
-## Replanning
+## Replanning (future support)
 
-Replanning uses the same interface as initial planning.
+> **Status: Future support.** ASAPPlanner does not currently define an
+> end-to-end replanning or deployment-transition contract.
 
-Run Planner again whenever a selection-relevant input changes, such as:
+The intended design will reuse the initial-planning input boundary. A caller
+would request replanning whenever a selection-relevant input changes, such as:
 
 * query semantics or accuracy requirements;
 * recurrence, horizon, data arrival, or distribution;
@@ -395,22 +397,10 @@ updated workload + evidence + capabilities
        downstream deployment transition
 ```
 
-Planner produces a new logical decision. The downstream system owns deployment diffing, migration, activation, and rollback.
-
----
-
-## Integration guidance
-
-For normal integrations:
-
-1. Lower the complete workload through a frontend.
-2. Call a whole-workload `search_workload*` API.
-3. Use the standard strategy set unless extending Planner.
-4. Preserve explicit accuracy requirements and required evidence.
-5. Use lifecycle-aware selection before making deployment cost decisions.
-6. Treat physical compilation and execution as downstream responsibilities.
-
-Lower-level Planner traits and APIs are extension points for research and deployment-specific customization; they are not separate required workflow stages.
+Today, a caller can run Planner again and obtain a new logical candidate space,
+but ASAPPlanner does not relate that result to the previous plan. Future support
+must define plan identity and compatibility across runs. Deployment diffing,
+migration, activation, and rollback remain downstream responsibilities.
 
 ## Related documents
 
