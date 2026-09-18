@@ -23,7 +23,7 @@ use asap_aware_mapping::replacement::{
 use asap_aware_mapping::{
     CostModel, DefaultCostModel, EvaluationRate, ExplanationKind, OperationPlacement,
 };
-use asap_frontend_promql::lower_promql;
+use asap_integration_tests::fixtures::lower_promql;
 use asap_types::dag_export;
 use asap_types::post_asap::{
     validate_execution_data_states, ExactKind, ExecutionDataState, ExecutionDataStateError,

@@ -19,10 +19,13 @@ use asap_aware_mapping::replacement::{keep_pre_asap, ImplementError};
 use asap_aware_mapping::{
     Replacement, ReplacementStrategy, ReplacementSubDAG, SketchAlgorithmStrategy, TargetSubDAG,
 };
-use asap_frontend_promql::{lower_promql, PromqlError as LoweringError};
+use asap_frontend_promql::PromqlError as LoweringError;
+#[path = "../support.rs"]
+mod support;
 use asap_types::post_asap::{SummaryExpr, SummaryNode};
 use asap_types::pre_asap::query_expr::QueryExpr;
 use asap_types::types::AccuracyTarget;
+use support::lower_promql;
 
 /// This crate has no "bind me one tree" public API any more —
 /// `SketchAlgorithmStrategy::replacements` always returns every candidate, and

@@ -10,10 +10,13 @@ use asap_aware_mapping::replacement::{keep_pre_asap, ImplementError};
 use asap_aware_mapping::{
     Replacement, ReplacementStrategy, ReplacementSubDAG, SketchAlgorithmStrategy, TargetSubDAG,
 };
-use asap_frontend_promql::{lower_promql, PromqlError};
+use asap_frontend_promql::PromqlError;
+#[path = "../support.rs"]
+mod support;
 use asap_types::post_asap::{SummaryExpr, SummaryNode};
 use asap_types::pre_asap::query_expr::QueryExpr;
 use asap_types::types::AccuracyTarget;
+use support::lower_promql;
 
 const CORPORA: &[(&str, &str)] = &[
     (

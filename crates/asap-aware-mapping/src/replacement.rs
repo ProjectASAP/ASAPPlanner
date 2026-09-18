@@ -5779,6 +5779,7 @@ mod tests {
     use super::*;
     use crate::accuracy::PropagationStats;
     use crate::cost_model::Cost;
+    use crate::test_support::lower_promql;
     use asap_types::pre_asap::agg_intent::{
         agg_is_exact, default_cardinality, default_quantile, MathFunc, TimeFunc,
     };
@@ -5798,10 +5799,7 @@ mod tests {
     // Finite samples can overflow a sum although their native average is finite.
     #[test]
     fn temporal_average_requires_finite_division_guard() {
-        let root = Rc::new(
-            asap_frontend_promql::lower_promql("avg_over_time(a[5m])", AccuracyTarget::Exact)
-                .unwrap(),
-        );
+        let root = Rc::new(lower_promql("avg_over_time(a[5m])", AccuracyTarget::Exact));
         let candidates =
             SketchAlgorithmStrategy::default_cost_model().replacements(&TargetSubDAG::new(&root));
         let operator = candidates
@@ -5830,8 +5828,7 @@ mod tests {
             "topk(5, sum_over_time(a[5m]))",
             "topk by(job)(5, count_over_time(a[5m]))",
         ] {
-            let root =
-                Rc::new(asap_frontend_promql::lower_promql(query, AccuracyTarget::Exact).unwrap());
+            let root = Rc::new(lower_promql(query, AccuracyTarget::Exact));
             let models = Models::with_default_accuracy(&crate::cost_model::DefaultCostModel);
             let node = exact_topk_over_temporal_values(&root, models)
                 .unwrap()
@@ -5859,7 +5856,7 @@ mod tests {
             "quantile_over_time(0.5,a[5m]) / quantile_over_time(0.9,a[5m])",
             "avg_over_time(a[5m]) / quantile_over_time(0.5,a[5m])",
         ] {
-            let root = Rc::new(asap_frontend_promql::lower_promql(query, target.clone()).unwrap());
+            let root = Rc::new(lower_promql(query, target.clone()));
             let models = Models::with_default_accuracy(&crate::cost_model::DefaultCostModel);
             assert!(realize_binary(&root, models, Some(&target))
                 .unwrap()

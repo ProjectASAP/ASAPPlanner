@@ -8,7 +8,7 @@
 use std::rc::Rc;
 use std::time::Duration;
 
-use asap_frontend_promql::lower_promql;
+use asap_integration_tests::fixtures::lower_promql;
 use asap_integration_tests::fixtures::metric_schema;
 use asap_types::pre_asap::{
     AggIntent, ArithmeticOpKind, BinaryOpKind, CompareOpKind, GroupSide, QueryExpr, Reduction,
@@ -21,6 +21,13 @@ fn lower(q: &str) -> QueryExpr {
 }
 
 fn scan(metric: &str, labels: &[&str]) -> QueryExpr {
+    QueryExpr::TimeRange {
+        range: Duration::from_secs(1),
+        child: Rc::new(source_scan(metric, labels)),
+    }
+}
+
+fn source_scan(metric: &str, labels: &[&str]) -> QueryExpr {
     QueryExpr::Scan {
         source: Source::TimeSeries {
             metric: metric.into(),
@@ -38,7 +45,7 @@ fn rate_agg(metric: &str) -> QueryExpr {
         having: None,
         child: Rc::new(QueryExpr::TimeRange {
             range: Duration::from_secs(300),
-            child: Rc::new(scan(metric, &[])),
+            child: Rc::new(source_scan(metric, &[])),
         }),
     }
 }

@@ -5,11 +5,11 @@
 //! heuristic's false-positive and false-negative cases. Undeclared metrics still
 //! fall back to the heuristic.
 
-use asap_frontend_promql::{
-    lower_promql, lower_promql_with_histograms, HistogramCatalog, HistogramKind,
-};
+use asap_frontend_promql::{HistogramCatalog, HistogramKind};
+mod support;
 use asap_types::pre_asap::{AggIntent, QueryExpr};
 use asap_types::types::AccuracyTarget;
+use support::{lower_promql, lower_promql_with_histograms};
 
 /// The histogram/quantile intent kind in the lowered tree: `"HQ"` for the
 /// classic-bucket `HistogramQuantile`, `"Q"` for the sketch-able `Quantile`.

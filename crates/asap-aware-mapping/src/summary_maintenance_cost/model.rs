@@ -3083,7 +3083,10 @@ mod tests {
     fn streaming_data_workload() -> DataWorkload {
         DataWorkload {
             arrival: DataArrival::ContinuouslyIngesting,
-
+            data_ingestion_interval: Evidence {
+                value: Some(asap_types::workload::DurationMs(1_000)),
+                ..Default::default()
+            },
             ingestion_rate: Evidence {
                 value: Some(Rate(2.0)),
                 source: EvidenceSource::Declared,
@@ -3491,7 +3494,10 @@ mod tests {
         ComparisonScope::from_workload(
             &DataWorkload {
                 arrival: DataArrival::ContinuouslyIngesting,
-
+                data_ingestion_interval: Evidence {
+                    value: Some(asap_types::workload::DurationMs(1_000)),
+                    ..Default::default()
+                },
                 ingestion_rate: Evidence {
                     value: Some(Rate(2.0)),
                     source: EvidenceSource::Declared,

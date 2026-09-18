@@ -3,7 +3,7 @@
 // One-off: pretty-print the QueryExpr for one canonical query per variant,
 // plus custom Join/SetOp/Dedup/CTE probes, to eyeball the actual shape.
 
-use asap_devtools::lower_promql;
+use asap_devtools::lower_promql_with_data_ingestion_interval;
 use asap_frontend_sql::{lower_sql_dialect, SqlCatalog};
 use asap_types::pre_asap::schema::{Column, DataType, Schema};
 use asap_types::types::AccuracyTarget;
@@ -70,7 +70,7 @@ async fn main() {
     ];
     for (label, q) in promql_examples {
         println!("=== {label} === promql> {q}");
-        match lower_promql(q, AccuracyTarget::Exact) {
+        match lower_promql_with_data_ingestion_interval(q, AccuracyTarget::Exact, 1_000) {
             Ok(qe) => println!("{qe:#?}"),
             Err(e) => println!("ERR: {e}"),
         }

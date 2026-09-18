@@ -4,7 +4,7 @@
 // Corpus mode dumps all four PromQL corpora as JSONL and writes a heuristic
 // anomaly report. The default mode remains the ad-hoc SQL/PromQL inspector.
 
-use asap_devtools::{lower_promql, SqlCatalog};
+use asap_devtools::{lower_promql_with_data_ingestion_interval, SqlCatalog};
 use asap_frontend_sql::lower_sql_dialect;
 use asap_types::pre_asap::schema::{Column, DataType, Schema};
 use asap_types::types::AccuracyTarget;
@@ -201,12 +201,16 @@ fn structural_shape(expression: &str) -> String {
     out
 }
 
-fn run_corpus(name: &str, source: &str) -> CorpusResult {
+fn run_corpus(name: &str, source: &str, interval_ms: u64) -> CorpusResult {
     let mut result = CorpusResult::default();
     for (index, expression) in corpus_lines(source).into_iter().enumerate() {
         let normalized_expression = normalize(expression);
         let structural_shape = structural_shape(expression);
-        match lower_promql(expression, AccuracyTarget::Exact) {
+        match lower_promql_with_data_ingestion_interval(
+            expression,
+            AccuracyTarget::Exact,
+            interval_ms,
+        ) {
             Ok(ir) => result.lowered.push(DumpRecord {
                 corpus: name.to_string(),
                 query_number: index + 1,
@@ -394,7 +398,7 @@ fn anomaly_report(all: &[DumpRecord], language: &str, manual_notes: &str) -> Str
     report
 }
 
-fn run_corpora(out_dir: PathBuf) {
+fn run_corpora(out_dir: PathBuf, interval_ms: u64) {
     std::fs::create_dir_all(&out_dir)
         .unwrap_or_else(|e| panic!("failed to create {}: {e}", out_dir.display()));
     let corpora = [
@@ -406,7 +410,7 @@ fn run_corpora(out_dir: PathBuf) {
     let mut all = Vec::new();
     let mut summary = Vec::new();
     for (name, source) in corpora {
-        let mut result = run_corpus(name, source);
+        let mut result = run_corpus(name, source, interval_ms);
         let total = result.lowered.len() + result.failed.len();
         write_jsonl(&out_dir.join(format!("{name}.jsonl")), &result.lowered);
         write_jsonl(
@@ -542,14 +546,25 @@ async fn main() {
     let mut args = std::env::args().skip(1);
     if args.next().as_deref() == Some("--corpora") {
         let mut out_dir = PathBuf::from("artifacts/promql_pre_asap");
+        let mut interval_ms = None;
         while let Some(arg) = args.next() {
             if arg == "--out-dir" {
                 out_dir = PathBuf::from(args.next().expect("--out-dir requires a path"));
+            } else if arg == "--data-ingestion-interval-ms" {
+                interval_ms = Some(
+                    args.next()
+                        .expect("--data-ingestion-interval-ms requires a value")
+                        .parse()
+                        .expect("--data-ingestion-interval-ms must be an unsigned integer"),
+                );
             } else {
                 panic!("unknown corpus-mode argument: {arg}");
             }
         }
-        run_corpora(out_dir);
+        run_corpora(
+            out_dir,
+            interval_ms.expect("--data-ingestion-interval-ms is required for --corpora"),
+        );
         return;
     }
     if std::env::args().nth(1).as_deref() == Some("--sql-corpora") {

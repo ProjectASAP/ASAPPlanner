@@ -11,7 +11,7 @@
 use std::rc::Rc;
 use std::time::Duration;
 
-use asap_frontend_promql::lower_promql;
+use asap_integration_tests::fixtures::lower_promql;
 use asap_integration_tests::fixtures::metric_schema;
 use asap_types::pre_asap::{
     AggIntent, ArithmeticOpKind, AtModifier, BinaryOpKind, CompareOpKind, GroupKeys, Predicate,
@@ -85,7 +85,14 @@ fn q23_sum_by_job_over_filtered_scan() {
         }))],
         schema: metric_schema(&["job", "status"]),
     };
-    let expected = agg(vec![2], AggIntent::Sum { col: None }, scan);
+    let expected = agg(
+        vec![2],
+        AggIntent::Sum { col: None },
+        QueryExpr::TimeRange {
+            range: Duration::from_secs(1),
+            child: Rc::new(scan),
+        },
+    );
     assert_eq!(
         lower(r#"sum by (job) (http_requests_total{status="200"})"#),
         expected
@@ -203,7 +210,14 @@ fn q53_outer_group_key_absent_from_nested_aggregate() {
         }))],
         schema: metric_schema(&["group", "job"]),
     };
-    let inner = agg(vec![2], AggIntent::Sum { col: None }, scan);
+    let inner = agg(
+        vec![2],
+        AggIntent::Sum { col: None },
+        QueryExpr::TimeRange {
+            range: Duration::from_secs(1),
+            child: Rc::new(scan),
+        },
+    );
     let expected = agg(vec![], AggIntent::Sum { col: None }, inner);
     assert_eq!(
         lower(r#"sum(sum by (group)(http_requests{job="api-server"})) by (job)"#),
@@ -220,16 +234,19 @@ fn q53_outer_group_key_absent_from_nested_aggregate() {
 //   parser's default `ignoring([])` match modifier.
 #[test]
 fn q52_outer_name_label_over_binary_op() {
-    let side = |metric: &str, env: &str| QueryExpr::Scan {
-        source: Source::TimeSeries {
-            metric: metric.into(),
-        },
-        predicates: vec![Predicate(Rc::new(QueryExpr::Compare {
-            left: Rc::new(QueryExpr::Column(2)), // env
-            op: CompareOpKind::Eq,
-            right: Rc::new(QueryExpr::Literal(ScalarValue::Utf8(env.into()))),
-        }))],
-        schema: metric_schema(&["env", "__name__"]),
+    let side = |metric: &str, env: &str| QueryExpr::TimeRange {
+        range: Duration::from_secs(1),
+        child: Rc::new(QueryExpr::Scan {
+            source: Source::TimeSeries {
+                metric: metric.into(),
+            },
+            predicates: vec![Predicate(Rc::new(QueryExpr::Compare {
+                left: Rc::new(QueryExpr::Column(2)), // env
+                op: CompareOpKind::Eq,
+                right: Rc::new(QueryExpr::Literal(ScalarValue::Utf8(env.into()))),
+            }))],
+            schema: metric_schema(&["env", "__name__"]),
+        }),
     };
     let expected = agg(
         vec![3], // __name__
@@ -326,17 +343,20 @@ fn q40_week_over_week_offset() {
 //   (seconds → ms); a bare selector wrapped in a `TimeShift` carrying the anchor.
 #[test]
 fn q40_at_modifier_absolute() {
-    let expected = QueryExpr::TimeShift {
-        shift: TimeShift {
-            offset_ms: 0,
-            at: Some(AtModifier::Timestamp(1_609_746_000_000)),
-        },
-        child: Rc::new(QueryExpr::Scan {
-            source: Source::TimeSeries {
-                metric: "up".into(),
+    let expected = QueryExpr::TimeRange {
+        range: Duration::from_secs(1),
+        child: Rc::new(QueryExpr::TimeShift {
+            shift: TimeShift {
+                offset_ms: 0,
+                at: Some(AtModifier::Timestamp(1_609_746_000_000)),
             },
-            predicates: vec![],
-            schema: metric_schema(&[]),
+            child: Rc::new(QueryExpr::Scan {
+                source: Source::TimeSeries {
+                    metric: "up".into(),
+                },
+                predicates: vec![],
+                schema: metric_schema(&[]),
+            }),
         }),
     };
     assert_eq!(lower("up @ 1609746000"), expected);

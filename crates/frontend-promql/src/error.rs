@@ -1,6 +1,7 @@
 use std::fmt;
 
 use asap_types::pre_asap::ResolveTreeError;
+use asap_types::workload::WorkloadError;
 
 /// Errors from lowering a PromQL query (parse → the canonical, unresolved
 /// tree, built directly →
@@ -13,6 +14,8 @@ use asap_types::pre_asap::ResolveTreeError;
 /// shared, so neither front end pulls the other's parser.
 #[derive(Debug)]
 pub enum PromqlError {
+    /// The workload omitted information required for plan-ready PromQL lowering.
+    InvalidWorkload(WorkloadError),
     /// The `promql-parser` crate rejected the query string (parse failure).
     Parse(String),
     /// A PromQL function (`rate`, `*_over_time`, …) not supported in this version.
@@ -36,6 +39,7 @@ pub enum PromqlError {
 impl fmt::Display for PromqlError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::InvalidWorkload(e) => write!(f, "invalid PromQL workload: {e}"),
             Self::Parse(e) => write!(f, "PromQL parse error: {e}"),
             Self::UnsupportedFunction(n) => write!(f, "unsupported PromQL function: {n}"),
             Self::UnsupportedAggregateOp(n) => write!(f, "unsupported PromQL aggregate op: {n}"),
@@ -53,6 +57,12 @@ impl std::error::Error for PromqlError {}
 impl From<ResolveTreeError> for PromqlError {
     fn from(e: ResolveTreeError) -> Self {
         Self::Convert(e)
+    }
+}
+
+impl From<WorkloadError> for PromqlError {
+    fn from(e: WorkloadError) -> Self {
+        Self::InvalidWorkload(e)
     }
 }
 

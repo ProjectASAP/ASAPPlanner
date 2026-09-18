@@ -15,14 +15,14 @@ tool on first use.
 
 | Command (`cargo run -p asap-devtools --bin … -- …`) | Input / options | Result |
 | --- | --- | --- |
-| `show_pre_asap_ir queries.txt` | File path, or stdin when omitted | Prints canonical Pre-ASAP IR |
-| `show_post_asap_ir queries.txt` | Same query file format | Prints all sketch-strategy Post-ASAP candidates using a fixed approximate target, in cost-model order |
-| `dag_export --promql "<query>"` | One PromQL expression | Exports a query graph for inspection |
+| `show_pre_asap_ir --data-ingestion-interval-ms 1000 queries.txt` | File path, or stdin when omitted | Prints canonical Pre-ASAP IR |
+| `show_post_asap_ir --data-ingestion-interval-ms 1000 queries.txt` | Same query file format | Prints all sketch-strategy Post-ASAP candidates using a fixed approximate target, in cost-model order |
+| `dag_export --data-ingestion-interval-ms 1000 --promql "<query>"` | One PromQL expression | Exports a query graph for inspection |
 | `dag_export --sql "<query>"` | One SQL expression using the tool's catalog | Exports a query graph for inspection |
-| `analyze_corpora --corpora --out-dir <dir>` | Repository PromQL corpora, output directory | Writes successful/error IR dumps and summary reports |
+| `analyze_corpora --corpora --data-ingestion-interval-ms 1000 --out-dir <dir>` | Repository PromQL corpora, output directory | Writes successful/error IR dumps and summary reports |
 | `analyze_corpora --sql-corpora --out-dir <dir>` | Repository SQL corpora, output directory | Writes SQL corpus reports |
-| `variant_coverage` | Repository corpora | Reports Pre-ASAP IR variant coverage |
-| `sketch_coverage --epsilon 0.01` | Repository corpora; epsilon defaults to `0.01` | Reports sketch/reuse opportunities among successfully lowered queries |
+| `variant_coverage --data-ingestion-interval-ms 1000` | Repository corpora | Reports Pre-ASAP IR variant coverage |
+| `sketch_coverage --data-ingestion-interval-ms 1000 --epsilon 0.01` | Repository corpora; epsilon defaults to `0.01` | Reports sketch/reuse opportunities among successfully lowered queries |
 
 ## Inspect a query from the command line
 
@@ -51,19 +51,19 @@ For your own schema, provide a `SqlCatalog` through the library API.
 Run:
 
 ```sh
-cargo run -p asap-devtools --bin show_pre_asap_ir -- queries.txt
+cargo run -p asap-devtools --bin show_pre_asap_ir -- --data-ingestion-interval-ms 1000 queries.txt
 ```
 
 You can also provide the queries through stdin:
 
 ```sh
-cargo run -p asap-devtools --bin show_pre_asap_ir < queries.txt
+cargo run -p asap-devtools --bin show_pre_asap_ir -- --data-ingestion-interval-ms 1000 < queries.txt
 ```
 
 To dump and compare every PromQL corpus, run:
 
 ```sh
-cargo run -p asap-devtools --bin analyze_corpora -- --corpora --out-dir artifacts/promql_pre_asap
+cargo run -p asap-devtools --bin analyze_corpora -- --corpora --data-ingestion-interval-ms 1000 --out-dir artifacts/promql_pre_asap
 ```
 
 This writes one successful-lowering JSONL dump and one error JSONL dump per
@@ -83,13 +83,13 @@ cargo run -p asap-devtools --bin analyze_corpora -- --sql-corpora --out-dir arti
 Run:
 
 ```sh
-cargo run -p asap-devtools --bin show_post_asap_ir -- queries.txt
+cargo run -p asap-devtools --bin show_post_asap_ir -- --data-ingestion-interval-ms 1000 queries.txt
 ```
 
 Or through stdin:
 
 ```sh
-cargo run -p asap-devtools --bin show_post_asap_ir < queries.txt
+cargo run -p asap-devtools --bin show_post_asap_ir -- --data-ingestion-interval-ms 1000 < queries.txt
 ```
 
 `show_post_asap_ir` uses an approximation target of ε = 0.01 and prints every
@@ -119,7 +119,7 @@ cargo run -p asap-devtools --bin dag_export -- --sql "<SQL query>"
 or:
 
 ```sh
-cargo run -p asap-devtools --bin dag_export -- --promql "<PromQL query>"
+cargo run -p asap-devtools --bin dag_export -- --data-ingestion-interval-ms 1000 --promql "<PromQL query>"
 ```
 
 See [`tools/dag-viewer/RUNNING.md`](../../tools/dag-viewer/RUNNING.md) for instructions on running the DAG viewer.
@@ -129,7 +129,7 @@ See [`tools/dag-viewer/RUNNING.md`](../../tools/dag-viewer/RUNNING.md) for instr
 Parse the query corpora in the repository and report which pre-ASAP IR variants are exercised:
 
 ```sh
-cargo run -p asap-devtools --bin variant_coverage
+cargo run -p asap-devtools --bin variant_coverage -- --data-ingestion-interval-ms 1000
 ```
 
 ### Check sketch-replacement coverage
@@ -137,7 +137,7 @@ cargo run -p asap-devtools --bin variant_coverage
 Parse the same query corpora, lower them with an approximate `AccuracyTarget`, and report what fraction of each corpus's successfully-lowered queries got a genuine sketch alternative (`SketchApproximation`, e.g. KLL vs. DDSketch) and/or a cross-query common-subexpression-reuse candidate (`CommonSubexpressionReuse`):
 
 ```sh
-cargo run -p asap-devtools --bin sketch_coverage -- --epsilon 0.01
+cargo run -p asap-devtools --bin sketch_coverage -- --data-ingestion-interval-ms 1000 --epsilon 0.01
 ```
 
 `--epsilon` is optional (defaults to `0.01`). See the binary's own doc comment for exactly how "coverage" is defined and attributed back to each query.
@@ -163,3 +163,8 @@ cargo run -p asap-devtools --example canonical_examples
 - [Design overview](../design_docs/README.md)
 - [Pre-ASAP IR reference](../develop_docs/pre-asap-ir.md)
 - [Post-ASAP IR reference](../design_docs/concepts/post-asap-ir.md)
+
+PromQL commands require `--data-ingestion-interval-ms` with the nonzero source
+sample cadence in milliseconds. The examples use a one-second cadence; supply
+the interval for your data. The mixed-input `show_pre_asap_ir` and
+`show_post_asap_ir` tools require this option even for SQL-only input files.

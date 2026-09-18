@@ -39,6 +39,20 @@ impl CurrentSeriesInput {
     /// Verify the named contract against the canonical maintenance input.
     pub fn matches_input(&self, input: &crate::pre_asap::QueryExpr) -> bool {
         use crate::pre_asap::{CompareOpKind, DataType, QueryExpr, ScalarValue, Source};
+        // PromQL instant selectors carry an ingestion-interval `TimeRange` as
+        // their input scope. The population must use the same expiry horizon;
+        // shifted and otherwise transformed inputs still fail below.
+        let input = match input {
+            QueryExpr::TimeRange { range, child }
+                if self.lookback_ms > 0
+                    && *range == std::time::Duration::from_millis(self.lookback_ms) =>
+            {
+                child.as_ref()
+            }
+            QueryExpr::TimeRange { .. } => return false,
+            other if self.lookback_ms == 300_000 => other,
+            _ => return false,
+        };
         let QueryExpr::Scan {
             source: Source::TimeSeries { metric },
             predicates,
@@ -51,7 +65,6 @@ impl CurrentSeriesInput {
             || *metric != self.metric
             || schema.closed
             || schema.time_index.is_none()
-            || self.lookback_ms != 300_000
         {
             return false;
         }

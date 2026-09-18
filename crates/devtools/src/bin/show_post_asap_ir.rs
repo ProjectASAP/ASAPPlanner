@@ -24,7 +24,7 @@ use asap_aware_mapping::replacement::keep_pre_asap;
 use asap_aware_mapping::{
     Replacement, ReplacementStrategy, ReplacementSubDAG, SketchAlgorithmStrategy, TargetSubDAG,
 };
-use asap_devtools::{lower_promql, lower_sql, SqlCatalog};
+use asap_devtools::{lower_promql_with_data_ingestion_interval, lower_sql, SqlCatalog};
 use asap_types::pre_asap::query_expr::QueryExpr;
 use asap_types::pre_asap::schema::{Column, DataType, Schema};
 use asap_types::types::AccuracyTarget;
@@ -81,7 +81,18 @@ fn catalog() -> SqlCatalog {
 
 #[tokio::main]
 async fn main() {
-    let input = match std::env::args().nth(1) {
+    let mut args = std::env::args().skip(1);
+    assert_eq!(
+        args.next().as_deref(),
+        Some("--data-ingestion-interval-ms"),
+        "usage: show_post_asap_ir --data-ingestion-interval-ms <ms> [queries.txt]"
+    );
+    let interval_ms = args
+        .next()
+        .expect("missing interval")
+        .parse()
+        .expect("interval must be an unsigned integer");
+    let input = match args.next() {
         Some(path) => {
             std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("failed to read {path}: {e}"))
         }
@@ -106,7 +117,8 @@ async fn main() {
                 .await
                 .map_err(|e| e.to_string())
         } else if let Some(q) = line.strip_prefix("promql>") {
-            lower_promql(q.trim(), ACCURACY.clone()).map_err(|e| e.to_string())
+            lower_promql_with_data_ingestion_interval(q.trim(), ACCURACY.clone(), interval_ms)
+                .map_err(|e| e.to_string())
         } else {
             println!("ERR: line must start with 'sql>' or 'promql>'");
             println!();
@@ -131,9 +143,10 @@ mod tests {
 
     #[test]
     fn bind_all_returns_every_sketch_candidate() {
-        let expr = lower_promql(
+        let expr = lower_promql_with_data_ingestion_interval(
             "quantile(0.99, rate(http_requests_total[5m]))",
             ACCURACY.clone(),
+            1_000,
         )
         .expect("query lowers to pre-ASAP IR");
         let root = Rc::new(expr.clone());

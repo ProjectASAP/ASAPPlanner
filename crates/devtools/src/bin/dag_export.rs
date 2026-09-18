@@ -677,7 +677,7 @@ fn winner_cost_annotations() -> (CostAnnotation, CostAnnotation, CostAnnotation)
     )
 }
 
-use asap_devtools::{lower_promql, lower_sql, SqlCatalog};
+use asap_devtools::{lower_promql_with_data_ingestion_interval, lower_sql, SqlCatalog};
 
 enum Lang {
     Sql,
@@ -766,6 +766,7 @@ struct ParsedArgs {
     table_schemas: Vec<String>,
     planner_cost: Option<PlannerCostDocument>,
     topk_margin: Option<TopKMarginEvidence>,
+    promql_ingestion_interval_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -822,6 +823,7 @@ fn parse_args() -> ParsedArgs {
     let mut table_schemas = Vec::new();
     let mut planner_cost_json = None;
     let mut topk_margin_json = None;
+    let mut promql_ingestion_interval_ms = None;
     let mut args = std::env::args().skip(1);
 
     fn flush(entries: &mut Vec<(String, Lang, String)>, pending: &mut Option<(Lang, String)>) {
@@ -877,6 +879,14 @@ fn parse_args() -> ParsedArgs {
                         .expect("--topk-margin-json requires a JSON object"),
                 );
             }
+            "--data-ingestion-interval-ms" => {
+                promql_ingestion_interval_ms = Some(
+                    args.next()
+                        .expect("--data-ingestion-interval-ms requires a value")
+                        .parse()
+                        .expect("--data-ingestion-interval-ms must be an unsigned integer"),
+                );
+            }
             other => panic!("unrecognized argument: {other}"),
         }
     }
@@ -899,6 +909,7 @@ fn parse_args() -> ParsedArgs {
         table_schemas,
         planner_cost,
         topk_margin,
+        promql_ingestion_interval_ms,
     }
 }
 
@@ -1421,6 +1432,7 @@ async fn main() {
         table_schemas,
         planner_cost,
         topk_margin,
+        promql_ingestion_interval_ms,
     } = parse_args();
     let sql_catalog = catalog(&table_schemas);
     let planner_started = Instant::now();
@@ -1441,7 +1453,13 @@ async fn main() {
             Lang::Sql => lower_sql(&query, &sql_catalog, accuracy.clone())
                 .await
                 .map_err(|e| e.to_string()),
-            Lang::PromQl => lower_promql(&query, accuracy.clone()).map_err(|e| e.to_string()),
+            Lang::PromQl => lower_promql_with_data_ingestion_interval(
+                &query,
+                accuracy.clone(),
+                promql_ingestion_interval_ms
+                    .expect("--data-ingestion-interval-ms is required for PromQL queries"),
+            )
+            .map_err(|e| e.to_string()),
         };
         match lowered {
             Ok(qe) => {
@@ -1617,7 +1635,12 @@ mod tests {
         EdgeStatistics, OperatorStatistics, SourceCoverage, UnaryEdgeStatistics,
     };
     use asap_aware_mapping::query_physical_lowering::lower_query_physical_dag;
+    use asap_devtools::PromqlError;
     use asap_types::pre_asap::{Column, DataType, Reduction, Schema, Source};
+
+    fn lower_promql(query: &str, accuracy: AccuracyTarget) -> Result<QueryExpr, PromqlError> {
+        lower_promql_with_data_ingestion_interval(query, accuracy, 1_000)
+    }
 
     fn non_topk_query() -> QueryExpr {
         QueryExpr::Aggregate {
