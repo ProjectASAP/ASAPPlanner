@@ -1,5 +1,7 @@
 # ASAPQuery rule coverage
 
+> Status: proposal and coverage analysis. Check the implementation and tests before relying on it as a supported-behavior catalog.
+
 This document compares ASAPPlanner's rule system with the Rust planner in
 ASAPQuery at upstream commit `2586400b3b0436a5414c901ebce07065d20b5223`.
 The comparison is by semantic capability, not source-file or function-name

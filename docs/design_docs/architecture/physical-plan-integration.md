@@ -109,6 +109,10 @@ Every `SummaryExpr` operation also needs explicit physical realization:
 | `SummaryDelete` | physical deletion/update operator supported by the selected representation |
 | `SummaryEstimate` | family- and query-specific readout operator |
 | `KeepPreAsap` | recursive lowering of the contained `QueryExpr` |
+| `BinaryOp` | binary evaluation preserving operand order, execution timing and any typed finite/relative-division guard |
+| `ValueOperation` | concrete realization of the value operation with its required execution timing and data state |
+| `RelationalJoin` | concrete row-join algorithm preserving join kind and predicate |
+| `CandidateTopK` | candidate generation and authoritative value ranking that preserve the membership completeness contract |
 
 This table is a completeness requirement, not a claim that every realization
 already exists. Until lowering introduces an explicit physical operator,
@@ -402,7 +406,7 @@ unlowered logical operations, inconsistent edges, or different comparison
 scopes make the complete candidate unavailable. The integration must never
 replace those failures with zero cost or structural node counting.
 
-See [Analytical resource cost](analytical-resource-cost.md) for the resource
+See [Analytical resource cost](../proposals/asap-aware-mapping/analytical-resource-cost.md) for the resource
 formulas, evidence validation, comparison-scope rules, and calibration model.
 
 ## Conditional temporal-average lowering

@@ -1,5 +1,10 @@
 # UnivMon frequency summaries
 
+> Status: partially implemented design. Planner has UnivMon types, candidate
+> construction, shared readouts and accuracy-gating tests. Approximate readouts
+> still require calibrated accuracy evidence; runtime compatibility and performance
+> are not established by planner tests. See [candidate integration tests](../../../crates/frontend-promql/tests/univmon_candidates.rs).
+
 This contract is for Planner and runtime developers implementing shared
 frequency statistics. One UnivMon state describes the frequency vector of
 input values in one population and time window. For samples `[2, 2, 5]`, the

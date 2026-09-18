@@ -20,8 +20,8 @@ use asap_types::pre_asap::agg_intent::AggIntent;
 use asap_types::types::AccuracyTarget;
 use asap_types::workload::{
     AccuracyRequirement, BatchEntry, DataArrival, DataWorkload, Evidence, EvidenceSource,
-    Predictability, Query, QueryLanguage, QueryRequirements, QueryTimeScope, QueryWorkload, Rate,
-    RepeatedDemand, RepeatingEntry, RepetitionInterval, TimeSelection,
+    PlanningWorkload, Predictability, Query, QueryLanguage, QueryRequirements, QueryTimeScope,
+    QueryWorkload, Rate, RepeatedDemand, RepeatingEntry, RepetitionInterval, TimeSelection,
 };
 
 const NOW_MS: u64 = 1_000_000;
@@ -70,32 +70,34 @@ impl CostModel for FullyCostedRuntime {
     }
 }
 
-fn dashboard_workload() -> QueryWorkload {
+fn dashboard_workload() -> PlanningWorkload {
     let query = Query("quantile_over_time(0.99, latency[5m])".into());
     let requirements = QueryRequirements {
         accuracy: AccuracyRequirement::Explicit(AccuracyTarget::Epsilon(0.01)),
         ..QueryRequirements::default()
     };
-    QueryWorkload {
-        language: QueryLanguage::PromQL,
-        query_batch: Some(vec![BatchEntry {
-            query: query.clone(),
-            requirements: requirements.clone(),
-            predictability: Predictability::AdHoc,
-            invocations: 1,
-            execute_at: None,
-            time_selection: TimeSelection::default(),
-        }]),
-        repeating_queries: Some(vec![RepeatingEntry {
-            query,
-            demand: RepeatedDemand::FixedInterval(RepetitionInterval(1_000)),
-            requirements,
-            predictability: Predictability::Predictable { known_at: None },
-            time_selection: TimeSelection {
-                scope: QueryTimeScope::RealTime,
-                ..TimeSelection::default()
-            },
-        }]),
+    PlanningWorkload {
+        query_workload: QueryWorkload {
+            language: QueryLanguage::PromQL,
+            query_batch: Some(vec![BatchEntry {
+                query: query.clone(),
+                requirements: requirements.clone(),
+                predictability: Predictability::AdHoc,
+                invocations: 1,
+                execute_at: None,
+                time_selection: TimeSelection::default(),
+            }]),
+            repeating_queries: Some(vec![RepeatingEntry {
+                query,
+                demand: RepeatedDemand::FixedInterval(RepetitionInterval(1_000)),
+                requirements,
+                predictability: Predictability::Predictable { known_at: None },
+                time_selection: TimeSelection {
+                    scope: QueryTimeScope::RealTime,
+                    ..TimeSelection::default()
+                },
+            }]),
+        },
         data_workload: Some(DataWorkload {
             arrival: DataArrival::ContinuouslyIngesting,
             ingestion_rate: Evidence {
@@ -104,6 +106,7 @@ fn dashboard_workload() -> QueryWorkload {
                 observed_at_ms: Some(NOW_MS),
                 valid_for_ms: Some(60_000),
             },
+
             ..DataWorkload::default()
         }),
     }
@@ -114,7 +117,7 @@ fn promql_dashboard_materializes_continuous_summary_with_explained_rejections() 
     let workload = dashboard_workload();
     workload.validate().unwrap();
 
-    let lowered = lower_promql_batch(&workload)
+    let lowered = lower_promql_batch(&workload.query_workload)
         .into_iter()
         .next()
         .expect("one normalized workload entry")
@@ -132,8 +135,11 @@ fn promql_dashboard_materializes_continuous_summary_with_explained_rejections() 
 
     let selection = global_selection_with_summary_maintenance_lifecycles(
         &space,
-        &workload,
-        &[1],
+        WorkloadDemand {
+            workload: &workload.query_workload,
+            data_workload: workload.data_workload.as_ref(),
+            entry_indices: &[1],
+        },
         NOW_MS,
         Some(Horizon(100.0)),
         capabilities,
@@ -143,7 +149,11 @@ fn promql_dashboard_materializes_continuous_summary_with_explained_rejections() 
     let plan = materialize_with_summary_maintenance_lifecycles(
         &selection,
         &target,
-        WorkloadDemand::new(&workload, &[1]),
+        WorkloadDemand::new_with_data(
+            &workload.query_workload,
+            workload.data_workload.as_ref().unwrap(),
+            &[1],
+        ),
         NOW_MS,
         Some(Horizon(100.0)),
         capabilities,

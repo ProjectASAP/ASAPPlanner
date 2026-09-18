@@ -4,7 +4,7 @@
 //!
 //! CSE only runs on an already-bound, already-canonicalized tree —
 //! structural matching is meaningless before canonicalization has converged
-//! semantically-equivalent queries onto one shape (`docs/design_docs/pre-asap-ir.md`
+//! semantically-equivalent queries onto one shape (`docs/develop_docs/pre-asap-ir.md`
 //! design principle 3; `median(latency)` and `approx_percentile_cont(latency,
 //! 0.5)` already lower to an identical `AggIntent::Quantile` today, per
 //! `sql_lowering.rs`'s `median_is_the_same_intent_as_an_explicit_half_percentile`

@@ -6,6 +6,11 @@ The viewer has one visualization mode: **Pre/Post-ASAP**.
 - Select multiple queries to see two workload-union DAGs: one pre-ASAP union
   and one post-ASAP union. Nodes with the same exporter-assigned workload
   identity are collapsed while query roots and ownership are retained.
+- The **All** checkbox left of the query strip selects or deselects every
+  query at once, and shows an indeterminate state while only some are
+  selected. It changes the selection only; **Clear all** in the header is a
+  different operation and discards the loaded workload itself.
+- Drag anywhere on the canvas to pan, including on a lane's own background.
 - Pre-ASAP nodes show only their original IR content.
 - Post-ASAP nodes show their translated IR content and the explicit planner
   decision carried by that node.
@@ -140,7 +145,7 @@ identifies the immutable catalog/runtime generation. A missing `value`
 planner export keeps CPU operations, peak memory, scan bytes, coefficients,
 and workload statistics in `inputs`. Without complete physical evidence, the
 annotation is `Unavailable`; structural node counts are never substituted.
-See the [analytical model design](../../docs/design_docs/asap-aware-mapping/analytical-resource-cost.md).
+See the [analytical model design](../../docs/design_docs/proposals/asap-aware-mapping/analytical-resource-cost.md).
 
 The checked-in viewer fixture makes its illustrative comparison reproducible.
 It models 100 evaluations of 100 million 64-byte rows with 100,000 groups.

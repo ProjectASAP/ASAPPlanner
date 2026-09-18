@@ -28,8 +28,8 @@ use asap_types::post_asap::{
 use asap_types::pre_asap::QueryExpr;
 use asap_types::types::AccuracyTarget;
 use asap_types::workload::{
-    DataArrival, Predictability, QueryRecurrence, QueryWorkload, RepeatedDemand, TimestampMs,
-    WorkloadError,
+    DataArrival, DataWorkload, Predictability, QueryRecurrence, QueryWorkload, RepeatedDemand,
+    TimestampMs, WorkloadError,
 };
 
 use crate::analytical_cost::AnalyticalCostError;
@@ -214,21 +214,40 @@ pub struct SummaryMaintenanceLifecyclePlan {
 /// Explicit association between a materialized target and the normalized
 /// workload entries whose demand consumes it.
 ///
-/// [`QueryWorkload`] remains the source-of-truth model. Indices avoid copying
-/// its normalized entry definitions while ensuring unrelated workload entries
-/// do not influence a target's lifecycle decision.
+/// [`QueryWorkload`] remains the source of query demand, while source-data
+/// evidence is supplied independently. Indices avoid copying normalized entry
+/// definitions while ensuring unrelated entries do not influence a target's
+/// lifecycle decision.
 #[derive(Debug, Clone, Copy)]
 pub struct WorkloadDemand<'a> {
-    /// Original normalized workload and workload-level data evidence.
+    /// Original normalized query workload.
     pub workload: &'a QueryWorkload,
+    /// Independent source-data evidence, when the caller has it.
+    pub data_workload: Option<&'a DataWorkload>,
     /// Indices from [`QueryWorkload::entries`] that consume this target.
     pub entry_indices: &'a [usize],
 }
 
 impl<'a> WorkloadDemand<'a> {
-    pub const fn new(workload: &'a QueryWorkload, entry_indices: &'a [usize]) -> Self {
+    /// Bind query demand without source-data evidence. Callers that have a
+    /// [`DataWorkload`] should use [`Self::new_with_data`] so ingestion facts
+    /// are not silently discarded.
+    pub const fn new_without_data(workload: &'a QueryWorkload, entry_indices: &'a [usize]) -> Self {
         Self {
             workload,
+            data_workload: None,
+            entry_indices,
+        }
+    }
+
+    pub const fn new_with_data(
+        workload: &'a QueryWorkload,
+        data_workload: &'a DataWorkload,
+        entry_indices: &'a [usize],
+    ) -> Self {
+        Self {
+            workload,
+            data_workload: Some(data_workload),
             entry_indices,
         }
     }
@@ -341,10 +360,19 @@ fn plan_summary_maintenance_lifecycles_with_profile(
     comparison_target: Option<&QueryExpr>,
 ) -> Result<SummaryMaintenanceLifecyclePlan, SummaryMaintenanceLifecyclePlanError> {
     demand.workload.validate()?;
+    if let Some(data) = demand.data_workload {
+        data.validate()?;
+    }
     if horizon.is_some_and(|h| !h.0.is_finite() || h.0 <= 0.0) {
         return Err(SummaryMaintenanceLifecyclePlanError::InvalidHorizon);
     }
-    let mut facts = workload_facts(demand.workload, demand.entry_indices, now_ms, horizon)?;
+    let mut facts = workload_facts(
+        demand.workload,
+        demand.data_workload,
+        demand.entry_indices,
+        now_ms,
+        horizon,
+    )?;
     if let Some(profile) = profile {
         facts.one_time_invocations = u64::try_from(profile.one_shot_consumers).unwrap_or(u64::MAX);
         facts.evaluation_rate = profile.evaluation_rate;
@@ -426,15 +454,20 @@ fn plan_summary_maintenance_lifecycles_with_profile(
 /// the responsibility of `GlobalSelection`.
 pub fn global_selection_with_summary_maintenance_lifecycles<'a, Id>(
     space: &'a PlanSpace<Id>,
-    workload: &QueryWorkload,
-    root_workload_entries: &[usize],
+    demand: WorkloadDemand<'_>,
     now_ms: u64,
     horizon: Option<Horizon>,
     capabilities: SummaryMaintenanceLifecycleCapabilities,
     cost_model: &dyn CostModel,
 ) -> Result<GlobalSelection<'a>, SummaryMaintenanceLifecycleSelectionError> {
+    let WorkloadDemand {
+        workload,
+        data_workload,
+        entry_indices: root_workload_entries,
+    } = demand;
     let profiles = space.recurrence_profiles_from_workload(
         workload,
+        data_workload,
         root_workload_entries,
         now_ms,
         horizon,
@@ -452,7 +485,11 @@ pub fn global_selection_with_summary_maintenance_lifecycles<'a, Id>(
             costs.finalize_target(&group.target);
             let plan = plan_summary_maintenance_lifecycles_with_profile(
                 Rc::clone(summary),
-                WorkloadDemand::new(workload, entry_indices),
+                WorkloadDemand {
+                    workload,
+                    data_workload,
+                    entry_indices,
+                },
                 now_ms,
                 horizon,
                 capabilities,
@@ -525,6 +562,7 @@ pub fn materialize_with_summary_maintenance_lifecycles(
 
 fn workload_facts(
     workload: &QueryWorkload,
+    data_workload: Option<&DataWorkload>,
     workload_entry_indices: &[usize],
     now_ms: u64,
     horizon: Option<Horizon>,
@@ -639,7 +677,7 @@ fn workload_facts(
         }
     }
 
-    let data = workload.data_workload.as_ref();
+    let data = data_workload;
     let arrival = data.map_or(DataArrival::Unknown, |data| data.arrival);
     let update_rate = data
         .and_then(|data| data.ingestion_rate.value_at(now_ms))
@@ -1266,6 +1304,28 @@ pub(crate) fn maintenance_mode(
 
 #[cfg(test)]
 mod tests {
+    // Independent data evidence must be validated at both planning boundaries.
+    #[test]
+    fn rejects_invalid_parallel_data_evidence() {
+        let query = workload(vec![batch(Predictability::AdHoc)], vec![], at_rest());
+        let space = crate::replacement::search_workload(vec![("q", quantile_query())]);
+        for rate in [1.0, -1.0, f64::NAN, f64::INFINITY] {
+            let mut data = at_rest();
+            data.ingestion_rate.value = Some(Rate(rate));
+            assert!(space
+                .recurrence_profiles_from_workload(&query, Some(&data), &[0], 0, None)
+                .is_err());
+            assert!(plan_summary_maintenance_lifecycles(
+                summary(),
+                WorkloadDemand::new_with_data(&query, &data, &[0]),
+                0,
+                None,
+                SummaryMaintenanceLifecycleCapabilities::ALL,
+                &crate::cost_model::DefaultCostModel,
+            )
+            .is_err());
+        }
+    }
     use super::*;
     use asap_types::post_asap::{
         ExactKind, ExactParams, GroupingStrategy, ResultGuarantee, SketchAlgorithm,
@@ -1618,19 +1678,19 @@ mod tests {
     fn workload(
         batches: Vec<BatchEntry>,
         repeating: Vec<RepeatingEntry>,
-        data: DataWorkload,
+        _data: DataWorkload,
     ) -> QueryWorkload {
         QueryWorkload {
             language: QueryLanguage::PromQL,
             query_batch: (!batches.is_empty()).then_some(batches),
             repeating_queries: (!repeating.is_empty()).then_some(repeating),
-            data_workload: Some(data),
         }
     }
 
     fn at_rest() -> DataWorkload {
         DataWorkload {
             arrival: DataArrival::AtRest,
+
             ..Default::default()
         }
     }
@@ -1638,6 +1698,7 @@ mod tests {
     fn continuous(observed_at_ms: u64, valid_for_ms: u64) -> DataWorkload {
         DataWorkload {
             arrival: DataArrival::ContinuouslyIngesting,
+
             ingestion_rate: Evidence {
                 value: Some(Rate(1.0)),
                 source: EvidenceSource::Observed,
@@ -1673,7 +1734,8 @@ mod tests {
         query.demand = RepeatedDemand::FixedInterval(RepetitionInterval(600));
         let workload = workload(vec![], vec![query], at_rest());
 
-        let facts = workload_facts(&workload, &[0], 0, Some(Horizon(1.0))).unwrap();
+        let facts =
+            workload_facts(&workload, Some(&at_rest()), &[0], 0, Some(Horizon(1.0))).unwrap();
 
         assert_eq!(facts.reads, Some(1.0));
     }
@@ -1682,7 +1744,7 @@ mod tests {
     fn unpredictable_one_time_at_rest_selects_ephemeral() {
         let plan = plan_summary_maintenance_lifecycles(
             summary(),
-            WorkloadDemand::new(
+            WorkloadDemand::new_without_data(
                 &workload(vec![batch(Predictability::AdHoc)], vec![], at_rest()),
                 &[0],
             ),
@@ -1724,7 +1786,11 @@ mod tests {
         entry.execute_at = Some(TimestampMs(11_000));
         let plan = plan_summary_maintenance_lifecycles(
             summary(),
-            WorkloadDemand::new(&workload(vec![entry], vec![], at_rest()), &[0]),
+            WorkloadDemand::new_with_data(
+                &workload(vec![entry], vec![], at_rest()),
+                &at_rest(),
+                &[0],
+            ),
             1_000,
             None,
             SummaryMaintenanceLifecycleCapabilities::ALL,
@@ -1744,7 +1810,11 @@ mod tests {
         entry.execute_at = Some(TimestampMs(11_000));
         let plan = plan_summary_maintenance_lifecycles(
             summary(),
-            WorkloadDemand::new(&workload(vec![entry], vec![], at_rest()), &[0]),
+            WorkloadDemand::new_with_data(
+                &workload(vec![entry], vec![], at_rest()),
+                &at_rest(),
+                &[0],
+            ),
             6_000,
             None,
             SummaryMaintenanceLifecycleCapabilities::ALL,
@@ -1770,7 +1840,7 @@ mod tests {
         entry.execute_at = Some(TimestampMs(2_000));
         let plan = plan_summary_maintenance_lifecycles(
             summary(),
-            WorkloadDemand::new(&workload(vec![entry], vec![], at_rest()), &[0]),
+            WorkloadDemand::new_without_data(&workload(vec![entry], vec![], at_rest()), &[0]),
             3_000,
             None,
             SummaryMaintenanceLifecycleCapabilities::ALL,
@@ -1788,7 +1858,7 @@ mod tests {
         let workload = workload(vec![], vec![repeating()], continuous(1_000, 20_000));
         let plan = plan_summary_maintenance_lifecycles(
             nested_summary(),
-            WorkloadDemand::new(&workload, &[0]),
+            WorkloadDemand::new_without_data(&workload, &[0]),
             1_000,
             Some(Horizon(10.0)),
             SummaryMaintenanceLifecycleCapabilities::ALL,
@@ -1815,7 +1885,11 @@ mod tests {
     fn repeated_at_rest_selects_shared_without_inventing_updates() {
         let plan = plan_summary_maintenance_lifecycles(
             summary(),
-            WorkloadDemand::new(&workload(vec![], vec![repeating()], at_rest()), &[0]),
+            WorkloadDemand::new_with_data(
+                &workload(vec![], vec![repeating()], at_rest()),
+                &at_rest(),
+                &[0],
+            ),
             1_000,
             Some(Horizon(10.0)),
             SummaryMaintenanceLifecycleCapabilities::ALL,
@@ -1851,8 +1925,9 @@ mod tests {
         };
         let plan = plan_summary_maintenance_lifecycles(
             summary(),
-            WorkloadDemand::new(
+            WorkloadDemand::new_with_data(
                 &workload(vec![], vec![repeating()], continuous(1_000, 60_000)),
+                &continuous(1_000, 60_000),
                 &[0],
             ),
             1_000,
@@ -1881,8 +1956,9 @@ mod tests {
     fn stale_ingestion_evidence_cannot_enable_continuous_maintenance() {
         let plan = plan_summary_maintenance_lifecycles(
             summary(),
-            WorkloadDemand::new(
+            WorkloadDemand::new_with_data(
                 &workload(vec![], vec![repeating()], continuous(1_000, 1_000)),
+                &continuous(1_000, 1_000),
                 &[0],
             ),
             3_000,
@@ -1902,7 +1978,7 @@ mod tests {
     fn unknown_costs_do_not_make_a_long_lived_lifecycle_win() {
         let plan = plan_summary_maintenance_lifecycles(
             summary(),
-            WorkloadDemand::new(
+            WorkloadDemand::new_without_data(
                 &workload(vec![], vec![repeating()], continuous(1_000, 60_000)),
                 &[0],
             ),
@@ -1926,7 +2002,7 @@ mod tests {
     fn unrelated_workload_entries_do_not_create_reuse_for_a_target() {
         let plan = plan_summary_maintenance_lifecycles(
             summary(),
-            WorkloadDemand::new(
+            WorkloadDemand::new_without_data(
                 &workload(
                     vec![batch(Predictability::AdHoc), batch(Predictability::AdHoc)],
                     vec![],
@@ -1960,7 +2036,7 @@ mod tests {
         ]);
         let plan = plan_summary_maintenance_lifecycles(
             summary(),
-            WorkloadDemand::new(&workload(vec![], vec![entry], at_rest()), &[0]),
+            WorkloadDemand::new_without_data(&workload(vec![], vec![entry], at_rest()), &[0]),
             1_000,
             Some(Horizon(10.0)),
             SummaryMaintenanceLifecycleCapabilities::ALL,
@@ -1976,7 +2052,7 @@ mod tests {
         assert!(matches!(
             plan_summary_maintenance_lifecycles(
                 summary(),
-                WorkloadDemand::new(&workload, &[]),
+                WorkloadDemand::new_without_data(&workload, &[]),
                 1_000,
                 None,
                 SummaryMaintenanceLifecycleCapabilities::ALL,
@@ -1987,7 +2063,7 @@ mod tests {
         assert!(matches!(
             plan_summary_maintenance_lifecycles(
                 summary(),
-                WorkloadDemand::new(&workload, &[0, 0]),
+                WorkloadDemand::new_without_data(&workload, &[0, 0]),
                 1_000,
                 None,
                 SummaryMaintenanceLifecycleCapabilities::ALL,
@@ -2010,7 +2086,7 @@ mod tests {
         );
         let plan = plan_summary_maintenance_lifecycles(
             summary(),
-            WorkloadDemand::new(&workload, &[0, 1]),
+            WorkloadDemand::new_without_data(&workload, &[0, 1]),
             1_000,
             Some(Horizon(10.0)),
             SummaryMaintenanceLifecycleCapabilities::ALL,
@@ -2033,8 +2109,9 @@ mod tests {
         };
         let plan = plan_summary_maintenance_lifecycles(
             summary(),
-            WorkloadDemand::new(
+            WorkloadDemand::new_with_data(
                 &workload(vec![], vec![entry], continuous(1_000, 60_000)),
+                &continuous(1_000, 60_000),
                 &[0],
             ),
             1_000,
@@ -2058,7 +2135,7 @@ mod tests {
         let plan = materialize_with_summary_maintenance_lifecycles(
             &selection,
             &space.roots[0].1,
-            WorkloadDemand::new(&workload, &[0]),
+            WorkloadDemand::new_without_data(&workload, &[0]),
             1_000,
             None,
             SummaryMaintenanceLifecycleCapabilities::ALL,
@@ -2182,7 +2259,7 @@ mod tests {
         let plan = materialize_with_summary_maintenance_lifecycles(
             &selection,
             &space.roots[0].1,
-            WorkloadDemand::new(&workload, &[0]),
+            WorkloadDemand::new_without_data(&workload, &[0]),
             1_000,
             None,
             SummaryMaintenanceLifecycleCapabilities::ALL,
@@ -2204,7 +2281,7 @@ mod tests {
         let plan = materialize_with_summary_maintenance_lifecycles(
             &selection,
             &space.roots[0].1,
-            WorkloadDemand::new(&workload, &[0]),
+            WorkloadDemand::new_without_data(&workload, &[0]),
             1_000,
             None,
             SummaryMaintenanceLifecycleCapabilities::ALL,
@@ -2228,8 +2305,7 @@ mod tests {
 
         let selection = global_selection_with_summary_maintenance_lifecycles(
             &space,
-            &workload,
-            &[0],
+            WorkloadDemand::new_with_data(&workload, &at_rest(), &[0]),
             1_000,
             None,
             SummaryMaintenanceLifecycleCapabilities::ALL,
@@ -2262,7 +2338,7 @@ mod tests {
         let horizon = Some(Horizon(10.0));
         let plan = plan_summary_maintenance_lifecycles(
             root,
-            WorkloadDemand::new(&workload, &[0, 1]),
+            WorkloadDemand::new_with_data(&workload, &at_rest(), &[0, 1]),
             1_000,
             horizon,
             SummaryMaintenanceLifecycleCapabilities::ALL,
@@ -2282,7 +2358,13 @@ mod tests {
         let space = crate::replacement::search_workload(vec![("dashboard", Rc::clone(&root))]);
         let workload = workload(vec![], vec![repeating()], continuous(1_000, 60_000));
         let profiles = space
-            .recurrence_profiles_from_workload(&workload, &[0], 1_000, Some(Horizon(10.0)))
+            .recurrence_profiles_from_workload(
+                &workload,
+                Some(&continuous(1_000, 60_000)),
+                &[0],
+                1_000,
+                Some(Horizon(10.0)),
+            )
             .unwrap();
         // `search_workload` canonicalizes roots through CSE; recurrence
         // profiles are keyed by that canonical post-CSE node.
@@ -2306,7 +2388,7 @@ mod tests {
             at_rest(),
         );
         let profiles = space
-            .recurrence_profiles_from_workload(&workload, &[1, 0], 1_000, Some(Horizon(10.0)))
+            .recurrence_profiles_from_workload(&workload, None, &[1, 0], 1_000, Some(Horizon(10.0)))
             .unwrap();
         let dashboard = profiles.for_target(&space.roots[0].1);
         let batch = profiles.for_target(&space.roots[1].1);

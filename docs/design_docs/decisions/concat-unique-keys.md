@@ -1,5 +1,7 @@
 # `Concat` and `unique_keys`: the discriminator override (issue #228)
 
+> Status: accepted decision for the implementation described here.
+
 > **Update**: the investigation below found no current call site paying for a
 > redundant `Dedup` that this override would remove, and the original version
 > of this document recommended deferring Option 1 on that basis. The repo
@@ -12,7 +14,7 @@
 
 ## Context
 
-[`QueryExpr::Concat`](../../crates/types/src/pre_asap/query_expr.rs) (the
+[`QueryExpr::Concat`](../../../crates/types/src/pre_asap/query_expr.rs) (the
 n-ary exact `UNION ALL` node, renamed from `Merge` in #226) always drops
 `unique_keys` on its output — `merge_drops_the_branches_unique_keys` and
 `merge_and_setop_agree_on_unique_keys` pin this down. Issue #228 asks whether
@@ -37,7 +39,7 @@ Both current `Concat`-constructing call sites, and every consumer of
 `Schema::unique_keys` in the tree:
 
 - **PromQL `histogram_quantiles`** —
-  [`walk_histogram_quantiles`](../../crates/frontend-promql/src/promql.rs).
+  [`walk_histogram_quantiles`](../../../crates/frontend-promql/src/promql.rs).
   Each branch is `PromqlRelabel { dst: label, value: Literal(φᵢ), child: Aggregate{…} }`
   — the discriminator (φ, formatted the way `open_metrics_float` renders it)
   really is a distinct literal per branch, so the "prove disjointness via a
@@ -46,7 +48,7 @@ Both current `Concat`-constructing call sites, and every consumer of
   directly — **no `Dedup` or dedup-equivalent node follows it**, in this
   function or in any caller (`walk_call` returns its result unmodified).
 - **SQL `ROLLUP`/`CUBE`/`GROUPING SETS`** —
-  [`lower_grouping_sets`](../../crates/frontend-sql/src/sql/mod.rs). Each
+  [`lower_grouping_sets`](../../../crates/frontend-sql/src/sql/mod.rs). Each
   level's branch is `Project { …, child: Aggregate{…} }`, reinstating omitted
   keys as typed `NULL`s, and the levels are `Concat`ed. The function returns
   `Unresolved::Concat { children: branches }` directly — **no `Dedup` follows

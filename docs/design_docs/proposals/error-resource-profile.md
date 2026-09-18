@@ -1,5 +1,10 @@
 # Error–Resource Profile (ERP)
 
+> Status: implemented ERP v1 with proposed extensions. The
+> [ERP module](../../../crates/asap-aware-mapping/src/erp.rs) consumes discrete
+> empirical profiles; benchmark observations are not worst-case accuracy proofs.
+> See the status, supported selection modes and remaining work below.
+
 ## Status
 
 ERP v1 is a discrete, shape- and distribution-conditioned profile exchanged between
