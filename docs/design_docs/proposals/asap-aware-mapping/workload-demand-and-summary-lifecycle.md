@@ -692,7 +692,7 @@ and after aggregation.
 
 ## Acceptance and test design
 
-Implementation acceptance is defined by identical logical queries producing
+Realization acceptance is defined by identical logical queries producing
 different legal lifecycle choices under different workload contracts:
 
 1. **Unpredictable one-time query:** offers raw recomputation, compatible

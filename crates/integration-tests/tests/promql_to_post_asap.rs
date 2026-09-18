@@ -13,7 +13,7 @@ use asap_aware_mapping::accuracy::{
     QuantileInputDomain,
 };
 use asap_aware_mapping::cost_model::DefaultCostModel;
-use asap_aware_mapping::replacement::{keep_pre_asap, ImplementError};
+use asap_aware_mapping::replacement::{keep_pre_asap, RealizationError};
 use asap_aware_mapping::{
     search_workload, search_workload_with_targets, AccuracyModel, Replacement, ReplacementStrategy,
     ReplacementSubDAG, SketchAlgorithmStrategy, TargetSubDAG,
@@ -35,7 +35,7 @@ use asap_types::types::AccuracyTarget;
 /// a caller decides what to keep. This test-only helper reproduces the
 /// take-the-first-(`cost_model`-preferred)-candidate pattern so the
 /// single-answer pins below don't all repeat it by hand.
-fn realize(expr: &QueryExpr) -> Result<Rc<SummaryNode>, ImplementError> {
+fn realize(expr: &QueryExpr) -> Result<Rc<SummaryNode>, RealizationError> {
     let root = Rc::new(expr.clone());
     let target = TargetSubDAG::new(&root);
     match SketchAlgorithmStrategy::default_cost_model()
@@ -260,7 +260,7 @@ fn counter_weighted_topk_uses_candidates_only_for_membership_and_exact_values_fo
     ] {
         let root =
             Rc::new(lower_promql(query, AccuracyTarget::Epsilon(0.01)).expect("lowering failed"));
-        let strategy = SketchAlgorithmStrategy::with_models_and_evidence(
+        let strategy = SketchAlgorithmStrategy::new_with_planning_inputs_and_evidence(
             &DefaultCostModel,
             &DefaultAccuracyModel,
             &EqualSplitAllocator,
@@ -540,7 +540,7 @@ fn planner_only_e2e_temporal_topk_preserves_query_update_and_readout_contract() 
             )
             .expect("lower temporal Top-K"),
         );
-        let strategy = SketchAlgorithmStrategy::with_models_and_evidence(
+        let strategy = SketchAlgorithmStrategy::new_with_planning_inputs_and_evidence(
             &DefaultCostModel,
             &DefaultAccuracyModel,
             &EqualSplitAllocator,
@@ -712,7 +712,7 @@ fn planner_topk_reference_execution_matches_ground_truth() {
             )
             .unwrap(),
         );
-        let strategy = SketchAlgorithmStrategy::with_models_and_evidence(
+        let strategy = SketchAlgorithmStrategy::new_with_planning_inputs_and_evidence(
             &DefaultCostModel,
             &DefaultAccuracyModel,
             &EqualSplitAllocator,
@@ -1114,7 +1114,7 @@ fn ddsketch_ratio_rejects_unsafe_domains() {
             )
             .unwrap(),
         );
-        let strategy = SketchAlgorithmStrategy::with_models_and_evidence(
+        let strategy = SketchAlgorithmStrategy::new_with_planning_inputs_and_evidence(
             &DefaultCostModel,
             &DefaultAccuracyModel,
             &EqualSplitAllocator,
@@ -1143,7 +1143,7 @@ fn ddsketch_ratio_bound_holds_for_signed_pinned_sketch_readouts() {
             )
             .unwrap(),
         );
-        let strategy = SketchAlgorithmStrategy::with_models_and_evidence(
+        let strategy = SketchAlgorithmStrategy::new_with_planning_inputs_and_evidence(
             &DefaultCostModel,
             &DefaultAccuracyModel,
             &EqualSplitAllocator,
@@ -1221,7 +1221,7 @@ fn ddsketch_ratio_requires_a_supported_population_size() {
     );
     for count in [0, (1u64 << 53) + 1] {
         let evidence = PopulationEvidence(count);
-        let strategy = SketchAlgorithmStrategy::with_models_and_evidence(
+        let strategy = SketchAlgorithmStrategy::new_with_planning_inputs_and_evidence(
             &DefaultCostModel,
             &DefaultAccuracyModel,
             &EqualSplitAllocator,

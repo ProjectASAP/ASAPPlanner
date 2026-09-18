@@ -777,7 +777,7 @@ fn scan_columns(e: &QueryExpr) -> Vec<String> {
 fn without_grouping_lowers_to_the_exclusion_form() {
     // `sum without (instance) (rate(m[5m]))` — a cross-series reduction over the
     // per-series rate, grouped by every label except `instance`. The excluded
-    // label is stored positionally (the Binder seeds it), the grouping is the
+    // label is stored positionally (the SchemaResolver seeds it), the grouping is the
     // `without` form, and the output schema stays open.
     let qe = lower("sum without (instance) (rate(m[5m]))");
     let QueryExpr::Aggregate {
@@ -869,7 +869,7 @@ fn accuracy_target_flows_into_quantile_intent() {
 fn aggregate_output_schema_preserves_time_axis_and_labels() {
     let qe = lower(r#"quantile_over_time(0.99, http_request_duration{env="prod"}[5m])"#);
     // Per-series reduction: the root is Aggregate { TimeRange { Scan } }.
-    // The Binder adds all referenced label names (group keys AND filter
+    // The SchemaResolver adds all referenced label names (group keys AND filter
     // predicate columns) to the scan schema, so `env` appears as a column
     // even though it is only used as a filter.
     // per_series_reduction_schema preserves the time axis and all label columns.
@@ -888,7 +888,7 @@ fn aggregate_output_schema_preserves_time_axis_and_labels() {
 
 #[test]
 fn scan_schema_carries_ts_value_and_group_keys() {
-    // `service` is a group key → the Binder lands it in the self-contained
+    // `service` is a group key → the SchemaResolver lands it in the self-contained
     // Scan schema (positional). `env` is only a filter, so it is not a column.
     let qe = lower("count by (service) (count_over_time(requests[1m]))");
     fn find_scan(n: &QueryExpr) -> &QueryExpr {

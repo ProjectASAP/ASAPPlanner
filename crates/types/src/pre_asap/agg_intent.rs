@@ -31,7 +31,7 @@ use crate::types::AccuracyTarget;
 /// [`QueryExpr`](super::query_expr::QueryExpr) is: positional `ColumnId` once
 /// bound (the default, and every existing use of the bare `AggIntent` name),
 /// or an unresolved name-based `ColumnRef` for a front end constructing this
-/// intent directly, before the [`Binder`](super::binder::Binder) has run.
+/// intent directly, before the [`SchemaResolver`](super::schema_resolver::SchemaResolver) has run.
 /// `None` is the PromQL convention "the time-series sample value"; SQL
 /// `SUM(bytes), AVG(latency)` sets distinct `Some(_)`s so a multi-aggregate
 /// node binds each reducer to the right column, and `plan::bind` knows which

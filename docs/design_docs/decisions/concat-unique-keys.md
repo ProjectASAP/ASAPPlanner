@@ -128,7 +128,7 @@ for why it's fine to ship unused.
   merged shape from — so the feature works correctly end-to-end for a future
   caller upstream of `resolve_root`, even though no such caller exists yet.
 - Every other match/construction site touching `Concat` across the tree
-  (`canonicalize.rs`, `cse.rs`, `binder.rs`, `dag_export.rs`,
+  (`canonicalize.rs`, `cse.rs`, `schema_resolver.rs`, `dag_export.rs`,
   `asap-aware-mapping`'s `replacement.rs`/`explanation.rs`, and every
   test/tooling AST walker) was mechanically updated to bind or ignore the new
   field — most just added `, ..`; the two places that *rebuild* a `Concat`
@@ -228,16 +228,16 @@ A code review of the initial implementation found two real correctness gaps
 in the untested `resolve()`/`canonicalize()` path, plus a documentation
 accuracy issue. All three are fixed on the same PR:
 
-1. **`binder.rs`'s `collect_referenced_columns` didn't walk
+1. **`schema_resolver.rs`'s `collect_referenced_columns` didn't walk
    `discriminator_unique_key`'s `ColumnRef`s.** This function seeds every
-   name a query references into the Binder's usage-derived fallback schema,
+   name a query references into the SchemaResolver's usage-derived fallback schema,
    which a schema-less `Scan` leaf (PromQL) falls back to. The `Concat` arm
    was updated with `, ..` only, unlike the analogous `Dedup.cols` case
    (which *is* walked, `push_ref_name`-style). Concretely: a future
    `concat_with_discriminator(branches, discriminator_col, inner_key)` call
    over an open query, where the discriminator column isn't otherwise
    referenced anywhere else in the tree, with a schema-less leaf `Scan` in
-   the first branch — the Binder's fallback schema wouldn't contain the
+   the first branch — the SchemaResolver's fallback schema wouldn't contain the
    discriminator name, and `resolve.rs`'s later `resolve_column_ref` call
    would fail `NotFound` for a column the caller correctly named. Fixed:
    the `Concat` arm now pushes `key.discriminator()` and every

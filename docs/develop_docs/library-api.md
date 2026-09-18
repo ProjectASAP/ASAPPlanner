@@ -418,7 +418,7 @@ fn main() {
     let allocation = EqualSplitAllocator;
     let evidence = NoAccuracyEvidence;
     let strategies: Vec<Box<dyn ReplacementStrategy + '_>> = vec![Box::new(
-        SketchAlgorithmStrategy::with_models_and_evidence(
+        SketchAlgorithmStrategy::new_with_planning_inputs_and_evidence(
             &cost, &accuracy, &allocation, &evidence,
         ),
     )];
@@ -430,7 +430,7 @@ fn main() {
 Constructor definition:
 
 ```text
-SketchAlgorithmStrategy::with_models_and_evidence(
+SketchAlgorithmStrategy::new_with_planning_inputs_and_evidence(
     cost_model: &dyn CostModel,
     accuracy_model: &dyn AccuracyModel,
     allocator: &dyn AccuracyBudgetAllocator,
@@ -455,7 +455,7 @@ with the intended model/evidence; replacing only the final sorting model does no
 regenerate parameter choices. For evidence-aware defaults, use
 `asap_aware_mapping::replacement::default_strategies_with_evidence`.
 For custom accuracy/allocation/evidence on sketches,
-`SketchAlgorithmStrategy::with_models_and_evidence` exposes these providers.
+`SketchAlgorithmStrategy::new_with_planning_inputs_and_evidence` exposes these providers.
 Keep each provider's evidence scope and freshness valid for the query population.
 
 ## Workload inputs and defaults
@@ -647,7 +647,7 @@ workflow for those decisions. Downstream still owns physical commitment.
 | --- | --- |
 | `PlanSpace::global_selection(&model)` | Compatible structural selection across groups; no recurrence or lifecycle planning implied |
 | `PlanSpace::global_selection_with_recurrence(...)` | Compatible selection using supplied recurrence profiles/horizon; no lifecycle commitments implied |
-| `GlobalSelection::materialize(&target)` | `Result<Option<Rc<SummaryNode>>, ImplementError>`; constructs semantic IR, not stored summary data |
+| `GlobalSelection::materialize(&target)` | `Result<Option<Rc<SummaryNode>>, RealizationError>`; constructs semantic IR, not stored summary data |
 
 Use a target associated with the searched space; materialization can return `None`
 when that target is absent. A downstream integration can use these convenience
@@ -660,7 +660,7 @@ for checking complete physical alternatives and deployment constraints.
 ```text
 PlanSpace::global_selection(&self, cost_model: &dyn CostModel) -> GlobalSelection<'_>
 GlobalSelection::materialize(&self, target: &Rc<QueryExpr>)
-    -> Result<Option<Rc<SummaryNode>>, ImplementError>
+    -> Result<Option<Rc<SummaryNode>>, RealizationError>
 ```
 
 For structural inspection only, this complete example selects a semantic root
@@ -741,4 +741,4 @@ cargo doc -p asap-aware-mapping -p asap-types --no-deps
 - [Cost models](../../crates/asap-aware-mapping/src/cost_model.rs)
 - [Lifecycle APIs](../../crates/asap-aware-mapping/src/summary_maintenance_lifecycle.rs)
 - [Workload types](../../crates/types/src/workload.rs)
-- [Downstream boundary](../design_docs/architecture/planner-downstream-boundary.md)
+- [Planner-runtime contract](../design_docs/architecture/planner-runtime-contract.md)

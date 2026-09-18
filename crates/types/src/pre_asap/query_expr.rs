@@ -10,7 +10,7 @@
 //! independently constructed, structurally-equal subtrees into two
 //! references to one `Rc` (issue #212, #222). Column identity is
 //! **positional** (`Aggregate.reduction: Reduction`, wrapping `GroupKeys`
-//! for the grouped case), resolved by the [`Binder`](super::binder) against
+//! for the grouped case), resolved by the [`SchemaResolver`](super::schema_resolver) against
 //! the self-contained [`Schema`] carried on each `Scan`.
 
 use std::rc::Rc;
@@ -25,15 +25,15 @@ use super::schema::{Column, ColumnId, DataType, Schema};
 
 /// The column-reference resolution state a [`QueryExpr<C>`] tree carries —
 /// [`ColumnId`] (the default, and what the bare `QueryExpr` name has always
-/// meant) once the [`Binder`](super::binder::Binder) has resolved every
+/// meant) once the [`SchemaResolver`](super::schema_resolver::SchemaResolver) has resolved every
 /// reference positionally, or the front-end-emitted, name-based [`ColumnRef`]
 /// before binding. The only place the two states differ in *shape* rather
 /// than just in which type fills `C` is [`QueryExpr::Scan`]'s `schema` field:
-/// a bound tree's binding schema is always known (the Binder is total, so
+/// a bound tree's binding schema is always known (the SchemaResolver is total, so
 /// [`ScanSchema`](Self::ScanSchema) `= Schema`); an unresolved front-end
 /// `Scan` knows its schema only when the front end already has it without
 /// binding — a SQL leaf, catalog-backed (`Some`) — `None` (PromQL) defers to
-/// the Binder, so `ScanSchema = Option<Schema>`.
+/// the SchemaResolver, so `ScanSchema = Option<Schema>`.
 pub trait ColState:
     Clone + std::fmt::Debug + PartialEq + Serialize + for<'de> Deserialize<'de>
 {
@@ -225,7 +225,7 @@ pub enum DataModel {
 }
 
 /// The leaf data source of a `Scan`. The schema itself rides on the
-/// `Scan.schema` field (Binder-built); `Source` carries only the leaf's
+/// `Scan.schema` field (SchemaResolver-built); `Source` carries only the leaf's
 /// identity.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Source {
@@ -397,7 +397,7 @@ pub enum WindowFrameBound {
 /// [`QueryExpr::PromqlInfoEnrich`] (issue #84). Unlike a `Scan` predicate it is not
 /// resolved positionally — it references the info metric's labels (`__name__`
 /// picks the metric, the rest constrain data labels), which aren't in the input
-/// vector's schema; the post-ASAP binder applies it against the info metric.
+/// vector's schema; the post-ASAP realization pass applies it against the info metric.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct InfoMatcher {
     pub label: String,
@@ -639,10 +639,10 @@ pub enum QueryExpr<C: ColState = ColumnId> {
     /// Outermost leaf. `schema` is the **binding schema** — the resolved column
     /// set every positional `ColumnId` in the tree indexes into, *not* a full
     /// description of the runtime row — once bound (`schema: Schema`, always
-    /// present: the [`Binder`](super::binder) is total). Before binding, a
+    /// present: the [`SchemaResolver`](super::schema_resolver) is total). Before binding, a
     /// front-end-emitted `Scan` (`C = ColumnRef`) knows it only when the front
     /// end already has it without binding — a catalog-backed SQL leaf — `None`
-    /// (PromQL) defers to the Binder; see [`ColState::ScanSchema`]. Complete
+    /// (PromQL) defers to the SchemaResolver; see [`ColState::ScanSchema`]. Complete
     /// when catalog-backed (SQL); for schemaless PromQL the bound schema is
     /// usage-derived (the `(ts, value)` floor + the labels the query
     /// references), since a metric's label set is open and known only at
@@ -719,7 +719,7 @@ pub enum QueryExpr<C: ColState = ColumnId> {
     /// metric(s), the rest constrain the data labels), joined on their shared
     /// identifying labels. Those join keys are the info metric's identifying
     /// labels — runtime/metadata-resolved, since an open PromQL schema can't
-    /// enumerate them — so they are NOT carried here; the post-ASAP binder
+    /// enumerate them — so they are NOT carried here; the post-ASAP realization pass
     /// resolves them from the info metric's schema. The output keeps
     /// `child`'s (open) schema: the
     /// grafted labels appear at runtime.
@@ -1062,7 +1062,7 @@ impl<C: ColState> QueryExpr<C> {
     }
 
     /// Recursively collect every column reference in a **scalar** subtree —
-    /// used by the [`Binder`](super::binder::Binder) to seed usage-derived
+    /// used by the [`SchemaResolver`](super::schema_resolver::SchemaResolver) to seed usage-derived
     /// leaf schemas, and available to post-ASAP binding for column-lineage /
     /// selectivity.
     /// `self` must be one of the scalar variants (see the module doc on
@@ -1130,7 +1130,7 @@ pub type ResolvedQueryExpr = QueryExpr<ColumnId>;
 
 /// The front-end-emitted, name-based, unresolved tree —
 /// `QueryExpr<ColumnRef>`: front ends construct this directly during their
-/// own `interpret` step (issue #179), and the [`Binder`](super::binder)
+/// own `interpret` step (issue #179), and the [`SchemaResolver`](super::schema_resolver)
 /// resolves it into [`ResolvedQueryExpr`].
 pub type UnresolvedQueryExpr = QueryExpr<ColumnRef>;
 

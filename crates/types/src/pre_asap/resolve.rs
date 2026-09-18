@@ -10,7 +10,7 @@
 //! "mechanical, schema-dependent substitution" #179 describes: a single
 //! generic, shape-preserving walk — every [`UnresolvedQueryExpr`] variant maps to the
 //! identical [`ResolvedQueryExpr`] variant — that resolves every [`ColumnRef`] to
-//! the [`Binder`](super::binder::Binder)-computed positional [`ColumnId`].
+//! the [`SchemaResolver`](super::schema_resolver::SchemaResolver)-computed positional [`ColumnId`].
 //!
 //! ## Why positional `ColumnId`, not just carrying names all the way through (issue #216)
 //!
@@ -53,7 +53,6 @@ use std::rc::Rc;
 use thiserror::Error;
 
 use super::agg_intent::AggIntent;
-use super::binder::Binder;
 use super::column_resolution::{
     resolve_column_ref, resolve_column_refs, resolve_expr, resolve_group_keys_promql, ResolveError,
 };
@@ -63,6 +62,7 @@ use super::query_expr::{
     QueryExprError, Reduction, ResolvedQueryExpr, SortKey, UnresolvedQueryExpr,
 };
 use super::schema::{ColumnId, Schema};
+use super::schema_resolver::SchemaResolver;
 
 /// Errors from resolving a canonical, unresolved [`UnresolvedQueryExpr`] tree.
 #[derive(Debug, Error)]
@@ -78,7 +78,7 @@ pub enum ResolveTreeError {
 
 /// Resolve a whole [`UnresolvedQueryExpr`] tree rooted at `tree` into canonical
 /// [`ResolvedQueryExpr`]: binds every `ColumnRef` to a `ColumnId` via the
-/// [`Binder`], then [`canonicalize`](super::canonicalize::canonicalize)s the
+/// [`SchemaResolver`], then [`canonicalize`](super::canonicalize::canonicalize)s the
 /// result.
 pub fn resolve_root(tree: &UnresolvedQueryExpr) -> Result<ResolvedQueryExpr, ResolveTreeError> {
     resolve_root_with_inherited(tree, &[])
@@ -90,7 +90,7 @@ fn resolve_root_with_inherited(
     tree: &UnresolvedQueryExpr,
     inherited: &[String],
 ) -> Result<ResolvedQueryExpr, ResolveTreeError> {
-    let fallback = Binder::new().bind_with_inherited(tree, inherited);
+    let fallback = SchemaResolver::new().resolve_schema_with_inherited(tree, inherited);
     let l3 = resolve(tree, &fallback)?;
     Ok(super::canonicalize::canonicalize(l3))
 }
@@ -408,7 +408,7 @@ fn resolve(
             // different label sets, so each branch resolves against its OWN
             // bound schema; but an independently-bound side still has to see
             // label names an *enclosing* node references (issue #52).
-            let own = super::binder::collect_referenced_columns(tree);
+            let own = super::schema_resolver::collect_referenced_columns(tree);
             let inherited: Vec<String> = inherited_names(fallback)
                 .into_iter()
                 .filter(|n| !own.contains(n))
@@ -698,8 +698,8 @@ mod tests {
     /// Issue #228 review, end-to-end: `resolve_root` over a `Concat` whose
     /// discriminator column is referenced *nowhere else* in the tree, with a
     /// schema-less (usage-derived) leaf `Scan` in the first branch — exactly
-    /// the scenario the review flagged. Before the `binder.rs` fix, the
-    /// Binder's fallback schema wouldn't contain `phi` at all, and this
+    /// the scenario the review flagged. Before the `schema_resolver.rs` fix, the
+    /// SchemaResolver's fallback schema wouldn't contain `phi` at all, and this
     /// `resolve_column_ref` call would fail `NotFound` for a column the
     /// caller correctly named. It must resolve cleanly, and the resolved
     /// `ConcatDiscriminatorKey` must carry the *positional* `ColumnId`s of

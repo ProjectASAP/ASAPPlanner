@@ -44,7 +44,7 @@ The implementation keeps five layers distinct:
   physical operator with the statistics required by its formula;
 - analytical estimation (`analytical_cost`), which composes any evidenced DAG
   whose operators have supported formulas;
-- the deployment summary binder, which maps a selected `SummaryExpr` DAG to
+- the deployment summary physical plan provider, which maps a selected `SummaryExpr` DAG to
   physical summary operators and snapshots their evidence; and
 - the planner-ranking adapter, which compares the complete raw and replacement
   DAGs before making a candidate available to global selection.
@@ -812,7 +812,7 @@ physical-identity deduplication.
 ### Complete bound streaming summary DAGs
 
 The multi-node streaming path accepts a complete, already-bound
-`SummaryExpr` DAG. It does not guess physical implementations. The binder must
+`SummaryExpr` DAG. It does not guess physical implementations. The provider must
 provide evidence for every reachable node:
 
 | Logical node | Required physical evidence |
@@ -889,7 +889,7 @@ whole. The planner does not mix individual nodes from different alternatives.
 
 The ownership of planner-visible realization selection versus downstream
 implementation and deployment is defined in
-[ASAPPlanner and downstream application boundaries](../../architecture/planner-downstream-boundary.md).
+[ASAPPlanner planner-runtime contract](../../architecture/planner-runtime-contract.md).
 This document defines only how complete alternatives are costed.
 
 A retained summary bootstraps every active window, consumes arriving rows, and
@@ -976,7 +976,7 @@ Logical CSE share/recompute rewrites are not complete physical alternatives:
 they do not encode retained shared state or independent execution
 multiplicity. The analytical adapter therefore does not assign them an
 optimistic complete-plan cost. They continue through the existing CSE policy
-until a physical binder can return explicit DAGs for both arms. Within every
+until a physical plan provider can return explicit DAGs for both arms. Within every
 bound physical DAG, stable provider-owned physical IDs deduplicate shared
 scans, builds, and retained states; logical `Rc` identity is never substituted
 for physical identity.
@@ -993,7 +993,7 @@ abstract per-summary `SummaryWindowFramework` assignment by comparing complete
 `StreamingWindowFrameworkCandidate` evidence bundles. Component ownership,
 including the distinction between a window primitive and its concrete runtime
 implementation, is defined in
-[ASAPPlanner and downstream application boundaries](../../architecture/planner-downstream-boundary.md).
+[ASAPPlanner planner-runtime contract](../../architecture/planner-runtime-contract.md).
 
 ## Accuracy evidence remains separate from cost
 
@@ -1182,7 +1182,7 @@ for units, formulas, evidence requirements, and calibration.
 
 The physical-plan adapter supports explicit network and materialization
 boundaries through optional deployment evidence. See
-[physical boundary estimates](../../../develop_docs/physical-boundary-costs.md)
+[physical boundary estimates](../../../develop_docs/physical-handoff-costs.md)
 for kinds, execution multiplicity, evidence, and calibration.
 
 An estimate is unavailable when required evidence, a physical formula, or a

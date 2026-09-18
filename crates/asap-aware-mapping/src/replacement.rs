@@ -10,10 +10,10 @@
 //! turns each of those candidates into a real, executable
 //! [`ReplacementSubDAG`]:
 //!
-//! 1. **Decide**: [`implementations_for_with`] enumerates every valid
-//!    [`Implementation`] for the target's intent — exhaustive, and ranked
+//! 1. **Decide**: [`realizations_for_intent`] enumerates every valid
+//!    [`Realization`] for the target's intent — exhaustive, and ranked
 //!    most-preferred-first via a [`CostModel`] (candidate sketch family/kind,
-//!    already sized to the target's own accuracy target: `Implementation::Sketch`'s
+//!    already sized to the target's own accuracy target: `Realization::Sketch`'s
 //!    `params` are the output of inverting that accuracy target through
 //!    `CostModel::size_params`, not a placeholder filled in later).
 //! 2. **Build**: for each candidate in that list, [`construct_summary`]
@@ -25,7 +25,7 @@
 //!    assembles the `SummaryAgg`/`SummaryEstimate` node.
 //!
 //! There is no separate decision step and construction step living in
-//! different modules bridged by a named "given an `Implementation`, bind it"
+//! different modules bridged by a named "given a `Realization`, bind it"
 //! function — step 2 is *not* a second decision (nothing about which
 //! candidate to prefer happens there), it is mechanical construction that
 //! has to run regardless of how `(kind, params)` were chosen, so it lives
@@ -76,7 +76,7 @@
 //!
 //! ## The two strategies, and why these two
 //!
-//! - [`SketchAlgorithmStrategy`] wraps [`implementations_for_with`]'s exhaustive,
+//! - [`SketchAlgorithmStrategy`] wraps [`realizations_for_intent`]'s exhaustive,
 //!   ranked list directly: for the same bindable-`Aggregate` shape this crate
 //!   binds (single intent, no `HAVING`), every entry becomes its own bound
 //!   candidate.
@@ -98,7 +98,7 @@
 //!
 //! ## Non-goals (tracked separately, not attempted here)
 //!
-//! - **[`implementations_for_with`]'s own outward-facing behavior is
+//! - **[`realizations_for_intent`]'s own outward-facing behavior is
 //!   unchanged.** Same inputs still produce the same exhaustive, ranked
 //!   list — only its home moved (from a separate `implementation` module
 //!   into this one) and its own visibility dropped to module-private, since
@@ -254,7 +254,7 @@
 //!   [`cse_preference`] — rather than re-deriving a competing comparison.
 //! - A group whose candidates are [`SketchAlgorithmStrategy`]'s sketch-family
 //!   candidates is ranked via [`CostModel::rank_candidates`] (the same hook
-//!   `implementations_for_with` itself consults), applied to the
+//!   `realizations_for_intent` itself consults), applied to the
 //!   candidates' own [`SketchAlgorithm`]s.
 //! - Any other shape (a single candidate, or a mix this module doesn't have
 //!   a defined comparison for) keeps discovery order — there is nothing to
@@ -396,7 +396,7 @@ use crate::topk_reuse::TopKLimitReuseStrategy;
 /// schema derivation over a pre-ASAP [`QueryExpr`] — not something specific
 /// to workload-wide orchestration.
 #[derive(Debug, Error)]
-pub enum ImplementError {
+pub enum RealizationError {
     /// Schema derivation failed while lifting an edge to `SummarySchema`.
     #[error("schema derivation failed during pre-ASAP → post-ASAP binding: {0}")]
     Schema(#[from] QueryExprError),
@@ -468,7 +468,7 @@ impl<'a> TargetSubDAG<'a> {
 
 /// What a [`ReplacementSubDAG`] actually substitutes a [`TargetSubDAG`] with.
 ///
-/// Generalizes [`implementations_for_with`]'s two possible *kinds* of answer
+/// Generalizes [`realizations_for_intent`]'s two possible *kinds* of answer
 /// — a post-ASAP binding decision, or a still-pre-ASAP structural alternative
 /// — into "one candidate among several", each with its own
 /// [`ReplacementSubDAG`].
@@ -513,7 +513,7 @@ pub struct ReplacementSubDAG {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReplacementProvenance {
-    SummaryImplementation,
+    SummaryRealization,
     CseShare,
     CseRecompute,
     LogicalRewrite,
@@ -613,7 +613,7 @@ pub trait ReplacementStrategy {
     }
 }
 
-// ── Implementation: how one AggIntent may be realised ───────────────────────
+// ── Realization: how one AggIntent may be realised ───────────────────────
 
 /// How an [`AggIntent`] may be realised at post-ASAP binding time (issue
 /// #98): by an approximate summary (sketch, sample, wavelet, statistical
@@ -622,15 +622,15 @@ pub trait ReplacementStrategy {
 /// carries only the intent + accuracy target, never the realization — and
 /// it's a per-node decision, made once per `AggIntent`, not a plan-wide one.
 ///
-/// [`implementations_for_with`] is where every valid realization gets
+/// [`realizations_for_intent`] is where every valid realization gets
 /// enumerated, exhaustive and ranked (most-preferred first) — this crate has
-/// no separate function that computes just "the one" `Implementation`
+/// no separate function that computes just "the one" `Realization`
 /// independently of that list. [`SketchAlgorithmStrategy`] is the sole
 /// consumer: it wraps every entry of this list into its own bound
 /// [`SummaryNode`] and returns all of them, ranked — a caller wanting a
 /// single answer keeps the first one itself (see the module docs above).
 #[derive(Debug, Clone, PartialEq)]
-pub enum Implementation {
+pub enum Realization {
     /// An exact **mergeable** accumulator (partial state ≡ the value
     /// itself: `Sum` / `Count` / `Min` / `Max` / `Rate` / `Increase`). The
     /// built state *is* the answer already — no `SummaryEstimate` readout
@@ -671,21 +671,21 @@ pub enum Implementation {
     PassThrough,
 }
 
-/// Does an already-**available** [`Implementation`] — e.g. a summary
+/// Does an already-**available** [`Realization`] — e.g. a summary
 /// instance a downstream deployment already materialized somewhere, found
 /// via whatever inventory/index that deployment keeps — satisfy a
-/// **required** [`Implementation`] (one of the candidates
-/// [`implementations_for_with`] produced for some [`AggIntent`])?
+/// **required** [`Realization`] (one of the candidates
+/// [`realizations_for_intent`] produced for some [`AggIntent`])?
 ///
 /// This is the query-optimization-literature "materialized view matching"
 /// / "answering queries using views" question, narrowed to this crate's
 /// summary vocabulary: not "can I build this from scratch" (that's what
-/// [`implementations_for_with`] answers) but "does something that already
+/// [`realizations_for_intent`] answers) but "does something that already
 /// exists answer this".
 ///
 /// `asap-plan` deliberately ships no implementation of this trait and no
-/// default method body — unlike [`implementations_for_with`], which decision
-/// an available `Implementation` satisfies a required one is not a fact this
+/// default method body — unlike [`realizations_for_intent`], which decision
+/// an available `Realization` satisfies a required one is not a fact this
 /// crate can settle on its own. Two real, reasonable answers already
 /// diverge outside this crate:
 ///
@@ -704,10 +704,10 @@ pub enum Implementation {
 ///
 /// Implementations are expected to consult `required`/`available`'s
 /// `kind` (and whatever grouping/placement context the deployment tracks
-/// alongside `Implementation`, which this trait's signature doesn't carry
+/// alongside `Realization`, which this trait's signature doesn't carry
 /// because this crate has no inventory concept to carry it in).
 pub trait Matcher {
-    fn is_satisfied_by(&self, required: &Implementation, available: &Implementation) -> bool;
+    fn is_satisfied_by(&self, required: &Realization, available: &Realization) -> bool;
 }
 
 /// Confidence δ assumed when the target carries only an ε
@@ -717,7 +717,7 @@ pub const DEFAULT_DELTA: f64 = 0.01;
 
 /// The sketch kinds that can serve an intent, most-preferred first.
 /// This is the `AggIntent → SketchAlgorithm` map of issue #98;
-/// [`implementations_for_with`] sizes and ranks every entry via `cost_model`.
+/// [`realizations_for_intent`] sizes and ranks every entry via `cost_model`.
 /// Listed here so the candidate set has one home.
 pub fn summary_candidates(intent: &AggIntent) -> &'static [SketchAlgorithm] {
     match intent {
@@ -748,9 +748,9 @@ pub fn summary_candidates(intent: &AggIntent) -> &'static [SketchAlgorithm] {
 
 /// The [`AccuracyTarget`] threaded onto an approximate-capable intent
 /// (`Quantile`/`Cardinality`/`Count`/`TopK`), or `None` for every other
-/// intent (no sketch candidate applies — [`implementations_for_with`]'s own
+/// intent (no sketch candidate applies — [`realizations_for_intent`]'s own
 /// match routes those elsewhere). Exposed so callers resolve the exact same
-/// accuracy target [`implementations_for_with`] does, without re-deriving it
+/// accuracy target [`realizations_for_intent`] does, without re-deriving it
 /// from scratch.
 pub fn accuracy_target(intent: &AggIntent) -> Option<&AccuracyTarget> {
     match intent {
@@ -764,10 +764,10 @@ pub fn accuracy_target(intent: &AggIntent) -> Option<&AccuracyTarget> {
     }
 }
 
-/// Every valid [`Implementation`] for `intent`, exhaustive and ranked
+/// Every valid [`Realization`] for `intent`, exhaustive and ranked
 /// (most-preferred first via `cost_model`) — the *only* place this crate
 /// decides what an `AggIntent` may become. Nothing in this crate computes
-/// "the one" `Implementation` independently of this list:
+/// "the one" `Realization` independently of this list:
 /// [`SketchAlgorithmStrategy`] keeps every entry as a candidate, and a caller
 /// that wants a single executable answer takes the head of *that* strategy's
 /// output itself.
@@ -779,12 +779,12 @@ pub fn accuracy_target(intent: &AggIntent) -> Option<&AccuracyTarget> {
 /// `pub(crate)`: [`SketchAlgorithmStrategy::replacements`] is this module's
 /// own caller; `grouping::HydraGroupingStrategy` (issue #256) is the one
 /// caller outside it, needing the exact same already-ranked candidate list
-/// to find the `Implementation::Sketch` matching the Hydra-eligible kind it
+/// to find the `Realization::Sketch` matching the Hydra-eligible kind it
 /// is building a candidate for.
-pub(crate) fn implementations_for_with(
+pub(crate) fn realizations_for_intent(
     intent: &AggIntent,
     cost_model: &dyn CostModel,
-) -> Vec<Implementation> {
+) -> Vec<Realization> {
     match intent {
         // ── Approximate-capable intents — the AccuracyTarget decides ────────
         AggIntent::Quantile { accuracy, .. }
@@ -795,13 +795,13 @@ pub(crate) fn implementations_for_with(
         | AggIntent::TopK { accuracy, .. } => match accuracy {
             AccuracyTarget::Exact if matches!(intent, AggIntent::Count { .. }) => vec![
                 exact_realization(intent),
-                Implementation::Sketch(SketchKind::new(
+                Realization::Sketch(SketchKind::new(
                     SketchAlgorithm::UnivMon,
                     default_size_params(SketchAlgorithm::UnivMon, intent, 0.0, DEFAULT_DELTA),
                 )),
             ],
             AccuracyTarget::Exact => vec![exact_realization(intent)],
-            _ => sketch_implementations(intent, accuracy, cost_model),
+            _ => sketch_realizations(intent, accuracy, cost_model),
         },
 
         // ── Exact mergeable accumulators ─────────────────────────────────────
@@ -823,13 +823,13 @@ pub(crate) fn implementations_for_with(
         | AggIntent::StdDev { .. }
         | AggIntent::Variance { .. }
         | AggIntent::PearsonCorr { .. } => {
-            vec![Implementation::PassThrough]
+            vec![Realization::PassThrough]
         }
 
         // ── Classic-bucket histogram_quantile (#79): exact `le`-bucket
         //    interpolation over pre-aggregated counts — NOT re-sketchable.
         //    (The native/raw form lowers to the generic `Quantile` above.)
-        AggIntent::HistogramQuantile { .. } => vec![Implementation::PassThrough],
+        AggIntent::HistogramQuantile { .. } => vec![Realization::PassThrough],
 
         // ── Per-series transforms and reductions with no sketch realization:
         //    counter-derivatives (#44), math (#45), time/calendar (#46),
@@ -859,12 +859,12 @@ pub(crate) fn implementations_for_with(
         | AggIntent::TsOfMinOverTime
         | AggIntent::TsOfMaxOverTime
         | AggIntent::TsOfFirstOverTime
-        | AggIntent::TsOfLastOverTime => vec![Implementation::PassThrough],
+        | AggIntent::TsOfLastOverTime => vec![Realization::PassThrough],
 
         // ── Group / count_values (#49): exact per `agg_is_exact`, but their
         //    output is structural (constant-1 / a synthesized label column),
         //    not a value a summary accumulator carries.
-        AggIntent::Group | AggIntent::CountValues { .. } => vec![Implementation::PassThrough],
+        AggIntent::Group | AggIntent::CountValues { .. } => vec![Realization::PassThrough],
 
         // ── Extension (deployment-model-specific, issue #131) — core has no
         //    realization opinion for a shape it doesn't know, so it defers
@@ -873,7 +873,7 @@ pub(crate) fn implementations_for_with(
         //    every deployment that doesn't override it. Core has no way to
         //    enumerate alternatives for an opaque deployment-defined shape,
         //    so this is always exactly one candidate. This is also the only
-        //    path that can currently produce `Implementation::Sample`/
+        //    path that can currently produce `Realization::Sample`/
         //    `Wavelet`/`StatModel` — see the module docs.
         AggIntent::Extension { ext_kind, payload } => {
             vec![cost_model.realize_extension(ext_kind, payload)]
@@ -885,29 +885,29 @@ pub(crate) fn implementations_for_with(
 /// `AccuracyTarget::Exact`. `Count` has a mergeable exact accumulator; exact
 /// quantile / top-k / cardinality have no single-value summary form (they
 /// need the full multiset / heap / set) and pass through.
-fn exact_realization(intent: &AggIntent) -> Implementation {
+fn exact_realization(intent: &AggIntent) -> Realization {
     match intent {
         AggIntent::Count { .. } => exact_accumulator(intent, ExactKind::Count, ExactParams::Count),
-        _ => Implementation::PassThrough,
+        _ => Realization::PassThrough,
     }
 }
 
-fn exact_accumulator(intent: &AggIntent, kind: ExactKind, params: ExactParams) -> Implementation {
+fn exact_accumulator(intent: &AggIntent, kind: ExactKind, params: ExactParams) -> Realization {
     // An exact accumulator is only sound when partial states merge
     // (`agg(A ∪ B) = combine(agg(A), agg(B))`).
     debug_assert!(
         agg_is_mergeable(intent),
         "accumulator for non-mergeable {intent:?}"
     );
-    Implementation::ExactAggregate { kind, params }
+    Realization::ExactAggregate { kind, params }
 }
 
 /// Resolve an [`AccuracyTarget`] into the `(eps, delta)` budget
-/// [`CostModel::size_params`] needs. Shared by [`sketch_implementations`] and
+/// [`CostModel::size_params`] needs. Shared by [`sketch_realizations`] and
 /// this crate's own sizing — one place this resolution happens, so nothing
 /// can drift apart on it.
 ///
-/// `Exact` is unreachable via [`implementations_for_with`] (which routes
+/// `Exact` is unreachable via [`realizations_for_intent`] (which routes
 /// `Exact` to [`exact_realization`] instead); degrades to the tightest
 /// parameters for a caller that resolves it directly anyway.
 pub fn accuracy_budget(accuracy: &AccuracyTarget) -> (f64, f64) {
@@ -918,14 +918,14 @@ pub fn accuracy_budget(accuracy: &AccuracyTarget) -> (f64, f64) {
     }
 }
 
-/// Every candidate sketch [`Implementation`] for an approximate-capable
+/// Every candidate sketch [`Realization`] for an approximate-capable
 /// intent, sized to `accuracy` and ranked via `cost_model.rank_candidates`
-/// (most-preferred first) — [`implementations_for_with`]'s Sketch branch.
-fn sketch_implementations(
+/// (most-preferred first) — [`realizations_for_intent`]'s Sketch branch.
+fn sketch_realizations(
     intent: &AggIntent,
     accuracy: &AccuracyTarget,
     cost_model: &dyn CostModel,
-) -> Vec<Implementation> {
+) -> Vec<Realization> {
     let (eps, delta) = accuracy_budget(accuracy);
     let ranked = crate::cost_model::validated_candidate_ranking(
         cost_model,
@@ -938,7 +938,7 @@ fn sketch_implementations(
             let params = cost_model.size_params(algorithm.clone(), intent, eps, delta);
             sketch_state_bytes(&params)
                 .is_none_or(|bytes| bytes <= DEFAULT_MAX_SKETCH_STATE_BYTES)
-                .then(|| Implementation::Sketch(SketchKind::new(algorithm, params)))
+                .then(|| Realization::Sketch(SketchKind::new(algorithm, params)))
         })
         .collect()
 }
@@ -1118,7 +1118,7 @@ pub struct ExpectedCaseSizing {
 ///
 /// [`default_size_params`]'s own behavior is completely unchanged by this
 /// function's existence — this is a separate, additive entry point, never
-/// called from [`default_size_params`] or [`implementations_for_with`].
+/// called from [`default_size_params`] or [`realizations_for_intent`].
 pub fn posterior_aware_size_params(
     kind: SketchAlgorithm,
     intent: &AggIntent,
@@ -1252,20 +1252,19 @@ static DEFAULT_ACCURACY_MODEL: DefaultAccuracyModel = DefaultAccuracyModel;
 static DEFAULT_ALLOCATOR: EqualSplitAllocator = EqualSplitAllocator;
 static NO_ACCURACY_EVIDENCE: NoAccuracyEvidence = NoAccuracyEvidence;
 
-/// The three deployment-pluggable models one candidate construction
-/// consults, bundled so the construction path threads one argument rather
-/// than three. `cost` ranks and sizes; `accuracy` and `allocator` decide
+/// The cost, accuracy, allocation, and evidence inputs consulted during
+/// candidate construction, bundled so the construction path threads one argument. `cost` ranks and sizes; `accuracy` and `allocator` decide
 /// legality (issue #172) — see [`crate::accuracy`]'s module docs for why
 /// those are separate from `cost` and run before it.
 #[derive(Clone, Copy)]
-pub(crate) struct Models<'a> {
+pub(crate) struct CandidatePlanningInputs<'a> {
     pub cost: &'a dyn CostModel,
     pub accuracy: &'a dyn AccuracyModel,
     pub allocator: &'a dyn AccuracyBudgetAllocator,
     pub evidence: &'a dyn AccuracyEvidenceProvider,
 }
 
-impl<'a> Models<'a> {
+impl<'a> CandidatePlanningInputs<'a> {
     /// `cost` with the built-in [`DefaultAccuracyModel`]/
     /// [`EqualSplitAllocator`] — what every entry point that only takes a
     /// `CostModel` uses.
@@ -1279,7 +1278,7 @@ impl<'a> Models<'a> {
     }
 }
 
-/// Wraps [`implementations_for_with`]'s exhaustive, ranked list directly: for
+/// Wraps [`realizations_for_intent`]'s exhaustive, ranked list directly: for
 /// a bindable `Aggregate`, every valid candidate summary realization as its
 /// own [`ReplacementSubDAG`].
 ///
@@ -1298,7 +1297,7 @@ impl<'a> Models<'a> {
 /// [`crate::accuracy`]'s module docs for the rules and the precedence
 /// between root and per-node targets.
 pub struct SketchAlgorithmStrategy<'a> {
-    models: Models<'a>,
+    planning_inputs: CandidatePlanningInputs<'a>,
 }
 
 impl SketchAlgorithmStrategy<'static> {
@@ -1306,7 +1305,7 @@ impl SketchAlgorithmStrategy<'static> {
     /// what a deployment gets with no custom cost model plugged in.
     pub fn default_cost_model() -> Self {
         Self {
-            models: Models::with_default_accuracy(&DEFAULT_COST_MODEL),
+            planning_inputs: CandidatePlanningInputs::with_default_accuracy(&DEFAULT_COST_MODEL),
         }
     }
 }
@@ -1314,11 +1313,11 @@ impl SketchAlgorithmStrategy<'static> {
 impl<'a> SketchAlgorithmStrategy<'a> {
     /// A strategy that ranks/binds via `cost_model` instead of the built-in
     /// static preference order — the same customization point
-    /// [`implementations_for_with`] already offers. Accuracy legality stays
+    /// [`realizations_for_intent`] already offers. Accuracy legality stays
     /// with the built-in [`DefaultAccuracyModel`]/[`EqualSplitAllocator`].
     pub fn new(cost_model: &'a dyn CostModel) -> Self {
         Self {
-            models: Models::with_default_accuracy(cost_model),
+            planning_inputs: CandidatePlanningInputs::with_default_accuracy(cost_model),
         }
     }
 
@@ -1327,13 +1326,13 @@ impl<'a> SketchAlgorithmStrategy<'a> {
     /// satisfaction, `allocator` for end-to-end budget splits. One model
     /// never overrides another: legality is settled by `accuracy_model`
     /// before `cost_model` ranks what is left.
-    pub fn with_models(
+    pub fn new_with_planning_inputs(
         cost_model: &'a dyn CostModel,
         accuracy_model: &'a dyn AccuracyModel,
         allocator: &'a dyn AccuracyBudgetAllocator,
     ) -> Self {
         Self {
-            models: Models {
+            planning_inputs: CandidatePlanningInputs {
                 cost: cost_model,
                 accuracy: accuracy_model,
                 allocator,
@@ -1342,16 +1341,16 @@ impl<'a> SketchAlgorithmStrategy<'a> {
         }
     }
 
-    /// Like [`Self::with_models`], with typed planning-time evidence for
+    /// Like [`Self::new_with_planning_inputs`], with typed planning-time evidence for
     /// rules such as TopK membership and Hydra shared-grid composition.
-    pub fn with_models_and_evidence(
+    pub fn new_with_planning_inputs_and_evidence(
         cost_model: &'a dyn CostModel,
         accuracy_model: &'a dyn AccuracyModel,
         allocator: &'a dyn AccuracyBudgetAllocator,
         evidence: &'a dyn AccuracyEvidenceProvider,
     ) -> Self {
         Self {
-            models: Models {
+            planning_inputs: CandidatePlanningInputs {
                 cost: cost_model,
                 accuracy: accuracy_model,
                 allocator,
@@ -1360,8 +1359,8 @@ impl<'a> SketchAlgorithmStrategy<'a> {
         }
     }
 
-    pub(crate) fn from_models(models: Models<'a>) -> Self {
-        Self { models }
+    pub(crate) fn from_planning_inputs(planning_inputs: CandidatePlanningInputs<'a>) -> Self {
+        Self { planning_inputs }
     }
 
     /// The whole enumeration for one target, with `intent_override`
@@ -1369,31 +1368,31 @@ impl<'a> SketchAlgorithmStrategy<'a> {
     /// differs — see [`realize_child_with`]).
     fn propose_with(&self, root: &Rc<QueryExpr>, intent_override: Option<&AggIntent>) -> Proposals {
         let mut proposals = Proposals::default();
-        if let Ok(Some(node)) = exact_topk_over_temporal_values(root, self.models) {
+        if let Ok(Some(node)) = exact_topk_over_temporal_values(root, self.planning_inputs) {
             proposals.candidates.push(ReplacementSubDAG {
                 replacement: Replacement::Summary(node),
                 strategy: "SketchAlgorithmStrategy",
-                provenance: ReplacementProvenance::SummaryImplementation,
+                provenance: ReplacementProvenance::SummaryRealization,
                 rationale: "select exact Top-K from independently maintained temporal values"
                     .into(),
             });
         }
         if intent_override.is_none() {
-            if let Ok(Some(node)) = realize_temporal_average(root, self.models, None) {
+            if let Ok(Some(node)) = realize_temporal_average(root, self.planning_inputs, None) {
                 proposals.candidates.push(ReplacementSubDAG {
                     replacement: Replacement::Summary(node),
                     strategy: "SketchAlgorithmStrategy",
-                    provenance: ReplacementProvenance::SummaryImplementation,
+                    provenance: ReplacementProvenance::SummaryRealization,
                     rationale: "read temporal average from sum/count only within the finite arithmetic domain; otherwise execute the original average".into(),
                 });
             }
         }
         if intent_override.is_none() && is_supported_exact_binary(root) {
-            if let Ok(Some(node)) = realize_binary(root, self.models, None) {
+            if let Ok(Some(node)) = realize_binary(root, self.planning_inputs, None) {
                 proposals.candidates.push(ReplacementSubDAG {
                     replacement: Replacement::Summary(node),
                     strategy: "SketchAlgorithmStrategy",
-                    provenance: ReplacementProvenance::SummaryImplementation,
+                    provenance: ReplacementProvenance::SummaryRealization,
                     rationale: "preserve exact PromQL arithmetic over independently realized summary operands".into(),
                 });
             }
@@ -1403,13 +1402,13 @@ impl<'a> SketchAlgorithmStrategy<'a> {
             return proposals;
         };
         let intent = intent_override.unwrap_or(declared);
-        let models = self.models;
+        let planning_inputs = self.planning_inputs;
 
         // Is the child approximate? Probed once, up front: a candidate over
         // an approximate child needs the end-to-end budget split across both
         // layers, which changes which candidates exist at all.
         let child_layers = aggregate_child(root)
-            .and_then(|child| realize_child_with(child, models, None).ok())
+            .and_then(|child| realize_child_with(child, planning_inputs, None).ok())
             .and_then(|child| {
                 child
                     .guarantee
@@ -1418,27 +1417,34 @@ impl<'a> SketchAlgorithmStrategy<'a> {
                     .map(ResultGuarantee::approximate_layer_count)
             });
 
-        // `implementations_for_with` is already exhaustive and ranked — no
+        // `realizations_for_intent` is already exhaustive and ranked — no
         // separate dispatch needed here. Only `Sketch` has more than one
         // candidate in practice (every other variant's own dispatch produces
-        // exactly one `Implementation`), but this loop doesn't need to know
+        // exactly one `Realization`), but this loop doesn't need to know
         // that; it just constructs whatever the list contains.
-        for implementation in implementations_for_with(intent, models.cost) {
-            let rationale = describe_implementation(intent, &implementation);
+        for realization in realizations_for_intent(intent, planning_inputs.cost) {
+            let rationale = describe_realization(intent, &realization);
             // The as-declared composition: every layer sized to its own
             // declared `AccuracyTarget`. Legal iff the composed guarantee
             // satisfies this node's target — a front end copying one target
             // onto every node does not make that so.
             proposals.record(
                 rationale.clone(),
-                construct_summary_with(root, intent, implementation.clone(), models, None, None),
+                construct_summary_with(
+                    root,
+                    intent,
+                    realization.clone(),
+                    planning_inputs,
+                    None,
+                    None,
+                ),
             );
 
             // Budget-split alternatives (issue #172, PR 2): re-size this
             // layer and the approximate child under each allocation of this
             // node's target across every approximate layer.
-            let (Some(child_layers), Implementation::Sketch(kind), Some(target)) =
-                (child_layers, &implementation, accuracy_target(intent))
+            let (Some(child_layers), Realization::Sketch(kind), Some(target)) =
+                (child_layers, &realization, accuracy_target(intent))
             else {
                 continue;
             };
@@ -1453,15 +1459,18 @@ impl<'a> SketchAlgorithmStrategy<'a> {
             else {
                 continue;
             };
-            let readout_query = readout(intent, &input.input, models.cost);
-            let Some(local) = models.accuracy.local_guarantee(&family, &readout_query) else {
+            let readout_query = readout(intent, &input.input, planning_inputs.cost);
+            let Some(local) = planning_inputs
+                .accuracy
+                .local_guarantee(&family, &readout_query)
+            else {
                 continue;
             };
             let shape = CompositionShape {
                 metric: local.metric,
                 approximate_layer_count: 1 + child_layers,
             };
-            let allocations = models.allocator.allocations(target, &shape);
+            let allocations = planning_inputs.allocator.allocations(target, &shape);
             if allocations.is_empty() {
                 proposals.rejected.push(RejectedCandidate {
                     strategy: "SketchAlgorithmStrategy",
@@ -1480,15 +1489,15 @@ impl<'a> SketchAlgorithmStrategy<'a> {
                 let outer_target = &allocation.layers[0];
                 let inner_target = allocation.inner_target(&shape);
                 let (eps, delta) = accuracy_budget(outer_target);
-                let resized = Implementation::Sketch(SketchKind::new(
+                let resized = Realization::Sketch(SketchKind::new(
                     kind.algorithm().clone(),
-                    models
+                    planning_inputs
                         .cost
                         .size_params(kind.algorithm().clone(), intent, eps, delta),
                 ));
                 // Identical to the as-declared composition already recorded
                 // above — nothing new to propose.
-                if resized == implementation && inner_target.as_ref() == declared_child_target {
+                if resized == realization && inner_target.as_ref() == declared_child_target {
                     continue;
                 }
                 let note = GuaranteeSource::BudgetAllocation {
@@ -1509,7 +1518,7 @@ impl<'a> SketchAlgorithmStrategy<'a> {
                         root,
                         intent,
                         resized,
-                        models,
+                        planning_inputs,
                         inner_target.as_ref(),
                         Some(note),
                     ),
@@ -1522,7 +1531,7 @@ impl<'a> SketchAlgorithmStrategy<'a> {
                     proposals.candidates.push(ReplacementSubDAG {
                         strategy: "SketchAlgorithmStrategy",
                         replacement: Replacement::Summary(node),
-                        provenance: ReplacementProvenance::SummaryImplementation,
+                        provenance: ReplacementProvenance::SummaryRealization,
                         rationale: format!(
                             "{} stays pre-ASAP because summary construction crosses an illegal \
                              execution-data_state boundary ({error})",
@@ -1538,28 +1547,28 @@ impl<'a> SketchAlgorithmStrategy<'a> {
 
 impl Proposals {
     /// File one construction attempt: a legal node becomes a candidate, an
-    /// [`ImplementError::Accuracy`] becomes a [`RejectedCandidate`], and a
+    /// [`RealizationError::Accuracy`] becomes a [`RejectedCandidate`], and a
     /// schema-derivation failure is skipped exactly as it always was.
-    fn record(&mut self, rationale: String, built: Result<Rc<SummaryNode>, ImplementError>) {
+    fn record(&mut self, rationale: String, built: Result<Rc<SummaryNode>, RealizationError>) {
         match built {
             Ok(node) => self.candidates.push(ReplacementSubDAG {
                 strategy: "SketchAlgorithmStrategy",
                 replacement: Replacement::Summary(node),
-                provenance: ReplacementProvenance::SummaryImplementation,
+                provenance: ReplacementProvenance::SummaryRealization,
                 rationale,
             }),
-            Err(ImplementError::Accuracy(error)) => self.rejected.push(RejectedCandidate {
+            Err(RealizationError::Accuracy(error)) => self.rejected.push(RejectedCandidate {
                 strategy: "SketchAlgorithmStrategy",
                 description: rationale,
                 error,
             }),
-            Err(ImplementError::ExecutionDataState(error)) => {
+            Err(RealizationError::ExecutionDataState(error)) => {
                 self.domain_error.get_or_insert(error);
             }
             Err(
-                ImplementError::Schema(_)
-                | ImplementError::ExactOperationSchema(_)
-                | ImplementError::PhysicalRealization(_),
+                RealizationError::Schema(_)
+                | RealizationError::ExactOperationSchema(_)
+                | RealizationError::PhysicalRealization(_),
             ) => {}
         }
     }
@@ -1587,38 +1596,38 @@ impl ReplacementStrategy for SketchAlgorithmStrategy<'_> {
     }
 }
 
-/// A human-readable rationale for one candidate `Implementation`, for
+/// A human-readable rationale for one candidate `Realization`, for
 /// [`ReplacementSubDAG::rationale`] text.
-fn describe_implementation(intent: &AggIntent, implementation: &Implementation) -> String {
-    match implementation {
-        Implementation::Sketch(kind) => format!(
+fn describe_realization(intent: &AggIntent, realization: &Realization) -> String {
+    match realization {
+        Realization::Sketch(kind) => format!(
             "{} realizes as a {:?} sketch — one of summary_candidates' \
-             alternatives for this intent (asap_aware_mapping::replacement::implementations_for_with)",
+             alternatives for this intent (asap_aware_mapping::replacement::realizations_for_intent)",
             describe_intent(intent),
             kind.algorithm()
         ),
-        Implementation::ExactAggregate { kind, .. } => format!(
+        Realization::ExactAggregate { kind, .. } => format!(
             "{} realizes as an exact {kind:?} accumulator — the only realization \
-             implementations_for_with produces for this intent (no approximate \
+             realizations_for_intent produces for this intent (no approximate \
              candidate applies)",
             describe_intent(intent)
         ),
-        Implementation::PassThrough => format!(
+        Realization::PassThrough => format!(
             "{} has no summary realization and stays a logical pass-through — the \
-             only realization implementations_for_with produces for this intent",
+             only realization realizations_for_intent produces for this intent",
             describe_intent(intent)
         ),
-        Implementation::Sample { kind, .. } => format!(
+        Realization::Sample { kind, .. } => format!(
             "{} realizes as a {kind:?} sample — the only realization the plugged-in \
              CostModel produced for this intent",
             describe_intent(intent)
         ),
-        Implementation::Wavelet { kind, .. } => format!(
+        Realization::Wavelet { kind, .. } => format!(
             "{} realizes as a {kind:?} wavelet transform — the only realization the \
              plugged-in CostModel produced for this intent",
             describe_intent(intent)
         ),
-        Implementation::StatModel { kind, .. } => format!(
+        Realization::StatModel { kind, .. } => format!(
             "{} realizes as a {kind:?} statistical model — the only realization the \
              plugged-in CostModel produced for this intent",
             describe_intent(intent)
@@ -1628,7 +1637,7 @@ fn describe_implementation(intent: &AggIntent, implementation: &Implementation) 
 
 /// A short human-readable label for an `AggIntent`, for
 /// [`ReplacementSubDAG::rationale`] text. Not exhaustive by design (unlike
-/// this crate's other `AggIntent` matches, e.g. [`implementations_for_with`]'s)
+/// this crate's other `AggIntent` matches, e.g. [`realizations_for_intent`]'s)
 /// — this is prose for a rationale string, not a decision, so an unlisted
 /// variant just falls back to its `Debug` tag rather than forcing every
 /// future intent to be named here too. [`crate::explanation`] needs no
@@ -1673,8 +1682,12 @@ pub(crate) fn describe_intent(intent: &AggIntent) -> String {
 pub(crate) fn realize_child(
     root: &Rc<QueryExpr>,
     cost_model: &dyn CostModel,
-) -> Result<Rc<SummaryNode>, ImplementError> {
-    realize_child_with(root, Models::with_default_accuracy(cost_model), None)
+) -> Result<Rc<SummaryNode>, RealizationError> {
+    realize_child_with(
+        root,
+        CandidatePlanningInputs::with_default_accuracy(cost_model),
+        None,
+    )
 }
 
 /// [`realize_child`] with every model explicit, plus an optional
@@ -1687,8 +1700,8 @@ pub(crate) fn realize_child(
 /// never approximates something the caller declared exact.
 fn exact_topk_over_temporal_values(
     root: &Rc<QueryExpr>,
-    models: Models<'_>,
-) -> Result<Option<Rc<SummaryNode>>, ImplementError> {
+    planning_inputs: CandidatePlanningInputs<'_>,
+) -> Result<Option<Rc<SummaryNode>>, RealizationError> {
     let QueryExpr::Aggregate {
         reduction,
         measures,
@@ -1719,7 +1732,7 @@ fn exact_topk_over_temporal_values(
     if !matches!(input.as_ref(), QueryExpr::TimeRange { .. }) {
         return Ok(None);
     }
-    let values = realize_child_with(child, models, Some(&AccuracyTarget::Exact))?;
+    let values = realize_child_with(child, planning_inputs, Some(&AccuracyTarget::Exact))?;
     if matches!(values.expr, SummaryExpr::KeepPreAsap(_))
         || !values
             .guarantee
@@ -1749,13 +1762,13 @@ fn exact_topk_over_temporal_values(
 
 fn realize_temporal_average(
     root: &Rc<QueryExpr>,
-    models: Models<'_>,
+    planning_inputs: CandidatePlanningInputs<'_>,
     target: Option<&AccuracyTarget>,
-) -> Result<Option<Rc<SummaryNode>>, ImplementError> {
+) -> Result<Option<Rc<SummaryNode>>, RealizationError> {
     let Some(components) = crate::rewrite::temporal_average_components(root) else {
         return Ok(None);
     };
-    let mut node = realize_child_with(&components, models, target)?;
+    let mut node = realize_child_with(&components, planning_inputs, target)?;
     let SummaryExpr::BinaryOp { operator, .. } = &mut Rc::make_mut(&mut node).expr else {
         return Ok(None);
     };
@@ -1766,13 +1779,13 @@ fn realize_temporal_average(
 
 pub(crate) fn realize_child_with(
     root: &Rc<QueryExpr>,
-    models: Models<'_>,
+    planning_inputs: CandidatePlanningInputs<'_>,
     end_to_end_target: Option<&AccuracyTarget>,
-) -> Result<Rc<SummaryNode>, ImplementError> {
-    if let Some(node) = realize_temporal_average(root, models, end_to_end_target)? {
+) -> Result<Rc<SummaryNode>, RealizationError> {
+    if let Some(node) = realize_temporal_average(root, planning_inputs, end_to_end_target)? {
         return Ok(node);
     }
-    if let Some(composed) = realize_binary(root, models, end_to_end_target)? {
+    if let Some(composed) = realize_binary(root, planning_inputs, end_to_end_target)? {
         return Ok(composed);
     }
     let overridden = end_to_end_target.and_then(|target| {
@@ -1782,7 +1795,7 @@ pub(crate) fn realize_child_with(
             Some(_) => Some(override_accuracy(declared, target)),
         }
     });
-    match SketchAlgorithmStrategy::from_models(models)
+    match SketchAlgorithmStrategy::from_planning_inputs(planning_inputs)
         .propose_with(root, overridden.as_ref())
         .candidates
         .into_iter()
@@ -1799,7 +1812,7 @@ pub(crate) fn realize_child_with(
             unreachable!("SketchAlgorithmStrategy never returns a Rewrite/composition candidate")
         }
         // No candidate at all: `root` isn't `bindable_intent` shape (or its
-        // intent has no realization `implementations_for_with` can't
+        // intent has no realization `realizations_for_intent` can't
         // produce — never happens, that match is exhaustive), or every
         // candidate was accuracy-illegal — either way the same conservative
         // fallback `SketchAlgorithmStrategy::matches` uses: keep the
@@ -1809,14 +1822,14 @@ pub(crate) fn realize_child_with(
 }
 
 /// Preserve an exact arithmetic root while allowing each vector operand to
-/// select its own summary implementation. If either vector arm cannot be
+/// select its own summary realization. If either vector arm cannot be
 /// accelerated, return `None` so the caller keeps the whole query exact;
 /// mixed raw/summary snapshots are never constructed.
 fn realize_binary(
     root: &Rc<QueryExpr>,
-    models: Models<'_>,
+    planning_inputs: CandidatePlanningInputs<'_>,
     end_to_end_target: Option<&AccuracyTarget>,
-) -> Result<Option<Rc<SummaryNode>>, ImplementError> {
+) -> Result<Option<Rc<SummaryNode>>, RealizationError> {
     let QueryExpr::BinaryOp {
         op,
         lhs,
@@ -1836,8 +1849,8 @@ fn realize_binary(
         return Ok(None);
     }
 
-    let mut lhs_node = realize_binary_operand(lhs, models, None)?;
-    let mut rhs_node = realize_binary_operand(rhs, models, None)?;
+    let mut lhs_node = realize_binary_operand(lhs, planning_inputs, None)?;
+    let mut rhs_node = realize_binary_operand(rhs, planning_inputs, None)?;
 
     let direct_ddsketch_ratio = matches!(op, BinaryOpKind::Arithmetic(ArithmeticOpKind::Div))
         && shared_quantile_target(lhs, rhs).is_some();
@@ -1851,10 +1864,10 @@ fn realize_binary(
             .as_ref()
             .and_then(ddsketch_ratio_operand_target)
         {
-            let Some(domains) = models
+            let Some(domains) = planning_inputs
                 .evidence
                 .quantile_input_domain(lhs)
-                .zip(models.evidence.quantile_input_domain(rhs))
+                .zip(planning_inputs.evidence.quantile_input_domain(rhs))
                 .map(|(lhs, rhs)| [lhs, rhs])
             else {
                 return Ok(None);
@@ -1866,8 +1879,8 @@ fn realize_binary(
             {
                 return Ok(None);
             }
-            lhs_node = realize_ddsketch_quantile_operand(lhs, models, &target)?;
-            rhs_node = realize_ddsketch_quantile_operand(rhs, models, &target)?;
+            lhs_node = realize_ddsketch_quantile_operand(lhs, planning_inputs, &target)?;
+            rhs_node = realize_ddsketch_quantile_operand(rhs, planning_inputs, &target)?;
             for (domain, node) in domains.iter().zip([&lhs_node, &rhs_node]) {
                 if !ddsketch_quantile_alpha(node)
                     .is_some_and(|alpha| domain.supports_ddsketch(alpha))
@@ -1903,7 +1916,7 @@ fn realize_binary(
                 metric,
                 approximate_layer_count: approximate.len(),
             };
-            let Some(allocation) = models
+            let Some(allocation) = planning_inputs
                 .allocator
                 .allocations(target, &shape)
                 .into_iter()
@@ -1915,9 +1928,9 @@ fn realize_binary(
                 approximate.into_iter().zip(allocation.layers.iter())
             {
                 if operand_index == 0 {
-                    lhs_node = realize_binary_operand(lhs, models, Some(local_target))?;
+                    lhs_node = realize_binary_operand(lhs, planning_inputs, Some(local_target))?;
                 } else {
-                    rhs_node = realize_binary_operand(rhs, models, Some(local_target))?;
+                    rhs_node = realize_binary_operand(rhs, planning_inputs, Some(local_target))?;
                 }
             }
         }
@@ -1954,7 +1967,7 @@ fn realize_binary(
             .into_iter()
             .collect::<Option<Vec<_>>>()
             .and_then(|inputs| {
-                models
+                planning_inputs
                     .accuracy
                     .propagate(
                         &CompositionOperator::ExactDivision,
@@ -2004,7 +2017,7 @@ fn realize_binary(
 fn finalize_exact_accumulator(
     node: Rc<SummaryNode>,
     logical_output: &QueryExpr,
-) -> Result<Rc<SummaryNode>, ImplementError> {
+) -> Result<Rc<SummaryNode>, RealizationError> {
     finalize_exact_accumulator_at(node, logical_output, ExecutionTiming::ReadTime)
 }
 
@@ -2012,7 +2025,7 @@ fn finalize_exact_accumulator_at(
     node: Rc<SummaryNode>,
     logical_output: &QueryExpr,
     timing: ExecutionTiming,
-) -> Result<Rc<SummaryNode>, ImplementError> {
+) -> Result<Rc<SummaryNode>, RealizationError> {
     let is_exact_state = matches!(
         node.expr,
         SummaryExpr::SummaryAgg {
@@ -2118,31 +2131,31 @@ fn ddsketch_quantile_alpha(node: &SummaryNode) -> Option<f64> {
 /// DDSketch rather than the cost model's generally preferred KLL candidate.
 fn realize_ddsketch_quantile_operand(
     operand: &Rc<QueryExpr>,
-    models: Models<'_>,
+    planning_inputs: CandidatePlanningInputs<'_>,
     target: &AccuracyTarget,
-) -> Result<Rc<SummaryNode>, ImplementError> {
+) -> Result<Rc<SummaryNode>, RealizationError> {
     let intent = bindable_intent(operand).and_then(|intent| match intent {
         AggIntent::Quantile { .. } => Some(override_accuracy(intent, target)),
         _ => None,
     });
     let Some(intent) = intent else {
-        return realize_binary_operand(operand, models, Some(target));
+        return realize_binary_operand(operand, planning_inputs, Some(target));
     };
     let (epsilon, delta) = accuracy_budget(target);
-    let implementation = Implementation::Sketch(SketchKind::new(
+    let realization = Realization::Sketch(SketchKind::new(
         SketchAlgorithm::DDSketch,
-        models
+        planning_inputs
             .cost
             .size_params(SketchAlgorithm::DDSketch, &intent, epsilon, delta),
     ));
-    construct_summary_with(operand, &intent, implementation, models, None, None)
+    construct_summary_with(operand, &intent, realization, planning_inputs, None, None)
 }
 
 fn realize_binary_operand(
     operand: &Rc<QueryExpr>,
-    models: Models<'_>,
+    planning_inputs: CandidatePlanningInputs<'_>,
     end_to_end_target: Option<&AccuracyTarget>,
-) -> Result<Rc<SummaryNode>, ImplementError> {
+) -> Result<Rc<SummaryNode>, RealizationError> {
     if is_promql_scalar(operand) {
         return Ok(Rc::new(SummaryNode {
             expr: SummaryExpr::KeepPreAsap(Rc::clone(operand)),
@@ -2153,7 +2166,7 @@ fn realize_binary_operand(
             guarantee: Some(ResultGuarantee::exact("PromQL scalar")),
         }));
     }
-    realize_child_with(operand, models, end_to_end_target)
+    realize_child_with(operand, planning_inputs, end_to_end_target)
 }
 
 /// `intent` with its `AccuracyTarget` replaced by `target` — a no-op for an
@@ -2176,22 +2189,22 @@ fn override_accuracy(intent: &AggIntent, target: &AccuracyTarget) -> AggIntent {
 /// candidate for a target, or a deployment wants to force a node its own
 /// runtime can't actually implement — through the same fallback this
 /// crate's own dispatch uses, without duplicating the schema-lift logic.
-pub fn keep_pre_asap(expr: &Rc<QueryExpr>) -> Result<Rc<SummaryNode>, ImplementError> {
+pub fn keep_pre_asap(expr: &Rc<QueryExpr>) -> Result<Rc<SummaryNode>, RealizationError> {
     keep_pre_asap_rc(Rc::clone(expr))
 }
 
-fn keep_pre_asap_rc(expr: Rc<QueryExpr>) -> Result<Rc<SummaryNode>, ImplementError> {
+fn keep_pre_asap_rc(expr: Rc<QueryExpr>) -> Result<Rc<SummaryNode>, RealizationError> {
     let schema = expr.output_schema()?;
     Ok(Rc::new(SummaryNode {
         expr: SummaryExpr::KeepPreAsap(expr),
         schema: lift(&schema),
         // A kept pre-ASAP subtree is executed exactly by the runtime
-        // (`Implementation::PassThrough`'s contract) — zero error.
+        // (`Realization::PassThrough`'s contract) — zero error.
         guarantee: Some(ResultGuarantee::exact("KeepPreAsap")),
     }))
 }
 
-// ── Construction: turn one already-decided Implementation into a SummaryNode ─
+// ── Construction: turn one already-decided Realization into a SummaryNode ─
 
 /// The bindable shape [`SketchAlgorithmStrategy`] targets: a single intent, no
 /// `HAVING`. A multi-intent node (SQL `SELECT SUM(a), AVG(b)`), or one with a
@@ -2212,7 +2225,7 @@ pub fn bindable_intent(node: &QueryExpr) -> Option<&AggIntent> {
     None
 }
 
-/// `expr` must still be the [`bindable_intent`] shape for `implementation` to
+/// `expr` must still be the [`bindable_intent`] shape for `realization` to
 /// have any effect; anything else falls back to [`keep_pre_asap`].
 /// Only `expr`'s own top-level decision is forced — recursion into `expr`'s
 /// child goes back through [`realize_child`] (fresh candidate
@@ -2231,17 +2244,17 @@ pub fn bindable_intent(node: &QueryExpr) -> Option<&AggIntent> {
 /// `AccuracyTarget` substituted (see [`realize_child_with`]).
 /// `child_target`, when set, is the end-to-end budget the child subtree is
 /// re-enumerated under; `allocation` is the provenance note recording the
-/// split that produced both. `Err(ImplementError::Accuracy)` is the
+/// split that produced both. `Err(RealizationError::Accuracy)` is the
 /// fail-closed answer for a composition with no sound rule or one that
 /// misses `intent`'s target.
 pub(crate) fn construct_summary_with(
     expr: &QueryExpr,
     intent: &AggIntent,
-    implementation: Implementation,
-    models: Models<'_>,
+    realization: Realization,
+    planning_inputs: CandidatePlanningInputs<'_>,
     child_target: Option<&AccuracyTarget>,
     allocation: Option<GuaranteeSource>,
-) -> Result<Rc<SummaryNode>, ImplementError> {
+) -> Result<Rc<SummaryNode>, RealizationError> {
     if let QueryExpr::Aggregate {
         reduction, child, ..
     } = expr
@@ -2249,7 +2262,7 @@ pub(crate) fn construct_summary_with(
         // `bindable_intent` already established the shape: exactly one
         // intent, no HAVING. (Multi-intent nodes and HAVING stay logical.)
         if bindable_intent(expr).is_some() {
-            if let Some((family, estimate)) = summary_family(implementation) {
+            if let Some((family, estimate)) = summary_family(realization) {
                 let input = realize_physical_summary_input(intent, &family, reduction, child)?;
                 let candidate = construct_summary_agg(
                     expr,
@@ -2258,13 +2271,13 @@ pub(crate) fn construct_summary_with(
                     input,
                     family,
                     estimate,
-                    models,
+                    planning_inputs,
                     child_target,
                     allocation,
                 )?;
                 if is_counter_weighted_topk(intent, child) {
                     let values = finalize_exact_accumulator(
-                        realize_child_with(child, models, Some(&AccuracyTarget::Exact))?,
+                        realize_child_with(child, planning_inputs, Some(&AccuracyTarget::Exact))?,
                         child,
                     )?;
                     if !values
@@ -2272,7 +2285,7 @@ pub(crate) fn construct_summary_with(
                         .as_ref()
                         .is_some_and(ResultGuarantee::is_exact)
                     {
-                        return Err(ImplementError::PhysicalRealization(
+                        return Err(RealizationError::PhysicalRealization(
                             "CandidateTopK exact rerank input is not exact",
                         ));
                     }
@@ -2288,7 +2301,7 @@ pub(crate) fn construct_summary_with(
                     if matches!(accuracy, AccuracyTarget::Exact)
                         && !matches!(completeness, CandidateCompleteness::Certified { .. })
                     {
-                        return Err(ImplementError::PhysicalRealization(
+                        return Err(RealizationError::PhysicalRealization(
                             "exact CandidateTopK requires certified candidate completeness",
                         ));
                     }
@@ -2330,36 +2343,34 @@ fn is_counter_weighted_topk(intent: &AggIntent, child: &QueryExpr) -> bool {
                         if matches!(measures.as_slice(), [AggIntent::Rate | AggIntent::Increase])))
 }
 
-/// Translate an [`Implementation`] into the `(family, needs a
+/// Translate an [`Realization`] into the `(family, needs a
 /// SummaryEstimate readout)` pair [`construct_summary_agg`] needs, or `None`
 /// for `PassThrough` (the caller falls back to [`keep_pre_asap`]).
 ///
 /// Every family's partial state needs a readout to recover a value, except
 /// `ExactAggregate` — its partial state *is* the value already, so no
 /// estimate step follows it.
-fn summary_family(implementation: Implementation) -> Option<(SummaryFamilyType, bool)> {
-    Some(match implementation {
-        Implementation::ExactAggregate { kind, params } => {
+fn summary_family(realization: Realization) -> Option<(SummaryFamilyType, bool)> {
+    Some(match realization {
+        Realization::ExactAggregate { kind, params } => {
             (SummaryFamilyType::ExactAggregate(kind, params), false)
         }
-        Implementation::Sketch(kind) => (
+        Realization::Sketch(kind) => (
             SummaryFamilyType::Sketch(kind, GroupingStrategy::default()),
             true,
         ),
-        Implementation::Sample { kind, params } => (SummaryFamilyType::Sample(kind, params), true),
-        Implementation::Wavelet { kind, params } => {
-            (SummaryFamilyType::Wavelet(kind, params), true)
-        }
-        Implementation::StatModel { kind, params } => {
+        Realization::Sample { kind, params } => (SummaryFamilyType::Sample(kind, params), true),
+        Realization::Wavelet { kind, params } => (SummaryFamilyType::Wavelet(kind, params), true),
+        Realization::StatModel { kind, params } => {
             (SummaryFamilyType::StatModel(kind, params), true)
         }
-        Implementation::PassThrough => return None,
+        Realization::PassThrough => return None,
     })
 }
 
-/// The physical input consumed by one summary implementation. Most summaries
+/// The physical input consumed by one summary realization. Most summaries
 /// consume the logical aggregate's immediate child and summarize its declared
-/// input value. Composite implementations can instead consume a larger
+/// input value. Composite realizations can instead consume a larger
 /// logical sub-DAG and bind a different key or value.
 struct PhysicalSummaryInput {
     child: Rc<QueryExpr>,
@@ -2379,7 +2390,7 @@ type PhysicalSummaryInputRule = fn(
     &Rc<QueryExpr>,
 ) -> PhysicalSummaryInputRuleResult;
 
-/// Ordered physical-realization rules for implementations that consume more
+/// Ordered physical-realization rules for realizations that consume more
 /// than the immediate logical input. New composite primitives add a rule here
 /// instead of adding query- or algorithm-specific branches to
 /// `construct_summary_agg`.
@@ -2425,20 +2436,20 @@ fn realize_physical_summary_input(
     family: &SummaryFamilyType,
     reduction: &Reduction,
     child: &Rc<QueryExpr>,
-) -> Result<PhysicalSummaryInput, ImplementError> {
+) -> Result<PhysicalSummaryInput, RealizationError> {
     for rule in PHYSICAL_SUMMARY_INPUT_RULES {
         match rule(intent, family, reduction, child) {
             PhysicalSummaryInputRuleResult::NotApplicable => {}
             PhysicalSummaryInputRuleResult::Realized(input) => return Ok(input),
             PhysicalSummaryInputRuleResult::Unsupported(reason) => {
-                return Err(ImplementError::PhysicalRealization(reason));
+                return Err(RealizationError::PhysicalRealization(reason));
             }
         }
     }
 
     let child_schema = child.output_schema()?;
     if matches!(intent, AggIntent::TopK { .. }) {
-        return Err(ImplementError::PhysicalRealization(
+        return Err(RealizationError::PhysicalRealization(
             "Top-K needs an explicit item identity and additive update input",
         ));
     }
@@ -2515,10 +2526,10 @@ fn construct_summary_agg(
     input: PhysicalSummaryInput,
     family: SummaryFamilyType,
     estimate: bool,
-    models: Models<'_>,
+    planning_inputs: CandidatePlanningInputs<'_>,
     child_target: Option<&AccuracyTarget>,
     allocation: Option<GuaranteeSource>,
-) -> Result<Rc<SummaryNode>, ImplementError> {
+) -> Result<Rc<SummaryNode>, RealizationError> {
     // The single canonical pre-ASAP derivation (per-series vs cross-series,
     // name overrides) already computes the row shape; binding only retypes
     // the summary state column.
@@ -2545,7 +2556,7 @@ fn construct_summary_agg(
     let state_idx = summary_col_index(&out_schema, &by, per_series);
 
     let summary_input = input.input;
-    let query = estimate.then(|| readout(intent, &summary_input, models.cost));
+    let query = estimate.then(|| readout(intent, &summary_input, planning_inputs.cost));
 
     let mut state_schema = lift(&out_schema);
     if keyed_heap {
@@ -2564,7 +2575,7 @@ fn construct_summary_agg(
         }
     }
 
-    let bound_child = realize_child_with(&input.child, models, child_target)?;
+    let bound_child = realize_child_with(&input.child, planning_inputs, child_target)?;
     // A maintained parent consumes finalized values, never the child's
     // accumulator representation. Keep the read boundary explicit even when
     // an exact scalar accumulator currently stores its value directly.
@@ -2585,8 +2596,8 @@ fn construct_summary_agg(
         query.as_ref(),
         &bound_child,
         intent,
-        models.accuracy,
-        models.evidence,
+        planning_inputs.accuracy,
+        planning_inputs.evidence,
         allocation,
     )?;
 
@@ -2624,7 +2635,7 @@ fn construct_summary_agg(
     }
 }
 
-/// Realize the composite heavy-hitter implementation for
+/// Realize the composite heavy-hitter realization for
 /// `TopK(Count GROUP BY key)`. The heap sketch consumes the raw keyed stream;
 /// it does not consume an independently materialized Count result.
 fn realize_keyed_additive_summary_input(
@@ -2938,7 +2949,7 @@ fn readout(
             _ => unreachable!("extension readout requires one column"),
         },
         other => {
-            unreachable!("no summary realization for {other:?} (implementations_for_with)")
+            unreachable!("no summary realization for {other:?} (realizations_for_intent)")
         }
     }
 }
@@ -3879,7 +3890,7 @@ fn rank_group<'a>(group: &'a MemoGroup, cost_model: &dyn CostModel) -> Vec<&'a R
 
     // Shape 3: `SketchAlgorithmStrategy`'s sketch-family candidates (every
     // candidate is a `Summary` that realizes a `SketchAlgorithm`) — rank via
-    // `CostModel::rank_candidates`, the same hook `implementations_for_with`
+    // `CostModel::rank_candidates`, the same hook `realizations_for_intent`
     // itself consults.
     if let Some(intent) = bindable_intent(&group.target) {
         let kinds: Option<Vec<SketchAlgorithm>> = ranked
@@ -4137,14 +4148,17 @@ impl<'a> GlobalSelection<'a> {
     pub fn materialize(
         &self,
         target: &Rc<QueryExpr>,
-    ) -> Result<Option<Rc<SummaryNode>>, ImplementError> {
+    ) -> Result<Option<Rc<SummaryNode>>, RealizationError> {
         if !self.groups.contains_key(&Rc::as_ptr(target)) {
             return Ok(None);
         }
         self.materialize_inner(target).map(Some)
     }
 
-    fn materialize_inner(&self, target: &Rc<QueryExpr>) -> Result<Rc<SummaryNode>, ImplementError> {
+    fn materialize_inner(
+        &self,
+        target: &Rc<QueryExpr>,
+    ) -> Result<Rc<SummaryNode>, RealizationError> {
         let ptr = Rc::as_ptr(target);
         if let Some(node) = self.materialized.borrow().get(&ptr) {
             return Ok(Rc::clone(node));
@@ -4175,14 +4189,14 @@ impl<'a> GlobalSelection<'a> {
     }
 
     /// Preserve composable query-time value operators in post-ASAP form even
-    /// when the operator itself has no summary implementation. Its child is
+    /// when the operator itself has no summary realization. Its child is
     /// materialized independently, so a selected summary remains visible
     /// beneath `Project`/`Filter`/`Sort`/`Limit` instead of being swallowed by
     /// one opaque `KeepPreAsap` subtree.
     fn materialize_residual(
         &self,
         target: &Rc<QueryExpr>,
-    ) -> Result<Rc<SummaryNode>, ImplementError> {
+    ) -> Result<Rc<SummaryNode>, RealizationError> {
         if let QueryExpr::Join {
             left,
             right,
@@ -4292,7 +4306,7 @@ impl<'a> GlobalSelection<'a> {
         &self,
         node: &Rc<SummaryNode>,
         target: &Rc<QueryExpr>,
-    ) -> Result<Rc<SummaryNode>, ImplementError> {
+    ) -> Result<Rc<SummaryNode>, RealizationError> {
         let QueryExpr::Aggregate {
             child: pre_child, ..
         } = target.as_ref()
@@ -4839,7 +4853,7 @@ impl<Id> PlanSpace<Id> {
                     // Accuracy reconciliation reads another discovered memo
                     // group, rather than inlining that group's children. Let
                     // the source group receive the uses and propagate them
-                    // through its own selected implementation when its turn
+                    // through its own selected realization when its turn
                     // arrives in topological order.
                     *effective_uses.entry(Rc::as_ptr(source)).or_insert(0) += outgoing_multiplier;
                 }
@@ -5270,25 +5284,29 @@ pub fn default_strategies_with<'a>(
 
 /// Default context-free strategies with both deployment costing and typed
 /// planning-time accuracy evidence. This is the production counterpart of
-/// constructing [`SketchAlgorithmStrategy::with_models_and_evidence`] and
-/// [`HydraGroupingStrategy::with_models_and_evidence`] separately.
+/// constructing [`SketchAlgorithmStrategy::new_with_planning_inputs_and_evidence`] and
+/// [`HydraGroupingStrategy::new_with_planning_inputs_and_evidence`] separately.
 pub fn default_strategies_with_evidence<'a>(
     cost_model: &'a dyn CostModel,
     evidence: &'a dyn AccuracyEvidenceProvider,
 ) -> Vec<Box<dyn ReplacementStrategy + 'a>> {
     vec![
-        Box::new(SketchAlgorithmStrategy::with_models_and_evidence(
-            cost_model,
-            &DEFAULT_ACCURACY_MODEL,
-            &DEFAULT_ALLOCATOR,
-            evidence,
-        )),
-        Box::new(HydraGroupingStrategy::with_models_and_evidence(
-            cost_model,
-            &DEFAULT_ACCURACY_MODEL,
-            &DEFAULT_ALLOCATOR,
-            evidence,
-        )),
+        Box::new(
+            SketchAlgorithmStrategy::new_with_planning_inputs_and_evidence(
+                cost_model,
+                &DEFAULT_ACCURACY_MODEL,
+                &DEFAULT_ALLOCATOR,
+                evidence,
+            ),
+        ),
+        Box::new(
+            HydraGroupingStrategy::new_with_planning_inputs_and_evidence(
+                cost_model,
+                &DEFAULT_ACCURACY_MODEL,
+                &DEFAULT_ALLOCATOR,
+                evidence,
+            ),
+        ),
         Box::new(SharedSubtreeStrategy),
         Box::new(crate::rewrite::AvgToSumOverCountStrategy),
         Box::new(ExactCompositionStrategy::new(cost_model)),
@@ -5829,8 +5847,10 @@ mod tests {
             "topk by(job)(5, count_over_time(a[5m]))",
         ] {
             let root = Rc::new(lower_promql(query, AccuracyTarget::Exact));
-            let models = Models::with_default_accuracy(&crate::cost_model::DefaultCostModel);
-            let node = exact_topk_over_temporal_values(&root, models)
+            let planning_inputs = CandidatePlanningInputs::with_default_accuracy(
+                &crate::cost_model::DefaultCostModel,
+            );
+            let node = exact_topk_over_temporal_values(&root, planning_inputs)
                 .unwrap()
                 .expect("exact Top-K candidate");
             assert!(node.guarantee.as_ref().unwrap().is_exact());
@@ -5857,8 +5877,10 @@ mod tests {
             "avg_over_time(a[5m]) / quantile_over_time(0.5,a[5m])",
         ] {
             let root = Rc::new(lower_promql(query, target.clone()));
-            let models = Models::with_default_accuracy(&crate::cost_model::DefaultCostModel);
-            assert!(realize_binary(&root, models, Some(&target))
+            let planning_inputs = CandidatePlanningInputs::with_default_accuracy(
+                &crate::cost_model::DefaultCostModel,
+            );
+            assert!(realize_binary(&root, planning_inputs, Some(&target))
                 .unwrap()
                 .is_none());
         }
@@ -5888,16 +5910,16 @@ mod tests {
         AccuracyTarget::Epsilon(e)
     }
 
-    // ── implementations_for_with / sizing ───────────────────────────────
+    // ── realizations_for_intent / sizing ───────────────────────────────
 
-    /// The most-preferred `Implementation` — `implementations_for_with(intent,
+    /// The most-preferred `Realization` — `realizations_for_intent(intent,
     /// &DefaultCostModel)`'s head — for tests that only care about the
     /// default pick, not the full candidate list.
-    fn preferred(intent: &AggIntent) -> Implementation {
-        implementations_for_with(intent, &DefaultCostModel)
+    fn preferred(intent: &AggIntent) -> Realization {
+        realizations_for_intent(intent, &DefaultCostModel)
             .into_iter()
             .next()
-            .expect("every intent has at least one Implementation")
+            .expect("every intent has at least one Realization")
     }
 
     /// Shorthand for asserting the realization *category*.
@@ -5910,9 +5932,9 @@ mod tests {
 
     fn cat(intent: &AggIntent) -> Cat {
         match preferred(intent) {
-            Implementation::ExactAggregate { kind, .. } => Cat::Acc(kind),
-            Implementation::Sketch(kind) => Cat::Sketch(kind.algorithm().clone()),
-            Implementation::PassThrough => Cat::Pass,
+            Realization::ExactAggregate { kind, .. } => Cat::Acc(kind),
+            Realization::Sketch(kind) => Cat::Sketch(kind.algorithm().clone()),
+            Realization::PassThrough => Cat::Pass,
             other => {
                 panic!("this coverage matrix expects only Exact/Sketch/PassThrough, got {other:?}")
             }
@@ -5921,7 +5943,7 @@ mod tests {
 
     /// The `AggIntent → SummaryKind` coverage matrix (issue #98): every intent
     /// variant maps to a sketch, an exact accumulator, or an explicit
-    /// pass-through. `implementations_for_with`'s match is exhaustive, so a
+    /// pass-through. `realizations_for_intent`'s match is exhaustive, so a
     /// new variant cannot compile without a decision; this matrix pins what
     /// each decision *is* (its preferred/first candidate).
     #[test]
@@ -6069,8 +6091,8 @@ mod tests {
     fn pearson_corr_keeps_exact_paired_input() {
         let intent = AggIntent::PearsonCorr { left: 0, right: 1 };
         assert!(matches!(
-            implementations_for_with(&intent, &crate::cost_model::DefaultCostModel).as_slice(),
-            [Implementation::PassThrough]
+            realizations_for_intent(&intent, &crate::cost_model::DefaultCostModel).as_slice(),
+            [Realization::PassThrough]
         ));
         assert!(summary_candidates(&intent).is_empty());
     }
@@ -6083,12 +6105,12 @@ mod tests {
             q: 0.99,
             accuracy: AccuracyTarget::Exact,
         };
-        assert_eq!(preferred(&exact), Implementation::PassThrough);
+        assert_eq!(preferred(&exact), Realization::PassThrough);
 
         let approx = default_quantile(0.99); // ε = 0.01
         assert_eq!(
             preferred(&approx),
-            Implementation::Sketch(SketchKind::new(
+            Realization::Sketch(SketchKind::new(
                 SketchAlgorithm::Kll,
                 SketchParams::Kll { k: 269 },
             ))
@@ -6101,7 +6123,7 @@ mod tests {
         };
         assert_eq!(
             preferred(&looser),
-            Implementation::Sketch(SketchKind::new(
+            Realization::Sketch(SketchKind::new(
                 SketchAlgorithm::Kll,
                 SketchParams::Kll { k: 52 },
             ))
@@ -6112,7 +6134,7 @@ mod tests {
     fn default_cardinality_sizes_hll_to_its_rse_magnitude() {
         assert_eq!(
             preferred(&default_cardinality()),
-            Implementation::Sketch(SketchKind::new(
+            Realization::Sketch(SketchKind::new(
                 SketchAlgorithm::Hll,
                 SketchParams::Hll { precision: 14 },
             ))
@@ -6129,7 +6151,7 @@ mod tests {
         };
         assert_eq!(
             preferred(&intent),
-            Implementation::Sketch(SketchKind::new(
+            Realization::Sketch(SketchKind::new(
                 SketchAlgorithm::Cms,
                 SketchParams::Cms {
                     width: 2719,
@@ -6143,7 +6165,7 @@ mod tests {
         };
         assert_eq!(
             preferred(&intent),
-            Implementation::Sketch(SketchKind::new(
+            Realization::Sketch(SketchKind::new(
                 SketchAlgorithm::Cms,
                 SketchParams::Cms {
                     width: 2719,
@@ -6160,7 +6182,7 @@ mod tests {
             accuracy: eps(0.01),
         };
         match preferred(&intent) {
-            Implementation::Sketch(kind) if kind.algorithm() == &SketchAlgorithm::CmsWithHeap => {
+            Realization::Sketch(kind) if kind.algorithm() == &SketchAlgorithm::CmsWithHeap => {
                 let SketchParams::CmsWithHeap {
                     width,
                     depth,
@@ -6216,15 +6238,15 @@ mod tests {
     }
 
     #[test]
-    fn implementations_for_with_enumerates_every_candidate_ranked() {
-        // Quantile's candidate list is [Kll, DDSketch] — implementations_for_with
+    fn realizations_for_intent_enumerates_every_candidate_ranked() {
+        // Quantile's candidate list is [Kll, DDSketch] — realizations_for_intent
         // must return both, ranked with the DefaultCostModel's preferred
         // (Kll) first.
         let kinds: Vec<SketchAlgorithm> =
-            implementations_for_with(&default_quantile(0.99), &DefaultCostModel)
+            realizations_for_intent(&default_quantile(0.99), &DefaultCostModel)
                 .into_iter()
-                .map(|implementation| match implementation {
-                    Implementation::Sketch(kind) => kind.algorithm().clone(),
+                .map(|realization| match realization {
+                    Realization::Sketch(kind) => kind.algorithm().clone(),
                     other => panic!("expected Sketch, got {other:?}"),
                 })
                 .collect();
@@ -6240,7 +6262,7 @@ mod tests {
         };
         assert_eq!(
             preferred(&intent),
-            Implementation::Sketch(SketchKind::new(
+            Realization::Sketch(SketchKind::new(
                 SketchAlgorithm::Kll,
                 SketchParams::Kll { k: 65_535 },
             ))
@@ -6475,7 +6497,7 @@ mod tests {
     fn approximate_quantile_enumerates_every_summary_candidate() {
         // Quantile's candidate list is [Kll, DDSketch] (summary_candidates) —
         // every entry must come back as its own bound SummaryNode candidate,
-        // not just Kll (the CostModel-ranked head implementations_for_with commits to).
+        // not just Kll (the CostModel-ranked head realizations_for_intent commits to).
         let q = Rc::new(agg(vec![2], default_quantile(0.99), metric_scan(&["job"])));
         let target = TargetSubDAG::new(&q);
         let replacements = SketchAlgorithmStrategy::default_cost_model().replacements(&target);
@@ -6551,7 +6573,7 @@ mod tests {
 
     #[test]
     fn exact_accuracy_target_yields_exactly_one_pass_through_candidate() {
-        // Exact quantile has no sketch candidate at all — implementations_for_with
+        // Exact quantile has no sketch candidate at all — realizations_for_intent
         // produces PassThrough, the only option, so exactly one candidate.
         let intent = AggIntent::Quantile {
             col: None,
@@ -6593,7 +6615,7 @@ mod tests {
 
     /// A custom `CostModel` doesn't change *which* candidates are enumerated
     /// (still every `summary_candidates` entry) — only which one
-    /// `implementations_for_with` itself would prefer first, and how each
+    /// `realizations_for_intent` itself would prefer first, and how each
     /// candidate's own params are sized.
     struct PreferDDSketch;
     impl CostModel for PreferDDSketch {
@@ -6647,7 +6669,7 @@ mod tests {
         let inner = agg(vec![2], default_quantile(0.5), metric_scan(&["job"]));
         let outer = Rc::new(agg(vec![], default_quantile(0.99), inner));
         let target = TargetSubDAG::new(&outer);
-        let replacements = SketchAlgorithmStrategy::with_models(
+        let replacements = SketchAlgorithmStrategy::new_with_planning_inputs(
             &DefaultCostModel,
             &RankAdditiveModel,
             &EqualSplitAllocator,
@@ -8036,11 +8058,11 @@ mod tests {
     fn realize_first(
         expr: &QueryExpr,
         cost_model: &dyn CostModel,
-    ) -> Result<Rc<SummaryNode>, ImplementError> {
+    ) -> Result<Rc<SummaryNode>, RealizationError> {
         realize_child(&Rc::new(expr.clone()), cost_model)
     }
 
-    fn realize(expr: &QueryExpr) -> Result<Rc<SummaryNode>, ImplementError> {
+    fn realize(expr: &QueryExpr) -> Result<Rc<SummaryNode>, RealizationError> {
         realize_first(expr, &DefaultCostModel)
     }
 
@@ -8160,7 +8182,7 @@ mod tests {
 
     /// A deployment-supplied `CostModel` can realize an `AggIntent::Extension`
     /// intent as a real sketch instead of the default `PassThrough` (issue
-    /// #150) — `implementations_for_with` must consult `realize_extension`
+    /// #150) — `realizations_for_intent` must consult `realize_extension`
     /// for the `Extension` arm, and `readout` must consult
     /// `readout_extension` to build its `SketchQuery` without panicking.
     struct FrequencyCostModel;
@@ -8174,13 +8196,9 @@ mod tests {
             candidates.to_vec()
         }
 
-        fn realize_extension(
-            &self,
-            ext_kind: &str,
-            _payload: &serde_json::Value,
-        ) -> Implementation {
+        fn realize_extension(&self, ext_kind: &str, _payload: &serde_json::Value) -> Realization {
             if ext_kind == "frequency" {
-                Implementation::Sketch(SketchKind::new(
+                Realization::Sketch(SketchKind::new(
                     SketchAlgorithm::CountSketch,
                     SketchParams::CountSketch {
                         width: 256,
@@ -8188,7 +8206,7 @@ mod tests {
                     },
                 ))
             } else {
-                Implementation::PassThrough
+                Realization::PassThrough
             }
         }
 
@@ -8365,7 +8383,7 @@ mod tests {
 
     #[test]
     fn nested_aggregates_realize_per_node() {
-        // quantile(0.9, sum by (job) (m)) — the implementation decision
+        // quantile(0.9, sum by (job) (m)) — the realization decision
         // fires per node over the nested tree: KLL over an exact Sum
         // accumulator.
         let inner = agg(vec![2], AggIntent::Sum { col: None }, metric_scan(&["job"]));
@@ -8571,7 +8589,7 @@ mod tests {
             },
             inner,
         ));
-        let strategy = SketchAlgorithmStrategy::with_models_and_evidence(
+        let strategy = SketchAlgorithmStrategy::new_with_planning_inputs_and_evidence(
             &DefaultCostModel,
             &DefaultAccuracyModel,
             &EqualSplitAllocator,
@@ -8605,7 +8623,7 @@ mod tests {
             },
             inner,
         ));
-        let strategy = SketchAlgorithmStrategy::with_models_and_evidence(
+        let strategy = SketchAlgorithmStrategy::new_with_planning_inputs_and_evidence(
             &DefaultCostModel,
             &DefaultAccuracyModel,
             &EqualSplitAllocator,
@@ -8672,7 +8690,7 @@ mod tests {
             },
             inner,
         ));
-        let strategy = SketchAlgorithmStrategy::with_models_and_evidence(
+        let strategy = SketchAlgorithmStrategy::new_with_planning_inputs_and_evidence(
             &DefaultCostModel,
             &DefaultAccuracyModel,
             &EqualSplitAllocator,
@@ -8739,7 +8757,7 @@ mod tests {
             },
             inner,
         ));
-        let strategy = SketchAlgorithmStrategy::with_models_and_evidence(
+        let strategy = SketchAlgorithmStrategy::new_with_planning_inputs_and_evidence(
             &DefaultCostModel,
             &DefaultAccuracyModel,
             &EqualSplitAllocator,
@@ -8790,7 +8808,7 @@ mod tests {
             },
             inner,
         ));
-        let strategy = SketchAlgorithmStrategy::with_models_and_evidence(
+        let strategy = SketchAlgorithmStrategy::new_with_planning_inputs_and_evidence(
             &DefaultCostModel,
             &DefaultAccuracyModel,
             &EqualSplitAllocator,
@@ -8843,7 +8861,7 @@ mod tests {
             },
             inner,
         ));
-        let strategy = SketchAlgorithmStrategy::with_models_and_evidence(
+        let strategy = SketchAlgorithmStrategy::new_with_planning_inputs_and_evidence(
             &DefaultCostModel,
             &DefaultAccuracyModel,
             &EqualSplitAllocator,
@@ -9097,7 +9115,7 @@ mod tests {
         // summary levels explicit while preserving the composed guarantee.
         let inner = agg(vec![2], quantile_eps(0.5, 0.1), metric_scan(&["job"]));
         let outer = Rc::new(agg(vec![], quantile_eps(0.99, 0.1), inner));
-        let strategy = SketchAlgorithmStrategy::with_models(
+        let strategy = SketchAlgorithmStrategy::new_with_planning_inputs(
             &DefaultCostModel,
             &RankAdditiveModel,
             &EqualSplitAllocator,
@@ -9123,7 +9141,7 @@ mod tests {
         let inner = agg(vec![2], quantile_eps(0.5, 0.1), metric_scan(&["job"]));
         let outer = Rc::new(agg(vec![], quantile_eps(0.99, 0.1), inner));
         let strategies: Vec<Box<dyn ReplacementStrategy>> =
-            vec![Box::new(SketchAlgorithmStrategy::with_models(
+            vec![Box::new(SketchAlgorithmStrategy::new_with_planning_inputs(
                 &DefaultCostModel,
                 &RankAdditiveModel,
                 &EqualSplitAllocator,

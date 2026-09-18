@@ -285,7 +285,7 @@ impl ReplacementStrategy for MaintainedPopulationStrategy {
             .map(|node| ReplacementSubDAG {
                 strategy: "MaintainedPopulationStrategy",
                 replacement: Replacement::Summary(node),
-                provenance: ReplacementProvenance::SummaryImplementation,
+                provenance: ReplacementProvenance::SummaryRealization,
                 rationale:
                     "share an exact maintained population across compatible aggregate readouts"
                         .into(),
