@@ -76,10 +76,30 @@ Each exact replacement candidate owns its complete logical-node
 alternative from satisfying another. Candidate matching includes the complete
 exported plan, including accuracy guarantees, and never uses a hash or strategy
 name; derived floating constants allow only a one-ULP JSON round-trip tolerance.
-Duplicate, conflicting, unused, or missing records fail closed. Without
-this document, `--post-asap` exports the raw graph only. The old
+Duplicate, conflicting, unused, or missing records fail closed. The old
 `--analytical-cost-json` spelling accepts the new document as an alias; its old
 compact aggregation payload is rejected with a migration error.
+
+`--default-cost` is the alternative cost source for a workload with no
+deployment to measure yet, and is mutually exclusive with
+`--planner-cost-json`:
+
+```sh
+cargo run -p asap-devtools --bin dag_export -- \
+  --post-asap --default-cost --epsilon 0.01 \
+  --sql "SELECT service, COUNT(*) FROM metrics GROUP BY service" --name q1 \
+  > /tmp/dag.json
+```
+
+It ranks candidates with the planner's structural `DefaultCostModel`, so the
+structure of the export is real — which replacements the search found, which
+one won per group, and the merged post-ASAP graph — while no cost is exported
+at all. Every `CostAnnotation` stays `Unavailable` with no `value` and renders
+as **Not estimated**; the structural ranking number is never serialized. Use
+it to see what ASAPPlanner does with a workload before there is a deployment
+to calibrate against, and `--planner-cost-json` once there is.
+
+Without either flag, `--post-asap` exports the raw graph only.
 
 The viewer also accepts the JSON produced by
 `export_summary_maintenance_plan`. It renders the materialized summary DAG as
@@ -144,8 +164,11 @@ identifies the immutable catalog/runtime generation. A missing `value`
 **Not estimated** — the viewer never fabricates a number. A complete physical
 planner export keeps CPU operations, peak memory, scan bytes, coefficients,
 and workload statistics in `inputs`. Without complete physical evidence, the
-annotation is `Unavailable`; structural node counts are never substituted.
-See the [analytical model design](../../docs/design_docs/proposals/asap-aware-mapping/analytical-resource-cost.md).
+annotation is `Unavailable`; structural node counts are never substituted,
+including under `--default-cost`, where they rank the candidates and are then
+discarded.
+See the [analytical model design](../../docs/design_docs/asap-aware-mapping/analytical-resource-cost.md).
+
 
 The checked-in viewer fixture makes its illustrative comparison reproducible.
 It models 100 evaluations of 100 million 64-byte rows with 100,000 groups.
