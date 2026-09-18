@@ -6,6 +6,10 @@ It does not commit, deploy, or execute a physical plan; downstream systems such
 as ASAPQuery-backend bind the candidates to physical alternatives, make the
 deployment-level decision, and run the selected contract.
 
+For the integration contract, start with [ASAPPlanner input, output, and
+workflow](input-output-workflow.md). It defines required and optional inputs,
+`PlanSpace` and selected-plan outputs, lifecycle requirements, and replanning.
+
 ## Planner component flow
 
 ```mermaid
