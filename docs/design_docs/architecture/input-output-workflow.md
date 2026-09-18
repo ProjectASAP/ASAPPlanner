@@ -28,10 +28,23 @@ separate inputs to candidate search, not frontend dependencies.
 |---|---|---|
 | `PlanSpace<Id>` | The legal candidate Post-ASAP DAGs for the workload, represented compactly as canonical roots, memoized alternatives, and cross-group composition information | The single ASAPPlanner output |
 
-`PlanSpace` is a compact representation of a set of candidate DAGs rather than
-an eagerly enumerated `Vec<Dag>`. Ranking, selection, materialization, and
-lifecycle APIs operate on this candidate set; they are views or helper
-operations, not additional top-level Planner outputs.
+`PlanSpace` does not eagerly copy every complete DAG. It stores the workload's
+canonical roots once, creates one memo group for each distinct target sub-DAG,
+and stores that target's replacement alternatives once inside the group.
+Candidate children refer back to canonical targets, so common subexpressions
+and shared alternatives are not duplicated across roots.
+
+For example, if one target has three alternatives and its child has two,
+eager enumeration could create six complete DAGs. `PlanSpace` stores the three
+parent alternatives, the two child alternatives, and their relationship.
+Whole-plan selection chooses compatible alternatives across those groups;
+materialization then recursively substitutes the selected alternatives to
+construct a complete Post-ASAP DAG. This memoized representation avoids the
+Cartesian-product expansion of complete DAGs and preserves shared nodes.
+
+Ranking, selection, materialization, and lifecycle APIs operate on this same
+candidate set; they are views or helper operations, not additional top-level
+Planner outputs.
 
 The candidate DAGs are logical planning artifacts. ASAPPlanner does **not**
 produce a deployed executable plan; downstream systems bind physical operators,
