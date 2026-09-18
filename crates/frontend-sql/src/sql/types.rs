@@ -18,7 +18,7 @@ use crate::error::SqlError as LoweringError;
 ///
 /// Used twice: to register Arrow-backed `MemTable`s so DataFusion can resolve
 /// `SELECT … FROM t`, and to attach each table's schema directly onto the
-/// canonical `Scan` (`schema: Some(_)`) so the Binder doesn't need to
+/// canonical `Scan` (`schema: Some(_)`) so the SchemaResolver doesn't need to
 /// usage-derive it.
 #[derive(Debug, Clone, Default)]
 pub struct SqlCatalog {

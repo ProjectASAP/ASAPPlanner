@@ -47,7 +47,7 @@
 //!   actually realizes a sketch family (`SummaryFamilyType::Sketch`), i.e.
 //!   [`SketchAlgorithmStrategy`] found something to offer beyond whatever
 //!   exact/pass-through candidate [`crate::replacement`]'s own
-//!   `implementations_for_with` would have committed to on its own.
+//!   `realizations_for_intent` would have committed to on its own.
 //! - [`ExplanationKind::CommonSubexpressionReuse`] — the `TargetSubDAG`
 //!   has two or more consumers *and* its candidate list contains the
 //!   [`SharedSubtreeStrategy`] "build once and share" candidate (the one
@@ -163,9 +163,9 @@
 //! |---|---|---|
 //! | Semantic-equivalent rewriting (e.g. `avg` → `sum`/`count`) | [`AvgToSumOverCountStrategy`](crate::rewrite::AvgToSumOverCountStrategy) exists and is wired into `default_strategies()` (issue #253) — but still no `ExplanationKind` of its own below, since this table is about *direct* findings for a catalog entry, and this strategy's whole point is indirect: its `Replacement::Rewrite` candidate exposes `sum`/`count` as independently bindable discovered targets, which can then earn `CommonSubexpressionReuse` findings when the workload actually reuses them | A dedicated variant would need `findings_from_plan_space` to recognize a `LogicalRewrite`-provenance candidate as a finding in its own right, not just rely on what it exposes downstream |
 //! | Roll-ups (fine-to-coarse group-by reuse) | [`RollupStrategy`](crate::rollup::RollupStrategy), derived from workload siblings after CSE/target discovery (issue #254) | Any `Replacement::Rewrite` candidate that rolls a coarse aggregate up from a compatible finer aggregate |
-//! | Wavelets/OMP | Params type exists (`WaveletKind`/`WaveletParams`), reachable only via a deployment `CostModel::realize_extension` (no core `AggIntent` dispatch picks it) | A `ReplacementStrategy` that inspects a deployment's own `CostModel`, once some intent shape actually maps to `Implementation::Wavelet` |
-//! | Sampling | Same story as Wavelets: `SamplingKind`/`SamplingParams` exist, unreachable from core dispatch | Same hook as Wavelets, for `Implementation::Sample` |
-//! | Deep generative compression | No representation at all — no `Implementation`/`SummaryFamilyType` variant | Needs a new summary family added to `asap_types::post_asap` first |
+//! | Wavelets/OMP | Params type exists (`WaveletKind`/`WaveletParams`), reachable only via a deployment `CostModel::realize_extension` (no core `AggIntent` dispatch picks it) | A `ReplacementStrategy` that inspects a deployment's own `CostModel`, once some intent shape actually maps to `Realization::Wavelet` |
+//! | Sampling | Same story as Wavelets: `SamplingKind`/`SamplingParams` exist, unreachable from core dispatch | Same hook as Wavelets, for `Realization::Sample` |
+//! | Deep generative compression | No representation at all — no `Realization`/`SummaryFamilyType` variant | Needs a new summary family added to `asap_types::post_asap` first |
 //! | Approximation frameworks for windows | No representation — `TimeRange`/`PromqlSubquery` windows are always evaluated exactly | Would key off those node types once an approximate-window operator exists |
 //! | Function decomposition | No representation anywhere | No hook point identified yet |
 //! | Continuous distributed monitoring | No representation — `RepeatingEntry`/`RepetitionInterval` in `asap_types::workload` describe *that* a query repeats, not any monitoring-specific decomposition | Would likely key off `RepeatingEntry` once such logic exists |
@@ -207,7 +207,7 @@ pub enum ExplanationKind {
     /// [`Replacement::Summary`] that realizes a sketch family —
     /// [`crate::replacement::SketchAlgorithmStrategy`] found a genuine sketch
     /// alternative for this `Aggregate`, beyond whatever exact/pass-through
-    /// candidate `crate::replacement`'s own `implementations_for_with` would
+    /// candidate `crate::replacement`'s own `realizations_for_intent` would
     /// have committed to on its own.
     SketchApproximation,
     /// A `TargetSubDAG` has two or more consumers *and* its candidate list

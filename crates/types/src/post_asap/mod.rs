@@ -78,6 +78,6 @@ pub use summary_maintenance_lifecycle::{
     SummaryMaintenanceLifecycleGuarantee,
 };
 pub use summary_window::{
-    plan_pane_phase, validate_pane_coverage, BoundaryCoverage, PaneCoverageError, PanePhaseBinding,
-    SummaryWindowFramework,
+    plan_pane_phase, validate_pane_coverage, PaneCoverageError, PaneLayout, SummaryWindowFramework,
+    WindowEdgeCoverage,
 };

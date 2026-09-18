@@ -46,7 +46,7 @@ pub struct SourceCoverage {
 }
 
 impl ComparisonScope {
-    /// Build a comparison boundary from canonical workload fields plus the
+    /// Build a comparison scope from canonical workload fields plus the
     /// physical snapshot identities supplied by the storage/catalog layer.
     pub fn from_workload(
         data: &DataWorkload,

@@ -27,22 +27,26 @@ pub enum SummaryWindowFramework {
     Extension(String),
 }
 
-/// Concrete pane phase recorded in a catalog binding or inventory snapshot.
+/// Concrete pane phase recorded in a catalog layout or inventory snapshot.
 /// Milliseconds are canonical throughout the shared contract.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PanePhaseBinding {
+pub struct PaneLayout {
     pub pane_width_ms: u64,
-    /// Unix timestamp of a pane boundary. `None` means the runtime has not
+    /// Unix timestamp of a pane edge. `None` means the runtime has not
     /// established an origin and therefore cannot claim full coverage.
     pub pane_origin_ms: Option<i64>,
 }
 
-/// How a query obtains exact values for partial panes at its two boundaries.
+/// How a query obtains exact values for partial panes at its two window edges.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
-pub enum BoundaryCoverage {
+pub enum WindowEdgeCoverage {
     PaneAligned,
-    ExactBoundaryResidual { executor: String, source: String },
+    #[serde(rename = "exact_boundary_residual")]
+    ExactWindowEdgeResidual {
+        executor: String,
+        source: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -58,23 +62,26 @@ pub enum PaneCoverageError {
 
 /// Validate that a pane-only readout covers a query exactly. A mismatched
 /// phase is sound only when the physical plan explicitly supplies an exact
-/// residual for the partial boundary panes.
+/// residual for the partial edge panes.
 pub fn validate_pane_coverage(
-    binding: &PanePhaseBinding,
+    layout: &PaneLayout,
     evaluation_time_ms: Option<i64>,
-    boundary: &BoundaryCoverage,
+    edge_coverage: &WindowEdgeCoverage,
 ) -> Result<(), PaneCoverageError> {
-    if binding.pane_width_ms == 0 {
+    if layout.pane_width_ms == 0 {
         return Err(PaneCoverageError::ZeroPaneWidth);
     }
-    if matches!(boundary, BoundaryCoverage::ExactBoundaryResidual { .. }) {
+    if matches!(
+        edge_coverage,
+        WindowEdgeCoverage::ExactWindowEdgeResidual { .. }
+    ) {
         return Ok(());
     }
-    let origin = binding
+    let origin = layout
         .pane_origin_ms
         .ok_or(PaneCoverageError::UnknownPaneOrigin)?;
     let evaluation = evaluation_time_ms.ok_or(PaneCoverageError::UnknownEvaluationPhase)?;
-    let width = binding.pane_width_ms as i64;
+    let width = layout.pane_width_ms as i64;
     let pane_phase_ms = origin.rem_euclid(width) as u64;
     let query_phase_ms = evaluation.rem_euclid(width) as u64;
     if pane_phase_ms == query_phase_ms {
@@ -94,7 +101,7 @@ pub fn validate_pane_coverage(
 pub fn plan_pane_phase(
     demand: &RepeatedDemand,
     pane_width_ms: u64,
-) -> Result<PanePhaseBinding, PaneCoverageError> {
+) -> Result<PaneLayout, PaneCoverageError> {
     if pane_width_ms == 0 {
         return Err(PaneCoverageError::ZeroPaneWidth);
     }
@@ -108,7 +115,7 @@ pub fn plan_pane_phase(
         }
         RepeatedDemand::FixedInterval(_) | RepeatedDemand::EstimatedRate(_) => None,
     };
-    Ok(PanePhaseBinding {
+    Ok(PaneLayout {
         pane_width_ms,
         pane_origin_ms: phase.and_then(|value| i64::try_from(value).ok()),
     })
@@ -136,21 +143,21 @@ mod tests {
 
     #[test]
     fn pane_only_readout_rejects_source_and_query_phase_mismatch() {
-        let binding = PanePhaseBinding {
+        let layout = PaneLayout {
             pane_width_ms: 60_000,
             pane_origin_ms: Some(26_000),
         };
         assert_eq!(
-            validate_pane_coverage(&binding, Some(56_000), &BoundaryCoverage::PaneAligned),
+            validate_pane_coverage(&layout, Some(56_000), &WindowEdgeCoverage::PaneAligned),
             Err(PaneCoverageError::PhaseMismatch {
                 pane_phase_ms: 26_000,
                 query_phase_ms: 56_000,
             })
         );
         assert!(validate_pane_coverage(
-            &binding,
+            &layout,
             Some(56_000),
-            &BoundaryCoverage::ExactBoundaryResidual {
+            &WindowEdgeCoverage::ExactWindowEdgeResidual {
                 executor: "prometheus".into(),
                 source: "m".into(),
             },
@@ -166,7 +173,7 @@ mod tests {
         };
         assert_eq!(
             plan_pane_phase(&demand, 60_000).unwrap(),
-            PanePhaseBinding {
+            PaneLayout {
                 pane_width_ms: 60_000,
                 pane_origin_ms: Some(56_000),
             }

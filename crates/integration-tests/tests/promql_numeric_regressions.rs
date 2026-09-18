@@ -197,7 +197,7 @@ fn sketch_counts_use_unit_weights_and_signed_sums_keep_value_weights() {
     use asap_aware_mapping::accuracy::{DefaultAccuracyModel, EqualSplitAllocator};
     use asap_aware_mapping::cost_model::DefaultCostModel;
     use asap_types::post_asap::{NonNegativeWeightProof, SketchAlgorithm, WeightDomain};
-    let strategy = SketchAlgorithmStrategy::with_models_and_evidence(
+    let strategy = SketchAlgorithmStrategy::new_with_planning_inputs_and_evidence(
         &DefaultCostModel,
         &DefaultAccuracyModel,
         &EqualSplitAllocator,

@@ -39,7 +39,7 @@
 //!   under "Key concepts (not yet implemented)", implemented for real (issue
 //!   #251, part of #33). [`replacement::SketchAlgorithmStrategy::replacements`]
 //!   both *decides* what an `AggIntent` may become
-//!   ([`replacement::implementations_for_with`], exhaustive and ranked via a
+//!   ([`replacement::realizations_for_intent`], exhaustive and ranked via a
 //!   `CostModel`, sized to the `AccuracyTarget`) and *constructs* each
 //!   candidate's bound [`SummaryNode`](asap_types::post_asap::SummaryNode) —
 //!   every candidate comes back, not just one.
@@ -67,7 +67,7 @@
 //! downstream deployment's job, out of this crate's scope.** This crate's
 //! output boundary is [`replacement::PlanSpace`]: every candidate
 //! replacement plus its cost, meant for a downstream consumer (e.g. a
-//! DAG-visualization view, or a deployment's own physical binder). Which
+//! DAG-visualization view, or a deployment's own physical plan provider). Which
 //! sketch to commit to *and* where to place it are a joint decision only a
 //! deployment can see the full picture for — picking one in isolation, with
 //! no real consumer of that single materialized answer inside this crate,
@@ -119,8 +119,8 @@
 //!   above apply" degree of freedom `docs/design_docs/asap_aware_mapping.md`
 //!   names (issue #253, part of #33): [`rewrite::AvgToSumOverCountStrategy`]
 //!   is a [`replacement::ReplacementStrategy`] that reshapes a bare `avg`
-//!   node — which [`replacement::implementations_for_with`] can only
-//!   dispatch to `Implementation::PassThrough`, so it can never be a
+//!   node — which [`replacement::realizations_for_intent`] can only
+//!   dispatch to `Realization::PassThrough`, so it can never be a
 //!   [`replacement::SharedSubtreeStrategy`] target — into a `sum`/`count`
 //!   pair under the same grouping, re-divided back by a wrapping `Project`,
 //!   so those *are* ordinary mergeable accumulators sharing/sketching can
@@ -129,37 +129,26 @@
 //!   is what decides whether the reshaped form is actually worth picking,
 //!   the same propose-don't-decide split every other strategy here keeps.
 //!
-//! ## Terminology — "bind" already means three different things nearby;
-//! this crate's own logical→physical step is named "implementation" instead
+//! ## Terminology
 //!
-//! `asap-plan` and its downstream consumers (e.g. `ASAPQuery-backend`'s
-//! `control_plane`) independently reused the word "bind" for three
-//! *different*, layer-specific meanings — none of which is what this
-//! crate's own [`replacement`] module does. To avoid becoming a
-//! fourth, colliding sense of the same word, this crate names its own
-//! logical intent → physical realization step after the term the
-//! query-optimization literature already uses for exactly that step:
-//! **implementation** (Cascades/Volcano's "implementation rule", logical →
-//! physical, as distinct from a *transformation rule*, logical → logical —
-//! see Graefe, *The Cascades Framework for Query Optimization*).
+//! Schema resolution, candidate realization, and runtime placement are distinct stages.
 //!
-//! | Term | Stage | Meaning | Lives in |
-//! |---|---|---|---|
-//! | **Parse** | parse | text (PromQL/SQL) → AST | `asap-frontend-promql` / `asap-frontend-sql` |
-//! | **Bind #1** | name resolution | `ColumnRef` (a name) → `ColumnId` (a concrete schema column) — the classic RDBMS "Parse → **Bind** → Optimize" pipeline sense (e.g. SQL Server's query-processor terminology) | [`asap_types::pre_asap::binder::Binder`](https://docs.rs/asap-types) |
-//! | **Implementation** — `replacement::implementations_for_with` | pre-ASAP → post-ASAP, *one node* | enumerating every concrete physical realization (a sketch family, an exact accumulator, or pass-through) for one [`AggIntent`](asap_types::pre_asap::agg_intent::AggIntent) | [`replacement`] |
-//! | **Replacement** — [`replacement::SketchAlgorithmStrategy::replacements`] | pre-ASAP → post-ASAP, *one target, every candidate* | wrap each `implementations_for_with` candidate into its own bound [`SummaryNode`](asap_types::post_asap::SummaryNode), ranked — a caller wanting one answer takes the first entry itself | [`replacement`] |
-//! | **Search** — [`replacement::search_workload`]/[`replacement::search_workload_with`] | pre-ASAP → post-ASAP, *whole workload, every candidate* | a Cascades/Volcano-style MEMO search: discover every candidate `TargetSubDAG` across a whole workload (not just one target in isolation), run every registered `ReplacementStrategy` against each to a fixpoint, and dedup into a [`replacement::PlanSpace`] — one [`replacement::MemoGroup`] per distinct `TargetSubDAG` holding every alternative discovered for it, never a flat `2^N`-sized list of whole candidate plans | [`replacement`] |
-//! | **Bind #2** (downstream, not in this crate) | post-ASAP → deployment placement | a *deployment's* own physical binder, deciding **which** candidate to commit to *and* **placement** (edge vs. backend, wire format, …) for a whole workload — a genuinely different, deployment-specific decision this crate doesn't model at all (this is also where a prior workload-wide "keep first/cost-preferred candidate per node" step, `bind::implement_workload`/`implement_workload_with`, would belong if a deployment still wants that exact behavior — it isn't shipped by this crate) | e.g. `control_plane::sketch_algebra::rules::bind_*` (as of this writing; expected to fold into that deployment's cost-model layer rather than stay a separate "bind" concept) |
+//! | Term | Meaning | Entry point |
+//! |---|---|---|
+//! | Schema resolution | Derive input schemas and resolve column names to positions | `asap_types::pre_asap::SchemaResolver::resolve_schema`, `resolve_root` |
+//! | Realization | Enumerate ranked physical forms for one aggregate intent | `replacement::realizations_for_intent` |
+//! | Replacement | Construct each candidate summary sub-DAG | [`replacement::SketchAlgorithmStrategy`] |
+//! | Search | Enumerate and compare alternatives across a workload | [`replacement::search_workload`] |
+//! | Runtime placement | Choose deployment locations and concrete executors | Downstream physical plan providers |
 //!
 //! A related question (tracked alongside issues #6/#33): whether this
 //! crate should also own a **matching** predicate — "does an already
-//! *available* `Implementation` satisfy a *required* one" — the way a
+//! *available* `Realization` satisfy a *required* one" — the way a
 //! database's materialized-view matching / "answering queries using
 //! views" layer does. It owns the *question*, not an *answer*:
 //! [`replacement::Matcher`] is a trait with no default implementation and
 //! no shipped instance, the same shape as [`cost_model::CostModel`] and for
-//! the same reason — which `Implementation`s are actually *available*
+//! the same reason — which `Realization`s are actually *available*
 //! anywhere is entirely a downstream deployment's concern (an inventory
 //! this crate has no way to see), and even the pure sketch-algebra
 //! compatibility rules (e.g. a heap-bearing top-k sketch also satisfying a
@@ -184,7 +173,6 @@
 pub mod accuracy;
 pub mod accuracy_reconciliation;
 pub mod analytical_cost;
-pub mod boundary_cost;
 pub mod cost_model;
 pub mod empirical_comparison;
 pub mod empirical_cost;
@@ -195,6 +183,7 @@ pub mod explanation;
 mod function_rules;
 pub mod grouping;
 pub mod pane_sharing;
+pub mod physical_handoff_cost;
 pub mod physical_operator_statistics;
 pub mod physical_plan_cost_model;
 pub mod query_physical_lowering;
@@ -235,7 +224,7 @@ pub use recurrence::{
 pub use replacement::{
     default_strategies, default_strategies_with, search_workload, search_workload_with,
     search_workload_with_targets, summary_candidates, CompositionDecision, GlobalSelection,
-    ImplementError, Implementation, Matcher, MemoGroup, PlanSpace, Proposals, RankedGroup,
+    Matcher, MemoGroup, PlanSpace, Proposals, RankedGroup, Realization, RealizationError,
     RecurrenceProfileMap, RejectedCandidate, Replacement, ReplacementProvenance,
     ReplacementStrategy, ReplacementSubDAG, SelectedGroup, SharedSubtreeStrategy,
     SketchAlgorithmStrategy, TargetSubDAG, MAX_SEARCH_ITERATIONS,

@@ -50,7 +50,7 @@ impl AccuracyModel for TestEvidence {
 
 fn candidate(query: &str, accuracy: AccuracyTarget) -> Rc<SummaryNode> {
     let root = lower_promql(query, accuracy).unwrap();
-    SketchAlgorithmStrategy::with_models(&DefaultCostModel, &TestEvidence, &EqualSplitAllocator)
+    SketchAlgorithmStrategy::new_with_planning_inputs(&DefaultCostModel, &TestEvidence, &EqualSplitAllocator)
         .replacements(&TargetSubDAG::new(&Rc::new(root)))
         .into_iter()
         .find_map(|candidate| {

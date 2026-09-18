@@ -6,7 +6,7 @@
 
 use std::rc::Rc;
 
-use asap_aware_mapping::replacement::{keep_pre_asap, ImplementError};
+use asap_aware_mapping::replacement::{keep_pre_asap, RealizationError};
 use asap_aware_mapping::{
     Replacement, ReplacementStrategy, ReplacementSubDAG, SketchAlgorithmStrategy, TargetSubDAG,
 };
@@ -64,7 +64,7 @@ fn queries(corpus: &str) -> impl Iterator<Item = &str> {
         .filter(|line| !line.is_empty() && !line.starts_with('#'))
 }
 
-fn post_asap_candidate(expr: &QueryExpr) -> Result<Rc<SummaryNode>, ImplementError> {
+fn post_asap_candidate(expr: &QueryExpr) -> Result<Rc<SummaryNode>, RealizationError> {
     let root = Rc::new(expr.clone());
     let target = TargetSubDAG::new(&root);
     match SketchAlgorithmStrategy::default_cost_model()

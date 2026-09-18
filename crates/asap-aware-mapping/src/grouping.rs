@@ -15,7 +15,7 @@
 //! CMS state and a Hydra-backed state cannot be accepted as compatible inputs
 //! to a downstream `SummaryMerge`. [`with_grouping`] updates both atomically.
 //!
-//! ## Legality vs. cost (same split [`crate::replacement::implementations_for_with`]
+//! ## Legality vs. cost (same split [`crate::replacement::realizations_for_intent`]
 //! already draws)
 //!
 //! This module only answers "is `SharedMultiSubpopulation` valid here at
@@ -46,13 +46,13 @@
 //! docs explain was deliberately deleted from this crate as an anti-pattern:
 //! forcing a choice via a whole-tree `CostModel` adapter had a real bug where
 //! the forced choice could leak into a target's own nested aggregates. This
-//! module never needs that: [`crate::replacement::implementations_for_with`]
-//! already returns every ranked candidate `Implementation` directly, so
+//! module never needs that: [`crate::replacement::realizations_for_intent`]
+//! already returns every ranked candidate `Realization` directly, so
 //! [`build_candidate`](HydraGroupingStrategy::build_candidate) just finds the
-//! one whose `Implementation::Sketch(kind)` has `kind.algorithm()` matching
+//! one whose `Realization::Sketch(kind)` has `kind.algorithm()` matching
 //! the Hydra-eligible `sketch_kind` it's building a candidate for, and
 //! passes that exact,
-//! already-decided `Implementation` to
+//! already-decided `Realization` to
 //! [`crate::replacement::construct_summary`] — the same first-class,
 //! one-candidate-at-a-time primitive [`crate::replacement::SketchAlgorithmStrategy`]
 //! itself calls once per candidate. No adapter, no steering, no risk of a
@@ -86,7 +86,7 @@ use crate::accuracy::{
 use crate::cost_model::{CostModel, DefaultCostModel};
 use crate::replacement::{
     accuracy_target, bindable_intent, construct_summary_with, describe_intent,
-    implementations_for_with, summary_candidates, Implementation, Models, Replacement,
+    realizations_for_intent, summary_candidates, CandidatePlanningInputs, Realization, Replacement,
     ReplacementStrategy, ReplacementSubDAG, TargetSubDAG,
 };
 
@@ -127,7 +127,7 @@ static DEFAULT_COST_MODEL: DefaultCostModel = DefaultCostModel;
 /// latter, matching every other strategy in this crate's "one strategy, one
 /// concern" shape.
 pub struct HydraGroupingStrategy<'a> {
-    models: Models<'a>,
+    planning_inputs: CandidatePlanningInputs<'a>,
 }
 
 impl HydraGroupingStrategy<'static> {
@@ -137,7 +137,7 @@ impl HydraGroupingStrategy<'static> {
     /// offers.
     pub fn default_cost_model() -> Self {
         Self {
-            models: Models::with_default_accuracy(&DEFAULT_COST_MODEL),
+            planning_inputs: CandidatePlanningInputs::with_default_accuracy(&DEFAULT_COST_MODEL),
         }
     }
 }
@@ -148,18 +148,18 @@ impl<'a> HydraGroupingStrategy<'a> {
     /// [`crate::replacement::SketchAlgorithmStrategy::new`] already offers.
     pub fn new(cost_model: &'a dyn CostModel) -> Self {
         Self {
-            models: Models::with_default_accuracy(cost_model),
+            planning_inputs: CandidatePlanningInputs::with_default_accuracy(cost_model),
         }
     }
 
-    pub fn with_models_and_evidence(
+    pub fn new_with_planning_inputs_and_evidence(
         cost_model: &'a dyn CostModel,
         accuracy_model: &'a dyn AccuracyModel,
         allocator: &'a dyn AccuracyBudgetAllocator,
         evidence: &'a dyn AccuracyEvidenceProvider,
     ) -> Self {
         Self {
-            models: Models {
+            planning_inputs: CandidatePlanningInputs {
                 cost: cost_model,
                 accuracy: accuracy_model,
                 allocator,
@@ -191,8 +191,8 @@ impl<'a> HydraGroupingStrategy<'a> {
             .collect()
     }
 
-    /// Find the already-ranked candidate [`Implementation::Sketch`] matching
-    /// `sketch_kind` among [`implementations_for_with`]'s exhaustive list for
+    /// Find the already-ranked candidate [`Realization::Sketch`] matching
+    /// `sketch_kind` among [`realizations_for_intent`]'s exhaustive list for
     /// `intent`, bind `root` to that exact, already-decided candidate via
     /// [`crate::replacement::construct_summary_with`] (no steering/forcing — see
     /// the module docs' "No `ForceSketchKind`-style steering"), then swap the
@@ -209,13 +209,14 @@ impl<'a> HydraGroupingStrategy<'a> {
         sketch_kind: SketchAlgorithm,
         hydra_kind: HydraKind,
     ) -> Option<ReplacementSubDAG> {
-        let implementation = implementations_for_with(intent, self.models.cost)
+        let realization = realizations_for_intent(intent, self.planning_inputs.cost)
             .into_iter()
             .find(|candidate| {
-                matches!(candidate, Implementation::Sketch(kind) if *kind.algorithm() == sketch_kind)
+                matches!(candidate, Realization::Sketch(kind) if *kind.algorithm() == sketch_kind)
             })?;
         let node =
-            construct_summary_with(root, intent, implementation, self.models, None, None).ok()?;
+            construct_summary_with(root, intent, realization, self.planning_inputs, None, None)
+                .ok()?;
         let per_subpopulation_params = per_subpopulation_sketch_params(&node)?;
         let params = default_hydra_params(hydra_kind.clone(), &per_subpopulation_params)?;
         let grouping = GroupingStrategy::SharedMultiSubpopulation {
@@ -233,21 +234,21 @@ impl<'a> HydraGroupingStrategy<'a> {
             },
             _ => return None,
         };
-        let stats = self.models.evidence.propagation_stats(
+        let stats = self.planning_inputs.evidence.propagation_stats(
             &CompositionOperator::ApproximateAggregate,
             family,
             query,
         );
         let patched = with_grouping(node, grouping, &stats);
         if let (Some(target), Some(guarantee)) = (accuracy_target(intent), &patched.guarantee) {
-            if !self.models.accuracy.satisfies(guarantee, target) {
+            if !self.planning_inputs.accuracy.satisfies(guarantee, target) {
                 return None;
             }
         }
         Some(ReplacementSubDAG {
             strategy: "HydraGroupingStrategy",
             replacement: Replacement::Summary(patched),
-            provenance: crate::replacement::ReplacementProvenance::SummaryImplementation,
+            provenance: crate::replacement::ReplacementProvenance::SummaryRealization,
             rationale: format!(
                 "{} realizes as a shared {hydra_kind:?} structure over {sketch_kind:?} \
                  serving every subpopulation of this grouped aggregate, instead of one \
@@ -611,7 +612,7 @@ mod tests {
             },
         };
         let q = Rc::new(agg(vec![2], intent, metric_scan(&["job"])));
-        let strategy = HydraGroupingStrategy::with_models_and_evidence(
+        let strategy = HydraGroupingStrategy::new_with_planning_inputs_and_evidence(
             &DefaultCostModel,
             &DefaultAccuracyModel,
             &EqualSplitAllocator,
@@ -688,7 +689,7 @@ mod tests {
     }
 
     /// A custom `CostModel` doesn't change *which* candidate is offered —
-    /// only which sketch candidate `implementations_for_with` itself would
+    /// only which sketch candidate `realizations_for_intent` itself would
     /// have ranked first, and how that candidate's own params are sized —
     /// same guarantee `SketchAlgorithmStrategy` makes for its own candidates.
     struct PreferDDSketch;

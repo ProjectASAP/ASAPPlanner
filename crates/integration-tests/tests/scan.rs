@@ -1,7 +1,7 @@
 //! `QueryExpr::Scan` — label matcher / predicate tests.
 //!
 //! The Scan schema is always [ts(0), value(1), label_a(2), label_b(3), …]
-//! where labels are appended alphabetically after dedup by the Binder.
+//! where labels are appended alphabetically after dedup by the SchemaResolver.
 //! Filter-only labels (not group keys) still land in the schema because the
 //! predicate expression references them positionally.
 //! Predicates are canonicalized alphabetically by label name at lowering time.
