@@ -23,21 +23,143 @@ If required accuracy, semantic, capability, or cost evidence is unavailable, Pla
 
 ## Inputs
 
-### Source-language inputs
+### Planning workload
 
-A frontend converts source-language queries into Planner's canonical representation.
+A frontend receives one `PlanningWorkload`. Query demand and facts about the
+queried data are separate because they have different sources and update
+cycles:
 
-| Input                           |               Required | Purpose                                                  |
-| ------------------------------- | ---------------------: | -------------------------------------------------------- |
-| Query text                      |                    Yes | Defines the query to plan.                               |
-| Query language                  |                    Yes | Selects the appropriate frontend.                        |
-| Schema/function catalog         |     Frontend-dependent | Resolves names and types.                                |
-| Accuracy requirement            |                    Yes | Use `Exact` when approximation is not allowed.           |
-| Query recurrence/time selection | For lifecycle planning | Describes how often and over what period the query runs. |
-| Data ingestion interval         |    For PromQL lowering | Defines the selection horizon for bare selectors.        |
-| Other workload facts            |               Optional | Enable optimizations that depend on them.                |
+```rust
+struct PlanningWorkload {
+    query_workload: QueryWorkload,
+    data_workload: Option<DataWorkload>,
+}
+```
 
-Frontend lowering produces one Pre-ASAP `QueryExpr` root for each workload query.
+| Field | Required | Purpose |
+|---|---:|---|
+| `query_workload` | Yes | Contains the source language and every one-time or repeating query. |
+| `data_workload` | Optional generally; required for PromQL | Describes data arrival and evidence about ingestion, cardinality, and distribution. PromQL additionally requires a nonzero `data_ingestion_interval`. |
+
+Frontend-specific resolution inputs are supplied alongside this structure. For
+example, SQL lowering requires a schema/function catalog. They are frontend
+dependencies, not fields of `PlanningWorkload`.
+
+### Query workload
+
+`QueryWorkload` describes query demand. It deliberately does not describe
+whether source data is still arriving.
+
+```rust
+struct QueryWorkload {
+    language: QueryLanguage,
+    query_batch: Option<Vec<BatchEntry>>,
+    repeating_queries: Option<Vec<RepeatingEntry>>,
+}
+```
+
+| Field | Required | Purpose |
+|---|---:|---|
+| `language` | Yes | Source language shared by every entry: PromQL, a SQL dialect, DataFusion, or Elastic DSL. It selects the frontend. |
+| `query_batch` | Optional | Finite one-time query entries. `None` means there is no batch portion. |
+| `repeating_queries` | Optional | Recurrent query entries. `None` means there is no repeating portion. |
+
+Both entry collections may be present. `QueryWorkload::entries()` normalizes
+them into one ordered stream: batch entries first, followed by repeating
+entries. If both are absent, lowering produces no query roots.
+
+#### One-time query fields
+
+```rust
+struct BatchEntry {
+    query: Query,
+    requirements: QueryRequirements,
+    predictability: Predictability,
+    invocations: u64,
+    execute_at: Option<TimestampMs>,
+    time_selection: TimeSelection,
+}
+```
+
+| Field | Required | Purpose |
+|---|---:|---|
+| `query` | Yes | Raw query text in `QueryWorkload.language`. |
+| `requirements` | Yes | Accuracy and response-latency requirements. Defaults mean exact accuracy and unspecified latency. |
+| `predictability` | Yes | Whether the query is ad hoc, known in advance, or unknown. `known_at` may record when a predictable query became known. |
+| `invocations` | Yes, nonzero | Number of executions in this finite batch. |
+| `execute_at` | Optional | Known execution time. Absence prevents time-specific preparation decisions. |
+| `time_selection` | Yes | Whether the query follows current data or a historical interval, its lookback, and any fixed upper bound. Unknown/default values limit lifecycle reasoning. |
+
+#### Repeating query fields
+
+```rust
+struct RepeatingEntry {
+    query: Query,
+    demand: RepeatedDemand,
+    requirements: QueryRequirements,
+    predictability: Predictability,
+    time_selection: TimeSelection,
+}
+```
+
+| Field | Required | Purpose |
+|---|---:|---|
+| `query` | Yes | Raw query text in `QueryWorkload.language`. |
+| `demand` | Yes | A nonzero fixed interval, fixed interval with evaluation phase, nonempty explicit schedule, or evidence-backed estimated rate. |
+| `requirements` | Yes | Accuracy and response-latency requirements. |
+| `predictability` | Yes | Whether future executions are known in advance. This is independent of recurrence. |
+| `time_selection` | Yes | Event-time scope, optional lookback, and optional fixed `as_of` time. |
+
+`QueryRequirements` and `TimeSelection` expand as follows:
+
+| Structure | Field | Meaning |
+|---|---|---|
+| `QueryRequirements` | `accuracy` | `Explicit(AccuracyTarget)` or `ImplicitExact`. Use an explicit target when approximation is allowed. |
+| `QueryRequirements` | `response_latency` | An optional finite, non-negative maximum in milliseconds. The default is unspecified. |
+| `TimeSelection` | `scope` | `RealTime`, `Longitudinal`, `Mixed`, or `Unknown`. |
+| `TimeSelection` | `lookback` | Optional event-time duration selected before the upper bound. |
+| `TimeSelection` | `as_of` | Optional fixed upper-bound timestamp; `None` means planning/evaluation time. |
+
+Frontend lowering produces one Pre-ASAP `QueryExpr` root for each normalized
+query entry. The caller must retain each root's association with its workload
+entry for later recurrence and lifecycle planning.
+
+### Data workload
+
+`DataWorkload` describes the data being queried. Each empirical field uses
+`Evidence<T>` so a value is accompanied by its source and freshness.
+
+```rust
+struct DataWorkload {
+    arrival: DataArrival,
+    data_ingestion_interval: Evidence<DurationMs>,
+    ingestion_volume: Evidence<u64>,
+    ingestion_rate: Evidence<Rate>,
+    input_cardinality: Evidence<u64>,
+    distribution: Evidence<DataDistribution>,
+}
+```
+
+| Field | Required | Purpose and behavior when unavailable |
+|---|---:|---|
+| `arrival` | Present; may be `Unknown` | Distinguishes data at rest, continuously ingesting data, and mixed data. Continuous-maintenance decisions are limited when unknown. |
+| `data_ingestion_interval` | Required and nonzero for PromQL; otherwise optional | Sampling cadence for each PromQL source. Bare instant selectors use it as their explicit selection horizon. |
+| `ingestion_volume` | Optional evidence | Total ingestion volume when known. Dependent resource estimates remain unavailable when absent or stale. |
+| `ingestion_rate` | Optional evidence | Updates per second used to price continuous maintenance. It must be finite and non-negative; at-rest data cannot declare a positive rate. |
+| `input_cardinality` | Optional evidence | Input row/sample count used by applicable sizing, accuracy, or cost rules. |
+| `distribution` | Optional evidence | `Zipf`, `Uniform`, or `Bursty` key distribution used only by rules that explicitly consume it. |
+
+Every `Evidence<T>` has four fields:
+
+| Field | Meaning |
+|---|---|
+| `value: Option<T>` | The fact itself; `None` means unavailable. |
+| `source: EvidenceSource` | `Declared`, `Observed`, `Derived`, or `Unknown`. |
+| `observed_at_ms: Option<u64>` | Observation timestamp used for freshness checks. |
+| `valid_for_ms: Option<u64>` | Validity duration. A duration without an observation timestamp is unusable. |
+
+Unavailable or stale data evidence stays unknown. Planner does not reinterpret
+it as zero ingestion, zero cardinality, or a favorable distribution.
 
 ### Canonical Planner inputs
 
