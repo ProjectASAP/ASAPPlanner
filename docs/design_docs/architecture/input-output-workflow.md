@@ -235,6 +235,12 @@ planned using a favorable assumption.
 Planner output may record the resulting guarantee, evidence provenance, or a
 rejection reason, but evidence itself remains an input.
 
+This completes the canonical input boundary for producing `PlanSpace`.
+Lifecycle-specific values such as a planning horizon and deployment lifecycle
+capabilities are not additional `PlanSpace` inputs. They are parameters to the
+optional [lifecycle-aware helper](#lifecycle-aware-helper) described after the
+output.
+
 ---
 
 ## Output
@@ -307,13 +313,26 @@ It is still **not an executable deployment plan**. Physical operator binding, pl
 
 ### Lifecycle-aware helper
 
-Lifecycle-aware planning is a helper over the candidate space that compares
-maintaining a summary against recomputing the raw query. Calling it requires
-query-workload bindings, planning time and horizon, recurrence, data arrival
-and update rate, deployment lifecycle capabilities, and comparable summary and
-raw-execution cost information. These are helper parameters, not fields added
-to the canonical `PlanningWorkload` input. Missing required information remains
-unknown rather than being treated as zero.
+Lifecycle-aware planning is an optional operation on an existing `PlanSpace`.
+It is not part of the canonical input-to-`PlanSpace` operation. Its purpose is
+to compare maintaining a summary with recomputing the raw query.
+
+The public helper receives these parameters:
+
+| Helper parameter | Source | Required |
+|---|---|---:|
+| `PlanSpace` | Canonical ASAPPlanner output | Yes |
+| Workload binding | `QueryWorkload` plus the workload-entry indices associated with each root | Yes |
+| Planning time (`now_ms`) | Caller clock in Unix milliseconds | Yes |
+| Planning horizon | Caller policy | Conditional: required for finite totals over recurring demand |
+| Data arrival and update rate | `DataWorkload` evidence | Conditional: required to cost continuous maintenance |
+| Lifecycle capabilities | Deployment/runtime provider | Yes for checking deployable lifecycle alternatives |
+| Summary and raw cost information | Cost model and physical-evidence provider | Yes for a cost-based maintenance-versus-recompute decision |
+
+Recurrence and time selection are already fields of the bound `QueryWorkload`;
+they are not duplicated as separate top-level inputs. Similarly, data arrival
+and update rate are read from the optional `DataWorkload`. Missing required
+facts remain unknown rather than being treated as zero.
 
 `SummaryMaintenanceLifecyclePlan` additionally records:
 
@@ -360,15 +379,15 @@ This produces structurally compatible logical plans. It does not determine wheth
 Use when deciding whether maintained summary state should actually be deployed.
 
 ```text
-PlanningWorkload + Pre-ASAP roots
-    -> search_workload_with_targets
-    -> global_selection_with_summary_maintenance_lifecycles
-    -> materialize_with_summary_maintenance_lifecycles
-    -> lifecycle-aware Post-ASAP plans
+PlanSpace + lifecycle helper parameters
+    -> lifecycle-aware selection and materialization
+    -> SummaryMaintenanceLifecyclePlan
     -> downstream physical deployment
 ```
 
-This workflow considers recurrence, data arrival, planning horizon, capabilities, and comparable summary/raw costs.
+This helper considers recurrence, data arrival, planning horizon, capabilities,
+and comparable summary/raw costs. It does not change the canonical
+`PlanningWorkload -> PlanSpace` interface.
 
 It is the recommended workflow for deployment decisions.
 
