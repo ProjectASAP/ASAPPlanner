@@ -1,5 +1,7 @@
 # Dimensions of optimization
 
+> Status: design exploration. The listed dimensions are not a supported-feature matrix.
+
 ASAP-aware mapping should support several largely orthogonal dimensions of optimization. Some of these are specific to sketch-based summaries, some are related to subpopulations/grouping keys.
 
 - (sketch) Which sketch/summary to select (e.g. KLL vs DDSketch)

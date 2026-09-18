@@ -1,5 +1,11 @@
 # Design: Query Workloads, Data Workloads, and Summary Lifecycle Maintenance
 
+> Status: partially implemented design. Workload types and
+> [lifecycle planning APIs](../../../../crates/asap-aware-mapping/src/summary_maintenance_lifecycle.rs)
+> implement the bounded planning path described below. The current-support and
+> future-work sections distinguish available behavior from broader search,
+> forecast integration and runtime deployment work.
+
 ## Audience and context
 
 This document is for ASAPPlanner designers, architects, researchers, and

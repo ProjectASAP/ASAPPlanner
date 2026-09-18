@@ -1,5 +1,11 @@
 # Shared maintained population rule
 
+> Status: planner rule implemented; deployment support is conditional. See
+> [MaintainedPopulationStrategy](../../../../crates/asap-aware-mapping/src/maintained_population.rs).
+> A deployment must provide the membership, freshness, state and operation
+> capabilities described below. Planner representation alone does not implement
+> population maintenance in a runtime.
+
 ## Definition and motivation
 
 A **population** is the multiset of records that an aggregation is defined over,
@@ -45,7 +51,7 @@ column and grouping determine whether consumers refer to the same population.
 ## Rule: share one population across compatible readouts
 
 **Implementation:** `MaintainedPopulationStrategy`, an opt-in `ReplacementStrategy`
-in [maintained_population.rs](../../../crates/asap-aware-mapping/src/maintained_population.rs).
+in [maintained_population.rs](../../../../crates/asap-aware-mapping/src/maintained_population.rs).
 
 **Target sub-DAGs:**
 

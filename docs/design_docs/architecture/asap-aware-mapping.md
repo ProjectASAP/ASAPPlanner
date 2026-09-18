@@ -40,11 +40,11 @@ budgets; deployment belongs to a later stage.
 - **Target Sub-DAG**: A sub-DAG of the pre-ASAP plan which is a candidate to be replaced by a post-ASAP sub-DAG
 - **Replacement Sub-DAG**: A candidate post-ASAP sub-DAG to replace a target sub-DAG. For example, a quantile aggregation may have KLL, DDSketch, and exact aggregation as alternatives.
 - **ReplacementStrategy**: A rule to recognize a target Sub-DAG and produces one or more valid replacement Sub-DAGs.
-- **Candidate Plan**: A complete post-ASAP plan formed by choosing compatible ReplacementStrategies across the plan.
+- **Candidate Plan**: A complete post-ASAP plan formed by choosing compatible replacement alternatives across the plan.
 - **Maintained population**: A multiset of qualifying records retained across evaluations and updated as members enter, change, leave or expire; multiple readouts can share this state.
 - **Cost Model**: A model used to compare valid candidate plans according to criteria such as storage, update cost, query latency, and accuracy.
 
-The distinction between **ReplacementStrategy** and **Candidate Plan** is important. A ReplacementStrategy is a local choice at one decision point, while a candidate plan is a complete plan that combines choices across all relevant decision points.
+The distinction between **ReplacementStrategy** and **Candidate Plan** is important. A ReplacementStrategy generates alternatives at a decision point, while a candidate plan is a complete plan that combines choices across all relevant decision points.
 
 ---
 
@@ -83,30 +83,30 @@ Rank and select post-ASAP plans
 
 The design is split into focused documents:
 
-- [Key concepts](key_concepts.md) defines target sub-DAGs, replacement sub-DAGs,
+- [Key concepts](../concepts/asap-aware-mapping.md) defines target sub-DAGs, replacement sub-DAGs,
   replacement strategies, candidate plans, and the cost model.
-- [Searching over plans](searching_over_plans.md) explains how the planner preserves,
+- [Searching over plans](asap-aware-plan-search.md) explains how the planner preserves,
   combines, checks, costs, and ranks alternatives across a workload.
-- [Optimizations](optimizations.md) describes summary selection, parameterization,
+- [Optimizations](../proposals/asap-aware-mapping/optimizations.md) describes summary selection, parameterization,
   subpopulation and time organization, roll-ups, sharing, semantic rewrites, and hybrid execution.
-- [Shared maintained population rule](maintained-populations.md) defines population membership,
+- [Shared maintained population rule](../proposals/asap-aware-mapping/maintained-populations.md) defines population membership,
   SQL/PromQL input contracts, sharing preconditions, the replacement DAG, and deployment obligations.
-- [Summary properties](summary_properties.md) lists the capabilities used to determine whether
+- [Summary properties](../proposals/asap-aware-mapping/summary-properties.md) lists the capabilities used to determine whether
   summaries and optimizations can be composed safely.
-- [End-to-end accuracy guarantees](end-to-end-accuracy-guarantees.md) specifies the typed
+- [End-to-end accuracy guarantees](../proposals/asap-aware-mapping/end-to-end-accuracy-guarantees.md) specifies the typed
   guarantee IR, sketch contracts, composition rules, target checking, and fail-closed boundaries.
-- [Analytical resource cost](analytical-resource-cost.md) defines CPU, retained-memory,
+- [Analytical resource cost](../proposals/asap-aware-mapping/analytical-resource-cost.md) defines CPU, retained-memory,
   and scan-I/O formulas, calibration, planner ranking, and fail-closed behavior.
 - [Physical plan integration](physical-plan-integration.md) defines how pre-ASAP and
   post-ASAP logical plans lower into the physical operator DAG consumed by statistics
   resolution and analytical costing.
-- [ASAPPlanner and downstream application boundaries](../asapplanner-downstream-boundary.md)
+- [ASAPPlanner and downstream application boundaries](planner-downstream-boundary.md)
   separates planner-owned search and selection from downstream physical
   implementation, deployment, and execution.
-- [Query workloads, data workloads, and summary lifecycle maintenance](workload-demand-and-summary-lifecycle.md) separates
+- [Query workloads, data workloads, and summary lifecycle maintenance](../proposals/asap-aware-mapping/workload-demand-and-summary-lifecycle.md) separates
   query-workload properties from data-workload properties and defines ephemeral, prepared,
   shared, and continuously maintained summary-state alternatives.
-- [Explainability](explainability.md) describes how the planner reports available replacements
+- [Explainability](../../develop_docs/replacement-explanations.md) describes how the planner reports available replacements
   using the same candidate space it optimizes.
 
 ---

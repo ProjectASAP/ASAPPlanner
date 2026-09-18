@@ -33,25 +33,28 @@ use std::rc::Rc;
 
 const ACCURACY: AccuracyTarget = AccuracyTarget::Epsilon(0.01);
 
-/// `asap-aware-mapping` has no "bind me one tree" public API any more —
-/// `SketchAlgorithmStrategy::replacements` always returns every candidate, and
-/// a caller decides what to keep. This debug tool just wants one
-/// representative binding per query, so it takes the first
-/// (`cost_model`-preferred) candidate the same way a production caller
-/// would.
-fn bind(expr: &QueryExpr) -> Result<Rc<asap_types::post_asap::SummaryNode>, String> {
+/// `SketchAlgorithmStrategy::replacements` returns every candidate. This
+/// debug tool prints all of them so callers can inspect the planner's choices.
+/// If the strategy has none, preserve the single pre-ASAP fallback output.
+fn bind_all(expr: &QueryExpr) -> Result<Vec<Rc<asap_types::post_asap::SummaryNode>>, String> {
     let root = Rc::new(expr.clone());
     let target = TargetSubDAG::new(&root);
-    match SketchAlgorithmStrategy::default_cost_model()
+    let candidates = SketchAlgorithmStrategy::default_cost_model()
         .replacements(&target)
         .into_iter()
-        .next()
-    {
-        Some(ReplacementSubDAG {
-            replacement: Replacement::Summary(node),
-            ..
-        }) => Ok(node),
-        _ => keep_pre_asap(&root).map_err(|e| e.to_string()),
+        .filter_map(|candidate| match candidate {
+            ReplacementSubDAG {
+                replacement: Replacement::Summary(node),
+                ..
+            } => Some(node),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+
+    if candidates.is_empty() {
+        Ok(vec![keep_pre_asap(&root).map_err(|e| e.to_string())?])
+    } else {
+        Ok(candidates)
     }
 }
 
@@ -109,10 +112,36 @@ async fn main() {
             println!();
             continue;
         };
-        match l3.and_then(|expr| bind(&expr)) {
-            Ok(l4) => println!("{:#?}", l4.expr),
+        match l3.and_then(|expr| bind_all(&expr)) {
+            Ok(candidates) => {
+                for (index, candidate) in candidates.iter().enumerate() {
+                    println!("--- candidate {} ---", index + 1);
+                    println!("{:#?}", candidate.expr);
+                }
+            }
             Err(e) => println!("ERR: {e}"),
         }
         println!();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bind_all_returns_every_sketch_candidate() {
+        let expr = lower_promql(
+            "quantile(0.99, rate(http_requests_total[5m]))",
+            ACCURACY.clone(),
+        )
+        .expect("query lowers to pre-ASAP IR");
+        let root = Rc::new(expr.clone());
+        let expected = SketchAlgorithmStrategy::default_cost_model()
+            .replacements(&TargetSubDAG::new(&root))
+            .len();
+
+        assert!(expected > 1, "fixture exposes alternative bindings");
+        assert_eq!(bind_all(&expr).expect("binding succeeds").len(), expected);
     }
 }

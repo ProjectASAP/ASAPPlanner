@@ -72,3 +72,18 @@ Group C: Related aggregations
 ```
 
 A candidate plan is formed by selecting one compatible alternative from each relevant group. This avoids representing every full plan independently when most of their structure is identical.
+
+
+## Current implementation boundary
+
+`PlanSpace` represents local alternatives in memo groups; it does not materialize
+every Cartesian product of the dimensions above. `cost_sorted` preserves and
+ranks group alternatives. Optional `global_selection` coordinates supported
+sharing and composition choices, and materialization links the selected semantic
+DAG. This is not a proof of global optimality over all possible physical plans.
+
+The [code architecture](../../develop_docs/asap-aware-mapping-architecture.md)
+describes current discovery and registry behavior; the
+[library guide](../../develop_docs/library-api.md#optional-whole-plan-selection-and-materialization)
+shows selection and its evidence boundaries. Broader optimization dimensions are
+tracked in the [proposal](../proposals/asap-aware-mapping/optimizations.md).

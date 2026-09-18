@@ -366,7 +366,7 @@ use asap_types::pre_asap::query_expr::{
 };
 use asap_types::pre_asap::schema::{ColumnId, Schema};
 use asap_types::types::AccuracyTarget;
-use asap_types::workload::{QueryRecurrence, QueryWorkload, RepeatedDemand};
+use asap_types::workload::{DataWorkload, QueryRecurrence, QueryWorkload, RepeatedDemand};
 use std::rc::Rc;
 use thiserror::Error;
 
@@ -3647,6 +3647,7 @@ impl<Id> PlanSpace<Id> {
     pub fn recurrence_profiles_from_workload(
         &self,
         workload: &QueryWorkload,
+        data_workload: Option<&DataWorkload>,
         // For each `PlanSpace::roots[i]`, the explicit index of its
         // corresponding normalized workload entry.
         root_workload_entries: &[usize],
@@ -3654,6 +3655,9 @@ impl<Id> PlanSpace<Id> {
         horizon: Option<Horizon>,
     ) -> Result<RecurrenceProfileMap, crate::recurrence::RecurrenceError> {
         workload.validate()?;
+        if let Some(data) = data_workload {
+            data.validate()?;
+        }
         if let Some(horizon) = horizon {
             if !horizon.0.is_finite() || horizon.0 <= 0.0 {
                 return Err(crate::recurrence::RecurrenceError::InvalidHorizon(horizon));
@@ -3708,9 +3712,7 @@ impl<Id> PlanSpace<Id> {
             };
             recurrences.push(recurrence);
         }
-        let update_rate = workload
-            .data_workload
-            .as_ref()
+        let update_rate = data_workload
             .and_then(|data| data.ingestion_rate.value_at(now_ms))
             .map(|rate| UpdateRate(rate.0));
         self.recurrence_profiles(&recurrences, update_rate)

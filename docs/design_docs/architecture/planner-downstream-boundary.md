@@ -137,10 +137,10 @@ in one cost formula.
 
 ## Related documents
 
-- [Post-ASAP IR](post-asap-ir.md)
-- [Physical plan integration](asap-aware-mapping/physical-plan-integration.md)
-- [Analytical resource cost](asap-aware-mapping/analytical-resource-cost.md)
-- [Workload demand and summary lifecycle](asap-aware-mapping/workload-demand-and-summary-lifecycle.md)
+- [Post-ASAP IR](../concepts/post-asap-ir.md)
+- [Physical plan integration](physical-plan-integration.md)
+- [Analytical resource cost](../proposals/asap-aware-mapping/analytical-resource-cost.md)
+- [Workload demand and summary lifecycle](../proposals/asap-aware-mapping/workload-demand-and-summary-lifecycle.md)
 - [ASAPCollector physical compilation](https://github.com/ProjectASAP/ASAPCollector/blob/87684f4b61514382d8b087724694f93187bfc19c/docs/design_docs/control-plane/post-asap-physical-compilation.md)
 - [ASAPQuery configuration formulation](https://github.com/ProjectASAP/ASAPQuery/blob/main/.design_docs/sketch-config-optimization-formulation.md)
 - [ASAPQuery optimizer MIP formulation](https://github.com/ProjectASAP/ASAPQuery/blob/main/.design_docs/optimizer-mip-formulation.md)

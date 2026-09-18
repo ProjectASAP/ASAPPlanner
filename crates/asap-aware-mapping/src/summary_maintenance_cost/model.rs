@@ -1150,23 +1150,13 @@ mod tests {
                 predictability: Predictability::Predictable { known_at: None },
                 time_selection: TimeSelection::default(),
             }]),
-            data_workload: Some(DataWorkload {
-                arrival: DataArrival::ContinuouslyIngesting,
-                ingestion_rate: Evidence {
-                    value: Some(Rate(2.0)),
-                    source: EvidenceSource::Declared,
-                    observed_at_ms: None,
-                    valid_for_ms: None,
-                },
-                ..DataWorkload::default()
-            }),
         };
         let root = summary_with_operations(false, false, false);
         let target = streaming_sum_query();
         bind_aggregations(&mut model, &target, &root, inputs, streaming_cpu());
         let plan = plan_summary_maintenance_lifecycles(
             root,
-            WorkloadDemand::new(&workload, &[0]),
+            WorkloadDemand::new_with_data(&workload, &streaming_data_workload(), &[0]),
             0,
             Some(Horizon(5.0)),
             SummaryMaintenanceLifecycleCapabilities::ALL,
@@ -1206,7 +1196,7 @@ mod tests {
 
         let plan = plan_summary_maintenance_lifecycles(
             root,
-            WorkloadDemand::new(&workload, &[0]),
+            WorkloadDemand::new_with_data(&workload, &streaming_data_workload(), &[0]),
             0,
             Some(Horizon(5.0)),
             SummaryMaintenanceLifecycleCapabilities {
@@ -1268,7 +1258,7 @@ mod tests {
 
         let plan = plan_summary_maintenance_lifecycles(
             root,
-            WorkloadDemand::new(&workload, &[0]),
+            WorkloadDemand::new_with_data(&workload, &streaming_data_workload(), &[0]),
             0,
             Some(Horizon(5.0)),
             SummaryMaintenanceLifecycleCapabilities {
@@ -1314,8 +1304,7 @@ mod tests {
         }
         let selection = global_selection_with_summary_maintenance_lifecycles(
             &space,
-            &workload,
-            &[0],
+            WorkloadDemand::new_with_data(&workload, &streaming_data_workload(), &[0]),
             0,
             Some(Horizon(5.0)),
             SummaryMaintenanceLifecycleCapabilities::ALL,
@@ -1325,7 +1314,7 @@ mod tests {
         let plan = materialize_with_summary_maintenance_lifecycles(
             &selection,
             &space.roots[0].1,
-            WorkloadDemand::new(&workload, &[0]),
+            WorkloadDemand::new_with_data(&workload, &streaming_data_workload(), &[0]),
             0,
             Some(Horizon(5.0)),
             SummaryMaintenanceLifecycleCapabilities::ALL,
@@ -1347,8 +1336,7 @@ mod tests {
             .clear();
         let unavailable = global_selection_with_summary_maintenance_lifecycles(
             &space,
-            &workload,
-            &[0],
+            WorkloadDemand::new_with_data(&workload, &streaming_data_workload(), &[0]),
             0,
             Some(Horizon(5.0)),
             SummaryMaintenanceLifecycleCapabilities::ALL,
@@ -1367,8 +1355,7 @@ mod tests {
         }
         let cheap_selection = global_selection_with_summary_maintenance_lifecycles(
             &space,
-            &workload,
-            &[0],
+            WorkloadDemand::new_with_data(&workload, &streaming_data_workload(), &[0]),
             0,
             Some(Horizon(5.0)),
             SummaryMaintenanceLifecycleCapabilities::ALL,
@@ -1383,7 +1370,7 @@ mod tests {
         let cheap_plan = materialize_with_summary_maintenance_lifecycles(
             &cheap_selection,
             &space.roots[0].1,
-            WorkloadDemand::new(&workload, &[0]),
+            WorkloadDemand::new_with_data(&workload, &streaming_data_workload(), &[0]),
             0,
             Some(Horizon(5.0)),
             SummaryMaintenanceLifecycleCapabilities::ALL,
@@ -1625,7 +1612,7 @@ mod tests {
 
         let plan = plan_summary_maintenance_lifecycles(
             Rc::clone(&root),
-            WorkloadDemand::new(&workload, &[0]),
+            WorkloadDemand::new_with_data(&workload, &streaming_data_workload(), &[0]),
             0,
             Some(Horizon(5.0)),
             SummaryMaintenanceLifecycleCapabilities::ALL,
@@ -1664,7 +1651,7 @@ mod tests {
         );
         let bad_edge = plan_summary_maintenance_lifecycles(
             Rc::clone(&root),
-            WorkloadDemand::new(&workload, &[0]),
+            WorkloadDemand::new_with_data(&workload, &streaming_data_workload(), &[0]),
             0,
             Some(Horizon(5.0)),
             SummaryMaintenanceLifecycleCapabilities::ALL,
@@ -1688,7 +1675,7 @@ mod tests {
             .io_bytes_per_execution = None;
         let missing_io = plan_summary_maintenance_lifecycles(
             root,
-            WorkloadDemand::new(&workload, &[0]),
+            WorkloadDemand::new_with_data(&workload, &streaming_data_workload(), &[0]),
             0,
             Some(Horizon(5.0)),
             SummaryMaintenanceLifecycleCapabilities::ALL,
@@ -1742,7 +1729,7 @@ mod tests {
         );
         let bad_edge = plan_summary_maintenance_lifecycles(
             Rc::clone(&root),
-            WorkloadDemand::new(&workload, &[0]),
+            WorkloadDemand::new_with_data(&workload, &streaming_data_workload(), &[0]),
             0,
             Some(Horizon(5.0)),
             SummaryMaintenanceLifecycleCapabilities::ALL,
@@ -1766,7 +1753,7 @@ mod tests {
             .io_bytes_per_execution = None;
         let missing_io = plan_summary_maintenance_lifecycles(
             root,
-            WorkloadDemand::new(&workload, &[0]),
+            WorkloadDemand::new_with_data(&workload, &streaming_data_workload(), &[0]),
             0,
             Some(Horizon(5.0)),
             SummaryMaintenanceLifecycleCapabilities::ALL,
@@ -1843,7 +1830,7 @@ mod tests {
 
         let plan = plan_summary_maintenance_lifecycles(
             root,
-            WorkloadDemand::new(&workload, &[0]),
+            WorkloadDemand::new_with_data(&workload, &streaming_data_workload(), &[0]),
             0,
             Some(Horizon(5.0)),
             SummaryMaintenanceLifecycleCapabilities::ALL,
@@ -1868,7 +1855,7 @@ mod tests {
         );
         let plan = plan_summary_maintenance_lifecycles(
             Rc::clone(&root),
-            WorkloadDemand::new(&workload, &[0]),
+            WorkloadDemand::new_with_data(&workload, &streaming_data_workload(), &[0]),
             0,
             Some(Horizon(5.0)),
             SummaryMaintenanceLifecycleCapabilities::ALL,
@@ -1895,7 +1882,7 @@ mod tests {
         );
         let costed_plan = plan_summary_maintenance_lifecycles(
             root,
-            WorkloadDemand::new(&workload, &[0]),
+            WorkloadDemand::new_with_data(&workload, &streaming_data_workload(), &[0]),
             0,
             Some(Horizon(5.0)),
             SummaryMaintenanceLifecycleCapabilities::ALL,
@@ -1927,7 +1914,7 @@ mod tests {
         );
         let incomplete = plan_summary_maintenance_lifecycles(
             Rc::clone(&root),
-            WorkloadDemand::new(&workload, &[0]),
+            WorkloadDemand::new_with_data(&workload, &streaming_data_workload(), &[0]),
             0,
             Some(Horizon(5.0)),
             SummaryMaintenanceLifecycleCapabilities::ALL,
@@ -1980,7 +1967,7 @@ mod tests {
         );
         let complete = plan_summary_maintenance_lifecycles(
             Rc::clone(&root),
-            WorkloadDemand::new(&workload, &[0]),
+            WorkloadDemand::new_with_data(&workload, &streaming_data_workload(), &[0]),
             0,
             Some(Horizon(5.0)),
             SummaryMaintenanceLifecycleCapabilities::ALL,
@@ -1998,7 +1985,7 @@ mod tests {
             .working_memory_bytes = 128;
         let larger_workspace = plan_summary_maintenance_lifecycles(
             Rc::clone(&root),
-            WorkloadDemand::new(&workload, &[0]),
+            WorkloadDemand::new_with_data(&workload, &streaming_data_workload(), &[0]),
             0,
             Some(Horizon(5.0)),
             SummaryMaintenanceLifecycleCapabilities::ALL,
@@ -2021,7 +2008,7 @@ mod tests {
         }
         let shared = plan_summary_maintenance_lifecycles(
             root,
-            WorkloadDemand::new(&workload, &[0]),
+            WorkloadDemand::new_with_data(&workload, &streaming_data_workload(), &[0]),
             0,
             Some(Horizon(5.0)),
             SummaryMaintenanceLifecycleCapabilities::ALL,
@@ -2120,7 +2107,7 @@ mod tests {
 
         let plan = plan_summary_maintenance_lifecycles(
             Rc::clone(&root),
-            WorkloadDemand::new(&workload, &[0]),
+            WorkloadDemand::new_with_data(&workload, &streaming_data_workload(), &[0]),
             0,
             Some(Horizon(5.0)),
             SummaryMaintenanceLifecycleCapabilities {
@@ -2165,7 +2152,7 @@ mod tests {
             asap_types::workload::AccuracyRequirement::Explicit(AccuracyTarget::Epsilon(0.01));
         let stricter = plan_summary_maintenance_lifecycles(
             root,
-            WorkloadDemand::new(&workload, &[0]),
+            WorkloadDemand::new_with_data(&workload, &streaming_data_workload(), &[0]),
             0,
             Some(Horizon(5.0)),
             SummaryMaintenanceLifecycleCapabilities {
@@ -2313,7 +2300,7 @@ mod tests {
 
         let plan = plan_summary_maintenance_lifecycles(
             root,
-            WorkloadDemand::new(&workload, &[0]),
+            WorkloadDemand::new_with_data(&workload, &streaming_data_workload(), &[0]),
             0,
             Some(Horizon(5.0)),
             SummaryMaintenanceLifecycleCapabilities::ALL,
@@ -2438,7 +2425,7 @@ mod tests {
 
         let plan = plan_summary_maintenance_lifecycles(
             root,
-            WorkloadDemand::new(&workload, &[0]),
+            WorkloadDemand::new_with_data(&workload, &streaming_data_workload(), &[0]),
             0,
             Some(Horizon(5.0)),
             SummaryMaintenanceLifecycleCapabilities::ALL,
@@ -2464,7 +2451,7 @@ mod tests {
         model.node_evidence.retained_queries.clear();
         let missing_retained = plan_summary_maintenance_lifecycles(
             Rc::clone(&root),
-            WorkloadDemand::new(&workload, &[0]),
+            WorkloadDemand::new_with_data(&workload, &streaming_data_workload(), &[0]),
             0,
             Some(Horizon(5.0)),
             SummaryMaintenanceLifecycleCapabilities::ALL,
@@ -2485,7 +2472,7 @@ mod tests {
         };
         let false_lineage = plan_summary_maintenance_lifecycles(
             root,
-            WorkloadDemand::new(&workload, &[0]),
+            WorkloadDemand::new_with_data(&workload, &streaming_data_workload(), &[0]),
             0,
             Some(Horizon(5.0)),
             SummaryMaintenanceLifecycleCapabilities::ALL,
@@ -2516,7 +2503,7 @@ mod tests {
         );
         let state_plan = plan_summary_maintenance_lifecycles(
             state_only,
-            WorkloadDemand::new(&workload, &[0]),
+            WorkloadDemand::new_with_data(&workload, &streaming_data_workload(), &[0]),
             0,
             Some(Horizon(5.0)),
             SummaryMaintenanceLifecycleCapabilities::ALL,
@@ -2564,7 +2551,7 @@ mod tests {
             });
         let nested_plan = plan_summary_maintenance_lifecycles(
             nested,
-            WorkloadDemand::new(&workload, &[0]),
+            WorkloadDemand::new_with_data(&workload, &streaming_data_workload(), &[0]),
             0,
             Some(Horizon(5.0)),
             SummaryMaintenanceLifecycleCapabilities::ALL,
@@ -3040,7 +3027,7 @@ mod tests {
 
         let plan = plan_summary_maintenance_lifecycles(
             root,
-            WorkloadDemand::new(&workload, &[0]),
+            WorkloadDemand::new_with_data(&workload, &streaming_data_workload(), &[0]),
             0,
             Some(Horizon(5.0)),
             SummaryMaintenanceLifecycleCapabilities {
@@ -3090,16 +3077,20 @@ mod tests {
                 predictability: Predictability::Predictable { known_at: None },
                 time_selection: TimeSelection::default(),
             }]),
-            data_workload: Some(DataWorkload {
-                arrival: DataArrival::ContinuouslyIngesting,
-                ingestion_rate: Evidence {
-                    value: Some(Rate(2.0)),
-                    source: EvidenceSource::Declared,
-                    observed_at_ms: None,
-                    valid_for_ms: None,
-                },
-                ..DataWorkload::default()
-            }),
+        }
+    }
+
+    fn streaming_data_workload() -> DataWorkload {
+        DataWorkload {
+            arrival: DataArrival::ContinuouslyIngesting,
+
+            ingestion_rate: Evidence {
+                value: Some(Rate(2.0)),
+                source: EvidenceSource::Declared,
+                observed_at_ms: None,
+                valid_for_ms: None,
+            },
+            ..Default::default()
         }
     }
 
@@ -3498,7 +3489,17 @@ mod tests {
         let workload = streaming_workload();
         let entry = workload.entries().next().unwrap();
         ComparisonScope::from_workload(
-            workload.data_workload.as_ref().unwrap(),
+            &DataWorkload {
+                arrival: DataArrival::ContinuouslyIngesting,
+
+                ingestion_rate: Evidence {
+                    value: Some(Rate(2.0)),
+                    source: EvidenceSource::Declared,
+                    observed_at_ms: None,
+                    valid_for_ms: None,
+                },
+                ..Default::default()
+            },
             &entry,
             asap_types::workload::TimestampMs(0),
             asap_types::workload::DurationMs(5_000),
