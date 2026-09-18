@@ -16,9 +16,11 @@ Post-ASAP alternatives for the workload.
 
 Frontend lowering converts the workload entries into canonical Pre-ASAP
 `QueryExpr` roots. The planning core associates each root with its caller-owned
-query ID and accuracy target. Frontend-specific context and planning models are
-workflow parameters rather than fields of `PlanningWorkload`; later sections
-document them separately.
+query ID and accuracy target. Some frontends take additional explicit
+dependencies that are not fields of `PlanningWorkload`: PromQL takes the
+planning timestamp and optionally a histogram catalog; SQL takes a schema and
+function catalog; MetricsQL takes no additional catalog. Planning models are
+separate inputs to candidate search, not frontend dependencies.
 
 ### Output at a glance
 
@@ -36,7 +38,7 @@ produce a deployed executable plan; downstream systems bind physical operators,
 choose placement and storage, deploy state, and execute queries.
 
 ```text
-PlanningWorkload + frontend context
+PlanningWorkload + frontend-specific dependencies
                  |
                  v
        canonical QueryExpr roots
@@ -74,9 +76,16 @@ struct PlanningWorkload {
 | `query_workload` | Yes | Contains the source language and every one-time or repeating query. |
 | `data_workload` | Optional generally; required for PromQL | Describes data arrival and evidence about ingestion, cardinality, and distribution. PromQL additionally requires a nonzero `data_ingestion_interval`. |
 
-Frontend-specific resolution inputs are supplied alongside this structure. For
-example, SQL lowering requires a schema/function catalog. They are frontend
-dependencies, not fields of `PlanningWorkload`.
+Frontend-specific dependencies are supplied alongside this structure:
+
+| Frontend | Additional lowering inputs |
+|---|---|
+| PromQL | `now_ms`, plus an optional `HistogramCatalog` when histogram semantics must be resolved |
+| SQL | `SqlCatalog`; single-query APIs also receive the accuracy target and optionally an explicit SQL dialect |
+| MetricsQL | No catalog; the single-query API receives the query text and accuracy target directly |
+
+These are explicit frontend function arguments, not one generic
+`FrontendContext` type and not fields of `PlanningWorkload`.
 
 ### Query workload
 
