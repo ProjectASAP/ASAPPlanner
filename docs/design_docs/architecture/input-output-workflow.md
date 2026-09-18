@@ -17,14 +17,6 @@ canonical queries + requirements + planning context
         (legal Post-ASAP alternatives)
 ```
 
-A typical integration:
-
-1. Lower source queries into canonical Pre-ASAP `QueryExpr` roots.
-2. Attach query IDs and accuracy requirements.
-3. Run Planner over the workload.
-4. Inspect the resulting alternatives or select a Post-ASAP DAG.
-5. Bind the selected logical DAG to physical operators downstream.
-
 If required accuracy, semantic, capability, or cost evidence is unavailable, Planner does not assume it. Unsupported optimizations fail closed, while `KeepPreAsap` preserves exact computation where supported.
 
 ---
