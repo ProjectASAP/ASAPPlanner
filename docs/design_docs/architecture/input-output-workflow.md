@@ -1,25 +1,6 @@
 # ASAPPlanner input, output, and workflows
 
-## Overview
-
-ASAPPlanner is a **logical planning library**. It takes canonical queries and their requirements, explores legal exact and approximate implementations, and returns a logical plan space.
-
-It does **not** deploy or execute plans.
-
-```text
-canonical queries + requirements + planning context
-                       |
-                       v
-                  ASAPPlanner
-                       |
-                       v
-              PlanSpace
-        (legal Post-ASAP alternatives)
-```
-
-If required accuracy, semantic, capability, or cost evidence is unavailable, Planner does not assume it. Unsupported optimizations fail closed, while `KeepPreAsap` preserves exact computation where supported.
-
----
+ 
 
 ## Inputs
 
