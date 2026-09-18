@@ -538,9 +538,6 @@ pub struct DataWorkload {
 
 // ── Top-level workload ────────────────────────────────────────────────────────
 
-/// The single normalised input type accepted by every entry point into the
-/// planner (HTTP POST /plan, YAML file, query-log replay, OpAMP callback).
-///
 /// `query_batch` and `repeating_queries` may both be present. [`Self::entries`]
 /// normalizes them into one ordered stream without conflating recurrence with
 /// data arrival.
@@ -553,8 +550,14 @@ pub struct QueryWorkload {
     pub query_batch: Option<Vec<BatchEntry>>,
     /// Queries that repeat on a fixed interval.
     pub repeating_queries: Option<Vec<RepeatingEntry>>,
-    /// Workload-level data facts used for accuracy and cost estimation.
-    /// Applies to all queries in this workload.
+}
+
+/// Complete planner input. Query demand and source-data evidence are parallel
+/// concerns and have independent provenance and update lifecycles.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PlanningWorkload {
+    pub query_workload: QueryWorkload,
     pub data_workload: Option<DataWorkload>,
 }
 
@@ -578,13 +581,28 @@ impl QueryWorkload {
         for entry in self.entries() {
             validate_entry(&entry)?;
         }
+        Ok(())
+    }
+}
+
+impl DataWorkload {
+    /// Validate source facts independently of query demand or language.
+    pub fn validate(&self) -> Result<(), WorkloadError> {
+        if matches!(self.arrival, DataArrival::AtRest)
+            && self.ingestion_rate.value.is_some_and(|rate| rate.0 > 0.0)
+        {
+            return Err(WorkloadError::AtRestWithPositiveIngestionRate);
+        }
+        validate_optional_rate(self.ingestion_rate.value)?;
+        Ok(())
+    }
+}
+
+impl PlanningWorkload {
+    pub fn validate(&self) -> Result<(), WorkloadError> {
+        self.query_workload.validate()?;
         if let Some(data) = &self.data_workload {
-            if matches!(data.arrival, DataArrival::AtRest)
-                && data.ingestion_rate.value.is_some_and(|rate| rate.0 > 0.0)
-            {
-                return Err(WorkloadError::AtRestWithPositiveIngestionRate);
-            }
-            validate_optional_rate(data.ingestion_rate.value)?;
+            data.validate()?;
         }
         Ok(())
     }
@@ -665,7 +683,6 @@ mod tests {
             language: QueryLanguage::PromQL,
             query_batch: None,
             repeating_queries: None,
-            data_workload: None,
         }
     }
 
@@ -756,15 +773,17 @@ mod tests {
 
     #[test]
     fn at_rest_rejects_a_positive_ingestion_rate() {
-        let mut workload = base_workload();
-        workload.data_workload = Some(DataWorkload {
-            arrival: DataArrival::AtRest,
-            ingestion_rate: Evidence {
-                value: Some(Rate(1.0)),
+        let workload = PlanningWorkload {
+            query_workload: base_workload(),
+            data_workload: Some(DataWorkload {
+                arrival: DataArrival::AtRest,
+                ingestion_rate: Evidence {
+                    value: Some(Rate(1.0)),
+                    ..Default::default()
+                },
                 ..Default::default()
-            },
-            ..Default::default()
-        });
+            }),
+        };
         assert_eq!(
             workload.validate(),
             Err(WorkloadError::AtRestWithPositiveIngestionRate)
@@ -773,26 +792,28 @@ mod tests {
 
     #[test]
     fn canonical_workloads_have_a_strict_json_round_trip() {
-        let workload = QueryWorkload {
-            language: QueryLanguage::PromQL,
-            query_batch: None,
-            repeating_queries: Some(vec![RepeatingEntry {
-                query: Query("rate(requests_total[5m])".into()),
-                demand: RepeatedDemand::FixedInterval(RepetitionInterval(10_000)),
-                requirements: QueryRequirements {
-                    accuracy: AccuracyRequirement::Explicit(AccuracyTarget::EpsilonDelta {
-                        epsilon: 0.01,
-                        delta: 0.001,
-                    }),
-                    response_latency: LatencyRequirement::ExplicitMaxMs(100.0),
-                },
-                predictability: Predictability::Predictable { known_at: None },
-                time_selection: TimeSelection {
-                    scope: QueryTimeScope::RealTime,
-                    lookback: Some(DurationMs(300_000)),
-                    as_of: None,
-                },
-            }]),
+        let workload = PlanningWorkload {
+            query_workload: QueryWorkload {
+                language: QueryLanguage::PromQL,
+                query_batch: None,
+                repeating_queries: Some(vec![RepeatingEntry {
+                    query: Query("rate(requests_total[5m])".into()),
+                    demand: RepeatedDemand::FixedInterval(RepetitionInterval(10_000)),
+                    requirements: QueryRequirements {
+                        accuracy: AccuracyRequirement::Explicit(AccuracyTarget::EpsilonDelta {
+                            epsilon: 0.01,
+                            delta: 0.001,
+                        }),
+                        response_latency: LatencyRequirement::ExplicitMaxMs(100.0),
+                    },
+                    predictability: Predictability::Predictable { known_at: None },
+                    time_selection: TimeSelection {
+                        scope: QueryTimeScope::RealTime,
+                        lookback: Some(DurationMs(300_000)),
+                        as_of: None,
+                    },
+                }]),
+            },
             data_workload: Some(DataWorkload {
                 arrival: DataArrival::ContinuouslyIngesting,
                 ingestion_rate: Evidence {
@@ -812,12 +833,12 @@ mod tests {
         };
 
         let json = serde_json::to_string_pretty(&workload).expect("serialize workload");
-        let decoded: QueryWorkload = serde_json::from_str(&json).expect("deserialize workload");
+        let decoded: PlanningWorkload = serde_json::from_str(&json).expect("deserialize workload");
         assert_eq!(decoded, workload);
         assert!(json.contains("\"continuously_ingesting\""));
 
         let with_unknown = json.replacen("{", "{\"unknown\":true,", 1);
-        assert!(serde_json::from_str::<QueryWorkload>(&with_unknown).is_err());
+        assert!(serde_json::from_str::<PlanningWorkload>(&with_unknown).is_err());
     }
 
     #[test]

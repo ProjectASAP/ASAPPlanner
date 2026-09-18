@@ -366,10 +366,16 @@ Keep each provider's evidence scope and freshness valid for the query population
 
 ## Workload inputs and defaults
 
-`QueryWorkload` holds language, optional batch/repeating entries, and optional
-`DataWorkload`. Entries carry requirements, predictability, recurrence and time
+`PlanningWorkload` holds `QueryWorkload` and optional `DataWorkload` as peer
+inputs. `QueryWorkload` contains the language and optional batch/repeating
+entries. Entries carry requirements, predictability, recurrence and time
 selection. These facts are separate: repeated queries can read data at rest.
-`WorkloadDemand` associates a target with the relevant workload entry indices.
+`WorkloadDemand` associates a target with the relevant workload entry indices
+and explicitly includes or omits the parallel data evidence.
+Both recurrence and lifecycle planning validate this independent data evidence:
+ingestion rates must be finite and nonnegative, and data at rest cannot have a
+positive ingestion rate. `DataWorkload::validate()` shares these checks with
+`PlanningWorkload::validate()`.
 
 | Type/input | Current behavior | Caller responsibility |
 | --- | --- | --- |
@@ -396,8 +402,8 @@ hold. Workload legality and known cost evidence can further restrict alternative
 
 ```text
 global_selection_with_summary_maintenance_lifecycles<'a, Id>(
-    space: &'a PlanSpace<Id>, workload: &QueryWorkload,
-    root_workload_entries: &[usize], now_ms: u64, horizon: Option<Horizon>,
+    space: &'a PlanSpace<Id>, demand: WorkloadDemand<'_>,
+    now_ms: u64, horizon: Option<Horizon>,
     capabilities: SummaryMaintenanceLifecycleCapabilities, cost_model: &dyn CostModel,
 ) -> Result<GlobalSelection<'a>, SummaryMaintenanceLifecycleSelectionError>
 
@@ -410,10 +416,9 @@ materialize_with_summary_maintenance_lifecycles(
 
 | Argument | Values / requirements |
 | --- | --- |
-| `space`, `workload` | Actual candidate space and its workload; keep their root associations |
-| `root_workload_entries` | One normalized workload entry index for each `space.roots` entry |
+| `space`, `demand` | Actual candidate space plus query demand, optional data evidence, and one normalized workload entry index for each `space.roots` entry |
 | `target` | A root from `space.roots`, after canonical sharing |
-| `demand` | `WorkloadDemand::new(&workload, &indices)` for the entries consuming that target |
+| `demand` | `WorkloadDemand::new_with_data(...)` when data evidence is available; use `new_without_data(...)` only when its absence is intentional |
 | `now_ms` | Actual planning time in Unix milliseconds for evidence freshness |
 | `horizon` | `Some(Horizon(seconds))` with positive finite seconds, or `None` when horizon-dependent comparisons are unavailable |
 | `capabilities` | Explicit Boolean fields below; several may be true |
@@ -443,11 +448,11 @@ use asap_aware_mapping::{
     SummaryMaintenanceLifecycleCapabilities, SummaryMaintenanceLifecyclePlan,
     WorkloadDemand,
 };
-use asap_types::workload::QueryWorkload;
+use asap_types::workload::PlanningWorkload;
 
 fn plan_batch_root(
     space: &PlanSpace<&str>,
-    workload: &QueryWorkload,
+    workload: &PlanningWorkload,
     entry_index: usize,
     now_ms: u64,
     horizon: Option<Horizon>,
@@ -463,11 +468,16 @@ fn plan_batch_root(
         supports_continuously_maintained: false,
     };
     let indices = [entry_index];
+    let demand = WorkloadDemand {
+        workload: &workload.query_workload,
+        data_workload: workload.data_workload.as_ref(),
+        entry_indices: &indices,
+    };
     let selection = global_selection_with_summary_maintenance_lifecycles(
-        space, workload, &indices, now_ms, horizon, capabilities, model,
+        space, demand, now_ms, horizon, capabilities, model,
     )?;
     let plan = materialize_with_summary_maintenance_lifecycles(
-        &selection, &space.roots[0].1, WorkloadDemand::new(workload, &indices),
+        &selection, &space.roots[0].1, demand,
         now_ms, horizon, capabilities, model,
     )?;
     if let Some(plan) = &plan {
