@@ -20,18 +20,20 @@ query ID and accuracy target. Frontend-specific context and planning models are
 workflow parameters rather than fields of `PlanningWorkload`; later sections
 document them separately.
 
-### Output fields at a glance
+### Output at a glance
 
 | Output | Fields or contents | Meaning |
 |---|---|---|
-| `PlanSpace<Id>` | Canonical workload roots, memo groups, legal candidates, rejected candidates and reasons, cross-group composition information | Canonical ASAPPlanner output: the complete logical choice space |
-| `Vec<RankedGroup>` | `target`, `consumer_count`, index-aligned `candidates` and `costs` | Optional ranked view of the same `PlanSpace` |
-| Materialized Post-ASAP roots | One `Rc<SummaryNode>` DAG per selected workload root, with shared nodes where applicable | Optional result after whole-plan logical selection |
-| `SummaryMaintenanceLifecyclePlan` | `root`, lifecycle deployments, horizon/rates/expected reads, window realization, accuracy guarantee, summary/raw costs, raw-recompute decision | Optional lifecycle-aware selected result |
+| `PlanSpace<Id>` | The legal candidate Post-ASAP DAGs for the workload, represented compactly as canonical roots, memoized alternatives, and cross-group composition information | The single ASAPPlanner output |
 
-These outputs are logical planning artifacts. ASAPPlanner does **not** produce a
-deployed executable plan; downstream systems bind physical operators, choose
-placement and storage, deploy state, and execute queries.
+`PlanSpace` is a compact representation of a set of candidate DAGs rather than
+an eagerly enumerated `Vec<Dag>`. Ranking, selection, materialization, and
+lifecycle APIs operate on this candidate set; they are views or helper
+operations, not additional top-level Planner outputs.
+
+The candidate DAGs are logical planning artifacts. ASAPPlanner does **not**
+produce a deployed executable plan; downstream systems bind physical operators,
+choose placement and storage, deploy state, and execute queries.
 
 ```text
 PlanningWorkload + frontend context
@@ -46,10 +48,6 @@ PlanningWorkload + frontend context
                  |
                  v
  PlanSpace: legal Post-ASAP alternatives
-                 |
-                 +--> ranked view (optional)
-                 +--> selected DAGs (optional)
-                 +--> lifecycle plans (optional)
 ```
 
 If required accuracy, semantic, capability, or cost evidence is unavailable, Planner does not assume it. Unsupported optimizations fail closed, while `KeepPreAsap` preserves exact computation where supported.
@@ -253,7 +251,7 @@ When required evidence is missing, the dependent optimization is unavailable.
 
 ---
 
-## Outputs
+## Output
 
 ### `PlanSpace<Id>`
 
@@ -266,6 +264,11 @@ When required evidence is missing, the dependent optimization is unavailable.
 * information needed for cross-group selection.
 
 A `PlanSpace` represents a **space of logical DAG choices**, not a single executable plan.
+
+The remaining APIs in this section derive information from that one output;
+they do not define separate ASAPPlanner output contracts.
+
+### Ranked view
 
 `PlanSpace::cost_sorted` provides a ranked view for inspection:
 
@@ -280,7 +283,7 @@ Vec<RankedGroup {
 
 This view is useful for debugging, explanation, or downstream optimization. Candidate presence does not imply physical deployability.
 
-### Selected Post-ASAP DAG
+### Selection and materialization helper
 
 `PlanSpace::global_selection*` coordinates decisions across memo groups.
 
@@ -301,7 +304,7 @@ The resulting DAG records logical information such as summary operators, paramet
 
 It is still **not an executable deployment plan**. Physical operator binding, placement, storage, and execution remain downstream responsibilities.
 
-### Lifecycle-aware output
+### Lifecycle-aware helper
 
 `SummaryMaintenanceLifecyclePlan` additionally records:
 
