@@ -26,7 +26,7 @@ separate inputs to candidate search, not frontend dependencies.
 
 | Output | Fields or contents | Meaning |
 |---|---|---|
-| `PlanSpace<Id>` | The legal candidate Post-ASAP DAGs for the workload, represented compactly as canonical roots, memoized alternatives, and cross-group composition information | The single ASAPPlanner output |
+| `PlanSpace<Id>` | The legal candidate Post-ASAP DAGs for the workload, represented compactly as canonical roots, memoized alternatives, and cross-group composition information | The ASAPPlanner output |
 
 Ranking, selection, materialization, and lifecycle APIs are views or helper
 operations over this output, not additional top-level Planner outputs.
