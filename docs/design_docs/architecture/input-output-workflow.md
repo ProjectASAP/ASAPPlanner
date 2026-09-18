@@ -1,6 +1,62 @@
 # ASAPPlanner input, output, and workflows
 
- 
+## Overview
+
+ASAPPlanner is a **logical planning library**. Its input is a planning workload
+plus the models, evidence, and deployment capabilities needed by the requested
+planning workflow. Its canonical output is a `PlanSpace` containing the legal
+Post-ASAP alternatives for the workload.
+
+### Input fields at a glance
+
+| Input | Fields | Required |
+|---|---|---:|
+| `PlanningWorkload.query_workload` | `language`, `query_batch`, `repeating_queries` | Yes |
+| `BatchEntry` | `query`, `requirements`, `predictability`, `invocations`, `execute_at`, `time_selection` | For each one-time query |
+| `RepeatingEntry` | `query`, `demand`, `requirements`, `predictability`, `time_selection` | For each repeating query |
+| `PlanningWorkload.data_workload` | `arrival`, `data_ingestion_interval`, `ingestion_volume`, `ingestion_rate`, `input_cardinality`, `distribution` | Conditional: required for PromQL; individual facts are required only by workflows that consume them |
+| Frontend context | Schema/function catalog and other language-specific resolution inputs | Frontend-dependent |
+| Planning context | Accuracy target/model/evidence, cost model, planning time, horizon, and lifecycle capabilities | Workflow-dependent |
+
+Frontend lowering converts the workload entries into canonical Pre-ASAP
+`QueryExpr` roots. The planning core associates each root with its caller-owned
+query ID and accuracy target.
+
+### Output fields at a glance
+
+| Output | Fields or contents | Meaning |
+|---|---|---|
+| `PlanSpace<Id>` | Canonical workload roots, memo groups, legal candidates, rejected candidates and reasons, cross-group composition information | Canonical ASAPPlanner output: the complete logical choice space |
+| `Vec<RankedGroup>` | `target`, `consumer_count`, index-aligned `candidates` and `costs` | Optional ranked view of the same `PlanSpace` |
+| Materialized Post-ASAP roots | One `Rc<SummaryNode>` DAG per selected workload root, with shared nodes where applicable | Optional result after whole-plan logical selection |
+| `SummaryMaintenanceLifecyclePlan` | `root`, lifecycle deployments, horizon/rates/expected reads, window realization, accuracy guarantee, summary/raw costs, raw-recompute decision | Optional lifecycle-aware selected result |
+
+These outputs are logical planning artifacts. ASAPPlanner does **not** produce a
+deployed executable plan; downstream systems bind physical operators, choose
+placement and storage, deploy state, and execute queries.
+
+```text
+PlanningWorkload + frontend context
+                 |
+                 v
+       canonical QueryExpr roots
+                 +
+   models + evidence + capabilities
+                 |
+                 v
+            ASAPPlanner
+                 |
+                 v
+ PlanSpace: legal Post-ASAP alternatives
+                 |
+                 +--> ranked view (optional)
+                 +--> selected DAGs (optional)
+                 +--> lifecycle plans (optional)
+```
+
+If required accuracy, semantic, capability, or cost evidence is unavailable, Planner does not assume it. Unsupported optimizations fail closed, while `KeepPreAsap` preserves exact computation where supported.
+
+---
 
 ## Inputs
 
