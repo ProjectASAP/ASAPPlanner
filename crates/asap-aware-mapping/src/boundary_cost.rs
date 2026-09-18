@@ -5,7 +5,7 @@ use crate::analytical_cost::{
     PhysicalDagNode,
 };
 use crate::physical_operator_statistics::{ComparisonScope, OperatorStatistics};
-pub use asap_types::resources::{BoundaryKind, BoundaryResources, MaterializationMedium};
+pub use asap_types::resources::{BoundaryKind, BoundaryResources};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 
@@ -208,7 +208,7 @@ pub fn estimate_boundaries(
                     }
                     term.network_bytes = bytes;
                 }
-                BoundaryKind::Materialization { .. } => term.materialization_bytes = bytes,
+                BoundaryKind::Materialization => term.materialization_bytes = bytes,
             }
             local = local
                 .checked_add(term)

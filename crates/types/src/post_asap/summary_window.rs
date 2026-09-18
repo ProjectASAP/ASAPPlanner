@@ -12,8 +12,7 @@ use serde::{Deserialize, Serialize};
 /// state over time.
 ///
 /// The built-in variants name semantics that the planner can compare across
-/// implementations. [`Self::Extension`] lets a provider introduce a new
-/// primitive without treating an opaque physical deployment ID as planner IR.
+/// implementations with defined planning and accuracy behavior.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SummaryWindowFramework {
@@ -23,8 +22,6 @@ pub enum SummaryWindowFramework {
     Sliding,
     /// Hierarchical buckets with exponentially increasing coverage.
     ExponentialHistogram,
-    /// A named planner primitive whose semantics are registered by a provider.
-    Extension(String),
 }
 
 /// Concrete pane phase recorded in a catalog binding or inventory snapshot.
@@ -119,12 +116,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn built_in_and_extension_frameworks_round_trip() {
+    fn built_in_frameworks_round_trip() {
         for framework in [
             SummaryWindowFramework::Tumbling,
             SummaryWindowFramework::Sliding,
             SummaryWindowFramework::ExponentialHistogram,
-            SummaryWindowFramework::Extension("learned_window".into()),
         ] {
             let encoded = serde_json::to_string(&framework).unwrap();
             assert_eq!(
@@ -132,6 +128,15 @@ mod tests {
                 framework
             );
         }
+    }
+
+    /// Opaque names cannot enter planning without defined window semantics.
+    #[test]
+    fn unimplemented_window_extensions_are_rejected() {
+        assert!(serde_json::from_value::<SummaryWindowFramework>(
+            serde_json::json!({"extension": "learned_window"})
+        )
+        .is_err());
     }
 
     #[test]

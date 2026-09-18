@@ -1,10 +1,11 @@
 # Physical boundary byte estimates
 
-`asap_types::resources` owns the canonical `BoundaryResources`, `BoundaryKind`,
-and `MaterializationMedium` definitions in `resources/boundary.rs`. The mapping
+`asap_types::resources` owns the canonical `BoundaryResources` and `BoundaryKind`
+definitions in `resources/boundary.rs`. The mapping
 crate re-exports those same types from `boundary_cost` for import compatibility;
 all estimator and export consumers therefore use shared definitions, not copies.
-Their existing JSON format is unchanged. The shared byte counters support checked
+Materialization is encoded as `{"kind":"materialization"}` without a medium;
+no current estimator distinguishes storage media. The shared byte counters support checked
 addition without depending on planner errors. Snapshot binding, validation,
 calibration, and ranking remain in the mapping crate. Boundary traffic/write work
 is distinct from CPU work, scanned bytes, and stored byte occupancy; it is not
@@ -32,7 +33,7 @@ Supported boundaries are:
 | Boundary | Required evidence | Dimension |
 |---|---|---|
 | Network/exchange/deployment transfer | Distinct nonempty source and destination locations | Network bytes |
-| Materialization/persistence | Memory, disk, or object-store medium | Materialization bytes |
+| Materialization/persistence | No additional kind-specific evidence | Materialization bytes |
 
 Every boundary also declares its unique physical ID, output logical bytes,
 encoded bytes per execution, and positive copy count. Logical bytes must equal

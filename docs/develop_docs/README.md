@@ -14,4 +14,5 @@ formats, evidence, and verification workflows.
 - [Offline sketch evidence](offline-sketch-evidence.md)
 - [Metrics-observability corpora](metrics-observability-corpora.md)
 - [Cost and boundary references](physical-boundary-costs.md), [storage operations](storage-operation-costs.md)
+- [Planning enum audit and migration](planning-enum-audit.md)
 - [Replacement explanations](replacement-explanations.md)
