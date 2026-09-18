@@ -56,7 +56,7 @@ If required accuracy, semantic, capability, or cost evidence is unavailable, Pla
 
 ## Inputs
 
-### Planning workload
+### `PlanningWorkload`
 
 A frontend receives one `PlanningWorkload`. Query demand and facts about the
 queried data are separate because they have different sources and update
@@ -74,18 +74,7 @@ struct PlanningWorkload {
 | `query_workload` | Yes | Contains the source language and every one-time or repeating query. |
 | `data_workload` | Optional generally; required for PromQL | Describes data arrival and evidence about ingestion, cardinality, and distribution. PromQL additionally requires a nonzero `data_ingestion_interval`. |
 
-Frontend-specific dependencies are supplied alongside this structure:
-
-| Frontend | Additional lowering inputs |
-|---|---|
-| PromQL | `now_ms`, plus an optional `HistogramCatalog` when histogram semantics must be resolved |
-| SQL | `SqlCatalog`; single-query APIs also receive the accuracy target and optionally an explicit SQL dialect |
-| MetricsQL | No catalog; the single-query API receives the query text and accuracy target directly |
-
-These are explicit frontend function arguments, not one generic
-`FrontendContext` type and not fields of `PlanningWorkload`.
-
-### Query workload
+#### `query_workload: QueryWorkload`
 
 `QueryWorkload` describes query demand. It deliberately does not describe
 whether source data is still arriving.
@@ -108,7 +97,7 @@ Both entry collections may be present. `QueryWorkload::entries()` normalizes
 them into one ordered stream: batch entries first, followed by repeating
 entries. If both are absent, lowering produces no query roots.
 
-#### One-time query fields
+##### `query_batch: Option<Vec<BatchEntry>>`
 
 ```rust
 struct BatchEntry {
@@ -130,7 +119,7 @@ struct BatchEntry {
 | `execute_at` | Optional | Known execution time. Absence prevents time-specific preparation decisions. |
 | `time_selection` | Yes | Whether the query follows current data or a historical interval, its lookback, and any fixed upper bound. Unknown/default values limit lifecycle reasoning. |
 
-#### Repeating query fields
+##### `repeating_queries: Option<Vec<RepeatingEntry>>`
 
 ```rust
 struct RepeatingEntry {
@@ -150,7 +139,11 @@ struct RepeatingEntry {
 | `predictability` | Yes | Whether future executions are known in advance. This is independent of recurrence. |
 | `time_selection` | Yes | Event-time scope, optional lookback, and optional fixed `as_of` time. |
 
-`QueryRequirements` and `TimeSelection` expand as follows:
+##### Shared entry fields
+
+`BatchEntry` and `RepeatingEntry` both contain `QueryRequirements`,
+`Predictability`, and `TimeSelection`. The nested requirement and time-selection
+fields expand as follows:
 
 | Structure | Field | Meaning |
 |---|---|---|
@@ -164,7 +157,7 @@ Frontend lowering produces one Pre-ASAP `QueryExpr` root for each normalized
 query entry. The caller must retain each root's association with its workload
 entry for later recurrence and lifecycle planning.
 
-### Data workload
+#### `data_workload: Option<DataWorkload>`
 
 `DataWorkload` describes the data being queried. Each empirical field uses
 `Evidence<T>` so a value is accompanied by its source and freshness.
@@ -189,7 +182,10 @@ struct DataWorkload {
 | `input_cardinality` | Optional evidence | Input row/sample count used by applicable sizing, accuracy, or cost rules. |
 | `distribution` | Optional evidence | `Zipf`, `Uniform`, or `Bursty` key distribution used only by rules that explicitly consume it. |
 
-Every `Evidence<T>` has four fields:
+##### `Evidence<T>` fields
+
+Every empirical field in `DataWorkload` uses `Evidence<T>`, which has four
+fields:
 
 | Field | Meaning |
 |---|---|
@@ -200,6 +196,20 @@ Every `Evidence<T>` has four fields:
 
 Unavailable or stale data evidence stays unknown. Planner does not reinterpret
 it as zero ingestion, zero cardinality, or a favorable distribution.
+
+### Frontend-specific dependencies
+
+These inputs are supplied alongside `PlanningWorkload`, rather than nested
+inside it:
+
+| Frontend | Additional lowering inputs |
+|---|---|
+| PromQL | `now_ms`, plus an optional `HistogramCatalog` when histogram semantics must be resolved |
+| SQL | `SqlCatalog`; single-query APIs also receive the accuracy target and optionally an explicit SQL dialect |
+| MetricsQL | No catalog; the single-query API receives the query text and accuracy target directly |
+
+They are explicit frontend function arguments, not one generic
+`FrontendContext` type.
 
 ### Canonical Planner inputs
 
