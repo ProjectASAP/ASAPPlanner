@@ -28,23 +28,8 @@ separate inputs to candidate search, not frontend dependencies.
 |---|---|---|
 | `PlanSpace<Id>` | The legal candidate Post-ASAP DAGs for the workload, represented compactly as canonical roots, memoized alternatives, and cross-group composition information | The single ASAPPlanner output |
 
-`PlanSpace` does not eagerly copy every complete DAG. It stores the workload's
-canonical roots once, creates one memo group for each distinct target sub-DAG,
-and stores that target's replacement alternatives once inside the group.
-Candidate children refer back to canonical targets, so common subexpressions
-and shared alternatives are not duplicated across roots.
-
-For example, if one target has three alternatives and its child has two,
-eager enumeration could create six complete DAGs. `PlanSpace` stores the three
-parent alternatives, the two child alternatives, and their relationship.
-Whole-plan selection chooses compatible alternatives across those groups;
-materialization then recursively substitutes the selected alternatives to
-construct a complete Post-ASAP DAG. This memoized representation avoids the
-Cartesian-product expansion of complete DAGs and preserves shared nodes.
-
-Ranking, selection, materialization, and lifecycle APIs operate on this same
-candidate set; they are views or helper operations, not additional top-level
-Planner outputs.
+Ranking, selection, materialization, and lifecycle APIs are views or helper
+operations over this output, not additional top-level Planner outputs.
 
 The candidate DAGs are logical planning artifacts. ASAPPlanner does **not**
 produce a deployed executable plan; downstream systems bind physical operators,
@@ -286,6 +271,21 @@ When required evidence is missing, the dependent optimization is unavailable.
 * information needed for cross-group selection.
 
 A `PlanSpace` represents a **space of logical DAG choices**, not a single executable plan.
+
+It represents that space compactly instead of eagerly copying every complete
+DAG. `PlanSpace` stores the workload's canonical roots once, creates one memo
+group for each distinct target sub-DAG, and stores that target's replacement
+alternatives once inside the group. Candidate children refer back to canonical
+targets, so common subexpressions and shared alternatives are not duplicated
+across roots.
+
+For example, if one target has three alternatives and its child has two,
+eager enumeration could create six complete DAGs. `PlanSpace` stores the three
+parent alternatives, the two child alternatives, and their relationship.
+Whole-plan selection chooses compatible alternatives across those groups;
+materialization then recursively substitutes the selected alternatives to
+construct a complete Post-ASAP DAG. This memoized representation avoids the
+Cartesian-product expansion of complete DAGs and preserves shared nodes.
 
 The remaining APIs in this section derive information from that one output;
 they do not define separate ASAPPlanner output contracts.
