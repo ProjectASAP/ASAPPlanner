@@ -206,6 +206,8 @@ pub mod storage_io;
 pub mod summary_maintenance_cost;
 pub mod summary_maintenance_dag_export;
 pub mod summary_maintenance_lifecycle;
+#[cfg(test)]
+mod test_support;
 pub mod topk_reuse;
 
 pub use accuracy::{

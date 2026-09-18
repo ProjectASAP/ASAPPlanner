@@ -13,7 +13,7 @@
 //! match is the **shape above the leaf**: an outer `Aggregate([TopK{k}])` over an
 //! explicit inner `Aggregate([Count])`.
 
-use asap_devtools::{lower_promql, lower_sql, SqlCatalog};
+use asap_devtools::{lower_promql_with_data_ingestion_interval, lower_sql, SqlCatalog};
 use asap_types::pre_asap::schema::{Column, DataType, Schema};
 use asap_types::pre_asap::{AggIntent, GroupKeys, QueryExpr};
 use asap_types::types::AccuracyTarget;
@@ -46,7 +46,7 @@ async fn sql(q: &str) -> QueryExpr {
 }
 
 fn promql(q: &str) -> QueryExpr {
-    lower_promql(q, AccuracyTarget::Exact)
+    lower_promql_with_data_ingestion_interval(q, AccuracyTarget::Exact, 1_000)
         .unwrap_or_else(|e| panic!("PromQL {q:?} failed to lower: {e:?}"))
 }
 

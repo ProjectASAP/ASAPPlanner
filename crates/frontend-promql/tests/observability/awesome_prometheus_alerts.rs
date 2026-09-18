@@ -26,9 +26,12 @@
 // `__GAP`-suffixed names intentionally SHOUT the documented divergences.
 #![allow(non_snake_case)]
 
-use asap_frontend_promql::{lower_promql, PromqlError as LoweringError};
+use asap_frontend_promql::PromqlError as LoweringError;
+#[path = "../support.rs"]
+mod support;
 use asap_types::pre_asap::{AggIntent, BinaryOpKind, CompareOpKind, QueryExpr, Reduction};
 use asap_types::types::AccuracyTarget;
+use support::lower_promql;
 
 const CORPUS: &str = include_str!("data/awesome_prometheus_alerts.txt");
 
@@ -174,14 +177,19 @@ fn corpus_lowering_is_total_and_fully_parseable() {
 #[test]
 fn vector_vs_vector_comparison_lowers_to_binaryop() {
     // node-exporter: `node_hwmon_temp_celsius > node_hwmon_temp_max_celsius`.
-    // Both operands are instant vectors → a `BinaryOp{Compare}` of two scans.
+    // Both operands are instant vectors → a `BinaryOp{Compare}` of two
+    // ingestion-interval-bounded scans.
     let qe = ok("node_hwmon_temp_celsius > node_hwmon_temp_max_celsius");
     let QueryExpr::BinaryOp { op, lhs, rhs, .. } = &qe else {
         panic!("expected BinaryOp, got {qe:?}");
     };
     assert_eq!(*op, BinaryOpKind::Compare(CompareOpKind::Gt));
-    assert!(matches!(lhs.as_ref(), QueryExpr::Scan { .. }));
-    assert!(matches!(rhs.as_ref(), QueryExpr::Scan { .. }));
+    assert!(
+        matches!(lhs.as_ref(), QueryExpr::TimeRange { child, .. } if matches!(child.as_ref(), QueryExpr::Scan { .. }))
+    );
+    assert!(
+        matches!(rhs.as_ref(), QueryExpr::TimeRange { child, .. } if matches!(child.as_ref(), QueryExpr::Scan { .. }))
+    );
 }
 
 #[test]

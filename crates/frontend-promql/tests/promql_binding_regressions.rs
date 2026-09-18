@@ -1,5 +1,7 @@
-use asap_frontend_promql::lower_promql;
 use asap_types::types::AccuracyTarget;
+
+mod support;
+use support::lower_promql;
 
 /// Prometheus treats these quantile parameters as valid queries returning special values.
 #[test]

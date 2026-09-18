@@ -118,11 +118,24 @@ fn recognize(root: &QueryExpr) -> Option<(MaintainedPopulation, PopulationReadou
         }
         return Some((population, readout, Rc::clone(source)));
     }
+    // A bare PromQL selector carries the declared ingestion interval as a
+    // temporal input scope. Membership must expire at that horizon; retain
+    // the wrapper as the maintained input so validation can check agreement.
+    let (series_source, lookback_ms) = match source.as_ref() {
+        QueryExpr::TimeRange { range, child } => {
+            let ms = u64::try_from(range.as_millis()).ok()?;
+            if ms == 0 || std::time::Duration::from_millis(ms) != *range {
+                return None;
+            }
+            (child.as_ref(), ms)
+        }
+        other => (other, 300_000),
+    };
     let QueryExpr::Scan {
         source: Source::TimeSeries { metric },
         predicates,
         schema,
-    } = source.as_ref()
+    } = series_source
     else {
         return None;
     };
@@ -176,7 +189,7 @@ fn recognize(root: &QueryExpr) -> Option<(MaintainedPopulation, PopulationReadou
                 matchers,
                 grouping: labels,
                 without: grouping.is_without(),
-                lookback_ms: 300_000,
+                lookback_ms,
             }),
             max_k: 0,
             quantiles: false,
@@ -285,12 +298,11 @@ impl ReplacementStrategy for MaintainedPopulationStrategy {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::lower_promql;
     use asap_types::post_asap::{compile_executable_dag, share_common_summary_subtrees};
+
     fn lower(q: &str) -> Rc<QueryExpr> {
-        Rc::new(
-            asap_frontend_promql::lower_promql(q, asap_types::types::AccuracyTarget::Exact)
-                .unwrap(),
-        )
+        Rc::new(lower_promql(q, asap_types::types::AccuracyTarget::Exact))
     }
 
     // Instant scalar aggregations share the same retractable series population.

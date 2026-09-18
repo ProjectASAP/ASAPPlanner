@@ -8,11 +8,13 @@ use asap_types::pre_asap::{
 };
 use asap_types::types::AccuracyTarget;
 use asap_types::workload::{
-    AccuracyRequirement, BatchEntry, Predictability, Query, QueryLanguage, QueryRequirements,
-    QueryWorkload, TimeSelection,
+    AccuracyRequirement, BatchEntry, DataWorkload, DurationMs, Evidence, PlanningWorkload,
+    Predictability, Query, QueryLanguage, QueryRequirements, QueryWorkload, TimeSelection,
 };
 
-use asap_frontend_promql::{lower_promql, lower_promql_batch, PromqlError as LoweringError};
+use asap_frontend_promql::{lower_promql_workload, PromqlError as LoweringError};
+mod support;
+use support::lower_promql;
 
 fn lower(q: &str) -> QueryExpr {
     lower_promql(q, AccuracyTarget::Exact).unwrap_or_else(|e| panic!("lower failed for {q:?}: {e}"))
@@ -75,9 +77,12 @@ fn distinct_over_time_preserves_cardinality_accuracy_and_nested_windows() {
 #[test]
 fn bare_selector_is_scan_with_predicates() {
     let qe = lower(r#"http_requests_total{env="prod",status!="500"}"#);
+    let QueryExpr::TimeRange { child, .. } = &qe else {
+        panic!("expected TimeRange, got {qe:?}");
+    };
     let QueryExpr::Scan {
         source, predicates, ..
-    } = &qe
+    } = child.as_ref()
     else {
         panic!("expected Scan, got {qe:?}");
     };
@@ -93,9 +98,12 @@ fn bare_selector_is_scan_with_predicates() {
 #[test]
 fn regex_matcher_lowers_to_regex_compareop() {
     let qe = lower(r#"http_requests_total{path=~"/api/.*"}"#);
+    let QueryExpr::TimeRange { child, .. } = &qe else {
+        panic!("expected TimeRange, got {qe:?}");
+    };
     let QueryExpr::Scan {
         predicates, schema, ..
-    } = &qe
+    } = child.as_ref()
     else {
         panic!("expected Scan, got {qe:?}");
     };
@@ -905,55 +913,66 @@ fn scan_schema_carries_ts_value_and_group_keys() {
 
 #[test]
 fn batch_lowers_each_entry_and_reads_per_query_accuracy() {
-    let workload = QueryWorkload {
-        language: QueryLanguage::PromQL,
-        query_batch: Some(vec![
-            BatchEntry {
-                query: Query("rate(a[5m])".into()),
-                requirements: QueryRequirements::default(),
-                predictability: Predictability::Unknown,
-                invocations: 1,
-                execute_at: None,
-                time_selection: TimeSelection::default(),
-            },
-            BatchEntry {
-                query: Query("quantile_over_time(0.9, b[5m])".into()),
-                requirements: QueryRequirements {
-                    accuracy: AccuracyRequirement::Explicit(AccuracyTarget::Epsilon(0.02)),
-                    ..Default::default()
+    let workload = PlanningWorkload {
+        query_workload: QueryWorkload {
+            language: QueryLanguage::PromQL,
+            query_batch: Some(vec![
+                BatchEntry {
+                    query: Query("rate(a[5m])".into()),
+                    requirements: QueryRequirements::default(),
+                    predictability: Predictability::Unknown,
+                    invocations: 1,
+                    execute_at: None,
+                    time_selection: TimeSelection::default(),
                 },
-                predictability: Predictability::Unknown,
-                invocations: 1,
-                execute_at: None,
-                time_selection: TimeSelection::default(),
+                BatchEntry {
+                    query: Query("quantile_over_time(0.9, b[5m])".into()),
+                    requirements: QueryRequirements {
+                        accuracy: AccuracyRequirement::Explicit(AccuracyTarget::Epsilon(0.02)),
+                        ..Default::default()
+                    },
+                    predictability: Predictability::Unknown,
+                    invocations: 1,
+                    execute_at: None,
+                    time_selection: TimeSelection::default(),
+                },
+            ]),
+            repeating_queries: None,
+        },
+        data_workload: Some(DataWorkload {
+            data_ingestion_interval: Evidence {
+                value: Some(DurationMs(1_000)),
+                ..Default::default()
             },
-        ]),
-        repeating_queries: None,
+            ..Default::default()
+        }),
     };
-    let results = lower_promql_batch(&workload);
+    let results = lower_promql_workload(&workload, 0).expect("valid workload");
     assert_eq!(results.len(), 2);
-    assert!(results[0].is_ok());
-    assert!(results[1].is_ok());
 }
 
 #[test]
 fn batch_rejects_non_promql_language() {
     use asap_types::workload::SqlDialect;
-    let workload = QueryWorkload {
-        language: QueryLanguage::SQL(SqlDialect::DataFusionSQL),
-        query_batch: Some(vec![BatchEntry {
-            query: Query("SELECT 1".into()),
-            requirements: QueryRequirements::default(),
-            predictability: Predictability::Unknown,
-            invocations: 1,
-            execute_at: None,
-            time_selection: TimeSelection::default(),
-        }]),
-        repeating_queries: None,
+    let workload = PlanningWorkload {
+        query_workload: QueryWorkload {
+            language: QueryLanguage::SQL(SqlDialect::DataFusionSQL),
+            query_batch: Some(vec![BatchEntry {
+                query: Query("SELECT 1".into()),
+                requirements: QueryRequirements::default(),
+                predictability: Predictability::Unknown,
+                invocations: 1,
+                execute_at: None,
+                time_selection: TimeSelection::default(),
+            }]),
+            repeating_queries: None,
+        },
+        data_workload: None,
     };
-    let results = lower_promql_batch(&workload);
-    assert_eq!(results.len(), 1);
-    assert!(matches!(results[0], Err(LoweringError::WrongLanguage(_))));
+    assert!(matches!(
+        lower_promql_workload(&workload, 0),
+        Err(LoweringError::WrongLanguage(_))
+    ));
 }
 
 // ── #12: one home per grouping concept (the canonical `Partition` node is removed) ──
@@ -1031,10 +1050,10 @@ fn topk_over_bare_selector_by_label_ranks_per_group() {
     assert!(!keys[0].ascending, "topk ranks descending");
     assert_eq!(partition_by, &vec![2], "job is col 2 in [ts, value, job]");
     // No implicit reducing aggregate — the selector is label-preserving, so the
-    // sort is directly over the Scan (the `job` label survives to partition by).
+    // sort is directly over the selector horizon (the `job` label survives to partition by).
     assert!(
-        matches!(child.as_ref(), QueryExpr::Scan { .. }),
-        "ranking is over the bare Scan, not a reducing Aggregate, got {child:?}"
+        matches!(child.as_ref(), QueryExpr::TimeRange { child, .. } if matches!(child.as_ref(), QueryExpr::Scan { .. })),
+        "ranking is over the bare selector horizon, not a reducing Aggregate, got {child:?}"
     );
     assert!(
         !has_intent(&q, |i| matches!(i, AggIntent::Sum { .. })),
@@ -1059,7 +1078,9 @@ fn topk_over_bare_selector_ranks_raw_samples() {
         panic!("expected Sort, got {child:?}");
     };
     assert!(partition_by.is_empty(), "no `by` → global ranking");
-    assert!(matches!(child.as_ref(), QueryExpr::Scan { .. }));
+    assert!(
+        matches!(child.as_ref(), QueryExpr::TimeRange { child, .. } if matches!(child.as_ref(), QueryExpr::Scan { .. }))
+    );
     assert!(!has_intent(&q, |i| matches!(i, AggIntent::Sum { .. })));
 }
 

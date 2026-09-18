@@ -38,29 +38,39 @@ asap-types = { git = "https://github.com/ProjectASAP/ASAPPlanner", rev = "e7fdb2
 
 | Public function | Required input | Output |
 | --- | --- | --- |
-| `asap_frontend_promql::lower_promql` | Query string, `AccuracyTarget` | `Result<QueryExpr, PromqlError>` |
+| `asap_frontend_promql::lower_promql_workload` | PromQL `PlanningWorkload` with a nonzero `data_ingestion_interval` | All-or-nothing `Result<Vec<QueryExpr>, PromqlError>` for normalized batch and repeating entries |
 | `asap_frontend_metricsql::lower_metricsql` | Query string, `AccuracyTarget` | `Result<QueryExpr, MetricsqlError>` |
 | `asap_frontend_sql::lower_sql` | Query string, `SqlCatalog`, accuracy | Async `Result<QueryExpr, SqlError>`; default SQL dialect is DataFusionSQL |
 | `asap_frontend_sql::lower_sql_dialect` | Same inputs plus `SqlDialect` | Async resolved Pre-ASAP query or error |
-| `lower_promql_batch` / `lower_sql_batch` in their frontend crates | `QueryWorkload`; SQL additionally needs catalog | Per-query results for `query_batch`; these helpers do not iterate `repeating_queries` |
+| `asap_frontend_sql::lower_sql_batch` | `QueryWorkload` and catalog | Per-query results for `query_batch`; does not iterate `repeating_queries` |
 
 Lowering resolves the supported source language into the canonical query
 representation. It does not enumerate Post-ASAP alternatives. A frontend may
 reject unsupported syntax or semantics; a declared language/dialect enum does
-not imply complete support. For mixed one-time/repeating workloads, use normalized
-`QueryWorkload::entries()` and the appropriate single-query frontend, preserving
-entry-to-root associations for later workload-aware operations.
+not imply complete support. PromQL workload lowering uses normalized
+`PlanningWorkload::query_workload.entries()` order, preserving entry-to-root associations for later
+workload-aware operations. For SQL mixed one-time/repeating workloads, iterate
+those entries with the single-query frontend.
 
 ### Definition and example
 
 PromQL's public signature (types are imported from their respective crates):
 
 ```text
-lower_promql(query: &str, accuracy: AccuracyTarget)
-    -> Result<QueryExpr, PromqlError>
+lower_promql_workload(workload: &PlanningWorkload, now_ms: u64)
+    -> Result<Vec<QueryExpr>, PromqlError>
 ```
 
-`query` and `accuracy` are required. These are the accuracy argument's choices:
+`DataWorkload.data_ingestion_interval` must contain a nonzero `Evidence<DurationMs>`.
+Pass the actual planning time as `now_ms` (Unix milliseconds), consistently with
+downstream lifecycle planning. Expired or future cadence evidence is rejected,
+as is expiring evidence without an observation timestamp. The histogram variant
+takes the same timestamp after its histogram catalog argument. The examples use
+`0` only because their explicitly supplied cadence is timeless.
+Bare instant selectors receive this selection horizon; explicit range selectors
+retain their query-specified range. Use `lower_promql_workload_with_histograms`
+to supply a histogram catalog for the whole workload. Each entry carries its
+own accuracy requirement, with these explicit target choices:
 
 | Value | Meaning | Example |
 | --- | --- | --- |
@@ -73,11 +83,39 @@ candidate's guarantee and its error metric; a target is a requirement, not proof
 that a supported candidate exists.
 
 ```rust
-use asap_frontend_promql::lower_promql;
+use asap_frontend_promql::lower_promql_workload;
+use asap_types::workload::{
+    AccuracyRequirement, BatchEntry, DataWorkload, DurationMs, Evidence, Query,
+    PlanningWorkload, QueryLanguage, QueryRequirements, QueryWorkload,
+};
 use asap_types::types::AccuracyTarget;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let pre_asap = lower_promql("sum(latency)", AccuracyTarget::Exact)?;
+    let workload = PlanningWorkload {
+        query_workload: QueryWorkload {
+            language: QueryLanguage::PromQL,
+            query_batch: Some(vec![BatchEntry {
+            query: Query("sum(latency)".into()),
+            requirements: QueryRequirements {
+                accuracy: AccuracyRequirement::Explicit(AccuracyTarget::Exact),
+                ..Default::default()
+            },
+            predictability: Default::default(),
+            invocations: 1,
+            execute_at: None,
+            time_selection: Default::default(),
+            }]),
+            repeating_queries: None,
+        },
+        data_workload: Some(DataWorkload {
+            data_ingestion_interval: Evidence {
+                value: Some(DurationMs(1_000)),
+                ..Default::default()
+            },
+            ..Default::default()
+        }),
+    };
+    let pre_asap = lower_promql_workload(&workload, 0)?;
     println!("{pre_asap:#?}");
     Ok(())
 }
@@ -149,7 +187,11 @@ The default cost model is suitable for inspection, not deployment calibration.
 
 ```rust
 use std::rc::Rc;
-use asap_frontend_promql::lower_promql;
+use asap_frontend_promql::lower_promql_workload;
+use asap_types::workload::{
+    AccuracyRequirement, BatchEntry, DataWorkload, DurationMs, Evidence, Query,
+    PlanningWorkload, QueryLanguage, QueryRequirements, QueryWorkload,
+};
 use asap_aware_mapping::{
     default_strategies_with, search_workload_with_targets,
     DefaultAccuracyModel, DefaultCostModel,
@@ -158,7 +200,31 @@ use asap_types::types::AccuracyTarget;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let accuracy = AccuracyTarget::Epsilon(0.01);
-    let root = Rc::new(lower_promql("quantile(0.99, latency)", accuracy.clone())?);
+    let workload = PlanningWorkload {
+        query_workload: QueryWorkload {
+            language: QueryLanguage::PromQL,
+            query_batch: Some(vec![BatchEntry {
+            query: Query("quantile(0.99, latency)".into()),
+            requirements: QueryRequirements {
+                accuracy: AccuracyRequirement::Explicit(accuracy.clone()),
+                ..Default::default()
+            },
+            predictability: Default::default(),
+            invocations: 1,
+            execute_at: None,
+            time_selection: Default::default(),
+            }]),
+            repeating_queries: None,
+        },
+        data_workload: Some(DataWorkload {
+            data_ingestion_interval: Evidence {
+                value: Some(DurationMs(1_000)),
+                ..Default::default()
+            },
+            ..Default::default()
+        }),
+    };
+    let root = Rc::new(lower_promql_workload(&workload, 0)?.remove(0));
     let cost_model = DefaultCostModel;
     let strategies = default_strategies_with(&cost_model);
     let space = search_workload_with_targets(
@@ -247,7 +313,11 @@ replacement::default_strategies_with_evidence<'a>(
 
 ```rust
 use std::rc::Rc;
-use asap_frontend_promql::lower_promql;
+use asap_frontend_promql::lower_promql_workload;
+use asap_types::workload::{
+    AccuracyRequirement, BatchEntry, DataWorkload, DurationMs, Evidence, Query,
+    PlanningWorkload, QueryLanguage, QueryRequirements, QueryWorkload,
+};
 use asap_aware_mapping::{
     search_workload_with_targets, DefaultAccuracyModel, DefaultCostModel,
     ReplacementStrategy, SketchAlgorithmStrategy, SharedSubtreeStrategy,
@@ -256,7 +326,31 @@ use asap_types::types::AccuracyTarget;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let accuracy = AccuracyTarget::Epsilon(0.01);
-    let root = Rc::new(lower_promql("quantile(0.99, latency)", accuracy.clone())?);
+    let workload = PlanningWorkload {
+        query_workload: QueryWorkload {
+            language: QueryLanguage::PromQL,
+            query_batch: Some(vec![BatchEntry {
+            query: Query("quantile(0.99, latency)".into()),
+            requirements: QueryRequirements {
+                accuracy: AccuracyRequirement::Explicit(accuracy.clone()),
+                ..Default::default()
+            },
+            predictability: Default::default(),
+            invocations: 1,
+            execute_at: None,
+            time_selection: Default::default(),
+            }]),
+            repeating_queries: None,
+        },
+        data_workload: Some(DataWorkload {
+            data_ingestion_interval: Evidence {
+                value: Some(DurationMs(1_000)),
+                ..Default::default()
+            },
+            ..Default::default()
+        }),
+    };
+    let root = Rc::new(lower_promql_workload(&workload, 0)?.remove(0));
     let model = DefaultCostModel;
     let strategies: Vec<Box<dyn ReplacementStrategy + '_>> = vec![
         Box::new(SketchAlgorithmStrategy::new(&model)),
@@ -575,12 +669,40 @@ Use lifecycle-aware selection above when the comparison needs those decisions.
 
 ```rust
 use std::rc::Rc;
-use asap_frontend_promql::lower_promql;
+use asap_frontend_promql::lower_promql_workload;
+use asap_types::workload::{
+    AccuracyRequirement, BatchEntry, DataWorkload, DurationMs, Evidence, Query,
+    PlanningWorkload, QueryLanguage, QueryRequirements, QueryWorkload,
+};
 use asap_aware_mapping::{search_workload, DefaultCostModel};
 use asap_types::types::AccuracyTarget;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let root = Rc::new(lower_promql("sum(latency)", AccuracyTarget::Exact)?);
+    let workload = PlanningWorkload {
+        query_workload: QueryWorkload {
+            language: QueryLanguage::PromQL,
+            query_batch: Some(vec![BatchEntry {
+            query: Query("sum(latency)".into()),
+            requirements: QueryRequirements {
+                accuracy: AccuracyRequirement::Explicit(AccuracyTarget::Exact),
+                ..Default::default()
+            },
+            predictability: Default::default(),
+            invocations: 1,
+            execute_at: None,
+            time_selection: Default::default(),
+            }]),
+            repeating_queries: None,
+        },
+        data_workload: Some(DataWorkload {
+            data_ingestion_interval: Evidence {
+                value: Some(DurationMs(1_000)),
+                ..Default::default()
+            },
+            ..Default::default()
+        }),
+    };
+    let root = Rc::new(lower_promql_workload(&workload, 0)?.remove(0));
     let space = search_workload(vec![("q1", root)]);
     let selection = space.global_selection(&DefaultCostModel);
     // Search may canonicalize roots; use the root returned by PlanSpace.

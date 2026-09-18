@@ -5,13 +5,14 @@ use asap_aware_mapping::accuracy::{
 };
 use asap_aware_mapping::cost_model::DefaultCostModel;
 use asap_aware_mapping::{Replacement, ReplacementStrategy, SketchAlgorithmStrategy, TargetSubDAG};
-use asap_frontend_promql::lower_promql;
+mod support;
 use asap_types::post_asap::{
     compile_executable_dag, cse::share_common_summary_subtrees, AccuracyError, BoundExpr,
     CompositionOperator, ErrorMetric, ProbabilityExpr, ResultGuarantee, SketchAlgorithm,
     SketchQuery, SummaryExpr, SummaryFamilyType, SummaryInputExpr, SummaryNode,
 };
 use asap_types::types::AccuracyTarget;
+use support::lower_promql;
 
 // Synthetic evidence exercises structural sharing, never runtime accuracy.
 struct TestEvidence;

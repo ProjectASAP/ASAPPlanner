@@ -9,7 +9,7 @@
 //! `Aggregate` or a `Project`.  Per-series reductions (`rate`, `*_over_time`)
 //! are label-preserving and keep the schema open.
 
-use asap_frontend_promql::lower_promql;
+use asap_integration_tests::fixtures::lower_promql;
 use asap_types::types::AccuracyTarget;
 
 fn lower(q: &str) -> asap_types::pre_asap::QueryExpr {

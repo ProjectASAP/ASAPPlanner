@@ -389,8 +389,10 @@ impl ReplacementStrategy for SemanticEquivalentRewriteStrategy {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::lower_promql;
     use asap_types::pre_asap::query_expr::Source;
     use asap_types::pre_asap::schema::{Column, Schema};
+    use asap_types::types::AccuracyTarget;
     use std::time::Duration;
 
     fn metric_scan(labels: &[&str]) -> QueryExpr {
@@ -419,13 +421,10 @@ mod tests {
     // Temporal averages expose two single-measure children without closing labels.
     #[test]
     fn temporal_average_components_preserves_schema_and_exposes_sum_count() {
-        let root = Rc::new(
-            asap_frontend_promql::lower_promql(
-                "avg_over_time(a{job=\"api\"}[5m])",
-                AccuracyTarget::Exact,
-            )
-            .unwrap(),
-        );
+        let root = Rc::new(lower_promql(
+            "avg_over_time(a{job=\"api\"}[5m])",
+            AccuracyTarget::Exact,
+        ));
         assert!(SemanticEquivalentRewriteStrategy
             .replacements(&TargetSubDAG::new(&root))
             .is_empty());

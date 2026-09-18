@@ -1,7 +1,7 @@
 //! Numeric regression fixtures: actual PromQL lowering plus numeric update/readout checks.
 //! The count/sum interpreter below verifies planner update semantics, not a deployed backend.
 use asap_aware_mapping::{Replacement, ReplacementStrategy, SketchAlgorithmStrategy, TargetSubDAG};
-use asap_frontend_promql::lower_promql;
+use asap_integration_tests::fixtures::lower_promql;
 use asap_types::post_asap::{
     compile_executable_dag, ExactKind, SummaryExpr, SummaryFamilyType, SummaryInputExpr,
     SummaryNode, SummaryUpdate,
