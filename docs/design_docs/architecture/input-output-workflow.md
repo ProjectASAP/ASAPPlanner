@@ -213,25 +213,37 @@ inside it:
 They are explicit frontend function arguments, not one generic
 `FrontendContext` type.
 
-### Canonical Planner inputs
+### Candidate-search API inputs
 
-The planning core operates on:
+After frontend lowering, the configurable whole-workload search API receives:
 
-```text
-Vec<(query_id, Rc<QueryExpr>, Option<AccuracyTarget>)>
+```rust
+search_workload_with_targets(
+    roots: Vec<(Id, Rc<QueryExpr>, Option<AccuracyTarget>)>,
+    strategies: &[Box<dyn ReplacementStrategy>],
+    accuracy_model: &dyn AccuracyModel,
+)
 ```
 
-The main inputs are:
+`Id` is not a field of `PlanningWorkload`, and there is no Planner-defined
+`query_id` type. Frontend lowering returns `QueryExpr` roots in normalized
+workload-entry order. The integration layer pairs each root with an opaque `Id`
+before search—for example, the workload entry index or an application query
+identifier. Planner preserves that value so the caller can associate output
+roots with its own queries; it does not affect candidate semantics or ranking.
 
-* **`query_id`** — caller-owned query identity.
-* **`QueryExpr`** — canonical exact query semantics.
-* **`AccuracyTarget`** — required end-to-end accuracy, if enforced.
-* **Strategies** — candidate transformations Planner may explore.
-* **`AccuracyModel`** — determines how guarantees compose and satisfy targets.
-* **`CostModel`** — evaluates candidate cost and availability.
-* **`AccuracyEvidenceProvider`** — provides facts required to prove candidate guarantees.
+| API input | Source | Planning role |
+|---|---|---|
+| `Id` | Added by the integration layer after lowering | Opaque result correlation only |
+| `Rc<QueryExpr>` | Frontend output | Canonical exact query semantics |
+| `Option<AccuracyTarget>` | The corresponding workload entry's `requirements.accuracy` | Enforces an end-to-end root guarantee when present |
+| `strategies` | Normally a standard strategy factory | Defines which candidate transformations search may explore |
+| `accuracy_model` | Normally `DefaultAccuracyModel` | Composes guarantees and checks them against targets |
 
-Most integrations should use the standard strategy set and `DefaultAccuracyModel`.
+`AccuracyEvidenceProvider` is supplied when constructing evidence-aware
+strategies; it is not another field in the root tuple. `CostModel` is used by
+strategy construction and by later ranking or selection helpers; it is not a
+direct argument of `search_workload_with_targets`.
 
 ### Additional inputs for lifecycle planning
 
