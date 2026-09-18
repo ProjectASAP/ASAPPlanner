@@ -216,17 +216,22 @@ Evidence is input to planning. The current library does not collect every kind
 in one `PlanningWorkload` field; each fact enters through the interface that
 consumes it:
 
-| Evidence | Examples | Supplied through |
-|---|---|---|
-| Semantic/domain | Input range, nonempty population, nonzero denominator | Typed accuracy/domain evidence provider |
-| Accuracy | Quantile domain, Top-K confidence, composition certificate | Accuracy evidence provider or registered accuracy model |
-| Cost | CPU time, operation count, memory, scan/storage I/O | Cost model or physical-evidence provider |
-| Workload | Cardinality, distribution, ingestion rate, recurrence | `PlanningWorkload` query/data workload fields |
-| Capability | Supported summaries, merge/delete support, window realization | Deployment capability or lifecycle provider |
+Evidence is not globally required or globally optional. Each item is
+**conditionally required** by the decision that consumes it:
+
+| Evidence | Required when | Examples | Supplied through |
+|---|---|---|---|
+| Semantic/domain | A transformation needs to prove an input precondition | Input range, nonempty population, nonzero denominator | Typed accuracy/domain evidence provider |
+| Accuracy | An approximate candidate needs a data-dependent accuracy certificate | Quantile domain, Top-K confidence, composition certificate | Accuracy evidence provider or registered accuracy model |
+| Cost | Candidates are compared or selected by deployment cost | CPU time, operation count, memory, scan/storage I/O | Cost model or physical-evidence provider |
+| Workload | A frontend or optimization consumes that workload fact | Cardinality, distribution, ingestion rate, recurrence | `PlanningWorkload` query/data workload fields |
+| Capability | A candidate must be checked against deployable operations | Supported summaries, merge/delete support, window realization | Deployment capability or lifecycle provider |
 
 Evidence must apply to the relevant workload and implementation. Time-sensitive evidence should also carry freshness information.
 
-When required evidence is missing, the dependent optimization is unavailable.
+Missing optional evidence does not invalidate unrelated candidates. When a
+candidate requires missing evidence, that candidate is unavailable rather than
+planned using a favorable assumption.
 Planner output may record the resulting guarantee, evidence provenance, or a
 rejection reason, but evidence itself remains an input.
 
