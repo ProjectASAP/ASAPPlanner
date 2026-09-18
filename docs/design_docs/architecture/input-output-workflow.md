@@ -11,16 +11,14 @@ Post-ASAP alternatives for the workload.
 
 | Input | Fields | Required |
 |---|---|---:|
-| `PlanningWorkload.query_workload` | `language`, `query_batch`, `repeating_queries` | Yes |
-| `BatchEntry` | `query`, `requirements`, `predictability`, `invocations`, `execute_at`, `time_selection` | For each one-time query |
-| `RepeatingEntry` | `query`, `demand`, `requirements`, `predictability`, `time_selection` | For each repeating query |
-| `PlanningWorkload.data_workload` | `arrival`, `data_ingestion_interval`, `ingestion_volume`, `ingestion_rate`, `input_cardinality`, `distribution` | Conditional: required for PromQL; individual facts are required only by workflows that consume them |
-| Frontend context | Schema/function catalog and other language-specific resolution inputs | Frontend-dependent |
-| Planning context | Accuracy target/model/evidence, cost model, planning time, horizon, and lifecycle capabilities | Workflow-dependent |
+| `PlanningWorkload.query_workload` | Query language and one-time/repeating query workloads | Yes |
+| `PlanningWorkload.data_workload` | Data arrival and optional evidence about ingestion, cardinality, and distribution | Conditional: required for PromQL; otherwise optional |
 
 Frontend lowering converts the workload entries into canonical Pre-ASAP
 `QueryExpr` roots. The planning core associates each root with its caller-owned
-query ID and accuracy target.
+query ID and accuracy target. Frontend-specific context and planning models are
+workflow parameters rather than fields of `PlanningWorkload`; later sections
+document them separately.
 
 ### Output fields at a glance
 
