@@ -14,22 +14,7 @@ use super::{
 use crate::pre_asap::{ColumnRef, GroupKeys, JoinKind, Predicate, QueryExpr, Reduction};
 use thiserror::Error;
 
-pub const POST_ASAP_DAG_WIRE_VERSION: u32 = 1;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub enum ExecutableOperator {
-    Fallback,
-    Binary,
-    CandidateTopK,
-    Value,
-    RelationalJoin,
-    SummaryAgg,
-    SummaryJoin,
-    SummarySubtract,
-    SummaryDelete,
-    SummaryEstimate,
-    SummaryMerge,
-}
+pub const POST_ASAP_DAG_WIRE_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum EdgeRole {
@@ -109,29 +94,11 @@ pub enum ExecutableOperatorPayload {
     SummaryMerge,
 }
 
-impl ExecutableOperatorPayload {
-    pub fn operator(&self) -> ExecutableOperator {
-        match self {
-            Self::Fallback { .. } => ExecutableOperator::Fallback,
-            Self::Binary { .. } => ExecutableOperator::Binary,
-            Self::CandidateTopK { .. } => ExecutableOperator::CandidateTopK,
-            Self::Value { .. } => ExecutableOperator::Value,
-            Self::RelationalJoin { .. } => ExecutableOperator::RelationalJoin,
-            Self::SummaryAgg { .. } => ExecutableOperator::SummaryAgg,
-            Self::SummaryJoin { .. } => ExecutableOperator::SummaryJoin,
-            Self::SummarySubtract => ExecutableOperator::SummarySubtract,
-            Self::SummaryDelete { .. } => ExecutableOperator::SummaryDelete,
-            Self::SummaryEstimate { .. } => ExecutableOperator::SummaryEstimate,
-            Self::SummaryMerge => ExecutableOperator::SummaryMerge,
-        }
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ExecutableDagNode {
     pub id: PostAsapNodeId,
-    pub operator: ExecutableOperator,
+    /// The payload variant is the sole operator identity (`payload.kind` in JSON).
     pub payload: ExecutableOperatorPayload,
     pub output_state: ExecutionDataState,
     pub output_schema: SummarySchema,
@@ -181,12 +148,6 @@ pub enum ExecutableDagValidationError {
     MissingRoot(PostAsapNodeId),
     #[error("edge endpoint {0:?} does not name a node")]
     MissingEdgeEndpoint(PostAsapNodeId),
-    #[error("node {node:?} declares {declared:?} but its payload is {actual:?}")]
-    OperatorPayloadMismatch {
-        node: PostAsapNodeId,
-        declared: ExecutableOperator,
-        actual: ExecutableOperator,
-    },
     #[error("edge {producer:?}->{consumer:?} schema differs from producer output")]
     EdgeSchemaMismatch {
         producer: PostAsapNodeId,
@@ -234,14 +195,6 @@ impl ExecutableDag {
         for node in &self.nodes {
             if nodes.insert(node.id, node).is_some() {
                 return Err(ExecutableDagValidationError::DuplicateNodeId(node.id));
-            }
-            let actual = node.payload.operator();
-            if node.operator != actual {
-                return Err(ExecutableDagValidationError::OperatorPayloadMismatch {
-                    node: node.id,
-                    declared: node.operator,
-                    actual,
-                });
             }
             if let ExecutableOperatorPayload::SummaryAgg {
                 family, grouping, ..
@@ -503,10 +456,8 @@ pub fn compile_executable_dag_with_node_ids(
             }
             SummaryExpr::SummaryMerge { .. } => ExecutableOperatorPayload::SummaryMerge,
         };
-        let operator = payload.operator();
         nodes.push(ExecutableDagNode {
             id,
-            operator,
             payload,
             output_state: state,
             output_schema: node.schema.clone(),
@@ -711,11 +662,17 @@ mod tests {
         document.validate().unwrap();
         let mut invalid = serde_json::to_value(&document).unwrap();
         invalid["dag"]["nodes"][0]["operator"] = serde_json::json!("Binary");
-        let invalid: PostAsapDagDocument = serde_json::from_value(invalid).unwrap();
-        assert!(matches!(
-            invalid.validate(),
-            Err(ExecutableDagValidationError::OperatorPayloadMismatch { .. })
-        ));
+        assert!(serde_json::from_value::<PostAsapDagDocument>(invalid).is_err());
+        assert!(document.dag.nodes.iter().all(|node| {
+            let wire = serde_json::to_value(node).unwrap();
+            wire.get("operator").is_none() && wire["payload"]["kind"].is_string()
+        }));
+        let mut old_version = document.clone();
+        old_version.schema_version = 1;
+        assert_eq!(
+            old_version.validate(),
+            Err(ExecutableDagValidationError::UnsupportedVersion(1))
+        );
         let mut unknown = serde_json::to_value(&document).unwrap();
         unknown["unexpected"] = serde_json::json!(true);
         assert!(serde_json::from_value::<PostAsapDagDocument>(unknown).is_err());

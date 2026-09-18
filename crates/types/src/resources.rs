@@ -12,7 +12,7 @@ pub mod cpu;
 pub mod measurement;
 pub mod physical;
 pub mod storage;
-pub use boundary::{BoundaryKind, BoundaryResources, MaterializationMedium};
+pub use boundary::{BoundaryKind, BoundaryResources};
 pub use cache::{CacheCapacityEvidence, CacheEvidence, CacheProfile};
 pub use storage::StorageResources;
 

@@ -150,16 +150,11 @@ fn mapping_resource_reexports_are_wire_compatible_shared_types() {
         serde_json::to_value(legacy).unwrap(),
         serde_json::json!({"network_bytes": 480, "materialization_bytes": 40})
     );
-    let shared_kind = asap_types::resources::BoundaryKind::Materialization {
-        medium: asap_types::resources::MaterializationMedium::Disk,
-    };
+    let shared_kind = asap_types::resources::BoundaryKind::Materialization;
     let mut boundary = transfer("persist", None);
     boundary.kind = shared_kind;
     let json = serde_json::to_value(&boundary).unwrap();
-    assert_eq!(
-        json["kind"],
-        serde_json::json!({"kind": "materialization", "medium": "disk"})
-    );
+    assert_eq!(json["kind"], serde_json::json!({"kind": "materialization"}));
     assert_eq!(
         serde_json::from_value::<PhysicalBoundary>(json).unwrap(),
         boundary
@@ -323,9 +318,7 @@ fn materialization_once_and_transfers_per_consumer_have_distinct_multiplicity() 
     dag.nodes[0].retained_bytes = 80;
     let mut profile = profile(&dag);
     let mut materialize = transfer("persist", None);
-    materialize.kind = BoundaryKind::Materialization {
-        medium: MaterializationMedium::Disk,
-    };
+    materialize.kind = BoundaryKind::Materialization;
     materialize.copies = 1;
     profile.plans[0].nodes.get_mut("scan").unwrap().boundaries = vec![
         materialize,
