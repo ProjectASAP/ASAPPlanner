@@ -14,13 +14,12 @@ Post-ASAP alternatives for the workload.
 | `PlanningWorkload.query_workload` | Query language and one-time/repeating query workloads | Yes |
 | `PlanningWorkload.data_workload` | Data arrival and optional evidence about ingestion, cardinality, and distribution | Conditional: required for PromQL; otherwise optional |
 
-Frontend lowering converts the workload entries into canonical Pre-ASAP
-`QueryExpr` roots. The planning core associates each root with its caller-owned
-query ID and accuracy target. Some frontends take additional explicit
-dependencies that are not fields of `PlanningWorkload`: PromQL takes the
-planning timestamp and optionally a histogram catalog; SQL takes a schema and
-function catalog; MetricsQL takes no additional catalog. Planning models are
-separate inputs to candidate search, not frontend dependencies.
+As part of the planning workflow, frontend lowering converts the workload
+entries into canonical Pre-ASAP `QueryExpr` roots. Those roots and the
+candidate-search API that consumes them are internal stages, not additional
+end-to-end user inputs. Some frontends require explicit dependencies alongside
+the workload; these are listed under
+[Frontend-specific dependencies](#frontend-specific-dependencies).
 
 ### Output at a glance
 
@@ -38,18 +37,13 @@ produce a deployed executable plan; downstream systems bind physical operators,
 choose placement and storage, deploy state, and execute queries.
 
 ```text
-PlanningWorkload + frontend-specific dependencies
-                 |
-                 v
-       canonical QueryExpr roots
-                 +
-   models + evidence + capabilities
-                 |
-                 v
-            ASAPPlanner
-                 |
-                 v
- PlanSpace: legal Post-ASAP alternatives
+PlanningWorkload + required workflow context
+                     |
+                     v
+                ASAPPlanner
+                     |
+                     v
+     PlanSpace: candidate Post-ASAP DAGs
 ```
 
 If required accuracy, semantic, capability, or cost evidence is unavailable, Planner does not assume it. Unsupported optimizations fail closed, while `KeepPreAsap` preserves exact computation where supported.
@@ -212,38 +206,6 @@ inside it:
 
 They are explicit frontend function arguments, not one generic
 `FrontendContext` type.
-
-### Candidate-search API inputs
-
-After frontend lowering, the configurable whole-workload search API receives:
-
-```rust
-search_workload_with_targets(
-    roots: Vec<(Id, Rc<QueryExpr>, Option<AccuracyTarget>)>,
-    strategies: &[Box<dyn ReplacementStrategy>],
-    accuracy_model: &dyn AccuracyModel,
-)
-```
-
-`Id` is not a field of `PlanningWorkload`, and there is no Planner-defined
-`query_id` type. Frontend lowering returns `QueryExpr` roots in normalized
-workload-entry order. The integration layer pairs each root with an opaque `Id`
-before search—for example, the workload entry index or an application query
-identifier. Planner preserves that value so the caller can associate output
-roots with its own queries; it does not affect candidate semantics or ranking.
-
-| API input | Source | Planning role |
-|---|---|---|
-| `Id` | Added by the integration layer after lowering | Opaque result correlation only |
-| `Rc<QueryExpr>` | Frontend output | Canonical exact query semantics |
-| `Option<AccuracyTarget>` | The corresponding workload entry's `requirements.accuracy` | Enforces an end-to-end root guarantee when present |
-| `strategies` | Normally a standard strategy factory | Defines which candidate transformations search may explore |
-| `accuracy_model` | Normally `DefaultAccuracyModel` | Composes guarantees and checks them against targets |
-
-`AccuracyEvidenceProvider` is supplied when constructing evidence-aware
-strategies; it is not another field in the root tuple. `CostModel` is used by
-strategy construction and by later ranking or selection helpers; it is not a
-direct argument of `search_workload_with_targets`.
 
 ### Additional inputs for lifecycle planning
 
