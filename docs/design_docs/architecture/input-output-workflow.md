@@ -37,13 +37,13 @@ produce a deployed executable plan; downstream systems bind physical operators,
 choose placement and storage, deploy state, and execute queries.
 
 ```text
-PlanningWorkload + required workflow context
-                     |
-                     v
-                ASAPPlanner
-                     |
-                     v
-     PlanSpace: candidate Post-ASAP DAGs
+PlanningWorkload + frontend-specific dependencies
+                        |
+                        v
+                   ASAPPlanner
+                        |
+                        v
+        PlanSpace: candidate Post-ASAP DAGs
 ```
 
 If required accuracy, semantic, capability, or cost evidence is unavailable, Planner does not assume it. Unsupported optimizations fail closed, while `KeepPreAsap` preserves exact computation where supported.
@@ -207,21 +207,6 @@ inside it:
 They are explicit frontend function arguments, not one generic
 `FrontendContext` type.
 
-### Additional inputs for lifecycle planning
-
-Lifecycle-aware planning compares maintaining a summary against recomputing the raw query.
-
-It additionally requires:
-
-* query workload bindings;
-* planning time and horizon;
-* query recurrence;
-* data arrival/update rate;
-* deployment lifecycle capabilities; and
-* comparable cost information for summary and raw execution.
-
-Missing required information remains **unknown** rather than being treated as zero.
-
 ---
 
 ## Evidence
@@ -313,6 +298,14 @@ The resulting DAG records logical information such as summary operators, paramet
 It is still **not an executable deployment plan**. Physical operator binding, placement, storage, and execution remain downstream responsibilities.
 
 ### Lifecycle-aware helper
+
+Lifecycle-aware planning is a helper over the candidate space that compares
+maintaining a summary against recomputing the raw query. Calling it requires
+query-workload bindings, planning time and horizon, recurrence, data arrival
+and update rate, deployment lifecycle capabilities, and comparable summary and
+raw-execution cost information. These are helper parameters, not fields added
+to the canonical `PlanningWorkload` input. Missing required information remains
+unknown rather than being treated as zero.
 
 `SummaryMaintenanceLifecyclePlan` additionally records:
 
