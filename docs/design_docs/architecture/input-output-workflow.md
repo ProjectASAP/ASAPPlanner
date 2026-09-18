@@ -1,349 +1,266 @@
-# ASAPPlanner input, output, and workflow
+# ASAPPlanner input, output, and workflows
 
-## Purpose
+## Overview
 
-This document defines the public mental model for embedding ASAPPlanner. It
-answers three questions:
+ASAPPlanner is a **logical planning library**. It takes canonical queries and their requirements, explores legal exact and approximate implementations, and returns a logical plan space.
 
-1. What must a caller provide?
-2. What does Planner return?
-3. Which workflow should a caller use?
-
-ASAPPlanner is a **logical planning library**. It accepts canonical query roots
-and their requirements, explores legal ways to answer them with exact or
-approximate summaries, and returns the resulting candidate space. It does not
-deploy or execute a plan.
-
-The central contract is:
+It does **not** deploy or execute plans.
 
 ```text
-canonical query roots + requirements + optional planning context
-                              |
-                              v
-                        ASAPPlanner
-                              |
-                              v
-             PlanSpace: legal Post-ASAP alternatives
+canonical queries + requirements + planning context
+                       |
+                       v
+                  ASAPPlanner
+                       |
+                       v
+              PlanSpace
+        (legal Post-ASAP alternatives)
 ```
 
-Candidate discovery, local replacement strategies, memo groups, accuracy
-allocation, and ranking are internal stages of this contract. They are public
-Rust extension points, but an application does not need to call them one by one.
+A typical integration:
 
-## The boundary in one example
+1. Lower source queries into canonical Pre-ASAP `QueryExpr` roots.
+2. Attach query IDs and accuracy requirements.
+3. Run Planner over the workload.
+4. Inspect the resulting alternatives or select a Post-ASAP DAG.
+5. Bind the selected logical DAG to physical operators downstream.
 
-For a recurring PromQL quantile query, the caller:
+If required accuracy, semantic, capability, or cost evidence is unavailable, Planner does not assume it. Unsupported optimizations fail closed, while `KeepPreAsap` preserves exact computation where supported.
 
-1. lowers the source query to a canonical Pre-ASAP `QueryExpr`;
-2. associates that root with an application query ID and accuracy requirement;
-3. asks Planner to search the workload; and
-4. receives a `PlanSpace` containing the exact alternative and every proven
-   legal summary alternative.
+---
 
-A downstream system may inspect all alternatives or ask Planner's selection
-helpers to choose and materialize a Post-ASAP DAG. The downstream system still
-binds that logical DAG to executable operators, storage, and placement.
+## Inputs
 
-If a proof or cost is missing, Planner does not invent it. The affected
-optimization is absent, rejected, or ranked as unavailable; an exact
-`KeepPreAsap` alternative preserves the original computation where supported.
+### Source-language inputs
 
-## Input contract
+A frontend converts source-language queries into Planner's canonical representation.
 
-There are two input layers. A frontend translates source-language input into
-the canonical input accepted by the planning core.
+| Input                           |               Required | Purpose                                                  |
+| ------------------------------- | ---------------------: | -------------------------------------------------------- |
+| Query text                      |                    Yes | Defines the query to plan.                               |
+| Query language                  |                    Yes | Selects the appropriate frontend.                        |
+| Schema/function catalog         |     Frontend-dependent | Resolves names and types.                                |
+| Accuracy requirement            |                    Yes | Use `Exact` when approximation is not allowed.           |
+| Query recurrence/time selection | For lifecycle planning | Describes how often and over what period the query runs. |
+| Data ingestion interval         |    For PromQL lowering | Defines the selection horizon for bare selectors.        |
+| Other workload facts            |               Optional | Enable optimizations that depend on them.                |
 
-### Source-language input
+Frontend lowering produces one Pre-ASAP `QueryExpr` root for each workload query.
 
-| Input | Required | Meaning if omitted or unknown |
-|---|---:|---|
-| Query text | Yes | There is no query to plan. |
-| Query language | Yes | The caller must select the matching frontend. |
-| Schema/function catalog | Frontend-dependent | SQL name and type resolution fails without the required catalog. |
-| Per-query accuracy requirement | Yes | Use `Exact` explicitly when approximation is not allowed. |
-| Query recurrence and time selection | Required for lifecycle-aware comparison | Candidate discovery can proceed, but Planner cannot compare repeated maintenance with raw recomputation over time. |
-| Data ingestion interval | Required by PromQL workload lowering | Bare selectors have no defensible selection horizon without it. |
-| Other data-workload facts | Optional | Optimizations requiring an unknown fact remain unavailable; unknown never means zero. |
+### Canonical Planner inputs
 
-The normalized workload types are `PlanningWorkload`, `QueryWorkload`, and
-optional `DataWorkload`. Frontend output is one Pre-ASAP `QueryExpr` root per
-workload entry. The caller must retain the association between each root and
-its workload entry.
-
-### Canonical planning input
-
-The planning core consumes:
+The planning core operates on:
 
 ```text
 Vec<(query_id, Rc<QueryExpr>, Option<AccuracyTarget>)>
 ```
 
-The fields have these roles:
+The main inputs are:
 
-| Field | Required | Role |
-|---|---:|---|
-| `query_id` | Yes | Caller-owned identity used to associate results with queries. |
-| `QueryExpr` | Yes | Canonical exact query semantics; this is the Pre-ASAP root. |
-| Root `AccuracyTarget` | Recommended; required for an enforced end-to-end target | Filters out summary candidates whose final guarantee is missing or insufficient. `None` means that this call adds no root-level requirement. |
-| Strategy set | Yes in the configurable API | Use `default_strategies_with_evidence` for the standard set with deployment models. Custom sets are an extension mechanism, not separate workflow stages. |
-| `AccuracyModel` | Yes in the configurable API | Defines how guarantees compose and whether they satisfy a target. Most callers use `DefaultAccuracyModel`. |
-| `CostModel` | Required for ranking or selection | Reports candidate availability and preference. The built-in default is useful for inspection, not a claim about deployment cost. |
-| `AccuracyEvidenceProvider` | Optional in general; required by candidates whose proof needs it | Supplies typed facts such as certified quantile input domains or Top-K separation. Without a required proof, that candidate fails closed. |
+* **`query_id`** — caller-owned query identity.
+* **`QueryExpr`** — canonical exact query semantics.
+* **`AccuracyTarget`** — required end-to-end accuracy, if enforced.
+* **Strategies** — candidate transformations Planner may explore.
+* **`AccuracyModel`** — determines how guarantees compose and satisfy targets.
+* **`CostModel`** — evaluates candidate cost and availability.
+* **`AccuracyEvidenceProvider`** — provides facts required to prove candidate guarantees.
 
-### Inputs used for lifecycle-aware selection
+Most integrations should use the standard strategy set and `DefaultAccuracyModel`.
 
-Lifecycle-aware selection answers a narrower question: is it cheaper to build,
-maintain, and read a summary, or to execute the raw query for the declared
-workload?
+### Additional inputs for lifecycle planning
 
-| Input | Required for lifecycle-aware selection | Role |
-|---|---:|---|
-| Query workload binding | Yes | Identifies which workload entries consume each root. |
-| Planning time (`now_ms`) | Yes | Evaluates schedules and evidence freshness. |
-| Planning horizon | Required for finite recurring totals | Bounds the number of reads and updates. Missing horizon leaves some totals unknown. |
-| Data arrival and update rate | Required for continuously maintained cost | Prices maintenance work. Unknown values cannot be treated as no updates. |
-| Lifecycle capabilities | Yes | Declares which lifecycle alternatives the deployment can implement. |
-| Complete comparable cost inputs | Required to choose on cost | Both the summary path and raw baseline must be costed in the same scope. |
+Lifecycle-aware planning compares maintaining a summary against recomputing the raw query.
 
-Lifecycle information is therefore not an optional accuracy check. It is
-optional only when the caller wants candidate discovery or a structural
-selection rather than a workload-costed deployment decision.
+It additionally requires:
 
-## What “evidence” means
+* query workload bindings;
+* planning time and horizon;
+* query recurrence;
+* data arrival/update rate;
+* deployment lifecycle capabilities; and
+* comparable cost information for summary and raw execution.
 
-**Evidence is a scoped fact used to justify candidate legality, accuracy, or
-cost.** It may be declared by a contract, derived analytically, measured in an
-offline benchmark, or observed online. Evidence must identify the workload and
-implementation to which it applies and, when time-sensitive, carry freshness
-information.
+Missing required information remains **unknown** rather than being treated as zero.
 
-| Kind | Examples | Consequence when required but missing |
-|---|---|---|
-| Semantic or domain evidence | Finite input range, nonempty population, denominator excludes zero | The transformation cannot prove its preconditions. |
-| Accuracy evidence | Quantile domain, Top-K confidence margins, composition certificate | The approximate candidate has no valid end-to-end guarantee. |
-| Cost evidence | CPU time, operation count, retained/peak bytes, scan or storage I/O | Planner cannot make the corresponding cost comparison. |
-| Workload evidence | Cardinality, distribution, ingestion rate, recurrence | Dependent sizing, propagation, or lifecycle costs remain unknown. |
-| Capability evidence | Supported summary, deletion, merge, or window framework | A physically unsupported alternative is unavailable. |
+---
 
-One fact may support more than one calculation. Cardinality, for example, may
-affect both an accuracy bound and a resource estimate. The consumer determines
-its role; the word “evidence” does not mean “cost measurement.” Historical
-observations also do not prove a permanent input-domain invariant unless the
-named contract enforces that invariant for the plan's lifetime.
+## Evidence
 
-## Vocabulary across Planner and runtime
+**Evidence is a scoped fact used to establish legality, accuracy, cost, or feasibility.**
 
-The input and output workflow uses different terms for different decisions.
-They must not be collapsed into one generic “window,” “implementation,” or
-“boundary” concept.
+Examples include:
 
-| Term | Owner | Meaning |
-|---|---|---|
-| Query window | Query semantics | The interval requested by the query, such as the five minutes in `data[5m]`. |
-| Evaluation cadence or slide | Workload semantics | When the query is evaluated; it does not say how state is stored. |
-| Summary window framework | ASAPPlanner | The abstract algorithm for organizing maintained summary state: tumbling, sliding, exponential histogram, or a registered extension. |
-| Physical window layout | Downstream runtime | The concrete storage organization, such as full-window states, fixed panes, or hierarchical pane rollups. |
-| Pane layout | Planner-runtime interface | Pane width and phase/origin needed to prove exact temporal coverage. A pane is a disjoint stored interval, not the query window itself. |
-| Window-edge coverage | Planner-runtime interface | How partial intervals at a query window's edges are answered, for example by alignment or an exact residual. |
-| Physical handoff | Physical costing/runtime | A network transfer or intermediate materialization. It is unrelated to a query-window edge. |
-| Comparison scope | Costing | The common source, predicates, time selection, recurrence, and horizon over which raw and summary costs are comparable. |
+| Evidence        | Examples                                                         |
+| --------------- | ---------------------------------------------------------------- |
+| Semantic/domain | Input range, nonempty population, nonzero denominator            |
+| Accuracy        | Quantile domain, Top-K confidence, composition certificate       |
+| Cost            | CPU time, operation count, memory, scan/storage I/O              |
+| Workload        | Cardinality, distribution, ingestion rate, recurrence            |
+| Capability      | Supported summaries, merge/delete support, window implementation |
 
-These concepts may map to enums in Planner or a downstream repository, but an
-enum is justified only when its variants express a live decision at that
-owner's layer. For example, Planner's `SummaryWindowFramework` describes an
-abstract choice it can compare; a backend physical-layout enum describes how
-that selected choice is stored. A second enum that repeats the same decision
-without adding an ownership or translation boundary should be removed or kept
-internal.
+Evidence must apply to the relevant workload and implementation. Time-sensitive evidence should also carry freshness information.
 
-Use **realization** for a candidate physical form and reserve
-**implementation** for executable code. Use **schema resolution** for resolving
-names and types, **window edge** for temporal coverage, **physical handoff** for
-transfer or materialization, and **comparison scope** for cost comparability.
-These names keep the workflow understandable while compatibility aliases remain
-in code.
+When required evidence is missing, the dependent optimization is unavailable.
 
-## Output contract
+---
 
-### Canonical output: `PlanSpace<Id>`
+## Outputs
 
-`PlanSpace` is the complete logical output of search. It contains:
+### `PlanSpace<Id>`
 
-- the workload roots after canonical common-subexpression sharing;
-- one `MemoGroup` for every discovered target sub-DAG;
-- every legal replacement candidate retained for that target;
-- rejected candidates and their reasons; and
-- prepared cross-group composition information used by selection.
+`PlanSpace` is Planner's canonical output. It contains:
 
-The output is a **space of DAG choices**, not one executable DAG. A memo group
-is a decision point for one canonical subexpression, not a standalone workload
-plan. Choosing the first candidate independently in every group is not a valid
-substitute for whole-plan selection because sharing and composition decisions
-can change downstream uses.
+* canonical workload roots;
+* memo groups for discovered target sub-DAGs;
+* legal replacement candidates;
+* rejected candidates and reasons; and
+* information needed for cross-group selection.
 
-`PlanSpace::cost_sorted` is a read-only ranked view:
+A `PlanSpace` represents a **space of logical DAG choices**, not a single executable plan.
+
+`PlanSpace::cost_sorted` provides a ranked view for inspection:
 
 ```text
 Vec<RankedGroup {
     target,
     consumer_count,
     candidates,
-    costs, // index-aligned with candidates
+    costs,
 }>
 ```
 
-It is intended for inspection, explanation, or a downstream physical planner
-that must retain alternatives. A listed candidate is logically available; its
-presence alone does not prove that the deployment can execute it.
+This view is useful for debugging, explanation, or downstream optimization. Candidate presence does not imply physical deployability.
 
-### Selected output: `GlobalSelection` and materialized DAGs
+### Selected Post-ASAP DAG
 
-`PlanSpace::global_selection*` coordinates choices across memo groups.
-`GlobalSelection::materialize(root)` returns the chosen `Rc<SummaryNode>`
-Post-ASAP DAG for that root. A workload therefore produces one materialized
-root per input query ID, with shared `Rc` nodes where the selection shares
-state.
-
-The materialized DAG records logical semantics, including summary family and
-parameters, operations, schemas, windows, and result guarantees. It is not yet
-an executable deployment plan. A downstream compiler must bind it to supported
-physical operators and may preserve `KeepPreAsap` regions for exact execution.
-
-### Lifecycle-aware selected output
-
-`SummaryMaintenanceLifecyclePlan` adds the information needed to explain a
-workload-aware maintenance decision:
-
-- the materialized root;
-- selected or rejected lifecycle alternatives for each summary state;
-- horizon, evaluation rate, update rate, and expected reads;
-- selected window implementation identity and accuracy guarantee, when known;
-- summary and raw-recompute costs, when comparable; and
-- whether raw recomputation was selected.
-
-This remains a planner contract, not runtime configuration. The downstream
-system compiles, deploys, and executes it.
-
-## Supported workflows
-
-### Workflow 1: inspect all logical alternatives
-
-Use this workflow for tooling, explanations, or a downstream optimizer that
-performs its own physical comparison.
-
-```text
-PlanningWorkload
-  -> frontend lowering
-  -> search_workload_with_targets
-  -> PlanSpace
-  -> cost_sorted (optional view)
-```
-
-Promise: all alternatives retained by the configured semantic, accuracy, and
-evidence checks are visible.
-
-Does not promise: one committed plan, complete physical feasibility, calibrated
-deployment cost, or a lifecycle decision.
-
-### Workflow 2: select a logical DAG
-
-Use this workflow when the caller wants Planner to coordinate sharing and
-composition choices but does not need a maintenance-versus-recompute decision.
+`PlanSpace::global_selection*` coordinates decisions across memo groups.
 
 ```text
 PlanSpace
-  -> global_selection
-  -> materialize each workload root
-  -> selected Post-ASAP DAGs
+    |
+    v
+global_selection
+    |
+    v
+materialize(root)
+    |
+    v
+Post-ASAP DAG
 ```
 
-Promise: choices are structurally compatible across the logical workload.
+The resulting DAG records logical information such as summary operators, parameters, schemas, windows, and accuracy guarantees.
 
-Does not promise: that the selected summary has a deployable physical
-implementation or that maintaining it is cheaper than raw execution.
+It is still **not an executable deployment plan**. Physical operator binding, placement, storage, and execution remain downstream responsibilities.
 
-### Workflow 3: make a lifecycle-aware planning decision
+### Lifecycle-aware output
 
-This is the recommended workflow for a downstream system deciding whether to
-deploy maintained summary state.
+`SummaryMaintenanceLifecyclePlan` additionally records:
+
+* the materialized root;
+* lifecycle choices for summary state;
+* planning horizon and expected reads/updates;
+* selected window implementation and guarantees;
+* comparable summary and raw-recomputation costs; and
+* whether raw recomputation was selected.
+
+---
+
+## Workflows
+
+### 1. Inspect logical alternatives
+
+Use when the caller wants to inspect Planner's candidate space or perform physical optimization downstream.
+
+```text
+PlanningWorkload
+    -> frontend lowering
+    -> search_workload_with_targets
+    -> PlanSpace
+    -> cost_sorted (optional)
+```
+
+This exposes legal logical alternatives but does not choose a deployment.
+
+### 2. Select a logical DAG
+
+Use when Planner should coordinate sharing and composition across the workload.
+
+```text
+PlanSpace
+    -> global_selection
+    -> materialize
+    -> selected Post-ASAP DAGs
+```
+
+This produces structurally compatible logical plans. It does not determine whether maintaining summaries is cheaper than raw execution.
+
+### 3. Make a lifecycle-aware decision
+
+Use when deciding whether maintained summary state should actually be deployed.
 
 ```text
 PlanningWorkload + Pre-ASAP roots
-  -> search_workload_with_targets
-  -> global_selection_with_summary_maintenance_lifecycles
-  -> materialize_with_summary_maintenance_lifecycles
-  -> lifecycle-aware Post-ASAP plans
-  -> downstream physical binding and deployment
+    -> search_workload_with_targets
+    -> global_selection_with_summary_maintenance_lifecycles
+    -> materialize_with_summary_maintenance_lifecycles
+    -> lifecycle-aware Post-ASAP plans
+    -> downstream physical deployment
 ```
 
-Promise: the selection uses declared recurrence, data arrival, horizon,
-capabilities, and comparable raw/summary costs. Missing required facts fail
-closed instead of becoming optimistic zeroes.
+This workflow considers recurrence, data arrival, planning horizon, capabilities, and comparable summary/raw costs.
 
-Does not promise: placement, cluster-capacity feasibility, runtime readiness,
-or execution. Those remain downstream responsibilities.
+It is the recommended workflow for deployment decisions.
+
+---
 
 ## Replanning
 
-Replanning uses the same contract as initial planning. There is no separate
-mutable Planner session whose hidden state changes the answer.
+Replanning uses the same interface as initial planning.
 
-The caller should invoke the workflow again when any selection-relevant input
-changes, including:
+Run Planner again whenever a selection-relevant input changes, such as:
 
-- query text, schema, or accuracy requirement;
-- recurrence, horizon, data arrival, or distribution;
-- evidence expiration or replacement;
-- supported physical capabilities;
-- cost calibration; or
-- available materialized state.
+* query semantics or accuracy requirements;
+* recurrence, horizon, data arrival, or distribution;
+* evidence;
+* supported capabilities;
+* cost calibration; or
+* available materialized state.
 
 ```text
-new workload snapshot + new evidence/capabilities
+updated workload + evidence + capabilities
                     |
                     v
-             run planning again
+              run Planner
                     |
                     v
-       new PlanSpace / selected contracts
+          new PlanSpace / selection
                     |
                     v
- downstream compares, transitions, and activates
+       downstream deployment transition
 ```
 
-Planner produces the new logical decision. The downstream system owns diffing
-old and new deployments, migration, activation ordering, and rollback. Evidence
-from one planning snapshot must not be silently reused after its validity or
-comparison scope changes.
+Planner produces a new logical decision. The downstream system owns deployment diffing, migration, activation, and rollback.
 
-## API guidance
+---
+
+## Integration guidance
 
 For normal integrations:
 
-- lower the complete workload through one frontend;
-- call a whole-workload `search_workload*` function once;
-- use the standard strategy factory rather than invoking individual strategies;
-- preserve explicit accuracy targets and required evidence;
-- use lifecycle-aware selection before claiming that a maintained summary is
-  preferable to exact recomputation; and
-- treat physical compilation and deployment as a downstream step.
+1. Lower the complete workload through a frontend.
+2. Call a whole-workload `search_workload*` API.
+3. Use the standard strategy set unless extending Planner.
+4. Preserve explicit accuracy requirements and required evidence.
+5. Use lifecycle-aware selection before making deployment cost decisions.
+6. Treat physical compilation and execution as downstream responsibilities.
 
-The lower-level public traits and functions support research and deployment
-extensions. They are not additional mandatory stages and should not be
-presented as independent end-user workflows.
-
-Public Rust visibility does not by itself make a type part of the recommended
-integration surface. New public enums, variants, and extension points require
-a concrete workflow that consumes them. API review should remove or internalize
-duplicate concepts, unused variants, and compatibility types after their
-consumers have migrated. This document names the intended external concepts;
-the library reference records the current Rust entry points.
+Lower-level Planner traits and APIs are extension points for research and deployment-specific customization; they are not separate required workflow stages.
 
 ## Related documents
 
-- [Planner pipeline](../concepts/planner-pipeline.md)
-- [Pre-ASAP IR](../concepts/pre-asap-ir.md)
-- [Post-ASAP IR](../concepts/post-asap-ir.md)
-- [Planner/downstream boundary](planner-downstream-boundary.md)
-- [Plan search internals](asap-aware-plan-search.md)
-- [Public library reference](../../develop_docs/library-api.md)
+* [Planner pipeline](../concepts/planner-pipeline.md)
+* [Pre-ASAP IR](../concepts/pre-asap-ir.md)
+* [Post-ASAP IR](../concepts/post-asap-ir.md)
+* [Planner/downstream boundary](planner-downstream-boundary.md)
+* [Plan search internals](asap-aware-plan-search.md)
+* [Public library reference](../../develop_docs/library-api.md)
