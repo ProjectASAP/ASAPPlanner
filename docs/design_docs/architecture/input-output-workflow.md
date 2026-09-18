@@ -13,6 +13,7 @@ Post-ASAP alternatives for the workload.
 |---|---|---:|
 | `PlanningWorkload.query_workload` | Query language and one-time/repeating query workloads | Yes |
 | `PlanningWorkload.data_workload` | Data arrival and optional evidence about ingestion, cardinality, and distribution | Conditional: required for PromQL; otherwise optional |
+| Planning evidence and capabilities | Domain, accuracy, cost, and deployment facts supplied through the applicable provider/model interface | Conditional: required only by optimizations that depend on those facts |
 
 As part of the planning workflow, frontend lowering converts the workload
 entries into canonical Pre-ASAP `QueryExpr` roots. Those roots and the
@@ -207,25 +208,27 @@ inside it:
 They are explicit frontend function arguments, not one generic
 `FrontendContext` type.
 
----
-
-## Evidence
+### Planning evidence inputs
 
 **Evidence is a scoped fact used to establish legality, accuracy, cost, or feasibility.**
 
-Examples include:
+Evidence is input to planning. The current library does not collect every kind
+in one `PlanningWorkload` field; each fact enters through the interface that
+consumes it:
 
-| Evidence        | Examples                                                         |
-| --------------- | ---------------------------------------------------------------- |
-| Semantic/domain | Input range, nonempty population, nonzero denominator            |
-| Accuracy        | Quantile domain, Top-K confidence, composition certificate       |
-| Cost            | CPU time, operation count, memory, scan/storage I/O              |
-| Workload        | Cardinality, distribution, ingestion rate, recurrence            |
-| Capability      | Supported summaries, merge/delete support, window implementation |
+| Evidence | Examples | Supplied through |
+|---|---|---|
+| Semantic/domain | Input range, nonempty population, nonzero denominator | Typed accuracy/domain evidence provider |
+| Accuracy | Quantile domain, Top-K confidence, composition certificate | Accuracy evidence provider or registered accuracy model |
+| Cost | CPU time, operation count, memory, scan/storage I/O | Cost model or physical-evidence provider |
+| Workload | Cardinality, distribution, ingestion rate, recurrence | `PlanningWorkload` query/data workload fields |
+| Capability | Supported summaries, merge/delete support, window realization | Deployment capability or lifecycle provider |
 
 Evidence must apply to the relevant workload and implementation. Time-sensitive evidence should also carry freshness information.
 
 When required evidence is missing, the dependent optimization is unavailable.
+Planner output may record the resulting guarantee, evidence provenance, or a
+rejection reason, but evidence itself remains an input.
 
 ---
 
