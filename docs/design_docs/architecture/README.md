@@ -7,7 +7,7 @@ as ASAPQuery-backend bind the candidates to physical alternatives, make the
 deployment-level decision, and run the selected contract.
 
 For the integration contract, start with [ASAPPlanner input, output, and
-workflows](planner-contract.md). It defines required and optional inputs,
+workflow](input-output-workflow.md). It defines required and optional inputs,
 `PlanSpace` and selected-plan outputs, lifecycle requirements, and replanning.
 
 ## Planner component flow

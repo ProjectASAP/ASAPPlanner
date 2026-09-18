@@ -1,4 +1,4 @@
-# ASAPPlanner input, output, and workflows
+# ASAPPlanner input, output, and workflow
 
 ## Purpose
 
@@ -130,6 +130,38 @@ affect both an accuracy bound and a resource estimate. The consumer determines
 its role; the word “evidence” does not mean “cost measurement.” Historical
 observations also do not prove a permanent input-domain invariant unless the
 named contract enforces that invariant for the plan's lifetime.
+
+## Vocabulary across Planner and runtime
+
+The input and output workflow uses different terms for different decisions.
+They must not be collapsed into one generic “window,” “implementation,” or
+“boundary” concept.
+
+| Term | Owner | Meaning |
+|---|---|---|
+| Query window | Query semantics | The interval requested by the query, such as the five minutes in `data[5m]`. |
+| Evaluation cadence or slide | Workload semantics | When the query is evaluated; it does not say how state is stored. |
+| Summary window framework | ASAPPlanner | The abstract algorithm for organizing maintained summary state: tumbling, sliding, exponential histogram, or a registered extension. |
+| Physical window layout | Downstream runtime | The concrete storage organization, such as full-window states, fixed panes, or hierarchical pane rollups. |
+| Pane layout | Planner-runtime interface | Pane width and phase/origin needed to prove exact temporal coverage. A pane is a disjoint stored interval, not the query window itself. |
+| Window-edge coverage | Planner-runtime interface | How partial intervals at a query window's edges are answered, for example by alignment or an exact residual. |
+| Physical handoff | Physical costing/runtime | A network transfer or intermediate materialization. It is unrelated to a query-window edge. |
+| Comparison scope | Costing | The common source, predicates, time selection, recurrence, and horizon over which raw and summary costs are comparable. |
+
+These concepts may map to enums in Planner or a downstream repository, but an
+enum is justified only when its variants express a live decision at that
+owner's layer. For example, Planner's `SummaryWindowFramework` describes an
+abstract choice it can compare; a backend physical-layout enum describes how
+that selected choice is stored. A second enum that repeats the same decision
+without adding an ownership or translation boundary should be removed or kept
+internal.
+
+Use **realization** for a candidate physical form and reserve
+**implementation** for executable code. Use **schema resolution** for resolving
+names and types, **window edge** for temporal coverage, **physical handoff** for
+transfer or materialization, and **comparison scope** for cost comparability.
+These names keep the workflow understandable while compatibility aliases remain
+in code.
 
 ## Output contract
 
@@ -299,6 +331,13 @@ For normal integrations:
 The lower-level public traits and functions support research and deployment
 extensions. They are not additional mandatory stages and should not be
 presented as independent end-user workflows.
+
+Public Rust visibility does not by itself make a type part of the recommended
+integration surface. New public enums, variants, and extension points require
+a concrete workflow that consumes them. API review should remove or internalize
+duplicate concepts, unused variants, and compatibility types after their
+consumers have migrated. This document names the intended external concepts;
+the library reference records the current Rust entry points.
 
 ## Related documents
 

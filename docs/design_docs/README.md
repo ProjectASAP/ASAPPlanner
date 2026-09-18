@@ -7,7 +7,7 @@ decisions, and evolving proposals.
   and Pre-ASAP/Post-ASAP representations.
 - [Architecture](architecture/README.md) describes stable component boundaries
   and system flows.
-- [Planner input, output, and workflows](architecture/planner-contract.md)
+- [Planner input, output, and workflow](architecture/input-output-workflow.md)
   defines the user-facing contract, required and optional inputs, output data
   structures, and initial-planning and replanning workflows.
 - [Decisions](decisions/README.md) records accepted local design choices.
