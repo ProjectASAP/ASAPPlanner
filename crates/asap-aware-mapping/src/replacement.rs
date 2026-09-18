@@ -1263,6 +1263,9 @@ pub(crate) struct Models<'a> {
     pub accuracy: &'a dyn AccuracyModel,
     pub allocator: &'a dyn AccuracyBudgetAllocator,
     pub evidence: &'a dyn AccuracyEvidenceProvider,
+    /// Demo-only escape hatch for exposing a DDSketch quantile-ratio
+    /// candidate without claiming that its end-to-end error is certified.
+    pub allow_uncertified_ddsketch_ratios: bool,
 }
 
 impl<'a> Models<'a> {
@@ -1275,6 +1278,7 @@ impl<'a> Models<'a> {
             accuracy: &DEFAULT_ACCURACY_MODEL,
             allocator: &DEFAULT_ALLOCATOR,
             evidence: &NO_ACCURACY_EVIDENCE,
+            allow_uncertified_ddsketch_ratios: false,
         }
     }
 }
@@ -1338,6 +1342,7 @@ impl<'a> SketchAlgorithmStrategy<'a> {
                 accuracy: accuracy_model,
                 allocator,
                 evidence: &NO_ACCURACY_EVIDENCE,
+                allow_uncertified_ddsketch_ratios: false,
             },
         }
     }
@@ -1356,8 +1361,21 @@ impl<'a> SketchAlgorithmStrategy<'a> {
                 accuracy: accuracy_model,
                 allocator,
                 evidence,
+                allow_uncertified_ddsketch_ratios: false,
             },
         }
+    }
+
+    /// Opts a demo or diagnostic caller into DDSketch quantile-ratio
+    /// candidates when no input-domain evidence is available.
+    ///
+    /// Such a candidate carries no [`ResultGuarantee`]. Production planning
+    /// should use [`Self::with_models_and_evidence`] so the ratio is admitted
+    /// only when its input domains support a certified error bound.
+    pub fn with_uncertified_ddsketch_ratios_for_demo(cost_model: &'a dyn CostModel) -> Self {
+        let mut models = Models::with_default_accuracy(cost_model);
+        models.allow_uncertified_ddsketch_ratios = true;
+        Self { models }
     }
 
     pub(crate) fn from_models(models: Models<'a>) -> Self {
@@ -1390,11 +1408,18 @@ impl<'a> SketchAlgorithmStrategy<'a> {
         }
         if intent_override.is_none() && is_supported_exact_binary(root) {
             if let Ok(Some(node)) = realize_binary(root, self.models, None) {
+                let rationale = if node.guarantee.is_none()
+                    && self.models.allow_uncertified_ddsketch_ratios
+                {
+                    "demo-only DDSketch quantile ratio; no certified end-to-end accuracy guarantee"
+                } else {
+                    "preserve exact PromQL arithmetic over independently realized summary operands"
+                };
                 proposals.candidates.push(ReplacementSubDAG {
                     replacement: Replacement::Summary(node),
                     strategy: "SketchAlgorithmStrategy",
                     provenance: ReplacementProvenance::SummaryImplementation,
-                    rationale: "preserve exact PromQL arithmetic over independently realized summary operands".into(),
+                    rationale: rationale.into(),
                 });
             }
             return proposals;
@@ -1841,6 +1866,8 @@ fn realize_binary(
 
     let direct_ddsketch_ratio = matches!(op, BinaryOpKind::Arithmetic(ArithmeticOpKind::Div))
         && shared_quantile_target(lhs, rhs).is_some();
+    let allow_uncertified_ddsketch_ratio =
+        direct_ddsketch_ratio && models.allow_uncertified_ddsketch_ratios;
     let ratio_target = end_to_end_target
         .cloned()
         .or_else(|| shared_quantile_target(lhs, rhs));
@@ -1851,31 +1878,34 @@ fn realize_binary(
             .as_ref()
             .and_then(ddsketch_ratio_operand_target)
         {
-            let Some(domains) = models
+            let domains = models
                 .evidence
                 .quantile_input_domain(lhs)
                 .zip(models.evidence.quantile_input_domain(rhs))
-                .map(|(lhs, rhs)| [lhs, rhs])
-            else {
+                .map(|(lhs, rhs)| [lhs, rhs]);
+            if domains.is_none() && !allow_uncertified_ddsketch_ratio {
                 return Ok(None);
-            };
+            }
             let (alpha, _) = accuracy_budget(&target);
-            if domains
-                .iter()
-                .any(|domain| !domain.supports_ddsketch(alpha))
-            {
+            if domains.as_ref().is_some_and(|domains| {
+                domains
+                    .iter()
+                    .any(|domain| !domain.supports_ddsketch(alpha))
+            }) {
                 return Ok(None);
             }
             lhs_node = realize_ddsketch_quantile_operand(lhs, models, &target)?;
             rhs_node = realize_ddsketch_quantile_operand(rhs, models, &target)?;
-            for (domain, node) in domains.iter().zip([&lhs_node, &rhs_node]) {
-                if !ddsketch_quantile_alpha(node)
-                    .is_some_and(|alpha| domain.supports_ddsketch(alpha))
-                {
-                    return Ok(None);
+            if let Some(domains) = domains.as_ref() {
+                for (domain, node) in domains.iter().zip([&lhs_node, &rhs_node]) {
+                    if !ddsketch_quantile_alpha(node)
+                        .is_some_and(|alpha| domain.supports_ddsketch(alpha))
+                    {
+                        return Ok(None);
+                    }
                 }
             }
-            ratio_domains = Some(domains);
+            ratio_domains = domains;
         }
     } else if let Some(target) = end_to_end_target {
         let operand_guarantees = [lhs_node.guarantee.as_ref(), rhs_node.guarantee.as_ref()];
@@ -1925,6 +1955,7 @@ fn realize_binary(
     // Only the domain-proven ratio path may consume approximate operands.
     // Runtime finite/nonzero checks alone do not establish quantile error bounds.
     if ratio_domains.is_none()
+        && !allow_uncertified_ddsketch_ratio
         && matches!(op, BinaryOpKind::Arithmetic(ArithmeticOpKind::Div))
         && [&lhs_node, &rhs_node].iter().any(|node| {
             !node
@@ -1947,6 +1978,7 @@ fn realize_binary(
 
     let guarantee = if matches!(op, BinaryOpKind::Arithmetic(ArithmeticOpKind::Div))
         && direct_ddsketch_ratio
+        && ratio_domains.is_some()
         && ddsketch_quantile_alpha(&lhs_node).is_some()
         && ddsketch_quantile_alpha(&rhs_node).is_some()
     {
@@ -1974,7 +2006,7 @@ fn realize_binary(
             .then(|| ResultGuarantee::exact("BinaryOp over exact operands"))
     };
 
-    if direct_ddsketch_ratio && guarantee.is_none() {
+    if direct_ddsketch_ratio && guarantee.is_none() && !allow_uncertified_ddsketch_ratio {
         return Ok(None);
     }
 

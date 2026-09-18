@@ -39,17 +39,19 @@ const ACCURACY: AccuracyTarget = AccuracyTarget::Epsilon(0.01);
 fn bind_all(expr: &QueryExpr) -> Result<Vec<Rc<asap_types::post_asap::SummaryNode>>, String> {
     let root = Rc::new(expr.clone());
     let target = TargetSubDAG::new(&root);
-    let candidates = SketchAlgorithmStrategy::default_cost_model()
-        .replacements(&target)
-        .into_iter()
-        .filter_map(|candidate| match candidate {
-            ReplacementSubDAG {
-                replacement: Replacement::Summary(node),
-                ..
-            } => Some(node),
-            _ => None,
-        })
-        .collect::<Vec<_>>();
+    let candidates = SketchAlgorithmStrategy::with_uncertified_ddsketch_ratios_for_demo(
+        &asap_aware_mapping::cost_model::DefaultCostModel,
+    )
+    .replacements(&target)
+    .into_iter()
+    .filter_map(|candidate| match candidate {
+        ReplacementSubDAG {
+            replacement: Replacement::Summary(node),
+            ..
+        } => Some(node),
+        _ => None,
+    })
+    .collect::<Vec<_>>();
 
     if candidates.is_empty() {
         Ok(vec![keep_pre_asap(&root).map_err(|e| e.to_string())?])
@@ -156,5 +158,45 @@ mod tests {
 
         assert!(expected > 1, "fixture exposes alternative bindings");
         assert_eq!(bind_all(&expr).expect("binding succeeds").len(), expected);
+    }
+
+    #[test]
+    fn bind_all_exposes_an_uncertified_ddsketch_ratio_for_the_demo() {
+        let expr = lower_promql_with_data_ingestion_interval(
+            "quantile_over_time(0.9,data[5m])/quantile_over_time(0.5,data[5m])",
+            ACCURACY.clone(),
+            1_000,
+        )
+        .expect("query lowers to pre-ASAP IR");
+
+        let candidates = bind_all(&expr).expect("binding succeeds");
+        assert_eq!(candidates.len(), 1);
+        assert!(matches!(
+            candidates[0].expr,
+            asap_types::post_asap::SummaryExpr::BinaryOp { .. }
+        ));
+        assert!(
+            candidates[0].guarantee.is_none(),
+            "the demo escape hatch must not claim a certified ratio bound"
+        );
+        asap_types::post_asap::compile_executable_dag(&candidates[0])
+            .expect("the demo candidate remains executable");
+    }
+
+    #[test]
+    fn demo_escape_hatch_does_not_relax_other_approximate_divisions() {
+        let expr = lower_promql_with_data_ingestion_interval(
+            "avg_over_time(data[5m])/quantile_over_time(0.5,data[5m])",
+            ACCURACY.clone(),
+            1_000,
+        )
+        .expect("query lowers to pre-ASAP IR");
+
+        let candidates = bind_all(&expr).expect("binding succeeds");
+        assert_eq!(candidates.len(), 1);
+        assert!(matches!(
+            candidates[0].expr,
+            asap_types::post_asap::SummaryExpr::KeepPreAsap(_)
+        ));
     }
 }

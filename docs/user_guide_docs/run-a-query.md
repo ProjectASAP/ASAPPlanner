@@ -101,10 +101,16 @@ your database schema. Use the
 [library workflow](../develop_docs/library-api.md) to retain workload alternatives
 and provide your own models.
 
+For the v1 demo, this command also opts into DDSketch quantile-ratio candidates
+when no input-domain evidence is available. Those candidates have
+`guarantee: None`: they demonstrate the intended post-ASAP shape but do not
+claim a certified end-to-end accuracy bound. The normal sketch strategy still
+declines such ratios unless the caller supplies sufficient domain evidence.
+
 Each input line is followed by its debug IR or an `ERR:` message. Post-ASAP
 output may contain summary state, readouts or exact `KeepPreAsap` work. An
-approximate target permits approximation; it does not guarantee a legal sketch.
-The tool prints plans, not query results.
+approximate target permits approximation; it does not guarantee a legal or
+certified sketch. The tool prints plans, not query results.
 
 ## More inspection commands
 
