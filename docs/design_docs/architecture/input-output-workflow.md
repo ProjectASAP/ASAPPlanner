@@ -28,8 +28,10 @@ separate inputs to candidate search, not frontend dependencies.
 |---|---|---|
 | `PlanSpace<Id>` | The legal candidate Post-ASAP DAGs for the workload, represented compactly as canonical roots, memoized alternatives, and cross-group composition information | The ASAPPlanner output |
 
-Ranking, selection, materialization, and lifecycle APIs are views or helper
-operations over this output, not additional top-level Planner outputs.
+[Ranking](#ranked-view), [selection and
+materialization](#selection-and-materialization-helper), and
+[lifecycle](#lifecycle-aware-helper) APIs are views or helper operations over
+this output, not additional top-level Planner outputs.
 
 The candidate DAGs are logical planning artifacts. ASAPPlanner does **not**
 produce a deployed executable plan; downstream systems bind physical operators,
