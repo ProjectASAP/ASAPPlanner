@@ -13,7 +13,7 @@ pub mod physical;
 pub mod physical_handoff;
 pub mod storage;
 pub use cache::{CacheCapacityEvidence, CacheEvidence, CacheProfile};
-pub use physical_handoff::{MaterializationMedium, PhysicalHandoffBytes, PhysicalHandoffKind};
+pub use physical_handoff::{PhysicalHandoffBytes, PhysicalHandoffKind};
 pub use storage::StorageResources;
 
 pub use cpu::{MeasuredCpu, ModeledCpu};

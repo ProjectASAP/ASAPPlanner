@@ -1,10 +1,11 @@
 # Physical handoff byte estimates
 
-`asap_types::resources` owns the canonical `PhysicalHandoffBytes`, `PhysicalHandoffKind`,
-and `MaterializationMedium` definitions in `resources/physical_handoff.rs`. The mapping
+`asap_types::resources` owns the canonical `PhysicalHandoffBytes` and
+`PhysicalHandoffKind` definitions in `resources/physical_handoff.rs`. The mapping
 crate re-exports those same types from `physical_handoff_cost` for import compatibility;
 all estimator and export consumers therefore use shared definitions, not copies.
-Their existing JSON format is unchanged. The shared byte counters support checked
+Materialization is encoded as `{"kind":"materialization"}` without a medium;
+no current estimator distinguishes storage media. The shared byte counters support checked
 addition without depending on planner errors. Snapshot binding, validation,
 calibration, and ranking remain in the mapping crate. handoff traffic/write work
 is distinct from CPU work, scanned bytes, and stored byte occupancy; it is not
@@ -32,7 +33,7 @@ Supported handoffs are:
 | Handoff | Required evidence | Dimension |
 |---|---|---|
 | Network/exchange/deployment transfer | Distinct nonempty source and destination locations | Network bytes |
-| Materialization/persistence | Memory, disk, or object-store medium | Materialization bytes |
+| Materialization/persistence | No additional kind-specific evidence | Materialization bytes |
 
 Every handoff also declares its unique physical ID, output logical bytes,
 encoded bytes per execution, and positive copy count. Logical bytes must equal
