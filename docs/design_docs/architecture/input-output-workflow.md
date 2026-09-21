@@ -28,7 +28,7 @@ not a field of `PlanningWorkload`; the other frontend dependencies are listed un
 
 | Output | Fields or contents | Meaning |
 |---|---|---|
-| `PlanSpace<Id>` | The legal candidate Post-ASAP DAGs for the workload, represented compactly as canonical roots, candidate groups, and cross-group composition information | The ASAPPlanner output |
+| `PlanSpace<Id>` | The legal candidate Post-ASAP DAGs for the workload, represented compactly as canonical roots, one candidate set per target sub-DAG, and cross-target composition information | The ASAPPlanner output |
 
 [Ranking](#ranked-view), [selection and
 materialization](#selection-and-materialization-helper), and
@@ -333,7 +333,7 @@ output.
 * one `TargetSubDAGCandidates` entry for each discovered target sub-DAG;
 * legal replacement candidates;
 * rejected candidates and reasons; and
-* information needed for cross-group selection.
+* information needed to select compatible candidates across targets.
 
 A `PlanSpace` represents a **space of logical DAG choices**, not a single executable plan.
 
@@ -360,9 +360,9 @@ across roots.
 For example, if one target has three alternatives and its child has two,
 eager enumeration could create six complete DAGs. `PlanSpace` stores the three
 parent alternatives, the two child alternatives, and their relationship.
-Whole-plan selection chooses compatible alternatives across those groups;
+Whole-plan selection chooses compatible alternatives across those targets;
 materialization then recursively substitutes the selected alternatives to
-construct a complete Post-ASAP DAG. Sharing groups this way avoids the
+construct a complete Post-ASAP DAG. Sharing each target's candidate set avoids the
 Cartesian-product expansion of complete DAGs and preserves shared nodes.
 
 The remaining APIs in this section derive information from that one output;
@@ -401,7 +401,8 @@ physical deployability.
 
 ### Selection and materialization helper
 
-`PlanSpace::global_selection*` coordinates decisions across candidate groups.
+`PlanSpace::global_selection*` coordinates decisions across the candidate sets
+for different target sub-DAGs.
 
 | Selection → materialization (click a step for details) |
 |:---:|
@@ -441,7 +442,7 @@ part of the canonical input-to-`PlanSpace` operation:
 
 1. `global_selection_with_summary_maintenance_lifecycles` uses the workload
    binding, lifecycle capabilities, and comparable costs to choose compatible
-   candidates across candidate groups. It returns `GlobalSelection`, not a DAG or a
+   candidates across target sub-DAGs. It returns `GlobalSelection`, not a DAG or a
    deployment plan.
 2. For each wanted query root, `materialize_with_summary_maintenance_lifecycles`
    takes that selection and root, constructs a Post-ASAP DAG, compares the
