@@ -81,6 +81,34 @@ a logical preference, not a finite cost claim.
 
 ## Backend-facing workflow
 
+### Before and after: query text to candidate space
+
+These examples use PromQL lowering, the built-in strategies and cost model,
+an approximate accuracy target, and **no external accuracy evidence**. “Before”
+means `main` immediately before this PR (which already includes #449); “after”
+means this PR. They describe logical planning, not a query executed by the
+backend.
+
+| PromQL input | Before this PR | After this PR |
+|---|---|---|
+| `count by(job)(up)` with an ε/δ target | Hydra's shared CMS/CountSketch alternatives are absent: missing shared-grid bounds make the strategy decline the target. | Both Hydra alternatives remain in `PlanSpace` with symbolic unknown bound/probability terms. `has_missing_accuracy_evidence()` is true; default `global_selection()` does not choose either as a certified answer. |
+| `entropy_over_time(m[5m])` with an ε target | The uncalibrated frequency readout has no `SummaryEstimate` candidate. | Its `SummaryEstimate` remains inspectable with `guarantee: None`. Default selection still skips it, so candidate visibility is not an accuracy certificate. |
+| `quantile_over_time(0.9,data[5m]) / quantile_over_time(0.5,data[5m])` with an ε target | The uncertified direct DDSketch ratio is **already** visible because of #449. | Still visible with `guarantee: None`, and still skipped by default selection. This is a regression/control example, not a new candidate introduced by this PR. |
+
+For the first two rows, the observable change is the alternative set delivered
+to an integrating backend. It may inspect or reject those alternatives; no
+newly visible unknown candidate becomes the automatic selected plan. An exact
+target still excludes uncertified summaries. Supplying known-invalid Hydra
+evidence (for example a failure probability of `1.5`) instead produces a
+`RejectedCandidate` with a reason, not a selectable alternative.
+
+The corresponding reproducible checks are
+`cargo test -p asap-frontend-promql grouped_count_keeps_uncertified_hydra_candidates_for_backend_review`,
+`cargo test -p asap-frontend-promql uncalibrated_frequency_readouts_do_not_bypass_accuracy_targets`,
+and `cargo test -p asap-integration-tests ddsketch_ratio_without_domain_proof_is_uncertified`.
+All three start from PromQL text and exercise frontend lowering and planning.
+None runs a deployed query.
+
 For a workload containing `quantile_over_time(0.9,data[5m]) /
 quantile_over_time(0.5,data[5m])`, search with `NoAccuracyEvidence` and a root
 target may expose a direct DDSketch ratio candidate. Its missing domain proof
