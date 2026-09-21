@@ -409,21 +409,27 @@ physical deployability.
 | ↓ |
 | [global_selection](../../develop_docs/library-api.md#what-does-global-selection-mean) |
 | ↓ |
-| [materialize(root)](../../develop_docs/library-api.md#optional-whole-plan-selection-and-materialization) |
-| ↓ |
-| `Result<Option<Rc<SummaryNode>>, ImplementError>` ([API example](../../develop_docs/library-api.md#api-definition-and-example)) |
-| ↓ |
-| `Some(Rc<SummaryNode>)`: selected [Post-ASAP DAG root](../concepts/post-asap-ir.md) for this query |
+| [materialize(root)](../../develop_docs/library-api.md#api-definition-and-example) returns `Result<Option<Rc<SummaryNode>>, ImplementError>` |
+| ↓ on success for a discovered root |
+| `Ok(Some(Rc<SummaryNode>))`: selected logical [Post-ASAP DAG root](../concepts/post-asap-ir.md) for this query; no lifecycle decision |
 
-“Selected Post-ASAP DAG” is the conceptual name of the `Some` result, not a
+“Selected Post-ASAP DAG” is the conceptual name of the `Ok(Some(...))` result, not a
 separate Rust type. It is no longer a set of candidates: `global_selection`
 has chosen alternatives, and `materialize(root)` has linked them for this
 root. Another workload root requires its own `materialize` call.
 
+The lifecycle-aware path uses the **same DAG-root type**:
+`SummaryMaintenanceLifecyclePlan.root: Rc<SummaryNode>`. Its surrounding plan
+also records deployments, costs, and whether raw recomputation was chosen.
+That path may replace the materialized summary root with exact `KeepPreAsap`
+when maintenance is not cost-justified; the two paths have the same root
+format, but need not return the same root value.
+
 `SummaryNode` contains a `SummaryExpr` and its guarantee; linked child
 `Rc<SummaryNode>` values form the DAG. `None` means the requested root was not
-discovered in this `PlanSpace`; an `Err` means materialization failed. On
-`Some`, the DAG records logical information such as summary operators,
+discovered in this `PlanSpace`; an `Err` means materialization failed. The
+`Result<Option<...>>` wrapper describes these outcomes; it is not another
+planning stage. On `Ok(Some(...))`, the DAG records logical information such as summary operators,
 parameters, schemas, windows, and accuracy guarantees.
 
 It is still **not an executable deployment plan**. Physical operator binding, placement, storage, and execution remain downstream responsibilities.
