@@ -6,9 +6,9 @@ It does not commit, deploy, or execute a physical plan; downstream systems such
 as ASAPQuery-backend bind the candidates to physical alternatives, make the
 deployment-level decision, and run the selected contract.
 
-For the integration contract, start with [ASAPPlanner input, output, and
-workflow](input-output-workflow.md). It defines required and optional inputs,
-`PlanSpace`, optional selection and lifecycle helpers, and replanning.
+For the integration workflow, start with [ASAPPlanner input, output, and
+workflows](input-output-workflow.md). It defines inputs, `PlanSpace`, selection
+and summary-maintenance lifecycle workflows, and future replanning support.
 
 ## Planner component flow
 
@@ -45,7 +45,7 @@ The three branches after it are optional: inspect ranked candidates, select
 and assemble a logical DAG, or make a workload-aware lifecycle decision.
 The last branch needs additional workload and deployment evidence. Its first
 call returns a `GlobalSelection`; the second returns a
-`SummaryMaintenanceLifecyclePlan` with a materialized root and lifecycle
+`SummaryMaintenanceLifecyclePlan` with an assembled DAG root and lifecycle
 decisions. No branch by itself deploys or executes a physical plan.
 
 ## Module map
@@ -85,7 +85,7 @@ must not silently change Planner-owned semantics.
 targets; `GlobalSelection::assemble_selected_dag` constructs a selected semantic DAG.
 Those plain APIs do not establish physical feasibility or a
 maintenance-versus-recompute decision. The lifecycle-aware selection call uses
-additional workload and evidence inputs; its materialization call returns a
+additional workload and evidence inputs; its DAG assembly call returns a
 plan with both a root and lifecycle decisions. See the [library guide](../../develop_docs/library-api.md#optional-whole-plan-selection-and-materialization)
 for the distinction. Downstream may consume candidates directly and retains
 responsibility for physical commitment.
