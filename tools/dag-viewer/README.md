@@ -48,7 +48,7 @@ schemas each SQL query uses with its checkboxes, or add a table with custom
 columns using one readable `name TYPE [NOT NULL]` declaration per line and
 an optional time-index column. The compact `name:type!` form remains accepted
 for compatibility. These definitions are passed to `dag_export` and used by the SQL
-binder; they are not display-only metadata. PromQL keeps its open metric
+schema_resolver; they are not display-only metadata. PromQL keeps its open metric
 model and shows an inferred schema based on the labels and values used by the
 query. The sidebar groups identical input schemas and lists every selected
 query that uses each one.

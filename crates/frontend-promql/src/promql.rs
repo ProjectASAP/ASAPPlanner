@@ -1661,7 +1661,7 @@ fn filtered_source(metric: String, matchers: Vec<Unresolved>, shift: TimeShift) 
             .into_iter()
             .map(|m| Predicate(Rc::new(m)))
             .collect(),
-        // Usage-derived (PromQL is schemaless) — the Binder fills this in.
+        // Usage-derived (PromQL is schemaless) — the SchemaResolver fills this in.
         schema: None,
     };
     if shift.is_identity() {

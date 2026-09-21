@@ -13,5 +13,7 @@ formats, evidence, and verification workflows.
 - [DDSketch ratio certification](../design_docs/proposals/asap-aware-mapping/ddsketch-quantile-ratios.md)
 - [Offline sketch evidence](offline-sketch-evidence.md)
 - [Metrics-observability corpora](metrics-observability-corpora.md)
-- [Cost and boundary references](physical-boundary-costs.md), [storage operations](storage-operation-costs.md)
+- [Physical handoff cost references](physical-handoff-costs.md), [storage operations](storage-operation-costs.md)
 - [Replacement explanations](replacement-explanations.md)
+
+- [Planner vocabulary migration (#427)](planner-vocabulary-migration.md)

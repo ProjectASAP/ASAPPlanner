@@ -1,14 +1,14 @@
-//! The **Binder** — name resolution as an explicit pass.
+//! The **SchemaResolver** — name resolution as an explicit pass.
 //!
-//! [`Binder::bind`] produces the complete, self-contained [`Schema`] every
+//! [`SchemaResolver::resolve_schema`] produces the complete, self-contained [`Schema`] every
 //! `ColumnId` in the canonical tree indexes into. [`resolve`](super::resolve)
-//! then becomes purely structural: it threads the Binder's schema and
+//! then becomes purely structural: it threads the SchemaResolver's schema and
 //! positional resolution downstream is **total**.
 //!
 //! The default [`UsageDerivedCatalog`] knows nothing — every schema is derived
 //! purely from the query's own usage. That is the honest state for the
 //! observability domain (metric label sets are open-ended). A registry-backed
-//! `SchemaCatalog` is future work; the `Binder` pass does not change when it
+//! `SchemaCatalog` is future work; the `SchemaResolver` pass does not change when it
 //! lands, only the catalog impl swaps.
 
 use super::expr_ir::ColumnRef;
@@ -23,16 +23,16 @@ use super::schema::{Column, DataType, Schema};
 /// Distinct from `Scan.schema`, which is the *resolved* binding schema this
 /// feeds — the catalog is the input, the schema is the result. Even a
 /// registry-backed PromQL catalog yields an **open** schema
-/// ([`Schema::closed`](asap_types::pre_asap::schema::Schema::closed) `= false`): a metric's
+/// ([`Schema::closed`] `= false`): a metric's
 /// labels are per-series and time-varying, so the registry is a superset hint,
 /// not a per-row contract.
 pub trait SchemaCatalog {
-    /// Columns known for `source`. `None` when unknown — the [`Binder`] then
+    /// Columns known for `source`. `None` when unknown — the [`SchemaResolver`] then
     /// falls back to a usage-derived column set.
     fn columns_for(&self, source: &str) -> Option<Vec<Column>>;
 }
 
-/// The default catalog: knows nothing. Every schema the [`Binder`] produces
+/// The default catalog: knows nothing. Every schema the [`SchemaResolver`] produces
 /// is derived purely from the query's own usage.
 pub struct UsageDerivedCatalog;
 
@@ -43,17 +43,17 @@ impl SchemaCatalog for UsageDerivedCatalog {
 }
 
 /// The explicit name-resolution pass.
-pub struct Binder<C: SchemaCatalog = UsageDerivedCatalog> {
+pub struct SchemaResolver<C: SchemaCatalog = UsageDerivedCatalog> {
     catalog: C,
 }
 
-impl Default for Binder<UsageDerivedCatalog> {
+impl Default for SchemaResolver<UsageDerivedCatalog> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl Binder<UsageDerivedCatalog> {
+impl SchemaResolver<UsageDerivedCatalog> {
     pub fn new() -> Self {
         Self {
             catalog: UsageDerivedCatalog,
@@ -61,7 +61,7 @@ impl Binder<UsageDerivedCatalog> {
     }
 }
 
-impl<C: SchemaCatalog> Binder<C> {
+impl<C: SchemaCatalog> SchemaResolver<C> {
     pub fn with_catalog(catalog: C) -> Self {
         Self { catalog }
     }
@@ -71,17 +71,21 @@ impl<C: SchemaCatalog> Binder<C> {
     /// Contains the time axis, the synthetic `value` column, and one column
     /// per distinct name referenced anywhere in the tree — so positional
     /// `ColumnId` resolution downstream is total.
-    pub fn bind(&self, tree: &UnresolvedQueryExpr) -> Schema {
-        self.bind_with_inherited(tree, &[])
+    pub fn resolve_schema(&self, tree: &UnresolvedQueryExpr) -> Schema {
+        self.resolve_schema_with_inherited(tree, &[])
     }
 
-    /// Like [`bind`](Self::bind), but also seeds `inherited` label names that are
+    /// Like [`resolve_schema`](Self::resolve_schema), but also seeds `inherited` label names that are
     /// referenced by an **enclosing** scope rather than by `tree` itself. This is
     /// how an independently-bound `BinaryOp` side (each side re-binds against its
     /// own sub-tree) still sees an outer aggregate's group keys — e.g. the
     /// `__name__` / `job` in `sum by (__name__)(a or b)`, which appear in neither
     /// side's own matchers (issue #52).
-    pub fn bind_with_inherited(&self, tree: &UnresolvedQueryExpr, inherited: &[String]) -> Schema {
+    pub fn resolve_schema_with_inherited(
+        &self,
+        tree: &UnresolvedQueryExpr,
+        inherited: &[String],
+    ) -> Schema {
         let mut columns: Vec<Column> = leftmost_scan_name(tree)
             .and_then(|name| self.catalog.columns_for(name))
             .unwrap_or_else(default_leaf_columns);
@@ -194,7 +198,7 @@ fn leftmost_scan_name(tree: &UnresolvedQueryExpr) -> Option<&str> {
 /// `reduction`/`having`/per-measure `col`, `Dedup.cols`, `PromqlSeriesSample.by`,
 /// `Filter.pred`, `Project.cols`, `Sort.keys`/`partition_by`,
 /// `SQLWindowFunc.args`/`partition_by`/`order_by`, `Join.pred`, `PromqlRelabel.value`.
-/// The Binder seeds these into the usage-derived leaf so positional
+/// The SchemaResolver seeds these into the usage-derived leaf so positional
 /// resolution downstream is total.
 pub(crate) fn collect_referenced_columns(tree: &UnresolvedQueryExpr) -> Vec<String> {
     use UnresolvedQueryExpr as QE;
@@ -316,7 +320,7 @@ pub(crate) fn collect_referenced_columns(tree: &UnresolvedQueryExpr) -> Vec<Stri
                 // column that isn't otherwise referenced anywhere else in
                 // the tree (plausible — a raw usage-derived label, not one a
                 // `Project`/relabel freshly created) is absent from the
-                // Binder's usage-derived fallback schema, and
+                // SchemaResolver's usage-derived fallback schema, and
                 // `resolve.rs`'s later `resolve_column_ref` call fails with
                 // `NotFound` for a column the caller correctly named.
                 if let Some(key) = discriminator_unique_key {
@@ -393,14 +397,14 @@ mod tests {
             child: Rc::new(src("m")),
         };
         assert_eq!(collect_referenced_columns(&tree), vec!["x", "y"]);
-        let schema = Binder::new().bind(&tree);
+        let schema = SchemaResolver::new().resolve_schema(&tree);
         assert!(schema.column_id("x").is_some());
         assert!(schema.column_id("y").is_some());
     }
 
     #[test]
     fn bare_source_yields_ts_value_floor() {
-        let schema = Binder::new().bind(&src("m"));
+        let schema = SchemaResolver::new().resolve_schema(&src("m"));
         assert_eq!(schema.columns.len(), 2);
         assert_eq!(schema.columns[0].name, "ts");
         assert_eq!(schema.columns[1].name, "value");
@@ -420,7 +424,7 @@ mod tests {
             partition_by: GroupKeys::by(vec![ColumnRef::Named("host".into())]),
             child: Rc::new(src("hits")),
         };
-        let schema = Binder::new().bind(&tree);
+        let schema = SchemaResolver::new().resolve_schema(&tree);
         assert!(schema.column_id("host").is_some());
     }
 
@@ -430,13 +434,13 @@ mod tests {
     /// `resolve.rs`'s later `resolve_column_ref` fails `NotFound` for a
     /// column the caller correctly named.
     #[test]
-    fn concat_discriminator_key_is_seeded_into_the_binder_schema() {
+    fn concat_discriminator_key_is_seeded_into_the_resolver_schema() {
         let tree = UnresolvedQueryExpr::concat_with_discriminator(
             vec![src("m")],
             ColumnRef::Named("phi".into()),
             vec![ColumnRef::Named("host".into())],
         );
-        let schema = Binder::new().bind(&tree);
+        let schema = SchemaResolver::new().resolve_schema(&tree);
         assert!(
             schema.column_id("phi").is_some(),
             "discriminator column must be seeded"
@@ -451,11 +455,12 @@ mod tests {
     fn inherited_names_are_seeded_alongside_referenced() {
         // A `BinaryOp` side re-binds against its own sub-tree, but must still see
         // an enclosing aggregate's group key (`__name__` / `job`) that appears in
-        // neither side's own matchers (issue #52). `bind_with_inherited` seeds it.
-        let schema = Binder::new().bind_with_inherited(&src("m"), &["__name__".into()]);
+        // neither side's own matchers (issue #52). `resolve_schema_with_inherited` seeds it.
+        let schema =
+            SchemaResolver::new().resolve_schema_with_inherited(&src("m"), &["__name__".into()]);
         assert!(schema.column_id("__name__").is_some());
-        // `bind` (no inheritance) does not conjure it.
-        let plain = Binder::new().bind(&src("m"));
+        // `resolve_schema` (no inheritance) does not conjure it.
+        let plain = SchemaResolver::new().resolve_schema(&src("m"));
         assert!(plain.column_id("__name__").is_none());
     }
 
@@ -473,7 +478,7 @@ mod tests {
                 })
             }
         }
-        let schema = Binder::with_catalog(FixedCatalog).bind(&src("known"));
+        let schema = SchemaResolver::with_catalog(FixedCatalog).resolve_schema(&src("known"));
         let dc = schema
             .column_id("datacenter")
             .and_then(|id| schema.columns.get(id));

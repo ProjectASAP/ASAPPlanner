@@ -69,7 +69,7 @@ Use `Replacement::Summary` when the alternative is a constructed post-ASAP summa
 Use `Replacement::Rewrite` when the alternative is still a logical pre-ASAP `QueryExpr`.
 
 Use `Replacement::ExactComposition` when an exact operation refers to a child
-target whose implementation must remain undecided. Selection coordinates the
+target whose realization must remain undecided. Selection coordinates the
 parent/child pair; materialization constructs and validates the composed DAG.
 See [exact_composition.rs](../../crates/asap-aware-mapping/src/exact_composition.rs).
 
@@ -150,13 +150,13 @@ exhaustiveness is not a promise of all theoretically possible plans.
 
 ---
 
-### `Implementation`
+### `Realization`
 
 One valid realization of an `AggIntent`, the pre-ASAP description of what an
 aggregation must compute without committing to a physical summary algorithm.
-An implementation may be an approximate sketch, an exact mergeable
+A realization may be an approximate sketch, an exact mergeable
 accumulator, or a pass-through that keeps the original operation instead of
-building a summary. `implementations_for_with` enumerates these concrete
+building a summary. `realizations_for_intent` enumerates these concrete
 realizations; `SketchAlgorithmStrategy::replacements()` constructs each one as
 a `ReplacementSubDAG`. It returns all
 candidates in preferred order without selecting a winner. At workload scale,
@@ -168,13 +168,13 @@ This guide uses the Cascades/Volcano terminology:
 
 - An **implementation rule** maps a logical operation to a candidate physical
   realization. For example, a quantile `AggIntent` may have KLL and DDSketch
-  `Implementation` values.
+  `Realization` values.
 - A **transformation rule** maps a logical operation to another logical
   operation. In this crate, that kind of candidate is represented by
   `Replacement::Rewrite`.
 - A **replacement candidate** packages either kind of result as a
   `ReplacementSubDAG` for search. `PlanSpace` stores and ranks these candidates.
-- **Physical commitment and placement** happen downstream. An `Implementation`
+- **Physical commitment and placement** happen downstream. An `Realization`
   therefore does not mean that the planner has committed the workload to that
   choice.
 
@@ -182,7 +182,7 @@ The concrete flow is:
 
 ```text
 AggIntent
-  -> implementations_for_with(): enumerate Implementation values
+  -> realizations_for_intent(): enumerate Realization values
   -> SketchAlgorithmStrategy: construct ReplacementSubDAG candidates
   -> PlanSpace: store and rank candidates
   -> downstream deployment: select and place a final choice
@@ -205,7 +205,7 @@ bounds, but does not execute workloads or own deployment measurements. Most hook
 |---|---|---|
 | `rank_candidates` | Order valid sketch algorithms | No |
 | `size_params` | Convert an accuracy target into sketch parameters | Yes |
-| `realize_extension` | Map a custom intent to an implementation | Yes |
+| `realize_extension` | Map a custom intent to a realization | Yes |
 | `readout_extension` | Query a custom extension summary | Panics until paired with a custom realization |
 | `cse_recompute_cost` | Estimate independent recomputation | Yes |
 | `cse_shared_maintenance_cost` | Estimate shared maintenance | Yes |
@@ -224,27 +224,27 @@ bounds, but does not execute workloads or own deployment measurements. Most hook
   fn size_params(&self, kind: SketchAlgorithm, intent: &AggIntent, eps: f64, delta: f64) -> SketchParams;
   ```
 
-- **`realize_extension`** — map a deployment-defined `AggIntent::Extension` to a post-ASAP `Implementation`. The default is `Implementation::PassThrough`.
+- **`realize_extension`** — map a deployment-defined `AggIntent::Extension` to a post-ASAP `Realization`. The default is `Realization::PassThrough`.
 
   Use `AggIntent::Extension { ext_kind, payload }` for intent shapes that only your deployment needs. Core treats both fields as opaque. For example, a deployment can tag an approximate-frequency intent with `ext_kind: "frequency"` and recognize it in `realize_extension`:
 
   ```rust
-  fn realize_extension(&self, ext_kind: &str, _payload: &serde_json::Value) -> Implementation {
+  fn realize_extension(&self, ext_kind: &str, _payload: &serde_json::Value) -> Realization {
       if ext_kind == "frequency" {
-          Implementation::Sketch(SketchKind::new(
+          Realization::Sketch(SketchKind::new(
               SketchAlgorithm::CountSketch,
               SketchParams::CountSketch { width: 1024, depth: 5 },
           ))
       } else {
-          Implementation::PassThrough  // fall back to the default for anything else
+          Realization::PassThrough  // fall back to the default for anything else
       }
   }
   ```
 
-  Return `Implementation::PassThrough` for unrecognized extension kinds. Do not panic.
+  Return `Realization::PassThrough` for unrecognized extension kinds. Do not panic.
 
   ```rust
-  fn realize_extension(&self, ext_kind: &str, payload: &serde_json::Value) -> Implementation;
+  fn realize_extension(&self, ext_kind: &str, payload: &serde_json::Value) -> Realization;
   ```
 
 - **`readout_extension`** — define how queries read an extension summary that `realize_extension` mapped to a `Sketch`. The two hooks are a pair: realization defines what is maintained; readout defines how it is queried. Override both for the same `ext_kind`. The default readout panics to prevent a silent wrong answer.
@@ -338,7 +338,7 @@ to the selected algorithm and classifies the pair into its category. The public
 `.category()`, `.algorithm()`, and `.params()` accessors expose the committed
 values without permitting an invalid combination.
 
-Where this matters in practice: `CostModel::rank_candidates`, `CostModel::size_params`, and `SketchAlgorithmStrategy::replacements` operate at the **algorithm** level. `summary_candidates(intent)` returns a list of `SketchAlgorithm`s (`[Kll, DDSketch]` for a `Quantile` intent), never a bare `SketchKind` with nothing chosen underneath it. `SketchKind` appears after an algorithm has been selected and sized—on `Implementation::Sketch(SketchKind)` and `SummaryFamilyType::Sketch(SketchKind)`.
+Where this matters in practice: `CostModel::rank_candidates`, `CostModel::size_params`, and `SketchAlgorithmStrategy::replacements` operate at the **algorithm** level. `summary_candidates(intent)` returns a list of `SketchAlgorithm`s (`[Kll, DDSketch]` for a `Quantile` intent), never a bare `SketchKind` with nothing chosen underneath it. `SketchKind` appears after an algorithm has been selected and sized—on `Realization::Sketch(SketchKind)` and `SummaryFamilyType::Sketch(SketchKind)`.
 
 `Sample`, `Wavelet`, and `StatModel` each use a flat `(Kind, Params)` pair. `Sketch` needs the additional algorithm level because multiple algorithms can serve the same purpose—for example, KLL and DDSketch both answer quantile queries.
 
@@ -350,11 +350,11 @@ Where this matters in practice: `CostModel::rank_candidates`, `CostModel::size_p
 
 ```rust
 pub trait Matcher {
-    fn is_satisfied_by(&self, required: &Implementation, available: &Implementation) -> bool;
+    fn is_satisfied_by(&self, required: &Realization, available: &Realization) -> bool;
 }
 ```
 
-`Matcher` does not decide how to build a summary. It asks whether an existing summary can satisfy a required implementation without building anything new. This is similar to a database reusing a materialized view or index.
+`Matcher` does not decide how to build a summary. It asks whether an existing summary can satisfy a required realization without building anything new. This is similar to a database reusing a materialized view or index.
 
 For example, a deployment may have a DDSketch for `latency` while a request
 was planned with KLL. A shared quantile query category is insufficient to prove
@@ -380,7 +380,7 @@ Concretely, `explanation.rs` reports three candidate kinds from each `MemoGroup`
 - `ExplanationKind::CommonSubexpressionReuse` — `consumer_count >= 2` and the group's candidates include `SharedSubtreeStrategy`'s "build once and share" candidate (the `Replacement::Rewrite` whose `Rc` is the group's own `target`).
 
 - `ExplanationKind::ExactComposition` — the group contains an exact operation
-  composed with a child target whose implementation remains a coordinated choice.
+  composed with a child target whose realization remains a coordinated choice.
 
 Each `ReplacementExplanation::reason` is copied verbatim from the matching candidate's own `ReplacementSubDAG::rationale`. Nothing in `explanation.rs` re-explains why a candidate is valid; that explanation already exists exactly once, on the candidate itself.
 

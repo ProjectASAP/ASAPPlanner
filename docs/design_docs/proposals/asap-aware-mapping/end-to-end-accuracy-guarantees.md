@@ -14,7 +14,7 @@ guarantees for post-ASAP plans. The parameter-configuration model applies to
 both single-summary and nested-summary plans; nesting is one consumer of the
 model, not its scope boundary.
 
-Implementation contracts, sketch formulas, extension steps, and validation
+Realization contracts, sketch formulas, extension steps, and validation
 commands live in the
 [developer guide](../../../develop_docs/end-to-end-accuracy-guarantees.md). This
 document is the authority for architectural decisions and correctness

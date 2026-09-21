@@ -3,7 +3,7 @@
 //! Front ends (issue #179) emit `ColumnRef` (name-based, optionally
 //! table-qualified); the canonical tree uses positional [`ColumnId`] resolved
 //! against a per-node [`Schema`]. These helpers bridge the two — the
-//! [`Binder`](super::binder) builds the schema, and [`resolve_column_refs`]
+//! [`SchemaResolver`](super::schema_resolver) builds the schema, and [`resolve_column_refs`]
 //! turns name-based refs (group keys, dedup columns) into positional ids,
 //! qualifier-aware.
 
@@ -96,7 +96,7 @@ pub fn resolve_column_refs(
 ///
 /// Against an **open** schema an unresolved key is still an error: the label
 /// may exist at runtime, and PromQL leaves seed every referenced label via the
-/// Binder, so an unresolved key over an open schema indicates a resolution bug,
+/// SchemaResolver, so an unresolved key over an open schema indicates a resolution bug,
 /// not an absent label. (SQL is unaffected — its `GROUP BY` resolves through
 /// the strict [`resolve_column_refs`], and DataFusion has already validated
 /// the columns anyway.)
@@ -315,7 +315,7 @@ mod tests {
     #[test]
     fn group_keys_promql_still_errors_on_open_schema() {
         // An open schema can't prove absence — an unresolved key there is a
-        // resolution bug (the Binder seeds every referenced label), not an
+        // resolution bug (the SchemaResolver seeds every referenced label), not an
         // absent label. Keep the strict error.
         let open = ts_value_schema(); // closed: false
         assert!(matches!(
