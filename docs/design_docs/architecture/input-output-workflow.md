@@ -184,14 +184,14 @@ struct BatchEntry {
 }
 ```
 
-| Field | Required | Purpose |
-|---|---:|---|
-| `query` | Yes | Raw query text in `QueryWorkload.language`. |
-| `requirements` | Yes | Accuracy and response-latency requirements. Defaults mean exact accuracy and unspecified latency. |
-| `predictability` | Yes | Whether the query is ad hoc, known in advance, or unknown. `known_at` may record when a predictable query became known. |
-| `invocations` | Yes, nonzero | Number of executions in this finite batch. |
-| `execute_at` | Optional | Known execution time. Absence prevents time-specific preparation decisions. |
-| `time_selection` | Yes | Whether the query follows current data or a historical interval, its lookback, and any fixed upper bound. Unknown/default values limit lifecycle reasoning. |
+| Field | Required | Purpose | Why it matters / example |
+|---|---:|---|---|
+| `query` | Yes | Raw query text in `QueryWorkload.language`. | `count(up)` determines the expression to lower and plan. |
+| `requirements` | Yes | Accuracy and response-latency requirements. Defaults mean exact accuracy and unspecified latency. | An explicit ε target permits approximate candidates; the exact default does not. |
+| `predictability` | Yes as a field; `Unknown` is allowed | Whether the query is ad hoc, known in advance, or unknown. `known_at` records when a predictable query became known. | A report known at 10:00 and scheduled for 11:00 may use a `Prepared` summary before execution. `AdHoc` or `Unknown` does not establish that eligibility. |
+| `invocations` | Yes, nonzero | Number of executions in this finite batch. | Ten executions can amortize one summary build differently from one execution. |
+| `execute_at` | Optional | Known execution time. | The `Prepared` case above also needs an execution time; without it Planner cannot establish a preparation window. |
+| `time_selection` | Yes | Whether the query follows current data or a historical interval, its lookback, and any fixed upper bound. | A moving five-minute window can require deletion/window support that a fixed historical interval does not. |
 
 ##### `repeating_queries: Option<Vec<RepeatingEntry>>`
 
@@ -205,13 +205,13 @@ struct RepeatingEntry {
 }
 ```
 
-| Field | Required | Purpose |
-|---|---:|---|
-| `query` | Yes | Raw query text in `QueryWorkload.language`. |
-| `demand` | Yes | A nonzero fixed interval, fixed interval with evaluation phase, nonempty explicit schedule, or evidence-backed estimated rate. |
-| `requirements` | Yes | Accuracy and response-latency requirements. |
-| `predictability` | Yes | Whether future executions are known in advance. This is independent of recurrence. |
-| `time_selection` | Yes | Event-time scope, optional lookback, and optional fixed `as_of` time. |
+| Field | Required | Purpose | Why it matters / example |
+|---|---:|---|---|
+| `query` | Yes | Raw query text in `QueryWorkload.language`. | `rate(up[5m])` determines the expression to lower and plan. |
+| `demand` | Yes | A nonzero fixed interval, fixed interval with evaluation phase, nonempty explicit schedule, or evidence-backed estimated rate. | A query every minute produces more expected reads over a horizon than one every hour. |
+| `requirements` | Yes | Accuracy and response-latency requirements. | An exact dashboard query cannot use an approximate summary solely because it is cheaper. |
+| `predictability` | Yes as a field; `Unknown` is allowed | Records whether future executions are known in advance; independent of recurrence. | Current lifecycle code does not use this field for repeating entries; set `Unknown` if no predictability claim is available. |
+| `time_selection` | Yes | Event-time scope, optional lookback, and optional fixed `as_of` time. | A live five-minute lookback differs from a fixed historical range when checking maintenance capabilities. |
 
 ##### Shared entry fields
 
@@ -290,8 +290,8 @@ They are explicit frontend function arguments, not one generic
 **Evidence is a scoped fact used to establish legality, accuracy, cost, or feasibility.**
 
 Evidence is input to planning. The current library does not collect every kind
-in one `PlanningWorkload` field; each fact enters through the interface that
-consumes it:
+in one `PlanningWorkload` field. The table below shows where each kind is
+supplied.
 
 Evidence is not globally required or globally optional. Each item is
 **conditionally required** by the decision that consumes it:
@@ -381,10 +381,17 @@ global_selection
 materialize(root)
     |
     v
-Post-ASAP DAG
+Result<Option<Rc<SummaryNode>>, ImplementError>
+    |
+    v
+Some(Rc<SummaryNode>): one Post-ASAP DAG root
 ```
 
-The resulting DAG records logical information such as summary operators, parameters, schemas, windows, and accuracy guarantees.
+`SummaryNode` contains a `SummaryExpr` and its guarantee; linked child
+`Rc<SummaryNode>` values form the DAG. `None` means the requested root was not
+discovered in this `PlanSpace`; an `Err` means materialization failed. On
+`Some`, the DAG records logical information such as summary operators,
+parameters, schemas, windows, and accuracy guarantees.
 
 It is still **not an executable deployment plan**. Physical operator binding, placement, storage, and execution remain downstream responsibilities.
 
