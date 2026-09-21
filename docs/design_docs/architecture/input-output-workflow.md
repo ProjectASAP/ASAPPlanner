@@ -337,6 +337,20 @@ output.
 
 A `PlanSpace` represents a **space of logical DAG choices**, not a single executable plan.
 
+This public interface is intended for library integrators such as
+ASAPQuery-backend. Users submitting queries through those systems do not need
+to handle it. Under the current division of responsibilities, the backend
+owns the physical deployment decision: it can inspect candidates and select
+among them using its supported implementations, measured costs, and available
+resources. An integration making that selection itself needs access to the
+candidate space. `assemble_selected_dag(root)` connects choices after
+selection, so it does not replace this candidate interface.
+
+This boundary follows who owns selection. A higher-level API could instead
+accept the backend's models and capabilities, select internally, and return
+only selected DAGs; exposing `PlanSpace` is not inherently required by the
+existence of deployment constraints.
+
 Why does search return a space rather than one “optimal” plan? The search API
 does not receive one universally comparable physical cost and capability model
 for every deployment. For example, a summary that is cheap to update in one
