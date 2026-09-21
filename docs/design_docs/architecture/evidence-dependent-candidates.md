@@ -17,9 +17,9 @@ target. An uncertified summary may still be a well-formed logical candidate;
 this label says nothing about whether the backend can physically execute it.
 The exact `KeepPreAsap` path has an exact guarantee.
 
-| State | Planner representation | Backend action |
+| State | Planner representation | Consequence / next step |
 |---|---|---|
-| Known guarantee | `ResultGuarantee` with evaluable bound and failure probability | Check the workload target and physical feasibility. |
+| Known guarantee | `ResultGuarantee` with evaluable bound and failure probability | Planner checks whether the guarantee satisfies the query's accuracy target. If this candidate is selected, the backend checks whether its implementation can realize the selected summary; it does not re-decide the accuracy target. |
 | Missing accuracy/domain evidence | Symbolic `BoundExpr::Unknown` or `ProbabilityExpr::Unknown`, or `guarantee: None` on a constructible summary | Inspect `ReplacementSubDAG::has_missing_accuracy_evidence()`, obtain applicable evidence or apply explicit policy; do not claim certification. |
 | Missing cost | `CostModel::candidate_cost()` returns `None` for a `ReplacementSubDAG` (including a non-finite or negative legacy estimate) | Keep that logical summary/rewrite candidate in `PlanSpace` for inspection; provide a comparable cost before selecting it by cost. This does not make it a deployable physical plan. |
 | Unknown runtime support | `ReplacementSubDAG::runtime_support_evidence(model)` returns `None` | Candidate remains visible; bind a concrete implementation and confirm support before deployment. |
