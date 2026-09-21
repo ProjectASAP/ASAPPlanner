@@ -88,8 +88,8 @@ flowchart TD
     L["One selected Post-ASAP DAG; exact KeepPreAsap if no optimization is selected"]
     X["Extra lifecycle inputs: horizon; update rate; capabilities; comparable summary/raw costs"]
     H["Lifecycle-aware global selection"]
-    HM["Materialize one root and decide lifecycle"]
-    O["SummaryMaintenanceLifecyclePlan: materialized root + maintenance/recompute decision"]
+    HM["Assemble one selected DAG and decide lifecycle"]
+    O["SummaryMaintenanceLifecyclePlan: assembled DAG root + maintenance/recompute decision"]
     B["Backend: bind and execute an accepted contract"]
     Q --> F
     D --> F
@@ -375,7 +375,7 @@ For example, if one target has three alternatives and its child has two,
 eager enumeration could create six complete DAGs. `PlanSpace` stores the three
 parent alternatives, the two child alternatives, and their relationship.
 Whole-plan selection chooses compatible alternatives across those targets;
-materialization then recursively substitutes the selected alternatives to
+`assemble_selected_dag(root)` then recursively substitutes the selected alternatives to
 construct a complete Post-ASAP DAG. Sharing each target's candidate set avoids the
 Cartesian-product expansion of complete DAGs and preserves shared nodes.
 
@@ -466,12 +466,17 @@ part of the canonical input-to-`PlanSpace` operation:
 2. For each wanted query root, `assemble_selected_dag_with_summary_maintenance_lifecycles`
    takes that selection and root, constructs a Post-ASAP DAG, compares the
    selected summary's maintenance cost with raw recomputation, and returns
-   `Option<SummaryMaintenanceLifecyclePlan>`. When a summary does not beat a
+   `Result<Option<SummaryMaintenanceLifecyclePlan>, MaterializeSummaryMaintenanceLifecycleError>`.
+   When a summary does not beat a
    known raw cost, or a required comparable cost is unavailable, the result
    retains the exact `KeepPreAsap` root and no summary deployments.
 
 The second call is per root; a workload with multiple roots can therefore
 produce multiple lifecycle plans from one `GlobalSelection`.
+This workflow is an alternative to [logical selection and DAG assembly](#selection-and-dag-assembly),
+not a step that requires running that workflow first. Its assembly helper calls
+`assemble_selected_dag` internally; neither helper creates a materialized view
+or deploys runtime state.
 See the [library guide's lifecycle and capabilities section](../../develop_docs/library-api.md#lifecycle-and-capabilities)
 for an API example and the capability contract.
 
@@ -480,7 +485,7 @@ Across the two calls, the caller supplies these parameters:
 | Helper parameter | Source | Required |
 |---|---|---:|
 | `PlanSpace` | Canonical ASAPPlanner output; passed to selection | Yes |
-| `GlobalSelection` and one root | Selection result and a root in that `PlanSpace`; passed to materialization | Yes for each materialized root |
+| `GlobalSelection` and one root | Selection result and a root in that `PlanSpace`; passed to DAG assembly | Yes for each assembled root |
 | Workload binding | `QueryWorkload` plus the workload-entry indices associated with each root | Yes |
 | Planning time (`now_ms`) | Caller clock in Unix milliseconds | Yes |
 | Planning horizon | Caller policy | Conditional: required for finite totals over recurring demand |
@@ -493,9 +498,10 @@ they are not duplicated as separate top-level inputs. Similarly, data arrival
 and update rate are read from the optional `DataWorkload`. Missing required
 facts remain unknown rather than being treated as zero.
 
-`SummaryMaintenanceLifecyclePlan` additionally records:
+The per-query output of this workflow is a `SummaryMaintenanceLifecyclePlan`,
+which records:
 
-* the materialized root;
+* the assembled Post-ASAP DAG root (`Rc<SummaryNode>`);
 * lifecycle choices for summary state;
 * planning horizon and expected reads/updates;
 * selected window implementation and guarantees;
