@@ -370,18 +370,35 @@ they do not define separate ASAPPlanner output contracts.
 
 ### Ranked view
 
-`PlanSpace::cost_sorted` provides a ranked view for inspection:
+`PlanSpace::cost_sorted` returns one `RankedGroup` for each
+`TargetSubDAGCandidates` entry. Conceptually, a `RankedGroup` is the same
+target's alternatives in cost-model preference order where the model defines
+one (otherwise discovery order), with one displayed cost
+per alternative. It is a **view of one decision point**, not a complete DAG
+or a selected plan.
 
-```text
-Vec<RankedGroup {
-    target,
-    consumer_count,
-    candidates,
-    costs,
-}>
+Here, `target` is the canonical `Rc<QueryExpr>` for the sub-DAG being replaced.
+A workload `root` is the top-level `QueryExpr` for a submitted query; every
+root is a target, but a target can also be an inner expression. For example,
+in `count(up) + 1`, the whole addition is a root and the inner `count(up)`
+can be a separate target with its own candidates.
+
+The return type is `Vec<RankedGroup<'_>>`; each element has this shape:
+
+```rust
+struct RankedGroup<'a> {
+    target: &'a Rc<QueryExpr>,
+    consumer_count: usize,
+    candidates: Vec<&'a ReplacementSubDAG>,
+    costs: Vec<f64>, // costs[i] describes candidates[i]
+}
 ```
 
-This view is useful for debugging, explanation, or downstream optimization. Candidate presence does not imply physical deployability.
+`consumer_count` counts references to this target in the workload. `costs`
+may contain `NaN` when the model has no numeric estimate; the ordering is not
+itself a deployment-cost certificate. This view is useful for debugging,
+explanation, or downstream optimization. Candidate presence does not imply
+physical deployability.
 
 ### Selection and materialization helper
 
