@@ -4,6 +4,7 @@ use asap_aware_mapping::accuracy::{
     AccuracyModel, DefaultAccuracyModel, EqualSplitAllocator, PropagationStats,
 };
 use asap_aware_mapping::cost_model::DefaultCostModel;
+use asap_aware_mapping::replacement::{default_strategies, search_workload_with_targets};
 use asap_aware_mapping::{Replacement, ReplacementStrategy, SketchAlgorithmStrategy, TargetSubDAG};
 mod support;
 use asap_types::post_asap::{
@@ -120,8 +121,8 @@ fn four_readouts_share_one_value_frequency_state_and_keep_honest_guarantees() {
 
 #[test]
 fn uncalibrated_frequency_readouts_do_not_bypass_accuracy_targets() {
-    // Parser support must not make an unmeasured heuristic eligible for a
-    // caller-visible bounded-error result under the production default model.
+    // An unmeasured heuristic remains inspectable but is never certified or
+    // automatically selected for a caller-visible bounded-error result.
     for query in ["entropy_over_time(m[5m])", "l2_over_time(m[5m])"] {
         for target in [
             AccuracyTarget::Exact,
@@ -131,11 +132,43 @@ fn uncalibrated_frequency_readouts_do_not_bypass_accuracy_targets() {
                 delta: 0.01,
             },
         ] {
-            let root = Rc::new(lower_promql(query, target).unwrap());
+            let root = Rc::new(lower_promql(query, target.clone()).unwrap());
             let candidates = SketchAlgorithmStrategy::default_cost_model()
                 .replacements(&TargetSubDAG::new(&root));
-            assert!(candidates.iter().all(|candidate| !matches!(&candidate.replacement,
-                Replacement::Summary(node) if matches!(&node.expr, SummaryExpr::SummaryEstimate { .. }))));
+            let unknown = candidates
+                .iter()
+                .filter(|candidate| {
+                    matches!(
+                        &candidate.replacement,
+                        Replacement::Summary(node)
+                            if matches!(&node.expr, SummaryExpr::SummaryEstimate { .. })
+                                && node.guarantee.is_none()
+                                && candidate.has_missing_accuracy_evidence()
+                    )
+                })
+                .count();
+            if target == AccuracyTarget::Exact {
+                assert_eq!(unknown, 0);
+            } else {
+                assert!(unknown > 0);
+                let space = search_workload_with_targets(
+                    vec![("q", Rc::clone(&root), Some(target))],
+                    &default_strategies(),
+                    &DefaultAccuracyModel,
+                );
+                assert!(space
+                    .group_for(&space.roots[0].1)
+                    .unwrap()
+                    .candidates
+                    .iter()
+                    .any(|candidate| candidate.has_missing_accuracy_evidence()));
+                assert!(!space
+                    .global_selection(&DefaultCostModel)
+                    .for_target(&space.roots[0].1)
+                    .unwrap()
+                    .chosen
+                    .is_some_and(|candidate| candidate.has_missing_accuracy_evidence()));
+            }
         }
     }
 }

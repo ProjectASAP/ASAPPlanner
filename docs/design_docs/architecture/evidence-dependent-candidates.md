@@ -12,15 +12,17 @@ not turn an unknown guarantee into a satisfied accuracy requirement.
 | State | Planner representation | Backend action |
 |---|---|---|
 | Known guarantee | `ResultGuarantee` with evaluable bound and failure probability | Check the workload target and physical feasibility. |
-| Missing accuracy/domain evidence | Symbolic `BoundExpr::Unknown` or `ProbabilityExpr::Unknown`; direct DDSketch ratios currently use `guarantee: None` | Inspect `ReplacementSubDAG::has_missing_accuracy_evidence()`, obtain applicable evidence or apply explicit policy; do not claim certification. |
+| Missing accuracy/domain evidence | Symbolic `BoundExpr::Unknown` or `ProbabilityExpr::Unknown`, or `guarantee: None` on a constructible summary | Inspect `ReplacementSubDAG::has_missing_accuracy_evidence()`, obtain applicable evidence or apply explicit policy; do not claim certification. |
 | Missing cost | `CostModel::candidate_cost()` returns `None` (including a non-finite or negative legacy estimate) | Retain the alternative for inspection; supply a comparable cost before cost-based deployment choice. |
 | Unknown runtime support | `ReplacementSubDAG::runtime_support_evidence(model)` returns `None` | Candidate remains visible; bind a concrete implementation and confirm support before deployment. |
 | Known invalid evidence or impossible semantics | No candidate; where supported, a `RejectedCandidate` records the error | Do not deploy. |
 
 `ResultGuarantee::has_unknown()` detects symbolic gaps. The candidate-level
-helper also covers the legacy DDSketch-ratio `None` representation. A root
+helper also covers summaries with no guarantee model, including DDSketch-ratio
+`None`. A root
 `AccuracyTarget` rejects a fully known guarantee that misses the target, but
-does not prune a candidate solely because a required statistic is absent.
+does not prune a candidate solely because a required statistic is absent under
+an approximate target. An exact target does not retain an uncertified summary.
 Unknown is not evidence that the target is met.
 For partially known guarantees, Planner tests an optimistic floor (unknown
 non-negative contributions set to zero) only to reject targets already
@@ -72,10 +74,10 @@ deploy every candidate in `PlanSpace`. If no alternative is chosen at a site,
 materialization retains the exact `KeepPreAsap` path. The backend can instead
 inspect alternatives, apply its own evidence and policy, then choose a
 physically supported one; it must not equate candidate presence with approval.
-Legacy models may use qualitative candidate ranking when no comparable
-numeric cost exists; this is a logical preference, not a finite cost claim.
-Evidence-strict models disable that legacy fallback with
-`allow_uncosted_legacy_selection() == false`.
+Models may explicitly opt into qualitative candidate ranking when no
+comparable numeric cost exists by returning `true` from
+`allow_uncosted_legacy_selection()`; the default is `false`. Such ranking is
+a logical preference, not a finite cost claim.
 
 ## Backend-facing workflow
 

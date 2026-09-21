@@ -672,10 +672,6 @@ impl SummaryMaintenanceCostModel {
 }
 
 impl CostModel for SummaryMaintenanceCostModel {
-    fn allow_uncosted_legacy_selection(&self) -> bool {
-        false
-    }
-
     fn candidate_cost(
         &self,
         candidate: &ReplacementSubDAG,

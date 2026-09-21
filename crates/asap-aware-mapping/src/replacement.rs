@@ -513,8 +513,8 @@ pub struct ReplacementSubDAG {
 
 impl ReplacementSubDAG {
     /// Whether this summary still needs accuracy/domain evidence before it can
-    /// be treated as certified. A missing guarantee is not generally unknown:
-    /// only the supported direct DDSketch ratio has that meaning today.
+    /// be treated as certified. A missing guarantee on any summary candidate
+    /// is unknown; exact `KeepPreAsap` carries an explicit exact guarantee.
     pub fn has_missing_accuracy_evidence(&self) -> bool {
         matches!(
             &self.replacement,
@@ -2145,29 +2145,10 @@ fn ddsketch_quantile_alpha(node: &SummaryNode) -> Option<f64> {
     }
 }
 
-/// An uncertified direct ratio stays visible to downstream selection even
-/// when the workload has a root target; it does not satisfy that target.
-fn is_uncertified_ddsketch_ratio(node: &SummaryNode) -> bool {
-    let SummaryExpr::BinaryOp {
-        lhs, rhs, operator, ..
-    } = &node.expr
-    else {
-        return false;
-    };
-    matches!(
-        operator.kind,
-        BinaryOpKind::Arithmetic(ArithmeticOpKind::Div)
-    ) && ddsketch_quantile_alpha(lhs).is_some()
-        && ddsketch_quantile_alpha(rhs).is_some()
-        && node.guarantee.is_none()
-}
-
 fn has_missing_accuracy_evidence(node: &SummaryNode) -> bool {
-    is_uncertified_ddsketch_ratio(node)
-        || node
-            .guarantee
-            .as_ref()
-            .is_some_and(ResultGuarantee::has_unknown)
+    node.guarantee
+        .as_ref()
+        .is_none_or(ResultGuarantee::has_unknown)
 }
 
 /// A direct ratio has an operator-specific DDSketch proof, so it must select
@@ -2884,27 +2865,12 @@ fn compose_guarantee(
         (_, None) => (CompositionOperator::ApproximateAggregate, None),
     };
     let Some(input) = child.guarantee.clone() else {
-        // A child with no guarantee at all is an unknown quantity, which
-        // nothing can be composed over (a `Sample` readout, say) — unless
-        // this node is itself the unknown family, in which case it inherits
-        // "unknown" rather than fabricating a guarantee for its child.
-        return match local {
-            Some(_) => Err(AccuracyError::MissingInputGuarantee {
-                operator: op,
-                input_index: 0,
-            }),
-            None => Ok(None),
-        };
+        // Shape is constructible, but the child has no accuracy certificate.
+        return Ok(None);
     };
-    if local.is_none() && input.is_exact() {
-        if accuracy_target(intent).is_some() {
-            return Err(AccuracyError::UnsupportedComposition {
-                operator: op,
-                input_metrics: vec![input.metric],
-                local_metric: None,
-                reason: "summary readout has no accuracy evidence for the requested target".into(),
-            });
-        }
+    if local.is_none() {
+        // No local error model: retain the candidate with unknown accuracy.
+        // Propagating the input alone would falsely certify the summary.
         return Ok(None);
     }
     let stats = evidence.propagation_stats(&op, family, query);
@@ -4767,12 +4733,13 @@ impl<Id> PlanSpace<Id> {
                     .min_by(|(_, left), (_, right)| left.0.total_cmp(&right.0))
                     .map(|(candidate, _)| candidate);
                 bound.or_else(|| {
-                    (effective >= 2)
+                    (cost_model.allow_uncosted_legacy_selection() && effective >= 2)
                         .then(|| {
                             decide_with_effective_count(group, effective, cost_model).and_then(
                                 |decision| {
+                                    let candidate = pick_shared_subtree_candidate(group, decision)?;
                                     chosen_share.insert(*ptr, decision);
-                                    pick_shared_subtree_candidate(group, decision)
+                                    Some(candidate)
                                 },
                             )
                         })
@@ -5423,13 +5390,13 @@ pub fn search_workload_with<'s, Id>(
 /// alongside each root. After the search, every root that carries a target
 /// has its group's bound [`Replacement::Summary`] candidates checked with
 /// `accuracy_model`'s [`AccuracyModel::satisfies`]: a candidate whose
-/// guarantee is absent (unknown) or misses the target is moved from
+/// guarantee is fully known and misses the target is moved from
 /// [`MemoGroup::candidates`] to [`MemoGroup::rejected`] *before*
 /// [`PlanSpace::cost_sorted`]/[`PlanSpace::global_selection`] ever rank the
-/// group, so a `CostModel` cannot pick it. The exception is an uncertified
-/// direct DDSketch quantile ratio, which remains available for downstream
-/// evidence-based selection with `guarantee: None`; neither ranking nor
-/// selection by cost certifies that it satisfies the target. A `KeepPreAsap` candidate is
+/// group. A constructible candidate with unknown accuracy remains visible for
+/// downstream review under an approximate target, but default whole-plan
+/// selection does not commit it. An exact target cannot accept an unknown
+/// approximate summary. A `KeepPreAsap` candidate is
 /// exact and always survives — the raw/pre-ASAP alternative is what an
 /// unsatisfiable root keeps. Logical [`Replacement::Rewrite`] candidates
 /// are not bound values and are left alone; the targets *inside* a rewrite
@@ -5473,7 +5440,7 @@ pub fn search_workload_with_targets<'s, Id>(
                 .drain(..)
                 .partition(|candidate| match &candidate.replacement {
                     Replacement::Summary(node) => node.guarantee.as_ref().map_or_else(
-                        || is_uncertified_ddsketch_ratio(node),
+                        || !matches!(target, AccuracyTarget::Exact),
                         |g| accuracy_model.satisfies(&g.optimistic_floor(), &target),
                     ),
                     Replacement::Rewrite(_) => true,
@@ -6595,7 +6562,7 @@ mod tests {
     }
 
     #[test]
-    fn cardinality_epsilon_delta_keeps_hll_with_unknown_confidence() {
+    fn cardinality_epsilon_delta_keeps_unknown_accuracy_candidates() {
         let q = Rc::new(agg(vec![2], default_cardinality(), metric_scan(&["job"])));
         let target = TargetSubDAG::new(&q);
         let replacements = SketchAlgorithmStrategy::default_cost_model().replacements(&target);
@@ -6613,7 +6580,8 @@ mod tests {
             vec![
                 SketchAlgorithm::Hll,
                 SketchAlgorithm::Theta,
-                SketchAlgorithm::Kmv
+                SketchAlgorithm::Kmv,
+                SketchAlgorithm::UnivMon,
             ]
         );
 
@@ -6643,7 +6611,8 @@ mod tests {
             vec![
                 SketchAlgorithm::Hll,
                 SketchAlgorithm::Theta,
-                SketchAlgorithm::Kmv
+                SketchAlgorithm::Kmv,
+                SketchAlgorithm::UnivMon,
             ]
         );
     }
@@ -7050,14 +7019,66 @@ mod tests {
     }
 
     #[test]
-    fn cardinality_group_gets_all_three_candidates() {
+    fn cardinality_group_keeps_all_four_candidates() {
         let root = Rc::new(agg(vec![2], default_cardinality(), metric_scan(&["job"])));
         let space = search_workload(vec![("q", root)]);
         let agg_group = space
             .groups()
             .find(|g| matches!(g.target.as_ref(), QueryExpr::Aggregate { .. }))
             .unwrap();
-        assert_eq!(agg_group.candidates.len(), 3);
+        assert_eq!(agg_group.candidates.len(), 4);
+        assert!(agg_group.candidates.iter().any(|candidate| matches!(
+            &candidate.replacement,
+            Replacement::Summary(node) if node.guarantee.is_none()
+                && candidate.has_missing_accuracy_evidence()
+        )));
+
+        let root = Rc::new(agg(vec![2], default_cardinality(), metric_scan(&["job"])));
+        let targeted = search_workload_with_targets(
+            vec![(
+                "q",
+                root,
+                Some(AccuracyTarget::EpsilonDelta {
+                    epsilon: 0.01,
+                    delta: 0.01,
+                }),
+            )],
+            &default_strategies(),
+            &DefaultAccuracyModel,
+        );
+        let target = &targeted.roots[0].1;
+        assert!(targeted
+            .group_for(target)
+            .unwrap()
+            .candidates
+            .iter()
+            .any(|candidate| matches!(
+                &candidate.replacement,
+                Replacement::Summary(node) if node.guarantee.is_none()
+                    && candidate.has_missing_accuracy_evidence()
+            )));
+        assert!(!targeted
+            .global_selection(&DefaultCostModel)
+            .for_target(target)
+            .unwrap()
+            .chosen
+            .is_some_and(ReplacementSubDAG::has_missing_accuracy_evidence));
+
+        let exact_target = search_workload_with_targets(
+            vec![(
+                "q",
+                Rc::new(agg(vec![2], default_cardinality(), metric_scan(&["job"]))),
+                Some(AccuracyTarget::Exact),
+            )],
+            &default_strategies(),
+            &DefaultAccuracyModel,
+        );
+        assert!(exact_target
+            .group_for(&exact_target.roots[0].1)
+            .unwrap()
+            .candidates
+            .iter()
+            .all(|candidate| !candidate.has_missing_accuracy_evidence()));
     }
 
     #[test]
@@ -7461,6 +7482,10 @@ mod tests {
     /// needs to cross.
     struct ConstantCseCost;
     impl CostModel for ConstantCseCost {
+        fn allow_uncosted_legacy_selection(&self) -> bool {
+            true
+        }
+
         fn rank_candidates(
             &self,
             _intent: &AggIntent,
@@ -7529,6 +7554,10 @@ mod tests {
         // not silently drop the candidate or fall back to discovery order.
         struct PreferDDSketch;
         impl CostModel for PreferDDSketch {
+            fn allow_uncosted_legacy_selection(&self) -> bool {
+                true
+            }
+
             fn rank_candidates(
                 &self,
                 _intent: &AggIntent,
@@ -7555,6 +7584,23 @@ mod tests {
             Replacement::Rewrite(_) | Replacement::ExactComposition(_) => None,
         };
         assert_eq!(kind, Some(SketchAlgorithm::DDSketch));
+
+        struct Uncosted;
+        impl CostModel for Uncosted {
+            fn rank_candidates(
+                &self,
+                _intent: &AggIntent,
+                candidates: &[SketchAlgorithm],
+            ) -> Vec<SketchAlgorithm> {
+                candidates.to_vec()
+            }
+        }
+        assert!(space
+            .global_selection(&Uncosted)
+            .for_target(&space.roots[0].1)
+            .unwrap()
+            .chosen
+            .is_none());
     }
 
     #[test]
@@ -7773,8 +7819,7 @@ mod tests {
         let planned = &space.roots[0].1;
 
         let selected = space.global_selection(&CompletePlanCost);
-        let chosen = selected.for_target(planned).unwrap().chosen.unwrap();
-        assert_eq!(chosen.provenance, ReplacementProvenance::CseRecompute);
+        assert!(selected.for_target(planned).unwrap().chosen.is_none());
     }
 
     #[test]
@@ -7812,6 +7857,10 @@ mod tests {
 
         struct AlwaysShare;
         impl CostModel for AlwaysShare {
+            fn allow_uncosted_legacy_selection(&self) -> bool {
+                true
+            }
+
             fn rank_candidates(
                 &self,
                 _intent: &AggIntent,

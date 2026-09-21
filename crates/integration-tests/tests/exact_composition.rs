@@ -155,6 +155,10 @@ fn root_target_rejects_unproven_composition() {
 }
 
 impl CostModel for StatsModel {
+    fn allow_uncosted_legacy_selection(&self) -> bool {
+        true
+    }
+
     fn value_operation_support_evidence(
         &self,
         _operation: &ExactOperation,
@@ -195,6 +199,10 @@ impl CostModel for StatsModel {
 struct NoCapabilityModel;
 
 impl CostModel for NoCapabilityModel {
+    fn allow_uncosted_legacy_selection(&self) -> bool {
+        true
+    }
+
     fn rank_candidates(
         &self,
         _intent: &AggIntent,

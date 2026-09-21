@@ -443,11 +443,12 @@ pub trait CostModel {
         false
     }
 
-    /// Permit historical qualitative ranking/CSE decisions when no numeric
-    /// candidate cost exists. Evidence-strict models override to `false` so
-    /// missing physical cost cannot silently fall back to a heuristic.
+    /// Opt into historical qualitative ranking/CSE decisions when no numeric
+    /// candidate cost exists. The safe default leaves an uncosted candidate
+    /// unselected; a model with an intentional non-numeric policy overrides
+    /// this to `true`.
     fn allow_uncosted_legacy_selection(&self) -> bool {
-        !self.candidate_cost_covers_complete_plan()
+        false
     }
 
     /// Candidate-level cost availability for final selection. A non-finite or

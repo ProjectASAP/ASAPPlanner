@@ -312,7 +312,21 @@ impl<'a> HydraGroupingStrategy<'a> {
 
 impl ReplacementStrategy for HydraGroupingStrategy<'_> {
     fn matches(&self, target: &TargetSubDAG<'_>) -> bool {
-        !self.hydra_proposals(target).candidates.is_empty()
+        let QueryExpr::Aggregate { reduction, .. } = target.root.as_ref() else {
+            return false;
+        };
+        if !has_subpopulations(reduction) {
+            return false;
+        }
+        let Some(intent) = bindable_intent(target.root) else {
+            return false;
+        };
+        implementations_for_with(intent, self.models.cost)
+            .into_iter()
+            .any(|implementation| {
+                matches!(implementation,
+                Implementation::Sketch(kind) if hydra_kind_for(kind.algorithm()).is_some())
+            })
     }
 
     fn replacements(&self, target: &TargetSubDAG<'_>) -> Vec<ReplacementSubDAG> {
@@ -723,6 +737,14 @@ mod tests {
             .rejected
             .iter()
             .all(|r| matches!(r.error, AccuracyError::UnsupportedComposition { .. })));
+
+        let space = crate::replacement::search_workload_with(
+            vec![("q", Rc::clone(&q))],
+            &[Box::new(strategy)],
+        );
+        let group = space.group_for(&space.roots[0].1).unwrap();
+        assert!(group.candidates.is_empty());
+        assert_eq!(group.rejected.len(), 2);
     }
 
     #[test]
