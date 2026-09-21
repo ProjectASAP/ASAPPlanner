@@ -28,7 +28,7 @@ not a field of `PlanningWorkload`; the other frontend dependencies are listed un
 
 | Output | Fields or contents | Meaning |
 |---|---|---|
-| `PlanSpace<Id>` | The legal candidate Post-ASAP DAGs for the workload, represented compactly as canonical roots, memoized alternatives, and cross-group composition information | The ASAPPlanner output |
+| `PlanSpace<Id>` | The legal candidate Post-ASAP DAGs for the workload, represented compactly as canonical roots, candidate groups, and cross-group composition information | The ASAPPlanner output |
 
 [Ranking](#ranked-view), [selection and
 materialization](#selection-and-materialization-helper), and
@@ -330,7 +330,7 @@ output.
 `PlanSpace` is Planner's canonical output. It contains:
 
 * canonical workload roots;
-* memo groups for discovered target sub-DAGs;
+* one candidate group for each discovered target sub-DAG (the current Rust type is `MemoGroup`);
 * legal replacement candidates;
 * rejected candidates and reasons; and
 * information needed for cross-group selection.
@@ -350,8 +350,8 @@ the lifecycle-aware workflow to obtain a selected plan. Downstream still
 checks and commits its physical implementation.
 
 It represents that space compactly instead of eagerly copying every complete
-DAG. `PlanSpace` stores the workload's canonical roots once, creates one memo
-group for each distinct target sub-DAG, and stores that target's replacement
+DAG. `PlanSpace` stores the workload's canonical roots once, creates one
+candidate group for each distinct target sub-DAG, and stores that target's replacement
 alternatives once inside the group. Candidate children refer back to canonical
 targets, so common subexpressions and shared alternatives are not duplicated
 across roots.
@@ -361,7 +361,7 @@ eager enumeration could create six complete DAGs. `PlanSpace` stores the three
 parent alternatives, the two child alternatives, and their relationship.
 Whole-plan selection chooses compatible alternatives across those groups;
 materialization then recursively substitutes the selected alternatives to
-construct a complete Post-ASAP DAG. This memoized representation avoids the
+construct a complete Post-ASAP DAG. Sharing groups this way avoids the
 Cartesian-product expansion of complete DAGs and preserves shared nodes.
 
 The remaining APIs in this section derive information from that one output;
@@ -384,7 +384,7 @@ This view is useful for debugging, explanation, or downstream optimization. Cand
 
 ### Selection and materialization helper
 
-`PlanSpace::global_selection*` coordinates decisions across memo groups.
+`PlanSpace::global_selection*` coordinates decisions across candidate groups.
 
 ```text
 PlanSpace
@@ -417,7 +417,7 @@ part of the canonical input-to-`PlanSpace` operation:
 
 1. `global_selection_with_summary_maintenance_lifecycles` uses the workload
    binding, lifecycle capabilities, and comparable costs to choose compatible
-   candidates across memo groups. It returns `GlobalSelection`, not a DAG or a
+   candidates across candidate groups. It returns `GlobalSelection`, not a DAG or a
    deployment plan.
 2. For each wanted query root, `materialize_with_summary_maintenance_lifecycles`
    takes that selection and root, constructs a Post-ASAP DAG, compares the

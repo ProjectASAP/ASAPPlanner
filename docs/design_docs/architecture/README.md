@@ -39,7 +39,7 @@ flowchart TD
     LINPUT --> LIFE --> LMAT --> LPLAN --> BACKEND
 ```
 
-`PlanSpace` is the output of logical candidate search. Its memo groups hold
+`PlanSpace` is the output of logical candidate search. Its candidate groups hold
 alternatives and rejection reasons, but no selected maintenance lifecycle.
 The three branches after it are optional: inspect ranked candidates, select
 and materialize a logical DAG, or make a workload-aware lifecycle decision.
@@ -68,7 +68,7 @@ explicit rather than being treated as zero.
 
 The primary output is `PlanSpace`; `cost_sorted` derives an optional ranked
 view with index-aligned costs. Downstream may inspect compatible choices
-across memo groups rather than assuming the first candidate is a feasible
+across candidate groups rather than assuming the first candidate is a feasible
 physical workload plan. Candidates carry logical summary algorithms,
 parameters, and guarantees; selected maintenance lifecycle decisions appear
 only after a lifecycle-aware helper runs. Rejection reasons are retained in
