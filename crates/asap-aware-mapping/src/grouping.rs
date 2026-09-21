@@ -30,12 +30,11 @@
 //!   have structural Hydra mappings. `HydraKll` remains an explicit
 //!   experimental IR value, but the paper excludes quantiles and search
 //!   therefore never emits it. The shared-grid term is represented
-//!   symbolically and accuracy-targeted candidates are withheld until its
-//!   required statistics are supplied.
+//!   symbolically; missing statistics leave an uncertified candidate visible.
 //!
 //! Whether Hydra is *worth it* for a given estimated subpopulation
 //! cardinality is a cost-model question, deliberately out of scope here —
-//! candidates with no modeled error bound are excluded before costing.
+//! candidates with missing error evidence remain visible for downstream review.
 //!
 //! ## No `ForceSketchKind`-style steering — bind one already-known candidate directly
 //!
@@ -73,9 +72,9 @@
 use std::rc::Rc;
 
 use asap_types::post_asap::{
-    default_hydra_params, hydra_kind_for, BoundExpr, CompositionOperator, GroupingStrategy,
-    GuaranteeSource, HydraKind, ProbabilityExpr, ResultGuarantee, SketchAlgorithm, SketchParams,
-    SummaryExpr, SummaryFamilyType, SummaryNode,
+    default_hydra_params, hydra_kind_for, AccuracyError, BoundExpr, CompositionOperator,
+    GroupingStrategy, GuaranteeSource, HydraKind, ProbabilityExpr, ResultGuarantee,
+    SketchAlgorithm, SketchParams, SummaryExpr, SummaryFamilyType, SummaryNode,
 };
 use asap_types::pre_asap::agg_intent::AggIntent;
 use asap_types::pre_asap::query_expr::{QueryExpr, Reduction};
@@ -86,8 +85,8 @@ use crate::accuracy::{
 use crate::cost_model::{CostModel, DefaultCostModel};
 use crate::replacement::{
     accuracy_target, bindable_intent, construct_summary_with, describe_intent,
-    implementations_for_with, summary_candidates, Implementation, Models, Replacement,
-    ReplacementStrategy, ReplacementSubDAG, TargetSubDAG,
+    implementations_for_with, summary_candidates, Implementation, Models, Proposals,
+    RejectedCandidate, Replacement, ReplacementStrategy, ReplacementSubDAG, TargetSubDAG,
 };
 
 /// Whether `reduction` has a genuine subpopulation concept for
@@ -172,23 +171,32 @@ impl<'a> HydraGroupingStrategy<'a> {
     /// when `target` isn't a bindable aggregate, has no subpopulation
     /// concept, or its intent's candidate summary families have no Hydra
     /// variant modeled.
-    fn hydra_candidates(&self, target: &TargetSubDAG<'_>) -> Vec<ReplacementSubDAG> {
+    fn hydra_proposals(&self, target: &TargetSubDAG<'_>) -> Proposals {
+        let mut proposals = Proposals::default();
         let QueryExpr::Aggregate { reduction, .. } = target.root.as_ref() else {
-            return Vec::new();
+            return proposals;
         };
         if !has_subpopulations(reduction) {
-            return Vec::new();
+            return proposals;
         }
         let Some(intent) = bindable_intent(target.root) else {
-            return Vec::new();
+            return proposals;
         };
-        summary_candidates(intent)
+        for (sketch_kind, hydra_kind) in summary_candidates(intent)
             .iter()
             .filter_map(|kind| hydra_kind_for(kind).map(|hydra_kind| (kind.clone(), hydra_kind)))
-            .filter_map(|(sketch_kind, hydra_kind)| {
-                self.build_candidate(target.root, intent, sketch_kind, hydra_kind)
-            })
-            .collect()
+        {
+            if let Some(candidate) = self.build_candidate(
+                target.root,
+                intent,
+                sketch_kind,
+                hydra_kind,
+                &mut proposals.rejected,
+            ) {
+                proposals.candidates.push(candidate);
+            }
+        }
+        proposals
     }
 
     /// Find the already-ranked candidate [`Implementation::Sketch`] matching
@@ -208,6 +216,7 @@ impl<'a> HydraGroupingStrategy<'a> {
         intent: &AggIntent,
         sketch_kind: SketchAlgorithm,
         hydra_kind: HydraKind,
+        rejected: &mut Vec<RejectedCandidate>,
     ) -> Option<ReplacementSubDAG> {
         let implementation = implementations_for_with(intent, self.models.cost)
             .into_iter()
@@ -238,9 +247,48 @@ impl<'a> HydraGroupingStrategy<'a> {
             family,
             query,
         );
+        if stats
+            .hydra_shared_grid_collision_bound
+            .is_some_and(|bound| !bound.is_finite() || bound < 0.0)
+            || stats
+                .hydra_shared_grid_failure_probability
+                .is_some_and(|probability| {
+                    !probability.is_finite() || !(0.0..=1.0).contains(&probability)
+                })
+        {
+            rejected.push(RejectedCandidate {
+                strategy: "HydraGroupingStrategy",
+                description: format!("{hydra_kind:?} over {sketch_kind:?}"),
+                error: AccuracyError::UnsupportedComposition {
+                    operator: CompositionOperator::ApproximateAggregate,
+                    input_metrics: node
+                        .guarantee
+                        .as_ref()
+                        .map_or_else(Vec::new, |g| vec![g.metric]),
+                    local_metric: None,
+                    reason: "invalid Hydra shared-grid collision or failure-probability evidence"
+                        .into(),
+                },
+            });
+            return None;
+        }
         let patched = with_grouping(node, grouping, &stats);
         if let (Some(target), Some(guarantee)) = (accuracy_target(intent), &patched.guarantee) {
-            if !self.models.accuracy.satisfies(guarantee, target) {
+            if !self
+                .models
+                .accuracy
+                .satisfies(&guarantee.optimistic_floor(), target)
+            {
+                rejected.push(RejectedCandidate {
+                    strategy: "HydraGroupingStrategy",
+                    description: format!("{hydra_kind:?} over {sketch_kind:?}"),
+                    error: AccuracyError::TargetNotSatisfied {
+                        metric: guarantee.metric,
+                        bound: guarantee.bound.evaluate(),
+                        failure_probability: guarantee.failure_probability.evaluate(),
+                        target: target.clone(),
+                    },
+                });
                 return None;
             }
         }
@@ -264,11 +312,15 @@ impl<'a> HydraGroupingStrategy<'a> {
 
 impl ReplacementStrategy for HydraGroupingStrategy<'_> {
     fn matches(&self, target: &TargetSubDAG<'_>) -> bool {
-        !self.hydra_candidates(target).is_empty()
+        !self.hydra_proposals(target).candidates.is_empty()
     }
 
     fn replacements(&self, target: &TargetSubDAG<'_>) -> Vec<ReplacementSubDAG> {
-        self.hydra_candidates(target)
+        self.hydra_proposals(target).candidates
+    }
+
+    fn propose(&self, target: &TargetSubDAG<'_>) -> Proposals {
+        self.hydra_proposals(target)
     }
 }
 
@@ -522,7 +574,7 @@ mod tests {
     // ── HydraGroupingStrategy ─────────────────────────────────────────────
 
     #[test]
-    fn does_not_match_a_grouped_count_with_an_unprovable_accuracy_target() {
+    fn matches_a_grouped_count_with_an_unprovable_accuracy_target() {
         let intent = AggIntent::Count {
             accuracy: AccuracyTarget::EpsilonDelta {
                 epsilon: 0.01,
@@ -531,7 +583,7 @@ mod tests {
         };
         let q = Rc::new(agg(vec![2], intent, metric_scan(&["job"])));
         let target = TargetSubDAG::new(&q);
-        assert!(!HydraGroupingStrategy::default_cost_model().matches(&target));
+        assert!(HydraGroupingStrategy::default_cost_model().matches(&target));
     }
 
     #[test]
@@ -572,7 +624,7 @@ mod tests {
     }
 
     #[test]
-    fn count_with_an_accuracy_target_has_no_hydra_candidate() {
+    fn count_with_an_accuracy_target_keeps_uncertified_hydra_candidates() {
         let intent = AggIntent::Count {
             accuracy: AccuracyTarget::EpsilonDelta {
                 epsilon: 0.01,
@@ -582,7 +634,14 @@ mod tests {
         let q = Rc::new(agg(vec![2], intent, metric_scan(&["job"])));
         let target = TargetSubDAG::new(&q);
         let replacements = HydraGroupingStrategy::default_cost_model().replacements(&target);
-        assert!(replacements.is_empty(), "{replacements:?}");
+        assert_eq!(replacements.len(), 2, "{replacements:?}");
+        assert!(replacements.iter().all(|candidate| matches!(
+            &candidate.replacement,
+            Replacement::Summary(node)
+                if node.guarantee.as_ref().is_some_and(|guarantee|
+                    guarantee.bound.evaluate().is_none()
+                        && guarantee.failure_probability.evaluate().is_none())
+        )));
     }
 
     struct ZeroSharedGridEvidence;
@@ -626,6 +685,85 @@ mod tests {
                     g.bound.evaluate().is_some()
                         && g.failure_probability.evaluate().is_some())
         )));
+    }
+
+    #[test]
+    fn invalid_partial_hydra_evidence_is_rejected_with_a_reason() {
+        struct InvalidEvidence;
+        impl AccuracyEvidenceProvider for InvalidEvidence {
+            fn propagation_stats(
+                &self,
+                _op: &CompositionOperator,
+                _family: &SummaryFamilyType,
+                _query: Option<&asap_types::post_asap::SketchQuery>,
+            ) -> PropagationStats {
+                PropagationStats {
+                    hydra_shared_grid_failure_probability: Some(1.5),
+                    ..Default::default()
+                }
+            }
+        }
+        let intent = AggIntent::Count {
+            accuracy: AccuracyTarget::EpsilonDelta {
+                epsilon: 0.01,
+                delta: 0.01,
+            },
+        };
+        let q = Rc::new(agg(vec![2], intent, metric_scan(&["job"])));
+        let strategy = HydraGroupingStrategy::with_models_and_evidence(
+            &DefaultCostModel,
+            &DefaultAccuracyModel,
+            &EqualSplitAllocator,
+            &InvalidEvidence,
+        );
+        let proposals = strategy.propose(&TargetSubDAG::new(&q));
+        assert!(proposals.candidates.is_empty());
+        assert_eq!(proposals.rejected.len(), 2);
+        assert!(proposals
+            .rejected
+            .iter()
+            .all(|r| matches!(r.error, AccuracyError::UnsupportedComposition { .. })));
+    }
+
+    #[test]
+    fn known_hydra_bound_over_target_is_rejected_despite_unknown_probability() {
+        struct ExcessiveCollision;
+        impl AccuracyEvidenceProvider for ExcessiveCollision {
+            fn propagation_stats(
+                &self,
+                _op: &CompositionOperator,
+                _family: &SummaryFamilyType,
+                _query: Option<&asap_types::post_asap::SketchQuery>,
+            ) -> PropagationStats {
+                PropagationStats {
+                    hydra_shared_grid_collision_bound: Some(0.1),
+                    ..Default::default()
+                }
+            }
+        }
+        let q = Rc::new(agg(
+            vec![2],
+            AggIntent::Count {
+                accuracy: AccuracyTarget::EpsilonDelta {
+                    epsilon: 0.01,
+                    delta: 0.01,
+                },
+            },
+            metric_scan(&["job"]),
+        ));
+        let strategy = HydraGroupingStrategy::with_models_and_evidence(
+            &DefaultCostModel,
+            &DefaultAccuracyModel,
+            &EqualSplitAllocator,
+            &ExcessiveCollision,
+        );
+        let proposals = strategy.propose(&TargetSubDAG::new(&q));
+        assert!(proposals.candidates.is_empty());
+        assert_eq!(proposals.rejected.len(), 2);
+        assert!(proposals
+            .rejected
+            .iter()
+            .all(|r| matches!(r.error, AccuracyError::TargetNotSatisfied { .. })));
     }
 
     #[test]

@@ -1,5 +1,8 @@
 # ASAPPlanner design overview
 
+See [Evidence-dependent candidates](evidence-dependent-candidates.md) for the
+unknown-evidence contract between Planner and downstream selection.
+
 ASAPPlanner is a reusable planning library. It converts queries and workload
 requirements into legal, ranked, deployment-independent Post-ASAP candidates.
 It does not commit, deploy, or execute a physical plan; downstream systems such
@@ -36,7 +39,7 @@ flowchart TD
             LEGAL[Semantic, schema, phase,<br/>and capability checks]
             BUDGET[AccuracyBudgetAllocator<br/>proposes local requirements]
             ACCURACY[AccuracyModel<br/>derives and propagates guarantees]
-            SATISFY[Keep candidates whose end-to-end<br/>guarantees satisfy query requirements]
+            SATISFY[Keep certified candidates and<br/>constructible unknown-evidence alternatives]
             LEGAL --> BUDGET --> ACCURACY --> SATISFY
         end
 
@@ -90,8 +93,8 @@ The ordering in the diagram is a correctness boundary:
 
 1. Frontends normalize source-language queries into the shared Pre-ASAP IR.
 2. ASAP-aware mapping enumerates alternatives; it does not choose one.
-3. Legality and the accuracy model reject candidates that cannot prove the
-   requested semantics and end-to-end guarantee.
+3. Legality rejects impossible semantics and known-invalid evidence. Missing
+   accuracy evidence leaves a constructible candidate visible but uncertified.
 4. Lifecycle expansion and cost models rank only eligible alternatives while
    preserving the candidate set. Cost cannot make an illegal candidate legal.
 5. Downstream systems bind those candidates to concrete physical alternatives.

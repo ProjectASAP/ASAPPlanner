@@ -443,16 +443,22 @@ pub trait CostModel {
         false
     }
 
-    /// Candidate-level availability for final selection. The default keeps
-    /// every candidate, including legacy models whose numeric estimate is a
-    /// display-only placeholder. Models that require evidence override this
-    /// method and return `None` rather than encoding "unavailable" as NaN.
+    /// Permit historical qualitative ranking/CSE decisions when no numeric
+    /// candidate cost exists. Evidence-strict models override to `false` so
+    /// missing physical cost cannot silently fall back to a heuristic.
+    fn allow_uncosted_legacy_selection(&self) -> bool {
+        !self.candidate_cost_covers_complete_plan()
+    }
+
+    /// Candidate-level cost availability for final selection. A non-finite or
+    /// negative estimate is unknown/invalid, never an available cost.
     fn candidate_cost(
         &self,
         candidate: &ReplacementSubDAG,
         target: &TargetSubDAG<'_>,
     ) -> Option<Cost> {
-        Some(Cost(self.estimate_cost(candidate, target)))
+        let value = self.estimate_cost(candidate, target);
+        (value.is_finite() && value >= 0.0).then_some(Cost(value))
     }
 
     /// Rank `candidates` (as returned by
@@ -460,11 +466,11 @@ pub trait CostModel {
     /// `intent`, best choice first.
     ///
     /// Implementations MAY reorder freely, but MUST return exactly the input
-    /// candidates: no additions, removals, or duplicates. Candidate legality
-    /// and availability belong to replacement generation, not costing; letting
-    /// this hook filter would violate [`ReplacementStrategy`]'s exhaustive,
-    /// never-prune contract. This invariant is checked at every production call
-    /// site, and a violation panics with a contract error.
+    /// candidates: no additions, removals, or duplicates. Semantic legality
+    /// belongs to replacement generation; cost availability is reported
+    /// separately by `candidate_cost`. Letting this hook filter would violate
+    /// [`ReplacementStrategy`]'s exhaustive, never-prune contract. This
+    /// invariant is checked at every production call site.
     ///
     /// [`ReplacementStrategy`]: crate::replacement::ReplacementStrategy
     fn rank_candidates(
@@ -885,13 +891,10 @@ pub trait CostModel {
     /// runtime can't execute is never proposed, so it can't be selected
     /// either.
     ///
-    /// Default: [`ValueOperationCapabilities::ALL`]. The built-in model
-    /// describes no particular runtime, and leaving both shapes *visible*
-    /// in `PlanSpace` (for explanations and the DAG viewer) is the more
-    /// informative default; selection is still gated separately by
-    /// [`Self::exact_composition_cost_inputs`], whose default supplies no
-    /// statistics, so nothing is ever *committed* to under the built-in
-    /// model. A deployment whose runtime lacks a shape narrows this.
+    /// Default: [`ValueOperationCapabilities::ALL`]. This describes shapes
+    /// worth exploring, not proof that a runtime implements them. The
+    /// [`Self::value_operation_support_evidence`] hook gates selection;
+    /// a deployment whose runtime lacks a shape can narrow this hook.
     fn value_operation_capabilities(&self) -> ValueOperationCapabilities {
         ValueOperationCapabilities::ALL
     }
@@ -906,6 +909,19 @@ pub trait CostModel {
         placement: OperationPlacement,
     ) -> bool {
         self.value_operation_capabilities().supports(placement)
+    }
+
+    /// Runtime support evidence for a mixed exact/summary operation. `None`
+    /// means that the logical shape is possible but runtime support has not
+    /// been established. The legacy boolean hook still rules out explicit
+    /// `false`; implementations that can prove support override this method
+    /// with `Some(true)`.
+    fn value_operation_support_evidence(
+        &self,
+        operation: &ExactOperation,
+        placement: OperationPlacement,
+    ) -> Option<bool> {
+        (!self.supports_value_operation(operation, placement)).then_some(false)
     }
 
     /// The statistics the issue #171 recurring-cost formulas need for one
@@ -1286,10 +1302,22 @@ mod tests {
     }
 
     #[test]
-    fn default_model_advertises_capabilities_but_no_statistics() {
+    fn default_model_has_potential_shapes_but_unknown_runtime_support() {
         assert_eq!(
             DefaultCostModel.value_operation_capabilities(),
             ValueOperationCapabilities::ALL
+        );
+        assert_eq!(
+            DefaultCostModel.value_operation_support_evidence(
+                &ExactOperation::Aggregate {
+                    reduction: asap_types::pre_asap::query_expr::Reduction::by(vec![]),
+                    measures: vec![AggIntent::Max { col: None }],
+                    output_names: vec![],
+                    having: None,
+                },
+                OperationPlacement::Read,
+            ),
+            None
         );
         assert!(ValueOperationCapabilities::NONE
             .supports(OperationPlacement::Read)

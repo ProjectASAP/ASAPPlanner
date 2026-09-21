@@ -41,8 +41,10 @@
 //!   accumulator form (its only implementation is `PassThrough`);
 //! - the exact operator consumes only `Plain` values in its data_state — checked
 //!   again, structurally, when the pair is composed;
-//! - the plugged-in [`CostModel`] advertises the matching
+//! - the plugged-in [`CostModel`] has not disproven the matching
 //!   [`ValueOperationCapabilities`](crate::cost_model::ValueOperationCapabilities).
+//!   Unknown support keeps the candidate visible; only explicit positive
+//!   support evidence permits global selection.
 //!
 //! `avg` gets a read-time operation candidate *and* keeps
 //! [`crate::rewrite::AvgToSumOverCountStrategy`]'s rewrite in the same
@@ -383,7 +385,8 @@ impl<'a> ExactCompositionStrategy<'a> {
         if let Some((op, child, intent)) = read_time_shape(target.root, self.cost_model) {
             if self
                 .cost_model
-                .supports_value_operation(&op, OperationPlacement::Read)
+                .value_operation_support_evidence(&op, OperationPlacement::Read)
+                != Some(false)
             {
                 let child_desc =
                     describe_intent(bindable_intent(&child).expect("checked by read_time_shape"));
@@ -412,7 +415,8 @@ impl<'a> ExactCompositionStrategy<'a> {
         if let Some((op, child, intent)) = maintenance_time_shape(target.root, self.cost_model) {
             if self
                 .cost_model
-                .supports_value_operation(&op, OperationPlacement::Maintenance)
+                .value_operation_support_evidence(&op, OperationPlacement::Maintenance)
+                != Some(false)
             {
                 out.push(ReplacementSubDAG {
                     strategy: "ExactCompositionStrategy",

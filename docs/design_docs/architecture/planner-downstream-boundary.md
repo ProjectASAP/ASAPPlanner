@@ -68,10 +68,10 @@ selected algorithm's semantics or guarantees.
 3. The provider binds a stable alternative identity and complete evidence:
    source coverage, input/output edges, operation counts, update and bootstrap
    fanout, retained state, CPU, memory, I/O, and accuracy facts.
-4. ASAPPlanner rejects missing or incomparable evidence, evaluates every legal
-   candidate over the same workload horizon, and selects the best complete
-   alternative. It never substitutes structural node counts or optimistic
-   zeroes.
+4. ASAPPlanner keeps constructible candidates with missing evidence visible
+   in `PlanSpace`, but default selection does not certify unknown accuracy or
+   substitute optimistic zeroes for missing cost. Comparable complete
+   alternatives can be selected over the same workload horizon.
 5. ASAPPlanner outputs the selected Post-ASAP semantics, lifecycle guarantees,
    realization contract, and chosen provider identity.
 6. ASAPQuery-backend compiles that result into consistent `CollectorPlan`,
@@ -127,8 +127,8 @@ in one cost formula.
 - A selected realization framework is a contract, not executor code.
 - Physical capabilities constrain the candidate space before ranking.
 - Physical identity and complete evidence accompany each implementation.
-- Missing statistics, unknown algorithms, stale evidence, and unsupported
-  capabilities make a candidate unavailable.
+- Missing statistics leave constructible candidates visible but uncertified;
+  unknown algorithms and known unsupported capabilities remain unavailable.
 - Shared logical nodes remain shared across the boundary; physical sharing
   additionally requires compatible filters, grouping, windows, parameters,
   lifecycle, and guarantees.

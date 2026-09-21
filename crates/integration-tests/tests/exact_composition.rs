@@ -26,8 +26,9 @@ use asap_aware_mapping::{
 use asap_integration_tests::fixtures::lower_promql;
 use asap_types::dag_export;
 use asap_types::post_asap::{
-    validate_execution_data_states, ExactKind, ExecutionDataState, ExecutionDataStateError,
-    ExecutionTiming, SketchAlgorithm, SummaryExpr, SummaryFamilyType, SummaryNode, SummaryUpdate,
+    validate_execution_data_states, ExactKind, ExactOperation, ExecutionDataState,
+    ExecutionDataStateError, ExecutionTiming, SketchAlgorithm, SummaryExpr, SummaryFamilyType,
+    SummaryNode, SummaryUpdate,
 };
 use asap_types::pre_asap::agg_intent::{default_quantile, AggIntent};
 use asap_types::pre_asap::query_expr::{QueryExpr, Reduction, Source};
@@ -154,6 +155,13 @@ fn root_target_rejects_unproven_composition() {
 }
 
 impl CostModel for StatsModel {
+    fn value_operation_support_evidence(
+        &self,
+        _operation: &ExactOperation,
+        _placement: OperationPlacement,
+    ) -> Option<bool> {
+        Some(true)
+    }
     fn rank_candidates(
         &self,
         _intent: &AggIntent,
@@ -203,6 +211,51 @@ impl CostModel for NoCapabilityModel {
     ) -> ExactCompositionCostInputs {
         StatsModel.exact_composition_cost_inputs(request)
     }
+}
+
+/// Complete cost evidence does not imply runtime support evidence.
+struct UnknownCapabilityModel;
+
+impl CostModel for UnknownCapabilityModel {
+    fn rank_candidates(
+        &self,
+        _intent: &AggIntent,
+        candidates: &[SketchAlgorithm],
+    ) -> Vec<SketchAlgorithm> {
+        candidates.to_vec()
+    }
+    fn exact_composition_cost_inputs(
+        &self,
+        request: &ExactCompositionCostRequest<'_>,
+    ) -> ExactCompositionCostInputs {
+        StatsModel.exact_composition_cost_inputs(request)
+    }
+}
+
+#[test]
+fn unknown_runtime_capability_keeps_candidate_but_prevents_selection() {
+    let root = agg(vec![0], AggIntent::Max { col: None }, fine_quantile());
+    let space = plan(vec![("q", root)], &UnknownCapabilityModel);
+    let group = space.group_for(&space.roots[0].1).unwrap();
+    assert!(group.candidates.iter().any(|candidate| {
+        matches!(candidate.replacement, Replacement::ExactComposition(_))
+            && candidate
+                .runtime_support_evidence(&UnknownCapabilityModel)
+                .is_none()
+            && UnknownCapabilityModel
+                .candidate_cost(
+                    candidate,
+                    &asap_aware_mapping::TargetSubDAG::new(&space.roots[0].1),
+                )
+                .is_none()
+    }));
+    let selection = space.global_selection(&UnknownCapabilityModel);
+    assert!(selection
+        .for_target(&space.roots[0].1)
+        .unwrap()
+        .composition
+        .is_none());
+    assert!(selection.materialize(&space.roots[0].1).unwrap().is_some());
 }
 
 fn plan(
