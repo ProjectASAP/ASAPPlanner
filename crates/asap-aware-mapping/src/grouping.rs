@@ -164,7 +164,6 @@ impl<'a> HydraGroupingStrategy<'a> {
                 accuracy: accuracy_model,
                 allocator,
                 evidence,
-                allow_uncertified_ddsketch_ratios: false,
             },
         }
     }

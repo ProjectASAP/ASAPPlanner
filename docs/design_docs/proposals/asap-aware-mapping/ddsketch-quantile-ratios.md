@@ -8,19 +8,18 @@ The formula alone does not establish its preconditions. `AccuracyEvidenceProvide
 
 Certification requires each domain to lie wholly within the pinned mapping's positive or negative indexable range (or be zero alone). Same-sign interpolation preserves the relative bound. Mixed-sign interpolation can cancel: for example, `[-1, 1.001]` can have estimated median zero despite a nonzero exact median. Nonzero values below the mapping minimum are counted as zero and also do not carry the relative bound.
 
-The denominator range must exclude zero. True and perturbed quotient ranges must stay finite and outside Float64's subnormal range, with an exact zero numerator allowed. Invalid quantile parameters and missing/invalid proofs do not receive a ratio certificate. Without a certificate the approximate ratio candidate is declined and exact execution remains available. These checks are conservative: an actual window may be safe even when its declared bounds cannot prove it.
+The denominator range must exclude zero. True and perturbed quotient ranges must stay finite and outside Float64's subnormal range, with an exact zero numerator allowed. Invalid quantile parameters and missing/invalid proofs do not receive a ratio certificate. Missing proof does not suppress candidate generation: the candidate has no root guarantee and an accuracy-enforcing selection must not treat it as certified. Invalid supplied domains are rejected. These checks are conservative: an actual window may be safe even when its declared bounds cannot prove it.
 
 The final guarantee records both input ranges and their contract identifiers. The integration layer must only provide contracts it enforces for the plan's lifetime. This change adds no runtime guard, fallback executor, or automatic proof inference, and does not change standalone DDSketch readout certification outside this ratio rule.
 
-## V1 demonstration policy
+## Candidate generation without evidence
 
-`SketchAlgorithmStrategy::with_uncertified_ddsketch_ratios_for_demo` is an
-explicit escape hatch for demos and diagnostics that need to inspect the
-DDSketch ratio DAG before an evidence provider is integrated. It permits the
+The default `SketchAlgorithmStrategy` permits a direct DDSketch quantile-ratio
 candidate when domain evidence is absent, but leaves the root guarantee unset.
-It does not turn missing evidence into evidence, and accuracy-enforcing callers
-must not treat this candidate as certified.
+This is useful for the v1 integration path; it does not turn missing evidence
+into evidence. Other approximate divisions still require their own composition
+rule or remain exact.
 
-The default constructors remain fail-closed. Production callers should use
-`with_models_and_evidence`. Runtime or statically enforced domain contracts
+Callers that require a certified end-to-end accuracy target must use evidence
+or select another candidate. Runtime or statically enforced domain contracts
 remain future work driven by observed v1 correctness needs.

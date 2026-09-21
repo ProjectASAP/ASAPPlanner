@@ -1263,9 +1263,6 @@ pub(crate) struct Models<'a> {
     pub accuracy: &'a dyn AccuracyModel,
     pub allocator: &'a dyn AccuracyBudgetAllocator,
     pub evidence: &'a dyn AccuracyEvidenceProvider,
-    /// Demo-only escape hatch for exposing a DDSketch quantile-ratio
-    /// candidate without claiming that its end-to-end error is certified.
-    pub allow_uncertified_ddsketch_ratios: bool,
 }
 
 impl<'a> Models<'a> {
@@ -1278,7 +1275,6 @@ impl<'a> Models<'a> {
             accuracy: &DEFAULT_ACCURACY_MODEL,
             allocator: &DEFAULT_ALLOCATOR,
             evidence: &NO_ACCURACY_EVIDENCE,
-            allow_uncertified_ddsketch_ratios: false,
         }
     }
 }
@@ -1342,7 +1338,6 @@ impl<'a> SketchAlgorithmStrategy<'a> {
                 accuracy: accuracy_model,
                 allocator,
                 evidence: &NO_ACCURACY_EVIDENCE,
-                allow_uncertified_ddsketch_ratios: false,
             },
         }
     }
@@ -1361,21 +1356,8 @@ impl<'a> SketchAlgorithmStrategy<'a> {
                 accuracy: accuracy_model,
                 allocator,
                 evidence,
-                allow_uncertified_ddsketch_ratios: false,
             },
         }
-    }
-
-    /// Opts a demo or diagnostic caller into DDSketch quantile-ratio
-    /// candidates when no input-domain evidence is available.
-    ///
-    /// Such a candidate carries no [`ResultGuarantee`]. Production planning
-    /// should use [`Self::with_models_and_evidence`] so the ratio is admitted
-    /// only when its input domains support a certified error bound.
-    pub fn with_uncertified_ddsketch_ratios_for_demo(cost_model: &'a dyn CostModel) -> Self {
-        let mut models = Models::with_default_accuracy(cost_model);
-        models.allow_uncertified_ddsketch_ratios = true;
-        Self { models }
     }
 
     pub(crate) fn from_models(models: Models<'a>) -> Self {
@@ -1408,10 +1390,8 @@ impl<'a> SketchAlgorithmStrategy<'a> {
         }
         if intent_override.is_none() && is_supported_exact_binary(root) {
             if let Ok(Some(node)) = realize_binary(root, self.models, None) {
-                let rationale = if node.guarantee.is_none()
-                    && self.models.allow_uncertified_ddsketch_ratios
-                {
-                    "demo-only DDSketch quantile ratio; no certified end-to-end accuracy guarantee"
+                let rationale = if node.guarantee.is_none() {
+                    "DDSketch quantile ratio without a certified end-to-end accuracy guarantee"
                 } else {
                     "preserve exact PromQL arithmetic over independently realized summary operands"
                 };
@@ -1866,8 +1846,6 @@ fn realize_binary(
 
     let direct_ddsketch_ratio = matches!(op, BinaryOpKind::Arithmetic(ArithmeticOpKind::Div))
         && shared_quantile_target(lhs, rhs).is_some();
-    let allow_uncertified_ddsketch_ratio =
-        direct_ddsketch_ratio && models.allow_uncertified_ddsketch_ratios;
     let ratio_target = end_to_end_target
         .cloned()
         .or_else(|| shared_quantile_target(lhs, rhs));
@@ -1883,9 +1861,6 @@ fn realize_binary(
                 .quantile_input_domain(lhs)
                 .zip(models.evidence.quantile_input_domain(rhs))
                 .map(|(lhs, rhs)| [lhs, rhs]);
-            if domains.is_none() && !allow_uncertified_ddsketch_ratio {
-                return Ok(None);
-            }
             let (alpha, _) = accuracy_budget(&target);
             if domains.as_ref().is_some_and(|domains| {
                 domains
@@ -1952,10 +1927,10 @@ fn realize_binary(
             }
         }
     }
-    // Only the domain-proven ratio path may consume approximate operands.
-    // Runtime finite/nonzero checks alone do not establish quantile error bounds.
+    // Only direct quantile ratios may consume approximate division operands
+    // without domain proof; their root guarantee remains unknown.
     if ratio_domains.is_none()
-        && !allow_uncertified_ddsketch_ratio
+        && !direct_ddsketch_ratio
         && matches!(op, BinaryOpKind::Arithmetic(ArithmeticOpKind::Div))
         && [&lhs_node, &rhs_node].iter().any(|node| {
             !node
@@ -1976,9 +1951,10 @@ fn realize_binary(
     lhs_node = finalize_exact_accumulator(lhs_node, lhs)?;
     rhs_node = finalize_exact_accumulator(rhs_node, rhs)?;
 
+    let has_ratio_domains = ratio_domains.is_some();
     let guarantee = if matches!(op, BinaryOpKind::Arithmetic(ArithmeticOpKind::Div))
         && direct_ddsketch_ratio
-        && ratio_domains.is_some()
+        && has_ratio_domains
         && ddsketch_quantile_alpha(&lhs_node).is_some()
         && ddsketch_quantile_alpha(&rhs_node).is_some()
     {
@@ -2006,7 +1982,7 @@ fn realize_binary(
             .then(|| ResultGuarantee::exact("BinaryOp over exact operands"))
     };
 
-    if direct_ddsketch_ratio && guarantee.is_none() && !allow_uncertified_ddsketch_ratio {
+    if direct_ddsketch_ratio && has_ratio_domains && guarantee.is_none() {
         return Ok(None);
     }
 
@@ -5877,23 +5853,30 @@ mod tests {
         }
     }
 
-    // Runtime division guards do not establish the input quantiles' error bounds.
+    // Missing domain proof permits an uncertified direct quantile ratio only.
     #[test]
-    fn quantile_ratio_without_input_proof_keeps_native_execution() {
+    fn quantile_ratio_without_input_proof_has_no_root_guarantee() {
         let target = AccuracyTarget::EpsilonDelta {
             epsilon: 0.01,
             delta: 0.01,
         };
-        for query in [
+        let root = Rc::new(lower_promql(
             "quantile_over_time(0.5,a[5m]) / quantile_over_time(0.9,a[5m])",
+            target.clone(),
+        ));
+        let models = Models::with_default_accuracy(&crate::cost_model::DefaultCostModel);
+        let candidate = realize_binary(&root, models, Some(&target))
+            .unwrap()
+            .expect("direct quantile ratio candidate");
+        assert!(candidate.guarantee.is_none());
+
+        let other = Rc::new(lower_promql(
             "avg_over_time(a[5m]) / quantile_over_time(0.5,a[5m])",
-        ] {
-            let root = Rc::new(lower_promql(query, target.clone()));
-            let models = Models::with_default_accuracy(&crate::cost_model::DefaultCostModel);
-            assert!(realize_binary(&root, models, Some(&target))
-                .unwrap()
-                .is_none());
-        }
+            target.clone(),
+        ));
+        assert!(realize_binary(&other, models, Some(&target))
+            .unwrap()
+            .is_none());
     }
 
     #[test]

@@ -104,7 +104,7 @@ fn sum_rate_and_increase_have_real_exact_accumulator_nodes() {
     }
 }
 
-/// A finite, nonzero approximate denominator does not prove a valid relative quantile bound.
+/// A finite, nonzero approximate denominator does not certify a ratio bound.
 #[test]
 fn checked_ratio_must_not_certify_cross_zero_interpolation() {
     let node = plan(
@@ -112,9 +112,10 @@ fn checked_ratio_must_not_certify_cross_zero_interpolation() {
         AccuracyTarget::Epsilon(0.01),
     );
     assert!(
-        matches!(node.expr, SummaryExpr::KeepPreAsap(_)),
-        "unproved ratio must retain native execution"
+        matches!(node.expr, SummaryExpr::BinaryOp { .. }),
+        "direct quantile ratio should remain an available candidate"
     );
+    assert!(node.guarantee.is_none());
     compile_executable_dag(&node).unwrap();
     // Keep the actual signed-sketch counterexample: division guards alone pass
     // even though the quantile interpolation does not preserve relative error.

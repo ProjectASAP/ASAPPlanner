@@ -1043,19 +1043,17 @@ fn exact_binary_maintenance_has_explicit_timing_and_legacy_wire_default() {
     }
 }
 
-/// A workload accuracy target is not evidence about signs, zeros or finite values.
+/// Missing domain evidence permits a candidate but cannot certify its accuracy.
 #[test]
-fn ddsketch_ratio_without_domain_proof_stays_exact() {
+fn ddsketch_ratio_without_domain_proof_is_uncertified() {
     let pre = lower_promql(
         "quantile_over_time(0.9, data[5m]) / quantile_over_time(0.5, data[5m])",
         AccuracyTarget::Epsilon(0.01),
     )
     .unwrap();
     let root = realize(&pre).unwrap();
-    assert!(
-        matches!(root.expr, SummaryExpr::KeepPreAsap(_)),
-        "unproven ratio was certified: {root:?}"
-    );
+    assert!(matches!(root.expr, SummaryExpr::BinaryOp { .. }));
+    assert!(root.guarantee.is_none());
     let space = search_workload_with_targets(
         vec![(
             "unproven",
