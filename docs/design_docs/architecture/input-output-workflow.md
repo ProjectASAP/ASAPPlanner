@@ -54,41 +54,60 @@ If required accuracy, semantic, capability, or cost evidence is unavailable, Pla
 ## Running example: a recurring PromQL query
 
 Suppose a dashboard evaluates `count_over_time(up[5m])` once a minute, and
-`up` receives a sample every 15 seconds. The following is a concrete workload
-description, not Rust constructor syntax:
+`up` receives a sample every 15 seconds. This diagram traces the concrete
+inputs and the three possible uses of the same candidate space:
 
-| Input location | Example value | Why it matters |
-|---|---|---|
-| `query_workload.language` | PromQL | Chooses PromQL lowering. |
-| `query_workload.repeating_queries[0]` | Query `count_over_time(up[5m])`; fixed 60-second demand; exact accuracy; real-time selection with a five-minute lookback; predictable query | Describes what is computed, how often it is requested, and that approximation is not permitted. “Predictable” means the query is known in advance; it is separate from running every minute. |
-| `data_workload` | Continuously ingesting; declared 15-second `data_ingestion_interval` | Supplies the PromQL source cadence and states that data continues to arrive. Other empirical fields can remain unknown. |
-| Frontend argument | Current planning time (`now_ms`) | Anchors time-dependent PromQL lowering. No SQL catalog is needed for this PromQL example. |
+```mermaid
+flowchart TD
+    Q["query_workload: PromQL; repeating query count_over_time(up[5m]); every 60 s; exact; real-time; predictable"]
+    D["data_workload: continuous arrival; declared ingestion interval 15 s"]
+    T["Frontend argument: now_ms"]
+    F["PromQL lowering"]
+    R["One canonical QueryExpr root"]
+    S["Candidate search"]
+    P["PlanSpace: logical choices for this root"]
+    I["cost_sorted: inspect choices"]
+    G["global_selection + materialize(root)"]
+    L["One selected Post-ASAP DAG; exact KeepPreAsap if no optimization is selected"]
+    X["Extra lifecycle inputs: horizon; update rate; capabilities; comparable summary/raw costs"]
+    H["Lifecycle-aware helper"]
+    O["SummaryMaintenanceLifecyclePlan: materialized root + maintenance/recompute decision"]
+    B["Backend: bind and execute an accepted contract"]
+    Q --> F
+    D --> F
+    T --> F
+    F --> R --> S --> P
+    P --> I
+    P --> G --> L --> B
+    P --> H
+    X --> H --> O --> B
+```
 
-Frontend lowering produces one canonical `QueryExpr` root. Candidate search
-returns a `PlanSpace` containing that root and its logical choices, including
-an exact count-summary realization where applicable. The `PlanSpace` is **not**
-a running dashboard query and does not say which physical implementation to
-deploy. A caller can inspect the choices with `cost_sorted`; if it asks for a
-single logical plan, `global_selection` followed by `materialize(root)` builds
-one Post-ASAP DAG for this root. If no selected optimization can be used, the
-materialized path can retain exact `KeepPreAsap` computation.
+“Predictable” says the query is known in advance; it is independent of its
+one-minute recurrence. The `PlanSpace` may contain an exact count-summary
+realization, but it is not a deployed query. Without the extra lifecycle
+inputs, the caller can still inspect candidates or obtain a logical DAG; it
+cannot conclude that maintaining a summary is cheaper than recomputing raw
+results.
 
-For a maintenance-versus-recompute decision, the same caller additionally
-supplies a planning horizon, an update-rate estimate, lifecycle capabilities,
-and comparable summary/raw costs to the lifecycle-aware helper. Its
-`SummaryMaintenanceLifecyclePlan` contains a materialized root **and** the
-chosen lifecycle decision. Without those additional facts, the caller can
-still inspect `PlanSpace` or select a logical DAG, but cannot claim that
-maintaining the summary is cheaper than raw recomputation. The backend then
-binds and executes whichever selected contract it accepts.
+For contrast, a one-time SQL query needs a catalog but need not supply data
+arrival evidence merely to inspect logical alternatives:
 
-For contrast, a one-time SQL request such as `SELECT COUNT(*) FROM metrics`
-goes in `query_batch` with `invocations = 1` and can mark
-`predictability = AdHoc`. The caller supplies a `SqlCatalog` to resolve
-`metrics` and its columns; `data_workload` can be `None` if this SQL lowering
-and the chosen search rules do not consume arrival evidence. It still yields
-one `QueryExpr` root and a `PlanSpace`. The recurring-query lifecycle inputs
-above are not needed merely to inspect its logical alternatives.
+```mermaid
+flowchart LR
+    Q["query_batch: SELECT COUNT(*) FROM metrics; invocations 1; AdHoc"]
+    C["SqlCatalog: resolves metrics and its columns"]
+    F["SQL lowering"]
+    R["One QueryExpr root"]
+    P["Candidate search → PlanSpace"]
+    Q --> F
+    C --> F
+    F --> R --> P
+```
+
+In this SQL example, `data_workload` can be `None` if the chosen lowering and
+search rules do not consume it. The lifecycle helper is not needed merely to
+inspect the `PlanSpace`.
 
 ---
 
