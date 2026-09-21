@@ -32,7 +32,7 @@ not a field of `PlanningWorkload`; the other frontend dependencies are listed un
 
 [Ranking](#ranked-view), [selection and
 DAG assembly](#selection-and-dag-assembly), and
-[lifecycle](#lifecycle-aware-helper) APIs operate on this `PlanSpace`.
+[summary-maintenance lifecycle](#summary-maintenance-lifecycle-aware-helper) APIs operate on this `PlanSpace`.
 `PlanSpace` contains logical candidate DAGs; it does **not** choose whether
 to build, maintain, or recompute their summary state. Using it without the
 lifecycle helper is appropriate for candidate inspection or when a downstream
@@ -318,7 +318,7 @@ rejection reason, but evidence itself remains an input.
 This completes the canonical input boundary for producing `PlanSpace`.
 Lifecycle-specific values such as a planning horizon and deployment lifecycle
 capabilities are not additional `PlanSpace` inputs. They are parameters to the
-optional [lifecycle-aware helper](#lifecycle-aware-helper) described after the
+optional [summary-maintenance-lifecycle-aware helper](#summary-maintenance-lifecycle-aware-helper) described after the
 output.
 
 ---
@@ -451,10 +451,10 @@ describes the function signatures and return handling.
 
 This workflow selects how to compute the query. To also decide whether to
 maintain summary state or recompute raw data, use the
-[lifecycle-aware workflow](#lifecycle-aware-helper) below. The downstream
+[summary-maintenance-lifecycle-aware workflow](#summary-maintenance-lifecycle-aware-helper) below. The downstream
 system binds physical implementations, deploys state, and executes the plan.
 
-### Lifecycle-aware helper
+### Summary-maintenance-lifecycle-aware helper
 
 Lifecycle-aware planning is a two-call workflow on an existing `PlanSpace`, not
 part of the canonical input-to-`PlanSpace` operation:
