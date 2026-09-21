@@ -12,7 +12,7 @@ Post-ASAP alternatives for the workload.
 | Input | Fields | Required |
 |---|---|---:|
 | `PlanningWorkload.query_workload` | Query language and one-time/repeating query workloads | Yes |
-| `PlanningWorkload.data_workload` | Data arrival and optional evidence about ingestion, cardinality, and distribution | Conditional: required for PromQL; otherwise optional |
+| `PlanningWorkload.data_workload` | Data arrival and optional evidence about ingestion, cardinality, and distribution | No implicit default. Set `None` when unavailable for non-PromQL workloads; PromQL requires `Some(DataWorkload)` with a nonzero ingestion interval. |
 | Frontend-specific dependencies (outside `PlanningWorkload`) | `SqlCatalog` for SQL; `now_ms` and, when needed, `HistogramCatalog` for PromQL | `SqlCatalog` is required for SQL lowering; `now_ms` is required for PromQL lowering |
 | Planning evidence and capabilities | Domain, accuracy, cost, and deployment facts supplied through the applicable provider/model interface | Conditional: required only by optimizations that depend on those facts |
 
@@ -130,7 +130,7 @@ struct PlanningWorkload {
 | Field | Required | Purpose |
 |---|---:|---|
 | `query_workload` | Yes | Contains the source language and every one-time or repeating query. |
-| `data_workload` | Optional generally; required for PromQL | Describes data arrival and evidence about ingestion, cardinality, and distribution. PromQL additionally requires a nonzero `data_ingestion_interval`. |
+| `data_workload` | Optional generally; required for PromQL | There is no automatic default: explicitly set `None` when unavailable for non-PromQL workloads. PromQL requires `Some(DataWorkload)` with a nonzero `data_ingestion_interval`. |
 
 #### `query_workload: QueryWorkload`
 
