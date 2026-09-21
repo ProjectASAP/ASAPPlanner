@@ -287,7 +287,7 @@ A custom cost model does not necessarily need to override every hook. The curren
 
 ---
 
-### `PlanSpace` / `TargetSubDAGCandidates` / `RankedGroup` — the whole-workload view
+### `PlanSpace` / `TargetSubDAGCandidates` / `RankedTargetSubDAGCandidates` — the whole-workload view
 
 `ReplacementStrategy` answers "what are the candidates for this one target?" `PlanSpace` answers the same question for every target in a whole workload at once, without materializing `2^N` fully-copied plans for `N` independently-choosable sites.
 
@@ -303,7 +303,7 @@ pub struct TargetSubDAGCandidates {
     pub rejected: Vec<RejectedCandidate>,    // failed accuracy checks
 }
 
-pub struct RankedGroup<'a> {
+pub struct RankedTargetSubDAGCandidates<'a> {
     pub target: &'a Rc<QueryExpr>,
     pub consumer_count: usize,
     pub candidates: Vec<&'a ReplacementSubDAG>,  // same candidates, ranked

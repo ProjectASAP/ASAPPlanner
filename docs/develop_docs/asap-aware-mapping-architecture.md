@@ -107,7 +107,7 @@ flowchart TB
 
   subgraph RANKING[4. Rank without selecting a final plan]
     SORT["PlanSpace::cost_sorted<br/>use the CostModel to order each group<br/>and cost every candidate"]:::choose
-    GROUP["RankedGroup<br/>the same candidates in preferred order,<br/>with costs aligned by index"]:::choose
+    GROUP["RankedTargetSubDAGCandidates<br/>the same candidates in preferred order,<br/>with costs aligned by index"]:::choose
     MEMO --> SORT -->|"reorder only; preserve every candidate"| GROUP
   end
 

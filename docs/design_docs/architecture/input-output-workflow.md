@@ -370,12 +370,11 @@ they do not define separate ASAPPlanner output contracts.
 
 ### Ranked view
 
-`PlanSpace::cost_sorted` returns one `RankedGroup` for each
-`TargetSubDAGCandidates` entry. Conceptually, a `RankedGroup` is the same
-target's alternatives in cost-model preference order where the model defines
-one (otherwise discovery order), with one displayed cost
-per alternative. It is a **view of one decision point**, not a complete DAG
-or a selected plan.
+`PlanSpace::cost_sorted` returns one `RankedTargetSubDAGCandidates` for each
+`TargetSubDAGCandidates` entry. Conceptually, it is the same target's
+alternatives in cost-model preference order where the model defines one
+(otherwise discovery order), with one displayed cost per alternative. It is
+a **view of one decision point**, not a complete DAG or a selected plan.
 
 Here, `target` is the canonical `Rc<QueryExpr>` for the sub-DAG being replaced.
 A workload `root` is the top-level `QueryExpr` for a submitted query; every
@@ -383,10 +382,10 @@ root is a target, but a target can also be an inner expression. For example,
 in `count(up) + 1`, the whole addition is a root and the inner `count(up)`
 can be a separate target with its own candidates.
 
-The return type is `Vec<RankedGroup<'_>>`; each element has this shape:
+The return type is `Vec<RankedTargetSubDAGCandidates<'_>>`; each element has this shape:
 
 ```rust
-struct RankedGroup<'a> {
+struct RankedTargetSubDAGCandidates<'a> {
     target: &'a Rc<QueryExpr>,
     consumer_count: usize,
     candidates: Vec<&'a ReplacementSubDAG>,
@@ -428,6 +427,12 @@ parameters, schemas, windows, and accuracy guarantees.
 
 It is still **not an executable deployment plan**. Physical operator binding, placement, storage, and execution remain downstream responsibilities.
 
+For the selection algorithm and a call example, see the
+[library guide's whole-plan selection section](../../develop_docs/library-api.md#optional-whole-plan-selection-and-materialization).
+For how candidate choices are represented before selection, see
+[Plan search internals](asap-aware-plan-search.md); for the resulting node
+structure, see [Post-ASAP IR](../concepts/post-asap-ir.md).
+
 ### Lifecycle-aware helper
 
 Lifecycle-aware planning is a two-call workflow on an existing `PlanSpace`, not
@@ -446,6 +451,8 @@ part of the canonical input-to-`PlanSpace` operation:
 
 The second call is per root; a workload with multiple roots can therefore
 produce multiple lifecycle plans from one `GlobalSelection`.
+See the [library guide's lifecycle and capabilities section](../../develop_docs/library-api.md#lifecycle-and-capabilities)
+for an API example and the capability contract.
 
 Across the two calls, the caller supplies these parameters:
 

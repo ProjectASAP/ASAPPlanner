@@ -153,7 +153,7 @@ because they are choices for the same computation. Another subexpression has its
 own group. If two queries reference a shared subexpression, they can consume the
 same group's result instead of requiring independent computation.
 
-`cost_sorted()` returns a `RankedGroup` for each group: the target subexpression,
+`cost_sorted()` returns a `RankedTargetSubDAGCandidates` for each group: the target subexpression,
 its candidates in ranked order, and a cost entry aligned with each candidate.
 It keeps the alternatives available; it does not select an entire workload plan.
 
@@ -167,7 +167,7 @@ search_workload_with_targets<'s, Id>(
 ) -> PlanSpace<Id>
 
 PlanSpace::cost_sorted(&self, cost_model: &dyn CostModel)
-    -> Vec<RankedGroup<'_>>
+    -> Vec<RankedTargetSubDAGCandidates<'_>>
 ```
 
 | Argument | Choices / meaning | Required? |
@@ -246,7 +246,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 | `search_workload` | `(query_id, Rc<QueryExpr>)` roots | `PlanSpace` with built-in strategies/model; no explicit per-root target argument |
 | `search_workload_with` | Roots, strategy slice | `PlanSpace`; callers choose context-free replacement strategies |
 | `search_workload_with_targets` | Roots with optional end-to-end targets, strategies, accuracy model | Candidate space with supplied root-target checks; `None` does not supply a root-level requirement |
-| `PlanSpace::cost_sorted` | Cost model | `Vec<RankedGroup>`; retains alternatives and pairs `candidates[i]` with `costs[i]` |
+| `PlanSpace::cost_sorted` | Cost model | `Vec<RankedTargetSubDAGCandidates>`; retains alternatives and pairs `candidates[i]` with `costs[i]` |
 | `PlanSpace::cost_sorted_with_recurrence` | Cost model, recurrence profiles, optional horizon | Ranked groups or `RecurrenceError`; uses recurrence for applicable share/recompute comparisons |
 | `SketchAlgorithmStrategy::replacements` through `ReplacementStrategy` | One `TargetSubDAG` | Alternatives at that target; not whole-workload search |
 

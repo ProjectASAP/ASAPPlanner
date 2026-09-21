@@ -655,7 +655,7 @@ pub struct TargetReplacement {
     /// "this was the best of N candidates" without re-deriving the ranking.
     pub rank: usize,
     /// This candidate's own estimated cost, straight off
-    /// `RankedGroup::costs` — `f64::NAN` whenever the plugged-in cost model
+    /// `RankedTargetSubDAGCandidates::costs` — `f64::NAN` whenever the plugged-in cost model
     /// doesn't estimate a numeric cost for this candidate shape (see that
     /// field's own doc upstream).
     pub cost: f64,

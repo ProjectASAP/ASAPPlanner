@@ -314,7 +314,7 @@
 //! like a Cascades/Volcano MEMO, but [`PlanSpace::cost_sorted`] alone never
 //! actually performed this composition step; `global_selection` is that
 //! step, added alongside `cost_sorted` rather than replacing it (both stay
-//! available — see [`RankedGroup`] vs. [`SelectedGroup`]'s own docs for when
+//! available — see [`RankedTargetSubDAGCandidates`] vs. [`SelectedGroup`]'s own docs for when
 //! to reach for which).
 //!
 //! Two things this deliberately does **not** attempt, both left as
@@ -3339,7 +3339,7 @@ impl<Id> PlanSpace<Id> {
     /// each other.
     ///
     /// Ranking itself is decided entirely by [`rank_group`] before
-    /// [`RankedGroup::costs`] is ever computed — pairing each candidate with
+    /// [`RankedTargetSubDAGCandidates::costs`] is ever computed — pairing each candidate with
     /// [`CostModel::grouping_state_cost`] for grouping alternatives, or
     /// [`CostModel::estimate_cost`] otherwise, is an additive annotation
     /// for a caller that wants to *display* a cost (e.g. a
@@ -3347,9 +3347,9 @@ impl<Id> PlanSpace<Id> {
     /// a `CostModel` whose `estimate_cost` disagrees with its own
     /// `rank_candidates`/`cse_share_decision` (a deployment bug, not
     /// something this method tries to protect against) would show a
-    /// `RankedGroup` whose `costs` aren't monotonically non-decreasing —
+    /// `RankedTargetSubDAGCandidates` whose `costs` aren't monotonically non-decreasing —
     /// `cost_sorted`'s own ordering guarantee is unaffected either way.
-    pub fn cost_sorted(&self, cost_model: &dyn CostModel) -> Vec<RankedGroup<'_>> {
+    pub fn cost_sorted(&self, cost_model: &dyn CostModel) -> Vec<RankedTargetSubDAGCandidates<'_>> {
         self.order
             .iter()
             .map(|ptr| {
@@ -3371,7 +3371,7 @@ impl<Id> PlanSpace<Id> {
                             .map_or_else(|| cost_model.estimate_cost(c, &target), |cost| cost.0)
                     })
                     .collect();
-                RankedGroup {
+                RankedTargetSubDAGCandidates {
                     target: &group.target,
                     consumer_count: group.consumer_count,
                     candidates,
@@ -3389,7 +3389,7 @@ impl<Id> PlanSpace<Id> {
         cost_model: &dyn CostModel,
         profiles: &RecurrenceProfileMap,
         horizon: Option<Horizon>,
-    ) -> Result<Vec<RankedGroup<'_>>, RecurrenceError> {
+    ) -> Result<Vec<RankedTargetSubDAGCandidates<'_>>, RecurrenceError> {
         self.order
             .iter()
             .map(|ptr| {
@@ -3430,7 +3430,7 @@ impl<Id> PlanSpace<Id> {
                             )
                     })
                     .collect();
-                Ok(RankedGroup {
+                Ok(RankedTargetSubDAGCandidates {
                     target: &group.target,
                     consumer_count: group.consumer_count,
                     candidates,
@@ -3799,7 +3799,7 @@ fn contribute(
 /// One [`TargetSubDAGCandidates`]'s candidates, ranked best-first by
 /// [`PlanSpace::cost_sorted`].
 #[derive(Debug)]
-pub struct RankedGroup<'a> {
+pub struct RankedTargetSubDAGCandidates<'a> {
     pub target: &'a Rc<QueryExpr>,
     pub consumer_count: usize,
     pub candidates: Vec<&'a ReplacementSubDAG>,
@@ -3998,7 +3998,7 @@ fn summary_grouping(node: &SummaryNode) -> Option<&GroupingStrategy> {
 /// workload root to this site. See the module docs' "Whole-plan
 /// (cross-group) selection" section for the full recurrence.
 ///
-/// Contrast with [`RankedGroup`] ([`PlanSpace::cost_sorted`]'s output):
+/// Contrast with [`RankedTargetSubDAGCandidates`] ([`PlanSpace::cost_sorted`]'s output):
 /// that ranks every candidate for one group in isolation and never commits
 /// to just one; this commits to exactly one (or none), and the count it
 /// ranks against — [`Self::effective_consumer_count`] — can differ from the
@@ -7312,7 +7312,7 @@ mod tests {
         );
     }
 
-    /// [`RankedGroup::costs`] is a per-candidate annotation, aligned
+    /// [`RankedTargetSubDAGCandidates::costs`] is a per-candidate annotation, aligned
     /// index-for-index with `candidates` — each entry must equal what
     /// calling [`CostModel::estimate_cost`] directly on that same candidate
     /// and target produces, not some other (or stale) number.
@@ -7337,7 +7337,7 @@ mod tests {
             assert_eq!(
                 cost,
                 DefaultCostModel.estimate_cost(candidate, &target),
-                "RankedGroup::costs must match calling CostModel::estimate_cost directly \
+                "RankedTargetSubDAGCandidates::costs must match calling CostModel::estimate_cost directly \
                  for the same candidate/target"
             );
         }

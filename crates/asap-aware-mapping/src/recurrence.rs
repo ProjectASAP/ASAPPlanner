@@ -1278,13 +1278,14 @@ mod tests {
         let infrequent_ranked = space
             .cost_sorted_with_recurrence(&DeterministicUnitCostModel, &infrequent, None)
             .unwrap();
-        let first_provenance = |ranked: &[crate::replacement::RankedGroup<'_>]| {
-            ranked
-                .iter()
-                .find(|group| Rc::ptr_eq(group.target, &shared.target))
-                .and_then(|group| group.candidates.first())
-                .map(|candidate| candidate.provenance)
-        };
+        let first_provenance =
+            |ranked: &[crate::replacement::RankedTargetSubDAGCandidates<'_>]| {
+                ranked
+                    .iter()
+                    .find(|group| Rc::ptr_eq(group.target, &shared.target))
+                    .and_then(|group| group.candidates.first())
+                    .map(|candidate| candidate.provenance)
+            };
         assert_eq!(
             first_provenance(&frequent_ranked),
             Some(crate::replacement::ReplacementProvenance::CseShare)
