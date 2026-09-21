@@ -157,4 +157,44 @@ mod tests {
         assert!(expected > 1, "fixture exposes alternative bindings");
         assert_eq!(bind_all(&expr).expect("binding succeeds").len(), expected);
     }
+
+    #[test]
+    fn bind_all_exposes_an_uncertified_ddsketch_ratio_by_default() {
+        let expr = lower_promql_with_data_ingestion_interval(
+            "quantile_over_time(0.9,data[5m])/quantile_over_time(0.5,data[5m])",
+            ACCURACY.clone(),
+            1_000,
+        )
+        .expect("query lowers to pre-ASAP IR");
+
+        let candidates = bind_all(&expr).expect("binding succeeds");
+        assert_eq!(candidates.len(), 1);
+        assert!(matches!(
+            candidates[0].expr,
+            asap_types::post_asap::SummaryExpr::BinaryOp { .. }
+        ));
+        assert!(
+            candidates[0].guarantee.is_none(),
+            "missing evidence must not claim a certified ratio bound"
+        );
+        asap_types::post_asap::compile_executable_dag(&candidates[0])
+            .expect("the demo candidate remains executable");
+    }
+
+    #[test]
+    fn default_ratio_candidate_does_not_relax_other_approximate_divisions() {
+        let expr = lower_promql_with_data_ingestion_interval(
+            "avg_over_time(data[5m])/quantile_over_time(0.5,data[5m])",
+            ACCURACY.clone(),
+            1_000,
+        )
+        .expect("query lowers to pre-ASAP IR");
+
+        let candidates = bind_all(&expr).expect("binding succeeds");
+        assert_eq!(candidates.len(), 1);
+        assert!(matches!(
+            candidates[0].expr,
+            asap_types::post_asap::SummaryExpr::KeepPreAsap(_)
+        ));
+    }
 }
