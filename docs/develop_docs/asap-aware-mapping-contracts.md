@@ -70,7 +70,7 @@ Use `Replacement::Rewrite` when the alternative is still a logical pre-ASAP `Que
 
 Use `Replacement::ExactComposition` when an exact operation refers to a child
 target whose realization must remain undecided. Selection coordinates the
-parent/child pair; materialization constructs and validates the composed DAG.
+parent/child pair; DAG assembly constructs and validates the composed DAG.
 See [exact_composition.rs](../../crates/asap-aware-mapping/src/exact_composition.rs).
 
 Examples:
@@ -189,7 +189,7 @@ AggIntent
 ```
 
 `ReplacementStrategy` enumerates supported legal candidates. The caller can
-consume ranked groups or use coordinated selection and semantic materialization;
+consume ranked candidate sets or use coordinated selection and DAG assembly;
 see [code architecture §3](asap-aware-mapping-architecture.md#3-how-the-current-pieces-fit-together).
 
 ---
@@ -289,13 +289,13 @@ A custom cost model does not necessarily need to override every hook. The curren
 
 ### `PlanSpace` / `TargetSubDAGCandidates` / `RankedTargetSubDAGCandidates` — the whole-workload view
 
-`ReplacementStrategy` answers "what are the candidates for this one target?" `PlanSpace` answers the same question for every target in a whole workload at once, without materializing `2^N` fully-copied plans for `N` independently-choosable sites.
+`ReplacementStrategy` answers "what are the candidates for this one target?" `PlanSpace` answers the same question for every target in a whole workload at once, without enumerating `2^N` fully-copied plans for `N` independently-choosable sites.
 
 ```rust
 // replacement.rs
 
 // One TargetSubDAGCandidates per distinct TargetSubDAG in the whole workload —
-// never a flat list of fully-materialized plans.
+// never a flat list of fully assembled plans.
 pub struct TargetSubDAGCandidates {
     pub target: Rc<QueryExpr>,
     pub consumer_count: usize,
@@ -313,9 +313,11 @@ pub struct RankedTargetSubDAGCandidates<'a> {
 
 `search_workload(roots)` runs the shared-subtree pass once, discovers every target across every root's whole DAG (not just root-level sharing — a `SharedSubtreeStrategy` candidate three levels under an unshared `Filter` is exactly as real a site as a shared whole root), and asks every registered strategy to a fixpoint. Two logically different candidates at two different targets are never copied into two separate plans — they're two entries in two different `TargetSubDAGCandidates`s, sharing every other node in the workload by construction.
 
-`PlanSpace::cost_sorted(cost_model)` is the one ranking step: for each group, it dispatches by candidate shape — a same-shape `Rewrite` pair (a `SharedSubtreeStrategy` share/recompute choice) goes through `CostModel::cse_share_decision`; a same-shape run of `Summary` candidates realizing sketches (a `SketchAlgorithmStrategy` choice) goes through `CostModel::rank_candidates`; and a mixed group is ordered by each candidate's `CostModel::estimate_cost`. Every candidate gets a numeric cost aligned index-for-index in `costs`. Count in, count out—nothing is dropped to produce a ranking. Legality checks
+`PlanSpace::cost_sorted(cost_model)` is the one ranking step: for each candidate set, it dispatches by candidate shape — a same-shape `Rewrite` pair (a `SharedSubtreeStrategy` share/recompute choice) goes through `CostModel::cse_share_decision`; a same-shape run of `Summary` candidates realizing sketches (a `SketchAlgorithmStrategy` choice) goes through `CostModel::rank_candidates`; and a mixed candidate set is ordered by each candidate's `CostModel::estimate_cost`. Every candidate gets a numeric cost aligned index-for-index in `costs`. Count in, count out—nothing is dropped to produce a ranking. Legality checks
 may already have removed proposals before this boundary. In particular,
-`search_workload_with_targets` checks explicit per-root targets. Use
+`search_workload_with_targets` checks explicit per-root targets, while retaining
+direct DDSketch ratios with missing domain evidence and no root guarantee for
+backend inspection. Automatic selection skips those unproven ratios. Use
 `global_selection` for coordinated sharing/composition choices and
 `GlobalSelection::assemble_selected_dag` for the resulting semantic DAG; neither deploys it.
 
@@ -376,10 +378,10 @@ The crate provides no default `Matcher` implementation because the answer depend
 
 Concretely, `explanation.rs` reports three candidate kinds from each `TargetSubDAGCandidates`:
 
-- `ExplanationKind::SketchApproximation` — the group's candidates include a `Replacement::Summary` that actually realizes `SummaryFamilyType::Sketch(..)`, i.e. `SketchAlgorithmStrategy` found a real sketch alternative, not just an exact/pass-through candidate.
-- `ExplanationKind::CommonSubexpressionReuse` — `consumer_count >= 2` and the group's candidates include `SharedSubtreeStrategy`'s "build once and share" candidate (the `Replacement::Rewrite` whose `Rc` is the group's own `target`).
+- `ExplanationKind::SketchApproximation` — the set contains a `Replacement::Summary` that realizes `SummaryFamilyType::Sketch(..)`, not just an exact/pass-through candidate.
+- `ExplanationKind::CommonSubexpressionReuse` — `consumer_count >= 2` and the set contains `SharedSubtreeStrategy`'s "build once and share" candidate (the `Replacement::Rewrite` whose `Rc` is the set's `target`).
 
-- `ExplanationKind::ExactComposition` — the group contains an exact operation
+- `ExplanationKind::ExactComposition` — the candidate set contains an exact operation
   composed with a child target whose realization remains a coordinated choice.
 
 Each `ReplacementExplanation::reason` is copied verbatim from the matching candidate's own `ReplacementSubDAG::rationale`. Nothing in `explanation.rs` re-explains why a candidate is valid; that explanation already exists exactly once, on the candidate itself.

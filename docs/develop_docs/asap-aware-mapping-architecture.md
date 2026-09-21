@@ -72,7 +72,7 @@ Terminology used in the diagram:
   is a compact data structure that trades exactness for bounded error. A
   query's **accuracy target** states the allowed error and failure probability.
   A candidate's **rationale** is its human-readable explanation.
-- `PlanSpace` is a planner **memo**: a compact search structure with one
+- `PlanSpace` is a compact candidate space with one
   `TargetSubDAGCandidates` per target instead of one full plan per combination of choices.
   A `node_hash` is a structural fingerprint used to narrow explanation lookup;
   exact structural equality is still checked afterward.
@@ -101,21 +101,21 @@ flowchart TB
   end
 
   subgraph SEARCHSPACE[3. Store the workload-wide search space]
-    MEMO["PlanSpace<br/>one TargetSubDAGCandidates per target; each group keeps<br/>all candidates, including dependent compositions"]:::store
-    CAND -->|"deduplicate by target and candidate identity"| MEMO
+    SPACE["PlanSpace<br/>one TargetSubDAGCandidates per target; each candidate set keeps<br/>all candidates, including dependent compositions"]:::store
+    CAND -->|"deduplicate by target and candidate identity"| SPACE
   end
 
-  subgraph RANKING[4. Rank without selecting a final plan]
-    SORT["PlanSpace::cost_sorted<br/>use the CostModel to order each group<br/>and cost every candidate"]:::choose
-    GROUP["RankedTargetSubDAGCandidates<br/>the same candidates in preferred order,<br/>with costs aligned by index"]:::choose
-    MEMO --> SORT -->|"reorder only; preserve every candidate"| GROUP
+  subgraph RANKING[Optional ranked view]
+    SORT["PlanSpace::cost_sorted<br/>use the CostModel to order each candidate set<br/>and cost every candidate"]:::choose
+    RANKED["RankedTargetSubDAGCandidates<br/>the same candidates in preferred order,<br/>with costs aligned by index"]:::choose
+    SPACE --> SORT -->|"reorder only; preserve every candidate"| RANKED
   end
 
-  subgraph REPORTING[5. Produce human-facing annotations]
+  subgraph REPORTING[Optional reporting view]
     EXPLAIN["explain_replacements<br/>select reportable candidates, copy their rationale,<br/>and add kind, location, target, and node_hash"]:::report
     EXPORT["dag_export<br/>narrow by node_hash, then confirm structural equality"]:::report
     VIEWER["dag-viewer<br/>show a badge and explanation beside that node"]:::report
-    MEMO -->|"reporting view; no new planner decision"| EXPLAIN --> EXPORT --> VIEWER
+    SPACE -->|"reporting view; no new planner decision"| EXPLAIN --> EXPORT --> VIEWER
   end
 ```
 
@@ -230,11 +230,12 @@ strategy-specific discovery logic.
 ### 3.4 Store and rank the complete search space
 
 Workload search deduplicates candidates into a `PlanSpace`. Each distinct
-target has one `TargetSubDAGCandidates` containing all alternatives discovered for it. This
-MEMO representation preserves independent choices without materializing a flat
+target has one `TargetSubDAGCandidates` containing retained alternatives and
+rejection reasons. This
+compact representation preserves independent choices without enumerating a flat
 list of `2^N` complete plans for `N` replaceable targets.
 
-`PlanSpace::cost_sorted` ranks each group's existing candidates with the
+`PlanSpace::cost_sorted` ranks each target's existing candidates with the
 supplied `CostModel`. It returns the same candidates in preferred order, with
 costs aligned by index; ranking does not select or remove a candidate.
 
@@ -252,7 +253,7 @@ execution policy. Constructing all candidates before taking the first costs
 more than constructing only the preferred candidate, but it keeps the strategy
 contract consistent and preserves the full choice set for other callers.
 
-`PlanSpace::global_selection` optionally coordinates cross-group sharing and
+`PlanSpace::global_selection` optionally coordinates cross-target sharing and
 composition choices. `GlobalSelection::assemble_selected_dag` constructs the selected
 semantic DAG. These plain APIs do not establish lifecycle or physical deployment
 feasibility. Recurrence and lifecycle-aware variants require the corresponding

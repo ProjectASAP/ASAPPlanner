@@ -15,6 +15,9 @@ Follow [Run and inspect a query](user_guide_docs/run-a-query.md). Tool-specific 
 
 ## Embed the library
 
+Start with [ASAPPlanner input, output, and workflows](design_docs/architecture/input-output-workflow.md)
+for the integration boundary, nested inputs, and choice of planning workflow.
+
 Use [Public library functions and examples](develop_docs/library-api.md) for
 frontend lowering, workload search, ranking, optional selection and lifecycle
 integration.

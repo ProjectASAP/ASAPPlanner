@@ -984,7 +984,7 @@ Use this table to find the right place for a change.
 | Search a whole workload for supported legal candidates | `search_workload`/`search_workload_with` |
 | Enforce per-root result accuracy requirements | `search_workload_with_targets` |
 | Coordinate compatible choices across groups | `PlanSpace::global_selection` |
-| Materialize the selected semantic DAG | `GlobalSelection::assemble_selected_dag` |
+| Assemble the selected logical DAG | `GlobalSelection::assemble_selected_dag` |
 | Get every candidate ranked best-first, across a whole workload | `PlanSpace::cost_sorted` |
 | Get a real numeric cost per candidate, not just a relative rank | `CostModel::estimate_cost` |
 | Enumerate valid sketch algorithms | `summary_candidates` |

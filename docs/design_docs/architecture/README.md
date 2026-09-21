@@ -41,9 +41,10 @@ flowchart TD
 
 `PlanSpace` is the output of logical candidate search. Each target's candidate set holds
 alternatives and rejection reasons, but no selected maintenance lifecycle.
-The three branches after it are optional: inspect ranked candidates, select
-and assemble a logical DAG, or make a workload-aware lifecycle decision.
-The last branch needs additional workload and deployment evidence. Its first
+Choose among the three branches: inspect candidates (optionally ranked), select
+and assemble logical DAGs, or select and assemble with summary-maintenance
+lifecycle decisions. Use the last branch when Planner owns the maintenance
+decision; otherwise the backend owns it. Its first
 call returns a `GlobalSelection`; the second returns a
 `SummaryMaintenanceLifecyclePlan` with an assembled DAG root and lifecycle
 decisions. No branch by itself deploys or executes a physical plan.
@@ -71,8 +72,8 @@ view with index-aligned costs. Downstream may inspect compatible choices
 across targets rather than assuming the first candidate is a feasible
 physical workload plan. Candidates carry logical summary algorithms,
 parameters, and guarantees; selected maintenance lifecycle decisions appear
-only after a lifecycle-aware helper runs. Rejection reasons are retained in
-the candidate space.
+only after a summary-maintenance-lifecycle-aware helper runs. Rejection reasons
+are retained in the candidate space.
 
 ASAPQuery-backend and other downstream applications translate the candidates
 into physical alternatives. They own concrete implementations, storage layout,

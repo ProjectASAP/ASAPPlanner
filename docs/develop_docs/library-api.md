@@ -1,7 +1,7 @@
 # Public library functions
 
 Audience: developers embedding ASAPPlanner or adding strategies/models. This is
-a compact reference for the public workflow APIs at revision `e7fdb24`, not an
+a compact reference for the public workflow APIs, not an
 exhaustive symbol reference. The [CLI guide](../user_guide_docs/run-a-query.md) covers command-line inspection; the [design overview](../design_docs/architecture/README.md) defines ownership.
 
 ASAPPlanner's primary output is `PlanSpace`; ranking is a view over its candidates.
@@ -141,19 +141,20 @@ example, see [the CLI frontend example](../../crates/devtools/src/bin/show_pre_a
 
 ## Generate and rank candidates
 
-### What is a group?
+### Target sub-DAG candidates
 
-A **group** (`TargetSubDAGCandidates`) collects implementation alternatives for one query
-subexpression discovered by search. It is not a SQL `GROUP BY` group or a group
-of input rows. A `PlanSpace` contains these groups and the workload's query roots.
+`TargetSubDAGCandidates` collects alternatives for one query subexpression
+discovered by search. `PlanSpace` contains these per-target candidate sets and
+the workload's query roots. A root is a whole query; an inner expression can
+also be a target.
 
 For example, a supported `quantile(0.99, latency)` subexpression may have multiple
-legal summary implementations. Those alternatives belong to the same group
+summary alternatives. Those alternatives belong to the same candidate set
 because they are choices for the same computation. Another subexpression has its
-own group. If two queries reference a shared subexpression, they can consume the
-same group's result instead of requiring independent computation.
+own candidate set. If two queries reference a shared subexpression, they can
+share its selected computation.
 
-`cost_sorted()` returns a `RankedTargetSubDAGCandidates` for each group: the target subexpression,
+`cost_sorted()` returns a `RankedTargetSubDAGCandidates` for each target: the subexpression,
 its candidates in ranked order, and a cost entry aligned with each candidate.
 It keeps the alternatives available; it does not select an entire workload plan.
 
@@ -183,7 +184,7 @@ that satisfies the root target. One exception is a direct DDSketch quantile
 ratio: without input-domain evidence, it remains in `PlanSpace` with
 `guarantee: None` so the downstream backend can decide whether to select it.
 Its presence does **not** mean it satisfies the target. `cost_sorted` still
-shows it, but `global_selection` skips it and materializes the exact fallback
+shows it, but `global_selection` skips it and DAG assembly uses the exact fallback
 unless a certified alternative is available. A backend that wants the
 uncertified candidate must explicitly inspect it and check its own domain
 evidence and execution requirements before selecting or deploying it.
@@ -257,7 +258,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 | `search_workload_with` | Roots, strategy slice | `PlanSpace`; callers choose context-free replacement strategies |
 | `search_workload_with_targets` | Roots with optional end-to-end targets, strategies, accuracy model | Candidate space with supplied root-target checks; `None` does not supply a root-level requirement; uncertified direct DDSketch ratios remain available for backend selection |
 | `PlanSpace::cost_sorted` | Cost model | `Vec<RankedTargetSubDAGCandidates>`; retains alternatives and pairs `candidates[i]` with `costs[i]` |
-| `PlanSpace::cost_sorted_with_recurrence` | Cost model, recurrence profiles, optional horizon | Ranked groups or `RecurrenceError`; uses recurrence for applicable share/recompute comparisons |
+| `PlanSpace::cost_sorted_with_recurrence` | Cost model, recurrence profiles, optional horizon | Ranked per-target candidate sets or `RecurrenceError`; uses recurrence for applicable share/recompute comparisons |
 | `SketchAlgorithmStrategy::replacements` through `ReplacementStrategy` | One `TargetSubDAG` | Alternatives at that target; not whole-workload search |
 
 `cost_sorted` is a ranking view, not a request to discard all but the first
@@ -498,6 +499,13 @@ optional also does not guarantee every planning operation can succeed without it
 
 ## Lifecycle and capabilities
 
+Use this workflow when Planner owns summary-maintenance lifecycle decisions;
+otherwise the backend may make them from logical candidates. It includes both
+selection and DAG assembly, so callers do not first run the ordinary workflow.
+The first helper returns one `GlobalSelection`; the second is called per root
+and returns a plan containing `root: Rc<SummaryNode>` plus maintenance decisions.
+See the [workflow design](../design_docs/architecture/input-output-workflow.md#summary-maintenance-lifecycle-aware-helper).
+
 Two capabilities are distinct: the runtime can orchestrate a lifecycle, and the
 chosen summary representation supports the required state operations. Both must
 hold. Workload legality and known cost evidence can further restrict alternatives.
@@ -600,7 +608,7 @@ that prepared or retained shared state is supported.
 
 | Function | Inputs | Output / promise |
 | --- | --- | --- |
-| `plan_summary_maintenance_lifecycles` | Materialized semantic root, `WorkloadDemand`, `now_ms`, optional horizon, runtime capabilities, cost model | `Result<SummaryMaintenanceLifecyclePlan, …>` for that fixed root; does not revisit all semantic candidates |
+| `plan_summary_maintenance_lifecycles` | Assembled logical DAG root, `WorkloadDemand`, `now_ms`, optional horizon, runtime capabilities, cost model | `Result<SummaryMaintenanceLifecyclePlan, …>` for that fixed root; does not revisit all semantic candidates |
 | `global_selection_with_summary_maintenance_lifecycles` | `PlanSpace`, workload/root-entry associations, time, horizon, capabilities, cost model | Lifecycle-aware compatible selection/error, using eligible cost evidence |
 | `assemble_selected_dag_with_summary_maintenance_lifecycles` | Selection, target root and lifecycle context | Optional lifecycle plan/error; attaches state deployment decisions |
 
@@ -618,8 +626,8 @@ consume ranked candidates and perform this comparison downstream instead.
 
 ### What does global selection mean?
 
-`global_selection()` coordinates implementation choices **across the groups in
-the workload DAG**. Here, “global” describes that cross-group scope. It does not
+`global_selection()` coordinates choices **across target sub-DAG candidate sets
+in the workload**. Here, “global” describes that cross-target scope. It does not
 mean a proven globally optimal solution over every possible physical plan, nor
 selection across every machine in a deployment.
 
@@ -630,15 +638,15 @@ Q1 --+
      +--> A --> B
 Q2 --+
 
-A's group: alternatives for computing A
-B's group: alternatives for computing B
+A's candidate set: alternatives for computing A
+B's candidate set: alternatives for computing B
 ```
 
 Both queries need A, and computing A needs B. Choosing to compute A once and
 share it, versus recomputing it for each consumer, changes how many evaluations
 of B are needed. That can change which choice for B is preferable.
 
-`cost_sorted()` ranks each group's alternatives using that group's recorded
+`cost_sorted()` ranks each target's alternatives using that target's recorded
 consumer count. `global_selection()` accounts for ancestor sharing decisions
 when deriving effective usage counts, and keeps coupled parent/child composition
 choices consistent. The result records coordinated choices; `assemble_selected_dag()` then
@@ -646,8 +654,8 @@ constructs the selected semantic DAG while preserving shared nodes.
 
 | Operation | Question answered | Result |
 | --- | --- | --- |
-| `cost_sorted()` | How are the alternatives ranked for each subexpression? | All ranked alternatives per group |
-| `global_selection()` | Which compatible choices should be used together, accounting for sharing and dependencies? | A coordinated selection across groups under the supplied model |
+| `cost_sorted()` | How are the alternatives ranked for each subexpression? | Ranked alternatives per target |
+| `global_selection()` | Which compatible choices should be used together, accounting for sharing and dependencies? | A coordinated selection across targets under the supplied model |
 
 Plain `global_selection()` does not automatically perform lifecycle planning or
 establish physical deployment feasibility. Use the corresponding evidence-aware
@@ -655,14 +663,14 @@ workflow for those decisions. Downstream still owns physical commitment.
 
 | Method on `PlanSpace` / `GlobalSelection` | Behavior |
 | --- | --- |
-| `PlanSpace::global_selection(&model)` | Compatible structural selection across groups; no recurrence or lifecycle planning implied |
+| `PlanSpace::global_selection(&model)` | Compatible structural selection across targets; no recurrence or lifecycle planning implied |
 | `PlanSpace::global_selection_with_recurrence(...)` | Compatible selection using supplied recurrence profiles/horizon; no lifecycle commitments implied |
 | `GlobalSelection::assemble_selected_dag(&target)` | `Result<Option<Rc<SummaryNode>>, RealizationError>`; constructs semantic IR, not stored summary data |
 
 Use a target associated with the searched space; DAG assembly can return `None`
 when that target is absent. A downstream integration can use these convenience
 APIs when its supplied model/evidence supports the intended comparison. Neither
-plain structural selection nor taking each group's first candidate substitutes
+plain structural selection nor taking each target's first candidate substitutes
 for checking complete physical alternatives and deployment constraints.
 
 ### API definition and example
