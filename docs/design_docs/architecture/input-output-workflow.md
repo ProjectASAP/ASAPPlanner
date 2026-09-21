@@ -38,12 +38,16 @@ lifecycle helper is appropriate for candidate inspection or when a downstream
 system makes its own deployment decision. `global_selection` plus
 `materialize` yields a selected logical DAG, not a recommendation to maintain
 its summaries. For a Planner-side maintenance-versus-recompute decision, use
-the lifecycle-aware helper: it returns a `SummaryMaintenanceLifecyclePlan`
-containing both a materialized DAG root and lifecycle decisions. This is the
-recommended path before deployment when Planner is responsible for that cost
-comparison. Lifecycle is separate because its decision needs a horizon,
-update-rate and physical-cost/capability facts that logical candidate search
-does not necessarily have; it is not an intrinsic property of a candidate DAG.
+the two-stage lifecycle-aware workflow. First,
+`global_selection_with_summary_maintenance_lifecycles` selects compatible
+candidates across the `PlanSpace` and returns a `GlobalSelection`. Then,
+`materialize_with_summary_maintenance_lifecycles` builds the DAG for one root
+and returns a `SummaryMaintenanceLifecyclePlan` with that root and lifecycle
+decisions. This is the recommended path before deployment when Planner is
+responsible for that cost comparison. Lifecycle is separate because its
+decision needs a horizon, update rate, and physical-cost/capability facts that
+logical candidate search does not necessarily have; it is not an intrinsic
+property of a candidate DAG.
 
 The candidate DAGs are logical planning artifacts. ASAPPlanner does **not**
 produce a deployed executable plan; downstream systems bind physical operators,
@@ -82,7 +86,8 @@ flowchart TD
     G["global_selection + materialize(root)"]
     L["One selected Post-ASAP DAG; exact KeepPreAsap if no optimization is selected"]
     X["Extra lifecycle inputs: horizon; update rate; capabilities; comparable summary/raw costs"]
-    H["Lifecycle-aware helper"]
+    H["Lifecycle-aware global selection"]
+    HM["Materialize one root and decide lifecycle"]
     O["SummaryMaintenanceLifecyclePlan: materialized root + maintenance/recompute decision"]
     B["Backend: bind and execute an accepted contract"]
     Q --> F
@@ -92,7 +97,7 @@ flowchart TD
     P --> I
     P --> G --> L --> B
     P --> H
-    X --> H --> O --> B
+    X --> H --> HM --> O --> B
 ```
 
 “Predictable” says the query is known in advance; it is independent of its
@@ -385,15 +390,29 @@ It is still **not an executable deployment plan**. Physical operator binding, pl
 
 ### Lifecycle-aware helper
 
-Lifecycle-aware planning is an optional operation on an existing `PlanSpace`.
-It is not part of the canonical input-to-`PlanSpace` operation. Its purpose is
-to compare maintaining a summary with recomputing the raw query.
+Lifecycle-aware planning is a two-call workflow on an existing `PlanSpace`, not
+part of the canonical input-to-`PlanSpace` operation:
 
-The public helper receives these parameters:
+1. `global_selection_with_summary_maintenance_lifecycles` uses the workload
+   binding, lifecycle capabilities, and comparable costs to choose compatible
+   candidates across memo groups. It returns `GlobalSelection`, not a DAG or a
+   deployment plan.
+2. For each wanted query root, `materialize_with_summary_maintenance_lifecycles`
+   takes that selection and root, constructs a Post-ASAP DAG, compares the
+   selected summary's maintenance cost with raw recomputation, and returns
+   `Option<SummaryMaintenanceLifecyclePlan>`. When a summary does not beat a
+   known raw cost, or a required comparable cost is unavailable, the result
+   retains the exact `KeepPreAsap` root and no summary deployments.
+
+The second call is per root; a workload with multiple roots can therefore
+produce multiple lifecycle plans from one `GlobalSelection`.
+
+Across the two calls, the caller supplies these parameters:
 
 | Helper parameter | Source | Required |
 |---|---|---:|
-| `PlanSpace` | Canonical ASAPPlanner output | Yes |
+| `PlanSpace` | Canonical ASAPPlanner output; passed to selection | Yes |
+| `GlobalSelection` and one root | Selection result and a root in that `PlanSpace`; passed to materialization | Yes for each materialized root |
 | Workload binding | `QueryWorkload` plus the workload-entry indices associated with each root | Yes |
 | Planning time (`now_ms`) | Caller clock in Unix milliseconds | Yes |
 | Planning horizon | Caller policy | Conditional: required for finite totals over recurring demand |
@@ -451,14 +470,16 @@ This produces structurally compatible logical plans. It does not determine wheth
 Use when deciding whether maintained summary state should actually be deployed.
 
 ```text
-PlanSpace + lifecycle helper parameters
-    -> lifecycle-aware selection and materialization
-    -> SummaryMaintenanceLifecyclePlan
+PlanSpace + lifecycle inputs
+    -> global_selection_with_summary_maintenance_lifecycles
+    -> GlobalSelection
+    -> materialize_with_summary_maintenance_lifecycles(selection, root, ...)
+    -> SummaryMaintenanceLifecyclePlan for that root
     -> downstream physical deployment
 ```
 
-This helper considers recurrence, data arrival, planning horizon, capabilities,
-and comparable summary/raw costs. It does not change the canonical
+These calls consider recurrence, data arrival, planning horizon, capabilities,
+and comparable summary/raw costs. They do not change the canonical
 `PlanningWorkload -> PlanSpace` interface.
 
 It is the recommended workflow for deployment decisions.
