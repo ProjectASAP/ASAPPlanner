@@ -72,26 +72,7 @@ use crate::summary_maintenance_lifecycle::{
 
 // ── Recurring-cost vocabulary for mixed exact/summary plans (issue #171) ──
 
-/// The unit a recurring cost is expressed in. One variant today; an enum so
-/// a JSON/DAG export names the unit explicitly instead of a consumer
-/// assuming it, and so a future per-resource unit can be added without
-/// changing every hook's signature.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum CostUnit {
-    /// Abstract cost units per wall-clock second — the common currency
-    /// every recurring alternative (maintain-and-read vs. recompute-per-eval)
-    /// is compared in.
-    CostUnitsPerSecond,
-}
-
-impl CostUnit {
-    /// Stable name for export (`"cost_units_per_second"`).
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::CostUnitsPerSecond => "cost_units_per_second",
-        }
-    }
-}
+pub use asap_types::cost::CostUnit;
 
 /// Who produced a set of [`ExactCompositionCostInputs`], and under which
 /// model version — carried into every composed decision's explanation and
@@ -189,6 +170,7 @@ pub struct ExactCompositionCostInputs {
     /// Cost of one full raw recompute of the target from pre-ASAP data —
     /// the `KeepPreAsap` baseline's per-evaluation cost.
     pub raw_recompute_cost: Option<f64>,
+    /// Recurring formulas require `CostUnitsPerSecond`; totals yield no rate.
     pub unit: CostUnit,
     pub provenance: CostProvenance,
 }
@@ -232,6 +214,9 @@ impl ExactCompositionCostInputs {
 ///
 /// `None` if any input is unknown — see [`ExactCompositionCostInputs`].
 pub fn read_operation_plan_cost_rate(inputs: &ExactCompositionCostInputs) -> Option<CostRate> {
+    if inputs.unit != CostUnit::CostUnitsPerSecond {
+        return None;
+    }
     let maintenance = inputs.update_rate? * inputs.summary_maintenance_cost_per_update?;
     let per_eval =
         inputs.summary_read_cost? + inputs.expected_output_rows? * inputs.exact_cost_per_row?;
@@ -252,6 +237,9 @@ pub fn read_operation_plan_cost_rate(inputs: &ExactCompositionCostInputs) -> Opt
 pub fn maintenance_operation_plan_cost_rate(
     inputs: &ExactCompositionCostInputs,
 ) -> Option<CostRate> {
+    if inputs.unit != CostUnit::CostUnitsPerSecond {
+        return None;
+    }
     let per_update = inputs.exact_cost_per_row? + inputs.summary_maintenance_cost_per_update?;
     let maintenance = inputs.update_rate? * per_update;
     let evaluation = inputs.evaluation_rate?.0 * inputs.summary_read_cost?;
@@ -266,6 +254,9 @@ pub fn maintenance_operation_plan_cost_rate(
 ///
 /// `None` if either input is unknown — see [`ExactCompositionCostInputs`].
 pub fn raw_recompute_cost_rate(inputs: &ExactCompositionCostInputs) -> Option<CostRate> {
+    if inputs.unit != CostUnit::CostUnitsPerSecond {
+        return None;
+    }
     finite_rate(inputs.evaluation_rate?.0 * inputs.raw_recompute_cost?)
 }
 
@@ -1270,6 +1261,18 @@ mod tests {
             crate::recurrence::total_cost(CostRate(5.0), Horizon(10.0), Cost(3.0)),
             Cost(53.0)
         );
+    }
+
+    /// Consolidation preserves type identity and rejects totals in recurring formulas.
+    #[test]
+    fn recurring_formulas_require_the_shared_rate_unit() {
+        let mut inputs = known_inputs();
+        let shared: asap_types::cost::CostUnit = inputs.unit;
+        assert_eq!(shared.as_str(), "cost_units_per_second");
+        inputs.unit = asap_types::cost::CostUnit::CostUnits;
+        assert_eq!(read_operation_plan_cost_rate(&inputs), None);
+        assert_eq!(maintenance_operation_plan_cost_rate(&inputs), None);
+        assert_eq!(raw_recompute_cost_rate(&inputs), None);
     }
 
     #[test]

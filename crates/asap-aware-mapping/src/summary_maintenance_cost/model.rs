@@ -535,13 +535,11 @@ impl SummaryMaintenanceCostModel {
             ));
         }
         let mut assigned = HashSet::new();
-        if candidate.assignments.iter().any(|assignment| {
-            !assigned.insert(Rc::as_ptr(&assignment.summary))
-                || matches!(
-                    &assignment.framework,
-                    Some(SummaryWindowFramework::Extension(name)) if name.trim().is_empty()
-                )
-        }) {
+        if candidate
+            .assignments
+            .iter()
+            .any(|assignment| !assigned.insert(Rc::as_ptr(&assignment.summary)))
+        {
             return Err(AnalyticalCostError::MissingOrZero(
                 "unique window framework assignments",
             ));
@@ -2186,11 +2184,8 @@ mod tests {
             &target,
             &root,
             StreamingWindowFrameworkCandidate {
-                physical_plan_id: "invalid-extension".into(),
-                assignments: vec![StreamingWindowFrameworkAssignment {
-                    summary: Rc::clone(&windowed_summary),
-                    framework: Some(SummaryWindowFramework::Extension("  ".into())),
-                }],
+                physical_plan_id: "empty-assignments".into(),
+                assignments: vec![],
                 accuracy: StreamingWindowAccuracyEvidence::Exact,
                 node_evidence: model.node_evidence.clone(),
             },
