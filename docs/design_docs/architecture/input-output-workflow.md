@@ -14,7 +14,8 @@ Post-ASAP alternatives for the workload.
 | `PlanningWorkload.query_workload` | Query language and one-time/repeating query workloads | Yes |
 | `PlanningWorkload.data_workload` | Data arrival and optional evidence about ingestion, cardinality, and distribution | No implicit default. Set `None` when unavailable for non-PromQL workloads; PromQL requires `Some(DataWorkload)` with a nonzero ingestion interval. |
 | Frontend-specific dependencies (outside `PlanningWorkload`) | `SqlCatalog` for SQL; `now_ms` and, when needed, `HistogramCatalog` for PromQL | `SqlCatalog` is required for SQL lowering; `now_ms` is required for PromQL lowering |
-| Planning evidence and capabilities | Domain, accuracy, cost, and deployment facts supplied through the applicable provider/model interface | Conditional: required only by optimizations that depend on those facts |
+| Planning models | Candidate cost/ranking and accuracy composition/checking | Used by the relevant APIs; built-in `DefaultCostModel` and `DefaultAccuracyModel` are available |
+| External evidence and capabilities | Domain facts, measured costs, workload statistics, and runtime support | Supply when available and when the chosen optimization or lifecycle decision depends on them; absence is not proof |
 
 As part of the planning workflow, frontend lowering converts the workload
 entries into canonical Pre-ASAP `QueryExpr` roots. Those roots and the
@@ -287,28 +288,30 @@ They are explicit frontend function arguments, not one generic
 
 ### Planning evidence inputs
 
-**Evidence is a scoped fact used to establish legality, accuracy, cost, or feasibility.**
+**A model is planning logic; evidence is a scoped fact used by that logic.**
+For example, `DefaultAccuracyModel` knows how to combine error bounds, while
+an input-domain observation tells it whether a particular quantile ratio has
+the required bound. The former can be provided by a built-in default; the
+latter cannot be fabricated by one.
 
-Evidence is input to planning. The current library does not collect every kind
-in one `PlanningWorkload` field. The table below shows where each kind is
-supplied.
-
-Evidence is not globally required or globally optional. Each item is
-**conditionally required** by the decision that consumes it:
-
-| Evidence | Required when | Examples | Supplied through |
-|---|---|---|---|
-| Semantic/domain | A transformation needs to prove an input precondition | Input range, nonempty population, nonzero denominator | Typed accuracy/domain evidence provider |
-| Accuracy | An approximate candidate needs a data-dependent accuracy certificate | Quantile domain, Top-K confidence, composition certificate | Accuracy evidence provider or registered accuracy model |
-| Cost | Candidates are compared or selected by deployment cost | CPU time, operation count, memory, scan/storage I/O | Cost model or physical-evidence provider |
-| Workload | A frontend or optimization consumes that workload fact | Cardinality, distribution, ingestion rate, recurrence | `PlanningWorkload` query/data workload fields |
-| Capability | A candidate must be checked against deployable operations | Supported summaries, merge/delete support, window realization | Deployment capability or lifecycle provider |
+| Input | Where it enters / default | Why it matters |
+|---|---|---|
+| Query demand | `PlanningWorkload.query_workload` is required. | Query text and requirements define the semantics; recurrence determines how often a selected plan is read. |
+| Data workload | `PlanningWorkload.data_workload` may be `None` except for PromQL, which requires a nonzero ingestion interval. Other empirical fields may be unknown. | Arrival rate and cardinality can change maintenance cost or accuracy calculations; unknown values cannot be treated as zero. |
+| Accuracy model | Target-aware search takes an `AccuracyModel`; `DefaultAccuracyModel` is available. Default strategies also use it for candidate construction. | Composes candidate guarantees and checks them against requested accuracy. The model does not itself provide missing data-domain facts. |
+| Cost model | Candidate strategies and `cost_sorted`/`global_selection` use a `CostModel`; `DefaultCostModel` is available. | Ranks or selects candidates. The built-in model is not a measured deployment cost for every physical implementation. |
+| Accuracy/domain evidence | `AccuracyEvidenceProvider`; default strategies use `NoAccuracyEvidence` when no provider is supplied. | Input ranges, nonempty populations, Top-K intervals, and similar facts can certify or rule out particular approximations. Missing facts remain unknown. |
+| Measured cost evidence | Supplied through a deployment-specific cost model or physical-evidence provider when cost-based physical/lifecycle comparison is needed. | CPU, memory, and I/O estimates must be comparable before claiming a summary beats raw recomputation. |
+| Runtime/lifecycle capabilities | Passed to lifecycle APIs or checked by deployment-specific providers; `SummaryMaintenanceLifecycleCapabilities::default()` enables all four lifecycle shapes, so it is not proof of actual backend support. | Prevents choosing a maintenance/window operation the intended executor cannot implement. |
 
 Evidence must apply to the relevant workload and implementation. Time-sensitive evidence should also carry freshness information.
 
-Missing optional evidence does not invalidate unrelated candidates. When a
-candidate requires missing evidence, that candidate is unavailable rather than
-planned using a favorable assumption.
+The models and query demand are important inputs in ordinary planning, even
+when a caller chooses built-in model defaults. External evidence and runtime
+capabilities matter just as much to decisions that use them, but their values
+are not universally required to construct `PlanSpace`. Missing evidence does
+not invalidate unrelated candidates; a dependent decision remains unknown or
+unavailable rather than using a favorable assumption.
 Planner output may record the resulting guarantee, evidence provenance, or a
 rejection reason, but evidence itself remains an input.
 
@@ -333,6 +336,18 @@ output.
 * information needed for cross-group selection.
 
 A `PlanSpace` represents a **space of logical DAG choices**, not a single executable plan.
+
+Why does search return a space rather than one “optimal” plan? The search API
+does not receive one universally comparable physical cost and capability model
+for every deployment. For example, a summary that is cheap to update in one
+backend may be expensive or unsupported in another; the answer can also change
+when a query is run once versus every minute over a long horizon. Returning
+only one candidate at this stage would discard alternatives before those
+deployment facts are known. This is the current API boundary, not a claim that
+users should manually pick arbitrary DAG fragments: callers with a suitable
+model can use `global_selection` and, when deciding maintain versus recompute,
+the lifecycle-aware workflow to obtain a selected plan. Downstream still
+checks and commits its physical implementation.
 
 It represents that space compactly instead of eagerly copying every complete
 DAG. `PlanSpace` stores the workload's canonical roots once, creates one memo
