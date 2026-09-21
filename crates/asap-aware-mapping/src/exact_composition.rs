@@ -19,7 +19,7 @@
 //! `realize_child` takes the head of the child's own ranking): a
 //! [`Replacement::ExactComposition`] carries only the child *target*
 //! (`ExactComposition::child_target`, the same `Rc<QueryExpr>` whose
-//! `MemoGroup` in `PlanSpace` already holds every candidate for it). It is
+//! `TargetSubDAGCandidates` in `PlanSpace` already holds every candidate for it). It is
 //! [`PlanSpace::global_selection`](crate::replacement::PlanSpace::global_selection)
 //! that commits the compatible parent/child pair — so the child's own
 //! cost-model ranking, workload-wide effective consumer count, and shared
@@ -116,7 +116,7 @@ impl OperationPlacement {
 pub struct ExactComposition {
     pub placement: OperationPlacement,
     pub op: ExactOperation,
-    /// The pre-ASAP child the operator consumes; its `MemoGroup` holds the
+    /// The pre-ASAP child the operator consumes; its `TargetSubDAGCandidates` holds the
     /// candidates `global_selection` may commit this composition with.
     pub child_target: Rc<QueryExpr>,
     /// The composed node's output schema — the target's own pre-ASAP
@@ -216,7 +216,7 @@ impl ExactComposition {
         Ok(node)
     }
 
-    /// Structural identity for `MemoGroup` dedup: same placement, same
+    /// Structural identity for `TargetSubDAGCandidates` dedup: same placement, same
     /// operator, same child `Rc`.
     pub(crate) fn same_as(&self, other: &Self) -> bool {
         self.placement == other.placement

@@ -287,16 +287,16 @@ A custom cost model does not necessarily need to override every hook. The curren
 
 ---
 
-### `PlanSpace` / `MemoGroup` / `RankedGroup` — the whole-workload view
+### `PlanSpace` / `TargetSubDAGCandidates` / `RankedGroup` — the whole-workload view
 
 `ReplacementStrategy` answers "what are the candidates for this one target?" `PlanSpace` answers the same question for every target in a whole workload at once, without materializing `2^N` fully-copied plans for `N` independently-choosable sites.
 
 ```rust
 // replacement.rs
 
-// One MemoGroup per distinct TargetSubDAG in the whole workload —
+// One TargetSubDAGCandidates per distinct TargetSubDAG in the whole workload —
 // never a flat list of fully-materialized plans.
-pub struct MemoGroup {
+pub struct TargetSubDAGCandidates {
     pub target: Rc<QueryExpr>,
     pub consumer_count: usize,
     pub candidates: Vec<ReplacementSubDAG>,  // accepted alternatives, unranked
@@ -311,7 +311,7 @@ pub struct RankedGroup<'a> {
 }
 ```
 
-`search_workload(roots)` runs the shared-subtree pass once, discovers every target across every root's whole DAG (not just root-level sharing — a `SharedSubtreeStrategy` candidate three levels under an unshared `Filter` is exactly as real a site as a shared whole root), and asks every registered strategy to a fixpoint. Two logically different candidates at two different targets are never copied into two separate plans — they're two entries in two different `MemoGroup`s, sharing every other node in the workload by construction.
+`search_workload(roots)` runs the shared-subtree pass once, discovers every target across every root's whole DAG (not just root-level sharing — a `SharedSubtreeStrategy` candidate three levels under an unshared `Filter` is exactly as real a site as a shared whole root), and asks every registered strategy to a fixpoint. Two logically different candidates at two different targets are never copied into two separate plans — they're two entries in two different `TargetSubDAGCandidates`s, sharing every other node in the workload by construction.
 
 `PlanSpace::cost_sorted(cost_model)` is the one ranking step: for each group, it dispatches by candidate shape — a same-shape `Rewrite` pair (a `SharedSubtreeStrategy` share/recompute choice) goes through `CostModel::cse_share_decision`; a same-shape run of `Summary` candidates realizing sketches (a `SketchAlgorithmStrategy` choice) goes through `CostModel::rank_candidates`; and a mixed group is ordered by each candidate's `CostModel::estimate_cost`. Every candidate gets a numeric cost aligned index-for-index in `costs`. Count in, count out—nothing is dropped to produce a ranking. Legality checks
 may already have removed proposals before this boundary. In particular,
@@ -374,7 +374,7 @@ The crate provides no default `Matcher` implementation because the answer depend
 
 > A `TargetSubDAG` is worth explaining exactly when its `PlanSpace` candidate list contains something beyond the trivial, no-op realization.
 
-Concretely, `explanation.rs` reports three candidate kinds from each `MemoGroup`:
+Concretely, `explanation.rs` reports three candidate kinds from each `TargetSubDAGCandidates`:
 
 - `ExplanationKind::SketchApproximation` — the group's candidates include a `Replacement::Summary` that actually realizes `SummaryFamilyType::Sketch(..)`, i.e. `SketchAlgorithmStrategy` found a real sketch alternative, not just an exact/pass-through candidate.
 - `ExplanationKind::CommonSubexpressionReuse` — `consumer_count >= 2` and the group's candidates include `SharedSubtreeStrategy`'s "build once and share" candidate (the `Replacement::Rewrite` whose `Rc` is the group's own `target`).
@@ -392,6 +392,6 @@ Explanations are derived from candidates already present in `PlanSpace`. A new c
 
 ### How it derives `location` text
 
-`PlanSpace`/`MemoGroup` track `Rc<QueryExpr>` pointer identity, not human-readable breadcrumbs. `ReplacementExplanation::location` provides prose such as `root "dash_a" > lhs` so reporting consumers can identify the relevant part of the query without interpreting pointer identity. Location derivation does not make replacement or costing decisions.
+`PlanSpace`/`TargetSubDAGCandidates` track `Rc<QueryExpr>` pointer identity, not human-readable breadcrumbs. `ReplacementExplanation::location` provides prose such as `root "dash_a" > lhs` so reporting consumers can identify the relevant part of the query without interpreting pointer identity. Location derivation does not make replacement or costing decisions.
 
 ---

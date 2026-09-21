@@ -1425,7 +1425,7 @@ mod tests {
     /// same shared child twice (`BinaryOp{lhs: X, rhs: X}`, the same shape
     /// `pre_asap::cse`'s own within-one-query sharing collapses onto one
     /// `Rc`) must credit that child with 2 contributions per repeating
-    /// root, matching how `MemoGroup::consumer_count` already counts that
+    /// root, matching how `TargetSubDAGCandidates::consumer_count` already counts that
     /// exact structural occurrence twice — not 1, which a plain
     /// reachability-set walk would (wrongly) collapse it to.
     #[test]

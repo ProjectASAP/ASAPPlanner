@@ -22,7 +22,7 @@
 //! (issue #252) now *already* computes, for every
 //! [`TargetSubDAG`](crate::replacement::TargetSubDAG) in the workload, every
 //! semantically valid [`crate::replacement::ReplacementSubDAG`] a registered
-//! [`ReplacementStrategy`] can propose — a [`PlanSpace`] of [`MemoGroup`]s. A
+//! [`ReplacementStrategy`] can propose — a [`PlanSpace`] of [`TargetSubDAGCandidates`]s. A
 //! rule re-deriving the same yes/no fact from scratch would be answering a
 //! question the search already answered, via a second, independently
 //! maintained traversal that has to keep agreeing with the first one.
@@ -40,7 +40,7 @@
 //! instead of recomputing it at every consumer), *is* an applicability
 //! finding — [`explain_replacements`] and
 //! [`explain_replacements_with`] just translate [`PlanSpace`]'s
-//! [`MemoGroup`]s into that shape:
+//! [`TargetSubDAGCandidates`]s into that shape:
 //!
 //! - [`ExplanationKind::SketchApproximation`] — the `TargetSubDAG`'s
 //!   candidate list contains at least one [`Replacement::Summary`] that
@@ -122,7 +122,7 @@
 //!    subsumed level below it. Same guarantee, same mechanism, just living in
 //!    [`crate::replacement`] now instead of here.
 //! 2. **A node reachable via more than one path is one finding, not one per
-//!    path.** [`MemoGroup`]s are keyed by `Rc` pointer identity in
+//!    path.** [`TargetSubDAGCandidates`]s are keyed by `Rc` pointer identity in
 //!    [`PlanSpace`]'s internal map — there is exactly one group per distinct
 //!    `Rc`, full stop, so a shared `Aggregate` reached via two different
 //!    `BinaryOp` branches (or two different workload roots) is exactly one
@@ -134,7 +134,7 @@
 //! ## One thing [`PlanSpace`] doesn't carry that this module still needs:
 //! human-readable `location` text
 //!
-//! [`MemoGroup`]/[`PlanSpace`] deliberately track only `Rc<QueryExpr>`
+//! [`TargetSubDAGCandidates`]/[`PlanSpace`] deliberately track only `Rc<QueryExpr>`
 //! pointer identity — the currency the search itself needs — not
 //! caller-facing prose. [`ReplacementExplanation::location`] is prose (a
 //! breadcrumb like `root "dash_a" > lhs`), so this module keeps one small,
@@ -180,7 +180,7 @@
 //! [`SketchAlgorithmStrategy`]: crate::replacement::SketchAlgorithmStrategy
 //! [`SharedSubtreeStrategy`]: crate::replacement::SharedSubtreeStrategy
 //! [`PlanSpace`]: crate::replacement::PlanSpace
-//! [`MemoGroup`]: crate::replacement::MemoGroup
+//! [`TargetSubDAGCandidates`]: crate::replacement::TargetSubDAGCandidates
 
 use std::collections::HashMap;
 use std::fmt::Display;
@@ -190,7 +190,9 @@ use asap_types::post_asap::{SummaryExpr, SummaryFamilyType, SummaryNode};
 use asap_types::pre_asap::cse::{structural_hash, HashCache};
 use asap_types::pre_asap::query_expr::QueryExpr;
 
-use crate::replacement::{self, MemoGroup, PlanSpace, Replacement, ReplacementStrategy};
+use crate::replacement::{
+    self, PlanSpace, Replacement, ReplacementStrategy, TargetSubDAGCandidates,
+};
 
 /// Which kind of replacement a [`ReplacementExplanation`] is about.
 ///
@@ -288,7 +290,7 @@ pub fn explain_replacements_with<'s, Id: Display>(
     findings_from_plan_space(&space)
 }
 
-/// Translate every discovered [`MemoGroup`] in `space` into zero, one, or two
+/// Translate every discovered [`TargetSubDAGCandidates`] in `space` into zero, one, or two
 /// [`ReplacementExplanation`]s (a `TargetSubDAG` can be both sketch-approximable
 /// *and* shared — the two optimizations are independent axes, not mutually
 /// exclusive).
@@ -348,7 +350,7 @@ fn findings_from_plan_space(space: &PlanSpace<String>) -> Vec<ReplacementExplana
 /// Does `group`'s candidate list contain an exact composition (issue
 /// #171)? If so, the finding's `reason` is every such candidate's own
 /// `rationale`, joined.
-fn composition_finding_reason(group: &MemoGroup) -> Option<String> {
+fn composition_finding_reason(group: &TargetSubDAGCandidates) -> Option<String> {
     let reasons: Vec<&str> = group
         .candidates
         .iter()
@@ -366,7 +368,7 @@ fn composition_finding_reason(group: &MemoGroup) -> Option<String> {
 /// If so, the finding's `reason` is every such candidate's own `rationale`,
 /// joined — this module does not invent new prose to restate why a candidate
 /// is valid.
-fn sketch_finding_reason(group: &MemoGroup) -> Option<String> {
+fn sketch_finding_reason(group: &TargetSubDAGCandidates) -> Option<String> {
     let reasons: Vec<&str> = group
         .candidates
         .iter()
@@ -386,7 +388,7 @@ fn sketch_finding_reason(group: &MemoGroup) -> Option<String> {
 /// candidate (the [`Replacement::Rewrite`] whose `Rc` is the group's own
 /// `target`) in its candidate list? If so, the finding's `reason` is that
 /// candidate's own `rationale`.
-fn shared_subexpr_finding_reason(group: &MemoGroup) -> Option<String> {
+fn shared_subexpr_finding_reason(group: &TargetSubDAGCandidates) -> Option<String> {
     if group.consumer_count < 2 {
         return None;
     }
@@ -634,7 +636,7 @@ mod tests {
     /// collapses onto one `Rc` — the same `median(x) == median(x)` shape
     /// `pre_asap::cse`'s own `single_query_shares_its_own_repeated_subtree`
     /// test uses — must be reported once, not once per path: it is exactly
-    /// one [`crate::replacement::MemoGroup`], keyed by `Rc` pointer identity,
+    /// one [`crate::replacement::TargetSubDAGCandidates`], keyed by `Rc` pointer identity,
     /// not one per path that reaches it.
     #[test]
     fn a_shared_sketchable_aggregate_is_reported_only_once() {

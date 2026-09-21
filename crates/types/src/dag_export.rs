@@ -625,7 +625,7 @@ fn build_summary(node: &SummaryNode, nodes: &mut Vec<SummaryDagNode>) -> u32 {
 /// One replacement site a higher layer (the `dag_export` binary) found by
 /// running `asap_aware_mapping::replacement::search_workload_with` +
 /// `PlanSpace::cost_sorted` and picking the best-ranked candidate for one
-/// `MemoGroup` — `asap_types` never runs that search itself (same layering
+/// `TargetSubDAGCandidates` — `asap_types` never runs that search itself (same layering
 /// rule as [`DagNote`]: this crate defines the shape, a higher crate
 /// populates it).
 #[derive(Debug, Clone, Serialize)]
@@ -650,7 +650,7 @@ pub struct TargetReplacement {
     /// verbatim from `ReplacementSubDAG::rationale` by the higher layer,
     /// not re-derived here).
     pub rationale: String,
-    /// This candidate's rank among its `MemoGroup`'s alternatives after
+    /// This candidate's rank among its `TargetSubDAGCandidates`'s alternatives after
     /// `PlanSpace::cost_sorted` (`0` = best). Exposed so a renderer can show
     /// "this was the best of N candidates" without re-deriving the ranking.
     pub rank: usize,
@@ -660,7 +660,7 @@ pub struct TargetReplacement {
     /// field's own doc upstream).
     pub cost: f64,
     /// The target's own pre-ASAP subtree, before replacement — literally
-    /// `export(target)` for the `MemoGroup`'s own `target`, reused as-is.
+    /// `export(target)` for the `TargetSubDAGCandidates`'s own `target`, reused as-is.
     pub before: DagGraph,
     pub after: TargetReplacementAfter,
     /// Structured baseline/selected/benefit cost annotations for this one
@@ -761,7 +761,7 @@ pub enum PostAsapSubstitution {
 ///
 /// `find_winner` is the whole layering seam: `asap_types` never runs
 /// `asap_aware_mapping::replacement::search_workload_with` or
-/// `PlanSpace::cost_sorted` itself, and has no idea what a `MemoGroup` or a
+/// `PlanSpace::cost_sorted` itself, and has no idea what a `TargetSubDAGCandidates` or a
 /// `ReplacementProvenance` is — it only asks, for one node at a time, "did a
 /// higher layer already decide something for you?" A caller (e.g. the
 /// `dag_export` devtools binary) builds this closure once per workload

@@ -143,7 +143,7 @@ example, see [the CLI frontend example](../../crates/devtools/src/bin/show_pre_a
 
 ### What is a group?
 
-A **group** (`MemoGroup`) collects implementation alternatives for one query
+A **group** (`TargetSubDAGCandidates`) collects implementation alternatives for one query
 subexpression discovered by search. It is not a SQL `GROUP BY` group or a group
 of input rows. A `PlanSpace` contains these groups and the workload's query roots.
 

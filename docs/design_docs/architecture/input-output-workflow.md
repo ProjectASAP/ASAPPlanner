@@ -330,7 +330,7 @@ output.
 `PlanSpace` is Planner's canonical output. It contains:
 
 * canonical workload roots;
-* one candidate group for each discovered target sub-DAG (the current Rust type is `MemoGroup`);
+* one `TargetSubDAGCandidates` entry for each discovered target sub-DAG;
 * legal replacement candidates;
 * rejected candidates and reasons; and
 * information needed for cross-group selection.
@@ -351,8 +351,9 @@ checks and commits its physical implementation.
 
 It represents that space compactly instead of eagerly copying every complete
 DAG. `PlanSpace` stores the workload's canonical roots once, creates one
-candidate group for each distinct target sub-DAG, and stores that target's replacement
-alternatives once inside the group. Candidate children refer back to canonical
+`TargetSubDAGCandidates` entry for each distinct target sub-DAG, and stores
+that target's replacement alternatives once inside the entry. Candidate
+children refer back to canonical
 targets, so common subexpressions and shared alternatives are not duplicated
 across roots.
 

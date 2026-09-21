@@ -76,7 +76,7 @@ A candidate plan is formed by selecting one compatible alternative from each rel
 
 ## Current implementation boundary
 
-`PlanSpace` represents local alternatives in memo groups; it does not materialize
+`PlanSpace` represents local alternatives in per-target candidate entries; it does not materialize
 every Cartesian product of the dimensions above. `cost_sorted` preserves and
 ranks group alternatives. Optional `global_selection` coordinates supported
 sharing and composition choices, and materialization links the selected semantic

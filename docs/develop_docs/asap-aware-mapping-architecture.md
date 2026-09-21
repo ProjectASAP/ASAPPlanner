@@ -73,7 +73,7 @@ Terminology used in the diagram:
   query's **accuracy target** states the allowed error and failure probability.
   A candidate's **rationale** is its human-readable explanation.
 - `PlanSpace` is a planner **memo**: a compact search structure with one
-  `MemoGroup` per target instead of one full plan per combination of choices.
+  `TargetSubDAGCandidates` per target instead of one full plan per combination of choices.
   A `node_hash` is a structural fingerprint used to narrow explanation lookup;
   exact structural equality is still checked afterward.
 
@@ -101,7 +101,7 @@ flowchart TB
   end
 
   subgraph SEARCHSPACE[3. Store the workload-wide search space]
-    MEMO["PlanSpace<br/>one MemoGroup per target; each group keeps<br/>all candidates, including dependent compositions"]:::store
+    MEMO["PlanSpace<br/>one TargetSubDAGCandidates per target; each group keeps<br/>all candidates, including dependent compositions"]:::store
     CAND -->|"deduplicate by target and candidate identity"| MEMO
   end
 
@@ -186,7 +186,7 @@ Each returned `ReplacementSubDAG` contains:
 - the proposing strategy name and typed provenance; and
 - the rationale for offering that replacement.
 
-The containing `MemoGroup` records the target. Legality includes required schema,
+The containing `TargetSubDAGCandidates` records the target. Legality includes required schema,
 capability and accuracy checks; supported algorithm applicability alone is not
 a result certificate.
 
@@ -230,7 +230,7 @@ strategy-specific discovery logic.
 ### 3.4 Store and rank the complete search space
 
 Workload search deduplicates candidates into a `PlanSpace`. Each distinct
-target has one `MemoGroup` containing all alternatives discovered for it. This
+target has one `TargetSubDAGCandidates` containing all alternatives discovered for it. This
 MEMO representation preserves independent choices without materializing a flat
 list of `2^N` complete plans for `N` replaceable targets.
 

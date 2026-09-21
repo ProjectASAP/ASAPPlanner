@@ -22,7 +22,7 @@
 // additionally runs `asap_aware_mapping::replacement::search_workload` (this
 // binary took no strategies of its own — `default_strategies()` already
 // includes `AvgToSumOverCountStrategy` as of #282) over every lowered query
-// and ranks each discovered `MemoGroup` via `PlanSpace::cost_sorted`. The
+// and ranks each discovered `TargetSubDAGCandidates` via `PlanSpace::cost_sorted`. The
 // best-ranked
 // candidate per group feeds two additive outputs:
 //
@@ -939,7 +939,7 @@ fn annotate_with_explanations(
     }
 }
 
-/// One `MemoGroup`'s best-ranked candidate, kept alongside its own `target`
+/// One `TargetSubDAGCandidates`'s best-ranked candidate, kept alongside its own `target`
 /// — the unit both [`PostAsapResults::replacements`] and
 /// [`PostAsapResults::post_graphs`] are built from, so the two outputs can
 /// never disagree about which candidate won for a given target.
@@ -1098,7 +1098,7 @@ struct PostAsapResults {
     /// directly into that query's own pre-ASAP shape in place.
     post_graphs: Vec<(String, DagGraph)>,
     /// One `(query_name, TargetRejection)` per accuracy-illegal candidate
-    /// the search refused (`MemoGroup::rejected`, issue #172) whose target
+    /// the search refused (`TargetSubDAGCandidates::rejected`, issue #172) whose target
     /// node is found in that query's own exported graph.
     rejections: Vec<(String, TargetRejection)>,
 }
@@ -1156,7 +1156,7 @@ fn assign_workload_node_ids(graphs: &mut [&mut DagGraph]) {
 /// Run `asap_aware_mapping::replacement::search_workload` (its own
 /// `default_strategies()` — which includes `AvgToSumOverCountStrategy` as of
 /// #282 — is exactly the strategy set this binary wants; no custom list
-/// needed) over every lowered query, rank each discovered `MemoGroup` via
+/// needed) over every lowered query, rank each discovered `TargetSubDAGCandidates` via
 /// `PlanSpace::global_selection`, and build both `--post-asap` outputs from the
 /// exact same set of winning candidates (see [`Winner`]), so the flat
 /// `replacements` list and the merged `post_graph` can never disagree about

@@ -54,13 +54,13 @@
 //!   workload (not just one target in isolation) and run every registered
 //!   strategy against each one, to a fixpoint, without ever materializing a
 //!   flat `2^N`-sized candidate-plan list: [`replacement::PlanSpace`] holds
-//!   one Cascades-style [`replacement::MemoGroup`] per distinct
+//!   one Cascades-style [`replacement::TargetSubDAGCandidates`] per distinct
 //!   `TargetSubDAG`, each carrying every alternative discovered for it.
 //!   [`replacement::PlanSpace::cost_sorted`] is the final
 //!   `sorted_by(cost_model)` step, ranking each group's candidates
 //!   best-first via the same [`CostModel`](cost_model::CostModel) the
 //!   single-target steps above already consult — see [`replacement`]'s own
-//!   module docs for the full design (MEMO groups vs. flat plans, dedup
+//!   module docs for the full design (per-target candidates vs. flat plans, dedup
 //!   discipline, termination, cost-based ranking).
 //!
 //! **Picking *which* candidate, and materializing one final answer, is a
@@ -149,7 +149,7 @@
 //! | **Bind #1** | name resolution | `ColumnRef` (a name) → `ColumnId` (a concrete schema column) — the classic RDBMS "Parse → **Bind** → Optimize" pipeline sense (e.g. SQL Server's query-processor terminology) | [`asap_types::pre_asap::binder::Binder`](https://docs.rs/asap-types) |
 //! | **Implementation** — `replacement::implementations_for_with` | pre-ASAP → post-ASAP, *one node* | enumerating every concrete physical realization (a sketch family, an exact accumulator, or pass-through) for one [`AggIntent`](asap_types::pre_asap::agg_intent::AggIntent) | [`replacement`] |
 //! | **Replacement** — [`replacement::SketchAlgorithmStrategy::replacements`] | pre-ASAP → post-ASAP, *one target, every candidate* | wrap each `implementations_for_with` candidate into its own bound [`SummaryNode`](asap_types::post_asap::SummaryNode), ranked — a caller wanting one answer takes the first entry itself | [`replacement`] |
-//! | **Search** — [`replacement::search_workload`]/[`replacement::search_workload_with`] | pre-ASAP → post-ASAP, *whole workload, every candidate* | a Cascades/Volcano-style MEMO search: discover every candidate `TargetSubDAG` across a whole workload (not just one target in isolation), run every registered `ReplacementStrategy` against each to a fixpoint, and dedup into a [`replacement::PlanSpace`] — one [`replacement::MemoGroup`] per distinct `TargetSubDAG` holding every alternative discovered for it, never a flat `2^N`-sized list of whole candidate plans | [`replacement`] |
+//! | **Search** — [`replacement::search_workload`]/[`replacement::search_workload_with`] | pre-ASAP → post-ASAP, *whole workload, every candidate* | a Cascades/Volcano-style MEMO search: discover every candidate `TargetSubDAG` across a whole workload (not just one target in isolation), run every registered `ReplacementStrategy` against each to a fixpoint, and dedup into a [`replacement::PlanSpace`] — one [`replacement::TargetSubDAGCandidates`] per distinct `TargetSubDAG` holding every alternative discovered for it, never a flat `2^N`-sized list of whole candidate plans | [`replacement`] |
 //! | **Bind #2** (downstream, not in this crate) | post-ASAP → deployment placement | a *deployment's* own physical binder, deciding **which** candidate to commit to *and* **placement** (edge vs. backend, wire format, …) for a whole workload — a genuinely different, deployment-specific decision this crate doesn't model at all (this is also where a prior workload-wide "keep first/cost-preferred candidate per node" step, `bind::implement_workload`/`implement_workload_with`, would belong if a deployment still wants that exact behavior — it isn't shipped by this crate) | e.g. `control_plane::sketch_algebra::rules::bind_*` (as of this writing; expected to fold into that deployment's cost-model layer rather than stay a separate "bind" concept) |
 //!
 //! A related question (tracked alongside issues #6/#33): whether this
@@ -235,10 +235,10 @@ pub use recurrence::{
 pub use replacement::{
     default_strategies, default_strategies_with, search_workload, search_workload_with,
     search_workload_with_targets, summary_candidates, CompositionDecision, GlobalSelection,
-    ImplementError, Implementation, Matcher, MemoGroup, PlanSpace, Proposals, RankedGroup,
+    ImplementError, Implementation, Matcher, PlanSpace, Proposals, RankedGroup,
     RecurrenceProfileMap, RejectedCandidate, Replacement, ReplacementProvenance,
     ReplacementStrategy, ReplacementSubDAG, SelectedGroup, SharedSubtreeStrategy,
-    SketchAlgorithmStrategy, TargetSubDAG, MAX_SEARCH_ITERATIONS,
+    SketchAlgorithmStrategy, TargetSubDAG, TargetSubDAGCandidates, MAX_SEARCH_ITERATIONS,
 };
 pub use rewrite::{AvgToSumOverCountStrategy, SemanticEquivalentRewriteStrategy};
 pub use summary_maintenance_dag_export::{
