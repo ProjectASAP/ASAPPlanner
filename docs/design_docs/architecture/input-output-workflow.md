@@ -403,21 +403,17 @@ physical deployability.
 
 `PlanSpace::global_selection*` coordinates decisions across candidate groups.
 
-```text
-PlanSpace
-    |
-    v
-global_selection
-    |
-    v
-materialize(root)
-    |
-    v
-Result<Option<Rc<SummaryNode>>, ImplementError>
-    |
-    v
-Some(Rc<SummaryNode>): selected Post-ASAP DAG root for this query
-```
+| Selection → materialization (click a step for details) |
+|:---:|
+| [PlanSpace](asap-aware-plan-search.md) |
+| ↓ |
+| [global_selection](../../develop_docs/library-api.md#what-does-global-selection-mean) |
+| ↓ |
+| [materialize(root)](../../develop_docs/library-api.md#optional-whole-plan-selection-and-materialization) |
+| ↓ |
+| `Result<Option<Rc<SummaryNode>>, ImplementError>` ([API example](../../develop_docs/library-api.md#api-definition-and-example)) |
+| ↓ |
+| `Some(Rc<SummaryNode>)`: selected [Post-ASAP DAG root](../concepts/post-asap-ir.md) for this query |
 
 “Selected Post-ASAP DAG” is the conceptual name of the `Some` result, not a
 separate Rust type. It is no longer a set of candidates: `global_selection`
@@ -431,12 +427,6 @@ discovered in this `PlanSpace`; an `Err` means materialization failed. On
 parameters, schemas, windows, and accuracy guarantees.
 
 It is still **not an executable deployment plan**. Physical operator binding, placement, storage, and execution remain downstream responsibilities.
-
-For the selection algorithm and a call example, see the
-[library guide's whole-plan selection section](../../develop_docs/library-api.md#optional-whole-plan-selection-and-materialization).
-For how candidate choices are represented before selection, see
-[Plan search internals](asap-aware-plan-search.md); for the resulting node
-structure, see [Post-ASAP IR](../concepts/post-asap-ir.md).
 
 ### Lifecycle-aware helper
 
