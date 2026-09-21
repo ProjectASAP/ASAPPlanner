@@ -86,7 +86,7 @@ targets; `GlobalSelection::assemble_selected_dag` constructs a selected semantic
 Those plain APIs do not establish physical feasibility or a
 maintenance-versus-recompute decision. The lifecycle-aware selection call uses
 additional workload and evidence inputs; its DAG assembly call returns a
-plan with both a root and lifecycle decisions. See the [library guide](../../develop_docs/library-api.md#optional-whole-plan-selection-and-materialization)
+plan with both a root and lifecycle decisions. See the [library guide](../../develop_docs/library-api.md#optional-whole-plan-selection-and-dag-assembly)
 for the distinction. Downstream may consume candidates directly and retains
 responsibility for physical commitment.
 
@@ -102,4 +102,4 @@ responsibility for physical commitment.
 - [Analytical resource cost](../proposals/asap-aware-mapping/analytical-resource-cost.md)
 - [Searching over plans](asap-aware-plan-search.md)
 - [Explainability](../../develop_docs/replacement-explanations.md)
-- [ASAPPlanner and downstream application boundaries](planner-downstream-boundary.md)
+- [ASAPPlanner planner-runtime contract](planner-runtime-contract.md)

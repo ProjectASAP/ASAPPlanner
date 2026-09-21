@@ -204,7 +204,7 @@ impl AccuracyEvidenceProvider for WorkloadAccuracyEvidence<'_> {
 /// [`DefaultAccuracyModel`]; a deployment with a proof for a composition the
 /// default rejects (a registered cross-metric conversion, say) implements
 /// this trait and passes it to
-/// [`crate::replacement::SketchAlgorithmStrategy::with_models`].
+/// [`crate::replacement::SketchAlgorithmStrategy::new_with_planning_inputs`].
 pub trait AccuracyModel {
     /// The definition-registered rule for applying `operation` to an
     /// approximate input. `None` means the function is exact only over exact

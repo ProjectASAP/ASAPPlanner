@@ -1,25 +1,26 @@
-# Physical boundary byte estimates
+# Physical handoff byte estimates
 
-`asap_types::resources` owns the canonical `BoundaryResources`, `BoundaryKind`,
-and `MaterializationMedium` definitions in `resources/boundary.rs`. The mapping
-crate re-exports those same types from `boundary_cost` for import compatibility;
+`asap_types::resources` owns the canonical `PhysicalHandoffBytes` and
+`PhysicalHandoffKind` definitions in `resources/physical_handoff.rs`. The mapping
+crate re-exports those same types from `physical_handoff_cost` for import compatibility;
 all estimator and export consumers therefore use shared definitions, not copies.
-Their existing JSON format is unchanged. The shared byte counters support checked
+Materialization is encoded as `{"kind":"materialization"}` without a medium;
+no current estimator distinguishes storage media. The shared byte counters support checked
 addition without depending on planner errors. Snapshot binding, validation,
-calibration, and ranking remain in the mapping crate. Boundary traffic/write work
+calibration, and ranking remain in the mapping crate. handoff traffic/write work
 is distinct from CPU work, scanned bytes, and stored byte occupancy; it is not
 collapsed into the generic CPU/byte resource container.
 
-The physical-plan adapter accepts an optional `BoundaryProfile` in the
+The physical-plan adapter accepts an optional `PhysicalHandoffProfile` in the
 immutable `PhysicalEvidenceSnapshot`. `dag_export --planner-cost-json` accepts
 the same profile in a top-level `boundaries` field. With no profile, these
 dimensions remain unestimated and the existing resource objective is preserved.
 
-The profile's `plans` list binds boundaries to complete physical alternatives.
+The profile's `plans` list binds handoffs to complete physical alternatives.
 Each plan supplies its `root` and a `nodes` map containing every physical node,
-its authoritative statistics, and an explicit list of boundary actions on its
-output. An empty boundary list declares ordinary in-memory dataflow with no
-boundary traffic. Exactly one plan must match the root, complete node set, and
+its authoritative statistics, and an explicit list of handoff actions on its
+output. An empty handoff list declares ordinary in-memory dataflow with no
+handoff traffic. Exactly one plan must match the root, complete node set, and
 node/statistics snapshot; missing or ambiguous matches fail closed. This lets
 alternatives reuse a producer identity while declaring different transfers to
 their respective consumers. All alternatives share the profile's immutable
@@ -27,14 +28,14 @@ evidence generation and calibration. Evidence
 must match the immutable snapshot version and be current at planning time:
 `observed_at_ms <= planning_time < valid_until_ms`.
 
-Supported boundaries are:
+Supported handoffs are:
 
-| Boundary | Required evidence | Dimension |
+| Handoff | Required evidence | Dimension |
 |---|---|---|
 | Network/exchange/deployment transfer | Distinct nonempty source and destination locations | Network bytes |
-| Materialization/persistence | Memory, disk, or object-store medium | Materialization bytes |
+| Materialization/persistence | No additional kind-specific evidence | Materialization bytes |
 
-Every boundary also declares its unique physical ID, output logical bytes,
+Every handoff also declares its unique physical ID, output logical bytes,
 encoded bytes per execution, and positive copy count. Logical bytes must equal
 the producer's output statistic. Encoded bytes capture an explicit compression
 or serialization estimate; empty and nonempty payloads must agree with the
@@ -43,39 +44,39 @@ and a materialization action with distinct IDs; these contribute to different
 dimensions and require separate calibration coefficients.
 
 ```text
-boundary_bytes = encoded_bytes * copies * executions
+handoff_bytes = encoded_bytes * copies * executions
 ```
 
-For a shared boundary (`consumer: null`), execution multiplicity comes from
-the producer. For a per-consumer boundary, `consumer` must identify an actual,
+For a shared handoff (`consumer: null`), execution multiplicity comes from
+the producer. For a per-consumer handoff, `consumer` must identify an actual,
 reachable parent of the producer; multiplicity comes from that consumer.
 `Once` means one execution; `PerEvaluation` uses the comparison scope's demand.
-Shared producers are traversed once regardless of fan-out. Duplicate boundary
+Shared producers are traversed once regardless of fan-out. Duplicate handoff
 IDs fail closed instead of being ambiguously counted or silently dropped.
-Boundary profiles currently require `CacheProfile::NoCache`. Cache evidence does
+handoff profiles currently require `CacheProfile::NoCache`. Cache evidence does
 not identify which physical transfers or materializations are skipped on a hit,
-and boundary execution counts derive from the comparison scope rather than a
-post-cache schedule. Combining a boundary profile with `CacheProfile::Evidence`
-therefore fails closed until cache-aware boundary execution evidence exists.
-Supported exports retain the no-cache profile provenance alongside boundary
+and handoff execution counts derive from the comparison scope rather than a
+post-cache schedule. Combining a handoff profile with `CacheProfile::Evidence`
+therefore fails closed until cache-aware handoff execution evidence exists.
+Supported exports retain the no-cache profile provenance alongside handoff
 model/calibration versions.
 
 Example: a retained producer materializes 40 encoded bytes once. Two consumers
 each receive two copies of those 40 bytes over three evaluations. The totals
 are 40 materialization bytes and 480 network bytes. Logical in-memory edges
-without a boundary action add no traffic. A retained producer can therefore
+without a handoff action add no traffic. A retained producer can therefore
 have a once-only persistence action and repeated transfers to its readers.
 
-`BoundaryEstimate` keeps network and materialization totals separate and returns
-per-node and per-boundary terms with model, evidence, and calibration provenance.
-A `BoundaryCalibration` supplies finite, nonnegative cost coefficients in the
+`PhysicalHandoffEstimate` keeps network and materialization totals separate and returns
+per-node and per-handoff terms with model, evidence, and calibration provenance.
+A `PhysicalHandoffCalibration` supplies finite, nonnegative cost coefficients in the
 same cost units as the base resource model, and a nonempty version. Both
 alternatives use that profile when ranking. This models byte work, not transfer
 latency, bandwidth contention, memory lifetime, or storage requests.
 Base CPU, scan, and retained-memory coefficients may all be zero when at least
-one boundary coefficient is positive. An absent boundary profile or an entirely
+one handoff coefficient is positive. An absent handoff profile or an entirely
 zero objective remains unavailable for ranking.
-Both the base and boundary calibration versions must be nonempty, including
+Both the base and handoff calibration versions must be nonempty, including
 when the base coefficients are all zero; combined annotations identify both.
 
 Annotations expose totals in `bytes`, plus terms named
@@ -93,7 +94,7 @@ separate follow-up integration points.
 Verification:
 
 ```sh
-cargo test -p asap-aware-mapping --test boundary_cost
-cargo test -p asap-devtools --bin dag_export boundary_bytes_export_and_change_plan_selection
+cargo test -p asap-aware-mapping --test physical_handoff_cost
+cargo test -p asap-devtools --bin dag_export handoff_bytes_export_and_change_plan_selection
 python3 -m unittest discover -s tools/dag-viewer -p 'test_render.py'
 ```

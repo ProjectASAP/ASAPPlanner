@@ -136,47 +136,42 @@ fn fixture() -> (EvidenceBackedPhysicalDag, ComparisonScope) {
     )
 }
 
-use asap_aware_mapping::boundary_cost::*;
+use asap_aware_mapping::physical_handoff_cost::*;
 
 // Legacy mapping imports and the shared resource API are the very same Rust types.
 #[test]
 fn mapping_resource_reexports_are_wire_compatible_shared_types() {
-    let shared = asap_types::resources::BoundaryResources {
+    let shared = asap_types::resources::PhysicalHandoffBytes {
         network_bytes: 480,
         materialization_bytes: 40,
     };
-    let legacy: BoundaryResources = shared;
+    let legacy: PhysicalHandoffBytes = shared;
     assert_eq!(
         serde_json::to_value(legacy).unwrap(),
         serde_json::json!({"network_bytes": 480, "materialization_bytes": 40})
     );
-    let shared_kind = asap_types::resources::BoundaryKind::Materialization {
-        medium: asap_types::resources::MaterializationMedium::Disk,
-    };
-    let mut boundary = transfer("persist", None);
-    boundary.kind = shared_kind;
-    let json = serde_json::to_value(&boundary).unwrap();
+    let shared_kind = asap_types::resources::PhysicalHandoffKind::Materialization;
+    let mut handoff = transfer("persist", None);
+    handoff.kind = shared_kind;
+    let json = serde_json::to_value(&handoff).unwrap();
+    assert_eq!(json["kind"], serde_json::json!({"kind": "materialization"}));
     assert_eq!(
-        json["kind"],
-        serde_json::json!({"kind": "materialization", "medium": "disk"})
-    );
-    assert_eq!(
-        serde_json::from_value::<PhysicalBoundary>(json).unwrap(),
-        boundary
+        serde_json::from_value::<PhysicalHandoff>(json).unwrap(),
+        handoff
     );
 }
 
-fn profile(dag: &EvidenceBackedPhysicalDag) -> BoundaryProfile {
-    BoundaryProfile {
+fn profile(dag: &EvidenceBackedPhysicalDag) -> PhysicalHandoffProfile {
+    PhysicalHandoffProfile {
         evidence_version: "evidence-v1".into(),
         observed_at_ms: 90,
         valid_until_ms: 200,
-        calibration: BoundaryCalibration {
+        calibration: PhysicalHandoffCalibration {
             version: "bytes-v1".into(),
             cost_per_network_byte: 2.0,
             cost_per_materialization_byte: 3.0,
         },
-        plans: vec![BoundaryPlanEvidence {
+        plans: vec![PhysicalHandoffPlanEvidence {
             root: dag.root.clone(),
             nodes: dag
                 .nodes
@@ -184,10 +179,10 @@ fn profile(dag: &EvidenceBackedPhysicalDag) -> BoundaryProfile {
                 .map(|node| {
                     (
                         node.id.clone(),
-                        BoundaryNodeEvidence {
+                        PhysicalHandoffNodeEvidence {
                             node: node.clone(),
                             statistics: dag.evidence[&node.id].statistics.clone(),
-                            boundaries: vec![],
+                            handoffs: vec![],
                         },
                     )
                 })
@@ -196,11 +191,11 @@ fn profile(dag: &EvidenceBackedPhysicalDag) -> BoundaryProfile {
     }
 }
 
-fn transfer(id: &str, consumer: Option<&str>) -> PhysicalBoundary {
-    PhysicalBoundary {
+fn transfer(id: &str, consumer: Option<&str>) -> PhysicalHandoff {
+    PhysicalHandoff {
         id: id.into(),
         consumer: consumer.map(str::to_owned),
-        kind: BoundaryKind::Network {
+        kind: PhysicalHandoffKind::Network {
             source_location: "edge".into(),
             destination_location: "backend".into(),
         },
@@ -210,16 +205,13 @@ fn transfer(id: &str, consumer: Option<&str>) -> PhysicalBoundary {
     }
 }
 
-fn profiles_for_alternatives(dags: &[&EvidenceBackedPhysicalDag]) -> BoundaryProfile {
+fn profiles_for_alternatives(dags: &[&EvidenceBackedPhysicalDag]) -> PhysicalHandoffProfile {
     let mut combined = profile(dags[0]);
     combined.plans.clear();
     for dag in dags {
         let mut alternative = profile(dag);
-        alternative.plans[0]
-            .nodes
-            .get_mut("scan")
-            .unwrap()
-            .boundaries = vec![transfer(&format!("wire-{}", dag.root), Some(&dag.root))];
+        alternative.plans[0].nodes.get_mut("scan").unwrap().handoffs =
+            vec![transfer(&format!("wire-{}", dag.root), Some(&dag.root))];
         combined.plans.extend(alternative.plans);
     }
     combined
@@ -227,7 +219,7 @@ fn profiles_for_alternatives(dags: &[&EvidenceBackedPhysicalDag]) -> BoundaryPro
 
 // Alternative consumers may share a producer identity without sharing transfers.
 #[test]
-fn shared_producer_boundaries_are_scoped_to_each_alternative() {
+fn shared_producer_handoffs_are_scoped_to_each_alternative() {
     let (dag, scope) = fixture();
     let alternative = |root: &str| {
         let mut value = dag.clone();
@@ -242,16 +234,16 @@ fn shared_producer_boundaries_are_scoped_to_each_alternative() {
     let candidate = alternative("right");
     let profile = profiles_for_alternatives(&[&raw, &candidate]);
     for plan in [&raw, &candidate] {
-        let estimate = estimate_boundaries(plan, &scope, &profile, "evidence-v1").unwrap();
+        let estimate = estimate_physical_handoffs(plan, &scope, &profile, "evidence-v1").unwrap();
         assert_eq!(estimate.total.network_bytes, 240);
-        assert_eq!(estimate.per_boundary.len(), 1);
+        assert_eq!(estimate.per_handoff.len(), 1);
         assert!(estimate
-            .per_boundary
+            .per_handoff
             .contains_key(&format!("wire-{}", plan.root)));
     }
 }
 
-// A boundary binding must identify exactly one complete physical alternative.
+// A handoff binding must identify exactly one complete physical alternative.
 #[test]
 fn missing_ambiguous_and_mismatched_plan_bindings_are_rejected() {
     let (dag, scope) = fixture();
@@ -284,7 +276,7 @@ fn missing_ambiguous_and_mismatched_plan_bindings_are_rejected() {
             _ => unreachable!(),
         }
         assert!(
-            estimate_boundaries(&dag, &scope, &profile, "evidence-v1").is_err(),
+            estimate_physical_handoffs(&dag, &scope, &profile, "evidence-v1").is_err(),
             "case {case}"
         );
     }
@@ -296,23 +288,23 @@ fn memory_edges_are_free_and_shared_transfer_is_counted_once() {
     let (dag, scope) = fixture();
     let mut profile = profile(&dag);
     assert_eq!(
-        estimate_boundaries(&dag, &scope, &profile, "evidence-v1")
+        estimate_physical_handoffs(&dag, &scope, &profile, "evidence-v1")
             .unwrap()
             .total,
-        BoundaryResources::default()
+        PhysicalHandoffBytes::default()
     );
     profile.plans[0]
         .nodes
         .get_mut("scan")
         .unwrap()
-        .boundaries
+        .handoffs
         .push(transfer("shared", None));
-    let estimate = estimate_boundaries(&dag, &scope, &profile, "evidence-v1").unwrap();
+    let estimate = estimate_physical_handoffs(&dag, &scope, &profile, "evidence-v1").unwrap();
     assert_eq!(estimate.total.network_bytes, 240); // 40 encoded bytes × 2 replicas × 3 evaluations
     assert_eq!(estimate.total.materialization_bytes, 0);
     assert_eq!(estimate.cost, 480.0);
     assert_eq!(estimate.per_node["scan"].network_bytes, 240);
-    assert_eq!(estimate.per_boundary["shared"].network_bytes, 240);
+    assert_eq!(estimate.per_handoff["shared"].network_bytes, 240);
 }
 
 // A retained producer materializes once and transfers separately to each reader.
@@ -323,16 +315,14 @@ fn materialization_once_and_transfers_per_consumer_have_distinct_multiplicity() 
     dag.nodes[0].retained_bytes = 80;
     let mut profile = profile(&dag);
     let mut materialize = transfer("persist", None);
-    materialize.kind = BoundaryKind::Materialization {
-        medium: MaterializationMedium::Disk,
-    };
+    materialize.kind = PhysicalHandoffKind::Materialization;
     materialize.copies = 1;
-    profile.plans[0].nodes.get_mut("scan").unwrap().boundaries = vec![
+    profile.plans[0].nodes.get_mut("scan").unwrap().handoffs = vec![
         materialize,
         transfer("left-wire", Some("left")),
         transfer("right-wire", Some("right")),
     ];
-    let estimate = estimate_boundaries(&dag, &scope, &profile, "evidence-v1").unwrap();
+    let estimate = estimate_physical_handoffs(&dag, &scope, &profile, "evidence-v1").unwrap();
     assert_eq!(estimate.total.materialization_bytes, 40);
     assert_eq!(estimate.total.network_bytes, 480);
     assert_eq!(estimate.cost, 1080.0);
@@ -340,39 +330,39 @@ fn materialization_once_and_transfers_per_consumer_have_distinct_multiplicity() 
 
 // Invalid endpoint, byte evidence, duplicate identity, and overflow fail closed.
 #[test]
-fn incompatible_boundary_evidence_is_rejected() {
+fn incompatible_handoff_evidence_is_rejected() {
     let (dag, scope) = fixture();
     for case in 0..7 {
         let mut profile = profile(&dag);
-        let mut boundary = transfer("wire", Some("left"));
+        let mut handoff = transfer("wire", Some("left"));
         match case {
-            0 => boundary.consumer = Some("root".into()),
-            1 => boundary.logical_bytes = 79,
-            2 => boundary.copies = 0,
-            3 => boundary.encoded_bytes = 0,
+            0 => handoff.consumer = Some("root".into()),
+            1 => handoff.logical_bytes = 79,
+            2 => handoff.copies = 0,
+            3 => handoff.encoded_bytes = 0,
             4 => {
-                boundary.kind = BoundaryKind::Network {
+                handoff.kind = PhysicalHandoffKind::Network {
                     source_location: "same".into(),
                     destination_location: "same".into(),
                 }
             }
-            5 => boundary.copies = u64::MAX,
+            5 => handoff.copies = u64::MAX,
             6 => profile.plans[0]
                 .nodes
                 .get_mut("scan")
                 .unwrap()
-                .boundaries
-                .push(boundary.clone()),
+                .handoffs
+                .push(handoff.clone()),
             _ => unreachable!(),
         }
         profile.plans[0]
             .nodes
             .get_mut("scan")
             .unwrap()
-            .boundaries
-            .push(boundary);
+            .handoffs
+            .push(handoff);
         assert!(
-            estimate_boundaries(&dag, &scope, &profile, "evidence-v1").is_err(),
+            estimate_physical_handoffs(&dag, &scope, &profile, "evidence-v1").is_err(),
             "case {case}"
         );
     }
@@ -384,19 +374,19 @@ fn missing_stale_and_non_finite_evidence_is_rejected() {
     let (dag, scope) = fixture();
     let mut evidence = profile(&dag);
     evidence.plans[0].nodes.remove("left");
-    assert!(estimate_boundaries(&dag, &scope, &evidence, "evidence-v1").is_err());
+    assert!(estimate_physical_handoffs(&dag, &scope, &evidence, "evidence-v1").is_err());
     evidence = profile(&dag);
     evidence.valid_until_ms = 100;
-    assert!(estimate_boundaries(&dag, &scope, &evidence, "evidence-v1").is_err());
+    assert!(estimate_physical_handoffs(&dag, &scope, &evidence, "evidence-v1").is_err());
     evidence = profile(&dag);
     evidence.calibration.cost_per_network_byte = f64::INFINITY;
-    assert!(estimate_boundaries(&dag, &scope, &evidence, "evidence-v1").is_err());
-    assert!(estimate_boundaries(&dag, &scope, &profile(&dag), "different").is_err());
+    assert!(estimate_physical_handoffs(&dag, &scope, &evidence, "evidence-v1").is_err());
+    assert!(estimate_physical_handoffs(&dag, &scope, &profile(&dag), "different").is_err());
 }
 
 // Individual actions may fit while accumulation across actions or nodes overflows.
 #[test]
-fn boundary_accumulation_and_calibrated_cost_overflow_are_rejected() {
+fn handoff_accumulation_and_calibrated_cost_overflow_are_rejected() {
     use asap_aware_mapping::analytical_cost::AnalyticalCostError;
     let (mut dag, mut scope) = fixture();
     scope.recurrence = QueryRecurrence::OneTime {
@@ -412,18 +402,18 @@ fn boundary_accumulation_and_calibrated_cost_overflow_are_rejected() {
             ("first", "scan"),
             ("second", if different_nodes { "left" } else { "scan" }),
         ] {
-            let mut boundary = transfer(id, None);
-            boundary.copies = 1;
-            boundary.encoded_bytes = u64::MAX / 2 + 1;
+            let mut handoff = transfer(id, None);
+            handoff.copies = 1;
+            handoff.encoded_bytes = u64::MAX / 2 + 1;
             evidence.plans[0]
                 .nodes
                 .get_mut(node)
                 .unwrap()
-                .boundaries
-                .push(boundary);
+                .handoffs
+                .push(handoff);
         }
         assert!(matches!(
-            estimate_boundaries(&dag, &scope, &evidence, "evidence-v1"),
+            estimate_physical_handoffs(&dag, &scope, &evidence, "evidence-v1"),
             Err(AnalyticalCostError::Overflow)
         ));
     }
@@ -432,11 +422,33 @@ fn boundary_accumulation_and_calibrated_cost_overflow_are_rejected() {
         .nodes
         .get_mut("scan")
         .unwrap()
-        .boundaries
+        .handoffs
         .push(transfer("wire", None));
     evidence.calibration.cost_per_network_byte = f64::MAX;
     assert!(matches!(
-        estimate_boundaries(&dag, &scope, &evidence, "evidence-v1"),
+        estimate_physical_handoffs(&dag, &scope, &evidence, "evidence-v1"),
         Err(AnalyticalCostError::Overflow)
     ));
+}
+
+// Renamed Rust fields accept existing evidence and preserve per-action estimate JSON.
+#[test]
+fn handoff_wire_fields_remain_compatible() {
+    let (dag, scope) = fixture();
+    let mut evidence = profile(&dag);
+    evidence.plans[0].nodes.get_mut("scan").unwrap().handoffs = vec![transfer("wire", None)];
+    let wire = serde_json::to_value(&evidence).unwrap();
+    let node = &wire["plans"][0]["nodes"]["scan"];
+    assert!(node.get("handoffs").is_none());
+    assert_eq!(node["boundaries"][0]["id"], "wire");
+    let restored: PhysicalHandoffProfile = serde_json::from_value(wire).unwrap();
+    assert_eq!(restored, evidence);
+    let estimate = estimate_physical_handoffs(&dag, &scope, &restored, "evidence-v1").unwrap();
+    let wire = serde_json::to_value(&estimate).unwrap();
+    assert!(wire.get("per_handoff").is_none());
+    assert_eq!(wire["per_boundary"]["wire"]["network_bytes"], 240);
+    assert_eq!(
+        serde_json::from_value::<PhysicalHandoffEstimate>(wire).unwrap(),
+        estimate
+    );
 }

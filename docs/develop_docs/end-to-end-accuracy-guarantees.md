@@ -1,4 +1,4 @@
-# End-to-End Accuracy Guarantees Implementation Companion
+# End-to-End Accuracy Guarantees Realization Companion
 
 This guide explains how to implement, extend, and validate the end-to-end
 accuracy model. Read the
@@ -47,7 +47,7 @@ The main implementation locations are:
 
 Read the sections below when changing one of those contracts.
 
-## Implementation model
+## Realization model
 
 Accuracy reasoning and allocation are separate from cost modeling:
 

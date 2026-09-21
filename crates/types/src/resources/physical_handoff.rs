@@ -1,9 +1,8 @@
 //! Physical transfer and materialization dimensions, independent of planner policy.
 //!
-//! A boundary is either a network transfer between execution locations or a
-//! materialization of an intermediate result in memory, on disk, or in an
-//! object store. This module defines their kinds, materialization media, and
-//! separate byte-work counters; it is not limited to network resources.
+//! A handoff is either a network transfer between execution locations or a
+//! materialization of an intermediate result. This module defines their kinds
+//! and separate byte-work counters; it is not limited to network resources.
 //!
 //! Counters describe bytes transferred or materialized, not retained memory,
 //! allocated disk space, or storage request counts. Estimation, evidence
@@ -13,35 +12,27 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-pub enum BoundaryKind {
+pub enum PhysicalHandoffKind {
     /// Transfer encoded data between execution locations.
     Network {
         source_location: String,
         destination_location: String,
     },
-    /// Write an intermediate result to the specified medium for later use.
-    Materialization { medium: MaterializationMedium },
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum MaterializationMedium {
-    Memory,
-    Disk,
-    ObjectStore,
+    /// Write an intermediate result for later use.
+    Materialization,
 }
 
 /// Byte work at explicitly declared physical actions, not storage occupancy.
 /// Network traffic and materialization writes remain separate dimensions.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct BoundaryResources {
-    /// Bytes transferred across explicitly declared network boundaries.
+pub struct PhysicalHandoffBytes {
+    /// Bytes transferred across explicitly declared network handoffs.
     pub network_bytes: u64,
-    /// Bytes written across materialization boundaries, regardless of medium.
+    /// Bytes written across materialization handoffs, regardless of medium.
     pub materialization_bytes: u64,
 }
 
-impl BoundaryResources {
+impl PhysicalHandoffBytes {
     pub fn terms(self) -> [(&'static str, u64); 2] {
         [
             ("network_bytes", self.network_bytes),
@@ -64,20 +55,20 @@ impl BoundaryResources {
 mod tests {
     use super::*;
 
-    /// The shared vocabulary retains the original flat counters and tagged kind JSON.
+    /// Handoff JSON keeps separate counters and only the evidence used for each kind.
     #[test]
-    fn boundary_json_format_is_unchanged() {
-        let bytes = BoundaryResources {
+    fn handoff_json_round_trip() {
+        let bytes = PhysicalHandoffBytes {
             network_bytes: 480,
             materialization_bytes: 40,
         };
         let json = serde_json::json!({"network_bytes": 480, "materialization_bytes": 40});
         assert_eq!(serde_json::to_value(bytes).unwrap(), json);
         assert_eq!(
-            serde_json::from_value::<BoundaryResources>(json).unwrap(),
+            serde_json::from_value::<PhysicalHandoffBytes>(json).unwrap(),
             bytes
         );
-        let network = BoundaryKind::Network {
+        let network = PhysicalHandoffKind::Network {
             source_location: "edge".into(),
             destination_location: "backend".into(),
         };
@@ -87,42 +78,39 @@ mod tests {
                 "kind": "network", "source_location": "edge", "destination_location": "backend"
             })
         );
-        for (medium, name) in [
-            (MaterializationMedium::Memory, "memory"),
-            (MaterializationMedium::Disk, "disk"),
-            (MaterializationMedium::ObjectStore, "object_store"),
-        ] {
-            let kind = BoundaryKind::Materialization { medium };
-            let json = serde_json::json!({"kind": "materialization", "medium": name});
-            assert_eq!(serde_json::to_value(&kind).unwrap(), json);
-            assert_eq!(serde_json::from_value::<BoundaryKind>(json).unwrap(), kind);
-        }
+        let kind = PhysicalHandoffKind::Materialization;
+        let json = serde_json::json!({"kind": "materialization"});
+        assert_eq!(serde_json::to_value(&kind).unwrap(), json);
+        assert_eq!(
+            serde_json::from_value::<PhysicalHandoffKind>(json).unwrap(),
+            kind
+        );
     }
 
     /// Either dimension overflowing returns None without changing the original counters.
     #[test]
     fn checked_add_preserves_dimensions_and_rejects_overflow() {
-        let first = BoundaryResources {
+        let first = PhysicalHandoffBytes {
             network_bytes: 2,
             materialization_bytes: 3,
         };
-        let second = BoundaryResources {
+        let second = PhysicalHandoffBytes {
             network_bytes: 5,
             materialization_bytes: 7,
         };
         assert_eq!(
             first.checked_add(second),
-            Some(BoundaryResources {
+            Some(PhysicalHandoffBytes {
                 network_bytes: 7,
                 materialization_bytes: 10,
             })
         );
         for overflowing in [
-            BoundaryResources {
+            PhysicalHandoffBytes {
                 network_bytes: u64::MAX,
                 materialization_bytes: 0,
             },
-            BoundaryResources {
+            PhysicalHandoffBytes {
                 network_bytes: 0,
                 materialization_bytes: u64::MAX,
             },

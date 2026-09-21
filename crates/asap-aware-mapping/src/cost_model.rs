@@ -9,7 +9,7 @@
 //! interface every deployment's cost model plugs into, so [`replacement`]'s
 //! summary selection has exactly one extension point instead of forcing
 //! each downstream (ASAPCollector + ASAPQuery-backend, ASAPFusion, …) to
-//! fork `replacement::implementations_for_with`.
+//! fork `replacement::realizations_for_intent`.
 //!
 //! This trait is scoped to the approximate-**sketch** family specifically
 //! ([`CostModel::rank_candidates`]/[`size_params`](CostModel::size_params)
@@ -64,8 +64,7 @@ use crate::recurrence::{
     RecurrenceProfile,
 };
 use crate::replacement::{
-    realize_child, Implementation, Replacement, ReplacementProvenance, ReplacementSubDAG,
-    TargetSubDAG,
+    realize_child, Realization, Replacement, ReplacementProvenance, ReplacementSubDAG, TargetSubDAG,
 };
 use crate::summary_maintenance_lifecycle::{
     SummaryMaintenanceCapabilities, SummaryMaintenanceLifecycleCostInputs,
@@ -73,26 +72,7 @@ use crate::summary_maintenance_lifecycle::{
 
 // ── Recurring-cost vocabulary for mixed exact/summary plans (issue #171) ──
 
-/// The unit a recurring cost is expressed in. One variant today; an enum so
-/// a JSON/DAG export names the unit explicitly instead of a consumer
-/// assuming it, and so a future per-resource unit can be added without
-/// changing every hook's signature.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum CostUnit {
-    /// Abstract cost units per wall-clock second — the common currency
-    /// every recurring alternative (maintain-and-read vs. recompute-per-eval)
-    /// is compared in.
-    CostUnitsPerSecond,
-}
-
-impl CostUnit {
-    /// Stable name for export (`"cost_units_per_second"`).
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::CostUnitsPerSecond => "cost_units_per_second",
-        }
-    }
-}
+pub use asap_types::cost::CostUnit;
 
 /// Who produced a set of [`ExactCompositionCostInputs`], and under which
 /// model version — carried into every composed decision's explanation and
@@ -190,6 +170,7 @@ pub struct ExactCompositionCostInputs {
     /// Cost of one full raw recompute of the target from pre-ASAP data —
     /// the `KeepPreAsap` baseline's per-evaluation cost.
     pub raw_recompute_cost: Option<f64>,
+    /// Recurring formulas require `CostUnitsPerSecond`; totals yield no rate.
     pub unit: CostUnit,
     pub provenance: CostProvenance,
 }
@@ -233,6 +214,9 @@ impl ExactCompositionCostInputs {
 ///
 /// `None` if any input is unknown — see [`ExactCompositionCostInputs`].
 pub fn read_operation_plan_cost_rate(inputs: &ExactCompositionCostInputs) -> Option<CostRate> {
+    if inputs.unit != CostUnit::CostUnitsPerSecond {
+        return None;
+    }
     let maintenance = inputs.update_rate? * inputs.summary_maintenance_cost_per_update?;
     let per_eval =
         inputs.summary_read_cost? + inputs.expected_output_rows? * inputs.exact_cost_per_row?;
@@ -253,6 +237,9 @@ pub fn read_operation_plan_cost_rate(inputs: &ExactCompositionCostInputs) -> Opt
 pub fn maintenance_operation_plan_cost_rate(
     inputs: &ExactCompositionCostInputs,
 ) -> Option<CostRate> {
+    if inputs.unit != CostUnit::CostUnitsPerSecond {
+        return None;
+    }
     let per_update = inputs.exact_cost_per_row? + inputs.summary_maintenance_cost_per_update?;
     let maintenance = inputs.update_rate? * per_update;
     let evaluation = inputs.evaluation_rate?.0 * inputs.summary_read_cost?;
@@ -267,6 +254,9 @@ pub fn maintenance_operation_plan_cost_rate(
 ///
 /// `None` if either input is unknown — see [`ExactCompositionCostInputs`].
 pub fn raw_recompute_cost_rate(inputs: &ExactCompositionCostInputs) -> Option<CostRate> {
+    if inputs.unit != CostUnit::CostUnitsPerSecond {
+        return None;
+    }
     finite_rate(inputs.evaluation_rate?.0 * inputs.raw_recompute_cost?)
 }
 
@@ -428,7 +418,7 @@ pub fn default_cse_shared_maintenance_cost(family: &SummaryFamilyType) -> Cost {
 /// intent, in an arbitrary static preference order (issue #98's "one home"
 /// for the candidate set). A `CostModel` re-orders that list under real,
 /// deployment-specific cost knowledge this crate has no way to know about —
-/// `replacement::implementations_for_with` constructs every candidate in the
+/// `replacement::realizations_for_intent` constructs every candidate in the
 /// resulting order.
 pub trait CostModel {
     /// Whether [`Self::candidate_cost`] prices a complete physical
@@ -480,7 +470,7 @@ pub trait CostModel {
     /// Splitting sizing out from candidate selection lets a deployment own
     /// its own parameter-sizing math (e.g. an empirically-tuned table, or
     /// discrete rungs required by a downstream catalog) without forking
-    /// `replacement::implementations_for_with` — the same "one extension
+    /// `replacement::realizations_for_intent` — the same "one extension
     /// point" rationale as `rank_candidates`, one level deeper. Default:
     /// [`replacement::default_size_params`], `asap-plan`'s built-in formulas
     /// (unchanged) — a deployment that only needs to reorder candidates,
@@ -539,17 +529,17 @@ pub trait CostModel {
 
     /// Realize an `AggIntent::Extension { ext_kind, payload }` — a
     /// deployment-specific intent shape core has no realization opinion
-    /// for (issue #131). `replacement::implementations_for_with` consults this
+    /// for (issue #131). `replacement::realizations_for_intent` consults this
     /// for every `Extension` node instead of hardcoding `PassThrough`
     /// (issue #150). Default: `PassThrough` — preserves today's behavior
     /// for every deployment that doesn't override this, exactly like
     /// `size_params`'s default-delegates pattern above.
-    fn realize_extension(&self, _ext_kind: &str, _payload: &serde_json::Value) -> Implementation {
-        Implementation::PassThrough
+    fn realize_extension(&self, _ext_kind: &str, _payload: &serde_json::Value) -> Realization {
+        Realization::PassThrough
     }
 
     /// Build the `SummaryEstimate` readout for an `Extension` intent this
-    /// same `CostModel` realized as `Implementation::Sketch` via
+    /// same `CostModel` realized as `Realization::Sketch` via
     /// [`realize_extension`](Self::realize_extension). Only ever called
     /// when `realize_extension` returned `Sketch` for the same
     /// `(ext_kind, payload)` — `replacement::readout` has no other way to build a
@@ -1273,6 +1263,18 @@ mod tests {
         );
     }
 
+    /// Consolidation preserves type identity and rejects totals in recurring formulas.
+    #[test]
+    fn recurring_formulas_require_the_shared_rate_unit() {
+        let mut inputs = known_inputs();
+        let shared: asap_types::cost::CostUnit = inputs.unit;
+        assert_eq!(shared.as_str(), "cost_units_per_second");
+        inputs.unit = asap_types::cost::CostUnit::CostUnits;
+        assert_eq!(read_operation_plan_cost_rate(&inputs), None);
+        assert_eq!(maintenance_operation_plan_cost_rate(&inputs), None);
+        assert_eq!(raw_recompute_cost_rate(&inputs), None);
+    }
+
     #[test]
     fn a_missing_input_yields_no_rate_not_zero() {
         let mut inputs = known_inputs();
@@ -1533,7 +1535,7 @@ mod tests {
             replacement: Replacement::Summary(Rc::new(summary_node(SummaryFamilyType::Plain(
                 asap_types::pre_asap::DataType::Float64,
             )))),
-            provenance: crate::replacement::ReplacementProvenance::SummaryImplementation,
+            provenance: crate::replacement::ReplacementProvenance::SummaryRealization,
             rationale: "whatever".into(),
         };
         assert!(RankOnly.estimate_cost(&candidate, &target).is_nan());
@@ -1557,7 +1559,7 @@ mod tests {
             replacement: Replacement::Summary(Rc::new(summary_node(
                 SummaryFamilyType::ExactAggregate(ExactKind::Sum, ExactParams::Sum),
             ))),
-            provenance: crate::replacement::ReplacementProvenance::SummaryImplementation,
+            provenance: crate::replacement::ReplacementProvenance::SummaryRealization,
             rationale: "exact accumulator".into(),
         };
         let pricey = ReplacementSubDAG {
@@ -1568,7 +1570,7 @@ mod tests {
                     family: "gaussian_mixture".into(),
                 },
             )))),
-            provenance: crate::replacement::ReplacementProvenance::SummaryImplementation,
+            provenance: crate::replacement::ReplacementProvenance::SummaryRealization,
             rationale: "fitted statistical model".into(),
         };
 

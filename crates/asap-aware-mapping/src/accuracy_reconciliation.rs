@@ -63,7 +63,7 @@
 //!
 //! [`crate::replacement::accuracy_budget`] resolves *every* `AccuracyTarget`
 //! (`Epsilon`/`EpsilonDelta`) to the literal `(eps, delta)` pair
-//! `implementations_for_with`'s `sketch_implementations` feeds into
+//! `realizations_for_intent`'s `sketch_realizations` feeds into
 //! `CostModel::size_params` — the same numbers `default_size_params`'
 //! `kll_k` / `cms_width` / `cms_depth` / `hll_precision` / `kmv_k` / DDSketch's
 //! own `alpha == eps` invert. Every shipped formula is monotonic in its
@@ -85,8 +85,8 @@
 //! sized with.
 //!
 //! `AccuracyTarget::Exact` is deliberately excluded from both sides (see
-//! [`dominates`]): `implementations_for_with` routes it to `exact_realization`
-//! instead of `sketch_implementations` — a different `Implementation` family
+//! [`dominates`]): `realizations_for_intent` routes it to `exact_realization`
+//! instead of `sketch_realizations` — a different `Realization` family
 //! entirely, not just a tighter budget within the same one — so "build once
 //! at the tighter of the two" doesn't mean the same thing there. Reconciling
 //! an exact consumer with an approximate one is a different, larger question
@@ -230,9 +230,9 @@ fn same_intent_except_accuracy(a: &AggIntent, b: &AggIntent) -> bool {
 /// `AccuracyTarget::Exact` on either side always returns `false` — never a
 /// dominator, never dominated. Numerically, `accuracy_budget(Exact)`
 /// resolves to a budget that would Pareto-dominate everything (zero error),
-/// but `implementations_for_with` realizes `Exact` through a wholly
-/// different code path (`exact_realization`, never `sketch_implementations`)
-/// — a different `Implementation` family, not a point on the same sizing
+/// but `realizations_for_intent` realizes `Exact` through a wholly
+/// different code path (`exact_realization`, never `sketch_realizations`)
+/// — a different `Realization` family, not a point on the same sizing
 /// curve — so the numeric comparison alone does not mean what it means for
 /// two approximate targets. See the module docs for the full reasoning.
 fn dominates(tighter: &AccuracyTarget, looser: &AccuracyTarget) -> bool {

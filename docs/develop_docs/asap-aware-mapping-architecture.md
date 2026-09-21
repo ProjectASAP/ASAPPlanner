@@ -1,11 +1,11 @@
 # ASAP-Aware Mapping architecture
 
 This document explains the architecture of ASAP-aware mapping: the planning
-layer that turns logical query operations into alternative `Implementation`
+layer that turns logical query operations into alternative `Realization`
 values built from ASAP primitives, such as exact summaries and approximate
-sketches. Here, an **implementation** is one candidate physical realization of
+sketches. Here, a **realization** is one candidate physical form of
 one logical operation—not a selected workload plan or a deployed executable.
-Read it to understand how strategies, implementations, and costing interact.
+Read it to understand how strategies, realizations, and costing interact.
 
 For procedural work—adding a `ReplacementStrategy`, changing a `CostModel`, or
 writing the expected tests—use [Extend ASAP-aware mapping](extend-asap-aware-mapping.md).
@@ -57,8 +57,8 @@ Terminology used in the diagram:
 - A **workload** is the set of named queries planned together. A **query root**
   is the top-level `QueryExpr` (the logical query-expression type) for one of
   those queries. **Pre-ASAP** means this logical input form, before the planner
-  realizes an operation as a concrete ASAP implementation; **post-ASAP** means
-  the resulting implementation form.
+  realizes an operation as a concrete ASAP realization; **post-ASAP** means
+  the resulting realization form.
 - A **DAG** (directed acyclic graph) represents query operators whose subtrees
   may be shared. **CSE** (common subexpression elimination) finds equivalent
   subtrees and represents legal reuse by making them the same shared node.
@@ -67,7 +67,7 @@ Terminology used in the diagram:
   for it. `Replacement::Summary` is a constructed post-ASAP summary—maintained state
   such as an exact accumulator or an approximate sketch—while
   `Replacement::Rewrite` is another pre-ASAP logical expression.
-  `Replacement::ExactComposition` refers to a child target whose implementation
+  `Replacement::ExactComposition` refers to a child target whose realization
   must remain undecided until compatible selection. A **sketch**
   is a compact data structure that trades exactness for bounded error. A
   query's **accuracy target** states the allowed error and failure probability.
@@ -257,6 +257,6 @@ composition choices. `GlobalSelection::assemble_selected_dag` constructs the sel
 semantic DAG. These plain APIs do not establish lifecycle or physical deployment
 feasibility. Recurrence and lifecycle-aware variants require the corresponding
 workload and evidence inputs; downstream owns physical commitment and execution.
-See the [library workflow](library-api.md#optional-whole-plan-selection-and-materialization).
+See the [library workflow](library-api.md#optional-whole-plan-selection-and-dag-assembly).
 
 ---

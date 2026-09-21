@@ -297,7 +297,11 @@ Evidence is input; a derived guarantee or rejection reason is output. Missing
 facts do not establish either validity or invalidity: Planner cannot claim a
 guarantee that depends on them. Candidate retention and selection depend on
 the applicable strategy, accuracy target, and helper; missing evidence is not
-a blanket reason to discard unrelated candidates.
+a blanket reason to discard unrelated candidates. For the direct DDSketch
+ratio above, search retains a candidate without a proven root guarantee when
+domain evidence is missing; automatic `global_selection` does not choose it.
+See the [candidate-search reference](../../develop_docs/library-api.md#generate-and-rank-candidates)
+for this backend-selection path.
 
 Additional inputs for a Planner-owned maintenance decision are listed with the
 [summary-maintenance-lifecycle-aware helper](#summary-maintenance-lifecycle-aware-helper).
@@ -508,6 +512,6 @@ responsibilities.
 * [Planner pipeline](../concepts/planner-pipeline.md)
 * [Pre-ASAP IR](../concepts/pre-asap-ir.md)
 * [Post-ASAP IR](../concepts/post-asap-ir.md)
-* [Planner/downstream boundary](planner-downstream-boundary.md)
+* [Planner/runtime responsibilities](planner-runtime-contract.md)
 * [Plan search internals](asap-aware-plan-search.md)
 * [Public library reference](../../develop_docs/library-api.md)

@@ -4,8 +4,8 @@ Audience: developers embedding ASAPPlanner or adding strategies/models. This is
 a compact reference for the public workflow APIs at revision `e7fdb24`, not an
 exhaustive symbol reference. The [CLI guide](../user_guide_docs/run-a-query.md) covers command-line inspection; the [design overview](../design_docs/architecture/README.md) defines ownership.
 
-ASAPPlanner's primary output is `PlanSpace` plus ranked legal candidates.
-Downstream owns physical binding and commitment. Selection/materialization helpers
+ASAPPlanner's primary output is `PlanSpace`; ranking is a view over its candidates.
+Downstream owns physical binding and commitment. Selection/DAG assembly helpers
 do not deploy a plan, and a serializable DAG is not evidence of runtime readiness.
 
 ## Choose a library workflow
@@ -15,8 +15,8 @@ do not deploy a plan, and a serializable DAG is not evidence of runtime readines
 | Pre-ASAP IR | Frontend `lower_*` | [Lower a query](#lower-a-query-into-pre-asap-ir) |
 | All ranked candidates | `search_workload_with_targets` -> `cost_sorted` | [Generate and rank](#generate-and-rank-candidates) |
 | Custom optimization set | Construct `Vec<Box<dyn ReplacementStrategy>>`, then search | [Strategies and models](#choose-strategies-and-models) |
-| Lifecycle-aware comparison | Lifecycle-aware selection -> lifecycle materialization | [Lifecycle recipe](#lifecycle-and-capabilities) |
-| Selected semantic DAG / export | `global_selection` -> `assemble_selected_dag` -> export | [Selection example](#optional-whole-plan-selection-and-materialization) |
+| Summary-maintenance lifecycle comparison | Lifecycle-aware selection -> DAG assembly with maintenance decisions | [Lifecycle recipe](#lifecycle-and-capabilities) |
+| Selected semantic DAG / export | `global_selection` -> `assemble_selected_dag` -> export | [Selection example](#optional-whole-plan-selection-and-dag-assembly) |
 
 Each recipe ends at a different artifact. Use only the stages needed for that
 artifact, while preserving the checks required by its intended consumer.
@@ -178,6 +178,16 @@ PlanSpace::cost_sorted(&self, cost_model: &dyn CostModel)
 | `accuracy_model` | `DefaultAccuracyModel` or a custom `AccuracyModel` implementation | Yes |
 | Ranking `cost_model` | `DefaultCostModel` or an evidence-backed/custom `CostModel` | Yes |
 
+`search_workload_with_targets` normally rejects candidates without a guarantee
+that satisfies the root target. One exception is a direct DDSketch quantile
+ratio: without input-domain evidence, it remains in `PlanSpace` with
+`guarantee: None` so the downstream backend can decide whether to select it.
+Its presence does **not** mean it satisfies the target. `cost_sorted` still
+shows it, but `global_selection` skips it and materializes the exact fallback
+unless a certified alternative is available. A backend that wants the
+uncertified candidate must explicitly inspect it and check its own domain
+evidence and execution requirements before selecting or deploying it.
+
 ### Example
 
 
@@ -245,7 +255,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 | --- | --- | --- |
 | `search_workload` | `(query_id, Rc<QueryExpr>)` roots | `PlanSpace` with built-in strategies/model; no explicit per-root target argument |
 | `search_workload_with` | Roots, strategy slice | `PlanSpace`; callers choose context-free replacement strategies |
-| `search_workload_with_targets` | Roots with optional end-to-end targets, strategies, accuracy model | Candidate space with supplied root-target checks; `None` does not supply a root-level requirement |
+| `search_workload_with_targets` | Roots with optional end-to-end targets, strategies, accuracy model | Candidate space with supplied root-target checks; `None` does not supply a root-level requirement; uncertified direct DDSketch ratios remain available for backend selection |
 | `PlanSpace::cost_sorted` | Cost model | `Vec<RankedTargetSubDAGCandidates>`; retains alternatives and pairs `candidates[i]` with `costs[i]` |
 | `PlanSpace::cost_sorted_with_recurrence` | Cost model, recurrence profiles, optional horizon | Ranked groups or `RecurrenceError`; uses recurrence for applicable share/recompute comparisons |
 | `SketchAlgorithmStrategy::replacements` through `ReplacementStrategy` | One `TargetSubDAG` | Alternatives at that target; not whole-workload search |
@@ -418,7 +428,7 @@ fn main() {
     let allocation = EqualSplitAllocator;
     let evidence = NoAccuracyEvidence;
     let strategies: Vec<Box<dyn ReplacementStrategy + '_>> = vec![Box::new(
-        SketchAlgorithmStrategy::with_models_and_evidence(
+        SketchAlgorithmStrategy::new_with_planning_inputs_and_evidence(
             &cost, &accuracy, &allocation, &evidence,
         ),
     )];
@@ -430,7 +440,7 @@ fn main() {
 Constructor definition:
 
 ```text
-SketchAlgorithmStrategy::with_models_and_evidence(
+SketchAlgorithmStrategy::new_with_planning_inputs_and_evidence(
     cost_model: &dyn CostModel,
     accuracy_model: &dyn AccuracyModel,
     allocator: &dyn AccuracyBudgetAllocator,
@@ -455,7 +465,7 @@ with the intended model/evidence; replacing only the final sorting model does no
 regenerate parameter choices. For evidence-aware defaults, use
 `asap_aware_mapping::replacement::default_strategies_with_evidence`.
 For custom accuracy/allocation/evidence on sketches,
-`SketchAlgorithmStrategy::with_models_and_evidence` exposes these providers.
+`SketchAlgorithmStrategy::new_with_planning_inputs_and_evidence` exposes these providers.
 Keep each provider's evidence scope and freshness valid for the query population.
 
 ## Workload inputs and defaults
@@ -604,7 +614,7 @@ lifecycle analysis after structural selection can evaluate the selected root,
 but does not make the earlier selection lifecycle-optimal. An application may
 consume ranked candidates and perform this comparison downstream instead.
 
-## Optional whole-plan selection and materialization
+## Optional whole-plan selection and DAG assembly
 
 ### What does global selection mean?
 
@@ -647,9 +657,9 @@ workflow for those decisions. Downstream still owns physical commitment.
 | --- | --- |
 | `PlanSpace::global_selection(&model)` | Compatible structural selection across groups; no recurrence or lifecycle planning implied |
 | `PlanSpace::global_selection_with_recurrence(...)` | Compatible selection using supplied recurrence profiles/horizon; no lifecycle commitments implied |
-| `GlobalSelection::assemble_selected_dag(&target)` | `Result<Option<Rc<SummaryNode>>, ImplementError>`; constructs semantic IR, not stored summary data |
+| `GlobalSelection::assemble_selected_dag(&target)` | `Result<Option<Rc<SummaryNode>>, RealizationError>`; constructs semantic IR, not stored summary data |
 
-Use a target associated with the searched space; materialization can return `None`
+Use a target associated with the searched space; DAG assembly can return `None`
 when that target is absent. A downstream integration can use these convenience
 APIs when its supplied model/evidence supports the intended comparison. Neither
 plain structural selection nor taking each group's first candidate substitutes
@@ -660,7 +670,7 @@ for checking complete physical alternatives and deployment constraints.
 ```text
 PlanSpace::global_selection(&self, cost_model: &dyn CostModel) -> GlobalSelection<'_>
 GlobalSelection::assemble_selected_dag(&self, target: &Rc<QueryExpr>)
-    -> Result<Option<Rc<SummaryNode>>, ImplementError>
+    -> Result<Option<Rc<SummaryNode>>, RealizationError>
 ```
 
 For structural inspection only, this complete example selects a semantic root
@@ -741,4 +751,4 @@ cargo doc -p asap-aware-mapping -p asap-types --no-deps
 - [Cost models](../../crates/asap-aware-mapping/src/cost_model.rs)
 - [Lifecycle APIs](../../crates/asap-aware-mapping/src/summary_maintenance_lifecycle.rs)
 - [Workload types](../../crates/types/src/workload.rs)
-- [Downstream boundary](../design_docs/architecture/planner-downstream-boundary.md)
+- [Planner-runtime contract](../design_docs/architecture/planner-runtime-contract.md)

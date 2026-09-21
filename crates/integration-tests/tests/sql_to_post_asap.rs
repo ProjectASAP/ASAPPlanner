@@ -20,7 +20,7 @@
 
 use std::rc::Rc;
 
-use asap_aware_mapping::replacement::{keep_pre_asap, ImplementError};
+use asap_aware_mapping::replacement::{keep_pre_asap, RealizationError};
 use asap_aware_mapping::{
     search_workload, DefaultCostModel, Replacement, ReplacementStrategy, ReplacementSubDAG,
     SketchAlgorithmStrategy, TargetSubDAG,
@@ -42,7 +42,7 @@ use asap_types::workload::SqlDialect;
 /// a caller decides what to keep. This test-only helper reproduces the
 /// take-the-first-(`cost_model`-preferred)-candidate pattern so the
 /// single-answer pins below don't all repeat it by hand.
-fn realize(expr: &QueryExpr) -> Result<Rc<SummaryNode>, ImplementError> {
+fn realize(expr: &QueryExpr) -> Result<Rc<SummaryNode>, RealizationError> {
     let root = Rc::new(expr.clone());
     let target = TargetSubDAG::new(&root);
     match SketchAlgorithmStrategy::default_cost_model()

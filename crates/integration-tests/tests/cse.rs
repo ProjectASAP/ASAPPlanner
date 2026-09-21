@@ -132,7 +132,7 @@ fn distinct_workload_queries_get_independent_memo_groups() {
         .expect("root b must be a discovered target");
     assert!(
         !Rc::ptr_eq(&group_a.target, &group_b.target),
-        "distinct queries must land in distinct MemoGroups"
+        "distinct queries must have distinct TargetSubDAGCandidates entries"
     );
     assert_eq!(group_a.consumer_count, 1);
     assert_eq!(group_b.consumer_count, 1);

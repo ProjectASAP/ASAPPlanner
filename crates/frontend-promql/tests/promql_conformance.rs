@@ -311,7 +311,7 @@ fn sum_collapses_all_series() {
 fn sum_by_groups_via_positional_aggregate() {
     // SEMANTICS: `by(job,instance)` keeps those labels; the grouping lives on a
     // positional `Aggregate.by` — the same shape SQL `GROUP BY` produces (not a
-    // name-based Partition). Binder leaf = [ts, value, instance, job] (referenced
+    // name-based Partition). SchemaResolver leaf = [ts, value, instance, job] (referenced
     // keys appended sorted), so the keys resolve to columns [2, 3].
     let qe = ok("sum by(job, instance) (node_filesystem_size_bytes)");
     let QueryExpr::Aggregate {

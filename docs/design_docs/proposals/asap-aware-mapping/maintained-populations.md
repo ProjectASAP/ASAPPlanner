@@ -50,7 +50,7 @@ column and grouping determine whether consumers refer to the same population.
 
 ## Rule: share one population across compatible readouts
 
-**Implementation:** `MaintainedPopulationStrategy`, an opt-in `ReplacementStrategy`
+**Realization:** `MaintainedPopulationStrategy`, an opt-in `ReplacementStrategy`
 in [maintained_population.rs](../../../../crates/asap-aware-mapping/src/maintained_population.rs).
 
 **Target sub-DAGs:**

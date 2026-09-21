@@ -84,6 +84,6 @@ DAG. This is not a proof of global optimality over all possible physical plans.
 
 The [code architecture](../../develop_docs/asap-aware-mapping-architecture.md)
 describes current discovery and registry behavior; the
-[library guide](../../develop_docs/library-api.md#optional-whole-plan-selection-and-materialization)
+[library guide](../../develop_docs/library-api.md#optional-whole-plan-selection-and-dag-assembly)
 shows selection and its evidence boundaries. Broader optimization dimensions are
 tracked in the [proposal](../proposals/asap-aware-mapping/optimizations.md).

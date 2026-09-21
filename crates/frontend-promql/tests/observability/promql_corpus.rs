@@ -15,7 +15,7 @@
 
 use std::rc::Rc;
 
-use asap_aware_mapping::replacement::{keep_pre_asap, ImplementError};
+use asap_aware_mapping::replacement::{keep_pre_asap, RealizationError};
 use asap_aware_mapping::{
     Replacement, ReplacementStrategy, ReplacementSubDAG, SketchAlgorithmStrategy, TargetSubDAG,
 };
@@ -33,7 +33,7 @@ use support::lower_promql;
 /// take-the-first-(`cost_model`-preferred)-candidate pattern so [`bind_tally`]
 /// gets one representative `Result` per query, matching what a totality
 /// check over the whole corpus wants.
-fn bind(expr: &QueryExpr) -> Result<Rc<SummaryNode>, ImplementError> {
+fn bind(expr: &QueryExpr) -> Result<Rc<SummaryNode>, RealizationError> {
     let root = Rc::new(expr.clone());
     let target = TargetSubDAG::new(&root);
     match SketchAlgorithmStrategy::default_cost_model()

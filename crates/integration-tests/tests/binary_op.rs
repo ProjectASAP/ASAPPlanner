@@ -1,9 +1,9 @@
 //! `QueryExpr::BinaryOp` — arithmetic, comparison, and vector-match tests.
 //!
-//! Each side of a `BinaryOp` is bound independently by the Binder, so each
+//! Each side of a `BinaryOp` is bound independently by the SchemaResolver, so each
 //! gets its own scan schema derived from the labels it references.
 //! `VectorMatch` labels (e.g. `on(job)`) are carried as strings on the node
-//! and are NOT resolved to column ids — the Binder does not see them.
+//! and are NOT resolved to column ids — the SchemaResolver does not see them.
 
 use std::rc::Rc;
 use std::time::Duration;

@@ -461,7 +461,7 @@ fn valid_params(algorithm: &SketchAlgorithm, params: &SketchParams) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::replacement::{implementations_for_with, Implementation};
+    use crate::replacement::{realizations_for_intent, Realization};
     use asap_types::types::AccuracyTarget;
 
     /// The documented synthetic wire-format example remains importable and
@@ -651,13 +651,13 @@ mod tests {
         let (artifact, context, intent) = fixture();
         let model =
             EmpiricalCostModel::new(EmpiricalEvidenceProvider::new(artifact, context).unwrap());
-        let default = implementations_for_with(&intent, &DefaultCostModel);
-        let measured = implementations_for_with(&intent, &model);
+        let default = realizations_for_intent(&intent, &DefaultCostModel);
+        let measured = realizations_for_intent(&intent, &model);
         assert_eq!(default.len(), measured.len());
-        let Implementation::Sketch(first_default) = &default[0] else {
+        let Realization::Sketch(first_default) = &default[0] else {
             panic!("expected sketch")
         };
-        let Implementation::Sketch(first_measured) = &measured[0] else {
+        let Realization::Sketch(first_measured) = &measured[0] else {
             panic!("expected sketch")
         };
         assert_eq!(first_default.algorithm(), &SketchAlgorithm::Cms);

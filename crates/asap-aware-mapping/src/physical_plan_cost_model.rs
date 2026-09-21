@@ -1,4 +1,4 @@
-//! Evidence-backed physical-plan costing at the planner selection boundary.
+//! Evidence-backed physical-plan costing at the planner selection handoff.
 
 use std::{cell::RefCell, rc::Rc};
 
@@ -30,16 +30,16 @@ pub struct PhysicalEvidenceSnapshot {
     pub scope: ComparisonScope,
     pub cache_profile: CacheProfile,
     pub storage_io: Option<crate::storage_io::StorageIoProfile>,
-    pub boundaries: Option<crate::boundary_cost::BoundaryProfile>,
+    pub handoffs: Option<crate::physical_handoff_cost::PhysicalHandoffProfile>,
 }
 
 /// Deployment evidence needed to price one planner alternative.
 ///
 /// The planner lowers raw queries and logical rewrites itself. A deployment
 /// supplies the comparison scope and atomic evidence for each selected query
-/// operator. Post-ASAP summary operators need a physical binder because their
+/// operator. Post-ASAP summary operators need a physical plan provider because their
 /// implementation, placement, and retained-state layout are deployment
-/// choices; that binder must return the complete summary DAG, including any
+/// choices; that provider must return the complete summary DAG, including any
 /// embedded `KeepPreAsap` work.
 pub trait PlannerPhysicalPlanProvider {
     /// Atomically captures the comparison scope and evidence generation.
@@ -72,9 +72,9 @@ pub struct PhysicalPlanComparison {
         crate::storage_io::StorageEstimate,
         crate::storage_io::StorageEstimate,
     )>,
-    pub boundaries: Option<(
-        crate::boundary_cost::BoundaryEstimate,
-        crate::boundary_cost::BoundaryEstimate,
+    pub handoffs: Option<(
+        crate::physical_handoff_cost::PhysicalHandoffEstimate,
+        crate::physical_handoff_cost::PhysicalHandoffEstimate,
     )>,
 }
 
@@ -109,7 +109,7 @@ impl<'a> PhysicalPlanCostModel<'a> {
                 "resource_calibration.version",
             ));
         }
-        // Supplemental storage or boundary pricing may supply a zero-base objective.
+        // Supplemental storage or handoff pricing may supply a zero-base objective.
         match calibration.validate() {
             Ok(()) | Err(AnalyticalCostError::ZeroCalibration) => {}
             Err(error) => return Err(error),
@@ -171,13 +171,13 @@ impl<'a> PhysicalPlanCostModel<'a> {
             ));
         }
         let scope = &snapshot.scope;
-        if snapshot.boundaries.is_some()
+        if snapshot.handoffs.is_some()
             && matches!(snapshot.cache_profile, CacheProfile::Evidence(_))
         {
-            // Scope-based boundary multiplicity does not describe which actions
+            // Scope-based handoff multiplicity does not describe which actions
             // cache hits skip; do not mix pre-cache byte work with discounted CPU.
             return Err(AnalyticalCostError::MissingOrStale(
-                "cache-aware boundary execution evidence",
+                "cache-aware handoff execution evidence",
             ));
         }
         let evidence = QueryEvidence {
@@ -234,18 +234,18 @@ impl<'a> PhysicalPlanCostModel<'a> {
                 ))
             })
             .transpose()?;
-        let boundaries = snapshot
-            .boundaries
+        let handoffs = snapshot
+            .handoffs
             .as_ref()
             .map(|profile| {
                 Ok((
-                    crate::boundary_cost::estimate_boundaries(
+                    crate::physical_handoff_cost::estimate_physical_handoffs(
                         &raw,
                         scope,
                         profile,
                         &snapshot.version,
                     )?,
-                    crate::boundary_cost::estimate_boundaries(
+                    crate::physical_handoff_cost::estimate_physical_handoffs(
                         &replacement,
                         scope,
                         profile,
@@ -275,11 +275,11 @@ impl<'a> PhysicalPlanCostModel<'a> {
                 });
                 // Boundary estimation above validates evidence and pricing.
                 // At least one dimension must have a positive coefficient.
-                let has_boundary_objective = snapshot.boundaries.as_ref().is_some_and(|profile| {
+                let has_handoff_objective = snapshot.handoffs.as_ref().is_some_and(|profile| {
                     profile.calibration.cost_per_network_byte > 0.0
                         || profile.calibration.cost_per_materialization_byte > 0.0
                 });
-                if !has_storage_objective && !has_boundary_objective {
+                if !has_storage_objective && !has_handoff_objective {
                     return Err(AnalyticalCostError::ZeroCalibration);
                 }
                 (Cost(0.0), Cost(0.0))
@@ -290,7 +290,7 @@ impl<'a> PhysicalPlanCostModel<'a> {
             raw_cost.0 += raw.cost;
             candidate_cost.0 += candidate.cost;
         }
-        if let Some((raw, candidate)) = &boundaries {
+        if let Some((raw, candidate)) = &handoffs {
             raw_cost.0 += raw.cost;
             candidate_cost.0 += candidate.cost;
         }
@@ -302,7 +302,7 @@ impl<'a> PhysicalPlanCostModel<'a> {
             raw_cost,
             candidate_cost,
             storage_io,
-            boundaries,
+            handoffs,
         })
     }
 }
@@ -452,7 +452,7 @@ mod tests {
         storage_io: Option<crate::storage_io::StorageIoProfile>,
         summary_available: bool,
         candidate_scan_bytes: u64,
-        boundaries: Option<crate::boundary_cost::BoundaryProfile>,
+        handoffs: Option<crate::physical_handoff_cost::PhysicalHandoffProfile>,
         snapshot_calls: Cell<u64>,
         raw_evidence_calls: Cell<u64>,
     }
@@ -463,7 +463,7 @@ mod tests {
                 storage_io: None,
                 summary_available,
                 candidate_scan_bytes,
-                boundaries: None,
+                handoffs: None,
                 snapshot_calls: Cell::new(0),
                 raw_evidence_calls: Cell::new(0),
             }
@@ -549,7 +549,7 @@ mod tests {
                 scope: scope(),
                 cache_profile: CacheProfile::no_cache(),
                 storage_io: self.storage_io.clone(),
-                boundaries: self.boundaries.clone(),
+                handoffs: self.handoffs.clone(),
             })
         }
 
@@ -725,22 +725,22 @@ mod tests {
     }
 
     // Combined objectives must identify the base calibration even when its
-    // coefficients are zero and boundaries supply the entire objective.
+    // coefficients are zero and handoffs supply the entire objective.
     #[test]
     fn blank_base_calibration_version_is_rejected() {
         let provider = TestProvider::new(true, 800);
         for version in ["", " \t\n"] {
-            for boundary_only in [false, true] {
+            for handoff_only in [false, true] {
                 let mut calibration = calibration();
                 calibration.version = version.into();
-                if boundary_only {
+                if handoff_only {
                     calibration.cost_per_cpu_op = 0.0;
                     calibration.cost_per_scan_byte = 0.0;
                     calibration.cost_per_retained_byte = 0.0;
                 }
                 assert!(
                     PhysicalPlanCostModel::new(&provider, calibration).is_err(),
-                    "blank base provenance accepted (boundary_only={boundary_only})"
+                    "blank base provenance accepted (handoff_only={handoff_only})"
                 );
             }
         }
@@ -748,8 +748,8 @@ mod tests {
 
     // Explicit byte pricing can rank complete plans without pricing CPU or scans.
     #[test]
-    fn boundary_only_objective_ranks_complete_plans() {
-        use crate::boundary_cost::*;
+    fn handoff_only_objective_ranks_complete_plans() {
+        use crate::physical_handoff_cost::*;
         let root = query();
         let target = TargetSubDAG::new(&root);
         let mut provider = TestProvider::new(true, 800);
@@ -759,18 +759,18 @@ mod tests {
             .unwrap()
             .1;
         let candidate = provider.summary_dag(&scope());
-        provider.boundaries = Some(BoundaryProfile {
+        provider.handoffs = Some(PhysicalHandoffProfile {
             evidence_version: "test-snapshot-1".into(),
             observed_at_ms: 900,
             valid_until_ms: 2000,
-            calibration: BoundaryCalibration {
+            calibration: PhysicalHandoffCalibration {
                 version: "network-only-v1".into(),
                 cost_per_network_byte: 1.0,
                 cost_per_materialization_byte: 0.0,
             },
             plans: [&raw, &candidate]
                 .into_iter()
-                .map(|dag| BoundaryPlanEvidence {
+                .map(|dag| PhysicalHandoffPlanEvidence {
                     root: dag.root.clone(),
                     nodes: dag
                         .nodes
@@ -778,11 +778,11 @@ mod tests {
                         .map(|node| {
                             let statistics = dag.evidence[&node.id].statistics.clone();
                             let bytes = statistics.output().bytes;
-                            let boundaries = if matches!(node.operator, PhysicalOperator::Scan) {
-                                vec![PhysicalBoundary {
+                            let handoffs = if matches!(node.operator, PhysicalOperator::Scan) {
+                                vec![PhysicalHandoff {
                                     id: "scan-transfer".into(),
                                     consumer: None,
-                                    kind: BoundaryKind::Network {
+                                    kind: PhysicalHandoffKind::Network {
                                         source_location: "edge".into(),
                                         destination_location: "backend".into(),
                                     },
@@ -795,10 +795,10 @@ mod tests {
                             };
                             (
                                 node.id.clone(),
-                                BoundaryNodeEvidence {
+                                PhysicalHandoffNodeEvidence {
                                     node: node.clone(),
                                     statistics,
-                                    boundaries,
+                                    handoffs,
                                 },
                             )
                         })
@@ -810,7 +810,7 @@ mod tests {
             cost_per_cpu_op: 0.0,
             cost_per_scan_byte: 0.0,
             cost_per_retained_byte: 0.0,
-            version: "boundary-only-v1".into(),
+            version: "handoff-only-v1".into(),
         };
         let space = crate::replacement::search_workload_with(
             vec![("q", Rc::clone(&root))],
@@ -826,7 +826,7 @@ mod tests {
         drop(model);
         for coefficient in [0.0, -1.0, f64::NAN] {
             provider
-                .boundaries
+                .handoffs
                 .as_mut()
                 .unwrap()
                 .calibration
@@ -839,7 +839,7 @@ mod tests {
                 .chosen
                 .is_none());
         }
-        provider.boundaries = None;
+        provider.handoffs = None;
         let model = PhysicalPlanCostModel::new(&provider, zero_base).unwrap();
         assert!(space
             .global_selection(&model)
@@ -1037,7 +1037,7 @@ mod tests {
                     scope: scope(),
                     cache_profile: CacheProfile::no_cache(),
                     storage_io: None,
-                    boundaries: None,
+                    handoffs: None,
                 })
             }
 

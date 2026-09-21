@@ -20,7 +20,7 @@ use serde::{Deserialize, Serialize};
 
 /// A name-based column reference — the front-end-emitted, unresolved state of
 /// [`QueryExpr::Column`](super::query_expr::QueryExpr::Column) (`C =
-/// ColumnRef`); the [`Binder`](super::binder::Binder) resolves it to a
+/// ColumnRef`); the [`SchemaResolver`](super::schema_resolver::SchemaResolver) resolves it to a
 /// positional [`ColumnId`](super::schema::ColumnId). Includes the two
 /// PromQL-conventional synthetic columns.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]

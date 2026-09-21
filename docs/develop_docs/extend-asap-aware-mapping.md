@@ -632,10 +632,10 @@ fn realize_extension(
     &self,
     ext_kind: &str,
     payload: &serde_json::Value,
-) -> Implementation;
+) -> Realization;
 ```
 
-This is the hook for turning an extension description into a concrete `Implementation`.
+This is the hook for turning an extension description into a concrete `Realization`.
 
 Use it for implementation families that are intentionally outside the built-in enum dispatch.
 
