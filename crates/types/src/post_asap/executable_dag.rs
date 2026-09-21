@@ -52,7 +52,8 @@ pub enum GroupingEdgeCompatibility {
 pub enum WindowEdgeCompatibility {
     /// Physical lowering must prove equal pane/query phase or install an
     /// exact boundary residual. The logical DAG alone cannot make that claim.
-    RequiresAlignedPanePhaseOrExactBoundaryResidual,
+    #[serde(rename = "RequiresAlignedPanePhaseOrExactBoundaryResidual")]
+    RequiresAlignedPanePhaseOrExactWindowEdgeResidual,
     NotApplicable,
 }
 
@@ -573,7 +574,7 @@ pub fn compile_executable_dag_with_node_ids(
                     .expect("validated child has data state"),
                 grouping,
                 window: if maintenance_dependency {
-                    WindowEdgeCompatibility::RequiresAlignedPanePhaseOrExactBoundaryResidual
+                    WindowEdgeCompatibility::RequiresAlignedPanePhaseOrExactWindowEdgeResidual
                 } else {
                     WindowEdgeCompatibility::NotApplicable
                 },
@@ -697,7 +698,7 @@ mod tests {
         assert_eq!(dependency.grouping, GroupingEdgeCompatibility::Identical);
         assert_eq!(
             dependency.window,
-            WindowEdgeCompatibility::RequiresAlignedPanePhaseOrExactBoundaryResidual
+            WindowEdgeCompatibility::RequiresAlignedPanePhaseOrExactWindowEdgeResidual
         );
         assert!(matches!(
             dependency.intermediate_schema.fields[0].dtype,

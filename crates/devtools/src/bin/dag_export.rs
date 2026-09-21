@@ -91,7 +91,8 @@ struct PlannerCostDocument {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     storage_io: Option<asap_aware_mapping::storage_io::StorageIoProfile>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    boundaries: Option<asap_aware_mapping::boundary_cost::BoundaryProfile>,
+    #[serde(rename = "boundaries")]
+    handoffs: Option<asap_aware_mapping::physical_handoff_cost::PhysicalHandoffProfile>,
     /// Immutable catalog/runtime evidence generation shared by this file.
     evidence_version: String,
     calibration: ResourceCalibration,
@@ -281,7 +282,7 @@ fn plan_values_match_inner(
 
 struct ExportPhysicalProvider<'a> {
     storage_io: Option<&'a asap_aware_mapping::storage_io::StorageIoProfile>,
-    boundaries: Option<&'a asap_aware_mapping::boundary_cost::BoundaryProfile>,
+    handoffs: Option<&'a asap_aware_mapping::physical_handoff_cost::PhysicalHandoffProfile>,
     evidence_version: &'a str,
     target: &'a TargetPhysicalEvidence,
     candidate: &'a CandidatePhysicalEvidence,
@@ -304,7 +305,7 @@ impl PlannerPhysicalPlanProvider for ExportPhysicalProvider<'_> {
             scope: self.target.scope.resolve()?,
             cache_profile: self.target.scope.cache_profile.clone(),
             storage_io: self.storage_io.cloned(),
-            boundaries: self.boundaries.cloned(),
+            handoffs: self.handoffs.cloned(),
         })
     }
 
@@ -394,7 +395,7 @@ impl ExportPlannerCostModel<'_> {
         Some((
             ExportPhysicalProvider {
                 storage_io: self.document.storage_io.as_ref(),
-                boundaries: self.document.boundaries.as_ref(),
+                handoffs: self.document.handoffs.as_ref(),
                 evidence_version: &self.document.evidence_version,
                 target: target_evidence,
                 candidate: candidate_evidence,
@@ -429,10 +430,10 @@ impl ExportPlannerCostModel<'_> {
                 storage.model_version, storage.calibration_version
             ));
         }
-        if let Some((boundary, _)) = &estimate.boundaries {
+        if let Some((handoff, _)) = &estimate.handoffs {
             version.push_str(&format!(
                 "+{}+{}",
-                boundary.model_version, boundary.calibration_version
+                handoff.model_version, handoff.calibration_version
             ));
         }
         let scope = &provider.target.scope;
@@ -548,8 +549,8 @@ impl ExportPlannerCostModel<'_> {
             raw_inputs.extend(storage_inputs(raw));
             candidate_inputs.extend(storage_inputs(candidate));
         }
-        let boundary_inputs =
-            |estimate: &asap_aware_mapping::boundary_cost::BoundaryEstimate| {
+        let handoff_inputs =
+            |estimate: &asap_aware_mapping::physical_handoff_cost::PhysicalHandoffEstimate| {
                 let mut terms: Vec<_> = estimate
                     .total
                     .terms()
@@ -562,7 +563,7 @@ impl ExportPlannerCostModel<'_> {
                     .collect();
                 for (prefix, entries) in [
                     ("physical_node", &estimate.per_node),
-                    ("boundary", &estimate.per_boundary),
+                    ("boundary", &estimate.per_handoff),
                 ] {
                     let mut ids: Vec<_> = entries.keys().collect();
                     ids.sort();
@@ -578,9 +579,9 @@ impl ExportPlannerCostModel<'_> {
                 }
                 terms
             };
-        if let Some((raw, candidate)) = &estimate.boundaries {
-            raw_inputs.extend(boundary_inputs(raw));
-            candidate_inputs.extend(boundary_inputs(candidate));
+        if let Some((raw, candidate)) = &estimate.handoffs {
+            raw_inputs.extend(handoff_inputs(raw));
+            candidate_inputs.extend(handoff_inputs(candidate));
         }
         let baseline = CostAnnotation::modeled(
             estimate.raw_cost.0,
@@ -1191,8 +1192,8 @@ fn run_post_asap_with_progress(
     // KeepPreAsap(Rc::new(target.clone())), .. })` — the *whole target*
     // wrapped as unbound, e.g. for a multi-measure/`HAVING`-bearing
     // aggregate, or (the case that actually surfaces this: `STDDEV_POP`/
-    // `AVG`/`VARIANCE` dispatch to `Implementation::PassThrough` with no
-    // alternative at all, per `implementations_for_with`'s own doc) an
+    // `AVG`/`VARIANCE` dispatch to `Realization::PassThrough` with no
+    // alternative at all, per `realizations_for_intent`'s own doc) an
     // intent with no summary realization whatsoever. This isn't a
     // replacement decision — it's `SketchAlgorithmStrategy` saying "nothing
     // to bind here" — the identical "no-op candidate" concept
@@ -1838,10 +1839,10 @@ mod tests {
         .is_none());
     }
 
-    // Declared boundaries survive JSON and affect the selected physical plan.
+    // Declared handoffs survive JSON and affect the selected physical plan.
     #[test]
-    fn boundary_bytes_export_and_change_plan_selection() {
-        use asap_aware_mapping::boundary_cost::*;
+    fn handoff_bytes_export_and_change_plan_selection() {
+        use asap_aware_mapping::physical_handoff_cost::*;
         let (query, candidate, mut document) = cost_fixture();
         let raw = fixture_raw_dag(&query, &candidate, &document);
         let candidate_dag = cheap_candidate_dag();
@@ -1852,11 +1853,11 @@ mod tests {
         }
         .candidate_cost(&candidate, &target)
         .is_some());
-        let mut profile = BoundaryProfile {
+        let mut profile = PhysicalHandoffProfile {
             evidence_version: document.evidence_version.clone(),
             observed_at_ms: 900,
             valid_until_ms: 2000,
-            calibration: BoundaryCalibration {
+            calibration: PhysicalHandoffCalibration {
                 version: "bytes-v1".into(),
                 cost_per_network_byte: 1.0,
                 cost_per_materialization_byte: 1.0,
@@ -1864,7 +1865,7 @@ mod tests {
             plans: vec![],
         };
         for dag in [&raw, &candidate_dag] {
-            profile.plans.push(BoundaryPlanEvidence {
+            profile.plans.push(PhysicalHandoffPlanEvidence {
                 root: dag.root.clone(),
                 nodes: dag
                     .nodes
@@ -1872,10 +1873,10 @@ mod tests {
                     .map(|node| {
                         (
                             node.id.clone(),
-                            BoundaryNodeEvidence {
+                            PhysicalHandoffNodeEvidence {
                                 node: node.clone(),
                                 statistics: dag.evidence[&node.id].statistics.clone(),
-                                boundaries: vec![],
+                                handoffs: vec![],
                             },
                         )
                     })
@@ -1886,11 +1887,11 @@ mod tests {
             .nodes
             .get_mut("summary-read")
             .unwrap()
-            .boundaries
-            .push(PhysicalBoundary {
+            .handoffs
+            .push(PhysicalHandoff {
                 id: "summary-transfer".into(),
                 consumer: None,
-                kind: BoundaryKind::Network {
+                kind: PhysicalHandoffKind::Network {
                     source_location: "edge".into(),
                     destination_location: "backend".into(),
                 },
@@ -1898,9 +1899,12 @@ mod tests {
                 encoded_bytes: 1200,
                 copies: 1,
             });
-        document.boundaries = Some(profile);
-        let parsed =
-            parse_planner_cost_document(&serde_json::to_string(&document).unwrap()).unwrap();
+        document.handoffs = Some(profile);
+        // Rust handoff names retain the deployed planner-cost JSON field names.
+        let wire = serde_json::to_value(&document).unwrap();
+        assert!(wire.get("handoffs").is_none());
+        assert!(wire["boundaries"]["plans"][1]["nodes"]["summary-read"]["boundaries"].is_array());
+        let parsed = parse_planner_cost_document(&wire.to_string()).unwrap();
         let model = ExportPlannerCostModel { document: &parsed };
         let (baseline, selected, _) = model.annotations(&candidate, &root);
         assert_eq!(
@@ -1933,17 +1937,17 @@ mod tests {
             .model_version
             .as_ref()
             .unwrap()
-            .contains(BOUNDARY_MODEL_VERSION));
+            .contains(PHYSICAL_HANDOFF_MODEL_VERSION));
         assert_eq!(
             selected.evidence_version.as_deref(),
             Some("test-evidence-v1")
         );
-        let mut boundary_only = parsed.clone();
-        boundary_only.calibration.cost_per_cpu_op = 0.0;
-        boundary_only.calibration.cost_per_scan_byte = 0.0;
-        boundary_only.calibration.cost_per_retained_byte = 0.0;
+        let mut handoff_only = parsed.clone();
+        handoff_only.calibration.cost_per_cpu_op = 0.0;
+        handoff_only.calibration.cost_per_scan_byte = 0.0;
+        handoff_only.calibration.cost_per_retained_byte = 0.0;
         let (baseline, selected, _) = ExportPlannerCostModel {
-            document: &boundary_only,
+            document: &handoff_only,
         }
         .annotations(&candidate, &root);
         assert_eq!(baseline.value, Some(0.0));
@@ -1953,7 +1957,7 @@ mod tests {
         // price a zero-base plan while retaining both sets of export evidence.
         {
             use asap_aware_mapping::storage_io::*;
-            let mut joint = boundary_only.clone();
+            let mut joint = handoff_only.clone();
             let mut storage = StorageIoProfile {
                 evidence_version: joint.evidence_version.clone(),
                 observed_at_ms: 900,
@@ -2000,7 +2004,7 @@ mod tests {
             for annotation in [&raw_cost, &candidate_cost] {
                 let version = annotation.model_version.as_ref().unwrap();
                 assert!(version.contains(STORAGE_IO_MODEL_VERSION));
-                assert!(version.contains(BOUNDARY_MODEL_VERSION));
+                assert!(version.contains(PHYSICAL_HANDOFF_MODEL_VERSION));
                 assert!(version.contains("joint-requests-v1"));
                 assert_eq!(annotation.cache_profile.as_deref(), Some("no-cache-v1"));
                 assert!(annotation
@@ -2013,7 +2017,7 @@ mod tests {
                     .any(|term| term.name == "network_bytes"));
             }
             let mut storage_only = joint.clone();
-            storage_only.boundaries = None;
+            storage_only.handoffs = None;
             assert_eq!(
                 ExportPlannerCostModel {
                     document: &storage_only
@@ -2030,7 +2034,7 @@ mod tests {
                 .is_none());
         }
 
-        // Explicit boundaries have no post-cache execution-count evidence.
+        // Explicit handoffs have no post-cache execution-count evidence.
         // A nontrivial cache profile must fail closed instead of combining
         // discounted CPU with pre-cache transfer multiplicity.
         let mut combined = serde_json::to_value(&parsed).unwrap();
@@ -2063,11 +2067,11 @@ mod tests {
                 .model_version
                 .as_ref()
                 .unwrap()
-                .contains(BOUNDARY_MODEL_VERSION));
+                .contains(PHYSICAL_HANDOFF_MODEL_VERSION));
         }
 
         let mut ambiguous = parsed.clone();
-        let plans = &mut ambiguous.boundaries.as_mut().unwrap().plans;
+        let plans = &mut ambiguous.handoffs.as_mut().unwrap().plans;
         plans.push(plans[0].clone());
         let model = ExportPlannerCostModel {
             document: &ambiguous,
@@ -2075,7 +2079,7 @@ mod tests {
         assert!(model.candidate_cost(&candidate, &target).is_none());
         assert!(model.annotations(&candidate, &root).0.value.is_none());
         document
-            .boundaries
+            .handoffs
             .as_mut()
             .unwrap()
             .calibration
@@ -2085,7 +2089,7 @@ mod tests {
         }
         .candidate_cost(&candidate, &target)
         .is_none());
-        document.boundaries.as_mut().unwrap().plans[0]
+        document.handoffs.as_mut().unwrap().plans[0]
             .nodes
             .remove(&raw.root);
         assert!(ExportPlannerCostModel {
@@ -2255,7 +2259,7 @@ mod tests {
         };
         let document = PlannerCostDocument {
             storage_io: None,
-            boundaries: None,
+            handoffs: None,
             evidence_version: "test-evidence-v1".into(),
             calibration: ResourceCalibration {
                 cost_per_cpu_op: 1.0,
@@ -2572,7 +2576,7 @@ mod tests {
         let second_dag = cheap_candidate_dag();
         let document = PlannerCostDocument {
             storage_io: None,
-            boundaries: None,
+            handoffs: None,
             evidence_version: "test-evidence-v1".into(),
             calibration: ResourceCalibration {
                 cost_per_cpu_op: 1.0,
@@ -2960,7 +2964,7 @@ mod tests {
 
     /// Regression test for a real stack overflow found via manual testing
     /// against real corpus queries (a `STDDEV_POP` aggregate, which — like
-    /// `AVG` — dispatches to `Implementation::PassThrough` with no
+    /// `AVG` — dispatches to `Realization::PassThrough` with no
     /// alternative strategy of its own, so its *only* candidate is
     /// `keep_pre_asap`'s conservative fallback: `Replacement::Summary`
     /// wrapping the *entire target* as `SummaryExpr::KeepPreAsap`).

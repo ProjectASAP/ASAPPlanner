@@ -5,7 +5,7 @@
 //! canonical `QueryExpr`, generic over an unresolved
 //! [`ColumnRef`](asap_types::pre_asap::ColumnRef) — directly, rather than a
 //! separate per-language relational tree; `resolve_root` runs the
-//! [`Binder`](asap_types::pre_asap::Binder) for positional name resolution.
+//! [`SchemaResolver`](asap_types::pre_asap::SchemaResolver) for positional name resolution.
 //! Depends on DataFusion only — never on the PromQL parser.
 
 pub mod error;

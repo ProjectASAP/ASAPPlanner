@@ -41,7 +41,7 @@ use crate::recurrence::{
     CostRate, EvaluationRate, Horizon, RecurrenceError, RecurrenceProfile, UpdateRate,
 };
 use crate::replacement::{
-    CandidateCostOverrides, GlobalSelection, ImplementError, PlanSpace, Replacement,
+    CandidateCostOverrides, GlobalSelection, PlanSpace, RealizationError, Replacement,
 };
 
 /// Summary-maintenance lifecycle shapes supported by the target runtime.
@@ -272,7 +272,7 @@ pub enum SummaryMaintenanceLifecyclePlanError {
 #[derive(Debug, thiserror::Error)]
 pub enum MaterializeSummaryMaintenanceLifecycleError {
     #[error(transparent)]
-    Materialize(#[from] ImplementError),
+    Materialize(#[from] RealizationError),
     #[error(transparent)]
     SummaryMaintenance(#[from] SummaryMaintenanceLifecyclePlanError),
 }

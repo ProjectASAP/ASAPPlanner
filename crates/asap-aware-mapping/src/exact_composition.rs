@@ -54,7 +54,7 @@
 //!
 //! - Propose an `ExactRead` for a position beneath a maintained
 //!   summary — data_state validation at composition rejects it as a typed
-//!   `ImplementError` regardless.
+//!   `RealizationError` regardless.
 //! - Decide whether a composition is *worth it*: that is
 //!   `global_selection`'s job, using the issue's cost-units-per-second
 //!   formulas (see `crate::cost_model::read_operation_plan_cost_rate` and
@@ -74,7 +74,7 @@ use asap_types::types::AccuracyTarget;
 
 use crate::cost_model::CostModel;
 use crate::replacement::{
-    bindable_intent, describe_intent, implementations_for_with, ImplementError, Implementation,
+    bindable_intent, describe_intent, realizations_for_intent, Realization, RealizationError,
     Replacement, ReplacementProvenance, ReplacementStrategy, ReplacementSubDAG, TargetSubDAG,
 };
 use crate::{AccuracyModel, DefaultAccuracyModel, PropagationStats};
@@ -143,9 +143,9 @@ impl ExactComposition {
     /// Build the composed, data_state-validated node over `child`. Every edge of
     /// the result (including everything beneath `child`) is checked by
     /// `asap_types::post_asap::validate_execution_data_states`; an illegal
-    /// placement is a typed [`ImplementError::ExecutionDataState`], never deferred to a
+    /// placement is a typed [`RealizationError::ExecutionDataState`], never deferred to a
     /// runtime.
-    pub fn compose(&self, child: Rc<SummaryNode>) -> Result<Rc<SummaryNode>, ImplementError> {
+    pub fn compose(&self, child: Rc<SummaryNode>) -> Result<Rc<SummaryNode>, RealizationError> {
         self.compose_with_accuracy(child, &DefaultAccuracyModel)
     }
 
@@ -156,14 +156,14 @@ impl ExactComposition {
         &self,
         child: Rc<SummaryNode>,
         accuracy_model: &dyn AccuracyModel,
-    ) -> Result<Rc<SummaryNode>, ImplementError> {
+    ) -> Result<Rc<SummaryNode>, RealizationError> {
         if let Some(produced) = produced_data_state(&child.expr) {
             if produced != self.placement.data_state() {
                 let edge = match self.placement {
                     OperationPlacement::Maintenance => "ValueOperation.child (maintenance time)",
                     OperationPlacement::Read => "ValueOperation.child (read time)",
                 };
-                return Err(ImplementError::ExecutionDataState(
+                return Err(RealizationError::ExecutionDataState(
                     ExecutionDataStateError::IllegalChildDataState {
                         edge,
                         child: produced,
@@ -191,7 +191,7 @@ impl ExactComposition {
                     // target check. Never replace this with an exact/default
                     // bound.
                     Err(AccuracyError::UnsupportedComposition { .. }) => None,
-                    Err(error) => return Err(ImplementError::Accuracy(error)),
+                    Err(error) => return Err(RealizationError::Accuracy(error)),
                 },
                 // No definition-registered rule: preserve "unknown". This is
                 // the fail-closed value used by accuracy-target filtering.
@@ -247,13 +247,13 @@ fn is_read_time_reducer(intent: &AggIntent) -> bool {
 
 /// Does `implementation` need a `SummaryEstimate` readout to yield a value
 /// — i.e. is it a shape a maintained accumulator can't legally sit above?
-fn needs_readout(implementation: &Implementation) -> bool {
+fn needs_readout(implementation: &Realization) -> bool {
     matches!(
         implementation,
-        Implementation::Sketch(_)
-            | Implementation::Sample { .. }
-            | Implementation::Wavelet { .. }
-            | Implementation::StatModel { .. }
+        Realization::Sketch(_)
+            | Realization::Sample { .. }
+            | Realization::Wavelet { .. }
+            | Realization::StatModel { .. }
     )
 }
 
@@ -285,7 +285,7 @@ fn read_time_shape(
         return None;
     }
     let child_intent = bindable_intent(child)?;
-    if !implementations_for_with(child_intent, cost_model)
+    if !realizations_for_intent(child_intent, cost_model)
         .iter()
         .any(needs_readout)
     {
@@ -331,9 +331,9 @@ fn maintenance_time_shape(
     // Exact accumulators (`Rate`/`Increase`) are already directly nestable
     // as `SummaryAgg(ExactAggregate)`; only a pass-through function needs
     // an explicit update-path node.
-    if implementations_for_with(intent, cost_model)
+    if realizations_for_intent(intent, cost_model)
         .iter()
-        .any(|i| *i != Implementation::PassThrough)
+        .any(|i| *i != Realization::PassThrough)
     {
         return None;
     }
@@ -624,7 +624,7 @@ mod tests {
         assert!(!comp.accepts_child(summary_input));
         assert!(matches!(
             comp.compose(Rc::clone(summary_input)),
-            Err(ImplementError::ExecutionDataState(
+            Err(RealizationError::ExecutionDataState(
                 ExecutionDataStateError::IllegalChildDataState { .. }
             ))
         ));
@@ -663,7 +663,7 @@ mod tests {
         assert!(!comp.accepts_child(&readout));
         assert!(matches!(
             comp.compose(readout),
-            Err(ImplementError::ExecutionDataState(
+            Err(RealizationError::ExecutionDataState(
                 ExecutionDataStateError::IllegalChildDataState { .. }
             ))
         ));

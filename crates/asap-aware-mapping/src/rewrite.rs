@@ -7,8 +7,8 @@
 //!
 //! ## Why `avg` needs this and `sum`/`count` don't
 //!
-//! [`replacement::implementations_for_with`] dispatches `AggIntent::Avg`
-//! straight to `Implementation::PassThrough` — see that module's own
+//! [`replacement::realizations_for_intent`] dispatches `AggIntent::Avg`
+//! straight to `Realization::PassThrough` — see that module's own
 //! comment on why: `Avg`/`StdDev`/`Variance` "need richer partial state"
 //! than a bare sketch/exact accumulator gives, so there is no summary
 //! realization for a bare `avg` node to bind to at all. A logical `avg`
@@ -374,7 +374,7 @@ impl ReplacementStrategy for SemanticEquivalentRewriteStrategy {
             replacement: Replacement::Rewrite(rewritten),
             provenance: crate::replacement::ReplacementProvenance::LogicalRewrite,
             rationale:
-                "avg has no summary realization at all (replacement::implementations_for_with \
+                "avg has no summary realization at all (replacement::realizations_for_intent \
                         dispatches it to PassThrough) and so can never share or sketch; \
                         rewriting it into sum/count under the same grouping — re-divided back \
                         into the original avg column by a wrapping Project — computes the same \

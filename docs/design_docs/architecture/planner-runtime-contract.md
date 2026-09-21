@@ -1,4 +1,4 @@
-# ASAPPlanner and downstream application boundaries
+# ASAPPlanner planner-runtime contract
 
 ## Purpose
 
@@ -7,7 +7,7 @@ logical summaries, maintenance lifecycles, and planner-visible realization
 strategies best satisfy a workload. Downstream systems implement, deploy, and
 execute the selected contracts.
 
-The boundary is iterative. A downstream provider can enumerate feasible
+The planner-runtime contract supports iterative planning. A downstream provider can enumerate feasible
 implementations and report their resource and accuracy evidence; ASAPPlanner
 uses that evidence to compare candidates and returns the selected identity and
 semantic contract. Measured behavior under a concrete data workload can thus
@@ -48,7 +48,7 @@ backend still owns how the selected algorithms are physically realized.
 
 ## Summary-algorithm analogy
 
-The same boundary applies when ASAPPlanner selects a summary algorithm. Planner
+The same contract applies when ASAPPlanner selects a summary algorithm. Planner
 can choose KLL rather than DDSketch, while downstream chooses the concrete KLL
 implementation and runtime configuration that satisfies the selected parameter
 and accuracy contract. Empirical KLL error, update work, state size, and readout
@@ -129,7 +129,8 @@ in one cost formula.
 - Physical identity and complete evidence accompany each implementation.
 - Missing statistics leave constructible candidates visible but uncertified;
   unknown algorithms and known unsupported capabilities remain unavailable.
-- Shared logical nodes remain shared across the boundary; physical sharing
+  Stale evidence cannot certify or cost a candidate.
+- Shared logical nodes remain shared across the planner-runtime contract; physical sharing
   additionally requires compatible filters, grouping, windows, parameters,
   lifecycle, and guarantees.
 - Collector, backend, and query plans are projections of one compiled decision

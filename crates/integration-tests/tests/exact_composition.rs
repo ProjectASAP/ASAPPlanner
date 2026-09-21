@@ -17,7 +17,7 @@ use asap_aware_mapping::cost_model::{
     ValueOperationCapabilities,
 };
 use asap_aware_mapping::replacement::{
-    default_strategies_with, search_workload_with, ImplementError, Replacement,
+    default_strategies_with, search_workload_with, RealizationError, Replacement,
     ReplacementProvenance, ReplacementStrategy, SketchAlgorithmStrategy, TargetSubDAG,
 };
 use asap_aware_mapping::{
@@ -694,8 +694,8 @@ fn readout_under_maintenance_is_rejected_at_construction() {
         validate_execution_data_states(&illegal),
         Err(ExecutionDataStateError::ReadoutUnderMaintenance { .. })
     ));
-    let err: ImplementError = validate_execution_data_states(&illegal).unwrap_err().into();
-    assert!(matches!(err, ImplementError::ExecutionDataState(_)));
+    let err: RealizationError = validate_execution_data_states(&illegal).unwrap_err().into();
+    assert!(matches!(err, RealizationError::ExecutionDataState(_)));
 }
 
 #[test]

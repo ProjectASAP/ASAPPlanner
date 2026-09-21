@@ -156,4 +156,4 @@ retains responsibility for physical commitment.
 - [Analytical resource cost](../proposals/asap-aware-mapping/analytical-resource-cost.md)
 - [Searching over plans](asap-aware-plan-search.md)
 - [Explainability](../../develop_docs/replacement-explanations.md)
-- [ASAPPlanner and downstream application boundaries](planner-downstream-boundary.md)
+- [ASAPPlanner planner-runtime contract](planner-runtime-contract.md)

@@ -9,7 +9,7 @@
 //! interface every deployment's cost model plugs into, so [`replacement`]'s
 //! summary selection has exactly one extension point instead of forcing
 //! each downstream (ASAPCollector + ASAPQuery-backend, ASAPFusion, …) to
-//! fork `replacement::implementations_for_with`.
+//! fork `replacement::realizations_for_intent`.
 //!
 //! This trait is scoped to the approximate-**sketch** family specifically
 //! ([`CostModel::rank_candidates`]/[`size_params`](CostModel::size_params)
@@ -64,8 +64,7 @@ use crate::recurrence::{
     RecurrenceProfile,
 };
 use crate::replacement::{
-    realize_child, Implementation, Replacement, ReplacementProvenance, ReplacementSubDAG,
-    TargetSubDAG,
+    realize_child, Realization, Replacement, ReplacementProvenance, ReplacementSubDAG, TargetSubDAG,
 };
 use crate::summary_maintenance_lifecycle::{
     SummaryMaintenanceCapabilities, SummaryMaintenanceLifecycleCostInputs,
@@ -428,7 +427,7 @@ pub fn default_cse_shared_maintenance_cost(family: &SummaryFamilyType) -> Cost {
 /// intent, in an arbitrary static preference order (issue #98's "one home"
 /// for the candidate set). A `CostModel` re-orders that list under real,
 /// deployment-specific cost knowledge this crate has no way to know about —
-/// `replacement::implementations_for_with` constructs every candidate in the
+/// `replacement::realizations_for_intent` constructs every candidate in the
 /// resulting order.
 pub trait CostModel {
     /// Whether [`Self::candidate_cost`] prices a complete physical
@@ -487,7 +486,7 @@ pub trait CostModel {
     /// Splitting sizing out from candidate selection lets a deployment own
     /// its own parameter-sizing math (e.g. an empirically-tuned table, or
     /// discrete rungs required by a downstream catalog) without forking
-    /// `replacement::implementations_for_with` — the same "one extension
+    /// `replacement::realizations_for_intent` — the same "one extension
     /// point" rationale as `rank_candidates`, one level deeper. Default:
     /// [`replacement::default_size_params`], `asap-plan`'s built-in formulas
     /// (unchanged) — a deployment that only needs to reorder candidates,
@@ -546,17 +545,17 @@ pub trait CostModel {
 
     /// Realize an `AggIntent::Extension { ext_kind, payload }` — a
     /// deployment-specific intent shape core has no realization opinion
-    /// for (issue #131). `replacement::implementations_for_with` consults this
+    /// for (issue #131). `replacement::realizations_for_intent` consults this
     /// for every `Extension` node instead of hardcoding `PassThrough`
     /// (issue #150). Default: `PassThrough` — preserves today's behavior
     /// for every deployment that doesn't override this, exactly like
     /// `size_params`'s default-delegates pattern above.
-    fn realize_extension(&self, _ext_kind: &str, _payload: &serde_json::Value) -> Implementation {
-        Implementation::PassThrough
+    fn realize_extension(&self, _ext_kind: &str, _payload: &serde_json::Value) -> Realization {
+        Realization::PassThrough
     }
 
     /// Build the `SummaryEstimate` readout for an `Extension` intent this
-    /// same `CostModel` realized as `Implementation::Sketch` via
+    /// same `CostModel` realized as `Realization::Sketch` via
     /// [`realize_extension`](Self::realize_extension). Only ever called
     /// when `realize_extension` returned `Sketch` for the same
     /// `(ext_kind, payload)` — `replacement::readout` has no other way to build a
@@ -1562,7 +1561,7 @@ mod tests {
             replacement: Replacement::Summary(Rc::new(summary_node(SummaryFamilyType::Plain(
                 asap_types::pre_asap::DataType::Float64,
             )))),
-            provenance: crate::replacement::ReplacementProvenance::SummaryImplementation,
+            provenance: crate::replacement::ReplacementProvenance::SummaryRealization,
             rationale: "whatever".into(),
         };
         assert!(RankOnly.estimate_cost(&candidate, &target).is_nan());
@@ -1586,7 +1585,7 @@ mod tests {
             replacement: Replacement::Summary(Rc::new(summary_node(
                 SummaryFamilyType::ExactAggregate(ExactKind::Sum, ExactParams::Sum),
             ))),
-            provenance: crate::replacement::ReplacementProvenance::SummaryImplementation,
+            provenance: crate::replacement::ReplacementProvenance::SummaryRealization,
             rationale: "exact accumulator".into(),
         };
         let pricey = ReplacementSubDAG {
@@ -1597,7 +1596,7 @@ mod tests {
                     family: "gaussian_mixture".into(),
                 },
             )))),
-            provenance: crate::replacement::ReplacementProvenance::SummaryImplementation,
+            provenance: crate::replacement::ReplacementProvenance::SummaryRealization,
             rationale: "fitted statistical model".into(),
         };
 

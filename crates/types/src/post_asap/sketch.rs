@@ -450,7 +450,7 @@ pub fn hydra_kind_for(algorithm: &SketchAlgorithm) -> Option<HydraKind> {
 /// belong to the [`SketchAlgorithm`] `kind` wraps: a caller bug, since
 /// [`hydra_kind_for`] and the algorithm a `SketchParams` came from must
 /// agree; callers that got both from the same already-ranked
-/// `Implementation` (as `asap_aware_mapping::grouping` does) cannot hit
+/// `Realization` (as `asap_aware_mapping::grouping` does) cannot hit
 /// this.
 ///
 /// This function is generic over which inner sketch type `kind` wraps
