@@ -420,6 +420,13 @@ into a selected logical plan for each workload query. The input is `PlanSpace`
 and a cost model. The output is a set of Post-ASAP DAGs, one per query root,
 with shared nodes where the selected plans reuse the same computation.
 
+The caller uses **two public APIs**: call
+`PlanSpace::global_selection(&cost_model)` once to obtain a `GlobalSelection`,
+then call `GlobalSelection::assemble_selected_dag(root)` for each wanted query
+root. For one query this is two function calls; for N query roots it is one
+selection call followed by N assembly calls. There is no single combined
+search/selection/assembly call in this workflow.
+
 Selection chooses compatible alternatives across the workload. For example,
 if two queries can share a summary, their choices must agree on the shared
 computation. `assemble_selected_dag(root)` then connects the chosen alternatives
@@ -513,18 +520,24 @@ PlanningWorkload
 
 This exposes legal logical alternatives but does not choose a deployment.
 
-### 2. Select a logical DAG
+### 2. Select logical DAGs for the workload
 
 Use when Planner should coordinate sharing and composition across the workload.
 
 ```text
-PlanSpace
-    -> global_selection
-    -> assemble_selected_dag(root), for each query root
-    -> selected Post-ASAP DAGs
+PlanSpace with N query roots
+    -> global_selection(cost_model), once for the workload
+    -> one GlobalSelection
+    -> assemble_selected_dag(root), once for each query root
+    -> N selected Post-ASAP DAG roots, with shared nodes where applicable
 ```
 
-This produces structurally compatible logical plans. It does not determine whether maintaining summaries is cheaper than raw execution.
+Each successful assembly call returns one DAG root. The caller collects those
+roots to obtain the workload's selected DAGs; a single-query workload yields
+one root. This is the same workflow as
+[Selection and DAG assembly](#selection-and-dag-assembly), shown at workload
+scope. It does not determine whether maintaining summaries is cheaper than raw
+execution.
 
 ### 3. Make a lifecycle-aware decision
 
