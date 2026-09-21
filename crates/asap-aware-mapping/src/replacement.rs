@@ -1389,11 +1389,16 @@ impl<'a> SketchAlgorithmStrategy<'a> {
         }
         if intent_override.is_none() && is_supported_exact_binary(root) {
             if let Ok(Some(node)) = realize_binary(root, self.planning_inputs, None) {
+                let rationale = if node.guarantee.is_none() {
+                    "DDSketch quantile ratio without a certified end-to-end accuracy guarantee"
+                } else {
+                    "preserve exact PromQL arithmetic over independently realized summary operands"
+                };
                 proposals.candidates.push(ReplacementSubDAG {
                     replacement: Replacement::Summary(node),
                     strategy: "SketchAlgorithmStrategy",
                     provenance: ReplacementProvenance::SummaryRealization,
-                    rationale: "preserve exact PromQL arithmetic over independently realized summary operands".into(),
+                    rationale: rationale.into(),
                 });
             }
             return proposals;
@@ -1864,31 +1869,29 @@ fn realize_binary(
             .as_ref()
             .and_then(ddsketch_ratio_operand_target)
         {
-            let Some(domains) = planning_inputs
-                .evidence
-                .quantile_input_domain(lhs)
-                .zip(planning_inputs.evidence.quantile_input_domain(rhs))
-                .map(|(lhs, rhs)| [lhs, rhs])
-            else {
-                return Ok(None);
-            };
             let (alpha, _) = accuracy_budget(&target);
-            if domains
-                .iter()
+            let lhs_domain = planning_inputs.evidence.quantile_input_domain(lhs);
+            let rhs_domain = planning_inputs.evidence.quantile_input_domain(rhs);
+            if [&lhs_domain, &rhs_domain]
+                .into_iter()
+                .flatten()
                 .any(|domain| !domain.supports_ddsketch(alpha))
             {
                 return Ok(None);
             }
+            let domains = lhs_domain.zip(rhs_domain).map(|(lhs, rhs)| [lhs, rhs]);
             lhs_node = realize_ddsketch_quantile_operand(lhs, planning_inputs, &target)?;
             rhs_node = realize_ddsketch_quantile_operand(rhs, planning_inputs, &target)?;
-            for (domain, node) in domains.iter().zip([&lhs_node, &rhs_node]) {
-                if !ddsketch_quantile_alpha(node)
-                    .is_some_and(|alpha| domain.supports_ddsketch(alpha))
-                {
-                    return Ok(None);
+            if let Some(domains) = domains.as_ref() {
+                for (domain, node) in domains.iter().zip([&lhs_node, &rhs_node]) {
+                    if !ddsketch_quantile_alpha(node)
+                        .is_some_and(|alpha| domain.supports_ddsketch(alpha))
+                    {
+                        return Ok(None);
+                    }
                 }
             }
-            ratio_domains = Some(domains);
+            ratio_domains = domains;
         }
     } else if let Some(target) = end_to_end_target {
         let operand_guarantees = [lhs_node.guarantee.as_ref(), rhs_node.guarantee.as_ref()];
@@ -1935,9 +1938,10 @@ fn realize_binary(
             }
         }
     }
-    // Only the domain-proven ratio path may consume approximate operands.
-    // Runtime finite/nonzero checks alone do not establish quantile error bounds.
+    // Only direct quantile ratios may consume approximate division operands
+    // without domain proof; their root guarantee remains unknown.
     if ratio_domains.is_none()
+        && !direct_ddsketch_ratio
         && matches!(op, BinaryOpKind::Arithmetic(ArithmeticOpKind::Div))
         && [&lhs_node, &rhs_node].iter().any(|node| {
             !node
@@ -1958,8 +1962,10 @@ fn realize_binary(
     lhs_node = finalize_exact_accumulator(lhs_node, lhs)?;
     rhs_node = finalize_exact_accumulator(rhs_node, rhs)?;
 
+    let has_ratio_domains = ratio_domains.is_some();
     let guarantee = if matches!(op, BinaryOpKind::Arithmetic(ArithmeticOpKind::Div))
         && direct_ddsketch_ratio
+        && has_ratio_domains
         && ddsketch_quantile_alpha(&lhs_node).is_some()
         && ddsketch_quantile_alpha(&rhs_node).is_some()
     {
@@ -1987,7 +1993,7 @@ fn realize_binary(
             .then(|| ResultGuarantee::exact("BinaryOp over exact operands"))
     };
 
-    if direct_ddsketch_ratio && guarantee.is_none() {
+    if direct_ddsketch_ratio && has_ratio_domains && guarantee.is_none() {
         return Ok(None);
     }
 
@@ -2125,6 +2131,23 @@ fn ddsketch_quantile_alpha(node: &SummaryNode) -> Option<f64> {
         (SketchAlgorithm::DDSketch, SketchParams::DDSketch { alpha }) => Some(*alpha),
         _ => None,
     }
+}
+
+/// An uncertified direct ratio stays visible to downstream selection even
+/// when the workload has a root target; it does not satisfy that target.
+fn is_uncertified_ddsketch_ratio(node: &SummaryNode) -> bool {
+    let SummaryExpr::BinaryOp {
+        lhs, rhs, operator, ..
+    } = &node.expr
+    else {
+        return false;
+    };
+    matches!(
+        operator.kind,
+        BinaryOpKind::Arithmetic(ArithmeticOpKind::Div)
+    ) && ddsketch_quantile_alpha(lhs).is_some()
+        && ddsketch_quantile_alpha(rhs).is_some()
+        && node.guarantee.is_none()
 }
 
 /// A direct ratio has an operator-specific DDSketch proof, so it must select
@@ -4577,6 +4600,8 @@ impl<Id> PlanSpace<Id> {
     /// [`SharedSubtreeStrategy`] decision on the path to it — unlike
     /// [`Self::cost_sorted`], whose per-group ranking only ever sees a
     /// group's own raw [`MemoGroup::consumer_count`].
+    /// Uncertified DDSketch ratios remain in [`PlanSpace`] for downstream
+    /// inspection but are not chosen automatically by this selector.
     pub fn global_selection(&self, cost_model: &dyn CostModel) -> GlobalSelection<'_> {
         self.global_selection_impl(cost_model, None, None, None)
             .expect("structural global selection cannot produce a recurrence error")
@@ -4678,6 +4703,7 @@ impl<Id> PlanSpace<Id> {
                         .candidates
                         .iter()
                         .filter(|candidate| !is_composition_candidate(candidate))
+                        .filter(|candidate| is_automatically_selectable(candidate))
                         .filter_map(|candidate| {
                             costs
                                 .get(&group.target, candidate)
@@ -4701,7 +4727,9 @@ impl<Id> PlanSpace<Id> {
                     .candidates
                     .iter()
                     .filter(|candidate| {
-                        !is_cse_candidate(candidate) && !is_composition_candidate(candidate)
+                        !is_cse_candidate(candidate)
+                            && !is_composition_candidate(candidate)
+                            && is_automatically_selectable(candidate)
                     })
                     .filter_map(|candidate| {
                         cost_model
@@ -4755,7 +4783,9 @@ impl<Id> PlanSpace<Id> {
                             .candidates
                             .iter()
                             .filter(|candidate| {
-                                !is_cse_candidate(candidate) && !is_composition_candidate(candidate)
+                                !is_cse_candidate(candidate)
+                                    && !is_composition_candidate(candidate)
+                                    && is_automatically_selectable(candidate)
                             })
                             .filter_map(|candidate| {
                                 cost_model
@@ -4800,6 +4830,7 @@ impl<Id> PlanSpace<Id> {
                     // children (see `multiplier`'s `_ => effective` arm).
                     None => rank_group(group, cost_model).into_iter().find(|candidate| {
                         !is_composition_candidate(candidate)
+                            && is_automatically_selectable(candidate)
                             && cost_model
                                 .candidate_cost(
                                     candidate,
@@ -4815,6 +4846,7 @@ impl<Id> PlanSpace<Id> {
                     .find(|candidate| {
                         !is_cse_candidate(candidate)
                             && !is_composition_candidate(candidate)
+                            && is_automatically_selectable(candidate)
                             && cost_model
                                 .candidate_cost(candidate, &effective_target)
                                 .is_some()
@@ -4895,6 +4927,13 @@ fn is_cse_candidate(candidate: &ReplacementSubDAG) -> bool {
     matches!(
         candidate.provenance,
         ReplacementProvenance::CseShare | ReplacementProvenance::CseRecompute
+    )
+}
+
+fn is_automatically_selectable(candidate: &ReplacementSubDAG) -> bool {
+    !matches!(
+        &candidate.replacement,
+        Replacement::Summary(node) if is_uncertified_ddsketch_ratio(node)
     )
 }
 
@@ -5362,7 +5401,10 @@ pub fn search_workload_with<'s, Id>(
 /// guarantee is absent (unknown) or misses the target is moved from
 /// [`MemoGroup::candidates`] to [`MemoGroup::rejected`] *before*
 /// [`PlanSpace::cost_sorted`]/[`PlanSpace::global_selection`] ever rank the
-/// group, so a `CostModel` cannot pick it. A `KeepPreAsap` candidate is
+/// group, so a `CostModel` cannot pick it. The exception is an uncertified
+/// direct DDSketch quantile ratio, which remains available for downstream
+/// evidence-based selection with `guarantee: None`; neither ranking nor
+/// selection by cost certifies that it satisfies the target. A `KeepPreAsap` candidate is
 /// exact and always survives — the raw/pre-ASAP alternative is what an
 /// unsatisfiable root keeps. Logical [`Replacement::Rewrite`] candidates
 /// are not bound values and are left alone; the targets *inside* a rewrite
@@ -5405,10 +5447,13 @@ pub fn search_workload_with_targets<'s, Id>(
                 .candidates
                 .drain(..)
                 .partition(|candidate| match &candidate.replacement {
-                    Replacement::Summary(node) => node
-                        .guarantee
-                        .as_ref()
-                        .is_some_and(|g| accuracy_model.satisfies(g, &target)),
+                    Replacement::Summary(node) => {
+                        is_uncertified_ddsketch_ratio(node)
+                            || node
+                                .guarantee
+                                .as_ref()
+                                .is_some_and(|g| accuracy_model.satisfies(g, &target))
+                    }
                     Replacement::Rewrite(_) => true,
                     // A composition's guarantee depends on the concrete child;
                     // prepare_compositions checks those pairs after all roots.
@@ -5865,25 +5910,31 @@ mod tests {
         }
     }
 
-    // Runtime division guards do not establish the input quantiles' error bounds.
+    // Missing domain proof permits an uncertified direct quantile ratio only.
     #[test]
-    fn quantile_ratio_without_input_proof_keeps_native_execution() {
+    fn quantile_ratio_without_input_proof_has_no_root_guarantee() {
         let target = AccuracyTarget::EpsilonDelta {
             epsilon: 0.01,
             delta: 0.01,
         };
-        for query in [
+        let root = Rc::new(lower_promql(
             "quantile_over_time(0.5,a[5m]) / quantile_over_time(0.9,a[5m])",
+            target.clone(),
+        ));
+        let planning_inputs =
+            CandidatePlanningInputs::with_default_accuracy(&crate::cost_model::DefaultCostModel);
+        let candidate = realize_binary(&root, planning_inputs, Some(&target))
+            .unwrap()
+            .expect("direct quantile ratio candidate");
+        assert!(candidate.guarantee.is_none());
+
+        let other = Rc::new(lower_promql(
             "avg_over_time(a[5m]) / quantile_over_time(0.5,a[5m])",
-        ] {
-            let root = Rc::new(lower_promql(query, target.clone()));
-            let planning_inputs = CandidatePlanningInputs::with_default_accuracy(
-                &crate::cost_model::DefaultCostModel,
-            );
-            assert!(realize_binary(&root, planning_inputs, Some(&target))
-                .unwrap()
-                .is_none());
-        }
+            target.clone(),
+        ));
+        assert!(realize_binary(&other, planning_inputs, Some(&target))
+            .unwrap()
+            .is_none());
     }
 
     #[test]

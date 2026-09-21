@@ -1043,19 +1043,17 @@ fn exact_binary_maintenance_has_explicit_timing_and_legacy_wire_default() {
     }
 }
 
-/// A workload accuracy target is not evidence about signs, zeros or finite values.
+/// Missing domain evidence permits a candidate but cannot certify its accuracy.
 #[test]
-fn ddsketch_ratio_without_domain_proof_stays_exact() {
+fn ddsketch_ratio_without_domain_proof_is_uncertified() {
     let pre = lower_promql(
         "quantile_over_time(0.9, data[5m]) / quantile_over_time(0.5, data[5m])",
         AccuracyTarget::Epsilon(0.01),
     )
     .unwrap();
     let root = realize(&pre).unwrap();
-    assert!(
-        matches!(root.expr, SummaryExpr::KeepPreAsap(_)),
-        "unproven ratio was certified: {root:?}"
-    );
+    assert!(matches!(root.expr, SummaryExpr::BinaryOp { .. }));
+    assert!(root.guarantee.is_none());
     let space = search_workload_with_targets(
         vec![(
             "unproven",
@@ -1065,18 +1063,36 @@ fn ddsketch_ratio_without_domain_proof_stays_exact() {
         &asap_aware_mapping::default_strategies(),
         &DefaultAccuracyModel,
     );
+    let root_group = space
+        .groups()
+        .find(|group| Rc::ptr_eq(&group.target, &space.roots[0].1))
+        .expect("root memo group");
+    assert!(
+        root_group.candidates.iter().any(|candidate| {
+            matches!(
+                &candidate.replacement,
+                Replacement::Summary(node)
+                    if matches!(node.expr, SummaryExpr::BinaryOp { .. })
+                        && node.guarantee.is_none()
+            )
+        }),
+        "backend must receive the uncertified ratio candidate for its own selection"
+    );
+
     let selection = space.global_selection(&DefaultCostModel);
-    if let Some(chosen) = selection
-        .for_target(&space.roots[0].1)
-        .and_then(|s| s.chosen.as_ref())
-    {
-        if let Replacement::Summary(node) = &chosen.replacement {
-            assert!(
-                node.guarantee.as_ref().is_some_and(|g| g.is_exact()),
-                "workload search selected an unproven approximate ratio"
-            );
-        }
-    }
+    assert!(
+        selection
+            .for_target(&space.roots[0].1)
+            .expect("selected root group")
+            .chosen
+            .is_none(),
+        "Planner must not automatically select an uncertified ratio"
+    );
+    let materialized = selection
+        .materialize(&space.roots[0].1)
+        .unwrap()
+        .expect("materialized root");
+    assert!(matches!(materialized.expr, SummaryExpr::KeepPreAsap(_)));
 }
 
 struct FixtureQuantileDomain {
@@ -1126,6 +1142,44 @@ fn ddsketch_ratio_rejects_unsafe_domains() {
             "unsafe domain [{lower}, {upper}] got {replacements:?}"
         );
     }
+}
+
+/// A missing proof for one side must not hide an invalid proof for the other.
+#[test]
+fn ddsketch_ratio_rejects_one_invalid_domain_when_the_other_is_missing() {
+    struct PartialUnsafeDomain;
+    impl AccuracyEvidenceProvider for PartialUnsafeDomain {
+        fn quantile_input_domain(&self, operand: &QueryExpr) -> Option<QuantileInputDomain> {
+            let QueryExpr::Aggregate { measures, .. } = operand else {
+                return None;
+            };
+            matches!(
+                measures.as_slice(),
+                [asap_types::pre_asap::agg_intent::AggIntent::Quantile { q, .. }] if *q == 0.9
+            )
+            .then(|| QuantileInputDomain {
+                lower: -1.0,
+                upper: 1.0,
+                max_samples: 1000,
+                contract: "unsafe numerator".into(),
+            })
+        }
+    }
+
+    let pre = Rc::new(
+        lower_promql(
+            "quantile_over_time(0.9, data[5m]) / quantile_over_time(0.5, data[5m])",
+            AccuracyTarget::Epsilon(0.01),
+        )
+        .unwrap(),
+    );
+    let strategy = SketchAlgorithmStrategy::new_with_planning_inputs_and_evidence(
+        &DefaultCostModel,
+        &DefaultAccuracyModel,
+        &EqualSplitAllocator,
+        &PartialUnsafeDomain,
+    );
+    assert!(strategy.replacements(&TargetSubDAG::new(&pre)).is_empty());
 }
 
 /// The committed planner alpha is exercised against the pinned sketch implementation.

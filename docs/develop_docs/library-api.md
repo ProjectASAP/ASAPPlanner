@@ -178,6 +178,16 @@ PlanSpace::cost_sorted(&self, cost_model: &dyn CostModel)
 | `accuracy_model` | `DefaultAccuracyModel` or a custom `AccuracyModel` implementation | Yes |
 | Ranking `cost_model` | `DefaultCostModel` or an evidence-backed/custom `CostModel` | Yes |
 
+`search_workload_with_targets` normally rejects candidates without a guarantee
+that satisfies the root target. One exception is a direct DDSketch quantile
+ratio: without input-domain evidence, it remains in `PlanSpace` with
+`guarantee: None` so the downstream backend can decide whether to select it.
+Its presence does **not** mean it satisfies the target. `cost_sorted` still
+shows it, but `global_selection` skips it and materializes the exact fallback
+unless a certified alternative is available. A backend that wants the
+uncertified candidate must explicitly inspect it and check its own domain
+evidence and execution requirements before selecting or deploying it.
+
 ### Example
 
 
@@ -245,7 +255,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 | --- | --- | --- |
 | `search_workload` | `(query_id, Rc<QueryExpr>)` roots | `PlanSpace` with built-in strategies/model; no explicit per-root target argument |
 | `search_workload_with` | Roots, strategy slice | `PlanSpace`; callers choose context-free replacement strategies |
-| `search_workload_with_targets` | Roots with optional end-to-end targets, strategies, accuracy model | Candidate space with supplied root-target checks; `None` does not supply a root-level requirement |
+| `search_workload_with_targets` | Roots with optional end-to-end targets, strategies, accuracy model | Candidate space with supplied root-target checks; uncertified direct DDSketch ratios remain available for backend selection |
 | `PlanSpace::cost_sorted` | Cost model | `Vec<RankedGroup>`; retains alternatives and pairs `candidates[i]` with `costs[i]` |
 | `PlanSpace::cost_sorted_with_recurrence` | Cost model, recurrence profiles, optional horizon | Ranked groups or `RecurrenceError`; uses recurrence for applicable share/recompute comparisons |
 | `SketchAlgorithmStrategy::replacements` through `ReplacementStrategy` | One `TargetSubDAG` | Alternatives at that target; not whole-workload search |
