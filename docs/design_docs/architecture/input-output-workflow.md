@@ -456,8 +456,13 @@ system binds physical implementations, deploys state, and executes the plan.
 
 ### Summary-maintenance-lifecycle-aware helper
 
-Lifecycle-aware planning is a two-call workflow on an existing `PlanSpace`, not
-part of the canonical input-to-`PlanSpace` operation:
+This workflow performs both candidate selection and DAG assembly, incorporating
+summary-maintenance lifecycle costs. Use it when ASAPPlanner owns the decision
+to maintain summaries versus recompute raw data. It is not needed for candidate
+inspection or when the downstream backend owns that decision.
+
+Starting from an existing `PlanSpace`, call these two public helpers in order;
+there is no need to run the ordinary selection/assembly workflow first:
 
 1. `global_selection_with_summary_maintenance_lifecycles` uses the workload
    binding, lifecycle capabilities, and comparable costs to choose compatible
@@ -477,6 +482,9 @@ This workflow is an alternative to [logical selection and DAG assembly](#selecti
 not a step that requires running that workflow first. Its assembly helper calls
 `assemble_selected_dag` internally; neither helper creates a materialized view
 or deploys runtime state.
+The output is a selected logical DAG with lifecycle decisions, not an executable
+deployment plan. Any claim of optimization is relative to the supplied cost
+model, evidence, and available candidates.
 See the [library guide's lifecycle and capabilities section](../../develop_docs/library-api.md#lifecycle-and-capabilities)
 for an API example and the capability contract.
 
