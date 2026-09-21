@@ -42,7 +42,7 @@ its summaries. For a Planner-side maintenance-versus-recompute decision, use
 the two-stage lifecycle-aware workflow. First,
 `global_selection_with_summary_maintenance_lifecycles` selects compatible
 candidates across the `PlanSpace` and returns a `GlobalSelection`. Then,
-`materialize_with_summary_maintenance_lifecycles` builds the DAG for one root
+`assemble_selected_dag_with_summary_maintenance_lifecycles` builds the DAG for one root
 and returns a `SummaryMaintenanceLifecyclePlan` with that root and lifecycle
 decisions. This is the recommended path before deployment when Planner is
 responsible for that cost comparison. Lifecycle is separate because its
@@ -463,7 +463,7 @@ part of the canonical input-to-`PlanSpace` operation:
    binding, lifecycle capabilities, and comparable costs to choose compatible
    candidates across target sub-DAGs. It returns `GlobalSelection`, not a DAG or a
    deployment plan.
-2. For each wanted query root, `materialize_with_summary_maintenance_lifecycles`
+2. For each wanted query root, `assemble_selected_dag_with_summary_maintenance_lifecycles`
    takes that selection and root, constructs a Post-ASAP DAG, compares the
    selected summary's maintenance cost with raw recomputation, and returns
    `Option<SummaryMaintenanceLifecyclePlan>`. When a summary does not beat a
@@ -547,7 +547,7 @@ Use when deciding whether maintained summary state should actually be deployed.
 PlanSpace + lifecycle inputs
     -> global_selection_with_summary_maintenance_lifecycles
     -> GlobalSelection
-    -> materialize_with_summary_maintenance_lifecycles(selection, root, ...)
+    -> assemble_selected_dag_with_summary_maintenance_lifecycles(selection, root, ...)
     -> SummaryMaintenanceLifecyclePlan for that root
     -> downstream physical deployment
 ```

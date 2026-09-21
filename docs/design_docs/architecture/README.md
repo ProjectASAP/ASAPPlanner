@@ -25,7 +25,7 @@ flowchart TD
     DAG["Selected logical Post-ASAP DAG"]
     LINPUT["Optional lifecycle inputs: horizon, rates, capabilities, costs"]
     LIFE["global_selection_with_summary_maintenance_lifecycles"]
-    LMAT["materialize_with_summary_maintenance_lifecycles"]
+    LMAT["assemble_selected_dag_with_summary_maintenance_lifecycles"]
     LPLAN["SummaryMaintenanceLifecyclePlan: DAG root + lifecycle decisions"]
     BACKEND["Downstream: bind physical alternatives, decide deployment, compile and execute"]
     W --> PRE

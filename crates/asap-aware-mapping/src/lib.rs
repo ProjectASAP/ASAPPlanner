@@ -246,8 +246,8 @@ pub use summary_maintenance_dag_export::{
     SummaryMaintenanceDeploymentExport, SummaryMaintenanceLifecycleAlternativeExport,
 };
 pub use summary_maintenance_lifecycle::{
-    global_selection_with_summary_maintenance_lifecycles,
-    materialize_with_summary_maintenance_lifecycles, plan_summary_maintenance_lifecycles,
+    assemble_selected_dag_with_summary_maintenance_lifecycles,
+    global_selection_with_summary_maintenance_lifecycles, plan_summary_maintenance_lifecycles,
     MaterializeSummaryMaintenanceLifecycleError, SummaryMaintenanceCapabilities,
     SummaryMaintenanceDeployment, SummaryMaintenanceLifecycleAlternative,
     SummaryMaintenanceLifecycleCapabilities, SummaryMaintenanceLifecycleCostInputs,

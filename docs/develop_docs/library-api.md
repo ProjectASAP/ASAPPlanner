@@ -501,7 +501,7 @@ global_selection_with_summary_maintenance_lifecycles<'a, Id>(
     capabilities: SummaryMaintenanceLifecycleCapabilities, cost_model: &dyn CostModel,
 ) -> Result<GlobalSelection<'a>, SummaryMaintenanceLifecycleSelectionError>
 
-materialize_with_summary_maintenance_lifecycles(
+assemble_selected_dag_with_summary_maintenance_lifecycles(
     selection: &GlobalSelection<'_>, target: &Rc<QueryExpr>,
     demand: WorkloadDemand<'_>, now_ms: u64, horizon: Option<Horizon>,
     capabilities: SummaryMaintenanceLifecycleCapabilities, cost_model: &dyn CostModel,
@@ -538,7 +538,7 @@ entries, construct demand using all applicable indices.
 ```rust
 use asap_aware_mapping::{
     global_selection_with_summary_maintenance_lifecycles,
-    materialize_with_summary_maintenance_lifecycles, CostModel, Horizon, PlanSpace,
+    assemble_selected_dag_with_summary_maintenance_lifecycles, CostModel, Horizon, PlanSpace,
     SummaryMaintenanceLifecycleCapabilities, SummaryMaintenanceLifecyclePlan,
     WorkloadDemand,
 };
@@ -570,7 +570,7 @@ fn plan_batch_root(
     let selection = global_selection_with_summary_maintenance_lifecycles(
         space, demand, now_ms, horizon, capabilities, model,
     )?;
-    let plan = materialize_with_summary_maintenance_lifecycles(
+    let plan = assemble_selected_dag_with_summary_maintenance_lifecycles(
         &selection, &space.roots[0].1, demand,
         now_ms, horizon, capabilities, model,
     )?;
@@ -592,7 +592,7 @@ that prepared or retained shared state is supported.
 | --- | --- | --- |
 | `plan_summary_maintenance_lifecycles` | Materialized semantic root, `WorkloadDemand`, `now_ms`, optional horizon, runtime capabilities, cost model | `Result<SummaryMaintenanceLifecyclePlan, …>` for that fixed root; does not revisit all semantic candidates |
 | `global_selection_with_summary_maintenance_lifecycles` | `PlanSpace`, workload/root-entry associations, time, horizon, capabilities, cost model | Lifecycle-aware compatible selection/error, using eligible cost evidence |
-| `materialize_with_summary_maintenance_lifecycles` | Selection, target root and lifecycle context | Optional lifecycle plan/error; attaches state deployment decisions |
+| `assemble_selected_dag_with_summary_maintenance_lifecycles` | Selection, target root and lifecycle context | Optional lifecycle plan/error; attaches state deployment decisions |
 
 Inspect `deployments`, their selected lifecycle/alternatives/rejections,
 `selected_raw_recompute`, and optional summary/raw costs. Success of a function

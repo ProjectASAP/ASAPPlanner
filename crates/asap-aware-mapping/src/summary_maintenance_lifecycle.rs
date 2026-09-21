@@ -515,9 +515,9 @@ pub fn global_selection_with_summary_maintenance_lifecycles<'a, Id>(
     Ok(space.global_selection_with_candidate_costs(cost_model, &profiles, horizon, &costs)?)
 }
 
-/// Materialize a globally selected phase-valid DAG and immediately attach
-/// workload-aware summary maintenance deployments.
-pub fn materialize_with_summary_maintenance_lifecycles(
+/// Assemble a globally selected phase-valid DAG and attach workload-aware
+/// summary maintenance decisions. This does not create or maintain runtime state.
+pub fn assemble_selected_dag_with_summary_maintenance_lifecycles(
     selection: &GlobalSelection<'_>,
     target: &Rc<QueryExpr>,
     demand: WorkloadDemand<'_>,
@@ -2138,7 +2138,7 @@ mod tests {
         let space = crate::replacement::search_workload(vec![("q", Rc::clone(&target))]);
         let selection = space.global_selection(&RawCheaper);
         let workload = workload(vec![batch(Predictability::AdHoc)], vec![], at_rest());
-        let plan = materialize_with_summary_maintenance_lifecycles(
+        let plan = assemble_selected_dag_with_summary_maintenance_lifecycles(
             &selection,
             &space.roots[0].1,
             WorkloadDemand::new_without_data(&workload, &[0]),
@@ -2262,7 +2262,7 @@ mod tests {
         let space = crate::replacement::search_workload(vec![("q", target)]);
         let selection = space.global_selection(&UnitCosts);
         let workload = workload(vec![batch(Predictability::AdHoc)], vec![], at_rest());
-        let plan = materialize_with_summary_maintenance_lifecycles(
+        let plan = assemble_selected_dag_with_summary_maintenance_lifecycles(
             &selection,
             &space.roots[0].1,
             WorkloadDemand::new_without_data(&workload, &[0]),
@@ -2284,7 +2284,7 @@ mod tests {
         let space = crate::replacement::search_workload(vec![("q", Rc::clone(&target))]);
         let selection = space.global_selection(&RawCheaper);
         let workload = workload(vec![batch(Predictability::AdHoc)], vec![], at_rest());
-        let plan = materialize_with_summary_maintenance_lifecycles(
+        let plan = assemble_selected_dag_with_summary_maintenance_lifecycles(
             &selection,
             &space.roots[0].1,
             WorkloadDemand::new_without_data(&workload, &[0]),

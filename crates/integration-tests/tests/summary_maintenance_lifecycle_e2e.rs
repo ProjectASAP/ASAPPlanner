@@ -7,8 +7,8 @@ use std::rc::Rc;
 use asap_aware_mapping::cost_model::Cost;
 use asap_aware_mapping::CostRate;
 use asap_aware_mapping::{
-    export_summary_maintenance_plan, global_selection_with_summary_maintenance_lifecycles,
-    materialize_with_summary_maintenance_lifecycles, search_workload_with, CostModel, Horizon,
+    assemble_selected_dag_with_summary_maintenance_lifecycles, export_summary_maintenance_plan,
+    global_selection_with_summary_maintenance_lifecycles, search_workload_with, CostModel, Horizon,
     SummaryMaintenanceCapabilities, SummaryMaintenanceLifecycleCapabilities,
     SummaryMaintenanceLifecycleCostInputs, SummaryMaintenanceLifecycleRejection, WorkloadDemand,
 };
@@ -150,7 +150,7 @@ fn promql_dashboard_materializes_continuous_summary_with_explained_rejections() 
         &FullyCostedRuntime,
     )
     .unwrap();
-    let plan = materialize_with_summary_maintenance_lifecycles(
+    let plan = assemble_selected_dag_with_summary_maintenance_lifecycles(
         &selection,
         &target,
         WorkloadDemand::new_with_data(
