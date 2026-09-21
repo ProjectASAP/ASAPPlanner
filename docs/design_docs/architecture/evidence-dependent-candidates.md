@@ -41,9 +41,16 @@ candidate's guarantee or used as a certificate.
 
 The Planner-side gates audited for this change are:
 
+In this table, **omitted** means the strategy does not add that candidate to
+the relevant `MemoGroup.candidates`; it does not necessarily record a reason. **Rejected**
+means the strategy adds a `RejectedCandidate` with an accuracy error to the
+relevant memo group's `rejected` list. Neither can be selected. The DDSketch
+ratio path currently uses omission for a supplied incompatible domain; it does
+not emit a `RejectedCandidate` for that case.
+
 | Path | Missing evidence | Known invalid evidence |
 |---|---|---|
-| Direct DDSketch quantile ratio | Candidate with no root guarantee | Incompatible supplied domain suppresses it. |
+| Direct DDSketch quantile ratio | Candidate with no root guarantee | A supplied domain incompatible with DDSketch causes this ratio candidate to be omitted; no `RejectedCandidate` is recorded. |
 | Hydra grouping | Symbolic shared-grid collision/failure terms | Reject with typed accuracy reason. |
 | Count-ranked TopK | Symbolic interval margin or failure probability | Reject overlapping/non-finite supplied intervals. |
 | HLL confidence | Symbolic failure probability | Reject a fully known unmet root target. |
