@@ -4586,6 +4586,8 @@ impl<Id> PlanSpace<Id> {
     /// [`SharedSubtreeStrategy`] decision on the path to it — unlike
     /// [`Self::cost_sorted`], whose per-group ranking only ever sees a
     /// group's own raw [`MemoGroup::consumer_count`].
+    /// Uncertified DDSketch ratios remain in [`PlanSpace`] for downstream
+    /// inspection but are not chosen automatically by this selector.
     pub fn global_selection(&self, cost_model: &dyn CostModel) -> GlobalSelection<'_> {
         self.global_selection_impl(cost_model, None, None, None)
             .expect("structural global selection cannot produce a recurrence error")
@@ -4687,6 +4689,7 @@ impl<Id> PlanSpace<Id> {
                         .candidates
                         .iter()
                         .filter(|candidate| !is_composition_candidate(candidate))
+                        .filter(|candidate| is_automatically_selectable(candidate))
                         .filter_map(|candidate| {
                             costs
                                 .get(&group.target, candidate)
@@ -4710,7 +4713,9 @@ impl<Id> PlanSpace<Id> {
                     .candidates
                     .iter()
                     .filter(|candidate| {
-                        !is_cse_candidate(candidate) && !is_composition_candidate(candidate)
+                        !is_cse_candidate(candidate)
+                            && !is_composition_candidate(candidate)
+                            && is_automatically_selectable(candidate)
                     })
                     .filter_map(|candidate| {
                         cost_model
@@ -4764,7 +4769,9 @@ impl<Id> PlanSpace<Id> {
                             .candidates
                             .iter()
                             .filter(|candidate| {
-                                !is_cse_candidate(candidate) && !is_composition_candidate(candidate)
+                                !is_cse_candidate(candidate)
+                                    && !is_composition_candidate(candidate)
+                                    && is_automatically_selectable(candidate)
                             })
                             .filter_map(|candidate| {
                                 cost_model
@@ -4809,6 +4816,7 @@ impl<Id> PlanSpace<Id> {
                     // children (see `multiplier`'s `_ => effective` arm).
                     None => rank_group(group, cost_model).into_iter().find(|candidate| {
                         !is_composition_candidate(candidate)
+                            && is_automatically_selectable(candidate)
                             && cost_model
                                 .candidate_cost(
                                     candidate,
@@ -4824,6 +4832,7 @@ impl<Id> PlanSpace<Id> {
                     .find(|candidate| {
                         !is_cse_candidate(candidate)
                             && !is_composition_candidate(candidate)
+                            && is_automatically_selectable(candidate)
                             && cost_model
                                 .candidate_cost(candidate, &effective_target)
                                 .is_some()
@@ -4904,6 +4913,13 @@ fn is_cse_candidate(candidate: &ReplacementSubDAG) -> bool {
     matches!(
         candidate.provenance,
         ReplacementProvenance::CseShare | ReplacementProvenance::CseRecompute
+    )
+}
+
+fn is_automatically_selectable(candidate: &ReplacementSubDAG) -> bool {
+    !matches!(
+        &candidate.replacement,
+        Replacement::Summary(node) if is_uncertified_ddsketch_ratio(node)
     )
 }
 

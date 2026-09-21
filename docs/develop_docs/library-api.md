@@ -182,10 +182,11 @@ PlanSpace::cost_sorted(&self, cost_model: &dyn CostModel)
 that satisfies the root target. One exception is a direct DDSketch quantile
 ratio: without input-domain evidence, it remains in `PlanSpace` with
 `guarantee: None` so the downstream backend can decide whether to select it.
-Its presence does **not** mean it satisfies the target. A backend must check
-its own domain evidence and execution requirements before selecting or
-deploying it; `cost_sorted` and `global_selection` only rank/select logical
-alternatives and do not perform that check.
+Its presence does **not** mean it satisfies the target. `cost_sorted` still
+shows it, but `global_selection` skips it and materializes the exact fallback
+unless a certified alternative is available. A backend that wants the
+uncertified candidate must explicitly inspect it and check its own domain
+evidence and execution requirements before selecting or deploying it.
 
 ### Example
 

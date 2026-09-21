@@ -21,6 +21,7 @@ into evidence. Other approximate divisions still require their own composition
 rule or remain exact.
 
 Callers that require a certified end-to-end accuracy target must use evidence
-or select another candidate. A backend may reject an uncertified candidate
-using its own evidence; Planner does not make that backend decision. Runtime or statically enforced domain contracts
-remain future work driven by observed v1 correctness needs.
+or select another candidate. Planner's automatic whole-plan selection skips
+uncertified ratios while retaining them in `PlanSpace`; a backend can inspect
+the candidate and make its own evidence-based selection. Runtime or statically
+enforced domain contracts remain future work driven by observed v1 correctness needs.

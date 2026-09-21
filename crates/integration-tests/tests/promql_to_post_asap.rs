@@ -1078,6 +1078,21 @@ fn ddsketch_ratio_without_domain_proof_is_uncertified() {
         }),
         "backend must receive the uncertified ratio candidate for its own selection"
     );
+
+    let selection = space.global_selection(&DefaultCostModel);
+    assert!(
+        selection
+            .for_target(&space.roots[0].1)
+            .expect("selected root group")
+            .chosen
+            .is_none(),
+        "Planner must not automatically select an uncertified ratio"
+    );
+    let materialized = selection
+        .materialize(&space.roots[0].1)
+        .unwrap()
+        .expect("materialized root");
+    assert!(matches!(materialized.expr, SummaryExpr::KeepPreAsap(_)));
 }
 
 struct FixtureQuantileDomain {
