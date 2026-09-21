@@ -226,8 +226,8 @@ pub use replacement::{
     search_workload_with_targets, summary_candidates, CompositionDecision, GlobalSelection,
     Matcher, PlanSpace, Proposals, RankedTargetSubDAGCandidates, Realization, RealizationError,
     RecurrenceProfileMap, RejectedCandidate, Replacement, ReplacementProvenance,
-    ReplacementStrategy, ReplacementSubDAG, SelectedGroup, SharedSubtreeStrategy,
-    SketchAlgorithmStrategy, TargetSubDAG, TargetSubDAGCandidates, MAX_SEARCH_ITERATIONS,
+    ReplacementStrategy, ReplacementSubDAG, SharedSubtreeStrategy, SketchAlgorithmStrategy,
+    TargetSubDAG, TargetSubDAGCandidates, TargetSubDAGSelection, MAX_SEARCH_ITERATIONS,
 };
 pub use rewrite::{AvgToSumOverCountStrategy, SemanticEquivalentRewriteStrategy};
 pub use summary_maintenance_dag_export::{
@@ -237,8 +237,8 @@ pub use summary_maintenance_dag_export::{
 pub use summary_maintenance_lifecycle::{
     assemble_selected_dag_with_summary_maintenance_lifecycles,
     global_selection_with_summary_maintenance_lifecycles, plan_summary_maintenance_lifecycles,
-    MaterializeSummaryMaintenanceLifecycleError, SummaryMaintenanceCapabilities,
-    SummaryMaintenanceDeployment, SummaryMaintenanceLifecycleAlternative,
+    SummaryMaintenanceCapabilities, SummaryMaintenanceDeployment,
+    SummaryMaintenanceLifecycleAlternative, SummaryMaintenanceLifecycleAssemblyError,
     SummaryMaintenanceLifecycleCapabilities, SummaryMaintenanceLifecycleCostInputs,
     SummaryMaintenanceLifecyclePlan, SummaryMaintenanceLifecyclePlanError,
     SummaryMaintenanceLifecycleRejection, SummaryMaintenanceLifecycleSelectionError,

@@ -1287,7 +1287,7 @@ mod tests {
         let space = crate::replacement::search_workload(vec![("q", Rc::clone(&target))]);
         let workload = streaming_workload();
         let mut model = streaming_model();
-        for group in space.groups() {
+        for group in space.target_subdag_candidates() {
             for candidate in &group.candidates {
                 if let Replacement::Summary(root) = &candidate.replacement {
                     bind_aggregations(

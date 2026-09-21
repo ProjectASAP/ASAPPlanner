@@ -73,7 +73,7 @@ fn duplicate_workload_queries_collapse_onto_one_memo_group() {
     // (asap-aware-mapping::replacement's own equivalent, internal test)
     // pins for the same fixture shape.
     let group = space
-        .group_for(&space.roots[0].1)
+        .candidates_for_target(&space.roots[0].1)
         .expect("shared root must be a discovered target");
     assert_eq!(group.consumer_count, 2);
     assert_eq!(
@@ -125,10 +125,10 @@ fn distinct_workload_queries_get_independent_memo_groups() {
     assert!(!Rc::ptr_eq(&space.roots[0].1, &space.roots[1].1));
 
     let group_a = space
-        .group_for(&space.roots[0].1)
+        .candidates_for_target(&space.roots[0].1)
         .expect("root a must be a discovered target");
     let group_b = space
-        .group_for(&space.roots[1].1)
+        .candidates_for_target(&space.roots[1].1)
         .expect("root b must be a discovered target");
     assert!(
         !Rc::ptr_eq(&group_a.target, &group_b.target),
@@ -161,7 +161,7 @@ fn single_query_repeated_subexpression_shares_one_memo_group() {
     );
 
     let group = space
-        .group_for(lhs)
+        .candidates_for_target(lhs)
         .expect("the shared branch must be a discovered target");
     assert_eq!(
         group.consumer_count, 2,

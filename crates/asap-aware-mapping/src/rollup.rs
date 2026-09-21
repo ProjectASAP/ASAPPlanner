@@ -673,7 +673,7 @@ mod tests {
 
         let space = crate::replacement::search_workload(vec![("fine", fine), ("coarse", coarse)]);
         let coarse_group = space
-            .groups()
+            .target_subdag_candidates()
             .find(|group| {
                 matches!(
                     group.target.as_ref(),
@@ -714,7 +714,7 @@ mod tests {
         let coarse = agg(vec![2], intent, &Rc::new(metric_scan()));
         let space = crate::replacement::search_workload(vec![("fine", fine), ("coarse", coarse)]);
         let coarse_group = space
-            .groups()
+            .target_subdag_candidates()
             .find(|group| {
                 matches!(
                     group.target.as_ref(),

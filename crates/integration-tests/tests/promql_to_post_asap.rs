@@ -909,7 +909,7 @@ fn promql_sum_of_count_over_time_is_composed_by_default_search() {
     let original_schema = original.output_schema().unwrap();
     let space = search_workload(vec![("query", original)]);
     let root = &space.roots[0].1;
-    let group = space.group_for(root).expect("root memo group");
+    let group = space.candidates_for_target(root).expect("root memo group");
     let candidate = group
         .candidates
         .iter()
@@ -1070,7 +1070,7 @@ fn ddsketch_ratio_without_domain_proof_is_uncertified() {
         &DefaultAccuracyModel,
     );
     let root_group = space
-        .groups()
+        .target_subdag_candidates()
         .find(|group| Rc::ptr_eq(&group.target, &space.roots[0].1))
         .expect("root memo group");
     assert!(

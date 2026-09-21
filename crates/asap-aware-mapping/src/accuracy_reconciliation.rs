@@ -569,7 +569,7 @@ mod tests {
 
         let loose_root = &space.roots[1].1;
         let loose_group = space
-            .group_for(loose_root)
+            .candidates_for_target(loose_root)
             .expect("loose consumer's own target has a group");
         assert!(
             loose_group.candidates.iter().any(|candidate| {
@@ -860,7 +860,7 @@ mod tests {
         // Fixture sanity: the two loose roots really did merge onto one Rc.
         assert!(Rc::ptr_eq(&space.roots[0].1, &space.roots[1].1));
         let loose_group = space
-            .group_for(&space.roots[0].1)
+            .candidates_for_target(&space.roots[0].1)
             .expect("the merged loose target has a group");
         assert_eq!(loose_group.consumer_count, 2);
         assert!(

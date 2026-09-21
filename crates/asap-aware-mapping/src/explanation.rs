@@ -309,7 +309,7 @@ fn findings_from_plan_space(space: &PlanSpace<String>) -> Vec<ReplacementExplana
     // per group) is real, not just a micro-optimization.
     let mut hash_cache = HashCache::new();
     let mut findings = Vec::new();
-    for group in space.groups() {
+    for group in space.target_subdag_candidates() {
         let location = locations
             .get(&Rc::as_ptr(&group.target))
             .map(|locs| locs.join(", "))

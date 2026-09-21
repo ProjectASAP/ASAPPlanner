@@ -348,7 +348,7 @@ mod tests {
             &[Box::new(MaintainedPopulationStrategy::new(&roots))],
         );
         assert!(space
-            .groups()
+            .target_subdag_candidates()
             .flat_map(|g| &g.candidates)
             .any(|c| c.strategy == "MaintainedPopulationStrategy"));
         let plans = share_common_summary_subtrees(
