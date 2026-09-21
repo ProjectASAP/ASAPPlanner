@@ -9,6 +9,14 @@ not turn an unknown guarantee into a satisfied accuracy requirement.
 
 ## Candidate state
 
+Here, **certified for a target** means Planner has a fully known
+`ResultGuarantee` for the candidate and `AccuracyModel::satisfies(guarantee,
+target)` returns `true`. **Uncertified** means Planner cannot make that claim:
+the guarantee is absent, contains unknown terms, or is known not to meet the
+target. An uncertified summary may still be a well-formed logical candidate;
+this label says nothing about whether the backend can physically execute it.
+The exact `KeepPreAsap` path has an exact guarantee.
+
 | State | Planner representation | Backend action |
 |---|---|---|
 | Known guarantee | `ResultGuarantee` with evaluable bound and failure probability | Check the workload target and physical feasibility. |
@@ -19,10 +27,10 @@ not turn an unknown guarantee into a satisfied accuracy requirement.
 
 `ResultGuarantee::has_unknown()` detects symbolic gaps. The candidate-level
 helper also covers summaries with no guarantee model, including DDSketch-ratio
-`None`. A root
-`AccuracyTarget` rejects a fully known guarantee that misses the target, but
-does not prune a candidate solely because a required statistic is absent under
-an approximate target. An exact target does not retain an uncertified summary.
+`None`. A root `AccuracyTarget` rejects a fully known guarantee that misses
+the target, but does not prune a candidate solely because a required statistic
+is absent under an approximate target. An exact target does not retain an
+approximate summary whose exactness cannot be proven.
 Unknown is not evidence that the target is met.
 For partially known guarantees, Planner tests an optimistic floor (unknown
 non-negative contributions set to zero) only to reject targets already
