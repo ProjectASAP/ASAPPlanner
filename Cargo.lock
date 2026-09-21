@@ -390,7 +390,7 @@ dependencies = [
 [[package]]
 name = "asap_sketchlib"
 version = "0.3.0"
-source = "git+https://github.com/ProjectASAP/asap_sketchlib?rev=da3635a80f8f854d47b772d49d5a9e5fb6927d8e#da3635a80f8f854d47b772d49d5a9e5fb6927d8e"
+source = "git+https://github.com/ProjectASAP/asap_sketchlib#932ab4af3d240c0a24c06b78b45596552437bad0"
 dependencies = [
  "bytes",
  "prost",
