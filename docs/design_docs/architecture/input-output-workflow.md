@@ -416,8 +416,13 @@ materialize(root)
 Result<Option<Rc<SummaryNode>>, ImplementError>
     |
     v
-Some(Rc<SummaryNode>): one Post-ASAP DAG root
+Some(Rc<SummaryNode>): selected Post-ASAP DAG root for this query
 ```
+
+“Selected Post-ASAP DAG” is the conceptual name of the `Some` result, not a
+separate Rust type. It is no longer a set of candidates: `global_selection`
+has chosen alternatives, and `materialize(root)` has linked them for this
+root. Another workload root requires its own `materialize` call.
 
 `SummaryNode` contains a `SummaryExpr` and its guarantee; linked child
 `Rc<SummaryNode>` values form the DAG. `None` means the requested root was not
