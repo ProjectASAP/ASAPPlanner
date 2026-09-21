@@ -487,7 +487,7 @@ pub enum Replacement {
     /// `ValueOperationAtMaintenanceTime` feeding a maintained summary above. Carries only a
     /// reference to the child target — [`PlanSpace::global_selection`]
     /// commits the compatible parent/child pair and
-    /// [`GlobalSelection::materialize`] links it into one validated
+    /// [`GlobalSelection::assemble_selected_dag`] links it into one validated
     /// `SummaryNode`. See [`crate::exact_composition`].
     ExactComposition(ExactComposition),
 }
@@ -4062,7 +4062,7 @@ pub struct CompositionDecision<'a> {
 pub struct GlobalSelection<'a> {
     order: Vec<*const QueryExpr>,
     groups: HashMap<*const QueryExpr, SelectedGroup<'a>>,
-    /// [`Self::materialize`]'s memo — one bound node per target for the
+    /// [`Self::assemble_selected_dag`]'s memo — one bound node per target for the
     /// life of this selection, so two parents composing over one shared
     /// child get the *same* `Rc<SummaryNode>`.
     materialized: RefCell<HashMap<*const QueryExpr, Rc<SummaryNode>>>,
@@ -4137,7 +4137,7 @@ impl<'a> GlobalSelection<'a> {
     /// the summary); a [`Replacement::Rewrite`] or an unmatched site stays
     /// the conservative `KeepPreAsap`. Memoized by target identity, so a
     /// shared inner summary is one `Rc` no matter how many roots reach it.
-    pub fn materialize(
+    pub fn assemble_selected_dag(
         &self,
         target: &Rc<QueryExpr>,
     ) -> Result<Option<Rc<SummaryNode>>, ImplementError> {

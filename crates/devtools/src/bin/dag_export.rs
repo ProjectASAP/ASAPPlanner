@@ -1216,7 +1216,7 @@ fn run_post_asap_with_progress(
             // independently exportable replacement. The CLI's default cost
             // model has no composition statistics and therefore cannot
             // select one; callers that provide such statistics must export
-            // `GlobalSelection::materialize` instead.
+            // `GlobalSelection::assemble_selected_dag` instead.
             if matches!(candidate.replacement, Replacement::ExactComposition(_)) {
                 return None;
             }

@@ -16,7 +16,7 @@ do not deploy a plan, and a serializable DAG is not evidence of runtime readines
 | All ranked candidates | `search_workload_with_targets` -> `cost_sorted` | [Generate and rank](#generate-and-rank-candidates) |
 | Custom optimization set | Construct `Vec<Box<dyn ReplacementStrategy>>`, then search | [Strategies and models](#choose-strategies-and-models) |
 | Lifecycle-aware comparison | Lifecycle-aware selection -> lifecycle materialization | [Lifecycle recipe](#lifecycle-and-capabilities) |
-| Selected semantic DAG / export | `global_selection` -> `materialize` -> export | [Selection example](#optional-whole-plan-selection-and-materialization) |
+| Selected semantic DAG / export | `global_selection` -> `assemble_selected_dag` -> export | [Selection example](#optional-whole-plan-selection-and-materialization) |
 
 Each recipe ends at a different artifact. Use only the stages needed for that
 artifact, while preserving the checks required by its intended consumer.
@@ -631,7 +631,7 @@ of B are needed. That can change which choice for B is preferable.
 `cost_sorted()` ranks each group's alternatives using that group's recorded
 consumer count. `global_selection()` accounts for ancestor sharing decisions
 when deriving effective usage counts, and keeps coupled parent/child composition
-choices consistent. The result records coordinated choices; `materialize()` then
+choices consistent. The result records coordinated choices; `assemble_selected_dag()` then
 constructs the selected semantic DAG while preserving shared nodes.
 
 | Operation | Question answered | Result |
@@ -647,7 +647,7 @@ workflow for those decisions. Downstream still owns physical commitment.
 | --- | --- |
 | `PlanSpace::global_selection(&model)` | Compatible structural selection across groups; no recurrence or lifecycle planning implied |
 | `PlanSpace::global_selection_with_recurrence(...)` | Compatible selection using supplied recurrence profiles/horizon; no lifecycle commitments implied |
-| `GlobalSelection::materialize(&target)` | `Result<Option<Rc<SummaryNode>>, ImplementError>`; constructs semantic IR, not stored summary data |
+| `GlobalSelection::assemble_selected_dag(&target)` | `Result<Option<Rc<SummaryNode>>, ImplementError>`; constructs semantic IR, not stored summary data |
 
 Use a target associated with the searched space; materialization can return `None`
 when that target is absent. A downstream integration can use these convenience
@@ -659,7 +659,7 @@ for checking complete physical alternatives and deployment constraints.
 
 ```text
 PlanSpace::global_selection(&self, cost_model: &dyn CostModel) -> GlobalSelection<'_>
-GlobalSelection::materialize(&self, target: &Rc<QueryExpr>)
+GlobalSelection::assemble_selected_dag(&self, target: &Rc<QueryExpr>)
     -> Result<Option<Rc<SummaryNode>>, ImplementError>
 ```
 
@@ -706,7 +706,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let space = search_workload(vec![("q1", root)]);
     let selection = space.global_selection(&DefaultCostModel);
     // Search may canonicalize roots; use the root returned by PlanSpace.
-    if let Some(summary) = selection.materialize(&space.roots[0].1)? {
+    if let Some(summary) = selection.assemble_selected_dag(&space.roots[0].1)? {
         let graph = asap_types::dag_export::export_summary(&summary);
         println!("{graph:#?}");
     }

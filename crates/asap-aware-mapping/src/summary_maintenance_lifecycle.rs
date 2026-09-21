@@ -527,7 +527,7 @@ pub fn materialize_with_summary_maintenance_lifecycles(
     cost_model: &dyn CostModel,
 ) -> Result<Option<SummaryMaintenanceLifecyclePlan>, MaterializeSummaryMaintenanceLifecycleError> {
     selection
-        .materialize(target)?
+        .assemble_selected_dag(target)?
         .map(|root| {
             let mut plan = plan_summary_maintenance_lifecycles_with_profile(
                 root,
@@ -2318,7 +2318,10 @@ mod tests {
             &SummaryMaintenancePrefersDdSketch,
         )
         .unwrap();
-        let materialized = selection.materialize(&space.roots[0].1).unwrap().unwrap();
+        let materialized = selection
+            .assemble_selected_dag(&space.roots[0].1)
+            .unwrap()
+            .unwrap();
 
         assert_eq!(
             sketch_algorithm(&materialized),

@@ -31,13 +31,13 @@ not a field of `PlanningWorkload`; the other frontend dependencies are listed un
 | `PlanSpace<Id>` | The legal candidate Post-ASAP DAGs for the workload, represented compactly as canonical roots, one candidate set per target sub-DAG, and cross-target composition information | The ASAPPlanner output |
 
 [Ranking](#ranked-view), [selection and
-materialization](#selection-and-materialization-helper), and
+DAG assembly](#selection-and-dag-assembly), and
 [lifecycle](#lifecycle-aware-helper) APIs operate on this `PlanSpace`.
 `PlanSpace` contains logical candidate DAGs; it does **not** choose whether
 to build, maintain, or recompute their summary state. Using it without the
 lifecycle helper is appropriate for candidate inspection or when a downstream
 system makes its own deployment decision. `global_selection` plus
-`materialize` yields a selected logical DAG, not a recommendation to maintain
+`assemble_selected_dag` yields a selected logical DAG, not a recommendation to maintain
 its summaries. For a Planner-side maintenance-versus-recompute decision, use
 the two-stage lifecycle-aware workflow. First,
 `global_selection_with_summary_maintenance_lifecycles` selects compatible
@@ -84,7 +84,7 @@ flowchart TD
     S["Candidate search"]
     P["PlanSpace: logical choices for this root"]
     I["cost_sorted: inspect choices"]
-    G["global_selection + materialize(root)"]
+    G["global_selection + assemble_selected_dag(root)"]
     L["One selected Post-ASAP DAG; exact KeepPreAsap if no optimization is selected"]
     X["Extra lifecycle inputs: horizon; update rate; capabilities; comparable summary/raw costs"]
     H["Lifecycle-aware global selection"]
@@ -399,7 +399,7 @@ itself a deployment-cost certificate. This view is useful for debugging,
 explanation, or downstream optimization. Candidate presence does not imply
 physical deployability.
 
-### Selection and materialization helper
+### Selection and DAG assembly
 
 Use this workflow when the caller wants Planner to turn its candidate space
 into a selected logical plan for each workload query. The input is `PlanSpace`
@@ -408,9 +408,10 @@ with shared nodes where the selected plans reuse the same computation.
 
 Selection chooses compatible alternatives across the workload. For example,
 if two queries can share a summary, their choices must agree on the shared
-computation. Materialization then connects the chosen alternatives into each
-query's DAG. Here, “materialization” means constructing the logical DAG in
-memory; it does not build summary state in the runtime.
+computation. `assemble_selected_dag(root)` then connects the chosen alternatives
+into each query's DAG in memory, preserving shared nodes. Candidate search has
+already built candidate sub-DAGs; assembly connects the selected choices into
+the result for one query root.
 
 | Input → decisions → output (click a step for details) |
 |:---:|
@@ -418,7 +419,7 @@ memory; it does not build summary state in the runtime.
 | ↓ |
 | **Select:** [global_selection](../../develop_docs/library-api.md#what-does-global-selection-mean) chooses compatible alternatives |
 | ↓ |
-| **Assemble:** [materialize(root)](../../develop_docs/library-api.md#api-definition-and-example) connects those choices for each query root |
+| **Assemble:** [assemble_selected_dag(root)](../../develop_docs/library-api.md#api-definition-and-example) connects those choices for each query root |
 | ↓ |
 | **Output:** one selected logical [Post-ASAP DAG](../concepts/post-asap-ir.md) per query root |
 
@@ -505,7 +506,7 @@ Use when Planner should coordinate sharing and composition across the workload.
 ```text
 PlanSpace
     -> global_selection
-    -> materialize
+    -> assemble_selected_dag(root), for each query root
     -> selected Post-ASAP DAGs
 ```
 

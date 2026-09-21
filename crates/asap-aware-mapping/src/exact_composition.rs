@@ -25,7 +25,7 @@
 //! cost-model ranking, workload-wide effective consumer count, and shared
 //! `Rc` identity (one inner summary serving two outer folds) all stay
 //! correct, and a child that is also shared by an unrelated consumer is
-//! maintained exactly once. `GlobalSelection::materialize` then links the
+//! maintained exactly once. `GlobalSelection::assemble_selected_dag` then links the
 //! committed pair into one validated post-ASAP DAG.
 //!
 //! ## Proposal conditions

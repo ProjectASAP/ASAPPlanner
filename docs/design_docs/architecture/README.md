@@ -21,7 +21,7 @@ flowchart TD
     SEARCH["Whole-workload candidate search: sharing, legality, accuracy"]
     SPACE["PlanSpace: compact logical candidate DAG space"]
     RANK["Optional cost_sorted: ranked inspection view"]
-    SELECT["Optional global_selection + materialize"]
+    SELECT["Optional global_selection + assemble_selected_dag"]
     DAG["Selected logical Post-ASAP DAG"]
     LINPUT["Optional lifecycle inputs: horizon, rates, capabilities, costs"]
     LIFE["global_selection_with_summary_maintenance_lifecycles"]
@@ -42,7 +42,7 @@ flowchart TD
 `PlanSpace` is the output of logical candidate search. Each target's candidate set holds
 alternatives and rejection reasons, but no selected maintenance lifecycle.
 The three branches after it are optional: inspect ranked candidates, select
-and materialize a logical DAG, or make a workload-aware lifecycle decision.
+and assemble a logical DAG, or make a workload-aware lifecycle decision.
 The last branch needs additional workload and deployment evidence. Its first
 call returns a `GlobalSelection`; the second returns a
 `SummaryMaintenanceLifecyclePlan` with a materialized root and lifecycle
@@ -82,7 +82,7 @@ candidates because it has evidence that the reusable Planner does not, but it
 must not silently change Planner-owned semantics.
 
 `PlanSpace::global_selection` optionally coordinates structural choices across
-targets; `GlobalSelection::materialize` constructs a selected semantic DAG.
+targets; `GlobalSelection::assemble_selected_dag` constructs a selected semantic DAG.
 Those plain APIs do not establish physical feasibility or a
 maintenance-versus-recompute decision. The lifecycle-aware selection call uses
 additional workload and evidence inputs; its materialization call returns a

@@ -317,7 +317,7 @@ pub struct RankedTargetSubDAGCandidates<'a> {
 may already have removed proposals before this boundary. In particular,
 `search_workload_with_targets` checks explicit per-root targets. Use
 `global_selection` for coordinated sharing/composition choices and
-`GlobalSelection::materialize` for the resulting semantic DAG; neither deploys it.
+`GlobalSelection::assemble_selected_dag` for the resulting semantic DAG; neither deploys it.
 
 ---
 

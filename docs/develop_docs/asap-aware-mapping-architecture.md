@@ -253,7 +253,7 @@ more than constructing only the preferred candidate, but it keeps the strategy
 contract consistent and preserves the full choice set for other callers.
 
 `PlanSpace::global_selection` optionally coordinates cross-group sharing and
-composition choices. `GlobalSelection::materialize` constructs the selected
+composition choices. `GlobalSelection::assemble_selected_dag` constructs the selected
 semantic DAG. These plain APIs do not establish lifecycle or physical deployment
 feasibility. Recurrence and lifecycle-aware variants require the corresponding
 workload and evidence inputs; downstream owns physical commitment and execution.
