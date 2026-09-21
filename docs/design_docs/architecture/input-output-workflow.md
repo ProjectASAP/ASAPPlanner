@@ -13,13 +13,14 @@ Post-ASAP alternatives for the workload.
 |---|---|---:|
 | `PlanningWorkload.query_workload` | Query language and one-time/repeating query workloads | Yes |
 | `PlanningWorkload.data_workload` | Data arrival and optional evidence about ingestion, cardinality, and distribution | Conditional: required for PromQL; otherwise optional |
+| Frontend-specific dependencies (outside `PlanningWorkload`) | `SqlCatalog` for SQL; `now_ms` and, when needed, `HistogramCatalog` for PromQL | `SqlCatalog` is required for SQL lowering; `now_ms` is required for PromQL lowering |
 | Planning evidence and capabilities | Domain, accuracy, cost, and deployment facts supplied through the applicable provider/model interface | Conditional: required only by optimizations that depend on those facts |
 
 As part of the planning workflow, frontend lowering converts the workload
 entries into canonical Pre-ASAP `QueryExpr` roots. Those roots and the
 candidate-search API that consumes them are internal stages, not additional
-end-to-end user inputs. Some frontends require explicit dependencies alongside
-the workload; these are listed under
+end-to-end user inputs. The SQL data catalog is a separate frontend input,
+not a field of `PlanningWorkload`; the other frontend dependencies are listed under
 [Frontend-specific dependencies](#frontend-specific-dependencies).
 
 ### Output at a glance
