@@ -31,8 +31,19 @@ not a field of `PlanningWorkload`; the other frontend dependencies are listed un
 
 [Ranking](#ranked-view), [selection and
 materialization](#selection-and-materialization-helper), and
-[lifecycle](#lifecycle-aware-helper) APIs are views or helper operations over
-this output, not additional top-level Planner outputs.
+[lifecycle](#lifecycle-aware-helper) APIs operate on this `PlanSpace`.
+`PlanSpace` contains logical candidate DAGs; it does **not** choose whether
+to build, maintain, or recompute their summary state. Using it without the
+lifecycle helper is appropriate for candidate inspection or when a downstream
+system makes its own deployment decision. `global_selection` plus
+`materialize` yields a selected logical DAG, not a recommendation to maintain
+its summaries. For a Planner-side maintenance-versus-recompute decision, use
+the lifecycle-aware helper: it returns a `SummaryMaintenanceLifecyclePlan`
+containing both a materialized DAG root and lifecycle decisions. This is the
+recommended path before deployment when Planner is responsible for that cost
+comparison. Lifecycle is separate because its decision needs a horizon,
+update-rate and physical-cost/capability facts that logical candidate search
+does not necessarily have; it is not an intrinsic property of a candidate DAG.
 
 The candidate DAGs are logical planning artifacts. ASAPPlanner does **not**
 produce a deployed executable plan; downstream systems bind physical operators,
