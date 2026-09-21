@@ -401,39 +401,36 @@ physical deployability.
 
 ### Selection and materialization helper
 
-`PlanSpace::global_selection*` coordinates decisions across the candidate sets
-for different target sub-DAGs.
+Use this workflow when the caller wants Planner to turn its candidate space
+into a selected logical plan for each workload query. The input is `PlanSpace`
+and a cost model. The output is a set of Post-ASAP DAGs, one per query root,
+with shared nodes where the selected plans reuse the same computation.
 
-| Selection → materialization (click a step for details) |
+Selection chooses compatible alternatives across the workload. For example,
+if two queries can share a summary, their choices must agree on the shared
+computation. Materialization then connects the chosen alternatives into each
+query's DAG. Here, “materialization” means constructing the logical DAG in
+memory; it does not build summary state in the runtime.
+
+| Input → decisions → output (click a step for details) |
 |:---:|
-| [PlanSpace](asap-aware-plan-search.md) |
+| **Input:** [PlanSpace](asap-aware-plan-search.md) + cost model |
 | ↓ |
-| [global_selection](../../develop_docs/library-api.md#what-does-global-selection-mean) |
+| **Select:** [global_selection](../../develop_docs/library-api.md#what-does-global-selection-mean) chooses compatible alternatives |
 | ↓ |
-| [materialize(root)](../../develop_docs/library-api.md#api-definition-and-example) returns `Result<Option<Rc<SummaryNode>>, ImplementError>` |
-| ↓ on success for a discovered root |
-| `Ok(Some(Rc<SummaryNode>))`: selected logical [Post-ASAP DAG root](../concepts/post-asap-ir.md) for this query; no lifecycle decision |
+| **Assemble:** [materialize(root)](../../develop_docs/library-api.md#api-definition-and-example) connects those choices for each query root |
+| ↓ |
+| **Output:** one selected logical [Post-ASAP DAG](../concepts/post-asap-ir.md) per query root |
 
-“Selected Post-ASAP DAG” is the conceptual name of the `Ok(Some(...))` result, not a
-separate Rust type. It is no longer a set of candidates: `global_selection`
-has chosen alternatives, and `materialize(root)` has linked them for this
-root. Another workload root requires its own `materialize` call.
+Each output DAG specifies the chosen operators, parameters, and accuracy
+guarantees. Its root is represented by `Rc<SummaryNode>`; the
+[API reference](../../develop_docs/library-api.md#api-definition-and-example)
+describes the function signatures and return handling.
 
-The lifecycle-aware path uses the **same DAG-root type**:
-`SummaryMaintenanceLifecyclePlan.root: Rc<SummaryNode>`. Its surrounding plan
-also records deployments, costs, and whether raw recomputation was chosen.
-That path may replace the materialized summary root with exact `KeepPreAsap`
-when maintenance is not cost-justified; the two paths have the same root
-format, but need not return the same root value.
-
-`SummaryNode` contains a `SummaryExpr` and its guarantee; linked child
-`Rc<SummaryNode>` values form the DAG. `None` means the requested root was not
-discovered in this `PlanSpace`; an `Err` means materialization failed. The
-`Result<Option<...>>` wrapper describes these outcomes; it is not another
-planning stage. On `Ok(Some(...))`, the DAG records logical information such as summary operators,
-parameters, schemas, windows, and accuracy guarantees.
-
-It is still **not an executable deployment plan**. Physical operator binding, placement, storage, and execution remain downstream responsibilities.
+This workflow selects how to compute the query. To also decide whether to
+maintain summary state or recompute raw data, use the
+[lifecycle-aware workflow](#lifecycle-aware-helper) below. The downstream
+system binds physical implementations, deploys state, and executes the plan.
 
 ### Lifecycle-aware helper
 
