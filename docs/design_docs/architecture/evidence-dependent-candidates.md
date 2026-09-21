@@ -13,7 +13,7 @@ not turn an unknown guarantee into a satisfied accuracy requirement.
 |---|---|---|
 | Known guarantee | `ResultGuarantee` with evaluable bound and failure probability | Check the workload target and physical feasibility. |
 | Missing accuracy/domain evidence | Symbolic `BoundExpr::Unknown` or `ProbabilityExpr::Unknown`, or `guarantee: None` on a constructible summary | Inspect `ReplacementSubDAG::has_missing_accuracy_evidence()`, obtain applicable evidence or apply explicit policy; do not claim certification. |
-| Missing cost | `CostModel::candidate_cost()` returns `None` (including a non-finite or negative legacy estimate) | Retain the alternative for inspection; supply a comparable cost before cost-based deployment choice. |
+| Missing cost | `CostModel::candidate_cost()` returns `None` for a `ReplacementSubDAG` (including a non-finite or negative legacy estimate) | Keep that logical summary/rewrite candidate in `PlanSpace` for inspection; provide a comparable cost before selecting it by cost. This does not make it a deployable physical plan. |
 | Unknown runtime support | `ReplacementSubDAG::runtime_support_evidence(model)` returns `None` | Candidate remains visible; bind a concrete implementation and confirm support before deployment. |
 | Known invalid evidence or impossible semantics | No candidate; where supported, a `RejectedCandidate` records the error | Do not deploy. |
 
