@@ -1856,19 +1856,17 @@ fn realize_binary(
             .as_ref()
             .and_then(ddsketch_ratio_operand_target)
         {
-            let domains = models
-                .evidence
-                .quantile_input_domain(lhs)
-                .zip(models.evidence.quantile_input_domain(rhs))
-                .map(|(lhs, rhs)| [lhs, rhs]);
             let (alpha, _) = accuracy_budget(&target);
-            if domains.as_ref().is_some_and(|domains| {
-                domains
-                    .iter()
-                    .any(|domain| !domain.supports_ddsketch(alpha))
-            }) {
+            let lhs_domain = models.evidence.quantile_input_domain(lhs);
+            let rhs_domain = models.evidence.quantile_input_domain(rhs);
+            if [&lhs_domain, &rhs_domain]
+                .into_iter()
+                .flatten()
+                .any(|domain| !domain.supports_ddsketch(alpha))
+            {
                 return Ok(None);
             }
+            let domains = lhs_domain.zip(rhs_domain).map(|(lhs, rhs)| [lhs, rhs]);
             lhs_node = realize_ddsketch_quantile_operand(lhs, models, &target)?;
             rhs_node = realize_ddsketch_quantile_operand(rhs, models, &target)?;
             if let Some(domains) = domains.as_ref() {
@@ -2120,6 +2118,23 @@ fn ddsketch_quantile_alpha(node: &SummaryNode) -> Option<f64> {
         (SketchAlgorithm::DDSketch, SketchParams::DDSketch { alpha }) => Some(*alpha),
         _ => None,
     }
+}
+
+/// An uncertified direct ratio stays visible to downstream selection even
+/// when the workload has a root target; it does not satisfy that target.
+fn is_uncertified_ddsketch_ratio(node: &SummaryNode) -> bool {
+    let SummaryExpr::BinaryOp {
+        lhs, rhs, operator, ..
+    } = &node.expr
+    else {
+        return false;
+    };
+    matches!(
+        operator.kind,
+        BinaryOpKind::Arithmetic(ArithmeticOpKind::Div)
+    ) && ddsketch_quantile_alpha(lhs).is_some()
+        && ddsketch_quantile_alpha(rhs).is_some()
+        && node.guarantee.is_none()
 }
 
 /// A direct ratio has an operator-specific DDSketch proof, so it must select
@@ -5352,7 +5367,10 @@ pub fn search_workload_with<'s, Id>(
 /// guarantee is absent (unknown) or misses the target is moved from
 /// [`MemoGroup::candidates`] to [`MemoGroup::rejected`] *before*
 /// [`PlanSpace::cost_sorted`]/[`PlanSpace::global_selection`] ever rank the
-/// group, so a `CostModel` cannot pick it. A `KeepPreAsap` candidate is
+/// group, so a `CostModel` cannot pick it. The exception is an uncertified
+/// direct DDSketch quantile ratio, which remains available for downstream
+/// evidence-based selection with `guarantee: None`; neither ranking nor
+/// selection by cost certifies that it satisfies the target. A `KeepPreAsap` candidate is
 /// exact and always survives — the raw/pre-ASAP alternative is what an
 /// unsatisfiable root keeps. Logical [`Replacement::Rewrite`] candidates
 /// are not bound values and are left alone; the targets *inside* a rewrite
@@ -5395,10 +5413,13 @@ pub fn search_workload_with_targets<'s, Id>(
                 .candidates
                 .drain(..)
                 .partition(|candidate| match &candidate.replacement {
-                    Replacement::Summary(node) => node
-                        .guarantee
-                        .as_ref()
-                        .is_some_and(|g| accuracy_model.satisfies(g, &target)),
+                    Replacement::Summary(node) => {
+                        is_uncertified_ddsketch_ratio(node)
+                            || node
+                                .guarantee
+                                .as_ref()
+                                .is_some_and(|g| accuracy_model.satisfies(g, &target))
+                    }
                     Replacement::Rewrite(_) => true,
                     // A composition's guarantee depends on the concrete child;
                     // prepare_compositions checks those pairs after all roots.

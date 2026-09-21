@@ -8,7 +8,7 @@ The formula alone does not establish its preconditions. `AccuracyEvidenceProvide
 
 Certification requires each domain to lie wholly within the pinned mapping's positive or negative indexable range (or be zero alone). Same-sign interpolation preserves the relative bound. Mixed-sign interpolation can cancel: for example, `[-1, 1.001]` can have estimated median zero despite a nonzero exact median. Nonzero values below the mapping minimum are counted as zero and also do not carry the relative bound.
 
-The denominator range must exclude zero. True and perturbed quotient ranges must stay finite and outside Float64's subnormal range, with an exact zero numerator allowed. Invalid quantile parameters and missing/invalid proofs do not receive a ratio certificate. Missing proof does not suppress candidate generation: the candidate has no root guarantee and an accuracy-enforcing selection must not treat it as certified. Invalid supplied domains are rejected. These checks are conservative: an actual window may be safe even when its declared bounds cannot prove it.
+The denominator range must exclude zero. True and perturbed quotient ranges must stay finite and outside Float64's subnormal range, with an exact zero numerator allowed. Invalid quantile parameters and missing/invalid proofs do not receive a ratio certificate. Missing proof does not suppress candidate generation: the candidate has no root guarantee and remains visible even in `search_workload_with_targets`. Downstream selection must not treat it as certified. Invalid supplied domains are rejected. These checks are conservative: an actual window may be safe even when its declared bounds cannot prove it.
 
 The final guarantee records both input ranges and their contract identifiers. The integration layer must only provide contracts it enforces for the plan's lifetime. This change adds no runtime guard, fallback executor, or automatic proof inference, and does not change standalone DDSketch readout certification outside this ratio rule.
 
@@ -21,5 +21,6 @@ into evidence. Other approximate divisions still require their own composition
 rule or remain exact.
 
 Callers that require a certified end-to-end accuracy target must use evidence
-or select another candidate. Runtime or statically enforced domain contracts
+or select another candidate. A backend may reject an uncertified candidate
+using its own evidence; Planner does not make that backend decision. Runtime or statically enforced domain contracts
 remain future work driven by observed v1 correctness needs.
