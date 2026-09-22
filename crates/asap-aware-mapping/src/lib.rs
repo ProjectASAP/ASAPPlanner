@@ -27,55 +27,35 @@
 //! so every front end normalizes before the pre-ASAP IR leaves resolution
 //! (issue #34, closed).
 //!
-//! ## Status
+//! ## Planning workflows
 //!
-//! This crate has two replacement/search capabilities — and deliberately no
-//! third one that commits to a single, final, physically-materialized
-//! answer for a whole workload:
+//! Candidate search returns [`PlanSpace`](replacement::PlanSpace), a compact
+//! logical choice space with one [`TargetSubDAGCandidates`] per target sub-DAG.
+//! [`ReplacementStrategy`] implementations propose local alternatives; search
+//! applies the applicable semantic and accuracy checks. Candidate presence does
+//! not certify physical deployability or an unknown accuracy guarantee.
 //!
-//! - [`replacement::ReplacementStrategy`] — per-target, never prunes,
-//!   exhaustive. The `TargetSubDAG`/`ReplacementSubDAG`/
-//!   `ReplacementStrategy` vocabulary `docs/design_docs/asap_aware_mapping.md` stubs out
-//!   under "Key concepts (not yet implemented)", implemented for real (issue
-//!   #251, part of #33). [`replacement::SketchAlgorithmStrategy::replacements`]
-//!   both *decides* what an `AggIntent` may become
-//!   ([`replacement::realizations_for_intent`], exhaustive and ranked via a
-//!   `CostModel`, sized to the `AccuracyTarget`) and *constructs* each
-//!   candidate's bound [`SummaryNode`](asap_types::post_asap::SummaryNode) —
-//!   every candidate comes back, not just one.
-//!   [`replacement::SharedSubtreeStrategy`] does the analogous job for the
-//!   build-independently-vs-build-once-and-share choice at a CSE-detected
-//!   shared subtree.
-//! - [`replacement::search_workload`]/[`replacement::PlanSpace::cost_sorted`]
-//!   — workload-wide, every candidate + cost, never materializes one
-//!   physical answer. Merged into the same module (issue #252, part of
-//!   #33): [`replacement::search_workload`]/[`replacement::search_workload_with`]
-//!   *search* — discover every candidate `TargetSubDAG` across a whole
-//!   workload (not just one target in isolation) and run every registered
-//!   strategy against each one, to a fixpoint, without ever materializing a
-//!   flat `2^N`-sized candidate-plan list: [`replacement::PlanSpace`] holds
-//!   one Cascades-style [`replacement::TargetSubDAGCandidates`] per distinct
-//!   `TargetSubDAG`, each carrying every alternative discovered for it.
-//!   [`replacement::PlanSpace::cost_sorted`] is the final
-//!   `sorted_by(cost_model)` step, ranking each group's candidates
-//!   best-first via the same [`CostModel`](cost_model::CostModel) the
-//!   single-target steps above already consult — see [`replacement`]'s own
-//!   module docs for the full design (per-target candidates vs. flat plans, dedup
-//!   discipline, termination, cost-based ranking).
+//! Integrators choose among these workflows:
 //!
-//! **Picking *which* candidate, and materializing one final answer, is a
-//! downstream deployment's job, out of this crate's scope.** This crate's
-//! output boundary is [`replacement::PlanSpace`]: every candidate
-//! replacement plus its cost, meant for a downstream consumer (e.g. a
-//! DAG-visualization view, or a deployment's own physical plan provider). Which
-//! sketch to commit to *and* where to place it are a joint decision only a
-//! deployment can see the full picture for — picking one in isolation, with
-//! no real consumer of that single materialized answer inside this crate,
-//! is out of scope. (A prior workload-wide "keep first/cost-preferred
-//! candidate per node, memoized by `Rc` identity" entry point —
-//! `bind::implement_workload`/`implement_workload_with` — used to live here
-//! and was removed for exactly this reason; see the terminology table below
-//! for where that "one answer" step now belongs, downstream.)
+//! - Inspect the candidate space, optionally using [`PlanSpace::cost_sorted`]
+//!   to obtain ranked views, and perform selection downstream.
+//! - Call [`PlanSpace::global_selection`] once for the workload, then
+//!   [`GlobalSelection::assemble_selected_dag`] for each query root. This
+//!   coordinates logical choices and preserves shared nodes, but makes no
+//!   summary-maintenance lifecycle decision.
+//! - When Planner owns maintenance-versus-recomputation decisions, use
+//!   [`global_selection_with_summary_maintenance_lifecycles`] followed by
+//!   [`assemble_selected_dag_with_summary_maintenance_lifecycles`] per root.
+//!   This alternative workflow returns [`SummaryMaintenanceLifecyclePlan`]
+//!   values containing DAG roots and maintenance decisions; callers do not need
+//!   to run ordinary selection/assembly first.
+//!
+//! Models and evidence determine which choices the helpers can justify.
+//! Physical operator binding, placement, storage, deployment, and execution
+//! remain downstream responsibilities. Neither taking the first candidate nor
+//! assembling a logical DAG creates an executable deployment plan.
+//!
+//! ## Supporting components
 //!
 //! - [`cost_model`] — the [`CostModel`](cost_model::CostModel) trait every
 //!   deployment's cost-based sketch selection plugs into (issues #6, #33).
@@ -92,7 +72,7 @@
 //!   [`explanation::ReplacementExplanation`] (why a replacement exists,
 //!   where, reusing the candidate's own rationale rather than inventing new
 //!   prose), meant for the same downstream consumer (e.g. a
-//!   DAG-visualization view) the crate doc's `## Status` section above
+//!   DAG-visualization view) the crate doc's planning workflows section above
 //!   already names for [`replacement::PlanSpace`] itself. Superseded PR
 //!   #247's own rule-based traversal, which re-walked the tree once per
 //!   optimization before [`replacement::search_workload`] existed to read

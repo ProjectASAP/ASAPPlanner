@@ -52,21 +52,17 @@
 //!   already produced, rather than re-deriving that explanation with a rule
 //!   of its own.
 //!
-//! A caller that wants one executable answer takes the first
-//! (`cost_model`-preferred) entry off `replacements()` itself
-//! (`.into_iter().next()`) — that "keep the head" step lives entirely on the
-//! calling side, not behind a second module-level entry point. This
-//! module's own [`realize_child`] performs that take-first step
-//! internally, but only for one, narrow, single-target purpose: recursing
-//! into a node's child while constructing one concrete candidate (see
-//! [`construct_summary_agg`]) and, symmetrically, recovering one
-//! representative bound node for a [`CostModel::cse_share_decision`]
-//! comparison (see [`realize_one`]) — never a workload-wide "commit to one
-//! final answer" step. Committing to one physically-materialized answer for
-//! a whole workload (previously `bind::implement_workload`/
-//! `implement_workload_with`) is out of this crate's scope — see the crate
-//! doc's `## Status` section for why. Every other caller goes through
-//! `SketchAlgorithmStrategy::replacements` directly and decides for itself.
+//! A caller may inspect local replacements, but taking the first candidate
+//! does not establish a compatible workload plan or physical deployability.
+//! For Planner-owned logical selection, call [`PlanSpace::global_selection`]
+//! once and [`GlobalSelection::assemble_selected_dag`] for each wanted query
+//! root. Alternatively, use the summary-maintenance-lifecycle-aware helpers
+//! when Planner should also compare maintenance against raw recomputation.
+//! Physical binding, deployment, and execution remain downstream.
+//!
+//! Internally, [`realize_child`] and [`realize_one`] may take a preferred local
+//! realization while constructing or costing a candidate. That local operation
+//! is not the public workload-selection workflow and does not create runtime state.
 //!
 //! This means an ordinary single-target bind sizes and fully constructs
 //! *every* sketch candidate at every sketch-capable node (not just the one a
@@ -1668,9 +1664,9 @@ pub(crate) fn describe_intent(intent: &AggIntent) -> String {
 /// every candidate via [`SketchAlgorithmStrategy::replacements`], keep the
 /// `cost_model`-preferred (first) one, and fall back to [`keep_pre_asap`]
 /// when there's no candidate at all — **not** a general single-answer API
-/// for a whole workload (that "commit to one final answer" step is a
-/// downstream deployment's job, out of this crate's scope — see the crate
-/// doc's `## Status` section). `root` must already be the caller's own
+/// for a whole workload. Use [`PlanSpace::global_selection`] and DAG assembly
+/// for coordinated logical selection; physical deployment remains downstream.
+/// `root` must already be the caller's own
 /// `Rc`, never fabricated per call, so this never allocates beyond what the
 /// caller already held.
 ///
@@ -4033,14 +4029,14 @@ fn summary_grouping(node: &SummaryNode) -> Option<&GroupingStrategy> {
 /// (cross-group) selection" section for the full recurrence.
 ///
 /// Contrast with [`RankedTargetSubDAGCandidates`] ([`PlanSpace::cost_sorted`]'s output):
-/// that ranks every candidate for one group in isolation and never commits
+/// that ranks every candidate for one target in isolation and never commits
 /// to just one; this commits to exactly one (or none), and the count it
 /// ranks against — [`Self::effective_consumer_count`] — can differ from the
-/// group's own raw structural [`TargetSubDAGCandidates::consumer_count`] whenever an
+/// target's own raw structural [`TargetSubDAGCandidates::consumer_count`] whenever an
 /// ancestor's choice changes how many times this site truly runs. Use
 /// `cost_sorted` to inspect every alternative for a site; use
 /// `global_selection` when you need this module's best single answer,
-/// accounting for cross-group interaction where it knows how to.
+/// accounting for cross-target interaction where it knows how to.
 #[derive(Debug)]
 pub struct TargetSubDAGSelection<'a> {
     /// The target sub-DAG this selection is for.
@@ -4052,12 +4048,15 @@ pub struct TargetSubDAGSelection<'a> {
     /// ancestor's own selected candidate is accounted for — see
     /// [`multiplier`]'s doc for the exact recurrence. Equal to
     /// `consumer_count` unless some ancestor on a path from a root to this
-    /// site is itself a [`SharedSubtreeStrategy`] group that chose
+    /// site has a [`SharedSubtreeStrategy`] alternative that chose
     /// [`ShareDecision::RecomputeIndependently`].
     pub effective_consumer_count: usize,
-    /// The candidate this selection committed to, or `None` for a group no
-    /// registered strategy proposed anything for (mirrors
-    /// [`TargetSubDAGCandidates::candidates`] being possibly empty).
+    /// The candidate chosen for this target, or `None` when no replacement
+    /// is selected. The candidate set need not be empty: an unproven DDSketch
+    /// ratio can remain available for backend inspection but be excluded from
+    /// automatic selection, or costing can prefer raw recomputation.
+    /// DAG assembly then preserves exact computation at this target where
+    /// supported, while independently selected children may remain visible.
     pub chosen: Option<&'a ReplacementSubDAG>,
     /// When `chosen` is a [`Replacement::ExactComposition`]: the child
     /// decision it was committed together with, and the cost comparison
@@ -4215,7 +4214,7 @@ impl<'a> GlobalSelection<'a> {
 
     /// Preserve composable query-time value operators in post-ASAP form even
     /// when the operator itself has no summary realization. Its child is
-    /// materialized independently, so a selected summary remains visible
+    /// assembled independently, so a selected summary remains visible
     /// beneath `Project`/`Filter`/`Sort`/`Limit` instead of being swallowed by
     /// one opaque `KeepPreAsap` subtree.
     fn assemble_residual(
@@ -8093,8 +8092,8 @@ mod tests {
     //
     // Moved from the former `bind.rs` (issue #251): `bind.rs`'s own
     // workload-wide orchestration (`implement_workload`/
-    // `implement_workload_with`) was deleted as out of this crate's scope
-    // (see the crate doc's `## Status` section), but these tests exercise
+    // `implement_workload_with`) was deleted. Current whole-workload logical
+    // selection uses `PlanSpace::global_selection`; these tests exercise
     // `construct_summary_agg`'s schema derivation end to end through
     // `realize_child` — production logic that still lives in this module —
     // so they move here rather than disappear. Unlike `bind.rs` (an
