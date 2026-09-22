@@ -47,17 +47,17 @@ may arrive unexpectedly during exploration, run once at a scheduled time, or
 repeat every ten seconds on a dashboard. Planning summary state from syntax
 alone either misses reuse or invents reuse that the workload does not justify.
 
-The current normalized workload distinguishes a one-shot `query_batch` from
-fixed-interval `repeating_queries`, and the recurrence cost model distinguishes
-one-shot consumers from evaluation and update rates. This is a useful base, but
-it does not represent predictability, uncertain demand, real-time versus
-longitudinal scope, at-rest versus continuously ingesting data, or summary-state
-lifecycle. It also risks treating "repeating query" and "streaming data" as the
-same fact even though the glossary defines them on different axes.
+The current `PlanningWorkload` separates query demand from data arrival.
+Query entries include predictability, recurrence or invocation count, accuracy,
+and time selection; `DataWorkload` contains arrival and empirical facts.
+These fields do not themselves select a summary-maintenance lifecycle.
+The [input/output/workflow design](../../architecture/input-output-workflow.md)
+is authoritative for current fields, defaults, and public call sequences.
 
 ## Inputs, outputs, and end-to-end behavior
 
-The planner receives four logically distinct inputs:
+For the broader lifecycle design, four categories of information matter
+(these are not four current top-level Rust fields):
 
 1. logical queries, which define query semantics;
 2. query workload, including per-query accuracy and latency requirements,
@@ -66,8 +66,10 @@ The planner receives four logically distinct inputs:
    distribution;
 4. existing summaries and the lifecycle actions available to the deployment.
 
-The implemented output is a phase-valid selected summary plan (or a
-cost-preferred raw-recomputation fallback) plus explicit state deployments. A
+Candidate search outputs `PlanSpace`. The implemented lifecycle-aware workflow
+then returns a `SummaryMaintenanceLifecyclePlan` per query root, containing the
+Post-ASAP DAG and maintenance decisions. It can choose exact raw recomputation
+when summary maintenance does not beat raw cost or comparable costs are missing. A
 state deployment states whether a summary is ephemeral, prepared, shared for a
 bounded period, or continuously maintained. It retains costs, assumptions, and
 structured rejection reasons. Exporting full input provenance remains a later

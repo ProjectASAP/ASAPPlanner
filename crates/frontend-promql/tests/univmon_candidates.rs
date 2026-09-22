@@ -157,7 +157,7 @@ fn uncalibrated_frequency_readouts_do_not_bypass_accuracy_targets() {
                     &DefaultAccuracyModel,
                 );
                 assert!(space
-                    .group_for(&space.roots[0].1)
+                    .candidates_for_target(&space.roots[0].1)
                     .unwrap()
                     .candidates
                     .iter()

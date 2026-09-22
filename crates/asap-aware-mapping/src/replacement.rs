@@ -52,21 +52,17 @@
 //!   already produced, rather than re-deriving that explanation with a rule
 //!   of its own.
 //!
-//! A caller that wants one executable answer takes the first
-//! (`cost_model`-preferred) entry off `replacements()` itself
-//! (`.into_iter().next()`) — that "keep the head" step lives entirely on the
-//! calling side, not behind a second module-level entry point. This
-//! module's own [`realize_child`] performs that take-first step
-//! internally, but only for one, narrow, single-target purpose: recursing
-//! into a node's child while constructing one concrete candidate (see
-//! [`construct_summary_agg`]) and, symmetrically, recovering one
-//! representative bound node for a [`CostModel::cse_share_decision`]
-//! comparison (see [`realize_one`]) — never a workload-wide "commit to one
-//! final answer" step. Committing to one physically-materialized answer for
-//! a whole workload (previously `bind::implement_workload`/
-//! `implement_workload_with`) is out of this crate's scope — see the crate
-//! doc's `## Status` section for why. Every other caller goes through
-//! `SketchAlgorithmStrategy::replacements` directly and decides for itself.
+//! A caller may inspect local replacements, but taking the first candidate
+//! does not establish a compatible workload plan or physical deployability.
+//! For Planner-owned logical selection, call [`PlanSpace::global_selection`]
+//! once and [`GlobalSelection::assemble_selected_dag`] for each wanted query
+//! root. Alternatively, use the summary-maintenance-lifecycle-aware helpers
+//! when Planner should also compare maintenance against raw recomputation.
+//! Physical binding, deployment, and execution remain downstream.
+//!
+//! Internally, [`realize_child`] and [`realize_one`] may take a preferred local
+//! realization while constructing or costing a candidate. That local operation
+//! is not the public workload-selection workflow and does not create runtime state.
 //!
 //! This means an ordinary single-target bind sizes and fully constructs
 //! *every* sketch candidate at every sketch-capable node (not just the one a
@@ -111,7 +107,7 @@
 //! `TargetSubDAG` discovery pass" — describing work deliberately left for a
 //! future Cascades/Volcano-style search engine (PR #263,
 //! `feat/cascades-search-252`, over the [`ReplacementStrategy`] extension
-//! point above). That engine is [`PlanSpace`]/[`MemoGroup`]/
+//! point above). That engine is [`PlanSpace`]/[`TargetSubDAGCandidates`]/
 //! [`search_workload`]/[`search_workload_with`] below, merged into this
 //! module rather than kept as a separate `search` module — the same "one
 //! module, one step" reasoning the top of this file already uses for
@@ -145,8 +141,8 @@
 //! plans, each one duplicating every untouched sibling subtree. This module
 //! does not do that:
 //!
-//! 1. **MEMO groups, not flat plans.** [`MemoGroup`] is this engine's
-//!    Cascades-style "group": one distinct [`TargetSubDAG`] (identified by
+//! 1. **Per-target candidates, not flat plans.** [`TargetSubDAGCandidates`]
+//!    stores the alternatives for one distinct [`TargetSubDAG`] (identified by
 //!    its own `Rc<QueryExpr>` pointer identity — the same currency
 //!    [`asap_types::pre_asap::cse::share_common_subtrees`] already
 //!    established across the workload) holding every
@@ -160,7 +156,7 @@
 //! 2. **Dedup by structural hash + `PartialEq`, reusing `pre_asap::cse`'s own
 //!    discipline.** [`asap_types::pre_asap::cse::structural_hash`] (made
 //!    `pub` for exactly this reuse) is only ever a candidate-narrowing
-//!    filter; [`MemoGroup::add_candidate`]'s actual duplicate check is
+//!    filter; [`TargetSubDAGCandidates::add_candidate`]'s actual duplicate check is
 //!    `QueryExpr`'s derived `PartialEq` — the same "hash is a filter,
 //!    `PartialEq` is the decision, no exceptions" rule `cse.rs`'s own
 //!    "Correctness" section states and this module inherits rather than
@@ -206,7 +202,7 @@
 //! (the `new_plans -= candidate_plans` dedup step the module-level
 //! pseudocode describes is therefore never asked to recognize "the same
 //! candidate, proposed again" as a special case — see
-//! [`MemoGroup::add_candidate`]'s own doc on why that distinction matters
+//! [`TargetSubDAGCandidates::add_candidate`]'s own doc on why that distinction matters
 //! for [`Replacement::Summary`] specifically, where no real equality check
 //! exists to make it safely).
 //!
@@ -246,7 +242,7 @@
 //! comparison was enough for the CSE share/recompute decision alone, and
 //! flagged that a real search engine — this module — is where that stops
 //! being the whole story; it isn't a contradiction of #237, it's the scope
-//! change #237 itself named). Concretely, per [`MemoGroup`]:
+//! change #237 itself named). Concretely, per [`TargetSubDAGCandidates`]:
 //!
 //! - A group whose candidates are the [`SharedSubtreeStrategy`]
 //!   share-vs-recompute pair is ranked by calling
@@ -272,7 +268,7 @@
 //! [`SharedSubtreeStrategy`] group by comparing a `consumer_count`-scaled
 //! recompute cost against a fixed maintenance cost — but a **nested**
 //! `SharedSubtreeStrategy` group's *true* recompute burden isn't its own
-//! raw [`MemoGroup::consumer_count`] (how many operator-child positions
+//! raw [`TargetSubDAGCandidates::consumer_count`] (how many operator-child positions
 //! directly reference it) whenever an ancestor on the path to it is
 //! *itself* being recomputed independently rather than shared: recomputing
 //! that ancestor independently at each of *its own* uses recomputes
@@ -314,7 +310,7 @@
 //! like a Cascades/Volcano MEMO, but [`PlanSpace::cost_sorted`] alone never
 //! actually performed this composition step; `global_selection` is that
 //! step, added alongside `cost_sorted` rather than replacing it (both stay
-//! available — see [`RankedGroup`] vs. [`SelectedGroup`]'s own docs for when
+//! available — see [`RankedTargetSubDAGCandidates`] vs. [`TargetSubDAGSelection`]'s own docs for when
 //! to reach for which).
 //!
 //! Two things this deliberately does **not** attempt, both left as
@@ -325,7 +321,7 @@
 //!   parameter at all today, so a `SketchAlgorithmStrategy` group's selection
 //!   here still falls back to [`rank_group`]'s ordinary (consumer-count-
 //!   blind) local ranking, even though its own
-//!   [`SelectedGroup::effective_consumer_count`] is computed and exposed
+//!   [`TargetSubDAGSelection::effective_consumer_count`] is computed and exposed
 //!   correctly regardless. Wiring sketch sizing/ranking to actually consume
 //!   it needs a `CostModel` interface change — out of scope here per this
 //!   issue's own "reuse `CostModel`, don't invent a new interface" ask; a
@@ -487,7 +483,7 @@ pub enum Replacement {
     /// `ValueOperationAtMaintenanceTime` feeding a maintained summary above. Carries only a
     /// reference to the child target — [`PlanSpace::global_selection`]
     /// commits the compatible parent/child pair and
-    /// [`GlobalSelection::materialize`] links it into one validated
+    /// [`GlobalSelection::assemble_selected_dag`] links it into one validated
     /// `SummaryNode`. See [`crate::exact_composition`].
     ExactComposition(ExactComposition),
 }
@@ -566,9 +562,9 @@ pub enum ReplacementProvenance {
 
 /// A candidate a strategy considered for a target but refused to propose on
 /// accuracy-legality grounds (issue #172) — kept alongside the group's
-/// legal candidates in [`MemoGroup::rejected`] so a rejection is as
+/// legal candidates in [`TargetSubDAGCandidates::rejected`] so a rejection is as
 /// inspectable (and exportable) as a selection. Never ranked: a
-/// [`CostModel`] only ever sees [`MemoGroup::candidates`].
+/// [`CostModel`] only ever sees [`TargetSubDAGCandidates::candidates`].
 #[derive(Debug, Clone)]
 pub struct RejectedCandidate {
     /// Name of the [`ReplacementStrategy`] that considered it.
@@ -628,7 +624,7 @@ pub trait ReplacementStrategy {
     /// every candidate from `replacements`, no rejections — a strategy that
     /// never performs an accuracy check need not override this.
     /// [`search_workload_with`] calls this (not `replacements`) so the
-    /// rejections land in [`MemoGroup::rejected`].
+    /// rejections land in [`TargetSubDAGCandidates::rejected`].
     fn propose(&self, target: &TargetSubDAG<'_>) -> Proposals {
         Proposals {
             candidates: self.replacements(target),
@@ -1693,9 +1689,9 @@ pub(crate) fn describe_intent(intent: &AggIntent) -> String {
 /// every candidate via [`SketchAlgorithmStrategy::replacements`], keep the
 /// `cost_model`-preferred (first) one, and fall back to [`keep_pre_asap`]
 /// when there's no candidate at all — **not** a general single-answer API
-/// for a whole workload (that "commit to one final answer" step is a
-/// downstream deployment's job, out of this crate's scope — see the crate
-/// doc's `## Status` section). `root` must already be the caller's own
+/// for a whole workload. Use [`PlanSpace::global_selection`] and DAG assembly
+/// for coordinated logical selection; physical deployment remains downstream.
+/// `root` must already be the caller's own
 /// `Rc`, never fabricated per call, so this never allocates beyond what the
 /// caller already held.
 ///
@@ -2249,7 +2245,7 @@ fn keep_pre_asap_rc(expr: Rc<QueryExpr>) -> Result<Rc<SummaryNode>, RealizationE
 /// logical. Unsupported logical parents still conservatively become one
 /// [`SummaryExpr::KeepPreAsap`] subtree. Composable query-time value
 /// operators (`Project`, `Filter`, `Sort`, and `Limit`) are retained during final
-/// materialization so their independently planned children remain visible.
+/// DAG assembly so their independently planned children remain visible.
 pub fn bindable_intent(node: &QueryExpr) -> Option<&AggIntent> {
     if let QueryExpr::Aggregate {
         measures, having, ..
@@ -3059,7 +3055,7 @@ impl ReplacementStrategy for SharedSubtreeStrategy {
     }
 }
 
-// ── Workload-wide search: MemoGroup / PlanSpace / search_workload ──────────
+// ── Workload-wide search: TargetSubDAGCandidates / PlanSpace / search_workload ──────────
 //
 // Merged in from the former `search.rs` (issue #252, part of #33) — see this
 // file's own top-level "Workload-wide search" doc section for the full
@@ -3072,9 +3068,9 @@ impl ReplacementStrategy for SharedSubtreeStrategy {
 /// exactly 2 passes over a fixed target set, regardless of workload size.
 pub const MAX_SEARCH_ITERATIONS: usize = 1_000;
 
-// ── MemoGroup ────────────────────────────────────────────────────────────
+// ── TargetSubDAGCandidates ──────────────────────────────────────────────
 
-/// One Cascades-style MEMO group: a single distinct [`TargetSubDAG`] (its
+/// Candidates for one distinct [`TargetSubDAG`] (its
 /// own `target` `Rc<QueryExpr>`, keyed by pointer identity in
 /// [`PlanSpace`]'s internal map — never re-derived by value) plus every
 /// [`ReplacementSubDAG`] alternative any registered [`ReplacementStrategy`]
@@ -3086,7 +3082,7 @@ pub const MAX_SEARCH_ITERATIONS: usize = 1_000;
 /// exactly one group per discovered `TargetSubDAG`, not "one group per
 /// `TargetSubDAG` something matched".
 #[derive(Debug, Clone)]
-pub struct MemoGroup {
+pub struct TargetSubDAGCandidates {
     /// The target sub-DAG this group is for.
     pub target: Rc<QueryExpr>,
     /// How many operator-child positions across the whole workload
@@ -3104,7 +3100,7 @@ pub struct MemoGroup {
     pub rejected: Vec<RejectedCandidate>,
 }
 
-impl MemoGroup {
+impl TargetSubDAGCandidates {
     fn new(target: Rc<QueryExpr>, consumer_count: usize) -> Self {
         Self {
             target,
@@ -3216,7 +3212,7 @@ fn is_duplicate_summary(_existing: &Rc<SummaryNode>, _candidate: &Rc<SummaryNode
 // ── PlanSpace ────────────────────────────────────────────────────────────
 
 /// The deduped candidate space [`search_workload`]/[`search_workload_with`]
-/// discover: one [`MemoGroup`] per distinct `TargetSubDAG` in the
+/// discover: one [`TargetSubDAGCandidates`] per distinct `TargetSubDAG` in the
 /// (already-CSE'd) workload, plus the workload's own post-CSE roots so a
 /// caller can still map a `Root`'s `Id` back to the `Rc<QueryExpr>` whose
 /// group holds its alternatives.
@@ -3225,12 +3221,12 @@ pub struct PlanSpace<Id> {
     /// [`search_workload_with`] runs up front — the same post-CSE roots
     /// every `TargetSubDAG` in `groups` was discovered from.
     pub roots: Vec<(Id, Rc<QueryExpr>)>,
-    groups: HashMap<*const QueryExpr, MemoGroup>,
-    /// Discovery order — stable iteration for [`PlanSpace::groups`]/
+    groups: HashMap<*const QueryExpr, TargetSubDAGCandidates>,
+    /// Discovery order — stable iteration for [`PlanSpace::target_subdag_candidates`]/
     /// [`PlanSpace::cost_sorted`], since `HashMap` iteration order isn't.
     order: Vec<*const QueryExpr>,
     /// Composition proofs are computed with the search model, then retained
-    /// through costing and materialization so no later default can replace it.
+    /// through costing and DAG assembly so no later default can replace it.
     composition_plans: Vec<PreparedComposition>,
 }
 
@@ -3343,8 +3339,8 @@ impl CandidateCostOverrides {
 }
 
 impl<Id> PlanSpace<Id> {
-    /// Every discovered group, in discovery order.
-    pub fn groups(&self) -> impl Iterator<Item = &MemoGroup> {
+    /// One candidate set per discovered target sub-DAG, in discovery order.
+    pub fn target_subdag_candidates(&self) -> impl Iterator<Item = &TargetSubDAGCandidates> {
         self.order.iter().map(move |ptr| &self.groups[ptr])
     }
 
@@ -3360,10 +3356,10 @@ impl<Id> PlanSpace<Id> {
         self.groups.is_empty()
     }
 
-    /// The group for `target`, if `target`'s own `Rc` is a discovered
+    /// The candidate set for `target`, if `target`'s own `Rc` is a discovered
     /// `TargetSubDAG` (i.e. `Rc::ptr_eq` to some node reachable from
     /// `roots`).
-    pub fn group_for(&self, target: &Rc<QueryExpr>) -> Option<&MemoGroup> {
+    pub fn candidates_for_target(&self, target: &Rc<QueryExpr>) -> Option<&TargetSubDAGCandidates> {
         self.groups.get(&Rc::as_ptr(target))
     }
 
@@ -3375,7 +3371,7 @@ impl<Id> PlanSpace<Id> {
     /// each other.
     ///
     /// Ranking itself is decided entirely by [`rank_group`] before
-    /// [`RankedGroup::costs`] is ever computed — pairing each candidate with
+    /// [`RankedTargetSubDAGCandidates::costs`] is ever computed — pairing each candidate with
     /// [`CostModel::grouping_state_cost`] for grouping alternatives, or
     /// [`CostModel::estimate_cost`] otherwise, is an additive annotation
     /// for a caller that wants to *display* a cost (e.g. a
@@ -3383,9 +3379,9 @@ impl<Id> PlanSpace<Id> {
     /// a `CostModel` whose `estimate_cost` disagrees with its own
     /// `rank_candidates`/`cse_share_decision` (a deployment bug, not
     /// something this method tries to protect against) would show a
-    /// `RankedGroup` whose `costs` aren't monotonically non-decreasing —
+    /// `RankedTargetSubDAGCandidates` whose `costs` aren't monotonically non-decreasing —
     /// `cost_sorted`'s own ordering guarantee is unaffected either way.
-    pub fn cost_sorted(&self, cost_model: &dyn CostModel) -> Vec<RankedGroup<'_>> {
+    pub fn cost_sorted(&self, cost_model: &dyn CostModel) -> Vec<RankedTargetSubDAGCandidates<'_>> {
         self.order
             .iter()
             .map(|ptr| {
@@ -3407,7 +3403,7 @@ impl<Id> PlanSpace<Id> {
                             .map_or_else(|| cost_model.estimate_cost(c, &target), |cost| cost.0)
                     })
                     .collect();
-                RankedGroup {
+                RankedTargetSubDAGCandidates {
                     target: &group.target,
                     consumer_count: group.consumer_count,
                     candidates,
@@ -3425,7 +3421,7 @@ impl<Id> PlanSpace<Id> {
         cost_model: &dyn CostModel,
         profiles: &RecurrenceProfileMap,
         horizon: Option<Horizon>,
-    ) -> Result<Vec<RankedGroup<'_>>, RecurrenceError> {
+    ) -> Result<Vec<RankedTargetSubDAGCandidates<'_>>, RecurrenceError> {
         self.order
             .iter()
             .map(|ptr| {
@@ -3466,7 +3462,7 @@ impl<Id> PlanSpace<Id> {
                             )
                     })
                     .collect();
-                Ok(RankedGroup {
+                Ok(RankedTargetSubDAGCandidates {
                     target: &group.target,
                     consumer_count: group.consumer_count,
                     candidates,
@@ -3479,11 +3475,11 @@ impl<Id> PlanSpace<Id> {
 
 // ── Recurrence-aware cost context (issue #287) ──────────────────────────
 
-/// One [`RecurrenceProfile`] per discovered [`MemoGroup`] target, built by
+/// One [`RecurrenceProfile`] per discovered [`TargetSubDAGCandidates`] target, built by
 /// [`PlanSpace::recurrence_profiles`] — the "carry `RepeatingEntry.demand`
 /// and relevant `DataWorkload` into ASAP-aware search/cost context"
 /// half of issue #287. Looked up by `Rc` pointer identity, the same
-/// currency [`PlanSpace::group_for`]/[`GlobalSelection::for_target`] already
+/// currency [`PlanSpace::candidates_for_target`]/[`GlobalSelection::for_target`] already
 /// use.
 /// Holds an owned `Rc<QueryExpr>` clone alongside each profile (not just its
 /// raw pointer) so this map keeps every node it describes alive for as long
@@ -3552,7 +3548,7 @@ impl<Id> PlanSpace<Id> {
     /// A parent that structurally references the same child more than once
     /// (e.g. `BinaryOp{lhs: X, rhs: X}`) credits that child with one
     /// contribution per reference, not one contribution per distinct node —
-    /// matching how [`MemoGroup::consumer_count`] counts that occurrence.
+    /// matching how [`TargetSubDAGCandidates::consumer_count`] counts that occurrence.
     /// Multiplicity is propagated through the full descendant path: if the
     /// repeated parent is independently evaluated twice, its child is also
     /// evaluated twice. This supplies recurrence-aware selection with the
@@ -3561,7 +3557,7 @@ impl<Id> PlanSpace<Id> {
     /// **Unreachable sites**: [`PlanSpace`] can contain a site no root's own
     /// structural tree actually reaches — e.g. one only ever produced by a
     /// [`Replacement::Rewrite`] candidate a [`ReplacementStrategy`] invented
-    /// (this walk only follows [`MemoGroup::target`]'s own structural
+    /// (this walk only follows [`TargetSubDAGCandidates::target`]'s own structural
     /// children, the same scope [`discover_targets`] uses for the original
     /// roots, never a candidate's rewritten value). Such a site gets
     /// [`RecurrenceProfile::EMPTY`] — in particular, `update_rate` is
@@ -3629,7 +3625,7 @@ impl<Id> PlanSpace<Id> {
                     &mut reached,
                 );
                 // Every reachable node was itself discovered as its own
-                // `MemoGroup` (`discover_targets` walks the identical
+                // `TargetSubDAGCandidates` (`discover_targets` walks the identical
                 // relational-skeleton scope) — its own `target` is the
                 // canonical `Rc` to read children off.
                 if let Some(group) = self.groups.get(&ptr) {
@@ -3832,10 +3828,10 @@ fn contribute(
     }
 }
 
-/// One [`MemoGroup`]'s candidates, ranked best-first by
+/// One [`TargetSubDAGCandidates`]'s candidates, ranked best-first by
 /// [`PlanSpace::cost_sorted`].
 #[derive(Debug)]
-pub struct RankedGroup<'a> {
+pub struct RankedTargetSubDAGCandidates<'a> {
     pub target: &'a Rc<QueryExpr>,
     pub consumer_count: usize,
     pub candidates: Vec<&'a ReplacementSubDAG>,
@@ -3855,7 +3851,10 @@ pub struct RankedGroup<'a> {
 /// order whenever there's nothing to rank (0 or 1 candidates) or this
 /// module doesn't have a defined `CostModel` comparison for the shape it
 /// sees — it never invents one.
-fn rank_group<'a>(group: &'a MemoGroup, cost_model: &dyn CostModel) -> Vec<&'a ReplacementSubDAG> {
+fn rank_group<'a>(
+    group: &'a TargetSubDAGCandidates,
+    cost_model: &dyn CostModel,
+) -> Vec<&'a ReplacementSubDAG> {
     let mut ranked: Vec<&ReplacementSubDAG> = group.candidates.iter().collect();
     if ranked.len() <= 1 {
         return ranked;
@@ -3963,7 +3962,7 @@ fn rank_group<'a>(group: &'a MemoGroup, cost_model: &dyn CostModel) -> Vec<&'a R
 /// expected in practice for a target that's already part of a legitimate
 /// workload tree, but this degrades to "keep discovery order" rather than
 /// panicking).
-fn cse_preference(group: &MemoGroup, cost_model: &dyn CostModel) -> Option<bool> {
+fn cse_preference(group: &TargetSubDAGCandidates, cost_model: &dyn CostModel) -> Option<bool> {
     if group.consumer_count < 2 {
         return None;
     }
@@ -4025,38 +4024,41 @@ fn summary_grouping(node: &SummaryNode) -> Option<&GroupingStrategy> {
 
 // ── global_selection ─────────────────────────────────────────────────────
 
-/// One group's globally-selected candidate — the answer
+/// One target sub-DAG's selected choice and usage information — the answer
 /// [`PlanSpace::global_selection`] commits to for one site, after folding in
 /// every ancestor [`SharedSubtreeStrategy`] decision on the path from a
 /// workload root to this site. See the module docs' "Whole-plan
 /// (cross-group) selection" section for the full recurrence.
 ///
-/// Contrast with [`RankedGroup`] ([`PlanSpace::cost_sorted`]'s output):
-/// that ranks every candidate for one group in isolation and never commits
+/// Contrast with [`RankedTargetSubDAGCandidates`] ([`PlanSpace::cost_sorted`]'s output):
+/// that ranks every candidate for one target in isolation and never commits
 /// to just one; this commits to exactly one (or none), and the count it
 /// ranks against — [`Self::effective_consumer_count`] — can differ from the
-/// group's own raw structural [`MemoGroup::consumer_count`] whenever an
+/// target's own raw structural [`TargetSubDAGCandidates::consumer_count`] whenever an
 /// ancestor's choice changes how many times this site truly runs. Use
 /// `cost_sorted` to inspect every alternative for a site; use
 /// `global_selection` when you need this module's best single answer,
-/// accounting for cross-group interaction where it knows how to.
+/// accounting for cross-target interaction where it knows how to.
 #[derive(Debug)]
-pub struct SelectedGroup<'a> {
+pub struct TargetSubDAGSelection<'a> {
     /// The target sub-DAG this selection is for.
     pub target: &'a Rc<QueryExpr>,
-    /// [`MemoGroup::consumer_count`] — how many operator-child positions
+    /// [`TargetSubDAGCandidates::consumer_count`] — how many operator-child positions
     /// directly reference `target`, ignoring every ancestor's own choice.
     pub consumer_count: usize,
     /// How many times `target`'s computation actually runs once every
     /// ancestor's own selected candidate is accounted for — see
     /// [`multiplier`]'s doc for the exact recurrence. Equal to
     /// `consumer_count` unless some ancestor on a path from a root to this
-    /// site is itself a [`SharedSubtreeStrategy`] group that chose
+    /// site has a [`SharedSubtreeStrategy`] alternative that chose
     /// [`ShareDecision::RecomputeIndependently`].
     pub effective_consumer_count: usize,
-    /// The candidate this selection committed to, or `None` for a group no
-    /// registered strategy proposed anything for (mirrors
-    /// [`MemoGroup::candidates`] being possibly empty).
+    /// The candidate chosen for this target, or `None` when no replacement
+    /// is selected. The candidate set need not be empty: an unproven DDSketch
+    /// ratio can remain available for backend inspection but be excluded from
+    /// automatic selection, or costing can prefer raw recomputation.
+    /// DAG assembly then preserves exact computation at this target where
+    /// supported, while independently selected children may remain visible.
     pub chosen: Option<&'a ReplacementSubDAG>,
     /// When `chosen` is a [`Replacement::ExactComposition`]: the child
     /// decision it was committed together with, and the cost comparison
@@ -4088,17 +4090,17 @@ pub struct CompositionDecision<'a> {
     pub inputs: ExactCompositionCostInputs,
 }
 
-/// [`PlanSpace::global_selection`]'s result: one [`SelectedGroup`] per
-/// discovered site, in the same discovery order [`PlanSpace::groups`]/
+/// [`PlanSpace::global_selection`]'s result: one [`TargetSubDAGSelection`] per
+/// discovered site, in the same discovery order [`PlanSpace::target_subdag_candidates`]/
 /// [`PlanSpace::cost_sorted`] use.
 #[derive(Debug)]
 pub struct GlobalSelection<'a> {
     order: Vec<*const QueryExpr>,
-    groups: HashMap<*const QueryExpr, SelectedGroup<'a>>,
-    /// [`Self::materialize`]'s memo — one bound node per target for the
+    groups: HashMap<*const QueryExpr, TargetSubDAGSelection<'a>>,
+    /// [`Self::assemble_selected_dag`]'s memo — one bound node per target for the
     /// life of this selection, so two parents composing over one shared
     /// child get the *same* `Rc<SummaryNode>`.
-    materialized: RefCell<HashMap<*const QueryExpr, Rc<SummaryNode>>>,
+    assembled_nodes: RefCell<HashMap<*const QueryExpr, Rc<SummaryNode>>>,
 }
 
 fn normalize_cross_input_equi_predicate(
@@ -4144,15 +4146,15 @@ fn relational_join_guarantee(
 }
 
 impl<'a> GlobalSelection<'a> {
-    /// Every selected group, in discovery order.
-    pub fn groups(&self) -> impl Iterator<Item = &SelectedGroup<'a>> {
+    /// One selection per discovered target sub-DAG, in discovery order.
+    pub fn target_selections(&self) -> impl Iterator<Item = &TargetSubDAGSelection<'a>> {
         self.order.iter().map(move |ptr| &self.groups[ptr])
     }
 
     /// The selection for `target`, if `target`'s own `Rc` is a discovered
     /// site (i.e. `Rc::ptr_eq` to some node reachable from the workload's
     /// roots).
-    pub fn for_target(&self, target: &Rc<QueryExpr>) -> Option<&SelectedGroup<'a>> {
+    pub fn for_target(&self, target: &Rc<QueryExpr>) -> Option<&TargetSubDAGSelection<'a>> {
         self.groups.get(&Rc::as_ptr(target))
     }
 
@@ -4165,31 +4167,28 @@ impl<'a> GlobalSelection<'a> {
     /// operation/child plan, retaining the search model's guarantee;
     /// a [`Replacement::Summary`] is
     /// re-linked so its `SummaryAgg` child is the child target's own
-    /// materialization whenever that is phase-legal beneath maintenance
+    /// DAG assembly whenever that is phase-legal beneath maintenance
     /// (so a child that chose an `ValueOperationAtMaintenanceTime` actually ends up under
     /// the summary); a [`Replacement::Rewrite`] or an unmatched site stays
     /// the conservative `KeepPreAsap`. Memoized by target identity, so a
     /// shared inner summary is one `Rc` no matter how many roots reach it.
-    pub fn materialize(
+    pub fn assemble_selected_dag(
         &self,
         target: &Rc<QueryExpr>,
     ) -> Result<Option<Rc<SummaryNode>>, RealizationError> {
         if !self.groups.contains_key(&Rc::as_ptr(target)) {
             return Ok(None);
         }
-        self.materialize_inner(target).map(Some)
+        self.assemble_target(target).map(Some)
     }
 
-    fn materialize_inner(
-        &self,
-        target: &Rc<QueryExpr>,
-    ) -> Result<Rc<SummaryNode>, RealizationError> {
+    fn assemble_target(&self, target: &Rc<QueryExpr>) -> Result<Rc<SummaryNode>, RealizationError> {
         let ptr = Rc::as_ptr(target);
-        if let Some(node) = self.materialized.borrow().get(&ptr) {
+        if let Some(node) = self.assembled_nodes.borrow().get(&ptr) {
             return Ok(Rc::clone(node));
         }
         let node = if read_time_nested_sum(target) {
-            self.materialize_residual(target)?
+            self.assemble_residual(target)?
         } else {
             match self
                 .groups
@@ -4197,7 +4196,7 @@ impl<'a> GlobalSelection<'a> {
                 .and_then(|sel| sel.chosen)
                 .map(|c| &c.replacement)
             {
-                None => self.materialize_residual(target)?,
+                None => self.assemble_residual(target)?,
                 Some(Replacement::Rewrite(rewritten)) => keep_pre_asap(rewritten)?,
                 Some(Replacement::Summary(node)) => self.relink_summary(node, target)?,
                 Some(Replacement::ExactComposition(_)) => Rc::clone(
@@ -4209,16 +4208,18 @@ impl<'a> GlobalSelection<'a> {
                 ),
             }
         };
-        self.materialized.borrow_mut().insert(ptr, Rc::clone(&node));
+        self.assembled_nodes
+            .borrow_mut()
+            .insert(ptr, Rc::clone(&node));
         Ok(node)
     }
 
     /// Preserve composable query-time value operators in post-ASAP form even
     /// when the operator itself has no summary realization. Its child is
-    /// materialized independently, so a selected summary remains visible
+    /// assembled independently, so a selected summary remains visible
     /// beneath `Project`/`Filter`/`Sort`/`Limit` instead of being swallowed by
     /// one opaque `KeepPreAsap` subtree.
-    fn materialize_residual(
+    fn assemble_residual(
         &self,
         target: &Rc<QueryExpr>,
     ) -> Result<Rc<SummaryNode>, RealizationError> {
@@ -4237,8 +4238,8 @@ impl<'a> GlobalSelection<'a> {
             let Some(pred) = normalized_pred else {
                 return keep_pre_asap(target);
             };
-            let left = self.materialize_inner(left)?;
-            let right = self.materialize_inner(right)?;
+            let left = self.assemble_target(left)?;
+            let right = self.assemble_target(right)?;
             let guarantee =
                 relational_join_guarantee(left.guarantee.as_ref(), right.guarantee.as_ref());
             let node = Rc::new(SummaryNode {
@@ -4304,7 +4305,7 @@ impl<'a> GlobalSelection<'a> {
             ),
             _ => return keep_pre_asap(target),
         };
-        let child = self.materialize_inner(child_target)?;
+        let child = self.assemble_target(child_target)?;
         let child = if matches!(operation, ValueOperation::Exact(_)) {
             finalize_exact_accumulator(child, child_target)?
         } else {
@@ -4325,7 +4326,7 @@ impl<'a> GlobalSelection<'a> {
     }
 
     /// Re-link a bound `Summary` candidate's `SummaryAgg` child to the
-    /// child target's own materialization when that is legal beneath
+    /// child target's own DAG assembly when that is legal beneath
     /// maintenance; otherwise keep the candidate exactly as constructed.
     fn relink_summary(
         &self,
@@ -4352,7 +4353,7 @@ impl<'a> GlobalSelection<'a> {
         if !has_maintenance_operation {
             return Ok(Rc::clone(node));
         }
-        let new_child = self.materialize_inner(pre_child)?;
+        let new_child = self.assemble_target(pre_child)?;
         Ok(relink_agg_child(node, &new_child))
     }
 }
@@ -4481,8 +4482,8 @@ struct CompositionOption<'a> {
 /// (or the one an earlier parent committed). Unknown statistics yield no
 /// option at all: the conservative `KeepPreAsap` path stays.
 fn composition_options<'a>(
-    group: &'a MemoGroup,
-    groups: &'a HashMap<*const QueryExpr, MemoGroup>,
+    group: &'a TargetSubDAGCandidates,
+    groups: &'a HashMap<*const QueryExpr, TargetSubDAGCandidates>,
     effective: usize,
     cost_model: &dyn CostModel,
     context: &CompositionContext,
@@ -4603,11 +4604,11 @@ fn composition_options<'a>(
 impl<Id> PlanSpace<Id> {
     /// The whole-plan (cross-group) selection step the module docs'
     /// "Whole-plan (cross-group) selection" section describes: one
-    /// [`SelectedGroup`] per discovered site, each ranked against an
+    /// [`TargetSubDAGSelection`] per discovered site, each ranked against an
     /// `effective_consumer_count` that accounts for every ancestor
     /// [`SharedSubtreeStrategy`] decision on the path to it — unlike
     /// [`Self::cost_sorted`], whose per-group ranking only ever sees a
-    /// group's own raw [`MemoGroup::consumer_count`].
+    /// group's own raw [`TargetSubDAGCandidates::consumer_count`].
     /// Uncertified DDSketch ratios remain in [`PlanSpace`] for downstream
     /// inspection but are not chosen automatically by this selector.
     pub fn global_selection(&self, cost_model: &dyn CostModel) -> GlobalSelection<'_> {
@@ -4650,7 +4651,7 @@ impl<Id> PlanSpace<Id> {
 
         let mut effective_uses = graph.external_root_uses.clone();
         let mut chosen_share: HashMap<*const QueryExpr, ShareDecision> = HashMap::new();
-        let mut groups: HashMap<*const QueryExpr, SelectedGroup<'_>> = HashMap::new();
+        let mut groups: HashMap<*const QueryExpr, TargetSubDAGSelection<'_>> = HashMap::new();
         let mut context = CompositionContext::default();
 
         for ptr in &topo {
@@ -4918,7 +4919,7 @@ impl<Id> PlanSpace<Id> {
 
             groups.insert(
                 *ptr,
-                SelectedGroup {
+                TargetSubDAGSelection {
                     target: &group.target,
                     consumer_count: group.consumer_count,
                     effective_consumer_count: effective,
@@ -4931,7 +4932,7 @@ impl<Id> PlanSpace<Id> {
         Ok(GlobalSelection {
             order: self.order.clone(),
             groups,
-            materialized: RefCell::new(HashMap::new()),
+            assembled_nodes: RefCell::new(HashMap::new()),
         })
     }
 }
@@ -4965,7 +4966,7 @@ fn is_automatically_selectable(candidate: &ReplacementSubDAG) -> bool {
 /// Composing this recurrence transitively up the whole ancestor chain (not
 /// just the immediate parent) is exactly what makes
 /// [`PlanSpace::global_selection`]'s `effective_consumer_count` differ from
-/// [`MemoGroup::consumer_count`] whenever a `RecomputeIndependently`
+/// [`TargetSubDAGCandidates::consumer_count`] whenever a `RecomputeIndependently`
 /// ancestor sits anywhere on the path from a root to a site — see the
 /// module docs' "Whole-plan (cross-group) selection" section.
 fn multiplier(
@@ -4987,7 +4988,9 @@ fn multiplier(
 /// when other strategies contributed additional alternatives to the same
 /// memo group. Provenance makes these two orthogonal choices identifiable
 /// without inferring semantics from pointer or expression shape.
-fn cse_candidate_pair(group: &MemoGroup) -> Option<(&ReplacementSubDAG, &ReplacementSubDAG)> {
+fn cse_candidate_pair(
+    group: &TargetSubDAGCandidates,
+) -> Option<(&ReplacementSubDAG, &ReplacementSubDAG)> {
     let mut share = None;
     let mut recompute = None;
     for candidate in &group.candidates {
@@ -5023,7 +5026,7 @@ fn cse_candidate_pair(group: &MemoGroup) -> Option<(&ReplacementSubDAG, &Replace
 /// structural count. `None` only when [`realize_child`] can't produce even a
 /// logical fallback for `group.target` (see that function's own doc).
 fn decide_with_effective_count(
-    group: &MemoGroup,
+    group: &TargetSubDAGCandidates,
     effective_consumer_count: usize,
     cost_model: &dyn CostModel,
 ) -> Option<ShareDecision> {
@@ -5037,7 +5040,7 @@ fn decide_with_effective_count(
 }
 
 fn decide_group_with_recurrence(
-    group: &MemoGroup,
+    group: &TargetSubDAGCandidates,
     effective_consumer_count: usize,
     recurrence: RecurrenceProfile,
     horizon: Option<Horizon>,
@@ -5064,7 +5067,7 @@ fn decide_group_with_recurrence(
 /// the same `Rc`-identity distinction [`is_duplicate_rewrite`]'s own doc
 /// explains is the *only* signal this IR carries for that choice.
 fn pick_shared_subtree_candidate(
-    group: &MemoGroup,
+    group: &TargetSubDAGCandidates,
     decision: ShareDecision,
 ) -> Option<&ReplacementSubDAG> {
     let (share, recompute) = cse_candidate_pair(group)?;
@@ -5409,7 +5412,7 @@ pub fn search_workload_with<'s, Id>(
 /// has its group's bound [`Replacement::Summary`] candidates checked with
 /// `accuracy_model`'s [`AccuracyModel::satisfies`]: a candidate whose
 /// guarantee is fully known and misses the target is moved from
-/// [`MemoGroup::candidates`] to [`MemoGroup::rejected`] *before*
+/// [`TargetSubDAGCandidates::candidates`] to [`TargetSubDAGCandidates::rejected`] *before*
 /// [`PlanSpace::cost_sorted`]/[`PlanSpace::global_selection`] ever rank the
 /// group. A constructible candidate with unknown accuracy remains visible for
 /// downstream review under an approximate target, but default whole-plan
@@ -5548,9 +5551,12 @@ fn search_cse_workload_with<'s, Id>(
         .collect();
     let topk_reuse_strategy = TopKLimitReuseStrategy::new(&limits);
 
-    let mut groups: HashMap<*const QueryExpr, MemoGroup> = HashMap::new();
+    let mut groups: HashMap<*const QueryExpr, TargetSubDAGCandidates> = HashMap::new();
     for ptr in &order {
-        groups.insert(*ptr, MemoGroup::new(Rc::clone(&nodes[ptr]), counts[ptr]));
+        groups.insert(
+            *ptr,
+            TargetSubDAGCandidates::new(Rc::clone(&nodes[ptr]), counts[ptr]),
+        );
     }
 
     // Round-based frontier: every target is asked exactly once per strategy
@@ -5648,9 +5654,9 @@ fn search_cse_workload_with<'s, Id>(
         // it next round. Targets already in `groups` are never revisited.
         let new_targets = &order[targets_before..];
         for ptr in new_targets {
-            groups
-                .entry(*ptr)
-                .or_insert_with(|| MemoGroup::new(Rc::clone(&nodes[ptr]), counts[ptr]));
+            groups.entry(*ptr).or_insert_with(|| {
+                TargetSubDAGCandidates::new(Rc::clone(&nodes[ptr]), counts[ptr])
+            });
         }
         frontier = new_targets.to_vec();
     }
@@ -5671,7 +5677,7 @@ fn search_cse_workload_with<'s, Id>(
 /// proves that `SharedSubtreeStrategy` is part of this search's strategy set.
 fn add_effective_count_cse_candidates(
     order: &[*const QueryExpr],
-    groups: &mut HashMap<*const QueryExpr, MemoGroup>,
+    groups: &mut HashMap<*const QueryExpr, TargetSubDAGCandidates>,
 ) {
     let mut possible_children: HashMap<*const QueryExpr, Vec<*const QueryExpr>> = HashMap::new();
     for ptr in order {
@@ -6757,7 +6763,9 @@ mod tests {
         let QueryExpr::Aggregate { child, .. } = space.roots[0].1.as_ref() else {
             unreachable!()
         };
-        let inner_group = space.group_for(child).expect("inner quantile is a target");
+        let inner_group = space
+            .candidates_for_target(child)
+            .expect("inner quantile is a target");
         let inner_kinds: Vec<SketchAlgorithm> = inner_group
             .candidates
             .iter()
@@ -6951,7 +6959,7 @@ mod tests {
         assert_eq!(SharedSubtreeStrategy.replacements(&target).len(), 2);
     }
 
-    // ── search_workload / PlanSpace / MemoGroup (merged from search.rs) ──
+    // ── search_workload / PlanSpace / TargetSubDAGCandidates (merged from search.rs) ──
     //
     // Reuses this test module's own `metric_scan`/`agg` fixture helpers
     // above (identical to `search.rs`'s own copies, which are dropped here
@@ -6976,7 +6984,7 @@ mod tests {
         assert_eq!(space.len(), 2);
 
         let agg_group = space
-            .groups()
+            .target_subdag_candidates()
             .find(|g| matches!(g.target.as_ref(), QueryExpr::Aggregate { .. }))
             .expect("an Aggregate group must be discovered");
         assert_eq!(agg_group.consumer_count, 1);
@@ -7029,7 +7037,7 @@ mod tests {
             .is_some_and(ReplacementSubDAG::has_missing_accuracy_evidence));
 
         let scan_group = space
-            .groups()
+            .target_subdag_candidates()
             .find(|g| matches!(g.target.as_ref(), QueryExpr::Scan { .. }))
             .expect("a Scan group must be discovered");
         assert_eq!(scan_group.consumer_count, 1);
@@ -7044,7 +7052,7 @@ mod tests {
         let root = Rc::new(agg(vec![2], default_cardinality(), metric_scan(&["job"])));
         let space = search_workload(vec![("q", root)]);
         let agg_group = space
-            .groups()
+            .target_subdag_candidates()
             .find(|g| matches!(g.target.as_ref(), QueryExpr::Aggregate { .. }))
             .unwrap();
         assert_eq!(agg_group.candidates.len(), 4);
@@ -7069,7 +7077,7 @@ mod tests {
         );
         let target = &targeted.roots[0].1;
         assert!(targeted
-            .group_for(target)
+            .candidates_for_target(target)
             .unwrap()
             .candidates
             .iter()
@@ -7095,7 +7103,7 @@ mod tests {
             &DefaultAccuracyModel,
         );
         assert!(exact_target
-            .group_for(&exact_target.roots[0].1)
+            .candidates_for_target(&exact_target.roots[0].1)
             .unwrap()
             .candidates
             .iter()
@@ -7116,7 +7124,7 @@ mod tests {
         // roots[0] and roots[1] must have merged onto the same Rc.
         assert!(Rc::ptr_eq(&space.roots[0].1, &space.roots[1].1));
 
-        let group = space.group_for(&space.roots[0].1).unwrap();
+        let group = space.candidates_for_target(&space.roots[0].1).unwrap();
         assert_eq!(group.consumer_count, 2);
         assert_eq!(
             group.candidates.len(),
@@ -7211,7 +7219,7 @@ mod tests {
         );
         let post_cse_shared = post_cse_shared_a;
         let group = space
-            .group_for(post_cse_shared)
+            .candidates_for_target(post_cse_shared)
             .expect("shared node must be a discovered target");
         assert_eq!(group.consumer_count, 2);
         assert!(
@@ -7235,7 +7243,7 @@ mod tests {
             AggIntent::Sum { col: None },
             metric_scan(&["job"]),
         ));
-        let mut group = MemoGroup::new(Rc::clone(&root), 2);
+        let mut group = TargetSubDAGCandidates::new(Rc::clone(&root), 2);
         let target = TargetSubDAG::with_consumer_count(&root, 2);
         let mut inserted = 0;
         for candidate in SharedSubtreeStrategy.replacements(&target) {
@@ -7275,7 +7283,7 @@ mod tests {
         // the documented behavior, not to endorse calling `replacements`
         // twice for the same target.
         let root = Rc::new(agg(vec![2], default_quantile(0.99), metric_scan(&["job"])));
-        let mut group = MemoGroup::new(Rc::clone(&root), 1);
+        let mut group = TargetSubDAGCandidates::new(Rc::clone(&root), 1);
         let strategy = SketchAlgorithmStrategy::default_cost_model();
         let target = TargetSubDAG::new(&root);
         for candidate in strategy.replacements(&target) {
@@ -7341,7 +7349,7 @@ mod tests {
             roots.push((i, Rc::new(shared.clone())));
         }
         let space = search_workload(roots);
-        let group = space.group_for(&space.roots[0].1).unwrap();
+        let group = space.candidates_for_target(&space.roots[0].1).unwrap();
         assert_eq!(group.consumer_count, 20);
 
         let ranked = space.cost_sorted(&DefaultCostModel);
@@ -7459,7 +7467,7 @@ mod tests {
         );
     }
 
-    /// [`RankedGroup::costs`] is a per-candidate annotation, aligned
+    /// [`RankedTargetSubDAGCandidates::costs`] is a per-candidate annotation, aligned
     /// index-for-index with `candidates` — each entry must equal what
     /// calling [`CostModel::estimate_cost`] directly on that same candidate
     /// and target produces, not some other (or stale) number.
@@ -7484,7 +7492,7 @@ mod tests {
             assert_eq!(
                 cost,
                 DefaultCostModel.estimate_cost(candidate, &target),
-                "RankedGroup::costs must match calling CostModel::estimate_cost directly \
+                "RankedTargetSubDAGCandidates::costs must match calling CostModel::estimate_cost directly \
                  for the same candidate/target"
             );
         }
@@ -7533,7 +7541,7 @@ mod tests {
 
         let ranked = space.cost_sorted(&DefaultCostModel);
         let selected = space.global_selection(&DefaultCostModel);
-        assert_eq!(ranked.len(), selected.groups().count());
+        assert_eq!(ranked.len(), selected.target_selections().count());
 
         for ranked_group in &ranked {
             let selected_group = selected.for_target(ranked_group.target).unwrap();
@@ -7553,13 +7561,13 @@ mod tests {
     #[test]
     fn global_selection_leaves_an_unmatched_group_as_none() {
         // A bare Scan: no registered strategy has an opinion on it, so it
-        // gets a group with an empty candidate list (see MemoGroup's own
+        // gets a group with an empty candidate list (see TargetSubDAGCandidates's own
         // doc) — global_selection must not invent a candidate for it.
         let root = Rc::new(metric_scan(&["job"]));
         let space = search_workload(vec![("q", root)]);
         let selected = space.global_selection(&DefaultCostModel);
         let scan_group = selected
-            .groups()
+            .target_selections()
             .find(|g| matches!(g.target.as_ref(), QueryExpr::Scan { .. }))
             .unwrap();
         assert!(scan_group.chosen.is_none());
@@ -7597,7 +7605,7 @@ mod tests {
         let space = search_workload(vec![("q", root)]);
         let selected = space.global_selection(&PreferDDSketch);
         let agg_group = selected
-            .groups()
+            .target_selections()
             .find(|g| matches!(g.target.as_ref(), QueryExpr::Aggregate { .. }))
             .unwrap();
         let kind = match &agg_group.chosen.unwrap().replacement {
@@ -7627,7 +7635,7 @@ mod tests {
     #[test]
     fn mixed_rewrite_group_keeps_and_selects_its_explicit_cse_pair() {
         let target = Rc::new(metric_scan(&["job"]));
-        let mut group = MemoGroup::new(Rc::clone(&target), 2);
+        let mut group = TargetSubDAGCandidates::new(Rc::clone(&target), 2);
         group.candidates = vec![
             ReplacementSubDAG {
                 strategy: "TestStrategy",
@@ -7727,8 +7735,8 @@ mod tests {
             panic!("expected root1/root2 to still be a Filter");
         };
         assert!(Rc::ptr_eq(c_via_a, &space.roots[2].1));
-        let a_group = space.group_for(a_rc).unwrap();
-        let c_group = space.group_for(c_via_a).unwrap();
+        let a_group = space.candidates_for_target(a_rc).unwrap();
+        let c_group = space.candidates_for_target(c_via_a).unwrap();
         assert_eq!(
             a_group.consumer_count, 2,
             "fixture sanity: a has 2 consumers"
@@ -7862,8 +7870,8 @@ mod tests {
             panic!("expected Filter root");
         };
 
-        assert_eq!(space.group_for(c_rc).unwrap().consumer_count, 1);
-        assert!(cse_candidate_pair(space.group_for(c_rc).unwrap()).is_some());
+        assert_eq!(space.candidates_for_target(c_rc).unwrap().consumer_count, 1);
+        assert!(cse_candidate_pair(space.candidates_for_target(c_rc).unwrap()).is_some());
 
         let selected = space.global_selection(&ConstantCseCost);
         let child = selected.for_target(c_rc).unwrap();
@@ -8082,7 +8090,12 @@ mod tests {
         discover_targets(&roots, &mut order, &mut nodes, &mut counts);
         let groups = order
             .iter()
-            .map(|ptr| (*ptr, MemoGroup::new(Rc::clone(&nodes[ptr]), counts[ptr])))
+            .map(|ptr| {
+                (
+                    *ptr,
+                    TargetSubDAGCandidates::new(Rc::clone(&nodes[ptr]), counts[ptr]),
+                )
+            })
             .collect();
         let space = PlanSpace {
             roots,
@@ -8189,8 +8202,8 @@ mod tests {
     //
     // Moved from the former `bind.rs` (issue #251): `bind.rs`'s own
     // workload-wide orchestration (`implement_workload`/
-    // `implement_workload_with`) was deleted as out of this crate's scope
-    // (see the crate doc's `## Status` section), but these tests exercise
+    // `implement_workload_with`) was deleted. Current whole-workload logical
+    // selection uses `PlanSpace::global_selection`; these tests exercise
     // `construct_summary_agg`'s schema derivation end to end through
     // `realize_child` — production logic that still lives in this module —
     // so they move here rather than disappear. Unlike `bind.rs` (an
@@ -9337,7 +9350,7 @@ mod tests {
             ))];
         let space = search_workload_with(vec![("q", Rc::clone(&outer))], &strategies);
         let root = &space.roots[0].1;
-        let group = space.group_for(root).unwrap();
+        let group = space.candidates_for_target(root).unwrap();
         assert!(!group.rejected.is_empty());
         assert!(group.candidates.iter().all(|c| match &c.replacement {
             Replacement::Summary(node) => node.guarantee.as_ref().is_some_and(|g| {
@@ -9374,7 +9387,7 @@ mod tests {
             &DefaultAccuracyModel,
         );
         let root = &space.roots[0].1;
-        let group = space.group_for(root).unwrap();
+        let group = space.candidates_for_target(root).unwrap();
         assert!(group
             .candidates
             .iter()
@@ -9393,7 +9406,7 @@ mod tests {
             &default_strategies(),
             &DefaultAccuracyModel,
         );
-        let group = space.group_for(&space.roots[0].1).unwrap();
+        let group = space.candidates_for_target(&space.roots[0].1).unwrap();
         assert!(group
             .candidates
             .iter()
@@ -9405,7 +9418,7 @@ mod tests {
             &default_strategies(),
             &DefaultAccuracyModel,
         );
-        let group = space.group_for(&space.roots[0].1).unwrap();
+        let group = space.candidates_for_target(&space.roots[0].1).unwrap();
         assert!(group.candidates.iter().all(|c| match &c.replacement {
             Replacement::Summary(node) => node
                 .guarantee
@@ -9438,7 +9451,7 @@ mod tests {
             &default_strategies(),
             &DefaultAccuracyModel,
         );
-        let group = space.group_for(&space.roots[0].1).unwrap();
+        let group = space.candidates_for_target(&space.roots[0].1).unwrap();
 
         assert!(group.candidates.iter().any(|candidate| matches!(
             &candidate.replacement,
@@ -9463,6 +9476,9 @@ mod tests {
             .unwrap()
             .chosen
             .is_some_and(ReplacementSubDAG::has_missing_accuracy_evidence));
-        assert!(selected.materialize(&space.roots[0].1).unwrap().is_some());
+        assert!(selected
+            .assemble_selected_dag(&space.roots[0].1)
+            .unwrap()
+            .is_some());
     }
 }

@@ -22,7 +22,7 @@
 // additionally runs `asap_aware_mapping::replacement::search_workload` (this
 // binary took no strategies of its own — `default_strategies()` already
 // includes `AvgToSumOverCountStrategy` as of #282) over every lowered query
-// and ranks each discovered `MemoGroup` via `PlanSpace::cost_sorted`. The
+// and ranks each discovered `TargetSubDAGCandidates` via `PlanSpace::cost_sorted`. The
 // best-ranked
 // candidate per group feeds two additive outputs:
 //
@@ -940,7 +940,7 @@ fn annotate_with_explanations(
     }
 }
 
-/// One `MemoGroup`'s best-ranked candidate, kept alongside its own `target`
+/// One `TargetSubDAGCandidates`'s best-ranked candidate, kept alongside its own `target`
 /// — the unit both [`PostAsapResults::replacements`] and
 /// [`PostAsapResults::post_graphs`] are built from, so the two outputs can
 /// never disagree about which candidate won for a given target.
@@ -1099,7 +1099,7 @@ struct PostAsapResults {
     /// directly into that query's own pre-ASAP shape in place.
     post_graphs: Vec<(String, DagGraph)>,
     /// One `(query_name, TargetRejection)` per accuracy-illegal candidate
-    /// the search refused (`MemoGroup::rejected`, issue #172) whose target
+    /// the search refused (`TargetSubDAGCandidates::rejected`, issue #172) whose target
     /// node is found in that query's own exported graph.
     rejections: Vec<(String, TargetRejection)>,
 }
@@ -1157,7 +1157,7 @@ fn assign_workload_node_ids(graphs: &mut [&mut DagGraph]) {
 /// Run `asap_aware_mapping::replacement::search_workload` (its own
 /// `default_strategies()` — which includes `AvgToSumOverCountStrategy` as of
 /// #282 — is exactly the strategy set this binary wants; no custom list
-/// needed) over every lowered query, rank each discovered `MemoGroup` via
+/// needed) over every lowered query, rank each discovered `TargetSubDAGCandidates` via
 /// `PlanSpace::global_selection`, and build both `--post-asap` outputs from the
 /// exact same set of winning candidates (see [`Winner`]), so the flat
 /// `replacements` list and the merged `post_graph` can never disagree about
@@ -1210,14 +1210,14 @@ fn run_post_asap_with_progress(
     // as an empty candidate list) avoids ever handing `export_post_asap` a
     // winner that can't help but recurse into itself.
     let winners: Vec<Winner<'_>> = selection
-        .groups()
+        .target_selections()
         .filter_map(|group| {
             let candidate = group.chosen?;
             // A composition is a reference-bearing logical choice, not an
             // independently exportable replacement. The CLI's default cost
             // model has no composition statistics and therefore cannot
             // select one; callers that provide such statistics must export
-            // `GlobalSelection::materialize` instead.
+            // `GlobalSelection::assemble_selected_dag` instead.
             if matches!(candidate.replacement, Replacement::ExactComposition(_)) {
                 return None;
             }
@@ -1332,7 +1332,7 @@ fn run_post_asap_with_progress(
     // Groups with accuracy-refused candidates (issue #172): matched to a
     // query's graph nodes the same hash-then-structural-equality way.
     let rejected_groups: Vec<_> = space
-        .groups()
+        .target_subdag_candidates()
         .filter(|group| !group.rejected.is_empty())
         .collect();
     let mut rejected_by_hash: HashMap<u64, Vec<usize>> = HashMap::new();
@@ -2231,7 +2231,7 @@ mod tests {
         let root = Rc::new(query.clone());
         let space = search_workload(vec![(String::from("q"), Rc::clone(&root))]);
         let group = space
-            .groups()
+            .target_subdag_candidates()
             .find(|group| *group.target == query)
             .expect("aggregate memo group");
         let candidate = group
@@ -2543,7 +2543,7 @@ mod tests {
         let root = Rc::new(query.clone());
         let space = search_workload(vec![(String::from("q"), Rc::clone(&root))]);
         let group = space
-            .groups()
+            .target_subdag_candidates()
             .find(|group| *group.target == query)
             .expect("aggregate memo group");
         let candidates: Vec<_> = group
@@ -2608,7 +2608,7 @@ mod tests {
         };
         let selection = space.global_selection(&model);
         let chosen = selection
-            .groups()
+            .target_selections()
             .find(|selected| selected.target.as_ref() == &query)
             .and_then(|selected| selected.chosen)
             .expect("one complete physical candidate should win");

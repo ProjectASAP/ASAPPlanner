@@ -13,7 +13,7 @@
 //! candidate generation
 //!     -> guarantee propagation            (AccuracyModel::propagate)
 //!     -> AccuracyTarget satisfaction      (AccuracyModel::satisfies)
-//!     -> legal candidates only            (illegal ones become MemoGroup::rejected)
+//!     -> legal candidates only            (illegal ones become TargetSubDAGCandidates::rejected)
 //!     -> cost ranking / global selection  (CostModel)
 //! ```
 //!
@@ -52,7 +52,7 @@
 //!   end-to-end target for that query's root value. It is checked against
 //!   the root group's candidates *before* cost ranking; a candidate whose
 //!   guarantee is unknown, or misses the target, is moved to
-//!   `MemoGroup::rejected`.
+//!   `TargetSubDAGCandidates::rejected`.
 //! - For an approximate node over an **exact** child, the node's own
 //!   `AggIntent.accuracy` sizes its sketch, exactly as before this module
 //!   existed, and the readout's guarantee is that sketch's local guarantee.

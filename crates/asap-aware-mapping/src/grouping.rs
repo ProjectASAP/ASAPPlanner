@@ -743,7 +743,7 @@ mod tests {
             vec![("q", Rc::clone(&q))],
             &[Box::new(strategy)],
         );
-        let group = space.group_for(&space.roots[0].1).unwrap();
+        let group = space.candidates_for_target(&space.roots[0].1).unwrap();
         assert!(group.candidates.is_empty());
         assert_eq!(group.rejected.len(), 2);
     }

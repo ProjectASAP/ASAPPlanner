@@ -1,9 +1,8 @@
 //! Physical transfer and materialization dimensions, independent of planner policy.
 //!
 //! A handoff is either a network transfer between execution locations or a
-//! materialization of an intermediate result in memory, on disk, or in an
-//! object store. This module defines their kinds, materialization media, and
-//! separate byte-work counters; it is not limited to network resources.
+//! materialization of an intermediate result. This module defines their kinds
+//! and separate byte-work counters; it is not limited to network resources.
 //!
 //! Counters describe bytes transferred or materialized, not retained memory,
 //! allocated disk space, or storage request counts. Estimation, evidence
@@ -19,16 +18,8 @@ pub enum PhysicalHandoffKind {
         source_location: String,
         destination_location: String,
     },
-    /// Write an intermediate result to the specified medium for later use.
-    Materialization { medium: MaterializationMedium },
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum MaterializationMedium {
-    Memory,
-    Disk,
-    ObjectStore,
+    /// Write an intermediate result for later use.
+    Materialization,
 }
 
 /// Byte work at explicitly declared physical actions, not storage occupancy.
@@ -64,9 +55,9 @@ impl PhysicalHandoffBytes {
 mod tests {
     use super::*;
 
-    /// The shared vocabulary retains the original flat counters and tagged kind JSON.
+    /// Handoff JSON keeps separate counters and only the evidence used for each kind.
     #[test]
-    fn handoff_json_format_is_unchanged() {
+    fn handoff_json_round_trip() {
         let bytes = PhysicalHandoffBytes {
             network_bytes: 480,
             materialization_bytes: 40,
@@ -87,19 +78,13 @@ mod tests {
                 "kind": "network", "source_location": "edge", "destination_location": "backend"
             })
         );
-        for (medium, name) in [
-            (MaterializationMedium::Memory, "memory"),
-            (MaterializationMedium::Disk, "disk"),
-            (MaterializationMedium::ObjectStore, "object_store"),
-        ] {
-            let kind = PhysicalHandoffKind::Materialization { medium };
-            let json = serde_json::json!({"kind": "materialization", "medium": name});
-            assert_eq!(serde_json::to_value(&kind).unwrap(), json);
-            assert_eq!(
-                serde_json::from_value::<PhysicalHandoffKind>(json).unwrap(),
-                kind
-            );
-        }
+        let kind = PhysicalHandoffKind::Materialization;
+        let json = serde_json::json!({"kind": "materialization"});
+        assert_eq!(serde_json::to_value(&kind).unwrap(), json);
+        assert_eq!(
+            serde_json::from_value::<PhysicalHandoffKind>(json).unwrap(),
+            kind
+        );
     }
 
     /// Either dimension overflowing returns None without changing the original counters.

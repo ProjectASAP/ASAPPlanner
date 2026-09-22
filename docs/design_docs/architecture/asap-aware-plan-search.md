@@ -54,36 +54,43 @@ For example:
                 shared remainder
 ```
 
-The planner should represent common structure once and attach alternatives only at the decision points where plans differ. Each decision point forms an **alternative group** containing its local choices:
+The planner represents common structure once and stores a candidate set for
+each target sub-DAG (`TargetSubDAGCandidates`). The dimensions below illustrate
+possible local choices; they are not separate collections keyed by optimization
+category:
 
 ```text
-Group A: Quantile implementation
+Quantile target candidates
     - KLL
     - DDSketch
     - exact quantile
 
-Group B: Subpopulation organization
+Subpopulation target candidates
     - one summary per subpopulation
     - shared multi-subpopulation summary
 
-Group C: Related aggregations
+Related-aggregation target candidates
     - compute independently
     - compute once and roll up
 ```
 
-A candidate plan is formed by selecting one compatible alternative from each relevant group. This avoids representing every full plan independently when most of their structure is identical.
+A candidate plan combines compatible choices from the relevant target candidate
+sets. This avoids copying every full plan when most structure is shared.
 
 
 ## Current implementation boundary
 
-`PlanSpace` represents local alternatives in memo groups; it does not materialize
-every Cartesian product of the dimensions above. `cost_sorted` preserves and
-ranks group alternatives. Optional `global_selection` coordinates supported
-sharing and composition choices, and materialization links the selected semantic
-DAG. This is not a proof of global optimality over all possible physical plans.
+`PlanSpace` stores per-target candidates rather than eagerly enumerating their
+Cartesian product. `cost_sorted` returns a `RankedTargetSubDAGCandidates` view
+for each target. `global_selection` coordinates supported sharing and
+composition choices; `assemble_selected_dag(root)` assembles one selected DAG
+per query root. This does not prove global physical optimality or select a
+summary-maintenance lifecycle. The
+[workflow design](input-output-workflow.md#workflows) explains when to use the
+ordinary or summary-maintenance-lifecycle-aware path.
 
 The [code architecture](../../develop_docs/asap-aware-mapping-architecture.md)
 describes current discovery and registry behavior; the
-[library guide](../../develop_docs/library-api.md#optional-whole-plan-selection-and-materialization)
+[library guide](../../develop_docs/library-api.md#optional-whole-plan-selection-and-dag-assembly)
 shows selection and its evidence boundaries. Broader optimization dimensions are
 tracked in the [proposal](../proposals/asap-aware-mapping/optimizations.md).

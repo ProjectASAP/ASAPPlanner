@@ -2,24 +2,25 @@
 
 ## Purpose
 
-ASAPPlanner is a general search and selection framework. It decides which
-logical summaries, maintenance lifecycles, and planner-visible realization
-strategies best satisfy a workload. Downstream systems implement, deploy, and
-execute the selected contracts.
+ASAPPlanner produces `PlanSpace`, a compact logical candidate space. Integrators
+may select candidates downstream or ask Planner's helpers to select and assemble
+DAGs. Summary-maintenance lifecycle decisions belong to Planner only when the
+integration uses its lifecycle-aware workflow; physical deployment and execution
+remain downstream. The [input/output/workflow design](input-output-workflow.md)
+defines this boundary.
 
-The planner-runtime contract supports iterative planning. A downstream provider can enumerate feasible
-implementations and report their resource and accuracy evidence; ASAPPlanner
-uses that evidence to compare candidates and returns the selected identity and
-semantic contract. Measured behavior under a concrete data workload can thus
-influence planning without putting executor code or deployment topology inside
-ASAPPlanner.
+A downstream provider can report implementation alternatives and their cost and
+accuracy evidence for a Planner-owned comparison. The resulting
+`SummaryMaintenanceLifecyclePlan` contains a Post-ASAP DAG root and maintenance
+decisions; it is not an executable plan. Repeated provider calls do not constitute
+an implemented end-to-end replanning or deployment-transition protocol.
 
 ## Three decision layers
 
 | Layer | Owner | Examples |
 |---|---|---|
-| Logical semantics and lifecycle | ASAPPlanner | Query rewrite; summary family and parameters; grouping; accuracy; `Ephemeral`, `Prepared`, `Shared`, or `ContinuouslyMaintained`; `DirectBuild` or `Incremental`. |
-| Planner-visible realization strategy | ASAPPlanner, using provider evidence | Tumbling windows, sliding windows/panes, PromSketch exponential-histogram windows, or another registered framework; KLL versus DDSketch; selection among complete feasible alternatives. |
+| Logical candidate semantics | ASAPPlanner | Query rewrite; summary family and parameters; grouping; accuracy guarantees when established. |
+| Summary maintenance and realization selection | Planner helpers when delegated to Planner; otherwise downstream | `Ephemeral`, `Prepared`, `Shared`, `ContinuouslyMaintained`; `DirectBuild` or `Incremental`; window implementations compared using provider evidence. |
 | Concrete implementation and deployment | ASAPQuery-backend and its workload optimizer | Library and data-structure implementation, exact pane layout, placement, sharding, storage, transmission, materialization IDs, executor configuration, and workload-wide assignment. |
 
 ASAPCollector and the ASAPQuery data plane execute the compiled downstream
@@ -29,6 +30,7 @@ a different summary, lifecycle, or realization framework.
 
 ## Incremental-maintenance example
 
+When the integration delegates summary-maintenance decisions to Planner,
 ASAPPlanner may decide that a logical summary should be incrementally
 maintained: new data updates existing summary state. It may also select the
 planner-visible window realization—such as tumbling, sliding/panes, or an
@@ -59,7 +61,12 @@ Planner selection does not imply that ASAPPlanner contains the implementation.
 Conversely, downstream implementation freedom does not permit changing the
 selected algorithm's semantics or guarantees.
 
-## Iterative planning protocol
+## Iterative planning protocol (future integration)
+
+The sequence below is an intended integration design, not one shipped public
+API or a required path for every caller. Current provider and lifecycle helpers
+support a bounded planning decision; cross-run identity, migration, activation,
+and rollback are not an end-to-end Planner protocol.
 
 1. ASAPPlanner enumerates semantically valid logical summaries, lifecycle
    alternatives, and registered realization strategies.
@@ -69,9 +76,11 @@ selected algorithm's semantics or guarantees.
    source coverage, input/output edges, operation counts, update and bootstrap
    fanout, retained state, CPU, memory, I/O, and accuracy facts.
 4. ASAPPlanner keeps constructible candidates with missing evidence visible
-   in `PlanSpace`, but default selection does not certify unknown accuracy or
-   substitute optimistic zeroes for missing cost. Comparable complete
-   alternatives can be selected over the same workload horizon.
+   in `PlanSpace` but does not certify unknown accuracy. The
+   summary-maintenance-lifecycle-aware workflow compares supported alternatives
+   over the same workload horizon. Missing or incomparable costs do not establish
+   that maintaining a summary beats raw recomputation; structural scores and
+   optimistic zeroes are not substitutes.
 5. ASAPPlanner outputs the selected Post-ASAP semantics, lifecycle guarantees,
    realization contract, and chosen provider identity.
 6. ASAPQuery-backend compiles that result into consistent `CollectorPlan`,
@@ -106,7 +115,7 @@ implementation into ASAPPlanner.
 ## Workload-wide optimization
 
 Candidate comparison and workload-wide deployment optimization are different
-problems. ASAPPlanner selects among summary and realization alternatives;
+problems. When requested, ASAPPlanner selects among summary and realization alternatives;
 ASAPQuery-backend retains ownership of facility-location decisions: sharing a
 deployed configuration across atomic queries, assigning queries to deployments,
 choosing hosts, and satisfying cluster capacity.
@@ -121,15 +130,20 @@ in one cost formula.
 
 ## Boundary invariants
 
-- Planner owns candidate semantics and final candidate selection.
+- Planner owns candidate semantics; selection may be performed by its helpers
+  or by the downstream integrator.
 - Downstream owns concrete implementation, compilation, placement, and
   execution.
 - A selected realization framework is a contract, not executor code.
-- Physical capabilities constrain the candidate space before ranking.
-- Physical identity and complete evidence accompany each implementation.
-- Missing statistics leave constructible candidates visible but uncertified;
-  unknown algorithms and known unsupported capabilities remain unavailable.
-  Stale evidence cannot certify or cost a candidate.
+- Physical capabilities and evidence constrain deployment choices, not every
+  logical candidate's presence in `PlanSpace`. Known unsupported capabilities
+  and unknown algorithms cannot become deployable alternatives.
+- Complete physical alternatives need identity and comparable evidence for
+  cost-based deployment decisions. Stale evidence cannot certify or cost a
+  candidate.
+- Missing evidence leaves constructible candidates visible but uncertified;
+  for example, an unproven DDSketch ratio remains inspectable but is not
+  automatically selected.
 - Shared logical nodes remain shared across the planner-runtime contract; physical sharing
   additionally requires compatible filters, grouping, windows, parameters,
   lifecycle, and guarantees.

@@ -78,7 +78,7 @@ fn lower_search_and_materialize(query: &str) -> Rc<SummaryNode> {
     let space = search_workload(vec![("query", pre)]);
     let selection = space.global_selection(&DefaultCostModel);
     selection
-        .materialize(&space.roots[0].1)
+        .assemble_selected_dag(&space.roots[0].1)
         .expect("materialization failed")
         .expect("root must be discovered")
 }
@@ -909,7 +909,7 @@ fn promql_sum_of_count_over_time_is_composed_by_default_search() {
     let original_schema = original.output_schema().unwrap();
     let space = search_workload(vec![("query", original)]);
     let root = &space.roots[0].1;
-    let group = space.group_for(root).expect("root memo group");
+    let group = space.candidates_for_target(root).expect("root memo group");
     let candidate = group
         .candidates
         .iter()
@@ -959,7 +959,10 @@ fn nested_summary_explicitly_finalizes_exact_child_at_maintenance_time() {
     );
     let space = search_workload(vec![("query", pre)]);
     let selected = space.global_selection(&DefaultCostModel);
-    let plan = selected.materialize(&space.roots[0].1).unwrap().unwrap();
+    let plan = selected
+        .assemble_selected_dag(&space.roots[0].1)
+        .unwrap()
+        .unwrap();
     let SummaryExpr::SummaryEstimate { summary_input, .. } = &plan.expr else {
         panic!("expected selected quantile summary");
     };
@@ -1021,7 +1024,10 @@ fn exact_binary_maintenance_has_explicit_timing_and_legacy_wire_default() {
         let input = lower_promql(query, AccuracyTarget::Epsilon(0.05)).unwrap();
         let search = search_workload(vec![("q", Rc::new(input))]);
         let choice = search.global_selection(&DefaultCostModel);
-        let plan = choice.materialize(&search.roots[0].1).unwrap().unwrap();
+        let plan = choice
+            .assemble_selected_dag(&search.roots[0].1)
+            .unwrap()
+            .unwrap();
         let dag = compile_executable_dag(&plan).unwrap();
         let payload = dag
             .nodes
@@ -1064,7 +1070,7 @@ fn ddsketch_ratio_without_domain_proof_is_uncertified() {
         &DefaultAccuracyModel,
     );
     let root_group = space
-        .groups()
+        .target_subdag_candidates()
         .find(|group| Rc::ptr_eq(&group.target, &space.roots[0].1))
         .expect("root memo group");
     assert!(
@@ -1089,7 +1095,7 @@ fn ddsketch_ratio_without_domain_proof_is_uncertified() {
         "Planner must not automatically select an uncertified ratio"
     );
     let materialized = selection
-        .materialize(&space.roots[0].1)
+        .assemble_selected_dag(&space.roots[0].1)
         .unwrap()
         .expect("materialized root");
     assert!(matches!(materialized.expr, SummaryExpr::KeepPreAsap(_)));

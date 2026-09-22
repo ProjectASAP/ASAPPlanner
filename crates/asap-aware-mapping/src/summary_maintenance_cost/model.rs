@@ -535,13 +535,11 @@ impl SummaryMaintenanceCostModel {
             ));
         }
         let mut assigned = HashSet::new();
-        if candidate.assignments.iter().any(|assignment| {
-            !assigned.insert(Rc::as_ptr(&assignment.summary))
-                || matches!(
-                    &assignment.framework,
-                    Some(SummaryWindowFramework::Extension(name)) if name.trim().is_empty()
-                )
-        }) {
+        if candidate
+            .assignments
+            .iter()
+            .any(|assignment| !assigned.insert(Rc::as_ptr(&assignment.summary)))
+        {
             return Err(AnalyticalCostError::MissingOrZero(
                 "unique window framework assignments",
             ));
@@ -898,8 +896,8 @@ mod tests {
     use super::*;
     use crate::recurrence::Horizon;
     use crate::summary_maintenance_lifecycle::{
-        global_selection_with_summary_maintenance_lifecycles,
-        materialize_with_summary_maintenance_lifecycles, plan_summary_maintenance_lifecycles,
+        assemble_selected_dag_with_summary_maintenance_lifecycles,
+        global_selection_with_summary_maintenance_lifecycles, plan_summary_maintenance_lifecycles,
         SummaryMaintenanceLifecycleCapabilities, WorkloadDemand,
     };
 
@@ -1289,7 +1287,7 @@ mod tests {
         let space = crate::replacement::search_workload(vec![("q", Rc::clone(&target))]);
         let workload = streaming_workload();
         let mut model = streaming_model();
-        for group in space.groups() {
+        for group in space.target_subdag_candidates() {
             for candidate in &group.candidates {
                 if let Replacement::Summary(root) = &candidate.replacement {
                     bind_aggregations(
@@ -1311,7 +1309,7 @@ mod tests {
             &model,
         )
         .unwrap();
-        let plan = materialize_with_summary_maintenance_lifecycles(
+        let plan = assemble_selected_dag_with_summary_maintenance_lifecycles(
             &selection,
             &space.roots[0].1,
             WorkloadDemand::new_with_data(&workload, &streaming_data_workload(), &[0]),
@@ -1367,7 +1365,7 @@ mod tests {
             .unwrap()
             .chosen
             .is_none());
-        let cheap_plan = materialize_with_summary_maintenance_lifecycles(
+        let cheap_plan = assemble_selected_dag_with_summary_maintenance_lifecycles(
             &cheap_selection,
             &space.roots[0].1,
             WorkloadDemand::new_with_data(&workload, &streaming_data_workload(), &[0]),
@@ -2186,11 +2184,8 @@ mod tests {
             &target,
             &root,
             StreamingWindowFrameworkCandidate {
-                physical_plan_id: "invalid-extension".into(),
-                assignments: vec![StreamingWindowFrameworkAssignment {
-                    summary: Rc::clone(&windowed_summary),
-                    framework: Some(SummaryWindowFramework::Extension("  ".into())),
-                }],
+                physical_plan_id: "empty-assignments".into(),
+                assignments: vec![],
                 accuracy: StreamingWindowAccuracyEvidence::Exact,
                 node_evidence: model.node_evidence.clone(),
             },

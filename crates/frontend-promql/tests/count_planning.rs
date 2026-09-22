@@ -29,7 +29,7 @@ fn grouped_count_keeps_uncertified_hydra_candidates_for_backend_review() {
     );
     let planned = &space.roots[0].1;
     let hydra: Vec<_> = space
-        .group_for(planned)
+        .candidates_for_target(planned)
         .unwrap()
         .candidates
         .iter()

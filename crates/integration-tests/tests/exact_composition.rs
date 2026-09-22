@@ -1,7 +1,7 @@
 //! Issue #171 — composing exact operators with summary plans across
 //! explicit update/readout boundaries, end to end through
 //! `search_workload_with` → `PlanSpace::global_selection` →
-//! `GlobalSelection::materialize` → `dag_export`.
+//! `GlobalSelection::assemble_selected_dag` → `dag_export`.
 //!
 //! Covers the issue's integration matrix: both nesting directions, grouped
 //! fine-to-coarse and identity folds, one inner summary shared by several
@@ -131,7 +131,10 @@ fn custom_accuracy_rule_survives_root_target_and_materialization() {
         .unwrap()
         .composition
         .is_some());
-    let node = selection.materialize(&space.roots[0].1).unwrap().unwrap();
+    let node = selection
+        .assemble_selected_dag(&space.roots[0].1)
+        .unwrap()
+        .unwrap();
     let guarantee = node.guarantee.as_ref().unwrap();
     assert!(guarantee.is_exact());
     assert!(format!("{:?}", guarantee.provenance).contains("custom rule oracle"));
@@ -244,7 +247,7 @@ impl CostModel for UnknownCapabilityModel {
 fn unknown_runtime_capability_keeps_candidate_but_prevents_selection() {
     let root = agg(vec![0], AggIntent::Max { col: None }, fine_quantile());
     let space = plan(vec![("q", root)], &UnknownCapabilityModel);
-    let group = space.group_for(&space.roots[0].1).unwrap();
+    let group = space.candidates_for_target(&space.roots[0].1).unwrap();
     assert!(group.candidates.iter().any(|candidate| {
         matches!(candidate.replacement, Replacement::ExactComposition(_))
             && candidate
@@ -263,7 +266,10 @@ fn unknown_runtime_capability_keeps_candidate_but_prevents_selection() {
         .unwrap()
         .composition
         .is_none());
-    assert!(selection.materialize(&space.roots[0].1).unwrap().is_some());
+    assert!(selection
+        .assemble_selected_dag(&space.roots[0].1)
+        .unwrap()
+        .is_some());
 }
 
 fn plan(
@@ -395,7 +401,7 @@ fn max_and_avg_over_quantile_compose_at_read_time_with_statistics() {
             unreachable!()
         };
 
-        let outer_group = space.group_for(&root).unwrap();
+        let outer_group = space.candidates_for_target(&root).unwrap();
         assert!(
             outer_group
                 .candidates
@@ -403,7 +409,7 @@ fn max_and_avg_over_quantile_compose_at_read_time_with_statistics() {
                 .any(|c| c.provenance == ReplacementProvenance::ValueOperationAtReadTime),
             "{intent:?}: outer group must hold an ValueOperationAtReadTime candidate"
         );
-        let inner_group = space.group_for(inner).unwrap();
+        let inner_group = space.candidates_for_target(inner).unwrap();
         assert!(
             inner_group
                 .candidates
@@ -437,7 +443,7 @@ fn max_and_avg_over_quantile_compose_at_read_time_with_statistics() {
             child_candidate
         ));
 
-        let composed = selection.materialize(&root).unwrap().unwrap();
+        let composed = selection.assemble_selected_dag(&root).unwrap().unwrap();
         let SummaryExpr::ValueOperation {
             child,
             timing: ExecutionTiming::ReadTime,
@@ -486,7 +492,7 @@ fn avg_over_quantile_keeps_the_sum_over_count_rewrite_as_a_competitor() {
     );
     let root = agg(vec![0], AggIntent::Avg { col: None }, inner);
     let space = plan(vec![("q", root)], &StatsModel);
-    let group = space.group_for(&space.roots[0].1).unwrap();
+    let group = space.candidates_for_target(&space.roots[0].1).unwrap();
     let provenances: Vec<_> = group.candidates.iter().map(|c| c.provenance).collect();
     assert!(provenances.contains(&ReplacementProvenance::LogicalRewrite));
     assert!(provenances.contains(&ReplacementProvenance::ValueOperationAtReadTime));
@@ -511,7 +517,7 @@ fn identity_and_genuine_multi_row_folds_both_compose() {
         let root = &space.roots[0].1;
         let composed = space
             .global_selection(&StatsModel)
-            .materialize(root)
+            .assemble_selected_dag(root)
             .unwrap()
             .unwrap();
         assert!(
@@ -550,7 +556,10 @@ fn a_shared_inner_summary_is_materialized_once_for_several_outer_folds() {
         "CSE must intern the shared inner quantile"
     );
     let inner = inner_of(&roots[0]);
-    assert_eq!(space.group_for(&inner).unwrap().consumer_count, 2);
+    assert_eq!(
+        space.candidates_for_target(&inner).unwrap().consumer_count,
+        2
+    );
 
     let decisions: Vec<_> = roots
         .iter()
@@ -573,7 +582,7 @@ fn a_shared_inner_summary_is_materialized_once_for_several_outer_folds() {
 
     let composed: Vec<_> = roots
         .iter()
-        .map(|r| selection.materialize(r).unwrap().unwrap())
+        .map(|r| selection.assemble_selected_dag(r).unwrap().unwrap())
         .collect();
     let child_of = |n: &Rc<SummaryNode>| match &n.expr {
         SummaryExpr::ValueOperation {
@@ -612,7 +621,7 @@ fn outer_summary_over_an_exact_function_composes_at_maintenance_time() {
         unreachable!()
     };
     assert!(space
-        .group_for(deriv)
+        .candidates_for_target(deriv)
         .unwrap()
         .candidates
         .iter()
@@ -628,7 +637,7 @@ fn outer_summary_over_an_exact_function_composes_at_maintenance_time() {
     assert!(decision.child_candidate.is_none(), "function input is raw");
     assert!(decision.cost_rate < decision.baseline_rate);
 
-    let composed = selection.materialize(&root).unwrap().unwrap();
+    let composed = selection.assemble_selected_dag(&root).unwrap().unwrap();
     let SummaryExpr::SummaryEstimate { summary_input, .. } = &composed.expr else {
         panic!("expected readout root, got {:?}", composed.expr);
     };
@@ -670,7 +679,7 @@ fn readout_under_maintenance_is_rejected_at_construction() {
     let space = plan(vec![("q", Rc::clone(&root))], &StatsModel);
     let post = space
         .global_selection(&StatsModel)
-        .materialize(&space.roots[0].1)
+        .assemble_selected_dag(&space.roots[0].1)
         .unwrap()
         .unwrap();
     let illegal = Rc::new(SummaryNode {
@@ -703,14 +712,14 @@ fn a_runtime_without_mixed_execution_gets_no_composition_candidates() {
     let root = agg(vec![0], AggIntent::Max { col: None }, fine_quantile());
     let space = plan(vec![("q", root)], &NoCapabilityModel);
     let root = Rc::clone(&space.roots[0].1);
-    let group = space.group_for(&root).unwrap();
+    let group = space.candidates_for_target(&root).unwrap();
     assert!(group
         .candidates
         .iter()
         .all(|c| !matches!(c.replacement, Replacement::ExactComposition(_))));
     let selection = space.global_selection(&NoCapabilityModel);
     assert!(selection.for_target(&root).unwrap().composition.is_none());
-    let node = selection.materialize(&root).unwrap().unwrap();
+    let node = selection.assemble_selected_dag(&root).unwrap().unwrap();
     assert!(!matches!(node.expr, SummaryExpr::ValueOperation { .. }));
     // The inner quantile is still independently selectable.
     let QueryExpr::Aggregate { child, .. } = root.as_ref() else {
@@ -729,7 +738,7 @@ fn missing_cost_statistics_preserve_the_conservative_keep_pre_asap() {
     let space = plan(vec![("q", root)], &DefaultCostModel);
     let root = Rc::clone(&space.roots[0].1);
     assert!(space
-        .group_for(&root)
+        .candidates_for_target(&root)
         .unwrap()
         .candidates
         .iter()
@@ -741,7 +750,7 @@ fn missing_cost_statistics_preserve_the_conservative_keep_pre_asap() {
         selected.chosen.map(|c| &c.replacement),
         Some(Replacement::ExactComposition(_))
     ));
-    let node = selection.materialize(&root).unwrap().unwrap();
+    let node = selection.assemble_selected_dag(&root).unwrap().unwrap();
     assert!(!matches!(node.expr, SummaryExpr::ValueOperation { .. }));
 
     let explanations = asap_aware_mapping::explain_replacements(vec![("q", (*root).clone())]);
@@ -759,7 +768,7 @@ fn dag_export_carries_explicit_stage_and_plain_schema_for_a_composed_plan() {
     let root = &space.roots[0].1;
     let composed = space
         .global_selection(&StatsModel)
-        .materialize(root)
+        .assemble_selected_dag(root)
         .unwrap()
         .unwrap();
     let graph = dag_export::export_summary(&composed);
@@ -800,14 +809,14 @@ fn promql_max_by_zone_over_quantile_over_time_composes() {
         Some(ReplacementProvenance::ValueOperationAtReadTime),
         "{:?}",
         space
-            .group_for(root)
+            .candidates_for_target(root)
             .unwrap()
             .candidates
             .iter()
             .map(|c| (c.strategy, c.provenance))
             .collect::<Vec<_>>()
     );
-    let composed = selection.materialize(root).unwrap().unwrap();
+    let composed = selection.assemble_selected_dag(root).unwrap().unwrap();
     assert!(matches!(
         composed.expr,
         SummaryExpr::ValueOperation {

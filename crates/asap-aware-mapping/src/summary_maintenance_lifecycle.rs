@@ -270,9 +270,9 @@ pub enum SummaryMaintenanceLifecyclePlanError {
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum MaterializeSummaryMaintenanceLifecycleError {
+pub enum SummaryMaintenanceLifecycleAssemblyError {
     #[error(transparent)]
-    Materialize(#[from] RealizationError),
+    AssembleDag(#[from] RealizationError),
     #[error(transparent)]
     SummaryMaintenance(#[from] SummaryMaintenanceLifecyclePlanError),
 }
@@ -474,7 +474,7 @@ pub fn global_selection_with_summary_maintenance_lifecycles<'a, Id>(
     )?;
     let bindings = space.workload_entries_by_target(workload, root_workload_entries)?;
     let mut costs = CandidateCostOverrides::default();
-    for group in space.groups() {
+    for group in space.target_subdag_candidates() {
         let Some(entry_indices) = bindings.get(&Rc::as_ptr(&group.target)) else {
             continue;
         };
@@ -515,9 +515,9 @@ pub fn global_selection_with_summary_maintenance_lifecycles<'a, Id>(
     Ok(space.global_selection_with_candidate_costs(cost_model, &profiles, horizon, &costs)?)
 }
 
-/// Materialize a globally selected phase-valid DAG and immediately attach
-/// workload-aware summary maintenance deployments.
-pub fn materialize_with_summary_maintenance_lifecycles(
+/// Assemble a globally selected phase-valid DAG and attach workload-aware
+/// summary maintenance decisions. This does not create or maintain runtime state.
+pub fn assemble_selected_dag_with_summary_maintenance_lifecycles(
     selection: &GlobalSelection<'_>,
     target: &Rc<QueryExpr>,
     demand: WorkloadDemand<'_>,
@@ -525,9 +525,9 @@ pub fn materialize_with_summary_maintenance_lifecycles(
     horizon: Option<Horizon>,
     capabilities: SummaryMaintenanceLifecycleCapabilities,
     cost_model: &dyn CostModel,
-) -> Result<Option<SummaryMaintenanceLifecyclePlan>, MaterializeSummaryMaintenanceLifecycleError> {
+) -> Result<Option<SummaryMaintenanceLifecyclePlan>, SummaryMaintenanceLifecycleAssemblyError> {
     selection
-        .materialize(target)?
+        .assemble_selected_dag(target)?
         .map(|root| {
             let mut plan = plan_summary_maintenance_lifecycles_with_profile(
                 root,
@@ -2138,7 +2138,7 @@ mod tests {
         let space = crate::replacement::search_workload(vec![("q", Rc::clone(&target))]);
         let selection = space.global_selection(&RawCheaper);
         let workload = workload(vec![batch(Predictability::AdHoc)], vec![], at_rest());
-        let plan = materialize_with_summary_maintenance_lifecycles(
+        let plan = assemble_selected_dag_with_summary_maintenance_lifecycles(
             &selection,
             &space.roots[0].1,
             WorkloadDemand::new_without_data(&workload, &[0]),
@@ -2262,7 +2262,7 @@ mod tests {
         let space = crate::replacement::search_workload(vec![("q", target)]);
         let selection = space.global_selection(&UnitCosts);
         let workload = workload(vec![batch(Predictability::AdHoc)], vec![], at_rest());
-        let plan = materialize_with_summary_maintenance_lifecycles(
+        let plan = assemble_selected_dag_with_summary_maintenance_lifecycles(
             &selection,
             &space.roots[0].1,
             WorkloadDemand::new_without_data(&workload, &[0]),
@@ -2284,7 +2284,7 @@ mod tests {
         let space = crate::replacement::search_workload(vec![("q", Rc::clone(&target))]);
         let selection = space.global_selection(&RawCheaper);
         let workload = workload(vec![batch(Predictability::AdHoc)], vec![], at_rest());
-        let plan = materialize_with_summary_maintenance_lifecycles(
+        let plan = assemble_selected_dag_with_summary_maintenance_lifecycles(
             &selection,
             &space.roots[0].1,
             WorkloadDemand::new_without_data(&workload, &[0]),
@@ -2318,7 +2318,10 @@ mod tests {
             &SummaryMaintenancePrefersDdSketch,
         )
         .unwrap();
-        let materialized = selection.materialize(&space.roots[0].1).unwrap().unwrap();
+        let materialized = selection
+            .assemble_selected_dag(&space.roots[0].1)
+            .unwrap()
+            .unwrap();
 
         assert_eq!(
             sketch_algorithm(&materialized),
