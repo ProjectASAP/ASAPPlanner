@@ -523,7 +523,7 @@ assemble_selected_dag_with_summary_maintenance_lifecycles(
     selection: &GlobalSelection<'_>, target: &Rc<QueryExpr>,
     demand: WorkloadDemand<'_>, now_ms: u64, horizon: Option<Horizon>,
     capabilities: SummaryMaintenanceLifecycleCapabilities, cost_model: &dyn CostModel,
-) -> Result<Option<SummaryMaintenanceLifecyclePlan>, MaterializeSummaryMaintenanceLifecycleError>
+) -> Result<Option<SummaryMaintenanceLifecyclePlan>, SummaryMaintenanceLifecycleAssemblyError>
 ```
 
 | Argument | Values / requirements |

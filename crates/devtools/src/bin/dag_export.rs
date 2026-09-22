@@ -1210,7 +1210,7 @@ fn run_post_asap_with_progress(
     // as an empty candidate list) avoids ever handing `export_post_asap` a
     // winner that can't help but recurse into itself.
     let winners: Vec<Winner<'_>> = selection
-        .groups()
+        .target_selections()
         .filter_map(|group| {
             let candidate = group.chosen?;
             // A composition is a reference-bearing logical choice, not an
@@ -1332,7 +1332,7 @@ fn run_post_asap_with_progress(
     // Groups with accuracy-refused candidates (issue #172): matched to a
     // query's graph nodes the same hash-then-structural-equality way.
     let rejected_groups: Vec<_> = space
-        .groups()
+        .target_subdag_candidates()
         .filter(|group| !group.rejected.is_empty())
         .collect();
     let mut rejected_by_hash: HashMap<u64, Vec<usize>> = HashMap::new();
@@ -2231,7 +2231,7 @@ mod tests {
         let root = Rc::new(query.clone());
         let space = search_workload(vec![(String::from("q"), Rc::clone(&root))]);
         let group = space
-            .groups()
+            .target_subdag_candidates()
             .find(|group| *group.target == query)
             .expect("aggregate memo group");
         let candidate = group
@@ -2543,7 +2543,7 @@ mod tests {
         let root = Rc::new(query.clone());
         let space = search_workload(vec![(String::from("q"), Rc::clone(&root))]);
         let group = space
-            .groups()
+            .target_subdag_candidates()
             .find(|group| *group.target == query)
             .expect("aggregate memo group");
         let candidates: Vec<_> = group
@@ -2608,7 +2608,7 @@ mod tests {
         };
         let selection = space.global_selection(&model);
         let chosen = selection
-            .groups()
+            .target_selections()
             .find(|selected| selected.target.as_ref() == &query)
             .and_then(|selected| selected.chosen)
             .expect("one complete physical candidate should win");

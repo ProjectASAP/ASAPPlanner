@@ -337,7 +337,7 @@ fn max_and_avg_over_quantile_compose_at_read_time_with_statistics() {
             unreachable!()
         };
 
-        let outer_group = space.group_for(&root).unwrap();
+        let outer_group = space.candidates_for_target(&root).unwrap();
         assert!(
             outer_group
                 .candidates
@@ -345,7 +345,7 @@ fn max_and_avg_over_quantile_compose_at_read_time_with_statistics() {
                 .any(|c| c.provenance == ReplacementProvenance::ValueOperationAtReadTime),
             "{intent:?}: outer group must hold an ValueOperationAtReadTime candidate"
         );
-        let inner_group = space.group_for(inner).unwrap();
+        let inner_group = space.candidates_for_target(inner).unwrap();
         assert!(
             inner_group
                 .candidates
@@ -428,7 +428,7 @@ fn avg_over_quantile_keeps_the_sum_over_count_rewrite_as_a_competitor() {
     );
     let root = agg(vec![0], AggIntent::Avg { col: None }, inner);
     let space = plan(vec![("q", root)], &StatsModel);
-    let group = space.group_for(&space.roots[0].1).unwrap();
+    let group = space.candidates_for_target(&space.roots[0].1).unwrap();
     let provenances: Vec<_> = group.candidates.iter().map(|c| c.provenance).collect();
     assert!(provenances.contains(&ReplacementProvenance::LogicalRewrite));
     assert!(provenances.contains(&ReplacementProvenance::ValueOperationAtReadTime));
@@ -492,7 +492,10 @@ fn a_shared_inner_summary_is_materialized_once_for_several_outer_folds() {
         "CSE must intern the shared inner quantile"
     );
     let inner = inner_of(&roots[0]);
-    assert_eq!(space.group_for(&inner).unwrap().consumer_count, 2);
+    assert_eq!(
+        space.candidates_for_target(&inner).unwrap().consumer_count,
+        2
+    );
 
     let decisions: Vec<_> = roots
         .iter()
@@ -554,7 +557,7 @@ fn outer_summary_over_an_exact_function_composes_at_maintenance_time() {
         unreachable!()
     };
     assert!(space
-        .group_for(deriv)
+        .candidates_for_target(deriv)
         .unwrap()
         .candidates
         .iter()
@@ -645,7 +648,7 @@ fn a_runtime_without_mixed_execution_gets_no_composition_candidates() {
     let root = agg(vec![0], AggIntent::Max { col: None }, fine_quantile());
     let space = plan(vec![("q", root)], &NoCapabilityModel);
     let root = Rc::clone(&space.roots[0].1);
-    let group = space.group_for(&root).unwrap();
+    let group = space.candidates_for_target(&root).unwrap();
     assert!(group
         .candidates
         .iter()
@@ -671,7 +674,7 @@ fn missing_cost_statistics_preserve_the_conservative_keep_pre_asap() {
     let space = plan(vec![("q", root)], &DefaultCostModel);
     let root = Rc::clone(&space.roots[0].1);
     assert!(space
-        .group_for(&root)
+        .candidates_for_target(&root)
         .unwrap()
         .candidates
         .iter()
@@ -742,7 +745,7 @@ fn promql_max_by_zone_over_quantile_over_time_composes() {
         Some(ReplacementProvenance::ValueOperationAtReadTime),
         "{:?}",
         space
-            .group_for(root)
+            .candidates_for_target(root)
             .unwrap()
             .candidates
             .iter()

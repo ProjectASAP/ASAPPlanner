@@ -451,7 +451,7 @@ there is no need to run the ordinary selection/assembly workflow first:
 2. For each wanted query root, `assemble_selected_dag_with_summary_maintenance_lifecycles`
    takes that selection and root, constructs a Post-ASAP DAG, compares the
    selected summary's maintenance cost with raw recomputation, and returns
-   `Result<Option<SummaryMaintenanceLifecyclePlan>, MaterializeSummaryMaintenanceLifecycleError>`.
+   `Result<Option<SummaryMaintenanceLifecyclePlan>, SummaryMaintenanceLifecycleAssemblyError>`.
    When a summary does not beat a
    known raw cost, or a required comparable cost is unavailable, the result
    retains the exact `KeepPreAsap` root and no summary deployments.

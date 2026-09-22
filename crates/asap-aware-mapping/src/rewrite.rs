@@ -634,14 +634,16 @@ mod tests {
         let root = Rc::new(avg_agg(vec![2], None, metric_scan(&["job"])));
         let space = crate::replacement::search_workload(vec![("avg", Rc::clone(&root))]);
 
-        let avg_group = space.group_for(&space.roots[0].1).expect("avg group");
+        let avg_group = space
+            .candidates_for_target(&space.roots[0].1)
+            .expect("avg group");
         assert!(avg_group.candidates.iter().any(|candidate| {
             candidate.provenance == crate::replacement::ReplacementProvenance::LogicalRewrite
         }));
 
         let mut found_sum = false;
         let mut found_count = false;
-        for group in space.groups() {
+        for group in space.target_subdag_candidates() {
             let QueryExpr::Aggregate { measures, .. } = group.target.as_ref() else {
                 continue;
             };
@@ -842,7 +844,7 @@ mod tests {
         );
         let space = crate::replacement::search_workload(vec![("sum-count", root)]);
         let root = &space.roots[0].1;
-        let group = space.group_for(root).expect("root memo group");
+        let group = space.candidates_for_target(root).expect("root memo group");
         let candidate = group
             .candidates
             .iter()

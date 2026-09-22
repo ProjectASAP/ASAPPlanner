@@ -270,9 +270,9 @@ pub enum SummaryMaintenanceLifecyclePlanError {
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum MaterializeSummaryMaintenanceLifecycleError {
+pub enum SummaryMaintenanceLifecycleAssemblyError {
     #[error(transparent)]
-    Materialize(#[from] RealizationError),
+    AssembleDag(#[from] RealizationError),
     #[error(transparent)]
     SummaryMaintenance(#[from] SummaryMaintenanceLifecyclePlanError),
 }
@@ -474,7 +474,7 @@ pub fn global_selection_with_summary_maintenance_lifecycles<'a, Id>(
     )?;
     let bindings = space.workload_entries_by_target(workload, root_workload_entries)?;
     let mut costs = CandidateCostOverrides::default();
-    for group in space.groups() {
+    for group in space.target_subdag_candidates() {
         let Some(entry_indices) = bindings.get(&Rc::as_ptr(&group.target)) else {
             continue;
         };
@@ -525,7 +525,7 @@ pub fn assemble_selected_dag_with_summary_maintenance_lifecycles(
     horizon: Option<Horizon>,
     capabilities: SummaryMaintenanceLifecycleCapabilities,
     cost_model: &dyn CostModel,
-) -> Result<Option<SummaryMaintenanceLifecyclePlan>, MaterializeSummaryMaintenanceLifecycleError> {
+) -> Result<Option<SummaryMaintenanceLifecyclePlan>, SummaryMaintenanceLifecycleAssemblyError> {
     selection
         .assemble_selected_dag(target)?
         .map(|root| {
