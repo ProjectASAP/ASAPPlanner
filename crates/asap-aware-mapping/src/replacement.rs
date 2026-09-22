@@ -4813,13 +4813,12 @@ impl<Id> PlanSpace<Id> {
                         match (cse, logical) {
                             (Some(cse), Some(logical))
                                 if cost_model
-                                    .candidate_cost(logical, &effective_target)
-                                    .unwrap()
-                                    .0
-                                    < cost_model
-                                        .candidate_cost(cse, &effective_target)
-                                        .unwrap()
-                                        .0 =>
+                                    .candidate_cost(cse, &effective_target)
+                                    .is_none_or(|cse_cost| {
+                                        cost_model
+                                            .candidate_cost(logical, &effective_target)
+                                            .is_some_and(|logical_cost| logical_cost.0 < cse_cost.0)
+                                    }) =>
                             {
                                 Some(logical)
                             }
@@ -7528,6 +7527,42 @@ mod tests {
         fn cse_shared_maintenance_cost(&self, _candidate: &CseCandidate) -> Cost {
             Cost(100.0)
         }
+    }
+
+    /// A costed logical choice must not panic when an explicitly allowed CSE
+    /// choice has no numeric cost.
+    #[test]
+    fn costed_logical_candidate_beats_uncosted_legacy_cse_choice() {
+        struct MixedCost;
+        impl CostModel for MixedCost {
+            fn allow_uncosted_legacy_selection(&self) -> bool {
+                true
+            }
+
+            fn rank_candidates(
+                &self,
+                _intent: &AggIntent,
+                candidates: &[SketchAlgorithm],
+            ) -> Vec<SketchAlgorithm> {
+                candidates.to_vec()
+            }
+
+            fn candidate_cost(
+                &self,
+                candidate: &ReplacementSubDAG,
+                _target: &TargetSubDAG<'_>,
+            ) -> Option<Cost> {
+                (!is_cse_candidate(candidate)).then_some(Cost(1.0))
+            }
+        }
+
+        let aggregate = Rc::new(agg(vec![2], default_quantile(0.99), metric_scan(&["job"])));
+        let space = search_workload(vec![("left", Rc::clone(&aggregate)), ("right", aggregate)]);
+        let root = &space.roots[0].1;
+        assert!(cse_candidate_pair(space.candidates_for_target(root).unwrap()).is_some());
+        let selected = space.global_selection(&MixedCost);
+        let chosen = selected.for_target(root).unwrap().chosen.unwrap();
+        assert!(!is_cse_candidate(chosen));
     }
 
     #[test]

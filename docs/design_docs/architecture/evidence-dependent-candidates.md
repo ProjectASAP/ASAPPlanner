@@ -42,9 +42,10 @@ candidate's guarantee or used as a certificate.
 The Planner-side gates audited for this change are:
 
 In this table, **omitted** means the strategy does not add that candidate to
-the relevant `MemoGroup.candidates`; it does not necessarily record a reason. **Rejected**
-means the strategy adds a `RejectedCandidate` with an accuracy error to the
-relevant memo group's `rejected` list. Neither can be selected. The DDSketch
+the relevant `TargetSubDAGCandidates::candidates`; it does not necessarily
+record a reason. **Rejected** means the strategy adds a `RejectedCandidate`
+with an accuracy error to the relevant target's
+`TargetSubDAGCandidates::rejected` list. Neither can be selected. The DDSketch
 ratio path currently uses omission for a supplied incompatible domain; it does
 not emit a `RejectedCandidate` for that case.
 
@@ -84,10 +85,10 @@ capabilities before deployment.
 
 The default `global_selection()` skips summaries that
 `has_missing_accuracy_evidence()` identifies as uncertified. Its
-`materialize()` result is a selected logical plan, not an instruction to
-deploy every candidate in `PlanSpace`. If no alternative is chosen at a site,
-materialization retains the exact `KeepPreAsap` path. The backend can instead
-inspect alternatives, apply its own evidence and policy, then choose a
+`GlobalSelection::assemble_selected_dag()` result is a selected logical plan,
+not an instruction to deploy every candidate in `PlanSpace`. If no alternative
+is chosen at a site, DAG assembly retains the exact `KeepPreAsap` path. The
+backend can inspect alternatives, apply its own evidence and policy, then choose a
 physically supported one; it must not equate candidate presence with approval.
 Models may explicitly opt into qualitative candidate ranking when no
 comparable numeric cost exists by returning `true` from
