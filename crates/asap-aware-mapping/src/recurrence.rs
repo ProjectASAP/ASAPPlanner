@@ -1209,7 +1209,7 @@ mod tests {
             "3 distinct Filters + 1 shared Aggregate + 1 Scan underneath it"
         );
         let shared_group = space
-            .groups()
+            .target_subdag_candidates()
             .find(|g| matches!(g.target.as_ref(), QueryExpr::Aggregate { .. }))
             .expect("the shared sum_agg() is a discovered target");
         assert_eq!(shared_group.consumer_count, 3, "shared by all 3 roots");
@@ -1260,7 +1260,7 @@ mod tests {
         ];
         let space = search_workload(roots);
         let shared = space
-            .groups()
+            .target_subdag_candidates()
             .find(|group| matches!(group.target.as_ref(), QueryExpr::Aggregate { .. }))
             .expect("the aggregate is shared by both roots");
         let update_rate = Some(UpdateRate(10.0));
@@ -1278,13 +1278,14 @@ mod tests {
         let infrequent_ranked = space
             .cost_sorted_with_recurrence(&DeterministicUnitCostModel, &infrequent, None)
             .unwrap();
-        let first_provenance = |ranked: &[crate::replacement::RankedGroup<'_>]| {
-            ranked
-                .iter()
-                .find(|group| Rc::ptr_eq(group.target, &shared.target))
-                .and_then(|group| group.candidates.first())
-                .map(|candidate| candidate.provenance)
-        };
+        let first_provenance =
+            |ranked: &[crate::replacement::RankedTargetSubDAGCandidates<'_>]| {
+                ranked
+                    .iter()
+                    .find(|group| Rc::ptr_eq(group.target, &shared.target))
+                    .and_then(|group| group.candidates.first())
+                    .map(|candidate| candidate.provenance)
+            };
         assert_eq!(
             first_provenance(&frequent_ranked),
             Some(crate::replacement::ReplacementProvenance::CseShare)
@@ -1387,7 +1388,7 @@ mod tests {
         let space = search_workload(roots);
 
         let count_group = space
-            .groups()
+            .target_subdag_candidates()
             .find(|g| {
                 matches!(
                     g.target.as_ref(),
@@ -1425,7 +1426,7 @@ mod tests {
     /// same shared child twice (`BinaryOp{lhs: X, rhs: X}`, the same shape
     /// `pre_asap::cse`'s own within-one-query sharing collapses onto one
     /// `Rc`) must credit that child with 2 contributions per repeating
-    /// root, matching how `MemoGroup::consumer_count` already counts that
+    /// root, matching how `TargetSubDAGCandidates::consumer_count` already counts that
     /// exact structural occurrence twice — not 1, which a plain
     /// reachability-set walk would (wrongly) collapse it to.
     #[test]
@@ -1441,7 +1442,7 @@ mod tests {
         let space = search_workload(vec![("q", Rc::new(root))]);
 
         let shared_group = space
-            .groups()
+            .target_subdag_candidates()
             .find(|g| matches!(g.target.as_ref(), QueryExpr::Aggregate { .. }))
             .expect("sum_agg() should merge onto one shared Rc, referenced twice from BinaryOp");
         assert_eq!(
@@ -1464,7 +1465,7 @@ mod tests {
         );
 
         let scan_group = space
-            .groups()
+            .target_subdag_candidates()
             .find(|group| matches!(group.target.as_ref(), QueryExpr::Scan { .. }))
             .expect("the shared aggregate has a scan descendant");
         assert_eq!(

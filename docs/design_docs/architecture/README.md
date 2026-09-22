@@ -1,102 +1,53 @@
 # ASAPPlanner design overview
 
 ASAPPlanner is a reusable planning library. It converts queries and workload
-requirements into legal, ranked, deployment-independent Post-ASAP candidates.
+requirements into a deployment-independent space of logical Post-ASAP candidates.
 It does not commit, deploy, or execute a physical plan; downstream systems such
 as ASAPQuery-backend bind the candidates to physical alternatives, make the
 deployment-level decision, and run the selected contract.
+
+For the integration workflow, start with [ASAPPlanner input, output, and
+workflows](input-output-workflow.md). It defines inputs, `PlanSpace`, selection
+and summary-maintenance lifecycle workflows, and future replanning support.
 
 ## Planner component flow
 
 ```mermaid
 flowchart TD
-    subgraph INPUTS[Inputs]
-        QUERY[SQL, PromQL, or MetricsQL queries]
-        WORKLOAD[Query and data workloads<br/>accuracy and latency requirements<br/>planning horizon]
-        CATALOG[Schema and function catalogs]
-        PROVIDER[Downstream capabilities<br/>physical alternatives and cost evidence]
-    end
-
-    subgraph PLANNER[ASAPPlanner boundary - reusable semantic planning]
-        subgraph FRONTENDS[Query frontends]
-            PARSE[Parse and translate]
-            CANON[Resolve names and canonicalize]
-            PRE[Pre-ASAP QueryExpr DAG]
-            PARSE --> CANON --> PRE
-        end
-
-        subgraph MAPPING[ASAP-aware mapping]
-            CSE[Canonical sharing and CSE]
-            STRATEGIES[Replacement strategies<br/>enumerate legal alternatives]
-            SPACE[PlanSpace of candidate<br/>Post-ASAP workload DAGs]
-            CSE --> STRATEGIES --> SPACE
-        end
-
-        subgraph CORRECTNESS[Legality and accuracy]
-            LEGAL[Semantic, schema, phase,<br/>and capability checks]
-            BUDGET[AccuracyBudgetAllocator<br/>proposes local requirements]
-            ACCURACY[AccuracyModel<br/>derives and propagates guarantees]
-            SATISFY[Keep candidates whose end-to-end<br/>guarantees satisfy query requirements]
-            LEGAL --> BUDGET --> ACCURACY --> SATISFY
-        end
-
-        subgraph RANKING[Lifecycle expansion and planner ranking]
-            LIFECYCLE[Expand legal summary-maintenance<br/>lifecycle alternatives]
-            COST[Cost models annotate and rank<br/>every eligible candidate]
-            RANK[Preserve every ranked candidate<br/>with cost and guarantee]
-            LIFECYCLE --> COST --> RANK
-        end
-
-        subgraph OUTPUTS[Planner output boundary]
-            POST[PlanSpace and RankedGroups<br/>all legal Post-ASAP candidates]
-            CONTRACT[Aligned costs, summary parameters,<br/>lifecycle contracts and guarantees]
-            EXPLAIN[Assumptions and<br/>structured rejections]
-        end
-    end
-
-    subgraph DOWNSTREAM[Downstream physical-planning boundary]
-        BIND[Bind each logical candidate to<br/>concrete algorithms and topology]
-        PHYSICAL[Enumerate feasible complete physical alternatives<br/>with stable identities and resource evidence]
-        DRANK[Apply deployment constraints and<br/>cost or rerank physical alternatives]
-        COMMIT[Commit one compatible<br/>whole-workload physical plan]
-        COMPILE[Compile runtime plan projections<br/>and materialization actions]
-        DEPLOY[Validate, deploy, and activate]
-        EXECUTE[Execute queries and<br/>maintain summary state]
-        FEEDBACK[Report capabilities, readiness,<br/>measured cost and accuracy evidence]
-        BIND --> PHYSICAL --> DRANK --> COMMIT --> COMPILE --> DEPLOY --> EXECUTE --> FEEDBACK
-    end
-
-    QUERY --> PARSE
-    CATALOG --> CANON
-    PRE --> CSE
-    WORKLOAD --> STRATEGIES
-    WORKLOAD --> BUDGET
-    WORKLOAD --> LIFECYCLE
-    PROVIDER --> LEGAL
-    PROVIDER -. optional evidence feedback .-> COST
-    SPACE --> LEGAL
-    SATISFY --> LIFECYCLE
-    RANK --> POST
-    RANK --> CONTRACT
-    RANK --> EXPLAIN
-
-    POST --> BIND
-    CONTRACT --> BIND
-    FEEDBACK -. next planning cycle .-> PROVIDER
-    PHYSICAL -. optional evidence feedback .-> PROVIDER
+    W["PlanningWorkload: query demand + optional data facts"]
+    F["Frontend dependencies: SQL catalog or PromQL time"]
+    E["Strategy, accuracy model, and applicable evidence"]
+    PRE["Frontend lowering → canonical Pre-ASAP QueryExpr roots"]
+    SEARCH["Whole-workload candidate search: sharing, legality, accuracy"]
+    SPACE["PlanSpace: compact logical candidate DAG space"]
+    RANK["Optional cost_sorted: ranked inspection view"]
+    SELECT["Optional global_selection + assemble_selected_dag"]
+    DAG["Selected logical Post-ASAP DAG"]
+    LINPUT["Optional lifecycle inputs: horizon, rates, capabilities, costs"]
+    LIFE["global_selection_with_summary_maintenance_lifecycles"]
+    LMAT["assemble_selected_dag_with_summary_maintenance_lifecycles"]
+    LPLAN["SummaryMaintenanceLifecyclePlan: DAG root + lifecycle decisions"]
+    BACKEND["Downstream: bind physical alternatives, decide deployment, compile and execute"]
+    W --> PRE
+    F --> PRE
+    PRE --> SEARCH
+    E --> SEARCH
+    SEARCH --> SPACE
+    SPACE --> RANK --> BACKEND
+    SPACE --> SELECT --> DAG --> BACKEND
+    SPACE --> LIFE
+    LINPUT --> LIFE --> LMAT --> LPLAN --> BACKEND
 ```
 
-The ordering in the diagram is a correctness boundary:
-
-1. Frontends normalize source-language queries into the shared Pre-ASAP IR.
-2. ASAP-aware mapping enumerates alternatives; it does not choose one.
-3. Legality and the accuracy model reject candidates that cannot prove the
-   requested semantics and end-to-end guarantee.
-4. Lifecycle expansion and cost models rank only eligible alternatives while
-   preserving the candidate set. Cost cannot make an illegal candidate legal.
-5. Downstream systems bind those candidates to concrete physical alternatives.
-   Physical feasibility and deployment costs may change their order; downstream
-   then chooses and commits the complete physical plan.
+`PlanSpace` is the output of logical candidate search. Each target's candidate set holds
+alternatives and rejection reasons, but no selected maintenance lifecycle.
+Choose among the three branches: inspect candidates (optionally ranked), select
+and assemble logical DAGs, or select and assemble with summary-maintenance
+lifecycle decisions. Use the last branch when Planner owns the maintenance
+decision; otherwise the backend owns it. Its first
+call returns a `GlobalSelection`; the second returns a
+`SummaryMaintenanceLifecyclePlan` with an assembled DAG root and lifecycle
+decisions. No branch by itself deploys or executes a physical plan.
 
 ## Module map
 
@@ -116,15 +67,13 @@ requirements, the planning horizon, available materialized state, downstream
 capabilities, and complete cost evidence. Missing or stale evidence must remain
 explicit rather than being treated as zero.
 
-The primary output boundary is `PlanSpace` plus its `cost_sorted` view: every
-memo group retains its legal Post-ASAP candidates, ranked with index-aligned
-costs. Downstream combines compatible choices across groups rather than
-assuming that the first candidate in each group is already a feasible physical
-workload plan. Each candidate carries the
-planner-owned semantic decisions needed downstream: summary algorithms and
-parameters, shared producer identities, logical time coverage, maintenance
-lifecycle requirements, and accuracy guarantees. Explanation output records
-costs, assumptions, and why candidates were rejected before ranking.
+The primary output is `PlanSpace`; `cost_sorted` derives an optional ranked
+view with index-aligned costs. Downstream may inspect compatible choices
+across targets rather than assuming the first candidate is a feasible
+physical workload plan. Candidates carry logical summary algorithms,
+parameters, and guarantees; selected maintenance lifecycle decisions appear
+only after a summary-maintenance-lifecycle-aware helper runs. Rejection reasons
+are retained in the candidate space.
 
 ASAPQuery-backend and other downstream applications translate the candidates
 into physical alternatives. They own concrete implementations, storage layout,
@@ -134,12 +83,13 @@ candidates because it has evidence that the reusable Planner does not, but it
 must not silently change Planner-owned semantics.
 
 `PlanSpace::global_selection` optionally coordinates structural choices across
-groups; `GlobalSelection::materialize` constructs the selected semantic DAG.
-Those plain APIs do not require complete physical evidence and do not establish
-physical feasibility. Recurrence and lifecycle-aware variants use their supplied
-workload and evidence contracts. See the [library guide](../../develop_docs/library-api.md#optional-whole-plan-selection-and-materialization)
-for the distinction. Downstream may consume the ranked candidates directly and
-retains responsibility for physical commitment.
+targets; `GlobalSelection::assemble_selected_dag` constructs a selected semantic DAG.
+Those plain APIs do not establish physical feasibility or a
+maintenance-versus-recompute decision. The lifecycle-aware selection call uses
+additional workload and evidence inputs; its DAG assembly call returns a
+plan with both a root and lifecycle decisions. See the [library guide](../../develop_docs/library-api.md#optional-whole-plan-selection-and-dag-assembly)
+for the distinction. Downstream may consume candidates directly and retains
+responsibility for physical commitment.
 
 ## Further reading
 

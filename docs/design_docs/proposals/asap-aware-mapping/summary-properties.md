@@ -109,7 +109,7 @@ costing:
 candidate generation
     -> guarantee propagation            (AccuracyModel::propagate)
     -> AccuracyTarget satisfaction      (AccuracyModel::satisfies)
-    -> legal candidates only            (illegal ones -> MemoGroup::rejected)
+    -> legal candidates only            (illegal ones -> TargetSubDAGCandidates::rejected)
     -> cost ranking / global selection  (CostModel)
 ```
 

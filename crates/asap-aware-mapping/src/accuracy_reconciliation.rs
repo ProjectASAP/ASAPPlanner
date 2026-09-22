@@ -10,7 +10,7 @@
 //! accuracy bound they ask for — `quantile(0.99, x)` at `epsilon=0.01` for
 //! one consumer, the same `quantile(0.99, x)` at `epsilon=0.05` for
 //! another — are therefore never the same `Rc`, never collapse into one
-//! [`crate::replacement::MemoGroup`], and [`crate::replacement::SharedSubtreeStrategy`]
+//! [`crate::replacement::TargetSubDAGCandidates`], and [`crate::replacement::SharedSubtreeStrategy`]
 //! never even gets a `TargetSubDAG` with `consumer_count >= 2` to propose
 //! sharing for. This crate would build two entirely independent sketches
 //! for what is conceptually one computation, even though a single sketch
@@ -106,7 +106,7 @@
 //! Like every [`ReplacementStrategy`], this only ever *proposes* — the
 //! looser-accuracy consumer's own independently-sized candidate (from
 //! [`crate::replacement::SketchAlgorithmStrategy`]) stays in its
-//! [`crate::replacement::MemoGroup`] right alongside this strategy's
+//! [`crate::replacement::TargetSubDAGCandidates`] right alongside this strategy's
 //! "read the tighter sibling instead" [`Replacement::Rewrite`] candidate;
 //! [`crate::cost_model::CostModel`]-driven ranking picks between them;
 //! nothing here removes or filters the independent candidate.
@@ -569,7 +569,7 @@ mod tests {
 
         let loose_root = &space.roots[1].1;
         let loose_group = space
-            .group_for(loose_root)
+            .candidates_for_target(loose_root)
             .expect("loose consumer's own target has a group");
         assert!(
             loose_group.candidates.iter().any(|candidate| {
@@ -860,7 +860,7 @@ mod tests {
         // Fixture sanity: the two loose roots really did merge onto one Rc.
         assert!(Rc::ptr_eq(&space.roots[0].1, &space.roots[1].1));
         let loose_group = space
-            .group_for(&space.roots[0].1)
+            .candidates_for_target(&space.roots[0].1)
             .expect("the merged loose target has a group");
         assert_eq!(loose_group.consumer_count, 2);
         assert!(

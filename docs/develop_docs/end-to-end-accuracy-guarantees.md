@@ -11,7 +11,8 @@ workflow.
 ## How one candidate moves through the implementation
 
 The implementation follows one candidate from a query requirement to either a
-legal post-ASAP node or a structured rejection:
+proven Post-ASAP node or a structured rejection. The direct DDSketch ratio
+exception described below also permits an unproven candidate for backend inspection:
 
 ```text
 aggregate intent and AccuracyTarget
@@ -22,7 +23,7 @@ aggregate intent and AccuracyTarget
     -> propagate guarantees through the registered composition rule
     -> check the final guarantee against AccuracyTarget
     -> keep legal candidate or record AccuracyError
-    -> rank only legal candidates with CostModel
+    -> rank retained candidates with CostModel (ranking does not prove accuracy)
 ```
 
 For a single summary, the child is exact and propagation leaves the local
@@ -74,7 +75,12 @@ trait AccuracyModel {
 
 `AccuracyBudgetAllocator` proposes finite parameter allocations for nested
 approximate layers. Every candidate must then be resized, propagated, and
-checked. `CostModel` may see only candidates that pass this check.
+checked before being treated as satisfying the target. This is distinct from
+candidate visibility: direct DDSketch ratios lacking domain evidence remain in
+`PlanSpace` with `guarantee: None` and can appear in `cost_sorted`, but automatic
+`global_selection` skips them. Presence and cost are not accuracy certification.
+See the [workflow design](../design_docs/architecture/input-output-workflow.md#planning-evidence-inputs)
+for this boundary.
 
 ## Composition contracts
 
@@ -230,12 +236,14 @@ with probability at most `1/3`. Zero or even depth has no modeled guarantee.
 ## Runtime or statistics evidence
 
 ASAPPlanner contains the guarantee algebra and parameter-derived contracts.
-It imports pinned `asap_sketchlib` DDSketch mapping bounds for ratio certification;
+It imports `asap_sketchlib` DDSketch mapping bounds for ratio certification;
 see [DDSketch ratio certification](../design_docs/proposals/asap-aware-mapping/ddsketch-quantile-ratios.md). This dependency
 does not make Planner a query executor. Data- or runtime-dependent evidence enters
 through an `AccuracyEvidenceProvider`, is exposed to propagation as typed
 `PropagationStats`, and is recorded in provenance. `NoAccuracyEvidence` is the
-default and preserves fail-closed behavior.
+default: it supplies no missing facts. Guarantee derivation remains conservative;
+the direct DDSketch ratio exception above retains a candidate without claiming
+its accuracy is proven.
 
 ### TopK membership
 

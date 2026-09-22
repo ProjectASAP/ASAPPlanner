@@ -896,8 +896,8 @@ mod tests {
     use super::*;
     use crate::recurrence::Horizon;
     use crate::summary_maintenance_lifecycle::{
-        global_selection_with_summary_maintenance_lifecycles,
-        materialize_with_summary_maintenance_lifecycles, plan_summary_maintenance_lifecycles,
+        assemble_selected_dag_with_summary_maintenance_lifecycles,
+        global_selection_with_summary_maintenance_lifecycles, plan_summary_maintenance_lifecycles,
         SummaryMaintenanceLifecycleCapabilities, WorkloadDemand,
     };
 
@@ -1287,7 +1287,7 @@ mod tests {
         let space = crate::replacement::search_workload(vec![("q", Rc::clone(&target))]);
         let workload = streaming_workload();
         let mut model = streaming_model();
-        for group in space.groups() {
+        for group in space.target_subdag_candidates() {
             for candidate in &group.candidates {
                 if let Replacement::Summary(root) = &candidate.replacement {
                     bind_aggregations(
@@ -1309,7 +1309,7 @@ mod tests {
             &model,
         )
         .unwrap();
-        let plan = materialize_with_summary_maintenance_lifecycles(
+        let plan = assemble_selected_dag_with_summary_maintenance_lifecycles(
             &selection,
             &space.roots[0].1,
             WorkloadDemand::new_with_data(&workload, &streaming_data_workload(), &[0]),
@@ -1365,7 +1365,7 @@ mod tests {
             .unwrap()
             .chosen
             .is_none());
-        let cheap_plan = materialize_with_summary_maintenance_lifecycles(
+        let cheap_plan = assemble_selected_dag_with_summary_maintenance_lifecycles(
             &cheap_selection,
             &space.roots[0].1,
             WorkloadDemand::new_with_data(&workload, &streaming_data_workload(), &[0]),

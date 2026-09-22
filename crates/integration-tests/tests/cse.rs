@@ -6,7 +6,7 @@
 //! `asap-types::pre_asap::cse`, run internally by `search_workload`) →
 //! `search_workload` (stage 2, `asap-aware-mapping`) — and asserts the
 //! sharing that stage 1 decides survives into stage 2's discovered
-//! `PlanSpace` as one genuinely shared `MemoGroup`, not just one shared
+//! `PlanSpace` as one genuinely shared `TargetSubDAGCandidates`, not just one shared
 //! `Rc<QueryExpr>`. This is the "real caller" the issue's landing plan
 //! requires before `share_common_subtrees` is allowed to exist at all (its
 //! predecessor, `asap-plan::cse::dedupe_subtrees`, was deleted in #192 for
@@ -33,7 +33,7 @@ use asap_types::types::AccuracyTarget;
 /// realistic case — two dashboards, or a query fired both standalone and as
 /// part of a larger batch) collapse onto one shared `Rc<QueryExpr>` after
 /// `search_workload`'s internal `share_common_subtrees` pass, and onto one
-/// genuinely-shared [`MemoGroup`](asap_aware_mapping::MemoGroup) — carrying
+/// genuinely-shared [`TargetSubDAGCandidates`](asap_aware_mapping::TargetSubDAGCandidates) — carrying
 /// every candidate discovered for it exactly once, not once per root — no
 /// second structural-equality pass at the post-ASAP layer needed for this
 /// kind of sharing.
@@ -67,13 +67,13 @@ fn duplicate_workload_queries_collapse_onto_one_memo_group() {
     );
 
     // The single shared root is one discovered TargetSubDAG, holding one
-    // MemoGroup with consumer_count 2 — SketchAlgorithmStrategy's one
+    // TargetSubDAGCandidates with consumer_count 2 — SketchAlgorithmStrategy's one
     // ExactAggregate candidate *and* SharedSubtreeStrategy's share-vs-
     // recompute pair, exactly as `shared_aggregate_across_two_roots_gets_both_strategies_candidates`
     // (asap-aware-mapping::replacement's own equivalent, internal test)
     // pins for the same fixture shape.
     let group = space
-        .group_for(&space.roots[0].1)
+        .candidates_for_target(&space.roots[0].1)
         .expect("shared root must be a discovered target");
     assert_eq!(group.consumer_count, 2);
     assert_eq!(
@@ -112,7 +112,7 @@ fn duplicate_workload_queries_collapse_onto_one_memo_group() {
 /// The negative control: two workload entries whose queries are NOT
 /// structurally identical must not be conflated — `search_workload`
 /// discovers two independent roots, each its own `TargetSubDAG` with its
-/// own `MemoGroup` and `consumer_count == 1`.
+/// own `TargetSubDAGCandidates` and `consumer_count == 1`.
 #[test]
 fn distinct_workload_queries_get_independent_memo_groups() {
     let a = lower_promql("sum by (job) (http_requests_total)", AccuracyTarget::Exact)
@@ -125,14 +125,14 @@ fn distinct_workload_queries_get_independent_memo_groups() {
     assert!(!Rc::ptr_eq(&space.roots[0].1, &space.roots[1].1));
 
     let group_a = space
-        .group_for(&space.roots[0].1)
+        .candidates_for_target(&space.roots[0].1)
         .expect("root a must be a discovered target");
     let group_b = space
-        .group_for(&space.roots[1].1)
+        .candidates_for_target(&space.roots[1].1)
         .expect("root b must be a discovered target");
     assert!(
         !Rc::ptr_eq(&group_a.target, &group_b.target),
-        "distinct queries must land in distinct MemoGroups"
+        "distinct queries must have distinct TargetSubDAGCandidates entries"
     );
     assert_eq!(group_a.consumer_count, 1);
     assert_eq!(group_b.consumer_count, 1);
@@ -141,7 +141,7 @@ fn distinct_workload_queries_get_independent_memo_groups() {
 /// Single-query CSE (a repeated sub-expression within one query) also
 /// survives through `search_workload`: the two grouped-`Aggregate` branches
 /// of a `BinaryOp` collapse to one shared `Rc<QueryExpr>` in the internal
-/// `share_common_subtrees` pass, and to one shared `MemoGroup` (with
+/// `share_common_subtrees` pass, and to one shared `TargetSubDAGCandidates` (with
 /// `consumer_count == 2`, one per branch) here.
 #[test]
 fn single_query_repeated_subexpression_shares_one_memo_group() {
@@ -161,7 +161,7 @@ fn single_query_repeated_subexpression_shares_one_memo_group() {
     );
 
     let group = space
-        .group_for(lhs)
+        .candidates_for_target(lhs)
         .expect("the shared branch must be a discovered target");
     assert_eq!(
         group.consumer_count, 2,
