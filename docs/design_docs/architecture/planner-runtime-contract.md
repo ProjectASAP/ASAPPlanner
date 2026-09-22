@@ -75,10 +75,12 @@ and rollback are not an end-to-end Planner protocol.
 3. The provider binds a stable alternative identity and complete evidence:
    source coverage, input/output edges, operation counts, update and bootstrap
    fanout, retained state, CPU, memory, I/O, and accuracy facts.
-4. The summary-maintenance-lifecycle-aware workflow compares supported
-   alternatives over the same workload horizon. Missing or incomparable costs
-   do not establish that maintaining a summary beats raw recomputation;
-   structural scores and optimistic zeroes are not substitutes.
+4. ASAPPlanner keeps constructible candidates with missing evidence visible
+   in `PlanSpace` but does not certify unknown accuracy. The
+   summary-maintenance-lifecycle-aware workflow compares supported alternatives
+   over the same workload horizon. Missing or incomparable costs do not establish
+   that maintaining a summary beats raw recomputation; structural scores and
+   optimistic zeroes are not substitutes.
 5. ASAPPlanner outputs the selected Post-ASAP semantics, lifecycle guarantees,
    realization contract, and chosen provider identity.
 6. ASAPQuery-backend compiles that result into consistent `CollectorPlan`,
@@ -134,12 +136,14 @@ in one cost formula.
   execution.
 - A selected realization framework is a contract, not executor code.
 - Physical capabilities and evidence constrain deployment choices, not every
-  logical candidate's presence in `PlanSpace`.
+  logical candidate's presence in `PlanSpace`. Known unsupported capabilities
+  and unknown algorithms cannot become deployable alternatives.
 - Complete physical alternatives need identity and comparable evidence for
-  cost-based deployment decisions.
-- Missing evidence remains unknown. It does not certify a guarantee or make
-  every dependent logical candidate disappear; for example, an unproven
-  DDSketch ratio remains inspectable but is not automatically selected.
+  cost-based deployment decisions. Stale evidence cannot certify or cost a
+  candidate.
+- Missing evidence leaves constructible candidates visible but uncertified;
+  for example, an unproven DDSketch ratio remains inspectable but is not
+  automatically selected.
 - Shared logical nodes remain shared across the planner-runtime contract; physical sharing
   additionally requires compatible filters, grouping, windows, parameters,
   lifecycle, and guarantees.

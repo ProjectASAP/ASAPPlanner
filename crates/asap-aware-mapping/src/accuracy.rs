@@ -939,12 +939,32 @@ impl AccuracyModel for DefaultAccuracyModel {
                         Ok(Self::additive(op, inputs, local, "additive_union_bound"))
                     }
                     ErrorMetric::RelativeValue => {
-                        if stats.values_non_negative != Some(true) {
+                        if stats.values_non_negative == Some(false) {
                             return Err(unsupported(
-                                "relative-error composition needs values of known sign \
-                                 (PropagationStats::values_non_negative)"
-                                    .into(),
+                                "relative-error composition cannot use a known signed input".into(),
                             ));
+                        }
+                        if stats.values_non_negative.is_none() {
+                            let mut provenance = composed_provenance(
+                                op,
+                                inputs,
+                                local,
+                                "relative_value_sign_unverified",
+                            );
+                            provenance.extend(stats.evidence_provenance.clone());
+                            provenance.push(GuaranteeSource::UnavailableStatistic {
+                                statistic: "values_non_negative".into(),
+                            });
+                            return Ok(ResultGuarantee {
+                                metric: ErrorMetric::RelativeValue,
+                                bound: BoundExpr::Unknown {
+                                    statistic: "values_non_negative".into(),
+                                },
+                                failure_probability: ProbabilityExpr::Unknown {
+                                    statistic: "values_non_negative".into(),
+                                },
+                                provenance,
+                            });
                         }
                         Ok(Self::multiplicative(op, inputs, local))
                     }
@@ -989,22 +1009,16 @@ impl AccuracyModel for DefaultAccuracyModel {
                     .into(),
             )),
             CompositionOperator::TopKSelection => {
-                let (Some(selected_lower), Some(excluded_upper), Some(delta)) = (
-                    stats.topk_selected_lower_bound,
-                    stats.topk_excluded_upper_bound,
-                    stats.topk_interval_failure_probability,
-                ) else {
-                    return Err(unsupported(
-                        "top-k membership needs selected-lower, excluded-upper, and interval \
-                         failure-probability evidence"
-                            .into(),
-                    ));
-                };
-                if !(selected_lower.is_finite()
-                    && excluded_upper.is_finite()
-                    && delta.is_finite()
-                    && (0.0..=1.0).contains(&delta)
-                    && selected_lower > excluded_upper)
+                let selected = stats.topk_selected_lower_bound;
+                let excluded = stats.topk_excluded_upper_bound;
+                let delta = stats.topk_interval_failure_probability;
+                if selected.is_some_and(|value| !value.is_finite())
+                    || excluded.is_some_and(|value| !value.is_finite())
+                    || delta
+                        .is_some_and(|value| !value.is_finite() || !(0.0..=1.0).contains(&value))
+                    || selected
+                        .zip(excluded)
+                        .is_some_and(|(lower, upper)| lower <= upper)
                 {
                     return Err(unsupported(
                         "top-k confidence intervals overlap or contain invalid evidence".into(),
@@ -1022,14 +1036,37 @@ impl AccuracyModel for DefaultAccuracyModel {
                 if let Some(local) = local {
                     provenance.extend(local.provenance.clone());
                 }
+                for (name, missing) in [
+                    ("topk_selected_lower_bound", selected.is_none()),
+                    ("topk_excluded_upper_bound", excluded.is_none()),
+                    ("topk_interval_failure_probability", delta.is_none()),
+                ] {
+                    if missing {
+                        provenance.push(GuaranteeSource::UnavailableStatistic {
+                            statistic: name.into(),
+                        });
+                    }
+                }
                 provenance.push(GuaranteeSource::CompositionStep {
                     operator: op.clone(),
                     rule: "topk_membership_margin_certificate".into(),
                 });
+                let certified = selected.is_some() && excluded.is_some() && delta.is_some();
                 Ok(ResultGuarantee {
                     metric: ErrorMetric::TopKMembership,
-                    bound: BoundExpr::Zero,
-                    failure_probability: ProbabilityExpr::Constant { value: delta },
+                    bound: if certified {
+                        BoundExpr::Zero
+                    } else {
+                        BoundExpr::Unknown {
+                            statistic: "topk_membership_margin".into(),
+                        }
+                    },
+                    failure_probability: delta.map_or_else(
+                        || ProbabilityExpr::Unknown {
+                            statistic: "topk_interval_failure_probability".into(),
+                        },
+                        |value| ProbabilityExpr::Constant { value },
+                    ),
                     provenance,
                 })
             }
@@ -1400,16 +1437,26 @@ mod tests {
     }
 
     #[test]
-    fn relative_error_without_sign_knowledge_is_rejected() {
-        let err = DefaultAccuracyModel
+    fn relative_error_without_sign_knowledge_remains_symbolic() {
+        let unknown = DefaultAccuracyModel
             .propagate(
                 &CompositionOperator::ApproximateAggregate,
                 &[rel(0.1)],
                 Some(&rel(0.2)),
                 &PropagationStats::default(),
             )
-            .unwrap_err();
-        assert!(matches!(err, AccuracyError::UnsupportedComposition { .. }));
+            .unwrap();
+        assert!(unknown.has_unknown());
+        let signed = DefaultAccuracyModel.propagate(
+            &CompositionOperator::ApproximateAggregate,
+            &[rel(0.1)],
+            Some(&rel(0.2)),
+            &PropagationStats {
+                values_non_negative: Some(false),
+                ..Default::default()
+            },
+        );
+        assert!(signed.is_err());
     }
 
     #[test]
@@ -1568,15 +1615,15 @@ mod tests {
 
     #[test]
     fn topk_selection_requires_a_separated_margin_certificate() {
-        let err = DefaultAccuracyModel
+        let unknown = DefaultAccuracyModel
             .propagate(
                 &CompositionOperator::TopKSelection,
                 &[abs(0.1, 0.01)],
                 None,
                 &PropagationStats::default(),
             )
-            .unwrap_err();
-        assert!(matches!(err, AccuracyError::UnsupportedComposition { .. }));
+            .unwrap();
+        assert!(unknown.has_unknown());
 
         let certified = DefaultAccuracyModel
             .propagate(
@@ -1607,6 +1654,32 @@ mod tests {
             },
         );
         assert!(overlapping.is_err());
+
+        let partial = DefaultAccuracyModel
+            .propagate(
+                &CompositionOperator::TopKSelection,
+                &[abs(0.1, 0.01)],
+                None,
+                &PropagationStats {
+                    topk_selected_lower_bound: Some(101.0),
+                    topk_interval_failure_probability: Some(0.005),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert!(partial.has_unknown());
+        assert_eq!(partial.failure_probability.evaluate(), Some(0.005));
+
+        let invalid_partial = DefaultAccuracyModel.propagate(
+            &CompositionOperator::TopKSelection,
+            &[abs(0.1, 0.01)],
+            None,
+            &PropagationStats {
+                topk_selected_lower_bound: Some(f64::NAN),
+                ..Default::default()
+            },
+        );
+        assert!(invalid_partial.is_err());
     }
 
     #[test]

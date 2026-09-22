@@ -110,6 +110,38 @@ pub enum BoundExpr {
 }
 
 impl BoundExpr {
+    fn optimistic_floor(&self) -> Self {
+        match self {
+            Self::Unknown { .. } => Self::Zero,
+            Self::Sum { terms } => Self::Sum {
+                terms: terms.iter().map(Self::optimistic_floor).collect(),
+            },
+            Self::Product { factors } => Self::Product {
+                factors: factors.iter().map(Self::optimistic_floor).collect(),
+            },
+            Self::Scaled { factor, inner } => Self::Scaled {
+                factor: *factor,
+                inner: Box::new(inner.optimistic_floor()),
+            },
+            Self::Max { terms } => Self::Max {
+                terms: terms.iter().map(Self::optimistic_floor).collect(),
+            },
+            other => other.clone(),
+        }
+    }
+
+    /// Whether evaluation depends on a statistic not yet supplied.
+    pub fn has_unknown(&self) -> bool {
+        match self {
+            BoundExpr::Zero | BoundExpr::Constant { .. } => false,
+            BoundExpr::Sum { terms }
+            | BoundExpr::Product { factors: terms }
+            | BoundExpr::Max { terms } => terms.iter().any(BoundExpr::has_unknown),
+            BoundExpr::Scaled { inner, .. } => inner.has_unknown(),
+            BoundExpr::Unknown { .. } => true,
+        }
+    }
+
     /// Numeric value of this bound, or `None` if any [`BoundExpr::Unknown`]
     /// leaf is reachable.
     pub fn evaluate(&self) -> Option<f64> {
@@ -176,6 +208,30 @@ pub enum ProbabilityExpr {
 }
 
 impl ProbabilityExpr {
+    fn optimistic_floor(&self) -> Self {
+        match self {
+            Self::Unknown { .. } => Self::Zero,
+            Self::UnionBound { terms } => Self::UnionBound {
+                terms: terms.iter().map(Self::optimistic_floor).collect(),
+            },
+            Self::Scaled { count, inner } => Self::Scaled {
+                count: count.optimistic_floor(),
+                inner: Box::new(inner.optimistic_floor()),
+            },
+            other => other.clone(),
+        }
+    }
+
+    /// Whether evaluation depends on a statistic not yet supplied.
+    pub fn has_unknown(&self) -> bool {
+        match self {
+            ProbabilityExpr::Zero | ProbabilityExpr::Constant { .. } => false,
+            ProbabilityExpr::UnionBound { terms } => terms.iter().any(ProbabilityExpr::has_unknown),
+            ProbabilityExpr::Scaled { count, inner } => count.has_unknown() || inner.has_unknown(),
+            ProbabilityExpr::Unknown { .. } => true,
+        }
+    }
+
     /// Numeric value clamped to `[0, 1]`, or `None` if any unknown leaf is
     /// reachable.
     pub fn evaluate(&self) -> Option<f64> {
@@ -244,8 +300,8 @@ pub enum CompositionOperator {
     InstantCounterRate,
     /// PromQL `increase`: extrapolated reset-corrected increase over a range.
     CounterIncrease,
-    /// A top-k selection over approximate inputs. Unsupported by the default
-    /// model until the margin certificate of issue #172 PR 3 exists.
+    /// A top-k selection over approximate inputs. Without a separated-margin
+    /// certificate the default model leaves membership accuracy unknown.
     TopKSelection,
 }
 
@@ -328,6 +384,23 @@ pub struct ResultGuarantee {
 }
 
 impl ResultGuarantee {
+    /// Optimistic lower bound used only to reject an impossible target.
+    /// Replacing unknown non-negative contributions by zero cannot certify
+    /// this candidate; the original guarantee remains unresolved.
+    pub fn optimistic_floor(&self) -> Self {
+        Self {
+            metric: self.metric,
+            bound: self.bound.optimistic_floor(),
+            failure_probability: self.failure_probability.optimistic_floor(),
+            provenance: self.provenance.clone(),
+        }
+    }
+
+    /// An unresolved bound or failure probability is not a certificate.
+    pub fn has_unknown(&self) -> bool {
+        self.bound.has_unknown() || self.failure_probability.has_unknown()
+    }
+
     /// The zero-error, zero-failure guarantee of a deterministic exact
     /// computation. `metric` is [`ErrorMetric::AbsoluteValue`]: an exact
     /// value is exact under every metric, and absolute error is the one
@@ -437,6 +510,37 @@ mod tests {
             inner: Box::new(ProbabilityExpr::Constant { value: 0.01 }),
         };
         assert_eq!(p.evaluate(), None);
+    }
+
+    #[test]
+    fn optimistic_floor_preserves_known_contributions_without_certifying() {
+        let guarantee = ResultGuarantee {
+            metric: ErrorMetric::Frequency,
+            bound: BoundExpr::Sum {
+                terms: vec![
+                    BoundExpr::Constant { value: 0.1 },
+                    BoundExpr::Unknown {
+                        statistic: "collision".into(),
+                    },
+                ],
+            },
+            failure_probability: ProbabilityExpr::UnionBound {
+                terms: vec![
+                    ProbabilityExpr::Constant { value: 0.02 },
+                    ProbabilityExpr::Unknown {
+                        statistic: "failure".into(),
+                    },
+                ],
+            },
+            provenance: vec![],
+        };
+        assert!(guarantee.has_unknown());
+        assert_eq!(guarantee.bound.evaluate(), None);
+        let floor = guarantee.optimistic_floor();
+        assert_eq!(floor.bound.evaluate(), Some(0.1));
+        assert_eq!(floor.failure_probability.evaluate(), Some(0.02));
+        assert!(!floor.has_unknown());
+        assert!(guarantee.has_unknown());
     }
 
     #[test]

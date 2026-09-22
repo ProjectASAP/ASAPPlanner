@@ -910,6 +910,10 @@ mod tests {
 
     struct DeterministicUnitCostModel;
     impl CostModel for DeterministicUnitCostModel {
+        fn allow_uncosted_legacy_selection(&self) -> bool {
+            true
+        }
+
         fn rank_candidates(
             &self,
             _intent: &asap_types::pre_asap::agg_intent::AggIntent,

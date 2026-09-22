@@ -507,6 +507,31 @@ pub struct ReplacementSubDAG {
     pub rationale: String,
 }
 
+impl ReplacementSubDAG {
+    /// Whether this summary still needs accuracy/domain evidence before it can
+    /// be treated as certified. A missing guarantee on any summary candidate
+    /// is unknown; exact `KeepPreAsap` carries an explicit exact guarantee.
+    pub fn has_missing_accuracy_evidence(&self) -> bool {
+        matches!(
+            &self.replacement,
+            Replacement::Summary(node) if has_missing_accuracy_evidence(node)
+        )
+    }
+
+    /// Runtime support for this candidate. Summary implementations remain
+    /// unknown until backend binding; a pure logical rewrite needs no new
+    /// physical operator. `Some(false)` disproves mixed-operation support.
+    pub fn runtime_support_evidence(&self, cost_model: &dyn CostModel) -> Option<bool> {
+        match &self.replacement {
+            Replacement::ExactComposition(composition) => {
+                cost_model.value_operation_support_evidence(&composition.op, composition.placement)
+            }
+            Replacement::Summary(_) => None,
+            Replacement::Rewrite(_) => Some(true),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReplacementProvenance {
     SummaryRealization,
@@ -2129,21 +2154,10 @@ fn ddsketch_quantile_alpha(node: &SummaryNode) -> Option<f64> {
     }
 }
 
-/// An uncertified direct ratio stays visible to downstream selection even
-/// when the workload has a root target; it does not satisfy that target.
-fn is_uncertified_ddsketch_ratio(node: &SummaryNode) -> bool {
-    let SummaryExpr::BinaryOp {
-        lhs, rhs, operator, ..
-    } = &node.expr
-    else {
-        return false;
-    };
-    matches!(
-        operator.kind,
-        BinaryOpKind::Arithmetic(ArithmeticOpKind::Div)
-    ) && ddsketch_quantile_alpha(lhs).is_some()
-        && ddsketch_quantile_alpha(rhs).is_some()
-        && node.guarantee.is_none()
+fn has_missing_accuracy_evidence(node: &SummaryNode) -> bool {
+    node.guarantee
+        .as_ref()
+        .is_none_or(ResultGuarantee::has_unknown)
 }
 
 /// A direct ratio has an operator-specific DDSketch proof, so it must select
@@ -2309,7 +2323,10 @@ pub(crate) fn construct_summary_with(
                         ));
                     }
                     let completeness = match candidate.guarantee.clone() {
-                        Some(guarantee) if guarantee.metric == ErrorMetric::TopKMembership => {
+                        Some(guarantee)
+                            if guarantee.metric == ErrorMetric::TopKMembership
+                                && !guarantee.has_unknown() =>
+                        {
                             CandidateCompleteness::Certified { guarantee }
                         }
                         guarantee => CandidateCompleteness::BestEffort { guarantee },
@@ -2855,27 +2872,12 @@ fn compose_guarantee(
         (_, None) => (CompositionOperator::ApproximateAggregate, None),
     };
     let Some(input) = child.guarantee.clone() else {
-        // A child with no guarantee at all is an unknown quantity, which
-        // nothing can be composed over (a `Sample` readout, say) — unless
-        // this node is itself the unknown family, in which case it inherits
-        // "unknown" rather than fabricating a guarantee for its child.
-        return match local {
-            Some(_) => Err(AccuracyError::MissingInputGuarantee {
-                operator: op,
-                input_index: 0,
-            }),
-            None => Ok(None),
-        };
+        // Shape is constructible, but the child has no accuracy certificate.
+        return Ok(None);
     };
-    if local.is_none() && input.is_exact() {
-        if accuracy_target(intent).is_some() {
-            return Err(AccuracyError::UnsupportedComposition {
-                operator: op,
-                input_metrics: vec![input.metric],
-                local_metric: None,
-                reason: "summary readout has no accuracy evidence for the requested target".into(),
-            });
-        }
+    if local.is_none() {
+        // No local error model: retain the candidate with unknown accuracy.
+        // Propagating the input alone would falsely certify the summary.
         return Ok(None);
     }
     let stats = evidence.propagation_stats(&op, family, query);
@@ -2891,7 +2893,7 @@ fn compose_guarantee(
         // Check even over an exact input: parameter clamps or a conservative
         // confidence conversion can make the tightest available sketch miss
         // its requested target.
-        if !accuracy.satisfies(&guarantee, target) {
+        if !accuracy.satisfies(&guarantee.optimistic_floor(), target) {
             return Err(AccuracyError::TargetNotSatisfied {
                 metric: guarantee.metric,
                 bound: guarantee.bound.evaluate(),
@@ -4492,6 +4494,9 @@ fn composition_options<'a>(
         let Replacement::ExactComposition(composition) = &candidate.replacement else {
             continue;
         };
+        if candidate.runtime_support_evidence(cost_model) != Some(true) {
+            continue;
+        }
         let child_ptr = Rc::as_ptr(&composition.child_target);
         let Some(child_group) = groups.get(&child_ptr) else {
             continue;
@@ -4530,6 +4535,9 @@ fn composition_options<'a>(
                     None => child_group.candidates.iter().collect(),
                 };
                 for child_candidate in child_candidates {
+                    if child_candidate.has_missing_accuracy_evidence() {
+                        continue;
+                    }
                     let Replacement::Summary(summary) = &child_candidate.replacement else {
                         continue;
                     };
@@ -4740,12 +4748,13 @@ impl<Id> PlanSpace<Id> {
                     .min_by(|(_, left), (_, right)| left.0.total_cmp(&right.0))
                     .map(|(candidate, _)| candidate);
                 bound.or_else(|| {
-                    (effective >= 2)
+                    (cost_model.allow_uncosted_legacy_selection() && effective >= 2)
                         .then(|| {
                             decide_with_effective_count(group, effective, cost_model).and_then(
                                 |decision| {
+                                    let candidate = pick_shared_subtree_candidate(group, decision)?;
                                     chosen_share.insert(*ptr, decision);
-                                    pick_shared_subtree_candidate(group, decision)
+                                    Some(candidate)
                                 },
                             )
                         })
@@ -4799,17 +4808,17 @@ impl<Id> PlanSpace<Id> {
                             cost_model
                                 .candidate_cost(candidate, &effective_target)
                                 .is_some()
+                                || cost_model.allow_uncosted_legacy_selection()
                         });
                         match (cse, logical) {
                             (Some(cse), Some(logical))
                                 if cost_model
-                                    .candidate_cost(logical, &effective_target)
-                                    .unwrap()
-                                    .0
-                                    < cost_model
-                                        .candidate_cost(cse, &effective_target)
-                                        .unwrap()
-                                        .0 =>
+                                    .candidate_cost(cse, &effective_target)
+                                    .is_none_or(|cse_cost| {
+                                        cost_model
+                                            .candidate_cost(logical, &effective_target)
+                                            .is_some_and(|logical_cost| logical_cost.0 < cse_cost.0)
+                                    }) =>
                             {
                                 Some(logical)
                             }
@@ -4832,12 +4841,13 @@ impl<Id> PlanSpace<Id> {
                     None => rank_group(group, cost_model).into_iter().find(|candidate| {
                         !is_composition_candidate(candidate)
                             && is_automatically_selectable(candidate)
-                            && cost_model
+                            && (cost_model
                                 .candidate_cost(
                                     candidate,
                                     &TargetSubDAG::with_consumer_count(&group.target, effective),
                                 )
                                 .is_some()
+                                || cost_model.allow_uncosted_legacy_selection())
                     }),
                 }
             } else {
@@ -4848,9 +4858,10 @@ impl<Id> PlanSpace<Id> {
                         !is_cse_candidate(candidate)
                             && !is_composition_candidate(candidate)
                             && is_automatically_selectable(candidate)
-                            && cost_model
+                            && (cost_model
                                 .candidate_cost(candidate, &effective_target)
                                 .is_some()
+                                || cost_model.allow_uncosted_legacy_selection())
                     })
                     .or_else(|| {
                         cse_candidate_pair(group)
@@ -4859,6 +4870,7 @@ impl<Id> PlanSpace<Id> {
                                 cost_model
                                     .candidate_cost(candidate, &effective_target)
                                     .is_some()
+                                    || cost_model.allow_uncosted_legacy_selection()
                             })
                     })
             };
@@ -4932,10 +4944,7 @@ fn is_cse_candidate(candidate: &ReplacementSubDAG) -> bool {
 }
 
 fn is_automatically_selectable(candidate: &ReplacementSubDAG) -> bool {
-    !matches!(
-        &candidate.replacement,
-        Replacement::Summary(node) if is_uncertified_ddsketch_ratio(node)
-    )
+    !candidate.has_missing_accuracy_evidence()
 }
 
 /// How much one direct reference to `parent_ptr` actually costs, once
@@ -5401,13 +5410,13 @@ pub fn search_workload_with<'s, Id>(
 /// alongside each root. After the search, every root that carries a target
 /// has its group's bound [`Replacement::Summary`] candidates checked with
 /// `accuracy_model`'s [`AccuracyModel::satisfies`]: a candidate whose
-/// guarantee is absent (unknown) or misses the target is moved from
+/// guarantee is fully known and misses the target is moved from
 /// [`TargetSubDAGCandidates::candidates`] to [`TargetSubDAGCandidates::rejected`] *before*
 /// [`PlanSpace::cost_sorted`]/[`PlanSpace::global_selection`] ever rank the
-/// group, so a `CostModel` cannot pick it. The exception is an uncertified
-/// direct DDSketch quantile ratio, which remains available for downstream
-/// evidence-based selection with `guarantee: None`; neither ranking nor
-/// selection by cost certifies that it satisfies the target. A `KeepPreAsap` candidate is
+/// group. A constructible candidate with unknown accuracy remains visible for
+/// downstream review under an approximate target, but default whole-plan
+/// selection does not commit it. An exact target cannot accept an unknown
+/// approximate summary. A `KeepPreAsap` candidate is
 /// exact and always survives — the raw/pre-ASAP alternative is what an
 /// unsatisfiable root keeps. Logical [`Replacement::Rewrite`] candidates
 /// are not bound values and are left alone; the targets *inside* a rewrite
@@ -5450,13 +5459,10 @@ pub fn search_workload_with_targets<'s, Id>(
                 .candidates
                 .drain(..)
                 .partition(|candidate| match &candidate.replacement {
-                    Replacement::Summary(node) => {
-                        is_uncertified_ddsketch_ratio(node)
-                            || node
-                                .guarantee
-                                .as_ref()
-                                .is_some_and(|g| accuracy_model.satisfies(g, &target))
-                    }
+                    Replacement::Summary(node) => node.guarantee.as_ref().map_or_else(
+                        || !matches!(target, AccuracyTarget::Exact),
+                        |g| accuracy_model.satisfies(&g.optimistic_floor(), &target),
+                    ),
                     Replacement::Rewrite(_) => true,
                     // A composition's guarantee depends on the concrete child;
                     // prepare_compositions checks those pairs after all roots.
@@ -6582,7 +6588,7 @@ mod tests {
     }
 
     #[test]
-    fn cardinality_epsilon_keeps_hll_but_epsilon_delta_rejects_unknown_confidence() {
+    fn cardinality_epsilon_delta_keeps_unknown_accuracy_candidates() {
         let q = Rc::new(agg(vec![2], default_cardinality(), metric_scan(&["job"])));
         let target = TargetSubDAG::new(&q);
         let replacements = SketchAlgorithmStrategy::default_cost_model().replacements(&target);
@@ -6600,7 +6606,8 @@ mod tests {
             vec![
                 SketchAlgorithm::Hll,
                 SketchAlgorithm::Theta,
-                SketchAlgorithm::Kmv
+                SketchAlgorithm::Kmv,
+                SketchAlgorithm::UnivMon,
             ]
         );
 
@@ -6625,7 +6632,15 @@ mod tests {
                 }
             })
             .collect();
-        assert_eq!(kinds, vec![SketchAlgorithm::Theta, SketchAlgorithm::Kmv]);
+        assert_eq!(
+            kinds,
+            vec![
+                SketchAlgorithm::Hll,
+                SketchAlgorithm::Theta,
+                SketchAlgorithm::Kmv,
+                SketchAlgorithm::UnivMon,
+            ]
+        );
     }
 
     #[test]
@@ -6954,7 +6969,7 @@ mod tests {
     // ── discovery + MEMO shape ───────────────────────────────────────────
 
     #[test]
-    fn single_bindable_aggregate_excludes_unprovable_hydra_candidates() {
+    fn single_bindable_aggregate_keeps_unprovable_hydra_candidates() {
         let intent = AggIntent::Count {
             accuracy: AccuracyTarget::EpsilonDelta {
                 epsilon: 0.01,
@@ -6974,8 +6989,8 @@ mod tests {
         assert_eq!(agg_group.consumer_count, 1);
         assert_eq!(
             agg_group.candidates.len(),
-            3,
-            "CMS/CountSketch and exact UnivMon total have modeled guarantees: {:?}",
+            5,
+            "Hydra candidates with unknown evidence remain available: {:?}",
             agg_group.candidates
         );
         assert!(agg_group
@@ -7002,9 +7017,23 @@ mod tests {
                     )
                 })
                 .count(),
-            0,
-            "Hydra shared-grid error is unmodeled, so accuracy-targeted candidates must be absent"
+            2,
+            "Hydra candidates remain visible with symbolic shared-grid error"
         );
+        assert_eq!(
+            agg_group
+                .candidates
+                .iter()
+                .filter(|candidate| candidate.has_missing_accuracy_evidence())
+                .count(),
+            2
+        );
+        let selected = space.global_selection(&DefaultCostModel);
+        assert!(!selected
+            .for_target(&space.roots[0].1)
+            .unwrap()
+            .chosen
+            .is_some_and(ReplacementSubDAG::has_missing_accuracy_evidence));
 
         let scan_group = space
             .target_subdag_candidates()
@@ -7018,14 +7047,66 @@ mod tests {
     }
 
     #[test]
-    fn cardinality_group_gets_all_three_candidates() {
+    fn cardinality_group_keeps_all_four_candidates() {
         let root = Rc::new(agg(vec![2], default_cardinality(), metric_scan(&["job"])));
         let space = search_workload(vec![("q", root)]);
         let agg_group = space
             .target_subdag_candidates()
             .find(|g| matches!(g.target.as_ref(), QueryExpr::Aggregate { .. }))
             .unwrap();
-        assert_eq!(agg_group.candidates.len(), 3);
+        assert_eq!(agg_group.candidates.len(), 4);
+        assert!(agg_group.candidates.iter().any(|candidate| matches!(
+            &candidate.replacement,
+            Replacement::Summary(node) if node.guarantee.is_none()
+                && candidate.has_missing_accuracy_evidence()
+        )));
+
+        let root = Rc::new(agg(vec![2], default_cardinality(), metric_scan(&["job"])));
+        let targeted = search_workload_with_targets(
+            vec![(
+                "q",
+                root,
+                Some(AccuracyTarget::EpsilonDelta {
+                    epsilon: 0.01,
+                    delta: 0.01,
+                }),
+            )],
+            &default_strategies(),
+            &DefaultAccuracyModel,
+        );
+        let target = &targeted.roots[0].1;
+        assert!(targeted
+            .candidates_for_target(target)
+            .unwrap()
+            .candidates
+            .iter()
+            .any(|candidate| matches!(
+                &candidate.replacement,
+                Replacement::Summary(node) if node.guarantee.is_none()
+                    && candidate.has_missing_accuracy_evidence()
+            )));
+        assert!(!targeted
+            .global_selection(&DefaultCostModel)
+            .for_target(target)
+            .unwrap()
+            .chosen
+            .is_some_and(ReplacementSubDAG::has_missing_accuracy_evidence));
+
+        let exact_target = search_workload_with_targets(
+            vec![(
+                "q",
+                Rc::new(agg(vec![2], default_cardinality(), metric_scan(&["job"]))),
+                Some(AccuracyTarget::Exact),
+            )],
+            &default_strategies(),
+            &DefaultAccuracyModel,
+        );
+        assert!(exact_target
+            .candidates_for_target(&exact_target.roots[0].1)
+            .unwrap()
+            .candidates
+            .iter()
+            .all(|candidate| !candidate.has_missing_accuracy_evidence()));
     }
 
     #[test]
@@ -7429,6 +7510,10 @@ mod tests {
     /// needs to cross.
     struct ConstantCseCost;
     impl CostModel for ConstantCseCost {
+        fn allow_uncosted_legacy_selection(&self) -> bool {
+            true
+        }
+
         fn rank_candidates(
             &self,
             _intent: &AggIntent,
@@ -7442,6 +7527,42 @@ mod tests {
         fn cse_shared_maintenance_cost(&self, _candidate: &CseCandidate) -> Cost {
             Cost(100.0)
         }
+    }
+
+    /// A costed logical choice must not panic when an explicitly allowed CSE
+    /// choice has no numeric cost.
+    #[test]
+    fn costed_logical_candidate_beats_uncosted_legacy_cse_choice() {
+        struct MixedCost;
+        impl CostModel for MixedCost {
+            fn allow_uncosted_legacy_selection(&self) -> bool {
+                true
+            }
+
+            fn rank_candidates(
+                &self,
+                _intent: &AggIntent,
+                candidates: &[SketchAlgorithm],
+            ) -> Vec<SketchAlgorithm> {
+                candidates.to_vec()
+            }
+
+            fn candidate_cost(
+                &self,
+                candidate: &ReplacementSubDAG,
+                _target: &TargetSubDAG<'_>,
+            ) -> Option<Cost> {
+                (!is_cse_candidate(candidate)).then_some(Cost(1.0))
+            }
+        }
+
+        let aggregate = Rc::new(agg(vec![2], default_quantile(0.99), metric_scan(&["job"])));
+        let space = search_workload(vec![("left", Rc::clone(&aggregate)), ("right", aggregate)]);
+        let root = &space.roots[0].1;
+        assert!(cse_candidate_pair(space.candidates_for_target(root).unwrap()).is_some());
+        let selected = space.global_selection(&MixedCost);
+        let chosen = selected.for_target(root).unwrap().chosen.unwrap();
+        assert!(!is_cse_candidate(chosen));
     }
 
     #[test]
@@ -7497,6 +7618,10 @@ mod tests {
         // not silently drop the candidate or fall back to discovery order.
         struct PreferDDSketch;
         impl CostModel for PreferDDSketch {
+            fn allow_uncosted_legacy_selection(&self) -> bool {
+                true
+            }
+
             fn rank_candidates(
                 &self,
                 _intent: &AggIntent,
@@ -7523,6 +7648,23 @@ mod tests {
             Replacement::Rewrite(_) | Replacement::ExactComposition(_) => None,
         };
         assert_eq!(kind, Some(SketchAlgorithm::DDSketch));
+
+        struct Uncosted;
+        impl CostModel for Uncosted {
+            fn rank_candidates(
+                &self,
+                _intent: &AggIntent,
+                candidates: &[SketchAlgorithm],
+            ) -> Vec<SketchAlgorithm> {
+                candidates.to_vec()
+            }
+        }
+        assert!(space
+            .global_selection(&Uncosted)
+            .for_target(&space.roots[0].1)
+            .unwrap()
+            .chosen
+            .is_none());
     }
 
     #[test]
@@ -7741,8 +7883,7 @@ mod tests {
         let planned = &space.roots[0].1;
 
         let selected = space.global_selection(&CompletePlanCost);
-        let chosen = selected.for_target(planned).unwrap().chosen.unwrap();
-        assert_eq!(chosen.provenance, ReplacementProvenance::CseRecompute);
+        assert!(selected.for_target(planned).unwrap().chosen.is_none());
     }
 
     #[test]
@@ -7780,6 +7921,10 @@ mod tests {
 
         struct AlwaysShare;
         impl CostModel for AlwaysShare {
+            fn allow_uncosted_legacy_selection(&self) -> bool {
+                true
+            }
+
             fn rank_candidates(
                 &self,
                 _intent: &AggIntent,
@@ -8595,7 +8740,7 @@ mod tests {
     }
 
     #[test]
-    fn topk_without_margin_evidence_falls_back_to_pre_asap() {
+    fn unsupported_direct_topk_without_margin_evidence_falls_back_to_pre_asap() {
         let q = agg(
             vec![2],
             AggIntent::TopK {
@@ -8606,6 +8751,34 @@ mod tests {
         );
         let root = realize(&q).unwrap();
         assert!(matches!(root.expr, SummaryExpr::KeepPreAsap(_)));
+    }
+
+    #[test]
+    fn count_ranked_topk_without_margin_evidence_keeps_an_uncertified_candidate() {
+        let inner = agg(
+            vec![2],
+            AggIntent::Count {
+                accuracy: AccuracyTarget::Epsilon(0.01),
+            },
+            metric_scan(&["job"]),
+        );
+        let root = Rc::new(agg(
+            vec![],
+            AggIntent::TopK {
+                k: 5,
+                accuracy: AccuracyTarget::Epsilon(0.01),
+            },
+            inner,
+        ));
+        let proposals =
+            SketchAlgorithmStrategy::default_cost_model().replacements(&TargetSubDAG::new(&root));
+        assert!(!proposals.is_empty());
+        assert!(proposals.iter().any(|candidate| matches!(
+            &candidate.replacement,
+            Replacement::Summary(node) if node.guarantee.as_ref().is_some_and(|g|
+                g.bound.evaluate().is_none()
+                    && g.failure_probability.evaluate().is_none())
+        )));
     }
 
     struct SeparatedTopKEvidence;
@@ -9292,7 +9465,7 @@ mod tests {
     }
 
     #[test]
-    fn topk_accuracy_target_rejects_uncertified_membership() {
+    fn topk_accuracy_target_keeps_uncertified_membership() {
         let inner = agg(
             vec![2],
             AggIntent::Count {
@@ -9315,14 +9488,32 @@ mod tests {
         );
         let group = space.candidates_for_target(&space.roots[0].1).unwrap();
 
-        assert!(group
+        assert!(group.candidates.iter().any(|candidate| matches!(
+            &candidate.replacement,
+            Replacement::Summary(node) if node.guarantee.as_ref().is_some_and(ResultGuarantee::has_unknown)
+        )));
+        let candidate = group
             .candidates
             .iter()
-            .all(|candidate| matches!(candidate.replacement, Replacement::Rewrite(_))));
-        assert!(!group.rejected.is_empty());
-        assert!(group.rejected.iter().all(|rejected| matches!(
-            rejected.error,
-            AccuracyError::TargetNotSatisfied { .. } | AccuracyError::UnsupportedComposition { .. }
-        )));
+            .find(|candidate| candidate.has_missing_accuracy_evidence())
+            .unwrap();
+        let Replacement::Summary(node) = &candidate.replacement else {
+            unreachable!()
+        };
+        let exported = asap_types::dag_export::export_summary(node);
+        assert!(exported.nodes[exported.root as usize]
+            .guarantee
+            .as_ref()
+            .is_some_and(ResultGuarantee::has_unknown));
+        let selected = space.global_selection(&DefaultCostModel);
+        assert!(!selected
+            .for_target(&space.roots[0].1)
+            .unwrap()
+            .chosen
+            .is_some_and(ReplacementSubDAG::has_missing_accuracy_evidence));
+        assert!(selected
+            .assemble_selected_dag(&space.roots[0].1)
+            .unwrap()
+            .is_some());
     }
 }
