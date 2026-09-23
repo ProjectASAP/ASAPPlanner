@@ -11,10 +11,10 @@ use super::{
     BinaryOperator, CandidateCompleteness, ExecutionTiming, GroupingStrategy, SketchQuery,
     SummaryFamilyType, SummaryUpdate, ValueOperation,
 };
-use crate::pre_asap::{ColumnRef, GroupKeys, JoinKind, Predicate, QueryExpr, Reduction};
+use crate::pre_asap::{ColumnRef, JoinKind, Predicate, QueryExpr, Reduction};
 use thiserror::Error;
 
-pub const POST_ASAP_DAG_WIRE_VERSION: u32 = 2;
+pub const POST_ASAP_DAG_WIRE_VERSION: u32 = 3;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum EdgeRole {
@@ -60,11 +60,7 @@ pub enum ExecutableOperatorPayload {
         timing: ExecutionTiming,
         operator: BinaryOperator,
     },
-    CandidateTopK {
-        /// Fixed-width transport value; runtimes validate conversion to their
-        /// local collection index type at installation.
-        k: u64,
-        grouping: GroupKeys,
+    MembershipFilter {
         completeness: CandidateCompleteness,
     },
     Value {
@@ -362,7 +358,7 @@ pub fn compile_executable_dag_with_node_ids(
             SummaryExpr::BinaryOp { lhs, rhs, .. } => {
                 vec![(lhs, EdgeRole::Left), (rhs, EdgeRole::Right)]
             }
-            SummaryExpr::CandidateTopK {
+            SummaryExpr::MembershipFilter {
                 candidates, values, ..
             } => vec![
                 (candidates, EdgeRole::CandidateMembership),
@@ -406,16 +402,11 @@ pub fn compile_executable_dag_with_node_ids(
                 timing: *timing,
                 operator: operator.clone(),
             },
-            SummaryExpr::CandidateTopK {
-                k,
-                grouping,
-                completeness,
-                ..
-            } => ExecutableOperatorPayload::CandidateTopK {
-                k: u64::try_from(*k).expect("usize always fits into the u64 wire count"),
-                grouping: grouping.clone(),
-                completeness: completeness.clone(),
-            },
+            SummaryExpr::MembershipFilter { completeness, .. } => {
+                ExecutableOperatorPayload::MembershipFilter {
+                    completeness: completeness.clone(),
+                }
+            }
             SummaryExpr::ValueOperation {
                 operation, timing, ..
             } => ExecutableOperatorPayload::Value {

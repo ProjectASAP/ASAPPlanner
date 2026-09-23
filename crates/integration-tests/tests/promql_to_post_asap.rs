@@ -272,24 +272,41 @@ fn counter_weighted_topk_uses_candidates_only_for_membership_and_exact_values_fo
             .find_map(|candidate| match candidate.replacement {
                 Replacement::Summary(node)
                     if candidate.rationale.contains("CmsWithHeap")
-                        && matches!(node.expr, SummaryExpr::CandidateTopK { .. }) =>
+                        && matches!(node.expr, SummaryExpr::ValueOperation { .. }) =>
                 {
                     Some(node)
                 }
                 _ => None,
             })
-            .unwrap_or_else(|| panic!("missing CandidateTopK for {query}"));
-        let SummaryExpr::CandidateTopK {
-            candidates,
-            values,
-            k,
-            completeness: CandidateCompleteness::Certified { .. },
+            .unwrap_or_else(|| panic!("missing MembershipFilter for {query}"));
+        // Candidate pruning must feed an ordinary grouped value TopK.
+        assert!(
+            matches!(plan.expr, SummaryExpr::ValueOperation { .. }),
+            "candidate optimization must be a composed value-operation graph"
+        );
+        let SummaryExpr::ValueOperation {
+            child: filtered,
+            operation:
+                asap_types::post_asap::ValueOperation::Exact(
+                    asap_types::post_asap::ExactOperation::Aggregate { measures, .. },
+                ),
             ..
         } = &plan.expr
         else {
+            panic!("expected ordinary TopK root")
+        };
+        assert!(
+            matches!(measures.as_slice(), [asap_types::pre_asap::AggIntent::TopK { k, .. }] if *k == expected_k)
+        );
+        let SummaryExpr::MembershipFilter {
+            candidates,
+            values,
+            completeness: CandidateCompleteness::Certified { .. },
+            ..
+        } = &filtered.expr
+        else {
             panic!("unexpected candidate plan for {query}: {:?}", plan.expr)
         };
-        assert_eq!(*k, expected_k);
         let SummaryExpr::SummaryEstimate { summary_input, .. } = &candidates.expr else {
             panic!("candidate membership must be a summary readout")
         };
@@ -331,11 +348,9 @@ fn counter_weighted_topk_uses_candidates_only_for_membership_and_exact_values_fo
         let executable = compile_executable_dag(&plan).expect("typed executable DAG");
         assert!(executable.nodes.iter().any(|node| matches!(
             &node.payload,
-            asap_types::post_asap::ExecutableOperatorPayload::CandidateTopK {
-                k,
-                grouping,
+            asap_types::post_asap::ExecutableOperatorPayload::MembershipFilter {
                 completeness: CandidateCompleteness::Certified { .. },
-            } if *k == expected_k as u64 && grouping.is_empty() && !grouping.is_without()
+            }
         )));
         assert!(executable.nodes.iter().any(|node| matches!(
             &node.payload,

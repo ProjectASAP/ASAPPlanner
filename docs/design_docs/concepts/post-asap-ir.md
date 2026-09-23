@@ -43,9 +43,13 @@ summary family supports incremental maintenance.
   filter, sort, limit or extension semantics with explicit execution timing.
 - `RelationalJoin`: join row-producing children using the specified join kind
   and predicate.
-- `CandidateTopK`: propose candidate members and rank them by authoritative exact
-  values; the completeness contract distinguishes certified from best-effort
-  membership.
+- `MembershipFilter`: semijoin value rows against membership identities without
+  sorting, limiting or replacing their values. The completeness contract belongs
+  to pruning, not ranking. A candidate-based TopK optimization expands to this
+  filter followed by an ordinary `ValueOperation::Exact(Aggregate::TopK)` node.
+  The filter has no `k` or grouping parameter. Certified and explicitly
+  best-effort membership remain distinct; exact requests cannot use an
+  uncertified pruning rewrite.
 
 A `SummaryNode` carries its expression, schema and optional result guarantee.
 State and query values have different contracts. Exact operations over

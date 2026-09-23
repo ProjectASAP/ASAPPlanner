@@ -112,7 +112,7 @@ Every `SummaryExpr` operation also needs explicit physical realization:
 | `BinaryOp` | binary evaluation preserving operand order, execution timing and any typed finite/relative-division guard |
 | `ValueOperation` | concrete realization of the value operation with its required execution timing and data state |
 | `RelationalJoin` | concrete row-join algorithm preserving join kind and predicate |
-| `CandidateTopK` | candidate generation and authoritative value ranking that preserve the membership completeness contract |
+| `MembershipFilter` | membership semijoin that preserves authoritative values and carries pruning completeness; ordinary value TopK performs ranking separately |
 
 This table is a completeness requirement, not a claim that every realization
 already exists. Until lowering introduces an explicit physical operator,
@@ -424,3 +424,16 @@ distinct from `checked_relative_division`, whose relative-error certificate also
 requires a normal result; setting both guards or attaching a guard to a non-division
 operator is invalid. Compilers must preserve this typed condition rather than
 recovering average semantics from query text.
+
+### Candidate pruning is a subgraph
+
+Candidate-based TopK lowers to summary membership readout, membership filtering
+of authoritative values, and an ordinary grouped TopK value operation. Each
+operation is independently exported and costed; the filter has no ranking or
+limit semantics. Execution can obtain authoritative values from local exact
+state, raw computation, or an explicitly bound external source. These source
+capabilities belong to the deployment, not to the filter.
+
+The executable DAG wire version is 3. The former fused operator has been removed
+without a compatibility alias or decoder. Consumers must upgrade their binding,
+validation and runtime dispatch together.

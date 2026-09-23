@@ -2236,7 +2236,7 @@ pub(crate) fn construct_summary_with(
                         .is_some_and(ResultGuarantee::is_exact)
                     {
                         return Err(RealizationError::PhysicalRealization(
-                            "CandidateTopK exact rerank input is not exact",
+                            "MembershipFilter exact rerank input is not exact",
                         ));
                     }
                     let completeness = match candidate.guarantee.clone() {
@@ -2255,10 +2255,9 @@ pub(crate) fn construct_summary_with(
                         && !matches!(completeness, CandidateCompleteness::Certified { .. })
                     {
                         return Err(RealizationError::PhysicalRealization(
-                            "exact CandidateTopK requires certified candidate completeness",
+                            "exact MembershipFilter requires certified candidate completeness",
                         ));
                     }
-                    let grouping = reduction.group_keys().cloned().unwrap_or_default();
                     let guarantee = match &completeness {
                         CandidateCompleteness::Certified { guarantee }
                         | CandidateCompleteness::BestEffort {
@@ -2266,13 +2265,29 @@ pub(crate) fn construct_summary_with(
                         } => Some(guarantee.clone()),
                         CandidateCompleteness::BestEffort { guarantee: None } => None,
                     };
-                    let node = Rc::new(SummaryNode {
-                        expr: SummaryExpr::CandidateTopK {
+                    let filtered_schema = values.schema.clone();
+                    let filtered = Rc::new(SummaryNode {
+                        expr: SummaryExpr::MembershipFilter {
                             candidates: candidate,
                             values,
-                            k: *k,
-                            grouping,
                             completeness,
+                        },
+                        schema: filtered_schema,
+                        guarantee: guarantee.clone(),
+                    });
+                    let node = Rc::new(SummaryNode {
+                        expr: SummaryExpr::ValueOperation {
+                            child: filtered,
+                            operation: ValueOperation::Exact(ExactOperation::Aggregate {
+                                reduction: reduction.clone(),
+                                measures: vec![AggIntent::TopK {
+                                    k: *k,
+                                    accuracy: accuracy.clone(),
+                                }],
+                                output_names: vec![],
+                                having: None,
+                            }),
+                            timing: ExecutionTiming::ReadTime,
                         },
                         schema: lift(&expr.output_schema()?),
                         guarantee,

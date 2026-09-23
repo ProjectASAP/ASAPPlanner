@@ -49,7 +49,7 @@ pub(super) fn estimate_heterogeneous_summary(
                 inner: right,
                 ..
             }
-            | SummaryExpr::CandidateTopK {
+            | SummaryExpr::MembershipFilter {
                 candidates: left,
                 values: right,
                 ..
@@ -303,13 +303,13 @@ pub(super) fn estimate_heterogeneous_summary(
                     io_bytes,
                 )?;
             }
-            SummaryExpr::CandidateTopK {
+            SummaryExpr::MembershipFilter {
                 candidates, values, ..
             } => {
                 let operation = summary_operation_evidence(node, evidence)?.resource();
                 *cpu_ops += evaluation_count as f64
-                    * validated_operator_executions("candidate_topk", operation)? as f64
-                    * validated_operator_cpu("candidate_topk", operation.cpu_ops)?;
+                    * validated_operator_executions("membership_filter", operation)? as f64
+                    * validated_operator_cpu("membership_filter", operation.cpu_ops)?;
                 add_operator_io(io_bytes, operation, evaluation_count)?;
                 for input in [candidates, values] {
                     visit_ops(
@@ -460,7 +460,7 @@ pub(super) fn estimate_heterogeneous_summary(
                             inner: right,
                             ..
                         }
-                        | SummaryExpr::CandidateTopK {
+                        | SummaryExpr::MembershipFilter {
                             candidates: left,
                             values: right,
                             ..
@@ -667,7 +667,7 @@ fn validate_summary_edges_and_physical_ids(
                 inner: right,
                 ..
             }
-            | SummaryExpr::CandidateTopK {
+            | SummaryExpr::MembershipFilter {
                 candidates: left,
                 values: right,
                 ..
@@ -844,7 +844,7 @@ pub(super) fn estimate_transient_liveness(
                 inner: right,
                 ..
             }
-            | SummaryExpr::CandidateTopK {
+            | SummaryExpr::MembershipFilter {
                 candidates: left,
                 values: right,
                 ..
@@ -891,7 +891,7 @@ pub(super) fn estimate_transient_liveness(
             SummaryExpr::SummaryMerge { .. }
             | SummaryExpr::BinaryOp { .. }
             | SummaryExpr::RelationalJoin { .. }
-            | SummaryExpr::CandidateTopK { .. }
+            | SummaryExpr::MembershipFilter { .. }
             | SummaryExpr::ValueOperation { .. }
             | SummaryExpr::SummarySubtract { .. }
             | SummaryExpr::SummaryDelete { .. }
@@ -975,7 +975,7 @@ pub(super) fn evidence_nodes(root: &SummaryNode) -> (Vec<&SummaryNode>, Vec<&Sum
                 inner: right,
                 ..
             }
-            | SummaryExpr::CandidateTopK {
+            | SummaryExpr::MembershipFilter {
                 candidates: left,
                 values: right,
                 ..
@@ -1330,7 +1330,7 @@ fn count_operations(root: &SummaryNode) -> Result<SummaryOperationCounts, Analyt
                 visit(left, seen, counts)?;
                 visit(right, seen, counts)?;
             }
-            SummaryExpr::CandidateTopK {
+            SummaryExpr::MembershipFilter {
                 candidates, values, ..
             } => {
                 visit(candidates, seen, counts)?;

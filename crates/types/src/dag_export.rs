@@ -475,7 +475,7 @@ macro_rules! define_summary_kind_tags {
 
 define_summary_kind_tags! {
     SummaryExpr::BinaryOp { .. } => "SummaryBinaryOp",
-    SummaryExpr::CandidateTopK { .. } => "CandidateTopK",
+    SummaryExpr::MembershipFilter { .. } => "MembershipFilter",
     SummaryExpr::ValueOperation { .. } => "ValueOperation",
     SummaryExpr::RelationalJoin { .. } => "RelationalJoin",
     SummaryExpr::SummaryAgg { .. } => "SummaryAgg",
@@ -500,15 +500,10 @@ fn summary_shape(expr: &SummaryExpr) -> (&'static str, String, serde_json::Value
             });
             (kind, label, detail)
         }
-        SummaryExpr::CandidateTopK {
-            k,
-            grouping,
-            completeness,
-            ..
-        } => (
+        SummaryExpr::MembershipFilter { completeness, .. } => (
             kind,
-            format!("CandidateTopK(k={k})"),
-            serde_json::json!({ "k": k, "grouping": grouping, "completeness": completeness }),
+            "MembershipFilter".into(),
+            serde_json::json!({ "completeness": completeness }),
         ),
         SummaryExpr::ValueOperation {
             operation, timing, ..
@@ -581,7 +576,7 @@ fn summary_children(expr: &SummaryExpr) -> Vec<&Rc<SummaryNode>> {
     match expr {
         SummaryExpr::KeepPreAsap(_) => vec![],
         SummaryExpr::BinaryOp { lhs, rhs, .. } => vec![lhs, rhs],
-        SummaryExpr::CandidateTopK {
+        SummaryExpr::MembershipFilter {
             candidates, values, ..
         } => vec![candidates, values],
         SummaryExpr::ValueOperation { child, .. } => vec![child],

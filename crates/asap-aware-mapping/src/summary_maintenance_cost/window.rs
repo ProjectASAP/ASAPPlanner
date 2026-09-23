@@ -62,7 +62,7 @@ pub(super) fn summary_aggregation_identities(root: &SummaryNode) -> HashSet<*con
                 inner: right,
                 ..
             }
-            | SummaryExpr::CandidateTopK {
+            | SummaryExpr::MembershipFilter {
                 candidates: left,
                 values: right,
                 ..

@@ -1022,7 +1022,7 @@ fn collect_summary_aggs(
             left: outer,
             right: inner,
         }
-        | SummaryExpr::CandidateTopK {
+        | SummaryExpr::MembershipFilter {
             candidates: outer,
             values: inner,
             ..

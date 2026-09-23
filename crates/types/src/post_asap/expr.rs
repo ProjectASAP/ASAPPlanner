@@ -136,14 +136,12 @@ pub enum SummaryExpr {
         operator: BinaryOperator,
     },
 
-    /// Use an approximate keyed summary only to propose members, then rank
-    /// those members by authoritative exact values. `candidates` never
-    /// supplies caller-visible values.
-    CandidateTopK {
+    /// Retain value rows whose identities occur in the membership input.
+    /// This operation neither sorts nor limits rows; membership values never
+    /// replace authoritative input values. Completeness records pruning evidence.
+    MembershipFilter {
         candidates: Rc<SummaryNode>,
         values: Rc<SummaryNode>,
-        k: usize,
-        grouping: GroupKeys,
         completeness: CandidateCompleteness,
     },
 

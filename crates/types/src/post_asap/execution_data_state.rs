@@ -239,7 +239,7 @@ pub fn produced_data_state(expr: &SummaryExpr) -> Option<ExecutionDataState> {
             timing: *timing,
             primitive: DataPrimitive::Raw,
         },
-        SummaryExpr::CandidateTopK { .. } | SummaryExpr::RelationalJoin { .. } => {
+        SummaryExpr::MembershipFilter { .. } | SummaryExpr::RelationalJoin { .. } => {
             ExecutionDataState::READ_ROWS
         }
         SummaryExpr::SummaryAgg { .. }
@@ -388,7 +388,7 @@ fn visit(
             }
             Ok(())
         }
-        SummaryExpr::CandidateTopK {
+        SummaryExpr::MembershipFilter {
             candidates, values, ..
         } => {
             for input in [candidates, values] {
@@ -396,7 +396,7 @@ fn visit(
                     produced_data_state(&input.expr).unwrap_or(ExecutionDataState::READ_ROWS);
                 if state != ExecutionDataState::READ_ROWS {
                     return Err(ExecutionDataStateError::IllegalChildDataState {
-                        edge: "CandidateTopK input",
+                        edge: "MembershipFilter input",
                         child: state,
                     });
                 }
@@ -549,7 +549,7 @@ pub fn assigned_child_data_state(parent: &SummaryExpr, child: &SummaryNode) -> E
             timing: ExecutionTiming::MaintenanceTime,
             ..
         }
-        | SummaryExpr::CandidateTopK { .. }
+        | SummaryExpr::MembershipFilter { .. }
         | SummaryExpr::RelationalJoin { .. }
         | SummaryExpr::SummaryAgg { .. }
         | SummaryExpr::SummaryJoin { .. }

@@ -3201,7 +3201,7 @@ mod tests {
                     inner: right,
                     ..
                 }
-                | SummaryExpr::CandidateTopK {
+                | SummaryExpr::MembershipFilter {
                     candidates: left,
                     values: right,
                     ..
@@ -3416,7 +3416,7 @@ mod tests {
                                 inner: right,
                                 ..
                             }
-                            | SummaryExpr::CandidateTopK {
+                            | SummaryExpr::MembershipFilter {
                                 candidates: left,
                                 values: right,
                                 ..
@@ -3465,7 +3465,7 @@ mod tests {
                     inner: right,
                     ..
                 }
-                | SummaryExpr::CandidateTopK {
+                | SummaryExpr::MembershipFilter {
                     candidates: left,
                     values: right,
                     ..
