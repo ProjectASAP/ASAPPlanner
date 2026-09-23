@@ -162,6 +162,6 @@ fn summary_children(expr: &SummaryExpr) -> Vec<&Rc<SummaryNode>> {
         } => vec![outer, inner],
         SummaryExpr::SummaryDelete { summary_input, .. }
         | SummaryExpr::SummaryEstimate { summary_input, .. } => vec![summary_input],
-        SummaryExpr::SummaryMerge { children } => children.iter().collect(),
+        SummaryExpr::SummaryMerge { children, .. } => children.iter().collect(),
     }
 }

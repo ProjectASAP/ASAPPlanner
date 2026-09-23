@@ -57,3 +57,16 @@ approximate readouts still require composed accuracy guarantees. See the
 [accuracy implementation companion](../../develop_docs/end-to-end-accuracy-guarantees.md)
 and [physical-plan integration](../architecture/physical-plan-integration.md)
 for the corresponding correctness and realization requirements.
+
+## Execution phase
+
+A physical operator defines what computation happens. The plan decides when it
+happens: **ingestion time** or **query time**. Operator identity must not imply
+one of these phases. Backend capability restrictions are implementation gaps,
+not definitions of the operator.
+
+SummaryMerge supports both phases in the executable contract. A query-time merge
+can combine stored ingestion results and query-produced states; an ingestion-time
+merge cannot depend on a future query result. Other operators still have current
+placement restrictions that require further implementation before this general
+contract is fully supported.

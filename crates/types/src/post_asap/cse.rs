@@ -138,9 +138,16 @@ fn same_node(left: &SummaryNode, right: &SummaryNode) -> bool {
                 key: bk,
             },
         ) => Rc::ptr_eq(ai, bi) && ak == bk,
-        (SummaryMerge { children: a }, SummaryMerge { children: b }) => {
-            a.len() == b.len() && a.iter().zip(b).all(|(a, b)| Rc::ptr_eq(a, b))
-        }
+        (
+            SummaryMerge {
+                children: a,
+                timing: at,
+            },
+            SummaryMerge {
+                children: b,
+                timing: bt,
+            },
+        ) => at == bt && a.len() == b.len() && a.iter().zip(b).all(|(a, b)| Rc::ptr_eq(a, b)),
         // Keep this exhaustive on the left: new variants require a sharing rule.
         (
             KeepPreAsap(_)
@@ -209,7 +216,7 @@ pub fn share_common_summary_subtrees<Id>(
             | SummaryExpr::SummaryDelete { summary_input, .. } => {
                 *summary_input = visit(summary_input, seen, pool);
             }
-            SummaryExpr::SummaryMerge { children } => {
+            SummaryExpr::SummaryMerge { children, .. } => {
                 for child in children {
                     *child = visit(child, seen, pool);
                 }
@@ -267,6 +274,7 @@ mod tests {
     fn shares_children_across_distinct_roots() {
         let merge = Rc::new(SummaryNode {
             expr: SummaryExpr::SummaryMerge {
+                timing: crate::post_asap::ExecutionTiming::MaintenanceTime,
                 children: vec![leaf(1.0), leaf(2.0)],
             },
             schema: SummarySchema {
@@ -276,7 +284,7 @@ mod tests {
             guarantee: None,
         });
         let roots = share_common_summary_subtrees(vec![(0, leaf(1.0)), (1, merge)]);
-        let SummaryExpr::SummaryMerge { children } = &roots[1].1.expr else {
+        let SummaryExpr::SummaryMerge { children, .. } = &roots[1].1.expr else {
             panic!()
         };
         assert!(Rc::ptr_eq(&roots[0].1, &children[0]));

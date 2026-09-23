@@ -2898,6 +2898,7 @@ mod tests {
         if merge {
             root = Rc::new(SummaryNode {
                 expr: SummaryExpr::SummaryMerge {
+                    timing: asap_types::post_asap::ExecutionTiming::MaintenanceTime,
                     children: vec![Rc::clone(&agg), Rc::clone(&agg)],
                 },
                 schema: schema.clone(),
@@ -3184,7 +3185,7 @@ mod tests {
                 }
                 SummaryExpr::SummaryAgg { child, .. }
                 | SummaryExpr::ValueOperation { child, .. } => retained(model, child, seen),
-                SummaryExpr::SummaryMerge { children } => {
+                SummaryExpr::SummaryMerge { children, .. } => {
                     for child in children {
                         retained(model, child, seen);
                     }
@@ -3322,7 +3323,7 @@ mod tests {
                     StreamingSummaryOperatorEvidence::Merge(SummaryOperatorResourceEvidence {
                         physical_id: format!("merge-{node:p}"),
                         inputs: match &node.expr {
-                            SummaryExpr::SummaryMerge { children } => {
+                            SummaryExpr::SummaryMerge { children, .. } => {
                                 vec![test_edge(); children.len()]
                             }
                             _ => unreachable!(),
@@ -3399,7 +3400,7 @@ mod tests {
                             SummaryExpr::ValueOperation { child, .. } => {
                                 owning_aggs(child, seen, owners)
                             }
-                            SummaryExpr::SummaryMerge { children } => {
+                            SummaryExpr::SummaryMerge { children, .. } => {
                                 for child in children {
                                     owning_aggs(child, seen, owners);
                                 }
@@ -3448,7 +3449,7 @@ mod tests {
                 | SummaryExpr::ValueOperation { child, .. } => {
                     bind_ops(model, child, seen, inputs, cpu)
                 }
-                SummaryExpr::SummaryMerge { children } => {
+                SummaryExpr::SummaryMerge { children, .. } => {
                     for child in children {
                         bind_ops(model, child, seen, inputs, cpu);
                     }

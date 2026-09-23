@@ -32,7 +32,7 @@ pub(super) fn estimate_heterogeneous_summary(
             SummaryExpr::SummaryAgg { child, .. } | SummaryExpr::ValueOperation { child, .. } => {
                 summary_source_selections(child, seen, out)?
             }
-            SummaryExpr::SummaryMerge { children } => {
+            SummaryExpr::SummaryMerge { children, .. } => {
                 for child in children {
                     summary_source_selections(child, seen, out)?;
                 }
@@ -368,7 +368,7 @@ pub(super) fn estimate_heterogeneous_summary(
                     io_bytes,
                 )?;
             }
-            SummaryExpr::SummaryMerge { children } => {
+            SummaryExpr::SummaryMerge { children, .. } => {
                 let operation = summary_operation_evidence(node, evidence)?.resource();
                 let merge = validated_operator_cpu("summary_merge", operation.cpu_ops)?;
                 *cpu_ops += evaluation_count as f64
@@ -443,7 +443,7 @@ pub(super) fn estimate_heterogeneous_summary(
                             collect_aggs(child, seen, out);
                         }
                         SummaryExpr::ValueOperation { child, .. } => collect_aggs(child, seen, out),
-                        SummaryExpr::SummaryMerge { children } => {
+                        SummaryExpr::SummaryMerge { children, .. } => {
                             children
                                 .iter()
                                 .for_each(|child| collect_aggs(child, seen, out));
@@ -652,7 +652,7 @@ fn validate_summary_edges_and_physical_ids(
             SummaryExpr::SummaryAgg { child, .. } | SummaryExpr::ValueOperation { child, .. } => {
                 vec![child]
             }
-            SummaryExpr::SummaryMerge { children } => {
+            SummaryExpr::SummaryMerge { children, .. } => {
                 children.iter().map(|child| child.as_ref()).collect()
             }
             SummaryExpr::SummarySubtract { left, right }
@@ -829,7 +829,7 @@ pub(super) fn estimate_transient_liveness(
             SummaryExpr::SummaryAgg { child, .. } | SummaryExpr::ValueOperation { child, .. } => {
                 vec![child]
             }
-            SummaryExpr::SummaryMerge { children } => {
+            SummaryExpr::SummaryMerge { children, .. } => {
                 children.iter().map(|child| child.as_ref()).collect()
             }
             SummaryExpr::SummarySubtract { left, right }
@@ -958,7 +958,7 @@ pub(super) fn evidence_nodes(root: &SummaryNode) -> (Vec<&SummaryNode>, Vec<&Sum
                 visit(child, seen, aggregations, joins);
             }
             SummaryExpr::ValueOperation { child, .. } => visit(child, seen, aggregations, joins),
-            SummaryExpr::SummaryMerge { children } => {
+            SummaryExpr::SummaryMerge { children, .. } => {
                 for child in children {
                     visit(child, seen, aggregations, joins);
                 }
@@ -1300,7 +1300,7 @@ fn count_operations(root: &SummaryNode) -> Result<SummaryOperationCounts, Analyt
                     .ok_or(AnalyticalCostError::Overflow)?;
                 visit(child, seen, counts)?;
             }
-            SummaryExpr::SummaryMerge { children } => {
+            SummaryExpr::SummaryMerge { children, .. } => {
                 if children.is_empty() {
                     return Err(AnalyticalCostError::InvalidPhysicalDag(
                         "summary merge has no children",

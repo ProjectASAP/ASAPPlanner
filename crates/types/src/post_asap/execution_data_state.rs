@@ -22,7 +22,8 @@
 //! | `SummaryAgg.child` | `MAINTENANCE_ROWS`, or `MAINTENANCE_SUMMARY` of an **exact accumulator** family. Never a read-time data_state. |
 //! | `SummaryEstimate.summary_input` | `MAINTENANCE_SUMMARY` (any family). Produces `READ_ROWS`. |
 //! | `SummaryJoin.outer/inner` | `MAINTENANCE_ROWS` or `MAINTENANCE_SUMMARY`; never a read-time data_state. |
-//! | `SummarySubtract`/`SummaryDelete`/`SummaryMerge` | `MAINTENANCE_SUMMARY`. |
+//! | `SummarySubtract`/`SummaryDelete` | `MAINTENANCE_SUMMARY`. |
+//! | `SummaryMerge` | Summary state at its explicit ingestion or read timing. |
 //! | `ValueOperation.child` with `MaintenanceTime` | `MAINTENANCE_ROWS`; explicit `FinalizeExactAccumulator` also accepts exact accumulator state. Produces `MAINTENANCE_ROWS`. |
 //! | `ValueOperation.child` with `ReadTime` | `READ_ROWS`. Produces `READ_ROWS`. |
 //!
@@ -245,8 +246,11 @@ pub fn produced_data_state(expr: &SummaryExpr) -> Option<ExecutionDataState> {
         SummaryExpr::SummaryAgg { .. }
         | SummaryExpr::SummaryJoin { .. }
         | SummaryExpr::SummarySubtract { .. }
-        | SummaryExpr::SummaryDelete { .. }
-        | SummaryExpr::SummaryMerge { .. } => ExecutionDataState::MAINTENANCE_SUMMARY,
+        | SummaryExpr::SummaryDelete { .. } => ExecutionDataState::MAINTENANCE_SUMMARY,
+        SummaryExpr::SummaryMerge { timing, .. } => ExecutionDataState {
+            timing: *timing,
+            primitive: DataPrimitive::SummaryState,
+        },
         SummaryExpr::SummaryEstimate { .. } => ExecutionDataState::READ_ROWS,
         SummaryExpr::ValueOperation { timing, .. } => match timing {
             ExecutionTiming::MaintenanceTime => ExecutionDataState::MAINTENANCE_ROWS,
@@ -462,9 +466,20 @@ fn visit(
             let s = state_only(summary_input, ExecutionDataStateEdge::SummaryDeleteInput)?;
             visit(summary_input, s, assignment)
         }
-        SummaryExpr::SummaryMerge { children } => {
+        SummaryExpr::SummaryMerge { children, timing } => {
             for input in children {
-                let s = state_only(input, ExecutionDataStateEdge::SummaryMergeInput)?;
+                let s = child_domain(input, ExecutionDataStateEdge::SummaryMergeInput, |state| {
+                    if state.primitive == DataPrimitive::SummaryState
+                        && (*timing == ExecutionTiming::ReadTime || state.timing == *timing)
+                    {
+                        Ok(())
+                    } else {
+                        Err(ExecutionDataStateError::IllegalChildDataState {
+                            edge: ExecutionDataStateEdge::SummaryMergeInput.describe(),
+                            child: state,
+                        })
+                    }
+                })?;
                 visit(input, s, assignment)?;
             }
             Ok(())
@@ -499,7 +514,8 @@ fn visit(
             let s = produced_data_state(&child.expr).unwrap_or(required);
             let exact_readout = (*timing == ExecutionTiming::ReadTime
                 || matches!(operation, ValueOperation::FinalizeExactAccumulator))
-                && s == ExecutionDataState::MAINTENANCE_SUMMARY
+                && s.primitive == DataPrimitive::SummaryState
+                && (*timing == ExecutionTiming::ReadTime || s.timing == *timing)
                 && is_exact_accumulator_state(&child.schema).is_ok();
             let population_readout = matches!(operation, ValueOperation::ReadPopulation { .. })
                 && *timing == ExecutionTiming::ReadTime
@@ -609,7 +625,13 @@ fn state_only(
     edge: ExecutionDataStateEdge,
 ) -> Result<ExecutionDataState, ExecutionDataStateError> {
     child_domain(child, edge, |avail| match avail {
-        ExecutionDataState::MAINTENANCE_SUMMARY => Ok(()),
+        state
+            if state.primitive == DataPrimitive::SummaryState
+                && (state.timing == ExecutionTiming::MaintenanceTime
+                    || matches!(edge, ExecutionDataStateEdge::SummaryEstimateInput)) =>
+        {
+            Ok(())
+        }
         other => Err(ExecutionDataStateError::IllegalChildDataState {
             edge: edge.describe(),
             child: other,
@@ -1015,6 +1037,56 @@ mod tests {
     }
 
     #[test]
+    fn summary_merge_runs_at_ingestion_or_query_time() {
+        for timing in [ExecutionTiming::MaintenanceTime, ExecutionTiming::ReadTime] {
+            let input = agg(keep(), kll());
+            let merged = Rc::new(SummaryNode {
+                expr: SummaryExpr::SummaryMerge {
+                    children: vec![input.clone()],
+                    timing,
+                },
+                schema: input.schema.clone(),
+                guarantee: None,
+            });
+            let root = estimate(merged.clone());
+            let assignment = validate_execution_data_states(&root).unwrap();
+            assert_eq!(
+                assignment.data_state_of(&merged),
+                Some(ExecutionDataState {
+                    timing,
+                    primitive: DataPrimitive::SummaryState,
+                })
+            );
+            let exported = crate::post_asap::compile_executable_dag(&root).unwrap();
+            assert!(exported.nodes.iter().any(|node| matches!(node.payload,
+                crate::post_asap::ExecutableOperatorPayload::SummaryMerge { timing: actual }
+                    if actual == timing)));
+        }
+    }
+
+    #[test]
+    fn ingestion_merge_cannot_depend_on_query_execution() {
+        let input = agg(keep(), kll());
+        let query_merge = Rc::new(SummaryNode {
+            expr: SummaryExpr::SummaryMerge {
+                children: vec![input.clone()],
+                timing: ExecutionTiming::ReadTime,
+            },
+            schema: input.schema.clone(),
+            guarantee: None,
+        });
+        let ingestion_merge = Rc::new(SummaryNode {
+            expr: SummaryExpr::SummaryMerge {
+                children: vec![query_merge],
+                timing: ExecutionTiming::MaintenanceTime,
+            },
+            schema: input.schema.clone(),
+            guarantee: None,
+        });
+        assert!(validate_execution_data_states(&ingestion_merge).is_err());
+    }
+
+    #[test]
     fn a_shared_keep_pre_asap_reached_in_two_domains_is_ambiguous() {
         // One raw subtree used both as update input (under a SummaryAgg) and
         // as a query-time fallback (under an ExactRead) — no single
@@ -1032,6 +1104,7 @@ mod tests {
         });
         let root = Rc::new(SummaryNode {
             expr: SummaryExpr::SummaryMerge {
+                timing: ExecutionTiming::MaintenanceTime,
                 children: vec![
                     Rc::new(SummaryNode {
                         expr: SummaryExpr::ValueOperation {

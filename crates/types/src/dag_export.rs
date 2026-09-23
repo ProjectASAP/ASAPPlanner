@@ -560,7 +560,7 @@ fn summary_shape(expr: &SummaryExpr) -> (&'static str, String, serde_json::Value
             let detail = serde_json::json!({ "query": format!("{query:?}") });
             (kind, label, detail)
         }
-        SummaryExpr::SummaryMerge { children } => {
+        SummaryExpr::SummaryMerge { children, .. } => {
             let label = format!("SummaryMerge({} children)", children.len());
             (kind, label, serde_json::json!({}))
         }
@@ -586,7 +586,7 @@ fn summary_children(expr: &SummaryExpr) -> Vec<&Rc<SummaryNode>> {
         SummaryExpr::SummarySubtract { left, right } => vec![left, right],
         SummaryExpr::SummaryDelete { summary_input, .. } => vec![summary_input],
         SummaryExpr::SummaryEstimate { summary_input, .. } => vec![summary_input],
-        SummaryExpr::SummaryMerge { children } => children.iter().collect(),
+        SummaryExpr::SummaryMerge { children, .. } => children.iter().collect(),
     }
 }
 

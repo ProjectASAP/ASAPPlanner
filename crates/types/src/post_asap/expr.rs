@@ -250,7 +250,10 @@ pub enum SummaryExpr {
     /// `mergeable` must be true. Inserted by a deployment's own stage
     /// allocator (not modeled in this crate) on cut edges.
     /// Output schema: one field (same family + params as inputs).
-    SummaryMerge { children: Vec<Rc<SummaryNode>> },
+    SummaryMerge {
+        children: Vec<Rc<SummaryNode>>,
+        timing: ExecutionTiming,
+    },
 }
 
 /// All semantics owned by a post-ASAP binary operator.

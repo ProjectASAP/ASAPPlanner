@@ -88,7 +88,9 @@ pub enum ExecutableOperatorPayload {
     SummaryEstimate {
         query: SketchQuery,
     },
-    SummaryMerge,
+    SummaryMerge {
+        timing: ExecutionTiming,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -380,7 +382,7 @@ pub fn compile_executable_dag_with_node_ids(
             | SummaryExpr::SummaryEstimate { summary_input, .. } => {
                 vec![(summary_input, EdgeRole::Input)]
             }
-            SummaryExpr::SummaryMerge { children } => {
+            SummaryExpr::SummaryMerge { children, .. } => {
                 children.iter().map(|c| (c, EdgeRole::Input)).collect()
             }
         };
@@ -446,7 +448,9 @@ pub fn compile_executable_dag_with_node_ids(
                     query: query.clone(),
                 }
             }
-            SummaryExpr::SummaryMerge { .. } => ExecutableOperatorPayload::SummaryMerge,
+            SummaryExpr::SummaryMerge { timing, .. } => {
+                ExecutableOperatorPayload::SummaryMerge { timing: *timing }
+            }
         };
         nodes.push(ExecutableDagNode {
             id,
