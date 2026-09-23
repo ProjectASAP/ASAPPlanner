@@ -17,6 +17,28 @@ Its native operators can execute independently of either backend engine.
 Engine integration must use these operators for computation, rather than merely
 using the shared scheduler around a second implementation.
 
+## Workspace organization
+
+[DataFusion's physical-plan crate](https://github.com/apache/datafusion/tree/main/datafusion/physical-plan)
+is the ownership reference: it owns the execution-plan interface, concrete
+operators, streams, metrics and operator tests within the same repository as
+planning. ASAP follows that repository boundary, while retaining its own DAG
+execution model.
+
+| Responsibility | ASAP owner |
+| --- | --- |
+| post-ASAP nodes, schemas, parameters and execution phase | `asap-types` |
+| Logical-to-physical lowering and candidate correctness | `asap-aware-mapping` |
+| Physical operator implementations, input/output validation and streams | `asap-physical-operators` |
+| Shared-producer scheduling, cancellation and resource accounting | `asap-physical-operators` |
+| Summary state encoding | `asap_sketch_codec` |
+| Sources, durable stores, publication and serving protocols | Deployment repositories |
+
+The IR crate does not depend on execution. The physical operator crate depends
+on the local IR crate. Operator unit tests can exercise private implementation
+details; Planner integration tests check that emitted DAGs bind and execute.
+Runtime values preserve the IR schema instead of redefining its type semantics.
+
 ## Execution contract
 
 An immutable plan describes typed nodes and dependency edges. Each execution
@@ -64,6 +86,7 @@ is deferred; a raw-only library test does not establish that deployment capabili
 | General computation | Reuse mature Arrow operators and expression execution | Implement and test the supported Planner vocabulary explicitly |
 | Shared DAG producer | Shared plan references need an explicit execution-sharing and buffering policy | One producer and independent consumer cursors are part of the runtime contract |
 | Summary lifecycle | Add custom summary state operators to the framework | Summary construction, merge and readout are native capabilities |
+| In-memory representation | Operators exchange Arrow RecordBatch values. Custom summary state may not map naturally to Arrow and can require an explicit encoding, wrapper or conversion, with associated integration and potential copying costs | Native values can carry ASAP-defined summary state directly, without requiring every state format to fit Arrow; the library must still define and validate state types, ownership and compatibility |
 | Engine reuse | Adapt both engines to DataFusion's execution model | Both engines bind the same ASAP interfaces |
 | Engineering cost | Less generic operator work; integration and semantic adaptation remain | More operator, typing, scheduling and resource-accounting responsibility |
 
