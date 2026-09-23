@@ -161,6 +161,7 @@ pub mod exact_composition;
 pub mod explanation;
 mod function_rules;
 pub mod grouping;
+pub mod hll_confidence;
 pub mod pane_sharing;
 pub mod physical_handoff_cost;
 pub mod physical_operator_statistics;
