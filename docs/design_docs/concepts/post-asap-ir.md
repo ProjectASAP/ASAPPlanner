@@ -43,13 +43,10 @@ summary family supports incremental maintenance.
   filter, sort, limit or extension semantics with explicit execution timing.
 - `RelationalJoin`: join row-producing children using the specified join kind
   and predicate.
-- `MembershipFilter`: semijoin value rows against membership identities without
-  sorting, limiting or replacing their values. The completeness contract belongs
-  to pruning, not ranking. A candidate-based TopK optimization expands to this
-  filter followed by an ordinary `ValueOperation::Exact(Aggregate::TopK)` node.
-  The filter has no `k` or grouping parameter. Certified and explicitly
-  best-effort membership remain distinct; exact requests cannot use an
-  uncertified pruning rewrite.
+- Candidate pruning uses `RelationalJoin` with `JoinKind::Semi` and an explicit
+  equality predicate on key columns. The left input supplies authoritative
+  values; the right input supplies keys. An ordinary TopK value operation ranks
+  the joined rows. Completeness evidence belongs to pruning, not ranking.
 
 A `SummaryNode` carries its expression, schema and optional result guarantee.
 State and query values have different contracts. Exact operations over
@@ -65,8 +62,10 @@ happens: **ingestion time** or **query time**. Operator identity must not imply
 one of these phases. Backend capability restrictions are implementation gaps,
 not definitions of the operator.
 
-SummaryMerge supports both phases in the executable contract. A query-time merge
-can combine stored ingestion results and query-produced states; an ingestion-time
-merge cannot depend on a future query result. Other operators still have current
-placement restrictions that require further implementation before this general
-contract is fully supported.
+Every executable physical payload supports both phase assignments. Phase is
+stored on the physical node, independently of its operator payload.
+`ExecutableDag::with_execution_phases` assigns a phase to every node and updates
+its edges. Ingestion work cannot depend on a future query result. Default
+semantic realization still proposes an initial layout; it does not restrict
+which phase a physical operator may use. Deployments must separately check that
+they have an implementation and a valid data source for the chosen placement.

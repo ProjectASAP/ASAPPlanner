@@ -48,11 +48,6 @@ pub(super) fn estimate_heterogeneous_summary(
                 outer: left,
                 inner: right,
                 ..
-            }
-            | SummaryExpr::MembershipFilter {
-                candidates: left,
-                values: right,
-                ..
             } => {
                 summary_source_selections(left, seen, out)?;
                 summary_source_selections(right, seen, out)?;
@@ -303,27 +298,7 @@ pub(super) fn estimate_heterogeneous_summary(
                     io_bytes,
                 )?;
             }
-            SummaryExpr::MembershipFilter {
-                candidates, values, ..
-            } => {
-                let operation = summary_operation_evidence(node, evidence)?.resource();
-                *cpu_ops += evaluation_count as f64
-                    * validated_operator_executions("membership_filter", operation)? as f64
-                    * validated_operator_cpu("membership_filter", operation.cpu_ops)?;
-                add_operator_io(io_bytes, operation, evaluation_count)?;
-                for input in [candidates, values] {
-                    visit_ops(
-                        input,
-                        seen,
-                        by_node,
-                        evidence,
-                        scope,
-                        evaluation_count,
-                        cpu_ops,
-                        io_bytes,
-                    )?;
-                }
-            }
+
             SummaryExpr::ValueOperation { child, .. } => {
                 let operation = summary_operation_evidence(node, evidence)?.resource();
                 *cpu_ops += evaluation_count as f64
@@ -458,11 +433,6 @@ pub(super) fn estimate_heterogeneous_summary(
                         | SummaryExpr::SummaryJoin {
                             outer: left,
                             inner: right,
-                            ..
-                        }
-                        | SummaryExpr::MembershipFilter {
-                            candidates: left,
-                            values: right,
                             ..
                         } => {
                             collect_aggs(left, seen, out);
@@ -666,11 +636,6 @@ fn validate_summary_edges_and_physical_ids(
                 outer: left,
                 inner: right,
                 ..
-            }
-            | SummaryExpr::MembershipFilter {
-                candidates: left,
-                values: right,
-                ..
             } => vec![left, right],
             SummaryExpr::SummaryDelete { summary_input, .. }
             | SummaryExpr::SummaryEstimate { summary_input, .. } => vec![summary_input],
@@ -843,11 +808,6 @@ pub(super) fn estimate_transient_liveness(
                 outer: left,
                 inner: right,
                 ..
-            }
-            | SummaryExpr::MembershipFilter {
-                candidates: left,
-                values: right,
-                ..
             } => vec![left, right],
             SummaryExpr::SummaryDelete { summary_input, .. }
             | SummaryExpr::SummaryEstimate { summary_input, .. } => vec![summary_input],
@@ -891,7 +851,6 @@ pub(super) fn estimate_transient_liveness(
             SummaryExpr::SummaryMerge { .. }
             | SummaryExpr::BinaryOp { .. }
             | SummaryExpr::RelationalJoin { .. }
-            | SummaryExpr::MembershipFilter { .. }
             | SummaryExpr::ValueOperation { .. }
             | SummaryExpr::SummarySubtract { .. }
             | SummaryExpr::SummaryDelete { .. }
@@ -973,11 +932,6 @@ pub(super) fn evidence_nodes(root: &SummaryNode) -> (Vec<&SummaryNode>, Vec<&Sum
             | SummaryExpr::SummaryJoin {
                 outer: left,
                 inner: right,
-                ..
-            }
-            | SummaryExpr::MembershipFilter {
-                candidates: left,
-                values: right,
                 ..
             } => {
                 if matches!(&node.expr, SummaryExpr::SummaryJoin { .. }) {
@@ -1330,12 +1284,7 @@ fn count_operations(root: &SummaryNode) -> Result<SummaryOperationCounts, Analyt
                 visit(left, seen, counts)?;
                 visit(right, seen, counts)?;
             }
-            SummaryExpr::MembershipFilter {
-                candidates, values, ..
-            } => {
-                visit(candidates, seen, counts)?;
-                visit(values, seen, counts)?;
-            }
+
             SummaryExpr::ValueOperation { child, .. } => visit(child, seen, counts)?,
             SummaryExpr::SummaryDelete { summary_input, .. } => {
                 counts.deletes_per_update = counts

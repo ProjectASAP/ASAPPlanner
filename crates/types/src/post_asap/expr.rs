@@ -136,15 +136,6 @@ pub enum SummaryExpr {
         operator: BinaryOperator,
     },
 
-    /// Retain value rows whose identities occur in the membership input.
-    /// This operation neither sorts nor limits rows; membership values never
-    /// replace authoritative input values. Completeness records pruning evidence.
-    MembershipFilter {
-        candidates: Rc<SummaryNode>,
-        values: Rc<SummaryNode>,
-        completeness: CandidateCompleteness,
-    },
-
     /// Plain-row semantics composed with a post-ASAP child. Timing is an
     /// independent physical choice, not part of the operation's identity.
     ValueOperation {
@@ -161,6 +152,8 @@ pub enum SummaryExpr {
         right: Rc<SummaryNode>,
         kind: JoinKind,
         pred: Predicate,
+        /// Optional proof for candidate pruning; ranking remains a separate operation.
+        pruning: Option<CandidateCompleteness>,
     },
 
     /// Summary aggregation. Post-ASAP binding chose `family` — which

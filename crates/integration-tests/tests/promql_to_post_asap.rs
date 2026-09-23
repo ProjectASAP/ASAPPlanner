@@ -278,7 +278,7 @@ fn counter_weighted_topk_uses_candidates_only_for_membership_and_exact_values_fo
                 }
                 _ => None,
             })
-            .unwrap_or_else(|| panic!("missing MembershipFilter for {query}"));
+            .unwrap_or_else(|| panic!("missing candidate semi-join for {query}"));
         // Candidate pruning must feed an ordinary grouped value TopK.
         assert!(
             matches!(plan.expr, SummaryExpr::ValueOperation { .. }),
@@ -298,10 +298,11 @@ fn counter_weighted_topk_uses_candidates_only_for_membership_and_exact_values_fo
         assert!(
             matches!(measures.as_slice(), [asap_types::pre_asap::AggIntent::TopK { k, .. }] if *k == expected_k)
         );
-        let SummaryExpr::MembershipFilter {
-            candidates,
-            values,
-            completeness: CandidateCompleteness::Certified { .. },
+        let SummaryExpr::RelationalJoin {
+            right: candidates,
+            left: values,
+            kind: asap_types::pre_asap::JoinKind::Semi,
+            pruning: Some(CandidateCompleteness::Certified { .. }),
             ..
         } = &filtered.expr
         else {
@@ -348,8 +349,10 @@ fn counter_weighted_topk_uses_candidates_only_for_membership_and_exact_values_fo
         let executable = compile_executable_dag(&plan).expect("typed executable DAG");
         assert!(executable.nodes.iter().any(|node| matches!(
             &node.payload,
-            asap_types::post_asap::ExecutableOperatorPayload::MembershipFilter {
-                completeness: CandidateCompleteness::Certified { .. },
+            asap_types::post_asap::ExecutableOperatorPayload::RelationalJoin {
+                join_kind: asap_types::pre_asap::JoinKind::Semi,
+                pruning: Some(CandidateCompleteness::Certified { .. }),
+                ..
             }
         )));
         assert!(executable.nodes.iter().any(|node| matches!(
@@ -371,11 +374,11 @@ fn counter_weighted_topk_uses_candidates_only_for_membership_and_exact_values_fo
         assert!(executable
             .edges
             .iter()
-            .any(|edge| edge.role == EdgeRole::CandidateMembership));
+            .any(|edge| edge.role == EdgeRole::Right));
         assert!(executable
             .edges
             .iter()
-            .any(|edge| edge.role == EdgeRole::AuthoritativeValues));
+            .any(|edge| edge.role == EdgeRole::Left));
         assert!(
             !matches!(child.expr, SummaryExpr::SummaryAgg { .. }),
             "membership materialization must bind ingest rows, not another summary"
@@ -1024,7 +1027,7 @@ fn nested_summary_explicitly_finalizes_exact_child_at_ingestion_time() {
 }
 
 #[test]
-fn binary_wire_requires_named_ingestion_or_query_phase() {
+fn physical_node_owns_phase_independently_of_binary_payload() {
     use asap_types::post_asap::{ExecutableOperatorPayload, ExecutionTiming};
     for (query, expected) in [
         (
@@ -1044,24 +1047,19 @@ fn binary_wire_requires_named_ingestion_or_query_phase() {
             .unwrap()
             .unwrap();
         let dag = compile_executable_dag(&plan).unwrap();
-        let payload = dag
+        let node = dag
             .nodes
             .iter()
-            .find_map(|node| {
-                matches!(node.payload, ExecutableOperatorPayload::Binary { .. })
-                    .then_some(&node.payload)
-            })
+            .find(|node| matches!(node.payload, ExecutableOperatorPayload::Binary { .. }))
             .unwrap();
-        assert!(
-            matches!(payload, ExecutableOperatorPayload::Binary { timing, .. } if *timing == expected)
-        );
-        let wire = serde_json::to_value(payload).unwrap();
-        assert_eq!(wire["timing"], expected.as_str());
-        let mut missing = wire.clone();
-        missing.as_object_mut().unwrap().remove("timing");
-        assert!(serde_json::from_value::<ExecutableOperatorPayload>(missing).is_err());
+        assert_eq!(node.output_state.timing, expected);
+        let wire = serde_json::to_value(&node.payload).unwrap();
+        assert!(wire.get("timing").is_none());
+        let mut obsolete = wire.clone();
+        obsolete["timing"] = serde_json::json!(expected.as_str());
+        assert!(serde_json::from_value::<ExecutableOperatorPayload>(obsolete).is_err());
         let restored: ExecutableOperatorPayload = serde_json::from_value(wire).unwrap();
-        assert_eq!(&restored, payload);
+        assert_eq!(restored, node.payload);
     }
 }
 

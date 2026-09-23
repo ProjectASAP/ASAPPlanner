@@ -231,7 +231,9 @@ impl ExecutionDataStateAssignment {
     }
 }
 
-/// The data_state `expr` *produces*, independent of context — `None` for
+/// Initial layout proposed by semantic realization, not a restriction on physical
+/// operator placement. `ExecutableDag::with_execution_phases` assigns the final
+/// phase independently of payload kind. Returns `None` for
 /// [`SummaryExpr::KeepPreAsap`], whose data_state is assigned by the edge reaching
 /// it (see the module docs).
 pub fn produced_data_state(expr: &SummaryExpr) -> Option<ExecutionDataState> {
@@ -241,9 +243,7 @@ pub fn produced_data_state(expr: &SummaryExpr) -> Option<ExecutionDataState> {
             timing: *timing,
             primitive: DataPrimitive::Raw,
         },
-        SummaryExpr::MembershipFilter { .. } | SummaryExpr::RelationalJoin { .. } => {
-            ExecutionDataState::QUERY_ROWS
-        }
+        SummaryExpr::RelationalJoin { .. } => ExecutionDataState::QUERY_ROWS,
         SummaryExpr::SummaryAgg { .. }
         | SummaryExpr::SummaryJoin { .. }
         | SummaryExpr::SummarySubtract { .. }
@@ -393,22 +393,7 @@ fn visit(
             }
             Ok(())
         }
-        SummaryExpr::MembershipFilter {
-            candidates, values, ..
-        } => {
-            for input in [candidates, values] {
-                let state =
-                    produced_data_state(&input.expr).unwrap_or(ExecutionDataState::QUERY_ROWS);
-                if state != ExecutionDataState::QUERY_ROWS {
-                    return Err(ExecutionDataStateError::IllegalChildDataState {
-                        edge: "MembershipFilter input",
-                        child: state,
-                    });
-                }
-                visit(input, state, assignment)?;
-            }
-            Ok(())
-        }
+
         SummaryExpr::RelationalJoin { left, right, .. } => {
             for input in [left, right] {
                 let state =
@@ -566,7 +551,6 @@ pub fn assigned_child_data_state(parent: &SummaryExpr, child: &SummaryNode) -> E
             timing: ExecutionTiming::IngestionTime,
             ..
         }
-        | SummaryExpr::MembershipFilter { .. }
         | SummaryExpr::RelationalJoin { .. }
         | SummaryExpr::SummaryAgg { .. }
         | SummaryExpr::SummaryJoin { .. }
@@ -1075,8 +1059,8 @@ mod tests {
             );
             let exported = crate::post_asap::compile_executable_dag(&root).unwrap();
             assert!(exported.nodes.iter().any(|node| matches!(node.payload,
-                crate::post_asap::ExecutableOperatorPayload::SummaryMerge { timing: actual }
-                    if actual == timing)));
+                crate::post_asap::ExecutableOperatorPayload::SummaryMerge
+                    if node.output_state.timing == timing)));
         }
     }
 

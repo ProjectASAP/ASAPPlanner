@@ -2236,7 +2236,7 @@ pub(crate) fn construct_summary_with(
                         .is_some_and(ResultGuarantee::is_exact)
                     {
                         return Err(RealizationError::PhysicalRealization(
-                            "MembershipFilter exact rerank input is not exact",
+                            "candidate pruning exact rerank input is not exact",
                         ));
                     }
                     let completeness = match candidate.guarantee.clone() {
@@ -2255,7 +2255,7 @@ pub(crate) fn construct_summary_with(
                         && !matches!(completeness, CandidateCompleteness::Certified { .. })
                     {
                         return Err(RealizationError::PhysicalRealization(
-                            "exact MembershipFilter requires certified candidate completeness",
+                            "exact candidate pruning requires certified candidate completeness",
                         ));
                     }
                     let guarantee = match &completeness {
@@ -2265,14 +2265,49 @@ pub(crate) fn construct_summary_with(
                         } => Some(guarantee.clone()),
                         CandidateCompleteness::BestEffort { guarantee: None } => None,
                     };
-                    let filtered_schema = values.schema.clone();
+                    // A heap readout is a keyed row stream at this boundary, not
+                    // an opaque TopK collection. Both sides expose explicit keys.
+                    let candidate = Rc::new(SummaryNode {
+                        expr: candidate.expr.clone(),
+                        schema: values.schema.clone(),
+                        guarantee: candidate.guarantee.clone(),
+                    });
+                    let keys = values
+                        .schema
+                        .fields
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(i, field)| {
+                            matches!(
+                                field.dtype,
+                                SummaryFamilyType::Plain(asap_types::pre_asap::DataType::Utf8)
+                            )
+                            .then_some(i)
+                        })
+                        .collect::<Vec<_>>();
+                    if keys.is_empty() {
+                        return Err(RealizationError::PhysicalRealization(
+                            "candidate semi-join requires explicit identity columns",
+                        ));
+                    }
+                    let pred = asap_types::pre_asap::Predicate(Rc::new(QueryExpr::BoolAnd(
+                        keys.iter()
+                            .map(|&key| QueryExpr::Compare {
+                                left: Rc::new(QueryExpr::Column(key)),
+                                op: asap_types::pre_asap::CompareOpKind::Eq,
+                                right: Rc::new(QueryExpr::Column(values.schema.fields.len() + key)),
+                            })
+                            .collect(),
+                    )));
                     let filtered = Rc::new(SummaryNode {
-                        expr: SummaryExpr::MembershipFilter {
-                            candidates: candidate,
-                            values,
-                            completeness,
+                        expr: SummaryExpr::RelationalJoin {
+                            left: values.clone(),
+                            right: candidate,
+                            kind: asap_types::pre_asap::JoinKind::Semi,
+                            pred,
+                            pruning: Some(completeness),
                         },
-                        schema: filtered_schema,
+                        schema: values.schema.clone(),
                         guarantee: guarantee.clone(),
                     });
                     let node = Rc::new(SummaryNode {
@@ -4239,6 +4274,7 @@ impl<'a> GlobalSelection<'a> {
                     right,
                     kind: kind.clone(),
                     pred,
+                    pruning: None,
                 },
                 schema: lift(&target.output_schema()?),
                 guarantee,

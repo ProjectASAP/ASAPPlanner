@@ -41,18 +41,6 @@ fn same_node(left: &SummaryNode, right: &SummaryNode) -> bool {
             },
         ) => Rc::ptr_eq(al, bl) && Rc::ptr_eq(ar, br) && ao == bo && at == bt,
         (
-            MembershipFilter {
-                candidates: ac,
-                values: av,
-                completeness: ax,
-            },
-            MembershipFilter {
-                candidates: bc,
-                values: bv,
-                completeness: bx,
-            },
-        ) => Rc::ptr_eq(ac, bc) && Rc::ptr_eq(av, bv) && same_value(ax, bx),
-        (
             ValueOperation {
                 child: ac,
                 operation: ao,
@@ -70,14 +58,22 @@ fn same_node(left: &SummaryNode, right: &SummaryNode) -> bool {
                 right: ar,
                 kind: ak,
                 pred: ap,
+                pruning: ax,
             },
             RelationalJoin {
                 left: bl,
                 right: br,
                 kind: bk,
                 pred: bp,
+                pruning: bx,
             },
-        ) => Rc::ptr_eq(al, bl) && Rc::ptr_eq(ar, br) && ak == bk && same_value(ap, bp),
+        ) => {
+            Rc::ptr_eq(al, bl)
+                && Rc::ptr_eq(ar, br)
+                && ak == bk
+                && same_value(ap, bp)
+                && same_value(ax, bx)
+        }
         (
             SummaryAgg {
                 child: ac,
@@ -152,7 +148,6 @@ fn same_node(left: &SummaryNode, right: &SummaryNode) -> bool {
         (
             KeepPreAsap(_)
             | BinaryOp { .. }
-            | MembershipFilter { .. }
             | ValueOperation { .. }
             | RelationalJoin { .. }
             | SummaryAgg { .. }
@@ -193,12 +188,7 @@ pub fn share_common_summary_subtrees<Id>(
                 *lhs = visit(lhs, seen, pool);
                 *rhs = visit(rhs, seen, pool);
             }
-            SummaryExpr::MembershipFilter {
-                candidates, values, ..
-            } => {
-                *candidates = visit(candidates, seen, pool);
-                *values = visit(values, seen, pool);
-            }
+
             SummaryExpr::ValueOperation { child, .. } => *child = visit(child, seen, pool),
             SummaryExpr::RelationalJoin { left, right, .. } => {
                 *left = visit(left, seen, pool);

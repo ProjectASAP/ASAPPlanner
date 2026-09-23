@@ -475,7 +475,7 @@ macro_rules! define_summary_kind_tags {
 
 define_summary_kind_tags! {
     SummaryExpr::BinaryOp { .. } => "SummaryBinaryOp",
-    SummaryExpr::MembershipFilter { .. } => "MembershipFilter",
+
     SummaryExpr::ValueOperation { .. } => "ValueOperation",
     SummaryExpr::RelationalJoin { .. } => "RelationalJoin",
     SummaryExpr::SummaryAgg { .. } => "SummaryAgg",
@@ -500,11 +500,7 @@ fn summary_shape(expr: &SummaryExpr) -> (&'static str, String, serde_json::Value
             });
             (kind, label, detail)
         }
-        SummaryExpr::MembershipFilter { completeness, .. } => (
-            kind,
-            "MembershipFilter".into(),
-            serde_json::json!({ "completeness": completeness }),
-        ),
+
         SummaryExpr::ValueOperation {
             operation, timing, ..
         } => (
@@ -576,9 +572,7 @@ fn summary_children(expr: &SummaryExpr) -> Vec<&Rc<SummaryNode>> {
     match expr {
         SummaryExpr::KeepPreAsap(_) => vec![],
         SummaryExpr::BinaryOp { lhs, rhs, .. } => vec![lhs, rhs],
-        SummaryExpr::MembershipFilter {
-            candidates, values, ..
-        } => vec![candidates, values],
+
         SummaryExpr::ValueOperation { child, .. } => vec![child],
         SummaryExpr::RelationalJoin { left, right, .. } => vec![left, right],
         SummaryExpr::SummaryAgg { child, .. } => vec![child],

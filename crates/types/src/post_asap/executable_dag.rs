@@ -14,15 +14,13 @@ use super::{
 use crate::pre_asap::{ColumnRef, JoinKind, Predicate, QueryExpr, Reduction};
 use thiserror::Error;
 
-pub const POST_ASAP_DAG_WIRE_VERSION: u32 = 3;
+pub const POST_ASAP_DAG_WIRE_VERSION: u32 = 4;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum EdgeRole {
     Input,
     Left,
     Right,
-    CandidateMembership,
-    AuthoritativeValues,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -50,25 +48,21 @@ pub enum WindowEdgeCompatibility {
 pub struct PostAsapNodeId(pub u32);
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ExecutableOperatorPayload {
     Fallback {
         expression: QueryExpr,
     },
     Binary {
-        timing: ExecutionTiming,
         operator: BinaryOperator,
-    },
-    MembershipFilter {
-        completeness: CandidateCompleteness,
     },
     Value {
         operation: ValueOperation,
-        timing: ExecutionTiming,
     },
     RelationalJoin {
         join_kind: JoinKind,
         pred: Predicate,
+        pruning: Option<CandidateCompleteness>,
     },
     SummaryAgg {
         family: SummaryFamilyType,
@@ -87,9 +81,7 @@ pub enum ExecutableOperatorPayload {
     SummaryEstimate {
         query: SketchQuery,
     },
-    SummaryMerge {
-        timing: ExecutionTiming,
-    },
+    SummaryMerge,
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -98,6 +90,7 @@ pub struct ExecutableDagNode {
     pub id: PostAsapNodeId,
     /// The payload variant is the sole operator identity (`payload.kind` in JSON).
     pub payload: ExecutableOperatorPayload,
+    /// Phase is a placement choice for every operator, independent of payload kind.
     pub output_state: ExecutionDataState,
     pub output_schema: SummarySchema,
     pub guarantee: Option<ResultGuarantee>,
@@ -127,8 +120,7 @@ pub struct ExecutableDag {
 
 /// Versioned transport envelope for a post-ASAP semantic DAG.
 ///
-/// `ExecutableDag` remains serializable as a legacy in-process adapter. New
-/// process boundaries should exchange this envelope and call [`Self::validate`].
+/// Process boundaries exchange this envelope and call [`Self::validate`].
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PostAsapDagDocument {
@@ -138,6 +130,13 @@ pub struct PostAsapDagDocument {
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum ExecutableDagValidationError {
+    #[error("phase assignment must name every DAG node exactly once")]
+    IncompletePhaseAssignment,
+    #[error("ingestion node {consumer:?} depends on query node {producer:?}")]
+    QueryDependencyInIngestion {
+        producer: PostAsapNodeId,
+        consumer: PostAsapNodeId,
+    },
     #[error("unsupported post-ASAP DAG schema version {0}")]
     UnsupportedVersion(u32),
     #[error("duplicate post-ASAP node id {0:?}")]
@@ -187,6 +186,31 @@ impl PostAsapDagDocument {
 }
 
 impl ExecutableDag {
+    /// Assign execution phases without changing operator semantics. Phase choices
+    /// do not prove deployment support: callers must bind concrete implementations
+    /// and storage boundaries before installing this plan.
+    pub fn with_execution_phases(
+        &self,
+        phases: &std::collections::BTreeMap<PostAsapNodeId, ExecutionTiming>,
+    ) -> Result<Self, ExecutableDagValidationError> {
+        self.validate()?;
+        if phases.len() != self.nodes.len()
+            || self.nodes.iter().any(|node| !phases.contains_key(&node.id))
+        {
+            return Err(ExecutableDagValidationError::IncompletePhaseAssignment);
+        }
+        let mut dag = self.clone();
+        for node in &mut dag.nodes {
+            node.output_state.timing = phases[&node.id];
+        }
+        let states: HashMap<_, _> = dag.nodes.iter().map(|n| (n.id, n.output_state)).collect();
+        for edge in &mut dag.edges {
+            edge.data_state = states[&edge.producer];
+        }
+        dag.validate()?;
+        Ok(dag)
+    }
+
     pub fn validate(&self) -> Result<(), ExecutableDagValidationError> {
         use std::collections::{HashMap, HashSet};
         let mut nodes = HashMap::new();
@@ -230,6 +254,14 @@ impl ExecutableDag {
                 return Err(ExecutableDagValidationError::MissingEdgeEndpoint(
                     edge.consumer,
                 ));
+            }
+            if producer.output_state.timing == ExecutionTiming::QueryTime
+                && nodes[&edge.consumer].output_state.timing == ExecutionTiming::IngestionTime
+            {
+                return Err(ExecutableDagValidationError::QueryDependencyInIngestion {
+                    producer: edge.producer,
+                    consumer: edge.consumer,
+                });
             }
             if edge.intermediate_schema != producer.output_schema {
                 return Err(ExecutableDagValidationError::EdgeSchemaMismatch {
@@ -359,12 +391,7 @@ pub fn compile_executable_dag_with_node_ids(
             SummaryExpr::BinaryOp { lhs, rhs, .. } => {
                 vec![(lhs, EdgeRole::Left), (rhs, EdgeRole::Right)]
             }
-            SummaryExpr::MembershipFilter {
-                candidates, values, ..
-            } => vec![
-                (candidates, EdgeRole::CandidateMembership),
-                (values, EdgeRole::AuthoritativeValues),
-            ],
+
             SummaryExpr::ValueOperation { child, .. } | SummaryExpr::SummaryAgg { child, .. } => {
                 vec![(child, EdgeRole::Input)]
             }
@@ -397,29 +424,23 @@ pub fn compile_executable_dag_with_node_ids(
             SummaryExpr::KeepPreAsap(expression) => ExecutableOperatorPayload::Fallback {
                 expression: (**expression).clone(),
             },
-            SummaryExpr::BinaryOp {
-                operator, timing, ..
-            } => ExecutableOperatorPayload::Binary {
-                timing: *timing,
+            SummaryExpr::BinaryOp { operator, .. } => ExecutableOperatorPayload::Binary {
                 operator: operator.clone(),
             },
-            SummaryExpr::MembershipFilter { completeness, .. } => {
-                ExecutableOperatorPayload::MembershipFilter {
-                    completeness: completeness.clone(),
-                }
-            }
-            SummaryExpr::ValueOperation {
-                operation, timing, ..
-            } => ExecutableOperatorPayload::Value {
+
+            SummaryExpr::ValueOperation { operation, .. } => ExecutableOperatorPayload::Value {
                 operation: operation.clone(),
-                timing: *timing,
             },
-            SummaryExpr::RelationalJoin { kind, pred, .. } => {
-                ExecutableOperatorPayload::RelationalJoin {
-                    join_kind: kind.clone(),
-                    pred: pred.clone(),
-                }
-            }
+            SummaryExpr::RelationalJoin {
+                kind,
+                pred,
+                pruning,
+                ..
+            } => ExecutableOperatorPayload::RelationalJoin {
+                join_kind: kind.clone(),
+                pred: pred.clone(),
+                pruning: pruning.clone(),
+            },
             SummaryExpr::SummaryAgg {
                 family,
                 input,
@@ -447,9 +468,7 @@ pub fn compile_executable_dag_with_node_ids(
                     query: query.clone(),
                 }
             }
-            SummaryExpr::SummaryMerge { timing, .. } => {
-                ExecutableOperatorPayload::SummaryMerge { timing: *timing }
-            }
+            SummaryExpr::SummaryMerge { .. } => ExecutableOperatorPayload::SummaryMerge,
         };
         nodes.push(ExecutableDagNode {
             id,
@@ -555,6 +574,155 @@ mod tests {
     use crate::pre_asap::schema::{Column, Schema};
     use crate::pre_asap::{ColumnRef, DataType, QueryExpr, Reduction, Source};
     use std::collections::BTreeMap;
+
+    #[test]
+    fn every_physical_payload_can_be_assigned_either_phase() {
+        use crate::post_asap::DataPrimitive;
+        use crate::pre_asap::{ArithmeticOpKind, BinaryOpKind, JoinKind, Predicate, ScalarValue};
+        let family = SummaryFamilyType::ExactAggregate(ExactKind::Sum, ExactParams::Sum);
+        let predicate = Predicate(Rc::new(QueryExpr::Literal(ScalarValue::Boolean(true))));
+        let payloads = vec![
+            ExecutableOperatorPayload::Fallback {
+                expression: QueryExpr::Literal(ScalarValue::Int64(1)),
+            },
+            ExecutableOperatorPayload::Binary {
+                operator: BinaryOperator {
+                    checked_relative_division: false,
+                    checked_finite_division: false,
+                    kind: BinaryOpKind::Arithmetic(ArithmeticOpKind::Add),
+                    vector_match: None,
+                },
+            },
+            ExecutableOperatorPayload::Value {
+                operation: ValueOperation::Limit { n: 1, offset: 0 },
+            },
+            ExecutableOperatorPayload::RelationalJoin {
+                join_kind: JoinKind::Semi,
+                pred: predicate,
+                pruning: None,
+            },
+            ExecutableOperatorPayload::SummaryAgg {
+                family: family.clone(),
+                input: SummaryUpdate::column(ColumnRef::SampleValue),
+                reduction: Reduction::by(vec![]),
+                grouping: GroupingStrategy::default(),
+            },
+            ExecutableOperatorPayload::SummaryJoin {
+                key: ColumnRef::SampleValue,
+                family: family.clone(),
+            },
+            ExecutableOperatorPayload::SummarySubtract,
+            ExecutableOperatorPayload::SummaryDelete {
+                key: ColumnRef::SampleValue,
+            },
+            ExecutableOperatorPayload::SummaryEstimate {
+                query: SketchQuery::Cardinality,
+            },
+            ExecutableOperatorPayload::SummaryMerge,
+        ];
+        for payload in payloads {
+            // This checks physical identity and placement, not kernel availability.
+            let primitive = match &payload {
+                ExecutableOperatorPayload::Fallback { .. }
+                | ExecutableOperatorPayload::Binary { .. }
+                | ExecutableOperatorPayload::Value { .. }
+                | ExecutableOperatorPayload::RelationalJoin { .. }
+                | ExecutableOperatorPayload::SummaryEstimate { .. } => DataPrimitive::Raw,
+                ExecutableOperatorPayload::SummaryAgg { .. }
+                | ExecutableOperatorPayload::SummaryJoin { .. }
+                | ExecutableOperatorPayload::SummarySubtract
+                | ExecutableOperatorPayload::SummaryDelete { .. }
+                | ExecutableOperatorPayload::SummaryMerge => DataPrimitive::SummaryState,
+            };
+            let dag = ExecutableDag {
+                root: PostAsapNodeId(0),
+                edges: vec![],
+                nodes: vec![ExecutableDagNode {
+                    id: PostAsapNodeId(0),
+                    payload: payload.clone(),
+                    output_state: ExecutionDataState {
+                        timing: ExecutionTiming::QueryTime,
+                        primitive,
+                    },
+                    output_schema: SummarySchema {
+                        fields: vec![SummaryField {
+                            name: "value".into(),
+                            dtype: family.clone(),
+                            nullable: false,
+                        }],
+                        time_index: None,
+                    },
+                    guarantee: None,
+                }],
+            };
+            for phase in [ExecutionTiming::IngestionTime, ExecutionTiming::QueryTime] {
+                let placed = dag
+                    .with_execution_phases(&BTreeMap::from([(dag.root, phase)]))
+                    .unwrap();
+                assert_eq!(placed.nodes[0].payload, payload);
+                assert_eq!(placed.nodes[0].output_state.timing, phase);
+                let wire = serde_json::to_value(&placed).unwrap();
+                assert!(wire["nodes"][0]["payload"].get("timing").is_none());
+                assert_eq!(
+                    serde_json::from_value::<ExecutableDag>(wire).unwrap(),
+                    placed
+                );
+            }
+            assert!(dag.with_execution_phases(&BTreeMap::new()).is_err());
+        }
+    }
+
+    #[test]
+    fn phase_assignment_updates_edges_and_rejects_query_dependencies_in_ingestion() {
+        use crate::pre_asap::ScalarValue;
+        let schema = SummarySchema {
+            fields: vec![],
+            time_index: None,
+        };
+        let nodes = [0, 1]
+            .into_iter()
+            .map(|id| ExecutableDagNode {
+                id: PostAsapNodeId(id),
+                payload: ExecutableOperatorPayload::Fallback {
+                    expression: QueryExpr::Literal(ScalarValue::Int64(1)),
+                },
+                output_state: ExecutionDataState::QUERY_ROWS,
+                output_schema: schema.clone(),
+                guarantee: None,
+            })
+            .collect();
+        let dag = ExecutableDag {
+            nodes,
+            root: PostAsapNodeId(1),
+            edges: vec![ExecutableDagEdge {
+                producer: PostAsapNodeId(0),
+                consumer: PostAsapNodeId(1),
+                role: EdgeRole::Input,
+                intermediate_schema: schema,
+                data_state: ExecutionDataState::QUERY_ROWS,
+                grouping: GroupingEdgeCompatibility::NotApplicable,
+                window: WindowEdgeCompatibility::NotApplicable,
+            }],
+        };
+        let placed = dag
+            .with_execution_phases(&BTreeMap::from([
+                (PostAsapNodeId(0), ExecutionTiming::IngestionTime),
+                (PostAsapNodeId(1), ExecutionTiming::QueryTime),
+            ]))
+            .unwrap();
+        assert_eq!(
+            placed.edges[0].data_state.timing,
+            ExecutionTiming::IngestionTime
+        );
+        assert_eq!(dag.edges[0].data_state.timing, ExecutionTiming::QueryTime);
+        assert!(matches!(
+            dag.with_execution_phases(&BTreeMap::from([
+                (PostAsapNodeId(0), ExecutionTiming::QueryTime),
+                (PostAsapNodeId(1), ExecutionTiming::IngestionTime),
+            ])),
+            Err(ExecutableDagValidationError::QueryDependencyInIngestion { .. })
+        ));
+    }
 
     #[test]
     fn exports_summary_over_summary_as_typed_precompute_edges() {

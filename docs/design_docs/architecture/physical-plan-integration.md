@@ -112,7 +112,7 @@ Every `SummaryExpr` operation also needs explicit physical realization:
 | `BinaryOp` | binary evaluation preserving operand order, execution timing and any typed finite/relative-division guard |
 | `ValueOperation` | concrete realization of the value operation with its required execution timing and data state |
 | `RelationalJoin` | concrete row-join algorithm preserving join kind and predicate |
-| `MembershipFilter` | membership semijoin that preserves authoritative values and carries pruning completeness; ordinary value TopK performs ranking separately |
+| `RelationalJoin` with `JoinKind::Semi` | retain left rows matching explicit right-side keys; candidate pruning carries completeness evidence and ordinary TopK ranks the result |
 
 This table is a completeness requirement, not a claim that every realization
 already exists. Until lowering introduces an explicit physical operator,
@@ -427,13 +427,17 @@ recovering average semantics from query text.
 
 ### Candidate pruning is a subgraph
 
-Candidate-based TopK lowers to summary membership readout, membership filtering
-of authoritative values, and an ordinary grouped TopK value operation. Each
-operation is independently exported and costed; the filter has no ranking or
-limit semantics. Execution can obtain authoritative values from local exact
-state, raw computation, or an explicitly bound external source. These source
-capabilities belong to the deployment, not to the filter.
+Candidate-based TopK uses a summary key readout, a general semi-join over
+explicit matching key columns, and an ordinary grouped TopK value operation.
+The join preserves authoritative left-side values and does not rank or limit
+rows. Completeness evidence controls whether pruning is valid. A plain Limit(k)
+cannot replace either key matching or value ranking.
 
-The executable DAG wire version is 3. The former fused operator has been removed
-without a compatibility alias or decoder. Consumers must upgrade their binding,
-validation and runtime dispatch together.
+Every physical operator can be placed at ingestion time or query time. The
+physical node carries that choice; operator payloads do not contain phase
+fields. The phase assignment API updates producer edge states and rejects an
+ingestion computation that depends on query-time work. Deployment capability,
+storage readiness, schemas and approximation guarantees remain separate checks.
+
+Executable DAG wire version 4 removes the special membership operator, its edge
+roles and the duplicate operator phase fields without compatibility aliases.

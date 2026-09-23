@@ -1021,11 +1021,6 @@ fn collect_summary_aggs(
         | SummaryExpr::SummarySubtract {
             left: outer,
             right: inner,
-        }
-        | SummaryExpr::MembershipFilter {
-            candidates: outer,
-            values: inner,
-            ..
         } => {
             collect_summary_aggs(outer, seen, output);
             collect_summary_aggs(inner, seen, output);

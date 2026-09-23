@@ -309,6 +309,7 @@ async fn sql_join_recursively_binds_both_temporal_aggregate_children() {
         right,
         kind,
         pred,
+        pruning: None,
     } = &join.expr
     else {
         panic!("expected read-time relational join, got {:?}", join.expr);
