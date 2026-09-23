@@ -402,7 +402,36 @@ fn validate(expr: &QueryExpr, schema: &planner_types::pre_asap::Schema) -> Resul
                 return Err(invalid());
             }
             validate(left, schema)?;
-            validate(right, schema)
+            validate(right, schema)?;
+            let (a, _) = left
+                .scalar_type(schema)
+                .map_err(|e| Error::Invalid(e.to_string()))?;
+            let (b, _) = right
+                .scalar_type(schema)
+                .map_err(|e| Error::Invalid(e.to_string()))?;
+            fn comparable(dtype: &DataType) -> bool {
+                match dtype {
+                    DataType::Null
+                    | DataType::Int64
+                    | DataType::Float64
+                    | DataType::Utf8
+                    | DataType::Bool
+                    | DataType::Timestamp => true,
+                    DataType::Map { key, value, .. } => comparable(key) && comparable(value),
+                    _ => false,
+                }
+            }
+            let numeric = |dtype: &DataType| matches!(dtype, DataType::Int64 | DataType::Float64);
+            if !comparable(&a)
+                || !comparable(&b)
+                || (a != b
+                    && !matches!(a, DataType::Null)
+                    && !matches!(b, DataType::Null)
+                    && !(numeric(&a) && numeric(&b)))
+            {
+                return Err(invalid());
+            }
+            Ok(())
         }
         QueryExpr::FunctionCall { name, args } => {
             if name != "asap_struct_field"
