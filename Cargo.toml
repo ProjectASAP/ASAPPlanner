@@ -1,5 +1,7 @@
 [workspace]
 members = [
+    "crates/asap-physical-operators",
+    "crates/asap_sketch_codec",
     "crates/types",
     "crates/sql-function-catalog",
     "crates/asap-aware-mapping",
