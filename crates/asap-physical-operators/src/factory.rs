@@ -1048,6 +1048,57 @@ impl AccumulatorUpdater for PlannerExactUpdater {
     }
 }
 
+struct UnivMonUpdater {
+    acc: UnivMonAccumulator,
+}
+
+struct HllUpdater {
+    acc: HllSketchAccumulator,
+}
+
+impl AccumulatorUpdater for HllUpdater {
+    fn is_keyed(&self) -> bool {
+        false
+    }
+    fn memory_usage_bytes(&self) -> usize {
+        self.acc.approx_memory_bytes()
+    }
+    fn update_single(&mut self, value: f64, _: i64) {
+        if !value.is_nan() {
+            let bits = if value == 0.0 { 0 } else { value.to_bits() };
+            self.acc.inner.update(&bits.to_le_bytes());
+        }
+    }
+    fn update_keyed(&mut self, _: &KeyByLabelValues, value: f64, timestamp_ms: i64) {
+        self.update_single(value, timestamp_ms);
+    }
+    impl_clone_accumulator_methods!(acc);
+    fn reset(&mut self) {
+        self.acc.reset_to_empty();
+    }
+}
+
+impl AccumulatorUpdater for UnivMonUpdater {
+    fn is_keyed(&self) -> bool {
+        false
+    }
+    fn memory_usage_bytes(&self) -> usize {
+        self.acc.approx_memory_bytes()
+    }
+    fn update_single(&mut self, value: f64, _: i64) {
+        self.acc
+            .insert_sample(value)
+            .expect("UnivMon sample counter overflow");
+    }
+    fn update_keyed(&mut self, _: &KeyByLabelValues, value: f64, timestamp_ms: i64) {
+        self.update_single(value, timestamp_ms);
+    }
+    impl_clone_accumulator_methods!(acc);
+    fn reset(&mut self) {
+        self.acc.reset_to_empty();
+    }
+}
+
 #[cfg(test)]
 mod planner_parameter_regression {
     use super::*;
@@ -1135,56 +1186,5 @@ mod planner_parameter_regression {
             };
             assert_eq!(dims, (3, 128), "{algorithm:?}");
         }
-    }
-}
-
-struct UnivMonUpdater {
-    acc: UnivMonAccumulator,
-}
-
-struct HllUpdater {
-    acc: HllSketchAccumulator,
-}
-
-impl AccumulatorUpdater for HllUpdater {
-    fn is_keyed(&self) -> bool {
-        false
-    }
-    fn memory_usage_bytes(&self) -> usize {
-        self.acc.approx_memory_bytes()
-    }
-    fn update_single(&mut self, value: f64, _: i64) {
-        if !value.is_nan() {
-            let bits = if value == 0.0 { 0 } else { value.to_bits() };
-            self.acc.inner.update(&bits.to_le_bytes());
-        }
-    }
-    fn update_keyed(&mut self, _: &KeyByLabelValues, value: f64, timestamp_ms: i64) {
-        self.update_single(value, timestamp_ms);
-    }
-    impl_clone_accumulator_methods!(acc);
-    fn reset(&mut self) {
-        self.acc.reset_to_empty();
-    }
-}
-
-impl AccumulatorUpdater for UnivMonUpdater {
-    fn is_keyed(&self) -> bool {
-        false
-    }
-    fn memory_usage_bytes(&self) -> usize {
-        self.acc.approx_memory_bytes()
-    }
-    fn update_single(&mut self, value: f64, _: i64) {
-        self.acc
-            .insert_sample(value)
-            .expect("UnivMon sample counter overflow");
-    }
-    fn update_keyed(&mut self, _: &KeyByLabelValues, value: f64, timestamp_ms: i64) {
-        self.update_single(value, timestamp_ms);
-    }
-    impl_clone_accumulator_methods!(acc);
-    fn reset(&mut self) {
-        self.acc.reset_to_empty();
     }
 }
