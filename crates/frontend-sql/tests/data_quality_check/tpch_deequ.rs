@@ -76,7 +76,7 @@ fn queries() -> Vec<(&'static str, &'static str)> {
     queries
 }
 
-// Pin rejected IDs and error reasons so coverage swaps cannot pass the ratchet.
+// Pin the rejected IDs (none) so coverage swaps cannot pass the ratchet.
 #[tokio::test]
 async fn lowers_the_warehouse_ingestion_check_set() {
     let cat = catalog();
@@ -92,10 +92,9 @@ async fn lowers_the_warehouse_ingestion_check_set() {
         }
     }
     // P4d and P4l are Pearson correlation checks; they lower since `corr`
-    // became `AggIntent::PearsonCorr`.
-    assert_eq!(
-        rejected,
-        vec![("P2b", "multi-column COUNT(DISTINCT)".into())]
-    );
-    assert_eq!(lowered, 49);
+    // became `AggIntent::PearsonCorr`. P2b is the `(l_orderkey, l_linenumber)`
+    // primary-key check; it lowers since `COUNT(DISTINCT a, b)` became
+    // a multi-column `AggIntent::Cardinality`.
+    assert_eq!(rejected, Vec::<(&str, String)>::new());
+    assert_eq!(lowered, 50);
 }

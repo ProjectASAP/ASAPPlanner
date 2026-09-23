@@ -201,7 +201,7 @@ impl Lowerer {
             AggregateFunction::Min => AggIntent::Min { col: None },
             AggregateFunction::Max => AggIntent::Max { col: None },
             AggregateFunction::Count => AggIntent::Cardinality {
-                col: None,
+                cols: vec![],
                 accuracy: self.accuracy.clone(),
             },
             AggregateFunction::StdDev => AggIntent::StdDev {

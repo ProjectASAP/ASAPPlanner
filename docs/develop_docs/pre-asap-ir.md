@@ -106,7 +106,7 @@ native-histogram accessors — this list is representative, not exhaustive:
 
 ```text
 Count, Sum(col), Min(col), Max(col), Avg(col), StdDev(col), Variance(col),
-Quantile(col, q), TopK(k), Cardinality(col), PearsonCorr(left, right)  // data-model-agnostic
+Quantile(col, q), TopK(k), Cardinality(cols), PearsonCorr(left, right)  // data-model-agnostic
 Rate, Increase                                                    // counter derivatives
 Changes, Delta, IDelta, Deriv, Resets,
 PredictLinear(seconds), DoubleExpSmoothing(sf, tf)                // range-vector functions
@@ -115,15 +115,37 @@ HistogramStdVar, HistogramFraction(lo, hi), HistogramQuantile(q)  // native-hist
 Math(func)                                                        // element-wise transform
 ```
 
-`PearsonCorr { left, right }` is the only measure with two value inputs. Both
+`PearsonCorr { left, right }` has two value inputs. Both
 references resolve to positional column IDs, and `input_cols()` exposes both
-dependencies — `input_col()` returns `None`, so single-column consumers cannot
-pick up half of the pair. SQL lowering projects both arguments, preserving
+dependencies. SQL lowering projects both arguments, preserving
 expressions, casts, and qualified join columns. The result is nullable `Float64`,
 with pairwise null handling owned by the executing engine. It remains exact:
 finalized correlation coefficients cannot be combined as scalar rollups, and no
 sketch or maintained correlation accumulator is selected. Physical costing accepts
 it as a hash aggregate with provider-supplied accumulator size.
+
+`Cardinality { cols, accuracy }` carries a list, not one column. One entry is
+SQL `COUNT(DISTINCT col)`; several count distinct *tuples*
+(`COUNT(DISTINCT a, b)`), which is not the distinct count of any one of them.
+Empty is the PromQL convention "the sample value" (`count_values`,
+`distinct_over_time`). Serialized intents reject unknown fields: legacy
+`Cardinality` payloads containing `col` must be migrated to `cols` before loading
+(`col: n` becomes `cols: [n]`, and `col: null` becomes `cols: []`). Omitting both
+fields still selects the implicit sample input.
+
+`input_cols()` is the only column accessor on `AggIntent` — an intent's arity is
+its own business, so no consumer can ask for "the" input column of an aggregate
+that reads two and silently receive one leg of it. That mattered concretely:
+before `Cardinality` took a list, SQL lowering dropped every argument after the
+first, reporting single-column cardinality as tuple cardinality.
+
+Realization is the single-column one with a wider item: a tuple becomes a
+`SummaryInputExpr::Tuple`, which the distinct-count sketches (HLL, Theta, KMV)
+hash as one value. UnivMon is withheld from a tuple — it estimates frequency
+moments over a single value stream. At `AccuracyTarget::Exact` the node stays a
+logical pass-through at any arity. Each SQL argument must be a bare column,
+qualifier preserved so a tuple over a join resolves to the correct side; an
+expression argument is rejected rather than reduced over a probe column.
 
 SQL `corr` currently rejects `DISTINCT`, aggregate `FILTER`, aggregate `ORDER BY`,
 explicit null treatment, and window usage (`OVER`). Further two-input statistics
@@ -365,9 +387,9 @@ topk(3, up)
 
 ### Dedup
 
-δ — row-level deduplication (SQL `SELECT DISTINCT`). Distinct from `AggIntent::Cardinality`
-(`COUNT(DISTINCT col)`), which collapses to a single number — `Dedup` still returns
-multiple rows.
+δ — row-level deduplication (SQL `SELECT DISTINCT`). Distinct from
+`AggIntent::Cardinality` (`COUNT(DISTINCT col)`, `COUNT(DISTINCT a, b)`), which
+collapses to a single number — `Dedup` still returns multiple rows.
 
 ```sql
 SELECT DISTINCT srcip, dstip FROM packets

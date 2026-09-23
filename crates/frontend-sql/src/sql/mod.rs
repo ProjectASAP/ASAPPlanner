@@ -1561,7 +1561,8 @@ impl FunctionRewrite for ClickHouseBuiltinRewrite {
             // the ClickHouse name (`argMax`/`argMin`) directly (issue #232).
             RewriteKind::PassThrough => return Ok(Transformed::no(Expr::AggregateFunction(f))),
             // `f(args...)` -> `count(args...) DISTINCT` — `lower_agg_intent`
-            // already maps `count` + `DISTINCT` to `AggIntent::Cardinality`.
+            // already maps `count` + `DISTINCT` to `AggIntent::Cardinality`,
+            // at whatever arity the call carries.
             RewriteKind::CountDistinct => AggregateFunction::new_udf(
                 count_udaf(),
                 f.args,
@@ -1636,13 +1637,6 @@ fn lower_agg_intent(expr: &Expr) -> Result<AggIntent<ColumnRef>, LoweringError> 
                     "DISTINCT {name}"
                 )));
             }
-            // Cardinality carries one column; dropping extra DISTINCT arguments
-            // would silently change tuple cardinality into single-column cardinality.
-            if matches!(semantic, AggSemantic::Count) && agg_fn.distinct && agg_fn.args.len() != 1 {
-                return Err(LoweringError::UnsupportedAggregate(
-                    "multi-column COUNT(DISTINCT)".into(),
-                ));
-            }
             // Value reducers (`reducer_col`) require a real column — `SUM(a*b)`
             // is rejected, not silently reduced over a probe column. Quantile
             // and CountDistinct reduce a column too, so they take the same path:
@@ -1672,9 +1666,22 @@ fn lower_agg_intent(expr: &Expr) -> Result<AggIntent<ColumnRef>, LoweringError> 
                         right: expr_to_group_ref(right)?,
                     }
                 }
-                AggSemantic::Count if agg_fn.distinct => AggIntent::Cardinality {
-                    col: col(&agg_fn.args)?,
-                    accuracy: current_accuracy(),
+                // Every argument reaches the intent: `COUNT(DISTINCT a, b)`
+                // counts distinct *tuples*, which is a different quantity from
+                // the distinct count of either column.
+                AggSemantic::Count if agg_fn.distinct => match agg_fn.args.as_slice() {
+                    // DataFusion's planner rejects a bare `COUNT(DISTINCT)`
+                    // before lowering. Guarded anyway: an empty `cols` is the
+                    // PromQL sample-value convention, which SQL never has.
+                    [] => {
+                        return Err(LoweringError::UnsupportedAggregate(
+                            "COUNT(DISTINCT) without an argument".into(),
+                        ))
+                    }
+                    args => AggIntent::Cardinality {
+                        cols: args.iter().map(distinct_col).collect::<Result<_, _>>()?,
+                        accuracy: current_accuracy(),
+                    },
                 },
                 AggSemantic::Count => AggIntent::Count {
                     accuracy: current_accuracy(),
@@ -1714,7 +1721,7 @@ fn lower_agg_intent(expr: &Expr) -> Result<AggIntent<ColumnRef>, LoweringError> 
                     accuracy: current_accuracy(),
                 },
                 AggSemantic::Cardinality => AggIntent::Cardinality {
-                    col: col(&agg_fn.args)?,
+                    cols: vec![reducer_col(&name, &agg_fn.args)?],
                     accuracy: current_accuracy(),
                 },
             })
@@ -2159,6 +2166,18 @@ fn agg_col_name(args: &[Expr]) -> Option<String> {
 fn reducer_col(name: &str, args: &[Expr]) -> Result<ColumnRef, LoweringError> {
     agg_col_name(args).map(ColumnRef::Named).ok_or_else(|| {
         LoweringError::UnsupportedAggregate(format!("{name} over a non-column expression"))
+    })
+}
+
+/// One argument of a `COUNT(DISTINCT ...)`. Resolved the way a grouping key is
+/// — what is being counted is an identity, and its qualifier has to survive a
+/// join (`a.k` vs `b.k`) — but reported as an aggregate restriction, since an
+/// aggregate call is what the user wrote.
+fn distinct_col(expr: &Expr) -> Result<ColumnRef, LoweringError> {
+    expr_to_group_ref(expr).map_err(|_| {
+        LoweringError::UnsupportedAggregate(
+            "COUNT(DISTINCT ...) over a non-column expression".into(),
+        )
     })
 }
 
