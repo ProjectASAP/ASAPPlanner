@@ -420,12 +420,59 @@ fn validate(expr: &QueryExpr, schema: &planner_types::pre_asap::Schema) -> Resul
         QueryExpr::BoolAnd(parts) | QueryExpr::BoolOr(parts) => {
             for part in parts {
                 validate(part, schema)?;
+                if !matches!(
+                    part.scalar_type(schema)
+                        .map_err(|e| Error::Invalid(e.to_string()))?
+                        .0,
+                    DataType::Bool | DataType::Null
+                ) {
+                    return Err(invalid());
+                }
             }
             Ok(())
         }
-        QueryExpr::Not(value) | QueryExpr::IsNull(value) | QueryExpr::IsNotNull(value) => {
-            validate(value, schema)
+        QueryExpr::Not(value) => {
+            validate(value, schema)?;
+            if !matches!(
+                value
+                    .scalar_type(schema)
+                    .map_err(|e| Error::Invalid(e.to_string()))?
+                    .0,
+                DataType::Bool | DataType::Null
+            ) {
+                return Err(invalid());
+            }
+            Ok(())
         }
+        QueryExpr::IsNull(value) | QueryExpr::IsNotNull(value) => validate(value, schema),
         _ => Err(invalid()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn mixed_comparison_preserves_integer_precision_and_boundaries() {
+        assert_eq!(
+            integer_float_cmp(9_007_199_254_740_993, 9_007_199_254_740_992.0),
+            Some(Ordering::Greater)
+        );
+        assert_eq!(
+            integer_float_cmp(i64::MAX, 9_223_372_036_854_775_808.0),
+            Some(Ordering::Less)
+        );
+        assert_eq!(
+            integer_float_cmp(i64::MIN, -9_223_372_036_854_775_808.0),
+            Some(Ordering::Equal)
+        );
+        assert_eq!(integer_float_cmp(-1, -1.5), Some(Ordering::Greater));
+        assert_eq!(integer_float_cmp(1, 1.5), Some(Ordering::Less));
+        assert_eq!(integer_float_cmp(0, f64::INFINITY), Some(Ordering::Less));
+        assert_eq!(
+            integer_float_cmp(0, f64::NEG_INFINITY),
+            Some(Ordering::Greater)
+        );
+        assert_eq!(integer_float_cmp(0, f64::NAN), None);
     }
 }

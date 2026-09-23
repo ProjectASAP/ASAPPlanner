@@ -42,6 +42,11 @@ fn result_field(name: &str, dtype: DataType, nullable: bool) -> SummaryField {
 
 #[derive(Clone, Debug)]
 pub enum Expression {
+    Binary {
+        operator: planner_types::post_asap::BinaryOperator,
+        left: Box<Expression>,
+        right: Box<Expression>,
+    },
     Planner(Box<super::expressions::CompiledExpression>),
     Column(usize),
     Literal {
@@ -68,6 +73,38 @@ impl Expression {
     fn dtype(&self, input: &Schema) -> Result<(DataType, bool), Error> {
         use Expression::*;
         match self {
+            Binary {
+                operator,
+                left,
+                right,
+            } => {
+                use planner_types::pre_asap::{BinaryOpKind, CompareOpKind};
+                let (a, n) = left.dtype(input)?;
+                let (b, m) = right.dtype(input)?;
+                if a != DataType::Float64 || b != a || operator.vector_match.is_some() {
+                    return Err(invalid(
+                        "binary expression requires resolved Float64 operands",
+                    ));
+                }
+                if (operator.checked_relative_division || operator.checked_finite_division)
+                    && operator.kind != BinaryOpKind::Arithmetic(ArithmeticOpKind::Div)
+                {
+                    return Err(invalid("checked division contract on non-division"));
+                }
+                let dtype = match operator.kind {
+                    BinaryOpKind::Arithmetic(_) => DataType::Float64,
+                    BinaryOpKind::Compare(
+                        CompareOpKind::Eq
+                        | CompareOpKind::Ne
+                        | CompareOpKind::Lt
+                        | CompareOpKind::Le
+                        | CompareOpKind::Gt
+                        | CompareOpKind::Ge,
+                    ) => DataType::Bool,
+                    _ => return Err(invalid("unsupported binary operation")),
+                };
+                Ok((dtype, n || m))
+            }
             Planner(expression) => Ok(expression.dtype()),
             Column(i) => {
                 let (t, n) = plain(input, *i)?;
@@ -135,6 +172,21 @@ impl Expression {
     fn evaluate(&self, row: &[Value]) -> Result<Value, Error> {
         use Expression::*;
         Ok(match self {
+            Binary {
+                operator,
+                left,
+                right,
+            } => {
+                let (a, b) = (left.evaluate(row)?, right.evaluate(row)?);
+                if matches!(a, Value::Null) || matches!(b, Value::Null) {
+                    Value::Null
+                } else {
+                    let (Value::Float64(a), Value::Float64(b)) = (a, b) else {
+                        return Err(invalid("binary value schema mismatch"));
+                    };
+                    crate::arithmetic::evaluate_binary(operator, a, b)?
+                }
+            }
             Planner(expression) => expression.evaluate(row)?,
             Column(i) => row[*i].clone(),
             Literal { value, .. } => value.clone(),
@@ -191,9 +243,13 @@ impl Expression {
     }
 }
 fn ordered(dtype: &DataType) -> bool {
+    if let DataType::Map { key, value, .. } = dtype {
+        return ordered(key) && ordered(value);
+    }
     matches!(
         dtype,
-        DataType::Int64
+        DataType::Null
+            | DataType::Int64
             | DataType::Float64
             | DataType::Utf8
             | DataType::Bool
@@ -255,6 +311,13 @@ enum Kind {
         keys: Vec<SortKey>,
         groups: Vec<usize>,
     },
+    Window {
+        intent: Box<planner_types::pre_asap::AggIntent<ColumnRef>>,
+        coordinate: usize,
+        value: usize,
+        groups: Vec<usize>,
+        window: Option<(i64, i64)>,
+    },
     Aggregate {
         groups: Vec<usize>,
         measures: Vec<Reduction>,
@@ -264,7 +327,7 @@ enum Kind {
     },
     Join {
         kind: planner_types::pre_asap::JoinKind,
-        predicate: super::expressions::CompiledExpression,
+        predicate: Box<super::expressions::CompiledExpression>,
     },
     SummaryBuild {
         family: SummaryFamilyType,
@@ -407,11 +470,11 @@ impl Operator {
                     )
                 }
                 Reduction::Min(i) | Reduction::Max(i) => {
-                    let (t, _) = plain(&input, *i)?;
+                    let (t, nullable) = plain(&input, *i)?;
                     if !ordered(t) {
                         return Err(invalid("ordered aggregate input required"));
                     }
-                    (t.clone(), true)
+                    (t.clone(), nullable || groups.is_empty())
                 }
             };
             fields.push(result_field(name, t, n));
@@ -425,6 +488,74 @@ impl Operator {
             output: schema(fields),
         })
     }
+    /// Bind a Planner temporal or histogram intent to explicit columns and window.
+    pub fn window(
+        input: Schema,
+        intent: planner_types::pre_asap::AggIntent<ColumnRef>,
+        coordinate: usize,
+        value: usize,
+        groups: Vec<usize>,
+        window: Option<(i64, i64)>,
+    ) -> Result<Self, Error> {
+        use planner_types::pre_asap::AggIntent;
+        validate_groups(&input, &groups)?;
+        let histogram = matches!(intent, AggIntent::HistogramQuantile { .. });
+        if !matches!(
+            intent,
+            AggIntent::Rate
+                | AggIntent::Increase
+                | AggIntent::Count { .. }
+                | AggIntent::Sum { col: None }
+                | AggIntent::Avg { col: None }
+                | AggIntent::Min { col: None }
+                | AggIntent::Max { col: None }
+                | AggIntent::HistogramQuantile { .. }
+        ) {
+            return Err(invalid(
+                "unsupported temporal intent or unresolved value column",
+            ));
+        }
+        let coordinate_type = if histogram {
+            DataType::Float64
+        } else {
+            DataType::Timestamp
+        };
+        if plain(&input, coordinate)? != (&coordinate_type, false)
+            || plain(&input, value)? != (&DataType::Float64, false)
+        {
+            return Err(invalid("window coordinate/value schema mismatch"));
+        }
+        if (!histogram && !matches!(window, Some((start, end)) if start < end))
+            || (histogram && window.is_some())
+        {
+            return Err(invalid("invalid temporal window"));
+        }
+        let mut fields = groups
+            .iter()
+            .map(|i| input.fields[*i].clone())
+            .collect::<Vec<_>>();
+        fields.push(result_field(
+            "value",
+            if matches!(intent, AggIntent::Count { .. }) {
+                DataType::Int64
+            } else {
+                DataType::Float64
+            },
+            false,
+        ));
+        Ok(Self {
+            kind: Kind::Window {
+                intent: Box::new(intent),
+                coordinate,
+                value,
+                groups,
+                window,
+            },
+            inputs: vec![input],
+            output: schema(fields),
+        })
+    }
+
     pub fn semi_join(
         left: Schema,
         right: Schema,
@@ -475,7 +606,10 @@ impl Operator {
             joined
         };
         Self {
-            kind: Kind::Join { kind, predicate },
+            kind: Kind::Join {
+                kind,
+                predicate: Box::new(predicate),
+            },
             inputs: vec![left, right],
             output: schema(fields),
         }
@@ -648,6 +782,7 @@ impl PhysicalOperator<Batch, Schema> for Operator {
             Kind::Limit { .. } => "Limit",
             Kind::Sort { .. } => "Sort",
             Kind::Aggregate { .. } => "Aggregate",
+            Kind::Window { .. } => "WindowAggregate",
             Kind::SemiJoin { .. } => "SemiJoin",
             Kind::Join { .. } => "RelationalJoin",
             Kind::SummaryBuild { .. } => "SummaryAgg",
@@ -923,6 +1058,13 @@ impl PhysicalOperator<Batch, Schema> for Operator {
                     Kind::Sort { keys, groups } => {
                         let mut grouped = BTreeMap::<Vec<Vec<u8>>, Vec<Vec<Value>>>::new();
                         for row in rows {
+                            for key in keys {
+                                if matches!(row[key.column], Value::Map(_))
+                                    && nested_nan(&row[key.column])
+                                {
+                                    return Err(invalid("NaN in collection sort key"));
+                                }
+                            }
                             grouped
                                 .entry(group_key(&row, groups)?)
                                 .or_default()
@@ -934,6 +1076,15 @@ impl PhysicalOperator<Batch, Schema> for Operator {
                             result.extend(rows);
                         }
                         result
+                    }
+                    Kind::Window {
+                        intent,
+                        coordinate,
+                        value,
+                        groups,
+                        window,
+                    } => {
+                        super::temporal::reduce(rows, intent, groups, *coordinate, *value, *window)?
                     }
                     Kind::Aggregate { groups, measures } => {
                         reduce(rows, groups, measures, &self.inputs[0])?
@@ -1274,4 +1425,15 @@ fn validate_readout(
         return Err(invalid("quantile readout requires quantile in [0,1]"));
     }
     Ok(())
+}
+
+fn nested_nan(value: &Value) -> bool {
+    match value {
+        Value::Float64(value) => value.is_nan(),
+        Value::Map(values) => values
+            .iter()
+            .any(|(key, value)| nested_nan(key) || nested_nan(value)),
+        Value::List(values) | Value::Struct(values) => values.iter().any(nested_nan),
+        _ => false,
+    }
 }
