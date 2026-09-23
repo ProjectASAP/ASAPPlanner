@@ -74,8 +74,10 @@ Grouped TopK composes Sort and Limit within each group; candidate
 completeness is an earlier pruning obligation.
 
 Values retain Planner types and nullability. Native summary batches currently
-support exact Sum/Count/Min/Max/Rate/Increase, KLL, DDSketch and HLL. Other available
-low-level kernels do not imply native batch bindings. Unsupported expressions,
+support exact Sum/Count/Min/Max/Rate/Increase, KLL, DDSketch and HLL. Stored-summary decoding, delta reconstruction, exact finalization and
+family-specific SketchQuery readout also live in this library. Deployment code
+selects compatible panes and supplies source batches. Stored-state kernels do
+not imply native batch bindings for every family. Unsupported expressions,
 state families and parameters must be rejected during binding, without an
 implicit external fallback. The backend retains source, storage, publication and protocol adapters.
 Computation must bind to Planner operations without a second backend operator
