@@ -1,0 +1,558 @@
+//! Bind a post-ASAP DAG to native operators. Sources are explicit execution
+//! frontiers supplied by the deployment; unsupported computation is an error.
+use super::{
+    operators::{Expression, Operator, Reduction, SortKey},
+    values::{Batch, Schema, Value},
+    Error, NodeId, PhysicalDag, PhysicalOperator,
+};
+use planner_types::{
+    post_asap::{
+        ExactOperation, ExecutableDag, ExecutableDagNode, ExecutableOperatorPayload as Payload,
+        SketchQuery, SummaryFamilyType, SummaryInputExpr, ValueOperation,
+    },
+    pre_asap::{
+        AggIntent, ColumnRef, CompareOpKind, DataType, GroupKeys, QueryExpr,
+        Reduction as PlannerReduction, ScalarValue,
+    },
+};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::Arc,
+};
+fn invalid(message: impl Into<String>) -> Error {
+    Error::Invalid(message.into())
+}
+
+/// Source nodes cut the DAG at an installed storage/ingestion frontier. The
+/// binding must have exactly the declared schema and no upstream dependencies.
+/// A deployment must authorize these frontiers before calling this function.
+pub type Source<'a> = Box<dyn PhysicalOperator<Batch, Schema> + 'a>;
+
+pub fn bind<'a>(
+    dag: &ExecutableDag,
+    mut sources: BTreeMap<NodeId, Source<'a>>,
+    roots: &[NodeId],
+) -> Result<PhysicalDag<'a, Batch, Schema>, Error> {
+    preflight_depth(dag)?;
+    dag.validate().map_err(|e| invalid(e.to_string()))?;
+    let nodes = dag
+        .nodes
+        .iter()
+        .map(|node| (u64::from(node.id.0), node))
+        .collect::<BTreeMap<_, _>>();
+    let mut dependencies = BTreeMap::<NodeId, Vec<NodeId>>::new();
+    // Binary input order is semantic; serialized edge order is not.
+    let mut edges = dag.edges.iter().collect::<Vec<_>>();
+    edges.sort_by_key(|edge| {
+        (
+            edge.consumer.0,
+            match edge.role {
+                planner_types::post_asap::EdgeRole::Left => 0,
+                planner_types::post_asap::EdgeRole::Input => 1,
+                planner_types::post_asap::EdgeRole::Right => 2,
+            },
+        )
+    });
+    for edge in edges {
+        dependencies
+            .entry(u64::from(edge.consumer.0))
+            .or_default()
+            .push(u64::from(edge.producer.0));
+    }
+    if sources.keys().any(|id| !nodes.contains_key(id)) {
+        return Err(invalid("source binding names an unknown node"));
+    }
+    let mut ordered = Vec::new();
+    let mut seen = BTreeSet::new();
+    let mut pending = roots.iter().map(|&id| (id, false)).collect::<Vec<_>>();
+    while let Some((id, expanded)) = pending.pop() {
+        if expanded {
+            ordered.push(id);
+            continue;
+        }
+        if !seen.insert(id) {
+            continue;
+        }
+        if !nodes.contains_key(&id) {
+            return Err(invalid(format!("missing root {id}")));
+        }
+        pending.push((id, true));
+        if !sources.contains_key(&id) {
+            for &input in dependencies.get(&id).into_iter().flatten() {
+                pending.push((input, false));
+            }
+        }
+    }
+    let mut graph = PhysicalDag::default();
+    let mut auxiliary = u64::MAX;
+    for id in ordered {
+        let node = nodes[&id];
+        let output = Arc::new(node.output_schema.clone());
+        super::values::validate_schema(&output)?;
+        let (operator, inputs) = if let Some(source) = sources.remove(&id) {
+            if !source.input_schemas().is_empty() || source.output_schema() != output {
+                return Err(invalid("frontier is not a source with the declared schema"));
+            }
+            (
+                Box::new(CheckedSource { source, output }) as Source<'a>,
+                vec![],
+            )
+        } else {
+            let mut inputs = dependencies.get(&id).cloned().unwrap_or_default();
+            let mut schemas = inputs
+                .iter()
+                .map(|id| Arc::new(nodes[id].output_schema.clone()))
+                .collect::<Vec<_>>();
+            if matches!(node.payload, Payload::SummaryMerge { .. }) && inputs.len() > 1 {
+                if schemas.iter().any(|s| s != &schemas[0]) {
+                    return Err(invalid("summary merge inputs have different schemas"));
+                }
+                graph.add(
+                    auxiliary,
+                    inputs,
+                    Operator::union(schemas[0].clone(), schemas.len())?,
+                )?;
+                inputs = vec![auxiliary];
+                auxiliary -= 1;
+                schemas.truncate(1);
+            }
+            let operator = bind_operation(node, &schemas)
+                .map_err(|error| invalid(format!("node {id}: {error}")))?
+                .with_output_schema(output)?;
+            (Box::new(operator) as Source<'a>, inputs)
+        };
+        graph.add_boxed(id, inputs, operator)?;
+    }
+    graph.validate(roots)?;
+    Ok(graph)
+}
+
+fn bind_operation(node: &ExecutableDagNode, inputs: &[Schema]) -> Result<Operator, Error> {
+    if let Payload::RelationalJoin {
+        join_kind: planner_types::pre_asap::JoinKind::Semi,
+        pred,
+        ..
+    } = &node.payload
+    {
+        let [left, right] = inputs else {
+            return Err(invalid("semi-join requires two inputs"));
+        };
+        let mut keys = Vec::new();
+        semi_join_keys(&pred.0, left.fields.len(), right.fields.len(), &mut keys)?;
+        return Operator::semi_join(left.clone(), right.clone(), keys);
+    }
+    let [input] = inputs else {
+        return Err(invalid(
+            "native Planner binding currently requires a unary operation or an explicit source",
+        ));
+    };
+    match &node.payload {
+        Payload::Value { operation, .. } => match operation {
+            ValueOperation::Project { cols, .. } => Operator::project(
+                input.clone(),
+                cols.iter()
+                    .enumerate()
+                    .map(|(i, col)| {
+                        Ok((
+                            node.output_schema
+                                .fields
+                                .get(i)
+                                .ok_or_else(|| invalid("projection width mismatch"))?
+                                .name
+                                .clone(),
+                            expression(&col.expr)?,
+                        ))
+                    })
+                    .collect::<Result<_, Error>>()?,
+            ),
+            ValueOperation::Filter { pred } => {
+                Operator::filter(input.clone(), expression(&pred.0)?)
+            }
+            ValueOperation::Sort { keys, partition_by } => Operator::sort(
+                input.clone(),
+                keys.iter()
+                    .map(|key| {
+                        let QueryExpr::Column(column) = key.expr else {
+                            return Err(invalid(
+                                "sort expression must be projected before sorting",
+                            ));
+                        };
+                        Ok(SortKey {
+                            column,
+                            descending: !key.ascending,
+                            nulls_first: key.nulls_first,
+                        })
+                    })
+                    .collect::<Result<_, Error>>()?,
+                groups(input, partition_by)?,
+            ),
+            ValueOperation::Limit {
+                n,
+                offset,
+                partition_by,
+            } => Operator::limit(
+                input.clone(),
+                *n as u64,
+                *offset as u64,
+                groups(input, partition_by)?,
+            ),
+            ValueOperation::Exact(ExactOperation::Aggregate {
+                reduction,
+                measures,
+                output_names,
+                having: None,
+            }) => {
+                if measures.len() != output_names.len() {
+                    return Err(invalid("aggregate output names differ from measures"));
+                }
+                let PlannerReduction::Reduce(keys) = reduction else {
+                    return Err(invalid(
+                        "per-entity aggregate requires an explicit entity binding",
+                    ));
+                };
+                let measures = measures
+                    .iter()
+                    .zip(output_names)
+                    .map(|(m, name)| {
+                        let column = |col: Option<usize>| {
+                            col.map(Ok)
+                                .unwrap_or_else(|| named_column(input, &ColumnRef::SampleValue))
+                        };
+                        let m = match m {
+                            AggIntent::Count { .. } => Reduction::Count,
+                            AggIntent::Sum { col } => Reduction::Sum(column(*col)?),
+                            AggIntent::Avg { col } => Reduction::Avg(column(*col)?),
+                            AggIntent::Min { col } => Reduction::Min(column(*col)?),
+                            AggIntent::Max { col } => Reduction::Max(column(*col)?),
+                            _ => {
+                                return Err(invalid(
+                                    "aggregate intent has no native implementation",
+                                ))
+                            }
+                        };
+                        Ok((name.clone(), m))
+                    })
+                    .collect::<Result<_, Error>>()?;
+                Operator::aggregate(input.clone(), groups(input, keys)?, measures)
+            }
+            ValueOperation::FinalizeExactAccumulator => {
+                let state = summary_column(input)?;
+                use crate::Statistic as S;
+                use planner_types::post_asap::ExactKind as E;
+                let statistic = match &input.fields[state].dtype {
+                    SummaryFamilyType::ExactAggregate(kind, _) => match kind {
+                        E::Sum => S::Sum,
+                        E::Count => S::Count,
+                        E::Min => S::Min,
+                        E::Max => S::Max,
+                        E::Rate => S::Rate,
+                        E::Increase => S::Increase,
+                        _ => return Err(invalid("exact family readout is unsupported")),
+                    },
+                    _ => return Err(invalid("exact finalization requires exact state")),
+                };
+                Operator::readout(input.clone(), state, statistic, Default::default())
+            }
+            _ => Err(invalid("value operation has no native implementation")),
+        },
+        Payload::SummaryAgg {
+            family,
+            input: update,
+            reduction,
+            grouping,
+        } => {
+            if update.item.is_some() {
+                return Err(invalid("keyed summary update binding is not implemented"));
+            }
+            crate::capability::validate_summary_kernel(family, update, grouping)
+                .map_err(Error::Invalid)?;
+            let SummaryInputExpr::Column(column) = &update.weight else {
+                return Err(invalid(
+                    "summary update expression must be projected to a column",
+                ));
+            };
+            let PlannerReduction::Reduce(keys) = reduction else {
+                return Err(invalid(
+                    "summary construction requires explicit grouping columns",
+                ));
+            };
+            Operator::summary_build(
+                input.clone(),
+                family.clone(),
+                named_column(input, column)?,
+                input.time_index,
+                groups(input, keys)?,
+            )
+        }
+        Payload::SummaryMerge { .. } => {
+            let state = summary_column(input)?;
+            Operator::summary_merge(
+                input.clone(),
+                state,
+                (0..input.fields.len())
+                    .filter(|&i| i != state && Some(i) != input.time_index)
+                    .collect(),
+            )
+        }
+        Payload::SummaryEstimate { query } => {
+            let mut params = std::collections::HashMap::new();
+            let statistic = match query {
+                SketchQuery::Quantile { q } => {
+                    params.insert("quantile".into(), q.to_string());
+                    crate::Statistic::Quantile
+                }
+                SketchQuery::Cardinality => crate::Statistic::Cardinality,
+                SketchQuery::PointCount { value: None, .. } => crate::Statistic::Count,
+                _ => return Err(invalid("summary readout is not implemented")),
+            };
+            Operator::readout(input.clone(), summary_column(input)?, statistic, params)
+        }
+        _ => Err(invalid(
+            "physical operation has no native binding; no fallback is installed",
+        )),
+    }
+}
+fn summary_column(input: &Schema) -> Result<usize, Error> {
+    let columns = input
+        .fields
+        .iter()
+        .enumerate()
+        .filter(|(_, f)| !matches!(f.dtype, SummaryFamilyType::Plain(_)))
+        .map(|(i, _)| i)
+        .collect::<Vec<_>>();
+    match columns.as_slice() {
+        [column] => Ok(*column),
+        _ => Err(invalid("one summary state column required")),
+    }
+}
+fn named_column(input: &Schema, column: &ColumnRef) -> Result<usize, Error> {
+    let name = match column {
+        ColumnRef::Named(name) => name.as_str(),
+        ColumnRef::SampleValue => "value",
+        _ => {
+            return Err(invalid(
+                "summary update requires an unambiguous bound column",
+            ))
+        }
+    };
+    let matches = input
+        .fields
+        .iter()
+        .enumerate()
+        .filter(|(_, field)| field.name == name)
+        .map(|(i, _)| i)
+        .collect::<Vec<_>>();
+    match matches.as_slice() {
+        [column] => Ok(*column),
+        _ => Err(invalid("summary update column missing or ambiguous")),
+    }
+}
+fn groups(input: &Schema, groups: &GroupKeys) -> Result<Vec<usize>, Error> {
+    if groups.is_without() {
+        return Err(invalid("grouping without requires resolved label columns"));
+    }
+    if groups.keys().iter().any(|&i| i >= input.fields.len()) {
+        return Err(invalid("grouping column out of range"));
+    }
+    Ok(groups.keys().to_vec())
+}
+fn expression(expr: &QueryExpr) -> Result<Expression, Error> {
+    let bind = |e: &QueryExpr| expression(e).map(Box::new);
+    Ok(match expr {
+        QueryExpr::Column(i) => Expression::Column(*i),
+        QueryExpr::Literal(value) => {
+            let (value, dtype) = match value {
+                ScalarValue::Int64(v) => (Value::Int64(*v), DataType::Int64),
+                ScalarValue::Float64(v) => (Value::Float64(*v), DataType::Float64),
+                ScalarValue::Utf8(v) => (Value::Utf8(v.as_str().into()), DataType::Utf8),
+                ScalarValue::Boolean(v) => (Value::Bool(*v), DataType::Bool),
+                ScalarValue::Null => (Value::Null, DataType::Null),
+                ScalarValue::Interval {
+                    months,
+                    days,
+                    nanos,
+                } => (
+                    Value::Interval {
+                        months: *months,
+                        days: *days,
+                        nanos: *nanos,
+                    },
+                    DataType::Interval,
+                ),
+            };
+            Expression::Literal { value, dtype }
+        }
+        QueryExpr::Arithmetic { op, left, right } => Expression::Arithmetic {
+            op: op.clone(),
+            left: bind(left)?,
+            right: bind(right)?,
+        },
+        QueryExpr::Compare {
+            left,
+            op: CompareOpKind::Eq,
+            right,
+        } => Expression::Equal(bind(left)?, bind(right)?),
+        QueryExpr::Compare {
+            left,
+            op: CompareOpKind::Lt,
+            right,
+        } => Expression::Less(bind(left)?, bind(right)?),
+        QueryExpr::Not(v) => Expression::Not(bind(v)?),
+        QueryExpr::IsNull(v) => Expression::IsNull(bind(v)?),
+        QueryExpr::IsNotNull(v) => Expression::Not(Box::new(Expression::IsNull(bind(v)?))),
+        QueryExpr::BoolAnd(items) | QueryExpr::BoolOr(items) => {
+            let and = matches!(expr, QueryExpr::BoolAnd(_));
+            let mut result = Expression::Literal {
+                value: Value::Bool(and),
+                dtype: DataType::Bool,
+            };
+            for item in items {
+                result = if and {
+                    Expression::And(Box::new(result), bind(item)?)
+                } else {
+                    Expression::Or(Box::new(result), bind(item)?)
+                };
+            }
+            result
+        }
+        _ => return Err(invalid("expression has no native implementation")),
+    })
+}
+
+// Source adapters may perform I/O, but their actual batches must honor the
+// schema accepted by the binder before a downstream expression sees a row.
+struct CheckedSource<'a> {
+    source: Source<'a>,
+    output: Schema,
+}
+impl PhysicalOperator<Batch, Schema> for CheckedSource<'_> {
+    fn name(&self) -> &str {
+        self.source.name()
+    }
+    fn input_schemas(&self) -> Vec<Schema> {
+        vec![]
+    }
+    fn output_schema(&self) -> Schema {
+        self.output.clone()
+    }
+    fn output_bytes(&self, batch: &Batch) -> usize {
+        self.source.output_bytes(batch)
+    }
+    fn start<'a>(
+        &'a self,
+        inputs: Vec<super::Input<'a, Batch>>,
+        context: super::RunContext,
+    ) -> Result<super::OutputStream<'a, Batch>, Error> {
+        use futures::StreamExt;
+        Ok(self
+            .source
+            .start(inputs, context)?
+            .map(|batch| {
+                let batch = batch?;
+                if batch.schema() != &self.output {
+                    return Err(invalid("source batch differs from its bound schema"));
+                }
+                Ok(batch)
+            })
+            .boxed_local())
+    }
+}
+
+// Bound recursion before invoking the upstream recursive provenance validator.
+fn preflight_depth(dag: &ExecutableDag) -> Result<(), Error> {
+    let mut remaining = dag
+        .nodes
+        .iter()
+        .map(|node| (node.id, 0usize))
+        .collect::<BTreeMap<_, _>>();
+    if remaining.len() != dag.nodes.len() {
+        return Err(invalid("duplicate Planner node"));
+    }
+    let mut consumers = BTreeMap::<_, Vec<_>>::new();
+    for edge in &dag.edges {
+        if !remaining.contains_key(&edge.producer) {
+            return Err(invalid("missing Planner edge producer"));
+        }
+        *remaining
+            .get_mut(&edge.consumer)
+            .ok_or_else(|| invalid("missing Planner edge consumer"))? += 1;
+        consumers
+            .entry(edge.producer)
+            .or_default()
+            .push(edge.consumer);
+    }
+    let mut ready = remaining
+        .iter()
+        .filter(|(_, n)| **n == 0)
+        .map(|(id, _)| *id)
+        .collect::<std::collections::VecDeque<_>>();
+    let mut depths = BTreeMap::new();
+    let mut visited = 0;
+    while let Some(id) = ready.pop_front() {
+        visited += 1;
+        let depth = *depths.get(&id).unwrap_or(&1usize);
+        if depth > 128 {
+            return Err(invalid("DAG exceeds the supported execution depth of 128"));
+        }
+        for &consumer in consumers.get(&id).into_iter().flatten() {
+            let next = depths.entry(consumer).or_insert(1);
+            *next = (*next).max(depth + 1);
+            let count = remaining.get_mut(&consumer).expect("validated endpoint");
+            *count -= 1;
+            if *count == 0 {
+                ready.push_back(consumer);
+            }
+        }
+    }
+    if visited != dag.nodes.len() {
+        return Err(invalid("Planner DAG contains a cycle"));
+    }
+    Ok(())
+}
+
+/// Join predicates address the concatenated left/right schema.
+fn semi_join_keys(
+    expr: &QueryExpr,
+    left: usize,
+    right: usize,
+    keys: &mut Vec<(usize, usize)>,
+) -> Result<(), Error> {
+    match expr {
+        QueryExpr::BoolAnd(parts) => {
+            for part in parts {
+                semi_join_keys(part, left, right, keys)?;
+            }
+        }
+        QueryExpr::Compare {
+            left: a,
+            op: CompareOpKind::Eq,
+            right: b,
+        } => {
+            let (QueryExpr::Column(a), QueryExpr::Column(b)) = (a.as_ref(), b.as_ref()) else {
+                return Err(invalid("semi-join requires column equality keys"));
+            };
+            let (a, b) = if a < b { (*a, *b) } else { (*b, *a) };
+            if a >= left || b < left || b >= left + right {
+                return Err(invalid("semi-join key must match left to right"));
+            }
+            keys.push((a, b - left));
+        }
+        _ => return Err(invalid("unsupported semi-join predicate")),
+    }
+    Ok(())
+}
+
+/// Resolve equality keys against the Planner join's concatenated input schema.
+/// Deployments may use these positions to bind their source columns.
+pub fn equijoin_keys(
+    pred: &planner_types::pre_asap::Predicate,
+    left: &planner_types::post_asap::SummarySchema,
+    right: &planner_types::post_asap::SummarySchema,
+) -> Result<Vec<(usize, usize)>, Error> {
+    let mut keys = Vec::new();
+    semi_join_keys(&pred.0, left.fields.len(), right.fields.len(), &mut keys)?;
+    if keys.is_empty() {
+        return Err(invalid("semi-join requires explicit matching keys"));
+    }
+    Ok(keys)
+}
