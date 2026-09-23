@@ -2334,7 +2334,7 @@ mod tests {
         let shared = summary();
         let root = Rc::new(SummaryNode {
             expr: SummaryExpr::SummaryMerge {
-                timing: asap_types::post_asap::ExecutionTiming::MaintenanceTime,
+                timing: asap_types::post_asap::ExecutionTiming::IngestionTime,
                 children: vec![Rc::clone(&shared), Rc::clone(&shared)],
             },
             schema: shared.schema.clone(),

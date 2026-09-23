@@ -823,7 +823,7 @@ fn promql_quantile_of_rate_binds_kll_over_rate_accumulator() {
     let SummaryExpr::ValueOperation {
         child,
         operation: ValueOperation::FinalizeExactAccumulator,
-        timing: asap_types::post_asap::ExecutionTiming::MaintenanceTime,
+        timing: asap_types::post_asap::ExecutionTiming::IngestionTime,
     } = &child.expr
     else {
         panic!("rate needs a maintenance readout");
@@ -962,7 +962,7 @@ fn promql_sum_of_count_over_time_is_composed_by_default_search() {
 }
 
 #[test]
-fn nested_summary_explicitly_finalizes_exact_child_at_maintenance_time() {
+fn nested_summary_explicitly_finalizes_exact_child_at_ingestion_time() {
     // Real workload selection must expose the state-to-value edge; an outer
     // sketch must not interpret exact accumulator bytes as input samples.
     let pre = Rc::new(
@@ -1001,7 +1001,7 @@ fn nested_summary_explicitly_finalizes_exact_child_at_maintenance_time() {
     ));
     assert_eq!(
         *timing,
-        asap_types::post_asap::ExecutionTiming::MaintenanceTime
+        asap_types::post_asap::ExecutionTiming::IngestionTime
     );
     assert!(matches!(
         source.expr,
@@ -1024,16 +1024,16 @@ fn nested_summary_explicitly_finalizes_exact_child_at_maintenance_time() {
 }
 
 #[test]
-fn exact_binary_maintenance_has_explicit_timing_and_legacy_wire_default() {
+fn binary_wire_requires_named_ingestion_or_query_phase() {
     use asap_types::post_asap::{ExecutableOperatorPayload, ExecutionTiming};
     for (query, expected) in [
         (
             "quantile(0.9, sum_over_time(m[1m]) + sum_over_time(n[1m]))",
-            ExecutionTiming::MaintenanceTime,
+            ExecutionTiming::IngestionTime,
         ),
         (
             "sum_over_time(m[1m]) + sum_over_time(n[1m])",
-            ExecutionTiming::ReadTime,
+            ExecutionTiming::QueryTime,
         ),
     ] {
         let input = lower_promql(query, AccuracyTarget::Epsilon(0.05)).unwrap();
@@ -1056,9 +1056,10 @@ fn exact_binary_maintenance_has_explicit_timing_and_legacy_wire_default() {
             matches!(payload, ExecutableOperatorPayload::Binary { timing, .. } if *timing == expected)
         );
         let wire = serde_json::to_value(payload).unwrap();
-        if expected == ExecutionTiming::ReadTime {
-            assert!(wire.get("timing").is_none());
-        }
+        assert_eq!(wire["timing"], expected.as_str());
+        let mut missing = wire.clone();
+        missing.as_object_mut().unwrap().remove("timing");
+        assert!(serde_json::from_value::<ExecutableOperatorPayload>(missing).is_err());
         let restored: ExecutableOperatorPayload = serde_json::from_value(wire).unwrap();
         assert_eq!(&restored, payload);
     }

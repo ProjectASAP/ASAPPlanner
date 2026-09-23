@@ -274,7 +274,7 @@ mod tests {
     fn shares_children_across_distinct_roots() {
         let merge = Rc::new(SummaryNode {
             expr: SummaryExpr::SummaryMerge {
-                timing: crate::post_asap::ExecutionTiming::MaintenanceTime,
+                timing: crate::post_asap::ExecutionTiming::IngestionTime,
                 children: vec![leaf(1.0), leaf(2.0)],
             },
             schema: SummarySchema {
@@ -417,7 +417,7 @@ mod tests {
                 for _ in 0..24 {
                     current = Rc::new(SummaryNode {
                         expr: SummaryExpr::BinaryOp {
-                            timing: super::super::ExecutionTiming::ReadTime,
+                            timing: super::super::ExecutionTiming::QueryTime,
                             lhs: Rc::clone(&current),
                             rhs: current,
                             operator: super::super::BinaryOperator {

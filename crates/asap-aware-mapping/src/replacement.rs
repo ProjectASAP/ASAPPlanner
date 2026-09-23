@@ -482,8 +482,8 @@ pub enum Replacement {
     Rewrite(Rc<QueryExpr>),
     /// An exact operator composed over another target's *own* selected
     /// decision across an explicit update/readout boundary (issue #171):
-    /// `ValueOperationAtReadTime` over a child's summary readout, or
-    /// `ValueOperationAtMaintenanceTime` feeding a maintained summary above. Carries only a
+    /// `ValueOperationAtQueryTime` over a child's summary readout, or
+    /// `ValueOperationAtIngestionTime` feeding a maintained summary above. Carries only a
     /// reference to the child target — [`PlanSpace::global_selection`]
     /// commits the compatible parent/child pair and
     /// [`GlobalSelection::assemble_selected_dag`] links it into one validated
@@ -557,10 +557,10 @@ pub enum ReplacementProvenance {
     AccuracyReconciliation,
     /// [`Replacement::ExactComposition`] with
     /// [`OperationPlacement::Read`] (issue #171).
-    ValueOperationAtReadTime,
+    ValueOperationAtQueryTime,
     /// [`Replacement::ExactComposition`] with
     /// [`OperationPlacement::Maintenance`] (issue #171).
-    ValueOperationAtMaintenanceTime,
+    ValueOperationAtIngestionTime,
 }
 
 /// A candidate a strategy considered for a target but refused to propose on
@@ -1680,10 +1680,10 @@ fn exact_topk_over_temporal_values(
                 output_names: output_names.clone(),
                 having: None,
             }),
-            timing: ExecutionTiming::ReadTime,
+            timing: ExecutionTiming::QueryTime,
         },
     });
-    validate_execution_data_states_at(&node, ExecutionDataState::READ_ROWS)?;
+    validate_execution_data_states_at(&node, ExecutionDataState::QUERY_ROWS)?;
     Ok(Some(node))
 }
 
@@ -1700,7 +1700,7 @@ fn realize_temporal_average(
         return Ok(None);
     };
     operator.checked_finite_division = true;
-    validate_execution_data_states_at(&node, ExecutionDataState::READ_ROWS)?;
+    validate_execution_data_states_at(&node, ExecutionDataState::QUERY_ROWS)?;
     Ok(Some(node))
 }
 
@@ -1921,7 +1921,7 @@ fn realize_binary(
 
     Ok(Some(Rc::new(SummaryNode {
         expr: SummaryExpr::BinaryOp {
-            timing: ExecutionTiming::ReadTime,
+            timing: ExecutionTiming::QueryTime,
             lhs: lhs_node,
             rhs: rhs_node,
             operator: asap_types::post_asap::BinaryOperator {
@@ -1946,7 +1946,7 @@ fn finalize_exact_accumulator(
     node: Rc<SummaryNode>,
     logical_output: &QueryExpr,
 ) -> Result<Rc<SummaryNode>, RealizationError> {
-    finalize_exact_accumulator_at(node, logical_output, ExecutionTiming::ReadTime)
+    finalize_exact_accumulator_at(node, logical_output, ExecutionTiming::QueryTime)
 }
 
 fn finalize_exact_accumulator_at(
@@ -2287,12 +2287,12 @@ pub(crate) fn construct_summary_with(
                                 output_names: vec![],
                                 having: None,
                             }),
-                            timing: ExecutionTiming::ReadTime,
+                            timing: ExecutionTiming::QueryTime,
                         },
                         schema: lift(&expr.output_schema()?),
                         guarantee,
                     });
-                    validate_execution_data_states_at(&node, ExecutionDataState::READ_ROWS)?;
+                    validate_execution_data_states_at(&node, ExecutionDataState::QUERY_ROWS)?;
                     return Ok(node);
                 }
                 return Ok(candidate);
@@ -2468,7 +2468,7 @@ fn maintenance_exact_values(node: Rc<SummaryNode>) -> Option<Rc<SummaryNode>> {
                 lhs: maintenance_exact_values(lhs.clone())?,
                 rhs: maintenance_exact_values(rhs.clone())?,
                 operator: operator.clone(),
-                timing: ExecutionTiming::MaintenanceTime,
+                timing: ExecutionTiming::IngestionTime,
             }
         }
         SummaryExpr::ValueOperation {
@@ -2486,7 +2486,7 @@ fn maintenance_exact_values(node: Rc<SummaryNode>) -> Option<Rc<SummaryNode>> {
             SummaryExpr::ValueOperation {
                 child: child.clone(),
                 operation: ValueOperation::FinalizeExactAccumulator,
-                timing: ExecutionTiming::MaintenanceTime,
+                timing: ExecutionTiming::IngestionTime,
             }
         }
         _ => return Some(node),
@@ -2560,7 +2560,7 @@ fn construct_summary_agg(
     // accumulator representation. Keep the read boundary explicit even when
     // an exact scalar accumulator currently stores its value directly.
     let bound_child =
-        finalize_exact_accumulator_at(bound_child, &input.child, ExecutionTiming::MaintenanceTime)?;
+        finalize_exact_accumulator_at(bound_child, &input.child, ExecutionTiming::IngestionTime)?;
     let bound_child = match maintenance_exact_values(bound_child) {
         Some(child) => child,
         None => keep_pre_asap(&input.child)?,
@@ -4159,7 +4159,7 @@ impl<'a> GlobalSelection<'a> {
     /// a [`Replacement::Summary`] is
     /// re-linked so its `SummaryAgg` child is the child target's own
     /// DAG assembly whenever that is phase-legal beneath maintenance
-    /// (so a child that chose an `ValueOperationAtMaintenanceTime` actually ends up under
+    /// (so a child that chose an `ValueOperationAtIngestionTime` actually ends up under
     /// the summary); a [`Replacement::Rewrite`] or an unmatched site stays
     /// the conservative `KeepPreAsap`. Memoized by target identity, so a
     /// shared inner summary is one `Rc` no matter how many roots reach it.
@@ -4178,7 +4178,7 @@ impl<'a> GlobalSelection<'a> {
         if let Some(node) = self.assembled_nodes.borrow().get(&ptr) {
             return Ok(Rc::clone(node));
         }
-        let node = if read_time_nested_sum(target) {
+        let node = if query_time_nested_sum(target) {
             self.assemble_residual(target)?
         } else {
             match self
@@ -4243,7 +4243,7 @@ impl<'a> GlobalSelection<'a> {
                 schema: lift(&target.output_schema()?),
                 guarantee,
             });
-            validate_execution_data_states_at(&node, ExecutionDataState::READ_ROWS)?;
+            validate_execution_data_states_at(&node, ExecutionDataState::QUERY_ROWS)?;
             return Ok(node);
         }
         let (child_target, operation) = match target.as_ref() {
@@ -4285,7 +4285,7 @@ impl<'a> GlobalSelection<'a> {
                 output_names,
                 having,
                 child,
-            } if read_time_nested_sum(target) => (
+            } if query_time_nested_sum(target) => (
                 child,
                 ValueOperation::Exact(ExactOperation::Aggregate {
                     reduction: reduction.clone(),
@@ -4307,12 +4307,12 @@ impl<'a> GlobalSelection<'a> {
             expr: SummaryExpr::ValueOperation {
                 child,
                 operation,
-                timing: ExecutionTiming::ReadTime,
+                timing: ExecutionTiming::QueryTime,
             },
             schema: lift(&target.output_schema()?),
             guarantee,
         });
-        validate_execution_data_states_at(&node, ExecutionDataState::READ_ROWS)?;
+        validate_execution_data_states_at(&node, ExecutionDataState::QUERY_ROWS)?;
         Ok(node)
     }
 
@@ -4353,7 +4353,7 @@ impl<'a> GlobalSelection<'a> {
 /// reduction of the inner summary values. Maintaining the outer SUM directly
 /// would hide that inner temporal aggregate inside `KeepPreAsap` and lose its
 /// independently selected summary.
-fn read_time_nested_sum(target: &QueryExpr) -> bool {
+fn query_time_nested_sum(target: &QueryExpr) -> bool {
     let QueryExpr::Aggregate {
         measures,
         having: None,
@@ -4420,10 +4420,8 @@ fn relink_agg_child(node: &Rc<SummaryNode>, new_child: &Rc<SummaryNode>) -> Rc<S
                 schema: node.schema.clone(),
                 guarantee: node.guarantee.clone(),
             });
-            match validate_execution_data_states_at(
-                &rebuilt,
-                ExecutionDataState::MAINTENANCE_SUMMARY,
-            ) {
+            match validate_execution_data_states_at(&rebuilt, ExecutionDataState::INGESTION_SUMMARY)
+            {
                 Ok(_) => rebuilt,
                 Err(_) => Rc::clone(node),
             }
@@ -4433,7 +4431,7 @@ fn relink_agg_child(node: &Rc<SummaryNode>, new_child: &Rc<SummaryNode>) -> Rc<S
 }
 
 /// The maintained `SummaryAgg` a bound `Summary` candidate builds (under
-/// its `SummaryEstimate` readout, if any) — the summary an `ValueOperationAtMaintenanceTime`
+/// its `SummaryEstimate` readout, if any) — the summary an `ValueOperationAtIngestionTime`
 /// beneath it feeds, for `maintenance_operation_plan_cost_rate`.
 fn maintained_summary(node: &Rc<SummaryNode>) -> Option<&Rc<SummaryNode>> {
     match &node.expr {
@@ -4457,7 +4455,7 @@ struct CompositionContext {
     /// one, and the child's own selection is forced to it).
     committed_child: HashMap<*const QueryExpr, *const ReplacementSubDAG>,
     /// site ptr → the maintained `SummaryAgg` directly above it, when its
-    /// parent chose a bound `Summary` — what an `ValueOperationAtMaintenanceTime` here feeds.
+    /// parent chose a bound `Summary` — what an `ValueOperationAtIngestionTime` here feeds.
     maintaining_parent: HashMap<*const QueryExpr, Rc<SummaryNode>>,
 }
 
@@ -4867,7 +4865,7 @@ impl<Id> PlanSpace<Id> {
             };
 
             // Record the maintained summary this site's bound candidate
-            // builds, for a child that may compose an `ValueOperationAtMaintenanceTime`
+            // builds, for a child that may compose an `ValueOperationAtIngestionTime`
             // beneath it.
             if let (Some(Replacement::Summary(node)), QueryExpr::Aggregate { child, .. }) =
                 (chosen.map(|c| &c.replacement), group.target.as_ref())
@@ -8617,7 +8615,7 @@ mod tests {
         let SummaryExpr::ValueOperation {
             child,
             operation: ValueOperation::FinalizeExactAccumulator,
-            timing: ExecutionTiming::MaintenanceTime,
+            timing: ExecutionTiming::IngestionTime,
         } = &child.expr
         else {
             panic!("expected explicit maintenance readout");

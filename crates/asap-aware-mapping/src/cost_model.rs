@@ -88,36 +88,36 @@ pub struct CostProvenance {
 
 /// Which mixed-execution shapes the downstream runtime can actually
 /// execute (issue #171). [`crate::exact_composition::ExactCompositionStrategy`]
-/// proposes an `ValueOperationAtReadTime` candidate only when
-/// `read_time` is set, and an `ValueOperationAtMaintenanceTime` candidate only
-/// when `maintenance_time` is — a runtime that cannot run an exact
+/// proposes an `ValueOperationAtQueryTime` candidate only when
+/// `query_time` is set, and an `ValueOperationAtIngestionTime` candidate only
+/// when `ingestion_time` is — a runtime that cannot run an exact
 /// operator on the update path must never be handed one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct ValueOperationCapabilities {
     /// The runtime can apply an exact operator to summary readouts at
     /// query evaluation time.
-    pub read_time: bool,
+    pub query_time: bool,
     /// The runtime can apply an exact row transform on the update path,
     /// feeding its output into maintained summary state.
-    pub maintenance_time: bool,
+    pub ingestion_time: bool,
 }
 
 impl ValueOperationCapabilities {
     /// Neither shape supported.
     pub const NONE: Self = Self {
-        read_time: false,
-        maintenance_time: false,
+        query_time: false,
+        ingestion_time: false,
     };
     /// Both shapes supported.
     pub const ALL: Self = Self {
-        read_time: true,
-        maintenance_time: true,
+        query_time: true,
+        ingestion_time: true,
     };
 
     pub fn supports(self, placement: OperationPlacement) -> bool {
         match placement {
-            OperationPlacement::Read => self.read_time,
-            OperationPlacement::Maintenance => self.maintenance_time,
+            OperationPlacement::Read => self.query_time,
+            OperationPlacement::Maintenance => self.ingestion_time,
         }
     }
 }

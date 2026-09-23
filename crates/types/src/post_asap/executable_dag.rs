@@ -56,7 +56,6 @@ pub enum ExecutableOperatorPayload {
         expression: QueryExpr,
     },
     Binary {
-        #[serde(default, skip_serializing_if = "ExecutionTiming::is_read_time")]
         timing: ExecutionTiming,
         operator: BinaryOperator,
     },
@@ -463,8 +462,8 @@ pub fn compile_executable_dag_with_node_ids(
         ids.insert(Rc::as_ptr(node), id);
         for (producer, child, role) in child_ids {
             let maintenance_dependency = nodes[producer.0 as usize].output_state.timing
-                == ExecutionTiming::MaintenanceTime
-                && nodes[id.0 as usize].output_state.timing == ExecutionTiming::MaintenanceTime;
+                == ExecutionTiming::IngestionTime
+                && nodes[id.0 as usize].output_state.timing == ExecutionTiming::IngestionTime;
             let grouping = match (&child.expr, &node.expr) {
                 (
                     SummaryExpr::SummaryAgg {
@@ -603,7 +602,7 @@ mod tests {
             expr: SummaryExpr::ValueOperation {
                 child: outer,
                 operation: ValueOperation::FinalizeExactAccumulator,
-                timing: ExecutionTiming::ReadTime,
+                timing: ExecutionTiming::QueryTime,
             },
             schema: SummarySchema {
                 fields: vec![SummaryField {
@@ -626,21 +625,18 @@ mod tests {
         assert_eq!(dag.root, PostAsapNodeId(3));
         assert_eq!(
             dag.nodes[1].output_state,
-            ExecutionDataState::MAINTENANCE_SUMMARY
+            ExecutionDataState::INGESTION_SUMMARY
         );
         assert_eq!(
             dag.nodes[2].output_state,
-            ExecutionDataState::MAINTENANCE_SUMMARY
+            ExecutionDataState::INGESTION_SUMMARY
         );
         let dependency = dag
             .edges
             .iter()
             .find(|e| e.producer == PostAsapNodeId(1) && e.consumer == PostAsapNodeId(2))
             .unwrap();
-        assert_eq!(
-            dependency.data_state,
-            ExecutionDataState::MAINTENANCE_SUMMARY
-        );
+        assert_eq!(dependency.data_state, ExecutionDataState::INGESTION_SUMMARY);
         assert_eq!(dependency.grouping, GroupingEdgeCompatibility::Identical);
         assert_eq!(
             dependency.window,

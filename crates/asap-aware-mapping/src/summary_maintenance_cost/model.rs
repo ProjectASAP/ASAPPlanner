@@ -2898,7 +2898,7 @@ mod tests {
         if merge {
             root = Rc::new(SummaryNode {
                 expr: SummaryExpr::SummaryMerge {
-                    timing: asap_types::post_asap::ExecutionTiming::MaintenanceTime,
+                    timing: asap_types::post_asap::ExecutionTiming::IngestionTime,
                     children: vec![Rc::clone(&agg), Rc::clone(&agg)],
                 },
                 schema: schema.clone(),
@@ -2983,7 +2983,7 @@ mod tests {
         let operand = summary_with_operations(false, false, false);
         Rc::new(SummaryNode {
             expr: SummaryExpr::BinaryOp {
-                timing: asap_types::post_asap::ExecutionTiming::ReadTime,
+                timing: asap_types::post_asap::ExecutionTiming::QueryTime,
                 lhs: Rc::clone(&operand),
                 rhs: operand,
                 operator: asap_types::post_asap::BinaryOperator {

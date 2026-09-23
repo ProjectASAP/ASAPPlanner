@@ -97,15 +97,15 @@ impl OperationPlacement {
     /// The availability the composed operator consumes and produces.
     pub fn data_state(self) -> ExecutionDataState {
         match self {
-            Self::Read => ExecutionDataState::READ_ROWS,
-            Self::Maintenance => ExecutionDataState::MAINTENANCE_ROWS,
+            Self::Read => ExecutionDataState::QUERY_ROWS,
+            Self::Maintenance => ExecutionDataState::INGESTION_ROWS,
         }
     }
 
     pub fn provenance(self) -> ReplacementProvenance {
         match self {
-            Self::Read => ReplacementProvenance::ValueOperationAtReadTime,
-            Self::Maintenance => ReplacementProvenance::ValueOperationAtMaintenanceTime,
+            Self::Read => ReplacementProvenance::ValueOperationAtQueryTime,
+            Self::Maintenance => ReplacementProvenance::ValueOperationAtIngestionTime,
         }
     }
 }
@@ -199,9 +199,9 @@ impl ExactComposition {
             },
         };
         let timing = match self.placement {
-            OperationPlacement::Read => asap_types::post_asap::ExecutionTiming::ReadTime,
+            OperationPlacement::Read => asap_types::post_asap::ExecutionTiming::QueryTime,
             OperationPlacement::Maintenance => {
-                asap_types::post_asap::ExecutionTiming::MaintenanceTime
+                asap_types::post_asap::ExecutionTiming::IngestionTime
             }
         };
         let expr = SummaryExpr::ValueOperation {
@@ -230,7 +230,7 @@ impl ExactComposition {
 /// Which exact reducers may run as a query-time fold over readout rows.
 /// `Count` only at `Exact` accuracy (an approximate count is a sketch
 /// target, not an exact fold).
-fn is_read_time_reducer(intent: &AggIntent) -> bool {
+fn is_query_time_reducer(intent: &AggIntent) -> bool {
     matches!(
         intent,
         AggIntent::Sum { .. }
@@ -258,7 +258,7 @@ fn needs_readout(implementation: &Realization) -> bool {
 }
 
 /// The `(op, child)` of a read-time operation-shaped target, or `None`.
-fn read_time_shape(
+fn query_time_shape(
     root: &QueryExpr,
     cost_model: &dyn CostModel,
 ) -> Option<(ExactOperation, Rc<QueryExpr>, AggIntent)> {
@@ -281,7 +281,7 @@ fn read_time_shape(
     let [intent] = measures.as_slice() else {
         return None;
     };
-    if !is_read_time_reducer(intent) {
+    if !is_query_time_reducer(intent) {
         return None;
     }
     let child_intent = bindable_intent(child)?;
@@ -308,7 +308,7 @@ fn read_time_shape(
 
 /// The `(op, child)` of a function-shaped target — a per-entity exact
 /// transform with no accumulator form — or `None`.
-fn maintenance_time_shape(
+fn ingestion_time_shape(
     root: &QueryExpr,
     cost_model: &dyn CostModel,
 ) -> Option<(ExactOperation, Rc<QueryExpr>, AggIntent)> {
@@ -382,14 +382,14 @@ impl<'a> ExactCompositionStrategy<'a> {
         let schema = asap_types::post_asap::execution_data_state::lift_plain(&schema);
         let mut out = Vec::new();
 
-        if let Some((op, child, intent)) = read_time_shape(target.root, self.cost_model) {
+        if let Some((op, child, intent)) = query_time_shape(target.root, self.cost_model) {
             if self
                 .cost_model
                 .value_operation_support_evidence(&op, OperationPlacement::Read)
                 != Some(false)
             {
                 let child_desc =
-                    describe_intent(bindable_intent(&child).expect("checked by read_time_shape"));
+                    describe_intent(bindable_intent(&child).expect("checked by query_time_shape"));
                 out.push(ReplacementSubDAG {
                     strategy: "ExactCompositionStrategy",
                     replacement: Replacement::ExactComposition(ExactComposition {
@@ -398,7 +398,7 @@ impl<'a> ExactCompositionStrategy<'a> {
                         child_target: child,
                         schema: schema.clone(),
                     }),
-                    provenance: ReplacementProvenance::ValueOperationAtReadTime,
+                    provenance: ReplacementProvenance::ValueOperationAtQueryTime,
                     rationale: format!(
                         "{} is an exact fold whose input is the readout of {} — a maintained \
                          accumulator cannot consume query-time values, so instead of collapsing \
@@ -412,7 +412,7 @@ impl<'a> ExactCompositionStrategy<'a> {
             }
         }
 
-        if let Some((op, child, intent)) = maintenance_time_shape(target.root, self.cost_model) {
+        if let Some((op, child, intent)) = ingestion_time_shape(target.root, self.cost_model) {
             if self
                 .cost_model
                 .value_operation_support_evidence(&op, OperationPlacement::Maintenance)
@@ -426,7 +426,7 @@ impl<'a> ExactCompositionStrategy<'a> {
                         child_target: child,
                         schema,
                     }),
-                    provenance: ReplacementProvenance::ValueOperationAtMaintenanceTime,
+                    provenance: ReplacementProvenance::ValueOperationAtIngestionTime,
                     rationale: format!(
                         "{} is an exact per-entity function with no accumulator form; as an \
                          explicit ExactMaintenance on the update path its output can feed a \
@@ -505,7 +505,7 @@ mod tests {
     }
 
     #[test]
-    fn proposes_read_time_operation_for_max_over_quantile() {
+    fn proposes_query_time_operation_for_max_over_quantile() {
         let root = max_over_quantile();
         let target = TargetSubDAG::new(&root);
         let strategy = ExactCompositionStrategy::default_cost_model();
@@ -521,7 +521,7 @@ mod tests {
         assert_eq!(comp.placement, OperationPlacement::Read);
         assert_eq!(
             candidates[0].provenance,
-            ReplacementProvenance::ValueOperationAtReadTime
+            ReplacementProvenance::ValueOperationAtQueryTime
         );
         let QueryExpr::Aggregate { child, .. } = root.as_ref() else {
             unreachable!()
@@ -535,7 +535,7 @@ mod tests {
     }
 
     #[test]
-    fn proposes_read_time_operation_for_avg_over_quantile_alongside_the_rewrite() {
+    fn proposes_query_time_operation_for_avg_over_quantile_alongside_the_rewrite() {
         let inner = agg(vec![2], default_quantile(0.99), metric_scan(&["zone"]));
         let root = Rc::new(agg(vec![0], AggIntent::Avg { col: None }, inner));
         let target = TargetSubDAG::new(&root);
@@ -550,14 +550,14 @@ mod tests {
     }
 
     #[test]
-    fn proposes_maintenance_time_operation_for_a_per_entity_pass_through_over_raw_input() {
+    fn proposes_ingestion_time_operation_for_a_per_entity_pass_through_over_raw_input() {
         let root = Rc::new(per_entity(AggIntent::Deriv, metric_scan(&["zone"])));
         let target = TargetSubDAG::new(&root);
         let candidates = ExactCompositionStrategy::default_cost_model().replacements(&target);
         assert_eq!(candidates.len(), 1);
         assert_eq!(
             candidates[0].provenance,
-            ReplacementProvenance::ValueOperationAtMaintenanceTime
+            ReplacementProvenance::ValueOperationAtIngestionTime
         );
     }
 
@@ -607,7 +607,7 @@ mod tests {
     }
 
     #[test]
-    fn compose_rejects_a_maintained_state_child_for_a_read_time_operation() {
+    fn compose_rejects_a_maintained_state_child_for_a_query_time_operation() {
         let root = max_over_quantile();
         let target = TargetSubDAG::new(&root);
         let candidates = ExactCompositionStrategy::default_cost_model().replacements(&target);
@@ -638,7 +638,7 @@ mod tests {
         assert!(matches!(
             composed.expr,
             SummaryExpr::ValueOperation {
-                timing: ExecutionTiming::ReadTime,
+                timing: ExecutionTiming::QueryTime,
                 ..
             }
         ));
@@ -650,7 +650,7 @@ mod tests {
     }
 
     #[test]
-    fn compose_rejects_a_readout_child_for_a_maintenance_time_operation() {
+    fn compose_rejects_a_readout_child_for_a_ingestion_time_operation() {
         let inner = agg(vec![2], default_quantile(0.99), metric_scan(&["zone"]));
         let root = Rc::new(per_entity(AggIntent::Deriv, inner));
         let candidates =
@@ -673,7 +673,7 @@ mod tests {
         assert!(matches!(
             comp.compose(raw).unwrap().expr,
             SummaryExpr::ValueOperation {
-                timing: ExecutionTiming::MaintenanceTime,
+                timing: ExecutionTiming::IngestionTime,
                 ..
             }
         ));
