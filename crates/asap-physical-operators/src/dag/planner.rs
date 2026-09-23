@@ -2,7 +2,7 @@
 //! frontiers supplied by the deployment; unsupported computation is an error.
 use super::{
     operators::{Expression, Operator, Reduction, SortKey},
-    values::{Batch, Schema, Value},
+    values::{Batch, Schema},
     Error, NodeId, PhysicalDag, PhysicalOperator,
 };
 use planner_types::{
@@ -11,8 +11,7 @@ use planner_types::{
         SketchQuery, SummaryFamilyType, SummaryInputExpr, ValueOperation,
     },
     pre_asap::{
-        AggIntent, ColumnRef, CompareOpKind, DataType, GroupKeys, QueryExpr,
-        Reduction as PlannerReduction, ScalarValue,
+        AggIntent, ColumnRef, CompareOpKind, GroupKeys, QueryExpr, Reduction as PlannerReduction,
     },
 };
 use std::{
@@ -116,9 +115,8 @@ pub fn bind<'a>(
                 auxiliary -= 1;
                 schemas.truncate(1);
             }
-            let operator = bind_operation(node, &schemas)
-                .map_err(|error| invalid(format!("node {id}: {error}")))?
-                .with_output_schema(output)?;
+            let operator = bind_node(node, &schemas)
+                .map_err(|error| invalid(format!("node {id}: {error}")))?;
             (Box::new(operator) as Source<'a>, inputs)
         };
         graph.add_boxed(id, inputs, operator)?;
@@ -127,19 +125,45 @@ pub fn bind<'a>(
     Ok(graph)
 }
 
+/// Bind a Planner node against the schemas supplied by its deployment edges.
+/// This is the same checked path used by complete DAG binding.
+pub fn bind_node(node: &ExecutableDagNode, inputs: &[Schema]) -> Result<Operator, Error> {
+    for schema in inputs {
+        super::values::validate_schema(schema)?;
+    }
+    bind_operation(node, inputs)?.with_output_schema(Arc::new(node.output_schema.clone()))
+}
+
 fn bind_operation(node: &ExecutableDagNode, inputs: &[Schema]) -> Result<Operator, Error> {
     if let Payload::RelationalJoin {
-        join_kind: planner_types::pre_asap::JoinKind::Semi,
+        join_kind,
         pred,
-        ..
+        pruning,
     } = &node.payload
     {
+        use planner_types::{post_asap::CandidateCompleteness, pre_asap::JoinKind};
+        if pruning.is_some() && *join_kind != JoinKind::Semi {
+            return Err(invalid("pruning certificate requires a semi-join"));
+        }
+        if matches!(pruning,Some(CandidateCompleteness::Certified { guarantee }) if guarantee.has_unknown() || guarantee.metric != planner_types::post_asap::ErrorMetric::TopKMembership)
+        {
+            return Err(invalid("invalid pruning certificate"));
+        }
         let [left, right] = inputs else {
-            return Err(invalid("semi-join requires two inputs"));
+            return Err(invalid("join requires two inputs"));
         };
-        let mut keys = Vec::new();
-        semi_join_keys(&pred.0, left.fields.len(), right.fields.len(), &mut keys)?;
-        return Operator::semi_join(left.clone(), right.clone(), keys);
+        if *join_kind == JoinKind::Semi {
+            if let Ok(keys) = equijoin_keys(pred, left, right) {
+                return Operator::semi_join(left.clone(), right.clone(), keys);
+            }
+        }
+        return Operator::relational_join(
+            left.clone(),
+            right.clone(),
+            join_kind.clone(),
+            pred,
+            Arc::new(node.output_schema.clone()),
+        );
     }
     let [input] = inputs else {
         return Err(invalid(
@@ -160,13 +184,13 @@ fn bind_operation(node: &ExecutableDagNode, inputs: &[Schema]) -> Result<Operato
                                 .ok_or_else(|| invalid("projection width mismatch"))?
                                 .name
                                 .clone(),
-                            expression(&col.expr)?,
+                            expression(&col.expr, input)?,
                         ))
                     })
                     .collect::<Result<_, Error>>()?,
             ),
             ValueOperation::Filter { pred } => {
-                Operator::filter(input.clone(), expression(&pred.0)?)
+                Operator::filter(input.clone(), expression(&pred.0, input)?)
             }
             ValueOperation::Sort { keys, partition_by } => Operator::sort(
                 input.clone(),
@@ -356,71 +380,12 @@ fn groups(input: &Schema, groups: &GroupKeys) -> Result<Vec<usize>, Error> {
     }
     Ok(groups.keys().to_vec())
 }
-fn expression(expr: &QueryExpr) -> Result<Expression, Error> {
-    let bind = |e: &QueryExpr| expression(e).map(Box::new);
-    Ok(match expr {
-        QueryExpr::Column(i) => Expression::Column(*i),
-        QueryExpr::Literal(value) => {
-            let (value, dtype) = match value {
-                ScalarValue::Int64(v) => (Value::Int64(*v), DataType::Int64),
-                ScalarValue::Float64(v) => (Value::Float64(*v), DataType::Float64),
-                ScalarValue::Utf8(v) => (Value::Utf8(v.as_str().into()), DataType::Utf8),
-                ScalarValue::Boolean(v) => (Value::Bool(*v), DataType::Bool),
-                ScalarValue::Null => (Value::Null, DataType::Null),
-                ScalarValue::Interval {
-                    months,
-                    days,
-                    nanos,
-                } => (
-                    Value::Interval {
-                        months: *months,
-                        days: *days,
-                        nanos: *nanos,
-                    },
-                    DataType::Interval,
-                ),
-            };
-            Expression::Literal { value, dtype }
-        }
-        QueryExpr::Arithmetic { op, left, right } => Expression::Arithmetic {
-            op: op.clone(),
-            left: bind(left)?,
-            right: bind(right)?,
-        },
-        QueryExpr::Compare {
-            left,
-            op: CompareOpKind::Eq,
-            right,
-        } => Expression::Equal(bind(left)?, bind(right)?),
-        QueryExpr::Compare {
-            left,
-            op: CompareOpKind::Lt,
-            right,
-        } => Expression::Less(bind(left)?, bind(right)?),
-        QueryExpr::Not(v) => Expression::Not(bind(v)?),
-        QueryExpr::IsNull(v) => Expression::IsNull(bind(v)?),
-        QueryExpr::IsNotNull(v) => Expression::Not(Box::new(Expression::IsNull(bind(v)?))),
-        QueryExpr::BoolAnd(items) | QueryExpr::BoolOr(items) => {
-            let and = matches!(expr, QueryExpr::BoolAnd(_));
-            let mut result = Expression::Literal {
-                value: Value::Bool(and),
-                dtype: DataType::Bool,
-            };
-            for item in items {
-                result = if and {
-                    Expression::And(Box::new(result), bind(item)?)
-                } else {
-                    Expression::Or(Box::new(result), bind(item)?)
-                };
-            }
-            result
-        }
-        _ => return Err(invalid("expression has no native implementation")),
-    })
+fn expression(expr: &QueryExpr, input: &Schema) -> Result<Expression, Error> {
+    Ok(Expression::planner(
+        super::expressions::CompiledExpression::compile(expr, input)?,
+    ))
 }
 
-// Source adapters may perform I/O, but their actual batches must honor the
-// schema accepted by the binder before a downstream expression sees a row.
 struct CheckedSource<'a> {
     source: Source<'a>,
     output: Schema,
