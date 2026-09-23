@@ -102,9 +102,10 @@ The variant follows from whether `lifecycle` was supplied in the input.
 
 ---
 
-## 3. The optimization stage
+## 3. The pluggable optimization pass
 
-The stage is a slot, and `MajorPass` is what fills it unless a caller says otherwise.
+The optimization pass is fully pluggable, as long as the end-to-end behavior is satisfied.
+The `MajorPass` described below will be used by default, which corresponds to the current optimization behavior of `ASAPPlanner`.
 
 ### 3.1 `MajorPass` — the original optimization pass
 
