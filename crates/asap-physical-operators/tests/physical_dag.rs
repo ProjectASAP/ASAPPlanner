@@ -812,3 +812,154 @@ fn planner_semijoin_sort_limit_contract_at_both_phases() {
         assert_eq!(scores, vec![2., 9.]);
     }
 }
+
+// Planner scalar signatures, collection access and null predicates share native execution.
+#[test]
+fn planner_expressions_preserve_collection_and_nullable_types() {
+    use asap_physical_operators::dag::expressions::CompiledExpression;
+    use planner_types::pre_asap::{CompareOpKind, QueryExpr, ScalarValue};
+    use std::rc::Rc;
+    let input_schema = schema(&[(
+        "items",
+        DataType::Map {
+            key: Box::new(DataType::Utf8),
+            value: Box::new(DataType::Int64),
+            value_nullable: false,
+        },
+        false,
+    )]);
+    let access = QueryExpr::FunctionCall {
+        name: "asap_element_access".into(),
+        args: vec![
+            QueryExpr::Column(0),
+            QueryExpr::Literal(ScalarValue::Utf8("count".into())),
+        ],
+    };
+    let project = Operator::project(
+        input_schema.clone(),
+        vec![(
+            "count".into(),
+            Expression::planner(CompiledExpression::compile(&access, &input_schema).unwrap()),
+        )],
+    )
+    .unwrap();
+    let mut dag = PhysicalDag::default();
+    dag.add(
+        0,
+        vec![],
+        Operator::source(
+            input_schema.clone(),
+            vec![Batch::try_new(
+                input_schema.clone(),
+                vec![
+                    vec![Value::Map(
+                        vec![(Value::Utf8("count".into()), Value::Int64(7))].into(),
+                    )],
+                    vec![Value::Map(Arc::from([]))],
+                ],
+            )
+            .unwrap()],
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let projected = project.schema();
+    dag.add(1, vec![0], project).unwrap();
+    let predicate = QueryExpr::Compare {
+        left: Rc::new(QueryExpr::Column(0)),
+        op: CompareOpKind::Ge,
+        right: Rc::new(QueryExpr::Literal(ScalarValue::Int64(1))),
+    };
+    dag.add(
+        2,
+        vec![1],
+        Operator::filter(
+            projected.clone(),
+            Expression::planner(CompiledExpression::compile(&predicate, &projected).unwrap()),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let rows = run(&dag, 2, query());
+    assert!(matches!(rows.as_slice(),[row] if matches!(row.as_slice(),[Value::Int64(7)])));
+    let unknown = QueryExpr::FunctionCall {
+        name: "unregistered_function".into(),
+        args: vec![QueryExpr::Column(0)],
+    };
+    assert!(CompiledExpression::compile(&unknown, &input_schema).is_err());
+}
+
+// Outer, semi and anti joins share Planner predicates and preserve SQL null behavior.
+#[test]
+fn native_relational_join_kinds_preserve_unmatched_rows() {
+    use planner_types::pre_asap::{CompareOpKind, JoinKind, Predicate, QueryExpr};
+    use std::rc::Rc;
+    let input = schema(&[("key", DataType::Int64, true)]);
+    let predicate = Predicate(Rc::new(QueryExpr::Compare {
+        left: Rc::new(QueryExpr::Column(0)),
+        op: CompareOpKind::Eq,
+        right: Rc::new(QueryExpr::Column(1)),
+    }));
+    for (kind, count) in [
+        (JoinKind::Inner, 1),
+        (JoinKind::Left, 3),
+        (JoinKind::Right, 3),
+        (JoinKind::Full, 5),
+        (JoinKind::Semi, 1),
+        (JoinKind::Anti, 2),
+        (JoinKind::Cross, 9),
+    ] {
+        let output = if matches!(kind, JoinKind::Semi | JoinKind::Anti) {
+            input.clone()
+        } else {
+            schema(&[
+                ("left", DataType::Int64, true),
+                ("right", DataType::Int64, true),
+            ])
+        };
+        let mut dag = PhysicalDag::default();
+        for (id, rows) in [
+            (
+                0,
+                vec![
+                    vec![Value::Int64(1)],
+                    vec![Value::Int64(2)],
+                    vec![Value::Null],
+                ],
+            ),
+            (
+                1,
+                vec![
+                    vec![Value::Int64(2)],
+                    vec![Value::Int64(3)],
+                    vec![Value::Null],
+                ],
+            ),
+        ] {
+            dag.add(
+                id,
+                vec![],
+                Operator::source(
+                    input.clone(),
+                    vec![Batch::try_new(input.clone(), rows).unwrap()],
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        }
+        dag.add(
+            2,
+            vec![0, 1],
+            Operator::relational_join(
+                input.clone(),
+                input.clone(),
+                kind.clone(),
+                &predicate,
+                output,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(run(&dag, 2, query()).len(), count, "{kind:?}");
+    }
+}

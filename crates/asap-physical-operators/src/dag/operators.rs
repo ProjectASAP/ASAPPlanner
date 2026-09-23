@@ -42,6 +42,7 @@ fn result_field(name: &str, dtype: DataType, nullable: bool) -> SummaryField {
 
 #[derive(Clone, Debug)]
 pub enum Expression {
+    Planner(Box<super::expressions::CompiledExpression>),
     Column(usize),
     Literal {
         value: Value,
@@ -61,9 +62,13 @@ pub enum Expression {
     IsNull(Box<Expression>),
 }
 impl Expression {
+    pub fn planner(expression: super::expressions::CompiledExpression) -> Self {
+        Self::Planner(Box::new(expression))
+    }
     fn dtype(&self, input: &Schema) -> Result<(DataType, bool), Error> {
         use Expression::*;
         match self {
+            Planner(expression) => Ok(expression.dtype()),
             Column(i) => {
                 let (t, n) = plain(input, *i)?;
                 Ok((t.clone(), n))
@@ -130,6 +135,7 @@ impl Expression {
     fn evaluate(&self, row: &[Value]) -> Result<Value, Error> {
         use Expression::*;
         Ok(match self {
+            Planner(expression) => expression.evaluate(row)?,
             Column(i) => row[*i].clone(),
             Literal { value, .. } => value.clone(),
             Negate(v) => match v.evaluate(row)? {
@@ -195,7 +201,7 @@ fn ordered(dtype: &DataType) -> bool {
             | DataType::Date
     )
 }
-fn numeric(op: &ArithmeticOpKind, a: Value, b: Value) -> Result<Value, Error> {
+pub(super) fn numeric(op: &ArithmeticOpKind, a: Value, b: Value) -> Result<Value, Error> {
     use ArithmeticOpKind::*;
     Ok(match (a, b) {
         (Value::Null, _) | (_, Value::Null) => Value::Null,
@@ -255,6 +261,10 @@ enum Kind {
     },
     SemiJoin {
         keys: Vec<(usize, usize)>,
+    },
+    Join {
+        kind: planner_types::pre_asap::JoinKind,
+        predicate: super::expressions::CompiledExpression,
     },
     SummaryBuild {
         family: SummaryFamilyType,
@@ -434,6 +444,43 @@ impl Operator {
             output: left,
         })
     }
+    pub fn relational_join(
+        left: Schema,
+        right: Schema,
+        kind: planner_types::pre_asap::JoinKind,
+        predicate: &planner_types::pre_asap::Predicate,
+        output: Schema,
+    ) -> Result<Self, Error> {
+        use planner_types::pre_asap::JoinKind;
+        let mut joined = left.fields.clone();
+        joined.extend(right.fields.clone());
+        let predicate =
+            super::expressions::CompiledExpression::compile(&predicate.0, &schema(joined.clone()))?;
+        if predicate.dtype().0 != DataType::Bool {
+            return Err(invalid("join predicate must be boolean"));
+        }
+        let fields = if matches!(kind, JoinKind::Semi | JoinKind::Anti) {
+            left.fields.clone()
+        } else {
+            for field in &mut joined[..left.fields.len()] {
+                if matches!(kind, JoinKind::Right | JoinKind::Full) {
+                    field.nullable = true;
+                }
+            }
+            for field in &mut joined[left.fields.len()..] {
+                if matches!(kind, JoinKind::Left | JoinKind::Full) {
+                    field.nullable = true;
+                }
+            }
+            joined
+        };
+        Self {
+            kind: Kind::Join { kind, predicate },
+            inputs: vec![left, right],
+            output: schema(fields),
+        }
+        .with_output_schema(output)
+    }
     pub fn summary_build(
         input: Schema,
         family: SummaryFamilyType,
@@ -602,6 +649,7 @@ impl PhysicalOperator<Batch, Schema> for Operator {
             Kind::Sort { .. } => "Sort",
             Kind::Aggregate { .. } => "Aggregate",
             Kind::SemiJoin { .. } => "SemiJoin",
+            Kind::Join { .. } => "RelationalJoin",
             Kind::SummaryBuild { .. } => "SummaryAgg",
             Kind::SummaryMerge { .. } => "SummaryMerge",
             Kind::Readout { .. } => "SummaryReadout",
@@ -629,6 +677,65 @@ impl PhysicalOperator<Batch, Schema> for Operator {
             return Ok(futures::stream::select_all(inputs)
                 .map(|batch| batch.map(|batch| batch.value().clone()))
                 .boxed_local());
+        }
+        if let Kind::Join { kind, predicate } = &self.kind {
+            let right = inputs.pop().ok_or_else(|| invalid("right input missing"))?;
+            let left = inputs.pop().ok_or_else(|| invalid("left input missing"))?;
+            return Ok(futures::stream::once(async move {
+                use planner_types::pre_asap::JoinKind;
+                let ((left, _left_memory), (right, _right_memory)) = futures::try_join!(
+                    collect_rows(left, &context),
+                    collect_rows(right, &context)
+                )?;
+                let mut result = Vec::new();
+                let mut right_matched = vec![false; right.len()];
+                for left_row in &left {
+                    let mut matched = false;
+                    for (i, right_row) in right.iter().enumerate() {
+                        let mut joined = left_row.clone();
+                        joined.extend(right_row.iter().cloned());
+                        if *kind == JoinKind::Cross
+                            || matches!(predicate.evaluate(&joined)?, Value::Bool(true))
+                        {
+                            matched = true;
+                            right_matched[i] = true;
+                            match kind {
+                                JoinKind::Semi => {
+                                    result.push(left_row.clone());
+                                    break;
+                                }
+                                JoinKind::Anti => break,
+                                _ => result.push(joined),
+                            }
+                        }
+                    }
+                    if !matched {
+                        match kind {
+                            JoinKind::Left | JoinKind::Full => {
+                                let mut joined = left_row.clone();
+                                joined.resize(
+                                    joined.len() + self.inputs[1].fields.len(),
+                                    Value::Null,
+                                );
+                                result.push(joined);
+                            }
+                            JoinKind::Anti => result.push(left_row.clone()),
+                            _ => {}
+                        }
+                    }
+                }
+                if matches!(kind, JoinKind::Right | JoinKind::Full) {
+                    for (matched, row) in right_matched.into_iter().zip(right) {
+                        if !matched {
+                            let mut joined = vec![Value::Null; self.inputs[0].fields.len()];
+                            joined.extend(row);
+                            result.push(joined);
+                        }
+                    }
+                }
+                Batch::try_new(output, result)
+            })
+            .boxed_local());
         }
         if let Kind::SemiJoin { keys } = &self.kind {
             let right = inputs.pop().ok_or_else(|| invalid("right input missing"))?;

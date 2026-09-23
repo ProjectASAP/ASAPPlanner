@@ -515,3 +515,5 @@ mod tests;
 pub mod planner;
 
 pub mod batch_execution;
+
+pub mod expressions;
