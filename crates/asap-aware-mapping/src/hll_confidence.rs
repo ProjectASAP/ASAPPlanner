@@ -76,7 +76,7 @@ impl ClassicHllConfidence {
         let m = f64::from(1u32 << precision);
         let max_n = f64::from(self.max_distinct);
         // Reserve numerical slack; do not certify sub-floating-point error.
-        let eps = self.relative_error * (1.0 - 1e-8);
+        let eps = self.relative_error - 1e-8;
         if max_n > m / 2.0 || max_n / (2.0 * (m - max_n)) > eps {
             return None;
         }
