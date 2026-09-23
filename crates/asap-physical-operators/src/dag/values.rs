@@ -164,6 +164,29 @@ impl Value {
             (Self::Utf8(a), Self::Utf8(b)) => a.cmp(b),
             (Self::Bool(a), Self::Bool(b)) => a.cmp(b),
             (Self::Date(a), Self::Date(b)) => a.cmp(b),
+            (Self::Map(left), Self::Map(right)) => {
+                let mut result = Ordering::Equal;
+                for ((lk, lv), (rk, rv)) in left.iter().zip(right.iter()) {
+                    result = lk.compare(rk)?;
+                    if result != Ordering::Equal {
+                        break;
+                    }
+                    result = match (lv, rv) {
+                        (Self::Null, Self::Null) => Ordering::Equal,
+                        (Self::Null, _) => Ordering::Greater,
+                        (_, Self::Null) => Ordering::Less,
+                        _ => lv.compare(rv)?,
+                    };
+                    if result != Ordering::Equal {
+                        break;
+                    }
+                }
+                if result == Ordering::Equal {
+                    left.len().cmp(&right.len())
+                } else {
+                    result
+                }
+            }
             _ => {
                 return Err(Error::Operator(
                     "values do not have a supported common ordering".into(),

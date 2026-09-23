@@ -62,9 +62,15 @@ operators currently have no spill implementation.
 ## Operator coverage
 
 Native operations include scalar sources, typed Project and Filter, arithmetic
-and boolean expressions, exact grouped aggregation, semi-join, grouped Sort and
+and boolean expressions, exact grouped aggregation, relational joins (including semi-join), grouped Sort and
 Limit, Union, vector-to-scalar conversion, and summary construction, merge and
-readout. Grouped TopK composes Sort and Limit within each group; candidate
+readout. Window operators consume Planner aggregate intents for Rate, Increase,
+Sum, Avg, Min, Max, Count and histogram quantiles. Deployments supply window
+boundaries and bound columns; the computation is identical in either phase.
+Count outputs Int64. Binary expressions use Planner arithmetic/comparison kinds
+and enforce its checked-division domains.
+
+Grouped TopK composes Sort and Limit within each group; candidate
 completeness is an earlier pruning obligation.
 
 Values retain Planner types and nullability. Native summary batches currently
