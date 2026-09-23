@@ -103,7 +103,7 @@ pub fn bind<'a>(
                 .iter()
                 .map(|id| Arc::new(nodes[id].output_schema.clone()))
                 .collect::<Vec<_>>();
-            if matches!(node.payload, Payload::SummaryMerge { .. }) && inputs.len() > 1 {
+            if matches!(node.payload, Payload::SummaryMerge) && inputs.len() > 1 {
                 if schemas.iter().any(|s| s != &schemas[0]) {
                     return Err(invalid("summary merge inputs have different schemas"));
                 }
@@ -284,7 +284,7 @@ fn bind_operation(node: &ExecutableDagNode, inputs: &[Schema]) -> Result<Operato
                 groups(input, keys)?,
             )
         }
-        Payload::SummaryMerge { .. } => {
+        Payload::SummaryMerge => {
             let state = summary_column(input)?;
             Operator::summary_merge(
                 input.clone(),
