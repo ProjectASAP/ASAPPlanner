@@ -1,0 +1,23 @@
+[package]
+name = "asap-planner"
+version = "0.1.0"
+edition = "2021"
+
+# The library facade (issue #429): one entry point that takes prepared input and
+# returns the selected DAG. It is the only crate that depends on every frontend
+# — before it, the sole facade re-exporting more than one was `asap-devtools`,
+# a developer-tools crate. Everything below the frontend boundary lives in
+# `asap-aware-mapping`, so a third party writing an optimization pass (issue
+# #430) depends on that crate alone and never pulls in DataFusion.
+[dependencies]
+asap-types = { path = "../types" }
+asap-aware-mapping = { path = "../asap-aware-mapping" }
+asap-frontend-sql = { path = "../frontend-sql" }
+asap-frontend-promql = { path = "../frontend-promql" }
+asap-frontend-metricsql = { path = "../frontend-metricsql" }
+thiserror = "2"
+
+[dev-dependencies]
+# The SQL frontend plans through DataFusion, which is async; `e2e_plan` is
+# therefore async and its tests need a runtime.
+tokio = { version = "1", features = ["rt", "macros", "rt-multi-thread"] }
