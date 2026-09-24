@@ -361,3 +361,55 @@ pub(crate) fn plain(schema: &Schema, column: usize) -> Result<(&DataType, bool),
     };
     Ok((dtype, f.nullable))
 }
+
+#[cfg(test)]
+mod weighted_state_tests {
+    use super::*;
+    use crate::summary_operators::weighted_frequency::{FrequencyAlgorithm, WeightedFrequency};
+    use planner_types::post_asap::{SketchAlgorithm, SketchKind, SketchParams};
+
+    // A state cannot acquire a different family or shape merely by relabeling its batch.
+    #[test]
+    fn weighted_state_family_and_shape_must_match() {
+        let cms = SummaryFamilyType::Sketch(
+            SketchKind::new(
+                SketchAlgorithm::CmsWithHeap,
+                SketchParams::CmsWithHeap {
+                    width: 32,
+                    depth: 5,
+                    heap_size: 8,
+                },
+            ),
+            Default::default(),
+        );
+        let cs = SummaryFamilyType::Sketch(
+            SketchKind::new(
+                SketchAlgorithm::CountSketchWithHeap,
+                SketchParams::CountSketchWithHeap {
+                    width: 32,
+                    depth: 5,
+                    heap_size: 8,
+                },
+            ),
+            Default::default(),
+        );
+        let state = WeightedFrequency::new(FrequencyAlgorithm::CountSketch, 32, 5, 8).unwrap();
+        assert!(validate_state(&cs, &state).is_ok());
+        assert!(validate_state(&cms, &state).is_err());
+        let wrong_shape =
+            WeightedFrequency::new(FrequencyAlgorithm::CountSketch, 64, 5, 8).unwrap();
+        assert!(validate_state(&cs, &wrong_shape).is_err());
+        let even_depth = SummaryFamilyType::Sketch(
+            SketchKind::new(
+                SketchAlgorithm::CountSketchWithHeap,
+                SketchParams::CountSketchWithHeap {
+                    width: 32,
+                    depth: 4,
+                    heap_size: 8,
+                },
+            ),
+            Default::default(),
+        );
+        assert!(validate_family(&even_depth).is_err());
+    }
+}

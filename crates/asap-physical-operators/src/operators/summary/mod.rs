@@ -7,18 +7,12 @@ impl Operator {
         items: Vec<usize>,
         groups: Vec<usize>,
     ) -> Result<Self, Error> {
-        use planner_types::post_asap::{SketchAlgorithm, SketchParams};
+        use crate::summary_operators::weighted_frequency::WeightedFrequency;
         crate::values::validate_family(&family)?;
         let SummaryFamilyType::Sketch(kind, _) = &family else {
             return Err(invalid("keyed sketch required"));
         };
-        if kind.algorithm() != &SketchAlgorithm::CmsWithHeap
-            || !matches!(kind.params(), SketchParams::CmsWithHeap { .. })
-        {
-            return Err(invalid(
-                "Float64 weighted keyed construction currently supports CMS with heap",
-            ));
-        }
+        WeightedFrequency::configuration(kind)?;
         validate_groups(&input, &groups)?;
         if items.is_empty() || plain(&input, value)? != (&DataType::Float64, false) {
             return Err(invalid(
@@ -63,18 +57,13 @@ impl Operator {
         k: usize,
         output: Schema,
     ) -> Result<Self, Error> {
-        use planner_types::post_asap::{SketchAlgorithm, SketchParams};
-        crate::capability::validate_native_family(&field(&input, state)?.dtype)?;
+        use crate::summary_operators::weighted_frequency::WeightedFrequency;
+        crate::values::validate_family(&field(&input, state)?.dtype)?;
         let SummaryFamilyType::Sketch(kind, _) = &field(&input, state)?.dtype else {
             return Err(invalid("keyed readout requires summary state"));
         };
-        let SketchParams::CmsWithHeap { heap_size, .. } = kind.params() else {
-            return Err(invalid("unsupported keyed readout family"));
-        };
-        if kind.algorithm() != &SketchAlgorithm::CmsWithHeap
-            || k > *heap_size as usize
-            || output.fields.len() <= input.fields.len()
-        {
+        let (_, _, _, capacity) = WeightedFrequency::configuration(kind)?;
+        if k > capacity || output.fields.len() <= input.fields.len() {
             return Err(invalid("invalid keyed readout shape or capacity"));
         }
         if state + 1 != input.fields.len()
@@ -92,7 +81,6 @@ impl Operator {
             output,
         })
     }
-
     pub fn summary_build(
         input: Schema,
         family: SummaryFamilyType,
@@ -243,8 +231,8 @@ pub(super) fn execute<'a>(
                     };
                     let summary = summary
                         .as_any()
-                        .downcast_ref::<crate::summary_operators::weighted_cms::WeightedCms>()
-                        .ok_or_else(|| invalid("weighted CMS typed state required"))?;
+                        .downcast_ref::<crate::summary_operators::weighted_frequency::WeightedFrequency>()
+                        .ok_or_else(|| invalid("weighted frequency typed state required"))?;
                     for items in summary.rows(*k) {
                         let mut values = row[..*state].to_vec();
                         values.extend(items);
@@ -473,21 +461,14 @@ async fn build_keyed_summary(
     groups: &[usize],
     context: &RunContext,
 ) -> Result<Vec<Vec<Value>>, Error> {
-    use crate::{summary_operators::weighted_cms::WeightedCms, AggregateCore};
-    use planner_types::post_asap::SketchParams;
+    use crate::{summary_operators::weighted_frequency::WeightedFrequency, AggregateCore};
     let SummaryFamilyType::Sketch(kind, _) = family else {
         unreachable!()
     };
-    let SketchParams::CmsWithHeap {
-        width,
-        depth,
-        heap_size,
-    } = kind.params()
-    else {
-        unreachable!()
-    };
+    let (algorithm, width, depth, capacity) = WeightedFrequency::configuration(kind)?;
     let mut work = Cooperative::new(context);
-    let mut states = BTreeMap::<Vec<Vec<u8>>, (Vec<Value>, WeightedCms, Reservation, usize)>::new();
+    let mut states =
+        BTreeMap::<Vec<Vec<u8>>, (Vec<Value>, WeightedFrequency, Reservation, usize)>::new();
     while let Some(batch) = input.next().await {
         let batch = batch?;
         for row in batch.rows() {
@@ -498,17 +479,17 @@ async fn build_keyed_summary(
                 let overhead = labels.iter().map(Value::bytes).sum::<usize>()
                     + key.iter().map(|v| v.len() + 24).sum::<usize>()
                     + 128;
-                let bytes = (*width as usize)
-                    .checked_mul(*depth as usize)
+                let bytes = width
+                    .checked_mul(depth)
                     .and_then(|n| n.checked_mul(8))
                     .and_then(|n| n.checked_add(overhead))
-                    .ok_or_else(|| invalid("weighted CMS memory size overflow"))?;
+                    .ok_or_else(|| invalid("weighted frequency memory size overflow"))?;
                 let reservation = context.reserve(bytes)?;
                 states.insert(
                     key.clone(),
                     (
                         labels,
-                        WeightedCms::new(*width as usize, *depth as usize, *heap_size as usize)?,
+                        WeightedFrequency::new(algorithm, width, depth, capacity)?,
                         reservation,
                         overhead,
                     ),
@@ -516,7 +497,7 @@ async fn build_keyed_summary(
             }
             let (_, summary, reservation, overhead) = states.get_mut(&key).unwrap();
             let Value::Float64(weight) = row[value] else {
-                return Err(invalid("weighted CMS weight type"));
+                return Err(invalid("weighted frequency weight type"));
             };
             summary.update(
                 &items.iter().map(|&i| row[i].clone()).collect::<Vec<_>>(),

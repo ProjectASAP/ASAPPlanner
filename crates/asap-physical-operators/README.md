@@ -58,7 +58,7 @@ operations; it does not interpret an unknown node as external fallback.
 Plain values preserve Planner scalar/collection types and nullability. Numeric
 arithmetic uses matching Int64 or Float64 inputs; integer overflow is an error.
 Boolean predicates use three-valued logic. Native summary states currently cover
-exact Sum/Count/Min/Max/Rate/Increase, KLL, DDSketch, HLL and Float64 weighted CMS with a candidate heap. Binding checks family,
+exact Sum/Count/Min/Max/Rate/Increase, KLL, DDSketch, HLL and Float64 weighted CMS and CountSketch with candidate heaps. Binding checks family,
 parameters and readout compatibility; source batches also validate state payloads.
 Existing accumulator algorithms are reused as kernels behind these operators.
 

@@ -243,7 +243,7 @@ the library contract; backend raw-data access still requires a deployment connec
 | Level | Acceptance contract | Scope |
 | --- | --- | --- |
 | Update kernel | `capability::validate_summary_kernel` | Family, parameters, grouping and item/update layout; used by the accumulator factory |
-| Native state edge | `capability::validate_native_family` | Exact accumulators, KLL, DDSketch, HLL and Float64 weighted CMS with compatible parameters |
+| Native state edge | `capability::validate_native_family` | Exact accumulators, KLL, DDSketch, HLL and Float64 weighted CMS and CountSketch with compatible parameters |
 | Scalar native readout | `capability::validate_native_readout` | Supported native state plus statistic/readout arguments |
 | Keyed native readout | `Operator::keyed_readout` | Weighted CMS family, heap capacity, typed identity/score schema and preserved partition columns |
 | Complete physical plan | `binding::bind` / `bind_with_data_sources` | Node support, expressions, schemas, source frontiers and bounded input requirements |

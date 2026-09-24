@@ -3,7 +3,7 @@
 //! `validate_summary_kernel` checks update kernels, including families without a
 //! native batch representation. `validate_native_family` and
 //! `validate_native_readout` check native state and scalar readout support.
-//! Keyed weighted-CMS readouts are checked by `Operator::keyed_readout`.
+//! Keyed weighted-frequency readouts are checked by `Operator::keyed_readout`.
 //! A successful kernel check alone does not mean an executable DAG will bind.
 //!
 //! Persisted state uses `stored_state` decoding and readout contracts; support
@@ -143,11 +143,16 @@ pub fn validate_native_family(family: &SummaryFamilyType) -> Result<(), Error> {
     use planner_types::post_asap::SketchAlgorithm as A;
     if let SummaryFamilyType::Sketch(kind, grouping) = family {
         if matches!(kind.algorithm(), A::CmsWithHeap | A::CountSketchWithHeap) {
-            let (_, width, depth, _) = crate::summary_operators::weighted_frequency::WeightedFrequency::configuration(kind)?;
+            let (_, width, depth, _) =
+                crate::summary_operators::weighted_frequency::WeightedFrequency::configuration(
+                    kind,
+                )?;
             return if valid_matrix(width as u32, depth as u32) && grouping == &Default::default() {
                 Ok(())
             } else {
-                Err(Error::Invalid("invalid weighted frequency dimensions or grouping strategy".into()))
+                Err(Error::Invalid(
+                    "invalid weighted frequency dimensions or grouping strategy".into(),
+                ))
             };
         }
     }
