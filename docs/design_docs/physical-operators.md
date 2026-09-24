@@ -38,7 +38,7 @@ src/
     source.rs        literals, batch sources, union, scalar conversion
   sources/           raw-source API, Scan and memory connector
   binding/           Planner executable DAG → physical operators
-  summary_kernels/ mathematical kernels, factory and traits
+  summary_kernels/ sketchlib adapters, exact accumulators, factory and traits
   stored_state/      decoding, delta application, persisted-state readout
   capability.rs      support checks
   values.rs          typed rows and state validation
@@ -120,6 +120,8 @@ admission. Deployments provide a complete evaluation window or equivalent snapsh
 | Persisted formats and reconstruction | `stored_state` |
 
 Kernel or stored-state support alone does not imply executable-plan support.
+Weighted CMS/CountSketch algorithms and candidate heaps live in `asap_sketchlib`;
+the local adapter translates Planner parameters and typed values.
 
 ## Scope and acceptance
 

@@ -97,13 +97,8 @@ impl DDSketchAccumulator {
             )
             .into());
         }
-        // The DataPoint-level METRIC scalars (count/sum/min/max) were
-        // dropped from `DDSketchState` (ProjectASAP/sketchlib-go#243 /
-        // asap_sketchlib#57). Reconstruct from the bucket store only:
-        // `DdSketch::from_raw` now takes just (alpha, store_counts,
-        // store_offset) and recovers `count` by summing the bucket
-        // counts via `total_count()`.
-        let inner = DdSketch::from_raw(state.alpha, state.store_counts.clone(), state.store_offset);
+        // Preserve positive, negative and zero stores from the sketchlib wire state.
+        let inner = DdSketch::from_proto(state);
         Ok(Self {
             inner,
             sample_p: normalize_sample_p(sample_p),
@@ -138,6 +133,12 @@ impl DDSketchAccumulator {
             .collect();
         let delta = DdSketchDelta {
             buckets,
+            negative_buckets: pb
+                .negative_buckets
+                .into_iter()
+                .map(|b| (b.index, b.d_count))
+                .collect(),
+            zero_count: pb.zero_count,
             ..Default::default()
         };
         self.inner
@@ -309,6 +310,7 @@ mod tests {
             alpha,
             store_counts,
             store_offset,
+            ..Default::default()
         };
         SketchEnvelope {
             sketch_state: Some(sketch_envelope::SketchState::Ddsketch(state)),
@@ -348,6 +350,7 @@ mod tests {
             alpha: 0.01,
             store_counts: vec![1, 2, 3, 4],
             store_offset: -2,
+            ..Default::default()
         };
         let env = SketchEnvelope {
             sketch_state: Some(sketch_envelope::SketchState::Ddsketch(state)),
@@ -443,6 +446,7 @@ mod tests {
                     d_count: 20,
                 },
             ],
+            ..Default::default()
         }
         .encode_to_vec();
 
@@ -464,6 +468,7 @@ mod tests {
                 index: i32::MAX,
                 d_count: 1,
             }],
+            ..Default::default()
         }
         .encode_to_vec();
         assert!(acc.apply_proto_delta_bytes(&bytes).is_err());
@@ -591,6 +596,7 @@ mod tests {
                 alpha: 0.01,
                 store_counts: vec![2, 4, 6, 8],
                 store_offset: -2,
+                ..Default::default()
             })),
             ..Default::default()
         };
@@ -624,6 +630,7 @@ mod tests {
             alpha: 0.01,
             store_counts: vec![1, 2, 3],
             store_offset: 0,
+            ..Default::default()
         }
         .encode_to_vec();
         assert_eq!(
@@ -661,5 +668,59 @@ mod tests {
             .downcast_ref::<DDSketchAccumulator>()
             .expect("downcast ok");
         assert_eq!(merged.sample_p, 0.1);
+    }
+}
+
+#[cfg(test)]
+mod dependency_upgrade_tests {
+    use super::*;
+    // The upgraded sketchlib state must retain negative and zero stores through both adapters.
+    #[test]
+    fn signed_state_survives_codec_and_accumulator_roundtrip() {
+        let mut inner = DdSketch::new(0.01);
+        for value in [-4.0, 0.0, 8.0] {
+            inner.update(value);
+        }
+        let bytes = asap_sketch_codec::encode_ddsketch(&inner);
+        let (wire, _) = asap_sketch_codec::ddsketch_state(&bytes).unwrap();
+        assert_eq!(wire.zero_count, 1);
+        assert_eq!(wire.negative_store_counts.iter().sum::<u64>(), 1);
+        let restored = DDSketchAccumulator::from_sketchlib_proto_bytes(&bytes).unwrap();
+        assert_eq!(restored.inner.total_count(), 3);
+        assert_eq!(restored.inner.alpha, inner.wire_alpha());
+        assert_eq!(restored.inner.store_counts, inner.store_counts);
+        assert_eq!(restored.inner.store_offset, inner.store_offset);
+        assert_eq!(
+            restored.inner.negative_store_counts,
+            inner.negative_store_counts
+        );
+        assert_eq!(
+            restored.inner.negative_store_offset,
+            inner.negative_store_offset
+        );
+        assert_eq!(restored.inner.zero_count, inner.zero_count);
+    }
+    // Negative and zero delta fields added by sketchlib must not be discarded by the adapter.
+    #[test]
+    fn signed_delta_survives_adapter() {
+        use asap_sketchlib::proto::sketchlib::{DdSketchBucketDelta, DdSketchDelta as PbDelta};
+        use prost::Message;
+        let mut accumulator = DDSketchAccumulator::new(0.01);
+        let bytes = PbDelta {
+            negative_buckets: vec![DdSketchBucketDelta {
+                index: 0,
+                d_count: 2,
+            }],
+            zero_count: 3,
+            ..Default::default()
+        }
+        .encode_to_vec();
+        accumulator.apply_proto_delta_bytes(&bytes).unwrap();
+        assert_eq!(accumulator.inner.total_count(), 5);
+        assert_eq!(accumulator.inner.zero_count, 3);
+        assert_eq!(
+            accumulator.inner.negative_store_counts.iter().sum::<u64>(),
+            2
+        );
     }
 }

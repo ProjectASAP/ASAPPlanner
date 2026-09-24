@@ -47,11 +47,7 @@ pub fn encode_ddsketch(sketch: &DdSketch) -> Vec<u8> {
         producer: None,
         hash_spec: None,
         sample_p: 0.0,
-        sketch_state: Some(SketchState::Ddsketch(DdSketchState {
-            alpha: sketch.wire_alpha(),
-            store_counts: sketch.store_counts.clone(),
-            store_offset: sketch.store_offset,
-        })),
+        sketch_state: Some(SketchState::Ddsketch(sketch.to_proto())),
     };
     envelope.encode_to_vec()
 }
