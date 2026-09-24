@@ -29,8 +29,28 @@ pub type Source<'a> = Box<dyn PhysicalOperator<Batch, Schema> + 'a>;
 
 pub fn bind<'a>(
     dag: &ExecutableDag,
+    sources: BTreeMap<NodeId, Source<'a>>,
+    roots: &[NodeId],
+) -> Result<PhysicalDag<'a, Batch, Schema>, Error> {
+    bind_internal(dag, sources, roots, None)
+}
+
+/// Bind raw Planner Scan leaves through registered connectors. Other retained
+/// pre-ASAP expressions remain unsupported; they are not executed externally.
+pub fn bind_with_data_sources<'a>(
+    dag: &ExecutableDag,
+    sources: BTreeMap<NodeId, Source<'a>>,
+    roots: &[NodeId],
+    data_sources: &super::scan::DataSources,
+) -> Result<PhysicalDag<'a, Batch, Schema>, Error> {
+    bind_internal(dag, sources, roots, Some(data_sources))
+}
+
+fn bind_internal<'a>(
+    dag: &ExecutableDag,
     mut sources: BTreeMap<NodeId, Source<'a>>,
     roots: &[NodeId],
+    data_sources: Option<&super::scan::DataSources>,
 ) -> Result<PhysicalDag<'a, Batch, Schema>, Error> {
     preflight_depth(dag)?;
     dag.validate().map_err(|e| invalid(e.to_string()))?;
@@ -96,6 +116,18 @@ pub fn bind<'a>(
                 Box::new(CheckedSource { source, output }) as Source<'a>,
                 vec![],
             )
+        } else if let (
+            Some(registry),
+            Payload::Fallback {
+                expression: expression @ QueryExpr::Scan { .. },
+            },
+        ) = (data_sources, &node.payload)
+        {
+            let scan = registry.bind(expression)?;
+            if scan.output_schema() != output {
+                return Err(invalid("Scan output differs from post-ASAP schema"));
+            }
+            (Box::new(scan) as Source<'a>, vec![])
         } else {
             let mut inputs = dependencies.get(&id).cloned().unwrap_or_default();
             let mut schemas = inputs
