@@ -45,8 +45,8 @@ summary family supports incremental maintenance.
   and predicate.
 - Candidate pruning uses `RelationalJoin` with `JoinKind::Semi` and an explicit
   equality predicate on key columns. The left input supplies authoritative
-  values; the right input supplies keys. An ordinary TopK value operation ranks
-  the joined rows. Completeness evidence belongs to pruning, not ranking.
+  values; the right input supplies keys. Grouped Sort followed by grouped Limit ranks
+  and selects the joined rows. Completeness evidence belongs to pruning, not ranking.
 
 A `SummaryNode` carries its expression, schema and optional result guarantee.
 State and query values have different contracts. Exact operations over

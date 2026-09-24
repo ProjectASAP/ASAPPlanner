@@ -10047,4 +10047,44 @@ mod tests {
         values.fields[0].dtype = SummaryFamilyType::Plain(DataType::Int64);
         assert_eq!(ranking_score_index(&logical, &values).unwrap(), 1);
     }
+    // A heap's key schema is derived from its encoded item, not all label columns.
+    #[test]
+    fn heap_readout_preserves_numeric_item_identity() {
+        let mut raw = metric_scan(&["id", "description"]);
+        let QueryExpr::Scan { schema, .. } = &mut raw else {
+            unreachable!()
+        };
+        schema.columns[2].dtype = DataType::Int64;
+        let node = agg(
+            vec![],
+            AggIntent::TopK {
+                k: 2,
+                accuracy: AccuracyTarget::Epsilon(0.01),
+            },
+            agg(vec![2], AggIntent::Sum { col: None }, raw.clone()),
+        );
+        let input = PhysicalSummaryInput {
+            child: Rc::new(raw),
+            input: SummaryUpdate {
+                item: Some(SummaryInputExpr::Column(ColumnRef::Named("id".into()))),
+                weight: SummaryInputExpr::Constant(1.0),
+                weight_domain: WeightDomain::NonNegative {
+                    proof: NonNegativeWeightProof::UnitCount,
+                },
+            },
+        };
+        let schema = keyed_heap_readout_schema(&input, &node).unwrap();
+        assert_eq!(
+            schema
+                .fields
+                .iter()
+                .map(|f| f.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["id", "__asap_estimate"]
+        );
+        assert_eq!(
+            schema.fields[0].dtype,
+            SummaryFamilyType::Plain(DataType::Int64)
+        );
+    }
 }
