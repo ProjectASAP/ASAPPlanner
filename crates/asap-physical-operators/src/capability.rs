@@ -142,22 +142,12 @@ pub(crate) fn is_unit_sample_frequency(update: &planner_types::post_asap::Summar
 pub fn validate_native_family(family: &SummaryFamilyType) -> Result<(), Error> {
     use planner_types::post_asap::SketchAlgorithm as A;
     if let SummaryFamilyType::Sketch(kind, grouping) = family {
-        if let planner_types::post_asap::SketchParams::CmsWithHeap {
-            width,
-            depth,
-            heap_size,
-        } = kind.params()
-        {
-            return if kind.algorithm() == &A::CmsWithHeap
-                && valid_matrix(*width, *depth)
-                && *heap_size > 0
-                && grouping == &Default::default()
-            {
+        if matches!(kind.algorithm(), A::CmsWithHeap | A::CountSketchWithHeap) {
+            let (_, width, depth, _) = crate::summary_operators::weighted_frequency::WeightedFrequency::configuration(kind)?;
+            return if valid_matrix(width as u32, depth as u32) && grouping == &Default::default() {
                 Ok(())
             } else {
-                Err(Error::Invalid(
-                    "invalid weighted CMS family or grouping strategy".into(),
-                ))
+                Err(Error::Invalid("invalid weighted frequency dimensions or grouping strategy".into()))
             };
         }
     }

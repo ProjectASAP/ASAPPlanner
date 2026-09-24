@@ -1,4 +1,4 @@
-//! Float64 weighted CMS state with typed candidate identities. Each instance
+//! Float64 weighted CMS and CountSketch state with typed candidate identities. Each instance
 //! represents one partition at one evaluation scope; updates never round rates
 //! to integer counts. Candidate membership still requires Planner evidence.
 use crate::{values::Value, Error};
@@ -26,7 +26,11 @@ impl Identity {
             Value::Int64(v) => Self::Int64(*v),
             Value::Float64(v) if v.is_finite() => Self::Float64(if *v == 0.0 { 0.0 } else { *v }),
             Value::Utf8(v) => Self::Utf8(v.to_string()),
-            _ => return Err(Error::Invalid("unsupported weighted CMS identity".into())),
+            _ => {
+                return Err(Error::Invalid(
+                    "unsupported weighted frequency identity".into(),
+                ))
+            }
         })
     }
     fn value(&self) -> Value {
@@ -65,29 +69,84 @@ impl Ord for Candidate {
             .then_with(|| other.key.cmp(&self.key))
     }
 }
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum FrequencyAlgorithm {
+    Cms,
+    CountSketch,
+}
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct WeightedCms {
+pub struct WeightedFrequency {
+    algorithm: FrequencyAlgorithm,
     width: usize,
     depth: usize,
     capacity: usize,
     cells: Vec<f64>,
     candidates: BinaryHeap<Candidate>,
 }
-impl WeightedCms {
+impl WeightedFrequency {
+    pub(crate) fn configuration(
+        kind: &planner_types::post_asap::SketchKind,
+    ) -> Result<(FrequencyAlgorithm, usize, usize, usize), Error> {
+        use planner_types::post_asap::{SketchAlgorithm as A, SketchParams as P};
+        let (algorithm, width, depth, capacity) = match (kind.algorithm(), kind.params()) {
+            (
+                A::CmsWithHeap,
+                P::CmsWithHeap {
+                    width,
+                    depth,
+                    heap_size,
+                },
+            ) => (FrequencyAlgorithm::Cms, *width, *depth, *heap_size),
+            (
+                A::CountSketchWithHeap,
+                P::CountSketchWithHeap {
+                    width,
+                    depth,
+                    heap_size,
+                },
+            ) if depth % 2 == 1 => (FrequencyAlgorithm::CountSketch, *width, *depth, *heap_size),
+            _ => {
+                return Err(Error::Invalid(
+                    "unsupported weighted frequency family or depth".into(),
+                ))
+            }
+        };
+        if width == 0 || depth == 0 || capacity == 0 {
+            return Err(Error::Invalid(
+                "invalid weighted frequency dimensions".into(),
+            ));
+        }
+        Ok((algorithm, width as usize, depth as usize, capacity as usize))
+    }
+
+    pub(crate) fn algorithm(&self) -> FrequencyAlgorithm {
+        self.algorithm
+    }
     pub(crate) fn shape(&self) -> (usize, usize, usize) {
         (self.width, self.depth, self.capacity)
     }
-    pub fn new(width: usize, depth: usize, capacity: usize) -> Result<Self, Error> {
+    pub fn new(
+        algorithm: FrequencyAlgorithm,
+        width: usize,
+        depth: usize,
+        capacity: usize,
+    ) -> Result<Self, Error> {
         let len = width
             .checked_mul(depth)
-            .filter(|_| width > 0 && depth > 0 && capacity > 0)
-            .ok_or_else(|| Error::Invalid("invalid weighted CMS dimensions".into()))?;
+            .filter(|_| {
+                width > 0
+                    && depth > 0
+                    && capacity > 0
+                    && (algorithm != FrequencyAlgorithm::CountSketch || depth % 2 == 1)
+            })
+            .ok_or_else(|| Error::Invalid("invalid weighted frequency dimensions".into()))?;
         let mut cells = Vec::new();
         cells
             .try_reserve_exact(len)
-            .map_err(|_| Error::Invalid("weighted CMS allocation failed".into()))?;
+            .map_err(|_| Error::Invalid("weighted frequency allocation failed".into()))?;
         cells.resize(len, 0.0);
         Ok(Self {
+            algorithm,
             width,
             depth,
             capacity,
@@ -100,8 +159,8 @@ impl WeightedCms {
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, Error> {
         use bincode::Options;
         let bytes = bytes
-            .strip_prefix(b"ASAP-WCMS-1\0")
-            .ok_or_else(|| Error::Invalid("weighted CMS format/version mismatch".into()))?;
+            .strip_prefix(b"ASAP-WFREQ-1\0")
+            .ok_or_else(|| Error::Invalid("weighted frequency format/version mismatch".into()))?;
         let mut state: Self = bincode::DefaultOptions::new()
             .with_fixint_encoding()
             .with_limit(bytes.len() as u64)
@@ -111,11 +170,15 @@ impl WeightedCms {
         if state.width == 0
             || state.depth == 0
             || state.capacity == 0
+            || (state.algorithm == FrequencyAlgorithm::CountSketch && state.depth.is_multiple_of(2))
             || state.width.checked_mul(state.depth) != Some(state.cells.len())
-            || state.cells.iter().any(|v| !v.is_finite() || *v < 0.0)
+            || state
+                .cells
+                .iter()
+                .any(|v| !v.is_finite() || (state.algorithm == FrequencyAlgorithm::Cms && *v < 0.0))
             || state.candidates.len() > state.capacity
         {
-            return Err(Error::Invalid("invalid weighted CMS state".into()));
+            return Err(Error::Invalid("invalid weighted frequency state".into()));
         }
         for candidate in &state.candidates {
             if candidate
@@ -126,23 +189,38 @@ impl WeightedCms {
                     .map_err(|e| Error::Invalid(e.to_string()))?
                     != candidate.key
             {
-                return Err(Error::Invalid("invalid weighted CMS identity".into()));
+                return Err(Error::Invalid("invalid weighted frequency identity".into()));
             }
         }
         state.retain(state.candidates.iter().cloned().collect());
         Ok(state)
     }
-    fn indexes(&self, key: &[u8]) -> impl Iterator<Item = usize> + '_ {
-        let key = key.to_vec();
+    fn indexes<'a>(&'a self, key: &'a [u8]) -> impl Iterator<Item = (usize, f64)> + 'a {
         (0..self.depth).map(move |row| {
-            row * self.width
-                + (xxhash_rust::xxh64::xxh64(&key, row as u64) % self.width as u64) as usize
+            let bucket =
+                (xxhash_rust::xxh64::xxh64(key, 2 * row as u64) % self.width as u64) as usize;
+            let sign = if self.algorithm == FrequencyAlgorithm::CountSketch
+                && xxhash_rust::xxh64::xxh64(key, 2 * row as u64 + 1) & 1 != 0
+            {
+                -1.0
+            } else {
+                1.0
+            };
+            (row * self.width + bucket, sign)
         })
     }
     fn estimate(&self, key: &[u8]) -> f64 {
-        self.indexes(key)
-            .map(|i| self.cells[i])
-            .fold(f64::INFINITY, f64::min)
+        let mut estimates = self
+            .indexes(key)
+            .map(|(i, sign)| self.cells[i] * sign)
+            .collect::<Vec<_>>();
+        match self.algorithm {
+            FrequencyAlgorithm::Cms => estimates.into_iter().fold(f64::INFINITY, f64::min),
+            FrequencyAlgorithm::CountSketch => {
+                let middle = estimates.len() / 2;
+                *estimates.select_nth_unstable_by(middle, f64::total_cmp).1
+            }
+        }
     }
     fn retain(&mut self, mut candidates: Vec<Candidate>) {
         candidates.sort_by(|a, b| a.key.cmp(&b.key));
@@ -157,9 +235,9 @@ impl WeightedCms {
         }
     }
     pub fn update(&mut self, values: &[Value], weight: f64) -> Result<(), Error> {
-        if !weight.is_finite() || weight < 0.0 {
+        if !weight.is_finite() || (self.algorithm == FrequencyAlgorithm::Cms && weight < 0.0) {
             return Err(Error::Operator(
-                "weighted CMS requires finite nonnegative rates".into(),
+                "weighted frequency requires finite weights; CMS additionally requires nonnegative weights".into(),
             ));
         }
         let identity = values
@@ -170,12 +248,12 @@ impl WeightedCms {
         let indexes = self.indexes(&key).collect::<Vec<_>>();
         if indexes
             .iter()
-            .any(|&i| !(self.cells[i] + weight).is_finite())
+            .any(|&(i, sign)| !(self.cells[i] + sign * weight).is_finite())
         {
-            return Err(Error::Operator("weighted CMS sum overflow".into()));
+            return Err(Error::Operator("weighted frequency sum overflow".into()));
         }
-        for i in indexes {
-            self.cells[i] += weight;
+        for (i, sign) in indexes {
+            self.cells[i] += sign * weight;
         }
         let mut candidates = self.candidates.iter().cloned().collect::<Vec<_>>();
         candidates.push(Candidate {
@@ -200,22 +278,22 @@ impl WeightedCms {
             .collect()
     }
 }
-impl SerializableToSink for WeightedCms {
+impl SerializableToSink for WeightedFrequency {
     fn serialize_to_json(&self) -> serde_json::Value {
-        serde_json::to_value(self).expect("finite validated CMS state")
+        serde_json::to_value(self).expect("finite validated frequency state")
     }
     fn serialize_to_bytes(&self) -> Vec<u8> {
-        let mut bytes = b"ASAP-WCMS-1\0".to_vec();
-        bytes.extend(bincode::serialize(self).expect("serializable CMS state"));
+        let mut bytes = b"ASAP-WFREQ-1\0".to_vec();
+        bytes.extend(bincode::serialize(self).expect("serializable frequency state"));
         bytes
     }
 }
-impl AggregateCore for WeightedCms {
+impl AggregateCore for WeightedFrequency {
     fn clone_boxed_core(&self) -> Box<dyn AggregateCore> {
         Box::new(self.clone())
     }
     fn type_name(&self) -> &'static str {
-        "WeightedCms"
+        "WeightedFrequency"
     }
     fn as_any(&self) -> &dyn std::any::Any {
         self
@@ -230,15 +308,15 @@ impl AggregateCore for WeightedCms {
         let other = other
             .as_any()
             .downcast_ref::<Self>()
-            .ok_or("weighted CMS state type mismatch")?;
-        if (self.width, self.depth, self.capacity) != (other.width, other.depth, other.capacity) {
-            return Err("weighted CMS shape mismatch".into());
+            .ok_or("weighted frequency state type mismatch")?;
+        if self.algorithm != other.algorithm || self.shape() != other.shape() {
+            return Err("weighted frequency shape mismatch".into());
         }
         let mut result = self.clone();
         for (value, rhs) in result.cells.iter_mut().zip(&other.cells) {
             *value += rhs;
             if !value.is_finite() {
-                return Err("weighted CMS merge overflow".into());
+                return Err("weighted frequency merge overflow".into());
             }
         }
         result.retain(
@@ -251,7 +329,10 @@ impl AggregateCore for WeightedCms {
         Ok(Box::new(result))
     }
     fn get_accumulator_type(&self) -> AggregationType {
-        AggregationType::CountMinSketchWithHeap
+        match self.algorithm {
+            FrequencyAlgorithm::Cms => AggregationType::CountMinSketchWithHeap,
+            FrequencyAlgorithm::CountSketch => AggregationType::CountSketchWithHeap,
+        }
     }
     fn get_keys(&self) -> Option<Vec<KeyByLabelValues>> {
         None
@@ -262,7 +343,7 @@ impl AggregateCore for WeightedCms {
         _: &Option<KeyByLabelValues>,
         _: &HashMap<String, String>,
     ) -> Result<f64, Box<dyn std::error::Error + Send + Sync>> {
-        Err("weighted CMS uses typed row readout".into())
+        Err("weighted frequency uses typed row readout".into())
     }
     fn approx_memory_bytes(&self) -> usize {
         std::mem::size_of::<Self>()
@@ -292,18 +373,64 @@ impl AggregateCore for WeightedCms {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // Signed fractional updates and merges retain numeric ranking, not magnitude ranking.
+    #[test]
+    fn count_sketch_signed_updates_roundtrip_and_merge() {
+        let mut left = WeightedFrequency::new(FrequencyAlgorithm::CountSketch, 4096, 5, 8).unwrap();
+        left.update(&[Value::Int64(1)], -10.5).unwrap();
+        left.update(&[Value::Null], 0.125).unwrap();
+        left.update(&[Value::Null], -0.0625).unwrap();
+        let mut right =
+            WeightedFrequency::new(FrequencyAlgorithm::CountSketch, 4096, 5, 8).unwrap();
+        right.update(&[Value::Null], 0.25).unwrap();
+        let merged = left.merge_with(&right).unwrap();
+        let merged = merged.as_any().downcast_ref::<WeightedFrequency>().unwrap();
+        let decoded = WeightedFrequency::from_bytes(&merged.serialize_to_bytes()).unwrap();
+        let rows = decoded.rows(2);
+        assert!(matches!(rows[0][0], Value::Null));
+        assert!(matches!(rows[0][1], Value::Float64(0.3125)));
+        assert!(matches!(rows[1][1], Value::Float64(-10.5)));
+        assert!(left
+            .merge_with(&WeightedFrequency::new(FrequencyAlgorithm::Cms, 4096, 5, 8).unwrap())
+            .is_err());
+        let before = left.serialize_to_bytes();
+        for weight in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            assert!(left.update(&[Value::Null], weight).is_err());
+            assert_eq!(left.serialize_to_bytes(), before);
+        }
+    }
+
+    // CountSketch uses sign-corrected median: one corrupted row cannot dominate five rows.
+    #[test]
+    fn count_sketch_median_and_odd_depth_contract() {
+        assert!(WeightedFrequency::new(FrequencyAlgorithm::CountSketch, 8, 2, 2).is_err());
+        let mut state = WeightedFrequency::new(FrequencyAlgorithm::CountSketch, 16, 5, 8).unwrap();
+        state.update(&[Value::Int64(4)], -0.375).unwrap();
+        let key = state.candidates.peek().unwrap().key.clone();
+        let indexes = state.indexes(&key).collect::<Vec<_>>();
+        for &(index, sign) in &indexes {
+            assert_eq!(state.cells[index] * sign, -0.375);
+        }
+        state.cells[indexes[0].0] += 1000.0;
+        assert_eq!(state.estimate(&key), -0.375);
+        let mut invalid = state.clone();
+        invalid.depth = 4;
+        invalid.cells.truncate(64);
+        assert!(WeightedFrequency::from_bytes(&invalid.serialize_to_bytes()).is_err());
+    }
+
     // Invalid rates must not mutate state; typed keys cannot collide by formatting.
     #[test]
     fn fractional_updates_typed_identities_and_invalid_weights() {
-        let mut state = WeightedCms::new(4096, 5, 8).unwrap();
+        let mut state = WeightedFrequency::new(FrequencyAlgorithm::Cms, 4096, 5, 8).unwrap();
         state.update(&[Value::Int64(1)], 0.125).unwrap();
         state.update(&[Value::Int64(1)], 0.125).unwrap();
         state.update(&[Value::Utf8("1".into())], 0.5).unwrap();
         state.update(&[Value::Null], 0.75).unwrap();
         let before = state.serialize_to_bytes();
-        let decoded = WeightedCms::from_bytes(&before).unwrap();
+        let decoded = WeightedFrequency::from_bytes(&before).unwrap();
         assert_eq!(decoded.rows(8).len(), 3);
-        assert!(WeightedCms::from_bytes(b"old integer state").is_err());
+        assert!(WeightedFrequency::from_bytes(b"old integer state").is_err());
         for weight in [-1.0, f64::INFINITY, f64::NAN] {
             assert!(state.update(&[Value::Null], weight).is_err());
             assert_eq!(state.serialize_to_bytes(), before);
@@ -317,15 +444,15 @@ mod tests {
     // Merge uses the same Float64 state representation and rejects other shapes.
     #[test]
     fn compatible_merge_preserves_fractional_weights() {
-        let mut left = WeightedCms::new(4096, 5, 8).unwrap();
+        let mut left = WeightedFrequency::new(FrequencyAlgorithm::Cms, 4096, 5, 8).unwrap();
         let mut right = left.clone();
         left.update(&[Value::Int64(7)], 0.125).unwrap();
         right.update(&[Value::Int64(7)], 0.25).unwrap();
         let merged = left.merge_with(&right).unwrap();
-        let merged = merged.as_any().downcast_ref::<WeightedCms>().unwrap();
+        let merged = merged.as_any().downcast_ref::<WeightedFrequency>().unwrap();
         assert!(matches!(merged.rows(1)[0][1], Value::Float64(0.375)));
         assert!(left
-            .merge_with(&WeightedCms::new(32, 5, 8).unwrap())
+            .merge_with(&WeightedFrequency::new(FrequencyAlgorithm::Cms, 32, 5, 8).unwrap())
             .is_err());
     }
 }

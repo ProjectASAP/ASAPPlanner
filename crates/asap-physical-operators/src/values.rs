@@ -268,21 +268,18 @@ fn validate_state(family: &SummaryFamilyType, state: &dyn AggregateCore) -> Resu
     validate_family(family)?;
     let valid = match family {
         SummaryFamilyType::Sketch(kind, _)
-            if matches!(kind.params(), SketchParams::CmsWithHeap { .. }) =>
+            if matches!(
+                kind.params(),
+                SketchParams::CmsWithHeap { .. } | SketchParams::CountSketchWithHeap { .. }
+            ) =>
         {
-            let SketchParams::CmsWithHeap {
-                width,
-                depth,
-                heap_size,
-            } = kind.params()
-            else {
-                unreachable!()
-            };
+            use crate::summary_operators::weighted_frequency::WeightedFrequency;
+            let (algorithm, width, depth, capacity) = WeightedFrequency::configuration(kind)?;
             state
                 .as_any()
-                .downcast_ref::<crate::summary_operators::weighted_cms::WeightedCms>()
+                .downcast_ref::<WeightedFrequency>()
                 .is_some_and(|state| {
-                    state.shape() == (*width as usize, *depth as usize, *heap_size as usize)
+                    state.algorithm() == algorithm && state.shape() == (width, depth, capacity)
                 })
         }
 
