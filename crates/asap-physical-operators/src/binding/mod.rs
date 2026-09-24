@@ -1,9 +1,10 @@
 //! Bind a post-ASAP DAG to native operators. Sources are explicit execution
 //! frontiers supplied by the deployment; unsupported computation is an error.
-use super::{
+use crate::{
     operators::{Expression, Operator, Reduction, SortKey},
+    plan::{NodeId, PhysicalDag, PhysicalOperator},
     values::{Batch, Schema},
-    Error, NodeId, PhysicalDag, PhysicalOperator,
+    Error,
 };
 use planner_types::{
     post_asap::{
@@ -41,7 +42,7 @@ pub fn bind_with_data_sources<'a>(
     dag: &ExecutableDag,
     sources: BTreeMap<NodeId, Source<'a>>,
     roots: &[NodeId],
-    data_sources: &super::scan::DataSources,
+    data_sources: &crate::sources::DataSources,
 ) -> Result<PhysicalDag<'a, Batch, Schema>, Error> {
     bind_internal(dag, sources, roots, Some(data_sources))
 }
@@ -50,7 +51,7 @@ fn bind_internal<'a>(
     dag: &ExecutableDag,
     mut sources: BTreeMap<NodeId, Source<'a>>,
     roots: &[NodeId],
-    data_sources: Option<&super::scan::DataSources>,
+    data_sources: Option<&crate::sources::DataSources>,
 ) -> Result<PhysicalDag<'a, Batch, Schema>, Error> {
     preflight_depth(dag)?;
     dag.validate().map_err(|e| invalid(e.to_string()))?;
@@ -107,7 +108,7 @@ fn bind_internal<'a>(
     for id in ordered {
         let node = nodes[&id];
         let output = Arc::new(node.output_schema.clone());
-        super::values::validate_schema(&output)?;
+        crate::values::validate_schema(&output)?;
         let (operator, inputs) = if let Some(source) = sources.remove(&id) {
             if !source.input_schemas().is_empty() || source.output_schema() != output {
                 return Err(invalid("frontier is not a source with the declared schema"));
@@ -161,7 +162,7 @@ fn bind_internal<'a>(
 /// This is the same checked path used by complete DAG binding.
 pub fn bind_node(node: &ExecutableDagNode, inputs: &[Schema]) -> Result<Operator, Error> {
     for schema in inputs {
-        super::values::validate_schema(schema)?;
+        crate::values::validate_schema(schema)?;
     }
     bind_operation(node, inputs)?.with_output_schema(Arc::new(node.output_schema.clone()))
 }
@@ -462,7 +463,7 @@ fn groups(input: &Schema, groups: &GroupKeys) -> Result<Vec<usize>, Error> {
 }
 fn expression(expr: &QueryExpr, input: &Schema) -> Result<Expression, Error> {
     Ok(Expression::planner(
-        super::expressions::CompiledExpression::compile(expr, input)?,
+        crate::expressions::CompiledExpression::compile(expr, input)?,
     ))
 }
 
@@ -471,6 +472,10 @@ struct CheckedSource<'a> {
     output: Schema,
 }
 impl PhysicalOperator<Batch, Schema> for CheckedSource<'_> {
+    fn properties(&self, inputs: &[crate::plan::PlanProperties]) -> crate::plan::PlanProperties {
+        self.source.properties(inputs)
+    }
+
     fn name(&self) -> &str {
         self.source.name()
     }
@@ -485,9 +490,9 @@ impl PhysicalOperator<Batch, Schema> for CheckedSource<'_> {
     }
     fn start<'a>(
         &'a self,
-        inputs: Vec<super::Input<'a, Batch>>,
-        context: super::RunContext,
-    ) -> Result<super::OutputStream<'a, Batch>, Error> {
+        inputs: Vec<crate::runtime::Input<'a, Batch>>,
+        context: crate::runtime::RunContext,
+    ) -> Result<crate::runtime::OutputStream<'a, Batch>, Error> {
         use futures::StreamExt;
         Ok(self
             .source

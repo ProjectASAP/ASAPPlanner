@@ -1,8 +1,8 @@
 //! Runtime values preserve Planner schemas; summary states are typed values too.
-use super::Error;
 use crate::AggregateCore;
+use crate::Error;
 use planner_types::{
-    post_asap::{SummaryFamilyType, SummarySchema},
+    post_asap::{SummaryFamilyType, SummaryField, SummarySchema},
     pre_asap::DataType,
 };
 use std::{cmp::Ordering, sync::Arc};
@@ -256,48 +256,8 @@ pub(crate) fn group_key(row: &[Value], columns: &[usize]) -> Result<Vec<Vec<u8>>
         .collect()
 }
 
-pub(crate) fn validate_family(family: &SummaryFamilyType) -> Result<(), Error> {
-    use planner_types::post_asap::SketchAlgorithm as A;
-    if let SummaryFamilyType::Sketch(kind, grouping) = family {
-        if let planner_types::post_asap::SketchParams::CmsWithHeap {
-            width,
-            depth,
-            heap_size,
-        } = kind.params()
-        {
-            return if kind.algorithm() == &A::CmsWithHeap
-                && *width > 0
-                && *depth > 0
-                && *heap_size > 0
-                && grouping == &Default::default()
-            {
-                Ok(())
-            } else {
-                Err(Error::Invalid(
-                    "invalid weighted CMS family or grouping strategy".into(),
-                ))
-            };
-        }
-    }
-    match family {
-        SummaryFamilyType::ExactAggregate(..) => {}
-        SummaryFamilyType::Sketch(kind, _)
-            if matches!(kind.algorithm(), A::Kll | A::DDSketch | A::Hll) => {}
-        _ => {
-            return Err(Error::Invalid(
-                "summary family has no native DAG state implementation".into(),
-            ))
-        }
-    }
-    crate::capability::validate_summary_kernel(
-        family,
-        &planner_types::post_asap::SummaryUpdate::column(
-            planner_types::pre_asap::ColumnRef::SampleValue,
-        ),
-        &Default::default(),
-    )
-    .map_err(Error::Invalid)
-}
+pub(crate) use crate::capability::validate_native_family as validate_family;
+
 fn validate_state(family: &SummaryFamilyType, state: &dyn AggregateCore) -> Result<(), Error> {
     use crate::summary_operators::{
         datasketches_kll_accumulator::DatasketchesKLLAccumulator,
@@ -389,4 +349,18 @@ pub(crate) fn validate_schema(schema: &Schema) -> Result<(), Error> {
         }
     }
     Ok(())
+}
+
+pub(crate) fn field(schema: &Schema, column: usize) -> Result<&SummaryField, Error> {
+    schema
+        .fields
+        .get(column)
+        .ok_or_else(|| Error::Invalid("column out of range".into()))
+}
+pub(crate) fn plain(schema: &Schema, column: usize) -> Result<(&DataType, bool), Error> {
+    let f = field(schema, column)?;
+    let SummaryFamilyType::Plain(dtype) = &f.dtype else {
+        return Err(Error::Invalid("plain value required".into()));
+    };
+    Ok((dtype, f.nullable))
 }

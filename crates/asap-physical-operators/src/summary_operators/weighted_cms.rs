@@ -1,7 +1,7 @@
 //! Float64 weighted CMS state with typed candidate identities. Each instance
 //! represents one partition at one evaluation scope; updates never round rates
 //! to integer counts. Candidate membership still requires Planner evidence.
-use crate::dag::{values::Value, Error};
+use crate::{values::Value, Error};
 use crate::{AggregateCore, AggregationType, KeyByLabelValues, SerializableToSink, Statistic};
 use serde::{Deserialize, Serialize};
 use std::{

@@ -1,8 +1,10 @@
 //! Raw data access. Connectors provide rows; Scan owns Planner predicate semantics.
-use super::{
+use crate::{
     expressions::CompiledExpression,
+    plan::PhysicalOperator,
+    runtime::{Input, OutputStream, RunContext},
     values::{Batch, Schema, Value},
-    Error, Input, OutputStream, PhysicalOperator, RunContext,
+    Error,
 };
 use futures::{stream, StreamExt};
 use planner_types::{
@@ -17,6 +19,10 @@ use std::sync::Arc;
 /// must release its resources. A connector error is never an empty successful scan.
 pub trait RawSource {
     fn schema(&self) -> Schema;
+    /// Declare a finite snapshot/window explicitly; execution scope alone does not bound a cursor.
+    fn boundedness(&self) -> crate::plan::Boundedness {
+        crate::plan::Boundedness::Unknown
+    }
     fn scan(&self, context: RunContext) -> Result<OutputStream<'_, Batch>, Error>;
 }
 
@@ -30,7 +36,7 @@ impl DataSources {
         if self.sources.iter().any(|(key, _)| key == &identity) {
             return Err(Error::Invalid("duplicate data source".into()));
         }
-        super::values::validate_schema(&source.schema())?;
+        crate::values::validate_schema(&source.schema())?;
         self.sources.push((identity, source));
         Ok(())
     }
@@ -57,7 +63,7 @@ impl DataSources {
                 .collect(),
             time_index: schema.time_index,
         });
-        super::values::validate_schema(&output)?;
+        crate::values::validate_schema(&output)?;
         let reader = self
             .sources
             .iter()
@@ -93,6 +99,13 @@ pub struct Scan {
     predicates: Vec<CompiledExpression>,
 }
 impl PhysicalOperator<Batch, Schema> for Scan {
+    fn properties(&self, _: &[crate::plan::PlanProperties]) -> crate::plan::PlanProperties {
+        crate::plan::PlanProperties {
+            boundedness: self.reader.boundedness(),
+            emission: crate::plan::Emission::Incremental,
+        }
+    }
+
     fn name(&self) -> &str {
         "Scan"
     }
@@ -170,43 +183,5 @@ impl PhysicalOperator<Batch, Schema> for Scan {
     }
 }
 
-/// Immutable in-memory raw data. The connector owns the resident input; each
-/// cursor clones only the next requested batch, not the entire data set.
-pub struct MemorySource {
-    schema: Schema,
-    batches: Vec<Batch>,
-}
-impl MemorySource {
-    pub fn new(schema: Schema, batches: Vec<Batch>) -> Result<Self, Error> {
-        super::values::validate_schema(&schema)?;
-        if schema
-            .fields
-            .iter()
-            .any(|f| !matches!(f.dtype, SummaryFamilyType::Plain(_)))
-        {
-            return Err(Error::Invalid(
-                "raw source cannot contain summary states".into(),
-            ));
-        }
-        if batches.iter().any(|batch| batch.schema() != &schema) {
-            return Err(Error::Invalid("memory source batch schema mismatch".into()));
-        }
-        Ok(Self { schema, batches })
-    }
-}
-impl RawSource for MemorySource {
-    fn schema(&self) -> Schema {
-        self.schema.clone()
-    }
-    fn scan(&self, context: RunContext) -> Result<OutputStream<'_, Batch>, Error> {
-        Ok(stream::iter(self.batches.iter())
-            .map(move |batch| {
-                if context.is_cancelled() {
-                    return Err(Error::Cancelled);
-                }
-                let _allocation = context.reserve(batch.bytes())?;
-                Ok(batch.clone())
-            })
-            .boxed_local())
-    }
-}
+mod memory;
+pub use memory::MemorySource;

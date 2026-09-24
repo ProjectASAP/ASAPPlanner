@@ -37,3 +37,6 @@ pub use sketch_envelope_accumulator::*;
 pub use sum_accumulator::*;
 
 pub mod weighted_cms;
+
+pub mod factory;
+pub mod traits;

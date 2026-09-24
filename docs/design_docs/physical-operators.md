@@ -101,6 +101,48 @@ on the local IR crate. Operator unit tests can exercise private implementation
 details; Planner integration tests check that emitted DAGs bind and execute.
 Runtime values preserve the IR schema instead of redefining its type semantics.
 
+### Module ownership
+
+```text
+src/
+  plan/          PhysicalDag, PhysicalOperator, properties and validation
+  runtime/       streams, shared producers, context, memory and cancellation
+  expressions/   scalar evaluation and Planner expression adaptation
+  operators/
+    projection.rs
+    filter.rs
+    joins/
+    aggregate/   ordinary and temporal reductions
+    sort.rs
+    limit.rs
+    summary/     build, merge and readout
+    source.rs    literal/batch sources, union and scalar conversion
+  sources/       raw-source API, Scan and memory connector
+  binding/       Planner executable DAG to physical operators
+  summary_operators/  mathematical summary kernels, factory and traits
+  stored_state/  decoding, delta application and persisted-state readout
+  capability.rs kernel and native operator support checks
+  values.rs     typed rows and state payload validation
+```
+
+The graph owns topology and static checks; the runtime owns each execution's
+producer state. Operator modules own both construction checks and computation.
+The `Operator` enum dispatch remains a small internal routing point. This does
+not change `SummaryExpr`, Planner semantics or shared-producer identity.
+
+`Expression` is the typed native builder; `CompiledExpression` validates and
+adapts Planner scalar expressions. Both are owned by `expressions`, with shared
+numeric execution. Planner-specific coercions and checked PromQL division remain
+explicit at their respective binding boundaries. No expression evaluator lives
+inside the projection or filter implementation.
+
+Deployment engines normally use `binding`, `plan`, `runtime` and `sources`.
+`summary_operators` exposes update kernels for pane maintenance; `stored_state`
+serves deployments reconstructing persisted panes. Kernel traits include state
+serialization because persistence consumes those states, but neither the graph
+nor its scheduler depends on serialization. Existing `dag`, `accumulators`, `factory`, `traits` and
+`arithmetic` import paths are thin compatibility re-exports.
+
 ## Execution contract
 
 An immutable plan describes typed nodes and dependency edges. Each execution
@@ -119,7 +161,31 @@ streams are worker-local. Deployments poll all consumers concurrently. The byte
 budget accounts for retained outputs and native operator state, including outputs
 held after queue eviction. It is not an RSS limit: source-owned data, temporary
 allocation peaks and allocator overhead remain outside that estimate. Blocking
-operators currently have no spill implementation.
+operators currently have no spill implementation. Join results and membership
+sets, grouping workspace, sort scratch space and merged summary-state estimates
+are charged while retained. Long row loops and sort merge steps yield to the
+caller, so cancellation and other consumers can progress within a single batch.
+Individual kernel calls and scalar evaluations remain synchronous; memory
+estimates are not allocator-exact peak bounds.
+
+### Finite input and emission
+
+`PhysicalOperator::properties` reports output boundedness and emission mode.
+Unknown source boundedness is conservative: it cannot satisfy a finite-input
+requirement. `PhysicalDag::properties` derives these facts together with topology
+and schema validation before `start` is called on any source.
+
+Sort, ordinary aggregate, temporal reductions, both joins, scalar/keyed summary build and summary merge
+and vector-to-scalar require bounded inputs and emit after input ends. Summary
+build updates incrementally but still finalizes at end-of-input. Projection,
+filter, limit, union and readout emit incrementally. A global Limit bounds its
+output cardinality; a grouped Limit inherits input boundedness because new
+groups may continue arriving. Neither declaration promises a time deadline.
+
+`RawSource::boundedness` defaults to Unknown. Connectors must explicitly promise
+that a snapshot or window ends; merely receiving a query/ingestion `Scope` is
+insufficient. The memory connector declares Bounded. Installed physical source
+frontiers preserve their supplied properties through the checked binding wrapper.
 
 ## Operator coverage
 
@@ -163,21 +229,55 @@ Deployments provide explicit storage or ingestion source frontiers and may bind
 raw Scan through the shared data-source interface. The memory connector proves
 the library contract; backend raw-data access still requires a deployment connector.
 
+### Capability levels
+
+| Level | Acceptance contract | Scope |
+| --- | --- | --- |
+| Update kernel | `capability::validate_summary_kernel` | Family, parameters, grouping and item/update layout; used by the accumulator factory |
+| Native state edge | `capability::validate_native_family` | Exact accumulators, KLL, DDSketch, HLL and Float64 weighted CMS with compatible parameters |
+| Scalar native readout | `capability::validate_native_readout` | Supported native state plus statistic/readout arguments |
+| Keyed native readout | `Operator::keyed_readout` | Weighted CMS family, heap capacity, typed identity/score schema and preserved partition columns |
+| Complete physical plan | `binding::bind` / `bind_with_data_sources` | Node support, expressions, schemas, source frontiers and bounded input requirements |
+| Persisted state | `stored_state` decoders and readout functions | Stored format and family-specific reconstruction/readout support |
+
+For example, a valid CMS update kernel does not imply a native CMS batch edge.
+Stored-state support also does not register a native operator. Consumers must
+use the contract for the path they intend to execute rather than treating kernel
+availability as whole-plan acceptance.
+
+Partitioned parallel execution, disk spill, cost-based algorithm selection,
+physical ordering/distribution properties and per-operator Explain/Analyze
+metrics remain future extensions. This change establishes finite-input and
+emission contracts without claiming those additional DataFusion capabilities.
+
 ## DataFusion reuse vs independent implementation
 
-| Decision dimension | Reuse DataFusion | Independent ASAP implementation |
-| --- | --- | --- |
-| General computation | Reuse mature Arrow operators and expression execution | Implement and test the supported Planner vocabulary explicitly |
-| Shared DAG producer | Shared plan references need an explicit execution-sharing and buffering policy | One producer and independent consumer cursors are part of the runtime contract |
-| Summary lifecycle | Add custom summary state operators to the framework | Summary construction, merge and readout are native capabilities |
-| In-memory representation | Operators exchange Arrow RecordBatch values. Custom summary state may not map naturally to Arrow and can require an explicit encoding, wrapper or conversion, with associated integration and potential copying costs | Native values can carry ASAP-defined summary state directly, without requiring every state format to fit Arrow; the library must still define and validate state types, ownership and compatibility |
-| Engine reuse | Adapt both engines to DataFusion's execution model | Both engines bind the same ASAP interfaces |
-| Engineering cost | Less generic operator work; integration and semantic adaptation remain | More operator, typing, scheduling and resource-accounting responsibility |
+The [execution comparison survey](datafusion-execution-comparison.md) examines
+runtime costs, Arrow/sketch representation, producer sharing, logical/physical
+extension points, optimization reuse, native maintenance cost and a benchmark
+plan against pinned upstream sources.
 
-DataFusion is a design reference, not this library's execution dependency. This
-choice does not claim that DataFusion cannot express shared dependencies. ASAP
-chooses direct ownership of execution sharing and summary-state semantics across
-both engines. Mathematical sketch kernels remain reusable implementation details.
+| Decision dimension | DataFusion backend | Native ASAP execution |
+| --- | --- | --- |
+| Runtime overhead | Partition streams; ordinary operators do not each require a separate task. Conversion, state transport and exchanges depend on the chosen integration | Local streams and native state edges; producer queues, per-row values, validation and copies still have costs |
+| Summary representation | Internal accumulators may remain native Rust objects; standard physical edges use Arrow batches, with binary/structured state or custom adapters | Native summary objects can cross edges directly |
+| Shared execution | Shared plan references do not automatically share results; fusion, materialization or custom run-scoped producer coordination can implement reuse | One producer per node per run, with independent consumer cursors |
+| Extension effort | Both logical and physical extension APIs exist; conventional custom nodes need not require an upstream fork | Direct control of both interfaces and implementations |
+| Generic computation | Mature relational kernels, partitioning and spill infrastructure, subject to correct custom properties and state contracts | Supported vocabulary implemented locally; partitioned execution and spill remain deferred |
+| Maintenance cost | Adapter, semantic and upstream-version integration | Ownership of operators, scheduler, resource contracts and future generic execution features |
+
+The native decision in this PR is scoped to direct ownership of summary-state
+edges and shared DAG execution. It does not establish that DataFusion is slower,
+that Arrow requires serializing every sketch update, or that DataFusion cannot
+implement fan-out. Multiple quantiles of one KLL can often be fused into one
+readout; independent downstream branches may still require general sharing.
+
+Borrowing DataFusion's module boundaries is useful regardless of backend choice.
+Porting its algorithms also means adapting their array, expression, memory,
+partition and spill dependencies and maintaining those adaptations. The survey
+specifies the measurements needed to compare full DataFusion, native execution
+and coarse hybrid subplans without confusing algorithm improvements with runtime
+overhead. No comparative benchmark is claimed here.
 
 ## Acceptance
 
