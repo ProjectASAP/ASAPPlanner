@@ -2,290 +2,299 @@
 
 ## 1. Problem
 
-ASAPPlanner produces logical Post-ASAP candidates, but downstream systems also
-need concrete implementations to execute a selected computation. Before this PR,
-there was no shared physical-operator library for precompute and query deployments
-to reuse. Reimplementing execution in each deployment duplicates work and makes
-consistency between Planner semantics and runtime behavior harder to maintain.
+ASAPPlanner describes valid summary computations. Precompute and query engines
+need concrete operators to execute them. Implementing these operators and their
+execution separately duplicates work and makes it harder to preserve Planner
+semantics across deployments.
 
-This design introduces `asap-physical-operators`: a shared library containing
-**physical operators and a DAG runtime**. asap-fusion and ASAPQuery can use it to
-bind selected computations and execute them with deployment-provided inputs.
-The planning library remains deployment-independent; downstream systems retain
-physical feasibility checks, final commitment and engine orchestration.
+This design provides a shared physical execution library for asap-fusion and
+ASAPQuery. It contains both physical operators and the runtime for executing a
+DAG. Deployment compilers use the shared physical operator vocabulary to describe
+computation; deployment engines supply inputs and invoke the shared executor.
+
+The intended outcome is that the same summary build, merge and readout can run
+in either engine with the same semantics and execution contracts.
 
 ## 2. Goals and Non-goals
 
 Goals:
 
-- Share relational operators and summary build, merge and readout implementations.
-- Execute shared dependencies once per run, with independent consumers.
-- Share binding, cancellation and resource control across deployments.
-- Test consistency between selected logical Post-ASAP DAGs and physical execution.
+- Share relational and summary operators across precompute and query execution.
+- Preserve logical semantics when compiling a computation to physical operators.
+- Execute shared producers once per run, with independent consumers.
+- Provide common failure, cancellation, backpressure and resource contracts.
+- Keep deployment decisions separate from computation execution.
 
-Non-goals for this PR are a complete precompute/query engine, external storage
-connectors, partitioned parallelism, sharding, disk spill and cost-based physical
-algorithm selection. The library provides a common place for future execution
-optimizations; it does not implement those optimizations here.
+This library does not choose deployment placement, manage durable storage,
+schedule maintenance or serve requests. Partitioned parallelism, sharding, spill
+and cost-based algorithm selection are outside the initial scope.
 
 ## 3. Architecture
 
-### 3.1 End-to-end flow
+### 3.1 Three layers
 
 Terminology follows the [ASAPPlanner design overview](architecture/README.md).
-The planning library determines logical candidates. Downstream selects a
-computation and commits to a feasible physical realization. The shared binder
-constructs supported implementations, and the shared runtime executes them.
-The deployment determines when, where and with which inputs execution happens.
+There are three layers:
 
 ```text
-SQL / PromQL + planning workload and applicable evidence
-    ↓ frontend lowering
-Canonical Pre-ASAP QueryExpr roots
-    ↓ logical candidate search
-PlanSpace: logical Post-ASAP candidate DAG space
-    ↓ selection and assembly
-Selected logical Post-ASAP DAG: SummaryNode / SummaryExpr
-    ↓ compile_executable_dag(...)
-ExecutableDag: structural representation compiled from the selected DAG
-    ↓ physical binding + deployment inputs and execution roots
-PhysicalDag: concrete operators and their dependencies
-    ↓ execute(..., RunContext)
-Results
+Logical planning — ASAPPlanner
+    PlanSpace → selected logical Post-ASAP DAG
+                         ↓
+Deployment compilation — deployment PhysicalPlanCompiler
+    Deployment plan: physical DAGs + input bindings + operational configuration
+                         ↓
+Shared execution — physical operators and DAG runtime
+    Bound inputs + physical DAG + run context → results
 ```
 
-This shows the selected-DAG path used by this library. `PlanSpace` is Planner's
-primary output; selection and assembly are subsequent steps, not an implicit
-physical deployment decision. Downstream may consume candidates directly or use
-Planner's optional selection helpers. Lifecycle-aware helpers additionally
-produce a `SummaryMaintenanceLifecyclePlan`; this runtime does not choose or
-schedule that lifecycle. See the [planning workflows](architecture/input-output-workflow.md).
-
-### 3.2 Representation boundaries
-
-| Architecture term | Rust representation | Meaning |
+| Layer | Responsibility | Output |
 | --- | --- | --- |
-| Pre-ASAP IR | `QueryExpr` | Original exact query semantics and output shape. |
-| Logical candidate DAG space | `PlanSpace` | Alternatives and their logical guarantees/rejection reasons, before physical commitment. |
-| Selected logical Post-ASAP DAG | `SummaryNode` / `SummaryExpr` | Selected logical summary semantics, including families, parameters, composition and readout. |
-| Compiled representation of the selected Post-ASAP DAG | `ExecutableDag` | Node identities, schemas, execution assignments and shared dependencies exported for binding. Contains no instantiated physical operators. |
-| Physical DAG used by this runtime | `asap_physical_operators::plan::PhysicalDag` | Concrete operator implementations connected for execution. |
+| Logical planning | Define legal computations, summary families, parameters and guarantees. | Logical candidates and a selected Post-ASAP DAG. |
+| Deployment compilation | Choose a feasible physical realization and establish its inputs, materializations, placement and operational configuration. | A deployment plan containing physical DAGs and their deployment contracts. |
+| Shared execution | Run the specified physical computation and coordinate dependencies and resources. | Result streams or an explicit failure. |
 
-`ExecutableDag` is derived from the selected logical Post-ASAP DAG; it is not a
-replacement name for Post-ASAP IR. A `SummaryNode` describes summary computation
-but does not consume batches, update mutable sketches or coordinate cancellation.
-Sharing its identity expresses a dependency; runtime coordination realizes shared
-execution.
+`PlanSpace` is the primary output of logical candidate search. Selection and
+assembly produce the logical DAG used for deployment compilation. Downstream
+physical evidence may inform selection through Planner's interfaces; the flow
+does not require choosing a candidate without considering physical feasibility.
+Planner-owned semantics and guarantees remain authoritative. See the
+[planning workflows](architecture/input-output-workflow.md).
 
-The architecture's [physical-plan integration](architecture/physical-plan-integration.md)
-also describes physical alternatives and analytical resource estimation. The
-runtime `PhysicalDag` here should not be confused with a cost-model representation:
-this PR does not automatically connect binding to analytical costing or search
-across physical alternatives.
+**The deployment decides what to run, where, when and with which inputs. The
+shared executor runs that computation.** Scheduling, plan installation,
+persistence and serving are deployment activities, not additional planning
+layers.
 
-### 3.3 Component responsibilities
+### 3.2 Two computation graphs
 
-**The shared runtime executes one DAG run. Deployment engines decide which work
-to run, when to run it and how to use its results.**
+| Graph | Describes | Owner |
+| --- | --- | --- |
+| Logical Post-ASAP DAG | Selected computation semantics, summary operations and shared dependencies. | Planner |
+| Physical DAG | Concrete operator choices, configuration, ordered dependencies and input slots. | Shared physical-plan contract, constructed by deployment compilation |
 
-| Component | Responsibility |
-| --- | --- |
-| ASAPPlanner planning library | Generate logical Post-ASAP candidates; optionally select and assemble logical DAGs. |
-| `compile_executable_dag` in `asap-types` | Export a selected logical Post-ASAP DAG as an `ExecutableDag`, preserving shared identity. |
-| Binder | Construct supported physical implementations and validate their connections. |
-| Physical operators | Perform relational and summary computation. |
-| Shared runtime | Coordinate dependencies, shared producers and per-run resources. |
-| asap-fusion / ASAPQuery | Decide physical feasibility and deployment; schedule runs, select storage/windows/revisions, persist/publish and serve results. |
+A logical node may expand into several physical operators. Several consumers
+may share one physical producer. A materialized intermediate result may become
+an input, excluding its upstream computation from that execution.
 
-Keeping implementations in the ASAPPlanner repository does not move deployment
-commitment into the planning library. The deployments reuse this crate as part
-of their physical implementation rather than duplicating its DAG execution.
+There is no additional execution IR between these graphs. Exporting a logical
+DAG as node IDs and edges is a serialization detail. Loading a physical DAG and
+instantiating its operator objects is an execution detail. Neither operation
+introduces a new semantic plan.
+
+A deployment plan is a container for physical DAGs and their operational
+configuration, not another computation graph. It can hold distinct precompute
+and query DAGs that use the same physical operator vocabulary.
+
+### 3.3 Deployment compiler and shared executor
+
+The backend `PhysicalPlanCompiler` is the deployment compilation entry point.
+It turns a selected logical Post-ASAP DAG into a feasible deployment contract:
+
+- Lower computation to the shared physical operator vocabulary.
+- Select input boundaries and bind them to raw sources or materializations.
+- Establish concrete window/state layout, placement and transmission contracts.
+- Produce consistent precompute and query plans referencing the same state
+  identities and schemas.
+
+The shared library owns operator definitions, validation and implementations.
+The compiler uses these contracts to construct physical DAGs; it does not
+maintain a separate query or precompute operator hierarchy.
+
+`QueryPlan` contains query identity, input/materialization bindings, a physical
+DAG and fallback policy. `PrecomputePlan` contains physical DAGs together with
+their trigger, input, state and publication contracts. Catalog and transmission
+configuration connect producers and consumers without redefining computation.
+
+At execution time, the deployment resolves input slots to readers or supplied
+state and instantiates the specified operators. This step does not reselect
+algorithms, change summary semantics or make new deployment decisions. The
+executor runs the resulting graph; the deployment handles its results.
 
 ## 4. Execution Model
 
-### 4.1 Binding
-
-The deployment supplies an `ExecutableDag`, execution roots and inputs. The
-[binder](../../crates/asap-physical-operators/src/binding/mod.rs) traverses reachable
-dependencies and constructs supported operators. A supplied intermediate result
-cuts traversal at that node, enabling sub-DAG execution. Section 6 defines this
-input boundary. Unsupported computation fails binding.
-
-### 4.2 DAG execution
-
-[`PhysicalDag::execute`](../../crates/asap-physical-operators/src/plan/mod.rs)
-creates per-run execution state using a `RunContext` and returns output streams.
-The deployment drives these streams and handles their results. Execution is
-worker-local; the library does not supply a deployment scheduler or thread pool.
-Separate runs reuse the plan structure while keeping mutable execution state
-independent.
-
-### 4.3 Shared producers
-
-A reachable producer executes once per run, even when several consumers depend
-on it. Each consumer has its own cursor over the shared output. Bounded queues
-apply backpressure, so deployments must poll multiple requested output streams
-concurrently. Dropping one consumer leaves other consumers active.
-
-### 4.4 Example: summary build → merge → readout
+### 4.1 Example: one KLL summary, two quantiles
 
 ```text
-Precompute deployment                 Query deployment
+Precompute DAG                         Query DAG
 
-raw data                              compatible stored KLL states
-    ↓                                             ↓
-KLL build                                      KLL merge
-    ↓                                         ┌───┴───┐
-stored KLL state                               ↓       ↓
-(deployment persists)                    p50 readout  p99 readout
+raw input slot                         stored-state input slot
+      ↓                                         ↓
+  KLL build                                 KLL merge
+      ↓                                    ┌────┴────┐
+ state output                              ↓         ↓
+                                      p50 readout  p99 readout
 ```
 
-The precompute engine provides a finite input window and persists the returned
-state. The query engine selects compatible stored states and supplies them at
-an input frontier. Binding includes only the required downstream computation.
-The merge executes once, and both readouts independently consume its output.
+Logical planning selects KLL computation and the required readouts. Deployment
+compilation decides where summaries are built and stored, assigns materialization
+identities and defines the input contract for each DAG.
 
-Both engines reuse the same build, merge and readout implementations. This is
-the E2E change introduced by the PR: deployments gain a shared binding and
-execution path for selected computations, while retaining storage and scheduling.
+The precompute engine supplies a finite input window, executes the build DAG
+and persists its output. The query engine supplies compatible stored states and
+executes the query DAG. Merge runs once; both quantile operators independently
+consume its output.
+
+Storage retrieval and publication are deployment responsibilities. Build, merge,
+readout and dependency execution use the shared library in both engines.
+
+### 4.2 One execution
+
+The executor takes a physical DAG, resolved inputs, selected output roots and
+a run context. Before opening sources, it validates the reachable computation
+and input contracts. It then creates fresh mutable execution state and returns
+output streams.
+
+The deployment drives those streams and handles completion or failure. Multiple
+requested streams must be polled concurrently so a slow consumer does not prevent
+progress through a shared producer's bounded queues. Dropping one consumer leaves
+its siblings active.
+
+The same physical DAG can execute repeatedly. Operator state, consumer cursors
+and resource reservations belong to an individual run. Persistent state is
+supplied explicitly through deployment inputs rather than implicitly retained
+between runs.
 
 ## 5. Execution Contracts
 
 | Contract | Invariant |
 | --- | --- |
-| C1 — Validate before execution | Topology, schemas, arity, supported operations and required boundedness are checked before sources start. Runtime data and reader failures remain execution errors. |
-| C2 — Execute each producer once per run | Multiple consumers share one producer execution. |
-| C3 — Isolate runs | Independent executions do not share mutable operator execution state. |
-| C4 — Apply backpressure | Producer/consumer communication uses bounded queues and independent cursors. |
-| C5 — Propagate failure and cancellation | Errors are not empty results; long computation loops cooperate with cancellation. |
+| C1 — Validate before execution | Reject invalid topology, arity, schemas, operator configurations and input boundedness before sources start. |
+| C2 — Execute shared producers once | A reachable physical producer executes once per run, regardless of consumer count. |
+| C3 — Isolate runs | Independent runs have independent mutable execution state. |
+| C4 — Apply backpressure | Bounded communication queues limit retained output; consumers have independent cursors. |
+| C5 — Propagate failure and cancellation | Errors are explicit, and cancellation terminates affected work and releases its resources. |
 | C6 — Enforce the tracked resource budget | Retained outputs and estimated operator workspace count against the run's byte budget. |
 
-Blocking operators, including sort, aggregation, joins and summary build/merge,
-require bounded input and finalize after input ends. Unknown source boundedness
-is insufficient. Projection, filter and readout can emit incrementally.
+Blocking operators require finite input and finalize after it ends. Unknown
+boundedness is insufficient for these operators. Incremental operators may emit
+before the input completes. Operator properties must make this distinction
+available to validation.
 
-Cancellation is cooperative: individual scalar and sketch-kernel calls remain
-synchronous. Resource accounting is not an allocator-exact or process-RSS limit;
-source-owned data and temporary allocation peaks are not fully covered. There
-is no spill path, so exceeding the tracked byte budget fails execution.
+Cancellation is cooperative, including within long computation loops. Individual
+synchronous kernel calls limit cancellation responsiveness. Memory accounting
+covers tracked allocations, not process RSS or every temporary allocation peak.
+Without spill support, exceeding the tracked budget fails the run.
 
-## 6. Inputs and Execution Frontiers
+The executor reports errors; deployment policy decides whether to retry or invoke
+an explicit fallback. It must not silently replace failed computation or turn an
+error into an empty result.
 
-A deployment can provide raw data at a Scan or already-computed results at an
-intermediate node. These are two ways to supply the inputs of one execution.
+## 6. Inputs and Execution Boundaries
 
-### 6.1 Raw data sources
+A physical DAG exposes typed input slots. The deployment plan binds each slot
+to raw data or an already-computed result.
 
-`bind_with_data_sources` resolves supported raw Scan leaves through a registry
-keyed by Planner source identity. Binding checks metadata; execution lazily opens
-readers. Connectors must declare finite snapshots/windows when required and
-handle cancellation and I/O buffering. Reader failures and schema drift fail
-execution. Only a memory connector is included in this PR.
+### 6.1 Raw inputs
 
-The current binder recognizes raw Scan inside a retained Pre-ASAP leaf payload.
-Other unsupported retained expressions fail binding; arbitrary Pre-ASAP execution
-is not implied by support for Scan.
+A raw input contract identifies the source, schema and required data scope.
+The deployment supplies a reader satisfying that contract. Readers declare
+boundedness, support cancellation and report schema drift or I/O failures.
+Opening readers is deferred until execution validation succeeds.
 
-### 6.2 Supplied intermediate results
+### 6.2 Materialized inputs
+
+Deployment compilation can replace an upstream computation with a compatible
+materialized result:
 
 ```text
-Scan → KLL build → KLL merge → quantile readout
-           ↑
-    deployment may supply this node's output from stored state
+Logical computation:   Scan → KLL build → merge → readout
+
+Physical query DAG:    stored-state input → merge → readout
 ```
 
-When a deployment supplies a compatible result, binding treats that node as an
-execution frontier and does not bind its upstream dependencies. The supplied
-operator must match the node's declared schema. Deployments therefore need not
-manually construct physical DAGs to reuse precomputed work.
+This boundary is chosen during deployment compilation. The executor receives an
+explicit input slot; it does not discover a materialization or decide to omit
+upstream work at serving time.
 
-Schema compatibility does not establish window coverage, revision correctness,
-maintenance readiness or accuracy guarantees. Planning and deployment must
-establish these before committing to execution. Stored-state decoding provides
-format support, not a policy for selecting valid stored panes.
+Compatibility includes summary family and parameters, schema, grouping, window
+coverage and revision scope. The deployment must establish materialization
+readiness and the applicable accuracy guarantee before using the result.
+Successful byte decoding or schema matching alone is insufficient.
 
 ## 7. Implementation Organization
 
+These are modules within the shared execution library, not architectural layers:
+
 | Module | Owns |
 | --- | --- |
-| `plan` | Physical DAG/operator contracts, properties and validation |
-| `binding` | Compiled Post-ASAP representation → concrete operators |
-| `runtime` | Per-run execution, streams, shared producers and resource control |
-| `operators` | Batch implementations of relational and temporal computation |
-| `expressions` | Scalar evaluation and Planner expression adaptation |
-| `operators/summary` | Physical summary build, merge and readout |
+| `plan` | Shared physical operator vocabulary, DAG structure, properties and validation |
+| `binding` | Instantiate specified operators and resolve supplied input slots |
+| `runtime` | Per-run state, streams, shared producers and resource accounting |
+| `operators` | Relational and temporal physical implementations |
+| `operators/summary` | Summary build, merge and readout implementations |
+| `expressions` | Scalar expression evaluation |
 | `summary_kernels` | Planner-facing sketch adapters and exact accumulators |
-| `sources` | Input interfaces, Scan and memory connector |
-| `stored_state` | Persisted summary decoding, delta application and reconstruction |
+| `sources` | Reader interfaces and input adapters |
+| `stored_state` | Supported state decoding, delta application and reconstruction |
 
-Sketch algorithms themselves, including weighted CMS/CountSketch, belong to
-`asap_sketchlib`. Kernel availability does not imply support for native binding,
-every readout or every stored-state format; these capabilities are checked
-separately.
+Sketch algorithms belong to `asap_sketchlib`. Storage selection and engine
+policies belong to deployment repositories. The deployment compiler consumes
+the shared operator contracts to lower logical computation.
 
-Locating the library alongside Planner lets one PR change an IR node and its
-physical implementation. It also enables tests across internal planning and
-execution APIs without coordinating repositories. Deployment policies and
-external connectors remain outside the library.
+Keeping the execution library alongside Planner allows one PR to change an IR
+operation and its implementation, and enables tests across internal planning
+and execution interfaces. Repository location does not transfer deployment
+ownership to the planning library.
 
 ## 8. Alternatives Considered
 
-### 8.1 ASAP-owned runtime — selected
+### 8.1 Shared ASAP execution — selected
 
-ASAP owns physical operators and DAG execution, following DataFusion's separation
-of contracts, runtime and concrete implementations. This provides direct control
-over native summary-state edges and shared producers, common computation across
-deployments, and tests spanning logical planning and execution.
+One physical operator vocabulary and executor support both precompute and query
+engines. ASAP controls summary-state edges and shared-producer semantics directly.
+The cost is maintaining operator correctness, resource management and future
+execution optimizations.
 
-The cost is ownership of operator correctness, resource management and future
-parallelism, spill and physical optimization. There is no measured claim that
-this runtime has lower overhead than DataFusion.
+Separate operator systems in each deployment would duplicate these responsibilities
+and require repeated consistency work. Deployment differences are expressed
+through input and operational contracts instead.
 
-### 8.2 DataFusion extension
+### 8.2 DataFusion execution
 
-DataFusion offers established physical implementations and execution machinery.
-Reusing it would require integrating ASAP's logical summary semantics, state
-transport, sharing, partitioning and lifecycle contracts. Extensions do not
-inherently require changes to DataFusion core, but existing optimizations are
-usable only when those contracts preserve ASAP semantics.
+DataFusion provides established operators and execution infrastructure. Reuse
+requires integrating ASAP's summary semantics, state transport, sharing and
+lifecycle contracts. Extensions do not inherently require changing DataFusion
+core, but optimizations must preserve the supplied semantics.
 
-This PR chooses native execution; a DataFusion backend or hybrid runtime is
-outside its scope. The [DataFusion comparison](datafusion-execution-comparison.md)
-provides the detailed tradeoffs.
+This design selects native execution, following DataFusion's separation of
+operator contracts and implementation responsibilities. It makes no claim of
+lower runtime overhead. See the [DataFusion comparison](datafusion-execution-comparison.md).
 
 ## 9. Validation
 
-Acceptance has three levels:
+The design requires three levels of automated validation:
 
-| Level | Required behavior | Coverage today |
-| --- | --- | --- |
-| Operator correctness | Correct results and schemas for supported types, edge cases and errors; resource contracts hold. | Unit tests, [semantic tests](../../crates/asap-physical-operators/tests/physical_semantics.rs) and [resource tests](../../crates/asap-physical-operators/tests/blocking_resources.rs). |
-| Physical DAG correctness | Correct composition, dependencies, shared producers, cancellation and independent runs. | Runtime unit tests and [DAG integration tests](../../crates/asap-physical-operators/tests/physical_dag.rs). |
-| Planner → execution correctness | Selected logical Post-ASAP DAGs compile, bind and execute with the intended semantics. | [Weighted TopK integration](../../crates/asap-physical-operators/tests/weighted_topk_binding.rs) starts from PromQL, selects a candidate and executes with supplied rate results. |
+| Level | Required behavior |
+| --- | --- |
+| Operators | Correct results and schemas across supported types, empty/null inputs, errors and resource limits. Summary build/merge/readout preserves the intended state semantics. |
+| Physical DAG execution | Correct composition, shared producers, independent consumers, repeated runs, cancellation and resource release. |
+| Planning and deployment integration | A selected Post-ASAP DAG compiles to consistent deployment contracts and executes through the shared library with correct input identities and results. |
 
-The third level is partial: weighted TopK injects finalized rates at a frontier,
-so it does not execute raw time-series input through rate calculation.
-[Raw Scan integration](../../crates/asap-physical-operators/tests/raw_scan.rs)
-covers Scan → Sort → Limit using a manually constructed `ExecutableDag`.
+The KLL example must verify both precompute output and query readouts, including
+one merge execution for two consumers. Materialized-input tests must reject
+incompatible state and establish that excluded upstream work does not run.
+Full-path tests must start with SQL/PromQL and raw inputs, then exercise planning,
+deployment compilation and native execution rather than injecting all computed
+intermediates.
 
-Still required are a complete SQL/PromQL → raw input → planning → binding → native
-results test and broader combinations of Planner-generated operators. Deployment
-acceptance additionally needs real connectors, window/revision selection,
-persistence, publication and serving.
+Existing operator, DAG and resource tests provide a foundation. The weighted
+TopK integration exercises a Planner-selected computation with supplied rate
+results; raw Scan integration uses a manually constructed DAG. These do not
+establish the complete three-layer integration. Automated tests have been run
+locally; no separate manual deployment-level verification has been performed.
 
-Existing automated tests were run locally. No separate manual deployment-level
-verification was performed. The documentation update does not add test coverage.
+Deployment acceptance additionally covers real connectors, installation,
+window/revision handling, persistence, publication and serving. This document
+defines the target design; it does not claim those integrations are complete.
 
 ## 10. Limitations and Future Work
 
-Execution currently targets supported operations over bounded inputs where
-blocking computation is required. It is not complete SQL/PromQL execution, and
-successful logical candidate construction does not prove physical feasibility.
-Downstream must reject candidates without a complete supported realization for
-the chosen execution boundary.
+The initial execution scope is supported computation with bounded input wherever
+blocking operators require it. Logical validity alone does not establish physical
+feasibility: deployment compilation must reject an unsupported realization before
+committing it, or select an explicit deployment fallback.
 
-Partitioned parallelism, sharding, spill, physical algorithm selection and richer
-ordering/distribution properties require further design and implementation.
-Connecting runtime implementations to analytical physical costing is also a
-separate integration task. These extensions must preserve C1–C6 and the planning
-and deployment ownership boundaries above.
+Parallelism, sharding, spill, richer ordering/distribution properties and physical
+algorithm costing can extend the same physical-plan contract. They must preserve
+C1–C6 and the three ownership boundaries. They do not require additional semantic
+IR layers.
