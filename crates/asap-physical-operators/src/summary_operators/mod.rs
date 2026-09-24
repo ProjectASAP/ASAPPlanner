@@ -36,6 +36,6 @@ pub use min_accumulator::*;
 pub use sketch_envelope_accumulator::*;
 pub use sum_accumulator::*;
 
-pub mod weighted_frequency;
 pub mod factory;
 pub mod traits;
+pub mod weighted_frequency;
