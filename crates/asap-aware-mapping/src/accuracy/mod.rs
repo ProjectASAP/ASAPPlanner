@@ -68,6 +68,12 @@
 //! - `AccuracyTarget::Exact` on a node admits only exact realizations
 //!   (unchanged), and an approximate layer can never satisfy it.
 
+mod estimator;
+pub mod hll;
+pub mod reconciliation;
+pub(crate) use estimator::EstimatorAccuracy;
+pub use estimator::EstimatorContract;
+
 use asap_types::post_asap::{
     AccuracyError, BoundExpr, CompositionOperator, ErrorMetric, ExactOperation, GuaranteeSource,
     ProbabilityExpr, ResultGuarantee, SketchAlgorithm, SketchParams, SketchQuery,
@@ -153,6 +159,16 @@ pub struct PropagationStats {
 
 /// Supplies typed planning-time evidence required by propagation rules.
 pub trait AccuracyEvidenceProvider {
+    /// Trusted estimator contract for this complete aggregate expression,
+    /// including source, filters, grouping and all panes in each readout.
+    /// An observed cardinality is not an enforced population bound.
+    fn estimator_contract(
+        &self,
+        _expression: &asap_types::pre_asap::QueryExpr,
+    ) -> Option<EstimatorContract> {
+        None
+    }
+
     /// Proof scoped to this complete quantile expression, including its source,
     /// filters, grouping and window. `None` means unknown, including emptiness.
     fn quantile_input_domain(

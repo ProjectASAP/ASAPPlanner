@@ -366,12 +366,12 @@ use asap_types::workload::{DataWorkload, QueryRecurrence, QueryWorkload, Repeate
 use std::rc::Rc;
 use thiserror::Error;
 
+use crate::accuracy::reconciliation::AccuracyReconciliationStrategy;
 use crate::accuracy::{
     AccuracyBudgetAllocator, AccuracyEvidenceProvider, AccuracyModel, CompositionShape,
     DefaultAccuracyModel, EqualSplitAllocator, NoAccuracyEvidence, KLL_RANK_ERROR_COEFFICIENT_99,
     KLL_RANK_ERROR_EXPONENT_99,
 };
-use crate::accuracy_reconciliation::AccuracyReconciliationStrategy;
 use crate::cost_model::{
     raw_recompute_cost_rate, Cost, CostModel, CseCandidate, DefaultCostModel,
     ExactCompositionCostInputs, ExactCompositionCostRequest, ShareDecision,
@@ -538,7 +538,7 @@ pub enum ReplacementProvenance {
     CseShare,
     CseRecompute,
     LogicalRewrite,
-    /// [`crate::accuracy_reconciliation::AccuracyReconciliationStrategy`]'s
+    /// [`crate::accuracy::reconciliation::AccuracyReconciliationStrategy`]'s
     /// "read a strictly-tighter sibling instead of building an independent,
     /// looser copy" candidate (issue #273). Kept distinct from
     /// `LogicalRewrite` — even though both are structurally-different,
@@ -2301,6 +2301,22 @@ pub(crate) fn construct_summary_with(
     child_target: Option<&AccuracyTarget>,
     allocation: Option<GuaranteeSource>,
 ) -> Result<Rc<SummaryNode>, RealizationError> {
+    let local_target = match allocation.as_ref() {
+        Some(GuaranteeSource::BudgetAllocation { local_target, .. }) => Some(local_target),
+        _ => accuracy_target(intent),
+    };
+    let estimator = crate::accuracy::EstimatorAccuracy::new(
+        planning_inputs.accuracy,
+        planning_inputs.evidence.estimator_contract(expr),
+        local_target,
+    );
+    let realization = match realization {
+        Realization::Sketch(kind) => match estimator.size_params(kind.algorithm()) {
+            Some(params) => Realization::Sketch(SketchKind::new(kind.algorithm().clone(), params)),
+            None => Realization::Sketch(kind),
+        },
+        other => other,
+    };
     if let QueryExpr::Aggregate {
         reduction, child, ..
     } = expr
@@ -2652,12 +2668,21 @@ fn construct_summary_agg(
     // materialized: the local guarantee of this family's readout (or exact
     // accumulator) composed over the child's, under the operator this
     // family applies to the child's values.
+    let local_target = match allocation.as_ref() {
+        Some(GuaranteeSource::BudgetAllocation { local_target, .. }) => Some(local_target),
+        _ => accuracy_target(intent),
+    };
+    let estimator = crate::accuracy::EstimatorAccuracy::new(
+        planning_inputs.accuracy,
+        planning_inputs.evidence.estimator_contract(node),
+        local_target,
+    );
     let guarantee = compose_guarantee(
         &family,
         query.as_ref(),
         &bound_child,
         intent,
-        planning_inputs.accuracy,
+        &estimator,
         planning_inputs.evidence,
         allocation,
     )?;
@@ -9598,5 +9623,119 @@ mod tests {
             .assemble_selected_dag(&space.roots[0].1)
             .unwrap()
             .is_some());
+    }
+    // Source evidence alone must enable Planner-owned sizing and certification.
+    #[test]
+    fn scoped_hll_evidence_sizes_and_certifies_without_a_deployment_model() {
+        use crate::accuracy::EstimatorContract;
+        struct SourceEvidence {
+            expression: QueryExpr,
+            max_distinct: u32,
+        }
+        impl AccuracyEvidenceProvider for SourceEvidence {
+            fn estimator_contract(&self, expression: &QueryExpr) -> Option<EstimatorContract> {
+                (expression == &self.expression).then_some(EstimatorContract::ClassicHll {
+                    max_distinct_per_readout: self.max_distinct,
+                })
+            }
+        }
+        let target = AccuracyTarget::EpsilonDelta {
+            epsilon: 0.05,
+            delta: 0.01,
+        };
+        let root = Rc::new(agg(
+            vec![],
+            AggIntent::Cardinality {
+                col: None,
+                accuracy: target.clone(),
+            },
+            metric_scan(&[]),
+        ));
+        let evidence = SourceEvidence {
+            expression: (*root).clone(),
+            max_distinct: 128,
+        };
+        let strategy = SketchAlgorithmStrategy::new_with_planning_inputs_and_evidence(
+            &DefaultCostModel,
+            &DefaultAccuracyModel,
+            &EqualSplitAllocator,
+            &evidence,
+        );
+        let candidates = strategy.replacements(&TargetSubDAG::new(&root));
+        let hll = candidates
+            .iter()
+            .find_map(|candidate| match &candidate.replacement {
+                Replacement::Summary(node)
+                    if summary_family_algorithm(node) == SketchAlgorithm::Hll =>
+                {
+                    Some(node)
+                }
+                _ => None,
+            })
+            .expect("HLL candidate");
+        assert!(DefaultAccuracyModel
+            .satisfies(hll.guarantee.as_ref().expect("HLL confidence"), &target));
+        let SummaryExpr::SummaryEstimate { summary_input, .. } = &hll.expr else {
+            panic!("readout")
+        };
+        let SummaryExpr::SummaryAgg {
+            family: SummaryFamilyType::Sketch(kind, _),
+            ..
+        } = &summary_input.expr
+        else {
+            panic!("HLL state")
+        };
+        let expected = crate::accuracy::hll::ClassicHllConfidence::new(128, 0.05)
+            .unwrap()
+            .precision(0.01)
+            .unwrap();
+        assert_eq!(
+            kind.params(),
+            &SketchParams::Hll {
+                precision: expected
+            }
+        );
+        let absent =
+            SketchAlgorithmStrategy::default_cost_model().replacements(&TargetSubDAG::new(&root));
+        assert!(!absent.iter().any(|candidate| matches!(&candidate.replacement, Replacement::Summary(node)
+            if summary_family_algorithm(node) == SketchAlgorithm::Hll && node.guarantee.as_ref().is_some_and(|g| DefaultAccuracyModel.satisfies(g, &target)))));
+        // Invalid contracts, infeasible targets and evidence for another source
+        // must never authorize a confidence-bearing HLL candidate.
+        for (max_distinct, delta, wrong_scope) in [
+            (0, 0.01, false),
+            (4097, 0.01, false),
+            (128, 1e-12, false),
+            (128, 0.01, true),
+        ] {
+            let target = AccuracyTarget::EpsilonDelta {
+                epsilon: 0.05,
+                delta,
+            };
+            let query = Rc::new(agg(
+                vec![],
+                AggIntent::Cardinality {
+                    col: None,
+                    accuracy: target.clone(),
+                },
+                metric_scan(&[]),
+            ));
+            let evidence = SourceEvidence {
+                expression: if wrong_scope {
+                    metric_scan(&["other"])
+                } else {
+                    (*query).clone()
+                },
+                max_distinct,
+            };
+            let strategy = SketchAlgorithmStrategy::new_with_planning_inputs_and_evidence(
+                &DefaultCostModel,
+                &DefaultAccuracyModel,
+                &EqualSplitAllocator,
+                &evidence,
+            );
+            assert!(!strategy.replacements(&TargetSubDAG::new(&query)).iter().any(|candidate|
+                matches!(&candidate.replacement, Replacement::Summary(node)
+                if summary_family_algorithm(node) == SketchAlgorithm::Hll && node.guarantee.as_ref().is_some_and(|g| DefaultAccuracyModel.satisfies(g, &target)))));
+        }
     }
 }
