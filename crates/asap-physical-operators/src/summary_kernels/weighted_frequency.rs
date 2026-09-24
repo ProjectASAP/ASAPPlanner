@@ -1,87 +1,44 @@
-//! Float64 weighted CMS and CountSketch state with typed candidate identities. Each instance
-//! represents one partition at one evaluation scope; updates never round rates
-//! to integer counts. Candidate membership still requires Planner evidence.
+//! ASAP type and trait adapter for sketchlib's Float64 weighted frequency kernel.
 use crate::{values::Value, Error};
 use crate::{AggregateCore, AggregationType, KeyByLabelValues, SerializableToSink, Statistic};
+pub use asap_sketchlib::FrequencyAlgorithm;
+use asap_sketchlib::{FrequencyIdentity, WeightedFrequency as Kernel, WeightedFrequencyError};
 use serde::{Deserialize, Serialize};
-use std::{
-    cmp::Ordering,
-    collections::{BinaryHeap, HashMap},
-    sync::Arc,
-};
+use std::collections::HashMap;
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
-enum Identity {
-    Null,
-    Bool(bool),
-    Int64(i64),
-    Float64(f64),
-    Utf8(String),
-}
-impl Identity {
-    fn from_value(value: &Value) -> Result<Self, Error> {
-        Ok(match value {
-            Value::Null => Self::Null,
-            Value::Bool(v) => Self::Bool(*v),
-            Value::Int64(v) => Self::Int64(*v),
-            Value::Float64(v) if v.is_finite() => Self::Float64(if *v == 0.0 { 0.0 } else { *v }),
-            Value::Utf8(v) => Self::Utf8(v.to_string()),
-            _ => {
-                return Err(Error::Invalid(
-                    "unsupported weighted frequency identity".into(),
-                ))
-            }
-        })
+fn adapt_error(error: WeightedFrequencyError) -> Error {
+    match error {
+        WeightedFrequencyError::Invalid(message) => Error::Invalid(message),
+        WeightedFrequencyError::Update(message) => Error::Operator(message),
     }
-    fn value(&self) -> Value {
-        match self {
-            Self::Null => Value::Null,
-            Self::Bool(v) => Value::Bool(*v),
-            Self::Int64(v) => Value::Int64(*v),
-            Self::Float64(v) => Value::Float64(*v),
-            Self::Utf8(v) => Value::Utf8(Arc::from(v.as_str())),
+}
+fn identity(value: &Value) -> Result<FrequencyIdentity, Error> {
+    Ok(match value {
+        Value::Null => FrequencyIdentity::Null,
+        Value::Bool(v) => FrequencyIdentity::Bool(*v),
+        Value::Int64(v) => FrequencyIdentity::Int64(*v),
+        Value::Float64(v) => FrequencyIdentity::Float64(*v),
+        Value::Utf8(v) => FrequencyIdentity::Utf8(v.to_string()),
+        _ => {
+            return Err(Error::Invalid(
+                "unsupported weighted frequency identity".into(),
+            ))
         }
+    })
+}
+fn value(identity: FrequencyIdentity) -> Value {
+    match identity {
+        FrequencyIdentity::Null => Value::Null,
+        FrequencyIdentity::Bool(v) => Value::Bool(v),
+        FrequencyIdentity::Int64(v) => Value::Int64(v),
+        FrequencyIdentity::Float64(v) => Value::Float64(v),
+        FrequencyIdentity::Utf8(v) => Value::Utf8(v.into()),
     }
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
-struct Candidate {
-    identity: Vec<Identity>,
-    key: Vec<u8>,
-    score: f64,
-}
-impl PartialEq for Candidate {
-    fn eq(&self, other: &Self) -> bool {
-        self.cmp(other) == Ordering::Equal
-    }
-}
-impl Eq for Candidate {}
-impl PartialOrd for Candidate {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.cmp(other))
-    }
-}
-impl Ord for Candidate {
-    fn cmp(&self, other: &Self) -> Ordering {
-        // The weakest candidate is the root of this bounded min-heap.
-        other
-            .score
-            .total_cmp(&self.score)
-            .then_with(|| other.key.cmp(&self.key))
-    }
-}
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum FrequencyAlgorithm {
-    Cms,
-    CountSketch,
-}
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(transparent)]
 pub struct WeightedFrequency {
-    algorithm: FrequencyAlgorithm,
-    width: usize,
-    depth: usize,
-    capacity: usize,
-    cells: Vec<f64>,
-    candidates: BinaryHeap<Candidate>,
+    inner: Kernel,
 }
 impl WeightedFrequency {
     pub(crate) fn configuration(
@@ -120,10 +77,10 @@ impl WeightedFrequency {
     }
 
     pub(crate) fn algorithm(&self) -> FrequencyAlgorithm {
-        self.algorithm
+        self.inner.algorithm()
     }
     pub(crate) fn shape(&self) -> (usize, usize, usize) {
-        (self.width, self.depth, self.capacity)
+        self.inner.shape()
     }
     pub fn new(
         algorithm: FrequencyAlgorithm,
@@ -131,148 +88,26 @@ impl WeightedFrequency {
         depth: usize,
         capacity: usize,
     ) -> Result<Self, Error> {
-        let len = width
-            .checked_mul(depth)
-            .filter(|_| {
-                width > 0
-                    && depth > 0
-                    && capacity > 0
-                    && (algorithm != FrequencyAlgorithm::CountSketch || depth % 2 == 1)
-            })
-            .ok_or_else(|| Error::Invalid("invalid weighted frequency dimensions".into()))?;
-        let mut cells = Vec::new();
-        cells
-            .try_reserve_exact(len)
-            .map_err(|_| Error::Invalid("weighted frequency allocation failed".into()))?;
-        cells.resize(len, 0.0);
-        Ok(Self {
-            algorithm,
-            width,
-            depth,
-            capacity,
-            cells,
-            candidates: BinaryHeap::new(),
-        })
+        Kernel::new(algorithm, width, depth, capacity)
+            .map(|inner| Self { inner })
+            .map_err(adapt_error)
     }
-    /// Decode only this kernel's versioned Float64 representation. Integer CMS
-    /// wire frames are different representations and are not accepted here.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, Error> {
-        use bincode::Options;
-        let bytes = bytes
-            .strip_prefix(b"ASAP-WFREQ-1\0")
-            .ok_or_else(|| Error::Invalid("weighted frequency format/version mismatch".into()))?;
-        let mut state: Self = bincode::DefaultOptions::new()
-            .with_fixint_encoding()
-            .with_limit(bytes.len() as u64)
-            .reject_trailing_bytes()
-            .deserialize(bytes)
-            .map_err(|e| Error::Invalid(e.to_string()))?;
-        if state.width == 0
-            || state.depth == 0
-            || state.capacity == 0
-            || (state.algorithm == FrequencyAlgorithm::CountSketch && state.depth.is_multiple_of(2))
-            || state.width.checked_mul(state.depth) != Some(state.cells.len())
-            || state
-                .cells
-                .iter()
-                .any(|v| !v.is_finite() || (state.algorithm == FrequencyAlgorithm::Cms && *v < 0.0))
-            || state.candidates.len() > state.capacity
-        {
-            return Err(Error::Invalid("invalid weighted frequency state".into()));
-        }
-        for candidate in &state.candidates {
-            if candidate
-                .identity
-                .iter()
-                .any(|v| matches!(v, Identity::Float64(n) if !n.is_finite()))
-                || bincode::serialize(&candidate.identity)
-                    .map_err(|e| Error::Invalid(e.to_string()))?
-                    != candidate.key
-            {
-                return Err(Error::Invalid("invalid weighted frequency identity".into()));
-            }
-        }
-        state.retain(state.candidates.iter().cloned().collect());
-        Ok(state)
-    }
-    fn indexes<'a>(&'a self, key: &'a [u8]) -> impl Iterator<Item = (usize, f64)> + 'a {
-        (0..self.depth).map(move |row| {
-            let bucket =
-                (xxhash_rust::xxh64::xxh64(key, 2 * row as u64) % self.width as u64) as usize;
-            let sign = if self.algorithm == FrequencyAlgorithm::CountSketch
-                && xxhash_rust::xxh64::xxh64(key, 2 * row as u64 + 1) & 1 != 0
-            {
-                -1.0
-            } else {
-                1.0
-            };
-            (row * self.width + bucket, sign)
-        })
-    }
-    fn estimate(&self, key: &[u8]) -> f64 {
-        let mut estimates = self
-            .indexes(key)
-            .map(|(i, sign)| self.cells[i] * sign)
-            .collect::<Vec<_>>();
-        match self.algorithm {
-            FrequencyAlgorithm::Cms => estimates.into_iter().fold(f64::INFINITY, f64::min),
-            FrequencyAlgorithm::CountSketch => {
-                let middle = estimates.len() / 2;
-                *estimates.select_nth_unstable_by(middle, f64::total_cmp).1
-            }
-        }
-    }
-    fn retain(&mut self, mut candidates: Vec<Candidate>) {
-        candidates.sort_by(|a, b| a.key.cmp(&b.key));
-        candidates.dedup_by(|a, b| a.key == b.key);
-        self.candidates.clear();
-        for mut candidate in candidates {
-            candidate.score = self.estimate(&candidate.key);
-            self.candidates.push(candidate);
-            if self.candidates.len() > self.capacity {
-                self.candidates.pop();
-            }
-        }
+        Kernel::from_bytes(bytes)
+            .map(|inner| Self { inner })
+            .map_err(adapt_error)
     }
     pub fn update(&mut self, values: &[Value], weight: f64) -> Result<(), Error> {
-        if !weight.is_finite() || (self.algorithm == FrequencyAlgorithm::Cms && weight < 0.0) {
-            return Err(Error::Operator(
-                "weighted frequency requires finite weights; CMS additionally requires nonnegative weights".into(),
-            ));
-        }
-        let identity = values
-            .iter()
-            .map(Identity::from_value)
-            .collect::<Result<Vec<_>, _>>()?;
-        let key = bincode::serialize(&identity).map_err(|e| Error::Operator(e.to_string()))?;
-        let indexes = self.indexes(&key).collect::<Vec<_>>();
-        if indexes
-            .iter()
-            .any(|&(i, sign)| !(self.cells[i] + sign * weight).is_finite())
-        {
-            return Err(Error::Operator("weighted frequency sum overflow".into()));
-        }
-        for (i, sign) in indexes {
-            self.cells[i] += sign * weight;
-        }
-        let mut candidates = self.candidates.iter().cloned().collect::<Vec<_>>();
-        candidates.push(Candidate {
-            identity,
-            key,
-            score: 0.0,
-        });
-        self.retain(candidates);
-        Ok(())
+        let values = values.iter().map(identity).collect::<Result<Vec<_>, _>>()?;
+        self.inner.update(&values, weight).map_err(adapt_error)
     }
     pub fn rows(&self, n: usize) -> Vec<Vec<Value>> {
-        let mut candidates = self.candidates.iter().collect::<Vec<_>>();
-        candidates.sort_by(|a, b| b.score.total_cmp(&a.score).then_with(|| a.key.cmp(&b.key)));
-        candidates
+        self.inner
+            .topk(n)
             .into_iter()
-            .take(n)
-            .map(|c| {
-                let mut row = c.identity.iter().map(Identity::value).collect::<Vec<_>>();
-                row.push(Value::Float64(c.score));
+            .map(|(items, score)| {
+                let mut row = items.into_iter().map(value).collect::<Vec<_>>();
+                row.push(Value::Float64(score));
                 row
             })
             .collect()
@@ -283,9 +118,7 @@ impl SerializableToSink for WeightedFrequency {
         serde_json::to_value(self).expect("finite validated frequency state")
     }
     fn serialize_to_bytes(&self) -> Vec<u8> {
-        let mut bytes = b"ASAP-WFREQ-1\0".to_vec();
-        bytes.extend(bincode::serialize(self).expect("serializable frequency state"));
-        bytes
+        self.inner.to_bytes()
     }
 }
 impl AggregateCore for WeightedFrequency {
@@ -309,27 +142,12 @@ impl AggregateCore for WeightedFrequency {
             .as_any()
             .downcast_ref::<Self>()
             .ok_or("weighted frequency state type mismatch")?;
-        if self.algorithm != other.algorithm || self.shape() != other.shape() {
-            return Err("weighted frequency shape mismatch".into());
-        }
-        let mut result = self.clone();
-        for (value, rhs) in result.cells.iter_mut().zip(&other.cells) {
-            *value += rhs;
-            if !value.is_finite() {
-                return Err("weighted frequency merge overflow".into());
-            }
-        }
-        result.retain(
-            self.candidates
-                .iter()
-                .chain(&other.candidates)
-                .cloned()
-                .collect(),
-        );
-        Ok(Box::new(result))
+        Ok(Box::new(Self {
+            inner: self.inner.merge(&other.inner)?,
+        }))
     }
     fn get_accumulator_type(&self) -> AggregationType {
-        match self.algorithm {
+        match self.inner.algorithm() {
             FrequencyAlgorithm::Cms => AggregationType::CountMinSketchWithHeap,
             FrequencyAlgorithm::CountSketch => AggregationType::CountSketchWithHeap,
         }
@@ -346,30 +164,9 @@ impl AggregateCore for WeightedFrequency {
         Err("weighted frequency uses typed row readout".into())
     }
     fn approx_memory_bytes(&self) -> usize {
-        std::mem::size_of::<Self>()
-            + self.cells.capacity() * 8
-            + self
-                .candidates
-                .iter()
-                .map(|c| {
-                    std::mem::size_of::<Candidate>()
-                        + c.key.capacity()
-                        + c.identity
-                            .iter()
-                            .map(|v| {
-                                std::mem::size_of::<Identity>()
-                                    + if let Identity::Utf8(s) = v {
-                                        s.capacity()
-                                    } else {
-                                        0
-                                    }
-                            })
-                            .sum::<usize>()
-                })
-                .sum::<usize>()
+        self.inner.approx_memory_bytes()
     }
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -398,25 +195,6 @@ mod tests {
             assert!(left.update(&[Value::Null], weight).is_err());
             assert_eq!(left.serialize_to_bytes(), before);
         }
-    }
-
-    // CountSketch uses sign-corrected median: one corrupted row cannot dominate five rows.
-    #[test]
-    fn count_sketch_median_and_odd_depth_contract() {
-        assert!(WeightedFrequency::new(FrequencyAlgorithm::CountSketch, 8, 2, 2).is_err());
-        let mut state = WeightedFrequency::new(FrequencyAlgorithm::CountSketch, 16, 5, 8).unwrap();
-        state.update(&[Value::Int64(4)], -0.375).unwrap();
-        let key = state.candidates.peek().unwrap().key.clone();
-        let indexes = state.indexes(&key).collect::<Vec<_>>();
-        for &(index, sign) in &indexes {
-            assert_eq!(state.cells[index] * sign, -0.375);
-        }
-        state.cells[indexes[0].0] += 1000.0;
-        assert_eq!(state.estimate(&key), -0.375);
-        let mut invalid = state.clone();
-        invalid.depth = 4;
-        invalid.cells.truncate(64);
-        assert!(WeightedFrequency::from_bytes(&invalid.serialize_to_bytes()).is_err());
     }
 
     // Invalid rates must not mutate state; typed keys cannot collide by formatting.

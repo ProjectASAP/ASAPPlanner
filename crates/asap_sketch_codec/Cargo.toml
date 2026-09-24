@@ -4,5 +4,5 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-asap_sketchlib = { git = "https://github.com/ProjectASAP/asap_sketchlib", rev = "026cd18c7b8c23ae6c46d4d683151ba562b8cd3a" }
+asap_sketchlib = { git = "https://github.com/ProjectASAP/asap_sketchlib", rev = "5f03ccbd798ed5fec62bdd839bcb331123cab369" }
 prost = "0.13"

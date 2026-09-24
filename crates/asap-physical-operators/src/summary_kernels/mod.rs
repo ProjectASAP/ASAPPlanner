@@ -1,4 +1,4 @@
-//! Summary algorithms and state; DAG execution adapters live in `operators::summary`.
+//! ASAP state adapters and exact accumulators; sketch algorithms live in `asap_sketchlib`.
 pub mod count_min_sketch;
 pub mod count_min_sketch_with_heap;
 pub mod count_sketch;

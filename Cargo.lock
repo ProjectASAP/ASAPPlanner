@@ -382,7 +382,7 @@ dependencies = [
  "asap-frontend-promql",
  "asap-types",
  "asap_sketch_codec",
- "asap_sketchlib 0.3.0 (git+https://github.com/ProjectASAP/asap_sketchlib?rev=026cd18c7b8c23ae6c46d4d683151ba562b8cd3a)",
+ "asap_sketchlib 0.3.0 (git+https://github.com/ProjectASAP/asap_sketchlib?rev=5f03ccbd798ed5fec62bdd839bcb331123cab369)",
  "base64 0.21.7",
  "bincode",
  "futures",
@@ -413,15 +413,16 @@ dependencies = [
 name = "asap_sketch_codec"
 version = "0.1.0"
 dependencies = [
- "asap_sketchlib 0.3.0 (git+https://github.com/ProjectASAP/asap_sketchlib?rev=026cd18c7b8c23ae6c46d4d683151ba562b8cd3a)",
+ "asap_sketchlib 0.3.0 (git+https://github.com/ProjectASAP/asap_sketchlib?rev=5f03ccbd798ed5fec62bdd839bcb331123cab369)",
  "prost",
 ]
 
 [[package]]
 name = "asap_sketchlib"
 version = "0.3.0"
-source = "git+https://github.com/ProjectASAP/asap_sketchlib?rev=026cd18c7b8c23ae6c46d4d683151ba562b8cd3a#026cd18c7b8c23ae6c46d4d683151ba562b8cd3a"
+source = "git+https://github.com/ProjectASAP/asap_sketchlib?rev=5f03ccbd798ed5fec62bdd839bcb331123cab369#5f03ccbd798ed5fec62bdd839bcb331123cab369"
 dependencies = [
+ "bincode",
  "bytes",
  "prost",
  "rand 0.9.5",
