@@ -8,7 +8,7 @@ use asap_sketchlib::CountSketchWithHeap;
 use asap_sketchlib::CsHeapItem;
 use asap_sketchlib::MessagePackCodec;
 
-use crate::accumulators::count_min_sketch_with_heap_accumulator::CountMinSketchWithHeapAccumulator;
+use crate::summary_operators::count_min_sketch_with_heap_accumulator::CountMinSketchWithHeapAccumulator;
 
 /// Decode a `CountMinSketch` from the modified-OTLP wire bytes.
 /// MSGPACK path round-trips `CountMinSketch::deserialize_msgpack`;

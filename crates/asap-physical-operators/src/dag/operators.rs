@@ -335,6 +335,16 @@ enum Kind {
         time: Option<usize>,
         groups: Vec<usize>,
     },
+    KeyedSummaryBuild {
+        family: SummaryFamilyType,
+        value: usize,
+        items: Vec<usize>,
+        groups: Vec<usize>,
+    },
+    KeyedReadout {
+        state: usize,
+        k: usize,
+    },
     SummaryMerge {
         state: usize,
         groups: Vec<usize>,
@@ -670,6 +680,97 @@ impl Operator {
             output: schema(fields),
         })
     }
+    pub fn keyed_summary_build(
+        input: Schema,
+        family: SummaryFamilyType,
+        value: usize,
+        items: Vec<usize>,
+        groups: Vec<usize>,
+    ) -> Result<Self, Error> {
+        use planner_types::post_asap::{SketchAlgorithm, SketchParams};
+        super::values::validate_family(&family)?;
+        let SummaryFamilyType::Sketch(kind, _) = &family else {
+            return Err(invalid("keyed sketch required"));
+        };
+        if kind.algorithm() != &SketchAlgorithm::CmsWithHeap
+            || !matches!(kind.params(), SketchParams::CmsWithHeap { .. })
+        {
+            return Err(invalid(
+                "Float64 weighted keyed construction currently supports CMS with heap",
+            ));
+        }
+        validate_groups(&input, &groups)?;
+        if items.is_empty() || plain(&input, value)? != (&DataType::Float64, false) {
+            return Err(invalid(
+                "keyed summary requires identities and non-null Float64 weights",
+            ));
+        }
+        for &item in &items {
+            if !matches!(
+                plain(&input, item)?.0,
+                DataType::Utf8
+                    | DataType::Int64
+                    | DataType::Float64
+                    | DataType::Bool
+                    | DataType::Null
+            ) {
+                return Err(invalid("unsupported keyed summary identity type"));
+            }
+        }
+        let mut fields = groups
+            .iter()
+            .map(|&i| input.fields[i].clone())
+            .collect::<Vec<_>>();
+        fields.push(SummaryField {
+            name: "state".into(),
+            dtype: family.clone(),
+            nullable: false,
+        });
+        Ok(Self {
+            kind: Kind::KeyedSummaryBuild {
+                family,
+                value,
+                items,
+                groups,
+            },
+            inputs: vec![input],
+            output: schema(fields),
+        })
+    }
+    pub fn keyed_readout(
+        input: Schema,
+        state: usize,
+        k: usize,
+        output: Schema,
+    ) -> Result<Self, Error> {
+        use planner_types::post_asap::{SketchAlgorithm, SketchParams};
+        let SummaryFamilyType::Sketch(kind, _) = &field(&input, state)?.dtype else {
+            return Err(invalid("keyed readout requires summary state"));
+        };
+        let SketchParams::CmsWithHeap { heap_size, .. } = kind.params() else {
+            return Err(invalid("unsupported keyed readout family"));
+        };
+        if kind.algorithm() != &SketchAlgorithm::CmsWithHeap
+            || k > *heap_size as usize
+            || output.fields.len() <= input.fields.len()
+        {
+            return Err(invalid("invalid keyed readout shape or capacity"));
+        }
+        if state + 1 != input.fields.len()
+            || output.fields[..state] != input.fields[..state]
+            || output.fields.last().unwrap().dtype != SummaryFamilyType::Plain(DataType::Float64)
+        {
+            return Err(invalid(
+                "keyed readout must preserve partitions and return a Float64 score",
+            ));
+        }
+        super::values::validate_schema(&output)?;
+        Ok(Self {
+            kind: Kind::KeyedReadout { state, k },
+            inputs: vec![input],
+            output,
+        })
+    }
     pub fn summary_merge(input: Schema, state: usize, groups: Vec<usize>) -> Result<Self, Error> {
         validate_groups(&input, &groups)?;
         super::values::validate_family(&field(&input, state)?.dtype)?;
@@ -785,7 +886,8 @@ impl PhysicalOperator<Batch, Schema> for Operator {
             Kind::Window { .. } => "WindowAggregate",
             Kind::SemiJoin { .. } => "SemiJoin",
             Kind::Join { .. } => "RelationalJoin",
-            Kind::SummaryBuild { .. } => "SummaryAgg",
+            Kind::SummaryBuild { .. } | Kind::KeyedSummaryBuild { .. } => "SummaryAgg",
+            Kind::KeyedReadout { .. } => "SummaryEstimate",
             Kind::SummaryMerge { .. } => "SummaryMerge",
             Kind::Readout { .. } => "SummaryReadout",
         }
@@ -1018,6 +1120,39 @@ impl PhysicalOperator<Batch, Schema> for Operator {
                 )
             })
             .boxed_local()),
+            Kind::KeyedSummaryBuild {
+                family,
+                value,
+                items,
+                groups,
+            } => Ok(futures::stream::once(async move {
+                Batch::try_new(
+                    output,
+                    build_keyed_summary(input, family, *value, items, groups, &context).await?,
+                )
+            })
+            .boxed_local()),
+            Kind::KeyedReadout { state, k } => Ok(input
+                .map(move |batch| {
+                    let batch = batch?;
+                    let mut rows = Vec::new();
+                    for row in batch.rows() {
+                        let Value::Summary { state: summary, .. } = &row[*state] else {
+                            return Err(invalid("summary value required"));
+                        };
+                        let summary = summary
+                            .as_any()
+                            .downcast_ref::<crate::summary_operators::weighted_cms::WeightedCms>()
+                            .ok_or_else(|| invalid("weighted CMS typed state required"))?;
+                        for items in summary.rows(*k) {
+                            let mut values = row[..*state].to_vec();
+                            values.extend(items);
+                            rows.push(values);
+                        }
+                    }
+                    Batch::try_new(output.clone(), rows)
+                })
+                .boxed_local()),
             Kind::Readout {
                 state,
                 statistic,
@@ -1254,6 +1389,79 @@ fn reduce_one(rows: &[Vec<Value>], measure: &Reduction, input: &Schema) -> Resul
         sum
     }))
 }
+async fn build_keyed_summary(
+    mut input: Input<'_, Batch>,
+    family: &SummaryFamilyType,
+    value: usize,
+    items: &[usize],
+    groups: &[usize],
+    context: &RunContext,
+) -> Result<Vec<Vec<Value>>, Error> {
+    use crate::{summary_operators::weighted_cms::WeightedCms, AggregateCore};
+    use planner_types::post_asap::SketchParams;
+    let SummaryFamilyType::Sketch(kind, _) = family else {
+        unreachable!()
+    };
+    let SketchParams::CmsWithHeap {
+        width,
+        depth,
+        heap_size,
+    } = kind.params()
+    else {
+        unreachable!()
+    };
+    let mut states = BTreeMap::<Vec<Vec<u8>>, (Vec<Value>, WeightedCms, Reservation, usize)>::new();
+    while let Some(batch) = input.next().await {
+        let batch = batch?;
+        for row in batch.rows() {
+            if context.is_cancelled() {
+                return Err(Error::Operator("execution cancelled".into()));
+            }
+            let key = group_key(row, groups)?;
+            if !states.contains_key(&key) {
+                let labels = groups.iter().map(|&i| row[i].clone()).collect::<Vec<_>>();
+                let overhead = labels.iter().map(Value::bytes).sum::<usize>()
+                    + key.iter().map(|v| v.len() + 24).sum::<usize>()
+                    + 128;
+                let bytes = (*width as usize)
+                    .checked_mul(*depth as usize)
+                    .and_then(|n| n.checked_mul(8))
+                    .and_then(|n| n.checked_add(overhead))
+                    .ok_or_else(|| invalid("weighted CMS memory size overflow"))?;
+                let reservation = context.reserve(bytes)?;
+                states.insert(
+                    key.clone(),
+                    (
+                        labels,
+                        WeightedCms::new(*width as usize, *depth as usize, *heap_size as usize)?,
+                        reservation,
+                        overhead,
+                    ),
+                );
+            }
+            let (_, summary, reservation, overhead) = states.get_mut(&key).unwrap();
+            let Value::Float64(weight) = row[value] else {
+                return Err(invalid("weighted CMS weight type"));
+            };
+            summary.update(
+                &items.iter().map(|&i| row[i].clone()).collect::<Vec<_>>(),
+                weight,
+            )?;
+            reservation.resize(summary.approx_memory_bytes() + *overhead)?;
+        }
+    }
+    Ok(states
+        .into_values()
+        .map(|(mut labels, summary, _, _)| {
+            labels.push(Value::Summary {
+                family: family.clone(),
+                state: Arc::new(summary),
+            });
+            labels
+        })
+        .collect())
+}
+
 async fn build_summary(
     mut input: Input<'_, Batch>,
     family: &SummaryFamilyType,

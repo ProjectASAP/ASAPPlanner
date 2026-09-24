@@ -399,7 +399,7 @@ fn kll_raw_partial_and_precomputed_are_native_dags() {
 #[test]
 fn restored_exact_state_and_family_validation() {
     use asap_physical_operators::{
-        accumulators::exact_accumulator::ExactAccumulator, SerializableToSink,
+        summary_operators::exact_accumulator::ExactAccumulator, SerializableToSink,
     };
     let family = SummaryFamilyType::ExactAggregate(ExactKind::Sum, ExactParams::Sum);
     let mut acc = ExactAccumulator::new(family.clone(), false).unwrap();
@@ -961,5 +961,114 @@ fn native_relational_join_kinds_preserve_unmatched_rows() {
         )
         .unwrap();
         assert_eq!(run(&dag, 2, query()).len(), count, "{kind:?}");
+    }
+}
+
+// Per-series fractional rates feed one independent CMS per job, in either scope.
+#[test]
+fn weighted_rate_topk_preserves_partitions_fractional_scores_and_evaluation_scope() {
+    use planner_types::post_asap::{SketchAlgorithm, SketchKind, SketchParams};
+    let raw = schema(&[
+        ("service", DataType::Utf8, false),
+        ("job", DataType::Utf8, false),
+        ("instance", DataType::Int64, false),
+        ("t", DataType::Timestamp, false),
+        ("value", DataType::Float64, false),
+    ]);
+    let mut rows = Vec::new();
+    // Multiple instances of auth accumulate. Batch has a very different scale.
+    for (service, job, instance, rate) in [
+        ("auth", "api", 1, 0.125),
+        ("auth", "api", 2, 0.25),
+        ("checkout", "api", 1, 0.3125),
+        ("search", "api", 1, 0.0625),
+        ("ingest", "batch", 1, 100.0),
+        ("export", "batch", 1, 80.0),
+        ("cleanup", "batch", 1, 20.0),
+    ] {
+        for (t, value) in [(0, 0.0), (30_000, rate * 30.0), (60_000, rate * 60.0)] {
+            rows.push(vec![
+                Value::Utf8(service.into()),
+                Value::Utf8(job.into()),
+                Value::Int64(instance),
+                Value::Timestamp(t),
+                Value::Float64(value),
+            ]);
+        }
+    }
+    let rates = Operator::window(
+        raw.clone(),
+        planner_types::pre_asap::AggIntent::Rate,
+        3,
+        4,
+        vec![0, 1, 2],
+        Some((0, 60_000)),
+    )
+    .unwrap();
+    let family = SummaryFamilyType::Sketch(
+        SketchKind::new(
+            SketchAlgorithm::CmsWithHeap,
+            SketchParams::CmsWithHeap {
+                width: 4096,
+                depth: 5,
+                heap_size: 8,
+            },
+        ),
+        Default::default(),
+    );
+    let build = Operator::keyed_summary_build(rates.schema(), family, 3, vec![0], vec![1]).unwrap();
+    let output = schema(&[
+        ("job", DataType::Utf8, false),
+        ("service", DataType::Utf8, false),
+        ("score", DataType::Float64, false),
+    ]);
+    let readout = Operator::keyed_readout(build.schema(), 1, 8, output.clone()).unwrap();
+    let mut dag = PhysicalDag::default();
+    dag.add(
+        0,
+        vec![],
+        Operator::source(raw.clone(), vec![Batch::try_new(raw, rows).unwrap()]).unwrap(),
+    )
+    .unwrap();
+    dag.add(1, vec![0], rates).unwrap();
+    dag.add(2, vec![1], build).unwrap();
+    dag.add(3, vec![2], readout).unwrap();
+    dag.add(
+        4,
+        vec![3],
+        Operator::sort(
+            output.clone(),
+            vec![SortKey {
+                column: 2,
+                descending: true,
+                nulls_first: false,
+            }],
+            vec![0],
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    dag.add(5, vec![4], Operator::limit(output, 2, 0, vec![0]).unwrap())
+        .unwrap();
+    for scope in [
+        query(),
+        Scope::Ingestion {
+            window_start_ms: 0,
+            window_end_ms: 60_000,
+            revision: 2,
+        },
+        query(),
+    ] {
+        let result = run(&dag, 5, scope);
+        assert_eq!(result.len(), 4);
+        assert_eq!(floats(&result, 2), vec![0.375, 0.3125, 100.0, 80.0]);
+        let services = result
+            .iter()
+            .map(|row| match &row[1] {
+                Value::Utf8(v) => v.as_ref(),
+                _ => panic!("service"),
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(services, vec!["auth", "checkout", "ingest", "export"]);
     }
 }

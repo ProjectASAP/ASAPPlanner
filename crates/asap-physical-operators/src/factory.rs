@@ -1,4 +1,4 @@
-use crate::accumulators::{
+use crate::summary_operators::{
     CountMinSketchAccumulator, CountMinSketchWithHeapAccumulator, CountSketchAccumulator,
     CountSketchWithHeapAccumulator, DDSketchAccumulator, DatasketchesKLLAccumulator,
     HydraKllSketchAccumulator, IncreaseAccumulator, KeyedCounterState, KeyedMaxState,
@@ -7,8 +7,8 @@ use crate::accumulators::{
 use crate::{AggregateCore, KeyByLabelValues, Measurement};
 // Production dispatch consumes Planner SummaryAgg payloads directly. The
 // config adapter below is compiled only for isolated historical kernel tests.
-use crate::accumulators::hll_sketch_accumulator::HllSketchAccumulator;
-use crate::accumulators::univmon_accumulator::UnivMonAccumulator;
+use crate::summary_operators::hll_sketch_accumulator::HllSketchAccumulator;
+use crate::summary_operators::univmon_accumulator::UnivMonAccumulator;
 use planner_types::post_asap::{ExactKind, SketchAlgorithm, SketchParams, SummaryFamilyType};
 
 /// Generate the two boilerplate clone-based `AccumulatorUpdater` methods
@@ -630,28 +630,16 @@ pub struct CmsHeapAccumulatorUpdater {
     col_num: usize,
     heap_size: usize,
     weight: TopkWeight,
-    weight_scale: f64,
 }
 
 impl CmsHeapAccumulatorUpdater {
     pub fn new(row_num: usize, col_num: usize, heap_size: usize, weight: TopkWeight) -> Self {
-        Self::with_weight_scale(row_num, col_num, heap_size, weight, 1.0)
-    }
-
-    pub fn with_weight_scale(
-        row_num: usize,
-        col_num: usize,
-        heap_size: usize,
-        weight: TopkWeight,
-        weight_scale: f64,
-    ) -> Self {
         Self {
             acc: CountMinSketchWithHeapAccumulator::new(row_num, col_num, heap_size),
             row_num,
             col_num,
             heap_size,
             weight,
-            weight_scale,
         }
     }
 }
@@ -671,7 +659,7 @@ impl AccumulatorUpdater for CmsHeapAccumulatorUpdater {
             // Σ value: feed the datapoint value. sketchlib's CMS-heap
             // `update(key, w)` adds `w.round()` occurrences of `key`, so the
             // heap value accumulates the (rounded) summed metric value.
-            TopkWeight::Value => value * self.weight_scale,
+            TopkWeight::Value => value,
             // Σ count: one occurrence per event, regardless of value.
             TopkWeight::Count => 1.0,
         };
@@ -767,28 +755,16 @@ pub struct CountSketchWithHeapAccumulatorUpdater {
     col_num: usize,
     heap_size: usize,
     weight: TopkWeight,
-    weight_scale: f64,
 }
 
 impl CountSketchWithHeapAccumulatorUpdater {
     pub fn new(row_num: usize, col_num: usize, heap_size: usize, weight: TopkWeight) -> Self {
-        Self::with_weight_scale(row_num, col_num, heap_size, weight, 1.0)
-    }
-
-    pub fn with_weight_scale(
-        row_num: usize,
-        col_num: usize,
-        heap_size: usize,
-        weight: TopkWeight,
-        weight_scale: f64,
-    ) -> Self {
         Self {
             acc: CountSketchWithHeapAccumulator::new(row_num, col_num, heap_size),
             row_num,
             col_num,
             heap_size,
             weight,
-            weight_scale,
         }
     }
 }
@@ -803,7 +779,7 @@ impl AccumulatorUpdater for CountSketchWithHeapAccumulatorUpdater {
 
     fn update_keyed(&mut self, key: &KeyByLabelValues, value: f64, _timestamp_ms: i64) {
         let weighted = match self.weight {
-            TopkWeight::Value => value * self.weight_scale,
+            TopkWeight::Value => value,
             TopkWeight::Count => 1.0,
         };
         self.acc.inner.update(&key.to_semicolon_str(), weighted);
@@ -918,6 +894,18 @@ pub fn create_planner_accumulator(
     input: &planner_types::post_asap::SummaryUpdate,
     grouping: &planner_types::post_asap::GroupingStrategy,
 ) -> Result<Box<dyn AccumulatorUpdater>, String> {
+    if input.item.is_some()
+        && matches!(
+            input.weight_domain,
+            planner_types::post_asap::WeightDomain::NonNegative {
+                proof:
+                    planner_types::post_asap::NonNegativeWeightProof::ResetAwareCounterDerivative
+            }
+        )
+    {
+        return Err("window-weighted summaries require typed DAG binding; integer heap updaters cannot consume rates".into());
+    }
+
     crate::capability::validate_summary_kernel(family, input, grouping)?;
     use planner_types::post_asap::GroupingStrategy;
     if grouping != &GroupingStrategy::PerSubpopulationInstance {
@@ -925,7 +913,7 @@ pub fn create_planner_accumulator(
     }
     if matches!(family, SummaryFamilyType::ExactAggregate(..)) {
         return Ok(Box::new(PlannerExactUpdater {
-            acc: crate::accumulators::exact_accumulator::ExactAccumulator::new(
+            acc: crate::summary_operators::exact_accumulator::ExactAccumulator::new(
                 family.clone(),
                 input.item.is_some(),
             )?,
@@ -937,16 +925,6 @@ pub fn create_planner_accumulator(
     if family_grouping != grouping {
         return Err("Planner family and operator grouping disagree".into());
     }
-    // Heap counters use fixed-point storage for fractional counter deltas.
-    // This encodes the selected update; it does not choose another family.
-    let weight_scale = if matches!(
-        input.weight,
-        planner_types::post_asap::SummaryInputExpr::ResetAwareCounterDelta { .. }
-    ) {
-        1_000_000.0
-    } else {
-        1.0
-    };
     let updater: Box<dyn AccumulatorUpdater> = match (kind.algorithm(), kind.params()) {
         (SketchAlgorithm::Kll, SketchParams::Kll { k }) => Box::new(KllAccumulatorUpdater::new(
             u16::try_from(*k).map_err(|_| "KLL k exceeds runtime bound")?,
@@ -964,25 +942,18 @@ pub fn create_planner_accumulator(
         }
         (SketchAlgorithm::CmsWithHeap, params @ SketchParams::CmsWithHeap { .. }) => {
             let (r, c, h) = cms_heap_dims(params);
-            Box::new(CmsHeapAccumulatorUpdater::with_weight_scale(
-                r,
-                c,
-                h,
-                TopkWeight::Value,
-                weight_scale,
-            ))
+            Box::new(CmsHeapAccumulatorUpdater::new(r, c, h, TopkWeight::Value))
         }
         (
             SketchAlgorithm::CountSketchWithHeap,
             params @ SketchParams::CountSketchWithHeap { .. },
         ) => {
             let (r, c, h) = cms_heap_dims(params);
-            Box::new(CountSketchWithHeapAccumulatorUpdater::with_weight_scale(
+            Box::new(CountSketchWithHeapAccumulatorUpdater::new(
                 r,
                 c,
                 h,
                 TopkWeight::Value,
-                weight_scale,
             ))
         }
         (SketchAlgorithm::Hll, SketchParams::Hll { precision }) => Box::new(HllUpdater {
@@ -1023,7 +994,7 @@ pub fn create_planner_accumulator(
 }
 
 struct PlannerExactUpdater {
-    acc: crate::accumulators::exact_accumulator::ExactAccumulator,
+    acc: crate::summary_operators::exact_accumulator::ExactAccumulator,
 }
 impl AccumulatorUpdater for PlannerExactUpdater {
     fn update_single(&mut self, value: f64, timestamp: i64) {
@@ -1034,7 +1005,7 @@ impl AccumulatorUpdater for PlannerExactUpdater {
     }
     impl_clone_accumulator_methods!(acc);
     fn reset(&mut self) {
-        self.acc = crate::accumulators::exact_accumulator::ExactAccumulator::new(
+        self.acc = crate::summary_operators::exact_accumulator::ExactAccumulator::new(
             self.acc.family().clone(),
             self.acc.is_keyed(),
         )

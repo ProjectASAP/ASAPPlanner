@@ -258,6 +258,27 @@ pub(crate) fn group_key(row: &[Value], columns: &[usize]) -> Result<Vec<Vec<u8>>
 
 pub(crate) fn validate_family(family: &SummaryFamilyType) -> Result<(), Error> {
     use planner_types::post_asap::SketchAlgorithm as A;
+    if let SummaryFamilyType::Sketch(kind, grouping) = family {
+        if let planner_types::post_asap::SketchParams::CmsWithHeap {
+            width,
+            depth,
+            heap_size,
+        } = kind.params()
+        {
+            return if kind.algorithm() == &A::CmsWithHeap
+                && *width > 0
+                && *depth > 0
+                && *heap_size > 0
+                && grouping == &Default::default()
+            {
+                Ok(())
+            } else {
+                Err(Error::Invalid(
+                    "invalid weighted CMS family or grouping strategy".into(),
+                ))
+            };
+        }
+    }
     match family {
         SummaryFamilyType::ExactAggregate(..) => {}
         SummaryFamilyType::Sketch(kind, _)
@@ -278,7 +299,7 @@ pub(crate) fn validate_family(family: &SummaryFamilyType) -> Result<(), Error> {
     .map_err(Error::Invalid)
 }
 fn validate_state(family: &SummaryFamilyType, state: &dyn AggregateCore) -> Result<(), Error> {
-    use crate::accumulators::{
+    use crate::summary_operators::{
         datasketches_kll_accumulator::DatasketchesKLLAccumulator,
         dd_sketch_accumulator::DDSketchAccumulator, exact_accumulator::ExactAccumulator,
         hll_sketch_accumulator::HllSketchAccumulator,
@@ -286,6 +307,25 @@ fn validate_state(family: &SummaryFamilyType, state: &dyn AggregateCore) -> Resu
     use planner_types::post_asap::SketchParams;
     validate_family(family)?;
     let valid = match family {
+        SummaryFamilyType::Sketch(kind, _)
+            if matches!(kind.params(), SketchParams::CmsWithHeap { .. }) =>
+        {
+            let SketchParams::CmsWithHeap {
+                width,
+                depth,
+                heap_size,
+            } = kind.params()
+            else {
+                unreachable!()
+            };
+            state
+                .as_any()
+                .downcast_ref::<crate::summary_operators::weighted_cms::WeightedCms>()
+                .is_some_and(|state| {
+                    state.shape() == (*width as usize, *depth as usize, *heap_size as usize)
+                })
+        }
+
         SummaryFamilyType::ExactAggregate(..) => {
             state
                 .as_any()
@@ -297,7 +337,9 @@ fn validate_state(family: &SummaryFamilyType, state: &dyn AggregateCore) -> Resu
                         planner_types::post_asap::ExactKind::Sum,
                         planner_types::post_asap::ExactParams::Sum
                     )
-                ) && state.as_any().is::<crate::accumulators::SumAccumulator>())
+                ) && state
+                    .as_any()
+                    .is::<crate::summary_operators::SumAccumulator>())
         }
         SummaryFamilyType::Sketch(kind, _) => match kind.params() {
             SketchParams::Kll { k } => state
