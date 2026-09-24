@@ -519,3 +519,5 @@ pub mod batch_execution;
 pub mod expressions;
 
 mod temporal;
+
+pub mod scan;

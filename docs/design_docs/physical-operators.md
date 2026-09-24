@@ -17,6 +17,67 @@ Its native operators can execute independently of either backend engine.
 Engine integration must use these operators for computation, rather than merely
 using the shared scheduler around a second implementation.
 
+## Engine and storage architecture
+
+```mermaid
+flowchart TB
+  subgraph Engine[ASAP Query Engine or Precompute Engine]
+    Planner[ASAPPlanner] --> Plan[Physical DAG]
+    Plan --> Runtime[ASAP Runtime]
+    Runtime --> Operators[Physical Operator Library]
+  end
+  Operators --> API[Data Source / Storage API]
+  API --> Connectors[Connectors / Adapters]
+  Connectors --> Systems[Storage / Data Systems]
+```
+
+Planner describes source identities, schemas and computation. The runtime
+schedules operators and owns shared execution, backpressure, cancellation and
+resource accounting. Scan reads raw rows through the data-source interface;
+Filter, Project, joins, aggregation and summary construction execute inside ASAP.
+The same interface serves ingestion time and query time.
+
+Connectors own system-specific access and decoding. Prometheus, S3, Parquet,
+Kafka and Iceberg are possible integrations, not built-in dependencies or claims
+of implemented support. A file format adapter and a storage transport can be
+composed; they need not each be a separate query engine. Asking an external
+system to execute the complete query remains external execution, not raw Scan.
+
+The shared API exchanges typed native batches. Ordinary columns preserve
+Planner types; other operator edges can carry ASAP summary states without an
+Arrow representation. Raw Scan accepts ordinary rows only. Reading stored
+summary state remains a distinct storage operation, with its own compatibility
+and coverage requirements.
+
+### Raw Scan contract
+
+The library provides Scan, a registry keyed by Planner table/time-series source
+identity, and an immutable in-memory connector. A deployment registers its
+connectors before binding the physical DAG. Binding resolves metadata and
+validates schemas and predicates without opening a reader. Execution lazily
+opens one cursor per reachable Scan per run, even when multiple consumers share
+that node. Each run gets a fresh cursor; dropping it releases connector resources.
+
+Scan evaluates Planner leaf predicates itself with three-valued boolean logic:
+only TRUE retains a row. Predicate pushdown is not assumed. Projection, time-range
+selection and aggregation remain explicit downstream operations; Scan does not
+silently interpret query evaluation time as a lookback or replay Kafka offsets.
+Connectors receive the execution context for cancellation and resource control;
+a deployment must bind any required snapshot/offset and bound its I/O buffers.
+Reader errors and schema drift fail execution, rather than becoming empty results.
+
+The current post-ASAP IR retains raw Scan as a leaf expression in its `Fallback`
+payload. The source-aware binder recognizes only that Scan expression and runs
+it locally; other retained expressions are still rejected. This does not invoke
+an external fallback or introduce another operator vocabulary. Explicit stored
+frontiers can still cut a DAG at a precomputed result.
+
+Acceptance includes a raw-only Scan → Sort → Limit DAG at both phases, shared
+consumers, independent runs, cancellation before opening, schema drift, reader
+errors, null predicates, empty inputs and memory limits. This establishes the
+library path. A backend must register a real reader before it can serve raw-only
+plans; a Prometheus reader and other external connectors are not implemented here.
+
 ## Workspace organization
 
 [DataFusion's physical-plan crate](https://github.com/apache/datafusion/tree/main/datafusion/physical-plan)
@@ -32,7 +93,8 @@ execution model.
 | Physical operator implementations, input/output validation and streams | `asap-physical-operators` |
 | Shared-producer scheduling, cancellation and resource accounting | `asap-physical-operators` |
 | Summary state encoding | `asap_sketch_codec` |
-| Sources, durable stores, publication and serving protocols | Deployment repositories |
+| Scan and data-source interface; reference memory connector | `asap-physical-operators` |
+| External connectors, durable stores, publication and serving protocols | Deployment repositories |
 
 The IR crate does not depend on execution. The physical operator crate depends
 on the local IR crate. Operator unit tests can exercise private implementation
@@ -61,7 +123,7 @@ operators currently have no spill implementation.
 
 ## Operator coverage
 
-Native operations include scalar sources, typed Project and Filter, arithmetic
+Native operations include raw Scan and scalar sources, typed Project and Filter, arithmetic
 and boolean expressions, exact grouped aggregation, relational joins (including semi-join), grouped Sort and
 Limit, Union, vector-to-scalar conversion, and summary construction, merge and
 readout. Window operators consume Planner aggregate intents for Rate, Increase,
@@ -83,9 +145,9 @@ implicit external fallback. The backend retains source, storage, publication and
 Computation must bind to Planner operations without a second backend operator
 vocabulary. Binding rejects unsupported Planner nodes before starting sources.
 
-Deployments provide explicit storage or ingestion source frontiers. A supplied
-batch source is not a backend raw Scan implementation. Local backend raw Scan
-is deferred; a raw-only library test does not establish that deployment capability.
+Deployments provide explicit storage or ingestion source frontiers and may bind
+raw Scan through the shared data-source interface. The memory connector proves
+the library contract; backend raw-data access still requires a deployment connector.
 
 ## DataFusion reuse vs independent implementation
 
