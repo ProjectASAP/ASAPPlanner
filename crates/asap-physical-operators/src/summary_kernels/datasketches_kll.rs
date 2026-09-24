@@ -537,7 +537,7 @@ mod tests {
         let boxed_accs: Vec<Box<dyn AggregateCore>> = vec![Box::new(kll1), Box::new(kll2)];
         assert!(DatasketchesKLLAccumulator::merge_multiple(&boxed_accs).is_err());
 
-        use crate::summary_operators::sum::SumAccumulator;
+        use crate::summary_kernels::sum::SumAccumulator;
         let kll = DatasketchesKLLAccumulator::new(200);
         let sum = SumAccumulator::new();
         let mixed_accs: Vec<Box<dyn AggregateCore>> = vec![Box::new(kll), Box::new(sum)];

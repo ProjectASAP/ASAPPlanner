@@ -38,7 +38,7 @@ src/
     source.rs        literals, batch sources, union, scalar conversion
   sources/           raw-source API, Scan and memory connector
   binding/           Planner executable DAG → physical operators
-  summary_operators/ mathematical kernels, factory and traits
+  summary_kernels/ mathematical kernels, factory and traits
   stored_state/      decoding, delta application, persisted-state readout
   capability.rs      support checks
   values.rs          typed rows and state validation

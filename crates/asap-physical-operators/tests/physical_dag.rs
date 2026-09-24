@@ -398,7 +398,7 @@ fn kll_raw_partial_and_precomputed_are_native_dags() {
 // Restored state must retain its family; a mislabeled state is rejected.
 #[test]
 fn restored_exact_state_and_family_validation() {
-    use asap_physical_operators::{summary_operators::exact::ExactAccumulator, SerializableToSink};
+    use asap_physical_operators::{summary_kernels::exact::ExactAccumulator, SerializableToSink};
     let family = SummaryFamilyType::ExactAggregate(ExactKind::Sum, ExactParams::Sum);
     let mut acc = ExactAccumulator::new(family.clone(), false).unwrap();
     acc.update(None, 7., 0);

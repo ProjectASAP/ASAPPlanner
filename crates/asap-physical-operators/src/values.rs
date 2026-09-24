@@ -260,7 +260,7 @@ pub(crate) fn group_key(row: &[Value], columns: &[usize]) -> Result<Vec<Vec<u8>>
 pub(crate) use crate::capability::validate_native_family as validate_family;
 
 fn validate_state(family: &SummaryFamilyType, state: &dyn AggregateCore) -> Result<(), Error> {
-    use crate::summary_operators::{
+    use crate::summary_kernels::{
         datasketches_kll::DatasketchesKLLAccumulator, dd_sketch::DDSketchAccumulator,
         exact::ExactAccumulator, hll_sketch::HllSketchAccumulator,
     };
@@ -273,7 +273,7 @@ fn validate_state(family: &SummaryFamilyType, state: &dyn AggregateCore) -> Resu
                 SketchParams::CmsWithHeap { .. } | SketchParams::CountSketchWithHeap { .. }
             ) =>
         {
-            use crate::summary_operators::weighted_frequency::WeightedFrequency;
+            use crate::summary_kernels::weighted_frequency::WeightedFrequency;
             let (algorithm, width, depth, capacity) = WeightedFrequency::configuration(kind)?;
             state
                 .as_any()
@@ -296,7 +296,7 @@ fn validate_state(family: &SummaryFamilyType, state: &dyn AggregateCore) -> Resu
                     )
                 ) && state
                     .as_any()
-                    .is::<crate::summary_operators::SumAccumulator>())
+                    .is::<crate::summary_kernels::SumAccumulator>())
         }
         SummaryFamilyType::Sketch(kind, _) => match kind.params() {
             SketchParams::Kll { k } => state
@@ -365,7 +365,7 @@ pub(crate) fn plain(schema: &Schema, column: usize) -> Result<(&DataType, bool),
 #[cfg(test)]
 mod weighted_state_tests {
     use super::*;
-    use crate::summary_operators::weighted_frequency::{FrequencyAlgorithm, WeightedFrequency};
+    use crate::summary_kernels::weighted_frequency::{FrequencyAlgorithm, WeightedFrequency};
     use planner_types::post_asap::{SketchAlgorithm, SketchKind, SketchParams};
 
     // A state cannot acquire a different family or shape merely by relabeling its batch.

@@ -1,4 +1,4 @@
-use crate::summary_operators::IncreaseAccumulator;
+use crate::summary_kernels::IncreaseAccumulator;
 use crate::{
     AggregateCore, AggregationType, KeyByLabelValues, MergeableAccumulator,
     MultipleSubpopulationAggregate, SerializableToSink, SingleSubpopulationAggregate,

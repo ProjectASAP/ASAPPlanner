@@ -78,7 +78,7 @@ See [the design](../../docs/design_docs/physical-operators.md).
 - `operators`: projection, filter, joins, aggregate/window, sort, limit and summary implementations.
 - `sources`: raw-source interface, Scan and the memory connector.
 - `binding`: Planner executable DAG binding and installed source frontiers.
-- `summary_operators`: mathematical summary kernels, update adapters and accumulator traits.
+- `summary_kernels`: mathematical summary kernels, update adapters and accumulator traits.
 - `stored_state`: persisted-state decoding, delta reconstruction and readout.
 - `capability`: explicit kernel and native-batch/readout validation.
 
