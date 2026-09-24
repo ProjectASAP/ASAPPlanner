@@ -237,6 +237,7 @@ impl Batch {
     }
     pub fn bytes(&self) -> usize {
         std::mem::size_of::<Self>()
+            + self.rows.capacity() * std::mem::size_of::<Vec<Value>>()
             + self
                 .rows
                 .iter()

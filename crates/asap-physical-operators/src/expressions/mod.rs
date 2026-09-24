@@ -72,7 +72,10 @@ impl Expression {
                 };
                 Ok((dtype, n || m))
             }
-            Planner(expression) => Ok(expression.dtype()),
+            Planner(expression) => {
+                expression.validate_input(input)?;
+                Ok(expression.dtype())
+            }
             Column(i) => {
                 let (t, n) = plain(input, *i)?;
                 Ok((t.clone(), n))
