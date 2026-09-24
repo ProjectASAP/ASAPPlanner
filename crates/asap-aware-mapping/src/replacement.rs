@@ -2572,34 +2572,26 @@ fn construct_summary_agg(
         if is_counter_weighted_topk(intent, child));
     let mut family = family;
     let score_population = if rate_weighted {
-        let n = planning_inputs
-            .evidence
-            .topk_max_distinct_items(node)
-            .filter(|n| *n > 0 && *n <= (1u64 << 53))
-            .ok_or(RealizationError::PhysicalRealization(
-                "weighted TopK requires a certified distinct-item bound",
-            ))?;
-        let (eps, delta) = accuracy_budget(accuracy_target(intent).expect("TopK target"));
-        if let SummaryFamilyType::Sketch(kind, grouping) = &family {
+        let bound = planning_inputs.evidence.topk_max_distinct_items(node);
+        if bound.is_some_and(|n| n == 0 || n > (1u64 << 53)) {
+            return Err(RealizationError::PhysicalRealization(
+                "invalid weighted TopK distinct-item bound",
+            ));
+        }
+        if let (Some(n), SummaryFamilyType::Sketch(kind, grouping)) = (bound, &family) {
+            let (eps, delta) = accuracy_budget(accuracy_target(intent).expect("TopK target"));
             let params = default_size_params(
                 kind.algorithm().clone(),
                 intent,
                 eps,
                 delta / (2.0 * n as f64),
             );
-            if sketch_state_bytes(&params)
-                .is_none_or(|bytes| bytes > DEFAULT_MAX_SKETCH_STATE_BYTES)
-            {
-                return Err(RealizationError::PhysicalRealization(
-                    "weighted TopK state exceeds budget",
-                ));
-            }
             family = SummaryFamilyType::Sketch(
                 SketchKind::new(kind.algorithm().clone(), params),
                 grouping.clone(),
             );
         }
-        Some(n)
+        bound
     } else {
         None
     };
@@ -2752,61 +2744,63 @@ fn construct_summary_agg(
         allocation,
     )?;
 
-    if let Some(n) = score_population {
+    if rate_weighted {
+        use asap_types::post_asap::{BoundExpr, ProbabilityExpr};
         let target = accuracy_target(intent).expect("TopK target");
-        let mut score = estimator
-            .local_guarantee(&family, query.as_ref().unwrap())
-            .ok_or(RealizationError::PhysicalRealization(
-                "weighted TopK has no score model",
-            ))?;
-        let score_delta =
-            score
-                .failure_probability
-                .evaluate()
-                .ok_or(RealizationError::PhysicalRealization(
-                    "weighted TopK score confidence is unknown",
-                ))?;
-        score.provenance.push(GuaranteeSource::CompositionStep {
-            operator: CompositionOperator::ApproximateAggregate,
-            rule: format!(
-                "simultaneous score bounds over at most {n} distinct partition/item identities"
-            ),
-        });
-        score.failure_probability = asap_types::post_asap::ProbabilityExpr::Constant {
-            value: (score_delta * n as f64).min(1.0),
+        guarantee = if let Some(mut score) =
+            estimator.local_guarantee(&family, query.as_ref().unwrap())
+        {
+            let count = match score_population {
+                Some(n) => BoundExpr::Constant { value: n as f64 },
+                None => {
+                    score
+                        .provenance
+                        .push(GuaranteeSource::UnavailableStatistic {
+                            statistic: "topk_max_distinct_items".into(),
+                        });
+                    BoundExpr::Unknown {
+                        statistic: "topk_max_distinct_items".into(),
+                    }
+                }
+            };
+            score.provenance.push(GuaranteeSource::CompositionStep {
+                operator: CompositionOperator::ApproximateAggregate,
+                rule: "simultaneous_score_bounds_over_distinct_partition_item_identities".into(),
+            });
+            score.failure_probability = ProbabilityExpr::Scaled {
+                count,
+                inner: Box::new(score.failure_probability),
+            };
+            // #455: missing evidence preserves a logical candidate. Only known
+            // contributions that already violate the target reject it here.
+            if !estimator.satisfies(&score.optimistic_floor(), target) {
+                return Err(RealizationError::PhysicalRealization(
+                    "weighted TopK scores miss accuracy target",
+                ));
+            }
+            let stats = planning_inputs.evidence.propagation_stats(
+                &CompositionOperator::TopKSelection,
+                &family,
+                membership_query.as_ref(),
+            );
+            let mut joint = estimator.propagate(
+                &CompositionOperator::TopKSelection,
+                std::slice::from_ref(&score),
+                None,
+                &stats,
+            )?;
+            joint.failure_probability = ProbabilityExpr::UnionBound {
+                terms: vec![joint.failure_probability, score.failure_probability],
+            };
+            if !estimator.satisfies(&joint.optimistic_floor(), target) {
+                return Err(RealizationError::PhysicalRealization(
+                    "weighted TopK joint guarantee misses target",
+                ));
+            }
+            Some(joint)
+        } else {
+            None
         };
-        if !estimator.satisfies(&score, target) {
-            return Err(RealizationError::PhysicalRealization(
-                "weighted TopK scores miss accuracy target",
-            ));
-        }
-        let stats = planning_inputs.evidence.propagation_stats(
-            &CompositionOperator::TopKSelection,
-            &family,
-            membership_query.as_ref(),
-        );
-        let mut joint = estimator.propagate(
-            &CompositionOperator::TopKSelection,
-            std::slice::from_ref(&score),
-            None,
-            &stats,
-        )?;
-        let membership_delta =
-            joint
-                .failure_probability
-                .evaluate()
-                .ok_or(RealizationError::PhysicalRealization(
-                    "weighted TopK membership confidence is unknown",
-                ))?;
-        joint.failure_probability = asap_types::post_asap::ProbabilityExpr::Constant {
-            value: (membership_delta + score.failure_probability.evaluate().unwrap()).min(1.0),
-        };
-        if !estimator.satisfies(&joint, target) {
-            return Err(RealizationError::PhysicalRealization(
-                "weighted TopK joint guarantee misses target",
-            ));
-        }
-        guarantee = Some(joint);
     }
 
     // `reduction` is carried onto `SummaryAgg` verbatim — not flattened to a

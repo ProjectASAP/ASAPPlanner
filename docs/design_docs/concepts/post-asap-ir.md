@@ -82,13 +82,14 @@ The DAG is per-series rate → finalized values → partitioned summary construc
 → typed candidate/score readout → output projection → grouped Sort → grouped
 Limit. The output count is two per job. The candidate capacity is a separate
 parameter, provisionally `max(k, ceil(1 / epsilon))`; this sizing choice is not a
-membership theorem. Missing membership evidence still prevents realization.
+membership theorem. Missing evidence retains a logical candidate with symbolic unknown guarantees;
+default selection does not certify or choose it.
 The row readout restores job and service identities and returns estimated sums.
 There is no mandatory exact scoring branch or candidate semi-join in this path.
 The old raw counter-delta update expression is removed rather than retained as a
 compatibility option: counter increments are not complete windowed rate results.
 
-The direct readout checks both score error and membership. A source provider
+The direct readout represents both score error and membership. A source provider
 supplies an enforced upper bound on distinct partition/item identities for the
 complete readout. Planner uses this bound to size confidence and union-bound
 score errors over adaptively selected items. Membership evidence is evaluated
@@ -105,3 +106,11 @@ strategy. Appending successive rate snapshots to one cumulative state is invalid
 An ingestion execution can compute a window before the query and store its state;
 a query execution can construct the same state on demand. These are placements
 of the same computation, not separate summary semantics.
+
+This follows the evidence-dependent candidate contract from #455. Missing
+population or margin evidence is exported as symbolic unknown terms, rather than
+erasing a constructible summary. Backend/runtime/deployment inspects these
+requirements and supplies applicable evidence before selection and installation.
+Re-running planning with that provider resolves guarantees and may resize the
+candidate. Known-invalid evidence or known bounds that already miss the target
+are rejected; an optimistic floor is never exported as a certificate.

@@ -320,7 +320,7 @@ fn grouped_rate_topk_consumes_finalized_rate_values() {
 
 // Selection is adaptive: a per-key score bound alone cannot certify all returned rows.
 #[test]
-fn weighted_topk_requires_a_complete_readout_population_bound() {
+fn weighted_topk_keeps_candidates_with_missing_population_evidence() {
     struct NoPopulationBound;
     impl AccuracyEvidenceProvider for NoPopulationBound {
         fn propagation_stats(
@@ -344,6 +344,65 @@ fn weighted_topk_requires_a_complete_readout_population_bound() {
         &DefaultAccuracyModel,
         &EqualSplitAllocator,
         &NoPopulationBound,
+    );
+    let candidates = strategy.replacements(&TargetSubDAG::new(&root));
+    assert!(candidates
+        .iter()
+        .any(|candidate| candidate.rationale.contains("CmsWithHeap")
+            && candidate.has_missing_accuracy_evidence()));
+}
+
+// Unknown requirements must survive physical export for deployment to inspect.
+#[test]
+fn weighted_topk_exports_symbolic_evidence_requirements() {
+    let root = Rc::new(
+        lower_promql(
+            "topk by(job)(2, sum by(service, job)(rate(m[1m])))",
+            AccuracyTarget::EpsilonDelta {
+                epsilon: 0.01,
+                delta: 0.01,
+            },
+        )
+        .unwrap(),
+    );
+    let candidates =
+        SketchAlgorithmStrategy::default_cost_model().replacements(&TargetSubDAG::new(&root));
+    let candidate = candidates
+        .iter()
+        .find(|candidate| candidate.rationale.contains("CmsWithHeap"))
+        .unwrap();
+    assert!(candidate.has_missing_accuracy_evidence());
+    let Replacement::Summary(node) = &candidate.replacement else {
+        panic!("summary candidate")
+    };
+    let dag = compile_executable_dag(node).unwrap();
+    let exported = serde_json::to_string(&dag).unwrap();
+    assert!(exported.contains("topk_max_distinct_items"));
+    assert!(exported.contains("topk_membership_margin"));
+    assert!(node.guarantee.as_ref().unwrap().has_unknown());
+}
+
+// Supplied invalid facts are distinct from absent evidence.
+#[test]
+fn weighted_topk_rejects_invalid_population_evidence() {
+    struct InvalidPopulation;
+    impl AccuracyEvidenceProvider for InvalidPopulation {
+        fn topk_max_distinct_items(&self, _: &QueryExpr) -> Option<u64> {
+            Some(0)
+        }
+    }
+    let root = Rc::new(
+        lower_promql(
+            "topk by(job)(2, sum by(service, job)(rate(m[1m])))",
+            AccuracyTarget::Epsilon(0.01),
+        )
+        .unwrap(),
+    );
+    let strategy = SketchAlgorithmStrategy::new_with_planning_inputs_and_evidence(
+        &DefaultCostModel,
+        &DefaultAccuracyModel,
+        &EqualSplitAllocator,
+        &InvalidPopulation,
     );
     assert!(strategy.replacements(&TargetSubDAG::new(&root)).is_empty());
 }
