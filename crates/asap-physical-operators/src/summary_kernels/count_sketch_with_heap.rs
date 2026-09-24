@@ -561,7 +561,7 @@ mod tests {
     /// min-over-rows divergence at the sketch-math level).
     #[test]
     fn test_rejects_merge_with_cms_family_accumulator() {
-        use crate::summary_operators::count_min_sketch_with_heap::CountMinSketchWithHeapAccumulator;
+        use crate::summary_kernels::count_min_sketch_with_heap::CountMinSketchWithHeapAccumulator;
 
         let cs = CountSketchWithHeapAccumulator::new(4, 64, 10);
         let cms = CountMinSketchWithHeapAccumulator::new(4, 64, 10);

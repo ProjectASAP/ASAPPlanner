@@ -144,9 +144,7 @@ pub fn validate_native_family(family: &SummaryFamilyType) -> Result<(), Error> {
     if let SummaryFamilyType::Sketch(kind, grouping) = family {
         if matches!(kind.algorithm(), A::CmsWithHeap | A::CountSketchWithHeap) {
             let (_, width, depth, _) =
-                crate::summary_operators::weighted_frequency::WeightedFrequency::configuration(
-                    kind,
-                )?;
+                crate::summary_kernels::weighted_frequency::WeightedFrequency::configuration(kind)?;
             return if valid_matrix(width as u32, depth as u32) && grouping == &Default::default() {
                 Ok(())
             } else {

@@ -1,11 +1,11 @@
 #![doc = include_str!("../README.md")]
 
-pub mod summary_operators;
+pub mod summary_kernels;
 /// Compatibility alias for existing deployments.
-pub use summary_operators as accumulators;
+pub use summary_kernels as accumulators;
 pub mod key_by_label_values;
 pub mod measurement;
-pub use summary_operators::traits;
+pub use summary_kernels::traits;
 
 mod aggregation_type;
 mod statistic;
@@ -17,7 +17,7 @@ pub use traits::*;
 
 pub use expressions::arithmetic;
 pub mod capability;
-pub use summary_operators::factory;
+pub use summary_kernels::factory;
 
 /// The exact Planner contract used by these kernels.
 pub use planner_types as planner;

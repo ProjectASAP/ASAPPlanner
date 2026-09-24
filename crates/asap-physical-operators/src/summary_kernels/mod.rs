@@ -1,3 +1,4 @@
+//! Summary algorithms and state; DAG execution adapters live in `operators::summary`.
 pub mod count_min_sketch;
 pub mod count_min_sketch_with_heap;
 pub mod count_sketch;

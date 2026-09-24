@@ -7,7 +7,7 @@ impl Operator {
         items: Vec<usize>,
         groups: Vec<usize>,
     ) -> Result<Self, Error> {
-        use crate::summary_operators::weighted_frequency::WeightedFrequency;
+        use crate::summary_kernels::weighted_frequency::WeightedFrequency;
         crate::values::validate_family(&family)?;
         let SummaryFamilyType::Sketch(kind, _) = &family else {
             return Err(invalid("keyed sketch required"));
@@ -57,7 +57,7 @@ impl Operator {
         k: usize,
         output: Schema,
     ) -> Result<Self, Error> {
-        use crate::summary_operators::weighted_frequency::WeightedFrequency;
+        use crate::summary_kernels::weighted_frequency::WeightedFrequency;
         crate::values::validate_family(&field(&input, state)?.dtype)?;
         let SummaryFamilyType::Sketch(kind, _) = &field(&input, state)?.dtype else {
             return Err(invalid("keyed readout requires summary state"));
@@ -242,7 +242,7 @@ pub(super) fn execute<'a>(
                     };
                     let summary = summary
                         .as_any()
-                        .downcast_ref::<crate::summary_operators::weighted_frequency::WeightedFrequency>()
+                        .downcast_ref::<crate::summary_kernels::weighted_frequency::WeightedFrequency>()
                         .ok_or_else(|| invalid("weighted frequency typed state required"))?;
                     for items in summary.rows(*k) {
                         let mut values = row[..*state].to_vec();
@@ -478,7 +478,7 @@ async fn build_keyed_summary(
     groups: &[usize],
     context: &RunContext,
 ) -> Result<Vec<Vec<Value>>, Error> {
-    use crate::{summary_operators::weighted_frequency::WeightedFrequency, AggregateCore};
+    use crate::{summary_kernels::weighted_frequency::WeightedFrequency, AggregateCore};
     let SummaryFamilyType::Sketch(kind, _) = family else {
         unreachable!()
     };
