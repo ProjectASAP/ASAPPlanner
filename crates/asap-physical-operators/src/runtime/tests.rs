@@ -1,5 +1,7 @@
 use super::*;
+use crate::plan::PhysicalOperator;
 use futures::{executor::block_on, stream, StreamExt};
+use std::cell::Cell;
 
 struct Source {
     starts: Rc<Cell<usize>>,

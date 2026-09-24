@@ -1,5 +1,5 @@
 //! Planner scalar expressions evaluated over native typed rows.
-use super::{
+use crate::{
     values::{Schema, Value},
     Error,
 };
@@ -260,7 +260,7 @@ fn arithmetic(op: &ArithmeticOpKind, left: Value, right: Value) -> Result<Value,
         (Value::Float64(a), Value::Int64(b)) => (Value::Float64(a), Value::Float64(b as f64)),
         pair => pair,
     };
-    super::operators::numeric(op, left, right)
+    super::numeric(op, left, right)
 }
 
 fn integer_float_cmp(integer: i64, float: f64) -> Option<Ordering> {
@@ -350,7 +350,7 @@ impl CompiledExpression {
             output,
         })
     }
-    pub(super) fn dtype(&self) -> (DataType, bool) {
+    pub(crate) fn dtype(&self) -> (DataType, bool) {
         self.output.clone()
     }
     /// Evaluate a row under the same typed schema used when binding the expression.

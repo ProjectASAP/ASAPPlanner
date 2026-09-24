@@ -1,6 +1,12 @@
 //! Execute a bounded in-memory batch through native operators. This is also the
 //! bridge for deployments whose boundary values are not yet streaming batches.
-use super::{operators::Operator, values::Batch, Error, PhysicalDag, RunContext, SharedValue};
+use crate::{
+    operators::Operator,
+    plan::PhysicalDag,
+    runtime::{RunContext, SharedValue},
+    values::Batch,
+    Error,
+};
 use futures::{FutureExt, StreamExt};
 
 /// Every input is already in memory; the chain contains native operators only.
@@ -55,8 +61,8 @@ pub fn evaluate_source(
 }
 
 fn evaluate_graph(
-    graph: PhysicalDag<'_, Batch, super::values::Schema>,
-    root: super::NodeId,
+    graph: PhysicalDag<'_, Batch, crate::values::Schema>,
+    root: crate::plan::NodeId,
     context: RunContext,
 ) -> Result<Vec<SharedValue<Batch>>, Error> {
     let mut output = graph.execute(&[root], context)?.remove(0);

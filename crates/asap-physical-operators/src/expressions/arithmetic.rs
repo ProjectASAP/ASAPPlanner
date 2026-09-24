@@ -23,8 +23,8 @@ pub fn evaluate_binary(
     operator: &planner_types::post_asap::BinaryOperator,
     left: f64,
     right: f64,
-) -> Result<crate::dag::values::Value, crate::dag::Error> {
-    use crate::dag::{values::Value, Error};
+) -> Result<crate::values::Value, crate::Error> {
+    use crate::{values::Value, Error};
     use planner_types::pre_asap::{ArithmeticOpKind, BinaryOpKind, CompareOpKind};
     let invalid =
         || Error::Invalid("unsupported binary operation or invalid checked-division domain".into());

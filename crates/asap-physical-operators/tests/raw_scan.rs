@@ -169,6 +169,9 @@ struct CountingSource {
     fail: bool,
 }
 impl RawSource for CountingSource {
+    fn boundedness(&self) -> asap_physical_operators::plan::Boundedness {
+        asap_physical_operators::plan::Boundedness::Bounded
+    }
     fn schema(&self) -> Schema {
         self.schema.clone()
     }

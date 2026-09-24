@@ -1,4 +1,15 @@
-//! Allocation-free checks for the concrete summary kernels in this crate.
+//! Capability boundaries, checked without constructing accumulator state.
+//!
+//! `validate_summary_kernel` checks update kernels, including families without a
+//! native batch representation. `validate_native_family` and
+//! `validate_native_readout` check native state and scalar readout support.
+//! Keyed weighted-CMS readouts are checked by `Operator::keyed_readout`.
+//! A successful kernel check alone does not mean an executable DAG will bind.
+//!
+//! Persisted state uses `stored_state` decoding and readout contracts; support
+//! there does not imply a native build/merge operator. Full plan acceptance is
+//! owned by `binding`, which also validates schemas, expressions and inputs.
+use crate::Error;
 use planner_types::post_asap::{
     ExactKind, ExactParams, GroupingStrategy, SketchAlgorithm, SketchParams, SummaryFamilyType,
     SummaryUpdate,
@@ -126,4 +137,90 @@ pub(crate) fn is_unit_sample_frequency(update: &planner_types::post_asap::Summar
                 proof: NonNegativeWeightProof::UnitCount
             }
         )
+}
+
+pub fn validate_native_family(family: &SummaryFamilyType) -> Result<(), Error> {
+    use planner_types::post_asap::SketchAlgorithm as A;
+    if let SummaryFamilyType::Sketch(kind, grouping) = family {
+        if let planner_types::post_asap::SketchParams::CmsWithHeap {
+            width,
+            depth,
+            heap_size,
+        } = kind.params()
+        {
+            return if kind.algorithm() == &A::CmsWithHeap
+                && valid_matrix(*width, *depth)
+                && *heap_size > 0
+                && grouping == &Default::default()
+            {
+                Ok(())
+            } else {
+                Err(Error::Invalid(
+                    "invalid weighted CMS family or grouping strategy".into(),
+                ))
+            };
+        }
+    }
+    match family {
+        SummaryFamilyType::ExactAggregate(..) => {}
+        SummaryFamilyType::Sketch(kind, _)
+            if matches!(kind.algorithm(), A::Kll | A::DDSketch | A::Hll) => {}
+        _ => {
+            return Err(Error::Invalid(
+                "summary family has no native DAG state implementation".into(),
+            ))
+        }
+    }
+    crate::capability::validate_summary_kernel(
+        family,
+        &planner_types::post_asap::SummaryUpdate::column(
+            planner_types::pre_asap::ColumnRef::SampleValue,
+        ),
+        &Default::default(),
+    )
+    .map_err(Error::Invalid)
+}
+
+pub fn validate_native_readout(
+    family: &SummaryFamilyType,
+    statistic: crate::Statistic,
+    parameters: &std::collections::HashMap<String, String>,
+) -> Result<(), Error> {
+    validate_native_family(family)?;
+    use crate::Statistic as S;
+    use planner_types::post_asap::{ExactKind as E, SketchAlgorithm as A};
+    let supported = match family {
+        SummaryFamilyType::ExactAggregate(kind, _) => matches!(
+            (kind, statistic),
+            (E::Sum, S::Sum)
+                | (E::Count, S::Count)
+                | (E::Min, S::Min)
+                | (E::Max, S::Max)
+                | (E::Rate, S::Rate)
+                | (E::Increase, S::Increase)
+        ),
+        SummaryFamilyType::Sketch(kind, _) => match kind.algorithm() {
+            A::Kll => statistic == S::Quantile,
+            A::DDSketch => matches!(statistic, S::Quantile | S::Count),
+            A::Hll => matches!(statistic, S::Cardinality | S::Count),
+            _ => false,
+        },
+        _ => false,
+    };
+    if !supported {
+        return Err(Error::Invalid(
+            "readout is not implemented for this summary family".into(),
+        ));
+    }
+    if statistic == S::Quantile
+        && !parameters
+            .get("quantile")
+            .and_then(|s| s.parse::<f64>().ok())
+            .is_some_and(|q| (0.0..=1.0).contains(&q))
+    {
+        return Err(Error::Invalid(
+            "quantile readout requires quantile in [0,1]".into(),
+        ));
+    }
+    Ok(())
 }

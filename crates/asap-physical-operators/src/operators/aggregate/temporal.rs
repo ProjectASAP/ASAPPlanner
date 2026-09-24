@@ -1,23 +1,38 @@
 //! Windowed computations use Planner intents; deployments supply the input window.
-use super::{
+use crate::{
+    operators::{
+        common::{key_bytes, row_bytes, Workspace},
+        sort::cooperative_sort,
+    },
+    runtime::{Cooperative, RunContext},
+};
+use crate::{
     values::{group_key, Value},
     Error,
 };
 use planner_types::pre_asap::{AggIntent, ColumnRef};
 use std::collections::BTreeMap;
 
-pub(super) fn reduce(
+pub(super) async fn reduce(
     rows: Vec<Vec<Value>>,
     intent: &AggIntent<ColumnRef>,
     groups: &[usize],
     coordinate: usize,
     value: usize,
     window: Option<(i64, i64)>,
+    context: &RunContext,
 ) -> Result<Vec<Vec<Value>>, Error> {
+    let mut work = Cooperative::new(context);
+    let mut workspace = Workspace::new(context)?;
     let mut grouped =
         BTreeMap::<Vec<Vec<u8>>, (Vec<Value>, Vec<(f64, f64)>, Vec<(i64, f64)>)>::new();
     for row in rows {
+        work.checkpoint().await?;
         let key = group_key(&row, groups)?;
+        workspace.grow(32)?;
+        if !grouped.contains_key(&key) {
+            workspace.grow(key_bytes(&key) + row_bytes(&row))?;
+        }
         let entry = grouped.entry(key).or_insert_with(|| {
             (
                 groups.iter().map(|i| row[*i].clone()).collect(),
@@ -35,11 +50,12 @@ pub(super) fn reduce(
         }
     }
     let mut output = Vec::new();
-    for (_, (mut keys, buckets, mut points)) in grouped {
+    for (_, (mut keys, buckets, points)) in grouped {
+        work.checkpoint().await?;
         let result = if let AggIntent::HistogramQuantile { q } = intent {
-            Some(Value::Float64(bucket_quantile(*q, buckets)))
+            Some(Value::Float64(bucket_quantile(*q, buckets, context).await?))
         } else {
-            points.sort_by_key(|p| p.0);
+            let points = cooperative_sort(points, |a, b| a.0.cmp(&b.0), context).await?;
             let (start, end) =
                 window.ok_or_else(|| Error::Invalid("missing temporal window".into()))?;
             if points.iter().any(|p| p.0 < start || p.0 > end)
@@ -122,20 +138,27 @@ fn rate(points: &[(i64, f64)], start: i64, end: i64) -> Option<f64> {
     Some(delta * (span + to_start + to_end) / span / ((end as f64 - start as f64) / 1000.))
 }
 
-fn bucket_quantile(q: f64, mut b: Vec<(f64, f64)>) -> f64 {
+async fn bucket_quantile(
+    q: f64,
+    mut b: Vec<(f64, f64)>,
+    context: &RunContext,
+) -> Result<f64, Error> {
+    let mut work = Cooperative::new(context);
+    let _scratch = context.reserve(b.len().checked_mul(16).ok_or(Error::MemoryLimit)?)?;
     if q.is_nan() {
-        return f64::NAN;
+        return Ok(f64::NAN);
     }
     if q < 0. {
-        return f64::NEG_INFINITY;
+        return Ok(f64::NEG_INFINITY);
     }
     if q > 1. {
-        return f64::INFINITY;
+        return Ok(f64::INFINITY);
     }
     b.retain(|p| !p.0.is_nan());
-    b.sort_by(|a, b| a.0.total_cmp(&b.0));
+    b = cooperative_sort(b, |a, b| a.0.total_cmp(&b.0), context).await?;
     let mut buckets: Vec<(f64, f64)> = Vec::new();
     for p in b {
+        work.checkpoint().await?;
         if let Some(last) = buckets.last_mut() {
             if last.0 == p.0 {
                 last.1 += p.1;
@@ -145,10 +168,11 @@ fn bucket_quantile(q: f64, mut b: Vec<(f64, f64)>) -> f64 {
         buckets.push(p);
     }
     if buckets.len() < 2 || buckets.last().unwrap().0 != f64::INFINITY {
-        return f64::NAN;
+        return Ok(f64::NAN);
     }
     let mut prev = buckets[0].1;
     for p in buckets.iter_mut().skip(1) {
+        work.checkpoint().await?;
         if p.1 < prev || (p.1 - prev).abs() <= 1e-12 * (p.1.abs() + prev.abs()) {
             p.1 = prev;
         }
@@ -156,19 +180,19 @@ fn bucket_quantile(q: f64, mut b: Vec<(f64, f64)>) -> f64 {
     }
     let count = buckets.last().unwrap().1;
     if count == 0. {
-        return f64::NAN;
+        return Ok(f64::NAN);
     }
     let rank = q * count;
     let idx = buckets[..buckets.len() - 1].partition_point(|p| p.1 < rank);
     if idx == buckets.len() - 1 {
-        return buckets[idx - 1].0;
+        return Ok(buckets[idx - 1].0);
     }
     if idx == 0 && buckets[0].0 <= 0. {
-        return buckets[0].0;
+        return Ok(buckets[0].0);
     }
     let (start, base) = if idx == 0 { (0., 0.) } else { buckets[idx - 1] };
     let (end, upper) = buckets[idx];
-    start + (end - start) * (rank - base) / (upper - base)
+    Ok(start + (end - start) * (rank - base) / (upper - base))
 }
 
 #[cfg(test)]
@@ -254,6 +278,17 @@ mod tests {
     // Histogram interpolation requires an infinite terminal bucket and coalesces duplicates.
     #[test]
     fn histogram_boundaries_and_duplicate_buckets() {
+        let context = RunContext::new(
+            Scope::Query {
+                evaluation_time_ms: 0,
+                revision: 0,
+            },
+            Limits::default(),
+        )
+        .unwrap();
+        let bucket_quantile = |q, buckets| {
+            futures::executor::block_on(super::bucket_quantile(q, buckets, &context)).unwrap()
+        };
         assert_eq!(
             bucket_quantile(0.5, vec![(1., 1.), (1., 1.), (2., 4.), (f64::INFINITY, 4.)]),
             1.
