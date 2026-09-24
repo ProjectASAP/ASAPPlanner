@@ -1632,22 +1632,20 @@ fn exact_topk_over_temporal_values(
     let QueryExpr::Aggregate {
         reduction,
         measures,
-        output_names,
+        output_names: _,
         having: None,
         child,
     } = root.as_ref()
     else {
         return Ok(None);
     };
-    if !matches!(
-        measures.as_slice(),
-        [AggIntent::TopK {
-            accuracy: AccuracyTarget::Exact,
-            ..
-        }]
-    ) {
+    let [AggIntent::TopK {
+        k,
+        accuracy: AccuracyTarget::Exact,
+    }] = measures.as_slice()
+    else {
         return Ok(None);
-    }
+    };
     let QueryExpr::Aggregate {
         reduction: Reduction::PerEntity,
         child: input,
@@ -1669,17 +1667,39 @@ fn exact_topk_over_temporal_values(
         return Ok(None);
     }
     let values = finalize_exact_accumulator(values, child)?;
-    let node = Rc::new(SummaryNode {
+    let partition_by = reduction
+        .group_keys()
+        .ok_or(RealizationError::PhysicalRealization(
+            "temporal ranking requires explicit grouping",
+        ))?
+        .clone();
+    let score = ranking_score_index(child, &values.schema)?;
+    let sorted = Rc::new(SummaryNode {
         guarantee: values.guarantee.clone(),
-        schema: lift(&root.output_schema()?),
+        schema: values.schema.clone(),
         expr: SummaryExpr::ValueOperation {
             child: values,
-            operation: ValueOperation::Exact(ExactOperation::Aggregate {
-                reduction: reduction.clone(),
-                measures: measures.clone(),
-                output_names: output_names.clone(),
-                having: None,
-            }),
+            operation: ValueOperation::Sort {
+                keys: vec![asap_types::pre_asap::SortKey {
+                    expr: QueryExpr::Column(score),
+                    ascending: false,
+                    nulls_first: false,
+                }],
+                partition_by: partition_by.clone(),
+            },
+            timing: ExecutionTiming::QueryTime,
+        },
+    });
+    let node = Rc::new(SummaryNode {
+        guarantee: sorted.guarantee.clone(),
+        schema: sorted.schema.clone(),
+        expr: SummaryExpr::ValueOperation {
+            child: sorted,
+            operation: ValueOperation::Limit {
+                n: *k,
+                offset: 0,
+                partition_by,
+            },
             timing: ExecutionTiming::QueryTime,
         },
     });
@@ -2265,40 +2285,7 @@ pub(crate) fn construct_summary_with(
                         } => Some(guarantee.clone()),
                         CandidateCompleteness::BestEffort { guarantee: None } => None,
                     };
-                    // A heap readout is a keyed row stream at this boundary, not
-                    // an opaque TopK collection. Both sides expose explicit keys.
-                    let candidate = Rc::new(SummaryNode {
-                        expr: candidate.expr.clone(),
-                        schema: values.schema.clone(),
-                        guarantee: candidate.guarantee.clone(),
-                    });
-                    let keys = values
-                        .schema
-                        .fields
-                        .iter()
-                        .enumerate()
-                        .filter_map(|(i, field)| {
-                            matches!(
-                                field.dtype,
-                                SummaryFamilyType::Plain(asap_types::pre_asap::DataType::Utf8)
-                            )
-                            .then_some(i)
-                        })
-                        .collect::<Vec<_>>();
-                    if keys.is_empty() {
-                        return Err(RealizationError::PhysicalRealization(
-                            "candidate semi-join requires explicit identity columns",
-                        ));
-                    }
-                    let pred = asap_types::pre_asap::Predicate(Rc::new(QueryExpr::BoolAnd(
-                        keys.iter()
-                            .map(|&key| QueryExpr::Compare {
-                                left: Rc::new(QueryExpr::Column(key)),
-                                op: asap_types::pre_asap::CompareOpKind::Eq,
-                                right: Rc::new(QueryExpr::Column(values.schema.fields.len() + key)),
-                            })
-                            .collect(),
-                    )));
+                    let pred = candidate_semijoin_predicate(&values.schema, &candidate.schema)?;
                     let filtered = Rc::new(SummaryNode {
                         expr: SummaryExpr::RelationalJoin {
                             left: values.clone(),
@@ -2310,21 +2297,42 @@ pub(crate) fn construct_summary_with(
                         schema: values.schema.clone(),
                         guarantee: guarantee.clone(),
                     });
-                    let node = Rc::new(SummaryNode {
+                    let partition_by = match reduction {
+                        Reduction::Reduce(keys) => keys.clone(),
+                        Reduction::PerEntity => {
+                            return Err(RealizationError::PhysicalRealization(
+                                "candidate ranking requires explicit grouping",
+                            ))
+                        }
+                    };
+                    let score = ranking_score_index(child, &values.schema)?;
+                    let sorted = Rc::new(SummaryNode {
                         expr: SummaryExpr::ValueOperation {
                             child: filtered,
-                            operation: ValueOperation::Exact(ExactOperation::Aggregate {
-                                reduction: reduction.clone(),
-                                measures: vec![AggIntent::TopK {
-                                    k: *k,
-                                    accuracy: accuracy.clone(),
+                            operation: ValueOperation::Sort {
+                                keys: vec![asap_types::pre_asap::SortKey {
+                                    expr: QueryExpr::Column(score),
+                                    ascending: false,
+                                    nulls_first: false,
                                 }],
-                                output_names: vec![],
-                                having: None,
-                            }),
+                                partition_by: partition_by.clone(),
+                            },
                             timing: ExecutionTiming::QueryTime,
                         },
-                        schema: lift(&expr.output_schema()?),
+                        schema: values.schema.clone(),
+                        guarantee: guarantee.clone(),
+                    });
+                    let node = Rc::new(SummaryNode {
+                        expr: SummaryExpr::ValueOperation {
+                            child: sorted,
+                            operation: ValueOperation::Limit {
+                                n: *k,
+                                offset: 0,
+                                partition_by,
+                            },
+                            timing: ExecutionTiming::QueryTime,
+                        },
+                        schema: values.schema.clone(),
                         guarantee,
                     });
                     validate_execution_data_states_at(&node, ExecutionDataState::QUERY_ROWS)?;
@@ -2570,6 +2578,14 @@ fn construct_summary_agg(
     let out_schema = node.output_schema()?;
     let state_idx = summary_col_index(&out_schema, &by, per_series);
 
+    let readout_schema = if keyed_heap
+        && matches!(node, QueryExpr::Aggregate { child, .. } if is_counter_weighted_topk(intent, child))
+    {
+        keyed_heap_readout_schema(&input, node)?
+    } else {
+        lift(&out_schema)
+    };
+
     let summary_input = input.input;
     let query = estimate.then(|| readout(intent, &summary_input, planning_inputs.cost));
 
@@ -2652,11 +2668,239 @@ fn construct_summary_agg(
                 summary_input: agg,
                 query,
             },
-            schema: lift(&out_schema),
+            schema: readout_schema,
             guarantee,
         })),
         None => Ok(agg),
     }
+}
+
+// Heap readout rows contain the encoded item identity, subpopulation keys,
+// and an estimated score. They never inherit the exact-value producer's schema.
+fn keyed_heap_readout_schema(
+    input: &PhysicalSummaryInput,
+    node: &QueryExpr,
+) -> Result<SummarySchema, RealizationError> {
+    let source = input.child.output_schema()?;
+    let mut refs = Vec::new();
+    let QueryExpr::Aggregate {
+        reduction, child, ..
+    } = node
+    else {
+        return Err(RealizationError::PhysicalRealization(
+            "heap readout requires an aggregate",
+        ));
+    };
+    if let Reduction::Reduce(groups) = reduction {
+        if groups.is_without() {
+            return Err(RealizationError::PhysicalRealization(
+                "heap readout requires explicit grouping",
+            ));
+        }
+        for index in groups.iter() {
+            refs.push(schema_column_ref(child, *index).ok_or(
+                RealizationError::PhysicalRealization("invalid heap partition key"),
+            )?);
+        }
+    }
+    fn item_refs(
+        item: &SummaryInputExpr,
+        schema: &Schema,
+        refs: &mut Vec<ColumnRef>,
+    ) -> Result<(), RealizationError> {
+        match item {
+            SummaryInputExpr::Column(column) => refs.push(column.clone()),
+            SummaryInputExpr::Tuple(items) => {
+                for item in items {
+                    item_refs(item, schema, refs)?;
+                }
+            }
+            SummaryInputExpr::EntityIdentity(EntityIdentity::PromqlLabelSet { excluding }) => {
+                if !schema.closed {
+                    return Err(RealizationError::PhysicalRealization(
+                        "dynamic label identity requires an explicit row representation",
+                    ));
+                }
+                for (index, column) in schema.columns.iter().enumerate() {
+                    if Some(index) != schema.time_index && column.name != "value" {
+                        let reference = match &column.table {
+                            Some(table) => ColumnRef::Qualified {
+                                table: table.clone(),
+                                name: column.name.clone(),
+                            },
+                            None => ColumnRef::Named(column.name.clone()),
+                        };
+                        if !excluding.contains(&reference) {
+                            refs.push(reference);
+                        }
+                    }
+                }
+            }
+            _ => {
+                return Err(RealizationError::PhysicalRealization(
+                    "unsupported heap item identity",
+                ))
+            }
+        }
+        Ok(())
+    }
+    item_refs(
+        input
+            .input
+            .item
+            .as_ref()
+            .ok_or(RealizationError::PhysicalRealization(
+                "heap item identity is missing",
+            ))?,
+        &source,
+        &mut refs,
+    )?;
+    let mut fields = Vec::<asap_types::post_asap::SummaryField>::new();
+    for reference in refs {
+        let matches: Vec<_> = source
+            .columns
+            .iter()
+            .filter(|column| match &reference {
+                ColumnRef::Named(name) => &column.name == name,
+                ColumnRef::Qualified { table, name } => {
+                    column.table.as_ref() == Some(table) && &column.name == name
+                }
+                ColumnRef::SampleValue => column.name == "value",
+                ColumnRef::Wildcard => false,
+            })
+            .collect();
+        let [column] = matches.as_slice() else {
+            return Err(RealizationError::PhysicalRealization(
+                "heap key must resolve to exactly one source column",
+            ));
+        };
+        if fields.iter().any(|field| field.name == column.name) || column.name == "__asap_estimate"
+        {
+            return Err(RealizationError::PhysicalRealization(
+                "heap keys must have distinct output names",
+            ));
+        }
+        fields.push(asap_types::post_asap::SummaryField {
+            name: column.name.clone(),
+            dtype: SummaryFamilyType::Plain(column.dtype.clone()),
+            nullable: column.nullable,
+        });
+    }
+    if fields.is_empty() {
+        return Err(RealizationError::PhysicalRealization(
+            "heap readout has no identity columns",
+        ));
+    }
+    fields.push(asap_types::post_asap::SummaryField {
+        name: "__asap_estimate".into(),
+        dtype: SummaryFamilyType::Plain(asap_types::pre_asap::DataType::Float64),
+        nullable: false,
+    });
+    Ok(SummarySchema {
+        fields,
+        time_index: None,
+    })
+}
+
+fn candidate_semijoin_predicate(
+    values: &SummarySchema,
+    candidates: &SummarySchema,
+) -> Result<asap_types::pre_asap::Predicate, RealizationError> {
+    let Some((score, keys)) = candidates.fields.split_last() else {
+        return Err(RealizationError::PhysicalRealization(
+            "candidate readout is empty",
+        ));
+    };
+    if score.name != "__asap_estimate" || keys.is_empty() {
+        return Err(RealizationError::PhysicalRealization(
+            "candidate readout has no declared key layout",
+        ));
+    }
+    let mut predicates = Vec::new();
+    for (right_index, key) in keys.iter().enumerate() {
+        let matches: Vec<_> = values
+            .fields
+            .iter()
+            .enumerate()
+            .filter(|(_, field)| field.name == key.name)
+            .collect();
+        let [(left_index, field)] = matches.as_slice() else {
+            return Err(RealizationError::PhysicalRealization(
+                "candidate key must resolve to exactly one value column",
+            ));
+        };
+        if field.dtype != key.dtype {
+            return Err(RealizationError::PhysicalRealization(
+                "candidate and value key types differ",
+            ));
+        }
+        let left = Rc::new(QueryExpr::Column(*left_index));
+        let right = Rc::new(QueryExpr::Column(values.fields.len() + right_index));
+        let equality = QueryExpr::Compare {
+            left: left.clone(),
+            op: asap_types::pre_asap::CompareOpKind::Eq,
+            right: right.clone(),
+        };
+        // Grouped NULL keys identify the same group on both sides.
+        predicates.push(QueryExpr::BoolOr(vec![
+            equality,
+            QueryExpr::BoolAnd(vec![QueryExpr::IsNull(left), QueryExpr::IsNull(right)]),
+        ]));
+    }
+    Ok(asap_types::pre_asap::Predicate(Rc::new(
+        QueryExpr::BoolAnd(predicates),
+    )))
+}
+
+fn ranking_score_index(
+    logical: &QueryExpr,
+    values: &SummarySchema,
+) -> Result<usize, RealizationError> {
+    let QueryExpr::Aggregate {
+        reduction,
+        measures,
+        ..
+    } = logical
+    else {
+        return Err(RealizationError::PhysicalRealization(
+            "ranking requires an explicit aggregate score",
+        ));
+    };
+    if measures.len() != 1 {
+        return Err(RealizationError::PhysicalRealization(
+            "ranking requires exactly one score",
+        ));
+    }
+    let index = match reduction {
+        Reduction::Reduce(groups) if !groups.is_without() => groups.len(),
+        Reduction::PerEntity => values
+            .fields
+            .iter()
+            .position(|field| field.name == "value")
+            .ok_or(RealizationError::PhysicalRealization(
+                "ranking requires the sample value column",
+            ))?,
+        _ => {
+            return Err(RealizationError::PhysicalRealization(
+                "ranking requires explicit grouping",
+            ))
+        }
+    };
+    if Some(index) == values.time_index
+        || !values.fields.get(index).is_some_and(|field| {
+            matches!(
+                field.dtype,
+                SummaryFamilyType::Plain(
+                    asap_types::pre_asap::DataType::Int64 | asap_types::pre_asap::DataType::Float64
+                )
+            )
+        })
+    {
+        return Err(RealizationError::PhysicalRealization(
+            "ranking score must be numeric",
+        ));
+    }
+    Ok(index)
 }
 
 /// Realize the composite heavy-hitter realization for
@@ -4264,8 +4508,8 @@ impl<'a> GlobalSelection<'a> {
             let Some(pred) = normalized_pred else {
                 return keep_pre_asap(target);
             };
-            let left = self.assemble_target(left)?;
-            let right = self.assemble_target(right)?;
+            let left = finalize_exact_accumulator(self.assemble_target(left)?, left)?;
+            let right = finalize_exact_accumulator(self.assemble_target(right)?, right)?;
             let guarantee =
                 relational_join_guarantee(left.guarantee.as_ref(), right.guarantee.as_ref());
             let node = Rc::new(SummaryNode {
@@ -4313,6 +4557,10 @@ impl<'a> GlobalSelection<'a> {
                 ValueOperation::Limit {
                     n: *n,
                     offset: *offset,
+                    partition_by: match child.as_ref() {
+                        QueryExpr::Sort { partition_by, .. } => partition_by.clone(),
+                        _ => Default::default(),
+                    },
                 },
             ),
             QueryExpr::Aggregate {
@@ -4332,12 +4580,7 @@ impl<'a> GlobalSelection<'a> {
             ),
             _ => return keep_pre_asap(target),
         };
-        let child = self.assemble_target(child_target)?;
-        let child = if matches!(operation, ValueOperation::Exact(_)) {
-            finalize_exact_accumulator(child, child_target)?
-        } else {
-            child
-        };
+        let child = finalize_exact_accumulator(self.assemble_target(child_target)?, child_target)?;
         let guarantee = child.guarantee.clone();
         let node = Rc::new(SummaryNode {
             expr: SummaryExpr::ValueOperation {
@@ -5936,13 +6179,40 @@ mod tests {
                 .unwrap()
                 .expect("exact Top-K candidate");
             assert!(node.guarantee.as_ref().unwrap().is_exact());
-            assert!(matches!(
-                node.expr,
-                SummaryExpr::ValueOperation {
-                    operation: ValueOperation::Exact(ExactOperation::Aggregate { .. }),
-                    ..
-                }
-            ));
+            let SummaryExpr::ValueOperation {
+                child: sorted,
+                operation:
+                    ValueOperation::Limit {
+                        n,
+                        offset,
+                        partition_by,
+                    },
+                ..
+            } = &node.expr
+            else {
+                panic!("temporal TopK must compose Sort and Limit");
+            };
+            assert_eq!((*n, *offset), (5, 0));
+            let SummaryExpr::ValueOperation {
+                operation:
+                    ValueOperation::Sort {
+                        keys,
+                        partition_by: sort_groups,
+                    },
+                child: values,
+                ..
+            } = &sorted.expr
+            else {
+                panic!("Limit must consume sorted temporal values");
+            };
+            assert_eq!(sort_groups, partition_by);
+            assert_eq!(
+                partition_by.keys().len(),
+                usize::from(query.contains("by(job)"))
+            );
+            assert_eq!(keys.len(), 1);
+            assert!(!keys[0].ascending);
+            assert_eq!(node.schema, values.schema);
             asap_types::post_asap::compile_executable_dag(&node).unwrap();
         }
     }
@@ -9674,5 +9944,107 @@ mod tests {
                 matches!(&candidate.replacement, Replacement::Summary(node)
                 if summary_family_algorithm(node) == SketchAlgorithm::Hll && node.guarantee.as_ref().is_some_and(|g| DefaultAccuracyModel.satisfies(g, &target)))));
         }
+    }
+
+    // A value projection cannot consume an opaque exact accumulator edge.
+    #[test]
+    fn residual_projection_finalizes_selected_exact_state() {
+        let inner = Rc::new(agg(vec![], AggIntent::Sum { col: None }, metric_scan(&[])));
+        let root = Rc::new(QueryExpr::Project {
+            cols: vec![asap_types::pre_asap::ProjectItem {
+                expr: QueryExpr::Column(0),
+                alias: Some("result".into()),
+            }],
+            qualifier: None,
+            child: inner.clone(),
+        });
+        let space = search_workload_with_targets(
+            vec![("q", root.clone(), Some(AccuracyTarget::Exact))],
+            &default_strategies(),
+            &DefaultAccuracyModel,
+        );
+        let selected = space.global_selection(&DefaultCostModel);
+        selected
+            .assembled_nodes
+            .borrow_mut()
+            .insert(Rc::as_ptr(&inner), realize(inner.as_ref()).unwrap());
+        let node = selected.assemble_target(&root).unwrap();
+        let SummaryExpr::ValueOperation {
+            child,
+            operation: ValueOperation::Project { .. },
+            ..
+        } = &node.expr
+        else {
+            panic!("expected Project");
+        };
+        assert!(matches!(
+            child.expr,
+            SummaryExpr::ValueOperation {
+                operation: ValueOperation::FinalizeExactAccumulator,
+                ..
+            }
+        ));
+        assert!(child
+            .schema
+            .fields
+            .iter()
+            .all(|field| matches!(field.dtype, SummaryFamilyType::Plain(_))));
+    }
+    // Join keys come from the producer's declared identity, irrespective of
+    // data type or column order; unrelated string columns are not identities.
+    #[test]
+    fn candidate_identity_mapping_preserves_types_positions_and_null_groups() {
+        use asap_types::post_asap::SummaryField;
+        let field = |name: &str, dtype| SummaryField {
+            name: name.into(),
+            dtype: SummaryFamilyType::Plain(dtype),
+            nullable: true,
+        };
+        let values = SummarySchema {
+            fields: vec![
+                field("description", DataType::Utf8),
+                field("score", DataType::Float64),
+                field("id", DataType::Int64),
+            ],
+            time_index: None,
+        };
+        let candidates = SummarySchema {
+            fields: vec![
+                field("id", DataType::Int64),
+                field("__asap_estimate", DataType::Float64),
+            ],
+            time_index: None,
+        };
+        let predicate = candidate_semijoin_predicate(&values, &candidates).unwrap();
+        let QueryExpr::BoolAnd(keys) = predicate.0.as_ref() else {
+            panic!("keys")
+        };
+        assert_eq!(keys.len(), 1);
+        let QueryExpr::BoolOr(null_safe) = &keys[0] else {
+            panic!("NULL-safe group identity")
+        };
+        assert!(
+            matches!(&null_safe[0], QueryExpr::Compare { left, right, .. } if matches!(left.as_ref(), QueryExpr::Column(2)) && matches!(right.as_ref(), QueryExpr::Column(3)))
+        );
+        assert!(
+            matches!(&null_safe[1], QueryExpr::BoolAnd(parts) if parts.iter().all(|p| matches!(p, QueryExpr::IsNull(_))))
+        );
+        let mut invalid = candidates.clone();
+        invalid.fields[0].dtype = SummaryFamilyType::Plain(DataType::Utf8);
+        assert!(candidate_semijoin_predicate(&values, &invalid).is_err());
+        invalid.fields[0].name = "missing".into();
+        assert!(candidate_semijoin_predicate(&values, &invalid).is_err());
+        let mut ambiguous = values.clone();
+        ambiguous.fields.push(values.fields[2].clone());
+        assert!(candidate_semijoin_predicate(&ambiguous, &candidates).is_err());
+    }
+
+    // A numeric group key must not be mistaken for the ranked aggregate score.
+    #[test]
+    fn ranking_uses_aggregate_output_position_not_first_numeric_column() {
+        let logical = agg(vec![2], AggIntent::Sum { col: None }, metric_scan(&["id"]));
+        let mut values = lift(&logical.output_schema().unwrap());
+        values.fields[0].dtype = SummaryFamilyType::Plain(DataType::Int64);
+        assert_eq!(ranking_score_index(&logical, &values).unwrap(), 1);
     }
 }

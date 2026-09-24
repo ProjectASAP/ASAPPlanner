@@ -14,7 +14,7 @@ use super::{
 use crate::pre_asap::{ColumnRef, JoinKind, Predicate, QueryExpr, Reduction};
 use thiserror::Error;
 
-pub const POST_ASAP_DAG_WIRE_VERSION: u32 = 4;
+pub const POST_ASAP_DAG_WIRE_VERSION: u32 = 5;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum EdgeRole {
@@ -594,7 +594,11 @@ mod tests {
                 },
             },
             ExecutableOperatorPayload::Value {
-                operation: ValueOperation::Limit { n: 1, offset: 0 },
+                operation: ValueOperation::Limit {
+                    n: 1,
+                    offset: 0,
+                    partition_by: Default::default(),
+                },
             },
             ExecutableOperatorPayload::RelationalJoin {
                 join_kind: JoinKind::Semi,

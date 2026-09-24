@@ -91,7 +91,7 @@ fn value_ranked_topk_preserves_summary_children_in_post_asap_dag() {
     ] {
         let root = lower_search_and_materialize(query);
         let SummaryExpr::ValueOperation {
-            operation: ValueOperation::Limit { n, offset },
+            operation: ValueOperation::Limit { n, offset, .. },
             child: sort,
             ..
         } = &root.expr
@@ -107,11 +107,23 @@ fn value_ranked_topk_preserves_summary_children_in_post_asap_dag() {
         else {
             panic!("expected query-time Sort under Limit for {query}");
         };
-        assert!(
-            matches!(child.expr, SummaryExpr::SummaryAgg { .. }),
-            "the materializable child must remain visible for {query}: {:?}",
-            child.expr
-        );
+        let SummaryExpr::ValueOperation {
+            operation: ValueOperation::FinalizeExactAccumulator,
+            child: state,
+            ..
+        } = &child.expr
+        else {
+            panic!(
+                "Sort must consume finalized values for {query}: {:?}",
+                child.expr
+            );
+        };
+        assert!(matches!(state.expr, SummaryExpr::SummaryAgg { .. }));
+        assert!(child
+            .schema
+            .fields
+            .iter()
+            .all(|field| matches!(field.dtype, SummaryFamilyType::Plain(_))));
     }
 }
 
@@ -197,7 +209,9 @@ fn value_ranked_topk_over_binary_ratio_finalizes_both_summary_operands() {
     let query = "topk(1, sum by(job)(increase(a[6h])) / sum by(job)(increase(b[6h])))";
     let root = lower_search_and_materialize(query);
     let SummaryExpr::ValueOperation {
-        operation: ValueOperation::Limit { n: 1, offset: 0 },
+        operation: ValueOperation::Limit {
+            n: 1, offset: 0, ..
+        },
         child: sort,
         ..
     } = &root.expr
@@ -279,25 +293,34 @@ fn counter_weighted_topk_uses_candidates_only_for_membership_and_exact_values_fo
                 _ => None,
             })
             .unwrap_or_else(|| panic!("missing candidate semi-join for {query}"));
-        // Candidate pruning must feed an ordinary grouped value TopK.
-        assert!(
-            matches!(plan.expr, SummaryExpr::ValueOperation { .. }),
-            "candidate optimization must be a composed value-operation graph"
-        );
+        // Candidate pruning feeds grouped Sort followed by grouped Limit.
         let SummaryExpr::ValueOperation {
-            child: filtered,
+            child: sorted,
             operation:
-                asap_types::post_asap::ValueOperation::Exact(
-                    asap_types::post_asap::ExactOperation::Aggregate { measures, .. },
-                ),
+                ValueOperation::Limit {
+                    n,
+                    offset: 0,
+                    partition_by,
+                },
             ..
         } = &plan.expr
         else {
-            panic!("expected ordinary TopK root")
+            panic!("expected grouped Limit root")
         };
-        assert!(
-            matches!(measures.as_slice(), [asap_types::pre_asap::AggIntent::TopK { k, .. }] if *k == expected_k)
-        );
+        assert_eq!(*n, expected_k as usize);
+        let SummaryExpr::ValueOperation {
+            child: filtered,
+            operation:
+                ValueOperation::Sort {
+                    partition_by: sort_groups,
+                    ..
+                },
+            ..
+        } = &sorted.expr
+        else {
+            panic!("expected grouped Sort")
+        };
+        assert_eq!(partition_by, sort_groups);
         let SummaryExpr::RelationalJoin {
             right: candidates,
             left: values,
@@ -308,6 +331,14 @@ fn counter_weighted_topk_uses_candidates_only_for_membership_and_exact_values_fo
         else {
             panic!("unexpected candidate plan for {query}: {:?}", plan.expr)
         };
+        assert_ne!(
+            candidates.schema, values.schema,
+            "candidate readout must retain its own schema"
+        );
+        assert_eq!(
+            candidates.schema.fields.last().unwrap().name,
+            "__asap_estimate"
+        );
         let SummaryExpr::SummaryEstimate { summary_input, .. } = &candidates.expr else {
             panic!("candidate membership must be a summary readout")
         };

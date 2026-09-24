@@ -67,6 +67,8 @@ pub enum ValueOperation {
     Limit {
         n: usize,
         offset: usize,
+        /// Apply the offset and limit independently to each group.
+        partition_by: GroupKeys,
     },
     Extension {
         name: String,
