@@ -35,3 +35,5 @@ pub use max_accumulator::*;
 pub use min_accumulator::*;
 pub use sketch_envelope_accumulator::*;
 pub use sum_accumulator::*;
+
+pub mod weighted_cms;

@@ -398,7 +398,7 @@ mod tests {
 
     #[test]
     fn test_aggregate_core_merge_wrong_type_rejects() {
-        use crate::accumulators::count_sketch_accumulator::CountSketchAccumulator;
+        use crate::summary_operators::count_sketch_accumulator::CountSketchAccumulator;
         let dd = DDSketchAccumulator::new(0.01);
         let cs = CountSketchAccumulator::new(2, 3);
         assert!(dd.merge_with(&cs).is_err());

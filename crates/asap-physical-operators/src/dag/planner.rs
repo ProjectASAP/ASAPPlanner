@@ -317,8 +317,48 @@ fn bind_operation(node: &ExecutableDagNode, inputs: &[Schema]) -> Result<Operato
             reduction,
             grouping,
         } => {
-            if update.item.is_some() {
-                return Err(invalid("keyed summary update binding is not implemented"));
+            if let Some(item) = &update.item {
+                let PlannerReduction::Reduce(keys) = reduction else {
+                    return Err(invalid("keyed summary requires explicit partitions"));
+                };
+                let SummaryInputExpr::Column(weight) = &update.weight else {
+                    return Err(invalid(
+                        "keyed summary weight must be a finalized value column",
+                    ));
+                };
+                if !matches!(
+                    update.weight_domain,
+                    planner_types::post_asap::WeightDomain::NonNegative { .. }
+                ) {
+                    return Err(invalid("CMS requires a nonnegative weight contract"));
+                }
+                fn columns(
+                    expr: &SummaryInputExpr,
+                    input: &Schema,
+                    result: &mut Vec<usize>,
+                ) -> Result<(), Error> {
+                    match expr {
+                        SummaryInputExpr::Column(column) => {
+                            result.push(named_column(input, column)?)
+                        }
+                        SummaryInputExpr::Tuple(items) => {
+                            for item in items {
+                                columns(item, input, result)?;
+                            }
+                        }
+                        _ => return Err(invalid("keyed summary needs explicit item columns")),
+                    }
+                    Ok(())
+                }
+                let mut items = Vec::new();
+                columns(item, input, &mut items)?;
+                return Operator::keyed_summary_build(
+                    input.clone(),
+                    family.clone(),
+                    named_column(input, weight)?,
+                    items,
+                    groups(input, keys)?,
+                );
             }
             crate::capability::validate_summary_kernel(family, update, grouping)
                 .map_err(Error::Invalid)?;
@@ -351,6 +391,14 @@ fn bind_operation(node: &ExecutableDagNode, inputs: &[Schema]) -> Result<Operato
             )
         }
         Payload::SummaryEstimate { query } => {
+            if let SketchQuery::TopK { k } = query {
+                return Operator::keyed_readout(
+                    input.clone(),
+                    summary_column(input)?,
+                    *k,
+                    Arc::new(node.output_schema.clone()),
+                );
+            }
             let mut params = std::collections::HashMap::new();
             let statistic = match query {
                 SketchQuery::Quantile { q } => {

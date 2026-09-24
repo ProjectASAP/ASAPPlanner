@@ -378,6 +378,8 @@ dependencies = [
 name = "asap-physical-operators"
 version = "0.1.0"
 dependencies = [
+ "asap-aware-mapping",
+ "asap-frontend-promql",
  "asap-types",
  "asap_sketch_codec",
  "asap_sketchlib 0.3.0 (git+https://github.com/ProjectASAP/asap_sketchlib?rev=026cd18c7b8c23ae6c46d4d683151ba562b8cd3a)",

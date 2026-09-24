@@ -24,3 +24,5 @@ extra_debugging = []
 
 [dev-dependencies]
 hex = "0.4"
+asap-aware-mapping = { path = "../asap-aware-mapping" }
+asap-frontend-promql = { path = "../frontend-promql" }

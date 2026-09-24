@@ -1,8 +1,8 @@
 #![doc = include_str!("../README.md")]
 
-pub mod accumulators;
 pub mod key_by_label_values;
 pub mod measurement;
+pub mod summary_operators;
 pub mod traits;
 
 mod aggregation_type;

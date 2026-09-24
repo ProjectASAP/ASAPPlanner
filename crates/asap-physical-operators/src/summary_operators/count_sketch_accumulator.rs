@@ -96,7 +96,7 @@ impl CountSketchAccumulator {
         // ingest caller skips the data point) instead of building a
         // degenerate or huge matrix. Shares the CMS validator since the
         // CountSketch matrix uses the same packed-hash column layout.
-        crate::accumulators::count_min_sketch_accumulator::validate_sketch_dims(
+        crate::summary_operators::count_min_sketch_accumulator::validate_sketch_dims(
             "CountSketchState",
             rows,
             cols,
@@ -554,7 +554,7 @@ mod tests {
 
     #[test]
     fn test_aggregate_core_merge_wrong_type_rejects() {
-        use crate::accumulators::count_min_sketch_accumulator::CountMinSketchAccumulator;
+        use crate::summary_operators::count_min_sketch_accumulator::CountMinSketchAccumulator;
         let cs = CountSketchAccumulator::new(2, 3);
         let cms = CountMinSketchAccumulator::new(2, 3);
         let result = cs.merge_with(&cms);
