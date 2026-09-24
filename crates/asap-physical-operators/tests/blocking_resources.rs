@@ -179,3 +179,62 @@ fn cooperative_sort_preserves_ties_across_chunks() {
     }
     assert_eq!(batch.rows().len(), 1025);
 }
+
+// The integrated weighted-summary path obeys the same cooperative cancellation contract.
+#[test]
+fn weighted_summary_build_yields_within_a_batch() {
+    use planner_types::post_asap::{SketchAlgorithm, SketchKind, SketchParams};
+    let input = Arc::new(SummarySchema {
+        fields: vec![
+            SummaryField {
+                name: "item".into(),
+                dtype: SummaryFamilyType::Plain(DataType::Int64),
+                nullable: false,
+            },
+            SummaryField {
+                name: "weight".into(),
+                dtype: SummaryFamilyType::Plain(DataType::Float64),
+                nullable: false,
+            },
+        ],
+        time_index: None,
+    });
+    let mut sources = PhysicalDag::default();
+    let batch = Batch::try_new(
+        input.clone(),
+        (0..1500)
+            .map(|i| vec![Value::Int64(i % 8), Value::Float64(0.25)])
+            .collect(),
+    )
+    .unwrap();
+    sources
+        .add(
+            0,
+            vec![],
+            Operator::source(input.clone(), vec![batch]).unwrap(),
+        )
+        .unwrap();
+    let family = SummaryFamilyType::Sketch(
+        SketchKind::new(
+            SketchAlgorithm::CmsWithHeap,
+            SketchParams::CmsWithHeap {
+                width: 64,
+                depth: 3,
+                heap_size: 8,
+            },
+        ),
+        Default::default(),
+    );
+    let operator = Operator::keyed_summary_build(input, family, 1, vec![0], vec![]).unwrap();
+    let run = context(16 * 1024 * 1024);
+    let inputs = sources.execute(&[0], run.clone()).unwrap();
+    let mut output = operator.start(inputs, run.clone()).unwrap();
+    assert!(output.next().now_or_never().is_none());
+    run.cancel();
+    assert!(matches!(
+        block_on(output.next()),
+        Some(Err(Error::Cancelled))
+    ));
+    drop(output);
+    assert_eq!(run.retained_bytes(), 0);
+}

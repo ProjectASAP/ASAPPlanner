@@ -11,6 +11,15 @@ refactor improves contracts but does not add partitioned execution or spill.
 Performance statements below are hypotheses unless described as implementation
 facts. No comparative benchmark has been run.
 
+The [SQL frontend](../../crates/frontend-sql/Cargo.toml) already depends on
+DataFusion 43 for parsing/planning; the physical-operator crate does not depend
+on DataFusion. Reusing the existing frontend dependency and selecting a newer
+execution backend are different choices. This survey follows the requested
+upstream main, so an implementation must select a supported release and verify
+its exact APIs rather than assume main's interfaces exist in version 43.
+Build/binary-size effects also depend on which crates a deployment already links;
+they should be measured separately from per-query runtime costs.
+
 ## Findings that affect the decision
 
 1. DataFusion's physical operator boundary uses Arrow RecordBatch streams.
