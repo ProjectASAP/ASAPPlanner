@@ -3008,7 +3008,7 @@ fn column_ref(column: &asap_types::pre_asap::Column) -> ColumnRef {
 fn summarised_input(
     intent: &AggIntent,
     child_schema: &Schema,
-) -> Result<SummaryInputExpr, ImplementError> {
+) -> Result<SummaryInputExpr, RealizationError> {
     let cols = intent.input_cols();
     if cols.len() < 2 {
         return Ok(SummaryInputExpr::Column(summarised_column(
@@ -3020,7 +3020,7 @@ fn summarised_input(
         .iter()
         .map(|id| child_schema.columns.get(*id).map(column_ref))
         .collect::<Option<Vec<_>>>()
-        .ok_or(ImplementError::PhysicalRealization(
+        .ok_or(RealizationError::PhysicalRealization(
             "a tuple column is outside the input schema",
         ))?;
     Ok(SummaryInputExpr::Tuple(
@@ -9646,7 +9646,7 @@ mod tests {
         let root = Rc::new(agg(
             vec![],
             AggIntent::Cardinality {
-                col: None,
+                cols: vec![],
                 accuracy: target.clone(),
             },
             metric_scan(&[]),
@@ -9714,7 +9714,7 @@ mod tests {
             let query = Rc::new(agg(
                 vec![],
                 AggIntent::Cardinality {
-                    col: None,
+                    cols: vec![],
                     accuracy: target.clone(),
                 },
                 metric_scan(&[]),
