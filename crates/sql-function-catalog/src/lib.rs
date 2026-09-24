@@ -22,7 +22,8 @@
 //!   resolves (`sum`, `avg`, `approx_percentile_cont`, ...). [`lookup_native`]
 //!   maps one to the [`AggSemantic`] `lower_agg_intent` builds an `AggIntent`
 //!   from. The DISTINCT-modifier rule ("`COUNT DISTINCT` alone maps, to
-//!   `Cardinality`; reject DISTINCT elsewhere") and the "reducer argument
+//!   `Cardinality`, over however many columns the call names; reject DISTINCT
+//!   elsewhere") and the "reducer argument
 //!   must be a bare column" rule are call-site logic, not per-function data,
 //!   and stay in `asap-frontend-sql`.
 //! - [`CLICKHOUSE_BUILTINS`] -- ClickHouse-only *aggregate* names DataFusion
@@ -84,8 +85,9 @@ pub enum Arity {
 pub enum AggSemantic {
     /// `COUNT(*)` / `COUNT(x)` -- ignores its argument (always a row count).
     /// `COUNT(DISTINCT x)` is the one exception the call site special-cases
-    /// into `Cardinality` instead; that combination is not its own catalog
-    /// entry (it is the same name, `count`, with a modifier).
+    /// into `Cardinality` instead (over every argument, so `COUNT(DISTINCT a, b)`
+    /// counts distinct pairs); that combination is not its own catalog entry
+    /// (it is the same name, `count`, with a modifier).
     Count,
     Sum,
     Min,

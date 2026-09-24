@@ -1699,7 +1699,7 @@ fn inner_intent(f: &InnerFunc) -> AggIntent<ColumnRef> {
             accuracy: current_accuracy(),
         },
         InnerFunc::Cardinality => AggIntent::Cardinality {
-            col: None,
+            cols: vec![],
             accuracy: current_accuracy(),
         },
         InnerFunc::Quantile(q) => AggIntent::Quantile {

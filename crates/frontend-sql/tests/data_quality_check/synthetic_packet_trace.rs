@@ -186,7 +186,7 @@ struct Tally {
 }
 
 #[tokio::test]
-async fn corpus_lowering_rejects_only_unsupported_tuple_counts() {
+async fn corpus_lowering_covers_every_query() {
     let cat = catalog();
     let mut t = Tally::default();
     for q in queries() {
@@ -195,11 +195,6 @@ async fn corpus_lowering_rejects_only_unsupported_tuple_counts() {
             Ok(_) => t.lowered += 1,
             // DataFusion surfaces parse/plan failures as `DataFusion(_)`.
             Err(LoweringError::DataFusion(_)) => t.unparseable += 1,
-            Err(LoweringError::UnsupportedAggregate(reason))
-                if reason == "multi-column COUNT(DISTINCT)" =>
-            {
-                t.rejected += 1
-            }
             Err(error) => panic!("unexpected lowering failure for {q}: {error}"),
         }
     }
@@ -214,8 +209,10 @@ async fn corpus_lowering_rejects_only_unsupported_tuple_counts() {
         "some DQC queries failed to parse/plan: {t:?}"
     );
 
-    assert_eq!(t.rejected, 9, "expected nine unsupported tuple counts");
-    assert_eq!(t.lowered, 61, "SQL lowering coverage changed: {t:?}");
+    // The nine tuple counts lower since `COUNT(DISTINCT a, b, ...)` became
+    // a multi-column `AggIntent::Cardinality`.
+    assert_eq!(t.rejected, 0, "no query is rejected: {t:?}");
+    assert_eq!(t.lowered, 70, "SQL lowering coverage changed: {t:?}");
 }
 
 impl Tally {
@@ -247,18 +244,19 @@ async fn distinct_source_ips_is_cardinality() {
 }
 
 #[tokio::test]
-async fn multi_arg_count_distinct_flow_is_rejected() {
-    // A single-column Cardinality intent cannot represent a distinct 5-tuple.
-    let error = lower_sql(
+async fn multi_arg_count_distinct_flow_counts_the_whole_tuple() {
+    // Every leg of the distinct 5-tuple reaches the intent, in argument order —
+    // the whole flow identity is counted, not its first column.
+    let qe = lower(
         "SELECT srcport, COUNT(DISTINCT srcip, dstip, srcport, dstport, proto) AS n \
          FROM packets GROUP BY srcport ORDER BY n DESC",
-        &catalog(),
-        AccuracyTarget::Exact,
     )
-    .await
-    .unwrap_err();
-    assert!(matches!(error, LoweringError::UnsupportedAggregate(reason)
-        if reason == "multi-column COUNT(DISTINCT)"));
+    .await;
+    let (_, measures) = first_aggregate(&qe).expect("expected an Aggregate");
+    let [AggIntent::Cardinality { cols, .. }] = measures.as_slice() else {
+        panic!("expected one Cardinality measure, got {measures:?}");
+    };
+    assert_eq!(cols, &[0, 1, 2, 3, 4]);
 }
 
 #[tokio::test]
