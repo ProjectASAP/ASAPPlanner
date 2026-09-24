@@ -11,7 +11,7 @@
 //! registers + variant + HIP accumulators losslessly, so the merge +
 //! store round-trip works end-to-end without that richer query surface.
 
-use crate::summary_operators::dd_sketch_accumulator::normalize_sample_p;
+use crate::summary_operators::dd_sketch::normalize_sample_p;
 use crate::{AggregateCore, AggregationType, KeyByLabelValues, SerializableToSink};
 use asap_sketchlib::{HllSketch, HllVariant, MessagePackCodec};
 use serde_json::Value;
@@ -567,7 +567,7 @@ mod tests {
 
     #[test]
     fn test_aggregate_core_merge_wrong_type_rejects() {
-        use crate::summary_operators::count_sketch_accumulator::CountSketchAccumulator;
+        use crate::summary_operators::count_sketch::CountSketchAccumulator;
         let hll = HllSketchAccumulator::new(HllVariant::Regular, 2);
         let cs = CountSketchAccumulator::new(2, 3);
         assert!(hll.merge_with(&cs).is_err());

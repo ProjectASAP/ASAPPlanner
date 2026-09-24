@@ -8,13 +8,13 @@ use asap_sketchlib::CountSketchWithHeap;
 use asap_sketchlib::CsHeapItem;
 use asap_sketchlib::MessagePackCodec;
 
-use crate::summary_operators::count_min_sketch_with_heap_accumulator::CountMinSketchWithHeapAccumulator;
+use crate::summary_operators::count_min_sketch_with_heap::CountMinSketchWithHeapAccumulator;
 
 /// Decode a `CountMinSketch` from the modified-OTLP wire bytes.
 /// MSGPACK path round-trips `CountMinSketch::deserialize_msgpack`;
 /// PROTO path decodes a `SketchEnvelope{count_min: CountMinState}`
 /// (or bare `CountMinState`) and re-projects to a flat matrix. Mirrors
-/// `precompute_operators::count_min_sketch_accumulator::from_sketchlib_proto_bytes`.
+/// `precompute_operators::count_min_sketch::from_sketchlib_proto_bytes`.
 pub fn decode_cms_from_proto(buffer: &[u8]) -> Result<CountMinSketch, String> {
     use asap_sketchlib::proto::sketchlib::{
         sketch_envelope, CountMinState, CounterType, SketchEnvelope,
@@ -88,7 +88,7 @@ pub fn decode_cms_from_msgpack(buffer: &[u8]) -> Result<CountMinSketch, String> 
 
 /// Decode a `CountSketch` from the modified-OTLP proto wire bytes.
 /// Mirrors
-/// `precompute_operators::count_sketch_accumulator::from_sketchlib_proto_bytes`.
+/// `precompute_operators::count_sketch::from_sketchlib_proto_bytes`.
 pub fn decode_cs_from_proto(buffer: &[u8]) -> Result<CountSketch, String> {
     use asap_sketchlib::proto::sketchlib::{
         sketch_envelope, CountSketchState, CounterType, SketchEnvelope,
@@ -195,13 +195,13 @@ pub fn decode_cs_with_heap_from_msgpack(buffer: &[u8]) -> Result<CountSketchWith
 // CountMinSketch}::apply_delta`; the proto `*Delta` message is decoded via
 // `asap_sketchlib::proto::sketchlib::{CountSketchDelta, CountMinDelta}`,
 // exactly as `precompute_operators::{count_sketch,
-// count_min_sketch}_accumulator::apply_proto_delta_bytes` does.
+// count_min_sketch}::apply_proto_delta_bytes` does.
 // ---------------------------------------------------------------------------
 
 /// Decode a `CountMinSketch` PROTO_DELTA frame into a FULL sketch by
 /// applying the sparse cell delta onto an empty base of the frame's
 /// declared dimensions. Mirrors
-/// `precompute_operators::count_min_sketch_accumulator::apply_proto_delta_bytes`.
+/// `precompute_operators::count_min_sketch::apply_proto_delta_bytes`.
 pub fn decode_cms_from_proto_delta(buffer: &[u8]) -> Result<CountMinSketch, String> {
     use asap_sketchlib::proto::sketchlib::CountMinDelta as PbDelta;
     use prost::Message;
@@ -249,7 +249,7 @@ pub fn decode_cms_from_proto_delta(buffer: &[u8]) -> Result<CountMinSketch, Stri
 /// Decode a `CountSketch` PROTO_DELTA frame into a FULL sketch by applying
 /// the sparse cell delta onto an empty base of the frame's declared
 /// dimensions. Mirrors
-/// `precompute_operators::count_sketch_accumulator::apply_proto_delta_bytes`.
+/// `precompute_operators::count_sketch::apply_proto_delta_bytes`.
 pub fn decode_cs_from_proto_delta(buffer: &[u8]) -> Result<CountSketch, String> {
     use asap_sketchlib::proto::sketchlib::CountSketchDelta as PbDelta;
     use prost::Message;
@@ -310,7 +310,7 @@ pub fn decode_cms_with_heap_from_msgpack_delta(
 /// matrix delta + full heap onto an empty base of the frame's declared
 /// dimensions. Same DELTA-HEAP wire shape as the CmsWithHeap delta frame
 /// (see `HeapDeltaWire`/`MatrixDeltaWire` in
-/// `count_min_sketch_with_heap_accumulator.rs`), decoded here directly
+/// `count_min_sketch_with_heap.rs`), decoded here directly
 /// with `rmp_serde` since there is no CountSketchWithHeap ingest
 /// accumulator to delegate to. No `asap_sketchlib` delta API needed — the
 /// public `from_legacy_matrix` rebuilds both the matrix and heap.

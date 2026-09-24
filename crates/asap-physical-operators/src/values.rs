@@ -260,9 +260,8 @@ pub(crate) use crate::capability::validate_native_family as validate_family;
 
 fn validate_state(family: &SummaryFamilyType, state: &dyn AggregateCore) -> Result<(), Error> {
     use crate::summary_operators::{
-        datasketches_kll_accumulator::DatasketchesKLLAccumulator,
-        dd_sketch_accumulator::DDSketchAccumulator, exact_accumulator::ExactAccumulator,
-        hll_sketch_accumulator::HllSketchAccumulator,
+        datasketches_kll::DatasketchesKLLAccumulator, dd_sketch::DDSketchAccumulator,
+        exact::ExactAccumulator, hll_sketch::HllSketchAccumulator,
     };
     use planner_types::post_asap::SketchParams;
     validate_family(family)?;

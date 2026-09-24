@@ -1,5 +1,5 @@
 //! Exact summary state identified by Planner family, independent of keyed layout.
-use super::increase_accumulator::IncreaseAccumulator;
+use super::increase::IncreaseAccumulator;
 use crate::Statistic;
 use crate::{
     AggregateCore, AggregationType, AuxStats, KeyByLabelValues, Measurement, SerializableToSink,

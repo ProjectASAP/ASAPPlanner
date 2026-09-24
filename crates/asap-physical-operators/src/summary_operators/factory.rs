@@ -7,8 +7,8 @@ use crate::summary_operators::{
 use crate::{AggregateCore, KeyByLabelValues, Measurement};
 // Production dispatch consumes Planner SummaryAgg payloads directly. The
 // config adapter below is compiled only for isolated historical kernel tests.
-use crate::summary_operators::hll_sketch_accumulator::HllSketchAccumulator;
-use crate::summary_operators::univmon_accumulator::UnivMonAccumulator;
+use crate::summary_operators::hll_sketch::HllSketchAccumulator;
+use crate::summary_operators::univmon::UnivMonAccumulator;
 use planner_types::post_asap::{ExactKind, SketchAlgorithm, SketchParams, SummaryFamilyType};
 
 /// Generate the two boilerplate clone-based `AccumulatorUpdater` methods
@@ -913,7 +913,7 @@ pub fn create_planner_accumulator(
     }
     if matches!(family, SummaryFamilyType::ExactAggregate(..)) {
         return Ok(Box::new(PlannerExactUpdater {
-            acc: crate::summary_operators::exact_accumulator::ExactAccumulator::new(
+            acc: crate::summary_operators::exact::ExactAccumulator::new(
                 family.clone(),
                 input.item.is_some(),
             )?,
@@ -994,7 +994,7 @@ pub fn create_planner_accumulator(
 }
 
 struct PlannerExactUpdater {
-    acc: crate::summary_operators::exact_accumulator::ExactAccumulator,
+    acc: crate::summary_operators::exact::ExactAccumulator,
 }
 impl AccumulatorUpdater for PlannerExactUpdater {
     fn update_single(&mut self, value: f64, timestamp: i64) {
@@ -1005,7 +1005,7 @@ impl AccumulatorUpdater for PlannerExactUpdater {
     }
     impl_clone_accumulator_methods!(acc);
     fn reset(&mut self) {
-        self.acc = crate::summary_operators::exact_accumulator::ExactAccumulator::new(
+        self.acc = crate::summary_operators::exact::ExactAccumulator::new(
             self.acc.family().clone(),
             self.acc.is_keyed(),
         )

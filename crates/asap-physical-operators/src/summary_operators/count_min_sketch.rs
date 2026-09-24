@@ -1,4 +1,4 @@
-use crate::summary_operators::dd_sketch_accumulator::normalize_sample_p;
+use crate::summary_operators::dd_sketch::normalize_sample_p;
 use crate::{
     AggregateCore, AggregationType, KeyByLabelValues, MergeableAccumulator,
     MultipleSubpopulationAggregate, SerializableToSink,
@@ -810,7 +810,7 @@ mod tests {
         let boxed_accs: Vec<Box<dyn AggregateCore>> = vec![Box::new(cms1), Box::new(cms2)];
         assert!(CountMinSketchAccumulator::merge_multiple(&boxed_accs).is_err());
 
-        use crate::summary_operators::sum_accumulator::SumAccumulator;
+        use crate::summary_operators::sum::SumAccumulator;
         let cms = CountMinSketchAccumulator::new(2, 3);
         let sum = SumAccumulator::new();
         let mixed_accs: Vec<Box<dyn AggregateCore>> = vec![Box::new(cms), Box::new(sum)];

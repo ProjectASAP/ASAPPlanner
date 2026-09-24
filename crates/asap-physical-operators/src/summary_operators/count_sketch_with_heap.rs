@@ -1,7 +1,7 @@
 //! Count Sketch with Heap accumulator — wraps
 //! `asap_sketchlib::CountSketchWithHeap`.
 //!
-//! Port of `count_min_sketch_with_heap_accumulator.rs` for the distinct
+//! Port of `count_min_sketch_with_heap.rs` for the distinct
 //! `CountSketchWithHeap` (median-of-signed-rows estimator) rather than
 //! `CountMinSketchWithHeap` (min-over-rows estimator). The two are
 //! different sketch algorithms that happen to share a storage shape and
@@ -24,7 +24,7 @@ use std::collections::HashMap;
 use crate::Statistic;
 
 /// Local serde view of the DELTA-HEAP wire frame (encoding `MSGPACK_DELTA`).
-/// Identical shape to `count_min_sketch_with_heap_accumulator.rs`'s
+/// Identical shape to `count_min_sketch_with_heap.rs`'s
 /// `HeapDeltaWire`/`MatrixDeltaWire` -- the wire frame is generic (sparse
 /// cell deltas + a full heap), not CMS-specific. See that file's doc for
 /// the exact rmp_serde positional layout.
@@ -561,7 +561,7 @@ mod tests {
     /// min-over-rows divergence at the sketch-math level).
     #[test]
     fn test_rejects_merge_with_cms_family_accumulator() {
-        use crate::summary_operators::count_min_sketch_with_heap_accumulator::CountMinSketchWithHeapAccumulator;
+        use crate::summary_operators::count_min_sketch_with_heap::CountMinSketchWithHeapAccumulator;
 
         let cs = CountSketchWithHeapAccumulator::new(4, 64, 10);
         let cms = CountMinSketchWithHeapAccumulator::new(4, 64, 10);

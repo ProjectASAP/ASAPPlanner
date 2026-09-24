@@ -205,7 +205,9 @@ summary replaces the exact grouped-sum materialization. Typed readout returns
 candidate identities and estimated scores; a semi-join is not required for this
 realization. Both score error and membership require accuracy guarantees.
 
-The `summary_operators` module owns typed summary kernels. Native weighted CMS and CountSketch
+The `summary_operators` module owns typed summary kernels. Its modules use operation
+names, such as `count_min_sketch`, `exact` and `sum`, without an
+`_accumulator` filename suffix or old-path aliases. Native weighted CMS and CountSketch
 use Float64 counters and preserves typed item identities, including numeric and
 NULL keys. Neither uses the integer-count codec or fixed-point counter-delta
 updates. The DAG binder supports column weights and explicit column/tuple item
