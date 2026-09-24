@@ -1562,6 +1562,11 @@ pub fn aggregate_output_schema(
             .and_then(|id| in_schema.columns.get(*id))
             .unwrap_or(&probe);
         let mut out = intent.output_column(in_col);
+        // A global extremum emits NULL for an empty input, even if its input
+        // column is non-nullable. Grouped extrema only emit existing groups.
+        if by.is_empty() && matches!(intent, AggIntent::Min { .. } | AggIntent::Max { .. }) {
+            out.nullable = true;
+        }
         if let Some((arg, _)) = intent
             .arg_selector_columns(in_schema)
             .map_err(QueryExprError::InvalidScalarSignature)?

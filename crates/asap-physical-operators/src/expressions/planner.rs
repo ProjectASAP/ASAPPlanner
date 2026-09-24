@@ -240,6 +240,20 @@ fn compare(op: &CompareOpKind, left: Value, right: Value) -> Result<Value, Error
     if matches!(left, Value::Null) || matches!(right, Value::Null) {
         return Ok(Value::Null);
     }
+    // NaN is unordered, not a type mismatch. Match the native scalar path.
+    if matches!(&left, Value::Float64(v) if v.is_nan())
+        || matches!(&right, Value::Float64(v) if v.is_nan())
+    {
+        return match op {
+            CompareOpKind::Ne => Ok(Value::Bool(true)),
+            CompareOpKind::Eq
+            | CompareOpKind::Lt
+            | CompareOpKind::Le
+            | CompareOpKind::Gt
+            | CompareOpKind::Ge => Ok(Value::Bool(false)),
+            _ => Err(Error::Invalid(format!("comparison {op:?}"))),
+        };
+    }
     let ordering = cell_cmp(&left, &right)
         .ok_or_else(|| Error::Invalid("comparison of incompatible values".into()))?;
     let value = match op {
@@ -352,6 +366,24 @@ impl CompiledExpression {
     }
     pub(crate) fn dtype(&self) -> (DataType, bool) {
         self.output.clone()
+    }
+    pub(crate) fn validate_input(&self, input: &Schema) -> Result<(), Error> {
+        if input.fields.len() != self.schema.columns.len()
+            || input
+                .fields
+                .iter()
+                .zip(&self.schema.columns)
+                .any(|(field, column)| {
+                    field.dtype
+                        != planner_types::post_asap::SummaryFamilyType::Plain(column.dtype.clone())
+                        || field.nullable != column.nullable
+                })
+        {
+            return Err(Error::Invalid(
+                "expression input differs from its bound schema".into(),
+            ));
+        }
+        Ok(())
     }
     /// Evaluate a row under the same typed schema used when binding the expression.
     pub fn evaluate(&self, row: &[Value]) -> Result<Value, Error> {

@@ -177,7 +177,18 @@ impl Operator {
         } else {
             DataType::Float64
         };
-        fields[state] = result_field("value", result_type, false);
+        // A state-only row represents the global population. Its extrema may
+        // be empty, just like an ordinary ungrouped MIN/MAX aggregate.
+        let nullable = fields.len() == 1
+            && matches!(
+                fields[state].dtype,
+                SummaryFamilyType::ExactAggregate(
+                    planner_types::post_asap::ExactKind::Min
+                        | planner_types::post_asap::ExactKind::Max,
+                    _
+                )
+            );
+        fields[state] = result_field("value", result_type, nullable);
         Ok(Self {
             kind: Kind::Readout {
                 state,
@@ -264,6 +275,12 @@ pub(super) fn execute<'a>(
                             i64::try_from(count)
                                 .map_err(|_| Error::Operator("exact count exceeds Int64".into()))?,
                         )
+                    } else if output.fields[*state].nullable
+                        && matches!(statistic, crate::Statistic::Min | crate::Statistic::Max)
+                    {
+                        let stats = summary.aux_stats();
+                        let value = if *statistic == crate::Statistic::Min { stats.min } else { stats.max };
+                        value.map(Value::Float64).unwrap_or(Value::Null)
                     } else {
                         Value::Float64(
                             summary

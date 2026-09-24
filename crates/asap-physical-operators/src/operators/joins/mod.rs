@@ -152,7 +152,7 @@ pub(super) fn execute<'a>(
             let mut work = Cooperative::new(&context);
             for row in &right {
                 work.checkpoint().await?;
-                if right_cols.iter().all(|&i| !matches!(row[i], Value::Null)) {
+                if right_cols.iter().all(|&i| matchable_key(&row[i])) {
                     let key = group_key(row, &right_cols)?;
                     if !members.contains(&key) {
                         workspace.grow(key_bytes(&key))?;
@@ -163,7 +163,7 @@ pub(super) fn execute<'a>(
             let mut rows = Vec::new();
             for row in left {
                 work.checkpoint().await?;
-                if left_cols.iter().all(|&i| !matches!(row[i], Value::Null))
+                if left_cols.iter().all(|&i| matchable_key(&row[i]))
                     && members.contains(&group_key(&row, &left_cols)?)
                 {
                     workspace.grow(std::mem::size_of::<Vec<Value>>())?;
@@ -175,4 +175,13 @@ pub(super) fn execute<'a>(
         .boxed_local());
     }
     unreachable!()
+}
+
+// Group keys canonicalize NaNs, but equality joins must not match them.
+fn matchable_key(value: &Value) -> bool {
+    match value {
+        Value::Null => false,
+        Value::Float64(v) => !v.is_nan(),
+        _ => true,
+    }
 }
