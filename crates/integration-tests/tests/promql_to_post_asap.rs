@@ -269,6 +269,7 @@ impl AccuracyEvidenceProvider for SeparatedTopK {
 fn counter_weighted_topk_uses_candidates_only_for_membership_and_exact_values_for_rerank() {
     for (query, expected_k) in [
         ("topk(2, sum by(job)(rate(m[1m])))", 2),
+        ("topk by(job)(2, sum by(service, job)(rate(m[1m])))", 2),
         ("topk(3, sum by(job)(rate(cpu_seconds_total[1h])))", 3),
         ("topk(3, sum by(job)(increase(requests_total[6h])))", 3),
     ] {
@@ -362,7 +363,10 @@ fn counter_weighted_topk_uses_candidates_only_for_membership_and_exact_values_fo
                 .is_some_and(|bytes| bytes
                     <= asap_aware_mapping::replacement::DEFAULT_MAX_SKETCH_STATE_BYTES)
         );
-        assert!(matches!(reduction, Reduction::Reduce(keys) if keys.is_empty()));
+        assert!(
+            matches!(reduction, Reduction::Reduce(keys) if keys.len() == usize::from(query.contains("topk by")))
+        );
+        assert_eq!(partition_by.len(), usize::from(query.contains("topk by")));
         assert_eq!(summary_input.schema.fields.len(), 1);
         assert_eq!(
             input.weight_domain,
