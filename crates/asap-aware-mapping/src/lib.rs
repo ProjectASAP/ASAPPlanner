@@ -151,7 +151,6 @@
 //!   docs for the pipeline order and the root-vs-per-node precedence rules.
 
 pub mod accuracy;
-pub mod accuracy_reconciliation;
 pub mod analytical_cost;
 pub mod cost_model;
 pub mod empirical_comparison;
@@ -179,12 +178,12 @@ pub mod summary_maintenance_lifecycle;
 mod test_support;
 pub mod topk_reuse;
 
+pub use accuracy::reconciliation::AccuracyReconciliationStrategy;
 pub use accuracy::{
     AccuracyAllocation, AccuracyBudgetAllocator, AccuracyEvidenceProvider, AccuracyModel,
     CompositionShape, DefaultAccuracyModel, EqualSplitAllocator, NoAccuracyEvidence,
     PropagationStats, WorkloadAccuracyEvidence,
 };
-pub use accuracy_reconciliation::AccuracyReconciliationStrategy;
 pub use cost_model::CompleteSummaryCandidateEstimate;
 pub use cost_model::{
     maintenance_operation_plan_cost_rate, raw_recompute_cost_rate, read_operation_plan_cost_rate,
