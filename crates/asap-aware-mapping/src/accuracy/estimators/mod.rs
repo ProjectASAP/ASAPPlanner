@@ -99,7 +99,7 @@ pub(crate) fn size_params(
             SketchParams::CmsWithHeap {
                 width: cms::cms_width(eps),
                 depth: cms::cms_depth(delta),
-                heap_size: k as u32,
+                heap_size: topk_capacity(k, eps),
             }
         }
         // Non-preferred candidates (DDSketch / Theta / Kmv / CountSketch /
@@ -124,11 +124,19 @@ pub(crate) fn size_params(
             SketchParams::CountSketchWithHeap {
                 width: count_sketch::count_sketch_width(eps),
                 depth: count_sketch::count_sketch_depth(delta),
-                heap_size: k as u32,
+                heap_size: topk_capacity(k, eps),
             }
         }
     }
 }
+/// Accuracy-dependent candidate budget, not a completeness theorem. The
+/// membership model must still certify the selected set independently.
+pub(crate) fn topk_capacity(k: usize, eps: f64) -> u32 {
+    u32::try_from(k)
+        .unwrap_or(u32::MAX)
+        .max(saturating_ceil(1.0 / eps, 1, 1 << 26))
+}
+
 /// `⌈x⌉` clamped to `[lo, hi]`; NaN / non-positive x saturate to `hi`
 /// (a degenerate ε means "as accurate as this family goes").
 pub(crate) fn saturating_ceil(x: f64, lo: u32, hi: u32) -> u32 {

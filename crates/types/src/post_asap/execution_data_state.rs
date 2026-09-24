@@ -19,8 +19,8 @@
 //!
 //! | Parent | Accepts from `child` |
 //! |---|---|
-//! | `SummaryAgg.child` | `INGESTION_ROWS`, or `INGESTION_SUMMARY` of an **exact accumulator** family. Never a read-time data_state. |
-//! | `SummaryEstimate.summary_input` | `INGESTION_SUMMARY` (any family). Produces `QUERY_ROWS`. |
+//! | `SummaryAgg.child` | Rows or exact accumulator state at either phase. The initial construction phase follows the input; deployment assigns final phases. |
+//! | `SummaryEstimate.summary_input` | Summary state at either phase (any family). Initial readout produces `QUERY_ROWS`. |
 //! | `SummaryJoin.outer/inner` | `INGESTION_ROWS` or `INGESTION_SUMMARY`; never a read-time data_state. |
 //! | `SummarySubtract`/`SummaryDelete` | `INGESTION_SUMMARY`. |
 //! | `SummaryMerge` | Summary state at its explicit ingestion or read timing. |
@@ -244,8 +244,12 @@ pub fn produced_data_state(expr: &SummaryExpr) -> Option<ExecutionDataState> {
             primitive: DataPrimitive::Raw,
         },
         SummaryExpr::RelationalJoin { .. } => ExecutionDataState::QUERY_ROWS,
-        SummaryExpr::SummaryAgg { .. }
-        | SummaryExpr::SummaryJoin { .. }
+        SummaryExpr::SummaryAgg { child, .. } => ExecutionDataState {
+            timing: produced_data_state(&child.expr)
+                .map_or(ExecutionTiming::IngestionTime, |state| state.timing),
+            primitive: DataPrimitive::SummaryState,
+        },
+        SummaryExpr::SummaryJoin { .. }
         | SummaryExpr::SummarySubtract { .. }
         | SummaryExpr::SummaryDelete { .. } => ExecutionDataState::INGESTION_SUMMARY,
         SummaryExpr::SummaryMerge { timing, .. } => ExecutionDataState {
@@ -413,8 +417,8 @@ fn visit(
                 child,
                 ExecutionDataStateEdge::SummaryAggChild,
                 |avail| match avail {
-                    ExecutionDataState::INGESTION_ROWS => Ok(()),
-                    ExecutionDataState::INGESTION_SUMMARY => {
+                    ExecutionDataState::INGESTION_ROWS | ExecutionDataState::QUERY_ROWS => Ok(()),
+                    state if state.primitive == DataPrimitive::SummaryState => {
                         is_exact_accumulator_state(&child.schema)
                     }
                     other => Err(ExecutionDataStateError::ReadoutUnderMaintenance {
@@ -902,13 +906,15 @@ mod tests {
     }
 
     #[test]
-    fn readout_under_summary_agg_is_rejected() {
+    fn readout_can_feed_summary_construction_at_query_time() {
         let inner = estimate(agg(keep(), kll()));
-        let root = agg(inner, kll());
-        assert!(matches!(
-            validate_execution_data_states(&root),
-            Err(ExecutionDataStateError::ReadoutUnderMaintenance { .. })
-        ));
+        let summary = agg(inner, kll());
+        let root = estimate(summary.clone());
+        let assignment = validate_execution_data_states(&root).unwrap();
+        assert_eq!(
+            assignment.data_state_of(&summary).unwrap().timing,
+            ExecutionTiming::QueryTime
+        );
     }
 
     #[test]
@@ -953,7 +959,7 @@ mod tests {
     }
 
     #[test]
-    fn query_time_operation_under_summary_agg_is_rejected() {
+    fn query_time_values_can_feed_query_time_summary_construction() {
         let inner = estimate(agg(keep(), kll()));
         let post = Rc::new(SummaryNode {
             expr: SummaryExpr::ValueOperation {
@@ -965,13 +971,8 @@ mod tests {
             guarantee: None,
         });
         let root = agg(post, kll());
-        assert_eq!(
-            validate_execution_data_states(&root).err(),
-            Some(ExecutionDataStateError::ReadoutUnderMaintenance {
-                edge: "SummaryAgg.child",
-                child: ExecutionDataState::QUERY_ROWS,
-            })
-        );
+        let root = estimate(root);
+        validate_execution_data_states(&root).unwrap();
     }
 
     #[test]

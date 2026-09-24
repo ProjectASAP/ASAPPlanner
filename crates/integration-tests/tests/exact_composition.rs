@@ -5,7 +5,7 @@
 //!
 //! Covers the issue's integration matrix: both nesting directions, grouped
 //! fine-to-coarse and identity folds, one inner summary shared by several
-//! queries, illegal readout-under-maintenance rejection, a runtime without
+//! queries, phase-aware summary construction, a runtime without
 //! the capability, a cost model without statistics, and pre/post-ASAP
 //! schemas plus shared `Rc` identity — along with pins for every
 //! already-supported exact-accumulator nesting.
@@ -17,8 +17,8 @@ use asap_aware_mapping::cost_model::{
     ValueOperationCapabilities,
 };
 use asap_aware_mapping::replacement::{
-    default_strategies_with, search_workload_with, RealizationError, Replacement,
-    ReplacementProvenance, ReplacementStrategy, SketchAlgorithmStrategy, TargetSubDAG,
+    default_strategies_with, search_workload_with, Replacement, ReplacementProvenance,
+    ReplacementStrategy, SketchAlgorithmStrategy, TargetSubDAG,
 };
 use asap_aware_mapping::{
     CostModel, DefaultCostModel, EvaluationRate, ExplanationKind, OperationPlacement,
@@ -26,9 +26,8 @@ use asap_aware_mapping::{
 use asap_integration_tests::fixtures::lower_promql;
 use asap_types::dag_export;
 use asap_types::post_asap::{
-    validate_execution_data_states, ExactKind, ExactOperation, ExecutionDataState,
-    ExecutionDataStateError, ExecutionTiming, SketchAlgorithm, SummaryExpr, SummaryFamilyType,
-    SummaryNode, SummaryUpdate,
+    validate_execution_data_states, ExactKind, ExactOperation, ExecutionDataState, ExecutionTiming,
+    SketchAlgorithm, SummaryExpr, SummaryFamilyType, SummaryNode, SummaryUpdate,
 };
 use asap_types::pre_asap::agg_intent::{default_quantile, AggIntent};
 use asap_types::pre_asap::query_expr::{QueryExpr, Reduction, Source};
@@ -669,13 +668,11 @@ fn outer_summary_over_an_exact_function_composes_at_ingestion_time() {
 
 // ── rejection, capability, statistics ───────────────────────────────────
 
-/// A maintained summary above a query-time readout is a typed plan-time
-/// error, both for the construction path and for a hand-built plan.
+/// Summary construction can consume query-time values without pretending
+/// they are available to an ingestion-time consumer.
 #[test]
-fn readout_under_maintenance_is_rejected_at_construction() {
+fn summary_construction_follows_its_value_input_phase() {
     let root = agg(vec![0], AggIntent::Max { col: None }, fine_quantile());
-    // A read-time ValueOperation can never be placed under a SummaryAgg: compose a
-    // read-time operation, then try to maintain a summary over it.
     let space = plan(vec![("q", Rc::clone(&root))], &StatsModel);
     let post = space
         .global_selection(&StatsModel)
@@ -699,12 +696,9 @@ fn readout_under_maintenance_is_rejected_at_construction() {
         },
         guarantee: None,
     });
-    assert!(matches!(
-        validate_execution_data_states(&illegal),
-        Err(ExecutionDataStateError::ReadoutUnderMaintenance { .. })
-    ));
-    let err: RealizationError = validate_execution_data_states(&illegal).unwrap_err().into();
-    assert!(matches!(err, RealizationError::ExecutionDataState(_)));
+    let state = asap_types::post_asap::produced_data_state(&illegal.expr).unwrap();
+    assert_eq!(state.timing, ExecutionTiming::QueryTime);
+    asap_types::post_asap::validate_execution_data_states_at(&illegal, state).unwrap();
 }
 
 #[test]

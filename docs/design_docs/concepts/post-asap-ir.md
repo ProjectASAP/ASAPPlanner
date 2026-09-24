@@ -69,3 +69,39 @@ its edges. Ingestion work cannot depend on a future query result. Default
 semantic realization still proposes an initial layout; it does not restrict
 which phase a physical operator may use. Deployments must separately check that
 they have an implementation and a valid data source for the chosen placement.
+
+## Weighted grouped TopK
+
+For `topk by(job)(2, sum by(service, job)(rate(m[1m])))`, the summary
+realization consumes the complete per-series rate results. Each job owns a
+separate CMS and candidate heap. Inside that partition, the item is service and
+the update weight is the series rate. Summing updates for one item implements
+the logical grouped sum without first constructing all exact grouped sums.
+
+The DAG is per-series rate → finalized values → partitioned summary construction
+→ typed candidate/score readout → output projection → grouped Sort → grouped
+Limit. The output count is two per job. The candidate capacity is a separate
+parameter, provisionally `max(k, ceil(1 / epsilon))`; this sizing choice is not a
+membership theorem. Missing membership evidence still prevents realization.
+The row readout restores job and service identities and returns estimated sums.
+There is no mandatory exact scoring branch or candidate semi-join in this path.
+The old raw counter-delta update expression is removed rather than retained as a
+compatibility option: counter increments are not complete windowed rate results.
+
+The direct readout checks both score error and membership. A source provider
+supplies an enforced upper bound on distinct partition/item identities for the
+complete readout. Planner uses this bound to size confidence and union-bound
+score errors over adaptively selected items. Membership evidence is evaluated
+for the query's output count, not the candidate capacity. Score and membership
+failure probabilities are combined, and the score guarantee remains in the
+membership guarantee's child provenance. An exact request does not accept this
+approximate output path merely because its selected identities are certified.
+
+Deployment chooses ingestion time or query time for these operators. The
+semantic constructor proposes a layout; `with_execution_phases` assigns the
+executable placement. Either deployment must give each evaluation a complete
+rate window and an isolated summary state, or maintain an equivalent replacement
+strategy. Appending successive rate snapshots to one cumulative state is invalid.
+An ingestion execution can compute a window before the query and store its state;
+a query execution can construct the same state on demand. These are placements
+of the same computation, not separate summary semantics.

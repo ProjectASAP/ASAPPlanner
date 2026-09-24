@@ -20,10 +20,9 @@ use asap_aware_mapping::{
 };
 use asap_integration_tests::fixtures::lower_promql;
 use asap_types::post_asap::{
-    compile_executable_dag, CandidateCompleteness, CompositionOperator, EdgeRole, EntityIdentity,
-    ExactKind, ExactParams, GroupingStrategy, NonNegativeWeightProof, SketchAlgorithm, SketchKind,
-    SketchParams, SketchQuery, SummaryExpr, SummaryFamilyType, SummaryInputExpr, SummaryNode,
-    SummarySchema, SummaryUpdate, ValueOperation, WeightDomain,
+    compile_executable_dag, CompositionOperator, EntityIdentity, ExactKind, ExactParams,
+    GroupingStrategy, SketchAlgorithm, SketchKind, SketchParams, SketchQuery, SummaryExpr,
+    SummaryFamilyType, SummaryInputExpr, SummaryNode, SummarySchema, SummaryUpdate, ValueOperation,
 };
 use asap_types::pre_asap::expr_ir::ColumnRef;
 use asap_types::pre_asap::query_expr::{QueryExpr, Reduction};
@@ -248,6 +247,10 @@ fn value_ranked_topk_over_binary_ratio_finalizes_both_summary_operands() {
 struct SeparatedTopK;
 
 impl AccuracyEvidenceProvider for SeparatedTopK {
+    fn topk_max_distinct_items(&self, _: &QueryExpr) -> Option<u64> {
+        Some(1000)
+    }
+
     fn propagation_stats(
         &self,
         op: &CompositionOperator,
@@ -265,16 +268,104 @@ impl AccuracyEvidenceProvider for SeparatedTopK {
     }
 }
 
+// Rate-weighted summaries must consume finalized rates, never raw counter deltas.
 #[test]
-fn counter_weighted_topk_uses_candidates_only_for_membership_and_exact_values_for_rerank() {
-    for (query, expected_k) in [
-        ("topk(2, sum by(job)(rate(m[1m])))", 2),
-        ("topk by(job)(2, sum by(service, job)(rate(m[1m])))", 2),
-        ("topk(3, sum by(job)(rate(cpu_seconds_total[1h])))", 3),
-        ("topk(3, sum by(job)(increase(requests_total[6h])))", 3),
+fn grouped_rate_topk_consumes_finalized_rate_values() {
+    let root = Rc::new(
+        lower_promql(
+            "topk by(job)(2, sum by(service, job)(rate(m[1m])))",
+            AccuracyTarget::Epsilon(0.01),
+        )
+        .unwrap(),
+    );
+    let strategy = SketchAlgorithmStrategy::new_with_planning_inputs_and_evidence(
+        &DefaultCostModel,
+        &DefaultAccuracyModel,
+        &EqualSplitAllocator,
+        &SeparatedTopK,
+    );
+    let plan = strategy
+        .replacements(&TargetSubDAG::new(&root))
+        .into_iter()
+        .find_map(|candidate| match candidate.replacement {
+            Replacement::Summary(node) if candidate.rationale.contains("CmsWithHeap") => Some(node),
+            _ => None,
+        })
+        .expect("rate-weighted CMS plan");
+    let dag = compile_executable_dag(&plan).unwrap();
+    assert!(!dag.nodes.iter().any(|node| matches!(
+        node.payload,
+        asap_types::post_asap::ExecutableOperatorPayload::RelationalJoin { .. }
+    )));
+    let node = dag.nodes.iter().find(|node| matches!(&node.payload,
+        asap_types::post_asap::ExecutableOperatorPayload::SummaryAgg { family: SummaryFamilyType::Sketch(kind, _), .. }
+        if kind.algorithm() == &SketchAlgorithm::CmsWithHeap)).unwrap();
+    assert_eq!(
+        node.output_state.timing,
+        asap_types::post_asap::ExecutionTiming::QueryTime
+    );
+    let asap_types::post_asap::ExecutableOperatorPayload::SummaryAgg { input, .. } = &node.payload
+    else {
+        unreachable!()
+    };
+    assert_eq!(
+        input.weight,
+        SummaryInputExpr::Column(ColumnRef::SampleValue)
+    );
+    assert_eq!(
+        input.item,
+        Some(SummaryInputExpr::Column(ColumnRef::Named("service".into())))
+    );
+}
+
+// Selection is adaptive: a per-key score bound alone cannot certify all returned rows.
+#[test]
+fn weighted_topk_requires_a_complete_readout_population_bound() {
+    struct NoPopulationBound;
+    impl AccuracyEvidenceProvider for NoPopulationBound {
+        fn propagation_stats(
+            &self,
+            op: &CompositionOperator,
+            family: &SummaryFamilyType,
+            query: Option<&SketchQuery>,
+        ) -> PropagationStats {
+            SeparatedTopK.propagation_stats(op, family, query)
+        }
+    }
+    let root = Rc::new(
+        lower_promql(
+            "topk by(job)(2, sum by(service, job)(rate(m[1m])))",
+            AccuracyTarget::Epsilon(0.01),
+        )
+        .unwrap(),
+    );
+    let strategy = SketchAlgorithmStrategy::new_with_planning_inputs_and_evidence(
+        &DefaultCostModel,
+        &DefaultAccuracyModel,
+        &EqualSplitAllocator,
+        &NoPopulationBound,
+    );
+    assert!(strategy.replacements(&TargetSubDAG::new(&root)).is_empty());
+}
+
+// The summary's estimate is projected back to logical service/job score rows.
+#[test]
+fn rate_and_increase_topk_use_summary_scores_and_grouped_limits() {
+    for query in [
+        "topk(2, sum by(job)(rate(m[1m])))",
+        "topk by(job)(2, sum by(service, job)(rate(m[1m])))",
+        "topk(2, sum by(job)(increase(m[6h])))",
     ] {
-        let root =
-            Rc::new(lower_promql(query, AccuracyTarget::Epsilon(0.01)).expect("lowering failed"));
+        let root = Rc::new(
+            lower_promql(
+                query,
+                AccuracyTarget::EpsilonDelta {
+                    epsilon: 0.01,
+                    delta: 0.01,
+                },
+            )
+            .unwrap(),
+        );
         let strategy = SketchAlgorithmStrategy::new_with_planning_inputs_and_evidence(
             &DefaultCostModel,
             &DefaultAccuracyModel,
@@ -285,32 +376,27 @@ fn counter_weighted_topk_uses_candidates_only_for_membership_and_exact_values_fo
             .replacements(&TargetSubDAG::new(&root))
             .into_iter()
             .find_map(|candidate| match candidate.replacement {
-                Replacement::Summary(node)
-                    if candidate.rationale.contains("CmsWithHeap")
-                        && matches!(node.expr, SummaryExpr::ValueOperation { .. }) =>
-                {
+                Replacement::Summary(node) if candidate.rationale.contains("CmsWithHeap") => {
                     Some(node)
                 }
                 _ => None,
             })
-            .unwrap_or_else(|| panic!("missing candidate semi-join for {query}"));
-        // Candidate pruning feeds grouped Sort followed by grouped Limit.
+            .expect("weighted summary");
         let SummaryExpr::ValueOperation {
             child: sorted,
             operation:
                 ValueOperation::Limit {
-                    n,
+                    n: 2,
                     offset: 0,
                     partition_by,
                 },
             ..
         } = &plan.expr
         else {
-            panic!("expected grouped Limit root")
+            panic!("grouped limit")
         };
-        assert_eq!(*n, expected_k as usize);
         let SummaryExpr::ValueOperation {
-            child: filtered,
+            child: projected,
             operation:
                 ValueOperation::Sort {
                     partition_by: sort_groups,
@@ -319,113 +405,62 @@ fn counter_weighted_topk_uses_candidates_only_for_membership_and_exact_values_fo
             ..
         } = &sorted.expr
         else {
-            panic!("expected grouped Sort")
+            panic!("grouped sort")
         };
         assert_eq!(partition_by, sort_groups);
-        let SummaryExpr::RelationalJoin {
-            right: candidates,
-            left: values,
-            kind: asap_types::pre_asap::JoinKind::Semi,
-            pruning: Some(CandidateCompleteness::Certified { .. }),
+        assert_eq!(partition_by.len(), usize::from(query.contains("topk by")));
+        let SummaryExpr::ValueOperation {
+            child: readout,
+            operation: ValueOperation::Project { .. },
             ..
-        } = &filtered.expr
+        } = &projected.expr
         else {
-            panic!("unexpected candidate plan for {query}: {:?}", plan.expr)
+            panic!("logical output projection")
         };
-        assert_ne!(
-            candidates.schema, values.schema,
-            "candidate readout must retain its own schema"
-        );
-        assert_eq!(
-            candidates.schema.fields.last().unwrap().name,
-            "__asap_estimate"
-        );
-        let SummaryExpr::SummaryEstimate { summary_input, .. } = &candidates.expr else {
-            panic!("candidate membership must be a summary readout")
+        let SummaryExpr::SummaryEstimate {
+            summary_input,
+            query: SketchQuery::TopK { k },
+        } = &readout.expr
+        else {
+            panic!("heap readout")
         };
+        assert!(*k > 2, "candidate capacity is independent of output count");
         let SummaryExpr::SummaryAgg {
-            child,
-            family,
+            child: rates,
             input,
-            reduction,
             ..
         } = &summary_input.expr
         else {
-            panic!("candidate membership must read a summary aggregate")
+            panic!("weighted summary")
         };
-        assert!(matches!(family, SummaryFamilyType::Sketch(kind, _)
-            if kind.algorithm() == &SketchAlgorithm::CmsWithHeap));
-        let SummaryFamilyType::Sketch(kind, _) = family else {
-            unreachable!()
-        };
-        assert!(
-            asap_aware_mapping::replacement::sketch_state_bytes(kind.params())
-                .is_some_and(|bytes| bytes
-                    <= asap_aware_mapping::replacement::DEFAULT_MAX_SKETCH_STATE_BYTES)
-        );
-        assert!(
-            matches!(reduction, Reduction::Reduce(keys) if keys.len() == usize::from(query.contains("topk by")))
-        );
-        assert_eq!(partition_by.len(), usize::from(query.contains("topk by")));
-        assert_eq!(summary_input.schema.fields.len(), 1);
         assert_eq!(
-            input.weight_domain,
-            WeightDomain::NonNegative {
-                proof: NonNegativeWeightProof::ResetAwareCounterDerivative,
-            }
-        );
-        assert!(matches!(
             input.weight,
-            SummaryInputExpr::ResetAwareCounterDelta {
-                value: ColumnRef::SampleValue,
-                series: EntityIdentity::PromqlLabelSet { .. },
-            }
-        ));
-        let executable = compile_executable_dag(&plan).expect("typed executable DAG");
-        assert!(executable.nodes.iter().any(|node| matches!(
-            &node.payload,
-            asap_types::post_asap::ExecutableOperatorPayload::RelationalJoin {
-                join_kind: asap_types::pre_asap::JoinKind::Semi,
-                pruning: Some(CandidateCompleteness::Certified { .. }),
-                ..
-            }
-        )));
-        assert!(executable.nodes.iter().any(|node| matches!(
-            &node.payload,
-            asap_types::post_asap::ExecutableOperatorPayload::SummaryAgg {
-                input: SummaryUpdate {
-                    weight: SummaryInputExpr::ResetAwareCounterDelta { .. },
-                    ..
-                },
-                ..
-            }
-        )));
-        assert!(
-            executable.edges.iter().all(|edge| edge.grouping
-                != asap_types::post_asap::GroupingEdgeCompatibility::Incompatible),
-            "unexpected incompatible edge: {:#?}",
-            executable.edges
+            SummaryInputExpr::Column(ColumnRef::SampleValue)
         );
-        assert!(executable
-            .edges
-            .iter()
-            .any(|edge| edge.role == EdgeRole::Right));
-        assert!(executable
-            .edges
-            .iter()
-            .any(|edge| edge.role == EdgeRole::Left));
-        assert!(
-            !matches!(child.expr, SummaryExpr::SummaryAgg { .. }),
-            "membership materialization must bind ingest rows, not another summary"
-        );
-        assert!(values.guarantee.as_ref().is_some_and(|g| g.is_exact()));
         assert!(matches!(
-            values.expr,
+            rates.expr,
             SummaryExpr::ValueOperation {
                 operation: ValueOperation::FinalizeExactAccumulator,
                 ..
             }
         ));
+        let dag = compile_executable_dag(&plan).unwrap();
+        for phase in [
+            asap_types::post_asap::ExecutionTiming::IngestionTime,
+            asap_types::post_asap::ExecutionTiming::QueryTime,
+        ] {
+            let phases = dag.nodes.iter().map(|node| (node.id, phase)).collect();
+            let placed = dag.with_execution_phases(&phases).unwrap();
+            assert!(placed
+                .nodes
+                .iter()
+                .all(|node| node.output_state.timing == phase));
+        }
+        let guarantee = plan.guarantee.as_ref().unwrap();
+        assert!(guarantee.failure_probability.evaluate().unwrap() <= 0.01);
+        assert!(guarantee.provenance.iter().any(|source| matches!(source,
+            asap_types::post_asap::GuaranteeSource::ChildGuarantee { guarantee, .. }
+            if guarantee.metric == asap_types::post_asap::ErrorMetric::Frequency)));
     }
 }
 
@@ -638,7 +673,7 @@ fn planner_only_e2e_temporal_topk_preserves_query_update_and_readout_contract() 
             | SketchParams::CountSketchWithHeap { heap_size, .. } => *heap_size,
             params => panic!("expected heap-bearing Top-K parameters, got {params:?}"),
         };
-        assert_eq!(heap_size, *k as u32);
+        assert_eq!(heap_size, 100u32.max(*k as u32));
         assert_eq!(
             state_input.item.as_ref(),
             Some(&SummaryInputExpr::EntityIdentity(
