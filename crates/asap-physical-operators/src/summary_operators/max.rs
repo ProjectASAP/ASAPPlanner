@@ -8,29 +8,26 @@ use std::collections::HashMap;
 
 use crate::Statistic;
 
-/// Exact minimum over one population, mergeable by comparison.
+/// Exact maximum over one population, mergeable by comparison.
 ///
-/// The sibling [`MaxAccumulator`](super::max_accumulator::MaxAccumulator) is a
-/// separate type on purpose: these two used to be one `MinMaxAccumulator`
-/// whose direction lived in a `sub_type: String`, which meant every layer
-/// above -- the wire `aggregationSubType`, the accumulator factory, the
-/// summary catalog -- had to carry the direction alongside the family and
-/// could silently answer a `min_over_time` read from maximum state.
+/// See [`MinAccumulator`](super::min::MinAccumulator) for why the
+/// two directions are separate types rather than one accumulator carrying a
+/// `sub_type` string.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MinAccumulator {
+pub struct MaxAccumulator {
     pub value: f64,
 }
 
-impl Default for MinAccumulator {
+impl Default for MaxAccumulator {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl MinAccumulator {
+impl MaxAccumulator {
     pub fn new() -> Self {
         Self {
-            value: f64::INFINITY,
+            value: f64::NEG_INFINITY,
         }
     }
 
@@ -39,7 +36,7 @@ impl MinAccumulator {
     }
 
     pub fn update(&mut self, value: f64) {
-        if value < self.value {
+        if value > self.value {
             self.value = value;
         }
     }
@@ -62,7 +59,7 @@ impl MinAccumulator {
     }
 }
 
-impl SerializableToSink for MinAccumulator {
+impl SerializableToSink for MaxAccumulator {
     fn serialize_to_json(&self) -> Value {
         serde_json::json!({ "value": self.value })
     }
@@ -72,14 +69,14 @@ impl SerializableToSink for MinAccumulator {
     }
 }
 
-impl MergeableAccumulator<MinAccumulator> for MinAccumulator {
+impl MergeableAccumulator<MaxAccumulator> for MaxAccumulator {
     fn merge_accumulators(
-        accumulators: Vec<MinAccumulator>,
-    ) -> Result<MinAccumulator, Box<dyn std::error::Error + Send + Sync>> {
+        accumulators: Vec<MaxAccumulator>,
+    ) -> Result<MaxAccumulator, Box<dyn std::error::Error + Send + Sync>> {
         if accumulators.is_empty() {
             return Err("No accumulators to merge".into());
         }
-        let mut result = MinAccumulator::new();
+        let mut result = MaxAccumulator::new();
         for acc in accumulators {
             result.update(acc.value);
         }
@@ -87,13 +84,13 @@ impl MergeableAccumulator<MinAccumulator> for MinAccumulator {
     }
 }
 
-impl AggregateCore for MinAccumulator {
+impl AggregateCore for MaxAccumulator {
     fn clone_boxed_core(&self) -> Box<dyn AggregateCore> {
         Box::new(self.clone())
     }
 
     fn type_name(&self) -> &'static str {
-        "MinAccumulator"
+        "MaxAccumulator"
     }
 
     fn as_any(&self) -> &dyn std::any::Any {
@@ -110,22 +107,22 @@ impl AggregateCore for MinAccumulator {
     ) -> Result<Box<dyn AggregateCore>, Box<dyn std::error::Error + Send + Sync>> {
         if other.get_accumulator_type() != self.get_accumulator_type() {
             return Err(format!(
-                "Cannot merge MinAccumulator with {}",
+                "Cannot merge MaxAccumulator with {}",
                 other.get_accumulator_type()
             )
             .into());
         }
-        let other_min = other
+        let other_max = other
             .as_any()
-            .downcast_ref::<MinAccumulator>()
-            .ok_or("Failed to downcast to MinAccumulator")?;
+            .downcast_ref::<MaxAccumulator>()
+            .ok_or("Failed to downcast to MaxAccumulator")?;
         let mut merged = self.clone();
-        merged.update(other_min.value);
+        merged.update(other_max.value);
         Ok(Box::new(merged))
     }
 
     fn get_accumulator_type(&self) -> AggregationType {
-        AggregationType::Min
+        AggregationType::Max
     }
 
     fn approx_memory_bytes(&self) -> usize {
@@ -133,11 +130,11 @@ impl AggregateCore for MinAccumulator {
     }
 
     fn aux_stats(&self) -> AuxStats {
-        // The sentinel `f64::INFINITY` from `new()` is surfaced as-is; the
+        // The sentinel `f64::NEG_INFINITY` from `new()` is surfaced as-is; the
         // query engine already treats it as "no data yet", the same way it
         // does for `query_statistic`.
         AuxStats {
-            min: Some(self.value),
+            max: Some(self.value),
             ..AuxStats::empty()
         }
     }
@@ -157,18 +154,18 @@ impl AggregateCore for MinAccumulator {
     }
 }
 
-impl SingleSubpopulationAggregate for MinAccumulator {
+impl SingleSubpopulationAggregate for MaxAccumulator {
     fn query(
         &self,
         statistic: Statistic,
         query_kwargs: Option<&HashMap<String, String>>,
     ) -> Result<f64, Box<dyn std::error::Error + Send + Sync>> {
         if query_kwargs.is_some() {
-            return Err("MinAccumulator does not support query parameters".into());
+            return Err("MaxAccumulator does not support query parameters".into());
         }
         match statistic {
-            Statistic::Min => Ok(self.value),
-            other => Err(format!("Unsupported statistic in MinAccumulator: {other:?}").into()),
+            Statistic::Max => Ok(self.value),
+            other => Err(format!("Unsupported statistic in MaxAccumulator: {other:?}").into()),
         }
     }
 
@@ -182,58 +179,58 @@ mod tests {
     use super::*;
 
     #[test]
-    fn keeps_the_smallest_update() {
-        let mut acc = MinAccumulator::new();
+    fn keeps_the_largest_update() {
+        let mut acc = MaxAccumulator::new();
         acc.update(10.0);
         acc.update(5.0);
         acc.update(15.0);
 
-        assert_eq!(acc.value, 5.0);
+        assert_eq!(acc.value, 15.0);
         assert_eq!(
-            crate::SingleSubpopulationAggregate::query(&acc, Statistic::Min, None).unwrap(),
-            5.0
+            crate::SingleSubpopulationAggregate::query(&acc, Statistic::Max, None).unwrap(),
+            15.0
         );
     }
 
     #[test]
-    fn refuses_to_answer_a_maximum_query() {
-        let acc = MinAccumulator::with_value(5.0);
-        assert!(crate::SingleSubpopulationAggregate::query(&acc, Statistic::Max, None).is_err());
+    fn refuses_to_answer_a_minimum_query() {
+        let acc = MaxAccumulator::with_value(15.0);
+        assert!(crate::SingleSubpopulationAggregate::query(&acc, Statistic::Min, None).is_err());
     }
 
     #[test]
-    fn merges_by_taking_the_smallest() {
+    fn merges_by_taking_the_largest() {
         let merged =
-            <MinAccumulator as MergeableAccumulator<MinAccumulator>>::merge_accumulators(vec![
-                MinAccumulator::with_value(10.0),
-                MinAccumulator::with_value(5.0),
-                MinAccumulator::with_value(15.0),
+            <MaxAccumulator as MergeableAccumulator<MaxAccumulator>>::merge_accumulators(vec![
+                MaxAccumulator::with_value(10.0),
+                MaxAccumulator::with_value(5.0),
+                MaxAccumulator::with_value(15.0),
             ])
             .unwrap();
-        assert_eq!(merged.value, 5.0);
+        assert_eq!(merged.value, 15.0);
     }
 
     #[test]
-    fn refuses_to_merge_with_a_maximum() {
-        use super::super::max_accumulator::MaxAccumulator;
-        let min = MinAccumulator::with_value(5.0);
+    fn refuses_to_merge_with_a_minimum() {
+        use super::super::min::MinAccumulator;
         let max = MaxAccumulator::with_value(15.0);
-        assert!(min.merge_with(&max).is_err());
+        let min = MinAccumulator::with_value(5.0);
+        assert!(max.merge_with(&min).is_err());
     }
 
     #[test]
     fn round_trips_through_both_serializations() {
-        let acc = MinAccumulator::with_value(42.5);
+        let acc = MaxAccumulator::with_value(42.5);
 
         let json = acc.serialize_to_json();
         assert_eq!(
-            MinAccumulator::deserialize_from_json(&json).unwrap().value,
+            MaxAccumulator::deserialize_from_json(&json).unwrap().value,
             42.5
         );
 
         let bytes = acc.serialize_to_bytes();
         assert_eq!(
-            MinAccumulator::deserialize_from_bytes(&bytes)
+            MaxAccumulator::deserialize_from_bytes(&bytes)
                 .unwrap()
                 .value,
             42.5
@@ -241,13 +238,11 @@ mod tests {
     }
 
     #[test]
-    fn aux_stats_expose_min_only() {
-        let aux = MinAccumulator::with_value(3.5).aux_stats();
-        assert_eq!(aux.min, Some(3.5));
-        assert_eq!(aux.max, None);
-        assert_eq!(aux.count, None);
-        assert_eq!(aux.sum, None);
-        assert_eq!(aux.try_answer(Statistic::Min), Some(3.5));
-        assert_eq!(aux.try_answer(Statistic::Max), None);
+    fn aux_stats_expose_max_only() {
+        let aux = MaxAccumulator::with_value(99.0).aux_stats();
+        assert_eq!(aux.max, Some(99.0));
+        assert_eq!(aux.min, None);
+        assert_eq!(aux.try_answer(Statistic::Max), Some(99.0));
+        assert_eq!(aux.try_answer(Statistic::Min), None);
     }
 }
