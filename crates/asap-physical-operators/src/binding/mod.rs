@@ -327,10 +327,12 @@ fn bind_operation(node: &ExecutableDagNode, inputs: &[Schema]) -> Result<Operato
                         "keyed summary weight must be a finalized value column",
                     ));
                 };
-                if !matches!(
-                    update.weight_domain,
-                    planner_types::post_asap::WeightDomain::NonNegative { .. }
-                ) {
+                if matches!(family, SummaryFamilyType::Sketch(kind, _) if kind.algorithm() == &planner_types::post_asap::SketchAlgorithm::CmsWithHeap)
+                    && !matches!(
+                        update.weight_domain,
+                        planner_types::post_asap::WeightDomain::NonNegative { .. }
+                    )
+                {
                     return Err(invalid("CMS requires a nonnegative weight contract"));
                 }
                 fn columns(

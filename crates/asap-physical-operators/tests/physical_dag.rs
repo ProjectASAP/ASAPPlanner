@@ -964,9 +964,14 @@ fn native_relational_join_kinds_preserve_unmatched_rows() {
     }
 }
 
-// Per-series fractional rates feed one independent CMS per job, in either scope.
+// Per-series fractional rates feed either weighted frequency family per job, in either scope.
 #[test]
 fn weighted_rate_topk_preserves_partitions_fractional_scores_and_evaluation_scope() {
+    for count_sketch in [false, true] {
+        assert_weighted_rate_topk(count_sketch);
+    }
+}
+fn assert_weighted_rate_topk(count_sketch: bool) {
     use planner_types::post_asap::{SketchAlgorithm, SketchKind, SketchParams};
     let raw = schema(&[
         ("service", DataType::Utf8, false),
@@ -1007,11 +1012,23 @@ fn weighted_rate_topk_preserves_partitions_fractional_scores_and_evaluation_scop
     .unwrap();
     let family = SummaryFamilyType::Sketch(
         SketchKind::new(
-            SketchAlgorithm::CmsWithHeap,
-            SketchParams::CmsWithHeap {
-                width: 4096,
-                depth: 5,
-                heap_size: 8,
+            if count_sketch {
+                SketchAlgorithm::CountSketchWithHeap
+            } else {
+                SketchAlgorithm::CmsWithHeap
+            },
+            if count_sketch {
+                SketchParams::CountSketchWithHeap {
+                    width: 4096,
+                    depth: 5,
+                    heap_size: 8,
+                }
+            } else {
+                SketchParams::CmsWithHeap {
+                    width: 4096,
+                    depth: 5,
+                    heap_size: 8,
+                }
             },
         ),
         Default::default(),

@@ -199,24 +199,33 @@ Count outputs Int64. Binary expressions use Planner arithmetic/comparison kinds
 and enforce its checked-division domains.
 
 Grouped TopK composes Sort and Limit within each group. A weighted summary can
-consume per-series rates directly: each job has its own CMS and candidate heap,
+consume per-series rates directly: each job has its own CMS or CountSketch with a candidate heap,
 with service as the item and rate as the weight. Sum accumulation inside the
 summary replaces the exact grouped-sum materialization. Typed readout returns
 candidate identities and estimated scores; a semi-join is not required for this
 realization. Both score error and membership require accuracy guarantees.
 
-The `summary_operators` module owns typed summary kernels. Native weighted CMS
-uses Float64 counters and preserves typed item identities, including numeric and
-NULL keys. It does not use the integer-count codec or fixed-point counter-delta
+The `summary_operators` module owns typed summary kernels. Native weighted CMS and CountSketch
+use Float64 counters and preserves typed item identities, including numeric and
+NULL keys. Neither uses the integer-count codec or fixed-point counter-delta
 updates. The DAG binder supports column weights and explicit column/tuple item
-identities for this CMS path; unsupported families or identities are rejected.
+identities for both families; unsupported families or identities are rejected.
+CMS accepts nonnegative weights and estimates each score using the minimum row
+counter. CountSketch accepts signed weights, uses separate bucket/sign hash seeds,
+and takes the median of sign-corrected estimates across a positive odd number of
+rows. Candidate heaps rank estimated scores, not absolute magnitudes. A bounded
+heap alone does not establish candidate completeness, including after signed
+updates or merges. Missing accuracy evidence remains a candidate requirement;
+physical binding does not impose deployment's accuracy acceptance policy.
+Versioned Float64 states carry their algorithm and dimensions; cross-family or
+incompatible-shape merges are rejected, without integer-state compatibility decoding.
 Summary construction and readout run in either ingestion or query scope, as
 chosen by deployment. Each run constructs independent partition state; deployment
 must supply one complete evaluation window, or an equivalent maintained snapshot.
 The candidate capacity is independent of the grouped Limit's output count.
 
 Values retain Planner types and nullability. Native summary batches currently
-support exact Sum/Count/Min/Max/Rate/Increase, KLL, DDSketch, HLL and Float64 weighted CMS with a candidate heap. Stored-summary decoding, delta reconstruction, exact finalization and
+support exact Sum/Count/Min/Max/Rate/Increase, KLL, DDSketch, HLL and Float64 weighted CMS and CountSketch with candidate heaps. Stored-summary decoding, delta reconstruction, exact finalization and
 family-specific SketchQuery readout also live in this library. Deployment code
 selects compatible panes and supplies source batches. Stored-state kernels do
 not imply native batch bindings for every family. Unsupported expressions,

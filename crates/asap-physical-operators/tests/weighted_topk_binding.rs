@@ -45,20 +45,28 @@ impl AccuracyEvidenceProvider for Evidence {
 // The evidence here exercises binding; it is not inferred from the sample data.
 #[test]
 fn planner_weighted_topk_binds_at_either_deployment_phase() {
-    assert_weighted_binding(&Evidence);
+    assert_weighted_binding(&Evidence, SketchAlgorithm::CmsWithHeap);
+    assert_weighted_binding(&Evidence, SketchAlgorithm::CountSketchWithHeap);
 }
 
 // Binding validates representation, while deployment owns evidence acceptance.
 #[test]
 fn physical_binding_does_not_impose_an_accuracy_acceptance_policy() {
-    assert_weighted_binding(&asap_aware_mapping::accuracy::NoAccuracyEvidence);
+    assert_weighted_binding(
+        &asap_aware_mapping::accuracy::NoAccuracyEvidence,
+        SketchAlgorithm::CmsWithHeap,
+    );
+    assert_weighted_binding(
+        &asap_aware_mapping::accuracy::NoAccuracyEvidence,
+        SketchAlgorithm::CountSketchWithHeap,
+    );
 }
 
-fn assert_weighted_binding(evidence: &dyn AccuracyEvidenceProvider) {
+fn assert_weighted_binding(evidence: &dyn AccuracyEvidenceProvider, algorithm: SketchAlgorithm) {
     let root = Rc::new(
         lower_promql(
             "topk by(job)(2, sum by(service, job)(rate(m[1m])))",
-            AccuracyTarget::Epsilon(0.01),
+            AccuracyTarget::Epsilon(0.1),
         )
         .unwrap(),
     );
@@ -72,12 +80,16 @@ fn assert_weighted_binding(evidence: &dyn AccuracyEvidenceProvider) {
         .replacements(&TargetSubDAG::new(&root))
         .into_iter()
         .find_map(|candidate| match candidate.replacement {
-            Replacement::Summary(node) if candidate.rationale.contains("CmsWithHeap") => Some(node),
+            Replacement::Summary(node)
+                if candidate.rationale.contains(&format!("{algorithm:?}")) =>
+            {
+                Some(node)
+            }
             _ => None,
         })
         .unwrap();
     let dag = compile_executable_dag(&plan).unwrap();
-    let build=dag.nodes.iter().find(|node|matches!(&node.payload,ExecutableOperatorPayload::SummaryAgg{family:SummaryFamilyType::Sketch(kind,_),..}if kind.algorithm()==&SketchAlgorithm::CmsWithHeap)).unwrap();
+    let build=dag.nodes.iter().find(|node|matches!(&node.payload,ExecutableOperatorPayload::SummaryAgg{family:SummaryFamilyType::Sketch(kind,_),..}if kind.algorithm()==&algorithm)).unwrap();
     let rate_id = dag
         .edges
         .iter()
