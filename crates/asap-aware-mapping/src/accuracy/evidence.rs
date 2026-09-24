@@ -96,6 +96,16 @@ pub trait AccuracyEvidenceProvider {
         None
     }
 
+    /// Enforced upper bound on distinct (partition, item) identities across a
+    /// complete TopK readout. Used to union-bound score errors for adaptively
+    /// selected candidates. Observed cardinality is not sufficient evidence.
+    fn topk_max_distinct_items(
+        &self,
+        _expression: &asap_types::pre_asap::QueryExpr,
+    ) -> Option<u64> {
+        None
+    }
+
     /// Proof scoped to this complete quantile expression, including its source,
     /// filters, grouping and window. `None` means unknown, including emptiness.
     fn quantile_input_domain(

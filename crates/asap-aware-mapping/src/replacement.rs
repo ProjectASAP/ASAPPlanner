@@ -349,13 +349,12 @@ use std::cell::RefCell;
 use std::collections::{HashMap, HashSet, VecDeque};
 
 use asap_types::post_asap::{
-    validate_execution_data_states_at, CandidateCompleteness, EntityIdentity, ErrorMetric,
-    ExactKind, ExactOperation, ExactOperationSchemaError, ExactParams, ExecutionDataState,
-    ExecutionDataStateError, ExecutionTiming, GroupingStrategy, NonNegativeWeightProof,
-    SamplingKind, SamplingParams, SketchAlgorithm, SketchKind, SketchParams,
-    SketchQuery as PostAsapSketchQuery, StatModelKind, StatModelParams, SummaryExpr,
-    SummaryFamilyType, SummaryField, SummaryInputExpr, SummaryNode, SummarySchema, SummaryUpdate,
-    ValueOperation, WaveletKind, WaveletParams, WeightDomain,
+    validate_execution_data_states_at, EntityIdentity, ExactKind, ExactOperation,
+    ExactOperationSchemaError, ExactParams, ExecutionDataState, ExecutionDataStateError,
+    ExecutionTiming, GroupingStrategy, NonNegativeWeightProof, SamplingKind, SamplingParams,
+    SketchAlgorithm, SketchKind, SketchParams, SketchQuery as PostAsapSketchQuery, StatModelKind,
+    StatModelParams, SummaryExpr, SummaryFamilyType, SummaryField, SummaryInputExpr, SummaryNode,
+    SummarySchema, SummaryUpdate, ValueOperation, WaveletKind, WaveletParams, WeightDomain,
 };
 use asap_types::post_asap::{AccuracyError, CompositionOperator, GuaranteeSource, ResultGuarantee};
 use asap_types::pre_asap::agg_intent::{agg_is_mergeable, AggIntent};
@@ -482,8 +481,8 @@ pub enum Replacement {
     Rewrite(Rc<QueryExpr>),
     /// An exact operator composed over another target's *own* selected
     /// decision across an explicit update/readout boundary (issue #171):
-    /// `ValueOperationAtReadTime` over a child's summary readout, or
-    /// `ValueOperationAtMaintenanceTime` feeding a maintained summary above. Carries only a
+    /// `ValueOperationAtQueryTime` over a child's summary readout, or
+    /// `ValueOperationAtIngestionTime` feeding a maintained summary above. Carries only a
     /// reference to the child target — [`PlanSpace::global_selection`]
     /// commits the compatible parent/child pair and
     /// [`GlobalSelection::assemble_selected_dag`] links it into one validated
@@ -557,10 +556,10 @@ pub enum ReplacementProvenance {
     AccuracyReconciliation,
     /// [`Replacement::ExactComposition`] with
     /// [`OperationPlacement::Read`] (issue #171).
-    ValueOperationAtReadTime,
+    ValueOperationAtQueryTime,
     /// [`Replacement::ExactComposition`] with
     /// [`OperationPlacement::Maintenance`] (issue #171).
-    ValueOperationAtMaintenanceTime,
+    ValueOperationAtIngestionTime,
 }
 
 /// A candidate a strategy considered for a target but refused to propose on
@@ -1132,7 +1131,7 @@ pub fn posterior_aware_size_params(
             SketchParams::CmsWithHeap {
                 width: relaxed_width(eps),
                 depth: cms_depth(delta),
-                heap_size: k as u32,
+                heap_size: crate::accuracy::topk_capacity(k, eps),
             }
         }
         SketchAlgorithm::CountSketch => {
@@ -1632,22 +1631,20 @@ fn exact_topk_over_temporal_values(
     let QueryExpr::Aggregate {
         reduction,
         measures,
-        output_names,
+        output_names: _,
         having: None,
         child,
     } = root.as_ref()
     else {
         return Ok(None);
     };
-    if !matches!(
-        measures.as_slice(),
-        [AggIntent::TopK {
-            accuracy: AccuracyTarget::Exact,
-            ..
-        }]
-    ) {
+    let [AggIntent::TopK {
+        k,
+        accuracy: AccuracyTarget::Exact,
+    }] = measures.as_slice()
+    else {
         return Ok(None);
-    }
+    };
     let QueryExpr::Aggregate {
         reduction: Reduction::PerEntity,
         child: input,
@@ -1669,21 +1666,43 @@ fn exact_topk_over_temporal_values(
         return Ok(None);
     }
     let values = finalize_exact_accumulator(values, child)?;
-    let node = Rc::new(SummaryNode {
+    let partition_by = reduction
+        .group_keys()
+        .ok_or(RealizationError::PhysicalRealization(
+            "temporal ranking requires explicit grouping",
+        ))?
+        .clone();
+    let score = ranking_score_index(child, &values.schema)?;
+    let sorted = Rc::new(SummaryNode {
         guarantee: values.guarantee.clone(),
-        schema: lift(&root.output_schema()?),
+        schema: values.schema.clone(),
         expr: SummaryExpr::ValueOperation {
             child: values,
-            operation: ValueOperation::Exact(ExactOperation::Aggregate {
-                reduction: reduction.clone(),
-                measures: measures.clone(),
-                output_names: output_names.clone(),
-                having: None,
-            }),
-            timing: ExecutionTiming::ReadTime,
+            operation: ValueOperation::Sort {
+                keys: vec![asap_types::pre_asap::SortKey {
+                    expr: QueryExpr::Column(score),
+                    ascending: false,
+                    nulls_first: false,
+                }],
+                partition_by: partition_by.clone(),
+            },
+            timing: ExecutionTiming::QueryTime,
         },
     });
-    validate_execution_data_states_at(&node, ExecutionDataState::READ_ROWS)?;
+    let node = Rc::new(SummaryNode {
+        guarantee: sorted.guarantee.clone(),
+        schema: sorted.schema.clone(),
+        expr: SummaryExpr::ValueOperation {
+            child: sorted,
+            operation: ValueOperation::Limit {
+                n: *k,
+                offset: 0,
+                partition_by,
+            },
+            timing: ExecutionTiming::QueryTime,
+        },
+    });
+    validate_execution_data_states_at(&node, ExecutionDataState::QUERY_ROWS)?;
     Ok(Some(node))
 }
 
@@ -1700,7 +1719,7 @@ fn realize_temporal_average(
         return Ok(None);
     };
     operator.checked_finite_division = true;
-    validate_execution_data_states_at(&node, ExecutionDataState::READ_ROWS)?;
+    validate_execution_data_states_at(&node, ExecutionDataState::QUERY_ROWS)?;
     Ok(Some(node))
 }
 
@@ -1921,7 +1940,7 @@ fn realize_binary(
 
     Ok(Some(Rc::new(SummaryNode {
         expr: SummaryExpr::BinaryOp {
-            timing: ExecutionTiming::ReadTime,
+            timing: ExecutionTiming::QueryTime,
             lhs: lhs_node,
             rhs: rhs_node,
             operator: asap_types::post_asap::BinaryOperator {
@@ -1946,7 +1965,7 @@ fn finalize_exact_accumulator(
     node: Rc<SummaryNode>,
     logical_output: &QueryExpr,
 ) -> Result<Rc<SummaryNode>, RealizationError> {
-    finalize_exact_accumulator_at(node, logical_output, ExecutionTiming::ReadTime)
+    finalize_exact_accumulator_at(node, logical_output, ExecutionTiming::QueryTime)
 }
 
 fn finalize_exact_accumulator_at(
@@ -2226,65 +2245,110 @@ pub(crate) fn construct_summary_with(
                     allocation,
                 )?;
                 if is_counter_weighted_topk(intent, child) {
-                    let values = finalize_exact_accumulator(
-                        realize_child_with(child, planning_inputs, Some(&AccuracyTarget::Exact))?,
-                        child,
-                    )?;
-                    if !values
-                        .guarantee
-                        .as_ref()
-                        .is_some_and(ResultGuarantee::is_exact)
-                    {
-                        return Err(RealizationError::PhysicalRealization(
-                            "CandidateTopK exact rerank input is not exact",
-                        ));
-                    }
-                    let completeness = match candidate.guarantee.clone() {
-                        Some(guarantee)
-                            if guarantee.metric == ErrorMetric::TopKMembership
-                                && !guarantee.has_unknown() =>
-                        {
-                            CandidateCompleteness::Certified { guarantee }
-                        }
-                        guarantee => CandidateCompleteness::BestEffort { guarantee },
-                    };
-                    let AggIntent::TopK { k, accuracy } = intent else {
-                        unreachable!()
-                    };
-                    if matches!(accuracy, AccuracyTarget::Exact)
-                        && !matches!(completeness, CandidateCompleteness::Certified { .. })
-                    {
-                        return Err(RealizationError::PhysicalRealization(
-                            "exact CandidateTopK requires certified candidate completeness",
-                        ));
-                    }
-                    let grouping = reduction.group_keys().cloned().unwrap_or_default();
-                    let guarantee = match &completeness {
-                        CandidateCompleteness::Certified { guarantee }
-                        | CandidateCompleteness::BestEffort {
-                            guarantee: Some(guarantee),
-                        } => Some(guarantee.clone()),
-                        CandidateCompleteness::BestEffort { guarantee: None } => None,
-                    };
-                    let node = Rc::new(SummaryNode {
-                        expr: SummaryExpr::CandidateTopK {
-                            candidates: candidate,
-                            values,
-                            k: *k,
-                            grouping,
-                            completeness,
-                        },
-                        schema: lift(&expr.output_schema()?),
-                        guarantee,
-                    });
-                    validate_execution_data_states_at(&node, ExecutionDataState::READ_ROWS)?;
-                    return Ok(node);
+                    return finish_weighted_topk(candidate, expr, intent);
                 }
                 return Ok(candidate);
             }
         }
     }
     keep_pre_asap_rc(Rc::new(expr.clone()))
+}
+
+fn finish_weighted_topk(
+    candidate: Rc<SummaryNode>,
+    logical: &QueryExpr,
+    intent: &AggIntent,
+) -> Result<Rc<SummaryNode>, RealizationError> {
+    let AggIntent::TopK { k, .. } = intent else {
+        unreachable!()
+    };
+    let QueryExpr::Aggregate {
+        reduction: Reduction::Reduce(groups),
+        child,
+        ..
+    } = logical
+    else {
+        return Err(RealizationError::PhysicalRealization(
+            "TopK requires explicit grouping",
+        ));
+    };
+    let schema = lift(&child.output_schema()?);
+    let score = ranking_score_index(child, &schema)?;
+    let cols = schema
+        .fields
+        .iter()
+        .enumerate()
+        .map(|(i, field)| {
+            let source = if i == score {
+                candidate.schema.fields.len() - 1
+            } else {
+                let matches = candidate
+                    .schema
+                    .fields
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, f)| f.name == field.name && f.dtype == field.dtype)
+                    .map(|(i, _)| i)
+                    .collect::<Vec<_>>();
+                match matches.as_slice() {
+                    [i] => *i,
+                    _ => {
+                        return Err(RealizationError::PhysicalRealization(
+                            "ambiguous TopK output identity",
+                        ))
+                    }
+                }
+            };
+            Ok(asap_types::pre_asap::query_expr::ProjectItem {
+                alias: Some(field.name.clone()),
+                expr: QueryExpr::Column(source),
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let guarantee = candidate.guarantee.clone();
+    let projected = Rc::new(SummaryNode {
+        expr: SummaryExpr::ValueOperation {
+            child: candidate,
+            operation: ValueOperation::Project {
+                cols,
+                qualifier: None,
+            },
+            timing: ExecutionTiming::QueryTime,
+        },
+        schema: schema.clone(),
+        guarantee: guarantee.clone(),
+    });
+    let sorted = Rc::new(SummaryNode {
+        expr: SummaryExpr::ValueOperation {
+            child: projected,
+            operation: ValueOperation::Sort {
+                keys: vec![asap_types::pre_asap::SortKey {
+                    expr: QueryExpr::Column(score),
+                    ascending: false,
+                    nulls_first: false,
+                }],
+                partition_by: groups.clone(),
+            },
+            timing: ExecutionTiming::QueryTime,
+        },
+        schema: schema.clone(),
+        guarantee: guarantee.clone(),
+    });
+    let result = Rc::new(SummaryNode {
+        expr: SummaryExpr::ValueOperation {
+            child: sorted,
+            operation: ValueOperation::Limit {
+                n: *k,
+                offset: 0,
+                partition_by: groups.clone(),
+            },
+            timing: ExecutionTiming::QueryTime,
+        },
+        schema,
+        guarantee,
+    });
+    validate_execution_data_states_at(&result, ExecutionDataState::QUERY_ROWS)?;
+    Ok(result)
 }
 
 fn is_counter_weighted_topk(intent: &AggIntent, child: &QueryExpr) -> bool {
@@ -2453,7 +2517,7 @@ fn maintenance_exact_values(node: Rc<SummaryNode>) -> Option<Rc<SummaryNode>> {
                 lhs: maintenance_exact_values(lhs.clone())?,
                 rhs: maintenance_exact_values(rhs.clone())?,
                 operator: operator.clone(),
-                timing: ExecutionTiming::MaintenanceTime,
+                timing: ExecutionTiming::IngestionTime,
             }
         }
         SummaryExpr::ValueOperation {
@@ -2471,7 +2535,7 @@ fn maintenance_exact_values(node: Rc<SummaryNode>) -> Option<Rc<SummaryNode>> {
             SummaryExpr::ValueOperation {
                 child: child.clone(),
                 operation: ValueOperation::FinalizeExactAccumulator,
-                timing: ExecutionTiming::MaintenanceTime,
+                timing: ExecutionTiming::IngestionTime,
             }
         }
         _ => return Some(node),
@@ -2504,10 +2568,71 @@ fn construct_summary_agg(
             SummaryFamilyType::Sketch(kind, _)
                 if matches!(kind.algorithm(), SketchAlgorithm::CmsWithHeap | SketchAlgorithm::CountSketchWithHeap)
         );
-    let physical_reduction = if keyed_heap && matches!(reduction, Reduction::PerEntity) {
-        // A heavy-hitter sidecar is one keyed state. `item` identifies the
-        // ranked series/group inside that state; retaining the logical
-        // PerEntity reduction here would allocate one full sketch per item.
+    let rate_weighted = matches!(node, QueryExpr::Aggregate { child, .. }
+        if is_counter_weighted_topk(intent, child));
+    let mut family = family;
+    let score_population = if rate_weighted {
+        let bound = planning_inputs.evidence.topk_max_distinct_items(node);
+        if bound.is_some_and(|n| n == 0 || n > (1u64 << 53)) {
+            return Err(RealizationError::PhysicalRealization(
+                "invalid weighted TopK distinct-item bound",
+            ));
+        }
+        if let (Some(n), SummaryFamilyType::Sketch(kind, grouping)) = (bound, &family) {
+            let (eps, delta) = accuracy_budget(accuracy_target(intent).expect("TopK target"));
+            let params = default_size_params(
+                kind.algorithm().clone(),
+                intent,
+                eps,
+                delta / (2.0 * n as f64),
+            );
+            family = SummaryFamilyType::Sketch(
+                SketchKind::new(kind.algorithm().clone(), params),
+                grouping.clone(),
+            );
+        }
+        bound
+    } else {
+        None
+    };
+    let physical_reduction = if rate_weighted {
+        let QueryExpr::Aggregate { child, .. } = node else {
+            unreachable!()
+        };
+        let source = input.child.output_schema()?;
+        let Reduction::Reduce(keys) = reduction else {
+            return Err(RealizationError::PhysicalRealization(
+                "TopK requires explicit partitions",
+            ));
+        };
+        if keys.is_without() {
+            return Err(RealizationError::PhysicalRealization(
+                "TopK requires explicit partitions",
+            ));
+        }
+        let mapped = keys
+            .iter()
+            .map(|index| {
+                let reference = schema_column_ref(child, *index).ok_or(
+                    RealizationError::PhysicalRealization("invalid TopK partition key"),
+                )?;
+                let matches = source
+                    .columns
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, column)| column_ref(column) == reference)
+                    .map(|(index, _)| index)
+                    .collect::<Vec<_>>();
+                match matches.as_slice() {
+                    [index] => Ok(*index),
+                    _ => Err(RealizationError::PhysicalRealization(
+                        "ambiguous TopK partition key",
+                    )),
+                }
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Reduction::by(mapped)
+    } else if keyed_heap && matches!(reduction, Reduction::PerEntity) {
         Reduction::by(vec![])
     } else {
         reduction.clone()
@@ -2520,15 +2645,43 @@ fn construct_summary_agg(
     let out_schema = node.output_schema()?;
     let state_idx = summary_col_index(&out_schema, &by, per_series);
 
+    let readout_schema = if keyed_heap
+        && matches!(node, QueryExpr::Aggregate { child, .. } if is_counter_weighted_topk(intent, child))
+    {
+        keyed_heap_readout_schema(&input, node)?
+    } else {
+        lift(&out_schema)
+    };
+
     let summary_input = input.input;
-    let query = estimate.then(|| readout(intent, &summary_input, planning_inputs.cost));
+    let query = estimate.then(|| {
+        if rate_weighted {
+            if let SummaryFamilyType::Sketch(kind, _) = &family {
+                let capacity = match kind.params() {
+                    SketchParams::CmsWithHeap { heap_size, .. }
+                    | SketchParams::CountSketchWithHeap { heap_size, .. } => *heap_size,
+                    _ => unreachable!(),
+                };
+                return PostAsapSketchQuery::TopK {
+                    k: capacity as usize,
+                };
+            }
+        }
+        readout(intent, &summary_input, planning_inputs.cost)
+    });
 
     let mut state_schema = lift(&out_schema);
     if keyed_heap {
         let mut state = state_schema.fields[state_idx].clone();
         state.dtype = family.clone();
+        let mut fields = if rate_weighted {
+            readout_schema.fields[..reduction.group_keys().map_or(0, |keys| keys.len())].to_vec()
+        } else {
+            Vec::new()
+        };
+        fields.push(state);
         state_schema = SummarySchema {
-            fields: vec![state],
+            fields,
             time_index: None,
         };
     } else if let Some(field) = state_schema.fields.get_mut(state_idx) {
@@ -2540,15 +2693,26 @@ fn construct_summary_agg(
         }
     }
 
-    let bound_child = realize_child_with(&input.child, planning_inputs, child_target)?;
-    // A maintained parent consumes finalized values, never the child's
-    // accumulator representation. Keep the read boundary explicit even when
-    // an exact scalar accumulator currently stores its value directly.
-    let bound_child =
-        finalize_exact_accumulator_at(bound_child, &input.child, ExecutionTiming::MaintenanceTime)?;
-    let bound_child = match maintenance_exact_values(bound_child) {
-        Some(child) => child,
-        None => keep_pre_asap(&input.child)?,
+    let bound_child = realize_child_with(
+        &input.child,
+        planning_inputs,
+        if rate_weighted {
+            Some(&AccuracyTarget::Exact)
+        } else {
+            child_target
+        },
+    )?;
+    let bound_child = if rate_weighted {
+        // A fresh query-time summary consumes this evaluation's finalized rates.
+        // Moving rate snapshots must never accumulate across evaluations.
+        finalize_exact_accumulator(bound_child, &input.child)?
+    } else {
+        let child = finalize_exact_accumulator_at(
+            bound_child,
+            &input.child,
+            ExecutionTiming::IngestionTime,
+        )?;
+        maintenance_exact_values(child).unwrap_or(keep_pre_asap(&input.child)?)
     };
 
     // ── Guarantee (issue #172) ──────────────────────────────────────────
@@ -2565,15 +2729,79 @@ fn construct_summary_agg(
         planning_inputs.evidence.estimator_contract(node),
         local_target,
     );
-    let guarantee = compose_guarantee(
+    let membership_query = if rate_weighted {
+        Some(readout(intent, &summary_input, planning_inputs.cost))
+    } else {
+        query.clone()
+    };
+    let mut guarantee = compose_guarantee(
         &family,
-        query.as_ref(),
+        membership_query.as_ref(),
         &bound_child,
         intent,
         &estimator,
         planning_inputs.evidence,
         allocation,
     )?;
+
+    if rate_weighted {
+        use asap_types::post_asap::{BoundExpr, ProbabilityExpr};
+        let target = accuracy_target(intent).expect("TopK target");
+        guarantee = if let Some(mut score) =
+            estimator.local_guarantee(&family, query.as_ref().unwrap())
+        {
+            let count = match score_population {
+                Some(n) => BoundExpr::Constant { value: n as f64 },
+                None => {
+                    score
+                        .provenance
+                        .push(GuaranteeSource::UnavailableStatistic {
+                            statistic: "topk_max_distinct_items".into(),
+                        });
+                    BoundExpr::Unknown {
+                        statistic: "topk_max_distinct_items".into(),
+                    }
+                }
+            };
+            score.provenance.push(GuaranteeSource::CompositionStep {
+                operator: CompositionOperator::ApproximateAggregate,
+                rule: "simultaneous_score_bounds_over_distinct_partition_item_identities".into(),
+            });
+            score.failure_probability = ProbabilityExpr::Scaled {
+                count,
+                inner: Box::new(score.failure_probability),
+            };
+            // #455: missing evidence preserves a logical candidate. Only known
+            // contributions that already violate the target reject it here.
+            if !estimator.satisfies(&score.optimistic_floor(), target) {
+                return Err(RealizationError::PhysicalRealization(
+                    "weighted TopK scores miss accuracy target",
+                ));
+            }
+            let stats = planning_inputs.evidence.propagation_stats(
+                &CompositionOperator::TopKSelection,
+                &family,
+                membership_query.as_ref(),
+            );
+            let mut joint = estimator.propagate(
+                &CompositionOperator::TopKSelection,
+                std::slice::from_ref(&score),
+                None,
+                &stats,
+            )?;
+            joint.failure_probability = ProbabilityExpr::UnionBound {
+                terms: vec![joint.failure_probability, score.failure_probability],
+            };
+            if !estimator.satisfies(&joint.optimistic_floor(), target) {
+                return Err(RealizationError::PhysicalRealization(
+                    "weighted TopK joint guarantee misses target",
+                ));
+            }
+            Some(joint)
+        } else {
+            None
+        };
+    }
 
     // `reduction` is carried onto `SummaryAgg` verbatim — not flattened to a
     // bare `Vec<ColumnId>` — so `SummaryExecutor::find_candidates` can tell
@@ -2602,11 +2830,189 @@ fn construct_summary_agg(
                 summary_input: agg,
                 query,
             },
-            schema: lift(&out_schema),
+            schema: readout_schema,
             guarantee,
         })),
         None => Ok(agg),
     }
+}
+
+// Heap readout rows contain the encoded item identity, subpopulation keys,
+// and an estimated score. They never inherit the exact-value producer's schema.
+fn keyed_heap_readout_schema(
+    input: &PhysicalSummaryInput,
+    node: &QueryExpr,
+) -> Result<SummarySchema, RealizationError> {
+    let source = input.child.output_schema()?;
+    let mut refs = Vec::new();
+    let QueryExpr::Aggregate {
+        reduction, child, ..
+    } = node
+    else {
+        return Err(RealizationError::PhysicalRealization(
+            "heap readout requires an aggregate",
+        ));
+    };
+    if let Reduction::Reduce(groups) = reduction {
+        if groups.is_without() {
+            return Err(RealizationError::PhysicalRealization(
+                "heap readout requires explicit grouping",
+            ));
+        }
+        for index in groups.iter() {
+            refs.push(schema_column_ref(child, *index).ok_or(
+                RealizationError::PhysicalRealization("invalid heap partition key"),
+            )?);
+        }
+    }
+    fn item_refs(
+        item: &SummaryInputExpr,
+        schema: &Schema,
+        refs: &mut Vec<ColumnRef>,
+    ) -> Result<(), RealizationError> {
+        match item {
+            SummaryInputExpr::Column(column) => refs.push(column.clone()),
+            SummaryInputExpr::Tuple(items) => {
+                for item in items {
+                    item_refs(item, schema, refs)?;
+                }
+            }
+            SummaryInputExpr::EntityIdentity(EntityIdentity::PromqlLabelSet { excluding }) => {
+                if !schema.closed {
+                    return Err(RealizationError::PhysicalRealization(
+                        "dynamic label identity requires an explicit row representation",
+                    ));
+                }
+                for (index, column) in schema.columns.iter().enumerate() {
+                    if Some(index) != schema.time_index && column.name != "value" {
+                        let reference = match &column.table {
+                            Some(table) => ColumnRef::Qualified {
+                                table: table.clone(),
+                                name: column.name.clone(),
+                            },
+                            None => ColumnRef::Named(column.name.clone()),
+                        };
+                        if !excluding.contains(&reference) {
+                            refs.push(reference);
+                        }
+                    }
+                }
+            }
+            _ => {
+                return Err(RealizationError::PhysicalRealization(
+                    "unsupported heap item identity",
+                ))
+            }
+        }
+        Ok(())
+    }
+    item_refs(
+        input
+            .input
+            .item
+            .as_ref()
+            .ok_or(RealizationError::PhysicalRealization(
+                "heap item identity is missing",
+            ))?,
+        &source,
+        &mut refs,
+    )?;
+    let mut fields = Vec::<asap_types::post_asap::SummaryField>::new();
+    for reference in refs {
+        let matches: Vec<_> = source
+            .columns
+            .iter()
+            .filter(|column| match &reference {
+                ColumnRef::Named(name) => &column.name == name,
+                ColumnRef::Qualified { table, name } => {
+                    column.table.as_ref() == Some(table) && &column.name == name
+                }
+                ColumnRef::SampleValue => column.name == "value",
+                ColumnRef::Wildcard => false,
+            })
+            .collect();
+        let [column] = matches.as_slice() else {
+            return Err(RealizationError::PhysicalRealization(
+                "heap key must resolve to exactly one source column",
+            ));
+        };
+        if fields.iter().any(|field| field.name == column.name) || column.name == "__asap_estimate"
+        {
+            return Err(RealizationError::PhysicalRealization(
+                "heap keys must have distinct output names",
+            ));
+        }
+        fields.push(asap_types::post_asap::SummaryField {
+            name: column.name.clone(),
+            dtype: SummaryFamilyType::Plain(column.dtype.clone()),
+            nullable: column.nullable,
+        });
+    }
+    if fields.is_empty() {
+        return Err(RealizationError::PhysicalRealization(
+            "heap readout has no identity columns",
+        ));
+    }
+    fields.push(asap_types::post_asap::SummaryField {
+        name: "__asap_estimate".into(),
+        dtype: SummaryFamilyType::Plain(asap_types::pre_asap::DataType::Float64),
+        nullable: false,
+    });
+    Ok(SummarySchema {
+        fields,
+        time_index: None,
+    })
+}
+
+fn ranking_score_index(
+    logical: &QueryExpr,
+    values: &SummarySchema,
+) -> Result<usize, RealizationError> {
+    let QueryExpr::Aggregate {
+        reduction,
+        measures,
+        ..
+    } = logical
+    else {
+        return Err(RealizationError::PhysicalRealization(
+            "ranking requires an explicit aggregate score",
+        ));
+    };
+    if measures.len() != 1 {
+        return Err(RealizationError::PhysicalRealization(
+            "ranking requires exactly one score",
+        ));
+    }
+    let index = match reduction {
+        Reduction::Reduce(groups) if !groups.is_without() => groups.len(),
+        Reduction::PerEntity => values
+            .fields
+            .iter()
+            .position(|field| field.name == "value")
+            .ok_or(RealizationError::PhysicalRealization(
+                "ranking requires the sample value column",
+            ))?,
+        _ => {
+            return Err(RealizationError::PhysicalRealization(
+                "ranking requires explicit grouping",
+            ))
+        }
+    };
+    if Some(index) == values.time_index
+        || !values.fields.get(index).is_some_and(|field| {
+            matches!(
+                field.dtype,
+                SummaryFamilyType::Plain(
+                    asap_types::pre_asap::DataType::Int64 | asap_types::pre_asap::DataType::Float64
+                )
+            )
+        })
+    {
+        return Err(RealizationError::PhysicalRealization(
+            "ranking score must be numeric",
+        ));
+    }
+    Ok(index)
 }
 
 /// Realize the composite heavy-hitter realization for
@@ -2641,24 +3047,13 @@ fn realize_keyed_additive_summary_input(
     else {
         return PhysicalSummaryInputRuleResult::NotApplicable;
     };
-    let counter_input = match measures.as_slice() {
-        [AggIntent::Sum { .. }] => match raw_child.as_ref() {
-            QueryExpr::Aggregate {
-                measures, child, ..
-            } if matches!(measures.as_slice(), [AggIntent::Rate | AggIntent::Increase]) => {
-                Some(Rc::clone(child))
-            }
-            _ => None,
-        },
-        _ => None,
-    };
+    let counter_input = matches!(measures.as_slice(), [AggIntent::Sum { .. }])
+        && matches!(raw_child.as_ref(), QueryExpr::Aggregate { measures, .. }
+            if matches!(measures.as_slice(), [AggIntent::Rate | AggIntent::Increase]));
     let weight = match measures.as_slice() {
         [AggIntent::Count { .. }] => SummaryInputExpr::Constant(1.0),
-        [AggIntent::Sum { .. }] if counter_input.is_some() => {
-            SummaryInputExpr::ResetAwareCounterDelta {
-                value: ColumnRef::SampleValue,
-                series: EntityIdentity::PromqlLabelSet { excluding: vec![] },
-            }
+        [AggIntent::Sum { .. }] if counter_input => {
+            SummaryInputExpr::Column(ColumnRef::SampleValue)
         }
         [AggIntent::Sum { col }] => SummaryInputExpr::Column(match col {
             None => ColumnRef::SampleValue,
@@ -2677,7 +3072,7 @@ fn realize_keyed_additive_summary_input(
         [AggIntent::Count { .. }] => WeightDomain::NonNegative {
             proof: NonNegativeWeightProof::UnitCount,
         },
-        [AggIntent::Sum { .. }] if counter_input.is_some() => WeightDomain::NonNegative {
+        [AggIntent::Sum { .. }] if counter_input => WeightDomain::NonNegative {
             proof: NonNegativeWeightProof::ResetAwareCounterDerivative,
         },
         _ => WeightDomain::UnknownOrSigned,
@@ -2736,7 +3131,7 @@ fn realize_keyed_additive_summary_input(
         }
     };
     PhysicalSummaryInputRuleResult::Realized(PhysicalSummaryInput {
-        child: counter_input.unwrap_or_else(|| Rc::clone(raw_child)),
+        child: Rc::clone(raw_child),
         input: SummaryUpdate {
             item: Some(item),
             weight,
@@ -4144,7 +4539,7 @@ impl<'a> GlobalSelection<'a> {
     /// a [`Replacement::Summary`] is
     /// re-linked so its `SummaryAgg` child is the child target's own
     /// DAG assembly whenever that is phase-legal beneath maintenance
-    /// (so a child that chose an `ValueOperationAtMaintenanceTime` actually ends up under
+    /// (so a child that chose an `ValueOperationAtIngestionTime` actually ends up under
     /// the summary); a [`Replacement::Rewrite`] or an unmatched site stays
     /// the conservative `KeepPreAsap`. Memoized by target identity, so a
     /// shared inner summary is one `Rc` no matter how many roots reach it.
@@ -4163,7 +4558,7 @@ impl<'a> GlobalSelection<'a> {
         if let Some(node) = self.assembled_nodes.borrow().get(&ptr) {
             return Ok(Rc::clone(node));
         }
-        let node = if read_time_nested_sum(target) {
+        let node = if query_time_nested_sum(target) {
             self.assemble_residual(target)?
         } else {
             match self
@@ -4214,8 +4609,8 @@ impl<'a> GlobalSelection<'a> {
             let Some(pred) = normalized_pred else {
                 return keep_pre_asap(target);
             };
-            let left = self.assemble_target(left)?;
-            let right = self.assemble_target(right)?;
+            let left = finalize_exact_accumulator(self.assemble_target(left)?, left)?;
+            let right = finalize_exact_accumulator(self.assemble_target(right)?, right)?;
             let guarantee =
                 relational_join_guarantee(left.guarantee.as_ref(), right.guarantee.as_ref());
             let node = Rc::new(SummaryNode {
@@ -4224,11 +4619,12 @@ impl<'a> GlobalSelection<'a> {
                     right,
                     kind: kind.clone(),
                     pred,
+                    pruning: None,
                 },
                 schema: lift(&target.output_schema()?),
                 guarantee,
             });
-            validate_execution_data_states_at(&node, ExecutionDataState::READ_ROWS)?;
+            validate_execution_data_states_at(&node, ExecutionDataState::QUERY_ROWS)?;
             return Ok(node);
         }
         let (child_target, operation) = match target.as_ref() {
@@ -4262,6 +4658,10 @@ impl<'a> GlobalSelection<'a> {
                 ValueOperation::Limit {
                     n: *n,
                     offset: *offset,
+                    partition_by: match child.as_ref() {
+                        QueryExpr::Sort { partition_by, .. } => partition_by.clone(),
+                        _ => Default::default(),
+                    },
                 },
             ),
             QueryExpr::Aggregate {
@@ -4270,7 +4670,7 @@ impl<'a> GlobalSelection<'a> {
                 output_names,
                 having,
                 child,
-            } if read_time_nested_sum(target) => (
+            } if query_time_nested_sum(target) => (
                 child,
                 ValueOperation::Exact(ExactOperation::Aggregate {
                     reduction: reduction.clone(),
@@ -4281,23 +4681,18 @@ impl<'a> GlobalSelection<'a> {
             ),
             _ => return keep_pre_asap(target),
         };
-        let child = self.assemble_target(child_target)?;
-        let child = if matches!(operation, ValueOperation::Exact(_)) {
-            finalize_exact_accumulator(child, child_target)?
-        } else {
-            child
-        };
+        let child = finalize_exact_accumulator(self.assemble_target(child_target)?, child_target)?;
         let guarantee = child.guarantee.clone();
         let node = Rc::new(SummaryNode {
             expr: SummaryExpr::ValueOperation {
                 child,
                 operation,
-                timing: ExecutionTiming::ReadTime,
+                timing: ExecutionTiming::QueryTime,
             },
             schema: lift(&target.output_schema()?),
             guarantee,
         });
-        validate_execution_data_states_at(&node, ExecutionDataState::READ_ROWS)?;
+        validate_execution_data_states_at(&node, ExecutionDataState::QUERY_ROWS)?;
         Ok(node)
     }
 
@@ -4338,7 +4733,7 @@ impl<'a> GlobalSelection<'a> {
 /// reduction of the inner summary values. Maintaining the outer SUM directly
 /// would hide that inner temporal aggregate inside `KeepPreAsap` and lose its
 /// independently selected summary.
-fn read_time_nested_sum(target: &QueryExpr) -> bool {
+fn query_time_nested_sum(target: &QueryExpr) -> bool {
     let QueryExpr::Aggregate {
         measures,
         having: None,
@@ -4405,10 +4800,8 @@ fn relink_agg_child(node: &Rc<SummaryNode>, new_child: &Rc<SummaryNode>) -> Rc<S
                 schema: node.schema.clone(),
                 guarantee: node.guarantee.clone(),
             });
-            match validate_execution_data_states_at(
-                &rebuilt,
-                ExecutionDataState::MAINTENANCE_SUMMARY,
-            ) {
+            match validate_execution_data_states_at(&rebuilt, ExecutionDataState::INGESTION_SUMMARY)
+            {
                 Ok(_) => rebuilt,
                 Err(_) => Rc::clone(node),
             }
@@ -4418,7 +4811,7 @@ fn relink_agg_child(node: &Rc<SummaryNode>, new_child: &Rc<SummaryNode>) -> Rc<S
 }
 
 /// The maintained `SummaryAgg` a bound `Summary` candidate builds (under
-/// its `SummaryEstimate` readout, if any) — the summary an `ValueOperationAtMaintenanceTime`
+/// its `SummaryEstimate` readout, if any) — the summary an `ValueOperationAtIngestionTime`
 /// beneath it feeds, for `maintenance_operation_plan_cost_rate`.
 fn maintained_summary(node: &Rc<SummaryNode>) -> Option<&Rc<SummaryNode>> {
     match &node.expr {
@@ -4442,7 +4835,7 @@ struct CompositionContext {
     /// one, and the child's own selection is forced to it).
     committed_child: HashMap<*const QueryExpr, *const ReplacementSubDAG>,
     /// site ptr → the maintained `SummaryAgg` directly above it, when its
-    /// parent chose a bound `Summary` — what an `ValueOperationAtMaintenanceTime` here feeds.
+    /// parent chose a bound `Summary` — what an `ValueOperationAtIngestionTime` here feeds.
     maintaining_parent: HashMap<*const QueryExpr, Rc<SummaryNode>>,
 }
 
@@ -4852,7 +5245,7 @@ impl<Id> PlanSpace<Id> {
             };
 
             // Record the maintained summary this site's bound candidate
-            // builds, for a child that may compose an `ValueOperationAtMaintenanceTime`
+            // builds, for a child that may compose an `ValueOperationAtIngestionTime`
             // beneath it.
             if let (Some(Replacement::Summary(node)), QueryExpr::Aggregate { child, .. }) =
                 (chosen.map(|c| &c.replacement), group.target.as_ref())
@@ -5887,13 +6280,40 @@ mod tests {
                 .unwrap()
                 .expect("exact Top-K candidate");
             assert!(node.guarantee.as_ref().unwrap().is_exact());
-            assert!(matches!(
-                node.expr,
-                SummaryExpr::ValueOperation {
-                    operation: ValueOperation::Exact(ExactOperation::Aggregate { .. }),
-                    ..
-                }
-            ));
+            let SummaryExpr::ValueOperation {
+                child: sorted,
+                operation:
+                    ValueOperation::Limit {
+                        n,
+                        offset,
+                        partition_by,
+                    },
+                ..
+            } = &node.expr
+            else {
+                panic!("temporal TopK must compose Sort and Limit");
+            };
+            assert_eq!((*n, *offset), (5, 0));
+            let SummaryExpr::ValueOperation {
+                operation:
+                    ValueOperation::Sort {
+                        keys,
+                        partition_by: sort_groups,
+                    },
+                child: values,
+                ..
+            } = &sorted.expr
+            else {
+                panic!("Limit must consume sorted temporal values");
+            };
+            assert_eq!(sort_groups, partition_by);
+            assert_eq!(
+                partition_by.keys().len(),
+                usize::from(query.contains("by(job)"))
+            );
+            assert_eq!(keys.len(), 1);
+            assert!(!keys[0].ascending);
+            assert_eq!(node.schema, values.schema);
             asap_types::post_asap::compile_executable_dag(&node).unwrap();
         }
     }
@@ -6229,7 +6649,7 @@ mod tests {
     }
 
     #[test]
-    fn topk_heap_size_tracks_k() {
+    fn topk_heap_capacity_respects_accuracy_and_output_count() {
         let intent = AggIntent::TopK {
             k: 25,
             accuracy: eps(0.01),
@@ -6244,7 +6664,7 @@ mod tests {
                 else {
                     unreachable!("SketchKind validates CmsWithHeap params")
                 };
-                assert_eq!(*heap_size, 25);
+                assert_eq!(*heap_size, 100);
                 assert_eq!(*width, 272); // ⌈e/0.01⌉
                 assert_eq!(*depth, 5);
             }
@@ -6441,7 +6861,7 @@ mod tests {
             } => {
                 assert_eq!(width, 68);
                 assert_eq!(depth, 5);
-                assert_eq!(heap_size, 7);
+                assert_eq!(heap_size, 100);
             }
             other => panic!("expected CmsWithHeap, got {other:?}"),
         }
@@ -8602,7 +9022,7 @@ mod tests {
         let SummaryExpr::ValueOperation {
             child,
             operation: ValueOperation::FinalizeExactAccumulator,
-            timing: ExecutionTiming::MaintenanceTime,
+            timing: ExecutionTiming::IngestionTime,
         } = &child.expr
         else {
             panic!("expected explicit maintenance readout");
@@ -9625,5 +10045,98 @@ mod tests {
                 matches!(&candidate.replacement, Replacement::Summary(node)
                 if summary_family_algorithm(node) == SketchAlgorithm::Hll && node.guarantee.as_ref().is_some_and(|g| DefaultAccuracyModel.satisfies(g, &target)))));
         }
+    }
+
+    // A value projection cannot consume an opaque exact accumulator edge.
+    #[test]
+    fn residual_projection_finalizes_selected_exact_state() {
+        let inner = Rc::new(agg(vec![], AggIntent::Sum { col: None }, metric_scan(&[])));
+        let root = Rc::new(QueryExpr::Project {
+            cols: vec![asap_types::pre_asap::ProjectItem {
+                expr: QueryExpr::Column(0),
+                alias: Some("result".into()),
+            }],
+            qualifier: None,
+            child: inner.clone(),
+        });
+        let space = search_workload_with_targets(
+            vec![("q", root.clone(), Some(AccuracyTarget::Exact))],
+            &default_strategies(),
+            &DefaultAccuracyModel,
+        );
+        let selected = space.global_selection(&DefaultCostModel);
+        selected
+            .assembled_nodes
+            .borrow_mut()
+            .insert(Rc::as_ptr(&inner), realize(inner.as_ref()).unwrap());
+        let node = selected.assemble_target(&root).unwrap();
+        let SummaryExpr::ValueOperation {
+            child,
+            operation: ValueOperation::Project { .. },
+            ..
+        } = &node.expr
+        else {
+            panic!("expected Project");
+        };
+        assert!(matches!(
+            child.expr,
+            SummaryExpr::ValueOperation {
+                operation: ValueOperation::FinalizeExactAccumulator,
+                ..
+            }
+        ));
+        assert!(child
+            .schema
+            .fields
+            .iter()
+            .all(|field| matches!(field.dtype, SummaryFamilyType::Plain(_))));
+    }
+    // A numeric group key must not be mistaken for the ranked aggregate score.
+    #[test]
+    fn ranking_uses_aggregate_output_position_not_first_numeric_column() {
+        let logical = agg(vec![2], AggIntent::Sum { col: None }, metric_scan(&["id"]));
+        let mut values = lift(&logical.output_schema().unwrap());
+        values.fields[0].dtype = SummaryFamilyType::Plain(DataType::Int64);
+        assert_eq!(ranking_score_index(&logical, &values).unwrap(), 1);
+    }
+    // A heap's key schema is derived from its encoded item, not all label columns.
+    #[test]
+    fn heap_readout_preserves_numeric_item_identity() {
+        let mut raw = metric_scan(&["id", "description"]);
+        let QueryExpr::Scan { schema, .. } = &mut raw else {
+            unreachable!()
+        };
+        schema.columns[2].dtype = DataType::Int64;
+        let node = agg(
+            vec![],
+            AggIntent::TopK {
+                k: 2,
+                accuracy: AccuracyTarget::Epsilon(0.01),
+            },
+            agg(vec![2], AggIntent::Sum { col: None }, raw.clone()),
+        );
+        let input = PhysicalSummaryInput {
+            child: Rc::new(raw),
+            input: SummaryUpdate {
+                item: Some(SummaryInputExpr::Column(ColumnRef::Named("id".into()))),
+                weight: SummaryInputExpr::Constant(1.0),
+                weight_domain: WeightDomain::NonNegative {
+                    proof: NonNegativeWeightProof::UnitCount,
+                },
+            },
+        };
+        let schema = keyed_heap_readout_schema(&input, &node).unwrap();
+        assert_eq!(
+            schema
+                .fields
+                .iter()
+                .map(|f| f.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["id", "__asap_estimate"]
+        );
+        assert_eq!(
+            schema.fields[0].dtype,
+            SummaryFamilyType::Plain(DataType::Int64)
+        );
     }
 }

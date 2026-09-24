@@ -229,7 +229,7 @@ impl MaintainedPopulationStrategy {
                         cols: cols.clone(),
                         qualifier: qualifier.clone(),
                     },
-                    timing: ExecutionTiming::ReadTime,
+                    timing: ExecutionTiming::QueryTime,
                 },
             }));
         }
@@ -258,7 +258,7 @@ impl MaintainedPopulationStrategy {
             expr: SummaryExpr::ValueOperation {
                 child: scan,
                 operation: ValueOperation::MaintainPopulation { population },
-                timing: ExecutionTiming::MaintenanceTime,
+                timing: ExecutionTiming::IngestionTime,
             },
             schema: input_schema,
             guarantee: Some(ResultGuarantee::exact(
@@ -269,7 +269,7 @@ impl MaintainedPopulationStrategy {
             expr: SummaryExpr::ValueOperation {
                 child: maintained,
                 operation: ValueOperation::ReadPopulation { readout },
-                timing: ExecutionTiming::ReadTime,
+                timing: ExecutionTiming::QueryTime,
             },
             schema: plain(root.output_schema().ok()?),
             guarantee: Some(ResultGuarantee::exact("exact current-population readout")),

@@ -475,7 +475,7 @@ macro_rules! define_summary_kind_tags {
 
 define_summary_kind_tags! {
     SummaryExpr::BinaryOp { .. } => "SummaryBinaryOp",
-    SummaryExpr::CandidateTopK { .. } => "CandidateTopK",
+
     SummaryExpr::ValueOperation { .. } => "ValueOperation",
     SummaryExpr::RelationalJoin { .. } => "RelationalJoin",
     SummaryExpr::SummaryAgg { .. } => "SummaryAgg",
@@ -500,16 +500,7 @@ fn summary_shape(expr: &SummaryExpr) -> (&'static str, String, serde_json::Value
             });
             (kind, label, detail)
         }
-        SummaryExpr::CandidateTopK {
-            k,
-            grouping,
-            completeness,
-            ..
-        } => (
-            kind,
-            format!("CandidateTopK(k={k})"),
-            serde_json::json!({ "k": k, "grouping": grouping, "completeness": completeness }),
-        ),
+
         SummaryExpr::ValueOperation {
             operation, timing, ..
         } => (
@@ -565,7 +556,7 @@ fn summary_shape(expr: &SummaryExpr) -> (&'static str, String, serde_json::Value
             let detail = serde_json::json!({ "query": format!("{query:?}") });
             (kind, label, detail)
         }
-        SummaryExpr::SummaryMerge { children } => {
+        SummaryExpr::SummaryMerge { children, .. } => {
             let label = format!("SummaryMerge({} children)", children.len());
             (kind, label, serde_json::json!({}))
         }
@@ -581,9 +572,7 @@ fn summary_children(expr: &SummaryExpr) -> Vec<&Rc<SummaryNode>> {
     match expr {
         SummaryExpr::KeepPreAsap(_) => vec![],
         SummaryExpr::BinaryOp { lhs, rhs, .. } => vec![lhs, rhs],
-        SummaryExpr::CandidateTopK {
-            candidates, values, ..
-        } => vec![candidates, values],
+
         SummaryExpr::ValueOperation { child, .. } => vec![child],
         SummaryExpr::RelationalJoin { left, right, .. } => vec![left, right],
         SummaryExpr::SummaryAgg { child, .. } => vec![child],
@@ -591,7 +580,7 @@ fn summary_children(expr: &SummaryExpr) -> Vec<&Rc<SummaryNode>> {
         SummaryExpr::SummarySubtract { left, right } => vec![left, right],
         SummaryExpr::SummaryDelete { summary_input, .. } => vec![summary_input],
         SummaryExpr::SummaryEstimate { summary_input, .. } => vec![summary_input],
-        SummaryExpr::SummaryMerge { children } => children.iter().collect(),
+        SummaryExpr::SummaryMerge { children, .. } => children.iter().collect(),
     }
 }
 

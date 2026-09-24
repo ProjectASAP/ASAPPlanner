@@ -19,12 +19,13 @@
 //!
 //! | Parent | Accepts from `child` |
 //! |---|---|
-//! | `SummaryAgg.child` | `MAINTENANCE_ROWS`, or `MAINTENANCE_SUMMARY` of an **exact accumulator** family. Never a read-time data_state. |
-//! | `SummaryEstimate.summary_input` | `MAINTENANCE_SUMMARY` (any family). Produces `READ_ROWS`. |
-//! | `SummaryJoin.outer/inner` | `MAINTENANCE_ROWS` or `MAINTENANCE_SUMMARY`; never a read-time data_state. |
-//! | `SummarySubtract`/`SummaryDelete`/`SummaryMerge` | `MAINTENANCE_SUMMARY`. |
-//! | `ValueOperation.child` with `MaintenanceTime` | `MAINTENANCE_ROWS`; explicit `FinalizeExactAccumulator` also accepts exact accumulator state. Produces `MAINTENANCE_ROWS`. |
-//! | `ValueOperation.child` with `ReadTime` | `READ_ROWS`. Produces `READ_ROWS`. |
+//! | `SummaryAgg.child` | Rows or exact accumulator state at either phase. The initial construction phase follows the input; deployment assigns final phases. |
+//! | `SummaryEstimate.summary_input` | Summary state at either phase (any family). Initial readout produces `QUERY_ROWS`. |
+//! | `SummaryJoin.outer/inner` | `INGESTION_ROWS` or `INGESTION_SUMMARY`; never a read-time data_state. |
+//! | `SummarySubtract`/`SummaryDelete` | `INGESTION_SUMMARY`. |
+//! | `SummaryMerge` | Summary state at its explicit ingestion or read timing. |
+//! | `ValueOperation.child` with `IngestionTime` | `INGESTION_ROWS`; explicit `FinalizeExactAccumulator` also accepts exact accumulator state. Produces `INGESTION_ROWS`. |
+//! | `ValueOperation.child` with `QueryTime` | `QUERY_ROWS`. Produces `QUERY_ROWS`. |
 //!
 //! ## `KeepPreAsap` declares its data_state through the derivation
 //!
@@ -55,20 +56,21 @@ use crate::pre_asap::schema::{Column, Schema};
 #[derive(
     Default, Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize,
 )]
+#[serde(rename_all = "snake_case")]
 pub enum ExecutionTiming {
-    MaintenanceTime,
+    IngestionTime,
     #[default]
-    ReadTime,
+    QueryTime,
 }
 
 impl ExecutionTiming {
-    pub fn is_read_time(&self) -> bool {
-        *self == Self::ReadTime
+    pub fn is_query_time(&self) -> bool {
+        *self == Self::QueryTime
     }
     pub fn as_str(self) -> &'static str {
         match self {
-            Self::MaintenanceTime => "maintenance_time",
-            Self::ReadTime => "read_time",
+            Self::IngestionTime => "ingestion_time",
+            Self::QueryTime => "query_time",
         }
     }
 }
@@ -100,16 +102,16 @@ pub struct ExecutionDataState {
 }
 
 impl ExecutionDataState {
-    pub const MAINTENANCE_ROWS: Self = Self {
-        timing: ExecutionTiming::MaintenanceTime,
+    pub const INGESTION_ROWS: Self = Self {
+        timing: ExecutionTiming::IngestionTime,
         primitive: DataPrimitive::Raw,
     };
-    pub const MAINTENANCE_SUMMARY: Self = Self {
-        timing: ExecutionTiming::MaintenanceTime,
+    pub const INGESTION_SUMMARY: Self = Self {
+        timing: ExecutionTiming::IngestionTime,
         primitive: DataPrimitive::SummaryState,
     };
-    pub const READ_ROWS: Self = Self {
-        timing: ExecutionTiming::ReadTime,
+    pub const QUERY_ROWS: Self = Self {
+        timing: ExecutionTiming::QueryTime,
         primitive: DataPrimitive::Raw,
     };
 }
@@ -229,7 +231,9 @@ impl ExecutionDataStateAssignment {
     }
 }
 
-/// The data_state `expr` *produces*, independent of context — `None` for
+/// Initial layout proposed by semantic realization, not a restriction on physical
+/// operator placement. `ExecutableDag::with_execution_phases` assigns the final
+/// phase independently of payload kind. Returns `None` for
 /// [`SummaryExpr::KeepPreAsap`], whose data_state is assigned by the edge reaching
 /// it (see the module docs).
 pub fn produced_data_state(expr: &SummaryExpr) -> Option<ExecutionDataState> {
@@ -239,18 +243,23 @@ pub fn produced_data_state(expr: &SummaryExpr) -> Option<ExecutionDataState> {
             timing: *timing,
             primitive: DataPrimitive::Raw,
         },
-        SummaryExpr::CandidateTopK { .. } | SummaryExpr::RelationalJoin { .. } => {
-            ExecutionDataState::READ_ROWS
-        }
-        SummaryExpr::SummaryAgg { .. }
-        | SummaryExpr::SummaryJoin { .. }
+        SummaryExpr::RelationalJoin { .. } => ExecutionDataState::QUERY_ROWS,
+        SummaryExpr::SummaryAgg { child, .. } => ExecutionDataState {
+            timing: produced_data_state(&child.expr)
+                .map_or(ExecutionTiming::IngestionTime, |state| state.timing),
+            primitive: DataPrimitive::SummaryState,
+        },
+        SummaryExpr::SummaryJoin { .. }
         | SummaryExpr::SummarySubtract { .. }
-        | SummaryExpr::SummaryDelete { .. }
-        | SummaryExpr::SummaryMerge { .. } => ExecutionDataState::MAINTENANCE_SUMMARY,
-        SummaryExpr::SummaryEstimate { .. } => ExecutionDataState::READ_ROWS,
+        | SummaryExpr::SummaryDelete { .. } => ExecutionDataState::INGESTION_SUMMARY,
+        SummaryExpr::SummaryMerge { timing, .. } => ExecutionDataState {
+            timing: *timing,
+            primitive: DataPrimitive::SummaryState,
+        },
+        SummaryExpr::SummaryEstimate { .. } => ExecutionDataState::QUERY_ROWS,
         SummaryExpr::ValueOperation { timing, .. } => match timing {
-            ExecutionTiming::MaintenanceTime => ExecutionDataState::MAINTENANCE_ROWS,
-            ExecutionTiming::ReadTime => ExecutionDataState::READ_ROWS,
+            ExecutionTiming::IngestionTime => ExecutionDataState::INGESTION_ROWS,
+            ExecutionTiming::QueryTime => ExecutionDataState::QUERY_ROWS,
         },
     })
 }
@@ -283,8 +292,8 @@ pub fn validate_execution_data_states(
     // deployment may hand an `ExactAggregate` accumulator straight to a
     // consumer) — only an update-path-only root is meaningless.
     let root_domain = match produced_data_state(&root.expr) {
-        None => ExecutionDataState::READ_ROWS,
-        Some(ExecutionDataState::MAINTENANCE_ROWS) => {
+        None => ExecutionDataState::QUERY_ROWS,
+        Some(ExecutionDataState::INGESTION_ROWS) => {
             return Err(ExecutionDataStateError::MaintenanceRowsAtRoot)
         }
         Some(data_state) => data_state,
@@ -336,7 +345,7 @@ fn visit(
         } => {
             if (operator.checked_relative_division && operator.checked_finite_division)
                 || (operator.checked_relative_division || operator.checked_finite_division)
-                    && (*timing != ExecutionTiming::ReadTime
+                    && (*timing != ExecutionTiming::QueryTime
                         || !matches!(
                             operator.kind,
                             crate::pre_asap::BinaryOpKind::Arithmetic(
@@ -346,7 +355,7 @@ fn visit(
             {
                 return Err(ExecutionDataStateError::InvalidCheckedDivision);
             }
-            if *timing == ExecutionTiming::MaintenanceTime {
+            if *timing == ExecutionTiming::IngestionTime {
                 use crate::pre_asap::{BinaryOpKind, DataType};
                 if operator.vector_match.is_some()
                     || !matches!(operator.kind, BinaryOpKind::Arithmetic(_))
@@ -388,27 +397,12 @@ fn visit(
             }
             Ok(())
         }
-        SummaryExpr::CandidateTopK {
-            candidates, values, ..
-        } => {
-            for input in [candidates, values] {
-                let state =
-                    produced_data_state(&input.expr).unwrap_or(ExecutionDataState::READ_ROWS);
-                if state != ExecutionDataState::READ_ROWS {
-                    return Err(ExecutionDataStateError::IllegalChildDataState {
-                        edge: "CandidateTopK input",
-                        child: state,
-                    });
-                }
-                visit(input, state, assignment)?;
-            }
-            Ok(())
-        }
+
         SummaryExpr::RelationalJoin { left, right, .. } => {
             for input in [left, right] {
                 let state =
-                    produced_data_state(&input.expr).unwrap_or(ExecutionDataState::READ_ROWS);
-                if state != ExecutionDataState::READ_ROWS {
+                    produced_data_state(&input.expr).unwrap_or(ExecutionDataState::QUERY_ROWS);
+                if state != ExecutionDataState::QUERY_ROWS {
                     return Err(ExecutionDataStateError::IllegalChildDataState {
                         edge: "RelationalJoin input",
                         child: state,
@@ -423,8 +417,8 @@ fn visit(
                 child,
                 ExecutionDataStateEdge::SummaryAggChild,
                 |avail| match avail {
-                    ExecutionDataState::MAINTENANCE_ROWS => Ok(()),
-                    ExecutionDataState::MAINTENANCE_SUMMARY => {
+                    ExecutionDataState::INGESTION_ROWS | ExecutionDataState::QUERY_ROWS => Ok(()),
+                    state if state.primitive == DataPrimitive::SummaryState => {
                         is_exact_accumulator_state(&child.schema)
                     }
                     other => Err(ExecutionDataStateError::ReadoutUnderMaintenance {
@@ -439,8 +433,8 @@ fn visit(
             for input in [outer, inner] {
                 let s = child_domain(input, ExecutionDataStateEdge::SummaryJoinInput, |avail| {
                     match avail {
-                        ExecutionDataState::MAINTENANCE_ROWS
-                        | ExecutionDataState::MAINTENANCE_SUMMARY => Ok(()),
+                        ExecutionDataState::INGESTION_ROWS
+                        | ExecutionDataState::INGESTION_SUMMARY => Ok(()),
                         other => Err(ExecutionDataStateError::ReadoutUnderMaintenance {
                             edge: ExecutionDataStateEdge::SummaryJoinInput.describe(),
                             child: other,
@@ -462,9 +456,20 @@ fn visit(
             let s = state_only(summary_input, ExecutionDataStateEdge::SummaryDeleteInput)?;
             visit(summary_input, s, assignment)
         }
-        SummaryExpr::SummaryMerge { children } => {
+        SummaryExpr::SummaryMerge { children, timing } => {
             for input in children {
-                let s = state_only(input, ExecutionDataStateEdge::SummaryMergeInput)?;
+                let s = child_domain(input, ExecutionDataStateEdge::SummaryMergeInput, |state| {
+                    if state.primitive == DataPrimitive::SummaryState
+                        && (*timing == ExecutionTiming::QueryTime || state.timing == *timing)
+                    {
+                        Ok(())
+                    } else {
+                        Err(ExecutionDataStateError::IllegalChildDataState {
+                            edge: ExecutionDataStateEdge::SummaryMergeInput.describe(),
+                            child: state,
+                        })
+                    }
+                })?;
                 visit(input, s, assignment)?;
             }
             Ok(())
@@ -480,12 +485,12 @@ fn visit(
         } => {
             let valid_population = match operation {
                 ValueOperation::MaintainPopulation { population } => {
-                    *timing == ExecutionTiming::MaintenanceTime
+                    *timing == ExecutionTiming::IngestionTime
                         && matches!(&child.expr, SummaryExpr::KeepPreAsap(input) if population.matches_input(input))
                 }
                 ValueOperation::ReadPopulation { readout } => {
-                    *timing == ExecutionTiming::ReadTime
-                        && matches!(&child.expr, SummaryExpr::ValueOperation { operation: ValueOperation::MaintainPopulation { population }, timing: ExecutionTiming::MaintenanceTime, .. } if population.supports(readout))
+                    *timing == ExecutionTiming::QueryTime
+                        && matches!(&child.expr, SummaryExpr::ValueOperation { operation: ValueOperation::MaintainPopulation { population }, timing: ExecutionTiming::IngestionTime, .. } if population.supports(readout))
                 }
                 _ => true,
             };
@@ -493,21 +498,22 @@ fn visit(
                 return Err(ExecutionDataStateError::InvalidMaintainedPopulation);
             }
             let required = match timing {
-                ExecutionTiming::MaintenanceTime => ExecutionDataState::MAINTENANCE_ROWS,
-                ExecutionTiming::ReadTime => ExecutionDataState::READ_ROWS,
+                ExecutionTiming::IngestionTime => ExecutionDataState::INGESTION_ROWS,
+                ExecutionTiming::QueryTime => ExecutionDataState::QUERY_ROWS,
             };
             let s = produced_data_state(&child.expr).unwrap_or(required);
-            let exact_readout = (*timing == ExecutionTiming::ReadTime
+            let exact_readout = (*timing == ExecutionTiming::QueryTime
                 || matches!(operation, ValueOperation::FinalizeExactAccumulator))
-                && s == ExecutionDataState::MAINTENANCE_SUMMARY
+                && s.primitive == DataPrimitive::SummaryState
+                && (*timing == ExecutionTiming::QueryTime || s.timing == *timing)
                 && is_exact_accumulator_state(&child.schema).is_ok();
             let population_readout = matches!(operation, ValueOperation::ReadPopulation { .. })
-                && *timing == ExecutionTiming::ReadTime
+                && *timing == ExecutionTiming::QueryTime
                 && matches!(
                     &child.expr,
                     SummaryExpr::ValueOperation {
                         operation: ValueOperation::MaintainPopulation { .. },
-                        timing: ExecutionTiming::MaintenanceTime,
+                        timing: ExecutionTiming::IngestionTime,
                         ..
                     }
                 );
@@ -537,19 +543,18 @@ pub fn assigned_child_data_state(parent: &SummaryExpr, child: &SummaryNode) -> E
     }
     match parent {
         SummaryExpr::ValueOperation {
-            timing: ExecutionTiming::ReadTime,
+            timing: ExecutionTiming::QueryTime,
             ..
         }
         | SummaryExpr::BinaryOp {
-            timing: ExecutionTiming::ReadTime,
+            timing: ExecutionTiming::QueryTime,
             ..
-        } => ExecutionDataState::READ_ROWS,
+        } => ExecutionDataState::QUERY_ROWS,
         SummaryExpr::KeepPreAsap(_)
         | SummaryExpr::BinaryOp {
-            timing: ExecutionTiming::MaintenanceTime,
+            timing: ExecutionTiming::IngestionTime,
             ..
         }
-        | SummaryExpr::CandidateTopK { .. }
         | SummaryExpr::RelationalJoin { .. }
         | SummaryExpr::SummaryAgg { .. }
         | SummaryExpr::SummaryJoin { .. }
@@ -558,9 +563,9 @@ pub fn assigned_child_data_state(parent: &SummaryExpr, child: &SummaryNode) -> E
         | SummaryExpr::SummaryEstimate { .. }
         | SummaryExpr::SummaryMerge { .. }
         | SummaryExpr::ValueOperation {
-            timing: ExecutionTiming::MaintenanceTime,
+            timing: ExecutionTiming::IngestionTime,
             ..
-        } => ExecutionDataState::MAINTENANCE_ROWS,
+        } => ExecutionDataState::INGESTION_ROWS,
     }
 }
 
@@ -585,16 +590,14 @@ fn child_domain(
             let assigned = match edge {
                 ExecutionDataStateEdge::SummaryAggChild
                 | ExecutionDataStateEdge::SummaryJoinInput
-                | ExecutionDataStateEdge::ValueOperationChild => {
-                    ExecutionDataState::MAINTENANCE_ROWS
-                }
+                | ExecutionDataStateEdge::ValueOperationChild => ExecutionDataState::INGESTION_ROWS,
                 ExecutionDataStateEdge::SummaryEstimateInput
                 | ExecutionDataStateEdge::SummarySubtractInput
                 | ExecutionDataStateEdge::SummaryDeleteInput
                 | ExecutionDataStateEdge::SummaryMergeInput => {
                     return Err(ExecutionDataStateError::IllegalChildDataState {
                         edge: edge.describe(),
-                        child: ExecutionDataState::MAINTENANCE_ROWS,
+                        child: ExecutionDataState::INGESTION_ROWS,
                     })
                 }
             };
@@ -609,7 +612,13 @@ fn state_only(
     edge: ExecutionDataStateEdge,
 ) -> Result<ExecutionDataState, ExecutionDataStateError> {
     child_domain(child, edge, |avail| match avail {
-        ExecutionDataState::MAINTENANCE_SUMMARY => Ok(()),
+        state
+            if state.primitive == DataPrimitive::SummaryState
+                && (state.timing == ExecutionTiming::IngestionTime
+                    || matches!(edge, ExecutionDataStateEdge::SummaryEstimateInput)) =>
+        {
+            Ok(())
+        }
         other => Err(ExecutionDataStateError::IllegalChildDataState {
             edge: edge.describe(),
             child: other,
@@ -770,15 +779,15 @@ mod tests {
     #[test]
     fn raw_primitive_labels() {
         assert_eq!(
-            ExecutionDataState::MAINTENANCE_ROWS.primitive,
+            ExecutionDataState::INGESTION_ROWS.primitive,
             DataPrimitive::Raw
         );
-        assert_eq!(ExecutionDataState::READ_ROWS.primitive, DataPrimitive::Raw);
+        assert_eq!(ExecutionDataState::QUERY_ROWS.primitive, DataPrimitive::Raw);
         assert_eq!(
-            ExecutionDataState::MAINTENANCE_ROWS.to_string(),
-            "maintenance_time/raw"
+            ExecutionDataState::INGESTION_ROWS.to_string(),
+            "ingestion_time/raw"
         );
-        assert_eq!(ExecutionDataState::READ_ROWS.to_string(), "read_time/raw");
+        assert_eq!(ExecutionDataState::QUERY_ROWS.to_string(), "query_time/raw");
         assert_eq!(DataPrimitive::SummaryState.as_str(), "summary_state");
     }
 
@@ -878,11 +887,11 @@ mod tests {
         let assignment = validate_execution_data_states(&root).unwrap();
         assert_eq!(
             assignment.data_state_of(&leaf),
-            Some(ExecutionDataState::MAINTENANCE_ROWS)
+            Some(ExecutionDataState::INGESTION_ROWS)
         );
         assert_eq!(
             assignment.data_state_of(&root),
-            Some(ExecutionDataState::MAINTENANCE_SUMMARY)
+            Some(ExecutionDataState::INGESTION_SUMMARY)
         );
     }
 
@@ -897,23 +906,25 @@ mod tests {
     }
 
     #[test]
-    fn readout_under_summary_agg_is_rejected() {
+    fn readout_can_feed_summary_construction_at_query_time() {
         let inner = estimate(agg(keep(), kll()));
-        let root = agg(inner, kll());
-        assert!(matches!(
-            validate_execution_data_states(&root),
-            Err(ExecutionDataStateError::ReadoutUnderMaintenance { .. })
-        ));
+        let summary = agg(inner, kll());
+        let root = estimate(summary.clone());
+        let assignment = validate_execution_data_states(&root).unwrap();
+        assert_eq!(
+            assignment.data_state_of(&summary).unwrap().timing,
+            ExecutionTiming::QueryTime
+        );
     }
 
     #[test]
-    fn read_time_operation_over_readout_is_legal_and_root_is_readout() {
+    fn query_time_operation_over_readout_is_legal_and_root_is_readout() {
         let inner = estimate(agg(keep(), kll()));
         let root = Rc::new(SummaryNode {
             expr: SummaryExpr::ValueOperation {
                 child: inner,
                 operation: ValueOperation::Exact(max_op()),
-                timing: ExecutionTiming::ReadTime,
+                timing: ExecutionTiming::QueryTime,
             },
             schema: plain(&["max"]),
             guarantee: None,
@@ -921,7 +932,7 @@ mod tests {
         let assignment = validate_execution_data_states(&root).unwrap();
         assert_eq!(
             assignment.data_state_of(&root),
-            Some(ExecutionDataState::READ_ROWS)
+            Some(ExecutionDataState::QUERY_ROWS)
         );
     }
 
@@ -934,7 +945,7 @@ mod tests {
                 operation: ValueOperation::Extension {
                     name: "approximate_calibration".into(),
                 },
-                timing: ExecutionTiming::ReadTime,
+                timing: ExecutionTiming::QueryTime,
             },
             schema: plain(&["calibrated"]),
             guarantee: None,
@@ -943,30 +954,25 @@ mod tests {
         let assignment = validate_execution_data_states(&root).unwrap();
         assert_eq!(
             assignment.data_state_of(&root),
-            Some(ExecutionDataState::READ_ROWS)
+            Some(ExecutionDataState::QUERY_ROWS)
         );
     }
 
     #[test]
-    fn read_time_operation_under_summary_agg_is_rejected() {
+    fn query_time_values_can_feed_query_time_summary_construction() {
         let inner = estimate(agg(keep(), kll()));
         let post = Rc::new(SummaryNode {
             expr: SummaryExpr::ValueOperation {
                 child: inner,
                 operation: ValueOperation::Exact(max_op()),
-                timing: ExecutionTiming::ReadTime,
+                timing: ExecutionTiming::QueryTime,
             },
             schema: plain(&["max"]),
             guarantee: None,
         });
         let root = agg(post, kll());
-        assert_eq!(
-            validate_execution_data_states(&root).err(),
-            Some(ExecutionDataStateError::ReadoutUnderMaintenance {
-                edge: "SummaryAgg.child",
-                child: ExecutionDataState::READ_ROWS,
-            })
-        );
+        let root = estimate(root);
+        validate_execution_data_states(&root).unwrap();
     }
 
     #[test]
@@ -975,7 +981,7 @@ mod tests {
             expr: SummaryExpr::ValueOperation {
                 child: keep(),
                 operation: ValueOperation::Exact(max_op()),
-                timing: ExecutionTiming::MaintenanceTime,
+                timing: ExecutionTiming::IngestionTime,
             },
             schema: plain(&["max"]),
             guarantee: None,
@@ -988,7 +994,7 @@ mod tests {
         let assignment = validate_execution_data_states(&root).unwrap();
         assert_eq!(
             assignment.data_state_of(&operation),
-            Some(ExecutionDataState::MAINTENANCE_ROWS)
+            Some(ExecutionDataState::INGESTION_ROWS)
         );
     }
 
@@ -999,7 +1005,7 @@ mod tests {
             expr: SummaryExpr::ValueOperation {
                 child: inner,
                 operation: ValueOperation::Exact(max_op()),
-                timing: ExecutionTiming::MaintenanceTime,
+                timing: ExecutionTiming::IngestionTime,
             },
             schema: plain(&["max"]),
             guarantee: None,
@@ -1009,9 +1015,76 @@ mod tests {
             validate_execution_data_states(&root),
             Err(ExecutionDataStateError::IllegalChildDataState {
                 edge: "ValueOperation.child",
-                child: ExecutionDataState::READ_ROWS
+                child: ExecutionDataState::QUERY_ROWS
             })
         ));
+    }
+
+    #[test]
+    fn execution_phase_wire_names_are_ingestion_and_query_time() {
+        for (phase, name) in [
+            (ExecutionTiming::IngestionTime, "ingestion_time"),
+            (ExecutionTiming::QueryTime, "query_time"),
+        ] {
+            assert_eq!(phase.as_str(), name);
+            assert_eq!(serde_json::to_value(phase).unwrap(), name);
+            assert_eq!(
+                serde_json::from_value::<ExecutionTiming>(serde_json::json!(name)).unwrap(),
+                phase
+            );
+        }
+        assert!(serde_json::from_str::<ExecutionTiming>("\"maintenance_time\"").is_err());
+        assert!(serde_json::from_str::<ExecutionTiming>("\"MaintenanceTime\"").is_err());
+    }
+
+    #[test]
+    fn summary_merge_runs_at_ingestion_or_query_time() {
+        for timing in [ExecutionTiming::IngestionTime, ExecutionTiming::QueryTime] {
+            let input = agg(keep(), kll());
+            let merged = Rc::new(SummaryNode {
+                expr: SummaryExpr::SummaryMerge {
+                    children: vec![input.clone()],
+                    timing,
+                },
+                schema: input.schema.clone(),
+                guarantee: None,
+            });
+            let root = estimate(merged.clone());
+            let assignment = validate_execution_data_states(&root).unwrap();
+            assert_eq!(
+                assignment.data_state_of(&merged),
+                Some(ExecutionDataState {
+                    timing,
+                    primitive: DataPrimitive::SummaryState,
+                })
+            );
+            let exported = crate::post_asap::compile_executable_dag(&root).unwrap();
+            assert!(exported.nodes.iter().any(|node| matches!(node.payload,
+                crate::post_asap::ExecutableOperatorPayload::SummaryMerge
+                    if node.output_state.timing == timing)));
+        }
+    }
+
+    #[test]
+    fn ingestion_merge_cannot_depend_on_query_execution() {
+        let input = agg(keep(), kll());
+        let query_merge = Rc::new(SummaryNode {
+            expr: SummaryExpr::SummaryMerge {
+                children: vec![input.clone()],
+                timing: ExecutionTiming::QueryTime,
+            },
+            schema: input.schema.clone(),
+            guarantee: None,
+        });
+        let ingestion_merge = Rc::new(SummaryNode {
+            expr: SummaryExpr::SummaryMerge {
+                children: vec![query_merge],
+                timing: ExecutionTiming::IngestionTime,
+            },
+            schema: input.schema.clone(),
+            guarantee: None,
+        });
+        assert!(validate_execution_data_states(&ingestion_merge).is_err());
     }
 
     #[test]
@@ -1025,19 +1098,20 @@ mod tests {
             expr: SummaryExpr::ValueOperation {
                 child: Rc::clone(&shared),
                 operation: ValueOperation::Exact(max_op()),
-                timing: ExecutionTiming::ReadTime,
+                timing: ExecutionTiming::QueryTime,
             },
             schema: plain(&["max"]),
             guarantee: None,
         });
         let root = Rc::new(SummaryNode {
             expr: SummaryExpr::SummaryMerge {
+                timing: ExecutionTiming::IngestionTime,
                 children: vec![
                     Rc::new(SummaryNode {
                         expr: SummaryExpr::ValueOperation {
                             child: maintained,
                             operation: ValueOperation::Exact(max_op()),
-                            timing: ExecutionTiming::ReadTime,
+                            timing: ExecutionTiming::QueryTime,
                         },
                         schema: plain(&["max"]),
                         guarantee: None,
@@ -1051,17 +1125,12 @@ mod tests {
         // SummaryMerge only accepts state, so this fails earlier for a
         // different reason; probe the ambiguity through a direct visit.
         let mut assignment = ExecutionDataStateAssignment::default();
-        visit(
-            &shared,
-            ExecutionDataState::MAINTENANCE_ROWS,
-            &mut assignment,
-        )
-        .unwrap();
+        visit(&shared, ExecutionDataState::INGESTION_ROWS, &mut assignment).unwrap();
         assert_eq!(
-            visit(&shared, ExecutionDataState::READ_ROWS, &mut assignment),
+            visit(&shared, ExecutionDataState::QUERY_ROWS, &mut assignment),
             Err(ExecutionDataStateError::AmbiguousKeepPreAsap {
-                first: ExecutionDataState::MAINTENANCE_ROWS,
-                second: ExecutionDataState::READ_ROWS,
+                first: ExecutionDataState::INGESTION_ROWS,
+                second: ExecutionDataState::QUERY_ROWS,
             })
         );
         assert!(validate_execution_data_states(&root).is_err());

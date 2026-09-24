@@ -67,6 +67,8 @@ pub enum ValueOperation {
     Limit {
         n: usize,
         offset: usize,
+        /// Apply the offset and limit independently to each group.
+        partition_by: GroupKeys,
     },
     Extension {
         name: String,
@@ -136,17 +138,6 @@ pub enum SummaryExpr {
         operator: BinaryOperator,
     },
 
-    /// Use an approximate keyed summary only to propose members, then rank
-    /// those members by authoritative exact values. `candidates` never
-    /// supplies caller-visible values.
-    CandidateTopK {
-        candidates: Rc<SummaryNode>,
-        values: Rc<SummaryNode>,
-        k: usize,
-        grouping: GroupKeys,
-        completeness: CandidateCompleteness,
-    },
-
     /// Plain-row semantics composed with a post-ASAP child. Timing is an
     /// independent physical choice, not part of the operation's identity.
     ValueOperation {
@@ -163,6 +154,8 @@ pub enum SummaryExpr {
         right: Rc<SummaryNode>,
         kind: JoinKind,
         pred: Predicate,
+        /// Optional proof for candidate pruning; ranking remains a separate operation.
+        pruning: Option<CandidateCompleteness>,
     },
 
     /// Summary aggregation. Post-ASAP binding chose `family` — which
@@ -252,7 +245,10 @@ pub enum SummaryExpr {
     /// `mergeable` must be true. Inserted by a deployment's own stage
     /// allocator (not modeled in this crate) on cut edges.
     /// Output schema: one field (same family + params as inputs).
-    SummaryMerge { children: Vec<Rc<SummaryNode>> },
+    SummaryMerge {
+        children: Vec<Rc<SummaryNode>>,
+        timing: ExecutionTiming,
+    },
 }
 
 /// All semantics owned by a post-ASAP binary operator.

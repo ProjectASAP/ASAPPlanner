@@ -112,7 +112,7 @@ Every `SummaryExpr` operation also needs explicit physical realization:
 | `BinaryOp` | binary evaluation preserving operand order, execution timing and any typed finite/relative-division guard |
 | `ValueOperation` | concrete realization of the value operation with its required execution timing and data state |
 | `RelationalJoin` | concrete row-join algorithm preserving join kind and predicate |
-| `CandidateTopK` | candidate generation and authoritative value ranking that preserve the membership completeness contract |
+| `RelationalJoin` with `JoinKind::Semi` | retain left rows matching explicit right-side keys; candidate pruning carries completeness evidence and ordinary TopK ranks the result |
 
 This table is a completeness requirement, not a claim that every realization
 already exists. Until lowering introduces an explicit physical operator,
@@ -424,3 +424,39 @@ distinct from `checked_relative_division`, whose relative-error certificate also
 requires a normal result; setting both guards or attaching a guard to a non-division
 operator is invalid. Compilers must preserve this typed condition rather than
 recovering average semantics from query text.
+
+### Candidate pruning is a subgraph
+
+Candidate-based TopK uses a summary key readout, a general semi-join over
+explicit matching key columns, grouped Sort by the authoritative score, and
+grouped Limit. Sort and Limit carry the same partition keys.
+The join preserves authoritative left-side values and does not rank or limit
+rows. Completeness evidence controls whether pruning is valid. A plain Limit(k)
+cannot replace either key matching or value ranking.
+
+Every physical operator can be placed at ingestion time or query time. The
+physical node carries that choice; operator payloads do not contain phase
+fields. The phase assignment API updates producer edge states and rejects an
+ingestion computation that depends on query-time work. Deployment capability,
+storage readiness, schemas and approximation guarantees remain separate checks.
+
+Executable DAG wire version 4 removes the special membership operator, its edge
+roles and the duplicate operator phase fields without compatibility aliases.
+
+The candidate row producer derives its key columns from the summary update's
+item identity and subpopulation keys. Its last column, `__asap_estimate`, is the
+summary score; it is never substituted for an authoritative value. The join
+maps keys by unambiguous name and matching type, including numeric keys, and
+matches two NULL grouping keys. It does not infer identity from string types
+or overwrite the right input's schema with the left input's schema. Unresolved,
+ambiguous or incompatible identities are rejected during realization. Dynamic
+label sets without an explicit row representation cannot use this row join.
+
+Ranking selects the aggregate output column, not the first numeric column:
+a numeric entity key is not a score. Exact accumulator inputs are explicitly
+finalized before row operators consume them. None of these operations proves
+candidate completeness; that evidence belongs to the semi-join's pruning step.
+
+The semantic `SummaryExpr` constructors still propose an initial execution
+layout. Uniform phase assignment applies to the exported executable DAG;
+it is not a claim that every deployment has implemented every placement.

@@ -54,6 +54,7 @@ not emit a `RejectedCandidate` for that case.
 | Direct DDSketch quantile ratio | Candidate with no root guarantee | A supplied domain incompatible with DDSketch causes this ratio candidate to be omitted; no `RejectedCandidate` is recorded. |
 | Hydra grouping | Symbolic shared-grid collision/failure terms | Reject with typed accuracy reason. |
 | Count-ranked TopK | Symbolic interval margin or failure probability | Reject overlapping/non-finite supplied intervals. |
+| Rate/increase-weighted grouped TopK | Symbolic distinct-item count in the score union bound and symbolic membership margin/failure terms; retain the CMS/heap candidate | Reject invalid supplied population bounds, invalid intervals, or known contributions that already violate the target. |
 | HLL confidence | Symbolic failure probability | Reject a fully known unmet root target. |
 | Relative-value composition | Symbolic bound when input sign is unknown | Reject known signed input for this rule. |
 | Exact sum/average/extremum | Symbolic row-count probability term | Reject unsupported metric combinations. |

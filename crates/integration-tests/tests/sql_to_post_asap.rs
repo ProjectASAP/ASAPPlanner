@@ -309,6 +309,7 @@ async fn sql_join_recursively_binds_both_temporal_aggregate_children() {
         right,
         kind,
         pred,
+        pruning: None,
     } = &join.expr
     else {
         panic!("expected read-time relational join, got {:?}", join.expr);
@@ -339,6 +340,14 @@ async fn sql_join_recursively_binds_both_temporal_aggregate_children() {
         } = &child.expr
         else {
             panic!("derived table Project was not retained: {:?}", child.expr);
+        };
+        let SummaryExpr::ValueOperation {
+            child: aggregate,
+            operation: ValueOperation::FinalizeExactAccumulator,
+            ..
+        } = &aggregate.expr
+        else {
+            panic!("derived table Project must consume finalized exact values");
         };
         assert!(matches!(
             aggregate.expr,
@@ -442,7 +451,7 @@ async fn sql_relational_parents_retain_summary_bound_aggregate() {
                     asap_types::post_asap::ValueOperation::Project { .. } => saw_project = true,
                     asap_types::post_asap::ValueOperation::Filter { .. } => saw_filter = true,
                     asap_types::post_asap::ValueOperation::Sort { .. } => saw_sort = true,
-                    asap_types::post_asap::ValueOperation::Limit { n, offset } => {
+                    asap_types::post_asap::ValueOperation::Limit { n, offset, .. } => {
                         assert_eq!((*n, *offset), (5, 0));
                         saw_limit = true;
                     }

@@ -2898,6 +2898,7 @@ mod tests {
         if merge {
             root = Rc::new(SummaryNode {
                 expr: SummaryExpr::SummaryMerge {
+                    timing: asap_types::post_asap::ExecutionTiming::IngestionTime,
                     children: vec![Rc::clone(&agg), Rc::clone(&agg)],
                 },
                 schema: schema.clone(),
@@ -2982,7 +2983,7 @@ mod tests {
         let operand = summary_with_operations(false, false, false);
         Rc::new(SummaryNode {
             expr: SummaryExpr::BinaryOp {
-                timing: asap_types::post_asap::ExecutionTiming::ReadTime,
+                timing: asap_types::post_asap::ExecutionTiming::QueryTime,
                 lhs: Rc::clone(&operand),
                 rhs: operand,
                 operator: asap_types::post_asap::BinaryOperator {
@@ -3184,7 +3185,7 @@ mod tests {
                 }
                 SummaryExpr::SummaryAgg { child, .. }
                 | SummaryExpr::ValueOperation { child, .. } => retained(model, child, seen),
-                SummaryExpr::SummaryMerge { children } => {
+                SummaryExpr::SummaryMerge { children, .. } => {
                     for child in children {
                         retained(model, child, seen);
                     }
@@ -3199,11 +3200,6 @@ mod tests {
                 | SummaryExpr::SummaryJoin {
                     outer: left,
                     inner: right,
-                    ..
-                }
-                | SummaryExpr::CandidateTopK {
-                    candidates: left,
-                    values: right,
                     ..
                 } => {
                     retained(model, left, seen);
@@ -3322,7 +3318,7 @@ mod tests {
                     StreamingSummaryOperatorEvidence::Merge(SummaryOperatorResourceEvidence {
                         physical_id: format!("merge-{node:p}"),
                         inputs: match &node.expr {
-                            SummaryExpr::SummaryMerge { children } => {
+                            SummaryExpr::SummaryMerge { children, .. } => {
                                 vec![test_edge(); children.len()]
                             }
                             _ => unreachable!(),
@@ -3399,7 +3395,7 @@ mod tests {
                             SummaryExpr::ValueOperation { child, .. } => {
                                 owning_aggs(child, seen, owners)
                             }
-                            SummaryExpr::SummaryMerge { children } => {
+                            SummaryExpr::SummaryMerge { children, .. } => {
                                 for child in children {
                                     owning_aggs(child, seen, owners);
                                 }
@@ -3414,11 +3410,6 @@ mod tests {
                             | SummaryExpr::SummaryJoin {
                                 outer: left,
                                 inner: right,
-                                ..
-                            }
-                            | SummaryExpr::CandidateTopK {
-                                candidates: left,
-                                values: right,
                                 ..
                             } => {
                                 owning_aggs(left, seen, owners);
@@ -3448,7 +3439,7 @@ mod tests {
                 | SummaryExpr::ValueOperation { child, .. } => {
                     bind_ops(model, child, seen, inputs, cpu)
                 }
-                SummaryExpr::SummaryMerge { children } => {
+                SummaryExpr::SummaryMerge { children, .. } => {
                     for child in children {
                         bind_ops(model, child, seen, inputs, cpu);
                     }
@@ -3463,11 +3454,6 @@ mod tests {
                 | SummaryExpr::SummaryJoin {
                     outer: left,
                     inner: right,
-                    ..
-                }
-                | SummaryExpr::CandidateTopK {
-                    candidates: left,
-                    values: right,
                     ..
                 } => {
                     bind_ops(model, left, seen, inputs, cpu);

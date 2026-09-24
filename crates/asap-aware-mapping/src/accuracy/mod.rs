@@ -123,6 +123,8 @@ impl AccuracyModel for DefaultAccuracyModel {
     }
 }
 
+pub(crate) use estimators::topk_capacity;
+
 #[cfg(test)]
 mod tests {
     use super::*;
