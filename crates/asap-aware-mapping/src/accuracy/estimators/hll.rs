@@ -4,10 +4,28 @@
 //! upper bound on distinct items in the complete readout population (including
 //! all merged panes). It is not an RSE-to-normal conversion or an ERP fit.
 
-use asap_types::post_asap::{
-    BoundExpr, ErrorMetric, GuaranteeSource, ProbabilityExpr, ResultGuarantee,
-};
+use super::*;
 
+pub(super) fn generic_guarantee(
+    algorithm: &SketchAlgorithm,
+    params: &SketchParams,
+    query: &SketchQuery,
+) -> Option<ResultGuarantee> {
+    let SketchParams::Hll { precision } = params else {
+        return None;
+    };
+    Some(super::bounded_guarantee(
+        algorithm,
+        params,
+        query,
+        ErrorMetric::Cardinality,
+        1.04 / 2f64.powi(i32::from(*precision)).sqrt(),
+        ProbabilityExpr::Unknown {
+            statistic: "hll_estimator_failure_probability".into(),
+        },
+        "generic_hll_rse_only_no_confidence_v1",
+    ))
+}
 /// A finite-population contract for `m * ln(m / zero_registers)` with the
 /// classic HLL small-range switch. Hashing is assumed independent and uniform.
 /// The deployment must establish the population bound; observations alone do
@@ -96,6 +114,11 @@ impl ClassicHllConfidence {
         // Never return a spurious zero from underflow or numeric cancellation.
         Some((worst * (1.0 + 1e-10) + 1e-12).min(1.0))
     }
+}
+
+/// HLL RSE-magnitude inversion. Generic HLL has no modeled confidence target.
+pub(crate) fn hll_precision(eps: f64) -> u8 {
+    saturating_ceil((1.04 / eps).powi(2).log2(), 4, 18) as u8
 }
 
 #[cfg(test)]
@@ -204,5 +227,32 @@ mod tests {
         let expected = (65536.0 * (65536.0 / zeroes as f64).ln()) as usize;
         assert_eq!(left.estimate(), expected);
         assert!((expected as f64 - 128.0).abs() / 128.0 <= 0.05);
+    }
+    #[test]
+    fn generic_rse_sizing_does_not_certify_confidence() {
+        use crate::replacement::default_size_params;
+        use asap_types::post_asap::{GroupingStrategy, SketchKind};
+        use asap_types::pre_asap::agg_intent::default_cardinality;
+        let c = default_cardinality();
+        let params = default_size_params(SketchAlgorithm::Hll, &c, 0.01, 0.01);
+        let g = DefaultAccuracyModel
+            .local_guarantee(
+                &SummaryFamilyType::Sketch(
+                    SketchKind::new(SketchAlgorithm::Hll, params),
+                    GroupingStrategy::default(),
+                ),
+                &SketchQuery::Cardinality,
+            )
+            .unwrap();
+        assert_eq!(g.metric, ErrorMetric::Cardinality);
+        assert_eq!(g.failure_probability.evaluate(), None);
+        assert!(DefaultAccuracyModel.satisfies(&g, &AccuracyTarget::Epsilon(0.01)));
+        assert!(!DefaultAccuracyModel.satisfies(
+            &g,
+            &AccuracyTarget::EpsilonDelta {
+                epsilon: 0.01,
+                delta: 0.01,
+            }
+        ));
     }
 }

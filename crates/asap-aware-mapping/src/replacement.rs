@@ -341,6 +341,10 @@
 //!   multi-group joint optimization beyond this per-site recurrence is left
 //!   for whenever that changes.
 
+use crate::accuracy::estimators::{
+    cms::{cms_depth, cms_width},
+    saturating_ceil,
+};
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet, VecDeque};
 
@@ -369,8 +373,7 @@ use thiserror::Error;
 use crate::accuracy::reconciliation::AccuracyReconciliationStrategy;
 use crate::accuracy::{
     AccuracyBudgetAllocator, AccuracyEvidenceProvider, AccuracyModel, CompositionShape,
-    DefaultAccuracyModel, EqualSplitAllocator, NoAccuracyEvidence, KLL_RANK_ERROR_COEFFICIENT_99,
-    KLL_RANK_ERROR_EXPONENT_99,
+    DefaultAccuracyModel, EqualSplitAllocator, NoAccuracyEvidence,
 };
 use crate::cost_model::{
     raw_recompute_cost_rate, Cost, CostModel, CseCandidate, DefaultCostModel,
@@ -1034,56 +1037,7 @@ pub fn default_size_params(
     eps: f64,
     delta: f64,
 ) -> SketchParams {
-    match kind {
-        // Baseline dimensions are candidates, not an inverted error bound.
-        // Empirical models may size these; no theoretical guarantee is claimed.
-        SketchAlgorithm::UnivMon => SketchParams::UnivMon {
-            heap_size: 256,
-            sketch_rows: 5,
-            sketch_cols: 1024,
-            layers: 16,
-        },
-        SketchAlgorithm::Kll => SketchParams::Kll { k: kll_k(eps) },
-        SketchAlgorithm::Cms => SketchParams::Cms {
-            width: cms_width(eps),
-            depth: cms_depth(delta),
-        },
-        SketchAlgorithm::Hll => SketchParams::Hll {
-            precision: hll_precision(eps),
-        },
-        SketchAlgorithm::CmsWithHeap => {
-            let k = match intent {
-                AggIntent::TopK { k, .. } => *k,
-                _ => unreachable!("CmsWithHeap is only a TopK candidate"),
-            };
-            SketchParams::CmsWithHeap {
-                width: cms_width(eps),
-                depth: cms_depth(delta),
-                heap_size: k as u32,
-            }
-        }
-        // Non-preferred candidates (DDSketch / Theta / Kmv / CountSketch /
-        // CountSketchWithHeap) are only reachable once a cost model picks
-        // them; sized here so that wiring is local.
-        SketchAlgorithm::DDSketch => SketchParams::DDSketch { alpha: eps },
-        SketchAlgorithm::Theta => SketchParams::Theta { k: kmv_k_99(eps) },
-        SketchAlgorithm::Kmv => SketchParams::Kmv { k: kmv_k_99(eps) },
-        SketchAlgorithm::CountSketch => SketchParams::CountSketch {
-            width: count_sketch_width(eps),
-            depth: count_sketch_depth(delta),
-        },
-        SketchAlgorithm::CountSketchWithHeap => {
-            let k = match intent {
-                AggIntent::TopK { k, .. } => *k,
-                _ => unreachable!("CountSketchWithHeap is only a TopK candidate"),
-            };
-            SketchParams::CountSketchWithHeap {
-                width: count_sketch_width(eps),
-                depth: count_sketch_depth(delta),
-                heap_size: k as u32,
-            }
-        }
-    }
+    crate::accuracy::estimators::size_params(kind, intent, eps, delta)
 }
 
 /// A deployment's explicit bet about how "typical" (non-adversarial) its
@@ -1204,72 +1158,6 @@ pub fn posterior_aware_size_params(
             default_size_params(kind, intent, eps, delta)
         }
     }
-}
-
-// ── Parameter sizing ──────────────────────────────────────────────────────────
-//
-// Each function inverts the sketch family's standard error bound to the
-// smallest parameter satisfying the target, clamped to the family's sane
-// range. A non-positive ε saturates to the clamp maximum (tightest allowed).
-
-/// Invert Apache DataSketches' empirical 99th-percentile, single-sided KLL
-/// normalized rank-error fit: `epsilon = 2.296 / k^0.9723`.
-fn kll_k(eps: f64) -> u32 {
-    saturating_ceil(
-        (KLL_RANK_ERROR_COEFFICIENT_99 / eps).powf(1.0 / KLL_RANK_ERROR_EXPONENT_99),
-        8,
-        65_535,
-    )
-}
-
-/// HLL RSE-magnitude inversion. Generic HLL has no modeled confidence target.
-fn hll_precision(eps: f64) -> u8 {
-    saturating_ceil((1.04 / eps).powi(2).log2(), 4, 18) as u8
-}
-
-/// CMS: over-count ≤ ε·N with width `w = ⌈e/ε⌉` columns.
-fn cms_width(eps: f64) -> u32 {
-    saturating_ceil(std::f64::consts::E / eps, 2, 1 << 26)
-}
-
-/// CMS: failure probability ≤ δ with depth `d = ⌈ln(1/δ)⌉` rows.
-/// δ = 0.01 → depth 5.
-fn cms_depth(delta: f64) -> u32 {
-    saturating_ceil((1.0 / delta).ln(), 1, 32)
-}
-
-/// 99%-confidence KMV/Theta relative bound via Chebyshev, using
-/// `RSE <= 1/sqrt(k-2)` and a ten-standard-deviation interval.
-fn kmv_k_99(eps: f64) -> u32 {
-    saturating_ceil(100.0 / (eps * eps) + 2.0, 16, 1 << 26)
-}
-
-/// CountSketch `L2` point-query width: ε = sqrt(3/w).
-fn count_sketch_width(eps: f64) -> u32 {
-    saturating_ceil(3.0 / (eps * eps), 2, 1 << 26)
-}
-
-/// Positive odd depth satisfying Hoeffding's median failure bound
-/// `exp(-depth/18) <= delta` for per-row failure at most 1/3.
-fn count_sketch_depth(delta: f64) -> u32 {
-    if !(delta.is_finite() && delta > 0.0 && delta < 1.0) {
-        return 255;
-    }
-    let depth = saturating_ceil(18.0 * (1.0 / delta).ln(), 1, 255);
-    if depth.is_multiple_of(2) {
-        (depth + 1).min(255)
-    } else {
-        depth
-    }
-}
-
-/// `⌈x⌉` clamped to `[lo, hi]`; NaN / non-positive x saturate to `hi`
-/// (a degenerate ε means "as accurate as this family goes").
-fn saturating_ceil(x: f64, lo: u32, hi: u32) -> u32 {
-    if !x.is_finite() || x <= 0.0 {
-        return hi;
-    }
-    (x.ceil() as u32).clamp(lo, hi)
 }
 
 // ── SketchAlgorithmStrategy ─────────────────────────────────────────────────
@@ -9401,7 +9289,7 @@ mod tests {
         assert_eq!(guarantee.metric, ErrorMetric::Rank);
         assert_eq!(
             guarantee.bound.evaluate(),
-            Some(crate::accuracy::kll_rank_error_99(269))
+            Some(crate::accuracy::estimators::kll::kll_rank_error_99(269))
         );
         assert_eq!(guarantee.approximate_layer_count(), 1);
         assert!(guarantee.provenance.iter().any(|s| matches!(
@@ -9685,7 +9573,7 @@ mod tests {
         else {
             panic!("HLL state")
         };
-        let expected = crate::accuracy::hll::ClassicHllConfidence::new(128, 0.05)
+        let expected = crate::accuracy::estimators::hll::ClassicHllConfidence::new(128, 0.05)
             .unwrap()
             .precision(0.01)
             .unwrap();

@@ -131,8 +131,8 @@ empirical calibration is different from an arbitrary benchmark's maximum
 observed error; both its confidence and applicability must remain explicit.
 
 The current interfaces still expose general parameter proposal through
-`CostModel::size_params`. Default sizing formulas also remain in candidate
-construction. Accuracy validation is independent of those proposals. The new
+`CostModel::size_params`. Default sizing is dispatched to the estimator modules through the existing
+public candidate-construction entry point. Accuracy validation is independent of those proposals. The new
 source-contract path centralizes HLL sizing and guarantee derivation in
 Planner's accuracy module, overriding the generic proposal when the applicable
 contract is supplied. It does not yet move every algorithm's sizing interface
@@ -243,13 +243,68 @@ Global selection still coordinates compatible choices and accounts for shared
 cost. The current reconciliation strategy does not reconcile exact and
 approximate requirements merely by ordering their epsilon values.
 
+### Example: two consumers of the same grouped quantile
+
+Suppose two queries compute the 95th-percentile latency from the same source,
+filter, time window and `service` grouping. They have identical output columns
+and differ only in accuracy requirements:
+
+| Consumer | Requested result | Rank error target | Failure-probability target |
+|---|---|---|---|
+| A | p95 latency per service | 1% | 1% |
+| B | p95 latency per service | 5% | 1% |
+
+Planner can propose building the tighter KLL computation required by A and
+letting B read that same result. A result certified to 1% rank error also meets
+B's 5% rank-error target, at the same confidence. The `service` grouping
+provides the stable row identity required by the current reconciliation rule.
+These percentages bound rank displacement, not latency-value error.
+
+```mermaid
+flowchart LR
+    Input[Same source, filter and window] --> Shared[KLL computation per service sized for A]
+    Shared --> A[Consumer A: 1% rank error]
+    Shared --> B[Consumer B: 5% rank error]
+```
+
+B's independently sized candidate remains available. Global selection compares
+that candidate with the reuse candidate and preserves the dependency on A's
+tighter computation if it chooses reuse. Sharing is therefore an explicit
+planning choice, not an unconditional rewrite or two separately charged builds.
+
+This reconciliation does not apply if B instead asks for p99, uses a different
+window or filter, or groups by another key: those queries differ in semantics,
+not just accuracy. Nor does this example justify serving B at a failure target
+of 0.1%; A's 1% failure guarantee would not meet it. A separate supported reuse
+rule or a different estimator configuration would be needed in those cases.
+
 ## Organization and extension contract
 
-The `asap-aware-mapping::accuracy` module groups the shared algebra and budget
-allocation, estimator/source-contract integration, algorithm-specific models
-such as `hll`, and cross-consumer `reconciliation`. Serializable guarantee and
-metric types live in `asap-types` so planning, explanations and downstream
-binding share the same contract.
+The `asap-aware-mapping::accuracy` module separates these responsibilities:
+
+```text
+accuracy/
+├── mod.rs              # Public interfaces and unified entry point
+├── evidence.rs         # Evidence and source contracts
+├── composition.rs      # Error propagation across computations
+├── allocation.rs       # End-to-end budget allocation
+├── reconciliation.rs   # Accuracy coordination across consumers
+└── estimators/
+    ├── mod.rs          # Family/readout dispatch and source-contract integration
+    ├── kll.rs
+    ├── ddsketch.rs
+    ├── hll.rs          # Generic HLL and bounded Classic HLL
+    ├── cms.rs
+    ├── count_sketch.rs
+    ├── cardinality.rs  # Shared KMV / Theta models
+    └── univmon.rs
+```
+
+Each estimator module owns its local accuracy formulas and associated sizing
+formulas. The unified entry point delegates to these models; it does not
+contain a second copy of their mathematics. Serializable guarantee and metric
+types live in `asap-types` so planning, explanations and downstream binding
+share the same contract.
 
 Adding an estimator or composition requires:
 
