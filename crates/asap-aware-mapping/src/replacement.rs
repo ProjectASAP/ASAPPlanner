@@ -1842,11 +1842,30 @@ fn realize_binary(
                 return Ok(None);
             }
             let domains = lhs_domain.zip(rhs_domain).map(|(lhs, rhs)| [lhs, rhs]);
+            let has_mean = [lhs, rhs]
+                .iter()
+                .any(|expr| matches!(bindable_intent(expr), Some(AggIntent::Avg { .. })));
+            if has_mean
+                && domains.as_ref().is_none_or(|domains| {
+                    domains.iter().any(|domain| {
+                        !(domain.lower.abs().max(domain.upper.abs()) * domain.max_samples as f64)
+                            .is_finite()
+                    })
+                })
+            {
+                return Ok(None);
+            }
             lhs_node = realize_ddsketch_quantile_operand(lhs, planning_inputs, &target)?;
             rhs_node = realize_ddsketch_quantile_operand(rhs, planning_inputs, &target)?;
             if let Some(domains) = domains.as_ref() {
                 for (domain, node) in domains.iter().zip([&lhs_node, &rhs_node]) {
                     if !ddsketch_quantile_alpha(node)
+                        .or_else(|| {
+                            node.guarantee
+                                .as_ref()
+                                .is_some_and(ResultGuarantee::is_exact)
+                                .then_some(alpha)
+                        })
                         .is_some_and(|alpha| domain.supports_ddsketch(alpha))
                     {
                         return Ok(None);
@@ -1928,9 +1947,13 @@ fn realize_binary(
     let guarantee = if matches!(op, BinaryOpKind::Arithmetic(ArithmeticOpKind::Div))
         && direct_ddsketch_ratio
         && has_ratio_domains
-        && ddsketch_quantile_alpha(&lhs_node).is_some()
-        && ddsketch_quantile_alpha(&rhs_node).is_some()
-    {
+        && [&lhs_node, &rhs_node].iter().all(|node| {
+            ddsketch_quantile_alpha(node).is_some()
+                || node
+                    .guarantee
+                    .as_ref()
+                    .is_some_and(ResultGuarantee::is_exact)
+        }) {
         [lhs_node.guarantee.clone(), rhs_node.guarantee.clone()]
             .into_iter()
             .collect::<Option<Vec<_>>>()
@@ -2039,9 +2062,8 @@ fn is_promql_scalar(expr: &QueryExpr) -> bool {
     )
 }
 
-/// Both direct quantile operands inherit the workload target during PromQL
-/// lowering. Reuse that one target for the ratio rather than interpreting it
-/// as two independent error budgets.
+/// Quantile operands inherit one workload target. A temporal mean is exact
+/// on its checked finite domain and needs no approximation budget.
 fn shared_quantile_target(lhs: &QueryExpr, rhs: &QueryExpr) -> Option<AccuracyTarget> {
     let quantile_target = |expr: &QueryExpr| match bindable_intent(expr) {
         Some(AggIntent::Quantile { accuracy, q, .. })
@@ -2051,9 +2073,16 @@ fn shared_quantile_target(lhs: &QueryExpr, rhs: &QueryExpr) -> Option<AccuracyTa
         }
         _ => None,
     };
-    let lhs = quantile_target(lhs)?;
-    let rhs = quantile_target(rhs)?;
-    (lhs == rhs).then_some(lhs)
+    match (quantile_target(lhs), quantile_target(rhs)) {
+        (Some(lhs), Some(rhs)) => (lhs == rhs).then_some(lhs),
+        (Some(target), None) if matches!(bindable_intent(rhs), Some(AggIntent::Avg { .. })) => {
+            Some(target)
+        }
+        (None, Some(target)) if matches!(bindable_intent(lhs), Some(AggIntent::Avg { .. })) => {
+            Some(target)
+        }
+        _ => None,
+    }
 }
 
 /// For `a / b`, two DDSketches with the same relative bound `alpha` produce
@@ -6353,6 +6382,43 @@ mod tests {
             assert!(!keys[0].ascending);
             assert_eq!(node.schema, values.schema);
             asap_types::post_asap::compile_executable_dag(&node).unwrap();
+        }
+    }
+
+    // A bounded exact mean can share the relative division proof with a quantile.
+    #[test]
+    fn bounded_mean_quantile_ratio_is_certified() {
+        struct Domain;
+        impl AccuracyEvidenceProvider for Domain {
+            fn quantile_input_domain(
+                &self,
+                _: &QueryExpr,
+            ) -> Option<crate::accuracy::QuantileInputDomain> {
+                Some(crate::accuracy::QuantileInputDomain {
+                    lower: 1.0,
+                    upper: 1000.0,
+                    max_samples: 10000,
+                    contract: "finite test population".into(),
+                })
+            }
+        }
+        let target = AccuracyTarget::EpsilonDelta {
+            epsilon: 0.01,
+            delta: 0.01,
+        };
+        let inputs = CandidatePlanningInputs {
+            evidence: &Domain,
+            ..CandidatePlanningInputs::with_default_accuracy(&DefaultCostModel)
+        };
+        for query in [
+            "avg_over_time(a[5m]) / quantile_over_time(0.5,a[5m])",
+            "quantile_over_time(0.5,a[5m]) / avg_over_time(a[5m])",
+        ] {
+            let root = Rc::new(lower_promql(query, target.clone()));
+            let node = realize_binary(&root, inputs, Some(&target))
+                .unwrap()
+                .expect("bounded ratio candidate");
+            assert!(DefaultAccuracyModel.satisfies(node.guarantee.as_ref().unwrap(), &target));
         }
     }
 

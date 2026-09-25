@@ -276,10 +276,10 @@ impl DefaultAccuracyModel {
         if inputs.len() != 2
             || inputs
                 .iter()
-                .any(|input| input.metric != ErrorMetric::RelativeValue)
+                .any(|input| input.metric != ErrorMetric::RelativeValue && !input.is_exact())
         {
             return Err(unsupported(
-                "division needs exactly two RelativeValue guarantees".into(),
+                "division needs two relative-value or exact guarantees".into(),
             ));
         }
         let Some(numerator) = inputs[0].bound.evaluate() else {
