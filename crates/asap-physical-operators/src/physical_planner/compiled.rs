@@ -40,6 +40,23 @@ pub struct CompiledPhysicalDag {
     roots: Vec<NodeId>,
 }
 impl CompiledPhysicalDag {
+    /// Assemble already-lowered operators and typed external inputs. This is
+    /// useful for engines that compose multiple compiled computation fragments.
+    pub fn from_operators(
+        inputs: BTreeMap<NodeId, InputContract>,
+        operators: BTreeMap<NodeId, (Vec<NodeId>, Operator)>,
+        roots: Vec<NodeId>,
+    ) -> Result<Self, Error> {
+        let mut result = Self::new(roots);
+        for (id, contract) in inputs {
+            result.add_input(id, contract)?;
+        }
+        for (id, (inputs, operator)) in operators {
+            result.add(id, inputs, operator)?;
+        }
+        result.validate()?;
+        Ok(result)
+    }
     pub(super) fn new(roots: Vec<NodeId>) -> Self {
         Self {
             nodes: BTreeMap::new(),
