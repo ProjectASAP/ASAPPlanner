@@ -329,3 +329,58 @@ fn empty_sources_and_three_valued_predicates() {
         });
     }
 }
+
+// A physical candidate can be compiled once without readers and rebound per run.
+#[test]
+fn compile_without_readers_and_rebind_inputs() {
+    use asap_physical_operators::{
+        operators::Operator,
+        physical_planner::{compile, InputContract, Source},
+    };
+    let (scan, schema, batches) = fixture();
+    let dag = plan(scan, &schema, ExecutionDataState::QUERY_ROWS);
+    let compiled = compile(
+        &dag,
+        BTreeMap::from([(0, InputContract::bounded(schema.clone()))]),
+        &[2],
+    )
+    .unwrap();
+    assert_eq!(compiled.input_contracts().count(), 1);
+    for _ in 0..2 {
+        let sources = BTreeMap::from([(
+            0,
+            Box::new(Operator::source(schema.clone(), batches.clone()).unwrap()) as Source<'_>,
+        )]);
+        let graph = compiled.instantiate(sources).unwrap();
+        let mut outputs = graph.execute(compiled.roots(), context()).unwrap();
+        let result = block_on(outputs.remove(0).collect::<Vec<_>>());
+        assert!(result.iter().all(Result::is_ok));
+        assert_eq!(
+            result
+                .iter()
+                .map(|b| b.as_ref().unwrap().rows().len())
+                .sum::<usize>(),
+            2
+        );
+    }
+    assert!(compiled.instantiate(BTreeMap::new()).is_err());
+}
+
+// Input boundedness must be proved during compilation, before readers exist.
+#[test]
+fn compilation_rejects_unknown_boundedness_for_sort() {
+    use asap_physical_operators::{
+        physical_planner::{compile, InputContract},
+        plan::{Boundedness, Emission, PlanProperties},
+    };
+    let (scan, schema, _) = fixture();
+    let dag = plan(scan, &schema, ExecutionDataState::QUERY_ROWS);
+    let input = InputContract {
+        schema,
+        properties: PlanProperties {
+            boundedness: Boundedness::Unknown,
+            emission: Emission::Unknown,
+        },
+    };
+    assert!(compile(&dag, BTreeMap::from([(0, input)]), &[2]).is_err());
+}

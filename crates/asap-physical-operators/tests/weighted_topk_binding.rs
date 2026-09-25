@@ -8,7 +8,7 @@ use asap_aware_mapping::{
 };
 use asap_physical_operators::dag::{
     operators::Operator,
-    planner::{bind, Source},
+    planner::{compile, InputContract, Source},
     values::{Batch, Value},
     Limits, RunContext, Scope,
 };
@@ -153,12 +153,15 @@ fn assert_weighted_binding(evidence: &dyn AccuracyEvidenceProvider, algorithm: S
             .unwrap();
         let source = Box::new(Operator::source(rates.clone(), vec![batch.clone()]).unwrap())
             as Source<'static>;
-        let graph = bind(
+        let compiled = compile(
             &placed,
-            BTreeMap::from([(rate_id.0 as u64, source)]),
+            BTreeMap::from([(rate_id.0 as u64, InputContract::bounded(rates.clone()))]),
             &[dag.root.0 as u64],
         )
         .unwrap();
+        let graph = compiled
+            .instantiate(BTreeMap::from([(rate_id.0 as u64, source)]))
+            .unwrap();
         let context = RunContext::new(scope, Limits::default()).unwrap();
         let output = block_on(async {
             let mut output = Vec::new();

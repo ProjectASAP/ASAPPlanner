@@ -339,7 +339,7 @@ fn projection_rejects_expression_bound_to_another_schema() {
 // A valid Planner MIN/MAX schema must bind even for a non-null input column.
 #[test]
 fn global_extrema_bind_with_planner_derived_schema() {
-    use asap_physical_operators::binding::bind_node;
+    use asap_physical_operators::physical_planner::compile_node;
     use planner_types::{
         post_asap::*,
         pre_asap::{AggIntent, Column, GroupKeys, Reduction as PlanReduction},
@@ -374,7 +374,7 @@ fn global_extrema_bind_with_planner_derived_schema() {
             output_schema: (*output).clone(),
             guarantee: None,
         };
-        let operator = bind_node(&node, std::slice::from_ref(&input))
+        let operator = compile_node(&node, std::slice::from_ref(&input))
             .expect("global extremum should bind to its Planner schema");
         assert!(operator.schema().fields[0].nullable);
         let empty = unary(input.clone(), vec![], operator.clone());

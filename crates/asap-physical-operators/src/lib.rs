@@ -28,9 +28,9 @@ pub mod stored_state;
 
 mod error;
 pub use error::Error;
-pub mod binding;
 pub mod expressions;
 pub mod operators;
+pub mod physical_planner;
 pub mod plan;
 pub mod runtime;
 pub mod sources;
