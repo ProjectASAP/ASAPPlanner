@@ -247,7 +247,7 @@ fn build_rewrite(root: &Rc<QueryExpr>) -> Option<Rc<QueryExpr>> {
 
 /// Compose adjacent per-entity and cross-entity accumulators when their
 /// algebra, rather than a query-language spelling, proves equivalence.
-fn composed_aggregate_rewrite(root: &Rc<QueryExpr>) -> Option<Rc<QueryExpr>> {
+pub(crate) fn composed_aggregate_rewrite(root: &Rc<QueryExpr>) -> Option<Rc<QueryExpr>> {
     let original_schema = root.output_schema().ok()?;
     let QueryExpr::Aggregate {
         reduction: outer_reduction @ Reduction::Reduce(_),
