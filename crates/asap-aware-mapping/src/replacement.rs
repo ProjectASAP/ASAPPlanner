@@ -4582,7 +4582,12 @@ impl<'a> GlobalSelection<'a> {
         if let Some(node) = self.assembled_nodes.borrow().get(&ptr) {
             return Ok(Rc::clone(node));
         }
-        let node = if query_time_nested_sum(target) {
+        let selected_summary = self
+            .groups
+            .get(&ptr)
+            .and_then(|sel| sel.chosen)
+            .is_some_and(|candidate| matches!(candidate.replacement, Replacement::Summary(_)));
+        let node = if query_time_nested_sum(target) && !selected_summary {
             self.assemble_residual(target)?
         } else {
             match self
@@ -8497,6 +8502,39 @@ mod tests {
             Replacement::Summary(node) if matches!(&node.expr,
                 SummaryExpr::SummaryAgg { reduction: Reduction::Reduce(_), child, .. }
                     if matches!(child.expr, SummaryExpr::KeepPreAsap(_))))));
+        struct PreferComposed;
+        impl CostModel for PreferComposed {
+            fn rank_candidates(
+                &self,
+                _: &AggIntent,
+                candidates: &[SketchAlgorithm],
+            ) -> Vec<SketchAlgorithm> {
+                candidates.to_vec()
+            }
+            fn candidate_cost(
+                &self,
+                candidate: &ReplacementSubDAG,
+                _: &TargetSubDAG<'_>,
+            ) -> Option<Cost> {
+                Some(Cost(
+                    if matches!(&candidate.replacement,
+                    Replacement::Summary(node) if matches!(&node.expr,
+                        SummaryExpr::SummaryAgg { reduction: Reduction::Reduce(_), child, .. }
+                            if matches!(child.expr, SummaryExpr::KeepPreAsap(_))))
+                    {
+                        1.0
+                    } else {
+                        100.0
+                    },
+                ))
+            }
+        }
+        let space = search_workload(vec![("q", root.clone())]);
+        let selected = space.global_selection(&PreferComposed);
+        let node = selected.assemble_target(&space.roots[0].1).unwrap();
+        assert!(matches!(&node.expr,
+            SummaryExpr::SummaryAgg { reduction: Reduction::Reduce(_), child, .. }
+                if matches!(child.expr, SummaryExpr::KeepPreAsap(_))));
     }
 
     // Mixed candidate ranking must honor explicit costs, not legacy estimates.
