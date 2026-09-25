@@ -520,15 +520,15 @@ impl ReplacementSubDAG {
         )
     }
 
-    /// Runtime support for this candidate. Summary implementations remain
-    /// unknown until backend binding; a pure logical rewrite needs no new
-    /// physical operator. `Some(false)` disproves mixed-operation support.
+    /// Physical feasibility evidence for this candidate. A pure logical
+    /// rewrite needs no new operator. Unknown support is checked during
+    /// physical/deployment compilation; explicit rejection prevents selection.
     pub fn runtime_support_evidence(&self, cost_model: &dyn CostModel) -> Option<bool> {
         match &self.replacement {
             Replacement::ExactComposition(composition) => {
                 cost_model.value_operation_support_evidence(&composition.op, composition.placement)
             }
-            Replacement::Summary(_) => None,
+            Replacement::Summary(node) => cost_model.summary_support_evidence(node),
             Replacement::Rewrite(_) => Some(true),
         }
     }
@@ -4936,7 +4936,7 @@ fn composition_options<'a>(
                     None => child_group.candidates.iter().collect(),
                 };
                 for child_candidate in child_candidates {
-                    if child_candidate.has_missing_accuracy_evidence() {
+                    if !is_automatically_selectable(child_candidate, cost_model) {
                         continue;
                     }
                     let Replacement::Summary(summary) = &child_candidate.replacement else {
@@ -5113,7 +5113,7 @@ impl<Id> PlanSpace<Id> {
                         .candidates
                         .iter()
                         .filter(|candidate| !is_composition_candidate(candidate))
-                        .filter(|candidate| is_automatically_selectable(candidate))
+                        .filter(|candidate| is_automatically_selectable(candidate, cost_model))
                         .filter_map(|candidate| {
                             costs
                                 .get(&group.target, candidate)
@@ -5139,7 +5139,7 @@ impl<Id> PlanSpace<Id> {
                     .filter(|candidate| {
                         !is_cse_candidate(candidate)
                             && !is_composition_candidate(candidate)
-                            && is_automatically_selectable(candidate)
+                            && is_automatically_selectable(candidate, cost_model)
                     })
                     .filter_map(|candidate| {
                         cost_model
@@ -5196,7 +5196,7 @@ impl<Id> PlanSpace<Id> {
                             .filter(|candidate| {
                                 !is_cse_candidate(candidate)
                                     && !is_composition_candidate(candidate)
-                                    && is_automatically_selectable(candidate)
+                                    && is_automatically_selectable(candidate, cost_model)
                             })
                             .filter_map(|candidate| {
                                 cost_model
@@ -5241,7 +5241,7 @@ impl<Id> PlanSpace<Id> {
                     // children (see `multiplier`'s `_ => effective` arm).
                     None => rank_group(group, cost_model).into_iter().find(|candidate| {
                         !is_composition_candidate(candidate)
-                            && is_automatically_selectable(candidate)
+                            && is_automatically_selectable(candidate, cost_model)
                             && (cost_model
                                 .candidate_cost(
                                     candidate,
@@ -5258,7 +5258,7 @@ impl<Id> PlanSpace<Id> {
                     .find(|candidate| {
                         !is_cse_candidate(candidate)
                             && !is_composition_candidate(candidate)
-                            && is_automatically_selectable(candidate)
+                            && is_automatically_selectable(candidate, cost_model)
                             && (cost_model
                                 .candidate_cost(candidate, &effective_target)
                                 .is_some()
@@ -5344,8 +5344,9 @@ fn is_cse_candidate(candidate: &ReplacementSubDAG) -> bool {
     )
 }
 
-fn is_automatically_selectable(candidate: &ReplacementSubDAG) -> bool {
+fn is_automatically_selectable(candidate: &ReplacementSubDAG, cost_model: &dyn CostModel) -> bool {
     !candidate.has_missing_accuracy_evidence()
+        && candidate.runtime_support_evidence(cost_model) != Some(false)
 }
 
 /// How much one direct reference to `parent_ptr` actually costs, once
@@ -8488,6 +8489,35 @@ mod tests {
                 .effective_consumer_count,
             1
         );
+    }
+
+    // A cheap but physically infeasible candidate must not be selected.
+    #[test]
+    fn explicit_summary_infeasibility_prevents_selection() {
+        struct Unsupported;
+        impl CostModel for Unsupported {
+            fn rank_candidates(
+                &self,
+                _: &AggIntent,
+                candidates: &[SketchAlgorithm],
+            ) -> Vec<SketchAlgorithm> {
+                candidates.to_vec()
+            }
+            fn candidate_cost(&self, _: &ReplacementSubDAG, _: &TargetSubDAG<'_>) -> Option<Cost> {
+                Some(Cost(1.0))
+            }
+            fn summary_support_evidence(&self, _: &SummaryNode) -> Option<bool> {
+                Some(false)
+            }
+        }
+        let root = Rc::new(lower_promql("sum_over_time(a[1m])", AccuracyTarget::Exact));
+        let space = search_workload(vec![("q", root)]);
+        let selected = space.global_selection(&Unsupported);
+        assert!(selected
+            .for_target(&space.roots[0].1)
+            .unwrap()
+            .chosen
+            .is_none());
     }
 
     // Composable temporal/grouped Sum must be executable as one producer.
