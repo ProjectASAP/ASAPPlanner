@@ -1286,6 +1286,22 @@ impl<'a> SketchAlgorithmStrategy<'a> {
     /// differs — see [`realize_child_with`]).
     fn propose_with(&self, root: &Rc<QueryExpr>, intent_override: Option<&AggIntent>) -> Proposals {
         let mut proposals = Proposals::default();
+        // A selected logical rewrite otherwise remains KeepPreAsap during DAG
+        // assembly. Also expose its concrete summary realization for selection.
+        if intent_override.is_none() {
+            if let Some(rewritten) = crate::rewrite::composed_aggregate_rewrite(root) {
+                if let Ok(node) = realize_child_with(&rewritten, self.planning_inputs, None) {
+                    if !matches!(node.expr, SummaryExpr::KeepPreAsap(_)) {
+                        proposals.candidates.push(ReplacementSubDAG {
+                            replacement: Replacement::Summary(node),
+                            strategy: "SketchAlgorithmStrategy",
+                            provenance: ReplacementProvenance::SummaryRealization,
+                            rationale: "realize a schema-preserving composition of temporal and grouped accumulators".into(),
+                        });
+                    }
+                }
+            }
+        }
         if let Ok(Some(node)) = exact_topk_over_temporal_values(root, self.planning_inputs) {
             proposals.candidates.push(ReplacementSubDAG {
                 replacement: Replacement::Summary(node),
@@ -8464,6 +8480,23 @@ mod tests {
                 .effective_consumer_count,
             1
         );
+    }
+
+    // Composable temporal/grouped Sum must be executable as one producer.
+    #[test]
+    fn grouped_temporal_sum_has_one_summary_producer_candidate() {
+        let root = Rc::new(lower_promql(
+            "sum by(job)(sum_over_time(a[1m]))",
+            AccuracyTarget::Exact,
+        ));
+        let candidates =
+            SketchAlgorithmStrategy::default_cost_model().replacements(&TargetSubDAG::new(&root));
+        assert!(candidates
+            .iter()
+            .any(|candidate| matches!(&candidate.replacement,
+            Replacement::Summary(node) if matches!(&node.expr,
+                SummaryExpr::SummaryAgg { reduction: Reduction::Reduce(_), child, .. }
+                    if matches!(child.expr, SummaryExpr::KeepPreAsap(_))))));
     }
 
     // Mixed candidate ranking must honor explicit costs, not legacy estimates.
