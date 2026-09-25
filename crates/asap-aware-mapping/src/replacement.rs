@@ -4316,9 +4316,17 @@ fn rank_group<'a>(
     // purpose. `total_cmp` gives deterministic placement to a model's NaN
     // placeholders without dropping any candidate.
     ranked.sort_by(|a, b| {
-        cost_model
-            .estimate_cost(a, &target)
-            .total_cmp(&cost_model.estimate_cost(b, &target))
+        match (
+            cost_model.candidate_cost(a, &target),
+            cost_model.candidate_cost(b, &target),
+        ) {
+            (Some(a), Some(b)) => a.0.total_cmp(&b.0),
+            (Some(_), None) => std::cmp::Ordering::Less,
+            (None, Some(_)) => std::cmp::Ordering::Greater,
+            (None, None) => cost_model
+                .estimate_cost(a, &target)
+                .total_cmp(&cost_model.estimate_cost(b, &target)),
+        }
     });
     ranked
 }
@@ -8456,6 +8464,46 @@ mod tests {
                 .effective_consumer_count,
             1
         );
+    }
+
+    // Mixed candidate ranking must honor explicit costs, not legacy estimates.
+    #[test]
+    fn mixed_candidate_ranking_uses_explicit_candidate_costs() {
+        struct ExplicitCosts;
+        impl CostModel for ExplicitCosts {
+            fn rank_candidates(
+                &self,
+                _: &AggIntent,
+                candidates: &[SketchAlgorithm],
+            ) -> Vec<SketchAlgorithm> {
+                candidates.to_vec()
+            }
+            fn candidate_cost(
+                &self,
+                candidate: &ReplacementSubDAG,
+                _: &TargetSubDAG<'_>,
+            ) -> Option<Cost> {
+                Some(Cost(
+                    if candidate.provenance == ReplacementProvenance::LogicalRewrite {
+                        1.0
+                    } else {
+                        100.0
+                    },
+                ))
+            }
+        }
+        let root = Rc::new(lower_promql(
+            "sum by(job)(sum_over_time(a[1m]))",
+            AccuracyTarget::Exact,
+        ));
+        let space = search_workload(vec![("q", root)]);
+        let selection = space.global_selection(&ExplicitCosts);
+        let selected = selection
+            .for_target(&space.roots[0].1)
+            .unwrap()
+            .chosen
+            .unwrap();
+        assert_eq!(selected.provenance, ReplacementProvenance::LogicalRewrite);
     }
 
     #[test]
