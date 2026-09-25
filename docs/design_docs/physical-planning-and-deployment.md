@@ -6,10 +6,10 @@ A Post-ASAP computation is progressively realized through four layers:
 
 ```mermaid
 flowchart LR
-    L["Logical Post-ASAP DAG<br/><b>Computation semantics</b>"]
-    M["Summary Maintenance Lifecycle<br/><b>State lifecycle</b>"]
-    P["Physical DAG<br/><b>Executable computation</b>"]
-    D["Deployment Plan / DAG<br/><b>System instantiation</b>"]
+    L["Logical Post-ASAP DAG<br/><b>What computation?</b>"]
+    M["Summary Maintenance Lifecycle<br/><b>How is state maintained?</b>"]
+    P["Physical DAG(s)<br/><b>How is it executed?</b>"]
+    D["Deployment Plan / DAG<br/><b>How is it instantiated?</b>"]
 
     L -->|"Summary Maintenance<br/>Selection"| M
     M -->|"Physical Plan<br/>Compiler"| P
@@ -18,58 +18,149 @@ flowchart LR
 
 | Layer | Defines |
 | --- | --- |
-| **Logical Post-ASAP DAG** | What computation should happen |
-| **Summary Maintenance Lifecycle** | How summary state is maintained |
-| **Physical DAG** | How the computation is executed |
-| **Deployment Plan / DAG** | How it is instantiated in a concrete system |
+| **Logical Post-ASAP DAG** | Computation semantics |
+| **Summary Maintenance Lifecycle** | Build, retention, reuse, and window strategy |
+| **Physical DAG(s)** | Concrete executable operators and input boundaries |
+| **Deployment Plan / DAG** | Concrete data/state bindings and operational lifecycle |
 
-ASAPPlanner owns computation, maintenance selection, physical planning, and the
-shared physical operator implementation library. Deployment systems such as
-ASAPQuery and asap-fusion own deployment compilation and operation.
+ASAPPlanner owns the first three layers and the shared physical operator
+implementation library. Deployment systems such as ASAPQuery and asap-fusion
+own deployment compilation and operation. The lifecycle is a planning contract
+associated with the logical DAG, not a separate computation IR.
+
+### Running example
+
+Suppose p50 and p99 are requested over the same five-minute latency population,
+and ASAP selects KLL with `k=200`. Assume query windows align with one-minute
+pane boundaries and that the selected parameters satisfy the required guarantees.
+Operator names below are illustrative; the example defines the design, not a
+claim that the entire deployment integration is implemented.
+
+The example evolves through the architecture as follows:
+
+```text
+1. Logical Post-ASAP DAG
+
+raw latency
+     ↓
+KLLBuild(k=200)
+     ↓
+KLLMerge
+   ┌─┴─────┐
+   ↓       ↓
+  p50     p99
+
+          │
+          │ Summary Maintenance Selection
+          ▼
+
+2. Summary Maintenance Lifecycle
+
+KLLBuild(k=200)
+  strategy = continuously maintain
+  window   = 1-minute panes
+  reuse    = p50 + p99
+  query    = merge panes covering requested aligned 5 minutes
+
+          │
+          │ Physical Plan Compiler
+          ▼
+
+3. Physical DAGs
+
+Maintenance DAG:
+RawInput<Latency, 1m>
+        ↓
+NativeKllBuild(k=200)
+        ↓
+KllStateOutput
+
+Query DAG:
+InputSlot<KllState>[5 panes]
+        ↓
+NativeKllMerge(k=200)
+      ┌─┴────────┐
+      ↓          ↓
+ NativeP50   NativeP99
+
+          │
+          │ Deployment Plan Compiler
+          ▼
+
+4. Deployment Plan / DAG
+
+Maintenance:
+OTLP latency source
+        ↓
+run KLL build over each complete 1-minute input pane
+        ↓
+store as latency-kll-1m/<window>
+
+Query:
+resolve five latency-kll-1m states
+        ↓
+execute query Physical DAG
+        ↓
+return p50 / p99
+```
+
+Each stage adds a different class of decision while preserving the preceding
+contracts. Here, continuous maintenance means recurring production of pane state;
+the bounded build DAG does not itself implement an unbounded streaming window.
 
 ## 2. Logical Post-ASAP DAG → Summary Maintenance Lifecycle
 
-The Logical Post-ASAP DAG defines computation semantics:
+The **Logical Post-ASAP DAG** defines computation semantics:
 
 ```text
-Scan → KLLBuild(k=200) → KLLMerge ─┬→ Quantile(0.50)
-                                └→ Quantile(0.99)
+Scan(latency)
+     ↓
+KLLBuild(k=200)
+     ↓
+KLLMerge
+   ┌─┴────────────┐
+   ↓              ↓
+Quantile(.5)  Quantile(.99)
 ```
 
-It specifies operators, summary parameters, dependencies, sharing, and guarantees.
-It does not specify how summary state is maintained.
+It establishes that KLL with `k=200` is used and that the merge is shared by the
+two readouts. It does not determine when KLL states are built or retained.
 
-**Summary Maintenance Selection** chooses the lifecycle of each summary producer
-using workload demand, window/freshness requirements, physical feasibility, and cost.
+**Summary Maintenance Selection** makes that decision using workload demand,
+window/freshness requirements, and physical feasibility/cost.
 
-Typical strategies are:
-
-- build per request;
-- build, retain, and reuse; or
-- continuously maintain.
-
-The result is a **Summary Maintenance Lifecycle** describing the selected strategy
-and applicable window, freshness, reuse, and retention requirements.
+For the running example, assume it selects:
 
 ```text
-Logical Post-ASAP DAG
-+ workload requirements
-+ physical feasibility/cost
-        ↓
-Summary Maintenance Selection
-        ↓
-Summary Maintenance Lifecycle
+producer: KLLBuild(k=200)
+
+strategy:
+    continuously maintain
+
+window realization:
+    1-minute panes
+
+query requirement:
+    combine panes covering the requested aligned 5-minute range
+
+reuse:
+    one merged state serves p50 and p99
 ```
 
-The lifecycle is a planning contract associated with the logical computation, not
-a separate computation IR. Selection may request physical candidates and use their
-feasibility and cost to reconsider maintenance candidates; this is not an
-irreversible pass.
+This produces the **Summary Maintenance Lifecycle**.
+
+The lifecycle specifies how the selected logical summary should be maintained,
+but not its concrete operator implementation or storage location.
+
+Physical feasibility may feed back into selection. For example, if the required
+pane-based maintenance cannot be implemented, this lifecycle candidate cannot be
+selected. One-minute panes alone also cannot cover an arbitrarily phased query
+window; that requires supported boundary handling or a different candidate.
 
 ## 3. Summary Maintenance Lifecycle → Physical DAG
 
-The **Physical Plan Compiler** lowers the logical computation and selected lifecycle
-into executable physical operators:
+The **Physical Plan Compiler** consumes both computation semantics and maintenance
+requirements:
 
 ```text
 Logical Post-ASAP DAG
@@ -81,35 +172,68 @@ Physical Plan Compiler
 Physical DAG(s)
 ```
 
-It selects physical implementations, compiles expressions, resolves types and
-schemas, preserves dependencies and sharing, creates typed input boundaries, and
-validates physical requirements.
+For the running example, the lifecycle creates two execution boundaries.
+
+### Maintenance Physical DAG
+
+```text
+RawInputSlot<Latency>(
+    window = 1m,
+    bounded = true
+)
+        ↓
+NativeKllBuild(k=200)
+        ↓
+KllStateOutput(k=200)
+```
+
+This DAG implements construction of each maintained one-minute pane. Its input
+contract requires the complete pane population; the deployment supplies that
+bounded input from its source integration.
+
+### Query Physical DAG
+
+```text
+InputSlot<KllState>(
+    k = 200,
+    coverage = requested aligned 5m
+)
+        ↓
+NativeKllMerge(k=200)
+      ┌─┴──────────────────┐
+      ↓                    ↓
+NativeQuantile(.50)   NativeQuantile(.99)
+```
+
+The Physical Plan Compiler chooses `NativeKllBuild`, `NativeKllMerge`, and the
+physical quantile implementations, validates state compatibility, and preserves
+the shared merge. It also resolves expressions, schemas, ordered dependencies
+and execution properties.
+
+The resulting Physical DAGs know that compatible KLL states are required, but
+do not know where those states are stored.
 
 For example:
 
 ```text
-InputSlot<KllState>(k=200, grouping=G)
-        ↓
-NativeKllMerge(k=200)
-        ├──→ NativeQuantile(0.50)
-        └──→ NativeQuantile(0.99)
+InputSlot<KllState>
 ```
 
-A **Physical DAG** contains concrete operators, compiled expressions, typed input
-slots, dependencies, output roots, and execution properties.
+is physical, while:
 
-It remains deployment-independent: materialization IDs, storage locations,
-placement, and scheduling are not part of the Physical DAG.
+```text
+s3://.../latency-kll/12:01
+```
 
-If the selected lifecycle cannot be physically realized, compilation fails and
-planning may reconsider the candidate.
+is deployment-specific. Placement and scheduling also remain outside the Physical
+DAG. If the required behavior cannot be realized, physical compilation fails.
 
 ## 4. Physical DAG → Deployment Plan / DAG
 
-The **Deployment Plan Compiler** binds a Physical DAG to a concrete deployment:
+The **Deployment Plan Compiler** binds the Physical DAGs to the concrete deployment:
 
 ```text
-Physical DAG(s)
+Physical DAGs
 + Summary Maintenance Lifecycle
 + deployment catalog/state
 + sources/materializations
@@ -120,76 +244,80 @@ Deployment Plan Compiler
 Deployment Plan / DAG
 ```
 
-It determines:
-
-- concrete source and materialization bindings;
-- storage and placement;
-- scheduling and lifecycle execution;
-- readiness and revision checks; and
-- persistence, publication, or serving behavior.
-
-For example:
+For the maintenance DAG, it may produce:
 
 ```text
-InputSlot<KllState>
-        ↓
-materialization "latency-kll-5m"
-        ↓
-object-store reader
+Source:
+    RawInputSlot<Latency>
+        → complete bounded panes from the OTLP latency source
+
+Schedule:
+    each 1-minute pane, once its completion requirements are met
+
+Execution:
+    RawInput → NativeKllBuild(k=200)
+
+Output:
+    KllStateOutput
+        → latency-kll-1m/<window>
 ```
 
-The deployment compiler does not lower logical operators or choose a different
-physical algorithm. If the selected physical computation cannot be bound correctly,
-it fails or requests replanning. A Deployment Plan / DAG is an operational
-instantiation, not another computation IR.
-
-## 5. Materialized Boundaries
-
-A selected maintenance strategy may place a materialized boundary inside the
-logical computation:
+For a query over `(12:00, 12:05]`, its input-binding rule resolves:
 
 ```text
-Scan → KLLBuild → KLLMerge → Quantile
-          ↑
-     materialized
+InputSlot<KllState>[5 panes]
+    ├── latency-kll-1m/(12:00,12:01]
+    ├── latency-kll-1m/(12:01,12:02]
+    ├── latency-kll-1m/(12:02,12:03]
+    ├── latency-kll-1m/(12:03,12:04]
+    └── latency-kll-1m/(12:04,12:05]
+              ↓
+        Query Physical DAG
+              ↓
+           p50, p99
 ```
 
-The corresponding query Physical DAG becomes:
+The Deployment Plan Compiler establishes bindings and checks that their contracts
+satisfy the physical inputs and selected lifecycle, including KLL parameters,
+grouping, population, window coverage and revision scope. The deployment engine
+resolves request-specific states and checks their actual coverage, revisions and
+readiness at execution time. A compiled plan cannot establish future readiness.
+
+The compiler does not replace `NativeKllMerge`, choose another sketch, or decide
+to maintain different windows. Such changes require replanning. A Deployment
+Plan / DAG is an operational instantiation, not another computation IR.
+
+## 5. Responsibility Boundary
+
+The complete example makes the ownership boundary explicit:
+
+| Stage | KLL example decision |
+| --- | --- |
+| **Logical Post-ASAP DAG** | Use `KLL(k=200)` with shared merge for p50/p99 |
+| **Summary Maintenance Selection** | Maintain 1-minute panes and reuse them for aligned five-minute queries |
+| **Summary Maintenance Lifecycle** | Record pane/window/freshness/reuse requirements |
+| **Physical Plan Compiler** | Lower to native KLL build, merge, and readout operators |
+| **Physical DAG** | Define maintenance and query DAGs with typed input/output boundaries |
+| **Deployment Plan Compiler** | Bind raw input and KLL state slots to concrete sources/materializations |
+| **Deployment Plan / DAG** | Specify maintenance schedules, stored-pane resolution and query execution |
 
 ```text
-InputSlot<KllState> → KLLMerge → Quantile
+Logical:
+    "Use KLL for p50/p99."
+
+Lifecycle:
+    "Maintain reusable 1-minute KLL panes."
+
+Physical:
+    "Execute NativeKllBuild and
+     NativeKllMerge → {p50, p99}."
+
+Deployment:
+    "Read OTLP here, store panes here,
+     and bind these five panes for this aligned query."
 ```
 
-Responsibilities remain separated:
-
-- **Summary Maintenance Selection** decides that the KLL state should be maintained
-  and reused.
-- **Physical Plan Compiler** constructs the Physical DAG with an explicit typed
-  boundary.
-- **Deployment Plan Compiler** binds that boundary to a concrete compatible
-  materialization.
-
-Reuse requires compatible summary family and parameters, schema, grouping,
-population, window coverage, revision scope, and guarantees.
-
-## 6. Execution
-
-The deployment engine resolves the Deployment Plan and calls ASAPPlanner's shared
-physical operator implementation library, `asap-physical-operators`:
-
-```text
-Deployment Plan / DAG
-        ↓ deployment engine resolves inputs and invokes
-Physical DAG + resolved inputs + RunContext
-        ↓
-ASAPPlanner shared physical operator implementation library
-    concrete operators + DAG runtime
-        ↓
-Results
-```
-
-The runtime executes the supplied Physical DAG. It does not select maintenance
-strategies, discover materializations, or make deployment decisions.
-
-Shared producers execute once per run, while failure, cancellation, backpressure,
-and resource management follow the common runtime contract.
+The deployment engine executes the bound Physical DAGs through ASAPPlanner's
+shared physical operator implementation library, `asap-physical-operators`, and
+its DAG runtime. The merge executes once per run for both consumers. Execution
+does not introduce additional planning decisions.
