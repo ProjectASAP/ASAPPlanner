@@ -4582,12 +4582,15 @@ impl<'a> GlobalSelection<'a> {
         if let Some(node) = self.assembled_nodes.borrow().get(&ptr) {
             return Ok(Rc::clone(node));
         }
-        let selected_summary = self
+        let selected_composed_summary = self
             .groups
             .get(&ptr)
             .and_then(|sel| sel.chosen)
-            .is_some_and(|candidate| matches!(candidate.replacement, Replacement::Summary(_)));
-        let node = if query_time_nested_sum(target) && !selected_summary {
+            .is_some_and(|candidate| matches!(&candidate.replacement,
+                Replacement::Summary(node) if matches!(&node.expr,
+                    SummaryExpr::SummaryAgg { child, .. }
+                    if matches!(&child.expr, SummaryExpr::KeepPreAsap(raw) if !contains_aggregate(raw)))));
+        let node = if query_time_nested_sum(target) && !selected_composed_summary {
             self.assemble_residual(target)?
         } else {
             match self
