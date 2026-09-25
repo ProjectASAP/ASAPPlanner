@@ -68,7 +68,7 @@ Deployments supply storage/ingestion sources and adapt output protocols. The
 library has no ASAPQuery-backend dependency. Backend raw Scan remains a separate
 deployment capability.
 
-See [the design](../../docs/design_docs/physical-operators.md).
+See [the design](../../docs/design_docs/physical-planning-and-deployment.md).
 
 ## Module boundaries
 
