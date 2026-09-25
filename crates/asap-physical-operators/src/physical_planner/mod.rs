@@ -1,8 +1,8 @@
-//! Bind a post-ASAP DAG to native operators. Sources are explicit execution
-//! frontiers supplied by the deployment; unsupported computation is an error.
+//! Compile logical computation to native operators with typed external inputs.
+//! Compilation needs no readers; deployment resolves inputs after selection.
 use crate::{
     operators::{Expression, Operator, Reduction, SortKey},
-    plan::{NodeId, PhysicalDag, PhysicalOperator},
+    plan::{Boundedness, Emission, NodeId, PhysicalDag, PhysicalOperator, PlanProperties},
     values::{Batch, Schema},
     Error,
 };
@@ -28,31 +28,74 @@ fn invalid(message: impl Into<String>) -> Error {
 /// A deployment must authorize these frontiers before calling this function.
 pub type Source<'a> = Box<dyn PhysicalOperator<Batch, Schema> + 'a>;
 
+mod compiled;
+pub use compiled::{CompiledPhysicalDag, InputContract};
+
+/// Compile computation without opening or retaining deployment readers.
+/// Input contracts identify explicit boundaries selected by maintenance planning.
+pub fn compile(
+    dag: &ExecutableDag,
+    inputs: BTreeMap<NodeId, InputContract>,
+    roots: &[NodeId],
+) -> Result<CompiledPhysicalDag, Error> {
+    compile_internal(dag, inputs, roots)
+}
+
+/// Convenience for callers that already resolved inputs. Lowering still uses
+/// only their contracts, and instantiation checks those contracts again.
 pub fn bind<'a>(
     dag: &ExecutableDag,
     sources: BTreeMap<NodeId, Source<'a>>,
     roots: &[NodeId],
 ) -> Result<PhysicalDag<'a, Batch, Schema>, Error> {
-    bind_internal(dag, sources, roots, None)
+    let inputs = sources
+        .iter()
+        .map(|(&id, source)| (id, InputContract::from_source(source.as_ref())))
+        .collect();
+    compile(dag, inputs, roots)?.instantiate(sources)
 }
 
-/// Bind raw Planner Scan leaves through registered connectors. Other retained
-/// pre-ASAP expressions remain unsupported; they are not executed externally.
+/// Resolve raw scan connectors before invoking the reader-independent compiler.
 pub fn bind_with_data_sources<'a>(
-    dag: &ExecutableDag,
-    sources: BTreeMap<NodeId, Source<'a>>,
-    roots: &[NodeId],
-    data_sources: &crate::sources::DataSources,
-) -> Result<PhysicalDag<'a, Batch, Schema>, Error> {
-    bind_internal(dag, sources, roots, Some(data_sources))
-}
-
-fn bind_internal<'a>(
     dag: &ExecutableDag,
     mut sources: BTreeMap<NodeId, Source<'a>>,
     roots: &[NodeId],
-    data_sources: Option<&crate::sources::DataSources>,
+    data_sources: &crate::sources::DataSources,
 ) -> Result<PhysicalDag<'a, Batch, Schema>, Error> {
+    // Only resolve scans reachable below the selected input boundaries.
+    let mut pending = roots.to_vec();
+    let mut seen = BTreeSet::new();
+    while let Some(id) = pending.pop() {
+        if !seen.insert(id) || sources.contains_key(&id) {
+            continue;
+        }
+        let node = dag
+            .nodes
+            .iter()
+            .find(|n| u64::from(n.id.0) == id)
+            .ok_or_else(|| invalid(format!("missing node {id}")))?;
+        if let Payload::Fallback {
+            expression: expression @ QueryExpr::Scan { .. },
+        } = &node.payload
+        {
+            sources.insert(id, Box::new(data_sources.bind(expression)?));
+        } else {
+            pending.extend(
+                dag.edges
+                    .iter()
+                    .filter(|e| u64::from(e.consumer.0) == id)
+                    .map(|e| u64::from(e.producer.0)),
+            );
+        }
+    }
+    bind(dag, sources, roots)
+}
+
+fn compile_internal(
+    dag: &ExecutableDag,
+    mut sources: BTreeMap<NodeId, InputContract>,
+    roots: &[NodeId],
+) -> Result<CompiledPhysicalDag, Error> {
     preflight_depth(dag)?;
     dag.validate().map_err(|e| invalid(e.to_string()))?;
     let nodes = dag
@@ -103,32 +146,17 @@ fn bind_internal<'a>(
             }
         }
     }
-    let mut graph = PhysicalDag::default();
+    let mut graph = CompiledPhysicalDag::new(roots.to_vec());
     let mut auxiliary = u64::MAX;
     for id in ordered {
         let node = nodes[&id];
         let output = Arc::new(node.output_schema.clone());
         crate::values::validate_schema(&output)?;
-        let (operator, inputs) = if let Some(source) = sources.remove(&id) {
-            if !source.input_schemas().is_empty() || source.output_schema() != output {
-                return Err(invalid("frontier is not a source with the declared schema"));
+        if let Some(source) = sources.remove(&id) {
+            if source.schema != output {
+                return Err(invalid("frontier does not have the declared schema"));
             }
-            (
-                Box::new(CheckedSource { source, output }) as Source<'a>,
-                vec![],
-            )
-        } else if let (
-            Some(registry),
-            Payload::Fallback {
-                expression: expression @ QueryExpr::Scan { .. },
-            },
-        ) = (data_sources, &node.payload)
-        {
-            let scan = registry.bind(expression)?;
-            if scan.output_schema() != output {
-                return Err(invalid("Scan output differs from post-ASAP schema"));
-            }
-            (Box::new(scan) as Source<'a>, vec![])
+            graph.add_input(id, source)?;
         } else {
             let mut inputs = dependencies.get(&id).cloned().unwrap_or_default();
             let mut schemas = inputs
@@ -148,19 +176,18 @@ fn bind_internal<'a>(
                 auxiliary -= 1;
                 schemas.truncate(1);
             }
-            let operator = bind_node(node, &schemas)
+            let operator = compile_node(node, &schemas)
                 .map_err(|error| invalid(format!("node {id}: {error}")))?;
-            (Box::new(operator) as Source<'a>, inputs)
-        };
-        graph.add_boxed(id, inputs, operator)?;
+            graph.add(id, inputs, operator)?;
+        }
     }
-    graph.validate(roots)?;
+    graph.validate()?;
     Ok(graph)
 }
 
 /// Bind a Planner node against the schemas supplied by its deployment edges.
 /// This is the same checked path used by complete DAG binding.
-pub fn bind_node(node: &ExecutableDagNode, inputs: &[Schema]) -> Result<Operator, Error> {
+pub fn compile_node(node: &ExecutableDagNode, inputs: &[Schema]) -> Result<Operator, Error> {
     for schema in inputs {
         crate::values::validate_schema(schema)?;
     }

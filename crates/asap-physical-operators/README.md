@@ -47,12 +47,12 @@ assert!(matches!(batch.rows()[0][0], Value::Int64(-7)));
 # Ok::<(), asap_physical_operators::dag::Error>(())
 ```
 
-`binding::bind` accepts a post-ASAP DAG and explicit source bindings for
-installed ingestion/storage frontiers. It rejects unsupported operations and
+`physical_planner::compile` accepts a post-ASAP DAG and typed input contracts.
+The resulting candidate is instantiated with deployment readers after selection. It rejects unsupported operations and
 schema mismatches before starting a source. Implement `PhysicalOperator` for a
 deployment source, including asynchronous I/O; computation operators remain in
 the library. The public `planner` export identifies the exact Planner types used
-by the crate. The native binder currently supports a subset of those types and
+by the crate. The physical compiler currently supports a subset of those types and
 operations; it does not interpret an unknown node as external fallback.
 
 Plain values preserve Planner scalar/collection types and nullability. Numeric
@@ -77,7 +77,7 @@ See [the design](../../docs/design_docs/physical-planning-and-deployment.md).
 - `expressions`: scalar evaluation; typed builders and the Planner expression adapter.
 - `operators`: projection, filter, joins, aggregate/window, sort, limit and summary implementations.
 - `sources`: raw-source interface, Scan and the memory connector.
-- `binding`: Planner executable DAG binding and installed source frontiers.
+- `physical_planner`: native operator lowering, typed input contracts and checked instantiation.
 - `summary_kernels`: sketchlib state adapters, exact accumulators, update adapters and traits.
 - `stored_state`: persisted-state decoding, delta reconstruction and readout.
 - `capability`: explicit kernel and native-batch/readout validation.
@@ -97,3 +97,17 @@ row processing and sort merges. Cancellation releases reservations when the
 stream is polled or dropped. Individual scalar evaluations, bounded sort chunks
 and sketch kernel calls are synchronous; this is not preemptive execution.
 There is no spill or partitioned parallel execution in this implementation.
+
+## Physical compilation and deployment inputs
+
+`physical_planner::compile` accepts a Planner `ExecutableDag`, typed
+`InputContract`s and output roots. It returns a reusable `CompiledPhysicalDag`
+containing selected native operators and no live readers. Compilation validates
+schemas, input ordering, sharing and boundedness before deployment source access.
+
+A deployment calls `CompiledPhysicalDag::instantiate` with exactly the declared
+inputs. This checks source schemas and execution properties and constructs the
+runnable graph without repeating logical lowering. The graph executes through
+the shared runtime with independent per-run state. Window coverage, revision and
+maintenance-policy admission remain deployment/planning contracts; this compiler
+does not discover storage or silently change a selected maintenance strategy.
