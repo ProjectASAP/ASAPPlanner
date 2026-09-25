@@ -834,6 +834,11 @@ pub(crate) fn realizations_for_intent(
                 )),
             ],
             AccuracyTarget::Exact => vec![exact_realization(intent)],
+            _ if matches!(intent, AggIntent::Count { .. }) => {
+                let mut candidates = sketch_realizations(intent, accuracy, cost_model);
+                candidates.push(exact_realization(intent));
+                candidates
+            }
             _ => sketch_realizations(intent, accuracy, cost_model),
         },
 
@@ -6647,6 +6652,23 @@ mod tests {
         );
     }
 
+    // Exact counting remains a legal candidate under an approximate target.
+    #[test]
+    fn approximate_count_includes_exact_accumulator_candidate() {
+        let intent = AggIntent::Count {
+            accuracy: eps(0.01),
+        };
+        assert!(realizations_for_intent(&intent, &DefaultCostModel)
+            .iter()
+            .any(|candidate| matches!(
+                candidate,
+                Realization::ExactAggregate {
+                    kind: ExactKind::Count,
+                    ..
+                }
+            )));
+    }
+
     #[test]
     fn epsilon_delta_sizes_cms_depth() {
         let intent = AggIntent::Count {
@@ -7432,7 +7454,7 @@ mod tests {
         assert_eq!(agg_group.consumer_count, 1);
         assert_eq!(
             agg_group.candidates.len(),
-            5,
+            6,
             "Hydra candidates with unknown evidence remain available: {:?}",
             agg_group.candidates
         );
