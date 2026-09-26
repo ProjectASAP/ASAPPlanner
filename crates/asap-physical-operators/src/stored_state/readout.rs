@@ -129,12 +129,16 @@ pub fn insufficient_counter_samples(
     matches!(
         statistic,
         crate::Statistic::Rate | crate::Statistic::Increase
-    ) && state
+    ) && (state
         .as_any()
         .downcast_ref::<crate::summary_kernels::IncreaseAccumulator>()
         .is_some_and(|state| {
             state.sample_count < 2 || state.last_seen_timestamp == state.starting_timestamp
         })
+        || state
+            .as_any()
+            .downcast_ref::<crate::summary_kernels::exact::ExactAccumulator>()
+            .is_some_and(|state| state.insufficient_counter_samples(statistic, &None)))
 }
 
 pub fn exact_readout_optional(
@@ -150,7 +154,12 @@ pub fn exact_readout_optional(
             .downcast_ref::<crate::summary_kernels::KeyedCounterState>()
             .and_then(|state| state.increases.get(key))
     });
-    if insufficient_counter_samples(merged.as_ref(), statistic)
+    let exact_insufficient = merged
+        .as_any()
+        .downcast_ref::<crate::summary_kernels::exact::ExactAccumulator>()
+        .is_some_and(|state| state.insufficient_counter_samples(statistic, key));
+    if exact_insufficient
+        || insufficient_counter_samples(merged.as_ref(), statistic)
         || counter.is_some_and(|counter| insufficient_counter_samples(counter, statistic))
     {
         return Ok(None);
@@ -166,6 +175,40 @@ mod counter_tests {
     use super::*;
     use crate::{summary_kernels::IncreaseAccumulator, AggregateCore, Measurement, Statistic};
     use std::sync::Arc;
+
+    #[test]
+    fn planner_counter_population_omits_insufficient_samples() {
+        use planner_types::post_asap::{ExactKind, ExactParams, SummaryFamilyType};
+        for (kind, params, statistic) in [
+            (ExactKind::Rate, ExactParams::Rate, Statistic::Rate),
+            (
+                ExactKind::Increase,
+                ExactParams::Increase,
+                Statistic::Increase,
+            ),
+        ] {
+            for keyed in [false, true] {
+                let mut state = crate::summary_kernels::exact::ExactAccumulator::new(
+                    SummaryFamilyType::ExactAggregate(kind.clone(), params.clone()),
+                    keyed,
+                )
+                .unwrap();
+                let key = keyed
+                    .then(|| crate::KeyByLabelValues::new_with_labels(vec!["checkout".into()]));
+                state.update(key.as_ref(), 10., 10_000);
+                assert_eq!(
+                    exact_readout_optional(
+                        [Arc::new(state) as Arc<dyn AggregateCore>],
+                        statistic,
+                        &key,
+                        &Default::default()
+                    )
+                    .unwrap(),
+                    None
+                );
+            }
+        }
+    }
 
     #[test]
     fn sparse_counter_is_absent_but_invalid_ranges_still_fail() {
