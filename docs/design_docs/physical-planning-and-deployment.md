@@ -28,6 +28,41 @@ implementation library. Deployment systems such as ASAPQuery and asap-fusion
 own deployment compilation and operation. The lifecycle is a planning contract
 associated with the logical DAG, not a separate computation IR.
 
+### Input semantics and summary semantics
+
+`source`, `filter`, `grouping` and `window` describe input-data semantics:
+where records originate, which records qualify, how they are grouped and which
+time interval applies. They are not a complete description of arbitrary summary
+computation. In particular, the same four fields can summarize different value
+expressions or produce different states.
+
+| Concern | Required semantic information |
+| --- | --- |
+| Input computation | Source identities and schemas, filters, joins/transforms and their order, or a reference to the canonical input sub-DAG |
+| Values and grouping | Value expressions, item identities and weights where applicable, group keys and types, and operation-defined null/duplicate handling |
+| Time | Time column and interpretation, interval bounds, evaluation alignment, and distinction between query range and maintained panes |
+| Summary computation | Exact operation or sketch family, algorithm and parameters, and supported build/merge behavior |
+| Output | State versus finalized value, output schema/type, and readout parameters when part of the output computation |
+
+For example, KLL over `latency_seconds` and KLL over `log(latency_seconds)` differ
+even with identical source, filter, grouping and window. Likewise, weighted
+frequency state needs both item and weight expressions. More complex inputs
+must retain their computation DAG; four descriptive fields cannot replace it.
+
+The canonical selected computation is authoritative. These categories describe
+what must be preserved, not a new flat IR or a second expression language.
+Operator-defined behavior should be referenced through its canonical contract,
+not independently configured in deployment metadata. Unsupported or unresolved
+semantics cannot be treated as compatible.
+
+Logical planning defines the semantics; physical compilation realizes them as
+operators and typed boundaries. Deployment binds concrete readers and state
+records that satisfy those requirements. A stored summary definition records or
+references the relevant semantics for compatibility checks. Matching a definition
+alone does not establish actual window coverage, revision compatibility or
+readiness; those require runtime checks. Physical location, encoding, scheduling
+and retention are separate execution/deployment contracts.
+
 ### Running example
 
 Suppose p50 and p99 are requested over the same latency samples in a five-minute window,
