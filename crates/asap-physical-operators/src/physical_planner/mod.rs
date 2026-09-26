@@ -34,6 +34,12 @@ pub use candidates::{
     CandidateSelection, PhysicalCandidate,
 };
 
+mod temporal_panes;
+pub use temporal_panes::{
+    compile_temporal_pane_candidate, TemporalEntityIdentity, TemporalPaneCandidate,
+    TemporalPaneMaintenance,
+};
+
 mod compiled;
 pub use compiled::{CompiledPhysicalDag, InputContract};
 

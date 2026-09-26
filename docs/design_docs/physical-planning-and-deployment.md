@@ -372,19 +372,33 @@ when the shared runtime merges panes for a query.
 
 ## 6. Executable acceptance coverage
 
-The tests distinguish optimizer-selected lifecycle execution from explicit
-physical pane construction:
+The tests cover optimizer-selected lifecycle execution and automatic temporal
+pane compilation, alongside independent operator/runtime fixtures:
 
 | Test | Contract exercised |
 | --- | --- |
+| `summary_maintenance_lifecycle_e2e::selected_temporal_lifecycle_compiles_panes_and_executes` | PromQL p50/p99 workloads → selected continuous lifecycle and Sliding framework → automatically generated maintenance/query DAGs → real codec round-trip → adjacent aligned windows; checks filters, entity identity, sample counts, missing/duplicate panes and phase rejection before opening readers |
 | `summary_maintenance_lifecycle_e2e::continuous_lifecycle_compiles_and_executes_spatial_kll` | PromQL workload → selected continuous lifecycle → logical DAG → compiled maintenance/query candidate → results in independent revisions; an unbounded candidate fails before pricing, and a bounded request candidate returns the same population |
 | `kll_pane_execution::five_panes_roundtrip_and_shared_merge_runs_once` | Explicit one-minute maintenance DAGs → real MessagePack state bytes → five required query inputs → shared native merge → p50/p99; counts every sample once, checks adjacent aligned windows and instruments one merge start per run |
 | `kll_pane_execution::restored_panes_reject_corruption_parameters_schema_and_missing_binding` | Corrupt bytes, parameter relabelling, incompatible schemas and absent bindings fail explicitly |
 | `precompute_candidates::grouped_rate_can_be_materialized_before_or_after_grouped_sum` | Cost changes select different legal precompute frontiers; both selected candidates execute with the same reset-sensitive result; uncompilable candidates are not priced |
 | `sql_to_physical::sql_filter_grouped_sum_executes_and_rebinds` | SQL text → candidate search → physical compilation → shared Scan predicates and grouped summary execution; NULL samples are ignored and fresh bindings produce new results |
 
-The pane test uses an explicit physical realization. It does not establish that
-maintenance selection automatically emits the complete temporal pane DAG.
-Pane phase validation uses the Planner coverage contract; concrete stored-pane
-identity, revision, readiness and population coverage remain deployment checks.
-Real storage and HTTP execution belong to deployment-repository E2E tests.
+`physical_planner::compile_temporal_pane_candidate` consumes the logical DAG,
+selected lifecycle/framework and a generic pane/entity input contract. It
+generates pane construction, scan predicates, ordered state slots, a shared
+merge, quantile readouts and run-scoped timestamps. A physical pane output has
+its own identity: one minute of state cannot masquerade as the logical
+five-minute summary. The returned candidate retains the maintenance contract.
+
+This initial realization supports bounded, complete KLL panes with known phase
+and resolved entity identity, for Sliding windows or a single Tumbling window.
+Source capability evidence must declare all entity keys or isolate one entity;
+usage-derived PromQL columns alone cannot establish that identity. Partial edge
+panes, exponential histograms and cross-run delta accumulation require further
+physical candidates and are rejected by this entry point.
+
+Physical execution checks pane timestamps and duplicate entity states. Concrete
+stored identity, revisions, readiness and completeness evidence remain
+deployment responsibilities. Real storage and HTTP execution belong to
+deployment-repository E2E tests.
