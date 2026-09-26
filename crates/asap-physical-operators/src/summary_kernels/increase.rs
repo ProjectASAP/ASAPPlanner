@@ -28,6 +28,33 @@ pub struct IncreaseAccumulator {
 }
 
 impl IncreaseAccumulator {
+    /// Merge two counter intervals without a temporary collection. Ties retain
+    /// the left input, matching the stable ordering of multi-pane merges.
+    pub(crate) fn merge_pair(left: &Self, right: &Self) -> Self {
+        let (first, second) = if left.starting_timestamp <= right.starting_timestamp {
+            (left, right)
+        } else {
+            (right, left)
+        };
+        let mut merged = first.clone();
+        if second.starting_timestamp > merged.last_seen_timestamp {
+            merged.total_increase +=
+                if second.starting_measurement.value >= merged.last_seen_measurement.value {
+                    second.starting_measurement.value - merged.last_seen_measurement.value
+                } else {
+                    second.starting_measurement.value
+                };
+        }
+        merged.total_increase += second.total_increase;
+        merged.sample_count = merged.sample_count.saturating_add(second.sample_count);
+        if second.last_seen_timestamp > merged.last_seen_timestamp {
+            merged.last_seen_measurement = second.last_seen_measurement.clone();
+            merged.last_seen_timestamp = second.last_seen_timestamp;
+        }
+
+        merged
+    }
+
     /// Return the number of bytes occupied by one accumulator at the start of
     /// `buffer`. Old persisted values end after `last_seen_timestamp`; reset-
     /// aware values carry a magic-prefixed extension. The magic makes this
@@ -292,20 +319,7 @@ impl MergeableAccumulator<IncreaseAccumulator> for IncreaseAccumulator {
         let mut result = accumulators[0].clone();
 
         for acc in &accumulators[1..] {
-            if acc.starting_timestamp > result.last_seen_timestamp {
-                result.total_increase +=
-                    if acc.starting_measurement.value >= result.last_seen_measurement.value {
-                        acc.starting_measurement.value - result.last_seen_measurement.value
-                    } else {
-                        acc.starting_measurement.value
-                    };
-            }
-            result.total_increase += acc.total_increase;
-            result.sample_count = result.sample_count.saturating_add(acc.sample_count);
-            if acc.last_seen_timestamp > result.last_seen_timestamp {
-                result.last_seen_measurement = acc.last_seen_measurement.clone();
-                result.last_seen_timestamp = acc.last_seen_timestamp;
-            }
+            result = Self::merge_pair(&result, acc);
         }
 
         Ok(result)
@@ -348,27 +362,7 @@ impl AggregateCore for IncreaseAccumulator {
             .downcast_ref::<IncreaseAccumulator>()
             .ok_or("Failed to downcast to IncreaseAccumulator")?;
 
-        let (first, second) = if self.starting_timestamp <= other_increase.starting_timestamp {
-            (self, other_increase)
-        } else {
-            (other_increase, self)
-        };
-        let mut merged = first.clone();
-        if second.starting_timestamp > merged.last_seen_timestamp {
-            merged.total_increase +=
-                if second.starting_measurement.value >= merged.last_seen_measurement.value {
-                    second.starting_measurement.value - merged.last_seen_measurement.value
-                } else {
-                    second.starting_measurement.value
-                };
-        }
-        merged.total_increase += second.total_increase;
-        merged.sample_count = merged.sample_count.saturating_add(second.sample_count);
-        if second.last_seen_timestamp > merged.last_seen_timestamp {
-            merged.last_seen_measurement = second.last_seen_measurement.clone();
-            merged.last_seen_timestamp = second.last_seen_timestamp;
-        }
-
+        let merged = Self::merge_pair(self, other_increase);
         Ok(Box::new(merged))
     }
 
