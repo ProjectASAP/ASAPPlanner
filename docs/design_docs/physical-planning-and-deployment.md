@@ -365,3 +365,7 @@ The deployment engine executes the bound Physical DAGs through ASAPPlanner's
 shared physical operator implementation library, `asap-physical-operators`, and
 its DAG runtime. The merge executes once per run for both consumers. Execution
 does not introduce additional planning decisions.
+
+Each maintained pane contributes its finalized population once. A replacement
+snapshot updates that pane's state; it does not introduce another population
+when the shared runtime merges panes for a query.

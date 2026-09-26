@@ -550,28 +550,14 @@ pub fn cumulative_summary_state(
     kind: DeltaSketchKind,
 ) -> Result<Option<SummaryState>, String> {
     let mut rolling: Option<SummaryState> = None;
-    for (_window_end, state) in samples {
-        match state.encoding {
-            SketchEncoding::ProtoFull | SketchEncoding::MsgpackFull => {
-                let new_state = decode_full(&kind, &state.bytes, state.encoding)?;
-                rolling = Some(match rolling.take() {
-                    None => new_state,
-                    Some(mut prev) => {
-                        prev.merge_same_family(&new_state)?;
-                        prev
-                    }
-                });
-            }
-            SketchEncoding::ProtoDelta | SketchEncoding::MsgpackDelta => {
-                if rolling.is_none() {
-                    rolling = Some(kind.bootstrap_empty());
-                }
-                if let Some(rs) = rolling.as_mut() {
-                    rs.apply_delta_bytes(&state.bytes, state.encoding)?;
-                }
-            }
+    visit_window_summary_states(samples, kind, |_, state| {
+        if let Some(acc) = rolling.as_mut() {
+            acc.merge_same_family(&state)?;
+        } else {
+            rolling = Some(state);
         }
-    }
+        Ok(())
+    })?;
     Ok(rolling)
 }
 
@@ -648,6 +634,20 @@ pub fn per_window_summary_states(
     kind: DeltaSketchKind,
 ) -> Result<(Vec<(i64, SummaryState)>, usize), String> {
     let mut out: Vec<(i64, SummaryState)> = Vec::new();
+    let skipped = visit_window_summary_states(samples, kind, |end, state| {
+        out.push((end, state));
+        Ok(())
+    })?;
+    Ok((out, skipped))
+}
+
+// Both readout modes must reconstruct the same final pane population. The
+// visitor lets cumulative merging stream panes without retaining every state.
+fn visit_window_summary_states(
+    samples: &[(i64, &SketchSampleState)],
+    kind: DeltaSketchKind,
+    mut emit: impl FnMut(i64, SummaryState) -> Result<(), String>,
+) -> Result<usize, String> {
     let mut skipped = 0usize;
 
     // Rolling state for the CURRENT window only. Reset to None whenever
@@ -661,7 +661,7 @@ pub fn per_window_summary_states(
         // state, then reset the base so this window starts from empty.
         if cur_end != Some(*window_end) {
             if let (Some(prev_end), Some(rs)) = (cur_end, rolling.take()) {
-                out.push((prev_end, rs));
+                emit(prev_end, rs)?;
             }
             cur_end = Some(*window_end);
         }
@@ -688,10 +688,10 @@ pub fn per_window_summary_states(
 
     // Flush the final window.
     if let (Some(prev_end), Some(rs)) = (cur_end, rolling.take()) {
-        out.push((prev_end, rs));
+        emit(prev_end, rs)?;
     }
 
-    Ok((out, skipped))
+    Ok(skipped)
 }
 
 // ---------------------------------------------------------------------------
@@ -957,6 +957,23 @@ mod tests {
             sk.update(v);
         }
         sk
+    }
+
+    /// A full re-snapshot replaces its pane's earlier frames; cumulative
+    /// readout must merge the finalized panes without counting updates twice.
+    #[test]
+    fn cumulative_readout_counts_resnapshot_population_once() {
+        let first = full(encode_dd(&dd_over(0.01, &[1., 2.])));
+        let updated = full(encode_dd(&dd_over(0.01, &[1., 2., 3.])));
+        let next = delta(encode_dd(&dd_over(0.01, &[9.])));
+        let samples = [(1000, &first), (1000, &updated), (2000, &next)];
+        let state = cumulative_summary_state(&samples, DeltaSketchKind::DDSketch { alpha: 0.01 })
+            .unwrap()
+            .unwrap();
+        let SummaryState::Dd(state) = state else {
+            panic!("expected DDSketch state");
+        };
+        assert_eq!(state.store_counts.iter().sum::<u64>(), 4);
     }
 
     /// PWR across 3 windows: window 1 is `[Full]`, windows 2 & 3 are
