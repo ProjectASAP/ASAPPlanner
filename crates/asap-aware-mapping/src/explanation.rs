@@ -535,6 +535,7 @@ mod tests {
             reduction: Reduction::by(by),
             measures: vec![intent],
             output_names: vec![],
+            filters: vec![],
             having: None,
             child: Rc::new(child),
         }

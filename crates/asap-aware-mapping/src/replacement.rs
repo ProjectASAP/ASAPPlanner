@@ -360,6 +360,7 @@ use asap_types::post_asap::{AccuracyError, CompositionOperator, GuaranteeSource,
 use asap_types::pre_asap::agg_intent::{agg_is_mergeable, AggIntent};
 use asap_types::pre_asap::cse::{share_common_subtrees, structural_hash, HashCache};
 use asap_types::pre_asap::expr_ir::{ArithmeticOpKind, ColumnRef};
+use asap_types::pre_asap::query_expr::any_measure_filtered;
 use asap_types::pre_asap::query_expr::{
     BinaryOpKind, Predicate, QueryExpr, QueryExprError, Reduction,
 };
@@ -1632,12 +1633,16 @@ fn exact_topk_over_temporal_values(
         reduction,
         measures,
         output_names: _,
+        filters,
         having: None,
         child,
     } = root.as_ref()
     else {
         return Ok(None);
     };
+    if any_measure_filtered(filters) {
+        return Ok(None);
+    }
     let [AggIntent::TopK {
         k,
         accuracy: AccuracyTarget::Exact,
@@ -2168,11 +2173,16 @@ fn keep_pre_asap_rc(expr: Rc<QueryExpr>) -> Result<Rc<SummaryNode>, RealizationE
 /// DAG assembly so their independently planned children remain visible.
 pub fn bindable_intent(node: &QueryExpr) -> Option<&AggIntent> {
     if let QueryExpr::Aggregate {
-        measures, having, ..
+        measures,
+        filters,
+        having,
+        ..
     } = node
     {
         if let ([intent], None) = (measures.as_slice(), having) {
-            return Some(intent);
+            if !any_measure_filtered(filters) {
+                return Some(intent);
+            }
         }
     }
     None
@@ -2815,6 +2825,7 @@ fn construct_summary_agg(
             input: summary_input,
             reduction: physical_reduction,
             grouping: GroupingStrategy::default(),
+            filter: None,
         },
         schema: state_schema,
         // Summary *state* carries no caller-visible guarantee; only a
@@ -4668,6 +4679,7 @@ impl<'a> GlobalSelection<'a> {
                 reduction,
                 measures,
                 output_names,
+                filters,
                 having,
                 child,
             } if query_time_nested_sum(target) => (
@@ -4676,6 +4688,7 @@ impl<'a> GlobalSelection<'a> {
                     reduction: reduction.clone(),
                     measures: measures.clone(),
                     output_names: output_names.clone(),
+                    filters: filters.clone(),
                     having: having.clone(),
                 }),
             ),
@@ -4736,6 +4749,7 @@ impl<'a> GlobalSelection<'a> {
 fn query_time_nested_sum(target: &QueryExpr) -> bool {
     let QueryExpr::Aggregate {
         measures,
+        filters,
         having: None,
         child,
         ..
@@ -4743,7 +4757,9 @@ fn query_time_nested_sum(target: &QueryExpr) -> bool {
     else {
         return false;
     };
-    matches!(measures.as_slice(), [AggIntent::Sum { .. }]) && contains_aggregate(child)
+    !any_measure_filtered(filters)
+        && matches!(measures.as_slice(), [AggIntent::Sum { .. }])
+        && contains_aggregate(child)
 }
 
 fn contains_aggregate(expr: &QueryExpr) -> bool {
@@ -4785,6 +4801,7 @@ fn relink_agg_child(node: &Rc<SummaryNode>, new_child: &Rc<SummaryNode>) -> Rc<S
             input,
             reduction,
             grouping,
+            filter,
         } => {
             if Rc::ptr_eq(child, new_child) {
                 return Rc::clone(node);
@@ -4796,6 +4813,7 @@ fn relink_agg_child(node: &Rc<SummaryNode>, new_child: &Rc<SummaryNode>) -> Rc<S
                     input: input.clone(),
                     reduction: reduction.clone(),
                     grouping: grouping.clone(),
+                    filter: filter.clone(),
                 },
                 schema: node.schema.clone(),
                 guarantee: node.guarantee.clone(),
@@ -6915,6 +6933,7 @@ mod tests {
             reduction: ReductionTy::by(by),
             measures: vec![intent],
             output_names: vec![],
+            filters: vec![],
             having: None,
             child: Rc::new(child),
         }
@@ -6937,6 +6956,7 @@ mod tests {
             reduction: ReductionTy::by(vec![2]),
             measures: vec![AggIntent::Sum { col: None }, AggIntent::Avg { col: None }],
             output_names: vec![],
+            filters: vec![],
             having: None,
             child: Rc::new(metric_scan(&["job"])),
         });
@@ -8661,6 +8681,7 @@ mod tests {
             reduction: ReductionTy::PerEntity,
             measures: vec![intent],
             output_names: vec![],
+            filters: vec![],
             having: None,
             child: Rc::new(child),
         }
@@ -9146,11 +9167,31 @@ mod tests {
             reduction: ReductionTy::by(vec![2]),
             measures: vec![AggIntent::Sum { col: None }, AggIntent::Avg { col: None }],
             output_names: vec![],
+            filters: vec![],
             having: None,
             child: Rc::new(metric_scan(&["job"])),
         };
         assert!(matches!(
             realize(&multi).unwrap().expr,
+            SummaryExpr::KeepPreAsap(_)
+        ));
+    }
+
+    // No binding rule applies a per-measure `FILTER` (#466), so the
+    // aggregate is retained exactly rather than bound to a summary.
+    #[test]
+    fn filtered_measure_stays_logical() {
+        use asap_types::pre_asap::expr_ir::ScalarValue;
+        use asap_types::pre_asap::query_expr::Predicate;
+        let mut q = agg(vec![2], default_quantile(0.99), metric_scan(&["job"]));
+        if let QueryExpr::Aggregate { filters, .. } = &mut q {
+            *filters = vec![Some(Predicate(Rc::new(QueryExpr::Literal(
+                ScalarValue::Boolean(true),
+            ))))];
+        }
+        assert!(bindable_intent(&q).is_none());
+        assert!(matches!(
+            realize(&q).unwrap().expr,
             SummaryExpr::KeepPreAsap(_)
         ));
     }
@@ -9396,6 +9437,7 @@ mod tests {
             reduction: ReductionTy::PerEntity,
             measures: vec![AggIntent::Sum { col: None }],
             output_names: vec![],
+            filters: vec![],
             having: None,
             child: Rc::new(QueryExpr::TimeRange {
                 range: std::time::Duration::from_secs(60),

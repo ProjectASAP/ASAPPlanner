@@ -49,6 +49,7 @@ use datafusion::logical_expr::{
 use datafusion::optimizer::analyzer::function_rewrite::ApplyFunctionRewrites;
 use datafusion::optimizer::{AnalyzerRule, OptimizerConfig};
 use datafusion::prelude::{SessionConfig, SessionContext};
+use datafusion::sql::parser::DFParser;
 
 use asap_sql_function_catalog::{AggSemantic, Arity, RewriteKind};
 use asap_types::pre_asap::agg_intent::AggIntent;
@@ -69,11 +70,13 @@ use crate::error::SqlError as LoweringError;
 
 mod clickhouse_ast;
 mod collection_planning;
+mod dialect;
 mod expr;
 mod types;
 
 pub use types::SqlCatalog;
 
+use self::dialect::GenericWithAggregateFilter;
 use self::expr::df_expr_to_unresolved;
 use self::types::{arrow_to_dtype, scalar_value_to_asap, schema_to_arrow};
 
@@ -172,16 +175,26 @@ impl<'a> SqlLowerer<'a> {
         accuracy: &AccuracyTarget,
     ) -> Result<Unresolved, LoweringError> {
         let ctx = self.build_context()?;
-        let plan = if matches!(self.dialect, SqlDialect::ClickhouseSQL) {
-            let state = ctx.state();
+        let state = ctx.state();
+        let statement = if matches!(self.dialect, SqlDialect::ClickhouseSQL) {
             let mut statement = state.sql_to_statement(sql, "ClickHouse")?;
             if let datafusion::sql::parser::Statement::Statement(ast) = &mut statement {
                 clickhouse_ast::normalize(ast);
             }
-            state.statement_to_plan(statement).await?
+            statement
         } else {
-            ctx.sql(sql).await?.into_unoptimized_plan()
+            // Not `ctx.sql(sql)`: that parses under the by-name `generic`
+            // dialect, which cannot see an aggregate `FILTER (WHERE …)`.
+            let mut statements = DFParser::parse_sql_with_dialect(sql, &GenericWithAggregateFilter)
+                .map_err(|e| datafusion::error::DataFusionError::SQL(e, None))?;
+            let (Some(statement), true) = (statements.pop_front(), statements.is_empty()) else {
+                return Err(LoweringError::UnsupportedFeature(
+                    "exactly one SQL statement per query".into(),
+                ));
+            };
+            statement
         };
+        let plan = state.statement_to_plan(statement).await?;
         let rewriter = ApplyFunctionRewrites::new(vec![Arc::new(ClickHouseBuiltinRewrite)]);
         let plan = rewriter.analyze(plan, ctx.state().options())?;
         // Output schemas omit predicate and nested-expression types. Check the
@@ -705,6 +718,7 @@ impl<'a> SqlLowerer<'a> {
                     reduction: Reduction::Reduce(GroupKeys::none()),
                     measures: vec![AggIntent::HistogramQuantile { q }],
                     output_names: vec!["value".into()],
+                    filters: vec![],
                     having: None,
                     child: Rc::new(input),
                 },
@@ -750,31 +764,21 @@ impl<'a> SqlLowerer<'a> {
 
     fn lower_aggregate(&self, agg: &logical_expr::Aggregate) -> Result<Unresolved, LoweringError> {
         let input = self.lower_plan(&agg.input)?;
-        // Canonical Count counts rows and has no nullable argument or FILTER.
-        // Check the original typed expression before derived-column rewriting
-        // erases the argument's nullability.
-        for expression in &agg.aggr_expr {
-            if let Expr::AggregateFunction(function) = unalias(expression) {
-                if function.func.name().eq_ignore_ascii_case("count") && !function.distinct {
-                    let nullable = function
-                        .args
-                        .iter()
-                        .try_fold(false, |nullable, argument| {
-                            argument
-                                .nullable(agg.input.schema().as_ref())
-                                .map(|next| nullable || next)
-                        })
-                        .map_err(|error| LoweringError::UnsupportedFeature(error.to_string()))?;
-                    if nullable || function.filter.is_some() {
-                        return Err(LoweringError::UnsupportedFeature(
-                            "COUNT of a nullable expression or with FILTER requires explicit per-aggregate null/filter semantics".into(),
-                        ));
-                    }
-                }
-            }
-        }
+        // Each measure's row predicate (`FILTER (WHERE …)`, or the NULL-skip
+        // a `count(expr)` implies), read off the original typed expression
+        // before derived-column rewriting erases the argument's nullability.
+        let measure_filters = agg
+            .aggr_expr
+            .iter()
+            .map(|e| measure_filter(e, agg.input.schema()))
+            .collect::<Result<Vec<_>, LoweringError>>()?;
 
         if agg.aggr_expr.iter().any(is_temporal_aggregate) {
+            if measure_filters.iter().any(Option::is_some) {
+                return Err(LoweringError::UnsupportedFeature(
+                    "FILTER on an ASAP temporal aggregate".into(),
+                ));
+            }
             return self.lower_temporal_aggregate(agg, input);
         }
 
@@ -782,6 +786,11 @@ impl<'a> SqlLowerer<'a> {
         // scan. `Aggregate.by` is a single key set, so each level becomes its own
         // `Aggregate` and they are merged (issue #118).
         if let Some(gs) = agg.group_expr.iter().find_map(as_grouping_set) {
+            if measure_filters.iter().any(Option::is_some) {
+                return Err(LoweringError::UnsupportedFeature(
+                    "FILTER on a measure inside a multi-level grouping".into(),
+                ));
+            }
             return self.lower_grouping_sets(agg, gs, input);
         }
 
@@ -827,6 +836,11 @@ impl<'a> SqlLowerer<'a> {
             .iter()
             .map(|e| derived.rewrite_agg(e))
             .collect::<Result<Vec<_>, LoweringError>>()?;
+        // A measure filter reads the aggregate's input rows, so the columns
+        // it names must survive any derived-column `Project` inserted below.
+        for column in measure_filters.iter().flatten().flat_map(Expr::column_refs) {
+            derived.passthrough(&Expr::Column(column.clone()))?;
+        }
 
         let child = Rc::new(derived.wrap(input)?);
         // DataFusion names the aggregate outputs in its own schema (e.g.
@@ -845,6 +859,19 @@ impl<'a> SqlLowerer<'a> {
             .iter()
             .map(lower_agg_intent)
             .collect::<Result<Vec<_>, LoweringError>>()?;
+        // Empty when nothing is filtered — the one canonical unfiltered shape.
+        let filters = if measure_filters.iter().any(Option::is_some) {
+            measure_filters
+                .iter()
+                .map(|f| {
+                    f.as_ref()
+                        .map(|f| Ok(Predicate(Rc::new(df_expr_to_unresolved(f)?))))
+                        .transpose()
+                })
+                .collect::<Result<Vec<_>, LoweringError>>()?
+        } else {
+            Vec::new()
+        };
         Ok(Unresolved::Aggregate {
             // SQL `GROUP BY` is always an inclusion list, never PromQL's
             // `without(...)` exclusion form — and always a genuine reduction,
@@ -853,6 +880,7 @@ impl<'a> SqlLowerer<'a> {
             reduction: Reduction::Reduce(GroupKeys::by(keys)),
             measures,
             output_names,
+            filters,
             having: None,
             child,
         })
@@ -1001,6 +1029,7 @@ impl<'a> SqlLowerer<'a> {
             reduction: Reduction::PerEntity,
             measures: vec![intent],
             output_names: vec![],
+            filters: vec![],
             having: None,
             child: Rc::new(child),
         })
@@ -1093,6 +1122,7 @@ impl<'a> SqlLowerer<'a> {
                     reduction: Reduction::Reduce(GroupKeys::by(level_keys)),
                     measures: measures.clone(),
                     output_names: output_names.clone(),
+                    filters: vec![],
                     having: None,
                     child: Rc::new(input.clone()),
                 };
@@ -1572,9 +1602,8 @@ impl FunctionRewrite for ClickHouseBuiltinRewrite {
                 f.null_treatment,
             ),
             // `f(cond)` -> `sum(CASE WHEN cond THEN 1 ELSE 0 END)` — see
-            // `RewriteKind::CountIfToSum`'s doc for why a plain `count(...)
-            // FILTER (WHERE cond)` doesn't work here (`AggIntent::Count`
-            // never consults its argument).
+            // `RewriteKind::CountIfToSum`'s doc; moving the `-If` family onto
+            // `Aggregate.filters` (issue #466) is a follow-up.
             RewriteKind::CountIfToSum => {
                 let cond = f.args.into_iter().next().expect(
                     "countif's stub signature fixes its arity at 1 -- the planner \
@@ -1600,6 +1629,67 @@ impl FunctionRewrite for ClickHouseBuiltinRewrite {
 }
 
 // ── Aggregate / group-key helpers ───────────────────────────────────────────────
+
+/// The row predicate one aggregate call carries (issue #466): its explicit
+/// `FILTER (WHERE p)`, plus — for a plain `count(expr)`, which canonical
+/// `AggIntent::Count` lowers to a row count that never looks at `expr` — the
+/// NULL-skipping SQL gives it. `count(CASE WHEN p THEN x END)` is the
+/// conditional-count idiom, so it becomes `p [AND x IS NOT NULL]` rather
+/// than the opaque `CASE … IS NOT NULL`; any other nullable argument becomes
+/// `expr IS NOT NULL`. `None` when the call updates on every row.
+fn measure_filter(expr: &Expr, input: &DFSchema) -> Result<Option<Expr>, LoweringError> {
+    let Expr::AggregateFunction(agg_fn) = unalias(expr) else {
+        return Ok(None);
+    };
+    let mut conjuncts: Vec<Expr> = agg_fn.filter.iter().map(|f| (**f).clone()).collect();
+    let counts_rows = agg_fn.func.name().eq_ignore_ascii_case("count") && !agg_fn.distinct;
+    if counts_rows {
+        for argument in &agg_fn.args {
+            let nullable = argument
+                .nullable(input)
+                .map_err(|error| LoweringError::UnsupportedFeature(error.to_string()))?;
+            if !nullable {
+                continue;
+            }
+            match conditional_count_arm(argument) {
+                Some((when, then)) => {
+                    conjuncts.push(when.clone());
+                    if then
+                        .nullable(input)
+                        .map_err(|error| LoweringError::UnsupportedFeature(error.to_string()))?
+                    {
+                        conjuncts.push(then.clone().is_not_null());
+                    }
+                }
+                None => conjuncts.push(argument.clone().is_not_null()),
+            }
+        }
+    }
+    Ok(conjuncts.into_iter().reduce(Expr::and))
+}
+
+/// `CASE WHEN p THEN x END` (searched, one arm, no `ELSE` or `ELSE NULL`)
+/// as `(p, x)`.
+fn conditional_count_arm(expr: &Expr) -> Option<(&Expr, &Expr)> {
+    let Expr::Case(case) = unalias(expr) else {
+        return None;
+    };
+    if case.expr.is_some() {
+        return None;
+    }
+    let else_is_null = match case.else_expr.as_deref() {
+        None => true,
+        Some(Expr::Literal(value)) => value.is_null(),
+        Some(_) => false,
+    };
+    if !else_is_null {
+        return None;
+    }
+    let [(when, then)] = case.when_then_expr.as_slice() else {
+        return None;
+    };
+    Some((when, then))
+}
 
 /// Map a DataFusion aggregate expression directly to the canonical
 /// [`AggIntent<ColumnRef>`] — issue #179's "dedicated function → canonical
@@ -1648,12 +1738,9 @@ fn lower_agg_intent(expr: &Expr) -> Result<AggIntent<ColumnRef>, LoweringError> 
             };
             Ok(match semantic {
                 AggSemantic::Correlation => {
-                    if agg_fn.filter.is_some()
-                        || agg_fn.order_by.is_some()
-                        || agg_fn.null_treatment.is_some()
-                    {
+                    if agg_fn.order_by.is_some() || agg_fn.null_treatment.is_some() {
                         return Err(LoweringError::UnsupportedAggregate(
-                            "corr with FILTER, ORDER BY, or explicit null treatment".into(),
+                            "corr with ORDER BY or explicit null treatment".into(),
                         ));
                     }
                     let [left, right] = agg_fn.args.as_slice() else {

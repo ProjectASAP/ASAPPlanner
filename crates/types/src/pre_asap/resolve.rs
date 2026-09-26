@@ -58,8 +58,8 @@ use super::column_resolution::{
 };
 use super::expr_ir::ColumnRef;
 use super::query_expr::{
-    aggregate_output_schema, ConcatDiscriminatorKey, GroupKeys, Predicate, ProjectItem,
-    QueryExprError, Reduction, ResolvedQueryExpr, SortKey, UnresolvedQueryExpr,
+    aggregate_output_schema, any_measure_filtered, ConcatDiscriminatorKey, GroupKeys, Predicate,
+    ProjectItem, QueryExprError, Reduction, ResolvedQueryExpr, SortKey, UnresolvedQueryExpr,
 };
 use super::schema::{ColumnId, Schema};
 use super::schema_resolver::SchemaResolver;
@@ -202,6 +202,7 @@ fn resolve(
             reduction,
             measures,
             output_names,
+            filters,
             having,
             child,
         } => {
@@ -212,6 +213,23 @@ fn resolve(
                 .iter()
                 .map(|m| resolve_agg_intent(m, &child_schema))
                 .collect::<Result<Vec<_>, ResolveError>>()?;
+            // A measure filter reads the rows being aggregated, so it binds
+            // against the child's schema, not the aggregate's output.
+            let filters = filters
+                .iter()
+                .map(|f| {
+                    f.as_ref()
+                        .map(|Predicate(p)| Ok(Predicate(Rc::new(resolve_expr(p, &child_schema)?))))
+                        .transpose()
+                })
+                .collect::<Result<Vec<_>, ResolveError>>()?;
+            // One canonical spelling of "unfiltered" (empty), so structural
+            // equality and CSE never split on `[]` versus `[None, None]`.
+            let filters = if any_measure_filtered(&filters) {
+                filters
+            } else {
+                Vec::new()
+            };
             let having = having
                 .as_ref()
                 .map(|Predicate(h)| -> Result<Predicate, ResolveTreeError> {
@@ -228,6 +246,7 @@ fn resolve(
                 reduction,
                 measures,
                 output_names: output_names.clone(),
+                filters,
                 having,
                 child: Rc::new(child),
             }
@@ -615,6 +634,68 @@ mod tests {
     use crate::pre_asap::query_expr::{
         BinaryOpKind, QueryExpr, Source, VectorMatch, VectorMatchKind,
     };
+
+    // A measure filter (#466) binds positionally against the aggregate's
+    // input, and a vector with no set entry collapses to the empty spelling.
+    #[test]
+    fn resolve_measure_filters_against_the_child_schema() {
+        use crate::pre_asap::expr_ir::ScalarValue;
+        use crate::pre_asap::query_expr::Predicate;
+        use crate::pre_asap::{Column, DataType, GroupKeys};
+        use crate::types::AccuracyTarget;
+        let scan = || UnresolvedQueryExpr::Scan {
+            source: Source::Table {
+                table_ref: "metrics".into(),
+            },
+            predicates: vec![],
+            schema: Some(Schema::new(vec![
+                Column::new("service", DataType::Utf8, false),
+                Column::new("latency", DataType::Float64, false),
+                Column::new("bytes", DataType::Int64, false),
+            ])),
+        };
+        let aggregate = |filters| UnresolvedQueryExpr::Aggregate {
+            reduction: Reduction::Reduce(GroupKeys::by(vec![ColumnRef::Named("service".into())])),
+            measures: vec![
+                AggIntent::Count {
+                    accuracy: AccuracyTarget::Exact,
+                },
+                AggIntent::Sum {
+                    col: Some(ColumnRef::Named("bytes".into())),
+                },
+            ],
+            output_names: vec![],
+            filters,
+            having: None,
+            child: Rc::new(scan()),
+        };
+        let latency_gt_one = Predicate(Rc::new(UnresolvedQueryExpr::Compare {
+            left: Rc::new(UnresolvedQueryExpr::Column(ColumnRef::Named(
+                "latency".into(),
+            ))),
+            op: CompareOpKind::Gt,
+            right: Rc::new(UnresolvedQueryExpr::Literal(ScalarValue::Float64(1.0))),
+        }));
+
+        let resolved = resolve_root(&aggregate(vec![Some(latency_gt_one), None])).unwrap();
+        let QueryExpr::Aggregate { filters, .. } = &resolved else {
+            unreachable!()
+        };
+        let [Some(Predicate(first)), None] = filters.as_slice() else {
+            panic!("expected one filtered and one unfiltered measure, got {filters:?}");
+        };
+        assert!(
+            matches!(first.as_ref(), QueryExpr::Compare { left, .. }
+                if matches!(left.as_ref(), QueryExpr::Column(1))),
+            "latency is input column 1, got {first:?}"
+        );
+
+        let resolved = resolve_root(&aggregate(vec![None, None])).unwrap();
+        let QueryExpr::Aggregate { filters, .. } = &resolved else {
+            unreachable!()
+        };
+        assert!(filters.is_empty());
+    }
 
     // Both sides resolve with qualifiers; an unknown right input is an error.
     #[test]

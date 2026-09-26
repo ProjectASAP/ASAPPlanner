@@ -81,6 +81,7 @@ fn same_node(left: &SummaryNode, right: &SummaryNode) -> bool {
                 input: ai,
                 reduction: ar,
                 grouping: ag,
+                filter: afl,
             },
             SummaryAgg {
                 child: bc,
@@ -88,8 +89,16 @@ fn same_node(left: &SummaryNode, right: &SummaryNode) -> bool {
                 input: bi,
                 reduction: br,
                 grouping: bg,
+                filter: bfl,
             },
-        ) => Rc::ptr_eq(ac, bc) && af == bf && same_value(ai, bi) && ar == br && ag == bg,
+        ) => {
+            Rc::ptr_eq(ac, bc)
+                && af == bf
+                && same_value(ai, bi)
+                && ar == br
+                && ag == bg
+                && same_value(afl, bfl)
+        }
         (
             SummaryJoin {
                 outer: ao,
@@ -363,6 +372,7 @@ mod tests {
                     input: SummaryUpdate::column(ColumnRef::SampleValue),
                     reduction: Reduction::PerEntity,
                     grouping: GroupingStrategy::default(),
+                    filter: None,
                 },
                 schema: SummarySchema {
                     fields: vec![],

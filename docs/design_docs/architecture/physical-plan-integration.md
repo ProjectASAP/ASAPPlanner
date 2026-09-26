@@ -443,6 +443,13 @@ storage readiness, schemas and approximation guarantees remain separate checks.
 Executable DAG wire version 4 removes the special membership operator, its edge
 roles and the duplicate operator phase fields without compatibility aliases.
 
+Executable DAG wire version 6 adds a per-measure row predicate to the aggregate
+operators (#466): `filters` on the exact aggregate value operation, parallel to
+its measures, and `filter` on `SummaryAgg`, gating which rows update the
+summary state. The version bump makes an older reader fail loudly instead of
+taking a filtered aggregate as unfiltered. No planner rule sets `SummaryAgg.filter`
+yet; a filtered pre-ASAP measure is retained as an exact fallback.
+
 The candidate row producer derives its key columns from the summary update's
 item identity and subpopulation keys. Its last column, `__asap_estimate`, is the
 summary score; it is never substituted for an authoritative value. The join

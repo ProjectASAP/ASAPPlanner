@@ -29,6 +29,7 @@ fn agg(by: Vec<usize>, intent: AggIntent, child: QueryExpr) -> QueryExpr {
         reduction: Reduction::by(by),
         measures: vec![intent],
         output_names: vec!["".into()],
+        filters: vec![],
         having: None,
         child: Rc::new(child),
     }
@@ -39,6 +40,7 @@ fn agg_per_entity(intent: AggIntent, child: QueryExpr) -> QueryExpr {
         reduction: Reduction::PerEntity,
         measures: vec![intent],
         output_names: vec!["".into()],
+        filters: vec![],
         having: None,
         child: Rc::new(child),
     }
@@ -292,6 +294,7 @@ fn q39_sum_without_instance_over_rate() {
         reduction: Reduction::Reduce(GroupKeys::without(vec![2])), // exclude `instance`
         measures: vec![AggIntent::Sum { col: None }],
         output_names: vec!["".into()],
+        filters: vec![],
         having: None,
         child: Rc::new(inner_rate),
     };
