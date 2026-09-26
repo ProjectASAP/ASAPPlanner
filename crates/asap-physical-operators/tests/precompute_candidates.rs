@@ -155,6 +155,26 @@ fn grouped_rate_can_be_materialized_before_or_after_grouped_sum() {
     let root = u64::from(dag.root.0);
     let state_id = u64::from(state.id.0);
     let rate_id = u64::from(readout.id.0);
+    let frontiers = asap_physical_operators::physical_planner::enumerate_frontiers(
+        &dag,
+        &BTreeMap::from([(state_id, InputContract::bounded(input_schema.clone()))]),
+        &[root],
+        128,
+    )
+    .unwrap();
+    assert!(frontiers.contains(&vec![]));
+    assert!(frontiers.contains(&vec![rate_id]));
+    assert!(frontiers.contains(&vec![root]));
+    assert!(!frontiers.contains(&vec![root, rate_id]));
+    assert!(
+        asap_physical_operators::physical_planner::enumerate_frontiers(
+            &dag,
+            &BTreeMap::from([(state_id, InputContract::bounded(input_schema.clone()))]),
+            &[root],
+            1,
+        )
+        .is_err()
+    );
     let candidates = compile_candidates(
         &dag,
         BTreeMap::from([(state_id, InputContract::bounded(input_schema))]),

@@ -30,8 +30,8 @@ pub type Source<'a> = Box<dyn PhysicalOperator<Batch, Schema> + 'a>;
 
 mod candidates;
 pub use candidates::{
-    compile_candidate, compile_candidates, select_candidate, CandidateCost, CandidateSelection,
-    PhysicalCandidate,
+    compile_candidate, compile_candidates, enumerate_frontiers, select_candidate, CandidateCost,
+    CandidateSelection, PhysicalCandidate,
 };
 
 mod compiled;

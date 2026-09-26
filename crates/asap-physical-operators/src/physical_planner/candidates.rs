@@ -66,6 +66,78 @@ pub fn compile_candidate(
     })
 }
 
+/// Enumerate bounded, reachable materialization frontiers above explicit inputs.
+/// Each frontier is an antichain: storing an output and its ancestor together
+/// would leave the ancestor unused by query execution. Lifecycle eligibility
+/// and deployment feasibility are evaluated separately before cost selection.
+/// Exceeding the search budget returns an error, never a partial inventory.
+pub fn enumerate_frontiers(
+    dag: &ExecutableDag,
+    inputs: &BTreeMap<NodeId, InputContract>,
+    roots: &[NodeId],
+    max_candidates: usize,
+) -> Result<Vec<Vec<NodeId>>, Error> {
+    if max_candidates == 0 {
+        return Err(invalid(
+            "frontier search requires a positive candidate budget",
+        ));
+    }
+    let compiled = compile(dag, inputs.clone(), roots)?;
+    let mut ancestors = BTreeMap::<NodeId, BTreeSet<NodeId>>::new();
+    let mut eligible = Vec::new();
+    for node in &dag.nodes {
+        let id = u64::from(node.id.0);
+        if inputs.contains_key(&id) {
+            continue;
+        }
+        let Ok(contract) = compiled.output_contract(id) else {
+            continue;
+        };
+        if contract.properties.boundedness != Boundedness::Bounded {
+            continue;
+        }
+        let mut seen = BTreeSet::new();
+        let mut pending = vec![id];
+        while let Some(current) = pending.pop() {
+            if !seen.insert(current) || inputs.contains_key(&current) {
+                continue;
+            }
+            pending.extend(
+                dag.edges
+                    .iter()
+                    .filter(|edge| u64::from(edge.consumer.0) == current)
+                    .map(|edge| u64::from(edge.producer.0)),
+            );
+        }
+        ancestors.insert(id, seen);
+        eligible.push(id);
+    }
+    eligible.sort_unstable();
+    let mut frontiers = vec![vec![]];
+    for id in eligible {
+        let additions = frontiers
+            .iter()
+            .filter(|frontier| {
+                frontier.iter().all(|previous| {
+                    !ancestors[&id].contains(previous) && !ancestors[previous].contains(&id)
+                })
+            })
+            .map(|frontier| {
+                let mut next = frontier.clone();
+                next.push(id);
+                next
+            })
+            .collect::<Vec<_>>();
+        if additions.len() > max_candidates.saturating_sub(frontiers.len()) {
+            return Err(invalid(
+                "materialization frontier search exceeds candidate budget",
+            ));
+        }
+        frontiers.extend(additions);
+    }
+    Ok(frontiers)
+}
+
 /// Lower every maintenance candidate before feasibility/cost evaluation. Keep
 /// individual failures visible; do not substitute another computation on error.
 pub fn compile_candidates(

@@ -259,7 +259,7 @@ and scoped complete-workload costs and chooses the lowest-cost feasible
 candidate. Costs must describe the same workload and planning horizon; missing
 feasibility is rejected before pricing. The optimizer supplies candidate
 frontiers and cost evidence, including updates, retention, recurrence and sharing.
-This interface does not yet enumerate every possible frontier automatically.
+`enumerate_frontiers` constructs bounded, reachable antichain frontiers above explicit input boundaries, including query-only and fully precomputed results. It fails explicitly when the candidate budget is exceeded. Maintenance selection must still reject frontiers that violate window, freshness, or reuse requirements; deployment feasibility is checked before pricing.
 
 Physical compilation opens no readers. Bounded precompute outputs become typed
 query inputs. Their build window, evaluation time, population, readiness and
