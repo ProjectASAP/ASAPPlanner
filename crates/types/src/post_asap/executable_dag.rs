@@ -14,7 +14,7 @@ use super::{
 use crate::pre_asap::{ColumnRef, JoinKind, Predicate, QueryExpr, Reduction};
 use thiserror::Error;
 
-pub const POST_ASAP_DAG_WIRE_VERSION: u32 = 5;
+pub const POST_ASAP_DAG_WIRE_VERSION: u32 = 6;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum EdgeRole {
@@ -69,6 +69,10 @@ pub enum ExecutableOperatorPayload {
         input: SummaryUpdate,
         reduction: Reduction,
         grouping: GroupingStrategy,
+        /// See `SummaryExpr::SummaryAgg::filter`. Wire version 6 added it;
+        /// a version-5 reader would otherwise take a filtered summary as
+        /// unfiltered.
+        filter: Option<Predicate>,
     },
     SummaryJoin {
         key: ColumnRef,
@@ -446,12 +450,14 @@ pub fn compile_executable_dag_with_node_ids(
                 input,
                 reduction,
                 grouping,
+                filter,
                 ..
             } => ExecutableOperatorPayload::SummaryAgg {
                 family: family.clone(),
                 input: input.clone(),
                 reduction: reduction.clone(),
                 grouping: grouping.clone(),
+                filter: filter.clone(),
             },
             SummaryExpr::SummaryJoin { key, family, .. } => {
                 ExecutableOperatorPayload::SummaryJoin {
@@ -610,6 +616,7 @@ mod tests {
                 input: SummaryUpdate::column(ColumnRef::SampleValue),
                 reduction: Reduction::by(vec![]),
                 grouping: GroupingStrategy::default(),
+                filter: None,
             },
             ExecutableOperatorPayload::SummaryJoin {
                 key: ColumnRef::SampleValue,
@@ -756,6 +763,7 @@ mod tests {
                     input: SummaryUpdate::column(ColumnRef::SampleValue),
                     reduction: Reduction::by(vec![]),
                     grouping: GroupingStrategy::default(),
+                    filter: None,
                 },
                 schema: SummarySchema {
                     fields: vec![SummaryField {

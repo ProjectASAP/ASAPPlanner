@@ -49,7 +49,7 @@ use thiserror::Error;
 
 use super::expr::{ExactOperation, SummaryExpr, SummaryNode, ValueOperation};
 use super::schema::{SummaryFamilyType, SummaryField, SummarySchema};
-use crate::pre_asap::query_expr::{aggregate_output_schema, QueryExprError};
+use crate::pre_asap::query_expr::{aggregate_output_schema, Predicate, QueryExprError};
 use crate::pre_asap::schema::{Column, Schema};
 
 /// When a post-ASAP value is produced.
@@ -649,6 +649,7 @@ fn check_plain_operands(
     let ExactOperation::Aggregate {
         reduction,
         measures,
+        filters,
         ..
     } = op;
     let mut referenced: Vec<usize> = reduction
@@ -657,6 +658,9 @@ fn check_plain_operands(
         .unwrap_or_default();
     for m in measures {
         referenced.extend(m.input_cols());
+    }
+    for Predicate(f) in filters.iter().flatten() {
+        referenced.extend(f.columns_referenced().into_iter().copied());
     }
     // With no explicit input column (the PromQL sample-value convention)
     // the operator reads every non-key column, so all must be plain.
@@ -839,6 +843,7 @@ mod tests {
                 input: crate::post_asap::SummaryUpdate::column(ColumnRef::SampleValue),
                 reduction: Reduction::by(vec![]),
                 grouping: GroupingStrategy::default(),
+                filter: None,
             },
             schema: SummarySchema {
                 fields: vec![SummaryField {
@@ -877,6 +882,7 @@ mod tests {
             measures: vec![AggIntent::Max { col: None }],
             output_names: vec![],
             having: None,
+            filters: vec![],
         }
     }
 
@@ -1144,6 +1150,7 @@ mod tests {
             measures: vec![AggIntent::PearsonCorr { left: 0, right: 1 }],
             output_names: vec![],
             having: None,
+            filters: vec![],
         });
         for operand in [0, 1] {
             let mut input = plain(&["x", "y", "unused"]);
@@ -1166,6 +1173,7 @@ mod tests {
             measures: vec![AggIntent::Max { col: None }],
             output_names: vec![],
             having: None,
+            filters: vec![],
         };
         let out = exact_operation_output_schema(&op, &child_schema).unwrap();
         let names: Vec<_> = out.fields.iter().map(|f| f.name.as_str()).collect();

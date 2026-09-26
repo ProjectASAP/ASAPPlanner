@@ -373,6 +373,7 @@ mod tests {
             reduction: Reduction::PerEntity,
             measures: vec![AggIntent::Rate],
             output_names: vec![],
+            filters: vec![],
             having: None,
             child: Rc::new(QueryExpr::TimeRange {
                 range: Duration::from_secs(300),

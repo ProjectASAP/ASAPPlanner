@@ -69,7 +69,7 @@ use asap_types::post_asap::{
     SummarySchema, ValueOperation,
 };
 use asap_types::pre_asap::agg_intent::AggIntent;
-use asap_types::pre_asap::query_expr::{QueryExpr, Reduction};
+use asap_types::pre_asap::query_expr::{any_measure_filtered, QueryExpr, Reduction};
 use asap_types::types::AccuracyTarget;
 
 use crate::cost_model::CostModel;
@@ -266,12 +266,16 @@ fn query_time_shape(
         reduction,
         measures,
         output_names,
+        filters,
         having: None,
         child,
     } = root
     else {
         return None;
     };
+    if any_measure_filtered(filters) {
+        return None;
+    }
     let Reduction::Reduce(by) = reduction else {
         return None;
     };
@@ -299,6 +303,7 @@ fn query_time_shape(
             reduction: reduction.clone(),
             measures: measures.clone(),
             output_names: output_names.clone(),
+            filters: filters.clone(),
             having: None,
         },
         Rc::clone(child),
@@ -316,12 +321,16 @@ fn ingestion_time_shape(
         reduction: Reduction::PerEntity,
         measures,
         output_names,
+        filters,
         having: None,
         child,
     } = root
     else {
         return None;
     };
+    if any_measure_filtered(filters) {
+        return None;
+    }
     let [intent] = measures.as_slice() else {
         return None;
     };
@@ -343,6 +352,7 @@ fn ingestion_time_shape(
             reduction: Reduction::PerEntity,
             measures: measures.clone(),
             output_names: output_names.clone(),
+            filters: filters.clone(),
             having: None,
         },
         Rc::clone(child),
@@ -479,6 +489,7 @@ mod tests {
             reduction: Reduction::by(by),
             measures: vec![intent],
             output_names: vec![],
+            filters: vec![],
             having: None,
             child: Rc::new(child),
         }
@@ -489,6 +500,7 @@ mod tests {
             reduction: Reduction::PerEntity,
             measures: vec![intent],
             output_names: vec![],
+            filters: vec![],
             having: None,
             child: Rc::new(child),
         }

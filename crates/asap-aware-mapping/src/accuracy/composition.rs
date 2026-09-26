@@ -1036,6 +1036,7 @@ mod tests {
             measures: vec![intent],
             output_names: vec![],
             having: None,
+            filters: vec![],
         };
         assert_eq!(
             DefaultAccuracyModel.exact_operation_rule(&operation(AggIntent::Rate)),

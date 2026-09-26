@@ -56,6 +56,7 @@ fn agg(by: Vec<usize>, intent: AggIntent, child: Rc<QueryExpr>) -> Rc<QueryExpr>
         reduction: Reduction::by(by),
         measures: vec![intent],
         output_names: vec![],
+        filters: vec![],
         having: None,
         child,
     })
@@ -66,6 +67,7 @@ fn per_entity(intent: AggIntent, child: Rc<QueryExpr>) -> Rc<QueryExpr> {
         reduction: Reduction::PerEntity,
         measures: vec![intent],
         output_names: vec![],
+        filters: vec![],
         having: None,
         child,
     })
@@ -689,6 +691,7 @@ fn summary_construction_follows_its_value_input_phase() {
             input: SummaryUpdate::column(asap_types::pre_asap::ColumnRef::SampleValue),
             reduction: Reduction::by(vec![]),
             grouping: Default::default(),
+            filter: None,
         },
         schema: asap_types::post_asap::SummarySchema {
             fields: vec![],
