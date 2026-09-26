@@ -108,10 +108,26 @@ fn merge_exact_states(
     states: impl IntoIterator<Item = std::sync::Arc<dyn crate::AggregateCore>>,
 ) -> Result<Box<dyn crate::AggregateCore>, String> {
     let mut states = states.into_iter();
-    let mut merged = states
+    let first = states
         .next()
-        .ok_or_else(|| "empty exact state input".to_string())?
-        .clone_boxed_core();
+        .ok_or_else(|| "empty exact state input".to_string())?;
+    if let Some(first) = first
+        .as_any()
+        .downcast_ref::<crate::summary_kernels::exact::ExactAccumulator>()
+    {
+        let mut merged = first.clone();
+        for state in states {
+            let other = state
+                .as_any()
+                .downcast_ref::<crate::summary_kernels::exact::ExactAccumulator>()
+                .ok_or_else(|| "merge requires Planner exact state".to_string())?;
+            merged
+                .merge_from(other)
+                .map_err(|error| error.to_string())?;
+        }
+        return Ok(Box::new(merged));
+    }
+    let mut merged = first.clone_boxed_core();
     for state in states {
         merged = merged
             .merge_with(state.as_ref())

@@ -29,6 +29,26 @@ pub struct ExactAccumulator {
 }
 
 impl ExactAccumulator {
+    /// Accumulate into run-local scratch state. Persistent input states remain
+    /// immutable; a failed merge discards this scratch state.
+    pub(crate) fn merge_from(&mut self, other: &Self) -> Result<(), Error> {
+        if self.family != other.family || self.is_keyed() != other.is_keyed() {
+            return Err("cannot merge different Planner families or layouts".into());
+        }
+        if let (Some(target), Some(source)) = (&mut self.keyed, &other.keyed) {
+            for (key, state) in source {
+                let combined = match target.get(key) {
+                    Some(old) => merge_scalar(old, state)?,
+                    None => state.clone(),
+                };
+                target.insert(key.clone(), combined);
+            }
+        } else {
+            self.scalar = merge_scalar(&self.scalar, &other.scalar)?;
+        }
+        Ok(())
+    }
+
     pub fn new(family: SummaryFamilyType, keyed: bool) -> Result<Self, String> {
         use ExactKind as K;
         use ExactParams as P;
@@ -155,12 +175,7 @@ fn merge_scalar(left: &ScalarState, right: &ScalarState) -> Result<ScalarState, 
             ScalarState::Max(a.iter().chain(b).copied().reduce(f64::max))
         }
         (ScalarState::Counter(a), ScalarState::Counter(b)) => ScalarState::Counter(match (a, b) {
-            (Some(a), Some(b)) => Some(
-                <IncreaseAccumulator as crate::MergeableAccumulator<_>>::merge_accumulators(vec![
-                    a.clone(),
-                    b.clone(),
-                ])?,
-            ),
+            (Some(a), Some(b)) => Some(IncreaseAccumulator::merge_pair(a, b)),
             (a, b) => a.clone().or_else(|| b.clone()),
         }),
         _ => return Err("exact scalar state families differ".into()),
@@ -194,21 +209,8 @@ impl AggregateCore for ExactAccumulator {
             .as_any()
             .downcast_ref::<Self>()
             .ok_or("merge requires Planner exact state")?;
-        if self.family != other.family || self.is_keyed() != other.is_keyed() {
-            return Err("cannot merge different Planner families or layouts".into());
-        }
         let mut merged = self.clone();
-        if let (Some(target), Some(source)) = (&mut merged.keyed, &other.keyed) {
-            for (key, state) in source {
-                let combined = match target.get(key) {
-                    Some(old) => merge_scalar(old, state)?,
-                    None => state.clone(),
-                };
-                target.insert(key.clone(), combined);
-            }
-        } else {
-            merged.scalar = merge_scalar(&self.scalar, &other.scalar)?;
-        }
+        merged.merge_from(other)?;
         Ok(Box::new(merged))
     }
     fn get_accumulator_type(&self) -> AggregationType {
