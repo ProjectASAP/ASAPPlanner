@@ -261,6 +261,8 @@ pub(super) fn execute<'a>(
             .map(move |batch| {
                 let batch = batch?;
                 let mut rows = batch.rows().to_vec();
+                rows.retain(|row| !matches!(&row[*state], Value::Summary { state: summary, .. }
+                    if crate::stored_state::readout::insufficient_counter_samples(summary.as_ref(), *statistic)));
                 for row in &mut rows {
                     let Value::Summary { state: summary, .. } = &row[*state] else {
                         return Err(invalid("summary value required"));
