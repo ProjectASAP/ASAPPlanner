@@ -1659,11 +1659,7 @@ fn exact_topk_over_temporal_values(
     else {
         return Ok(None);
     };
-    let [AggIntent::TopK {
-        k,
-        accuracy: AccuracyTarget::Exact,
-    }] = measures.as_slice()
-    else {
+    let [AggIntent::TopK { k, .. }] = measures.as_slice() else {
         return Ok(None);
     };
     let QueryExpr::Aggregate {
@@ -6330,6 +6326,25 @@ mod tests {
                 .is_empty(),
             "an unconditional pre-ASAP rewrite would bypass the runtime guard"
         );
+    }
+
+    // Approximate requests also admit exact temporal ranking candidates.
+    #[test]
+    fn approximate_temporal_topk_admits_exact_maintained_values() {
+        let root = Rc::new(lower_promql(
+            "topk by(job)(1,count_over_time(a[5m]))",
+            AccuracyTarget::EpsilonDelta {
+                epsilon: 0.01,
+                delta: 0.01,
+            },
+        ));
+        let planning_inputs =
+            CandidatePlanningInputs::with_default_accuracy(&crate::cost_model::DefaultCostModel);
+        let node = exact_topk_over_temporal_values(&root, planning_inputs)
+            .unwrap()
+            .expect("exact ranking is legal for an approximate request");
+        assert!(node.guarantee.as_ref().unwrap().is_exact());
+        asap_types::post_asap::compile_executable_dag(&node).unwrap();
     }
 
     // Exact Top-K consumes the Planner's maintained temporal values.
