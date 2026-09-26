@@ -28,13 +28,53 @@ implementation library. Deployment systems such as ASAPQuery and asap-fusion
 own deployment compilation and operation. The lifecycle is a planning contract
 associated with the logical DAG, not a separate computation IR.
 
+### Input semantics and summary semantics
+
+`source`, `filter`, `grouping` and `window` describe input-data semantics:
+where records originate, which records qualify, how they are grouped and which
+time interval applies. They are not a complete description of arbitrary summary
+computation. In particular, the same four fields can summarize different value
+expressions or produce different states.
+
+| Concern | Required semantic information |
+| --- | --- |
+| Input computation | Source identities and schemas, filters, joins/transforms and their order, or a reference to the canonical input sub-DAG |
+| Values and grouping | Value expressions, item identities and weights where applicable, group keys and types, and operation-defined null/duplicate handling |
+| Time | Time column and interpretation, interval bounds, evaluation alignment, and distinction between query range and maintained panes |
+| Summary computation | Exact operation or sketch family, algorithm and parameters, and supported build/merge behavior |
+| Output | State versus finalized value, output schema/type, and readout parameters when part of the output computation |
+
+For example, KLL over `latency_seconds` and KLL over `log(latency_seconds)` differ
+even with identical source, filter, grouping and window. Likewise, weighted
+frequency state needs both item and weight expressions. More complex inputs
+must retain their computation DAG; four descriptive fields cannot replace it.
+
+The canonical selected computation is authoritative. These categories describe
+what must be preserved, not a new flat IR or a second expression language.
+Operator-defined behavior should be referenced through its canonical contract,
+not independently configured in deployment metadata. Unsupported or unresolved
+semantics cannot be treated as compatible.
+
+Logical planning defines the semantics; physical compilation realizes them as
+operators and typed boundaries. Deployment binds concrete readers and state
+records that satisfy those requirements. A stored summary definition records or
+references the relevant semantics for compatibility checks. Matching a definition
+alone does not establish actual window coverage, revision compatibility or
+readiness; those require runtime checks. Physical location, encoding, scheduling
+and retention are separate execution/deployment contracts.
+
 ### Running example
 
-Suppose p50 and p99 are requested over the same five-minute latency population,
+Suppose p50 and p99 are requested over the same latency samples in a five-minute window,
 and ASAP selects KLL with `k=200`. Assume query windows align with one-minute
 pane boundaries and that the selected parameters satisfy the required guarantees.
 Operator names below are illustrative; the example defines the design, not a
 claim that the entire deployment integration is implemented.
+
+The data source identifies where samples come from. Filters, grouping and the
+window determine which samples enter each summary. Here `pane_duration: 1m`
+means each stored pane covers one minute; the query range is five minutes.
+Neither duration specifies how often maintenance runs or how long state is kept.
 
 The example evolves through the architecture as follows:
 
@@ -188,7 +228,7 @@ KllStateOutput(k=200)
 ```
 
 This DAG implements construction of each maintained one-minute pane. Its input
-contract requires the complete pane population; the deployment supplies that
+contract requires all input samples matching the source, filters and group within that pane; the deployment supplies that
 bounded input from its source integration.
 
 ### Query Physical DAG
@@ -262,7 +302,7 @@ frontiers and cost evidence, including updates, retention, recurrence and sharin
 `enumerate_frontiers` constructs bounded, reachable antichain frontiers above explicit input boundaries, including query-only and fully precomputed results. It fails explicitly when the candidate budget is exceeded. Maintenance selection must still reject frontiers that violate window, freshness, or reuse requirements; deployment feasibility is checked before pricing.
 
 Physical compilation opens no readers. Bounded precompute outputs become typed
-query inputs. Their build window, evaluation time, population, readiness and
+query inputs. Their source, filters, grouping, build window, evaluation time, readiness and
 revision contracts must accompany the selected lifecycle and be checked during
 deployment binding. Type compatibility alone does not establish reuse legality.
 
@@ -323,7 +363,7 @@ InputSlot<KllState>[5 panes]
 
 The Deployment Plan Compiler establishes bindings and checks that their contracts
 satisfy the physical inputs and selected lifecycle, including KLL parameters,
-grouping, population, window coverage and revision scope. The deployment engine
+source, filters, grouping, window coverage and revision scope. The deployment engine
 resolves request-specific states and checks their actual coverage, revisions and
 readiness at execution time. A compiled plan cannot establish future readiness.
 
@@ -366,9 +406,9 @@ shared physical operator implementation library, `asap-physical-operators`, and
 its DAG runtime. The merge executes once per run for both consumers. Execution
 does not introduce additional planning decisions.
 
-Each maintained pane contributes its finalized population once. A replacement
-snapshot updates that pane's state; it does not introduce another population
-when the shared runtime merges panes for a query.
+Each maintained pane contributes its input samples once. A replacement snapshot
+replaces that pane's state; query merging must not count both the old and new
+snapshots as separate inputs.
 
 ## 6. Executable acceptance coverage
 
@@ -378,7 +418,7 @@ pane compilation, alongside independent operator/runtime fixtures:
 | Test | Contract exercised |
 | --- | --- |
 | `summary_maintenance_lifecycle_e2e::selected_temporal_lifecycle_compiles_panes_and_executes` | PromQL p50/p99 workloads → selected continuous lifecycle and Sliding framework → automatically generated maintenance/query DAGs → real codec round-trip → adjacent aligned windows; checks filters, entity identity, sample counts, missing/duplicate panes and phase rejection before opening readers |
-| `summary_maintenance_lifecycle_e2e::continuous_lifecycle_compiles_and_executes_spatial_kll` | PromQL workload → selected continuous lifecycle → logical DAG → compiled maintenance/query candidate → results in independent revisions; an unbounded candidate fails before pricing, and a bounded request candidate returns the same population |
+| `summary_maintenance_lifecycle_e2e::continuous_lifecycle_compiles_and_executes_spatial_kll` | PromQL workload → selected continuous lifecycle → logical DAG → compiled maintenance/query candidate → results in independent revisions; an unbounded candidate fails before pricing, and a bounded request candidate summarizes the same input samples |
 | `kll_pane_execution::five_panes_roundtrip_and_shared_merge_runs_once` | Explicit one-minute maintenance DAGs → real MessagePack state bytes → five required query inputs → shared native merge → p50/p99; counts every sample once, checks adjacent aligned windows and instruments one merge start per run |
 | `kll_pane_execution::restored_panes_reject_corruption_parameters_schema_and_missing_binding` | Corrupt bytes, parameter relabelling, incompatible schemas and absent bindings fail explicitly |
 | `precompute_candidates::grouped_rate_can_be_materialized_before_or_after_grouped_sum` | Cost changes select different legal precompute frontiers; both selected candidates execute with the same reset-sensitive result; uncompilable candidates are not priced |
@@ -399,6 +439,6 @@ panes, exponential histograms and cross-run delta accumulation require further
 physical candidates and are rejected by this entry point.
 
 Physical execution checks pane timestamps and duplicate entity states. Concrete
-stored identity, revisions, readiness and completeness evidence remain
+stored identity, revisions, readiness and complete coverage of required input samples remain
 deployment responsibilities. Real storage and HTTP execution belong to
 deployment-repository E2E tests.
