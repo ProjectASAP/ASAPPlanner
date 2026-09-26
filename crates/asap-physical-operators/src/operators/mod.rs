@@ -95,6 +95,61 @@ pub struct Operator {
     output: Schema,
 }
 impl Operator {
+    pub(crate) fn is_counter_readout(&self) -> bool {
+        matches!(
+            self.kind,
+            Kind::Readout {
+                statistic: crate::Statistic::Rate | crate::Statistic::Increase,
+                ..
+            }
+        )
+    }
+    pub(crate) fn with_counter_lookback(mut self, lookback: i64) -> Result<Self, Error> {
+        if lookback <= 0 {
+            return Err(invalid("counter lookback must be positive"));
+        }
+        if let Kind::Readout { parameters, .. } = &mut self.kind {
+            parameters.insert("logical_lookback_ms".into(), lookback.to_string());
+        }
+        Ok(self)
+    }
+    pub(super) fn readout_parameters(
+        &self,
+        context: &RunContext,
+    ) -> Result<std::collections::HashMap<String, String>, Error> {
+        let Kind::Readout { parameters, .. } = &self.kind else {
+            return Ok(Default::default());
+        };
+        let mut parameters = parameters.clone();
+        if let Some(lookback) = parameters.remove("logical_lookback_ms") {
+            let lookback: i64 = lookback
+                .parse()
+                .map_err(|_| invalid("invalid counter lookback"))?;
+            let end = match context.scope {
+                crate::runtime::Scope::Query {
+                    evaluation_time_ms, ..
+                } => evaluation_time_ms,
+                crate::runtime::Scope::Ingestion { window_end_ms, .. } => window_end_ms,
+            };
+            let start = end
+                .checked_sub(lookback)
+                .ok_or_else(|| invalid("counter window overflows Int64"))?;
+            if let crate::runtime::Scope::Ingestion {
+                window_start_ms, ..
+            } = context.scope
+            {
+                if window_start_ms != start {
+                    return Err(invalid(
+                        "maintenance window differs from logical counter window",
+                    ));
+                }
+            }
+            parameters.insert("range_start_ms".into(), start.to_string());
+            parameters.insert("range_end_ms".into(), end.to_string());
+        }
+        Ok(parameters)
+    }
+
     pub(crate) fn with_output_schema(mut self, output: Schema) -> Result<Self, Error> {
         if self.output.fields.len() != output.fields.len()
             || self
@@ -170,6 +225,9 @@ impl PhysicalOperator<Batch, Schema> for Operator {
             Kind::SummaryMerge { .. } => "SummaryMerge",
             Kind::Readout { .. } => "SummaryReadout",
         }
+    }
+    fn validate_context(&self, context: &RunContext) -> Result<(), Error> {
+        self.readout_parameters(context).map(|_| ())
     }
     fn input_schemas(&self) -> Vec<Schema> {
         self.inputs.clone()
