@@ -162,8 +162,8 @@ pub struct CandidateCost {
     pub total_cost: f64,
 }
 
-pub struct CandidateSelection {
-    pub candidate: PhysicalCandidate,
+pub struct CandidateSelection<T = PhysicalCandidate> {
+    pub candidate: T,
     pub candidate_index: usize,
     pub cost: CandidateCost,
 }
@@ -171,12 +171,14 @@ pub struct CandidateSelection {
 /// Select only compiled and deployment-feasible physical candidates. `None`
 /// rejects an unbindable candidate before pricing. Comparable scoped costs are
 /// required; deployment never rewrites the selected frontier after this step.
-pub fn select_candidate(
-    candidates: Vec<Result<PhysicalCandidate, Error>>,
-    mut evaluate: impl FnMut(&PhysicalCandidate) -> Result<Option<CandidateCost>, Error>,
-) -> Result<CandidateSelection, Error> {
+/// The payload is generic so deployments can retain binding/diagnostic metadata
+/// alongside each compiled computation without duplicating winner selection.
+pub fn select_candidate<T>(
+    candidates: Vec<Result<T, Error>>,
+    mut evaluate: impl FnMut(&T) -> Result<Option<CandidateCost>, Error>,
+) -> Result<CandidateSelection<T>, Error> {
     let mut scope: Option<(String, f64)> = None;
-    let mut selected: Option<CandidateSelection> = None;
+    let mut selected: Option<CandidateSelection<T>> = None;
     for (candidate_index, candidate) in candidates.into_iter().enumerate() {
         let Ok(candidate) = candidate else { continue };
         let Some(cost) = evaluate(&candidate)? else {
