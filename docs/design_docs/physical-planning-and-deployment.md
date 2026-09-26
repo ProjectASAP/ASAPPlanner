@@ -63,6 +63,14 @@ alone does not establish actual window coverage, revision compatibility or
 readiness; those require runtime checks. Physical location, encoding, scheduling
 and retention are separate execution/deployment contracts.
 
+The persisted semantic format contains only the dependency closure of the
+selected output. It excludes execution timing, temporary node IDs and deployment
+bindings. For a stored raw-input aggregate, its direct input interval is the
+record's `(start, end]` interval; a consuming query's lookback is not the identity
+of each pane. Nested computations retain their own time semantics. Planner exports
+this contract through `SummarySemanticFragment`; changing its semantic wire
+vocabulary requires an explicit format-version review.
+
 ### Running example
 
 Suppose p50 and p99 are requested over the same latency samples in a five-minute window,

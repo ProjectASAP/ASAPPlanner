@@ -35,6 +35,8 @@ pub mod guarantee;
 pub mod maintained_population;
 pub mod query_time;
 pub mod schema;
+pub mod semantic_definition;
+pub use semantic_definition::SummarySemanticFragment;
 pub mod sketch;
 pub mod summary_maintenance;
 pub mod summary_maintenance_lifecycle;
