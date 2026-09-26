@@ -162,7 +162,7 @@ dependencies = [
  "arrow-schema",
  "arrow-select",
  "atoi",
- "base64",
+ "base64 0.22.1",
  "chrono",
  "comfy-table",
  "half",
@@ -309,7 +309,7 @@ version = "0.1.0"
 dependencies = [
  "asap-frontend-promql",
  "asap-types",
- "asap_sketchlib",
+ "asap_sketchlib 0.3.0 (git+https://github.com/ProjectASAP/asap_sketchlib)",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
@@ -368,10 +368,34 @@ dependencies = [
  "asap-aware-mapping",
  "asap-frontend-promql",
  "asap-frontend-sql",
+ "asap-physical-operators",
  "asap-types",
- "asap_sketchlib",
+ "asap_sketchlib 0.3.0 (git+https://github.com/ProjectASAP/asap_sketchlib)",
+ "futures",
  "serde_json",
  "tokio",
+]
+
+[[package]]
+name = "asap-physical-operators"
+version = "0.1.0"
+dependencies = [
+ "asap-aware-mapping",
+ "asap-frontend-promql",
+ "asap-types",
+ "asap_sketch_codec",
+ "asap_sketchlib 0.3.0 (git+https://github.com/ProjectASAP/asap_sketchlib?rev=5f03ccbd798ed5fec62bdd839bcb331123cab369)",
+ "base64 0.21.7",
+ "bincode",
+ "futures",
+ "hex",
+ "prost",
+ "rmp-serde",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tracing",
+ "xxhash-rust",
 ]
 
 [[package]]
@@ -384,7 +408,34 @@ version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
+ "sha2",
  "thiserror 2.0.18",
+]
+
+[[package]]
+name = "asap_sketch_codec"
+version = "0.1.0"
+dependencies = [
+ "asap_sketchlib 0.3.0 (git+https://github.com/ProjectASAP/asap_sketchlib?rev=5f03ccbd798ed5fec62bdd839bcb331123cab369)",
+ "prost",
+]
+
+[[package]]
+name = "asap_sketchlib"
+version = "0.3.0"
+source = "git+https://github.com/ProjectASAP/asap_sketchlib?rev=5f03ccbd798ed5fec62bdd839bcb331123cab369#5f03ccbd798ed5fec62bdd839bcb331123cab369"
+dependencies = [
+ "bincode",
+ "bytes",
+ "prost",
+ "rand 0.9.5",
+ "rmp-serde",
+ "serde",
+ "serde-big-array",
+ "serde_bytes",
+ "smallvec",
+ "twox-hash 2.1.2",
+ "xxhash-rust",
 ]
 
 [[package]]
@@ -447,6 +498,12 @@ name = "autocfg"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c08606f8c3cbf4ce6ec8e28fb0014a2c086708fe954eaa885384a6165172e7e8"
+
+[[package]]
+name = "base64"
+version = "0.21.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9d297deb1925b89f2ccc13d7635fa0714f12c87adce1c75356b39ca9b7178567"
 
 [[package]]
 name = "base64"
@@ -942,7 +999,7 @@ checksum = "f52c4012648b34853e40a2c6bcaa8772f837831019b68aca384fb38436dba162"
 dependencies = [
  "arrow",
  "arrow-buffer",
- "base64",
+ "base64 0.22.1",
  "blake2",
  "blake3",
  "chrono",
@@ -2168,7 +2225,7 @@ dependencies = [
  "arrow-ipc",
  "arrow-schema",
  "arrow-select",
- "base64",
+ "base64 0.22.1",
  "brotli",
  "bytes",
  "chrono",

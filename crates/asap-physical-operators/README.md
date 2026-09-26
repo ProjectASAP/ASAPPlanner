@@ -1,0 +1,126 @@
+# ASAP physical operators
+
+An independent Rust physical operator DAG runtime shared by ingestion time and
+query time execution. The library requires neither backend engine, a server,
+a storage implementation, Arrow nor DataFusion. DataFusion informed the design;
+it is not the execution framework.
+
+`plan::PhysicalDag` binds typed operator inputs to node IDs. Each execution starts
+one producer per reachable node, shares output batches among its consumers, and
+bounds buffering. Dropping one consumer does not cancel other consumers. A
+`RunContext` carries query or ingestion scope, cancellation and byte accounting.
+Executions use the caller's worker and worker-local streams, with no internal
+thread pool. Poll multiple root streams concurrently when they share inputs.
+
+`operators::Operator` implements native batch sources, scalar values,
+projection, filtering, grouped exact aggregation, semi-join, grouped Sort and
+Limit, vector-to-scalar conversion, Union, and summary construction/merge/readout.
+Sort followed by Limit implements grouped ranking; no dedicated TopK physical
+operator is needed. Summary construction updates state batch by batch. End of
+input means the supplied query range or ingestion window is complete.
+
+```rust
+use asap_physical_operators::{
+    expressions::Expression,
+    operators::Operator,
+    values::Value,
+    plan::PhysicalDag,
+    runtime::{Limits, RunContext, Scope},
+};
+use asap_physical_operators::planner::pre_asap::DataType;
+use futures::{executor::block_on, StreamExt};
+
+let source = Operator::scalar(Value::Int64(7), DataType::Int64)?;
+let negate = Operator::project(source.schema(), vec![
+    ("value".into(), Expression::Negate(Box::new(Expression::Column(0)))),
+])?;
+let mut plan = PhysicalDag::default();
+plan.add(0, vec![], source)?;
+plan.add(1, vec![0], negate)?;
+let run = RunContext::new(
+    Scope::Query { evaluation_time_ms: 1000, revision: 1 },
+    Limits::default(),
+)?;
+let mut output = plan.execute(&[1], run)?.remove(0);
+let batch = block_on(output.next()).unwrap()?;
+assert!(matches!(batch.rows()[0][0], Value::Int64(-7)));
+# Ok::<(), asap_physical_operators::dag::Error>(())
+```
+
+`physical_planner::compile` accepts a post-ASAP DAG and typed input contracts.
+The resulting candidate is instantiated with deployment readers after selection. It rejects unsupported operations and
+schema mismatches before starting a source. Implement `PhysicalOperator` for a
+deployment source, including asynchronous I/O; computation operators remain in
+the library. The public `planner` export identifies the exact Planner types used
+by the crate. The physical compiler currently supports a subset of those types and
+operations; it does not interpret an unknown node as external fallback.
+
+Plain values preserve Planner scalar/collection types and nullability. Numeric
+arithmetic uses matching Int64 or Float64 inputs; integer overflow is an error.
+Boolean predicates use three-valued logic. Native summary states currently cover
+exact Sum/Count/Min/Max/Rate/Increase, KLL, DDSketch, HLL and Float64 weighted CMS and CountSketch with candidate heaps. Binding checks family,
+parameters and readout compatibility; source batches also validate state payloads.
+Existing accumulator algorithms are reused as kernels behind these operators.
+
+This crate is owned by ASAPPlanner. Its `planner-types` dependency is the local
+IR crate, so a contract change and its execution tests belong in the same PR.
+Deployments supply storage/ingestion sources and adapt output protocols. The
+library has no ASAPQuery-backend dependency. Backend raw Scan remains a separate
+deployment capability.
+
+See [the design](../../docs/design_docs/physical-planning-and-deployment.md).
+
+## Module boundaries
+
+- `plan`: immutable graph, operator interface, schemas and execution properties.
+- `runtime`: per-run streams, shared producers, memory reservations and cancellation.
+- `expressions`: scalar evaluation; typed builders and the Planner expression adapter.
+- `operators`: projection, filter, joins, aggregate/window, sort, limit and summary implementations.
+- `sources`: raw-source interface, Scan and the memory connector.
+- `physical_planner`: native operator lowering, typed input contracts and checked instantiation.
+- `summary_kernels`: sketchlib state adapters, exact accumulators, update adapters and traits.
+- `stored_state`: persisted-state decoding, delta reconstruction and readout.
+- `capability`: explicit kernel and native-batch/readout validation.
+
+The old `dag`, `accumulators`, `factory`, `traits` and `arithmetic` paths remain re-exports for deployment
+source compatibility. They contain no alternative execution implementations.
+
+A source must declare `Boundedness::Bounded` to feed a blocking operator.
+The default for a custom raw source is `Unknown`; query or ingestion scope alone
+does not promise that its cursor ends. `PhysicalDag::properties` validates these
+requirements before any source starts and returns boundedness and emission mode
+for every reachable node. The memory connector declares finite input. Custom
+physical sources expose the same facts through `PhysicalOperator::properties`.
+
+Blocking operators reserve estimated workspace and yield cooperatively during
+row processing and sort merges. Cancellation releases reservations when the
+stream is polled or dropped. Individual scalar evaluations, bounded sort chunks
+and sketch kernel calls are synchronous; this is not preemptive execution.
+There is no spill or partitioned parallel execution in this implementation.
+
+## Physical compilation and deployment inputs
+
+`physical_planner::compile` accepts a Planner `ExecutableDag`, typed
+`InputContract`s and output roots. It returns a reusable `CompiledPhysicalDag`
+containing selected native operators and no live readers. Compilation validates
+schemas, input ordering, sharing and boundedness before deployment source access.
+
+A deployment calls `CompiledPhysicalDag::instantiate` with exactly the declared
+inputs. This checks source schemas and execution properties and constructs the
+runnable graph without repeating logical lowering. The graph executes through
+the shared runtime with independent per-run state. Window coverage, revision and
+maintenance-policy admission remain deployment/planning contracts; this compiler
+does not discover storage or silently change a selected maintenance strategy.
+
+`physical_planner::compile_temporal_pane_candidate` lowers a selected continuous
+KLL lifecycle and Sliding/Tumbling framework into maintenance and query DAGs.
+`TemporalPaneMaintenance` supplies pane geometry and a resolved complete entity
+identity contract. The compiler inserts population guards, scan predicates,
+pane construction, ordered state slots, a shared merge and quantile readouts.
+Pane outputs have distinct physical identities from the logical whole-window
+summary, and the returned candidate retains the maintenance contract for binding.
+Each run checks phase, pane timestamps and duplicate entity states. The initial
+realization uses complete bounded snapshots; partial edges, exponential
+histograms and cross-run delta accumulation are unsupported. Storage identities,
+revision selection, completeness/readiness evidence and scheduling stay with
+deployment.

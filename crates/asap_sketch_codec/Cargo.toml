@@ -1,0 +1,8 @@
+[package]
+name = "asap_sketch_codec"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+asap_sketchlib = { git = "https://github.com/ProjectASAP/asap_sketchlib", rev = "5f03ccbd798ed5fec62bdd839bcb331123cab369" }
+prost = "0.13"

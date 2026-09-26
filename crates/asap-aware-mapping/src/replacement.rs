@@ -520,15 +520,15 @@ impl ReplacementSubDAG {
         )
     }
 
-    /// Runtime support for this candidate. Summary implementations remain
-    /// unknown until backend binding; a pure logical rewrite needs no new
-    /// physical operator. `Some(false)` disproves mixed-operation support.
+    /// Physical feasibility evidence for this candidate. A pure logical
+    /// rewrite needs no new operator. Unknown support is checked during
+    /// physical/deployment compilation; explicit rejection prevents selection.
     pub fn runtime_support_evidence(&self, cost_model: &dyn CostModel) -> Option<bool> {
         match &self.replacement {
             Replacement::ExactComposition(composition) => {
                 cost_model.value_operation_support_evidence(&composition.op, composition.placement)
             }
-            Replacement::Summary(_) => None,
+            Replacement::Summary(node) => cost_model.summary_support_evidence(node),
             Replacement::Rewrite(_) => Some(true),
         }
     }
@@ -834,6 +834,11 @@ pub(crate) fn realizations_for_intent(
                 )),
             ],
             AccuracyTarget::Exact => vec![exact_realization(intent)],
+            _ if matches!(intent, AggIntent::Count { .. }) => {
+                let mut candidates = sketch_realizations(intent, accuracy, cost_model);
+                candidates.push(exact_realization(intent));
+                candidates
+            }
             _ => sketch_realizations(intent, accuracy, cost_model),
         },
 
@@ -1286,6 +1291,22 @@ impl<'a> SketchAlgorithmStrategy<'a> {
     /// differs — see [`realize_child_with`]).
     fn propose_with(&self, root: &Rc<QueryExpr>, intent_override: Option<&AggIntent>) -> Proposals {
         let mut proposals = Proposals::default();
+        // A selected logical rewrite otherwise remains KeepPreAsap during DAG
+        // assembly. Also expose its concrete summary realization for selection.
+        if intent_override.is_none() {
+            if let Some(rewritten) = crate::rewrite::composed_aggregate_rewrite(root) {
+                if let Ok(node) = realize_child_with(&rewritten, self.planning_inputs, None) {
+                    if !matches!(node.expr, SummaryExpr::KeepPreAsap(_)) {
+                        proposals.candidates.push(ReplacementSubDAG {
+                            replacement: Replacement::Summary(node),
+                            strategy: "SketchAlgorithmStrategy",
+                            provenance: ReplacementProvenance::SummaryRealization,
+                            rationale: "realize a schema-preserving composition of temporal and grouped accumulators".into(),
+                        });
+                    }
+                }
+            }
+        }
         if let Ok(Some(node)) = exact_topk_over_temporal_values(root, self.planning_inputs) {
             proposals.candidates.push(ReplacementSubDAG {
                 replacement: Replacement::Summary(node),
@@ -1638,11 +1659,7 @@ fn exact_topk_over_temporal_values(
     else {
         return Ok(None);
     };
-    let [AggIntent::TopK {
-        k,
-        accuracy: AccuracyTarget::Exact,
-    }] = measures.as_slice()
-    else {
+    let [AggIntent::TopK { k, .. }] = measures.as_slice() else {
         return Ok(None);
     };
     let QueryExpr::Aggregate {
@@ -1821,11 +1838,30 @@ fn realize_binary(
                 return Ok(None);
             }
             let domains = lhs_domain.zip(rhs_domain).map(|(lhs, rhs)| [lhs, rhs]);
+            let has_mean = [lhs, rhs]
+                .iter()
+                .any(|expr| matches!(bindable_intent(expr), Some(AggIntent::Avg { .. })));
+            if has_mean
+                && domains.as_ref().is_none_or(|domains| {
+                    domains.iter().any(|domain| {
+                        !(domain.lower.abs().max(domain.upper.abs()) * domain.max_samples as f64)
+                            .is_finite()
+                    })
+                })
+            {
+                return Ok(None);
+            }
             lhs_node = realize_ddsketch_quantile_operand(lhs, planning_inputs, &target)?;
             rhs_node = realize_ddsketch_quantile_operand(rhs, planning_inputs, &target)?;
             if let Some(domains) = domains.as_ref() {
                 for (domain, node) in domains.iter().zip([&lhs_node, &rhs_node]) {
                     if !ddsketch_quantile_alpha(node)
+                        .or_else(|| {
+                            node.guarantee
+                                .as_ref()
+                                .is_some_and(ResultGuarantee::is_exact)
+                                .then_some(alpha)
+                        })
                         .is_some_and(|alpha| domain.supports_ddsketch(alpha))
                     {
                         return Ok(None);
@@ -1907,9 +1943,13 @@ fn realize_binary(
     let guarantee = if matches!(op, BinaryOpKind::Arithmetic(ArithmeticOpKind::Div))
         && direct_ddsketch_ratio
         && has_ratio_domains
-        && ddsketch_quantile_alpha(&lhs_node).is_some()
-        && ddsketch_quantile_alpha(&rhs_node).is_some()
-    {
+        && [&lhs_node, &rhs_node].iter().all(|node| {
+            ddsketch_quantile_alpha(node).is_some()
+                || node
+                    .guarantee
+                    .as_ref()
+                    .is_some_and(ResultGuarantee::is_exact)
+        }) {
         [lhs_node.guarantee.clone(), rhs_node.guarantee.clone()]
             .into_iter()
             .collect::<Option<Vec<_>>>()
@@ -2018,9 +2058,8 @@ fn is_promql_scalar(expr: &QueryExpr) -> bool {
     )
 }
 
-/// Both direct quantile operands inherit the workload target during PromQL
-/// lowering. Reuse that one target for the ratio rather than interpreting it
-/// as two independent error budgets.
+/// Quantile operands inherit one workload target. A temporal mean is exact
+/// on its checked finite domain and needs no approximation budget.
 fn shared_quantile_target(lhs: &QueryExpr, rhs: &QueryExpr) -> Option<AccuracyTarget> {
     let quantile_target = |expr: &QueryExpr| match bindable_intent(expr) {
         Some(AggIntent::Quantile { accuracy, q, .. })
@@ -2030,9 +2069,16 @@ fn shared_quantile_target(lhs: &QueryExpr, rhs: &QueryExpr) -> Option<AccuracyTa
         }
         _ => None,
     };
-    let lhs = quantile_target(lhs)?;
-    let rhs = quantile_target(rhs)?;
-    (lhs == rhs).then_some(lhs)
+    match (quantile_target(lhs), quantile_target(rhs)) {
+        (Some(lhs), Some(rhs)) => (lhs == rhs).then_some(lhs),
+        (Some(target), None) if matches!(bindable_intent(rhs), Some(AggIntent::Avg { .. })) => {
+            Some(target)
+        }
+        (None, Some(target)) if matches!(bindable_intent(lhs), Some(AggIntent::Avg { .. })) => {
+            Some(target)
+        }
+        _ => None,
+    }
 }
 
 /// For `a / b`, two DDSketches with the same relative bound `alpha` produce
@@ -4316,9 +4362,17 @@ fn rank_group<'a>(
     // purpose. `total_cmp` gives deterministic placement to a model's NaN
     // placeholders without dropping any candidate.
     ranked.sort_by(|a, b| {
-        cost_model
-            .estimate_cost(a, &target)
-            .total_cmp(&cost_model.estimate_cost(b, &target))
+        match (
+            cost_model.candidate_cost(a, &target),
+            cost_model.candidate_cost(b, &target),
+        ) {
+            (Some(a), Some(b)) => a.0.total_cmp(&b.0),
+            (Some(_), None) => std::cmp::Ordering::Less,
+            (None, Some(_)) => std::cmp::Ordering::Greater,
+            (None, None) => cost_model
+                .estimate_cost(a, &target)
+                .total_cmp(&cost_model.estimate_cost(b, &target)),
+        }
     });
     ranked
 }
@@ -4558,7 +4612,15 @@ impl<'a> GlobalSelection<'a> {
         if let Some(node) = self.assembled_nodes.borrow().get(&ptr) {
             return Ok(Rc::clone(node));
         }
-        let node = if query_time_nested_sum(target) {
+        let selected_composed_summary = self
+            .groups
+            .get(&ptr)
+            .and_then(|sel| sel.chosen)
+            .is_some_and(|candidate| matches!(&candidate.replacement,
+                Replacement::Summary(node) if matches!(&node.expr,
+                    SummaryExpr::SummaryAgg { child, .. }
+                    if matches!(&child.expr, SummaryExpr::KeepPreAsap(raw) if !contains_aggregate(raw)))));
+        let node = if query_time_nested_sum(target) && !selected_composed_summary {
             self.assemble_residual(target)?
         } else {
             match self
@@ -4904,7 +4966,7 @@ fn composition_options<'a>(
                     None => child_group.candidates.iter().collect(),
                 };
                 for child_candidate in child_candidates {
-                    if child_candidate.has_missing_accuracy_evidence() {
+                    if !is_automatically_selectable(child_candidate, cost_model) {
                         continue;
                     }
                     let Replacement::Summary(summary) = &child_candidate.replacement else {
@@ -5081,7 +5143,7 @@ impl<Id> PlanSpace<Id> {
                         .candidates
                         .iter()
                         .filter(|candidate| !is_composition_candidate(candidate))
-                        .filter(|candidate| is_automatically_selectable(candidate))
+                        .filter(|candidate| is_automatically_selectable(candidate, cost_model))
                         .filter_map(|candidate| {
                             costs
                                 .get(&group.target, candidate)
@@ -5107,7 +5169,7 @@ impl<Id> PlanSpace<Id> {
                     .filter(|candidate| {
                         !is_cse_candidate(candidate)
                             && !is_composition_candidate(candidate)
-                            && is_automatically_selectable(candidate)
+                            && is_automatically_selectable(candidate, cost_model)
                     })
                     .filter_map(|candidate| {
                         cost_model
@@ -5164,7 +5226,7 @@ impl<Id> PlanSpace<Id> {
                             .filter(|candidate| {
                                 !is_cse_candidate(candidate)
                                     && !is_composition_candidate(candidate)
-                                    && is_automatically_selectable(candidate)
+                                    && is_automatically_selectable(candidate, cost_model)
                             })
                             .filter_map(|candidate| {
                                 cost_model
@@ -5209,7 +5271,7 @@ impl<Id> PlanSpace<Id> {
                     // children (see `multiplier`'s `_ => effective` arm).
                     None => rank_group(group, cost_model).into_iter().find(|candidate| {
                         !is_composition_candidate(candidate)
-                            && is_automatically_selectable(candidate)
+                            && is_automatically_selectable(candidate, cost_model)
                             && (cost_model
                                 .candidate_cost(
                                     candidate,
@@ -5226,7 +5288,7 @@ impl<Id> PlanSpace<Id> {
                     .find(|candidate| {
                         !is_cse_candidate(candidate)
                             && !is_composition_candidate(candidate)
-                            && is_automatically_selectable(candidate)
+                            && is_automatically_selectable(candidate, cost_model)
                             && (cost_model
                                 .candidate_cost(candidate, &effective_target)
                                 .is_some()
@@ -5312,8 +5374,9 @@ fn is_cse_candidate(candidate: &ReplacementSubDAG) -> bool {
     )
 }
 
-fn is_automatically_selectable(candidate: &ReplacementSubDAG) -> bool {
+fn is_automatically_selectable(candidate: &ReplacementSubDAG, cost_model: &dyn CostModel) -> bool {
     !candidate.has_missing_accuracy_evidence()
+        && candidate.runtime_support_evidence(cost_model) != Some(false)
 }
 
 /// How much one direct reference to `parent_ptr` actually costs, once
@@ -6265,6 +6328,25 @@ mod tests {
         );
     }
 
+    // Approximate requests also admit exact temporal ranking candidates.
+    #[test]
+    fn approximate_temporal_topk_admits_exact_maintained_values() {
+        let root = Rc::new(lower_promql(
+            "topk by(job)(1,count_over_time(a[5m]))",
+            AccuracyTarget::EpsilonDelta {
+                epsilon: 0.01,
+                delta: 0.01,
+            },
+        ));
+        let planning_inputs =
+            CandidatePlanningInputs::with_default_accuracy(&crate::cost_model::DefaultCostModel);
+        let node = exact_topk_over_temporal_values(&root, planning_inputs)
+            .unwrap()
+            .expect("exact ranking is legal for an approximate request");
+        assert!(node.guarantee.as_ref().unwrap().is_exact());
+        asap_types::post_asap::compile_executable_dag(&node).unwrap();
+    }
+
     // Exact Top-K consumes the Planner's maintained temporal values.
     #[test]
     fn exact_temporal_topk_has_a_maintained_value_candidate() {
@@ -6315,6 +6397,43 @@ mod tests {
             assert!(!keys[0].ascending);
             assert_eq!(node.schema, values.schema);
             asap_types::post_asap::compile_executable_dag(&node).unwrap();
+        }
+    }
+
+    // A bounded exact mean can share the relative division proof with a quantile.
+    #[test]
+    fn bounded_mean_quantile_ratio_is_certified() {
+        struct Domain;
+        impl AccuracyEvidenceProvider for Domain {
+            fn quantile_input_domain(
+                &self,
+                _: &QueryExpr,
+            ) -> Option<crate::accuracy::QuantileInputDomain> {
+                Some(crate::accuracy::QuantileInputDomain {
+                    lower: 1.0,
+                    upper: 1000.0,
+                    max_samples: 10000,
+                    contract: "finite test population".into(),
+                })
+            }
+        }
+        let target = AccuracyTarget::EpsilonDelta {
+            epsilon: 0.01,
+            delta: 0.01,
+        };
+        let inputs = CandidatePlanningInputs {
+            evidence: &Domain,
+            ..CandidatePlanningInputs::with_default_accuracy(&DefaultCostModel)
+        };
+        for query in [
+            "avg_over_time(a[5m]) / quantile_over_time(0.5,a[5m])",
+            "quantile_over_time(0.5,a[5m]) / avg_over_time(a[5m])",
+        ] {
+            let root = Rc::new(lower_promql(query, target.clone()));
+            let node = realize_binary(&root, inputs, Some(&target))
+                .unwrap()
+                .expect("bounded ratio candidate");
+            assert!(DefaultAccuracyModel.satisfies(node.guarantee.as_ref().unwrap(), &target));
         }
     }
 
@@ -6612,6 +6731,23 @@ mod tests {
                 SketchParams::Hll { precision: 14 },
             ))
         );
+    }
+
+    // Exact counting remains a legal candidate under an approximate target.
+    #[test]
+    fn approximate_count_includes_exact_accumulator_candidate() {
+        let intent = AggIntent::Count {
+            accuracy: eps(0.01),
+        };
+        assert!(realizations_for_intent(&intent, &DefaultCostModel)
+            .iter()
+            .any(|candidate| matches!(
+                candidate,
+                Realization::ExactAggregate {
+                    kind: ExactKind::Count,
+                    ..
+                }
+            )));
     }
 
     #[test]
@@ -7399,7 +7535,7 @@ mod tests {
         assert_eq!(agg_group.consumer_count, 1);
         assert_eq!(
             agg_group.candidates.len(),
-            5,
+            6,
             "Hydra candidates with unknown evidence remain available: {:?}",
             agg_group.candidates
         );
@@ -8456,6 +8592,125 @@ mod tests {
                 .effective_consumer_count,
             1
         );
+    }
+
+    // A cheap but physically infeasible candidate must not be selected.
+    #[test]
+    fn explicit_summary_infeasibility_prevents_selection() {
+        struct Unsupported;
+        impl CostModel for Unsupported {
+            fn rank_candidates(
+                &self,
+                _: &AggIntent,
+                candidates: &[SketchAlgorithm],
+            ) -> Vec<SketchAlgorithm> {
+                candidates.to_vec()
+            }
+            fn candidate_cost(&self, _: &ReplacementSubDAG, _: &TargetSubDAG<'_>) -> Option<Cost> {
+                Some(Cost(1.0))
+            }
+            fn summary_support_evidence(&self, _: &SummaryNode) -> Option<bool> {
+                Some(false)
+            }
+        }
+        let root = Rc::new(lower_promql("sum_over_time(a[1m])", AccuracyTarget::Exact));
+        let space = search_workload(vec![("q", root)]);
+        let selected = space.global_selection(&Unsupported);
+        assert!(selected
+            .for_target(&space.roots[0].1)
+            .unwrap()
+            .chosen
+            .is_none());
+    }
+
+    // Composable temporal/grouped Sum must be executable as one producer.
+    #[test]
+    fn grouped_temporal_sum_has_one_summary_producer_candidate() {
+        let root = Rc::new(lower_promql(
+            "sum by(job)(sum_over_time(a[1m]))",
+            AccuracyTarget::Exact,
+        ));
+        let candidates =
+            SketchAlgorithmStrategy::default_cost_model().replacements(&TargetSubDAG::new(&root));
+        assert!(candidates
+            .iter()
+            .any(|candidate| matches!(&candidate.replacement,
+            Replacement::Summary(node) if matches!(&node.expr,
+                SummaryExpr::SummaryAgg { reduction: Reduction::Reduce(_), child, .. }
+                    if matches!(child.expr, SummaryExpr::KeepPreAsap(_))))));
+        struct PreferComposed;
+        impl CostModel for PreferComposed {
+            fn rank_candidates(
+                &self,
+                _: &AggIntent,
+                candidates: &[SketchAlgorithm],
+            ) -> Vec<SketchAlgorithm> {
+                candidates.to_vec()
+            }
+            fn candidate_cost(
+                &self,
+                candidate: &ReplacementSubDAG,
+                _: &TargetSubDAG<'_>,
+            ) -> Option<Cost> {
+                Some(Cost(
+                    if matches!(&candidate.replacement,
+                    Replacement::Summary(node) if matches!(&node.expr,
+                        SummaryExpr::SummaryAgg { reduction: Reduction::Reduce(_), child, .. }
+                            if matches!(child.expr, SummaryExpr::KeepPreAsap(_))))
+                    {
+                        1.0
+                    } else {
+                        100.0
+                    },
+                ))
+            }
+        }
+        let space = search_workload(vec![("q", root.clone())]);
+        let selected = space.global_selection(&PreferComposed);
+        let node = selected.assemble_target(&space.roots[0].1).unwrap();
+        assert!(matches!(&node.expr,
+            SummaryExpr::SummaryAgg { reduction: Reduction::Reduce(_), child, .. }
+                if matches!(child.expr, SummaryExpr::KeepPreAsap(_))));
+    }
+
+    // Mixed candidate ranking must honor explicit costs, not legacy estimates.
+    #[test]
+    fn mixed_candidate_ranking_uses_explicit_candidate_costs() {
+        struct ExplicitCosts;
+        impl CostModel for ExplicitCosts {
+            fn rank_candidates(
+                &self,
+                _: &AggIntent,
+                candidates: &[SketchAlgorithm],
+            ) -> Vec<SketchAlgorithm> {
+                candidates.to_vec()
+            }
+            fn candidate_cost(
+                &self,
+                candidate: &ReplacementSubDAG,
+                _: &TargetSubDAG<'_>,
+            ) -> Option<Cost> {
+                Some(Cost(
+                    if candidate.provenance == ReplacementProvenance::LogicalRewrite {
+                        1.0
+                    } else {
+                        100.0
+                    },
+                ))
+            }
+        }
+        let root = Rc::new(lower_promql(
+            "sum by(job)(sum_over_time(a[1m]))",
+            AccuracyTarget::Exact,
+        ));
+        let space = search_workload(vec![("q", root)]);
+        let selection = space.global_selection(&ExplicitCosts);
+        let selected = selection
+            .for_target(&space.roots[0].1)
+            .unwrap()
+            .chosen
+            .unwrap();
+        assert_eq!(selected.provenance, ReplacementProvenance::LogicalRewrite);
     }
 
     #[test]
