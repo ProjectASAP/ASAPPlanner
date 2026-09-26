@@ -25,6 +25,10 @@ pub trait PhysicalOperator<V, S> {
         false
     }
 
+    /// Validate run-specific contracts before any source is opened.
+    fn validate_context(&self, _context: &RunContext) -> Result<(), Error> {
+        Ok(())
+    }
     fn input_schemas(&self) -> Vec<S>;
     fn output_schema(&self) -> S;
     fn start<'a>(

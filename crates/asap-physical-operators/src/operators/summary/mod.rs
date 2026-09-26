@@ -205,6 +205,7 @@ pub(super) fn execute<'a>(
     mut inputs: Vec<Input<'a, Batch>>,
     context: RunContext,
 ) -> Result<OutputStream<'a, Batch>, Error> {
+    let parameters = operator.readout_parameters(&context)?;
     let output = operator.output.clone();
     let input = inputs.pop().ok_or_else(|| invalid("input missing"))?;
     match &operator.kind {
@@ -256,7 +257,7 @@ pub(super) fn execute<'a>(
         Kind::Readout {
             state,
             statistic,
-            parameters,
+            ..
         } => Ok(input
             .map(move |batch| {
                 let batch = batch?;
@@ -286,7 +287,7 @@ pub(super) fn execute<'a>(
                     } else {
                         Value::Float64(
                             summary
-                                .query_statistic(*statistic, &None, parameters)
+                                .query_statistic(*statistic, &None, &parameters)
                                 .map_err(|e| Error::Operator(e.to_string()))?,
                         )
                     };

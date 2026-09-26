@@ -50,6 +50,15 @@ pub(crate) fn execute<'r, V: 'r, S: Clone + PartialEq + Debug + 'r>(
         return Err(Error::Cancelled);
     }
     dag.validate(roots)?;
+    let mut pending = roots.to_vec();
+    let mut visited = std::collections::BTreeSet::new();
+    while let Some(id) = pending.pop() {
+        if visited.insert(id) {
+            let node = &dag.nodes[&id];
+            node.operator.validate_context(&context)?;
+            pending.extend(node.inputs.iter().copied());
+        }
+    }
     fn build<'r, V: 'r, S: 'r>(
         dag: &'r PhysicalDag<'_, V, S>,
         id: NodeId,

@@ -182,8 +182,35 @@ fn compile_internal(
                 auxiliary -= 1;
                 schemas.truncate(1);
             }
-            let operator = compile_node(node, &schemas)
+            let mut operator = compile_node(node, &schemas)
                 .map_err(|error| invalid(format!("node {id}: {error}")))?;
+            if operator.is_counter_readout() {
+                let mut pending = vec![id];
+                let mut visited = BTreeSet::new();
+                let mut ranges = BTreeSet::new();
+                while let Some(ancestor) = pending.pop() {
+                    if !visited.insert(ancestor) {
+                        continue;
+                    }
+                    if let Payload::Fallback {
+                        expression: QueryExpr::TimeRange { range, .. },
+                    } = &nodes[&ancestor].payload
+                    {
+                        ranges.insert(
+                            i64::try_from(range.as_millis())
+                                .map_err(|_| invalid("counter lookback exceeds Int64"))?,
+                        );
+                        continue;
+                    }
+                    pending.extend(dependencies.get(&ancestor).into_iter().flatten().copied());
+                }
+                if ranges.len() > 1 {
+                    return Err(invalid("counter readout has ambiguous logical windows"));
+                }
+                if let Some(lookback) = ranges.into_iter().next() {
+                    operator = operator.with_counter_lookback(lookback)?;
+                }
+            }
             graph.add(id, inputs, operator)?;
         }
     }

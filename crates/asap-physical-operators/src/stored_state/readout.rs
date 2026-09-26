@@ -132,7 +132,9 @@ pub fn insufficient_counter_samples(
     ) && state
         .as_any()
         .downcast_ref::<crate::summary_kernels::IncreaseAccumulator>()
-        .is_some_and(|state| state.sample_count < 2)
+        .is_some_and(|state| {
+            state.sample_count < 2 || state.last_seen_timestamp == state.starting_timestamp
+        })
 }
 
 pub fn exact_readout_optional(
@@ -168,6 +170,18 @@ mod counter_tests {
         assert_eq!(
             exact_readout_optional(
                 [Arc::new(state.clone()) as Arc<dyn AggregateCore>],
+                Statistic::Rate,
+                &None,
+                &parameters
+            )
+            .unwrap(),
+            None
+        );
+        let mut repeated = state.clone();
+        repeated.update(Measurement::new(10.), 10_000);
+        assert_eq!(
+            exact_readout_optional(
+                [Arc::new(repeated) as Arc<dyn AggregateCore>],
                 Statistic::Rate,
                 &None,
                 &parameters

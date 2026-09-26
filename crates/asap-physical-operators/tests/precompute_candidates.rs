@@ -112,6 +112,10 @@ fn grouped_rate_can_be_materialized_before_or_after_grouped_sum() {
         } => (family, input, grouping),
         _ => unreachable!(),
     };
+    let range_parameters = std::collections::HashMap::from([
+        ("range_start_ms".into(), "-58000".into()),
+        ("range_end_ms".into(), "2000".into()),
+    ]);
     let mut expected_rate_sum = 0.;
     let rows = [[100., 0., 100.], [100., 200., 0.]]
         .into_iter()
@@ -126,7 +130,7 @@ fn grouped_rate_can_be_materialized_before_or_after_grouped_sum() {
                 .query_statistic(
                     asap_physical_operators::Statistic::Rate,
                     &None,
-                    &Default::default(),
+                    &range_parameters,
                 )
                 .unwrap();
             let summary = Value::Summary {
@@ -262,7 +266,7 @@ fn grouped_rate_can_be_materialized_before_or_after_grouped_sum() {
         revision: 1,
     };
     let maintenance_scope = Scope::Ingestion {
-        window_start_ms: 0,
+        window_start_ms: -58_000,
         window_end_ms: 2000,
         revision: 1,
     };
@@ -270,6 +274,20 @@ fn grouped_rate_can_be_materialized_before_or_after_grouped_sum() {
     for candidate in candidates {
         let candidate = candidate.unwrap();
         let inputs = if let Some(precompute) = &candidate.precompute {
+            let source = Operator::source(batch.schema().clone(), vec![batch.clone()]).unwrap();
+            let invalid = precompute
+                .instantiate(BTreeMap::from([(state_id, Box::new(source) as Source<'_>)]))
+                .unwrap();
+            let context = RunContext::new(
+                Scope::Ingestion {
+                    window_start_ms: 0,
+                    window_end_ms: 2000,
+                    revision: 1,
+                },
+                Limits::default(),
+            )
+            .unwrap();
+            assert!(invalid.execute(precompute.roots(), context).is_err());
             let stored = run(
                 precompute,
                 BTreeMap::from([(state_id, batch.clone())]),
@@ -310,7 +328,7 @@ fn grouped_rate_can_be_materialized_before_or_after_grouped_sum() {
         .query_statistic(
             asap_physical_operators::Statistic::Rate,
             &None,
-            &Default::default(),
+            &range_parameters,
         )
         .unwrap();
     assert_ne!(
