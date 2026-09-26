@@ -588,14 +588,6 @@ pub enum SummaryInputExpr {
     Column(ColumnRef),
     Tuple(Vec<SummaryInputExpr>),
     EntityIdentity(EntityIdentity),
-    /// Reset-aware non-negative increment derived at ingest from the current
-    /// counter sample and the previous sample for the same series. This is an
-    /// update expression, not a query-time rate estimate; CandidateTopK uses
-    /// it only for membership and reranks against an exact counter SDS.
-    ResetAwareCounterDelta {
-        value: ColumnRef,
-        series: EntityIdentity,
-    },
 }
 
 /// What to extract from a built summary. Carried by `SummaryEstimate`.

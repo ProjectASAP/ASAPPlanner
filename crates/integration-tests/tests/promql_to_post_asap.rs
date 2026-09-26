@@ -20,10 +20,9 @@ use asap_aware_mapping::{
 };
 use asap_integration_tests::fixtures::lower_promql;
 use asap_types::post_asap::{
-    compile_executable_dag, CandidateCompleteness, CompositionOperator, EdgeRole, EntityIdentity,
-    ExactKind, ExactParams, GroupingStrategy, NonNegativeWeightProof, SketchAlgorithm, SketchKind,
-    SketchParams, SketchQuery, SummaryExpr, SummaryFamilyType, SummaryInputExpr, SummaryNode,
-    SummarySchema, SummaryUpdate, ValueOperation, WeightDomain,
+    compile_executable_dag, CompositionOperator, EntityIdentity, ExactKind, ExactParams,
+    GroupingStrategy, SketchAlgorithm, SketchKind, SketchParams, SketchQuery, SummaryExpr,
+    SummaryFamilyType, SummaryInputExpr, SummaryNode, SummarySchema, SummaryUpdate, ValueOperation,
 };
 use asap_types::pre_asap::expr_ir::ColumnRef;
 use asap_types::pre_asap::query_expr::{QueryExpr, Reduction};
@@ -91,7 +90,7 @@ fn value_ranked_topk_preserves_summary_children_in_post_asap_dag() {
     ] {
         let root = lower_search_and_materialize(query);
         let SummaryExpr::ValueOperation {
-            operation: ValueOperation::Limit { n, offset },
+            operation: ValueOperation::Limit { n, offset, .. },
             child: sort,
             ..
         } = &root.expr
@@ -107,11 +106,23 @@ fn value_ranked_topk_preserves_summary_children_in_post_asap_dag() {
         else {
             panic!("expected query-time Sort under Limit for {query}");
         };
-        assert!(
-            matches!(child.expr, SummaryExpr::SummaryAgg { .. }),
-            "the materializable child must remain visible for {query}: {:?}",
-            child.expr
-        );
+        let SummaryExpr::ValueOperation {
+            operation: ValueOperation::FinalizeExactAccumulator,
+            child: state,
+            ..
+        } = &child.expr
+        else {
+            panic!(
+                "Sort must consume finalized values for {query}: {:?}",
+                child.expr
+            );
+        };
+        assert!(matches!(state.expr, SummaryExpr::SummaryAgg { .. }));
+        assert!(child
+            .schema
+            .fields
+            .iter()
+            .all(|field| matches!(field.dtype, SummaryFamilyType::Plain(_))));
     }
 }
 
@@ -197,7 +208,9 @@ fn value_ranked_topk_over_binary_ratio_finalizes_both_summary_operands() {
     let query = "topk(1, sum by(job)(increase(a[6h])) / sum by(job)(increase(b[6h])))";
     let root = lower_search_and_materialize(query);
     let SummaryExpr::ValueOperation {
-        operation: ValueOperation::Limit { n: 1, offset: 0 },
+        operation: ValueOperation::Limit {
+            n: 1, offset: 0, ..
+        },
         child: sort,
         ..
     } = &root.expr
@@ -234,6 +247,10 @@ fn value_ranked_topk_over_binary_ratio_finalizes_both_summary_operands() {
 struct SeparatedTopK;
 
 impl AccuracyEvidenceProvider for SeparatedTopK {
+    fn topk_max_distinct_items(&self, _: &QueryExpr) -> Option<u64> {
+        Some(1000)
+    }
+
     fn propagation_stats(
         &self,
         op: &CompositionOperator,
@@ -251,15 +268,163 @@ impl AccuracyEvidenceProvider for SeparatedTopK {
     }
 }
 
+// Rate-weighted summaries must consume finalized rates, never raw counter deltas.
 #[test]
-fn counter_weighted_topk_uses_candidates_only_for_membership_and_exact_values_for_rerank() {
-    for (query, expected_k) in [
-        ("topk(2, sum by(job)(rate(m[1m])))", 2),
-        ("topk(3, sum by(job)(rate(cpu_seconds_total[1h])))", 3),
-        ("topk(3, sum by(job)(increase(requests_total[6h])))", 3),
+fn grouped_rate_topk_consumes_finalized_rate_values() {
+    let root = Rc::new(
+        lower_promql(
+            "topk by(job)(2, sum by(service, job)(rate(m[1m])))",
+            AccuracyTarget::Epsilon(0.01),
+        )
+        .unwrap(),
+    );
+    let strategy = SketchAlgorithmStrategy::new_with_planning_inputs_and_evidence(
+        &DefaultCostModel,
+        &DefaultAccuracyModel,
+        &EqualSplitAllocator,
+        &SeparatedTopK,
+    );
+    let plan = strategy
+        .replacements(&TargetSubDAG::new(&root))
+        .into_iter()
+        .find_map(|candidate| match candidate.replacement {
+            Replacement::Summary(node) if candidate.rationale.contains("CmsWithHeap") => Some(node),
+            _ => None,
+        })
+        .expect("rate-weighted CMS plan");
+    let dag = compile_executable_dag(&plan).unwrap();
+    assert!(!dag.nodes.iter().any(|node| matches!(
+        node.payload,
+        asap_types::post_asap::ExecutableOperatorPayload::RelationalJoin { .. }
+    )));
+    let node = dag.nodes.iter().find(|node| matches!(&node.payload,
+        asap_types::post_asap::ExecutableOperatorPayload::SummaryAgg { family: SummaryFamilyType::Sketch(kind, _), .. }
+        if kind.algorithm() == &SketchAlgorithm::CmsWithHeap)).unwrap();
+    assert_eq!(
+        node.output_state.timing,
+        asap_types::post_asap::ExecutionTiming::QueryTime
+    );
+    let asap_types::post_asap::ExecutableOperatorPayload::SummaryAgg { input, .. } = &node.payload
+    else {
+        unreachable!()
+    };
+    assert_eq!(
+        input.weight,
+        SummaryInputExpr::Column(ColumnRef::SampleValue)
+    );
+    assert_eq!(
+        input.item,
+        Some(SummaryInputExpr::Column(ColumnRef::Named("service".into())))
+    );
+}
+
+// Selection is adaptive: a per-key score bound alone cannot certify all returned rows.
+#[test]
+fn weighted_topk_keeps_candidates_with_missing_population_evidence() {
+    struct NoPopulationBound;
+    impl AccuracyEvidenceProvider for NoPopulationBound {
+        fn propagation_stats(
+            &self,
+            op: &CompositionOperator,
+            family: &SummaryFamilyType,
+            query: Option<&SketchQuery>,
+        ) -> PropagationStats {
+            SeparatedTopK.propagation_stats(op, family, query)
+        }
+    }
+    let root = Rc::new(
+        lower_promql(
+            "topk by(job)(2, sum by(service, job)(rate(m[1m])))",
+            AccuracyTarget::Epsilon(0.01),
+        )
+        .unwrap(),
+    );
+    let strategy = SketchAlgorithmStrategy::new_with_planning_inputs_and_evidence(
+        &DefaultCostModel,
+        &DefaultAccuracyModel,
+        &EqualSplitAllocator,
+        &NoPopulationBound,
+    );
+    let candidates = strategy.replacements(&TargetSubDAG::new(&root));
+    assert!(candidates
+        .iter()
+        .any(|candidate| candidate.rationale.contains("CmsWithHeap")
+            && candidate.has_missing_accuracy_evidence()));
+}
+
+// Unknown requirements must survive physical export for deployment to inspect.
+#[test]
+fn weighted_topk_exports_symbolic_evidence_requirements() {
+    let root = Rc::new(
+        lower_promql(
+            "topk by(job)(2, sum by(service, job)(rate(m[1m])))",
+            AccuracyTarget::EpsilonDelta {
+                epsilon: 0.01,
+                delta: 0.01,
+            },
+        )
+        .unwrap(),
+    );
+    let candidates =
+        SketchAlgorithmStrategy::default_cost_model().replacements(&TargetSubDAG::new(&root));
+    let candidate = candidates
+        .iter()
+        .find(|candidate| candidate.rationale.contains("CmsWithHeap"))
+        .unwrap();
+    assert!(candidate.has_missing_accuracy_evidence());
+    let Replacement::Summary(node) = &candidate.replacement else {
+        panic!("summary candidate")
+    };
+    let dag = compile_executable_dag(node).unwrap();
+    let exported = serde_json::to_string(&dag).unwrap();
+    assert!(exported.contains("topk_max_distinct_items"));
+    assert!(exported.contains("topk_membership_margin"));
+    assert!(node.guarantee.as_ref().unwrap().has_unknown());
+}
+
+// Supplied invalid facts are distinct from absent evidence.
+#[test]
+fn weighted_topk_rejects_invalid_population_evidence() {
+    struct InvalidPopulation;
+    impl AccuracyEvidenceProvider for InvalidPopulation {
+        fn topk_max_distinct_items(&self, _: &QueryExpr) -> Option<u64> {
+            Some(0)
+        }
+    }
+    let root = Rc::new(
+        lower_promql(
+            "topk by(job)(2, sum by(service, job)(rate(m[1m])))",
+            AccuracyTarget::Epsilon(0.01),
+        )
+        .unwrap(),
+    );
+    let strategy = SketchAlgorithmStrategy::new_with_planning_inputs_and_evidence(
+        &DefaultCostModel,
+        &DefaultAccuracyModel,
+        &EqualSplitAllocator,
+        &InvalidPopulation,
+    );
+    assert!(strategy.replacements(&TargetSubDAG::new(&root)).is_empty());
+}
+
+// The summary's estimate is projected back to logical service/job score rows.
+#[test]
+fn rate_and_increase_topk_use_summary_scores_and_grouped_limits() {
+    for query in [
+        "topk(2, sum by(job)(rate(m[1m])))",
+        "topk by(job)(2, sum by(service, job)(rate(m[1m])))",
+        "topk(2, sum by(job)(increase(m[6h])))",
     ] {
-        let root =
-            Rc::new(lower_promql(query, AccuracyTarget::Epsilon(0.01)).expect("lowering failed"));
+        let root = Rc::new(
+            lower_promql(
+                query,
+                AccuracyTarget::EpsilonDelta {
+                    epsilon: 0.01,
+                    delta: 0.01,
+                },
+            )
+            .unwrap(),
+        );
         let strategy = SketchAlgorithmStrategy::new_with_planning_inputs_and_evidence(
             &DefaultCostModel,
             &DefaultAccuracyModel,
@@ -270,109 +435,91 @@ fn counter_weighted_topk_uses_candidates_only_for_membership_and_exact_values_fo
             .replacements(&TargetSubDAG::new(&root))
             .into_iter()
             .find_map(|candidate| match candidate.replacement {
-                Replacement::Summary(node)
-                    if candidate.rationale.contains("CmsWithHeap")
-                        && matches!(node.expr, SummaryExpr::CandidateTopK { .. }) =>
-                {
+                Replacement::Summary(node) if candidate.rationale.contains("CmsWithHeap") => {
                     Some(node)
                 }
                 _ => None,
             })
-            .unwrap_or_else(|| panic!("missing CandidateTopK for {query}"));
-        let SummaryExpr::CandidateTopK {
-            candidates,
-            values,
-            k,
-            completeness: CandidateCompleteness::Certified { .. },
+            .expect("weighted summary");
+        let SummaryExpr::ValueOperation {
+            child: sorted,
+            operation:
+                ValueOperation::Limit {
+                    n: 2,
+                    offset: 0,
+                    partition_by,
+                },
             ..
         } = &plan.expr
         else {
-            panic!("unexpected candidate plan for {query}: {:?}", plan.expr)
+            panic!("grouped limit")
         };
-        assert_eq!(*k, expected_k);
-        let SummaryExpr::SummaryEstimate { summary_input, .. } = &candidates.expr else {
-            panic!("candidate membership must be a summary readout")
+        let SummaryExpr::ValueOperation {
+            child: projected,
+            operation:
+                ValueOperation::Sort {
+                    partition_by: sort_groups,
+                    ..
+                },
+            ..
+        } = &sorted.expr
+        else {
+            panic!("grouped sort")
         };
+        assert_eq!(partition_by, sort_groups);
+        assert_eq!(partition_by.len(), usize::from(query.contains("topk by")));
+        let SummaryExpr::ValueOperation {
+            child: readout,
+            operation: ValueOperation::Project { .. },
+            ..
+        } = &projected.expr
+        else {
+            panic!("logical output projection")
+        };
+        let SummaryExpr::SummaryEstimate {
+            summary_input,
+            query: SketchQuery::TopK { k },
+        } = &readout.expr
+        else {
+            panic!("heap readout")
+        };
+        assert!(*k > 2, "candidate capacity is independent of output count");
         let SummaryExpr::SummaryAgg {
-            child,
-            family,
+            child: rates,
             input,
-            reduction,
             ..
         } = &summary_input.expr
         else {
-            panic!("candidate membership must read a summary aggregate")
+            panic!("weighted summary")
         };
-        assert!(matches!(family, SummaryFamilyType::Sketch(kind, _)
-            if kind.algorithm() == &SketchAlgorithm::CmsWithHeap));
-        let SummaryFamilyType::Sketch(kind, _) = family else {
-            unreachable!()
-        };
-        assert!(
-            asap_aware_mapping::replacement::sketch_state_bytes(kind.params())
-                .is_some_and(|bytes| bytes
-                    <= asap_aware_mapping::replacement::DEFAULT_MAX_SKETCH_STATE_BYTES)
-        );
-        assert!(matches!(reduction, Reduction::Reduce(keys) if keys.is_empty()));
-        assert_eq!(summary_input.schema.fields.len(), 1);
         assert_eq!(
-            input.weight_domain,
-            WeightDomain::NonNegative {
-                proof: NonNegativeWeightProof::ResetAwareCounterDerivative,
-            }
-        );
-        assert!(matches!(
             input.weight,
-            SummaryInputExpr::ResetAwareCounterDelta {
-                value: ColumnRef::SampleValue,
-                series: EntityIdentity::PromqlLabelSet { .. },
-            }
-        ));
-        let executable = compile_executable_dag(&plan).expect("typed executable DAG");
-        assert!(executable.nodes.iter().any(|node| matches!(
-            &node.payload,
-            asap_types::post_asap::ExecutableOperatorPayload::CandidateTopK {
-                k,
-                grouping,
-                completeness: CandidateCompleteness::Certified { .. },
-            } if *k == expected_k as u64 && grouping.is_empty() && !grouping.is_without()
-        )));
-        assert!(executable.nodes.iter().any(|node| matches!(
-            &node.payload,
-            asap_types::post_asap::ExecutableOperatorPayload::SummaryAgg {
-                input: SummaryUpdate {
-                    weight: SummaryInputExpr::ResetAwareCounterDelta { .. },
-                    ..
-                },
-                ..
-            }
-        )));
-        assert!(
-            executable.edges.iter().all(|edge| edge.grouping
-                != asap_types::post_asap::GroupingEdgeCompatibility::Incompatible),
-            "unexpected incompatible edge: {:#?}",
-            executable.edges
+            SummaryInputExpr::Column(ColumnRef::SampleValue)
         );
-        assert!(executable
-            .edges
-            .iter()
-            .any(|edge| edge.role == EdgeRole::CandidateMembership));
-        assert!(executable
-            .edges
-            .iter()
-            .any(|edge| edge.role == EdgeRole::AuthoritativeValues));
-        assert!(
-            !matches!(child.expr, SummaryExpr::SummaryAgg { .. }),
-            "membership materialization must bind ingest rows, not another summary"
-        );
-        assert!(values.guarantee.as_ref().is_some_and(|g| g.is_exact()));
         assert!(matches!(
-            values.expr,
+            rates.expr,
             SummaryExpr::ValueOperation {
                 operation: ValueOperation::FinalizeExactAccumulator,
                 ..
             }
         ));
+        let dag = compile_executable_dag(&plan).unwrap();
+        for phase in [
+            asap_types::post_asap::ExecutionTiming::IngestionTime,
+            asap_types::post_asap::ExecutionTiming::QueryTime,
+        ] {
+            let phases = dag.nodes.iter().map(|node| (node.id, phase)).collect();
+            let placed = dag.with_execution_phases(&phases).unwrap();
+            assert!(placed
+                .nodes
+                .iter()
+                .all(|node| node.output_state.timing == phase));
+        }
+        let guarantee = plan.guarantee.as_ref().unwrap();
+        assert!(guarantee.failure_probability.evaluate().unwrap() <= 0.01);
+        assert!(guarantee.provenance.iter().any(|source| matches!(source,
+            asap_types::post_asap::GuaranteeSource::ChildGuarantee { guarantee, .. }
+            if guarantee.metric == asap_types::post_asap::ErrorMetric::Frequency)));
     }
 }
 
@@ -585,7 +732,7 @@ fn planner_only_e2e_temporal_topk_preserves_query_update_and_readout_contract() 
             | SketchParams::CountSketchWithHeap { heap_size, .. } => *heap_size,
             params => panic!("expected heap-bearing Top-K parameters, got {params:?}"),
         };
-        assert_eq!(heap_size, *k as u32);
+        assert_eq!(heap_size, 100u32.max(*k as u32));
         assert_eq!(
             state_input.item.as_ref(),
             Some(&SummaryInputExpr::EntityIdentity(
@@ -808,7 +955,7 @@ fn promql_quantile_of_rate_binds_kll_over_rate_accumulator() {
     let SummaryExpr::ValueOperation {
         child,
         operation: ValueOperation::FinalizeExactAccumulator,
-        timing: asap_types::post_asap::ExecutionTiming::MaintenanceTime,
+        timing: asap_types::post_asap::ExecutionTiming::IngestionTime,
     } = &child.expr
     else {
         panic!("rate needs a maintenance readout");
@@ -947,7 +1094,7 @@ fn promql_sum_of_count_over_time_is_composed_by_default_search() {
 }
 
 #[test]
-fn nested_summary_explicitly_finalizes_exact_child_at_maintenance_time() {
+fn nested_summary_explicitly_finalizes_exact_child_at_ingestion_time() {
     // Real workload selection must expose the state-to-value edge; an outer
     // sketch must not interpret exact accumulator bytes as input samples.
     let pre = Rc::new(
@@ -986,7 +1133,7 @@ fn nested_summary_explicitly_finalizes_exact_child_at_maintenance_time() {
     ));
     assert_eq!(
         *timing,
-        asap_types::post_asap::ExecutionTiming::MaintenanceTime
+        asap_types::post_asap::ExecutionTiming::IngestionTime
     );
     assert!(matches!(
         source.expr,
@@ -1009,16 +1156,16 @@ fn nested_summary_explicitly_finalizes_exact_child_at_maintenance_time() {
 }
 
 #[test]
-fn exact_binary_maintenance_has_explicit_timing_and_legacy_wire_default() {
+fn physical_node_owns_phase_independently_of_binary_payload() {
     use asap_types::post_asap::{ExecutableOperatorPayload, ExecutionTiming};
     for (query, expected) in [
         (
             "quantile(0.9, sum_over_time(m[1m]) + sum_over_time(n[1m]))",
-            ExecutionTiming::MaintenanceTime,
+            ExecutionTiming::IngestionTime,
         ),
         (
             "sum_over_time(m[1m]) + sum_over_time(n[1m])",
-            ExecutionTiming::ReadTime,
+            ExecutionTiming::QueryTime,
         ),
     ] {
         let input = lower_promql(query, AccuracyTarget::Epsilon(0.05)).unwrap();
@@ -1029,23 +1176,19 @@ fn exact_binary_maintenance_has_explicit_timing_and_legacy_wire_default() {
             .unwrap()
             .unwrap();
         let dag = compile_executable_dag(&plan).unwrap();
-        let payload = dag
+        let node = dag
             .nodes
             .iter()
-            .find_map(|node| {
-                matches!(node.payload, ExecutableOperatorPayload::Binary { .. })
-                    .then_some(&node.payload)
-            })
+            .find(|node| matches!(node.payload, ExecutableOperatorPayload::Binary { .. }))
             .unwrap();
-        assert!(
-            matches!(payload, ExecutableOperatorPayload::Binary { timing, .. } if *timing == expected)
-        );
-        let wire = serde_json::to_value(payload).unwrap();
-        if expected == ExecutionTiming::ReadTime {
-            assert!(wire.get("timing").is_none());
-        }
+        assert_eq!(node.output_state.timing, expected);
+        let wire = serde_json::to_value(&node.payload).unwrap();
+        assert!(wire.get("timing").is_none());
+        let mut obsolete = wire.clone();
+        obsolete["timing"] = serde_json::json!(expected.as_str());
+        assert!(serde_json::from_value::<ExecutableOperatorPayload>(obsolete).is_err());
         let restored: ExecutableOperatorPayload = serde_json::from_value(wire).unwrap();
-        assert_eq!(&restored, payload);
+        assert_eq!(restored, node.payload);
     }
 }
 

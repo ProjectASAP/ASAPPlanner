@@ -238,15 +238,12 @@ pub enum RewriteKind {
     /// is needed once the call wears DataFusion's own name.
     CountDistinct,
     /// `f(cond)` -> `sum(CASE WHEN cond THEN 1 ELSE 0 END)` -- ClickHouse's
-    /// conditional-count family. Not a plain `count(...) FILTER (WHERE
-    /// cond)`: `AggIntent::Count` never consults its argument (it always
-    /// means "row count"), so a per-call *filtered* count needs a shape
-    /// whose value actually depends on `cond` to survive `lower_agg_intent`
-    /// unchanged. Summing a 0/1 indicator does, and lands on the existing
-    /// `Sum` path -- including the general non-column-argument
+    /// conditional-count family. Predates per-measure filters (issue #466,
+    /// `Aggregate.filters`); the `-If` combinators' move onto that field is
+    /// left for a follow-up, so the indicator sum stays: it lands on the
+    /// existing `Sum` path -- including the general non-column-argument
     /// materialization `asap-frontend-sql`'s `lower_aggregate` already does
-    /// for any reducer over an expression (issue #110) -- so no new
-    /// `AggIntent` variant or lowering path is needed either.
+    /// for any reducer over an expression (issue #110).
     CountIfToSum,
     /// No native DataFusion aggregate shape to rewrite to at all -- the call
     /// survives unchanged (`ClickHouseBuiltinRewrite` is a no-op for it) and

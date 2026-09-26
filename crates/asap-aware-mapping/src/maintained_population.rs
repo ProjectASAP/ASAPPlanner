@@ -7,7 +7,8 @@ use asap_types::post_asap::{
     SummaryField, SummaryNode, SummarySchema, ValueOperation,
 };
 use asap_types::pre_asap::{
-    AggIntent, CompareOpKind, DataType, QueryExpr, Reduction, ScalarValue, Schema, Source,
+    any_measure_filtered, AggIntent, CompareOpKind, DataType, QueryExpr, Reduction, ScalarValue,
+    Schema, Source,
 };
 use std::rc::Rc;
 
@@ -40,12 +41,16 @@ fn recognize(root: &QueryExpr) -> Option<(MaintainedPopulation, PopulationReadou
             child,
             reduction: Reduction::Reduce(grouping),
             measures,
+            filters,
             having: None,
             ..
         } => {
             let [intent] = measures.as_slice() else {
                 return None;
             };
+            if any_measure_filtered(filters) {
+                return None;
+            }
             let (col, readout) = match intent {
                 AggIntent::Quantile { q, col, .. } if q.is_finite() => {
                     (*col, PopulationReadout::Quantile { q: *q })
@@ -229,7 +234,7 @@ impl MaintainedPopulationStrategy {
                         cols: cols.clone(),
                         qualifier: qualifier.clone(),
                     },
-                    timing: ExecutionTiming::ReadTime,
+                    timing: ExecutionTiming::QueryTime,
                 },
             }));
         }
@@ -258,7 +263,7 @@ impl MaintainedPopulationStrategy {
             expr: SummaryExpr::ValueOperation {
                 child: scan,
                 operation: ValueOperation::MaintainPopulation { population },
-                timing: ExecutionTiming::MaintenanceTime,
+                timing: ExecutionTiming::IngestionTime,
             },
             schema: input_schema,
             guarantee: Some(ResultGuarantee::exact(
@@ -269,7 +274,7 @@ impl MaintainedPopulationStrategy {
             expr: SummaryExpr::ValueOperation {
                 child: maintained,
                 operation: ValueOperation::ReadPopulation { readout },
-                timing: ExecutionTiming::ReadTime,
+                timing: ExecutionTiming::QueryTime,
             },
             schema: plain(root.output_schema().ok()?),
             guarantee: Some(ResultGuarantee::exact("exact current-population readout")),

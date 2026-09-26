@@ -25,7 +25,7 @@ pub enum SummaryFamilyType {
     /// passed through unchanged from a pre-ASAP edge.
     Plain(DataType),
     /// Exact, mergeable accumulator state (`Sum`/`Count`/`Min`/`Max`/`Rate`/
-    /// `Increase`) — the partial state *is* the value; no readout needed.
+    /// `Increase`). Value consumers require an explicit finalization boundary.
     ExactAggregate(ExactKind, ExactParams),
     /// Approximate sketch state (KLL/CMS/HLL/…), read out via a
     /// `SummaryEstimate`. A [`SketchKind`] already carries the concrete

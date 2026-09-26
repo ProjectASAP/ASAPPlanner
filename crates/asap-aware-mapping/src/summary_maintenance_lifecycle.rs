@@ -1021,11 +1021,6 @@ fn collect_summary_aggs(
         | SummaryExpr::SummarySubtract {
             left: outer,
             right: inner,
-        }
-        | SummaryExpr::CandidateTopK {
-            candidates: outer,
-            values: inner,
-            ..
         } => {
             collect_summary_aggs(outer, seen, output);
             collect_summary_aggs(inner, seen, output);
@@ -1034,7 +1029,7 @@ fn collect_summary_aggs(
         | SummaryExpr::SummaryEstimate { summary_input, .. } => {
             collect_summary_aggs(summary_input, seen, output)
         }
-        SummaryExpr::SummaryMerge { children } => {
+        SummaryExpr::SummaryMerge { children, .. } => {
             for child in children {
                 collect_summary_aggs(child, seen, output);
             }
@@ -1588,6 +1583,7 @@ mod tests {
             reduction: Reduction::by(vec![]),
             measures: vec![AggIntent::Sum { col: None }],
             output_names: vec![],
+            filters: vec![],
             having: None,
             child: query_root(),
         })
@@ -1602,6 +1598,7 @@ mod tests {
                 accuracy: AccuracyTarget::Epsilon(0.1),
             }],
             output_names: vec![],
+            filters: vec![],
             having: None,
             child: query_root(),
         })
@@ -1626,6 +1623,7 @@ mod tests {
                 )),
                 reduction: Reduction::by(vec![]),
                 grouping: GroupingStrategy::default(),
+                filter: None,
             },
             schema: SummarySchema {
                 fields: vec![SummaryField {
@@ -1651,6 +1649,7 @@ mod tests {
                 )),
                 reduction: Reduction::by(vec![]),
                 grouping: GroupingStrategy::default(),
+                filter: None,
             },
             schema: SummarySchema {
                 fields: vec![SummaryField {
@@ -2334,6 +2333,7 @@ mod tests {
         let shared = summary();
         let root = Rc::new(SummaryNode {
             expr: SummaryExpr::SummaryMerge {
+                timing: asap_types::post_asap::ExecutionTiming::IngestionTime,
                 children: vec![Rc::clone(&shared), Rc::clone(&shared)],
             },
             schema: shared.schema.clone(),

@@ -45,7 +45,7 @@ pub(super) fn summary_aggregation_identities(root: &SummaryNode) -> HashSet<*con
                 visit(child, seen, out);
             }
             SummaryExpr::ValueOperation { child, .. } => visit(child, seen, out),
-            SummaryExpr::SummaryMerge { children } => {
+            SummaryExpr::SummaryMerge { children, .. } => {
                 for child in children {
                     visit(child, seen, out);
                 }
@@ -60,11 +60,6 @@ pub(super) fn summary_aggregation_identities(root: &SummaryNode) -> HashSet<*con
             | SummaryExpr::SummaryJoin {
                 outer: left,
                 inner: right,
-                ..
-            }
-            | SummaryExpr::CandidateTopK {
-                candidates: left,
-                values: right,
                 ..
             } => {
                 visit(left, seen, out);

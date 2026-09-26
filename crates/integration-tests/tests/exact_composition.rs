@@ -5,7 +5,7 @@
 //!
 //! Covers the issue's integration matrix: both nesting directions, grouped
 //! fine-to-coarse and identity folds, one inner summary shared by several
-//! queries, illegal readout-under-maintenance rejection, a runtime without
+//! queries, phase-aware summary construction, a runtime without
 //! the capability, a cost model without statistics, and pre/post-ASAP
 //! schemas plus shared `Rc` identity — along with pins for every
 //! already-supported exact-accumulator nesting.
@@ -17,8 +17,8 @@ use asap_aware_mapping::cost_model::{
     ValueOperationCapabilities,
 };
 use asap_aware_mapping::replacement::{
-    default_strategies_with, search_workload_with, RealizationError, Replacement,
-    ReplacementProvenance, ReplacementStrategy, SketchAlgorithmStrategy, TargetSubDAG,
+    default_strategies_with, search_workload_with, Replacement, ReplacementProvenance,
+    ReplacementStrategy, SketchAlgorithmStrategy, TargetSubDAG,
 };
 use asap_aware_mapping::{
     CostModel, DefaultCostModel, EvaluationRate, ExplanationKind, OperationPlacement,
@@ -26,8 +26,8 @@ use asap_aware_mapping::{
 use asap_integration_tests::fixtures::lower_promql;
 use asap_types::dag_export;
 use asap_types::post_asap::{
-    validate_execution_data_states, ExactKind, ExecutionDataState, ExecutionDataStateError,
-    ExecutionTiming, SketchAlgorithm, SummaryExpr, SummaryFamilyType, SummaryNode, SummaryUpdate,
+    validate_execution_data_states, ExactKind, ExactOperation, ExecutionDataState, ExecutionTiming,
+    SketchAlgorithm, SummaryExpr, SummaryFamilyType, SummaryNode, SummaryUpdate,
 };
 use asap_types::pre_asap::agg_intent::{default_quantile, AggIntent};
 use asap_types::pre_asap::query_expr::{QueryExpr, Reduction, Source};
@@ -56,6 +56,7 @@ fn agg(by: Vec<usize>, intent: AggIntent, child: Rc<QueryExpr>) -> Rc<QueryExpr>
         reduction: Reduction::by(by),
         measures: vec![intent],
         output_names: vec![],
+        filters: vec![],
         having: None,
         child,
     })
@@ -66,6 +67,7 @@ fn per_entity(intent: AggIntent, child: Rc<QueryExpr>) -> Rc<QueryExpr> {
         reduction: Reduction::PerEntity,
         measures: vec![intent],
         output_names: vec![],
+        filters: vec![],
         having: None,
         child,
     })
@@ -157,6 +159,17 @@ fn root_target_rejects_unproven_composition() {
 }
 
 impl CostModel for StatsModel {
+    fn allow_uncosted_legacy_selection(&self) -> bool {
+        true
+    }
+
+    fn value_operation_support_evidence(
+        &self,
+        _operation: &ExactOperation,
+        _placement: OperationPlacement,
+    ) -> Option<bool> {
+        Some(true)
+    }
     fn rank_candidates(
         &self,
         _intent: &AggIntent,
@@ -190,6 +203,10 @@ impl CostModel for StatsModel {
 struct NoCapabilityModel;
 
 impl CostModel for NoCapabilityModel {
+    fn allow_uncosted_legacy_selection(&self) -> bool {
+        true
+    }
+
     fn rank_candidates(
         &self,
         _intent: &AggIntent,
@@ -206,6 +223,54 @@ impl CostModel for NoCapabilityModel {
     ) -> ExactCompositionCostInputs {
         StatsModel.exact_composition_cost_inputs(request)
     }
+}
+
+/// Complete cost evidence does not imply runtime support evidence.
+struct UnknownCapabilityModel;
+
+impl CostModel for UnknownCapabilityModel {
+    fn rank_candidates(
+        &self,
+        _intent: &AggIntent,
+        candidates: &[SketchAlgorithm],
+    ) -> Vec<SketchAlgorithm> {
+        candidates.to_vec()
+    }
+    fn exact_composition_cost_inputs(
+        &self,
+        request: &ExactCompositionCostRequest<'_>,
+    ) -> ExactCompositionCostInputs {
+        StatsModel.exact_composition_cost_inputs(request)
+    }
+}
+
+#[test]
+fn unknown_runtime_capability_keeps_candidate_but_prevents_selection() {
+    let root = agg(vec![0], AggIntent::Max { col: None }, fine_quantile());
+    let space = plan(vec![("q", root)], &UnknownCapabilityModel);
+    let group = space.candidates_for_target(&space.roots[0].1).unwrap();
+    assert!(group.candidates.iter().any(|candidate| {
+        matches!(candidate.replacement, Replacement::ExactComposition(_))
+            && candidate
+                .runtime_support_evidence(&UnknownCapabilityModel)
+                .is_none()
+            && UnknownCapabilityModel
+                .candidate_cost(
+                    candidate,
+                    &asap_aware_mapping::TargetSubDAG::new(&space.roots[0].1),
+                )
+                .is_none()
+    }));
+    let selection = space.global_selection(&UnknownCapabilityModel);
+    assert!(selection
+        .for_target(&space.roots[0].1)
+        .unwrap()
+        .composition
+        .is_none());
+    assert!(selection
+        .assemble_selected_dag(&space.roots[0].1)
+        .unwrap()
+        .is_some());
 }
 
 fn plan(
@@ -303,7 +368,7 @@ fn every_exact_accumulator_is_finalized_before_an_outer_sketch() {
         let SummaryExpr::ValueOperation {
             child,
             operation: asap_types::post_asap::ValueOperation::FinalizeExactAccumulator,
-            timing: ExecutionTiming::MaintenanceTime,
+            timing: ExecutionTiming::IngestionTime,
         } = &child.expr
         else {
             panic!("{kind:?}: missing maintenance finalization");
@@ -323,12 +388,12 @@ fn every_exact_accumulator_is_finalized_before_an_outer_sketch() {
 // ── direction 1: outer exact fold over an inner summary readout ────────
 
 /// Before this PR both `max`/`avg` over a quantile collapsed into one
-/// opaque `KeepPreAsap`. Now: the outer group holds an `ValueOperationAtReadTime`
+/// opaque `KeepPreAsap`. Now: the outer group holds an `ValueOperationAtQueryTime`
 /// candidate referencing the inner target, the inner group keeps its own
 /// sketch candidates, and with statistics the pair is committed and
-/// materializes as `ValueOperationAtReadTime → SummaryEstimate → SummaryAgg`.
+/// materializes as `ValueOperationAtQueryTime → SummaryEstimate → SummaryAgg`.
 #[test]
-fn max_and_avg_over_quantile_compose_at_read_time_with_statistics() {
+fn max_and_avg_over_quantile_compose_at_query_time_with_statistics() {
     for intent in [AggIntent::Max { col: None }, AggIntent::Avg { col: None }] {
         let root = agg(vec![0], intent.clone(), fine_quantile());
         let space = plan(vec![("q", Rc::clone(&root))], &StatsModel);
@@ -342,8 +407,8 @@ fn max_and_avg_over_quantile_compose_at_read_time_with_statistics() {
             outer_group
                 .candidates
                 .iter()
-                .any(|c| c.provenance == ReplacementProvenance::ValueOperationAtReadTime),
-            "{intent:?}: outer group must hold an ValueOperationAtReadTime candidate"
+                .any(|c| c.provenance == ReplacementProvenance::ValueOperationAtQueryTime),
+            "{intent:?}: outer group must hold an ValueOperationAtQueryTime candidate"
         );
         let inner_group = space.candidates_for_target(inner).unwrap();
         assert!(
@@ -360,7 +425,7 @@ fn max_and_avg_over_quantile_compose_at_read_time_with_statistics() {
         let chosen = selected.chosen.expect("a decision");
         assert_eq!(
             chosen.provenance,
-            ReplacementProvenance::ValueOperationAtReadTime
+            ReplacementProvenance::ValueOperationAtQueryTime
         );
         let decision = selected
             .composition
@@ -382,12 +447,12 @@ fn max_and_avg_over_quantile_compose_at_read_time_with_statistics() {
         let composed = selection.assemble_selected_dag(&root).unwrap().unwrap();
         let SummaryExpr::ValueOperation {
             child,
-            timing: ExecutionTiming::ReadTime,
+            timing: ExecutionTiming::QueryTime,
             ..
         } = &composed.expr
         else {
             panic!(
-                "{intent:?}: expected ValueOperationAtReadTime root, got {:?}",
+                "{intent:?}: expected ValueOperationAtQueryTime root, got {:?}",
                 composed.expr
             );
         };
@@ -431,7 +496,7 @@ fn avg_over_quantile_keeps_the_sum_over_count_rewrite_as_a_competitor() {
     let group = space.candidates_for_target(&space.roots[0].1).unwrap();
     let provenances: Vec<_> = group.candidates.iter().map(|c| c.provenance).collect();
     assert!(provenances.contains(&ReplacementProvenance::LogicalRewrite));
-    assert!(provenances.contains(&ReplacementProvenance::ValueOperationAtReadTime));
+    assert!(provenances.contains(&ReplacementProvenance::ValueOperationAtQueryTime));
 }
 
 /// Grouped fine-to-coarse fold (`by (zone)` over `by (zone, host)`) and the
@@ -460,7 +525,7 @@ fn identity_and_genuine_multi_row_folds_both_compose() {
             matches!(
                 composed.expr,
                 SummaryExpr::ValueOperation {
-                    timing: ExecutionTiming::ReadTime,
+                    timing: ExecutionTiming::QueryTime,
                     ..
                 }
             ),
@@ -523,10 +588,10 @@ fn a_shared_inner_summary_is_materialized_once_for_several_outer_folds() {
     let child_of = |n: &Rc<SummaryNode>| match &n.expr {
         SummaryExpr::ValueOperation {
             child,
-            timing: ExecutionTiming::ReadTime,
+            timing: ExecutionTiming::QueryTime,
             ..
         } => Rc::clone(child),
-        other => panic!("expected ValueOperationAtReadTime, got {other:?}"),
+        other => panic!("expected ValueOperationAtQueryTime, got {other:?}"),
     };
     assert!(
         Rc::ptr_eq(&child_of(&composed[0]), &child_of(&composed[1])),
@@ -537,11 +602,11 @@ fn a_shared_inner_summary_is_materialized_once_for_several_outer_folds() {
 // ── direction 2: outer summary over an inner exact maintenance-time operation ─
 
 /// `quantile(0.99, deriv(latency[5m]))`: `deriv` has no accumulator form.
-/// The function target gets an `ValueOperationAtMaintenanceTime` candidate; with a
+/// The function target gets an `ValueOperationAtIngestionTime` candidate; with a
 /// maintained summary above it and statistics, it is committed, and the
 /// outer summary's materialization is re-linked over it.
 #[test]
-fn outer_summary_over_an_exact_function_composes_at_maintenance_time() {
+fn outer_summary_over_an_exact_function_composes_at_ingestion_time() {
     use std::time::Duration;
     let deriv = per_entity(
         AggIntent::Deriv,
@@ -561,13 +626,13 @@ fn outer_summary_over_an_exact_function_composes_at_maintenance_time() {
         .unwrap()
         .candidates
         .iter()
-        .any(|c| c.provenance == ReplacementProvenance::ValueOperationAtMaintenanceTime));
+        .any(|c| c.provenance == ReplacementProvenance::ValueOperationAtIngestionTime));
 
     let selection = space.global_selection(&StatsModel);
     let deriv_sel = selection.for_target(deriv).unwrap();
     assert_eq!(
         deriv_sel.chosen.unwrap().provenance,
-        ReplacementProvenance::ValueOperationAtMaintenanceTime
+        ReplacementProvenance::ValueOperationAtIngestionTime
     );
     let decision = deriv_sel.composition.as_ref().unwrap();
     assert!(decision.child_candidate.is_none(), "function input is raw");
@@ -582,12 +647,12 @@ fn outer_summary_over_an_exact_function_composes_at_maintenance_time() {
     };
     let SummaryExpr::ValueOperation {
         child: raw,
-        timing: ExecutionTiming::MaintenanceTime,
+        timing: ExecutionTiming::IngestionTime,
         ..
     } = &child.expr
     else {
         panic!(
-            "expected ValueOperationAtMaintenanceTime under the maintained summary, got {:?}",
+            "expected ValueOperationAtIngestionTime under the maintained summary, got {:?}",
             child.expr
         );
     };
@@ -595,23 +660,21 @@ fn outer_summary_over_an_exact_function_composes_at_maintenance_time() {
     let assignment = validate_execution_data_states(&composed).unwrap();
     assert_eq!(
         assignment.data_state_of(child),
-        Some(ExecutionDataState::MAINTENANCE_ROWS)
+        Some(ExecutionDataState::INGESTION_ROWS)
     );
     assert_eq!(
         assignment.data_state_of(raw),
-        Some(ExecutionDataState::MAINTENANCE_ROWS)
+        Some(ExecutionDataState::INGESTION_ROWS)
     );
 }
 
 // ── rejection, capability, statistics ───────────────────────────────────
 
-/// A maintained summary above a query-time readout is a typed plan-time
-/// error, both for the construction path and for a hand-built plan.
+/// Summary construction can consume query-time values without pretending
+/// they are available to an ingestion-time consumer.
 #[test]
-fn readout_under_maintenance_is_rejected_at_construction() {
+fn summary_construction_follows_its_value_input_phase() {
     let root = agg(vec![0], AggIntent::Max { col: None }, fine_quantile());
-    // A read-time ValueOperation can never be placed under a SummaryAgg: compose a
-    // read-time operation, then try to maintain a summary over it.
     let space = plan(vec![("q", Rc::clone(&root))], &StatsModel);
     let post = space
         .global_selection(&StatsModel)
@@ -628,6 +691,7 @@ fn readout_under_maintenance_is_rejected_at_construction() {
             input: SummaryUpdate::column(asap_types::pre_asap::ColumnRef::SampleValue),
             reduction: Reduction::by(vec![]),
             grouping: Default::default(),
+            filter: None,
         },
         schema: asap_types::post_asap::SummarySchema {
             fields: vec![],
@@ -635,12 +699,9 @@ fn readout_under_maintenance_is_rejected_at_construction() {
         },
         guarantee: None,
     });
-    assert!(matches!(
-        validate_execution_data_states(&illegal),
-        Err(ExecutionDataStateError::ReadoutUnderMaintenance { .. })
-    ));
-    let err: RealizationError = validate_execution_data_states(&illegal).unwrap_err().into();
-    assert!(matches!(err, RealizationError::ExecutionDataState(_)));
+    let state = asap_types::post_asap::produced_data_state(&illegal.expr).unwrap();
+    assert_eq!(state.timing, ExecutionTiming::QueryTime);
+    asap_types::post_asap::validate_execution_data_states_at(&illegal, state).unwrap();
 }
 
 #[test]
@@ -678,7 +739,7 @@ fn missing_cost_statistics_preserve_the_conservative_keep_pre_asap() {
         .unwrap()
         .candidates
         .iter()
-        .any(|c| c.provenance == ReplacementProvenance::ValueOperationAtReadTime));
+        .any(|c| c.provenance == ReplacementProvenance::ValueOperationAtQueryTime));
     let selection = space.global_selection(&DefaultCostModel);
     let selected = selection.for_target(&root).unwrap();
     assert!(selected.composition.is_none());
@@ -710,7 +771,7 @@ fn dag_export_carries_explicit_stage_and_plain_schema_for_a_composed_plan() {
     let graph = dag_export::export_summary(&composed);
     let node = &graph.nodes[graph.root as usize];
     assert_eq!(node.kind, "ValueOperation");
-    assert_eq!(node.detail["timing"], "read_time");
+    assert_eq!(node.detail["timing"], "query_time");
     assert!(node.detail["operation"]
         .as_str()
         .unwrap()
@@ -742,7 +803,7 @@ fn promql_max_by_zone_over_quantile_over_time_composes() {
     let selected = selection.for_target(root).unwrap();
     assert_eq!(
         selected.chosen.map(|c| c.provenance),
-        Some(ReplacementProvenance::ValueOperationAtReadTime),
+        Some(ReplacementProvenance::ValueOperationAtQueryTime),
         "{:?}",
         space
             .candidates_for_target(root)
@@ -756,7 +817,7 @@ fn promql_max_by_zone_over_quantile_over_time_composes() {
     assert!(matches!(
         composed.expr,
         SummaryExpr::ValueOperation {
-            timing: ExecutionTiming::ReadTime,
+            timing: ExecutionTiming::QueryTime,
             ..
         }
     ));

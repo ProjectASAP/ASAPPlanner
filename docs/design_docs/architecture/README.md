@@ -48,6 +48,11 @@ decision; otherwise the backend owns it. Its first
 call returns a `GlobalSelection`; the second returns a
 `SummaryMaintenanceLifecyclePlan` with an assembled DAG root and lifecycle
 decisions. No branch by itself deploys or executes a physical plan.
+Known-invalid evidence rejects a logical candidate. Missing accuracy evidence
+leaves a constructible candidate visible in `PlanSpace` but uncertified; default
+selection does not commit it without the required guarantee. Cost evidence can
+rank eligible candidates, but it cannot establish a missing guarantee or turn
+an unsupported physical alternative into a deployable plan.
 
 ## Module map
 

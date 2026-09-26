@@ -61,7 +61,9 @@ use std::rc::Rc;
 
 use asap_types::pre_asap::agg_intent::AggIntent;
 use asap_types::pre_asap::expr_ir::ArithmeticOpKind;
-use asap_types::pre_asap::query_expr::{BinaryOpKind, ProjectItem, QueryExpr, Reduction};
+use asap_types::pre_asap::query_expr::{
+    any_measure_filtered, BinaryOpKind, ProjectItem, QueryExpr, Reduction,
+};
 use asap_types::pre_asap::schema::{ColumnId, DataType};
 use asap_types::types::AccuracyTarget;
 
@@ -76,6 +78,7 @@ fn avg_rewrite_target(node: &QueryExpr) -> Option<(usize, Option<ColumnId>)> {
     let QueryExpr::Aggregate {
         reduction,
         measures,
+        filters,
         having: None,
         child,
         ..
@@ -83,6 +86,9 @@ fn avg_rewrite_target(node: &QueryExpr) -> Option<(usize, Option<ColumnId>)> {
     else {
         return None;
     };
+    if any_measure_filtered(filters) {
+        return None;
+    }
     let Reduction::Reduce(by) = reduction else {
         return None;
     };
@@ -133,6 +139,7 @@ pub(crate) fn temporal_average_components(root: &Rc<QueryExpr>) -> Option<Rc<Que
     let QueryExpr::Aggregate {
         reduction: Reduction::PerEntity,
         measures,
+        filters,
         child,
         having: None,
         ..
@@ -140,6 +147,9 @@ pub(crate) fn temporal_average_components(root: &Rc<QueryExpr>) -> Option<Rc<Que
     else {
         return None;
     };
+    if any_measure_filtered(filters) {
+        return None;
+    }
     let [AggIntent::Avg { col }] = measures.as_slice() else {
         return None;
     };
@@ -158,6 +168,7 @@ pub(crate) fn temporal_average_components(root: &Rc<QueryExpr>) -> Option<Rc<Que
             reduction: Reduction::PerEntity,
             measures: vec![intent],
             output_names: vec![],
+            filters: vec![],
             having: None,
             child: Rc::clone(child),
         })
@@ -203,6 +214,7 @@ fn build_rewrite(root: &Rc<QueryExpr>) -> Option<Rc<QueryExpr>> {
         reduction: reduction.clone(),
         measures: vec![AggIntent::Sum { col }],
         output_names: Vec::new(),
+        filters: vec![],
         having: None,
         child: Rc::clone(child),
     });
@@ -212,6 +224,7 @@ fn build_rewrite(root: &Rc<QueryExpr>) -> Option<Rc<QueryExpr>> {
             accuracy: AccuracyTarget::Exact,
         }],
         output_names: Vec::new(),
+        filters: vec![],
         having: None,
         child: Rc::clone(child),
     });
@@ -253,6 +266,7 @@ fn composed_aggregate_rewrite(root: &Rc<QueryExpr>) -> Option<Rc<QueryExpr>> {
         reduction: outer_reduction @ Reduction::Reduce(_),
         measures: outer_measures,
         output_names,
+        filters: outer_filters,
         having: None,
         child,
     } = root.as_ref()
@@ -262,6 +276,7 @@ fn composed_aggregate_rewrite(root: &Rc<QueryExpr>) -> Option<Rc<QueryExpr>> {
     let QueryExpr::Aggregate {
         reduction: Reduction::PerEntity,
         measures: inner_measures,
+        filters: inner_filters,
         having: None,
         child: inner_child,
         ..
@@ -269,6 +284,9 @@ fn composed_aggregate_rewrite(root: &Rc<QueryExpr>) -> Option<Rc<QueryExpr>> {
     else {
         return None;
     };
+    if any_measure_filtered(outer_filters) || any_measure_filtered(inner_filters) {
+        return None;
+    }
     let ([outer], [inner]) = (outer_measures.as_slice(), inner_measures.as_slice()) else {
         return None;
     };
@@ -283,6 +301,7 @@ fn composed_aggregate_rewrite(root: &Rc<QueryExpr>) -> Option<Rc<QueryExpr>> {
         reduction: outer_reduction.clone(),
         measures: vec![composed],
         output_names: output_names.clone(),
+        filters: vec![],
         having: None,
         child: Rc::clone(inner_child),
     });
@@ -413,6 +432,7 @@ mod tests {
             reduction: Reduction::by(by),
             measures: vec![AggIntent::Avg { col }],
             output_names: vec![],
+            filters: vec![],
             having: None,
             child: Rc::new(child),
         }
@@ -459,6 +479,7 @@ mod tests {
             reduction: Reduction::by(vec![2]),
             measures: vec![AggIntent::Sum { col: None }, AggIntent::Avg { col: None }],
             output_names: vec![],
+            filters: vec![],
             having: None,
             child: Rc::new(metric_scan(&["job"])),
         });
@@ -494,6 +515,7 @@ mod tests {
                 reduction: Reduction::by(vec![2]),
                 measures: vec![intent.clone()],
                 output_names: vec![],
+                filters: vec![],
                 having: None,
                 child: Rc::new(metric_scan(&["job"])),
             });
@@ -514,6 +536,7 @@ mod tests {
             )),
             measures: vec![AggIntent::Avg { col: None }],
             output_names: vec![],
+            filters: vec![],
             having: None,
             child: Rc::new(metric_scan(&["job"])),
         });
@@ -528,6 +551,7 @@ mod tests {
             reduction: Reduction::PerEntity,
             measures: vec![AggIntent::Avg { col: None }],
             output_names: vec![],
+            filters: vec![],
             having: None,
             child: Rc::new(metric_scan(&[])),
         });
@@ -755,6 +779,7 @@ mod tests {
             reduction: Reduction::PerEntity,
             measures: vec![inner],
             output_names: vec![],
+            filters: vec![],
             having: None,
             child: Rc::new(QueryExpr::TimeRange {
                 range: Duration::from_secs(300),
@@ -767,6 +792,7 @@ mod tests {
             // Match the PromQL front end: an empty entry selects the intent's
             // canonical output name rather than an explicit alias.
             output_names: vec![String::new()],
+            filters: vec![],
             having: None,
             child: Rc::new(temporal),
         })

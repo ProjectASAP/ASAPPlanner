@@ -283,11 +283,15 @@ pub fn lower_query_physical_dag(
                 QueryExpr::Aggregate {
                     reduction,
                     measures,
+                    filters,
                     having,
                     child,
                     ..
                 } => {
-                    if having.is_some() || measures.is_empty() {
+                    if having.is_some()
+                        || asap_types::pre_asap::any_measure_filtered(filters)
+                        || measures.is_empty()
+                    {
                         return Err(AnalyticalCostError::UnsupportedQueryOperator);
                     }
                     if matches!(reduction, asap_types::pre_asap::Reduction::PerEntity) {
@@ -1457,6 +1461,7 @@ mod tests {
             reduction: Reduction::by(vec![]),
             measures: vec![AggIntent::PearsonCorr { left: 0, right: 1 }],
             output_names: vec!["r".into()],
+            filters: vec![],
             having: None,
             child: Rc::new(QueryExpr::Scan {
                 source: source.clone(),
@@ -1516,6 +1521,7 @@ mod tests {
             reduction: Reduction::by(vec![0]),
             measures: vec![AggIntent::Sum { col: Some(1) }],
             output_names: vec![],
+            filters: vec![],
             having: None,
             child: Rc::clone(&scan),
         });
@@ -2251,6 +2257,7 @@ mod tests {
                 accuracy: AccuracyTarget::Exact,
             }],
             output_names: vec![],
+            filters: vec![],
             having: None,
             child: scan(),
         });
@@ -2331,6 +2338,7 @@ mod tests {
             reduction: Reduction::PerEntity,
             measures: vec![AggIntent::Absent],
             output_names: vec![],
+            filters: vec![],
             having: None,
             child: scan,
         });
@@ -2566,6 +2574,7 @@ mod tests {
             reduction: Reduction::PerEntity,
             measures: vec![AggIntent::Sum { col: None }],
             output_names: vec![],
+            filters: vec![],
             having: None,
             child: sample,
         });

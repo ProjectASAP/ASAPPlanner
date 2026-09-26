@@ -227,6 +227,7 @@ pub(crate) fn collect_referenced_columns(tree: &UnresolvedQueryExpr) -> Vec<Stri
             QE::Aggregate {
                 reduction,
                 measures,
+                filters,
                 having,
                 child,
                 ..
@@ -235,6 +236,9 @@ pub(crate) fn collect_referenced_columns(tree: &UnresolvedQueryExpr) -> Vec<Stri
                     group_keys(by, out);
                 }
                 measure_cols(measures, out);
+                for super::query_expr::Predicate(f) in filters.iter().flatten() {
+                    named(f, out);
+                }
                 if let Some(super::query_expr::Predicate(h)) = having {
                     named(h, out);
                 }
@@ -393,6 +397,7 @@ mod tests {
                 right: ColumnRef::Named("y".into()),
             }],
             output_names: vec![],
+            filters: vec![],
             having: None,
             child: Rc::new(src("m")),
         };

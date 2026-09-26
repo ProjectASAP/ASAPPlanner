@@ -41,22 +41,6 @@ fn same_node(left: &SummaryNode, right: &SummaryNode) -> bool {
             },
         ) => Rc::ptr_eq(al, bl) && Rc::ptr_eq(ar, br) && ao == bo && at == bt,
         (
-            CandidateTopK {
-                candidates: ac,
-                values: av,
-                k: ak,
-                grouping: ag,
-                completeness: ax,
-            },
-            CandidateTopK {
-                candidates: bc,
-                values: bv,
-                k: bk,
-                grouping: bg,
-                completeness: bx,
-            },
-        ) => Rc::ptr_eq(ac, bc) && Rc::ptr_eq(av, bv) && ak == bk && ag == bg && same_value(ax, bx),
-        (
             ValueOperation {
                 child: ac,
                 operation: ao,
@@ -74,14 +58,22 @@ fn same_node(left: &SummaryNode, right: &SummaryNode) -> bool {
                 right: ar,
                 kind: ak,
                 pred: ap,
+                pruning: ax,
             },
             RelationalJoin {
                 left: bl,
                 right: br,
                 kind: bk,
                 pred: bp,
+                pruning: bx,
             },
-        ) => Rc::ptr_eq(al, bl) && Rc::ptr_eq(ar, br) && ak == bk && same_value(ap, bp),
+        ) => {
+            Rc::ptr_eq(al, bl)
+                && Rc::ptr_eq(ar, br)
+                && ak == bk
+                && same_value(ap, bp)
+                && same_value(ax, bx)
+        }
         (
             SummaryAgg {
                 child: ac,
@@ -89,6 +81,7 @@ fn same_node(left: &SummaryNode, right: &SummaryNode) -> bool {
                 input: ai,
                 reduction: ar,
                 grouping: ag,
+                filter: afl,
             },
             SummaryAgg {
                 child: bc,
@@ -96,8 +89,16 @@ fn same_node(left: &SummaryNode, right: &SummaryNode) -> bool {
                 input: bi,
                 reduction: br,
                 grouping: bg,
+                filter: bfl,
             },
-        ) => Rc::ptr_eq(ac, bc) && af == bf && same_value(ai, bi) && ar == br && ag == bg,
+        ) => {
+            Rc::ptr_eq(ac, bc)
+                && af == bf
+                && same_value(ai, bi)
+                && ar == br
+                && ag == bg
+                && same_value(afl, bfl)
+        }
         (
             SummaryJoin {
                 outer: ao,
@@ -142,14 +143,20 @@ fn same_node(left: &SummaryNode, right: &SummaryNode) -> bool {
                 key: bk,
             },
         ) => Rc::ptr_eq(ai, bi) && ak == bk,
-        (SummaryMerge { children: a }, SummaryMerge { children: b }) => {
-            a.len() == b.len() && a.iter().zip(b).all(|(a, b)| Rc::ptr_eq(a, b))
-        }
+        (
+            SummaryMerge {
+                children: a,
+                timing: at,
+            },
+            SummaryMerge {
+                children: b,
+                timing: bt,
+            },
+        ) => at == bt && a.len() == b.len() && a.iter().zip(b).all(|(a, b)| Rc::ptr_eq(a, b)),
         // Keep this exhaustive on the left: new variants require a sharing rule.
         (
             KeepPreAsap(_)
             | BinaryOp { .. }
-            | CandidateTopK { .. }
             | ValueOperation { .. }
             | RelationalJoin { .. }
             | SummaryAgg { .. }
@@ -190,12 +197,7 @@ pub fn share_common_summary_subtrees<Id>(
                 *lhs = visit(lhs, seen, pool);
                 *rhs = visit(rhs, seen, pool);
             }
-            SummaryExpr::CandidateTopK {
-                candidates, values, ..
-            } => {
-                *candidates = visit(candidates, seen, pool);
-                *values = visit(values, seen, pool);
-            }
+
             SummaryExpr::ValueOperation { child, .. } => *child = visit(child, seen, pool),
             SummaryExpr::RelationalJoin { left, right, .. } => {
                 *left = visit(left, seen, pool);
@@ -213,7 +215,7 @@ pub fn share_common_summary_subtrees<Id>(
             | SummaryExpr::SummaryDelete { summary_input, .. } => {
                 *summary_input = visit(summary_input, seen, pool);
             }
-            SummaryExpr::SummaryMerge { children } => {
+            SummaryExpr::SummaryMerge { children, .. } => {
                 for child in children {
                     *child = visit(child, seen, pool);
                 }
@@ -271,6 +273,7 @@ mod tests {
     fn shares_children_across_distinct_roots() {
         let merge = Rc::new(SummaryNode {
             expr: SummaryExpr::SummaryMerge {
+                timing: crate::post_asap::ExecutionTiming::IngestionTime,
                 children: vec![leaf(1.0), leaf(2.0)],
             },
             schema: SummarySchema {
@@ -280,7 +283,7 @@ mod tests {
             guarantee: None,
         });
         let roots = share_common_summary_subtrees(vec![(0, leaf(1.0)), (1, merge)]);
-        let SummaryExpr::SummaryMerge { children } = &roots[1].1.expr else {
+        let SummaryExpr::SummaryMerge { children, .. } = &roots[1].1.expr else {
             panic!()
         };
         assert!(Rc::ptr_eq(&roots[0].1, &children[0]));
@@ -369,6 +372,7 @@ mod tests {
                     input: SummaryUpdate::column(ColumnRef::SampleValue),
                     reduction: Reduction::PerEntity,
                     grouping: GroupingStrategy::default(),
+                    filter: None,
                 },
                 schema: SummarySchema {
                     fields: vec![],
@@ -413,7 +417,7 @@ mod tests {
                 for _ in 0..24 {
                     current = Rc::new(SummaryNode {
                         expr: SummaryExpr::BinaryOp {
-                            timing: super::super::ExecutionTiming::ReadTime,
+                            timing: super::super::ExecutionTiming::QueryTime,
                             lhs: Rc::clone(&current),
                             rhs: current,
                             operator: super::super::BinaryOperator {

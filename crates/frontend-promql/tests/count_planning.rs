@@ -1,7 +1,12 @@
 //! Query text through summary selection: counts use observations, never value weights.
 use std::rc::Rc;
 
-use asap_aware_mapping::{Replacement, ReplacementStrategy, SketchAlgorithmStrategy, TargetSubDAG};
+use asap_aware_mapping::accuracy::DefaultAccuracyModel;
+use asap_aware_mapping::cost_model::DefaultCostModel;
+use asap_aware_mapping::{
+    default_strategies, search_workload_with_targets, Replacement, ReplacementStrategy,
+    SketchAlgorithmStrategy, TargetSubDAG,
+};
 mod support;
 use asap_types::post_asap::{
     compile_executable_dag, ExactKind, ExecutableOperatorPayload, NonNegativeWeightProof,
@@ -9,6 +14,38 @@ use asap_types::post_asap::{
 };
 use asap_types::types::AccuracyTarget;
 use support::lower_promql;
+
+#[test]
+fn grouped_count_keeps_uncertified_hydra_candidates_for_backend_review() {
+    let target = AccuracyTarget::EpsilonDelta {
+        epsilon: 0.01,
+        delta: 0.01,
+    };
+    let root = Rc::new(lower_promql("count by(job)(up)", target.clone()).unwrap());
+    let space = search_workload_with_targets(
+        vec![("count", root, Some(target))],
+        &default_strategies(),
+        &DefaultAccuracyModel,
+    );
+    let planned = &space.roots[0].1;
+    let hydra: Vec<_> = space
+        .candidates_for_target(planned)
+        .unwrap()
+        .candidates
+        .iter()
+        .filter(|candidate| candidate.strategy == "HydraGroupingStrategy")
+        .collect();
+    assert_eq!(hydra.len(), 2);
+    assert!(hydra
+        .iter()
+        .all(|candidate| candidate.has_missing_accuracy_evidence()));
+    assert!(!space
+        .global_selection(&DefaultCostModel)
+        .for_target(planned)
+        .unwrap()
+        .chosen
+        .is_some_and(|candidate| candidate.has_missing_accuracy_evidence()));
+}
 
 // Exact series and temporal counts must select a count accumulator, not distinct or sum.
 #[test]

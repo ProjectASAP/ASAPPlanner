@@ -341,22 +341,26 @@
 //!   multi-group joint optimization beyond this per-site recurrence is left
 //!   for whenever that changes.
 
+use crate::accuracy::estimators::{
+    cms::{cms_depth, cms_width},
+    saturating_ceil,
+};
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet, VecDeque};
 
 use asap_types::post_asap::{
-    validate_execution_data_states_at, CandidateCompleteness, EntityIdentity, ErrorMetric,
-    ExactKind, ExactOperation, ExactOperationSchemaError, ExactParams, ExecutionDataState,
-    ExecutionDataStateError, ExecutionTiming, GroupingStrategy, NonNegativeWeightProof,
-    SamplingKind, SamplingParams, SketchAlgorithm, SketchKind, SketchParams,
-    SketchQuery as PostAsapSketchQuery, StatModelKind, StatModelParams, SummaryExpr,
-    SummaryFamilyType, SummaryField, SummaryInputExpr, SummaryNode, SummarySchema, SummaryUpdate,
-    ValueOperation, WaveletKind, WaveletParams, WeightDomain,
+    validate_execution_data_states_at, EntityIdentity, ExactKind, ExactOperation,
+    ExactOperationSchemaError, ExactParams, ExecutionDataState, ExecutionDataStateError,
+    ExecutionTiming, GroupingStrategy, NonNegativeWeightProof, SamplingKind, SamplingParams,
+    SketchAlgorithm, SketchKind, SketchParams, SketchQuery as PostAsapSketchQuery, StatModelKind,
+    StatModelParams, SummaryExpr, SummaryFamilyType, SummaryField, SummaryInputExpr, SummaryNode,
+    SummarySchema, SummaryUpdate, ValueOperation, WaveletKind, WaveletParams, WeightDomain,
 };
 use asap_types::post_asap::{AccuracyError, CompositionOperator, GuaranteeSource, ResultGuarantee};
 use asap_types::pre_asap::agg_intent::{agg_is_mergeable, AggIntent};
 use asap_types::pre_asap::cse::{share_common_subtrees, structural_hash, HashCache};
 use asap_types::pre_asap::expr_ir::{ArithmeticOpKind, ColumnRef};
+use asap_types::pre_asap::query_expr::any_measure_filtered;
 use asap_types::pre_asap::query_expr::{
     BinaryOpKind, Predicate, QueryExpr, QueryExprError, Reduction,
 };
@@ -366,12 +370,11 @@ use asap_types::workload::{DataWorkload, QueryRecurrence, QueryWorkload, Repeate
 use std::rc::Rc;
 use thiserror::Error;
 
+use crate::accuracy::reconciliation::AccuracyReconciliationStrategy;
 use crate::accuracy::{
     AccuracyBudgetAllocator, AccuracyEvidenceProvider, AccuracyModel, CompositionShape,
-    DefaultAccuracyModel, EqualSplitAllocator, NoAccuracyEvidence, KLL_RANK_ERROR_COEFFICIENT_99,
-    KLL_RANK_ERROR_EXPONENT_99,
+    DefaultAccuracyModel, EqualSplitAllocator, NoAccuracyEvidence,
 };
-use crate::accuracy_reconciliation::AccuracyReconciliationStrategy;
 use crate::cost_model::{
     raw_recompute_cost_rate, Cost, CostModel, CseCandidate, DefaultCostModel,
     ExactCompositionCostInputs, ExactCompositionCostRequest, ShareDecision,
@@ -479,8 +482,8 @@ pub enum Replacement {
     Rewrite(Rc<QueryExpr>),
     /// An exact operator composed over another target's *own* selected
     /// decision across an explicit update/readout boundary (issue #171):
-    /// `ValueOperationAtReadTime` over a child's summary readout, or
-    /// `ValueOperationAtMaintenanceTime` feeding a maintained summary above. Carries only a
+    /// `ValueOperationAtQueryTime` over a child's summary readout, or
+    /// `ValueOperationAtIngestionTime` feeding a maintained summary above. Carries only a
     /// reference to the child target — [`PlanSpace::global_selection`]
     /// commits the compatible parent/child pair and
     /// [`GlobalSelection::assemble_selected_dag`] links it into one validated
@@ -507,13 +510,38 @@ pub struct ReplacementSubDAG {
     pub rationale: String,
 }
 
+impl ReplacementSubDAG {
+    /// Whether this summary still needs accuracy/domain evidence before it can
+    /// be treated as certified. A missing guarantee on any summary candidate
+    /// is unknown; exact `KeepPreAsap` carries an explicit exact guarantee.
+    pub fn has_missing_accuracy_evidence(&self) -> bool {
+        matches!(
+            &self.replacement,
+            Replacement::Summary(node) if has_missing_accuracy_evidence(node)
+        )
+    }
+
+    /// Runtime support for this candidate. Summary implementations remain
+    /// unknown until backend binding; a pure logical rewrite needs no new
+    /// physical operator. `Some(false)` disproves mixed-operation support.
+    pub fn runtime_support_evidence(&self, cost_model: &dyn CostModel) -> Option<bool> {
+        match &self.replacement {
+            Replacement::ExactComposition(composition) => {
+                cost_model.value_operation_support_evidence(&composition.op, composition.placement)
+            }
+            Replacement::Summary(_) => None,
+            Replacement::Rewrite(_) => Some(true),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReplacementProvenance {
     SummaryRealization,
     CseShare,
     CseRecompute,
     LogicalRewrite,
-    /// [`crate::accuracy_reconciliation::AccuracyReconciliationStrategy`]'s
+    /// [`crate::accuracy::reconciliation::AccuracyReconciliationStrategy`]'s
     /// "read a strictly-tighter sibling instead of building an independent,
     /// looser copy" candidate (issue #273). Kept distinct from
     /// `LogicalRewrite` — even though both are structurally-different,
@@ -529,10 +557,10 @@ pub enum ReplacementProvenance {
     AccuracyReconciliation,
     /// [`Replacement::ExactComposition`] with
     /// [`OperationPlacement::Read`] (issue #171).
-    ValueOperationAtReadTime,
+    ValueOperationAtQueryTime,
     /// [`Replacement::ExactComposition`] with
     /// [`OperationPlacement::Maintenance`] (issue #171).
-    ValueOperationAtMaintenanceTime,
+    ValueOperationAtIngestionTime,
 }
 
 /// A candidate a strategy considered for a target but refused to propose on
@@ -1009,56 +1037,7 @@ pub fn default_size_params(
     eps: f64,
     delta: f64,
 ) -> SketchParams {
-    match kind {
-        // Baseline dimensions are candidates, not an inverted error bound.
-        // Empirical models may size these; no theoretical guarantee is claimed.
-        SketchAlgorithm::UnivMon => SketchParams::UnivMon {
-            heap_size: 256,
-            sketch_rows: 5,
-            sketch_cols: 1024,
-            layers: 16,
-        },
-        SketchAlgorithm::Kll => SketchParams::Kll { k: kll_k(eps) },
-        SketchAlgorithm::Cms => SketchParams::Cms {
-            width: cms_width(eps),
-            depth: cms_depth(delta),
-        },
-        SketchAlgorithm::Hll => SketchParams::Hll {
-            precision: hll_precision(eps),
-        },
-        SketchAlgorithm::CmsWithHeap => {
-            let k = match intent {
-                AggIntent::TopK { k, .. } => *k,
-                _ => unreachable!("CmsWithHeap is only a TopK candidate"),
-            };
-            SketchParams::CmsWithHeap {
-                width: cms_width(eps),
-                depth: cms_depth(delta),
-                heap_size: k as u32,
-            }
-        }
-        // Non-preferred candidates (DDSketch / Theta / Kmv / CountSketch /
-        // CountSketchWithHeap) are only reachable once a cost model picks
-        // them; sized here so that wiring is local.
-        SketchAlgorithm::DDSketch => SketchParams::DDSketch { alpha: eps },
-        SketchAlgorithm::Theta => SketchParams::Theta { k: kmv_k_99(eps) },
-        SketchAlgorithm::Kmv => SketchParams::Kmv { k: kmv_k_99(eps) },
-        SketchAlgorithm::CountSketch => SketchParams::CountSketch {
-            width: count_sketch_width(eps),
-            depth: count_sketch_depth(delta),
-        },
-        SketchAlgorithm::CountSketchWithHeap => {
-            let k = match intent {
-                AggIntent::TopK { k, .. } => *k,
-                _ => unreachable!("CountSketchWithHeap is only a TopK candidate"),
-            };
-            SketchParams::CountSketchWithHeap {
-                width: count_sketch_width(eps),
-                depth: count_sketch_depth(delta),
-                heap_size: k as u32,
-            }
-        }
-    }
+    crate::accuracy::estimators::size_params(kind, intent, eps, delta)
 }
 
 /// A deployment's explicit bet about how "typical" (non-adversarial) its
@@ -1153,7 +1132,7 @@ pub fn posterior_aware_size_params(
             SketchParams::CmsWithHeap {
                 width: relaxed_width(eps),
                 depth: cms_depth(delta),
-                heap_size: k as u32,
+                heap_size: crate::accuracy::topk_capacity(k, eps),
             }
         }
         SketchAlgorithm::CountSketch => {
@@ -1179,72 +1158,6 @@ pub fn posterior_aware_size_params(
             default_size_params(kind, intent, eps, delta)
         }
     }
-}
-
-// ── Parameter sizing ──────────────────────────────────────────────────────────
-//
-// Each function inverts the sketch family's standard error bound to the
-// smallest parameter satisfying the target, clamped to the family's sane
-// range. A non-positive ε saturates to the clamp maximum (tightest allowed).
-
-/// Invert Apache DataSketches' empirical 99th-percentile, single-sided KLL
-/// normalized rank-error fit: `epsilon = 2.296 / k^0.9723`.
-fn kll_k(eps: f64) -> u32 {
-    saturating_ceil(
-        (KLL_RANK_ERROR_COEFFICIENT_99 / eps).powf(1.0 / KLL_RANK_ERROR_EXPONENT_99),
-        8,
-        65_535,
-    )
-}
-
-/// HLL RSE-magnitude inversion. Generic HLL has no modeled confidence target.
-fn hll_precision(eps: f64) -> u8 {
-    saturating_ceil((1.04 / eps).powi(2).log2(), 4, 18) as u8
-}
-
-/// CMS: over-count ≤ ε·N with width `w = ⌈e/ε⌉` columns.
-fn cms_width(eps: f64) -> u32 {
-    saturating_ceil(std::f64::consts::E / eps, 2, 1 << 26)
-}
-
-/// CMS: failure probability ≤ δ with depth `d = ⌈ln(1/δ)⌉` rows.
-/// δ = 0.01 → depth 5.
-fn cms_depth(delta: f64) -> u32 {
-    saturating_ceil((1.0 / delta).ln(), 1, 32)
-}
-
-/// 99%-confidence KMV/Theta relative bound via Chebyshev, using
-/// `RSE <= 1/sqrt(k-2)` and a ten-standard-deviation interval.
-fn kmv_k_99(eps: f64) -> u32 {
-    saturating_ceil(100.0 / (eps * eps) + 2.0, 16, 1 << 26)
-}
-
-/// CountSketch `L2` point-query width: ε = sqrt(3/w).
-fn count_sketch_width(eps: f64) -> u32 {
-    saturating_ceil(3.0 / (eps * eps), 2, 1 << 26)
-}
-
-/// Positive odd depth satisfying Hoeffding's median failure bound
-/// `exp(-depth/18) <= delta` for per-row failure at most 1/3.
-fn count_sketch_depth(delta: f64) -> u32 {
-    if !(delta.is_finite() && delta > 0.0 && delta < 1.0) {
-        return 255;
-    }
-    let depth = saturating_ceil(18.0 * (1.0 / delta).ln(), 1, 255);
-    if depth.is_multiple_of(2) {
-        (depth + 1).min(255)
-    } else {
-        depth
-    }
-}
-
-/// `⌈x⌉` clamped to `[lo, hi]`; NaN / non-positive x saturate to `hi`
-/// (a degenerate ε means "as accurate as this family goes").
-fn saturating_ceil(x: f64, lo: u32, hi: u32) -> u32 {
-    if !x.is_finite() || x <= 0.0 {
-        return hi;
-    }
-    (x.ceil() as u32).clamp(lo, hi)
 }
 
 // ── SketchAlgorithmStrategy ─────────────────────────────────────────────────
@@ -1719,22 +1632,24 @@ fn exact_topk_over_temporal_values(
     let QueryExpr::Aggregate {
         reduction,
         measures,
-        output_names,
+        output_names: _,
+        filters,
         having: None,
         child,
     } = root.as_ref()
     else {
         return Ok(None);
     };
-    if !matches!(
-        measures.as_slice(),
-        [AggIntent::TopK {
-            accuracy: AccuracyTarget::Exact,
-            ..
-        }]
-    ) {
+    if any_measure_filtered(filters) {
         return Ok(None);
     }
+    let [AggIntent::TopK {
+        k,
+        accuracy: AccuracyTarget::Exact,
+    }] = measures.as_slice()
+    else {
+        return Ok(None);
+    };
     let QueryExpr::Aggregate {
         reduction: Reduction::PerEntity,
         child: input,
@@ -1756,21 +1671,43 @@ fn exact_topk_over_temporal_values(
         return Ok(None);
     }
     let values = finalize_exact_accumulator(values, child)?;
-    let node = Rc::new(SummaryNode {
+    let partition_by = reduction
+        .group_keys()
+        .ok_or(RealizationError::PhysicalRealization(
+            "temporal ranking requires explicit grouping",
+        ))?
+        .clone();
+    let score = ranking_score_index(child, &values.schema)?;
+    let sorted = Rc::new(SummaryNode {
         guarantee: values.guarantee.clone(),
-        schema: lift(&root.output_schema()?),
+        schema: values.schema.clone(),
         expr: SummaryExpr::ValueOperation {
             child: values,
-            operation: ValueOperation::Exact(ExactOperation::Aggregate {
-                reduction: reduction.clone(),
-                measures: measures.clone(),
-                output_names: output_names.clone(),
-                having: None,
-            }),
-            timing: ExecutionTiming::ReadTime,
+            operation: ValueOperation::Sort {
+                keys: vec![asap_types::pre_asap::SortKey {
+                    expr: QueryExpr::Column(score),
+                    ascending: false,
+                    nulls_first: false,
+                }],
+                partition_by: partition_by.clone(),
+            },
+            timing: ExecutionTiming::QueryTime,
         },
     });
-    validate_execution_data_states_at(&node, ExecutionDataState::READ_ROWS)?;
+    let node = Rc::new(SummaryNode {
+        guarantee: sorted.guarantee.clone(),
+        schema: sorted.schema.clone(),
+        expr: SummaryExpr::ValueOperation {
+            child: sorted,
+            operation: ValueOperation::Limit {
+                n: *k,
+                offset: 0,
+                partition_by,
+            },
+            timing: ExecutionTiming::QueryTime,
+        },
+    });
+    validate_execution_data_states_at(&node, ExecutionDataState::QUERY_ROWS)?;
     Ok(Some(node))
 }
 
@@ -1787,7 +1724,7 @@ fn realize_temporal_average(
         return Ok(None);
     };
     operator.checked_finite_division = true;
-    validate_execution_data_states_at(&node, ExecutionDataState::READ_ROWS)?;
+    validate_execution_data_states_at(&node, ExecutionDataState::QUERY_ROWS)?;
     Ok(Some(node))
 }
 
@@ -2008,7 +1945,7 @@ fn realize_binary(
 
     Ok(Some(Rc::new(SummaryNode {
         expr: SummaryExpr::BinaryOp {
-            timing: ExecutionTiming::ReadTime,
+            timing: ExecutionTiming::QueryTime,
             lhs: lhs_node,
             rhs: rhs_node,
             operator: asap_types::post_asap::BinaryOperator {
@@ -2033,7 +1970,7 @@ fn finalize_exact_accumulator(
     node: Rc<SummaryNode>,
     logical_output: &QueryExpr,
 ) -> Result<Rc<SummaryNode>, RealizationError> {
-    finalize_exact_accumulator_at(node, logical_output, ExecutionTiming::ReadTime)
+    finalize_exact_accumulator_at(node, logical_output, ExecutionTiming::QueryTime)
 }
 
 fn finalize_exact_accumulator_at(
@@ -2142,21 +2079,10 @@ fn ddsketch_quantile_alpha(node: &SummaryNode) -> Option<f64> {
     }
 }
 
-/// An uncertified direct ratio stays visible to downstream selection even
-/// when the workload has a root target; it does not satisfy that target.
-fn is_uncertified_ddsketch_ratio(node: &SummaryNode) -> bool {
-    let SummaryExpr::BinaryOp {
-        lhs, rhs, operator, ..
-    } = &node.expr
-    else {
-        return false;
-    };
-    matches!(
-        operator.kind,
-        BinaryOpKind::Arithmetic(ArithmeticOpKind::Div)
-    ) && ddsketch_quantile_alpha(lhs).is_some()
-        && ddsketch_quantile_alpha(rhs).is_some()
-        && node.guarantee.is_none()
+fn has_missing_accuracy_evidence(node: &SummaryNode) -> bool {
+    node.guarantee
+        .as_ref()
+        .is_none_or(ResultGuarantee::has_unknown)
 }
 
 /// A direct ratio has an operator-specific DDSketch proof, so it must select
@@ -2247,11 +2173,16 @@ fn keep_pre_asap_rc(expr: Rc<QueryExpr>) -> Result<Rc<SummaryNode>, RealizationE
 /// DAG assembly so their independently planned children remain visible.
 pub fn bindable_intent(node: &QueryExpr) -> Option<&AggIntent> {
     if let QueryExpr::Aggregate {
-        measures, having, ..
+        measures,
+        filters,
+        having,
+        ..
     } = node
     {
         if let ([intent], None) = (measures.as_slice(), having) {
-            return Some(intent);
+            if !any_measure_filtered(filters) {
+                return Some(intent);
+            }
         }
     }
     None
@@ -2287,6 +2218,22 @@ pub(crate) fn construct_summary_with(
     child_target: Option<&AccuracyTarget>,
     allocation: Option<GuaranteeSource>,
 ) -> Result<Rc<SummaryNode>, RealizationError> {
+    let local_target = match allocation.as_ref() {
+        Some(GuaranteeSource::BudgetAllocation { local_target, .. }) => Some(local_target),
+        _ => accuracy_target(intent),
+    };
+    let estimator = crate::accuracy::EstimatorAccuracy::new(
+        planning_inputs.accuracy,
+        planning_inputs.evidence.estimator_contract(expr),
+        local_target,
+    );
+    let realization = match realization {
+        Realization::Sketch(kind) => match estimator.size_params(kind.algorithm()) {
+            Some(params) => Realization::Sketch(SketchKind::new(kind.algorithm().clone(), params)),
+            None => Realization::Sketch(kind),
+        },
+        other => other,
+    };
     if let QueryExpr::Aggregate {
         reduction, child, ..
     } = expr
@@ -2308,62 +2255,110 @@ pub(crate) fn construct_summary_with(
                     allocation,
                 )?;
                 if is_counter_weighted_topk(intent, child) {
-                    let values = finalize_exact_accumulator(
-                        realize_child_with(child, planning_inputs, Some(&AccuracyTarget::Exact))?,
-                        child,
-                    )?;
-                    if !values
-                        .guarantee
-                        .as_ref()
-                        .is_some_and(ResultGuarantee::is_exact)
-                    {
-                        return Err(RealizationError::PhysicalRealization(
-                            "CandidateTopK exact rerank input is not exact",
-                        ));
-                    }
-                    let completeness = match candidate.guarantee.clone() {
-                        Some(guarantee) if guarantee.metric == ErrorMetric::TopKMembership => {
-                            CandidateCompleteness::Certified { guarantee }
-                        }
-                        guarantee => CandidateCompleteness::BestEffort { guarantee },
-                    };
-                    let AggIntent::TopK { k, accuracy } = intent else {
-                        unreachable!()
-                    };
-                    if matches!(accuracy, AccuracyTarget::Exact)
-                        && !matches!(completeness, CandidateCompleteness::Certified { .. })
-                    {
-                        return Err(RealizationError::PhysicalRealization(
-                            "exact CandidateTopK requires certified candidate completeness",
-                        ));
-                    }
-                    let grouping = reduction.group_keys().cloned().unwrap_or_default();
-                    let guarantee = match &completeness {
-                        CandidateCompleteness::Certified { guarantee }
-                        | CandidateCompleteness::BestEffort {
-                            guarantee: Some(guarantee),
-                        } => Some(guarantee.clone()),
-                        CandidateCompleteness::BestEffort { guarantee: None } => None,
-                    };
-                    let node = Rc::new(SummaryNode {
-                        expr: SummaryExpr::CandidateTopK {
-                            candidates: candidate,
-                            values,
-                            k: *k,
-                            grouping,
-                            completeness,
-                        },
-                        schema: lift(&expr.output_schema()?),
-                        guarantee,
-                    });
-                    validate_execution_data_states_at(&node, ExecutionDataState::READ_ROWS)?;
-                    return Ok(node);
+                    return finish_weighted_topk(candidate, expr, intent);
                 }
                 return Ok(candidate);
             }
         }
     }
     keep_pre_asap_rc(Rc::new(expr.clone()))
+}
+
+fn finish_weighted_topk(
+    candidate: Rc<SummaryNode>,
+    logical: &QueryExpr,
+    intent: &AggIntent,
+) -> Result<Rc<SummaryNode>, RealizationError> {
+    let AggIntent::TopK { k, .. } = intent else {
+        unreachable!()
+    };
+    let QueryExpr::Aggregate {
+        reduction: Reduction::Reduce(groups),
+        child,
+        ..
+    } = logical
+    else {
+        return Err(RealizationError::PhysicalRealization(
+            "TopK requires explicit grouping",
+        ));
+    };
+    let schema = lift(&child.output_schema()?);
+    let score = ranking_score_index(child, &schema)?;
+    let cols = schema
+        .fields
+        .iter()
+        .enumerate()
+        .map(|(i, field)| {
+            let source = if i == score {
+                candidate.schema.fields.len() - 1
+            } else {
+                let matches = candidate
+                    .schema
+                    .fields
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, f)| f.name == field.name && f.dtype == field.dtype)
+                    .map(|(i, _)| i)
+                    .collect::<Vec<_>>();
+                match matches.as_slice() {
+                    [i] => *i,
+                    _ => {
+                        return Err(RealizationError::PhysicalRealization(
+                            "ambiguous TopK output identity",
+                        ))
+                    }
+                }
+            };
+            Ok(asap_types::pre_asap::query_expr::ProjectItem {
+                alias: Some(field.name.clone()),
+                expr: QueryExpr::Column(source),
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let guarantee = candidate.guarantee.clone();
+    let projected = Rc::new(SummaryNode {
+        expr: SummaryExpr::ValueOperation {
+            child: candidate,
+            operation: ValueOperation::Project {
+                cols,
+                qualifier: None,
+            },
+            timing: ExecutionTiming::QueryTime,
+        },
+        schema: schema.clone(),
+        guarantee: guarantee.clone(),
+    });
+    let sorted = Rc::new(SummaryNode {
+        expr: SummaryExpr::ValueOperation {
+            child: projected,
+            operation: ValueOperation::Sort {
+                keys: vec![asap_types::pre_asap::SortKey {
+                    expr: QueryExpr::Column(score),
+                    ascending: false,
+                    nulls_first: false,
+                }],
+                partition_by: groups.clone(),
+            },
+            timing: ExecutionTiming::QueryTime,
+        },
+        schema: schema.clone(),
+        guarantee: guarantee.clone(),
+    });
+    let result = Rc::new(SummaryNode {
+        expr: SummaryExpr::ValueOperation {
+            child: sorted,
+            operation: ValueOperation::Limit {
+                n: *k,
+                offset: 0,
+                partition_by: groups.clone(),
+            },
+            timing: ExecutionTiming::QueryTime,
+        },
+        schema,
+        guarantee,
+    });
+    validate_execution_data_states_at(&result, ExecutionDataState::QUERY_ROWS)?;
+    Ok(result)
 }
 
 fn is_counter_weighted_topk(intent: &AggIntent, child: &QueryExpr) -> bool {
@@ -2532,7 +2527,7 @@ fn maintenance_exact_values(node: Rc<SummaryNode>) -> Option<Rc<SummaryNode>> {
                 lhs: maintenance_exact_values(lhs.clone())?,
                 rhs: maintenance_exact_values(rhs.clone())?,
                 operator: operator.clone(),
-                timing: ExecutionTiming::MaintenanceTime,
+                timing: ExecutionTiming::IngestionTime,
             }
         }
         SummaryExpr::ValueOperation {
@@ -2550,7 +2545,7 @@ fn maintenance_exact_values(node: Rc<SummaryNode>) -> Option<Rc<SummaryNode>> {
             SummaryExpr::ValueOperation {
                 child: child.clone(),
                 operation: ValueOperation::FinalizeExactAccumulator,
-                timing: ExecutionTiming::MaintenanceTime,
+                timing: ExecutionTiming::IngestionTime,
             }
         }
         _ => return Some(node),
@@ -2583,10 +2578,71 @@ fn construct_summary_agg(
             SummaryFamilyType::Sketch(kind, _)
                 if matches!(kind.algorithm(), SketchAlgorithm::CmsWithHeap | SketchAlgorithm::CountSketchWithHeap)
         );
-    let physical_reduction = if keyed_heap && matches!(reduction, Reduction::PerEntity) {
-        // A heavy-hitter sidecar is one keyed state. `item` identifies the
-        // ranked series/group inside that state; retaining the logical
-        // PerEntity reduction here would allocate one full sketch per item.
+    let rate_weighted = matches!(node, QueryExpr::Aggregate { child, .. }
+        if is_counter_weighted_topk(intent, child));
+    let mut family = family;
+    let score_population = if rate_weighted {
+        let bound = planning_inputs.evidence.topk_max_distinct_items(node);
+        if bound.is_some_and(|n| n == 0 || n > (1u64 << 53)) {
+            return Err(RealizationError::PhysicalRealization(
+                "invalid weighted TopK distinct-item bound",
+            ));
+        }
+        if let (Some(n), SummaryFamilyType::Sketch(kind, grouping)) = (bound, &family) {
+            let (eps, delta) = accuracy_budget(accuracy_target(intent).expect("TopK target"));
+            let params = default_size_params(
+                kind.algorithm().clone(),
+                intent,
+                eps,
+                delta / (2.0 * n as f64),
+            );
+            family = SummaryFamilyType::Sketch(
+                SketchKind::new(kind.algorithm().clone(), params),
+                grouping.clone(),
+            );
+        }
+        bound
+    } else {
+        None
+    };
+    let physical_reduction = if rate_weighted {
+        let QueryExpr::Aggregate { child, .. } = node else {
+            unreachable!()
+        };
+        let source = input.child.output_schema()?;
+        let Reduction::Reduce(keys) = reduction else {
+            return Err(RealizationError::PhysicalRealization(
+                "TopK requires explicit partitions",
+            ));
+        };
+        if keys.is_without() {
+            return Err(RealizationError::PhysicalRealization(
+                "TopK requires explicit partitions",
+            ));
+        }
+        let mapped = keys
+            .iter()
+            .map(|index| {
+                let reference = schema_column_ref(child, *index).ok_or(
+                    RealizationError::PhysicalRealization("invalid TopK partition key"),
+                )?;
+                let matches = source
+                    .columns
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, column)| column_ref(column) == reference)
+                    .map(|(index, _)| index)
+                    .collect::<Vec<_>>();
+                match matches.as_slice() {
+                    [index] => Ok(*index),
+                    _ => Err(RealizationError::PhysicalRealization(
+                        "ambiguous TopK partition key",
+                    )),
+                }
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Reduction::by(mapped)
+    } else if keyed_heap && matches!(reduction, Reduction::PerEntity) {
         Reduction::by(vec![])
     } else {
         reduction.clone()
@@ -2599,15 +2655,43 @@ fn construct_summary_agg(
     let out_schema = node.output_schema()?;
     let state_idx = summary_col_index(&out_schema, &by, per_series);
 
+    let readout_schema = if keyed_heap
+        && matches!(node, QueryExpr::Aggregate { child, .. } if is_counter_weighted_topk(intent, child))
+    {
+        keyed_heap_readout_schema(&input, node)?
+    } else {
+        lift(&out_schema)
+    };
+
     let summary_input = input.input;
-    let query = estimate.then(|| readout(intent, &summary_input, planning_inputs.cost));
+    let query = estimate.then(|| {
+        if rate_weighted {
+            if let SummaryFamilyType::Sketch(kind, _) = &family {
+                let capacity = match kind.params() {
+                    SketchParams::CmsWithHeap { heap_size, .. }
+                    | SketchParams::CountSketchWithHeap { heap_size, .. } => *heap_size,
+                    _ => unreachable!(),
+                };
+                return PostAsapSketchQuery::TopK {
+                    k: capacity as usize,
+                };
+            }
+        }
+        readout(intent, &summary_input, planning_inputs.cost)
+    });
 
     let mut state_schema = lift(&out_schema);
     if keyed_heap {
         let mut state = state_schema.fields[state_idx].clone();
         state.dtype = family.clone();
+        let mut fields = if rate_weighted {
+            readout_schema.fields[..reduction.group_keys().map_or(0, |keys| keys.len())].to_vec()
+        } else {
+            Vec::new()
+        };
+        fields.push(state);
         state_schema = SummarySchema {
-            fields: vec![state],
+            fields,
             time_index: None,
         };
     } else if let Some(field) = state_schema.fields.get_mut(state_idx) {
@@ -2619,15 +2703,26 @@ fn construct_summary_agg(
         }
     }
 
-    let bound_child = realize_child_with(&input.child, planning_inputs, child_target)?;
-    // A maintained parent consumes finalized values, never the child's
-    // accumulator representation. Keep the read boundary explicit even when
-    // an exact scalar accumulator currently stores its value directly.
-    let bound_child =
-        finalize_exact_accumulator_at(bound_child, &input.child, ExecutionTiming::MaintenanceTime)?;
-    let bound_child = match maintenance_exact_values(bound_child) {
-        Some(child) => child,
-        None => keep_pre_asap(&input.child)?,
+    let bound_child = realize_child_with(
+        &input.child,
+        planning_inputs,
+        if rate_weighted {
+            Some(&AccuracyTarget::Exact)
+        } else {
+            child_target
+        },
+    )?;
+    let bound_child = if rate_weighted {
+        // A fresh query-time summary consumes this evaluation's finalized rates.
+        // Moving rate snapshots must never accumulate across evaluations.
+        finalize_exact_accumulator(bound_child, &input.child)?
+    } else {
+        let child = finalize_exact_accumulator_at(
+            bound_child,
+            &input.child,
+            ExecutionTiming::IngestionTime,
+        )?;
+        maintenance_exact_values(child).unwrap_or(keep_pre_asap(&input.child)?)
     };
 
     // ── Guarantee (issue #172) ──────────────────────────────────────────
@@ -2635,15 +2730,88 @@ fn construct_summary_agg(
     // materialized: the local guarantee of this family's readout (or exact
     // accumulator) composed over the child's, under the operator this
     // family applies to the child's values.
-    let guarantee = compose_guarantee(
+    let local_target = match allocation.as_ref() {
+        Some(GuaranteeSource::BudgetAllocation { local_target, .. }) => Some(local_target),
+        _ => accuracy_target(intent),
+    };
+    let estimator = crate::accuracy::EstimatorAccuracy::new(
+        planning_inputs.accuracy,
+        planning_inputs.evidence.estimator_contract(node),
+        local_target,
+    );
+    let membership_query = if rate_weighted {
+        Some(readout(intent, &summary_input, planning_inputs.cost))
+    } else {
+        query.clone()
+    };
+    let mut guarantee = compose_guarantee(
         &family,
-        query.as_ref(),
+        membership_query.as_ref(),
         &bound_child,
         intent,
-        planning_inputs.accuracy,
+        &estimator,
         planning_inputs.evidence,
         allocation,
     )?;
+
+    if rate_weighted {
+        use asap_types::post_asap::{BoundExpr, ProbabilityExpr};
+        let target = accuracy_target(intent).expect("TopK target");
+        guarantee = if let Some(mut score) =
+            estimator.local_guarantee(&family, query.as_ref().unwrap())
+        {
+            let count = match score_population {
+                Some(n) => BoundExpr::Constant { value: n as f64 },
+                None => {
+                    score
+                        .provenance
+                        .push(GuaranteeSource::UnavailableStatistic {
+                            statistic: "topk_max_distinct_items".into(),
+                        });
+                    BoundExpr::Unknown {
+                        statistic: "topk_max_distinct_items".into(),
+                    }
+                }
+            };
+            score.provenance.push(GuaranteeSource::CompositionStep {
+                operator: CompositionOperator::ApproximateAggregate,
+                rule: "simultaneous_score_bounds_over_distinct_partition_item_identities".into(),
+            });
+            score.failure_probability = ProbabilityExpr::Scaled {
+                count,
+                inner: Box::new(score.failure_probability),
+            };
+            // #455: missing evidence preserves a logical candidate. Only known
+            // contributions that already violate the target reject it here.
+            if !estimator.satisfies(&score.optimistic_floor(), target) {
+                return Err(RealizationError::PhysicalRealization(
+                    "weighted TopK scores miss accuracy target",
+                ));
+            }
+            let stats = planning_inputs.evidence.propagation_stats(
+                &CompositionOperator::TopKSelection,
+                &family,
+                membership_query.as_ref(),
+            );
+            let mut joint = estimator.propagate(
+                &CompositionOperator::TopKSelection,
+                std::slice::from_ref(&score),
+                None,
+                &stats,
+            )?;
+            joint.failure_probability = ProbabilityExpr::UnionBound {
+                terms: vec![joint.failure_probability, score.failure_probability],
+            };
+            if !estimator.satisfies(&joint.optimistic_floor(), target) {
+                return Err(RealizationError::PhysicalRealization(
+                    "weighted TopK joint guarantee misses target",
+                ));
+            }
+            Some(joint)
+        } else {
+            None
+        };
+    }
 
     // `reduction` is carried onto `SummaryAgg` verbatim — not flattened to a
     // bare `Vec<ColumnId>` — so `SummaryExecutor::find_candidates` can tell
@@ -2657,6 +2825,7 @@ fn construct_summary_agg(
             input: summary_input,
             reduction: physical_reduction,
             grouping: GroupingStrategy::default(),
+            filter: None,
         },
         schema: state_schema,
         // Summary *state* carries no caller-visible guarantee; only a
@@ -2672,11 +2841,189 @@ fn construct_summary_agg(
                 summary_input: agg,
                 query,
             },
-            schema: lift(&out_schema),
+            schema: readout_schema,
             guarantee,
         })),
         None => Ok(agg),
     }
+}
+
+// Heap readout rows contain the encoded item identity, subpopulation keys,
+// and an estimated score. They never inherit the exact-value producer's schema.
+fn keyed_heap_readout_schema(
+    input: &PhysicalSummaryInput,
+    node: &QueryExpr,
+) -> Result<SummarySchema, RealizationError> {
+    let source = input.child.output_schema()?;
+    let mut refs = Vec::new();
+    let QueryExpr::Aggregate {
+        reduction, child, ..
+    } = node
+    else {
+        return Err(RealizationError::PhysicalRealization(
+            "heap readout requires an aggregate",
+        ));
+    };
+    if let Reduction::Reduce(groups) = reduction {
+        if groups.is_without() {
+            return Err(RealizationError::PhysicalRealization(
+                "heap readout requires explicit grouping",
+            ));
+        }
+        for index in groups.iter() {
+            refs.push(schema_column_ref(child, *index).ok_or(
+                RealizationError::PhysicalRealization("invalid heap partition key"),
+            )?);
+        }
+    }
+    fn item_refs(
+        item: &SummaryInputExpr,
+        schema: &Schema,
+        refs: &mut Vec<ColumnRef>,
+    ) -> Result<(), RealizationError> {
+        match item {
+            SummaryInputExpr::Column(column) => refs.push(column.clone()),
+            SummaryInputExpr::Tuple(items) => {
+                for item in items {
+                    item_refs(item, schema, refs)?;
+                }
+            }
+            SummaryInputExpr::EntityIdentity(EntityIdentity::PromqlLabelSet { excluding }) => {
+                if !schema.closed {
+                    return Err(RealizationError::PhysicalRealization(
+                        "dynamic label identity requires an explicit row representation",
+                    ));
+                }
+                for (index, column) in schema.columns.iter().enumerate() {
+                    if Some(index) != schema.time_index && column.name != "value" {
+                        let reference = match &column.table {
+                            Some(table) => ColumnRef::Qualified {
+                                table: table.clone(),
+                                name: column.name.clone(),
+                            },
+                            None => ColumnRef::Named(column.name.clone()),
+                        };
+                        if !excluding.contains(&reference) {
+                            refs.push(reference);
+                        }
+                    }
+                }
+            }
+            _ => {
+                return Err(RealizationError::PhysicalRealization(
+                    "unsupported heap item identity",
+                ))
+            }
+        }
+        Ok(())
+    }
+    item_refs(
+        input
+            .input
+            .item
+            .as_ref()
+            .ok_or(RealizationError::PhysicalRealization(
+                "heap item identity is missing",
+            ))?,
+        &source,
+        &mut refs,
+    )?;
+    let mut fields = Vec::<asap_types::post_asap::SummaryField>::new();
+    for reference in refs {
+        let matches: Vec<_> = source
+            .columns
+            .iter()
+            .filter(|column| match &reference {
+                ColumnRef::Named(name) => &column.name == name,
+                ColumnRef::Qualified { table, name } => {
+                    column.table.as_ref() == Some(table) && &column.name == name
+                }
+                ColumnRef::SampleValue => column.name == "value",
+                ColumnRef::Wildcard => false,
+            })
+            .collect();
+        let [column] = matches.as_slice() else {
+            return Err(RealizationError::PhysicalRealization(
+                "heap key must resolve to exactly one source column",
+            ));
+        };
+        if fields.iter().any(|field| field.name == column.name) || column.name == "__asap_estimate"
+        {
+            return Err(RealizationError::PhysicalRealization(
+                "heap keys must have distinct output names",
+            ));
+        }
+        fields.push(asap_types::post_asap::SummaryField {
+            name: column.name.clone(),
+            dtype: SummaryFamilyType::Plain(column.dtype.clone()),
+            nullable: column.nullable,
+        });
+    }
+    if fields.is_empty() {
+        return Err(RealizationError::PhysicalRealization(
+            "heap readout has no identity columns",
+        ));
+    }
+    fields.push(asap_types::post_asap::SummaryField {
+        name: "__asap_estimate".into(),
+        dtype: SummaryFamilyType::Plain(asap_types::pre_asap::DataType::Float64),
+        nullable: false,
+    });
+    Ok(SummarySchema {
+        fields,
+        time_index: None,
+    })
+}
+
+fn ranking_score_index(
+    logical: &QueryExpr,
+    values: &SummarySchema,
+) -> Result<usize, RealizationError> {
+    let QueryExpr::Aggregate {
+        reduction,
+        measures,
+        ..
+    } = logical
+    else {
+        return Err(RealizationError::PhysicalRealization(
+            "ranking requires an explicit aggregate score",
+        ));
+    };
+    if measures.len() != 1 {
+        return Err(RealizationError::PhysicalRealization(
+            "ranking requires exactly one score",
+        ));
+    }
+    let index = match reduction {
+        Reduction::Reduce(groups) if !groups.is_without() => groups.len(),
+        Reduction::PerEntity => values
+            .fields
+            .iter()
+            .position(|field| field.name == "value")
+            .ok_or(RealizationError::PhysicalRealization(
+                "ranking requires the sample value column",
+            ))?,
+        _ => {
+            return Err(RealizationError::PhysicalRealization(
+                "ranking requires explicit grouping",
+            ))
+        }
+    };
+    if Some(index) == values.time_index
+        || !values.fields.get(index).is_some_and(|field| {
+            matches!(
+                field.dtype,
+                SummaryFamilyType::Plain(
+                    asap_types::pre_asap::DataType::Int64 | asap_types::pre_asap::DataType::Float64
+                )
+            )
+        })
+    {
+        return Err(RealizationError::PhysicalRealization(
+            "ranking score must be numeric",
+        ));
+    }
+    Ok(index)
 }
 
 /// Realize the composite heavy-hitter realization for
@@ -2711,24 +3058,13 @@ fn realize_keyed_additive_summary_input(
     else {
         return PhysicalSummaryInputRuleResult::NotApplicable;
     };
-    let counter_input = match measures.as_slice() {
-        [AggIntent::Sum { .. }] => match raw_child.as_ref() {
-            QueryExpr::Aggregate {
-                measures, child, ..
-            } if matches!(measures.as_slice(), [AggIntent::Rate | AggIntent::Increase]) => {
-                Some(Rc::clone(child))
-            }
-            _ => None,
-        },
-        _ => None,
-    };
+    let counter_input = matches!(measures.as_slice(), [AggIntent::Sum { .. }])
+        && matches!(raw_child.as_ref(), QueryExpr::Aggregate { measures, .. }
+            if matches!(measures.as_slice(), [AggIntent::Rate | AggIntent::Increase]));
     let weight = match measures.as_slice() {
         [AggIntent::Count { .. }] => SummaryInputExpr::Constant(1.0),
-        [AggIntent::Sum { .. }] if counter_input.is_some() => {
-            SummaryInputExpr::ResetAwareCounterDelta {
-                value: ColumnRef::SampleValue,
-                series: EntityIdentity::PromqlLabelSet { excluding: vec![] },
-            }
+        [AggIntent::Sum { .. }] if counter_input => {
+            SummaryInputExpr::Column(ColumnRef::SampleValue)
         }
         [AggIntent::Sum { col }] => SummaryInputExpr::Column(match col {
             None => ColumnRef::SampleValue,
@@ -2747,7 +3083,7 @@ fn realize_keyed_additive_summary_input(
         [AggIntent::Count { .. }] => WeightDomain::NonNegative {
             proof: NonNegativeWeightProof::UnitCount,
         },
-        [AggIntent::Sum { .. }] if counter_input.is_some() => WeightDomain::NonNegative {
+        [AggIntent::Sum { .. }] if counter_input => WeightDomain::NonNegative {
             proof: NonNegativeWeightProof::ResetAwareCounterDerivative,
         },
         _ => WeightDomain::UnknownOrSigned,
@@ -2806,7 +3142,7 @@ fn realize_keyed_additive_summary_input(
         }
     };
     PhysicalSummaryInputRuleResult::Realized(PhysicalSummaryInput {
-        child: counter_input.unwrap_or_else(|| Rc::clone(raw_child)),
+        child: Rc::clone(raw_child),
         input: SummaryUpdate {
             item: Some(item),
             weight,
@@ -2880,27 +3216,12 @@ fn compose_guarantee(
         (_, None) => (CompositionOperator::ApproximateAggregate, None),
     };
     let Some(input) = child.guarantee.clone() else {
-        // A child with no guarantee at all is an unknown quantity, which
-        // nothing can be composed over (a `Sample` readout, say) — unless
-        // this node is itself the unknown family, in which case it inherits
-        // "unknown" rather than fabricating a guarantee for its child.
-        return match local {
-            Some(_) => Err(AccuracyError::MissingInputGuarantee {
-                operator: op,
-                input_index: 0,
-            }),
-            None => Ok(None),
-        };
+        // Shape is constructible, but the child has no accuracy certificate.
+        return Ok(None);
     };
-    if local.is_none() && input.is_exact() {
-        if accuracy_target(intent).is_some() {
-            return Err(AccuracyError::UnsupportedComposition {
-                operator: op,
-                input_metrics: vec![input.metric],
-                local_metric: None,
-                reason: "summary readout has no accuracy evidence for the requested target".into(),
-            });
-        }
+    if local.is_none() {
+        // No local error model: retain the candidate with unknown accuracy.
+        // Propagating the input alone would falsely certify the summary.
         return Ok(None);
     }
     let stats = evidence.propagation_stats(&op, family, query);
@@ -2916,7 +3237,7 @@ fn compose_guarantee(
         // Check even over an exact input: parameter clamps or a conservative
         // confidence conversion can make the tightest available sketch miss
         // its requested target.
-        if !accuracy.satisfies(&guarantee, target) {
+        if !accuracy.satisfies(&guarantee.optimistic_floor(), target) {
             return Err(AccuracyError::TargetNotSatisfied {
                 metric: guarantee.metric,
                 bound: guarantee.bound.evaluate(),
@@ -4229,7 +4550,7 @@ impl<'a> GlobalSelection<'a> {
     /// a [`Replacement::Summary`] is
     /// re-linked so its `SummaryAgg` child is the child target's own
     /// DAG assembly whenever that is phase-legal beneath maintenance
-    /// (so a child that chose an `ValueOperationAtMaintenanceTime` actually ends up under
+    /// (so a child that chose an `ValueOperationAtIngestionTime` actually ends up under
     /// the summary); a [`Replacement::Rewrite`] or an unmatched site stays
     /// the conservative `KeepPreAsap`. Memoized by target identity, so a
     /// shared inner summary is one `Rc` no matter how many roots reach it.
@@ -4248,7 +4569,7 @@ impl<'a> GlobalSelection<'a> {
         if let Some(node) = self.assembled_nodes.borrow().get(&ptr) {
             return Ok(Rc::clone(node));
         }
-        let node = if read_time_nested_sum(target) {
+        let node = if query_time_nested_sum(target) {
             self.assemble_residual(target)?
         } else {
             match self
@@ -4299,8 +4620,8 @@ impl<'a> GlobalSelection<'a> {
             let Some(pred) = normalized_pred else {
                 return keep_pre_asap(target);
             };
-            let left = self.assemble_target(left)?;
-            let right = self.assemble_target(right)?;
+            let left = finalize_exact_accumulator(self.assemble_target(left)?, left)?;
+            let right = finalize_exact_accumulator(self.assemble_target(right)?, right)?;
             let guarantee =
                 relational_join_guarantee(left.guarantee.as_ref(), right.guarantee.as_ref());
             let node = Rc::new(SummaryNode {
@@ -4309,11 +4630,12 @@ impl<'a> GlobalSelection<'a> {
                     right,
                     kind: kind.clone(),
                     pred,
+                    pruning: None,
                 },
                 schema: lift(&target.output_schema()?),
                 guarantee,
             });
-            validate_execution_data_states_at(&node, ExecutionDataState::READ_ROWS)?;
+            validate_execution_data_states_at(&node, ExecutionDataState::QUERY_ROWS)?;
             return Ok(node);
         }
         let (child_target, operation) = match target.as_ref() {
@@ -4347,42 +4669,43 @@ impl<'a> GlobalSelection<'a> {
                 ValueOperation::Limit {
                     n: *n,
                     offset: *offset,
+                    partition_by: match child.as_ref() {
+                        QueryExpr::Sort { partition_by, .. } => partition_by.clone(),
+                        _ => Default::default(),
+                    },
                 },
             ),
             QueryExpr::Aggregate {
                 reduction,
                 measures,
                 output_names,
+                filters,
                 having,
                 child,
-            } if read_time_nested_sum(target) => (
+            } if query_time_nested_sum(target) => (
                 child,
                 ValueOperation::Exact(ExactOperation::Aggregate {
                     reduction: reduction.clone(),
                     measures: measures.clone(),
                     output_names: output_names.clone(),
+                    filters: filters.clone(),
                     having: having.clone(),
                 }),
             ),
             _ => return keep_pre_asap(target),
         };
-        let child = self.assemble_target(child_target)?;
-        let child = if matches!(operation, ValueOperation::Exact(_)) {
-            finalize_exact_accumulator(child, child_target)?
-        } else {
-            child
-        };
+        let child = finalize_exact_accumulator(self.assemble_target(child_target)?, child_target)?;
         let guarantee = child.guarantee.clone();
         let node = Rc::new(SummaryNode {
             expr: SummaryExpr::ValueOperation {
                 child,
                 operation,
-                timing: ExecutionTiming::ReadTime,
+                timing: ExecutionTiming::QueryTime,
             },
             schema: lift(&target.output_schema()?),
             guarantee,
         });
-        validate_execution_data_states_at(&node, ExecutionDataState::READ_ROWS)?;
+        validate_execution_data_states_at(&node, ExecutionDataState::QUERY_ROWS)?;
         Ok(node)
     }
 
@@ -4423,9 +4746,10 @@ impl<'a> GlobalSelection<'a> {
 /// reduction of the inner summary values. Maintaining the outer SUM directly
 /// would hide that inner temporal aggregate inside `KeepPreAsap` and lose its
 /// independently selected summary.
-fn read_time_nested_sum(target: &QueryExpr) -> bool {
+fn query_time_nested_sum(target: &QueryExpr) -> bool {
     let QueryExpr::Aggregate {
         measures,
+        filters,
         having: None,
         child,
         ..
@@ -4433,7 +4757,9 @@ fn read_time_nested_sum(target: &QueryExpr) -> bool {
     else {
         return false;
     };
-    matches!(measures.as_slice(), [AggIntent::Sum { .. }]) && contains_aggregate(child)
+    !any_measure_filtered(filters)
+        && matches!(measures.as_slice(), [AggIntent::Sum { .. }])
+        && contains_aggregate(child)
 }
 
 fn contains_aggregate(expr: &QueryExpr) -> bool {
@@ -4475,6 +4801,7 @@ fn relink_agg_child(node: &Rc<SummaryNode>, new_child: &Rc<SummaryNode>) -> Rc<S
             input,
             reduction,
             grouping,
+            filter,
         } => {
             if Rc::ptr_eq(child, new_child) {
                 return Rc::clone(node);
@@ -4486,14 +4813,13 @@ fn relink_agg_child(node: &Rc<SummaryNode>, new_child: &Rc<SummaryNode>) -> Rc<S
                     input: input.clone(),
                     reduction: reduction.clone(),
                     grouping: grouping.clone(),
+                    filter: filter.clone(),
                 },
                 schema: node.schema.clone(),
                 guarantee: node.guarantee.clone(),
             });
-            match validate_execution_data_states_at(
-                &rebuilt,
-                ExecutionDataState::MAINTENANCE_SUMMARY,
-            ) {
+            match validate_execution_data_states_at(&rebuilt, ExecutionDataState::INGESTION_SUMMARY)
+            {
                 Ok(_) => rebuilt,
                 Err(_) => Rc::clone(node),
             }
@@ -4503,7 +4829,7 @@ fn relink_agg_child(node: &Rc<SummaryNode>, new_child: &Rc<SummaryNode>) -> Rc<S
 }
 
 /// The maintained `SummaryAgg` a bound `Summary` candidate builds (under
-/// its `SummaryEstimate` readout, if any) — the summary an `ValueOperationAtMaintenanceTime`
+/// its `SummaryEstimate` readout, if any) — the summary an `ValueOperationAtIngestionTime`
 /// beneath it feeds, for `maintenance_operation_plan_cost_rate`.
 fn maintained_summary(node: &Rc<SummaryNode>) -> Option<&Rc<SummaryNode>> {
     match &node.expr {
@@ -4527,7 +4853,7 @@ struct CompositionContext {
     /// one, and the child's own selection is forced to it).
     committed_child: HashMap<*const QueryExpr, *const ReplacementSubDAG>,
     /// site ptr → the maintained `SummaryAgg` directly above it, when its
-    /// parent chose a bound `Summary` — what an `ValueOperationAtMaintenanceTime` here feeds.
+    /// parent chose a bound `Summary` — what an `ValueOperationAtIngestionTime` here feeds.
     maintaining_parent: HashMap<*const QueryExpr, Rc<SummaryNode>>,
 }
 
@@ -4555,6 +4881,9 @@ fn composition_options<'a>(
         let Replacement::ExactComposition(composition) = &candidate.replacement else {
             continue;
         };
+        if candidate.runtime_support_evidence(cost_model) != Some(true) {
+            continue;
+        }
         let child_ptr = Rc::as_ptr(&composition.child_target);
         let Some(child_group) = groups.get(&child_ptr) else {
             continue;
@@ -4593,6 +4922,9 @@ fn composition_options<'a>(
                     None => child_group.candidates.iter().collect(),
                 };
                 for child_candidate in child_candidates {
+                    if child_candidate.has_missing_accuracy_evidence() {
+                        continue;
+                    }
                     let Replacement::Summary(summary) = &child_candidate.replacement else {
                         continue;
                     };
@@ -4803,12 +5135,13 @@ impl<Id> PlanSpace<Id> {
                     .min_by(|(_, left), (_, right)| left.0.total_cmp(&right.0))
                     .map(|(candidate, _)| candidate);
                 bound.or_else(|| {
-                    (effective >= 2)
+                    (cost_model.allow_uncosted_legacy_selection() && effective >= 2)
                         .then(|| {
                             decide_with_effective_count(group, effective, cost_model).and_then(
                                 |decision| {
+                                    let candidate = pick_shared_subtree_candidate(group, decision)?;
                                     chosen_share.insert(*ptr, decision);
-                                    pick_shared_subtree_candidate(group, decision)
+                                    Some(candidate)
                                 },
                             )
                         })
@@ -4862,17 +5195,17 @@ impl<Id> PlanSpace<Id> {
                             cost_model
                                 .candidate_cost(candidate, &effective_target)
                                 .is_some()
+                                || cost_model.allow_uncosted_legacy_selection()
                         });
                         match (cse, logical) {
                             (Some(cse), Some(logical))
                                 if cost_model
-                                    .candidate_cost(logical, &effective_target)
-                                    .unwrap()
-                                    .0
-                                    < cost_model
-                                        .candidate_cost(cse, &effective_target)
-                                        .unwrap()
-                                        .0 =>
+                                    .candidate_cost(cse, &effective_target)
+                                    .is_none_or(|cse_cost| {
+                                        cost_model
+                                            .candidate_cost(logical, &effective_target)
+                                            .is_some_and(|logical_cost| logical_cost.0 < cse_cost.0)
+                                    }) =>
                             {
                                 Some(logical)
                             }
@@ -4895,12 +5228,13 @@ impl<Id> PlanSpace<Id> {
                     None => rank_group(group, cost_model).into_iter().find(|candidate| {
                         !is_composition_candidate(candidate)
                             && is_automatically_selectable(candidate)
-                            && cost_model
+                            && (cost_model
                                 .candidate_cost(
                                     candidate,
                                     &TargetSubDAG::with_consumer_count(&group.target, effective),
                                 )
                                 .is_some()
+                                || cost_model.allow_uncosted_legacy_selection())
                     }),
                 }
             } else {
@@ -4911,9 +5245,10 @@ impl<Id> PlanSpace<Id> {
                         !is_cse_candidate(candidate)
                             && !is_composition_candidate(candidate)
                             && is_automatically_selectable(candidate)
-                            && cost_model
+                            && (cost_model
                                 .candidate_cost(candidate, &effective_target)
                                 .is_some()
+                                || cost_model.allow_uncosted_legacy_selection())
                     })
                     .or_else(|| {
                         cse_candidate_pair(group)
@@ -4922,12 +5257,13 @@ impl<Id> PlanSpace<Id> {
                                 cost_model
                                     .candidate_cost(candidate, &effective_target)
                                     .is_some()
+                                    || cost_model.allow_uncosted_legacy_selection()
                             })
                     })
             };
 
             // Record the maintained summary this site's bound candidate
-            // builds, for a child that may compose an `ValueOperationAtMaintenanceTime`
+            // builds, for a child that may compose an `ValueOperationAtIngestionTime`
             // beneath it.
             if let (Some(Replacement::Summary(node)), QueryExpr::Aggregate { child, .. }) =
                 (chosen.map(|c| &c.replacement), group.target.as_ref())
@@ -4995,10 +5331,7 @@ fn is_cse_candidate(candidate: &ReplacementSubDAG) -> bool {
 }
 
 fn is_automatically_selectable(candidate: &ReplacementSubDAG) -> bool {
-    !matches!(
-        &candidate.replacement,
-        Replacement::Summary(node) if is_uncertified_ddsketch_ratio(node)
-    )
+    !candidate.has_missing_accuracy_evidence()
 }
 
 /// How much one direct reference to `parent_ptr` actually costs, once
@@ -5464,13 +5797,13 @@ pub fn search_workload_with<'s, Id>(
 /// alongside each root. After the search, every root that carries a target
 /// has its group's bound [`Replacement::Summary`] candidates checked with
 /// `accuracy_model`'s [`AccuracyModel::satisfies`]: a candidate whose
-/// guarantee is absent (unknown) or misses the target is moved from
+/// guarantee is fully known and misses the target is moved from
 /// [`TargetSubDAGCandidates::candidates`] to [`TargetSubDAGCandidates::rejected`] *before*
 /// [`PlanSpace::cost_sorted`]/[`PlanSpace::global_selection`] ever rank the
-/// group, so a `CostModel` cannot pick it. The exception is an uncertified
-/// direct DDSketch quantile ratio, which remains available for downstream
-/// evidence-based selection with `guarantee: None`; neither ranking nor
-/// selection by cost certifies that it satisfies the target. A `KeepPreAsap` candidate is
+/// group. A constructible candidate with unknown accuracy remains visible for
+/// downstream review under an approximate target, but default whole-plan
+/// selection does not commit it. An exact target cannot accept an unknown
+/// approximate summary. A `KeepPreAsap` candidate is
 /// exact and always survives — the raw/pre-ASAP alternative is what an
 /// unsatisfiable root keeps. Logical [`Replacement::Rewrite`] candidates
 /// are not bound values and are left alone; the targets *inside* a rewrite
@@ -5513,13 +5846,10 @@ pub fn search_workload_with_targets<'s, Id>(
                 .candidates
                 .drain(..)
                 .partition(|candidate| match &candidate.replacement {
-                    Replacement::Summary(node) => {
-                        is_uncertified_ddsketch_ratio(node)
-                            || node
-                                .guarantee
-                                .as_ref()
-                                .is_some_and(|g| accuracy_model.satisfies(g, &target))
-                    }
+                    Replacement::Summary(node) => node.guarantee.as_ref().map_or_else(
+                        || !matches!(target, AccuracyTarget::Exact),
+                        |g| accuracy_model.satisfies(&g.optimistic_floor(), &target),
+                    ),
                     Replacement::Rewrite(_) => true,
                     // A composition's guarantee depends on the concrete child;
                     // prepare_compositions checks those pairs after all roots.
@@ -5968,13 +6298,40 @@ mod tests {
                 .unwrap()
                 .expect("exact Top-K candidate");
             assert!(node.guarantee.as_ref().unwrap().is_exact());
-            assert!(matches!(
-                node.expr,
-                SummaryExpr::ValueOperation {
-                    operation: ValueOperation::Exact(ExactOperation::Aggregate { .. }),
-                    ..
-                }
-            ));
+            let SummaryExpr::ValueOperation {
+                child: sorted,
+                operation:
+                    ValueOperation::Limit {
+                        n,
+                        offset,
+                        partition_by,
+                    },
+                ..
+            } = &node.expr
+            else {
+                panic!("temporal TopK must compose Sort and Limit");
+            };
+            assert_eq!((*n, *offset), (5, 0));
+            let SummaryExpr::ValueOperation {
+                operation:
+                    ValueOperation::Sort {
+                        keys,
+                        partition_by: sort_groups,
+                    },
+                child: values,
+                ..
+            } = &sorted.expr
+            else {
+                panic!("Limit must consume sorted temporal values");
+            };
+            assert_eq!(sort_groups, partition_by);
+            assert_eq!(
+                partition_by.keys().len(),
+                usize::from(query.contains("by(job)"))
+            );
+            assert_eq!(keys.len(), 1);
+            assert!(!keys[0].ascending);
+            assert_eq!(node.schema, values.schema);
             asap_types::post_asap::compile_executable_dag(&node).unwrap();
         }
     }
@@ -6310,7 +6667,7 @@ mod tests {
     }
 
     #[test]
-    fn topk_heap_size_tracks_k() {
+    fn topk_heap_capacity_respects_accuracy_and_output_count() {
         let intent = AggIntent::TopK {
             k: 25,
             accuracy: eps(0.01),
@@ -6325,7 +6682,7 @@ mod tests {
                 else {
                     unreachable!("SketchKind validates CmsWithHeap params")
                 };
-                assert_eq!(*heap_size, 25);
+                assert_eq!(*heap_size, 100);
                 assert_eq!(*width, 272); // ⌈e/0.01⌉
                 assert_eq!(*depth, 5);
             }
@@ -6522,7 +6879,7 @@ mod tests {
             } => {
                 assert_eq!(width, 68);
                 assert_eq!(depth, 5);
-                assert_eq!(heap_size, 7);
+                assert_eq!(heap_size, 100);
             }
             other => panic!("expected CmsWithHeap, got {other:?}"),
         }
@@ -6576,6 +6933,7 @@ mod tests {
             reduction: ReductionTy::by(by),
             measures: vec![intent],
             output_names: vec![],
+            filters: vec![],
             having: None,
             child: Rc::new(child),
         }
@@ -6598,6 +6956,7 @@ mod tests {
             reduction: ReductionTy::by(vec![2]),
             measures: vec![AggIntent::Sum { col: None }, AggIntent::Avg { col: None }],
             output_names: vec![],
+            filters: vec![],
             having: None,
             child: Rc::new(metric_scan(&["job"])),
         });
@@ -6659,7 +7018,7 @@ mod tests {
     }
 
     #[test]
-    fn cardinality_epsilon_keeps_hll_but_epsilon_delta_rejects_unknown_confidence() {
+    fn cardinality_epsilon_delta_keeps_unknown_accuracy_candidates() {
         let q = Rc::new(agg(vec![2], default_cardinality(), metric_scan(&["job"])));
         let target = TargetSubDAG::new(&q);
         let replacements = SketchAlgorithmStrategy::default_cost_model().replacements(&target);
@@ -6677,7 +7036,8 @@ mod tests {
             vec![
                 SketchAlgorithm::Hll,
                 SketchAlgorithm::Theta,
-                SketchAlgorithm::Kmv
+                SketchAlgorithm::Kmv,
+                SketchAlgorithm::UnivMon,
             ]
         );
 
@@ -6702,7 +7062,15 @@ mod tests {
                 }
             })
             .collect();
-        assert_eq!(kinds, vec![SketchAlgorithm::Theta, SketchAlgorithm::Kmv]);
+        assert_eq!(
+            kinds,
+            vec![
+                SketchAlgorithm::Hll,
+                SketchAlgorithm::Theta,
+                SketchAlgorithm::Kmv,
+                SketchAlgorithm::UnivMon,
+            ]
+        );
     }
 
     #[test]
@@ -7031,7 +7399,7 @@ mod tests {
     // ── discovery + MEMO shape ───────────────────────────────────────────
 
     #[test]
-    fn single_bindable_aggregate_excludes_unprovable_hydra_candidates() {
+    fn single_bindable_aggregate_keeps_unprovable_hydra_candidates() {
         let intent = AggIntent::Count {
             accuracy: AccuracyTarget::EpsilonDelta {
                 epsilon: 0.01,
@@ -7051,8 +7419,8 @@ mod tests {
         assert_eq!(agg_group.consumer_count, 1);
         assert_eq!(
             agg_group.candidates.len(),
-            3,
-            "CMS/CountSketch and exact UnivMon total have modeled guarantees: {:?}",
+            5,
+            "Hydra candidates with unknown evidence remain available: {:?}",
             agg_group.candidates
         );
         assert!(agg_group
@@ -7079,9 +7447,23 @@ mod tests {
                     )
                 })
                 .count(),
-            0,
-            "Hydra shared-grid error is unmodeled, so accuracy-targeted candidates must be absent"
+            2,
+            "Hydra candidates remain visible with symbolic shared-grid error"
         );
+        assert_eq!(
+            agg_group
+                .candidates
+                .iter()
+                .filter(|candidate| candidate.has_missing_accuracy_evidence())
+                .count(),
+            2
+        );
+        let selected = space.global_selection(&DefaultCostModel);
+        assert!(!selected
+            .for_target(&space.roots[0].1)
+            .unwrap()
+            .chosen
+            .is_some_and(ReplacementSubDAG::has_missing_accuracy_evidence));
 
         let scan_group = space
             .target_subdag_candidates()
@@ -7095,14 +7477,66 @@ mod tests {
     }
 
     #[test]
-    fn cardinality_group_gets_all_three_candidates() {
+    fn cardinality_group_keeps_all_four_candidates() {
         let root = Rc::new(agg(vec![2], default_cardinality(), metric_scan(&["job"])));
         let space = search_workload(vec![("q", root)]);
         let agg_group = space
             .target_subdag_candidates()
             .find(|g| matches!(g.target.as_ref(), QueryExpr::Aggregate { .. }))
             .unwrap();
-        assert_eq!(agg_group.candidates.len(), 3);
+        assert_eq!(agg_group.candidates.len(), 4);
+        assert!(agg_group.candidates.iter().any(|candidate| matches!(
+            &candidate.replacement,
+            Replacement::Summary(node) if node.guarantee.is_none()
+                && candidate.has_missing_accuracy_evidence()
+        )));
+
+        let root = Rc::new(agg(vec![2], default_cardinality(), metric_scan(&["job"])));
+        let targeted = search_workload_with_targets(
+            vec![(
+                "q",
+                root,
+                Some(AccuracyTarget::EpsilonDelta {
+                    epsilon: 0.01,
+                    delta: 0.01,
+                }),
+            )],
+            &default_strategies(),
+            &DefaultAccuracyModel,
+        );
+        let target = &targeted.roots[0].1;
+        assert!(targeted
+            .candidates_for_target(target)
+            .unwrap()
+            .candidates
+            .iter()
+            .any(|candidate| matches!(
+                &candidate.replacement,
+                Replacement::Summary(node) if node.guarantee.is_none()
+                    && candidate.has_missing_accuracy_evidence()
+            )));
+        assert!(!targeted
+            .global_selection(&DefaultCostModel)
+            .for_target(target)
+            .unwrap()
+            .chosen
+            .is_some_and(ReplacementSubDAG::has_missing_accuracy_evidence));
+
+        let exact_target = search_workload_with_targets(
+            vec![(
+                "q",
+                Rc::new(agg(vec![2], default_cardinality(), metric_scan(&["job"]))),
+                Some(AccuracyTarget::Exact),
+            )],
+            &default_strategies(),
+            &DefaultAccuracyModel,
+        );
+        assert!(exact_target
+            .candidates_for_target(&exact_target.roots[0].1)
+            .unwrap()
+            .candidates
+            .iter()
+            .all(|candidate| !candidate.has_missing_accuracy_evidence()));
     }
 
     #[test]
@@ -7506,6 +7940,10 @@ mod tests {
     /// needs to cross.
     struct ConstantCseCost;
     impl CostModel for ConstantCseCost {
+        fn allow_uncosted_legacy_selection(&self) -> bool {
+            true
+        }
+
         fn rank_candidates(
             &self,
             _intent: &AggIntent,
@@ -7519,6 +7957,42 @@ mod tests {
         fn cse_shared_maintenance_cost(&self, _candidate: &CseCandidate) -> Cost {
             Cost(100.0)
         }
+    }
+
+    /// A costed logical choice must not panic when an explicitly allowed CSE
+    /// choice has no numeric cost.
+    #[test]
+    fn costed_logical_candidate_beats_uncosted_legacy_cse_choice() {
+        struct MixedCost;
+        impl CostModel for MixedCost {
+            fn allow_uncosted_legacy_selection(&self) -> bool {
+                true
+            }
+
+            fn rank_candidates(
+                &self,
+                _intent: &AggIntent,
+                candidates: &[SketchAlgorithm],
+            ) -> Vec<SketchAlgorithm> {
+                candidates.to_vec()
+            }
+
+            fn candidate_cost(
+                &self,
+                candidate: &ReplacementSubDAG,
+                _target: &TargetSubDAG<'_>,
+            ) -> Option<Cost> {
+                (!is_cse_candidate(candidate)).then_some(Cost(1.0))
+            }
+        }
+
+        let aggregate = Rc::new(agg(vec![2], default_quantile(0.99), metric_scan(&["job"])));
+        let space = search_workload(vec![("left", Rc::clone(&aggregate)), ("right", aggregate)]);
+        let root = &space.roots[0].1;
+        assert!(cse_candidate_pair(space.candidates_for_target(root).unwrap()).is_some());
+        let selected = space.global_selection(&MixedCost);
+        let chosen = selected.for_target(root).unwrap().chosen.unwrap();
+        assert!(!is_cse_candidate(chosen));
     }
 
     #[test]
@@ -7574,6 +8048,10 @@ mod tests {
         // not silently drop the candidate or fall back to discovery order.
         struct PreferDDSketch;
         impl CostModel for PreferDDSketch {
+            fn allow_uncosted_legacy_selection(&self) -> bool {
+                true
+            }
+
             fn rank_candidates(
                 &self,
                 _intent: &AggIntent,
@@ -7600,6 +8078,23 @@ mod tests {
             Replacement::Rewrite(_) | Replacement::ExactComposition(_) => None,
         };
         assert_eq!(kind, Some(SketchAlgorithm::DDSketch));
+
+        struct Uncosted;
+        impl CostModel for Uncosted {
+            fn rank_candidates(
+                &self,
+                _intent: &AggIntent,
+                candidates: &[SketchAlgorithm],
+            ) -> Vec<SketchAlgorithm> {
+                candidates.to_vec()
+            }
+        }
+        assert!(space
+            .global_selection(&Uncosted)
+            .for_target(&space.roots[0].1)
+            .unwrap()
+            .chosen
+            .is_none());
     }
 
     #[test]
@@ -7818,8 +8313,7 @@ mod tests {
         let planned = &space.roots[0].1;
 
         let selected = space.global_selection(&CompletePlanCost);
-        let chosen = selected.for_target(planned).unwrap().chosen.unwrap();
-        assert_eq!(chosen.provenance, ReplacementProvenance::CseRecompute);
+        assert!(selected.for_target(planned).unwrap().chosen.is_none());
     }
 
     #[test]
@@ -7857,6 +8351,10 @@ mod tests {
 
         struct AlwaysShare;
         impl CostModel for AlwaysShare {
+            fn allow_uncosted_legacy_selection(&self) -> bool {
+                true
+            }
+
             fn rank_candidates(
                 &self,
                 _intent: &AggIntent,
@@ -8183,6 +8681,7 @@ mod tests {
             reduction: ReductionTy::PerEntity,
             measures: vec![intent],
             output_names: vec![],
+            filters: vec![],
             having: None,
             child: Rc::new(child),
         }
@@ -8544,7 +9043,7 @@ mod tests {
         let SummaryExpr::ValueOperation {
             child,
             operation: ValueOperation::FinalizeExactAccumulator,
-            timing: ExecutionTiming::MaintenanceTime,
+            timing: ExecutionTiming::IngestionTime,
         } = &child.expr
         else {
             panic!("expected explicit maintenance readout");
@@ -8668,6 +9167,7 @@ mod tests {
             reduction: ReductionTy::by(vec![2]),
             measures: vec![AggIntent::Sum { col: None }, AggIntent::Avg { col: None }],
             output_names: vec![],
+            filters: vec![],
             having: None,
             child: Rc::new(metric_scan(&["job"])),
         };
@@ -8677,8 +9177,27 @@ mod tests {
         ));
     }
 
+    // No binding rule applies a per-measure `FILTER` (#466), so the
+    // aggregate is retained exactly rather than bound to a summary.
     #[test]
-    fn topk_without_margin_evidence_falls_back_to_pre_asap() {
+    fn filtered_measure_stays_logical() {
+        use asap_types::pre_asap::expr_ir::ScalarValue;
+        use asap_types::pre_asap::query_expr::Predicate;
+        let mut q = agg(vec![2], default_quantile(0.99), metric_scan(&["job"]));
+        if let QueryExpr::Aggregate { filters, .. } = &mut q {
+            *filters = vec![Some(Predicate(Rc::new(QueryExpr::Literal(
+                ScalarValue::Boolean(true),
+            ))))];
+        }
+        assert!(bindable_intent(&q).is_none());
+        assert!(matches!(
+            realize(&q).unwrap().expr,
+            SummaryExpr::KeepPreAsap(_)
+        ));
+    }
+
+    #[test]
+    fn unsupported_direct_topk_without_margin_evidence_falls_back_to_pre_asap() {
         let q = agg(
             vec![2],
             AggIntent::TopK {
@@ -8689,6 +9208,34 @@ mod tests {
         );
         let root = realize(&q).unwrap();
         assert!(matches!(root.expr, SummaryExpr::KeepPreAsap(_)));
+    }
+
+    #[test]
+    fn count_ranked_topk_without_margin_evidence_keeps_an_uncertified_candidate() {
+        let inner = agg(
+            vec![2],
+            AggIntent::Count {
+                accuracy: AccuracyTarget::Epsilon(0.01),
+            },
+            metric_scan(&["job"]),
+        );
+        let root = Rc::new(agg(
+            vec![],
+            AggIntent::TopK {
+                k: 5,
+                accuracy: AccuracyTarget::Epsilon(0.01),
+            },
+            inner,
+        ));
+        let proposals =
+            SketchAlgorithmStrategy::default_cost_model().replacements(&TargetSubDAG::new(&root));
+        assert!(!proposals.is_empty());
+        assert!(proposals.iter().any(|candidate| matches!(
+            &candidate.replacement,
+            Replacement::Summary(node) if node.guarantee.as_ref().is_some_and(|g|
+                g.bound.evaluate().is_none()
+                    && g.failure_probability.evaluate().is_none())
+        )));
     }
 
     struct SeparatedTopKEvidence;
@@ -8890,6 +9437,7 @@ mod tests {
             reduction: ReductionTy::PerEntity,
             measures: vec![AggIntent::Sum { col: None }],
             output_names: vec![],
+            filters: vec![],
             having: None,
             child: Rc::new(QueryExpr::TimeRange {
                 range: std::time::Duration::from_secs(60),
@@ -9203,7 +9751,7 @@ mod tests {
         assert_eq!(guarantee.metric, ErrorMetric::Rank);
         assert_eq!(
             guarantee.bound.evaluate(),
-            Some(crate::accuracy::kll_rank_error_99(269))
+            Some(crate::accuracy::estimators::kll::kll_rank_error_99(269))
         );
         assert_eq!(guarantee.approximate_layer_count(), 1);
         assert!(guarantee.provenance.iter().any(|s| matches!(
@@ -9375,7 +9923,7 @@ mod tests {
     }
 
     #[test]
-    fn topk_accuracy_target_rejects_uncertified_membership() {
+    fn topk_accuracy_target_keeps_uncertified_membership() {
         let inner = agg(
             vec![2],
             AggIntent::Count {
@@ -9398,14 +9946,239 @@ mod tests {
         );
         let group = space.candidates_for_target(&space.roots[0].1).unwrap();
 
-        assert!(group
+        assert!(group.candidates.iter().any(|candidate| matches!(
+            &candidate.replacement,
+            Replacement::Summary(node) if node.guarantee.as_ref().is_some_and(ResultGuarantee::has_unknown)
+        )));
+        let candidate = group
             .candidates
             .iter()
-            .all(|candidate| matches!(candidate.replacement, Replacement::Rewrite(_))));
-        assert!(!group.rejected.is_empty());
-        assert!(group.rejected.iter().all(|rejected| matches!(
-            rejected.error,
-            AccuracyError::TargetNotSatisfied { .. } | AccuracyError::UnsupportedComposition { .. }
-        )));
+            .find(|candidate| candidate.has_missing_accuracy_evidence())
+            .unwrap();
+        let Replacement::Summary(node) = &candidate.replacement else {
+            unreachable!()
+        };
+        let exported = asap_types::dag_export::export_summary(node);
+        assert!(exported.nodes[exported.root as usize]
+            .guarantee
+            .as_ref()
+            .is_some_and(ResultGuarantee::has_unknown));
+        let selected = space.global_selection(&DefaultCostModel);
+        assert!(!selected
+            .for_target(&space.roots[0].1)
+            .unwrap()
+            .chosen
+            .is_some_and(ReplacementSubDAG::has_missing_accuracy_evidence));
+        assert!(selected
+            .assemble_selected_dag(&space.roots[0].1)
+            .unwrap()
+            .is_some());
+    }
+    // Source evidence alone must enable Planner-owned sizing and certification.
+    #[test]
+    fn scoped_hll_evidence_sizes_and_certifies_without_a_deployment_model() {
+        use crate::accuracy::EstimatorContract;
+        struct SourceEvidence {
+            expression: QueryExpr,
+            max_distinct: u32,
+        }
+        impl AccuracyEvidenceProvider for SourceEvidence {
+            fn estimator_contract(&self, expression: &QueryExpr) -> Option<EstimatorContract> {
+                (expression == &self.expression).then_some(EstimatorContract::ClassicHll {
+                    max_distinct_per_readout: self.max_distinct,
+                })
+            }
+        }
+        let target = AccuracyTarget::EpsilonDelta {
+            epsilon: 0.05,
+            delta: 0.01,
+        };
+        let root = Rc::new(agg(
+            vec![],
+            AggIntent::Cardinality {
+                cols: vec![],
+                accuracy: target.clone(),
+            },
+            metric_scan(&[]),
+        ));
+        let evidence = SourceEvidence {
+            expression: (*root).clone(),
+            max_distinct: 128,
+        };
+        let strategy = SketchAlgorithmStrategy::new_with_planning_inputs_and_evidence(
+            &DefaultCostModel,
+            &DefaultAccuracyModel,
+            &EqualSplitAllocator,
+            &evidence,
+        );
+        let candidates = strategy.replacements(&TargetSubDAG::new(&root));
+        let hll = candidates
+            .iter()
+            .find_map(|candidate| match &candidate.replacement {
+                Replacement::Summary(node)
+                    if summary_family_algorithm(node) == SketchAlgorithm::Hll =>
+                {
+                    Some(node)
+                }
+                _ => None,
+            })
+            .expect("HLL candidate");
+        assert!(DefaultAccuracyModel
+            .satisfies(hll.guarantee.as_ref().expect("HLL confidence"), &target));
+        let SummaryExpr::SummaryEstimate { summary_input, .. } = &hll.expr else {
+            panic!("readout")
+        };
+        let SummaryExpr::SummaryAgg {
+            family: SummaryFamilyType::Sketch(kind, _),
+            ..
+        } = &summary_input.expr
+        else {
+            panic!("HLL state")
+        };
+        let expected = crate::accuracy::estimators::hll::ClassicHllConfidence::new(128, 0.05)
+            .unwrap()
+            .precision(0.01)
+            .unwrap();
+        assert_eq!(
+            kind.params(),
+            &SketchParams::Hll {
+                precision: expected
+            }
+        );
+        let absent =
+            SketchAlgorithmStrategy::default_cost_model().replacements(&TargetSubDAG::new(&root));
+        assert!(!absent.iter().any(|candidate| matches!(&candidate.replacement, Replacement::Summary(node)
+            if summary_family_algorithm(node) == SketchAlgorithm::Hll && node.guarantee.as_ref().is_some_and(|g| DefaultAccuracyModel.satisfies(g, &target)))));
+        // Invalid contracts, infeasible targets and evidence for another source
+        // must never authorize a confidence-bearing HLL candidate.
+        for (max_distinct, delta, wrong_scope) in [
+            (0, 0.01, false),
+            (4097, 0.01, false),
+            (128, 1e-12, false),
+            (128, 0.01, true),
+        ] {
+            let target = AccuracyTarget::EpsilonDelta {
+                epsilon: 0.05,
+                delta,
+            };
+            let query = Rc::new(agg(
+                vec![],
+                AggIntent::Cardinality {
+                    cols: vec![],
+                    accuracy: target.clone(),
+                },
+                metric_scan(&[]),
+            ));
+            let evidence = SourceEvidence {
+                expression: if wrong_scope {
+                    metric_scan(&["other"])
+                } else {
+                    (*query).clone()
+                },
+                max_distinct,
+            };
+            let strategy = SketchAlgorithmStrategy::new_with_planning_inputs_and_evidence(
+                &DefaultCostModel,
+                &DefaultAccuracyModel,
+                &EqualSplitAllocator,
+                &evidence,
+            );
+            assert!(!strategy.replacements(&TargetSubDAG::new(&query)).iter().any(|candidate|
+                matches!(&candidate.replacement, Replacement::Summary(node)
+                if summary_family_algorithm(node) == SketchAlgorithm::Hll && node.guarantee.as_ref().is_some_and(|g| DefaultAccuracyModel.satisfies(g, &target)))));
+        }
+    }
+
+    // A value projection cannot consume an opaque exact accumulator edge.
+    #[test]
+    fn residual_projection_finalizes_selected_exact_state() {
+        let inner = Rc::new(agg(vec![], AggIntent::Sum { col: None }, metric_scan(&[])));
+        let root = Rc::new(QueryExpr::Project {
+            cols: vec![asap_types::pre_asap::ProjectItem {
+                expr: QueryExpr::Column(0),
+                alias: Some("result".into()),
+            }],
+            qualifier: None,
+            child: inner.clone(),
+        });
+        let space = search_workload_with_targets(
+            vec![("q", root.clone(), Some(AccuracyTarget::Exact))],
+            &default_strategies(),
+            &DefaultAccuracyModel,
+        );
+        let selected = space.global_selection(&DefaultCostModel);
+        selected
+            .assembled_nodes
+            .borrow_mut()
+            .insert(Rc::as_ptr(&inner), realize(inner.as_ref()).unwrap());
+        let node = selected.assemble_target(&root).unwrap();
+        let SummaryExpr::ValueOperation {
+            child,
+            operation: ValueOperation::Project { .. },
+            ..
+        } = &node.expr
+        else {
+            panic!("expected Project");
+        };
+        assert!(matches!(
+            child.expr,
+            SummaryExpr::ValueOperation {
+                operation: ValueOperation::FinalizeExactAccumulator,
+                ..
+            }
+        ));
+        assert!(child
+            .schema
+            .fields
+            .iter()
+            .all(|field| matches!(field.dtype, SummaryFamilyType::Plain(_))));
+    }
+    // A numeric group key must not be mistaken for the ranked aggregate score.
+    #[test]
+    fn ranking_uses_aggregate_output_position_not_first_numeric_column() {
+        let logical = agg(vec![2], AggIntent::Sum { col: None }, metric_scan(&["id"]));
+        let mut values = lift(&logical.output_schema().unwrap());
+        values.fields[0].dtype = SummaryFamilyType::Plain(DataType::Int64);
+        assert_eq!(ranking_score_index(&logical, &values).unwrap(), 1);
+    }
+    // A heap's key schema is derived from its encoded item, not all label columns.
+    #[test]
+    fn heap_readout_preserves_numeric_item_identity() {
+        let mut raw = metric_scan(&["id", "description"]);
+        let QueryExpr::Scan { schema, .. } = &mut raw else {
+            unreachable!()
+        };
+        schema.columns[2].dtype = DataType::Int64;
+        let node = agg(
+            vec![],
+            AggIntent::TopK {
+                k: 2,
+                accuracy: AccuracyTarget::Epsilon(0.01),
+            },
+            agg(vec![2], AggIntent::Sum { col: None }, raw.clone()),
+        );
+        let input = PhysicalSummaryInput {
+            child: Rc::new(raw),
+            input: SummaryUpdate {
+                item: Some(SummaryInputExpr::Column(ColumnRef::Named("id".into()))),
+                weight: SummaryInputExpr::Constant(1.0),
+                weight_domain: WeightDomain::NonNegative {
+                    proof: NonNegativeWeightProof::UnitCount,
+                },
+            },
+        };
+        let schema = keyed_heap_readout_schema(&input, &node).unwrap();
+        assert_eq!(
+            schema
+                .fields
+                .iter()
+                .map(|f| f.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["id", "__asap_estimate"]
+        );
+        assert_eq!(
+            schema.fields[0].dtype,
+            SummaryFamilyType::Plain(DataType::Int64)
+        );
     }
 }

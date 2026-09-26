@@ -213,6 +213,7 @@ fn try_promote_additive_top_ranking(expr: &QueryExpr) -> Option<QueryExpr> {
     let QueryExpr::Aggregate {
         reduction,
         measures,
+        filters,
         child: aggregate_child,
         ..
     } = agg_expr
@@ -225,6 +226,11 @@ fn try_promote_additive_top_ranking(expr: &QueryExpr) -> Option<QueryExpr> {
     let [ranked_agg] = measures.as_slice() else {
         return None;
     };
+    // A heavy-hitter sketch ranks the raw update stream; a filtered measure
+    // only counts part of it, and no binding rule applies the filter (#466).
+    if filters.iter().any(Option::is_some) {
+        return None;
+    }
     if ranked_col != by.len() {
         return None;
     }
@@ -261,6 +267,7 @@ fn try_promote_additive_top_ranking(expr: &QueryExpr) -> Option<QueryExpr> {
         reduction: Reduction::by(partition_by.to_vec()),
         measures: vec![AggIntent::TopK { k: *k, accuracy }],
         output_names: Vec::new(),
+        filters: Vec::new(),
         having: None,
         child: Rc::new(agg_expr.clone()),
     })
@@ -373,6 +380,7 @@ mod tests {
                 accuracy: AccuracyTarget::Exact,
             }],
             output_names: vec![],
+            filters: vec![],
             having: None,
             child: Rc::new(scan()),
         }
@@ -415,6 +423,25 @@ mod tests {
         // Limit 5 { Sort DESC by count-col (1) { Aggregate[Count] by [1] } }.
         let q = limit(5, 0, sort(desc(1), count_by_service()));
         assert!(is_topk_over_count(&canonicalize(q)));
+    }
+
+    // A heavy-hitter sketch ranks every row; a count that only counts some
+    // rows (#466) is not that, so the generic Sort + Limit stays.
+    #[test]
+    fn does_not_promote_a_filtered_count_ranking() {
+        let mut filtered = count_by_service();
+        let QueryExpr::Aggregate { filters, .. } = &mut filtered else {
+            unreachable!()
+        };
+        *filters = vec![Some(Predicate(Rc::new(QueryExpr::Compare {
+            left: Rc::new(QueryExpr::Column(2)),
+            op: CompareOpKind::Gt,
+            right: Rc::new(QueryExpr::Literal(ScalarValue::Float64(1.0))),
+        })))];
+        let q = limit(5, 0, sort(desc(1), filtered));
+        let canonical = canonicalize(q.clone());
+        assert!(!is_topk_over_count(&canonical));
+        assert_eq!(canonical, q);
     }
 
     #[test]
@@ -545,6 +572,7 @@ mod tests {
             reduction: Reduction::by(vec![1]),
             measures: vec![AggIntent::Sum { col: None }],
             output_names: vec![],
+            filters: vec![],
             having: None,
             child: Rc::new(scan()),
         };
@@ -573,6 +601,7 @@ mod tests {
                 reduction: Reduction::PerEntity,
                 measures: vec![counter],
                 output_names: vec![],
+                filters: vec![],
                 having: None,
                 child: Rc::new(scan()),
             };
@@ -580,6 +609,7 @@ mod tests {
                 reduction: Reduction::by(vec![1]),
                 measures: vec![AggIntent::Sum { col: None }],
                 output_names: vec![],
+                filters: vec![],
                 having: None,
                 child: Rc::new(derived),
             };
@@ -619,6 +649,7 @@ mod tests {
             reduction: Reduction::by(vec![1, 2]),
             measures: vec![agg],
             output_names: vec![],
+            filters: vec![],
             having: None,
             child: Rc::new(scan4()),
         }
