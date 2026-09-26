@@ -228,6 +228,50 @@ s3://.../latency-kll/12:01
 is deployment-specific. Placement and scheduling also remain outside the Physical
 DAG. If the required behavior cannot be realized, physical compilation fails.
 
+### Physical candidates include precompute computation
+
+Materialization frontiers are Planner decisions. A candidate records both the
+precompute Physical DAG and the query Physical DAG, with typed outputs connecting
+them. The deployment compiler binds those outputs; it does not move operators.
+
+For `sum by(job)(rate(m[1m]))`, legal physical candidates can include:
+
+```text
+Candidate A:
+  precompute: compatible per-series counter states → per-series Rate
+  materialized output: per-series rate values for window/evaluation/revision
+  query: stored per-series rate values → grouped Sum
+
+Candidate B:
+  precompute: compatible per-series counter states → per-series Rate → grouped Sum
+  materialized output: grouped values for window/evaluation/revision
+  query: stored grouped values → result
+```
+
+Both preserve reset-aware Rate before Sum. Summing raw counters before Rate is
+not equivalent. The counter-state build may be another maintenance DAG; typed
+state inputs do not imply that a deployment can construct or bind those states.
+
+The shared library exposes `physical_planner::compile_candidates(...)` to lower
+explicit frontier candidates to `PhysicalCandidate { precompute, query,
+materialized_outputs }`. `select_candidate(...)` accepts deployment feasibility
+and scoped complete-workload costs and chooses the lowest-cost feasible
+candidate. Costs must describe the same workload and planning horizon; missing
+feasibility is rejected before pricing. The optimizer supplies candidate
+frontiers and cost evidence, including updates, retention, recurrence and sharing.
+This interface does not yet enumerate every possible frontier automatically.
+
+Physical compilation opens no readers. Bounded precompute outputs become typed
+query inputs. Their build window, evaluation time, population, readiness and
+revision contracts must accompany the selected lifecycle and be checked during
+deployment binding. Type compatibility alone does not establish reuse legality.
+
+The Planner integration test executes both candidates through the shared runtime
+and reverses the selected frontier with two controlled cost fixtures. It also
+rejects shadowed/duplicate boundaries and incomparable planning horizons. This
+establishes Planner capability; it does not establish that ASAPQuery currently
+supports persisting every scalar/result-output frontier.
+
 ## 4. Physical DAG → Deployment Plan / DAG
 
 The **Deployment Plan Compiler** binds the Physical DAGs to the concrete deployment:
