@@ -144,7 +144,15 @@ pub fn exact_readout_optional(
     parameters: &std::collections::HashMap<String, String>,
 ) -> Result<Option<f64>, String> {
     let merged = merge_exact_states(states)?;
-    if insufficient_counter_samples(merged.as_ref(), statistic) {
+    let counter = key.as_ref().and_then(|key| {
+        merged
+            .as_any()
+            .downcast_ref::<crate::summary_kernels::KeyedCounterState>()
+            .and_then(|state| state.increases.get(key))
+    });
+    if insufficient_counter_samples(merged.as_ref(), statistic)
+        || counter.is_some_and(|counter| insufficient_counter_samples(counter, statistic))
+    {
         return Ok(None);
     }
     merged
@@ -189,6 +197,28 @@ mod counter_tests {
             .unwrap(),
             None
         );
+        let mut keyed = crate::summary_kernels::KeyedCounterState::new();
+        let label = crate::KeyByLabelValues::new_with_labels(vec!["checkout".into()]);
+        keyed.update(label.clone(), state.clone());
+        assert_eq!(
+            exact_readout_optional(
+                [Arc::new(keyed.clone()) as Arc<dyn AggregateCore>],
+                Statistic::Rate,
+                &Some(label),
+                &parameters
+            )
+            .unwrap(),
+            None
+        );
+        assert!(exact_readout_optional(
+            [Arc::new(keyed) as Arc<dyn AggregateCore>],
+            Statistic::Rate,
+            &Some(crate::KeyByLabelValues::new_with_labels(vec![
+                "missing".into()
+            ])),
+            &parameters
+        )
+        .is_err());
         state.update(Measurement::new(20.), 20_000);
         assert!(exact_readout_optional(
             [Arc::new(state.clone()) as Arc<dyn AggregateCore>],
