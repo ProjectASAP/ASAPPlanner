@@ -19,6 +19,7 @@ mod aggregate;
 mod filter;
 mod joins;
 mod limit;
+mod panes;
 mod projection;
 mod sort;
 mod source;
@@ -28,6 +29,14 @@ pub use sort::SortKey;
 #[derive(Clone)]
 enum Kind {
     Source(Vec<Batch>),
+    PaneInput {
+        coordinate: usize,
+        layout: planner_types::post_asap::PaneLayout,
+        offset_ms: Option<i64>,
+    },
+    ScopeTimestamp {
+        columns: Vec<Option<usize>>,
+    },
     Union,
     VectorToScalar {
         column: usize,
@@ -199,7 +208,14 @@ impl PhysicalOperator<Batch, Schema> for Operator {
         };
         PlanProperties {
             boundedness,
-            emission: if self.requires_bounded_input() {
+            emission: if matches!(
+                self.kind,
+                Kind::PaneInput { .. } | Kind::ScopeTimestamp { .. }
+            ) {
+                inputs
+                    .first()
+                    .map_or(Emission::Unknown, |input| input.emission)
+            } else if self.requires_bounded_input() {
                 Emission::AfterInput
             } else {
                 Emission::Incremental
@@ -210,6 +226,8 @@ impl PhysicalOperator<Batch, Schema> for Operator {
     fn name(&self) -> &str {
         match self.kind {
             Kind::Source(_) => "Source",
+            Kind::PaneInput { .. } => "PaneInput",
+            Kind::ScopeTimestamp { .. } => "ScopeTimestamp",
             Kind::Union => "Union",
             Kind::VectorToScalar { .. } => "VectorToScalar",
             Kind::Project(_) => "Project",
@@ -227,6 +245,7 @@ impl PhysicalOperator<Batch, Schema> for Operator {
         }
     }
     fn validate_context(&self, context: &RunContext) -> Result<(), Error> {
+        panes::validate_context(self, context)?;
         self.readout_parameters(context).map(|_| ())
     }
     fn input_schemas(&self) -> Vec<Schema> {
@@ -248,6 +267,9 @@ impl PhysicalOperator<Batch, Schema> for Operator {
                 source::execute(self, inputs, context)
             }
             Kind::Project(_) => projection::execute(self, inputs, context),
+            Kind::PaneInput { .. } | Kind::ScopeTimestamp { .. } => {
+                panes::execute(self, inputs, context)
+            }
             Kind::Filter(_) => filter::execute(self, inputs, context),
             Kind::Limit { .. } => limit::execute(self, inputs, context),
             Kind::Sort { .. } => sort::execute(self, inputs, context),
