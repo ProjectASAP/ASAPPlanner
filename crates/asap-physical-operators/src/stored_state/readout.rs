@@ -98,6 +98,15 @@ pub fn exact_readout(
     key: &Option<crate::KeyByLabelValues>,
     parameters: &std::collections::HashMap<String, String>,
 ) -> Result<f64, String> {
+    let merged = merge_exact_states(states)?;
+    merged
+        .query_statistic(statistic, key, parameters)
+        .map_err(|e| e.to_string())
+}
+
+fn merge_exact_states(
+    states: impl IntoIterator<Item = std::sync::Arc<dyn crate::AggregateCore>>,
+) -> Result<Box<dyn crate::AggregateCore>, String> {
     let mut states = states.into_iter();
     let mut merged = states
         .next()
@@ -108,7 +117,84 @@ pub fn exact_readout(
             .merge_with(state.as_ref())
             .map_err(|e| e.to_string())?;
     }
+    Ok(merged)
+}
+
+/// PromQL counter readouts omit a series with fewer than two samples. Other
+/// state/type/range failures remain errors rather than empty results.
+pub fn insufficient_counter_samples(
+    state: &dyn crate::AggregateCore,
+    statistic: crate::Statistic,
+) -> bool {
+    matches!(
+        statistic,
+        crate::Statistic::Rate | crate::Statistic::Increase
+    ) && state
+        .as_any()
+        .downcast_ref::<crate::summary_kernels::IncreaseAccumulator>()
+        .is_some_and(|state| state.sample_count < 2)
+}
+
+pub fn exact_readout_optional(
+    states: impl IntoIterator<Item = std::sync::Arc<dyn crate::AggregateCore>>,
+    statistic: crate::Statistic,
+    key: &Option<crate::KeyByLabelValues>,
+    parameters: &std::collections::HashMap<String, String>,
+) -> Result<Option<f64>, String> {
+    let merged = merge_exact_states(states)?;
+    if insufficient_counter_samples(merged.as_ref(), statistic) {
+        return Ok(None);
+    }
     merged
         .query_statistic(statistic, key, parameters)
-        .map_err(|e| e.to_string())
+        .map(Some)
+        .map_err(|error| error.to_string())
+}
+
+#[cfg(test)]
+mod counter_tests {
+    use super::*;
+    use crate::{summary_kernels::IncreaseAccumulator, AggregateCore, Measurement, Statistic};
+    use std::sync::Arc;
+
+    #[test]
+    fn sparse_counter_is_absent_but_invalid_ranges_still_fail() {
+        let mut state =
+            IncreaseAccumulator::new(Measurement::new(10.), 10_000, Measurement::new(10.), 10_000);
+        let parameters = std::collections::HashMap::from([
+            ("range_start_ms".into(), "0".into()),
+            ("range_end_ms".into(), "60000".into()),
+        ]);
+        assert_eq!(
+            exact_readout_optional(
+                [Arc::new(state.clone()) as Arc<dyn AggregateCore>],
+                Statistic::Rate,
+                &None,
+                &parameters
+            )
+            .unwrap(),
+            None
+        );
+        state.update(Measurement::new(20.), 20_000);
+        assert!(exact_readout_optional(
+            [Arc::new(state.clone()) as Arc<dyn AggregateCore>],
+            Statistic::Rate,
+            &None,
+            &parameters
+        )
+        .unwrap()
+        .is_some());
+        let invalid = std::collections::HashMap::from([
+            ("range_start_ms".into(), "60000".into()),
+            ("range_end_ms".into(), "0".into()),
+        ]);
+        assert!(exact_readout_optional(
+            [Arc::new(state) as Arc<dyn AggregateCore>],
+            Statistic::Rate,
+            &None,
+            &invalid
+        )
+        .is_err());
+        assert!(exact_readout_optional([], Statistic::Rate, &None, &parameters).is_err());
+    }
 }
