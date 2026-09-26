@@ -89,6 +89,27 @@ impl CompiledPhysicalDag {
             Node::Operator { .. } => None,
         })
     }
+    /// Derive a reachable output contract without opening deployment readers.
+    pub fn output_contract(&self, id: NodeId) -> Result<InputContract, Error> {
+        let sources = self
+            .input_contracts()
+            .map(|(id, contract)| (id, Box::new(contract.clone()) as Source<'_>))
+            .collect();
+        let graph = self.instantiate(sources)?;
+        let properties = graph.properties(&self.roots)?;
+        let properties = *properties
+            .get(&id)
+            .ok_or_else(|| invalid("output is not reachable"))?;
+        let schema = match self
+            .nodes
+            .get(&id)
+            .ok_or_else(|| invalid("missing output"))?
+        {
+            Node::Input(contract) => contract.schema.clone(),
+            Node::Operator { operator, .. } => operator.output_schema(),
+        };
+        Ok(InputContract { schema, properties })
+    }
     /// Validate using contract-only sources. No deployment reader is available.
     pub fn validate(&self) -> Result<(), Error> {
         let sources = self
