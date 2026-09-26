@@ -119,52 +119,7 @@ fn dashboard_workload() -> PlanningWorkload {
 #[test]
 fn promql_dashboard_materializes_continuous_summary_with_explained_rejections() {
     let workload = dashboard_workload();
-    workload.validate().unwrap();
-
-    let lowered = lower_promql_workload(&workload, 0)
-        .expect("valid PromQL workload")
-        .into_iter()
-        .next()
-        .expect("one normalized workload entry");
-    let root = Rc::new(lowered);
-    let strategies = asap_aware_mapping::default_strategies_with(&FullyCostedRuntime);
-    let space = search_workload_with(vec![("dashboard", Rc::clone(&root))], &strategies);
-    let target = Rc::clone(&space.roots[0].1);
-    let capabilities = SummaryMaintenanceLifecycleCapabilities {
-        supports_ephemeral: true,
-        supports_prepared: false,
-        supports_shared: false,
-        supports_continuously_maintained: true,
-    };
-
-    let selection = global_selection_with_summary_maintenance_lifecycles(
-        &space,
-        WorkloadDemand {
-            workload: &workload.query_workload,
-            data_workload: workload.data_workload.as_ref(),
-            entry_indices: &[1],
-        },
-        NOW_MS,
-        Some(Horizon(100.0)),
-        capabilities,
-        &FullyCostedRuntime,
-    )
-    .unwrap();
-    let plan = assemble_selected_dag_with_summary_maintenance_lifecycles(
-        &selection,
-        &target,
-        WorkloadDemand::new_with_data(
-            &workload.query_workload,
-            workload.data_workload.as_ref().unwrap(),
-            &[1],
-        ),
-        NOW_MS,
-        Some(Horizon(100.0)),
-        capabilities,
-        &FullyCostedRuntime,
-    )
-    .unwrap()
-    .expect("selected summary plan");
+    let plan = selected_plan(&workload);
 
     assert!(!plan.selected_raw_recompute);
     assert_eq!(plan.expected_reads, Some(100.0));
@@ -230,4 +185,229 @@ fn promql_dashboard_materializes_continuous_summary_with_explained_rejections() 
         summary_node["detail"]["summary_maintenance"]["selected"]["lifecycle"]["kind"],
         "continuously_maintained"
     );
+}
+
+fn selected_plan(
+    workload: &PlanningWorkload,
+) -> asap_aware_mapping::SummaryMaintenanceLifecyclePlan {
+    workload.validate().unwrap();
+
+    let lowered = lower_promql_workload(workload, 0)
+        .expect("valid PromQL workload")
+        .into_iter()
+        .next()
+        .expect("one normalized workload entry");
+    let root = Rc::new(lowered);
+    let strategies = asap_aware_mapping::default_strategies_with(&FullyCostedRuntime);
+    let space = search_workload_with(vec![("dashboard", Rc::clone(&root))], &strategies);
+    let target = Rc::clone(&space.roots[0].1);
+    let capabilities = SummaryMaintenanceLifecycleCapabilities {
+        supports_ephemeral: true,
+        supports_prepared: false,
+        supports_shared: false,
+        supports_continuously_maintained: true,
+    };
+
+    let selection = global_selection_with_summary_maintenance_lifecycles(
+        &space,
+        WorkloadDemand {
+            workload: &workload.query_workload,
+            data_workload: workload.data_workload.as_ref(),
+            entry_indices: &[1],
+        },
+        NOW_MS,
+        Some(Horizon(100.0)),
+        capabilities,
+        &FullyCostedRuntime,
+    )
+    .unwrap();
+    assemble_selected_dag_with_summary_maintenance_lifecycles(
+        &selection,
+        &target,
+        WorkloadDemand::new_with_data(
+            &workload.query_workload,
+            workload.data_workload.as_ref().unwrap(),
+            &[1],
+        ),
+        NOW_MS,
+        Some(Horizon(100.0)),
+        capabilities,
+        &FullyCostedRuntime,
+    )
+    .unwrap()
+    .expect("selected summary plan")
+}
+
+mod physical_common;
+
+/// A selected continuous lifecycle supplies a materialization boundary; its
+/// maintenance and query DAGs execute the selected KLL computation in fresh runs.
+#[test]
+fn continuous_lifecycle_compiles_and_executes_spatial_kll() {
+    use asap_physical_operators::{
+        physical_planner::{compile_candidate, InputContract},
+        runtime::Scope,
+        values::{Batch, Value},
+    };
+    use asap_types::{
+        post_asap::{compile_executable_dag, ExecutableOperatorPayload, SummaryFamilyType},
+        pre_asap::DataType,
+    };
+    use std::{collections::BTreeMap, sync::Arc};
+    let mut workload = dashboard_workload();
+    workload.query_workload.query_batch.as_mut().unwrap()[0].query =
+        Query("quantile(0.99, latency)".into());
+    workload.query_workload.repeating_queries.as_mut().unwrap()[0].query =
+        Query("quantile(0.99, latency)".into());
+    let selected = selected_plan(&workload);
+    assert_eq!(
+        selected.deployments[0]
+            .summary_maintenance_lifecycle_guarantee
+            .as_ref()
+            .unwrap()
+            .summary_maintenance_lifecycle,
+        SummaryMaintenanceLifecycle::ContinuouslyMaintained
+    );
+    let dag = compile_executable_dag(&selected.root).unwrap();
+    let build = dag
+        .nodes
+        .iter()
+        .find(|node| matches!(node.payload, ExecutableOperatorPayload::SummaryAgg { .. }))
+        .unwrap();
+    let input = dag
+        .edges
+        .iter()
+        .find(|edge| edge.consumer == build.id)
+        .unwrap()
+        .producer;
+    let raw = dag.nodes.iter().find(|node| node.id == input).unwrap();
+    let schema = Arc::new(raw.output_schema.clone());
+    let candidate = compile_candidate(
+        &dag,
+        BTreeMap::from([(u64::from(input.0), InputContract::bounded(schema.clone()))]),
+        &[u64::from(dag.root.0)],
+        &[u64::from(build.id.0)],
+    )
+    .unwrap();
+
+    // A continuous input without a finite pane boundary cannot implement this
+    // blocking builder. Retain lifecycle ownership in the candidate payload;
+    // only the legal bounded request candidate reaches workload pricing.
+    let mut unbounded = InputContract::bounded(schema.clone());
+    unbounded.properties.boundedness = asap_physical_operators::plan::Boundedness::Unbounded;
+    let rejected = compile_candidate(
+        &dag,
+        BTreeMap::from([(u64::from(input.0), unbounded)]),
+        &[u64::from(dag.root.0)],
+        &[u64::from(build.id.0)],
+    );
+    assert!(rejected.is_err());
+    let request = compile_candidate(
+        &dag,
+        BTreeMap::from([(u64::from(input.0), InputContract::bounded(schema.clone()))]),
+        &[u64::from(dag.root.0)],
+        &[],
+    )
+    .unwrap();
+    let mut priced = 0;
+    let feedback = asap_physical_operators::physical_planner::select_candidate(
+        vec![
+            rejected.map(|candidate| {
+                (
+                    SummaryMaintenanceLifecycle::ContinuouslyMaintained,
+                    candidate,
+                )
+            }),
+            Ok((SummaryMaintenanceLifecycle::Ephemeral, request)),
+        ],
+        |_| {
+            priced += 1;
+            Ok(Some(
+                asap_physical_operators::physical_planner::CandidateCost {
+                    workload_scope: "dashboard".into(),
+                    horizon_seconds: 100.,
+                    total_cost: 1000.,
+                },
+            ))
+        },
+    )
+    .unwrap();
+    assert_eq!(priced, 1);
+    assert_eq!(feedback.candidate.0, SummaryMaintenanceLifecycle::Ephemeral);
+    for revision in [1, 2] {
+        let rows = (1..=100)
+            .map(|value| {
+                schema
+                    .fields
+                    .iter()
+                    .map(|field| match field.dtype {
+                        SummaryFamilyType::Plain(DataType::Float64) => {
+                            Value::Float64(f64::from(value))
+                        }
+                        SummaryFamilyType::Plain(DataType::Timestamp) => Value::Timestamp(300_000),
+                        _ => panic!("unexpected field {field:?}"),
+                    })
+                    .collect()
+            })
+            .collect();
+        let raw_batch = Batch::try_new(schema.clone(), rows).unwrap();
+        let direct = physical_common::execute(
+            &feedback.candidate.1.query,
+            BTreeMap::from([(u64::from(input.0), raw_batch.clone())]),
+            Scope::Query {
+                evaluation_time_ms: 300_000,
+                revision,
+            },
+        );
+        let state = physical_common::execute(
+            candidate.precompute.as_ref().unwrap(),
+            BTreeMap::from([(u64::from(input.0), raw_batch)]),
+            Scope::Ingestion {
+                window_start_ms: 0,
+                window_end_ms: 300_000,
+                revision,
+            },
+        );
+        let result = physical_common::execute(
+            &candidate.query,
+            BTreeMap::from([(u64::from(build.id.0), state[0][0].clone())]),
+            Scope::Query {
+                evaluation_time_ms: 300_000,
+                revision,
+            },
+        );
+        let values: Vec<_> = result[0]
+            .iter()
+            .flat_map(|batch| batch.rows())
+            .flat_map(|row| row.iter())
+            .filter_map(|value| {
+                if let Value::Float64(value) = value {
+                    Some(*value)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        let direct_values: Vec<_> = direct[0]
+            .iter()
+            .flat_map(|batch| batch.rows())
+            .flat_map(|row| row.iter())
+            .filter_map(|value| {
+                if let Value::Float64(value) = value {
+                    Some(*value)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        assert_eq!(
+            values, direct_values,
+            "maintenance and request candidates preserve the same population"
+        );
+        assert_eq!(values.len(), 1);
+        assert!(
+            (98. ..=100.).contains(&values[0]),
+            "p99 rank must reflect the supplied population"
+        );
+    }
 }

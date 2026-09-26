@@ -195,9 +195,12 @@ fn grouped_rate_can_be_materialized_before_or_after_grouped_sum() {
                 InputContract::bounded(Arc::new(state.output_schema.clone())),
             )]),
             &[root],
-            &[vec![rate_id], vec![root]],
+            &[vec![999], vec![rate_id], vec![root]],
         );
+        assert!(inventory[0].is_err());
+        let mut evaluated = 0;
         let selected = select_candidate(inventory, |candidate| {
+            evaluated += 1;
             let grouped = candidate.materialized_outputs.contains_key(&root);
             Ok(Some(CandidateCost {
                 workload_scope: "reset-counter-workload".into(),
@@ -211,6 +214,29 @@ fn grouped_rate_can_be_materialized_before_or_after_grouped_sum() {
             prefer_grouped
         );
         assert_eq!(selected.cost.total_cost, 1.);
+        assert_eq!(evaluated, 2, "uncompilable candidates must never be priced");
+        let candidate = selected.candidate;
+        let precompute = candidate.precompute.as_ref().unwrap();
+        let stored = run(
+            precompute,
+            BTreeMap::from([(state_id, batch.clone())]),
+            Scope::Ingestion {
+                window_start_ms: -58_000,
+                window_end_ms: 2000,
+                revision: 1,
+            },
+        );
+        let output = run(
+            &candidate.query,
+            BTreeMap::from([(precompute.roots()[0], stored[0].clone())]),
+            Scope::Query {
+                evaluation_time_ms: 2000,
+                revision: 1,
+            },
+        );
+        assert!(
+            matches!(output[0].rows()[0][1], Value::Float64(value) if value == expected_rate_sum)
+        );
     }
     let contracts = BTreeMap::from([(
         state_id,
