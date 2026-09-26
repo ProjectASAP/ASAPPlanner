@@ -53,6 +53,28 @@ impl ExactAccumulator {
     pub fn family(&self) -> &SummaryFamilyType {
         &self.family
     }
+    pub(crate) fn insufficient_counter_samples(
+        &self,
+        statistic: Statistic,
+        key: &Option<KeyByLabelValues>,
+    ) -> bool {
+        if statistic != self.statistic() {
+            return false;
+        }
+        let state = match (&self.keyed, key) {
+            (Some(states), Some(key)) => states.get(key),
+            (None, None) => Some(&self.scalar),
+            _ => None,
+        };
+        match state {
+            Some(ScalarState::Counter(None)) => true,
+            Some(ScalarState::Counter(Some(counter))) => {
+                counter.sample_count < 2
+                    || counter.last_seen_timestamp == counter.starting_timestamp
+            }
+            _ => false,
+        }
+    }
     pub fn is_keyed(&self) -> bool {
         self.keyed.is_some()
     }
