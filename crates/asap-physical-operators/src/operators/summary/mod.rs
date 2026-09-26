@@ -90,8 +90,8 @@ impl Operator {
     ) -> Result<Self, Error> {
         crate::values::validate_family(&family)?;
         validate_groups(&input, &groups)?;
-        if plain(&input, value)? != (&DataType::Float64, false) {
-            return Err(invalid("summary numeric update requires non-null Float64"));
+        if plain(&input, value)?.0 != &DataType::Float64 {
+            return Err(invalid("summary numeric update requires Float64"));
         }
         if let Some(time) = time {
             if plain(&input, time)? != (&DataType::Timestamp, false) {
@@ -374,8 +374,12 @@ async fn build_summary(
             }
             let (_, updater, memory, overhead, previous) =
                 states.get_mut(&key).expect("inserted group");
-            let Value::Float64(value) = row[value] else {
-                return Err(invalid("summary update type"));
+            // SQL aggregates ignore NULL samples while retaining the group.
+            // A missing counter sample also contributes no observation.
+            let value = match row[value] {
+                Value::Float64(value) => value,
+                Value::Null => continue,
+                _ => return Err(invalid("summary update type")),
             };
             let timestamp = if let Some(time) = time {
                 let Value::Timestamp(time) = row[time] else {
