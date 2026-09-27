@@ -3831,6 +3831,9 @@ impl<Id: Clone + PartialEq> PlanSpace<Id> {
             candidates: Vec::new(),
             rejected_assemblies: Vec::new(),
         };
+        // Hash buckets avoid quadratic comparisons across a large workload
+        // inventory. Equality still decides deduplication, including collisions.
+        let mut seen = HashMap::<u64, Vec<usize>>::new();
         for mut ordinal in 0..combinations {
             let mut groups = HashMap::new();
             let mut assembled_nodes = HashMap::new();
@@ -3869,7 +3872,41 @@ impl<Id: Clone + PartialEq> PlanSpace<Id> {
             match roots {
                 Ok(roots) => {
                     let roots = asap_types::post_asap::share_common_summary_subtrees(roots);
-                    if !inventory.candidates.contains(&roots) {
+                    use std::hash::{Hash, Hasher};
+                    let mut hash = std::collections::hash_map::DefaultHasher::new();
+                    for (_, node) in &roots {
+                        let mut value = serde_json::to_value((&node.schema, &node.guarantee))
+                            .map_err(|_| {
+                                RealizationError::PhysicalRealization(
+                                    "candidate identity serialization failed",
+                                )
+                            })?;
+                        fn normalize(value: &mut serde_json::Value) {
+                            match value {
+                                serde_json::Value::Number(number)
+                                    if number.as_f64() == Some(0.0) =>
+                                {
+                                    *value = serde_json::json!(0);
+                                }
+                                serde_json::Value::Array(values) => {
+                                    values.iter_mut().for_each(normalize)
+                                }
+                                serde_json::Value::Object(values) => {
+                                    values.values_mut().for_each(normalize)
+                                }
+                                _ => {}
+                            }
+                        }
+                        normalize(&mut value);
+                        value.sort_all_objects();
+                        value.to_string().hash(&mut hash);
+                    }
+                    let bucket = seen.entry(hash.finish()).or_default();
+                    if !bucket
+                        .iter()
+                        .any(|&index| inventory.candidates[index] == roots)
+                    {
+                        bucket.push(inventory.candidates.len());
                         inventory.candidates.push(roots);
                     }
                 }
