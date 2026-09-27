@@ -5,7 +5,7 @@ use planner_types::pre_asap::{Column, DataType, Source as LogicalSource};
 use std::rc::Rc;
 
 /// Not a legal PromQL label name, so it cannot shadow a user label.
-pub const SERIES_IDENTITY_COLUMN: &str = "$promql_series_identity";
+pub use planner_types::pre_asap::schema::PROMQL_SERIES_IDENTITY as SERIES_IDENTITY_COLUMN;
 
 /// Canonical, reversible identity. JSON object encoding preserves label names,
 /// empty values and escaping; sorting makes ingestion order irrelevant.
@@ -141,4 +141,91 @@ pub fn series_row(
         return Err(invalid("source lacks its full series identity"));
     }
     Ok(row)
+}
+
+/// Compile the selected TopK computation above an existing maintained-population
+/// source. The boundary supplies the complete eligible vector, not a truncated
+/// TopK result; ranking remains a native physical operator.
+pub fn compile_current_series_readout(
+    selected: &Rc<planner_types::post_asap::SummaryNode>,
+) -> Result<CompiledPhysicalDag, Error> {
+    use planner_types::post_asap::{
+        compile_executable_dag, maintained_population::PopulationReadout, SummaryField,
+    };
+    let mut dag = compile_executable_dag(selected).map_err(|error| invalid(error.to_string()))?;
+    if dag.nodes.len() != 3
+        || !dag.nodes.iter().any(|node| {
+            node.id == dag.root
+                && matches!(
+                    node.payload,
+                    Payload::Value {
+                        operation: ValueOperation::ReadPopulation {
+                            readout: PopulationReadout::TopK { .. }
+                        }
+                    }
+                )
+        })
+    {
+        return Err(invalid(
+            "expected one selected current-series TopK computation",
+        ));
+    }
+    let mut frontier = None;
+    for node in &mut dag.nodes {
+        match &mut node.payload {
+            Payload::Fallback { expression } => {
+                *expression = with_series_identity(expression)?;
+            }
+            Payload::Value {
+                operation: ValueOperation::MaintainPopulation { .. },
+            } => {
+                frontier = Some(u64::from(node.id.0));
+            }
+            Payload::Value {
+                operation:
+                    ValueOperation::ReadPopulation {
+                        readout: PopulationReadout::TopK { .. },
+                    },
+            } => {}
+            _ => return Err(invalid("unsupported current-series readout dependency")),
+        }
+        if node
+            .output_schema
+            .fields
+            .iter()
+            .any(|field| field.name == SERIES_IDENTITY_COLUMN)
+        {
+            return Err(invalid(
+                "current-series input already has a physical identity column",
+            ));
+        }
+        node.output_schema.fields.push(SummaryField {
+            name: SERIES_IDENTITY_COLUMN.into(),
+            dtype: SummaryFamilyType::Plain(DataType::Utf8),
+            nullable: false,
+        });
+    }
+    for edge in &mut dag.edges {
+        edge.intermediate_schema = dag
+            .nodes
+            .iter()
+            .find(|node| node.id == edge.producer)
+            .unwrap()
+            .output_schema
+            .clone();
+    }
+    let frontier = frontier.ok_or_else(|| invalid("missing current-series population"))?;
+    let schema = Arc::new(
+        dag.nodes
+            .iter()
+            .find(|node| u64::from(node.id.0) == frontier)
+            .unwrap()
+            .output_schema
+            .clone(),
+    );
+    compile(
+        &dag,
+        BTreeMap::from([(frontier, InputContract::bounded(schema))]),
+        &[u64::from(dag.root.0)],
+    )
 }
