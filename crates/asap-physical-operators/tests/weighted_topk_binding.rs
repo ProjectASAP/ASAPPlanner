@@ -371,51 +371,57 @@ fn direct_rate_topk_exposes_heap_candidates_with_complete_series_identity() {
                 })
                 .collect();
             let batch = Batch::try_new(schema.clone(), rows).unwrap();
-            let source =
-                Box::new(Operator::source(schema.clone(), vec![batch]).unwrap()) as Source<'static>;
-            let graph = compiled
-                .instantiate(BTreeMap::from([(u64::from(input_id.0), source)]))
-                .unwrap();
-            let context = RunContext::new(
+            for scope in [
                 Scope::Query {
                     evaluation_time_ms: time,
                     revision: 1,
                 },
-                Limits::default(),
-            )
-            .unwrap();
-            let mut scores = block_on(async {
-                let mut scores = vec![];
-                let mut stream = graph
-                    .execute(&[u64::from(dag.root.0)], context)
-                    .unwrap()
-                    .remove(0);
-                while let Some(batch) = stream.next().await {
-                    let batch = batch.unwrap();
-                    for row in batch.rows() {
-                        assert!(row.iter().any(
-                            |value| matches!(value, Value::Timestamp(actual) if *actual == time)
-                        ));
-                        scores.push(
-                            row.iter()
-                                .find_map(|value| {
-                                    if let Value::Float64(value) = value {
-                                        Some(*value)
-                                    } else {
-                                        None
-                                    }
-                                })
-                                .unwrap(),
-                        );
+                Scope::Ingestion {
+                    window_start_ms: time - 60_000,
+                    window_end_ms: time,
+                    revision: 1,
+                },
+            ] {
+                let source =
+                    Box::new(Operator::source(schema.clone(), vec![batch.clone()]).unwrap())
+                        as Source<'static>;
+                let graph = compiled
+                    .instantiate(BTreeMap::from([(u64::from(input_id.0), source)]))
+                    .unwrap();
+                let context = RunContext::new(scope, Limits::default()).unwrap();
+                let mut scores = block_on(async {
+                    let mut scores = vec![];
+                    let mut stream = graph
+                        .execute(&[u64::from(dag.root.0)], context)
+                        .unwrap()
+                        .remove(0);
+                    while let Some(batch) = stream.next().await {
+                        let batch = batch.unwrap();
+                        for row in batch.rows() {
+                            assert!(row.iter().any(
+                                |value| matches!(value, Value::Timestamp(actual) if *actual == time)
+                            ));
+                            scores.push(
+                                row.iter()
+                                    .find_map(|value| {
+                                        if let Value::Float64(value) = value {
+                                            Some(*value)
+                                        } else {
+                                            None
+                                        }
+                                    })
+                                    .unwrap(),
+                            );
+                        }
                     }
-                }
-                scores
-            });
-            scores.sort_by(f64::total_cmp);
-            assert_eq!(
-                scores, expected,
-                "heap snapshots must not accumulate across evaluations"
-            );
+                    scores
+                });
+                scores.sort_by(f64::total_cmp);
+                assert_eq!(
+                    scores, expected,
+                    "heap snapshots must not accumulate across evaluations"
+                );
+            }
         }
     }
 }
