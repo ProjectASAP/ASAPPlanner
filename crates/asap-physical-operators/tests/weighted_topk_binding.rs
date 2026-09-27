@@ -269,6 +269,19 @@ fn rate_updates_cannot_enter_integer_heap_factory() {
 /// requiring an otherwise unnecessary grouped Sum between Rate and TopK.
 #[test]
 fn direct_rate_topk_exposes_heap_candidates_with_complete_series_identity() {
+    check_direct_rate_topk(false);
+}
+
+// Unreferenced labels still distinguish series throughout Rate and heap readout.
+#[test]
+fn direct_rate_topk_preserves_dynamic_unreferenced_labels() {
+    check_direct_rate_topk(true);
+}
+
+fn check_direct_rate_topk(dynamic: bool) {
+    use asap_physical_operators::physical_planner::promql_rows::{
+        decode_series_identity, series_row, with_series_identity, SERIES_IDENTITY_COLUMN,
+    };
     let mut logical =
         lower_promql("topk by(job)(2, rate(m[1m]))", AccuracyTarget::Epsilon(0.1)).unwrap();
     fn resolve_catalog(node: &mut QueryExpr) {
@@ -289,7 +302,11 @@ fn direct_rate_topk_exposes_heap_candidates_with_complete_series_identity() {
             _ => panic!("unexpected input shape: {node:?}"),
         }
     }
-    resolve_catalog(&mut logical);
+    if dynamic {
+        logical = with_series_identity(&logical).unwrap();
+    } else {
+        resolve_catalog(&mut logical);
+    }
     let root = Rc::new(logical);
     let strategy = SketchAlgorithmStrategy::new_with_planning_inputs_and_evidence(
         &DefaultCostModel,
@@ -381,6 +398,22 @@ fn direct_rate_topk_exposes_heap_candidates_with_complete_series_identity() {
             let mut raw_rows = Vec::new();
             for (service, samples) in series {
                 for (offset, value) in [10_000, 30_000, 50_000].into_iter().zip(samples) {
+                    if dynamic {
+                        raw_rows.push(
+                            series_row(
+                                &raw_schema,
+                                &BTreeMap::from([
+                                    ("job".into(), "api".into()),
+                                    ("service".into(), service.into()),
+                                    ("unreferenced".into(), format!("{service}-extra")),
+                                ]),
+                                end - 60_000 + offset,
+                                value,
+                            )
+                            .unwrap(),
+                        );
+                        continue;
+                    }
                     raw_rows.push(
                         raw_schema
                             .fields
@@ -422,7 +455,25 @@ fn direct_rate_topk_exposes_heap_candidates_with_complete_series_identity() {
                         .unwrap()
                         .remove(0);
                     while let Some(batch) = stream.next().await {
-                        for row in batch.unwrap().rows() {
+                        let batch = batch.unwrap();
+                        for row in batch.rows() {
+                            if dynamic {
+                                let column = batch
+                                    .schema()
+                                    .fields
+                                    .iter()
+                                    .position(|field| field.name == SERIES_IDENTITY_COLUMN)
+                                    .unwrap();
+                                let Value::Utf8(encoded) = &row[column] else {
+                                    panic!("identity lost");
+                                };
+                                let labels = decode_series_identity(encoded).unwrap();
+                                assert_eq!(labels["job"], "api");
+                                assert_eq!(
+                                    labels["unreferenced"],
+                                    format!("{}-extra", labels["service"])
+                                );
+                            }
                             assert!(row.iter().any(
                                 |value| matches!(value, Value::Timestamp(time) if *time == end)
                             ));
@@ -469,6 +520,18 @@ fn direct_rate_topk_exposes_heap_candidates_with_complete_series_identity() {
             let rows = values
                 .into_iter()
                 .map(|(service, value)| {
+                    if dynamic {
+                        return series_row(
+                            &schema,
+                            &BTreeMap::from([
+                                ("job".into(), "api".into()),
+                                ("service".into(), service.into()),
+                            ]),
+                            time,
+                            value,
+                        )
+                        .unwrap();
+                    }
                     schema
                         .fields
                         .iter()

@@ -28,6 +28,8 @@ fn invalid(message: impl Into<String>) -> Error {
 /// A deployment must authorize these frontiers before calling this function.
 pub type Source<'a> = Box<dyn PhysicalOperator<Batch, Schema> + 'a>;
 
+pub mod promql_rows;
+
 mod candidates;
 pub use candidates::{
     compile_candidate, compile_candidates, enumerate_frontiers, select_candidate, CandidateCost,

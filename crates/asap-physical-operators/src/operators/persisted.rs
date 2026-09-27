@@ -36,6 +36,12 @@ impl TryFrom<StoredOperator> for Operator {
             } => Operator::pane_input(input(0)?, coordinate, layout, offset_ms)?,
             Kind::ScopeTimestamp { .. } => Operator::scope_timestamp(input(0)?, output.clone())?,
             Kind::Union => Operator::union(input(0)?, inputs.len())?,
+            Kind::CurrentSeries {
+                identity,
+                coordinate,
+                value,
+                lookback_ms,
+            } => Operator::current_series(input(0)?, identity, coordinate, value, lookback_ms)?,
             Kind::VectorToScalar { column } => Operator::vector_to_scalar(input(0)?, column)?,
             Kind::Project(expressions) => {
                 if expressions.len() != output.fields.len() {
