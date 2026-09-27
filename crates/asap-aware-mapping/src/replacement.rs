@@ -3789,10 +3789,65 @@ impl<Id: Clone + PartialEq> PlanSpace<Id> {
         &self,
         expansion_limit: usize,
     ) -> Result<CandidateDagInventory<Id>, RealizationError> {
+        self.enumerate_candidate_roots(&self.roots, expansion_limit)
+    }
+
+    /// Enumerate one workload root without expanding independent roots' choices.
+    /// Discovery and composition proofs still come from the shared workload
+    /// space. Deployment may price combinations lazily; this API does not rank
+    /// candidates or claim that independently cheapest roots minimize shared cost.
+    pub fn enumerate_candidate_dags_for_root(
+        &self,
+        id: &Id,
+        expansion_limit: usize,
+    ) -> Result<CandidateDagInventory<Id>, RealizationError> {
+        let roots = self
+            .roots
+            .iter()
+            .filter(|(candidate, _)| candidate == id)
+            .cloned()
+            .collect::<Vec<_>>();
+        if roots.len() != 1 {
+            return Err(RealizationError::PhysicalRealization(
+                "candidate enumeration requires one uniquely identified workload root",
+            ));
+        }
+        self.enumerate_candidate_roots(&roots, expansion_limit)
+    }
+
+    fn enumerate_candidate_roots(
+        &self,
+        roots: &[(Id, Rc<QueryExpr>)],
+        expansion_limit: usize,
+    ) -> Result<CandidateDagInventory<Id>, RealizationError> {
+        let mut reachable = Vec::new();
+        let mut nodes = HashMap::new();
+        let mut counts = HashMap::new();
+        for (_, root) in roots {
+            walk(root, &mut reachable, &mut nodes, &mut counts);
+        }
+        // Rewrites may introduce descendants absent from the original root.
+        let mut cursor = 0;
+        while cursor < reachable.len() {
+            let ptr = reachable[cursor];
+            cursor += 1;
+            if let Some(group) = self.groups.get(&ptr) {
+                for candidate in &group.candidates {
+                    if let Replacement::Rewrite(rewritten) = &candidate.replacement {
+                        walk(rewritten, &mut reachable, &mut nodes, &mut counts);
+                    }
+                }
+            }
+        }
+        let order = self
+            .order
+            .iter()
+            .copied()
+            .filter(|ptr| counts.contains_key(ptr))
+            .collect::<Vec<_>>();
         // Composition plans carry the proofs established during discovery.
         // No cost ranking is consulted while expanding these choices.
-        let options: Vec<Vec<CandidateDagChoice<'_>>> = self
-            .order
+        let options: Vec<Vec<CandidateDagChoice<'_>>> = order
             .iter()
             .map(|ptr| {
                 let group = &self.groups[ptr];
@@ -3837,7 +3892,7 @@ impl<Id: Clone + PartialEq> PlanSpace<Id> {
         for mut ordinal in 0..combinations {
             let mut groups = HashMap::new();
             let mut assembled_nodes = HashMap::new();
-            for (ptr, choices) in self.order.iter().zip(&options) {
+            for (ptr, choices) in order.iter().zip(&options) {
                 let (chosen, prepared) = &choices[ordinal % choices.len()];
                 ordinal /= choices.len();
                 let group = &self.groups[ptr];
@@ -3856,12 +3911,11 @@ impl<Id: Clone + PartialEq> PlanSpace<Id> {
                 );
             }
             let assembly = GlobalSelection {
-                order: self.order.clone(),
+                order: order.clone(),
                 groups,
                 assembled_nodes: RefCell::new(assembled_nodes),
             };
-            let roots = self
-                .roots
+            let roots = roots
                 .iter()
                 .map(|(id, root)| {
                     assembly
@@ -6564,6 +6618,76 @@ mod tests {
             .candidates
             .iter()
             .any(|forest| matches!(forest[0].1.expr, SummaryExpr::KeepPreAsap(_))));
+    }
+
+    // Independent roots must not require materializing their Cartesian product.
+    #[test]
+    fn root_inventory_preserves_choices_without_workload_cartesian_expansion() {
+        let roots = (0..24usize)
+            .map(|id| {
+                (
+                    id,
+                    Rc::new(agg(
+                        vec![2],
+                        default_quantile((id + 1) as f64 / 25.0),
+                        metric_scan(&["job"]),
+                    )),
+                )
+            })
+            .collect();
+        let space = search_workload(roots);
+        assert!(space.enumerate_candidate_dags(4096).is_err());
+        for id in 0..24 {
+            let inventory = space.enumerate_candidate_dags_for_root(&id, 4096).unwrap();
+            assert!(inventory
+                .candidates
+                .iter()
+                .all(|forest| forest.len() == 1 && forest[0].0 == id));
+            let descriptions = inventory
+                .candidates
+                .iter()
+                .map(|forest| format!("{:?}", forest[0].1))
+                .collect::<Vec<_>>();
+            assert!(descriptions.iter().any(|node| node.contains("Kll")));
+            assert!(descriptions.iter().any(|node| node.contains("DDSketch")));
+            assert!(inventory
+                .candidates
+                .iter()
+                .any(|forest| matches!(forest[0].1.expr, SummaryExpr::KeepPreAsap(_))));
+        }
+        assert!(space.enumerate_candidate_dags_for_root(&24, 4096).is_err());
+        assert!(space.enumerate_candidate_dags_for_root(&0, 0).is_err());
+    }
+
+    // Factoring changes enumeration, not the set of root computations.
+    #[test]
+    fn root_inventory_matches_projection_of_exhaustive_workload_inventory() {
+        let roots = (0..2usize)
+            .map(|id| {
+                (
+                    id,
+                    Rc::new(agg(
+                        vec![2],
+                        default_quantile(0.5 + id as f64 * 0.4),
+                        metric_scan(&["job"]),
+                    )),
+                )
+            })
+            .collect();
+        let space = search_workload(roots);
+        let full = space.enumerate_candidate_dags(4096).unwrap();
+        for id in 0..2 {
+            let inventory = space.enumerate_candidate_dags_for_root(&id, 4096).unwrap();
+            for forest in &full.candidates {
+                let node = &forest.iter().find(|(root, _)| *root == id).unwrap().1;
+                assert!(inventory.candidates.iter().any(|one| &one[0].1 == node));
+            }
+            for one in &inventory.candidates {
+                assert!(full.candidates.iter().any(|forest| forest
+                    .iter()
+                    .any(|(root, node)| *root == id && node == &one[0].1)));
+            }
+        }
     }
 
     #[test]
