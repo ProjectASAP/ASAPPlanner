@@ -17,4 +17,6 @@ pub enum SketchEncoding {
     ProtoDelta,
     MsgpackFull,
     MsgpackDelta,
+    /// Versioned typed physical output; never a legacy sketch frame.
+    NativeBatchV1,
 }
