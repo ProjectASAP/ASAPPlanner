@@ -20,14 +20,16 @@ mod filter;
 mod joins;
 mod limit;
 mod panes;
+mod persisted;
 mod projection;
 mod sort;
 mod source;
 mod summary;
 pub use aggregate::Reduction;
 pub use sort::SortKey;
-#[derive(Clone)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 enum Kind {
+    #[serde(skip)]
     Source(Vec<Batch>),
     PaneInput {
         coordinate: usize,
@@ -97,7 +99,8 @@ enum Kind {
     },
 }
 /// A bound operation has a fully checked input/output contract before execution.
-#[derive(Clone)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+#[serde(try_from = "persisted::StoredOperator")]
 pub struct Operator {
     kind: Kind,
     inputs: Vec<Schema>,

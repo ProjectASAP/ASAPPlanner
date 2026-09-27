@@ -14,7 +14,7 @@ impl Operator {
         })
     }
 }
-#[derive(Clone, Debug)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
 pub struct SortKey {
     pub column: usize,
     pub descending: bool,

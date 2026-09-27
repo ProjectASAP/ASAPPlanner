@@ -214,3 +214,82 @@ pub fn select_candidate<T>(
     }
     selected.ok_or_else(|| invalid("no feasible priced physical candidate"))
 }
+
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StoredCandidate {
+    version: u32,
+    precompute: Option<serde_json::Value>,
+    query: serde_json::Value,
+    materialized_outputs: BTreeMap<NodeId, InputContract>,
+}
+
+impl PhysicalCandidate {
+    /// Validate the physical handoff, including the producer/reader boundary.
+    pub fn validate(&self) -> Result<(), Error> {
+        self.query.validate()?;
+        let Some(precompute) = &self.precompute else {
+            return if self.materialized_outputs.is_empty() {
+                Ok(())
+            } else {
+                Err(invalid("materialized outputs have no producer DAG"))
+            };
+        };
+        precompute.validate()?;
+        let outputs: BTreeSet<_> = self.materialized_outputs.keys().copied().collect();
+        if outputs.is_empty() || outputs != precompute.roots().iter().copied().collect() {
+            return Err(invalid("physical frontier differs from precompute outputs"));
+        }
+        let readers: BTreeMap<_, _> = self.query.input_contracts().collect();
+        for (&id, contract) in &self.materialized_outputs {
+            let produced = precompute.output_contract(id)?;
+            // Direct frontiers retain their node IDs. Temporal candidates can
+            // read several window instances through distinct input slots;
+            // their deployment bindings must validate those slots separately.
+            let reader = readers.get(&id);
+            if contract.schema != produced.schema
+                || reader.is_some_and(|reader| contract.schema != reader.schema)
+                || produced.properties.boundedness != Boundedness::Bounded
+                || contract.properties.boundedness != Boundedness::Bounded
+                || reader
+                    .is_some_and(|reader| reader.properties.boundedness != Boundedness::Bounded)
+            {
+                return Err(invalid("physical frontier schema or boundedness mismatch"));
+            }
+        }
+        Ok(())
+    }
+    pub fn encode(&self) -> Result<Vec<u8>, Error> {
+        self.validate()?;
+        let graph = |dag: &CompiledPhysicalDag| -> Result<serde_json::Value, Error> {
+            serde_json::from_slice(&dag.encode()?).map_err(|error| invalid(error.to_string()))
+        };
+        serde_json::to_vec(&StoredCandidate {
+            version: 1,
+            precompute: self.precompute.as_ref().map(graph).transpose()?,
+            query: graph(&self.query)?,
+            materialized_outputs: self.materialized_outputs.clone(),
+        })
+        .map_err(|error| invalid(error.to_string()))
+    }
+    /// Recover the selected physical candidate; no logical IR is accepted here.
+    pub fn decode(bytes: &[u8]) -> Result<Self, Error> {
+        let stored: StoredCandidate =
+            serde_json::from_slice(bytes).map_err(|error| invalid(error.to_string()))?;
+        if stored.version != 1 {
+            return Err(invalid("unsupported physical candidate format"));
+        }
+        let graph = |value| -> Result<CompiledPhysicalDag, Error> {
+            CompiledPhysicalDag::decode(
+                &serde_json::to_vec(&value).map_err(|error| invalid(error.to_string()))?,
+            )
+        };
+        let candidate = Self {
+            precompute: stored.precompute.map(graph).transpose()?,
+            query: graph(stored.query)?,
+            materialized_outputs: stored.materialized_outputs,
+        };
+        candidate.validate()?;
+        Ok(candidate)
+    }
+}
