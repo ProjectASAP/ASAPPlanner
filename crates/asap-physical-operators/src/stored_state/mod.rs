@@ -1,6 +1,7 @@
 //! Portable stored-summary payloads and reconstruction, independent of storage engines.
 pub mod decoders;
 pub mod delta_apply;
+pub mod native;
 pub mod readout;
 
 #[derive(Debug, Clone)]
