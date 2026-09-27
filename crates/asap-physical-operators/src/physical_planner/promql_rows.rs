@@ -252,3 +252,67 @@ pub fn compile_current_series_readout(
         &[u64::from(dag.root.0)],
     )
 }
+
+/// Compile a selected per-series Rate -> ranking computation above its exact
+/// counter readout. Deployments bind complete window readouts at this boundary;
+/// the heap is rebuilt independently for each evaluation. This does not move
+/// that frontier to ingestion time or authorize combining finalized rates.
+pub fn compile_rate_ranking(
+    selected: &Rc<planner_types::post_asap::SummaryNode>,
+) -> Result<
+    (
+        Rc<planner_types::post_asap::SummaryNode>,
+        CompiledPhysicalDag,
+    ),
+    Error,
+> {
+    use planner_types::post_asap::{
+        compile_executable_dag_with_node_ids, ExactKind, SummaryExpr, SummaryNode,
+    };
+    fn frontier(node: &Rc<SummaryNode>) -> Option<Rc<SummaryNode>> {
+        match &node.expr {
+            SummaryExpr::ValueOperation {
+                child,
+                operation: ValueOperation::FinalizeExactAccumulator,
+                ..
+            } if matches!(&child.expr, SummaryExpr::SummaryAgg {
+                    family: SummaryFamilyType::ExactAggregate(ExactKind::Rate, _),
+                    reduction: planner_types::pre_asap::Reduction::PerEntity,
+                    child: raw, ..
+                } if matches!(&raw.expr, SummaryExpr::KeepPreAsap(expr) if matches!(expr.as_ref(), QueryExpr::TimeRange { .. }))) =>
+            {
+                Some(Rc::clone(node))
+            }
+            SummaryExpr::ValueOperation { child, .. } | SummaryExpr::SummaryAgg { child, .. } => {
+                frontier(child)
+            }
+            SummaryExpr::SummaryEstimate { summary_input, .. } => frontier(summary_input),
+            _ => None,
+        }
+    }
+    let source = frontier(selected)
+        .ok_or_else(|| invalid("ranking requires one exact per-series Rate frontier"))?;
+    if !source
+        .schema
+        .fields
+        .iter()
+        .any(|field| field.name == SERIES_IDENTITY_COLUMN)
+    {
+        return Err(invalid("Rate ranking requires complete series identity"));
+    }
+    let compiled = compile_executable_dag_with_node_ids(selected)
+        .map_err(|error| invalid(error.to_string()))?;
+    let id = u64::from(
+        compiled
+            .node_ids
+            .node_id(&source)
+            .ok_or_else(|| invalid("missing Rate frontier"))?
+            .0,
+    );
+    let program = compile(
+        &compiled.dag,
+        BTreeMap::from([(id, InputContract::bounded(Arc::new(source.schema.clone())))]),
+        &[u64::from(compiled.dag.root.0)],
+    )?;
+    Ok((source, program))
+}

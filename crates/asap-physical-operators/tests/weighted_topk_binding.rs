@@ -330,6 +330,28 @@ fn check_direct_rate_topk(dynamic: bool) {
                 _ => None,
             })
             .unwrap_or_else(|| panic!("missing {algorithm:?} over direct Rate"));
+        if dynamic {
+            let (source, ranked) =
+                asap_physical_operators::physical_planner::promql_rows::compile_rate_ranking(
+                    candidate,
+                )
+                .unwrap();
+            assert!(matches!(
+                source.expr,
+                SummaryExpr::ValueOperation {
+                    operation: ValueOperation::FinalizeExactAccumulator,
+                    ..
+                }
+            ));
+            assert_eq!(ranked.input_contracts().count(), 1);
+            let encoded = String::from_utf8(ranked.encode().unwrap()).unwrap();
+            assert!(encoded.contains("KeyedSummaryBuild"));
+            assert!(encoded.contains("KeyedReadout"));
+            assert!(
+                !encoded.contains("\"Rate\""),
+                "Rate must be supplied by its exact stored-state readout"
+            );
+        }
         let dag = compile_executable_dag(candidate).unwrap();
         assert!(dag.nodes.iter().any(|node| matches!(&node.payload,
             ExecutableOperatorPayload::SummaryAgg { family: SummaryFamilyType::Sketch(kind, _), .. } if kind.algorithm() == &algorithm)));
