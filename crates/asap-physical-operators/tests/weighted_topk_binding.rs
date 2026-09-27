@@ -600,3 +600,134 @@ fn check_direct_rate_topk(dynamic: bool) {
         }
     }
 }
+
+// Spatial ranking consumes one eligible instant vector. Signed values require
+// CountSketch; a raw metric does not establish the non-negative CMS contract.
+#[test]
+fn spatial_topk_exposes_signed_heap_candidate_over_complete_snapshot() {
+    use asap_physical_operators::physical_planner::promql_rows::{
+        decode_series_identity, series_row, with_series_identity, SERIES_IDENTITY_COLUMN,
+    };
+    let logical = lower_promql("topk by(job)(1, m)", AccuracyTarget::Epsilon(0.1)).unwrap();
+    let root = Rc::new(with_series_identity(&logical).unwrap());
+    let strategy = SketchAlgorithmStrategy::new_with_planning_inputs_and_evidence(
+        &DefaultCostModel,
+        &DefaultAccuracyModel,
+        &EqualSplitAllocator,
+        &Evidence,
+    );
+    let candidates = strategy
+        .current_series_topk_candidates(&root, &AccuracyTarget::Epsilon(0.1))
+        .candidates;
+    assert!(!candidates
+        .iter()
+        .any(|c| c.rationale.contains("CmsWithHeap")));
+    let selected = candidates
+        .iter()
+        .find_map(|candidate| match &candidate.replacement {
+            Replacement::Summary(node) if candidate.rationale.contains("CountSketchWithHeap") => {
+                Some(node)
+            }
+            _ => None,
+        })
+        .expect("signed spatial TopK must expose CountSketch with heap");
+    let dag = compile_executable_dag(selected).unwrap();
+    let raw = dag
+        .nodes
+        .iter()
+        .find(|node| {
+            matches!(
+                &node.payload,
+                ExecutableOperatorPayload::Fallback {
+                    expression: QueryExpr::TimeRange { .. }
+                }
+            )
+        })
+        .unwrap();
+    let schema = Arc::new(raw.output_schema.clone());
+    let program = compile(
+        &dag,
+        BTreeMap::from([(u64::from(raw.id.0), InputContract::bounded(schema.clone()))]),
+        &[u64::from(dag.root.0)],
+    )
+    .unwrap();
+    let snapshot_program =
+        asap_physical_operators::physical_planner::promql_rows::compile_current_series_readout(
+            selected,
+        )
+        .unwrap();
+    let encoded: serde_json::Value =
+        serde_json::from_slice(&snapshot_program.encode().unwrap()).unwrap();
+    assert!(!encoded.to_string().contains("CurrentSeries"));
+    assert!(encoded.to_string().contains("KeyedSummaryBuild"));
+    assert!(encoded.to_string().contains("KeyedReadout"));
+    for (values, expected, score) in [
+        ([100., 20.], "a", 100.),
+        ([1., 20.], "b", 20.),
+        ([-10., -2.], "b", -2.),
+    ] {
+        let rows = ["a", "b"]
+            .into_iter()
+            .zip(values)
+            .map(|(instance, value)| {
+                series_row(
+                    &schema,
+                    &BTreeMap::from([
+                        ("job".into(), "api".into()),
+                        ("unreferenced".into(), instance.into()),
+                    ]),
+                    60_000,
+                    value,
+                )
+                .unwrap()
+            })
+            .collect();
+        let batch = Batch::try_new(schema.clone(), rows).unwrap();
+        let graph = program
+            .instantiate(BTreeMap::from([(
+                u64::from(raw.id.0),
+                Box::new(Operator::source(schema.clone(), vec![batch]).unwrap()) as Source<'_>,
+            )]))
+            .unwrap();
+        block_on(async {
+            let context = RunContext::new(
+                Scope::Query {
+                    evaluation_time_ms: 60_000,
+                    revision: 0,
+                },
+                Limits::default(),
+            )
+            .unwrap();
+            let mut stream = graph.execute(program.roots(), context).unwrap().remove(0);
+            let mut result = Vec::new();
+            while let Some(batch) = stream.next().await {
+                let batch = batch.unwrap();
+                let identity = batch
+                    .schema()
+                    .fields
+                    .iter()
+                    .position(|f| f.name == SERIES_IDENTITY_COLUMN)
+                    .unwrap();
+                let value = batch
+                    .schema()
+                    .fields
+                    .iter()
+                    .position(|f| f.name == "value")
+                    .unwrap();
+                for row in batch.rows() {
+                    let Value::Utf8(labels) = &row[identity] else {
+                        panic!()
+                    };
+                    let Value::Float64(v) = row[value] else {
+                        panic!()
+                    };
+                    result.push((
+                        decode_series_identity(labels).unwrap()["unreferenced"].clone(),
+                        v,
+                    ));
+                }
+            }
+            assert_eq!(result, vec![(expected.into(), score)]);
+        });
+    }
+}

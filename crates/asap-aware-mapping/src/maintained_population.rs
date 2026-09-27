@@ -50,6 +50,7 @@ fn recognize(root: &QueryExpr) -> Option<(MaintainedPopulation, PopulationReadou
                 AggIntent::Quantile { q, col, .. } if q.is_finite() => {
                     (*col, PopulationReadout::Quantile { q: *q })
                 }
+                AggIntent::TopK { k, .. } => (None, PopulationReadout::TopK { k: *k }),
                 AggIntent::Sum { col } => (*col, PopulationReadout::Sum),
                 AggIntent::Count { .. } => (None, PopulationReadout::Count),
                 AggIntent::Avg { col } => (*col, PopulationReadout::Average),

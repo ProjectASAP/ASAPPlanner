@@ -45,3 +45,11 @@ Tests cover open-label Rate → CMS/CountSketch heaps, hidden-label round trips,
 reset and zero-rate cases, snapshot replacement/decrease/expiry/staleness,
 serialized physical recovery, and resource rejection. These are shared-library
 tests, not proof of Backend candidate selection or durable deployment execution.
+
+Spatial heap candidates use the same complete series identity. Planner's
+`current_series_topk_candidates` explores a CountSketch-with-heap realization
+of canonical Sort/Limit under an explicit accuracy target. The physical graph
+selects the latest eligible samples before building a fresh heap. A maintained
+population boundary can supply that snapshot directly. Arbitrary signed metric
+values do not authorize CMS; counter Rate's non-negative proof is separate.
+These candidates still require membership/score evidence for deployment admission.
