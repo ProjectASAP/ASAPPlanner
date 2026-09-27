@@ -753,3 +753,208 @@ fn spatial_topk_exposes_signed_heap_candidate_over_complete_snapshot() {
         });
     }
 }
+
+// Placement changes execution ownership only. Every fixed-window candidate
+// contains Rate finalization before a fresh heap, with query readout downstream.
+#[test]
+fn planner_exposes_fixed_window_rate_heap_precompute_candidates() {
+    use asap_physical_operators::physical_planner::{
+        compile_candidate, promql_rows::with_series_identity,
+    };
+    let root = Rc::new(
+        with_series_identity(
+            &lower_promql("topk by(job)(2, rate(m[1m]))", AccuracyTarget::Epsilon(0.1)).unwrap(),
+        )
+        .unwrap(),
+    );
+    let strategy = SketchAlgorithmStrategy::new_with_planning_inputs_and_evidence(
+        &DefaultCostModel,
+        &DefaultAccuracyModel,
+        &EqualSplitAllocator,
+        &Evidence,
+    );
+    let candidates = strategy.fixed_window_rate_topk_candidates(&root).candidates;
+    assert_eq!(candidates.len(), 2);
+    for candidate in candidates {
+        let Replacement::Summary(root) = candidate.replacement else {
+            panic!()
+        };
+        let dag = compile_executable_dag(&root).unwrap();
+        let state = dag
+            .nodes
+            .iter()
+            .find(|node| {
+                matches!(
+                    &node.payload,
+                    ExecutableOperatorPayload::SummaryAgg {
+                        family: SummaryFamilyType::ExactAggregate(ExactKind::Rate, _),
+                        ..
+                    }
+                )
+            })
+            .unwrap();
+        let heap = dag
+            .nodes
+            .iter()
+            .find(|node| {
+                matches!(
+                    &node.payload,
+                    ExecutableOperatorPayload::SummaryAgg {
+                        family: SummaryFamilyType::Sketch(..),
+                        ..
+                    }
+                )
+            })
+            .unwrap();
+        assert_eq!(heap.output_state.timing, ExecutionTiming::IngestionTime);
+        let physical = compile_candidate(
+            &dag,
+            BTreeMap::from([(
+                u64::from(state.id.0),
+                InputContract::bounded(Arc::new(state.output_schema.clone())),
+            )]),
+            &[u64::from(dag.root.0)],
+            &[u64::from(heap.id.0)],
+        )
+        .unwrap();
+        let exported = asap_physical_operators::physical_planner::promql_rows::compile_fixed_window_rate_ranking(&root).unwrap();
+        assert_eq!(exported.encode().unwrap(), physical.encode().unwrap());
+        assert!(
+            asap_physical_operators::physical_planner::promql_rows::compile_rate_ranking(&root)
+                .is_err(),
+            "query binding must not move the selected precompute frontier"
+        );
+        // Execute the selected split across a state serialization boundary.
+        // Each run builds fresh weights from that window's counters.
+        let execute = |plan: &asap_physical_operators::physical_planner::CompiledPhysicalDag,
+                       input: Batch,
+                       scope: Scope| {
+            let id = plan.input_contracts().next().unwrap().0;
+            let source = Box::new(Operator::source(input.schema().clone(), vec![input]).unwrap())
+                as Source<'static>;
+            let graph = plan.instantiate(BTreeMap::from([(id, source)])).unwrap();
+            block_on(async {
+                let mut stream = graph
+                    .execute(
+                        plan.roots(),
+                        RunContext::new(scope, Limits::default()).unwrap(),
+                    )
+                    .unwrap()
+                    .remove(0);
+                let mut batches = Vec::new();
+                while let Some(batch) = stream.next().await {
+                    batches.push((*batch.unwrap()).clone());
+                }
+                assert_eq!(batches.len(), 1);
+                batches.remove(0)
+            })
+        };
+        let (family, input, grouping) = match &state.payload {
+            ExecutableOperatorPayload::SummaryAgg {
+                family,
+                input,
+                grouping,
+                ..
+            } => (family, input, grouping),
+            _ => unreachable!(),
+        };
+        for (end, samples, leader) in [
+            (
+                60_000,
+                [[0., 100., 200.], [0., 10., 20.], [0., 1., 2.]],
+                "a",
+            ),
+            (
+                120_000,
+                [[200., 200., 200.], [100., 0., 300.], [2., 3., 4.]],
+                "b",
+            ),
+        ] {
+            let schema = Arc::new(state.output_schema.clone());
+            let rows = samples
+                .into_iter()
+                .zip(["a", "b", "c"])
+                .map(|(samples, label)| {
+                    let mut accumulator =
+                        asap_physical_operators::factory::create_planner_accumulator(
+                            family, input, grouping,
+                        )
+                        .unwrap();
+                    for (offset, value) in [10_000, 30_000, 50_000].into_iter().zip(samples) {
+                        accumulator.update_single(value, end - 60_000 + offset);
+                    }
+                    let summary = Value::Summary {
+                        family: family.clone(),
+                        state: Arc::from(accumulator.into_accumulator()),
+                    };
+                    schema
+                        .fields
+                        .iter()
+                        .map(|field| match &field.dtype {
+                            SummaryFamilyType::ExactAggregate(..) => summary.clone(),
+                            SummaryFamilyType::Plain(DataType::Timestamp) => Value::Timestamp(end),
+                            SummaryFamilyType::Plain(DataType::Utf8)
+                                if field.name == "$promql_series_identity" =>
+                            {
+                                Value::Utf8(
+                                    serde_json::to_string(&BTreeMap::from([
+                                        ("job", "api"),
+                                        ("instance", label),
+                                    ]))
+                                    .unwrap()
+                                    .into(),
+                                )
+                            }
+                            SummaryFamilyType::Plain(DataType::Utf8) => Value::Utf8("api".into()),
+                            _ => panic!("unexpected state field {field:?}"),
+                        })
+                        .collect()
+                })
+                .collect();
+            let batch = Batch::try_new(schema, rows).unwrap();
+            let precompute = physical.precompute.as_ref().unwrap();
+            let heap = execute(
+                precompute,
+                batch,
+                Scope::Ingestion {
+                    window_start_ms: end - 60_000,
+                    window_end_ms: end,
+                    revision: 1,
+                },
+            );
+            let bytes = asap_physical_operators::stored_state::native::encode_batch(&heap).unwrap();
+            let restored = asap_physical_operators::stored_state::native::decode_batch(
+                &bytes,
+                heap.schema().clone(),
+                1 << 24,
+            )
+            .unwrap();
+            let result = execute(
+                &physical.query,
+                restored,
+                Scope::Query {
+                    evaluation_time_ms: end,
+                    revision: 1,
+                },
+            );
+            let identity = result
+                .schema()
+                .fields
+                .iter()
+                .position(|f| f.name == "$promql_series_identity")
+                .unwrap();
+            let Value::Utf8(encoded) = &result.rows()[0][identity] else {
+                panic!()
+            };
+            let labels: BTreeMap<String, String> = serde_json::from_str(encoded).unwrap();
+            assert_eq!(labels["instance"], leader);
+            assert_eq!(result.rows().len(), 2);
+        }
+        let precompute = String::from_utf8(physical.precompute.unwrap().encode().unwrap()).unwrap();
+        assert!(precompute.contains("KeyedSummaryBuild"));
+        assert!(precompute.contains("Rate"));
+        assert!(!String::from_utf8(physical.query.encode().unwrap())
+            .unwrap()
+            .contains("KeyedSummaryBuild"));
+    }
+}

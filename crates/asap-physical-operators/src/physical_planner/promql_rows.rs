@@ -274,7 +274,7 @@ pub fn compile_rate_ranking(
             SummaryExpr::ValueOperation {
                 child,
                 operation: ValueOperation::FinalizeExactAccumulator,
-                ..
+                timing: planner_types::post_asap::ExecutionTiming::QueryTime,
             } if matches!(&child.expr, SummaryExpr::SummaryAgg {
                     family: SummaryFamilyType::ExactAggregate(ExactKind::Rate, _),
                     reduction: planner_types::pre_asap::Reduction::PerEntity,
@@ -315,4 +315,55 @@ pub fn compile_rate_ranking(
         &[u64::from(compiled.dag.root.0)],
     )?;
     Ok((source, program))
+}
+
+/// The selected logical placement requires a fresh heap for each closed window.
+/// Compile both physical graphs before deployment chooses storage or scheduling.
+/// The input is the complete collection of per-series exact counter states.
+pub fn compile_fixed_window_rate_ranking(
+    selected: &Rc<planner_types::post_asap::SummaryNode>,
+) -> Result<PhysicalCandidate, Error> {
+    use planner_types::post_asap::{
+        compile_executable_dag, ExactKind, ExecutionTiming, SketchAlgorithm,
+    };
+    let dag = compile_executable_dag(selected).map_err(|e| invalid(e.to_string()))?;
+    let sources = dag
+        .nodes
+        .iter()
+        .filter(|n| {
+            matches!(
+                &n.payload,
+                Payload::SummaryAgg {
+                    family: SummaryFamilyType::ExactAggregate(ExactKind::Rate, _),
+                    reduction: planner_types::pre_asap::Reduction::PerEntity,
+                    ..
+                }
+            )
+        })
+        .collect::<Vec<_>>();
+    let heaps = dag.nodes.iter().filter(|n| n.output_state.timing == ExecutionTiming::IngestionTime && matches!(&n.payload, Payload::SummaryAgg {
+        family: SummaryFamilyType::Sketch(kind, _), ..
+    } if matches!(kind.algorithm(), SketchAlgorithm::CmsWithHeap | SketchAlgorithm::CountSketchWithHeap))).collect::<Vec<_>>();
+    let ([source], [heap]) = (sources.as_slice(), heaps.as_slice()) else {
+        return Err(invalid("expected one selected fixed-window Rate heap"));
+    };
+    if !source
+        .output_schema
+        .fields
+        .iter()
+        .any(|f| f.name == SERIES_IDENTITY_COLUMN)
+    {
+        return Err(invalid(
+            "fixed-window Rate heap requires complete series identity",
+        ));
+    }
+    compile_candidate(
+        &dag,
+        BTreeMap::from([(
+            u64::from(source.id.0),
+            InputContract::bounded(Arc::new(source.output_schema.clone())),
+        )]),
+        &[u64::from(dag.root.0)],
+        &[u64::from(heap.id.0)],
+    )
 }

@@ -1341,6 +1341,53 @@ impl<'a> SketchAlgorithmStrategy<'a> {
         self.propose_with(&ranked, None)
     }
 
+    /// Fixed-window maintenance can finalize each series' counter state and
+    /// build a fresh heap for that evaluation window. Deployment must provide
+    /// a complete, synchronized population and bind the matching window; this
+    /// candidate never incrementally adds one window's rates to another.
+    pub fn fixed_window_rate_topk_candidates(&self, root: &Rc<QueryExpr>) -> Proposals {
+        fn place(node: &Rc<SummaryNode>) -> Option<Rc<SummaryNode>> {
+            let mut next = node.as_ref().clone();
+            match &mut next.expr {
+                SummaryExpr::ValueOperation {
+                    child,
+                    operation: ValueOperation::FinalizeExactAccumulator,
+                    timing,
+                } if matches!(&child.expr, SummaryExpr::SummaryAgg {
+                        family: SummaryFamilyType::ExactAggregate(ExactKind::Rate, _),
+                        reduction: Reduction::PerEntity, child: source, ..
+                    } if matches!(&source.expr, SummaryExpr::KeepPreAsap(source) if matches!(source.as_ref(), QueryExpr::TimeRange { .. }))) =>
+                {
+                    *timing = ExecutionTiming::IngestionTime;
+                }
+                SummaryExpr::ValueOperation { child, .. }
+                | SummaryExpr::SummaryAgg { child, .. } => *child = place(child)?,
+                SummaryExpr::SummaryEstimate { summary_input, .. } => {
+                    *summary_input = place(summary_input)?
+                }
+                _ => return None,
+            }
+            Some(Rc::new(next))
+        }
+        let mut proposals = self.propose_with(root, None);
+        proposals.candidates.retain_mut(|candidate| {
+            let Replacement::Summary(node) = &candidate.replacement else { return false };
+            let Ok(dag) = asap_types::post_asap::compile_executable_dag(node) else { return false };
+            if !dag.nodes.iter().any(|node| matches!(&node.payload,
+                asap_types::post_asap::ExecutableOperatorPayload::SummaryAgg {
+                    family: SummaryFamilyType::Sketch(kind, _), ..
+                } if matches!(kind.algorithm(), SketchAlgorithm::CmsWithHeap | SketchAlgorithm::CountSketchWithHeap))) {
+                return false;
+            }
+            let Some(placed) = place(node) else { return false };
+            if asap_types::post_asap::compile_executable_dag(&placed).is_err() { return false; }
+            candidate.replacement = Replacement::Summary(placed);
+            candidate.rationale.push_str("; fixed-window precompute over complete per-series counter states");
+            true
+        });
+        proposals
+    }
+
     pub(crate) fn from_planning_inputs(planning_inputs: CandidatePlanningInputs<'a>) -> Self {
         Self { planning_inputs }
     }
@@ -1605,7 +1652,7 @@ fn describe_realization(intent: &AggIntent, realization: &Realization) -> String
     match realization {
         Realization::Sketch(kind) => format!(
             "{} realizes as a {:?} sketch — one of summary_candidates' \
-             alternatives for this intent (asap_aware_mapping::replacement::realizations_for_intent)",
+             candidates for this intent (asap_aware_mapping::replacement::realizations_for_intent)",
             describe_intent(intent),
             kind.algorithm()
         ),
