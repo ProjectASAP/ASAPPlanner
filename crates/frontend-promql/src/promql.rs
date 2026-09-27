@@ -625,7 +625,10 @@ fn build_over_subtree(outer: Outer, keys: Vec<ColumnRef>, child: Unresolved) -> 
                     && matches!(sum_child.as_ref(), Unresolved::Aggregate { measures, .. }
                         if matches!(measures.as_slice(), [AggIntent::Rate | AggIntent::Increase]))
             );
-            if descending && weighted_counter_ranking {
+            let direct_counter_ranking = matches!(&child, Unresolved::Aggregate {
+                measures, reduction: Reduction::PerEntity, ..
+            } if matches!(measures.as_slice(), [AggIntent::Rate | AggIntent::Increase]));
+            if descending && (weighted_counter_ranking || direct_counter_ranking) {
                 return Ok(outer_aggregate(
                     keys,
                     AggIntent::TopK {
@@ -1487,10 +1490,27 @@ fn build(inner: Inner, keys: Vec<ColumnRef>, outer: Outer) -> Result<Unresolved>
             })
         }
         Outer::TopK { k, descending } => {
+            // Preserve the counter-value ranking intent. Physical candidates
+            // may rebuild a heap over finalized rates or use exact Sort/Limit;
+            // neither is allowed to sum raw counter samples as ranking weights.
+            if descending && matches!(inner.func, Some(InnerFunc::Rate | InnerFunc::Increase)) {
+                let intent = inner_intent(inner.func.as_ref().expect("counter function"));
+                let ranked = windowed_aggregate(inner, vec![], intent);
+                return Ok(Unresolved::Aggregate {
+                    reduction: Reduction::Reduce(keys.into()),
+                    measures: vec![AggIntent::TopK {
+                        k: k as usize,
+                        accuracy: current_accuracy(),
+                    }],
+                    output_names: vec![],
+                    having: None,
+                    child: Rc::new(ranked),
+                });
+            }
             // Heavy-hitter only when ranking by an additive measure (`count`
             // or `sum`): that is a
             // first-class aggregate intent → `TopK`. Any other ranking (topk
-            // over avg/quantile/rate, a bare selector's raw value, all bottomk)
+            // over avg/quantile, a bare selector's raw value, all bottomk)
             // is a generic order-by-value + limit and stays as the `Sort + Limit`
             // operator pair. The descending-plus-measure rule is shared with the
             // canonicalize-pass promotion so the two cannot drift (issue #38).

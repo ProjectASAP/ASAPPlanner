@@ -264,3 +264,158 @@ fn rate_updates_cannot_enter_integer_heap_factory() {
         .is_err()
     );
 }
+
+/// A catalog-resolved per-series rate can feed a heap sketch directly, without
+/// requiring an otherwise unnecessary grouped Sum between Rate and TopK.
+#[test]
+fn direct_rate_topk_exposes_heap_candidates_with_complete_series_identity() {
+    let mut logical =
+        lower_promql("topk by(job)(2, rate(m[1m]))", AccuracyTarget::Epsilon(0.1)).unwrap();
+    fn resolve_catalog(node: &mut QueryExpr) {
+        match node {
+            QueryExpr::Aggregate { child, .. } | QueryExpr::TimeRange { child, .. } => {
+                resolve_catalog(Rc::make_mut(child))
+            }
+            QueryExpr::Scan { schema, .. } => {
+                schema.closed = true;
+                schema
+                    .columns
+                    .push(planner_types::pre_asap::schema::Column::new(
+                        "service",
+                        DataType::Utf8,
+                        false,
+                    ));
+            }
+            _ => panic!("unexpected input shape: {node:?}"),
+        }
+    }
+    resolve_catalog(&mut logical);
+    let root = Rc::new(logical);
+    let strategy = SketchAlgorithmStrategy::new_with_planning_inputs_and_evidence(
+        &DefaultCostModel,
+        &DefaultAccuracyModel,
+        &EqualSplitAllocator,
+        &Evidence,
+    );
+    let candidates = strategy.replacements(&TargetSubDAG::new(&root));
+    for algorithm in [
+        SketchAlgorithm::CmsWithHeap,
+        SketchAlgorithm::CountSketchWithHeap,
+    ] {
+        let candidate = candidates
+            .iter()
+            .find_map(|candidate| match &candidate.replacement {
+                Replacement::Summary(node)
+                    if candidate.rationale.contains(&format!("{algorithm:?}")) =>
+                {
+                    Some(node)
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("missing {algorithm:?} over direct Rate"));
+        let dag = compile_executable_dag(candidate).unwrap();
+        assert!(dag.nodes.iter().any(|node| matches!(&node.payload,
+            ExecutableOperatorPayload::SummaryAgg { family: SummaryFamilyType::Sketch(kind, _), .. } if kind.algorithm() == &algorithm)));
+        let build = dag.nodes.iter().find(|node| matches!(&node.payload,
+            ExecutableOperatorPayload::SummaryAgg { family: SummaryFamilyType::Sketch(kind, _), .. } if kind.algorithm() == &algorithm)).unwrap();
+        let input_id = dag
+            .edges
+            .iter()
+            .find(|edge| edge.consumer == build.id)
+            .unwrap()
+            .producer;
+        let schema = Arc::new(
+            dag.nodes
+                .iter()
+                .find(|node| node.id == input_id)
+                .unwrap()
+                .output_schema
+                .clone(),
+        );
+        let compiled = compile(
+            &dag,
+            BTreeMap::from([(
+                u64::from(input_id.0),
+                InputContract::bounded(schema.clone()),
+            )]),
+            &[u64::from(dag.root.0)],
+        )
+        .unwrap();
+        for (time, values, expected) in [
+            (
+                60_000,
+                vec![("auth", 3.), ("checkout", 2.), ("search", 1.)],
+                vec![2., 3.],
+            ),
+            (
+                61_000,
+                vec![("auth", 0.), ("checkout", 2.), ("search", 4.)],
+                vec![2., 4.],
+            ),
+            (62_000, vec![("auth", 0.), ("checkout", 2.)], vec![0., 2.]),
+        ] {
+            let rows = values
+                .into_iter()
+                .map(|(service, value)| {
+                    schema
+                        .fields
+                        .iter()
+                        .map(|field| match field.name.as_str() {
+                            "service" => Value::Utf8(service.into()),
+                            "job" => Value::Utf8("api".into()),
+                            "value" => Value::Float64(value),
+                            "ts" => Value::Timestamp(time),
+                            _ => panic!("unexpected rate field {field:?}"),
+                        })
+                        .collect()
+                })
+                .collect();
+            let batch = Batch::try_new(schema.clone(), rows).unwrap();
+            let source =
+                Box::new(Operator::source(schema.clone(), vec![batch]).unwrap()) as Source<'static>;
+            let graph = compiled
+                .instantiate(BTreeMap::from([(u64::from(input_id.0), source)]))
+                .unwrap();
+            let context = RunContext::new(
+                Scope::Query {
+                    evaluation_time_ms: time,
+                    revision: 1,
+                },
+                Limits::default(),
+            )
+            .unwrap();
+            let mut scores = block_on(async {
+                let mut scores = vec![];
+                let mut stream = graph
+                    .execute(&[u64::from(dag.root.0)], context)
+                    .unwrap()
+                    .remove(0);
+                while let Some(batch) = stream.next().await {
+                    let batch = batch.unwrap();
+                    for row in batch.rows() {
+                        assert!(row.iter().any(
+                            |value| matches!(value, Value::Timestamp(actual) if *actual == time)
+                        ));
+                        scores.push(
+                            row.iter()
+                                .find_map(|value| {
+                                    if let Value::Float64(value) = value {
+                                        Some(*value)
+                                    } else {
+                                        None
+                                    }
+                                })
+                                .unwrap(),
+                        );
+                    }
+                }
+                scores
+            });
+            scores.sort_by(f64::total_cmp);
+            assert_eq!(
+                scores, expected,
+                "heap snapshots must not accumulate across evaluations"
+            );
+        }
+    }
+}
