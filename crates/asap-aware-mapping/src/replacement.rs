@@ -3874,9 +3874,29 @@ impl<Id: Clone + PartialEq> PlanSpace<Id> {
                     let roots = asap_types::post_asap::share_common_summary_subtrees(roots);
                     use std::hash::{Hash, Hasher};
                     let mut hash = std::collections::hash_map::DefaultHasher::new();
-                    for (_, node) in &roots {
-                        let mut value = serde_json::to_value((&node.schema, &node.guarantee))
-                            .map_err(|_| {
+                    let mut pending = roots
+                        .iter()
+                        .map(|(_, node)| node.as_ref())
+                        .collect::<Vec<_>>();
+                    while let Some(node) = pending.pop() {
+                        std::mem::discriminant(&node.expr).hash(&mut hash);
+                        let raw = match &node.expr {
+                            SummaryExpr::KeepPreAsap(raw) => Some(raw.as_ref()),
+                            _ => None,
+                        };
+                        let operation = match &node.expr {
+                            SummaryExpr::ValueOperation {
+                                timing, operation, ..
+                            } => serde_json::json!((timing, operation)),
+                            SummaryExpr::BinaryOp {
+                                timing, operator, ..
+                            } => serde_json::json!((timing, operator)),
+                            SummaryExpr::SummaryMerge { timing, .. } => serde_json::json!(timing),
+                            _ => serde_json::Value::Null,
+                        };
+                        let mut value =
+                            serde_json::to_value((&node.schema, &node.guarantee, raw, operation))
+                                .map_err(|_| {
                                 RealizationError::PhysicalRealization(
                                     "candidate identity serialization failed",
                                 )
@@ -3900,6 +3920,28 @@ impl<Id: Clone + PartialEq> PlanSpace<Id> {
                         normalize(&mut value);
                         value.sort_all_objects();
                         value.to_string().hash(&mut hash);
+                        match &node.expr {
+                            SummaryExpr::KeepPreAsap(_) => {}
+                            SummaryExpr::BinaryOp { lhs, rhs, .. } => {
+                                pending.extend([lhs.as_ref(), rhs.as_ref()])
+                            }
+                            SummaryExpr::RelationalJoin { left, right, .. }
+                            | SummaryExpr::SummarySubtract { left, right } => {
+                                pending.extend([left.as_ref(), right.as_ref()])
+                            }
+                            SummaryExpr::ValueOperation { child, .. }
+                            | SummaryExpr::SummaryAgg { child, .. } => pending.push(child.as_ref()),
+                            SummaryExpr::SummaryJoin { outer, inner, .. } => {
+                                pending.extend([outer.as_ref(), inner.as_ref()])
+                            }
+                            SummaryExpr::SummaryDelete { summary_input, .. }
+                            | SummaryExpr::SummaryEstimate { summary_input, .. } => {
+                                pending.push(summary_input.as_ref())
+                            }
+                            SummaryExpr::SummaryMerge { children, .. } => {
+                                pending.extend(children.iter().map(|child| child.as_ref()))
+                            }
+                        }
                     }
                     let bucket = seen.entry(hash.finish()).or_default();
                     if !bucket
