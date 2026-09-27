@@ -329,13 +329,17 @@ fn cell_cmp(left: &Value, right: &Value) -> Option<Ordering> {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
 pub struct CompiledExpression {
     expression: QueryExpr,
     schema: planner_types::pre_asap::Schema,
     output: (DataType, bool),
 }
 impl CompiledExpression {
+    pub(crate) fn expression(&self) -> &QueryExpr {
+        &self.expression
+    }
+
     pub fn compile(expression: &QueryExpr, input: &Schema) -> Result<Self, Error> {
         let schema = input
             .fields
@@ -368,6 +372,12 @@ impl CompiledExpression {
         self.output.clone()
     }
     pub(crate) fn validate_input(&self, input: &Schema) -> Result<(), Error> {
+        let checked = Self::compile(&self.expression, input)?;
+        if checked.output != self.output {
+            return Err(Error::Invalid(
+                "persisted expression type differs from its semantics".into(),
+            ));
+        }
         if input.fields.len() != self.schema.columns.len()
             || input
                 .fields

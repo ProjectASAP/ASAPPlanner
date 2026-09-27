@@ -7,7 +7,7 @@ use planner_types::{
 };
 use std::{cmp::Ordering, sync::Arc};
 pub type Schema = Arc<SummarySchema>;
-#[derive(Clone)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub enum Value {
     Null,
     Bool(bool),
@@ -24,6 +24,7 @@ pub enum Value {
     List(Arc<[Value]>),
     Struct(Arc<[Value]>),
     Map(Arc<[(Value, Value)]>),
+    #[serde(skip)]
     Summary {
         family: SummaryFamilyType,
         state: Arc<dyn AggregateCore>,

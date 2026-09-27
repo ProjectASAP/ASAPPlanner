@@ -1,5 +1,5 @@
 //! Execution facts used to reject operators that cannot finish on their inputs.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Boundedness {
     /// The source or operator promises a finite result for this run.
     Bounded,
@@ -18,14 +18,14 @@ impl Boundedness {
         }
     }
 }
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Emission {
     Incremental,
     /// Produces its result only after all inputs end, even if accumulation is incremental.
     AfterInput,
     Unknown,
 }
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PlanProperties {
     pub boundedness: Boundedness,
     pub emission: Emission,

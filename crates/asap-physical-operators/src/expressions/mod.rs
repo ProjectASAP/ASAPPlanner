@@ -7,7 +7,7 @@ use planner_types::pre_asap::{ArithmeticOpKind, DataType};
 pub mod arithmetic;
 mod planner;
 pub use planner::CompiledExpression;
-#[derive(Clone, Debug)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
 pub enum Expression {
     Binary {
         operator: planner_types::post_asap::BinaryOperator,

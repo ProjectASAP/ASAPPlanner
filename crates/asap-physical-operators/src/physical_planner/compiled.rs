@@ -2,7 +2,7 @@
 use super::*;
 
 /// A typed execution boundary, without storage identity or a live reader.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct InputContract {
     pub schema: Schema,
     pub properties: PlanProperties,
@@ -24,7 +24,7 @@ impl InputContract {
         }
     }
 }
-#[derive(Clone)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 enum Node {
     Input(InputContract),
     Operator {
@@ -39,7 +39,44 @@ pub struct CompiledPhysicalDag {
     nodes: BTreeMap<NodeId, Node>,
     roots: Vec<NodeId>,
 }
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StoredDag {
+    version: u32,
+    nodes: BTreeMap<NodeId, Node>,
+    roots: Vec<NodeId>,
+}
+
 impl CompiledPhysicalDag {
+    /// Persist selected physical operators and input slots, never live readers
+    /// or mutable summary state. Recovery does not run logical plan lowering.
+    pub fn encode(&self) -> Result<Vec<u8>, Error> {
+        self.validate()?;
+        let bytes = serde_json::to_vec(&StoredDag {
+            version: 1,
+            nodes: self.nodes.clone(),
+            roots: self.roots.clone(),
+        })
+        .map_err(|error| invalid(error.to_string()))?;
+        // JSON cannot preserve non-finite literal values. Fail at publication,
+        // rather than persisting a document that cannot be recovered.
+        Self::decode(&bytes)?;
+        Ok(bytes)
+    }
+    pub fn decode(bytes: &[u8]) -> Result<Self, Error> {
+        let stored: StoredDag =
+            serde_json::from_slice(bytes).map_err(|error| invalid(error.to_string()))?;
+        if stored.version != 1 {
+            return Err(invalid("unsupported physical plan format"));
+        }
+        let result = Self {
+            nodes: stored.nodes,
+            roots: stored.roots,
+        };
+        result.validate()?;
+        Ok(result)
+    }
+
     /// Assemble already-lowered operators and typed external inputs. This is
     /// useful for engines that compose multiple compiled computation fragments.
     pub fn from_operators(

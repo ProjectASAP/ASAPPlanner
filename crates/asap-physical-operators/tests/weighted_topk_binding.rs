@@ -354,6 +354,9 @@ fn direct_rate_topk_exposes_heap_candidates_with_complete_series_identity() {
             &[u64::from(dag.root.0)],
         )
         .unwrap();
+        let bytes = raw_compiled.encode().unwrap();
+        let raw_compiled =
+            asap_physical_operators::physical_planner::CompiledPhysicalDag::decode(&bytes).unwrap();
         // Each evaluation receives a complete raw window. A reset, a stopped
         // series and an expired leader must not retain last run's heap weights.
         for (end, series, expected) in [
