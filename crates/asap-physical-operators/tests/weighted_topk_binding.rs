@@ -332,6 +332,115 @@ fn direct_rate_topk_exposes_heap_candidates_with_complete_series_identity() {
                 .output_schema
                 .clone(),
         );
+        let raw = dag
+            .nodes
+            .iter()
+            .find(|node| {
+                matches!(
+                    &node.payload,
+                    ExecutableOperatorPayload::Fallback {
+                        expression: QueryExpr::TimeRange { .. }
+                    }
+                )
+            })
+            .unwrap_or_else(|| panic!("no raw counter source: {dag:?}"));
+        let raw_schema = Arc::new(raw.output_schema.clone());
+        let raw_compiled = compile(
+            &dag,
+            BTreeMap::from([(
+                u64::from(raw.id.0),
+                InputContract::bounded(raw_schema.clone()),
+            )]),
+            &[u64::from(dag.root.0)],
+        )
+        .unwrap();
+        // Each evaluation receives a complete raw window. A reset, a stopped
+        // series and an expired leader must not retain last run's heap weights.
+        for (end, series, expected) in [
+            (
+                60_000,
+                vec![
+                    ("auth", vec![10., 30., 50.]),
+                    ("checkout", vec![10., 50., 90.]),
+                    ("search", vec![10., 70., 130.]),
+                ],
+                vec![11. / 6., 8. / 3.],
+            ),
+            (
+                120_000,
+                vec![
+                    ("auth", vec![100., 10., 50.]),
+                    ("checkout", vec![100., 100., 100.]),
+                ],
+                vec![0., 1.25],
+            ),
+        ] {
+            let mut raw_rows = Vec::new();
+            for (service, samples) in series {
+                for (offset, value) in [10_000, 30_000, 50_000].into_iter().zip(samples) {
+                    raw_rows.push(
+                        raw_schema
+                            .fields
+                            .iter()
+                            .map(|field| match field.name.as_str() {
+                                "service" => Value::Utf8(service.into()),
+                                "job" => Value::Utf8("api".into()),
+                                "value" => Value::Float64(value),
+                                "ts" => Value::Timestamp(end - 60_000 + offset),
+                                _ => panic!("unexpected raw field"),
+                            })
+                            .collect(),
+                    );
+                }
+            }
+            let raw_batch = Batch::try_new(raw_schema.clone(), raw_rows).unwrap();
+            for scope in [
+                Scope::Ingestion {
+                    window_start_ms: end - 60_000,
+                    window_end_ms: end,
+                    revision: 1,
+                },
+                Scope::Query {
+                    evaluation_time_ms: end,
+                    revision: 1,
+                },
+            ] {
+                let source = Box::new(
+                    Operator::source(raw_schema.clone(), vec![raw_batch.clone()]).unwrap(),
+                ) as Source<'static>;
+                let graph = raw_compiled
+                    .instantiate(BTreeMap::from([(u64::from(raw.id.0), source)]))
+                    .unwrap();
+                let context = RunContext::new(scope, Limits::default()).unwrap();
+                let mut raw_scores = block_on(async {
+                    let mut scores = Vec::new();
+                    let mut stream = graph
+                        .execute(&[u64::from(dag.root.0)], context)
+                        .unwrap()
+                        .remove(0);
+                    while let Some(batch) = stream.next().await {
+                        for row in batch.unwrap().rows() {
+                            assert!(row.iter().any(
+                                |value| matches!(value, Value::Timestamp(time) if *time == end)
+                            ));
+                            scores.extend(row.iter().filter_map(|value| match value {
+                                Value::Float64(value) => Some(*value),
+                                _ => None,
+                            }));
+                        }
+                    }
+                    scores
+                });
+                raw_scores.sort_by(f64::total_cmp);
+                assert_eq!(raw_scores.len(), expected.len());
+                for (actual, expected) in raw_scores.iter().zip(&expected) {
+                    assert!(
+                        (actual - expected).abs() < 1e-12,
+                        "raw counter semantics must precede heap ranking: {raw_scores:?}"
+                    );
+                }
+            }
+        }
         let compiled = compile(
             &dag,
             BTreeMap::from([(

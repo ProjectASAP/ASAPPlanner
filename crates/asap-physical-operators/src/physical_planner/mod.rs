@@ -188,6 +188,66 @@ fn compile_internal(
                 auxiliary -= 1;
                 schemas.truncate(1);
             }
+            // Per-entity identity is safe only when the source catalog closes
+            // the label set. An open PromQL projection can hide distinct series.
+            if let Payload::SummaryAgg {
+                family,
+                input: update,
+                reduction: PlannerReduction::PerEntity,
+                grouping,
+            } = &node.payload
+            {
+                let [input_id] = inputs.as_slice() else {
+                    return Err(invalid("per-entity summary requires one input"));
+                };
+                let Payload::Fallback {
+                    expression: QueryExpr::TimeRange { child, .. },
+                } = &nodes[input_id].payload
+                else {
+                    return Err(invalid(
+                        "per-entity summary requires a resolved raw time range",
+                    ));
+                };
+                let QueryExpr::Scan { schema, .. } = child.as_ref() else {
+                    return Err(invalid("per-entity summary requires a resolved source"));
+                };
+                if !schema.closed || update.item.is_some() {
+                    return Err(invalid(
+                        "per-entity summary requires complete source identity",
+                    ));
+                }
+                crate::capability::validate_summary_kernel(family, update, grouping)
+                    .map_err(Error::Invalid)?;
+                let SummaryInputExpr::Column(value) = &update.weight else {
+                    return Err(invalid(
+                        "per-entity update requires a projected value column",
+                    ));
+                };
+                let input = schemas[0].clone();
+                let value = named_column(&input, value)?;
+                let coordinate = input
+                    .time_index
+                    .ok_or_else(|| invalid("temporal input lacks time"))?;
+                let groups = (0..input.fields.len())
+                    .filter(|&column| column != value && column != coordinate)
+                    .collect();
+                let build = Operator::summary_build(
+                    input,
+                    family.clone(),
+                    value,
+                    Some(coordinate),
+                    groups,
+                )?;
+                let compact = build.schema();
+                graph.add(auxiliary, inputs, build)?;
+                graph.add(
+                    id,
+                    vec![auxiliary],
+                    Operator::scope_timestamp(compact, output)?,
+                )?;
+                auxiliary -= 1;
+                continue;
+            }
             let mut operator = compile_node(node, &schemas)
                 .map_err(|error| invalid(format!("node {id}: {error}")))?;
             if operator.is_counter_readout() {
