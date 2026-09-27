@@ -11,7 +11,7 @@ flowchart LR
     P["Physical DAG(s)<br/><b>How is it executed?</b>"]
     D["Deployment Plan / DAG<br/><b>How is it instantiated?</b>"]
 
-    L -->|"Summary Maintenance<br/>Selection"| M
+    L -->|"Summary Maintenance<br/>Candidate Generation"| M
     M -->|"Physical Plan<br/>Compiler"| P
     P -->|"Deployment Plan<br/>Compiler"| D
 ```
@@ -20,13 +20,58 @@ flowchart LR
 | --- | --- |
 | **Logical Post-ASAP DAG** | Computation semantics |
 | **Summary Maintenance Lifecycle** | Build, retention, reuse, and window strategy |
-| **Physical DAG(s)** | Concrete executable operators and input boundaries |
-| **Deployment Plan / DAG** | Concrete data/state bindings and operational lifecycle |
+| **Physical DAG(s)** | Supported physical candidates, executable operators and typed input boundaries |
+| **Deployment Plan / DAG** | Selected candidate, concrete data/state bindings and operational lifecycle |
 
 ASAPPlanner owns the first three layers and the shared physical operator
 implementation library. Deployment systems such as ASAPQuery and asap-fusion
 own deployment compilation and operation. The lifecycle is a planning contract
 associated with the logical DAG, not a separate computation IR.
+
+### Candidate generation and deployment selection
+
+Planner exposes the supported, semantically legal **physical plan candidates**.
+It does not discard a computation family or materialization placement merely
+because a deployment-independent cost estimate prefers another candidate.
+Logical candidates are an internal search stage, not the deployment handoff.
+
+```text
+Query semantics + accuracy and lifecycle requirements
+                    ↓ Planner
+Supported Physical DAG candidates + typed inputs/outputs + requirements
+                    ↓ backend
+Binding feasibility + runtime statistics + resource limits + ERP
+                    ↓ backend deployment compiler
+Selected PrecomputePlan + QueryPlan + StoredOutputReferences
+```
+
+Planner owns operators, dependencies, sharing, and each candidate's
+materialization frontier. The backend rejects candidates it cannot realize and
+prices feasible candidates over a comparable workload and time horizon. It binds
+the selected candidate; it does not lower the logical computation again, exchange
+operators, or move an operator across the selected frontier. A missing quote is
+not a zero-cost implementation. ERP evidence cannot authorize an illegal rewrite.
+
+The candidate inventory must identify its supported search scope and budget.
+If a configured exhaustive enumeration exceeds its budget, planning fails
+explicitly instead of selecting from an undisclosed partial inventory. Reports
+separate unsupported compilation, deployment infeasibility, missing evidence,
+and a feasible candidate that loses on cost. Absence is not a cost comparison.
+
+For `sum by(job)(rate(m[1m]))`, Rate remains per series before grouped Sum.
+When lifecycle requirements permit it, a candidate may finalize Rate and Sum
+within a bounded precompute run and persist the grouped value. Another may leave
+those operators in the query DAG. Storing a value requires its exact evaluation
+window, revision, readiness and serving cadence to match the query contract.
+
+For instant-vector TopK, CMS/CountSketch with a candidate heap requires explicit
+series identity and a supported latest-value input protocol. Appending historical
+sample values does not preserve instant-vector semantics. Replacement, rank
+decrease, expiry, grouping and the required approximation guarantee must be
+validated before admitting that physical candidate.
+
+This is the target ownership contract. A backend path that still reconstructs
+operators from logical candidates has not completed this integration.
 
 ### Input semantics and summary semantics
 
@@ -74,7 +119,7 @@ vocabulary requires an explicit format-version review.
 ### Running example
 
 Suppose p50 and p99 are requested over the same latency samples in a five-minute window,
-and ASAP selects KLL with `k=200`. Assume query windows align with one-minute
+and one Planner candidate uses KLL with `k=200`. Assume query windows align with one-minute
 pane boundaries and that the selected parameters satisfy the required guarantees.
 Operator names below are illustrative; the example defines the design, not a
 claim that the entire deployment integration is implemented.
@@ -99,7 +144,7 @@ KLLMerge
   p50     p99
 
           │
-          │ Summary Maintenance Selection
+          │ Summary Maintenance Candidate Generation
           ▼
 
 2. Summary Maintenance Lifecycle
@@ -174,8 +219,10 @@ Quantile(.5)  Quantile(.99)
 It establishes that KLL with `k=200` is used and that the merge is shared by the
 two readouts. It does not determine when KLL states are built or retained.
 
-**Summary Maintenance Selection** makes that decision using workload demand,
-window/freshness requirements, and physical feasibility/cost.
+**Summary Maintenance Candidate Generation** enumerates legal lifecycle choices
+using workload demand, window/freshness requirements and supported physical
+implementations. Backend selection uses runtime feasibility and cost after
+physical compilation. The following example follows one candidate.
 
 For the running example, assume it selects:
 
@@ -386,7 +433,7 @@ The complete example makes the ownership boundary explicit:
 | Stage | KLL example decision |
 | --- | --- |
 | **Logical Post-ASAP DAG** | Use `KLL(k=200)` with shared merge for p50/p99 |
-| **Summary Maintenance Selection** | Maintain 1-minute panes and reuse them for aligned five-minute queries |
+| **Summary Maintenance Candidate Generation** | Maintain 1-minute panes and reuse them for aligned five-minute queries |
 | **Summary Maintenance Lifecycle** | Record pane/window/freshness/reuse requirements |
 | **Physical Plan Compiler** | Lower to native KLL build, merge, and readout operators |
 | **Physical DAG** | Define maintenance and query DAGs with typed input/output boundaries |
