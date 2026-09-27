@@ -16,6 +16,7 @@ use crate::expressions::ordered;
 pub use crate::expressions::Expression;
 use common::*;
 mod aggregate;
+mod current_series;
 mod filter;
 mod joins;
 mod limit;
@@ -38,6 +39,12 @@ enum Kind {
     },
     ScopeTimestamp {
         columns: Vec<Option<usize>>,
+    },
+    CurrentSeries {
+        identity: usize,
+        coordinate: usize,
+        value: usize,
+        lookback_ms: i64,
     },
     Union,
     VectorToScalar {
@@ -193,6 +200,7 @@ impl PhysicalOperator<Batch, Schema> for Operator {
         matches!(
             self.kind,
             Kind::Sort { .. }
+                | Kind::CurrentSeries { .. }
                 | Kind::Aggregate { .. }
                 | Kind::Window { .. }
                 | Kind::Join { .. }
@@ -232,6 +240,7 @@ impl PhysicalOperator<Batch, Schema> for Operator {
             Kind::PaneInput { .. } => "PaneInput",
             Kind::ScopeTimestamp { .. } => "ScopeTimestamp",
             Kind::Union => "Union",
+            Kind::CurrentSeries { .. } => "CurrentSeries",
             Kind::VectorToScalar { .. } => "VectorToScalar",
             Kind::Project(_) => "Project",
             Kind::Filter(_) => "Filter",
@@ -249,6 +258,7 @@ impl PhysicalOperator<Batch, Schema> for Operator {
     }
     fn validate_context(&self, context: &RunContext) -> Result<(), Error> {
         panes::validate_context(self, context)?;
+        current_series::validate_context(self, context)?;
         self.readout_parameters(context).map(|_| ())
     }
     fn input_schemas(&self) -> Vec<Schema> {
@@ -270,6 +280,7 @@ impl PhysicalOperator<Batch, Schema> for Operator {
                 source::execute(self, inputs, context)
             }
             Kind::Project(_) => projection::execute(self, inputs, context),
+            Kind::CurrentSeries { .. } => current_series::execute(self, inputs, context),
             Kind::PaneInput { .. } | Kind::ScopeTimestamp { .. } => {
                 panes::execute(self, inputs, context)
             }

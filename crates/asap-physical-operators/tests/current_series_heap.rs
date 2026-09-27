@@ -1,0 +1,282 @@
+//! Spatial heap weights come from a fresh instant vector, never sample history.
+use asap_physical_operators::{
+    operators::Operator,
+    physical_planner::{
+        promql_rows::{decode_series_identity, series_row, SERIES_IDENTITY_COLUMN},
+        CompiledPhysicalDag, InputContract, Source,
+    },
+    runtime::{Limits, RunContext, Scope},
+    values::{Batch, Value},
+};
+use futures::{executor::block_on, StreamExt};
+use planner_types::{post_asap::*, pre_asap::DataType};
+use std::{collections::BTreeMap, sync::Arc};
+
+fn schema() -> Arc<SummarySchema> {
+    Arc::new(SummarySchema {
+        fields: [
+            ("ts", DataType::Timestamp),
+            ("value", DataType::Float64),
+            ("job", DataType::Utf8),
+            (SERIES_IDENTITY_COLUMN, DataType::Utf8),
+        ]
+        .into_iter()
+        .map(|(name, dtype)| SummaryField {
+            name: name.into(),
+            dtype: SummaryFamilyType::Plain(dtype),
+            nullable: false,
+        })
+        .collect(),
+        time_index: Some(0),
+    })
+}
+fn run(program: &CompiledPhysicalDag, data: Batch, end: i64) -> Result<Vec<Batch>, String> {
+    let recovered = CompiledPhysicalDag::decode(&program.encode().map_err(|e| e.to_string())?)
+        .map_err(|e| e.to_string())?;
+    let graph = recovered
+        .instantiate(BTreeMap::from([(
+            0,
+            Box::new(Operator::source(data.schema().clone(), vec![data]).unwrap()) as Source<'_>,
+        )]))
+        .unwrap();
+    let context = RunContext::new(
+        Scope::Query {
+            evaluation_time_ms: end,
+            revision: 0,
+        },
+        Limits::default(),
+    )
+    .unwrap();
+    block_on(async {
+        let mut stream = graph.execute(recovered.roots(), context).unwrap().remove(0);
+        let mut batches = Vec::new();
+        while let Some(batch) = stream.next().await {
+            batches.push((*batch.map_err(|e| e.to_string())?).clone());
+        }
+        Ok(batches)
+    })
+}
+fn input(samples: &[(&str, i64, f64)]) -> Batch {
+    let schema = schema();
+    let rows = samples
+        .iter()
+        .map(|(instance, time, value)| {
+            series_row(
+                &schema,
+                &BTreeMap::from([
+                    ("job".into(), "api".into()),
+                    ("hidden_instance".into(), (*instance).into()),
+                ]),
+                *time,
+                *value,
+            )
+            .unwrap()
+        })
+        .collect();
+    Batch::try_new(schema, rows).unwrap()
+}
+fn snapshot_plan() -> CompiledPhysicalDag {
+    CompiledPhysicalDag::from_operators(
+        BTreeMap::from([(0, InputContract::bounded(schema()))]),
+        BTreeMap::from([(
+            1,
+            (
+                vec![0],
+                Operator::current_series(schema(), 3, 0, 1, 60_000).unwrap(),
+            ),
+        )]),
+        vec![1],
+    )
+    .unwrap()
+}
+
+// Replacement, expiry and stale markers act before sketch updates. Hidden labels
+// survive even when every series has the same projected `job` value.
+#[test]
+fn latest_snapshot_replaces_decreases_expires_and_retains_full_identity() {
+    let plan = snapshot_plan();
+    let batches = run(
+        &plan,
+        input(&[
+            ("decrease", 10_000, 100.),
+            ("decrease", 50_000, 1.),
+            ("steady", 40_000, 20.),
+            ("expired", 0, 1_000.),
+            ("stale", 20_000, 500.),
+            ("stale", 55_000, f64::from_bits(0x7ff0_0000_0000_0002)),
+            ("future", 60_001, 2_000.),
+        ]),
+        60_000,
+    )
+    .unwrap();
+    let values = batches
+        .iter()
+        .flat_map(|batch| batch.rows())
+        .map(|row| {
+            let Value::Utf8(identity) = &row[3] else {
+                panic!()
+            };
+            let Value::Float64(value) = row[1] else {
+                panic!()
+            };
+            assert!(matches!(row[0], Value::Timestamp(60_000)));
+            (
+                decode_series_identity(identity).unwrap()["hidden_instance"].clone(),
+                value,
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    assert_eq!(
+        values,
+        BTreeMap::from([("decrease".into(), 1.), ("steady".into(), 20.)])
+    );
+    assert!(run(&plan, input(&[("steady", 40_000, 20.)]), 100_000)
+        .unwrap()
+        .iter()
+        .all(|batch| batch.rows().is_empty()));
+    assert!(run(
+        &plan,
+        input(&[("conflict", 50_000, 1.), ("conflict", 50_000, 2.)]),
+        60_000
+    )
+    .is_err());
+}
+
+#[test]
+fn spatial_heap_ranks_latest_values_in_independent_runs() {
+    for algorithm in [
+        SketchAlgorithm::CmsWithHeap,
+        SketchAlgorithm::CountSketchWithHeap,
+    ] {
+        let params = match algorithm {
+            SketchAlgorithm::CmsWithHeap => SketchParams::CmsWithHeap {
+                width: 2048,
+                depth: 5,
+                heap_size: 100,
+            },
+            _ => SketchParams::CountSketchWithHeap {
+                width: 2048,
+                depth: 5,
+                heap_size: 100,
+            },
+        };
+        let family =
+            SummaryFamilyType::Sketch(SketchKind::new(algorithm, params), Default::default());
+        let build = Operator::keyed_summary_build(schema(), family, 1, vec![3], vec![2]).unwrap();
+        let output = Arc::new(SummarySchema {
+            fields: vec![
+                schema().fields[2].clone(),
+                schema().fields[3].clone(),
+                schema().fields[1].clone(),
+            ],
+            time_index: None,
+        });
+        let read = Operator::keyed_readout(build.schema(), 1, 1, output).unwrap();
+        let plan = CompiledPhysicalDag::from_operators(
+            BTreeMap::from([(0, InputContract::bounded(schema()))]),
+            BTreeMap::from([
+                (
+                    1,
+                    (
+                        vec![0],
+                        Operator::current_series(schema(), 3, 0, 1, 60_000).unwrap(),
+                    ),
+                ),
+                (2, (vec![1], build)),
+                (3, (vec![2], read)),
+            ]),
+            vec![3],
+        )
+        .unwrap();
+        for (samples, end, winner, score) in [
+            (
+                vec![("a", 10_000, 100.), ("a", 50_000, 1.), ("b", 50_000, 20.)],
+                60_000,
+                "b",
+                20.,
+            ),
+            (
+                vec![("a", 110_000, 3.), ("b", 50_000, 20.)],
+                120_000,
+                "a",
+                3.,
+            ),
+        ] {
+            let batches = run(&plan, input(&samples), end).unwrap();
+            let rows = batches
+                .iter()
+                .flat_map(|batch| batch.rows())
+                .collect::<Vec<_>>();
+            assert_eq!(rows.len(), 1);
+            let Value::Utf8(encoded) = &rows[0][1] else {
+                panic!()
+            };
+            assert_eq!(
+                decode_series_identity(encoded).unwrap()["hidden_instance"],
+                winner
+            );
+            assert!(matches!(rows[0][2], Value::Float64(actual) if actual == score));
+        }
+    }
+}
+
+// Blocking membership selection shares the run's cancellation and byte budget.
+#[test]
+fn current_series_observes_resource_limits() {
+    use asap_physical_operators::Error;
+    let plan = snapshot_plan();
+    for cancelled in [false, true] {
+        let data = input(&[("one", 50_000, 1.)]);
+        let graph = plan
+            .instantiate(BTreeMap::from([(
+                0,
+                Box::new(Operator::source(data.schema().clone(), vec![data]).unwrap())
+                    as Source<'_>,
+            )]))
+            .unwrap();
+        let context = RunContext::new(
+            Scope::Query {
+                evaluation_time_ms: 60_000,
+                revision: 0,
+            },
+            Limits {
+                max_bytes: if cancelled { 1 << 20 } else { 1 },
+                ..Limits::default()
+            },
+        )
+        .unwrap();
+        if cancelled {
+            context.cancel();
+        }
+        let result = match graph.execute(&[1], context.clone()) {
+            Err(error) => Err(error),
+            Ok(mut streams) => block_on(streams.remove(0).next()).unwrap().map(|_| ()),
+        };
+        assert!(matches!(
+            (cancelled, result),
+            (true, Err(Error::Cancelled)) | (false, Err(Error::MemoryLimit))
+        ));
+        assert_eq!(context.retained_bytes(), 0);
+    }
+}
+
+#[test]
+fn identity_encoding_is_lossless_and_rejects_noncanonical_inputs() {
+    use asap_physical_operators::physical_planner::promql_rows::encode_series_identity;
+    let labels = BTreeMap::from([
+        ("a".into(), "quote\"slash\\".into()),
+        ("other".into(), "".into()),
+    ]);
+    assert_eq!(
+        decode_series_identity(&encode_series_identity(&labels).unwrap()).unwrap(),
+        labels
+    );
+    for invalid in [
+        "[]",
+        "{\"a\":1}",
+        "{\"a\":\"x\",\"a\":\"x\"}",
+        "{ \"a\":\"x\"}",
+    ] {
+        assert!(decode_series_identity(invalid).is_err(), "{invalid}");
+    }
+}
