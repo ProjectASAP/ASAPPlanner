@@ -667,6 +667,9 @@ fn visit_window_summary_states(
         }
 
         match state.encoding {
+            SketchEncoding::NativeBatchV1 => {
+                return Err("native physical outputs require the bound native batch decoder".into())
+            }
             SketchEncoding::ProtoFull | SketchEncoding::MsgpackFull => {
                 // A Full (re)sets this window's base.
                 rolling = Some(decode_full(&kind, &state.bytes, state.encoding)?);

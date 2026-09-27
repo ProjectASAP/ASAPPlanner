@@ -250,6 +250,24 @@ mod tests {
         }
     }
 
+    // A storage tag cannot send weighted physical output through an integer heap decoder.
+    #[test]
+    fn legacy_sketch_reader_rejects_native_batch_frames() {
+        let sample = super::super::SketchSampleState {
+            bytes: encode_batch(&weighted(SketchAlgorithm::CmsWithHeap)).unwrap(),
+            encoding: super::super::SketchEncoding::NativeBatchV1,
+        };
+        let result = super::super::delta_apply::per_window_summary_states(
+            &[(60_000, &sample)],
+            super::super::delta_apply::DeltaSketchKind::CmsWithHeap {
+                rows: 5,
+                cols: 64,
+                heap_size: 8,
+            },
+        );
+        assert!(result.is_err());
+    }
+
     // Every admitted native summary codec survives the same typed boundary.
     #[test]
     fn native_summary_families_and_nonfinite_plain_values_roundtrip() {
