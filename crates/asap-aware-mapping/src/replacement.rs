@@ -3711,6 +3711,120 @@ impl<Id> PlanSpace<Id> {
     }
 }
 
+/// DAG candidates assembled from an unpriced search space.
+/// This is an internal planning stage: callers must still validate lifecycle
+/// requirements and compile supported physical operators before deployment.
+/// The caller supplies a finite expansion budget; exceeding it is an error,
+/// never a silently truncated inventory presented as exhaustive.
+#[derive(Debug)]
+pub struct CandidateDagInventory<Id> {
+    pub candidates: Vec<Vec<(Id, Rc<SummaryNode>)>>,
+    pub rejected_assemblies: Vec<String>,
+}
+
+type CandidateDagChoice<'a> = (Option<&'a ReplacementSubDAG>, Option<Rc<SummaryNode>>);
+
+impl<Id: Clone + PartialEq> PlanSpace<Id> {
+    pub fn enumerate_candidate_dags(
+        &self,
+        expansion_limit: usize,
+    ) -> Result<CandidateDagInventory<Id>, RealizationError> {
+        // Composition plans carry the proofs established during discovery.
+        // No cost ranking is consulted while expanding these choices.
+        let options: Vec<Vec<CandidateDagChoice<'_>>> = self
+            .order
+            .iter()
+            .map(|ptr| {
+                let group = &self.groups[ptr];
+                let mut choices = vec![(None, None)];
+                for candidate in &group.candidates {
+                    match &candidate.replacement {
+                        Replacement::ExactComposition(operation) => {
+                            for prepared in &self.composition_plans {
+                                if prepared.target == *ptr
+                                    && prepared.operation.placement == operation.placement
+                                    && prepared.operation.op == operation.op
+                                    && Rc::ptr_eq(
+                                        &prepared.operation.child_target,
+                                        &operation.child_target,
+                                    )
+                                {
+                                    choices
+                                        .push((Some(candidate), Some(Rc::clone(&prepared.plan))));
+                                }
+                            }
+                        }
+                        _ => choices.push((Some(candidate), None)),
+                    }
+                }
+                choices
+            })
+            .collect();
+        let combinations = options
+            .iter()
+            .try_fold(1usize, |n, choices| n.checked_mul(choices.len()))
+            .filter(|n| *n <= expansion_limit)
+            .ok_or(RealizationError::PhysicalRealization(
+                "candidate expansion budget exceeded; no partial inventory returned",
+            ))?;
+        let mut inventory = CandidateDagInventory {
+            candidates: Vec::new(),
+            rejected_assemblies: Vec::new(),
+        };
+        for mut ordinal in 0..combinations {
+            let mut groups = HashMap::new();
+            let mut assembled_nodes = HashMap::new();
+            for (ptr, choices) in self.order.iter().zip(&options) {
+                let (chosen, prepared) = &choices[ordinal % choices.len()];
+                ordinal /= choices.len();
+                let group = &self.groups[ptr];
+                if let Some(node) = prepared {
+                    assembled_nodes.insert(*ptr, Rc::clone(node));
+                }
+                groups.insert(
+                    *ptr,
+                    TargetSubDAGSelection {
+                        target: &group.target,
+                        consumer_count: group.consumer_count,
+                        effective_consumer_count: group.consumer_count,
+                        chosen: *chosen,
+                        composition: None,
+                    },
+                );
+            }
+            let assembly = GlobalSelection {
+                order: self.order.clone(),
+                groups,
+                assembled_nodes: RefCell::new(assembled_nodes),
+            };
+            let roots = self
+                .roots
+                .iter()
+                .map(|(id, root)| {
+                    assembly
+                        .assemble_target(root)
+                        .map(|node| (id.clone(), node))
+                })
+                .collect::<Result<Vec<_>, _>>();
+            match roots {
+                Ok(roots) => {
+                    let roots = asap_types::post_asap::share_common_summary_subtrees(roots);
+                    if !inventory.candidates.contains(&roots) {
+                        inventory.candidates.push(roots);
+                    }
+                }
+                Err(error) => {
+                    let reason = error.to_string();
+                    if !inventory.rejected_assemblies.contains(&reason) {
+                        inventory.rejected_assemblies.push(reason);
+                    }
+                }
+            }
+        }
+        Ok(inventory)
+    }
+}
+
 /// Lifecycle-aware whole-subplan costs keyed by target and candidate identity.
 #[derive(Default)]
 pub(crate) struct CandidateCostOverrides {
@@ -6294,6 +6408,31 @@ mod tests {
     use asap_types::pre_asap::schema::{Column, DataType, Schema as SchemaTy};
     use asap_types::types::AccuracyTarget;
     use std::collections::HashMap;
+
+    #[test]
+    fn unpriced_inventory_retains_quantile_families_and_raw_execution() {
+        let query = Rc::new(agg(vec![2], default_quantile(0.9), metric_scan(&["job"])));
+        let space = search_workload(vec![(0usize, query)]);
+        let inventory = space.enumerate_candidate_dags(4096).unwrap();
+        let roots = inventory
+            .candidates
+            .iter()
+            .map(|forest| format!("{:?}", forest[0].1))
+            .collect::<Vec<_>>();
+        assert!(roots.iter().any(|root| root.contains("Kll")));
+        assert!(roots.iter().any(|root| root.contains("DDSketch")));
+        assert!(inventory
+            .candidates
+            .iter()
+            .any(|forest| matches!(forest[0].1.expr, SummaryExpr::KeepPreAsap(_))));
+    }
+
+    #[test]
+    fn inventory_budget_never_returns_a_silent_partial_search() {
+        let query = Rc::new(agg(vec![2], default_quantile(0.9), metric_scan(&["job"])));
+        let space = search_workload(vec![(0usize, query)]);
+        assert!(space.enumerate_candidate_dags(0).is_err());
+    }
 
     fn equi_pred(left: ColumnId, right: ColumnId) -> Predicate {
         Predicate(Rc::new(QueryExpr::Compare {
