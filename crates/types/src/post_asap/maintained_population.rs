@@ -63,7 +63,7 @@ impl CurrentSeriesInput {
         };
         if self.metric.is_empty()
             || *metric != self.metric
-            || schema.closed
+            || (schema.closed && !schema.has_promql_series_identity())
             || schema.time_index.is_none()
         {
             return false;

@@ -142,8 +142,11 @@ fn recognize(root: &QueryExpr) -> Option<(MaintainedPopulation, PopulationReadou
     if value_column.is_some_and(|c| schema.columns.get(c).is_none_or(|c| c.name != "value")) {
         return None;
     }
-    // Open time-series schemas distinguish instant PromQL populations from table rows.
-    if metric.is_empty() || schema.closed || schema.time_index.is_none() {
+    // PromQL can retain open labels or resolve them into a complete identity column.
+    if metric.is_empty()
+        || (schema.closed && !schema.has_promql_series_identity())
+        || schema.time_index.is_none()
+    {
         return None;
     }
     let label = |col: usize| -> Option<String> {

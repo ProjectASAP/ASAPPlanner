@@ -22,6 +22,11 @@ rejects noncanonical encodings. A query adapter must still apply the selected
 operator's metric-name/result-label rules. Source selection, complete window
 coverage and revision admission remain deployment responsibilities.
 
+Planner's maintained-population candidate recognizes this explicit identity
+representation. Its TopK readout compiles automatically to `CurrentSeries`,
+`Sort`, and `Limit`; deployment supplies the raw boundary or an already maintained
+population boundary. Compilation does not open either source.
+
 The native `CurrentSeries` operator selects the latest sample per complete
 identity in `(evaluation_time - lookback, evaluation_time]`. It removes stale
 markers after selecting the latest sample, so an older value cannot reappear.

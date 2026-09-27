@@ -190,8 +190,103 @@ fn compile_internal(
                 auxiliary -= 1;
                 schemas.truncate(1);
             }
-            // Per-entity identity is safe only when the source catalog closes
-            // the label set. An open PromQL projection can hide distinct series.
+            if let Payload::Value {
+                operation: ValueOperation::MaintainPopulation { population },
+            } = &node.payload
+            {
+                use planner_types::post_asap::maintained_population::PopulationInput;
+                let PopulationInput::CurrentSeries(spec) = &population.input else {
+                    return Err(invalid(
+                        "native maintained population requires a current-series input",
+                    ));
+                };
+                let [input] = schemas.as_slice() else {
+                    return Err(invalid("current-series population requires one input"));
+                };
+                if spec.without {
+                    return Err(invalid(
+                        "dynamic without grouping requires label-set projection",
+                    ));
+                }
+                let identity = named_column(
+                    input,
+                    &ColumnRef::Named(promql_rows::SERIES_IDENTITY_COLUMN.into()),
+                )?;
+                let coordinate = input
+                    .time_index
+                    .ok_or_else(|| invalid("current-series input lacks timestamp"))?;
+                let value = named_column(input, &ColumnRef::SampleValue)?;
+                let lookback = i64::try_from(spec.lookback_ms)
+                    .map_err(|_| invalid("current-series lookback overflows"))?;
+                graph.add(
+                    id,
+                    inputs,
+                    Operator::current_series(input.clone(), identity, coordinate, value, lookback)?
+                        .with_output_schema(output)?,
+                )?;
+                continue;
+            }
+            if let Payload::Value {
+                operation: ValueOperation::ReadPopulation { readout },
+            } = &node.payload
+            {
+                use planner_types::post_asap::maintained_population::{
+                    PopulationInput, PopulationReadout,
+                };
+                let PopulationReadout::TopK { k } = readout else {
+                    return Err(invalid(
+                        "native population readout does not support this operation",
+                    ));
+                };
+                let [producer] = inputs.as_slice() else {
+                    return Err(invalid("population readout requires one input"));
+                };
+                let Payload::Value {
+                    operation: ValueOperation::MaintainPopulation { population },
+                } = &nodes[producer].payload
+                else {
+                    return Err(invalid(
+                        "population readout requires its declared population",
+                    ));
+                };
+                let PopulationInput::CurrentSeries(spec) = &population.input else {
+                    return Err(invalid("current-series population required"));
+                };
+                if spec.without {
+                    return Err(invalid(
+                        "dynamic without ranking requires label-set projection",
+                    ));
+                }
+                let input = schemas[0].clone();
+                let groups = spec
+                    .grouping
+                    .iter()
+                    .map(|name| named_column(&input, &ColumnRef::Named(name.clone())))
+                    .collect::<Result<Vec<_>, _>>()?;
+                let value = named_column(&input, &ColumnRef::SampleValue)?;
+                graph.add(
+                    auxiliary,
+                    inputs,
+                    Operator::sort(
+                        input.clone(),
+                        vec![SortKey {
+                            column: value,
+                            descending: true,
+                            nulls_first: false,
+                        }],
+                        groups.clone(),
+                    )?,
+                )?;
+                graph.add(
+                    id,
+                    vec![auxiliary],
+                    Operator::limit(input, *k as u64, 0, groups)?.with_output_schema(output)?,
+                )?;
+                auxiliary -= 1;
+                continue;
+            }
+            // A closed row must include either all source labels or the explicit
+            // complete-label identity. Projected labels alone are insufficient.
             if let Payload::SummaryAgg {
                 family,
                 input: update,

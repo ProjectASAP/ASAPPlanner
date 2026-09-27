@@ -33,9 +33,10 @@ fn schema() -> Arc<SummarySchema> {
 fn run(program: &CompiledPhysicalDag, data: Batch, end: i64) -> Result<Vec<Batch>, String> {
     let recovered = CompiledPhysicalDag::decode(&program.encode().map_err(|e| e.to_string())?)
         .map_err(|e| e.to_string())?;
+    let input_id = recovered.input_contracts().next().unwrap().0;
     let graph = recovered
         .instantiate(BTreeMap::from([(
-            0,
+            input_id,
             Box::new(Operator::source(data.schema().clone(), vec![data]).unwrap()) as Source<'_>,
         )]))
         .unwrap();
@@ -279,4 +280,120 @@ fn identity_encoding_is_lossless_and_rejects_noncanonical_inputs() {
     ] {
         assert!(decode_series_identity(invalid).is_err(), "{invalid}");
     }
+}
+
+// The actual Planner population candidate lowers to native operators; this
+// test does not manually assemble the computation or its dependency edges.
+#[test]
+fn planner_current_series_candidate_compiles_with_dynamic_identity() {
+    use asap_physical_operators::physical_planner::{compile, promql_rows::with_series_identity};
+    use planner_types::{types::AccuracyTarget, workload::*};
+    use std::rc::Rc;
+    let workload = PlanningWorkload {
+        query_workload: QueryWorkload {
+            language: QueryLanguage::PromQL,
+            query_batch: Some(vec![BatchEntry {
+                query: Query("topk by(job)(1, m)".into()),
+                requirements: QueryRequirements {
+                    accuracy: AccuracyRequirement::Explicit(AccuracyTarget::Exact),
+                    ..Default::default()
+                },
+                predictability: Predictability::Unknown,
+                invocations: 1,
+                execute_at: None,
+                time_selection: TimeSelection::default(),
+            }]),
+            repeating_queries: None,
+        },
+        data_workload: Some(DataWorkload {
+            data_ingestion_interval: Evidence {
+                value: Some(DurationMs(60_000)),
+                ..Default::default()
+            },
+            ..Default::default()
+        }),
+    };
+    let original = asap_frontend_promql::lower_promql_workload(&workload, 0)
+        .unwrap()
+        .remove(0);
+    let open_root = Rc::new(original.clone());
+    let open_selected =
+        asap_aware_mapping::maintained_population::MaintainedPopulationStrategy::new(
+            std::slice::from_ref(&open_root),
+        )
+        .candidate(&open_root)
+        .unwrap();
+    let snapshot_program =
+        asap_physical_operators::physical_planner::promql_rows::compile_current_series_readout(
+            &open_selected,
+        )
+        .unwrap();
+    let encoded = String::from_utf8(snapshot_program.encode().unwrap()).unwrap();
+    assert!(
+        !encoded.contains("CurrentSeries"),
+        "maintained input must not be rebuilt"
+    );
+    assert!(encoded.contains("Sort") && encoded.contains("Limit"));
+    assert_eq!(snapshot_program.input_contracts().count(), 1);
+    let root = Rc::new(with_series_identity(&original).unwrap());
+    let selected = asap_aware_mapping::maintained_population::MaintainedPopulationStrategy::new(
+        std::slice::from_ref(&root),
+    )
+    .candidate(&root)
+    .unwrap();
+    let logical = compile_executable_dag(&selected).unwrap();
+    let raw = logical
+        .nodes
+        .iter()
+        .find(|node| matches!(node.payload, ExecutableOperatorPayload::Fallback { .. }))
+        .unwrap();
+    let raw_schema = Arc::new(raw.output_schema.clone());
+    let physical = compile(
+        &logical,
+        BTreeMap::from([(
+            u64::from(raw.id.0),
+            InputContract::bounded(raw_schema.clone()),
+        )]),
+        &[u64::from(logical.root.0)],
+    )
+    .unwrap();
+    let bytes = String::from_utf8(physical.encode().unwrap()).unwrap();
+    assert!(bytes.contains("CurrentSeries"));
+    assert!(bytes.contains("Sort"));
+    assert!(bytes.contains("Limit"));
+    let rows = [("a", 10_000, 100.), ("a", 50_000, 1.), ("b", 50_000, 20.)]
+        .into_iter()
+        .map(|(member, at, value)| {
+            series_row(
+                &raw_schema,
+                &BTreeMap::from([
+                    ("job".into(), "api".into()),
+                    ("unreferenced".into(), member.into()),
+                ]),
+                at,
+                value,
+            )
+            .unwrap()
+        })
+        .collect();
+    let batches = run(&physical, Batch::try_new(raw_schema, rows).unwrap(), 60_000).unwrap();
+    let rows = batches
+        .iter()
+        .flat_map(|batch| batch.rows())
+        .collect::<Vec<_>>();
+    assert_eq!(rows.len(), 1);
+    assert!(matches!(rows[0][1], Value::Float64(20.)));
+    let id = batches[0]
+        .schema()
+        .fields
+        .iter()
+        .position(|field| field.name == SERIES_IDENTITY_COLUMN)
+        .unwrap();
+    let Value::Utf8(encoded) = &rows[0][id] else {
+        panic!()
+    };
+    assert_eq!(
+        decode_series_identity(encoded).unwrap()["unreferenced"],
+        "b"
+    );
 }
