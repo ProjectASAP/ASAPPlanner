@@ -23,6 +23,7 @@ impl Operator {
             if !matches!(
                 plain(&input, item)?.0,
                 DataType::Utf8
+                    | DataType::Timestamp
                     | DataType::Int64
                     | DataType::Float64
                     | DataType::Bool
@@ -248,6 +249,15 @@ pub(super) fn execute<'a>(
                     for items in summary.rows(*k) {
                         let mut values = row[..*state].to_vec();
                         values.extend(items);
+                        // The typed output schema restores epoch-millisecond
+                        // timestamp keys from the kernel's Int64 representation.
+                        for (value, field) in values.iter_mut().zip(&output.fields) {
+                            if field.dtype == SummaryFamilyType::Plain(DataType::Timestamp) {
+                                if let Value::Int64(time) = value {
+                                    *value = Value::Timestamp(*time);
+                                }
+                            }
+                        }
                         rows.push(values);
                     }
                 }
@@ -524,7 +534,13 @@ async fn build_keyed_summary(
                 return Err(invalid("weighted frequency weight type"));
             };
             summary.update(
-                &items.iter().map(|&i| row[i].clone()).collect::<Vec<_>>(),
+                &items
+                    .iter()
+                    .map(|&i| match &row[i] {
+                        Value::Timestamp(time) => Value::Int64(*time),
+                        value => value.clone(),
+                    })
+                    .collect::<Vec<_>>(),
                 weight,
             )?;
             reservation.resize(summary.approx_memory_bytes() + *overhead)?;

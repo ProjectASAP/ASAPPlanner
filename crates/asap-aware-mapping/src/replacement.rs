@@ -2401,9 +2401,10 @@ fn is_counter_weighted_topk(intent: &AggIntent, child: &QueryExpr) -> bool {
     matches!(intent, AggIntent::TopK { .. })
         && matches!(child,
             QueryExpr::Aggregate { measures, child, .. }
-                if matches!(measures.as_slice(), [AggIntent::Sum { .. }])
-                    && matches!(child.as_ref(), QueryExpr::Aggregate { measures, .. }
-                        if matches!(measures.as_slice(), [AggIntent::Rate | AggIntent::Increase])))
+                if matches!(measures.as_slice(), [AggIntent::Rate | AggIntent::Increase])
+                    || (matches!(measures.as_slice(), [AggIntent::Sum { .. }])
+                        && matches!(child.as_ref(), QueryExpr::Aggregate { measures, .. }
+                            if matches!(measures.as_slice(), [AggIntent::Rate | AggIntent::Increase]))))
 }
 
 /// Translate an [`Realization`] into the `(family, needs a
@@ -2459,6 +2460,7 @@ type PhysicalSummaryInputRule = fn(
 /// `construct_summary_agg`.
 const PHYSICAL_SUMMARY_INPUT_RULES: &[PhysicalSummaryInputRule] = &[
     realize_value_frequency_summary_input,
+    realize_counter_value_summary_input,
     realize_keyed_additive_summary_input,
 ];
 
@@ -3059,6 +3061,64 @@ fn ranking_score_index(
         ));
     }
     Ok(index)
+}
+
+/// Rebuild a heap from this evaluation's finalized per-series counter values.
+/// The rate window is preserved; raw counter samples never become CMS weights.
+fn realize_counter_value_summary_input(
+    intent: &AggIntent,
+    family: &SummaryFamilyType,
+    output_reduction: &Reduction,
+    child: &Rc<QueryExpr>,
+) -> PhysicalSummaryInputRuleResult {
+    if !matches!(intent, AggIntent::TopK { .. })
+        || !matches!(family, SummaryFamilyType::Sketch(kind, _) if matches!(kind.algorithm(), SketchAlgorithm::CmsWithHeap | SketchAlgorithm::CountSketchWithHeap))
+        || !matches!(child.as_ref(), QueryExpr::Aggregate { reduction: Reduction::PerEntity, measures, .. } if matches!(measures.as_slice(), [AggIntent::Rate | AggIntent::Increase]))
+    {
+        return PhysicalSummaryInputRuleResult::NotApplicable;
+    }
+    let Ok(schema) = child.output_schema() else {
+        return PhysicalSummaryInputRuleResult::Unsupported(
+            "counter ranking needs a valid value schema",
+        );
+    };
+    if !schema.closed {
+        return PhysicalSummaryInputRuleResult::Unsupported(
+            "counter ranking needs the complete resolved series identity",
+        );
+    }
+    let Reduction::Reduce(groups) = output_reduction else {
+        return PhysicalSummaryInputRuleResult::Unsupported(
+            "counter ranking requires explicit partitions",
+        );
+    };
+    if groups.is_without() {
+        return PhysicalSummaryInputRuleResult::Unsupported(
+            "counter ranking requires resolved partitions",
+        );
+    }
+    // Retain the evaluation timestamp in each returned row. This sketch is a
+    // snapshot, not an additive history of successive rate evaluations.
+    let items = schema
+        .columns
+        .iter()
+        .enumerate()
+        .filter(|(index, column)| column.name != "value" && !groups.contains(index))
+        .map(|(index, _)| schema_column_ref(child, index).map(SummaryInputExpr::Column))
+        .collect::<Option<Vec<_>>>();
+    let Some(items) = items.filter(|items| !items.is_empty()) else {
+        return PhysicalSummaryInputRuleResult::Unsupported("counter ranking has no item columns");
+    };
+    PhysicalSummaryInputRuleResult::Realized(PhysicalSummaryInput {
+        child: Rc::clone(child),
+        input: SummaryUpdate {
+            item: Some(SummaryInputExpr::Tuple(items)),
+            weight: SummaryInputExpr::Column(ColumnRef::SampleValue),
+            weight_domain: WeightDomain::NonNegative {
+                proof: NonNegativeWeightProof::ResetAwareCounterDerivative,
+            },
+        },
+    })
 }
 
 /// Realize the composite heavy-hitter realization for

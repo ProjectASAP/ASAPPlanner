@@ -362,3 +362,43 @@ fn grouped_rate_can_be_materialized_before_or_after_grouped_sum() {
         "counter resets prohibit moving Sum before Rate"
     );
 }
+
+/// Enumerated frontiers include both grouped-result and per-series readout
+/// persistence; an explicit Rate-state input retains its original semantics.
+#[test]
+fn bounded_inventory_exposes_grouped_rate_physical_frontiers() {
+    use asap_physical_operators::physical_planner::enumerate_frontiers;
+    let dag = grouped_rate();
+    let state = dag
+        .nodes
+        .iter()
+        .find(|node| {
+            matches!(
+                &node.payload,
+                ExecutableOperatorPayload::SummaryAgg {
+                    family: SummaryFamilyType::ExactAggregate(ExactKind::Rate, _),
+                    ..
+                }
+            )
+        })
+        .unwrap();
+    let inputs = BTreeMap::from([(
+        u64::from(state.id.0),
+        InputContract::bounded(Arc::new(state.output_schema.clone())),
+    )]);
+    let roots = [u64::from(dag.root.0)];
+    let frontiers = enumerate_frontiers(&dag, &inputs, &roots, 4096).unwrap();
+    let candidates = compile_candidates(&dag, inputs.clone(), &roots, &frontiers)
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert!(candidates.iter().any(|c| c.precompute.is_none()));
+    assert!(candidates
+        .iter()
+        .any(|c| c.materialized_outputs.contains_key(&roots[0])));
+    assert!(candidates
+        .iter()
+        .any(|c| !c.materialized_outputs.is_empty()
+            && !c.materialized_outputs.contains_key(&roots[0])));
+    assert!(enumerate_frontiers(&dag, &inputs, &roots, 1).is_err());
+}
