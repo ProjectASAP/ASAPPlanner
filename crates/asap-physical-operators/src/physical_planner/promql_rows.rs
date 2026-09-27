@@ -153,6 +153,29 @@ pub fn compile_current_series_readout(
         compile_executable_dag, maintained_population::PopulationReadout, SummaryField,
     };
     let mut dag = compile_executable_dag(selected).map_err(|error| invalid(error.to_string()))?;
+    // Typed snapshot candidates already carry full identity throughout the DAG.
+    // Cut at the population output, preserving all selected heap/readout nodes.
+    let populations = dag.nodes.iter().filter(|node| matches!(&node.payload,
+        Payload::Value { operation: ValueOperation::MaintainPopulation { population } }
+            if matches!(population.input, planner_types::post_asap::maintained_population::PopulationInput::CurrentSeries(_))
+    )).collect::<Vec<_>>();
+    if let [population] = populations.as_slice() {
+        if population
+            .output_schema
+            .fields
+            .iter()
+            .any(|field| field.name == SERIES_IDENTITY_COLUMN)
+        {
+            return compile(
+                &dag,
+                BTreeMap::from([(
+                    u64::from(population.id.0),
+                    InputContract::bounded(Arc::new(population.output_schema.clone())),
+                )]),
+                &[u64::from(dag.root.0)],
+            );
+        }
+    }
     if dag.nodes.len() != 3
         || !dag.nodes.iter().any(|node| {
             node.id == dag.root

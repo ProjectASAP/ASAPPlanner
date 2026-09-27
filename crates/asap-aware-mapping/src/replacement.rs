@@ -1282,6 +1282,65 @@ impl<'a> SketchAlgorithmStrategy<'a> {
         }
     }
 
+    /// Preserve the canonical Sort/Limit representation while exploring heap
+    /// realizations of an instant-vector ranking under the caller's target.
+    /// The input must carry the complete dynamic series identity. This never
+    /// treats a range of historical samples as the instant vector.
+    pub fn current_series_topk_candidates(
+        &self,
+        root: &Rc<QueryExpr>,
+        accuracy: &AccuracyTarget,
+    ) -> Proposals {
+        let QueryExpr::Limit {
+            n,
+            offset: 0,
+            child,
+        } = root.as_ref()
+        else {
+            return Proposals::default();
+        };
+        let QueryExpr::Sort {
+            keys,
+            partition_by,
+            child,
+        } = child.as_ref()
+        else {
+            return Proposals::default();
+        };
+        let [key] = keys.as_slice() else {
+            return Proposals::default();
+        };
+        let QueryExpr::Column(value) = key.expr else {
+            return Proposals::default();
+        };
+        let Ok(schema) = child.output_schema() else {
+            return Proposals::default();
+        };
+        if key.ascending
+            || key.nulls_first
+            || partition_by.is_without()
+            || !schema.has_promql_series_identity()
+            || !schema
+                .columns
+                .get(value)
+                .is_some_and(|column| column.name == "value")
+            || !is_current_series_source(child)
+        {
+            return Proposals::default();
+        }
+        let ranked = Rc::new(QueryExpr::Aggregate {
+            reduction: Reduction::Reduce(partition_by.clone()),
+            measures: vec![AggIntent::TopK {
+                k: *n,
+                accuracy: accuracy.clone(),
+            }],
+            output_names: vec![],
+            having: None,
+            child: Rc::clone(child),
+        });
+        self.propose_with(&ranked, None)
+    }
+
     pub(crate) fn from_planning_inputs(planning_inputs: CandidatePlanningInputs<'a>) -> Self {
         Self { planning_inputs }
     }
@@ -2290,7 +2349,7 @@ pub(crate) fn construct_summary_with(
                     child_target,
                     allocation,
                 )?;
-                if is_counter_weighted_topk(intent, child) {
+                if is_snapshot_weighted_topk(intent, child) {
                     return finish_weighted_topk(candidate, expr, intent);
                 }
                 return Ok(candidate);
@@ -2397,14 +2456,25 @@ fn finish_weighted_topk(
     Ok(result)
 }
 
-fn is_counter_weighted_topk(intent: &AggIntent, child: &QueryExpr) -> bool {
+fn is_current_series_source(child: &QueryExpr) -> bool {
+    let source = match child {
+        QueryExpr::TimeRange { child, .. } => child.as_ref(),
+        source => source,
+    };
+    matches!(source, QueryExpr::Scan {
+        source: asap_types::pre_asap::Source::TimeSeries { .. }, schema, ..
+    } if schema.has_promql_series_identity())
+}
+
+fn is_snapshot_weighted_topk(intent: &AggIntent, child: &QueryExpr) -> bool {
     matches!(intent, AggIntent::TopK { .. })
-        && matches!(child,
+        && (is_current_series_source(child)
+            || matches!(child,
             QueryExpr::Aggregate { measures, child, .. }
                 if matches!(measures.as_slice(), [AggIntent::Rate | AggIntent::Increase])
                     || (matches!(measures.as_slice(), [AggIntent::Sum { .. }])
                         && matches!(child.as_ref(), QueryExpr::Aggregate { measures, .. }
-                            if matches!(measures.as_slice(), [AggIntent::Rate | AggIntent::Increase]))))
+                            if matches!(measures.as_slice(), [AggIntent::Rate | AggIntent::Increase])))))
 }
 
 /// Translate an [`Realization`] into the `(family, needs a
@@ -2461,6 +2531,7 @@ type PhysicalSummaryInputRule = fn(
 const PHYSICAL_SUMMARY_INPUT_RULES: &[PhysicalSummaryInputRule] = &[
     realize_value_frequency_summary_input,
     realize_counter_value_summary_input,
+    realize_current_series_summary_input,
     realize_keyed_additive_summary_input,
 ];
 
@@ -2616,10 +2687,10 @@ fn construct_summary_agg(
             SummaryFamilyType::Sketch(kind, _)
                 if matches!(kind.algorithm(), SketchAlgorithm::CmsWithHeap | SketchAlgorithm::CountSketchWithHeap)
         );
-    let rate_weighted = matches!(node, QueryExpr::Aggregate { child, .. }
-        if is_counter_weighted_topk(intent, child));
+    let snapshot_weighted = matches!(node, QueryExpr::Aggregate { child, .. }
+        if is_snapshot_weighted_topk(intent, child));
     let mut family = family;
-    let score_population = if rate_weighted {
+    let score_population = if snapshot_weighted {
         let bound = planning_inputs.evidence.topk_max_distinct_items(node);
         if bound.is_some_and(|n| n == 0 || n > (1u64 << 53)) {
             return Err(RealizationError::PhysicalRealization(
@@ -2643,7 +2714,7 @@ fn construct_summary_agg(
     } else {
         None
     };
-    let physical_reduction = if rate_weighted {
+    let physical_reduction = if snapshot_weighted {
         let QueryExpr::Aggregate { child, .. } = node else {
             unreachable!()
         };
@@ -2694,7 +2765,7 @@ fn construct_summary_agg(
     let state_idx = summary_col_index(&out_schema, &by, per_series);
 
     let readout_schema = if keyed_heap
-        && matches!(node, QueryExpr::Aggregate { child, .. } if is_counter_weighted_topk(intent, child))
+        && matches!(node, QueryExpr::Aggregate { child, .. } if is_snapshot_weighted_topk(intent, child))
     {
         keyed_heap_readout_schema(&input, node)?
     } else {
@@ -2703,7 +2774,7 @@ fn construct_summary_agg(
 
     let summary_input = input.input;
     let query = estimate.then(|| {
-        if rate_weighted {
+        if snapshot_weighted {
             if let SummaryFamilyType::Sketch(kind, _) = &family {
                 let capacity = match kind.params() {
                     SketchParams::CmsWithHeap { heap_size, .. }
@@ -2722,7 +2793,7 @@ fn construct_summary_agg(
     if keyed_heap {
         let mut state = state_schema.fields[state_idx].clone();
         state.dtype = family.clone();
-        let mut fields = if rate_weighted {
+        let mut fields = if snapshot_weighted {
             readout_schema.fields[..reduction.group_keys().map_or(0, |keys| keys.len())].to_vec()
         } else {
             Vec::new()
@@ -2744,13 +2815,30 @@ fn construct_summary_agg(
     let bound_child = realize_child_with(
         &input.child,
         planning_inputs,
-        if rate_weighted {
+        if snapshot_weighted {
             Some(&AccuracyTarget::Exact)
         } else {
             child_target
         },
     )?;
-    let bound_child = if rate_weighted {
+    let bound_child = if snapshot_weighted && is_current_series_source(&input.child) {
+        // Explicit snapshot selection prevents historical observations from
+        // becoming repeated weights in an instant-vector heap.
+        let root = Rc::new(node.clone());
+        let population = crate::maintained_population::MaintainedPopulationStrategy::new(
+            std::slice::from_ref(&root),
+        )
+        .candidate(&root)
+        .ok_or(RealizationError::PhysicalRealization(
+            "snapshot ranking requires a supported current-series population",
+        ))?;
+        let SummaryExpr::ValueOperation { child, .. } = &population.expr else {
+            return Err(RealizationError::PhysicalRealization(
+                "missing population readout",
+            ));
+        };
+        Rc::clone(child)
+    } else if snapshot_weighted {
         // A fresh query-time summary consumes this evaluation's finalized rates.
         // Moving rate snapshots must never accumulate across evaluations.
         finalize_exact_accumulator(bound_child, &input.child)?
@@ -2777,7 +2865,7 @@ fn construct_summary_agg(
         planning_inputs.evidence.estimator_contract(node),
         local_target,
     );
-    let membership_query = if rate_weighted {
+    let membership_query = if snapshot_weighted {
         Some(readout(intent, &summary_input, planning_inputs.cost))
     } else {
         query.clone()
@@ -2792,7 +2880,7 @@ fn construct_summary_agg(
         allocation,
     )?;
 
-    if rate_weighted {
+    if snapshot_weighted {
         use asap_types::post_asap::{BoundExpr, ProbabilityExpr};
         let target = accuracy_target(intent).expect("TopK target");
         guarantee = if let Some(mut score) =
@@ -3016,6 +3104,19 @@ fn ranking_score_index(
     logical: &QueryExpr,
     values: &SummarySchema,
 ) -> Result<usize, RealizationError> {
+    if is_current_series_source(logical) {
+        return values
+            .fields
+            .iter()
+            .position(|field| {
+                field.name == "value"
+                    && field.dtype
+                        == SummaryFamilyType::Plain(asap_types::pre_asap::DataType::Float64)
+            })
+            .ok_or(RealizationError::PhysicalRealization(
+                "snapshot ranking requires the sample value column",
+            ));
+    }
     let QueryExpr::Aggregate {
         reduction,
         measures,
@@ -3117,6 +3218,66 @@ fn realize_counter_value_summary_input(
             weight_domain: WeightDomain::NonNegative {
                 proof: NonNegativeWeightProof::ResetAwareCounterDerivative,
             },
+        },
+    })
+}
+
+/// An instant-vector source has one current value per full series identity.
+/// Rebuild the state for each evaluation; historical samples are not updates.
+fn realize_current_series_summary_input(
+    intent: &AggIntent,
+    family: &SummaryFamilyType,
+    output_reduction: &Reduction,
+    child: &Rc<QueryExpr>,
+) -> PhysicalSummaryInputRuleResult {
+    if !matches!(intent, AggIntent::TopK { .. }) || !is_current_series_source(child) {
+        return PhysicalSummaryInputRuleResult::NotApplicable;
+    }
+    let SummaryFamilyType::Sketch(kind, _) = family else {
+        return PhysicalSummaryInputRuleResult::NotApplicable;
+    };
+    match kind.algorithm() {
+        SketchAlgorithm::CountSketchWithHeap => {}
+        SketchAlgorithm::CmsWithHeap => {
+            return PhysicalSummaryInputRuleResult::Unsupported(
+                "current sample values do not prove non-negative CMS weights",
+            )
+        }
+        _ => return PhysicalSummaryInputRuleResult::NotApplicable,
+    }
+    let Reduction::Reduce(groups) = output_reduction else {
+        return PhysicalSummaryInputRuleResult::Unsupported(
+            "snapshot ranking requires explicit partitions",
+        );
+    };
+    if groups.is_without() {
+        return PhysicalSummaryInputRuleResult::Unsupported(
+            "snapshot ranking requires resolved partitions",
+        );
+    }
+    let Ok(schema) = child.output_schema() else {
+        return PhysicalSummaryInputRuleResult::Unsupported(
+            "snapshot ranking requires a valid source schema",
+        );
+    };
+    let items = schema
+        .columns
+        .iter()
+        .enumerate()
+        .filter(|(index, column)| column.name != "value" && !groups.contains(index))
+        .map(|(index, _)| schema_column_ref(child, index).map(SummaryInputExpr::Column))
+        .collect::<Option<Vec<_>>>();
+    let Some(items) = items.filter(|items| !items.is_empty()) else {
+        return PhysicalSummaryInputRuleResult::Unsupported(
+            "snapshot ranking has no item identity",
+        );
+    };
+    PhysicalSummaryInputRuleResult::Realized(PhysicalSummaryInput {
+        child: Rc::clone(child),
+        input: SummaryUpdate {
+            item: Some(SummaryInputExpr::Tuple(items)),
+            weight: SummaryInputExpr::Column(ColumnRef::SampleValue),
+            weight_domain: WeightDomain::UnknownOrSigned,
         },
     })
 }
