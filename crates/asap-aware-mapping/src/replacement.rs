@@ -4189,6 +4189,9 @@ impl<Id: Clone + PartialEq> PlanSpace<Id> {
                 .map(|(id, root)| {
                     assembly
                         .assemble_target(root)
+                        // Exposed query candidates return values. Internal assembly
+                        // still retains accumulator states for sharing and storage.
+                        .and_then(|node| finalize_exact_accumulator(node, root))
                         .map(|node| (id.clone(), node))
                 })
                 .collect::<Result<Vec<_>, _>>();
@@ -6870,6 +6873,31 @@ mod tests {
     use asap_types::pre_asap::schema::{Column, DataType, Schema as SchemaTy};
     use asap_types::types::AccuracyTarget;
     use std::collections::HashMap;
+
+    // Every exposed query result has a readout; internal accumulator frontiers stay states.
+    #[test]
+    fn query_candidate_roots_do_not_leak_exact_accumulator_state() {
+        for query in [
+            "sum by(job)(rate(m[1m]))",
+            "sum by(job)(m)",
+            "sum_over_time(m[1m])",
+        ] {
+            let root = Rc::new(lower_promql(query, AccuracyTarget::Exact));
+            let space = search_workload(vec![(0usize, root.clone())]);
+            let inventory = space.enumerate_candidate_dags(4096).unwrap();
+            assert!(!inventory.candidates.is_empty());
+            for node in inventory.candidates.iter().map(|forest| &forest[0].1) {
+                assert!(
+                    node.schema
+                        .fields
+                        .iter()
+                        .all(|field| matches!(field.dtype, SummaryFamilyType::Plain(_))),
+                    "{query}: query root leaks state: {:?}",
+                    node.schema
+                );
+            }
+        }
+    }
 
     #[test]
     fn unpriced_inventory_retains_quantile_families_and_raw_execution() {

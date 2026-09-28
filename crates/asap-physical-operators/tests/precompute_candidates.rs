@@ -14,7 +14,7 @@ use futures::{executor::block_on, StreamExt};
 use planner_types::{post_asap::*, pre_asap::DataType, types::AccuracyTarget, workload::*};
 use std::{collections::BTreeMap, rc::Rc, sync::Arc};
 
-fn grouped_rate() -> ExecutableDag {
+fn grouped_rate_space() -> asap_aware_mapping::PlanSpace<&'static str> {
     let workload = PlanningWorkload {
         query_workload: QueryWorkload {
             language: QueryLanguage::PromQL,
@@ -44,7 +44,15 @@ fn grouped_rate() -> ExecutableDag {
             .unwrap()
             .remove(0),
     );
-    let space = search_workload(vec![("grouped-rate", root)]);
+    let root = Rc::new(
+        asap_physical_operators::physical_planner::promql_rows::with_series_identity(&root)
+            .unwrap(),
+    );
+    search_workload(vec![("grouped-rate", root)])
+}
+
+fn grouped_rate() -> ExecutableDag {
+    let space = grouped_rate_space();
     let selected = space
         .global_selection(&DefaultCostModel)
         .assemble_selected_dag(&space.roots[0].1)
@@ -401,4 +409,152 @@ fn bounded_inventory_exposes_grouped_rate_physical_frontiers() {
         .any(|c| !c.materialized_outputs.is_empty()
             && !c.materialized_outputs.contains_key(&roots[0])));
     assert!(enumerate_frontiers(&dag, &inputs, &roots, 1).is_err());
+}
+
+#[test]
+fn enumerated_grouped_rate_candidates_execute_numeric_query_outputs() {
+    let inventory = grouped_rate_space().enumerate_candidate_dags(4096).unwrap();
+    let mut executed = 0;
+    for forest in inventory.candidates {
+        let root = &forest[0].1;
+        let dag = compile_executable_dag(root).unwrap();
+        let Some(state) = dag.nodes.iter().find(|node| {
+            matches!(
+                node.payload,
+                ExecutableOperatorPayload::SummaryAgg {
+                    family: SummaryFamilyType::ExactAggregate(ExactKind::Rate, _),
+                    ..
+                }
+            )
+        }) else {
+            continue;
+        };
+        let boundary = dag
+            .nodes
+            .iter()
+            .find(|node| {
+                matches!(
+                    node.payload,
+                    ExecutableOperatorPayload::SummaryAgg {
+                        family: SummaryFamilyType::ExactAggregate(ExactKind::Sum, _),
+                        ..
+                    }
+                )
+            })
+            .map(|node| u64::from(node.id.0))
+            .unwrap_or(u64::from(dag.root.0));
+        let physical_candidates = compile_candidates(
+            &dag,
+            BTreeMap::from([(
+                u64::from(state.id.0),
+                InputContract::bounded(Arc::new(state.output_schema.clone())),
+            )]),
+            &[u64::from(dag.root.0)],
+            &[vec![], vec![boundary]],
+        );
+        let (family, input, grouping) = match &state.payload {
+            ExecutableOperatorPayload::SummaryAgg {
+                family,
+                input,
+                grouping,
+                ..
+            } => (family, input, grouping),
+            _ => unreachable!(),
+        };
+        let schema = Arc::new(state.output_schema.clone());
+        let rows = ["a", "b"]
+            .into_iter()
+            .map(|instance| {
+                let mut accumulator = create_planner_accumulator(family, input, grouping).unwrap();
+                for (timestamp, value) in [(1_000, 1.), (31_000, 31.), (59_000, 59.)] {
+                    accumulator.update_single(value, timestamp);
+                }
+                let summary = Value::Summary {
+                    family: family.clone(),
+                    state: Arc::from(accumulator.into_accumulator()),
+                };
+                schema
+                    .fields
+                    .iter()
+                    .map(|field| match &field.dtype {
+                        SummaryFamilyType::ExactAggregate(..) => summary.clone(),
+                        SummaryFamilyType::Plain(DataType::Timestamp) => Value::Timestamp(60_000),
+                        SummaryFamilyType::Plain(DataType::Utf8)
+                            if field.name == "$promql_series_identity" =>
+                        {
+                            Value::Utf8(
+                                serde_json::to_string(&BTreeMap::from([
+                                    ("job", "api"),
+                                    ("instance", instance),
+                                ]))
+                                .unwrap()
+                                .into(),
+                            )
+                        }
+                        SummaryFamilyType::Plain(DataType::Utf8) => Value::Utf8("api".into()),
+                        _ => panic!("unexpected input field {field:?}"),
+                    })
+                    .collect()
+            })
+            .collect();
+        let batch = Batch::try_new(schema, rows).unwrap();
+        for physical in physical_candidates {
+            let physical = physical.unwrap();
+            let inputs = if let Some(precompute) = &physical.precompute {
+                let source_id = precompute.input_contracts().next().unwrap().0;
+                let stored = run(
+                    precompute,
+                    BTreeMap::from([(source_id, batch.clone())]),
+                    Scope::Ingestion {
+                        window_start_ms: 0,
+                        window_end_ms: 60_000,
+                        revision: 1,
+                    },
+                );
+                assert_eq!(stored.len(), 1);
+                // Persist/recover the actual materialization boundary before reading it.
+                let bytes = asap_physical_operators::stored_state::native::encode_batch(&stored[0])
+                    .unwrap();
+                let recovered = asap_physical_operators::stored_state::native::decode_batch(
+                    &bytes,
+                    stored[0].schema().clone(),
+                    1 << 20,
+                )
+                .unwrap();
+                BTreeMap::from([(precompute.roots()[0], recovered)])
+            } else {
+                BTreeMap::from([(
+                    physical.query.input_contracts().next().unwrap().0,
+                    batch.clone(),
+                )])
+            };
+            let output = run(
+                &physical.query,
+                inputs,
+                Scope::Query {
+                    evaluation_time_ms: 60_000,
+                    revision: 1,
+                },
+            );
+            assert_eq!(output.len(), 1);
+            assert_eq!(output[0].rows().len(), 1);
+            assert!(output[0]
+                .schema()
+                .fields
+                .iter()
+                .all(|field| matches!(field.dtype, SummaryFamilyType::Plain(_))));
+            assert!(
+                output[0].rows()[0]
+                    .iter()
+                    .any(|value| matches!(value, Value::Float64(x) if (*x - 2.).abs() < 1e-12)),
+                "{:?}",
+                output[0].rows()
+            );
+            executed += 1;
+        }
+    }
+    assert!(
+        executed >= 2,
+        "must execute both stored and query-time grouped Rate candidates: {executed}"
+    );
 }
