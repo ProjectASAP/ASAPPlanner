@@ -1,14 +1,26 @@
-# Operator flattening
+# Sharing Operators Between Pre-ASAP IR and Post-ASAP IR
 
 > Status: proposed, not implemented. Problem statement:
 > [#468](https://github.com/ProjectASAP/ASAPPlanner/issues/468). Code
 > references and counts are against `main` at `8acb472`.
 
-**In one sentence**: split `QueryExpr` into original operators (`OriginalOp`) and
-scalar expressions (`ScalarExpr`); introduce `Operator { Basic(OriginalOp), Ext(ASAPOp) }`
-so that every operator's children are `Rc<Operator>`; then delete the parallel
-post-ASAP IR (`SummaryExpr`, `SummaryNode`, `SummarySchema`, and the relational
-variants of `ValueOperation`).
+**The idea.** Today the post-ASAP-plan is glued together by different operator types. 
+This proposal keeps one operator language and makes summary operators extra node kinds in it: any relational operator can sit above a summary, and a summary can read any relational subtree.
+Nothing is wrapped and nothing is duplicated.
+
+```
+Today                                            Proposed
+ValueOperation(Project)         ← a copy         Project
+  SummaryEstimate                                  Ext(SummaryEstimate)
+    SummaryAgg(Kll)                                  Ext(SummaryAgg(Kll))
+      KeepPreAsap(Scan lineitem) ← a black box         Scan lineitem
+```
+
+Concretely: split `QueryExpr` into operators (`OriginalOp`) and scalar
+expressions (`ScalarExpr`), make every operator's children `Rc<Operator>` with
+`Operator = Basic(OriginalOp) | Ext(ASAPOp)`, and delete the parallel post-ASAP
+types (`SummaryExpr`, `SummaryNode`, `SummarySchema`, and the relational variants
+of `ValueOperation`).
 
 **Roadmap**:
 
