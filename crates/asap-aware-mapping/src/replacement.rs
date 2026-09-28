@@ -5186,6 +5186,18 @@ impl<'a> GlobalSelection<'a> {
         self.assemble_target(target).map(Some)
     }
 
+    /// Assemble a complete query result, including an exact-state readout when
+    /// needed. `assemble_selected_dag` also serves internal state frontiers;
+    /// callers exposing query results must use this boundary instead.
+    pub fn assemble_selected_query(
+        &self,
+        target: &Rc<QueryExpr>,
+    ) -> Result<Option<Rc<SummaryNode>>, RealizationError> {
+        self.assemble_selected_dag(target)?
+            .map(|node| finalize_exact_accumulator(node, target))
+            .transpose()
+    }
+
     fn assemble_target(&self, target: &Rc<QueryExpr>) -> Result<Rc<SummaryNode>, RealizationError> {
         let ptr = Rc::as_ptr(target);
         if let Some(node) = self.assembled_nodes.borrow().get(&ptr) {
