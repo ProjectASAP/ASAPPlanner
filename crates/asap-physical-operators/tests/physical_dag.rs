@@ -1139,7 +1139,7 @@ fn grouped_temporal_schema_compiles_and_executes_topk() {
                 partition_by: GroupKeys::none(),
             },
         ),
-        &[input.clone()],
+        std::slice::from_ref(&input),
     )
     .unwrap();
     let limit = compile_node(
@@ -1151,7 +1151,7 @@ fn grouped_temporal_schema_compiles_and_executes_topk() {
                 partition_by: GroupKeys::none(),
             },
         ),
-        &[input.clone()],
+        std::slice::from_ref(&input),
     )
     .unwrap();
     let compiled = CompiledPhysicalDag::from_operators(
