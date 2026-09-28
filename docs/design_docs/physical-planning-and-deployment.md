@@ -116,6 +116,20 @@ of each pane. Nested computations retain their own time semantics. Planner expor
 this contract through `SummarySemanticFragment`; changing its semantic wire
 vocabulary requires an explicit format-version review.
 
+### Dataset-bound semantic export
+
+Backend supplies a stable `LogicalDatasetIdentity { namespace, dataset }` before
+Planner exports a persisted definition. Source names within the exported DAG are
+resolved in that dataset. Tenant A's `KLL(latency)` and tenant B's `KLL(latency)`
+therefore differ; relocating the same dataset to another endpoint does not.
+
+`SummarySemanticFragment::from_stored_output_in_dataset` exports version 2 with
+this identity. Version 1 remains an unbound structural description; Backend's new
+planning path uses version 2 for persisted outputs and validates the identity
+against the installed input binding. Endpoint and replica information do not enter
+semantic identity. Definitions do not authorize cross-deployment reads or adoption
+of another plan version's state.
+
 ### Running example
 
 Suppose p50 and p99 are requested over the same latency samples in a five-minute window,
@@ -497,17 +511,3 @@ Physical execution checks pane timestamps and duplicate entity states. Concrete
 stored identity, revisions, readiness and complete coverage of required input samples remain
 deployment responsibilities. Real storage and HTTP execution belong to
 deployment-repository E2E tests.
-
-### Dataset-bound semantic export
-
-Backend supplies a stable `LogicalDatasetIdentity { namespace, dataset }` before
-Planner exports a persisted definition. Source names within the exported DAG are
-resolved in that dataset. Tenant A's `KLL(latency)` and tenant B's `KLL(latency)`
-therefore differ; relocating the same dataset to another endpoint does not.
-
-`SummarySemanticFragment::from_stored_output_in_dataset` exports version 2 with
-this identity. Version 1 remains an unbound structural description; Backend's new
-planning path uses version 2 for persisted outputs and validates the identity
-against the installed input binding. Endpoint and replica information do not enter
-semantic identity. Definitions do not authorize cross-deployment reads or adoption
-of another plan version's state.
