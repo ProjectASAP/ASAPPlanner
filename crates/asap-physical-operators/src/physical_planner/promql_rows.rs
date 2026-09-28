@@ -253,8 +253,8 @@ pub fn compile_current_series_readout(
     )
 }
 
-/// Compile a selected per-series Rate -> ranking computation above its exact
-/// counter readout. Deployments bind complete window readouts at this boundary;
+/// Compile selected ranking or aggregation above an exact per-series Rate
+/// readout. Deployments bind complete window readouts at this boundary;
 /// the heap is rebuilt independently for each evaluation. This does not move
 /// that frontier to ingestion time or authorize combining finalized rates.
 pub fn compile_rate_ranking(
@@ -317,10 +317,10 @@ pub fn compile_rate_ranking(
     Ok((source, program))
 }
 
-/// The selected logical placement requires a fresh heap for each closed window.
+/// The selected logical placement requires fresh aggregate state per closed window.
 /// Compile both physical graphs before deployment chooses storage or scheduling.
 /// The input is the complete collection of per-series exact counter states.
-pub fn compile_fixed_window_rate_ranking(
+pub fn compile_fixed_window_rate_aggregation(
     selected: &Rc<planner_types::post_asap::SummaryNode>,
 ) -> Result<PhysicalCandidate, Error> {
     use planner_types::post_asap::{
@@ -341,11 +341,31 @@ pub fn compile_fixed_window_rate_ranking(
             )
         })
         .collect::<Vec<_>>();
-    let heaps = dag.nodes.iter().filter(|n| n.output_state.timing == ExecutionTiming::IngestionTime && matches!(&n.payload, Payload::SummaryAgg {
-        family: SummaryFamilyType::Sketch(kind, _), ..
-    } if matches!(kind.algorithm(), SketchAlgorithm::CmsWithHeap | SketchAlgorithm::CountSketchWithHeap))).collect::<Vec<_>>();
+    let heaps = dag
+        .nodes
+        .iter()
+        .filter(|n| {
+            n.output_state.timing == ExecutionTiming::IngestionTime
+                && match &n.payload {
+                    Payload::SummaryAgg {
+                        family: SummaryFamilyType::Sketch(kind, _),
+                        ..
+                    } => matches!(
+                        kind.algorithm(),
+                        SketchAlgorithm::CmsWithHeap | SketchAlgorithm::CountSketchWithHeap
+                    ),
+                    Payload::SummaryAgg {
+                        family: SummaryFamilyType::ExactAggregate(ExactKind::Sum, _),
+                        ..
+                    } => true,
+                    _ => false,
+                }
+        })
+        .collect::<Vec<_>>();
     let ([source], [heap]) = (sources.as_slice(), heaps.as_slice()) else {
-        return Err(invalid("expected one selected fixed-window Rate heap"));
+        return Err(invalid(
+            "expected one selected fixed-window Rate aggregation",
+        ));
     };
     if !source
         .output_schema
@@ -354,7 +374,7 @@ pub fn compile_fixed_window_rate_ranking(
         .any(|f| f.name == SERIES_IDENTITY_COLUMN)
     {
         return Err(invalid(
-            "fixed-window Rate heap requires complete series identity",
+            "fixed-window Rate aggregation requires complete series identity",
         ));
     }
     compile_candidate(
