@@ -175,7 +175,7 @@ KLLBuild(k=200)
 
 3. Physical DAGs
 
-Maintenance DAG:
+Precompute DAG:
 RawInput<Latency, 1m>
         ↓
 NativeKllBuild(k=200)
@@ -196,7 +196,7 @@ NativeKllMerge(k=200)
 
 4. Deployment Plan / DAG
 
-Maintenance:
+Precompute:
 OTLP latency source
         ↓
 run KLL build over each complete 1-minute input pane
@@ -283,7 +283,15 @@ Physical DAG(s)
 
 For the running example, the lifecycle creates two execution boundaries.
 
-### Maintenance Physical DAG
+These two halves are named as `PhysicalCandidate` names them, `precompute`
+and `query`. *Maintenance* stays the lifecycle's word (section 2): it covers
+how state is built, retained, reused and scheduled. A precompute DAG is the
+physical object that a maintenance lifecycle compiles to, so reusing
+*maintenance* for it collapses two layers that the crates keep apart:
+`asap-aware-mapping::summary_maintenance_*` owns the lifecycle, and
+`asap-physical-operators::physical_planner` owns the DAGs.
+
+### Precompute Physical DAG
 
 ```text
 RawInputSlot<Latency>(
@@ -358,7 +366,7 @@ Candidate B:
 ```
 
 Both preserve reset-aware Rate before Sum. Summing raw counters before Rate is
-not equivalent. The counter-state build may be another maintenance DAG; typed
+not equivalent. The counter-state build may be another precompute DAG; typed
 state inputs do not imply that a deployment can construct or bind those states.
 
 The shared library exposes `physical_planner::compile_candidates(...)` to lower
@@ -397,7 +405,7 @@ Deployment Plan Compiler
 Deployment Plan / DAG
 ```
 
-For the maintenance DAG, it may produce:
+For the precompute DAG, it may produce:
 
 ```text
 Source:
@@ -450,7 +458,7 @@ The complete example makes the ownership boundary explicit:
 | **Summary Maintenance Candidate Generation** | Maintain 1-minute panes and reuse them for aligned five-minute queries |
 | **Summary Maintenance Lifecycle** | Record pane/window/freshness/reuse requirements |
 | **Physical Plan Compiler** | Lower to native KLL build, merge, and readout operators |
-| **Physical DAG** | Define maintenance and query DAGs with typed input/output boundaries |
+| **Physical DAG** | Define precompute and query DAGs with typed input/output boundaries |
 | **Deployment Plan Compiler** | Bind raw input and KLL state slots to concrete sources/materializations |
 | **Deployment Plan / DAG** | Specify maintenance schedules, stored-pane resolution and query execution |
 
@@ -486,9 +494,9 @@ pane compilation, alongside independent operator/runtime fixtures:
 
 | Test | Contract exercised |
 | --- | --- |
-| `summary_maintenance_lifecycle_e2e::selected_temporal_lifecycle_compiles_panes_and_executes` | PromQL p50/p99 workloads → selected continuous lifecycle and Sliding framework → automatically generated maintenance/query DAGs → real codec round-trip → adjacent aligned windows; checks filters, entity identity, sample counts, missing/duplicate panes and phase rejection before opening readers |
-| `summary_maintenance_lifecycle_e2e::continuous_lifecycle_compiles_and_executes_spatial_kll` | PromQL workload → selected continuous lifecycle → logical DAG → compiled maintenance/query candidate → results in independent revisions; an unbounded candidate fails before pricing, and a bounded request candidate summarizes the same input samples |
-| `kll_pane_execution::five_panes_roundtrip_and_shared_merge_runs_once` | Explicit one-minute maintenance DAGs → real MessagePack state bytes → five required query inputs → shared native merge → p50/p99; counts every sample once, checks adjacent aligned windows and instruments one merge start per run |
+| `summary_maintenance_lifecycle_e2e::selected_temporal_lifecycle_compiles_panes_and_executes` | PromQL p50/p99 workloads → selected continuous lifecycle and Sliding framework → automatically generated precompute/query DAGs → real codec round-trip → adjacent aligned windows; checks filters, entity identity, sample counts, missing/duplicate panes and phase rejection before opening readers |
+| `summary_maintenance_lifecycle_e2e::continuous_lifecycle_compiles_and_executes_spatial_kll` | PromQL workload → selected continuous lifecycle → logical DAG → compiled precompute/query candidate → results in independent revisions; an unbounded candidate fails before pricing, and a bounded request candidate summarizes the same input samples |
+| `kll_pane_execution::five_panes_roundtrip_and_shared_merge_runs_once` | Explicit one-minute precompute DAGs → real MessagePack state bytes → five required query inputs → shared native merge → p50/p99; counts every sample once, checks adjacent aligned windows and instruments one merge start per run |
 | `kll_pane_execution::restored_panes_reject_corruption_parameters_schema_and_missing_binding` | Corrupt bytes, parameter relabelling, incompatible schemas and absent bindings fail explicitly |
 | `precompute_candidates::grouped_rate_can_be_materialized_before_or_after_grouped_sum` | Cost changes select different legal precompute frontiers; both selected candidates execute with the same reset-sensitive result; uncompilable candidates are not priced |
 | `sql_to_physical::sql_filter_grouped_sum_executes_and_rebinds` | SQL text → candidate search → physical compilation → shared Scan predicates and grouped summary execution; NULL samples are ignored and fresh bindings produce new results |
