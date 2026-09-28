@@ -43,7 +43,7 @@ macro_rules! impl_clone_accumulator_methods {
 /// This provides a uniform interface over all accumulator types so that the
 /// worker loop doesn't need to know which concrete type it's dealing with.
 pub trait AccumulatorUpdater: Send {
-    /// Validate an immutable maintenance input before an updater can silently
+    /// Validate an immutable precompute input before an updater can silently
     /// discard a value outside its representable domain.
     fn validate_single_input(&self, value: f64) -> Result<(), String> {
         if value.is_finite() {
