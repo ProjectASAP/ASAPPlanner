@@ -1399,7 +1399,7 @@ impl<'a> SketchAlgorithmStrategy<'a> {
             if asap_types::post_asap::compile_executable_dag(&placed).is_err() {
                 return false;
             }
-            let Ok(placed) = finalize_exact_accumulator(placed, root) else {
+            let Ok(placed) = finalize_query_candidate(placed, root) else {
                 return false;
             };
             candidate.replacement = Replacement::Summary(placed);
@@ -1849,7 +1849,7 @@ fn exact_topk_over_temporal_values(
     {
         return Ok(None);
     }
-    let values = finalize_exact_accumulator(values, child)?;
+    let values = finalize_query_candidate(values, child)?;
     let partition_by = reduction
         .group_keys()
         .ok_or(RealizationError::PhysicalRealization(
@@ -2103,8 +2103,8 @@ fn realize_binary(
         return Ok(None);
     }
 
-    lhs_node = finalize_exact_accumulator(lhs_node, lhs)?;
-    rhs_node = finalize_exact_accumulator(rhs_node, rhs)?;
+    lhs_node = finalize_query_candidate(lhs_node, lhs)?;
+    rhs_node = finalize_query_candidate(rhs_node, rhs)?;
 
     let has_ratio_domains = ratio_domains.is_some();
     let guarantee = if matches!(op, BinaryOpKind::Arithmetic(ArithmeticOpKind::Div))
@@ -2168,7 +2168,7 @@ fn realize_binary(
 /// Put an explicit read boundary between maintained exact state and a
 /// query-time value consumer. Approximate summaries must already carry a
 /// `SummaryEstimate`, so they deliberately do not pass this predicate.
-fn finalize_exact_accumulator(
+pub fn finalize_query_candidate(
     node: Rc<SummaryNode>,
     logical_output: &QueryExpr,
 ) -> Result<Rc<SummaryNode>, RealizationError> {
@@ -2949,7 +2949,7 @@ fn construct_summary_agg(
     } else if snapshot_weighted {
         // A fresh query-time summary consumes this evaluation's finalized rates.
         // Moving rate snapshots must never accumulate across evaluations.
-        finalize_exact_accumulator(bound_child, &input.child)?
+        finalize_query_candidate(bound_child, &input.child)?
     } else {
         let child = finalize_exact_accumulator_at(
             bound_child,
@@ -4191,7 +4191,7 @@ impl<Id: Clone + PartialEq> PlanSpace<Id> {
                         .assemble_target(root)
                         // Exposed query candidates return values. Internal assembly
                         // still retains accumulator states for sharing and storage.
-                        .and_then(|node| finalize_exact_accumulator(node, root))
+                        .and_then(|node| finalize_query_candidate(node, root))
                         .map(|node| (id.clone(), node))
                 })
                 .collect::<Result<Vec<_>, _>>();
@@ -5194,7 +5194,7 @@ impl<'a> GlobalSelection<'a> {
         target: &Rc<QueryExpr>,
     ) -> Result<Option<Rc<SummaryNode>>, RealizationError> {
         self.assemble_selected_dag(target)?
-            .map(|node| finalize_exact_accumulator(node, target))
+            .map(|node| finalize_query_candidate(node, target))
             .transpose()
     }
 
@@ -5262,8 +5262,8 @@ impl<'a> GlobalSelection<'a> {
             let Some(pred) = normalized_pred else {
                 return keep_pre_asap(target);
             };
-            let left = finalize_exact_accumulator(self.assemble_target(left)?, left)?;
-            let right = finalize_exact_accumulator(self.assemble_target(right)?, right)?;
+            let left = finalize_query_candidate(self.assemble_target(left)?, left)?;
+            let right = finalize_query_candidate(self.assemble_target(right)?, right)?;
             let guarantee =
                 relational_join_guarantee(left.guarantee.as_ref(), right.guarantee.as_ref());
             let node = Rc::new(SummaryNode {
@@ -5334,7 +5334,7 @@ impl<'a> GlobalSelection<'a> {
             ),
             _ => return keep_pre_asap(target),
         };
-        let child = finalize_exact_accumulator(self.assemble_target(child_target)?, child_target)?;
+        let child = finalize_query_candidate(self.assemble_target(child_target)?, child_target)?;
         let guarantee = child.guarantee.clone();
         let node = Rc::new(SummaryNode {
             expr: SummaryExpr::ValueOperation {
@@ -6898,6 +6898,20 @@ mod tests {
             let space = search_workload(vec![(0usize, root.clone())]);
             let inventory = space.enumerate_candidate_dags(4096).unwrap();
             assert!(!inventory.candidates.is_empty());
+            let strategy = SketchAlgorithmStrategy::new(&DefaultCostModel);
+            for candidate in strategy.propose(&TargetSubDAG::new(&root)).candidates {
+                if let Replacement::Summary(node) = candidate.replacement {
+                    let output = finalize_query_candidate(node, &root).unwrap();
+                    assert!(
+                        output
+                            .schema
+                            .fields
+                            .iter()
+                            .all(|field| matches!(field.dtype, SummaryFamilyType::Plain(_))),
+                        "direct candidate {query} leaks state"
+                    );
+                }
+            }
             let selected = space
                 .global_selection(&DefaultCostModel)
                 .assemble_selected_query(&space.roots[0].1)
