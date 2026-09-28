@@ -38,7 +38,7 @@ macro_rules! impl_clone_accumulator_methods {
     };
 }
 
-/// Shared update interface for query-time and maintenance-time accumulation.
+/// Shared update interface for query-time and precompute-time accumulation.
 ///
 /// This provides a uniform interface over all accumulator types so that the
 /// worker loop doesn't need to know which concrete type it's dealing with.
