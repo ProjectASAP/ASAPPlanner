@@ -117,6 +117,26 @@ impl CompiledPhysicalDag {
         }
         Ok(())
     }
+    /// Identify the external input whose rows survive unchanged at this output.
+    /// Protocol adapters can retain labels that are outside a closed physical schema.
+    pub fn row_source(&self, id: NodeId) -> Option<NodeId> {
+        match self.nodes.get(&id)? {
+            Node::Input(_) => Some(id),
+            Node::Operator { inputs, operator } => {
+                let index = operator.row_preserving_input()?;
+                self.row_source(*inputs.get(index)?)
+            }
+        }
+    }
+
+    /// Selected operator name, for plan inspection without decoding its wire format.
+    pub fn operator_name(&self, id: NodeId) -> Option<&str> {
+        match self.nodes.get(&id)? {
+            Node::Input(_) => Some("Input"),
+            Node::Operator { operator, .. } => Some(operator.name()),
+        }
+    }
+
     pub fn roots(&self) -> &[NodeId] {
         &self.roots
     }

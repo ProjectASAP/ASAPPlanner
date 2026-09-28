@@ -65,6 +65,8 @@ pub enum QueryExprError {
     /// used by `Project`'s own `output_schema` arm instead).
     #[error("a scalar expression has no row schema of its own")]
     ScalarHasNoRowSchema,
+    #[error("invalid per-series sample column: {0}")]
+    InvalidSampleColumn(String),
 }
 
 // ── Leaf / supporting types ───────────────────────────────────────────────────
@@ -1451,12 +1453,23 @@ impl QueryExpr<ColumnId> {
 /// one value per series, so every label column of `input` is preserved and only
 /// the sample value is replaced — kept named `value` so the PromQL sample-value
 /// convention (and any outer `SampleValue` reference) still resolves it by name.
-fn per_series_reduction_schema(input: &Schema, agg: &AggIntent) -> Schema {
-    let value_idx = input
-        .column_id("value")
-        .or_else(|| (0..input.columns.len()).find(|&i| Some(i) != input.time_index));
+fn per_series_reduction_schema(input: &Schema, agg: &AggIntent) -> Result<Schema, QueryExprError> {
+    let vi = if let Some(index) = agg.input_cols().first() {
+        *index
+    } else {
+        super::column_resolution::resolve_column_ref(&ColumnRef::SampleValue, input)
+            .map_err(|error| QueryExprError::InvalidSampleColumn(error.to_string()))?
+    };
+    if !matches!(
+        input.columns.get(vi).map(|column| &column.dtype),
+        Some(DataType::Float64 | DataType::Int64)
+    ) {
+        return Err(QueryExprError::InvalidSampleColumn(format!(
+            "column {vi} is not numeric"
+        )));
+    }
     let mut columns = input.columns.clone();
-    if let Some(vi) = value_idx {
+    {
         let mut out = agg.output_column(&columns[vi]);
         out.name = "value".into();
         // A per-series range reduction produces a PromQL sample value, which is
@@ -1466,14 +1479,14 @@ fn per_series_reduction_schema(input: &Schema, agg: &AggIntent) -> Schema {
         out.dtype = DataType::Float64;
         columns[vi] = out;
     }
-    Schema {
+    Ok(Schema {
         columns,
         time_index: input.time_index,
         unique_keys: input.unique_keys.clone(),
         // Per-series reduction is label-preserving: it inherits its input's
         // completeness (an open scan stays open; a closed one stays closed).
         closed: input.closed,
-    }
+    })
 }
 
 /// The output schema of an `Aggregate { reduction, measures }` over `in_schema` —
@@ -1500,7 +1513,7 @@ pub fn aggregate_output_schema(
                 1,
                 "a per-entity reduction is single-aggregate"
             );
-            return Ok(per_series_reduction_schema(in_schema, &measures[0]));
+            return per_series_reduction_schema(in_schema, &measures[0]);
         }
         Reduction::Reduce(by) => by,
     };
@@ -2284,6 +2297,26 @@ mod tests {
         };
         let back: TimeShift = serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
         assert_eq!(back, s);
+    }
+
+    // Nested temporal aggregation must replace the sample, never the grouping label.
+    #[test]
+    fn temporal_reduction_of_grouped_sum_preserves_job() {
+        let input = Schema::new(vec![
+            col("job", DataType::Utf8, true),
+            col("sum", DataType::Float64, false),
+        ]);
+        for aggregate in [
+            AggIntent::Avg { col: None },
+            AggIntent::Avg { col: Some(1) },
+            AggIntent::Rate,
+        ] {
+            let output =
+                aggregate_output_schema(&input, &Reduction::PerEntity, &[aggregate], &[]).unwrap();
+            assert_eq!(output.columns[0], input.columns[0]);
+            assert_eq!(output.columns[1].name, "value");
+            assert_eq!(output.columns[1].dtype, DataType::Float64);
+        }
     }
 
     #[test]

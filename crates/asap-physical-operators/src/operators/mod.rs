@@ -114,6 +114,15 @@ pub struct Operator {
     output: Schema,
 }
 impl Operator {
+    pub(crate) fn row_preserving_input(&self) -> Option<usize> {
+        match self.kind {
+            Kind::Filter(_) | Kind::Sort { .. } | Kind::Limit { .. } | Kind::SemiJoin { .. } => {
+                Some(0)
+            }
+            _ => None,
+        }
+    }
+
     pub(crate) fn is_counter_readout(&self) -> bool {
         matches!(
             self.kind,

@@ -1087,3 +1087,105 @@ fn assert_weighted_rate_topk(count_sketch: bool) {
         assert_eq!(services, vec!["auth", "checkout", "ingest", "export"]);
     }
 }
+
+// The grouped temporal reducer's sample schema must survive physical Sort/Limit binding.
+#[test]
+fn grouped_temporal_schema_compiles_and_executes_topk() {
+    use asap_physical_operators::physical_planner::{
+        compile_node, CompiledPhysicalDag, InputContract, Source,
+    };
+    use planner_types::post_asap::{
+        ExecutableDagNode, ExecutableOperatorPayload, ExecutionDataState, PostAsapNodeId,
+        ValueOperation,
+    };
+    use planner_types::pre_asap::{
+        aggregate_output_schema, AggIntent, Column, GroupKeys, QueryExpr, Reduction as IrReduction,
+        Schema as IrSchema,
+    };
+    let grouped = IrSchema::new(vec![
+        Column::new("job", DataType::Utf8, false),
+        Column::new("sum", DataType::Float64, false),
+    ]);
+    let output = aggregate_output_schema(
+        &grouped,
+        &IrReduction::PerEntity,
+        &[AggIntent::Avg { col: None }],
+        &[],
+    )
+    .unwrap();
+    let input = schema(
+        &output
+            .columns
+            .iter()
+            .map(|c| (c.name.as_str(), c.dtype.clone(), c.nullable))
+            .collect::<Vec<_>>(),
+    );
+    let node = |id, operation| ExecutableDagNode {
+        id: PostAsapNodeId(id),
+        payload: ExecutableOperatorPayload::Value { operation },
+        output_state: ExecutionDataState::QUERY_ROWS,
+        output_schema: (*input).clone(),
+        guarantee: None,
+    };
+    let sort = compile_node(
+        &node(
+            1,
+            ValueOperation::Sort {
+                keys: vec![planner_types::pre_asap::SortKey {
+                    expr: QueryExpr::Column(1),
+                    ascending: false,
+                    nulls_first: false,
+                }],
+                partition_by: GroupKeys::none(),
+            },
+        ),
+        &[input.clone()],
+    )
+    .unwrap();
+    let limit = compile_node(
+        &node(
+            2,
+            ValueOperation::Limit {
+                n: 1,
+                offset: 0,
+                partition_by: GroupKeys::none(),
+            },
+        ),
+        &[input.clone()],
+    )
+    .unwrap();
+    let compiled = CompiledPhysicalDag::from_operators(
+        [(0, InputContract::bounded(input.clone()))].into(),
+        [(1, (vec![0], sort)), (2, (vec![1], limit))].into(),
+        vec![2],
+    )
+    .unwrap();
+    let recovered = CompiledPhysicalDag::decode(&compiled.encode().unwrap()).unwrap();
+    assert_eq!(recovered.row_source(2), Some(0));
+    assert_eq!(recovered.operator_name(2), Some("Limit"));
+    let expected = vec![Value::Utf8("api".into()), Value::Float64(9.)];
+    let batch = Batch::try_new(
+        input.clone(),
+        vec![
+            vec![Value::Utf8("worker".into()), Value::Float64(2.)],
+            expected.clone(),
+        ],
+    )
+    .unwrap();
+    let source = Box::new(Operator::source(input, vec![batch]).unwrap()) as Source<'_>;
+    let physical = recovered.instantiate([(0, source)].into()).unwrap();
+    let mut stream = physical
+        .execute(&[2], RunContext::new(query(), Limits::default()).unwrap())
+        .unwrap()
+        .remove(0);
+    let rows = block_on(async {
+        let mut rows = vec![];
+        while let Some(batch) = stream.next().await {
+            rows.extend_from_slice(batch.unwrap().rows());
+        }
+        rows
+    });
+    assert_eq!(rows.len(), 1);
+    assert!(matches!(&rows[0][0], Value::Utf8(label) if label.as_ref() == "api"));
+    assert!(matches!(rows[0][1], Value::Float64(9.)));
+}
