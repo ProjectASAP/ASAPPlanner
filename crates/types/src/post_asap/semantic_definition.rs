@@ -7,10 +7,31 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 
+/// Stable identity of a logical input dataset, independent of its endpoint.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LogicalDatasetIdentity {
+    pub namespace: String,
+    pub dataset: String,
+}
+
+impl LogicalDatasetIdentity {
+    pub fn validate(&self) -> Result<(), String> {
+        if self.namespace.trim().is_empty() || self.dataset.trim().is_empty() {
+            return Err("dataset namespace and identity must be nonempty".into());
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SummarySemanticFragment {
     pub format_version: u32,
+    /// Version 1 fragments are unbound structural descriptions. Persisted,
+    /// dataset-bound descriptions use version 2.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dataset_identity: Option<LogicalDatasetIdentity>,
     pub output: String,
     pub nodes: BTreeMap<String, SemanticOperation>,
 }
@@ -71,6 +92,20 @@ fn role(role: EdgeRole) -> u8 {
 impl SummarySemanticFragment {
     pub fn from_stored_output(dag: &ExecutableDag, output: PostAsapNodeId) -> Result<Self, String> {
         Self::export(dag, output, true)
+    }
+
+    /// All source names in this DAG resolve within this logical dataset.
+    pub fn from_stored_output_in_dataset(
+        dag: &ExecutableDag,
+        output: PostAsapNodeId,
+        dataset: LogicalDatasetIdentity,
+    ) -> Result<Self, String> {
+        dataset.validate()?;
+        let mut fragment = Self::export(dag, output, true)?;
+        fragment.format_version = 2;
+        fragment.dataset_identity = Some(dataset);
+        fragment.validate()?;
+        Ok(fragment)
     }
 
     pub fn from_dag(dag: &ExecutableDag, output: PostAsapNodeId) -> Result<Self, String> {
@@ -215,6 +250,7 @@ impl SummarySemanticFragment {
         let mut hashes: BTreeMap<PostAsapNodeId, String> = BTreeMap::new();
         let mut result = Self {
             format_version: 1,
+            dataset_identity: None,
             output: String::new(),
             nodes: BTreeMap::new(),
         };
@@ -284,7 +320,12 @@ impl SummarySemanticFragment {
     }
 
     pub fn validate(&self) -> Result<(), String> {
-        if self.format_version != 1
+        match (&self.dataset_identity, self.format_version) {
+            (None, 1) => (),
+            (Some(dataset), 2) => dataset.validate()?,
+            _ => return Err("semantic version and dataset binding disagree".into()),
+        }
+        if !matches!(self.format_version, 1 | 2)
             || self.nodes.is_empty()
             || self.nodes.len() > 4096
             || canonical_bytes(self)?.len() > 4 * 1024 * 1024
@@ -370,6 +411,39 @@ mod tests {
             guarantee: None,
         }))
         .unwrap()
+    }
+
+    // Equal source names in different datasets must not alias persisted meaning.
+    #[test]
+    fn dataset_identity_is_semantic_and_roundtrips() {
+        let dag = fixture("latency");
+        let export = |namespace: &str| {
+            SummarySemanticFragment::from_stored_output_in_dataset(
+                &dag,
+                dag.root,
+                LogicalDatasetIdentity {
+                    namespace: namespace.into(),
+                    dataset: "requests".into(),
+                },
+            )
+            .unwrap()
+        };
+        let a = export("tenant-a");
+        assert_ne!(
+            canonical_bytes(&a).unwrap(),
+            canonical_bytes(&export("tenant-b")).unwrap()
+        );
+        assert_eq!(a, export("tenant-a")); // No endpoint enters the semantic API.
+        let restored: SummarySemanticFragment =
+            serde_json::from_slice(&canonical_bytes(&a).unwrap()).unwrap();
+        restored.validate().unwrap();
+        assert_eq!(a, restored);
+        let mut bad = a.clone();
+        bad.dataset_identity.as_mut().unwrap().namespace.clear();
+        assert!(bad.validate().is_err());
+        bad = a;
+        bad.dataset_identity = None;
+        assert!(bad.validate().is_err());
     }
 
     // Storage identity must ignore temporary identifiers and execution placement.
