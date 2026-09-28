@@ -28,7 +28,7 @@ pub struct TemporalPaneMaintenance {
     pub entity_identity: TemporalEntityIdentity,
 }
 
-/// Generated maintenance and query computation. `pane_inputs` is ordered from
+/// Generated precompute and query computation. `pane_inputs` is ordered from
 /// the oldest complete pane to the newest; each run checks actual timestamps.
 #[derive(Clone)]
 pub struct TemporalPaneCandidate {
