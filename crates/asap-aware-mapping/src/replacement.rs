@@ -6898,7 +6898,17 @@ mod tests {
             let space = search_workload(vec![(0usize, root.clone())]);
             let inventory = space.enumerate_candidate_dags(4096).unwrap();
             assert!(!inventory.candidates.is_empty());
-            for node in inventory.candidates.iter().map(|forest| &forest[0].1) {
+            let selected = space
+                .global_selection(&DefaultCostModel)
+                .assemble_selected_query(&space.roots[0].1)
+                .unwrap()
+                .unwrap();
+            for node in inventory
+                .candidates
+                .iter()
+                .map(|forest| &forest[0].1)
+                .chain(std::iter::once(&selected))
+            {
                 assert!(
                     node.schema
                         .fields
