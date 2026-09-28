@@ -1342,10 +1342,10 @@ impl<'a> SketchAlgorithmStrategy<'a> {
     }
 
     /// Fixed-window maintenance can finalize each series' counter state and
-    /// build a fresh heap for that evaluation window. Deployment must provide
+    /// build a fresh heap or grouped Sum for that evaluation window. Deployment must provide
     /// a complete, synchronized population and bind the matching window; this
     /// candidate never incrementally adds one window's rates to another.
-    pub fn fixed_window_rate_topk_candidates(&self, root: &Rc<QueryExpr>) -> Proposals {
+    pub fn fixed_window_rate_candidates(&self, root: &Rc<QueryExpr>) -> Proposals {
         fn place(node: &Rc<SummaryNode>) -> Option<Rc<SummaryNode>> {
             let mut next = node.as_ref().clone();
             match &mut next.expr {
@@ -1371,18 +1371,79 @@ impl<'a> SketchAlgorithmStrategy<'a> {
         }
         let mut proposals = self.propose_with(root, None);
         proposals.candidates.retain_mut(|candidate| {
-            let Replacement::Summary(node) = &candidate.replacement else { return false };
-            let Ok(dag) = asap_types::post_asap::compile_executable_dag(node) else { return false };
-            if !dag.nodes.iter().any(|node| matches!(&node.payload,
+            let Replacement::Summary(node) = &candidate.replacement else {
+                return false;
+            };
+            let Ok(dag) = asap_types::post_asap::compile_executable_dag(node) else {
+                return false;
+            };
+            if !dag.nodes.iter().any(|node| match &node.payload {
                 asap_types::post_asap::ExecutableOperatorPayload::SummaryAgg {
-                    family: SummaryFamilyType::Sketch(kind, _), ..
-                } if matches!(kind.algorithm(), SketchAlgorithm::CmsWithHeap | SketchAlgorithm::CountSketchWithHeap))) {
+                    family: SummaryFamilyType::Sketch(kind, _),
+                    ..
+                } => matches!(
+                    kind.algorithm(),
+                    SketchAlgorithm::CmsWithHeap | SketchAlgorithm::CountSketchWithHeap
+                ),
+                asap_types::post_asap::ExecutableOperatorPayload::SummaryAgg {
+                    family: SummaryFamilyType::ExactAggregate(ExactKind::Sum, _),
+                    ..
+                } => true,
+                _ => false,
+            }) {
                 return false;
             }
-            let Some(placed) = place(node) else { return false };
-            if asap_types::post_asap::compile_executable_dag(&placed).is_err() { return false; }
+            let Some(placed) = place(node) else {
+                return false;
+            };
+            if asap_types::post_asap::compile_executable_dag(&placed).is_err() {
+                return false;
+            }
+            let Ok(placed) = finalize_exact_accumulator(placed, root) else {
+                return false;
+            };
             candidate.replacement = Replacement::Summary(placed);
-            candidate.rationale.push_str("; fixed-window precompute over complete per-series counter states");
+            candidate
+                .rationale
+                .push_str("; fixed-window precompute over complete per-series counter states");
+            true
+        });
+        proposals
+    }
+
+    /// Retain grouped Sum after a per-series Rate readout as a query-time
+    /// candidate alongside its complete-window maintenance placement.
+    pub fn query_time_rate_aggregation_candidates(&self, root: &Rc<QueryExpr>) -> Proposals {
+        fn query_time(node: &Rc<SummaryNode>) -> Rc<SummaryNode> {
+            let mut next = node.as_ref().clone();
+            match &mut next.expr {
+                SummaryExpr::ValueOperation {
+                    child,
+                    operation: ValueOperation::FinalizeExactAccumulator,
+                    timing,
+                } if matches!(
+                    &child.expr,
+                    SummaryExpr::SummaryAgg {
+                        family: SummaryFamilyType::ExactAggregate(ExactKind::Rate, _),
+                        ..
+                    }
+                ) =>
+                {
+                    *timing = ExecutionTiming::QueryTime;
+                }
+                SummaryExpr::ValueOperation { child, .. }
+                | SummaryExpr::SummaryAgg { child, .. } => *child = query_time(child),
+                _ => {}
+            }
+            Rc::new(next)
+        }
+        let mut proposals = self.fixed_window_rate_candidates(root);
+        proposals.candidates.retain_mut(|candidate| {
+            let Replacement::Summary(node) = &candidate.replacement else { return false };
+            if !matches!(&node.expr, SummaryExpr::ValueOperation { child, operation: ValueOperation::FinalizeExactAccumulator, .. }
+                if matches!(&child.expr, SummaryExpr::SummaryAgg { family: SummaryFamilyType::ExactAggregate(ExactKind::Sum, _), .. })) { return false; }
+            candidate.replacement = Replacement::Summary(query_time(node));
+            candidate.rationale = "query-time grouped Sum over complete per-series Rate readouts".into();
             true
         });
         proposals

@@ -773,7 +773,7 @@ fn planner_exposes_fixed_window_rate_heap_precompute_candidates() {
         &EqualSplitAllocator,
         &Evidence,
     );
-    let candidates = strategy.fixed_window_rate_topk_candidates(&root).candidates;
+    let candidates = strategy.fixed_window_rate_candidates(&root).candidates;
     assert_eq!(candidates.len(), 2);
     for candidate in candidates {
         let Replacement::Summary(root) = candidate.replacement else {
@@ -817,7 +817,7 @@ fn planner_exposes_fixed_window_rate_heap_precompute_candidates() {
             &[u64::from(heap.id.0)],
         )
         .unwrap();
-        let exported = asap_physical_operators::physical_planner::promql_rows::compile_fixed_window_rate_ranking(&root).unwrap();
+        let exported = asap_physical_operators::physical_planner::promql_rows::compile_fixed_window_rate_aggregation(&root).unwrap();
         assert_eq!(exported.encode().unwrap(), physical.encode().unwrap());
         assert!(
             asap_physical_operators::physical_planner::promql_rows::compile_rate_ranking(&root)
@@ -956,5 +956,61 @@ fn planner_exposes_fixed_window_rate_heap_precompute_candidates() {
         assert!(!String::from_utf8(physical.query.encode().unwrap())
             .unwrap()
             .contains("KeyedSummaryBuild"));
+    }
+}
+
+// Grouped Rate has a legal stored Sum candidate as well as query-time reduction.
+#[test]
+fn grouped_rate_exposes_precomputed_sum_with_query_readout() {
+    let root = Rc::new(
+        asap_physical_operators::physical_planner::promql_rows::with_series_identity(
+            &lower_promql("sum by(job)(rate(m[1m]))", AccuracyTarget::Exact).unwrap(),
+        )
+        .unwrap(),
+    );
+    let strategy = SketchAlgorithmStrategy::new_with_planning_inputs_and_evidence(
+        &DefaultCostModel,
+        &DefaultAccuracyModel,
+        &EqualSplitAllocator,
+        &Evidence,
+    );
+    let direct = strategy.query_time_rate_aggregation_candidates(&root);
+    assert!(
+        direct.candidates.iter().any(|candidate| {
+            let Replacement::Summary(root) = &candidate.replacement else {
+                return false;
+            };
+            let Ok((_, program)) =
+                asap_physical_operators::physical_planner::promql_rows::compile_rate_ranking(root)
+            else {
+                return false;
+            };
+            let output = program.output_contract(program.roots()[0]).unwrap();
+            output
+                .schema
+                .fields
+                .iter()
+                .all(|field| matches!(field.dtype, SummaryFamilyType::Plain(_)))
+        }),
+        "query-time grouped Rate must finalize Sum inside the physical graph"
+    );
+    let candidates = strategy.fixed_window_rate_candidates(&root).candidates;
+    assert!(
+        !candidates.is_empty(),
+        "Planner must expose Rate -> grouped Sum at ingestion"
+    );
+    for candidate in candidates {
+        let Replacement::Summary(root) = candidate.replacement else {
+            panic!()
+        };
+        let physical = asap_physical_operators::physical_planner::promql_rows::compile_fixed_window_rate_aggregation(&root).unwrap();
+        let precompute = String::from_utf8(physical.precompute.unwrap().encode().unwrap()).unwrap();
+        assert!(
+            precompute.contains("SummaryBuild")
+                && precompute.contains("Rate")
+                && precompute.contains("Sum")
+        );
+        let query = String::from_utf8(physical.query.encode().unwrap()).unwrap();
+        assert!(query.contains("Readout") && !query.contains("SummaryBuild"));
     }
 }
