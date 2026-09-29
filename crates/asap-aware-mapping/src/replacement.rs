@@ -6314,7 +6314,7 @@ mod tests {
             assert_eq!(keys.len(), 1);
             assert!(!keys[0].ascending);
             assert_eq!(node.schema, values.schema);
-            asap_types::post_asap::compile_executable_dag(&node).unwrap();
+            asap_types::post_asap::compile_post_asap_dag(&node).unwrap();
         }
     }
 

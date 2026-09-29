@@ -101,7 +101,7 @@ Variant names are kept, so a tree serializes the same; `ScalarBridge` keeps the 
 - Existing tests pass unchanged apart from construction syntax.
 - Tests that place a scalar in operator position no longer compile and are rewritten or
   deleted: the `CurrentTimestamp` unit test, the `ScalarHasNoRowSchema` tests, and the
-  `executable_dag.rs` tests using `QueryExpr::Literal` as a `fallback` expression.
+  `post_asap_dag.rs` tests using `QueryExpr::Literal` as a `fallback` expression.
 
 ## 5. Limits
 
