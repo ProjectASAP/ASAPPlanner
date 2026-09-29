@@ -1300,3 +1300,101 @@ fn certified_pruning_rejects_missing_authoritative_values_after_recovery() {
         }
     }
 }
+
+// Precompute arithmetic must match population/window identities, never zip arrival order.
+#[test]
+fn compiled_ingestion_binary_preserves_alignment_and_rejects_missing_updates() {
+    use asap_physical_operators::physical_planner::{
+        compile_node, CompiledPhysicalDag, InputContract, Source,
+    };
+    use planner_types::{
+        post_asap::*,
+        pre_asap::{ArithmeticOpKind, BinaryOpKind},
+    };
+    use std::collections::BTreeMap;
+    let input = schema(&[
+        ("population", DataType::Utf8, false),
+        ("time", DataType::Timestamp, false),
+        ("value", DataType::Float64, false),
+    ]);
+    let node = ExecutableDagNode {
+        id: PostAsapNodeId(2),
+        output_schema: (*input).clone(),
+        output_state: ExecutionDataState::INGESTION_ROWS,
+        guarantee: None,
+        payload: ExecutableOperatorPayload::Binary {
+            operator: BinaryOperator {
+                kind: BinaryOpKind::Arithmetic(ArithmeticOpKind::Sub),
+                vector_match: None,
+                checked_relative_division: false,
+                checked_finite_division: false,
+            },
+        },
+    };
+    let program = CompiledPhysicalDag::from_operators(
+        [
+            (0, InputContract::bounded(input.clone())),
+            (1, InputContract::bounded(input.clone())),
+        ]
+        .into(),
+        [(
+            2,
+            (
+                vec![0, 1],
+                compile_node(&node, &[input.clone(), input.clone()]).unwrap(),
+            ),
+        )]
+        .into(),
+        vec![2],
+    )
+    .unwrap();
+    let program = CompiledPhysicalDag::decode(&program.encode().unwrap()).unwrap();
+    for (right, expected) in [
+        (vec![("b", 2, 3.), ("a", 1, 2.)], Some(vec![8., 17.])),
+        (vec![("b", 2, 3.)], None),
+        (vec![("a", 1, 2.), ("a", 1, 2.)], None),
+        (vec![("a", 2, 2.), ("b", 1, 3.)], None),
+        (vec![("a", 1, f64::NAN), ("b", 2, 3.)], None),
+    ] {
+        let sources = [vec![("a", 1, 10.), ("b", 2, 20.)], right]
+            .into_iter()
+            .enumerate()
+            .map(|(i, rows)| {
+                let rows = rows
+                    .into_iter()
+                    .map(|(group, time, value)| {
+                        vec![
+                            Value::Utf8(group.into()),
+                            Value::Timestamp(time),
+                            Value::Float64(value),
+                        ]
+                    })
+                    .collect();
+                let batch = Batch::try_new(input.clone(), rows).unwrap();
+                (
+                    i as u64,
+                    Box::new(Operator::source(input.clone(), vec![batch]).unwrap()) as Source<'_>,
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        let graph = program.instantiate(sources).unwrap();
+        let result = block_on(async {
+            let mut stream = graph
+                .execute(
+                    program.roots(),
+                    RunContext::new(query(), Limits::default()).unwrap(),
+                )
+                .unwrap()
+                .remove(0);
+            let mut rows = Vec::new();
+            while let Some(batch) = stream.next().await {
+                rows.extend(batch?.rows().iter().cloned());
+            }
+            Ok::<_, asap_physical_operators::Error>(rows)
+        });
+        match expected {
+            Some(values) => assert_eq!(floats(&result.unwrap(), 2), values),
+            None => assert!(result.is_err()),
+        }
+    }
+}

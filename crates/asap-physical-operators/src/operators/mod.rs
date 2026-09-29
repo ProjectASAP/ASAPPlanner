@@ -1,4 +1,5 @@
 //! Native physical operators. Each module owns its constructors and execution.
+mod aligned_binary;
 use crate::plan::{Boundedness, Emission, PhysicalOperator, PlanProperties};
 use crate::{
     runtime::{Cooperative, Input, OutputStream, Reservation, RunContext},
@@ -59,6 +60,11 @@ enum Kind {
     VectorBinary {
         operator: planner_types::post_asap::BinaryOperator,
         return_bool: bool,
+    },
+    AlignedBinary {
+        keys: Vec<(usize, usize)>,
+        values: (usize, usize),
+        operator: planner_types::post_asap::BinaryOperator,
     },
     RangeWindow {
         intent: Box<planner_types::pre_asap::AggIntent<ColumnRef>>,
@@ -224,6 +230,7 @@ impl PhysicalOperator<Batch, Schema> for Operator {
         matches!(
             self.kind,
             Kind::Sort { .. }
+                | Kind::AlignedBinary { .. }
                 | Kind::VectorBinary { .. }
                 | Kind::RangeWindow { .. }
                 | Kind::HistogramQuantile
@@ -271,6 +278,7 @@ impl PhysicalOperator<Batch, Schema> for Operator {
             Kind::CurrentSeries { .. } => "CurrentSeries",
             Kind::VectorToScalar { .. } => "VectorToScalar",
             Kind::VectorBinary { .. } => "VectorBinary",
+            Kind::AlignedBinary { .. } => "AlignedBinary",
             Kind::RangeWindow { .. } => "RangeWindow",
             Kind::HistogramQuantile => "HistogramQuantile",
             Kind::Project(_) => "Project",
@@ -311,6 +319,7 @@ impl PhysicalOperator<Batch, Schema> for Operator {
                 source::execute(self, inputs, context)
             }
             Kind::VectorBinary { .. } => vector_binary::execute(self, inputs, context),
+            Kind::AlignedBinary { .. } => aligned_binary::execute(self, inputs, context),
             Kind::RangeWindow { .. } | Kind::HistogramQuantile => {
                 vector_window::execute(self, inputs, context)
             }
