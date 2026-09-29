@@ -130,6 +130,7 @@ pub(super) fn execute<'a>(
         let mut workspace = Workspace::new(&context)?;
         let mut work = Cooperative::new(&context);
         let mut rows = Vec::new();
+        let mut result_identities = std::collections::BTreeSet::new();
         let mut emit = |labels: Labels, a: f64, b: f64| -> Result<(), Error> {
             let arithmetic = matches!(operator.kind, BinaryOpKind::Arithmetic(_));
             let result = match crate::expressions::arithmetic::evaluate_binary(operator, a, b)? {
@@ -158,6 +159,10 @@ pub(super) fn execute<'a>(
                 } else {
                     labels
                 };
+                workspace.grow(label_bytes(&labels) + 64)?;
+                if !result_identities.insert(labels.clone()) {
+                    return Err(invalid("duplicate vector result labels"));
+                }
                 workspace.grow(
                     label_bytes(&labels)
                         + std::mem::size_of::<Vec<Value>>()
