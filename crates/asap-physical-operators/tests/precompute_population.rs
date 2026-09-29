@@ -186,3 +186,223 @@ fn finalized_shared_panes_rebuild_one_global_summary_after_recovery() {
         }
     }
 }
+
+fn logical_schema(family: SummaryFamilyType) -> SummarySchema {
+    SummarySchema {
+        fields: vec![SummaryField {
+            name: "value".into(),
+            dtype: family,
+            nullable: false,
+        }],
+        time_index: None,
+    }
+}
+fn state_graph(
+    family: SummaryFamilyType,
+    target: Option<SummaryFamilyType>,
+    merge: bool,
+) -> CompiledPhysicalDag {
+    let mut nodes = vec![ExecutableDagNode {
+        id: PostAsapNodeId(0),
+        payload: ExecutableOperatorPayload::SummaryMerge,
+        output_state: ExecutionDataState::INGESTION_SUMMARY,
+        output_schema: logical_schema(family.clone()),
+        guarantee: None,
+    }];
+    if merge {
+        nodes.push(ExecutableDagNode {
+            id: PostAsapNodeId(1),
+            payload: ExecutableOperatorPayload::SummaryMerge,
+            ..nodes[0].clone()
+        });
+    }
+    let read_id = nodes.len() as u32;
+    nodes.push(ExecutableDagNode {
+        id: PostAsapNodeId(read_id),
+        payload: ExecutableOperatorPayload::Value {
+            operation: ValueOperation::FinalizeExactAccumulator,
+        },
+        output_state: ExecutionDataState::INGESTION_ROWS,
+        output_schema: logical_schema(SummaryFamilyType::Plain(DataType::Float64)),
+        guarantee: None,
+    });
+    if let Some(target) = target {
+        nodes.push(ExecutableDagNode {
+            id: PostAsapNodeId(nodes.len() as u32),
+            payload: ExecutableOperatorPayload::SummaryAgg {
+                family: target.clone(),
+                input: SummaryUpdate::column(ColumnRef::SampleValue),
+                reduction: Reduction::by(vec![]),
+                grouping: GroupingStrategy::default(),
+            },
+            output_state: ExecutionDataState::INGESTION_SUMMARY,
+            output_schema: logical_schema(target),
+            guarantee: None,
+        });
+    }
+    let edges = (1..nodes.len())
+        .map(|i| ExecutableDagEdge {
+            producer: nodes[i - 1].id,
+            consumer: nodes[i].id,
+            role: EdgeRole::Input,
+            intermediate_schema: nodes[i - 1].output_schema.clone(),
+            data_state: nodes[i - 1].output_state,
+            grouping: GroupingEdgeCompatibility::NotApplicable,
+            window: WindowEdgeCompatibility::NotApplicable,
+        })
+        .collect();
+    let root = nodes.last().unwrap().id;
+    precompute::compile(
+        &ExecutableDag { nodes, edges, root },
+        &[0],
+        &[u64::from(root.0)],
+    )
+    .unwrap()
+}
+fn native_run(
+    program: &CompiledPhysicalDag,
+    family: SummaryFamilyType,
+    states: Vec<Arc<dyn asap_physical_operators::AggregateCore>>,
+    context: RunContext,
+) -> Result<Vec<Vec<Value>>, asap_physical_operators::Error> {
+    let program = CompiledPhysicalDag::decode(&program.encode()?)?;
+    let rows = states
+        .into_iter()
+        .enumerate()
+        .map(|(i, state)| {
+            vec![
+                Value::Map(vec![].into()),
+                Value::Timestamp((i as i64 + 1) * 1000),
+                Value::Summary {
+                    family: family.clone(),
+                    state,
+                },
+            ]
+        })
+        .collect();
+    let input = Batch::try_new(precompute::population_schema(family), rows)?;
+    let graph = program.instantiate(BTreeMap::from([(
+        0,
+        Box::new(Operator::source(input.schema().clone(), vec![input])?) as Source<'_>,
+    )]))?;
+    block_on(async {
+        let mut rows = Vec::new();
+        let mut stream = graph.execute(program.roots(), context)?.remove(0);
+        while let Some(batch) = stream.next().await {
+            rows.extend(batch?.rows().iter().cloned());
+        }
+        Ok(rows)
+    })
+}
+fn ingestion_context(limits: Limits) -> RunContext {
+    RunContext::new(
+        Scope::Ingestion {
+            window_start_ms: 0,
+            window_end_ms: 2000,
+            revision: 1,
+        },
+        limits,
+    )
+    .unwrap()
+}
+fn sum_state(value: f64) -> Arc<dyn asap_physical_operators::AggregateCore> {
+    Arc::new(asap_physical_operators::summary_kernels::SumAccumulator::with_sum(value))
+}
+
+// Only an explicit merge may collapse distinct pane updates before finalization.
+#[test]
+fn explicit_merge_changes_pane_cardinality() {
+    let family = SummaryFamilyType::ExactAggregate(ExactKind::Sum, ExactParams::Sum);
+    for (merge, expected) in [(false, vec![2., 7.]), (true, vec![9.])] {
+        let program = state_graph(family.clone(), None, merge);
+        let rows = native_run(
+            &program,
+            family.clone(),
+            vec![sum_state(2.), sum_state(7.)],
+            ingestion_context(Limits::default()),
+        )
+        .unwrap();
+        let values = rows
+            .iter()
+            .map(|row| match row[2] {
+                Value::Float64(v) => v,
+                _ => panic!("numeric readout expected"),
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(values, expected);
+        assert!(matches!(rows.last().unwrap()[1], Value::Timestamp(2000)));
+    }
+}
+
+// Typed updates reject invalid domains before publishing any target state.
+#[test]
+fn precompute_rejects_nonfinite_and_nonpositive_dds_updates() {
+    let source = SummaryFamilyType::ExactAggregate(ExactKind::Sum, ExactParams::Sum);
+    let target = SummaryFamilyType::Sketch(
+        SketchKind::new(
+            SketchAlgorithm::DDSketch,
+            SketchParams::DDSketch { alpha: 0.01 },
+        ),
+        GroupingStrategy::default(),
+    );
+    let program = state_graph(source.clone(), Some(target), false);
+    assert!(native_run(
+        &program,
+        source.clone(),
+        vec![sum_state(20.)],
+        ingestion_context(Limits::default())
+    )
+    .is_ok());
+    for value in [-20., 0., f64::MAX, f64::NAN, f64::INFINITY] {
+        assert!(native_run(
+            &program,
+            source.clone(),
+            vec![sum_state(value)],
+            ingestion_context(Limits::default())
+        )
+        .is_err());
+    }
+}
+
+// An exact count must not silently lose units when exposed through Float64 rows.
+#[test]
+fn precompute_count_conversion_checks_precision() {
+    use asap_physical_operators::summary_kernels::exact::ExactAccumulator;
+    let family = SummaryFamilyType::ExactAggregate(ExactKind::Count, ExactParams::Count);
+    let program = state_graph(family.clone(), None, false);
+    for (count, valid) in [(3u64, true), ((1u64 << 53) + 1, false)] {
+        let mut state =
+            serde_json::to_value(ExactAccumulator::new(family.clone(), false).unwrap()).unwrap();
+        state["scalar"]["Count"] = count.into();
+        let state: ExactAccumulator = serde_json::from_value(state).unwrap();
+        let result = native_run(
+            &program,
+            family.clone(),
+            vec![Arc::new(state)],
+            ingestion_context(Limits::default()),
+        );
+        assert_eq!(result.is_ok(), valid);
+    }
+}
+
+// Graph execution retains terminal cancellation and shared workspace limits.
+#[test]
+fn precompute_graph_enforces_cancellation_and_budget() {
+    let family = SummaryFamilyType::ExactAggregate(ExactKind::Sum, ExactParams::Sum);
+    let program = state_graph(family.clone(), None, true);
+    let context = ingestion_context(Limits::default());
+    context.cancel();
+    let error = native_run(&program, family.clone(), vec![sum_state(1.)], context).unwrap_err();
+    assert!(format!("{error:?}").contains("Cancelled"));
+    let error = native_run(
+        &program,
+        family,
+        vec![sum_state(1.)],
+        ingestion_context(Limits {
+            max_bytes: 1,
+            ..Limits::default()
+        }),
+    )
+    .unwrap_err();
+    assert!(format!("{error:?}").contains("MemoryLimit"));
+}
