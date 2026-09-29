@@ -163,6 +163,7 @@ pub mod explanation;
 mod function_rules;
 pub mod grouping;
 pub mod pane_sharing;
+pub mod pass;
 pub mod physical_handoff_cost;
 pub mod physical_operator_statistics;
 pub mod physical_plan_cost_model;
@@ -196,6 +197,11 @@ pub use explanation::{
     explain_replacements, explain_replacements_with, ExplanationKind, ReplacementExplanation,
 };
 pub use grouping::{has_subpopulations, HydraGroupingStrategy};
+pub use pass::{
+    optimize, LifecycleInput, MajorPass, OptimizationInput, OptimizationInputError,
+    OptimizationPass, OptimizeError, PassNameConflict, PassRegistry, PlanOutput, PlanningModels,
+    QueryLifecyclePlan, QueryPlan,
+};
 pub use recurrence::{
     evaluation_rate_of, total_cost, update_rate_from_data_workload, CostRate, EvaluationRate,
     Horizon, RecurrenceCostExplanation, RecurrenceError, RecurrenceProfile, RootRecurrence,
