@@ -229,6 +229,21 @@ using workload demand, window/freshness requirements and supported physical
 implementations. Backend selection uses runtime feasibility and cost after
 physical compilation. The following example follows one candidate.
 
+Candidate generation and selection are separate steps. For every unique summary
+state, enumeration reports each lifecycle (ephemeral, prepared, shared,
+continuously maintained) as legal, with a Planner cost or explicitly unknown
+cost, or as rejected with a reason. Planner does not remove a legal alternative
+because its own estimate prefers another. A deployment prices the legal
+alternatives over the whole workload, counting shared state once, and binds one
+lifecycle per state. Binding checks that the choice is legal and that states on
+one maintenance path share an evaluation schedule. An alternative whose cost is
+unknown can be bound only when the deployment's cost model is authoritative for
+complete-candidate cost; unknown cost is never treated as zero. It then yields the same
+lifecycle guarantee and window framework the physical compiler consumes when
+Planner selects. Planner's own cheapest-alternative selection remains available
+for callers without deployment pricing. The window framework is decided for the
+complete combination, not for one alternative in isolation.
+
 For the running example, assume it selects:
 
 ```text
