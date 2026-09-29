@@ -318,3 +318,80 @@ fn compiled_constant_needs_no_deployment_source() {
     let result = run_inputs(graph, vec![]).unwrap();
     assert!(matches!(result[0][0], Value::Float64(3.)));
 }
+
+// Scalar broadcasting cannot silently create duplicate result identities when
+// arithmetic or bool comparisons remove the metric name.
+#[test]
+fn scalar_broadcast_rejects_colliding_result_labels_after_recovery() {
+    use planner_types::{
+        post_asap::BinaryOperator,
+        pre_asap::{ArithmeticOpKind, BinaryOpKind, CompareOpKind},
+    };
+    for left_scalar in [false, true] {
+        for names in [["a", "a"], ["a", "b"]] {
+            for (kind, return_bool) in [
+                (BinaryOpKind::Arithmetic(ArithmeticOpKind::Add), false),
+                (BinaryOpKind::Compare(CompareOpKind::Gt), true),
+            ] {
+                let graph = compile_binary(
+                    &BinaryOperator {
+                        kind,
+                        vector_match: None,
+                        checked_relative_division: false,
+                        checked_finite_division: false,
+                    },
+                    return_bool,
+                    left_scalar,
+                    !left_scalar,
+                )
+                .unwrap();
+                let vector = Batch::try_new(
+                    vector_schema(),
+                    vec![
+                        row(&[("__name__", names[0]), ("job", "api")], 2.),
+                        row(&[("__name__", names[1]), ("job", "api")], 3.),
+                    ],
+                )
+                .unwrap();
+                let scalar =
+                    Batch::try_new(scalar_schema(), vec![vec![Value::Float64(1.)]]).unwrap();
+                let result = run_inputs(
+                    graph,
+                    if left_scalar {
+                        vec![scalar, vector]
+                    } else {
+                        vec![vector, scalar]
+                    },
+                );
+                assert!(result.is_err(), "duplicate output label sets were accepted");
+            }
+        }
+    }
+    let graph = compile_binary(
+        &BinaryOperator {
+            kind: BinaryOpKind::Compare(CompareOpKind::Gt),
+            vector_match: None,
+            checked_relative_division: false,
+            checked_finite_division: false,
+        },
+        false,
+        false,
+        true,
+    )
+    .unwrap();
+    let rows = vec![
+        row(&[("__name__", "a"), ("job", "api")], 2.),
+        row(&[("__name__", "b"), ("job", "api")], 3.),
+    ];
+    equal_rows(
+        run_inputs(
+            graph,
+            vec![
+                Batch::try_new(vector_schema(), rows.clone()).unwrap(),
+                Batch::try_new(scalar_schema(), vec![vec![Value::Float64(1.)]]).unwrap(),
+            ],
+        )
+        .unwrap(),
+        rows,
+    );
+}
