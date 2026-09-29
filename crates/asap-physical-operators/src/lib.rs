@@ -1,4 +1,5 @@
-//! Shared physical operators. This layer holds summary kernels and typed values.
+//! Shared physical operators: summary kernels, typed values, native operators
+//! and the DAG runtime.
 
 pub mod key_by_label_values;
 pub mod measurement;
@@ -20,3 +21,11 @@ pub use planner_types as planner;
 mod error;
 pub use error::Error;
 pub mod values;
+
+pub use expressions::arithmetic;
+pub mod expressions;
+pub mod operators;
+pub mod plan;
+pub mod readout;
+pub mod runtime;
+pub mod sources;
