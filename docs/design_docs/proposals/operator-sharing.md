@@ -71,9 +71,16 @@ pub fn derive_guarantees(
   evidence: &dyn AccuracyEvidenceProvider,  // evidence provider used for derivation
   memo: &mut DerivationMemo,
 ) -> Result<Rc<Operator>, AccuracyError>;
-/// Build the execution timing of one DAG root by derivation
+/// Build the execution timing of one DAG root by derivation; the root runs at query time
 pub fn derive_timings(
   root: &Rc<Operator>,
+  memo: &mut DerivationMemo,
+) -> Result<Rc<Operator>, ExecutionDataStateError>;
+/// Same, with the root's timing given, e.g. `IngestionTime` for a maintenance candidate
+/// (like today's `validate_execution_data_states_at`)
+pub fn derive_timings_at(
+  root: &Rc<Operator>,
+  root_timing: ExecutionTiming,
   memo: &mut DerivationMemo,
 ) -> Result<Rc<Operator>, ExecutionDataStateError>;
 ```
@@ -228,7 +235,7 @@ impl Field {
 
 A guarantee is filled in two steps:
 
-1. **Binding** records local accuracy guarantee: a `SummaryEstimate`'s `local_guarantee` (the sketch's error over an exact input) and an exact `SummaryAgg`'s `exact_rule`. No `guarantee` slot is set yet.
+1. **Binding** records local accuracy guarantee: a `SummaryEstimate`'s `local_guarantee` (the sketch's error over an exact input) and an exact `SummaryAgg`'s `exact_rule`. No `guarantee` slot is set yet. To size a sketch and check its target, binding still needs the child's error, as today: it runs `derive_guarantees` on the child with a fresh memo, reads the result, and drops it.
 2. **`derive_guarantees`** fills every slot bottom-up: a node without an `ASAP` descendant is exact, and every other node composes its children's guarantees by its own rule.
 
 ```
@@ -243,7 +250,7 @@ Per node kind:
 | Node | Today | After |
 |---|---|---|
 | `SummaryEstimate` | stored at binding: the sketch's own error composed with the child's (`compose_guarantee`) | **derived**: `local_guarantee` composed with the child's. `local_guarantee` is set at binding: the sketch's error over an exact input, `None` when the model has no error model for the family |
-| `SummaryAgg` | stored: ExactAggregate family composed with the child's; sketch families `None` | **derived**: ExactAggregate family: exact, composed with the child's under `exact_rule`; sketch families `Set(None)`, state has no guarantee |
+| `SummaryAgg` | stored: ExactAggregate family composed with the child's; sketch families `None` | **derived**: ExactAggregate family: exact, composed with the child's under `exact_rule`, except `ExactKind::Count`, exact whatever the child (as today); sketch families `Set(None)`, state has no guarantee |
 | `NonASAPOp` | pre-ASAP `QueryExpr`: none<br>post-ASAP `KeepPreAsap`: exact<br>post-ASAP `ValueOperation` / `BinaryOp` / `RelationalJoin` copies: composed at construction | **derived**: composed from the children; exact if no `ASAP` descendant |
 | `FinalizeExactAccumulator` | copies the child's | **derived**: the child's |
 | `MaintainPopulation` / `ReadPopulation` | stored: exact | **derived**: exact |
@@ -362,7 +369,9 @@ shared with other queries.
 ```rust
 fn assemble(&self, t: &Rc<Operator>) -> Rc<Operator> {
     memo by ptr;                                          // shared children stay one Rc
-    match self.chosen(t) {
+    let chosen = if query_time_nested_sum(t) { None }     // as today: keep the outer SUM so the
+                 else { self.chosen(t) };                 // inner target's own choice is assembled
+    match chosen {
         Some(Subtree(r))           => r,                  // a complete plan, used as is
         Some(ExactComposition{..}) => composition.plan,
         None => t.map_children(|c| if is_target(c) { self.assemble(c) } else { c }),
@@ -379,8 +388,8 @@ on that result, as today: lifecycle planning holds `Rc`s into the plan and reads
 root's guarantee, so it must see the derived tree.
 
 - **Illegal child** (e.g. a query-time `SummaryEstimate` under a `SummaryAgg`): candidates
-  are checked when built, as `relink_summary` does today
-  (`validate_execution_data_states_at`). An error from `derive_timings` after assembly is
+  are checked when built with `derive_timings_at(candidate, placement's timing)`, as
+  `relink_summary` does today with `validate_execution_data_states_at`. An error from `derive_timings` after assembly is
   a bug, and planning fails with that error.
 - **A shared subtree read at two timings**, e.g. a query-time `Aggregate` and an
   ingestion-time `SummaryAgg` reading one `Scan`: both choices are legal, only the sharing
@@ -484,7 +493,7 @@ lowering plus a `DagInput` arm (an incoming edge as a materialized table); the
 | 1 Split | [decoupling doc](decoupling_op_and_expr.md): `NonASAPOp` + `ScalarExpr`; children stay `Rc<NonASAPOp>` | scalar code ([decoupling doc §3](decoupling_op_and_expr.md#3-changes)) |
 | 2 Two levels | §1.1, §1.4: `Operator<C>`, an empty `ASAPOp`, `contains_asap()`, `expect_non_asap()`; child slots become `Rc<Operator<C>>`; every variant gets `timing` / `guarantee` slots, and nodes are built through constructors that leave both `Unset` | every crate; the same mechanical change everywhere |
 | 3 One schema | §2.1: `Column` → `Field` and `Schema.columns` → `fields` (serde keeps the name `columns` until stage 4); `FieldType`, `ASAPType`, `PlainField`, `Schema` everywhere except the `executable_dag.rs` wire types, which keep `SummarySchema` until stage 4. **No wire change** | `asap-types` + schema construction in every crate |
-| 4 New types | fill `ASAPOp`; `ASAP` arms of `output_schema`; `derive_guarantees` and `derive_timings` (§2.2, §5); the entry check (§3); `flatten(&SummaryNode) -> Rc<Operator>` so export runs on the new types; wire types become `Schema`, and `Schema.fields` serializes as `fields`. Wire → 6. **The only wire-breaking stage**; merged together with ASAPQuery-backend and ASAPCollector | `asap-types`, `devtools`, viewer |
+| 4 New types | fill `ASAPOp`; `ASAP` arms of `output_schema`; `derive_guarantees` and `derive_timings` (§2.2, §5); the entry check (§3); `flatten(&SummaryNode) -> Rc<Operator>` so export runs on the new types, copying each node's guarantee and today's derived timing into the slots, so the export is unchanged; wire types become `Schema`, and `Schema.fields` serializes as `fields`. Wire → 6. **The only wire-breaking stage**; merged together with ASAPQuery-backend and ASAPCollector | `asap-types`, `devtools`, viewer |
 | 5 Planner | §4: candidates and assembly on `Rc<Operator>`; §7 moves to the new types; delete `flatten` | `asap-aware-mapping` |
 | 6 Cleanup | delete `SummaryExpr`, `SummaryNode`, extra `ValueOperation` variants, `ExactOperation`, `post_asap/cse.rs`; update `post-asap-ir.md`, `physical-plan-integration.md`, developer and viewer docs | docs |
 

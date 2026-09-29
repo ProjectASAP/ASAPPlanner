@@ -6,8 +6,7 @@
 > approximate, measured on `main` at `8acb472`.
 
 **The idea.** `QueryExpr` holds two different kinds of node in one enum. This proposal
-splits it into `NonASAPOp` (operators) and `ScalarExpr` (scalar expressions), so the
-field a node sits in decides its type.
+splits it into `NonASAPOp` (operators) and `ScalarExpr` (scalar expressions).
 
 ```
 Today                                        Proposed
