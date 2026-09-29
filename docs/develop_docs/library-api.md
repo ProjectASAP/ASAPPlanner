@@ -267,6 +267,29 @@ they are not necessarily a globally sortable physical-cost scalar. Unavailable
 cost alternatives may remain for explanation. Inspect eligibility and evidence
 before physical selection; do not treat their presence as deployment permission.
 
+### Enumerate candidate DAGs per root
+
+```text
+PlanSpace::enumerate_candidate_dags_for_root(&self, id: &Id, expansion_limit: usize)
+    -> Result<CandidateDagInventory<Id>, RealizationError>
+```
+
+Returns every distinct finalized DAG for one root, unranked; other roots'
+choices are not multiplied in. Exceeding `expansion_limit` is an error, never a
+partial inventory.
+
+For PromQL roots that carry a target, `search_workload_with_targets` also asks
+each strategy's `ReplacementStrategy::propose_for_root`. `SketchAlgorithmStrategy`
+answers with physical alternatives over rows carrying the complete series
+identity (`$promql_series_identity`): current-series TopK, fixed-window and
+query-time Rate aggregation, and realizations over per-series Rate state. They
+are finalized, deduplicated, and marked
+`ReplacementProvenance::RootPhysicalRealization`. Callers do not apply
+`with_series_identity` or call the proposal methods themselves. Compile each
+alternative with the matching `promql_rows::compile_*` function; queries without
+such an alternative keep their previous inventory. `global_selection` never
+commits these candidates; the backend compiles and prices them.
+
 ## Choose strategies and models
 
 ### Strategy options
