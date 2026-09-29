@@ -295,8 +295,14 @@ fn fragment(
                                 .output_schema
                                 .fields
                                 .get(*key)
+                                .filter(|field| {
+                                    !field.nullable
+                                        && field.dtype == SummaryFamilyType::Plain(DataType::Utf8)
+                                })
                                 .map(|f| f.name.clone())
-                                .ok_or_else(|| invalid("summary grouping column is missing"))
+                                .ok_or_else(|| {
+                                    invalid("summary grouping must identify population labels")
+                                })
                         })
                         .collect::<Result<Vec<_>, _>>()?,
                     without: keys.is_without(),

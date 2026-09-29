@@ -106,6 +106,17 @@ fn finalized_shared_panes_rebuild_one_global_summary_after_recovery() {
             edges,
             root: PostAsapNodeId(3),
         };
+        let mut invalid_grouping = dag.clone();
+        let ExecutableOperatorPayload::SummaryAgg { reduction, .. } =
+            &mut invalid_grouping.nodes[3].payload
+        else {
+            unreachable!()
+        };
+        *reduction = Reduction::Reduce(GroupKeys::by(vec![0]));
+        assert!(
+            precompute::compile(&invalid_grouping, &[0], &[3]).is_err(),
+            "numeric values cannot be reinterpreted as population labels"
+        );
         let program = precompute::compile(&dag, &[0], &[3]).unwrap();
         let program = CompiledPhysicalDag::decode(&program.encode().unwrap()).unwrap();
         assert_eq!(program.input_contracts().count(), 1);
