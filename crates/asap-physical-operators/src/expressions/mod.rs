@@ -16,6 +16,12 @@ pub enum Expression {
     },
     Planner(Box<crate::expressions::CompiledExpression>),
     Column(usize),
+    ExactFloat64(usize),
+    LabelSet {
+        column: usize,
+        labels: Vec<String>,
+        without: bool,
+    },
     Literal {
         value: Value,
         dtype: DataType,
@@ -75,6 +81,36 @@ impl Expression {
             Planner(expression) => {
                 expression.validate_input(input)?;
                 Ok(expression.dtype())
+            }
+            ExactFloat64(column) => {
+                let (dtype, nullable) = plain(input, *column)?;
+                if nullable || !matches!(dtype, DataType::Int64 | DataType::Float64) {
+                    return Err(invalid(
+                        "exact Float64 conversion requires non-null numeric input",
+                    ));
+                }
+                Ok((DataType::Float64, false))
+            }
+            LabelSet { column, labels, .. } => {
+                let (dtype, nullable) = plain(input, *column)?;
+                let expected = DataType::Map {
+                    key: Box::new(DataType::Utf8),
+                    value: Box::new(DataType::Utf8),
+                    value_nullable: false,
+                };
+                if dtype != &expected
+                    || nullable
+                    || labels
+                        .iter()
+                        .collect::<std::collections::BTreeSet<_>>()
+                        .len()
+                        != labels.len()
+                {
+                    return Err(invalid(
+                        "label projection requires a non-null Utf8 map and unique label names",
+                    ));
+                }
+                Ok((expected, false))
             }
             Column(i) => {
                 let (t, n) = plain(input, *i)?;
@@ -142,6 +178,52 @@ impl Expression {
     pub(crate) fn evaluate(&self, row: &[Value]) -> Result<Value, Error> {
         use Expression::*;
         Ok(match self {
+            ExactFloat64(column) => match row[*column] {
+                Value::Float64(value) => Value::Float64(value),
+                Value::Int64(value) if value.unsigned_abs() <= (1u64 << 53) => {
+                    Value::Float64(value as f64)
+                }
+                _ => {
+                    return Err(invalid(
+                        "numeric result cannot be represented exactly as Float64",
+                    ))
+                }
+            },
+            LabelSet {
+                column,
+                labels,
+                without,
+            } => {
+                let Value::Map(entries) = &row[*column] else {
+                    return Err(invalid("label projection requires a map"));
+                };
+                let mut selected = std::collections::BTreeMap::new();
+                let mut seen = std::collections::BTreeSet::new();
+                for (key, value) in entries.iter() {
+                    let (Value::Utf8(key), Value::Utf8(value)) = (key, value) else {
+                        return Err(invalid("label projection requires Utf8 entries"));
+                    };
+                    if !seen.insert(key.clone()) {
+                        return Err(invalid("duplicate label name"));
+                    }
+                    let keep = if *without {
+                        key.as_ref() != "__name__"
+                            && !labels.iter().any(|label| label.as_str() == key.as_ref())
+                    } else {
+                        labels.iter().any(|label| label.as_str() == key.as_ref())
+                    };
+                    if keep && !value.is_empty() {
+                        selected.insert(key.clone(), value.clone());
+                    }
+                }
+                Value::Map(
+                    selected
+                        .into_iter()
+                        .map(|(k, v)| (Value::Utf8(k), Value::Utf8(v)))
+                        .collect::<Vec<_>>()
+                        .into(),
+                )
+            }
             Binary {
                 operator,
                 left,

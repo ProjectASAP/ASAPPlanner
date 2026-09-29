@@ -26,6 +26,7 @@ mod projection;
 mod sort;
 mod source;
 mod summary;
+pub(crate) mod vector_binary;
 pub use aggregate::Reduction;
 pub use sort::SortKey;
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
@@ -49,6 +50,10 @@ enum Kind {
     Union,
     VectorToScalar {
         column: usize,
+    },
+    VectorBinary {
+        operator: planner_types::post_asap::BinaryOperator,
+        return_bool: bool,
     },
     Project(Vec<Expression>),
     Filter(Expression),
@@ -209,6 +214,7 @@ impl PhysicalOperator<Batch, Schema> for Operator {
         matches!(
             self.kind,
             Kind::Sort { .. }
+                | Kind::VectorBinary { .. }
                 | Kind::CurrentSeries { .. }
                 | Kind::Aggregate { .. }
                 | Kind::Window { .. }
@@ -251,6 +257,7 @@ impl PhysicalOperator<Batch, Schema> for Operator {
             Kind::Union => "Union",
             Kind::CurrentSeries { .. } => "CurrentSeries",
             Kind::VectorToScalar { .. } => "VectorToScalar",
+            Kind::VectorBinary { .. } => "VectorBinary",
             Kind::Project(_) => "Project",
             Kind::Filter(_) => "Filter",
             Kind::Limit { .. } => "Limit",
@@ -288,6 +295,7 @@ impl PhysicalOperator<Batch, Schema> for Operator {
             Kind::Source(_) | Kind::Union | Kind::VectorToScalar { .. } => {
                 source::execute(self, inputs, context)
             }
+            Kind::VectorBinary { .. } => vector_binary::execute(self, inputs, context),
             Kind::Project(_) => projection::execute(self, inputs, context),
             Kind::CurrentSeries { .. } => current_series::execute(self, inputs, context),
             Kind::PaneInput { .. } | Kind::ScopeTimestamp { .. } => {

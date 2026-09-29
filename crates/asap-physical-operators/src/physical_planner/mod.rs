@@ -29,6 +29,7 @@ fn invalid(message: impl Into<String>) -> Error {
 pub type Source<'a> = Box<dyn PhysicalOperator<Batch, Schema> + 'a>;
 
 pub mod promql_rows;
+pub mod promql_values;
 
 mod candidates;
 pub use candidates::{
@@ -391,6 +392,12 @@ pub fn compile_node(node: &ExecutableDagNode, inputs: &[Schema]) -> Result<Opera
 }
 
 fn bind_operation(node: &ExecutableDagNode, inputs: &[Schema]) -> Result<Operator, Error> {
+    if let Payload::Binary { operator } = &node.payload {
+        let [left, right] = inputs else {
+            return Err(invalid("binary requires two inputs"));
+        };
+        return Operator::vector_binary(left.clone(), right.clone(), operator.clone(), false);
+    }
     if let Payload::RelationalJoin {
         join_kind,
         pred,
