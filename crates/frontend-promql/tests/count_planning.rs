@@ -9,7 +9,7 @@ use asap_aware_mapping::{
 };
 mod support;
 use asap_types::post_asap::{
-    compile_executable_dag, ExactKind, ExecutableOperatorPayload, NonNegativeWeightProof,
+    compile_post_asap_dag, ExactKind, NonNegativeWeightProof, PostAsapOperatorPayload,
     SketchAlgorithm, SummaryExpr, SummaryFamilyType, SummaryInputExpr, WeightDomain,
 };
 use asap_types::types::AccuracyTarget;
@@ -98,13 +98,13 @@ fn frequency_count_candidates_use_unit_weights() {
             ) {
                 continue;
             }
-            let dag = compile_executable_dag(node).unwrap();
+            let dag = compile_post_asap_dag(node).unwrap();
             assert!(
                 dag.nodes.iter().any(|node| matches!(
                     &node.payload,
-                    ExecutableOperatorPayload::SummaryAgg { input: actual, .. } if actual == input
+                    PostAsapOperatorPayload::SummaryAgg { input: actual, .. } if actual == input
                 )),
-                "executable DAG must preserve the count update contract"
+                "post-ASAP DAG must preserve the count update contract"
             );
             algorithms.push(kind.algorithm().clone());
             assert!(input.item.is_some(), "frequency keys must be explicit");
@@ -235,12 +235,12 @@ fn cms_count_updates_total_ten_for_zero_positive_and_negative_samples() {
             let Replacement::Summary(node) = &candidate.replacement else {
                 return None;
             };
-            let dag = compile_executable_dag(node).unwrap();
+            let dag = compile_post_asap_dag(node).unwrap();
             dag.nodes
                 .iter()
                 .any(|node| {
                     matches!(&node.payload,
-            ExecutableOperatorPayload::SummaryAgg { family: SummaryFamilyType::Sketch(kind, _), .. }
+            PostAsapOperatorPayload::SummaryAgg { family: SummaryFamilyType::Sketch(kind, _), .. }
                 if kind.algorithm() == &SketchAlgorithm::Cms)
                 })
                 .then_some(dag)
@@ -250,7 +250,7 @@ fn cms_count_updates_total_ten_for_zero_positive_and_negative_samples() {
         .nodes
         .iter()
         .find_map(|node| match &node.payload {
-            ExecutableOperatorPayload::SummaryAgg { input, .. } => Some(input),
+            PostAsapOperatorPayload::SummaryAgg { input, .. } => Some(input),
             _ => None,
         })
         .unwrap();

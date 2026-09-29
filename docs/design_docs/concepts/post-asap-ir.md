@@ -55,19 +55,30 @@ approximate readouts still require composed accuracy guarantees. See the
 and [physical-plan integration](../architecture/physical-plan-integration.md)
 for the corresponding correctness and realization requirements.
 
+## Tree and exported DAG forms
+
+The Pre-ASAP DAG and the Post-ASAP DAG are both logical: they describe what is
+computed, not which physical operators execute it. The Post-ASAP DAG has two
+forms of the same content. Planning builds and shares `SummaryNode` trees.
+`compile_post_asap_dag` converts a selected tree into a
+[`PostAsapDag`](../../../crates/types/src/post_asap/post_asap_dag.rs) with
+stable node IDs and typed edges; `PostAsapDagDocument` is its versioned wire
+envelope. Physical compilation consumes `PostAsapDag` and produces a separate
+physical DAG.
+
 ## Execution phase
 
-A physical operator defines what computation happens. The plan decides when it
+An operator defines what computation happens. The plan decides when it
 happens: **ingestion time** or **query time**. Operator identity must not imply
 one of these phases. Backend capability restrictions are implementation gaps,
 not definitions of the operator.
 
-Every executable physical payload supports both phase assignments. Phase is
-stored on the physical node, independently of its operator payload.
-`ExecutableDag::with_execution_phases` assigns a phase to every node and updates
+Every post-ASAP operator payload supports both phase assignments. Phase is
+stored on the `PostAsapDag` node, independently of its operator payload.
+`PostAsapDag::with_execution_phases` assigns a phase to every node and updates
 its edges. Ingestion work cannot depend on a future query result. Default
 semantic realization still proposes an initial layout; it does not restrict
-which phase a physical operator may use. Deployments must separately check that
+which phase an operator may use. Deployments must separately check that
 they have an implementation and a valid data source for the chosen placement.
 
 ## Weighted grouped TopK
@@ -100,7 +111,7 @@ approximate output path merely because its selected identities are certified.
 
 Deployment chooses ingestion time or query time for these operators. The
 semantic constructor proposes a layout; `with_execution_phases` assigns the
-executable placement. Either deployment must give each evaluation a complete
+placement. Either deployment must give each evaluation a complete
 rate window and an isolated summary state, or maintain an equivalent replacement
 strategy. Appending successive rate snapshots to one cumulative state is invalid.
 An ingestion execution can compute a window before the query and store its state;
