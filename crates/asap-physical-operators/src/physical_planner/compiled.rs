@@ -126,7 +126,7 @@ impl CompiledPhysicalDag {
     pub fn encode(&self) -> Result<Vec<u8>, Error> {
         self.validate()?;
         let bytes = serde_json::to_vec(&StoredDag {
-            version: 1,
+            version: 2,
             nodes: self.nodes.clone(),
             roots: self.roots.clone(),
         })
@@ -139,7 +139,7 @@ impl CompiledPhysicalDag {
     pub fn decode(bytes: &[u8]) -> Result<Self, Error> {
         let stored: StoredDag =
             serde_json::from_slice(bytes).map_err(|error| invalid(error.to_string()))?;
-        if stored.version != 1 {
+        if stored.version != 2 {
             return Err(invalid("unsupported physical plan format"));
         }
         let result = Self {
@@ -203,6 +203,13 @@ impl CompiledPhysicalDag {
     }
 
     /// Selected operator name, for plan inspection without decoding its wire format.
+    /// Certified candidate pruning checks authoritative-key coverage inside this operator.
+    pub fn certified_pruning_keys(&self, id: NodeId) -> Option<&[(usize, usize)]> {
+        match self.nodes.get(&id)? {
+            Node::Operator { operator, .. } => operator.certified_pruning_keys(),
+            Node::Input(_) => None,
+        }
+    }
     pub fn operator_name(&self, id: NodeId) -> Option<&str> {
         match self.nodes.get(&id)? {
             Node::Input(_) => Some("Input"),

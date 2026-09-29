@@ -81,7 +81,17 @@ impl TryFrom<StoredOperator> for Operator {
                 let names = output.fields[groups.len()..].iter().map(|f| f.name.clone());
                 Operator::aggregate(input(0)?, groups, names.zip(measures).collect())?
             }
-            Kind::SemiJoin { keys } => Operator::semi_join(input(0)?, input(1)?, keys)?,
+            Kind::SemiJoin {
+                keys,
+                require_complete_right,
+            } => {
+                let operator = Operator::semi_join(input(0)?, input(1)?, keys)?;
+                if require_complete_right {
+                    operator.require_complete_right()
+                } else {
+                    operator
+                }
+            }
             Kind::Join { kind, predicate } => Operator::relational_join(
                 input(0)?,
                 input(1)?,
