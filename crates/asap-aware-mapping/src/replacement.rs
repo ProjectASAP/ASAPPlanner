@@ -560,6 +560,12 @@ pub enum ReplacementProvenance {
     /// [`Replacement::ExactComposition`] with
     /// [`OperationPlacement::Maintenance`] (issue #171).
     ValueOperationAtIngestionTime,
+    /// A finalized whole-query result over a physical row representation
+    /// the logical children do not share (see
+    /// [`ReplacementStrategy::propose_for_root`]). Assembly uses it verbatim,
+    /// and default selection never commits it: only deployment compiles and
+    /// prices it.
+    RootPhysicalRealization,
 }
 
 /// A candidate a strategy considered for a target but refused to propose on
@@ -633,6 +639,14 @@ pub trait ReplacementStrategy {
             rejected: Vec::new(),
             domain_error: None,
         }
+    }
+
+    /// Whole-query alternatives for a workload root under its end-to-end
+    /// `target`. These may change the root's physical row representation, so
+    /// [`search_workload_with_targets`] asks only workload roots, once each.
+    /// Default: none.
+    fn propose_for_root(&self, _root: &Rc<QueryExpr>, _target: &AccuracyTarget) -> Proposals {
+        Proposals::default()
     }
 }
 
@@ -1704,6 +1718,73 @@ impl ReplacementStrategy for SketchAlgorithmStrategy<'_> {
 
     fn propose(&self, target: &TargetSubDAG<'_>) -> Proposals {
         self.propose_with(target.root, None)
+    }
+
+    /// Physical alternatives over rows that carry the complete PromQL series
+    /// identity: current-series TopK, fixed-window and query-time Rate
+    /// aggregation, and ordinary realizations over per-series Rate state.
+    /// Each is a finalized query result for the identity-carrying root.
+    fn propose_for_root(&self, root: &Rc<QueryExpr>, target: &AccuracyTarget) -> Proposals {
+        let Ok(typed) = asap_types::pre_asap::schema::with_promql_series_identity(root) else {
+            return Proposals::default();
+        };
+        let typed = Rc::new(typed);
+        let mut proposals = self.current_series_topk_candidates(&typed, target);
+        let mut direct = self.propose_with(&typed, None).candidates;
+        // Other identity-carrying realizations duplicate the logical root's.
+        direct.retain(|candidate| {
+            matches!(&candidate.replacement, Replacement::Summary(node) if has_series_rate_frontier(node))
+        });
+        // Rejections from the shared enumeration repeat the logical root's own.
+        let candidates = std::mem::take(&mut proposals.candidates)
+            .into_iter()
+            .chain(self.fixed_window_rate_candidates(&typed).candidates)
+            .chain(
+                self.query_time_rate_aggregation_candidates(&typed)
+                    .candidates,
+            )
+            .chain(direct);
+        for mut candidate in candidates {
+            let Replacement::Summary(node) = candidate.replacement else {
+                continue;
+            };
+            let Ok(node) = finalize_query_candidate(node, &typed) else {
+                continue;
+            };
+            let duplicate = proposals.candidates.iter().any(|existing| {
+                matches!(&existing.replacement, Replacement::Summary(other) if *other == node)
+            });
+            if !duplicate {
+                candidate.replacement = Replacement::Summary(node);
+                candidate.provenance = ReplacementProvenance::RootPhysicalRealization;
+                proposals.candidates.push(candidate);
+            }
+        }
+        proposals
+    }
+}
+
+/// Exact per-series Rate state over raw samples: the frontier at which
+/// deployment binds complete, identity-keyed counter states.
+fn has_series_rate_frontier(node: &SummaryNode) -> bool {
+    match &node.expr {
+        SummaryExpr::SummaryAgg {
+            family: SummaryFamilyType::ExactAggregate(ExactKind::Rate, _),
+            reduction: Reduction::PerEntity,
+            child,
+            ..
+        } if matches!(&child.expr, SummaryExpr::KeepPreAsap(source)
+            if matches!(source.as_ref(), QueryExpr::TimeRange { .. })) =>
+        {
+            true
+        }
+        SummaryExpr::ValueOperation { child, .. } | SummaryExpr::SummaryAgg { child, .. } => {
+            has_series_rate_frontier(child)
+        }
+        SummaryExpr::SummaryEstimate { summary_input, .. } => {
+            has_series_rate_frontier(summary_input)
+        }
+        _ => false,
     }
 }
 
@@ -5203,6 +5284,14 @@ impl<'a> GlobalSelection<'a> {
         if let Some(node) = self.assembled_nodes.borrow().get(&ptr) {
             return Ok(Rc::clone(node));
         }
+        if let Some(ReplacementSubDAG {
+            replacement: Replacement::Summary(node),
+            provenance: ReplacementProvenance::RootPhysicalRealization,
+            ..
+        }) = self.groups.get(&ptr).and_then(|selection| selection.chosen)
+        {
+            return Ok(Rc::clone(node));
+        }
         let selected_composed_summary = self
             .groups
             .get(&ptr)
@@ -5966,7 +6055,8 @@ fn is_cse_candidate(candidate: &ReplacementSubDAG) -> bool {
 }
 
 fn is_automatically_selectable(candidate: &ReplacementSubDAG, cost_model: &dyn CostModel) -> bool {
-    !candidate.has_missing_accuracy_evidence()
+    candidate.provenance != ReplacementProvenance::RootPhysicalRealization
+        && !candidate.has_missing_accuracy_evidence()
         && candidate.runtime_support_evidence(cost_model) != Some(false)
 }
 
@@ -6468,6 +6558,28 @@ pub fn search_workload_with_targets<'s, Id>(
         .zip(targets)
         .filter_map(|((_, root), target)| target.map(|t| (Rc::as_ptr(root), t)))
         .collect();
+    // Whole-root proposals join the root group before its target check.
+    for (index, (ptr, target)) in root_ptrs.iter().enumerate() {
+        if root_ptrs[..index].contains(&(*ptr, target.clone())) {
+            continue;
+        }
+        let group = space.groups.get_mut(ptr).expect("every root has a group");
+        let root = Rc::clone(&group.target);
+        for strategy in strategies {
+            let name = strategy.name();
+            let proposals = strategy.propose_for_root(&root, target);
+            for mut candidate in proposals.candidates {
+                candidate.strategy = name;
+                group.add_candidate(candidate);
+            }
+            group
+                .rejected
+                .extend(proposals.rejected.into_iter().map(|mut rejection| {
+                    rejection.strategy = name;
+                    rejection
+                }));
+        }
+    }
     let mut composition_targets: HashMap<_, Vec<_>> = HashMap::new();
     for (ptr, target) in root_ptrs {
         composition_targets
