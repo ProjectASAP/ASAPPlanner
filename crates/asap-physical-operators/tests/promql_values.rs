@@ -395,3 +395,96 @@ fn scalar_broadcast_rejects_colliding_result_labels_after_recovery() {
         rows,
     );
 }
+
+// Persisted exact readout graphs, rather than the storage adapter, merge panes,
+// finalize each population, and preserve the requested metric-name semantics.
+#[test]
+fn exact_state_readouts_recover_and_finalize_panes() {
+    use asap_physical_operators::factory::create_planner_accumulator;
+    use planner_types::post_asap::*;
+    use std::sync::Arc;
+    for (kind, params, expected) in [
+        (ExactKind::Sum, ExactParams::Sum, 12.),
+        (ExactKind::Count, ExactParams::Count, 4.),
+        (ExactKind::Min, ExactParams::Min, 1.),
+        (ExactKind::Max, ExactParams::Max, 5.),
+    ] {
+        let family = SummaryFamilyType::ExactAggregate(kind, params);
+        for preserve in [false, true] {
+            let rows = [[1., 2.], [4., 5.]]
+                .into_iter()
+                .map(|samples| {
+                    let mut state = create_planner_accumulator(
+                        &family,
+                        &SummaryUpdate::column(ColumnRef::SampleValue),
+                        &GroupingStrategy::PerSubpopulationInstance,
+                    )
+                    .unwrap();
+                    for sample in samples {
+                        state.update_single(sample, 0);
+                    }
+                    let labels = row(&[("__name__", "m"), ("instance", "a")], 0.).remove(0);
+                    vec![
+                        labels,
+                        Value::Summary {
+                            family: family.clone(),
+                            state: Arc::from(state.into_accumulator()),
+                        },
+                    ]
+                })
+                .collect();
+            let output = run_inputs(
+                compile_exact_readout(family.clone(), 60_000, preserve).unwrap(),
+                vec![Batch::try_new(exact_state_schema(family.clone()).unwrap(), rows).unwrap()],
+            )
+            .unwrap();
+            let labels = if preserve {
+                vec![("__name__", "m"), ("instance", "a")]
+            } else {
+                vec![("instance", "a")]
+            };
+            equal_rows(output, vec![row(&labels, expected)]);
+        }
+    }
+}
+
+#[test]
+fn recovered_exact_counter_uses_window_and_omits_insufficient_samples() {
+    use asap_physical_operators::factory::create_planner_accumulator;
+    use planner_types::post_asap::*;
+    use std::sync::Arc;
+    for (kind, params, expected) in [
+        (ExactKind::Rate, ExactParams::Rate, 1.),
+        (ExactKind::Increase, ExactParams::Increase, 60.),
+    ] {
+        let family = SummaryFamilyType::ExactAggregate(kind, params);
+        let rows = [1, 2]
+            .into_iter()
+            .map(|count| {
+                let mut state = create_planner_accumulator(
+                    &family,
+                    &SummaryUpdate::column(ColumnRef::SampleValue),
+                    &GroupingStrategy::PerSubpopulationInstance,
+                )
+                .unwrap();
+                state.update_single(100., -50_000);
+                if count == 2 {
+                    state.update_single(140., -10_000);
+                }
+                vec![
+                    row(&[("instance", if count == 1 { "one" } else { "two" })], 0.).remove(0),
+                    Value::Summary {
+                        family: family.clone(),
+                        state: Arc::from(state.into_accumulator()),
+                    },
+                ]
+            })
+            .collect();
+        let output = run_inputs(
+            compile_exact_readout(family.clone(), 60_000, false).unwrap(),
+            vec![Batch::try_new(exact_state_schema(family).unwrap(), rows).unwrap()],
+        )
+        .unwrap();
+        equal_rows(output, vec![row(&[("instance", "two")], expected)]);
+    }
+}
