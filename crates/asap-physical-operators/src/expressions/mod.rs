@@ -17,6 +17,7 @@ pub enum Expression {
     Planner(Box<crate::expressions::CompiledExpression>),
     Column(usize),
     ExactFloat64(usize),
+    FiniteFloat64(Box<Expression>),
     LabelSet {
         column: usize,
         labels: Vec<String>,
@@ -81,6 +82,12 @@ impl Expression {
             Planner(expression) => {
                 expression.validate_input(input)?;
                 Ok(expression.dtype())
+            }
+            FiniteFloat64(expression) => {
+                if expression.dtype(input)? != (DataType::Float64, false) {
+                    return Err(invalid("finite update requires non-null Float64"));
+                }
+                Ok((DataType::Float64, false))
             }
             ExactFloat64(column) => {
                 let (dtype, nullable) = plain(input, *column)?;
@@ -178,6 +185,10 @@ impl Expression {
     pub(crate) fn evaluate(&self, row: &[Value]) -> Result<Value, Error> {
         use Expression::*;
         Ok(match self {
+            FiniteFloat64(expression) => match expression.evaluate(row)? {
+                Value::Float64(value) if value.is_finite() => Value::Float64(value),
+                _ => return Err(invalid("summary update must be finite")),
+            },
             ExactFloat64(column) => match row[*column] {
                 Value::Float64(value) => Value::Float64(value),
                 Value::Int64(value) if value.unsigned_abs() <= (1u64 << 53) => {
