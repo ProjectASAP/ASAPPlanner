@@ -12,15 +12,17 @@ impl Operator {
         })
     }
     pub fn scalar(value: Value, dtype: DataType) -> Result<Self, Error> {
-        let schema = schema(vec![result_field(
+        let output = schema(vec![result_field(
             "value",
-            dtype,
+            dtype.clone(),
             matches!(value, Value::Null),
         )]);
-        Self::source(
-            schema.clone(),
-            vec![Batch::try_new(schema, vec![vec![value]])?],
-        )
+        Batch::try_new(output.clone(), vec![vec![value.clone()]])?;
+        Ok(Self {
+            kind: Kind::Constant { value, dtype },
+            inputs: vec![],
+            output,
+        })
     }
     pub fn vector_to_scalar(input: Schema, column: usize) -> Result<Self, Error> {
         if plain(&input, column)? != (&DataType::Float64, false) {
@@ -51,6 +53,12 @@ pub(super) fn execute<'a>(
     let output = operator.output.clone();
     if let Kind::Source(batches) = &operator.kind {
         return Ok(futures::stream::iter(batches.iter().cloned().map(Ok)).boxed_local());
+    }
+    if let Kind::Constant { value, .. } = &operator.kind {
+        return Ok(futures::stream::once(async move {
+            Batch::try_new(output, vec![vec![value.clone()]])
+        })
+        .boxed_local());
     }
     if matches!(operator.kind, Kind::Union) {
         return Ok(futures::stream::select_all(inputs)

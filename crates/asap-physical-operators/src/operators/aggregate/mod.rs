@@ -159,7 +159,7 @@ pub(super) fn execute<'a>(
     .boxed_local())
 }
 
-mod temporal;
+pub(super) mod temporal;
 async fn reduce(
     rows: Vec<Vec<Value>>,
     groups: &[usize],

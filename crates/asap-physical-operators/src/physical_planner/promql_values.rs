@@ -8,6 +8,59 @@ pub fn vector_schema() -> Schema {
     crate::operators::vector_binary::value_schema(false)
 }
 
+pub fn matrix_schema() -> Schema {
+    crate::operators::vector_window::matrix_schema()
+}
+
+pub fn compile_scalar(value: f64) -> Result<CompiledPhysicalDag, Error> {
+    let operator = Operator::scalar(
+        crate::values::Value::Float64(value),
+        planner_types::pre_asap::DataType::Float64,
+    )?
+    .with_output_schema(scalar_schema())?;
+    CompiledPhysicalDag::from_operators(
+        BTreeMap::new(),
+        BTreeMap::from([(0, (vec![], operator))]),
+        vec![0],
+    )
+}
+
+pub fn compile_temporal(
+    intent: &AggIntent<ColumnRef>,
+    preserve_metric_name: bool,
+) -> Result<CompiledPhysicalDag, Error> {
+    let operator = Operator::range_window(intent.clone())?;
+    let mut operators = vec![operator];
+    if !preserve_metric_name {
+        operators.push(Operator::project(
+            vector_schema(),
+            vec![
+                (
+                    "labels".into(),
+                    Expression::LabelSet {
+                        column: 0,
+                        labels: vec![],
+                        without: true,
+                    },
+                ),
+                ("value".into(), Expression::Column(1)),
+            ],
+        )?);
+    }
+    unary(operators, matrix_schema())
+}
+
+pub fn compile_histogram_quantile() -> Result<CompiledPhysicalDag, Error> {
+    CompiledPhysicalDag::from_operators(
+        BTreeMap::from([
+            (0, InputContract::bounded(scalar_schema())),
+            (1, InputContract::bounded(vector_schema())),
+        ]),
+        BTreeMap::from([(2, (vec![0, 1], Operator::histogram_quantile()))]),
+        vec![2],
+    )
+}
+
 /// Compile before deployment chooses readers. Input slots 0 and 1 retain operand order.
 pub fn compile_binary(
     operator: &planner_types::post_asap::BinaryOperator,

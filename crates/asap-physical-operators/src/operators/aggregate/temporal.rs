@@ -13,7 +13,7 @@ use crate::{
 use planner_types::pre_asap::{AggIntent, ColumnRef};
 use std::collections::BTreeMap;
 
-pub(super) async fn reduce(
+pub(in crate::operators) async fn reduce(
     rows: Vec<Vec<Value>>,
     intent: &AggIntent<ColumnRef>,
     groups: &[usize],
