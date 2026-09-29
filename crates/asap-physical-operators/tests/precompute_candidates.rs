@@ -51,14 +51,14 @@ fn grouped_rate_space() -> asap_aware_mapping::PlanSpace<&'static str> {
     search_workload(vec![("grouped-rate", root)])
 }
 
-fn grouped_rate() -> ExecutableDag {
+fn grouped_rate() -> PostAsapDag {
     let space = grouped_rate_space();
     let selected = space
         .global_selection(&DefaultCostModel)
         .assemble_selected_dag(&space.roots[0].1)
         .unwrap()
         .unwrap();
-    compile_executable_dag(&selected).unwrap()
+    compile_post_asap_dag(&selected).unwrap()
 }
 fn run(plan: &CompiledPhysicalDag, inputs: BTreeMap<u64, Batch>, scope: Scope) -> Vec<Batch> {
     let sources = inputs
@@ -91,7 +91,7 @@ fn grouped_rate_can_be_materialized_before_or_after_grouped_sum() {
         .find(|node| {
             matches!(
                 node.payload,
-                ExecutableOperatorPayload::SummaryAgg {
+                PostAsapOperatorPayload::SummaryAgg {
                     family: SummaryFamilyType::ExactAggregate(ExactKind::Rate, _),
                     ..
                 }
@@ -104,7 +104,7 @@ fn grouped_rate_can_be_materialized_before_or_after_grouped_sum() {
         .find(|node| {
             matches!(
                 node.payload,
-                ExecutableOperatorPayload::Value {
+                PostAsapOperatorPayload::Value {
                     operation: ValueOperation::FinalizeExactAccumulator
                 }
             )
@@ -112,7 +112,7 @@ fn grouped_rate_can_be_materialized_before_or_after_grouped_sum() {
         .unwrap();
     let input_schema = Arc::new(state.output_schema.clone());
     let (family, update, grouping) = match &state.payload {
-        ExecutableOperatorPayload::SummaryAgg {
+        PostAsapOperatorPayload::SummaryAgg {
             family,
             input,
             grouping,
@@ -383,7 +383,7 @@ fn bounded_inventory_exposes_grouped_rate_physical_frontiers() {
         .find(|node| {
             matches!(
                 &node.payload,
-                ExecutableOperatorPayload::SummaryAgg {
+                PostAsapOperatorPayload::SummaryAgg {
                     family: SummaryFamilyType::ExactAggregate(ExactKind::Rate, _),
                     ..
                 }
@@ -417,11 +417,11 @@ fn enumerated_grouped_rate_candidates_execute_numeric_query_outputs() {
     let mut executed = 0;
     for forest in inventory.candidates {
         let root = &forest[0].1;
-        let dag = compile_executable_dag(root).unwrap();
+        let dag = compile_post_asap_dag(root).unwrap();
         let Some(state) = dag.nodes.iter().find(|node| {
             matches!(
                 node.payload,
-                ExecutableOperatorPayload::SummaryAgg {
+                PostAsapOperatorPayload::SummaryAgg {
                     family: SummaryFamilyType::ExactAggregate(ExactKind::Rate, _),
                     ..
                 }
@@ -435,7 +435,7 @@ fn enumerated_grouped_rate_candidates_execute_numeric_query_outputs() {
             .find(|node| {
                 matches!(
                     node.payload,
-                    ExecutableOperatorPayload::SummaryAgg {
+                    PostAsapOperatorPayload::SummaryAgg {
                         family: SummaryFamilyType::ExactAggregate(ExactKind::Sum, _),
                         ..
                     }
@@ -453,7 +453,7 @@ fn enumerated_grouped_rate_candidates_execute_numeric_query_outputs() {
             &[vec![], vec![boundary]],
         );
         let (family, input, grouping) = match &state.payload {
-            ExecutableOperatorPayload::SummaryAgg {
+            PostAsapOperatorPayload::SummaryAgg {
                 family,
                 input,
                 grouping,

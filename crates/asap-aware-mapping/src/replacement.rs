@@ -1374,18 +1374,18 @@ impl<'a> SketchAlgorithmStrategy<'a> {
             let Replacement::Summary(node) = &candidate.replacement else {
                 return false;
             };
-            let Ok(dag) = asap_types::post_asap::compile_executable_dag(node) else {
+            let Ok(dag) = asap_types::post_asap::compile_post_asap_dag(node) else {
                 return false;
             };
             if !dag.nodes.iter().any(|node| match &node.payload {
-                asap_types::post_asap::ExecutableOperatorPayload::SummaryAgg {
+                asap_types::post_asap::PostAsapOperatorPayload::SummaryAgg {
                     family: SummaryFamilyType::Sketch(kind, _),
                     ..
                 } => matches!(
                     kind.algorithm(),
                     SketchAlgorithm::CmsWithHeap | SketchAlgorithm::CountSketchWithHeap
                 ),
-                asap_types::post_asap::ExecutableOperatorPayload::SummaryAgg {
+                asap_types::post_asap::PostAsapOperatorPayload::SummaryAgg {
                     family: SummaryFamilyType::ExactAggregate(ExactKind::Sum, _),
                     ..
                 } => true,
@@ -1396,7 +1396,7 @@ impl<'a> SketchAlgorithmStrategy<'a> {
             let Some(placed) = place(node) else {
                 return false;
             };
-            if asap_types::post_asap::compile_executable_dag(&placed).is_err() {
+            if asap_types::post_asap::compile_post_asap_dag(&placed).is_err() {
                 return false;
             }
             let Ok(placed) = finalize_query_candidate(placed, root) else {
@@ -7079,7 +7079,7 @@ mod tests {
             .unwrap()
             .expect("exact ranking is legal for an approximate request");
         assert!(node.guarantee.as_ref().unwrap().is_exact());
-        asap_types::post_asap::compile_executable_dag(&node).unwrap();
+        asap_types::post_asap::compile_post_asap_dag(&node).unwrap();
     }
 
     // Exact Top-K consumes the Planner's maintained temporal values.

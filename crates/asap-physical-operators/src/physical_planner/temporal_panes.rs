@@ -45,7 +45,7 @@ pub struct TemporalPaneCandidate {
 /// This initial realization consumes complete pane populations and emits full
 /// state snapshots. Cross-run delta accumulation belongs to other candidates.
 pub fn compile_temporal_pane_candidate(
-    dag: &ExecutableDag,
+    dag: &PostAsapDag,
     inputs: BTreeMap<NodeId, InputContract>,
     roots: &[NodeId],
     maintenance: &TemporalPaneMaintenance,

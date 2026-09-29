@@ -1,7 +1,7 @@
 //! Persistable dependency closure using Planner's typed operation vocabulary.
 //! Node hashes are local semantic references, not executable or deployed IDs.
 use crate::post_asap::{
-    EdgeRole, ExecutableDag, ExecutableOperatorPayload, PostAsapNodeId, SummarySchema,
+    EdgeRole, PostAsapDag, PostAsapNodeId, PostAsapOperatorPayload, SummarySchema,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -90,13 +90,13 @@ fn role(role: EdgeRole) -> u8 {
 }
 
 impl SummarySemanticFragment {
-    pub fn from_stored_output(dag: &ExecutableDag, output: PostAsapNodeId) -> Result<Self, String> {
+    pub fn from_stored_output(dag: &PostAsapDag, output: PostAsapNodeId) -> Result<Self, String> {
         Self::export(dag, output, true)
     }
 
     /// All source names in this DAG resolve within this logical dataset.
     pub fn from_stored_output_in_dataset(
-        dag: &ExecutableDag,
+        dag: &PostAsapDag,
         output: PostAsapNodeId,
         dataset: LogicalDatasetIdentity,
     ) -> Result<Self, String> {
@@ -108,12 +108,12 @@ impl SummarySemanticFragment {
         Ok(fragment)
     }
 
-    pub fn from_dag(dag: &ExecutableDag, output: PostAsapNodeId) -> Result<Self, String> {
+    pub fn from_dag(dag: &PostAsapDag, output: PostAsapNodeId) -> Result<Self, String> {
         Self::export(dag, output, false)
     }
 
     fn export(
-        dag: &ExecutableDag,
+        dag: &PostAsapDag,
         output: PostAsapNodeId,
         parameterize_range: bool,
     ) -> Result<Self, String> {
@@ -129,7 +129,7 @@ impl SummarySemanticFragment {
                 );
             }
         }
-        let dag = ExecutableDag {
+        let dag = PostAsapDag {
             nodes: dag
                 .nodes
                 .iter()
@@ -157,7 +157,7 @@ impl SummarySemanticFragment {
                 .find(|n| n.id == output)
                 .ok_or("missing output")?
                 .payload,
-            ExecutableOperatorPayload::SummaryAgg {
+            PostAsapOperatorPayload::SummaryAgg {
                 reduction: crate::pre_asap::Reduction::PerEntity,
                 grouping: crate::post_asap::GroupingStrategy::PerSubpopulationInstance,
                 input: crate::post_asap::SummaryUpdate {
@@ -182,7 +182,7 @@ impl SummarySemanticFragment {
                 if !direct.contains(&node.id) {
                     continue;
                 }
-                if let ExecutableOperatorPayload::Fallback { expression } = &mut node.payload {
+                if let PostAsapOperatorPayload::Fallback { expression } = &mut node.payload {
                     let source = match expression {
                         crate::pre_asap::QueryExpr::TimeRange { child, .. } => {
                             std::rc::Rc::make_mut(child)
@@ -281,24 +281,24 @@ impl SummarySemanticFragment {
             if parameterize_range
                 && matches!(
                     nodes[&output].payload,
-                    ExecutableOperatorPayload::SummaryAgg { .. }
+                    PostAsapOperatorPayload::SummaryAgg { .. }
                 )
                 && dag
                     .edges
                     .iter()
                     .any(|e| e.consumer == output && e.producer == id)
             {
-                if let ExecutableOperatorPayload::Fallback {
+                if let PostAsapOperatorPayload::Fallback {
                     expression: crate::pre_asap::QueryExpr::TimeRange { child, .. },
                 } = &payload
                 {
-                    payload = ExecutableOperatorPayload::Fallback {
+                    payload = PostAsapOperatorPayload::Fallback {
                         expression: child.as_ref().clone(),
                     };
                     record_range = true;
                 }
             }
-            if let ExecutableOperatorPayload::RelationalJoin { pruning, .. } = &mut payload {
+            if let PostAsapOperatorPayload::RelationalJoin { pruning, .. } = &mut payload {
                 *pruning = None;
             }
             let operation = SemanticOperation {
@@ -333,17 +333,17 @@ impl SummarySemanticFragment {
             return Err("unsupported semantic fragment version or size".into());
         }
         for (key, node) in &self.nodes {
-            let payload: ExecutableOperatorPayload =
+            let payload: PostAsapOperatorPayload =
                 serde_json::from_value(node.operation.clone()).map_err(|e| e.to_string())?;
             if node.record_range {
                 let root = self
                     .nodes
                     .get(&self.output)
                     .ok_or("missing semantic root")?;
-                let root_payload: ExecutableOperatorPayload =
+                let root_payload: PostAsapOperatorPayload =
                     serde_json::from_value(root.operation.clone()).map_err(|e| e.to_string())?;
-                if !matches!(payload, ExecutableOperatorPayload::Fallback { .. })
-                    || !matches!(root_payload, ExecutableOperatorPayload::SummaryAgg { .. })
+                if !matches!(payload, PostAsapOperatorPayload::Fallback { .. })
+                    || !matches!(root_payload, PostAsapOperatorPayload::SummaryAgg { .. })
                     || !root.inputs.iter().any(|input| &input.node == key)
                 {
                     return Err("record range must belong to a direct summary input".into());
@@ -385,11 +385,11 @@ impl SummarySemanticFragment {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::post_asap::{compile_executable_dag, SummaryExpr, SummaryNode};
+    use crate::post_asap::{compile_post_asap_dag, SummaryExpr, SummaryNode};
     use crate::pre_asap::{Column, DataType, QueryExpr, Schema, Source};
     use std::rc::Rc;
 
-    fn fixture(metric: &str) -> ExecutableDag {
+    fn fixture(metric: &str) -> PostAsapDag {
         let scan = QueryExpr::Scan {
             source: Source::TimeSeries {
                 metric: metric.into(),
@@ -405,7 +405,7 @@ mod tests {
             }],
             time_index: None,
         };
-        compile_executable_dag(&Rc::new(SummaryNode {
+        compile_post_asap_dag(&Rc::new(SummaryNode {
             expr: SummaryExpr::KeepPreAsap(Rc::new(scan)),
             schema,
             guarantee: None,
@@ -483,7 +483,7 @@ mod tests {
         let original = fixture("latency");
         let expected = SummarySemanticFragment::from_dag(&original, original.root).unwrap();
         let mut transformed = original.clone();
-        let ExecutableOperatorPayload::Fallback { expression } = &mut transformed.nodes[0].payload
+        let PostAsapOperatorPayload::Fallback { expression } = &mut transformed.nodes[0].payload
         else {
             unreachable!()
         };
@@ -503,7 +503,7 @@ mod tests {
             canonical_bytes(&expected).unwrap(),
             canonical_bytes(&logged).unwrap()
         );
-        let ExecutableOperatorPayload::Fallback {
+        let PostAsapOperatorPayload::Fallback {
             expression: QueryExpr::Project { cols, .. },
         } = &mut transformed.nodes[0].payload
         else {
@@ -520,13 +520,13 @@ mod tests {
         let stored = dag.root;
         let mut consumer = dag.nodes[0].clone();
         consumer.id = PostAsapNodeId(9);
-        consumer.payload = ExecutableOperatorPayload::Value {
+        consumer.payload = PostAsapOperatorPayload::Value {
             operation: crate::post_asap::ValueOperation::Project {
                 cols: vec![],
                 qualifier: None,
             },
         };
-        dag.edges.push(crate::post_asap::ExecutableDagEdge {
+        dag.edges.push(crate::post_asap::PostAsapDagEdge {
             producer: stored,
             consumer: consumer.id,
             role: EdgeRole::Input,
@@ -550,8 +550,7 @@ mod tests {
         use crate::pre_asap::{ColumnRef, Reduction};
         let make = |seconds| {
             let mut dag = fixture("latency");
-            let ExecutableOperatorPayload::Fallback { expression } = &mut dag.nodes[0].payload
-            else {
+            let PostAsapOperatorPayload::Fallback { expression } = &mut dag.nodes[0].payload else {
                 unreachable!()
             };
             *expression = QueryExpr::TimeRange {
@@ -561,7 +560,7 @@ mod tests {
             let mut output = dag.nodes[0].clone();
             output.id = PostAsapNodeId(1);
             let family = SummaryFamilyType::ExactAggregate(ExactKind::Sum, ExactParams::Sum);
-            output.payload = ExecutableOperatorPayload::SummaryAgg {
+            output.payload = PostAsapOperatorPayload::SummaryAgg {
                 family: family.clone(),
                 input: SummaryUpdate {
                     item: None,
@@ -573,7 +572,7 @@ mod tests {
             };
             output.output_schema.fields[0].dtype = family;
             output.output_state.primitive = DataPrimitive::SummaryState;
-            dag.edges.push(ExecutableDagEdge {
+            dag.edges.push(PostAsapDagEdge {
                 producer: dag.root,
                 consumer: output.id,
                 role: EdgeRole::Input,
@@ -599,7 +598,7 @@ mod tests {
         // Open entities retain their full label identity; consumer-demanded
         // optional labels do not change the per-entity stored computation.
         let mut open = one.clone();
-        let ExecutableOperatorPayload::Fallback {
+        let PostAsapOperatorPayload::Fallback {
             expression: QueryExpr::TimeRange { child, .. },
         } = &mut open.nodes[0].payload
         else {
@@ -610,7 +609,7 @@ mod tests {
         };
         schema.closed = false;
         let expected = SummarySemanticFragment::from_stored_output(&open, open.root).unwrap();
-        let ExecutableOperatorPayload::Fallback {
+        let PostAsapOperatorPayload::Fallback {
             expression: QueryExpr::TimeRange { child, .. },
         } = &mut open.nodes[0].payload
         else {

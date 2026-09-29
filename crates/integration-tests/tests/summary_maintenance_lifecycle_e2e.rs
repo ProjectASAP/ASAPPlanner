@@ -265,7 +265,7 @@ fn continuous_lifecycle_compiles_and_executes_spatial_kll() {
         values::{Batch, Value},
     };
     use asap_types::{
-        post_asap::{compile_executable_dag, ExecutableOperatorPayload, SummaryFamilyType},
+        post_asap::{compile_post_asap_dag, PostAsapOperatorPayload, SummaryFamilyType},
         pre_asap::DataType,
     };
     use std::{collections::BTreeMap, sync::Arc};
@@ -283,11 +283,11 @@ fn continuous_lifecycle_compiles_and_executes_spatial_kll() {
             .summary_maintenance_lifecycle,
         SummaryMaintenanceLifecycle::ContinuouslyMaintained
     );
-    let dag = compile_executable_dag(&selected.root).unwrap();
+    let dag = compile_post_asap_dag(&selected.root).unwrap();
     let build = dag
         .nodes
         .iter()
-        .find(|node| matches!(node.payload, ExecutableOperatorPayload::SummaryAgg { .. }))
+        .find(|node| matches!(node.payload, PostAsapOperatorPayload::SummaryAgg { .. }))
         .unwrap();
     let input = dag
         .edges
@@ -506,7 +506,7 @@ fn selected_temporal_lifecycle_compiles_panes_and_executes() {
     };
     use asap_types::{
         post_asap::{
-            compile_executable_dag, plan_pane_phase, ExecutableOperatorPayload, SummaryFamilyType,
+            compile_post_asap_dag, plan_pane_phase, PostAsapOperatorPayload, SummaryFamilyType,
             SummaryWindowFramework,
         },
         pre_asap::DataType,
@@ -541,17 +541,17 @@ fn selected_temporal_lifecycle_compiles_panes_and_executes() {
             deployment.selected_window_framework,
             Some(SummaryWindowFramework::Sliding)
         );
-        let dag = compile_executable_dag(&plan.root).unwrap();
+        let dag = compile_post_asap_dag(&plan.root).unwrap();
         let build = dag
             .nodes
             .iter()
-            .find(|node| matches!(node.payload, ExecutableOperatorPayload::SummaryAgg { .. }))
+            .find(|node| matches!(node.payload, PostAsapOperatorPayload::SummaryAgg { .. }))
             .unwrap();
         assert_eq!(build.id, deployment.post_asap_node_id);
         let raw = dag
             .nodes
             .iter()
-            .find(|node| matches!(node.payload, ExecutableOperatorPayload::Fallback { .. }))
+            .find(|node| matches!(node.payload, PostAsapOperatorPayload::Fallback { .. }))
             .unwrap();
         let schema = Arc::new(raw.output_schema.clone());
         let width = workload

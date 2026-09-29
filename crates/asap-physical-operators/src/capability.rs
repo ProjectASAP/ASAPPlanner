@@ -4,7 +4,7 @@
 //! native batch representation. `validate_native_family` and
 //! `validate_native_readout` check native state and scalar readout support.
 //! Keyed weighted-frequency readouts are checked by `Operator::keyed_readout`.
-//! A successful kernel check alone does not mean an executable DAG will bind.
+//! A successful kernel check alone does not mean a physical DAG will bind.
 //!
 //! Persisted state uses `stored_state` decoding and readout contracts; support
 //! there does not imply a native build/merge operator. Full plan acceptance is

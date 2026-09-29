@@ -8,8 +8,8 @@ use asap_physical_operators::{
 use futures::{executor::block_on, StreamExt};
 use planner_types::{
     post_asap::{
-        BinaryOperator, ExecutableDagNode, ExecutableOperatorPayload, ExecutionDataState,
-        PostAsapNodeId, SummaryFamilyType, SummaryField, SummarySchema,
+        BinaryOperator, ExecutionDataState, PostAsapDagNode, PostAsapNodeId,
+        PostAsapOperatorPayload, SummaryFamilyType, SummaryField, SummarySchema,
     },
     pre_asap::{ArithmeticOpKind, BinaryOpKind, DataType},
 };
@@ -50,9 +50,9 @@ fn row(name: &str, job: &str, value: f64) -> Vec<Value> {
 }
 fn program() -> CompiledPhysicalDag {
     let schema = schema();
-    let node = ExecutableDagNode {
+    let node = PostAsapDagNode {
         id: PostAsapNodeId(2),
-        payload: ExecutableOperatorPayload::Binary {
+        payload: PostAsapOperatorPayload::Binary {
             operator: BinaryOperator {
                 kind: BinaryOpKind::Arithmetic(ArithmeticOpKind::Div),
                 vector_match: None,

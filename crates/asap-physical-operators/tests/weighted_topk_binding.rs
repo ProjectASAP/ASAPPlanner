@@ -88,8 +88,8 @@ fn assert_weighted_binding(evidence: &dyn AccuracyEvidenceProvider, algorithm: S
             _ => None,
         })
         .unwrap();
-    let dag = compile_executable_dag(&plan).unwrap();
-    let build=dag.nodes.iter().find(|node|matches!(&node.payload,ExecutableOperatorPayload::SummaryAgg{family:SummaryFamilyType::Sketch(kind,_),..}if kind.algorithm()==&algorithm)).unwrap();
+    let dag = compile_post_asap_dag(&plan).unwrap();
+    let build=dag.nodes.iter().find(|node|matches!(&node.payload,PostAsapOperatorPayload::SummaryAgg{family:SummaryFamilyType::Sketch(kind,_),..}if kind.algorithm()==&algorithm)).unwrap();
     let rate_id = dag
         .edges
         .iter()
@@ -352,11 +352,11 @@ fn check_direct_rate_topk(dynamic: bool) {
                 "Rate must be supplied by its exact stored-state readout"
             );
         }
-        let dag = compile_executable_dag(candidate).unwrap();
+        let dag = compile_post_asap_dag(candidate).unwrap();
         assert!(dag.nodes.iter().any(|node| matches!(&node.payload,
-            ExecutableOperatorPayload::SummaryAgg { family: SummaryFamilyType::Sketch(kind, _), .. } if kind.algorithm() == &algorithm)));
+            PostAsapOperatorPayload::SummaryAgg { family: SummaryFamilyType::Sketch(kind, _), .. } if kind.algorithm() == &algorithm)));
         let build = dag.nodes.iter().find(|node| matches!(&node.payload,
-            ExecutableOperatorPayload::SummaryAgg { family: SummaryFamilyType::Sketch(kind, _), .. } if kind.algorithm() == &algorithm)).unwrap();
+            PostAsapOperatorPayload::SummaryAgg { family: SummaryFamilyType::Sketch(kind, _), .. } if kind.algorithm() == &algorithm)).unwrap();
         let input_id = dag
             .edges
             .iter()
@@ -377,7 +377,7 @@ fn check_direct_rate_topk(dynamic: bool) {
             .find(|node| {
                 matches!(
                     &node.payload,
-                    ExecutableOperatorPayload::Fallback {
+                    PostAsapOperatorPayload::Fallback {
                         expression: QueryExpr::TimeRange { .. }
                     }
                 )
@@ -653,14 +653,14 @@ fn spatial_topk_exposes_signed_heap_candidate_over_complete_snapshot() {
             _ => None,
         })
         .expect("signed spatial TopK must expose CountSketch with heap");
-    let dag = compile_executable_dag(selected).unwrap();
+    let dag = compile_post_asap_dag(selected).unwrap();
     let raw = dag
         .nodes
         .iter()
         .find(|node| {
             matches!(
                 &node.payload,
-                ExecutableOperatorPayload::Fallback {
+                PostAsapOperatorPayload::Fallback {
                     expression: QueryExpr::TimeRange { .. }
                 }
             )
@@ -779,14 +779,14 @@ fn planner_exposes_fixed_window_rate_heap_precompute_candidates() {
         let Replacement::Summary(root) = candidate.replacement else {
             panic!()
         };
-        let dag = compile_executable_dag(&root).unwrap();
+        let dag = compile_post_asap_dag(&root).unwrap();
         let state = dag
             .nodes
             .iter()
             .find(|node| {
                 matches!(
                     &node.payload,
-                    ExecutableOperatorPayload::SummaryAgg {
+                    PostAsapOperatorPayload::SummaryAgg {
                         family: SummaryFamilyType::ExactAggregate(ExactKind::Rate, _),
                         ..
                     }
@@ -799,7 +799,7 @@ fn planner_exposes_fixed_window_rate_heap_precompute_candidates() {
             .find(|node| {
                 matches!(
                     &node.payload,
-                    ExecutableOperatorPayload::SummaryAgg {
+                    PostAsapOperatorPayload::SummaryAgg {
                         family: SummaryFamilyType::Sketch(..),
                         ..
                     }
@@ -850,7 +850,7 @@ fn planner_exposes_fixed_window_rate_heap_precompute_candidates() {
             })
         };
         let (family, input, grouping) = match &state.payload {
-            ExecutableOperatorPayload::SummaryAgg {
+            PostAsapOperatorPayload::SummaryAgg {
                 family,
                 input,
                 grouping,

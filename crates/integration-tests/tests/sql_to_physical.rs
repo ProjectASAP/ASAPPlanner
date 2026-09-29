@@ -8,7 +8,7 @@ use asap_physical_operators::{
     values::{Batch, Value},
 };
 use asap_types::{
-    post_asap::{compile_executable_dag, ExecutableOperatorPayload, SummaryFamilyType},
+    post_asap::{compile_post_asap_dag, PostAsapOperatorPayload, SummaryFamilyType},
     pre_asap::{Column, DataType, QueryExpr, Schema},
     types::AccuracyTarget,
 };
@@ -41,14 +41,14 @@ async fn sql_filter_grouped_sum_executes_and_rebinds() {
             .assemble_selected_dag(&space.roots[0].1)
             .unwrap()
             .unwrap();
-        let dag = compile_executable_dag(&selected).unwrap();
+        let dag = compile_post_asap_dag(&selected).unwrap();
         let scan = dag
             .nodes
             .iter()
             .find(|node| {
                 matches!(
                     &node.payload,
-                    ExecutableOperatorPayload::Fallback {
+                    PostAsapOperatorPayload::Fallback {
                         expression: QueryExpr::Scan { .. }
                     }
                 )
@@ -88,7 +88,7 @@ async fn sql_filter_grouped_sum_executes_and_rebinds() {
                     .collect()
             })
             .collect();
-            let ExecutableOperatorPayload::Fallback { expression } = &scan.payload else {
+            let PostAsapOperatorPayload::Fallback { expression } = &scan.payload else {
                 unreachable!()
             };
             let QueryExpr::Scan { source, .. } = expression else {

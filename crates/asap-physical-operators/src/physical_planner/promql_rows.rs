@@ -150,9 +150,9 @@ pub fn compile_current_series_readout(
     selected: &Rc<planner_types::post_asap::SummaryNode>,
 ) -> Result<CompiledPhysicalDag, Error> {
     use planner_types::post_asap::{
-        compile_executable_dag, maintained_population::PopulationReadout, SummaryField,
+        compile_post_asap_dag, maintained_population::PopulationReadout, SummaryField,
     };
-    let mut dag = compile_executable_dag(selected).map_err(|error| invalid(error.to_string()))?;
+    let mut dag = compile_post_asap_dag(selected).map_err(|error| invalid(error.to_string()))?;
     // Typed snapshot candidates already carry full identity throughout the DAG.
     // Cut at the population output, preserving all selected heap/readout nodes.
     let populations = dag.nodes.iter().filter(|node| matches!(&node.payload,
@@ -267,7 +267,7 @@ pub fn compile_rate_ranking(
     Error,
 > {
     use planner_types::post_asap::{
-        compile_executable_dag_with_node_ids, ExactKind, SummaryExpr, SummaryNode,
+        compile_post_asap_dag_with_node_ids, ExactKind, SummaryExpr, SummaryNode,
     };
     fn frontier(node: &Rc<SummaryNode>) -> Option<Rc<SummaryNode>> {
         match &node.expr {
@@ -300,7 +300,7 @@ pub fn compile_rate_ranking(
     {
         return Err(invalid("Rate ranking requires complete series identity"));
     }
-    let compiled = compile_executable_dag_with_node_ids(selected)
+    let compiled = compile_post_asap_dag_with_node_ids(selected)
         .map_err(|error| invalid(error.to_string()))?;
     let id = u64::from(
         compiled
@@ -324,9 +324,9 @@ pub fn compile_fixed_window_rate_aggregation(
     selected: &Rc<planner_types::post_asap::SummaryNode>,
 ) -> Result<PhysicalCandidate, Error> {
     use planner_types::post_asap::{
-        compile_executable_dag, ExactKind, ExecutionTiming, SketchAlgorithm,
+        compile_post_asap_dag, ExactKind, ExecutionTiming, SketchAlgorithm,
     };
-    let dag = compile_executable_dag(selected).map_err(|e| invalid(e.to_string()))?;
+    let dag = compile_post_asap_dag(selected).map_err(|e| invalid(e.to_string()))?;
     let sources = dag
         .nodes
         .iter()

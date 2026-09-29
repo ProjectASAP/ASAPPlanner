@@ -28,6 +28,15 @@ implementation library. Deployment systems such as ASAPQuery and asap-fusion
 own deployment compilation and operation. The lifecycle is a planning contract
 associated with the logical DAG, not a separate computation IR.
 
+The Logical Post-ASAP DAG is preceded by the Pre-ASAP DAG (`QueryExpr`), the
+language-independent query semantics before summary selection. Both are
+logical. Planning builds Post-ASAP `SummaryNode` trees; `compile_post_asap_dag`
+exports the selected tree as a `PostAsapDag`, which is the Physical Plan
+Compiler's input. Its per-node execution phase (ingestion or query time) is an
+initial placement: compilation places ingestion-time nodes in the precompute DAG,
+while frontier enumeration proposes alternative materialization splits. Which
+layer owns placement is an open design question, deferred to a later change.
+
 ### Candidate generation and deployment selection
 
 Planner exposes the supported, semantically legal **physical plan candidates**.
@@ -272,7 +281,7 @@ The **Physical Plan Compiler** consumes both computation semantics and maintenan
 requirements:
 
 ```text
-Logical Post-ASAP DAG
+Logical Post-ASAP DAG (PostAsapDag)
 + Summary Maintenance Lifecycle
 + physical capabilities
         ↓

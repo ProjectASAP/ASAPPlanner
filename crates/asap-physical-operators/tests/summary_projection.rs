@@ -44,18 +44,18 @@ fn post_asap_summary_projection_survives_recovery() {
         ],
         time_index: None,
     };
-    let dag = ExecutableDag {
+    let dag = PostAsapDag {
         nodes: vec![
-            ExecutableDagNode {
+            PostAsapDagNode {
                 id: PostAsapNodeId(0),
-                payload: ExecutableOperatorPayload::SummaryMerge,
+                payload: PostAsapOperatorPayload::SummaryMerge,
                 output_schema: (*schema).clone(),
                 output_state: ExecutionDataState::INGESTION_SUMMARY,
                 guarantee: None,
             },
-            ExecutableDagNode {
+            PostAsapDagNode {
                 id: PostAsapNodeId(1),
-                payload: ExecutableOperatorPayload::Value {
+                payload: PostAsapOperatorPayload::Value {
                     operation: ValueOperation::Project {
                         cols: vec![1, 0]
                             .into_iter()
@@ -72,7 +72,7 @@ fn post_asap_summary_projection_survives_recovery() {
                 guarantee: None,
             },
         ],
-        edges: vec![ExecutableDagEdge {
+        edges: vec![PostAsapDagEdge {
             producer: PostAsapNodeId(0),
             consumer: PostAsapNodeId(1),
             role: EdgeRole::Input,

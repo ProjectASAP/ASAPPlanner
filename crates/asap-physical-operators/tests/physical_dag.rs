@@ -454,32 +454,32 @@ fn bind_post_asap_before_execution() {
     use asap_physical_operators::dag::planner::bind;
     use planner_types::{
         post_asap::{
-            EdgeRole, ExecutableDag, ExecutableDagEdge, ExecutableDagNode,
-            ExecutableOperatorPayload, ExecutionDataState, GroupingEdgeCompatibility,
-            PostAsapNodeId, ValueOperation, WindowEdgeCompatibility,
+            EdgeRole, ExecutionDataState, GroupingEdgeCompatibility, PostAsapDag, PostAsapDagEdge,
+            PostAsapDagNode, PostAsapNodeId, PostAsapOperatorPayload, ValueOperation,
+            WindowEdgeCompatibility,
         },
         pre_asap::{ArithmeticOpKind, ProjectItem, QueryExpr, ScalarValue},
     };
     use std::{collections::BTreeMap, rc::Rc};
     let schema = schema(&[("value", DataType::Float64, false)]);
-    let node = |id, payload| ExecutableDagNode {
+    let node = |id, payload| PostAsapDagNode {
         id: PostAsapNodeId(id),
         payload,
         output_state: ExecutionDataState::QUERY_ROWS,
         output_schema: (*schema).clone(),
         guarantee: None,
     };
-    let mut dag = ExecutableDag {
+    let mut dag = PostAsapDag {
         nodes: vec![
             node(
                 0,
-                ExecutableOperatorPayload::Fallback {
+                PostAsapOperatorPayload::Fallback {
                     expression: QueryExpr::promql_scalar(1.),
                 },
             ),
             node(
                 1,
-                ExecutableOperatorPayload::Value {
+                PostAsapOperatorPayload::Value {
                     operation: ValueOperation::Project {
                         cols: vec![ProjectItem {
                             alias: None,
@@ -494,7 +494,7 @@ fn bind_post_asap_before_execution() {
                 },
             ),
         ],
-        edges: vec![ExecutableDagEdge {
+        edges: vec![PostAsapDagEdge {
             producer: PostAsapNodeId(0),
             consumer: PostAsapNodeId(1),
             role: EdgeRole::Input,
@@ -520,7 +520,7 @@ fn bind_post_asap_before_execution() {
     let native = bind(&dag, sources(), &[1]).unwrap();
     assert_eq!(floats(&run(&native, 1, query()), 0), vec![3.]);
     assert!(bind(&dag, BTreeMap::new(), &[1]).is_err());
-    dag.nodes[1].payload = ExecutableOperatorPayload::Value {
+    dag.nodes[1].payload = PostAsapOperatorPayload::Value {
         operation: ValueOperation::Extension {
             name: "unknown".into(),
         },
@@ -555,8 +555,8 @@ fn source_batches_must_match_the_bound_schema() {
     use asap_physical_operators::dag::{self, PhysicalOperator};
     use planner_types::{
         post_asap::{
-            ExecutableDag, ExecutableDagNode, ExecutableOperatorPayload, ExecutionDataState,
-            PostAsapNodeId,
+            ExecutionDataState, PostAsapDag, PostAsapDagNode, PostAsapNodeId,
+            PostAsapOperatorPayload,
         },
         pre_asap::QueryExpr,
     };
@@ -592,10 +592,10 @@ fn source_batches_must_match_the_bound_schema() {
     }
     let expected = schema(&[("value", DataType::Float64, false)]);
     let starts = Rc::new(Cell::new(0));
-    let plan = ExecutableDag {
-        nodes: vec![ExecutableDagNode {
+    let plan = PostAsapDag {
+        nodes: vec![PostAsapDagNode {
             id: PostAsapNodeId(0),
-            payload: ExecutableOperatorPayload::Fallback {
+            payload: PostAsapOperatorPayload::Fallback {
                 expression: QueryExpr::promql_scalar(1.),
             },
             output_state: ExecutionDataState::QUERY_ROWS,
@@ -673,14 +673,14 @@ fn planner_semijoin_sort_limit_contract_at_both_phases() {
         ("score", DataType::Float64, false),
     ]);
     let keys_schema = schema(&[("key", DataType::Utf8, false)]);
-    let node = |id, payload, schema: &Schema| ExecutableDagNode {
+    let node = |id, payload, schema: &Schema| PostAsapDagNode {
         id: PostAsapNodeId(id),
         payload,
         output_schema: (**schema).clone(),
         output_state: ExecutionDataState::QUERY_ROWS,
         guarantee: None,
     };
-    let edge = |producer, consumer, role, schema: &Schema| ExecutableDagEdge {
+    let edge = |producer, consumer, role, schema: &Schema| PostAsapDagEdge {
         producer: PostAsapNodeId(producer),
         consumer: PostAsapNodeId(consumer),
         role,
@@ -690,25 +690,25 @@ fn planner_semijoin_sort_limit_contract_at_both_phases() {
         window: WindowEdgeCompatibility::NotApplicable,
     };
     let groups = GroupKeys::by(vec![0]);
-    let dag = ExecutableDag {
+    let dag = PostAsapDag {
         nodes: vec![
             node(
                 0,
-                ExecutableOperatorPayload::Fallback {
+                PostAsapOperatorPayload::Fallback {
                     expression: QueryExpr::promql_scalar(0.),
                 },
                 &rows_schema,
             ),
             node(
                 1,
-                ExecutableOperatorPayload::Fallback {
+                PostAsapOperatorPayload::Fallback {
                     expression: QueryExpr::promql_scalar(0.),
                 },
                 &keys_schema,
             ),
             node(
                 2,
-                ExecutableOperatorPayload::RelationalJoin {
+                PostAsapOperatorPayload::RelationalJoin {
                     join_kind: JoinKind::Semi,
                     pruning: None,
                     pred: Predicate(Rc::new(QueryExpr::Compare {
@@ -721,7 +721,7 @@ fn planner_semijoin_sort_limit_contract_at_both_phases() {
             ),
             node(
                 3,
-                ExecutableOperatorPayload::Value {
+                PostAsapOperatorPayload::Value {
                     operation: ValueOperation::Sort {
                         keys: vec![SortKey {
                             expr: QueryExpr::Column(2),
@@ -735,7 +735,7 @@ fn planner_semijoin_sort_limit_contract_at_both_phases() {
             ),
             node(
                 4,
-                ExecutableOperatorPayload::Value {
+                PostAsapOperatorPayload::Value {
                     operation: ValueOperation::Limit {
                         n: 1,
                         offset: 0,
@@ -1095,7 +1095,7 @@ fn grouped_temporal_schema_compiles_and_executes_topk() {
         compile_node, CompiledPhysicalDag, InputContract, Source,
     };
     use planner_types::post_asap::{
-        ExecutableDagNode, ExecutableOperatorPayload, ExecutionDataState, PostAsapNodeId,
+        ExecutionDataState, PostAsapDagNode, PostAsapNodeId, PostAsapOperatorPayload,
         ValueOperation,
     };
     use planner_types::pre_asap::{
@@ -1120,9 +1120,9 @@ fn grouped_temporal_schema_compiles_and_executes_topk() {
             .map(|c| (c.name.as_str(), c.dtype.clone(), c.nullable))
             .collect::<Vec<_>>(),
     );
-    let node = |id, operation| ExecutableDagNode {
+    let node = |id, operation| PostAsapDagNode {
         id: PostAsapNodeId(id),
-        payload: ExecutableOperatorPayload::Value { operation },
+        payload: PostAsapOperatorPayload::Value { operation },
         output_state: ExecutionDataState::QUERY_ROWS,
         output_schema: (*input).clone(),
         guarantee: None,
@@ -1203,12 +1203,12 @@ fn certified_pruning_rejects_missing_authoritative_values_after_recovery() {
     use std::{collections::BTreeMap, rc::Rc};
     let schema = schema(&[("key", DataType::Utf8, false)]);
     for certified in [false, true] {
-        let node = ExecutableDagNode {
+        let node = PostAsapDagNode {
             id: PostAsapNodeId(2),
             output_schema: (*schema).clone(),
             output_state: ExecutionDataState::QUERY_ROWS,
             guarantee: None,
-            payload: ExecutableOperatorPayload::RelationalJoin {
+            payload: PostAsapOperatorPayload::RelationalJoin {
                 join_kind: JoinKind::Semi,
                 pred: Predicate(Rc::new(QueryExpr::Compare {
                     left: Rc::new(QueryExpr::Column(0)),
@@ -1317,12 +1317,12 @@ fn compiled_ingestion_binary_preserves_alignment_and_rejects_missing_updates() {
         ("time", DataType::Timestamp, false),
         ("value", DataType::Float64, false),
     ]);
-    let node = ExecutableDagNode {
+    let node = PostAsapDagNode {
         id: PostAsapNodeId(2),
         output_schema: (*input).clone(),
         output_state: ExecutionDataState::INGESTION_ROWS,
         guarantee: None,
-        payload: ExecutableOperatorPayload::Binary {
+        payload: PostAsapOperatorPayload::Binary {
             operator: BinaryOperator {
                 kind: BinaryOpKind::Arithmetic(ArithmeticOpKind::Sub),
                 vector_match: None,

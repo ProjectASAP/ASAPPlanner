@@ -8,7 +8,7 @@ use crate::{
 };
 use planner_types::{
     post_asap::{
-        ExactOperation, ExecutableDag, ExecutableDagNode, ExecutableOperatorPayload as Payload,
+        ExactOperation, PostAsapDag, PostAsapDagNode, PostAsapOperatorPayload as Payload,
         SketchQuery, SummaryFamilyType, SummaryInputExpr, ValueOperation,
     },
     pre_asap::{
@@ -50,7 +50,7 @@ pub use compiled::{CompiledPhysicalDag, InputContract};
 /// Compile computation without opening or retaining deployment readers.
 /// Input contracts identify explicit boundaries selected by maintenance planning.
 pub fn compile(
-    dag: &ExecutableDag,
+    dag: &PostAsapDag,
     inputs: BTreeMap<NodeId, InputContract>,
     roots: &[NodeId],
 ) -> Result<CompiledPhysicalDag, Error> {
@@ -60,7 +60,7 @@ pub fn compile(
 /// Convenience for callers that already resolved inputs. Lowering still uses
 /// only their contracts, and instantiation checks those contracts again.
 pub fn bind<'a>(
-    dag: &ExecutableDag,
+    dag: &PostAsapDag,
     sources: BTreeMap<NodeId, Source<'a>>,
     roots: &[NodeId],
 ) -> Result<PhysicalDag<'a, Batch, Schema>, Error> {
@@ -73,7 +73,7 @@ pub fn bind<'a>(
 
 /// Resolve raw scan connectors before invoking the reader-independent compiler.
 pub fn bind_with_data_sources<'a>(
-    dag: &ExecutableDag,
+    dag: &PostAsapDag,
     mut sources: BTreeMap<NodeId, Source<'a>>,
     roots: &[NodeId],
     data_sources: &crate::sources::DataSources,
@@ -108,7 +108,7 @@ pub fn bind_with_data_sources<'a>(
 }
 
 fn compile_internal(
-    dag: &ExecutableDag,
+    dag: &PostAsapDag,
     mut sources: BTreeMap<NodeId, InputContract>,
     roots: &[NodeId],
 ) -> Result<CompiledPhysicalDag, Error> {
@@ -385,14 +385,14 @@ fn compile_internal(
 
 /// Bind a Planner node against the schemas supplied by its deployment edges.
 /// This is the same checked path used by complete DAG binding.
-pub fn compile_node(node: &ExecutableDagNode, inputs: &[Schema]) -> Result<Operator, Error> {
+pub fn compile_node(node: &PostAsapDagNode, inputs: &[Schema]) -> Result<Operator, Error> {
     for schema in inputs {
         crate::values::validate_schema(schema)?;
     }
     bind_operation(node, inputs)?.with_output_schema(Arc::new(node.output_schema.clone()))
 }
 
-fn bind_operation(node: &ExecutableDagNode, inputs: &[Schema]) -> Result<Operator, Error> {
+fn bind_operation(node: &PostAsapDagNode, inputs: &[Schema]) -> Result<Operator, Error> {
     if let Payload::Binary { operator } = &node.payload {
         let [left, right] = inputs else {
             return Err(invalid("binary requires two inputs"));
@@ -798,7 +798,7 @@ impl PhysicalOperator<Batch, Schema> for CheckedSource<'_> {
 }
 
 // Bound recursion before invoking the upstream recursive provenance validator.
-fn preflight_depth(dag: &ExecutableDag) -> Result<(), Error> {
+fn preflight_depth(dag: &PostAsapDag) -> Result<(), Error> {
     let mut remaining = dag
         .nodes
         .iter()

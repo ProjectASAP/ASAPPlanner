@@ -341,11 +341,11 @@ fn planner_current_series_candidate_compiles_with_dynamic_identity() {
     )
     .candidate(&root)
     .unwrap();
-    let logical = compile_executable_dag(&selected).unwrap();
+    let logical = compile_post_asap_dag(&selected).unwrap();
     let raw = logical
         .nodes
         .iter()
-        .find(|node| matches!(node.payload, ExecutableOperatorPayload::Fallback { .. }))
+        .find(|node| matches!(node.payload, PostAsapOperatorPayload::Fallback { .. }))
         .unwrap();
     let raw_schema = Arc::new(raw.output_schema.clone());
     let physical = compile(

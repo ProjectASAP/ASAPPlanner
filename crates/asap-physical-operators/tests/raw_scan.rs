@@ -53,15 +53,15 @@ fn fixture() -> (QueryExpr, Schema, Vec<Batch>) {
     ];
     (scan, output, batches)
 }
-fn plan(scan: QueryExpr, schema: &Schema, state: ExecutionDataState) -> ExecutableDag {
-    let node = |id, payload| ExecutableDagNode {
+fn plan(scan: QueryExpr, schema: &Schema, state: ExecutionDataState) -> PostAsapDag {
+    let node = |id, payload| PostAsapDagNode {
         id: PostAsapNodeId(id),
         payload,
         output_state: state,
         output_schema: (**schema).clone(),
         guarantee: None,
     };
-    let edge = |producer, consumer| ExecutableDagEdge {
+    let edge = |producer, consumer| PostAsapDagEdge {
         producer: PostAsapNodeId(producer),
         consumer: PostAsapNodeId(consumer),
         role: EdgeRole::Input,
@@ -70,12 +70,12 @@ fn plan(scan: QueryExpr, schema: &Schema, state: ExecutionDataState) -> Executab
         grouping: GroupingEdgeCompatibility::NotApplicable,
         window: WindowEdgeCompatibility::NotApplicable,
     };
-    ExecutableDag {
+    PostAsapDag {
         nodes: vec![
-            node(0, ExecutableOperatorPayload::Fallback { expression: scan }),
+            node(0, PostAsapOperatorPayload::Fallback { expression: scan }),
             node(
                 1,
-                ExecutableOperatorPayload::Value {
+                PostAsapOperatorPayload::Value {
                     operation: ValueOperation::Sort {
                         keys: vec![planner_types::pre_asap::SortKey {
                             expr: QueryExpr::Column(0),
@@ -88,7 +88,7 @@ fn plan(scan: QueryExpr, schema: &Schema, state: ExecutionDataState) -> Executab
             ),
             node(
                 2,
-                ExecutableOperatorPayload::Value {
+                PostAsapOperatorPayload::Value {
                     operation: ValueOperation::Limit {
                         n: 2,
                         offset: 0,

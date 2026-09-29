@@ -19,7 +19,7 @@ pub struct PhysicalCandidate {
 /// contract used to build each output. This API never treats a result from a
 /// different window or revision as interchangeable merely because types match.
 pub fn compile_candidate(
-    dag: &ExecutableDag,
+    dag: &PostAsapDag,
     inputs: BTreeMap<NodeId, InputContract>,
     roots: &[NodeId],
     frontier: &[NodeId],
@@ -72,7 +72,7 @@ pub fn compile_candidate(
 /// and deployment feasibility are evaluated separately before cost selection.
 /// Exceeding the search budget returns an error, never a partial inventory.
 pub fn enumerate_frontiers(
-    dag: &ExecutableDag,
+    dag: &PostAsapDag,
     inputs: &BTreeMap<NodeId, InputContract>,
     roots: &[NodeId],
     max_candidates: usize,
@@ -141,7 +141,7 @@ pub fn enumerate_frontiers(
 /// Lower every maintenance candidate before feasibility/cost evaluation. Keep
 /// individual failures visible; do not substitute another computation on error.
 pub fn compile_candidates(
-    dag: &ExecutableDag,
+    dag: &PostAsapDag,
     inputs: BTreeMap<NodeId, InputContract>,
     roots: &[NodeId],
     frontiers: &[Vec<NodeId>],

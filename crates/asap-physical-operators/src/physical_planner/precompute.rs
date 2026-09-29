@@ -66,7 +66,7 @@ pub fn is_population_schema(schema: &Schema) -> bool {
 /// Compile a complete selected precompute sub-DAG. Inputs are already-computed
 /// state boundaries; the deployment supplies groups, panes and states, never operations.
 pub fn compile(
-    dag: &ExecutableDag,
+    dag: &PostAsapDag,
     frontiers: &[NodeId],
     roots: &[NodeId],
 ) -> Result<CompiledPhysicalDag, Error> {
@@ -161,7 +161,7 @@ pub fn compile(
     CompiledPhysicalDag::compose(sources, fragments, roots.to_vec())
 }
 
-fn validate_value_output(node: &ExecutableDagNode) -> Result<(), Error> {
+fn validate_value_output(node: &PostAsapDagNode) -> Result<(), Error> {
     let schema = &node.output_schema;
     let values = schema
         .fields
@@ -184,9 +184,9 @@ fn validate_value_output(node: &ExecutableDagNode) -> Result<(), Error> {
 }
 
 fn fragment(
-    node: &ExecutableDagNode,
+    node: &PostAsapDagNode,
     schemas: &[Schema],
-    parents: &[&ExecutableDagNode],
+    parents: &[&PostAsapDagNode],
 ) -> Result<CompiledPhysicalDag, Error> {
     let sources = schemas
         .iter()
