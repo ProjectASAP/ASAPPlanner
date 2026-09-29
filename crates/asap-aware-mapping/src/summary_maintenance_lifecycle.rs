@@ -20,7 +20,7 @@ use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use asap_types::post_asap::{
-    compile_executable_dag_with_node_ids, EvaluationSchedule, ExecutionDataStateError,
+    compile_post_asap_dag_with_node_ids, EvaluationSchedule, ExecutionDataStateError,
     OutputRepresentation, PostAsapNodeId, ResultGuarantee, SummaryExpr,
     SummaryMaintenanceLifecycle, SummaryMaintenanceLifecycleGuarantee, SummaryMaintenanceMode,
     SummaryNode, SummaryWindowFramework,
@@ -390,7 +390,7 @@ fn plan_summary_maintenance_lifecycles_with_profile(
     }
     let mut summaries = Vec::new();
     collect_summary_aggs(&root, &mut HashSet::new(), &mut summaries);
-    let node_ids = compile_executable_dag_with_node_ids(&root)?.node_ids;
+    let node_ids = compile_post_asap_dag_with_node_ids(&root)?.node_ids;
     let components = summary_state_components(&summaries);
     let mut deployments: Vec<SummaryMaintenanceDeployment> = summaries
         .into_iter()

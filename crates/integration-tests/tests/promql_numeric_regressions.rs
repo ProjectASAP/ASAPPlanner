@@ -3,7 +3,7 @@
 use asap_aware_mapping::{Replacement, ReplacementStrategy, SketchAlgorithmStrategy, TargetSubDAG};
 use asap_integration_tests::fixtures::lower_promql;
 use asap_types::post_asap::{
-    compile_executable_dag, ExactKind, SummaryExpr, SummaryFamilyType, SummaryInputExpr,
+    compile_post_asap_dag, ExactKind, SummaryExpr, SummaryFamilyType, SummaryInputExpr,
     SummaryNode, SummaryUpdate,
 };
 use asap_types::pre_asap::{ColumnRef, Reduction};
@@ -66,7 +66,7 @@ fn count_up_counts_targets_even_when_values_repeat_or_change_sign() {
             3.
         );
     }
-    compile_executable_dag(&node).unwrap();
+    compile_post_asap_dag(&node).unwrap();
 }
 
 /// Ten samples give count ten, whereas sum retains the signed sample values.
@@ -84,7 +84,7 @@ fn window_counts_and_sums_distinguish_one_zero_three_and_negative_values() {
             let got: f64 = (0..10).map(|_| contribution(family, update, value)).sum();
             assert_eq!(got, if is_count { 10. } else { value * 10. });
         }
-        compile_executable_dag(&node).unwrap();
+        compile_post_asap_dag(&node).unwrap();
     }
 }
 
@@ -100,7 +100,7 @@ fn sum_rate_and_increase_have_real_exact_accumulator_nodes() {
         let (family, _, _) = aggregate(&node);
         assert!(matches!(family, SummaryFamilyType::ExactAggregate(k, _) if *k == kind));
         assert!(node.guarantee.as_ref().unwrap().is_exact());
-        compile_executable_dag(&node).unwrap();
+        compile_post_asap_dag(&node).unwrap();
     }
 }
 
@@ -116,7 +116,7 @@ fn checked_ratio_must_not_certify_cross_zero_interpolation() {
         "direct quantile ratio should remain an available candidate"
     );
     assert!(node.guarantee.is_none());
-    compile_executable_dag(&node).unwrap();
+    compile_post_asap_dag(&node).unwrap();
     // Keep the actual signed-sketch counterexample: division guards alone pass
     // even though the quantile interpolation does not preserve relative error.
     let alpha = (0.01 - 8.0 * f64::EPSILON) / 2.01;
@@ -164,7 +164,7 @@ fn quantile_over_temporal_average_keeps_a_legal_candidate() {
             matches!(child.expr, SummaryExpr::KeepPreAsap(_)),
             "guarded expression must retain native maintenance input"
         );
-        compile_executable_dag(&node).unwrap();
+        compile_post_asap_dag(&node).unwrap();
     }
 }
 
@@ -274,6 +274,6 @@ fn sketch_counts_use_unit_weights_and_signed_sums_keep_value_weights() {
             };
             assert_eq!(got, if is_count { 10. } else { 10. * value });
         }
-        compile_executable_dag(node).unwrap();
+        compile_post_asap_dag(node).unwrap();
     }
 }

@@ -50,6 +50,7 @@ fn recognize(root: &QueryExpr) -> Option<(MaintainedPopulation, PopulationReadou
                 AggIntent::Quantile { q, col, .. } if q.is_finite() => {
                     (*col, PopulationReadout::Quantile { q: *q })
                 }
+                AggIntent::TopK { k, .. } => (None, PopulationReadout::TopK { k: *k }),
                 AggIntent::Sum { col } => (*col, PopulationReadout::Sum),
                 AggIntent::Count { .. } => (None, PopulationReadout::Count),
                 AggIntent::Avg { col } => (*col, PopulationReadout::Average),
@@ -142,8 +143,11 @@ fn recognize(root: &QueryExpr) -> Option<(MaintainedPopulation, PopulationReadou
     if value_column.is_some_and(|c| schema.columns.get(c).is_none_or(|c| c.name != "value")) {
         return None;
     }
-    // Open time-series schemas distinguish instant PromQL populations from table rows.
-    if metric.is_empty() || schema.closed || schema.time_index.is_none() {
+    // PromQL can retain open labels or resolve them into a complete identity column.
+    if metric.is_empty()
+        || (schema.closed && !schema.has_promql_series_identity())
+        || schema.time_index.is_none()
+    {
         return None;
     }
     let label = |col: usize| -> Option<String> {
@@ -299,7 +303,7 @@ impl ReplacementStrategy for MaintainedPopulationStrategy {
 mod tests {
     use super::*;
     use crate::test_support::lower_promql;
-    use asap_types::post_asap::{compile_executable_dag, share_common_summary_subtrees};
+    use asap_types::post_asap::{compile_post_asap_dag, share_common_summary_subtrees};
 
     fn lower(q: &str) -> Rc<QueryExpr> {
         Rc::new(lower_promql(q, asap_types::types::AccuracyTarget::Exact))
@@ -323,7 +327,7 @@ mod tests {
             let candidate = rule
                 .candidate(&root)
                 .expect("current-series rule candidate");
-            compile_executable_dag(&candidate).expect("typed executable DAG");
+            compile_post_asap_dag(&candidate).expect("typed post-ASAP DAG");
         }
     }
 
@@ -360,7 +364,7 @@ mod tests {
         );
         let mut producers = Vec::new();
         for (_, plan) in &plans {
-            compile_executable_dag(plan).unwrap();
+            compile_post_asap_dag(plan).unwrap();
             let SummaryExpr::ValueOperation {
                 child,
                 operation: ValueOperation::ReadPopulation { .. },
@@ -444,7 +448,7 @@ mod tests {
         *operation = ValueOperation::ReadPopulation {
             readout: PopulationReadout::TopK { k: 6 },
         };
-        assert!(compile_executable_dag(&Rc::new(bad.clone())).is_err());
+        assert!(compile_post_asap_dag(&Rc::new(bad.clone())).is_err());
         let SummaryExpr::ValueOperation {
             child, operation, ..
         } = &mut bad.expr
@@ -466,6 +470,6 @@ mod tests {
             unreachable!()
         };
         spec.metric = "b".into();
-        assert!(compile_executable_dag(&Rc::new(bad)).is_err());
+        assert!(compile_post_asap_dag(&Rc::new(bad)).is_err());
     }
 }

@@ -434,20 +434,20 @@ The `KeepPreAsap` / `BinaryOp` / `ValueOperation` / `RelationalJoin` arms of tod
 - `BinaryOp`'s ingestion-side constraints move into this arm.
 - `AmbiguousKeepPreAsap` is deleted: a subtree read at two timings is copied (§4).
 
-## 6. Export: fragments in the executable DAG
+## 6. Export: fragments in the post-ASAP DAG
 
 The four original-operator payloads (`fallback{expression: QueryExpr}`, `binary`,
 `value`, `relational_join`) become one:
 
 ```rust
-ExecutableOperatorPayload::Relational {
+PostAsapOperatorPayload::Relational {
     /// No ASAP node inside. Leaves are Scans, or Scan { source: Source::DagInput { role } }
     /// for an incoming edge whose schema is the edge's intermediate_schema.
     expression: Operator,
 }
 ```
 
-`compile_executable_dag` takes each **largest connected subtree without `ASAP`** as one
+`compile_post_asap_dag` takes each **largest connected subtree without `ASAP`** as one
 fragment, cutting an edge with a `DagInput` leaf wherever it meets an `ASAP` node.
 `ASAP` nodes map one-to-one onto the existing summary payloads;
 `FinalizeExactAccumulator` / `MaintainPopulation` / `ReadPopulation` stay
@@ -460,7 +460,7 @@ lowering plus a `DagInput` arm (an incoming edge as a materialized table); the
   stage 4), together with the downstream readers.
 - **Timing and guarantee** are read from the node slots; an `Unset` slot is rejected.
   An edge's `data_state` is its producer's timing plus the primitive of its kind (§5).
-  `compile_executable_dag` no longer re-runs data-state validation.
+  `compile_post_asap_dag` no longer re-runs data-state validation.
 - **`SummaryMerge`** stays a wire payload, although its planner-side variant is
   unimplemented (§1.3, §10).
 - **Phases** become per fragment. Switching phase inside a fragment would need a
@@ -492,7 +492,7 @@ lowering plus a `DagInput` arm (an incoming edge as a materialized table); the
 | 0 Preparation | `Rc` for `Concat.children`; `rebuild_children` → `map_children`; `Column::plain` | `asap-types` |
 | 1 Split | [decoupling doc](decoupling_op_and_expr.md): `NonASAPOp` + `ScalarExpr`; children stay `Rc<NonASAPOp>` | scalar code ([decoupling doc §3](decoupling_op_and_expr.md#3-changes)) |
 | 2 Two levels | §1.1, §1.4: `Operator<C>`, an empty `ASAPOp`, `contains_asap()`, `expect_non_asap()`; child slots become `Rc<Operator<C>>`; every variant gets `timing` / `guarantee` slots, and nodes are built through constructors that leave both `Unset` | every crate; the same mechanical change everywhere |
-| 3 One schema | §2.1: `Column` → `Field` and `Schema.columns` → `fields` (serde keeps the name `columns` until stage 4); `FieldType`, `ASAPType`, `PlainField`, `Schema` everywhere except the `executable_dag.rs` wire types, which keep `SummarySchema` until stage 4. **No wire change** | `asap-types` + schema construction in every crate |
+| 3 One schema | §2.1: `Column` → `Field` and `Schema.columns` → `fields` (serde keeps the name `columns` until stage 4); `FieldType`, `ASAPType`, `PlainField`, `Schema` everywhere except the `post_asap_dag.rs` wire types, which keep `SummarySchema` until stage 4. **No wire change** | `asap-types` + schema construction in every crate |
 | 4 New types | fill `ASAPOp`; `ASAP` arms of `output_schema`; `derive_guarantees` and `derive_timings` (§2.2, §5); the entry check (§3); `flatten(&SummaryNode) -> Rc<Operator>` so export runs on the new types, copying each node's guarantee and today's derived timing into the slots, so the export is unchanged; wire types become `Schema`, and `Schema.fields` serializes as `fields`. Wire → 6. **The only wire-breaking stage**; merged together with ASAPQuery-backend and ASAPCollector | `asap-types`, `devtools`, viewer |
 | 5 Planner | §4: candidates and assembly on `Rc<Operator>`; §7 moves to the new types; delete `flatten` | `asap-aware-mapping` |
 | 6 Cleanup | delete `SummaryExpr`, `SummaryNode`, extra `ValueOperation` variants, `ExactOperation`, `post_asap/cse.rs`; update `post-asap-ir.md`, `physical-plan-integration.md`, developer and viewer docs | docs |
@@ -531,5 +531,5 @@ the same early flat export, on the final types.
 
 ## 10. Open questions
 
-- Does ASAPQuery insert `SummaryMerge` only on the executable DAG, or through ASAPPlanner's
+- Does ASAPQuery insert `SummaryMerge` only on the exported post-ASAP DAG, or through ASAPPlanner's
   post-ASAP types? The planner-side variant is unimplemented (§1.3).

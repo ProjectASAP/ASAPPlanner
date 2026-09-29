@@ -122,7 +122,7 @@ async fn corr_rejects_unrepresented_forms() {
     }
 }
 
-// Exact fallback retains the complete typed query and compiles to an executable DAG.
+// Exact fallback retains the complete typed query and compiles to a post-ASAP DAG.
 #[tokio::test]
 async fn corr_survives_exact_plan_compilation() {
     let query = Rc::new(lower("SELECT corr(x, y) AS r FROM a").await);
@@ -132,5 +132,5 @@ async fn corr_survives_exact_plan_compilation() {
         panic!("expected exact fallback");
     };
     assert_eq!(aggregate(retained).0, aggregate(&query).0);
-    asap_types::post_asap::compile_executable_dag(&plan).unwrap();
+    asap_types::post_asap::compile_post_asap_dag(&plan).unwrap();
 }

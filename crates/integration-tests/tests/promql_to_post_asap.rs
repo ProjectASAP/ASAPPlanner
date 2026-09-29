@@ -20,7 +20,7 @@ use asap_aware_mapping::{
 };
 use asap_integration_tests::fixtures::lower_promql;
 use asap_types::post_asap::{
-    compile_executable_dag, CompositionOperator, EntityIdentity, ExactKind, ExactParams,
+    compile_post_asap_dag, CompositionOperator, EntityIdentity, ExactKind, ExactParams,
     GroupingStrategy, SketchAlgorithm, SketchKind, SketchParams, SketchQuery, SummaryExpr,
     SummaryFamilyType, SummaryInputExpr, SummaryNode, SummarySchema, SummaryUpdate, ValueOperation,
 };
@@ -292,19 +292,19 @@ fn grouped_rate_topk_consumes_finalized_rate_values() {
             _ => None,
         })
         .expect("rate-weighted CMS plan");
-    let dag = compile_executable_dag(&plan).unwrap();
+    let dag = compile_post_asap_dag(&plan).unwrap();
     assert!(!dag.nodes.iter().any(|node| matches!(
         node.payload,
-        asap_types::post_asap::ExecutableOperatorPayload::RelationalJoin { .. }
+        asap_types::post_asap::PostAsapOperatorPayload::RelationalJoin { .. }
     )));
     let node = dag.nodes.iter().find(|node| matches!(&node.payload,
-        asap_types::post_asap::ExecutableOperatorPayload::SummaryAgg { family: SummaryFamilyType::Sketch(kind, _), .. }
+        asap_types::post_asap::PostAsapOperatorPayload::SummaryAgg { family: SummaryFamilyType::Sketch(kind, _), .. }
         if kind.algorithm() == &SketchAlgorithm::CmsWithHeap)).unwrap();
     assert_eq!(
         node.output_state.timing,
         asap_types::post_asap::ExecutionTiming::QueryTime
     );
-    let asap_types::post_asap::ExecutableOperatorPayload::SummaryAgg { input, .. } = &node.payload
+    let asap_types::post_asap::PostAsapOperatorPayload::SummaryAgg { input, .. } = &node.payload
     else {
         unreachable!()
     };
@@ -375,7 +375,7 @@ fn weighted_topk_exports_symbolic_evidence_requirements() {
     let Replacement::Summary(node) = &candidate.replacement else {
         panic!("summary candidate")
     };
-    let dag = compile_executable_dag(node).unwrap();
+    let dag = compile_post_asap_dag(node).unwrap();
     let exported = serde_json::to_string(&dag).unwrap();
     assert!(exported.contains("topk_max_distinct_items"));
     assert!(exported.contains("topk_membership_margin"));
@@ -503,7 +503,7 @@ fn rate_and_increase_topk_use_summary_scores_and_grouped_limits() {
                 ..
             }
         ));
-        let dag = compile_executable_dag(&plan).unwrap();
+        let dag = compile_post_asap_dag(&plan).unwrap();
         for phase in [
             asap_types::post_asap::ExecutionTiming::IngestionTime,
             asap_types::post_asap::ExecutionTiming::QueryTime,
@@ -660,7 +660,7 @@ fn ddsketch_quantile_ratio_meets_the_shared_relative_error_target() {
 #[test]
 fn planner_only_e2e_temporal_topk_preserves_query_update_and_readout_contract() {
     // Self-contained Planner E2E: each case starts from PromQL text and ends
-    // at the executable post-ASAP summary DAG. No controller/backend types,
+    // at the post-ASAP summary DAG. No controller/backend types,
     // fixtures, configuration, or runtime are involved.
     let cases = [
         (
@@ -831,7 +831,7 @@ fn execute_topk_reference(plan: &SummaryNode) -> Vec<(String, f64)> {
 }
 
 #[test]
-fn planner_topk_reference_execution_matches_ground_truth() {
+fn planner_heap_topk_reference_execution_matches_ground_truth() {
     // Pin numeric results independently of the emitted IR: swapping weights,
     // losing identity, changing the window, or dropping k changes the answer.
     for (query, expected) in [
@@ -865,8 +865,11 @@ fn planner_topk_reference_execution_matches_ground_truth() {
             &EqualSplitAllocator,
             &SeparatedTopK,
         );
-        let candidates = strategy.replacements(&TargetSubDAG::new(&pre));
-        assert!(!candidates.is_empty(), "no plan for {query}");
+        // This reference executor consumes keyed heap updates. The inventory
+        // also contains maintained exact values followed by sort/limit; those
+        // have a different execution contract and must not enter this fixture.
+        let candidates: Vec<_> = strategy.replacements(&TargetSubDAG::new(&pre)).into_iter().filter(|candidate| matches!(&candidate.replacement, Replacement::Summary(plan) if matches!(plan.expr, SummaryExpr::SummaryEstimate { query: SketchQuery::TopK { .. }, .. }))).collect();
+        assert!(!candidates.is_empty(), "no heap candidate for {query}");
         for candidate in candidates {
             let Replacement::Summary(plan) = candidate.replacement else {
                 panic!("expected summary plan for {query}")
@@ -1152,12 +1155,12 @@ fn nested_summary_explicitly_finalizes_exact_child_at_ingestion_time() {
         .fields
         .iter()
         .any(|field| matches!(field.dtype, SummaryFamilyType::Plain(DataType::Float64))));
-    compile_executable_dag(&plan).expect("explicit boundary is a valid executable DAG");
+    compile_post_asap_dag(&plan).expect("explicit boundary is a valid post-ASAP DAG");
 }
 
 #[test]
 fn physical_node_owns_phase_independently_of_binary_payload() {
-    use asap_types::post_asap::{ExecutableOperatorPayload, ExecutionTiming};
+    use asap_types::post_asap::{ExecutionTiming, PostAsapOperatorPayload};
     for (query, expected) in [
         (
             "quantile(0.9, sum_over_time(m[1m]) + sum_over_time(n[1m]))",
@@ -1175,19 +1178,19 @@ fn physical_node_owns_phase_independently_of_binary_payload() {
             .assemble_selected_dag(&search.roots[0].1)
             .unwrap()
             .unwrap();
-        let dag = compile_executable_dag(&plan).unwrap();
+        let dag = compile_post_asap_dag(&plan).unwrap();
         let node = dag
             .nodes
             .iter()
-            .find(|node| matches!(node.payload, ExecutableOperatorPayload::Binary { .. }))
+            .find(|node| matches!(node.payload, PostAsapOperatorPayload::Binary { .. }))
             .unwrap();
         assert_eq!(node.output_state.timing, expected);
         let wire = serde_json::to_value(&node.payload).unwrap();
         assert!(wire.get("timing").is_none());
         let mut obsolete = wire.clone();
         obsolete["timing"] = serde_json::json!(expected.as_str());
-        assert!(serde_json::from_value::<ExecutableOperatorPayload>(obsolete).is_err());
-        let restored: ExecutableOperatorPayload = serde_json::from_value(wire).unwrap();
+        assert!(serde_json::from_value::<PostAsapOperatorPayload>(obsolete).is_err());
+        let restored: PostAsapOperatorPayload = serde_json::from_value(wire).unwrap();
         assert_eq!(restored, node.payload);
     }
 }
