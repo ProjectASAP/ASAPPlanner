@@ -36,8 +36,8 @@ pub mod promql_values;
 
 mod candidates;
 pub use candidates::{
-    compile_candidate, compile_candidates, enumerate_frontiers, select_candidate, CandidateCost,
-    CandidateSelection, PhysicalCandidate,
+    compile_candidate, compile_candidates, cut_candidate, enumerate_compiled_frontiers,
+    enumerate_frontiers, select_candidate, CandidateCost, CandidateSelection, PhysicalCandidate,
 };
 
 mod temporal_panes;
@@ -109,6 +109,12 @@ pub fn bind_with_data_sources<'a>(
     bind(dag, sources, roots)
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Planner nodes lowered by this thread, for compile-once tests.
+    static LOWERED_NODES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 fn compile_internal(
     dag: &PostAsapDag,
     mut sources: BTreeMap<NodeId, InputContract>,
@@ -165,9 +171,12 @@ fn compile_internal(
         }
     }
     let mut graph = CompiledPhysicalDag::new(roots.to_vec());
-    let mut auxiliary = u64::MAX;
     for id in ordered {
         let node = nodes[&id];
+        // At most one helper operator per node, numbered above the u32 Planner
+        // ID range by its node alone, so every boundary choice yields a subgraph
+        // of the same lowering and candidate cuts need not renumber operators.
+        let auxiliary = u64::MAX - id;
         let output = Arc::new(node.output_schema.clone());
         crate::values::validate_schema(&output)?;
         if let Some(source) = sources.remove(&id) {
@@ -176,6 +185,8 @@ fn compile_internal(
             }
             graph.add_input(id, source)?;
         } else {
+            #[cfg(test)]
+            LOWERED_NODES.with(|count| count.set(count.get() + 1));
             let mut inputs = dependencies.get(&id).cloned().unwrap_or_default();
             let mut schemas = inputs
                 .iter()
@@ -191,7 +202,6 @@ fn compile_internal(
                     Operator::union(schemas[0].clone(), schemas.len())?,
                 )?;
                 inputs = vec![auxiliary];
-                auxiliary -= 1;
                 schemas.truncate(1);
             }
             if let Payload::Value {
@@ -286,7 +296,6 @@ fn compile_internal(
                     vec![auxiliary],
                     Operator::limit(input, *k as u64, 0, groups)?.with_output_schema(output)?,
                 )?;
-                auxiliary -= 1;
                 continue;
             }
             // A closed row must include either all source labels or the explicit
@@ -346,7 +355,6 @@ fn compile_internal(
                     vec![auxiliary],
                     Operator::scope_timestamp(compact, output)?,
                 )?;
-                auxiliary -= 1;
                 continue;
             }
             let mut operator = compile_node(node, &schemas)

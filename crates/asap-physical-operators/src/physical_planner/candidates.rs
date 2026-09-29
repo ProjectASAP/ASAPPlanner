@@ -26,23 +26,41 @@ pub fn compile_candidate(
     roots: &[NodeId],
     frontier: &[NodeId],
 ) -> Result<PhysicalCandidate, Error> {
+    cut_candidate(&compile(dag, inputs, roots)?, frontier)
+}
+
+/// Derive one frontier's candidate from a complete [`compile`] result by
+/// partitioning its operators; nothing is lowered again. A deployment compiles
+/// each query DAG once and derives every placement choice from that result.
+/// The candidate is identical to [`compile_candidate`] for the same frontier.
+pub fn cut_candidate(
+    compiled: &CompiledPhysicalDag,
+    frontier: &[NodeId],
+) -> Result<PhysicalCandidate, Error> {
     if frontier.is_empty() {
         return Ok(PhysicalCandidate {
             precompute: None,
-            query: compile(dag, inputs, roots)?,
+            query: compiled.clone(),
             materialized_outputs: BTreeMap::new(),
         });
     }
     let frontier_set: BTreeSet<_> = frontier.iter().copied().collect();
-    if frontier_set.len() != frontier.len() || frontier.iter().any(|id| inputs.contains_key(id)) {
+    // `compile` retains only reachable nodes and numbers its helper operators
+    // above the u32 Planner ID range; only Planner outputs are boundaries.
+    if frontier_set.len() != frontier.len()
+        || frontier
+            .iter()
+            .any(|&id| !compiled.is_operator(id) || u32::try_from(id).is_err())
+    {
         return Err(invalid("frontier must contain distinct computed outputs"));
     }
-    let full = compile(dag, inputs.clone(), roots)?;
-    let precompute = compile(dag, inputs.clone(), frontier)?;
+    let inputs: BTreeMap<_, _> = compiled
+        .input_contracts()
+        .map(|(id, contract)| (id, contract.clone()))
+        .collect();
+    let precompute = compiled.cut(&inputs, frontier)?;
     let mut materialized_outputs = BTreeMap::new();
     for &id in frontier {
-        // Also proves that the frontier is reachable from the requested roots.
-        full.output_contract(id)?;
         let mut output = precompute.output_contract(id)?;
         if output.properties.boundedness != Boundedness::Bounded {
             return Err(invalid("materialized output requires bounded execution"));
@@ -54,7 +72,7 @@ pub fn compile_candidate(
     }
     let mut query_inputs = inputs;
     query_inputs.extend(materialized_outputs.clone());
-    let query = compile(dag, query_inputs, roots)?;
+    let query = compiled.cut(&query_inputs, compiled.roots())?;
     let used: BTreeSet<_> = query.input_contracts().map(|(id, _)| id).collect();
     if !frontier.iter().all(|id| used.contains(id)) {
         return Err(invalid(
@@ -79,42 +97,39 @@ pub fn enumerate_frontiers(
     roots: &[NodeId],
     max_candidates: usize,
 ) -> Result<Vec<Vec<NodeId>>, Error> {
+    enumerate_compiled_frontiers(&compile(dag, inputs.clone(), roots)?, max_candidates)
+}
+
+/// [`enumerate_frontiers`] over an existing [`compile`] result, so enumeration
+/// and [`cut_candidate`] share one lowering.
+pub fn enumerate_compiled_frontiers(
+    compiled: &CompiledPhysicalDag,
+    max_candidates: usize,
+) -> Result<Vec<Vec<NodeId>>, Error> {
     if max_candidates == 0 {
         return Err(invalid(
             "frontier search requires a positive candidate budget",
         ));
     }
-    let compiled = compile(dag, inputs.clone(), roots)?;
     let mut ancestors = BTreeMap::<NodeId, BTreeSet<NodeId>>::new();
     let mut eligible = Vec::new();
-    for node in &dag.nodes {
-        let id = u64::from(node.id.0);
-        if inputs.contains_key(&id) {
-            continue;
-        }
-        let Ok(contract) = compiled.output_contract(id) else {
-            continue;
-        };
-        if contract.properties.boundedness != Boundedness::Bounded {
+    for (id, properties) in compiled.output_properties()? {
+        if !compiled.is_operator(id)
+            || u32::try_from(id).is_err()
+            || properties.boundedness != Boundedness::Bounded
+        {
             continue;
         }
         let mut seen = BTreeSet::new();
         let mut pending = vec![id];
         while let Some(current) = pending.pop() {
-            if !seen.insert(current) || inputs.contains_key(&current) {
-                continue;
+            if seen.insert(current) {
+                pending.extend(compiled.dependencies(current));
             }
-            pending.extend(
-                dag.edges
-                    .iter()
-                    .filter(|edge| u64::from(edge.consumer.0) == current)
-                    .map(|edge| u64::from(edge.producer.0)),
-            );
         }
         ancestors.insert(id, seen);
         eligible.push(id);
     }
-    eligible.sort_unstable();
     let mut frontiers = vec![vec![]];
     for id in eligible {
         let additions = frontiers
@@ -142,16 +157,20 @@ pub fn enumerate_frontiers(
 
 /// Lower every maintenance candidate before feasibility/cost evaluation. Keep
 /// individual failures visible; do not substitute another computation on error.
+/// The DAG is lowered once; each frontier is a [`cut_candidate`] of it.
 pub fn compile_candidates(
     dag: &PostAsapDag,
     inputs: BTreeMap<NodeId, InputContract>,
     roots: &[NodeId],
     frontiers: &[Vec<NodeId>],
 ) -> Vec<Result<PhysicalCandidate, Error>> {
-    frontiers
-        .iter()
-        .map(|frontier| compile_candidate(dag, inputs.clone(), roots, frontier))
-        .collect()
+    match compile(dag, inputs, roots) {
+        Ok(compiled) => frontiers
+            .iter()
+            .map(|frontier| cut_candidate(&compiled, frontier))
+            .collect(),
+        Err(error) => frontiers.iter().map(|_| Err(error.clone())).collect(),
+    }
 }
 
 /// Complete workload cost supplied by scoped optimizer/deployment evidence.
@@ -271,5 +290,78 @@ impl PhysicalCandidate {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use planner_types::workload::*;
+
+    fn grouped_rate() -> (PostAsapDag, BTreeMap<NodeId, InputContract>, NodeId) {
+        let workload = PlanningWorkload {
+            query_workload: QueryWorkload {
+                language: QueryLanguage::PromQL,
+                query_batch: Some(vec![BatchEntry {
+                    query: Query("sum by(job)(rate(m[1m]))".into()),
+                    requirements: QueryRequirements {
+                        accuracy: AccuracyRequirement::Explicit(
+                            planner_types::types::AccuracyTarget::Exact,
+                        ),
+                        ..Default::default()
+                    },
+                    predictability: Predictability::Unknown,
+                    invocations: 1,
+                    execute_at: None,
+                    time_selection: TimeSelection::default(),
+                }]),
+                repeating_queries: None,
+            },
+            data_workload: Some(DataWorkload {
+                data_ingestion_interval: Evidence {
+                    value: Some(DurationMs(1000)),
+                    ..Default::default()
+                },
+                ..Default::default()
+            }),
+        };
+        let root = asap_frontend_promql::lower_promql_workload(&workload, 0)
+            .unwrap()
+            .remove(0);
+        let root = std::rc::Rc::new(promql_rows::with_series_identity(&root).unwrap());
+        let space = asap_aware_mapping::search_workload(vec![("q", root)]);
+        let selected = space
+            .global_selection(&asap_aware_mapping::cost_model::DefaultCostModel)
+            .assemble_selected_dag(&space.roots[0].1)
+            .unwrap()
+            .unwrap();
+        let dag = planner_types::post_asap::compile_post_asap_dag(&selected).unwrap();
+        let state = dag
+            .nodes
+            .iter()
+            .find(|node| matches!(node.payload, Payload::SummaryAgg { .. }))
+            .unwrap();
+        let inputs = BTreeMap::from([(
+            u64::from(state.id.0),
+            InputContract::bounded(Arc::new(state.output_schema.clone())),
+        )]);
+        (dag.clone(), inputs, u64::from(dag.root.0))
+    }
+
+    /// Enumerating and cutting every frontier lowers each Planner node once.
+    #[test]
+    fn candidates_for_all_frontiers_share_one_lowering() {
+        let (dag, inputs, root) = grouped_rate();
+        let lowered = || crate::physical_planner::LOWERED_NODES.with(|count| count.get());
+        let before = lowered();
+        let compiled = compile(&dag, inputs, &[root]).unwrap();
+        let once = lowered() - before;
+        let frontiers = enumerate_compiled_frontiers(&compiled, 4096).unwrap();
+        assert!(frontiers.len() >= 3, "{frontiers:?}");
+        for frontier in &frontiers {
+            cut_candidate(&compiled, frontier).unwrap();
+        }
+        assert!(once > 0);
+        assert_eq!(lowered() - before, once);
     }
 }
