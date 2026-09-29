@@ -8,4 +8,5 @@ extensions. A design document is not a promise of downstream runtime support.
 - [ASAPQuery rule coverage](asapquery-rule-coverage.md)
 - [UnivMon frequency summary](univmon-frequency-summary.md)
 - [ASAP-aware mapping proposals](asap-aware-mapping/README.md)
-- [Operator flattening](operator-flattening.md)
+- [Operator sharing](operator-sharing.md)
+- [Decoupling operators from scalar expressions](decoupling_op_and_expr.md)
