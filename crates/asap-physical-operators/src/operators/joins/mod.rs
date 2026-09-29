@@ -32,6 +32,15 @@ impl Operator {
         }
         self
     }
+    pub(crate) fn certified_pruning_keys(&self) -> Option<&[(usize, usize)]> {
+        match &self.kind {
+            Kind::SemiJoin {
+                keys,
+                require_complete_right: true,
+            } => Some(keys),
+            _ => None,
+        }
+    }
     pub fn relational_join(
         left: Schema,
         right: Schema,
