@@ -4,6 +4,15 @@ impl Operator {
         let fields = columns
             .iter()
             .map(|(name, e)| {
+                if let Expression::Column(index) = e {
+                    let mut field = input
+                        .fields
+                        .get(*index)
+                        .ok_or_else(|| invalid("projection column out of range"))?
+                        .clone();
+                    field.name = name.clone();
+                    return Ok(field);
+                }
                 let (t, n) = e.dtype(&input)?;
                 Ok(result_field(name, t, n))
             })

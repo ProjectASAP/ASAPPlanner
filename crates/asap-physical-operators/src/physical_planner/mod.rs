@@ -498,7 +498,10 @@ fn bind_operation(node: &ExecutableDagNode, inputs: &[Schema]) -> Result<Operato
                                 .ok_or_else(|| invalid("projection width mismatch"))?
                                 .name
                                 .clone(),
-                            expression(&col.expr, input)?,
+                            match &col.expr {
+                                QueryExpr::Column(index) => Expression::Column(*index),
+                                expr => expression(expr, input)?,
+                            },
                         ))
                     })
                     .collect::<Result<_, Error>>()?,
