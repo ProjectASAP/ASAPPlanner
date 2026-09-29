@@ -48,6 +48,11 @@ impl TryFrom<StoredOperator> for Operator {
                 operator,
                 return_bool,
             } => Operator::vector_binary(input(0)?, input(1)?, operator, return_bool)?,
+            Kind::AlignedBinary {
+                keys,
+                values,
+                operator,
+            } => Operator::aligned_binary(input(0)?, input(1)?, keys, values, operator)?,
             Kind::RangeWindow { intent } => Operator::range_window(*intent)?,
             Kind::HistogramQuantile => Operator::histogram_quantile(),
             Kind::Project(expressions) => {
