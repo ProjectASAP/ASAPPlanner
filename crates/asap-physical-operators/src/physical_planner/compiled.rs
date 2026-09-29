@@ -212,13 +212,8 @@ impl CompiledPhysicalDag {
     }
     /// Derive a reachable output contract without opening deployment readers.
     pub fn output_contract(&self, id: NodeId) -> Result<InputContract, Error> {
-        let sources = self
-            .input_contracts()
-            .map(|(id, contract)| (id, Box::new(contract.clone()) as Source<'_>))
-            .collect();
-        let graph = self.instantiate(sources)?;
-        let properties = graph.properties(&self.roots)?;
-        let properties = *properties
+        let properties = *self
+            .output_properties()?
             .get(&id)
             .ok_or_else(|| invalid("output is not reachable"))?;
         let schema = match self
@@ -230,6 +225,53 @@ impl CompiledPhysicalDag {
             Node::Operator { operator, .. } => operator.output_schema(),
         };
         Ok(InputContract { schema, properties })
+    }
+    /// Properties of every reachable node, derived in one contract-only pass.
+    pub(super) fn output_properties(&self) -> Result<BTreeMap<NodeId, PlanProperties>, Error> {
+        let sources = self
+            .input_contracts()
+            .map(|(id, contract)| (id, Box::new(contract.clone()) as Source<'_>))
+            .collect();
+        self.instantiate(sources)?.properties(&self.roots)
+    }
+    /// Direct physical dependencies; empty for inputs and unknown IDs.
+    pub(super) fn dependencies(&self, id: NodeId) -> &[NodeId] {
+        match self.nodes.get(&id) {
+            Some(Node::Operator { inputs, .. }) => inputs,
+            _ => &[],
+        }
+    }
+    pub(super) fn is_operator(&self, id: NodeId) -> bool {
+        matches!(self.nodes.get(&id), Some(Node::Operator { .. }))
+    }
+    /// Keep the already-lowered operators reachable from `roots`, replacing
+    /// each node in `boundaries` by a typed input. Nothing is lowered again.
+    pub(super) fn cut(
+        &self,
+        boundaries: &BTreeMap<NodeId, InputContract>,
+        roots: &[NodeId],
+    ) -> Result<Self, Error> {
+        let mut result = Self::new(roots.to_vec());
+        let mut pending = roots.to_vec();
+        while let Some(id) = pending.pop() {
+            if result.nodes.contains_key(&id) {
+                continue;
+            }
+            let node = match boundaries.get(&id) {
+                Some(contract) => Node::Input(contract.clone()),
+                None => self
+                    .nodes
+                    .get(&id)
+                    .cloned()
+                    .ok_or_else(|| invalid(format!("missing physical node {id}")))?,
+            };
+            if let Node::Operator { inputs, .. } = &node {
+                pending.extend(inputs);
+            }
+            result.nodes.insert(id, node);
+        }
+        result.validate()?;
+        Ok(result)
     }
     /// Validate using contract-only sources. No deployment reader is available.
     pub fn validate(&self) -> Result<(), Error> {
