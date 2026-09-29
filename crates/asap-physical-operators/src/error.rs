@@ -1,3 +1,4 @@
+use crate::plan::NodeId;
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum Error {
     #[error("invalid DAG: {0}")]
@@ -6,7 +7,7 @@ pub enum Error {
     Operator(String),
     #[error("node {node} ({operation}) failed: {source}")]
     AtNode {
-        node: u64,
+        node: NodeId,
         operation: String,
         source: Box<Error>,
     },

@@ -2,7 +2,7 @@
 use crate::AggregateCore;
 use crate::Error;
 use planner_types::{
-    post_asap::{SummaryFamilyType, SummarySchema},
+    post_asap::{SummaryFamilyType, SummaryField, SummarySchema},
     pre_asap::DataType,
 };
 use std::{cmp::Ordering, sync::Arc};
@@ -247,6 +247,16 @@ impl Batch {
                 .sum::<usize>()
     }
 }
+pub(crate) fn group_key(row: &[Value], columns: &[usize]) -> Result<Vec<Vec<u8>>, Error> {
+    columns
+        .iter()
+        .map(|&i| {
+            row.get(i)
+                .ok_or_else(|| Error::Invalid("group column out of range".into()))?
+                .key()
+        })
+        .collect()
+}
 
 pub(crate) use crate::capability::validate_native_family as validate_family;
 
@@ -326,6 +336,20 @@ pub(crate) fn validate_schema(schema: &Schema) -> Result<(), Error> {
         }
     }
     Ok(())
+}
+
+pub(crate) fn field(schema: &Schema, column: usize) -> Result<&SummaryField, Error> {
+    schema
+        .fields
+        .get(column)
+        .ok_or_else(|| Error::Invalid("column out of range".into()))
+}
+pub(crate) fn plain(schema: &Schema, column: usize) -> Result<(&DataType, bool), Error> {
+    let f = field(schema, column)?;
+    let SummaryFamilyType::Plain(dtype) = &f.dtype else {
+        return Err(Error::Invalid("plain value required".into()));
+    };
+    Ok((dtype, f.nullable))
 }
 
 #[cfg(test)]
