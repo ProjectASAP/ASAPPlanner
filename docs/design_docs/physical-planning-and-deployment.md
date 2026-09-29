@@ -415,6 +415,17 @@ feasibility is rejected before pricing. The optimizer supplies candidate
 frontiers and cost evidence, including updates, retention, recurrence and sharing.
 `enumerate_frontiers` constructs bounded, reachable antichain frontiers above explicit input boundaries, including query-only and fully precomputed results. It fails explicitly when the candidate budget is exceeded. Maintenance selection must still reject frontiers that violate window, freshness, or reuse requirements; deployment feasibility is checked before pricing.
 
+Lowering a node does not depend on the chosen frontier, so Planner lowers each
+query DAG once. `compile(dag, inputs, roots)` yields the complete
+`CompiledPhysicalDag`; `enumerate_compiled_frontiers(&compiled, max)` and
+`cut_candidate(&compiled, frontier)` then derive each placement by partitioning
+its operators: nodes above the frontier and below the roots form the query DAG,
+and the frontier's ancestors form the precompute DAG. Helper operators are
+numbered by their Planner node, so a cut is byte-identical to lowering that
+frontier directly. `compile_candidate(s)` and `enumerate_frontiers` are wrappers
+over this path. A deployment compiles each query DAG once, not once per
+placement choice. Temporal pane candidates remain a separate lowering.
+
 Physical compilation opens no readers. Bounded precompute outputs become typed
 query inputs. Their source, filters, grouping, build window, evaluation time, readiness and
 revision contracts must accompany the selected lifecycle and be checked during
