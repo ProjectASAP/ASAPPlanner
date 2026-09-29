@@ -100,6 +100,13 @@ pub struct QueryLifecyclePlan {
 
 The variant follows from whether `lifecycle` was supplied in the input.
 
+`PlanOutput` is the result of selection, not a replacement for `PlanSpace`. A
+pass keeps one candidate per target and drops the others. A caller that must
+choose among candidates itself still reads `PlanSpace`. Each `dag` is the
+`SummaryNode` tree form of a Post-ASAP DAG. `compile_post_asap_dag(&dag)`
+produces the exported `PostAsapDag` form. See
+[output layers](input-output-workflow.md#output-layers).
+
 ---
 
 ## 3. The pluggable optimization pass
