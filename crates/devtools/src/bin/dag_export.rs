@@ -2870,8 +2870,10 @@ mod tests {
         }
     }
 
+    // TopK queries of different sizes share one exact ranked prefix and differ
+    // only in their final Limit.
     #[test]
-    fn workload_node_ids_make_smaller_topk_reuse_explicit() {
+    fn workload_node_ids_share_ranked_prefix_across_topk_sizes() {
         let small = lower_promql(
             "topk(5, rate(http_requests_total[5m]))",
             AccuracyTarget::Epsilon(0.01),
@@ -2915,18 +2917,14 @@ mod tests {
             .unwrap()
             .1;
         let q3_root = &q3.nodes[q3.root as usize];
-        assert_eq!(q3_root.label, "Limit(5)");
-        assert_eq!(
-            q3_root
-                .decision
-                .as_ref()
-                .map(|decision| decision.strategy.as_str()),
-            Some("TopKLimitReuseStrategy")
-        );
-        let q3_large = &q3.nodes[q3_root.children[0] as usize];
-        let q4_large = &q4.nodes[q4.root as usize];
-        assert_eq!(q3_large.label, "Limit(10)");
-        assert_eq!(q3_large.workload_node_id, q4_large.workload_node_id);
+        let q4_root = &q4.nodes[q4.root as usize];
+        assert!(q3_root.label.contains("Limit { n: 5,"));
+        assert!(q4_root.label.contains("Limit { n: 10,"));
+        assert_ne!(q3_root.workload_node_id, q4_root.workload_node_id);
+        let q3_ranked = &q3.nodes[q3_root.children[0] as usize];
+        let q4_ranked = &q4.nodes[q4_root.children[0] as usize];
+        assert!(q3_ranked.label.contains("Sort"));
+        assert_eq!(q3_ranked.workload_node_id, q4_ranked.workload_node_id);
     }
 
     #[tokio::test]

@@ -738,7 +738,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 | --- | --- |
 | `asap_types::dag_export::export(&query)` | Pre-ASAP inspection graph |
 | `asap_types::dag_export::export_summary(&summary)` | Post-ASAP inspection graph |
-| `asap_types::post_asap::compile_executable_dag(&root)` | Compile a semantic DAG with execution-data-state validation; not a physical plan |
+| `asap_types::post_asap::compile_post_asap_dag(&root)` | Compile a semantic DAG with execution-data-state validation; not a physical plan |
 | `PostAsapDagDocument::new(dag)` and `.validate()` | Versioned semantic envelope and explicit validation; constructing it alone does not validate |
 | `asap_aware_mapping::export_summary_maintenance_plan(&plan)` | Graph plus lifecycle deployments, alternatives and available cost/guarantee information |
 | `explain_replacements` / `explain_replacements_with` | Findings from default/custom-strategy search; not a complete physical feasibility report |

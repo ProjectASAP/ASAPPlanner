@@ -27,8 +27,8 @@ use asap_aware_mapping::{
 };
 use asap_frontend_sql::{lower_sql, lower_sql_dialect, SqlCatalog};
 use asap_types::post_asap::{
-    compile_executable_dag, EdgeRole, ExactKind, ExactParams, ExecutableOperatorPayload,
-    GroupingStrategy, SketchAlgorithm, SketchKind, SketchParams, SketchQuery, SummaryExpr,
+    compile_post_asap_dag, EdgeRole, ExactKind, ExactParams, GroupingStrategy,
+    PostAsapOperatorPayload, SketchAlgorithm, SketchKind, SketchParams, SketchQuery, SummaryExpr,
     SummaryFamilyType, SummaryNode, SummarySchema, SummaryUpdate, ValueOperation,
 };
 use asap_types::pre_asap::expr_ir::ColumnRef;
@@ -192,10 +192,10 @@ async fn clickhouse_outer_sum_recursively_binds_inner_temporal_aggregate() {
             has_temporal_summary(&root),
             "inner {function} was hidden: {root:?}"
         );
-        let executable = compile_executable_dag(&root).expect("nested SQL DAG must be executable");
-        assert!(executable.nodes.iter().any(|node| matches!(
+        let dag = compile_post_asap_dag(&root).expect("nested SQL DAG must compile");
+        assert!(dag.nodes.iter().any(|node| matches!(
             node.payload,
-            ExecutableOperatorPayload::Value {
+            PostAsapOperatorPayload::Value {
                 operation: ValueOperation::Exact(_),
                 ..
             }
@@ -361,19 +361,14 @@ async fn sql_join_recursively_binds_both_temporal_aggregate_children() {
         .guarantee
         .as_ref()
         .is_some_and(|value| value.is_exact()));
-    let executable = compile_executable_dag(&root).expect("join DAG must compile");
-    let join_id = executable
+    let dag = compile_post_asap_dag(&root).expect("join DAG must compile");
+    let join_id = dag
         .nodes
         .iter()
-        .find(|node| {
-            matches!(
-                node.payload,
-                ExecutableOperatorPayload::RelationalJoin { .. }
-            )
-        })
+        .find(|node| matches!(node.payload, PostAsapOperatorPayload::RelationalJoin { .. }))
         .expect("relational join node")
         .id;
-    let roles = executable
+    let roles = dag
         .edges
         .iter()
         .filter(|edge| edge.consumer == join_id)
@@ -550,10 +545,10 @@ async fn sql_filter_keeps_read_predicate_and_summary_population_selection() {
     }
     assert_eq!(retained_read_predicate, Some(expected_read_predicate));
 
-    let executable = compile_executable_dag(&root).expect("typed DAG compilation failed");
-    assert!(executable.nodes.iter().any(|node| matches!(
+    let dag = compile_post_asap_dag(&root).expect("typed DAG compilation failed");
+    assert!(dag.nodes.iter().any(|node| matches!(
         &node.payload,
-        ExecutableOperatorPayload::Value {
+        PostAsapOperatorPayload::Value {
             operation: ValueOperation::Filter { pred },
             ..
         } if pred == retained_read_predicate.as_ref().unwrap()
@@ -811,9 +806,9 @@ async fn map_projection_export_preserves_unsupported_child_boundary() {
         .assemble_selected_dag(&space.roots[0].1)
         .unwrap()
         .unwrap();
-    let executable = compile_executable_dag(&root).unwrap();
-    assert!(executable.nodes.iter().any(|node| matches!(&node.payload,
-        ExecutableOperatorPayload::Value { operation: ValueOperation::Project { cols, .. }, .. }
+    let dag = compile_post_asap_dag(&root).unwrap();
+    assert!(dag.nodes.iter().any(|node| matches!(&node.payload,
+        PostAsapOperatorPayload::Value { operation: ValueOperation::Project { cols, .. }, .. }
         if cols.iter().any(|item| matches!(&item.expr, QueryExpr::FunctionCall { name, .. } if name == "map"))
     )));
     let mut node = root.as_ref();

@@ -28,11 +28,11 @@
 //! — see `asap_aware_mapping::grouping`'s module docs for why.
 
 pub mod cse;
-pub mod executable_dag;
 pub mod execution_data_state;
 pub mod expr;
 pub mod guarantee;
 pub mod maintained_population;
+pub mod post_asap_dag;
 pub mod query_time;
 pub mod schema;
 pub mod sketch;
@@ -41,12 +41,6 @@ pub mod summary_maintenance_lifecycle;
 pub mod summary_window;
 
 pub use cse::share_common_summary_subtrees;
-pub use executable_dag::{
-    compile_executable_dag, compile_executable_dag_with_node_ids, EdgeRole, ExecutableDag,
-    ExecutableDagCompilation, ExecutableDagEdge, ExecutableDagNode, ExecutableDagValidationError,
-    ExecutableNodeIdentityMap, ExecutableOperatorPayload, GroupingEdgeCompatibility,
-    PostAsapDagDocument, PostAsapNodeId, WindowEdgeCompatibility, POST_ASAP_DAG_WIRE_VERSION,
-};
 pub use execution_data_state::{
     assigned_child_data_state, exact_operation_output_schema, produced_data_state,
     validate_execution_data_states, validate_execution_data_states_at, DataPrimitive,
@@ -59,6 +53,13 @@ pub use expr::{
 pub use guarantee::{
     AccuracyError, BoundExpr, CompositionOperator, ErrorMetric, GuaranteeSource, ProbabilityExpr,
     ResultGuarantee,
+};
+pub use post_asap_dag::{
+    compile_post_asap_dag, compile_post_asap_dag_with_node_ids, EdgeRole,
+    GroupingEdgeCompatibility, PostAsapDag, PostAsapDagCompilation, PostAsapDagDocument,
+    PostAsapDagEdge, PostAsapDagNode, PostAsapDagValidationError, PostAsapNodeId,
+    PostAsapNodeIdentityMap, PostAsapOperatorPayload, WindowEdgeCompatibility,
+    POST_ASAP_DAG_WIRE_VERSION,
 };
 pub use query_time::{
     classic_cms_sizing, cms_posterior_error_bound, count_sketch_posterior_error_bound,

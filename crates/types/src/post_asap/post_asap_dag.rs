@@ -1,4 +1,4 @@
-//! Runtime-neutral executable DAG contract shared by precompute and query engines.
+//! Runtime-neutral post-ASAP DAG contract shared by precompute and query engines.
 
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -49,7 +49,7 @@ pub struct PostAsapNodeId(pub u32);
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-pub enum ExecutableOperatorPayload {
+pub enum PostAsapOperatorPayload {
     Fallback {
         expression: QueryExpr,
     },
@@ -90,10 +90,10 @@ pub enum ExecutableOperatorPayload {
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct ExecutableDagNode {
+pub struct PostAsapDagNode {
     pub id: PostAsapNodeId,
     /// The payload variant is the sole operator identity (`payload.kind` in JSON).
-    pub payload: ExecutableOperatorPayload,
+    pub payload: PostAsapOperatorPayload,
     /// Phase is a placement choice for every operator, independent of payload kind.
     pub output_state: ExecutionDataState,
     pub output_schema: SummarySchema,
@@ -102,7 +102,7 @@ pub struct ExecutableDagNode {
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct ExecutableDagEdge {
+pub struct PostAsapDagEdge {
     pub producer: PostAsapNodeId,
     pub consumer: PostAsapNodeId,
     pub role: EdgeRole,
@@ -114,9 +114,9 @@ pub struct ExecutableDagEdge {
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct ExecutableDag {
-    pub nodes: Vec<ExecutableDagNode>,
-    pub edges: Vec<ExecutableDagEdge>,
+pub struct PostAsapDag {
+    pub nodes: Vec<PostAsapDagNode>,
+    pub edges: Vec<PostAsapDagEdge>,
     /// Semantic workload root. Physical query/precompute sinks are selected
     /// downstream by the control plane.
     pub root: PostAsapNodeId,
@@ -129,11 +129,11 @@ pub struct ExecutableDag {
 #[serde(deny_unknown_fields)]
 pub struct PostAsapDagDocument {
     pub schema_version: u32,
-    pub dag: ExecutableDag,
+    pub dag: PostAsapDag,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
-pub enum ExecutableDagValidationError {
+pub enum PostAsapDagValidationError {
     #[error("phase assignment must name every DAG node exactly once")]
     IncompletePhaseAssignment,
     #[error("ingestion node {consumer:?} depends on query node {producer:?}")]
@@ -172,16 +172,16 @@ pub enum ExecutableDagValidationError {
 }
 
 impl PostAsapDagDocument {
-    pub fn new(dag: ExecutableDag) -> Self {
+    pub fn new(dag: PostAsapDag) -> Self {
         Self {
             schema_version: POST_ASAP_DAG_WIRE_VERSION,
             dag,
         }
     }
 
-    pub fn validate(&self) -> Result<(), ExecutableDagValidationError> {
+    pub fn validate(&self) -> Result<(), PostAsapDagValidationError> {
         if self.schema_version != POST_ASAP_DAG_WIRE_VERSION {
-            return Err(ExecutableDagValidationError::UnsupportedVersion(
+            return Err(PostAsapDagValidationError::UnsupportedVersion(
                 self.schema_version,
             ));
         }
@@ -189,19 +189,19 @@ impl PostAsapDagDocument {
     }
 }
 
-impl ExecutableDag {
+impl PostAsapDag {
     /// Assign execution phases without changing operator semantics. Phase choices
     /// do not prove deployment support: callers must bind concrete implementations
     /// and storage boundaries before installing this plan.
     pub fn with_execution_phases(
         &self,
         phases: &std::collections::BTreeMap<PostAsapNodeId, ExecutionTiming>,
-    ) -> Result<Self, ExecutableDagValidationError> {
+    ) -> Result<Self, PostAsapDagValidationError> {
         self.validate()?;
         if phases.len() != self.nodes.len()
             || self.nodes.iter().any(|node| !phases.contains_key(&node.id))
         {
-            return Err(ExecutableDagValidationError::IncompletePhaseAssignment);
+            return Err(PostAsapDagValidationError::IncompletePhaseAssignment);
         }
         let mut dag = self.clone();
         for node in &mut dag.nodes {
@@ -215,14 +215,14 @@ impl ExecutableDag {
         Ok(dag)
     }
 
-    pub fn validate(&self) -> Result<(), ExecutableDagValidationError> {
+    pub fn validate(&self) -> Result<(), PostAsapDagValidationError> {
         use std::collections::{HashMap, HashSet};
         let mut nodes = HashMap::new();
         for node in &self.nodes {
             if nodes.insert(node.id, node).is_some() {
-                return Err(ExecutableDagValidationError::DuplicateNodeId(node.id));
+                return Err(PostAsapDagValidationError::DuplicateNodeId(node.id));
             }
-            if let ExecutableOperatorPayload::SummaryAgg {
+            if let PostAsapOperatorPayload::SummaryAgg {
                 family, grouping, ..
             } = &node.payload
             {
@@ -233,48 +233,48 @@ impl ExecutableDag {
                     }
                     if let SummaryFamilyType::Sketch(_, schema_grouping) = &field.dtype {
                         if schema_grouping != grouping {
-                            return Err(ExecutableDagValidationError::SummaryGroupingMismatch {
+                            return Err(PostAsapDagValidationError::SummaryGroupingMismatch {
                                 node: node.id,
                             });
                         }
                     }
                 }
                 if !found_family {
-                    return Err(ExecutableDagValidationError::SummaryFamilySchemaMismatch {
+                    return Err(PostAsapDagValidationError::SummaryFamilySchemaMismatch {
                         node: node.id,
                     });
                 }
             }
         }
         if !nodes.contains_key(&self.root) {
-            return Err(ExecutableDagValidationError::MissingRoot(self.root));
+            return Err(PostAsapDagValidationError::MissingRoot(self.root));
         }
         let mut children: HashMap<PostAsapNodeId, Vec<PostAsapNodeId>> = HashMap::new();
         for edge in &self.edges {
             let producer = nodes.get(&edge.producer).ok_or(
-                ExecutableDagValidationError::MissingEdgeEndpoint(edge.producer),
+                PostAsapDagValidationError::MissingEdgeEndpoint(edge.producer),
             )?;
             if !nodes.contains_key(&edge.consumer) {
-                return Err(ExecutableDagValidationError::MissingEdgeEndpoint(
+                return Err(PostAsapDagValidationError::MissingEdgeEndpoint(
                     edge.consumer,
                 ));
             }
             if producer.output_state.timing == ExecutionTiming::QueryTime
                 && nodes[&edge.consumer].output_state.timing == ExecutionTiming::IngestionTime
             {
-                return Err(ExecutableDagValidationError::QueryDependencyInIngestion {
+                return Err(PostAsapDagValidationError::QueryDependencyInIngestion {
                     producer: edge.producer,
                     consumer: edge.consumer,
                 });
             }
             if edge.intermediate_schema != producer.output_schema {
-                return Err(ExecutableDagValidationError::EdgeSchemaMismatch {
+                return Err(PostAsapDagValidationError::EdgeSchemaMismatch {
                     producer: edge.producer,
                     consumer: edge.consumer,
                 });
             }
             if edge.data_state != producer.output_state {
-                return Err(ExecutableDagValidationError::EdgeDataStateMismatch {
+                return Err(PostAsapDagValidationError::EdgeDataStateMismatch {
                     producer: edge.producer,
                     consumer: edge.consumer,
                 });
@@ -314,7 +314,7 @@ impl ExecutableDag {
             &mut HashSet::new(),
             &mut HashSet::new(),
         ) {
-            return Err(ExecutableDagValidationError::Cycle);
+            return Err(PostAsapDagValidationError::Cycle);
         }
         let mut reachable = HashSet::new();
         fn mark(
@@ -331,21 +331,21 @@ impl ExecutableDag {
         }
         mark(self.root, &children, &mut reachable);
         if let Some(id) = nodes.keys().find(|id| !reachable.contains(id)) {
-            return Err(ExecutableDagValidationError::UnreachableNode(*id));
+            return Err(PostAsapDagValidationError::UnreachableNode(*id));
         }
         Ok(())
     }
 }
 
 /// Compiler-local identity assignment. It deliberately retains `Rc` handles
-/// and is not serialized; deployed artifacts persist the executable node ID
+/// and is not serialized; deployed artifacts persist the post-ASAP node ID
 /// together with their physical materialization/query IDs.
 #[derive(Debug, Clone)]
-pub struct ExecutableNodeIdentityMap {
+pub struct PostAsapNodeIdentityMap {
     nodes_by_id: Vec<Rc<SummaryNode>>,
 }
 
-impl ExecutableNodeIdentityMap {
+impl PostAsapNodeIdentityMap {
     pub fn node_id(&self, node: &Rc<SummaryNode>) -> Option<PostAsapNodeId> {
         self.nodes_by_id
             .iter()
@@ -359,20 +359,20 @@ impl ExecutableNodeIdentityMap {
 }
 
 #[derive(Debug, Clone)]
-pub struct ExecutableDagCompilation {
-    pub dag: ExecutableDag,
-    pub node_ids: ExecutableNodeIdentityMap,
+pub struct PostAsapDagCompilation {
+    pub dag: PostAsapDag,
+    pub node_ids: PostAsapNodeIdentityMap,
 }
 
-pub fn compile_executable_dag(
+pub fn compile_post_asap_dag(
     root: &Rc<SummaryNode>,
-) -> Result<ExecutableDag, ExecutionDataStateError> {
-    Ok(compile_executable_dag_with_node_ids(root)?.dag)
+) -> Result<PostAsapDag, ExecutionDataStateError> {
+    Ok(compile_post_asap_dag_with_node_ids(root)?.dag)
 }
 
-pub fn compile_executable_dag_with_node_ids(
+pub fn compile_post_asap_dag_with_node_ids(
     root: &Rc<SummaryNode>,
-) -> Result<ExecutableDagCompilation, ExecutionDataStateError> {
+) -> Result<PostAsapDagCompilation, ExecutionDataStateError> {
     let assignment = validate_execution_data_states(root)?;
     let mut nodes = Vec::new();
     let mut edges = Vec::new();
@@ -383,8 +383,8 @@ pub fn compile_executable_dag_with_node_ids(
         node: &Rc<SummaryNode>,
         assignment: &super::ExecutionDataStateAssignment,
         ids: &mut HashMap<*const SummaryNode, PostAsapNodeId>,
-        nodes: &mut Vec<ExecutableDagNode>,
-        edges: &mut Vec<ExecutableDagEdge>,
+        nodes: &mut Vec<PostAsapDagNode>,
+        edges: &mut Vec<PostAsapDagEdge>,
         nodes_by_id: &mut Vec<Rc<SummaryNode>>,
     ) -> PostAsapNodeId {
         if let Some(id) = ids.get(&Rc::as_ptr(node)) {
@@ -425,14 +425,14 @@ pub fn compile_executable_dag_with_node_ids(
             .data_state_of(node)
             .expect("validated node has state");
         let payload = match &node.expr {
-            SummaryExpr::KeepPreAsap(expression) => ExecutableOperatorPayload::Fallback {
+            SummaryExpr::KeepPreAsap(expression) => PostAsapOperatorPayload::Fallback {
                 expression: (**expression).clone(),
             },
-            SummaryExpr::BinaryOp { operator, .. } => ExecutableOperatorPayload::Binary {
+            SummaryExpr::BinaryOp { operator, .. } => PostAsapOperatorPayload::Binary {
                 operator: operator.clone(),
             },
 
-            SummaryExpr::ValueOperation { operation, .. } => ExecutableOperatorPayload::Value {
+            SummaryExpr::ValueOperation { operation, .. } => PostAsapOperatorPayload::Value {
                 operation: operation.clone(),
             },
             SummaryExpr::RelationalJoin {
@@ -440,7 +440,7 @@ pub fn compile_executable_dag_with_node_ids(
                 pred,
                 pruning,
                 ..
-            } => ExecutableOperatorPayload::RelationalJoin {
+            } => PostAsapOperatorPayload::RelationalJoin {
                 join_kind: kind.clone(),
                 pred: pred.clone(),
                 pruning: pruning.clone(),
@@ -452,31 +452,29 @@ pub fn compile_executable_dag_with_node_ids(
                 grouping,
                 filter,
                 ..
-            } => ExecutableOperatorPayload::SummaryAgg {
+            } => PostAsapOperatorPayload::SummaryAgg {
                 family: family.clone(),
                 input: input.clone(),
                 reduction: reduction.clone(),
                 grouping: grouping.clone(),
                 filter: filter.clone(),
             },
-            SummaryExpr::SummaryJoin { key, family, .. } => {
-                ExecutableOperatorPayload::SummaryJoin {
-                    key: key.clone(),
-                    family: family.clone(),
-                }
-            }
-            SummaryExpr::SummarySubtract { .. } => ExecutableOperatorPayload::SummarySubtract,
+            SummaryExpr::SummaryJoin { key, family, .. } => PostAsapOperatorPayload::SummaryJoin {
+                key: key.clone(),
+                family: family.clone(),
+            },
+            SummaryExpr::SummarySubtract { .. } => PostAsapOperatorPayload::SummarySubtract,
             SummaryExpr::SummaryDelete { key, .. } => {
-                ExecutableOperatorPayload::SummaryDelete { key: key.clone() }
+                PostAsapOperatorPayload::SummaryDelete { key: key.clone() }
             }
             SummaryExpr::SummaryEstimate { query, .. } => {
-                ExecutableOperatorPayload::SummaryEstimate {
+                PostAsapOperatorPayload::SummaryEstimate {
                     query: query.clone(),
                 }
             }
-            SummaryExpr::SummaryMerge { .. } => ExecutableOperatorPayload::SummaryMerge,
+            SummaryExpr::SummaryMerge { .. } => PostAsapOperatorPayload::SummaryMerge,
         };
-        nodes.push(ExecutableDagNode {
+        nodes.push(PostAsapDagNode {
             id,
             payload,
             output_state: state,
@@ -530,7 +528,7 @@ pub fn compile_executable_dag_with_node_ids(
                 }
                 _ => GroupingEdgeCompatibility::NotApplicable,
             };
-            edges.push(ExecutableDagEdge {
+            edges.push(PostAsapDagEdge {
                 producer,
                 consumer: id,
                 role,
@@ -561,12 +559,12 @@ pub fn compile_executable_dag_with_node_ids(
         &mut edges,
         &mut nodes_by_id,
     );
-    let dag = ExecutableDag { nodes, edges, root };
+    let dag = PostAsapDag { nodes, edges, root };
     dag.validate()
         .expect("compiler emits a valid post-ASAP DAG");
-    Ok(ExecutableDagCompilation {
+    Ok(PostAsapDagCompilation {
         dag,
-        node_ids: ExecutableNodeIdentityMap { nodes_by_id },
+        node_ids: PostAsapNodeIdentityMap { nodes_by_id },
     })
 }
 
@@ -588,10 +586,10 @@ mod tests {
         let family = SummaryFamilyType::ExactAggregate(ExactKind::Sum, ExactParams::Sum);
         let predicate = Predicate(Rc::new(QueryExpr::Literal(ScalarValue::Boolean(true))));
         let payloads = vec![
-            ExecutableOperatorPayload::Fallback {
+            PostAsapOperatorPayload::Fallback {
                 expression: QueryExpr::Literal(ScalarValue::Int64(1)),
             },
-            ExecutableOperatorPayload::Binary {
+            PostAsapOperatorPayload::Binary {
                 operator: BinaryOperator {
                     checked_relative_division: false,
                     checked_finite_division: false,
@@ -599,56 +597,56 @@ mod tests {
                     vector_match: None,
                 },
             },
-            ExecutableOperatorPayload::Value {
+            PostAsapOperatorPayload::Value {
                 operation: ValueOperation::Limit {
                     n: 1,
                     offset: 0,
                     partition_by: Default::default(),
                 },
             },
-            ExecutableOperatorPayload::RelationalJoin {
+            PostAsapOperatorPayload::RelationalJoin {
                 join_kind: JoinKind::Semi,
                 pred: predicate,
                 pruning: None,
             },
-            ExecutableOperatorPayload::SummaryAgg {
+            PostAsapOperatorPayload::SummaryAgg {
                 family: family.clone(),
                 input: SummaryUpdate::column(ColumnRef::SampleValue),
                 reduction: Reduction::by(vec![]),
                 grouping: GroupingStrategy::default(),
                 filter: None,
             },
-            ExecutableOperatorPayload::SummaryJoin {
+            PostAsapOperatorPayload::SummaryJoin {
                 key: ColumnRef::SampleValue,
                 family: family.clone(),
             },
-            ExecutableOperatorPayload::SummarySubtract,
-            ExecutableOperatorPayload::SummaryDelete {
+            PostAsapOperatorPayload::SummarySubtract,
+            PostAsapOperatorPayload::SummaryDelete {
                 key: ColumnRef::SampleValue,
             },
-            ExecutableOperatorPayload::SummaryEstimate {
+            PostAsapOperatorPayload::SummaryEstimate {
                 query: SketchQuery::Cardinality,
             },
-            ExecutableOperatorPayload::SummaryMerge,
+            PostAsapOperatorPayload::SummaryMerge,
         ];
         for payload in payloads {
             // This checks physical identity and placement, not kernel availability.
             let primitive = match &payload {
-                ExecutableOperatorPayload::Fallback { .. }
-                | ExecutableOperatorPayload::Binary { .. }
-                | ExecutableOperatorPayload::Value { .. }
-                | ExecutableOperatorPayload::RelationalJoin { .. }
-                | ExecutableOperatorPayload::SummaryEstimate { .. } => DataPrimitive::Raw,
-                ExecutableOperatorPayload::SummaryAgg { .. }
-                | ExecutableOperatorPayload::SummaryJoin { .. }
-                | ExecutableOperatorPayload::SummarySubtract
-                | ExecutableOperatorPayload::SummaryDelete { .. }
-                | ExecutableOperatorPayload::SummaryMerge => DataPrimitive::SummaryState,
+                PostAsapOperatorPayload::Fallback { .. }
+                | PostAsapOperatorPayload::Binary { .. }
+                | PostAsapOperatorPayload::Value { .. }
+                | PostAsapOperatorPayload::RelationalJoin { .. }
+                | PostAsapOperatorPayload::SummaryEstimate { .. } => DataPrimitive::Raw,
+                PostAsapOperatorPayload::SummaryAgg { .. }
+                | PostAsapOperatorPayload::SummaryJoin { .. }
+                | PostAsapOperatorPayload::SummarySubtract
+                | PostAsapOperatorPayload::SummaryDelete { .. }
+                | PostAsapOperatorPayload::SummaryMerge => DataPrimitive::SummaryState,
             };
-            let dag = ExecutableDag {
+            let dag = PostAsapDag {
                 root: PostAsapNodeId(0),
                 edges: vec![],
-                nodes: vec![ExecutableDagNode {
+                nodes: vec![PostAsapDagNode {
                     id: PostAsapNodeId(0),
                     payload: payload.clone(),
                     output_state: ExecutionDataState {
@@ -674,10 +672,7 @@ mod tests {
                 assert_eq!(placed.nodes[0].output_state.timing, phase);
                 let wire = serde_json::to_value(&placed).unwrap();
                 assert!(wire["nodes"][0]["payload"].get("timing").is_none());
-                assert_eq!(
-                    serde_json::from_value::<ExecutableDag>(wire).unwrap(),
-                    placed
-                );
+                assert_eq!(serde_json::from_value::<PostAsapDag>(wire).unwrap(), placed);
             }
             assert!(dag.with_execution_phases(&BTreeMap::new()).is_err());
         }
@@ -692,9 +687,9 @@ mod tests {
         };
         let nodes = [0, 1]
             .into_iter()
-            .map(|id| ExecutableDagNode {
+            .map(|id| PostAsapDagNode {
                 id: PostAsapNodeId(id),
-                payload: ExecutableOperatorPayload::Fallback {
+                payload: PostAsapOperatorPayload::Fallback {
                     expression: QueryExpr::Literal(ScalarValue::Int64(1)),
                 },
                 output_state: ExecutionDataState::QUERY_ROWS,
@@ -702,10 +697,10 @@ mod tests {
                 guarantee: None,
             })
             .collect();
-        let dag = ExecutableDag {
+        let dag = PostAsapDag {
             nodes,
             root: PostAsapNodeId(1),
-            edges: vec![ExecutableDagEdge {
+            edges: vec![PostAsapDagEdge {
                 producer: PostAsapNodeId(0),
                 consumer: PostAsapNodeId(1),
                 role: EdgeRole::Input,
@@ -731,7 +726,7 @@ mod tests {
                 (PostAsapNodeId(0), ExecutionTiming::QueryTime),
                 (PostAsapNodeId(1), ExecutionTiming::IngestionTime),
             ])),
-            Err(ExecutableDagValidationError::QueryDependencyInIngestion { .. })
+            Err(PostAsapDagValidationError::QueryDependencyInIngestion { .. })
         ));
     }
 
@@ -795,7 +790,7 @@ mod tests {
             guarantee: None,
         });
 
-        let compiled = compile_executable_dag_with_node_ids(&root).unwrap();
+        let compiled = compile_post_asap_dag_with_node_ids(&root).unwrap();
         assert_eq!(compiled.node_ids.node_id(&root), Some(PostAsapNodeId(3)));
         assert!(Rc::ptr_eq(
             compiled.node_ids.summary_node(PostAsapNodeId(1)).unwrap(),
@@ -826,9 +821,9 @@ mod tests {
             dependency.intermediate_schema.fields[0].dtype,
             SummaryFamilyType::ExactAggregate(ExactKind::Sum, _)
         ));
-        let encoded = serde_json::to_string(&dag).expect("serialize executable contract");
-        let decoded: ExecutableDag =
-            serde_json::from_str(&encoded).expect("deserialize executable contract");
+        let encoded = serde_json::to_string(&dag).expect("serialize post-ASAP DAG");
+        let decoded: PostAsapDag =
+            serde_json::from_str(&encoded).expect("deserialize post-ASAP DAG");
         assert_eq!(decoded, dag);
         let document = PostAsapDagDocument::new(decoded);
         document.validate().unwrap();
@@ -843,14 +838,14 @@ mod tests {
         old_version.schema_version = 1;
         assert_eq!(
             old_version.validate(),
-            Err(ExecutableDagValidationError::UnsupportedVersion(1))
+            Err(PostAsapDagValidationError::UnsupportedVersion(1))
         );
         let mut unknown = serde_json::to_value(&document).unwrap();
         unknown["unexpected"] = serde_json::json!(true);
         assert!(serde_json::from_value::<PostAsapDagDocument>(unknown).is_err());
         assert!(matches!(
             dag.nodes[2].payload,
-            ExecutableOperatorPayload::SummaryAgg {
+            PostAsapOperatorPayload::SummaryAgg {
                 family: SummaryFamilyType::ExactAggregate(ExactKind::Sum, ExactParams::Sum),
                 reduction: Reduction::Reduce(_),
                 ..

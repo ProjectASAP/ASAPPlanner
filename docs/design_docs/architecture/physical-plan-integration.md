@@ -440,7 +440,7 @@ fields. The phase assignment API updates producer edge states and rejects an
 ingestion computation that depends on query-time work. Deployment capability,
 storage readiness, schemas and approximation guarantees remain separate checks.
 
-Executable DAG wire version 4 removes the special membership operator, its edge
+Post-ASAP DAG wire version 4 removes the special membership operator, its edge
 roles and the duplicate operator phase fields without compatibility aliases.
 
 Executable DAG wire version 6 adds a per-measure row predicate to the aggregate
@@ -465,5 +465,5 @@ finalized before row operators consume them. None of these operations proves
 candidate completeness; that evidence belongs to the semi-join's pruning step.
 
 The semantic `SummaryExpr` constructors still propose an initial execution
-layout. Uniform phase assignment applies to the exported executable DAG;
+layout. Uniform phase assignment applies to the exported post-ASAP DAG;
 it is not a claim that every deployment has implemented every placement.

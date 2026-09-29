@@ -232,7 +232,7 @@ impl ExecutionDataStateAssignment {
 }
 
 /// Initial layout proposed by semantic realization, not a restriction on physical
-/// operator placement. `ExecutableDag::with_execution_phases` assigns the final
+/// operator placement. `PostAsapDag::with_execution_phases` assigns the final
 /// phase independently of payload kind. Returns `None` for
 /// [`SummaryExpr::KeepPreAsap`], whose data_state is assigned by the edge reaching
 /// it (see the module docs).
@@ -1064,9 +1064,9 @@ mod tests {
                     primitive: DataPrimitive::SummaryState,
                 })
             );
-            let exported = crate::post_asap::compile_executable_dag(&root).unwrap();
+            let exported = crate::post_asap::compile_post_asap_dag(&root).unwrap();
             assert!(exported.nodes.iter().any(|node| matches!(node.payload,
-                crate::post_asap::ExecutableOperatorPayload::SummaryMerge
+                crate::post_asap::PostAsapOperatorPayload::SummaryMerge
                     if node.output_state.timing == timing)));
         }
     }
