@@ -631,6 +631,30 @@ an alternative with `MissingCostEvidence` is accepted only when the cost model's
 complete-candidate hook covers lifecycle costs. Window frameworks and totals come
 from that hook, as in Planner selection.
 
+A lifecycle choice then fixes each physical placement: for example, a
+continuously maintained state places its producer in precompute, while an
+ephemeral one keeps it in the query. Compile each query's `PostAsapDag` once
+and derive every placement from that result:
+
+```rust
+use asap_physical_operators::physical_planner::{
+    compile, cut_candidate, enumerate_compiled_frontiers,
+};
+
+let compiled = compile(&dag, inputs, &roots)?; // each node lowered once
+for frontier in enumerate_compiled_frontiers(&compiled, 4096)? {
+    // Precompute/query DAGs split at `frontier`; no logical lowering.
+    let candidate = cut_candidate(&compiled, &frontier)?;
+    // Check feasibility and price `candidate`; bind the selected one as is.
+}
+```
+
+`cut_candidate` returns exactly the `PhysicalCandidate` that
+`compile_candidate(&dag, inputs, &roots, &frontier)` returns, and rejects the
+same invalid frontiers. The mapping from lifecycle choice to frontier stays with
+the caller. Temporal pane candidates are a different lowering and still use
+`compile_temporal_pane_candidate`.
+
 ## Optional whole-plan selection and DAG assembly
 
 ### What does global selection mean?
