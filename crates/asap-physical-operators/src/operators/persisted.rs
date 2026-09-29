@@ -43,6 +43,10 @@ impl TryFrom<StoredOperator> for Operator {
                 lookback_ms,
             } => Operator::current_series(input(0)?, identity, coordinate, value, lookback_ms)?,
             Kind::VectorToScalar { column } => Operator::vector_to_scalar(input(0)?, column)?,
+            Kind::VectorBinary {
+                operator,
+                return_bool,
+            } => Operator::vector_binary(input(0)?, input(1)?, operator, return_bool)?,
             Kind::Project(expressions) => {
                 if expressions.len() != output.fields.len() {
                     return Err(invalid("persisted projection width mismatch"));
