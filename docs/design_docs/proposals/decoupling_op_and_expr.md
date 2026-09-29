@@ -84,7 +84,7 @@ NonASAPOp<C>
 | Location | Change |
 |---|---|
 | frontend expression lowering (`df_expr_to_unresolved`, PromQL `walk`) | scalar positions build `ScalarExpr`, operator positions `NonASAPOp` |
-| `resolve`, `column_resolution.rs` | separate operator and scalar resolvers; a scalar resolves against its operator's input schema |
+| `resolve`, `column_resolution.rs` | already separate: `resolve` walks operators and calls `resolve_expr` for scalars. Each scalar resolves against one schema its operator picks (usually the child's output; the `Aggregate`'s output for `HAVING`, left + right for a `Join` predicate, the `Scan`'s own schema for `Scan` predicates). The split only changes their signatures: `resolve` takes `NonASAPOp`, `resolve_expr` takes `ScalarExpr`. Leaf schemas are still inferred from scalar column references across the whole tree |
 | `canonicalize`, `pre_asap/cse.rs` | the "scalar: nothing to do" arms go; scalars are hashed as plain data |
 | `scalar_signature.rs`, `infer_expr_type` | take `ScalarExpr` |
 | `QueryExpr::output_schema` | becomes `NonASAPOp::output_schema`; the scalar arms and `ScalarHasNoRowSchema` go |
