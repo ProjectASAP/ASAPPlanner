@@ -323,7 +323,7 @@ mod tests {
             let candidate = rule
                 .candidate(&root)
                 .expect("current-series rule candidate");
-            compile_post_asap_dag(&candidate).expect("typed executable DAG");
+            compile_post_asap_dag(&candidate).expect("typed post-ASAP DAG");
         }
     }
 
