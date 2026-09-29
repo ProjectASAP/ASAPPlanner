@@ -1,7 +1,7 @@
 //! A bounded PromQL source row carries the entire label set, not just labels
 //! mentioned by the query. The source adapter owns this lossless encoding.
 use super::*;
-use planner_types::pre_asap::{Column, DataType, Source as LogicalSource};
+use planner_types::pre_asap::DataType;
 use std::rc::Rc;
 
 /// Not a legal PromQL label name, so it cannot shadow a user label.
@@ -22,78 +22,10 @@ pub fn decode_series_identity(encoded: &str) -> Result<BTreeMap<String, String>,
     Ok(labels)
 }
 
-/// Resolve the row representation before candidate search. `closed` describes
-/// physical columns here: the final column contains every dynamic source label.
-/// It does not assert that the query's projected labels are the full label set.
-///
-/// This realization supports explicit `by` grouping and per-series computation.
-/// Operators that rewrite or implicitly match dynamic label sets require their
-/// own realization; they must not accidentally treat the opaque identity as a
-/// user label or silently discard it.
+/// Resolve the row representation before candidate search; see
+/// [`planner_types::pre_asap::schema::with_promql_series_identity`].
 pub fn with_series_identity(root: &QueryExpr) -> Result<QueryExpr, Error> {
-    let mut root = root.clone();
-    fn visit(node: &mut QueryExpr) -> Result<(), Error> {
-        use planner_types::pre_asap::Reduction;
-        match node {
-            QueryExpr::Scan {
-                source: LogicalSource::TimeSeries { .. },
-                schema,
-                ..
-            } => {
-                if schema
-                    .columns
-                    .iter()
-                    .any(|column| column.name == SERIES_IDENTITY_COLUMN)
-                {
-                    return Err(invalid(
-                        "source already contains a physical series identity",
-                    ));
-                }
-                if schema.closed {
-                    return Err(invalid(
-                        "dynamic series identity requires an open PromQL source",
-                    ));
-                }
-                schema
-                    .columns
-                    .push(Column::new(SERIES_IDENTITY_COLUMN, DataType::Utf8, false));
-                schema.closed = true;
-                Ok(())
-            }
-            QueryExpr::TimeRange { child, .. } | QueryExpr::Limit { child, .. } => {
-                visit(Rc::make_mut(child))
-            }
-            QueryExpr::Aggregate {
-                child, reduction, ..
-            } => {
-                if matches!(reduction, Reduction::Reduce(keys) if keys.is_without()) {
-                    return Err(invalid(
-                        "dynamic without grouping requires label-set projection",
-                    ));
-                }
-                visit(Rc::make_mut(child))
-            }
-            QueryExpr::Sort {
-                child,
-                partition_by,
-                ..
-            } => {
-                if partition_by.is_without() {
-                    return Err(invalid(
-                        "dynamic without ranking requires label-set projection",
-                    ));
-                }
-                visit(Rc::make_mut(child))
-            }
-            _ => Err(invalid(
-                "operator has no dynamic series-identity realization",
-            )),
-        }
-    }
-    visit(&mut root)?;
-    root.output_schema()
-        .map_err(|error| invalid(error.to_string()))?;
-    Ok(root)
+    planner_types::pre_asap::schema::with_promql_series_identity(root).map_err(invalid)
 }
 
 /// Construct source rows only from full identities. The named label columns
