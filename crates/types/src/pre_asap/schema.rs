@@ -154,7 +154,21 @@ pub struct Schema {
     pub closed: bool,
 }
 
+/// Reserved physical row column carrying canonical JSON of a complete PromQL
+/// label map. `$` cannot occur in a user PromQL label name.
+pub const PROMQL_SERIES_IDENTITY: &str = "$promql_series_identity";
+
 impl Schema {
+    pub fn has_promql_series_identity(&self) -> bool {
+        self.closed
+            && self.columns.iter().any(|column| {
+                column.name == PROMQL_SERIES_IDENTITY
+                    && column.dtype == DataType::Utf8
+                    && !column.nullable
+                    && column.table.is_none()
+            })
+    }
+
     /// Construct a `Schema` from columns alone — no time index, no
     /// unique-key constraint. Used by `Scan` over a tabular source
     /// when the catalog supplies no primary-key metadata.

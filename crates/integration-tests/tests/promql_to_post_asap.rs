@@ -831,7 +831,7 @@ fn execute_topk_reference(plan: &SummaryNode) -> Vec<(String, f64)> {
 }
 
 #[test]
-fn planner_topk_reference_execution_matches_ground_truth() {
+fn planner_heap_topk_reference_execution_matches_ground_truth() {
     // Pin numeric results independently of the emitted IR: swapping weights,
     // losing identity, changing the window, or dropping k changes the answer.
     for (query, expected) in [
@@ -865,8 +865,11 @@ fn planner_topk_reference_execution_matches_ground_truth() {
             &EqualSplitAllocator,
             &SeparatedTopK,
         );
-        let candidates = strategy.replacements(&TargetSubDAG::new(&pre));
-        assert!(!candidates.is_empty(), "no plan for {query}");
+        // This reference executor consumes keyed heap updates. The inventory
+        // also contains maintained exact values followed by sort/limit; those
+        // have a different execution contract and must not enter this fixture.
+        let candidates: Vec<_> = strategy.replacements(&TargetSubDAG::new(&pre)).into_iter().filter(|candidate| matches!(&candidate.replacement, Replacement::Summary(plan) if matches!(plan.expr, SummaryExpr::SummaryEstimate { query: SketchQuery::TopK { .. }, .. }))).collect();
+        assert!(!candidates.is_empty(), "no heap candidate for {query}");
         for candidate in candidates {
             let Replacement::Summary(plan) = candidate.replacement else {
                 panic!("expected summary plan for {query}")
