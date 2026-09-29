@@ -135,6 +135,42 @@ pub struct Operator {
     output: Schema,
 }
 impl Operator {
+    pub(crate) fn row_preserving_input(&self) -> Option<usize> {
+        match self.kind {
+            Kind::Filter(_) | Kind::Sort { .. } | Kind::Limit { .. } | Kind::SemiJoin { .. } => {
+                Some(0)
+            }
+            _ => None,
+        }
+    }
+
+    pub(crate) fn is_counter_readout(&self) -> bool {
+        matches!(
+            self.kind,
+            Kind::Readout {
+                query: ReadoutQuery::Exact(crate::summary_kernels::exact::ExactReadout {
+                    statistic: crate::Statistic::Rate | crate::Statistic::Increase,
+                    ..
+                }),
+                ..
+            }
+        )
+    }
+
+    pub(crate) fn with_counter_lookback(mut self, lookback: i64) -> Result<Self, Error> {
+        if lookback <= 0 {
+            return Err(invalid("counter lookback must be positive"));
+        }
+        if let Kind::Readout {
+            query: ReadoutQuery::Exact(readout),
+            ..
+        } = &mut self.kind
+        {
+            readout.lookback_ms = Some(lookback);
+        }
+        Ok(self)
+    }
+
     /// Resolve a counter readout's logical lookback to this run's evaluation range.
     pub(super) fn readout_range(&self, context: &RunContext) -> Result<Option<(i64, i64)>, Error> {
         let Kind::Readout {

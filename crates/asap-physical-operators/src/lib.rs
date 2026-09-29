@@ -1,5 +1,4 @@
-//! Shared physical operators: summary kernels, typed values, native operators
-//! and the DAG runtime.
+#![doc = include_str!("../README.md")]
 
 pub mod key_by_label_values;
 pub mod measurement;
@@ -12,20 +11,23 @@ pub use measurement::Measurement;
 pub use statistic::Statistic;
 pub use traits::*;
 
+pub use expressions::arithmetic;
 pub mod capability;
 pub use summary_kernels::factory;
 
 /// The exact Planner contract used by these kernels.
 pub use planner_types as planner;
 
+pub mod dag;
+
+pub mod readout;
+
 mod error;
 pub use error::Error;
-pub mod values;
-
-pub use expressions::arithmetic;
 pub mod expressions;
 pub mod operators;
+pub mod physical_planner;
 pub mod plan;
-pub mod readout;
 pub mod runtime;
 pub mod sources;
+pub mod values;
