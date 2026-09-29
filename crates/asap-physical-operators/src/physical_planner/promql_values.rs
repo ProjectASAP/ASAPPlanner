@@ -206,3 +206,66 @@ pub fn compile_vector_to_scalar() -> Result<CompiledPhysicalDag, Error> {
         vector_schema(),
     )
 }
+
+/// A stored exact-state input retains the complete population identity. The
+/// deployment supplies eligible panes; merging and finalization are computation.
+pub fn exact_state_schema(family: SummaryFamilyType) -> Result<Schema, Error> {
+    if !matches!(family, SummaryFamilyType::ExactAggregate(..)) {
+        return Err(invalid("exact-state input requires an exact family"));
+    }
+    crate::values::validate_family(&family)?;
+    let mut schema = (*vector_schema()).clone();
+    schema.fields[1].dtype = family;
+    Ok(Arc::new(schema))
+}
+
+/// Retain exact readout semantics before any deployment state is opened.
+pub fn compile_exact_readout(
+    family: SummaryFamilyType,
+    lookback_ms: u64,
+    preserve_metric_name: bool,
+) -> Result<CompiledPhysicalDag, Error> {
+    use planner_types::post_asap::ExactKind;
+    let statistic = match &family {
+        SummaryFamilyType::ExactAggregate(kind, _) => match kind {
+            ExactKind::Sum => crate::Statistic::Sum,
+            ExactKind::Count => crate::Statistic::Count,
+            ExactKind::Min => crate::Statistic::Min,
+            ExactKind::Max => crate::Statistic::Max,
+            ExactKind::Rate => crate::Statistic::Rate,
+            ExactKind::Increase => crate::Statistic::Increase,
+            ExactKind::IRate => return Err(invalid("instant-rate state readout is not supported")),
+        },
+        _ => return Err(invalid("exact readout requires an exact family")),
+    };
+    let input = exact_state_schema(family)?;
+    let merge = Operator::summary_merge(input.clone(), 1, vec![0])?;
+    let mut readout = Operator::readout(merge.schema(), 1, statistic, Default::default())?;
+    if matches!(
+        statistic,
+        crate::Statistic::Rate | crate::Statistic::Increase
+    ) {
+        readout = readout.with_counter_lookback(
+            i64::try_from(lookback_ms).map_err(|_| invalid("counter lookback exceeds Int64"))?,
+        )?;
+    }
+    let project = Operator::project(
+        readout.schema(),
+        vec![
+            (
+                "labels".into(),
+                if preserve_metric_name {
+                    Expression::Column(0)
+                } else {
+                    Expression::LabelSet {
+                        column: 0,
+                        labels: vec![],
+                        without: true,
+                    }
+                },
+            ),
+            ("value".into(), Expression::ExactFloat64(1)),
+        ],
+    )?;
+    unary(vec![merge, readout, project], input)
+}
