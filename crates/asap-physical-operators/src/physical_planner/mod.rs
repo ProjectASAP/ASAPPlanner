@@ -417,8 +417,18 @@ fn bind_operation(node: &ExecutableDagNode, inputs: &[Schema]) -> Result<Operato
         };
         if *join_kind == JoinKind::Semi {
             if let Ok(keys) = equijoin_keys(pred, left, right) {
-                return Operator::semi_join(left.clone(), right.clone(), keys);
+                let operator = Operator::semi_join(left.clone(), right.clone(), keys)?;
+                return Ok(
+                    if matches!(pruning, Some(CandidateCompleteness::Certified { .. })) {
+                        operator.require_complete_right()
+                    } else {
+                        operator
+                    },
+                );
             }
+        }
+        if matches!(pruning, Some(CandidateCompleteness::Certified { .. })) {
+            return Err(invalid("certified pruning requires explicit equijoin keys"));
         }
         return Operator::relational_join(
             left.clone(),

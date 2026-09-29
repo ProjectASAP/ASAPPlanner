@@ -88,6 +88,7 @@ enum Kind {
     },
     SemiJoin {
         keys: Vec<(usize, usize)>,
+        require_complete_right: bool,
     },
     Join {
         kind: planner_types::pre_asap::JoinKind,

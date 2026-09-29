@@ -14,10 +14,32 @@ impl Operator {
             }
         }
         Ok(Self {
-            kind: Kind::SemiJoin { keys },
+            kind: Kind::SemiJoin {
+                keys,
+                require_complete_right: false,
+            },
             inputs: vec![left.clone(), right],
             output: left,
         })
+    }
+    pub(crate) fn require_complete_right(mut self) -> Self {
+        if let Kind::SemiJoin {
+            require_complete_right,
+            ..
+        } = &mut self.kind
+        {
+            *require_complete_right = true;
+        }
+        self
+    }
+    pub(crate) fn certified_pruning_keys(&self) -> Option<&[(usize, usize)]> {
+        match &self.kind {
+            Kind::SemiJoin {
+                keys,
+                require_complete_right: true,
+            } => Some(keys),
+            _ => None,
+        }
     }
     pub fn relational_join(
         left: Schema,
@@ -138,7 +160,11 @@ pub(super) fn execute<'a>(
         })
         .boxed_local());
     }
-    if let Kind::SemiJoin { keys } = &operator.kind {
+    if let Kind::SemiJoin {
+        keys,
+        require_complete_right,
+    } = &operator.kind
+    {
         let right = inputs.pop().ok_or_else(|| invalid("right input missing"))?;
         let left = inputs.pop().ok_or_else(|| invalid("left input missing"))?;
         return Ok(futures::stream::once(async move {
@@ -158,17 +184,32 @@ pub(super) fn execute<'a>(
                         workspace.grow(key_bytes(&key))?;
                         members.insert(key);
                     }
+                } else if *require_complete_right {
+                    return Err(invalid(
+                        "certified pruning candidate has an unmatchable key",
+                    ));
                 }
             }
             let mut rows = Vec::new();
+            let mut covered = std::collections::BTreeSet::new();
             for row in left {
                 work.checkpoint().await?;
                 if left_cols.iter().all(|&i| matchable_key(&row[i]))
                     && members.contains(&group_key(&row, &left_cols)?)
                 {
+                    if *require_complete_right {
+                        let key = group_key(&row, &left_cols)?;
+                        if !covered.contains(&key) {
+                            workspace.grow(key_bytes(&key))?;
+                            covered.insert(key);
+                        }
+                    }
                     workspace.grow(std::mem::size_of::<Vec<Value>>())?;
                     rows.push(row);
                 }
+            }
+            if *require_complete_right && members != covered {
+                return Err(invalid("certified pruning key has no authoritative value"));
             }
             Batch::try_new(output, rows)
         })

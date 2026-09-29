@@ -1189,3 +1189,114 @@ fn grouped_temporal_schema_compiles_and_executes_topk() {
     assert!(matches!(&rows[0][0], Value::Utf8(label) if label.as_ref() == "api"));
     assert!(matches!(rows[0][1], Value::Float64(9.)));
 }
+
+// A certified candidate set must have authoritative values for every key, including after recovery.
+#[test]
+fn certified_pruning_rejects_missing_authoritative_values_after_recovery() {
+    use asap_physical_operators::physical_planner::{
+        compile_node, CompiledPhysicalDag, InputContract, Source,
+    };
+    use planner_types::{
+        post_asap::*,
+        pre_asap::{CompareOpKind, JoinKind, Predicate, QueryExpr},
+    };
+    use std::{collections::BTreeMap, rc::Rc};
+    let schema = schema(&[("key", DataType::Utf8, false)]);
+    for certified in [false, true] {
+        let node = ExecutableDagNode {
+            id: PostAsapNodeId(2),
+            output_schema: (*schema).clone(),
+            output_state: ExecutionDataState::QUERY_ROWS,
+            guarantee: None,
+            payload: ExecutableOperatorPayload::RelationalJoin {
+                join_kind: JoinKind::Semi,
+                pred: Predicate(Rc::new(QueryExpr::Compare {
+                    left: Rc::new(QueryExpr::Column(0)),
+                    op: CompareOpKind::Eq,
+                    right: Rc::new(QueryExpr::Column(1)),
+                })),
+                pruning: certified.then_some(CandidateCompleteness::Certified {
+                    guarantee: ResultGuarantee {
+                        metric: ErrorMetric::TopKMembership,
+                        bound: BoundExpr::Zero,
+                        failure_probability: ProbabilityExpr::Constant { value: 0.01 },
+                        provenance: vec![],
+                    },
+                }),
+            },
+        };
+        let graph = CompiledPhysicalDag::from_operators(
+            [
+                (0, InputContract::bounded(schema.clone())),
+                (1, InputContract::bounded(schema.clone())),
+            ]
+            .into(),
+            [(
+                2,
+                (
+                    vec![0, 1],
+                    compile_node(&node, &[schema.clone(), schema.clone()]).unwrap(),
+                ),
+            )]
+            .into(),
+            vec![2],
+        )
+        .unwrap();
+        let graph = CompiledPhysicalDag::decode(&graph.encode().unwrap()).unwrap();
+        assert_eq!(
+            graph.certified_pruning_keys(2),
+            certified.then_some(&[(0, 0)][..])
+        );
+        for complete in [false, true] {
+            let sources = [
+                vec!["a"],
+                if complete {
+                    vec!["a"]
+                } else {
+                    vec!["a", "missing"]
+                },
+            ]
+            .into_iter()
+            .enumerate()
+            .map(|(i, keys)| {
+                let batch = Batch::try_new(
+                    schema.clone(),
+                    keys.into_iter()
+                        .map(|k| vec![Value::Utf8(k.into())])
+                        .collect(),
+                )
+                .unwrap();
+                (
+                    i as u64,
+                    Box::new(Operator::source(schema.clone(), vec![batch]).unwrap()) as Source<'_>,
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+            let bound = graph.instantiate(sources).unwrap();
+            let result = block_on(async {
+                let mut stream = bound
+                    .execute(
+                        graph.roots(),
+                        RunContext::new(query(), Limits::default()).unwrap(),
+                    )
+                    .unwrap()
+                    .remove(0);
+                let mut rows = vec![];
+                while let Some(batch) = stream.next().await {
+                    rows.extend(batch?.rows().iter().cloned());
+                }
+                Ok::<_, asap_physical_operators::Error>(rows)
+            });
+            if certified && !complete {
+                assert!(result
+                    .unwrap_err()
+                    .to_string()
+                    .contains("no authoritative value"));
+            } else {
+                let rows = result.unwrap();
+                assert_eq!(rows.len(), 1);
+                assert!(matches!(&rows[0][0], Value::Utf8(key) if key.as_ref() == "a"));
+            }
+        }
+    }
+}
