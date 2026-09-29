@@ -29,6 +29,7 @@ impl TryFrom<StoredOperator> for Operator {
         };
         let op = match kind {
             Kind::Source(_) => return Err(invalid("physical plans cannot persist live sources")),
+            Kind::Constant { value, dtype } => Operator::scalar(value, dtype)?,
             Kind::PaneInput {
                 coordinate,
                 layout,
@@ -47,6 +48,8 @@ impl TryFrom<StoredOperator> for Operator {
                 operator,
                 return_bool,
             } => Operator::vector_binary(input(0)?, input(1)?, operator, return_bool)?,
+            Kind::RangeWindow { intent } => Operator::range_window(*intent)?,
+            Kind::HistogramQuantile => Operator::histogram_quantile(),
             Kind::Project(expressions) => {
                 if expressions.len() != output.fields.len() {
                     return Err(invalid("persisted projection width mismatch"));

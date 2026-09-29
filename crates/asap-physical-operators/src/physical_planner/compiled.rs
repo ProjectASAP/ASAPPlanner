@@ -48,6 +48,79 @@ struct StoredDag {
 }
 
 impl CompiledPhysicalDag {
+    /// Link already-selected physical fragments without lowering operators again.
+    /// Fragment keys and source keys share a namespace; repeated dependency IDs
+    /// therefore remain one producer in the composed graph.
+    pub fn compose(
+        sources: BTreeMap<NodeId, InputContract>,
+        fragments: BTreeMap<NodeId, (Vec<NodeId>, Self)>,
+        roots: Vec<NodeId>,
+    ) -> Result<Self, Error> {
+        if sources.keys().any(|id| fragments.contains_key(id)) {
+            return Err(invalid("physical source and fragment IDs overlap"));
+        }
+        let mut contracts = sources.clone();
+        for (&id, (_, fragment)) in &fragments {
+            fragment.validate()?;
+            let [root] = fragment.roots() else {
+                return Err(invalid("composed fragment requires one root"));
+            };
+            if fragment.input_contracts().any(|(id, _)| id == *root) {
+                return Err(invalid("fragment root must be a computed output"));
+            }
+            contracts.insert(id, fragment.output_contract(*root)?);
+        }
+        let mut next = contracts
+            .keys()
+            .next_back()
+            .copied()
+            .unwrap_or(0)
+            .checked_add(1)
+            .ok_or_else(|| invalid("physical node ID overflow"))?;
+        let mut result = Self::new(roots);
+        for (id, contract) in sources {
+            result.add_input(id, contract)?;
+        }
+        for (id, (inputs, fragment)) in fragments {
+            if inputs.len() != fragment.input_contracts().count() {
+                return Err(invalid("physical fragment input arity mismatch"));
+            }
+            let mut mapping = BTreeMap::new();
+            for ((local, expected), global) in fragment.input_contracts().zip(inputs) {
+                let actual = contracts
+                    .get(&global)
+                    .ok_or_else(|| invalid("missing physical fragment dependency"))?;
+                if expected.schema != actual.schema
+                    || (expected.properties.boundedness == Boundedness::Bounded
+                        && actual.properties.boundedness != Boundedness::Bounded)
+                {
+                    return Err(invalid("physical fragment dependency contract mismatch"));
+                }
+                mapping.insert(local, global);
+            }
+            mapping.insert(fragment.roots[0], id);
+            for local in fragment.nodes.keys() {
+                if !mapping.contains_key(local) {
+                    mapping.insert(*local, next);
+                    next = next
+                        .checked_add(1)
+                        .ok_or_else(|| invalid("physical node ID overflow"))?;
+                }
+            }
+            for (local, node) in fragment.nodes {
+                if let Node::Operator { inputs, operator } = node {
+                    result.add(
+                        mapping[&local],
+                        inputs.into_iter().map(|input| mapping[&input]).collect(),
+                        operator,
+                    )?;
+                }
+            }
+        }
+        result.validate()?;
+        Ok(result)
+    }
+
     /// Persist selected physical operators and input slots, never live readers
     /// or mutable summary state. Recovery does not run logical plan lowering.
     pub fn encode(&self) -> Result<Vec<u8>, Error> {

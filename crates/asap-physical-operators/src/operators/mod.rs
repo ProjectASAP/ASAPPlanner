@@ -27,12 +27,17 @@ mod sort;
 mod source;
 mod summary;
 pub(crate) mod vector_binary;
+pub(crate) mod vector_window;
 pub use aggregate::Reduction;
 pub use sort::SortKey;
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 enum Kind {
     #[serde(skip)]
     Source(Vec<Batch>),
+    Constant {
+        value: Value,
+        dtype: DataType,
+    },
     PaneInput {
         coordinate: usize,
         layout: planner_types::post_asap::PaneLayout,
@@ -55,6 +60,10 @@ enum Kind {
         operator: planner_types::post_asap::BinaryOperator,
         return_bool: bool,
     },
+    RangeWindow {
+        intent: Box<planner_types::pre_asap::AggIntent<ColumnRef>>,
+    },
+    HistogramQuantile,
     Project(Vec<Expression>),
     Filter(Expression),
     Limit {
@@ -215,6 +224,8 @@ impl PhysicalOperator<Batch, Schema> for Operator {
             self.kind,
             Kind::Sort { .. }
                 | Kind::VectorBinary { .. }
+                | Kind::RangeWindow { .. }
+                | Kind::HistogramQuantile
                 | Kind::CurrentSeries { .. }
                 | Kind::Aggregate { .. }
                 | Kind::Window { .. }
@@ -228,7 +239,7 @@ impl PhysicalOperator<Batch, Schema> for Operator {
     }
     fn properties(&self, inputs: &[PlanProperties]) -> PlanProperties {
         let boundedness = match &self.kind {
-            Kind::Source(_) => Boundedness::Bounded,
+            Kind::Source(_) | Kind::Constant { .. } => Boundedness::Bounded,
             Kind::Limit { groups, .. } if groups.is_empty() => Boundedness::Bounded,
             _ => Boundedness::from_inputs(inputs),
         };
@@ -252,12 +263,15 @@ impl PhysicalOperator<Batch, Schema> for Operator {
     fn name(&self) -> &str {
         match self.kind {
             Kind::Source(_) => "Source",
+            Kind::Constant { .. } => "Constant",
             Kind::PaneInput { .. } => "PaneInput",
             Kind::ScopeTimestamp { .. } => "ScopeTimestamp",
             Kind::Union => "Union",
             Kind::CurrentSeries { .. } => "CurrentSeries",
             Kind::VectorToScalar { .. } => "VectorToScalar",
             Kind::VectorBinary { .. } => "VectorBinary",
+            Kind::RangeWindow { .. } => "RangeWindow",
+            Kind::HistogramQuantile => "HistogramQuantile",
             Kind::Project(_) => "Project",
             Kind::Filter(_) => "Filter",
             Kind::Limit { .. } => "Limit",
@@ -292,10 +306,13 @@ impl PhysicalOperator<Batch, Schema> for Operator {
         context: RunContext,
     ) -> Result<OutputStream<'a, Batch>, Error> {
         match self.kind {
-            Kind::Source(_) | Kind::Union | Kind::VectorToScalar { .. } => {
+            Kind::Source(_) | Kind::Constant { .. } | Kind::Union | Kind::VectorToScalar { .. } => {
                 source::execute(self, inputs, context)
             }
             Kind::VectorBinary { .. } => vector_binary::execute(self, inputs, context),
+            Kind::RangeWindow { .. } | Kind::HistogramQuantile => {
+                vector_window::execute(self, inputs, context)
+            }
             Kind::Project(_) => projection::execute(self, inputs, context),
             Kind::CurrentSeries { .. } => current_series::execute(self, inputs, context),
             Kind::PaneInput { .. } | Kind::ScopeTimestamp { .. } => {
