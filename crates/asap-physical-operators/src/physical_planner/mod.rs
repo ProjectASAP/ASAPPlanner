@@ -200,7 +200,7 @@ fn compile_internal(
     let mut graph = CompiledPhysicalDag::new(roots.to_vec());
     for id in ordered {
         let node = nodes[&id];
-        let auxiliary = helper_id(id, 0);
+        let mut auxiliary = helper_id(id, 0);
         let output = Arc::new(node.output_schema.clone());
         crate::values::validate_schema(&output)?;
         if let Some(source) = sources.remove(&id) {
