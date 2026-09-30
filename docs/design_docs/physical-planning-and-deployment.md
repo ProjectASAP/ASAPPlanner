@@ -89,10 +89,12 @@ separate unsupported compilation, deployment infeasibility, missing evidence,
 and a feasible candidate that loses on cost. Absence is not a cost comparison.
 
 For `sum by(job)(rate(m[1m]))`, Rate remains per series before grouped Sum.
-When lifecycle requirements permit it, a candidate may finalize Rate and Sum
-within a bounded precompute run and persist the grouped value. Another may leave
-those operators in the query DAG. Storing a value requires its exact evaluation
-window, revision, readiness and serving cadence to match the query contract.
+`PlanSpace` offers one such candidate, with a per-series Rate state and a grouped
+Sum state. Its lifecycle assignment places it: a retained Sum state finalizes
+Rate and builds Sum within a bounded precompute run; an `Ephemeral` Sum over a
+retained Rate state leaves the Rate readout and Sum in the query DAG. Storing a
+value requires its exact evaluation window, revision, readiness and serving
+cadence to match the query contract.
 
 For instant-vector TopK, CMS/CountSketch with a candidate heap requires explicit
 series identity and a supported latest-value input protocol. Appending historical
@@ -378,22 +380,24 @@ Materialization frontiers are Planner decisions. A candidate records both the
 precompute Physical DAG and the query Physical DAG, with typed outputs connecting
 them. The deployment compiler binds those outputs; it does not move operators.
 Lifecycle timing gives the frontier: ingestion-time nodes read by query-time
-nodes. Moving further bounded consumers into precompute, as in Candidate B
-below, is not yet expressed as a lifecycle choice.
-
-For `sum by(job)(rate(m[1m]))`, legal physical candidates can include:
+nodes. For `sum by(job)(rate(m[1m]))`, the two lifecycle choices of the single
+logical candidate give:
 
 ```text
-Candidate A:
-  precompute: compatible per-series counter states → per-series Rate
-  materialized output: per-series rate values for window/evaluation/revision
-  query: stored per-series rate values → grouped Sum
+Candidate A (Rate state retained, Sum Ephemeral):
+  precompute: counter samples → per-series Rate state
+  materialized output: per-series Rate states for window/evaluation/revision
+  query: stored Rate states → Rate readout → grouped Sum → result
 
-Candidate B:
-  precompute: compatible per-series counter states → per-series Rate → grouped Sum
-  materialized output: grouped values for window/evaluation/revision
-  query: stored grouped values → result
+Candidate B (Rate and Sum states retained):
+  precompute: counter samples → per-series Rate → grouped Sum state
+  materialized output: grouped Sum states for window/evaluation/revision
+  query: stored grouped Sum states → Sum readout → result
 ```
+
+Explicit frontiers passed to `compile_candidates` can also persist per-series
+rate values; deriving that frontier from timing inside the physical planner is
+not yet implemented.
 
 Both preserve reset-aware Rate before Sum. Summing raw counters before Rate is
 not equivalent. The counter-state build may be another precompute DAG; typed

@@ -34,7 +34,9 @@ fields and [frontend dependencies](#frontend-specific-dependencies).
 DAG assembly](#selection-and-dag-assembly), and
 [summary-maintenance lifecycle](#summary-maintenance-lifecycle-aware-helper) APIs operate on this `PlanSpace`.
 These are alternative uses of the candidate space, not mandatory sequential
-stages. `PlanSpace` itself has no selected summary-maintenance lifecycle.
+stages. `PlanSpace` itself has no selected summary-maintenance lifecycle, and
+its candidates do not choose precompute versus query-time placement: a chosen
+lifecycle assignment sets each node's execution timing.
 
 The candidate DAGs are logical planning artifacts. ASAPPlanner does **not**
 produce a deployed executable plan; downstream systems bind physical operators,
