@@ -631,28 +631,32 @@ an alternative with `MissingCostEvidence` is accepted only when the cost model's
 complete-candidate hook covers lifecycle costs. Window frameworks and totals come
 from that hook, as in Planner selection.
 
-A lifecycle choice then fixes each physical placement: for example, a
-continuously maintained state places its producer in precompute, while an
-ephemeral one keeps it in the query. Compile each query's `PostAsapDag` once
-and derive every placement from that result:
+A lifecycle choice then fixes each physical placement through timing: a
+continuously maintained state and its inputs run at ingestion time, while an
+ephemeral one stays at query time. Compile each query's `PostAsapDag` once and
+cut every chosen assignment from that result:
 
 ```rust
 use asap_physical_operators::physical_planner::{
-    compile, cut_candidate, enumerate_compiled_frontiers,
+    compile, cut_candidate, frontier_from_timing,
 };
 
 let compiled = compile(&dag, inputs, &roots)?; // each node lowered once
-for frontier in enumerate_compiled_frontiers(&compiled, 4096)? {
+for plan in lifecycle_plans {
+    let frontier = frontier_from_timing(&plan.execution_timed_dag()?)?;
     // Precompute/query DAGs split at `frontier`; no logical lowering.
     let candidate = cut_candidate(&compiled, &frontier)?;
     // Check feasibility and price `candidate`; bind the selected one as is.
 }
 ```
 
-`cut_candidate` returns exactly the `PhysicalCandidate` that
-`compile_candidate(&dag, inputs, &roots, &frontier)` returns, and rejects the
-same invalid frontiers. The mapping from lifecycle choice to frontier stays with
-the caller. Temporal pane candidates are a different lowering and still use
+The frontier is the set of ingestion-time nodes read by query-time nodes (or an
+ingestion-time root). `frontier_from_timing` rejects a query-time node feeding
+an ingestion-time node. `cut_candidate` returns exactly what
+`compile_candidate(&dag, inputs, &roots, &frontier)` returns and rejects the
+same invalid frontiers. If the DAG has an ingestion-time `Binary`, compile with
+the same timing for that node, because it lowers differently. Temporal pane
+candidates are a different lowering and still use
 `compile_temporal_pane_candidate`.
 
 ## Optional whole-plan selection and DAG assembly

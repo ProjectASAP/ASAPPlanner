@@ -408,16 +408,21 @@ feasibility is rejected before pricing. The optimizer supplies candidate
 frontiers and cost evidence, including updates, retention, recurrence and sharing.
 `enumerate_frontiers` constructs bounded, reachable antichain frontiers above explicit input boundaries, including query-only and fully precomputed results. It fails explicitly when the candidate budget is exceeded. Maintenance selection must still reject frontiers that violate window, freshness, or reuse requirements; deployment feasibility is checked before pricing.
 
-Lowering a node does not depend on the chosen frontier, so Planner lowers each
-query DAG once. `compile(dag, inputs, roots)` yields the complete
-`CompiledPhysicalDag`; `enumerate_compiled_frontiers(&compiled, max)` and
-`cut_candidate(&compiled, frontier)` then derive each placement by partitioning
-its operators: nodes above the frontier and below the roots form the query DAG,
-and the frontier's ancestors form the precompute DAG. Helper operators are
-numbered by their Planner node, so a cut is byte-identical to lowering that
-frontier directly. `compile_candidate(s)` and `enumerate_frontiers` are wrappers
-over this path. A deployment compiles each query DAG once, not once per
-placement choice. Temporal pane candidates remain a separate lowering.
+The lifecycle layer decides timing; physical compilation reads it. Lowering a
+node does not depend on the frontier, so each query DAG is lowered once and
+different lifecycle assignments are different cuts of that lowering.
+`compile(dag, inputs, roots)` yields the complete `CompiledPhysicalDag`.
+`frontier_from_timing(&timed_dag)` reads an assignment's timed DAG (from
+`execution_timed_dag`) and returns its frontier: ingestion-time nodes read by
+query-time nodes, or an ingestion-time root; a query-time node feeding an
+ingestion-time node is rejected. `cut_candidate(&compiled, &frontier)` then
+partitions the lowered operators: the frontier's ancestors form the precompute
+DAG and the rest form the query DAG. Helper operators are numbered by their
+Planner node (`u64::MAX - node_id`), so a cut is byte-identical to
+`compile_candidate` for that frontier. One exception: an ingestion-time
+`Binary` lowers differently, so its timing must match at compile time.
+`compile_candidate(s)` and `enumerate_frontiers` wrap the same path. Temporal
+pane candidates remain a separate lowering.
 
 Physical compilation opens no readers. Bounded precompute outputs become typed
 query inputs. Their source, filters, grouping, build window, evaluation time, readiness and
@@ -538,6 +543,7 @@ pane compilation, alongside independent operator/runtime fixtures:
 | `summary_maintenance_lifecycle_e2e::selected_temporal_lifecycle_compiles_panes_and_executes` | PromQL p50/p99 workloads → selected continuous lifecycle and Sliding framework → automatically generated precompute/query DAGs → real codec round-trip → adjacent aligned windows; checks filters, entity identity, sample counts, missing/duplicate panes and phase rejection before opening readers |
 | `summary_maintenance_lifecycle_e2e::continuous_lifecycle_compiles_and_executes_spatial_kll` | PromQL workload → selected continuous lifecycle → logical DAG → compiled precompute/query candidate → results in independent revisions; an unbounded candidate fails before pricing, and a bounded request candidate summarizes the same input samples |
 | `summary_maintenance_lifecycle_e2e::chosen_lifecycle_timing_decides_precompute_contents` | PromQL workload → enumerated lifecycles → explicit choice → timed DAG → compiled candidate; ContinuouslyMaintained stores the state in precompute, Ephemeral leaves precompute empty and reads the raw source at query time; both return the same p99 |
+| `summary_maintenance_lifecycle_e2e::lifecycle_timing_cuts_one_compilation` | KLL quantile and grouped Rate→Sum: one compilation cut by the ContinuouslyMaintained and Ephemeral timed DAGs equals `compile_candidate` for each; the frontier is the retained state or empty |
 | `summary_maintenance_lifecycle_e2e::planner_lifecycle_selection_reproduces_strategy_timing` | For PromQL fixtures, the timed DAG from Planner's retained selection equals the DAG realization strategies produce today |
 | `kll_pane_execution::five_panes_roundtrip_and_shared_merge_runs_once` | Explicit one-minute precompute DAGs → real MessagePack state bytes → five required query inputs → shared native merge → p50/p99; counts every sample once, checks adjacent aligned windows and instruments one merge start per run |
 | `kll_pane_execution::restored_panes_reject_corruption_parameters_schema_and_missing_binding` | Corrupt bytes, parameter relabelling, incompatible schemas and absent bindings fail explicitly |
