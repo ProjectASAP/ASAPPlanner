@@ -219,7 +219,9 @@ frontend (#494); they are never silently ignored.
 ## Additional scalar and persistence coverage
 
 `deriv` and `predict_linear` use per-series linear regression. Prediction
-uses the evaluation instant even when an offset or `@` selects older samples.
+uses the evaluation instant even when an offset selects older samples. As in
+Prometheus, an `@`-pinned call is step-invariant: it is evaluated once, at the
+first instant of the query or of its subquery grid, and reused at every step.
 Inner subquery functions validate label-set uniqueness per step.
 
 `time()` reads the run's evaluation timestamp in seconds and composes with
@@ -239,5 +241,8 @@ only; the backend still supplies raw selectors and stored inputs.
 including selector offsets and subquery grids. The deployment supplies the
 outer query bounds with `RunContext::with_query_range(start_ms, end_ms)`;
 for an instant query both bounds equal its evaluation time. Executing an
-anchored program without those bounds fails before reading inputs. Query
-output timestamps still use the current evaluation instant.
+`@ start()`/`@ end()` program without those bounds fails before reading
+inputs. A literal `@` pin does not require bounds, but a range query must
+still supply them: without them each step runs as its own instant query, so a
+pinned call is re-evaluated per step. Query output timestamps still use the
+current evaluation instant.
