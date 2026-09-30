@@ -474,6 +474,13 @@ shared physical operator implementation library, `asap-physical-operators`, and
 its DAG runtime. The merge executes once per run for both consumers. Execution
 does not introduce additional planning decisions.
 
+The physical layer does not own raw ingestion, pane construction or geometry,
+storage formats, or decoding persisted bytes into typed state. It compiles
+computation over typed input contracts: summary build, merge (for example KLL
+merge), sketch estimates and exact finalization. The deployment constructs panes,
+reads and decodes stored state, and binds the typed values to input slots.
+Compiled physical plans are Planner outputs and keep their own serialized form.
+
 Each maintained pane contributes its input samples once. A replacement snapshot
 replaces that pane's state; query merging must not count both the old and new
 snapshots as separate inputs.
