@@ -20,10 +20,11 @@ use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use asap_types::post_asap::{
-    compile_post_asap_dag_with_node_ids, EvaluationSchedule, ExecutionDataStateError,
-    OutputRepresentation, PostAsapNodeId, ResultGuarantee, SummaryExpr,
-    SummaryMaintenanceLifecycle, SummaryMaintenanceLifecycleGuarantee, SummaryMaintenanceMode,
-    SummaryNode, SummaryWindowFramework,
+    compile_post_asap_dag, compile_post_asap_dag_with_node_ids, EvaluationSchedule,
+    ExecutionDataStateError, ExecutionTiming, OutputRepresentation, PostAsapDag,
+    PostAsapDagValidationError, PostAsapNodeId, PostAsapOperatorPayload, ResultGuarantee,
+    SummaryExpr, SummaryMaintenanceLifecycle, SummaryMaintenanceLifecycleGuarantee,
+    SummaryMaintenanceMode, SummaryNode, SummaryWindowFramework, ValueOperation,
 };
 use asap_types::pre_asap::QueryExpr;
 use asap_types::types::AccuracyTarget;
@@ -209,6 +210,84 @@ pub struct SummaryMaintenanceLifecyclePlan {
     /// Cost of evaluating the original expression for the same demand, when
     /// fully known.
     pub raw_recompute_total_cost: Option<Cost>,
+}
+
+/// Why a lifecycle plan cannot assign execution timing to its DAG.
+#[derive(Debug, thiserror::Error, PartialEq)]
+pub enum SummaryMaintenanceTimingError {
+    #[error(transparent)]
+    InvalidPostAsapDag(#[from] ExecutionDataStateError),
+    #[error("summary {0:?} has no selected lifecycle")]
+    UnselectedLifecycle(PostAsapNodeId),
+    /// Lifecycle enumeration covers `SummaryAgg` states only; timing for other
+    /// retained state would otherwise be guessed.
+    #[error("node {0:?} maintains state that has no summary-maintenance lifecycle")]
+    UnplannedMaintainedState(PostAsapNodeId),
+    #[error(transparent)]
+    InvalidPhases(#[from] PostAsapDagValidationError),
+}
+
+impl SummaryMaintenanceLifecyclePlan {
+    /// The post-ASAP DAG of [`Self::root`] with every node's timing derived
+    /// from the selected lifecycles, so physical compilation places it.
+    ///
+    /// A retained (non-`Ephemeral`) state outlives one query, so it and every
+    /// input it consumes run at ingestion time. Every other node runs at query
+    /// time: readouts and consumers of retained state, and each `Ephemeral`
+    /// state not consumed by retained state together with its inputs, whose
+    /// raw data the deployment must supply as a query source. Timings already
+    /// on the root are ignored.
+    pub fn execution_timed_dag(&self) -> Result<PostAsapDag, SummaryMaintenanceTimingError> {
+        let dag = compile_post_asap_dag(&self.root)?;
+        if let Some(node) = dag.nodes.iter().find(|node| {
+            matches!(
+                node.payload,
+                PostAsapOperatorPayload::Value {
+                    operation: ValueOperation::MaintainPopulation { .. }
+                }
+            )
+        }) {
+            return Err(SummaryMaintenanceTimingError::UnplannedMaintainedState(
+                node.id,
+            ));
+        }
+        let mut pending = Vec::new();
+        for deployment in &self.deployments {
+            let guarantee = deployment
+                .summary_maintenance_lifecycle_guarantee
+                .as_ref()
+                .ok_or(SummaryMaintenanceTimingError::UnselectedLifecycle(
+                    deployment.post_asap_node_id,
+                ))?;
+            if guarantee.summary_maintenance_lifecycle != SummaryMaintenanceLifecycle::Ephemeral {
+                pending.push(deployment.post_asap_node_id);
+            }
+        }
+        let mut ingestion = HashSet::new();
+        while let Some(id) = pending.pop() {
+            if ingestion.insert(id) {
+                pending.extend(
+                    dag.edges
+                        .iter()
+                        .filter(|edge| edge.consumer == id)
+                        .map(|edge| edge.producer),
+                );
+            }
+        }
+        let phases = dag
+            .nodes
+            .iter()
+            .map(|node| {
+                let timing = if ingestion.contains(&node.id) {
+                    ExecutionTiming::IngestionTime
+                } else {
+                    ExecutionTiming::QueryTime
+                };
+                (node.id, timing)
+            })
+            .collect();
+        Ok(dag.with_execution_phases(&phases)?)
+    }
 }
 
 /// Explicit association between a materialized target and the normalized
@@ -2844,5 +2923,295 @@ mod tests {
             .deployments()
             .iter()
             .any(|deployment| Rc::ptr_eq(&deployment.summary, &shared)));
+    }
+
+    fn readout(state: &Rc<SummaryNode>) -> Rc<SummaryNode> {
+        Rc::new(SummaryNode {
+            expr: SummaryExpr::ValueOperation {
+                child: Rc::clone(state),
+                operation: ValueOperation::FinalizeExactAccumulator,
+                timing: ExecutionTiming::QueryTime,
+            },
+            schema: SummarySchema {
+                fields: vec![SummaryField {
+                    name: "value".into(),
+                    dtype: SummaryFamilyType::Plain(DataType::Float64),
+                    nullable: false,
+                }],
+                time_index: None,
+            },
+            guarantee: Some(ResultGuarantee::exact("sum")),
+        })
+    }
+
+    fn lifecycle_matching(
+        alternatives: &[SummaryMaintenanceLifecycleAlternative],
+        kind: fn(&SummaryMaintenanceLifecycle) -> bool,
+    ) -> SummaryMaintenanceLifecycle {
+        alternatives
+            .iter()
+            .map(|alternative| &alternative.summary_maintenance_lifecycle)
+            .find(|lifecycle| kind(lifecycle))
+            .expect("lifecycle kind is an alternative")
+            .clone()
+    }
+
+    /// Bind the lifecycle `choose` picks for every state of `root`, then
+    /// derive the timed DAG.
+    fn timed_dag(
+        root: Rc<SummaryNode>,
+        workload: &QueryWorkload,
+        data: &DataWorkload,
+        horizon: Option<Horizon>,
+        choose: impl Fn(&SummaryMaintenanceDeployment) -> SummaryMaintenanceLifecycle,
+    ) -> PostAsapDag {
+        let candidates = enumerate_summary_maintenance_lifecycles(
+            root,
+            WorkloadDemand::new_with_data(workload, data, &[0]),
+            1_000,
+            horizon,
+            SummaryMaintenanceLifecycleCapabilities::ALL,
+            &UnitCosts,
+        )
+        .unwrap();
+        let choice: Vec<_> = candidates
+            .deployments()
+            .iter()
+            .map(|deployment| (deployment.post_asap_node_id, choose(deployment)))
+            .collect();
+        let dag = candidates
+            .select(&choice)
+            .unwrap()
+            .execution_timed_dag()
+            .unwrap();
+        dag.validate().unwrap();
+        dag
+    }
+
+    /// Operator kinds in node-id order, each paired with its timing.
+    fn timings(dag: &PostAsapDag) -> Vec<(&'static str, ExecutionTiming)> {
+        dag.nodes
+            .iter()
+            .map(|node| {
+                let kind = match node.payload {
+                    PostAsapOperatorPayload::Fallback { .. } => "raw",
+                    PostAsapOperatorPayload::SummaryAgg { .. } => "state",
+                    PostAsapOperatorPayload::Value { .. } => "readout",
+                    PostAsapOperatorPayload::Binary { .. } => "binary",
+                    _ => "other",
+                };
+                (kind, node.output_state.timing)
+            })
+            .collect()
+    }
+
+    const INGEST: ExecutionTiming = ExecutionTiming::IngestionTime;
+    const QUERY: ExecutionTiming = ExecutionTiming::QueryTime;
+
+    // Every retained lifecycle kind runs its state and inputs at ingestion
+    // time and its readout at query time.
+    #[test]
+    fn retained_lifecycles_time_state_and_inputs_at_ingestion() {
+        let mut scheduled = batch(Predictability::Predictable {
+            known_at: Some(TimestampMs(1_000)),
+        });
+        scheduled.execute_at = Some(TimestampMs(11_000));
+        type Case = (
+            QueryWorkload,
+            DataWorkload,
+            Option<Horizon>,
+            fn(&SummaryMaintenanceLifecycle) -> bool,
+        );
+        let cases: [Case; 3] = [
+            (
+                workload(vec![], vec![repeating()], continuous(1_000, 60_000)),
+                continuous(1_000, 60_000),
+                Some(Horizon(10.0)),
+                |lifecycle| {
+                    matches!(
+                        lifecycle,
+                        SummaryMaintenanceLifecycle::ContinuouslyMaintained
+                    )
+                },
+            ),
+            (
+                workload(vec![], vec![repeating()], at_rest()),
+                at_rest(),
+                Some(Horizon(10.0)),
+                |lifecycle| matches!(lifecycle, SummaryMaintenanceLifecycle::Shared { .. }),
+            ),
+            (
+                workload(vec![scheduled], vec![], at_rest()),
+                at_rest(),
+                None,
+                |lifecycle| matches!(lifecycle, SummaryMaintenanceLifecycle::Prepared { .. }),
+            ),
+        ];
+        for (workload, data, horizon, kind) in cases {
+            let dag = timed_dag(
+                readout(&summary()),
+                &workload,
+                &data,
+                horizon,
+                |deployment| lifecycle_matching(&deployment.alternatives, kind),
+            );
+            assert_eq!(
+                timings(&dag),
+                [("raw", INGEST), ("state", INGEST), ("readout", QUERY)]
+            );
+        }
+    }
+
+    // An Ephemeral state, its raw input, and its readout all run at query time.
+    #[test]
+    fn ephemeral_lifecycle_times_state_and_downstream_at_query() {
+        let workload = workload(vec![batch(Predictability::AdHoc)], vec![], at_rest());
+        let dag = timed_dag(readout(&summary()), &workload, &at_rest(), None, |_| {
+            SummaryMaintenanceLifecycle::Ephemeral
+        });
+        assert_eq!(
+            timings(&dag),
+            [("raw", QUERY), ("state", QUERY), ("readout", QUERY)]
+        );
+    }
+
+    // One state read by two consumers is one deployment; its timing follows
+    // that single choice while both consumers run at query time.
+    #[test]
+    fn shared_state_is_timed_once_for_all_consumers() {
+        let state = summary();
+        let lhs = readout(&state);
+        let rhs = Rc::new(lhs.as_ref().clone());
+        let root = Rc::new(SummaryNode {
+            expr: SummaryExpr::BinaryOp {
+                lhs,
+                rhs,
+                operator: asap_types::post_asap::BinaryOperator {
+                    kind: asap_types::pre_asap::BinaryOpKind::Arithmetic(
+                        asap_types::pre_asap::ArithmeticOpKind::Add,
+                    ),
+                    vector_match: None,
+                    checked_relative_division: false,
+                    checked_finite_division: false,
+                },
+                timing: QUERY,
+            },
+            schema: readout(&state).schema.clone(),
+            guarantee: None,
+        });
+        let data = continuous(1_000, 60_000);
+        let workload = workload(vec![], vec![repeating()], data.clone());
+        let dag = timed_dag(root, &workload, &data, Some(Horizon(10.0)), |deployment| {
+            assert!(Rc::ptr_eq(&deployment.summary, &state));
+            SummaryMaintenanceLifecycle::ContinuouslyMaintained
+        });
+        assert_eq!(
+            timings(&dag),
+            [
+                ("raw", INGEST),
+                ("state", INGEST),
+                ("readout", QUERY),
+                ("readout", QUERY),
+                ("binary", QUERY),
+            ]
+        );
+    }
+
+    // An Ephemeral state consumed by retained state is built on the retained
+    // state's ingestion path; it is not retained, but cannot run at query time.
+    #[test]
+    fn ephemeral_state_feeding_retained_state_runs_at_ingestion() {
+        let mut scheduled = batch(Predictability::Predictable {
+            known_at: Some(TimestampMs(1_000)),
+        });
+        scheduled.execute_at = Some(TimestampMs(11_000));
+        let root = nested_summary();
+        let workload = workload(vec![scheduled], vec![], at_rest());
+        let dag = timed_dag(
+            Rc::clone(&root),
+            &workload,
+            &at_rest(),
+            None,
+            |deployment| {
+                if Rc::ptr_eq(&deployment.summary, &root) {
+                    lifecycle_matching(&deployment.alternatives, |lifecycle| {
+                        matches!(lifecycle, SummaryMaintenanceLifecycle::Prepared { .. })
+                    })
+                } else {
+                    SummaryMaintenanceLifecycle::Ephemeral
+                }
+            },
+        );
+        assert_eq!(
+            timings(&dag),
+            [("raw", INGEST), ("state", INGEST), ("state", INGEST)]
+        );
+    }
+
+    // Timing is not derived for a state without a selected lifecycle, and a
+    // raw-recompute plan runs entirely at query time.
+    #[test]
+    fn timing_requires_a_selected_lifecycle_for_every_state() {
+        let workload = workload(vec![batch(Predictability::AdHoc)], vec![], at_rest());
+        let data = at_rest();
+        let demand = WorkloadDemand::new_with_data(&workload, &data, &[0]);
+        let plan = plan_summary_maintenance_lifecycles(
+            readout(&summary()),
+            demand,
+            1_000,
+            None,
+            SummaryMaintenanceLifecycleCapabilities::ALL,
+            &crate::cost_model::DefaultCostModel,
+        )
+        .unwrap();
+        assert_eq!(
+            plan.execution_timed_dag().unwrap_err(),
+            SummaryMaintenanceTimingError::UnselectedLifecycle(
+                plan.deployments[0].post_asap_node_id
+            )
+        );
+        let raw = plan_summary_maintenance_lifecycles(
+            crate::replacement::keep_pre_asap(&sum_query()).unwrap(),
+            demand,
+            1_000,
+            None,
+            SummaryMaintenanceLifecycleCapabilities::ALL,
+            &UnitCosts,
+        )
+        .unwrap();
+        assert_eq!(
+            timings(&raw.execution_timed_dag().unwrap()),
+            [("raw", QUERY)]
+        );
+    }
+
+    // A maintained population is retained state the lifecycle plan does not
+    // enumerate, so its timing is refused rather than guessed.
+    #[test]
+    fn timing_refuses_state_outside_the_lifecycle_plan() {
+        let target = Rc::new(crate::test_support::lower_promql(
+            "sum(a)",
+            AccuracyTarget::Exact,
+        ));
+        let root = crate::maintained_population::MaintainedPopulationStrategy::new(
+            std::slice::from_ref(&target),
+        )
+        .candidate(&target)
+        .unwrap();
+        let workload = workload(vec![batch(Predictability::AdHoc)], vec![], at_rest());
+        let plan = plan_summary_maintenance_lifecycles(
+            root,
+            WorkloadDemand::new_with_data(&workload, &at_rest(), &[0]),
+            1_000,
+            None,
+            SummaryMaintenanceLifecycleCapabilities::ALL,
+            &UnitCosts,
+        )
+        .unwrap();
+        assert!(plan.deployments.is_empty());
+        assert!(matches!(
+            plan.execution_timed_dag(),
+            Err(SummaryMaintenanceTimingError::UnplannedMaintainedState(_))
+        ));
     }
 }

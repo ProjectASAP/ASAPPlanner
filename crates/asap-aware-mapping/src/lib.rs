@@ -222,7 +222,7 @@ pub use summary_maintenance_lifecycle::{
     SummaryMaintenanceLifecycleCapabilities, SummaryMaintenanceLifecycleChoiceError,
     SummaryMaintenanceLifecycleCostInputs, SummaryMaintenanceLifecyclePlan,
     SummaryMaintenanceLifecyclePlanError, SummaryMaintenanceLifecycleRejection,
-    SummaryMaintenanceLifecycleSelectionError, WorkloadDemand,
+    SummaryMaintenanceLifecycleSelectionError, SummaryMaintenanceTimingError, WorkloadDemand,
 };
 pub use topk_reuse::TopKLimitReuseStrategy;
 
