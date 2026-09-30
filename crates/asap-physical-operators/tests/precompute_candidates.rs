@@ -4,9 +4,9 @@ use asap_physical_operators::{
     factory::create_planner_accumulator,
     operators::Operator,
     physical_planner::{
-        compile, compile_candidate, compile_candidates, cut_candidate,
-        enumerate_compiled_frontiers, enumerate_frontiers, select_candidate, CandidateCost,
-        CompiledPhysicalDag, InputContract, PhysicalCandidate, Source,
+        compile, compile_candidate, compile_candidates, cut_candidate, enumerate_frontiers,
+        select_candidate, CandidateCost, CompiledPhysicalDag, InputContract, PhysicalCandidate,
+        Source,
     },
     runtime::{Limits, RunContext, Scope},
     values::{Batch, Value},
@@ -587,11 +587,7 @@ fn assert_cuts_match_recompilation(
     min_frontiers: usize,
 ) {
     let compiled = compile(dag, inputs.clone(), roots).unwrap();
-    let frontiers = enumerate_compiled_frontiers(&compiled, 4096).unwrap();
-    assert_eq!(
-        frontiers,
-        enumerate_frontiers(dag, &inputs, roots, 4096).unwrap()
-    );
+    let frontiers = enumerate_frontiers(dag, &inputs, roots, 4096).unwrap();
     assert!(frontiers.len() >= min_frontiers, "{frontiers:?}");
     for frontier in &frontiers {
         let cut = cut_candidate(&compiled, frontier).unwrap();

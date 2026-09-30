@@ -86,6 +86,41 @@ pub fn cut_candidate(
     })
 }
 
+/// Materialization frontier implied by lifecycle-assigned timing: ingestion-time
+/// nodes read by a query-time node, plus the root when it is ingestion-timed.
+/// `cut_candidate` of one [`compile`] result with this frontier realizes the
+/// assignment, so different assignments are different cuts of one lowering.
+/// That holds while timing-dependent lowering (an ingestion-time `Binary`
+/// aligns by value column) has the same timing at compile time as here.
+/// A query-time node feeding an ingestion-time node has no valid placement.
+pub fn frontier_from_timing(dag: &PostAsapDag) -> Result<Vec<NodeId>, Error> {
+    use planner_types::post_asap::ExecutionTiming::IngestionTime;
+    let timing = dag
+        .nodes
+        .iter()
+        .map(|node| (node.id, node.output_state.timing))
+        .collect::<BTreeMap<_, _>>();
+    let mut frontier = BTreeSet::new();
+    if timing.get(&dag.root) == Some(&IngestionTime) {
+        frontier.insert(u64::from(dag.root.0));
+    }
+    for edge in &dag.edges {
+        let (Some(&producer), Some(&consumer)) =
+            (timing.get(&edge.producer), timing.get(&edge.consumer))
+        else {
+            return Err(invalid("timed DAG edge names an unknown node"));
+        };
+        match (producer == IngestionTime, consumer == IngestionTime) {
+            (true, false) => {
+                frontier.insert(u64::from(edge.producer.0));
+            }
+            (false, true) => return Err(invalid("query-time node feeds an ingestion-time node")),
+            _ => {}
+        }
+    }
+    Ok(frontier.into_iter().collect())
+}
+
 /// Enumerate bounded, reachable materialization frontiers above explicit inputs.
 /// Each frontier is an antichain: storing an output and its ancestor together
 /// would leave the ancestor unused by query execution. Lifecycle eligibility
@@ -100,9 +135,7 @@ pub fn enumerate_frontiers(
     enumerate_compiled_frontiers(&compile(dag, inputs.clone(), roots)?, max_candidates)
 }
 
-/// [`enumerate_frontiers`] over an existing [`compile`] result, so enumeration
-/// and [`cut_candidate`] share one lowering.
-pub fn enumerate_compiled_frontiers(
+fn enumerate_compiled_frontiers(
     compiled: &CompiledPhysicalDag,
     max_candidates: usize,
 ) -> Result<Vec<Vec<NodeId>>, Error> {
@@ -363,5 +396,88 @@ mod tests {
         }
         assert!(once > 0);
         assert_eq!(lowered() - before, once);
+    }
+
+    fn with_timing(
+        dag: &PostAsapDag,
+        timing: impl Fn(&PostAsapDagNode) -> planner_types::post_asap::ExecutionTiming,
+    ) -> PostAsapDag {
+        let mut timed = dag.clone();
+        for node in &mut timed.nodes {
+            node.output_state.timing = timing(node);
+        }
+        for edge in &mut timed.edges {
+            let producer = timed.nodes.iter().find(|node| node.id == edge.producer);
+            edge.data_state = producer.unwrap().output_state;
+        }
+        timed
+    }
+
+    fn raw_input(dag: &PostAsapDag) -> BTreeMap<NodeId, InputContract> {
+        let raw = dag
+            .nodes
+            .iter()
+            .find(|node| matches!(node.payload, Payload::Fallback { .. }))
+            .unwrap();
+        BTreeMap::from([(
+            u64::from(raw.id.0),
+            InputContract::bounded(Arc::new(raw.output_schema.clone())),
+        )])
+    }
+
+    /// Cutting one compilation by a retained-state timing and by the all
+    /// query-time timing (what ContinuouslyMaintained and Ephemeral assign)
+    /// lowers each Planner node once and matches `compile_candidate`.
+    #[test]
+    fn timing_cuts_share_one_lowering() {
+        use planner_types::post_asap::ExecutionTiming::QueryTime;
+        let (retained, _, root) = grouped_rate();
+        let ephemeral = with_timing(&retained, |_| QueryTime);
+        let inputs = raw_input(&retained);
+        let lowered = || crate::physical_planner::LOWERED_NODES.with(|count| count.get());
+        let before = lowered();
+        let compiled = compile(&ephemeral, inputs.clone(), &[root]).unwrap();
+        let once = lowered() - before;
+        let cuts = [&retained, &ephemeral].map(|timed| {
+            let frontier = frontier_from_timing(timed).unwrap();
+            let cut = cut_candidate(&compiled, &frontier).unwrap();
+            (timed, frontier, cut)
+        });
+        assert!(once > 0);
+        assert_eq!(lowered() - before, once);
+        assert_eq!(cuts[0].1.len(), 1);
+        assert!(cuts[1].1.is_empty());
+        for (timed, frontier, cut) in cuts {
+            let expected = compile_candidate(timed, inputs.clone(), &[root], &frontier).unwrap();
+            assert_eq!(
+                serde_json::to_vec(&cut).unwrap(),
+                serde_json::to_vec(&expected).unwrap()
+            );
+        }
+    }
+
+    /// The frontier is the ingestion-time nodes read at query time; an
+    /// ingestion-time root is itself the frontier.
+    #[test]
+    fn frontier_from_timing_includes_ingestion_root() {
+        use planner_types::post_asap::ExecutionTiming::IngestionTime;
+        let (dag, _, root) = grouped_rate();
+        let timed = with_timing(&dag, |_| IngestionTime);
+        assert_eq!(frontier_from_timing(&timed).unwrap(), [root]);
+    }
+
+    /// A query-time node feeding an ingestion-time node is rejected.
+    #[test]
+    fn frontier_from_timing_rejects_query_time_input_to_ingestion() {
+        use planner_types::post_asap::ExecutionTiming::{IngestionTime, QueryTime};
+        let (dag, _, _) = grouped_rate();
+        let timed = with_timing(&dag, |node| {
+            if node.id == dag.root {
+                IngestionTime
+            } else {
+                QueryTime
+            }
+        });
+        assert!(frontier_from_timing(&timed).is_err());
     }
 }
