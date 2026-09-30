@@ -15,15 +15,31 @@ operators.
 ## Layers
 
 ```text
-            PromQL / SQL / MetricsQL
-                      │
-┌──────────── ASAPPlanner ────────────────────────────────┐
-│ 0 Frontends       → Pre-ASAP DAG (QueryExpr)             │
-│ 1 PlanSpace       what to compute; no placement          │
-│ 2 Lifecycle       per-state lifecycle → node timing      │
-│ 3 Physical        compile once; cut by timing into       │
-│   compile         precompute and query DAGs              │
-└──────────────────────┬──────────────────────────────────┘
+                  PromQL / SQL / MetricsQL
+                       │
+┌───────────────────────── ASAPPlanner ────────────────────────────┐
+│ 0. Frontends                                                     │
+│    PromQL / SQL / MetricsQL: parse + lower -> PreASAPDAG         │
+│    Reject unsupported constructs, such as PromQL fill.           │
+│                      │                                           │
+│ 1. Logical Post-ASAP (asap-aware-mapping)                        │
+│    PlanSpace: WHAT to compute; no placement.                     │
+│    Summary families, rewrites, exact candidates                  │
+│    -> candidate PostASAPDAGs                                     │
+│                      │                                           │
+│ 2. Summary maintenance lifecycle                                 │
+│    Per unique summary state / maintained population:             │
+│    Ephemeral | Prepared | Shared | ContinuouslyMaintained        │
+│    Chosen assignment -> node timing, window framework,           │
+│    retention. The only source of timing.                         │
+│    -> timed PostASAPDAG                                          │
+│                      │                                           │
+│ 3. Physical compile (asap-physical-operators)                    │
+│    Compile once -> PhysicalDAG                                   │
+│    Cut by timing -> PhysicalCandidate                            │
+│    { precompute DAG, query DAG, typed InputContracts }           │
+│    Operators + kernels implement all computation.                │
+└──────────────────────┬───────────────────────────────────────────┘
           physical plan / DAG (the boundary)
 ┌──────────────────────┴──────── Deployment ──────────────┐
 │ 4 Selection       price lifecycle assignments; choose    │
@@ -31,12 +47,31 @@ operators.
 └─────────────────────────────────────────────────────────┘
 ```
 
+### DAG names
+
+This design uses three names consistently. They describe graph artifacts,
+not three alternative outputs of the same stage.
+
+| Design name | Meaning | Current Rust representation |
+|---|---|---|
+| `PreASAPDAG` | Frontend-lowered query semantics before summary rewrites | A graph rooted at `Rc<QueryExpr>` |
+| `PostASAPDAG` | A logical computation candidate; the lifecycle assignment adds timing to this same logical graph | A graph rooted at `Rc<SummaryNode>`; exported as `PostAsapDag` for physical compilation |
+| `PhysicalDAG` | Compiled operators and kernels with typed inputs | `CompiledPhysicalDag` |
+
+These are the proposed naming conventions. This documentation revision does
+not rename Rust types or APIs. Code signatures retain their current names.
+`PostAsapDag` is the exported representation of `PostASAPDAG`, not a fourth
+planning layer. `PhysicalCandidate` packages the precompute and query cuts
+of a `PhysicalDAG` with their typed input contracts.
+
+### Responsibilities
+
 | Layer | Owns | Does not own |
 |---|---|---|
-| 0. Frontends | Language semantics and lowering. A construct that cannot be represented faithfully is rejected, never ignored (for example PromQL `fill`). | Summaries, placement |
-| 1. Logical candidate space (`PlanSpace`) | Which computation to use: summary families, exact rewrites, compositions, series-identity typing. | Placement |
+| 0. Frontends | Language semantics and lowering into `PreASAPDAG`. A construct that cannot be represented faithfully is rejected, never ignored (for example PromQL `fill`). | Summaries, placement |
+| 1. Logical candidate space (`PlanSpace`) | `PlanSpace` represents candidate `PostASAPDAG`s: summary families, exact rewrites, compositions, and series-identity typing. | Placement |
 | 2. Summary maintenance lifecycle | For each unique summary state and maintained population, the lifecycle choices (`Ephemeral`, `Prepared`, `Shared`, `ContinuouslyMaintained`) and their costs under a caller-supplied cost model. A chosen assignment sets every node's execution timing, window framework and retention. | The cost values themselves |
-| 3. Physical compilation | All computation: value operations, aggregation, PromQL functions and subqueries, vector matching, comparisons and set operators, `histogram_quantile`, summary build, merge and estimate, sort, limit, joins. It splits the precompute DAG from the query DAG by timing. | Raw ingestion, pane construction, storage formats, decoding persisted state, scheduling |
+| 3. Physical compilation | All computation: value operations, aggregation, PromQL functions and subqueries, vector matching, comparisons and set operators, `histogram_quantile`, summary build, merge and estimate, sort, limit, joins. Compiles a timed `PostASAPDAG` into a `PhysicalDAG`, then cuts it by timing into a `PhysicalCandidate`. | Raw ingestion, pane construction, storage formats, decoding persisted state, scheduling |
 | 4. Deployment selection | Prices lifecycle assignments and, through its cost model, logical candidates. Shared state is counted once. It binds the chosen plan. | Re-lowering computation |
 | 5. Deployment execution | Ingestion and routing, pane assignment and completeness, lateness and revisions, storage and codecs over Planner kernel states, reading stored state into typed inputs, query-time raw sources, the exact-engine fallback. | Any computation algorithm |
 
@@ -61,9 +96,9 @@ and encoding belong to the deployment.
 
 ## Timing and placement
 
-Timing comes only from the lifecycle layer. Logical strategies may suggest an
-initial layout, but they do not choose placement. The rules for applying an
-assignment are:
+Timing comes only from the lifecycle layer. Logical strategies propose
+computation candidates, not execution timing or placement. The rules for
+applying an assignment are:
 
 * a retained state (`ContinuouslyMaintained`, `Shared`, `Prepared`) and every
   node feeding it run at ingestion time;
@@ -71,11 +106,14 @@ assignment are:
 * an `Ephemeral` state that feeds a retained state runs at ingestion time,
   because query-time work may not feed ingestion-time work.
 
-Physical compilation lowers a logical candidate once and derives one candidate
-per assignment by cutting at the timing frontier: the ingestion-time nodes read
+A chosen lifecycle assignment produces a timed `PostASAPDAG`. Physical
+compilation calls `compile` once to produce a `PhysicalDAG`, then
+`cut_candidate(&compiled, &frontier_from_timing(&dag)?)` to form the
+`PhysicalCandidate`. The timing frontier contains the ingestion-time nodes read
 by query-time nodes, plus an ingestion-time root. An ingestion-time `Binary` is
 the one exception. It lowers differently from a query-time one, so its timing
-must match at compile time.
+must match at compile time. Assignments that change this lowering need a
+matching compilation; other timing cuts can reuse the compiled graph.
 
 ## Cost and selection
 

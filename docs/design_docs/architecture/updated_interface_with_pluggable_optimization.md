@@ -102,8 +102,12 @@ The variant follows from whether `lifecycle` was supplied in the input.
 
 `PlanOutput` is one pass's selected logical plan, not a replacement for
 `PlanSpace`: candidates the pass dropped are not in it, so a deployment that
-prices candidates itself enumerates them from `PlanSpace`. Timing is decided
-after `PlanOutput`, which is why it stays in `SummaryNode` form. See
+prices candidates itself enumerates them from `PlanSpace`. Each selected
+logical graph is a `PostASAPDAG`, currently represented by `Rc<SummaryNode>`.
+The lifecycle layer alone supplies timing; `DagWithLifecycle` includes that
+choice, while `Dag` does not. Physical compilation then produces a
+`PhysicalDAG` (currently `CompiledPhysicalDag`) and cuts a `PhysicalCandidate`.
+These are design names, not renamed Rust APIs. See
 [output layers](input-output-workflow.md#output-layers).
 
 ---
