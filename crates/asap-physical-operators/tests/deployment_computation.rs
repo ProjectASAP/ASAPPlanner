@@ -267,6 +267,50 @@ fn grouped_vector_arithmetic_matches_labels() {
     );
 }
 
+// Exact observation counts finalize to the Float64 value PromQL declares,
+// then roll up per job: api has 2 + 1 + 1 samples in 5m, db has 1.
+#[test]
+fn exact_count_finalizes_to_declared_float_value() {
+    let mut dag = exact_dag("sum by (job) (count_over_time(m[5m]))");
+    let finalize = dag
+        .nodes
+        .iter()
+        .find(|node| {
+            matches!(
+                node.payload,
+                PostAsapOperatorPayload::Value {
+                    operation: ValueOperation::FinalizeExactAccumulator
+                }
+            )
+        })
+        .unwrap()
+        .clone();
+    let root = dag.nodes.iter().find(|n| n.id == dag.root).unwrap().clone();
+    let mut edge = dag
+        .edges
+        .iter()
+        .find(|e| e.producer == finalize.id)
+        .unwrap()
+        .clone();
+    // Read the rolled-up exact state the same way the query path does.
+    let mut read = finalize.clone();
+    read.id = PostAsapNodeId(root.id.0 + 1);
+    read.output_schema = root.output_schema.clone();
+    read.output_schema.fields.last_mut().unwrap().dtype =
+        SummaryFamilyType::Plain(planner_types::pre_asap::DataType::Float64);
+    edge.producer = root.id;
+    edge.consumer = read.id;
+    edge.intermediate_schema = root.output_schema.clone();
+    edge.data_state = root.output_state.clone();
+    dag.root = read.id;
+    dag.nodes.push(read);
+    dag.edges.push(edge);
+    assert_eq!(
+        run(&dag, SAMPLES, 60_000).unwrap(),
+        reference(&[("api", 4.), ("db", 1.)])
+    );
+}
+
 // Comparisons need filter/bool semantics that `Binary` does not carry, so
 // they fail at compile time instead of emitting 0/1 values.
 #[test]

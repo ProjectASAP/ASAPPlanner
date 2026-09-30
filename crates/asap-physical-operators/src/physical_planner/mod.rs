@@ -406,6 +406,41 @@ fn compile_internal(
                     }
                 }
             }
+            if let Payload::Value {
+                operation: ValueOperation::FinalizeExactAccumulator,
+            } = &node.payload
+            {
+                // Exact counts read out as Int64; PromQL declares a Float64 sample.
+                let readout = bind_operation(node, &schemas)
+                    .map_err(|error| invalid(format!("node {id}: {error}")))?;
+                let actual = readout.schema();
+                let converted = actual.fields.iter().zip(&output.fields).position(|(a, d)| {
+                    a.dtype == SummaryFamilyType::Plain(DataType::Int64)
+                        && d.dtype == SummaryFamilyType::Plain(DataType::Float64)
+                });
+                if let Some(column) = converted {
+                    let columns = actual
+                        .fields
+                        .iter()
+                        .enumerate()
+                        .map(|(i, field)| {
+                            (
+                                field.name.clone(),
+                                if i == column {
+                                    Expression::ExactFloat64(i)
+                                } else {
+                                    Expression::Column(i)
+                                },
+                            )
+                        })
+                        .collect();
+                    let project = Operator::project(actual, columns)?.with_output_schema(output)?;
+                    graph.add(auxiliary, inputs, readout)?;
+                    graph.add(id, vec![auxiliary], project)?;
+                    auxiliary -= 1;
+                    continue;
+                }
+            }
             let mut operator = compile_node(node, &schemas)
                 .map_err(|error| invalid(format!("node {id}: {error}")))?;
             if operator.is_counter_readout() {
