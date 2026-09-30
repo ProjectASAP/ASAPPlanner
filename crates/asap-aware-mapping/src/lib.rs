@@ -199,7 +199,7 @@ pub use grouping::{has_subpopulations, HydraGroupingStrategy};
 pub use pass::{
     optimize, LifecycleInput, MajorPass, OptimizationInput, OptimizationInputError,
     OptimizationPass, OptimizeError, PassNameConflict, PassRegistry, PlanOutput, PlanningModels,
-    QueryLifecyclePlan, QueryPlan,
+    QueryLifecyclePlan,
 };
 pub use recurrence::{
     evaluation_rate_of, total_cost, update_rate_from_data_workload, CostRate, EvaluationRate,

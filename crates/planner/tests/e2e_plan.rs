@@ -6,9 +6,13 @@ use std::rc::Rc;
 use asap_aware_mapping::pass::{
     OptimizationInput, OptimizationPass, OptimizeError, PlanOutput, PlanningModels,
 };
-use asap_aware_mapping::{Horizon, LifecycleInput, SummaryMaintenanceLifecycleCapabilities};
-use asap_frontend_sql::SqlCatalog;
+use asap_aware_mapping::replacement::default_strategies_with_evidence;
+use asap_aware_mapping::{
+    search_workload_with_targets, Horizon, LifecycleInput, SummaryMaintenanceLifecycleCapabilities,
+};
+use asap_frontend_sql::{lower_sql_dialect, SqlCatalog};
 use asap_planner::{e2e_plan, FrontendInput, PlanError, UserInput, UserInputError};
+use asap_types::post_asap::SummaryExpr;
 use asap_types::pre_asap::schema::{Column, DataType, Schema};
 use asap_types::types::AccuracyTarget;
 use asap_types::workload::{
@@ -35,6 +39,12 @@ fn batch(sql: &str) -> BatchEntry {
         execute_at: None,
         time_selection: TimeSelection::default(),
     }
+}
+
+/// The planning clock and default capabilities, no horizon: the least a
+/// caller can supply.
+fn lifecycle() -> LifecycleInput {
+    LifecycleInput::new(NOW_MS, SummaryMaintenanceLifecycleCapabilities::default())
 }
 
 fn lineitem_catalog() -> SqlCatalog {
@@ -80,14 +90,80 @@ async fn plans_every_query_in_entry_order() {
         &workload,
         FrontendInput::Sql { catalog: &catalog },
         PlanningModels::builtin(),
+        lifecycle(),
     );
 
     let output = e2e_plan(input).await.expect("workload plans");
-    let PlanOutput::Dag { plans } = &output else {
-        panic!("no lifecycle input was supplied, so the DAG-only variant is expected");
-    };
-    assert_eq!(plans.len(), 2);
+    assert_eq!(output.plans.len(), 2);
     assert_eq!(output.entry_indices(), vec![0, 1]);
+}
+
+/// With the built-in cost model no lifecycle cost is ever known, and
+/// lifecycle-aware selection then finalizes every summary target as raw
+/// recompute: the cost-only selection picks a sketch for the same workload.
+/// This pins that behavior so the facade's output is not mistaken for a
+/// decision; it is a defect of `DefaultCostModel`, not addressed here.
+#[tokio::test]
+async fn builtin_cost_model_cannot_price_lifecycles_and_falls_back_to_raw_recompute() {
+    let workload = sql_workload(
+        vec![
+            batch("SELECT COUNT(DISTINCT l_orderkey) FROM lineitem"),
+            batch("SELECT approx_percentile_cont(l_extendedprice, 0.99) FROM lineitem"),
+        ],
+        None,
+    );
+    let catalog = lineitem_catalog();
+    let models = PlanningModels::builtin();
+
+    let output = e2e_plan(UserInput::new(
+        &workload,
+        FrontendInput::Sql { catalog: &catalog },
+        models,
+        lifecycle(),
+    ))
+    .await
+    .expect("workload plans");
+
+    // The cost-only selection over the same search space, the way a caller
+    // reaches it without the facade.
+    let mut roots = Vec::new();
+    for (index, entry) in workload.query_workload.entries().enumerate() {
+        let accuracy = entry.requirements.accuracy.target();
+        let expr = lower_sql_dialect(
+            &entry.query.0,
+            &catalog,
+            SqlDialect::DataFusionSQL,
+            accuracy.clone(),
+        )
+        .await
+        .expect("lowers");
+        roots.push((index, Rc::new(expr), Some(accuracy)));
+    }
+    let strategies = default_strategies_with_evidence(models.cost, models.evidence);
+    let space = search_workload_with_targets(roots, &strategies, models.accuracy);
+    let selection = space.global_selection(models.cost);
+
+    assert_eq!(output.plans.len(), space.roots.len());
+    for (plan, (_, root)) in output.plans.iter().zip(&space.roots) {
+        let cost_only = selection
+            .assemble_selected_dag(root)
+            .expect("assembles")
+            .expect("root has a group");
+        assert!(
+            !matches!(cost_only.expr, SummaryExpr::KeepPreAsap(_)),
+            "entry {}: cost-only selection was expected to pick a summary",
+            plan.entry_index
+        );
+        assert!(
+            matches!(plan.plan.root.expr, SummaryExpr::KeepPreAsap(_))
+                && plan.plan.selected_raw_recompute
+                && plan.plan.deployments.is_empty()
+                && plan.plan.summary_total_cost.is_none()
+                && plan.plan.raw_recompute_total_cost.is_none(),
+            "entry {}: the built-in model priced a lifecycle",
+            plan.entry_index
+        );
+    }
 }
 
 /// A repeating SQL query reaches the optimizer. `lower_sql_batch` walks
@@ -112,6 +188,7 @@ async fn lowers_repeating_sql_entries_too() {
         &workload,
         FrontendInput::Sql { catalog: &catalog },
         PlanningModels::builtin(),
+        lifecycle(),
     );
 
     let output = e2e_plan(input).await.expect("workload plans");
@@ -153,6 +230,7 @@ async fn runs_a_caller_supplied_pass_instead_of_the_shipped_one() {
         &workload,
         FrontendInput::Sql { catalog: &catalog },
         PlanningModels::builtin(),
+        lifecycle(),
     )
     .with_pass(&pass);
 
@@ -176,10 +254,8 @@ async fn harness_rejects_a_pass_that_mislabels_entry_indices() {
         }
         fn optimize(&self, input: OptimizationInput<'_>) -> Result<PlanOutput, OptimizeError> {
             let mut output = asap_aware_mapping::MajorPass.optimize(input)?;
-            if let PlanOutput::Dag { plans } = &mut output {
-                for plan in plans.iter_mut() {
-                    plan.entry_index += 1;
-                }
+            for plan in output.plans.iter_mut() {
+                plan.entry_index += 1;
             }
             Ok(output)
         }
@@ -195,6 +271,7 @@ async fn harness_rejects_a_pass_that_mislabels_entry_indices() {
         &workload,
         FrontendInput::Sql { catalog: &catalog },
         PlanningModels::builtin(),
+        lifecycle(),
     )
     .with_pass(&pass);
 
@@ -226,6 +303,7 @@ async fn rejects_a_frontend_that_does_not_match_the_workload_language() {
             histograms: None,
         },
         PlanningModels::builtin(),
+        lifecycle(),
     );
 
     let err = e2e_plan(input).await.unwrap_err();
@@ -261,11 +339,11 @@ fn rejects_disagreeing_planning_clocks() {
             histograms: None,
         },
         PlanningModels::builtin(),
-    )
-    .with_lifecycle(LifecycleInput::new(
-        NOW_MS + 1,
-        SummaryMaintenanceLifecycleCapabilities::default(),
-    ));
+        LifecycleInput::new(
+            NOW_MS + 1,
+            SummaryMaintenanceLifecycleCapabilities::default(),
+        ),
+    );
 
     assert!(matches!(
         input.validate(),
@@ -273,10 +351,10 @@ fn rejects_disagreeing_planning_clocks() {
     ));
 }
 
-/// Supplying lifecycle input switches the output variant, and the DAG is still
-/// there — inside each plan's `root`, not alongside it.
+/// The maintenance decisions ride inside each plan, and the DAG is still
+/// there — inside the plan's `root`, not alongside it.
 #[tokio::test]
-async fn lifecycle_input_selects_the_lifecycle_variant() {
+async fn lifecycle_decisions_ride_inside_each_plan() {
     let workload = PlanningWorkload {
         query_workload: QueryWorkload {
             language: QueryLanguage::PromQL,
@@ -305,17 +383,12 @@ async fn lifecycle_input_selects_the_lifecycle_variant() {
             histograms: None,
         },
         PlanningModels::builtin(),
-    )
-    .with_lifecycle(
-        LifecycleInput::new(NOW_MS, SummaryMaintenanceLifecycleCapabilities::default())
-            .with_horizon(Horizon(3_600.0)),
+        lifecycle().with_horizon(Horizon(3_600.0)),
     );
 
     let output = e2e_plan(input).await.expect("workload plans");
-    let PlanOutput::DagWithLifecycle { plans } = &output else {
-        panic!("lifecycle input was supplied, so the lifecycle variant is expected");
-    };
-    assert_eq!(plans.len(), 1);
-    assert_eq!(plans[0].entry_index, 0);
-    let _: &Rc<_> = &plans[0].plan.root;
+    assert_eq!(output.plans.len(), 1);
+    assert_eq!(output.plans[0].entry_index, 0);
+    let _: &Rc<_> = &output.plans[0].plan.root;
+    assert_eq!(output.dags().len(), 1);
 }
