@@ -1640,16 +1640,18 @@ fn without_output_schema(
             ));
         }
     }
+    // A nested aggregate renames the sample value (`sum by (le) (…)` → `sum`);
+    // it is still the value, not a kept label.
+    let value =
+        super::column_resolution::resolve_column_ref(&ColumnRef::SampleValue, in_schema).ok();
     let mut out_cols: Vec<Column> = Vec::new();
     for (i, col) in in_schema.columns.iter().enumerate() {
         let is_time = in_schema.time_index == Some(i);
-        let is_value = col.name == "value";
-        if !is_time && !is_value && !excluded.contains(&i) {
+        if !is_time && value != Some(i) && !excluded.contains(&i) {
             out_cols.push(col.clone());
         }
     }
-    let probe = in_schema
-        .column_id("value")
+    let probe = value
         .and_then(|i| in_schema.columns.get(i))
         .cloned()
         .unwrap_or_else(|| Column::new("value", DataType::Float64, false));
@@ -2256,6 +2258,31 @@ mod tests {
         assert!(!s.closed, "a `without` result stays open");
         assert!(s.time_index.is_none());
         assert!(s.unique_keys.is_empty(), "kept set unknown → no unique key");
+    }
+
+    // A nested aggregate's renamed sample value is not a kept label.
+    #[test]
+    fn without_aggregate_drops_a_renamed_sample_value() {
+        // `sum without (inst) (sum by (inst, job) (m))` over `[inst, job, sum]`.
+        let inner = QueryExpr::Scan {
+            source: Source::TimeSeries { metric: "m".into() },
+            predicates: vec![],
+            schema: Schema::new(vec![
+                col("inst", DataType::Utf8, true),
+                col("job", DataType::Utf8, true),
+                col("sum", DataType::Float64, false),
+            ]),
+        };
+        let agg = QueryExpr::Aggregate {
+            reduction: Reduction::Reduce(GroupKeys::without(vec![0])),
+            measures: vec![AggIntent::Sum { col: None }],
+            output_names: vec![],
+            having: None,
+            child: Rc::new(inner),
+        };
+        let s = agg.output_schema().unwrap();
+        let names: Vec<_> = s.columns.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, vec!["job", "sum"]);
     }
 
     #[test]
