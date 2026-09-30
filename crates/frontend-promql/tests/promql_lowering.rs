@@ -237,7 +237,7 @@ fn histogram_quantile_wraps_inner_in_quantile() {
         panic!("expected outer Aggregate{{HistogramQuantile}}, got {qe:?}");
     };
     assert!(
-        matches!(measures.as_slice(), [AggIntent::HistogramQuantile { q }] if (*q - 0.95).abs() < 1e-9)
+        matches!(measures.as_slice(), [AggIntent::HistogramQuantile { q, .. }] if (*q - 0.95).abs() < 1e-9)
     );
     let QueryExpr::Aggregate {
         measures, child, ..
@@ -274,7 +274,7 @@ fn histogram_quantile_over_sum_by_le_preserves_grouping() {
     };
     // The `by (le)` grouping marks the classic cumulative-bucket form.
     assert!(
-        matches!(measures.as_slice(), [AggIntent::HistogramQuantile { q }] if (*q - 0.99).abs() < 1e-9)
+        matches!(measures.as_slice(), [AggIntent::HistogramQuantile { q, .. }] if (*q - 0.99).abs() < 1e-9)
     );
     // `sum by (le)` survives as a positional Aggregate (by = [2], `le`) over the
     // inner Rate — no name-based Partition.
@@ -288,6 +288,90 @@ fn histogram_quantile_over_sum_by_le_preserves_grouping() {
     };
     assert_eq!(reduction, &Reduction::by(vec![2]));
     assert!(matches!(measures.as_slice(), [AggIntent::Sum { .. }]));
+}
+
+/// The classic `histogram_quantile` aggregate: its `without` keys, `le`
+/// column, and output column names.
+fn classic_histogram(qe: &QueryExpr) -> (Vec<usize>, usize, Vec<String>) {
+    let QueryExpr::Aggregate {
+        reduction: Reduction::Reduce(by),
+        measures,
+        ..
+    } = qe
+    else {
+        panic!("expected a reducing Aggregate, got {qe:?}");
+    };
+    let [AggIntent::HistogramQuantile { le, .. }] = measures.as_slice() else {
+        panic!("expected HistogramQuantile, got {measures:?}");
+    };
+    assert!(by.is_without(), "histogram_quantile groups without (le)");
+    let names = qe
+        .output_schema()
+        .unwrap()
+        .columns
+        .iter()
+        .map(|c| c.name.clone())
+        .collect();
+    (by.keys().to_vec(), *le, names)
+}
+
+// A classic histogram_quantile groups `without (le)` and names the child's
+// `le` column, even when no matcher or grouping mentions `le`.
+#[test]
+fn classic_histogram_quantile_groups_without_le() {
+    let qe = lower("histogram_quantile(0.9, rate(http_duration_seconds_bucket[5m]))");
+    let (keys, le, names) = classic_histogram(&qe);
+    let QueryExpr::Aggregate { child, .. } = &qe else {
+        unreachable!()
+    };
+    let child = child.output_schema().unwrap();
+    assert_eq!(child.columns[le].name, "le");
+    assert_eq!(keys, vec![le]);
+    assert_eq!(names, vec!["histogram_quantile"]);
+}
+
+// An explicit `sum by (le, job)` argument keeps `job` and drops `le` and the
+// renamed sample value from the output labels.
+#[test]
+fn classic_histogram_quantile_over_sum_by_keeps_other_labels() {
+    let qe =
+        lower("histogram_quantile(0.9, sum by (le, job) (rate(http_duration_seconds_bucket[5m])))");
+    let (keys, le, names) = classic_histogram(&qe);
+    // `sum by (le, job)` outputs `[job, le, sum]`.
+    assert_eq!((keys, le), (vec![1], 1));
+    assert_eq!(names, vec!["job", "histogram_quantile"]);
+}
+
+// Out-of-range and NaN quantiles lower unchanged; execution returns -Inf/+Inf/NaN.
+#[test]
+fn classic_histogram_quantile_keeps_out_of_range_quantiles() {
+    for (query, expected) in [
+        ("histogram_quantile(-1, x_bucket)", -1.),
+        ("histogram_quantile(2, x_bucket)", 2.),
+    ] {
+        let QueryExpr::Aggregate { measures, .. } = lower(query) else {
+            panic!("{query}");
+        };
+        assert!(
+            matches!(measures.as_slice(), [AggIntent::HistogramQuantile { q, .. }] if *q == expected)
+        );
+    }
+    let QueryExpr::Aggregate { measures, .. } = lower("histogram_quantile(NaN, x_bucket)") else {
+        panic!("NaN");
+    };
+    assert!(matches!(measures.as_slice(), [AggIntent::HistogramQuantile { q, .. }] if q.is_nan()));
+}
+
+// An argument whose closed output lacks `le` has no buckets. Prometheus
+// returns an empty vector; lowering rejects it rather than guess a column.
+#[test]
+fn classic_histogram_quantile_rejects_an_argument_without_le() {
+    let error = lower_promql(
+        "histogram_quantile(0.9, sum by (job) (rate(x_bucket[5m])))",
+        AccuracyTarget::Exact,
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("le"), "{error}");
 }
 
 // ── rate / increase carry their own window (no Window node) ─────────────────────

@@ -193,8 +193,14 @@ pub enum AggIntent<C = ColumnId> {
     /// to: this is exact bucket interpolation, not a sketch-able quantile, so it
     /// carries no accuracy target and is a cross-series reduction over `le`
     /// (issue #43).
+    ///
+    /// PromQL groups the enclosing `Aggregate` `without([le])`: one histogram
+    /// is the set of series that differ only in `le`. The output drops `le`
+    /// and `__name__`. `le` names the bucket-bound column so that execution
+    /// need not guess it from the grouping keys.
     HistogramQuantile {
         q: f64,
+        le: C,
     },
 
     /// A per-sample element-wise math / trig transform (issue #45) — `abs`,

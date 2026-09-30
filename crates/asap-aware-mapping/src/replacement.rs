@@ -7389,7 +7389,7 @@ mod tests {
                 Pass,
             ),
             // classic-bucket histogram_quantile is not re-sketchable (#79)
-            (A::HistogramQuantile { q: 0.99 }, Pass),
+            (A::HistogramQuantile { q: 0.99, le: 0 }, Pass),
             // counter-derivative / range-vector functions (#44)
             (A::Changes, Pass),
             (A::Delta, Pass),
@@ -10122,7 +10122,7 @@ mod tests {
         // decree. All three stay whole logical subtrees.
         for intent in [
             AggIntent::Avg { col: None },
-            AggIntent::HistogramQuantile { q: 0.99 },
+            AggIntent::HistogramQuantile { q: 0.99, le: 0 },
             AggIntent::Quantile {
                 col: None,
                 q: 0.99,

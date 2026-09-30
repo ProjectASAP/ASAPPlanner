@@ -702,8 +702,12 @@ impl<'a> SqlLowerer<'a> {
                     }
                 }
                 PlanningBridge::HistogramQuantile { q } => Unresolved::Aggregate {
+                    // The marker is the projection's only column: one histogram.
                     reduction: Reduction::Reduce(GroupKeys::none()),
-                    measures: vec![AggIntent::HistogramQuantile { q }],
+                    measures: vec![AggIntent::HistogramQuantile {
+                        q,
+                        le: ColumnRef::Named("le".into()),
+                    }],
                     output_names: vec!["value".into()],
                     having: None,
                     child: Rc::new(input),

@@ -87,6 +87,11 @@ enum Kind {
         operator: planner_types::post_asap::BinaryOperator,
         scalars: [bool; 2],
     },
+    SeriesHistogramQuantile {
+        /// `f64` bits: JSON cannot encode the NaN and infinite quantiles.
+        quantile: u64,
+        le: usize,
+    },
     Project(Vec<Expression>),
     Filter(Expression),
     Limit {
@@ -261,6 +266,7 @@ impl PhysicalOperator<Batch, Schema> for Operator {
                 | Kind::SeriesWindow { .. }
                 | Kind::SeriesLabels { .. }
                 | Kind::SeriesBinary { .. }
+                | Kind::SeriesHistogramQuantile { .. }
                 | Kind::Aggregate { .. }
                 | Kind::Window { .. }
                 | Kind::Join { .. }
@@ -306,6 +312,7 @@ impl PhysicalOperator<Batch, Schema> for Operator {
             Kind::SeriesWindow { .. } => "SeriesWindow",
             Kind::SeriesLabels { .. } => "SeriesLabels",
             Kind::SeriesBinary { .. } => "SeriesBinary",
+            Kind::SeriesHistogramQuantile { .. } => "SeriesHistogramQuantile",
             Kind::Project(_) => "Project",
             Kind::Filter(_) => "Filter",
             Kind::Limit { .. } => "Limit",
@@ -352,7 +359,7 @@ impl PhysicalOperator<Batch, Schema> for Operator {
             Kind::CurrentSeries { .. } => current_series::execute(self, inputs, context),
             Kind::ScopeTimestamp { .. } => scope_timestamp::execute(self, inputs, context),
             Kind::SeriesWindow { .. } => series_window::execute(self, inputs, context),
-            Kind::SeriesLabels { .. } | Kind::SeriesBinary { .. } => {
+            Kind::SeriesLabels { .. } | Kind::SeriesBinary { .. } | Kind::SeriesHistogramQuantile { .. } => {
                 series_labels::execute(self, inputs, context)
             }
             Kind::Filter(_) => filter::execute(self, inputs, context),
