@@ -353,37 +353,6 @@ Whole-plan selection chooses compatible alternatives across those targets;
 construct a complete Post-ASAP DAG. Sharing each target's candidate set avoids the
 Cartesian-product expansion of complete DAGs and preserves shared nodes.
 
-### Output layers
-
-The [Planner and deployment layering](../proposals/planner-backend-layering.md)
-proposal places `PlanSpace` in a longer pipeline, from what to compute to how
-to run it. Main implements layers 0 and 1; the others are in open pull
-requests. The proposal's [DAG names](../proposals/planner-backend-layering.md#dag-names)
-table maps each design name to its current type on main.
-
-| Layer | Output | Decides |
-|---|---|---|
-| 0. Frontends | `CandidatePreASAPDAGs` (today one `QueryExpr` root per entry) | Parse and lower PromQL, SQL, or MetricsQL; reject unsupported semantics. |
-| 1. Logical Post-ASAP | `CandidatePostASAPDAGs` (today `PlanSpace`) | What to compute: summary families, rewrites, and exact candidates. No placement. |
-| 2. Summary maintenance lifecycle | `CandidatePostASAPDAGs` with timing | `Ephemeral`, `Prepared`, `Shared`, or `ContinuouslyMaintained` per unique summary state; each admissible assignment sets node timing, window framework, and retention. The only source of timing. |
-| 3. Physical compilation | `CandidatePhysicalDAGs` | Compile operators and kernels, then cut by timing into precompute and query DAGs with typed input contracts. |
-| 4–5. Deployment | Deployment-owned | Price lifecycle assignments and summary families with its own costs; select, bind, and execute. |
-
-#### Candidate generation
-
-Every layer outputs all legal candidates:
-
-`CandidatePreASAPDAGs → CandidatePostASAPDAGs → CandidatePostASAPDAGs with timing → CandidatePhysicalDAGs`
-
-No intermediate layer selects a winner. A frontend may produce a singleton set
-for an unambiguous query. Candidate sets may be compact or enumerated lazily,
-and rejected candidates keep their reasons. The [selection
-workflows](#workflows) below, and `PlanOutput` from `e2e_plan` or `optimize`,
-are opt-in selection helpers, not stages of this pipeline. A deployment that
-prices candidates itself enumerates the candidate space rather than reading a
-selected result; in particular it keeps every summary-family candidate, such as
-KLL and DDSketch, and compares them with its whole-plan quotes.
-
 ## Workflows
 
 All paths start by lowering the workload and searching for candidates:
