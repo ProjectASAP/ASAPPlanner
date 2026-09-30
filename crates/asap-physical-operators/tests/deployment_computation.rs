@@ -516,3 +516,30 @@ fn per_series_vector_matching_follows_on_and_ignoring() {
         assert!(error.contains("many-to-one"), "{error}");
     }
 }
+
+// Current-series sums and averages are compensated like Prometheus, and an
+// overflowing running sum does not turn the average into +Inf.
+#[test]
+fn population_sums_and_averages_are_compensated() {
+    let cancel: &[Sample] = &[
+        ("m", "api", "a", 50_000, 1e100),
+        ("m", "api", "b", 50_000, 1.),
+        ("m", "api", "c", 50_000, -1e100),
+    ];
+    let huge: &[Sample] = &[
+        ("m", "api", "a", 50_000, 1.7e308),
+        ("m", "api", "b", 50_000, 1.7e308),
+    ];
+    for (query, samples, expected) in [
+        ("sum by (job) (m)", cancel, 1.),
+        ("avg by (job) (m)", cancel, 1. / 3.),
+        ("avg by (job) (m)", huge, 1.7e308),
+    ] {
+        let dag = population_dag(query);
+        assert_eq!(
+            run(&dag, samples, 60_000).unwrap(),
+            reference(&[("api", expected)]),
+            "{query}"
+        );
+    }
+}

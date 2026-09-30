@@ -92,10 +92,14 @@ pub(in crate::operators) fn window_value(
         AggIntent::Count { .. } => Some(Value::Int64(
             i64::try_from(points.len()).map_err(|_| Error::Invalid("count overflow".into()))?,
         )),
-        AggIntent::Sum { .. } => Some(Value::Float64(points.iter().map(|p| p.1).sum())),
-        AggIntent::Avg { .. } => Some(Value::Float64(
-            points.iter().map(|p| p.1).sum::<f64>() / points.len() as f64,
-        )),
+        AggIntent::Sum { .. } | AggIntent::Avg { .. } => {
+            let values = points.iter().map(|p| p.1).collect::<Vec<_>>();
+            Some(Value::Float64(if matches!(intent, AggIntent::Sum { .. }) {
+                super::promql_sum(0., &values)
+            } else {
+                super::promql_avg(&values)
+            }))
+        }
         AggIntent::Min { .. } => Some(Value::Float64(points.iter().fold(f64::NAN, |a, p| {
             if a.is_nan() || p.1 < a {
                 p.1
