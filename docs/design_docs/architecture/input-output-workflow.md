@@ -52,7 +52,7 @@ precompute and query DAGs. Planner does not install a deployment plan.
 PlanningWorkload + frontend dependencies + planning models/evidence
                         |
                         v
-         Frontends -> all candidate PreASAPDAGs
+         Frontends -> CandidatePreASAPDAGs
                         |
                         v
         CandidatePostASAPDAGs
@@ -387,7 +387,7 @@ names do not imply that the Rust APIs have been renamed.
 
 | Layer | Form | Decides |
 |---|---|---|
-| 0. Frontends | All candidate `PreASAPDAG`s | Parse and lower PromQL, SQL, or MetricsQL; reject unsupported semantics such as PromQL `fill`. |
+| 0. Frontends | `CandidatePreASAPDAGs` | Parse and lower PromQL, SQL, or MetricsQL; reject unsupported semantics such as PromQL `fill`. |
 | 1. Logical Post-ASAP | `CandidatePostASAPDAGs` | What to compute: summary families, rewrites, and exact candidates. No placement. `PlanOutput` is an optional library-selected logical result; deployments can enumerate candidates themselves. |
 | 2. Summary maintenance lifecycle | Lifecycle choices per unique summary state and maintained population → `CandidatePostASAPDAGs` with timing | `Ephemeral`, `Prepared`, `Shared`, or `ContinuouslyMaintained`. Each admissible assignment produces a candidate with node timing, window framework, and retention; this layer is the only source of timing. |
 | 3. Physical compilation | `CandidatePhysicalDAGs` | Compile operators and kernels once, then cut by timing into precompute and query DAGs with typed `InputContracts`. Ingestion-time Binary lowering requires matching compile-time timing. |

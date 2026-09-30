@@ -19,7 +19,7 @@ operators.
                        │
 ┌───────────────────────── ASAPPlanner ────────────────────────────┐
 │ 0. Frontends                                                     │
-│    Parse + lower -> all candidate PreASAPDAGs                    │
+│    Parse + lower -> CandidatePreASAPDAGs                         │
 │    Reject unsupported constructs, such as PromQL fill.           │
 │                      │                                           │
 │ 1. Logical Post-ASAP (asap-aware-mapping)                        │
@@ -51,7 +51,7 @@ operators.
 
 Every Planner layer outputs all legal candidates represented at that stage:
 
-`candidate PreASAPDAGs → CandidatePostASAPDAGs → CandidatePostASAPDAGs with timing → CandidatePhysicalDAGs`
+`CandidatePreASAPDAGs → CandidatePostASAPDAGs → CandidatePostASAPDAGs with timing → CandidatePhysicalDAGs`
 
 No intermediate layer chooses a winning candidate. Frontend lowering can
 produce a singleton candidate set for an unambiguous query; it need not invent
@@ -76,6 +76,7 @@ passed between layers.
 | Design name | Meaning | Current Rust representation |
 |---|---|---|
 | `PreASAPDAG` | Frontend-lowered query semantics before summary rewrites | A graph rooted at `Rc<QueryExpr>` |
+| `CandidatePreASAPDAGs` | All legal frontend-lowered `PreASAPDAG` candidates; an unambiguous query can produce a singleton collection | A collection of graphs rooted at `Rc<QueryExpr>`; no public Rust collection type named `CandidatePreASAPDAGs` yet |
 | `PostASAPDAG` | A logical computation candidate; the lifecycle assignment adds timing to this same logical graph | A graph rooted at `Rc<SummaryNode>`; exported as `PostAsapDag` for physical compilation |
 | `CandidatePostASAPDAGs` | All legal logical `PostASAPDAG` candidates, represented compactly rather than necessarily materialized as a list; lifecycle enumeration produces their candidates with timing | `CandidatePostASAPDAGs<Id>` (renamed from the former candidate-space API in [#508](https://github.com/ProjectASAP/ASAPPlanner/pull/508)) |
 | `PhysicalDAG` | Compiled operators and kernels with typed inputs | `CompiledPhysicalDag` |
@@ -93,7 +94,7 @@ for one member of `CandidatePhysicalDAGs`, not an additional layer output.
 
 | Layer | Owns | Does not own |
 |---|---|---|
-| 0. Frontends | Language semantics and lowering into candidate `PreASAPDAG`s. A construct that cannot be represented faithfully is rejected, never ignored (for example PromQL `fill`). | Summaries, placement |
+| 0. Frontends | Language semantics and lowering into `CandidatePreASAPDAGs`. A construct that cannot be represented faithfully is rejected, never ignored (for example PromQL `fill`). | Summaries, placement |
 | 1. Logical Post-ASAP | `CandidatePostASAPDAGs`: all legal logical candidates, including summary families, exact rewrites, compositions, and series-identity typing. | Placement |
 | 2. Summary maintenance lifecycle | For each unique summary state and maintained population, the lifecycle choices (`Ephemeral`, `Prepared`, `Shared`, `ContinuouslyMaintained`) and their costs under a caller-supplied cost model. Each assignment sets every node's execution timing, window framework and retention, producing `CandidatePostASAPDAGs` with timing. | The cost values themselves |
 | 3. Physical compilation | All computation: value operations, aggregation, PromQL functions and subqueries, vector matching, comparisons and set operators, `histogram_quantile`, summary build, merge and estimate, sort, limit, joins. Compiles `CandidatePostASAPDAGs` with timing into `CandidatePhysicalDAGs`, including each candidate's timing cuts; it does not select a winner. | Raw ingestion, pane construction, storage formats, decoding persisted state, scheduling |
