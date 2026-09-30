@@ -164,8 +164,8 @@ Fallback and in query-time `Binary` nodes, following Prometheus'
 - Range functions other than `last_over_time` now drop `__name__` in the
   Fallback. Series whose label sets become equal are an error, as in
   Prometheus. Vector-scalar results are checked the same way. Inside a
-  subquery the inner function also drops the name, without that check,
-  because each series repeats across steps.
+  subquery the inner function also drops the name and checks identities
+  separately at each evaluation timestamp.
 
 Binary result schemas now include labels contributed by `or`, `group_right`,
 and `group_left`, including a right-side series identity when needed. Thus
@@ -176,7 +176,7 @@ and `group_left`, including a right-side series identity when needed. Thus
 |---|---|
 | 1 | Comparisons, `bool`, set operators, `group_left`/`group_right`, `scalar()` operands, and literals over aggregates whose value has another name, such as `sum by (job) (a) * 2`. Still Partial. |
 | 5 | Grouped `Binary` rows use the same operator instead of a relational join. A duplicate match group is now an error instead of a cross product. |
-| 7 | Fallback, grouped `Binary`, and per-series `bool` comparisons. Per-series filter comparisons and set operators on `Binary` nodes fail closed: stored readouts keep `__name__` even where the range function drops it. Now Partial. |
+| 7 | Fallback, grouped `Binary`, and per-series comparisons and sets. Temporal stored readouts drop `__name__` before matching, including exact Count conversion, and reject duplicate output identities. |
 
 Totals after this change: 20 Supported, 5 Partial, 4 Missing, 2 Backend.
 
@@ -190,7 +190,7 @@ An argument whose output provably lacks `le`, such as
 `sum by (job) (rate(x_bucket[5m]))`, is rejected at lowering. Prometheus
 returns an empty vector for it. Candidate search keeps the classic form as one
 exact `KeepPreAsap` subtree for every accuracy target; it has no sketch
-candidate. `histogram_quantiles` lowers each branch the same way, but the
+candidate. `histogram_quantiles` lowers each branch the same way; the
 Fallback compiler accepts its `Concat` of relabeled branches and rejects
 duplicate output label sets. Nested aggregation, such as
 `sum(histogram_quantile(…))`, resolves the renamed sample-value column.
@@ -205,26 +205,25 @@ In order of backend usage:
    - Other scalar functions as operands.
    - Subquery operands other than one per-series function; implicit
      subquery resolution, which is a deployment default.
-   - Other functions, such as `deriv`, `predict_linear`,
-     `stddev_over_time`, `absent`, and math functions.
+   - Other functions, such as `stddev_over_time`, `absent`, and math functions.
    After these shapes are covered, the backend can delete rows 28 and 30.
-2. Row 7: per-series readouts must drop `__name__` where their range
-   function does, and check for equal label sets. Then filter comparisons
-   and set operators over them can compile.
-3. Rows 25 and 27: constant weights and `EntityIdentity` items for precompute
+2. Rows 25 and 27: constant weights and `EntityIdentity` items for precompute
    `SummaryAgg`.
-4. Row 16: a label-map sketch-state readout, the counterpart of
+3. Row 16: a label-map sketch-state readout, the counterpart of
    `compile_exact_readout`, and MetricsQL `__name__` retention rules.
-5. Row 20: summary join, subtract, and delete.
-6. An equal-label-set check for inner subquery functions, per step.
+4. Row 20: summary join, subtract, and delete.
 
 `fill`, `fill_left`, and `fill_right` matching modifiers are rejected by the
 frontend (#494); they are never silently ignored.
 
 ## Additional scalar and persistence coverage
 
+`deriv` and `predict_linear` use per-series linear regression. Prediction
+uses the evaluation instant even when an offset or `@` selects older samples.
+Inner subquery functions validate label-set uniqueness per step.
+
 `time()` reads the run's evaluation timestamp in seconds and composes with
-scalar and vector operands, including `vector(time())`. Both logical literals
+scalar and vector operands, including `vector(time())`. Logical literals, floating intent parameters,
 and physical values encode NaN and infinities as explicit JSON strings instead
 of losing them as `null`; finite values remain numbers. Deployments continue
 to own outer document versioning. The exact Sum payload is independently tagged
