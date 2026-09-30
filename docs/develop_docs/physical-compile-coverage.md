@@ -74,13 +74,49 @@ Totals at #475: 11 Supported, 4 Partial, 14 Missing, 2 Backend.
 
 Totals after this change: 17 Supported, 4 Partial, 8 Missing, 2 Backend.
 
+## Covered by PromQL fallback compilation
+
+`compile` now lowers a `Fallback{QueryExpr}` node from its typed expression.
+The expression must read at most one selector, realized with
+`promql_rows::with_series_identity`. The deployment supplies that selector's raw
+rows at `promql_fallback::raw_series_input(node)`, with the schema returned by
+`promql_fallback::raw_series`. The node's own ID still names its output, so a
+deployment may instead supply the whole result, for example from an external
+exact engine. A Fallback that reads no selector, such as `vector(1)`, needs no
+input.
+
+`Operator::series_window` evaluates each series at the query time, or at each
+subquery step, over the left-open window `(t - offset - range, t - offset]`.
+Instant selection takes the latest sample and omits the series if that sample is
+a stale marker. Range functions ignore stale markers. The raw rows must cover
+every window the node evaluates; `raw_series` documents the subquery extent.
+A subquery has at most 100000 steps. Output rows keep the full series identity;
+the query adapter still applies PromQL's metric-name rules. A bare selector
+consumed by another node, such as a per-entity summary, remains raw range rows
+and is not compiled as instant selection.
+
+| Row | Change |
+|---|---|
+| 1 | Supported shapes: selectors with `offset`; `rate`, `increase`, `delta`, and `sum`/`avg`/`min`/`max`/`count_over_time`; `by` aggregation; `sort`; `topk`/`limit`; `scalar()`; `vector(literal)`; arithmetic with one literal. Now Partial. |
+| 9 | `scalar()` compiles to `VectorToScalar`. |
+| 11 | Range functions over the raw selector rows. |
+| 12 | `f(sel[R:S])` and `f(g(sel[r])[R:S])`, with subquery `offset`, evaluate on the aligned step grid. The frontend now retains subquery `offset`/`@` as a `TimeShift`; it previously dropped them. Now Partial. |
+
+Totals after this change: 19 Supported, 5 Partial, 5 Missing, 2 Backend.
+
 ## Remaining
 
 In order of backend usage:
 
-1. Row 1 and rows 9–12: lower PromQL-shaped `Fallback{QueryExpr}` subtrees
-   (range functions over matrices, `scalar()`, `histogram_quantile`, `sort`,
-   subquery grids). After that, rows 28 and 30 can be deleted from the backend.
+1. Rows 1, 10, and 12, the remaining `Fallback` shapes:
+   - Subtrees with more than one selector, such as vector-vector binaries.
+   - `histogram_quantile`: the frontend emits `by ()` grouping with no
+     output labels. The IR must group `without (le)` and keep the labels.
+   - Subquery operands other than one per-series function; implicit
+     subquery resolution, which is a deployment default.
+   - `@` on selectors and subqueries; `without` grouping; `irate`,
+     `changes`, and other range functions.
+   After these shapes are covered, the backend can delete rows 28 and 30.
 2. Row 7: comparison filters and `bool` comparisons. This needs `return_bool`
    in the `Binary` payload. `compile` currently rejects comparisons.
 3. Row 5 for per-series rows: matching needs a metric-name-free series
