@@ -7,9 +7,9 @@ use asap_types::pre_asap::{AggIntent, PreASAPNode};
 use asap_types::resources::CacheProfile;
 
 use crate::analytical_cost::{
-    estimate_physical_dag_comparison, AnalyticalCostError,
-    EvidenceBackedPhysicalDag as BoundPhysicalDAG, PhysicalDagComparisonEstimate,
-    PhysicalDagEstimateRequest, PhysicalNodeEvidence, ResourceCalibration,
+    estimate_physical_dag_comparison, AnalyticalCostError, EvidenceBackedPhysicalDag,
+    PhysicalDagComparisonEstimate, PhysicalDagEstimateRequest, PhysicalNodeEvidence,
+    ResourceCalibration,
 };
 use crate::cost_model::{Cost, CostModel, DefaultCostModel};
 use crate::physical_operator_statistics::ComparisonScope;
@@ -59,7 +59,7 @@ pub trait PlannerPhysicalPlanProvider {
         snapshot: &PhysicalEvidenceSnapshot,
         summary: &Rc<PostASAPNode>,
         target: &TargetSubDAG<'_>,
-    ) -> Result<BoundPhysicalDAG, AnalyticalCostError>;
+    ) -> Result<EvidenceBackedPhysicalDag, AnalyticalCostError>;
 }
 
 /// Dimensional comparison retained for explanations and verification.
@@ -94,7 +94,7 @@ struct CachedTargetEvidence {
     root: Rc<PreASAPNode>,
     consumer_count: usize,
     snapshot: PhysicalEvidenceSnapshot,
-    raw: BoundPhysicalDAG,
+    raw: EvidenceBackedPhysicalDag,
 }
 
 impl<'a> PhysicalPlanCostModel<'a> {
@@ -124,7 +124,7 @@ impl<'a> PhysicalPlanCostModel<'a> {
     fn target_evidence(
         &self,
         target: &TargetSubDAG<'_>,
-    ) -> Result<(PhysicalEvidenceSnapshot, BoundPhysicalDAG), AnalyticalCostError> {
+    ) -> Result<(PhysicalEvidenceSnapshot, EvidenceBackedPhysicalDag), AnalyticalCostError> {
         if let Some(cached) = self.target_evidence.borrow().iter().find(|cached| {
             Rc::ptr_eq(&cached.root, target.root) && cached.consumer_count == target.consumer_count
         }) {
@@ -469,7 +469,7 @@ mod tests {
             }
         }
 
-        fn summary_dag(&self, scope: &ComparisonScope) -> BoundPhysicalDAG {
+        fn summary_dag(&self, scope: &ComparisonScope) -> EvidenceBackedPhysicalDag {
             let scan_statistics = scan_statistics(self.candidate_scan_bytes, edge(100, 800));
             let aggregate_statistics = aggregate_statistics(edge(100, 800), edge(1, 8));
             let read_statistics = pass_through_statistics(edge(1, 8));
@@ -499,7 +499,7 @@ mod tests {
                     },
                 ),
             ]);
-            BoundPhysicalDAG {
+            EvidenceBackedPhysicalDag {
                 nodes: vec![
                     PhysicalDagNode {
                         id: "candidate-scan".into(),
@@ -584,7 +584,7 @@ mod tests {
             snapshot: &PhysicalEvidenceSnapshot,
             _summary: &Rc<PostASAPNode>,
             _target: &TargetSubDAG<'_>,
-        ) -> Result<BoundPhysicalDAG, AnalyticalCostError> {
+        ) -> Result<EvidenceBackedPhysicalDag, AnalyticalCostError> {
             assert_eq!(snapshot.version, "test-snapshot-1");
             self.summary_available
                 .then(|| self.summary_dag(&snapshot.scope))
@@ -914,7 +914,7 @@ mod tests {
                 snapshot: &PhysicalEvidenceSnapshot,
                 summary: &Rc<PostASAPNode>,
                 target: &TargetSubDAG<'_>,
-            ) -> Result<BoundPhysicalDAG, AnalyticalCostError> {
+            ) -> Result<EvidenceBackedPhysicalDag, AnalyticalCostError> {
                 self.0.summary_physical_dag(snapshot, summary, target)
             }
         }
@@ -1002,7 +1002,7 @@ mod tests {
                 snapshot: &PhysicalEvidenceSnapshot,
                 summary: &Rc<PostASAPNode>,
                 target: &TargetSubDAG<'_>,
-            ) -> Result<BoundPhysicalDAG, AnalyticalCostError> {
+            ) -> Result<EvidenceBackedPhysicalDag, AnalyticalCostError> {
                 let mut dag = self.0.summary_physical_dag(snapshot, summary, target)?;
                 dag.nodes[0]
                     .source_coverage
@@ -1054,7 +1054,7 @@ mod tests {
                 _snapshot: &PhysicalEvidenceSnapshot,
                 _summary: &Rc<PostASAPNode>,
                 _target: &TargetSubDAG<'_>,
-            ) -> Result<BoundPhysicalDAG, AnalyticalCostError> {
+            ) -> Result<EvidenceBackedPhysicalDag, AnalyticalCostError> {
                 panic!("blank snapshot versions must fail before summary binding")
             }
         }

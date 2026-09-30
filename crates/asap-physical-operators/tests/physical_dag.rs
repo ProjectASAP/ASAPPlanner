@@ -3,7 +3,7 @@ use asap_physical_operators::{
     dag::{
         operators::{Expression, Operator, Reduction, SortKey},
         values::{Batch, Schema, Value},
-        BoundPhysicalDAG, Limits, RunContext, Scope,
+        Limits, PhysicalExecution, RunContext, Scope,
     },
     Statistic,
 };
@@ -26,7 +26,7 @@ fn schema(fields: &[(&str, DataType, bool)]) -> Schema {
         time_index: None,
     })
 }
-fn run(dag: &BoundPhysicalDAG<'_, Batch, Schema>, root: u64, scope: Scope) -> Vec<Vec<Value>> {
+fn run(dag: &PhysicalExecution<'_, Batch, Schema>, root: u64, scope: Scope) -> Vec<Vec<Value>> {
     let context = RunContext::new(
         scope,
         Limits {
@@ -85,7 +85,7 @@ fn grouped_sort_limit_across_batches() {
         .unwrap()
     })
     .collect();
-    let mut dag = BoundPhysicalDAG::default();
+    let mut dag = PhysicalExecution::default();
     dag.add(
         0,
         vec![],
@@ -122,7 +122,7 @@ fn summary_construction_merge_and_readout_at_both_phases() {
     let family = SummaryFamilyType::ExactAggregate(ExactKind::Sum, ExactParams::Sum);
     let build = Operator::summary_build(schema.clone(), family, 0, None, vec![]).unwrap();
     let state = build.schema();
-    let mut dag = BoundPhysicalDAG::default();
+    let mut dag = PhysicalExecution::default();
     dag.add(0, vec![], Operator::source(schema, batches).unwrap())
         .unwrap();
     dag.add(1, vec![0], build).unwrap();
@@ -181,7 +181,7 @@ fn diamond_semijoin_preserves_left_values_and_multiplicity() {
         ),
     )
     .unwrap();
-    let mut dag = BoundPhysicalDAG::default();
+    let mut dag = PhysicalExecution::default();
     dag.add(
         0,
         vec![],
@@ -210,7 +210,7 @@ fn exact_integer_and_empty_extrema() {
         vec![("sum".into(), Reduction::Sum(0))],
     )
     .unwrap();
-    let mut dag = BoundPhysicalDAG::default();
+    let mut dag = PhysicalExecution::default();
     let value = 9_007_199_254_740_993;
     dag.add(
         0,
@@ -228,7 +228,7 @@ fn exact_integer_and_empty_extrema() {
     .unwrap();
     dag.add(1, vec![0], aggregate).unwrap();
     assert!(matches!(run(&dag,1,query())[0][0],Value::Int64(v) if v==value+2));
-    let mut empty = BoundPhysicalDAG::default();
+    let mut empty = PhysicalExecution::default();
     empty
         .add(0, vec![], Operator::source(schema.clone(), vec![]).unwrap())
         .unwrap();
@@ -255,7 +255,7 @@ fn scalar_negation_and_vector_conversion() {
     )
     .unwrap();
     let convert = Operator::vector_to_scalar(project.schema(), 0).unwrap();
-    let mut dag = BoundPhysicalDAG::default();
+    let mut dag = PhysicalExecution::default();
     dag.add(0, vec![], scalar).unwrap();
     dag.add(1, vec![0], project).unwrap();
     dag.add(2, vec![1], convert).unwrap();
@@ -266,7 +266,7 @@ fn scalar_negation_and_vector_conversion() {
         Box::new(Expression::Column(0)),
     );
     let filter = Operator::filter(scalar.schema(), predicate).unwrap();
-    let mut dag = BoundPhysicalDAG::default();
+    let mut dag = PhysicalExecution::default();
     dag.add(0, vec![], scalar).unwrap();
     dag.add(1, vec![0], filter).unwrap();
     assert!(run(&dag, 1, query()).is_empty());
@@ -315,7 +315,7 @@ fn kll_raw_partial_and_precomputed_are_native_dags() {
     let build = Operator::summary_build(input.clone(), family, 0, None, vec![]).unwrap();
     let state = build.schema();
     let build_range = |start: u32, end: u32| {
-        let mut dag = BoundPhysicalDAG::default();
+        let mut dag = PhysicalExecution::default();
         let batch = Batch::try_new(
             input.clone(),
             (start..end)
@@ -343,7 +343,7 @@ fn kll_raw_partial_and_precomputed_are_native_dags() {
     let prefix = build_range(0, 64);
     let complete = build_range(0, 128);
     let query_plan = |stored: Option<Vec<Vec<Value>>>, raw_start: Option<u32>| {
-        let mut dag = BoundPhysicalDAG::default();
+        let mut dag = PhysicalExecution::default();
         let mut states = vec![];
         if let Some(rows) = stored {
             dag.add(
@@ -432,7 +432,7 @@ fn exact_state_and_family_validation() {
         family: family.clone(),
         state: Arc::new(acc),
     };
-    let mut dag = BoundPhysicalDAG::default();
+    let mut dag = PhysicalExecution::default();
     dag.add(
         0,
         vec![],
@@ -580,7 +580,7 @@ fn empty_exact_count_is_an_integer_state_readout() {
         ),
     )
     .unwrap();
-    let mut dag = BoundPhysicalDAG::default();
+    let mut dag = PhysicalExecution::default();
     dag.add(0, vec![], Operator::source(input, vec![]).unwrap())
         .unwrap();
     dag.add(1, vec![0], build).unwrap();
@@ -663,7 +663,7 @@ fn source_batches_must_match_the_bound_schema() {
 #[test]
 fn extrema_preserve_numeric_values_in_the_presence_of_nan() {
     let input = schema(&[("v", DataType::Float64, false)]);
-    let mut dag = BoundPhysicalDAG::default();
+    let mut dag = PhysicalExecution::default();
     dag.add(
         0,
         vec![],
@@ -880,7 +880,7 @@ fn planner_expressions_preserve_collection_and_nullable_types() {
         )],
     )
     .unwrap();
-    let mut dag = BoundPhysicalDAG::default();
+    let mut dag = PhysicalExecution::default();
     dag.add(
         0,
         vec![],
@@ -954,7 +954,7 @@ fn native_relational_join_kinds_preserve_unmatched_rows() {
                 ("right", DataType::Int64, true),
             ])
         };
-        let mut dag = BoundPhysicalDAG::default();
+        let mut dag = PhysicalExecution::default();
         for (id, rows) in [
             (
                 0,
@@ -1077,7 +1077,7 @@ fn assert_weighted_rate_topk(count_sketch: bool) {
         ("score", DataType::Float64, false),
     ]);
     let readout = Operator::keyed_readout(build.schema(), 1, 8, output.clone()).unwrap();
-    let mut dag = BoundPhysicalDAG::default();
+    let mut dag = PhysicalExecution::default();
     dag.add(
         0,
         vec![],

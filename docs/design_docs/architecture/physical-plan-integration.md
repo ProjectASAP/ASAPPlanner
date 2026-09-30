@@ -128,7 +128,7 @@ select each concrete implementation and provide all edges, resource facts,
 multiplicities, source ownership, and stable physical identities. The planner
 fails closed when any reachable `SummaryExpr` node lacks that binding.
 
-The raw/query portion of a streaming comparison remains a `BoundPhysicalDAG` using
+The raw/query portion of a streaming comparison remains a `PhysicalExecution` using
 the canonical `PhysicalOperator` and `OperatorStatistics` pairing. Summary
 evidence is kept separate only where lifecycle-driven update, retention, and
 expiration multiplicities require facts beyond the query-DAG

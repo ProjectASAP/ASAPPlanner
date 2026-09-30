@@ -4,7 +4,7 @@ use crate::operators::ReadoutQuery;
 use crate::summary_kernels::exact::ExactReadout;
 use crate::{
     operators::{Expression, Operator, Reduction, SortKey},
-    plan::{BoundPhysicalDAG, Boundedness, Emission, NodeId, PhysicalOperator, PlanProperties},
+    plan::{Boundedness, Emission, NodeId, PhysicalExecution, PhysicalOperator, PlanProperties},
     values::{Batch, Schema},
     Error,
 };
@@ -114,7 +114,7 @@ pub fn bind<'a>(
     dag: &PostASAPDAGTransport,
     sources: BTreeMap<NodeId, Source<'a>>,
     roots: &[NodeId],
-) -> Result<BoundPhysicalDAG<'a, Batch, Schema>, Error> {
+) -> Result<PhysicalExecution<'a, Batch, Schema>, Error> {
     let inputs = sources
         .iter()
         .map(|(&id, source)| (id, InputContract::from_source(source.as_ref())))
@@ -128,7 +128,7 @@ pub fn bind_with_data_sources<'a>(
     mut sources: BTreeMap<NodeId, Source<'a>>,
     roots: &[NodeId],
     data_sources: &crate::sources::DataSources,
-) -> Result<BoundPhysicalDAG<'a, Batch, Schema>, Error> {
+) -> Result<PhysicalExecution<'a, Batch, Schema>, Error> {
     // Only resolve scans reachable below the selected input boundaries.
     let mut pending = roots.to_vec();
     let mut seen = BTreeSet::new();

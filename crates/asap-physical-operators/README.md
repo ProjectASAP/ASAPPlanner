@@ -5,7 +5,7 @@ query time execution. The library requires neither backend engine, a server,
 a storage implementation, Arrow nor DataFusion. DataFusion informed the design;
 it is not the execution framework.
 
-`plan::BoundPhysicalDAG` binds typed operator inputs to node IDs. Each execution starts
+`plan::PhysicalExecution` binds typed operator inputs to node IDs. Each execution starts
 one producer per reachable node, shares output batches among its consumers, and
 bounds buffering. Dropping one consumer does not cancel other consumers. A
 `RunContext` carries query or ingestion scope, cancellation and byte accounting.
@@ -24,7 +24,7 @@ use asap_physical_operators::{
     expressions::Expression,
     operators::Operator,
     values::Value,
-    plan::BoundPhysicalDAG,
+    plan::PhysicalExecution,
     runtime::{Limits, RunContext, Scope},
 };
 use asap_physical_operators::planner::pre_asap::DataType;
@@ -34,7 +34,7 @@ let source = Operator::scalar(Value::Int64(7), DataType::Int64)?;
 let negate = Operator::project(source.schema(), vec![
     ("value".into(), Expression::Negate(Box::new(Expression::Column(0)))),
 ])?;
-let mut plan = BoundPhysicalDAG::default();
+let mut plan = PhysicalExecution::default();
 plan.add(0, vec![], source)?;
 plan.add(1, vec![0], negate)?;
 let run = RunContext::new(
@@ -91,7 +91,7 @@ state; operators own grouping.
 
 A source must declare `Boundedness::Bounded` to feed a blocking operator.
 The default for a custom raw source is `Unknown`; query or ingestion scope alone
-does not promise that its cursor ends. `BoundPhysicalDAG::properties` validates these
+does not promise that its cursor ends. `PhysicalExecution::properties` validates these
 requirements before any source starts and returns boundedness and emission mode
 for every reachable node. The memory connector declares finite input. Custom
 physical sources expose the same facts through `PhysicalOperator::properties`.

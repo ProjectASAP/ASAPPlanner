@@ -42,17 +42,21 @@ pub(crate) struct Node<'a, V, S> {
     pub(crate) inputs: Vec<NodeId>,
     pub(crate) operator: Box<dyn PhysicalOperator<V, S> + 'a>,
 }
-pub struct BoundPhysicalDAG<'a, V, S> {
+/// Execution handle: a graph of runnable operators with their inputs connected.
+/// [`PhysicalDAG::instantiate`](crate::physical_planner::PhysicalDAG::instantiate)
+/// derives one from a compiled `PhysicalDAG` by binding runtime sources; it
+/// lives for one execution and is never persisted or compared as a plan.
+pub struct PhysicalExecution<'a, V, S> {
     pub(crate) nodes: BTreeMap<NodeId, Node<'a, V, S>>,
 }
-impl<V, S> Default for BoundPhysicalDAG<'_, V, S> {
+impl<V, S> Default for PhysicalExecution<'_, V, S> {
     fn default() -> Self {
         Self {
             nodes: BTreeMap::new(),
         }
     }
 }
-impl<'a, V: 'a, S: Clone + PartialEq + Debug + 'a> BoundPhysicalDAG<'a, V, S> {
+impl<'a, V: 'a, S: Clone + PartialEq + Debug + 'a> PhysicalExecution<'a, V, S> {
     pub fn add(
         &mut self,
         id: NodeId,
@@ -79,7 +83,7 @@ impl<'a, V: 'a, S: Clone + PartialEq + Debug + 'a> BoundPhysicalDAG<'a, V, S> {
     /// Derive properties while checking topology and schemas, before starting sources.
     pub fn properties(&self, roots: &[NodeId]) -> Result<BTreeMap<NodeId, PlanProperties>, Error> {
         fn visit<V, S: Clone + PartialEq + Debug>(
-            dag: &BoundPhysicalDAG<'_, V, S>,
+            dag: &PhysicalExecution<'_, V, S>,
             id: NodeId,
             active: &mut BTreeSet<NodeId>,
             done: &mut BTreeMap<NodeId, (usize, PlanProperties)>,

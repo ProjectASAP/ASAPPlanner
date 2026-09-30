@@ -1,7 +1,7 @@
 //! Blocking operators enforce resources before returning their first batch.
 use asap_physical_operators::{
     operators::Operator,
-    plan::{BoundPhysicalDAG, PhysicalOperator},
+    plan::{PhysicalExecution, PhysicalOperator},
     runtime::{Limits, RunContext, Scope},
     values::{Batch, Schema, Value},
     Error,
@@ -38,8 +38,8 @@ fn context(max_bytes: usize) -> RunContext {
     )
     .unwrap()
 }
-fn source(n: usize) -> BoundPhysicalDAG<'static, Batch, Schema> {
-    let mut dag = BoundPhysicalDAG::default();
+fn source(n: usize) -> PhysicalExecution<'static, Batch, Schema> {
+    let mut dag = PhysicalExecution::default();
     dag.add(
         0,
         vec![],
@@ -150,7 +150,7 @@ fn cooperative_sort_preserves_ties_across_chunks() {
             .collect(),
     )
     .unwrap();
-    let mut dag = BoundPhysicalDAG::default();
+    let mut dag = PhysicalExecution::default();
     dag.add(0, vec![], Operator::source(schema(2), vec![batch]).unwrap())
         .unwrap();
     dag.add(
@@ -201,7 +201,7 @@ fn weighted_summary_build_yields_within_a_batch() {
         ],
         time_index: None,
     });
-    let mut sources = BoundPhysicalDAG::default();
+    let mut sources = PhysicalExecution::default();
     let batch = Batch::try_new(
         input.clone(),
         (0..1500)

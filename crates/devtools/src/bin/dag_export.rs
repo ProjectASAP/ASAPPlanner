@@ -55,7 +55,7 @@ use std::rc::Rc;
 use std::time::Instant;
 
 use asap_aware_mapping::analytical_cost::{
-    cache_hit_ratios, AnalyticalCostError, EvidenceBackedPhysicalDag as BoundPhysicalDAG,
+    cache_hit_ratios, AnalyticalCostError, EvidenceBackedPhysicalDag as PhysicalExecution,
     PhysicalNodeEvidence, ResourceCalibration, ANALYTICAL_COST_MODEL_VERSION,
 };
 #[cfg(test)]
@@ -188,7 +188,7 @@ enum CandidatePhysicalEvidence {
     Summary {
         plan: serde_json::Value,
         query_nodes: Vec<QueryNodePhysicalEvidence>,
-        physical_dag: BoundPhysicalDAG,
+        physical_dag: PhysicalExecution,
     },
 }
 
@@ -218,7 +218,7 @@ impl CandidatePhysicalEvidence {
         actual.is_ok_and(|actual| plan_values_match(&actual, self.plan()))
     }
 
-    fn summary_dag(&self) -> Option<&BoundPhysicalDAG> {
+    fn summary_dag(&self) -> Option<&PhysicalExecution> {
         match self {
             Self::Summary { physical_dag, .. } => Some(physical_dag),
             Self::Rewrite { .. } => None,
@@ -350,7 +350,7 @@ impl PlannerPhysicalPlanProvider for ExportPhysicalProvider<'_> {
         snapshot: &PhysicalEvidenceSnapshot,
         _summary: &Rc<PostASAPNode>,
         _target: &asap_aware_mapping::replacement::TargetSubDAG<'_>,
-    ) -> Result<BoundPhysicalDAG, AnalyticalCostError> {
+    ) -> Result<PhysicalExecution, AnalyticalCostError> {
         if snapshot.scope != self.target.scope.resolve()? {
             return Err(AnalyticalCostError::ComparisonScopeMismatch(
                 "planner evidence snapshot",
@@ -1665,7 +1665,7 @@ mod tests {
         query: &PreASAPNode,
         candidate: &ReplacementSubDAG,
         document: &PlannerCostDocument,
-    ) -> BoundPhysicalDAG {
+    ) -> PhysicalExecution {
         let model = ExportPlannerCostModel { document };
         let root = Rc::new(query.clone());
         let target = asap_aware_mapping::replacement::TargetSubDAG::new(&root);
@@ -2178,7 +2178,7 @@ mod tests {
         entries.into_inner()
     }
 
-    fn cheap_candidate_dag() -> BoundPhysicalDAG {
+    fn cheap_candidate_dag() -> PhysicalExecution {
         let coverage = test_scope().sources[0].clone();
         let statistics = OperatorStatistics::Scan {
             edges: UnaryEdgeStatistics {
@@ -2188,7 +2188,7 @@ mod tests {
             },
             source_read_bytes: 64,
         };
-        BoundPhysicalDAG {
+        PhysicalExecution {
             nodes: vec![PhysicalDagNode {
                 id: "summary-read".into(),
                 operator: PhysicalOperator::Scan,

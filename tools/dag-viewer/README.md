@@ -71,8 +71,8 @@ Load the JSON with the page's file picker. `--planner-cost-json` is a complete
 physical-evidence document: an immutable `evidence_version`, calibration, and
 target records containing the exact target `PreASAPNode` and comparison scope.
 Each exact replacement candidate owns its complete logical-node
-`PhysicalNodeEvidence`; summary candidates additionally own their bound
-`BoundPhysicalDAG`. Candidate-local evidence prevents statistics for one physical
+`PhysicalNodeEvidence`; summary candidates additionally own their
+`EvidenceBackedPhysicalDag`. Candidate-local evidence prevents statistics for one physical
 alternative from satisfying another. Candidate matching includes the complete
 exported plan, including accuracy guarantees, and never uses a hash or strategy
 name; derived floating constants allow only a one-ULP JSON round-trip tolerance.

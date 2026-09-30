@@ -285,8 +285,8 @@ impl PhysicalDAG {
     pub fn instantiate<'a>(
         &self,
         mut sources: BTreeMap<NodeId, Source<'a>>,
-    ) -> Result<BoundPhysicalDAG<'a, Batch, Schema>, Error> {
-        let mut graph = BoundPhysicalDAG::default();
+    ) -> Result<PhysicalExecution<'a, Batch, Schema>, Error> {
+        let mut graph = PhysicalExecution::default();
         for (&id, node) in &self.nodes {
             match node {
                 Node::Input(contract) => {

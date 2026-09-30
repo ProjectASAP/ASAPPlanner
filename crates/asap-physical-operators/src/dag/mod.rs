@@ -1,5 +1,5 @@
 //! Compatibility imports. New code should use plan, runtime, operators, physical_planner and sources directly.
-pub use crate::plan::{BoundPhysicalDAG, NodeId, PhysicalOperator};
+pub use crate::plan::{NodeId, PhysicalExecution, PhysicalOperator};
 pub use crate::runtime::batch_execution;
 pub use crate::runtime::{
     Input, Limits, OutputStream, Reservation, RunContext, Scope, SharedValue,

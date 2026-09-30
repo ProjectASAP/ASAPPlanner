@@ -3,7 +3,7 @@ mod physical_common;
 use asap_physical_operators::{
     operators::{Operator, ReadoutQuery},
     physical_planner::{InputContract, PhysicalDAG, Source},
-    plan::{BoundPhysicalDAG, PhysicalOperator, PlanProperties},
+    plan::{PhysicalExecution, PhysicalOperator, PlanProperties},
     runtime::{Input, Limits, OutputStream, RunContext, Scope},
     summary_kernels::datasketches_kll::DatasketchesKLLAccumulator,
     values::{Batch, Schema, Value},
@@ -224,7 +224,7 @@ fn five_panes_roundtrip_and_shared_merge_runs_once() {
         assert!((value(1) - (50 + offset * 20) as f64).abs() <= 1.);
         assert!((value(2) - (99 + offset * 20) as f64).abs() <= 1.);
         let starts = Arc::new(AtomicUsize::new(0));
-        let mut dag = BoundPhysicalDAG::default();
+        let mut dag = PhysicalExecution::default();
         dag.add(
             0,
             vec![],

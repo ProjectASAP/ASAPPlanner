@@ -1,6 +1,6 @@
 //! Per-run producer sharing, streams, backpressure and resource ownership.
 use crate::{
-    plan::{BoundPhysicalDAG, NodeId},
+    plan::{NodeId, PhysicalExecution},
     Error,
 };
 use futures::{stream::LocalBoxStream, Stream};
@@ -42,7 +42,7 @@ impl<V> SharedValue<V> {
 }
 
 pub(crate) fn execute<'r, V: 'r, S: Clone + PartialEq + Debug + 'r>(
-    dag: &'r BoundPhysicalDAG<'_, V, S>,
+    dag: &'r PhysicalExecution<'_, V, S>,
     roots: &[NodeId],
     context: RunContext,
 ) -> Result<Vec<Input<'r, V>>, Error> {
@@ -60,7 +60,7 @@ pub(crate) fn execute<'r, V: 'r, S: Clone + PartialEq + Debug + 'r>(
         }
     }
     fn build<'r, V: 'r, S: 'r>(
-        dag: &'r BoundPhysicalDAG<'_, V, S>,
+        dag: &'r PhysicalExecution<'_, V, S>,
         id: NodeId,
         context: &RunContext,
         states: &mut BTreeMap<NodeId, Rc<RefCell<Producer<'r, V>>>>,
