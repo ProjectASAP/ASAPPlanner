@@ -58,7 +58,7 @@ PlanningWorkload + frontend dependencies + planning models/evidence
         PlanSpace: candidate PostASAPDAGs
                         |
                         v
-       lifecycle assignment -> timed PostASAPDAG
+       lifecycle assignment -> PostASAPDAG with timing
                         |
                         v
        compile -> PhysicalDAG -> cut PhysicalCandidate
@@ -387,7 +387,7 @@ names do not imply that the Rust APIs have been renamed.
 |---|---|---|
 | 0. Frontends | `PreASAPDAG` | Parse and lower PromQL, SQL, or MetricsQL; reject unsupported semantics such as PromQL `fill`. |
 | 1. Logical Post-ASAP | `PlanSpace<Id>` containing candidate `PostASAPDAG`s | What to compute: summary families, rewrites, and exact candidates. No placement. `PlanOutput` is an optional library-selected logical result; deployments can enumerate candidates themselves. |
-| 2. Summary maintenance lifecycle | Lifecycle choices per unique summary state and maintained population → timed `PostASAPDAG` | `Ephemeral`, `Prepared`, `Shared`, or `ContinuouslyMaintained`. A chosen assignment sets node timing, window framework, and retention; it is the only source of timing. |
+| 2. Summary maintenance lifecycle | Lifecycle choices per unique summary state and maintained population → `PostASAPDAG` with timing | `Ephemeral`, `Prepared`, `Shared`, or `ContinuouslyMaintained`. A chosen assignment sets node timing, window framework, and retention; it is the only source of timing. |
 | 3. Physical compilation | `PhysicalDAG` → `PhysicalCandidate` | Compile operators and kernels once, then cut by timing into precompute and query DAGs with typed `InputContracts`. Ingestion-time Binary lowering requires matching compile-time timing. |
 | 4–5. Deployment | Deployment-owned | Prices lifecycle assignments with its own costs, including summary store cost; selects, binds, and executes. |
 
