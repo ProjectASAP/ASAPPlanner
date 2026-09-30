@@ -1095,10 +1095,28 @@ fn lifecycle_timing_cuts_one_compilation() {
         ] {
             let (dag, states) = lifecycle_timed_dag(query, &lifecycle);
             let frontier = frontier_from_timing(&dag).unwrap();
+            // Retained states read by a query-time consumer, or the root itself.
+            let query_time = |id: u64| {
+                dag.nodes.iter().any(|node| {
+                    u64::from(node.id.0) == id
+                        && node.output_state.timing
+                            == asap_types::post_asap::ExecutionTiming::QueryTime
+                })
+            };
             let expected_frontier = if lifecycle == SummaryMaintenanceLifecycle::Ephemeral {
                 vec![]
             } else {
                 states
+                    .iter()
+                    .copied()
+                    .filter(|state| {
+                        *state == u64::from(dag.root.0)
+                            || dag.edges.iter().any(|edge| {
+                                u64::from(edge.producer.0) == *state
+                                    && query_time(u64::from(edge.consumer.0))
+                            })
+                    })
+                    .collect()
             };
             assert_eq!(frontier, expected_frontier, "{query} {lifecycle:?}");
             let cut = cut_candidate(&compiled, &frontier).unwrap();
