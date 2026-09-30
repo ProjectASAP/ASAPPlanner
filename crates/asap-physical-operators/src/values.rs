@@ -262,8 +262,8 @@ pub(crate) use crate::capability::validate_native_family as validate_family;
 
 fn validate_state(family: &SummaryFamilyType, state: &dyn AggregateCore) -> Result<(), Error> {
     use crate::summary_kernels::{
-        datasketches_kll::DatasketchesKLLAccumulator, dd_sketch::DDSketchAccumulator,
-        exact::ExactAccumulator, hll_sketch::HllSketchAccumulator,
+        count_min_sketch::CountMinSketchAccumulator, datasketches_kll::DatasketchesKLLAccumulator,
+        dd_sketch::DDSketchAccumulator, exact::ExactAccumulator, hll_sketch::HllSketchAccumulator,
     };
     use planner_types::post_asap::SketchParams;
     validate_family(family)?;
@@ -301,6 +301,12 @@ fn validate_state(family: &SummaryFamilyType, state: &dyn AggregateCore) -> Resu
                 .as_any()
                 .downcast_ref::<HllSketchAccumulator>()
                 .is_some_and(|s| s.inner.precision == u32::from(*precision)),
+            SketchParams::Cms { width, depth } => state
+                .as_any()
+                .downcast_ref::<CountMinSketchAccumulator>()
+                .is_some_and(|s| {
+                    (s.inner.rows(), s.inner.cols()) == (*depth as usize, *width as usize)
+                }),
             _ => false,
         },
         _ => false,

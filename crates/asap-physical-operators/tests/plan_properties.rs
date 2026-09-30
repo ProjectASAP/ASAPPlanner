@@ -139,7 +139,21 @@ fn summary_capability_levels_are_distinct() {
         weight_domain: Default::default(),
     };
     assert!(validate_summary_kernel(&cms, &update, &grouping).is_ok());
-    assert!(validate_native_family(&cms).is_err());
+    // Stored Count-Min state reads only its bare count natively.
+    assert!(validate_native_family(&cms).is_ok());
+    let bare_count = SketchQuery::PointCount {
+        key: ColumnRef::SampleValue,
+        value: None,
+    };
+    assert!(validate_sketch_readout(&cms, &bare_count).is_ok());
+    assert!(validate_sketch_readout(
+        &cms,
+        &SketchQuery::PointCount {
+            key: ColumnRef::Named("host".into()),
+            value: Some("a".into()),
+        }
+    )
+    .is_err());
     let kll = SummaryFamilyType::Sketch(
         SketchKind::new(SketchAlgorithm::Kll, SketchParams::Kll { k: 128 }),
         grouping,

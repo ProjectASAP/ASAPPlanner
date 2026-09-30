@@ -305,9 +305,12 @@ fn check(
             .collect(),
         Reduction::PerEntity => vec![],
     };
-    if asap_physical_operators::capability::validate_native_family(family).is_err() {
-        // Families without a native state (e.g. plain CMS, UnivMon)
-        // are outside precompute execution; their compile must fail.
+    let stored_only = matches!(family, SummaryFamilyType::Sketch(kind, _)
+        if kind.algorithm() == &asap_types::post_asap::SketchAlgorithm::Cms);
+    if stored_only || asap_physical_operators::capability::validate_native_family(family).is_err() {
+        // Families without a native state (e.g. UnivMon), or with native
+        // stored state only (plain CMS), are outside precompute execution;
+        // their compile must fail.
         assert!(precompute::compile(dag, &[source], &[root]).is_err());
         return Err(format!("{family:?}"));
     }

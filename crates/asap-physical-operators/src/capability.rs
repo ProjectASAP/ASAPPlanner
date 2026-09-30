@@ -141,6 +141,17 @@ pub(crate) fn is_unit_sample_frequency(update: &planner_types::post_asap::Summar
 pub fn validate_native_family(family: &SummaryFamilyType) -> Result<(), Error> {
     use planner_types::post_asap::SketchAlgorithm as A;
     if let SummaryFamilyType::Sketch(kind, grouping) = family {
+        // Plain Count-Min is native as stored state only: it merges and reads
+        // its bare count, but the DAG does not build it from rows.
+        if let (A::Cms, SketchParams::Cms { width, depth }) = (kind.algorithm(), kind.params()) {
+            return if valid_matrix(*width, *depth) && grouping == &Default::default() {
+                Ok(())
+            } else {
+                Err(Error::Invalid(
+                    "invalid Count-Min dimensions or grouping strategy".into(),
+                ))
+            };
+        }
         if matches!(kind.algorithm(), A::CmsWithHeap | A::CountSketchWithHeap) {
             let (_, width, depth, _) =
                 crate::summary_kernels::weighted_frequency::WeightedFrequency::configuration(kind)?;
@@ -195,6 +206,9 @@ pub fn validate_sketch_readout(
             (A::DDSketch, _) => bare_count,
             (A::Hll, SketchQuery::Cardinality) => true,
             (A::Hll, _) => bare_count,
+            // Only count intents read a Count-Min bare count, and their
+            // updates have unit weight; the readout is typed Int64 on that basis.
+            (A::Cms, _) => bare_count,
             _ => false,
         },
         _ => false,
