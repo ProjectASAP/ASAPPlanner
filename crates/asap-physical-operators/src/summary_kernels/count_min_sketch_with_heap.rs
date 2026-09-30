@@ -14,6 +14,15 @@ impl CountMinSketchWithHeapAccumulator {
         }
     }
 
+    /// Total update weight, including items no longer retained in the top-k heap.
+    /// Deployment count readouts use the kernel rather than reconstructing matrix math.
+    pub fn total(&self) -> f64 {
+        self.inner
+            .sketch_matrix()
+            .first()
+            .map_or(0.0, |row| row.iter().sum())
+    }
+
     pub fn query_key(&self, key: &KeyByLabelValues) -> f64 {
         let key_string = key.labels.join(";");
         self.inner.estimate(&key_string)
@@ -232,6 +241,29 @@ mod tests {
             (top[0].1 - 35.0).abs() < 1e-6,
             "summed value should be 35 (10+25), got {}",
             top[0].1
+        );
+    }
+}
+
+#[cfg(test)]
+mod total_tests {
+    use super::*;
+
+    // Total mass includes evicted heap entries and accumulates across merged panes.
+    #[test]
+    fn total_keeps_weight_outside_the_heap() {
+        let mut state = CountMinSketchWithHeapAccumulator::new(2, 10, 1);
+        state.insert_value("a", 3.0);
+        state.insert_value("b", 7.0);
+        assert_eq!(state.total(), 10.0);
+        let merged = state.merge_with(&state).unwrap();
+        assert_eq!(
+            merged
+                .as_any()
+                .downcast_ref::<CountMinSketchWithHeapAccumulator>()
+                .unwrap()
+                .total(),
+            20.0
         );
     }
 }
