@@ -426,3 +426,193 @@ fn continuous_lifecycle_compiles_and_executes_spatial_kll() {
         );
     }
 }
+
+fn quantile_workload(query: &str) -> PlanningWorkload {
+    let mut workload = dashboard_workload();
+    workload.query_workload.query_batch.as_mut().unwrap()[0].query = Query(query.into());
+    workload.query_workload.repeating_queries.as_mut().unwrap()[0].query = Query(query.into());
+    workload
+}
+
+/// Precompute outputs implied by timing: ingestion-time nodes read by a
+/// query-time node, or the root when it is itself ingestion-timed.
+fn ingestion_frontier(dag: &asap_types::post_asap::PostAsapDag) -> Vec<u64> {
+    use asap_types::post_asap::ExecutionTiming::IngestionTime;
+    let timing = |id| {
+        dag.nodes
+            .iter()
+            .find(|node| node.id == id)
+            .unwrap()
+            .output_state
+            .timing
+    };
+    let mut frontier: Vec<_> = dag
+        .nodes
+        .iter()
+        .filter(|node| {
+            node.output_state.timing == IngestionTime
+                && (node.id == dag.root
+                    || dag.edges.iter().any(|edge| {
+                        edge.producer == node.id && timing(edge.consumer) != IngestionTime
+                    }))
+        })
+        .map(|node| u64::from(node.id.0))
+        .collect();
+    frontier.sort_unstable();
+    frontier
+}
+
+/// For existing PromQL fixtures, Planner's own retained lifecycle selection
+/// reproduces the timing that realization strategies assign today.
+#[test]
+fn planner_lifecycle_selection_reproduces_strategy_timing() {
+    for query in [
+        "quantile_over_time(0.99, latency[5m])",
+        "quantile(0.99, latency)",
+        "sum by(job)(rate(m[1m]))",
+    ] {
+        let plan = selected_plan(&quantile_workload(query));
+        assert!(!plan.selected_raw_recompute, "{query}");
+        assert!(plan.deployments.iter().all(|deployment| {
+            deployment
+                .summary_maintenance_lifecycle_guarantee
+                .as_ref()
+                .is_some_and(|guarantee| {
+                    guarantee.summary_maintenance_lifecycle
+                        != SummaryMaintenanceLifecycle::Ephemeral
+                })
+        }));
+        let strategy = asap_types::post_asap::compile_post_asap_dag(&plan.root).unwrap();
+        assert_eq!(plan.execution_timed_dag().unwrap(), strategy, "{query}");
+    }
+}
+
+/// An explicitly chosen lifecycle reaches physical compilation through timing:
+/// ContinuouslyMaintained puts the state in precompute, Ephemeral leaves
+/// precompute empty and reads the raw source at query time; both answer alike.
+#[test]
+fn chosen_lifecycle_timing_decides_precompute_contents() {
+    use asap_aware_mapping::enumerate_summary_maintenance_lifecycles;
+    use asap_physical_operators::{
+        physical_planner::{compile_candidate, InputContract},
+        runtime::Scope,
+        values::{Batch, Value},
+    };
+    use asap_types::{
+        post_asap::{PostAsapOperatorPayload, SummaryFamilyType},
+        pre_asap::DataType,
+    };
+    use std::{collections::BTreeMap, sync::Arc};
+
+    let workload = quantile_workload("quantile(0.99, latency)");
+    let root = selected_plan(&workload).root;
+    let mut answers = Vec::new();
+    for lifecycle in [
+        SummaryMaintenanceLifecycle::ContinuouslyMaintained,
+        SummaryMaintenanceLifecycle::Ephemeral,
+    ] {
+        let candidates = enumerate_summary_maintenance_lifecycles(
+            Rc::clone(&root),
+            WorkloadDemand::new_with_data(
+                &workload.query_workload,
+                workload.data_workload.as_ref().unwrap(),
+                &[1],
+            ),
+            NOW_MS,
+            Some(Horizon(100.)),
+            SummaryMaintenanceLifecycleCapabilities::ALL,
+            &FullyCostedRuntime,
+        )
+        .unwrap();
+        let [deployment] = candidates.deployments() else {
+            panic!("one summary state");
+        };
+        let id = deployment.post_asap_node_id;
+        let state = u64::from(id.0);
+        let dag = candidates
+            .select(&[(id, lifecycle.clone())])
+            .unwrap()
+            .execution_timed_dag()
+            .unwrap();
+        let raw = dag
+            .nodes
+            .iter()
+            .find(|node| matches!(node.payload, PostAsapOperatorPayload::Fallback { .. }))
+            .unwrap();
+        let (raw_id, schema) = (u64::from(raw.id.0), Arc::new(raw.output_schema.clone()));
+        let frontier = ingestion_frontier(&dag);
+        let candidate = compile_candidate(
+            &dag,
+            BTreeMap::from([(raw_id, InputContract::bounded(schema.clone()))]),
+            &[u64::from(dag.root.0)],
+            &frontier,
+        )
+        .unwrap();
+        let rows = (1..=100)
+            .map(|value| {
+                schema
+                    .fields
+                    .iter()
+                    .map(|field| match field.dtype {
+                        SummaryFamilyType::Plain(DataType::Float64) => {
+                            Value::Float64(f64::from(value))
+                        }
+                        SummaryFamilyType::Plain(DataType::Timestamp) => Value::Timestamp(300_000),
+                        _ => panic!("unexpected field {field:?}"),
+                    })
+                    .collect()
+            })
+            .collect();
+        let raw_batch = Batch::try_new(schema.clone(), rows).unwrap();
+        let query_scope = Scope::Query {
+            evaluation_time_ms: 300_000,
+            revision: 1,
+        };
+        let result = if lifecycle == SummaryMaintenanceLifecycle::Ephemeral {
+            assert!(frontier.is_empty());
+            assert!(candidate.precompute.is_none());
+            physical_common::execute(
+                &candidate.query,
+                BTreeMap::from([(raw_id, raw_batch)]),
+                query_scope,
+            )
+        } else {
+            assert_eq!(frontier, [state]);
+            assert_eq!(
+                candidate
+                    .materialized_outputs
+                    .keys()
+                    .copied()
+                    .collect::<Vec<_>>(),
+                [state]
+            );
+            let stored = physical_common::execute(
+                candidate.precompute.as_ref().unwrap(),
+                BTreeMap::from([(raw_id, raw_batch)]),
+                Scope::Ingestion {
+                    window_start_ms: 0,
+                    window_end_ms: 300_000,
+                    revision: 1,
+                },
+            );
+            physical_common::execute(
+                &candidate.query,
+                BTreeMap::from([(state, stored[0][0].clone())]),
+                query_scope,
+            )
+        };
+        answers.push(
+            result[0]
+                .iter()
+                .flat_map(|batch| batch.rows())
+                .flat_map(|row| row.iter())
+                .filter_map(|value| match value {
+                    Value::Float64(value) => Some(*value),
+                    _ => None,
+                })
+                .collect::<Vec<_>>(),
+        );
+    }
+    assert_eq!(answers[0], answers[1]);
+    assert_eq!(answers[0].len(), 1);
+}
