@@ -120,6 +120,24 @@ it.
 
 Totals are unchanged: 19 Supported, 5 Partial, 5 Missing, 2 Backend.
 
+## Covered by per-series arithmetic
+
+| Row | Change |
+|---|---|
+| 5 | Query-time `Binary` over rows with a series identity, such as per-series readouts of stored state, uses the Fallback's `series_labels` and `series_binary`. Examples: `avg_over_time` as stored sum/count, and `rate(a) / rate(b)`. Matching drops `__name__` and honors `on`/`ignoring` when the payload carries them. Only one-to-one arithmetic is covered; `group_left`/`group_right` stay rejected and comparisons are row 7. Now Supported. |
+| 4, 8 | A literal operand also applies to per-series rows and drops `__name__`. |
+
+Grouped `sum`/`avg`, current-series `Sum`/`Average` readouts, and
+`sum_over_time`/`avg_over_time` use Prometheus' Kahan-Neumaier summation. An
+average switches to an incremental mean once the running sum would overflow.
+The grouped path also serves SQL `SUM`/`AVG` over Float64, which are now
+compensated the same way.
+Stored exact `Sum` state still sums without compensation, because a
+compensation term would change the stored state layout. Its checked
+`avg_over_time` division therefore fails instead of returning a finite mean.
+
+Totals after this change: 20 Supported, 4 Partial, 5 Missing, 2 Backend.
+
 ## Remaining
 
 In order of backend usage:
@@ -156,11 +174,10 @@ In order of backend usage:
    After these shapes are covered, the backend can delete rows 28 and 30.
 2. Row 7: comparison filters and `bool` comparisons. This needs `return_bool`
    in the `Binary` payload. `compile` currently rejects comparisons.
-3. Row 5 for per-series rows in a `Binary` payload node: its grouped-row join
-   still rejects `$promql_series_identity`. It could reuse the Fallback's
-   `series_labels` and `series_binary` operators.
-4. Rows 25 and 27: constant weights and `EntityIdentity` items for precompute
+3. Rows 25 and 27: constant weights and `EntityIdentity` items for precompute
    `SummaryAgg`.
-5. Row 16: a label-map sketch-state readout, the counterpart of
+4. Row 16: a label-map sketch-state readout, the counterpart of
    `compile_exact_readout`, and MetricsQL `__name__` retention rules.
-6. Row 20: summary join, subtract, and delete.
+5. Row 20: summary join, subtract, and delete.
+6. Compensated stored exact `Sum` state, a state-layout change shared with the
+   backend's stored-state decoding.

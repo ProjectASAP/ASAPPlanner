@@ -622,3 +622,26 @@ fn empty_labels_and_empty_sides_match_prometheus() {
     // A non-literal scalar operand has no identity realization yet.
     assert!(promql_rows::with_series_identity(&parse("a + scalar(b)")).is_err());
 }
+
+// Sums and averages use Prometheus' Kahan-Neumaier compensation, and an
+// average whose running sum overflows switches to an incremental mean.
+#[test]
+fn sums_and_averages_are_compensated_like_prometheus() {
+    let cancel = &[("a", 10, 1e100), ("a", 20, 1.), ("a", 30, -1e100)];
+    assert_eq!(one("sum_over_time(m[1m])", cancel, 60), 1.);
+    assert_eq!(one("avg_over_time(m[1m])", cancel, 60), 1. / 3.);
+    let huge = &[("a", 10, 1.7e308), ("a", 20, 1.7e308)];
+    assert_eq!(one("avg_over_time(m[1m])", huge, 60), 1.7e308);
+    assert_eq!(one("sum_over_time(m[1m])", huge, 60), f64::INFINITY);
+    let infinite = &[("a", 10, f64::INFINITY), ("a", 20, 1.)];
+    assert_eq!(one("sum_over_time(m[1m])", infinite, 60), f64::INFINITY);
+    assert_eq!(one("avg_over_time(m[1m])", infinite, 60), f64::INFINITY);
+    let opposite = &[("a", 10, f64::INFINITY), ("a", 20, f64::NEG_INFINITY)];
+    assert!(one("sum_over_time(m[1m])", opposite, 60).is_nan());
+    assert!(one("avg_over_time(m[1m])", opposite, 60).is_nan());
+    let cancel = &[("a", 50, 1e100), ("b", 50, 1.), ("c", 50, -1e100)];
+    assert_eq!(one("sum(m)", cancel, 60), 1.);
+    assert_eq!(one("avg(m)", cancel, 60), 1. / 3.);
+    let huge = &[("a", 50, 1.7e308), ("b", 50, 1.7e308)];
+    assert_eq!(one("avg(m)", huge, 60), 1.7e308);
+}

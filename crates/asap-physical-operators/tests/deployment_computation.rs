@@ -97,8 +97,12 @@ fn raw_inputs(dag: &PostAsapDag) -> Vec<(u64, Arc<SummarySchema>, String)> {
 type Sample = (&'static str, &'static str, &'static str, i64, f64);
 
 /// Compile, round-trip, bind raw `(metric, job, instance, ts, value)` samples,
-/// and return `(job, value)` rows of the root.
-fn run(dag: &PostAsapDag, samples: &[Sample], end: i64) -> Result<BTreeMap<String, f64>, String> {
+/// and return the root's batches.
+fn execute(
+    dag: &PostAsapDag,
+    samples: &[Sample],
+    end: i64,
+) -> Result<Vec<asap_physical_operators::runtime::SharedValue<Batch>>, String> {
     let inputs = raw_inputs(dag);
     let program = compile(
         dag,
@@ -164,25 +168,33 @@ fn run(dag: &PostAsapDag, samples: &[Sample], end: i64) -> Result<BTreeMap<Strin
             .execute(program.roots(), context)
             .map_err(|e| e.to_string())?
             .remove(0);
-        let mut rows = BTreeMap::new();
+        let mut batches = Vec::new();
         while let Some(batch) = stream.next().await {
-            let batch = batch.map_err(|e| e.to_string())?;
-            let job = batch.schema().fields.iter().position(|f| f.name == "job");
-            for row in batch.rows() {
-                let key = match job.map(|i| &row[i]) {
-                    Some(Value::Utf8(job)) => job.to_string(),
-                    _ => String::new(),
-                };
-                let value = match row.last() {
-                    Some(Value::Float64(v)) => *v,
-                    Some(Value::Int64(v)) => *v as f64,
-                    other => return Err(format!("unexpected value {other:?}")),
-                };
-                assert!(rows.insert(key, value).is_none(), "duplicate output group");
-            }
+            batches.push(batch.map_err(|e| e.to_string())?);
         }
-        Ok(rows)
+        Ok(batches)
     })
+}
+
+/// [`execute`], returning `(job, value)` rows of the root.
+fn run(dag: &PostAsapDag, samples: &[Sample], end: i64) -> Result<BTreeMap<String, f64>, String> {
+    let mut rows = BTreeMap::new();
+    for batch in execute(dag, samples, end)? {
+        let job = batch.schema().fields.iter().position(|f| f.name == "job");
+        for row in batch.rows() {
+            let key = match job.map(|i| &row[i]) {
+                Some(Value::Utf8(job)) => job.to_string(),
+                _ => String::new(),
+            };
+            let value = match row.last() {
+                Some(Value::Float64(v)) => *v,
+                Some(Value::Int64(v)) => *v as f64,
+                other => return Err(format!("unexpected value {other:?}")),
+            };
+            assert!(rows.insert(key, value).is_none(), "duplicate output group");
+        }
+    }
+    Ok(rows)
 }
 
 const SAMPLES: &[Sample] = &[
@@ -337,4 +349,199 @@ fn row_comparison_fails_closed() {
     }
     let error = run(&dag, SAMPLES, 60_000).unwrap_err();
     assert!(error.contains("comparison"), "{error}");
+}
+
+/// [`execute`], returning per-series `(identity, value)` rows of the root,
+/// with NaN-aware formatting for comparison.
+fn run_series(dag: &PostAsapDag, samples: &[Sample], end: i64) -> Result<String, String> {
+    let mut rows = BTreeMap::new();
+    for batch in execute(dag, samples, end)? {
+        let schema = batch.schema();
+        let column = |name: &str| schema.fields.iter().position(|f| f.name == name).unwrap();
+        let (identity, value) = (column(promql_rows::SERIES_IDENTITY_COLUMN), column("value"));
+        for row in batch.rows() {
+            let (Value::Utf8(identity), Value::Float64(value)) = (&row[identity], &row[value])
+            else {
+                return Err(format!("unexpected row {row:?}"));
+            };
+            assert!(rows.insert(identity.to_string(), *value).is_none());
+        }
+    }
+    Ok(format!("{rows:?}"))
+}
+
+fn series(pairs: &[(&str, &str, f64)]) -> String {
+    let rows = pairs
+        .iter()
+        .map(|(job, instance, value)| {
+            (
+                format!(r#"{{"instance":"{instance}","job":"{job}"}}"#),
+                *value,
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    format!("{rows:?}")
+}
+
+/// Five counter samples per series, one per minute up to 300s, at `base + step * i`.
+fn counter(
+    metric: &'static str,
+    job: &'static str,
+    base: f64,
+    step: f64,
+) -> impl Iterator<Item = Sample> {
+    (1..=5).map(move |i| (metric, job, "x", i * 60_000, base + step * (i - 1) as f64))
+}
+
+// avg_over_time over stored per-series sum/count state divides per series and
+// drops the metric name, as Prometheus does. An overflowing stored sum fails
+// the checked division instead of returning +Inf.
+#[test]
+fn per_series_average_divides_stored_sum_by_count() {
+    let dag = exact_dag("avg_over_time(m[5m])");
+    assert_eq!(
+        run_series(&dag, SAMPLES, 60_000).unwrap(),
+        series(&[
+            ("api", "a", 2.5),
+            ("api", "b", 7.),
+            ("api", "c", 2.),
+            ("db", "d", 5.)
+        ])
+    );
+    let huge: &[Sample] = &[
+        ("m", "api", "a", 10_000, 1.7e308),
+        ("m", "api", "a", 20_000, 1.7e308),
+    ];
+    assert!(run_series(&dag, huge, 60_000).is_err());
+}
+
+// rate(a) / rate(b) matches series on their labels without the metric name.
+// Unmatched series are dropped; x/0 is +Inf and 0/0 is NaN; an empty side
+// yields an empty vector.
+#[test]
+fn per_series_rate_ratio_matches_prometheus() {
+    // Window (0, 300s]: first sample at 60s, extrapolated 60s to the start
+    // (durationToZero is exactly 60s too), so rate = (last - first) * 1.25 / 300.
+    // a{api} = 40 * 1.25 / 300, b{api} = 20 * 1.25 / 300, so the ratio is 2.
+    let samples = counter("a", "api", 10., 10.)
+        .chain(counter("a", "db", 10., 10.))
+        .chain(counter("a", "web", 10., 10.))
+        .chain(counter("a", "cache", 7., 0.))
+        .chain(counter("b", "api", 5., 5.))
+        .chain(counter("b", "web", 7., 0.))
+        .chain(counter("b", "cache", 7., 0.))
+        .chain(counter("b", "other", 5., 5.))
+        .collect::<Vec<_>>();
+    let dag = exact_dag("rate(a[5m]) / rate(b[5m])");
+    assert_eq!(
+        run_series(&dag, &samples, 300_000).unwrap(),
+        series(&[
+            ("api", "x", 2.),
+            ("cache", "x", f64::NAN),
+            ("web", "x", f64::INFINITY),
+        ])
+    );
+    let only_a = samples
+        .iter()
+        .filter(|s| s.0 == "a")
+        .copied()
+        .collect::<Vec<_>>();
+    assert_eq!(run_series(&dag, &only_a, 300_000).unwrap(), series(&[]));
+}
+
+// A literal operand applies to every stored per-series value, on either side,
+// and drops the metric name.
+#[test]
+fn per_series_scalar_arithmetic_applies_to_stored_readouts() {
+    let samples = counter("m", "api", 10., 10.).collect::<Vec<_>>();
+    // rate = 40 * 1.25 / 300 = 1/6.
+    for (query, expected) in [
+        ("rate(m[5m]) * 2", 50. / 300. * 2.),
+        ("1 - rate(m[5m])", 1. - 50. / 300.),
+        // The stored sum readout keeps `__name__`; the arithmetic drops it.
+        ("sum_over_time(m[5m]) * 2", 150. * 2.),
+    ] {
+        assert_eq!(
+            run_series(&exact_dag(query), &samples, 300_000).unwrap(),
+            series(&[("api", "x", expected)]),
+            "{query}"
+        );
+    }
+}
+
+fn with_vector_match(
+    mut dag: PostAsapDag,
+    kind: planner_types::pre_asap::VectorMatchKind,
+    labels: &[&str],
+) -> PostAsapDag {
+    for node in &mut dag.nodes {
+        if let PostAsapOperatorPayload::Binary { operator } = &mut node.payload {
+            operator.vector_match = Some(planner_types::pre_asap::VectorMatch {
+                kind: kind.clone(),
+                labels: labels.iter().map(|l| l.to_string()).collect(),
+                grouping: None,
+            });
+        }
+    }
+    dag
+}
+
+// `on` and `ignoring` reduce each side to the matching labels, which become
+// the result's labels; a duplicate match group on either side is an error.
+#[test]
+fn per_series_vector_matching_follows_on_and_ignoring() {
+    use planner_types::pre_asap::VectorMatchKind;
+    let samples = counter("a", "api", 10., 10.)
+        .chain(counter("b", "api", 5., 5.))
+        .chain(counter("b", "db", 5., 5.))
+        .collect::<Vec<_>>();
+    let dag = exact_dag("rate(a[5m]) / rate(b[5m])");
+    for (kind, labels) in [
+        (VectorMatchKind::On, ["job"]),
+        (VectorMatchKind::Ignoring, ["instance"]),
+    ] {
+        let dag = with_vector_match(dag.clone(), kind, &labels);
+        assert_eq!(
+            run_series(&dag, &samples, 300_000).unwrap(),
+            format!(
+                "{:?}",
+                BTreeMap::from([(r#"{"job":"api"}"#.to_string(), 2.)])
+            )
+        );
+        let mut duplicate = samples.clone();
+        duplicate.extend(counter("b", "api", 5., 5.).map(|s| (s.0, s.1, "y", s.3, s.4)));
+        let error = run_series(&dag, &duplicate, 300_000).unwrap_err();
+        assert!(error.contains("duplicate series"), "{error}");
+        let mut duplicate = samples.clone();
+        duplicate.extend(counter("a", "api", 5., 5.).map(|s| (s.0, s.1, "y", s.3, s.4)));
+        let error = run_series(&dag, &duplicate, 300_000).unwrap_err();
+        assert!(error.contains("many-to-one"), "{error}");
+    }
+}
+
+// Current-series sums and averages are compensated like Prometheus, and an
+// overflowing running sum does not turn the average into +Inf.
+#[test]
+fn population_sums_and_averages_are_compensated() {
+    let cancel: &[Sample] = &[
+        ("m", "api", "a", 50_000, 1e100),
+        ("m", "api", "b", 50_000, 1.),
+        ("m", "api", "c", 50_000, -1e100),
+    ];
+    let huge: &[Sample] = &[
+        ("m", "api", "a", 50_000, 1.7e308),
+        ("m", "api", "b", 50_000, 1.7e308),
+    ];
+    for (query, samples, expected) in [
+        ("sum by (job) (m)", cancel, 1.),
+        ("avg by (job) (m)", cancel, 1. / 3.),
+        ("avg by (job) (m)", huge, 1.7e308),
+    ] {
+        let dag = population_dag(query);
+        assert_eq!(
+            run(&dag, samples, 60_000).unwrap(),
+            reference(&[("api", expected)]),
+            "{query}"
+        );
+    }
 }

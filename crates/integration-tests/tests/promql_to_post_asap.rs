@@ -1436,3 +1436,30 @@ fn ddsketch_ratio_requires_a_supported_population_size() {
         assert!(strategy.replacements(&TargetSubDAG::new(&pre)).is_empty());
     }
 }
+
+// Every `without` aggregation candidate exports a valid DAG: its summary state
+// column carries the family instead of the readout's Float64 value.
+#[test]
+fn without_aggregation_candidates_export_valid_dags() {
+    for accuracy in [
+        AccuracyTarget::Exact,
+        AccuracyTarget::EpsilonDelta {
+            epsilon: 0.01,
+            delta: 0.01,
+        },
+    ] {
+        for query in ["sum without (pod) (m)", "quantile without (pod) (0.5, m)"] {
+            let root = Rc::new(lower_promql(query, accuracy.clone()).unwrap());
+            let space = search_workload_with_targets(
+                vec![(0, root, Some(accuracy.clone()))],
+                &asap_aware_mapping::default_strategies(),
+                &DefaultAccuracyModel,
+            );
+            let inventory = space.enumerate_candidate_dags_for_root(&0, 65_536).unwrap();
+            assert!(!inventory.candidates.is_empty(), "{query}");
+            for (_, node) in inventory.candidates.iter().flatten() {
+                compile_post_asap_dag(node).unwrap_or_else(|e| panic!("{query}: {e}"));
+            }
+        }
+    }
+}
