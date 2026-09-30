@@ -21,11 +21,11 @@ use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use asap_types::post_asap::{
-    export_post_asap_dag_with_node_ids, EvaluationSchedule, ExecutionDataStateError,
-    ExecutionTiming, OutputRepresentation, PostASAPDAGTransport, PostASAPNode,
-    PostAsapDagValidationError, PostAsapNodeId, ResultGuarantee, SummaryExpr,
-    SummaryMaintenanceLifecycle, SummaryMaintenanceLifecycleGuarantee, SummaryMaintenanceMode,
-    SummaryWindowFramework, ValueOperation,
+    EvaluationSchedule, ExecutionDataStateError, ExecutionTiming, OutputRepresentation,
+    PostASAPDAGTransport, PostASAPNode, PostAsapDagValidationError, PostAsapNodeId,
+    ResultGuarantee, SummaryExpr, SummaryMaintenanceLifecycle,
+    SummaryMaintenanceLifecycleGuarantee, SummaryMaintenanceMode, SummaryWindowFramework,
+    ValueOperation,
 };
 use asap_types::pre_asap::PreASAPNode;
 use asap_types::types::AccuracyTarget;
@@ -248,7 +248,7 @@ impl SummaryMaintenanceLifecyclePlan {
     /// ignored.
     pub fn export_timed_dag(&self) -> Result<PostASAPDAGTransport, SummaryMaintenanceTimingError> {
         let index = Rc::new(asap_types::post_asap::index_post_asap_dag(&self.root)?);
-        Ok(self.execution_assignment(index)?.to_transport()?)
+        Ok(self.execution_assignment(index)?.to_transport())
     }
 
     /// Derive lifecycle timing over a shared index; no logical operators are
@@ -418,6 +418,8 @@ pub(crate) struct SummaryMaintenanceLifecycleCandidates<'a> {
 pub enum SummaryMaintenanceLifecycleChoiceError {
     #[error("lifecycle assignment expansion exceeds the requested limit {0}")]
     ExpansionLimit(usize),
+    #[error("summary {0:?} has no lifecycle alternative")]
+    NoAlternatives(PostAsapNodeId),
     #[error("summary {0:?} is not a deployment of this root")]
     UnknownSummary(PostAsapNodeId),
     #[error("summary {0:?} is chosen more than once")]
@@ -456,7 +458,6 @@ impl SummaryMaintenanceLifecycleCandidates<'_> {
 
     /// Guarantee that binding `lifecycle` would attach under this workload's
     /// data arrival, so a caller can price an alternative before choosing it.
-    #[cfg(test)]
     pub fn guarantee(
         &self,
         lifecycle: &SummaryMaintenanceLifecycle,
@@ -535,6 +536,16 @@ impl SummaryMaintenanceLifecycleCandidates<'_> {
         &self,
         limit: usize,
     ) -> Result<usize, SummaryMaintenanceLifecycleChoiceError> {
+        if let Some(empty) = self
+            .plan
+            .deployments
+            .iter()
+            .find(|d| d.alternatives.is_empty())
+        {
+            return Err(SummaryMaintenanceLifecycleChoiceError::NoAlternatives(
+                empty.post_asap_node_id,
+            ));
+        }
         let count = self.plan.deployments.iter().try_fold(1usize, |n, d| {
             n.checked_mul(d.alternatives.len())
                 .filter(|n| *n <= limit)
@@ -788,7 +799,7 @@ fn enumerate_with_profile<'a>(
         StateKind::SummaryAgg,
     );
     summaries.extend(standalone_populations(&root));
-    let node_ids = export_post_asap_dag_with_node_ids(&root)?.node_ids;
+    let node_ids = asap_types::post_asap::index_post_asap_dag(&root)?.node_ids;
     let components = summary_state_components(&summaries);
     let deployments: Vec<SummaryMaintenanceDeployment> = summaries
         .into_iter()
@@ -2470,10 +2481,7 @@ mod tests {
                 assert!(plan.summary_total_cost.is_none());
                 let timed = plan.execution_assignment(index.clone()).unwrap();
                 assert!(Rc::ptr_eq(timed.index(), &index));
-                assert_eq!(
-                    timed.to_transport().unwrap(),
-                    plan.export_timed_dag().unwrap()
-                );
+                assert_eq!(timed.to_transport(), plan.export_timed_dag().unwrap());
             }
         }
         assert!(legal > 0);

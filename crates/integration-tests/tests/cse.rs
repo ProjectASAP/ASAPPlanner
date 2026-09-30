@@ -62,7 +62,7 @@ fn duplicate_workload_queries_collapse_onto_one_memo_group() {
     // roots[0] and roots[1] must have merged onto the same Rc — the
     // `share_common_subtrees` pass `search_workload` runs internally.
     assert!(
-        Rc::ptr_eq(&space.roots[0].1, &space.roots[1].1),
+        Rc::ptr_eq(&space.roots()[0].1, &space.roots()[1].1),
         "search_workload must collapse the two identical roots onto one Rc<PreASAPNode>"
     );
 
@@ -73,7 +73,7 @@ fn duplicate_workload_queries_collapse_onto_one_memo_group() {
     // (asap-aware-mapping::replacement's own equivalent, internal test)
     // pins for the same fixture shape.
     let group = space
-        .candidates_for_target(&space.roots[0].1)
+        .candidates_for_target(&space.roots()[0].1)
         .expect("shared root must be a discovered target");
     assert_eq!(group.consumer_count, 2);
     assert_eq!(
@@ -122,13 +122,13 @@ fn distinct_workload_queries_get_independent_memo_groups() {
     assert_ne!(a, b, "fixture sanity: the two queries differ");
 
     let space = search_workload(vec![("a", Rc::new(a)), ("b", Rc::new(b))]);
-    assert!(!Rc::ptr_eq(&space.roots[0].1, &space.roots[1].1));
+    assert!(!Rc::ptr_eq(&space.roots()[0].1, &space.roots()[1].1));
 
     let group_a = space
-        .candidates_for_target(&space.roots[0].1)
+        .candidates_for_target(&space.roots()[0].1)
         .expect("root a must be a discovered target");
     let group_b = space
-        .candidates_for_target(&space.roots[1].1)
+        .candidates_for_target(&space.roots()[1].1)
         .expect("root b must be a discovered target");
     assert!(
         !Rc::ptr_eq(&group_a.target, &group_b.target),
@@ -149,7 +149,7 @@ fn single_query_repeated_subexpression_shares_one_memo_group() {
     let expr = lower_promql(query, AccuracyTarget::Exact).expect("query failed to lower");
 
     let space = search_workload(vec![("q", Rc::new(expr))]);
-    let [(_, root)] = space.roots.as_slice() else {
+    let [(_, root)] = space.roots().as_slice() else {
         panic!("expected 1 root");
     };
     let PreASAPNode::BinaryOp { lhs, rhs, .. } = root.as_ref() else {

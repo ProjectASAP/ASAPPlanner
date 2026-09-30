@@ -55,7 +55,7 @@ fn grouped_rate() -> PostASAPDAGTransport {
     let space = grouped_rate_space();
     let selected = space
         .global_selection(&DefaultCostModel)
-        .assemble_selected_query(&space.roots[0].1)
+        .assemble_selected_query(&space.roots()[0].1)
         .unwrap()
         .unwrap();
     export_post_asap_dag(&selected).unwrap()
@@ -568,11 +568,11 @@ fn recompiled_candidate(
     if frontier.is_empty() {
         return Ok(PhysicalCandidate {
             precompute: None,
-            query: compile(dag, inputs.clone(), roots)?,
+            query: compile(dag.as_view(), inputs.clone(), roots)?,
             materialized_outputs: BTreeMap::new(),
         });
     }
-    let precompute = compile(dag, inputs.clone(), frontier)?;
+    let precompute = compile(dag.as_view(), inputs.clone(), frontier)?;
     let mut materialized_outputs = BTreeMap::new();
     for &id in frontier {
         let mut output = precompute.output_contract(id)?;
@@ -583,7 +583,7 @@ fn recompiled_candidate(
     query_inputs.extend(materialized_outputs.clone());
     Ok(PhysicalCandidate {
         precompute: Some(precompute),
-        query: compile(dag, query_inputs, roots)?,
+        query: compile(dag.as_view(), query_inputs, roots)?,
         materialized_outputs,
     })
 }
@@ -594,7 +594,7 @@ fn assert_cuts_match_recompilation(
     roots: &[u64],
     min_frontiers: usize,
 ) {
-    let compiled = compile(dag, inputs.clone(), roots).unwrap();
+    let compiled = compile(dag.as_view(), inputs.clone(), roots).unwrap();
     let frontiers = enumerate_frontiers(dag, &inputs, roots, 4096).unwrap();
     assert!(frontiers.len() >= min_frontiers, "{frontiers:?}");
     for frontier in &frontiers {
@@ -676,7 +676,7 @@ fn population_topk_cuts_equal_per_frontier_compilation() {
         InputContract::bounded(Arc::new(raw.output_schema.clone())),
     )]);
     let roots = [u64::from(dag.root.0)];
-    let compiled = compile(&dag, inputs.clone(), &roots).unwrap();
+    let compiled = compile(dag.as_view(), inputs.clone(), &roots).unwrap();
     // The root reads its population through a Sort helper numbered by the root.
     let helper = u64::MAX - (roots[0] << 16);
     assert_eq!(compiled.operator_name(helper), Some("Sort"));
@@ -718,7 +718,7 @@ fn cut_candidate_rejects_invalid_frontiers() {
         state_id,
         InputContract::bounded(Arc::new(state.output_schema.clone())),
     )]);
-    let compiled = compile(&dag, inputs.clone(), &[root]).unwrap();
+    let compiled = compile(dag.as_view(), inputs.clone(), &[root]).unwrap();
     for frontier in [
         vec![rate_id, rate_id],
         vec![state_id],

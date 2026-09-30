@@ -235,5 +235,6 @@ pub mod maintained_population;
 
 mod candidate_timing;
 pub use candidate_timing::{
-    CandidateTimingContext, CandidateTimingError, PostASAPCandidateMetadata, WithTiming,
+    CandidatePostASAPDAGsWithTiming, CandidateTimingContext, CandidateTimingError,
+    PostASAPCandidateMetadata,
 };

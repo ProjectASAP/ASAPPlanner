@@ -157,14 +157,14 @@ fn uncalibrated_frequency_readouts_do_not_bypass_accuracy_targets() {
                     &DefaultAccuracyModel,
                 );
                 assert!(space
-                    .candidates_for_target(&space.roots[0].1)
+                    .candidates_for_target(&space.roots()[0].1)
                     .unwrap()
                     .candidates
                     .iter()
                     .any(|candidate| candidate.has_missing_accuracy_evidence()));
                 assert!(!space
                     .global_selection(&DefaultCostModel)
-                    .for_target(&space.roots[0].1)
+                    .for_target(&space.roots()[0].1)
                     .unwrap()
                     .chosen
                     .is_some_and(|candidate| candidate.has_missing_accuracy_evidence()));

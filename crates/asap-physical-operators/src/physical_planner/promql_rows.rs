@@ -99,7 +99,7 @@ pub fn compile_current_series_readout(
             .any(|field| field.name == SERIES_IDENTITY_COLUMN)
         {
             return compile(
-                &dag,
+                dag.as_view(),
                 BTreeMap::from([(
                     u64::from(population.id.0),
                     InputContract::bounded(Arc::new(population.output_schema.clone())),
@@ -179,7 +179,7 @@ pub fn compile_current_series_readout(
             .clone(),
     );
     compile(
-        &dag,
+        dag.as_view(),
         BTreeMap::from([(frontier, InputContract::bounded(schema))]),
         &[u64::from(dag.root.0)],
     )
@@ -192,9 +192,7 @@ pub fn compile_current_series_readout(
 pub fn compile_rate_ranking(
     selected: &Rc<planner_types::post_asap::PostASAPNode>,
 ) -> Result<(Rc<planner_types::post_asap::PostASAPNode>, PhysicalDAG), Error> {
-    use planner_types::post_asap::{
-        export_post_asap_dag_with_node_ids, ExactKind, PostASAPNode, SummaryExpr,
-    };
+    use planner_types::post_asap::{index_post_asap_dag, ExactKind, PostASAPNode, SummaryExpr};
     fn frontier(node: &Rc<PostASAPNode>) -> Option<Rc<PostASAPNode>> {
         match &node.expr {
             SummaryExpr::ValueOperation {
@@ -226,8 +224,7 @@ pub fn compile_rate_ranking(
     {
         return Err(invalid("Rate ranking requires complete series identity"));
     }
-    let compiled =
-        export_post_asap_dag_with_node_ids(selected).map_err(|error| invalid(error.to_string()))?;
+    let compiled = index_post_asap_dag(selected).map_err(|error| invalid(error.to_string()))?;
     let id = u64::from(
         compiled
             .node_ids
@@ -236,9 +233,9 @@ pub fn compile_rate_ranking(
             .0,
     );
     let program = compile(
-        &compiled.dag,
+        compiled.view(),
         BTreeMap::from([(id, InputContract::bounded(Arc::new(source.schema.clone())))]),
-        &[u64::from(compiled.dag.root.0)],
+        &[u64::from(compiled.root_id.0)],
     )?;
     Ok((source, program))
 }

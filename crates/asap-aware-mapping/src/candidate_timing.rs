@@ -1,5 +1,5 @@
 //! Timed stage of the candidate collection; lifecycle machinery stays internal.
-use std::{marker::PhantomData, rc::Rc};
+use std::rc::Rc;
 
 use crate::{
     cost_model::CostModel,
@@ -14,6 +14,7 @@ use crate::{
 use asap_types::post_asap::{
     index_post_asap_dag, ExecutionDataStateError, PostASAPDAG, PostASAPDAGAssignment,
     PostASAPDAGIndex, PostAsapNodeId, SummaryMaintenanceLifecycle,
+    SummaryMaintenanceLifecycleGuarantee,
 };
 
 /// Demand and evidence bound to the requested workload root, not unrelated queries.
@@ -49,9 +50,11 @@ struct PreparedTiming<'a> {
     count: usize,
 }
 
-/// Storage for the timed stage. It retains shared graph indices and factored
-/// choices, never a Cartesian-product vector of timed graphs.
-pub struct WithTiming<'a, Id> {
+/// Every lifecycle assignment of one workload root's logical candidates: the
+/// design's "`CandidatePostASAPDAGs` with timing". It retains shared graph
+/// indices and factored choices, never a Cartesian-product vector of timed
+/// graphs, and it does not select an assignment.
+pub struct CandidatePostASAPDAGsWithTiming<'a, Id> {
     id: Id,
     logical: Vec<Result<PreparedTiming<'a>, Rc<CandidateTimingError>>>,
     rejected_assemblies: Vec<String>,
@@ -79,7 +82,7 @@ impl<Id: Clone + PartialEq> CandidatePostASAPDAGs<Id> {
         context: CandidateTimingContext<'a>,
         logical_limit: usize,
         assignment_limit: usize,
-    ) -> Result<CandidatePostASAPDAGs<Id, WithTiming<'a, Id>>, CandidateTimingError> {
+    ) -> Result<CandidatePostASAPDAGsWithTiming<'a, Id>, CandidateTimingError> {
         let inventory = self.enumerate_candidate_dags_for_root(id, logical_limit)?;
         let roots = inventory.candidates.into_iter().map(|mut roots| {
             // The logical enumerator was explicitly scoped to this one root.
@@ -94,15 +97,17 @@ impl<Id: Clone + PartialEq> CandidatePostASAPDAGs<Id> {
             assignment_limit,
         )
     }
+}
 
+impl<'a, Id> CandidatePostASAPDAGsWithTiming<'a, Id> {
     /// Enter the same timed collection API when a caller already has one logical
     /// graph. Explicit selection helpers do not need another lifecycle API type.
-    pub fn from_post_asap_dag<'a>(
+    pub fn from_post_asap_dag(
         id: Id,
         root: PostASAPDAG,
         context: CandidateTimingContext<'a>,
         assignment_limit: usize,
-    ) -> Result<CandidatePostASAPDAGs<Id, WithTiming<'a, Id>>, CandidateTimingError> {
+    ) -> Result<Self, CandidateTimingError> {
         prepare(id, [root], Vec::new(), context, assignment_limit)
     }
 }
@@ -113,7 +118,7 @@ fn prepare<'a, Id>(
     rejected_assemblies: Vec<String>,
     context: CandidateTimingContext<'a>,
     limit: usize,
-) -> Result<CandidatePostASAPDAGs<Id, WithTiming<'a, Id>>, CandidateTimingError> {
+) -> Result<CandidatePostASAPDAGsWithTiming<'a, Id>, CandidateTimingError> {
     let mut logical = Vec::new();
     let mut count = 0usize;
     for root in roots {
@@ -129,18 +134,13 @@ fn prepare<'a, Id>(
             )?;
             Ok::<_, CandidateTimingError>((index, lifecycles))
         })();
-        let prepared = match prepared {
-            Ok((index, lifecycles)) => {
-                // Budget failures are collection failures, never rejected choices
-                // inside a deceptively complete partial collection.
-                let n = lifecycles.assignment_count(limit)?;
-                Ok(PreparedTiming {
-                    index,
-                    lifecycles,
-                    count: n,
-                })
-            }
-            Err(error) => Err(Rc::new(error)),
+        let prepared = match prepared
+            .and_then(|(index, lifecycles)| prepared_timing(index, lifecycles, limit))
+        {
+            // Budget failures are collection failures, never rejected choices
+            // inside a deceptively complete partial collection.
+            Err(error @ CandidateTimingError::ExpansionLimit(_)) => return Err(error),
+            prepared => prepared.map_err(Rc::new),
         };
         count = count
             .checked_add(prepared.as_ref().map_or(1, |p| p.count))
@@ -148,30 +148,47 @@ fn prepare<'a, Id>(
             .ok_or(CandidateTimingError::ExpansionLimit(limit))?;
         logical.push(prepared);
     }
-    Ok(CandidatePostASAPDAGs {
-        stage: WithTiming {
-            id,
-            logical,
-            rejected_assemblies,
-            count,
-        },
-        identity: PhantomData,
+    Ok(CandidatePostASAPDAGsWithTiming {
+        id,
+        logical,
+        rejected_assemblies,
+        count,
     })
 }
 
-impl<Id: Clone> CandidatePostASAPDAGs<Id, WithTiming<'_, Id>> {
+/// A logical candidate yields its assignments, or one diagnostic entry when it
+/// has none: a state with no lifecycle alternative must not vanish silently.
+fn prepared_timing(
+    index: Rc<PostASAPDAGIndex>,
+    lifecycles: SummaryMaintenanceLifecycleCandidates<'_>,
+    limit: usize,
+) -> Result<PreparedTiming<'_>, CandidateTimingError> {
+    match lifecycles.assignment_count(limit) {
+        Ok(count) => Ok(PreparedTiming {
+            index,
+            lifecycles,
+            count,
+        }),
+        Err(SummaryMaintenanceLifecycleChoiceError::ExpansionLimit(limit)) => {
+            Err(CandidateTimingError::ExpansionLimit(limit))
+        }
+        Err(error) => Err(error.into()),
+    }
+}
+
+impl<Id: Clone> CandidatePostASAPDAGsWithTiming<'_, Id> {
     /// Includes rejected assignments; failures retain their candidate identity.
     pub fn len(&self) -> usize {
-        self.stage.count
+        self.count
     }
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
     pub fn logical_len(&self) -> usize {
-        self.stage.logical.len()
+        self.logical.len()
     }
     pub fn rejected_assemblies(&self) -> &[String] {
-        &self.stage.rejected_assemblies
+        &self.rejected_assemblies
     }
 
     pub fn iter(
@@ -182,14 +199,13 @@ impl<Id: Clone> CandidatePostASAPDAGs<Id, WithTiming<'_, Id>> {
             Result<PostASAPDAGAssignment, Rc<CandidateTimingError>>,
         ),
     > + '_ {
-        self.stage
-            .logical
+        self.logical
             .iter()
             .enumerate()
             .flat_map(move |(logical_candidate, prepared)| {
                 (0..prepared.as_ref().map_or(1, |p| p.count)).map(move |assignment_candidate| {
                     let mut metadata = PostASAPCandidateMetadata {
-                        id: self.stage.id.clone(),
+                        id: self.id.clone(),
                         logical_candidate,
                         assignment_candidate,
                         choices: Vec::new(),
@@ -227,6 +243,16 @@ impl<Id: Clone> CandidatePostASAPDAGs<Id, WithTiming<'_, Id>> {
         self.prepared(logical_candidate)
             .map(|p| p.lifecycles.deployments())
     }
+    /// Guarantee that choosing `lifecycle` would attach under this workload's
+    /// data arrival, so a deployment can price an alternative before binding it.
+    pub fn lifecycle_guarantee(
+        &self,
+        logical_candidate: usize,
+        lifecycle: &SummaryMaintenanceLifecycle,
+    ) -> Result<SummaryMaintenanceLifecycleGuarantee, Rc<CandidateTimingError>> {
+        self.prepared(logical_candidate)
+            .map(|p| p.lifecycles.guarantee(lifecycle))
+    }
     pub fn select_lifecycles(
         &self,
         logical_candidate: usize,
@@ -242,8 +268,7 @@ impl<Id: Clone> CandidatePostASAPDAGs<Id, WithTiming<'_, Id>> {
         &self,
         logical_candidate: usize,
     ) -> Result<&PreparedTiming<'_>, Rc<CandidateTimingError>> {
-        self.stage
-            .logical
+        self.logical
             .get(logical_candidate)
             .ok_or_else(|| {
                 Rc::new(CandidateTimingError::UnknownLogicalCandidate(

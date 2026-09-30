@@ -117,7 +117,7 @@ fn compile_dag(
             )
         })
         .collect();
-    let program = compile(dag, inputs, &[root]).map_err(|e| e.to_string())?;
+    let program = compile(dag.as_view(), inputs, &[root]).map_err(|e| e.to_string())?;
     Ok(serde_json::from_slice(&serde_json::to_vec(&program).unwrap()).unwrap())
 }
 
@@ -434,12 +434,14 @@ fn raw_series_contract_is_explicit() {
         .try_into()
         .unwrap();
     assert!(matches!(selector, PreASAPNode::TimeRange { .. }));
-    let missing = compile(&dag, BTreeMap::new(), &[root]).err().unwrap();
+    let missing = compile(dag.as_view(), BTreeMap::new(), &[root])
+        .err()
+        .unwrap();
     assert!(missing.to_string().contains("raw series input"));
     let mut wrong = (*schema).clone();
     wrong.fields.pop();
     let wrong = compile(
-        &dag,
+        dag.as_view(),
         BTreeMap::from([(
             promql_fallback::raw_series_input(root, 0),
             InputContract::bounded(std::sync::Arc::new(wrong)),
@@ -490,7 +492,7 @@ fn raw_series_contract_is_explicit() {
     };
     let raw = promql_fallback::raw_series(&selector).unwrap().remove(0).1;
     assert!(compile(
-        &consumed,
+        consumed.as_view(),
         BTreeMap::from([(
             promql_fallback::raw_series_input(0, 0),
             InputContract::bounded(raw)
@@ -1244,7 +1246,7 @@ fn histogram_quantile_selection_keeps_the_exact_fallback() {
                 &default_strategies(),
                 &DefaultAccuracyModel,
             );
-            let planned = &space.roots[0].1;
+            let planned = &space.roots()[0].1;
             let candidates = &space.candidates_for_target(planned).unwrap().candidates;
             assert!(
                 candidates.iter().all(|c| matches!(&c.replacement,

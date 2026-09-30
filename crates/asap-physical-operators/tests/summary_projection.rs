@@ -84,7 +84,7 @@ fn post_asap_summary_projection_survives_recovery() {
         root: PostAsapNodeId(1),
     };
     let program = compile(
-        &dag,
+        dag.as_view(),
         BTreeMap::from([(0, InputContract::bounded(schema.clone()))]),
         &[1],
     )

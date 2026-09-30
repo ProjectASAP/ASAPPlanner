@@ -213,7 +213,7 @@ fn global_selection_never_commits_a_series_identity_heap() {
     );
     let selected = space
         .global_selection(&DefaultCostModel)
-        .assemble_selected_dag(&space.roots[0].1)
+        .assemble_selected_dag(&space.roots()[0].1)
         .unwrap()
         .unwrap();
     assert!(!carries_identity(&vec![(0, selected)]));
@@ -236,7 +236,7 @@ fn repeated_roots_do_not_duplicate_alternatives() {
             .collect();
         let space = search_workload_with_targets(roots, &strategies, &DefaultAccuracyModel);
         space
-            .candidates_for_target(&space.roots[0].1)
+            .candidates_for_target(&space.roots()[0].1)
             .unwrap()
             .candidates
             .iter()

@@ -120,7 +120,7 @@ fn execute_relabeled(
 ) -> Result<Vec<asap_physical_operators::runtime::SharedValue<Batch>>, String> {
     let inputs = raw_inputs(dag);
     let program = compile(
-        dag,
+        dag.as_view(),
         inputs
             .iter()
             .map(|(id, schema, _)| (*id, InputContract::bounded(schema.clone())))
@@ -676,7 +676,7 @@ fn stored_count_min_bare_count_compiles_to_a_readout() {
     };
     let schema = Arc::new(state.output_schema.clone());
     let program = compile(
-        &dag,
+        dag.as_view(),
         BTreeMap::from([(
             u64::from(state.id.0),
             InputContract::bounded(schema.clone()),

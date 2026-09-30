@@ -351,7 +351,7 @@ fn planner_current_series_candidate_compiles_with_dynamic_identity() {
         .unwrap();
     let raw_schema = Arc::new(raw.output_schema.clone());
     let physical = compile(
-        &logical,
+        logical.as_view(),
         BTreeMap::from([(
             u64::from(raw.id.0),
             InputContract::bounded(raw_schema.clone()),

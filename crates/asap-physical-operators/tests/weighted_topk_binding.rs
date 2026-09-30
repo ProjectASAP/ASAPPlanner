@@ -154,7 +154,7 @@ fn assert_weighted_binding(evidence: &dyn AccuracyEvidenceProvider, algorithm: S
         let source = Box::new(Operator::source(rates.clone(), vec![batch.clone()]).unwrap())
             as Source<'static>;
         let compiled = compile(
-            &placed,
+            placed.as_view(),
             BTreeMap::from([(rate_id.0 as u64, InputContract::bounded(rates.clone()))]),
             &[dag.root.0 as u64],
         )
@@ -385,7 +385,7 @@ fn check_direct_rate_topk(dynamic: bool) {
             .unwrap_or_else(|| panic!("no raw counter source: {dag:?}"));
         let raw_schema = Arc::new(raw.output_schema.clone());
         let raw_compiled = compile(
-            &dag,
+            dag.as_view(),
             BTreeMap::from([(
                 u64::from(raw.id.0),
                 InputContract::bounded(raw_schema.clone()),
@@ -520,7 +520,7 @@ fn check_direct_rate_topk(dynamic: bool) {
             }
         }
         let compiled = compile(
-            &dag,
+            dag.as_view(),
             BTreeMap::from([(
                 u64::from(input_id.0),
                 InputContract::bounded(schema.clone()),
@@ -670,7 +670,7 @@ fn spatial_topk_exposes_signed_heap_candidate_over_complete_snapshot() {
         .unwrap();
     let schema = Arc::new(raw.output_schema.clone());
     let program = compile(
-        &dag,
+        dag.as_view(),
         BTreeMap::from([(u64::from(raw.id.0), InputContract::bounded(schema.clone()))]),
         &[u64::from(dag.root.0)],
     )
@@ -821,7 +821,7 @@ fn continuously_maintained_dag(candidate: &Rc<PostASAPNode>) -> PostASAPDAGTrans
         },
         ..Default::default()
     };
-    let lifecycles = asap_aware_mapping::CandidatePostASAPDAGs::from_post_asap_dag(
+    let lifecycles = asap_aware_mapping::CandidatePostASAPDAGsWithTiming::from_post_asap_dag(
         (),
         Rc::clone(candidate),
         asap_aware_mapping::CandidateTimingContext {

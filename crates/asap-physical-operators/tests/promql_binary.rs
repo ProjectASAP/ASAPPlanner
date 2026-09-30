@@ -392,7 +392,7 @@ fn stored_series_readouts_support_filters_and_sets() {
                 root: PostAsapNodeId(4),
             };
             let graph = compile(
-                &dag,
+                dag.as_view(),
                 BTreeMap::from([
                     (0, InputContract::bounded(state_schema.clone())),
                     (1, InputContract::bounded(state_schema.clone())),

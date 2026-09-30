@@ -40,7 +40,7 @@ mod candidates;
 pub use candidates::{
     compile_candidate, compile_candidates, compile_physical_dag_candidates, cut_candidate,
     enumerate_frontiers, frontier_from_timing, select_candidate, CandidateCost,
-    CandidatePhysicalDAGs, CandidateSelection, PhysicalCandidate,
+    CandidatePhysicalDAGs, CandidateSelection, PhysicalCandidate, PhysicalCandidateError,
 };
 
 mod compiled;
@@ -48,64 +48,16 @@ pub use compiled::{InputContract, PhysicalDAG};
 
 mod row_values;
 
-/// Read-only access to the one logical computation, or an imported transport
-/// document. Both paths use the same validator and operator compiler.
-pub trait PhysicalCompileInput {
-    fn with_view<T>(
-        &self,
-        compile: impl FnOnce(planner_types::post_asap::PostASAPDAGView<'_>) -> Result<T, Error>,
-    ) -> Result<T, Error>;
-}
-impl PhysicalCompileInput for PostASAPDAGTransport {
-    fn with_view<T>(
-        &self,
-        compile: impl FnOnce(planner_types::post_asap::PostASAPDAGView<'_>) -> Result<T, Error>,
-    ) -> Result<T, Error> {
-        compile(self.as_view())
-    }
-}
-impl PhysicalCompileInput for planner_types::post_asap::PostASAPDAGIndex {
-    fn with_view<T>(
-        &self,
-        compile: impl FnOnce(planner_types::post_asap::PostASAPDAGView<'_>) -> Result<T, Error>,
-    ) -> Result<T, Error> {
-        let nodes = self.node_views();
-        compile(planner_types::post_asap::PostASAPDAGView {
-            nodes: &nodes,
-            edges: self.edges(),
-            root: self.root_id,
-        })
-    }
-}
-impl PhysicalCompileInput for planner_types::post_asap::PostASAPDAG {
-    fn with_view<T>(
-        &self,
-        compile: impl FnOnce(planner_types::post_asap::PostASAPDAGView<'_>) -> Result<T, Error>,
-    ) -> Result<T, Error> {
-        planner_types::post_asap::index_post_asap_dag(self)
-            .map_err(|e| invalid(e.to_string()))?
-            .with_view(compile)
-    }
-}
-
-impl PhysicalCompileInput for planner_types::post_asap::PostASAPDAGAssignment {
-    fn with_view<T>(
-        &self,
-        compile: impl FnOnce(planner_types::post_asap::PostASAPDAGView<'_>) -> Result<T, Error>,
-    ) -> Result<T, Error> {
-        self.with_view(compile)
-            .map_err(|e| invalid(e.to_string()))?
-    }
-}
-
 /// Compile computation without opening or retaining deployment readers.
 /// Input contracts identify explicit boundaries selected by maintenance planning.
+/// The view is a transport document's ([`PostASAPDAGTransport::as_view`]), a
+/// shared index's, or a lifecycle assignment's timing over that index.
 pub fn compile(
-    dag: &impl PhysicalCompileInput,
+    dag: planner_types::post_asap::PostASAPDAGView<'_>,
     inputs: BTreeMap<NodeId, InputContract>,
     roots: &[NodeId],
 ) -> Result<PhysicalDAG, Error> {
-    dag.with_view(|view| compile_internal(&view, inputs, roots))
+    compile_internal(&dag, inputs, roots)
 }
 
 /// Convenience for callers that already resolved inputs. Lowering still uses
@@ -119,7 +71,7 @@ pub fn bind<'a>(
         .iter()
         .map(|(&id, source)| (id, InputContract::from_source(source.as_ref())))
         .collect();
-    compile(dag, inputs, roots)?.instantiate(sources)
+    compile(dag.as_view(), inputs, roots)?.instantiate(sources)
 }
 
 /// Resolve raw scan connectors before invoking the reader-independent compiler.
@@ -181,13 +133,13 @@ fn compile_internal(
     preflight_depth(dag)?;
     dag.validate().map_err(|e| invalid(e.to_string()))?;
     let nodes = dag
-        .nodes
+        .nodes()
         .iter()
         .map(|node| (u64::from(node.id.0), node))
         .collect::<BTreeMap<_, _>>();
     let mut dependencies = BTreeMap::<NodeId, Vec<NodeId>>::new();
     // Binary input order is semantic; serialized edge order is not.
-    let mut edges = dag.edges.iter().collect::<Vec<_>>();
+    let mut edges = dag.edges().iter().collect::<Vec<_>>();
     edges.sort_by_key(|edge| {
         (
             edge.consumer.0,
@@ -299,7 +251,7 @@ fn compile_internal(
                 Payload::Fallback {
                     expression: PreASAPNode::TimeRange { .. }
                 }
-            ) && dag.edges.iter().any(|e| u64::from(e.producer.0) == id);
+            ) && dag.edges().iter().any(|e| u64::from(e.producer.0) == id);
             if let (Payload::Fallback { expression }, false) = (&node.payload, raw_rows) {
                 let promql_fallback::Lowering {
                     selectors,
@@ -513,8 +465,8 @@ fn compile_internal(
                 continue;
             }
             if let Payload::Binary { operator } = &node.payload {
-                let query_time = node.output_state.timing
-                    == planner_types::post_asap::ExecutionTiming::QueryTime;
+                let query_time =
+                    dag.timing(node) == planner_types::post_asap::ExecutionTiming::QueryTime;
                 if let Some(&(value, left)) = literals.get(&id) {
                     let [input] = schemas.as_slice() else {
                         return Err(invalid("scalar binary requires one row input"));
@@ -580,7 +532,7 @@ fn compile_internal(
             } = &node.payload
             {
                 // Exact counts read out as Int64; PromQL declares a Float64 sample.
-                let readout = bind_operation(node, &schemas)
+                let readout = bind_operation(node, dag.timing(node), &schemas)
                     .map_err(|error| invalid(format!("node {id}: {error}")))?;
                 let actual = readout.schema();
                 let converted = actual.fields.iter().zip(&output.fields).position(|(a, d)| {
@@ -620,7 +572,7 @@ fn compile_internal(
                     continue;
                 }
             }
-            let mut operator = compile_node(node, &schemas)
+            let mut operator = compile_timed_node(node, dag.timing(node), &schemas)
                 .map_err(|error| invalid(format!("node {id}: {error}")))?;
             if operator.is_counter_readout() {
                 let mut pending = vec![id];
@@ -685,18 +637,31 @@ fn temporal_readout_drops_name(node: &PostAsapDagNode) -> bool {
 /// Bind a Planner node against the schemas supplied by its deployment edges.
 /// This is the same checked path used by complete DAG binding.
 pub fn compile_node(node: &PostAsapDagNode, inputs: &[Schema]) -> Result<Operator, Error> {
+    compile_timed_node(node, node.output_state.timing, inputs)
+}
+
+/// Lower `node` under `timing`, which a lifecycle assignment may overlay.
+fn compile_timed_node(
+    node: &PostAsapDagNode,
+    timing: planner_types::post_asap::ExecutionTiming,
+    inputs: &[Schema],
+) -> Result<Operator, Error> {
     for schema in inputs {
         crate::values::validate_schema(schema)?;
     }
-    bind_operation(node, inputs)?.with_output_schema(Arc::new(node.output_schema.clone()))
+    bind_operation(node, timing, inputs)?.with_output_schema(Arc::new(node.output_schema.clone()))
 }
 
-fn bind_operation(node: &PostAsapDagNode, inputs: &[Schema]) -> Result<Operator, Error> {
+fn bind_operation(
+    node: &PostAsapDagNode,
+    timing: planner_types::post_asap::ExecutionTiming,
+    inputs: &[Schema],
+) -> Result<Operator, Error> {
     if let Payload::Binary { operator } = &node.payload {
         let [left, right] = inputs else {
             return Err(invalid("binary requires two inputs"));
         };
-        if node.output_state.timing == planner_types::post_asap::ExecutionTiming::IngestionTime {
+        if timing == planner_types::post_asap::ExecutionTiming::IngestionTime {
             let value = |schema: &Schema| -> Result<usize, Error> {
                 let columns = schema
                     .fields
@@ -1100,15 +1065,15 @@ impl PhysicalOperator<Batch, Schema> for CheckedSource<'_> {
 // Bound recursion before invoking the upstream recursive provenance validator.
 fn preflight_depth(dag: &planner_types::post_asap::PostASAPDAGView<'_>) -> Result<(), Error> {
     let mut remaining = dag
-        .nodes
+        .nodes()
         .iter()
         .map(|node| (node.id, 0usize))
         .collect::<BTreeMap<_, _>>();
-    if remaining.len() != dag.nodes.len() {
+    if remaining.len() != dag.nodes().len() {
         return Err(invalid("duplicate Planner node"));
     }
     let mut consumers = BTreeMap::<_, Vec<_>>::new();
-    for edge in dag.edges {
+    for edge in dag.edges() {
         if !remaining.contains_key(&edge.producer) {
             return Err(invalid("missing Planner edge producer"));
         }
@@ -1143,7 +1108,7 @@ fn preflight_depth(dag: &planner_types::post_asap::PostASAPDAGView<'_>) -> Resul
             }
         }
     }
-    if visited != dag.nodes.len() {
+    if visited != dag.nodes().len() {
         return Err(invalid("Planner DAG contains a cycle"));
     }
     Ok(())

@@ -67,7 +67,7 @@ fn candidates(query: &str, accuracy: AccuracyTarget) -> Vec<Rc<PostASAPNode>> {
     let space = search_workload(vec![("query", root)]);
     if let Ok(Some(selected)) = space
         .global_selection(&DefaultCostModel)
-        .assemble_selected_dag(&space.roots[0].1)
+        .assemble_selected_dag(&space.roots()[0].1)
     {
         result.push(selected);
     }

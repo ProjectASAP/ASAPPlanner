@@ -224,7 +224,7 @@ fn selected_plan_for_lowered(
     let root = Rc::new(lowered);
     let strategies = asap_aware_mapping::default_strategies_with(model);
     let space = search_workload_with(vec![("dashboard", Rc::clone(&root))], &strategies);
-    let target = Rc::clone(&space.roots[0].1);
+    let target = Rc::clone(&space.roots()[0].1);
     let capabilities = SummaryMaintenanceLifecycleCapabilities {
         supports_ephemeral: true,
         supports_prepared: false,
@@ -458,7 +458,7 @@ fn lifecycle_timed_dag(
     }
     let root =
         selected_plan_for_lowered(&workload, lowered, &FullyCostedRuntime, Horizon(100.)).root;
-    let candidates = asap_aware_mapping::CandidatePostASAPDAGs::from_post_asap_dag(
+    let candidates = asap_aware_mapping::CandidatePostASAPDAGsWithTiming::from_post_asap_dag(
         (),
         root,
         asap_aware_mapping::CandidateTimingContext {
@@ -563,7 +563,7 @@ fn chosen_lifecycle_timing_decides_precompute_contents() {
         let inputs = raw_inputs(&dag);
         let (&raw_id, contract) = inputs.iter().next().unwrap();
         let schema = contract.schema.clone();
-        let frontier = frontier_from_timing(&dag).unwrap();
+        let frontier = frontier_from_timing(dag.as_view()).unwrap();
         let candidate =
             compile_candidate(&dag, inputs, &[u64::from(dag.root.0)], &frontier).unwrap();
         let rows = (1..=100)
@@ -649,13 +649,13 @@ fn lifecycle_timing_cuts_one_compilation() {
         let (compiled_dag, _) = lifecycle_timed_dag(query, &ephemeral);
         let inputs = raw_inputs(&compiled_dag);
         let roots = [u64::from(compiled_dag.root.0)];
-        let compiled = compile(&compiled_dag, inputs.clone(), &roots).unwrap();
+        let compiled = compile(compiled_dag.as_view(), inputs.clone(), &roots).unwrap();
         for lifecycle in [
             SummaryMaintenanceLifecycle::ContinuouslyMaintained,
             ephemeral,
         ] {
             let (dag, states) = lifecycle_timed_dag(query, &lifecycle);
-            let frontier = frontier_from_timing(&dag).unwrap();
+            let frontier = frontier_from_timing(dag.as_view()).unwrap();
             // Retained states read by a query-time consumer, or the root itself.
             let query_time = |id: u64| {
                 dag.nodes.iter().any(|node| {
@@ -723,7 +723,7 @@ fn chosen_population_lifecycle_decides_precompute_contents() {
         SummaryMaintenanceLifecycle::ContinuouslyMaintained,
         SummaryMaintenanceLifecycle::Ephemeral,
     ] {
-        let candidates = asap_aware_mapping::CandidatePostASAPDAGs::from_post_asap_dag(
+        let candidates = asap_aware_mapping::CandidatePostASAPDAGsWithTiming::from_post_asap_dag(
             (),
             Rc::clone(&root),
             asap_aware_mapping::CandidateTimingContext {
@@ -767,7 +767,7 @@ fn chosen_population_lifecycle_decides_precompute_contents() {
             .unwrap();
         let (raw_id, schema) = (u64::from(raw.id.0), Arc::new(raw.output_schema.clone()));
         let frontier =
-            asap_physical_operators::physical_planner::frontier_from_timing(&dag).unwrap();
+            asap_physical_operators::physical_planner::frontier_from_timing(dag.as_view()).unwrap();
         let candidate = compile_candidate(
             &dag,
             BTreeMap::from([(raw_id, InputContract::bounded(schema.clone()))]),
@@ -881,7 +881,7 @@ fn grouped_rate_sum_placement_is_a_lifecycle_choice() {
         SummaryMaintenanceLifecycle::ContinuouslyMaintained,
         SummaryMaintenanceLifecycle::Ephemeral,
     ] {
-        let lifecycles = asap_aware_mapping::CandidatePostASAPDAGs::from_post_asap_dag(
+        let lifecycles = asap_aware_mapping::CandidatePostASAPDAGsWithTiming::from_post_asap_dag(
             (),
             Rc::clone(candidate),
             asap_aware_mapping::CandidateTimingContext {
@@ -923,7 +923,7 @@ fn grouped_rate_sum_placement_is_a_lifecycle_choice() {
             .find(|node| matches!(node.payload, PostAsapOperatorPayload::Fallback { .. }))
             .unwrap();
         let frontier =
-            asap_physical_operators::physical_planner::frontier_from_timing(&dag).unwrap();
+            asap_physical_operators::physical_planner::frontier_from_timing(dag.as_view()).unwrap();
         let [boundary] = frontier.as_slice() else {
             panic!("one precompute output, got {frontier:?}");
         };
@@ -1062,7 +1062,7 @@ fn execute_timed(
             .collect();
         Batch::try_new(schema.clone(), rows).unwrap()
     };
-    let frontier = frontier_from_timing(dag).unwrap();
+    let frontier = frontier_from_timing(dag.as_view()).unwrap();
     let candidate = compile_candidate(
         dag,
         raw.iter()
@@ -1165,8 +1165,12 @@ fn maintained_arithmetic_over_one_selector_executes() {
 /// metadata and shared logical identity survive through physical compilation.
 #[test]
 fn named_candidate_collections_preserve_timing_and_compile_errors() {
-    use asap_aware_mapping::{CandidatePostASAPDAGs, CandidateTimingContext};
-    use asap_physical_operators::physical_planner::compile_physical_dag_candidates;
+    use asap_aware_mapping::{
+        CandidatePostASAPDAGsWithTiming, CandidateTimingContext, CandidateTimingError,
+    };
+    use asap_physical_operators::physical_planner::{
+        compile_physical_dag_candidates, PhysicalCandidateError,
+    };
     let workload = quantile_workload("sum by(job)(rate(m[1m]))");
     let lowered = lower_promql_workload(&workload, 0).unwrap().remove(0);
     let lowered =
@@ -1184,9 +1188,10 @@ fn named_candidate_collections_preserve_timing_and_compile_errors() {
         capabilities: SummaryMaintenanceLifecycleCapabilities::ALL,
         cost_model: &FullyCostedRuntime,
     };
-    assert!(logical
-        .with_timing_for_root(&17, context(), 4096, 0)
-        .is_err());
+    assert!(matches!(
+        logical.with_timing_for_root(&17, context(), 4096, 0),
+        Err(CandidateTimingError::ExpansionLimit(0))
+    ));
     assert!(logical
         .with_timing_for_root(&18, context(), 4096, 4096)
         .is_err());
@@ -1223,12 +1228,29 @@ fn named_candidate_collections_preserve_timing_and_compile_errors() {
     assert!(valid > 1);
     assert!(rejected > 0);
     assert_eq!(valid + rejected, timed.len());
-    let physical = compile_physical_dag_candidates(&timed, |_, assignment| {
-        Ok((
-            raw_inputs(&assignment.to_transport().unwrap()),
-            vec![u64::from(assignment.index().root_id.0)],
-        ))
-    });
+    // The total assignment budget is exact: the collection's size fits, one less does not.
+    assert_eq!(
+        logical
+            .with_timing_for_root(&17, context(), 4096, timed.len())
+            .unwrap()
+            .len(),
+        timed.len()
+    );
+    let short = timed.len() - 1;
+    assert!(matches!(
+        logical.with_timing_for_root(&17, context(), 4096, short),
+        Err(CandidateTimingError::ExpansionLimit(limit)) if limit == short
+    ));
+    let physical = compile_physical_dag_candidates(
+        timed.iter(),
+        timed.rejected_assemblies().to_vec(),
+        |_, assignment| {
+            Ok((
+                raw_inputs(&assignment.to_transport()),
+                vec![u64::from(assignment.index().root_id.0)],
+            ))
+        },
+    );
     assert_eq!(physical.len(), timed.len());
     assert_eq!(physical.rejected_assemblies(), timed.rejected_assemblies());
     let mut compiled = 0;
@@ -1247,7 +1269,7 @@ fn named_candidate_collections_preserve_timing_and_compile_errors() {
         );
         assert_eq!(before.choices, after.choices);
         if timing.is_err() {
-            assert!(dag.is_err());
+            assert!(matches!(dag, Err(PhysicalCandidateError::Timing(_))));
         }
         if dag.is_ok() {
             compiled += 1;
@@ -1256,7 +1278,7 @@ fn named_candidate_collections_preserve_timing_and_compile_errors() {
         }
     }
     assert!(compiled > 1);
-    let failed = compile_physical_dag_candidates(&timed, |_, _| {
+    let failed = compile_physical_dag_candidates(timed.iter(), Vec::new(), |_, _| {
         Err(asap_physical_operators::Error::Invalid(
             "missing deployment input evidence".into(),
         ))
@@ -1279,29 +1301,39 @@ fn named_candidate_collections_preserve_timing_and_compile_errors() {
             })
         })
         .unwrap();
-    let one =
-        CandidatePostASAPDAGs::from_post_asap_dag(17usize, first.clone(), context(), 4096).unwrap();
+    let one = CandidatePostASAPDAGsWithTiming::from_post_asap_dag(
+        17usize,
+        first.clone(),
+        context(),
+        4096,
+    )
+    .unwrap();
     assert_eq!(one.logical_len(), 1);
     assert!(!one.lifecycle_alternatives(0).unwrap().is_empty());
     let mut invalid = context();
     invalid.horizon = Some(Horizon(-1.));
     let rejected =
-        CandidatePostASAPDAGs::from_post_asap_dag(17usize, first, invalid, 4096).unwrap();
+        CandidatePostASAPDAGsWithTiming::from_post_asap_dag(17usize, first, invalid, 4096).unwrap();
     assert_eq!(rejected.len(), 1);
-    let physical = compile_physical_dag_candidates(&rejected, |_, _| {
+    let physical = compile_physical_dag_candidates(rejected.iter(), Vec::new(), |_, _| {
         panic!("invalid lifecycle context must not reach compilation")
     });
     assert_eq!(physical.len(), 1);
     let (metadata, error) = physical.iter().next().unwrap();
     assert_eq!(metadata.id, 17);
-    assert!(error.is_err());
+    assert!(matches!(
+        error,
+        Err(PhysicalCandidateError::Timing(timing))
+            if matches!(timing.as_ref(), CandidateTimingError::Lifecycle(_))
+    ));
     let mut counts = std::collections::BTreeMap::<usize, usize>::new();
     for (metadata, _) in timed.iter() {
         *counts.entry(metadata.logical_candidate).or_default() += 1;
     }
     let largest = *counts.values().max().unwrap();
     assert!(largest < timed.len());
-    assert!(logical
-        .with_timing_for_root(&17, context(), 4096, largest)
-        .is_err());
+    assert!(matches!(
+        logical.with_timing_for_root(&17, context(), 4096, largest),
+        Err(CandidateTimingError::ExpansionLimit(limit)) if limit == largest
+    ));
 }

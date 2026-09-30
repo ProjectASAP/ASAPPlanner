@@ -340,7 +340,7 @@ fn compile_without_readers_and_rebind_inputs() {
     let (scan, schema, batches) = fixture();
     let dag = plan(scan, &schema, ExecutionDataState::QUERY_ROWS);
     let compiled = compile(
-        &dag,
+        dag.as_view(),
         BTreeMap::from([(0, InputContract::bounded(schema.clone()))]),
         &[2],
     )
@@ -382,5 +382,5 @@ fn compilation_rejects_unknown_boundedness_for_sort() {
             emission: Emission::Unknown,
         },
     };
-    assert!(compile(&dag, BTreeMap::from([(0, input)]), &[2]).is_err());
+    assert!(compile(dag.as_view(), BTreeMap::from([(0, input)]), &[2]).is_err());
 }

@@ -38,7 +38,7 @@ async fn sql_filter_grouped_sum_executes_and_rebinds() {
         let space = search_workload(vec![("sql", logical)]);
         let selected = space
             .global_selection(&DefaultCostModel)
-            .assemble_selected_dag(&space.roots[0].1)
+            .assemble_selected_dag(&space.roots()[0].1)
             .unwrap()
             .unwrap();
         let dag = export_post_asap_dag(&selected).unwrap();
@@ -60,7 +60,7 @@ async fn sql_filter_grouped_sum_executes_and_rebinds() {
             .iter()
             .all(|field| matches!(field.dtype, SummaryFamilyType::Plain(_))));
         let plan = compile(
-            &dag,
+            dag.as_view(),
             BTreeMap::from([(u64::from(scan.id.0), InputContract::bounded(schema.clone()))]),
             &[u64::from(dag.root.0)],
         )
