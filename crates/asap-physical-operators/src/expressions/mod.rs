@@ -28,10 +28,12 @@ pub enum Expression {
         column: usize,
         name: String,
     },
-    /// Canonical encoding of a complete label map, identical to
+    /// Canonical encoding of a label map less `excluding`, identical to
     /// `promql_rows::encode_series_identity`.
     LabelIdentity {
         column: usize,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        excluding: Vec<String>,
     },
     Literal {
         value: Value,
@@ -129,7 +131,7 @@ impl Expression {
                 }
                 Ok((expected, false))
             }
-            Label { column, .. } | LabelIdentity { column } => {
+            Label { column, .. } | LabelIdentity { column, .. } => {
                 if plain(input, *column)?
                     != (
                         &DataType::Map {
@@ -291,7 +293,7 @@ impl Expression {
                 }
                 Value::Utf8(found.unwrap_or_else(|| "".into()))
             }
-            LabelIdentity { column } => {
+            LabelIdentity { column, excluding } => {
                 let Value::Map(entries) = &row[*column] else {
                     return Err(invalid("label identity requires a map"));
                 };
@@ -300,6 +302,9 @@ impl Expression {
                     let (Value::Utf8(key), Value::Utf8(value)) = (key, value) else {
                         return Err(invalid("label identity requires Utf8 entries"));
                     };
+                    if excluding.iter().any(|label| label.as_str() == key.as_ref()) {
+                        continue;
+                    }
                     if labels.insert(key.to_string(), value.to_string()).is_some() {
                         return Err(invalid("duplicate label name"));
                     }
