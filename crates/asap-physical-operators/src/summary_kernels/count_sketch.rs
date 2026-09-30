@@ -23,7 +23,8 @@ impl CountSketchAccumulator {
     }
 
     /// Adopt a sketch decoded from an edge frame whose updates were sampled
-    /// with probability `sample_p` in (0, 1]; `1` means unsampled.
+    /// with probability `sample_p` in (0, 1]; `1` means unsampled. Wire
+    /// formats that encode "unsampled" as `0` must map it to `1` first.
     pub fn from_sketch(sketch: CountSketch, sample_p: f64) -> Result<Self, KernelError> {
         Ok(Self {
             inner: sketch,
@@ -34,6 +35,14 @@ impl CountSketchAccumulator {
     /// Edge sampling probability, for deployments that persist this state.
     pub fn sample_p(&self) -> f64 {
         self.sample_p
+    }
+
+    /// Record that updates sampled at `sample_p` were applied to `inner` in
+    /// place (e.g. an ingest delta), under the same rule as `merge_with`.
+    pub fn merge_sample_p(&mut self, sample_p: f64) -> Result<(), KernelError> {
+        self.sample_p =
+            super::sampling::merged(self.sample_p, super::sampling::checked(sample_p)?)?;
+        Ok(())
     }
 
     /// Median-of-signed-rows point estimate for `key`, via

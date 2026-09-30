@@ -14,7 +14,9 @@ pub trait AggregateCore: Send + Sync {
     fn as_any(&self) -> &dyn std::any::Any;
 
     /// Mutable downcast, so a deployment can apply ingest deltas and merges to
-    /// a cached state in place instead of copying it for every frame.
+    /// a cached state in place instead of copying it for every frame. Sampled
+    /// kernels must also record the delta's probability with their
+    /// `merge_sample_p`.
     fn as_any_mut(&mut self) -> &mut dyn std::any::Any;
 
     /// Merge with a state of the same family and shape, leaving both inputs unchanged.

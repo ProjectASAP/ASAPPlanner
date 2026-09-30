@@ -19,7 +19,8 @@ impl DDSketchAccumulator {
     }
 
     /// Adopt a sketch decoded from an edge frame whose updates were sampled
-    /// with probability `sample_p` in (0, 1]; `1` means unsampled.
+    /// with probability `sample_p` in (0, 1]; `1` means unsampled. Wire
+    /// formats that encode "unsampled" as `0` must map it to `1` first.
     pub fn from_sketch(sketch: DdSketch, sample_p: f64) -> Result<Self, KernelError> {
         Ok(Self {
             inner: sketch,
@@ -30,6 +31,14 @@ impl DDSketchAccumulator {
     /// Edge sampling probability, for deployments that persist this state.
     pub fn sample_p(&self) -> f64 {
         self.sample_p
+    }
+
+    /// Record that updates sampled at `sample_p` were applied to `inner` in
+    /// place (e.g. an ingest delta), under the same rule as `merge_with`.
+    pub fn merge_sample_p(&mut self, sample_p: f64) -> Result<(), KernelError> {
+        self.sample_p =
+            super::sampling::merged(self.sample_p, super::sampling::checked(sample_p)?)?;
+        Ok(())
     }
 }
 
@@ -144,5 +153,16 @@ mod tests {
         assert_eq!(merged.estimate(&bare_count()).unwrap(), 8.0);
         let other = DDSketchAccumulator::from_sketch(DdSketch::new(0.01), 0.5).unwrap();
         assert!(sampled.merge_with(&other).is_err());
+    }
+
+    // A sampled delta applied in place to an unsampled base scales its readout by 1/p.
+    #[test]
+    fn in_place_delta_records_sample_p() {
+        let mut base = DDSketchAccumulator::new(0.01);
+        base.inner.update(1.0);
+        base.merge_sample_p(0.5).unwrap();
+        assert_eq!(base.estimate(&bare_count()).unwrap(), 2.0);
+        assert!(base.merge_sample_p(0.25).is_err());
+        assert!(base.merge_sample_p(0.0).is_err());
     }
 }
