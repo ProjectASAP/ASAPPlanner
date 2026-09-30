@@ -1341,114 +1341,6 @@ impl<'a> SketchAlgorithmStrategy<'a> {
         self.propose_with(&ranked, None)
     }
 
-    /// Fixed-window maintenance can finalize each series' counter state and
-    /// build a fresh heap or grouped Sum for that evaluation window. Deployment must provide
-    /// a complete, synchronized population and bind the matching window; this
-    /// candidate never incrementally adds one window's rates to another.
-    pub fn fixed_window_rate_candidates(&self, root: &Rc<QueryExpr>) -> Proposals {
-        fn place(node: &Rc<SummaryNode>) -> Option<Rc<SummaryNode>> {
-            let mut next = node.as_ref().clone();
-            match &mut next.expr {
-                SummaryExpr::ValueOperation {
-                    child,
-                    operation: ValueOperation::FinalizeExactAccumulator,
-                    timing,
-                } if matches!(&child.expr, SummaryExpr::SummaryAgg {
-                        family: SummaryFamilyType::ExactAggregate(ExactKind::Rate, _),
-                        reduction: Reduction::PerEntity, child: source, ..
-                    } if matches!(&source.expr, SummaryExpr::KeepPreAsap(source) if matches!(source.as_ref(), QueryExpr::TimeRange { .. }))) =>
-                {
-                    *timing = ExecutionTiming::IngestionTime;
-                }
-                SummaryExpr::ValueOperation { child, .. }
-                | SummaryExpr::SummaryAgg { child, .. } => *child = place(child)?,
-                SummaryExpr::SummaryEstimate { summary_input, .. } => {
-                    *summary_input = place(summary_input)?
-                }
-                _ => return None,
-            }
-            Some(Rc::new(next))
-        }
-        let mut proposals = self.propose_with(root, None);
-        proposals.candidates.retain_mut(|candidate| {
-            let Replacement::Summary(node) = &candidate.replacement else {
-                return false;
-            };
-            let Ok(dag) = asap_types::post_asap::compile_post_asap_dag(node) else {
-                return false;
-            };
-            if !dag.nodes.iter().any(|node| match &node.payload {
-                asap_types::post_asap::PostAsapOperatorPayload::SummaryAgg {
-                    family: SummaryFamilyType::Sketch(kind, _),
-                    ..
-                } => matches!(
-                    kind.algorithm(),
-                    SketchAlgorithm::CmsWithHeap | SketchAlgorithm::CountSketchWithHeap
-                ),
-                asap_types::post_asap::PostAsapOperatorPayload::SummaryAgg {
-                    family: SummaryFamilyType::ExactAggregate(ExactKind::Sum, _),
-                    ..
-                } => true,
-                _ => false,
-            }) {
-                return false;
-            }
-            let Some(placed) = place(node) else {
-                return false;
-            };
-            if asap_types::post_asap::compile_post_asap_dag(&placed).is_err() {
-                return false;
-            }
-            let Ok(placed) = finalize_query_candidate(placed, root) else {
-                return false;
-            };
-            candidate.replacement = Replacement::Summary(placed);
-            candidate
-                .rationale
-                .push_str("; fixed-window precompute over complete per-series counter states");
-            true
-        });
-        proposals
-    }
-
-    /// Retain grouped Sum after a per-series Rate readout as a query-time
-    /// candidate alongside its complete-window maintenance placement.
-    pub fn query_time_rate_aggregation_candidates(&self, root: &Rc<QueryExpr>) -> Proposals {
-        fn query_time(node: &Rc<SummaryNode>) -> Rc<SummaryNode> {
-            let mut next = node.as_ref().clone();
-            match &mut next.expr {
-                SummaryExpr::ValueOperation {
-                    child,
-                    operation: ValueOperation::FinalizeExactAccumulator,
-                    timing,
-                } if matches!(
-                    &child.expr,
-                    SummaryExpr::SummaryAgg {
-                        family: SummaryFamilyType::ExactAggregate(ExactKind::Rate, _),
-                        ..
-                    }
-                ) =>
-                {
-                    *timing = ExecutionTiming::QueryTime;
-                }
-                SummaryExpr::ValueOperation { child, .. }
-                | SummaryExpr::SummaryAgg { child, .. } => *child = query_time(child),
-                _ => {}
-            }
-            Rc::new(next)
-        }
-        let mut proposals = self.fixed_window_rate_candidates(root);
-        proposals.candidates.retain_mut(|candidate| {
-            let Replacement::Summary(node) = &candidate.replacement else { return false };
-            if !matches!(&node.expr, SummaryExpr::ValueOperation { child, operation: ValueOperation::FinalizeExactAccumulator, .. }
-                if matches!(&child.expr, SummaryExpr::SummaryAgg { family: SummaryFamilyType::ExactAggregate(ExactKind::Sum, _), .. })) { return false; }
-            candidate.replacement = Replacement::Summary(query_time(node));
-            candidate.rationale = "query-time grouped Sum over complete per-series Rate readouts".into();
-            true
-        });
-        proposals
-    }
-
     pub(crate) fn from_planning_inputs(planning_inputs: CandidatePlanningInputs<'a>) -> Self {
         Self { planning_inputs }
     }
@@ -2718,7 +2610,9 @@ fn realize_physical_summary_input(
 /// Emit `SummaryAgg` (recursively binding the child), plus the
 /// `SummaryEstimate` readout when `estimate` is set.
 // Retain the exact expression and schema while placing its value production
-// on the update path. Read-time consumers keep their original shared nodes.
+// on the update path. This is the initial layout for values feeding a summary;
+// lifecycle timing is authoritative. Read-time consumers keep their original
+// shared nodes.
 fn maintenance_exact_values(node: Rc<SummaryNode>) -> Option<Rc<SummaryNode>> {
     let expr = match &node.expr {
         // These guards can fall back at read time, but cannot recover a parent
@@ -2947,8 +2841,9 @@ fn construct_summary_agg(
         };
         Rc::clone(child)
     } else if snapshot_weighted {
-        // A fresh query-time summary consumes this evaluation's finalized rates.
-        // Moving rate snapshots must never accumulate across evaluations.
+        // Each evaluation's finalized rates feed a fresh summary; rate snapshots
+        // must never accumulate across evaluations. Query time is only the
+        // initial layout; a retained summary's lifecycle moves it to ingestion.
         finalize_query_candidate(bound_child, &input.child)?
     } else {
         let child = finalize_exact_accumulator_at(
