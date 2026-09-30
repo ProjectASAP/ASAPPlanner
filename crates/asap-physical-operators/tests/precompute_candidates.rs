@@ -673,7 +673,7 @@ fn population_topk_cuts_equal_per_frontier_compilation() {
     let roots = [u64::from(dag.root.0)];
     let compiled = compile(&dag, inputs.clone(), &roots).unwrap();
     // The root reads its population through a Sort helper numbered by the root.
-    let helper = u64::MAX - roots[0];
+    let helper = u64::MAX - (roots[0] << 16);
     assert_eq!(compiled.operator_name(helper), Some("Sort"));
     assert!(
         cut_candidate(&compiled, &[helper]).is_err(),
