@@ -216,31 +216,6 @@ The deployment decides both placement and the summary family.
 * Unknown cost stays unknown. It never becomes zero, and an alternative that
   cannot be priced is not selected.
 
-## Query-time raw data and mixed placement
-
-An `Ephemeral` state is built at query time, so the deployment must provide raw
-data as a query-time source (for example Prometheus raw series). If it cannot,
-that alternative is not offered.
-
-A single query may mix `Ephemeral` and stored inputs, with bounded staleness:
-
-* raw inputs are read at the query evaluation time `t_q`;
-* each stored input uses its latest complete revision, with watermark `t_s`;
-* the mix is admitted only if `t_q − t_s ≤ max_lag` for every stored input;
-  `max_lag` is configurable and defaults to one slide of that output;
-* the observed lag is reported with the result;
-* beyond the bound, the query takes the exact fallback. A silently stale mix is
-  never returned.
-
-## Failure and compatibility
-
-* **Fail closed.** A query or subtree that Planner cannot compile is answered
-  whole by the deployment's exact engine. Nothing is approximated, ignored or
-  computed by deployment-owned operators.
-* **Development-stage compatibility.** Persisted plans and stored formats carry
-  versions. A format change bumps the version and rejects old data with a clear
-  error. Old data is not migrated and is never misread.
-
 ## Example: store cost changes placement
 
 The following uses `sum by (job) (rate(m[1m]))`, evaluated every 10 s.
