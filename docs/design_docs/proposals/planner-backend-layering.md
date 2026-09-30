@@ -84,7 +84,6 @@ the earlier types, where one exists.
 | `CandidatePostASAPDAGs` with timing | The logical candidates with each admissible lifecycle assignment's timing, window framework and retention | None; lifecycle helpers return one selected `SummaryMaintenanceLifecyclePlan` | `CandidatePostASAPDAGs` with timing |
 | `PhysicalDAG` | Compiled operators and kernels with typed inputs, before runtime sources are bound | None | `PhysicalDAG` |
 | `CandidatePhysicalDAGs` | Physical candidates with their timing cuts, metadata and diagnostics, before deployment selection | None | `CandidatePhysicalDAGs` |
-| `BoundPhysicalDAG` | The execution graph after the deployment binds runtime sources | None (deployment-owned) | `BoundPhysicalDAG` |
 
 A candidate collection shares graphs across its candidates; it is not a copy
 of every complete DAG. Timing is attached to the shared logical graph, not
@@ -93,6 +92,11 @@ one physical compilation, and each candidate's precompute and query DAGs are
 cut from it on demand. The exported `PostAsapDag` form is an explicit
 export/import format, not an additional planning layer (see
 [Post-ASAP IR](../concepts/post-asap-ir.md#tree-and-exported-dag-forms)).
+
+Binding runtime sources is an execution step of a `PhysicalDAG`, not another
+DAG. At execution the deployment supplies a source for each typed input slot,
+the slots are checked against their contracts, and the graph runs; the bound
+instance lives only for that execution and is not persisted or compared.
 
 ### Responsibilities
 
