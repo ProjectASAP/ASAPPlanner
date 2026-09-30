@@ -19,11 +19,48 @@ enum ScalarState {
 
 /// Both the family and population layout survive persistence. Sharing counter
 /// arithmetic never authorizes a Rate state to answer an Increase readout.
+///
+/// Deserialization validates the payload against its declared family, so
+/// deployments can persist this state with any serde format without mirroring
+/// its shape.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(try_from = "ExactPayload")]
 pub struct ExactAccumulator {
     family: SummaryFamilyType,
     scalar: ScalarState,
     keyed: Option<HashMap<KeyByLabelValues, ScalarState>>,
+}
+
+#[derive(Deserialize)]
+struct ExactPayload {
+    family: SummaryFamilyType,
+    scalar: ScalarState,
+    keyed: Option<HashMap<KeyByLabelValues, ScalarState>>,
+}
+
+impl TryFrom<ExactPayload> for ExactAccumulator {
+    type Error = String;
+
+    fn try_from(payload: ExactPayload) -> Result<Self, String> {
+        let empty = Self::new(payload.family, payload.keyed.is_some())?;
+        let same_kind = |state: &ScalarState| {
+            std::mem::discriminant(state) == std::mem::discriminant(&empty.scalar)
+        };
+        if !same_kind(&payload.scalar)
+            || payload
+                .keyed
+                .iter()
+                .flat_map(HashMap::values)
+                .any(|s| !same_kind(s))
+        {
+            return Err("exact payload differs from its declared Planner family".into());
+        }
+        Ok(Self {
+            scalar: payload.scalar,
+            keyed: payload.keyed,
+            ..empty
+        })
+    }
 }
 
 /// Planned readout of an exact summary. `lookback_ms` is the logical PromQL
@@ -233,5 +270,70 @@ impl AggregateCore for ExactAccumulator {
                     })
                     .sum::<usize>()
             })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde::Serialize;
+
+    #[derive(Serialize)]
+    struct Payload {
+        family: SummaryFamilyType,
+        scalar: ScalarState,
+        keyed: Option<HashMap<KeyByLabelValues, ScalarState>>,
+    }
+
+    fn decode(payload: &Payload) -> Result<ExactAccumulator, rmp_serde::decode::Error> {
+        rmp_serde::from_slice(&rmp_serde::to_vec_named(payload).unwrap())
+    }
+
+    fn sum() -> SummaryFamilyType {
+        SummaryFamilyType::ExactAggregate(ExactKind::Sum, ExactParams::Sum)
+    }
+
+    // A persisted exact state decodes back to the same family, layout and readout.
+    #[test]
+    fn serialized_state_round_trips() {
+        let mut state = ExactAccumulator::new(sum(), true).unwrap();
+        let key = KeyByLabelValues::new_with_labels(vec!["a".into()]);
+        state.update(Some(&key), 2.5, 0);
+        let bytes = rmp_serde::to_vec_named(&state).unwrap();
+        let restored: ExactAccumulator = rmp_serde::from_slice(&bytes).unwrap();
+        assert_eq!(restored.family(), &sum());
+        assert_eq!(
+            restored.readout(Statistic::Sum, None, Some(&key)).unwrap(),
+            Some(2.5)
+        );
+    }
+
+    // Decoding rejects population states that differ from the declared family.
+    #[test]
+    fn decode_rejects_state_of_another_family() {
+        let scalar = Payload {
+            family: sum(),
+            scalar: ScalarState::Count(3),
+            keyed: None,
+        };
+        assert!(decode(&scalar).is_err());
+        let key = KeyByLabelValues::new_with_labels(vec!["a".into()]);
+        let keyed = Payload {
+            family: sum(),
+            scalar: ScalarState::Sum(0.0),
+            keyed: Some(HashMap::from([(key, ScalarState::Max(Some(1.0)))])),
+        };
+        assert!(decode(&keyed).is_err());
+    }
+
+    // Decoding rejects families that have no exact Planner state.
+    #[test]
+    fn decode_rejects_unsupported_family() {
+        let payload = Payload {
+            family: SummaryFamilyType::ExactAggregate(ExactKind::Sum, ExactParams::Count),
+            scalar: ScalarState::Sum(0.0),
+            keyed: None,
+        };
+        assert!(decode(&payload).is_err());
     }
 }
