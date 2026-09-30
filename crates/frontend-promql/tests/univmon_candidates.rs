@@ -8,7 +8,7 @@ use asap_aware_mapping::replacement::{default_strategies, search_workload_with_t
 use asap_aware_mapping::{Replacement, ReplacementStrategy, SketchAlgorithmStrategy, TargetSubDAG};
 mod support;
 use asap_types::post_asap::{
-    compile_post_asap_dag, cse::share_common_summary_subtrees, AccuracyError, BoundExpr,
+    cse::share_common_summary_subtrees, export_post_asap_dag, AccuracyError, BoundExpr,
     CompositionOperator, ErrorMetric, PostASAPNode, ProbabilityExpr, ResultGuarantee,
     SketchAlgorithm, SketchQuery, SummaryExpr, SummaryFamilyType, SummaryInputExpr,
 };
@@ -115,7 +115,7 @@ fn four_readouts_share_one_value_frequency_state_and_keep_honest_guarantees() {
                 "production has no calibrated error bound"
             );
         }
-        compile_post_asap_dag(root).unwrap();
+        export_post_asap_dag(root).unwrap();
     }
 }
 

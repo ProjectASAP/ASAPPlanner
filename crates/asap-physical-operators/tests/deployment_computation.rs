@@ -54,7 +54,7 @@ fn exact_dag(query: &str) -> PostASAPDAGTransport {
         .into_iter()
         .find_map(|candidate| match candidate.replacement {
             Replacement::Summary(node) => {
-                let dag = compile_post_asap_dag(&node).ok()?;
+                let dag = export_post_asap_dag(&node).ok()?;
                 dag.nodes
                     .iter()
                     .all(|n| !matches!(&n.payload, PostAsapOperatorPayload::SummaryAgg { family, .. } if !matches!(family, SummaryFamilyType::ExactAggregate(..))))
@@ -72,7 +72,7 @@ fn population_dag(query: &str) -> PostASAPDAGTransport {
     )
     .candidate(&root)
     .unwrap();
-    compile_post_asap_dag(&selected).unwrap()
+    export_post_asap_dag(&selected).unwrap()
 }
 
 /// Raw scan nodes are the frontier; everything above them is compiled.
@@ -640,7 +640,7 @@ fn stored_count_min_bare_count_compiles_to_a_readout() {
             .into_iter()
             .find_map(|candidate| match candidate.replacement {
                 Replacement::Summary(node) => {
-                    let dag = compile_post_asap_dag(&node).ok()?;
+                    let dag = export_post_asap_dag(&node).ok()?;
                     let bare_count = dag.nodes.iter().any(|n| {
                         matches!(
                             &n.payload,

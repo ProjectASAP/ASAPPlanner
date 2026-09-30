@@ -158,7 +158,7 @@ pub fn compile(
     frontiers: &[NodeId],
     roots: &[NodeId],
 ) -> Result<PhysicalDAG, Error> {
-    preflight_depth(dag)?;
+    preflight_depth(&dag.as_view())?;
     dag.validate().map_err(|e| invalid(e.to_string()))?;
     let nodes = dag
         .nodes

@@ -38,8 +38,9 @@ pub mod promql_values;
 
 mod candidates;
 pub use candidates::{
-    compile_candidate, compile_candidates, cut_candidate, enumerate_frontiers,
-    frontier_from_timing, select_candidate, CandidateCost, CandidateSelection, PhysicalCandidate,
+    compile_candidate, compile_candidates, compile_timed_candidates, cut_candidate,
+    enumerate_frontiers, frontier_from_timing, select_candidate, CandidateCost,
+    CandidatePhysicalDAGs, CandidateSelection, PhysicalCandidate, PhysicalDAGCandidate,
 };
 
 mod compiled;
@@ -47,14 +48,64 @@ pub use compiled::{InputContract, PhysicalDAG};
 
 mod row_values;
 
+/// Read-only access to the one logical computation, or an imported transport
+/// document. Both paths use the same validator and operator compiler.
+pub trait PhysicalCompileInput {
+    fn with_view<T>(
+        &self,
+        compile: impl FnOnce(planner_types::post_asap::PostASAPDAGView<'_>) -> Result<T, Error>,
+    ) -> Result<T, Error>;
+}
+impl PhysicalCompileInput for PostASAPDAGTransport {
+    fn with_view<T>(
+        &self,
+        compile: impl FnOnce(planner_types::post_asap::PostASAPDAGView<'_>) -> Result<T, Error>,
+    ) -> Result<T, Error> {
+        compile(self.as_view())
+    }
+}
+impl PhysicalCompileInput for planner_types::post_asap::PostASAPDAGIndex {
+    fn with_view<T>(
+        &self,
+        compile: impl FnOnce(planner_types::post_asap::PostASAPDAGView<'_>) -> Result<T, Error>,
+    ) -> Result<T, Error> {
+        let nodes = self.node_views();
+        compile(planner_types::post_asap::PostASAPDAGView {
+            nodes: &nodes,
+            edges: self.edges(),
+            root: self.root_id,
+        })
+    }
+}
+impl PhysicalCompileInput for planner_types::post_asap::PostASAPDAG {
+    fn with_view<T>(
+        &self,
+        compile: impl FnOnce(planner_types::post_asap::PostASAPDAGView<'_>) -> Result<T, Error>,
+    ) -> Result<T, Error> {
+        planner_types::post_asap::index_post_asap_dag(self)
+            .map_err(|e| invalid(e.to_string()))?
+            .with_view(compile)
+    }
+}
+
+impl PhysicalCompileInput for planner_types::post_asap::PostASAPDAGAssignment {
+    fn with_view<T>(
+        &self,
+        compile: impl FnOnce(planner_types::post_asap::PostASAPDAGView<'_>) -> Result<T, Error>,
+    ) -> Result<T, Error> {
+        self.with_view(compile)
+            .map_err(|e| invalid(e.to_string()))?
+    }
+}
+
 /// Compile computation without opening or retaining deployment readers.
 /// Input contracts identify explicit boundaries selected by maintenance planning.
 pub fn compile(
-    dag: &PostASAPDAGTransport,
+    dag: &impl PhysicalCompileInput,
     inputs: BTreeMap<NodeId, InputContract>,
     roots: &[NodeId],
 ) -> Result<PhysicalDAG, Error> {
-    compile_internal(dag, inputs, roots)
+    dag.with_view(|view| compile_internal(&view, inputs, roots))
 }
 
 /// Convenience for callers that already resolved inputs. Lowering still uses
@@ -123,7 +174,7 @@ fn helper_id(node: NodeId, index: u64) -> NodeId {
 }
 
 fn compile_internal(
-    dag: &PostASAPDAGTransport,
+    dag: &planner_types::post_asap::PostASAPDAGView<'_>,
     mut sources: BTreeMap<NodeId, InputContract>,
     roots: &[NodeId],
 ) -> Result<PhysicalDAG, Error> {
@@ -1047,7 +1098,7 @@ impl PhysicalOperator<Batch, Schema> for CheckedSource<'_> {
 }
 
 // Bound recursion before invoking the upstream recursive provenance validator.
-fn preflight_depth(dag: &PostASAPDAGTransport) -> Result<(), Error> {
+fn preflight_depth(dag: &planner_types::post_asap::PostASAPDAGView<'_>) -> Result<(), Error> {
     let mut remaining = dag
         .nodes
         .iter()
@@ -1057,7 +1108,7 @@ fn preflight_depth(dag: &PostASAPDAGTransport) -> Result<(), Error> {
         return Err(invalid("duplicate Planner node"));
     }
     let mut consumers = BTreeMap::<_, Vec<_>>::new();
-    for edge in &dag.edges {
+    for edge in dag.edges {
         if !remaining.contains_key(&edge.producer) {
             return Err(invalid("missing Planner edge producer"));
         }

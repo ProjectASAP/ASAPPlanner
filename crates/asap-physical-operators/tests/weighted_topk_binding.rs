@@ -88,7 +88,7 @@ fn assert_weighted_binding(evidence: &dyn AccuracyEvidenceProvider, algorithm: S
             _ => None,
         })
         .unwrap();
-    let dag = compile_post_asap_dag(&plan).unwrap();
+    let dag = export_post_asap_dag(&plan).unwrap();
     let build=dag.nodes.iter().find(|node|matches!(&node.payload,PostAsapOperatorPayload::SummaryAgg{family:SummaryFamilyType::Sketch(kind,_),..}if kind.algorithm()==&algorithm)).unwrap();
     let rate_id = dag
         .edges
@@ -352,7 +352,7 @@ fn check_direct_rate_topk(dynamic: bool) {
                 "Rate must be supplied by its exact stored-state readout"
             );
         }
-        let dag = compile_post_asap_dag(candidate).unwrap();
+        let dag = export_post_asap_dag(candidate).unwrap();
         assert!(dag.nodes.iter().any(|node| matches!(&node.payload,
             PostAsapOperatorPayload::SummaryAgg { family: SummaryFamilyType::Sketch(kind, _), .. } if kind.algorithm() == &algorithm)));
         let build = dag.nodes.iter().find(|node| matches!(&node.payload,
@@ -655,7 +655,7 @@ fn spatial_topk_exposes_signed_heap_candidate_over_complete_snapshot() {
             _ => None,
         })
         .expect("signed spatial TopK must expose CountSketch with heap");
-    let dag = compile_post_asap_dag(selected).unwrap();
+    let dag = export_post_asap_dag(selected).unwrap();
     let raw = dag
         .nodes
         .iter()
@@ -844,7 +844,7 @@ fn continuously_maintained_dag(candidate: &Rc<PostASAPNode>) -> PostASAPDAGTrans
     lifecycles
         .select(&choices)
         .unwrap()
-        .execution_timed_dag()
+        .export_timed_dag()
         .unwrap()
 }
 

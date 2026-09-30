@@ -126,7 +126,7 @@ fn inventories(query: &str, accuracy: AccuracyTarget) -> (Vec<Dag>, Vec<Dag>) {
 
 fn carries_identity(dag: &Dag) -> bool {
     dag.iter().any(|(_, root)| {
-        compile_post_asap_dag(root)
+        export_post_asap_dag(root)
             .unwrap()
             .nodes
             .iter()

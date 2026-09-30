@@ -132,5 +132,5 @@ async fn corr_survives_exact_plan_compilation() {
         panic!("expected exact fallback");
     };
     assert_eq!(aggregate(retained).0, aggregate(&query).0);
-    asap_types::post_asap::compile_post_asap_dag(&plan).unwrap();
+    asap_types::post_asap::export_post_asap_dag(&plan).unwrap();
 }

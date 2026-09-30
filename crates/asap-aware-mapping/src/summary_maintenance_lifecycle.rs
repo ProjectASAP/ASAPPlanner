@@ -21,7 +21,7 @@ use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use asap_types::post_asap::{
-    compile_post_asap_dag_with_node_ids, EvaluationSchedule, ExecutionDataStateError,
+    export_post_asap_dag_with_node_ids, EvaluationSchedule, ExecutionDataStateError,
     ExecutionTiming, OutputRepresentation, PostASAPDAGTransport, PostASAPNode,
     PostAsapDagValidationError, PostAsapNodeId, ResultGuarantee, SummaryExpr,
     SummaryMaintenanceLifecycle, SummaryMaintenanceLifecycleGuarantee, SummaryMaintenanceMode,
@@ -228,6 +228,8 @@ pub enum SummaryMaintenanceTimingError {
     /// one; this arises only for a plan whose root or deployments were edited.
     #[error("node {0:?} maintains state that has no summary-maintenance lifecycle")]
     UnplannedMaintainedState(PostAsapNodeId),
+    #[error("timing index belongs to a different logical graph")]
+    GraphMismatch,
     #[error(transparent)]
     InvalidPhases(#[from] PostAsapDagValidationError),
 }
@@ -244,13 +246,26 @@ impl SummaryMaintenanceLifecyclePlan {
     /// maintained populations as to `SummaryAgg` states; a population feeding
     /// a `SummaryAgg` is one of its inputs. Timings already on the root are
     /// ignored.
-    pub fn execution_timed_dag(
+    pub fn export_timed_dag(&self) -> Result<PostASAPDAGTransport, SummaryMaintenanceTimingError> {
+        let index = Rc::new(asap_types::post_asap::index_post_asap_dag(&self.root)?);
+        Ok(self.execution_assignment(index)?.to_transport()?)
+    }
+
+    /// Derive lifecycle timing over a shared index; no logical operators are
+    /// cloned or rewritten. Window/retention commitments remain on this plan.
+    pub fn execution_assignment(
         &self,
-    ) -> Result<PostASAPDAGTransport, SummaryMaintenanceTimingError> {
-        let compiled = compile_post_asap_dag_with_node_ids(&self.root)?;
-        let dag = compiled.dag;
+        index: Rc<asap_types::post_asap::PostASAPDAGIndex>,
+    ) -> Result<asap_types::post_asap::PostASAPDAGAssignment, SummaryMaintenanceTimingError> {
+        if !index
+            .node_ids
+            .summary_node(index.root_id)
+            .is_some_and(|root| Rc::ptr_eq(root, &self.root))
+        {
+            return Err(SummaryMaintenanceTimingError::GraphMismatch);
+        }
         for population in &standalone_populations(&self.root) {
-            let id = compiled
+            let id = index
                 .node_ids
                 .node_id(population)
                 .expect("collected population belongs to the compiled DAG");
@@ -278,15 +293,16 @@ impl SummaryMaintenanceLifecyclePlan {
         while let Some(id) = pending.pop() {
             if ingestion.insert(id) {
                 pending.extend(
-                    dag.edges
+                    index
+                        .edges()
                         .iter()
                         .filter(|edge| edge.consumer == id)
                         .map(|edge| edge.producer),
                 );
             }
         }
-        let phases = dag
-            .nodes
+        let phases = index
+            .node_views()
             .iter()
             .map(|node| {
                 let timing = if ingestion.contains(&node.id) {
@@ -297,7 +313,9 @@ impl SummaryMaintenanceLifecyclePlan {
                 (node.id, timing)
             })
             .collect();
-        Ok(dag.with_execution_phases(&phases)?)
+        Ok(asap_types::post_asap::PostASAPDAGAssignment::new(
+            index, phases,
+        )?)
     }
 }
 
@@ -383,6 +401,7 @@ pub enum SummaryMaintenanceLifecycleSelectionError {
 /// Planner selection ([`plan_summary_maintenance_lifecycles`]) and a
 /// deployment's explicit choice ([`Self::select`]) both finish from this value,
 /// so they produce the same [`SummaryMaintenanceLifecyclePlan`] shape.
+#[derive(Clone)]
 pub struct SummaryMaintenanceLifecycleCandidates<'a> {
     /// Unselected plan: deployments carry alternatives but no guarantee or
     /// window framework.
@@ -397,6 +416,8 @@ pub struct SummaryMaintenanceLifecycleCandidates<'a> {
 /// Why an explicit per-state lifecycle choice cannot be bound.
 #[derive(Debug, thiserror::Error, PartialEq)]
 pub enum SummaryMaintenanceLifecycleChoiceError {
+    #[error("lifecycle assignment expansion exceeds the requested limit {0}")]
+    ExpansionLimit(usize),
     #[error("summary {0:?} is not a deployment of this root")]
     UnknownSummary(PostAsapNodeId),
     #[error("summary {0:?} is chosen more than once")]
@@ -414,6 +435,14 @@ pub enum SummaryMaintenanceLifecycleChoiceError {
     IncompatibleEvaluationSchedules,
     #[error("the cost model supplied no complete estimate for the chosen combination")]
     NoCompleteEstimate,
+}
+
+/// One enumerated combination, including its rejection when it is infeasible.
+/// A successful unpriced plan still needs window/evidence binding before installation.
+#[derive(Debug)]
+pub struct LifecycleAssignmentCandidate {
+    pub choices: Vec<(PostAsapNodeId, SummaryMaintenanceLifecycle)>,
+    pub plan: Result<SummaryMaintenanceLifecyclePlan, SummaryMaintenanceLifecycleChoiceError>,
 }
 
 impl SummaryMaintenanceLifecycleCandidates<'_> {
@@ -480,8 +509,58 @@ impl SummaryMaintenanceLifecycleCandidates<'_> {
     /// then obtained exactly as for Planner selection, so window framework and
     /// cost are the model's and unknown cost is never replaced by zero.
     pub fn select(
+        self,
+        choices: &[(PostAsapNodeId, SummaryMaintenanceLifecycle)],
+    ) -> Result<SummaryMaintenanceLifecyclePlan, SummaryMaintenanceLifecycleChoiceError> {
+        self.bind_assignment(choices, true)
+    }
+
+    /// Enumerate assignments without choosing a winner. Unknown costs remain
+    /// unknown; rejected combinations retain an error alongside their choices.
+    /// Expansion is lazy and refuses an insufficient budget before yielding.
+    pub fn assignments(
+        &self,
+        limit: usize,
+    ) -> Result<
+        impl Iterator<Item = LifecycleAssignmentCandidate> + '_,
+        SummaryMaintenanceLifecycleChoiceError,
+    > {
+        let count = self.plan.deployments.iter().try_fold(1usize, |n, d| {
+            n.checked_mul(d.alternatives.len())
+                .filter(|n| *n <= limit)
+                .ok_or(SummaryMaintenanceLifecycleChoiceError::ExpansionLimit(
+                    limit,
+                ))
+        })?;
+        if count > limit {
+            return Err(SummaryMaintenanceLifecycleChoiceError::ExpansionLimit(
+                limit,
+            ));
+        }
+        Ok((0..count).map(move |mut ordinal| {
+            let choices = self
+                .plan
+                .deployments
+                .iter()
+                .map(|deployment| {
+                    let alternative =
+                        &deployment.alternatives[ordinal % deployment.alternatives.len()];
+                    ordinal /= deployment.alternatives.len();
+                    (
+                        deployment.post_asap_node_id,
+                        alternative.summary_maintenance_lifecycle.clone(),
+                    )
+                })
+                .collect::<Vec<_>>();
+            let plan = self.clone().bind_assignment(&choices, false);
+            LifecycleAssignmentCandidate { choices, plan }
+        }))
+    }
+
+    fn bind_assignment(
         mut self,
         choices: &[(PostAsapNodeId, SummaryMaintenanceLifecycle)],
+        require_cost: bool,
     ) -> Result<SummaryMaintenanceLifecyclePlan, SummaryMaintenanceLifecycleChoiceError> {
         use SummaryMaintenanceLifecycleChoiceError as E;
         let deployments = &self.plan.deployments;
@@ -501,7 +580,11 @@ impl SummaryMaintenanceLifecycleCandidates<'_> {
                 .iter()
                 .find(|alternative| alternative.summary_maintenance_lifecycle == *lifecycle)
                 .ok_or(E::NotAnAlternative(*id))?;
-            if !context.eligible(alternative) {
+            if !(context.eligible(alternative)
+                || (!require_cost
+                    && alternative.rejection
+                        == Some(SummaryMaintenanceLifecycleRejection::MissingCostEvidence)))
+            {
                 return Err(E::Rejected {
                     post_asap_node_id: *id,
                     rejection: alternative.rejection.clone(),
@@ -509,6 +592,10 @@ impl SummaryMaintenanceLifecycleCandidates<'_> {
             }
             chosen[index] = Some(alternative);
         }
+        let all_costs_known = chosen
+            .iter()
+            .flatten()
+            .all(|alternative| alternative.total_cost.is_some());
         let selected = chosen
             .into_iter()
             .enumerate()
@@ -530,15 +617,31 @@ impl SummaryMaintenanceLifecycleCandidates<'_> {
         if !context.schedules_compatible(&selected) {
             return Err(E::IncompatibleEvaluationSchedules);
         }
-        let estimate = context
-            .estimate(deployments, &selected)
-            .ok_or(E::NoCompleteEstimate)?;
+        let estimate = if all_costs_known
+            || self
+                .cost_model
+                .complete_summary_candidate_estimate_covers_lifecycle_costs()
+        {
+            context.estimate(deployments, &selected)
+        } else {
+            None
+        };
+        if require_cost && estimate.is_none() {
+            return Err(E::NoCompleteEstimate);
+        }
         let guarantees = selected
             .into_iter()
             .map(|(index, guarantee, _)| (index, guarantee))
             .collect();
-        apply_selection(&mut self.plan.deployments, guarantees, &estimate);
-        Ok(self.finish(Some(estimate)))
+        if let Some(estimate) = &estimate {
+            apply_selection(&mut self.plan.deployments, guarantees, estimate);
+        } else {
+            for (index, guarantee) in guarantees {
+                self.plan.deployments[index].summary_maintenance_lifecycle_guarantee =
+                    Some(guarantee);
+            }
+        }
+        Ok(self.finish(estimate))
     }
 }
 
@@ -674,7 +777,7 @@ fn enumerate_with_profile<'a>(
         StateKind::SummaryAgg,
     );
     summaries.extend(standalone_populations(&root));
-    let node_ids = compile_post_asap_dag_with_node_ids(&root)?.node_ids;
+    let node_ids = export_post_asap_dag_with_node_ids(&root)?.node_ids;
     let components = summary_state_components(&summaries);
     let deployments: Vec<SummaryMaintenanceDeployment> = summaries
         .into_iter()
@@ -2322,6 +2425,49 @@ mod tests {
         assert_eq!(plan.update_rate, None);
     }
 
+    /// Generation keeps unpriced legal assignments and rejected choices visible;
+    /// the budget is checked before iteration and every assignment shares its root.
+    #[test]
+    fn assignment_generation_preserves_unknown_costs_and_graph_identity() {
+        let root = summary();
+        let workload = workload(vec![], vec![repeating()], continuous(1_000, 60_000));
+        let candidates = enumerate_summary_maintenance_lifecycles(
+            root.clone(),
+            WorkloadDemand::new_without_data(&workload, &[0]),
+            1_000,
+            Some(Horizon(10.0)),
+            SummaryMaintenanceLifecycleCapabilities::ALL,
+            &crate::cost_model::DefaultCostModel,
+        )
+        .unwrap();
+        assert!(candidates.assignments(0).is_err());
+        let assignments = candidates.assignments(4096).unwrap().collect::<Vec<_>>();
+        assert_eq!(
+            assignments.len(),
+            candidates
+                .deployments()
+                .iter()
+                .map(|d| d.alternatives.len())
+                .product::<usize>()
+        );
+        let index = Rc::new(asap_types::post_asap::index_post_asap_dag(&root).unwrap());
+        let mut legal = 0;
+        for candidate in assignments {
+            if let Ok(plan) = candidate.plan {
+                legal += 1;
+                assert!(Rc::ptr_eq(&plan.root, &root));
+                assert!(plan.summary_total_cost.is_none());
+                let timed = plan.execution_assignment(index.clone()).unwrap();
+                assert!(Rc::ptr_eq(timed.index(), &index));
+                assert_eq!(
+                    timed.to_transport().unwrap(),
+                    plan.export_timed_dag().unwrap()
+                );
+            }
+        }
+        assert!(legal > 0);
+    }
+
     #[test]
     fn unknown_costs_do_not_make_a_long_lived_lifecycle_win() {
         let plan = plan_summary_maintenance_lifecycles(
@@ -3055,7 +3201,7 @@ mod tests {
         let dag = candidates
             .select(&choice)
             .unwrap()
-            .execution_timed_dag()
+            .export_timed_dag()
             .unwrap();
         dag.validate().unwrap();
         dag
@@ -3238,7 +3384,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            plan.execution_timed_dag().unwrap_err(),
+            plan.export_timed_dag().unwrap_err(),
             SummaryMaintenanceTimingError::UnselectedLifecycle(
                 plan.deployments[0].post_asap_node_id
             )
@@ -3252,10 +3398,7 @@ mod tests {
             &UnitCosts,
         )
         .unwrap();
-        assert_eq!(
-            timings(&raw.execution_timed_dag().unwrap()),
-            [("raw", QUERY)]
-        );
+        assert_eq!(timings(&raw.export_timed_dag().unwrap()), [("raw", QUERY)]);
     }
 
     /// A strategy-built `sum(a)` over one maintained current-series population.
@@ -3356,7 +3499,7 @@ mod tests {
             .all(|alternative| alternative.total_cost.is_none()));
         assert!(deployment.summary_maintenance_lifecycle_guarantee.is_none());
         assert_eq!(
-            plan.execution_timed_dag().unwrap_err(),
+            plan.export_timed_dag().unwrap_err(),
             SummaryMaintenanceTimingError::UnselectedLifecycle(deployment.post_asap_node_id)
         );
     }
@@ -3408,7 +3551,7 @@ mod tests {
             Some(SummaryMaintenanceLifecycle::Shared { .. })
         ));
         assert_eq!(
-            population_timings(&plan.execution_timed_dag().unwrap()),
+            population_timings(&plan.export_timed_dag().unwrap()),
             [("raw", INGEST), ("population", INGEST), ("readout", QUERY)]
         );
     }
@@ -3583,7 +3726,7 @@ mod tests {
         .unwrap();
         let id = plan.deployments.remove(0).post_asap_node_id;
         assert_eq!(
-            plan.execution_timed_dag(),
+            plan.export_timed_dag(),
             Err(SummaryMaintenanceTimingError::UnplannedMaintainedState(id))
         );
     }

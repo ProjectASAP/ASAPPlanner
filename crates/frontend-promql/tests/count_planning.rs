@@ -9,7 +9,7 @@ use asap_aware_mapping::{
 };
 mod support;
 use asap_types::post_asap::{
-    compile_post_asap_dag, ExactKind, NonNegativeWeightProof, PostAsapOperatorPayload,
+    export_post_asap_dag, ExactKind, NonNegativeWeightProof, PostAsapOperatorPayload,
     SketchAlgorithm, SummaryExpr, SummaryFamilyType, SummaryInputExpr, WeightDomain,
 };
 use asap_types::types::AccuracyTarget;
@@ -98,7 +98,7 @@ fn frequency_count_candidates_use_unit_weights() {
             ) {
                 continue;
             }
-            let dag = compile_post_asap_dag(node).unwrap();
+            let dag = export_post_asap_dag(node).unwrap();
             assert!(
                 dag.nodes.iter().any(|node| matches!(
                     &node.payload,
@@ -235,7 +235,7 @@ fn cms_count_updates_total_ten_for_zero_positive_and_negative_samples() {
             let Replacement::Summary(node) = &candidate.replacement else {
                 return None;
             };
-            let dag = compile_post_asap_dag(node).unwrap();
+            let dag = export_post_asap_dag(node).unwrap();
             dag.nodes
                 .iter()
                 .any(|node| {

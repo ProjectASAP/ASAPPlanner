@@ -18,7 +18,7 @@ use asap_physical_operators::{
     AggregateCore, KeyByLabelValues, Statistic,
 };
 use asap_types::post_asap::{
-    compile_post_asap_dag, EntityIdentity, ExactKind, PostASAPDAGTransport, PostASAPNode,
+    export_post_asap_dag, EntityIdentity, ExactKind, PostASAPDAGTransport, PostASAPNode,
     PostAsapOperatorPayload, SketchAlgorithm, SketchQuery, SummaryFamilyType, SummaryInputExpr,
     SummaryUpdate,
 };
@@ -409,7 +409,7 @@ fn raw_sample_summaries_compile_and_match_their_kernels() {
     let mut checked = BTreeMap::new();
     for (query, accuracy) in queries {
         for candidate in candidates(query, accuracy.clone()) {
-            let dag = compile_post_asap_dag(&candidate).unwrap();
+            let dag = export_post_asap_dag(&candidate).unwrap();
             for (source, root) in raw_summaries(&dag) {
                 match check(query, &dag, source, root, &rows) {
                     Ok(family) => {
@@ -465,7 +465,7 @@ fn grouped_raw_summary(
     )
     .pop()
     .unwrap();
-    let mut dag = compile_post_asap_dag(&candidate).unwrap();
+    let mut dag = export_post_asap_dag(&candidate).unwrap();
     let (source, root) = raw_summaries(&dag)[0];
     let node = dag
         .nodes

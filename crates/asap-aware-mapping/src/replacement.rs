@@ -6897,7 +6897,7 @@ mod tests {
             }
         }
         let mut shape =
-            serde_json::to_value(asap_types::post_asap::compile_post_asap_dag(node).unwrap())
+            serde_json::to_value(asap_types::post_asap::export_post_asap_dag(node).unwrap())
                 .unwrap();
         strip(&mut shape);
         shape
@@ -7148,7 +7148,7 @@ mod tests {
             .unwrap()
             .expect("exact ranking is legal for an approximate request");
         assert!(node.guarantee.as_ref().unwrap().is_exact());
-        asap_types::post_asap::compile_post_asap_dag(&node).unwrap();
+        asap_types::post_asap::export_post_asap_dag(&node).unwrap();
     }
 
     // Exact Top-K consumes the Planner's maintained temporal values.
@@ -7200,7 +7200,7 @@ mod tests {
             assert_eq!(keys.len(), 1);
             assert!(!keys[0].ascending);
             assert_eq!(node.schema, values.schema);
-            asap_types::post_asap::compile_post_asap_dag(&node).unwrap();
+            asap_types::post_asap::export_post_asap_dag(&node).unwrap();
         }
     }
 

@@ -274,7 +274,7 @@ fn continuous_lifecycle_compiles_and_executes_spatial_kll() {
         values::{Batch, Value},
     };
     use asap_types::{
-        post_asap::{compile_post_asap_dag, PostAsapOperatorPayload, SummaryFamilyType},
+        post_asap::{export_post_asap_dag, PostAsapOperatorPayload, SummaryFamilyType},
         pre_asap::DataType,
     };
     use std::{collections::BTreeMap, sync::Arc};
@@ -292,7 +292,7 @@ fn continuous_lifecycle_compiles_and_executes_spatial_kll() {
             .summary_maintenance_lifecycle,
         SummaryMaintenanceLifecycle::ContinuouslyMaintained
     );
-    let dag = compile_post_asap_dag(&selected.root).unwrap();
+    let dag = export_post_asap_dag(&selected.root).unwrap();
     let build = dag
         .nodes
         .iter()
@@ -482,7 +482,7 @@ fn lifecycle_timed_dag(
     let dag = candidates
         .select(&choices)
         .unwrap()
-        .execution_timed_dag()
+        .export_timed_dag()
         .unwrap();
     (dag, states)
 }
@@ -529,8 +529,8 @@ fn planner_lifecycle_selection_reproduces_strategy_timing() {
                         != SummaryMaintenanceLifecycle::Ephemeral
                 })
         }));
-        let strategy = asap_types::post_asap::compile_post_asap_dag(&plan.root).unwrap();
-        assert_eq!(plan.execution_timed_dag().unwrap(), strategy, "{query}");
+        let strategy = asap_types::post_asap::export_post_asap_dag(&plan.root).unwrap();
+        assert_eq!(plan.export_timed_dag().unwrap(), strategy, "{query}");
     }
 }
 
@@ -742,7 +742,7 @@ fn chosen_population_lifecycle_decides_precompute_contents() {
         let dag = candidates
             .select(&[(id, lifecycle.clone())])
             .unwrap()
-            .execution_timed_dag()
+            .export_timed_dag()
             .unwrap();
         let population = dag.nodes.iter().find(|node| node.id == id).unwrap();
         let PostAsapOperatorPayload::Value {
@@ -906,7 +906,7 @@ fn grouped_rate_sum_placement_is_a_lifecycle_choice() {
         let dag = lifecycles
             .select(&choices)
             .unwrap()
-            .execution_timed_dag()
+            .export_timed_dag()
             .unwrap();
         let raw = dag
             .nodes

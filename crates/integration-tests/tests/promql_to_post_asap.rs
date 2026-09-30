@@ -20,7 +20,7 @@ use asap_aware_mapping::{
 };
 use asap_integration_tests::fixtures::lower_promql;
 use asap_types::post_asap::{
-    compile_post_asap_dag, CompositionOperator, EntityIdentity, ExactKind, ExactParams,
+    export_post_asap_dag, CompositionOperator, EntityIdentity, ExactKind, ExactParams,
     GroupingStrategy, PostASAPNode, SketchAlgorithm, SketchKind, SketchParams, SketchQuery,
     SummaryExpr, SummaryFamilyType, SummaryInputExpr, SummarySchema, SummaryUpdate, ValueOperation,
 };
@@ -292,7 +292,7 @@ fn grouped_rate_topk_consumes_finalized_rate_values() {
             _ => None,
         })
         .expect("rate-weighted CMS plan");
-    let dag = compile_post_asap_dag(&plan).unwrap();
+    let dag = export_post_asap_dag(&plan).unwrap();
     assert!(!dag.nodes.iter().any(|node| matches!(
         node.payload,
         asap_types::post_asap::PostAsapOperatorPayload::RelationalJoin { .. }
@@ -375,7 +375,7 @@ fn weighted_topk_exports_symbolic_evidence_requirements() {
     let Replacement::Summary(node) = &candidate.replacement else {
         panic!("summary candidate")
     };
-    let dag = compile_post_asap_dag(node).unwrap();
+    let dag = export_post_asap_dag(node).unwrap();
     let exported = serde_json::to_string(&dag).unwrap();
     assert!(exported.contains("topk_max_distinct_items"));
     assert!(exported.contains("topk_membership_margin"));
@@ -503,7 +503,7 @@ fn rate_and_increase_topk_use_summary_scores_and_grouped_limits() {
                 ..
             }
         ));
-        let dag = compile_post_asap_dag(&plan).unwrap();
+        let dag = export_post_asap_dag(&plan).unwrap();
         for phase in [
             asap_types::post_asap::ExecutionTiming::IngestionTime,
             asap_types::post_asap::ExecutionTiming::QueryTime,
@@ -1155,7 +1155,7 @@ fn nested_summary_explicitly_finalizes_exact_child_at_ingestion_time() {
         .fields
         .iter()
         .any(|field| matches!(field.dtype, SummaryFamilyType::Plain(DataType::Float64))));
-    compile_post_asap_dag(&plan).expect("explicit boundary is a valid post-ASAP DAG");
+    export_post_asap_dag(&plan).expect("explicit boundary is a valid post-ASAP DAG");
 }
 
 #[test]
@@ -1181,7 +1181,7 @@ fn physical_node_owns_phase_independently_of_binary_payload() {
             .assemble_selected_dag(&search.roots[0].1)
             .unwrap()
             .unwrap();
-        let dag = compile_post_asap_dag(&plan).unwrap();
+        let dag = export_post_asap_dag(&plan).unwrap();
         let node = dag
             .nodes
             .iter()
@@ -1461,7 +1461,7 @@ fn without_aggregation_candidates_export_valid_dags() {
             let inventory = space.enumerate_candidate_dags_for_root(&0, 65_536).unwrap();
             assert!(!inventory.candidates.is_empty(), "{query}");
             for (_, node) in inventory.candidates.iter().flatten() {
-                compile_post_asap_dag(node).unwrap_or_else(|e| panic!("{query}: {e}"));
+                export_post_asap_dag(node).unwrap_or_else(|e| panic!("{query}: {e}"));
             }
         }
     }

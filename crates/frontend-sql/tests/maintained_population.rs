@@ -3,7 +3,7 @@ use asap_aware_mapping::maintained_population::MaintainedPopulationStrategy;
 use asap_frontend_sql::{lower_sql, SqlCatalog};
 use asap_types::{
     post_asap::{
-        compile_post_asap_dag,
+        export_post_asap_dag,
         maintained_population::{MaintainedPopulation, PopulationInput},
         share_common_summary_subtrees, SummaryExpr, ValueOperation,
     },
@@ -67,7 +67,7 @@ async fn sql_quantiles_share_rows_without_promql_lookback() {
             .collect(),
     );
     for (_, plan) in &plans {
-        compile_post_asap_dag(plan).unwrap();
+        export_post_asap_dag(plan).unwrap();
     }
     let (a, spec) = population(&plans[0].1);
     let (b, _) = population(&plans[1].1);
@@ -128,7 +128,7 @@ async fn sql_scalar_readouts_share_membership() {
             .collect(),
     );
     for (_, plan) in &plans {
-        compile_post_asap_dag(plan).unwrap();
+        export_post_asap_dag(plan).unwrap();
         assert!(Rc::ptr_eq(population(&plans[0].1).0, population(plan).0));
     }
 }
@@ -156,7 +156,7 @@ async fn malformed_table_population_fails_validation() {
         unreachable!()
     };
     *value_column = 1;
-    assert!(compile_post_asap_dag(&candidate).is_err());
+    assert!(export_post_asap_dag(&candidate).is_err());
 }
 
 // SQL ORDER BY value DESC LIMIT k uses the same maximum-k state contract.
@@ -175,7 +175,7 @@ async fn sql_topk_limits_share_maximum_k() {
             .collect(),
     );
     for (_, plan) in &plans {
-        compile_post_asap_dag(plan).unwrap();
+        export_post_asap_dag(plan).unwrap();
         assert_eq!(population(plan).1.max_k, 5);
         assert!(Rc::ptr_eq(population(&plans[0].1).0, population(plan).0));
     }

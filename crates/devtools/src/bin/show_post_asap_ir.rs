@@ -177,7 +177,7 @@ mod tests {
             candidates[0].guarantee.is_none(),
             "missing evidence must not claim a certified ratio bound"
         );
-        asap_types::post_asap::compile_post_asap_dag(&candidates[0])
+        asap_types::post_asap::export_post_asap_dag(&candidates[0])
             .expect("the demo candidate remains executable");
     }
 

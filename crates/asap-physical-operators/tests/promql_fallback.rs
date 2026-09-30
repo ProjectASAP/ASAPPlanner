@@ -58,7 +58,7 @@ fn lower(query: &str) -> PreASAPNode {
 /// The whole query retained as one pre-ASAP node.
 fn fallback_dag(expression: PreASAPNode) -> PostASAPDAGTransport {
     let schema = lift_plain(&expression.output_schema().unwrap());
-    compile_post_asap_dag(&Rc::new(PostASAPNode {
+    export_post_asap_dag(&Rc::new(PostASAPNode {
         expr: SummaryExpr::KeepPreAsap(Rc::new(expression)),
         schema,
         guarantee: None,
@@ -1257,7 +1257,7 @@ fn histogram_quantile_selection_keeps_the_exact_fallback() {
                 .assemble_selected_dag(planned)
                 .unwrap()
                 .unwrap();
-            let dag = compile_post_asap_dag(&selected).unwrap();
+            let dag = export_post_asap_dag(&selected).unwrap();
             let rows = evaluate_dag(&root, &dag, &[("x_bucket", &samples)], 60).unwrap();
             let values: Vec<_> = rows.iter().map(|(_, _, v)| *v).collect();
             assert_eq!(values, vec![1.75], "{query} {target:?}");

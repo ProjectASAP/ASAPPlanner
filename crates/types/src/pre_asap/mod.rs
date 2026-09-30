@@ -67,6 +67,6 @@ pub use schema_resolver::{SchemaCatalog, SchemaResolver, UsageDerivedCatalog};
 /// Shared root of a frontend-lowered query graph.
 pub type PreASAPDAG<C = ColumnId> = std::rc::Rc<PreASAPNode<C>>;
 
-/// Frontend candidates keyed by normalized workload entry. Repeated IDs are
-/// alternative lowerings; distinct IDs are independent workload entries.
+/// Frontend candidates keyed by workload entry. Current frontends produce one
+/// lowering per entry; distinct entries are independent workload queries.
 pub type CandidatePreASAPDAGs<Id> = Vec<(Id, PreASAPDAG)>;

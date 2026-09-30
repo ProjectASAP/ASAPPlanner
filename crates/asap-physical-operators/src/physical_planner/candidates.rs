@@ -93,32 +93,36 @@ pub fn cut_candidate(
 /// That holds while timing-dependent lowering (an ingestion-time `Binary`
 /// aligns by value column) has the same timing at compile time as here.
 /// A query-time node feeding an ingestion-time node has no valid placement.
-pub fn frontier_from_timing(dag: &PostASAPDAGTransport) -> Result<Vec<NodeId>, Error> {
-    use planner_types::post_asap::ExecutionTiming::IngestionTime;
-    let timing = dag
-        .nodes
-        .iter()
-        .map(|node| (node.id, node.output_state.timing))
-        .collect::<BTreeMap<_, _>>();
-    let mut frontier = BTreeSet::new();
-    if timing.get(&dag.root) == Some(&IngestionTime) {
-        frontier.insert(u64::from(dag.root.0));
-    }
-    for edge in &dag.edges {
-        let (Some(&producer), Some(&consumer)) =
-            (timing.get(&edge.producer), timing.get(&edge.consumer))
-        else {
-            return Err(invalid("timed DAG edge names an unknown node"));
-        };
-        match (producer == IngestionTime, consumer == IngestionTime) {
-            (true, false) => {
-                frontier.insert(u64::from(edge.producer.0));
-            }
-            (false, true) => return Err(invalid("query-time node feeds an ingestion-time node")),
-            _ => {}
+pub fn frontier_from_timing(dag: &impl PhysicalCompileInput) -> Result<Vec<NodeId>, Error> {
+    dag.with_view(|dag| {
+        use planner_types::post_asap::ExecutionTiming::IngestionTime;
+        let timing = dag
+            .nodes
+            .iter()
+            .map(|node| (node.id, node.output_state.timing))
+            .collect::<BTreeMap<_, _>>();
+        let mut frontier = BTreeSet::new();
+        if timing.get(&dag.root) == Some(&IngestionTime) {
+            frontier.insert(u64::from(dag.root.0));
         }
-    }
-    Ok(frontier.into_iter().collect())
+        for edge in dag.edges {
+            let (Some(&producer), Some(&consumer)) =
+                (timing.get(&edge.producer), timing.get(&edge.consumer))
+            else {
+                return Err(invalid("timed DAG edge names an unknown node"));
+            };
+            match (producer == IngestionTime, consumer == IngestionTime) {
+                (true, false) => {
+                    frontier.insert(u64::from(edge.producer.0));
+                }
+                (false, true) => {
+                    return Err(invalid("query-time node feeds an ingestion-time node"))
+                }
+                _ => {}
+            }
+        }
+        Ok(frontier.into_iter().collect())
+    })
 }
 
 /// Enumerate bounded, reachable materialization frontiers above explicit inputs.
@@ -204,6 +208,83 @@ pub fn compile_candidates(
             .collect(),
         Err(error) => frontiers.iter().map(|_| Err(error.clone())).collect(),
     }
+}
+
+/// A physical alternative shares its compiled operators. Execution graphs are
+/// derived only when a caller needs to evaluate, bind or execute this cut.
+#[derive(Clone)]
+pub struct PhysicalDAGCandidate {
+    compiled: Arc<PhysicalDAG>,
+    frontier: Vec<NodeId>,
+}
+impl PhysicalDAGCandidate {
+    pub fn compiled(&self) -> &Arc<PhysicalDAG> {
+        &self.compiled
+    }
+    pub fn frontier(&self) -> &[NodeId] {
+        &self.frontier
+    }
+    pub fn materialize(&self) -> Result<PhysicalCandidate, Error> {
+        cut_candidate(&self.compiled, &self.frontier)
+    }
+}
+
+/// Metadata identifies the logical/lifecycle alternative, including window and
+/// retention requirements. Errors retain that identity in the same entry.
+pub type CandidatePhysicalDAGs<Metadata = ()> =
+    Vec<(Metadata, Result<PhysicalDAGCandidate, Error>)>;
+
+/// Compile lifecycle assignments without selecting a winner. All assignments
+/// for the same shared index and Binary timings reuse one compilation. Inputs
+/// and requested roots are fixed for this invocation; other input contracts
+/// require a separate invocation.
+pub fn compile_timed_candidates<Metadata>(
+    candidates: impl IntoIterator<Item = (Metadata, planner_types::post_asap::PostASAPDAGAssignment)>,
+    inputs: BTreeMap<NodeId, InputContract>,
+    roots: &[NodeId],
+) -> CandidatePhysicalDAGs<Metadata> {
+    use planner_types::post_asap::{ExecutionTiming, PostASAPDAGIndex};
+    // Keep index handles alive: allocator address reuse must not join unrelated DAGs.
+    let mut indices: Vec<std::rc::Rc<PostASAPDAGIndex>> = Vec::new();
+    let mut compiled =
+        BTreeMap::<(usize, Vec<(u32, bool)>), Result<Arc<PhysicalDAG>, Error>>::new();
+    candidates
+        .into_iter()
+        .map(|(metadata, assignment)| {
+            let result = (|| {
+                let index_id = indices
+                    .iter()
+                    .position(|index| std::rc::Rc::ptr_eq(index, assignment.index()))
+                    .unwrap_or_else(|| {
+                        indices.push(assignment.index().clone());
+                        indices.len() - 1
+                    });
+                let binary_timing = assignment
+                    .index()
+                    .node_views()
+                    .into_iter()
+                    .filter_map(|node| {
+                        matches!(node.payload, Payload::Binary { .. }).then(|| {
+                            (
+                                node.id.0,
+                                assignment.phases()[&node.id] == ExecutionTiming::IngestionTime,
+                            )
+                        })
+                    })
+                    .collect();
+                let dag = compiled
+                    .entry((index_id, binary_timing))
+                    .or_insert_with(|| compile(&assignment, inputs.clone(), roots).map(Arc::new))
+                    .clone()?;
+                let frontier = frontier_from_timing(&assignment)?;
+                Ok(PhysicalDAGCandidate {
+                    compiled: dag,
+                    frontier,
+                })
+            })();
+            (metadata, result)
+        })
+        .collect()
 }
 
 /// Complete workload cost supplied by scoped optimizer/deployment evidence.
@@ -331,16 +412,16 @@ mod tests {
     use super::*;
     use planner_types::workload::*;
 
-    fn grouped_rate() -> (
-        PostASAPDAGTransport,
-        BTreeMap<NodeId, InputContract>,
-        NodeId,
-    ) {
+    fn grouped_root() -> planner_types::post_asap::PostASAPDAG {
+        logical_root("sum by(job)(rate(m[1m]))")
+    }
+
+    fn logical_root(query: &str) -> planner_types::post_asap::PostASAPDAG {
         let workload = PlanningWorkload {
             query_workload: QueryWorkload {
                 language: QueryLanguage::PromQL,
                 query_batch: Some(vec![BatchEntry {
-                    query: Query("sum by(job)(rate(m[1m]))".into()),
+                    query: Query(query.into()),
                     requirements: QueryRequirements {
                         accuracy: AccuracyRequirement::Explicit(
                             planner_types::types::AccuracyTarget::Exact,
@@ -372,7 +453,16 @@ mod tests {
             .assemble_selected_dag(&space.roots[0].1)
             .unwrap()
             .unwrap();
-        let dag = planner_types::post_asap::compile_post_asap_dag(&selected).unwrap();
+        selected
+    }
+
+    fn grouped_rate() -> (
+        PostASAPDAGTransport,
+        BTreeMap<NodeId, InputContract>,
+        NodeId,
+    ) {
+        let selected = grouped_root();
+        let dag = planner_types::post_asap::export_post_asap_dag(&selected).unwrap();
         let state = dag
             .nodes
             .iter()
@@ -383,6 +473,134 @@ mod tests {
             InputContract::bounded(Arc::new(state.output_schema.clone())),
         )]);
         (dag.clone(), inputs, u64::from(dag.root.0))
+    }
+
+    /// Assignments share the logical index and physical lowering; on-demand cuts
+    /// have exactly the same contracts and operators as independent compilation.
+    #[test]
+    fn named_candidates_share_graphs_and_preserve_cuts() {
+        use planner_types::post_asap::{
+            index_post_asap_dag, ExecutionTiming, PostASAPDAGAssignment,
+        };
+        let root = grouped_root();
+        let index = std::rc::Rc::new(index_post_asap_dag(&root).unwrap());
+        assert!(std::rc::Rc::ptr_eq(
+            index.node_ids.summary_node(index.root_id).unwrap(),
+            &root
+        ));
+        let inputs = raw_input(&index.to_transport());
+        let assignments =
+            [ExecutionTiming::QueryTime, ExecutionTiming::IngestionTime].map(|phase| {
+                PostASAPDAGAssignment::new(
+                    index.clone(),
+                    index.node_views().iter().map(|n| (n.id, phase)).collect(),
+                )
+                .unwrap()
+            });
+        let lowered = || crate::physical_planner::LOWERED_NODES.with(|count| count.get());
+        let before = lowered();
+        let candidates = compile_timed_candidates(
+            assignments.iter().cloned().enumerate(),
+            inputs.clone(),
+            &[u64::from(index.root_id.0)],
+        );
+        let count = lowered() - before;
+        let a = candidates[0].1.as_ref().unwrap();
+        let b = candidates[1].1.as_ref().unwrap();
+        assert!(Arc::ptr_eq(a.compiled(), b.compiled()));
+        assert!(count > 0);
+        for ((_, candidate), assignment) in candidates.iter().zip(&assignments) {
+            let actual = candidate.as_ref().unwrap().materialize().unwrap();
+            assert_eq!(lowered() - before, count);
+            actual.validate().unwrap();
+            let expected =
+                cut_candidate(a.compiled(), &frontier_from_timing(assignment).unwrap()).unwrap();
+            assert_eq!(
+                serde_json::to_vec(&actual).unwrap(),
+                serde_json::to_vec(&expected).unwrap()
+            );
+        }
+        let direct = compile(&root, inputs.clone(), &[u64::from(index.root_id.0)]).unwrap();
+        let imported =
+            compile(&index.to_transport(), inputs, &[u64::from(index.root_id.0)]).unwrap();
+        assert_eq!(
+            serde_json::to_vec(&direct).unwrap(),
+            serde_json::to_vec(&imported).unwrap()
+        );
+        let mut illegal = assignments[1].phases().clone();
+        let first = index.edges().first().unwrap();
+        illegal.insert(first.producer, ExecutionTiming::QueryTime);
+        assert!(PostASAPDAGAssignment::new(index.clone(), illegal).is_err());
+        assert!(PostASAPDAGAssignment::new(index, BTreeMap::new()).is_err());
+    }
+
+    /// Binary placement changes lowering, so these candidates must not share
+    /// a compilation even though the logical graph and input contracts agree.
+    #[test]
+    fn binary_timing_gets_distinct_compilations_and_errors_keep_identity() {
+        use planner_types::post_asap::{
+            index_post_asap_dag, ExecutionTiming, PostASAPDAGAssignment,
+        };
+        let lhs = logical_root("m");
+        let rhs = logical_root("n");
+        let root = std::rc::Rc::new(planner_types::post_asap::PostASAPNode {
+            schema: lhs.schema.clone(),
+            guarantee: lhs.guarantee.clone(),
+            expr: planner_types::post_asap::SummaryExpr::BinaryOp {
+                lhs,
+                rhs,
+                timing: ExecutionTiming::QueryTime,
+                operator: planner_types::post_asap::BinaryOperator {
+                    kind: planner_types::pre_asap::BinaryOpKind::Arithmetic(
+                        planner_types::pre_asap::ArithmeticOpKind::Add,
+                    ),
+                    vector_match: None,
+                    checked_relative_division: false,
+                    checked_finite_division: false,
+                },
+            },
+        });
+        let index = std::rc::Rc::new(index_post_asap_dag(&root).unwrap());
+        assert!(index
+            .node_views()
+            .iter()
+            .any(|n| matches!(n.payload, Payload::Binary { .. })));
+        let inputs = index
+            .node_views()
+            .iter()
+            .filter(|n| matches!(n.payload, Payload::Fallback { .. }))
+            .map(|n| {
+                (
+                    u64::from(n.id.0),
+                    InputContract::bounded(Arc::new(n.output_schema.clone())),
+                )
+            })
+            .collect();
+        let assignments =
+            [ExecutionTiming::QueryTime, ExecutionTiming::IngestionTime].map(|phase| {
+                PostASAPDAGAssignment::new(
+                    index.clone(),
+                    index.node_views().iter().map(|n| (n.id, phase)).collect(),
+                )
+                .unwrap()
+            });
+        let candidates = compile_timed_candidates(
+            assignments.iter().cloned().enumerate(),
+            inputs,
+            &[u64::from(index.root_id.0)],
+        );
+        let a = candidates[0].1.as_ref().unwrap();
+        let b = candidates[1].1.as_ref().unwrap();
+        assert!(!Arc::ptr_eq(a.compiled(), b.compiled()));
+        a.materialize().unwrap().validate().unwrap();
+        b.materialize().unwrap().validate().unwrap();
+        let rejected =
+            compile_timed_candidates(assignments.into_iter().enumerate(), BTreeMap::new(), &[999]);
+        assert_eq!(
+            rejected.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
+            vec![0, 1]
+        );
+        assert!(rejected.iter().all(|(_, result)| result.is_err()));
     }
 
     /// Enumerating and cutting every frontier lowers each Planner node once.

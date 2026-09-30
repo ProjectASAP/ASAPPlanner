@@ -1216,7 +1216,7 @@ mod tests {
                     primitive: DataPrimitive::SummaryState,
                 })
             );
-            let exported = crate::post_asap::compile_post_asap_dag(&root).unwrap();
+            let exported = crate::post_asap::export_post_asap_dag(&root).unwrap();
             assert!(exported.nodes.iter().any(|node| matches!(node.payload,
                 crate::post_asap::PostAsapOperatorPayload::SummaryMerge
                     if node.output_state.timing == timing)));

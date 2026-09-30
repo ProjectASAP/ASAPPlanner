@@ -262,7 +262,7 @@ impl MaintainedPopulationStrategy {
         });
         // Query time is only the initial layout: whether the population is
         // retained at ingestion or rebuilt per query is its lifecycle choice
-        // (`SummaryMaintenanceLifecyclePlan::execution_timed_dag`). The readout
+        // (`SummaryMaintenanceLifecyclePlan::export_timed_dag`). The readout
         // and projection above it are query-time by construction.
         let maintained = Rc::new(PostASAPNode {
             expr: SummaryExpr::ValueOperation {
@@ -309,7 +309,7 @@ impl ReplacementStrategy for MaintainedPopulationStrategy {
 mod tests {
     use super::*;
     use crate::test_support::lower_promql;
-    use asap_types::post_asap::{compile_post_asap_dag, share_common_summary_subtrees};
+    use asap_types::post_asap::{export_post_asap_dag, share_common_summary_subtrees};
 
     fn lower(q: &str) -> Rc<PreASAPNode> {
         Rc::new(lower_promql(q, asap_types::types::AccuracyTarget::Exact))
@@ -333,7 +333,7 @@ mod tests {
             let candidate = rule
                 .candidate(&root)
                 .expect("current-series rule candidate");
-            compile_post_asap_dag(&candidate).expect("typed post-ASAP DAG");
+            export_post_asap_dag(&candidate).expect("typed post-ASAP DAG");
         }
     }
 
@@ -370,7 +370,7 @@ mod tests {
         );
         let mut producers = Vec::new();
         for (_, plan) in &plans {
-            compile_post_asap_dag(plan).unwrap();
+            export_post_asap_dag(plan).unwrap();
             let SummaryExpr::ValueOperation {
                 child,
                 operation: ValueOperation::ReadPopulation { .. },
@@ -459,7 +459,7 @@ mod tests {
                 unreachable!()
             };
             *timing = population;
-            compile_post_asap_dag(&Rc::new(node))
+            export_post_asap_dag(&Rc::new(node))
         };
         use ExecutionTiming::{IngestionTime, QueryTime};
         assert!(with_timings(IngestionTime, QueryTime).is_ok());
@@ -479,7 +479,7 @@ mod tests {
         *operation = ValueOperation::ReadPopulation {
             readout: PopulationReadout::TopK { k: 6 },
         };
-        assert!(compile_post_asap_dag(&Rc::new(bad.clone())).is_err());
+        assert!(export_post_asap_dag(&Rc::new(bad.clone())).is_err());
         let SummaryExpr::ValueOperation {
             child, operation, ..
         } = &mut bad.expr
@@ -501,6 +501,6 @@ mod tests {
             unreachable!()
         };
         spec.metric = "b".into();
-        assert!(compile_post_asap_dag(&Rc::new(bad)).is_err());
+        assert!(export_post_asap_dag(&Rc::new(bad)).is_err());
     }
 }

@@ -343,7 +343,7 @@ fn planner_current_series_candidate_compiles_with_dynamic_identity() {
     )
     .candidate(&root)
     .unwrap();
-    let logical = compile_post_asap_dag(&selected).unwrap();
+    let logical = export_post_asap_dag(&selected).unwrap();
     let raw = logical
         .nodes
         .iter()

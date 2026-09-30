@@ -82,6 +82,13 @@ async fn plans_every_query_in_entry_order() {
         PlanningModels::builtin(),
     );
 
+    let frontend = asap_planner::lower_candidates(&input)
+        .await
+        .expect("frontend candidates");
+    assert_eq!(
+        frontend.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
+        vec![0, 1]
+    );
     let output = e2e_plan(input).await.expect("workload plans");
     let PlanOutput::Dag { plans } = &output else {
         panic!("no lifecycle input was supplied, so the DAG-only variant is expected");
@@ -114,6 +121,13 @@ async fn lowers_repeating_sql_entries_too() {
         PlanningModels::builtin(),
     );
 
+    let frontend = asap_planner::lower_candidates(&input)
+        .await
+        .expect("frontend candidates");
+    assert_eq!(
+        frontend.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
+        vec![0, 1]
+    );
     let output = e2e_plan(input).await.expect("workload plans");
     assert_eq!(
         output.len(),

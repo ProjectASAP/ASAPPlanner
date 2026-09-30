@@ -58,7 +58,7 @@ fn grouped_rate() -> PostASAPDAGTransport {
         .assemble_selected_query(&space.roots[0].1)
         .unwrap()
         .unwrap();
-    compile_post_asap_dag(&selected).unwrap()
+    export_post_asap_dag(&selected).unwrap()
 }
 fn run(plan: &PhysicalDAG, inputs: BTreeMap<u64, Batch>, scope: Scope) -> Vec<Batch> {
     let sources = inputs
@@ -423,7 +423,7 @@ fn enumerated_grouped_rate_candidates_execute_numeric_query_outputs() {
     let mut executed = 0;
     for forest in inventory.candidates {
         let root = &forest[0].1;
-        let dag = compile_post_asap_dag(root).unwrap();
+        let dag = export_post_asap_dag(root).unwrap();
         let Some(state) = dag.nodes.iter().find(|node| {
             matches!(
                 node.payload,
@@ -665,7 +665,7 @@ fn population_topk_cuts_equal_per_frontier_compilation() {
     )
     .candidate(&root)
     .unwrap();
-    let dag = compile_post_asap_dag(&selected).unwrap();
+    let dag = export_post_asap_dag(&selected).unwrap();
     let raw = dag
         .nodes
         .iter()

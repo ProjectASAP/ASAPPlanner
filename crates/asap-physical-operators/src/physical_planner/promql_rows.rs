@@ -82,9 +82,9 @@ pub fn compile_current_series_readout(
     selected: &Rc<planner_types::post_asap::PostASAPNode>,
 ) -> Result<PhysicalDAG, Error> {
     use planner_types::post_asap::{
-        compile_post_asap_dag, maintained_population::PopulationReadout, SummaryField,
+        export_post_asap_dag, maintained_population::PopulationReadout, SummaryField,
     };
-    let mut dag = compile_post_asap_dag(selected).map_err(|error| invalid(error.to_string()))?;
+    let mut dag = export_post_asap_dag(selected).map_err(|error| invalid(error.to_string()))?;
     // Typed snapshot candidates already carry full identity throughout the DAG.
     // Cut at the population output, preserving all selected heap/readout nodes.
     let populations = dag.nodes.iter().filter(|node| matches!(&node.payload,
@@ -193,7 +193,7 @@ pub fn compile_rate_ranking(
     selected: &Rc<planner_types::post_asap::PostASAPNode>,
 ) -> Result<(Rc<planner_types::post_asap::PostASAPNode>, PhysicalDAG), Error> {
     use planner_types::post_asap::{
-        compile_post_asap_dag_with_node_ids, ExactKind, PostASAPNode, SummaryExpr,
+        export_post_asap_dag_with_node_ids, ExactKind, PostASAPNode, SummaryExpr,
     };
     fn frontier(node: &Rc<PostASAPNode>) -> Option<Rc<PostASAPNode>> {
         match &node.expr {
@@ -226,8 +226,8 @@ pub fn compile_rate_ranking(
     {
         return Err(invalid("Rate ranking requires complete series identity"));
     }
-    let compiled = compile_post_asap_dag_with_node_ids(selected)
-        .map_err(|error| invalid(error.to_string()))?;
+    let compiled =
+        export_post_asap_dag_with_node_ids(selected).map_err(|error| invalid(error.to_string()))?;
     let id = u64::from(
         compiled
             .node_ids
