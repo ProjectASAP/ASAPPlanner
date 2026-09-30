@@ -5,11 +5,13 @@ as ASAPQuery-backend.
 
 ## Goal
 
-A deployment selects and executes plans that ASAPPlanner compiled. ASAPPlanner
-decides what can be computed and how it is computed. The deployment decides
-where each piece runs, based on its own costs. It supplies data and state and
-runs the compiled plans. It never re-derives the computation or keeps its own
-operators.
+ASAPPlanner decides what can be computed, how it is computed and which plan is
+best, and hands the deployment one optimal physical plan to execute. The
+deployment prices the candidates with its own costs, but it does not rank or
+select: it passes its prices to ASAPPlanner's selection function and receives
+the optimal plan. It then supplies data and state and runs that plan. It never
+re-derives the computation, keeps its own operators, or implements its own
+ranking or selection.
 
 ## Layers
 
@@ -40,21 +42,27 @@ operators.
 │    -> CandidatePhysicalDAGs                                      │
 │    Each candidate: { precompute DAG, query DAG, InputContracts } │
 │    Operators + kernels implement all computation.                │
+│                      │                                           │
+│ 4. Selection (library function)                                  │
+│    Input: deployment's prices, accuracy requirements and         │
+│    capabilities. Rank and combine candidates for the workload.   │
+│    -> one optimal PhysicalDAG                                    │
 └──────────────────────┬───────────────────────────────────────────┘
-          CandidatePhysicalDAGs (the boundary)
-┌──────────────────────┴──────── Deployment ──────────────┐
-│ 4 Selection       price lifecycle assignments; choose    │
-│ 5 Execution       ingest, panes, storage, readout, run   │
-└─────────────────────────────────────────────────────────┘
+          optimal PhysicalDAG (the boundary)
+┌──────────────────────┴──────── Deployment ───────────────────────┐
+│ Pricing: computes the costs and quotes passed to selection       │
+│ 5. Execution: ingest, panes, storage, readout, run               │
+└──────────────────────────────────────────────────────────────────┘
 ```
 
 ### Candidate generation by ASAPPlanner
 
-Every Planner layer outputs all legal candidates represented at that stage:
+Layers 0 to 3 output all legal candidates represented at their stage, and
+selection is the only step that chooses:
 
-`CandidatePreASAPDAGs → CandidatePostASAPDAGs → CandidatePostASAPDAGs with materialization annotations → CandidatePhysicalDAGs`
+`CandidatePreASAPDAGs → CandidatePostASAPDAGs → CandidatePostASAPDAGs with materialization annotations → CandidatePhysicalDAGs → optimal PhysicalDAG`
 
-No intermediate layer chooses a winning candidate. Frontend lowering can
+No layer before selection chooses a winning candidate. Frontend lowering can
 produce a singleton candidate set for an unambiguous query; it need not invent
 alternative parses. Logical planning exposes the supported computation
 candidates; lifecycle enumeration exposes their admissible assignments;
@@ -65,9 +73,9 @@ reasons, rather than silently discarded by an intermediate cost selection.
 “All candidates” means the legal candidate space under the supplied semantics,
 accuracy requirements, evidence, and capabilities. It can be represented
 compactly or enumerated lazily; it does not require eagerly materializing the
-Cartesian product. The deployment selects from this space. Library helpers
-that return one selected `PlanOutput` are optional selection APIs, not stages
-of this candidate-preserving pipeline.
+Cartesian product. Selection chooses from this space using the deployment's
+prices. Library helpers that return one selected `PlanOutput` without deployment
+prices are optional convenience APIs, not stages of this pipeline.
 
 ### DAG names
 
@@ -83,7 +91,8 @@ the earlier types, where one exists.
 | `CandidatePostASAPDAGs` | All legal logical candidates for the workload | `PlanSpace` | `CandidatePostASAPDAGs` |
 | `CandidatePostASAPDAGs` with materialization annotations | The same Post-ASAP candidates, annotated with each admissible lifecycle assignment's timing, window framework and retention; still Post-ASAP DAGs, not physical ones | None; lifecycle helpers return one selected `SummaryMaintenanceLifecyclePlan` | `CandidatePostASAPDAGs` with timing |
 | `PhysicalDAG` | Compiled operators and kernels with typed inputs, before runtime sources are bound | None | `PhysicalDAG` |
-| `CandidatePhysicalDAGs` | Physical candidates with their timing cuts, metadata and diagnostics, before deployment selection | None | `CandidatePhysicalDAGs` |
+| `CandidatePhysicalDAGs` | Physical candidates with their timing cuts, metadata and diagnostics, before selection | None | `CandidatePhysicalDAGs` |
+| optimal `PhysicalDAG` | The selected candidate: its precompute and query `PhysicalDAG`s with every stored output's lifecycle, window framework and retention | None | one materialized element of `CandidatePhysicalDAGs` |
 
 A candidate collection shares graphs across its candidates; it is not a copy
 of every complete DAG. Timing is attached to the shared logical graph, not
@@ -113,8 +122,8 @@ long it is retained. This is a workload-level decision, like a database's
 materialized-view selection: it spans queries (shared state is kept once), it
 depends on workload demand (read and update rates, horizon), and its result
 persists. The Planner enumerates the admissible choices; the deployment prices
-and chooses. The choice is recorded as annotations on the Post-ASAP nodes
-(timing, window framework, retention), so the annotated graph is still a
+them, and selection chooses. The choice is recorded as annotations on the
+Post-ASAP nodes (timing, window framework, retention), so the annotated graph is still a
 Post-ASAP DAG, much as physical properties annotate logical expressions in a
 database optimizer. Operator materialization (blocking operators such as sort,
 aggregation or summary build) and computing a shared subexpression once are
@@ -133,7 +142,7 @@ wraps a whole Pre-ASAP expression and compiles to many operators; the
 operator-flattening proposal ([operator sharing](operator-sharing.md), from
 #469) removes it by making non-ASAP operators ordinary Post-ASAP nodes, and
 #481 revises its export to emit one Post-ASAP node per non-ASAP operator. If a node gains alternative physical implementations, they become further candidates in
-`CandidatePhysicalDAGs`, priced and chosen by the deployment.
+`CandidatePhysicalDAGs`, priced by the deployment and chosen by selection.
 
 ### Responsibilities
 
@@ -143,16 +152,19 @@ operator-flattening proposal ([operator sharing](operator-sharing.md), from
 | 1. Logical Post-ASAP | `CandidatePostASAPDAGs`: all legal logical candidates, including summary families, exact rewrites, compositions, and series-identity typing. | Placement |
 | 2. Physical design: summary materialization | For each unique summary state and maintained population, the lifecycle choices (`Ephemeral`, `Prepared`, `Shared`, `ContinuouslyMaintained`) and their costs under a caller-supplied cost model. Each assignment sets every node's execution timing, window framework and retention, producing `CandidatePostASAPDAGs` with materialization annotations. | The cost values themselves; operator implementation |
 | 3. Physical implementation: compilation | All computation: value operations, aggregation, PromQL functions and subqueries, vector matching, comparisons and set operators, `histogram_quantile`, summary build, merge and estimate, sort, limit, joins. Lowers each node of `CandidatePostASAPDAGs` with materialization annotations to operators and cuts by timing into `CandidatePhysicalDAGs`; it does not select a winner. | Raw ingestion, pane construction, storage formats, decoding persisted state, scheduling |
-| 4. Deployment selection | Prices lifecycle assignments and, through its cost model, logical candidates. Shared state is counted once. It binds the chosen plan. | Re-lowering computation |
+| 4. Selection (Planner library function) | Ranking and combining all candidates, including every summary family and lifecycle assignment, across the workload with the deployment's prices, counting shared state once; returning one optimal `PhysicalDAG`. Candidates that cannot be priced are not selected. | The prices themselves |
+| Deployment pricing | Computing the prices passed to selection: unit costs, whole-plan quotes, store price; supplying accuracy requirements and capabilities (for example whether query-time raw data is available). | Ranking, sorting or selection |
 | 5. Deployment execution | Ingestion and routing, pane assignment and completeness, lateness and revisions, storage and codecs over Planner kernel states, reading stored state into typed inputs, query-time raw sources, the exact-engine fallback. Sampled or delta edge frames are rejected. | Any computation algorithm |
 
-The deployment may call Planner's logical and lifecycle APIs. The rule is only
-that every computation runs as a Planner-compiled physical DAG.
+The deployment may call Planner's earlier-layer APIs, for example to inspect
+candidates while pricing them. The rules are that every computation runs as a
+Planner-compiled physical DAG and every choice among candidates is made by
+Planner's selection function.
 
 ## The boundary
 
-The deployment receives `CandidatePhysicalDAGs`, containing all supported
-physical candidates, for selection. Each candidate contains:
+The deployment receives the optimal `PhysicalDAG` returned by selection. It
+contains:
 
 * a **precompute DAG**, whose inputs are raw-sample contracts (rows carrying
   series labels, timestamp and value; the label set is the complete series
@@ -161,7 +173,7 @@ physical candidates, for selection. Each candidate contains:
   raw-series contracts, or both;
 * the lifecycle, window framework and retention of every stored output.
 
-After selection, the deployment binds each input contract, stores each precompute output under
+The deployment binds each input contract, stores each precompute output under
 its own storage identity, and returns the query DAG's result. Semantic identity
 of stored outputs is defined by the logical DAG they compute. Storage identity
 and encoding belong to the deployment.
@@ -182,17 +194,17 @@ Physical design produces `CandidatePostASAPDAGs` with materialization
 annotations, containing one candidate for each admissible lifecycle assignment
 of a logical candidate. These are Post-ASAP graphs with execution timing
 assigned, not a new DAG representation or a single selected plan. The
-deployment prices the assignments and selects among the candidates. The timing
+deployment prices the assignments and selection chooses among them. The timing
 frontier contains the ingestion-time nodes read by query-time nodes, plus an
 ingestion-time root.
 
 ## Cost and selection
 
-The deployment decides both placement and the summary family.
+The deployment prices; ASAPPlanner selects. Selection decides both placement and
+the summary family, using only the deployment's prices.
 
-* **Placement.** For each assignment, the deployment prices every state's
-  lifecycle with its own costs, then chooses the cheapest admissible
-  assignment for the whole workload:
+* **Prices supplied by the deployment.** For each lifecycle assignment, the price
+  of every state's lifecycle:
   * build cost;
   * maintenance per update (precompute CPU);
   * reads;
@@ -200,17 +212,18 @@ The deployment decides both placement and the summary family.
     the installed window layout × cardinality × store price;
   * retirement;
   * for `Ephemeral`, processing of the raw samples read at query time.
+
+  The deployment may also supply whole-plan quotes for physical candidates.
+* **Selection.** Selection ranks and combines the candidates and returns the
+  cheapest admissible plan for the whole workload that meets the accuracy
+  requirements.
 * **Sharing.** A state shared by several queries is priced once, with all
   consumers' demand. This holds only when compilation would install one shared
   output: same window layout, evaluation interval and phase.
-* **Family.** Planner does not prune families: every summary-family candidate
-  (for example KLL and DDSketch for one quantile) reaches the deployment. The
-  deployment compares their physical candidates with its whole-plan quotes,
-  alongside lifecycle and placement choices. Planner's global-selection helpers
-  select only when a caller explicitly asks; no Planner layer calls them as an
-  intermediate stage. Known gap: ASAPQuery-backend #795 currently calls
-  `global_selection` before pricing and so pre-selects families; this is being
-  changed.
+* **Family.** Planner does not prune families before selection: every
+  summary-family candidate (for example KLL and DDSketch for one quantile)
+  reaches selection, which compares them with the deployment's prices and
+  quotes.
 * Unknown cost stays unknown. It never becomes zero, and an alternative that
   cannot be priced is not selected.
 
@@ -220,7 +233,8 @@ The following uses `sum by (job) (rate(m[1m]))`, evaluated every 10 s.
 
 Consider one logical candidate: a per-series Rate state feeding a
 grouped Sum state. Logical planning does not return placement variants. The
-lifecycle layer lists choices for both states. The deployment prices them:
+lifecycle layer lists choices for both states. The deployment prices them, and
+selection chooses:
 
 * When summary storage is cheap, both states are retained. The precompute DAG
   builds Rate and Sum per pane, and the query DAG only reads the Sum.
@@ -229,5 +243,5 @@ lifecycle layer lists choices for both states. The deployment prices them:
 * When storage is more expensive still, both states become `Ephemeral`. The
   query DAG reads raw series at `t_q`.
 
-All three are cuts of one compilation. The deployment's decision is only which
-lifecycle assignment to buy.
+All three are cuts of one compilation. Only the deployment's store price
+changes; selection picks the lifecycle assignment that is cheapest under it.
