@@ -198,7 +198,8 @@ pub fn with_promql_series_identity(root: &super::QueryExpr) -> Result<super::Que
             | QueryExpr::Limit { child, .. }
             | QueryExpr::TimeShift { child, .. }
             | QueryExpr::PromqlSubquery { child, .. }
-            | QueryExpr::PromqlScalarFromVector(child) => visit(Rc::make_mut(child)),
+            | QueryExpr::PromqlScalarFromVector(child)
+            | QueryExpr::PromqlRelabel { child, .. } => visit(Rc::make_mut(child)),
             // Constants read no series.
             QueryExpr::PromqlScalarBridge(_)
             | QueryExpr::EvalTimestamp
@@ -207,6 +208,12 @@ pub fn with_promql_series_identity(root: &super::QueryExpr) -> Result<super::Que
             QueryExpr::BinaryOp { lhs, rhs, .. } => {
                 visit(Rc::make_mut(lhs))?;
                 visit(Rc::make_mut(rhs))
+            }
+            QueryExpr::Concat { children, .. } => {
+                for child in children {
+                    visit(child)?;
+                }
+                Ok(())
             }
             QueryExpr::Aggregate { child, .. } => visit(Rc::make_mut(child)),
             QueryExpr::Sort {

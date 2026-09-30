@@ -75,6 +75,17 @@ impl TryFrom<UncheckedOperator> for Operator {
             Kind::SeriesBinary { operator, scalars } => {
                 Operator::series_binary(input(0)?, input(1)?, operator, scalars)?
             }
+            Kind::SeriesRelabel {
+                destination,
+                replacement,
+                source_regex,
+            } => Operator::series_relabel(
+                input(0)?,
+                output.clone(),
+                destination,
+                replacement,
+                source_regex,
+            )?,
             Kind::SeriesHistogramQuantile { quantile, le } => {
                 Operator::series_histogram_quantile(input(0)?, f64::from_bits(quantile), le)?
             }
