@@ -1172,6 +1172,8 @@ fn physical_node_owns_phase_independently_of_binary_payload() {
         ),
     ] {
         let input = lower_promql(query, AccuracyTarget::Epsilon(0.05)).unwrap();
+        // Backend lowering carries opaque series identity before candidate export.
+        let input = asap_types::pre_asap::schema::with_promql_series_identity(&input).unwrap();
         let search = search_workload(vec![("q", Rc::new(input))]);
         let choice = search.global_selection(&DefaultCostModel);
         let plan = choice
