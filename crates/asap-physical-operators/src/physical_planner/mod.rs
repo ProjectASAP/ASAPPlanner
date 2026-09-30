@@ -32,6 +32,7 @@ fn invalid(message: impl Into<String>) -> Error {
 pub type Source<'a> = Box<dyn PhysicalOperator<Batch, Schema> + 'a>;
 
 pub mod precompute;
+pub mod promql_fallback;
 pub mod promql_rows;
 pub mod promql_values;
 
@@ -173,7 +174,19 @@ fn compile_internal(
             .or_default()
             .push(u64::from(edge.producer.0));
     }
-    if sources.keys().any(|id| !nodes.contains_key(id)) {
+    let known = |id: &NodeId| {
+        nodes.contains_key(id)
+            || promql_fallback::raw_series_owner(*id).is_some_and(|owner| {
+                matches!(
+                    nodes.get(&owner),
+                    Some(PostAsapDagNode {
+                        payload: Payload::Fallback { .. },
+                        ..
+                    })
+                )
+            })
+    };
+    if !sources.keys().all(known) {
         return Err(invalid("source binding names an unknown node"));
     }
     let mut ordered = Vec::new();
@@ -227,6 +240,46 @@ fn compile_internal(
                 )?;
                 inputs = vec![auxiliary];
                 schemas.truncate(1);
+            }
+            // A consumed bare selector supplies raw range rows (e.g. to a
+            // per-entity summary), not an instant vector, so only its consumer computes.
+            let raw_rows = matches!(
+                &node.payload,
+                Payload::Fallback {
+                    expression: QueryExpr::TimeRange { .. }
+                }
+            ) && dag.edges.iter().any(|e| u64::from(e.producer.0) == id);
+            if let (Payload::Fallback { expression }, false) = (&node.payload, raw_rows) {
+                let slot = promql_fallback::raw_series_input(id);
+                let (leaf, mut chain) = promql_fallback::lower(expression)
+                    .map_err(|error| invalid(format!("node {id}: {error}")))?;
+                let mut inputs = match (leaf, sources.remove(&slot)) {
+                    (Some((_, schema)), Some(contract)) if contract.schema == schema => {
+                        graph.add_input(slot, contract)?;
+                        vec![slot]
+                    }
+                    (None, None) => vec![],
+                    (Some(_), None) => {
+                        return Err(invalid(format!(
+                            "node {id}: PromQL fallback requires raw series input {slot}"
+                        )))
+                    }
+                    _ => {
+                        return Err(invalid(format!(
+                            "node {id}: raw series input differs from the selector schema"
+                        )))
+                    }
+                };
+                let last = chain
+                    .pop()
+                    .ok_or_else(|| invalid("empty PromQL lowering"))?;
+                for operator in chain {
+                    graph.add(auxiliary, inputs, operator)?;
+                    inputs = vec![auxiliary];
+                    auxiliary -= 1;
+                }
+                graph.add(id, inputs, last.with_output_schema(output)?)?;
+                continue;
             }
             if let Payload::Value {
                 operation: ValueOperation::MaintainPopulation { population },
