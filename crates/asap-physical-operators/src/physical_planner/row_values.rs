@@ -170,12 +170,12 @@ fn binary(operator: &BinaryOperator, left: Expression, right: Expression) -> Exp
     }
 }
 
-/// Aggregate readouts of a maintained current-series population.
+/// Aggregate readouts of a maintained current-series population, as a chain.
 pub(super) fn population_aggregate(
     input: &Schema,
     grouping: &[String],
     readout: &PopulationReadout,
-) -> Result<Operator, Error> {
+) -> Result<Vec<Operator>, Error> {
     let groups = grouping
         .iter()
         .map(|name| named_column(input, &ColumnRef::Named(name.clone())))
@@ -195,5 +195,33 @@ pub(super) fn population_aggregate(
             ))
         }
     };
-    Operator::aggregate(input.clone(), groups, vec![("value".into(), reduction)])
+    if !groups.is_empty() {
+        return Ok(vec![Operator::aggregate(
+            input.clone(),
+            groups,
+            vec![("value".into(), reduction)],
+        )?]);
+    }
+    // A global aggregate over no members is an empty PromQL vector, not one row.
+    let aggregate = Operator::aggregate(
+        input.clone(),
+        vec![],
+        vec![
+            ("value".into(), reduction),
+            ("members".into(), Reduction::Count),
+        ],
+    )?;
+    let zero = Expression::Literal {
+        value: crate::values::Value::Int64(0),
+        dtype: DataType::Int64,
+    };
+    let filter = Operator::filter(
+        aggregate.schema(),
+        Expression::Less(Box::new(zero), Box::new(Expression::Column(1))),
+    )?;
+    let project = Operator::project(
+        filter.schema(),
+        vec![("value".into(), Expression::Column(0))],
+    )?;
+    Ok(vec![aggregate, filter, project])
 }

@@ -282,9 +282,16 @@ fn compile_internal(
                 }
                 let input = schemas[0].clone();
                 let PopulationReadout::TopK { k } = readout else {
-                    let aggregate =
+                    let mut chain =
                         row_values::population_aggregate(&input, &spec.grouping, readout)?;
-                    graph.add(id, inputs, aggregate.with_output_schema(output)?)?;
+                    let last = chain.pop().expect("nonempty chain");
+                    let mut inputs = inputs;
+                    for operator in chain {
+                        graph.add(auxiliary, inputs, operator)?;
+                        inputs = vec![auxiliary];
+                        auxiliary -= 1;
+                    }
+                    graph.add(id, inputs, last.with_output_schema(output)?)?;
                     continue;
                 };
                 let groups = spec
