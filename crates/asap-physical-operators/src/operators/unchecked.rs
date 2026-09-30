@@ -50,6 +50,19 @@ impl TryFrom<UncheckedOperator> for Operator {
             } => Operator::aligned_binary(input(0)?, input(1)?, keys, values, operator)?,
             Kind::RangeWindow { intent } => Operator::range_window(*intent)?,
             Kind::HistogramQuantile => Operator::histogram_quantile(),
+            Kind::SeriesWindow {
+                function,
+                range_ms,
+                offset_ms,
+                steps,
+                ..
+            } => Operator::series_window(
+                input(0)?,
+                function.map(|f| *f),
+                range_ms,
+                offset_ms,
+                steps,
+            )?,
             Kind::Project(expressions) => {
                 if expressions.len() != output.fields.len() {
                     return Err(invalid("projection width mismatch"));
