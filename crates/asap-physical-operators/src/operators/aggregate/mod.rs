@@ -335,9 +335,9 @@ async fn reduce_one(
     Ok(Value::Float64(if matches!(measure, Reduction::Avg(_)) {
         promql_avg(&floats)
     } else {
-        // Prometheus starts `sum` from the first value; -0.0 keeps an
-        // all-negative-zero group's sign.
-        promql_sum(-0.0, &floats)
+        // Prometheus starts `sum` from the first value; adding it to 0 gives
+        // the same sum and compensation.
+        promql_sum(0., &floats)
     }))
 }
 
