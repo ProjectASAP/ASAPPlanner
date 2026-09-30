@@ -27,6 +27,12 @@ impl Operator {
                         false,
                     )
                 }
+                Reduction::Quantile { column, q } => {
+                    if plain(&input, *column)?.0 != &DataType::Float64 || q.is_nan() {
+                        return Err(invalid("quantile requires Float64 input and a numeric q"));
+                    }
+                    (DataType::Float64, false)
+                }
                 Reduction::Min(i) | Reduction::Max(i) => {
                     let (t, nullable) = plain(&input, *i)?;
                     if !ordered(t) {
@@ -120,6 +126,11 @@ pub enum Reduction {
     Avg(usize),
     Min(usize),
     Max(usize),
+    /// PromQL `quantile`: linear interpolation between closest ranks.
+    Quantile {
+        column: usize,
+        q: f64,
+    },
 }
 pub(super) fn execute<'a>(
     operator: &'a Operator,
@@ -198,6 +209,25 @@ async fn reduce(
     Ok(output)
 }
 
+// Matches Prometheus `quantile`: NaN for no values, ±Inf outside [0, 1].
+fn quantile(q: f64, mut values: Vec<f64>) -> f64 {
+    if values.is_empty() {
+        return f64::NAN;
+    }
+    if q < 0. {
+        return f64::NEG_INFINITY;
+    }
+    if q > 1. {
+        return f64::INFINITY;
+    }
+    values.sort_by(f64::total_cmp);
+    let rank = q * (values.len() - 1) as f64;
+    let low = rank.floor() as usize;
+    let high = (low + 1).min(values.len() - 1);
+    let weight = rank - low as f64;
+    values[low] * (1. - weight) + values[high] * weight
+}
+
 async fn reduce_one(
     rows: &[Vec<Value>],
     measure: &Reduction,
@@ -211,6 +241,18 @@ async fn reduce_one(
             ))
         }
         Reduction::Sum(i) | Reduction::Avg(i) | Reduction::Min(i) | Reduction::Max(i) => *i,
+        Reduction::Quantile { column, q } => {
+            let mut values = Vec::with_capacity(rows.len());
+            for row in rows {
+                work.checkpoint().await?;
+                match &row[*column] {
+                    Value::Float64(value) => values.push(*value),
+                    Value::Null => {}
+                    _ => return Err(invalid("floating quantile value required")),
+                }
+            }
+            return Ok(Value::Float64(quantile(*q, values)));
+        }
     };
     let values = rows
         .iter()
@@ -290,4 +332,17 @@ async fn reduce_one(
     } else {
         sum
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    // Quantile follows Prometheus: interpolate ranks, NaN when empty, ±Inf outside [0, 1].
+    #[test]
+    fn quantile_matches_prometheus_edge_cases() {
+        assert!(super::quantile(0.5, vec![]).is_nan());
+        assert_eq!(super::quantile(0.5, vec![3.]), 3.);
+        assert_eq!(super::quantile(0.75, vec![4., 1., 2., 3.]), 3.25);
+        assert_eq!(super::quantile(-0.1, vec![1.]), f64::NEG_INFINITY);
+        assert_eq!(super::quantile(1.1, vec![1.]), f64::INFINITY);
+    }
 }
