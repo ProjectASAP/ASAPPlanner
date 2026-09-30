@@ -1055,9 +1055,9 @@ may be fitted from measurements or encode a deployment resource policy. The
 calibration version is exported so results from different policies are not
 treated as directly comparable.
 
-Changing calibration may change the selected plan. A memory-constrained
-deployment and an I/O-constrained deployment need not choose the same legal
-candidate.
+Changing calibration may change the selected plan. Selection under a
+memory-constrained deployment's costs and under an I/O-constrained deployment's
+costs need not return the same legal candidate.
 
 ## Candidate selection and provenance
 

@@ -44,7 +44,7 @@ that its result satisfies a query's accuracy requirements.
 Tests cover open-label Rate → CMS/CountSketch heaps, hidden-label round trips,
 reset and zero-rate cases, snapshot replacement/decrease/expiry/staleness,
 serialized physical recovery, and resource rejection. These are shared-library
-tests, not proof of Backend candidate selection or durable deployment execution.
+tests, not proof of candidate selection under Backend prices or durable deployment execution.
 
 Spatial heap candidates use the same complete series identity. Planner's
 `current_series_topk_candidates` explores a CountSketch-with-heap realization

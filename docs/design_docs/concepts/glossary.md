@@ -22,7 +22,7 @@ A logical plan representation that can contain ASAP primitives, alongside relati
 
 ## Candidate
 
-One legal Post-ASAP alternative for answering an intent. Planner preserves alternatives for downstream selection rather than committing to one.
+One legal Post-ASAP alternative for answering an intent. Planner preserves alternatives until its selection, which uses the deployment's cost model, rather than committing to one early.
 
 ## Summary
 
@@ -30,4 +30,4 @@ Maintained state, exact or approximate, that can answer some query intent more e
 
 ## Physical plan
 
-A concrete execution and deployment choice: runtime topology of data lifecycle stages, placement of computation, transmission, storage. Physical plans are owned by downstream systems.
+A precompute DAG and a query DAG of physical operators, with the lifecycle, window framework and retention of every stored output. Planner compiles and selects it; the deployment binds its inputs, places, stores and executes it.

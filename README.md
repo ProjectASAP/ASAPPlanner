@@ -1,6 +1,6 @@
 # ASAPPlanner
 
-ASAPPlanner turns SQL, PromQL, and MetricsQL query workloads into legal candidate plans that may use Approximate Streaming Analytics Primitives (ASAPs), such as sketches and exact summaries. It normalizes language-specific queries into a shared representation, then enumerates and ranks semantically equivalent alternatives. Downstream systems choose, deploy, and execute a physical plan.
+ASAPPlanner turns SQL, PromQL, and MetricsQL query workloads into legal candidate plans that may use Approximate Streaming Analytics Primitives (ASAPs), such as sketches and exact summaries. It normalizes language-specific queries into a shared representation, then enumerates and ranks semantically equivalent alternatives. Planner selects one physical plan using the deployment's cost model; the deployment executes it.
 
 ## Start here
 

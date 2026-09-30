@@ -184,8 +184,9 @@ The concrete flow is:
 AggIntent
   -> realizations_for_intent(): enumerate Realization values
   -> SketchAlgorithmStrategy: construct ReplacementSubDAG candidates
-  -> CandidatePostASAPDAGs: store and rank candidates
-  -> downstream deployment: select and place a final choice
+  -> CandidatePostASAPDAGs: store candidates
+  -> Planner selection with the deployment's cost model
+  -> deployment: place and execute the selected plan
 ```
 
 `ReplacementStrategy` enumerates supported legal candidates. The caller can

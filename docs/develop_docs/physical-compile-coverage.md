@@ -8,7 +8,8 @@ Audience: developers moving computation from ASAPQuery-backend into
 Logical selection decides what to compute. The maintenance lifecycle sets node
 timing. `physical_planner::compile` turns a timed `PostASAPDAGTransport` into physical
 operator DAGs. The backend owns ingestion, panes, storage, stored-state
-readout, external exact engines, pricing/selection, and execution scheduling.
+readout, external exact engines, its cost model, and execution scheduling;
+selection is a Planner function.
 
 A backend lowering is *covered* when `compile` accepts the corresponding
 `PostASAPDAGTransport` node and produces operators with the same result. The backend

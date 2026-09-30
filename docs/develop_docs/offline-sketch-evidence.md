@@ -92,7 +92,7 @@ for a single independently instantiated state. It deliberately leaves retention,
 retirement and read costs unknown. In particular, a point-frequency benchmark
 read does not price a total-count read, even when both use CMS. A deployment must
 match readout semantics and supply the missing lifecycle and raw-query evidence
-before selecting and pricing a complete physical plan. Never combine these
+before Planner selects a complete physical plan under the deployment's prices. Never combine these
 nanosecond costs with CPU operation counts without explicit calibration.
 
 `error` contains offline observed statistics and a query descriptor. Its metric
