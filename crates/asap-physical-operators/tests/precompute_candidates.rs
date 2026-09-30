@@ -15,7 +15,7 @@ use futures::{executor::block_on, StreamExt};
 use planner_types::{post_asap::*, pre_asap::DataType, types::AccuracyTarget, workload::*};
 use std::{collections::BTreeMap, rc::Rc, sync::Arc};
 
-fn grouped_rate_space() -> asap_aware_mapping::PlanSpace<&'static str> {
+fn grouped_rate_space() -> asap_aware_mapping::CandidatePostASAPDAGs<&'static str> {
     let workload = PlanningWorkload {
         query_workload: QueryWorkload {
             language: QueryLanguage::PromQL,

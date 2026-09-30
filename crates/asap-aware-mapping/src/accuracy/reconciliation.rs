@@ -141,7 +141,7 @@
 //! priced with, reflecting "one more reference into a structure that's
 //! already being maintained" rather than "build a whole new one."
 //!
-//! `PlanSpace::global_selection` treats this rewrite as a cross-group edge:
+//! `CandidatePostASAPDAGs::global_selection` treats this rewrite as a cross-group edge:
 //! selecting it increments `rc`'s own `effective_consumer_count`, then lets
 //! that sibling group propagate the uses through its selected implementation.
 //! Accuracy edges are directed strictly from looser to tighter budgets, so

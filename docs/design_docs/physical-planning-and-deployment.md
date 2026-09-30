@@ -38,7 +38,7 @@ below states.
 
 ### Layer contract
 
-1. **Logical Post-ASAP** (`PlanSpace`) decides what to compute: summary
+1. **Logical Post-ASAP** (`CandidatePostASAPDAGs`) decides what to compute: summary
    families, readouts and sharing. It does not decide placement; timing that a
    realization strategy writes while building a candidate is provisional.
 2. **Summary maintenance lifecycle** (Planner) lists the lifecycle choices for
@@ -92,7 +92,7 @@ separate unsupported compilation, deployment infeasibility, missing evidence,
 and a feasible candidate that loses on cost. Absence is not a cost comparison.
 
 For `sum by(job)(rate(m[1m]))`, Rate remains per series before grouped Sum.
-`PlanSpace` offers one such candidate, with a per-series Rate state and a grouped
+`CandidatePostASAPDAGs` offers one such candidate, with a per-series Rate state and a grouped
 Sum state. Its lifecycle assignment places it: a retained Sum state finalizes
 Rate and builds Sum within a bounded precompute run; an `Ephemeral` Sum over a
 retained Rate state leaves the Rate readout and Sum in the query DAG. Storing a

@@ -66,7 +66,7 @@ For the broader lifecycle design, four categories of information matter
    distribution;
 4. existing summaries and the lifecycle actions available to the deployment.
 
-Candidate search outputs `PlanSpace`. The implemented lifecycle-aware workflow
+Candidate search outputs `CandidatePostASAPDAGs`. The implemented lifecycle-aware workflow
 then returns a `SummaryMaintenanceLifecyclePlan` per query root, containing the
 Post-ASAP DAG and maintenance decisions. It can choose exact raw recomputation
 when summary maintenance does not beat raw cost or comparable costs are missing. A

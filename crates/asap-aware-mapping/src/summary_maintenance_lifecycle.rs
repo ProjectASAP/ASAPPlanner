@@ -43,7 +43,7 @@ use crate::recurrence::{
     CostRate, EvaluationRate, Horizon, RecurrenceError, RecurrenceProfile, UpdateRate,
 };
 use crate::replacement::{
-    CandidateCostOverrides, GlobalSelection, PlanSpace, RealizationError, Replacement,
+    CandidateCostOverrides, CandidatePostASAPDAGs, GlobalSelection, RealizationError, Replacement,
 };
 
 /// Summary-maintenance lifecycle shapes supported by the target runtime.
@@ -623,7 +623,7 @@ pub fn enumerate_summary_maintenance_lifecycles<'a>(
 
 /// Internal candidate-costing form. The workload binding supplies temporal
 /// eligibility and data-arrival facts; `profile` supplies effective uses after
-/// DAG path multiplicity has been propagated by `PlanSpace`.
+/// DAG path multiplicity has been propagated by `CandidatePostASAPDAGs`.
 #[expect(clippy::too_many_arguments, reason = "internal bound planning context")]
 fn enumerate_with_profile<'a>(
     root: Rc<SummaryNode>,
@@ -724,7 +724,7 @@ fn enumerate_with_profile<'a>(
 /// attached, so shared `Rc` identity and exact-composition commitments remain
 /// the responsibility of `GlobalSelection`.
 pub fn global_selection_with_summary_maintenance_lifecycles<'a, Id>(
-    space: &'a PlanSpace<Id>,
+    space: &'a CandidatePostASAPDAGs<Id>,
     demand: WorkloadDemand<'_>,
     now_ms: u64,
     horizon: Option<Horizon>,
@@ -2701,7 +2701,7 @@ mod tests {
     }
 
     #[test]
-    fn normalized_workload_drives_plan_space_recurrence_profiles() {
+    fn normalized_workload_drives_candidate_dag_recurrence_profiles() {
         let root = query_root();
         let space = crate::replacement::search_workload(vec![("dashboard", Rc::clone(&root))]);
         let workload = workload(vec![], vec![repeating()], continuous(1_000, 60_000));

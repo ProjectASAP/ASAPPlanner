@@ -1,6 +1,6 @@
 //! Issue #171 — composing exact operators with summary plans across
 //! explicit update/readout boundaries, end to end through
-//! `search_workload_with` → `PlanSpace::global_selection` →
+//! `search_workload_with` → `CandidatePostASAPDAGs::global_selection` →
 //! `GlobalSelection::assemble_selected_dag` → `dag_export`.
 //!
 //! Covers the issue's integration matrix: both nesting directions, grouped
@@ -274,7 +274,7 @@ fn unknown_runtime_capability_keeps_candidate_but_prevents_selection() {
 fn plan(
     roots: Vec<(&'static str, Rc<QueryExpr>)>,
     cost_model: &dyn CostModel,
-) -> asap_aware_mapping::PlanSpace<&'static str> {
+) -> asap_aware_mapping::CandidatePostASAPDAGs<&'static str> {
     search_workload_with(roots, &default_strategies_with(cost_model))
 }
 
@@ -723,7 +723,7 @@ fn a_runtime_without_mixed_execution_gets_no_composition_candidates() {
 }
 
 /// Without statistics (the built-in model) the composition is *proposed*
-/// — visible in `PlanSpace` and explanations — but never *selected*: the
+/// — visible in `CandidatePostASAPDAGs` and explanations — but never *selected*: the
 /// site keeps a non-composed alternative, and the inner summary stays
 /// independently selectable.
 #[test]

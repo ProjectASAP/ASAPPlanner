@@ -22,6 +22,6 @@ rule or remain exact.
 
 Callers that require a certified end-to-end accuracy target must use evidence
 or select another candidate. Planner's automatic whole-plan selection skips
-uncertified ratios while retaining them in `PlanSpace`; a backend can inspect
+uncertified ratios while retaining them in `CandidatePostASAPDAGs`; a backend can inspect
 the candidate and make its own evidence-based selection. Runtime or statically
 enforced domain contracts remain future work driven by observed v1 correctness needs.

@@ -42,7 +42,7 @@
 //! `docs/design_docs/cse-cost-model-decision.md` for the full design discussion (why
 //! cost-based, why not a full plan-search engine, the layering constraint
 //! that forces detection to stay cost-agnostic).
-//! [`PlanSpace::cost_sorted`](crate::replacement::PlanSpace::cost_sorted)
+//! [`CandidatePostASAPDAGs::cost_sorted`](crate::replacement::CandidatePostASAPDAGs::cost_sorted)
 //! (via [`crate::replacement`]'s own `cse_preference`) and
 //! [`DefaultCostModel::estimate_cost`] are this crate's own callers.
 
@@ -139,7 +139,7 @@ pub struct ExactCompositionCostRequest<'a> {
     /// formula charges.
     pub summary: &'a SummaryNode,
     /// How many times this site actually runs once ancestors' own choices
-    /// are accounted for (see `PlanSpace::global_selection`).
+    /// are accounted for (see `CandidatePostASAPDAGs::global_selection`).
     pub effective_consumer_count: usize,
 }
 
@@ -268,7 +268,7 @@ fn finite_rate(units_per_second: f64) -> Option<CostRate> {
 
 /// A CSE-detected, legality-gated shared subtree with two or more consumers
 /// — the unit [`CostModel::cse_share_decision`] decides over. Built by
-/// [`PlanSpace::cost_sorted`](crate::replacement::PlanSpace::cost_sorted)
+/// [`CandidatePostASAPDAGs::cost_sorted`](crate::replacement::CandidatePostASAPDAGs::cost_sorted)
 /// (via [`crate::replacement`]'s own `cse_preference`) the first time it
 /// needs a representative bound node for a subtree that
 /// [`asap_types::pre_asap::cse::share_common_subtrees`] already collapsed
@@ -735,7 +735,7 @@ pub trait CostModel {
     /// [`ReplacementSubDAG`] candidate at `target` — a real `f64`, not just a
     /// relative rank, meant for a caller that wants to *display* "candidate A
     /// costs ≈ X, candidate B costs ≈ Y" (e.g. a DAG-visualization view built
-    /// on [`PlanSpace::cost_sorted`](crate::replacement::PlanSpace::cost_sorted)),
+    /// on [`CandidatePostASAPDAGs::cost_sorted`](crate::replacement::CandidatePostASAPDAGs::cost_sorted)),
     /// not just order candidates against each other — that ordering job
     /// already belongs to [`rank_candidates`](Self::rank_candidates) (for a
     /// [`SketchAlgorithmStrategy`](crate::replacement::SketchAlgorithmStrategy)
@@ -932,7 +932,7 @@ pub trait CostModel {
     ///
     /// Default: every input unknown ([`ExactCompositionCostInputs::unknown`])
     /// — unknown is never zero, and with no rate derivable
-    /// `PlanSpace::global_selection` keeps the conservative `KeepPreAsap`
+    /// `CandidatePostASAPDAGs::global_selection` keeps the conservative `KeepPreAsap`
     /// behavior for the site. A deployment that wants defaults must supply
     /// them here explicitly.
     fn exact_composition_cost_inputs(
@@ -1103,7 +1103,7 @@ impl CostModel for DefaultCostModel {
                 }
             }
             // A composed candidate is costed in cost-units-per-second by
-            // `PlanSpace::global_selection` against the child decision it
+            // `CandidatePostASAPDAGs::global_selection` against the child decision it
             // is committed with — a different unit from this structural
             // estimate, and unknowable here without that child. `NaN`
             // keeps it from ever out-ranking a real estimate by accident.

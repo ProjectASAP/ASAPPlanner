@@ -29,7 +29,7 @@
 //!
 //! ## Planning workflows
 //!
-//! Candidate search returns [`PlanSpace`](replacement::PlanSpace), a compact
+//! Candidate search returns [`CandidatePostASAPDAGs`](replacement::CandidatePostASAPDAGs), a compact
 //! logical choice space with one [`TargetSubDAGCandidates`] per target sub-DAG.
 //! [`ReplacementStrategy`] implementations propose local alternatives; search
 //! applies the applicable semantic and accuracy checks. Candidate presence does
@@ -37,9 +37,9 @@
 //!
 //! Integrators choose among these workflows:
 //!
-//! - Inspect the candidate space, optionally using [`PlanSpace::cost_sorted`]
+//! - Inspect the candidate space, optionally using [`CandidatePostASAPDAGs::cost_sorted`]
 //!   to obtain ranked views, and perform selection downstream.
-//! - Call [`PlanSpace::global_selection`] once for the workload, then
+//! - Call [`CandidatePostASAPDAGs::global_selection`] once for the workload, then
 //!   [`GlobalSelection::assemble_selected_dag`] for each query root. This
 //!   coordinates logical choices and preserves shared nodes, but makes no
 //!   summary-maintenance lifecycle decision.
@@ -73,7 +73,7 @@
 //!   where, reusing the candidate's own rationale rather than inventing new
 //!   prose), meant for the same downstream consumer (e.g. a
 //!   DAG-visualization view) the crate doc's planning workflows section above
-//!   already names for [`replacement::PlanSpace`] itself. Superseded PR
+//!   already names for [`replacement::CandidatePostASAPDAGs`] itself. Superseded PR
 //!   #247's own rule-based traversal, which re-walked the tree once per
 //!   optimization before [`replacement::search_workload`] existed to read
 //!   from instead — see that module's docs for the full reframing.
@@ -105,7 +105,7 @@
 //!   pair under the same grouping, re-divided back by a wrapping `Project`,
 //!   so those *are* ordinary mergeable accumulators sharing/sketching can
 //!   reach. It only reshapes; [`replacement::search_workload`]'s cost-based
-//!   ranking (or a downstream consumer reading [`replacement::PlanSpace`])
+//!   ranking (or a downstream consumer reading [`replacement::CandidatePostASAPDAGs`])
 //!   is what decides whether the reshaped form is actually worth picking,
 //!   the same propose-don't-decide split every other strategy here keeps.
 //!
@@ -208,9 +208,9 @@ pub use recurrence::{
 };
 pub use replacement::{
     default_strategies, default_strategies_with, search_workload, search_workload_with,
-    search_workload_with_targets, summary_candidates, CompositionDecision, GlobalSelection,
-    Matcher, PlanSpace, Proposals, RankedTargetSubDAGCandidates, Realization, RealizationError,
-    RecurrenceProfileMap, RejectedCandidate, Replacement, ReplacementProvenance,
+    search_workload_with_targets, summary_candidates, CandidatePostASAPDAGs, CompositionDecision,
+    GlobalSelection, Matcher, Proposals, RankedTargetSubDAGCandidates, Realization,
+    RealizationError, RecurrenceProfileMap, RejectedCandidate, Replacement, ReplacementProvenance,
     ReplacementStrategy, ReplacementSubDAG, SharedSubtreeStrategy, SketchAlgorithmStrategy,
     TargetSubDAG, TargetSubDAGCandidates, TargetSubDAGSelection, MAX_SEARCH_ITERATIONS,
 };
