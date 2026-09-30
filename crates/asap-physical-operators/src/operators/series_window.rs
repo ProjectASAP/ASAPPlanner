@@ -3,12 +3,14 @@ use super::*;
 use planner_types::pre_asap::AggIntent;
 
 /// A PromQL subquery grid: every multiple of `step_ms` in
-/// `(T - offset_ms - range_ms, T - offset_ms]`, where `T` is the query time.
+/// `(T - offset_ms - range_ms, T - offset_ms]`. `T` is `at_ms` (the subquery's
+/// `@`) when present, else the query time.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct SubquerySteps {
     pub range_ms: i64,
     pub step_ms: i64,
     pub offset_ms: i64,
+    pub at_ms: Option<i64>,
 }
 
 const STALE_MARKER: u64 = 0x7ff0_0000_0000_0002;
@@ -16,8 +18,9 @@ const MAX_SUBQUERY_STEPS: i64 = 100_000;
 
 impl Operator {
     /// Evaluate each series at instant `t` over its samples in
-    /// `(t - offset_ms - range_ms, t - offset_ms]`. `t` is the query time, or
-    /// each step of `steps`. `function: None` is instant selection: the latest
+    /// `(e - offset_ms - range_ms, e - offset_ms]`. `t` is the query time, or
+    /// each step of `steps`; `e` is `at_ms` (the selector's `@`) when present,
+    /// else `t`. `function: None` is instant selection: the latest
     /// sample, absent if it is a stale marker. Range functions ignore stale
     /// markers. A series is every column except the time and `value` columns.
     /// Output rows keep the input schema, with time `t` and the result value.
@@ -26,6 +29,7 @@ impl Operator {
         function: Option<AggIntent<ColumnRef>>,
         range_ms: i64,
         offset_ms: i64,
+        at_ms: Option<i64>,
         steps: Option<SubquerySteps>,
     ) -> Result<Self, Error> {
         let coordinate = input
@@ -83,6 +87,7 @@ impl Operator {
                 value: *value,
                 range_ms,
                 offset_ms,
+                at_ms,
                 steps,
             },
             inputs: vec![input.clone()],
@@ -107,7 +112,9 @@ fn evaluation_times(
         return Ok((evaluation_time_ms, evaluation_time_ms, 1));
     };
     let overflow = || invalid("subquery grid overflows");
-    let end = evaluation_time_ms
+    let end = steps
+        .at_ms
+        .unwrap_or(evaluation_time_ms)
         .checked_sub(steps.offset_ms)
         .ok_or_else(overflow)?;
     let start = end.checked_sub(steps.range_ms).ok_or_else(overflow)?;
@@ -128,6 +135,7 @@ pub(super) fn execute<'a>(
         value,
         range_ms,
         offset_ms,
+        at_ms,
         steps,
     } = &operator.kind
     else {
@@ -175,7 +183,10 @@ pub(super) fn execute<'a>(
         while time <= last && !series.is_empty() {
             work.checkpoint().await?;
             let overflow = || invalid("series window overflows");
-            let end = time.checked_sub(*offset_ms).ok_or_else(overflow)?;
+            let end = at_ms
+                .unwrap_or(time)
+                .checked_sub(*offset_ms)
+                .ok_or_else(overflow)?;
             let start = end.checked_sub(*range_ms).ok_or_else(overflow)?;
             for (template, points) in series.values() {
                 work.checkpoint().await?;

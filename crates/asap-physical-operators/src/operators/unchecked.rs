@@ -54,6 +54,7 @@ impl TryFrom<UncheckedOperator> for Operator {
                 function,
                 range_ms,
                 offset_ms,
+                at_ms,
                 steps,
                 ..
             } => Operator::series_window(
@@ -61,8 +62,15 @@ impl TryFrom<UncheckedOperator> for Operator {
                 function.map(|f| *f),
                 range_ms,
                 offset_ms,
+                at_ms,
                 steps,
             )?,
+            Kind::SeriesLabels { kind, labels } => {
+                Operator::series_labels(input(0)?, kind, labels)?
+            }
+            Kind::SeriesBinary { operator } => {
+                Operator::series_binary(input(0)?, input(1)?, operator)?
+            }
             Kind::Project(expressions) => {
                 if expressions.len() != output.fields.len() {
                     return Err(invalid("projection width mismatch"));
