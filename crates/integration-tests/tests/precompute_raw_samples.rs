@@ -420,6 +420,16 @@ fn raw_sample_summaries_compile_and_match_their_kernels() {
         }
     }
     println!("checked {checked:?}; families {families:?}; without native state {unsupported:?}");
+    for query in [
+        "topk by (service) (2, sum_over_time(m[5m]))",
+        "quantile by (service) (0.9, m)",
+        "distinct_over_time(m[5m])",
+    ] {
+        assert!(
+            checked.contains_key(query),
+            "{query} has no checked raw summary"
+        );
+    }
     for family in [
         "Sum",
         "Count",
