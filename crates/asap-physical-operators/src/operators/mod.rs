@@ -23,6 +23,7 @@ mod joins;
 mod limit;
 mod panes;
 mod projection;
+mod series_window;
 mod sort;
 mod source;
 mod summary;
@@ -30,6 +31,7 @@ mod unchecked;
 pub(crate) mod vector_binary;
 pub(crate) mod vector_window;
 pub use aggregate::Reduction;
+pub use series_window::SubquerySteps;
 pub use sort::SortKey;
 pub use summary::ReadoutQuery;
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
@@ -71,6 +73,14 @@ enum Kind {
         intent: Box<planner_types::pre_asap::AggIntent<ColumnRef>>,
     },
     HistogramQuantile,
+    SeriesWindow {
+        function: Option<Box<planner_types::pre_asap::AggIntent<ColumnRef>>>,
+        coordinate: usize,
+        value: usize,
+        range_ms: i64,
+        offset_ms: i64,
+        steps: Option<SubquerySteps>,
+    },
     Project(Vec<Expression>),
     Filter(Expression),
     Limit {
@@ -242,6 +252,7 @@ impl PhysicalOperator<Batch, Schema> for Operator {
                 | Kind::RangeWindow { .. }
                 | Kind::HistogramQuantile
                 | Kind::CurrentSeries { .. }
+                | Kind::SeriesWindow { .. }
                 | Kind::Aggregate { .. }
                 | Kind::Window { .. }
                 | Kind::Join { .. }
@@ -288,6 +299,7 @@ impl PhysicalOperator<Batch, Schema> for Operator {
             Kind::AlignedBinary { .. } => "AlignedBinary",
             Kind::RangeWindow { .. } => "RangeWindow",
             Kind::HistogramQuantile => "HistogramQuantile",
+            Kind::SeriesWindow { .. } => "SeriesWindow",
             Kind::Project(_) => "Project",
             Kind::Filter(_) => "Filter",
             Kind::Limit { .. } => "Limit",
@@ -305,6 +317,7 @@ impl PhysicalOperator<Batch, Schema> for Operator {
     fn validate_context(&self, context: &RunContext) -> Result<(), Error> {
         panes::validate_context(self, context)?;
         current_series::validate_context(self, context)?;
+        series_window::validate_context(self, context)?;
         self.readout_range(context).map(|_| ())
     }
     fn input_schemas(&self) -> Vec<Schema> {
@@ -332,6 +345,7 @@ impl PhysicalOperator<Batch, Schema> for Operator {
             }
             Kind::Project(_) => projection::execute(self, inputs, context),
             Kind::CurrentSeries { .. } => current_series::execute(self, inputs, context),
+            Kind::SeriesWindow { .. } => series_window::execute(self, inputs, context),
             Kind::PaneInput { .. } | Kind::ScopeTimestamp { .. } => {
                 panes::execute(self, inputs, context)
             }
