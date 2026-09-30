@@ -67,7 +67,7 @@ For the broader lifecycle design, four categories of information matter
 4. existing summaries and the lifecycle actions available to the deployment.
 
 Candidate search outputs `CandidatePostASAPDAGs`. The implemented lifecycle-aware workflow
-then returns a `SummaryMaintenanceLifecyclePlan` per query root, containing the
+then returns a `LifecyclePostASAPDAG` per query root, containing the
 Post-ASAP DAG and maintenance decisions. It can choose exact raw recomputation
 when summary maintenance does not beat raw cost or comparable costs are missing. A
 state deployment states whether a summary is ephemeral, prepared, shared for a
@@ -142,7 +142,7 @@ normalize query and data workloads
   report, or data at rest from continuous ingestion as an explicit mode.
 - **What is new, and why will it succeed?** Orthogonal workload axes and an
   explicit state lifecycle let the existing recurrence formulas compare the
-  same summary under different deployment choices without changing query
+  same summary under different lifecycle choices without changing query
   semantics.
 - **Who cares?** Users need predictable latency and cost; operators need to
   know what state will exist and for how long; planner developers need demand
@@ -417,7 +417,7 @@ cost. It is not a query correctness requirement.
 
 ### Separate operator state, schedule, and output
 
-The physical design must not use `SummaryAgg` as shorthand for incremental
+Summary lifecycle planning must not use `SummaryAgg` as shorthand for incremental
 maintenance.
 
 ```rust

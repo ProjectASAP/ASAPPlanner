@@ -18,7 +18,8 @@ There are no compatibility aliases for the former graph names.
 | `CompiledPhysicalDag` | `PhysicalDAG` |
 | Runtime-bound `PhysicalDag` | `PhysicalExecution`, the execution handle returned by `PhysicalDAG::instantiate` |
 | `compile(&dag, …)`, `frontier_from_timing(&dag)` over a transport | `compile(dag.as_view(), …)`, `frontier_from_timing(dag.as_view())`; an index or assignment passes `view()` |
-| `enumerate_summary_maintenance_lifecycles`, `SummaryMaintenanceLifecycleCandidates` | `CandidatePostASAPDAGsWithTiming` (see below) |
+| `enumerate_summary_maintenance_lifecycles`, `SummaryMaintenanceLifecycleCandidates` | `CandidateLifecyclePostASAPDAGs` (see below) |
+| `SummaryMaintenanceLifecyclePlan`, `SummaryMaintenanceLifecyclePlanError` | `LifecyclePostASAPDAG` (same fields), `LifecyclePostASAPDAGError` |
 
 ## Candidate generation
 
@@ -48,7 +49,7 @@ let physical = compile_physical_dag_candidates(
 );
 ```
 
-`timed` has type `CandidatePostASAPDAGsWithTiming<'a, Id>`; `physical` has type
+`timed` has type `CandidateLifecyclePostASAPDAGs<'a, Id>`; `physical` has type
 `CandidatePhysicalDAGs<PostASAPCandidateMetadata<Id>, Rc<CandidateTimingError>>`.
 `CandidateTimingContext` binds the root's `WorkloadDemand`, planning clock,
 horizon, lifecycle capabilities and cost model. No winner-selection helper runs
@@ -65,7 +66,7 @@ error. Unknown cost stays unknown; absent window evidence must still be resolved
 before installation.
 
 Callers with an already assembled logical graph enter the same collection via
-`CandidatePostASAPDAGsWithTiming::from_post_asap_dag(id, root, context, limit)`.
+`CandidateLifecyclePostASAPDAGs::from_post_asap_dag(id, root, context, limit)`.
 `lifecycle_alternatives(logical_index)` supports inspection,
 `lifecycle_guarantee(logical_index, state, lifecycle)` answers the guarantee of one
 of a state's alternatives, so the deployment can supply its price before it

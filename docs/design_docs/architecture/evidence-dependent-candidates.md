@@ -61,7 +61,7 @@ not emit a `RejectedCandidate` for that case.
 | Cost/rate/physical evidence | `None` cost or missing workload rate; candidate remains in `CandidatePostASAPDAGs` | Physical/lifecycle evaluation reports unavailable or rejected evidence. |
 | Mixed exact/summary operator | Unknown runtime support; candidate remains in `CandidatePostASAPDAGs` | `Some(false)` prevents construction. |
 
-Lifecycle deployment choices are a separate output from `CandidatePostASAPDAGs`; their
+Lifecycle assignments (`CandidateLifecyclePostASAPDAGs`) are a separate output from `CandidatePostASAPDAGs`; their
 capability/cost rejections do not erase the logical summary candidate. The
 backend must still check ordinary summary family, window, and state-operation
 capabilities before deployment.

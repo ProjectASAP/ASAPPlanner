@@ -46,7 +46,7 @@ below states.
    maintained population that does not feed a summary state.
    A chosen assignment determines every node's
    `ExecutionTiming`, plus window framework and retention.
-   `SummaryMaintenanceLifecyclePlan::export_timed_dag` applies it: a retained
+   `LifecyclePostASAPDAG::export_timed_dag` applies it: a retained
    (non-`Ephemeral`) state and all of its inputs run at ingestion time;
    readouts, other consumers, and `Ephemeral` states not consumed by retained
    state run at query time. A population that feeds a summary state is one of

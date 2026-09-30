@@ -1231,7 +1231,7 @@ fn ddsketch_ratio_without_domain_proof_is_uncertified() {
                         && node.guarantee.is_none()
             )
         }),
-        "backend must receive the uncertified ratio candidate for its own selection"
+        "selection must receive the uncertified ratio candidate"
     );
 
     let selection = space.global_selection(&DefaultCostModel);

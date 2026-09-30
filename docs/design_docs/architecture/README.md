@@ -26,7 +26,7 @@ flowchart TD
     LINPUT["Optional lifecycle inputs: horizon, rates, capabilities, costs"]
     LIFE["global_selection_with_summary_maintenance_lifecycles"]
     LMAT["assemble_selected_dag_with_summary_maintenance_lifecycles"]
-    LPLAN["SummaryMaintenanceLifecyclePlan: DAG root + lifecycle decisions"]
+    LPLAN["LifecyclePostASAPDAG: DAG root + lifecycle decisions"]
     BACKEND["Downstream: bind physical alternatives, decide deployment, compile and execute"]
     W --> PRE
     F --> PRE
@@ -46,7 +46,7 @@ and assemble logical DAGs, or select and assemble with summary-maintenance
 lifecycle decisions. Use the last branch when Planner owns the maintenance
 decision; otherwise the backend owns it. Its first
 call returns a `GlobalSelection`; the second returns a
-`SummaryMaintenanceLifecyclePlan` with an assembled DAG root and lifecycle
+`LifecyclePostASAPDAG` with an assembled DAG root and lifecycle
 decisions. No branch by itself deploys or executes a physical plan.
 Known-invalid evidence rejects a logical candidate. Missing accuracy evidence
 leaves a constructible candidate visible in `CandidatePostASAPDAGs` but uncertified; default

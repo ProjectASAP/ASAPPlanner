@@ -6,7 +6,7 @@ Audience: Planner developers and API integrators.
 ## Objective
 
 Align the Rust API with the DAG names in
-[Planner and deployment layering](planner-backend-layering.md#dag-names),
+[Planner and deployment layering](planner-backend-layering.md#dags-and-what-each-encodes),
 without duplicating graph implementations or eagerly copying every candidate.
 
 The public pipeline is:
@@ -14,7 +14,7 @@ The public pipeline is:
 ```text
 CandidatePreASAPDAGs
   -> CandidatePostASAPDAGs
-  -> CandidatePostASAPDAGs with timing
+  -> CandidateLifecyclePostASAPDAGs
   -> CandidatePhysicalDAGs
   -> selection with deployment-supplied prices
   -> deployment execution of the selected plan
@@ -100,11 +100,12 @@ rather than treating a rename as completion of the structural work.
   assignment; an assignment's view overlays its timing on the index's records
   instead of copying them. Transport import and direct compilation share
   validation and operator lowering; no second rewrite implementation was introduced.
-- Added the lazy, budget-checked timed collection `CandidatePostASAPDAGsWithTiming`.
+- Added the lazy, budget-checked timed collection `CandidateLifecyclePostASAPDAGs`.
   Unpriced legal choices retain unknown cost, and rejected combinations retain
   their choices and errors. `execution_assignment` attaches timing to the shared
-  index. Window and retention metadata stay on the accompanying lifecycle plan;
-  unresolved window evidence remains explicit and must be supplied before
+  index. `SummaryMaintenanceLifecyclePlan` is merged into `LifecyclePostASAPDAG`:
+  one DAG root with its per-state lifecycle, window framework and retention, from
+  which the timing is derived; unresolved window evidence remains explicit and must be supplied before
   deployment installation.
 - Added `compile_physical_dag_candidates` and `CandidatePhysicalDAGs`. Compatible
   assignments share `Arc<PhysicalDAG>`; timing that changes lowering produces a
@@ -122,7 +123,7 @@ consumers must adopt the breaking names when they update their Planner dependenc
 ## Collection boundary completion
 
 The logical collection `CandidatePostASAPDAGs<Id>` and the timed collection
-`CandidatePostASAPDAGsWithTiming<'a, Id>` are separate plain types. The timed
+`CandidateLifecyclePostASAPDAGs<'a, Id>` are separate plain types. The timed
 collection encapsulates the existing lifecycle enumerator: `with_timing_for_root`
 handles logical realization, index sharing, assignment budgets and lazy
 generation, and single already-assembled graphs use `from_post_asap_dag`. It

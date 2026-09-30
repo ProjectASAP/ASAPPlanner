@@ -7,9 +7,9 @@ use crate::{
     summary_maintenance_lifecycle::{
         enumerate_summary_maintenance_lifecycles, SummaryMaintenanceLifecycleCandidates,
     },
-    Horizon, SummaryMaintenanceDeployment, SummaryMaintenanceLifecycleCapabilities,
-    SummaryMaintenanceLifecycleChoiceError, SummaryMaintenanceLifecyclePlan,
-    SummaryMaintenanceLifecyclePlanError, SummaryMaintenanceTimingError, WorkloadDemand,
+    Horizon, LifecyclePostASAPDAG, LifecyclePostASAPDAGError, SummaryMaintenanceDeployment,
+    SummaryMaintenanceLifecycleCapabilities, SummaryMaintenanceLifecycleChoiceError,
+    SummaryMaintenanceTimingError, WorkloadDemand,
 };
 use asap_types::post_asap::{
     index_post_asap_dag, ExecutionDataStateError, PostASAPDAG, PostASAPDAGAssignment,
@@ -31,7 +31,7 @@ pub enum CandidateTimingError {
     #[error(transparent)]
     Logical(#[from] RealizationError),
     #[error(transparent)]
-    Lifecycle(#[from] SummaryMaintenanceLifecyclePlanError),
+    Lifecycle(#[from] LifecyclePostASAPDAGError),
     #[error(transparent)]
     Choice(#[from] SummaryMaintenanceLifecycleChoiceError),
     #[error(transparent)]
@@ -50,11 +50,11 @@ struct PreparedTiming<'a> {
     count: usize,
 }
 
-/// Every lifecycle assignment of one workload root's logical candidates: the
-/// design's "`CandidatePostASAPDAGs` with timing". It retains shared graph
-/// indices and factored choices, never a Cartesian-product vector of timed
-/// graphs, and it does not select an assignment.
-pub struct CandidatePostASAPDAGsWithTiming<'a, Id> {
+/// Every lifecycle assignment of one workload root's logical candidates, each a
+/// [`LifecyclePostASAPDAG`]. It retains shared graph indices and factored
+/// choices, never a Cartesian-product vector of timed graphs, and it does not
+/// select an assignment.
+pub struct CandidateLifecyclePostASAPDAGs<'a, Id> {
     id: Id,
     logical: Vec<Result<PreparedTiming<'a>, Rc<CandidateTimingError>>>,
     rejected_assemblies: Vec<String>,
@@ -62,14 +62,15 @@ pub struct CandidatePostASAPDAGsWithTiming<'a, Id> {
 }
 
 /// Candidate identity and lifecycle evidence survive both timing and compilation
-/// failures. `None` means lifecycle binding failed, not an implicit default.
+/// failures. `lifecycle` is `None` when lifecycle binding failed, not an
+/// implicit default.
 #[derive(Debug)]
 pub struct PostASAPCandidateMetadata<Id> {
     pub id: Id,
     pub logical_candidate: usize,
     pub assignment_candidate: usize,
     pub choices: Vec<(PostASAPNodeId, SummaryMaintenanceLifecycle)>,
-    pub lifecycle: Option<SummaryMaintenanceLifecyclePlan>,
+    pub lifecycle: Option<LifecyclePostASAPDAG>,
 }
 
 impl<Id: Clone + PartialEq> CandidatePostASAPDAGs<Id> {
@@ -82,7 +83,7 @@ impl<Id: Clone + PartialEq> CandidatePostASAPDAGs<Id> {
         context: CandidateTimingContext<'a>,
         logical_limit: usize,
         assignment_limit: usize,
-    ) -> Result<CandidatePostASAPDAGsWithTiming<'a, Id>, CandidateTimingError> {
+    ) -> Result<CandidateLifecyclePostASAPDAGs<'a, Id>, CandidateTimingError> {
         let inventory = self
             .enumerate_candidate_dags_for_root(id, logical_limit)
             .map_err(|error| match error {
@@ -106,7 +107,7 @@ impl<Id: Clone + PartialEq> CandidatePostASAPDAGs<Id> {
     }
 }
 
-impl<'a, Id> CandidatePostASAPDAGsWithTiming<'a, Id> {
+impl<'a, Id> CandidateLifecyclePostASAPDAGs<'a, Id> {
     /// Enter the same timed collection API when a caller already has one logical
     /// graph. Explicit selection helpers do not need another lifecycle API type.
     pub fn from_post_asap_dag(
@@ -125,7 +126,7 @@ fn prepare<'a, Id>(
     rejected_assemblies: Vec<String>,
     context: CandidateTimingContext<'a>,
     limit: usize,
-) -> Result<CandidatePostASAPDAGsWithTiming<'a, Id>, CandidateTimingError> {
+) -> Result<CandidateLifecyclePostASAPDAGs<'a, Id>, CandidateTimingError> {
     let enumerated = roots.into_iter().map(|root| {
         let index = Rc::new(index_post_asap_dag(&root)?);
         let lifecycles = enumerate_summary_maintenance_lifecycles(
@@ -155,7 +156,7 @@ pub(crate) fn collect_timing<'a, Id>(
     >,
     rejected_assemblies: Vec<String>,
     limit: usize,
-) -> Result<CandidatePostASAPDAGsWithTiming<'a, Id>, CandidateTimingError> {
+) -> Result<CandidateLifecyclePostASAPDAGs<'a, Id>, CandidateTimingError> {
     let mut logical = Vec::new();
     let mut count = 0usize;
     for prepared in enumerated {
@@ -173,7 +174,7 @@ pub(crate) fn collect_timing<'a, Id>(
             .ok_or(CandidateTimingError::ExpansionLimit(limit))?;
         logical.push(prepared);
     }
-    Ok(CandidatePostASAPDAGsWithTiming {
+    Ok(CandidateLifecyclePostASAPDAGs {
         id,
         logical,
         rejected_assemblies,
@@ -201,7 +202,7 @@ fn prepared_timing(
     }
 }
 
-impl<Id: Clone> CandidatePostASAPDAGsWithTiming<'_, Id> {
+impl<Id: Clone> CandidateLifecyclePostASAPDAGs<'_, Id> {
     /// Includes rejected assignments; failures retain their candidate identity.
     pub fn len(&self) -> usize {
         self.count
@@ -300,7 +301,7 @@ impl<Id: Clone> CandidatePostASAPDAGsWithTiming<'_, Id> {
         &self,
         logical_candidate: usize,
         choices: &[(PostASAPNodeId, SummaryMaintenanceLifecycle)],
-    ) -> Result<SummaryMaintenanceLifecyclePlan, Rc<CandidateTimingError>> {
+    ) -> Result<LifecyclePostASAPDAG, Rc<CandidateTimingError>> {
         self.prepared(logical_candidate)?
             .lifecycles
             .clone()

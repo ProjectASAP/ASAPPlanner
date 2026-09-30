@@ -38,7 +38,7 @@
 //! Integrators choose among these workflows:
 //!
 //! - Inspect the candidate space, optionally using [`CandidatePostASAPDAGs::cost_sorted`]
-//!   to obtain ranked views, and perform selection downstream.
+//!   to obtain ranked views under the supplied cost model.
 //! - Call [`CandidatePostASAPDAGs::global_selection`] once for the workload, then
 //!   [`GlobalSelection::assemble_selected_dag`] for each query root. This
 //!   coordinates logical choices and preserves shared nodes, but makes no
@@ -46,9 +46,9 @@
 //! - When Planner owns maintenance-versus-recomputation decisions, use
 //!   [`global_selection_with_summary_maintenance_lifecycles`] followed by
 //!   [`assemble_selected_dag_with_summary_maintenance_lifecycles`] per root.
-//!   This alternative workflow returns [`SummaryMaintenanceLifecyclePlan`]
-//!   values containing DAG roots and maintenance decisions; callers do not need
-//!   to run ordinary selection/assembly first.
+//!   This alternative workflow returns [`LifecyclePostASAPDAG`]
+//!   values: DAG roots annotated with their lifecycle assignment; callers do not
+//!   need to run ordinary selection/assembly first.
 //!
 //! Models and evidence determine which choices the helpers can justify.
 //! Physical operator binding, placement, storage, deployment, and execution
@@ -57,8 +57,8 @@
 //!
 //! ## Supporting components
 //!
-//! - [`cost_model`] — the [`CostModel`](cost_model::CostModel) trait every
-//!   deployment's cost-based sketch selection plugs into (issues #6, #33).
+//! - [`cost_model`] — the [`CostModel`](cost_model::CostModel) trait through
+//!   which a deployment supplies the costs Planner's selection uses (issues #6, #33).
 //!   `asap-plan` itself only ships [`DefaultCostModel`](cost_model::DefaultCostModel),
 //!   which preserves [`replacement`]'s built-in static preference order and
 //!   — via [`CostModel::estimate_cost`](cost_model::CostModel::estimate_cost)
@@ -222,12 +222,12 @@ pub use summary_maintenance_dag_export::{
 pub use summary_maintenance_lifecycle::{
     assemble_selected_dag_with_summary_maintenance_lifecycles,
     global_selection_with_summary_maintenance_lifecycles, plan_summary_maintenance_lifecycles,
-    SummaryMaintenanceCapabilities, SummaryMaintenanceDeployment,
-    SummaryMaintenanceLifecycleAlternative, SummaryMaintenanceLifecycleAssemblyError,
-    SummaryMaintenanceLifecycleCapabilities, SummaryMaintenanceLifecycleChoiceError,
-    SummaryMaintenanceLifecycleCostInputs, SummaryMaintenanceLifecyclePlan,
-    SummaryMaintenanceLifecyclePlanError, SummaryMaintenanceLifecycleRejection,
-    SummaryMaintenanceLifecycleSelectionError, SummaryMaintenanceTimingError, WorkloadDemand,
+    LifecyclePostASAPDAG, LifecyclePostASAPDAGError, SummaryMaintenanceCapabilities,
+    SummaryMaintenanceDeployment, SummaryMaintenanceLifecycleAlternative,
+    SummaryMaintenanceLifecycleAssemblyError, SummaryMaintenanceLifecycleCapabilities,
+    SummaryMaintenanceLifecycleChoiceError, SummaryMaintenanceLifecycleCostInputs,
+    SummaryMaintenanceLifecycleRejection, SummaryMaintenanceLifecycleSelectionError,
+    SummaryMaintenanceTimingError, WorkloadDemand,
 };
 pub use topk_reuse::TopKLimitReuseStrategy;
 
@@ -235,6 +235,6 @@ pub mod maintained_population;
 
 mod candidate_timing;
 pub use candidate_timing::{
-    CandidatePostASAPDAGsWithTiming, CandidateTimingContext, CandidateTimingError,
+    CandidateLifecyclePostASAPDAGs, CandidateTimingContext, CandidateTimingError,
     PostASAPCandidateMetadata,
 };

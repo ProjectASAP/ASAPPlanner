@@ -262,7 +262,7 @@ impl MaintainedPopulationStrategy {
         });
         // Query time is only the initial layout: whether the population is
         // retained at ingestion or rebuilt per query is its lifecycle choice
-        // (`SummaryMaintenanceLifecyclePlan::export_timed_dag`). The readout
+        // (`LifecyclePostASAPDAG::export_timed_dag`). The readout
         // and projection above it are query-time by construction.
         let maintained = Rc::new(PostASAPNode {
             expr: SummaryExpr::ValueOperation {

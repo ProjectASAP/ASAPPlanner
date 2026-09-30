@@ -545,7 +545,7 @@ assemble_selected_dag_with_summary_maintenance_lifecycles(
     selection: &GlobalSelection<'_>, target: &Rc<PreASAPNode>,
     demand: WorkloadDemand<'_>, now_ms: u64, horizon: Option<Horizon>,
     capabilities: SummaryMaintenanceLifecycleCapabilities, cost_model: &dyn CostModel,
-) -> Result<Option<SummaryMaintenanceLifecyclePlan>, SummaryMaintenanceLifecycleAssemblyError>
+) -> Result<Option<LifecyclePostASAPDAG>, SummaryMaintenanceLifecycleAssemblyError>
 ```
 
 | Argument | Values / requirements |
@@ -579,7 +579,7 @@ entries, construct demand using all applicable indices.
 use asap_aware_mapping::{
     global_selection_with_summary_maintenance_lifecycles,
     assemble_selected_dag_with_summary_maintenance_lifecycles, CostModel, Horizon, CandidatePostASAPDAGs,
-    SummaryMaintenanceLifecycleCapabilities, SummaryMaintenanceLifecyclePlan,
+    SummaryMaintenanceLifecycleCapabilities, LifecyclePostASAPDAG,
     WorkloadDemand,
 };
 use asap_types::workload::PlanningWorkload;
@@ -591,7 +591,7 @@ fn plan_batch_root(
     now_ms: u64,
     horizon: Option<Horizon>,
     model: &dyn CostModel,
-) -> Result<Option<SummaryMaintenanceLifecyclePlan>, Box<dyn std::error::Error>> {
+) -> Result<Option<LifecyclePostASAPDAG>, Box<dyn std::error::Error>> {
     if space.roots.len() != 1 {
         return Err("this example requires exactly one root".into());
     }
@@ -630,10 +630,10 @@ that prepared or retained shared state is supported.
 
 | Function | Inputs | Output / promise |
 | --- | --- | --- |
-| `plan_summary_maintenance_lifecycles` | Assembled logical DAG root, `WorkloadDemand`, `now_ms`, optional horizon, runtime capabilities, cost model | `Result<SummaryMaintenanceLifecyclePlan, …>` for that fixed root; does not revisit all semantic candidates |
+| `plan_summary_maintenance_lifecycles` | Assembled logical DAG root, `WorkloadDemand`, `now_ms`, optional horizon, runtime capabilities, cost model | `Result<LifecyclePostASAPDAG, …>` for that fixed root; does not revisit all semantic candidates |
 | `global_selection_with_summary_maintenance_lifecycles` | `CandidatePostASAPDAGs`, workload/root-entry associations, time, horizon, capabilities, cost model | Lifecycle-aware compatible selection/error, using eligible cost evidence |
 | `assemble_selected_dag_with_summary_maintenance_lifecycles` | Selection, target root and lifecycle context | Optional lifecycle plan/error; attaches state deployment decisions |
-| `CandidatePostASAPDAGs::with_timing_for_root` | Root ID, `CandidateTimingContext`, logical and assignment expansion limits | `CandidatePostASAPDAGsWithTiming<'a, Id>`; lazy assignments and rejections, with shared logical graphs and lifecycle metadata |
+| `CandidatePostASAPDAGs::with_timing_for_root` | Root ID, `CandidateTimingContext`, logical and assignment expansion limits | `CandidateLifecyclePostASAPDAGs<'a, Id>`; lazy assignments and rejections, with shared logical graphs and lifecycle metadata |
 | Timed collection `lifecycle_guarantee(logical_index, state, lifecycle)` | A state and one of its lifecycle alternatives | The guarantee that choosing it would attach, so the deployment can supply its price; a lifecycle the state does not offer is rejected |
 | Timed collection `select_lifecycles(logical_index, choices)` | One `(PostASAPNodeId, SummaryMaintenanceLifecycle)` per state, copied from `lifecycle_alternatives(logical_index)` | The same lifecycle plan and validation as explicit Planner selection, with typed rejection on failure |
 
@@ -650,7 +650,7 @@ instead supply its own prices to that comparison.
 A deployment that supplies its own lifecycle prices obtains the timed candidates
 with `with_timing_for_root`; selection over those prices binds one choice per
 state, through `select_lifecycles`, which validates a given choice. Callers with an assembled root use
-`CandidatePostASAPDAGsWithTiming::from_post_asap_dag` to enter the same timed collection.
+`CandidateLifecyclePostASAPDAGs::from_post_asap_dag` to enter the same timed collection.
 A choice is accepted only if Planner could select it:
 an alternative with `MissingCostEvidence` is accepted only when the cost model's
 complete-candidate hook covers lifecycle costs. Window frameworks and totals come
@@ -671,7 +671,7 @@ for plan in lifecycle_plans {
     let frontier = frontier_from_timing(plan.export_timed_dag()?.as_view())?;
     // Precompute/query DAGs split at `frontier`; no logical lowering.
     let candidate = cut_candidate(&compiled, &frontier)?;
-    // Check feasibility and price `candidate`; bind the selected one as is.
+    // The deployment prices `candidate`; Planner's selection binds one as is.
 }
 ```
 
@@ -691,7 +691,7 @@ state's input. The lifecycle cost hooks (`summary_maintenance_capabilities`,
 hook therefore also receive `MaintainPopulation` nodes. A model that does not
 recognize one should return unknown costs, which keep its alternatives
 unselected; a model that prices every node uniformly now also prices
-populations, so population candidates can win lifecycle-aware selection. `SummaryMaintenanceLifecyclePlan::export_timed_dag` times a
+populations, so population candidates can win lifecycle-aware selection. `LifecyclePostASAPDAG::export_timed_dag` times a
 population as it times a summary state: retained at ingestion, `Ephemeral` at
 query time from the raw source.
 

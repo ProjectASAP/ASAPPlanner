@@ -62,7 +62,7 @@ PlanningWorkload + frontend dependencies + planning models/evidence
         CandidatePostASAPDAGs
                         |
                         v
-       lifecycle assignments -> CandidatePostASAPDAGs with timing
+       lifecycle assignments -> CandidateLifecyclePostASAPDAGs
                         |
                         v
        compile and cut by timing -> CandidatePhysicalDAGs
@@ -91,7 +91,7 @@ flowchart TD
     X["Extra lifecycle inputs: horizon; update rate; capabilities; comparable summary/raw costs"]
     H["Summary-maintenance-lifecycle-aware selection"]
     HM["Assemble one selected DAG and decide summary maintenance"]
-    O["SummaryMaintenanceLifecyclePlan: assembled DAG root + maintenance/recompute decision"]
+    O["LifecyclePostASAPDAG: assembled DAG root annotated with its lifecycle assignment"]
     PC["Planner: lifecycle timing, compile PhysicalDAG, cut PhysicalCandidate"]
     B["Backend: bind typed inputs, deploy, and execute"]
     Q --> F
@@ -394,7 +394,7 @@ timing assignments, physical candidate generation and explicit transport exports
 |---|---|---|
 | 0. Frontends | `CandidatePreASAPDAGs` | Parse and lower PromQL, SQL, or MetricsQL; reject unsupported semantics such as PromQL `fill`. |
 | 1. Logical Post-ASAP | `CandidatePostASAPDAGs` | What to compute: summary families, rewrites, and exact candidates. No placement. `PlanOutput` is an optional library-selected logical result; selection with deployment prices uses the candidate collection itself. |
-| 2. Summary maintenance lifecycle | Lifecycle choices per unique summary state and maintained population → `CandidatePostASAPDAGs` with timing (`CandidatePostASAPDAGsWithTiming`) | `Ephemeral`, `Prepared`, `Shared`, or `ContinuouslyMaintained`. Each admissible assignment produces a candidate with node timing, window framework, and retention; this layer is the only source of timing. |
+| 2. Summary lifecycle planning | Lifecycle choices per unique summary state and maintained population → `CandidateLifecyclePostASAPDAGs` | `Ephemeral`, `Prepared`, `Shared`, or `ContinuouslyMaintained`. Each admissible assignment produces a candidate with node timing, window framework, and retention; this layer is the only source of timing. |
 | 3. Physical compilation | `CandidatePhysicalDAGs` | Compile operators and kernels once, then cut by timing into precompute and query DAGs with typed `InputContracts`. |
 | 4. Selection | Planner library function | Takes the deployment's prices (including summary store cost), accuracy requirements and capabilities, and returns one optimal physical plan. |
 | 5. Deployment execution | Deployment-owned | Binds, installs state, and executes the selected plan. |
@@ -525,7 +525,7 @@ there is no need to run the ordinary selection/assembly workflow first:
 2. For each wanted query root, `assemble_selected_dag_with_summary_maintenance_lifecycles`
    takes that selection and root, constructs a PostASAPDAG, compares the
    selected summary's maintenance cost with raw recomputation, and returns
-   `Result<Option<SummaryMaintenanceLifecyclePlan>, SummaryMaintenanceLifecycleAssemblyError>`.
+   `Result<Option<LifecyclePostASAPDAG>, SummaryMaintenanceLifecycleAssemblyError>`.
    When a summary does not beat a
    known raw cost, or a required comparable cost is unavailable, the result
    retains the exact `KeepPreAsap` root and no summary deployments.
@@ -558,7 +558,7 @@ they are not duplicated as separate top-level inputs. Similarly, data arrival
 and update rate are read from the optional `DataWorkload`. Missing required
 facts remain unknown rather than being treated as zero.
 
-The per-query output, `SummaryMaintenanceLifecyclePlan`, **contains** the
+The per-query output, `LifecyclePostASAPDAG`, **contains** the
 PostASAPDAG rather than being a parallel representation. It records:
 
 * the assembled PostASAPDAG root (`Rc<PostASAPNode>`);

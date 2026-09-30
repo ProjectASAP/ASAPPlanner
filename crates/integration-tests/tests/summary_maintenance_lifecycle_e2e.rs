@@ -187,16 +187,14 @@ fn promql_dashboard_materializes_continuous_summary_with_explained_rejections() 
     );
 }
 
-fn selected_plan(
-    workload: &PlanningWorkload,
-) -> asap_aware_mapping::SummaryMaintenanceLifecyclePlan {
+fn selected_plan(workload: &PlanningWorkload) -> asap_aware_mapping::LifecyclePostASAPDAG {
     selected_plan_with_model(workload, &FullyCostedRuntime)
 }
 
 fn selected_plan_with_model(
     workload: &PlanningWorkload,
     model: &dyn CostModel,
-) -> asap_aware_mapping::SummaryMaintenanceLifecyclePlan {
+) -> asap_aware_mapping::LifecyclePostASAPDAG {
     selected_plan_with_horizon(workload, model, Horizon(100.))
 }
 
@@ -204,7 +202,7 @@ fn selected_plan_with_horizon(
     workload: &PlanningWorkload,
     model: &dyn CostModel,
     horizon: Horizon,
-) -> asap_aware_mapping::SummaryMaintenanceLifecyclePlan {
+) -> asap_aware_mapping::LifecyclePostASAPDAG {
     workload.validate().unwrap();
 
     let lowered = lower_promql_workload(workload, 0)
@@ -220,7 +218,7 @@ fn selected_plan_for_lowered(
     lowered: asap_types::pre_asap::PreASAPNode,
     model: &dyn CostModel,
     horizon: Horizon,
-) -> asap_aware_mapping::SummaryMaintenanceLifecyclePlan {
+) -> asap_aware_mapping::LifecyclePostASAPDAG {
     let root = Rc::new(lowered);
     let strategies = asap_aware_mapping::default_strategies_with(model);
     let space = search_workload_with(vec![("dashboard", Rc::clone(&root))], &strategies);
@@ -458,7 +456,7 @@ fn lifecycle_timed_dag(
     }
     let root =
         selected_plan_for_lowered(&workload, lowered, &FullyCostedRuntime, Horizon(100.)).root;
-    let candidates = asap_aware_mapping::CandidatePostASAPDAGsWithTiming::from_post_asap_dag(
+    let candidates = asap_aware_mapping::CandidateLifecyclePostASAPDAGs::from_post_asap_dag(
         (),
         root,
         asap_aware_mapping::CandidateTimingContext {
@@ -723,7 +721,7 @@ fn chosen_population_lifecycle_decides_precompute_contents() {
         SummaryMaintenanceLifecycle::ContinuouslyMaintained,
         SummaryMaintenanceLifecycle::Ephemeral,
     ] {
-        let candidates = asap_aware_mapping::CandidatePostASAPDAGsWithTiming::from_post_asap_dag(
+        let candidates = asap_aware_mapping::CandidateLifecyclePostASAPDAGs::from_post_asap_dag(
             (),
             Rc::clone(&root),
             asap_aware_mapping::CandidateTimingContext {
@@ -881,7 +879,7 @@ fn grouped_rate_sum_placement_is_a_lifecycle_choice() {
         SummaryMaintenanceLifecycle::ContinuouslyMaintained,
         SummaryMaintenanceLifecycle::Ephemeral,
     ] {
-        let lifecycles = asap_aware_mapping::CandidatePostASAPDAGsWithTiming::from_post_asap_dag(
+        let lifecycles = asap_aware_mapping::CandidateLifecyclePostASAPDAGs::from_post_asap_dag(
             (),
             Rc::clone(candidate),
             asap_aware_mapping::CandidateTimingContext {
@@ -1166,7 +1164,7 @@ fn maintained_arithmetic_over_one_selector_executes() {
 #[test]
 fn named_candidate_collections_preserve_timing_and_compile_errors() {
     use asap_aware_mapping::{
-        CandidatePostASAPDAGsWithTiming, CandidateTimingContext, CandidateTimingError,
+        CandidateLifecyclePostASAPDAGs, CandidateTimingContext, CandidateTimingError,
     };
     use asap_physical_operators::physical_planner::{
         compile_physical_dag_candidates, PhysicalCandidateError,
@@ -1315,13 +1313,9 @@ fn named_candidate_collections_preserve_timing_and_compile_errors() {
             })
         })
         .unwrap();
-    let one = CandidatePostASAPDAGsWithTiming::from_post_asap_dag(
-        17usize,
-        first.clone(),
-        context(),
-        4096,
-    )
-    .unwrap();
+    let one =
+        CandidateLifecyclePostASAPDAGs::from_post_asap_dag(17usize, first.clone(), context(), 4096)
+            .unwrap();
     assert_eq!(one.logical_len(), 1);
     assert!(!one.lifecycle_alternatives(0).unwrap().is_empty());
 
@@ -1356,7 +1350,7 @@ fn named_candidate_collections_preserve_timing_and_compile_errors() {
     let mut invalid = context();
     invalid.horizon = Some(Horizon(-1.));
     let rejected =
-        CandidatePostASAPDAGsWithTiming::from_post_asap_dag(17usize, first, invalid, 4096).unwrap();
+        CandidateLifecyclePostASAPDAGs::from_post_asap_dag(17usize, first, invalid, 4096).unwrap();
     assert_eq!(rejected.len(), 1);
     let physical = compile_physical_dag_candidates(rejected.iter(), Vec::new(), |_, _| {
         panic!("invalid lifecycle context must not reach compilation")

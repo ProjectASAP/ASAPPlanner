@@ -24,5 +24,5 @@ The earlier #445 renames (`TargetSubDAGCandidates`,
 counterpart) are prerequisites, not additional changes here.
 
 The workflow remains one selection call per workload followed by one assembly
-call per query root. `SummaryMaintenanceLifecyclePlan` contains the assembled
+call per query root. `LifecyclePostASAPDAG` contains the assembled
 Post-ASAP DAG root plus maintenance decisions; it is not an executable plan.

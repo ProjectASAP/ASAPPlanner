@@ -17,7 +17,7 @@ use asap_types::post_asap::{
 };
 
 use crate::summary_maintenance_lifecycle::{
-    SummaryMaintenanceLifecyclePlan, SummaryMaintenanceLifecycleRejection,
+    LifecyclePostASAPDAG, SummaryMaintenanceLifecycleRejection,
 };
 
 #[derive(Debug, Clone, Serialize)]
@@ -61,9 +61,7 @@ pub struct SummaryMaintenanceLifecycleAlternativeExport {
 
 pub type SummaryMaintenanceLifecycleGuaranteeExport = SummaryMaintenanceLifecycleGuarantee;
 
-pub fn export_summary_maintenance_plan(
-    plan: &SummaryMaintenanceLifecyclePlan,
-) -> SummaryMaintenanceDagExport {
+pub fn export_summary_maintenance_plan(plan: &LifecyclePostASAPDAG) -> SummaryMaintenanceDagExport {
     let deployments: Vec<_> = plan
         .deployments
         .iter()

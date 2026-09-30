@@ -94,7 +94,7 @@ pub struct QueryPlan {
 
 pub struct QueryLifecyclePlan {
     pub entry_index: usize,
-    pub plan: SummaryMaintenanceLifecyclePlan,   // its `root` is the DAG
+    pub plan: LifecyclePostASAPDAG,   // its `root` is the DAG
 }
 ```
 

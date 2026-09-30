@@ -2,16 +2,16 @@
 
 ## Purpose
 
-ASAPPlanner produces `CandidatePostASAPDAGs`, a compact logical candidate space. Integrators
-may select candidates downstream or ask Planner's helpers to select and assemble
-DAGs. Summary-maintenance lifecycle decisions belong to Planner only when the
+ASAPPlanner produces `CandidatePostASAPDAGs`, a compact logical candidate space.
+Selection is a Planner function that uses the deployment's cost model; Planner's
+helpers select and assemble DAGs. Summary-maintenance lifecycle decisions belong to Planner only when the
 integration uses its lifecycle-aware workflow; physical deployment and execution
 remain downstream. The [input/output/workflow design](input-output-workflow.md)
 defines this boundary.
 
 A downstream provider can report implementation alternatives and their cost and
 accuracy evidence for a Planner-owned comparison. The resulting
-`SummaryMaintenanceLifecyclePlan` contains a Post-ASAP DAG root and maintenance
+`LifecyclePostASAPDAG` contains a Post-ASAP DAG root and maintenance
 decisions; it is not an executable plan. Repeated provider calls do not constitute
 an implemented end-to-end replanning or deployment-transition protocol.
 
@@ -38,8 +38,8 @@ exponential histogram—because those alternatives have different accuracy,
 CPU, memory, and I/O behavior.
 
 ASAPQuery-backend then implements the selected framework. For example, after
-Planner chooses a sliding-window realization, the backend chooses the concrete
-pane representation, runtime operator implementation, machine placement, sharding,
+Planner chooses a sliding-window realization, the backend implements it with its
+own pane representation, runtime operator implementation, machine placement, sharding,
 watermark behavior, and materialization identifiers. ASAPCollector maintains
 the compiled panes and summary state.
 
@@ -51,7 +51,7 @@ backend still owns how the selected algorithms are physically realized.
 ## Summary-algorithm analogy
 
 The same contract applies when ASAPPlanner selects a summary algorithm. Planner
-can choose KLL rather than DDSketch, while downstream chooses the concrete KLL
+can choose KLL rather than DDSketch, while downstream supplies the concrete KLL
 implementation and runtime configuration that satisfies the selected parameter
 and accuracy contract. Empirical KLL error, update work, state size, and readout
 work observed on a particular workload can be fed back as evidence for later

@@ -274,7 +274,7 @@ impl<M, E: Clone> CandidatePhysicalDAGs<M, E> {
 }
 
 /// Compile timed logical candidates (e.g. the iterator of
-/// `CandidatePostASAPDAGsWithTiming`), preserving every assignment and
+/// `CandidateLifecyclePostASAPDAGs`), preserving every assignment and
 /// rejection. Input contracts and requested roots can differ between logical
 /// realizations. The resolver supplies contracts, never live runtime readers.
 /// The metadata and timing error types are the caller's, so this layer does

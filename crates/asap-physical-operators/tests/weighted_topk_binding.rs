@@ -821,7 +821,7 @@ fn continuously_maintained_dag(candidate: &Rc<PostASAPNode>) -> PostASAPDAGTrans
         },
         ..Default::default()
     };
-    let lifecycles = asap_aware_mapping::CandidatePostASAPDAGsWithTiming::from_post_asap_dag(
+    let lifecycles = asap_aware_mapping::CandidateLifecyclePostASAPDAGs::from_post_asap_dag(
         (),
         Rc::clone(candidate),
         asap_aware_mapping::CandidateTimingContext {

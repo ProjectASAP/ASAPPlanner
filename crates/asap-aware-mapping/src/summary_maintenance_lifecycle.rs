@@ -11,7 +11,7 @@
 //!
 //! This module enumerates and costs `Ephemeral`, `Prepared`, `Shared`, and
 //! `ContinuouslyMaintained` alternatives for every unique `SummaryAgg` in a
-//! materialized plan, and for every maintained population (`MaintainPopulation`)
+//! assembled Post-ASAP DAG, and for every maintained population (`MaintainPopulation`)
 //! that is not an input of a `SummaryAgg`. [`SummaryMaintenanceMode`] is an orthogonal detail of
 //! the selected deployment: state is either built directly or updated
 //! incrementally. Unknown evidence stays unknown and therefore cannot make a
@@ -181,11 +181,14 @@ pub struct SummaryMaintenanceDeployment {
     pub alternatives: Vec<SummaryMaintenanceLifecycleAlternative>,
 }
 
-/// Workload-aware lifecycle and window-framework decisions for every unique
-/// summary state reachable from one materialized post-ASAP root.
+/// A Post-ASAP DAG annotated with one lifecycle assignment: `root` plus, for
+/// each unique summary state reachable from it, the lifecycle (including
+/// retention) and window framework in `deployments`. Per-node timing is derived
+/// from these annotations by [`Self::execution_assignment`], the only source of
+/// timing, so no separate timed graph is kept beside this DAG.
 #[derive(Debug, Clone)]
-pub struct SummaryMaintenanceLifecyclePlan {
-    /// Root of the materialized post-ASAP DAG being deployed.
+pub struct LifecyclePostASAPDAG {
+    /// Root of the annotated Post-ASAP DAG.
     pub root: Rc<PostASAPNode>,
     /// One entry per unique reachable `SummaryAgg`, then per unique
     /// maintained population outside any `SummaryAgg`'s inputs; shared `Rc`
@@ -216,7 +219,7 @@ pub struct SummaryMaintenanceLifecyclePlan {
     pub raw_recompute_total_cost: Option<Cost>,
 }
 
-/// Why a lifecycle plan cannot assign execution timing to its DAG.
+/// Why a lifecycle DAG cannot assign execution timing to its nodes.
 #[derive(Debug, thiserror::Error, PartialEq)]
 pub enum SummaryMaintenanceTimingError {
     #[error(transparent)]
@@ -225,7 +228,7 @@ pub enum SummaryMaintenanceTimingError {
     UnselectedLifecycle(PostASAPNodeId),
     /// A maintained population outside any `SummaryAgg`'s inputs has no
     /// deployment, so its timing would be guessed. Enumeration always emits
-    /// one; this arises only for a plan whose root or deployments were edited.
+    /// one; this arises only for a DAG whose root or deployments were edited.
     #[error("node {0:?} maintains state that has no summary-maintenance lifecycle")]
     UnplannedMaintainedState(PostASAPNodeId),
     #[error("timing index belongs to a different logical graph")]
@@ -234,7 +237,7 @@ pub enum SummaryMaintenanceTimingError {
     InvalidPhases(#[from] PostASAPDAGValidationError),
 }
 
-impl SummaryMaintenanceLifecyclePlan {
+impl LifecyclePostASAPDAG {
     /// The post-ASAP DAG of [`Self::root`] with every node's timing derived
     /// from the selected lifecycles, so physical compilation places it.
     ///
@@ -362,7 +365,7 @@ impl<'a> WorkloadDemand<'a> {
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum SummaryMaintenanceLifecyclePlanError {
+pub enum LifecyclePostASAPDAGError {
     #[error(transparent)]
     InvalidWorkload(#[from] WorkloadError),
     #[error("optimization horizon must be finite and strictly positive")]
@@ -382,7 +385,7 @@ pub enum SummaryMaintenanceLifecycleAssemblyError {
     #[error(transparent)]
     AssembleDag(#[from] RealizationError),
     #[error(transparent)]
-    SummaryMaintenance(#[from] SummaryMaintenanceLifecyclePlanError),
+    SummaryMaintenance(#[from] LifecyclePostASAPDAGError),
 }
 
 /// Failure while deriving workload-aware candidate costs before global
@@ -392,20 +395,20 @@ pub enum SummaryMaintenanceLifecycleSelectionError {
     #[error(transparent)]
     Recurrence(#[from] RecurrenceError),
     #[error(transparent)]
-    SummaryMaintenance(#[from] SummaryMaintenanceLifecyclePlanError),
+    SummaryMaintenance(#[from] LifecyclePostASAPDAGError),
 }
 
 /// Every lifecycle alternative for each unique retained state of one fixed
 /// root, before any lifecycle is chosen.
 ///
-/// Planner selection ([`plan_summary_maintenance_lifecycles`]) and a
-/// deployment's explicit choice ([`Self::select`]) both finish from this value,
-/// so they produce the same [`SummaryMaintenanceLifecyclePlan`] shape.
+/// Planner selection ([`plan_summary_maintenance_lifecycles`]) and binding an
+/// explicit assignment ([`Self::select`]) both finish from this value,
+/// so they produce the same [`LifecyclePostASAPDAG`] shape.
 #[derive(Clone)]
 pub(crate) struct SummaryMaintenanceLifecycleCandidates<'a> {
-    /// Unselected plan: deployments carry alternatives but no guarantee or
+    /// Unselected DAG: deployments carry alternatives but no guarantee or
     /// window framework.
-    plan: SummaryMaintenanceLifecyclePlan,
+    plan: LifecyclePostASAPDAG,
     components: Vec<usize>,
     arrival: DataArrival,
     required_accuracy: Vec<AccuracyTarget>,
@@ -440,16 +443,16 @@ pub enum SummaryMaintenanceLifecycleChoiceError {
 }
 
 /// One enumerated combination, including its rejection when it is infeasible.
-/// A successful unpriced plan still needs window/evidence binding before installation.
+/// A successful unpriced DAG still needs window/evidence binding before installation.
 #[derive(Debug)]
 pub struct LifecycleAssignmentCandidate {
     pub choices: Vec<(PostASAPNodeId, SummaryMaintenanceLifecycle)>,
-    pub plan: Result<SummaryMaintenanceLifecyclePlan, SummaryMaintenanceLifecycleChoiceError>,
+    pub plan: Result<LifecyclePostASAPDAG, SummaryMaintenanceLifecycleChoiceError>,
 }
 
 impl SummaryMaintenanceLifecycleCandidates<'_> {
     /// One entry per unique retained state (see
-    /// [`SummaryMaintenanceLifecyclePlan::deployments`]), with every
+    /// [`LifecyclePostASAPDAG::deployments`]), with every
     /// alternative and its rejection; no lifecycle or window framework is
     /// selected.
     pub fn deployments(&self) -> &[SummaryMaintenanceDeployment] {
@@ -480,7 +483,7 @@ impl SummaryMaintenanceLifecycleCandidates<'_> {
     fn finish(
         mut self,
         estimate: Option<CompleteSummaryCandidateEstimate>,
-    ) -> SummaryMaintenanceLifecyclePlan {
+    ) -> LifecyclePostASAPDAG {
         if let Some(estimate) = estimate {
             self.plan.summary_total_cost = Some(estimate.cost);
             self.plan.selected_window_implementation_id = estimate.physical_plan_id;
@@ -491,7 +494,7 @@ impl SummaryMaintenanceLifecycleCandidates<'_> {
 
     /// Planner's choice: the cheapest complete combination of eligible
     /// alternatives.
-    fn select_cheapest(mut self) -> SummaryMaintenanceLifecyclePlan {
+    fn select_cheapest(mut self) -> LifecyclePostASAPDAG {
         let estimate = select_complete_lifecycle_combination(
             &self.plan.root,
             &mut self.plan.deployments,
@@ -506,14 +509,14 @@ impl SummaryMaintenanceLifecycleCandidates<'_> {
         self.finish(estimate)
     }
 
-    /// Bind one caller-chosen lifecycle per summary state. Each choice must be
+    /// Bind one given lifecycle per summary state. Each choice must be
     /// an alternative Planner itself could select; the complete estimate is
     /// then obtained exactly as for Planner selection, so window framework and
     /// cost are the model's and unknown cost is never replaced by zero.
     pub fn select(
         self,
         choices: &[(PostASAPNodeId, SummaryMaintenanceLifecycle)],
-    ) -> Result<SummaryMaintenanceLifecyclePlan, SummaryMaintenanceLifecycleChoiceError> {
+    ) -> Result<LifecyclePostASAPDAG, SummaryMaintenanceLifecycleChoiceError> {
         self.bind_assignment(choices, true)
     }
 
@@ -583,7 +586,7 @@ impl SummaryMaintenanceLifecycleCandidates<'_> {
         mut self,
         choices: &[(PostASAPNodeId, SummaryMaintenanceLifecycle)],
         require_cost: bool,
-    ) -> Result<SummaryMaintenanceLifecyclePlan, SummaryMaintenanceLifecycleChoiceError> {
+    ) -> Result<LifecyclePostASAPDAG, SummaryMaintenanceLifecycleChoiceError> {
         use SummaryMaintenanceLifecycleChoiceError as E;
         let deployments = &self.plan.deployments;
         let mut chosen: Vec<Option<&SummaryMaintenanceLifecycleAlternative>> =
@@ -702,7 +705,7 @@ struct SummaryMaintenanceWorkloadFacts {
     requires_deletion: bool,
 }
 
-/// Validate a materialized plan, enumerate lifecycle alternatives for each
+/// Validate an assembled Post-ASAP DAG, enumerate lifecycle alternatives for each
 /// unique summary state, and select the cheapest legal alternative whose cost
 /// is fully known.
 pub fn plan_summary_maintenance_lifecycles(
@@ -712,7 +715,7 @@ pub fn plan_summary_maintenance_lifecycles(
     horizon: Option<Horizon>,
     capabilities: SummaryMaintenanceLifecycleCapabilities,
     cost_model: &dyn CostModel,
-) -> Result<SummaryMaintenanceLifecyclePlan, SummaryMaintenanceLifecyclePlanError> {
+) -> Result<LifecyclePostASAPDAG, LifecyclePostASAPDAGError> {
     Ok(enumerate_summary_maintenance_lifecycles(
         root,
         demand,
@@ -724,10 +727,9 @@ pub fn plan_summary_maintenance_lifecycles(
     .select_cheapest())
 }
 
-/// Validate a materialized plan and enumerate lifecycle alternatives for each
-/// unique summary state without choosing one. A deployment that prices the
-/// alternatives itself binds its choice with
-/// [`SummaryMaintenanceLifecycleCandidates::select`].
+/// Validate a Post-ASAP DAG and enumerate lifecycle alternatives for each
+/// unique summary state without choosing one. An explicit assignment is bound
+/// with [`SummaryMaintenanceLifecycleCandidates::select`].
 pub(crate) fn enumerate_summary_maintenance_lifecycles<'a>(
     root: Rc<PostASAPNode>,
     demand: WorkloadDemand<'_>,
@@ -735,7 +737,7 @@ pub(crate) fn enumerate_summary_maintenance_lifecycles<'a>(
     horizon: Option<Horizon>,
     capabilities: SummaryMaintenanceLifecycleCapabilities,
     cost_model: &'a dyn CostModel,
-) -> Result<SummaryMaintenanceLifecycleCandidates<'a>, SummaryMaintenanceLifecyclePlanError> {
+) -> Result<SummaryMaintenanceLifecycleCandidates<'a>, LifecyclePostASAPDAGError> {
     enumerate_with_profile(
         root,
         demand,
@@ -761,13 +763,13 @@ fn enumerate_with_profile<'a>(
     cost_model: &'a dyn CostModel,
     profile: Option<RecurrenceProfile>,
     comparison_target: Option<&'a PreASAPNode>,
-) -> Result<SummaryMaintenanceLifecycleCandidates<'a>, SummaryMaintenanceLifecyclePlanError> {
+) -> Result<SummaryMaintenanceLifecycleCandidates<'a>, LifecyclePostASAPDAGError> {
     demand.workload.validate()?;
     if let Some(data) = demand.data_workload {
         data.validate()?;
     }
     if horizon.is_some_and(|h| !h.0.is_finite() || h.0 <= 0.0) {
-        return Err(SummaryMaintenanceLifecyclePlanError::InvalidHorizon);
+        return Err(LifecyclePostASAPDAGError::InvalidHorizon);
     }
     let mut facts = workload_facts(
         demand.workload,
@@ -824,7 +826,7 @@ fn enumerate_with_profile<'a>(
         .collect();
     let selected_raw_recompute = matches!(root.expr, SummaryExpr::KeepPreAsap(_));
     Ok(SummaryMaintenanceLifecycleCandidates {
-        plan: SummaryMaintenanceLifecyclePlan {
+        plan: LifecyclePostASAPDAG {
             root,
             deployments,
             horizon,
@@ -924,7 +926,7 @@ pub fn assemble_selected_dag_with_summary_maintenance_lifecycles(
     horizon: Option<Horizon>,
     capabilities: SummaryMaintenanceLifecycleCapabilities,
     cost_model: &dyn CostModel,
-) -> Result<Option<SummaryMaintenanceLifecyclePlan>, SummaryMaintenanceLifecycleAssemblyError> {
+) -> Result<Option<LifecyclePostASAPDAG>, SummaryMaintenanceLifecycleAssemblyError> {
     selection
         .assemble_selected_dag(target)?
         .map(|root| {
@@ -966,7 +968,7 @@ fn workload_facts(
     workload_entry_indices: &[usize],
     now_ms: u64,
     horizon: Option<Horizon>,
-) -> Result<SummaryMaintenanceWorkloadFacts, SummaryMaintenanceLifecyclePlanError> {
+) -> Result<SummaryMaintenanceWorkloadFacts, LifecyclePostASAPDAGError> {
     let mut one_time_invocations = 0u64;
     let mut recurring_reads = 0.0;
     let mut recurring_known = true;
@@ -980,19 +982,19 @@ fn workload_facts(
 
     let entries: Vec<_> = workload.entries().collect();
     if workload_entry_indices.is_empty() {
-        return Err(SummaryMaintenanceLifecyclePlanError::EmptyWorkloadDemand);
+        return Err(LifecyclePostASAPDAGError::EmptyWorkloadDemand);
     }
     let mut seen_indices = HashSet::new();
     for &index in workload_entry_indices {
         if !seen_indices.insert(index) {
-            return Err(SummaryMaintenanceLifecyclePlanError::DuplicateWorkloadEntry { index });
+            return Err(LifecyclePostASAPDAGError::DuplicateWorkloadEntry { index });
         }
-        let entry = entries.get(index).ok_or(
-            SummaryMaintenanceLifecyclePlanError::InvalidWorkloadEntry {
+        let entry = entries
+            .get(index)
+            .ok_or(LifecyclePostASAPDAGError::InvalidWorkloadEntry {
                 index,
                 entry_count: entries.len(),
-            },
-        )?;
+            })?;
         required_accuracy.push(entry.requirements.accuracy.target());
         requires_deletion |= entry.time_selection.lookback.is_some()
             && entry.time_selection.as_of.is_none()
@@ -2610,7 +2612,7 @@ mod tests {
                 SummaryMaintenanceLifecycleCapabilities::ALL,
                 &UnitCosts,
             ),
-            Err(SummaryMaintenanceLifecyclePlanError::EmptyWorkloadDemand)
+            Err(LifecyclePostASAPDAGError::EmptyWorkloadDemand)
         ));
         assert!(matches!(
             plan_summary_maintenance_lifecycles(
@@ -2621,7 +2623,7 @@ mod tests {
                 SummaryMaintenanceLifecycleCapabilities::ALL,
                 &UnitCosts,
             ),
-            Err(SummaryMaintenanceLifecyclePlanError::DuplicateWorkloadEntry { index: 0 })
+            Err(LifecyclePostASAPDAGError::DuplicateWorkloadEntry { index: 0 })
         ));
     }
 

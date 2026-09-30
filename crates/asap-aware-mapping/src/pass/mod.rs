@@ -28,8 +28,8 @@ use crate::cost_model::{CostModel, DefaultCostModel};
 use crate::recurrence::Horizon;
 use crate::replacement::RealizationError;
 use crate::summary_maintenance_lifecycle::{
-    SummaryMaintenanceLifecycleAssemblyError, SummaryMaintenanceLifecycleCapabilities,
-    SummaryMaintenanceLifecyclePlan, SummaryMaintenanceLifecycleSelectionError,
+    LifecyclePostASAPDAG, SummaryMaintenanceLifecycleAssemblyError,
+    SummaryMaintenanceLifecycleCapabilities, SummaryMaintenanceLifecycleSelectionError,
 };
 
 pub use major::MajorPass;
@@ -173,12 +173,12 @@ pub struct QueryPlan {
     pub dag: Rc<PostASAPNode>,
 }
 
-/// One query's DAG plus the maintenance decisions taken for it. The DAG is
+/// One query's DAG annotated with its lifecycle assignment. The DAG is
 /// `plan.root` — this is not a representation parallel to [`QueryPlan`].
 #[derive(Debug, Clone)]
 pub struct QueryLifecyclePlan {
     pub entry_index: usize,
-    pub plan: SummaryMaintenanceLifecyclePlan,
+    pub plan: LifecyclePostASAPDAG,
 }
 
 /// One variant per workflow. Which one comes back is decided by
