@@ -57,6 +57,8 @@ impl TryFrom<UncheckedOperator> for Operator {
                 offset_ms,
                 at_ms,
                 steps,
+                range_at,
+                steps_range_at,
                 ..
             } => Operator::series_window(
                 input(0)?,
@@ -65,7 +67,8 @@ impl TryFrom<UncheckedOperator> for Operator {
                 offset_ms,
                 at_ms,
                 steps,
-            )?,
+            )?
+            .with_series_range_bounds(range_at, steps_range_at)?,
             // The rebuilt kind must equal the serialized one, which rejects
             // a unique rewrite with other matching labels.
             Kind::SeriesLabels { unique: true, .. } => Operator::series_without_name(input(0)?)?,

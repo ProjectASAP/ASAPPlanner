@@ -40,6 +40,7 @@ pub(super) struct Control {
 #[derive(Clone)]
 pub struct RunContext {
     pub scope: Scope,
+    query_range: Option<(i64, i64)>,
     pub(super) control: Rc<Control>,
 }
 impl RunContext {
@@ -53,6 +54,7 @@ impl RunContext {
         }
         Ok(Self {
             scope,
+            query_range: None,
             control: Rc::new(Control {
                 cancelled: Cell::new(false),
                 bytes: Cell::new(0),
@@ -62,6 +64,21 @@ impl RunContext {
             }),
         })
     }
+    /// Supply the outer range query bounds for PromQL `@ start()` / `@ end()`.
+    /// For an instant query, supply the evaluation instant as both bounds.
+    pub fn with_query_range(mut self, start_ms: i64, end_ms: i64) -> Result<Self, Error> {
+        if start_ms > end_ms || !matches!(self.scope, Scope::Query { .. }) {
+            return Err(Error::Invalid(
+                "query range requires ordered bounds and query scope".into(),
+            ));
+        }
+        self.query_range = Some((start_ms, end_ms));
+        Ok(self)
+    }
+    pub(crate) fn query_range(&self) -> Option<(i64, i64)> {
+        self.query_range
+    }
+
     pub fn cancel(&self) {
         self.control.cancelled.set(true);
         for waiter in self.control.waiters.borrow_mut().drain(..) {

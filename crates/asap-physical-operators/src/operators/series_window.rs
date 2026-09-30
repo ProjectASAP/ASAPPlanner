@@ -1,6 +1,6 @@
 //! PromQL per-series evaluation over the samples before an evaluation instant.
 use super::*;
-use planner_types::pre_asap::AggIntent;
+use planner_types::pre_asap::{AggIntent, AtModifier};
 
 /// A PromQL subquery grid: every multiple of `step_ms` in
 /// `(T - offset_ms - range_ms, T - offset_ms]`. `T` is `at_ms` (the subquery's
@@ -17,6 +17,35 @@ const STALE_MARKER: u64 = 0x7ff0_0000_0000_0002;
 const MAX_SUBQUERY_STEPS: i64 = 100_000;
 
 impl Operator {
+    pub(crate) fn with_series_range_bounds(
+        mut self,
+        anchor: Option<AtModifier>,
+        steps_anchor: Option<AtModifier>,
+    ) -> Result<Self, Error> {
+        let Kind::SeriesWindow {
+            at_ms,
+            steps,
+            range_at,
+            steps_range_at,
+            ..
+        } = &mut self.kind
+        else {
+            return Err(invalid("range anchors require a series window"));
+        };
+        if anchor
+            .iter()
+            .chain(steps_anchor.iter())
+            .any(|at| matches!(at, AtModifier::Timestamp(_)))
+            || (anchor.is_some() && at_ms.is_some())
+            || (steps_anchor.is_some() && steps.is_none_or(|steps| steps.at_ms.is_some()))
+        {
+            return Err(invalid("invalid range-bound anchor"));
+        }
+        *range_at = anchor;
+        *steps_range_at = steps_anchor;
+        Ok(self)
+    }
+
     /// Evaluate each series at instant `t` over its samples in
     /// `(e - offset_ms - range_ms, e - offset_ms]`. `t` is the query time, or
     /// each step of `steps`; `e` is `at_ms` (the selector's `@`) when present,
@@ -89,10 +118,32 @@ impl Operator {
                 offset_ms,
                 at_ms,
                 steps,
+                range_at: None,
+                steps_range_at: None,
             },
             inputs: vec![input.clone()],
             output: input,
         })
+    }
+}
+
+fn anchor(
+    context: &RunContext,
+    literal: Option<i64>,
+    bound: Option<AtModifier>,
+) -> Result<Option<i64>, Error> {
+    match bound {
+        None => Ok(literal),
+        Some(bound) => {
+            let (start, end) = context
+                .query_range()
+                .ok_or_else(|| invalid("@ start() and @ end() require query range bounds"))?;
+            match bound {
+                AtModifier::Start => Ok(Some(start)),
+                AtModifier::End => Ok(Some(end)),
+                AtModifier::Timestamp(_) => Err(invalid("invalid range-bound anchor")),
+            }
+        }
     }
 }
 
@@ -137,6 +188,8 @@ pub(super) fn execute<'a>(
         offset_ms,
         at_ms,
         steps,
+        range_at,
+        steps_range_at,
     } = &operator.kind
     else {
         unreachable!()
@@ -145,7 +198,12 @@ pub(super) fn execute<'a>(
     let input = inputs
         .pop()
         .ok_or_else(|| invalid("series window input missing"))?;
-    let times = evaluation_times(&context, *steps)?;
+    let mut resolved_steps = *steps;
+    if let Some(steps) = &mut resolved_steps {
+        steps.at_ms = anchor(&context, steps.at_ms, *steps_range_at)?;
+    }
+    let at_ms = anchor(&context, *at_ms, *range_at)?;
+    let times = evaluation_times(&context, resolved_steps)?;
     Ok(futures::stream::once(async move {
         let (rows, _memory) = collect_rows(input, &context).await?;
         let mut work = Cooperative::new(&context);
@@ -236,7 +294,18 @@ pub(super) fn execute<'a>(
 }
 
 pub(super) fn validate_context(operator: &Operator, context: &RunContext) -> Result<(), Error> {
-    if let Kind::SeriesWindow { steps, .. } = operator.kind {
+    if let Kind::SeriesWindow {
+        mut steps,
+        at_ms,
+        range_at,
+        steps_range_at,
+        ..
+    } = operator.kind
+    {
+        anchor(context, at_ms, range_at)?;
+        if let Some(steps) = &mut steps {
+            steps.at_ms = anchor(context, steps.at_ms, steps_range_at)?;
+        }
         evaluation_times(context, steps)?;
     }
     Ok(())

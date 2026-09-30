@@ -135,6 +135,17 @@ fn evaluate_dag(
     metrics: &[(&str, &[Sample])],
     at: i64,
 ) -> Result<Vec<(BTreeMap<String, String>, i64, f64)>, String> {
+    evaluate_dag_with_range(expression, dag, metrics, at, None)
+}
+
+#[allow(clippy::type_complexity)]
+fn evaluate_dag_with_range(
+    expression: &QueryExpr,
+    dag: &PostAsapDag,
+    metrics: &[(&str, &[Sample])],
+    at: i64,
+    bounds: Option<(i64, i64)>,
+) -> Result<Vec<(BTreeMap<String, String>, i64, f64)>, String> {
     let program = compile_dag(expression, dag)?;
     let mut sources = BTreeMap::new();
     let selectors = promql_fallback::raw_series(expression).unwrap();
@@ -166,6 +177,12 @@ fn evaluate_dag(
         Limits::default(),
     )
     .unwrap();
+    let context = match bounds {
+        Some((start, end)) => context
+            .with_query_range(start * 1000, end * 1000)
+            .map_err(|e| e.to_string())?,
+        None => context,
+    };
     block_on(async {
         let mut stream = graph
             .execute(program.roots(), context)
@@ -1399,4 +1416,48 @@ fn grouped_binary_right_rows_preserve_all_labels() {
     )
     .unwrap_err()
     .contains("same labelset"));
+}
+
+// Range-bound anchors compile without freezing the evaluation instant into the plan.
+#[test]
+fn range_bound_anchors_compile() {
+    for query in [
+        "a @ start()",
+        "sum_over_time(a[1m] @ end())",
+        "max_over_time(a[2m:1m] @ start())",
+    ] {
+        assert!(compile_query(query).is_ok(), "{query}");
+    }
+}
+
+// Stored programs resolve outer range anchors per run, including offsets and subquery grids.
+#[test]
+fn range_bound_anchors_use_outer_query_bounds() {
+    let samples: &[Sample] = &[
+        ("job=a", 30, 1.),
+        ("job=a", 60, 2.),
+        ("job=a", 90, 3.),
+        ("job=a", 120, 4.),
+    ];
+    for (query, expected) in [
+        ("a @ start()", 2.),
+        ("a @ end()", 4.),
+        ("a @ start() offset 30s", 1.),
+        ("sum_over_time(a[1m] @ end())", 7.),
+        ("max_over_time(a[2m:1m] @ start())", 2.),
+        ("max_over_time(a[2m:1m] @ end())", 4.),
+        ("max_over_time(a[2m:1m] @ end() offset 1m)", 2.),
+        ("max_over_time(a @ end()[2m:1m])", 4.),
+    ] {
+        let expression = lower(query);
+        let dag = fallback_dag(expression.clone());
+        let output =
+            evaluate_dag_with_range(&expression, &dag, &[("a", samples)], 90, Some((60, 120)))
+                .unwrap();
+        assert_eq!(output.len(), 1, "{query}");
+        assert_eq!(output[0].2, expected, "{query}");
+        assert_eq!(output[0].1, 90_000, "{query}");
+        let error = evaluate_dag(&expression, &dag, &[("a", samples)], 90).unwrap_err();
+        assert!(error.contains("query range bounds"), "{query}: {error}");
+    }
 }

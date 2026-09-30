@@ -65,7 +65,17 @@ fn at(shift: &planner_types::pre_asap::TimeShift) -> Result<Option<i64>, Error> 
     match shift.at {
         None => Ok(None),
         Some(AtModifier::Timestamp(at)) => Ok(Some(at)),
-        Some(_) => Err(invalid("@ start() and @ end() depend on the range query")),
+        Some(AtModifier::Start | AtModifier::End) => Ok(None),
+    }
+}
+
+fn range_anchor(expression: &QueryExpr) -> Option<AtModifier> {
+    match expression {
+        QueryExpr::TimeRange { child, .. } => range_anchor(child),
+        QueryExpr::TimeShift { shift, .. } => shift
+            .at
+            .filter(|at| matches!(at, AtModifier::Start | AtModifier::End)),
+        _ => None,
     }
 }
 
@@ -199,7 +209,8 @@ impl Lowering {
                 let input = self.read(expression)?;
                 let schema = self.schema(&input);
                 self.push(
-                    Operator::series_window(schema, None, range, offset, at, None)?,
+                    Operator::series_window(schema, None, range, offset, at, None)?
+                        .with_series_range_bounds(range_anchor(expression), None)?,
                     vec![input],
                     expression,
                 )
@@ -345,7 +356,8 @@ impl Lowering {
             let input = self.read(matrix)?;
             let schema = self.schema(&input);
             return self.push(
-                Operator::series_window(schema, Some(function), range, offset, at, None)?,
+                Operator::series_window(schema, Some(function), range, offset, at, None)?
+                    .with_series_range_bounds(range_anchor(matrix), None)?,
                 vec![input],
                 logical,
             );
@@ -384,7 +396,8 @@ impl Lowering {
                 inner_offset,
                 inner_at,
                 Some(steps),
-            )?,
+            )?
+            .with_series_range_bounds(range_anchor(selected), range_anchor(matrix))?,
             vec![raw],
             child,
         )?;
@@ -397,7 +410,8 @@ impl Lowering {
         }
         let input = self.schema(&step);
         self.push(
-            Operator::series_window(input, Some(function), steps.range_ms, offset, at_ms, None)?,
+            Operator::series_window(input, Some(function), steps.range_ms, offset, at_ms, None)?
+                .with_series_range_bounds(range_anchor(matrix), None)?,
             vec![step],
             logical,
         )
