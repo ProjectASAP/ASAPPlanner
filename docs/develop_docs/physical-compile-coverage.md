@@ -228,6 +228,6 @@ In order of backend usage:
    aggregated (label-column) rows. The logical output schema, which is the left
    side's, has no column for them.
 9. An equal-label-set check for inner subquery functions, per step.
-10. `fill`, `fill_left`, and `fill_right` matching modifiers. The frontend
-   still ignores them. Rejecting them drops 27 corpus queries below the
-   lowering floor, so that change needs its own decision.
+
+`fill`, `fill_left`, and `fill_right` matching modifiers are rejected by the
+frontend (#494); they are never silently ignored.

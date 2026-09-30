@@ -359,9 +359,9 @@ impl PhysicalOperator<Batch, Schema> for Operator {
             Kind::CurrentSeries { .. } => current_series::execute(self, inputs, context),
             Kind::ScopeTimestamp { .. } => scope_timestamp::execute(self, inputs, context),
             Kind::SeriesWindow { .. } => series_window::execute(self, inputs, context),
-            Kind::SeriesLabels { .. } | Kind::SeriesBinary { .. } | Kind::SeriesHistogramQuantile { .. } => {
-                series_labels::execute(self, inputs, context)
-            }
+            Kind::SeriesLabels { .. }
+            | Kind::SeriesBinary { .. }
+            | Kind::SeriesHistogramQuantile { .. } => series_labels::execute(self, inputs, context),
             Kind::Filter(_) => filter::execute(self, inputs, context),
             Kind::Limit { .. } => limit::execute(self, inputs, context),
             Kind::Sort { .. } => sort::execute(self, inputs, context),
