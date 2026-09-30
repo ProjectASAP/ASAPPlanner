@@ -225,7 +225,13 @@ pub(in crate::operators) async fn bucket_quantile(
         return Ok(f64::NAN);
     }
     let rank = q * count;
-    let idx = buckets[..buckets.len() - 1].partition_point(|p| p.1 < rank);
+    let idx = buckets[..buckets.len() - 1].partition_point(|p| {
+        // Go searches for `count >= rank`; a NaN comparison is never a match.
+        !matches!(
+            p.1.partial_cmp(&rank),
+            Some(std::cmp::Ordering::Greater | std::cmp::Ordering::Equal)
+        )
+    });
     if idx == buckets.len() - 1 {
         return Ok(buckets[idx - 1].0);
     }
@@ -380,6 +386,15 @@ mod tests {
                 0.5,
                 vec![(1., 1.), (2., 2.), (f64::INFINITY, f64::INFINITY)]
             ),
+            2.
+        );
+        // A NaN rank (0 · ∞, or a NaN total) finds no bucket, as Go's sort.Search.
+        assert_eq!(
+            bucket_quantile(0., vec![(1., 1.), (2., 2.), (f64::INFINITY, f64::INFINITY)]),
+            2.
+        );
+        assert_eq!(
+            bucket_quantile(0.5, vec![(1., 1.), (2., 2.), (f64::INFINITY, f64::NAN)]),
             2.
         );
     }
