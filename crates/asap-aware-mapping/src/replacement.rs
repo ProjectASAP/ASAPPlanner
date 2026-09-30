@@ -2896,7 +2896,14 @@ fn construct_summary_agg(
             &input.child,
             ExecutionTiming::IngestionTime,
         )?;
-        maintenance_exact_values(child).unwrap_or(keep_pre_asap(&input.child)?)
+        let child = maintenance_exact_values(child).unwrap_or(keep_pre_asap(&input.child)?);
+        // Maintenance arithmetic must satisfy the ingestion contract; e.g. a
+        // per-series sum over different selectors has no exact aligned
+        // layout, so this candidate fails closed and exact execution remains.
+        if matches!(child.expr, SummaryExpr::BinaryOp { .. }) {
+            validate_execution_data_states_at(&child, ExecutionDataState::INGESTION_ROWS)?;
+        }
+        child
     };
 
     // ── Guarantee (issue #172) ──────────────────────────────────────────

@@ -1163,7 +1163,8 @@ fn physical_node_owns_phase_independently_of_binary_payload() {
     use asap_types::post_asap::{ExecutionTiming, PostAsapOperatorPayload};
     for (query, expected) in [
         (
-            "quantile(0.9, sum_over_time(m[1m]) + sum_over_time(n[1m]))",
+            // One selector: both operands cover the same series.
+            "quantile(0.9, sum_over_time(m[1m]) + sum_over_time(m[1m]))",
             ExecutionTiming::IngestionTime,
         ),
         (
