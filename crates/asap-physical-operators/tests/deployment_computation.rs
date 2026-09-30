@@ -220,6 +220,18 @@ fn population_aggregates_match_current_series_reference() {
     }
 }
 
+// A global readout of an empty population is an empty vector, as in PromQL.
+#[test]
+fn global_population_aggregate_of_no_members_is_empty() {
+    // Latest values are [1, 2, 5, 7] at 60s; every member has expired by 1000s.
+    for (query, expected) in [("sum(m)", 15.), ("count(m)", 4.), ("quantile(0.5, m)", 3.5)] {
+        let dag = population_dag(query);
+        let live = run(&dag, SAMPLES, 60_000).unwrap();
+        assert_eq!(live, reference(&[("", expected)]), "{query}");
+        assert!(run(&dag, SAMPLES, 1_000_000).unwrap().is_empty(), "{query}");
+    }
+}
+
 // Scalar operands on either side apply to every grouped value, including negation.
 #[test]
 fn scalar_literal_arithmetic_applies_to_grouped_values() {
@@ -301,7 +313,7 @@ fn exact_count_finalizes_to_declared_float_value() {
     edge.producer = root.id;
     edge.consumer = read.id;
     edge.intermediate_schema = root.output_schema.clone();
-    edge.data_state = root.output_state.clone();
+    edge.data_state = root.output_state;
     dag.root = read.id;
     dag.nodes.push(read);
     dag.edges.push(edge);

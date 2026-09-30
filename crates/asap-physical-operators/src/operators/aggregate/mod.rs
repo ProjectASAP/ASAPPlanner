@@ -209,7 +209,8 @@ async fn reduce(
     Ok(output)
 }
 
-// Matches Prometheus `quantile`: NaN for no values, ±Inf outside [0, 1].
+// Matches Prometheus `quantile`: NaN for no values, ±Inf outside [0, 1],
+// and NaN samples ordered first.
 fn quantile(q: f64, mut values: Vec<f64>) -> f64 {
     if values.is_empty() {
         return f64::NAN;
@@ -220,7 +221,12 @@ fn quantile(q: f64, mut values: Vec<f64>) -> f64 {
     if q > 1. {
         return f64::INFINITY;
     }
-    values.sort_by(f64::total_cmp);
+    values.sort_by(|a, b| match (a.is_nan(), b.is_nan()) {
+        (true, true) => std::cmp::Ordering::Equal,
+        (true, false) => std::cmp::Ordering::Less,
+        (false, true) => std::cmp::Ordering::Greater,
+        _ => a.total_cmp(b),
+    });
     let rank = q * (values.len() - 1) as f64;
     let low = rank.floor() as usize;
     let high = (low + 1).min(values.len() - 1);
@@ -344,5 +350,6 @@ mod tests {
         assert_eq!(super::quantile(0.75, vec![4., 1., 2., 3.]), 3.25);
         assert_eq!(super::quantile(-0.1, vec![1.]), f64::NEG_INFINITY);
         assert_eq!(super::quantile(1.1, vec![1.]), f64::INFINITY);
+        assert_eq!(super::quantile(1., vec![2., f64::NAN, 1.]), 2.);
     }
 }
