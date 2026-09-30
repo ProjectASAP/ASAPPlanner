@@ -26,15 +26,15 @@ pub fn decode_series_identity(encoded: &str) -> Result<BTreeMap<String, String>,
 /// physical columns here: the final column contains every dynamic source label.
 /// It does not assert that the query's projected labels are the full label set.
 ///
-/// This realization supports explicit `by` grouping, per-series computation,
-/// subqueries, `scalar()`, and arithmetic with a literal operand.
-/// Operators that rewrite or implicitly match dynamic label sets require their
-/// own realization; they must not accidentally treat the opaque identity as a
-/// user label or silently discard it.
+/// This realization supports `by` and `without` grouping, per-series
+/// computation, subqueries, `scalar()`, and one-to-one arithmetic. Operators
+/// that rewrite or implicitly match dynamic label sets require their own
+/// realization; they must not accidentally treat the opaque identity as a
+/// user label or silently discard it. `promql_fallback` realizes `without`
+/// and vector matching by rewriting the identity.
 pub fn with_series_identity(root: &QueryExpr) -> Result<QueryExpr, Error> {
     let mut root = root.clone();
     fn visit(node: &mut QueryExpr) -> Result<(), Error> {
-        use planner_types::pre_asap::Reduction;
         match node {
             QueryExpr::Scan {
                 source: LogicalSource::TimeSeries { .. },
@@ -73,28 +73,23 @@ pub fn with_series_identity(root: &QueryExpr) -> Result<QueryExpr, Error> {
             {
                 Ok(())
             }
-            // Arithmetic with a literal matches no labels.
             QueryExpr::BinaryOp {
                 op: planner_types::pre_asap::BinaryOpKind::Arithmetic(_),
                 lhs,
                 rhs,
-                vector_match: None,
-            } if super::row_values::scalar_literal(lhs).is_some()
-                || super::row_values::scalar_literal(rhs).is_some() =>
+                vector_match,
+            } if vector_match.as_ref().is_none_or(|m| m.grouping.is_none())
+                && ![&*lhs, &*rhs].into_iter().any(|side| {
+                    matches!(
+                        side.as_ref(),
+                        QueryExpr::PromqlScalarFromVector(_) | QueryExpr::EvalTimestamp
+                    )
+                }) =>
             {
                 visit(Rc::make_mut(lhs))?;
                 visit(Rc::make_mut(rhs))
             }
-            QueryExpr::Aggregate {
-                child, reduction, ..
-            } => {
-                if matches!(reduction, Reduction::Reduce(keys) if keys.is_without()) {
-                    return Err(invalid(
-                        "dynamic without grouping requires label-set projection",
-                    ));
-                }
-                visit(Rc::make_mut(child))
-            }
+            QueryExpr::Aggregate { child, .. } => visit(Rc::make_mut(child)),
             QueryExpr::Sort {
                 child,
                 partition_by,

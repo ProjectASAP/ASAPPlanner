@@ -17,7 +17,7 @@ use planner_types::{
 use std::{collections::BTreeMap, rc::Rc};
 
 /// Bare selectors look back one ingestion interval: 60s.
-fn lower(query: &str) -> QueryExpr {
+fn parse(query: &str) -> QueryExpr {
     let workload = PlanningWorkload {
         query_workload: QueryWorkload {
             language: QueryLanguage::PromQL,
@@ -42,10 +42,13 @@ fn lower(query: &str) -> QueryExpr {
             ..Default::default()
         }),
     };
-    let expression = asap_frontend_promql::lower_promql_workload(&workload, 0)
+    asap_frontend_promql::lower_promql_workload(&workload, 0)
         .unwrap()
-        .remove(0);
-    promql_rows::with_series_identity(&expression).unwrap()
+        .remove(0)
+}
+
+fn lower(query: &str) -> QueryExpr {
+    promql_rows::with_series_identity(&parse(query)).unwrap()
 }
 
 /// The whole query retained as one pre-ASAP node.
@@ -59,8 +62,32 @@ fn fallback_dag(expression: QueryExpr) -> PostAsapDag {
     .unwrap()
 }
 
-/// `(job, seconds, value)`; every sample belongs to metric `m`.
+/// `(labels, seconds, value)`. `labels` is `k=v,...`, or a bare `job` value.
 type Sample = (&'static str, i64, f64);
+
+fn labels(spec: &str) -> BTreeMap<String, String> {
+    if !spec.contains('=') {
+        return BTreeMap::from([("job".into(), spec.into())]);
+    }
+    spec.split(',')
+        .map(|pair| {
+            let (k, v) = pair.split_once('=').unwrap();
+            (k.to_string(), v.to_string())
+        })
+        .collect()
+}
+
+/// The metric a selector reads.
+fn metric(selector: &QueryExpr) -> String {
+    match selector {
+        QueryExpr::Scan {
+            source: planner_types::pre_asap::Source::TimeSeries { metric },
+            ..
+        } => metric.clone(),
+        QueryExpr::TimeRange { child, .. } | QueryExpr::TimeShift { child, .. } => metric(child),
+        other => panic!("not a selector: {other:?}"),
+    }
+}
 
 fn compile_query(query: &str) -> Result<CompiledPhysicalDag, String> {
     let expression = lower(query);
@@ -68,37 +95,46 @@ fn compile_query(query: &str) -> Result<CompiledPhysicalDag, String> {
     let root = u64::from(dag.root.0);
     let inputs = promql_fallback::raw_series(&expression)
         .map_err(|e| e.to_string())?
-        .map(|(_, schema)| {
+        .into_iter()
+        .enumerate()
+        .map(|(i, (_, schema))| {
             (
-                promql_fallback::raw_series_input(root),
+                promql_fallback::raw_series_input(root, i),
                 InputContract::bounded(schema),
             )
         })
-        .into_iter()
         .collect();
     let program = compile(&dag, inputs, &[root]).map_err(|e| e.to_string())?;
     Ok(serde_json::from_slice(&serde_json::to_vec(&program).unwrap()).unwrap())
 }
 
-/// Evaluate at `at` seconds; returns `(job or "", timestamp ms, value)` rows in order.
-fn run(query: &str, samples: &[Sample], at: i64) -> Result<Vec<(String, i64, f64)>, String> {
+/// Evaluate at `at` seconds over samples of each named metric; returns
+/// `(output labels, timestamp ms, value)` rows in order.
+#[allow(clippy::type_complexity)]
+fn evaluate(
+    query: &str,
+    metrics: &[(&str, &[Sample])],
+    at: i64,
+) -> Result<Vec<(BTreeMap<String, String>, i64, f64)>, String> {
     let expression = lower(query);
     let program = compile_query(query)?;
     let mut sources = BTreeMap::new();
-    if let Some((_, schema)) = promql_fallback::raw_series(&expression).unwrap() {
-        let rows = samples
+    let selectors = promql_fallback::raw_series(&expression).unwrap();
+    for (i, (selector, schema)) in selectors.into_iter().enumerate() {
+        let name = metric(&selector);
+        let rows = metrics
             .iter()
-            .map(|(job, seconds, value)| {
-                let labels = BTreeMap::from([
-                    ("__name__".to_string(), "m".to_string()),
-                    ("job".into(), job.to_string()),
-                ]);
+            .filter(|(m, _)| *m == name)
+            .flat_map(|(_, samples)| samples.iter())
+            .map(|(spec, seconds, value)| {
+                let mut labels = labels(spec);
+                labels.insert("__name__".into(), name.clone());
                 promql_rows::series_row(&schema, &labels, seconds * 1000, *value).unwrap()
             })
             .collect();
         let batch = Batch::try_new(schema.clone(), rows).unwrap();
         sources.insert(
-            promql_fallback::raw_series_input(program.roots()[0]),
+            promql_fallback::raw_series_input(program.roots()[0], i),
             Box::new(Operator::source(schema, vec![batch]).unwrap()) as _,
         );
     }
@@ -121,26 +157,65 @@ fn run(query: &str, samples: &[Sample], at: i64) -> Result<Vec<(String, i64, f64
             let batch = batch.map_err(|e| e.to_string())?;
             let schema = batch.schema().clone();
             for row in batch.rows() {
-                let mut job = String::new();
+                let mut labels = BTreeMap::new();
                 let mut time = -1;
                 let mut value = None;
                 for (field, cell) in schema.fields.iter().zip(row) {
                     match (field.name.as_str(), cell) {
                         (promql_rows::SERIES_IDENTITY_COLUMN, Value::Utf8(id)) => {
-                            job = promql_rows::decode_series_identity(id).unwrap()["job"].clone()
+                            labels = promql_rows::decode_series_identity(id).unwrap()
                         }
-                        ("job", Value::Utf8(label)) => job = label.to_string(),
+                        (_, Value::Utf8(_) | Value::Null) => {}
                         (_, Value::Timestamp(t)) => time = *t,
                         (_, Value::Float64(v)) => value = Some(*v),
                         (_, Value::Int64(v)) => value = Some(*v as f64),
                         other => return Err(format!("unexpected cell {other:?}")),
                     }
                 }
-                rows.push((job, time, value.ok_or("missing value")?));
+                if !schema
+                    .fields
+                    .iter()
+                    .any(|f| f.name == promql_rows::SERIES_IDENTITY_COLUMN)
+                {
+                    for (field, cell) in schema.fields.iter().zip(row) {
+                        if let Value::Utf8(label) = cell {
+                            if !label.is_empty() {
+                                labels.insert(field.name.clone(), label.to_string());
+                            }
+                        }
+                    }
+                }
+                rows.push((labels, time, value.ok_or("missing value")?));
             }
         }
         Ok(rows)
     })
+}
+
+/// Evaluate at `at` seconds over metric `m`; returns `(job or "", timestamp ms, value)`.
+fn run(query: &str, samples: &[Sample], at: i64) -> Result<Vec<(String, i64, f64)>, String> {
+    Ok(evaluate(query, &[("m", samples)], at)?
+        .into_iter()
+        .map(|(labels, time, value)| (labels.get("job").cloned().unwrap_or_default(), time, value))
+        .collect())
+}
+
+/// Output rows as `(k=v,... sorted, value)`, including any `__name__`.
+fn labeled(query: &str, metrics: &[(&str, &[Sample])], at: i64) -> Vec<(String, f64)> {
+    let mut rows = evaluate(query, metrics, at)
+        .unwrap_or_else(|e| panic!("{query}: {e}"))
+        .into_iter()
+        .map(|(labels, _, value)| {
+            let spec = labels
+                .iter()
+                .map(|(k, v)| format!("{k}={v}"))
+                .collect::<Vec<_>>()
+                .join(",");
+            (spec, value)
+        })
+        .collect::<Vec<_>>();
+    rows.sort_by(|a, b| a.0.cmp(&b.0));
+    rows
 }
 
 fn values(query: &str, samples: &[Sample], at: i64) -> Vec<(String, f64)> {
@@ -297,7 +372,6 @@ fn subqueries_evaluate_their_operand_on_the_aligned_grid() {
         ),
         3.
     );
-    assert!(compile_query("max_over_time(m[5m:1m] @ 100)").is_err());
 }
 
 // Subquery work is bounded by the query: at most 100000 steps.
@@ -314,7 +388,10 @@ fn raw_series_contract_is_explicit() {
     let expression = lower("rate(m[5m])");
     let dag = fallback_dag(expression.clone());
     let root = u64::from(dag.root.0);
-    let (selector, schema) = promql_fallback::raw_series(&expression).unwrap().unwrap();
+    let [(selector, schema)] = promql_fallback::raw_series(&expression)
+        .unwrap()
+        .try_into()
+        .unwrap();
     assert!(matches!(selector, QueryExpr::TimeRange { .. }));
     let missing = compile(&dag, BTreeMap::new(), &[root]).err().unwrap();
     assert!(missing.to_string().contains("raw series input"));
@@ -323,7 +400,7 @@ fn raw_series_contract_is_explicit() {
     let wrong = compile(
         &dag,
         BTreeMap::from([(
-            promql_fallback::raw_series_input(root),
+            promql_fallback::raw_series_input(root, 0),
             InputContract::bounded(std::sync::Arc::new(wrong)),
         )]),
         &[root],
@@ -370,11 +447,11 @@ fn raw_series_contract_is_explicit() {
         }],
         root: PostAsapNodeId(1),
     };
-    let raw = promql_fallback::raw_series(&selector).unwrap().unwrap().1;
+    let raw = promql_fallback::raw_series(&selector).unwrap().remove(0).1;
     assert!(compile(
         &consumed,
         BTreeMap::from([(
-            promql_fallback::raw_series_input(0),
+            promql_fallback::raw_series_input(0, 0),
             InputContract::bounded(raw)
         )]),
         &[1],
@@ -424,4 +501,124 @@ fn instant_and_counting_range_functions() {
         one("quantile_over_time(-1, m[5m])", COUNTER, 300),
         f64::NEG_INFINITY
     );
+}
+
+// `@ <t>` evaluates the selector or subquery at `t`, minus any offset, and the
+// result keeps the query's evaluation time.
+#[test]
+fn at_modifier_fixes_the_evaluation_instant() {
+    let samples = &[("a", 60, 1.), ("a", 120, 2.), ("a", 180, 3.)];
+    assert_eq!(
+        run("m @ 120", samples, 1000).unwrap(),
+        vec![("a".into(), 1_000_000, 2.)]
+    );
+    assert!(values("m", samples, 1000).is_empty());
+    assert_eq!(one("count_over_time(m[2m] @ 180)", samples, 1000), 2.);
+    assert_eq!(one("m @ 180 offset 1m", samples, 1000), 2.);
+    // The subquery grid is (60s, 180s]: steps 120 and 180 select 2 and 3.
+    assert_eq!(one("max_over_time(m[2m:1m] @ 180)", samples, 1000), 3.);
+    assert_eq!(
+        one("sum_over_time(m[2m:1m] @ 180 offset 1m)", samples, 1000),
+        3.
+    );
+    // An inner @ pins every step to the same instant.
+    assert_eq!(one("sum_over_time((m @ 60)[2m:1m])", samples, 180), 2.);
+    // start() and end() depend on the range query, which is the deployment's.
+    assert!(compile_query("m @ start()").is_err());
+}
+
+const A: &[Sample] = &[("job=x", 50, 10.), ("job=y", 50, 20.), ("job=w", 50, 0.)];
+const B: &[Sample] = &[("job=x", 50, 2.), ("job=z", 50, 5.), ("job=w", 50, 0.)];
+
+// Vector-vector arithmetic matches series one-to-one on label sets without
+// the metric name, and the result drops the metric name.
+#[test]
+fn vector_arithmetic_matches_label_sets() {
+    let metrics = &[("a", A), ("b", B)];
+    let quotient = labeled("a / b", metrics, 60);
+    assert_eq!(quotient.len(), 2);
+    assert_eq!(quotient[0].0, "job=w");
+    assert!(quotient[0].1.is_nan(), "0 / 0 is NaN");
+    assert_eq!(quotient[1], ("job=x".into(), 5.));
+    // Each selector reads its own raw rows, even a repeated metric.
+    assert_eq!(
+        labeled("(a - b) * a", metrics, 60),
+        vec![("job=w".into(), 0.), ("job=x".into(), 80.)]
+    );
+    assert_eq!(
+        labeled("sum by (job) (a) - sum by (job) (b)", metrics, 60),
+        vec![("job=w".into(), 0.), ("job=x".into(), 8.)]
+    );
+    // Rates of two counters over their own windows.
+    let up: &[Sample] = &[("job=x", 0, 0.), ("job=x", 60, 60.)];
+    let down: &[Sample] = &[("job=x", 0, 0.), ("job=x", 60, 30.)];
+    assert_eq!(
+        labeled("rate(a[2m]) / rate(b[2m])", &[("a", up), ("b", down)], 60),
+        vec![("job=x".into(), 2.)]
+    );
+}
+
+// on() keeps only the listed labels and ignoring() drops them; a duplicate
+// match group is an error unless the left duplicates never match.
+#[test]
+fn on_and_ignoring_select_the_matching_labels() {
+    let a: &[Sample] = &[("job=x,inst=1", 50, 10.)];
+    let b: &[Sample] = &[("job=x,inst=2", 50, 4.)];
+    let metrics = &[("a", a), ("b", b)];
+    assert!(labeled("a - b", metrics, 60).is_empty());
+    assert_eq!(
+        labeled("a - on(job) b", metrics, 60),
+        vec![("job=x".into(), 6.)]
+    );
+    assert_eq!(
+        labeled("a - ignoring(inst) b", metrics, 60),
+        vec![("job=x".into(), 6.)]
+    );
+    let pair: &[Sample] = &[("job=x,inst=1", 50, 1.), ("job=x,inst=2", 50, 2.)];
+    let other: &[Sample] = &[("job=y", 50, 1.)];
+    assert!(evaluate("a + on(job) b", &[("a", a), ("b", pair)], 60).is_err());
+    assert!(evaluate("a + on(job) b", &[("a", pair), ("b", b)], 60).is_err());
+    assert!(labeled("a + on(job) b", &[("a", pair), ("b", other)], 60).is_empty());
+    assert!(promql_rows::with_series_identity(&parse("a + on(job) group_left b")).is_err());
+}
+
+// without() groups by every label except the listed ones and the metric name.
+#[test]
+fn without_grouping_drops_labels_and_the_name() {
+    let a: &[Sample] = &[
+        ("job=x,inst=1", 50, 1.),
+        ("job=x,inst=2", 50, 2.),
+        ("job=y,inst=1", 50, 4.),
+    ];
+    let metrics = &[("a", a)];
+    assert_eq!(
+        labeled("sum without (inst) (a)", metrics, 60),
+        vec![("job=x".into(), 3.), ("job=y".into(), 4.)]
+    );
+    assert_eq!(
+        labeled("count without (inst) (a)", metrics, 60),
+        vec![("job=x".into(), 2.), ("job=y".into(), 1.)]
+    );
+    assert_eq!(
+        labeled("max without (job, inst) (a)", metrics, 60),
+        vec![(String::new(), 4.)]
+    );
+    assert!(labeled("sum without (inst) (a)", &[], 60).is_empty());
+}
+
+// An empty label value is an absent label, and an empty side yields an empty
+// result before any duplicate check, as in Prometheus.
+#[test]
+fn empty_labels_and_empty_sides_match_prometheus() {
+    let a: &[Sample] = &[("job=x,env=", 50, 3.)];
+    let b: &[Sample] = &[("job=x", 50, 1.)];
+    assert_eq!(
+        labeled("a + b", &[("a", a), ("b", b)], 60),
+        vec![("job=x".into(), 4.)]
+    );
+    let pair: &[Sample] = &[("job=x,inst=1", 50, 1.), ("job=x,inst=2", 50, 2.)];
+    assert!(labeled("a + on(job) b", &[("b", pair)], 60).is_empty());
+    assert!(labeled("b + on(job) a", &[("b", pair)], 60).is_empty());
+    // A non-literal scalar operand has no identity realization yet.
+    assert!(promql_rows::with_series_identity(&parse("a + scalar(b)")).is_err());
 }

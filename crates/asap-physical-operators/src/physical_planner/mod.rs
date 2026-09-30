@@ -240,35 +240,54 @@ fn compile_internal(
                 }
             ) && dag.edges.iter().any(|e| u64::from(e.producer.0) == id);
             if let (Payload::Fallback { expression }, false) = (&node.payload, raw_rows) {
-                let slot = promql_fallback::raw_series_input(id);
-                let (leaf, mut chain) = promql_fallback::lower(expression)
+                let promql_fallback::Lowering {
+                    selectors,
+                    mut steps,
+                } = promql_fallback::lower(expression)
                     .map_err(|error| invalid(format!("node {id}: {error}")))?;
-                let mut inputs = match (leaf, sources.remove(&slot)) {
-                    (Some((_, schema)), Some(contract)) if contract.schema == schema => {
-                        graph.add_input(slot, contract)?;
-                        vec![slot]
-                    }
-                    (None, None) => vec![],
-                    (Some(_), None) => {
-                        return Err(invalid(format!(
-                            "node {id}: PromQL fallback requires raw series input {slot}"
+                let mut slots = Vec::new();
+                for (i, (_, schema)) in selectors.iter().enumerate() {
+                    let slot = promql_fallback::raw_series_input(id, i);
+                    match sources.remove(&slot) {
+                        Some(contract) if &contract.schema == schema => {
+                            graph.add_input(slot, contract)?
+                        }
+                        Some(_) => {
+                            return Err(invalid(format!(
+                            "node {id}: raw series input {slot} differs from the selector schema"
                         )))
+                        }
+                        None => {
+                            return Err(invalid(format!(
+                                "node {id}: PromQL fallback requires raw series input {slot}"
+                            )))
+                        }
                     }
-                    _ => {
-                        return Err(invalid(format!(
-                            "node {id}: raw series input differs from the selector schema"
-                        )))
-                    }
-                };
-                let last = chain
+                    slots.push(slot);
+                }
+                let (last, last_inputs) = steps
                     .pop()
                     .ok_or_else(|| invalid("empty PromQL lowering"))?;
-                for operator in chain {
-                    graph.add(auxiliary, inputs, operator)?;
-                    inputs = vec![auxiliary];
+                let mut ids = Vec::new();
+                let resolve = |inputs: Vec<promql_fallback::Input>, ids: &[NodeId]| {
+                    inputs
+                        .into_iter()
+                        .map(|input| match input {
+                            promql_fallback::Input::Raw(i) => slots[i],
+                            promql_fallback::Input::Step(i) => ids[i],
+                        })
+                        .collect::<Vec<_>>()
+                };
+                for (operator, inputs) in steps {
+                    graph.add(auxiliary, resolve(inputs, &ids), operator)?;
+                    ids.push(auxiliary);
                     auxiliary -= 1;
                 }
-                graph.add(id, inputs, last.with_output_schema(output)?)?;
+                graph.add(
+                    id,
+                    resolve(last_inputs, &ids),
+                    last.with_output_schema(output)?,
+                )?;
                 continue;
             }
             if let Payload::Value {
