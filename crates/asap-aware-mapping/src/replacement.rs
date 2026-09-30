@@ -560,11 +560,11 @@ pub enum ReplacementProvenance {
     /// [`Replacement::ExactComposition`] with
     /// [`OperationPlacement::Maintenance`] (issue #171).
     ValueOperationAtIngestionTime,
-    /// A finalized whole-query result over a physical row representation
-    /// the logical children do not share (see
-    /// [`ReplacementStrategy::propose_for_root`]). Assembly uses it verbatim,
-    /// and default selection never commits it: only deployment compiles and
-    /// prices it.
+    /// A finalized whole-query result over rows carrying the PromQL series
+    /// identity, which the logical root does not expose (see
+    /// [`ReplacementStrategy::propose_for_root`]). Default selection never
+    /// commits it, because its readout must be validated and priced by
+    /// deployment; otherwise it would silently replace the logical plan.
     RootPhysicalRealization,
 }
 
@@ -641,10 +641,11 @@ pub trait ReplacementStrategy {
         }
     }
 
-    /// Whole-query alternatives for a workload root under its end-to-end
-    /// `target`. These may change the root's physical row representation, so
+    /// Whole-query logical alternatives for a workload root under its
+    /// end-to-end `target`. These may need input rows the root does not expose
+    /// (for example, the PromQL series identity), so
     /// [`search_workload_with_targets`] asks only workload roots, once each.
-    /// Default: none.
+    /// They decide what to compute, never placement. Default: none.
     fn propose_for_root(&self, _root: &Rc<QueryExpr>, _target: &AccuracyTarget) -> Proposals {
         Proposals::default()
     }
@@ -1720,31 +1721,19 @@ impl ReplacementStrategy for SketchAlgorithmStrategy<'_> {
         self.propose_with(target.root, None)
     }
 
-    /// Physical alternatives over rows that carry the complete PromQL series
-    /// identity: current-series TopK, fixed-window and query-time Rate
-    /// aggregation, and ordinary realizations over per-series Rate state.
-    /// Each is a finalized query result for the identity-carrying root.
+    /// Heap realizations of an instant-vector ranking (current-series TopK).
+    /// They rank rows that carry the complete PromQL series identity, which
+    /// the logical root does not expose, so each is a finalized query result
+    /// for the identity-carrying root. Placement variants (for example,
+    /// fixed-window or query-time Rate aggregation) are not listed here: the
+    /// lifecycle assigns timing and the physical compiler reads it.
     fn propose_for_root(&self, root: &Rc<QueryExpr>, target: &AccuracyTarget) -> Proposals {
         let Ok(typed) = asap_types::pre_asap::schema::with_promql_series_identity(root) else {
             return Proposals::default();
         };
         let typed = Rc::new(typed);
         let mut proposals = self.current_series_topk_candidates(&typed, target);
-        let mut direct = self.propose_with(&typed, None).candidates;
-        // Other identity-carrying realizations duplicate the logical root's.
-        direct.retain(|candidate| {
-            matches!(&candidate.replacement, Replacement::Summary(node) if has_series_rate_frontier(node))
-        });
-        // Rejections from the shared enumeration repeat the logical root's own.
-        let candidates = std::mem::take(&mut proposals.candidates)
-            .into_iter()
-            .chain(self.fixed_window_rate_candidates(&typed).candidates)
-            .chain(
-                self.query_time_rate_aggregation_candidates(&typed)
-                    .candidates,
-            )
-            .chain(direct);
-        for mut candidate in candidates {
+        for mut candidate in std::mem::take(&mut proposals.candidates) {
             let Replacement::Summary(node) = candidate.replacement else {
                 continue;
             };
@@ -1761,30 +1750,6 @@ impl ReplacementStrategy for SketchAlgorithmStrategy<'_> {
             }
         }
         proposals
-    }
-}
-
-/// Exact per-series Rate state over raw samples: the frontier at which
-/// deployment binds complete, identity-keyed counter states.
-fn has_series_rate_frontier(node: &SummaryNode) -> bool {
-    match &node.expr {
-        SummaryExpr::SummaryAgg {
-            family: SummaryFamilyType::ExactAggregate(ExactKind::Rate, _),
-            reduction: Reduction::PerEntity,
-            child,
-            ..
-        } if matches!(&child.expr, SummaryExpr::KeepPreAsap(source)
-            if matches!(source.as_ref(), QueryExpr::TimeRange { .. })) =>
-        {
-            true
-        }
-        SummaryExpr::ValueOperation { child, .. } | SummaryExpr::SummaryAgg { child, .. } => {
-            has_series_rate_frontier(child)
-        }
-        SummaryExpr::SummaryEstimate { summary_input, .. } => {
-            has_series_rate_frontier(summary_input)
-        }
-        _ => false,
     }
 }
 
@@ -5282,14 +5247,6 @@ impl<'a> GlobalSelection<'a> {
     fn assemble_target(&self, target: &Rc<QueryExpr>) -> Result<Rc<SummaryNode>, RealizationError> {
         let ptr = Rc::as_ptr(target);
         if let Some(node) = self.assembled_nodes.borrow().get(&ptr) {
-            return Ok(Rc::clone(node));
-        }
-        if let Some(ReplacementSubDAG {
-            replacement: Replacement::Summary(node),
-            provenance: ReplacementProvenance::RootPhysicalRealization,
-            ..
-        }) = self.groups.get(&ptr).and_then(|selection| selection.chosen)
-        {
             return Ok(Rc::clone(node));
         }
         let selected_composed_summary = self
