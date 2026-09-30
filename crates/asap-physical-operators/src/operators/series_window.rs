@@ -149,18 +149,22 @@ fn anchor(
     }
 }
 
-/// The first and last evaluation instants and the step between them. The grid
-/// is iterated, not allocated: its size depends only on the query.
+fn evaluation_time(context: &RunContext) -> Result<i64, Error> {
+    match context.scope {
+        crate::runtime::Scope::Query {
+            evaluation_time_ms, ..
+        } => Ok(evaluation_time_ms),
+        _ => Err(invalid("series window requires a query evaluation time")),
+    }
+}
+
+/// The first and last evaluation instants for the query evaluated at
+/// `evaluation_time_ms`, and the step between them. The grid is iterated, not
+/// allocated: its size depends only on the query.
 fn evaluation_times(
-    context: &RunContext,
+    evaluation_time_ms: i64,
     steps: Option<SubquerySteps>,
 ) -> Result<(i64, i64, i64), Error> {
-    let crate::runtime::Scope::Query {
-        evaluation_time_ms, ..
-    } = context.scope
-    else {
-        return Err(invalid("series window requires a query evaluation time"));
-    };
     let Some(steps) = steps else {
         return Ok((evaluation_time_ms, evaluation_time_ms, 1));
     };
@@ -205,7 +209,15 @@ pub(super) fn execute<'a>(
         steps.at_ms = anchor(&context, steps.at_ms, *steps_range_at)?;
     }
     let at_ms = anchor(&context, *at_ms, *range_at)?;
-    let times = evaluation_times(&context, resolved_steps)?;
+    let times = evaluation_times(evaluation_time(&context)?, resolved_steps)?;
+    // A window pinned by `@` is step-invariant in Prometheus: it is evaluated
+    // once, at the first instant of the query (or of its subquery grid), and
+    // that result is reused at every step. Only predict_linear reads the time.
+    let invariant_time = match (at_ms, context.query_range()) {
+        (None, _) => None,
+        (Some(_), None) => Some(times.0),
+        (Some(_), Some((start, _))) => Some(evaluation_times(start, resolved_steps)?.0),
+    };
     Ok(futures::stream::once(async move {
         let (rows, _memory) = collect_rows(input, &context).await?;
         let mut work = Cooperative::new(&context);
@@ -269,7 +281,11 @@ pub(super) fn execute<'a>(
                             None
                         } else {
                             match aggregate::temporal::window_value(
-                                intent, &fresh, start, end, time,
+                                intent,
+                                &fresh,
+                                start,
+                                end,
+                                invariant_time.unwrap_or(time),
                             )? {
                                 Some(Value::Float64(v)) => Some(v),
                                 Some(Value::Int64(v)) => Some(v as f64),
@@ -310,7 +326,7 @@ pub(super) fn validate_context(operator: &Operator, context: &RunContext) -> Res
         if let Some(steps) = &mut steps {
             steps.at_ms = anchor(context, steps.at_ms, steps_range_at)?;
         }
-        evaluation_times(context, steps)?;
+        evaluation_times(evaluation_time(context)?, steps)?;
     }
     Ok(())
 }

@@ -64,8 +64,11 @@ impl RunContext {
             }),
         })
     }
-    /// Supply the outer range query bounds for PromQL `@ start()` / `@ end()`.
-    /// For an instant query, supply the evaluation instant as both bounds.
+    /// Supply the outer range query bounds for PromQL `@ start()` / `@ end()`
+    /// and for `@`-pinned calls, which are evaluated once at the query start.
+    /// A range query run step by step must always supply them; without bounds
+    /// each step is treated as its own instant query. For an instant query,
+    /// supply the evaluation instant as both bounds.
     pub fn with_query_range(mut self, start_ms: i64, end_ms: i64) -> Result<Self, Error> {
         if start_ms > end_ms || !matches!(self.scope, Scope::Query { .. }) {
             return Err(Error::Invalid(

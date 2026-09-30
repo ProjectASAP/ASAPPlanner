@@ -1499,6 +1499,57 @@ fn regression_range_functions_use_evaluation_time_and_drop_names() {
         .is_nan());
 }
 
+// An `@`-pinned range function is step-invariant, as in Prometheus: it is
+// evaluated once, at the query start or at the subquery's first step, so
+// predict_linear's anchor does not move with each evaluation step.
+#[test]
+fn pinned_range_functions_are_step_invariant() {
+    // `a` rises by one per second, sampled every 10 s.
+    let rising: Vec<Sample> = (0..=30)
+        .map(|i| ("job=x", i * 10, (i * 10) as f64))
+        .collect();
+    // (query, range-query bounds, Prometheus value at T = 300 s).
+    for (query, bounds, expected) in [
+        // Subquery grid (180, 300] steps 240 and 300; one evaluation at 240.
+        (
+            "max_over_time(predict_linear(a[1m] @ 100, 0)[2m:1m])",
+            None,
+            240.,
+        ),
+        // A range query starting at 240 evaluates its grid from (120, 240]: at 180.
+        (
+            "max_over_time(predict_linear(a[1m] @ 100, 0)[2m:1m])",
+            Some((240, 300)),
+            180.,
+        ),
+        (
+            "max_over_time(predict_linear(a[1m] @ start(), 0)[2m:1m])",
+            Some((240, 300)),
+            180.,
+        ),
+        // A top-level pinned call is evaluated at the query start.
+        ("predict_linear(a[1m] @ 100, 0)", Some((240, 300)), 240.),
+        ("predict_linear(a[1m] @ 100, 0)", None, 300.),
+        // Functions that do not read the evaluation time are unchanged.
+        ("max_over_time(deriv(a[1m] @ 100)[2m:1m])", None, 1.),
+        ("max_over_time(rate(a[1m] @ 100)[2m:1m])", None, 1.),
+        ("max_over_time(a @ 100[2m:1m])", None, 100.),
+        // Without `@`, the anchor is each step: the latest step, 300, wins.
+        ("max_over_time(predict_linear(a[1m], 0)[2m:1m])", None, 300.),
+    ] {
+        let expression = lower(query);
+        let dag = fallback_dag(expression.clone());
+        let output = evaluate_dag_with_range(&expression, &dag, &[("a", &rising)], 300, bounds)
+            .unwrap_or_else(|e| panic!("{query}: {e}"));
+        assert_eq!(output.len(), 1, "{query}");
+        assert!(
+            (output[0].2 - expected).abs() < 1e-9,
+            "{query} {bounds:?}: {} != {expected}",
+            output[0].2
+        );
+    }
+}
+
 // Dropping an inner range function's metric name rejects equal labels within
 // each subquery step, while allowing that labelset at different steps.
 #[test]
