@@ -456,6 +456,25 @@ fn compile_internal(
             if let Payload::Binary { operator } = &node.payload {
                 let query_time = node.output_state.timing
                     == planner_types::post_asap::ExecutionTiming::QueryTime;
+                // Per-series readouts keep `__name__` even where the range
+                // function drops it; only name-dropping operators ignore that.
+                let per_series = schemas.iter().any(|schema| {
+                    schema
+                        .fields
+                        .iter()
+                        .any(|f| f.name == promql_rows::SERIES_IDENTITY_COLUMN)
+                });
+                if per_series
+                    && matches!(
+                        operator.kind,
+                        planner_types::pre_asap::BinaryOpKind::Compare(_)
+                            | planner_types::pre_asap::BinaryOpKind::Set(_)
+                    )
+                {
+                    return Err(invalid(format!(
+                        "node {id}: per-series readouts do not apply the range function's __name__ rule"
+                    )));
+                }
                 if let Some(&(value, left)) = literals.get(&id) {
                     let [input] = schemas.as_slice() else {
                         return Err(invalid("scalar binary requires one row input"));
@@ -463,23 +482,27 @@ fn compile_internal(
                     if !query_time {
                         return Err(invalid("scalar literal binary must run at query time"));
                     }
-                    if row_values::per_series(input) {
-                        let mut chain =
-                            row_values::series_scalar_binary(input, operator, value, left)
-                                .map_err(|error| invalid(format!("node {id}: {error}")))?;
-                        let last = chain.pop().expect("nonempty chain");
-                        let mut inputs = inputs;
-                        for operator in chain {
-                            graph.add(auxiliary, inputs, operator)?;
-                            inputs = vec![auxiliary];
-                            auxiliary -= 1;
-                        }
-                        graph.add(id, inputs, last.with_output_schema(output)?)?;
-                        continue;
-                    }
-                    let project = row_values::scalar_binary(input, operator, value, left)
+                    let scalar =
+                        Operator::scalar(crate::values::Value::Float64(value), DataType::Float64)?;
+                    let (sides, scalars, operands) = if left {
+                        (
+                            [scalar.schema(), input.clone()],
+                            [true, false],
+                            vec![auxiliary, inputs[0]],
+                        )
+                    } else {
+                        (
+                            [input.clone(), scalar.schema()],
+                            [false, true],
+                            vec![inputs[0], auxiliary],
+                        )
+                    };
+                    let [l, r] = sides;
+                    let binary = Operator::series_binary(l, r, operator.clone(), scalars)
                         .map_err(|error| invalid(format!("node {id}: {error}")))?;
-                    graph.add(id, inputs, project.with_output_schema(output)?)?;
+                    graph.add(auxiliary, vec![], scalar)?;
+                    graph.add(id, operands, binary.with_output_schema(output)?)?;
+                    auxiliary -= 1;
                     continue;
                 }
                 let label_map = |schema: &Schema| {
@@ -488,24 +511,26 @@ fn compile_internal(
                         .iter()
                         .any(|f| matches!(f.dtype, SummaryFamilyType::Plain(DataType::Map { .. })))
                 };
+                // Grouped rows carry their labels as columns; per-series rows
+                // carry the series identity.
                 if let (true, [left, right]) = (query_time, schemas.as_slice()) {
-                    if row_values::per_series(left) || row_values::per_series(right) {
-                        let [left, right, binary] =
-                            row_values::series_vector_binary(left, right, operator)
-                                .map_err(|error| invalid(format!("node {id}: {error}")))?;
-                        let sides = [auxiliary, auxiliary - 1];
-                        graph.add(sides[0], vec![inputs[0]], left)?;
-                        graph.add(sides[1], vec![inputs[1]], right)?;
-                        graph.add(id, sides.to_vec(), binary.with_output_schema(output)?)?;
-                        auxiliary -= 2;
-                        continue;
-                    }
                     if !label_map(left) && !label_map(right) {
-                        let (join, project) = row_values::grouped_binary(left, right, operator)
-                            .map_err(|error| invalid(format!("node {id}: {error}")))?;
-                        graph.add(auxiliary, inputs, join)?;
-                        graph.add(id, vec![auxiliary], project.with_output_schema(output)?)?;
-                        auxiliary -= 1;
+                        // A scalar-valued Fallback operand, such as `scalar(x)`, has no labels.
+                        let scalar = |input: &NodeId| {
+                            matches!(
+                                nodes.get(input).map(|node| &node.payload),
+                                Some(Payload::Fallback { expression })
+                                    if promql_fallback::scalar(expression)
+                            )
+                        };
+                        let binary = Operator::series_binary(
+                            left.clone(),
+                            right.clone(),
+                            operator.clone(),
+                            [scalar(&inputs[0]), scalar(&inputs[1])],
+                        )
+                        .map_err(|error| invalid(format!("node {id}: {error}")))?;
+                        graph.add(id, inputs, binary.with_output_schema(output)?)?;
                         continue;
                     }
                 }

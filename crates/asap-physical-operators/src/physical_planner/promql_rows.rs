@@ -27,7 +27,7 @@ pub fn decode_series_identity(encoded: &str) -> Result<BTreeMap<String, String>,
 /// It does not assert that the query's projected labels are the full label set.
 ///
 /// This realization supports `by` and `without` grouping, per-series
-/// computation, subqueries, `scalar()`, and one-to-one arithmetic. Operators
+/// computation, subqueries, `scalar()`, and binary operators. Operators
 /// that rewrite or implicitly match dynamic label sets require their own
 /// realization; they must not accidentally treat the opaque identity as a
 /// user label or silently discard it. `promql_fallback` realizes `without`
@@ -73,18 +73,11 @@ pub fn with_series_identity(root: &QueryExpr) -> Result<QueryExpr, Error> {
             {
                 Ok(())
             }
-            QueryExpr::BinaryOp {
-                op: planner_types::pre_asap::BinaryOpKind::Arithmetic(_),
-                lhs,
-                rhs,
-                vector_match,
-            } if vector_match.as_ref().is_none_or(|m| m.grouping.is_none())
-                && ![&*lhs, &*rhs].into_iter().any(|side| {
-                    matches!(
-                        side.as_ref(),
-                        QueryExpr::PromqlScalarFromVector(_) | QueryExpr::EvalTimestamp
-                    )
-                }) =>
+            // `time()` has no row realization yet.
+            QueryExpr::BinaryOp { lhs, rhs, .. }
+                if ![&*lhs, &*rhs]
+                    .into_iter()
+                    .any(|side| matches!(side.as_ref(), QueryExpr::EvalTimestamp)) =>
             {
                 visit(Rc::make_mut(lhs))?;
                 visit(Rc::make_mut(rhs))

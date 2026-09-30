@@ -348,20 +348,58 @@ fn exact_count_finalizes_to_declared_float_value() {
     );
 }
 
-// Comparisons need filter/bool semantics that `Binary` does not carry, so
-// they fail at compile time instead of emitting 0/1 values.
-#[test]
-fn row_comparison_fails_closed() {
-    let mut dag = exact_dag("sum by (job) (sum_over_time(m[5m])) * 2");
+/// `dag` with its Binary operator replaced by `kind`.
+fn with_kind(mut dag: PostAsapDag, kind: planner_types::pre_asap::BinaryOpKind) -> PostAsapDag {
     for node in &mut dag.nodes {
         if let PostAsapOperatorPayload::Binary { operator } = &mut node.payload {
-            operator.kind = planner_types::pre_asap::BinaryOpKind::Compare(
-                planner_types::pre_asap::CompareOpKind::Gt,
-            );
+            operator.kind = kind.clone();
         }
     }
-    let error = run(&dag, SAMPLES, 60_000).unwrap_err();
-    assert!(error.contains("comparison"), "{error}");
+    dag
+}
+
+// A comparison Binary over grouped values keeps the groups whose comparison
+// holds, with their value, on either side of the literal; `bool` yields 1 or 0.
+#[test]
+fn grouped_comparisons_filter_or_return_bool() {
+    use planner_types::pre_asap::{BinaryOpKind::*, CompareOpKind::Gt};
+    // sum_over_time over 5m per job: api = 14, db = 5.
+    let right = exact_dag("sum by (job) (sum_over_time(m[5m])) * 10");
+    let left = exact_dag("10 - sum by (job) (sum_over_time(m[5m]))");
+    for (dag, expected) in [
+        (
+            with_kind(right.clone(), Compare(Gt)),
+            reference(&[("api", 14.)]),
+        ),
+        (
+            with_kind(right, CompareBool(Gt)),
+            reference(&[("api", 1.), ("db", 0.)]),
+        ),
+        (with_kind(left, Compare(Gt)), reference(&[("db", 5.)])),
+    ] {
+        assert_eq!(run(&dag, SAMPLES, 60_000).unwrap(), expected);
+    }
+}
+
+// A `bool` comparison Binary over per-series readouts matches one-to-one and
+// drops the metric name; a filter fails closed.
+#[test]
+fn per_series_comparisons_filter_or_return_bool() {
+    use planner_types::pre_asap::{BinaryOpKind::*, CompareOpKind::*};
+    let samples = counter("a", "api", 10., 10.)
+        .chain(counter("a", "db", 10., 10.))
+        .chain(counter("b", "api", 5., 5.))
+        .chain(counter("b", "db", 20., 20.))
+        .collect::<Vec<_>>();
+    // rate: a{api} = a{db} = 50/300, b{api} = 25/300, b{db} = 100/300.
+    let dag = exact_dag("rate(a[5m]) / rate(b[5m])");
+    // The readout keeps `__name__`, which rate drops, so a filter would keep it.
+    let error = run_series(&with_kind(dag.clone(), Compare(Gt)), &samples, 300_000).unwrap_err();
+    assert!(error.contains("__name__"), "{error}");
+    assert_eq!(
+        run_series(&with_kind(dag, CompareBool(Lt)), &samples, 300_000).unwrap(),
+        series(&[("api", "x", 0.), ("db", "x", 1.)])
+    );
 }
 
 /// [`execute`], returning per-series `(identity, value)` rows of the root,
