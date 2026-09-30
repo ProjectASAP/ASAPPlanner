@@ -633,8 +633,8 @@ that prepared or retained shared state is supported.
 | `plan_summary_maintenance_lifecycles` | Assembled logical DAG root, `WorkloadDemand`, `now_ms`, optional horizon, runtime capabilities, cost model | `Result<SummaryMaintenanceLifecyclePlan, …>` for that fixed root; does not revisit all semantic candidates |
 | `global_selection_with_summary_maintenance_lifecycles` | `CandidatePostASAPDAGs`, workload/root-entry associations, time, horizon, capabilities, cost model | Lifecycle-aware compatible selection/error, using eligible cost evidence |
 | `assemble_selected_dag_with_summary_maintenance_lifecycles` | Selection, target root and lifecycle context | Optional lifecycle plan/error; attaches state deployment decisions |
-| `enumerate_summary_maintenance_lifecycles` | Same inputs as `plan_summary_maintenance_lifecycles` | `SummaryMaintenanceLifecycleCandidates`: per unique retained state, every alternative with its cost or rejection; nothing selected. `guarantee(&lifecycle)` gives the mode/schedule that alternative would carry |
-| `SummaryMaintenanceLifecycleCandidates::select(choices)` | One `(PostAsapNodeId, SummaryMaintenanceLifecycle)` per state, copied from `deployments()` | The same `SummaryMaintenanceLifecyclePlan` Planner selection would produce for that combination, or `SummaryMaintenanceLifecycleChoiceError` when a choice is unknown, missing, duplicated, rejected, schedule-incompatible, or not completely estimable |
+| `CandidatePostASAPDAGs::with_timing_for_root` | Root ID, `CandidateTimingContext`, logical and assignment expansion limits | `CandidatePostASAPDAGs<Id, WithTiming<'a, Id>>`; lazy assignments and rejections, with shared logical graphs and lifecycle metadata |
+| Timed collection `select_lifecycles(logical_index, choices)` | One `(PostAsapNodeId, SummaryMaintenanceLifecycle)` per state, copied from `lifecycle_alternatives(logical_index)` | The same lifecycle plan and validation as explicit Planner selection, with typed rejection on failure |
 
 Inspect `deployments`, their selected lifecycle/alternatives/rejections,
 `selected_raw_recompute`, and optional summary/raw costs. Success of a function
@@ -647,8 +647,10 @@ but does not make the earlier selection lifecycle-optimal. An application may
 consume ranked candidates and perform this comparison downstream instead.
 
 A deployment that prices lifecycles itself calls
-`enumerate_summary_maintenance_lifecycles`, prices the alternatives, and binds
-its choice with `select`. A choice is accepted only if Planner could select it:
+`with_timing_for_root`, prices its candidates, and explicitly binds a choice
+with `select_lifecycles` when needed. Callers with an assembled root use
+`CandidatePostASAPDAGs::from_post_asap_dag` to enter the same timed collection.
+A choice is accepted only if Planner could select it:
 an alternative with `MissingCostEvidence` is accepted only when the cost model's
 complete-candidate hook covers lifecycle costs. Window frameworks and totals come
 from that hook, as in Planner selection.

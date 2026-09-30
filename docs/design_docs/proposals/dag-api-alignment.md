@@ -1,7 +1,6 @@
 # DAG API alignment
 
-Status: naming and graph-sharing changes implemented and workspace-tested on
-the #480 branch; the unified timed logical candidate collection API remains open.
+Status: collection API unification implemented and validated on #480.
 Audience: Planner developers and API integrators.
 
 ## Objective
@@ -101,12 +100,12 @@ rather than treating a rename as completion of the structural work.
   Physical compilation accepts the root, index or timing assignment through a
   borrowed projection. Transport import and direct compilation share validation
   and operator lowering; no second rewrite implementation was introduced.
-- Added lazy, budget-checked lifecycle `assignments`. Unpriced legal choices
+- Added a lazy, budget-checked timed stage of `CandidatePostASAPDAGs`. Unpriced legal choices
   retain unknown cost, and rejected combinations retain their choices and errors.
   `execution_assignment` attaches timing to the shared index. Window and
   retention metadata stay on the accompanying lifecycle plan; unresolved window
   evidence remains explicit and must be supplied before deployment installation.
-- Added `compile_timed_candidates` and `CandidatePhysicalDAGs`. Compatible
+- Added `compile_physical_dag_candidates` and `CandidatePhysicalDAGs<Id>`. Compatible
   assignments share `Arc<PhysicalDAG>`; Binary timing changes produce a separate
   compilation. Cuts materialize on demand through the existing implementation.
 - Kept explicit eager cut and winner-selection helpers for callers requesting
@@ -119,16 +118,27 @@ The Rust API migration is documented in
 [dag-api-migration.md](../../develop_docs/dag-api-migration.md). Downstream
 consumers must adopt the breaking names before repinning to this branch.
 
-Validation: `cargo test --workspace` passed all 1507 tests across 91 test groups.
-Formatting, strict all-target clippy, Markdown links and whitespace are checked
-before publishing this implementation.
+## Collection boundary completion
 
-## Remaining API alignment
+The logical collection now has a timed stage,
+`CandidatePostASAPDAGs<Id, WithTiming<'a, Id>>`, which encapsulates the existing
+lifecycle enumerator. `with_timing_for_root` handles logical realization,
+index sharing, assignment budgets and lazy generation. Single already-assembled
+graphs use `from_post_asap_dag`. The old lifecycle enumerator is crate-private.
 
-The lifecycle enumerator is still public as
-`SummaryMaintenanceLifecycleCandidates`, and callers compose its assignments
-with logical candidates themselves. This does not yet implement a unified
-`CandidatePostASAPDAGs` with timing collection boundary. Encapsulate the existing
-enumerator behind that boundary, preserving graph sharing, lifecycle metadata,
-rejections and lazy generation; do not rename it as though it already contains
-the logical candidate space or duplicate its enumeration algorithm.
+`compile_physical_dag_candidates` consumes this timed collection directly and
+returns `CandidatePhysicalDAGs<Id>`. The physical collection owns shared graphs
+and cut descriptors; the old public `PhysicalDAGCandidate` wrapper is removed.
+The physical crate depends on the mapping crate to consume this typed boundary;
+logical search does not depend on physical compilation. Both transitions retain
+IDs, lifecycle metadata and errors. Reuse also checks contracts and requested
+roots, preventing one candidate's input boundary from contaminating another.
+
+Existing explicit lifecycle selection and cut APIs delegate to the same
+implementation. No second lifecycle enumeration or operator compiler was added.
+
+Validation: `cargo test --workspace` passed 1509 tests across 91 test groups.
+`cargo clippy --workspace --all-targets -- -D warnings`, formatting and diff
+checks passed. Integration coverage exercises the two named collection
+transitions, lazy assignment generation, total budgets, retained IDs and errors,
+graph sharing, and compilation reuse across contract/root changes.

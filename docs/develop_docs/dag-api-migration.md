@@ -24,30 +24,51 @@ entry deterministically. This function does not invoke an optimization pass.
 `search_workload` and the target-aware search APIs consume the same root/ID
 collection and produce the compact `CandidatePostASAPDAGs<Id>`.
 
-Use `enumerate_candidate_dags` or `enumerate_candidate_dags_for_root` with an
-explicit expansion limit to obtain logical realizations. Rejected assemblies
-remain visible. This is not a call to `global_selection`.
+The normal stage transition is:
 
-For each logical root:
+```rust,ignore
+let timed = logical.with_timing_for_root(
+    &workload_entry_id,
+    timing_context,
+    logical_expansion_limit,
+    assignment_expansion_limit,
+)?;
+let physical = compile_physical_dag_candidates(&timed, |metadata, assignment| {
+    // Supply typed contracts and requested root IDs for this realization.
+    resolve_contracts(metadata, assignment)
+});
+```
 
-1. Build one shared `Rc<PostASAPDAGIndex>` with `index_post_asap_dag(&root)`.
-2. Call `enumerate_summary_maintenance_lifecycles` with its workload demand,
-   capabilities and evidence. Call `assignments(limit)` to enumerate combinations
-   lazily. Each item contains its choices and a plan or rejection. The limit is
-   checked before yielding, so exhaustion cannot silently truncate candidates.
-3. For a successful plan, call `plan.execution_assignment(index.clone())`.
-   Keep the plan alongside the assignment: it owns the lifecycle, window,
-   retention and cost metadata. An absent cost remains unknown. An absent
-   window framework is unresolved deployment evidence, not an implicit default.
-4. Pass `(metadata, assignment)` pairs to `compile_timed_candidates`, with the
-   input contracts and requested root IDs. The returned
-   `CandidatePhysicalDAGs<Metadata>` keeps metadata even when compilation fails.
-   Use the same index for assignments of one logical root. Input contracts and
-   requested roots are fixed per call; different contracts need a separate call.
-5. Inspect a candidate's shared compiled graph and frontier for pricing, or
-   call `materialize()` when its precompute/query cuts are needed. Errors from
-   cut materialization remain errors; do not silently substitute another plan.
-   After selection, bind sources and execute the selected cuts.
+`timed` has type `CandidatePostASAPDAGs<Id, WithTiming<'a, Id>>`; `physical`
+has type `CandidatePhysicalDAGs<Id>`. `CandidateTimingContext` binds the root's
+`WorkloadDemand`, planning clock, horizon, lifecycle capabilities and cost model.
+No winner-selection helper runs during these transitions.
+
+The timed collection enumerates assignments lazily and owns the shared graph
+indices. Both expansion budgets are checked before iteration, including the
+total assignment count across logical alternatives. Rejected logical assemblies
+remain accessible through `rejected_assemblies()`. Iterator entries retain
+workload ID, logical/assignment indices, choices, lifecycle plan and timing or
+rejection. Unknown cost stays unknown; absent window evidence must still be
+resolved before installation.
+
+Callers with an already assembled logical graph enter the same collection via
+`CandidatePostASAPDAGs::from_post_asap_dag(id, root, context, limit)`.
+`lifecycle_alternatives(logical_index)` supports inspection;
+`select_lifecycles(logical_index, choices)` remains an explicit opt-in selection
+operation. The former `enumerate_summary_maintenance_lifecycles` function and
+`SummaryMaintenanceLifecycleCandidates` type are now internal implementation
+machinery, not public layer outputs.
+
+`compile_physical_dag_candidates` accepts the timed collection directly; it
+replaces the tuple-based `compile_timed_candidates` API. Its contract resolver
+can supply different inputs and roots for different realizations. The physical
+collection keeps every timing or compilation failure with its original identity.
+It exposes shared `PhysicalDAG`s through `iter()`, frontiers through
+`frontier(index)`, and execution cuts through `materialize(index)`.
+The former public `PhysicalDAGCandidate` wrapper is removed. Cut descriptors and
+compilation reuse are internal to `CandidatePhysicalDAGs`, which is now a struct
+rather than an alias for manually assembled tuples.
 
 Whole-workload selection must still account for shared state and compatible
 assignments across roots. Independent per-root minima do not prove a workload
@@ -66,7 +87,7 @@ query-time producers feeding ingestion-time consumers are rejected. Assignments
 share the index and graph; lifecycle choices do not clone logical operators.
 
 Physical candidate generation shares each compiled graph across assignments
-with the same index and Binary timings. Ingestion-time Binary changes lowering,
+with the same index, Binary timings, input contracts and requested roots. Ingestion-time Binary changes lowering,
 so incompatible assignments get separate compilations. Candidate cuts are
 materialized on demand using the existing cut implementation. The convenience
 `compile_candidate` and `compile_candidates` APIs still eagerly materialize

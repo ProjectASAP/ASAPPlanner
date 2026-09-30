@@ -78,9 +78,9 @@ passed between layers.
 | `PreASAPDAG` | Frontend-lowered query semantics before summary rewrites | `PreASAPDAG<C> = Rc<PreASAPNode<C>>` |
 | `CandidatePreASAPDAGs` | Frontend candidates associated with workload entry IDs; current deterministic frontends produce one per entry | `CandidatePreASAPDAGs<Id> = Vec<(Id, PreASAPDAG)>`; `asap_planner::lower_pre_asap_dag_candidates` emits normalized entry indices |
 | `PostASAPDAG` | One shared logical computation graph | `PostASAPDAG = Rc<PostASAPNode>` |
-| `CandidatePostASAPDAGs` | All legal logical candidates represented compactly | `CandidatePostASAPDAGs<Id>` |
+| `CandidatePostASAPDAGs` | Logical candidates, with lifecycle timing added by the next layer without copying their graphs | `CandidatePostASAPDAGs<Id>` before timing; `CandidatePostASAPDAGs<Id, WithTiming<'a, Id>>` afterward |
 | `PhysicalDAG` | Compiled operators and kernels with typed inputs, before binding runtime sources | `PhysicalDAG` |
-| `CandidatePhysicalDAGs` | Physical alternatives before deployment selection, sharing compiled operators across compatible timing assignments | `CandidatePhysicalDAGs<Metadata>` from `compile_timed_candidates`; each entry retains metadata and either a shared `PhysicalDAGCandidate` or its compile error |
+| `CandidatePhysicalDAGs` | Physical alternatives before deployment selection, with shared compiled graphs, candidate metadata and diagnostics | `CandidatePhysicalDAGs<Id>` from `compile_physical_dag_candidates`, which directly accepts the timed logical collection |
 
 The individual logical DAG names are root-reference aliases, not wrapper
 implementations. `PostASAPDAGIndex` retains those shared nodes and indexes their
@@ -90,24 +90,23 @@ plan carried with the candidate. An unpriced candidate is not automatically a
 deployable plan: unknown window or cost evidence must still be resolved before
 installation and selection respectively.
 
-The lifecycle API is not yet unified with this collection boundary:
-`SummaryMaintenanceLifecycleCandidates` is currently a public enumerator of
-lifecycle choices for one fixed logical root. Its `assignments()` yields
-lifecycle plans or rejections, from which callers derive shared timing
-assignments. It is not another DAG representation, and it is not the Rust type
-for `CandidatePostASAPDAGs` with timing. The intended layer output still needs a
-collection API that encapsulates this enumeration while retaining its existing
-implementation and candidate metadata.
+`with_timing_for_root` returns the timed stage of `CandidatePostASAPDAGs`.
+The collection privately owns lifecycle enumeration and shares one logical index
+across that root's assignments. Its iterator preserves workload and candidate
+identity, lifecycle/window/retention metadata, and rejection reasons. Logical
+and assignment expansion limits are checked before the collection is exposed;
+assignment plans and timing are generated lazily.
 
 Physical compilation reads a transient borrowed projection of the logical
 nodes. `PostASAPDAGTransport` and its versioned `PostASAPDAGDocument` are explicit
 export/import formats; both compilation paths share validation and lowering.
 They are not additional planning layers or alternative rewrite implementations.
 
-`PhysicalDAGCandidate` contains an `Arc<PhysicalDAG>` and a timing frontier.
-Its `materialize()` method produces a `PhysicalCandidate` containing precompute
-and query cuts with typed input contracts when those cuts are needed. This is
-on-demand packaging of one alternative, not another candidate generation stage.
+`CandidatePhysicalDAGs::iter()` exposes each candidate's metadata and shared
+`PhysicalDAG` or error. The collection privately owns cut descriptors;
+`materialize(index)` derives that candidate's precompute and query DAGs with
+typed contracts on demand. No additional public candidate wrapper must be
+constructed or selected between the two collection APIs.
 `BoundPhysicalDAG` is the execution graph after runtime sources are bound.
 See the [implementation plan](dag-api-alignment.md) and
 [API migration guide](../../develop_docs/dag-api-migration.md).
@@ -159,8 +158,8 @@ The lifecycle layer produces `CandidatePostASAPDAGs` with timing, containing
 one candidate for each admissible lifecycle assignment of a logical candidate. These are
 logical graphs with execution timing assigned, not a new DAG representation
 or a single selected plan. The deployment prices the assignments and selects
-among the candidates. Each required lowering is compiled once. `compile_timed_candidates` shares a
-`PhysicalDAG` across compatible assignments; `materialize()` derives the
+among the candidates. Each required lowering is compiled once. `compile_physical_dag_candidates` shares a
+`PhysicalDAG` across compatible assignments; `materialize(index)` derives the
 `PhysicalCandidate` on demand using the same timing-cut implementation. The timing frontier contains the ingestion-time nodes read
 by query-time nodes, plus an ingestion-time root. An ingestion-time `Binary` is
 the one exception. It lowers differently from a query-time one, so its timing
