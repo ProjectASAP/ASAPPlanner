@@ -12,7 +12,7 @@ pub enum Value {
     Null,
     Bool(bool),
     Int64(i64),
-    Float64(f64),
+    Float64(#[serde(with = "planner_types::serde_f64")] f64),
     Utf8(Arc<str>),
     Timestamp(i64),
     Date(i32),

@@ -10,7 +10,8 @@ type Error = Box<dyn std::error::Error + Send + Sync>;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 enum ScalarState {
-    Sum(f64),
+    // Versioned variant deliberately rejects the old uncompensated Sum payload.
+    SumV2 { sum: f64, compensation: f64 },
     Count(u64),
     Min(Option<f64>),
     Max(Option<f64>),
@@ -90,7 +91,7 @@ impl ExactAccumulator {
             _ => return Err("readout population differs from installed layout".into()),
         };
         match state {
-            ScalarState::Sum(sum) => Ok(Some(*sum)),
+            ScalarState::SumV2 { sum, compensation } => Ok(Some(sum + compensation)),
             ScalarState::Count(count) => Ok(Some(*count as f64)),
             ScalarState::Min(value) | ScalarState::Max(value) => Ok(*value),
             ScalarState::Counter(Some(counter)) => counter
@@ -132,7 +133,10 @@ impl ExactAccumulator {
         use ExactKind as K;
         use ExactParams as P;
         let scalar = match &family {
-            SummaryFamilyType::ExactAggregate(K::Sum, P::Sum) => ScalarState::Sum(0.0),
+            SummaryFamilyType::ExactAggregate(K::Sum, P::Sum) => ScalarState::SumV2 {
+                sum: 0.0,
+                compensation: 0.0,
+            },
             SummaryFamilyType::ExactAggregate(K::Count, P::Count) => ScalarState::Count(0),
             SummaryFamilyType::ExactAggregate(K::Min, P::Min) => ScalarState::Min(None),
             SummaryFamilyType::ExactAggregate(K::Max, P::Max) => ScalarState::Max(None),
@@ -187,7 +191,7 @@ impl ExactAccumulator {
             _ => panic!("exact update population layout differs from installed DAG"),
         };
         match state {
-            ScalarState::Sum(sum) => *sum += value,
+            ScalarState::SumV2 { sum, compensation } => compensated_add(sum, compensation, value),
             ScalarState::Count(count) => {
                 *count = count.checked_add(1).expect("exact count overflow")
             }
@@ -224,9 +228,36 @@ impl ExactAccumulator {
     }
 }
 
+// Kahan-Neumaier addition, clearing the correction when the running sum is infinite.
+fn compensated_add(sum: &mut f64, compensation: &mut f64, value: f64) {
+    let next = *sum + value;
+    *compensation = if next.is_infinite() {
+        0.0
+    } else if sum.abs() >= value.abs() {
+        *compensation + ((*sum - next) + value)
+    } else {
+        *compensation + ((value - next) + *sum)
+    };
+    *sum = next;
+}
+
 fn merge_scalar(left: &ScalarState, right: &ScalarState) -> Result<ScalarState, Error> {
     Ok(match (left, right) {
-        (ScalarState::Sum(a), ScalarState::Sum(b)) => ScalarState::Sum(a + b),
+        (
+            ScalarState::SumV2 {
+                sum: a,
+                compensation: ac,
+            },
+            ScalarState::SumV2 {
+                sum: b,
+                compensation: bc,
+            },
+        ) => {
+            let (mut sum, mut compensation) = (*a, *ac);
+            compensated_add(&mut sum, &mut compensation, *b);
+            compensated_add(&mut sum, &mut compensation, *bc);
+            ScalarState::SumV2 { sum, compensation }
+        }
         (ScalarState::Count(a), ScalarState::Count(b)) => {
             ScalarState::Count(a.checked_add(*b).ok_or("exact count overflow")?)
         }
@@ -296,6 +327,42 @@ mod tests {
         SummaryFamilyType::ExactAggregate(ExactKind::Sum, ExactParams::Sum)
     }
 
+    // Stored Sum preserves low-order increments across updates, persistence and pane merge.
+    #[test]
+    fn stored_sum_is_compensated() {
+        let mut state = ExactAccumulator::new(sum(), false).unwrap();
+        for value in [1e16, 1.0] {
+            state.update(None, value, 0);
+        }
+        let bytes = rmp_serde::to_vec_named(&state).unwrap();
+        let mut restored: ExactAccumulator = rmp_serde::from_slice(&bytes).unwrap();
+        let mut negative = ExactAccumulator::new(sum(), false).unwrap();
+        negative.update(None, -1e16, 1);
+        restored.merge_from(&negative).unwrap();
+        assert_eq!(
+            restored.readout(Statistic::Sum, None, None).unwrap(),
+            Some(1.0)
+        );
+    }
+
+    // Infinite running sums retain IEEE behavior without a spurious NaN correction.
+    #[test]
+    fn compensated_sum_retains_infinity_rules() {
+        let mut state = ExactAccumulator::new(sum(), false).unwrap();
+        state.update(None, f64::INFINITY, 0);
+        state.update(None, 1.0, 0);
+        assert_eq!(
+            state.readout(Statistic::Sum, None, None).unwrap(),
+            Some(f64::INFINITY)
+        );
+        state.update(None, f64::NEG_INFINITY, 0);
+        assert!(state
+            .readout(Statistic::Sum, None, None)
+            .unwrap()
+            .unwrap()
+            .is_nan());
+    }
+
     // A persisted exact state decodes back to the same family, layout and readout.
     #[test]
     fn serialized_state_round_trips() {
@@ -323,10 +390,22 @@ mod tests {
         let key = KeyByLabelValues::new_with_labels(vec!["a".into()]);
         let keyed = Payload {
             family: sum(),
-            scalar: ScalarState::Sum(0.0),
+            scalar: ScalarState::SumV2 {
+                sum: 0.0,
+                compensation: 0.0,
+            },
             keyed: Some(HashMap::from([(key, ScalarState::Max(Some(1.0)))])),
         };
         assert!(decode(&keyed).is_err());
+    }
+
+    // Old uncompensated Sum payloads are rejected instead of being misread as SumV2.
+    #[test]
+    fn old_sum_payload_is_rejected() {
+        let state = ExactAccumulator::new(sum(), false).unwrap();
+        let mut payload = serde_json::to_value(state).unwrap();
+        payload["scalar"] = serde_json::json!({ "Sum": 42.0 });
+        assert!(serde_json::from_value::<ExactAccumulator>(payload).is_err());
     }
 
     // Decoding rejects families that have no exact Planner state.
@@ -334,7 +413,10 @@ mod tests {
     fn decode_rejects_unsupported_family() {
         let payload = Payload {
             family: SummaryFamilyType::ExactAggregate(ExactKind::Sum, ExactParams::Count),
-            scalar: ScalarState::Sum(0.0),
+            scalar: ScalarState::SumV2 {
+                sum: 0.0,
+                compensation: 0.0,
+            },
             keyed: None,
         };
         assert!(decode(&payload).is_err());

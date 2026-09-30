@@ -43,6 +43,7 @@ enum Kind {
         value: Value,
         dtype: DataType,
     },
+    EvaluationTime,
     ScopeTimestamp {
         columns: Vec<Option<usize>>,
     },
@@ -279,7 +280,7 @@ impl PhysicalOperator<Batch, Schema> for Operator {
     }
     fn properties(&self, inputs: &[PlanProperties]) -> PlanProperties {
         let boundedness = match &self.kind {
-            Kind::Source(_) | Kind::Constant { .. } => Boundedness::Bounded,
+            Kind::Source(_) | Kind::Constant { .. } | Kind::EvaluationTime => Boundedness::Bounded,
             Kind::Limit { groups, .. } if groups.is_empty() => Boundedness::Bounded,
             _ => Boundedness::from_inputs(inputs),
         };
@@ -300,6 +301,7 @@ impl PhysicalOperator<Batch, Schema> for Operator {
     fn name(&self) -> &str {
         match self.kind {
             Kind::Source(_) => "Source",
+            Kind::EvaluationTime => "EvaluationTime",
             Kind::Constant { .. } => "Constant",
             Kind::ScopeTimestamp { .. } => "ScopeTimestamp",
             Kind::Union => "Union",
@@ -347,9 +349,11 @@ impl PhysicalOperator<Batch, Schema> for Operator {
         context: RunContext,
     ) -> Result<OutputStream<'a, Batch>, Error> {
         match self.kind {
-            Kind::Source(_) | Kind::Constant { .. } | Kind::Union | Kind::VectorToScalar { .. } => {
-                source::execute(self, inputs, context)
-            }
+            Kind::Source(_)
+            | Kind::Constant { .. }
+            | Kind::EvaluationTime
+            | Kind::Union
+            | Kind::VectorToScalar { .. } => source::execute(self, inputs, context),
             Kind::VectorBinary { .. } => vector_binary::execute(self, inputs, context),
             Kind::AlignedBinary { .. } => aligned_binary::execute(self, inputs, context),
             Kind::RangeWindow { .. } | Kind::HistogramQuantile => {

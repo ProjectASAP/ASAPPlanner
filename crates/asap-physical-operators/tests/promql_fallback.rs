@@ -663,8 +663,7 @@ fn empty_labels_and_empty_sides_match_prometheus() {
     let pair: &[Sample] = &[("job=x,inst=1", 50, 1.), ("job=x,inst=2", 50, 2.)];
     assert!(labeled("a + on(job) b", &[("b", pair)], 60).is_empty());
     assert!(labeled("b + on(job) a", &[("b", pair)], 60).is_empty());
-    // `time()` has no row realization yet.
-    assert!(promql_rows::with_series_identity(&parse("a - time()")).is_err());
+    assert!(labeled("a - time()", &[], 60).is_empty());
 }
 
 // Sums and averages use Prometheus' Kahan-Neumaier compensation, and an
@@ -1238,6 +1237,42 @@ fn histogram_quantile_selection_keeps_the_exact_fallback() {
             let rows = evaluate_dag(&root, &dag, &[("x_bucket", &samples)], 60).unwrap();
             let values: Vec<_> = rows.iter().map(|(_, _, v)| *v).collect();
             assert_eq!(values, vec![1.75], "{query} {target:?}");
+        }
+    }
+}
+
+// time() uses the query evaluation instant in seconds in scalar and vector operands.
+#[test]
+fn evaluation_time_operands_use_runtime_scope() {
+    assert_eq!(labeled("time()", &[], 60), rows(&[("", 60.)]));
+    assert_eq!(labeled("vector(time())", &[], 60), rows(&[("", 60.)]));
+    assert_eq!(
+        labeled("a + time()", &[("a", A)], 60),
+        rows(&[("job=w", 60.), ("job=x", 70.), ("job=y", 80.)])
+    );
+    assert_eq!(
+        labeled("time() - scalar(b)", &[("b", &[("job=x", 60, 3.)])], 61),
+        rows(&[("", 58.)])
+    );
+}
+
+// Non-finite scalar operands survive both logical and physical plan JSON round trips.
+#[test]
+fn nonfinite_literals_round_trip_in_plans() {
+    for (query, expected) in [
+        ("vector(NaN)", f64::NAN),
+        ("vector(+Inf)", f64::INFINITY),
+        ("vector(-Inf)", f64::NEG_INFINITY),
+    ] {
+        let expression = lower(query);
+        let json = serde_json::to_vec(&expression).unwrap();
+        let restored: QueryExpr = serde_json::from_slice(&json).unwrap();
+        let result = evaluate_dag(&restored, &fallback_dag(restored.clone()), &[], 60).unwrap();
+        assert_eq!(result.len(), 1);
+        if expected.is_nan() {
+            assert!(result[0].2.is_nan());
+        } else {
+            assert_eq!(result[0].2, expected);
         }
     }
 }
