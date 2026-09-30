@@ -434,15 +434,14 @@ The lifecycle layer decides timing; physical compilation reads it. Lowering a
 node does not depend on the frontier, so each query DAG is lowered once and
 different lifecycle assignments are different cuts of that lowering.
 `compile(dag, inputs, roots)` yields the complete `PhysicalDAG`.
-`frontier_from_timing(&timed_dag)` reads an assignment's timed DAG (from
-`export_timed_dag`) and returns its frontier: ingestion-time nodes read by
+`frontier_from_timing` reads an assignment's timing (a lifecycle assignment's
+view, or a DAG from `export_timed_dag`) and returns its frontier: ingestion-time nodes read by
 query-time nodes, or an ingestion-time root; a query-time node feeding an
 ingestion-time node is rejected. `cut_candidate(&compiled, &frontier)` then
 partitions the lowered operators: the frontier's ancestors form the precompute
 DAG and the rest form the query DAG. Helper operators are numbered by their
 Planner node (`u64::MAX - (node_id << 16) - index`), so a cut is byte-identical to
-`compile_candidate` for that frontier. One exception: an ingestion-time
-`Binary` lowers differently, so its timing must match at compile time.
+`compile_candidate` for that frontier.
 `compile_candidate(s)` and `enumerate_frontiers` wrap the same path. Temporal
 pane candidates remain a separate lowering.
 
@@ -572,7 +571,6 @@ operator/runtime fixtures:
 | `summary_maintenance_lifecycle_e2e::continuous_lifecycle_compiles_and_executes_spatial_kll` | PromQL workload → selected continuous lifecycle → logical DAG → compiled precompute/query candidate → results in independent revisions; an unbounded candidate fails before pricing, and a bounded request candidate summarizes the same input samples |
 | `summary_maintenance_lifecycle_e2e::chosen_lifecycle_timing_decides_precompute_contents` | PromQL workload → enumerated lifecycles → explicit choice → timed DAG → compiled candidate; ContinuouslyMaintained stores the state in precompute, Ephemeral leaves precompute empty and reads the raw source at query time; both return the same p99 |
 | `summary_maintenance_lifecycle_e2e::lifecycle_timing_cuts_one_compilation` | KLL quantile and grouped Rate→Sum: one compilation cut by the ContinuouslyMaintained and Ephemeral timed DAGs equals `compile_candidate` for each; the frontier is the retained state or empty |
-
 | `summary_maintenance_lifecycle_e2e::chosen_population_lifecycle_decides_precompute_contents` | PromQL `topk by(job)` over a maintained population → explicit choice → timed DAG → compiled candidate; ContinuouslyMaintained stores the population in precompute, Ephemeral rebuilds it from raw samples at query time; both rank alike |
 | `summary_maintenance_lifecycle_e2e::planner_lifecycle_selection_reproduces_strategy_timing` | For PromQL summary fixtures, the timed DAG from Planner's retained selection equals the DAG realization strategies produce |
 | `kll_pane_execution::five_panes_roundtrip_and_shared_merge_runs_once` | Explicit one-minute precompute DAGs → real MessagePack state bytes → five required query inputs → shared native merge → p50/p99; counts every sample once, checks adjacent aligned windows and instruments one merge start per run |

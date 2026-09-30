@@ -25,11 +25,8 @@ lifecycle assignments; generation does not implicitly select a winner.
 
 ## Baseline
 
-The complete implementation depends on the physical compilation and lifecycle
-integration underlying #508. Main and the original #480 documentation branch
-do not yet contain those implementations. Apply the complete refactor on that
-integration, preserving #480's documentation changes; do not merge main as part
-of this task.
+The implementation builds on the physical compilation and lifecycle APIs of the
+stack under #508; main does not contain them yet.
 
 ## Changes
 
@@ -61,8 +58,8 @@ of this task.
    identifying their timing cuts, contracts and lifecycle metadata. Reuse the
    existing cut and validation implementation. Materialize precompute/query
    execution graphs on demand, including after deployment selection. Preserve
-   separate compilations when timing changes operator lowering, notably an
-   ingestion-time Binary. Keep failures attributable to their candidates.
+   separate compilations when timing changes operator lowering. Keep failures
+   attributable to their candidates.
 6. **Update the public boundary and documentation.** Route collection APIs
    through the existing lowering, search, lifecycle and compilation algorithms.
    Preserve explicit opt-in selection helpers. Update the DAG naming table to
@@ -77,8 +74,8 @@ of this task.
 - Shared logical subgraphs retain identity through enumeration and compilation.
 - Lifecycle alternatives reuse the logical graph and assign all required node
   timing, window and retention information. Illegal timing edges are rejected.
-- Equivalent timing cuts share one compilation. Timing-dependent Binary
-  lowering remains correct and cannot reuse an incompatible realization.
+- Equivalent timing cuts share one compilation; a realization is never reused
+  for timing that lowers differently.
 - Candidate generation preserves valid alternatives and visible rejection
   reasons; candidate inspection never silently invokes winner selection.
 - Selected physical execution graphs preserve their typed producer/reader
@@ -96,23 +93,26 @@ rather than treating a rename as completion of the structural work.
 
 - Named the existing node types and shared root aliases; added frontend
   `lower_pre_asap_dag_candidates` and the ID-preserving `CandidatePreASAPDAGs` collection.
-- Added `PostASAPDAGIndex`, retaining shared node references and edge metadata.
-  Physical compilation accepts the root, index or timing assignment through a
-  borrowed projection. Transport import and direct compilation share validation
-  and operator lowering; no second rewrite implementation was introduced.
-- Added a lazy, budget-checked timed stage of `CandidatePostASAPDAGs`. Unpriced legal choices
-  retain unknown cost, and rejected combinations retain their choices and errors.
-  `execution_assignment` attaches timing to the shared index. Window and
-  retention metadata stay on the accompanying lifecycle plan; unresolved window
-  evidence remains explicit and must be supplied before deployment installation.
-- Added `compile_physical_dag_candidates` and `CandidatePhysicalDAGs<Id>`. Compatible
-  assignments share `Arc<PhysicalDAG>`; Binary timing changes produce a separate
-  compilation. Cuts materialize on demand through the existing implementation.
+- Added `PostASAPDAGIndex`, retaining shared node references and projecting
+  node and edge records once. Physical compilation takes a borrowed
+  `PostASAPDAGView` of a transport document, an index, or a lifecycle
+  assignment; an assignment's view overlays its timing on the index's records
+  instead of copying them. Transport import and direct compilation share
+  validation and operator lowering; no second rewrite implementation was introduced.
+- Added the lazy, budget-checked timed collection `CandidatePostASAPDAGsWithTiming`.
+  Unpriced legal choices retain unknown cost, and rejected combinations retain
+  their choices and errors. `execution_assignment` attaches timing to the shared
+  index. Window and retention metadata stay on the accompanying lifecycle plan;
+  unresolved window evidence remains explicit and must be supplied before
+  deployment installation.
+- Added `compile_physical_dag_candidates` and `CandidatePhysicalDAGs`. Compatible
+  assignments share `Arc<PhysicalDAG>`; timing that changes lowering produces a
+  separate compilation. Cuts materialize on demand through the existing implementation.
 - Kept explicit eager cut and winner-selection helpers for callers requesting
   them. These helpers are not the candidate-preserving generation pipeline.
 - Added regression coverage for workload entry IDs, shared logical identity,
-  assignment budgets and unknown costs, physical compilation sharing,
-  timing-dependent Binary separation, transport equivalence and rejected timing.
+  assignment budgets and unknown costs, physical compilation sharing, agreement
+  with independent compilation of each assignment's transport, and rejected timing.
 
 The Rust API migration is documented in
 [dag-api-migration.md](../../develop_docs/dag-api-migration.md). Downstream
@@ -120,25 +120,25 @@ consumers must adopt the breaking names before repinning to this branch.
 
 ## Collection boundary completion
 
-The logical collection now has a timed stage,
-`CandidatePostASAPDAGs<Id, WithTiming<'a, Id>>`, which encapsulates the existing
-lifecycle enumerator. `with_timing_for_root` handles logical realization,
-index sharing, assignment budgets and lazy generation. Single already-assembled
-graphs use `from_post_asap_dag`. The old lifecycle enumerator is crate-private.
+The logical collection `CandidatePostASAPDAGs<Id>` and the timed collection
+`CandidatePostASAPDAGsWithTiming<'a, Id>` are separate plain types. The timed
+collection encapsulates the existing lifecycle enumerator: `with_timing_for_root`
+handles logical realization, index sharing, assignment budgets and lazy
+generation, and single already-assembled graphs use `from_post_asap_dag`. It
+also answers `lifecycle_guarantee`, so a deployment can price an alternative
+before binding it. A state without lifecycle alternatives yields a diagnostic
+entry rather than disappearing.
 
-`compile_physical_dag_candidates` consumes this timed collection directly and
-returns `CandidatePhysicalDAGs<Id>`. The physical collection owns shared graphs
-and cut descriptors; the old public `PhysicalDAGCandidate` wrapper is removed.
-The physical crate depends on the mapping crate to consume this typed boundary;
-logical search does not depend on physical compilation. Both transitions retain
-IDs, lifecycle metadata and errors. Reuse also checks contracts and requested
-roots, preventing one candidate's input boundary from contaminating another.
+`compile_physical_dag_candidates` consumes the timed collection's entries and
+returns `CandidatePhysicalDAGs<M, E>`, which owns shared graphs and cut
+descriptors. The metadata type `M` and the timing error type `E` belong to the
+caller, so the physical crate does not depend on lifecycle planning; a timing
+failure stays typed as `PhysicalCandidateError::Timing`, separate from
+`PhysicalCandidateError::Compile`. Both transitions retain IDs, lifecycle
+metadata and errors. Reuse also checks contracts and requested roots,
+preventing one candidate's input boundary from contaminating another.
 
 Existing explicit lifecycle selection and cut APIs delegate to the same
 implementation. No second lifecycle enumeration or operator compiler was added.
-
-Validation: `cargo test --workspace` passed 1509 tests across 91 test groups.
-`cargo clippy --workspace --all-targets -- -D warnings`, formatting and diff
-checks passed. Integration coverage exercises the two named collection
-transitions, lazy assignment generation, total budgets, retained IDs and errors,
-graph sharing, and compilation reuse across contract/root changes.
+Binding runtime sources is an execution step: `PhysicalDAG::instantiate`
+returns a `PhysicalExecution` handle for one run, not another DAG.

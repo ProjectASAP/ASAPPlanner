@@ -30,7 +30,7 @@ fields and [frontend dependencies](#frontend-specific-dependencies).
 
 | Output | Fields or contents | Meaning |
 |---|---|---|
-| `CandidatePostASAPDAGs` | All legal logical candidates for the workload, represented compactly as canonical roots, one candidate set per target sub-DAG, and cross-target composition information | The candidate space: nothing is selected yet |
+| `CandidatePostASAPDAGs<Id>` | All legal logical candidates for the workload, represented compactly as canonical roots, one candidate set per target sub-DAG, and cross-target composition information | The candidate space: nothing is selected yet |
 | `PlanOutput` | One selected PostASAPDAG root (`Rc<PostASAPNode>`) per workload entry, optionally with summary-maintenance lifecycle decisions | One optimization pass's selection, returned by `e2e_plan` and `optimize` |
 
 `PlanOutput` is selected from the candidate space, not a second output beside
@@ -41,7 +41,9 @@ it. [Output layers](#output-layers) places both in the `PreASAPDAG` →
 DAG assembly](#selection-and-dag-assembly), and
 [summary-maintenance lifecycle](#summary-maintenance-lifecycle-aware-helper) APIs operate on this candidate collection.
 These are different uses of the candidate space, not mandatory sequential
-stages. The logical candidates have no selected summary-maintenance lifecycle.
+stages. `CandidatePostASAPDAGs` itself has no selected summary-maintenance lifecycle, and
+its candidates do not choose precompute versus query-time placement: a chosen
+lifecycle assignment sets each node's execution timing.
 
 These candidates are logical `PostASAPDAG`s. Planner also compiles
 physical candidates. Downstream systems price lifecycle assignments, bind
@@ -325,7 +327,7 @@ Additional inputs for a Planner-owned maintenance decision are listed with the
 
 ## Output
 
-### CandidatePostASAPDAGs
+### `CandidatePostASAPDAGs<Id>`
 
 The logical layer outputs `CandidatePostASAPDAGs`. The current
 Rust API represents this collection compactly as `CandidatePostASAPDAGs<Id>`; this is an
@@ -390,8 +392,8 @@ timing assignments, physical candidate generation and explicit transport exports
 |---|---|---|
 | 0. Frontends | `CandidatePreASAPDAGs` | Parse and lower PromQL, SQL, or MetricsQL; reject unsupported semantics such as PromQL `fill`. |
 | 1. Logical Post-ASAP | `CandidatePostASAPDAGs` | What to compute: summary families, rewrites, and exact candidates. No placement. `PlanOutput` is an optional library-selected logical result; deployments can enumerate candidates themselves. |
-| 2. Summary maintenance lifecycle | Lifecycle choices per unique summary state and maintained population → `CandidatePostASAPDAGs` with timing | `Ephemeral`, `Prepared`, `Shared`, or `ContinuouslyMaintained`. Each admissible assignment produces a candidate with node timing, window framework, and retention; this layer is the only source of timing. |
-| 3. Physical compilation | `CandidatePhysicalDAGs` | Compile operators and kernels once, then cut by timing into precompute and query DAGs with typed `InputContracts`. Ingestion-time Binary lowering requires matching compile-time timing. |
+| 2. Summary maintenance lifecycle | Lifecycle choices per unique summary state and maintained population → `CandidatePostASAPDAGs` with timing (`CandidatePostASAPDAGsWithTiming`) | `Ephemeral`, `Prepared`, `Shared`, or `ContinuouslyMaintained`. Each admissible assignment produces a candidate with node timing, window framework, and retention; this layer is the only source of timing. |
+| 3. Physical compilation | `CandidatePhysicalDAGs` | Compile operators and kernels once, then cut by timing into precompute and query DAGs with typed `InputContracts`. |
 | 4–5. Deployment | Deployment-owned | Prices lifecycle assignments with its own costs, including summary store cost; selects, binds, and executes. |
 
 Each layer preserves all legal candidates under the supplied constraints;

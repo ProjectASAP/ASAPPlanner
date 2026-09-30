@@ -633,7 +633,8 @@ that prepared or retained shared state is supported.
 | `plan_summary_maintenance_lifecycles` | Assembled logical DAG root, `WorkloadDemand`, `now_ms`, optional horizon, runtime capabilities, cost model | `Result<SummaryMaintenanceLifecyclePlan, …>` for that fixed root; does not revisit all semantic candidates |
 | `global_selection_with_summary_maintenance_lifecycles` | `CandidatePostASAPDAGs`, workload/root-entry associations, time, horizon, capabilities, cost model | Lifecycle-aware compatible selection/error, using eligible cost evidence |
 | `assemble_selected_dag_with_summary_maintenance_lifecycles` | Selection, target root and lifecycle context | Optional lifecycle plan/error; attaches state deployment decisions |
-| `CandidatePostASAPDAGs::with_timing_for_root` | Root ID, `CandidateTimingContext`, logical and assignment expansion limits | `CandidatePostASAPDAGs<Id, WithTiming<'a, Id>>`; lazy assignments and rejections, with shared logical graphs and lifecycle metadata |
+| `CandidatePostASAPDAGs::with_timing_for_root` | Root ID, `CandidateTimingContext`, logical and assignment expansion limits | `CandidatePostASAPDAGsWithTiming<'a, Id>`; lazy assignments and rejections, with shared logical graphs and lifecycle metadata |
+| Timed collection `lifecycle_guarantee(logical_index, lifecycle)` | One lifecycle alternative of a state | The guarantee that choosing it would attach, for pricing before binding |
 | Timed collection `select_lifecycles(logical_index, choices)` | One `(PostASAPNodeId, SummaryMaintenanceLifecycle)` per state, copied from `lifecycle_alternatives(logical_index)` | The same lifecycle plan and validation as explicit Planner selection, with typed rejection on failure |
 
 Inspect `deployments`, their selected lifecycle/alternatives/rejections,
@@ -649,7 +650,7 @@ consume ranked candidates and perform this comparison downstream instead.
 A deployment that prices lifecycles itself calls
 `with_timing_for_root`, prices its candidates, and explicitly binds a choice
 with `select_lifecycles` when needed. Callers with an assembled root use
-`CandidatePostASAPDAGs::from_post_asap_dag` to enter the same timed collection.
+`CandidatePostASAPDAGsWithTiming::from_post_asap_dag` to enter the same timed collection.
 A choice is accepted only if Planner could select it:
 an alternative with `MissingCostEvidence` is accepted only when the cost model's
 complete-candidate hook covers lifecycle costs. Window frameworks and totals come
@@ -665,9 +666,9 @@ use asap_physical_operators::physical_planner::{
     compile, cut_candidate, frontier_from_timing,
 };
 
-let compiled = compile(&dag, inputs, &roots)?; // each node lowered once
+let compiled = compile(dag.as_view(), inputs, &roots)?; // each node lowered once
 for plan in lifecycle_plans {
-    let frontier = frontier_from_timing(&plan.export_timed_dag()?)?;
+    let frontier = frontier_from_timing(plan.export_timed_dag()?.as_view())?;
     // Precompute/query DAGs split at `frontier`; no logical lowering.
     let candidate = cut_candidate(&compiled, &frontier)?;
     // Check feasibility and price `candidate`; bind the selected one as is.
