@@ -249,16 +249,13 @@ pub fn compile_rate_ranking(
     Ok((source, program))
 }
 
-/// The selected logical placement requires fresh aggregate state per closed window.
-/// Compile both physical graphs before deployment chooses storage or scheduling.
-/// The input is the complete collection of per-series exact counter states.
+/// Compile a lifecycle-timed DAG whose heap or grouped Sum over per-series
+/// Rate readouts runs at ingestion time: fresh aggregate state per closed
+/// window. The input is the complete collection of per-series counter states.
 pub fn compile_fixed_window_rate_aggregation(
-    selected: &Rc<planner_types::post_asap::SummaryNode>,
+    dag: &planner_types::post_asap::PostAsapDag,
 ) -> Result<PhysicalCandidate, Error> {
-    use planner_types::post_asap::{
-        compile_post_asap_dag, ExactKind, ExecutionTiming, SketchAlgorithm,
-    };
-    let dag = compile_post_asap_dag(selected).map_err(|e| invalid(e.to_string()))?;
+    use planner_types::post_asap::{ExactKind, ExecutionTiming, SketchAlgorithm};
     let sources = dag
         .nodes
         .iter()
@@ -310,7 +307,7 @@ pub fn compile_fixed_window_rate_aggregation(
         ));
     }
     compile_candidate(
-        &dag,
+        dag,
         BTreeMap::from([(
             u64::from(source.id.0),
             InputContract::bounded(Arc::new(source.output_schema.clone())),
