@@ -116,9 +116,10 @@ HistogramQuantile(q, le)                                          // classic-buc
 Math(func)                                                        // element-wise transform
 ```
 
-`HistogramQuantile { q, le }` names its bucket-bound column `le`. Its
-`Aggregate` groups `without([le])`, so one histogram is the set of series that
-differ only in `le`.
+`HistogramQuantile { q, le }` names its bucket-bound column `le`. PromQL's
+`Aggregate` groups it `without([le])`, so one histogram is the set of series
+that differ only in `le`. The SQL `asap_histogram_quantile` bridge reads one
+histogram over all rows.
 
 `PearsonCorr { left, right }` has two value inputs. Both
 references resolve to positional column IDs, and `input_cols()` exposes both
