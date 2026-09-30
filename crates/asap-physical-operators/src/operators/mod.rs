@@ -88,6 +88,11 @@ enum Kind {
         operator: planner_types::post_asap::BinaryOperator,
         scalars: [bool; 2],
     },
+    SeriesRelabel {
+        destination: String,
+        replacement: String,
+        source_regex: Option<(String, String)>,
+    },
     SeriesHistogramQuantile {
         /// `f64` bits: JSON cannot encode the NaN and infinite quantiles.
         quantile: u64,
@@ -268,6 +273,7 @@ impl PhysicalOperator<Batch, Schema> for Operator {
                 | Kind::SeriesLabels { .. }
                 | Kind::SeriesBinary { .. }
                 | Kind::SeriesHistogramQuantile { .. }
+                | Kind::SeriesRelabel { .. }
                 | Kind::Aggregate { .. }
                 | Kind::Window { .. }
                 | Kind::Join { .. }
@@ -314,6 +320,7 @@ impl PhysicalOperator<Batch, Schema> for Operator {
             Kind::SeriesWindow { .. } => "SeriesWindow",
             Kind::SeriesLabels { .. } => "SeriesLabels",
             Kind::SeriesBinary { .. } => "SeriesBinary",
+            Kind::SeriesRelabel { .. } => "SeriesRelabel",
             Kind::SeriesHistogramQuantile { .. } => "SeriesHistogramQuantile",
             Kind::Project(_) => "Project",
             Kind::Filter(_) => "Filter",
@@ -365,7 +372,8 @@ impl PhysicalOperator<Batch, Schema> for Operator {
             Kind::SeriesWindow { .. } => series_window::execute(self, inputs, context),
             Kind::SeriesLabels { .. }
             | Kind::SeriesBinary { .. }
-            | Kind::SeriesHistogramQuantile { .. } => series_labels::execute(self, inputs, context),
+            | Kind::SeriesHistogramQuantile { .. }
+            | Kind::SeriesRelabel { .. } => series_labels::execute(self, inputs, context),
             Kind::Filter(_) => filter::execute(self, inputs, context),
             Kind::Limit { .. } => limit::execute(self, inputs, context),
             Kind::Sort { .. } => sort::execute(self, inputs, context),

@@ -1427,14 +1427,34 @@ impl QueryExpr<ColumnId> {
             // <vector>`) is the vector side's — a scalar operand (a constant or
             // `time()`) contributes only its value, no labels. Prefer the
             // non-scalar side.
-            QueryExpr::BinaryOp { lhs, rhs, .. } => match (lhs.as_ref(), rhs.as_ref()) {
-                (
-                    QueryExpr::PromqlScalarBridge(_)
-                    | QueryExpr::EvalTimestamp
-                    | QueryExpr::PromqlScalarFromVector(_),
-                    r,
-                ) => r.output_schema(),
-                (l, _) => l.output_schema(),
+            QueryExpr::BinaryOp { lhs, rhs, op, vector_match } => {
+                fn scalar(expression: &QueryExpr) -> bool {
+                    match expression {
+                        QueryExpr::PromqlScalarBridge(_) | QueryExpr::EvalTimestamp | QueryExpr::PromqlScalarFromVector(_) => true,
+                        QueryExpr::BinaryOp { lhs, rhs, .. } => scalar(lhs) && scalar(rhs),
+                        _ => false,
+                    }
+                }
+                let left = lhs.output_schema()?;
+                let right = rhs.output_schema()?;
+                if scalar(lhs) { return Ok(right); }
+                let mut output = left;
+                let grouping = vector_match.as_ref().and_then(|m| m.grouping.as_ref());
+                let right_rows = matches!(op, BinaryOpKind::Set(PromQLVectorSetOpKind::Or))
+                    || matches!(grouping, Some(g) if g.side == GroupSide::Right);
+                let mut additions = Vec::new();
+                if right_rows {
+                    additions.extend(right.columns.iter().filter(|c| c.dtype == DataType::Utf8).cloned());
+                }
+                if let Some(grouping) = grouping {
+                    additions.extend(grouping.labels.iter().map(|name| Column::new(name.clone(), DataType::Utf8, true)));
+                }
+                for column in additions {
+                    if !output.columns.iter().any(|c| c.name == column.name) {
+                        output.columns.push(column);
+                    }
+                }
+                Ok(output)
             },
 
             // The scalar variants (issue #205) — see `QueryExprError::ScalarHasNoRowSchema`.
@@ -1545,9 +1565,10 @@ pub fn aggregate_output_schema(
             ))?;
         out_cols.push(c.clone());
     }
-    let value_col_idx = in_schema
-        .column_id("value")
-        .or_else(|| (0..in_schema.columns.len()).find(|i| !by.contains(i)));
+    let value_col_idx =
+        super::column_resolution::resolve_column_ref(&ColumnRef::SampleValue, in_schema)
+            .ok()
+            .or_else(|| (0..in_schema.columns.len()).find(|i| !by.contains(i)));
     let probe = value_col_idx
         .and_then(|i| in_schema.columns.get(i))
         .cloned()

@@ -137,6 +137,63 @@ impl Lowering {
     /// An instant vector, or a scalar for scalar-valued expressions.
     fn value(&mut self, expression: &QueryExpr) -> Result<Input, Error> {
         match expression {
+            QueryExpr::Concat { children, .. } => {
+                if !children.iter().all(|branch| matches!(branch,
+                    QueryExpr::PromqlRelabel { child, .. } if matches!(child.as_ref(),
+                        QueryExpr::Aggregate { measures, .. } if matches!(measures.as_slice(), [AggIntent::HistogramQuantile { .. }])))) {
+                    return Err(invalid("PromQL concatenation requires classic histogram quantile branches"));
+                }
+                let inputs = children
+                    .iter()
+                    .map(|child| self.value(child))
+                    .collect::<Result<Vec<_>, _>>()?;
+                let output = declared(expression)?;
+                if inputs.iter().any(|input| self.schema(input) != output) {
+                    return Err(invalid(
+                        "concatenated PromQL branches require equal schemas",
+                    ));
+                }
+                let union = self.add(Operator::union(output.clone(), inputs.len())?, inputs);
+                // Multi-quantile branches drop the metric name and form one vector.
+                self.push(
+                    Operator::series_without_name(output)?,
+                    vec![union],
+                    expression,
+                )
+            }
+            QueryExpr::PromqlRelabel { dst, value, child } => {
+                let step = self.value(child)?;
+                let input = self.schema(&step);
+                let (replacement, source_regex) = match value.as_ref() {
+                    QueryExpr::Literal(planner_types::pre_asap::ScalarValue::Utf8(value)) => {
+                        (value.clone(), None)
+                    }
+                    QueryExpr::FunctionCall { name, args } if name == "label_replace" => {
+                        let [QueryExpr::Column(source), QueryExpr::Literal(planner_types::pre_asap::ScalarValue::Utf8(pattern)), QueryExpr::Literal(planner_types::pre_asap::ScalarValue::Utf8(
+                            replacement,
+                        ))] = args.as_slice()
+                        else {
+                            return Err(invalid("invalid label_replace arguments"));
+                        };
+                        let source = input
+                            .fields
+                            .get(*source)
+                            .ok_or_else(|| invalid("label_replace source missing"))?
+                            .name
+                            .clone();
+                        (replacement.clone(), Some((source, pattern.clone())))
+                    }
+                    _ => return Err(invalid("unsupported PromQL label rewrite")),
+                };
+                let operator = Operator::series_relabel(
+                    input,
+                    declared(expression)?,
+                    dst.clone(),
+                    replacement,
+                    source_regex,
+                )?;
+                self.push(operator, vec![step], expression)
+            }
             QueryExpr::TimeRange { .. } => {
                 let (range, offset, at) = selector(expression)?;
                 let input = self.read(expression)?;
@@ -363,7 +420,17 @@ impl Lowering {
             let operator = Operator::series_histogram_quantile(input, *q, *le)?;
             return self.push(operator, vec![step], logical);
         }
-        let value = named_column(&input, &ColumnRef::SampleValue)?;
+        let value = input
+            .fields
+            .iter()
+            .enumerate()
+            .filter(|(_, f)| f.dtype == SummaryFamilyType::Plain(DataType::Float64))
+            .map(|(i, _)| i)
+            .collect::<Vec<_>>();
+        let [value] = value.as_slice() else {
+            return Err(invalid("PromQL aggregation requires one Float64 value"));
+        };
+        let value = *value;
         let reduction = match measure {
             AggIntent::Sum { col: None } => Reduction::Sum(value),
             AggIntent::Avg { col: None } => Reduction::Avg(value),

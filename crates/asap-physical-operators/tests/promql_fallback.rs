@@ -1276,3 +1276,127 @@ fn nonfinite_literals_round_trip_in_plans() {
         }
     }
 }
+
+// Classic histogram results remain aggregatable and support multi-quantile label branches.
+#[test]
+fn histogram_quantiles_and_nested_aggregation() {
+    let samples = buckets(&[("job=a", HISTOGRAM), ("job=b", HISTOGRAM)]);
+    assert_eq!(
+        quantile("sum(histogram_quantile(0.5, x_bucket))", &samples),
+        rows(&[("", 3.5)])
+    );
+    assert_eq!(
+        quantile("histogram_quantiles(x_bucket, \"q\", 0.5, 0.9)", &samples),
+        rows(&[
+            ("job=a,q=0.5", 1.75),
+            ("job=a,q=0.9", 4.0),
+            ("job=b,q=0.5", 1.75),
+            ("job=b,q=0.9", 4.0)
+        ])
+    );
+}
+
+// Relabeling anchors regexes, expands captures, preserves nonmatches and removes empty labels.
+#[test]
+fn label_replace_preserves_promql_labels() {
+    let samples: &[Sample] = &[
+        ("job=api:one,team=old", 50, 1.0),
+        ("job=other,team=old", 50, 2.0),
+    ];
+    assert_eq!(
+        labeled(
+            "label_replace(a, \"team\", \"$1\", \"job\", \"(.*):.*\")",
+            &[("a", samples)],
+            60
+        ),
+        rows(&[
+            ("__name__=a,job=api:one,team=api", 1.0),
+            ("__name__=a,job=other,team=old", 2.0)
+        ])
+    );
+    assert_eq!(
+        labeled(
+            "label_replace(a, \"team\", \"\", \"job\", \".*\")",
+            &[("a", samples)],
+            60
+        ),
+        rows(&[
+            ("__name__=a,job=api:one", 1.0),
+            ("__name__=a,job=other", 2.0)
+        ])
+    );
+}
+
+// Binary results over aggregates retain labels contributed by the other operand.
+#[test]
+fn binary_aggregates_accept_additional_labels() {
+    let a: &[Sample] = &[("job=x", 50, 2.0)];
+    let info: &[Sample] = &[("job=x,team=blue", 50, 3.0)];
+    assert_eq!(
+        labeled(
+            "sum by(job)(a) * on(job) group_left(team) info",
+            &[("a", a), ("info", info)],
+            60
+        ),
+        rows(&[("job=x,team=blue", 6.0)])
+    );
+    assert_eq!(
+        labeled("sum by(job)(a) or info", &[("a", a), ("info", info)], 60),
+        rows(&[("job=x", 2.0), ("__name__=info,job=x,team=blue", 3.0)])
+    );
+}
+
+// Relabeling handles missing sources and named captures, and rejects label-set collisions.
+#[test]
+fn label_replace_missing_labels_named_captures_and_duplicates() {
+    let a: &[Sample] = &[("job=api:one", 50, 2.)];
+    assert_eq!(
+        labeled(
+            r#"label_replace(a, "team", "${part}", "job", "(?P<part>.*):.*")"#,
+            &[("a", a)],
+            60
+        ),
+        rows(&[("__name__=a,job=api:one,team=api", 2.)])
+    );
+    assert_eq!(
+        labeled(
+            r#"label_replace(a, "team", "unknown", "missing", "^$")"#,
+            &[("a", a)],
+            60
+        ),
+        rows(&[("__name__=a,job=api:one,team=unknown", 2.)])
+    );
+    assert!(evaluate(r#"label_replace(a, "", "x", "job", ".*")"#, &[("a", a)], 60).is_err());
+    let duplicate: &[Sample] = &[("job=a", 50, 1.), ("job=b", 50, 2.)];
+    assert!(evaluate(
+        r#"label_replace(a, "job", "same", "job", ".*")"#,
+        &[("a", duplicate)],
+        60
+    )
+    .unwrap_err()
+    .contains("same labelset"));
+}
+
+// Right-side grouped rows and group_right labels survive an aggregated left schema.
+#[test]
+fn grouped_binary_right_rows_preserve_all_labels() {
+    let a: &[Sample] = &[("job=x", 50, 2.)];
+    let info: &[Sample] = &[("job=x,team=blue", 50, 3.)];
+    let metrics = &[("a", a), ("info", info)];
+    assert_eq!(
+        labeled("sum by(job)(a) * on(job) group_right info", metrics, 60),
+        rows(&[("job=x,team=blue", 6.)])
+    );
+    assert_eq!(
+        labeled("sum by(job)(a) or sum by(job,team)(info)", metrics, 60),
+        rows(&[("job=x", 2.), ("job=x,team=blue", 3.)])
+    );
+    let samples = buckets(&[("job=a", HISTOGRAM)]);
+    assert!(evaluate(
+        r#"histogram_quantiles(x_bucket, "q", 0.5, 0.5)"#,
+        &[("x_bucket", &samples)],
+        60
+    )
+    .unwrap_err()
+    .contains("same labelset"));
+}

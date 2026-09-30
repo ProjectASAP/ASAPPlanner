@@ -167,12 +167,10 @@ Fallback and in query-time `Binary` nodes, following Prometheus'
   subquery the inner function also drops the name, without that check,
   because each series repeats across steps.
 
-A result is written in the left operand's schema. Without a series identity,
-its label columns must hold every label the right side can contribute
-(`or`, `group_right`, and `group_left` labels); otherwise `compile` rejects it.
-So `sum(a) or vector(0)` compiles, but
-`sum by (job) (a) * on(job) group_left(team) info` is rejected: the
-aggregate's schema has no `team` column.
+Binary result schemas now include labels contributed by `or`, `group_right`,
+and `group_left`, including a right-side series identity when needed. Thus
+`sum by (job) (a) * on(job) group_left(team) info` retains `team`, and
+`sum by(job)(a) or info` retains every right-side label.
 
 | Row | Change |
 |---|---|
@@ -193,10 +191,9 @@ An argument whose output provably lacks `le`, such as
 returns an empty vector for it. Candidate search keeps the classic form as one
 exact `KeepPreAsap` subtree for every accuracy target; it has no sketch
 candidate. `histogram_quantiles` lowers each branch the same way, but the
-Fallback compiler does not yet accept its `Concat` of relabeled branches.
-Aggregating or doing arithmetic over the result, as in
-`sum(histogram_quantile(…))`, fails like any expression over a nested
-aggregate's renamed value column.
+Fallback compiler accepts its `Concat` of relabeled branches and rejects
+duplicate output label sets. Nested aggregation, such as
+`sum(histogram_quantile(…))`, resolves the renamed sample-value column.
 
 Totals after this change: 21 Supported, 5 Partial, 3 Missing, 2 Backend.
 
@@ -211,7 +208,7 @@ In order of backend usage:
    - `@ start()` and `@ end()`, which need the range query's bounds in the
      run scope.
    - Other functions, such as `deriv`, `predict_linear`,
-     `stddev_over_time`, `absent`, `label_replace`, and math functions.
+     `stddev_over_time`, `absent`, and math functions.
    After these shapes are covered, the backend can delete rows 28 and 30.
 2. Row 7: per-series readouts must drop `__name__` where their range
    function does, and check for equal label sets. Then filter comparisons
@@ -221,10 +218,7 @@ In order of backend usage:
 4. Row 16: a label-map sketch-state readout, the counterpart of
    `compile_exact_readout`, and MetricsQL `__name__` retention rules.
 5. Row 20: summary join, subtract, and delete.
-6. `group_left` labels and `or`/`group_right` right-side labels onto
-   aggregated (label-column) rows. The logical output schema, which is the left
-   side's, has no column for them.
-7. An equal-label-set check for inner subquery functions, per step.
+6. An equal-label-set check for inner subquery functions, per step.
 
 `fill`, `fill_left`, and `fill_right` matching modifiers are rejected by the
 frontend (#494); they are never silently ignored.
@@ -237,3 +231,9 @@ and physical values encode NaN and infinities as explicit JSON strings instead
 of losing them as `null`; finite values remain numbers. Deployments continue
 to own outer document versioning. The exact Sum payload is independently tagged
 `SumV2`, so old uncompensated states fail decoding rather than being misread.
+
+`label_replace` compiles to a native label rewrite with anchored regular
+expressions, capture expansion, non-match preservation, empty-label removal,
+and duplicate-label-set rejection. Multi-quantile branches use the same label
+rewrite for their constant quantile labels. These operators perform computation
+only; the backend still supplies raw selectors and stored inputs.

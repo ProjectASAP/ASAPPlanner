@@ -78,6 +78,52 @@ impl Layout {
 }
 
 impl Operator {
+    pub(crate) fn series_relabel(
+        input: Schema,
+        output: Schema,
+        destination: String,
+        replacement: String,
+        source_regex: Option<(String, String)>,
+    ) -> Result<Self, Error> {
+        // Prometheus uses UTF-8 label validation; Rust strings are already UTF-8.
+        if destination.is_empty() || destination == PROMQL_SERIES_IDENTITY {
+            return Err(invalid("invalid or reserved destination label name"));
+        }
+        layout(&input)?;
+        let out = layout(&output)?;
+        if input
+            .fields
+            .iter()
+            .filter(|field| field.name != destination)
+            .any(|field| !output.fields.contains(field))
+        {
+            return Err(invalid(
+                "label rewrite must preserve non-destination input columns",
+            ));
+        }
+
+        if out.identity.is_none()
+            && !out
+                .labels
+                .iter()
+                .any(|&i| output.fields[i].name == destination)
+        {
+            return Err(invalid("label rewrite destination missing from output"));
+        }
+        if let Some((_, pattern)) = &source_regex {
+            regex::Regex::new(&format!("^(?s:{pattern})$")).map_err(|e| invalid(&e.to_string()))?;
+        }
+        Ok(Self {
+            kind: Kind::SeriesRelabel {
+                destination,
+                replacement,
+                source_regex,
+            },
+            inputs: vec![input],
+            output,
+        })
+    }
+
     /// Rewrite each row's label set to PromQL's matching labels: `On` keeps
     /// only `labels`; `Ignoring` drops `labels` and the metric name.
     pub fn series_labels(
@@ -183,42 +229,43 @@ impl Operator {
                 layout(schema)?;
             }
         }
+        let mut output = if scalars == [true, false] {
+            (*right).clone()
+        } else {
+            (*left).clone()
+        };
         if vectors {
-            let (l, r) = (layout(&left)?, layout(&right)?);
-            let names = |layout: &Layout, schema: &Schema| {
-                layout
-                    .labels
-                    .iter()
-                    .map(|&i| schema.fields[i].name.clone())
-                    .collect::<std::collections::BTreeSet<_>>()
-            };
+            let r = layout(&right)?;
             let right_rows = matches!(operator.kind, BinaryOpKind::Set(PromQLVectorSetOpKind::Or))
                 || matches!(grouping, Some(g) if g.side == GroupSide::Right);
-            let fits = l.identity.is_some()
-                || match grouping {
-                    _ if right_rows => {
-                        r.identity.is_none() && names(&r, &right).is_subset(&names(&l, &left))
-                    }
-                    Some(g) => g
+            let mut additions = Vec::new();
+            if right_rows {
+                additions.extend(
+                    r.labels
+                        .iter()
+                        .chain(r.identity.iter())
+                        .map(|&i| right.fields[i].clone()),
+                );
+            }
+            if let Some(grouping) = grouping {
+                additions.extend(
+                    grouping
                         .labels
                         .iter()
-                        .all(|label| names(&l, &left).contains(label)),
-                    None => true,
-                };
+                        .map(|name| result_field(name, DataType::Utf8, true)),
+                );
+            }
+            for field in additions {
+                if !output.fields.iter().any(|f| f.name == field.name) {
+                    output.fields.push(field);
+                }
+            }
             let or = matches!(operator.kind, BinaryOpKind::Set(PromQLVectorSetOpKind::Or));
-            // A series identity holds any label set, since `write` re-encodes it.
-            // A right row needs a time only if the left layout has one.
-            if !fits || (or && left.time_index.is_some() && right.time_index.is_none()) {
-                return Err(invalid(
-                    "PromQL binary result labels do not fit the left schema",
-                ));
+            if or && left.time_index.is_some() && right.time_index.is_none() {
+                return Err(invalid("PromQL binary right row requires a timestamp"));
             }
         }
-        let output = if scalars == [true, false] {
-            right.clone()
-        } else {
-            left.clone()
-        };
+        let output = Arc::new(output);
         Ok(Self {
             kind: Kind::SeriesBinary { operator, scalars },
             inputs: vec![left, right],
@@ -336,6 +383,18 @@ async fn series_binary(
         Some(m) => (m.kind.clone(), m.labels.as_slice(), m.grouping.as_ref()),
     };
     let read = |side: usize, row: &[Value]| layouts[side].read(schemas[side], row);
+    let output = &operator.output;
+    let output_layout = layout(output)?;
+    let render =
+        |side: usize, row: &[Value], labels: &Labels, value: f64| -> Result<Vec<Value>, Error> {
+            let mut result = vec![Value::Null; output.fields.len()];
+            if let (Some(to), Some(from)) = (output.time_index, schemas[side].time_index) {
+                result[to] = row[from].clone();
+            }
+            output_layout.write(output, &mut result, labels)?;
+            result[output_layout.value] = Value::Float64(value);
+            Ok(result)
+        };
     if let BinaryOpKind::Set(set) = &binary.kind {
         // `and`/`unless` look up the right side; `or` adds unmatched right rows.
         let lookup = if *set == PromQLVectorSetOpKind::Or {
@@ -357,7 +416,7 @@ async fn series_binary(
             let found = signatures.contains(&signature(&kind, names, read(0, row)?));
             if *set == PromQLVectorSetOpKind::Or || found == and {
                 workspace.grow(row_bytes(row))?;
-                result.push(row.clone());
+                result.push(render(0, row, &read(0, row)?, float(&layouts[0], row)?)?);
             }
         }
         if *set == PromQLVectorSetOpKind::Or {
@@ -367,12 +426,7 @@ async fn series_binary(
                 if signatures.contains(&signature(&kind, names, labels.clone())) {
                     continue;
                 }
-                let mut out = vec![Value::Null; schemas[0].fields.len()];
-                if let (Some(to), Some(from)) = (schemas[0].time_index, schemas[1].time_index) {
-                    out[to] = row[from].clone();
-                }
-                out[layouts[0].value] = Value::Float64(float(&layouts[1], row)?);
-                layouts[0].write(schemas[0], &mut out, &labels)?;
+                let out = render(1, row, &labels, float(&layouts[1], row)?)?;
                 workspace.grow(row_bytes(&out))?;
                 result.push(out);
             }
@@ -454,14 +508,11 @@ async fn series_binary(
                 "multiple matches for labels: grouping labels must ensure unique matches",
             ));
         }
-        // The output row is in the left layout.
-        let mut out = if swapped {
-            left[*one_index].clone()
+        let out = if swapped {
+            render(0, &left[*one_index], &metric, computed)?
         } else {
-            row.clone()
+            render(0, row, &metric, computed)?
         };
-        layouts[0].write(schemas[0], &mut out, &metric)?;
-        out[layouts[0].value] = Value::Float64(computed);
         workspace.grow(row_bytes(&out))?;
         result.push(out);
     }
@@ -532,6 +583,58 @@ pub(super) fn execute<'a>(
                     &mut workspace,
                 )
                 .await?;
+            }
+            (
+                Kind::SeriesRelabel {
+                    destination,
+                    replacement,
+                    source_regex,
+                },
+                None,
+            ) => {
+                let input = &operator.inputs[0];
+                let from = layout(input)?;
+                let to = layout(&output)?;
+                let regex = source_regex
+                    .as_ref()
+                    .map(|(_, pattern)| regex::Regex::new(&format!("^(?s:{pattern})$")))
+                    .transpose()
+                    .map_err(|e| invalid(&e.to_string()))?;
+                let mut seen = std::collections::BTreeSet::new();
+                for row in rows {
+                    work.checkpoint().await?;
+                    let mut labels = from.read(input, &row)?;
+                    let rewritten = match (&source_regex, &regex) {
+                        (Some((source, _)), Some(regex)) => regex
+                            .captures(labels.get(source).map_or("", String::as_str))
+                            .map(|captures| {
+                                let mut value = String::new();
+                                captures.expand(replacement, &mut value);
+                                value
+                            }),
+                        _ => Some(replacement.clone()),
+                    };
+                    if let Some(value) = rewritten {
+                        if value.is_empty() {
+                            labels.remove(destination);
+                        } else {
+                            labels.insert(destination.clone(), value);
+                        }
+                    }
+                    if !seen.insert(labels.clone()) {
+                        return Err(invalid(
+                            "vector cannot contain metrics with the same labelset",
+                        ));
+                    }
+                    let mut out = vec![Value::Null; output.fields.len()];
+                    if let (Some(from), Some(to)) = (input.time_index, output.time_index) {
+                        out[to] = row[from].clone();
+                    }
+                    out[to.value] = row[from.value].clone();
+                    to.write(&output, &mut out, &labels)?;
+                    workspace.grow(row_bytes(&out) + label_bytes(&labels))?;
+                    result.push(out);
+                }
             }
             (Kind::SeriesHistogramQuantile { quantile, le }, None) => {
                 let input = &operator.inputs[0];
