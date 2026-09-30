@@ -382,7 +382,7 @@ fn grouped_comparisons_filter_or_return_bool() {
 }
 
 // A `bool` comparison Binary over per-series readouts matches one-to-one and
-// drops the metric name; a filter fails closed.
+// drops the metric name; a filter keeps the surviving left value.
 #[test]
 fn per_series_comparisons_filter_or_return_bool() {
     use planner_types::pre_asap::{BinaryOpKind::*, CompareOpKind::*};
@@ -393,9 +393,10 @@ fn per_series_comparisons_filter_or_return_bool() {
         .collect::<Vec<_>>();
     // rate: a{api} = a{db} = 50/300, b{api} = 25/300, b{db} = 100/300.
     let dag = exact_dag("rate(a[5m]) / rate(b[5m])");
-    // The readout keeps `__name__`, which rate drops, so a filter would keep it.
-    let error = run_series(&with_kind(dag.clone(), Compare(Gt)), &samples, 300_000).unwrap_err();
-    assert!(error.contains("__name__"), "{error}");
+    assert_eq!(
+        run_series(&with_kind(dag.clone(), Compare(Gt)), &samples, 300_000).unwrap(),
+        series(&[("api", "x", 50. / 300.)])
+    );
     assert_eq!(
         run_series(&with_kind(dag, CompareBool(Lt)), &samples, 300_000).unwrap(),
         series(&[("api", "x", 0.), ("db", "x", 1.)])
