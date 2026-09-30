@@ -948,6 +948,28 @@ fn pathologically_nested_query_is_rejected_not_stack_overflow() {
     assert!(format!("{err}").contains("nesting"), "got {err}");
 }
 
+// Behavior: every parser-accepted `fill` modifier form is rejected with a
+// fill-specific lowering error rather than silently dropped.
+#[test]
+fn fill_modifiers_are_rejected_not_ignored() {
+    for q in [
+        "a + fill(0) b",
+        "a + fill_left(1) b",
+        "a + fill_right(2) b",
+        "a + fill_left(1) fill_right(2) b",
+        "a + fill_right(2) fill_left(1) b",
+        "a + on(job) fill(0) b",
+        "a * ignoring(instance) group_left(env) fill_right(0) b",
+        "a > bool on(job) fill(0) b",
+        "sum(a - on(job) group_right fill_left(0) b)",
+    ] {
+        match lower_promql(q, AccuracyTarget::Exact) {
+            Err(LoweringError::UnsupportedFeature(m)) if m.contains("`fill`") => {}
+            other => panic!("expected fill rejection for {q:?}, got {other:?}"),
+        }
+    }
+}
+
 // ── accuracy propagation ──────────────────────────────────────────────────────
 
 #[test]
