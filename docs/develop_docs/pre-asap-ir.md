@@ -111,9 +111,14 @@ Rate, Increase                                                    // counter der
 Changes, Delta, IDelta, Deriv, Resets,
 PredictLinear(seconds), DoubleExpSmoothing(sf, tf)                // range-vector functions
 HistogramCount, HistogramSum, HistogramAvg, HistogramStdDev,
-HistogramStdVar, HistogramFraction(lo, hi), HistogramQuantile(q)  // native-histogram accessors
+HistogramStdVar, HistogramFraction(lo, hi)                       // native-histogram accessors
+HistogramQuantile(q, le)                                          // classic-bucket quantile
 Math(func)                                                        // element-wise transform
 ```
+
+`HistogramQuantile { q, le }` names its bucket-bound column `le`. Its
+`Aggregate` groups `without([le])`, so one histogram is the set of series that
+differ only in `le`.
 
 `PearsonCorr { left, right }` has two value inputs. Both
 references resolve to positional column IDs, and `input_cols()` exposes both
