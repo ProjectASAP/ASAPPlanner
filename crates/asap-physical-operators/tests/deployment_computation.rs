@@ -103,6 +103,17 @@ fn execute(
     samples: &[Sample],
     end: i64,
 ) -> Result<Vec<asap_physical_operators::runtime::SharedValue<Batch>>, String> {
+    execute_relabeled(dag, samples, end, &BTreeMap::new())
+}
+
+/// [`execute`], supplying samples of each instance in `relabel` under its
+/// `(__name__, instance)` instead.
+fn execute_relabeled(
+    dag: &PostAsapDag,
+    samples: &[Sample],
+    end: i64,
+    relabel: &BTreeMap<&str, (&str, &str)>,
+) -> Result<Vec<asap_physical_operators::runtime::SharedValue<Batch>>, String> {
     let inputs = raw_inputs(dag);
     let program = compile(
         dag,
@@ -122,6 +133,8 @@ fn execute(
                 .iter()
                 .filter(|sample| sample.0 == metric)
                 .map(|(name, job, instance, at, value)| {
+                    let (name, instance) =
+                        relabel.get(instance).copied().unwrap_or((*name, *instance));
                     let labels = BTreeMap::from([
                         ("__name__".to_string(), name.to_string()),
                         ("job".into(), job.to_string()),
@@ -467,6 +480,24 @@ fn per_series_scalar_arithmetic_applies_to_stored_readouts() {
             "{query}"
         );
     }
+}
+
+// A literal operand drops the metric name; series that then share a label set
+// are an error, as in Prometheus, rather than duplicate output series.
+#[test]
+fn per_series_scalar_arithmetic_rejects_label_sets_equal_without_the_name() {
+    let dag = exact_dag("sum_over_time(m[5m]) * 2");
+    let samples = counter("m", "api", 10., 10.)
+        .chain(counter("m", "api", 1., 1.).map(|s| (s.0, s.1, "y", s.3, s.4)))
+        .collect::<Vec<_>>();
+    let distinct = BTreeMap::from([("y", ("n", "y"))]);
+    assert!(execute_relabeled(&dag, &samples, 300_000, &distinct).is_ok());
+    // Both series are then {instance="x",job="api"}, named m and n.
+    let equal = BTreeMap::from([("y", ("n", "x"))]);
+    let Err(error) = execute_relabeled(&dag, &samples, 300_000, &equal) else {
+        panic!("duplicate label sets were accepted");
+    };
+    assert!(error.contains("same labelset"), "{error}");
 }
 
 fn with_vector_match(

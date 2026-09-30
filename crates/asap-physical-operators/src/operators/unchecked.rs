@@ -70,7 +70,10 @@ impl TryFrom<UncheckedOperator> for Operator {
                 at_ms,
                 steps,
             )?,
-            Kind::SeriesLabels { kind, labels } => {
+            // The rebuilt kind must equal the serialized one, which rejects
+            // a unique rewrite with other matching labels.
+            Kind::SeriesLabels { unique: true, .. } => Operator::series_without_name(input(0)?)?,
+            Kind::SeriesLabels { kind, labels, .. } => {
                 Operator::series_labels(input(0)?, kind, labels)?
             }
             Kind::SeriesBinary { operator } => {

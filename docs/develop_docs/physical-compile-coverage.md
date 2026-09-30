@@ -125,7 +125,7 @@ Totals are unchanged: 19 Supported, 5 Partial, 5 Missing, 2 Backend.
 | Row | Change |
 |---|---|
 | 5 | Query-time `Binary` over rows with a series identity, such as per-series readouts of stored state, uses the Fallback's `series_labels` and `series_binary`. Examples: `avg_over_time` as stored sum/count, and `rate(a) / rate(b)`. Matching drops `__name__` and honors `on`/`ignoring` when the payload carries them. Only one-to-one arithmetic is covered; `group_left`/`group_right` stay rejected and comparisons are row 7. Now Supported. |
-| 4, 8 | A literal operand also applies to per-series rows and drops `__name__`. |
+| 4, 8 | A literal operand also applies to per-series rows and drops `__name__`, in the Fallback too. Series whose label sets become equal are an error, as in Prometheus. |
 
 Grouped `sum`/`avg`, current-series `Sum`/`Average` readouts, and
 `sum_over_time`/`avg_over_time` use Prometheus' Kahan-Neumaier summation. An
