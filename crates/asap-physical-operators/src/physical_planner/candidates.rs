@@ -210,55 +210,116 @@ pub fn compile_candidates(
     }
 }
 
-/// A physical alternative shares its compiled operators. Execution graphs are
-/// derived only when a caller needs to evaluate, bind or execute this cut.
-#[derive(Clone)]
-pub struct PhysicalDAGCandidate {
+// The cut descriptor is an implementation detail of the collection. A public
+// entry exposes its shared PhysicalDAG, metadata and diagnostics directly.
+struct CompiledCut {
     compiled: Arc<PhysicalDAG>,
     frontier: Vec<NodeId>,
 }
-impl PhysicalDAGCandidate {
-    pub fn compiled(&self) -> &Arc<PhysicalDAG> {
-        &self.compiled
+
+/// All physical alternatives and their original logical/lifecycle identity.
+/// The collection owns shared compilation and cut descriptors; callers do not
+/// assemble a second candidate wrapper or lose generation errors in a filter.
+pub struct CandidatePhysicalDAGs<Id> {
+    entries: Vec<(
+        asap_aware_mapping::PostASAPCandidateMetadata<Id>,
+        Result<CompiledCut, Error>,
+    )>,
+    rejected_assemblies: Vec<String>,
+}
+impl<Id> CandidatePhysicalDAGs<Id> {
+    pub fn len(&self) -> usize {
+        self.entries.len()
     }
-    pub fn frontier(&self) -> &[NodeId] {
-        &self.frontier
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
     }
-    pub fn materialize(&self) -> Result<PhysicalCandidate, Error> {
-        cut_candidate(&self.compiled, &self.frontier)
+    pub fn rejected_assemblies(&self) -> &[String] {
+        &self.rejected_assemblies
+    }
+    pub fn iter(
+        &self,
+    ) -> impl Iterator<
+        Item = (
+            &asap_aware_mapping::PostASAPCandidateMetadata<Id>,
+            Result<&Arc<PhysicalDAG>, &Error>,
+        ),
+    > {
+        self.entries
+            .iter()
+            .map(|(metadata, result)| (metadata, result.as_ref().map(|cut| &cut.compiled)))
+    }
+    pub fn frontier(&self, candidate: usize) -> Result<&[NodeId], Error> {
+        Ok(&self.cut(candidate)?.frontier)
+    }
+    pub fn materialize(&self, candidate: usize) -> Result<PhysicalCandidate, Error> {
+        let cut = self.cut(candidate)?;
+        cut_candidate(&cut.compiled, &cut.frontier)
+    }
+    fn cut(&self, candidate: usize) -> Result<&CompiledCut, Error> {
+        self.entries
+            .get(candidate)
+            .ok_or_else(|| invalid("unknown physical candidate"))?
+            .1
+            .as_ref()
+            .map_err(Clone::clone)
     }
 }
 
-/// Metadata identifies the logical/lifecycle alternative, including window and
-/// retention requirements. Errors retain that identity in the same entry.
-pub type CandidatePhysicalDAGs<Metadata = ()> =
-    Vec<(Metadata, Result<PhysicalDAGCandidate, Error>)>;
+/// Compile the timed logical collection directly, preserving every assignment
+/// and rejection. Input contracts and requested roots can differ between logical
+/// realizations. The resolver supplies contracts, never live runtime readers.
+pub fn compile_physical_dag_candidates<Id: Clone>(
+    candidates: &asap_aware_mapping::CandidatePostASAPDAGs<
+        Id,
+        asap_aware_mapping::WithTiming<'_, Id>,
+    >,
+    resolve_inputs: impl FnMut(
+        &asap_aware_mapping::PostASAPCandidateMetadata<Id>,
+        &planner_types::post_asap::PostASAPDAGAssignment,
+    ) -> Result<(BTreeMap<NodeId, InputContract>, Vec<NodeId>), Error>,
+) -> CandidatePhysicalDAGs<Id> {
+    compile_assignments(
+        candidates.iter(),
+        resolve_inputs,
+        candidates.rejected_assemblies().to_vec(),
+    )
+}
 
-/// Compile lifecycle assignments without selecting a winner. All assignments
-/// for the same shared index and Binary timings reuse one compilation. Inputs
-/// and requested roots are fixed for this invocation; other input contracts
-/// require a separate invocation.
-pub fn compile_timed_candidates<Metadata>(
-    candidates: impl IntoIterator<Item = (Metadata, planner_types::post_asap::PostASAPDAGAssignment)>,
+struct SharedCompilation {
+    index: std::rc::Rc<planner_types::post_asap::PostASAPDAGIndex>,
+    binary_timing: Vec<(u32, bool)>,
     inputs: BTreeMap<NodeId, InputContract>,
-    roots: &[NodeId],
-) -> CandidatePhysicalDAGs<Metadata> {
-    use planner_types::post_asap::{ExecutionTiming, PostASAPDAGIndex};
-    // Keep index handles alive: allocator address reuse must not join unrelated DAGs.
-    let mut indices: Vec<std::rc::Rc<PostASAPDAGIndex>> = Vec::new();
-    let mut compiled =
-        BTreeMap::<(usize, Vec<(u32, bool)>), Result<Arc<PhysicalDAG>, Error>>::new();
-    candidates
+    roots: Vec<NodeId>,
+    compiled: Result<Arc<PhysicalDAG>, Error>,
+}
+
+fn compile_assignments<Id>(
+    candidates: impl IntoIterator<
+        Item = (
+            asap_aware_mapping::PostASAPCandidateMetadata<Id>,
+            Result<
+                planner_types::post_asap::PostASAPDAGAssignment,
+                std::rc::Rc<asap_aware_mapping::CandidateTimingError>,
+            >,
+        ),
+    >,
+    mut resolve_inputs: impl FnMut(
+        &asap_aware_mapping::PostASAPCandidateMetadata<Id>,
+        &planner_types::post_asap::PostASAPDAGAssignment,
+    ) -> Result<(BTreeMap<NodeId, InputContract>, Vec<NodeId>), Error>,
+    rejected_assemblies: Vec<String>,
+) -> CandidatePhysicalDAGs<Id> {
+    use planner_types::post_asap::ExecutionTiming;
+    // Keep graph identities alive, and include contracts/roots in reuse checks:
+    // different candidate input boundaries must never share an invalid lowering.
+    let mut compilations: Vec<SharedCompilation> = Vec::new();
+    let entries = candidates
         .into_iter()
         .map(|(metadata, assignment)| {
             let result = (|| {
-                let index_id = indices
-                    .iter()
-                    .position(|index| std::rc::Rc::ptr_eq(index, assignment.index()))
-                    .unwrap_or_else(|| {
-                        indices.push(assignment.index().clone());
-                        indices.len() - 1
-                    });
+                let assignment = assignment.map_err(|error| invalid(error.to_string()))?;
+                let (inputs, roots) = resolve_inputs(&metadata, &assignment)?;
                 let binary_timing = assignment
                     .index()
                     .node_views()
@@ -271,20 +332,35 @@ pub fn compile_timed_candidates<Metadata>(
                             )
                         })
                     })
-                    .collect();
-                let dag = compiled
-                    .entry((index_id, binary_timing))
-                    .or_insert_with(|| compile(&assignment, inputs.clone(), roots).map(Arc::new))
-                    .clone()?;
+                    .collect::<Vec<_>>();
+                let compiled = if let Some(existing) = compilations.iter().find(|existing| {
+                    std::rc::Rc::ptr_eq(&existing.index, assignment.index())
+                        && existing.binary_timing == binary_timing
+                        && existing.inputs == inputs
+                        && existing.roots == roots
+                }) {
+                    existing.compiled.clone()?
+                } else {
+                    let compiled = compile(&assignment, inputs.clone(), &roots).map(Arc::new);
+                    compilations.push(SharedCompilation {
+                        index: assignment.index().clone(),
+                        binary_timing,
+                        inputs,
+                        roots,
+                        compiled: compiled.clone(),
+                    });
+                    compiled?
+                };
                 let frontier = frontier_from_timing(&assignment)?;
-                Ok(PhysicalDAGCandidate {
-                    compiled: dag,
-                    frontier,
-                })
+                Ok(CompiledCut { compiled, frontier })
             })();
             (metadata, result)
         })
-        .collect()
+        .collect();
+    CandidatePhysicalDAGs {
+        entries,
+        rejected_assemblies,
+    }
 }
 
 /// Complete workload cost supplied by scoped optimizer/deployment evidence.
@@ -412,6 +488,29 @@ mod tests {
     use super::*;
     use planner_types::workload::*;
 
+    fn compile_test_candidates(
+        candidates: impl IntoIterator<Item = (usize, planner_types::post_asap::PostASAPDAGAssignment)>,
+        inputs: BTreeMap<NodeId, InputContract>,
+        roots: &[NodeId],
+    ) -> CandidatePhysicalDAGs<usize> {
+        compile_assignments(
+            candidates.into_iter().map(|(id, timing)| {
+                (
+                    asap_aware_mapping::PostASAPCandidateMetadata {
+                        id,
+                        logical_candidate: 0,
+                        assignment_candidate: id,
+                        choices: Vec::new(),
+                        lifecycle: None,
+                    },
+                    Ok(timing),
+                )
+            }),
+            |_, _| Ok((inputs.clone(), roots.to_vec())),
+            Vec::new(),
+        )
+    }
+
     fn grouped_root() -> planner_types::post_asap::PostASAPDAG {
         logical_root("sum by(job)(rate(m[1m]))")
     }
@@ -499,22 +598,21 @@ mod tests {
             });
         let lowered = || crate::physical_planner::LOWERED_NODES.with(|count| count.get());
         let before = lowered();
-        let candidates = compile_timed_candidates(
+        let candidates = compile_test_candidates(
             assignments.iter().cloned().enumerate(),
             inputs.clone(),
             &[u64::from(index.root_id.0)],
         );
         let count = lowered() - before;
-        let a = candidates[0].1.as_ref().unwrap();
-        let b = candidates[1].1.as_ref().unwrap();
-        assert!(Arc::ptr_eq(a.compiled(), b.compiled()));
+        let a = candidates.iter().next().unwrap().1.unwrap();
+        let b = candidates.iter().nth(1).unwrap().1.unwrap();
+        assert!(Arc::ptr_eq(a, b));
         assert!(count > 0);
-        for ((_, candidate), assignment) in candidates.iter().zip(&assignments) {
-            let actual = candidate.as_ref().unwrap().materialize().unwrap();
+        for (i, assignment) in assignments.iter().enumerate() {
+            let actual = candidates.materialize(i).unwrap();
             assert_eq!(lowered() - before, count);
             actual.validate().unwrap();
-            let expected =
-                cut_candidate(a.compiled(), &frontier_from_timing(assignment).unwrap()).unwrap();
+            let expected = cut_candidate(a, &frontier_from_timing(assignment).unwrap()).unwrap();
             assert_eq!(
                 serde_json::to_vec(&actual).unwrap(),
                 serde_json::to_vec(&expected).unwrap()
@@ -584,23 +682,82 @@ mod tests {
                 )
                 .unwrap()
             });
-        let candidates = compile_timed_candidates(
+        let candidates = compile_test_candidates(
             assignments.iter().cloned().enumerate(),
             inputs,
             &[u64::from(index.root_id.0)],
         );
-        let a = candidates[0].1.as_ref().unwrap();
-        let b = candidates[1].1.as_ref().unwrap();
-        assert!(!Arc::ptr_eq(a.compiled(), b.compiled()));
-        a.materialize().unwrap().validate().unwrap();
-        b.materialize().unwrap().validate().unwrap();
+        let a = candidates.iter().next().unwrap().1.unwrap();
+        let b = candidates.iter().nth(1).unwrap().1.unwrap();
+        assert!(!Arc::ptr_eq(a, b));
+        candidates.materialize(0).unwrap().validate().unwrap();
+        candidates.materialize(1).unwrap().validate().unwrap();
         let rejected =
-            compile_timed_candidates(assignments.into_iter().enumerate(), BTreeMap::new(), &[999]);
+            compile_test_candidates(assignments.into_iter().enumerate(), BTreeMap::new(), &[999]);
         assert_eq!(
-            rejected.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
+            rejected
+                .iter()
+                .map(|(metadata, _)| metadata.id)
+                .collect::<Vec<_>>(),
             vec![0, 1]
         );
         assert!(rejected.iter().all(|(_, result)| result.is_err()));
+    }
+
+    /// Identical logical timing is insufficient for reuse when the deployment
+    /// supplies different input contracts or requests different output roots.
+    #[test]
+    fn shared_compilation_respects_contracts_and_roots() {
+        use planner_types::post_asap::{
+            index_post_asap_dag, ExecutionTiming, PostASAPDAGAssignment,
+        };
+        let index = std::rc::Rc::new(index_post_asap_dag(&grouped_root()).unwrap());
+        let assignment = PostASAPDAGAssignment::new(
+            index.clone(),
+            index
+                .node_views()
+                .iter()
+                .map(|n| (n.id, ExecutionTiming::QueryTime))
+                .collect(),
+        )
+        .unwrap();
+        let inputs = raw_input(&index.to_transport());
+        let raw = *inputs.keys().next().unwrap();
+        let candidates = compile_assignments(
+            (0..3usize).map(|id| {
+                (
+                    asap_aware_mapping::PostASAPCandidateMetadata {
+                        id,
+                        logical_candidate: 0,
+                        assignment_candidate: id,
+                        choices: Vec::new(),
+                        lifecycle: None,
+                    },
+                    Ok(assignment.clone()),
+                )
+            }),
+            |metadata, _| {
+                let mut inputs = inputs.clone();
+                if metadata.id == 1 {
+                    inputs
+                        .values_mut()
+                        .for_each(|input| input.properties.emission = Emission::AfterInput);
+                }
+                let root = if metadata.id == 2 {
+                    raw
+                } else {
+                    u64::from(index.root_id.0)
+                };
+                Ok((inputs, vec![root]))
+            },
+            Vec::new(),
+        );
+        let dags = candidates
+            .iter()
+            .map(|(_, dag)| dag.unwrap())
+            .collect::<Vec<_>>();
+        assert!(!Arc::ptr_eq(dags[0], dags[1]));
+        assert!(!Arc::ptr_eq(dags[0], dags[2]));
     }
 
     /// Enumerating and cutting every frontier lowers each Planner node once.

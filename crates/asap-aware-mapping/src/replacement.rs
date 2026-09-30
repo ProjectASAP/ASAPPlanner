@@ -3919,7 +3919,14 @@ fn is_duplicate_summary(_existing: &Rc<PostASAPNode>, _candidate: &Rc<PostASAPNo
 /// (already-CSE'd) workload, plus the workload's own post-CSE roots so a
 /// caller can still map a `Root`'s `Id` back to the `Rc<PreASAPNode>` whose
 /// group holds its alternatives.
-pub struct CandidatePostASAPDAGs<Id> {
+pub struct CandidatePostASAPDAGs<Id, Stage = LogicalCandidates<Id>> {
+    pub(crate) stage: Stage,
+    pub(crate) identity: std::marker::PhantomData<fn() -> Id>,
+}
+
+/// Compact logical search storage. The timed stage replaces this storage;
+/// it does not keep a duplicate search index beside its assignments.
+pub struct LogicalCandidates<Id> {
     /// The workload's roots, after the one `share_common_subtrees` pass
     /// [`search_workload_with`] runs up front — the same post-CSE roots
     /// every `TargetSubDAG` in `groups` was discovered from.
@@ -3931,6 +3938,18 @@ pub struct CandidatePostASAPDAGs<Id> {
     /// Composition proofs are computed with the search model, then retained
     /// through costing and DAG assembly so no later default can replace it.
     composition_plans: Vec<PreparedComposition>,
+}
+
+impl<Id> std::ops::Deref for CandidatePostASAPDAGs<Id> {
+    type Target = LogicalCandidates<Id>;
+    fn deref(&self) -> &Self::Target {
+        &self.stage
+    }
+}
+impl<Id> std::ops::DerefMut for CandidatePostASAPDAGs<Id> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.stage
+    }
 }
 
 struct PreparedComposition {
@@ -3946,14 +3965,15 @@ impl<Id> CandidatePostASAPDAGs<Id> {
         accuracy: &dyn AccuracyModel,
         targets: &HashMap<*const PreASAPNode, Vec<AccuracyTarget>>,
     ) {
-        self.composition_plans.clear();
-        for group in self.groups.values() {
+        self.stage.composition_plans.clear();
+        for group in self.stage.groups.values() {
             for candidate in &group.candidates {
                 let Replacement::ExactComposition(operation) = &candidate.replacement else {
                     continue;
                 };
                 let children: Vec<_> = match operation.placement {
                     OperationPlacement::Read => self
+                        .stage
                         .groups
                         .get(&Rc::as_ptr(&operation.child_target))
                         .into_iter()
@@ -3985,7 +4005,7 @@ impl<Id> CandidatePostASAPDAGs<Id> {
                             continue;
                         }
                     }
-                    self.composition_plans.push(PreparedComposition {
+                    self.stage.composition_plans.push(PreparedComposition {
                         target: Rc::as_ptr(&group.target),
                         operation: operation.clone(),
                         child,
@@ -4015,7 +4035,7 @@ impl<Id: Clone + PartialEq> CandidatePostASAPDAGs<Id> {
         &self,
         expansion_limit: usize,
     ) -> Result<CandidateDagInventory<Id>, RealizationError> {
-        self.enumerate_candidate_roots(&self.roots, expansion_limit)
+        self.enumerate_candidate_roots(&self.stage.roots, expansion_limit)
     }
 
     /// Enumerate one workload root without expanding independent roots' choices.
@@ -4028,6 +4048,7 @@ impl<Id: Clone + PartialEq> CandidatePostASAPDAGs<Id> {
         expansion_limit: usize,
     ) -> Result<CandidateDagInventory<Id>, RealizationError> {
         let roots = self
+            .stage
             .roots
             .iter()
             .filter(|(candidate, _)| candidate == id)
@@ -4057,7 +4078,7 @@ impl<Id: Clone + PartialEq> CandidatePostASAPDAGs<Id> {
         while cursor < reachable.len() {
             let ptr = reachable[cursor];
             cursor += 1;
-            if let Some(group) = self.groups.get(&ptr) {
+            if let Some(group) = self.stage.groups.get(&ptr) {
                 for candidate in &group.candidates {
                     if let Replacement::Rewrite(rewritten) = &candidate.replacement {
                         walk(rewritten, &mut reachable, &mut nodes, &mut counts);
@@ -4066,6 +4087,7 @@ impl<Id: Clone + PartialEq> CandidatePostASAPDAGs<Id> {
             }
         }
         let order = self
+            .stage
             .order
             .iter()
             .copied()
@@ -4076,12 +4098,12 @@ impl<Id: Clone + PartialEq> CandidatePostASAPDAGs<Id> {
         let options: Vec<Vec<CandidateDagChoice<'_>>> = order
             .iter()
             .map(|ptr| {
-                let group = &self.groups[ptr];
+                let group = &self.stage.groups[ptr];
                 let mut choices = vec![(None, None)];
                 for candidate in &group.candidates {
                     match &candidate.replacement {
                         Replacement::ExactComposition(operation) => {
-                            for prepared in &self.composition_plans {
+                            for prepared in &self.stage.composition_plans {
                                 if prepared.target == *ptr
                                     && prepared.operation.placement == operation.placement
                                     && prepared.operation.op == operation.op
@@ -4121,7 +4143,7 @@ impl<Id: Clone + PartialEq> CandidatePostASAPDAGs<Id> {
             for (ptr, choices) in order.iter().zip(&options) {
                 let (chosen, prepared) = &choices[ordinal % choices.len()];
                 ordinal /= choices.len();
-                let group = &self.groups[ptr];
+                let group = &self.stage.groups[ptr];
                 if let Some(node) = prepared {
                     assembled_nodes.insert(*ptr, Rc::clone(node));
                 }
@@ -4294,19 +4316,22 @@ impl CandidateCostOverrides {
 impl<Id> CandidatePostASAPDAGs<Id> {
     /// One candidate set per discovered target sub-DAG, in discovery order.
     pub fn target_subdag_candidates(&self) -> impl Iterator<Item = &TargetSubDAGCandidates> {
-        self.order.iter().map(move |ptr| &self.groups[ptr])
+        self.stage
+            .order
+            .iter()
+            .map(move |ptr| &self.stage.groups[ptr])
     }
 
     /// How many distinct targets were discovered.
     pub fn len(&self) -> usize {
-        self.groups.len()
+        self.stage.groups.len()
     }
 
     /// Whether no targets were discovered at all (an empty workload, or one
     /// with no `PreASAPNode` nodes reachable from any root — never true for a
     /// non-empty `roots`, since every root is itself a target).
     pub fn is_empty(&self) -> bool {
-        self.groups.is_empty()
+        self.stage.groups.is_empty()
     }
 
     /// The candidate set for `target`, if `target`'s own `Rc` is a discovered
@@ -4316,7 +4341,7 @@ impl<Id> CandidatePostASAPDAGs<Id> {
         &self,
         target: &Rc<PreASAPNode>,
     ) -> Option<&TargetSubDAGCandidates> {
-        self.groups.get(&Rc::as_ptr(target))
+        self.stage.groups.get(&Rc::as_ptr(target))
     }
 
     /// The `sorted_by(cost_model)` step: every group, each with its own
@@ -4338,10 +4363,11 @@ impl<Id> CandidatePostASAPDAGs<Id> {
     /// `RankedTargetSubDAGCandidates` whose `costs` aren't monotonically non-decreasing —
     /// `cost_sorted`'s own ordering guarantee is unaffected either way.
     pub fn cost_sorted(&self, cost_model: &dyn CostModel) -> Vec<RankedTargetSubDAGCandidates<'_>> {
-        self.order
+        self.stage
+            .order
             .iter()
             .map(|ptr| {
-                let group = &self.groups[ptr];
+                let group = &self.stage.groups[ptr];
                 let target = TargetSubDAG::with_consumer_count(&group.target, group.consumer_count);
                 let mut candidates = rank_group(group, cost_model);
                 // Availability is candidate-specific and cannot be expressed
@@ -4378,10 +4404,11 @@ impl<Id> CandidatePostASAPDAGs<Id> {
         profiles: &RecurrenceProfileMap,
         horizon: Option<Horizon>,
     ) -> Result<Vec<RankedTargetSubDAGCandidates<'_>>, RecurrenceError> {
-        self.order
+        self.stage
+            .order
             .iter()
             .map(|ptr| {
-                let group = &self.groups[ptr];
+                let group = &self.stage.groups[ptr];
                 let mut candidates = rank_group(group, cost_model);
                 if cse_candidate_pair(group).is_some() {
                     if let Some(decision) = decide_group_with_recurrence(
@@ -4473,7 +4500,7 @@ impl<Id> CandidatePostASAPDAGs<Id> {
     /// site reachable from it.
     ///
     /// `root_recurrence` is positional: `root_recurrence[i]` describes
-    /// `self.roots[i]` — the same order [`search_workload`]/
+    /// `self.stage.roots[i]` — the same order [`search_workload`]/
     /// [`search_workload_with`] were originally called with (post-CSE
     /// dedup preserves both root count and order — see
     /// `asap_types::pre_asap::cse::share_common_subtrees`'s own
@@ -4481,7 +4508,7 @@ impl<Id> CandidatePostASAPDAGs<Id> {
     /// `Hash`/`Clone` bound needed on it at all — issue #287's "keep
     /// caller/query identifiers opaque" requirement) at the cost of the
     /// caller keeping the two slices in step; `root_recurrence.len()` must
-    /// equal `self.roots.len()`.
+    /// equal `self.stage.roots.len()`.
     ///
     /// A shared sub-DAG reachable from more than one root aggregates every
     /// reaching root's contribution — repeating roots' rates are summed and
@@ -4528,15 +4555,15 @@ impl<Id> CandidatePostASAPDAGs<Id> {
     /// rate is non-finite or negative,
     /// [`RecurrenceError::InvalidUpdateRate`] if `update_rate` is non-finite
     /// or negative, or [`RecurrenceError::RootCountMismatch`] if
-    /// `root_recurrence.len() != self.roots.len()`.
+    /// `root_recurrence.len() != self.stage.roots.len()`.
     pub fn recurrence_profiles(
         &self,
         root_recurrence: &[RootRecurrence],
         update_rate: Option<UpdateRate>,
     ) -> Result<RecurrenceProfileMap, crate::recurrence::RecurrenceError> {
-        if root_recurrence.len() != self.roots.len() {
+        if root_recurrence.len() != self.stage.roots.len() {
             return Err(crate::recurrence::RecurrenceError::RootCountMismatch {
-                expected: self.roots.len(),
+                expected: self.stage.roots.len(),
                 got: root_recurrence.len(),
             });
         }
@@ -4560,7 +4587,7 @@ impl<Id> CandidatePostASAPDAGs<Id> {
         // sites" doc.
         let mut reached: HashSet<*const PreASAPNode> = HashSet::new();
 
-        for ((_, root), recurrence) in self.roots.iter().zip(root_recurrence) {
+        for ((_, root), recurrence) in self.stage.roots.iter().zip(root_recurrence) {
             let recurrence = *recurrence;
             let root_ptr = Rc::as_ptr(root);
             // Carry path multiplicity transitively. If a shared ancestor is
@@ -4584,7 +4611,7 @@ impl<Id> CandidatePostASAPDAGs<Id> {
                 // `TargetSubDAGCandidates` (`discover_targets` walks the identical
                 // relational-skeleton scope) — its own `target` is the
                 // canonical `Rc` to read children off.
-                if let Some(group) = self.groups.get(&ptr) {
+                if let Some(group) = self.stage.groups.get(&ptr) {
                     for (child, edge_count) in direct_child_counts(&group.target) {
                         queue.push_back((
                             child,
@@ -4597,8 +4624,8 @@ impl<Id> CandidatePostASAPDAGs<Id> {
             }
         }
 
-        let mut profiles = HashMap::with_capacity(self.order.len());
-        for ptr in &self.order {
+        let mut profiles = HashMap::with_capacity(self.stage.order.len());
+        for ptr in &self.stage.order {
             let rate = rates.get(ptr).copied().unwrap_or(0.0);
             let evaluation_rate = (rate > 0.0).then_some(crate::recurrence::EvaluationRate(rate));
             let one_shot_consumers = one_shot_counts.get(ptr).copied().unwrap_or(0);
@@ -4609,7 +4636,7 @@ impl<Id> CandidatePostASAPDAGs<Id> {
             } else {
                 None
             };
-            let node = Rc::clone(&self.groups[ptr].target);
+            let node = Rc::clone(&self.stage.groups[ptr].target);
             profiles.insert(
                 *ptr,
                 (
@@ -4630,7 +4657,7 @@ impl<Id> CandidatePostASAPDAGs<Id> {
     /// query and data workloads. This is the authoritative bridge from the
     /// public workload model into recurrence-aware candidate costing.
     /// `root_workload_entries[i]` explicitly identifies the normalized
-    /// workload entry for `self.roots[i]`; callers need not arrange roots in
+    /// workload entry for `self.stage.roots[i]`; callers need not arrange roots in
     /// the batch-then-repeating storage order.
     pub fn recurrence_profiles_from_workload(
         &self,
@@ -4651,9 +4678,9 @@ impl<Id> CandidatePostASAPDAGs<Id> {
                 return Err(crate::recurrence::RecurrenceError::InvalidHorizon(horizon));
             }
         }
-        if root_workload_entries.len() != self.roots.len() {
+        if root_workload_entries.len() != self.stage.roots.len() {
             return Err(crate::recurrence::RecurrenceError::RootCountMismatch {
-                expected: self.roots.len(),
+                expected: self.stage.roots.len(),
                 got: root_workload_entries.len(),
             });
         }
@@ -4714,14 +4741,14 @@ impl<Id> CandidatePostASAPDAGs<Id> {
         root_workload_entries: &[usize],
     ) -> Result<HashMap<*const PreASAPNode, Vec<usize>>, RecurrenceError> {
         let entry_count = workload.entries().count();
-        if root_workload_entries.len() != self.roots.len() {
+        if root_workload_entries.len() != self.stage.roots.len() {
             return Err(RecurrenceError::RootCountMismatch {
-                expected: self.roots.len(),
+                expected: self.stage.roots.len(),
                 got: root_workload_entries.len(),
             });
         }
         let mut bindings: HashMap<*const PreASAPNode, HashSet<usize>> = HashMap::new();
-        for ((_, root), &entry_index) in self.roots.iter().zip(root_workload_entries) {
+        for ((_, root), &entry_index) in self.stage.roots.iter().zip(root_workload_entries) {
             if entry_index >= entry_count {
                 return Err(RecurrenceError::InvalidWorkloadEntry {
                     index: entry_index,
@@ -4735,7 +4762,7 @@ impl<Id> CandidatePostASAPDAGs<Id> {
                     continue;
                 }
                 bindings.entry(ptr).or_default().insert(entry_index);
-                if let Some(group) = self.groups.get(&ptr) {
+                if let Some(group) = self.stage.groups.get(&ptr) {
                     queue.extend(
                         direct_child_counts(&group.target)
                             .into_iter()
@@ -5636,7 +5663,7 @@ impl<Id> CandidatePostASAPDAGs<Id> {
         candidate_costs: Option<&CandidateCostOverrides>,
     ) -> Result<GlobalSelection<'_>, RecurrenceError> {
         let graph = reference_graph(self);
-        let topo = topological_order(&self.order, &graph);
+        let topo = topological_order(&self.stage.order, &graph);
 
         let mut effective_uses = graph.external_root_uses.clone();
         let mut chosen_share: HashMap<*const PreASAPNode, ShareDecision> = HashMap::new();
@@ -5644,7 +5671,7 @@ impl<Id> CandidatePostASAPDAGs<Id> {
         let mut context = CompositionContext::default();
 
         for ptr in &topo {
-            let group = &self.groups[ptr];
+            let group = &self.stage.groups[ptr];
 
             let effective = effective_uses.get(ptr).copied().unwrap_or(0);
             effective_uses.insert(*ptr, effective);
@@ -5666,11 +5693,11 @@ impl<Id> CandidatePostASAPDAGs<Id> {
             } else {
                 composition_options(
                     group,
-                    &self.groups,
+                    &self.stage.groups,
                     effective,
                     cost_model,
                     &context,
-                    &self.composition_plans,
+                    &self.stage.composition_plans,
                 )
                 .into_iter()
                 .min_by(|a, b| a.decision.cost_rate.0.total_cmp(&b.decision.cost_rate.0))
@@ -5918,7 +5945,7 @@ impl<Id> CandidatePostASAPDAGs<Id> {
         }
 
         Ok(GlobalSelection {
-            order: self.order.clone(),
+            order: self.stage.order.clone(),
             groups,
             assembled_nodes: RefCell::new(HashMap::new()),
         })
@@ -6113,8 +6140,8 @@ fn reference_graph<Id>(space: &CandidatePostASAPDAGs<Id>) -> ReferenceGraph {
             .entry(Rc::as_ptr(root))
             .or_insert(0) += 1;
     }
-    for ptr in &space.order {
-        let group = &space.groups[ptr];
+    for ptr in &space.stage.order {
+        let group = &space.stage.groups[ptr];
         record_possible_edges(*ptr, &group.target, &mut graph);
         for candidate in &group.candidates {
             if let Replacement::Rewrite(rewrite) = &candidate.replacement {
@@ -6446,7 +6473,11 @@ pub fn search_workload_with_targets<'s, Id>(
         if root_ptrs[..index].contains(&(*ptr, target.clone())) {
             continue;
         }
-        let group = space.groups.get_mut(ptr).expect("every root has a group");
+        let group = space
+            .stage
+            .groups
+            .get_mut(ptr)
+            .expect("every root has a group");
         let root = Rc::clone(&group.target);
         for strategy in strategies {
             let name = strategy.name();
@@ -6469,7 +6500,7 @@ pub fn search_workload_with_targets<'s, Id>(
             .entry(ptr)
             .or_default()
             .push(target.clone());
-        let Some(group) = space.groups.get_mut(&ptr) else {
+        let Some(group) = space.stage.groups.get_mut(&ptr) else {
             continue;
         };
         let (legal, illegal): (Vec<_>, Vec<_>) =
@@ -6683,10 +6714,13 @@ fn search_cse_workload_with<'s, Id>(
     add_effective_count_cse_candidates(&order, &mut groups);
 
     CandidatePostASAPDAGs {
-        roots: cse_roots,
-        groups,
-        order,
-        composition_plans: Vec::new(),
+        stage: LogicalCandidates {
+            roots: cse_roots,
+            groups,
+            order,
+            composition_plans: Vec::new(),
+        },
+        identity: std::marker::PhantomData,
     }
 }
 
@@ -9602,10 +9636,13 @@ mod tests {
             })
             .collect();
         let space = CandidatePostASAPDAGs {
-            roots,
-            groups,
-            order: order.clone(),
-            composition_plans: Vec::new(),
+            stage: LogicalCandidates {
+                roots,
+                groups,
+                order: order.clone(),
+                composition_plans: Vec::new(),
+            },
+            identity: std::marker::PhantomData,
         };
         let graph = reference_graph(&space);
 

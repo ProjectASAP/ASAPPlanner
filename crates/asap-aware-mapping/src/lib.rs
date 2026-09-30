@@ -221,10 +221,9 @@ pub use summary_maintenance_dag_export::{
 };
 pub use summary_maintenance_lifecycle::{
     assemble_selected_dag_with_summary_maintenance_lifecycles,
-    enumerate_summary_maintenance_lifecycles, global_selection_with_summary_maintenance_lifecycles,
-    plan_summary_maintenance_lifecycles, SummaryMaintenanceCapabilities,
-    SummaryMaintenanceDeployment, SummaryMaintenanceLifecycleAlternative,
-    SummaryMaintenanceLifecycleAssemblyError, SummaryMaintenanceLifecycleCandidates,
+    global_selection_with_summary_maintenance_lifecycles, plan_summary_maintenance_lifecycles,
+    SummaryMaintenanceCapabilities, SummaryMaintenanceDeployment,
+    SummaryMaintenanceLifecycleAlternative, SummaryMaintenanceLifecycleAssemblyError,
     SummaryMaintenanceLifecycleCapabilities, SummaryMaintenanceLifecycleChoiceError,
     SummaryMaintenanceLifecycleCostInputs, SummaryMaintenanceLifecyclePlan,
     SummaryMaintenanceLifecyclePlanError, SummaryMaintenanceLifecycleRejection,
@@ -233,3 +232,8 @@ pub use summary_maintenance_lifecycle::{
 pub use topk_reuse::TopKLimitReuseStrategy;
 
 pub mod maintained_population;
+
+mod candidate_timing;
+pub use candidate_timing::{
+    CandidateTimingContext, CandidateTimingError, PostASAPCandidateMetadata, WithTiming,
+};

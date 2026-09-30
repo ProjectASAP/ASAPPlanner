@@ -2,7 +2,7 @@
 use super::*;
 
 /// A typed execution boundary, without storage identity or a live reader.
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct InputContract {
     pub schema: Schema,
     pub properties: PlanProperties,

@@ -761,8 +761,7 @@ fn spatial_topk_exposes_signed_heap_candidate_over_complete_snapshot() {
 fn continuously_maintained_dag(candidate: &Rc<PostASAPNode>) -> PostASAPDAGTransport {
     use asap_aware_mapping::{
         cost_model::{Cost, CostModel},
-        enumerate_summary_maintenance_lifecycles, CostRate, Horizon,
-        SummaryMaintenanceCapabilities, SummaryMaintenanceLifecycleCapabilities,
+        CostRate, Horizon, SummaryMaintenanceCapabilities, SummaryMaintenanceLifecycleCapabilities,
         SummaryMaintenanceLifecycleCostInputs, WorkloadDemand,
     };
     use planner_types::workload::{
@@ -822,17 +821,22 @@ fn continuously_maintained_dag(candidate: &Rc<PostASAPNode>) -> PostASAPDAGTrans
         },
         ..Default::default()
     };
-    let lifecycles = enumerate_summary_maintenance_lifecycles(
+    let lifecycles = asap_aware_mapping::CandidatePostASAPDAGs::from_post_asap_dag(
+        (),
         Rc::clone(candidate),
-        WorkloadDemand::new_with_data(&queries, &data, &[0]),
-        NOW_MS,
-        Some(Horizon(100.)),
-        SummaryMaintenanceLifecycleCapabilities::ALL,
-        &Costed,
+        asap_aware_mapping::CandidateTimingContext {
+            demand: WorkloadDemand::new_with_data(&queries, &data, &[0]),
+            now_ms: NOW_MS,
+            horizon: Some(Horizon(100.)),
+            capabilities: SummaryMaintenanceLifecycleCapabilities::ALL,
+            cost_model: &Costed,
+        },
+        4096,
     )
     .unwrap();
     let choices = lifecycles
-        .deployments()
+        .lifecycle_alternatives(0)
+        .unwrap()
         .iter()
         .map(|deployment| {
             (
@@ -842,7 +846,7 @@ fn continuously_maintained_dag(candidate: &Rc<PostASAPNode>) -> PostASAPDAGTrans
         })
         .collect::<Vec<_>>();
     lifecycles
-        .select(&choices)
+        .select_lifecycles(0, &choices)
         .unwrap()
         .export_timed_dag()
         .unwrap()

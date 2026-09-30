@@ -449,7 +449,6 @@ fn lifecycle_timed_dag(
     query: &str,
     lifecycle: &SummaryMaintenanceLifecycle,
 ) -> (asap_types::post_asap::PostASAPDAGTransport, Vec<u64>) {
-    use asap_aware_mapping::enumerate_summary_maintenance_lifecycles;
     let workload = quantile_workload(query);
     let mut lowered = lower_promql_workload(&workload, 0).unwrap().remove(0);
     if query.contains(" by(") {
@@ -459,28 +458,33 @@ fn lifecycle_timed_dag(
     }
     let root =
         selected_plan_for_lowered(&workload, lowered, &FullyCostedRuntime, Horizon(100.)).root;
-    let candidates = enumerate_summary_maintenance_lifecycles(
+    let candidates = asap_aware_mapping::CandidatePostASAPDAGs::from_post_asap_dag(
+        (),
         root,
-        WorkloadDemand::new_with_data(
-            &workload.query_workload,
-            workload.data_workload.as_ref().unwrap(),
-            &[1],
-        ),
-        NOW_MS,
-        Some(Horizon(100.)),
-        SummaryMaintenanceLifecycleCapabilities::ALL,
-        &FullyCostedRuntime,
+        asap_aware_mapping::CandidateTimingContext {
+            demand: WorkloadDemand::new_with_data(
+                &workload.query_workload,
+                workload.data_workload.as_ref().unwrap(),
+                &[1],
+            ),
+            now_ms: NOW_MS,
+            horizon: Some(Horizon(100.)),
+            capabilities: SummaryMaintenanceLifecycleCapabilities::ALL,
+            cost_model: &FullyCostedRuntime,
+        },
+        4096,
     )
     .unwrap();
     let choices: Vec<_> = candidates
-        .deployments()
+        .lifecycle_alternatives(0)
+        .unwrap()
         .iter()
         .map(|deployment| (deployment.post_asap_node_id, lifecycle.clone()))
         .collect();
     let mut states: Vec<_> = choices.iter().map(|(id, _)| u64::from(id.0)).collect();
     states.sort_unstable();
     let dag = candidates
-        .select(&choices)
+        .select_lifecycles(0, &choices)
         .unwrap()
         .export_timed_dag()
         .unwrap();
@@ -692,10 +696,7 @@ fn lifecycle_timing_cuts_one_compilation() {
 /// rebuilds it from the raw source at query time; both rank alike.
 #[test]
 fn chosen_population_lifecycle_decides_precompute_contents() {
-    use asap_aware_mapping::{
-        enumerate_summary_maintenance_lifecycles,
-        maintained_population::MaintainedPopulationStrategy,
-    };
+    use asap_aware_mapping::maintained_population::MaintainedPopulationStrategy;
     use asap_physical_operators::{
         physical_planner::{
             compile_candidate,
@@ -722,25 +723,29 @@ fn chosen_population_lifecycle_decides_precompute_contents() {
         SummaryMaintenanceLifecycle::ContinuouslyMaintained,
         SummaryMaintenanceLifecycle::Ephemeral,
     ] {
-        let candidates = enumerate_summary_maintenance_lifecycles(
+        let candidates = asap_aware_mapping::CandidatePostASAPDAGs::from_post_asap_dag(
+            (),
             Rc::clone(&root),
-            WorkloadDemand::new_with_data(
-                &workload.query_workload,
-                workload.data_workload.as_ref().unwrap(),
-                &[1],
-            ),
-            NOW_MS,
-            Some(Horizon(100.)),
-            SummaryMaintenanceLifecycleCapabilities::ALL,
-            &FullyCostedRuntime,
+            asap_aware_mapping::CandidateTimingContext {
+                demand: WorkloadDemand::new_with_data(
+                    &workload.query_workload,
+                    workload.data_workload.as_ref().unwrap(),
+                    &[1],
+                ),
+                now_ms: NOW_MS,
+                horizon: Some(Horizon(100.)),
+                capabilities: SummaryMaintenanceLifecycleCapabilities::ALL,
+                cost_model: &FullyCostedRuntime,
+            },
+            4096,
         )
         .unwrap();
-        let [deployment] = candidates.deployments() else {
+        let [deployment] = candidates.lifecycle_alternatives(0).unwrap() else {
             panic!("one population state");
         };
         let id = deployment.post_asap_node_id;
         let dag = candidates
-            .select(&[(id, lifecycle.clone())])
+            .select_lifecycles(0, &[(id, lifecycle.clone())])
             .unwrap()
             .export_timed_dag()
             .unwrap();
@@ -838,7 +843,6 @@ fn chosen_population_lifecycle_decides_precompute_contents() {
 /// state leaves Sum in the query DAG.
 #[test]
 fn grouped_rate_sum_placement_is_a_lifecycle_choice() {
-    use asap_aware_mapping::enumerate_summary_maintenance_lifecycles;
     use asap_physical_operators::physical_planner::{compile_candidate, InputContract};
     use asap_types::post_asap::{
         ExactKind, PostAsapOperatorPayload, SummaryExpr, SummaryFamilyType,
@@ -877,21 +881,26 @@ fn grouped_rate_sum_placement_is_a_lifecycle_choice() {
         SummaryMaintenanceLifecycle::ContinuouslyMaintained,
         SummaryMaintenanceLifecycle::Ephemeral,
     ] {
-        let lifecycles = enumerate_summary_maintenance_lifecycles(
+        let lifecycles = asap_aware_mapping::CandidatePostASAPDAGs::from_post_asap_dag(
+            (),
             Rc::clone(candidate),
-            WorkloadDemand::new_with_data(
-                &workload.query_workload,
-                workload.data_workload.as_ref().unwrap(),
-                &[1],
-            ),
-            NOW_MS,
-            Some(Horizon(100.)),
-            SummaryMaintenanceLifecycleCapabilities::ALL,
-            &FullyCostedRuntime,
+            asap_aware_mapping::CandidateTimingContext {
+                demand: WorkloadDemand::new_with_data(
+                    &workload.query_workload,
+                    workload.data_workload.as_ref().unwrap(),
+                    &[1],
+                ),
+                now_ms: NOW_MS,
+                horizon: Some(Horizon(100.)),
+                capabilities: SummaryMaintenanceLifecycleCapabilities::ALL,
+                cost_model: &FullyCostedRuntime,
+            },
+            4096,
         )
         .unwrap();
         let choices = lifecycles
-            .deployments()
+            .lifecycle_alternatives(0)
+            .unwrap()
             .iter()
             .map(|deployment| {
                 let lifecycle = if is_exact(&deployment.summary, ExactKind::Sum) {
@@ -904,7 +913,7 @@ fn grouped_rate_sum_placement_is_a_lifecycle_choice() {
             .collect::<Vec<_>>();
         assert_eq!(choices.len(), 2, "Rate and Sum states");
         let dag = lifecycles
-            .select(&choices)
+            .select_lifecycles(0, &choices)
             .unwrap()
             .export_timed_dag()
             .unwrap();
@@ -973,7 +982,7 @@ fn typed_selection(query: &str) -> (asap_types::post_asap::PostASAPDAGTransport,
     )
     .unwrap();
     let dag = selected_plan_for_lowered(&workload, lowered, &FullyCostedRuntime, Horizon(100.))
-        .execution_timed_dag()
+        .export_timed_dag()
         .unwrap();
     let ingestion_binary = dag.nodes.iter().any(|node| {
         matches!(node.payload, PostAsapOperatorPayload::Binary { .. })
@@ -1150,4 +1159,149 @@ fn maintained_arithmetic_over_one_selector_executes() {
     // KLL at epsilon 0.01 returns an input value within 0.01 of rank 0.9; of
     // two values only the larger is.
     assert_eq!(values, [10.0]);
+}
+
+/// The named layer collections connect directly: IDs, rejections, lifecycle
+/// metadata and shared logical identity survive through physical compilation.
+#[test]
+fn named_candidate_collections_preserve_timing_and_compile_errors() {
+    use asap_aware_mapping::{CandidatePostASAPDAGs, CandidateTimingContext};
+    use asap_physical_operators::physical_planner::compile_physical_dag_candidates;
+    let workload = quantile_workload("sum by(job)(rate(m[1m]))");
+    let lowered = lower_promql_workload(&workload, 0).unwrap().remove(0);
+    let lowered =
+        asap_physical_operators::physical_planner::promql_rows::with_series_identity(&lowered)
+            .unwrap();
+    let logical = asap_aware_mapping::search_workload(vec![(17usize, Rc::new(lowered))]);
+    let context = || CandidateTimingContext {
+        demand: WorkloadDemand::new_with_data(
+            &workload.query_workload,
+            workload.data_workload.as_ref().unwrap(),
+            &[1],
+        ),
+        now_ms: NOW_MS,
+        horizon: Some(Horizon(100.)),
+        capabilities: SummaryMaintenanceLifecycleCapabilities::ALL,
+        cost_model: &FullyCostedRuntime,
+    };
+    assert!(logical
+        .with_timing_for_root(&17, context(), 4096, 0)
+        .is_err());
+    assert!(logical
+        .with_timing_for_root(&18, context(), 4096, 4096)
+        .is_err());
+    let timed = logical
+        .with_timing_for_root(&17, context(), 4096, 65536)
+        .unwrap();
+    assert!(!timed.is_empty());
+    let mut indices = std::collections::BTreeMap::new();
+    let mut valid = 0;
+    let mut rejected = 0;
+    for (metadata, assignment) in timed.iter() {
+        assert_eq!(metadata.id, 17);
+        match assignment {
+            Ok(assignment) => {
+                valid += 1;
+                let plan = metadata.lifecycle.as_ref().unwrap();
+                assert!(Rc::ptr_eq(
+                    &plan.root,
+                    assignment
+                        .index()
+                        .node_ids
+                        .summary_node(assignment.index().root_id)
+                        .unwrap()
+                ));
+                if let Some(previous) =
+                    indices.insert(metadata.logical_candidate, assignment.index().clone())
+                {
+                    assert!(Rc::ptr_eq(&previous, assignment.index()));
+                }
+            }
+            Err(_) => rejected += 1,
+        }
+    }
+    assert!(valid > 1);
+    assert!(rejected > 0);
+    assert_eq!(valid + rejected, timed.len());
+    let physical = compile_physical_dag_candidates(&timed, |_, assignment| {
+        Ok((
+            raw_inputs(&assignment.to_transport().unwrap()),
+            vec![u64::from(assignment.index().root_id.0)],
+        ))
+    });
+    assert_eq!(physical.len(), timed.len());
+    assert_eq!(physical.rejected_assemblies(), timed.rejected_assemblies());
+    let mut compiled = 0;
+    for (i, ((before, timing), (after, dag))) in timed.iter().zip(physical.iter()).enumerate() {
+        assert_eq!(
+            (
+                before.id,
+                before.logical_candidate,
+                before.assignment_candidate
+            ),
+            (
+                after.id,
+                after.logical_candidate,
+                after.assignment_candidate
+            )
+        );
+        assert_eq!(before.choices, after.choices);
+        if timing.is_err() {
+            assert!(dag.is_err());
+        }
+        if dag.is_ok() {
+            compiled += 1;
+            assert!(after.lifecycle.is_some());
+            physical.materialize(i).unwrap().validate().unwrap();
+        }
+    }
+    assert!(compiled > 1);
+    let failed = compile_physical_dag_candidates(&timed, |_, _| {
+        Err(asap_physical_operators::Error::Invalid(
+            "missing deployment input evidence".into(),
+        ))
+    });
+    assert_eq!(failed.len(), timed.len());
+    assert!(failed
+        .iter()
+        .all(|(metadata, result)| metadata.id == 17 && result.is_err()));
+    assert!(physical.materialize(physical.len()).is_err());
+
+    // The single-DAG entry point is the same collection, not a public lifecycle helper.
+    let first = timed
+        .iter()
+        .find_map(|(metadata, timing)| {
+            timing.ok().and_then(|_| {
+                metadata
+                    .lifecycle
+                    .filter(|plan| !plan.deployments.is_empty())
+                    .map(|plan| plan.root)
+            })
+        })
+        .unwrap();
+    let one =
+        CandidatePostASAPDAGs::from_post_asap_dag(17usize, first.clone(), context(), 4096).unwrap();
+    assert_eq!(one.logical_len(), 1);
+    assert!(!one.lifecycle_alternatives(0).unwrap().is_empty());
+    let mut invalid = context();
+    invalid.horizon = Some(Horizon(-1.));
+    let rejected =
+        CandidatePostASAPDAGs::from_post_asap_dag(17usize, first, invalid, 4096).unwrap();
+    assert_eq!(rejected.len(), 1);
+    let physical = compile_physical_dag_candidates(&rejected, |_, _| {
+        panic!("invalid lifecycle context must not reach compilation")
+    });
+    assert_eq!(physical.len(), 1);
+    let (metadata, error) = physical.iter().next().unwrap();
+    assert_eq!(metadata.id, 17);
+    assert!(error.is_err());
+    let mut counts = std::collections::BTreeMap::<usize, usize>::new();
+    for (metadata, _) in timed.iter() {
+        *counts.entry(metadata.logical_candidate).or_default() += 1;
+    }
+    let largest = *counts.values().max().unwrap();
+    assert!(largest < timed.len());
+    assert!(logical
+        .with_timing_for_root(&17, context(), 4096, largest)
+        .is_err());
 }

@@ -38,9 +38,9 @@ pub mod promql_values;
 
 mod candidates;
 pub use candidates::{
-    compile_candidate, compile_candidates, compile_timed_candidates, cut_candidate,
+    compile_candidate, compile_candidates, compile_physical_dag_candidates, cut_candidate,
     enumerate_frontiers, frontier_from_timing, select_candidate, CandidateCost,
-    CandidatePhysicalDAGs, CandidateSelection, PhysicalCandidate, PhysicalDAGCandidate,
+    CandidatePhysicalDAGs, CandidateSelection, PhysicalCandidate,
 };
 
 mod compiled;

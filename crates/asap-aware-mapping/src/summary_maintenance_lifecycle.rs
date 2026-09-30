@@ -402,7 +402,7 @@ pub enum SummaryMaintenanceLifecycleSelectionError {
 /// deployment's explicit choice ([`Self::select`]) both finish from this value,
 /// so they produce the same [`SummaryMaintenanceLifecyclePlan`] shape.
 #[derive(Clone)]
-pub struct SummaryMaintenanceLifecycleCandidates<'a> {
+pub(crate) struct SummaryMaintenanceLifecycleCandidates<'a> {
     /// Unselected plan: deployments carry alternatives but no guarantee or
     /// window framework.
     plan: SummaryMaintenanceLifecyclePlan,
@@ -456,6 +456,7 @@ impl SummaryMaintenanceLifecycleCandidates<'_> {
 
     /// Guarantee that binding `lifecycle` would attach under this workload's
     /// data arrival, so a caller can price an alternative before choosing it.
+    #[cfg(test)]
     pub fn guarantee(
         &self,
         lifecycle: &SummaryMaintenanceLifecycle,
@@ -518,6 +519,7 @@ impl SummaryMaintenanceLifecycleCandidates<'_> {
     /// Enumerate assignments without choosing a winner. Unknown costs remain
     /// unknown; rejected combinations retain an error alongside their choices.
     /// Expansion is lazy and refuses an insufficient budget before yielding.
+    #[cfg(test)]
     pub fn assignments(
         &self,
         limit: usize,
@@ -525,6 +527,14 @@ impl SummaryMaintenanceLifecycleCandidates<'_> {
         impl Iterator<Item = LifecycleAssignmentCandidate> + '_,
         SummaryMaintenanceLifecycleChoiceError,
     > {
+        let count = self.assignment_count(limit)?;
+        Ok((0..count).map(move |ordinal| self.assignment_at(ordinal)))
+    }
+
+    pub(crate) fn assignment_count(
+        &self,
+        limit: usize,
+    ) -> Result<usize, SummaryMaintenanceLifecycleChoiceError> {
         let count = self.plan.deployments.iter().try_fold(1usize, |n, d| {
             n.checked_mul(d.alternatives.len())
                 .filter(|n| *n <= limit)
@@ -537,24 +547,25 @@ impl SummaryMaintenanceLifecycleCandidates<'_> {
                 limit,
             ));
         }
-        Ok((0..count).map(move |mut ordinal| {
-            let choices = self
-                .plan
-                .deployments
-                .iter()
-                .map(|deployment| {
-                    let alternative =
-                        &deployment.alternatives[ordinal % deployment.alternatives.len()];
-                    ordinal /= deployment.alternatives.len();
-                    (
-                        deployment.post_asap_node_id,
-                        alternative.summary_maintenance_lifecycle.clone(),
-                    )
-                })
-                .collect::<Vec<_>>();
-            let plan = self.clone().bind_assignment(&choices, false);
-            LifecycleAssignmentCandidate { choices, plan }
-        }))
+        Ok(count)
+    }
+
+    pub(crate) fn assignment_at(&self, mut ordinal: usize) -> LifecycleAssignmentCandidate {
+        let choices = self
+            .plan
+            .deployments
+            .iter()
+            .map(|deployment| {
+                let alternative = &deployment.alternatives[ordinal % deployment.alternatives.len()];
+                ordinal /= deployment.alternatives.len();
+                (
+                    deployment.post_asap_node_id,
+                    alternative.summary_maintenance_lifecycle.clone(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let plan = self.clone().bind_assignment(&choices, false);
+        LifecycleAssignmentCandidate { choices, plan }
     }
 
     fn bind_assignment(
@@ -706,7 +717,7 @@ pub fn plan_summary_maintenance_lifecycles(
 /// unique summary state without choosing one. A deployment that prices the
 /// alternatives itself binds its choice with
 /// [`SummaryMaintenanceLifecycleCandidates::select`].
-pub fn enumerate_summary_maintenance_lifecycles<'a>(
+pub(crate) fn enumerate_summary_maintenance_lifecycles<'a>(
     root: Rc<PostASAPNode>,
     demand: WorkloadDemand<'_>,
     now_ms: u64,
