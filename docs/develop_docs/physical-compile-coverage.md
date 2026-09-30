@@ -205,8 +205,6 @@ In order of backend usage:
    - Other scalar functions as operands.
    - Subquery operands other than one per-series function; implicit
      subquery resolution, which is a deployment default.
-   - `@ start()` and `@ end()`, which need the range query's bounds in the
-     run scope.
    - Other functions, such as `deriv`, `predict_linear`,
      `stddev_over_time`, `absent`, and math functions.
    After these shapes are covered, the backend can delete rows 28 and 30.
@@ -237,3 +235,10 @@ expressions, capture expansion, non-match preservation, empty-label removal,
 and duplicate-label-set rejection. Multi-quantile branches use the same label
 rewrite for their constant quantile labels. These operators perform computation
 only; the backend still supplies raw selectors and stored inputs.
+
+`@ start()` and `@ end()` remain dynamic anchors in the compiled program,
+including selector offsets and subquery grids. The deployment supplies the
+outer query bounds with `RunContext::with_query_range(start_ms, end_ms)`;
+for an instant query both bounds equal its evaluation time. Executing an
+anchored program without those bounds fails before reading inputs. Query
+output timestamps still use the current evaluation instant.

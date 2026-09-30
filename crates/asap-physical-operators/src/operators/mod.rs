@@ -78,6 +78,10 @@ enum Kind {
         offset_ms: i64,
         at_ms: Option<i64>,
         steps: Option<SubquerySteps>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        range_at: Option<planner_types::pre_asap::AtModifier>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        steps_range_at: Option<planner_types::pre_asap::AtModifier>,
     },
     SeriesLabels {
         kind: planner_types::pre_asap::VectorMatchKind,
