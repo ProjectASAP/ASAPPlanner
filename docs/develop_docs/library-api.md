@@ -611,7 +611,7 @@ that prepared or retained shared state is supported.
 | `plan_summary_maintenance_lifecycles` | Assembled logical DAG root, `WorkloadDemand`, `now_ms`, optional horizon, runtime capabilities, cost model | `Result<SummaryMaintenanceLifecyclePlan, …>` for that fixed root; does not revisit all semantic candidates |
 | `global_selection_with_summary_maintenance_lifecycles` | `PlanSpace`, workload/root-entry associations, time, horizon, capabilities, cost model | Lifecycle-aware compatible selection/error, using eligible cost evidence |
 | `assemble_selected_dag_with_summary_maintenance_lifecycles` | Selection, target root and lifecycle context | Optional lifecycle plan/error; attaches state deployment decisions |
-| `enumerate_summary_maintenance_lifecycles` | Same inputs as `plan_summary_maintenance_lifecycles` | `SummaryMaintenanceLifecycleCandidates`: per unique state, every alternative with its cost or rejection; nothing selected. `guarantee(&lifecycle)` gives the mode/schedule that alternative would carry |
+| `enumerate_summary_maintenance_lifecycles` | Same inputs as `plan_summary_maintenance_lifecycles` | `SummaryMaintenanceLifecycleCandidates`: per unique retained state, every alternative with its cost or rejection; nothing selected. `guarantee(&lifecycle)` gives the mode/schedule that alternative would carry |
 | `SummaryMaintenanceLifecycleCandidates::select(choices)` | One `(PostAsapNodeId, SummaryMaintenanceLifecycle)` per state, copied from `deployments()` | The same `SummaryMaintenanceLifecyclePlan` Planner selection would produce for that combination, or `SummaryMaintenanceLifecycleChoiceError` when a choice is unknown, missing, duplicated, rejected, schedule-incompatible, or not completely estimable |
 
 Inspect `deployments`, their selected lifecycle/alternatives/rejections,
@@ -630,6 +630,16 @@ its choice with `select`. A choice is accepted only if Planner could select it:
 an alternative with `MissingCostEvidence` is accepted only when the cost model's
 complete-candidate hook covers lifecycle costs. Window frameworks and totals come
 from that hook, as in Planner selection.
+
+Retained states are `SummaryAgg` nodes and `MaintainPopulation` nodes that do
+not feed a `SummaryAgg`; a population that does feed one is part of that
+state's input. The lifecycle cost hooks (`summary_maintenance_capabilities`,
+`summary_maintenance_lifecycle_cost_inputs_for_horizon`) and the complete-candidate
+hook therefore also receive `MaintainPopulation` nodes. A model that does not
+recognize one should return unknown costs, which keep its alternatives
+unselected. `SummaryMaintenanceLifecyclePlan::execution_timed_dag` times a
+population as it times a summary state: retained at ingestion, `Ephemeral` at
+query time from the raw source.
 
 ## Optional whole-plan selection and DAG assembly
 
