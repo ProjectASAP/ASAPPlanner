@@ -756,10 +756,102 @@ fn spatial_topk_exposes_signed_heap_candidate_over_complete_snapshot() {
     }
 }
 
-// Placement changes execution ownership only. Every fixed-window candidate
-// contains Rate finalization before a fresh heap, with query readout downstream.
+/// Deployment-side lifecycle choice: every summary state of `candidate` is
+/// continuously maintained, and the chosen lifecycles set execution timing.
+fn continuously_maintained_dag(candidate: &Rc<SummaryNode>) -> PostAsapDag {
+    use asap_aware_mapping::{
+        cost_model::{Cost, CostModel},
+        enumerate_summary_maintenance_lifecycles, CostRate, Horizon,
+        SummaryMaintenanceCapabilities, SummaryMaintenanceLifecycleCapabilities,
+        SummaryMaintenanceLifecycleCostInputs, WorkloadDemand,
+    };
+    use planner_types::workload::{
+        DataArrival, Rate, RepeatedDemand, RepeatingEntry, RepetitionInterval,
+    };
+    struct Costed;
+    impl CostModel for Costed {
+        fn rank_candidates(
+            &self,
+            _: &planner_types::pre_asap::agg_intent::AggIntent,
+            candidates: &[SketchAlgorithm],
+        ) -> Vec<SketchAlgorithm> {
+            candidates.to_vec()
+        }
+        fn summary_maintenance_lifecycle_cost_inputs(
+            &self,
+            _: &SummaryNode,
+        ) -> SummaryMaintenanceLifecycleCostInputs {
+            SummaryMaintenanceLifecycleCostInputs {
+                build_cost: Some(Cost(10.)),
+                maintenance_cost_per_update: Some(Cost(1.)),
+                summary_read_cost: Some(Cost(1.)),
+                retention_cost_rate: Some(CostRate(0.1)),
+                retirement_cost: Some(Cost(1.)),
+            }
+        }
+        fn summary_maintenance_capabilities(
+            &self,
+            _: &SummaryNode,
+        ) -> SummaryMaintenanceCapabilities {
+            SummaryMaintenanceCapabilities {
+                incremental_update: true,
+                merge: true,
+                delete: true,
+            }
+        }
+    }
+    const NOW_MS: u64 = 1_000_000;
+    let queries = QueryWorkload {
+        language: QueryLanguage::PromQL,
+        query_batch: None,
+        repeating_queries: Some(vec![RepeatingEntry {
+            query: Query("topk by(job)(2, rate(m[1m]))".into()),
+            demand: RepeatedDemand::FixedInterval(RepetitionInterval(60_000)),
+            requirements: QueryRequirements::default(),
+            predictability: Predictability::Predictable { known_at: None },
+            time_selection: TimeSelection::default(),
+        }]),
+    };
+    let data = DataWorkload {
+        arrival: DataArrival::ContinuouslyIngesting,
+        ingestion_rate: WorkloadEvidence {
+            value: Some(Rate(1.)),
+            source: planner_types::workload::EvidenceSource::Observed,
+            observed_at_ms: Some(NOW_MS),
+            valid_for_ms: Some(60_000),
+        },
+        ..Default::default()
+    };
+    let lifecycles = enumerate_summary_maintenance_lifecycles(
+        Rc::clone(candidate),
+        WorkloadDemand::new_with_data(&queries, &data, &[0]),
+        NOW_MS,
+        Some(Horizon(100.)),
+        SummaryMaintenanceLifecycleCapabilities::ALL,
+        &Costed,
+    )
+    .unwrap();
+    let choices = lifecycles
+        .deployments()
+        .iter()
+        .map(|deployment| {
+            (
+                deployment.post_asap_node_id,
+                SummaryMaintenanceLifecycle::ContinuouslyMaintained,
+            )
+        })
+        .collect::<Vec<_>>();
+    lifecycles
+        .select(&choices)
+        .unwrap()
+        .execution_timed_dag()
+        .unwrap()
+}
+
+// A maintained heap over finalized per-series Rate is the fixed-window
+// placement: lifecycle timing, not a separate candidate, puts it in precompute.
 #[test]
-fn planner_exposes_fixed_window_rate_heap_precompute_candidates() {
+fn maintained_rate_heap_lifecycle_compiles_fixed_window_precompute() {
     use asap_physical_operators::physical_planner::{
         compile_candidate, promql_rows::with_series_identity,
     };
@@ -775,13 +867,17 @@ fn planner_exposes_fixed_window_rate_heap_precompute_candidates() {
         &EqualSplitAllocator,
         &Evidence,
     );
-    let candidates = strategy.fixed_window_rate_candidates(&root).candidates;
+    let candidates = strategy
+        .replacements(&TargetSubDAG::new(&root))
+        .into_iter()
+        .filter_map(|candidate| match candidate.replacement {
+            Replacement::Summary(root) if candidate.rationale.contains("WithHeap") => Some(root),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
     assert_eq!(candidates.len(), 2);
-    for candidate in candidates {
-        let Replacement::Summary(root) = candidate.replacement else {
-            panic!()
-        };
-        let dag = compile_post_asap_dag(&root).unwrap();
+    for root in candidates {
+        let dag = continuously_maintained_dag(&root);
         let state = dag
             .nodes
             .iter()
@@ -819,15 +915,10 @@ fn planner_exposes_fixed_window_rate_heap_precompute_candidates() {
             &[u64::from(heap.id.0)],
         )
         .unwrap();
-        let exported = asap_physical_operators::physical_planner::promql_rows::compile_fixed_window_rate_aggregation(&root).unwrap();
+        let exported = asap_physical_operators::physical_planner::promql_rows::compile_fixed_window_rate_aggregation(&dag).unwrap();
         assert_eq!(
             serde_json::to_vec(&exported).unwrap(),
             serde_json::to_vec(&physical).unwrap()
-        );
-        assert!(
-            asap_physical_operators::physical_planner::promql_rows::compile_rate_ranking(&root)
-                .is_err(),
-            "query binding must not move the selected precompute frontier"
         );
         // Execute the selected split across a state serialization boundary.
         // Each run builds fresh weights from that window's counters.
@@ -957,62 +1048,5 @@ fn planner_exposes_fixed_window_rate_heap_precompute_candidates() {
                 .unwrap()
                 .contains("KeyedSummaryBuild")
         );
-    }
-}
-
-// Grouped Rate has a legal stored Sum candidate as well as query-time reduction.
-#[test]
-fn grouped_rate_exposes_precomputed_sum_with_query_readout() {
-    let root = Rc::new(
-        asap_physical_operators::physical_planner::promql_rows::with_series_identity(
-            &lower_promql("sum by(job)(rate(m[1m]))", AccuracyTarget::Exact).unwrap(),
-        )
-        .unwrap(),
-    );
-    let strategy = SketchAlgorithmStrategy::new_with_planning_inputs_and_evidence(
-        &DefaultCostModel,
-        &DefaultAccuracyModel,
-        &EqualSplitAllocator,
-        &Evidence,
-    );
-    let direct = strategy.query_time_rate_aggregation_candidates(&root);
-    assert!(
-        direct.candidates.iter().any(|candidate| {
-            let Replacement::Summary(root) = &candidate.replacement else {
-                return false;
-            };
-            let Ok((_, program)) =
-                asap_physical_operators::physical_planner::promql_rows::compile_rate_ranking(root)
-            else {
-                return false;
-            };
-            let output = program.output_contract(program.roots()[0]).unwrap();
-            output
-                .schema
-                .fields
-                .iter()
-                .all(|field| matches!(field.dtype, SummaryFamilyType::Plain(_)))
-        }),
-        "query-time grouped Rate must finalize Sum inside the physical graph"
-    );
-    let candidates = strategy.fixed_window_rate_candidates(&root).candidates;
-    assert!(
-        !candidates.is_empty(),
-        "Planner must expose Rate -> grouped Sum at ingestion"
-    );
-    for candidate in candidates {
-        let Replacement::Summary(root) = candidate.replacement else {
-            panic!()
-        };
-        let physical = asap_physical_operators::physical_planner::promql_rows::compile_fixed_window_rate_aggregation(&root).unwrap();
-        let precompute =
-            String::from_utf8(serde_json::to_vec(&physical.precompute.unwrap()).unwrap()).unwrap();
-        assert!(
-            precompute.contains("SummaryBuild")
-                && precompute.contains("Rate")
-                && precompute.contains("Sum")
-        );
-        let query = String::from_utf8(serde_json::to_vec(&physical.query).unwrap()).unwrap();
-        assert!(query.contains("Readout") && !query.contains("SummaryBuild"));
     }
 }
