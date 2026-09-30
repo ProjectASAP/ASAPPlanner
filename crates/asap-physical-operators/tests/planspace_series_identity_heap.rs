@@ -1,6 +1,7 @@
-//! Physical row-representation alternatives are part of Planner's search space:
-//! `enumerate_candidate_dags_for_root` lists them without a caller-side
-//! series-identity pass, cost ranking, or workload Cartesian expansion.
+//! Logical heap alternatives that need the PromQL series identity are part of
+//! Planner's search space: `enumerate_candidate_dags_for_root` lists
+//! current-series TopK heaps without a caller-side series-identity pass, cost
+//! ranking, or workload Cartesian expansion. Placement variants are not listed.
 use asap_aware_mapping::{
     accuracy::{AccuracyEvidenceProvider, DefaultAccuracyModel, PropagationStats},
     cost_model::DefaultCostModel,
@@ -8,8 +9,7 @@ use asap_aware_mapping::{
     search_workload_with_targets, Proposals, ReplacementStrategy, ReplacementSubDAG, TargetSubDAG,
 };
 use asap_physical_operators::physical_planner::promql_rows::{
-    compile_current_series_readout, compile_fixed_window_rate_aggregation, compile_rate_ranking,
-    SERIES_IDENTITY_COLUMN,
+    compile_current_series_readout, SERIES_IDENTITY_COLUMN,
 };
 use planner_types::{
     post_asap::*,
@@ -139,7 +139,7 @@ fn carries_identity(dag: &Dag) -> bool {
     })
 }
 
-/// Shared acceptance checks; returns the added physical alternatives.
+/// Shared acceptance checks; returns the added identity-carrying alternatives.
 fn added_alternatives(query: &str, accuracy: AccuracyTarget) -> Vec<Rc<SummaryNode>> {
     let (full, logical) = inventories(query, accuracy);
     for (index, dag) in full.iter().enumerate() {
@@ -157,59 +157,35 @@ fn added_alternatives(query: &str, accuracy: AccuracyTarget) -> Vec<Rc<SummaryNo
     added.into_iter().map(|mut dag| dag.remove(0).1).collect()
 }
 
-// Grouped counter rates list both ingestion-time and query-time grouped Sum.
-#[test]
-fn grouped_rate_lists_fixed_window_and_query_time_aggregation() {
-    let added = added_alternatives("sum by(job)(rate(m[1m]))", AccuracyTarget::Exact);
-    assert!(added
-        .iter()
-        .any(|root| compile_fixed_window_rate_aggregation(root).is_ok()));
-    assert!(added.iter().any(|root| compile_rate_ranking(root).is_ok()));
-}
+const CURRENT_SERIES_TOPK: &str = "topk by(job)(1, m)";
 
-// Ranking over counter rates lists heap ranking and fixed-window heaps.
+// Instant-vector TopK lists finalized current-series heap readouts.
 #[test]
-fn rate_topk_lists_rate_ranking_and_fixed_window_heaps() {
-    let added = added_alternatives("topk by(job)(2, rate(m[1m]))", AccuracyTarget::Epsilon(0.1));
-    assert!(added.iter().any(|root| compile_rate_ranking(root).is_ok()));
-    assert!(added
-        .iter()
-        .any(|root| compile_fixed_window_rate_aggregation(root).is_ok()));
-}
-
-// Instant-vector TopK lists the current-series heap readout.
-#[test]
-fn current_series_topk_lists_current_series_readout() {
-    let added = added_alternatives("topk by(job)(1, m)", AccuracyTarget::Epsilon(0.1));
-    assert!(added
-        .iter()
-        .any(|root| compile_current_series_readout(root).is_ok()));
-}
-
-// Every added alternative is a finalized query result the physical layer binds.
-#[test]
-fn added_alternatives_are_finalized_and_physically_bindable() {
-    for (query, accuracy) in [
-        ("sum by(job)(rate(m[1m]))", AccuracyTarget::Exact),
-        ("topk by(job)(2, rate(m[1m]))", AccuracyTarget::Epsilon(0.1)),
-        ("topk by(job)(1, m)", AccuracyTarget::Epsilon(0.1)),
-        ("rate(m[1m])", AccuracyTarget::Exact),
-    ] {
-        let added = added_alternatives(query, accuracy);
-        assert!(!added.is_empty(), "{query}");
-        for root in added {
-            assert!(!matches!(root.expr, SummaryExpr::SummaryAgg { .. }));
-            assert!(
-                compile_current_series_readout(&root).is_ok()
-                    || compile_rate_ranking(&root).is_ok()
-                    || compile_fixed_window_rate_aggregation(&root).is_ok(),
-                "{query}: unbindable alternative {root:?}"
-            );
-        }
+fn current_series_topk_lists_heap_readouts() {
+    let added = added_alternatives(CURRENT_SERIES_TOPK, AccuracyTarget::Epsilon(0.1));
+    assert!(!added.is_empty());
+    for root in added {
+        assert!(!matches!(root.expr, SummaryExpr::SummaryAgg { .. }));
+        assert!(
+            compile_current_series_readout(&root).is_ok(),
+            "unbindable alternative {root:?}"
+        );
     }
 }
 
-// Queries without a series-identity physical realization are unchanged.
+// Rate queries gain no fixed-window or query-time placement variants.
+#[test]
+fn rate_placement_variants_are_not_listed() {
+    for (query, accuracy) in [
+        ("sum by(job)(rate(m[1m]))", AccuracyTarget::Exact),
+        ("topk by(job)(2, rate(m[1m]))", AccuracyTarget::Epsilon(0.1)),
+        ("rate(m[1m])", AccuracyTarget::Exact),
+    ] {
+        assert!(added_alternatives(query, accuracy).is_empty(), "{query}");
+    }
+}
+
+// Queries without a current-series heap realization are unchanged.
 #[test]
 fn unrelated_queries_keep_their_inventory() {
     for (query, accuracy) in [
@@ -223,11 +199,12 @@ fn unrelated_queries_keep_their_inventory() {
         assert!(added_alternatives(query, accuracy).is_empty(), "{query}");
     }
 }
-// Default cost-based selection keeps the logical plan; deployment prices alternatives.
+
+// Default cost-based selection keeps the logical plan; deployment prices heaps.
 #[test]
-fn global_selection_never_commits_a_physical_alternative() {
-    let accuracy = AccuracyTarget::Exact;
-    let root = lower("sum by(job)(rate(m[1m]))", &accuracy);
+fn global_selection_never_commits_a_series_identity_heap() {
+    let accuracy = AccuracyTarget::Epsilon(0.1);
+    let root = lower(CURRENT_SERIES_TOPK, &accuracy);
     let strategies = default_strategies_with_evidence(&DefaultCostModel, &Evidence);
     let space = search_workload_with_targets(
         vec![(0, root, Some(accuracy))],
@@ -245,14 +222,14 @@ fn global_selection_never_commits_a_physical_alternative() {
 // A query repeated in the workload is proposed once, not once per copy.
 #[test]
 fn repeated_roots_do_not_duplicate_alternatives() {
-    let accuracy = AccuracyTarget::Exact;
+    let accuracy = AccuracyTarget::Epsilon(0.1);
     let strategies = default_strategies_with_evidence(&DefaultCostModel, &Evidence);
     let count = |copies: usize| {
         let roots = (0..copies)
             .map(|id| {
                 (
                     id,
-                    lower("sum by(job)(rate(m[1m]))", &accuracy),
+                    lower(CURRENT_SERIES_TOPK, &accuracy),
                     Some(accuracy.clone()),
                 )
             })
@@ -268,5 +245,6 @@ fn repeated_roots_do_not_duplicate_alternatives() {
             })
             .count()
     };
+    assert!(count(1) > 0);
     assert_eq!(count(2), count(1));
 }
