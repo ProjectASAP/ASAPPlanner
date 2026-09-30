@@ -380,7 +380,7 @@ Cartesian-product expansion of complete DAGs and preserves shared nodes.
 ### Output layers
 
 Planning proceeds through these layers, from what to compute to how to run it.
-The [Planner and deployment layering](../proposals/planner-backend-layering.md)
+The [Planner and deployment layering](../proposals/planner-layering.md)
 proposal describes the full contract, including deployment costs and mixed
 placement.
 

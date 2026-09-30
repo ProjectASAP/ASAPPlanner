@@ -6,7 +6,7 @@ Audience: Planner developers and API integrators.
 ## Objective
 
 Align the Rust API with the DAG names in
-[Planner and deployment layering](planner-backend-layering.md#dags-and-what-each-encodes),
+[Planner and deployment layering](planner-layering.md#dags-and-what-each-encodes),
 without duplicating graph implementations or eagerly copying every candidate.
 
 The public pipeline is:

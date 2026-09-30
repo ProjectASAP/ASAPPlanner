@@ -10,5 +10,5 @@ extensions. A design document is not a promise of downstream runtime support.
 - [ASAP-aware mapping proposals](asap-aware-mapping/README.md)
 - [Operator sharing](operator-sharing.md)
 - [Decoupling operators from scalar expressions](decoupling_op_and_expr.md)
-- [Planner and deployment layering](planner-backend-layering.md)
+- [Planner and deployment layering](planner-layering.md)
 - [DAG API alignment](dag-api-alignment.md)
