@@ -398,6 +398,20 @@ fn unbound(intent: &AggIntent) -> Result<AggIntent<ColumnRef>, Error> {
         AggIntent::Avg { col: None } => AggIntent::Avg { col: None },
         AggIntent::Min { col: None } => AggIntent::Min { col: None },
         AggIntent::Max { col: None } => AggIntent::Max { col: None },
+        AggIntent::IRate => AggIntent::IRate,
+        AggIntent::IDelta => AggIntent::IDelta,
+        AggIntent::Changes => AggIntent::Changes,
+        AggIntent::Resets => AggIntent::Resets,
+        AggIntent::LastOverTime => AggIntent::LastOverTime,
+        AggIntent::Quantile {
+            col: None,
+            q,
+            accuracy,
+        } => AggIntent::Quantile {
+            col: None,
+            q: *q,
+            accuracy: accuracy.clone(),
+        },
         _ => return Err(invalid("unsupported PromQL range function")),
     })
 }

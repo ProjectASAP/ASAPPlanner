@@ -66,6 +66,12 @@ impl Operator {
                     | AggIntent::Avg { col: None }
                     | AggIntent::Min { col: None }
                     | AggIntent::Max { col: None }
+                    | AggIntent::IRate
+                    | AggIntent::IDelta
+                    | AggIntent::Changes
+                    | AggIntent::Resets
+                    | AggIntent::LastOverTime
+                    | AggIntent::Quantile { col: None, .. }
             )
         ) {
             return Err(invalid("unsupported PromQL range function"));
