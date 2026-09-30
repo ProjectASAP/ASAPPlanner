@@ -40,6 +40,27 @@ fn lower(query: &str) -> QueryExpr {
         .remove(0)
 }
 
+/// The first exact summary candidate, as Planner selection would hand it over.
+fn exact_dag(query: &str) -> PostAsapDag {
+    use asap_aware_mapping::{Replacement, ReplacementStrategy, TargetSubDAG};
+    let expression = lower(query);
+    let root = Rc::new(promql_rows::with_series_identity(&expression).unwrap_or(expression));
+    asap_aware_mapping::SketchAlgorithmStrategy::new(&asap_aware_mapping::DefaultCostModel)
+        .replacements(&TargetSubDAG::new(&root))
+        .into_iter()
+        .find_map(|candidate| match candidate.replacement {
+            Replacement::Summary(node) => {
+                let dag = compile_post_asap_dag(&node).ok()?;
+                dag.nodes
+                    .iter()
+                    .all(|n| !matches!(&n.payload, PostAsapOperatorPayload::SummaryAgg { family, .. } if !matches!(family, SummaryFamilyType::ExactAggregate(..))))
+                    .then_some(dag)
+            }
+            _ => None,
+        })
+        .unwrap()
+}
+
 fn population_dag(query: &str) -> PostAsapDag {
     let root = Rc::new(promql_rows::with_series_identity(&lower(query)).unwrap());
     let selected = asap_aware_mapping::maintained_population::MaintainedPopulationStrategy::new(
@@ -197,4 +218,67 @@ fn population_aggregates_match_current_series_reference() {
         let dag = population_dag(query);
         assert_eq!(run(&dag, SAMPLES, 60_000).unwrap(), expected, "{query}");
     }
+}
+
+// Scalar operands on either side apply to every grouped value, including negation.
+#[test]
+fn scalar_literal_arithmetic_applies_to_grouped_values() {
+    // sum_over_time over 5m per job: api = 4 + 1 + 7 + 2 = 14, db = 5.
+    for (query, expected) in [
+        (
+            "sum by (job) (sum_over_time(m[5m])) * 2",
+            reference(&[("api", 28.), ("db", 10.)]),
+        ),
+        (
+            "100 - sum by (job) (sum_over_time(m[5m]))",
+            reference(&[("api", 86.), ("db", 95.)]),
+        ),
+        (
+            "-sum by (job) (sum_over_time(m[5m]))",
+            reference(&[("api", -14.), ("db", -5.)]),
+        ),
+    ] {
+        assert_eq!(
+            run(&exact_dag(query), SAMPLES, 60_000).unwrap(),
+            expected,
+            "{query}"
+        );
+    }
+}
+
+// Grouped vectors match one-to-one on labels; unmatched groups are dropped and
+// unchecked division by zero yields +Inf as in PromQL.
+#[test]
+fn grouped_vector_arithmetic_matches_labels() {
+    let samples: &[Sample] = &[
+        ("a", "api", "x", 10_000, 6.),
+        ("a", "api", "y", 20_000, 3.),
+        ("a", "db", "x", 10_000, 1.),
+        ("a", "web", "x", 10_000, 1.),
+        ("b", "api", "x", 10_000, 3.),
+        ("b", "db", "x", 10_000, 0.),
+        ("b", "cache", "x", 10_000, 1.),
+    ];
+    let dag =
+        exact_dag("sum by (job) (sum_over_time(a[5m])) / sum by (job) (sum_over_time(b[5m]))");
+    assert_eq!(
+        run(&dag, samples, 60_000).unwrap(),
+        reference(&[("api", 3.), ("db", f64::INFINITY)])
+    );
+}
+
+// Comparisons need filter/bool semantics that `Binary` does not carry, so
+// they fail at compile time instead of emitting 0/1 values.
+#[test]
+fn row_comparison_fails_closed() {
+    let mut dag = exact_dag("sum by (job) (sum_over_time(m[5m])) * 2");
+    for node in &mut dag.nodes {
+        if let PostAsapOperatorPayload::Binary { operator } = &mut node.payload {
+            operator.kind = planner_types::pre_asap::BinaryOpKind::Compare(
+                planner_types::pre_asap::CompareOpKind::Gt,
+            );
+        }
+    }
+    let error = run(&dag, SAMPLES, 60_000).unwrap_err();
+    assert!(error.contains("comparison"), "{error}");
 }
