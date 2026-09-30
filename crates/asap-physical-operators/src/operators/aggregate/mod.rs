@@ -211,7 +211,7 @@ async fn reduce(
 
 // Matches Prometheus `quantile`: NaN for no values, ±Inf outside [0, 1],
 // and NaN samples ordered first.
-fn quantile(q: f64, mut values: Vec<f64>) -> f64 {
+pub(super) fn quantile(q: f64, mut values: Vec<f64>) -> f64 {
     if values.is_empty() {
         return f64::NAN;
     }

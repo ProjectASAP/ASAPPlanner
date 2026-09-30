@@ -383,3 +383,45 @@ fn raw_series_contract_is_explicit() {
     // Implicit subquery resolution belongs to the deployment's evaluation interval.
     assert!(compile_query("max_over_time(m[5m:])").is_err());
 }
+
+// irate/idelta use the last two samples (irate corrects a reset to the last
+// value); changes/resets count value changes and decreases; quantile_over_time
+// interpolates; all skip stale markers.
+#[test]
+fn instant_and_counting_range_functions() {
+    // COUNTER in (0s, 300s]: 10, 20, 5, 15.
+    assert!((one("irate(m[5m])", COUNTER, 300) - 10. / 60.).abs() < 1e-12);
+    assert_eq!(one("idelta(m[5m])", COUNTER, 300), 10.);
+    // At 200s the last pair 20 -> 5 is a reset: irate uses 5 as the increase.
+    assert!((one("irate(m[5m])", COUNTER, 200) - 5. / 60.).abs() < 1e-12);
+    assert_eq!(one("idelta(m[5m])", COUNTER, 200), -15.);
+    assert!(values("irate(m[1m])", COUNTER, 300).is_empty());
+    assert_eq!(one("changes(m[5m])", COUNTER, 300), 3.);
+    assert_eq!(one("resets(m[5m])", COUNTER, 300), 1.);
+    assert_eq!(one("changes(m[2m])", COUNTER, 300), 0.);
+    // NaN to NaN is not a change; any other transition involving NaN is.
+    let flat = &[
+        ("a", 10, 1.),
+        ("a", 20, 1.),
+        ("a", 30, 2.),
+        ("a", 40, f64::NAN),
+        ("a", 50, f64::NAN),
+        ("a", 55, 1.),
+    ];
+    assert_eq!(one("changes(m[1m])", flat, 60), 3.);
+    let stale = f64::from_bits(0x7ff0_0000_0000_0002);
+    let ended = &[("a", 240, 15.), ("a", 250, stale)];
+    assert_eq!(one("last_over_time(m[5m])", ended, 300), 15.);
+    assert!(values("m", ended, 300).is_empty());
+    // Sorted 5, 10, 15, 20: rank 1.5 and 0.75; outside [0, 1] is +-Inf.
+    assert_eq!(one("quantile_over_time(0.5, m[5m])", COUNTER, 300), 12.5);
+    assert_eq!(one("quantile_over_time(0.25, m[5m])", COUNTER, 300), 8.75);
+    assert_eq!(
+        one("quantile_over_time(2, m[5m])", COUNTER, 300),
+        f64::INFINITY
+    );
+    assert_eq!(
+        one("quantile_over_time(-1, m[5m])", COUNTER, 300),
+        f64::NEG_INFINITY
+    );
+}
