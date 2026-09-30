@@ -138,30 +138,26 @@ compensation term would change the stored state layout. Its checked
 
 Totals after this change: 20 Supported, 4 Partial, 5 Missing, 2 Backend.
 
+## Covered by classic histogram_quantile
+
+| Row | Change |
+|---|---|
+| 10 | A classic-bucket `histogram_quantile(q, v)` lowers to `Aggregate{Reduce(without([le])), [HistogramQuantile{q, le}]}`, where `le` is the argument's `le` column. The frontend seeds `le` into the selector's schema. The Fallback compiles it to one operator that groups rows by every label except `le` and applies Prometheus `bucketQuantile`. The output labels are the input labels without `le` and `__name__`; result label sets that become equal are an error, as in Prometheus. Covers `histogram_quantile(q, rate(x_bucket[5m]))`, `histogram_quantile(q, sum by (le, job) (…))`, and bare bucket selectors. Now Supported. |
+
+An argument whose output provably lacks `le`, such as
+`sum by (job) (rate(x_bucket[5m]))`, is rejected at lowering. Prometheus
+returns an empty vector for it. Candidate search keeps the classic form as one
+exact `KeepPreAsap` subtree for every accuracy target; it has no sketch
+candidate. `histogram_quantiles` lowers each branch the same way, but the
+Fallback compiler does not yet accept its `Concat` of relabeled branches.
+
+Totals after this change: 21 Supported, 4 Partial, 4 Missing, 2 Backend.
+
 ## Remaining
 
 In order of backend usage:
 
-1. Rows 1, 10, and 12, the remaining `Fallback` shapes:
-   - `histogram_quantile` (row 10). The compiler cannot recover the grouping
-     from today's IR, which is `Aggregate{Reduce(by ()), [HistogramQuantile{q}]}`.
-     It computes one quantile over all buckets and drops the output labels. The IR
-     must carry:
-     - The bucket label: the `le` column of the child's schema, named by the
-       intent, for example `HistogramQuantile{q, le: C}`. The frontend must
-       add `le` to the selector's schema even when no matcher names it.
-     - The grouping: `Reduce(without([le]))`, so that each histogram is
-       one set of series that differ only in `le`. An explicit
-       `sum by (x, le)` inside the argument still yields `without (le)` over
-       those rows.
-     - The output labels: every input label except `le` and `__name__`. The
-       `without` output schema already carries them, and the series identity
-       with `le` removed. `series_labels(Ignoring, [le])` computes the latter.
-     The operator then applies Prometheus `bucketQuantile`. It parses `le`
-     as a float, skips unparsable values, and requires a `+Inf` bucket, else
-     it returns NaN. It forces cumulative counts to be monotonic and returns
-     NaN for fewer than two buckets. For q < 0 it returns -Inf; for q > 1,
-     +Inf.
+1. Rows 1 and 12, the remaining `Fallback` shapes:
    - Comparisons and set operators (`and`, `or`, `unless`); `group_left` and
      `group_right`; arithmetic with a non-literal scalar, such as
      `scalar(x)` or `time()`.
