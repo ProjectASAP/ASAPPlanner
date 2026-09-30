@@ -687,7 +687,6 @@ fn lifecycle_timing_cuts_one_compilation() {
     }
 }
 
-
 /// A maintained current-series population is placed by its lifecycle choice:
 /// ContinuouslyMaintained stores the population in precompute, Ephemeral
 /// rebuilds it from the raw source at query time; both rank alike.
@@ -762,7 +761,8 @@ fn chosen_population_lifecycle_decides_precompute_contents() {
             .find(|node| matches!(node.payload, PostAsapOperatorPayload::Fallback { .. }))
             .unwrap();
         let (raw_id, schema) = (u64::from(raw.id.0), Arc::new(raw.output_schema.clone()));
-        let frontier = ingestion_frontier(&dag);
+        let frontier =
+            asap_physical_operators::physical_planner::frontier_from_timing(&dag).unwrap();
         let candidate = compile_candidate(
             &dag,
             BTreeMap::from([(raw_id, InputContract::bounded(schema.clone()))]),
