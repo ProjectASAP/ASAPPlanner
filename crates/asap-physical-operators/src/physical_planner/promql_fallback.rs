@@ -222,6 +222,7 @@ impl Lowering {
                 };
                 let step = self.value(vector)?;
                 let input = self.schema(&step);
+                let step = self.add(Operator::series_without_name(input.clone())?, vec![step]);
                 let value = named_column(&input, &ColumnRef::SampleValue)?;
                 let literal = Expression::Literal {
                     value: crate::values::Value::Float64(literal),

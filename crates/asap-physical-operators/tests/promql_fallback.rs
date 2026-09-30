@@ -128,7 +128,8 @@ fn evaluate(
             .flat_map(|(_, samples)| samples.iter())
             .map(|(spec, seconds, value)| {
                 let mut labels = labels(spec);
-                labels.insert("__name__".into(), name.clone());
+                // A sample may supply its own `__name__`, as a series of another metric.
+                labels.entry("__name__".into()).or_insert(name.clone());
                 promql_rows::series_row(&schema, &labels, seconds * 1000, *value).unwrap()
             })
             .collect();
@@ -604,6 +605,32 @@ fn without_grouping_drops_labels_and_the_name() {
         vec![(String::new(), 4.)]
     );
     assert!(labeled("sum without (inst) (a)", &[], 60).is_empty());
+    // Series equal without the name share a group rather than colliding.
+    let named: &[Sample] = &[
+        ("job=x,inst=1", 50, 1.),
+        ("__name__=b,job=x,inst=1", 50, 2.),
+    ];
+    assert_eq!(
+        labeled("sum without (inst) (a)", &[("a", named)], 60),
+        vec![("job=x".into(), 3.)]
+    );
+}
+
+// Arithmetic with a literal drops the metric name; series that then share a
+// label set are an error, as in Prometheus.
+#[test]
+fn literal_arithmetic_drops_the_name_and_rejects_equal_label_sets() {
+    let a: &[Sample] = &[
+        ("job=x,inst=1", 50, 1.),
+        ("__name__=b,job=x,inst=2", 50, 2.),
+    ];
+    assert_eq!(
+        labeled("a * 2", &[("a", a)], 60),
+        vec![("inst=1,job=x".into(), 2.), ("inst=2,job=x".into(), 4.)]
+    );
+    let equal: &[Sample] = &[("job=x", 50, 1.), ("__name__=b,job=x", 50, 2.)];
+    let error = evaluate("a * 2", &[("a", equal)], 60).unwrap_err();
+    assert!(error.contains("same labelset"), "{error}");
 }
 
 // An empty label value is an absent label, and an empty side yields an empty
