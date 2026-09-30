@@ -14,9 +14,9 @@ never re-derives the computation, and keeps no operators of its own.
 ## Layers
 
 ```text
-  Query workload (PromQL / SQL / MetricsQL, query repeating pattern, etc.)
-  + data workload
-  + deployment inputs: cost model, accuracy requirements, capabilities
+  Query workload (PromQL / SQL / MetricsQL, query repeating pattern, accuracy requirements, query latency requirement)
+  + data workload (data arrival pattern: streaming data vs data at rest, data distribution, cardinality) 
+  + deployment inputs: empirical cost estimation, empirical accuracy estimation, capabilities
                        │
 ┌───────────────────────┴───────── ASAPPlanner ────────────────────┐
 │ 0. Frontends                                                     │
