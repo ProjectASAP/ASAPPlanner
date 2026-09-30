@@ -27,15 +27,25 @@ use futures::{executor::block_on, StreamExt};
 
 type Series = BTreeMap<String, String>;
 
-fn series(service: &str, instance: &str) -> Series {
+/// A series label set; `None` omits the label. An empty value is present
+/// in the input but is not part of the series identity.
+fn series(service: Option<&str>, instance: &str) -> Series {
     [
-        ("__name__", "m"),
+        ("__name__", Some("m")),
         ("service", service),
-        ("instance", instance),
+        ("instance", Some(instance)),
     ]
     .into_iter()
-    .map(|(k, v)| (k.to_owned(), v.to_owned()))
+    .filter_map(|(k, v)| Some((k.to_owned(), v?.to_owned())))
     .collect()
+}
+
+fn canonical(labels: &Series) -> Series {
+    labels
+        .iter()
+        .filter(|(_, v)| !v.is_empty())
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect()
 }
 
 /// Every Planner candidate for `query`: the searched selection plus each
@@ -86,10 +96,17 @@ fn raw_summaries(dag: &PostAsapDag) -> Vec<(u64, u64)> {
 
 fn samples() -> Vec<(Series, i64, f64)> {
     let mut rows = Vec::new();
-    for (index, (service, instance)) in [("a", "1"), ("a", "2"), ("b", "1")].iter().enumerate() {
+    let series_set = [
+        (Some("a"), "1"),
+        (Some("a"), "2"),
+        (Some("b"), "1"),
+        (None, "3"),
+        (Some("b"), ""),
+    ];
+    for (index, (service, instance)) in series_set.iter().enumerate() {
         for step in 1..=5i64 {
             let value = (index as f64 + 1.0) * step as f64 + (step % 2) as f64;
-            rows.push((series(service, instance), step * 1000, value));
+            rows.push((series(*service, instance), step * 1000, value));
         }
     }
     rows
@@ -160,13 +177,21 @@ fn execute(
     })
 }
 
+/// PromQL grouping of a canonical label set: `by` keeps the named labels,
+/// `without` drops them and `__name__`.
 fn population(reduction: &Reduction, dag_labels: &[String], labels: &Series) -> Series {
+    let labels = canonical(labels);
     match reduction {
-        Reduction::PerEntity => labels.clone(),
-        Reduction::Reduce(_) => labels
-            .iter()
-            .filter(|(k, v)| dag_labels.contains(k) && !v.is_empty())
-            .map(|(k, v)| (k.clone(), v.clone()))
+        Reduction::PerEntity => labels,
+        Reduction::Reduce(keys) => labels
+            .into_iter()
+            .filter(|(k, _)| {
+                if keys.is_without() {
+                    k != "__name__" && !dag_labels.contains(k)
+                } else {
+                    dag_labels.contains(k)
+                }
+            })
             .collect(),
     }
 }
@@ -176,13 +201,27 @@ fn population(reduction: &Reduction, dag_labels: &[String], labels: &Series) -> 
 fn item(expr: &SummaryInputExpr, labels: &Series, value: f64, out: &mut Vec<Value>) {
     match expr {
         SummaryInputExpr::Column(ColumnRef::SampleValue) => out.push(Value::Float64(value)),
+        SummaryInputExpr::Column(ColumnRef::Named(name)) if name == "value" => {
+            out.push(Value::Float64(value))
+        }
         SummaryInputExpr::Column(ColumnRef::Named(name)) => out.push(Value::Utf8(
-            labels.get(name).cloned().unwrap_or_default().into(),
+            canonical(labels)
+                .get(name)
+                .cloned()
+                .unwrap_or_default()
+                .into(),
         )),
-        SummaryInputExpr::EntityIdentity(EntityIdentity::PromqlLabelSet { excluding })
-            if excluding.is_empty() =>
-        {
-            out.push(Value::Utf8(serde_json::to_string(labels).unwrap().into()))
+        SummaryInputExpr::EntityIdentity(EntityIdentity::PromqlLabelSet { excluding }) => {
+            let mut identity = canonical(labels);
+            for column in excluding {
+                let ColumnRef::Named(name) = column else {
+                    panic!("unsupported fixture exclusion {column:?}")
+                };
+                identity.remove(name);
+            }
+            out.push(Value::Utf8(
+                serde_json::to_string(&identity).unwrap().into(),
+            ))
         }
         SummaryInputExpr::Tuple(items) => items.iter().for_each(|i| item(i, labels, value, out)),
         other => panic!("unsupported fixture item {other:?}"),
@@ -357,24 +396,41 @@ fn raw_sample_summaries_compile_and_match_their_kernels() {
             "topk(2, sum by (service) (count_over_time(m[5m])))",
             &sketch,
         ),
+        ("topk(2, sum_over_time(m[5m]))", &sketch),
+        ("topk by (service) (2, sum_over_time(m[5m]))", &sketch),
     ];
     let rows = samples();
     let mut families = BTreeSet::new();
     let mut unsupported = BTreeSet::new();
+    let mut checked = BTreeMap::new();
     for (query, accuracy) in queries {
         for candidate in candidates(query, accuracy.clone()) {
             let dag = compile_post_asap_dag(&candidate).unwrap();
             for (source, root) in raw_summaries(&dag) {
                 match check(query, &dag, source, root, &rows) {
-                    Ok(family) => families.insert(family),
-                    Err(family) => unsupported.insert(family),
-                };
+                    Ok(family) => {
+                        families.insert(family);
+                        *checked.entry(query).or_insert(0) += 1;
+                    }
+                    Err(family) => {
+                        unsupported.insert(family);
+                    }
+                }
             }
         }
     }
-    println!("raw summary families: {families:?}; without native state: {unsupported:?}");
+    println!("checked {checked:?}; families {families:?}; without native state {unsupported:?}");
     for family in [
-        "Sum", "Count", "Min", "Max", "Rate", "Increase", "Kll", "DDSketch", "Hll",
+        "Sum",
+        "Count",
+        "Min",
+        "Max",
+        "Rate",
+        "Increase",
+        "Kll",
+        "DDSketch",
+        "Hll",
+        "CountSketchWithHeap",
     ] {
         assert!(
             families.contains(family),
@@ -384,7 +440,7 @@ fn raw_sample_summaries_compile_and_match_their_kernels() {
 }
 
 /// Replace the raw summary of `sum by (service) (sum_over_time(m[5m]))` with
-/// another update, keeping its raw input and grouping.
+/// another update, keeping its raw input and reduction.
 fn grouped_raw_summary(family: SummaryFamilyType, input: SummaryUpdate) -> (PostAsapDag, u64, u64) {
     let candidate = candidates(
         "sum by (service) (sum_over_time(m[5m]))",
@@ -485,11 +541,60 @@ fn raw_sample_heaps_resolve_items_from_labels() {
             weight_domain: WeightDomain::NonNegative {
                 proof: NonNegativeWeightProof::ResetAwareCounterDerivative,
             },
-            ..by_instance
+            ..by_instance.clone()
         },
     );
     assert!(
         precompute::compile(&derivative.0, &[derivative.1], &[derivative.2]).is_err(),
         "raw samples are cumulative counters, not their derivative"
+    );
+    // A scan's time column is not a label; it cannot silently read as empty.
+    let time_item = grouped_raw_summary(
+        heap(
+            SketchAlgorithm::CountSketchWithHeap,
+            SketchParams::CountSketchWithHeap {
+                width: 64,
+                depth: 3,
+                heap_size: 8,
+            },
+        ),
+        SummaryUpdate {
+            item: Some(SummaryInputExpr::Column(ColumnRef::Named("ts".into()))),
+            ..by_instance
+        },
+    );
+    assert!(precompute::compile(&time_item.0, &[time_item.1], &[time_item.2]).is_err());
+}
+
+// `without` grouping over raw samples drops the listed labels and `__name__`.
+#[test]
+fn raw_sample_without_grouping_drops_labels_and_name() {
+    use asap_types::pre_asap::query_expr::GroupKeys;
+    let family =
+        SummaryFamilyType::ExactAggregate(ExactKind::Sum, asap_types::post_asap::ExactParams::Sum);
+    let (mut dag, source, root) =
+        grouped_raw_summary(family, SummaryUpdate::column(ColumnRef::SampleValue));
+    let service = dag
+        .nodes
+        .iter()
+        .find(|n| u64::from(n.id.0) == source)
+        .unwrap()
+        .output_schema
+        .fields
+        .iter()
+        .position(|f| f.name == "service")
+        .unwrap();
+    let node = dag
+        .nodes
+        .iter_mut()
+        .find(|n| u64::from(n.id.0) == root)
+        .unwrap();
+    let PostAsapOperatorPayload::SummaryAgg { reduction, .. } = &mut node.payload else {
+        unreachable!()
+    };
+    *reduction = Reduction::Reduce(GroupKeys::without(vec![service]));
+    assert_eq!(
+        check("without", &dag, source, root, &samples()),
+        Ok("Sum".into())
     );
 }
