@@ -31,9 +31,9 @@ fields and [frontend dependencies](#frontend-specific-dependencies).
 | `PlanSpace<Id>` | The legal candidate Post-ASAP DAGs for the workload, represented compactly as canonical roots, one candidate set per target sub-DAG, and cross-target composition information | The candidate space: nothing is selected yet |
 | `PlanOutput` | One selected Post-ASAP DAG root (`Rc<SummaryNode>`) per workload entry, optionally with summary-maintenance lifecycle decisions | One optimization pass's selection, returned by `e2e_plan` and `optimize` |
 
-`PlanOutput` is derived from the candidate space, not a second output beside it.
-[Output layers](#output-layers) explains how the two relate to each other and
-to the exported `PostAsapDag`.
+`PlanOutput` is selected from the candidate space, not a second output beside
+it. [Output layers](#output-layers) places both, and `PostAsapDag`, in the
+planning layers.
 
 [Ranking](#ranked-view), [selection and
 DAG assembly](#selection-and-dag-assembly), and
@@ -362,26 +362,33 @@ Cartesian-product expansion of complete DAGs and preserves shared nodes.
 
 ### Output layers
 
-The types that the Planner returns belong to three layers. Each layer is
-derived from the one above it:
+Planning proceeds through these layers, from what to compute to how to run it:
 
-| Layer | Type | Produced by | Contains |
-|---|---|---|---|
-| Candidate space | `PlanSpace<Id>` | `search_workload_with_targets` | Every legal candidate for every target |
-| Selected logical plan | `PlanOutput`, or the `Rc<SummaryNode>` roots from the [selection workflows](#workflows) | An `OptimizationPass` (`MajorPass` by default), or the caller's own selection and assembly calls | One selected candidate per target, assembled into one DAG root per query |
-| Exported logical DAG | `PostAsapDag` | `compile_post_asap_dag(root)`, per selected root | The same selected DAG, with stable node IDs and typed edges |
+| Layer | Form | Decides |
+|---|---|---|
+| 1. Logical candidate space | `PlanSpace<Id>` | *What* to compute: summary families and rewrites. Not placement (precompute versus query time). |
+| 2. Logical selection | Library/evaluation path: `PlanOutput` from `e2e_plan`/`optimize`, one `Rc<SummaryNode>` per query. Deployment path: candidates enumerated from `PlanSpace`, e.g. `enumerate_candidate_dags_for_root` | Which logical candidate to use. `PlanOutput` is one pass's selection under the caller's cost model; candidates it dropped are not in it. |
+| 3. Summary maintenance lifecycle | Lifecycle choices per unique summary state | Each node's execution timing, window framework, and retention. |
+| 4. Physical compilation | Timed logical DAG exported as `PostAsapDag`, via `compile_post_asap_dag` | Split by timing into precompute and query physical DAGs. |
+| 5. Deployment | Deployment-owned | Prices lifecycle assignments with its own costs, including summary store cost; selects, binds, and executes. |
 
-All three layers are logical. `SummaryNode` trees and `PostAsapDag` are two
-forms of the same selected DAG, as described in
-[Post-ASAP IR](../concepts/post-asap-ir.md#tree-and-exported-dag-forms).
-`PlanOutput` carries the tree form. A caller that needs the exported form
-compiles each root. Physical compilation starts from a selected logical DAG and
-produces a separate physical DAG, which is not a Planner output described here.
+A deployment that prices candidates itself, such as ASAPQuery-backend, must
+enumerate them from `PlanSpace`, not read `PlanOutput`; otherwise candidates
+such as those added in #472 never reach its pricing.
 
-Candidates that selection did not keep are only available from `PlanSpace`.
-A consumer that must choose among candidates using facts the pass does not
-have, such as backend support or measured cost, must read `PlanSpace` rather
-than `PlanOutput`.
+`PostAsapDag` is the form a logical DAG takes when it enters physical
+compilation, not a separate Planner output. `PlanOutput` stays in
+`SummaryNode` form because timing is decided after it. Both forms are described
+in [Post-ASAP IR](../concepts/post-asap-ir.md#tree-and-exported-dag-forms).
+
+Placement does not belong to `PlanSpace`. The grouped `Rate`→`Sum`
+"maintenance versus query placement" candidate pair from #472 is a placement
+choice and is planned to move to the lifecycle layer.
+
+Cross-query sharing is expressed by common-subexpression elimination in the
+logical layer and by explicit node identity in a multi-root `PostAsapDag` at
+physical compilation. The per-query `Vec` in `PlanOutput` is not the sharing
+contract.
 
 ## Workflows
 
