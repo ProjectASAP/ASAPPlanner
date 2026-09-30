@@ -1023,6 +1023,26 @@ mod tests {
                 ..
             }
         ));
+
+        // An assignment's view overlays its timing on the shared records; its
+        // transport equals assigning the same phases to the exported document.
+        let index = Rc::new(compiled);
+        let phases: BTreeMap<_, _> = index
+            .node_views()
+            .iter()
+            .map(|n| (n.id, ExecutionTiming::QueryTime))
+            .collect();
+        let assignment = PostASAPDAGAssignment::new(index.clone(), phases.clone()).unwrap();
+        let summary = &index.node_views()[1];
+        assert_eq!(index.view().timing(summary), ExecutionTiming::IngestionTime);
+        assert_eq!(
+            assignment.view().timing(summary),
+            ExecutionTiming::QueryTime
+        );
+        assert_eq!(
+            assignment.to_transport(),
+            index.to_transport().with_execution_phases(&phases).unwrap()
+        );
     }
 
     #[test]

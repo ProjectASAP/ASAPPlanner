@@ -699,6 +699,79 @@ mod tests {
         assert!(rejected.iter().all(|(_, result)| result.is_err()));
     }
 
+    /// Each collection candidate equals an independent compilation of its own
+    /// assignment after a transport round trip; an ingestion-time Binary lowers
+    /// differently, so the collection must compile from the assignment's timing.
+    #[test]
+    fn candidates_match_independent_compilation_of_their_assignments() {
+        use planner_types::post_asap::{
+            index_post_asap_dag, ExecutionTiming, PostASAPDAGAssignment, PostASAPDAGDocument,
+        };
+        let lhs = logical_root("m");
+        let rhs = logical_root("n");
+        let root = std::rc::Rc::new(planner_types::post_asap::PostASAPNode {
+            schema: lhs.schema.clone(),
+            guarantee: lhs.guarantee.clone(),
+            expr: planner_types::post_asap::SummaryExpr::BinaryOp {
+                lhs,
+                rhs,
+                timing: ExecutionTiming::QueryTime,
+                operator: planner_types::post_asap::BinaryOperator {
+                    kind: planner_types::pre_asap::BinaryOpKind::Arithmetic(
+                        planner_types::pre_asap::ArithmeticOpKind::Add,
+                    ),
+                    vector_match: None,
+                    checked_relative_division: false,
+                    checked_finite_division: false,
+                },
+            },
+        });
+        let index = std::rc::Rc::new(index_post_asap_dag(&root).unwrap());
+        let inputs: BTreeMap<_, _> = index
+            .node_views()
+            .iter()
+            .filter(|n| matches!(n.payload, Payload::Fallback { .. }))
+            .map(|n| {
+                (
+                    u64::from(n.id.0),
+                    InputContract::bounded(Arc::new(n.output_schema.clone())),
+                )
+            })
+            .collect();
+        let roots = [u64::from(index.root_id.0)];
+        let assignments =
+            [ExecutionTiming::QueryTime, ExecutionTiming::IngestionTime].map(|phase| {
+                PostASAPDAGAssignment::new(
+                    index.clone(),
+                    index.node_views().iter().map(|n| (n.id, phase)).collect(),
+                )
+                .unwrap()
+            });
+        let candidates = compile_test_candidates(
+            assignments.iter().cloned().enumerate(),
+            inputs.clone(),
+            &roots,
+        );
+        for (i, assignment) in assignments.iter().enumerate() {
+            let bytes =
+                serde_json::to_vec(&PostASAPDAGDocument::new(assignment.to_transport())).unwrap();
+            let document: PostASAPDAGDocument = serde_json::from_slice(&bytes).unwrap();
+            document.validate().unwrap();
+            let frontier = frontier_from_timing(document.dag.as_view()).unwrap();
+            let expected =
+                compile_candidate(&document.dag, inputs.clone(), &roots, &frontier).unwrap();
+            assert_eq!(
+                serde_json::to_vec(&candidates.materialize(i).unwrap()).unwrap(),
+                serde_json::to_vec(&expected).unwrap(),
+                "assignment {i}"
+            );
+        }
+        let lowered = assignments.each_ref().map(|a| {
+            serde_json::to_vec(&compile(a.view(), inputs.clone(), &roots).unwrap()).unwrap()
+        });
+        assert_ne!(lowered[0], lowered[1]);
+    }
+
     /// Identical logical timing is insufficient for reuse when the deployment
     /// supplies different input contracts or requests different output roots.
     #[test]

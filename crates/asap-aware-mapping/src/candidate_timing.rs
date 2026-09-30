@@ -44,7 +44,7 @@ pub enum CandidateTimingError {
     UnknownLogicalCandidate(usize),
 }
 
-struct PreparedTiming<'a> {
+pub(crate) struct PreparedTiming<'a> {
     index: Rc<PostASAPDAGIndex>,
     lifecycles: SummaryMaintenanceLifecycleCandidates<'a>,
     count: usize,
@@ -158,7 +158,7 @@ fn prepare<'a, Id>(
 
 /// A logical candidate yields its assignments, or one diagnostic entry when it
 /// has none: a state with no lifecycle alternative must not vanish silently.
-fn prepared_timing(
+pub(crate) fn prepared_timing(
     index: Rc<PostASAPDAGIndex>,
     lifecycles: SummaryMaintenanceLifecycleCandidates<'_>,
     limit: usize,

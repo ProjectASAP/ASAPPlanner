@@ -2487,6 +2487,36 @@ mod tests {
         assert!(legal > 0);
     }
 
+    /// A state with no lifecycle alternative is a timed-candidate diagnostic,
+    /// not an empty product that makes its logical candidate vanish.
+    #[test]
+    fn state_without_alternatives_is_a_timed_candidate_diagnostic() {
+        let root = summary();
+        let workload = workload(vec![], vec![repeating()], continuous(1_000, 60_000));
+        let mut candidates = enumerate_summary_maintenance_lifecycles(
+            root.clone(),
+            WorkloadDemand::new_without_data(&workload, &[0]),
+            1_000,
+            Some(Horizon(10.0)),
+            SummaryMaintenanceLifecycleCapabilities::ALL,
+            &crate::cost_model::DefaultCostModel,
+        )
+        .unwrap();
+        let id = candidates.plan.deployments[0].post_asap_node_id;
+        candidates.plan.deployments[0].alternatives.clear();
+        assert_eq!(
+            candidates.assignment_count(4096),
+            Err(SummaryMaintenanceLifecycleChoiceError::NoAlternatives(id))
+        );
+        let index = Rc::new(asap_types::post_asap::index_post_asap_dag(&root).unwrap());
+        assert!(matches!(
+            crate::candidate_timing::prepared_timing(index, candidates, 4096),
+            Err(crate::CandidateTimingError::Choice(
+                SummaryMaintenanceLifecycleChoiceError::NoAlternatives(missing)
+            )) if missing == id
+        ));
+    }
+
     #[test]
     fn unknown_costs_do_not_make_a_long_lived_lifecycle_win() {
         let plan = plan_summary_maintenance_lifecycles(
