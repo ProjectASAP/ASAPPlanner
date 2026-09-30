@@ -1,6 +1,7 @@
 # DAG API alignment
 
-Status: implemented and workspace-tested on the #480 branch.
+Status: naming and graph-sharing changes implemented and workspace-tested on
+the #480 branch; the unified timed logical candidate collection API remains open.
 Audience: Planner developers and API integrators.
 
 ## Objective
@@ -121,3 +122,13 @@ consumers must adopt the breaking names before repinning to this branch.
 Validation: `cargo test --workspace` passed all 1507 tests across 91 test groups.
 Formatting, strict all-target clippy, Markdown links and whitespace are checked
 before publishing this implementation.
+
+## Remaining API alignment
+
+The lifecycle enumerator is still public as
+`SummaryMaintenanceLifecycleCandidates`, and callers compose its assignments
+with logical candidates themselves. This does not yet implement a unified
+`CandidatePostASAPDAGs` with timing collection boundary. Encapsulate the existing
+enumerator behind that boundary, preserving graph sharing, lifecycle metadata,
+rejections and lazy generation; do not rename it as though it already contains
+the logical candidate space or duplicate its enumeration algorithm.

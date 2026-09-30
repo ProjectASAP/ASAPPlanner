@@ -78,7 +78,7 @@ passed between layers.
 | `PreASAPDAG` | Frontend-lowered query semantics before summary rewrites | `PreASAPDAG<C> = Rc<PreASAPNode<C>>` |
 | `CandidatePreASAPDAGs` | Frontend candidates associated with workload entry IDs; current deterministic frontends produce one per entry | `CandidatePreASAPDAGs<Id> = Vec<(Id, PreASAPDAG)>`; `asap_planner::lower_pre_asap_dag_candidates` emits normalized entry indices |
 | `PostASAPDAG` | One shared logical computation graph | `PostASAPDAG = Rc<PostASAPNode>` |
-| `CandidatePostASAPDAGs` | All legal logical candidates represented compactly; lifecycle enumeration attaches assignments without copying their graphs | `CandidatePostASAPDAGs<Id>`; bounded logical enumeration followed by lazy `SummaryMaintenanceLifecycleCandidates::assignments` |
+| `CandidatePostASAPDAGs` | All legal logical candidates represented compactly | `CandidatePostASAPDAGs<Id>` |
 | `PhysicalDAG` | Compiled operators and kernels with typed inputs, before binding runtime sources | `PhysicalDAG` |
 | `CandidatePhysicalDAGs` | Physical alternatives before deployment selection, sharing compiled operators across compatible timing assignments | `CandidatePhysicalDAGs<Metadata>` from `compile_timed_candidates`; each entry retains metadata and either a shared `PhysicalDAGCandidate` or its compile error |
 
@@ -89,6 +89,15 @@ to that shared index; window, retention and cost evidence remain in the lifecycl
 plan carried with the candidate. An unpriced candidate is not automatically a
 deployable plan: unknown window or cost evidence must still be resolved before
 installation and selection respectively.
+
+The lifecycle API is not yet unified with this collection boundary:
+`SummaryMaintenanceLifecycleCandidates` is currently a public enumerator of
+lifecycle choices for one fixed logical root. Its `assignments()` yields
+lifecycle plans or rejections, from which callers derive shared timing
+assignments. It is not another DAG representation, and it is not the Rust type
+for `CandidatePostASAPDAGs` with timing. The intended layer output still needs a
+collection API that encapsulates this enumeration while retaining its existing
+implementation and candidate metadata.
 
 Physical compilation reads a transient borrowed projection of the logical
 nodes. `PostASAPDAGTransport` and its versioned `PostASAPDAGDocument` are explicit
