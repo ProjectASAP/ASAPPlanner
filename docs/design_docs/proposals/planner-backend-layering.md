@@ -133,10 +133,8 @@ merge); helper operators are numbered from their source node, so every operator
 traces back to one Post-ASAP node. One exception is a `Fallback` node, which
 wraps a whole Pre-ASAP expression and compiles to many operators; the
 operator-flattening proposal ([operator sharing](operator-sharing.md), from
-#469) removes it by making non-ASAP operators ordinary Post-ASAP nodes. Its
-export section currently groups the largest non-ASAP subtree into one
-`Relational` fragment; per-node correspondence needs that export to keep one
-node per operator. Today each node kind has essentially one lowering (a
+#469) removes it by making non-ASAP operators ordinary Post-ASAP nodes, and
+#481 revises its export to emit one Post-ASAP node per non-ASAP operator. Today each node kind has essentially one lowering (a
 `Binary` lowers differently at ingestion and query time); if a node gains
 alternative physical implementations, they become further candidates in
 `CandidatePhysicalDAGs`, priced and chosen by the deployment.
