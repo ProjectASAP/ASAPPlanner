@@ -385,6 +385,7 @@ dependencies = [
  "asap-types",
  "asap_sketchlib 0.3.0 (git+https://github.com/ProjectASAP/asap_sketchlib?rev=5f03ccbd798ed5fec62bdd839bcb331123cab369)",
  "futures",
+ "rmp-serde",
  "serde",
  "serde_json",
  "thiserror 2.0.18",

@@ -2,8 +2,24 @@
 
 use crate::AggregateCore;
 use asap_sketchlib::{DataInput, UnivMon};
+use planner_types::{post_asap::SketchQuery, pre_asap::ColumnRef};
 
 type Error = Box<dyn std::error::Error + Send + Sync>;
+
+fn check_dimensions(
+    heap_size: usize,
+    rows: usize,
+    cols: usize,
+    layers: usize,
+) -> Result<(), Error> {
+    if heap_size == 0 || cols == 0 || !(1..=20).contains(&rows) || !(1..=64).contains(&layers) {
+        return Err("invalid UnivMon dimensions".into());
+    }
+    rows.checked_mul(cols)
+        .and_then(|n| n.checked_mul(layers))
+        .ok_or("UnivMon dimensions overflow")?;
+    Ok(())
+}
 
 #[derive(Debug, Clone)]
 pub struct UnivMonAccumulator {
@@ -17,15 +33,31 @@ impl UnivMonAccumulator {
     }
 
     pub fn new(heap_size: usize, rows: usize, cols: usize, layers: usize) -> Result<Self, Error> {
-        if heap_size == 0 || cols == 0 || !(1..=20).contains(&rows) || !(1..=64).contains(&layers) {
-            return Err("invalid UnivMon dimensions".into());
-        }
-        rows.checked_mul(cols)
-            .and_then(|n| n.checked_mul(layers))
-            .ok_or("UnivMon dimensions overflow")?;
+        check_dimensions(heap_size, rows, cols, layers)?;
         Ok(Self {
             inner: UnivMon::init_univmon(heap_size, rows, cols, layers),
         })
+    }
+
+    /// Adopt a decoded sketch, e.g. one a deployment restored from its stored
+    /// bytes. Rejects dimensions [`Self::new`] rejects and terminal-mode
+    /// sketches, which do not accept this accumulator's updates.
+    pub fn from_sketch(sketch: UnivMon) -> Result<Self, Error> {
+        check_dimensions(
+            sketch.heap_size,
+            sketch.sketch_row,
+            sketch.sketch_col,
+            sketch.layer_size,
+        )?;
+        if !sketch.accepts_standard_updates() {
+            return Err("terminal-mode UnivMon state cannot accept standard updates".into());
+        }
+        Ok(Self { inner: sketch })
+    }
+
+    /// The underlying sketch, so a deployment can encode it with sketchlib's codec.
+    pub fn sketch(&self) -> &UnivMon {
+        &self.inner
     }
 
     /// Each non-NaN sample is one occurrence. Signed zero has one identity.
@@ -96,6 +128,9 @@ impl AggregateCore for UnivMonAccumulator {
     fn as_any(&self) -> &dyn std::any::Any {
         self
     }
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
 
     fn merge_with(&self, other: &dyn AggregateCore) -> Result<Box<dyn AggregateCore>, Error> {
         let other = other
@@ -105,5 +140,80 @@ impl AggregateCore for UnivMonAccumulator {
         let mut merged = self.clone();
         merged.merge_in_place(other)?;
         Ok(Box::new(merged))
+    }
+
+    /// Sample count (a bare `PointCount`), distinct count, L2 norm and entropy
+    /// of the sample-value frequencies.
+    fn estimate(&self, query: &SketchQuery) -> Result<f64, Error> {
+        Ok(match query {
+            SketchQuery::PointCount {
+                key: ColumnRef::SampleValue,
+                value: None,
+            } => self.inner.calc_l1(),
+            SketchQuery::Cardinality => self.inner.calc_card(),
+            SketchQuery::FrequencyL2 => self.inner.calc_l2(),
+            SketchQuery::FrequencyEntropy => self.inner.calc_entropy(),
+            other => return Err(format!("UnivMon does not answer {other:?}").into()),
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn count() -> SketchQuery {
+        SketchQuery::PointCount {
+            key: ColumnRef::SampleValue,
+            value: None,
+        }
+    }
+
+    // Count, distinct, L2 and entropy readouts count each non-NaN sample once;
+    // signed zero is one identity.
+    #[test]
+    fn frequency_readouts() {
+        let mut state = UnivMonAccumulator::new(32, 5, 1024, 4).unwrap();
+        for value in [0.0, -0.0, 2.0, 2.0, f64::NAN] {
+            state.insert_sample(value).unwrap();
+        }
+        let read = |query| state.estimate(&query).unwrap();
+        assert_eq!(read(count()), 4.0);
+        assert!((read(SketchQuery::Cardinality) - 2.0).abs() < 0.01);
+        assert!((read(SketchQuery::FrequencyL2) - 8.0f64.sqrt()).abs() < 0.01);
+        assert!((read(SketchQuery::FrequencyEntropy) - 1.0).abs() < 0.01);
+        assert!(state.estimate(&SketchQuery::Quantile { q: 0.5 }).is_err());
+    }
+
+    // A sketch taken out and adopted back answers the same readouts.
+    #[test]
+    fn adopted_sketch_keeps_readouts() {
+        let mut state = UnivMonAccumulator::new(32, 5, 1024, 4).unwrap();
+        for value in [1.0, 2.0, 2.0] {
+            state.insert_sample(value).unwrap();
+        }
+        let adopted = UnivMonAccumulator::from_sketch(state.sketch().clone()).unwrap();
+        assert_eq!(adopted.dimensions(), state.dimensions());
+        for query in [
+            count(),
+            SketchQuery::Cardinality,
+            SketchQuery::FrequencyEntropy,
+        ] {
+            assert_eq!(
+                adopted.estimate(&query).unwrap(),
+                state.estimate(&query).unwrap()
+            );
+        }
+    }
+
+    // Adoption rejects terminal-mode sketches and dimensions `new` rejects.
+    #[test]
+    fn adoption_rejects_terminal_or_invalid_sketches() {
+        let mut terminal = UnivMon::init_univmon(4, 3, 16, 2);
+        terminal.fast_insert(&DataInput::U64(1), 1);
+        assert!(UnivMonAccumulator::from_sketch(terminal.clone()).is_err());
+        terminal.free();
+        assert!(UnivMonAccumulator::from_sketch(terminal).is_ok());
+        assert!(UnivMonAccumulator::from_sketch(UnivMon::init_univmon(4, 21, 16, 2)).is_err());
     }
 }

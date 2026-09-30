@@ -75,11 +75,24 @@ impl WeightedFrequency {
         Ok((algorithm, width as usize, depth as usize, capacity as usize))
     }
 
-    pub(crate) fn algorithm(&self) -> FrequencyAlgorithm {
+    /// Algorithm and `(width, depth, capacity)` shape, so a deployment can check
+    /// a decoded state against its declared family.
+    pub fn algorithm(&self) -> FrequencyAlgorithm {
         self.inner.algorithm()
     }
-    pub(crate) fn shape(&self) -> (usize, usize, usize) {
+    pub fn shape(&self) -> (usize, usize, usize) {
         self.inner.shape()
+    }
+    /// Sketchlib's versioned `WeightedFrequencyV1` bytes, for deployments that
+    /// persist this state.
+    pub fn to_bytes(&self) -> Vec<u8> {
+        self.inner.to_bytes()
+    }
+    /// Decode and validate bytes written by [`Self::to_bytes`].
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, Error> {
+        Kernel::from_bytes(bytes)
+            .map(|inner| Self { inner })
+            .map_err(adapt_error)
     }
     pub fn new(
         algorithm: FrequencyAlgorithm,
@@ -112,6 +125,9 @@ impl AggregateCore for WeightedFrequency {
         Box::new(self.clone())
     }
     fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
         self
     }
     fn merge_with(
@@ -148,5 +164,24 @@ mod tests {
         assert!(left
             .merge_with(&WeightedFrequency::new(FrequencyAlgorithm::Cms, 32, 5, 8).unwrap())
             .is_err());
+    }
+
+    // Stored bytes restore the algorithm, shape and ranked rows; foreign bytes are rejected.
+    #[test]
+    fn bytes_round_trip() {
+        let mut state = WeightedFrequency::new(FrequencyAlgorithm::CountSketch, 64, 3, 4).unwrap();
+        state.update(&[Value::Utf8("a".into())], 2.5).unwrap();
+        state.update(&[Value::Utf8("b".into())], 1.0).unwrap();
+        let restored = WeightedFrequency::from_bytes(&state.to_bytes()).unwrap();
+        assert!(matches!(
+            restored.algorithm(),
+            FrequencyAlgorithm::CountSketch
+        ));
+        assert_eq!(restored.shape(), (64, 3, 4));
+        assert_eq!(
+            format!("{:?}", restored.rows(2)),
+            format!("{:?}", state.rows(2))
+        );
+        assert!(WeightedFrequency::from_bytes(b"not a frequency state").is_err());
     }
 }

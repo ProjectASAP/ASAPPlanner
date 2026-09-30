@@ -9,6 +9,7 @@ pub mod exact;
 pub mod hll_sketch;
 pub mod hydra_kll;
 pub mod increase;
+mod sampling;
 pub mod univmon;
 
 pub use count_min_sketch::*;
