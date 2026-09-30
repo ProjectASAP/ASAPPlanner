@@ -130,7 +130,10 @@ pub(super) fn execute<'a>(
                 }
                 let result = aggregate::temporal::reduce(
                     rows,
-                    &AggIntent::HistogramQuantile { q: *q },
+                    &AggIntent::HistogramQuantile {
+                        q: *q,
+                        le: ColumnRef::Named("le".into()),
+                    },
                     &[0],
                     1,
                     2,

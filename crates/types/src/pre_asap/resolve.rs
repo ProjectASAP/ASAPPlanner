@@ -584,7 +584,10 @@ fn resolve_agg_intent(
             lower: *lower,
             upper: *upper,
         },
-        AggIntent::HistogramQuantile { q } => AggIntent::HistogramQuantile { q: *q },
+        AggIntent::HistogramQuantile { q, le } => AggIntent::HistogramQuantile {
+            q: *q,
+            le: resolve_column_ref(le, schema)?,
+        },
         AggIntent::Math(f) => AggIntent::Math(f.clone()),
         AggIntent::Absent => AggIntent::Absent,
         AggIntent::AbsentOverTime => AggIntent::AbsentOverTime,

@@ -702,8 +702,14 @@ impl<'a> SqlLowerer<'a> {
                     }
                 }
                 PlanningBridge::HistogramQuantile { q } => Unresolved::Aggregate {
-                    reduction: Reduction::Reduce(GroupKeys::none()),
-                    measures: vec![AggIntent::HistogramQuantile { q }],
+                    // As in PromQL: one histogram per label set other than `le`.
+                    reduction: Reduction::Reduce(GroupKeys::without(vec![ColumnRef::Named(
+                        "le".into(),
+                    )])),
+                    measures: vec![AggIntent::HistogramQuantile {
+                        q,
+                        le: ColumnRef::Named("le".into()),
+                    }],
                     output_names: vec!["value".into()],
                     having: None,
                     child: Rc::new(input),

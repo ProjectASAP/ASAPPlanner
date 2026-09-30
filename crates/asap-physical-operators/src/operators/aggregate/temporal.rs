@@ -52,7 +52,7 @@ pub(in crate::operators) async fn reduce(
     let mut output = Vec::new();
     for (_, (mut keys, buckets, points)) in grouped {
         work.checkpoint().await?;
-        let result = if let AggIntent::HistogramQuantile { q } = intent {
+        let result = if let AggIntent::HistogramQuantile { q, .. } = intent {
             Some(Value::Float64(bucket_quantile(*q, buckets, context).await?))
         } else {
             let points = cooperative_sort(points, |a, b| a.0.cmp(&b.0), context).await?;
