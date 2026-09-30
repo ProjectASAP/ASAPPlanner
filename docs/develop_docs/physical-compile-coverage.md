@@ -63,7 +63,30 @@ Status values:
 
 Totals at #475: 11 Supported, 4 Partial, 14 Missing, 2 Backend.
 
+## Covered after this change
+
+| Row | Change |
+|---|---|
+| 4, 8, 13 | Query-time `Binary` folds a scalar-literal operand into a projection over grouped value rows. |
+| 5 | Query-time `Binary` over grouped value rows performs an inner equi-join on equal label columns, then applies the operator. Per-series rows remain Partial. |
+| 15 | Count finalization converts exactly to the declared Float64 value. |
+| 22, 23 | `ReadPopulation` Sum/Count/Average/Quantile compile to grouped aggregation. `Reduction::Quantile` implements PromQL interpolation. |
+
+Totals after this change: 17 Supported, 4 Partial, 8 Missing, 2 Backend.
+
 ## Remaining
 
-Every Missing or Partial row above, in order of backend usage. Rows 1 and 28
-are removed from the backend only after rows 4–13 are covered.
+In order of backend usage:
+
+1. Row 1 and rows 9–12: lower PromQL-shaped `Fallback{QueryExpr}` subtrees
+   (range functions over matrices, `scalar()`, `histogram_quantile`, `sort`,
+   subquery grids). After that, rows 28 and 30 can be deleted from the backend.
+2. Row 7: comparison filters and `bool` comparisons. This needs `return_bool`
+   in the `Binary` payload. `compile` currently rejects comparisons.
+3. Row 5 for per-series rows: matching needs a metric-name-free series
+   identity, not the full `$promql_series_identity`.
+4. Rows 25 and 27: constant weights and `EntityIdentity` items for precompute
+   `SummaryAgg`.
+5. Row 16: a label-map sketch-state readout, the counterpart of
+   `compile_exact_readout`, and MetricsQL `__name__` retention rules.
+6. Row 20: summary join, subtract, and delete.
