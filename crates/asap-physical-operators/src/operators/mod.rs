@@ -81,6 +81,7 @@ enum Kind {
     SeriesLabels {
         kind: planner_types::pre_asap::VectorMatchKind,
         labels: Vec<String>,
+        unique: bool,
     },
     SeriesBinary {
         operator: planner_types::post_asap::BinaryOperator,

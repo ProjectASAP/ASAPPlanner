@@ -86,7 +86,7 @@ pub(super) fn series_scalar_binary(
     literal_left: bool,
 ) -> Result<Vec<Operator>, Error> {
     arithmetic(operator)?;
-    let relabel = Operator::series_labels(input.clone(), VectorMatchKind::Ignoring, vec![])?;
+    let relabel = Operator::series_without_name(input.clone())?;
     let value = input
         .fields
         .iter()

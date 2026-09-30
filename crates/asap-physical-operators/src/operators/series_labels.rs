@@ -87,7 +87,27 @@ impl Operator {
     ) -> Result<Self, Error> {
         layout(&input)?;
         Ok(Self {
-            kind: Kind::SeriesLabels { kind, labels },
+            kind: Kind::SeriesLabels {
+                kind,
+                labels,
+                unique: false,
+            },
+            inputs: vec![input.clone()],
+            output: input,
+        })
+    }
+
+    /// Drop the metric name from each row's label set, as PromQL arithmetic
+    /// with a literal does. Unlike matching labels, the result is itself a
+    /// vector, so two rows that become equal are an error, as in Prometheus.
+    pub fn series_without_name(input: Schema) -> Result<Self, Error> {
+        layout(&input)?;
+        Ok(Self {
+            kind: Kind::SeriesLabels {
+                kind: VectorMatchKind::Ignoring,
+                labels: vec![],
+                unique: true,
+            },
             inputs: vec![input.clone()],
             output: input,
         })
@@ -134,7 +154,15 @@ pub(super) fn execute<'a>(
         let (rows, _memory) = collect_rows(left, &context).await?;
         let mut result = Vec::new();
         match (&operator.kind, right) {
-            (Kind::SeriesLabels { kind, labels }, None) => {
+            (
+                Kind::SeriesLabels {
+                    kind,
+                    labels,
+                    unique,
+                },
+                None,
+            ) => {
+                let mut seen = std::collections::BTreeSet::new();
                 for mut row in rows {
                     work.checkpoint().await?;
                     let mut set = left_layout.read(&output, &row)?;
@@ -146,6 +174,16 @@ pub(super) fn execute<'a>(
                     }
                     left_layout.write(&output, &mut row, &set)?;
                     workspace.grow(row_bytes(&row))?;
+                    // Matching and grouping sides may repeat a label set;
+                    // their consumers decide whether that is an error.
+                    if *unique {
+                        workspace.grow(set.iter().map(|(k, v)| 64 + k.len() + v.len()).sum())?;
+                        if !seen.insert(set) {
+                            return Err(invalid(
+                                "vector cannot contain metrics with the same labelset",
+                            ));
+                        }
+                    }
                     result.push(row);
                 }
             }
