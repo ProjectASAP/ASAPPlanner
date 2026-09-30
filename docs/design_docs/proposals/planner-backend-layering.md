@@ -29,10 +29,10 @@ never re-derives the computation, and keeps no operators of its own.
 │    -> CandidatePostASAPDAGs                                      │
 │                      │                                           │
 │ Physical planning (how)                                          │
-│ 2. Summary materialization                                       │
+│ 2. Summary lifecycle planning                                    │
 │    Per summary state: Ephemeral | Prepared | Shared |            │
 │    ContinuouslyMaintained -> node timing, window framework,      │
-│    retention -> CandidateMaterializedPostASAPDAGs                │
+│    retention -> CandidateLifecyclePostASAPDAGs                   │
 │                      │                                           │
 │ 3. Compilation                                                   │
 │    Lower each node to operators; cut by timing                   │
@@ -59,9 +59,9 @@ or infeasible candidates are rejected with reasons, not silently dropped.
 Each stage adds decisions to the DAG it receives. The table shows which
 decisions each DAG carries.
 
-| | `PreASAPDAG` | `PostASAPDAG` | `MaterializedPostASAPDAG` | `PhysicalDAG` |
+| | `PreASAPDAG` | `PostASAPDAG` | `LifecyclePostASAPDAG` | `PhysicalDAG` |
 |---|---|---|---|---|
-| Produced by | 0. Frontends | 1. Logical optimization | 2. Summary materialization | 3. Compilation; 4. selects one |
+| Produced by | 0. Frontends | 1. Logical optimization | 2. Summary lifecycle planning | 3. Compilation; 4. selects one |
 | Node | Query operation | Logical operation, including summary operations | Same, plus annotations | Physical operator |
 | Logical optimization (summary family, rewrites) | No | Yes | Yes | Yes |
 | Materialization decided (which summary states persist) | No | No | Yes | Yes |
@@ -77,20 +77,24 @@ Name mapping to code:
 |---|---|---|
 | `PreASAPDAG` | `Rc<QueryExpr>` | `PreASAPDAG` |
 | `PostASAPDAG` | `Rc<SummaryNode>` tree; exported as `PostAsapDag` | `PostASAPDAG` |
-| `MaterializedPostASAPDAG` | `SummaryMaintenanceLifecyclePlan`, one selected assignment beside the DAG | `MaterializedPostASAPDAG`; `SummaryMaintenanceLifecyclePlan` is merged into it |
+| `LifecyclePostASAPDAG` | `SummaryMaintenanceLifecyclePlan`, one selected assignment beside the DAG | `LifecyclePostASAPDAG`; `SummaryMaintenanceLifecyclePlan` is merged into it |
 | `PhysicalDAG` | None | `PhysicalDAG` |
 | `CandidatePreASAPDAGs` | None; one `QueryExpr` root per entry | `CandidatePreASAPDAGs` |
 | `CandidatePostASAPDAGs` | `PlanSpace` | `CandidatePostASAPDAGs` |
-| `CandidateMaterializedPostASAPDAGs` | None | `CandidateMaterializedPostASAPDAGs` (#480 currently names it `CandidatePostASAPDAGsWithTiming`) |
+| `CandidateLifecyclePostASAPDAGs` | None | `CandidateLifecyclePostASAPDAGs` |
 | `CandidatePhysicalDAGs` | None | `CandidatePhysicalDAGs` |
 
-**Post-ASAP DAG to materialized DAG.** In this document, *materialization*
-means summary state kept across executions, like a materialized view. Choosing
-it is a workload-level decision, like a database's materialized-view
-selection: it spans queries (a shared state is kept once) and depends on
-workload demand (read and update rates, horizon). A lifecycle assignment
-annotates every node with execution timing, and every stored state with window
-framework and retention:
+**Post-ASAP DAG to lifecycle DAG.** A summary state's *lifecycle*
+(`Ephemeral`, `Prepared`, `Shared`, `ContinuouslyMaintained`) fixes several
+separate aspects together: whether the state is materialized (kept across
+executions, like a materialized view), when it is computed, how it is
+maintained, how long it is retained, and its window framework. The table above
+lists these aspects separately; the lifecycle is the one choice that sets them.
+Choosing lifecycles is a workload-level decision, like a database's
+materialized-view selection: it spans queries (a shared state is kept once) and
+depends on workload demand (read and update rates, horizon). A lifecycle
+assignment annotates every node with execution timing, and every stored state
+with window framework and retention:
 
 * a retained state (`ContinuouslyMaintained`, `Shared`, `Prepared`) and every
   node feeding it run at ingestion time;
@@ -102,7 +106,7 @@ The result is still a Post-ASAP DAG, much as physical properties annotate
 logical expressions in a database optimizer. This is the only source of
 timing; logical optimization proposes computations, never timing or placement.
 
-**Materialized DAG to physical DAG.** Compilation lowers each node to physical
+**Lifecycle DAG to physical DAG.** Compilation lowers each node to physical
 operators and cuts the graph at the timing frontier (ingestion-time nodes read
 by query-time nodes, plus an ingestion-time root) into a precompute and a query
 DAG. Materialization is decided in layer 2 and realized here: the precompute
@@ -125,10 +129,10 @@ checked against their contracts, and the graph runs.
 |---|---|---|
 | 0. Frontends | Language semantics and lowering. A construct that cannot be represented faithfully is rejected, never ignored (for example PromQL `fill`). | Summaries, placement |
 | 1. Logical optimization | All legal logical candidates: summary families, exact rewrites, compositions, series-identity typing. | Placement, timing |
-| 2. Summary materialization | For each unique summary state and maintained population, the admissible lifecycle assignments and their timing, window framework and retention. | Cost values; operator implementation |
+| 2. Summary lifecycle planning | For each unique summary state and maintained population, the admissible lifecycle assignments and their timing, window framework and retention. | Cost values; operator implementation |
 | 3. Compilation | All computation: value operations, aggregation, PromQL functions and subqueries, vector matching, comparisons and set operators, `histogram_quantile`, summary build, merge and estimate, sort, limit, joins. | Raw ingestion, pane construction, storage formats, decoding persisted state, scheduling |
 | 4. Selection | Costing every candidate with the deployment's cost model and returning the cheapest admissible `PhysicalDAG` for the whole workload that meets the accuracy requirements. A state shared by several queries is costed once with all consumers' demand (only when compilation installs one shared output: same window layout, evaluation interval and phase). Unknown cost stays unknown and such a candidate is not selected. | The cost values |
-| 5. Deployment | Inputs: the cost model (build, per-update maintenance, read, store price per byte-second, retirement, query-time raw processing; optionally whole-plan quotes), accuracy requirements and capabilities (for example whether query-time raw data is available). Execution: ingestion and routing, panes and completeness, lateness and revisions, storage and codecs over Planner kernel states, reading stored state into typed inputs, query-time raw sources, the exact-engine fallback. Sampled or delta edge frames are rejected. | Ranking or selection; any computation algorithm |
+| 5. Deployment | Inputs: the cost model (build, per-update maintenance, read, store price per byte-second, retirement, query-time raw processing; optionally whole-plan quotes), accuracy requirements and capabilities (for example whether query-time raw data is available). Execution: ingestion and routing, panes and completeness, lateness and revisions, storage and codecs over Planner kernel states, reading stored state into typed inputs, query-time raw sources, the exact-engine fallback. Sampled or delta edge frames are rejected. | Any computation algorithm |
 
 ## The boundary
 
@@ -154,7 +158,7 @@ four DAGs, and shows that only the deployment's store price changes the plan.
 
 * `PreASAPDAG`: `sum by (job)` over `rate` over the range selector `m[1m]`.
 * `PostASAPDAG`: a per-series Rate state feeding a grouped Sum state.
-* `MaterializedPostASAPDAG`: one per lifecycle assignment, for example
+* `LifecyclePostASAPDAG`: one per lifecycle assignment, for example
   (a) both retained, (b) Rate retained and Sum `Ephemeral`, (c) both
   `Ephemeral`.
 * `PhysicalDAG`: one compilation, cut three ways. (a) Precompute builds Rate
