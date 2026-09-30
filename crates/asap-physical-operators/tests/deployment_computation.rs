@@ -458,6 +458,8 @@ fn per_series_scalar_arithmetic_applies_to_stored_readouts() {
     for (query, expected) in [
         ("rate(m[5m]) * 2", 50. / 300. * 2.),
         ("1 - rate(m[5m])", 1. - 50. / 300.),
+        // The stored sum readout keeps `__name__`; the arithmetic drops it.
+        ("sum_over_time(m[5m]) * 2", 150. * 2.),
     ] {
         assert_eq!(
             run_series(&exact_dag(query), &samples, 300_000).unwrap(),

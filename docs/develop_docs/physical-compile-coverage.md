@@ -124,12 +124,14 @@ Totals are unchanged: 19 Supported, 5 Partial, 5 Missing, 2 Backend.
 
 | Row | Change |
 |---|---|
-| 5 | Query-time `Binary` over rows with a series identity, such as per-series readouts of stored state, uses the Fallback's `series_labels` and `series_binary`. Examples: `avg_over_time` as stored sum/count, and `rate(a) / rate(b)`. Matching drops `__name__` and honors `on`/`ignoring` when the payload carries them. Now Supported. |
+| 5 | Query-time `Binary` over rows with a series identity, such as per-series readouts of stored state, uses the Fallback's `series_labels` and `series_binary`. Examples: `avg_over_time` as stored sum/count, and `rate(a) / rate(b)`. Matching drops `__name__` and honors `on`/`ignoring` when the payload carries them. Only one-to-one arithmetic is covered; `group_left`/`group_right` stay rejected and comparisons are row 7. Now Supported. |
 | 4, 8 | A literal operand also applies to per-series rows and drops `__name__`. |
 
 Grouped `sum`/`avg`, current-series `Sum`/`Average` readouts, and
 `sum_over_time`/`avg_over_time` use Prometheus' Kahan-Neumaier summation. An
 average switches to an incremental mean once the running sum would overflow.
+The grouped path also serves SQL `SUM`/`AVG` over Float64, which are now
+compensated the same way.
 Stored exact `Sum` state still sums without compensation, because a
 compensation term would change the stored state layout. Its checked
 `avg_over_time` division therefore fails instead of returning a finite mean.
