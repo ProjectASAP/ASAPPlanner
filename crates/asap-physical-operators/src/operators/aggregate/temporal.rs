@@ -65,7 +65,18 @@ pub(in crate::operators) async fn reduce(
                     "duplicate or out-of-window timestamp".into(),
                 ));
             }
-            window_value(intent, &points, start, end)?
+            window_value(
+                intent,
+                &points,
+                start,
+                end,
+                match context.scope {
+                    crate::runtime::Scope::Query {
+                        evaluation_time_ms, ..
+                    } => evaluation_time_ms,
+                    _ => end,
+                },
+            )?
         };
         if let Some(result) = result {
             keys.push(result);
@@ -82,8 +93,13 @@ pub(in crate::operators) fn window_value(
     points: &[(i64, f64)],
     start: i64,
     end: i64,
+    evaluation_time: i64,
 ) -> Result<Option<Value>, Error> {
     Ok(match intent {
+        AggIntent::Deriv => regression(points, points.first().map_or(0, |p| p.0))
+            .map(|(slope, _)| Value::Float64(slope)),
+        AggIntent::PredictLinear { seconds } => regression(points, evaluation_time)
+            .map(|(slope, intercept)| Value::Float64(slope * seconds + intercept)),
         AggIntent::Rate => rate(points, start, end, true).map(Value::Float64),
         AggIntent::Delta => rate(points, start, end, false)
             .map(|v| Value::Float64(v * (end as f64 - start as f64) / 1000.)),
@@ -255,6 +271,32 @@ fn almost_equal(a: f64, b: f64) -> bool {
         return diff < EPSILON * f64::MIN_POSITIVE;
     }
     diff / sum.min(f64::MAX) < EPSILON
+}
+
+// Center timestamps before fitting and compensate sums to preserve small slopes.
+fn regression(points: &[(i64, f64)], anchor: i64) -> Option<(f64, f64)> {
+    if points.len() < 2 {
+        return None;
+    }
+    let first = points[0].1;
+    if points.iter().all(|p| p.1 == first) {
+        return Some(if first.is_finite() {
+            (0., first)
+        } else {
+            (f64::NAN, f64::NAN)
+        });
+    }
+    let mut sums = [(0., 0.); 4];
+    for &(timestamp, y) in points {
+        let x = (i128::from(timestamp) - i128::from(anchor)) as f64 / 1000.;
+        for (acc, value) in sums.iter_mut().zip([x, y, x * y, x * x]) {
+            *acc = super::kahan_inc(value, acc.0, acc.1);
+        }
+    }
+    let [sx, sy, sxy, sxx] = sums.map(|(s, c)| s + c);
+    let n = points.len() as f64;
+    let slope = (sxy - sx * sy / n) / (sxx - sx * sx / n);
+    Some((slope, sy / n - slope * sx / n))
 }
 
 #[cfg(test)]

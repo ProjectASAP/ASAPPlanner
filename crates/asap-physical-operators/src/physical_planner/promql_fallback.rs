@@ -401,11 +401,10 @@ impl Lowering {
             vec![raw],
             child,
         )?;
-        // The inner function drops the name too. A series repeats across
-        // steps, so this rewrite does not check for equal label sets.
+        // Name removal must validate each subquery evaluation step.
         if inner.is_some() && !matches!(inner, Some(AggIntent::LastOverTime)) {
             let input = self.schema(&step);
-            let relabel = Operator::series_labels(input, VectorMatchKind::Ignoring, vec![])?;
+            let relabel = Operator::series_without_name(input)?;
             step = self.add(relabel, vec![step]);
         }
         let input = self.schema(&step);
@@ -519,6 +518,8 @@ impl Lowering {
 fn unbound(intent: &AggIntent) -> Result<AggIntent<ColumnRef>, Error> {
     Ok(match intent {
         AggIntent::Rate => AggIntent::Rate,
+        AggIntent::Deriv => AggIntent::Deriv,
+        AggIntent::PredictLinear { seconds } => AggIntent::PredictLinear { seconds: *seconds },
         AggIntent::Increase => AggIntent::Increase,
         AggIntent::Delta => AggIntent::Delta,
         AggIntent::Count { accuracy } => AggIntent::Count {

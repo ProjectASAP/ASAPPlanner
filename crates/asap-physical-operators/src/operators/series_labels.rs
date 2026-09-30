@@ -557,7 +557,14 @@ pub(super) fn execute<'a>(
                     // their consumers decide whether that is an error.
                     if *unique {
                         workspace.grow(label_bytes(&set))?;
-                        if !seen.insert(set) {
+                        let time = output
+                            .time_index
+                            .map(|index| match row[index] {
+                                Value::Timestamp(time) => Ok(time),
+                                _ => Err(invalid("series timestamp must be Timestamp")),
+                            })
+                            .transpose()?;
+                        if !seen.insert((time, set)) {
                             return Err(invalid(
                                 "vector cannot contain metrics with the same labelset",
                             ));

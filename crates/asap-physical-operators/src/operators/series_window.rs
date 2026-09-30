@@ -92,6 +92,8 @@ impl Operator {
             function,
             None | Some(
                 AggIntent::Rate
+                    | AggIntent::Deriv
+                    | AggIntent::PredictLinear { .. }
                     | AggIntent::Increase
                     | AggIntent::Delta
                     | AggIntent::Count { .. }
@@ -266,7 +268,9 @@ pub(super) fn execute<'a>(
                         if fresh.is_empty() {
                             None
                         } else {
-                            match aggregate::temporal::window_value(intent, &fresh, start, end)? {
+                            match aggregate::temporal::window_value(
+                                intent, &fresh, start, end, time,
+                            )? {
                                 Some(Value::Float64(v)) => Some(v),
                                 Some(Value::Int64(v)) => Some(v as f64),
                                 Some(_) => return Err(invalid("invalid range function result")),
