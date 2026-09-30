@@ -116,7 +116,7 @@ Totals after this change: 19 Supported, 5 Partial, 5 Missing, 2 Backend.
 query's evaluation time. The raw rows must cover the window at that instant.
 Vector matching and `without` rewrite the series identity, so their results
 already lack `__name__`. Other results keep it; the query adapter still drops
-it.
+it. (Range functions drop it too since the comparison change below.)
 
 Totals are unchanged: 19 Supported, 5 Partial, 5 Missing, 2 Backend.
 
@@ -137,6 +137,49 @@ compensation term would change the stored state layout. Its checked
 `avg_over_time` division therefore fails instead of returning a finite mean.
 
 Totals after this change: 20 Supported, 4 Partial, 5 Missing, 2 Backend.
+
+## Covered by comparisons and set operators
+
+The IR now distinguishes `bool` comparisons: `BinaryOpKind::CompareBool(op)`
+beside the filtering `BinaryOpKind::Compare(op)`. The PromQL frontend emits it
+for `bool`; it previously dropped the modifier.
+
+`Operator::series_binary` evaluates every PromQL binary operator, in the
+Fallback and in query-time `Binary` nodes, following Prometheus'
+`VectorBinop`, `VectorAnd`, `VectorOr`, and `VectorUnless`:
+
+- Arithmetic drops `__name__`. A comparison filter keeps the matched left
+  series with its value and name; with a scalar on the left it keeps the
+  vector's value. `bool` yields 1 or 0 and drops the name. NaN compares
+  unequal to everything.
+- Operands may be vectors, literals, `scalar()`, or scalar-valued binary
+  expressions such as `-scalar(x)`. Two scalars yield a scalar. The
+  label-map `vector_binary` also treats `CompareBool` as its `bool` mode.
+- One-to-one matching and `group_left`/`group_right` with included labels.
+  The "one" side must not repeat a match group; many-to-one results must be
+  unique. A left duplicate is an error only if more than one match is kept.
+- `and`, `or`, and `unless` match label sets many-to-many, with `on` or
+  `ignoring`, and return the original series.
+- Range functions other than `last_over_time` now drop `__name__` in the
+  Fallback. Series whose label sets become equal are an error, as in
+  Prometheus. Vector-scalar results are checked the same way. Inside a
+  subquery the inner function also drops the name, without that check,
+  because each series repeats across steps.
+
+A result is written in the left operand's schema. Without a series identity,
+its label columns must hold every label the right side can contribute
+(`or`, `group_right`, and `group_left` labels); otherwise `compile` rejects it.
+So `sum(a) or vector(0)` compiles, but
+`sum by (job) (a) * on(job) group_left(team) info` is rejected: the
+aggregate's schema has no `team` column.
+
+| Row | Change |
+|---|---|
+| 1 | Comparisons, `bool`, set operators, `group_left`/`group_right`, `scalar()` operands, and literals over aggregates whose value has another name, such as `sum by (job) (a) * 2`. Still Partial. |
+| 5 | Grouped `Binary` rows use the same operator instead of a relational join. A duplicate match group is now an error instead of a cross product. |
+| 7 | Fallback, grouped `Binary`, and per-series `bool` comparisons. Per-series filter comparisons and set operators on `Binary` nodes fail closed: stored readouts keep `__name__` even where the range function drops it. Now Partial. |
+
+Totals after this change: 20 Supported, 5 Partial, 4 Missing, 2 Backend.
 
 ## Remaining
 
@@ -162,9 +205,7 @@ In order of backend usage:
      it returns NaN. It forces cumulative counts to be monotonic and returns
      NaN for fewer than two buckets. For q < 0 it returns -Inf; for q > 1,
      +Inf.
-   - Comparisons and set operators (`and`, `or`, `unless`); `group_left` and
-     `group_right`; arithmetic with a non-literal scalar, such as
-     `scalar(x)` or `time()`.
+   - `time()` and other scalar functions as operands.
    - Subquery operands other than one per-series function; implicit
      subquery resolution, which is a deployment default.
    - `@ start()` and `@ end()`, which need the range query's bounds in the
@@ -172,8 +213,9 @@ In order of backend usage:
    - Other functions, such as `deriv`, `predict_linear`,
      `stddev_over_time`, `absent`, `label_replace`, and math functions.
    After these shapes are covered, the backend can delete rows 28 and 30.
-2. Row 7: comparison filters and `bool` comparisons. This needs `return_bool`
-   in the `Binary` payload. `compile` currently rejects comparisons.
+2. Row 7: per-series readouts must drop `__name__` where their range
+   function does, and check for equal label sets. Then filter comparisons
+   and set operators over them can compile.
 3. Rows 25 and 27: constant weights and `EntityIdentity` items for precompute
    `SummaryAgg`.
 4. Row 16: a label-map sketch-state readout, the counterpart of
@@ -181,3 +223,12 @@ In order of backend usage:
 5. Row 20: summary join, subtract, and delete.
 6. Compensated stored exact `Sum` state, a state-layout change shared with the
    backend's stored-state decoding.
+7. Non-finite literals (`NaN`, `Inf`) in compiled operators do not survive a
+   JSON round trip of the program.
+8. `group_left` labels and `or`/`group_right` right-side labels onto
+   aggregated (label-column) rows. The logical output schema, which is the left
+   side's, has no column for them.
+9. An equal-label-set check for inner subquery functions, per step.
+10. `fill`, `fill_left`, and `fill_right` matching modifiers. The frontend
+   still ignores them. Rejecting them drops 27 corpus queries below the
+   lowering floor, so that change needs its own decision.
