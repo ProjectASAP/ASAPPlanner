@@ -560,7 +560,9 @@ fn at_modifier_fixes_the_evaluation_instant() {
     // An inner @ pins every step to the same instant.
     assert_eq!(one("sum_over_time((m @ 60)[2m:1m])", samples, 180), 2.);
     // start() and end() depend on the range query, which is the deployment's.
-    assert!(compile_query("m @ start()").is_err());
+    assert!(evaluate("m @ start()", &[], 60)
+        .unwrap_err()
+        .contains("query range bounds"));
 }
 
 const A: &[Sample] = &[("job=x", 50, 10.), ("job=y", 50, 20.), ("job=w", 50, 0.)];
