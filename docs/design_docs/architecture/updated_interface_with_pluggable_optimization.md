@@ -7,14 +7,14 @@
 
 What that buys:
 
-* One call in place of six across three stages. `PlanSpace` and
+* One call in place of six across three stages. `CandidatePostASAPDAGs` and
   `GlobalSelection` no longer appear in user code.
 * The root-to-entry bindings a caller used to build by hand are derived, and
   their ordering contract is checked rather than assumed.
 * A new optimization algorithm can be freely implemented as a trait implementation, rather than a
   rule disguised to fit a two-phase pipeline it does not share.
 
-Unchanged: `PlanSpace`, `cost_sorted`, `global_selection`, and the interface
+Unchanged: `CandidatePostASAPDAGs`, `cost_sorted`, `global_selection`, and the interface
 [input, output, and workflows](input-output-workflow.md) describes.
 
 ```text
@@ -100,9 +100,12 @@ pub struct QueryLifecyclePlan {
 
 The variant follows from whether `lifecycle` was supplied in the input.
 
-`PlanOutput` is one pass's selected logical plan, not a replacement for
-`PlanSpace`: candidates the pass dropped are not in it, so a deployment that
-prices candidates itself enumerates them from `PlanSpace`. Each selected
+`PlanOutput` is an opt-in selection helper's result. The candidate-preserving
+Planner pipeline outputs all legal candidates at each layer and does not pass
+through this single-selection result. `PlanOutput` is not a replacement for
+the collection of candidate `PostASAPDAG`s: candidates the pass dropped are
+not in it, so a deployment that prices candidates itself enumerates the full
+candidate collection. Each selected
 logical graph is a `PostASAPDAG`, currently represented by `Rc<SummaryNode>`.
 The lifecycle layer alone supplies timing; `DagWithLifecycle` includes that
 choice, while `Dag` does not. Physical compilation then produces a

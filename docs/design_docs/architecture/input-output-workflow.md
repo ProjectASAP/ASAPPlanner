@@ -9,7 +9,7 @@ ASAPPlanner provides frontend lowering, logical candidate search, summary
 maintenance lifecycles, and physical compilation. Its input is a planning
 workload plus the models, evidence, and deployment capabilities required by
 the chosen workflow. The graph stages are `PreASAPDAG`, `PostASAPDAG`, and
-`PhysicalDAG`. `PlanSpace` is the logical candidate-space interface; compiled
+`PhysicalDAG`. Logical planning outputs all legal candidate `PostASAPDAG`s; compiled
 physical candidates form the execution boundary with a deployment.
 
 ### Input fields at a glance
@@ -30,7 +30,7 @@ fields and [frontend dependencies](#frontend-specific-dependencies).
 
 | Output | Fields or contents | Meaning |
 |---|---|---|
-| `PlanSpace<Id>` | The legal candidate PostASAPDAGs for the workload, represented compactly as canonical roots, one candidate set per target sub-DAG, and cross-target composition information | The candidate space: nothing is selected yet |
+| Candidate `PostASAPDAG`s | The legal candidate PostASAPDAGs for the workload, represented compactly as canonical roots, one candidate set per target sub-DAG, and cross-target composition information | The candidate space: nothing is selected yet |
 | `PlanOutput` | One selected PostASAPDAG root (`Rc<SummaryNode>`) per workload entry, optionally with summary-maintenance lifecycle decisions | One optimization pass's selection, returned by `e2e_plan` and `optimize` |
 
 `PlanOutput` is selected from the candidate space, not a second output beside
@@ -39,11 +39,11 @@ it. [Output layers](#output-layers) places both in the `PreASAPDAG` →
 
 [Ranking](#ranked-view), [selection and
 DAG assembly](#selection-and-dag-assembly), and
-[summary-maintenance lifecycle](#summary-maintenance-lifecycle-aware-helper) APIs operate on this `PlanSpace`.
+[summary-maintenance lifecycle](#summary-maintenance-lifecycle-aware-helper) APIs operate on this candidate collection.
 These are different uses of the candidate space, not mandatory sequential
-stages. `PlanSpace` itself has no selected summary-maintenance lifecycle.
+stages. The logical candidates have no selected summary-maintenance lifecycle.
 
-The candidates in `PlanSpace` are logical `PostASAPDAG`s. Planner also compiles
+These candidates are logical `PostASAPDAG`s. Planner also compiles
 physical candidates. Downstream systems price lifecycle assignments, bind
 the compiled typed inputs, choose storage, install state, and execute the
 precompute and query DAGs. Planner does not install a deployment plan.
@@ -52,16 +52,16 @@ precompute and query DAGs. Planner does not install a deployment plan.
 PlanningWorkload + frontend dependencies + planning models/evidence
                         |
                         v
-         Frontends -> PreASAPDAG
+         Frontends -> all candidate PreASAPDAGs
                         |
                         v
-        PlanSpace: candidate PostASAPDAGs
+        All candidate PostASAPDAGs
                         |
                         v
-       lifecycle assignments -> candidate PostASAPDAGs with timing
+       lifecycle assignments -> all candidate PostASAPDAGs with timing
                         |
                         v
-       compile -> PhysicalDAG -> cut PhysicalCandidate
+       compile -> all candidate PhysicalDAGs -> all PhysicalCandidates
 ```
 
 ---
@@ -80,7 +80,7 @@ flowchart TD
     F["PromQL lowering"]
     R["One canonical PreASAPDAG root"]
     S["Candidate search"]
-    P["PlanSpace: logical choices for this root"]
+    P["Candidate PostASAPDAGs for this root"]
     I["cost_sorted: inspect choices"]
     G["global_selection + assemble_selected_dag(root)"]
     L["One selected PostASAPDAG; exact KeepPreAsap if no optimization is selected"]
@@ -101,7 +101,7 @@ flowchart TD
 ```
 
 “Predictable” says the query is known in advance; it is independent of its
-one-minute recurrence. The `PlanSpace` may contain an exact count-summary
+one-minute recurrence. The candidate collection may contain an exact count-summary
 realization, but it is not a deployed query. Without the extra lifecycle
 inputs, the caller can still inspect candidates or obtain a logical DAG; it
 cannot conclude that maintaining a summary is cheaper than recomputing raw
@@ -116,7 +116,7 @@ flowchart LR
     C["SqlCatalog: resolves metrics and its columns"]
     F["SQL lowering"]
     R["One PreASAPDAG root"]
-    P["Candidate search → PlanSpace"]
+    P["Candidate search → candidate PostASAPDAGs"]
     Q --> F
     C --> F
     F --> R --> P
@@ -124,7 +124,7 @@ flowchart LR
 
 In this SQL example, `data_workload` can be `None` if the chosen lowering and
 search rules do not consume it. The lifecycle helper is not needed merely to
-inspect the `PlanSpace`.
+inspect the candidate PostASAPDAGs.
 
 ---
 
@@ -325,9 +325,11 @@ Additional inputs for a Planner-owned maintenance decision are listed with the
 
 ## Output
 
-### `PlanSpace<Id>`
+### Candidate PostASAPDAGs
 
-`PlanSpace` is Planner's logical candidate-space output. It contains:
+The logical layer outputs all legal candidate `PostASAPDAG`s. The current
+Rust API represents this collection compactly as `CandidatePostASAPDAGs<Id>`; this is an
+implementation name, not an additional design stage. It contains:
 
 * canonical workload roots;
 * one `TargetSubDAGCandidates` entry for each discovered target sub-DAG;
@@ -335,7 +337,7 @@ Additional inputs for a Planner-owned maintenance decision are listed with the
 * rejected candidates and reasons; and
 * information needed to select compatible candidates across targets.
 
-A `PlanSpace` represents a **space of logical DAG choices**, not a single plan.
+This collection represents a **space of logical DAG choices**, not a single plan.
 It is exposed to integrators because the backend may choose among candidates
 using implementation support, measured costs, and available resources that
 candidate search does not have. A summary that is cheap on one backend may be
@@ -356,7 +358,7 @@ For `count(up) + 1`, the addition is a root and `count(up)` can be an inner
 target. `TargetSubDAGCandidates` holds the candidates for one such target.
 
 It represents that space compactly instead of eagerly copying every complete
-DAG. `PlanSpace` stores the workload's canonical roots once, creates one
+DAG. The current representation stores the workload's canonical roots once, creates one
 `TargetSubDAGCandidates` entry for each distinct target sub-DAG, and stores
 that target's replacement candidates once inside the entry. Candidate
 children refer back to canonical
@@ -364,7 +366,7 @@ targets, so common subexpressions and shared candidates are not duplicated
 across roots.
 
 For example, if one target has three candidates and its child has two,
-eager enumeration could create six complete DAGs. `PlanSpace` stores the three
+eager enumeration could create six complete DAGs. The representation stores the three
 parent candidates, the two child candidates, and their relationship.
 Whole-plan selection chooses compatible candidates across those targets;
 `assemble_selected_dag(root)` then recursively substitutes the selected candidates to
@@ -385,14 +387,20 @@ names do not imply that the Rust APIs have been renamed.
 
 | Layer | Form | Decides |
 |---|---|---|
-| 0. Frontends | `PreASAPDAG` | Parse and lower PromQL, SQL, or MetricsQL; reject unsupported semantics such as PromQL `fill`. |
-| 1. Logical Post-ASAP | `PlanSpace<Id>` containing candidate `PostASAPDAG`s | What to compute: summary families, rewrites, and exact candidates. No placement. `PlanOutput` is an optional library-selected logical result; deployments can enumerate candidates themselves. |
-| 2. Summary maintenance lifecycle | Lifecycle choices per unique summary state and maintained population → candidate `PostASAPDAG`s with timing | `Ephemeral`, `Prepared`, `Shared`, or `ContinuouslyMaintained`. Each admissible assignment produces a candidate with node timing, window framework, and retention; this layer is the only source of timing. |
-| 3. Physical compilation | `PhysicalDAG` → `PhysicalCandidate` | Compile operators and kernels once, then cut by timing into precompute and query DAGs with typed `InputContracts`. Ingestion-time Binary lowering requires matching compile-time timing. |
+| 0. Frontends | All candidate `PreASAPDAG`s | Parse and lower PromQL, SQL, or MetricsQL; reject unsupported semantics such as PromQL `fill`. |
+| 1. Logical Post-ASAP | All legal candidate `PostASAPDAG`s | What to compute: summary families, rewrites, and exact candidates. No placement. `PlanOutput` is an optional library-selected logical result; deployments can enumerate candidates themselves. |
+| 2. Summary maintenance lifecycle | Lifecycle choices per unique summary state and maintained population → all admissible candidate `PostASAPDAG`s with timing | `Ephemeral`, `Prepared`, `Shared`, or `ContinuouslyMaintained`. Each admissible assignment produces a candidate with node timing, window framework, and retention; this layer is the only source of timing. |
+| 3. Physical compilation | All candidate `PhysicalDAG`s → all `PhysicalCandidates` | Compile operators and kernels once, then cut by timing into precompute and query DAGs with typed `InputContracts`. Ingestion-time Binary lowering requires matching compile-time timing. |
 | 4–5. Deployment | Deployment-owned | Prices lifecycle assignments with its own costs, including summary store cost; selects, binds, and executes. |
 
+Each layer preserves all legal candidates under the supplied constraints;
+none selects a winner in this pipeline. Frontend output may be a singleton
+set. Candidate sets may remain compact or be enumerated lazily, and rejected
+candidates retain reasons. The selection workflows below are opt-in library
+helpers, not mandatory stages that discard candidates before deployment.
+
 A deployment that prices candidates itself, such as ASAPQuery-backend, must
-enumerate them from `PlanSpace`, not read `PlanOutput`; otherwise candidates
+enumerate the candidate collection, not read `PlanOutput`; otherwise candidates
 such as those added in #472 never reach its pricing.
 
 `PostAsapDag` exports the logical `PostASAPDAG` for physical compilation; it
@@ -403,7 +411,7 @@ caller's cost model; a pricing deployment makes that lifecycle choice itself.
 Both forms are described in
 [Post-ASAP IR](../concepts/post-asap-ir.md#tree-and-exported-dag-forms).
 
-Placement does not belong to `PlanSpace`. The grouped `Rate`→`Sum`
+Placement does not belong to logical candidate generation. The grouped `Rate`→`Sum`
 "maintenance versus query placement" candidate pair from #472 is a placement
 choice; #485 replaces it with one candidate placed by lifecycle choice.
 
@@ -420,7 +428,7 @@ All paths start by lowering the workload and searching for candidates:
 PlanningWorkload + frontend dependencies + planning models/evidence
     -> frontend lowering: one PreASAPDAG root per normalized query entry
     -> search_workload_with_targets
-    -> PlanSpace
+    -> all legal candidate PostASAPDAGs
 ```
 
 The integration associates each lowered root with a caller-owned `Id` and its
@@ -437,7 +445,7 @@ Then choose the operation matching the caller's responsibility:
 
 ### Ranked view
 
-`PlanSpace::cost_sorted` returns one `RankedTargetSubDAGCandidates` for each
+`CandidatePostASAPDAGs::cost_sorted` returns one `RankedTargetSubDAGCandidates` for each
 `TargetSubDAGCandidates` entry. Conceptually, it is the same target's
 candidates in cost-model preference order where the model defines one
 (otherwise discovery order), with one displayed cost per candidate. It is
@@ -462,8 +470,8 @@ physical deployability.
 
 ### Selection and DAG assembly
 
-The input is `PlanSpace` and a cost model. Call
-`PlanSpace::global_selection(&cost_model)` once for the workload, then
+The input is the candidate collection and a cost model. In the current API, call
+`CandidatePostASAPDAGs::global_selection(&cost_model)` once for the workload, then
 `GlobalSelection::assemble_selected_dag(root)` for each wanted query root.
 These are two public APIs, not one combined call: N roots require one selection
 and N assembly calls. Each successful assembly returns one DAG root; the caller
@@ -478,7 +486,7 @@ the result for one query root.
 
 | Input → decisions → output (click a step for details) |
 |:---:|
-| **Input:** [PlanSpace](asap-aware-plan-search.md) + cost model |
+| **Input:** [Candidate PostASAPDAGs](asap-aware-plan-search.md) + cost model |
 | ↓ |
 | **Select:** [global_selection](../../develop_docs/library-api.md#what-does-global-selection-mean) chooses compatible candidates |
 | ↓ |
@@ -500,7 +508,7 @@ summary-maintenance lifecycle costs. Use it when ASAPPlanner owns the decision
 to maintain summaries versus recompute raw data. It is not needed for candidate
 inspection or when the downstream backend owns that decision.
 
-Starting from an existing `PlanSpace`, call these two public helpers in order;
+Starting from the candidate collection (currently `CandidatePostASAPDAGs`), call these two public helpers in order;
 there is no need to run the ordinary selection/assembly workflow first:
 
 1. `global_selection_with_summary_maintenance_lifecycles` uses the workload
@@ -529,8 +537,8 @@ Across the two calls, the caller supplies these parameters:
 
 | Helper parameter | Source | Required |
 |---|---|---:|
-| `PlanSpace` | Canonical ASAPPlanner output; passed to selection | Yes |
-| `GlobalSelection` and one root | Selection result and a root in that `PlanSpace`; passed to DAG assembly | Yes for each assembled root |
+| Candidate collection (`CandidatePostASAPDAGs` in the current API) | Logical candidates passed to selection | Yes |
+| `GlobalSelection` and one root | Selection result and a root in that candidate collection; passed to DAG assembly | Yes for each assembled root |
 | Workload binding | `QueryWorkload` plus the workload-entry indices associated with each root | Yes |
 | Planning time (`now_ms`) | Caller clock in Unix milliseconds | Yes |
 | Planning horizon | Caller policy | Conditional: required for finite totals over recurring demand |
