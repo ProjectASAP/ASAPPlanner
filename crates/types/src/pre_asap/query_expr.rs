@@ -254,8 +254,13 @@ pub enum BinaryOpKind {
     /// Arithmetic — `Add/Sub/Mul/Div/Mod` (shared with `QueryExpr::Arithmetic`).
     Arithmetic(ArithmeticOpKind),
     /// Comparison — `Eq/Ne/Lt/Le/Gt/Ge` + `Like/ILike/Regex` family (shared
-    /// with `QueryExpr::Compare`).
+    /// with `QueryExpr::Compare`). PromQL keeps the matched series whose
+    /// comparison holds.
     Compare(CompareOpKind),
+    /// PromQL comparison with the `bool` modifier: every matched series
+    /// yields 1 or 0 and loses its metric name. A separate variant, not a
+    /// flag, because only comparisons take `bool`.
+    CompareBool(CompareOpKind),
     /// PromQL vector-set operation.
     Set(PromQLVectorSetOpKind),
 }
@@ -265,6 +270,7 @@ impl std::fmt::Display for BinaryOpKind {
         match self {
             BinaryOpKind::Arithmetic(op) => write!(f, "{op}"),
             BinaryOpKind::Compare(op) => write!(f, "{op}"),
+            BinaryOpKind::CompareBool(op) => write!(f, "{op} bool"),
             BinaryOpKind::Set(PromQLVectorSetOpKind::And) => f.write_str("AND"),
             BinaryOpKind::Set(PromQLVectorSetOpKind::Or) => f.write_str("OR"),
             BinaryOpKind::Set(PromQLVectorSetOpKind::Unless) => f.write_str("unless"),

@@ -1274,7 +1274,10 @@ fn selector_is_bucket(vs: &VectorSelector) -> bool {
 fn walk_binary(bin: &BinaryExpr) -> Result<Unresolved> {
     let lhs = scalar_or_vector(&bin.lhs)?;
     let rhs = scalar_or_vector(&bin.rhs)?;
-    let op = binop(bin.op.id())?;
+    let op = match (binop(bin.op.id())?, bin.return_bool()) {
+        (BinaryOpKind::Compare(op), true) => BinaryOpKind::CompareBool(op),
+        (op, _) => op,
+    };
     let vector_match = bin.modifier.as_ref().map(|m| {
         let (kind, labels) = match &m.matching {
             Some(LabelModifier::Include(ls)) => (VectorMatchKind::On, ls.labels.clone()),

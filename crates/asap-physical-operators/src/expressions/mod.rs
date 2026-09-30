@@ -75,6 +75,14 @@ impl Expression {
                         | CompareOpKind::Gt
                         | CompareOpKind::Ge,
                     ) => DataType::Bool,
+                    BinaryOpKind::CompareBool(
+                        CompareOpKind::Eq
+                        | CompareOpKind::Ne
+                        | CompareOpKind::Lt
+                        | CompareOpKind::Le
+                        | CompareOpKind::Gt
+                        | CompareOpKind::Ge,
+                    ) => DataType::Float64,
                     _ => return Err(invalid("unsupported binary operation")),
                 };
                 Ok((dtype, n || m))
