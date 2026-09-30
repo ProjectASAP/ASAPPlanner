@@ -1101,6 +1101,13 @@ fn histogram_quantile_normalizes_buckets_like_prometheus() {
         quantile("histogram_quantile(0.5, x_bucket)", &invalid),
         vec![("job=a".into(), 1.)]
     );
+    // Go's ParseFloat rejects an out-of-range bound rather than rounding it to +Inf.
+    let overflow = buckets(&[("job=a", &[("1", 1.), ("1e400", 2.)])]);
+    let rows = quantile("histogram_quantile(0.5, x_bucket)", &overflow);
+    assert!(
+        matches!(rows.as_slice(), [(_, v)] if v.is_nan()),
+        "{rows:?}"
+    );
     let duplicate = buckets(&[("job=a", &[("1", 1.), ("1.0", 1.), ("+Inf", 4.)])]);
     assert_eq!(
         quantile("histogram_quantile(0.5, x_bucket)", &duplicate),

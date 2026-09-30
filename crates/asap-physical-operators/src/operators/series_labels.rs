@@ -541,7 +541,7 @@ pub(super) fn execute<'a>(
                     work.checkpoint().await?;
                     let mut set = left_layout.read(input, &row)?;
                     // Prometheus skips a series whose `le` is not a float.
-                    let Some(bound) = set.remove(bucket).and_then(|v| v.parse::<f64>().ok()) else {
+                    let Some(bound) = set.remove(bucket).and_then(|v| parse_bound(&v)) else {
                         continue;
                     };
                     let Value::Float64(count) = row[left_layout.value] else {
@@ -557,11 +557,11 @@ pub(super) fn execute<'a>(
                     histograms.entry(set).or_default().push((bound, count));
                 }
                 let out_layout = layout(&output)?;
+                let q = f64::from_bits(*quantile);
                 let mut seen = std::collections::BTreeSet::new();
                 for (mut set, buckets) in histograms {
                     work.checkpoint().await?;
                     set.remove("__name__");
-                    let q = f64::from_bits(*quantile);
                     let value = aggregate::temporal::bucket_quantile(q, buckets, &context).await?;
                     let mut row = vec![Value::Null; output.fields.len()];
                     out_layout.write(&output, &mut row, &set)?;
@@ -580,4 +580,15 @@ pub(super) fn execute<'a>(
         Batch::try_new(output.clone(), result)
     })
     .boxed_local())
+}
+
+/// A bucket bound as Go's `strconv.ParseFloat` reads it, except hex floats:
+/// an out-of-range literal is an error, not an infinity.
+fn parse_bound(text: &str) -> Option<f64> {
+    let bound = text.parse::<f64>().ok()?;
+    let unsigned = text.strip_prefix(['+', '-']).unwrap_or(text);
+    let infinite = ["inf", "infinity"]
+        .iter()
+        .any(|word| unsigned.eq_ignore_ascii_case(word));
+    (bound.is_finite() || bound.is_nan() || infinite).then_some(bound)
 }
