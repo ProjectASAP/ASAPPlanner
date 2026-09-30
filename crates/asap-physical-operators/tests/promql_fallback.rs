@@ -18,13 +18,17 @@ use std::{collections::BTreeMap, rc::Rc};
 
 /// Bare selectors look back one ingestion interval: 60s.
 fn parse(query: &str) -> QueryExpr {
+    parse_with(query, AccuracyTarget::Exact)
+}
+
+fn parse_with(query: &str, accuracy: AccuracyTarget) -> QueryExpr {
     let workload = PlanningWorkload {
         query_workload: QueryWorkload {
             language: QueryLanguage::PromQL,
             query_batch: Some(vec![BatchEntry {
                 query: Query(query.into()),
                 requirements: QueryRequirements {
-                    accuracy: AccuracyRequirement::Explicit(AccuracyTarget::Exact),
+                    accuracy: AccuracyRequirement::Explicit(accuracy),
                     ..Default::default()
                 },
                 predictability: Predictability::Unknown,
@@ -91,9 +95,13 @@ fn metric(selector: &QueryExpr) -> String {
 
 fn compile_query(query: &str) -> Result<CompiledPhysicalDag, String> {
     let expression = lower(query);
-    let dag = fallback_dag(expression.clone());
+    compile_dag(&expression, &fallback_dag(expression.clone()))
+}
+
+/// Compile a DAG whose root is the Fallback computing `expression`.
+fn compile_dag(expression: &QueryExpr, dag: &PostAsapDag) -> Result<CompiledPhysicalDag, String> {
     let root = u64::from(dag.root.0);
-    let inputs = promql_fallback::raw_series(&expression)
+    let inputs = promql_fallback::raw_series(expression)
         .map_err(|e| e.to_string())?
         .into_iter()
         .enumerate()
@@ -104,7 +112,7 @@ fn compile_query(query: &str) -> Result<CompiledPhysicalDag, String> {
             )
         })
         .collect();
-    let program = compile(&dag, inputs, &[root]).map_err(|e| e.to_string())?;
+    let program = compile(dag, inputs, &[root]).map_err(|e| e.to_string())?;
     Ok(serde_json::from_slice(&serde_json::to_vec(&program).unwrap()).unwrap())
 }
 
@@ -117,9 +125,19 @@ fn evaluate(
     at: i64,
 ) -> Result<Vec<(BTreeMap<String, String>, i64, f64)>, String> {
     let expression = lower(query);
-    let program = compile_query(query)?;
+    evaluate_dag(&expression, &fallback_dag(expression.clone()), metrics, at)
+}
+
+#[allow(clippy::type_complexity)]
+fn evaluate_dag(
+    expression: &QueryExpr,
+    dag: &PostAsapDag,
+    metrics: &[(&str, &[Sample])],
+    at: i64,
+) -> Result<Vec<(BTreeMap<String, String>, i64, f64)>, String> {
+    let program = compile_dag(expression, dag)?;
     let mut sources = BTreeMap::new();
-    let selectors = promql_fallback::raw_series(&expression).unwrap();
+    let selectors = promql_fallback::raw_series(expression).unwrap();
     for (i, (selector, schema)) in selectors.into_iter().enumerate() {
         let name = metric(&selector);
         let rows = metrics
@@ -1172,4 +1190,47 @@ fn histogram_quantile_rejects_equal_output_label_sets() {
     )
     .unwrap_err();
     assert!(error.contains("same labelset"), "{error}");
+}
+
+// Candidate search keeps a classic histogram_quantile whole and exact, even
+// for an approximate target, and the selected DAG compiles and executes.
+#[test]
+fn histogram_quantile_selection_keeps_the_exact_fallback() {
+    use asap_aware_mapping::{
+        accuracy::DefaultAccuracyModel, cost_model::DefaultCostModel, default_strategies,
+        search_workload_with_targets, Replacement,
+    };
+    let samples = buckets(&[("job=a", HISTOGRAM)]);
+    for target in [AccuracyTarget::Exact, AccuracyTarget::Epsilon(0.01)] {
+        for query in [
+            "histogram_quantile(0.5, x_bucket)",
+            "histogram_quantile(0.5, sum by (le, job) (x_bucket))",
+        ] {
+            let root = Rc::new(
+                promql_rows::with_series_identity(&parse_with(query, target.clone())).unwrap(),
+            );
+            let space = search_workload_with_targets(
+                vec![(query, root.clone(), Some(target.clone()))],
+                &default_strategies(),
+                &DefaultAccuracyModel,
+            );
+            let planned = &space.roots[0].1;
+            let candidates = &space.candidates_for_target(planned).unwrap().candidates;
+            assert!(
+                candidates.iter().all(|c| matches!(&c.replacement,
+                    Replacement::Summary(node) if matches!(&node.expr,
+                        SummaryExpr::KeepPreAsap(e) if **e == *root))),
+                "{query}: {candidates:?}"
+            );
+            let selected = space
+                .global_selection(&DefaultCostModel)
+                .assemble_selected_dag(planned)
+                .unwrap()
+                .unwrap();
+            let dag = compile_post_asap_dag(&selected).unwrap();
+            let rows = evaluate_dag(&root, &dag, &[("x_bucket", &samples)], 60).unwrap();
+            let values: Vec<_> = rows.iter().map(|(_, _, v)| *v).collect();
+            assert_eq!(values, vec![1.75], "{query} {target:?}");
+        }
+    }
 }
