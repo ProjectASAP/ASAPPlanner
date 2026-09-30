@@ -30,9 +30,9 @@ operators.
 │ 2. Summary maintenance lifecycle                                 │
 │    Per unique summary state / maintained population:             │
 │    Ephemeral | Prepared | Shared | ContinuouslyMaintained        │
-│    Chosen assignment -> node timing, window framework,           │
+│    Each assignment -> node timing, window framework,             │
 │    retention. The only source of timing.                         │
-│    -> PostASAPDAG with timing                                    │
+│    -> candidate PostASAPDAGs with timing                         │
 │                      │                                           │
 │ 3. Physical compile (asap-physical-operators)                    │
 │    Compile once -> PhysicalDAG                                   │
@@ -70,7 +70,7 @@ of a `PhysicalDAG` with their typed input contracts.
 |---|---|---|
 | 0. Frontends | Language semantics and lowering into `PreASAPDAG`. A construct that cannot be represented faithfully is rejected, never ignored (for example PromQL `fill`). | Summaries, placement |
 | 1. Logical candidate space (`PlanSpace`) | `PlanSpace` represents candidate `PostASAPDAG`s: summary families, exact rewrites, compositions, and series-identity typing. | Placement |
-| 2. Summary maintenance lifecycle | For each unique summary state and maintained population, the lifecycle choices (`Ephemeral`, `Prepared`, `Shared`, `ContinuouslyMaintained`) and their costs under a caller-supplied cost model. A chosen assignment sets every node's execution timing, window framework and retention. | The cost values themselves |
+| 2. Summary maintenance lifecycle | For each unique summary state and maintained population, the lifecycle choices (`Ephemeral`, `Prepared`, `Shared`, `ContinuouslyMaintained`) and their costs under a caller-supplied cost model. Each assignment sets every node's execution timing, window framework and retention, producing candidate `PostASAPDAG`s with timing. | The cost values themselves |
 | 3. Physical compilation | All computation: value operations, aggregation, PromQL functions and subqueries, vector matching, comparisons and set operators, `histogram_quantile`, summary build, merge and estimate, sort, limit, joins. Compiles a `PostASAPDAG` with timing into a `PhysicalDAG`, then cuts it by timing into a `PhysicalCandidate`. | Raw ingestion, pane construction, storage formats, decoding persisted state, scheduling |
 | 4. Deployment selection | Prices lifecycle assignments and, through its cost model, logical candidates. Shared state is counted once. It binds the chosen plan. | Re-lowering computation |
 | 5. Deployment execution | Ingestion and routing, pane assignment and completeness, lateness and revisions, storage and codecs over Planner kernel states, reading stored state into typed inputs, query-time raw sources, the exact-engine fallback. | Any computation algorithm |
@@ -106,9 +106,11 @@ applying an assignment are:
 * an `Ephemeral` state that feeds a retained state runs at ingestion time,
   because query-time work may not feed ingestion-time work.
 
-A chosen lifecycle assignment produces a `PostASAPDAG` with timing. This is the same logical
-graph with execution timing assigned, not a new DAG representation. Physical
-compilation calls `compile` once to produce a `PhysicalDAG`, then
+The lifecycle layer produces candidate `PostASAPDAG`s with timing, one for
+each admissible lifecycle assignment of a logical candidate. These are
+logical graphs with execution timing assigned, not a new DAG representation
+or a single selected plan. The deployment prices the assignments and selects
+among the candidates. For each required lowering, physical compilation calls `compile` once to produce a `PhysicalDAG`, then
 `cut_candidate(&compiled, &frontier_from_timing(&dag)?)` to form the
 `PhysicalCandidate`. The timing frontier contains the ingestion-time nodes read
 by query-time nodes, plus an ingestion-time root. An ingestion-time `Binary` is
