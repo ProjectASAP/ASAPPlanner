@@ -23,22 +23,24 @@ operators.
 │    Parse + lower -> CandidatePreASAPDAGs                         │
 │    Reject unsupported constructs, such as PromQL fill.           │
 │                      │                                           │
+│ Logical planning (what)                                          │
 │ 1. Logical Post-ASAP (asap-aware-mapping)                        │
 │    WHAT to compute; no placement.                                │
 │    Summary families, rewrites, exact candidates                  │
 │    -> CandidatePostASAPDAGs                                      │
 │                      │                                           │
-│ 2. Summary maintenance lifecycle                                 │
-│    Per unique summary state / maintained population:             │
-│    Ephemeral | Prepared | Shared | ContinuouslyMaintained        │
-│    Each assignment -> node timing, window framework,             │
-│    retention. The only source of timing.                         │
-│    -> CandidatePostASAPDAGs with timing                          │
+│ Physical planning (how)                                          │
+│ 2. Physical design: summary materialization                      │
+│    Per unique summary state / maintained population, choose a    │
+│    lifecycle: Ephemeral | Prepared | Shared |                    │
+│    ContinuouslyMaintained. Each assignment -> node timing,       │
+│    window framework, retention. The only source of timing.       │
+│    -> CandidatePostASAPDAGs with materialization annotations     │
 │                      │                                           │
-│ 3. Physical compile                                              │
-│    Compile and cut by timing -> CandidatePhysicalDAGs            │
-│    Each candidate contains:                                      │
-│    { precompute DAG, query DAG, typed InputContracts }           │
+│ 3. Physical implementation: compilation                          │
+│    Lower each Post-ASAP node to operators; cut by timing         │
+│    -> CandidatePhysicalDAGs                                      │
+│    Each candidate: { precompute DAG, query DAG, InputContracts } │
 │    Operators + kernels implement all computation.                │
 └──────────────────────┬───────────────────────────────────────────┘
           CandidatePhysicalDAGs (the boundary)
@@ -52,7 +54,7 @@ operators.
 
 Every Planner layer outputs all legal candidates represented at that stage:
 
-`CandidatePreASAPDAGs → CandidatePostASAPDAGs → CandidatePostASAPDAGs with timing → CandidatePhysicalDAGs`
+`CandidatePreASAPDAGs → CandidatePostASAPDAGs → CandidatePostASAPDAGs with materialization annotations → CandidatePhysicalDAGs`
 
 No intermediate layer chooses a winning candidate. Frontend lowering can
 produce a singleton candidate set for an unambiguous query; it need not invent
@@ -81,7 +83,7 @@ the earlier types, where one exists.
 | `CandidatePreASAPDAGs` | Frontend candidates, keyed by workload entry; deterministic frontends produce one per entry | None; one `QueryExpr` root per entry | `CandidatePreASAPDAGs` |
 | `PostASAPDAG` | One shared logical computation graph | `Rc<SummaryNode>` tree; exported as `PostAsapDag` | `PostASAPDAG` |
 | `CandidatePostASAPDAGs` | All legal logical candidates for the workload | `PlanSpace` | `CandidatePostASAPDAGs` |
-| `CandidatePostASAPDAGs` with timing | The logical candidates with each admissible lifecycle assignment's timing, window framework and retention | None; lifecycle helpers return one selected `SummaryMaintenanceLifecyclePlan` | `CandidatePostASAPDAGs` with timing |
+| `CandidatePostASAPDAGs` with materialization annotations | The same Post-ASAP candidates, annotated with each admissible lifecycle assignment's timing, window framework and retention; still Post-ASAP DAGs, not physical ones | None; lifecycle helpers return one selected `SummaryMaintenanceLifecyclePlan` | `CandidatePostASAPDAGs` with timing |
 | `PhysicalDAG` | Compiled operators and kernels with typed inputs, before runtime sources are bound | None | `PhysicalDAG` |
 | `CandidatePhysicalDAGs` | Physical candidates with their timing cuts, metadata and diagnostics, before deployment selection | None | `CandidatePhysicalDAGs` |
 
@@ -93,10 +95,51 @@ cut from it on demand. The exported `PostAsapDag` form is an explicit
 export/import format, not an additional planning layer (see
 [Post-ASAP IR](../concepts/post-asap-ir.md#tree-and-exported-dag-forms)).
 
+There are only two kinds of DAG after the frontend: Post-ASAP DAGs, whose
+nodes are logical operations (optionally carrying materialization annotations),
+and physical DAGs, whose nodes are selected physical operators.
+
 Binding runtime sources is an execution step of a `PhysicalDAG`, not another
 DAG. At execution the deployment supplies a source for each typed input slot,
 the slots are checked against their contracts, and the graph runs; the bound
 instance lives only for that execution and is not persisted or compared.
+
+### Physical planning
+
+Physical planning has two parts of different character, as in databases.
+
+**Physical design (summary materialization).** In this document,
+*materialization* means summary state kept across executions, like a
+materialized view: whether a state is maintained, how it is refreshed and how
+long it is retained. This is a workload-level decision, like a database's
+materialized-view selection: it spans queries (shared state is kept once), it
+depends on workload demand (read and update rates, horizon), and its result
+persists. The Planner enumerates the admissible choices; the deployment prices
+and chooses. The choice is recorded as annotations on the Post-ASAP nodes
+(timing, window framework, retention), so the annotated graph is still a
+Post-ASAP DAG, much as physical properties annotate logical expressions in a
+database optimizer. Operator materialization (blocking operators such as sort,
+aggregation or summary build) and computing a shared subexpression once are
+details of compilation and the runtime, not separate layers.
+
+**Physical implementation (compilation).** Compilation lowers each Post-ASAP
+node to physical operators and cuts the graph by timing into a precompute and a
+query DAG. Materialization is *decided* by physical design and *realized* here:
+the precompute DAG's outputs at the cut are the materialized states, and the
+query DAG reads them through typed input slots. A physical DAG corresponds to
+its Post-ASAP DAG node by node. A node may expand into several operators (for
+example TopK into sort then limit, or a multi-input merge into union then
+merge); helper operators are numbered from their source node, so every operator
+traces back to one Post-ASAP node. One exception is a `Fallback` node, which
+wraps a whole Pre-ASAP expression and compiles to many operators; the
+operator-flattening proposal ([operator sharing](operator-sharing.md), from
+#469) removes it by making non-ASAP operators ordinary Post-ASAP nodes. Its
+export section currently groups the largest non-ASAP subtree into one
+`Relational` fragment; per-node correspondence needs that export to keep one
+node per operator. Today each node kind has essentially one lowering (a
+`Binary` lowers differently at ingestion and query time); if a node gains
+alternative physical implementations, they become further candidates in
+`CandidatePhysicalDAGs`, priced and chosen by the deployment.
 
 ### Responsibilities
 
@@ -104,8 +147,8 @@ instance lives only for that execution and is not persisted or compared.
 |---|---|---|
 | 0. Frontends | Language semantics and lowering into `CandidatePreASAPDAGs`. A construct that cannot be represented faithfully is rejected, never ignored (for example PromQL `fill`). | Summaries, placement |
 | 1. Logical Post-ASAP | `CandidatePostASAPDAGs`: all legal logical candidates, including summary families, exact rewrites, compositions, and series-identity typing. | Placement |
-| 2. Summary maintenance lifecycle | For each unique summary state and maintained population, the lifecycle choices (`Ephemeral`, `Prepared`, `Shared`, `ContinuouslyMaintained`) and their costs under a caller-supplied cost model. Each assignment sets every node's execution timing, window framework and retention, producing `CandidatePostASAPDAGs` with timing. | The cost values themselves |
-| 3. Physical compilation | All computation: value operations, aggregation, PromQL functions and subqueries, vector matching, comparisons and set operators, `histogram_quantile`, summary build, merge and estimate, sort, limit, joins. Compiles `CandidatePostASAPDAGs` with timing into `CandidatePhysicalDAGs`, including each candidate's timing cuts; it does not select a winner. | Raw ingestion, pane construction, storage formats, decoding persisted state, scheduling |
+| 2. Physical design: summary materialization | For each unique summary state and maintained population, the lifecycle choices (`Ephemeral`, `Prepared`, `Shared`, `ContinuouslyMaintained`) and their costs under a caller-supplied cost model. Each assignment sets every node's execution timing, window framework and retention, producing `CandidatePostASAPDAGs` with materialization annotations. | The cost values themselves; operator implementation |
+| 3. Physical implementation: compilation | All computation: value operations, aggregation, PromQL functions and subqueries, vector matching, comparisons and set operators, `histogram_quantile`, summary build, merge and estimate, sort, limit, joins. Lowers each node of `CandidatePostASAPDAGs` with materialization annotations to operators and cuts by timing into `CandidatePhysicalDAGs`; it does not select a winner. | Raw ingestion, pane construction, storage formats, decoding persisted state, scheduling |
 | 4. Deployment selection | Prices lifecycle assignments and, through its cost model, logical candidates. Shared state is counted once. It binds the chosen plan. | Re-lowering computation |
 | 5. Deployment execution | Ingestion and routing, pane assignment and completeness, lateness and revisions, storage and codecs over Planner kernel states, reading stored state into typed inputs, query-time raw sources, the exact-engine fallback. Sampled or delta edge frames are rejected. | Any computation algorithm |
 
@@ -131,7 +174,7 @@ and encoding belong to the deployment.
 
 ## Timing and placement
 
-Timing comes only from the lifecycle layer. Logical strategies propose
+Timing comes only from physical design, that is, from the chosen lifecycle assignment. Logical strategies propose
 computation candidates, not execution timing or placement. The rules for
 applying an assignment are:
 
@@ -141,10 +184,10 @@ applying an assignment are:
 * an `Ephemeral` state that feeds a retained state runs at ingestion time,
   because query-time work may not feed ingestion-time work.
 
-The lifecycle layer produces `CandidatePostASAPDAGs` with timing, containing
-one candidate for each admissible lifecycle assignment of a logical candidate.
-These are logical graphs with execution timing assigned, not a new DAG
-representation or a single selected plan. The deployment prices the
+Physical design produces `CandidatePostASAPDAGs` with materialization
+annotations, containing one candidate for each admissible lifecycle assignment
+of a logical candidate. These are Post-ASAP graphs with execution timing
+assigned, not a new DAG representation or a single selected plan. The deployment prices the
 assignments and selects among the candidates. Each required lowering is
 compiled once, and compatible assignments share that `PhysicalDAG`; each
 candidate's cut is derived from it. The timing frontier contains the
