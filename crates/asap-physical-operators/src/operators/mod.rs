@@ -85,6 +85,7 @@ enum Kind {
     },
     SeriesBinary {
         operator: planner_types::post_asap::BinaryOperator,
+        scalars: [bool; 2],
     },
     Project(Vec<Expression>),
     Filter(Expression),

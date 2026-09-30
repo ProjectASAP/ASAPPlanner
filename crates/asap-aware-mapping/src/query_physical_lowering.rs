@@ -1029,7 +1029,7 @@ fn promql_binary_operation(
         BinaryOpKind::Set(PromQLVectorSetOpKind::And) => PromqlBinaryOperation::And,
         BinaryOpKind::Set(PromQLVectorSetOpKind::Or) => PromqlBinaryOperation::Or,
         BinaryOpKind::Set(PromQLVectorSetOpKind::Unless) => PromqlBinaryOperation::Unless,
-        BinaryOpKind::Arithmetic(_) | BinaryOpKind::Compare(_) => {
+        BinaryOpKind::Arithmetic(_) | BinaryOpKind::Compare(_) | BinaryOpKind::CompareBool(_) => {
             PromqlBinaryOperation::ArithmeticOrComparison
         }
     }

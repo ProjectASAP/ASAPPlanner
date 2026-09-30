@@ -705,6 +705,25 @@ fn binary_op_with_on_grouping() {
     assert_eq!(vm.labels, vec!["host".to_string()]);
 }
 
+// `bool` changes a comparison from a filter to a 0/1 result, so the IR must
+// carry it.
+#[test]
+fn bool_comparisons_are_distinct() {
+    let op = |q: &str| match lower(q) {
+        QueryExpr::BinaryOp { op, .. } => op,
+        other => panic!("expected BinaryOp, got {other:?}"),
+    };
+    assert_eq!(op("a > 1"), BinaryOpKind::Compare(CompareOpKind::Gt));
+    assert_eq!(
+        op("a > bool 1"),
+        BinaryOpKind::CompareBool(CompareOpKind::Gt)
+    );
+    assert_eq!(
+        op("a == bool on(job) b"),
+        BinaryOpKind::CompareBool(CompareOpKind::Eq)
+    );
+}
+
 #[test]
 fn binary_op_binds_each_branch_against_its_own_schema() {
     // Each side scans a different metric and groups by a different label. With a

@@ -580,7 +580,6 @@ fn on_and_ignoring_select_the_matching_labels() {
     assert!(evaluate("a + on(job) b", &[("a", a), ("b", pair)], 60).is_err());
     assert!(evaluate("a + on(job) b", &[("a", pair), ("b", b)], 60).is_err());
     assert!(labeled("a + on(job) b", &[("a", pair), ("b", other)], 60).is_empty());
-    assert!(promql_rows::with_series_identity(&parse("a + on(job) group_left b")).is_err());
 }
 
 // without() groups by every label except the listed ones and the metric name.
@@ -646,8 +645,8 @@ fn empty_labels_and_empty_sides_match_prometheus() {
     let pair: &[Sample] = &[("job=x,inst=1", 50, 1.), ("job=x,inst=2", 50, 2.)];
     assert!(labeled("a + on(job) b", &[("b", pair)], 60).is_empty());
     assert!(labeled("b + on(job) a", &[("b", pair)], 60).is_empty());
-    // A non-literal scalar operand has no identity realization yet.
-    assert!(promql_rows::with_series_identity(&parse("a + scalar(b)")).is_err());
+    // `time()` has no row realization yet.
+    assert!(promql_rows::with_series_identity(&parse("a - time()")).is_err());
 }
 
 // Sums and averages use Prometheus' Kahan-Neumaier compensation, and an
@@ -671,4 +670,329 @@ fn sums_and_averages_are_compensated_like_prometheus() {
     assert_eq!(one("avg(m)", cancel, 60), 1. / 3.);
     let huge = &[("a", 50, 1.7e308), ("b", 50, 1.7e308)];
     assert_eq!(one("avg(m)", huge, 60), 1.7e308);
+}
+
+/// `(k=v,... sorted, value)` rows for readable expectations.
+fn rows(pairs: &[(&str, f64)]) -> Vec<(String, f64)> {
+    let mut rows = pairs
+        .iter()
+        .map(|(spec, value)| (spec.to_string(), *value))
+        .collect::<Vec<_>>();
+    rows.sort_by(|a, b| a.0.cmp(&b.0));
+    rows
+}
+
+/// `labeled`, with NaN values rendered comparable.
+fn labeled_nan(query: &str, metrics: &[(&str, &[Sample])], at: i64) -> Vec<(String, String)> {
+    labeled(query, metrics, at)
+        .into_iter()
+        .map(|(labels, value)| (labels, format!("{value:?}")))
+        .collect()
+}
+
+const C: &[Sample] = &[
+    ("job=x", 50, 10.),
+    ("job=y", 50, 20.),
+    ("job=w", 50, 0.),
+    ("job=n", 50, f64::NAN),
+];
+
+// A comparison with a scalar keeps the matching series with their value and
+// metric name, whichever side the scalar is on; `bool` yields 1 or 0 for every
+// series and drops the name. NaN compares unequal to everything.
+#[test]
+fn scalar_comparisons_filter_or_return_bool() {
+    let metrics = &[("a", C)];
+    let kept = rows(&[("__name__=a,job=x", 10.), ("__name__=a,job=y", 20.)]);
+    assert_eq!(labeled("a > 5", metrics, 60), kept);
+    assert_eq!(labeled("5 < a", metrics, 60), kept);
+    assert_eq!(
+        labeled("a <= 10", metrics, 60),
+        rows(&[("__name__=a,job=w", 0.), ("__name__=a,job=x", 10.)])
+    );
+    assert_eq!(
+        labeled("a > bool 5", metrics, 60),
+        rows(&[("job=n", 0.), ("job=w", 0.), ("job=x", 1.), ("job=y", 1.)])
+    );
+    assert_eq!(
+        labeled("10 == bool a", metrics, 60),
+        rows(&[("job=n", 0.), ("job=w", 0.), ("job=x", 1.), ("job=y", 0.)])
+    );
+    // scalar() of no series is NaN.
+    assert_eq!(labeled("a != scalar(b)", metrics, 60).len(), 4);
+    assert!(labeled("a == scalar(b)", metrics, 60).is_empty());
+    assert!(labeled("a > 5", &[], 60).is_empty());
+    // Only `bool` drops the name, so only it can make label sets collide.
+    let equal: &[Sample] = &[("job=x", 50, 1.), ("__name__=b,job=x", 50, 2.)];
+    assert_eq!(labeled("a > 0", &[("a", equal)], 60).len(), 2);
+    let error = evaluate("a > bool 0", &[("a", equal)], 60).unwrap_err();
+    assert!(error.contains("same labelset"), "{error}");
+}
+
+// Vector comparisons match one-to-one like arithmetic. A filter keeps the
+// left series, name included, unless `on` reduces its labels; `bool` drops the
+// name. A left duplicate is an error only if more than one of it is kept.
+#[test]
+fn vector_comparisons_match_one_to_one() {
+    let metrics = &[("a", A), ("b", B)];
+    assert_eq!(
+        labeled("a > b", metrics, 60),
+        rows(&[("__name__=a,job=x", 10.)])
+    );
+    assert_eq!(
+        labeled("a >= b", metrics, 60),
+        rows(&[("__name__=a,job=w", 0.), ("__name__=a,job=x", 10.)])
+    );
+    assert_eq!(
+        labeled("a > bool b", metrics, 60),
+        rows(&[("job=w", 0.), ("job=x", 1.)])
+    );
+    assert!(labeled("a < b", metrics, 60).is_empty());
+    let a: &[Sample] = &[("job=x,inst=1", 50, 10.)];
+    let b: &[Sample] = &[("job=x,inst=2", 50, 4.)];
+    let metrics = &[("a", a), ("b", b)];
+    assert_eq!(
+        labeled("a > on(job) b", metrics, 60),
+        rows(&[("job=x", 10.)])
+    );
+    assert_eq!(
+        labeled("a > ignoring(inst) b", metrics, 60),
+        rows(&[("__name__=a,job=x", 10.)])
+    );
+    let pair: &[Sample] = &[("job=x,inst=1", 50, 1.), ("job=x,inst=2", 50, 5.)];
+    let metrics = &[("a", pair), ("b", b)];
+    assert_eq!(
+        labeled("a > on(job) b", metrics, 60),
+        rows(&[("job=x", 5.)])
+    );
+    let error = evaluate("a > bool on(job) b", metrics, 60).unwrap_err();
+    assert!(error.contains("many-to-one"), "{error}");
+    let nan: &[Sample] = &[("job=x", 50, f64::NAN)];
+    let metrics = &[("a", nan), ("b", nan)];
+    assert_eq!(labeled("a == bool b", metrics, 60), rows(&[("job=x", 0.)]));
+    assert_eq!(
+        labeled_nan("a != b", metrics, 60),
+        vec![("__name__=a,job=x".into(), "NaN".into())]
+    );
+}
+
+const S: &[Sample] = &[
+    ("job=x", 50, 1.),
+    ("job=y", 50, 2.),
+    ("job=z,inst=1", 50, 3.),
+];
+const T: &[Sample] = &[
+    ("job=x", 50, 10.),
+    ("job=w", 50, 20.),
+    ("job=z,inst=2", 50, 30.),
+];
+
+// Set operators match label sets many-to-many, ignoring the name by default,
+// and return the original series unchanged.
+#[test]
+fn set_operators_match_label_sets() {
+    let metrics = &[("a", S), ("b", T)];
+    assert_eq!(
+        labeled("a and b", metrics, 60),
+        rows(&[("__name__=a,job=x", 1.)])
+    );
+    assert_eq!(
+        labeled("a and on(job) b", metrics, 60),
+        rows(&[("__name__=a,job=x", 1.), ("__name__=a,inst=1,job=z", 3.)])
+    );
+    assert_eq!(
+        labeled("a and ignoring(inst) b", metrics, 60),
+        labeled("a and on(job) b", metrics, 60)
+    );
+    assert_eq!(
+        labeled("a or b", metrics, 60),
+        rows(&[
+            ("__name__=a,job=x", 1.),
+            ("__name__=a,job=y", 2.),
+            ("__name__=a,inst=1,job=z", 3.),
+            ("__name__=b,job=w", 20.),
+            ("__name__=b,inst=2,job=z", 30.),
+        ])
+    );
+    assert_eq!(
+        labeled("a or on(job) b", metrics, 60),
+        rows(&[
+            ("__name__=a,job=x", 1.),
+            ("__name__=a,job=y", 2.),
+            ("__name__=a,inst=1,job=z", 3.),
+            ("__name__=b,job=w", 20.),
+        ])
+    );
+    assert_eq!(
+        labeled("a unless b", metrics, 60),
+        rows(&[("__name__=a,job=y", 2.), ("__name__=a,inst=1,job=z", 3.)])
+    );
+    assert_eq!(
+        labeled("a unless on(job) b", metrics, 60),
+        rows(&[("__name__=a,job=y", 2.)])
+    );
+    assert_eq!(labeled("a and on() b", metrics, 60).len(), 3);
+    // Empty sides, and duplicates on either side, which set operators allow.
+    let a_only = &[("a", S)];
+    assert!(labeled("a and b", a_only, 60).is_empty());
+    assert_eq!(labeled("a unless b", a_only, 60).len(), 3);
+    assert_eq!(labeled("b or a", a_only, 60).len(), 3);
+    let pair: &[Sample] = &[("job=x,inst=1", 50, 1.), ("job=x,inst=2", 50, f64::NAN)];
+    assert_eq!(
+        labeled_nan("a and on(job) b", &[("a", pair), ("b", pair)], 60),
+        vec![
+            ("__name__=a,inst=1,job=x".into(), "1.0".into()),
+            ("__name__=a,inst=2,job=x".into(), "NaN".into()),
+        ]
+    );
+}
+
+const MANY: &[Sample] = &[
+    ("job=x,inst=1", 50, 2.),
+    ("job=x,inst=2", 50, 3.),
+    ("job=y,inst=1", 50, 4.),
+];
+const ONE: &[Sample] = &[("job=x,team=t1", 50, 10.), ("job=y", 50, 100.)];
+
+// group_left/group_right match many series to one; the result keeps the many
+// side's labels plus the listed labels of the one side, which a missing label
+// removes. A filter keeps the left value.
+#[test]
+fn group_modifiers_match_many_to_one() {
+    let metrics = &[("a", MANY), ("info", ONE)];
+    assert_eq!(
+        labeled("a * on(job) group_left(team) info", metrics, 60),
+        rows(&[
+            ("inst=1,job=x,team=t1", 20.),
+            ("inst=2,job=x,team=t1", 30.),
+            ("inst=1,job=y", 400.),
+        ])
+    );
+    assert_eq!(
+        labeled("info - on(job) group_right a", metrics, 60),
+        rows(&[
+            ("inst=1,job=x", 8.),
+            ("inst=2,job=x", 7.),
+            ("inst=1,job=y", 96.)
+        ])
+    );
+    assert_eq!(
+        labeled("info > on(job) group_right a", metrics, 60),
+        rows(&[
+            ("__name__=a,inst=1,job=x", 10.),
+            ("__name__=a,inst=2,job=x", 10.),
+            ("__name__=a,inst=1,job=y", 100.),
+        ])
+    );
+    assert_eq!(
+        labeled("a > bool ignoring(inst, team) group_left info", metrics, 60),
+        rows(&[
+            ("inst=1,job=x", 0.),
+            ("inst=2,job=x", 0.),
+            ("inst=1,job=y", 0.)
+        ])
+    );
+    // Two "one" series for a match group, or two results with equal labels.
+    let two: &[Sample] = &[("job=x,team=t1", 50, 1.), ("job=x,team=t2", 50, 2.)];
+    let error = evaluate(
+        "a * on(job) group_left info",
+        &[("a", MANY), ("info", two)],
+        60,
+    )
+    .unwrap_err();
+    assert!(error.contains("duplicate series"), "{error}");
+    let error = evaluate(
+        "info * on(job) group_right a",
+        &[("a", two), ("info", MANY)],
+        60,
+    )
+    .unwrap_err();
+    assert!(error.contains("left hand-side"), "{error}");
+    let named: &[Sample] = &[("job=x", 50, 1.), ("__name__=c,job=x", 50, 2.)];
+    let error = evaluate(
+        "a * on(job) group_left info",
+        &[("a", named), ("info", ONE)],
+        60,
+    )
+    .unwrap_err();
+    assert!(error.contains("unique matches"), "{error}");
+    assert!(labeled("a * on(job) group_left info", &[("a", MANY)], 60).is_empty());
+}
+
+// A non-literal scalar applies like a literal; scalar-scalar arithmetic yields
+// a scalar; and a literal applies to aggregated rows whose value has another name.
+#[test]
+fn scalar_operands_and_aggregates() {
+    let three: &[Sample] = &[("job=b", 50, 3.)];
+    let metrics = &[("a", A), ("b", three)];
+    assert_eq!(
+        labeled("a * scalar(b)", metrics, 60),
+        rows(&[("job=w", 0.), ("job=x", 30.), ("job=y", 60.)])
+    );
+    assert_eq!(
+        labeled("a > scalar(b)", metrics, 60),
+        rows(&[("__name__=a,job=x", 10.), ("__name__=a,job=y", 20.)])
+    );
+    assert_eq!(labeled("scalar(b) * 2", metrics, 60), rows(&[("", 6.)]));
+    assert_eq!(
+        labeled("scalar(b) > bool 2", metrics, 60),
+        rows(&[("", 1.)])
+    );
+    // scalar() of several series is NaN.
+    assert!(labeled("scalar(a) - 1", metrics, 60)[0].1.is_nan());
+    assert_eq!(
+        labeled("sum by (job) (a) * 2", metrics, 60),
+        rows(&[("job=w", 0.), ("job=x", 20.), ("job=y", 40.)])
+    );
+    assert_eq!(
+        labeled("sum by (job) (a) > bool 5", metrics, 60),
+        rows(&[("job=w", 0.), ("job=x", 1.), ("job=y", 1.)])
+    );
+}
+
+// Range functions other than last_over_time drop the metric name, so series
+// that then share a label set are an error, as in Prometheus.
+#[test]
+fn range_functions_drop_the_name_and_reject_equal_label_sets() {
+    let equal: &[Sample] = &[
+        ("job=x", 10, 1.),
+        ("job=x", 50, 2.),
+        ("__name__=b,job=x", 10, 1.),
+        ("__name__=b,job=x", 50, 4.),
+    ];
+    let error = evaluate("rate(a[1m])", &[("a", equal)], 60).unwrap_err();
+    assert!(error.contains("same labelset"), "{error}");
+    assert_eq!(
+        labeled("last_over_time(a[1m])", &[("a", equal)], 60),
+        rows(&[("__name__=a,job=x", 2.), ("__name__=b,job=x", 4.)])
+    );
+    assert_eq!(
+        labeled("max_over_time(a[1m])", &[("a", &equal[..2])], 60),
+        rows(&[("job=x", 2.)])
+    );
+}
+
+// Scalar-valued expressions are scalars too; `or vector(0)` fills an empty
+// aggregate; a range function inside a subquery drops the name.
+#[test]
+fn scalar_expressions_or_vector_and_subquery_names() {
+    let three: &[Sample] = &[("job=b", 50, 3.)];
+    let metrics = &[("a", A), ("b", three)];
+    assert_eq!(
+        labeled("a + (scalar(b) * 2)", metrics, 60),
+        rows(&[("job=w", 6.), ("job=x", 16.), ("job=y", 26.)])
+    );
+    assert_eq!(
+        labeled("a + -scalar(b)", metrics, 60),
+        rows(&[("job=w", -3.), ("job=x", 7.), ("job=y", 17.)])
+    );
+    assert_eq!(
+        labeled("sum(a) or vector(0)", metrics, 60),
+        rows(&[("", 30.)])
+    );
+    assert_eq!(labeled("sum(a) or vector(0)", &[], 60), rows(&[("", 0.)]));
+    let counter: &[Sample] = &[("job=x", 0, 0.), ("job=x", 30, 3.), ("job=x", 60, 6.)];
+    let result = labeled("last_over_time(rate(a[1m])[2m:1m])", &[("a", counter)], 60);
+    assert_eq!(result.len(), 1);
+    assert_eq!(result[0].0, "job=x");
 }
