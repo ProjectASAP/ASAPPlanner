@@ -1,7 +1,9 @@
 //! Query-time PromQL value computation over logical row schemas.
 use super::*;
 use planner_types::post_asap::{maintained_population::PopulationReadout, BinaryOperator};
-use planner_types::pre_asap::{BinaryOpKind, DataType, Predicate, ScalarValue};
+use planner_types::pre_asap::{
+    BinaryOpKind, DataType, Predicate, ScalarValue, VectorMatch, VectorMatchKind,
+};
 use std::rc::Rc;
 
 /// A PromQL number literal has no row schema; its consumer folds it in.
@@ -23,7 +25,7 @@ fn grouped_value(input: &Schema) -> Result<(usize, Vec<usize>), Error> {
             .any(|field| field.name == promql_rows::SERIES_IDENTITY_COLUMN)
     {
         return Err(invalid(
-            "row binary requires grouped rows; per-series matching needs a name-free identity",
+            "row binary requires grouped rows or rows with a series identity",
         ));
     }
     let mut value = None;
@@ -54,6 +56,15 @@ fn arithmetic(operator: &BinaryOperator) -> Result<(), Error> {
     Ok(())
 }
 
+/// Rows whose labels are the encoded PromQL series identity, such as
+/// per-series readouts of stored state.
+pub(super) fn per_series(input: &Schema) -> bool {
+    input
+        .fields
+        .iter()
+        .any(|field| field.name == promql_rows::SERIES_IDENTITY_COLUMN)
+}
+
 /// Apply `vector op scalar` (or `scalar op vector`) to each row's value.
 pub(super) fn scalar_binary(
     input: &Schema,
@@ -63,6 +74,68 @@ pub(super) fn scalar_binary(
 ) -> Result<Operator, Error> {
     arithmetic(operator)?;
     let (value, _) = grouped_value(input)?;
+    literal_projection(input, value, operator, literal, literal_left)
+}
+
+/// `scalar_binary` over per-series rows: PromQL arithmetic also drops the
+/// metric name from the series identity. Returns a chain.
+pub(super) fn series_scalar_binary(
+    input: &Schema,
+    operator: &BinaryOperator,
+    literal: f64,
+    literal_left: bool,
+) -> Result<Vec<Operator>, Error> {
+    arithmetic(operator)?;
+    let relabel = Operator::series_labels(input.clone(), VectorMatchKind::Ignoring, vec![])?;
+    let value = input
+        .fields
+        .iter()
+        .position(|field| {
+            field.dtype == SummaryFamilyType::Plain(DataType::Float64) && !field.nullable
+        })
+        .ok_or_else(|| invalid("per-series rows require a Float64 value"))?;
+    let project = literal_projection(input, value, operator, literal, literal_left)?;
+    Ok(vec![relabel, project])
+}
+
+/// PromQL one-to-one arithmetic where either side carries a series identity.
+/// Returns the left and right relabelings to the matching labels, and the
+/// binary over their outputs.
+pub(super) fn series_vector_binary(
+    left: &Schema,
+    right: &Schema,
+    operator: &BinaryOperator,
+) -> Result<[Operator; 3], Error> {
+    arithmetic(operator)?;
+    let (kind, labels) = match &operator.vector_match {
+        None => (VectorMatchKind::Ignoring, vec![]),
+        Some(VectorMatch {
+            kind,
+            labels,
+            grouping: None,
+        }) => (kind.clone(), labels.clone()),
+        Some(_) => return Err(invalid("group_left/group_right matching is unsupported")),
+    };
+    let left_labels = Operator::series_labels(left.clone(), kind.clone(), labels.clone())?;
+    let right_labels = Operator::series_labels(right.clone(), kind, labels)?;
+    let binary = Operator::series_binary(
+        left_labels.schema(),
+        right_labels.schema(),
+        BinaryOperator {
+            vector_match: None,
+            ..operator.clone()
+        },
+    )?;
+    Ok([left_labels, right_labels, binary])
+}
+
+fn literal_projection(
+    input: &Schema,
+    value: usize,
+    operator: &BinaryOperator,
+    literal: f64,
+    literal_left: bool,
+) -> Result<Operator, Error> {
     let literal = Expression::Literal {
         value: crate::values::Value::Float64(literal),
         dtype: DataType::Float64,
