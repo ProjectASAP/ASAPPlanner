@@ -21,8 +21,8 @@ mod current_series;
 mod filter;
 mod joins;
 mod limit;
-mod panes;
 mod projection;
+mod scope_timestamp;
 mod sort;
 mod source;
 mod summary;
@@ -39,11 +39,6 @@ enum Kind {
     Constant {
         value: Value,
         dtype: DataType,
-    },
-    PaneInput {
-        coordinate: usize,
-        layout: planner_types::post_asap::PaneLayout,
-        offset_ms: Option<i64>,
     },
     ScopeTimestamp {
         columns: Vec<Option<usize>>,
@@ -260,10 +255,7 @@ impl PhysicalOperator<Batch, Schema> for Operator {
         };
         PlanProperties {
             boundedness,
-            emission: if matches!(
-                self.kind,
-                Kind::PaneInput { .. } | Kind::ScopeTimestamp { .. }
-            ) {
+            emission: if matches!(self.kind, Kind::ScopeTimestamp { .. }) {
                 inputs
                     .first()
                     .map_or(Emission::Unknown, |input| input.emission)
@@ -279,7 +271,6 @@ impl PhysicalOperator<Batch, Schema> for Operator {
         match self.kind {
             Kind::Source(_) => "Source",
             Kind::Constant { .. } => "Constant",
-            Kind::PaneInput { .. } => "PaneInput",
             Kind::ScopeTimestamp { .. } => "ScopeTimestamp",
             Kind::Union => "Union",
             Kind::CurrentSeries { .. } => "CurrentSeries",
@@ -303,7 +294,6 @@ impl PhysicalOperator<Batch, Schema> for Operator {
         }
     }
     fn validate_context(&self, context: &RunContext) -> Result<(), Error> {
-        panes::validate_context(self, context)?;
         current_series::validate_context(self, context)?;
         self.readout_range(context).map(|_| ())
     }
@@ -332,9 +322,7 @@ impl PhysicalOperator<Batch, Schema> for Operator {
             }
             Kind::Project(_) => projection::execute(self, inputs, context),
             Kind::CurrentSeries { .. } => current_series::execute(self, inputs, context),
-            Kind::PaneInput { .. } | Kind::ScopeTimestamp { .. } => {
-                panes::execute(self, inputs, context)
-            }
+            Kind::ScopeTimestamp { .. } => scope_timestamp::execute(self, inputs, context),
             Kind::Filter(_) => filter::execute(self, inputs, context),
             Kind::Limit { .. } => limit::execute(self, inputs, context),
             Kind::Sort { .. } => sort::execute(self, inputs, context),

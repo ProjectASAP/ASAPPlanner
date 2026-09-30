@@ -116,15 +116,6 @@ the shared runtime with independent per-run state. Window coverage, revision and
 maintenance-policy admission remain deployment/planning contracts; this compiler
 does not discover storage or silently change a selected maintenance strategy.
 
-`physical_planner::compile_temporal_pane_candidate` lowers a selected continuous
-KLL lifecycle and Sliding/Tumbling framework into maintenance and query DAGs.
-`TemporalPaneMaintenance` supplies pane geometry and a resolved complete entity
-identity contract. The compiler inserts population guards, scan predicates,
-pane construction, ordered state slots, a shared merge and quantile readouts.
-Pane outputs have distinct physical identities from the logical whole-window
-summary, and the returned candidate retains the maintenance contract for binding.
-Each run checks phase, pane timestamps and duplicate entity states. The initial
-realization uses complete bounded snapshots; partial edges, exponential
-histograms and cross-run delta accumulation are unsupported. Storage identities,
-revision selection, completeness/readiness evidence and scheduling stay with
-deployment.
+Pane construction and geometry belong to deployment. A deployment runs the
+precompute DAG once per pane it constructs and binds the selected pane states to
+query input slots; the query DAG merges and reads them out as computation.
