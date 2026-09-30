@@ -463,6 +463,20 @@ fn compile_internal(
                     if !query_time {
                         return Err(invalid("scalar literal binary must run at query time"));
                     }
+                    if row_values::per_series(input) {
+                        let mut chain =
+                            row_values::series_scalar_binary(input, operator, value, left)
+                                .map_err(|error| invalid(format!("node {id}: {error}")))?;
+                        let last = chain.pop().expect("nonempty chain");
+                        let mut inputs = inputs;
+                        for operator in chain {
+                            graph.add(auxiliary, inputs, operator)?;
+                            inputs = vec![auxiliary];
+                            auxiliary -= 1;
+                        }
+                        graph.add(id, inputs, last.with_output_schema(output)?)?;
+                        continue;
+                    }
                     let project = row_values::scalar_binary(input, operator, value, left)
                         .map_err(|error| invalid(format!("node {id}: {error}")))?;
                     graph.add(id, inputs, project.with_output_schema(output)?)?;
@@ -475,6 +489,17 @@ fn compile_internal(
                         .any(|f| matches!(f.dtype, SummaryFamilyType::Plain(DataType::Map { .. })))
                 };
                 if let (true, [left, right]) = (query_time, schemas.as_slice()) {
+                    if row_values::per_series(left) || row_values::per_series(right) {
+                        let [left, right, binary] =
+                            row_values::series_vector_binary(left, right, operator)
+                                .map_err(|error| invalid(format!("node {id}: {error}")))?;
+                        let sides = [auxiliary, auxiliary - 1];
+                        graph.add(sides[0], vec![inputs[0]], left)?;
+                        graph.add(sides[1], vec![inputs[1]], right)?;
+                        graph.add(id, sides.to_vec(), binary.with_output_schema(output)?)?;
+                        auxiliary -= 2;
+                        continue;
+                    }
                     if !label_map(left) && !label_map(right) {
                         let (join, project) = row_values::grouped_binary(left, right, operator)
                             .map_err(|error| invalid(format!("node {id}: {error}")))?;
