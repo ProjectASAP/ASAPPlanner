@@ -39,8 +39,9 @@ pub fn population_schema(family: SummaryFamilyType) -> Schema {
 /// complete label set, so it is the complete source identity of per-series
 /// summaries; `$timestamp` is the sample time and `value` a finite sample
 /// (stale markers are not samples). Rows are what the boundary's source scan
-/// selected; the deployment decides which rows and panes they are. Build rows
-/// with [`raw_sample_row`], which makes the label set canonical.
+/// selected; the deployment decides which rows and panes they are. Label sets
+/// must be canonical (sorted, unique, no empty values), since they are the
+/// population identity: build rows with [`raw_sample_row`].
 pub fn raw_sample_schema() -> Schema {
     let mut schema = (*population_schema(SummaryFamilyType::Plain(DataType::Float64))).clone();
     schema.fields[1].name = "$timestamp".into();
@@ -374,7 +375,7 @@ fn fragment(
             // A unit-frequency summary (HLL) observes each raw sample value.
             let unit_frequency = raw
                 && crate::capability::is_unit_sample_frequency(update)
-                && !matches!(family, SummaryFamilyType::Sketch(kind, _) if matches!(
+                && matches!(family, SummaryFamilyType::Sketch(kind, _) if !matches!(
                     kind.algorithm(),
                     planner_types::post_asap::SketchAlgorithm::Cms
                         | planner_types::post_asap::SketchAlgorithm::CountSketch
