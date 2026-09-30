@@ -1202,3 +1202,20 @@ fn histogram_quantiles_rejects_an_out_of_range_quantile() {
         );
     }
 }
+
+// A subquery's `offset`/`@` shift the whole subquery, so the tree keeps them.
+#[test]
+fn subquery_time_shift_is_retained() {
+    let QueryExpr::Aggregate { child, .. } = lower("max_over_time(m[5m:1m] offset 1m)") else {
+        panic!("expected a range function");
+    };
+    let QueryExpr::TimeShift { shift, child } = child.as_ref() else {
+        panic!("subquery offset was dropped: {child:?}");
+    };
+    assert_eq!(shift.offset_ms, 60_000);
+    assert!(matches!(child.as_ref(), QueryExpr::PromqlSubquery { .. }));
+    assert!(matches!(
+        lower("max_over_time(m[5m:1m] @ 100)"),
+        QueryExpr::Aggregate { child, .. } if matches!(child.as_ref(), QueryExpr::TimeShift { .. })
+    ));
+}

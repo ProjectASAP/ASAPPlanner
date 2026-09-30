@@ -878,7 +878,8 @@ pub enum QueryExpr<C: ColState = ColumnId> {
     /// unchanged. Wraps the shifted selector directly — `m offset 1h` →
     /// `TimeShift { Scan }`; a ranged selector `m[5m] offset 1h` →
     /// `TimeRange { 5m, TimeShift { Scan } }` (the range is taken at the shifted
-    /// time). Never carries the identity shift (the converter emits a bare
+    /// time). A shifted subquery wraps the `PromqlSubquery`, moving its step
+    /// grid. Never carries the identity shift (the converter emits a bare
     /// selector when neither modifier is present).
     TimeShift {
         shift: TimeShift,
