@@ -378,8 +378,11 @@ such as those added in #472 never reach its pricing.
 
 `PostAsapDag` is the form a logical DAG takes when it enters physical
 compilation, not a separate Planner output. `PlanOutput` stays in
-`SummaryNode` form because timing is decided after it. Both forms are described
-in [Post-ASAP IR](../concepts/post-asap-ir.md#tree-and-exported-dag-forms).
+`SummaryNode` form because timing is fixed only by a lifecycle assignment. Its
+`DagWithLifecycle` variant is the library path doing layer 3 as well, under the
+caller's cost model; a pricing deployment makes that lifecycle choice itself.
+Both forms are described in
+[Post-ASAP IR](../concepts/post-asap-ir.md#tree-and-exported-dag-forms).
 
 Placement does not belong to `PlanSpace`. The grouped `Rate`→`Sum`
 "maintenance versus query placement" candidate pair from #472 is a placement
