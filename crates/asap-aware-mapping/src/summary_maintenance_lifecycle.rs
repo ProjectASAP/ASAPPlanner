@@ -11,7 +11,8 @@
 //!
 //! This module enumerates and costs `Ephemeral`, `Prepared`, `Shared`, and
 //! `ContinuouslyMaintained` alternatives for every unique `SummaryAgg` in a
-//! materialized plan. [`SummaryMaintenanceMode`] is an orthogonal detail of
+//! materialized plan, and for every maintained population (`MaintainPopulation`)
+//! that is not an input of a `SummaryAgg`. [`SummaryMaintenanceMode`] is an orthogonal detail of
 //! the selected deployment: state is either built directly or updated
 //! incrementally. Unknown evidence stays unknown and therefore cannot make a
 //! long-lived alternative win.
@@ -20,11 +21,11 @@ use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use asap_types::post_asap::{
-    compile_post_asap_dag, compile_post_asap_dag_with_node_ids, EvaluationSchedule,
-    ExecutionDataStateError, ExecutionTiming, OutputRepresentation, PostAsapDag,
-    PostAsapDagValidationError, PostAsapNodeId, PostAsapOperatorPayload, ResultGuarantee,
-    SummaryExpr, SummaryMaintenanceLifecycle, SummaryMaintenanceLifecycleGuarantee,
-    SummaryMaintenanceMode, SummaryNode, SummaryWindowFramework, ValueOperation,
+    compile_post_asap_dag_with_node_ids, EvaluationSchedule, ExecutionDataStateError,
+    ExecutionTiming, OutputRepresentation, PostAsapDag, PostAsapDagValidationError, PostAsapNodeId,
+    ResultGuarantee, SummaryExpr, SummaryMaintenanceLifecycle,
+    SummaryMaintenanceLifecycleGuarantee, SummaryMaintenanceMode, SummaryNode,
+    SummaryWindowFramework, ValueOperation,
 };
 use asap_types::pre_asap::QueryExpr;
 use asap_types::types::AccuracyTarget;
@@ -159,14 +160,16 @@ impl SummaryMaintenanceLifecycleAlternative {
     }
 }
 
-/// One unique summary-state deployment. Shared `Rc` nodes are emitted once.
+/// One unique retained-state deployment. Shared `Rc` nodes are emitted once.
 #[derive(Debug, Clone)]
 pub struct SummaryMaintenanceDeployment {
     /// Identity of this summary in the exported post-ASAP semantic DAG.
     /// It is scoped to one plan version and is not a summary definition or
     /// summary instance identity.
     pub post_asap_node_id: PostAsapNodeId,
-    /// The unique materialized `SummaryAgg` represented by this deployment.
+    /// The unique materialized `SummaryAgg`, or maintained population
+    /// (`MaintainPopulation`) not consumed by a `SummaryAgg`, represented by
+    /// this deployment. Cost-model lifecycle hooks receive this node.
     pub summary: Rc<SummaryNode>,
     /// Lifecycle, evaluation, and representation commitment selected for this
     /// state, or `None` when no alternative is selectable.
@@ -184,8 +187,9 @@ pub struct SummaryMaintenanceDeployment {
 pub struct SummaryMaintenanceLifecyclePlan {
     /// Root of the materialized post-ASAP DAG being deployed.
     pub root: Rc<SummaryNode>,
-    /// One entry per unique reachable `SummaryAgg`; shared `Rc` nodes appear
-    /// only once.
+    /// One entry per unique reachable `SummaryAgg`, then per unique
+    /// maintained population outside any `SummaryAgg`'s inputs; shared `Rc`
+    /// nodes appear only once.
     pub deployments: Vec<SummaryMaintenanceDeployment>,
     /// Caller-supplied optimization horizon used to turn rates into total
     /// costs. `None` keeps horizon-dependent alternatives unselectable.
@@ -219,8 +223,9 @@ pub enum SummaryMaintenanceTimingError {
     InvalidPostAsapDag(#[from] ExecutionDataStateError),
     #[error("summary {0:?} has no selected lifecycle")]
     UnselectedLifecycle(PostAsapNodeId),
-    /// Lifecycle enumeration covers `SummaryAgg` states only; timing for other
-    /// retained state would otherwise be guessed.
+    /// A maintained population outside any `SummaryAgg`'s inputs has no
+    /// deployment, so its timing would be guessed. Enumeration always emits
+    /// one; this arises only for a plan whose root or deployments were edited.
     #[error("node {0:?} maintains state that has no summary-maintenance lifecycle")]
     UnplannedMaintainedState(PostAsapNodeId),
     #[error(transparent)]
@@ -235,21 +240,25 @@ impl SummaryMaintenanceLifecyclePlan {
     /// input it consumes run at ingestion time. Every other node runs at query
     /// time: readouts and consumers of retained state, and each `Ephemeral`
     /// state not consumed by retained state together with its inputs, whose
-    /// raw data the deployment must supply as a query source. Timings already
-    /// on the root are ignored.
+    /// raw data the deployment must supply as a query source. This applies to
+    /// maintained populations as to `SummaryAgg` states; a population feeding
+    /// a `SummaryAgg` is one of its inputs. Timings already on the root are
+    /// ignored.
     pub fn execution_timed_dag(&self) -> Result<PostAsapDag, SummaryMaintenanceTimingError> {
-        let dag = compile_post_asap_dag(&self.root)?;
-        if let Some(node) = dag.nodes.iter().find(|node| {
-            matches!(
-                node.payload,
-                PostAsapOperatorPayload::Value {
-                    operation: ValueOperation::MaintainPopulation { .. }
-                }
-            )
-        }) {
-            return Err(SummaryMaintenanceTimingError::UnplannedMaintainedState(
-                node.id,
-            ));
+        let compiled = compile_post_asap_dag_with_node_ids(&self.root)?;
+        let dag = compiled.dag;
+        for population in &standalone_populations(&self.root) {
+            let id = compiled
+                .node_ids
+                .node_id(population)
+                .expect("collected population belongs to the compiled DAG");
+            if !self
+                .deployments
+                .iter()
+                .any(|deployment| deployment.post_asap_node_id == id)
+            {
+                return Err(SummaryMaintenanceTimingError::UnplannedMaintainedState(id));
+            }
         }
         let mut pending = Vec::new();
         for deployment in &self.deployments {
@@ -366,7 +375,7 @@ pub enum SummaryMaintenanceLifecycleSelectionError {
     SummaryMaintenance(#[from] SummaryMaintenanceLifecyclePlanError),
 }
 
-/// Every lifecycle alternative for each unique summary state of one fixed
+/// Every lifecycle alternative for each unique retained state of one fixed
 /// root, before any lifecycle is chosen.
 ///
 /// Planner selection ([`plan_summary_maintenance_lifecycles`]) and a
@@ -406,8 +415,10 @@ pub enum SummaryMaintenanceLifecycleChoiceError {
 }
 
 impl SummaryMaintenanceLifecycleCandidates<'_> {
-    /// One entry per unique reachable `SummaryAgg`, with every alternative
-    /// and its rejection; no lifecycle or window framework is selected.
+    /// One entry per unique retained state (see
+    /// [`SummaryMaintenanceLifecyclePlan::deployments`]), with every
+    /// alternative and its rejection; no lifecycle or window framework is
+    /// selected.
     pub fn deployments(&self) -> &[SummaryMaintenanceDeployment] {
         &self.plan.deployments
     }
@@ -654,7 +665,13 @@ fn enumerate_with_profile<'a>(
         };
     }
     let mut summaries = Vec::new();
-    collect_summary_aggs(&root, &mut HashSet::new(), &mut summaries);
+    collect_states(
+        &root,
+        &mut HashSet::new(),
+        &mut summaries,
+        StateKind::SummaryAgg,
+    );
+    summaries.extend(standalone_populations(&root));
     let node_ids = compile_post_asap_dag_with_node_ids(&root)?.node_ids;
     let components = summary_state_components(&summaries);
     let deployments: Vec<SummaryMaintenanceDeployment> = summaries
@@ -1249,20 +1266,39 @@ fn rejected(
     }
 }
 
-fn collect_summary_aggs(
+#[derive(Clone, Copy, PartialEq)]
+enum StateKind {
+    SummaryAgg,
+    Population,
+}
+
+/// Collect every unique node of `kind` reachable from `node`.
+fn collect_states(
     node: &Rc<SummaryNode>,
     seen: &mut HashSet<*const SummaryNode>,
     output: &mut Vec<Rc<SummaryNode>>,
+    kind: StateKind,
 ) {
     if !seen.insert(Rc::as_ptr(node)) {
         return;
     }
     match &node.expr {
         SummaryExpr::SummaryAgg { child, .. } => {
-            output.push(Rc::clone(node));
-            collect_summary_aggs(child, seen, output);
+            if kind == StateKind::SummaryAgg {
+                output.push(Rc::clone(node));
+            }
+            collect_states(child, seen, output, kind);
         }
-        SummaryExpr::ValueOperation { child, .. } => collect_summary_aggs(child, seen, output),
+        SummaryExpr::ValueOperation {
+            child, operation, ..
+        } => {
+            if kind == StateKind::Population
+                && matches!(operation, ValueOperation::MaintainPopulation { .. })
+            {
+                output.push(Rc::clone(node));
+            }
+            collect_states(child, seen, output, kind)
+        }
         SummaryExpr::SummaryJoin { outer, inner, .. }
         | SummaryExpr::RelationalJoin {
             left: outer,
@@ -1278,20 +1314,48 @@ fn collect_summary_aggs(
             left: outer,
             right: inner,
         } => {
-            collect_summary_aggs(outer, seen, output);
-            collect_summary_aggs(inner, seen, output);
+            collect_states(outer, seen, output, kind);
+            collect_states(inner, seen, output, kind);
         }
         SummaryExpr::SummaryDelete { summary_input, .. }
         | SummaryExpr::SummaryEstimate { summary_input, .. } => {
-            collect_summary_aggs(summary_input, seen, output)
+            collect_states(summary_input, seen, output, kind)
         }
         SummaryExpr::SummaryMerge { children, .. } => {
             for child in children {
-                collect_summary_aggs(child, seen, output);
+                collect_states(child, seen, output, kind);
             }
         }
         SummaryExpr::KeepPreAsap(_) => {}
     }
+}
+
+/// Maintained populations that are not an input of any `SummaryAgg`. A
+/// population feeding summary state is on that state's maintenance path, so
+/// that state's lifecycle times it, even when a readout also reads it directly.
+fn standalone_populations(root: &Rc<SummaryNode>) -> Vec<Rc<SummaryNode>> {
+    let mut summaries = Vec::new();
+    collect_states(
+        root,
+        &mut HashSet::new(),
+        &mut summaries,
+        StateKind::SummaryAgg,
+    );
+    let mut nested = Vec::new();
+    let mut seen = HashSet::new();
+    for summary in &summaries {
+        collect_states(summary, &mut seen, &mut nested, StateKind::Population);
+    }
+    let nested: HashSet<_> = nested.iter().map(Rc::as_ptr).collect();
+    let mut populations = Vec::new();
+    collect_states(
+        root,
+        &mut HashSet::new(),
+        &mut populations,
+        StateKind::Population,
+    );
+    populations.retain(|population| !nested.contains(&Rc::as_ptr(population)));
+    populations
 }
 
 pub(crate) fn evaluation_schedule(
@@ -1316,7 +1380,7 @@ pub(crate) fn evaluation_schedule(
 }
 
 /// Summary states composed on one maintenance path must be produced on the
-/// same schedule. Return a component id for each collected `SummaryAgg`.
+/// same schedule. Return a component id for each collected state.
 fn summary_state_components(summaries: &[Rc<SummaryNode>]) -> Vec<usize> {
     let indices: HashMap<_, _> = summaries
         .iter()
@@ -1347,7 +1411,12 @@ fn summary_state_components(summaries: &[Rc<SummaryNode>]) -> Vec<usize> {
             continue;
         }
         let mut descendants = Vec::new();
-        collect_summary_aggs(child, &mut HashSet::new(), &mut descendants);
+        collect_states(
+            child,
+            &mut HashSet::new(),
+            &mut descendants,
+            StateKind::SummaryAgg,
+        );
         for descendant in descendants {
             let child_index = indices[&Rc::as_ptr(&descendant)];
             let parent_root = find(&mut parents, parent_index);
@@ -1597,8 +1666,8 @@ mod tests {
     }
     use super::*;
     use asap_types::post_asap::{
-        ExactKind, ExactParams, GroupingStrategy, ResultGuarantee, SketchAlgorithm,
-        SummaryFamilyType, SummaryField, SummarySchema,
+        ExactKind, ExactParams, GroupingStrategy, PostAsapOperatorPayload, ResultGuarantee,
+        SketchAlgorithm, SummaryFamilyType, SummaryField, SummarySchema,
     };
     use asap_types::pre_asap::AggIntent;
     use asap_types::pre_asap::{Column, ColumnRef, DataType, QueryExpr, Reduction, Schema, Source};
@@ -3185,33 +3254,333 @@ mod tests {
         );
     }
 
-    // A maintained population is retained state the lifecycle plan does not
-    // enumerate, so its timing is refused rather than guessed.
-    #[test]
-    fn timing_refuses_state_outside_the_lifecycle_plan() {
+    /// A strategy-built `sum(a)` over one maintained current-series population.
+    fn population_readout() -> Rc<SummaryNode> {
         let target = Rc::new(crate::test_support::lower_promql(
             "sum(a)",
             AccuracyTarget::Exact,
         ));
-        let root = crate::maintained_population::MaintainedPopulationStrategy::new(
-            std::slice::from_ref(&target),
-        )
+        crate::maintained_population::MaintainedPopulationStrategy::new(std::slice::from_ref(
+            &target,
+        ))
         .candidate(&target)
-        .unwrap();
-        let workload = workload(vec![batch(Predictability::AdHoc)], vec![], at_rest());
-        let plan = plan_summary_maintenance_lifecycles(
-            root,
-            WorkloadDemand::new_with_data(&workload, &at_rest(), &[0]),
+        .unwrap()
+    }
+
+    fn is_population(node: &SummaryNode) -> bool {
+        matches!(
+            node.expr,
+            SummaryExpr::ValueOperation {
+                operation: ValueOperation::MaintainPopulation { .. },
+                ..
+            }
+        )
+    }
+
+    fn population_timings(dag: &PostAsapDag) -> Vec<(&'static str, ExecutionTiming)> {
+        dag.nodes
+            .iter()
+            .zip(timings(dag))
+            .map(|(node, (kind, timing))| match node.payload {
+                PostAsapOperatorPayload::Value {
+                    operation: ValueOperation::MaintainPopulation { .. },
+                } => ("population", timing),
+                _ => (kind, timing),
+            })
+            .collect()
+    }
+
+    // A maintained population is enumerated as retained state, with costs
+    // from the caller's model for both the maintained and the rebuilt choice.
+    #[test]
+    fn enumeration_includes_maintained_population() {
+        let data = continuous(1_000, 60_000);
+        let workload = workload(vec![], vec![repeating()], data.clone());
+        let candidates = enumerate_summary_maintenance_lifecycles(
+            population_readout(),
+            WorkloadDemand::new_with_data(&workload, &data, &[0]),
             1_000,
-            None,
+            Some(Horizon(10.0)),
             SummaryMaintenanceLifecycleCapabilities::ALL,
             &UnitCosts,
         )
         .unwrap();
-        assert!(plan.deployments.is_empty());
+        let [deployment] = candidates.deployments() else {
+            panic!("one population state");
+        };
+        assert!(is_population(&deployment.summary));
+        let cost = |lifecycle: SummaryMaintenanceLifecycle| {
+            deployment
+                .alternatives
+                .iter()
+                .find(|alternative| alternative.summary_maintenance_lifecycle == lifecycle)
+                .and_then(|alternative| alternative.total_cost)
+        };
+        // Ephemeral: (build 10 + read 1 + retire 1) x 10 reads. Maintained over
+        // 10 s at 1 update/s: build 10 + updates 10 + reads 10 + retention 1 + retire 1.
+        assert_eq!(
+            cost(SummaryMaintenanceLifecycle::Ephemeral),
+            Some(Cost(120.0))
+        );
+        assert_eq!(
+            cost(SummaryMaintenanceLifecycle::ContinuouslyMaintained),
+            Some(Cost(32.0))
+        );
+    }
+
+    // Without cost evidence a population's alternatives stay unknown: Planner
+    // selects none and timing is refused rather than guessed.
+    #[test]
+    fn population_without_cost_evidence_stays_unselected() {
+        let data = continuous(1_000, 60_000);
+        let workload = workload(vec![], vec![repeating()], data.clone());
+        let plan = plan_summary_maintenance_lifecycles(
+            population_readout(),
+            WorkloadDemand::new_with_data(&workload, &data, &[0]),
+            1_000,
+            Some(Horizon(10.0)),
+            SummaryMaintenanceLifecycleCapabilities::ALL,
+            &crate::cost_model::DefaultCostModel,
+        )
+        .unwrap();
+        let [deployment] = plan.deployments.as_slice() else {
+            panic!("one population state");
+        };
+        assert!(deployment
+            .alternatives
+            .iter()
+            .all(|alternative| alternative.total_cost.is_none()));
+        assert!(deployment.summary_maintenance_lifecycle_guarantee.is_none());
+        assert_eq!(
+            plan.execution_timed_dag().unwrap_err(),
+            SummaryMaintenanceTimingError::UnselectedLifecycle(deployment.post_asap_node_id)
+        );
+    }
+
+    // A retained population and its raw input run at ingestion time; an
+    // Ephemeral population is rebuilt from raw input at query time.
+    #[test]
+    fn population_lifecycle_choice_decides_its_timing() {
+        let data = continuous(1_000, 60_000);
+        let workload = workload(vec![], vec![repeating()], data.clone());
+        let timed = |lifecycle: SummaryMaintenanceLifecycle| {
+            population_timings(&timed_dag(
+                population_readout(),
+                &workload,
+                &data,
+                Some(Horizon(10.0)),
+                |_| lifecycle.clone(),
+            ))
+        };
+        assert_eq!(
+            timed(SummaryMaintenanceLifecycle::ContinuouslyMaintained),
+            [("raw", INGEST), ("population", INGEST), ("readout", QUERY)]
+        );
+        assert_eq!(
+            timed(SummaryMaintenanceLifecycle::Ephemeral),
+            [("raw", QUERY), ("population", QUERY), ("readout", QUERY)]
+        );
+    }
+
+    // When retaining is cheaper, Planner's own selection keeps the population
+    // maintained at ingestion time, as realization strategies placed it before
+    // population timing became a lifecycle decision.
+    #[test]
+    fn planner_selection_retains_population_at_ingestion() {
+        let data = continuous(1_000, 60_000);
+        let workload = workload(vec![], vec![repeating()], data.clone());
+        let plan = plan_summary_maintenance_lifecycles(
+            population_readout(),
+            WorkloadDemand::new_with_data(&workload, &data, &[0]),
+            1_000,
+            Some(Horizon(10.0)),
+            SummaryMaintenanceLifecycleCapabilities::ALL,
+            &UnitCosts,
+        )
+        .unwrap();
+        // Shared and ContinuouslyMaintained tie at 32; the first wins.
         assert!(matches!(
-            plan.execution_timed_dag(),
-            Err(SummaryMaintenanceTimingError::UnplannedMaintainedState(_))
+            selected_summary_maintenance_lifecycle(&plan.deployments[0]),
+            Some(SummaryMaintenanceLifecycle::Shared { .. })
         ));
+        assert_eq!(
+            population_timings(&plan.execution_timed_dag().unwrap()),
+            [("raw", INGEST), ("population", INGEST), ("readout", QUERY)]
+        );
+    }
+
+    // A population feeding summary state is that state's input, not a separate
+    // deployment: the state's lifecycle times it.
+    #[test]
+    fn population_feeding_summary_state_follows_that_state() {
+        let SummaryExpr::ValueOperation {
+            child: population, ..
+        } = &population_readout().expr
+        else {
+            unreachable!()
+        };
+        let state = summary();
+        let SummaryExpr::SummaryAgg {
+            family,
+            input,
+            reduction,
+            grouping,
+            ..
+        } = &state.expr
+        else {
+            unreachable!()
+        };
+        let state = Rc::new(SummaryNode {
+            expr: SummaryExpr::SummaryAgg {
+                child: Rc::clone(population),
+                family: family.clone(),
+                input: input.clone(),
+                reduction: reduction.clone(),
+                grouping: grouping.clone(),
+            },
+            ..state.as_ref().clone()
+        });
+        let data = continuous(1_000, 60_000);
+        let workload = workload(vec![], vec![repeating()], data.clone());
+        let timed = |lifecycle: SummaryMaintenanceLifecycle| {
+            population_timings(&timed_dag(
+                readout(&state),
+                &workload,
+                &data,
+                Some(Horizon(10.0)),
+                |deployment| {
+                    assert!(Rc::ptr_eq(&deployment.summary, &state));
+                    lifecycle.clone()
+                },
+            ))
+        };
+        assert_eq!(
+            timed(SummaryMaintenanceLifecycle::ContinuouslyMaintained),
+            [
+                ("raw", INGEST),
+                ("population", INGEST),
+                ("state", INGEST),
+                ("readout", QUERY)
+            ]
+        );
+        assert_eq!(
+            timed(SummaryMaintenanceLifecycle::Ephemeral),
+            [
+                ("raw", QUERY),
+                ("population", QUERY),
+                ("state", QUERY),
+                ("readout", QUERY)
+            ]
+        );
+    }
+
+    // A population both read directly and consumed by summary state is that
+    // state's input in either traversal order: not a separate deployment, and
+    // timed by the state's lifecycle.
+    #[test]
+    fn shared_population_follows_its_summary_consumer() {
+        let direct = population_readout();
+        let SummaryExpr::ValueOperation {
+            child: population, ..
+        } = &direct.expr
+        else {
+            unreachable!()
+        };
+        let state = summary();
+        let SummaryExpr::SummaryAgg {
+            family,
+            input,
+            reduction,
+            grouping,
+            ..
+        } = &state.expr
+        else {
+            unreachable!()
+        };
+        let state = Rc::new(SummaryNode {
+            expr: SummaryExpr::SummaryAgg {
+                child: Rc::clone(population),
+                family: family.clone(),
+                input: input.clone(),
+                reduction: reduction.clone(),
+                grouping: grouping.clone(),
+            },
+            ..state.as_ref().clone()
+        });
+        let binary = |lhs: Rc<SummaryNode>, rhs: Rc<SummaryNode>| {
+            Rc::new(SummaryNode {
+                schema: lhs.schema.clone(),
+                expr: SummaryExpr::BinaryOp {
+                    lhs,
+                    rhs,
+                    operator: asap_types::post_asap::BinaryOperator {
+                        kind: asap_types::pre_asap::BinaryOpKind::Arithmetic(
+                            asap_types::pre_asap::ArithmeticOpKind::Add,
+                        ),
+                        vector_match: None,
+                        checked_relative_division: false,
+                        checked_finite_division: false,
+                    },
+                    timing: QUERY,
+                },
+                guarantee: None,
+            })
+        };
+        let data = continuous(1_000, 60_000);
+        let workload = workload(vec![], vec![repeating()], data.clone());
+        for root in [
+            binary(Rc::clone(&direct), readout(&state)),
+            binary(readout(&state), Rc::clone(&direct)),
+        ] {
+            for lifecycle in [
+                SummaryMaintenanceLifecycle::ContinuouslyMaintained,
+                SummaryMaintenanceLifecycle::Ephemeral,
+            ] {
+                let dag = timed_dag(
+                    Rc::clone(&root),
+                    &workload,
+                    &data,
+                    Some(Horizon(10.0)),
+                    |deployment| {
+                        assert!(Rc::ptr_eq(&deployment.summary, &state));
+                        lifecycle.clone()
+                    },
+                );
+                let expected = if lifecycle == SummaryMaintenanceLifecycle::Ephemeral {
+                    QUERY
+                } else {
+                    INGEST
+                };
+                for (kind, timing) in population_timings(&dag) {
+                    if matches!(kind, "raw" | "population" | "state") {
+                        assert_eq!(timing, expected, "{kind}");
+                    } else {
+                        assert_eq!(timing, QUERY, "{kind}");
+                    }
+                }
+            }
+        }
+    }
+
+    // A plan whose population deployment was removed after enumeration is
+    // refused rather than timed by a guess.
+    #[test]
+    fn timing_refuses_population_without_deployment() {
+        let data = continuous(1_000, 60_000);
+        let workload = workload(vec![], vec![repeating()], data.clone());
+        let mut plan = plan_summary_maintenance_lifecycles(
+            population_readout(),
+            WorkloadDemand::new_with_data(&workload, &data, &[0]),
+            1_000,
+            Some(Horizon(10.0)),
+            SummaryMaintenanceLifecycleCapabilities::ALL,
+            &UnitCosts,
+        )
+        .unwrap();
+        let id = plan.deployments.remove(0).post_asap_node_id;
+        assert_eq!(
+            plan.execution_timed_dag(),
+            Err(SummaryMaintenanceTimingError::UnplannedMaintainedState(id))
+        );
     }
 }

@@ -42,12 +42,15 @@ below states.
    families, readouts and sharing. It does not decide placement; timing that a
    realization strategy writes while building a candidate is provisional.
 2. **Summary maintenance lifecycle** (Planner) lists the lifecycle choices for
-   each unique summary state. A chosen assignment determines every node's
+   each unique retained state: every summary state (`SummaryAgg`) and every
+   maintained population that does not feed a summary state.
+   A chosen assignment determines every node's
    `ExecutionTiming`, plus window framework and retention.
    `SummaryMaintenanceLifecyclePlan::execution_timed_dag` applies it: a retained
    (non-`Ephemeral`) state and all of its inputs run at ingestion time;
    readouts, other consumers, and `Ephemeral` states not consumed by retained
-   state run at query time.
+   state run at query time. A population that feeds a summary state is one of
+   that state's inputs and follows its timing.
 3. **Physical compile** (Planner) reads timing: ingestion-time nodes form the
    precompute DAG and the rest form the query DAG, joined by typed outputs. It
    does not see raw ingestion, panes, storage or stored-state readout.
@@ -259,7 +262,7 @@ using workload demand, window/freshness requirements and supported physical
 implementations. Backend selection uses runtime feasibility and cost after
 physical compilation. The following example follows one candidate.
 
-Candidate generation and selection are separate steps. For every unique summary
+Candidate generation and selection are separate steps. For every unique retained
 state, enumeration reports each lifecycle (ephemeral, prepared, shared,
 continuously maintained) as legal, with a Planner cost or explicitly unknown
 cost, or as rejected with a reason. Planner does not remove a legal alternative
@@ -273,6 +276,14 @@ lifecycle guarantee and window framework the physical compiler consumes when
 Planner selects. Planner's own cheapest-alternative selection remains available
 for callers without deployment pricing. The window framework is decided for the
 complete combination, not for one alternative in isolation.
+
+A maintained population (for example, the current series of `topk by(job)(1, m)`)
+is retained state like a summary. Retaining it maintains the latest sample per
+series at ingestion and leaves only the readout at query time. Choosing
+`Ephemeral` rebuilds that snapshot from raw samples for each query, so the
+deployment must supply the raw source at query time. The caller's `CostModel`
+prices both through the same lifecycle hooks; a model without population
+evidence leaves them unknown, and they are not selected.
 
 For the running example, assume it selects:
 
@@ -561,7 +572,9 @@ operator/runtime fixtures:
 | `summary_maintenance_lifecycle_e2e::continuous_lifecycle_compiles_and_executes_spatial_kll` | PromQL workload → selected continuous lifecycle → logical DAG → compiled precompute/query candidate → results in independent revisions; an unbounded candidate fails before pricing, and a bounded request candidate summarizes the same input samples |
 | `summary_maintenance_lifecycle_e2e::chosen_lifecycle_timing_decides_precompute_contents` | PromQL workload → enumerated lifecycles → explicit choice → timed DAG → compiled candidate; ContinuouslyMaintained stores the state in precompute, Ephemeral leaves precompute empty and reads the raw source at query time; both return the same p99 |
 | `summary_maintenance_lifecycle_e2e::lifecycle_timing_cuts_one_compilation` | KLL quantile and grouped Rate→Sum: one compilation cut by the ContinuouslyMaintained and Ephemeral timed DAGs equals `compile_candidate` for each; the frontier is the retained state or empty |
-| `summary_maintenance_lifecycle_e2e::planner_lifecycle_selection_reproduces_strategy_timing` | For PromQL fixtures, the timed DAG from Planner's retained selection equals the DAG realization strategies produce today |
+
+| `summary_maintenance_lifecycle_e2e::chosen_population_lifecycle_decides_precompute_contents` | PromQL `topk by(job)` over a maintained population → explicit choice → timed DAG → compiled candidate; ContinuouslyMaintained stores the population in precompute, Ephemeral rebuilds it from raw samples at query time; both rank alike |
+| `summary_maintenance_lifecycle_e2e::planner_lifecycle_selection_reproduces_strategy_timing` | For PromQL summary fixtures, the timed DAG from Planner's retained selection equals the DAG realization strategies produce |
 | `kll_pane_execution::five_panes_roundtrip_and_shared_merge_runs_once` | Explicit one-minute precompute DAGs → real MessagePack state bytes → five required query inputs → shared native merge → p50/p99; counts every sample once, checks adjacent aligned windows and instruments one merge start per run |
 | `kll_pane_execution::restored_panes_reject_corruption_parameters_schema_and_missing_binding` | Corrupt bytes, parameter relabelling, incompatible schemas and absent bindings fail explicitly |
 | `precompute_candidates::grouped_rate_can_be_materialized_before_or_after_grouped_sum` | Cost changes select different legal precompute frontiers; both selected candidates execute with the same reset-sensitive result; uncompilable candidates are not priced |
