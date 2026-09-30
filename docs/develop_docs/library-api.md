@@ -280,15 +280,14 @@ partial inventory.
 
 For PromQL roots that carry a target, `search_workload_with_targets` also asks
 each strategy's `ReplacementStrategy::propose_for_root`. `SketchAlgorithmStrategy`
-answers with physical alternatives over rows carrying the complete series
-identity (`$promql_series_identity`): current-series TopK, fixed-window and
-query-time Rate aggregation, and realizations over per-series Rate state. They
-are finalized, deduplicated, and marked
-`ReplacementProvenance::RootPhysicalRealization`. Callers do not apply
-`with_series_identity` or call the proposal methods themselves. Compile each
-alternative with the matching `promql_rows::compile_*` function; queries without
-such an alternative keep their previous inventory. `global_selection` never
-commits these candidates; the backend compiles and prices them.
+answers an instant-vector TopK with current-series heap realizations over rows
+carrying the complete series identity (`$promql_series_identity`). They are
+finalized, deduplicated, and marked `ReplacementProvenance::RootPhysicalRealization`.
+Callers do not apply `with_series_identity` themselves. Compile each with
+`promql_rows::compile_current_series_readout`; other queries keep their previous
+inventory. `global_selection` never commits these candidates; the backend
+compiles and prices them. PlanSpace lists no placement variants: node timing
+comes from the summary maintenance lifecycle.
 
 ## Choose strategies and models
 

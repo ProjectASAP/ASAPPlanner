@@ -79,13 +79,12 @@ sample values does not preserve instant-vector semantics. Replacement, rank
 decrease, expiry, grouping and the required approximation guarantee must be
 validated before admitting that physical candidate.
 
-Whole-query alternatives that need a different physical row representation are
-part of Planner's candidate space. For PromQL, Planner resolves rows that carry
-the complete series identity, then proposes the families above for that root:
-fixed-window Rate aggregation, query-time ranking or aggregation over
-per-series Rate readouts, and current-series TopK. These are listed per root
-with the other candidates, unranked. Queries without such a realization are
-unchanged.
+Planner's candidate space decides what to compute, not placement. For an
+instant-vector PromQL TopK, Planner resolves rows that carry the complete series
+identity and lists the current-series heap realizations per root with the other
+candidates, unranked. Precompute or query-time placement of Rate and grouped Sum
+is not a separate Planner candidate: the summary maintenance lifecycle assigns
+each node's timing, and the physical compiler reads it.
 
 This is the target ownership contract. A backend path that still reconstructs
 operators from logical candidates has not completed this integration.
