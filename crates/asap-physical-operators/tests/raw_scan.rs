@@ -54,16 +54,16 @@ fn fixture() -> (PreASAPNode, Schema, Vec<Batch>) {
     (scan, output, batches)
 }
 fn plan(scan: PreASAPNode, schema: &Schema, state: ExecutionDataState) -> PostASAPDAGTransport {
-    let node = |id, payload| PostAsapDagNode {
-        id: PostAsapNodeId(id),
+    let node = |id, payload| PostASAPDAGNode {
+        id: PostASAPNodeId(id),
         payload,
         output_state: state,
         output_schema: (**schema).clone(),
         guarantee: None,
     };
-    let edge = |producer, consumer| PostAsapDagEdge {
-        producer: PostAsapNodeId(producer),
-        consumer: PostAsapNodeId(consumer),
+    let edge = |producer, consumer| PostASAPDAGEdge {
+        producer: PostASAPNodeId(producer),
+        consumer: PostASAPNodeId(consumer),
         role: EdgeRole::Input,
         intermediate_schema: (**schema).clone(),
         data_state: state,
@@ -72,10 +72,10 @@ fn plan(scan: PreASAPNode, schema: &Schema, state: ExecutionDataState) -> PostAS
     };
     PostASAPDAGTransport {
         nodes: vec![
-            node(0, PostAsapOperatorPayload::Fallback { expression: scan }),
+            node(0, PostASAPOperatorPayload::Fallback { expression: scan }),
             node(
                 1,
-                PostAsapOperatorPayload::Value {
+                PostASAPOperatorPayload::Value {
                     operation: ValueOperation::Sort {
                         keys: vec![planner_types::pre_asap::SortKey {
                             expr: PreASAPNode::Column(0),
@@ -88,7 +88,7 @@ fn plan(scan: PreASAPNode, schema: &Schema, state: ExecutionDataState) -> PostAS
             ),
             node(
                 2,
-                PostAsapOperatorPayload::Value {
+                PostASAPOperatorPayload::Value {
                     operation: ValueOperation::Limit {
                         n: 2,
                         offset: 0,
@@ -98,7 +98,7 @@ fn plan(scan: PreASAPNode, schema: &Schema, state: ExecutionDataState) -> PostAS
             ),
         ],
         edges: vec![edge(0, 1), edge(1, 2)],
-        root: PostAsapNodeId(2),
+        root: PostASAPNodeId(2),
     }
 }
 fn registry(source: Arc<dyn RawSource>) -> DataSources {

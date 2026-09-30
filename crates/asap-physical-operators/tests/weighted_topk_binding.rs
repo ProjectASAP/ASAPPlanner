@@ -89,7 +89,7 @@ fn assert_weighted_binding(evidence: &dyn AccuracyEvidenceProvider, algorithm: S
         })
         .unwrap();
     let dag = export_post_asap_dag(&plan).unwrap();
-    let build=dag.nodes.iter().find(|node|matches!(&node.payload,PostAsapOperatorPayload::SummaryAgg{family:SummaryFamilyType::Sketch(kind,_),..}if kind.algorithm()==&algorithm)).unwrap();
+    let build=dag.nodes.iter().find(|node|matches!(&node.payload,PostASAPOperatorPayload::SummaryAgg{family:SummaryFamilyType::Sketch(kind,_),..}if kind.algorithm()==&algorithm)).unwrap();
     let rate_id = dag
         .edges
         .iter()
@@ -354,9 +354,9 @@ fn check_direct_rate_topk(dynamic: bool) {
         }
         let dag = export_post_asap_dag(candidate).unwrap();
         assert!(dag.nodes.iter().any(|node| matches!(&node.payload,
-            PostAsapOperatorPayload::SummaryAgg { family: SummaryFamilyType::Sketch(kind, _), .. } if kind.algorithm() == &algorithm)));
+            PostASAPOperatorPayload::SummaryAgg { family: SummaryFamilyType::Sketch(kind, _), .. } if kind.algorithm() == &algorithm)));
         let build = dag.nodes.iter().find(|node| matches!(&node.payload,
-            PostAsapOperatorPayload::SummaryAgg { family: SummaryFamilyType::Sketch(kind, _), .. } if kind.algorithm() == &algorithm)).unwrap();
+            PostASAPOperatorPayload::SummaryAgg { family: SummaryFamilyType::Sketch(kind, _), .. } if kind.algorithm() == &algorithm)).unwrap();
         let input_id = dag
             .edges
             .iter()
@@ -377,7 +377,7 @@ fn check_direct_rate_topk(dynamic: bool) {
             .find(|node| {
                 matches!(
                     &node.payload,
-                    PostAsapOperatorPayload::Fallback {
+                    PostASAPOperatorPayload::Fallback {
                         expression: PreASAPNode::TimeRange { .. }
                     }
                 )
@@ -662,7 +662,7 @@ fn spatial_topk_exposes_signed_heap_candidate_over_complete_snapshot() {
         .find(|node| {
             matches!(
                 &node.payload,
-                PostAsapOperatorPayload::Fallback {
+                PostASAPOperatorPayload::Fallback {
                     expression: PreASAPNode::TimeRange { .. }
                 }
             )
@@ -888,7 +888,7 @@ fn maintained_rate_heap_lifecycle_compiles_fixed_window_precompute() {
             .find(|node| {
                 matches!(
                     &node.payload,
-                    PostAsapOperatorPayload::SummaryAgg {
+                    PostASAPOperatorPayload::SummaryAgg {
                         family: SummaryFamilyType::ExactAggregate(ExactKind::Rate, _),
                         ..
                     }
@@ -901,7 +901,7 @@ fn maintained_rate_heap_lifecycle_compiles_fixed_window_precompute() {
             .find(|node| {
                 matches!(
                     &node.payload,
-                    PostAsapOperatorPayload::SummaryAgg {
+                    PostASAPOperatorPayload::SummaryAgg {
                         family: SummaryFamilyType::Sketch(..),
                         ..
                     }
@@ -950,7 +950,7 @@ fn maintained_rate_heap_lifecycle_compiles_fixed_window_precompute() {
             })
         };
         let (family, input, grouping) = match &state.payload {
-            PostAsapOperatorPayload::SummaryAgg {
+            PostASAPOperatorPayload::SummaryAgg {
                 family,
                 input,
                 grouping,

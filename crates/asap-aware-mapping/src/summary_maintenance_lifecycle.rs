@@ -22,7 +22,7 @@ use std::rc::Rc;
 
 use asap_types::post_asap::{
     EvaluationSchedule, ExecutionDataStateError, ExecutionTiming, OutputRepresentation,
-    PostASAPDAGTransport, PostASAPNode, PostAsapDagValidationError, PostAsapNodeId,
+    PostASAPDAGTransport, PostASAPDAGValidationError, PostASAPNode, PostASAPNodeId,
     ResultGuarantee, SummaryExpr, SummaryMaintenanceLifecycle,
     SummaryMaintenanceLifecycleGuarantee, SummaryMaintenanceMode, SummaryWindowFramework,
     ValueOperation,
@@ -166,7 +166,7 @@ pub struct SummaryMaintenanceDeployment {
     /// Identity of this summary in the exported post-ASAP semantic DAG.
     /// It is scoped to one plan version and is not a summary definition or
     /// summary instance identity.
-    pub post_asap_node_id: PostAsapNodeId,
+    pub post_asap_node_id: PostASAPNodeId,
     /// The unique materialized `SummaryAgg`, or maintained population
     /// (`MaintainPopulation`) not consumed by a `SummaryAgg`, represented by
     /// this deployment. Cost-model lifecycle hooks receive this node.
@@ -220,18 +220,18 @@ pub struct SummaryMaintenanceLifecyclePlan {
 #[derive(Debug, thiserror::Error, PartialEq)]
 pub enum SummaryMaintenanceTimingError {
     #[error(transparent)]
-    InvalidPostAsapDag(#[from] ExecutionDataStateError),
+    InvalidPostASAPDAG(#[from] ExecutionDataStateError),
     #[error("summary {0:?} has no selected lifecycle")]
-    UnselectedLifecycle(PostAsapNodeId),
+    UnselectedLifecycle(PostASAPNodeId),
     /// A maintained population outside any `SummaryAgg`'s inputs has no
     /// deployment, so its timing would be guessed. Enumeration always emits
     /// one; this arises only for a plan whose root or deployments were edited.
     #[error("node {0:?} maintains state that has no summary-maintenance lifecycle")]
-    UnplannedMaintainedState(PostAsapNodeId),
+    UnplannedMaintainedState(PostASAPNodeId),
     #[error("timing index belongs to a different logical graph")]
     GraphMismatch,
     #[error(transparent)]
-    InvalidPhases(#[from] PostAsapDagValidationError),
+    InvalidPhases(#[from] PostASAPDAGValidationError),
 }
 
 impl SummaryMaintenanceLifecyclePlan {
@@ -374,7 +374,7 @@ pub enum SummaryMaintenanceLifecyclePlanError {
     #[error("workload entry index {index} appears more than once in one demand binding")]
     DuplicateWorkloadEntry { index: usize },
     #[error(transparent)]
-    InvalidPostAsapDag(#[from] ExecutionDataStateError),
+    InvalidPostASAPDAG(#[from] ExecutionDataStateError),
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -419,18 +419,18 @@ pub enum SummaryMaintenanceLifecycleChoiceError {
     #[error("lifecycle assignment expansion exceeds the requested limit {0}")]
     ExpansionLimit(usize),
     #[error("summary {0:?} has no lifecycle alternative")]
-    NoAlternatives(PostAsapNodeId),
+    NoAlternatives(PostASAPNodeId),
     #[error("summary {0:?} is not a deployment of this root")]
-    UnknownSummary(PostAsapNodeId),
+    UnknownSummary(PostASAPNodeId),
     #[error("summary {0:?} is chosen more than once")]
-    DuplicateChoice(PostAsapNodeId),
+    DuplicateChoice(PostASAPNodeId),
     #[error("summary {0:?} has no chosen lifecycle")]
-    MissingChoice(PostAsapNodeId),
+    MissingChoice(PostASAPNodeId),
     #[error("chosen lifecycle is not an enumerated alternative of summary {0:?}")]
-    NotAnAlternative(PostAsapNodeId),
+    NotAnAlternative(PostASAPNodeId),
     #[error("chosen lifecycle of summary {post_asap_node_id:?} is rejected: {rejection:?}")]
     Rejected {
-        post_asap_node_id: PostAsapNodeId,
+        post_asap_node_id: PostASAPNodeId,
         rejection: Option<SummaryMaintenanceLifecycleRejection>,
     },
     #[error("summary states on one maintenance path have different evaluation schedules")]
@@ -443,7 +443,7 @@ pub enum SummaryMaintenanceLifecycleChoiceError {
 /// A successful unpriced plan still needs window/evidence binding before installation.
 #[derive(Debug)]
 pub struct LifecycleAssignmentCandidate {
-    pub choices: Vec<(PostAsapNodeId, SummaryMaintenanceLifecycle)>,
+    pub choices: Vec<(PostASAPNodeId, SummaryMaintenanceLifecycle)>,
     pub plan: Result<SummaryMaintenanceLifecyclePlan, SummaryMaintenanceLifecycleChoiceError>,
 }
 
@@ -512,7 +512,7 @@ impl SummaryMaintenanceLifecycleCandidates<'_> {
     /// cost are the model's and unknown cost is never replaced by zero.
     pub fn select(
         self,
-        choices: &[(PostAsapNodeId, SummaryMaintenanceLifecycle)],
+        choices: &[(PostASAPNodeId, SummaryMaintenanceLifecycle)],
     ) -> Result<SummaryMaintenanceLifecyclePlan, SummaryMaintenanceLifecycleChoiceError> {
         self.bind_assignment(choices, true)
     }
@@ -581,7 +581,7 @@ impl SummaryMaintenanceLifecycleCandidates<'_> {
 
     fn bind_assignment(
         mut self,
-        choices: &[(PostAsapNodeId, SummaryMaintenanceLifecycle)],
+        choices: &[(PostASAPNodeId, SummaryMaintenanceLifecycle)],
         require_cost: bool,
     ) -> Result<SummaryMaintenanceLifecyclePlan, SummaryMaintenanceLifecycleChoiceError> {
         use SummaryMaintenanceLifecycleChoiceError as E;
@@ -1793,7 +1793,7 @@ mod tests {
     }
     use super::*;
     use asap_types::post_asap::{
-        ExactKind, ExactParams, GroupingStrategy, PostAsapOperatorPayload, ResultGuarantee,
+        ExactKind, ExactParams, GroupingStrategy, PostASAPOperatorPayload, ResultGuarantee,
         SketchAlgorithm, SummaryFamilyType, SummaryField, SummarySchema,
     };
     use asap_types::pre_asap::AggIntent;
@@ -2704,7 +2704,7 @@ mod tests {
     fn whole_candidate_cost_is_evaluated_before_selecting_a_lifecycle() {
         let root = summary();
         let mut deployments = vec![SummaryMaintenanceDeployment {
-            post_asap_node_id: PostAsapNodeId(0),
+            post_asap_node_id: PostASAPNodeId(0),
             summary: Rc::clone(&root),
             summary_maintenance_lifecycle_guarantee: None,
             selected_window_framework: None,
@@ -2767,7 +2767,7 @@ mod tests {
         ];
         let mut deployments: Vec<_> = (0..13)
             .map(|summary_index| SummaryMaintenanceDeployment {
-                post_asap_node_id: PostAsapNodeId(summary_index as u32),
+                post_asap_node_id: PostASAPNodeId(summary_index as u32),
                 summary: Rc::clone(&root),
                 summary_maintenance_lifecycle_guarantee: None,
                 selected_window_framework: None,
@@ -2967,7 +2967,7 @@ mod tests {
     fn choose(
         candidates: &SummaryMaintenanceLifecycleCandidates<'_>,
         lifecycle: SummaryMaintenanceLifecycle,
-    ) -> Vec<(PostAsapNodeId, SummaryMaintenanceLifecycle)> {
+    ) -> Vec<(PostASAPNodeId, SummaryMaintenanceLifecycle)> {
         candidates
             .deployments()
             .iter()
@@ -3077,7 +3077,7 @@ mod tests {
         use SummaryMaintenanceLifecycleChoiceError as E;
         let data = continuous(1_000, 60_000);
         let workload = workload(vec![], vec![repeating()], data.clone());
-        let select = |model: &dyn CostModel, choice: &dyn Fn(PostAsapNodeId) -> Vec<_>| {
+        let select = |model: &dyn CostModel, choice: &dyn Fn(PostASAPNodeId) -> Vec<_>| {
             let candidates = continuous_candidates(&workload, &data, model);
             let id = candidates.deployments()[0].post_asap_node_id;
             (id, candidates.select(&choice(id)).unwrap_err())
@@ -3120,9 +3120,9 @@ mod tests {
         });
         assert_eq!(error, E::DuplicateChoice(id));
         let (_, error) = select(&UnitCosts, &|_| {
-            vec![(PostAsapNodeId(u32::MAX), continuous.clone())]
+            vec![(PostASAPNodeId(u32::MAX), continuous.clone())]
         });
-        assert_eq!(error, E::UnknownSummary(PostAsapNodeId(u32::MAX)));
+        assert_eq!(error, E::UnknownSummary(PostASAPNodeId(u32::MAX)));
     }
 
     // Nested states on one maintenance path must share an evaluation schedule.
@@ -3262,10 +3262,10 @@ mod tests {
             .iter()
             .map(|node| {
                 let kind = match node.payload {
-                    PostAsapOperatorPayload::Fallback { .. } => "raw",
-                    PostAsapOperatorPayload::SummaryAgg { .. } => "state",
-                    PostAsapOperatorPayload::Value { .. } => "readout",
-                    PostAsapOperatorPayload::Binary { .. } => "binary",
+                    PostASAPOperatorPayload::Fallback { .. } => "raw",
+                    PostASAPOperatorPayload::SummaryAgg { .. } => "state",
+                    PostASAPOperatorPayload::Value { .. } => "readout",
+                    PostASAPOperatorPayload::Binary { .. } => "binary",
                     _ => "other",
                 };
                 (kind, node.output_state.timing)
@@ -3478,7 +3478,7 @@ mod tests {
             .iter()
             .zip(timings(dag))
             .map(|(node, (kind, timing))| match node.payload {
-                PostAsapOperatorPayload::Value {
+                PostASAPOperatorPayload::Value {
                     operation: ValueOperation::MaintainPopulation { .. },
                 } => ("population", timing),
                 _ => (kind, timing),

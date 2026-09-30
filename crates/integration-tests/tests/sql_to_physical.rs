@@ -8,7 +8,7 @@ use asap_physical_operators::{
     values::{Batch, Value},
 };
 use asap_types::{
-    post_asap::{export_post_asap_dag, PostAsapOperatorPayload, SummaryFamilyType},
+    post_asap::{export_post_asap_dag, PostASAPOperatorPayload, SummaryFamilyType},
     pre_asap::{Column, DataType, PreASAPNode, Schema},
     types::AccuracyTarget,
 };
@@ -48,7 +48,7 @@ async fn sql_filter_grouped_sum_executes_and_rebinds() {
             .find(|node| {
                 matches!(
                     &node.payload,
-                    PostAsapOperatorPayload::Fallback {
+                    PostASAPOperatorPayload::Fallback {
                         expression: PreASAPNode::Scan { .. }
                     }
                 )
@@ -88,7 +88,7 @@ async fn sql_filter_grouped_sum_executes_and_rebinds() {
                     .collect()
             })
             .collect();
-            let PostAsapOperatorPayload::Fallback { expression } = &scan.payload else {
+            let PostASAPOperatorPayload::Fallback { expression } = &scan.payload else {
                 unreachable!()
             };
             let PreASAPNode::Scan { source, .. } = expression else {

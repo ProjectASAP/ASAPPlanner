@@ -634,7 +634,7 @@ that prepared or retained shared state is supported.
 | `global_selection_with_summary_maintenance_lifecycles` | `CandidatePostASAPDAGs`, workload/root-entry associations, time, horizon, capabilities, cost model | Lifecycle-aware compatible selection/error, using eligible cost evidence |
 | `assemble_selected_dag_with_summary_maintenance_lifecycles` | Selection, target root and lifecycle context | Optional lifecycle plan/error; attaches state deployment decisions |
 | `CandidatePostASAPDAGs::with_timing_for_root` | Root ID, `CandidateTimingContext`, logical and assignment expansion limits | `CandidatePostASAPDAGs<Id, WithTiming<'a, Id>>`; lazy assignments and rejections, with shared logical graphs and lifecycle metadata |
-| Timed collection `select_lifecycles(logical_index, choices)` | One `(PostAsapNodeId, SummaryMaintenanceLifecycle)` per state, copied from `lifecycle_alternatives(logical_index)` | The same lifecycle plan and validation as explicit Planner selection, with typed rejection on failure |
+| Timed collection `select_lifecycles(logical_index, choices)` | One `(PostASAPNodeId, SummaryMaintenanceLifecycle)` per state, copied from `lifecycle_alternatives(logical_index)` | The same lifecycle plan and validation as explicit Planner selection, with typed rejection on failure |
 
 Inspect `deployments`, their selected lifecycle/alternatives/rejections,
 `selected_raw_recompute`, and optional summary/raw costs. Success of a function

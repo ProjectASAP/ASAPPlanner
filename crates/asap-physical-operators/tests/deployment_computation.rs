@@ -57,7 +57,7 @@ fn exact_dag(query: &str) -> PostASAPDAGTransport {
                 let dag = export_post_asap_dag(&node).ok()?;
                 dag.nodes
                     .iter()
-                    .all(|n| !matches!(&n.payload, PostAsapOperatorPayload::SummaryAgg { family, .. } if !matches!(family, SummaryFamilyType::ExactAggregate(..))))
+                    .all(|n| !matches!(&n.payload, PostASAPOperatorPayload::SummaryAgg { family, .. } if !matches!(family, SummaryFamilyType::ExactAggregate(..))))
                     .then_some(dag)
             }
             _ => None,
@@ -80,7 +80,7 @@ fn raw_inputs(dag: &PostASAPDAGTransport) -> Vec<(u64, Arc<SummarySchema>, Strin
     dag.nodes
         .iter()
         .filter_map(|node| match &node.payload {
-            PostAsapOperatorPayload::Fallback {
+            PostASAPOperatorPayload::Fallback {
                 expression: PreASAPNode::TimeRange { child, .. },
             } => match child.as_ref() {
                 PreASAPNode::Scan {
@@ -323,7 +323,7 @@ fn exact_count_finalizes_to_declared_float_value() {
         .find(|node| {
             matches!(
                 node.payload,
-                PostAsapOperatorPayload::Value {
+                PostASAPOperatorPayload::Value {
                     operation: ValueOperation::FinalizeExactAccumulator
                 }
             )
@@ -339,7 +339,7 @@ fn exact_count_finalizes_to_declared_float_value() {
         .clone();
     // Read the rolled-up exact state the same way the query path does.
     let mut read = finalize.clone();
-    read.id = PostAsapNodeId(root.id.0 + 1);
+    read.id = PostASAPNodeId(root.id.0 + 1);
     read.output_schema = root.output_schema.clone();
     read.output_schema.fields.last_mut().unwrap().dtype =
         SummaryFamilyType::Plain(planner_types::pre_asap::DataType::Float64);
@@ -362,7 +362,7 @@ fn with_kind(
     kind: planner_types::pre_asap::BinaryOpKind,
 ) -> PostASAPDAGTransport {
     for node in &mut dag.nodes {
-        if let PostAsapOperatorPayload::Binary { operator } = &mut node.payload {
+        if let PostASAPOperatorPayload::Binary { operator } = &mut node.payload {
             operator.kind = kind.clone();
         }
     }
@@ -556,7 +556,7 @@ fn with_vector_match(
     labels: &[&str],
 ) -> PostASAPDAGTransport {
     for node in &mut dag.nodes {
-        if let PostAsapOperatorPayload::Binary { operator } = &mut node.payload {
+        if let PostASAPOperatorPayload::Binary { operator } = &mut node.payload {
             operator.vector_match = Some(planner_types::pre_asap::VectorMatch {
                 kind: kind.clone(),
                 labels: labels.iter().map(|l| l.to_string()).collect(),
@@ -644,13 +644,13 @@ fn stored_count_min_bare_count_compiles_to_a_readout() {
                     let bare_count = dag.nodes.iter().any(|n| {
                         matches!(
                             &n.payload,
-                            PostAsapOperatorPayload::SummaryEstimate {
+                            PostASAPOperatorPayload::SummaryEstimate {
                                 query: SketchQuery::PointCount { value: None, .. }
                             }
                         )
                     });
                     let count_min = dag.nodes.iter().any(|n| {
-                        matches!(&n.payload, PostAsapOperatorPayload::SummaryAgg {
+                        matches!(&n.payload, PostASAPOperatorPayload::SummaryAgg {
                         family: SummaryFamilyType::Sketch(kind, _), ..
                     } if kind.algorithm() == &SketchAlgorithm::Cms)
                     });
@@ -662,9 +662,9 @@ fn stored_count_min_bare_count_compiles_to_a_readout() {
     let state = dag
         .nodes
         .iter()
-        .find(|n| matches!(n.payload, PostAsapOperatorPayload::SummaryAgg { .. }))
+        .find(|n| matches!(n.payload, PostASAPOperatorPayload::SummaryAgg { .. }))
         .unwrap();
-    let PostAsapOperatorPayload::SummaryAgg {
+    let PostASAPOperatorPayload::SummaryAgg {
         family: SummaryFamilyType::Sketch(kind, _),
         ..
     } = &state.payload

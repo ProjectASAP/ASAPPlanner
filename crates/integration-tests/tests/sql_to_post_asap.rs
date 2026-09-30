@@ -28,7 +28,7 @@ use asap_aware_mapping::{
 use asap_frontend_sql::{lower_sql, lower_sql_dialect, SqlCatalog};
 use asap_types::post_asap::{
     export_post_asap_dag, EdgeRole, ExactKind, ExactParams, GroupingStrategy, PostASAPNode,
-    PostAsapOperatorPayload, SketchAlgorithm, SketchKind, SketchParams, SketchQuery, SummaryExpr,
+    PostASAPOperatorPayload, SketchAlgorithm, SketchKind, SketchParams, SketchQuery, SummaryExpr,
     SummaryFamilyType, SummarySchema, SummaryUpdate, ValueOperation,
 };
 use asap_types::pre_asap::expr_ir::ColumnRef;
@@ -197,7 +197,7 @@ async fn clickhouse_outer_sum_recursively_binds_inner_temporal_aggregate() {
         let dag = export_post_asap_dag(&root).expect("nested SQL DAG must compile");
         assert!(dag.nodes.iter().any(|node| matches!(
             node.payload,
-            PostAsapOperatorPayload::Value {
+            PostASAPOperatorPayload::Value {
                 operation: ValueOperation::Exact(_),
                 ..
             }
@@ -367,7 +367,7 @@ async fn sql_join_recursively_binds_both_temporal_aggregate_children() {
     let join_id = dag
         .nodes
         .iter()
-        .find(|node| matches!(node.payload, PostAsapOperatorPayload::RelationalJoin { .. }))
+        .find(|node| matches!(node.payload, PostASAPOperatorPayload::RelationalJoin { .. }))
         .expect("relational join node")
         .id;
     let roles = dag
@@ -550,7 +550,7 @@ async fn sql_filter_keeps_read_predicate_and_summary_population_selection() {
     let dag = export_post_asap_dag(&root).expect("typed DAG compilation failed");
     assert!(dag.nodes.iter().any(|node| matches!(
         &node.payload,
-        PostAsapOperatorPayload::Value {
+        PostASAPOperatorPayload::Value {
             operation: ValueOperation::Filter { pred },
             ..
         } if pred == retained_read_predicate.as_ref().unwrap()
@@ -810,7 +810,7 @@ async fn map_projection_export_preserves_unsupported_child_boundary() {
         .unwrap();
     let dag = export_post_asap_dag(&root).unwrap();
     assert!(dag.nodes.iter().any(|node| matches!(&node.payload,
-        PostAsapOperatorPayload::Value { operation: ValueOperation::Project { cols, .. }, .. }
+        PostASAPOperatorPayload::Value { operation: ValueOperation::Project { cols, .. }, .. }
         if cols.iter().any(|item| matches!(&item.expr, PreASAPNode::FunctionCall { name, .. } if name == "map"))
     )));
     let mut node = root.as_ref();

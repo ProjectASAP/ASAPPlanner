@@ -836,7 +836,7 @@ mod tests {
 
     fn with_timing(
         dag: &PostASAPDAGTransport,
-        timing: impl Fn(&PostAsapDagNode) -> planner_types::post_asap::ExecutionTiming,
+        timing: impl Fn(&PostASAPDAGNode) -> planner_types::post_asap::ExecutionTiming,
     ) -> PostASAPDAGTransport {
         let mut timed = dag.clone();
         for node in &mut timed.nodes {

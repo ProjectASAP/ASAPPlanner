@@ -77,7 +77,7 @@ pub fn raw_sample_row(
 
 /// Input contract of a precompute boundary: raw sample rows for a raw time
 /// series scan, otherwise the stored population of its summary state.
-pub fn boundary_schema(node: &PostAsapDagNode) -> Result<Schema, Error> {
+pub fn boundary_schema(node: &PostASAPDAGNode) -> Result<Schema, Error> {
     let Payload::Fallback { expression } = &node.payload else {
         return source_schema(&node.output_schema);
     };
@@ -249,7 +249,7 @@ pub fn compile(
     PhysicalDAG::compose(sources, fragments, roots.to_vec())
 }
 
-fn validate_value_output(node: &PostAsapDagNode) -> Result<(), Error> {
+fn validate_value_output(node: &PostASAPDAGNode) -> Result<(), Error> {
     let schema = &node.output_schema;
     // Physical population rows already carry the complete identity in `$population`.
     // Typed logical plans may expose its opaque series-identity column as metadata.
@@ -289,9 +289,9 @@ fn validate_value_output(node: &PostAsapDagNode) -> Result<(), Error> {
 }
 
 fn fragment(
-    node: &PostAsapDagNode,
+    node: &PostASAPDAGNode,
     schemas: &[Schema],
-    parents: &[&PostAsapDagNode],
+    parents: &[&PostASAPDAGNode],
 ) -> Result<PhysicalDAG, Error> {
     let sources = schemas
         .iter()

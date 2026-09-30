@@ -73,7 +73,7 @@ use asap_aware_mapping::replacement::{
 use asap_aware_mapping::{AccuracyEvidenceProvider, PropagationStats};
 use asap_types::cost::{BaselineRef, CostAnnotation, CostInput, CostSource, CostUnit};
 use asap_types::dag_export::{
-    self, DagDecision, DagGraph, DagNote, NamedGraph, PostAsapSubstitution, TargetRejection,
+    self, DagDecision, DagGraph, DagNote, NamedGraph, PostASAPSubstitution, TargetRejection,
     TargetReplacement, TargetReplacementAfter, WorkloadGraph,
 };
 use asap_types::post_asap::PostASAPNode;
@@ -941,8 +941,8 @@ fn annotate_with_explanations(
 }
 
 /// One `TargetSubDAGCandidates`'s best-ranked candidate, kept alongside its own `target`
-/// — the unit both [`PostAsapResults::replacements`] and
-/// [`PostAsapResults::post_graphs`] are built from, so the two outputs can
+/// — the unit both [`PostASAPResults::replacements`] and
+/// [`PostASAPResults::post_graphs`] are built from, so the two outputs can
 /// never disagree about which candidate won for a given target.
 #[allow(dead_code)]
 struct Winner<'a> {
@@ -1087,7 +1087,7 @@ fn target_replacement(
 
 /// The two additive `--post-asap` outputs — see this file's top-of-file
 /// usage doc for what each is for.
-struct PostAsapResults {
+struct PostASAPResults {
     /// One `(query_name, TargetReplacement)` pair per discovered replacement
     /// site whose target node is found in that query's own exported graph. A
     /// target can in principle be reachable from more than one query's root
@@ -1104,8 +1104,8 @@ struct PostAsapResults {
     rejections: Vec<(String, TargetRejection)>,
 }
 
-fn raw_only_post_asap_results() -> PostAsapResults {
-    PostAsapResults {
+fn raw_only_post_asap_results() -> PostASAPResults {
+    PostASAPResults {
         replacements: Vec::new(),
         post_graphs: Vec::new(),
         rejections: Vec::new(),
@@ -1169,7 +1169,7 @@ fn run_post_asap_with_progress(
     cost_model: &dyn CostModel,
     export_model: Option<&ExportPlannerCostModel<'_>>,
     evidence: Option<&dyn AccuracyEvidenceProvider>,
-) -> PostAsapResults {
+) -> PostASAPResults {
     let mapping_started = Instant::now();
     if progress {
         eprintln!("[3/4] ASAP-aware mapping is running…");
@@ -1272,7 +1272,7 @@ fn run_post_asap_with_progress(
     }
     let post_started = Instant::now();
     let mut post_graph_cache = HashCache::new();
-    let mut find_winner = |expr: &PreASAPNode| -> Option<PostAsapSubstitution> {
+    let mut find_winner = |expr: &PreASAPNode| -> Option<PostASAPSubstitution> {
         let i = lookup_winner(&by_hash, &winners, &mut post_graph_cache, expr)?;
         let winner = &winners[i];
         let (baseline_cost, selected_cost, benefit) = winner.costs.clone();
@@ -1291,11 +1291,11 @@ fn run_post_asap_with_progress(
             benefit: Some(benefit),
         };
         Some(match &winners[i].candidate.replacement {
-            Replacement::Rewrite(rc) => PostAsapSubstitution::Rewrite {
+            Replacement::Rewrite(rc) => PostASAPSubstitution::Rewrite {
                 replacement: Rc::clone(rc),
                 decision,
             },
-            Replacement::Summary(rc) => PostAsapSubstitution::Summary {
+            Replacement::Summary(rc) => PostASAPSubstitution::Summary {
                 replacement: Rc::clone(rc),
                 decision,
             },
@@ -1411,7 +1411,7 @@ fn run_post_asap_with_progress(
         );
     }
 
-    PostAsapResults {
+    PostASAPResults {
         replacements,
         post_graphs,
         rejections,
@@ -1419,7 +1419,7 @@ fn run_post_asap_with_progress(
 }
 
 #[cfg(test)]
-fn run_post_asap(lowered_queries: &[(String, String, PreASAPNode)]) -> PostAsapResults {
+fn run_post_asap(lowered_queries: &[(String, String, PreASAPNode)]) -> PostASAPResults {
     run_post_asap_with_progress(lowered_queries, false, &DefaultCostModel, None, None)
 }
 

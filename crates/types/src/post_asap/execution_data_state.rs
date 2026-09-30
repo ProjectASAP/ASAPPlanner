@@ -1218,7 +1218,7 @@ mod tests {
             );
             let exported = crate::post_asap::export_post_asap_dag(&root).unwrap();
             assert!(exported.nodes.iter().any(|node| matches!(node.payload,
-                crate::post_asap::PostAsapOperatorPayload::SummaryMerge
+                crate::post_asap::PostASAPOperatorPayload::SummaryMerge
                     if node.output_state.timing == timing)));
         }
     }

@@ -453,8 +453,8 @@ fn raw_series_contract_is_explicit() {
     // turned into instant selection.
     let selector = lower("m");
     let schema = lift_plain(&selector.output_schema().unwrap());
-    let node = |id, payload| PostAsapDagNode {
-        id: PostAsapNodeId(id),
+    let node = |id, payload| PostASAPDAGNode {
+        id: PostASAPNodeId(id),
         payload,
         output_state: ExecutionDataState::QUERY_ROWS,
         output_schema: schema.clone(),
@@ -464,13 +464,13 @@ fn raw_series_contract_is_explicit() {
         nodes: vec![
             node(
                 0,
-                PostAsapOperatorPayload::Fallback {
+                PostASAPOperatorPayload::Fallback {
                     expression: selector.clone(),
                 },
             ),
             node(
                 1,
-                PostAsapOperatorPayload::Value {
+                PostASAPOperatorPayload::Value {
                     operation: ValueOperation::Limit {
                         n: 1,
                         offset: 0,
@@ -479,16 +479,16 @@ fn raw_series_contract_is_explicit() {
                 },
             ),
         ],
-        edges: vec![PostAsapDagEdge {
-            producer: PostAsapNodeId(0),
-            consumer: PostAsapNodeId(1),
+        edges: vec![PostASAPDAGEdge {
+            producer: PostASAPNodeId(0),
+            consumer: PostASAPNodeId(1),
             role: EdgeRole::Input,
             intermediate_schema: schema.clone(),
             data_state: ExecutionDataState::QUERY_ROWS,
             grouping: GroupingEdgeCompatibility::NotApplicable,
             window: WindowEdgeCompatibility::NotApplicable,
         }],
-        root: PostAsapNodeId(1),
+        root: PostASAPNodeId(1),
     };
     let raw = promql_fallback::raw_series(&selector).unwrap().remove(0).1;
     assert!(compile(

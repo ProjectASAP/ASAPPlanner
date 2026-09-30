@@ -10,6 +10,8 @@ There are no compatibility aliases for the former graph names.
 | `SummaryNode`, `Rc<SummaryNode>` | `PostASAPNode`, `PostASAPDAG` |
 | `PlanSpace<Id>` | `CandidatePostASAPDAGs<Id>` |
 | `PostAsapDag`, `PostAsapDagDocument` | `PostASAPDAGTransport`, `PostASAPDAGDocument` for explicit transport |
+| `PostAsapNodeId`, `PostAsapOperatorPayload`, `PostAsapDagNode`, `PostAsapDagEdge`, `PostAsapDagValidationError`, `PostAsapNodeIdentityMap`, `PostAsapSubstitution` | `PostASAPNodeId`, `PostASAPOperatorPayload`, `PostASAPDAGNode`, `PostASAPDAGEdge`, `PostASAPDAGValidationError`, `PostASAPNodeIdentityMap`, `PostASAPSubstitution` |
+| `InvalidPostAsapDag` error variants | `InvalidPostASAPDAG` |
 | `compile_post_asap_dag`, `compile_post_asap_dag_with_node_ids` | `export_post_asap_dag`, `export_post_asap_dag_with_node_ids` |
 | `execution_timed_dag` | `export_timed_dag` for transport; use `execution_assignment` for shared compilation |
 | `CompiledPhysicalDag` | `PhysicalDAG` |

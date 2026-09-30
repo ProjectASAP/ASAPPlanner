@@ -13,7 +13,7 @@ use crate::{
 };
 use asap_types::post_asap::{
     index_post_asap_dag, ExecutionDataStateError, PostASAPDAG, PostASAPDAGAssignment,
-    PostASAPDAGIndex, PostAsapNodeId, SummaryMaintenanceLifecycle,
+    PostASAPDAGIndex, PostASAPNodeId, SummaryMaintenanceLifecycle,
     SummaryMaintenanceLifecycleGuarantee,
 };
 
@@ -68,7 +68,7 @@ pub struct PostASAPCandidateMetadata<Id> {
     pub id: Id,
     pub logical_candidate: usize,
     pub assignment_candidate: usize,
-    pub choices: Vec<(PostAsapNodeId, SummaryMaintenanceLifecycle)>,
+    pub choices: Vec<(PostASAPNodeId, SummaryMaintenanceLifecycle)>,
     pub lifecycle: Option<SummaryMaintenanceLifecyclePlan>,
 }
 
@@ -256,7 +256,7 @@ impl<Id: Clone> CandidatePostASAPDAGsWithTiming<'_, Id> {
     pub fn select_lifecycles(
         &self,
         logical_candidate: usize,
-        choices: &[(PostAsapNodeId, SummaryMaintenanceLifecycle)],
+        choices: &[(PostASAPNodeId, SummaryMaintenanceLifecycle)],
     ) -> Result<SummaryMaintenanceLifecyclePlan, Rc<CandidateTimingError>> {
         self.prepared(logical_candidate)?
             .lifecycles

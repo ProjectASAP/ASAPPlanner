@@ -45,11 +45,11 @@ pub enum WindowEdgeCompatibility {
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
 )]
 #[serde(transparent)]
-pub struct PostAsapNodeId(pub u32);
+pub struct PostASAPNodeId(pub u32);
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-pub enum PostAsapOperatorPayload {
+pub enum PostASAPOperatorPayload {
     Fallback {
         expression: PreASAPNode,
     },
@@ -86,10 +86,10 @@ pub enum PostAsapOperatorPayload {
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct PostAsapDagNode {
-    pub id: PostAsapNodeId,
+pub struct PostASAPDAGNode {
+    pub id: PostASAPNodeId,
     /// The payload variant is the sole operator identity (`payload.kind` in JSON).
-    pub payload: PostAsapOperatorPayload,
+    pub payload: PostASAPOperatorPayload,
     /// Phase is a placement choice for every operator, independent of payload kind.
     pub output_state: ExecutionDataState,
     pub output_schema: SummarySchema,
@@ -98,9 +98,9 @@ pub struct PostAsapDagNode {
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct PostAsapDagEdge {
-    pub producer: PostAsapNodeId,
-    pub consumer: PostAsapNodeId,
+pub struct PostASAPDAGEdge {
+    pub producer: PostASAPNodeId,
+    pub consumer: PostASAPNodeId,
     pub role: EdgeRole,
     pub intermediate_schema: SummarySchema,
     pub data_state: ExecutionDataState,
@@ -111,11 +111,11 @@ pub struct PostAsapDagEdge {
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PostASAPDAGTransport {
-    pub nodes: Vec<PostAsapDagNode>,
-    pub edges: Vec<PostAsapDagEdge>,
+    pub nodes: Vec<PostASAPDAGNode>,
+    pub edges: Vec<PostASAPDAGEdge>,
     /// Semantic workload root. Physical query/precompute sinks are selected
     /// downstream by the control plane.
-    pub root: PostAsapNodeId,
+    pub root: PostASAPNodeId,
 }
 
 /// Versioned transport envelope for a post-ASAP semantic DAG.
@@ -129,42 +129,42 @@ pub struct PostASAPDAGDocument {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
-pub enum PostAsapDagValidationError {
+pub enum PostASAPDAGValidationError {
     #[error("phase assignment must name every DAG node exactly once")]
     IncompletePhaseAssignment,
     #[error("ingestion node {consumer:?} depends on query node {producer:?}")]
     QueryDependencyInIngestion {
-        producer: PostAsapNodeId,
-        consumer: PostAsapNodeId,
+        producer: PostASAPNodeId,
+        consumer: PostASAPNodeId,
     },
     #[error("unsupported post-ASAP DAG schema version {0}")]
     UnsupportedVersion(u32),
     #[error("duplicate post-ASAP node id {0:?}")]
-    DuplicateNodeId(PostAsapNodeId),
+    DuplicateNodeId(PostASAPNodeId),
     #[error("post-ASAP DAG root {0:?} does not name a node")]
-    MissingRoot(PostAsapNodeId),
+    MissingRoot(PostASAPNodeId),
     #[error("edge endpoint {0:?} does not name a node")]
-    MissingEdgeEndpoint(PostAsapNodeId),
+    MissingEdgeEndpoint(PostASAPNodeId),
     #[error("edge {producer:?}->{consumer:?} schema differs from producer output")]
     EdgeSchemaMismatch {
-        producer: PostAsapNodeId,
-        consumer: PostAsapNodeId,
+        producer: PostASAPNodeId,
+        consumer: PostASAPNodeId,
     },
     #[error("edge {producer:?}->{consumer:?} data state differs from producer output")]
     EdgeDataStateMismatch {
-        producer: PostAsapNodeId,
-        consumer: PostAsapNodeId,
+        producer: PostASAPNodeId,
+        consumer: PostASAPNodeId,
     },
     #[error("post-ASAP DAG contains a cycle")]
     Cycle,
     #[error("post-ASAP node {0:?} is not reachable from the root")]
-    UnreachableNode(PostAsapNodeId),
+    UnreachableNode(PostASAPNodeId),
     #[error("summary aggregate node {node:?} output schema does not contain its declared family")]
-    SummaryFamilySchemaMismatch { node: PostAsapNodeId },
+    SummaryFamilySchemaMismatch { node: PostASAPNodeId },
     #[error(
         "summary aggregate node {node:?} declares grouping inconsistent with its sketch state"
     )]
-    SummaryGroupingMismatch { node: PostAsapNodeId },
+    SummaryGroupingMismatch { node: PostASAPNodeId },
 }
 
 impl PostASAPDAGDocument {
@@ -175,9 +175,9 @@ impl PostASAPDAGDocument {
         }
     }
 
-    pub fn validate(&self) -> Result<(), PostAsapDagValidationError> {
+    pub fn validate(&self) -> Result<(), PostASAPDAGValidationError> {
         if self.schema_version != POST_ASAP_DAG_WIRE_VERSION {
-            return Err(PostAsapDagValidationError::UnsupportedVersion(
+            return Err(PostASAPDAGValidationError::UnsupportedVersion(
                 self.schema_version,
             ));
         }
@@ -191,8 +191,8 @@ impl PostASAPDAGTransport {
     /// and storage boundaries before installing this plan.
     pub fn with_execution_phases(
         &self,
-        phases: &std::collections::BTreeMap<PostAsapNodeId, ExecutionTiming>,
-    ) -> Result<Self, PostAsapDagValidationError> {
+        phases: &std::collections::BTreeMap<PostASAPNodeId, ExecutionTiming>,
+    ) -> Result<Self, PostASAPDAGValidationError> {
         self.validate()?;
         let mut dag = self.clone();
         assign_phases(&mut dag.nodes, &mut dag.edges, phases)?;
@@ -208,7 +208,7 @@ impl PostASAPDAGTransport {
             phases: None,
         }
     }
-    pub fn validate(&self) -> Result<(), PostAsapDagValidationError> {
+    pub fn validate(&self) -> Result<(), PostASAPDAGValidationError> {
         self.as_view().validate()
     }
 }
@@ -219,35 +219,35 @@ impl PostASAPDAGTransport {
 /// [`Self::output_state`] and [`Self::edge_state`], not from the records.
 #[derive(Clone, Copy)]
 pub struct PostASAPDAGView<'a> {
-    nodes: &'a [PostAsapDagNode],
-    edges: &'a [PostAsapDagEdge],
-    root: PostAsapNodeId,
-    phases: Option<&'a std::collections::BTreeMap<PostAsapNodeId, ExecutionTiming>>,
+    nodes: &'a [PostASAPDAGNode],
+    edges: &'a [PostASAPDAGEdge],
+    root: PostASAPNodeId,
+    phases: Option<&'a std::collections::BTreeMap<PostASAPNodeId, ExecutionTiming>>,
 }
 impl<'a> PostASAPDAGView<'a> {
-    pub fn nodes(&self) -> &'a [PostAsapDagNode] {
+    pub fn nodes(&self) -> &'a [PostASAPDAGNode] {
         self.nodes
     }
-    pub fn edges(&self) -> &'a [PostAsapDagEdge] {
+    pub fn edges(&self) -> &'a [PostASAPDAGEdge] {
         self.edges
     }
-    pub fn root(&self) -> PostAsapNodeId {
+    pub fn root(&self) -> PostASAPNodeId {
         self.root
     }
     /// Execution timing of `node` under this view's assignment.
-    pub fn timing(&self, node: &PostAsapDagNode) -> ExecutionTiming {
+    pub fn timing(&self, node: &PostASAPDAGNode) -> ExecutionTiming {
         self.phases
             .and_then(|phases| phases.get(&node.id).copied())
             .unwrap_or(node.output_state.timing)
     }
-    pub fn output_state(&self, node: &PostAsapDagNode) -> ExecutionDataState {
+    pub fn output_state(&self, node: &PostASAPDAGNode) -> ExecutionDataState {
         ExecutionDataState {
             timing: self.timing(node),
             ..node.output_state
         }
     }
     /// An assigned edge carries its producer's assigned state.
-    pub fn edge_state(&self, edge: &PostAsapDagEdge) -> ExecutionDataState {
+    pub fn edge_state(&self, edge: &PostASAPDAGEdge) -> ExecutionDataState {
         match self.phases {
             None => edge.data_state,
             Some(phases) => ExecutionDataState {
@@ -261,14 +261,14 @@ impl<'a> PostASAPDAGView<'a> {
     }
 }
 impl PostASAPDAGView<'_> {
-    pub fn validate(&self) -> Result<(), PostAsapDagValidationError> {
+    pub fn validate(&self) -> Result<(), PostASAPDAGValidationError> {
         use std::collections::{HashMap, HashSet};
         let mut nodes = HashMap::new();
         for node in self.nodes {
             if nodes.insert(node.id, node).is_some() {
-                return Err(PostAsapDagValidationError::DuplicateNodeId(node.id));
+                return Err(PostASAPDAGValidationError::DuplicateNodeId(node.id));
             }
-            if let PostAsapOperatorPayload::SummaryAgg {
+            if let PostASAPOperatorPayload::SummaryAgg {
                 family, grouping, ..
             } = &node.payload
             {
@@ -279,48 +279,48 @@ impl PostASAPDAGView<'_> {
                     }
                     if let SummaryFamilyType::Sketch(_, schema_grouping) = &field.dtype {
                         if schema_grouping != grouping {
-                            return Err(PostAsapDagValidationError::SummaryGroupingMismatch {
+                            return Err(PostASAPDAGValidationError::SummaryGroupingMismatch {
                                 node: node.id,
                             });
                         }
                     }
                 }
                 if !found_family {
-                    return Err(PostAsapDagValidationError::SummaryFamilySchemaMismatch {
+                    return Err(PostASAPDAGValidationError::SummaryFamilySchemaMismatch {
                         node: node.id,
                     });
                 }
             }
         }
         if !nodes.contains_key(&self.root) {
-            return Err(PostAsapDagValidationError::MissingRoot(self.root));
+            return Err(PostASAPDAGValidationError::MissingRoot(self.root));
         }
-        let mut children: HashMap<PostAsapNodeId, Vec<PostAsapNodeId>> = HashMap::new();
+        let mut children: HashMap<PostASAPNodeId, Vec<PostASAPNodeId>> = HashMap::new();
         for edge in self.edges {
             let producer = nodes.get(&edge.producer).ok_or(
-                PostAsapDagValidationError::MissingEdgeEndpoint(edge.producer),
+                PostASAPDAGValidationError::MissingEdgeEndpoint(edge.producer),
             )?;
             if !nodes.contains_key(&edge.consumer) {
-                return Err(PostAsapDagValidationError::MissingEdgeEndpoint(
+                return Err(PostASAPDAGValidationError::MissingEdgeEndpoint(
                     edge.consumer,
                 ));
             }
             if self.timing(producer) == ExecutionTiming::QueryTime
                 && self.timing(nodes[&edge.consumer]) == ExecutionTiming::IngestionTime
             {
-                return Err(PostAsapDagValidationError::QueryDependencyInIngestion {
+                return Err(PostASAPDAGValidationError::QueryDependencyInIngestion {
                     producer: edge.producer,
                     consumer: edge.consumer,
                 });
             }
             if edge.intermediate_schema != producer.output_schema {
-                return Err(PostAsapDagValidationError::EdgeSchemaMismatch {
+                return Err(PostASAPDAGValidationError::EdgeSchemaMismatch {
                     producer: edge.producer,
                     consumer: edge.consumer,
                 });
             }
             if self.edge_state(edge) != self.output_state(producer) {
-                return Err(PostAsapDagValidationError::EdgeDataStateMismatch {
+                return Err(PostASAPDAGValidationError::EdgeDataStateMismatch {
                     producer: edge.producer,
                     consumer: edge.consumer,
                 });
@@ -331,10 +331,10 @@ impl PostASAPDAGView<'_> {
                 .push(edge.producer);
         }
         fn visit(
-            id: PostAsapNodeId,
-            children: &HashMap<PostAsapNodeId, Vec<PostAsapNodeId>>,
-            visiting: &mut HashSet<PostAsapNodeId>,
-            visited: &mut HashSet<PostAsapNodeId>,
+            id: PostASAPNodeId,
+            children: &HashMap<PostASAPNodeId, Vec<PostASAPNodeId>>,
+            visiting: &mut HashSet<PostASAPNodeId>,
+            visited: &mut HashSet<PostASAPNodeId>,
         ) -> bool {
             if visited.contains(&id) {
                 return true;
@@ -360,13 +360,13 @@ impl PostASAPDAGView<'_> {
             &mut HashSet::new(),
             &mut HashSet::new(),
         ) {
-            return Err(PostAsapDagValidationError::Cycle);
+            return Err(PostASAPDAGValidationError::Cycle);
         }
         let mut reachable = HashSet::new();
         fn mark(
-            id: PostAsapNodeId,
-            children: &HashMap<PostAsapNodeId, Vec<PostAsapNodeId>>,
-            reachable: &mut HashSet<PostAsapNodeId>,
+            id: PostASAPNodeId,
+            children: &HashMap<PostASAPNodeId, Vec<PostASAPNodeId>>,
+            reachable: &mut HashSet<PostASAPNodeId>,
         ) {
             if !reachable.insert(id) {
                 return;
@@ -377,7 +377,7 @@ impl PostASAPDAGView<'_> {
         }
         mark(self.root, &children, &mut reachable);
         if let Some(id) = nodes.keys().find(|id| !reachable.contains(id)) {
-            return Err(PostAsapDagValidationError::UnreachableNode(*id));
+            return Err(PostASAPDAGValidationError::UnreachableNode(*id));
         }
         Ok(())
     }
@@ -388,7 +388,7 @@ impl PostASAPDAGView<'_> {
 #[derive(Debug, Clone)]
 pub struct PostASAPDAGAssignment {
     index: Rc<PostASAPDAGIndex>,
-    phases: std::collections::BTreeMap<PostAsapNodeId, ExecutionTiming>,
+    phases: std::collections::BTreeMap<PostASAPNodeId, ExecutionTiming>,
 }
 impl PostASAPDAGAssignment {
     pub fn index(&self) -> &Rc<PostASAPDAGIndex> {
@@ -396,18 +396,18 @@ impl PostASAPDAGAssignment {
     }
     pub fn new(
         index: Rc<PostASAPDAGIndex>,
-        phases: std::collections::BTreeMap<PostAsapNodeId, ExecutionTiming>,
-    ) -> Result<Self, PostAsapDagValidationError> {
+        phases: std::collections::BTreeMap<PostASAPNodeId, ExecutionTiming>,
+    ) -> Result<Self, PostASAPDAGValidationError> {
         if phases.len() != index.nodes.len()
             || index.nodes.iter().any(|n| !phases.contains_key(&n.id))
         {
-            return Err(PostAsapDagValidationError::IncompletePhaseAssignment);
+            return Err(PostASAPDAGValidationError::IncompletePhaseAssignment);
         }
         let result = Self { index, phases };
         result.view().validate()?;
         Ok(result)
     }
-    pub fn phases(&self) -> &std::collections::BTreeMap<PostAsapNodeId, ExecutionTiming> {
+    pub fn phases(&self) -> &std::collections::BTreeMap<PostASAPNodeId, ExecutionTiming> {
         &self.phases
     }
     /// The shared index's records with this assignment's timing overlaid.
@@ -423,7 +423,7 @@ impl PostASAPDAGAssignment {
             nodes: view
                 .nodes
                 .iter()
-                .map(|node| PostAsapDagNode {
+                .map(|node| PostASAPDAGNode {
                     output_state: view.output_state(node),
                     ..node.clone()
                 })
@@ -431,7 +431,7 @@ impl PostASAPDAGAssignment {
             edges: view
                 .edges
                 .iter()
-                .map(|edge| PostAsapDagEdge {
+                .map(|edge| PostASAPDAGEdge {
                     data_state: view.edge_state(edge),
                     ..edge.clone()
                 })
@@ -442,12 +442,12 @@ impl PostASAPDAGAssignment {
 }
 
 fn assign_phases(
-    nodes: &mut [PostAsapDagNode],
-    edges: &mut [PostAsapDagEdge],
-    phases: &std::collections::BTreeMap<PostAsapNodeId, ExecutionTiming>,
-) -> Result<(), PostAsapDagValidationError> {
+    nodes: &mut [PostASAPDAGNode],
+    edges: &mut [PostASAPDAGEdge],
+    phases: &std::collections::BTreeMap<PostASAPNodeId, ExecutionTiming>,
+) -> Result<(), PostASAPDAGValidationError> {
     if phases.len() != nodes.len() || nodes.iter().any(|n| !phases.contains_key(&n.id)) {
-        return Err(PostAsapDagValidationError::IncompletePhaseAssignment);
+        return Err(PostASAPDAGValidationError::IncompletePhaseAssignment);
     }
     for node in nodes.iter_mut() {
         node.output_state.timing = phases[&node.id];
@@ -457,7 +457,7 @@ fn assign_phases(
         edge.data_state =
             *states
                 .get(&edge.producer)
-                .ok_or(PostAsapDagValidationError::MissingEdgeEndpoint(
+                .ok_or(PostASAPDAGValidationError::MissingEdgeEndpoint(
                     edge.producer,
                 ))?;
     }
@@ -468,19 +468,19 @@ fn assign_phases(
 /// and is not serialized; deployed artifacts persist the post-ASAP node ID
 /// together with their physical materialization/query IDs.
 #[derive(Debug, Clone)]
-pub struct PostAsapNodeIdentityMap {
+pub struct PostASAPNodeIdentityMap {
     nodes_by_id: Vec<Rc<PostASAPNode>>,
 }
 
-impl PostAsapNodeIdentityMap {
-    pub fn node_id(&self, node: &Rc<PostASAPNode>) -> Option<PostAsapNodeId> {
+impl PostASAPNodeIdentityMap {
+    pub fn node_id(&self, node: &Rc<PostASAPNode>) -> Option<PostASAPNodeId> {
         self.nodes_by_id
             .iter()
             .position(|candidate| Rc::ptr_eq(candidate, node))
-            .map(|id| PostAsapNodeId(id as u32))
+            .map(|id| PostASAPNodeId(id as u32))
     }
 
-    pub fn summary_node(&self, id: PostAsapNodeId) -> Option<&Rc<PostASAPNode>> {
+    pub fn summary_node(&self, id: PostASAPNodeId) -> Option<&Rc<PostASAPNode>> {
         self.nodes_by_id.get(id.0 as usize)
     }
 }
@@ -499,18 +499,18 @@ pub fn export_post_asap_dag(
 /// Lifecycle assignments overlay timing on these records without copying them.
 #[derive(Debug, Clone)]
 pub struct PostASAPDAGIndex {
-    pub root_id: PostAsapNodeId,
-    pub node_ids: PostAsapNodeIdentityMap,
-    nodes: Vec<PostAsapDagNode>,
-    edges: Vec<PostAsapDagEdge>,
+    pub root_id: PostASAPNodeId,
+    pub node_ids: PostASAPNodeIdentityMap,
+    nodes: Vec<PostASAPDAGNode>,
+    edges: Vec<PostASAPDAGEdge>,
 }
 
 impl PostASAPDAGIndex {
     /// Node records in ID order, with the logical graph's own timing.
-    pub fn node_views(&self) -> &[PostAsapDagNode] {
+    pub fn node_views(&self) -> &[PostASAPDAGNode] {
         &self.nodes
     }
-    pub fn edges(&self) -> &[PostAsapDagEdge] {
+    pub fn edges(&self) -> &[PostASAPDAGEdge] {
         &self.edges
     }
     pub fn view(&self) -> PostASAPDAGView<'_> {
@@ -531,19 +531,19 @@ impl PostASAPDAGIndex {
 }
 
 fn project_node(
-    id: PostAsapNodeId,
+    id: PostASAPNodeId,
     node: &PostASAPNode,
     state: ExecutionDataState,
-) -> PostAsapDagNode {
+) -> PostASAPDAGNode {
     let payload = match &node.expr {
-        SummaryExpr::KeepPreAsap(expression) => PostAsapOperatorPayload::Fallback {
+        SummaryExpr::KeepPreAsap(expression) => PostASAPOperatorPayload::Fallback {
             expression: (**expression).clone(),
         },
-        SummaryExpr::BinaryOp { operator, .. } => PostAsapOperatorPayload::Binary {
+        SummaryExpr::BinaryOp { operator, .. } => PostASAPOperatorPayload::Binary {
             operator: operator.clone(),
         },
 
-        SummaryExpr::ValueOperation { operation, .. } => PostAsapOperatorPayload::Value {
+        SummaryExpr::ValueOperation { operation, .. } => PostASAPOperatorPayload::Value {
             operation: operation.clone(),
         },
         SummaryExpr::RelationalJoin {
@@ -551,7 +551,7 @@ fn project_node(
             pred,
             pruning,
             ..
-        } => PostAsapOperatorPayload::RelationalJoin {
+        } => PostASAPOperatorPayload::RelationalJoin {
             join_kind: kind.clone(),
             pred: pred.clone(),
             pruning: pruning.clone(),
@@ -562,26 +562,26 @@ fn project_node(
             reduction,
             grouping,
             ..
-        } => PostAsapOperatorPayload::SummaryAgg {
+        } => PostASAPOperatorPayload::SummaryAgg {
             family: family.clone(),
             input: input.clone(),
             reduction: reduction.clone(),
             grouping: grouping.clone(),
         },
-        SummaryExpr::SummaryJoin { key, family, .. } => PostAsapOperatorPayload::SummaryJoin {
+        SummaryExpr::SummaryJoin { key, family, .. } => PostASAPOperatorPayload::SummaryJoin {
             key: key.clone(),
             family: family.clone(),
         },
-        SummaryExpr::SummarySubtract { .. } => PostAsapOperatorPayload::SummarySubtract,
+        SummaryExpr::SummarySubtract { .. } => PostASAPOperatorPayload::SummarySubtract,
         SummaryExpr::SummaryDelete { key, .. } => {
-            PostAsapOperatorPayload::SummaryDelete { key: key.clone() }
+            PostASAPOperatorPayload::SummaryDelete { key: key.clone() }
         }
-        SummaryExpr::SummaryEstimate { query, .. } => PostAsapOperatorPayload::SummaryEstimate {
+        SummaryExpr::SummaryEstimate { query, .. } => PostASAPOperatorPayload::SummaryEstimate {
             query: query.clone(),
         },
-        SummaryExpr::SummaryMerge { .. } => PostAsapOperatorPayload::SummaryMerge,
+        SummaryExpr::SummaryMerge { .. } => PostASAPOperatorPayload::SummaryMerge,
     };
-    PostAsapDagNode {
+    PostASAPDAGNode {
         id,
         payload,
         output_state: state,
@@ -602,10 +602,10 @@ pub fn index_post_asap_dag(
     fn visit(
         node: &Rc<PostASAPNode>,
         assignment: &super::ExecutionDataStateAssignment,
-        ids: &mut HashMap<*const PostASAPNode, PostAsapNodeId>,
+        ids: &mut HashMap<*const PostASAPNode, PostASAPNodeId>,
         nodes: &mut Vec<Rc<PostASAPNode>>,
-        edges: &mut Vec<PostAsapDagEdge>,
-    ) -> PostAsapNodeId {
+        edges: &mut Vec<PostASAPDAGEdge>,
+    ) -> PostASAPNodeId {
         if let Some(id) = ids.get(&Rc::as_ptr(node)) {
             return *id;
         }
@@ -639,7 +639,7 @@ pub fn index_post_asap_dag(
             .iter()
             .map(|(c, r)| (visit(c, assignment, ids, nodes, edges), *c, *r))
             .collect();
-        let id = PostAsapNodeId(nodes.len() as u32);
+        let id = PostASAPNodeId(nodes.len() as u32);
         nodes.push(Rc::clone(node));
         ids.insert(Rc::as_ptr(node), id);
         for (producer, child, role) in child_ids {
@@ -694,7 +694,7 @@ pub fn index_post_asap_dag(
                 }
                 _ => GroupingEdgeCompatibility::NotApplicable,
             };
-            edges.push(PostAsapDagEdge {
+            edges.push(PostASAPDAGEdge {
                 producer,
                 consumer: id,
                 role,
@@ -723,7 +723,7 @@ pub fn index_post_asap_dag(
         .enumerate()
         .map(|(id, node)| {
             project_node(
-                PostAsapNodeId(id as u32),
+                PostASAPNodeId(id as u32),
                 node,
                 assignment
                     .data_state_of(node)
@@ -733,7 +733,7 @@ pub fn index_post_asap_dag(
         .collect();
     Ok(PostASAPDAGIndex {
         root_id: root,
-        node_ids: PostAsapNodeIdentityMap { nodes_by_id: nodes },
+        node_ids: PostASAPNodeIdentityMap { nodes_by_id: nodes },
         nodes: projected,
         edges,
     })
@@ -757,10 +757,10 @@ mod tests {
         let family = SummaryFamilyType::ExactAggregate(ExactKind::Sum, ExactParams::Sum);
         let predicate = Predicate(Rc::new(PreASAPNode::Literal(ScalarValue::Boolean(true))));
         let payloads = vec![
-            PostAsapOperatorPayload::Fallback {
+            PostASAPOperatorPayload::Fallback {
                 expression: PreASAPNode::Literal(ScalarValue::Int64(1)),
             },
-            PostAsapOperatorPayload::Binary {
+            PostASAPOperatorPayload::Binary {
                 operator: BinaryOperator {
                     checked_relative_division: false,
                     checked_finite_division: false,
@@ -768,56 +768,56 @@ mod tests {
                     vector_match: None,
                 },
             },
-            PostAsapOperatorPayload::Value {
+            PostASAPOperatorPayload::Value {
                 operation: ValueOperation::Limit {
                     n: 1,
                     offset: 0,
                     partition_by: Default::default(),
                 },
             },
-            PostAsapOperatorPayload::RelationalJoin {
+            PostASAPOperatorPayload::RelationalJoin {
                 join_kind: JoinKind::Semi,
                 pred: predicate,
                 pruning: None,
             },
-            PostAsapOperatorPayload::SummaryAgg {
+            PostASAPOperatorPayload::SummaryAgg {
                 family: family.clone(),
                 input: SummaryUpdate::column(ColumnRef::SampleValue),
                 reduction: Reduction::by(vec![]),
                 grouping: GroupingStrategy::default(),
             },
-            PostAsapOperatorPayload::SummaryJoin {
+            PostASAPOperatorPayload::SummaryJoin {
                 key: ColumnRef::SampleValue,
                 family: family.clone(),
             },
-            PostAsapOperatorPayload::SummarySubtract,
-            PostAsapOperatorPayload::SummaryDelete {
+            PostASAPOperatorPayload::SummarySubtract,
+            PostASAPOperatorPayload::SummaryDelete {
                 key: ColumnRef::SampleValue,
             },
-            PostAsapOperatorPayload::SummaryEstimate {
+            PostASAPOperatorPayload::SummaryEstimate {
                 query: SketchQuery::Cardinality,
             },
-            PostAsapOperatorPayload::SummaryMerge,
+            PostASAPOperatorPayload::SummaryMerge,
         ];
         for payload in payloads {
             // This checks physical identity and placement, not kernel availability.
             let primitive = match &payload {
-                PostAsapOperatorPayload::Fallback { .. }
-                | PostAsapOperatorPayload::Binary { .. }
-                | PostAsapOperatorPayload::Value { .. }
-                | PostAsapOperatorPayload::RelationalJoin { .. }
-                | PostAsapOperatorPayload::SummaryEstimate { .. } => DataPrimitive::Raw,
-                PostAsapOperatorPayload::SummaryAgg { .. }
-                | PostAsapOperatorPayload::SummaryJoin { .. }
-                | PostAsapOperatorPayload::SummarySubtract
-                | PostAsapOperatorPayload::SummaryDelete { .. }
-                | PostAsapOperatorPayload::SummaryMerge => DataPrimitive::SummaryState,
+                PostASAPOperatorPayload::Fallback { .. }
+                | PostASAPOperatorPayload::Binary { .. }
+                | PostASAPOperatorPayload::Value { .. }
+                | PostASAPOperatorPayload::RelationalJoin { .. }
+                | PostASAPOperatorPayload::SummaryEstimate { .. } => DataPrimitive::Raw,
+                PostASAPOperatorPayload::SummaryAgg { .. }
+                | PostASAPOperatorPayload::SummaryJoin { .. }
+                | PostASAPOperatorPayload::SummarySubtract
+                | PostASAPOperatorPayload::SummaryDelete { .. }
+                | PostASAPOperatorPayload::SummaryMerge => DataPrimitive::SummaryState,
             };
             let dag = PostASAPDAGTransport {
-                root: PostAsapNodeId(0),
+                root: PostASAPNodeId(0),
                 edges: vec![],
-                nodes: vec![PostAsapDagNode {
-                    id: PostAsapNodeId(0),
+                nodes: vec![PostASAPDAGNode {
+                    id: PostASAPNodeId(0),
                     payload: payload.clone(),
                     output_state: ExecutionDataState {
                         timing: ExecutionTiming::QueryTime,
@@ -860,9 +860,9 @@ mod tests {
         };
         let nodes = [0, 1]
             .into_iter()
-            .map(|id| PostAsapDagNode {
-                id: PostAsapNodeId(id),
-                payload: PostAsapOperatorPayload::Fallback {
+            .map(|id| PostASAPDAGNode {
+                id: PostASAPNodeId(id),
+                payload: PostASAPOperatorPayload::Fallback {
                     expression: PreASAPNode::Literal(ScalarValue::Int64(1)),
                 },
                 output_state: ExecutionDataState::QUERY_ROWS,
@@ -872,10 +872,10 @@ mod tests {
             .collect();
         let dag = PostASAPDAGTransport {
             nodes,
-            root: PostAsapNodeId(1),
-            edges: vec![PostAsapDagEdge {
-                producer: PostAsapNodeId(0),
-                consumer: PostAsapNodeId(1),
+            root: PostASAPNodeId(1),
+            edges: vec![PostASAPDAGEdge {
+                producer: PostASAPNodeId(0),
+                consumer: PostASAPNodeId(1),
                 role: EdgeRole::Input,
                 intermediate_schema: schema,
                 data_state: ExecutionDataState::QUERY_ROWS,
@@ -885,8 +885,8 @@ mod tests {
         };
         let placed = dag
             .with_execution_phases(&BTreeMap::from([
-                (PostAsapNodeId(0), ExecutionTiming::IngestionTime),
-                (PostAsapNodeId(1), ExecutionTiming::QueryTime),
+                (PostASAPNodeId(0), ExecutionTiming::IngestionTime),
+                (PostASAPNodeId(1), ExecutionTiming::QueryTime),
             ]))
             .unwrap();
         assert_eq!(
@@ -896,10 +896,10 @@ mod tests {
         assert_eq!(dag.edges[0].data_state.timing, ExecutionTiming::QueryTime);
         assert!(matches!(
             dag.with_execution_phases(&BTreeMap::from([
-                (PostAsapNodeId(0), ExecutionTiming::QueryTime),
-                (PostAsapNodeId(1), ExecutionTiming::IngestionTime),
+                (PostASAPNodeId(0), ExecutionTiming::QueryTime),
+                (PostASAPNodeId(1), ExecutionTiming::IngestionTime),
             ])),
-            Err(PostAsapDagValidationError::QueryDependencyInIngestion { .. })
+            Err(PostASAPDAGValidationError::QueryDependencyInIngestion { .. })
         ));
     }
 
@@ -963,13 +963,13 @@ mod tests {
         });
 
         let compiled = index_post_asap_dag(&root).unwrap();
-        assert_eq!(compiled.node_ids.node_id(&root), Some(PostAsapNodeId(3)));
+        assert_eq!(compiled.node_ids.node_id(&root), Some(PostASAPNodeId(3)));
         assert!(Rc::ptr_eq(
-            compiled.node_ids.summary_node(PostAsapNodeId(1)).unwrap(),
+            compiled.node_ids.summary_node(PostASAPNodeId(1)).unwrap(),
             &inner
         ));
         let dag = compiled.to_transport();
-        assert_eq!(dag.root, PostAsapNodeId(3));
+        assert_eq!(dag.root, PostASAPNodeId(3));
         assert_eq!(
             dag.nodes[1].output_state,
             ExecutionDataState::INGESTION_SUMMARY
@@ -981,7 +981,7 @@ mod tests {
         let dependency = dag
             .edges
             .iter()
-            .find(|e| e.producer == PostAsapNodeId(1) && e.consumer == PostAsapNodeId(2))
+            .find(|e| e.producer == PostASAPNodeId(1) && e.consumer == PostASAPNodeId(2))
             .unwrap();
         assert_eq!(dependency.data_state, ExecutionDataState::INGESTION_SUMMARY);
         assert_eq!(dependency.grouping, GroupingEdgeCompatibility::Identical);
@@ -1010,14 +1010,14 @@ mod tests {
         old_version.schema_version = 1;
         assert_eq!(
             old_version.validate(),
-            Err(PostAsapDagValidationError::UnsupportedVersion(1))
+            Err(PostASAPDAGValidationError::UnsupportedVersion(1))
         );
         let mut unknown = serde_json::to_value(&document).unwrap();
         unknown["unexpected"] = serde_json::json!(true);
         assert!(serde_json::from_value::<PostASAPDAGDocument>(unknown).is_err());
         assert!(matches!(
             dag.nodes[2].payload,
-            PostAsapOperatorPayload::SummaryAgg {
+            PostASAPOperatorPayload::SummaryAgg {
                 family: SummaryFamilyType::ExactAggregate(ExactKind::Sum, ExactParams::Sum),
                 reduction: Reduction::Reduce(_),
                 ..
@@ -1048,8 +1048,8 @@ mod tests {
     #[test]
     fn post_asap_node_ids_serialize_in_deterministic_binding_order() {
         let mut bindings = BTreeMap::new();
-        bindings.insert(PostAsapNodeId(10), "materialization-10");
-        bindings.insert(PostAsapNodeId(2), "query-2");
+        bindings.insert(PostASAPNodeId(10), "materialization-10");
+        bindings.insert(PostASAPNodeId(2), "query-2");
         assert_eq!(
             serde_json::to_string(&bindings).unwrap(),
             r#"{"2":"query-2","10":"materialization-10"}"#

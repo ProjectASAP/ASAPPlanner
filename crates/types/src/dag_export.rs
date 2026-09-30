@@ -716,7 +716,7 @@ pub fn export(expr: &PreASAPNode) -> DagGraph {
 /// [`DagNode::notes`] already states); it only defines the shape a decision
 /// comes back in.
 #[derive(Debug, Clone)]
-pub enum PostAsapSubstitution {
+pub enum PostASAPSubstitution {
     /// This exact node has a winning `Replacement::Rewrite` — keep building
     /// from `.0` instead of the original node. Still pre-ASAP shaped, so
     /// [`build`] renders it via the same ordinary `DagNode` path — see
@@ -772,7 +772,7 @@ pub enum PostAsapSubstitution {
 /// return the target itself as a candidate.
 pub fn export_post_asap(
     root: &PreASAPNode,
-    find_winner: &mut dyn FnMut(&PreASAPNode) -> Option<PostAsapSubstitution>,
+    find_winner: &mut dyn FnMut(&PreASAPNode) -> Option<PostASAPSubstitution>,
 ) -> DagGraph {
     let mut nodes = Vec::new();
     let mut cache = HashCache::new();
@@ -955,7 +955,7 @@ fn build_summary_hybrid(
     node: &PostASAPNode,
     nodes: &mut Vec<DagNode>,
     cache: &mut HashCache,
-    find_winner: &mut dyn FnMut(&PreASAPNode) -> Option<PostAsapSubstitution>,
+    find_winner: &mut dyn FnMut(&PreASAPNode) -> Option<PostASAPSubstitution>,
 ) -> u32 {
     if let SummaryExpr::KeepPreAsap(inner) = &node.expr {
         return build(inner, nodes, cache, find_winner);
@@ -1023,10 +1023,10 @@ fn build(
     expr: &PreASAPNode,
     nodes: &mut Vec<DagNode>,
     cache: &mut HashCache,
-    find_winner: &mut dyn FnMut(&PreASAPNode) -> Option<PostAsapSubstitution>,
+    find_winner: &mut dyn FnMut(&PreASAPNode) -> Option<PostASAPSubstitution>,
 ) -> u32 {
     match find_winner(expr) {
-        Some(PostAsapSubstitution::Rewrite {
+        Some(PostASAPSubstitution::Rewrite {
             replacement,
             decision,
         }) => {
@@ -1045,7 +1045,7 @@ fn build(
             }
             return root;
         }
-        Some(PostAsapSubstitution::Summary {
+        Some(PostASAPSubstitution::Summary {
             replacement,
             decision,
         }) => {
@@ -1079,7 +1079,7 @@ fn build_no_recheck(
     expr: &PreASAPNode,
     nodes: &mut Vec<DagNode>,
     cache: &mut HashCache,
-    find_winner: &mut dyn FnMut(&PreASAPNode) -> Option<PostAsapSubstitution>,
+    find_winner: &mut dyn FnMut(&PreASAPNode) -> Option<PostASAPSubstitution>,
 ) -> u32 {
     match expr {
         PreASAPNode::Scan {

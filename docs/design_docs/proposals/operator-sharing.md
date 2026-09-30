@@ -440,7 +440,7 @@ The four original-operator payloads (`fallback{expression: PreASAPNode}`, `binar
 `value`, `relational_join`) become one:
 
 ```rust
-PostAsapOperatorPayload::Relational {
+PostASAPOperatorPayload::Relational {
     /// No ASAP node inside. Leaves are Scans, or Scan { source: Source::DagInput { role } }
     /// for an incoming edge whose schema is the edge's intermediate_schema.
     expression: Operator,

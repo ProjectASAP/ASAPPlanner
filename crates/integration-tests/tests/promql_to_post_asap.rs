@@ -295,16 +295,16 @@ fn grouped_rate_topk_consumes_finalized_rate_values() {
     let dag = export_post_asap_dag(&plan).unwrap();
     assert!(!dag.nodes.iter().any(|node| matches!(
         node.payload,
-        asap_types::post_asap::PostAsapOperatorPayload::RelationalJoin { .. }
+        asap_types::post_asap::PostASAPOperatorPayload::RelationalJoin { .. }
     )));
     let node = dag.nodes.iter().find(|node| matches!(&node.payload,
-        asap_types::post_asap::PostAsapOperatorPayload::SummaryAgg { family: SummaryFamilyType::Sketch(kind, _), .. }
+        asap_types::post_asap::PostASAPOperatorPayload::SummaryAgg { family: SummaryFamilyType::Sketch(kind, _), .. }
         if kind.algorithm() == &SketchAlgorithm::CmsWithHeap)).unwrap();
     assert_eq!(
         node.output_state.timing,
         asap_types::post_asap::ExecutionTiming::QueryTime
     );
-    let asap_types::post_asap::PostAsapOperatorPayload::SummaryAgg { input, .. } = &node.payload
+    let asap_types::post_asap::PostASAPOperatorPayload::SummaryAgg { input, .. } = &node.payload
     else {
         unreachable!()
     };
@@ -1160,7 +1160,7 @@ fn nested_summary_explicitly_finalizes_exact_child_at_ingestion_time() {
 
 #[test]
 fn physical_node_owns_phase_independently_of_binary_payload() {
-    use asap_types::post_asap::{ExecutionTiming, PostAsapOperatorPayload};
+    use asap_types::post_asap::{ExecutionTiming, PostASAPOperatorPayload};
     for (query, expected) in [
         (
             // One selector: both operands cover the same series.
@@ -1185,15 +1185,15 @@ fn physical_node_owns_phase_independently_of_binary_payload() {
         let node = dag
             .nodes
             .iter()
-            .find(|node| matches!(node.payload, PostAsapOperatorPayload::Binary { .. }))
+            .find(|node| matches!(node.payload, PostASAPOperatorPayload::Binary { .. }))
             .unwrap();
         assert_eq!(node.output_state.timing, expected);
         let wire = serde_json::to_value(&node.payload).unwrap();
         assert!(wire.get("timing").is_none());
         let mut obsolete = wire.clone();
         obsolete["timing"] = serde_json::json!(expected.as_str());
-        assert!(serde_json::from_value::<PostAsapOperatorPayload>(obsolete).is_err());
-        let restored: PostAsapOperatorPayload = serde_json::from_value(wire).unwrap();
+        assert!(serde_json::from_value::<PostASAPOperatorPayload>(obsolete).is_err());
+        let restored: PostASAPOperatorPayload = serde_json::from_value(wire).unwrap();
         assert_eq!(restored, node.payload);
     }
 }

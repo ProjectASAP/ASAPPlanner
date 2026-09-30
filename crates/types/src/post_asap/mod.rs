@@ -57,9 +57,9 @@ pub use guarantee::{
 };
 pub use post_asap_dag::{
     export_post_asap_dag, index_post_asap_dag, EdgeRole, GroupingEdgeCompatibility,
-    PostASAPDAGAssignment, PostASAPDAGDocument, PostASAPDAGIndex, PostASAPDAGTransport,
-    PostASAPDAGView, PostAsapDagEdge, PostAsapDagNode, PostAsapDagValidationError, PostAsapNodeId,
-    PostAsapNodeIdentityMap, PostAsapOperatorPayload, WindowEdgeCompatibility,
+    PostASAPDAGAssignment, PostASAPDAGDocument, PostASAPDAGEdge, PostASAPDAGIndex, PostASAPDAGNode,
+    PostASAPDAGTransport, PostASAPDAGValidationError, PostASAPDAGView, PostASAPNodeId,
+    PostASAPNodeIdentityMap, PostASAPOperatorPayload, WindowEdgeCompatibility,
     POST_ASAP_DAG_WIRE_VERSION,
 };
 pub use query_time::{

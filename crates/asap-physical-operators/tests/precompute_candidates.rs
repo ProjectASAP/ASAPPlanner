@@ -91,7 +91,7 @@ fn grouped_rate_can_be_materialized_before_or_after_grouped_sum() {
         .find(|node| {
             matches!(
                 node.payload,
-                PostAsapOperatorPayload::SummaryAgg {
+                PostASAPOperatorPayload::SummaryAgg {
                     family: SummaryFamilyType::ExactAggregate(ExactKind::Rate, _),
                     ..
                 }
@@ -104,7 +104,7 @@ fn grouped_rate_can_be_materialized_before_or_after_grouped_sum() {
         .find(|node| {
             matches!(
                 node.payload,
-                PostAsapOperatorPayload::Value {
+                PostASAPOperatorPayload::Value {
                     operation: ValueOperation::FinalizeExactAccumulator
                 }
             ) && dag
@@ -115,7 +115,7 @@ fn grouped_rate_can_be_materialized_before_or_after_grouped_sum() {
         .unwrap();
     let input_schema = Arc::new(state.output_schema.clone());
     let (family, update, grouping) = match &state.payload {
-        PostAsapOperatorPayload::SummaryAgg {
+        PostASAPOperatorPayload::SummaryAgg {
             family,
             input,
             grouping,
@@ -389,7 +389,7 @@ fn bounded_inventory_exposes_grouped_rate_physical_frontiers() {
         .find(|node| {
             matches!(
                 &node.payload,
-                PostAsapOperatorPayload::SummaryAgg {
+                PostASAPOperatorPayload::SummaryAgg {
                     family: SummaryFamilyType::ExactAggregate(ExactKind::Rate, _),
                     ..
                 }
@@ -427,7 +427,7 @@ fn enumerated_grouped_rate_candidates_execute_numeric_query_outputs() {
         let Some(state) = dag.nodes.iter().find(|node| {
             matches!(
                 node.payload,
-                PostAsapOperatorPayload::SummaryAgg {
+                PostASAPOperatorPayload::SummaryAgg {
                     family: SummaryFamilyType::ExactAggregate(ExactKind::Rate, _),
                     ..
                 }
@@ -441,7 +441,7 @@ fn enumerated_grouped_rate_candidates_execute_numeric_query_outputs() {
             .find(|node| {
                 matches!(
                     node.payload,
-                    PostAsapOperatorPayload::SummaryAgg {
+                    PostASAPOperatorPayload::SummaryAgg {
                         family: SummaryFamilyType::ExactAggregate(ExactKind::Sum, _),
                         ..
                     }
@@ -459,7 +459,7 @@ fn enumerated_grouped_rate_candidates_execute_numeric_query_outputs() {
             &[vec![], vec![boundary]],
         );
         let (family, input, grouping) = match &state.payload {
-            PostAsapOperatorPayload::SummaryAgg {
+            PostASAPOperatorPayload::SummaryAgg {
                 family,
                 input,
                 grouping,
@@ -616,7 +616,7 @@ fn grouped_rate_cuts_equal_per_frontier_compilation() {
     let state = dag
         .nodes
         .iter()
-        .find(|node| matches!(node.payload, PostAsapOperatorPayload::SummaryAgg { .. }))
+        .find(|node| matches!(node.payload, PostASAPOperatorPayload::SummaryAgg { .. }))
         .unwrap();
     let inputs = BTreeMap::from([(
         u64::from(state.id.0),
@@ -669,7 +669,7 @@ fn population_topk_cuts_equal_per_frontier_compilation() {
     let raw = dag
         .nodes
         .iter()
-        .find(|node| matches!(node.payload, PostAsapOperatorPayload::Fallback { .. }))
+        .find(|node| matches!(node.payload, PostASAPOperatorPayload::Fallback { .. }))
         .unwrap();
     let inputs = BTreeMap::from([(
         u64::from(raw.id.0),
@@ -695,7 +695,7 @@ fn cut_candidate_rejects_invalid_frontiers() {
     let state = dag
         .nodes
         .iter()
-        .find(|node| matches!(node.payload, PostAsapOperatorPayload::SummaryAgg { .. }))
+        .find(|node| matches!(node.payload, PostASAPOperatorPayload::SummaryAgg { .. }))
         .unwrap();
     let readout = dag
         .nodes
@@ -703,7 +703,7 @@ fn cut_candidate_rejects_invalid_frontiers() {
         .find(|node| {
             matches!(
                 node.payload,
-                PostAsapOperatorPayload::Value {
+                PostASAPOperatorPayload::Value {
                     operation: ValueOperation::FinalizeExactAccumulator
                 }
             )

@@ -12,7 +12,7 @@ use serde::Serialize;
 
 use asap_types::dag_export::{self, SummaryDagGraph};
 use asap_types::post_asap::{
-    PostASAPNode, PostAsapNodeId, ResultGuarantee, SummaryExpr, SummaryMaintenanceLifecycle,
+    PostASAPNode, PostASAPNodeId, ResultGuarantee, SummaryExpr, SummaryMaintenanceLifecycle,
     SummaryMaintenanceLifecycleGuarantee, SummaryWindowFramework,
 };
 
@@ -42,7 +42,7 @@ pub struct SummaryMaintenanceDagExport {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct SummaryMaintenanceDeploymentExport {
-    pub post_asap_node_id: PostAsapNodeId,
+    pub post_asap_node_id: PostASAPNodeId,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub selected_window_framework: Option<SummaryWindowFramework>,
     #[serde(skip_serializing_if = "Option::is_none")]

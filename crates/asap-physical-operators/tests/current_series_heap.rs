@@ -347,7 +347,7 @@ fn planner_current_series_candidate_compiles_with_dynamic_identity() {
     let raw = logical
         .nodes
         .iter()
-        .find(|node| matches!(node.payload, PostAsapOperatorPayload::Fallback { .. }))
+        .find(|node| matches!(node.payload, PostASAPOperatorPayload::Fallback { .. }))
         .unwrap();
     let raw_schema = Arc::new(raw.output_schema.clone());
     let physical = compile(

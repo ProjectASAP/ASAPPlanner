@@ -189,7 +189,7 @@ function render() {
   sidepanel.style.display = 'block';
   sideResizeHandle.style.display = 'block';
 
-  renderPrePostAsap();
+  renderPrePostASAP();
   renderLegend();
 }
 
@@ -476,7 +476,7 @@ function hideModeHint() {
 }
 
 // ── Pre/Post-ASAP: one query or two workload-union DAGs ──────────────────
-function renderPrePostAsap() {
+function renderPrePostASAP() {
   const chosen = getParticipants();
   const selected = chosen.map((i) => queries[i]);
   renderScopeSummary(selected);

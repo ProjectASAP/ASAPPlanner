@@ -10,7 +10,7 @@ use crate::{
 };
 use planner_types::{
     post_asap::{
-        ExactOperation, PostASAPDAGTransport, PostAsapDagNode, PostAsapOperatorPayload as Payload,
+        ExactOperation, PostASAPDAGNode, PostASAPDAGTransport, PostASAPOperatorPayload as Payload,
         SketchQuery, SummaryFamilyType, SummaryInputExpr, ValueOperation,
     },
     pre_asap::{
@@ -156,7 +156,7 @@ fn compile_internal(
         let consumer = u64::from(edge.consumer.0);
         if let (
             Payload::Fallback { expression },
-            Some(PostAsapDagNode {
+            Some(PostASAPDAGNode {
                 payload: Payload::Binary { .. },
                 ..
             }),
@@ -182,7 +182,7 @@ fn compile_internal(
             || promql_fallback::raw_series_owner(*id).is_some_and(|owner| {
                 matches!(
                     nodes.get(&owner),
-                    Some(PostAsapDagNode {
+                    Some(PostASAPDAGNode {
                         payload: Payload::Fallback { .. },
                         ..
                     })
@@ -615,7 +615,7 @@ fn compile_internal(
 
 // Temporal summary readouts produce PromQL vectors, whose range functions drop
 // the metric name before matching/filtering. Stored state retains its full identity.
-fn temporal_readout_drops_name(node: &PostAsapDagNode) -> bool {
+fn temporal_readout_drops_name(node: &PostASAPDAGNode) -> bool {
     node.output_schema
         .fields
         .iter()
@@ -636,13 +636,13 @@ fn temporal_readout_drops_name(node: &PostAsapDagNode) -> bool {
 
 /// Bind a Planner node against the schemas supplied by its deployment edges.
 /// This is the same checked path used by complete DAG binding.
-pub fn compile_node(node: &PostAsapDagNode, inputs: &[Schema]) -> Result<Operator, Error> {
+pub fn compile_node(node: &PostASAPDAGNode, inputs: &[Schema]) -> Result<Operator, Error> {
     compile_timed_node(node, node.output_state.timing, inputs)
 }
 
 /// Lower `node` under `timing`, which a lifecycle assignment may overlay.
 fn compile_timed_node(
-    node: &PostAsapDagNode,
+    node: &PostASAPDAGNode,
     timing: planner_types::post_asap::ExecutionTiming,
     inputs: &[Schema],
 ) -> Result<Operator, Error> {
@@ -653,7 +653,7 @@ fn compile_timed_node(
 }
 
 fn bind_operation(
-    node: &PostAsapDagNode,
+    node: &PostASAPDAGNode,
     timing: planner_types::post_asap::ExecutionTiming,
     inputs: &[Schema],
 ) -> Result<Operator, Error> {

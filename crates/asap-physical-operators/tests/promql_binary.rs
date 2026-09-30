@@ -8,8 +8,8 @@ use asap_physical_operators::{
 use futures::{executor::block_on, StreamExt};
 use planner_types::{
     post_asap::{
-        BinaryOperator, ExecutionDataState, PostAsapDagNode, PostAsapNodeId,
-        PostAsapOperatorPayload, SummaryFamilyType, SummaryField, SummarySchema,
+        BinaryOperator, ExecutionDataState, PostASAPDAGNode, PostASAPNodeId,
+        PostASAPOperatorPayload, SummaryFamilyType, SummaryField, SummarySchema,
     },
     pre_asap::{ArithmeticOpKind, BinaryOpKind, DataType},
 };
@@ -58,9 +58,9 @@ fn program() -> PhysicalDAG {
 }
 fn program_for(operator: BinaryOperator) -> PhysicalDAG {
     let schema = schema();
-    let node = PostAsapDagNode {
-        id: PostAsapNodeId(2),
-        payload: PostAsapOperatorPayload::Binary { operator },
+    let node = PostASAPDAGNode {
+        id: PostASAPNodeId(2),
+        payload: PostASAPOperatorPayload::Binary { operator },
         output_state: ExecutionDataState::QUERY_ROWS,
         output_schema: (*schema).clone(),
         guarantee: None,
@@ -340,14 +340,14 @@ fn stored_series_readouts_support_filters_and_sets() {
             BinaryOpKind::Set(PromQLVectorSetOpKind::Or),
         ] {
             let nodes = (0..5)
-                .map(|id| PostAsapDagNode {
-                    id: PostAsapNodeId(id),
+                .map(|id| PostASAPDAGNode {
+                    id: PostASAPNodeId(id),
                     payload: match id {
-                        0 | 1 => PostAsapOperatorPayload::SummaryMerge,
-                        2 | 3 => PostAsapOperatorPayload::Value {
+                        0 | 1 => PostASAPOperatorPayload::SummaryMerge,
+                        2 | 3 => PostASAPOperatorPayload::Value {
                             operation: ValueOperation::FinalizeExactAccumulator,
                         },
-                        _ => PostAsapOperatorPayload::Binary {
+                        _ => PostASAPOperatorPayload::Binary {
                             operator: BinaryOperator {
                                 kind: kind.clone(),
                                 vector_match: None,
@@ -376,9 +376,9 @@ fn stored_series_readouts_support_filters_and_sets() {
                 (3, 4, EdgeRole::Right),
             ]
             .into_iter()
-            .map(|(producer, consumer, role)| PostAsapDagEdge {
-                producer: PostAsapNodeId(producer),
-                consumer: PostAsapNodeId(consumer),
+            .map(|(producer, consumer, role)| PostASAPDAGEdge {
+                producer: PostASAPNodeId(producer),
+                consumer: PostASAPNodeId(consumer),
                 role,
                 intermediate_schema: nodes[producer as usize].output_schema.clone(),
                 data_state: nodes[producer as usize].output_state,
@@ -389,7 +389,7 @@ fn stored_series_readouts_support_filters_and_sets() {
             let dag = PostASAPDAGTransport {
                 nodes,
                 edges,
-                root: PostAsapNodeId(4),
+                root: PostASAPNodeId(4),
             };
             let graph = compile(
                 dag.as_view(),

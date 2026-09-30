@@ -274,7 +274,7 @@ fn continuous_lifecycle_compiles_and_executes_spatial_kll() {
         values::{Batch, Value},
     };
     use asap_types::{
-        post_asap::{export_post_asap_dag, PostAsapOperatorPayload, SummaryFamilyType},
+        post_asap::{export_post_asap_dag, PostASAPOperatorPayload, SummaryFamilyType},
         pre_asap::DataType,
     };
     use std::{collections::BTreeMap, sync::Arc};
@@ -296,7 +296,7 @@ fn continuous_lifecycle_compiles_and_executes_spatial_kll() {
     let build = dag
         .nodes
         .iter()
-        .find(|node| matches!(node.payload, PostAsapOperatorPayload::SummaryAgg { .. }))
+        .find(|node| matches!(node.payload, PostASAPOperatorPayload::SummaryAgg { .. }))
         .unwrap();
     let input = dag
         .edges
@@ -501,7 +501,7 @@ fn raw_inputs(
         .find(|node| {
             matches!(
                 node.payload,
-                asap_types::post_asap::PostAsapOperatorPayload::Fallback { .. }
+                asap_types::post_asap::PostASAPOperatorPayload::Fallback { .. }
             )
         })
         .unwrap();
@@ -707,7 +707,7 @@ fn chosen_population_lifecycle_decides_precompute_contents() {
         values::{Batch, Value},
     };
     use asap_types::post_asap::{
-        maintained_population::PopulationInput, PostAsapOperatorPayload, ValueOperation,
+        maintained_population::PopulationInput, PostASAPOperatorPayload, ValueOperation,
     };
     use std::{collections::BTreeMap, sync::Arc};
 
@@ -750,7 +750,7 @@ fn chosen_population_lifecycle_decides_precompute_contents() {
             .export_timed_dag()
             .unwrap();
         let population = dag.nodes.iter().find(|node| node.id == id).unwrap();
-        let PostAsapOperatorPayload::Value {
+        let PostASAPOperatorPayload::Value {
             operation: ValueOperation::MaintainPopulation { population },
         } = &population.payload
         else {
@@ -763,7 +763,7 @@ fn chosen_population_lifecycle_decides_precompute_contents() {
         let raw = dag
             .nodes
             .iter()
-            .find(|node| matches!(node.payload, PostAsapOperatorPayload::Fallback { .. }))
+            .find(|node| matches!(node.payload, PostASAPOperatorPayload::Fallback { .. }))
             .unwrap();
         let (raw_id, schema) = (u64::from(raw.id.0), Arc::new(raw.output_schema.clone()));
         let frontier =
@@ -845,7 +845,7 @@ fn chosen_population_lifecycle_decides_precompute_contents() {
 fn grouped_rate_sum_placement_is_a_lifecycle_choice() {
     use asap_physical_operators::physical_planner::{compile_candidate, InputContract};
     use asap_types::post_asap::{
-        ExactKind, PostAsapOperatorPayload, SummaryExpr, SummaryFamilyType,
+        ExactKind, PostASAPOperatorPayload, SummaryExpr, SummaryFamilyType,
     };
     use std::{collections::BTreeMap, sync::Arc};
 
@@ -920,7 +920,7 @@ fn grouped_rate_sum_placement_is_a_lifecycle_choice() {
         let raw = dag
             .nodes
             .iter()
-            .find(|node| matches!(node.payload, PostAsapOperatorPayload::Fallback { .. }))
+            .find(|node| matches!(node.payload, PostASAPOperatorPayload::Fallback { .. }))
             .unwrap();
         let frontier =
             asap_physical_operators::physical_planner::frontier_from_timing(dag.as_view()).unwrap();
@@ -959,8 +959,8 @@ fn grouped_rate_sum_placement_is_a_lifecycle_choice() {
     else {
         unreachable!()
     };
-    let state = |payload: &PostAsapOperatorPayload, kind: ExactKind| {
-        matches!(payload, PostAsapOperatorPayload::SummaryAgg {
+    let state = |payload: &PostASAPOperatorPayload, kind: ExactKind| {
+        matches!(payload, PostASAPOperatorPayload::SummaryAgg {
             family: SummaryFamilyType::ExactAggregate(k, _), ..
         } if *k == kind)
     };
@@ -975,7 +975,7 @@ fn grouped_rate_sum_placement_is_a_lifecycle_choice() {
 /// The lifecycle-timed DAG Planner selects for `query` with upfront series
 /// typing, and whether it keeps an ingestion-time Binary.
 fn typed_selection(query: &str) -> (asap_types::post_asap::PostASAPDAGTransport, bool) {
-    use asap_types::post_asap::{ExecutionTiming, PostAsapOperatorPayload};
+    use asap_types::post_asap::{ExecutionTiming, PostASAPOperatorPayload};
     let workload = quantile_workload(query);
     let lowered = asap_types::pre_asap::schema::with_promql_series_identity(
         &lower_promql_workload(&workload, 0).unwrap().remove(0),
@@ -985,7 +985,7 @@ fn typed_selection(query: &str) -> (asap_types::post_asap::PostASAPDAGTransport,
         .export_timed_dag()
         .unwrap();
     let ingestion_binary = dag.nodes.iter().any(|node| {
-        matches!(node.payload, PostAsapOperatorPayload::Binary { .. })
+        matches!(node.payload, PostASAPOperatorPayload::Binary { .. })
             && node.output_state.timing == ExecutionTiming::IngestionTime
     });
     (dag, ingestion_binary)
@@ -1005,7 +1005,7 @@ fn execute_timed(
         values::{Batch, Value},
     };
     use asap_types::{
-        post_asap::PostAsapOperatorPayload,
+        post_asap::PostASAPOperatorPayload,
         pre_asap::{PreASAPNode, Source},
     };
     use std::{collections::BTreeMap, sync::Arc};
@@ -1013,7 +1013,7 @@ fn execute_timed(
     // expression reads each of its selectors through its raw-series slots.
     let mut raw = BTreeMap::new();
     for node in &dag.nodes {
-        let PostAsapOperatorPayload::Fallback { expression } = &node.payload else {
+        let PostASAPOperatorPayload::Fallback { expression } = &node.payload else {
             continue;
         };
         let metric = |selector: &PreASAPNode| match selector {

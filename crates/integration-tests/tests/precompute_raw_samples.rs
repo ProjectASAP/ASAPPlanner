@@ -19,7 +19,7 @@ use asap_physical_operators::{
 };
 use asap_types::post_asap::{
     export_post_asap_dag, EntityIdentity, ExactKind, PostASAPDAGTransport, PostASAPNode,
-    PostAsapOperatorPayload, SketchAlgorithm, SketchQuery, SummaryFamilyType, SummaryInputExpr,
+    PostASAPOperatorPayload, SketchAlgorithm, SketchQuery, SummaryFamilyType, SummaryInputExpr,
     SummaryUpdate,
 };
 use asap_types::pre_asap::{expr_ir::ColumnRef, query_expr::Reduction};
@@ -78,7 +78,7 @@ fn candidates(query: &str, accuracy: AccuracyTarget) -> Vec<Rc<PostASAPNode>> {
 fn raw_summaries(dag: &PostASAPDAGTransport) -> Vec<(u64, u64)> {
     dag.nodes
         .iter()
-        .filter(|node| matches!(node.payload, PostAsapOperatorPayload::SummaryAgg { .. }))
+        .filter(|node| matches!(node.payload, PostASAPOperatorPayload::SummaryAgg { .. }))
         .filter_map(|node| {
             let inputs = dag
                 .edges
@@ -89,7 +89,7 @@ fn raw_summaries(dag: &PostASAPDAGTransport) -> Vec<(u64, u64)> {
                 return None;
             };
             let source = dag.nodes.iter().find(|n| n.id == edge.producer)?;
-            matches!(source.payload, PostAsapOperatorPayload::Fallback { .. })
+            matches!(source.payload, PostASAPOperatorPayload::Fallback { .. })
                 .then_some((u64::from(source.id.0), u64::from(node.id.0)))
         })
         .collect()
@@ -284,7 +284,7 @@ fn check(
         .iter()
         .find(|n| u64::from(n.id.0) == root)
         .unwrap();
-    let PostAsapOperatorPayload::SummaryAgg {
+    let PostASAPOperatorPayload::SummaryAgg {
         family,
         input,
         reduction,
@@ -472,7 +472,7 @@ fn grouped_raw_summary(
         .iter_mut()
         .find(|n| u64::from(n.id.0) == root)
         .unwrap();
-    let PostAsapOperatorPayload::SummaryAgg {
+    let PostASAPOperatorPayload::SummaryAgg {
         family: old,
         input: update,
         ..
@@ -606,7 +606,7 @@ fn raw_sample_without_grouping_drops_labels_and_name() {
         .iter_mut()
         .find(|n| u64::from(n.id.0) == root)
         .unwrap();
-    let PostAsapOperatorPayload::SummaryAgg { reduction, .. } = &mut node.payload else {
+    let PostASAPOperatorPayload::SummaryAgg { reduction, .. } = &mut node.payload else {
         unreachable!()
     };
     *reduction = Reduction::Reduce(GroupKeys::without(vec![service]));

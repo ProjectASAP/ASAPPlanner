@@ -481,16 +481,16 @@ fn bind_post_asap_before_execution() {
     use asap_physical_operators::dag::planner::bind;
     use planner_types::{
         post_asap::{
-            EdgeRole, ExecutionDataState, GroupingEdgeCompatibility, PostASAPDAGTransport,
-            PostAsapDagEdge, PostAsapDagNode, PostAsapNodeId, PostAsapOperatorPayload,
+            EdgeRole, ExecutionDataState, GroupingEdgeCompatibility, PostASAPDAGEdge,
+            PostASAPDAGNode, PostASAPDAGTransport, PostASAPNodeId, PostASAPOperatorPayload,
             ValueOperation, WindowEdgeCompatibility,
         },
         pre_asap::{ArithmeticOpKind, PreASAPNode, ProjectItem, ScalarValue},
     };
     use std::{collections::BTreeMap, rc::Rc};
     let schema = schema(&[("value", DataType::Float64, false)]);
-    let node = |id, payload| PostAsapDagNode {
-        id: PostAsapNodeId(id),
+    let node = |id, payload| PostASAPDAGNode {
+        id: PostASAPNodeId(id),
         payload,
         output_state: ExecutionDataState::QUERY_ROWS,
         output_schema: (*schema).clone(),
@@ -500,13 +500,13 @@ fn bind_post_asap_before_execution() {
         nodes: vec![
             node(
                 0,
-                PostAsapOperatorPayload::Fallback {
+                PostASAPOperatorPayload::Fallback {
                     expression: PreASAPNode::promql_scalar(1.),
                 },
             ),
             node(
                 1,
-                PostAsapOperatorPayload::Value {
+                PostASAPOperatorPayload::Value {
                     operation: ValueOperation::Project {
                         cols: vec![ProjectItem {
                             alias: None,
@@ -521,16 +521,16 @@ fn bind_post_asap_before_execution() {
                 },
             ),
         ],
-        edges: vec![PostAsapDagEdge {
-            producer: PostAsapNodeId(0),
-            consumer: PostAsapNodeId(1),
+        edges: vec![PostASAPDAGEdge {
+            producer: PostASAPNodeId(0),
+            consumer: PostASAPNodeId(1),
             role: EdgeRole::Input,
             intermediate_schema: (*schema).clone(),
             data_state: ExecutionDataState::QUERY_ROWS,
             grouping: GroupingEdgeCompatibility::NotApplicable,
             window: WindowEdgeCompatibility::NotApplicable,
         }],
-        root: PostAsapNodeId(1),
+        root: PostASAPNodeId(1),
     };
     let sources = || -> BTreeMap<u64, asap_physical_operators::dag::planner::Source<'static>> {
         BTreeMap::from([(
@@ -549,7 +549,7 @@ fn bind_post_asap_before_execution() {
     // A literal Fallback needs no deployment input.
     let literal = bind(&dag, BTreeMap::new(), &[1]).unwrap();
     assert_eq!(floats(&run(&literal, 1, query()), 0), vec![3.]);
-    dag.nodes[1].payload = PostAsapOperatorPayload::Value {
+    dag.nodes[1].payload = PostASAPOperatorPayload::Value {
         operation: ValueOperation::Extension {
             name: "unknown".into(),
         },
@@ -594,8 +594,8 @@ fn source_batches_must_match_the_bound_schema() {
     use asap_physical_operators::dag::{self, PhysicalOperator};
     use planner_types::{
         post_asap::{
-            ExecutionDataState, PostASAPDAGTransport, PostAsapDagNode, PostAsapNodeId,
-            PostAsapOperatorPayload,
+            ExecutionDataState, PostASAPDAGNode, PostASAPDAGTransport, PostASAPNodeId,
+            PostASAPOperatorPayload,
         },
         pre_asap::PreASAPNode,
     };
@@ -632,9 +632,9 @@ fn source_batches_must_match_the_bound_schema() {
     let expected = schema(&[("value", DataType::Float64, false)]);
     let starts = Rc::new(Cell::new(0));
     let plan = PostASAPDAGTransport {
-        nodes: vec![PostAsapDagNode {
-            id: PostAsapNodeId(0),
-            payload: PostAsapOperatorPayload::Fallback {
+        nodes: vec![PostASAPDAGNode {
+            id: PostASAPNodeId(0),
+            payload: PostASAPOperatorPayload::Fallback {
                 expression: PreASAPNode::promql_scalar(1.),
             },
             output_state: ExecutionDataState::QUERY_ROWS,
@@ -642,7 +642,7 @@ fn source_batches_must_match_the_bound_schema() {
             guarantee: None,
         }],
         edges: vec![],
-        root: PostAsapNodeId(0),
+        root: PostASAPNodeId(0),
     };
     let source = Box::new(WrongSource {
         schema: expected,
@@ -712,16 +712,16 @@ fn planner_semijoin_sort_limit_contract_at_both_phases() {
         ("score", DataType::Float64, false),
     ]);
     let keys_schema = schema(&[("key", DataType::Utf8, false)]);
-    let node = |id, payload, schema: &Schema| PostAsapDagNode {
-        id: PostAsapNodeId(id),
+    let node = |id, payload, schema: &Schema| PostASAPDAGNode {
+        id: PostASAPNodeId(id),
         payload,
         output_schema: (**schema).clone(),
         output_state: ExecutionDataState::QUERY_ROWS,
         guarantee: None,
     };
-    let edge = |producer, consumer, role, schema: &Schema| PostAsapDagEdge {
-        producer: PostAsapNodeId(producer),
-        consumer: PostAsapNodeId(consumer),
+    let edge = |producer, consumer, role, schema: &Schema| PostASAPDAGEdge {
+        producer: PostASAPNodeId(producer),
+        consumer: PostASAPNodeId(consumer),
         role,
         intermediate_schema: (**schema).clone(),
         data_state: ExecutionDataState::QUERY_ROWS,
@@ -733,21 +733,21 @@ fn planner_semijoin_sort_limit_contract_at_both_phases() {
         nodes: vec![
             node(
                 0,
-                PostAsapOperatorPayload::Fallback {
+                PostASAPOperatorPayload::Fallback {
                     expression: PreASAPNode::promql_scalar(0.),
                 },
                 &rows_schema,
             ),
             node(
                 1,
-                PostAsapOperatorPayload::Fallback {
+                PostASAPOperatorPayload::Fallback {
                     expression: PreASAPNode::promql_scalar(0.),
                 },
                 &keys_schema,
             ),
             node(
                 2,
-                PostAsapOperatorPayload::RelationalJoin {
+                PostASAPOperatorPayload::RelationalJoin {
                     join_kind: JoinKind::Semi,
                     pruning: None,
                     pred: Predicate(Rc::new(PreASAPNode::Compare {
@@ -760,7 +760,7 @@ fn planner_semijoin_sort_limit_contract_at_both_phases() {
             ),
             node(
                 3,
-                PostAsapOperatorPayload::Value {
+                PostASAPOperatorPayload::Value {
                     operation: ValueOperation::Sort {
                         keys: vec![SortKey {
                             expr: PreASAPNode::Column(2),
@@ -774,7 +774,7 @@ fn planner_semijoin_sort_limit_contract_at_both_phases() {
             ),
             node(
                 4,
-                PostAsapOperatorPayload::Value {
+                PostASAPOperatorPayload::Value {
                     operation: ValueOperation::Limit {
                         n: 1,
                         offset: 0,
@@ -791,7 +791,7 @@ fn planner_semijoin_sort_limit_contract_at_both_phases() {
             edge(2, 3, EdgeRole::Input, &rows_schema),
             edge(3, 4, EdgeRole::Input, &rows_schema),
         ],
-        root: PostAsapNodeId(4),
+        root: PostASAPNodeId(4),
     };
     let text = |v: &str| Value::Utf8(v.into());
     for (phase, scope) in [
@@ -1134,7 +1134,7 @@ fn grouped_temporal_schema_compiles_and_executes_topk() {
         compile_node, InputContract, PhysicalDAG, Source,
     };
     use planner_types::post_asap::{
-        ExecutionDataState, PostAsapDagNode, PostAsapNodeId, PostAsapOperatorPayload,
+        ExecutionDataState, PostASAPDAGNode, PostASAPNodeId, PostASAPOperatorPayload,
         ValueOperation,
     };
     use planner_types::pre_asap::{
@@ -1159,9 +1159,9 @@ fn grouped_temporal_schema_compiles_and_executes_topk() {
             .map(|c| (c.name.as_str(), c.dtype.clone(), c.nullable))
             .collect::<Vec<_>>(),
     );
-    let node = |id, operation| PostAsapDagNode {
-        id: PostAsapNodeId(id),
-        payload: PostAsapOperatorPayload::Value { operation },
+    let node = |id, operation| PostASAPDAGNode {
+        id: PostASAPNodeId(id),
+        payload: PostASAPOperatorPayload::Value { operation },
         output_state: ExecutionDataState::QUERY_ROWS,
         output_schema: (*input).clone(),
         guarantee: None,
@@ -1243,12 +1243,12 @@ fn certified_pruning_rejects_missing_authoritative_values_after_recovery() {
     use std::{collections::BTreeMap, rc::Rc};
     let schema = schema(&[("key", DataType::Utf8, false)]);
     for certified in [false, true] {
-        let node = PostAsapDagNode {
-            id: PostAsapNodeId(2),
+        let node = PostASAPDAGNode {
+            id: PostASAPNodeId(2),
             output_schema: (*schema).clone(),
             output_state: ExecutionDataState::QUERY_ROWS,
             guarantee: None,
-            payload: PostAsapOperatorPayload::RelationalJoin {
+            payload: PostASAPOperatorPayload::RelationalJoin {
                 join_kind: JoinKind::Semi,
                 pred: Predicate(Rc::new(PreASAPNode::Compare {
                     left: Rc::new(PreASAPNode::Column(0)),
@@ -1358,12 +1358,12 @@ fn compiled_ingestion_binary_preserves_alignment_and_rejects_missing_updates() {
         ("time", DataType::Timestamp, false),
         ("value", DataType::Float64, false),
     ]);
-    let node = PostAsapDagNode {
-        id: PostAsapNodeId(2),
+    let node = PostASAPDAGNode {
+        id: PostASAPNodeId(2),
         output_schema: (*input).clone(),
         output_state: ExecutionDataState::INGESTION_ROWS,
         guarantee: None,
-        payload: PostAsapOperatorPayload::Binary {
+        payload: PostASAPOperatorPayload::Binary {
             operator: BinaryOperator {
                 kind: BinaryOpKind::Arithmetic(ArithmeticOpKind::Sub),
                 vector_match: None,
