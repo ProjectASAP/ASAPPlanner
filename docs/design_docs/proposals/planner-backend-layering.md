@@ -1,9 +1,7 @@
 # Planner and deployment layering
 
-Status: proposal. Main implements layers 0 and 1 and the library lifecycle
-helpers; open pull requests implement the rest (see
-[Implementation status](#implementation-status)). Audience: designers of
-ASAPPlanner and of deployments such as ASAPQuery-backend.
+Status: proposal. Audience: designers of ASAPPlanner and of deployments such
+as ASAPQuery-backend.
 
 ## Goal
 
@@ -233,26 +231,3 @@ lifecycle layer lists choices for both states. The deployment prices them:
 
 All three are cuts of one compilation. The deployment's decision is only which
 lifecycle assignment to buy.
-
-## Implementation status
-
-Main implements frontends, logical candidates (`PlanSpace`) and the library
-lifecycle and selection helpers. The remaining layers are in open, stacked pull
-requests.
-
-* **Planner.** Split of #462: #473 → #474 → #475. Lifecycle candidates and
-  timing: #476, #482, #479, #485, #491. Physical layer: #483, #477. Physical
-  compile coverage: #484, #486–#490, #492–#495, #500–#507; the remaining gaps
-  are listed in physical-compile-coverage.md, added by #484. Target DAG names:
-  #508, #480.
-* **ASAPQuery-backend.** #788 through #812: query-time raw sources, lifecycle
-  placement, Planner precompute and query DAGs, and codecs over Planner
-  kernels.
-
-Open items:
-
-* Family pruning in the backend: #795 pre-selects families through
-  `global_selection` instead of pricing every family candidate.
-* Removing edge sampling (`sample_p`) and delta-frame ingestion; the data plane
-  does not ingest OTLP.
-* The remaining physical-compile coverage gaps.
