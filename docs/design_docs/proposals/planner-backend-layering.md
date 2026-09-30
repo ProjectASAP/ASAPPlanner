@@ -134,9 +134,7 @@ traces back to one Post-ASAP node. One exception is a `Fallback` node, which
 wraps a whole Pre-ASAP expression and compiles to many operators; the
 operator-flattening proposal ([operator sharing](operator-sharing.md), from
 #469) removes it by making non-ASAP operators ordinary Post-ASAP nodes, and
-#481 revises its export to emit one Post-ASAP node per non-ASAP operator. Today each node kind has essentially one lowering (a
-`Binary` lowers differently at ingestion and query time); if a node gains
-alternative physical implementations, they become further candidates in
+#481 revises its export to emit one Post-ASAP node per non-ASAP operator. If a node gains alternative physical implementations, they become further candidates in
 `CandidatePhysicalDAGs`, priced and chosen by the deployment.
 
 ### Responsibilities
@@ -189,19 +187,6 @@ assigned, not a new DAG representation or a single selected plan. The
 deployment prices the assignments and selects among the candidates. The timing
 frontier contains the ingestion-time nodes read by query-time nodes, plus an
 ingestion-time root.
-
-**Timing can change a node's implementation.** For most nodes, timing only
-decides which side of the cut the node falls on, so one compilation serves every
-lifecycle assignment and each assignment is a different cut of it. A node whose
-physical operator depends on its timing is *timing-sensitive*. Today the only
-such node is `Binary`: at ingestion time it combines aligned row streams per pane
-and its result feeds a summary (`AlignedBinary`); at query time it matches
-readout vectors under PromQL rules (`series_binary`). Assignments share a
-compilation only when they give every timing-sensitive node the same timing;
-each distinct combination is compiled once. For example, in
-`quantile(0.9, sum_over_time(m[1m]) + sum_over_time(n[1m]))`, retaining the
-quantile state puts `+` at ingestion time, while making that state `Ephemeral`
-puts `+` at query time, so the two assignments need two compilations.
 
 ## Cost and selection
 
