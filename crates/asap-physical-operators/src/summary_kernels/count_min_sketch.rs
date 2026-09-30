@@ -40,6 +40,16 @@ impl CountMinSketchAccumulator {
         Ok(())
     }
 
+    /// Total sampled update weight scaled by `1/p`, for unkeyed count readouts.
+    /// Each Count-Min row receives every update once, including collisions.
+    pub fn total(&self) -> f64 {
+        self.inner
+            .sketch()
+            .first()
+            .map_or(0.0, |row| row.iter().sum::<f64>())
+            / self.sample_p
+    }
+
     /// Estimated frequency of one item, scaled by `1/p` for a sampled sketch.
     pub fn query_key(&self, key: &KeyByLabelValues) -> f64 {
         self.inner.estimate(&key.to_semicolon_str()) / self.sample_p
@@ -115,6 +125,26 @@ mod tests {
         assert!(raw.query_key(&key) >= 10.0);
         assert!((sampled.query_key(&key) - raw.query_key(&key) * 4.0).abs() < 1e-9);
         assert!(CountMinSketchAccumulator::from_sketch(sketch, f64::NAN).is_err());
+    }
+
+    // Totals retain all update weight despite collisions and rescale edge sampling.
+    #[test]
+    fn total_weight_is_scaled_after_merge() {
+        let mut sketch = CountMinSketch::new(2, 1);
+        sketch.update("a", 3.0);
+        sketch.update("b", 7.0);
+        let sampled = CountMinSketchAccumulator::from_sketch(sketch, 0.25).unwrap();
+        assert_eq!(sampled.total(), 40.0);
+        let merged = sampled.merge_with(&sampled).unwrap();
+        assert_eq!(
+            merged
+                .as_any()
+                .downcast_ref::<CountMinSketchAccumulator>()
+                .unwrap()
+                .total(),
+            80.0
+        );
+        assert_eq!(CountMinSketchAccumulator::new(2, 1).total(), 0.0);
     }
 
     // Merging with an unsampled base keeps p; two sampled probabilities do not merge.
