@@ -535,6 +535,7 @@ pub(super) fn execute<'a>(
             }
             (Kind::SeriesHistogramQuantile { quantile, le }, None) => {
                 let input = &operator.inputs[0];
+                let left_layout = layout(input)?;
                 let bucket = &input.fields[*le].name;
                 let mut histograms = BTreeMap::<Labels, Vec<(f64, f64)>>::new();
                 for row in rows {
