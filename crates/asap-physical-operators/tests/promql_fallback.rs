@@ -996,3 +996,180 @@ fn scalar_expressions_or_vector_and_subquery_names() {
     assert_eq!(result.len(), 1);
     assert_eq!(result[0].0, "job=x");
 }
+
+/// Instant `x_bucket` samples at 50s: `(labels without le, [(le, count)])`.
+fn buckets(series: &[(&'static str, &[(&'static str, f64)])]) -> Vec<Sample> {
+    series
+        .iter()
+        .flat_map(|(labels, buckets)| {
+            buckets.iter().map(move |(le, count)| {
+                let spec = if labels.is_empty() {
+                    format!("le={le}")
+                } else {
+                    format!("{labels},le={le}")
+                };
+                (&*Box::leak(spec.into_boxed_str()), 50, *count)
+            })
+        })
+        .collect()
+}
+
+fn quantile(query: &str, samples: &[Sample]) -> Vec<(String, f64)> {
+    labeled(query, &[("x_bucket", samples)], 60)
+}
+
+const HISTOGRAM: &[(&str, f64)] = &[("1", 2.), ("2", 6.), ("4", 8.), ("+Inf", 10.)];
+
+// histogram_quantile interpolates linearly within the bucket holding rank q·count,
+// returns the highest finite bound for the +Inf bucket, and maps q outside
+// [0, 1] to ∓Inf and a NaN q to NaN. Output labels drop le and __name__.
+#[test]
+fn histogram_quantile_interpolates_classic_buckets() {
+    let samples = buckets(&[("job=a", HISTOGRAM)]);
+    for (q, expected) in [
+        ("0", 0.),
+        ("0.1", 0.5),
+        ("0.5", 1.75),
+        ("0.9", 4.),
+        ("1", 4.),
+        ("-0.5", f64::NEG_INFINITY),
+        ("1.5", f64::INFINITY),
+    ] {
+        let query = format!("histogram_quantile({q}, x_bucket)");
+        assert_eq!(
+            quantile(&query, &samples),
+            vec![("job=a".into(), expected)],
+            "{query}"
+        );
+    }
+    let nan = quantile("histogram_quantile(NaN, x_bucket)", &samples);
+    assert!(matches!(nan.as_slice(), [(labels, v)] if labels == "job=a" && v.is_nan()));
+}
+
+// Each label set other than le is its own histogram. Degenerate histograms
+// yield NaN: no +Inf bucket, fewer than two buckets, or zero observations.
+#[test]
+fn histogram_quantile_groups_series_and_rejects_degenerate_histograms() {
+    let samples = buckets(&[
+        ("job=a", HISTOGRAM),
+        ("job=b", &[("1", 1.), ("2", 2.)]),
+        ("job=c", &[("+Inf", 5.)]),
+        ("job=d", &[("1", 0.), ("+Inf", 0.)]),
+        ("job=e,inst=1", HISTOGRAM),
+    ]);
+    let rows = quantile("histogram_quantile(0.5, x_bucket)", &samples);
+    let labels: Vec<_> = rows.iter().map(|(l, _)| l.as_str()).collect();
+    assert_eq!(
+        labels,
+        vec!["inst=1,job=e", "job=a", "job=b", "job=c", "job=d"]
+    );
+    assert_eq!(rows[0].1, 1.75);
+    assert_eq!(rows[1].1, 1.75);
+    assert!(rows[2..].iter().all(|(_, v)| v.is_nan()), "{rows:?}");
+}
+
+// Buckets sort by bound, unparsable or missing le values are skipped, equal
+// bounds merge, and decreasing cumulative counts are raised to be monotonic.
+#[test]
+fn histogram_quantile_normalizes_buckets_like_prometheus() {
+    let unordered = buckets(&[("job=a", &[("+Inf", 10.), ("4", 8.), ("1", 2.), ("2", 6.)])]);
+    assert_eq!(
+        quantile("histogram_quantile(0.5, x_bucket)", &unordered),
+        vec![("job=a".into(), 1.75)]
+    );
+    let mut invalid = buckets(&[("job=a", &[("abc", 100.), ("1", 2.), ("+Inf", 4.)])]);
+    invalid.push(("job=a", 50, 100.));
+    assert_eq!(
+        quantile("histogram_quantile(0.5, x_bucket)", &invalid),
+        vec![("job=a".into(), 1.)]
+    );
+    let duplicate = buckets(&[("job=a", &[("1", 1.), ("1.0", 1.), ("+Inf", 4.)])]);
+    assert_eq!(
+        quantile("histogram_quantile(0.5, x_bucket)", &duplicate),
+        vec![("job=a".into(), 1.)]
+    );
+    // Counts [6, 2→6, 8, 8]: rank 7 lies in (2, 4], 1 of its 2 observations in.
+    let decreasing = buckets(&[("job=a", &[("1", 6.), ("2", 2.), ("4", 8.), ("+Inf", 8.)])]);
+    assert_eq!(
+        quantile("histogram_quantile(0.875, x_bucket)", &decreasing),
+        vec![("job=a".into(), 3.)]
+    );
+}
+
+// A lowest bucket with a non-positive bound is returned as is, not
+// interpolated from zero.
+#[test]
+fn histogram_quantile_non_positive_lowest_bucket() {
+    let samples = buckets(&[("job=a", &[("-1", 2.), ("1", 4.), ("+Inf", 4.)])]);
+    for (q, expected) in [("0.25", -1.), ("0.75", 0.)] {
+        let query = format!("histogram_quantile({q}, x_bucket)");
+        assert_eq!(
+            quantile(&query, &samples),
+            vec![("job=a".into(), expected)],
+            "{query}"
+        );
+    }
+}
+
+// The common shapes: an aggregated rate keeps its by labels other than le, and
+// a per-series rate keeps every label but le and __name__.
+#[test]
+fn histogram_quantile_over_rates_and_sums() {
+    // Each counter grows by c per minute, so its rate is c/60.
+    let counter = |labels: &'static str, le: &str, c: f64| {
+        let spec: &'static str = Box::leak(format!("{labels},le={le}").into_boxed_str());
+        (60..=240)
+            .step_by(60)
+            .map(move |t| (spec, t as i64, c * (t / 60) as f64))
+            .collect::<Vec<Sample>>()
+    };
+    let mut samples = Vec::new();
+    for inst in ["job=a,inst=1", "job=a,inst=2"] {
+        for (le, count) in HISTOGRAM {
+            samples.extend(counter(inst, le, *count));
+        }
+    }
+    let metrics = &[("x_bucket", samples.as_slice())];
+    let close = |rows: Vec<(String, f64)>, expected: &[(&str, f64)]| {
+        assert_eq!(rows.len(), expected.len(), "{rows:?}");
+        for ((labels, v), (want, w)) in rows.iter().zip(expected) {
+            assert_eq!(labels, want);
+            assert!((v - w).abs() < 1e-9, "{labels}: {v} vs {w}");
+        }
+    };
+    close(
+        labeled(
+            "histogram_quantile(0.5, sum by (le, job) (rate(x_bucket[5m])))",
+            metrics,
+            300,
+        ),
+        &[("job=a", 1.75)],
+    );
+    close(
+        labeled(
+            "histogram_quantile(0.5, sum by (le) (x_bucket))",
+            metrics,
+            250,
+        ),
+        &[("", 1.75)],
+    );
+    close(
+        labeled("histogram_quantile(0.5, rate(x_bucket[5m]))", metrics, 300),
+        &[("inst=1,job=a", 1.75), ("inst=2,job=a", 1.75)],
+    );
+}
+
+// Histograms that differ only in __name__ collide once it is dropped, which
+// Prometheus reports as an error rather than merging them.
+#[test]
+fn histogram_quantile_rejects_equal_output_label_sets() {
+    let mut samples = buckets(&[("job=a", HISTOGRAM)]);
+    samples.extend(buckets(&[("__name__=y_bucket,job=a", HISTOGRAM)]));
+    let error = evaluate(
+        "histogram_quantile(0.5, x_bucket)",
+        &[("x_bucket", &samples)],
+        60,
+    )
+    .unwrap_err();
+    assert!(error.contains("same labelset"), "{error}");
+}

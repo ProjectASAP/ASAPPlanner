@@ -334,9 +334,8 @@ fn classic_histogram_quantile_groups_without_le() {
 // renamed sample value from the output labels.
 #[test]
 fn classic_histogram_quantile_over_sum_by_keeps_other_labels() {
-    let qe = lower(
-        "histogram_quantile(0.9, sum by (le, job) (rate(http_duration_seconds_bucket[5m])))",
-    );
+    let qe =
+        lower("histogram_quantile(0.9, sum by (le, job) (rate(http_duration_seconds_bucket[5m])))");
     let (keys, le, names) = classic_histogram(&qe);
     // `sum by (le, job)` outputs `[job, le, sum]`.
     assert_eq!((keys, le), (vec![1], 1));

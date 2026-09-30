@@ -355,6 +355,13 @@ impl Lowering {
         logical: &QueryExpr,
     ) -> Result<Input, Error> {
         let mut input = self.schema(&step);
+        if let AggIntent::HistogramQuantile { q, le } = measure {
+            if !keys.is_without() || keys.keys() != [*le] {
+                return Err(invalid("histogram_quantile must group without (le)"));
+            }
+            let operator = Operator::series_histogram_quantile(input, *q, *le)?;
+            return self.push(operator, vec![step], logical);
+        }
         let value = named_column(&input, &ColumnRef::SampleValue)?;
         let reduction = match measure {
             AggIntent::Sum { col: None } => Reduction::Sum(value),

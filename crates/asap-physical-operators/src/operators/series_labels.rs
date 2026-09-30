@@ -113,6 +113,29 @@ impl Operator {
         })
     }
 
+    /// PromQL `histogram_quantile` over classic buckets: one histogram per
+    /// label set other than the `le` column's label. The result drops `le`,
+    /// `__name__` and the time column; its value is the quantile.
+    pub fn series_histogram_quantile(input: Schema, q: f64, le: usize) -> Result<Self, Error> {
+        let layout = layout(&input)?;
+        if !layout.labels.contains(&le) {
+            return Err(invalid("histogram bucket bound must be a label column"));
+        }
+        let mut fields = (0..input.fields.len())
+            .filter(|&i| i != le && i != layout.value && Some(i) != input.time_index)
+            .map(|i| input.fields[i].clone())
+            .collect::<Vec<_>>();
+        fields.push(input.fields[layout.value].clone());
+        Ok(Self {
+            kind: Kind::SeriesHistogramQuantile {
+                quantile: q.to_bits(),
+                le,
+            },
+            inputs: vec![input],
+            output: schema(fields),
+        })
+    }
+
     /// A PromQL binary operator with Prometheus' matching, metric-name, and
     /// duplicate rules. `scalars` marks the operands that are one-row PromQL
     /// scalars, such as a literal or `scalar(x)`, rather than vectors.
@@ -509,6 +532,48 @@ pub(super) fn execute<'a>(
                     &mut workspace,
                 )
                 .await?;
+            }
+            (Kind::SeriesHistogramQuantile { quantile, le }, None) => {
+                let input = &operator.inputs[0];
+                let bucket = &input.fields[*le].name;
+                let mut histograms = BTreeMap::<Labels, Vec<(f64, f64)>>::new();
+                for row in rows {
+                    work.checkpoint().await?;
+                    let mut set = left_layout.read(input, &row)?;
+                    // Prometheus skips a series whose `le` is not a float.
+                    let Some(bound) = set.remove(bucket).and_then(|v| v.parse::<f64>().ok()) else {
+                        continue;
+                    };
+                    let Value::Float64(count) = row[left_layout.value] else {
+                        return Err(invalid("vector value must be Float64"));
+                    };
+                    workspace.grow(
+                        64 + set
+                            .iter()
+                            .map(|(k, v)| 64 + k.len() + v.len())
+                            .sum::<usize>(),
+                    )?;
+                    // The histogram identity keeps `__name__`; only the result drops it.
+                    histograms.entry(set).or_default().push((bound, count));
+                }
+                let out_layout = layout(&output)?;
+                let mut seen = std::collections::BTreeSet::new();
+                for (mut set, buckets) in histograms {
+                    work.checkpoint().await?;
+                    set.remove("__name__");
+                    let q = f64::from_bits(*quantile);
+                    let value = aggregate::temporal::bucket_quantile(q, buckets, &context).await?;
+                    let mut row = vec![Value::Null; output.fields.len()];
+                    out_layout.write(&output, &mut row, &set)?;
+                    row[out_layout.value] = Value::Float64(value);
+                    if !seen.insert(set) {
+                        return Err(invalid(
+                            "vector cannot contain metrics with the same labelset",
+                        ));
+                    }
+                    workspace.grow(row_bytes(&row))?;
+                    result.push(row);
+                }
             }
             _ => return Err(invalid("series label operator inputs mismatch")),
         }
