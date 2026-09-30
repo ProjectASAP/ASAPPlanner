@@ -1523,3 +1523,21 @@ fn subquery_label_uniqueness_is_checked_per_evaluation_step() {
     assert_eq!(result[0].0, "job=x");
     assert!((result[0].1 - 0.05).abs() < 1e-12);
 }
+
+// Non-finite histogram quantile parameters survive the logical DAG JSON boundary too.
+#[test]
+fn logical_nonfinite_quantile_parameter_round_trips() {
+    let expression = lower("histogram_quantile(NaN, x_bucket)");
+    let restored: QueryExpr =
+        serde_json::from_slice(&serde_json::to_vec(&expression).unwrap()).unwrap();
+    let samples = buckets(&[("job=a", HISTOGRAM)]);
+    let result = evaluate_dag(
+        &restored,
+        &fallback_dag(restored.clone()),
+        &[("x_bucket", &samples)],
+        60,
+    )
+    .unwrap();
+    assert_eq!(result.len(), 1);
+    assert!(result[0].2.is_nan());
+}

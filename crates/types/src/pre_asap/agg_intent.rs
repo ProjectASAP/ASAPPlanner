@@ -90,6 +90,7 @@ pub enum AggIntent<C = ColumnId> {
     Quantile {
         #[serde(default)]
         col: Option<C>,
+        #[serde(with = "crate::serde_f64")]
         q: f64,
         accuracy: AccuracyTarget,
     },
@@ -156,14 +157,17 @@ pub enum AggIntent<C = ColumnId> {
     /// the value `t` seconds into the future.
     PredictLinear {
         /// The prediction horizon in seconds (the 2nd, scalar argument).
+        #[serde(with = "crate::serde_f64")]
         seconds: f64,
     },
     /// PromQL `double_exponential_smoothing(v[w], sf, tf)` — Holt-Winters
     /// double-exponential smoothing.
     DoubleExpSmoothing {
         /// Data (level) smoothing factor `sf` ∈ (0, 1).
+        #[serde(with = "crate::serde_f64")]
         smoothing: f64,
         /// Trend smoothing factor `tf` ∈ (0, 1).
+        #[serde(with = "crate::serde_f64")]
         trend: f64,
     },
 
@@ -184,7 +188,9 @@ pub enum AggIntent<C = ColumnId> {
     /// PromQL `histogram_fraction(lower, upper, v)` — fraction of observations
     /// in `[lower, upper]`.
     HistogramFraction {
+        #[serde(with = "crate::serde_f64")]
         lower: f64,
+        #[serde(with = "crate::serde_f64")]
         upper: f64,
     },
     /// PromQL `histogram_quantile(φ, <le-bucketed vector>)` — the φ-quantile
@@ -199,6 +205,7 @@ pub enum AggIntent<C = ColumnId> {
     /// and `__name__`. `le` names the bucket-bound column so that execution
     /// need not guess it from the grouping keys.
     HistogramQuantile {
+        #[serde(with = "crate::serde_f64")]
         q: f64,
         le: C,
     },
@@ -348,19 +355,24 @@ pub enum MathFunc {
     Rad,
     /// `round(v, to_nearest)` — nearest multiple of `to_nearest` (default 1).
     Round {
+        #[serde(with = "crate::serde_f64")]
         to_nearest: f64,
     },
     /// `clamp(v, min, max)`.
     Clamp {
+        #[serde(with = "crate::serde_f64")]
         min: f64,
+        #[serde(with = "crate::serde_f64")]
         max: f64,
     },
     /// `clamp_min(v, min)`.
     ClampMin {
+        #[serde(with = "crate::serde_f64")]
         min: f64,
     },
     /// `clamp_max(v, max)`.
     ClampMax {
+        #[serde(with = "crate::serde_f64")]
         max: f64,
     },
 }
