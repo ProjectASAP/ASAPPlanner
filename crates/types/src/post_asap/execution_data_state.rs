@@ -510,6 +510,7 @@ fn visit(
                 && s.primitive == DataPrimitive::SummaryState
                 && (*timing == ExecutionTiming::QueryTime || s.timing == *timing)
                 && is_exact_accumulator_state(&child.schema).is_ok();
+            // A query-time readout may read a population retained at ingestion.
             let population_readout = matches!(operation, ValueOperation::ReadPopulation { .. })
                 && *timing == ExecutionTiming::QueryTime
                 && matches!(

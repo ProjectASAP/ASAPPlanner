@@ -117,7 +117,7 @@ pub fn export_summary_maintenance_plan(
 }
 
 /// Walk in the same post-order as `dag_export::export_summary` and attach a
-/// deployment directly to every flattened occurrence of its `SummaryAgg`.
+/// deployment directly to every flattened occurrence of its state node.
 /// This makes the decision visible to graph consumers without asking them to
 /// reconstruct pointer identity from graph position.
 fn annotate_lifecycle_deployments(

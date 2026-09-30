@@ -687,7 +687,8 @@ state's input. The lifecycle cost hooks (`summary_maintenance_capabilities`,
 `summary_maintenance_lifecycle_cost_inputs_for_horizon`) and the complete-candidate
 hook therefore also receive `MaintainPopulation` nodes. A model that does not
 recognize one should return unknown costs, which keep its alternatives
-unselected. `SummaryMaintenanceLifecyclePlan::execution_timed_dag` times a
+unselected; a model that prices every node uniformly now also prices
+populations, so population candidates can win lifecycle-aware selection. `SummaryMaintenanceLifecyclePlan::execution_timed_dag` times a
 population as it times a summary state: retained at ingestion, `Ephemeral` at
 query time from the raw source.
 

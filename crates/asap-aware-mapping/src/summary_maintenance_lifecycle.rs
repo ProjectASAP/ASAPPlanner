@@ -225,7 +225,7 @@ pub enum SummaryMaintenanceTimingError {
     UnselectedLifecycle(PostAsapNodeId),
     /// A maintained population outside any `SummaryAgg`'s inputs has no
     /// deployment, so its timing would be guessed. Enumeration always emits
-    /// one; this arises only for a plan whose deployments were edited.
+    /// one; this arises only for a plan whose root or deployments were edited.
     #[error("node {0:?} maintains state that has no summary-maintenance lifecycle")]
     UnplannedMaintainedState(PostAsapNodeId),
     #[error(transparent)]
@@ -247,9 +247,7 @@ impl SummaryMaintenanceLifecyclePlan {
     pub fn execution_timed_dag(&self) -> Result<PostAsapDag, SummaryMaintenanceTimingError> {
         let compiled = compile_post_asap_dag_with_node_ids(&self.root)?;
         let dag = compiled.dag;
-        let mut populations = Vec::new();
-        collect_states(&self.root, &mut HashSet::new(), &mut populations, true);
-        for population in &populations {
+        for population in &standalone_populations(&self.root) {
             let id = compiled
                 .node_ids
                 .node_id(population)
@@ -377,7 +375,7 @@ pub enum SummaryMaintenanceLifecycleSelectionError {
     SummaryMaintenance(#[from] SummaryMaintenanceLifecyclePlanError),
 }
 
-/// Every lifecycle alternative for each unique summary state of one fixed
+/// Every lifecycle alternative for each unique retained state of one fixed
 /// root, before any lifecycle is chosen.
 ///
 /// Planner selection ([`plan_summary_maintenance_lifecycles`]) and a
@@ -667,8 +665,13 @@ fn enumerate_with_profile<'a>(
         };
     }
     let mut summaries = Vec::new();
-    collect_states(&root, &mut HashSet::new(), &mut summaries, false);
-    collect_states(&root, &mut HashSet::new(), &mut summaries, true);
+    collect_states(
+        &root,
+        &mut HashSet::new(),
+        &mut summaries,
+        StateKind::SummaryAgg,
+    );
+    summaries.extend(standalone_populations(&root));
     let node_ids = compile_post_asap_dag_with_node_ids(&root)?.node_ids;
     let components = summary_state_components(&summaries);
     let deployments: Vec<SummaryMaintenanceDeployment> = summaries
@@ -1263,32 +1266,38 @@ fn rejected(
     }
 }
 
-/// Collect unique `SummaryAgg` states, or with `populations` the unique
-/// maintained populations outside every `SummaryAgg`'s inputs. A population
-/// feeding a `SummaryAgg` is on that state's maintenance path, so that
-/// state's lifecycle times it.
+#[derive(Clone, Copy, PartialEq)]
+enum StateKind {
+    SummaryAgg,
+    Population,
+}
+
+/// Collect every unique node of `kind` reachable from `node`.
 fn collect_states(
     node: &Rc<SummaryNode>,
     seen: &mut HashSet<*const SummaryNode>,
     output: &mut Vec<Rc<SummaryNode>>,
-    populations: bool,
+    kind: StateKind,
 ) {
     if !seen.insert(Rc::as_ptr(node)) {
         return;
     }
     match &node.expr {
-        SummaryExpr::SummaryAgg { .. } if populations => {}
         SummaryExpr::SummaryAgg { child, .. } => {
-            output.push(Rc::clone(node));
-            collect_states(child, seen, output, populations);
+            if kind == StateKind::SummaryAgg {
+                output.push(Rc::clone(node));
+            }
+            collect_states(child, seen, output, kind);
         }
         SummaryExpr::ValueOperation {
             child, operation, ..
         } => {
-            if populations && matches!(operation, ValueOperation::MaintainPopulation { .. }) {
+            if kind == StateKind::Population
+                && matches!(operation, ValueOperation::MaintainPopulation { .. })
+            {
                 output.push(Rc::clone(node));
             }
-            collect_states(child, seen, output, populations)
+            collect_states(child, seen, output, kind)
         }
         SummaryExpr::SummaryJoin { outer, inner, .. }
         | SummaryExpr::RelationalJoin {
@@ -1305,20 +1314,48 @@ fn collect_states(
             left: outer,
             right: inner,
         } => {
-            collect_states(outer, seen, output, populations);
-            collect_states(inner, seen, output, populations);
+            collect_states(outer, seen, output, kind);
+            collect_states(inner, seen, output, kind);
         }
         SummaryExpr::SummaryDelete { summary_input, .. }
         | SummaryExpr::SummaryEstimate { summary_input, .. } => {
-            collect_states(summary_input, seen, output, populations)
+            collect_states(summary_input, seen, output, kind)
         }
         SummaryExpr::SummaryMerge { children, .. } => {
             for child in children {
-                collect_states(child, seen, output, populations);
+                collect_states(child, seen, output, kind);
             }
         }
         SummaryExpr::KeepPreAsap(_) => {}
     }
+}
+
+/// Maintained populations that are not an input of any `SummaryAgg`. A
+/// population feeding summary state is on that state's maintenance path, so
+/// that state's lifecycle times it, even when a readout also reads it directly.
+fn standalone_populations(root: &Rc<SummaryNode>) -> Vec<Rc<SummaryNode>> {
+    let mut summaries = Vec::new();
+    collect_states(
+        root,
+        &mut HashSet::new(),
+        &mut summaries,
+        StateKind::SummaryAgg,
+    );
+    let mut nested = Vec::new();
+    let mut seen = HashSet::new();
+    for summary in &summaries {
+        collect_states(summary, &mut seen, &mut nested, StateKind::Population);
+    }
+    let nested: HashSet<_> = nested.iter().map(Rc::as_ptr).collect();
+    let mut populations = Vec::new();
+    collect_states(
+        root,
+        &mut HashSet::new(),
+        &mut populations,
+        StateKind::Population,
+    );
+    populations.retain(|population| !nested.contains(&Rc::as_ptr(population)));
+    populations
 }
 
 pub(crate) fn evaluation_schedule(
@@ -1363,21 +1400,6 @@ fn summary_state_components(summaries: &[Rc<SummaryNode>]) -> Vec<usize> {
         let SummaryExpr::SummaryAgg { child, .. } = &summary.expr else {
             continue;
         };
-        // A population that is also read directly is one deployment; the
-        // summary state built from it shares its schedule.
-        if let (
-            SummaryExpr::ValueOperation {
-                operation: ValueOperation::MaintainPopulation { .. },
-                ..
-            },
-            Some(&population),
-        ) = (&child.expr, indices.get(&Rc::as_ptr(child)))
-        {
-            let parent_root = find(&mut parents, parent_index);
-            let child_root = find(&mut parents, population);
-            parents[child_root] = parent_root;
-            continue;
-        }
         if !matches!(
             child.expr,
             SummaryExpr::SummaryAgg { .. }
@@ -1389,7 +1411,12 @@ fn summary_state_components(summaries: &[Rc<SummaryNode>]) -> Vec<usize> {
             continue;
         }
         let mut descendants = Vec::new();
-        collect_states(child, &mut HashSet::new(), &mut descendants, false);
+        collect_states(
+            child,
+            &mut HashSet::new(),
+            &mut descendants,
+            StateKind::SummaryAgg,
+        );
         for descendant in descendants {
             let child_index = indices[&Rc::as_ptr(&descendant)];
             let parent_root = find(&mut parents, parent_index);
@@ -3371,13 +3398,11 @@ mod tests {
             &UnitCosts,
         )
         .unwrap();
-        assert_ne!(
+        // Shared and ContinuouslyMaintained tie at 32; the first wins.
+        assert!(matches!(
             selected_summary_maintenance_lifecycle(&plan.deployments[0]),
-            Some(&SummaryMaintenanceLifecycle::Ephemeral)
-        );
-        assert!(plan.deployments[0]
-            .summary_maintenance_lifecycle_guarantee
-            .is_some());
+            Some(SummaryMaintenanceLifecycle::Shared { .. })
+        ));
         assert_eq!(
             population_timings(&plan.execution_timed_dag().unwrap()),
             [("raw", INGEST), ("population", INGEST), ("readout", QUERY)]
@@ -3447,6 +3472,94 @@ mod tests {
                 ("readout", QUERY)
             ]
         );
+    }
+
+    // A population both read directly and consumed by summary state is that
+    // state's input in either traversal order: not a separate deployment, and
+    // timed by the state's lifecycle.
+    #[test]
+    fn shared_population_follows_its_summary_consumer() {
+        let direct = population_readout();
+        let SummaryExpr::ValueOperation {
+            child: population, ..
+        } = &direct.expr
+        else {
+            unreachable!()
+        };
+        let state = summary();
+        let SummaryExpr::SummaryAgg {
+            family,
+            input,
+            reduction,
+            grouping,
+            ..
+        } = &state.expr
+        else {
+            unreachable!()
+        };
+        let state = Rc::new(SummaryNode {
+            expr: SummaryExpr::SummaryAgg {
+                child: Rc::clone(population),
+                family: family.clone(),
+                input: input.clone(),
+                reduction: reduction.clone(),
+                grouping: grouping.clone(),
+            },
+            ..state.as_ref().clone()
+        });
+        let binary = |lhs: Rc<SummaryNode>, rhs: Rc<SummaryNode>| {
+            Rc::new(SummaryNode {
+                schema: lhs.schema.clone(),
+                expr: SummaryExpr::BinaryOp {
+                    lhs,
+                    rhs,
+                    operator: asap_types::post_asap::BinaryOperator {
+                        kind: asap_types::pre_asap::BinaryOpKind::Arithmetic(
+                            asap_types::pre_asap::ArithmeticOpKind::Add,
+                        ),
+                        vector_match: None,
+                        checked_relative_division: false,
+                        checked_finite_division: false,
+                    },
+                    timing: QUERY,
+                },
+                guarantee: None,
+            })
+        };
+        let data = continuous(1_000, 60_000);
+        let workload = workload(vec![], vec![repeating()], data.clone());
+        for root in [
+            binary(Rc::clone(&direct), readout(&state)),
+            binary(readout(&state), Rc::clone(&direct)),
+        ] {
+            for lifecycle in [
+                SummaryMaintenanceLifecycle::ContinuouslyMaintained,
+                SummaryMaintenanceLifecycle::Ephemeral,
+            ] {
+                let dag = timed_dag(
+                    Rc::clone(&root),
+                    &workload,
+                    &data,
+                    Some(Horizon(10.0)),
+                    |deployment| {
+                        assert!(Rc::ptr_eq(&deployment.summary, &state));
+                        lifecycle.clone()
+                    },
+                );
+                let expected = if lifecycle == SummaryMaintenanceLifecycle::Ephemeral {
+                    QUERY
+                } else {
+                    INGEST
+                };
+                for (kind, timing) in population_timings(&dag) {
+                    if matches!(kind, "raw" | "population" | "state") {
+                        assert_eq!(timing, expected, "{kind}");
+                    } else {
+                        assert_eq!(timing, QUERY, "{kind}");
+                    }
+                }
+            }
+        }
     }
 
     // A plan whose population deployment was removed after enumeration is
