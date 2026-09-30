@@ -1,6 +1,7 @@
 # DAG API alignment
 
-Status: implementation plan. Audience: Planner developers and API integrators.
+Status: implemented and workspace-tested on the #480 branch.
+Audience: Planner developers and API integrators.
 
 ## Objective
 
@@ -90,3 +91,33 @@ Implement in reviewable commits: naming and frontend collection; logical graph
 and timing consolidation; physical candidate sharing; documentation and final
 integration validation. Record actual completion and any remaining limitations
 rather than treating a rename as completion of the structural work.
+
+## Implementation record
+
+- Named the existing node types and shared root aliases; added frontend
+  `lower_candidates` and the ID-preserving `CandidatePreASAPDAGs` collection.
+- Added `PostASAPDAGIndex`, retaining shared node references and edge metadata.
+  Physical compilation accepts the root, index or timing assignment through a
+  borrowed projection. Transport import and direct compilation share validation
+  and operator lowering; no second rewrite implementation was introduced.
+- Added lazy, budget-checked lifecycle `assignments`. Unpriced legal choices
+  retain unknown cost, and rejected combinations retain their choices and errors.
+  `execution_assignment` attaches timing to the shared index. Window and
+  retention metadata stay on the accompanying lifecycle plan; unresolved window
+  evidence remains explicit and must be supplied before deployment installation.
+- Added `compile_timed_candidates` and `CandidatePhysicalDAGs`. Compatible
+  assignments share `Arc<PhysicalDAG>`; Binary timing changes produce a separate
+  compilation. Cuts materialize on demand through the existing implementation.
+- Kept explicit eager cut and winner-selection helpers for callers requesting
+  them. These helpers are not the candidate-preserving generation pipeline.
+- Added regression coverage for workload entry IDs, shared logical identity,
+  assignment budgets and unknown costs, physical compilation sharing,
+  timing-dependent Binary separation, transport equivalence and rejected timing.
+
+The Rust API migration is documented in
+[dag-api-migration.md](../../develop_docs/dag-api-migration.md). Downstream
+consumers must adopt the breaking names before repinning to this branch.
+
+Validation: `cargo test --workspace` passed all 1507 tests across 91 test groups.
+Formatting, strict all-target clippy, Markdown links and whitespace are checked
+before publishing this implementation.

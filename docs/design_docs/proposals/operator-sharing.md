@@ -447,7 +447,7 @@ PostAsapOperatorPayload::Relational {
 }
 ```
 
-`compile_post_asap_dag` takes each **largest connected subtree without `ASAP`** as one
+`export_post_asap_dag` takes each **largest connected subtree without `ASAP`** as one
 fragment, cutting an edge with a `DagInput` leaf wherever it meets an `ASAP` node.
 `ASAP` nodes map one-to-one onto the existing summary payloads;
 `FinalizeExactAccumulator` / `MaintainPopulation` / `ReadPopulation` stay
@@ -460,7 +460,7 @@ lowering plus a `DagInput` arm (an incoming edge as a materialized table); the
   stage 4), together with the downstream readers.
 - **Timing and guarantee** are read from the node slots; an `Unset` slot is rejected.
   An edge's `data_state` is its producer's timing plus the primitive of its kind (§5).
-  `compile_post_asap_dag` no longer re-runs data-state validation.
+  `export_post_asap_dag` no longer re-runs data-state validation.
 - **`SummaryMerge`** stays a wire payload, although its planner-side variant is
   unimplemented (§1.3, §10).
 - **Phases** become per fragment. Switching phase inside a fragment would need a

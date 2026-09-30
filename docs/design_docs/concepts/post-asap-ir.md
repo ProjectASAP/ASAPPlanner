@@ -60,7 +60,7 @@ for the corresponding correctness and realization requirements.
 The Pre-ASAP DAG and the Post-ASAP DAG are both logical: they describe what is
 computed, not which physical operators execute it. The Post-ASAP DAG has two
 forms of the same content. Planning builds and shares `PostASAPNode` trees.
-`compile_post_asap_dag` converts a selected tree into a
+`export_post_asap_dag` converts a selected tree into a
 [`PostASAPDAGTransport`](../../../crates/types/src/post_asap/post_asap_dag.rs) with
 stable node IDs and typed edges; `PostASAPDAGDocument` is its versioned wire
 envelope. Physical compilation consumes `PostASAPDAGTransport` and produces a separate

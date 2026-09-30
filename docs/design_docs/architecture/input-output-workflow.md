@@ -380,10 +380,11 @@ The [Planner and deployment layering](../proposals/planner-backend-layering.md)
 proposal describes the full contract, including deployment costs and mixed
 placement.
 
-The design names are `PreASAPDAG` (currently rooted at `Rc<PreASAPNode>`),
-`PostASAPDAG` (currently rooted at `Rc<PostASAPNode>`, exported as
-`PostASAPDAGTransport`), and `PhysicalDAG` (currently `PhysicalDAG`). These
-names do not imply that the Rust APIs have been renamed.
+The Rust graph APIs are `PreASAPDAG = Rc<PreASAPNode>`,
+`PostASAPDAG = Rc<PostASAPNode>`, and `PhysicalDAG`. Named candidate
+collections carry alternatives between layers. The
+[API migration guide](../../develop_docs/dag-api-migration.md) describes shared
+timing assignments, physical candidate generation and explicit transport exports.
 
 | Layer | Form | Decides |
 |---|---|---|
@@ -403,8 +404,8 @@ A deployment that prices candidates itself, such as ASAPQuery-backend, must
 enumerate the candidate collection, not read `PlanOutput`; otherwise candidates
 such as those added in #472 never reach its pricing.
 
-`PostASAPDAGTransport` exports the logical `PostASAPDAG` for physical compilation; it
-is not the compiled `PhysicalDAG`. `PlanOutput` carries logical graphs in the
+`PostASAPDAGTransport` is an explicit export/import format. Physical compilation
+can read the shared logical graph directly through its indexed view. `PlanOutput` carries logical graphs in the
 current `PostASAPNode` representation. Its `DagWithLifecycle` variant is the
 library path doing layer 2 as well, under the
 caller's cost model; a pricing deployment makes that lifecycle choice itself.

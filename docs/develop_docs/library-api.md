@@ -665,7 +665,7 @@ use asap_physical_operators::physical_planner::{
 
 let compiled = compile(&dag, inputs, &roots)?; // each node lowered once
 for plan in lifecycle_plans {
-    let frontier = frontier_from_timing(&plan.execution_timed_dag()?)?;
+    let frontier = frontier_from_timing(&plan.export_timed_dag()?)?;
     // Precompute/query DAGs split at `frontier`; no logical lowering.
     let candidate = cut_candidate(&compiled, &frontier)?;
     // Check feasibility and price `candidate`; bind the selected one as is.
@@ -688,7 +688,7 @@ state's input. The lifecycle cost hooks (`summary_maintenance_capabilities`,
 hook therefore also receive `MaintainPopulation` nodes. A model that does not
 recognize one should return unknown costs, which keep its alternatives
 unselected; a model that prices every node uniformly now also prices
-populations, so population candidates can win lifecycle-aware selection. `SummaryMaintenanceLifecyclePlan::execution_timed_dag` times a
+populations, so population candidates can win lifecycle-aware selection. `SummaryMaintenanceLifecyclePlan::export_timed_dag` times a
 population as it times a summary state: retained at ingestion, `Ephemeral` at
 query time from the raw source.
 
@@ -808,7 +808,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 | --- | --- |
 | `asap_types::dag_export::export(&query)` | Pre-ASAP inspection graph |
 | `asap_types::dag_export::export_summary(&summary)` | Post-ASAP inspection graph |
-| `asap_types::post_asap::compile_post_asap_dag(&root)` | Compile a semantic DAG with execution-data-state validation; not a physical plan |
+| `asap_types::post_asap::export_post_asap_dag(&root)` | Compile a semantic DAG with execution-data-state validation; not a physical plan |
 | `PostASAPDAGDocument::new(dag)` and `.validate()` | Versioned semantic envelope and explicit validation; constructing it alone does not validate |
 | `asap_aware_mapping::export_summary_maintenance_plan(&plan)` | Graph plus lifecycle deployments, alternatives and available cost/guarantee information |
 | `explain_replacements` / `explain_replacements_with` | Findings from default/custom-strategy search; not a complete physical feasibility report |

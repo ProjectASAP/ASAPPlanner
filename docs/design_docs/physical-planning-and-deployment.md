@@ -30,7 +30,7 @@ associated with the logical DAG, not a separate computation IR.
 
 The Logical Post-ASAP DAG is preceded by the Pre-ASAP DAG (`PreASAPNode`), the
 language-independent query semantics before summary selection. Both are
-logical. Planning builds Post-ASAP `PostASAPNode` trees; `compile_post_asap_dag`
+logical. Planning builds Post-ASAP `PostASAPNode` trees; `export_post_asap_dag`
 exports the selected tree as a `PostASAPDAGTransport`, which is the Physical Plan
 Compiler's input. Its per-node execution phase (ingestion or query time) is
 decided by the selected summary maintenance lifecycle, as the layer contract
@@ -46,7 +46,7 @@ below states.
    maintained population that does not feed a summary state.
    A chosen assignment determines every node's
    `ExecutionTiming`, plus window framework and retention.
-   `SummaryMaintenanceLifecyclePlan::execution_timed_dag` applies it: a retained
+   `SummaryMaintenanceLifecyclePlan::export_timed_dag` applies it: a retained
    (non-`Ephemeral`) state and all of its inputs run at ingestion time;
    readouts, other consumers, and `Ephemeral` states not consumed by retained
    state run at query time. A population that feeds a summary state is one of
@@ -435,7 +435,7 @@ node does not depend on the frontier, so each query DAG is lowered once and
 different lifecycle assignments are different cuts of that lowering.
 `compile(dag, inputs, roots)` yields the complete `PhysicalDAG`.
 `frontier_from_timing(&timed_dag)` reads an assignment's timed DAG (from
-`execution_timed_dag`) and returns its frontier: ingestion-time nodes read by
+`export_timed_dag`) and returns its frontier: ingestion-time nodes read by
 query-time nodes, or an ingestion-time root; a query-time node feeding an
 ingestion-time node is rejected. `cut_candidate(&compiled, &frontier)` then
 partitions the lowered operators: the frontier's ancestors form the precompute
