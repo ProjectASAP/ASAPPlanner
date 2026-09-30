@@ -5203,6 +5203,9 @@ impl<'a> GlobalSelection<'a> {
         if let Some(node) = self.assembled_nodes.borrow().get(&ptr) {
             return Ok(Rc::clone(node));
         }
+        // A selected summary that realizes its inner aggregate, instead of
+        // hiding it in `KeepPreAsap`, is kept; lifecycle assignment decides
+        // whether it runs in precompute or at query time.
         let selected_composed_summary = self
             .groups
             .get(&ptr)
@@ -5210,7 +5213,7 @@ impl<'a> GlobalSelection<'a> {
             .is_some_and(|candidate| matches!(&candidate.replacement,
                 Replacement::Summary(node) if matches!(&node.expr,
                     SummaryExpr::SummaryAgg { child, .. }
-                    if matches!(&child.expr, SummaryExpr::KeepPreAsap(raw) if !contains_aggregate(raw)))));
+                    if !matches!(&child.expr, SummaryExpr::KeepPreAsap(raw) if contains_aggregate(raw)))));
         let node = if query_time_nested_sum(target) && !selected_composed_summary {
             self.assemble_residual(target)?
         } else {
@@ -6885,6 +6888,77 @@ mod tests {
     use asap_types::pre_asap::schema::{Column, DataType, Schema as SchemaTy};
     use asap_types::types::AccuracyTarget;
     use std::collections::HashMap;
+
+    // Candidate shape without execution timing: what is computed, not where.
+    fn timing_free_shape(node: &Rc<SummaryNode>) -> serde_json::Value {
+        fn strip(value: &mut serde_json::Value) {
+            match value {
+                serde_json::Value::Object(fields) => {
+                    fields.remove("timing");
+                    fields.values_mut().for_each(strip);
+                }
+                serde_json::Value::Array(values) => values.iter_mut().for_each(strip),
+                _ => {}
+            }
+        }
+        let mut shape =
+            serde_json::to_value(asap_types::post_asap::compile_post_asap_dag(node).unwrap())
+                .unwrap();
+        strip(&mut shape);
+        shape
+    }
+
+    // Rate inventories never offer two candidates that differ only in timing.
+    #[test]
+    fn rate_candidate_inventories_have_no_timing_only_duplicates() {
+        for (query, accuracy) in [
+            ("sum by(job)(rate(m[1m]))", AccuracyTarget::Exact),
+            ("topk by(job)(2, rate(m[1m]))", AccuracyTarget::Epsilon(0.1)),
+        ] {
+            let root = Rc::new(lower_promql(query, accuracy));
+            let inventory = search_workload(vec![(0usize, root)])
+                .enumerate_candidate_dags(4096)
+                .unwrap();
+            let shapes = inventory
+                .candidates
+                .iter()
+                .map(|forest| timing_free_shape(&forest[0].1))
+                .collect::<Vec<_>>();
+            for (i, shape) in shapes.iter().enumerate() {
+                assert!(!shapes[..i].contains(shape), "{query}: duplicate {i}");
+            }
+        }
+    }
+
+    // Grouped Sum over Rate readouts stays a summary state in the inventory,
+    // so lifecycle assignment can place it in precompute or at query time.
+    #[test]
+    fn grouped_rate_sum_inventory_keeps_sum_state_for_lifecycle_placement() {
+        let root = Rc::new(lower_promql(
+            "sum by(job)(rate(m[1m]))",
+            AccuracyTarget::Exact,
+        ));
+        let inventory = search_workload(vec![(0usize, root)])
+            .enumerate_candidate_dags(4096)
+            .unwrap();
+        let is_exact = |node: &SummaryNode, kind: ExactKind| {
+            matches!(&node.expr, SummaryExpr::SummaryAgg {
+                family: SummaryFamilyType::ExactAggregate(k, _), ..
+            } if *k == kind)
+        };
+        assert!(inventory.candidates.iter().any(|forest| {
+            let SummaryExpr::ValueOperation { child: sum, .. } = &forest[0].1.expr else {
+                return false;
+            };
+            let SummaryExpr::SummaryAgg { child: rate, .. } = &sum.expr else {
+                return false;
+            };
+            is_exact(sum, ExactKind::Sum)
+                && matches!(&rate.expr, SummaryExpr::ValueOperation {
+                    child, operation: ValueOperation::FinalizeExactAccumulator, ..
+                } if is_exact(child, ExactKind::Rate))
+        }));
+    }
 
     // Every exposed query result has a readout; internal accumulator frontiers stay states.
     #[test]
