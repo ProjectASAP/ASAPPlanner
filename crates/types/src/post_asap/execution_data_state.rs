@@ -483,14 +483,17 @@ fn visit(
             operation,
             timing,
         } => {
+            // Population timing is a lifecycle decision: a retained population
+            // is maintained at ingestion time, an ephemeral one is rebuilt
+            // from raw input per query. Its input and readout contracts are
+            // structural and hold either way.
             let valid_population = match operation {
                 ValueOperation::MaintainPopulation { population } => {
-                    *timing == ExecutionTiming::IngestionTime
-                        && matches!(&child.expr, SummaryExpr::KeepPreAsap(input) if population.matches_input(input))
+                    matches!(&child.expr, SummaryExpr::KeepPreAsap(input) if population.matches_input(input))
                 }
                 ValueOperation::ReadPopulation { readout } => {
                     *timing == ExecutionTiming::QueryTime
-                        && matches!(&child.expr, SummaryExpr::ValueOperation { operation: ValueOperation::MaintainPopulation { population }, timing: ExecutionTiming::IngestionTime, .. } if population.supports(readout))
+                        && matches!(&child.expr, SummaryExpr::ValueOperation { operation: ValueOperation::MaintainPopulation { population }, .. } if population.supports(readout))
                 }
                 _ => true,
             };
@@ -513,7 +516,6 @@ fn visit(
                     &child.expr,
                     SummaryExpr::ValueOperation {
                         operation: ValueOperation::MaintainPopulation { .. },
-                        timing: ExecutionTiming::IngestionTime,
                         ..
                     }
                 );
