@@ -411,6 +411,10 @@ pub enum RealizationError {
     /// would change its semantics.
     #[error("unsupported physical summary realization: {0}")]
     PhysicalRealization(&'static str),
+    /// Candidate enumeration would exceed the caller's expansion limit; no
+    /// partial inventory is returned.
+    #[error("candidate expansion exceeds limit {0}")]
+    ExpansionLimit(usize),
     /// A constructed plan violates the update/readout phase contract
     /// (issue #171) — e.g. a summary readout placed beneath a maintained
     /// `SummaryAgg`. Detected at construction, never at runtime.
@@ -1590,7 +1594,8 @@ impl Proposals {
             Err(
                 RealizationError::Schema(_)
                 | RealizationError::ExactOperationSchema(_)
-                | RealizationError::PhysicalRealization(_),
+                | RealizationError::PhysicalRealization(_)
+                | RealizationError::ExpansionLimit(_),
             ) => {}
         }
     }
@@ -4106,9 +4111,7 @@ impl<Id: Clone + PartialEq> CandidatePostASAPDAGs<Id> {
             .iter()
             .try_fold(1usize, |n, choices| n.checked_mul(choices.len()))
             .filter(|n| *n <= expansion_limit)
-            .ok_or(RealizationError::PhysicalRealization(
-                "candidate expansion budget exceeded; no partial inventory returned",
-            ))?;
+            .ok_or(RealizationError::ExpansionLimit(expansion_limit))?;
         let mut inventory = CandidateDagInventory {
             candidates: Vec::new(),
             rejected_assemblies: Vec::new(),

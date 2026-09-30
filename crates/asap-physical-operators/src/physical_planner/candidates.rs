@@ -506,15 +506,20 @@ mod tests {
     }
 
     fn logical_root(query: &str) -> planner_types::post_asap::PostASAPDAG {
+        logical_root_at(query, planner_types::types::AccuracyTarget::Exact)
+    }
+
+    fn logical_root_at(
+        query: &str,
+        accuracy: planner_types::types::AccuracyTarget,
+    ) -> planner_types::post_asap::PostASAPDAG {
         let workload = PlanningWorkload {
             query_workload: QueryWorkload {
                 language: QueryLanguage::PromQL,
                 query_batch: Some(vec![BatchEntry {
                     query: Query(query.into()),
                     requirements: QueryRequirements {
-                        accuracy: AccuracyRequirement::Explicit(
-                            planner_types::types::AccuracyTarget::Exact,
-                        ),
+                        accuracy: AccuracyRequirement::Explicit(accuracy.clone()),
                         ..Default::default()
                     },
                     predictability: Predictability::Unknown,
@@ -696,7 +701,68 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![0, 1]
         );
-        assert!(rejected.iter().all(|(_, result)| result.is_err()));
+        assert!(rejected
+            .iter()
+            .all(|(_, result)| matches!(result, Err(PhysicalCandidateError::Compile(_)))));
+    }
+
+    /// Candidates share one compilation unless a Binary's timing differs, so
+    /// every other payload must lower identically at ingestion and query time.
+    #[test]
+    fn only_binary_lowering_depends_on_timing() {
+        use planner_types::post_asap::{
+            index_post_asap_dag, ExecutionTiming, PostASAPDAGAssignment,
+        };
+        use planner_types::types::AccuracyTarget::{Epsilon, Exact};
+        let queries = [
+            ("sum by(job)(rate(m[1m]))", Exact),
+            ("m", Exact),
+            ("count(m)", Exact),
+            ("topk(2, m)", Exact),
+            ("max_over_time(m[5m])", Exact),
+            ("sum(increase(m[1m]))", Exact),
+            ("quantile(0.5, m)", Epsilon(0.01)),
+            ("quantile_over_time(0.9, m[5m])", Epsilon(0.01)),
+            ("count(count by(job)(m))", Epsilon(0.05)),
+        ];
+        let mut payloads = BTreeSet::new();
+        for (query, accuracy) in queries {
+            let index =
+                std::rc::Rc::new(index_post_asap_dag(&logical_root_at(query, accuracy)).unwrap());
+            assert!(!index
+                .node_views()
+                .iter()
+                .any(|n| matches!(n.payload, Payload::Binary { .. })));
+            let inputs = raw_input(&index.to_transport());
+            let roots = [u64::from(index.root_id.0)];
+            let lowered =
+                [ExecutionTiming::QueryTime, ExecutionTiming::IngestionTime].map(|phase| {
+                    let assignment = PostASAPDAGAssignment::new(
+                        index.clone(),
+                        index.node_views().iter().map(|n| (n.id, phase)).collect(),
+                    )
+                    .unwrap();
+                    compile(assignment.view(), inputs.clone(), &roots)
+                        .map(|dag| serde_json::to_vec(&dag).unwrap())
+                        .map_err(|error| error.to_string())
+                });
+            // Unsupported shapes must also fail identically at either timing.
+            assert_eq!(lowered[0], lowered[1], "{query}");
+            if lowered[0].is_err() {
+                continue;
+            }
+            payloads.extend(index.node_views().iter().map(|n| {
+                format!("{:?}", n.payload)
+                    .split([' ', '{', '('])
+                    .next()
+                    .unwrap()
+                    .to_string()
+            }));
+        }
+        // The fixtures exercise every non-Binary payload kind the compiler lowers natively.
+        for kind in ["Fallback", "SummaryAgg", "SummaryEstimate", "Value"] {
+            assert!(payloads.contains(kind), "{kind} not covered: {payloads:?}");
+        }
     }
 
     /// Each collection candidate equals an independent compilation of its own

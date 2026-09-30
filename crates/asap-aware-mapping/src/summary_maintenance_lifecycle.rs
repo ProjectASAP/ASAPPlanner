@@ -2509,11 +2509,20 @@ mod tests {
             Err(SummaryMaintenanceLifecycleChoiceError::NoAlternatives(id))
         );
         let index = Rc::new(asap_types::post_asap::index_post_asap_dag(&root).unwrap());
+        let timed =
+            crate::candidate_timing::collect_timing(7, [Ok((index, candidates))], vec![], 4096)
+                .unwrap();
+        assert_eq!(timed.len(), 1);
+        let entries = timed.iter().collect::<Vec<_>>();
+        let [(metadata, Err(error))] = entries.as_slice() else {
+            panic!("expected one diagnostic entry");
+        };
+        assert_eq!((metadata.id, metadata.logical_candidate), (7, 0));
         assert!(matches!(
-            crate::candidate_timing::prepared_timing(index, candidates, 4096),
-            Err(crate::CandidateTimingError::Choice(
+            error.as_ref(),
+            crate::CandidateTimingError::Choice(
                 SummaryMaintenanceLifecycleChoiceError::NoAlternatives(missing)
-            )) if missing == id
+            ) if *missing == id
         ));
     }
 

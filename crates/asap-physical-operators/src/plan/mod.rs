@@ -44,8 +44,12 @@ pub(crate) struct Node<'a, V, S> {
 }
 /// Execution handle: a graph of runnable operators with their inputs connected.
 /// [`PhysicalDAG::instantiate`](crate::physical_planner::PhysicalDAG::instantiate)
-/// derives one from a compiled `PhysicalDAG` by binding runtime sources; it
-/// lives for one execution and is never persisted or compared as a plan.
+/// derives one from a compiled `PhysicalDAG` by binding runtime sources, as do
+/// the [`bind`](crate::physical_planner::bind) and
+/// [`bind_with_data_sources`](crate::physical_planner::bind_with_data_sources)
+/// conveniences. It holds those bound sources, so it lives no longer than they
+/// do; each [`Self::execute`] call is a separate run. It is never persisted or
+/// compared as a plan.
 pub struct PhysicalExecution<'a, V, S> {
     pub(crate) nodes: BTreeMap<NodeId, Node<'a, V, S>>,
 }

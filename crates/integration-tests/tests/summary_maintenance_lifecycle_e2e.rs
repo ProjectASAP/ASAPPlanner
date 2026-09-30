@@ -1192,6 +1192,11 @@ fn named_candidate_collections_preserve_timing_and_compile_errors() {
         logical.with_timing_for_root(&17, context(), 4096, 0),
         Err(CandidateTimingError::ExpansionLimit(0))
     ));
+    // The logical budget is reported the same way as the assignment budget.
+    assert!(matches!(
+        logical.with_timing_for_root(&17, context(), 0, 4096),
+        Err(CandidateTimingError::ExpansionLimit(0))
+    ));
     assert!(logical
         .with_timing_for_root(&18, context(), 4096, 4096)
         .is_err());
@@ -1284,10 +1289,19 @@ fn named_candidate_collections_preserve_timing_and_compile_errors() {
         ))
     });
     assert_eq!(failed.len(), timed.len());
-    assert!(failed
-        .iter()
-        .all(|(metadata, result)| metadata.id == 17 && result.is_err()));
-    assert!(physical.materialize(physical.len()).is_err());
+    // A resolver failure is a compile error; timing failures stay timing errors.
+    for ((_, timing), (metadata, result)) in timed.iter().zip(failed.iter()) {
+        assert_eq!(metadata.id, 17);
+        if timing.is_ok() {
+            assert!(matches!(result, Err(PhysicalCandidateError::Compile(_))));
+        } else {
+            assert!(matches!(result, Err(PhysicalCandidateError::Timing(_))));
+        }
+    }
+    assert!(matches!(
+        physical.materialize(physical.len()),
+        Err(PhysicalCandidateError::Compile(_))
+    ));
 
     // The single-DAG entry point is the same collection, not a public lifecycle helper.
     let first = timed
@@ -1310,6 +1324,35 @@ fn named_candidate_collections_preserve_timing_and_compile_errors() {
     .unwrap();
     assert_eq!(one.logical_len(), 1);
     assert!(!one.lifecycle_alternatives(0).unwrap().is_empty());
+
+    // A listed alternative can be priced before binding; a lifecycle or state
+    // the candidate does not offer is rejected rather than priced.
+    use asap_aware_mapping::SummaryMaintenanceLifecycleChoiceError as Choice;
+    let deployment = &one.lifecycle_alternatives(0).unwrap()[0];
+    let state = deployment.post_asap_node_id;
+    for alternative in &deployment.alternatives {
+        let lifecycle = &alternative.summary_maintenance_lifecycle;
+        let guarantee = one.lifecycle_guarantee(0, state, lifecycle).unwrap();
+        assert_eq!(&guarantee.summary_maintenance_lifecycle, lifecycle);
+    }
+    let unoffered = SummaryMaintenanceLifecycle::Shared {
+        retention: asap_types::workload::DurationMs(u64::MAX),
+    };
+    assert!(!deployment
+        .alternatives
+        .iter()
+        .any(|a| a.summary_maintenance_lifecycle == unoffered));
+    assert!(matches!(
+        one.lifecycle_guarantee(0, state, &unoffered).unwrap_err().as_ref(),
+        CandidateTimingError::Choice(Choice::NotAnAlternative(id)) if *id == state
+    ));
+    let unknown = asap_types::post_asap::PostASAPNodeId(u32::MAX);
+    assert!(matches!(
+        one.lifecycle_guarantee(0, unknown, &SummaryMaintenanceLifecycle::Ephemeral)
+            .unwrap_err()
+            .as_ref(),
+        CandidateTimingError::Choice(Choice::UnknownSummary(id)) if *id == unknown
+    ));
     let mut invalid = context();
     invalid.horizon = Some(Horizon(-1.));
     let rejected =

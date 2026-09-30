@@ -44,7 +44,7 @@ pub enum CandidateTimingError {
     UnknownLogicalCandidate(usize),
 }
 
-pub(crate) struct PreparedTiming<'a> {
+struct PreparedTiming<'a> {
     index: Rc<PostASAPDAGIndex>,
     lifecycles: SummaryMaintenanceLifecycleCandidates<'a>,
     count: usize,
@@ -83,7 +83,14 @@ impl<Id: Clone + PartialEq> CandidatePostASAPDAGs<Id> {
         logical_limit: usize,
         assignment_limit: usize,
     ) -> Result<CandidatePostASAPDAGsWithTiming<'a, Id>, CandidateTimingError> {
-        let inventory = self.enumerate_candidate_dags_for_root(id, logical_limit)?;
+        let inventory = self
+            .enumerate_candidate_dags_for_root(id, logical_limit)
+            .map_err(|error| match error {
+                RealizationError::ExpansionLimit(limit) => {
+                    CandidateTimingError::ExpansionLimit(limit)
+                }
+                error => error.into(),
+            })?;
         let roots = inventory.candidates.into_iter().map(|mut roots| {
             // The logical enumerator was explicitly scoped to this one root.
             debug_assert_eq!(roots.len(), 1);
@@ -119,21 +126,39 @@ fn prepare<'a, Id>(
     context: CandidateTimingContext<'a>,
     limit: usize,
 ) -> Result<CandidatePostASAPDAGsWithTiming<'a, Id>, CandidateTimingError> {
+    let enumerated = roots.into_iter().map(|root| {
+        let index = Rc::new(index_post_asap_dag(&root)?);
+        let lifecycles = enumerate_summary_maintenance_lifecycles(
+            root,
+            context.demand,
+            context.now_ms,
+            context.horizon,
+            context.capabilities,
+            context.cost_model,
+        )?;
+        Ok((index, lifecycles))
+    });
+    collect_timing(id, enumerated, rejected_assemblies, limit)
+}
+
+/// Collect each logical candidate's enumerated lifecycles into the timed collection.
+pub(crate) fn collect_timing<'a, Id>(
+    id: Id,
+    enumerated: impl IntoIterator<
+        Item = Result<
+            (
+                Rc<PostASAPDAGIndex>,
+                SummaryMaintenanceLifecycleCandidates<'a>,
+            ),
+            CandidateTimingError,
+        >,
+    >,
+    rejected_assemblies: Vec<String>,
+    limit: usize,
+) -> Result<CandidatePostASAPDAGsWithTiming<'a, Id>, CandidateTimingError> {
     let mut logical = Vec::new();
     let mut count = 0usize;
-    for root in roots {
-        let prepared = (|| {
-            let index = Rc::new(index_post_asap_dag(&root)?);
-            let lifecycles = enumerate_summary_maintenance_lifecycles(
-                root,
-                context.demand,
-                context.now_ms,
-                context.horizon,
-                context.capabilities,
-                context.cost_model,
-            )?;
-            Ok::<_, CandidateTimingError>((index, lifecycles))
-        })();
+    for prepared in enumerated {
         let prepared = match prepared
             .and_then(|(index, lifecycles)| prepared_timing(index, lifecycles, limit))
         {
@@ -158,7 +183,7 @@ fn prepare<'a, Id>(
 
 /// A logical candidate yields its assignments, or one diagnostic entry when it
 /// has none: a state with no lifecycle alternative must not vanish silently.
-pub(crate) fn prepared_timing(
+fn prepared_timing(
     index: Rc<PostASAPDAGIndex>,
     lifecycles: SummaryMaintenanceLifecycleCandidates<'_>,
     limit: usize,
@@ -243,15 +268,33 @@ impl<Id: Clone> CandidatePostASAPDAGsWithTiming<'_, Id> {
         self.prepared(logical_candidate)
             .map(|p| p.lifecycles.deployments())
     }
-    /// Guarantee that choosing `lifecycle` would attach under this workload's
-    /// data arrival, so a deployment can price an alternative before binding it.
+    /// Guarantee that choosing `lifecycle` for `state` would attach under this
+    /// workload's data arrival, so a deployment can supply a price for that
+    /// alternative before selection. `lifecycle` must be one of the state's alternatives.
     pub fn lifecycle_guarantee(
         &self,
         logical_candidate: usize,
+        state: PostASAPNodeId,
         lifecycle: &SummaryMaintenanceLifecycle,
     ) -> Result<SummaryMaintenanceLifecycleGuarantee, Rc<CandidateTimingError>> {
-        self.prepared(logical_candidate)
-            .map(|p| p.lifecycles.guarantee(lifecycle))
+        use SummaryMaintenanceLifecycleChoiceError as E;
+        let prepared = self.prepared(logical_candidate)?;
+        let deployment = prepared
+            .lifecycles
+            .deployments()
+            .iter()
+            .find(|d| d.post_asap_node_id == state)
+            .ok_or_else(|| Rc::new(CandidateTimingError::Choice(E::UnknownSummary(state))))?;
+        if !deployment
+            .alternatives
+            .iter()
+            .any(|a| &a.summary_maintenance_lifecycle == lifecycle)
+        {
+            return Err(Rc::new(CandidateTimingError::Choice(E::NotAnAlternative(
+                state,
+            ))));
+        }
+        Ok(prepared.lifecycles.guarantee(lifecycle))
     }
     pub fn select_lifecycles(
         &self,
