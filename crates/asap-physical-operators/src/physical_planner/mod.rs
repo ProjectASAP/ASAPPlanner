@@ -49,6 +49,8 @@ pub use temporal_panes::{
 mod compiled;
 pub use compiled::{CompiledPhysicalDag, InputContract};
 
+mod row_values;
+
 /// Compile computation without opening or retaining deployment readers.
 /// Input contracts identify explicit boundaries selected by maintenance planning.
 pub fn compile(
@@ -237,11 +239,6 @@ fn compile_internal(
                 use planner_types::post_asap::maintained_population::{
                     PopulationInput, PopulationReadout,
                 };
-                let PopulationReadout::TopK { k } = readout else {
-                    return Err(invalid(
-                        "native population readout does not support this operation",
-                    ));
-                };
                 let [producer] = inputs.as_slice() else {
                     return Err(invalid("population readout requires one input"));
                 };
@@ -262,6 +259,12 @@ fn compile_internal(
                     ));
                 }
                 let input = schemas[0].clone();
+                let PopulationReadout::TopK { k } = readout else {
+                    let aggregate =
+                        row_values::population_aggregate(&input, &spec.grouping, readout)?;
+                    graph.add(id, inputs, aggregate.with_output_schema(output)?)?;
+                    continue;
+                };
                 let groups = spec
                     .grouping
                     .iter()
