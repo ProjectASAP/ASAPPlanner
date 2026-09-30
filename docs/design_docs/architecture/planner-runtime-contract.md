@@ -39,7 +39,7 @@ CPU, memory, and I/O behavior.
 
 ASAPQuery-backend then implements the selected framework. For example, after
 Planner chooses a sliding-window realization, the backend chooses the concrete
-pane representation, runtime operator implementation, placement, sharding,
+pane representation, runtime operator implementation, machine placement, sharding,
 watermark behavior, and materialization identifiers. ASAPCollector maintains
 the compiled panes and summary state.
 
