@@ -14,6 +14,7 @@ use planner_types::{
 };
 use std::{collections::BTreeMap, sync::Arc};
 
+// Typed series identity survives finalization and derived precompute through population metadata.
 #[test]
 fn finalized_shared_panes_rebuild_one_global_summary_after_recovery() {
     let family = SummaryFamilyType::ExactAggregate(ExactKind::Sum, ExactParams::Sum);
@@ -33,6 +34,11 @@ fn finalized_shared_panes_rebuild_one_global_summary_after_recovery() {
         nullable: false,
     });
     value_schema.time_index = Some(1);
+    value_schema.fields.push(SummaryField {
+        name: planner_types::pre_asap::schema::PROMQL_SERIES_IDENTITY.into(),
+        dtype: SummaryFamilyType::Plain(DataType::Utf8),
+        nullable: false,
+    });
     for (weight, expected) in [
         (SummaryInputExpr::Column(ColumnRef::SampleValue), 60.),
         (SummaryInputExpr::Constant(1.), 4.),
@@ -106,6 +112,17 @@ fn finalized_shared_panes_rebuild_one_global_summary_after_recovery() {
             edges,
             root: PostAsapNodeId(3),
         };
+        // Identity metadata must remain one non-null Utf8 column.
+        for mutation in 0..3 {
+            let mut invalid_identity = dag.clone();
+            let fields = &mut invalid_identity.nodes[1].output_schema.fields;
+            match mutation {
+                0 => fields[2].nullable = true,
+                1 => fields[2].dtype = SummaryFamilyType::Plain(DataType::Float64),
+                _ => fields.push(fields[2].clone()),
+            }
+            assert!(precompute::compile(&invalid_identity, &[0], &[3]).is_err());
+        }
         let mut invalid_grouping = dag.clone();
         let PostAsapOperatorPayload::SummaryAgg { reduction, .. } =
             &mut invalid_grouping.nodes[3].payload

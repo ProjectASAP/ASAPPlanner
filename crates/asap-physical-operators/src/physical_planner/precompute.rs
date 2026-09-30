@@ -251,11 +251,28 @@ pub fn compile(
 
 fn validate_value_output(node: &PostAsapDagNode) -> Result<(), Error> {
     let schema = &node.output_schema;
+    // Physical population rows already carry the complete identity in `$population`.
+    // Typed logical plans may expose its opaque series-identity column as metadata.
+    let identity = planner_types::pre_asap::schema::PROMQL_SERIES_IDENTITY;
+    let identities = schema
+        .fields
+        .iter()
+        .filter(|field| field.name == identity)
+        .collect::<Vec<_>>();
+    if identities.len() > 1
+        || identities
+            .iter()
+            .any(|field| field.nullable || field.dtype != SummaryFamilyType::Plain(DataType::Utf8))
+    {
+        return Err(invalid(
+            "precompute series identity requires one non-null Utf8 column",
+        ));
+    }
     let values = schema
         .fields
         .iter()
         .enumerate()
-        .filter(|(i, _)| Some(*i) != schema.time_index)
+        .filter(|(i, field)| Some(*i) != schema.time_index && field.name != identity)
         .collect::<Vec<_>>();
     if !matches!(values.as_slice(), [(_, field)] if !field.nullable && field.dtype == SummaryFamilyType::Plain(DataType::Float64))
         || schema.time_index.is_some_and(|i| {
