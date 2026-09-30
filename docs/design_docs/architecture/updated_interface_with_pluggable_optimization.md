@@ -103,7 +103,7 @@ The variant follows from whether `lifecycle` was supplied in the input.
 `PlanOutput` is an opt-in selection helper's result. The candidate-preserving
 Planner pipeline outputs all legal candidates at each layer and does not pass
 through this single-selection result. `PlanOutput` is not a replacement for
-the collection of candidate `PostASAPDAG`s: candidates the pass dropped are
+`CandidatePostASAPDAGs`: candidates the pass dropped are
 not in it, so a deployment that prices candidates itself enumerates the full
 candidate collection. Each selected
 logical graph is a `PostASAPDAG`, currently represented by `Rc<SummaryNode>`.

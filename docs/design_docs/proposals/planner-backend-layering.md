@@ -25,33 +25,33 @@ operators.
 │ 1. Logical Post-ASAP (asap-aware-mapping)                        │
 │    WHAT to compute; no placement.                                │
 │    Summary families, rewrites, exact candidates                  │
-│    -> all candidate PostASAPDAGs                                 │
+│    -> CandidatePostASAPDAGs                                      │
 │                      │                                           │
 │ 2. Summary maintenance lifecycle                                 │
 │    Per unique summary state / maintained population:             │
 │    Ephemeral | Prepared | Shared | ContinuouslyMaintained        │
 │    Each assignment -> node timing, window framework,             │
 │    retention. The only source of timing.                         │
-│    -> all candidate PostASAPDAGs with timing                     │
+│    -> CandidatePostASAPDAGs with timing                          │
 │                      │                                           │
 │ 3. Physical compile (asap-physical-operators)                    │
-│    Compile candidates -> all candidate PhysicalDAGs              │
-│    Cut by timing -> all PhysicalCandidates                       │
+│    Compile and cut by timing -> CandidatePhysicalDAGs            │
+│    Each candidate contains:                                      │
 │    { precompute DAG, query DAG, typed InputContracts }           │
 │    Operators + kernels implement all computation.                │
 └──────────────────────┬───────────────────────────────────────────┘
-          physical candidates (the boundary)
+          CandidatePhysicalDAGs (the boundary)
 ┌──────────────────────┴──────── Deployment ──────────────┐
 │ 4 Selection       price lifecycle assignments; choose    │
 │ 5 Execution       ingest, panes, storage, readout, run   │
 └─────────────────────────────────────────────────────────┘
 ```
 
-### Candidate preservation
+### Candidate generation by ASAPPlanner
 
 Every Planner layer outputs all legal candidates represented at that stage:
 
-`candidate PreASAPDAGs → candidate PostASAPDAGs → candidate PostASAPDAGs with timing → candidate PhysicalDAGs → PhysicalCandidates`
+`candidate PreASAPDAGs → CandidatePostASAPDAGs → CandidatePostASAPDAGs with timing → CandidatePhysicalDAGs`
 
 No intermediate layer chooses a winning candidate. Frontend lowering can
 produce a singleton candidate set for an unambiguous query; it need not invent
@@ -86,16 +86,17 @@ renamed to `CandidatePostASAPDAGs` in #508; `QueryExpr`, `SummaryNode`, `PostAsa
 and `CompiledPhysicalDag` remain the graph representations shown above.
 `PostAsapDag` is the exported representation of `PostASAPDAG`, not a fourth
 planning layer. `PhysicalCandidate` packages the precompute and query cuts
-of a `PhysicalDAG` with their typed input contracts.
+of a `PhysicalDAG` with their typed input contracts. It is the Rust packaging
+for one member of `CandidatePhysicalDAGs`, not an additional layer output.
 
 ### Responsibilities
 
 | Layer | Owns | Does not own |
 |---|---|---|
 | 0. Frontends | Language semantics and lowering into candidate `PreASAPDAG`s. A construct that cannot be represented faithfully is rejected, never ignored (for example PromQL `fill`). | Summaries, placement |
-| 1. Logical Post-ASAP | All legal candidate `PostASAPDAG`s: summary families, exact rewrites, compositions, and series-identity typing. | Placement |
-| 2. Summary maintenance lifecycle | For each unique summary state and maintained population, the lifecycle choices (`Ephemeral`, `Prepared`, `Shared`, `ContinuouslyMaintained`) and their costs under a caller-supplied cost model. Each assignment sets every node's execution timing, window framework and retention, producing candidate `PostASAPDAG`s with timing. | The cost values themselves |
-| 3. Physical compilation | All computation: value operations, aggregation, PromQL functions and subqueries, vector matching, comparisons and set operators, `histogram_quantile`, summary build, merge and estimate, sort, limit, joins. Compiles candidate `PostASAPDAG`s with timing into candidate `PhysicalDAG`s and produces their timing-cut `PhysicalCandidates`; it does not select a winner. | Raw ingestion, pane construction, storage formats, decoding persisted state, scheduling |
+| 1. Logical Post-ASAP | `CandidatePostASAPDAGs`: all legal logical candidates, including summary families, exact rewrites, compositions, and series-identity typing. | Placement |
+| 2. Summary maintenance lifecycle | For each unique summary state and maintained population, the lifecycle choices (`Ephemeral`, `Prepared`, `Shared`, `ContinuouslyMaintained`) and their costs under a caller-supplied cost model. Each assignment sets every node's execution timing, window framework and retention, producing `CandidatePostASAPDAGs` with timing. | The cost values themselves |
+| 3. Physical compilation | All computation: value operations, aggregation, PromQL functions and subqueries, vector matching, comparisons and set operators, `histogram_quantile`, summary build, merge and estimate, sort, limit, joins. Compiles `CandidatePostASAPDAGs` with timing into `CandidatePhysicalDAGs`, including each candidate's timing cuts; it does not select a winner. | Raw ingestion, pane construction, storage formats, decoding persisted state, scheduling |
 | 4. Deployment selection | Prices lifecycle assignments and, through its cost model, logical candidates. Shared state is counted once. It binds the chosen plan. | Re-lowering computation |
 | 5. Deployment execution | Ingestion and routing, pane assignment and completeness, lateness and revisions, storage and codecs over Planner kernel states, reading stored state into typed inputs, query-time raw sources, the exact-engine fallback. | Any computation algorithm |
 
@@ -104,8 +105,8 @@ that every computation runs as a Planner-compiled physical DAG.
 
 ## The boundary
 
-The deployment receives all supported physical candidates for selection. Each
-candidate contains:
+The deployment receives `CandidatePhysicalDAGs`, containing all supported
+physical candidates, for selection. Each candidate contains:
 
 * a **precompute DAG**, whose inputs are raw-sample contracts (rows carrying
   series labels, timestamp and value; the label set is the complete series
@@ -131,8 +132,8 @@ applying an assignment are:
 * an `Ephemeral` state that feeds a retained state runs at ingestion time,
   because query-time work may not feed ingestion-time work.
 
-The lifecycle layer produces candidate `PostASAPDAG`s with timing, one for
-each admissible lifecycle assignment of a logical candidate. These are
+The lifecycle layer produces `CandidatePostASAPDAGs` with timing, containing
+one candidate for each admissible lifecycle assignment of a logical candidate. These are
 logical graphs with execution timing assigned, not a new DAG representation
 or a single selected plan. The deployment prices the assignments and selects
 among the candidates. Each required lowering is compiled once; physical compilation calls `compile` once to produce a `PhysicalDAG`, then

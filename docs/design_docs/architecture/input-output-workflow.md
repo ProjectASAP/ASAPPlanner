@@ -9,8 +9,8 @@ ASAPPlanner provides frontend lowering, logical candidate search, summary
 maintenance lifecycles, and physical compilation. Its input is a planning
 workload plus the models, evidence, and deployment capabilities required by
 the chosen workflow. The graph stages are `PreASAPDAG`, `PostASAPDAG`, and
-`PhysicalDAG`. Logical planning outputs all legal candidate `PostASAPDAG`s; compiled
-physical candidates form the execution boundary with a deployment.
+`PhysicalDAG`. Logical planning outputs `CandidatePostASAPDAGs`;
+`CandidatePhysicalDAGs` forms the execution boundary with a deployment.
 
 ### Input fields at a glance
 
@@ -30,7 +30,7 @@ fields and [frontend dependencies](#frontend-specific-dependencies).
 
 | Output | Fields or contents | Meaning |
 |---|---|---|
-| Candidate `PostASAPDAG`s | The legal candidate PostASAPDAGs for the workload, represented compactly as canonical roots, one candidate set per target sub-DAG, and cross-target composition information | The candidate space: nothing is selected yet |
+| `CandidatePostASAPDAGs` | All legal logical candidates for the workload, represented compactly as canonical roots, one candidate set per target sub-DAG, and cross-target composition information | The candidate space: nothing is selected yet |
 | `PlanOutput` | One selected PostASAPDAG root (`Rc<SummaryNode>`) per workload entry, optionally with summary-maintenance lifecycle decisions | One optimization pass's selection, returned by `e2e_plan` and `optimize` |
 
 `PlanOutput` is selected from the candidate space, not a second output beside
@@ -55,13 +55,13 @@ PlanningWorkload + frontend dependencies + planning models/evidence
          Frontends -> all candidate PreASAPDAGs
                         |
                         v
-        All candidate PostASAPDAGs
+        CandidatePostASAPDAGs
                         |
                         v
-       lifecycle assignments -> all candidate PostASAPDAGs with timing
+       lifecycle assignments -> CandidatePostASAPDAGs with timing
                         |
                         v
-       compile -> all candidate PhysicalDAGs -> all PhysicalCandidates
+       compile and cut by timing -> CandidatePhysicalDAGs
 ```
 
 ---
@@ -80,7 +80,7 @@ flowchart TD
     F["PromQL lowering"]
     R["One canonical PreASAPDAG root"]
     S["Candidate search"]
-    P["Candidate PostASAPDAGs for this root"]
+    P["CandidatePostASAPDAGs for this root"]
     I["cost_sorted: inspect choices"]
     G["global_selection + assemble_selected_dag(root)"]
     L["One selected PostASAPDAG; exact KeepPreAsap if no optimization is selected"]
@@ -116,7 +116,7 @@ flowchart LR
     C["SqlCatalog: resolves metrics and its columns"]
     F["SQL lowering"]
     R["One PreASAPDAG root"]
-    P["Candidate search → candidate PostASAPDAGs"]
+    P["Candidate search → CandidatePostASAPDAGs"]
     Q --> F
     C --> F
     F --> R --> P
@@ -124,7 +124,7 @@ flowchart LR
 
 In this SQL example, `data_workload` can be `None` if the chosen lowering and
 search rules do not consume it. The lifecycle helper is not needed merely to
-inspect the candidate PostASAPDAGs.
+inspect `CandidatePostASAPDAGs`.
 
 ---
 
@@ -325,9 +325,9 @@ Additional inputs for a Planner-owned maintenance decision are listed with the
 
 ## Output
 
-### Candidate PostASAPDAGs
+### CandidatePostASAPDAGs
 
-The logical layer outputs all legal candidate `PostASAPDAG`s. The current
+The logical layer outputs `CandidatePostASAPDAGs`. The current
 Rust API represents this collection compactly as `CandidatePostASAPDAGs<Id>`; this is an
 implementation name, not an additional design stage. It contains:
 
@@ -388,9 +388,9 @@ names do not imply that the Rust APIs have been renamed.
 | Layer | Form | Decides |
 |---|---|---|
 | 0. Frontends | All candidate `PreASAPDAG`s | Parse and lower PromQL, SQL, or MetricsQL; reject unsupported semantics such as PromQL `fill`. |
-| 1. Logical Post-ASAP | All legal candidate `PostASAPDAG`s | What to compute: summary families, rewrites, and exact candidates. No placement. `PlanOutput` is an optional library-selected logical result; deployments can enumerate candidates themselves. |
-| 2. Summary maintenance lifecycle | Lifecycle choices per unique summary state and maintained population → all admissible candidate `PostASAPDAG`s with timing | `Ephemeral`, `Prepared`, `Shared`, or `ContinuouslyMaintained`. Each admissible assignment produces a candidate with node timing, window framework, and retention; this layer is the only source of timing. |
-| 3. Physical compilation | All candidate `PhysicalDAG`s → all `PhysicalCandidates` | Compile operators and kernels once, then cut by timing into precompute and query DAGs with typed `InputContracts`. Ingestion-time Binary lowering requires matching compile-time timing. |
+| 1. Logical Post-ASAP | `CandidatePostASAPDAGs` | What to compute: summary families, rewrites, and exact candidates. No placement. `PlanOutput` is an optional library-selected logical result; deployments can enumerate candidates themselves. |
+| 2. Summary maintenance lifecycle | Lifecycle choices per unique summary state and maintained population → `CandidatePostASAPDAGs` with timing | `Ephemeral`, `Prepared`, `Shared`, or `ContinuouslyMaintained`. Each admissible assignment produces a candidate with node timing, window framework, and retention; this layer is the only source of timing. |
+| 3. Physical compilation | `CandidatePhysicalDAGs` | Compile operators and kernels once, then cut by timing into precompute and query DAGs with typed `InputContracts`. Ingestion-time Binary lowering requires matching compile-time timing. |
 | 4–5. Deployment | Deployment-owned | Prices lifecycle assignments with its own costs, including summary store cost; selects, binds, and executes. |
 
 Each layer preserves all legal candidates under the supplied constraints;
@@ -428,7 +428,7 @@ All paths start by lowering the workload and searching for candidates:
 PlanningWorkload + frontend dependencies + planning models/evidence
     -> frontend lowering: one PreASAPDAG root per normalized query entry
     -> search_workload_with_targets
-    -> all legal candidate PostASAPDAGs
+    -> CandidatePostASAPDAGs
 ```
 
 The integration associates each lowered root with a caller-owned `Id` and its
@@ -486,7 +486,7 @@ the result for one query root.
 
 | Input → decisions → output (click a step for details) |
 |:---:|
-| **Input:** [Candidate PostASAPDAGs](asap-aware-plan-search.md) + cost model |
+| **Input:** [CandidatePostASAPDAGs](asap-aware-plan-search.md) + cost model |
 | ↓ |
 | **Select:** [global_selection](../../develop_docs/library-api.md#what-does-global-selection-mean) chooses compatible candidates |
 | ↓ |
