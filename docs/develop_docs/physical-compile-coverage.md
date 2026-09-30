@@ -76,14 +76,14 @@ Totals after this change: 17 Supported, 4 Partial, 8 Missing, 2 Backend.
 
 ## Covered by PromQL fallback compilation
 
-`compile` now lowers a `Fallback{QueryExpr}` node from its typed expression.
-The expression must read at most one selector, realized with
-`promql_rows::with_series_identity`. The deployment supplies that selector's raw
-rows at `promql_fallback::raw_series_input(node)`, with the schema returned by
-`promql_fallback::raw_series`. The node's own ID still names its output, so a
-deployment may instead supply the whole result, for example from an external
-exact engine. A Fallback that reads no selector, such as `vector(1)`, needs no
-input.
+`compile` now lowers a `Fallback{QueryExpr}` node from its typed expression,
+realized with `promql_rows::with_series_identity`. The deployment supplies the
+raw rows of the `i`th selector returned by `promql_fallback::raw_series` at
+`promql_fallback::raw_series_input(node, i)`, with that selector's schema. Each
+selector has its own slot, even when two selectors read the same metric. The
+node's own ID still names its output, so a deployment may instead supply the
+whole result, for example from an external exact engine. A Fallback that reads
+no selector, such as `vector(1)`, needs no input.
 
 `Operator::series_window` evaluates each series at the query time, or at each
 subquery step, over the left-open window `(t - offset - range, t - offset]`.
@@ -104,23 +104,61 @@ and is not compiled as instant selection.
 
 Totals after this change: 19 Supported, 5 Partial, 5 Missing, 2 Backend.
 
+## Covered by multi-selector fallback compilation
+
+| Row | Change |
+|---|---|
+| 1 | Vector-vector arithmetic with one-to-one matching, `on`, and `ignoring`. Each side is reduced to its matching labels, then matched on equal label sets. A duplicate match group is an error, as in Prometheus. The result drops `__name__`. `without` aggregation. `irate`, `idelta`, `changes`, `resets`, `last_over_time`, and exact `quantile_over_time`. `@ <timestamp>` on selectors. Still Partial. |
+| 11 | The range functions above, over raw selector rows. |
+| 12 | `@ <timestamp>` on subqueries anchors the step grid. An inner selector's `@` pins every step. Still Partial. |
+
+`@` fixes the instant a window ends at, before `offset`; the output keeps the
+query's evaluation time. The raw rows must cover the window at that instant.
+Vector matching and `without` rewrite the series identity, so their results
+already lack `__name__`. Other results keep it; the query adapter still drops
+it.
+
+Totals are unchanged: 19 Supported, 5 Partial, 5 Missing, 2 Backend.
+
 ## Remaining
 
 In order of backend usage:
 
 1. Rows 1, 10, and 12, the remaining `Fallback` shapes:
-   - Subtrees with more than one selector, such as vector-vector binaries.
-   - `histogram_quantile`: the frontend emits `by ()` grouping with no
-     output labels. The IR must group `without (le)` and keep the labels.
+   - `histogram_quantile` (row 10). The compiler cannot recover the grouping
+     from today's IR, which is `Aggregate{Reduce(by ()), [HistogramQuantile{q}]}`.
+     It computes one quantile over all buckets and drops the output labels. The IR
+     must carry:
+     - The bucket label: the `le` column of the child's schema, named by the
+       intent, for example `HistogramQuantile{q, le: C}`. The frontend must
+       add `le` to the selector's schema even when no matcher names it.
+     - The grouping: `Reduce(without([le]))`, so that each histogram is
+       one set of series that differ only in `le`. An explicit
+       `sum by (x, le)` inside the argument still yields `without (le)` over
+       those rows.
+     - The output labels: every input label except `le` and `__name__`. The
+       `without` output schema already carries them, and the series identity
+       with `le` removed. `series_labels(Ignoring, [le])` computes the latter.
+     The operator then applies Prometheus `bucketQuantile`. It parses `le`
+     as a float, skips unparsable values, and requires a `+Inf` bucket, else
+     it returns NaN. It forces cumulative counts to be monotonic and returns
+     NaN for fewer than two buckets. For q < 0 it returns -Inf; for q > 1,
+     +Inf.
+   - Comparisons and set operators (`and`, `or`, `unless`); `group_left` and
+     `group_right`; arithmetic with a non-literal scalar, such as
+     `scalar(x)` or `time()`.
    - Subquery operands other than one per-series function; implicit
      subquery resolution, which is a deployment default.
-   - `@` on selectors and subqueries; `without` grouping; `irate`,
-     `changes`, and other range functions.
+   - `@ start()` and `@ end()`, which need the range query's bounds in the
+     run scope.
+   - Other functions, such as `deriv`, `predict_linear`,
+     `stddev_over_time`, `absent`, `label_replace`, and math functions.
    After these shapes are covered, the backend can delete rows 28 and 30.
 2. Row 7: comparison filters and `bool` comparisons. This needs `return_bool`
    in the `Binary` payload. `compile` currently rejects comparisons.
-3. Row 5 for per-series rows: matching needs a metric-name-free series
-   identity, not the full `$promql_series_identity`.
+3. Row 5 for per-series rows in a `Binary` payload node: its grouped-row join
+   still rejects `$promql_series_identity`. It could reuse the Fallback's
+   `series_labels` and `series_binary` operators.
 4. Rows 25 and 27: constant weights and `EntityIdentity` items for precompute
    `SummaryAgg`.
 5. Row 16: a label-map sketch-state readout, the counterpart of
