@@ -75,7 +75,7 @@
 //!
 //! - [`EvaluationRate`]: derived from [`asap_types::workload::RepeatingEntry::demand`]
 //!   values of every repeating consumer reaching a target (via
-//!   [`evaluation_rate_of`], or [`crate::replacement::CandidatePostASAPDAGs::recurrence_profiles`]
+//!   [`evaluation_rate_of`], or [`crate::replacement::CandidateLogicalPostASAPDAGs::recurrence_profiles`]
 //!   for a whole workload). A one-shot ([`asap_types::workload::BatchEntry`])
 //!   consumer contributes to [`RecurrenceProfile::one_shot_consumers`]
 //!   instead, never to this rate.
@@ -216,18 +216,18 @@ pub enum RecurrenceError {
          CostRate with a one-shot Cost without distorting the comparison"
     )]
     InvalidHorizon(Horizon),
-    /// [`crate::replacement::CandidatePostASAPDAGs::recurrence_profiles`] was called
+    /// [`crate::replacement::CandidateLogicalPostASAPDAGs::recurrence_profiles`] was called
     /// with a `root_recurrence` slice whose length doesn't match the
-    /// `CandidatePostASAPDAGs`'s own root count — a caller error, but recoverable
+    /// `CandidateLogicalPostASAPDAGs`'s own root count — a caller error, but recoverable
     /// (this method's whole signature promises a `Result`, so this is
     /// reported the same way every other input-validation failure is,
     /// never a panic).
     #[error(
         "recurrence_profiles: root_recurrence must have one entry per root, in the same order \
-         CandidatePostASAPDAGs::roots is in (got {got} entries for {expected} roots)"
+         CandidateLogicalPostASAPDAGs::roots is in (got {got} entries for {expected} roots)"
     )]
     RootCountMismatch {
-        /// `CandidatePostASAPDAGs::roots.len()`.
+        /// `CandidateLogicalPostASAPDAGs::roots.len()`.
         expected: usize,
         /// `root_recurrence.len()`.
         got: usize,
@@ -239,7 +239,7 @@ pub enum RecurrenceError {
 /// applied at every point an `UpdateRate` enters a [`RecurrenceProfile`]
 /// ([`RecurrenceProfile::with_update_rate`],
 /// [`update_rate_from_data_workload`],
-/// [`crate::replacement::CandidatePostASAPDAGs::recurrence_profiles`]'s own parameter)
+/// [`crate::replacement::CandidateLogicalPostASAPDAGs::recurrence_profiles`]'s own parameter)
 /// *and*, as a backstop that can't be bypassed by constructing a
 /// `RecurrenceProfile` via its public fields directly, inside [`decide`]
 /// itself before any comparison uses it.
@@ -373,7 +373,7 @@ impl RecurrenceProfile {
 }
 
 /// How one workload root recurs — the opaque per-root tag
-/// [`crate::replacement::CandidatePostASAPDAGs::recurrence_profiles`] threads down to
+/// [`crate::replacement::CandidateLogicalPostASAPDAGs::recurrence_profiles`] threads down to
 /// every target reachable from that root. Mirrors
 /// [`asap_types::workload::QueryWorkload`]'s own `query_batch` (one-shot)
 /// vs. `repeating_queries` (an interval each) split, but at the
@@ -1126,7 +1126,7 @@ mod tests {
         }
     }
 
-    // ── multiple roots sharing a sub-DAG, via CandidatePostASAPDAGs ──────────────────
+    // ── multiple roots sharing a sub-DAG, via CandidateLogicalPostASAPDAGs ──────────────────
 
     use crate::replacement::search_workload;
     use asap_types::pre_asap::agg_intent::AggIntent;
@@ -1186,7 +1186,7 @@ mod tests {
 
     /// Three workload roots share one underlying `sum_agg()` sub-DAG: two
     /// repeating consumers with different intervals, one one-shot batch
-    /// consumer. `CandidatePostASAPDAGs::recurrence_profiles` must aggregate all three
+    /// consumer. `CandidateLogicalPostASAPDAGs::recurrence_profiles` must aggregate all three
     /// onto the shared sub-DAG's own profile: `evaluation_rate = 1/t1 +
     /// 1/t2`, `one_shot_consumers = 1` — issue #287's "support a shared
     /// sub-DAG consumed by queries with different intervals" and "multiple

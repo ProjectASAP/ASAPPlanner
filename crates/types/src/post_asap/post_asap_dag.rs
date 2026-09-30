@@ -86,7 +86,7 @@ pub enum PostASAPOperatorPayload {
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct PostASAPDAGNode {
+pub struct LogicalPostASAPDAGNode {
     pub id: PostASAPNodeId,
     /// The payload variant is the sole operator identity (`payload.kind` in JSON).
     pub payload: PostASAPOperatorPayload,
@@ -98,7 +98,7 @@ pub struct PostASAPDAGNode {
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct PostASAPDAGEdge {
+pub struct LogicalPostASAPDAGEdge {
     pub producer: PostASAPNodeId,
     pub consumer: PostASAPNodeId,
     pub role: EdgeRole,
@@ -110,9 +110,9 @@ pub struct PostASAPDAGEdge {
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct PostASAPDAGTransport {
-    pub nodes: Vec<PostASAPDAGNode>,
-    pub edges: Vec<PostASAPDAGEdge>,
+pub struct LogicalPostASAPDAGTransport {
+    pub nodes: Vec<LogicalPostASAPDAGNode>,
+    pub edges: Vec<LogicalPostASAPDAGEdge>,
     /// Semantic workload root. Physical query/precompute sinks are selected
     /// downstream by the control plane.
     pub root: PostASAPNodeId,
@@ -123,13 +123,13 @@ pub struct PostASAPDAGTransport {
 /// Process boundaries exchange this envelope and call [`Self::validate`].
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct PostASAPDAGDocument {
+pub struct LogicalPostASAPDAGDocument {
     pub schema_version: u32,
-    pub dag: PostASAPDAGTransport,
+    pub dag: LogicalPostASAPDAGTransport,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
-pub enum PostASAPDAGValidationError {
+pub enum LogicalPostASAPDAGValidationError {
     #[error("phase assignment must name every DAG node exactly once")]
     IncompletePhaseAssignment,
     #[error("ingestion node {consumer:?} depends on query node {producer:?}")]
@@ -167,17 +167,17 @@ pub enum PostASAPDAGValidationError {
     SummaryGroupingMismatch { node: PostASAPNodeId },
 }
 
-impl PostASAPDAGDocument {
-    pub fn new(dag: PostASAPDAGTransport) -> Self {
+impl LogicalPostASAPDAGDocument {
+    pub fn new(dag: LogicalPostASAPDAGTransport) -> Self {
         Self {
             schema_version: POST_ASAP_DAG_WIRE_VERSION,
             dag,
         }
     }
 
-    pub fn validate(&self) -> Result<(), PostASAPDAGValidationError> {
+    pub fn validate(&self) -> Result<(), LogicalPostASAPDAGValidationError> {
         if self.schema_version != POST_ASAP_DAG_WIRE_VERSION {
-            return Err(PostASAPDAGValidationError::UnsupportedVersion(
+            return Err(LogicalPostASAPDAGValidationError::UnsupportedVersion(
                 self.schema_version,
             ));
         }
@@ -185,14 +185,14 @@ impl PostASAPDAGDocument {
     }
 }
 
-impl PostASAPDAGTransport {
+impl LogicalPostASAPDAGTransport {
     /// Assign execution phases without changing operator semantics. Phase choices
     /// do not prove deployment support: callers must bind concrete implementations
     /// and storage boundaries before installing this plan.
     pub fn with_execution_phases(
         &self,
         phases: &std::collections::BTreeMap<PostASAPNodeId, ExecutionTiming>,
-    ) -> Result<Self, PostASAPDAGValidationError> {
+    ) -> Result<Self, LogicalPostASAPDAGValidationError> {
         self.validate()?;
         let mut dag = self.clone();
         assign_phases(&mut dag.nodes, &mut dag.edges, phases)?;
@@ -200,15 +200,15 @@ impl PostASAPDAGTransport {
         Ok(dag)
     }
 
-    pub fn as_view(&self) -> PostASAPDAGView<'_> {
-        PostASAPDAGView {
+    pub fn as_view(&self) -> LogicalPostASAPDAGView<'_> {
+        LogicalPostASAPDAGView {
             nodes: &self.nodes,
             edges: &self.edges,
             root: self.root,
             phases: None,
         }
     }
-    pub fn validate(&self) -> Result<(), PostASAPDAGValidationError> {
+    pub fn validate(&self) -> Result<(), LogicalPostASAPDAGValidationError> {
         self.as_view().validate()
     }
 }
@@ -218,36 +218,36 @@ impl PostASAPDAGTransport {
 /// so node and edge states must be read through [`Self::timing`],
 /// [`Self::output_state`] and [`Self::edge_state`], not from the records.
 #[derive(Clone, Copy)]
-pub struct PostASAPDAGView<'a> {
-    nodes: &'a [PostASAPDAGNode],
-    edges: &'a [PostASAPDAGEdge],
+pub struct LogicalPostASAPDAGView<'a> {
+    nodes: &'a [LogicalPostASAPDAGNode],
+    edges: &'a [LogicalPostASAPDAGEdge],
     root: PostASAPNodeId,
     phases: Option<&'a std::collections::BTreeMap<PostASAPNodeId, ExecutionTiming>>,
 }
-impl<'a> PostASAPDAGView<'a> {
-    pub fn nodes(&self) -> &'a [PostASAPDAGNode] {
+impl<'a> LogicalPostASAPDAGView<'a> {
+    pub fn nodes(&self) -> &'a [LogicalPostASAPDAGNode] {
         self.nodes
     }
-    pub fn edges(&self) -> &'a [PostASAPDAGEdge] {
+    pub fn edges(&self) -> &'a [LogicalPostASAPDAGEdge] {
         self.edges
     }
     pub fn root(&self) -> PostASAPNodeId {
         self.root
     }
     /// Execution timing of `node` under this view's assignment.
-    pub fn timing(&self, node: &PostASAPDAGNode) -> ExecutionTiming {
+    pub fn timing(&self, node: &LogicalPostASAPDAGNode) -> ExecutionTiming {
         self.phases
             .and_then(|phases| phases.get(&node.id).copied())
             .unwrap_or(node.output_state.timing)
     }
-    pub fn output_state(&self, node: &PostASAPDAGNode) -> ExecutionDataState {
+    pub fn output_state(&self, node: &LogicalPostASAPDAGNode) -> ExecutionDataState {
         ExecutionDataState {
             timing: self.timing(node),
             ..node.output_state
         }
     }
     /// An assigned edge carries its producer's assigned state.
-    pub fn edge_state(&self, edge: &PostASAPDAGEdge) -> ExecutionDataState {
+    pub fn edge_state(&self, edge: &LogicalPostASAPDAGEdge) -> ExecutionDataState {
         match self.phases {
             None => edge.data_state,
             Some(phases) => ExecutionDataState {
@@ -260,13 +260,13 @@ impl<'a> PostASAPDAGView<'a> {
         }
     }
 }
-impl PostASAPDAGView<'_> {
-    pub fn validate(&self) -> Result<(), PostASAPDAGValidationError> {
+impl LogicalPostASAPDAGView<'_> {
+    pub fn validate(&self) -> Result<(), LogicalPostASAPDAGValidationError> {
         use std::collections::{HashMap, HashSet};
         let mut nodes = HashMap::new();
         for node in self.nodes {
             if nodes.insert(node.id, node).is_some() {
-                return Err(PostASAPDAGValidationError::DuplicateNodeId(node.id));
+                return Err(LogicalPostASAPDAGValidationError::DuplicateNodeId(node.id));
             }
             if let PostASAPOperatorPayload::SummaryAgg {
                 family, grouping, ..
@@ -279,48 +279,54 @@ impl PostASAPDAGView<'_> {
                     }
                     if let SummaryFamilyType::Sketch(_, schema_grouping) = &field.dtype {
                         if schema_grouping != grouping {
-                            return Err(PostASAPDAGValidationError::SummaryGroupingMismatch {
-                                node: node.id,
-                            });
+                            return Err(
+                                LogicalPostASAPDAGValidationError::SummaryGroupingMismatch {
+                                    node: node.id,
+                                },
+                            );
                         }
                     }
                 }
                 if !found_family {
-                    return Err(PostASAPDAGValidationError::SummaryFamilySchemaMismatch {
-                        node: node.id,
-                    });
+                    return Err(
+                        LogicalPostASAPDAGValidationError::SummaryFamilySchemaMismatch {
+                            node: node.id,
+                        },
+                    );
                 }
             }
         }
         if !nodes.contains_key(&self.root) {
-            return Err(PostASAPDAGValidationError::MissingRoot(self.root));
+            return Err(LogicalPostASAPDAGValidationError::MissingRoot(self.root));
         }
         let mut children: HashMap<PostASAPNodeId, Vec<PostASAPNodeId>> = HashMap::new();
         for edge in self.edges {
             let producer = nodes.get(&edge.producer).ok_or(
-                PostASAPDAGValidationError::MissingEdgeEndpoint(edge.producer),
+                LogicalPostASAPDAGValidationError::MissingEdgeEndpoint(edge.producer),
             )?;
             if !nodes.contains_key(&edge.consumer) {
-                return Err(PostASAPDAGValidationError::MissingEdgeEndpoint(
+                return Err(LogicalPostASAPDAGValidationError::MissingEdgeEndpoint(
                     edge.consumer,
                 ));
             }
             if self.timing(producer) == ExecutionTiming::QueryTime
                 && self.timing(nodes[&edge.consumer]) == ExecutionTiming::IngestionTime
             {
-                return Err(PostASAPDAGValidationError::QueryDependencyInIngestion {
-                    producer: edge.producer,
-                    consumer: edge.consumer,
-                });
+                return Err(
+                    LogicalPostASAPDAGValidationError::QueryDependencyInIngestion {
+                        producer: edge.producer,
+                        consumer: edge.consumer,
+                    },
+                );
             }
             if edge.intermediate_schema != producer.output_schema {
-                return Err(PostASAPDAGValidationError::EdgeSchemaMismatch {
+                return Err(LogicalPostASAPDAGValidationError::EdgeSchemaMismatch {
                     producer: edge.producer,
                     consumer: edge.consumer,
                 });
             }
             if self.edge_state(edge) != self.output_state(producer) {
-                return Err(PostASAPDAGValidationError::EdgeDataStateMismatch {
+                return Err(LogicalPostASAPDAGValidationError::EdgeDataStateMismatch {
                     producer: edge.producer,
                     consumer: edge.consumer,
                 });
@@ -360,7 +366,7 @@ impl PostASAPDAGView<'_> {
             &mut HashSet::new(),
             &mut HashSet::new(),
         ) {
-            return Err(PostASAPDAGValidationError::Cycle);
+            return Err(LogicalPostASAPDAGValidationError::Cycle);
         }
         let mut reachable = HashSet::new();
         fn mark(
@@ -377,7 +383,7 @@ impl PostASAPDAGView<'_> {
         }
         mark(self.root, &children, &mut reachable);
         if let Some(id) = nodes.keys().find(|id| !reachable.contains(id)) {
-            return Err(PostASAPDAGValidationError::UnreachableNode(*id));
+            return Err(LogicalPostASAPDAGValidationError::UnreachableNode(*id));
         }
         Ok(())
     }
@@ -386,22 +392,22 @@ impl PostASAPDAGView<'_> {
 /// Lifecycle-assigned timing over one indexed shared logical graph.
 /// Cloning an assignment shares the graph and its index; it copies no operators.
 #[derive(Debug, Clone)]
-pub struct PostASAPDAGAssignment {
-    index: Rc<PostASAPDAGIndex>,
+pub struct LogicalPostASAPDAGAssignment {
+    index: Rc<LogicalPostASAPDAGIndex>,
     phases: std::collections::BTreeMap<PostASAPNodeId, ExecutionTiming>,
 }
-impl PostASAPDAGAssignment {
-    pub fn index(&self) -> &Rc<PostASAPDAGIndex> {
+impl LogicalPostASAPDAGAssignment {
+    pub fn index(&self) -> &Rc<LogicalPostASAPDAGIndex> {
         &self.index
     }
     pub fn new(
-        index: Rc<PostASAPDAGIndex>,
+        index: Rc<LogicalPostASAPDAGIndex>,
         phases: std::collections::BTreeMap<PostASAPNodeId, ExecutionTiming>,
-    ) -> Result<Self, PostASAPDAGValidationError> {
+    ) -> Result<Self, LogicalPostASAPDAGValidationError> {
         if phases.len() != index.nodes.len()
             || index.nodes.iter().any(|n| !phases.contains_key(&n.id))
         {
-            return Err(PostASAPDAGValidationError::IncompletePhaseAssignment);
+            return Err(LogicalPostASAPDAGValidationError::IncompletePhaseAssignment);
         }
         let result = Self { index, phases };
         result.view().validate()?;
@@ -411,19 +417,19 @@ impl PostASAPDAGAssignment {
         &self.phases
     }
     /// The shared index's records with this assignment's timing overlaid.
-    pub fn view(&self) -> PostASAPDAGView<'_> {
-        PostASAPDAGView {
+    pub fn view(&self) -> LogicalPostASAPDAGView<'_> {
+        LogicalPostASAPDAGView {
             phases: Some(&self.phases),
             ..self.index.view()
         }
     }
-    pub fn to_transport(&self) -> PostASAPDAGTransport {
+    pub fn to_transport(&self) -> LogicalPostASAPDAGTransport {
         let view = self.view();
-        PostASAPDAGTransport {
+        LogicalPostASAPDAGTransport {
             nodes: view
                 .nodes
                 .iter()
-                .map(|node| PostASAPDAGNode {
+                .map(|node| LogicalPostASAPDAGNode {
                     output_state: view.output_state(node),
                     ..node.clone()
                 })
@@ -431,7 +437,7 @@ impl PostASAPDAGAssignment {
             edges: view
                 .edges
                 .iter()
-                .map(|edge| PostASAPDAGEdge {
+                .map(|edge| LogicalPostASAPDAGEdge {
                     data_state: view.edge_state(edge),
                     ..edge.clone()
                 })
@@ -442,24 +448,21 @@ impl PostASAPDAGAssignment {
 }
 
 fn assign_phases(
-    nodes: &mut [PostASAPDAGNode],
-    edges: &mut [PostASAPDAGEdge],
+    nodes: &mut [LogicalPostASAPDAGNode],
+    edges: &mut [LogicalPostASAPDAGEdge],
     phases: &std::collections::BTreeMap<PostASAPNodeId, ExecutionTiming>,
-) -> Result<(), PostASAPDAGValidationError> {
+) -> Result<(), LogicalPostASAPDAGValidationError> {
     if phases.len() != nodes.len() || nodes.iter().any(|n| !phases.contains_key(&n.id)) {
-        return Err(PostASAPDAGValidationError::IncompletePhaseAssignment);
+        return Err(LogicalPostASAPDAGValidationError::IncompletePhaseAssignment);
     }
     for node in nodes.iter_mut() {
         node.output_state.timing = phases[&node.id];
     }
     let states: HashMap<_, _> = nodes.iter().map(|n| (n.id, n.output_state)).collect();
     for edge in edges {
-        edge.data_state =
-            *states
-                .get(&edge.producer)
-                .ok_or(PostASAPDAGValidationError::MissingEdgeEndpoint(
-                    edge.producer,
-                ))?;
+        edge.data_state = *states.get(&edge.producer).ok_or(
+            LogicalPostASAPDAGValidationError::MissingEdgeEndpoint(edge.producer),
+        )?;
     }
     Ok(())
 }
@@ -487,7 +490,7 @@ impl PostASAPNodeIdentityMap {
 
 pub fn export_post_asap_dag(
     root: &Rc<PostASAPNode>,
-) -> Result<PostASAPDAGTransport, ExecutionDataStateError> {
+) -> Result<LogicalPostASAPDAGTransport, ExecutionDataStateError> {
     let dag = index_post_asap_dag(root)?.to_transport();
     dag.validate()
         .expect("compiler emits a valid post-ASAP DAG");
@@ -498,31 +501,31 @@ pub fn export_post_asap_dag(
 /// plus node and edge records projected once for compilation and transport.
 /// Lifecycle assignments overlay timing on these records without copying them.
 #[derive(Debug, Clone)]
-pub struct PostASAPDAGIndex {
+pub struct LogicalPostASAPDAGIndex {
     pub root_id: PostASAPNodeId,
     pub node_ids: PostASAPNodeIdentityMap,
-    nodes: Vec<PostASAPDAGNode>,
-    edges: Vec<PostASAPDAGEdge>,
+    nodes: Vec<LogicalPostASAPDAGNode>,
+    edges: Vec<LogicalPostASAPDAGEdge>,
 }
 
-impl PostASAPDAGIndex {
+impl LogicalPostASAPDAGIndex {
     /// Node records in ID order, with the logical graph's own timing.
-    pub fn node_views(&self) -> &[PostASAPDAGNode] {
+    pub fn node_views(&self) -> &[LogicalPostASAPDAGNode] {
         &self.nodes
     }
-    pub fn edges(&self) -> &[PostASAPDAGEdge] {
+    pub fn edges(&self) -> &[LogicalPostASAPDAGEdge] {
         &self.edges
     }
-    pub fn view(&self) -> PostASAPDAGView<'_> {
-        PostASAPDAGView {
+    pub fn view(&self) -> LogicalPostASAPDAGView<'_> {
+        LogicalPostASAPDAGView {
             nodes: &self.nodes,
             edges: &self.edges,
             root: self.root_id,
             phases: None,
         }
     }
-    pub fn to_transport(&self) -> PostASAPDAGTransport {
-        PostASAPDAGTransport {
+    pub fn to_transport(&self) -> LogicalPostASAPDAGTransport {
+        LogicalPostASAPDAGTransport {
             nodes: self.nodes.clone(),
             edges: self.edges.clone(),
             root: self.root_id,
@@ -534,7 +537,7 @@ fn project_node(
     id: PostASAPNodeId,
     node: &PostASAPNode,
     state: ExecutionDataState,
-) -> PostASAPDAGNode {
+) -> LogicalPostASAPDAGNode {
     let payload = match &node.expr {
         SummaryExpr::KeepPreAsap(expression) => PostASAPOperatorPayload::Fallback {
             expression: (**expression).clone(),
@@ -581,7 +584,7 @@ fn project_node(
         },
         SummaryExpr::SummaryMerge { .. } => PostASAPOperatorPayload::SummaryMerge,
     };
-    PostASAPDAGNode {
+    LogicalPostASAPDAGNode {
         id,
         payload,
         output_state: state,
@@ -592,8 +595,8 @@ fn project_node(
 
 /// Assign stable postorder IDs once without copying the logical operators.
 pub fn index_post_asap_dag(
-    root: &super::PostASAPDAG,
-) -> Result<PostASAPDAGIndex, ExecutionDataStateError> {
+    root: &super::LogicalPostASAPDAG,
+) -> Result<LogicalPostASAPDAGIndex, ExecutionDataStateError> {
     let assignment = validate_execution_data_states(root)?;
     let mut edges = Vec::new();
     let mut ids = HashMap::new();
@@ -604,7 +607,7 @@ pub fn index_post_asap_dag(
         assignment: &super::ExecutionDataStateAssignment,
         ids: &mut HashMap<*const PostASAPNode, PostASAPNodeId>,
         nodes: &mut Vec<Rc<PostASAPNode>>,
-        edges: &mut Vec<PostASAPDAGEdge>,
+        edges: &mut Vec<LogicalPostASAPDAGEdge>,
     ) -> PostASAPNodeId {
         if let Some(id) = ids.get(&Rc::as_ptr(node)) {
             return *id;
@@ -694,7 +697,7 @@ pub fn index_post_asap_dag(
                 }
                 _ => GroupingEdgeCompatibility::NotApplicable,
             };
-            edges.push(PostASAPDAGEdge {
+            edges.push(LogicalPostASAPDAGEdge {
                 producer,
                 consumer: id,
                 role,
@@ -731,7 +734,7 @@ pub fn index_post_asap_dag(
             )
         })
         .collect();
-    Ok(PostASAPDAGIndex {
+    Ok(LogicalPostASAPDAGIndex {
         root_id: root,
         node_ids: PostASAPNodeIdentityMap { nodes_by_id: nodes },
         nodes: projected,
@@ -813,10 +816,10 @@ mod tests {
                 | PostASAPOperatorPayload::SummaryDelete { .. }
                 | PostASAPOperatorPayload::SummaryMerge => DataPrimitive::SummaryState,
             };
-            let dag = PostASAPDAGTransport {
+            let dag = LogicalPostASAPDAGTransport {
                 root: PostASAPNodeId(0),
                 edges: vec![],
-                nodes: vec![PostASAPDAGNode {
+                nodes: vec![LogicalPostASAPDAGNode {
                     id: PostASAPNodeId(0),
                     payload: payload.clone(),
                     output_state: ExecutionDataState {
@@ -843,7 +846,7 @@ mod tests {
                 let wire = serde_json::to_value(&placed).unwrap();
                 assert!(wire["nodes"][0]["payload"].get("timing").is_none());
                 assert_eq!(
-                    serde_json::from_value::<PostASAPDAGTransport>(wire).unwrap(),
+                    serde_json::from_value::<LogicalPostASAPDAGTransport>(wire).unwrap(),
                     placed
                 );
             }
@@ -860,7 +863,7 @@ mod tests {
         };
         let nodes = [0, 1]
             .into_iter()
-            .map(|id| PostASAPDAGNode {
+            .map(|id| LogicalPostASAPDAGNode {
                 id: PostASAPNodeId(id),
                 payload: PostASAPOperatorPayload::Fallback {
                     expression: PreASAPNode::Literal(ScalarValue::Int64(1)),
@@ -870,10 +873,10 @@ mod tests {
                 guarantee: None,
             })
             .collect();
-        let dag = PostASAPDAGTransport {
+        let dag = LogicalPostASAPDAGTransport {
             nodes,
             root: PostASAPNodeId(1),
-            edges: vec![PostASAPDAGEdge {
+            edges: vec![LogicalPostASAPDAGEdge {
                 producer: PostASAPNodeId(0),
                 consumer: PostASAPNodeId(1),
                 role: EdgeRole::Input,
@@ -899,7 +902,7 @@ mod tests {
                 (PostASAPNodeId(0), ExecutionTiming::QueryTime),
                 (PostASAPNodeId(1), ExecutionTiming::IngestionTime),
             ])),
-            Err(PostASAPDAGValidationError::QueryDependencyInIngestion { .. })
+            Err(LogicalPostASAPDAGValidationError::QueryDependencyInIngestion { .. })
         ));
     }
 
@@ -994,14 +997,14 @@ mod tests {
             SummaryFamilyType::ExactAggregate(ExactKind::Sum, _)
         ));
         let encoded = serde_json::to_string(&dag).expect("serialize post-ASAP DAG");
-        let decoded: PostASAPDAGTransport =
+        let decoded: LogicalPostASAPDAGTransport =
             serde_json::from_str(&encoded).expect("deserialize post-ASAP DAG");
         assert_eq!(decoded, dag);
-        let document = PostASAPDAGDocument::new(decoded);
+        let document = LogicalPostASAPDAGDocument::new(decoded);
         document.validate().unwrap();
         let mut invalid = serde_json::to_value(&document).unwrap();
         invalid["dag"]["nodes"][0]["operator"] = serde_json::json!("Binary");
-        assert!(serde_json::from_value::<PostASAPDAGDocument>(invalid).is_err());
+        assert!(serde_json::from_value::<LogicalPostASAPDAGDocument>(invalid).is_err());
         assert!(document.dag.nodes.iter().all(|node| {
             let wire = serde_json::to_value(node).unwrap();
             wire.get("operator").is_none() && wire["payload"]["kind"].is_string()
@@ -1010,11 +1013,11 @@ mod tests {
         old_version.schema_version = 1;
         assert_eq!(
             old_version.validate(),
-            Err(PostASAPDAGValidationError::UnsupportedVersion(1))
+            Err(LogicalPostASAPDAGValidationError::UnsupportedVersion(1))
         );
         let mut unknown = serde_json::to_value(&document).unwrap();
         unknown["unexpected"] = serde_json::json!(true);
-        assert!(serde_json::from_value::<PostASAPDAGDocument>(unknown).is_err());
+        assert!(serde_json::from_value::<LogicalPostASAPDAGDocument>(unknown).is_err());
         assert!(matches!(
             dag.nodes[2].payload,
             PostASAPOperatorPayload::SummaryAgg {
@@ -1032,7 +1035,7 @@ mod tests {
             .iter()
             .map(|n| (n.id, ExecutionTiming::QueryTime))
             .collect();
-        let assignment = PostASAPDAGAssignment::new(index.clone(), phases.clone()).unwrap();
+        let assignment = LogicalPostASAPDAGAssignment::new(index.clone(), phases.clone()).unwrap();
         let summary = &index.node_views()[1];
         assert_eq!(index.view().timing(summary), ExecutionTiming::IngestionTime);
         assert_eq!(

@@ -77,7 +77,7 @@ trait AccuracyModel {
 approximate layers. Every candidate must then be resized, propagated, and
 checked before being treated as satisfying the target. This is distinct from
 candidate visibility: direct DDSketch ratios lacking domain evidence remain in
-`CandidatePostASAPDAGs` with `guarantee: None` and can appear in `cost_sorted`, but automatic
+`CandidateLogicalPostASAPDAGs` with `guarantee: None` and can appear in `cost_sorted`, but automatic
 `global_selection` skips them. Presence and cost are not accuracy certification.
 See the [workflow design](../design_docs/architecture/input-output-workflow.md#planning-evidence-inputs)
 for this boundary.

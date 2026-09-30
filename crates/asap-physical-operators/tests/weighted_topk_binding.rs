@@ -395,7 +395,7 @@ fn check_direct_rate_topk(dynamic: bool) {
         .unwrap();
         let bytes = serde_json::to_vec(&raw_compiled).unwrap();
         let raw_compiled = serde_json::from_slice::<
-            asap_physical_operators::physical_planner::PhysicalDAG,
+            asap_physical_operators::physical_planner::PhysicalPostASAPDAG,
         >(&bytes)
         .unwrap();
         // Each evaluation receives a complete raw window. A reset, a stopped
@@ -758,7 +758,7 @@ fn spatial_topk_exposes_signed_heap_candidate_over_complete_snapshot() {
 
 /// Deployment-side lifecycle choice: every summary state of `candidate` is
 /// continuously maintained, and the chosen lifecycles set execution timing.
-fn continuously_maintained_dag(candidate: &Rc<PostASAPNode>) -> PostASAPDAGTransport {
+fn continuously_maintained_dag(candidate: &Rc<PostASAPNode>) -> LogicalPostASAPDAGTransport {
     use asap_aware_mapping::{
         cost_model::{Cost, CostModel},
         CostRate, Horizon, SummaryMaintenanceCapabilities, SummaryMaintenanceLifecycleCapabilities,
@@ -926,7 +926,7 @@ fn maintained_rate_heap_lifecycle_compiles_fixed_window_precompute() {
         );
         // Execute the selected split across a state serialization boundary.
         // Each run builds fresh weights from that window's counters.
-        let execute = |plan: &asap_physical_operators::physical_planner::PhysicalDAG,
+        let execute = |plan: &asap_physical_operators::physical_planner::PhysicalPostASAPDAG,
                        input: Batch,
                        scope: Scope| {
             let id = plan.input_contracts().next().unwrap().0;

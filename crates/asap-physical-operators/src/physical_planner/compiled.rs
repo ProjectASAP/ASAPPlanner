@@ -38,7 +38,7 @@ enum Node {
 /// Deserialization validates the graph before it is usable.
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 #[serde(try_from = "UncheckedDag")]
-pub struct PhysicalDAG {
+pub struct PhysicalPostASAPDAG {
     nodes: BTreeMap<NodeId, Node>,
     roots: Vec<NodeId>,
 }
@@ -48,7 +48,7 @@ struct UncheckedDag {
     nodes: BTreeMap<NodeId, Node>,
     roots: Vec<NodeId>,
 }
-impl TryFrom<UncheckedDag> for PhysicalDAG {
+impl TryFrom<UncheckedDag> for PhysicalPostASAPDAG {
     type Error = Error;
     fn try_from(dag: UncheckedDag) -> Result<Self, Error> {
         let result = Self {
@@ -60,7 +60,7 @@ impl TryFrom<UncheckedDag> for PhysicalDAG {
     }
 }
 
-impl PhysicalDAG {
+impl PhysicalPostASAPDAG {
     /// Link already-selected physical fragments without lowering operators again.
     /// Fragment keys and source keys share a namespace; repeated dependency IDs
     /// therefore remain one producer in the composed graph.

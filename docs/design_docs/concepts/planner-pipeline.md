@@ -1,6 +1,6 @@
 # Planner pipeline
 
-ASAPPlanner accepts a planning workload and produces `CandidatePostASAPDAGs`, a compact
+ASAPPlanner accepts a planning workload and produces `CandidateLogicalPostASAPDAGs`, a compact
 representation of candidate Post-ASAP DAGs. Ranking and selection are operations
 over that output, not mandatory stages of candidate search.
 
@@ -10,7 +10,7 @@ over that output, not mandatory stages of candidate search.
     Pre-ASAP IR: exact, language-independent query intent
             | enumerate legal summary-aware alternatives
             v
-    CandidatePostASAPDAGs: candidate Post-ASAP DAGs
+    CandidateLogicalPostASAPDAGs: candidate Post-ASAP DAGs
             |
             +--> inspect candidates, optionally using cost_sorted
             +--> select and assemble logical DAGs

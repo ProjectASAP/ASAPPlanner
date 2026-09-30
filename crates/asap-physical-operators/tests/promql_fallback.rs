@@ -3,7 +3,7 @@
 //! hand-computed with Prometheus semantics.
 use asap_physical_operators::{
     operators::Operator,
-    physical_planner::{compile, promql_fallback, promql_rows, InputContract, PhysicalDAG},
+    physical_planner::{compile, promql_fallback, promql_rows, InputContract, PhysicalPostASAPDAG},
     runtime::{Limits, RunContext, Scope},
     values::{Batch, Value},
 };
@@ -56,7 +56,7 @@ fn lower(query: &str) -> PreASAPNode {
 }
 
 /// The whole query retained as one pre-ASAP node.
-fn fallback_dag(expression: PreASAPNode) -> PostASAPDAGTransport {
+fn fallback_dag(expression: PreASAPNode) -> LogicalPostASAPDAGTransport {
     let schema = lift_plain(&expression.output_schema().unwrap());
     export_post_asap_dag(&Rc::new(PostASAPNode {
         expr: SummaryExpr::KeepPreAsap(Rc::new(expression)),
@@ -95,7 +95,7 @@ fn metric(selector: &PreASAPNode) -> String {
     }
 }
 
-fn compile_query(query: &str) -> Result<PhysicalDAG, String> {
+fn compile_query(query: &str) -> Result<PhysicalPostASAPDAG, String> {
     let expression = lower(query);
     compile_dag(&expression, &fallback_dag(expression.clone()))
 }
@@ -103,8 +103,8 @@ fn compile_query(query: &str) -> Result<PhysicalDAG, String> {
 /// Compile a DAG whose root is the Fallback computing `expression`.
 fn compile_dag(
     expression: &PreASAPNode,
-    dag: &PostASAPDAGTransport,
-) -> Result<PhysicalDAG, String> {
+    dag: &LogicalPostASAPDAGTransport,
+) -> Result<PhysicalPostASAPDAG, String> {
     let root = u64::from(dag.root.0);
     let inputs = promql_fallback::raw_series(expression)
         .map_err(|e| e.to_string())?
@@ -136,7 +136,7 @@ fn evaluate(
 #[allow(clippy::type_complexity)]
 fn evaluate_dag(
     expression: &PreASAPNode,
-    dag: &PostASAPDAGTransport,
+    dag: &LogicalPostASAPDAGTransport,
     metrics: &[(&str, &[Sample])],
     at: i64,
 ) -> Result<Vec<(BTreeMap<String, String>, i64, f64)>, String> {
@@ -146,7 +146,7 @@ fn evaluate_dag(
 #[allow(clippy::type_complexity)]
 fn evaluate_dag_with_range(
     expression: &PreASAPNode,
-    dag: &PostASAPDAGTransport,
+    dag: &LogicalPostASAPDAGTransport,
     metrics: &[(&str, &[Sample])],
     at: i64,
     bounds: Option<(i64, i64)>,
@@ -453,14 +453,14 @@ fn raw_series_contract_is_explicit() {
     // turned into instant selection.
     let selector = lower("m");
     let schema = lift_plain(&selector.output_schema().unwrap());
-    let node = |id, payload| PostASAPDAGNode {
+    let node = |id, payload| LogicalPostASAPDAGNode {
         id: PostASAPNodeId(id),
         payload,
         output_state: ExecutionDataState::QUERY_ROWS,
         output_schema: schema.clone(),
         guarantee: None,
     };
-    let consumed = PostASAPDAGTransport {
+    let consumed = LogicalPostASAPDAGTransport {
         nodes: vec![
             node(
                 0,
@@ -479,7 +479,7 @@ fn raw_series_contract_is_explicit() {
                 },
             ),
         ],
-        edges: vec![PostASAPDAGEdge {
+        edges: vec![LogicalPostASAPDAGEdge {
             producer: PostASAPNodeId(0),
             consumer: PostASAPNodeId(1),
             role: EdgeRole::Input,

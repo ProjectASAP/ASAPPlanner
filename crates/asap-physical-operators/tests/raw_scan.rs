@@ -53,15 +53,19 @@ fn fixture() -> (PreASAPNode, Schema, Vec<Batch>) {
     ];
     (scan, output, batches)
 }
-fn plan(scan: PreASAPNode, schema: &Schema, state: ExecutionDataState) -> PostASAPDAGTransport {
-    let node = |id, payload| PostASAPDAGNode {
+fn plan(
+    scan: PreASAPNode,
+    schema: &Schema,
+    state: ExecutionDataState,
+) -> LogicalPostASAPDAGTransport {
+    let node = |id, payload| LogicalPostASAPDAGNode {
         id: PostASAPNodeId(id),
         payload,
         output_state: state,
         output_schema: (**schema).clone(),
         guarantee: None,
     };
-    let edge = |producer, consumer| PostASAPDAGEdge {
+    let edge = |producer, consumer| LogicalPostASAPDAGEdge {
         producer: PostASAPNodeId(producer),
         consumer: PostASAPNodeId(consumer),
         role: EdgeRole::Input,
@@ -70,7 +74,7 @@ fn plan(scan: PreASAPNode, schema: &Schema, state: ExecutionDataState) -> PostAS
         grouping: GroupingEdgeCompatibility::NotApplicable,
         window: WindowEdgeCompatibility::NotApplicable,
     };
-    PostASAPDAGTransport {
+    LogicalPostASAPDAGTransport {
         nodes: vec![
             node(0, PostASAPOperatorPayload::Fallback { expression: scan }),
             node(

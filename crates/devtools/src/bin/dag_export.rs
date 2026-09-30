@@ -22,7 +22,7 @@
 // additionally runs `asap_aware_mapping::replacement::search_workload` (this
 // binary took no strategies of its own — `default_strategies()` already
 // includes `AvgToSumOverCountStrategy` as of #282) over every lowered query
-// and ranks each discovered `TargetSubDAGCandidates` via `CandidatePostASAPDAGs::cost_sorted`. The
+// and ranks each discovered `TargetSubDAGCandidates` via `CandidateLogicalPostASAPDAGs::cost_sorted`. The
 // best-ranked
 // candidate per group feeds two additive outputs:
 //
@@ -1158,7 +1158,7 @@ fn assign_workload_node_ids(graphs: &mut [&mut DagGraph]) {
 /// `default_strategies()` — which includes `AvgToSumOverCountStrategy` as of
 /// #282 — is exactly the strategy set this binary wants; no custom list
 /// needed) over every lowered query, rank each discovered `TargetSubDAGCandidates` via
-/// `CandidatePostASAPDAGs::global_selection`, and build both `--post-asap` outputs from the
+/// `CandidateLogicalPostASAPDAGs::global_selection`, and build both `--post-asap` outputs from the
 /// exact same set of winning candidates (see [`Winner`]), so the flat
 /// `replacements` list and the merged `post_graph` can never disagree about
 /// which candidate won for a given target.

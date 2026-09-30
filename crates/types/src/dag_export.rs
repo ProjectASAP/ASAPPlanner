@@ -613,7 +613,7 @@ fn build_summary(node: &PostASAPNode, nodes: &mut Vec<SummaryDagNode>) -> u32 {
 
 /// One replacement site a higher layer (the `dag_export` binary) found by
 /// running `asap_aware_mapping::replacement::search_workload_with` +
-/// `CandidatePostASAPDAGs::cost_sorted` and picking the best-ranked candidate for one
+/// `CandidateLogicalPostASAPDAGs::cost_sorted` and picking the best-ranked candidate for one
 /// `TargetSubDAGCandidates` — `asap_types` never runs that search itself (same layering
 /// rule as [`DagNote`]: this crate defines the shape, a higher crate
 /// populates it).
@@ -640,7 +640,7 @@ pub struct TargetReplacement {
     /// not re-derived here).
     pub rationale: String,
     /// This candidate's rank among its `TargetSubDAGCandidates`'s alternatives after
-    /// `CandidatePostASAPDAGs::cost_sorted` (`0` = best). Exposed so a renderer can show
+    /// `CandidateLogicalPostASAPDAGs::cost_sorted` (`0` = best). Exposed so a renderer can show
     /// "this was the best of N candidates" without re-deriving the ranking.
     pub rank: usize,
     /// This candidate's own estimated cost, straight off
@@ -712,7 +712,7 @@ pub fn export(expr: &PreASAPNode) -> DagGraph {
 /// merged post-ASAP graph via [`export_post_asap`] — see that function's own
 /// doc for the full design. `asap_types` has no opinion on *how* this is
 /// decided (that's `asap_aware_mapping::replacement::search_workload_with` +
-/// `CandidatePostASAPDAGs::cost_sorted`'s job, a higher layer, exactly the layering rule
+/// `CandidateLogicalPostASAPDAGs::cost_sorted`'s job, a higher layer, exactly the layering rule
 /// [`DagNode::notes`] already states); it only defines the shape a decision
 /// comes back in.
 #[derive(Debug, Clone)]
@@ -750,7 +750,7 @@ pub enum PostASAPSubstitution {
 ///
 /// `find_winner` is the whole layering seam: `asap_types` never runs
 /// `asap_aware_mapping::replacement::search_workload_with` or
-/// `CandidatePostASAPDAGs::cost_sorted` itself, and has no idea what a `TargetSubDAGCandidates` or a
+/// `CandidateLogicalPostASAPDAGs::cost_sorted` itself, and has no idea what a `TargetSubDAGCandidates` or a
 /// `ReplacementProvenance` is — it only asks, for one node at a time, "did a
 /// higher layer already decide something for you?" A caller (e.g. the
 /// `dag_export` devtools binary) builds this closure once per workload

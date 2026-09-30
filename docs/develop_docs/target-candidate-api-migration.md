@@ -6,8 +6,8 @@ are unchanged. #453 separately defines the integration API surface.
 
 | Previous name | New name | Meaning |
 |---|---|---|
-| `CandidatePostASAPDAGs::groups()` | `CandidatePostASAPDAGs::target_subdag_candidates()` | Iterate candidate sets, one per target, in discovery order |
-| `CandidatePostASAPDAGs::group_for(target)` | `CandidatePostASAPDAGs::candidates_for_target(target)` | Look up one target's candidate set |
+| `CandidateLogicalPostASAPDAGs::groups()` | `CandidateLogicalPostASAPDAGs::target_subdag_candidates()` | Iterate candidate sets, one per target, in discovery order |
+| `CandidateLogicalPostASAPDAGs::group_for(target)` | `CandidateLogicalPostASAPDAGs::candidates_for_target(target)` | Look up one target's candidate set |
 | `SelectedGroup` | `TargetSubDAGSelection` | Selected choice and usage information for one target; the choice may be absent |
 | `GlobalSelection::groups()` | `GlobalSelection::target_selections()` | Iterate decisions, not alternative sets |
 | `MaterializeSummaryMaintenanceLifecycleError` | `SummaryMaintenanceLifecycleAssemblyError` | Failure assembling a DAG or deriving maintenance decisions |

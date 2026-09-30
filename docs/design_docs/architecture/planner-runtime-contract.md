@@ -2,7 +2,7 @@
 
 ## Purpose
 
-ASAPPlanner produces `CandidatePostASAPDAGs`, a compact logical candidate space.
+ASAPPlanner produces `CandidateLogicalPostASAPDAGs`, a compact logical candidate space.
 Selection is a Planner function that uses the deployment's cost model; Planner's
 helpers select and assemble DAGs. Summary-maintenance lifecycle decisions belong to Planner only when the
 integration uses its lifecycle-aware workflow; physical deployment and execution
@@ -76,7 +76,7 @@ and rollback are not an end-to-end Planner protocol.
    source coverage, input/output edges, operation counts, update and bootstrap
    fanout, retained state, CPU, memory, I/O, and accuracy facts.
 4. ASAPPlanner keeps constructible candidates with missing evidence visible
-   in `CandidatePostASAPDAGs` but does not certify unknown accuracy. The
+   in `CandidateLogicalPostASAPDAGs` but does not certify unknown accuracy. The
    summary-maintenance-lifecycle-aware workflow compares supported alternatives
    over the same workload horizon. Missing or incomparable costs do not establish
    that maintaining a summary beats raw recomputation; structural scores and
@@ -136,7 +136,7 @@ in one cost formula.
   execution.
 - A selected realization framework is a contract, not executor code.
 - Physical capabilities and evidence constrain deployment choices, not every
-  logical candidate's presence in `CandidatePostASAPDAGs`. Known unsupported capabilities
+  logical candidate's presence in `CandidateLogicalPostASAPDAGs`. Known unsupported capabilities
   and unknown algorithms cannot become deployable alternatives.
 - Complete physical alternatives need identity and comparable evidence for
   cost-based deployment decisions. Stale evidence cannot certify or cost a

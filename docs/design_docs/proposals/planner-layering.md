@@ -26,7 +26,7 @@ never re-derives the computation, and keeps no operators of its own.
 │ Logical planning (what)                                          │
 │ 1. Logical optimization                                          │
 │    Summary families, rewrites, exact candidates                  │
-│    -> CandidatePostASAPDAGs                                      │
+│    -> CandidateLogicalPostASAPDAGs                               │
 │                      │                                           │
 │ Physical planning (how)                                          │
 │ 2. Summary lifecycle planning                                    │
@@ -36,13 +36,13 @@ never re-derives the computation, and keeps no operators of its own.
 │                      │                                           │
 │ 3. Compilation                                                   │
 │    Lower each node to operators; cut by timing                   │
-│    -> CandidatePhysicalDAGs                                      │
+│    -> CandidatePhysicalPostASAPDAGs                              │
 │                      │                                           │
 │ 4. Selection                                                     │
 │    Cost every candidate with the deployment's cost model;        │
 │    choose the cheapest admissible one for the workload.          │
 └──────────────────────┬───────────────────────────────────────────┘
-          one optimal PhysicalDAG (the boundary)
+          one optimal PhysicalPostASAPDAG (the boundary)
 ┌──────────────────────┴──────── Deployment ───────────────────────┐
 │ 5. Execution: ingest, panes, storage, readout, run               │
 └──────────────────────────────────────────────────────────────────┘
@@ -59,7 +59,7 @@ or infeasible candidates are rejected with reasons, not silently dropped.
 Each stage adds decisions to the DAG it receives. The table shows which
 decisions each DAG carries.
 
-| | `PreASAPDAG` | `PostASAPDAG` | `LifecyclePostASAPDAG` | `PhysicalDAG` |
+| | `PreASAPDAG` | `LogicalPostASAPDAG` | `LifecyclePostASAPDAG` | `PhysicalPostASAPDAG` |
 |---|---|---|---|---|
 | Produced by | 0. Frontends | 1. Logical optimization | 2. Summary lifecycle planning | 3. Compilation; 4. selects one |
 | Node | Query operation | Logical operation, including summary operations | Same, plus annotations | Physical operator |
@@ -76,13 +76,13 @@ Name mapping to code:
 | Design name | Current main | Target API (open PRs #508, #480) |
 |---|---|---|
 | `PreASAPDAG` | `Rc<QueryExpr>` | `PreASAPDAG` |
-| `PostASAPDAG` | `Rc<SummaryNode>` tree; exported as `PostAsapDag` | `PostASAPDAG` |
+| `LogicalPostASAPDAG` | `Rc<SummaryNode>` tree; exported as `PostAsapDag` | `LogicalPostASAPDAG` |
 | `LifecyclePostASAPDAG` | `SummaryMaintenanceLifecyclePlan`, one selected assignment beside the DAG | `LifecyclePostASAPDAG`; `SummaryMaintenanceLifecyclePlan` is merged into it |
-| `PhysicalDAG` | None | `PhysicalDAG` |
+| `PhysicalPostASAPDAG` | None | `PhysicalPostASAPDAG` |
 | `CandidatePreASAPDAGs` | None; one `QueryExpr` root per entry | `CandidatePreASAPDAGs` |
-| `CandidatePostASAPDAGs` | `PlanSpace` | `CandidatePostASAPDAGs` |
+| `CandidateLogicalPostASAPDAGs` | `PlanSpace` | `CandidateLogicalPostASAPDAGs` |
 | `CandidateLifecyclePostASAPDAGs` | None | `CandidateLifecyclePostASAPDAGs` |
-| `CandidatePhysicalDAGs` | None | `CandidatePhysicalDAGs` |
+| `CandidatePhysicalPostASAPDAGs` | None | `CandidatePhysicalPostASAPDAGs` |
 
 **Post-ASAP DAG to lifecycle DAG.** A summary state's *lifecycle*
 (`Ephemeral`, `Prepared`, `Shared`, `ContinuouslyMaintained`) fixes several
@@ -119,9 +119,9 @@ operator-flattening proposal ([operator sharing](operator-sharing.md), #469,
 #481). Operator materialization (sort, aggregation, summary build) and
 computing a shared subexpression once are compilation and runtime details.
 
-Binding runtime sources is an execution step of a `PhysicalDAG`, not another
-DAG: the deployment supplies a source for each typed input slot, the slots are
-checked against their contracts, and the graph runs.
+Binding runtime sources is an execution step of a `PhysicalPostASAPDAG`, not
+another DAG: the deployment supplies a source for each typed input slot, the
+slots are checked against their contracts, and the graph runs.
 
 ## Responsibilities
 
@@ -131,13 +131,13 @@ checked against their contracts, and the graph runs.
 | 1. Logical optimization | All legal logical candidates: summary families, exact rewrites, compositions, series-identity typing. | Placement, timing |
 | 2. Summary lifecycle planning | For each unique summary state and maintained population, the admissible lifecycle assignments and their timing, window framework and retention. | Cost values; operator implementation |
 | 3. Compilation | All computation: value operations, aggregation, PromQL functions and subqueries, vector matching, comparisons and set operators, `histogram_quantile`, summary build, merge and estimate, sort, limit, joins. | Raw ingestion, pane construction, storage formats, decoding persisted state, scheduling |
-| 4. Selection | Costing every candidate with the deployment's cost model and returning the cheapest admissible `PhysicalDAG` for the whole workload that meets the accuracy requirements. A state shared by several queries is costed once with all consumers' demand (only when compilation installs one shared output: same window layout, evaluation interval and phase). Unknown cost stays unknown and such a candidate is not selected. | The cost values |
+| 4. Selection | Costing every candidate with the deployment's cost model and returning the cheapest admissible `PhysicalPostASAPDAG` for the whole workload that meets the accuracy requirements. A state shared by several queries is costed once with all consumers' demand (only when compilation installs one shared output: same window layout, evaluation interval and phase). Unknown cost stays unknown and such a candidate is not selected. | The cost values |
 | 5. Deployment | Inputs: the cost model (build, per-update maintenance, read, store price per byte-second, retirement, query-time raw processing; optionally whole-plan quotes), accuracy requirements and capabilities (for example whether query-time raw data is available). Execution: ingestion and routing, panes and completeness, lateness and revisions, storage and codecs over Planner kernel states, reading stored state into typed inputs, query-time raw sources, the exact-engine fallback. Sampled or delta edge frames are rejected. | Any computation algorithm |
 
 ## The boundary
 
 The deployment passes its inputs to ASAPPlanner and receives one optimal
-`PhysicalDAG`, which contains:
+`PhysicalPostASAPDAG`, which contains:
 
 * a **precompute DAG**, whose inputs are raw-sample contracts (rows carrying
   series labels, timestamp and value; the label set is the complete series
@@ -157,13 +157,13 @@ This traces `sum by (job) (rate(m[1m]))`, evaluated every 10 s, through the
 four DAGs, and shows that only the deployment's store price changes the plan.
 
 * `PreASAPDAG`: `sum by (job)` over `rate` over the range selector `m[1m]`.
-* `PostASAPDAG`: a per-series Rate state feeding a grouped Sum state.
+* `LogicalPostASAPDAG`: a per-series Rate state feeding a grouped Sum state.
 * `LifecyclePostASAPDAG`: one per lifecycle assignment, for example
   (a) both retained, (b) Rate retained and Sum `Ephemeral`, (c) both
   `Ephemeral`.
-* `PhysicalDAG`: one compilation, cut three ways. (a) Precompute builds Rate
-  and Sum per pane; the query only reads Sum. (b) Precompute keeps Rate; the
-  query builds Sum. (c) No precompute; the query reads raw series at `t_q`.
+* `PhysicalPostASAPDAG`: one compilation, cut three ways. (a) Precompute builds
+  Rate and Sum per pane; the query only reads Sum. (b) Precompute keeps Rate;
+  the query builds Sum. (c) No precompute; the query reads raw series at `t_q`.
 
 Selection returns (a) when storage is cheap, (b) when it is expensive, and (c)
 when it is more expensive still. The deployment only changed its store price.

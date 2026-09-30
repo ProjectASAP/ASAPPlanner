@@ -2,7 +2,7 @@
 //! Deployments choose the encoding; JSON is used here only as a test format.
 use asap_physical_operators::{
     operators::{Operator, SortKey},
-    physical_planner::{InputContract, PhysicalDAG},
+    physical_planner::{InputContract, PhysicalPostASAPDAG},
 };
 use planner_types::{
     post_asap::{SummaryFamilyType, SummaryField, SummarySchema},
@@ -10,7 +10,7 @@ use planner_types::{
 };
 use std::{collections::BTreeMap, sync::Arc};
 
-fn sorted() -> PhysicalDAG {
+fn sorted() -> PhysicalPostASAPDAG {
     let schema = Arc::new(SummarySchema {
         fields: vec![SummaryField {
             name: "value".into(),
@@ -19,7 +19,7 @@ fn sorted() -> PhysicalDAG {
         }],
         time_index: None,
     });
-    PhysicalDAG::from_operators(
+    PhysicalPostASAPDAG::from_operators(
         BTreeMap::from([(0, InputContract::bounded(schema.clone()))]),
         BTreeMap::from([(
             1,
@@ -45,7 +45,7 @@ fn sorted() -> PhysicalDAG {
 #[test]
 fn recovery_retains_selected_operator_and_rejects_invalid_contracts() {
     let bytes = serde_json::to_vec(&sorted()).unwrap();
-    let recovered = serde_json::from_slice::<PhysicalDAG>(&bytes).unwrap();
+    let recovered = serde_json::from_slice::<PhysicalPostASAPDAG>(&bytes).unwrap();
     assert_eq!(serde_json::to_vec(&recovered).unwrap(), bytes);
     for mutation in ["column", "edge", "output"] {
         let mut wire: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
@@ -62,7 +62,8 @@ fn recovery_retains_selected_operator_and_rejects_invalid_contracts() {
             _ => unreachable!(),
         }
         assert!(
-            serde_json::from_slice::<PhysicalDAG>(&serde_json::to_vec(&wire).unwrap()).is_err(),
+            serde_json::from_slice::<PhysicalPostASAPDAG>(&serde_json::to_vec(&wire).unwrap())
+                .is_err(),
             "accepted {mutation}"
         );
     }
@@ -73,7 +74,7 @@ fn candidate_recovery_preserves_materialization_boundary() {
     use asap_physical_operators::physical_planner::PhysicalCandidate;
     let precompute = sorted();
     let output = InputContract::bounded(precompute.output_contract(1).unwrap().schema);
-    let query = PhysicalDAG::from_operators(
+    let query = PhysicalPostASAPDAG::from_operators(
         BTreeMap::from([(1, output.clone())]),
         BTreeMap::from([(
             2,

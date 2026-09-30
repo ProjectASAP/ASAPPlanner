@@ -2,7 +2,7 @@
 mod physical_common;
 use asap_physical_operators::{
     operators::{Operator, ReadoutQuery},
-    physical_planner::{InputContract, PhysicalDAG, Source},
+    physical_planner::{InputContract, PhysicalPostASAPDAG, Source},
     plan::{PhysicalExecution, PhysicalOperator, PlanProperties},
     runtime::{Input, Limits, OutputStream, RunContext, Scope},
     summary_kernels::datasketches_kll::DatasketchesKLLAccumulator,
@@ -47,11 +47,11 @@ fn query_scope() -> Scope {
         revision: 1,
     }
 }
-fn fixture() -> (PhysicalDAG, Operator, Schema) {
+fn fixture() -> (PhysicalPostASAPDAG, Operator, Schema) {
     let raw = raw_schema();
     let build = Operator::summary_build(raw.clone(), family(200), 0, None, vec![]).unwrap();
     let state = build.schema();
-    let maintenance = PhysicalDAG::from_operators(
+    let maintenance = PhysicalPostASAPDAG::from_operators(
         BTreeMap::from([(0, InputContract::bounded(raw))]),
         BTreeMap::from([(1, (vec![0], build))]),
         vec![1],
@@ -60,7 +60,7 @@ fn fixture() -> (PhysicalDAG, Operator, Schema) {
     let merge = Operator::summary_merge(state.clone(), 0, vec![]).unwrap();
     (maintenance, merge, state)
 }
-fn pane_state(maintenance: &PhysicalDAG, pane: i64) -> Arc<dyn AggregateCore> {
+fn pane_state(maintenance: &PhysicalPostASAPDAG, pane: i64) -> Arc<dyn AggregateCore> {
     // Twenty samples in each (start,end] one-minute pane; k=200 avoids
     // compaction so quantiles and sample counts have deterministic oracles.
     let raw = raw_schema();
@@ -139,7 +139,7 @@ fn five_panes_roundtrip_and_shared_merge_runs_once() {
     let (maintenance, merge, schema) = fixture();
     let panes: Vec<_> = (0..6).map(|pane| pane_state(&maintenance, pane)).collect();
     drop(maintenance);
-    let compiled = PhysicalDAG::from_operators(
+    let compiled = PhysicalPostASAPDAG::from_operators(
         (0..5)
             .map(|id| (id, InputContract::bounded(schema.clone())))
             .collect(),
@@ -267,7 +267,7 @@ fn panes_reject_parameters_schema_and_missing_binding() {
         state: Arc::new(DatasketchesKLLAccumulator::new(128)),
     };
     assert!(Batch::try_new(schema.clone(), vec![vec![wrong]]).is_err());
-    let compiled = PhysicalDAG::from_operators(
+    let compiled = PhysicalPostASAPDAG::from_operators(
         BTreeMap::from([(0, InputContract::bounded(schema))]),
         BTreeMap::from([(1, (vec![0], merge))]),
         vec![1],

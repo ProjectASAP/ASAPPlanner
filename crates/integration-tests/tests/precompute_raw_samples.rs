@@ -18,7 +18,7 @@ use asap_physical_operators::{
     AggregateCore, KeyByLabelValues, Statistic,
 };
 use asap_types::post_asap::{
-    export_post_asap_dag, EntityIdentity, ExactKind, PostASAPDAGTransport, PostASAPNode,
+    export_post_asap_dag, EntityIdentity, ExactKind, LogicalPostASAPDAGTransport, PostASAPNode,
     PostASAPOperatorPayload, SketchAlgorithm, SketchQuery, SummaryFamilyType, SummaryInputExpr,
     SummaryUpdate,
 };
@@ -75,7 +75,7 @@ fn candidates(query: &str, accuracy: AccuracyTarget) -> Vec<Rc<PostASAPNode>> {
 }
 
 /// Raw-input summary nodes: `(dag, raw source id, summary id)`.
-fn raw_summaries(dag: &PostASAPDAGTransport) -> Vec<(u64, u64)> {
+fn raw_summaries(dag: &LogicalPostASAPDAGTransport) -> Vec<(u64, u64)> {
     dag.nodes
         .iter()
         .filter(|node| matches!(node.payload, PostASAPOperatorPayload::SummaryAgg { .. }))
@@ -114,7 +114,7 @@ fn samples() -> Vec<(Series, i64, f64)> {
 }
 
 fn execute(
-    dag: &PostASAPDAGTransport,
+    dag: &LogicalPostASAPDAGTransport,
     source: u64,
     root: u64,
     rows: &[(Series, i64, f64)],
@@ -128,9 +128,9 @@ fn execute(
                 .map(|n| (&n.output_schema, &n.payload))
         );
     });
-    let program = serde_json::from_slice::<asap_physical_operators::physical_planner::PhysicalDAG>(
-        &serde_json::to_vec(&program).unwrap(),
-    )
+    let program = serde_json::from_slice::<
+        asap_physical_operators::physical_planner::PhysicalPostASAPDAG,
+    >(&serde_json::to_vec(&program).unwrap())
     .unwrap();
     let schema = precompute::raw_sample_schema();
     let batch = Batch::try_new(
@@ -274,7 +274,7 @@ fn readouts(state: &dyn AggregateCore, family: &SummaryFamilyType) -> Vec<f64> {
 /// or the family when it has no native state.
 fn check(
     query: &str,
-    dag: &PostASAPDAGTransport,
+    dag: &LogicalPostASAPDAGTransport,
     source: u64,
     root: u64,
     rows: &[(Series, i64, f64)],
@@ -458,7 +458,7 @@ fn raw_sample_summaries_compile_and_match_their_kernels() {
 fn grouped_raw_summary(
     family: SummaryFamilyType,
     input: SummaryUpdate,
-) -> (PostASAPDAGTransport, u64, u64) {
+) -> (LogicalPostASAPDAGTransport, u64, u64) {
     let candidate = candidates(
         "sum by (service) (sum_over_time(m[5m]))",
         AccuracyTarget::Exact,

@@ -1,14 +1,14 @@
 //! Binary computation must be fully compiled before deployment binds values.
 use asap_physical_operators::{
     operators::Operator,
-    physical_planner::{compile_node, InputContract, PhysicalDAG, Source},
+    physical_planner::{compile_node, InputContract, PhysicalPostASAPDAG, Source},
     runtime::{Limits, RunContext, Scope},
     values::{Batch, Schema, Value},
 };
 use futures::{executor::block_on, StreamExt};
 use planner_types::{
     post_asap::{
-        BinaryOperator, ExecutionDataState, PostASAPDAGNode, PostASAPNodeId,
+        BinaryOperator, ExecutionDataState, LogicalPostASAPDAGNode, PostASAPNodeId,
         PostASAPOperatorPayload, SummaryFamilyType, SummaryField, SummarySchema,
     },
     pre_asap::{ArithmeticOpKind, BinaryOpKind, DataType},
@@ -48,7 +48,7 @@ fn row(name: &str, job: &str, value: f64) -> Vec<Value> {
         Value::Float64(value),
     ]
 }
-fn program() -> PhysicalDAG {
+fn program() -> PhysicalPostASAPDAG {
     program_for(BinaryOperator {
         kind: BinaryOpKind::Arithmetic(ArithmeticOpKind::Div),
         vector_match: None,
@@ -56,9 +56,9 @@ fn program() -> PhysicalDAG {
         checked_finite_division: false,
     })
 }
-fn program_for(operator: BinaryOperator) -> PhysicalDAG {
+fn program_for(operator: BinaryOperator) -> PhysicalPostASAPDAG {
     let schema = schema();
-    let node = PostASAPDAGNode {
+    let node = LogicalPostASAPDAGNode {
         id: PostASAPNodeId(2),
         payload: PostASAPOperatorPayload::Binary { operator },
         output_state: ExecutionDataState::QUERY_ROWS,
@@ -66,7 +66,7 @@ fn program_for(operator: BinaryOperator) -> PhysicalDAG {
         guarantee: None,
     };
     let operator = compile_node(&node, &[schema.clone(), schema.clone()]).unwrap();
-    let graph = PhysicalDAG::from_operators(
+    let graph = PhysicalPostASAPDAG::from_operators(
         BTreeMap::from([
             (0, InputContract::bounded(schema.clone())),
             (1, InputContract::bounded(schema)),
@@ -75,7 +75,7 @@ fn program_for(operator: BinaryOperator) -> PhysicalDAG {
         vec![2],
     )
     .unwrap();
-    serde_json::from_slice::<PhysicalDAG>(&serde_json::to_vec(&graph).unwrap()).unwrap()
+    serde_json::from_slice::<PhysicalPostASAPDAG>(&serde_json::to_vec(&graph).unwrap()).unwrap()
 }
 fn evaluate(
     left: Vec<Vec<Value>>,
@@ -84,7 +84,7 @@ fn evaluate(
     evaluate_with(program(), left, right)
 }
 fn evaluate_with(
-    graph: PhysicalDAG,
+    graph: PhysicalPostASAPDAG,
     left: Vec<Vec<Value>>,
     right: Vec<Vec<Value>>,
 ) -> Result<Vec<Vec<Value>>, asap_physical_operators::Error> {
@@ -163,7 +163,8 @@ fn scalar_broadcast_and_bool_comparison_are_distinct() {
         )
         .unwrap();
         let graph =
-            serde_json::from_slice::<PhysicalDAG>(&serde_json::to_vec(&graph).unwrap()).unwrap();
+            serde_json::from_slice::<PhysicalPostASAPDAG>(&serde_json::to_vec(&graph).unwrap())
+                .unwrap();
         let scalar = promql_values::scalar_schema();
         let vector = promql_values::vector_schema();
         let sources = BTreeMap::from([
@@ -340,7 +341,7 @@ fn stored_series_readouts_support_filters_and_sets() {
             BinaryOpKind::Set(PromQLVectorSetOpKind::Or),
         ] {
             let nodes = (0..5)
-                .map(|id| PostASAPDAGNode {
+                .map(|id| LogicalPostASAPDAGNode {
                     id: PostASAPNodeId(id),
                     payload: match id {
                         0 | 1 => PostASAPOperatorPayload::SummaryMerge,
@@ -376,7 +377,7 @@ fn stored_series_readouts_support_filters_and_sets() {
                 (3, 4, EdgeRole::Right),
             ]
             .into_iter()
-            .map(|(producer, consumer, role)| PostASAPDAGEdge {
+            .map(|(producer, consumer, role)| LogicalPostASAPDAGEdge {
                 producer: PostASAPNodeId(producer),
                 consumer: PostASAPNodeId(consumer),
                 role,
@@ -386,7 +387,7 @@ fn stored_series_readouts_support_filters_and_sets() {
                 window: WindowEdgeCompatibility::NotApplicable,
             })
             .collect();
-            let dag = PostASAPDAGTransport {
+            let dag = LogicalPostASAPDAGTransport {
                 nodes,
                 edges,
                 root: PostASAPNodeId(4),
@@ -400,7 +401,7 @@ fn stored_series_readouts_support_filters_and_sets() {
                 &[4],
             )
             .unwrap();
-            let graph: PhysicalDAG =
+            let graph: PhysicalPostASAPDAG =
                 serde_json::from_slice(&serde_json::to_vec(&graph).unwrap()).unwrap();
             let sources = [(0, "a", 6.), (1, "b", 2.)]
                 .into_iter()

@@ -21,8 +21,8 @@ use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use asap_types::post_asap::{
-    EvaluationSchedule, ExecutionDataStateError, ExecutionTiming, OutputRepresentation,
-    PostASAPDAGTransport, PostASAPDAGValidationError, PostASAPNode, PostASAPNodeId,
+    EvaluationSchedule, ExecutionDataStateError, ExecutionTiming, LogicalPostASAPDAGTransport,
+    LogicalPostASAPDAGValidationError, OutputRepresentation, PostASAPNode, PostASAPNodeId,
     ResultGuarantee, SummaryExpr, SummaryMaintenanceLifecycle,
     SummaryMaintenanceLifecycleGuarantee, SummaryMaintenanceMode, SummaryWindowFramework,
     ValueOperation,
@@ -43,7 +43,8 @@ use crate::recurrence::{
     CostRate, EvaluationRate, Horizon, RecurrenceError, RecurrenceProfile, UpdateRate,
 };
 use crate::replacement::{
-    CandidateCostOverrides, CandidatePostASAPDAGs, GlobalSelection, RealizationError, Replacement,
+    CandidateCostOverrides, CandidateLogicalPostASAPDAGs, GlobalSelection, RealizationError,
+    Replacement,
 };
 
 /// Summary-maintenance lifecycle shapes supported by the target runtime.
@@ -223,7 +224,7 @@ pub struct LifecyclePostASAPDAG {
 #[derive(Debug, thiserror::Error, PartialEq)]
 pub enum SummaryMaintenanceTimingError {
     #[error(transparent)]
-    InvalidPostASAPDAG(#[from] ExecutionDataStateError),
+    InvalidLogicalPostASAPDAG(#[from] ExecutionDataStateError),
     #[error("summary {0:?} has no selected lifecycle")]
     UnselectedLifecycle(PostASAPNodeId),
     /// A maintained population outside any `SummaryAgg`'s inputs has no
@@ -234,7 +235,7 @@ pub enum SummaryMaintenanceTimingError {
     #[error("timing index belongs to a different logical graph")]
     GraphMismatch,
     #[error(transparent)]
-    InvalidPhases(#[from] PostASAPDAGValidationError),
+    InvalidPhases(#[from] LogicalPostASAPDAGValidationError),
 }
 
 impl LifecyclePostASAPDAG {
@@ -249,7 +250,9 @@ impl LifecyclePostASAPDAG {
     /// maintained populations as to `SummaryAgg` states; a population feeding
     /// a `SummaryAgg` is one of its inputs. Timings already on the root are
     /// ignored.
-    pub fn export_timed_dag(&self) -> Result<PostASAPDAGTransport, SummaryMaintenanceTimingError> {
+    pub fn export_timed_dag(
+        &self,
+    ) -> Result<LogicalPostASAPDAGTransport, SummaryMaintenanceTimingError> {
         let index = Rc::new(asap_types::post_asap::index_post_asap_dag(&self.root)?);
         Ok(self.execution_assignment(index)?.to_transport())
     }
@@ -258,8 +261,9 @@ impl LifecyclePostASAPDAG {
     /// cloned or rewritten. Window/retention commitments remain on this plan.
     pub fn execution_assignment(
         &self,
-        index: Rc<asap_types::post_asap::PostASAPDAGIndex>,
-    ) -> Result<asap_types::post_asap::PostASAPDAGAssignment, SummaryMaintenanceTimingError> {
+        index: Rc<asap_types::post_asap::LogicalPostASAPDAGIndex>,
+    ) -> Result<asap_types::post_asap::LogicalPostASAPDAGAssignment, SummaryMaintenanceTimingError>
+    {
         if !index
             .node_ids
             .summary_node(index.root_id)
@@ -316,7 +320,7 @@ impl LifecyclePostASAPDAG {
                 (node.id, timing)
             })
             .collect();
-        Ok(asap_types::post_asap::PostASAPDAGAssignment::new(
+        Ok(asap_types::post_asap::LogicalPostASAPDAGAssignment::new(
             index, phases,
         )?)
     }
@@ -377,7 +381,7 @@ pub enum LifecyclePostASAPDAGError {
     #[error("workload entry index {index} appears more than once in one demand binding")]
     DuplicateWorkloadEntry { index: usize },
     #[error(transparent)]
-    InvalidPostASAPDAG(#[from] ExecutionDataStateError),
+    InvalidLogicalPostASAPDAG(#[from] ExecutionDataStateError),
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -752,7 +756,7 @@ pub(crate) fn enumerate_summary_maintenance_lifecycles<'a>(
 
 /// Internal candidate-costing form. The workload binding supplies temporal
 /// eligibility and data-arrival facts; `profile` supplies effective uses after
-/// DAG path multiplicity has been propagated by `CandidatePostASAPDAGs`.
+/// DAG path multiplicity has been propagated by `CandidateLogicalPostASAPDAGs`.
 #[expect(clippy::too_many_arguments, reason = "internal bound planning context")]
 fn enumerate_with_profile<'a>(
     root: Rc<PostASAPNode>,
@@ -853,7 +857,7 @@ fn enumerate_with_profile<'a>(
 /// attached, so shared `Rc` identity and exact-composition commitments remain
 /// the responsibility of `GlobalSelection`.
 pub fn global_selection_with_summary_maintenance_lifecycles<'a, Id>(
-    space: &'a CandidatePostASAPDAGs<Id>,
+    space: &'a CandidateLogicalPostASAPDAGs<Id>,
     demand: WorkloadDemand<'_>,
     now_ms: u64,
     horizon: Option<Horizon>,
@@ -3243,7 +3247,7 @@ mod tests {
         data: &DataWorkload,
         horizon: Option<Horizon>,
         choose: impl Fn(&SummaryMaintenanceDeployment) -> SummaryMaintenanceLifecycle,
-    ) -> PostASAPDAGTransport {
+    ) -> LogicalPostASAPDAGTransport {
         let candidates = enumerate_summary_maintenance_lifecycles(
             root,
             WorkloadDemand::new_with_data(workload, data, &[0]),
@@ -3268,7 +3272,7 @@ mod tests {
     }
 
     /// Operator kinds in node-id order, each paired with its timing.
-    fn timings(dag: &PostASAPDAGTransport) -> Vec<(&'static str, ExecutionTiming)> {
+    fn timings(dag: &LogicalPostASAPDAGTransport) -> Vec<(&'static str, ExecutionTiming)> {
         dag.nodes
             .iter()
             .map(|node| {
@@ -3484,7 +3488,9 @@ mod tests {
         )
     }
 
-    fn population_timings(dag: &PostASAPDAGTransport) -> Vec<(&'static str, ExecutionTiming)> {
+    fn population_timings(
+        dag: &LogicalPostASAPDAGTransport,
+    ) -> Vec<(&'static str, ExecutionTiming)> {
         dag.nodes
             .iter()
             .zip(timings(dag))

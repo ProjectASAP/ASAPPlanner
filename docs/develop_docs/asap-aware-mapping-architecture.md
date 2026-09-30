@@ -72,7 +72,7 @@ Terminology used in the diagram:
   is a compact data structure that trades exactness for bounded error. A
   query's **accuracy target** states the allowed error and failure probability.
   A candidate's **rationale** is its human-readable explanation.
-- `CandidatePostASAPDAGs` is a compact candidate space with one
+- `CandidateLogicalPostASAPDAGs` is a compact candidate space with one
   `TargetSubDAGCandidates` per target instead of one full plan per combination of choices.
   A `node_hash` is a structural fingerprint used to narrow explanation lookup;
   exact structural equality is still checked afterward.
@@ -101,12 +101,12 @@ flowchart TB
   end
 
   subgraph SEARCHSPACE[3. Store the workload-wide search space]
-    SPACE["CandidatePostASAPDAGs<br/>one TargetSubDAGCandidates per target; each candidate set keeps<br/>all candidates, including dependent compositions"]:::store
+    SPACE["CandidateLogicalPostASAPDAGs<br/>one TargetSubDAGCandidates per target; each candidate set keeps<br/>all candidates, including dependent compositions"]:::store
     CAND -->|"deduplicate by target and candidate identity"| SPACE
   end
 
   subgraph RANKING[Optional ranked view]
-    SORT["CandidatePostASAPDAGs::cost_sorted<br/>use the CostModel to order each candidate set<br/>and cost every candidate"]:::choose
+    SORT["CandidateLogicalPostASAPDAGs::cost_sorted<br/>use the CostModel to order each candidate set<br/>and cost every candidate"]:::choose
     RANKED["RankedTargetSubDAGCandidates<br/>the same candidates in preferred order,<br/>with costs aligned by index"]:::choose
     SPACE --> SORT -->|"reorder only; preserve every candidate"| RANKED
   end
@@ -229,13 +229,13 @@ strategy-specific discovery logic.
 
 ### 3.4 Store and rank the complete search space
 
-Workload search deduplicates candidates into a `CandidatePostASAPDAGs`. Each distinct
+Workload search deduplicates candidates into a `CandidateLogicalPostASAPDAGs`. Each distinct
 target has one `TargetSubDAGCandidates` containing retained alternatives and
 rejection reasons. This
 compact representation preserves independent choices without enumerating a flat
 list of `2^N` complete plans for `N` replaceable targets.
 
-`CandidatePostASAPDAGs::cost_sorted` ranks each target's existing candidates with the
+`CandidateLogicalPostASAPDAGs::cost_sorted` ranks each target's existing candidates with the
 supplied `CostModel`. It returns the same candidates in preferred order, with
 costs aligned by index; ranking does not select or remove a candidate.
 
@@ -253,7 +253,7 @@ execution policy. Constructing all candidates before taking the first costs
 more than constructing only the preferred candidate, but it keeps the strategy
 contract consistent and preserves the full choice set for other callers.
 
-`CandidatePostASAPDAGs::global_selection` optionally coordinates cross-target sharing and
+`CandidateLogicalPostASAPDAGs::global_selection` optionally coordinates cross-target sharing and
 composition choices. `GlobalSelection::assemble_selected_dag` constructs the selected
 semantic DAG. These plain APIs do not establish lifecycle or physical deployment
 feasibility. Recurrence and lifecycle-aware variants require the corresponding

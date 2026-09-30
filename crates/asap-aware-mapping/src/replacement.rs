@@ -54,7 +54,7 @@
 //!
 //! A caller may inspect local replacements, but taking the first candidate
 //! does not establish a compatible workload plan or physical deployability.
-//! For Planner-owned logical selection, call [`CandidatePostASAPDAGs::global_selection`]
+//! For Planner-owned logical selection, call [`CandidateLogicalPostASAPDAGs::global_selection`]
 //! once and [`GlobalSelection::assemble_selected_dag`] for each wanted query
 //! root. Alternatively, use the summary-maintenance-lifecycle-aware helpers
 //! when Planner should also compare maintenance against raw recomputation.
@@ -107,7 +107,7 @@
 //! `TargetSubDAG` discovery pass" — describing work deliberately left for a
 //! future Cascades/Volcano-style search engine (PR #263,
 //! `feat/cascades-search-252`, over the [`ReplacementStrategy`] extension
-//! point above). That engine is [`CandidatePostASAPDAGs`]/[`TargetSubDAGCandidates`]/
+//! point above). That engine is [`CandidateLogicalPostASAPDAGs`]/[`TargetSubDAGCandidates`]/
 //! [`search_workload`]/[`search_workload_with`] below, merged into this
 //! module rather than kept as a separate `search` module — the same "one
 //! module, one step" reasoning the top of this file already uses for
@@ -146,7 +146,7 @@
 //!    its own `Rc<PreASAPNode>` pointer identity — the same currency
 //!    [`asap_types::pre_asap::cse::share_common_subtrees`] already
 //!    established across the workload) holding every
-//!    [`ReplacementSubDAG`] alternative discovered for it. [`CandidatePostASAPDAGs`] is
+//!    [`ReplacementSubDAG`] alternative discovered for it. [`CandidateLogicalPostASAPDAGs`] is
 //!    a collection of these groups, keyed by `TargetSubDAG` — a candidate
 //!    "plan" is never materialized as a distinct top-level `Rc<PreASAPNode>`
 //!    at all; two logically-different overall choices at two different
@@ -235,7 +235,7 @@
 //!
 //! ### Cost-based final selection — reusing `CostModel`, not a second interface
 //!
-//! [`CandidatePostASAPDAGs::cost_sorted`] is the `sorted_by(cost_model)` step, and it
+//! [`CandidateLogicalPostASAPDAGs::cost_sorted`] is the `sorted_by(cost_model)` step, and it
 //! reuses this crate's existing [`CostModel`] trait rather than inventing a
 //! second cost interface (`docs/design_docs/cse-cost-model-decision.md`,
 //! issue #237, explicitly reasoned about *why* a narrow, direct cost
@@ -259,7 +259,7 @@
 //!
 //! ## Whole-plan (cross-group) selection — issue #271
 //!
-//! [`CandidatePostASAPDAGs::cost_sorted`] above ranks every group's candidates
+//! [`CandidateLogicalPostASAPDAGs::cost_sorted`] above ranks every group's candidates
 //! independently: it never lets one group's choice influence how another
 //! group is costed. That's the right behavior when groups genuinely don't
 //! interact — which both shipped strategies' one-round convergence (see
@@ -277,7 +277,7 @@
 //! per-group ranking has no way to see this — it only ever looks at one
 //! group's own `candidates`, in isolation.
 //!
-//! [`CandidatePostASAPDAGs::global_selection`] is that missing step: a single
+//! [`CandidateLogicalPostASAPDAGs::global_selection`] is that missing step: a single
 //! **top-down dynamic-programming pass** over the discovered sites,
 //! processed in the topological order [`topological_order`] computes over a
 //! small [`ReferenceGraph`] built for exactly this purpose (parent before
@@ -305,9 +305,9 @@
 //! subproblems (a site reachable through more than one parent path is
 //! solved once, memoized in `effective_uses`, and reused for every path
 //! into it) combined via a real recurrence — not just the MEMO-group
-//! sharing [`CandidatePostASAPDAGs`] itself already does for *storing* candidates. That
+//! sharing [`CandidateLogicalPostASAPDAGs`] itself already does for *storing* candidates. That
 //! distinction is exactly what issue #271 raised: this module already looks
-//! like a Cascades/Volcano MEMO, but [`CandidatePostASAPDAGs::cost_sorted`] alone never
+//! like a Cascades/Volcano MEMO, but [`CandidateLogicalPostASAPDAGs::cost_sorted`] alone never
 //! actually performed this composition step; `global_selection` is that
 //! step, added alongside `cost_sorted` rather than replacing it (both stay
 //! available — see [`RankedTargetSubDAGCandidates`] vs. [`TargetSubDAGSelection`]'s own docs for when
@@ -487,7 +487,7 @@ pub enum Replacement {
     /// decision across an explicit update/readout boundary (issue #171):
     /// `ValueOperationAtQueryTime` over a child's summary readout, or
     /// `ValueOperationAtIngestionTime` feeding a maintained summary above. Carries only a
-    /// reference to the child target — [`CandidatePostASAPDAGs::global_selection`]
+    /// reference to the child target — [`CandidateLogicalPostASAPDAGs::global_selection`]
     /// commits the compatible parent/child pair and
     /// [`GlobalSelection::assemble_selected_dag`] links it into one validated
     /// `PostASAPNode`. See [`crate::exact_composition`].
@@ -1724,7 +1724,7 @@ pub(crate) fn describe_intent(intent: &AggIntent) -> String {
 /// every candidate via [`SketchAlgorithmStrategy::replacements`], keep the
 /// `cost_model`-preferred (first) one, and fall back to [`keep_pre_asap`]
 /// when there's no candidate at all — **not** a general single-answer API
-/// for a whole workload. Use [`CandidatePostASAPDAGs::global_selection`] and DAG assembly
+/// for a whole workload. Use [`CandidateLogicalPostASAPDAGs::global_selection`] and DAG assembly
 /// for coordinated logical selection; physical deployment remains downstream.
 /// `root` must already be the caller's own
 /// `Rc`, never fabricated per call, so this never allocates beyond what the
@@ -3763,7 +3763,7 @@ impl ReplacementStrategy for SharedSubtreeStrategy {
     }
 }
 
-// ── Workload-wide search: TargetSubDAGCandidates / CandidatePostASAPDAGs / search_workload ──────────
+// ── Workload-wide search: TargetSubDAGCandidates / CandidateLogicalPostASAPDAGs / search_workload ──────────
 //
 // Merged in from the former `search.rs` (issue #252, part of #33) — see this
 // file's own top-level "Workload-wide search" doc section for the full
@@ -3780,13 +3780,13 @@ pub const MAX_SEARCH_ITERATIONS: usize = 1_000;
 
 /// Candidates for one distinct [`TargetSubDAG`] (its
 /// own `target` `Rc<PreASAPNode>`, keyed by pointer identity in
-/// [`CandidatePostASAPDAGs`]'s internal map — never re-derived by value) plus every
+/// [`CandidateLogicalPostASAPDAGs`]'s internal map — never re-derived by value) plus every
 /// [`ReplacementSubDAG`] alternative any registered [`ReplacementStrategy`]
 /// proposed for it.
 ///
 /// `candidates` is deliberately *not* required to be non-empty — a
 /// `TargetSubDAG` no registered strategy has an opinion on still gets a
-/// group (with an empty candidate list), so [`CandidatePostASAPDAGs`] always has
+/// group (with an empty candidate list), so [`CandidateLogicalPostASAPDAGs`] always has
 /// exactly one group per discovered `TargetSubDAG`, not "one group per
 /// `TargetSubDAG` something matched".
 #[derive(Debug, Clone)]
@@ -3797,13 +3797,13 @@ pub struct TargetSubDAGCandidates {
     /// reference this exact `Rc` — see [`discover_targets`].
     pub consumer_count: usize,
     /// Every distinct alternative discovered for `target`, in discovery
-    /// order (not ranked — see [`CandidatePostASAPDAGs::cost_sorted`] for the ranked
+    /// order (not ranked — see [`CandidateLogicalPostASAPDAGs::cost_sorted`] for the ranked
     /// view).
     pub candidates: Vec<ReplacementSubDAG>,
     /// Every candidate a strategy considered for `target` but refused on
     /// accuracy-legality grounds (issue #172), plus any `candidates` entry
     /// the root-target check ([`search_workload_with_targets`]) moved here.
-    /// Never ranked — [`CandidatePostASAPDAGs::cost_sorted`]/[`CandidatePostASAPDAGs::global_selection`]
+    /// Never ranked — [`CandidateLogicalPostASAPDAGs::cost_sorted`]/[`CandidateLogicalPostASAPDAGs::global_selection`]
     /// read only `candidates`, so a [`CostModel`] cannot resurrect one.
     pub rejected: Vec<RejectedCandidate>,
 }
@@ -3917,22 +3917,22 @@ fn is_duplicate_summary(_existing: &Rc<PostASAPNode>, _candidate: &Rc<PostASAPNo
     false
 }
 
-// ── CandidatePostASAPDAGs ────────────────────────────────────────────────────────────
+// ── CandidateLogicalPostASAPDAGs ────────────────────────────────────────────────────────────
 
 /// The deduped candidate space [`search_workload`]/[`search_workload_with`]
 /// discover: one [`TargetSubDAGCandidates`] per distinct `TargetSubDAG` in the
 /// (already-CSE'd) workload, plus the workload's own post-CSE roots so a
 /// caller can still map a `Root`'s `Id` back to the `Rc<PreASAPNode>` whose
 /// group holds its alternatives.
-pub struct CandidatePostASAPDAGs<Id> {
+pub struct CandidateLogicalPostASAPDAGs<Id> {
     /// The workload's roots, after the one `share_common_subtrees` pass
     /// [`search_workload_with`] runs up front — the same post-CSE roots
     /// every `TargetSubDAG` in `groups` was discovered from. Read through
     /// [`Self::roots`]: the groups are keyed by these roots' nodes.
     pub(crate) roots: asap_types::pre_asap::CandidatePreASAPDAGs<Id>,
     groups: HashMap<*const PreASAPNode, TargetSubDAGCandidates>,
-    /// Discovery order — stable iteration for [`CandidatePostASAPDAGs::target_subdag_candidates`]/
-    /// [`CandidatePostASAPDAGs::cost_sorted`], since `HashMap` iteration order isn't.
+    /// Discovery order — stable iteration for [`CandidateLogicalPostASAPDAGs::target_subdag_candidates`]/
+    /// [`CandidateLogicalPostASAPDAGs::cost_sorted`], since `HashMap` iteration order isn't.
     order: Vec<*const PreASAPNode>,
     /// Composition proofs are computed with the search model, then retained
     /// through costing and DAG assembly so no later default can replace it.
@@ -3946,7 +3946,7 @@ struct PreparedComposition {
     plan: Rc<PostASAPNode>,
 }
 
-impl<Id> CandidatePostASAPDAGs<Id> {
+impl<Id> CandidateLogicalPostASAPDAGs<Id> {
     fn prepare_compositions(
         &mut self,
         accuracy: &dyn AccuracyModel,
@@ -4016,7 +4016,7 @@ pub struct CandidateDagInventory<Id> {
 
 type CandidateDagChoice<'a> = (Option<&'a ReplacementSubDAG>, Option<Rc<PostASAPNode>>);
 
-impl<Id: Clone + PartialEq> CandidatePostASAPDAGs<Id> {
+impl<Id: Clone + PartialEq> CandidateLogicalPostASAPDAGs<Id> {
     pub fn enumerate_candidate_dags(
         &self,
         expansion_limit: usize,
@@ -4295,7 +4295,7 @@ impl CandidateCostOverrides {
     }
 }
 
-impl<Id> CandidatePostASAPDAGs<Id> {
+impl<Id> CandidateLogicalPostASAPDAGs<Id> {
     /// The workload's post-CSE roots with their entry IDs, in input order.
     pub fn roots(&self) -> &asap_types::pre_asap::CandidatePreASAPDAGs<Id> {
         &self.roots
@@ -4441,16 +4441,16 @@ impl<Id> CandidatePostASAPDAGs<Id> {
 // ── Recurrence-aware cost context (issue #287) ──────────────────────────
 
 /// One [`RecurrenceProfile`] per discovered [`TargetSubDAGCandidates`] target, built by
-/// [`CandidatePostASAPDAGs::recurrence_profiles`] — the "carry `RepeatingEntry.demand`
+/// [`CandidateLogicalPostASAPDAGs::recurrence_profiles`] — the "carry `RepeatingEntry.demand`
 /// and relevant `DataWorkload` into ASAP-aware search/cost context"
 /// half of issue #287. Looked up by `Rc` pointer identity, the same
-/// currency [`CandidatePostASAPDAGs::candidates_for_target`]/[`GlobalSelection::for_target`] already
+/// currency [`CandidateLogicalPostASAPDAGs::candidates_for_target`]/[`GlobalSelection::for_target`] already
 /// use.
 /// Holds an owned `Rc<PreASAPNode>` clone alongside each profile (not just its
 /// raw pointer) so this map keeps every node it describes alive for as long
 /// as the map itself lives — a `RecurrenceProfileMap` is safe to outlive the
-/// `CandidatePostASAPDAGs` it was built from. Without this, a raw `*const PreASAPNode` key
-/// could, after the originating `CandidatePostASAPDAGs` (the only other owner of those
+/// `CandidateLogicalPostASAPDAGs` it was built from. Without this, a raw `*const PreASAPNode` key
+/// could, after the originating `CandidateLogicalPostASAPDAGs` (the only other owner of those
 /// `Rc`s) is dropped, collide with an unrelated, later allocation that
 /// happens to reuse the same freed address — silently returning a stale
 /// profile for the wrong node (issue #287 review, bug 4).
@@ -4462,7 +4462,7 @@ pub struct RecurrenceProfileMap {
 impl RecurrenceProfileMap {
     /// The [`RecurrenceProfile`] for `target`, or
     /// [`RecurrenceProfile::EMPTY`] when `target` wasn't a discovered site
-    /// in the [`CandidatePostASAPDAGs`] this map was built from (or carried no
+    /// in the [`CandidateLogicalPostASAPDAGs`] this map was built from (or carried no
     /// recurring/one-shot/update-rate metadata at all) — always a valid,
     /// "no metadata" answer, never a panic.
     pub fn for_target(&self, target: &Rc<PreASAPNode>) -> RecurrenceProfile {
@@ -4473,7 +4473,7 @@ impl RecurrenceProfileMap {
     }
 }
 
-impl<Id> CandidatePostASAPDAGs<Id> {
+impl<Id> CandidateLogicalPostASAPDAGs<Id> {
     /// Build one [`RecurrenceProfile`] per discovered site, by walking every
     /// root's whole reachable sub-DAG (the same relational-skeleton
     /// traversal [`discover_targets`] itself used to discover those sites)
@@ -4519,7 +4519,7 @@ impl<Id> CandidatePostASAPDAGs<Id> {
     /// evaluated twice. This supplies recurrence-aware selection with the
     /// effective structural execution rate rather than mere reachability.
     ///
-    /// **Unreachable sites**: [`CandidatePostASAPDAGs`] can contain a site no root's own
+    /// **Unreachable sites**: [`CandidateLogicalPostASAPDAGs`] can contain a site no root's own
     /// structural tree actually reaches — e.g. one only ever produced by a
     /// [`Replacement::Rewrite`] candidate a [`ReplacementStrategy`] invented
     /// (this walk only follows [`TargetSubDAGCandidates::target`]'s own structural
@@ -4645,7 +4645,7 @@ impl<Id> CandidatePostASAPDAGs<Id> {
         &self,
         workload: &QueryWorkload,
         data_workload: Option<&DataWorkload>,
-        // For each `CandidatePostASAPDAGs::roots[i]`, the explicit index of its
+        // For each `CandidateLogicalPostASAPDAGs::roots[i]`, the explicit index of its
         // corresponding normalized workload entry.
         root_workload_entries: &[usize],
         now_ms: u64,
@@ -4766,7 +4766,7 @@ impl<Id> CandidatePostASAPDAGs<Id> {
 
 /// Record `times` occurrences of `recurrence` against `ptr` — `times > 1`
 /// when a single parent structurally references `ptr` more than once (see
-/// [`CandidatePostASAPDAGs::recurrence_profiles`]'s own doc on edge multiplicity).
+/// [`CandidateLogicalPostASAPDAGs::recurrence_profiles`]'s own doc on edge multiplicity).
 /// A no-op for `times == 0` (an `Rc` returned as a `direct_child_counts`
 /// child always has `edge_count >= 1` in practice, but this keeps the
 /// helper correct regardless).
@@ -4794,7 +4794,7 @@ fn contribute(
 }
 
 /// One [`TargetSubDAGCandidates`]'s candidates, ranked best-first by
-/// [`CandidatePostASAPDAGs::cost_sorted`].
+/// [`CandidateLogicalPostASAPDAGs::cost_sorted`].
 #[derive(Debug)]
 pub struct RankedTargetSubDAGCandidates<'a> {
     pub target: &'a Rc<PreASAPNode>,
@@ -4998,12 +4998,12 @@ fn summary_grouping(node: &PostASAPNode) -> Option<&GroupingStrategy> {
 // ── global_selection ─────────────────────────────────────────────────────
 
 /// One target sub-DAG's selected choice and usage information — the answer
-/// [`CandidatePostASAPDAGs::global_selection`] commits to for one site, after folding in
+/// [`CandidateLogicalPostASAPDAGs::global_selection`] commits to for one site, after folding in
 /// every ancestor [`SharedSubtreeStrategy`] decision on the path from a
 /// workload root to this site. See the module docs' "Whole-plan
 /// (cross-group) selection" section for the full recurrence.
 ///
-/// Contrast with [`RankedTargetSubDAGCandidates`] ([`CandidatePostASAPDAGs::cost_sorted`]'s output):
+/// Contrast with [`RankedTargetSubDAGCandidates`] ([`CandidateLogicalPostASAPDAGs::cost_sorted`]'s output):
 /// that ranks every candidate for one target in isolation and never commits
 /// to just one; this commits to exactly one (or none), and the count it
 /// ranks against — [`Self::effective_consumer_count`] — can differ from the
@@ -5040,7 +5040,7 @@ pub struct TargetSubDAGSelection<'a> {
     pub composition: Option<CompositionDecision<'a>>,
 }
 
-/// Why [`CandidatePostASAPDAGs::global_selection`] committed an exact composition at a
+/// Why [`CandidateLogicalPostASAPDAGs::global_selection`] committed an exact composition at a
 /// site: which child candidate it composes with, and the
 /// cost-units-per-second comparison against the raw fallback that it won.
 #[derive(Debug)]
@@ -5063,9 +5063,9 @@ pub struct CompositionDecision<'a> {
     pub inputs: ExactCompositionCostInputs,
 }
 
-/// [`CandidatePostASAPDAGs::global_selection`]'s result: one [`TargetSubDAGSelection`] per
-/// discovered site, in the same discovery order [`CandidatePostASAPDAGs::target_subdag_candidates`]/
-/// [`CandidatePostASAPDAGs::cost_sorted`] use.
+/// [`CandidateLogicalPostASAPDAGs::global_selection`]'s result: one [`TargetSubDAGSelection`] per
+/// discovered site, in the same discovery order [`CandidateLogicalPostASAPDAGs::target_subdag_candidates`]/
+/// [`CandidateLogicalPostASAPDAGs::cost_sorted`] use.
 #[derive(Debug)]
 pub struct GlobalSelection<'a> {
     order: Vec<*const PreASAPNode>,
@@ -5454,7 +5454,7 @@ fn is_composition_candidate(candidate: &ReplacementSubDAG) -> bool {
     matches!(candidate.replacement, Replacement::ExactComposition(_))
 }
 
-/// Everything [`CandidatePostASAPDAGs::global_selection`] threads between sites for
+/// Everything [`CandidateLogicalPostASAPDAGs::global_selection`] threads between sites for
 /// exact compositions (issue #171): child candidates already committed by
 /// an earlier parent, and the maintained summary above each site.
 #[derive(Default)]
@@ -5476,7 +5476,7 @@ struct CompositionOption<'a> {
 
 /// Every [`Replacement::ExactComposition`] candidate of `group` whose
 /// composed-plan rate is *known* and beats the raw-recompute baseline —
-/// costed against each compatible child candidate already in `CandidatePostASAPDAGs`
+/// costed against each compatible child candidate already in `CandidateLogicalPostASAPDAGs`
 /// (or the one an earlier parent committed). Unknown statistics yield no
 /// option at all: the conservative `KeepPreAsap` path stays.
 fn composition_options<'a>(
@@ -5599,7 +5599,7 @@ fn composition_options<'a>(
     options
 }
 
-impl<Id> CandidatePostASAPDAGs<Id> {
+impl<Id> CandidateLogicalPostASAPDAGs<Id> {
     /// The whole-plan (cross-group) selection step the module docs'
     /// "Whole-plan (cross-group) selection" section describes: one
     /// [`TargetSubDAGSelection`] per discovered site, each ranked against an
@@ -5607,7 +5607,7 @@ impl<Id> CandidatePostASAPDAGs<Id> {
     /// [`SharedSubtreeStrategy`] decision on the path to it — unlike
     /// [`Self::cost_sorted`], whose per-group ranking only ever sees a
     /// group's own raw [`TargetSubDAGCandidates::consumer_count`].
-    /// Uncertified DDSketch ratios remain in [`CandidatePostASAPDAGs`] for downstream
+    /// Uncertified DDSketch ratios remain in [`CandidateLogicalPostASAPDAGs`] for downstream
     /// inspection but are not chosen automatically by this selector.
     pub fn global_selection(&self, cost_model: &dyn CostModel) -> GlobalSelection<'_> {
         self.global_selection_impl(cost_model, None, None, None)
@@ -5964,7 +5964,7 @@ fn is_automatically_selectable(candidate: &ReplacementSubDAG, cost_model: &dyn C
 ///
 /// Composing this recurrence transitively up the whole ancestor chain (not
 /// just the immediate parent) is exactly what makes
-/// [`CandidatePostASAPDAGs::global_selection`]'s `effective_consumer_count` differ from
+/// [`CandidateLogicalPostASAPDAGs::global_selection`]'s `effective_consumer_count` differ from
 /// [`TargetSubDAGCandidates::consumer_count`] whenever a `RecomputeIndependently`
 /// ancestor sits anywhere on the path from a root to a site — see the
 /// module docs' "Whole-plan (cross-group) selection" section.
@@ -6078,7 +6078,7 @@ fn pick_shared_subtree_candidate(
 
 // ── reference graph + topological order ─────────────────────────────────
 
-/// The parent/child structure [`CandidatePostASAPDAGs::global_selection`]'s DP walks —
+/// The parent/child structure [`CandidateLogicalPostASAPDAGs::global_selection`]'s DP walks —
 /// built separately from [`discover_targets`]'s own `order`/`nodes`/`counts`
 /// maps (which only track *aggregate* reference counts, not per-parent
 /// breakdown or direction) rather than extending that already-reviewed,
@@ -6099,7 +6099,7 @@ struct ReferenceGraph {
     /// a node's "external" use. Nothing inside the tree decides this (it
     /// isn't a reference from another discovered site), so it's never
     /// subject to any ancestor's Share/Recompute choice — it's the base
-    /// case [`CandidatePostASAPDAGs::global_selection`]'s recurrence starts from.
+    /// case [`CandidateLogicalPostASAPDAGs::global_selection`]'s recurrence starts from.
     external_root_uses: HashMap<*const PreASAPNode, usize>,
 }
 
@@ -6110,7 +6110,7 @@ struct ReferenceGraph {
 /// their relational children as before. The
 /// graph is deliberately only used for topological ordering; effective-use
 /// counts are propagated through the one candidate actually selected.
-fn reference_graph<Id>(space: &CandidatePostASAPDAGs<Id>) -> ReferenceGraph {
+fn reference_graph<Id>(space: &CandidateLogicalPostASAPDAGs<Id>) -> ReferenceGraph {
     let mut graph = ReferenceGraph {
         parents_of: HashMap::new(),
         children_of: HashMap::new(),
@@ -6244,7 +6244,7 @@ fn direct_child_counts(node: &PreASAPNode) -> Vec<(*const PreASAPNode, usize)> {
 /// (first-seen-first), not a valid topological one: a node reached via two
 /// different root paths can have a parent that's discovered *after* it (see
 /// this function's own test for a worked diamond example), which is exactly
-/// backwards for [`CandidatePostASAPDAGs::global_selection`]'s recurrence.
+/// backwards for [`CandidateLogicalPostASAPDAGs::global_selection`]'s recurrence.
 fn topological_order(
     order: &[*const PreASAPNode],
     graph: &ReferenceGraph,
@@ -6370,16 +6370,16 @@ pub fn default_strategies_with_evidence<'a>(
 // ── search_workload ──────────────────────────────────────────────────────
 
 /// Search a whole workload's pre-ASAP roots for every candidate replacement
-/// [`default_strategies`] can find, deduped into a [`CandidatePostASAPDAGs`]. Candidate
+/// [`default_strategies`] can find, deduped into a [`CandidateLogicalPostASAPDAGs`]. Candidate
 /// *generation* uses the built-in [`DefaultCostModel`] (via
 /// [`default_strategies`], the same way [`SketchAlgorithmStrategy::default_cost_model`]
-/// does); call [`CandidatePostASAPDAGs::cost_sorted`] on the result for the final
+/// does); call [`CandidateLogicalPostASAPDAGs::cost_sorted`] on the result for the final
 /// `sorted_by(cost_model)` step. Use [`search_workload_with`] to plug in a
 /// custom strategy set (e.g. built via [`default_strategies_with`] for a
 /// deployment-specific [`CostModel`]).
 pub fn search_workload<Id>(
     roots: asap_types::pre_asap::CandidatePreASAPDAGs<Id>,
-) -> CandidatePostASAPDAGs<Id> {
+) -> CandidateLogicalPostASAPDAGs<Id> {
     search_workload_with(roots, &default_strategies())
 }
 
@@ -6399,12 +6399,12 @@ pub fn search_workload<Id>(
 /// section). Deduping candidate plans this way needs no
 /// [`CostModel`] at all — that only enters at two well-defined points: each
 /// [`ReplacementStrategy`] in `strategies` may already carry its own (e.g.
-/// [`SketchAlgorithmStrategy::new`]'s), and [`CandidatePostASAPDAGs::cost_sorted`]'s final
+/// [`SketchAlgorithmStrategy::new`]'s), and [`CandidateLogicalPostASAPDAGs::cost_sorted`]'s final
 /// ranking step takes one explicitly.
 pub fn search_workload_with<'s, Id>(
     roots: asap_types::pre_asap::CandidatePreASAPDAGs<Id>,
     strategies: &[Box<dyn ReplacementStrategy + 's>],
-) -> CandidatePostASAPDAGs<Id> {
+) -> CandidateLogicalPostASAPDAGs<Id> {
     let mut space = search_cse_workload_with(cse_workload(roots), strategies);
     space.prepare_compositions(&DefaultAccuracyModel, &HashMap::new());
     space
@@ -6417,7 +6417,7 @@ pub fn search_workload_with<'s, Id>(
 /// `accuracy_model`'s [`AccuracyModel::satisfies`]: a candidate whose
 /// guarantee is fully known and misses the target is moved from
 /// [`TargetSubDAGCandidates::candidates`] to [`TargetSubDAGCandidates::rejected`] *before*
-/// [`CandidatePostASAPDAGs::cost_sorted`]/[`CandidatePostASAPDAGs::global_selection`] ever rank the
+/// [`CandidateLogicalPostASAPDAGs::cost_sorted`]/[`CandidateLogicalPostASAPDAGs::global_selection`] ever rank the
 /// group. A constructible candidate with unknown accuracy remains visible for
 /// downstream review under an approximate target, but default whole-plan
 /// selection does not commit it. An exact target cannot accept an unknown
@@ -6433,7 +6433,7 @@ pub fn search_workload_with_targets<'s, Id>(
     roots: Vec<(Id, Rc<PreASAPNode>, Option<AccuracyTarget>)>,
     strategies: &[Box<dyn ReplacementStrategy + 's>],
     accuracy_model: &dyn AccuracyModel,
-) -> CandidatePostASAPDAGs<Id> {
+) -> CandidateLogicalPostASAPDAGs<Id> {
     let mut targets = Vec::with_capacity(roots.len());
     let roots = roots
         .into_iter()
@@ -6556,7 +6556,7 @@ fn cse_workload<Id>(
 fn search_cse_workload_with<'s, Id>(
     cse_roots: asap_types::pre_asap::CandidatePreASAPDAGs<Id>,
     strategies: &[Box<dyn ReplacementStrategy + 's>],
-) -> CandidatePostASAPDAGs<Id> {
+) -> CandidateLogicalPostASAPDAGs<Id> {
     let mut order = Vec::new();
     let mut nodes = HashMap::new();
     let mut counts: HashMap<*const PreASAPNode, usize> = HashMap::new();
@@ -6691,7 +6691,7 @@ fn search_cse_workload_with<'s, Id>(
 
     add_effective_count_cse_candidates(&order, &mut groups);
 
-    CandidatePostASAPDAGs {
+    CandidateLogicalPostASAPDAGs {
         roots: cse_roots,
         groups,
         order,
@@ -8317,7 +8317,7 @@ mod tests {
         assert_eq!(SharedSubtreeStrategy.replacements(&target).len(), 2);
     }
 
-    // ── search_workload / CandidatePostASAPDAGs / TargetSubDAGCandidates (merged from search.rs) ──
+    // ── search_workload / CandidateLogicalPostASAPDAGs / TargetSubDAGCandidates (merged from search.rs) ──
     //
     // Reuses this test module's own `metric_scan`/`agg` fixture helpers
     // above (identical to `search.rs`'s own copies, which are dropped here
@@ -9610,7 +9610,7 @@ mod tests {
                 )
             })
             .collect();
-        let space = CandidatePostASAPDAGs {
+        let space = CandidateLogicalPostASAPDAGs {
             roots,
             groups,
             order: order.clone(),
@@ -9716,7 +9716,7 @@ mod tests {
     // Moved from the former `bind.rs` (issue #251): `bind.rs`'s own
     // workload-wide orchestration (`implement_workload`/
     // `implement_workload_with`) was deleted. Current whole-workload logical
-    // selection uses `CandidatePostASAPDAGs::global_selection`; these tests exercise
+    // selection uses `CandidateLogicalPostASAPDAGs::global_selection`; these tests exercise
     // `construct_summary_agg`'s schema derivation end to end through
     // `realize_child` — production logic that still lives in this module —
     // so they move here rather than disappear. Unlike `bind.rs` (an

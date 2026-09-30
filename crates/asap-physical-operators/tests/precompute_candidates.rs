@@ -5,7 +5,8 @@ use asap_physical_operators::{
     operators::Operator,
     physical_planner::{
         compile, compile_candidate, compile_candidates, cut_candidate, enumerate_frontiers,
-        select_candidate, CandidateCost, InputContract, PhysicalCandidate, PhysicalDAG, Source,
+        select_candidate, CandidateCost, InputContract, PhysicalCandidate, PhysicalPostASAPDAG,
+        Source,
     },
     runtime::{Limits, RunContext, Scope},
     values::{Batch, Value},
@@ -14,7 +15,7 @@ use futures::{executor::block_on, StreamExt};
 use planner_types::{post_asap::*, pre_asap::DataType, types::AccuracyTarget, workload::*};
 use std::{collections::BTreeMap, rc::Rc, sync::Arc};
 
-fn grouped_rate_space() -> asap_aware_mapping::CandidatePostASAPDAGs<&'static str> {
+fn grouped_rate_space() -> asap_aware_mapping::CandidateLogicalPostASAPDAGs<&'static str> {
     let workload = PlanningWorkload {
         query_workload: QueryWorkload {
             language: QueryLanguage::PromQL,
@@ -51,7 +52,7 @@ fn grouped_rate_space() -> asap_aware_mapping::CandidatePostASAPDAGs<&'static st
     search_workload(vec![("grouped-rate", root)])
 }
 
-fn grouped_rate() -> PostASAPDAGTransport {
+fn grouped_rate() -> LogicalPostASAPDAGTransport {
     let space = grouped_rate_space();
     let selected = space
         .global_selection(&DefaultCostModel)
@@ -60,7 +61,7 @@ fn grouped_rate() -> PostASAPDAGTransport {
         .unwrap();
     export_post_asap_dag(&selected).unwrap()
 }
-fn run(plan: &PhysicalDAG, inputs: BTreeMap<u64, Batch>, scope: Scope) -> Vec<Batch> {
+fn run(plan: &PhysicalPostASAPDAG, inputs: BTreeMap<u64, Batch>, scope: Scope) -> Vec<Batch> {
     let sources = inputs
         .into_iter()
         .map(|(id, batch)| {
@@ -559,7 +560,7 @@ fn enumerated_grouped_rate_candidates_execute_numeric_query_outputs() {
 /// The per-frontier lowering used before compile-once cuts: each boundary
 /// choice lowers the precompute and query DAGs from the logical DAG again.
 fn recompiled_candidate(
-    dag: &PostASAPDAGTransport,
+    dag: &LogicalPostASAPDAGTransport,
     inputs: &BTreeMap<u64, InputContract>,
     roots: &[u64],
     frontier: &[u64],
@@ -589,7 +590,7 @@ fn recompiled_candidate(
 }
 
 fn assert_cuts_match_recompilation(
-    dag: &PostASAPDAGTransport,
+    dag: &LogicalPostASAPDAGTransport,
     inputs: BTreeMap<u64, InputContract>,
     roots: &[u64],
     min_frontiers: usize,

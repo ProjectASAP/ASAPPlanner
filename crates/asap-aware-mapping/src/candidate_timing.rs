@@ -3,7 +3,7 @@ use std::rc::Rc;
 
 use crate::{
     cost_model::CostModel,
-    replacement::{CandidatePostASAPDAGs, RealizationError},
+    replacement::{CandidateLogicalPostASAPDAGs, RealizationError},
     summary_maintenance_lifecycle::{
         enumerate_summary_maintenance_lifecycles, SummaryMaintenanceLifecycleCandidates,
     },
@@ -12,8 +12,8 @@ use crate::{
     SummaryMaintenanceTimingError, WorkloadDemand,
 };
 use asap_types::post_asap::{
-    index_post_asap_dag, ExecutionDataStateError, PostASAPDAG, PostASAPDAGAssignment,
-    PostASAPDAGIndex, PostASAPNodeId, SummaryMaintenanceLifecycle,
+    index_post_asap_dag, ExecutionDataStateError, LogicalPostASAPDAG, LogicalPostASAPDAGAssignment,
+    LogicalPostASAPDAGIndex, PostASAPNodeId, SummaryMaintenanceLifecycle,
     SummaryMaintenanceLifecycleGuarantee,
 };
 
@@ -45,7 +45,7 @@ pub enum CandidateTimingError {
 }
 
 struct PreparedTiming<'a> {
-    index: Rc<PostASAPDAGIndex>,
+    index: Rc<LogicalPostASAPDAGIndex>,
     lifecycles: SummaryMaintenanceLifecycleCandidates<'a>,
     count: usize,
 }
@@ -73,7 +73,7 @@ pub struct PostASAPCandidateMetadata<Id> {
     pub lifecycle: Option<LifecyclePostASAPDAG>,
 }
 
-impl<Id: Clone + PartialEq> CandidatePostASAPDAGs<Id> {
+impl<Id: Clone + PartialEq> CandidateLogicalPostASAPDAGs<Id> {
     /// Attach every lifecycle alternative for this root's logical candidates.
     /// Both budgets are checked before a collection can be iterated. Whole-
     /// workload selection must still coordinate choices and shared state.
@@ -112,7 +112,7 @@ impl<'a, Id> CandidateLifecyclePostASAPDAGs<'a, Id> {
     /// graph. Explicit selection helpers do not need another lifecycle API type.
     pub fn from_post_asap_dag(
         id: Id,
-        root: PostASAPDAG,
+        root: LogicalPostASAPDAG,
         context: CandidateTimingContext<'a>,
         assignment_limit: usize,
     ) -> Result<Self, CandidateTimingError> {
@@ -122,7 +122,7 @@ impl<'a, Id> CandidateLifecyclePostASAPDAGs<'a, Id> {
 
 fn prepare<'a, Id>(
     id: Id,
-    roots: impl IntoIterator<Item = PostASAPDAG>,
+    roots: impl IntoIterator<Item = LogicalPostASAPDAG>,
     rejected_assemblies: Vec<String>,
     context: CandidateTimingContext<'a>,
     limit: usize,
@@ -148,7 +148,7 @@ pub(crate) fn collect_timing<'a, Id>(
     enumerated: impl IntoIterator<
         Item = Result<
             (
-                Rc<PostASAPDAGIndex>,
+                Rc<LogicalPostASAPDAGIndex>,
                 SummaryMaintenanceLifecycleCandidates<'a>,
             ),
             CandidateTimingError,
@@ -185,7 +185,7 @@ pub(crate) fn collect_timing<'a, Id>(
 /// A logical candidate yields its assignments, or one diagnostic entry when it
 /// has none: a state with no lifecycle alternative must not vanish silently.
 fn prepared_timing(
-    index: Rc<PostASAPDAGIndex>,
+    index: Rc<LogicalPostASAPDAGIndex>,
     lifecycles: SummaryMaintenanceLifecycleCandidates<'_>,
     limit: usize,
 ) -> Result<PreparedTiming<'_>, CandidateTimingError> {
@@ -222,7 +222,7 @@ impl<Id: Clone> CandidateLifecyclePostASAPDAGs<'_, Id> {
     ) -> impl Iterator<
         Item = (
             PostASAPCandidateMetadata<Id>,
-            Result<PostASAPDAGAssignment, Rc<CandidateTimingError>>,
+            Result<LogicalPostASAPDAGAssignment, Rc<CandidateTimingError>>,
         ),
     > + '_ {
         self.logical

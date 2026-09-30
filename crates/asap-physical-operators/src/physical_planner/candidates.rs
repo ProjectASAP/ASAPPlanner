@@ -7,8 +7,8 @@ use super::*;
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 #[serde(try_from = "UncheckedCandidate")]
 pub struct PhysicalCandidate {
-    pub precompute: Option<PhysicalDAG>,
-    pub query: PhysicalDAG,
+    pub precompute: Option<PhysicalPostASAPDAG>,
+    pub query: PhysicalPostASAPDAG,
     pub materialized_outputs: BTreeMap<NodeId, InputContract>,
 }
 
@@ -21,7 +21,7 @@ pub struct PhysicalCandidate {
 /// contract used to build each output. This API never treats a result from a
 /// different window or revision as interchangeable merely because types match.
 pub fn compile_candidate(
-    dag: &PostASAPDAGTransport,
+    dag: &LogicalPostASAPDAGTransport,
     inputs: BTreeMap<NodeId, InputContract>,
     roots: &[NodeId],
     frontier: &[NodeId],
@@ -34,7 +34,7 @@ pub fn compile_candidate(
 /// each query DAG once and derives every placement choice from that result.
 /// The candidate is identical to [`compile_candidate`] for the same frontier.
 pub fn cut_candidate(
-    compiled: &PhysicalDAG,
+    compiled: &PhysicalPostASAPDAG,
     frontier: &[NodeId],
 ) -> Result<PhysicalCandidate, Error> {
     if frontier.is_empty() {
@@ -94,7 +94,7 @@ pub fn cut_candidate(
 /// aligns by value column) has the same timing at compile time as here.
 /// A query-time node feeding an ingestion-time node has no valid placement.
 pub fn frontier_from_timing(
-    dag: planner_types::post_asap::PostASAPDAGView<'_>,
+    dag: planner_types::post_asap::LogicalPostASAPDAGView<'_>,
 ) -> Result<Vec<NodeId>, Error> {
     use planner_types::post_asap::ExecutionTiming::IngestionTime;
     let timing = dag
@@ -129,7 +129,7 @@ pub fn frontier_from_timing(
 /// and deployment feasibility are evaluated separately before cost selection.
 /// Exceeding the search budget returns an error, never a partial inventory.
 pub fn enumerate_frontiers(
-    dag: &PostASAPDAGTransport,
+    dag: &LogicalPostASAPDAGTransport,
     inputs: &BTreeMap<NodeId, InputContract>,
     roots: &[NodeId],
     max_candidates: usize,
@@ -141,7 +141,7 @@ pub fn enumerate_frontiers(
 }
 
 fn enumerate_compiled_frontiers(
-    compiled: &PhysicalDAG,
+    compiled: &PhysicalPostASAPDAG,
     max_candidates: usize,
 ) -> Result<Vec<Vec<NodeId>>, Error> {
     if max_candidates == 0 {
@@ -197,7 +197,7 @@ fn enumerate_compiled_frontiers(
 /// individual failures visible; do not substitute another computation on error.
 /// The DAG is lowered once; each frontier is a [`cut_candidate`] of it.
 pub fn compile_candidates(
-    dag: &PostASAPDAGTransport,
+    dag: &LogicalPostASAPDAGTransport,
     inputs: BTreeMap<NodeId, InputContract>,
     roots: &[NodeId],
     frontiers: &[Vec<NodeId>],
@@ -212,9 +212,9 @@ pub fn compile_candidates(
 }
 
 // The cut descriptor is an implementation detail of the collection. A public
-// entry exposes its shared PhysicalDAG, metadata and diagnostics directly.
+// entry exposes its shared PhysicalPostASAPDAG, metadata and diagnostics directly.
 struct CompiledCut {
-    compiled: Arc<PhysicalDAG>,
+    compiled: Arc<PhysicalPostASAPDAG>,
     frontier: Vec<NodeId>,
 }
 
@@ -232,11 +232,11 @@ pub enum PhysicalCandidateError<E> {
 /// (for example `asap_aware_mapping::PostASAPCandidateMetadata`). The collection
 /// owns shared compilation and cut descriptors; callers do not assemble a second
 /// candidate wrapper or lose generation errors in a filter.
-pub struct CandidatePhysicalDAGs<M, E> {
+pub struct CandidatePhysicalPostASAPDAGs<M, E> {
     entries: Vec<(M, Result<CompiledCut, PhysicalCandidateError<E>>)>,
     rejected_assemblies: Vec<String>,
 }
-impl<M, E: Clone> CandidatePhysicalDAGs<M, E> {
+impl<M, E: Clone> CandidatePhysicalPostASAPDAGs<M, E> {
     pub fn len(&self) -> usize {
         self.entries.len()
     }
@@ -248,7 +248,12 @@ impl<M, E: Clone> CandidatePhysicalDAGs<M, E> {
     }
     pub fn iter(
         &self,
-    ) -> impl Iterator<Item = (&M, Result<&Arc<PhysicalDAG>, &PhysicalCandidateError<E>>)> {
+    ) -> impl Iterator<
+        Item = (
+            &M,
+            Result<&Arc<PhysicalPostASAPDAG>, &PhysicalCandidateError<E>>,
+        ),
+    > {
         self.entries
             .iter()
             .map(|(metadata, result)| (metadata, result.as_ref().map(|cut| &cut.compiled)))
@@ -283,15 +288,15 @@ pub fn compile_physical_dag_candidates<M, E>(
     candidates: impl IntoIterator<
         Item = (
             M,
-            Result<planner_types::post_asap::PostASAPDAGAssignment, E>,
+            Result<planner_types::post_asap::LogicalPostASAPDAGAssignment, E>,
         ),
     >,
     rejected_assemblies: Vec<String>,
     mut resolve_inputs: impl FnMut(
         &M,
-        &planner_types::post_asap::PostASAPDAGAssignment,
+        &planner_types::post_asap::LogicalPostASAPDAGAssignment,
     ) -> Result<(BTreeMap<NodeId, InputContract>, Vec<NodeId>), Error>,
-) -> CandidatePhysicalDAGs<M, E> {
+) -> CandidatePhysicalPostASAPDAGs<M, E> {
     use planner_types::post_asap::ExecutionTiming;
     // Keep graph identities alive, and include contracts/roots in reuse checks:
     // different candidate input boundaries must never share an invalid lowering.
@@ -348,18 +353,18 @@ pub fn compile_physical_dag_candidates<M, E>(
             (metadata, result)
         })
         .collect();
-    CandidatePhysicalDAGs {
+    CandidatePhysicalPostASAPDAGs {
         entries,
         rejected_assemblies,
     }
 }
 
 struct SharedCompilation {
-    index: std::rc::Rc<planner_types::post_asap::PostASAPDAGIndex>,
+    index: std::rc::Rc<planner_types::post_asap::LogicalPostASAPDAGIndex>,
     binary_timing: Vec<(u32, bool)>,
     inputs: BTreeMap<NodeId, InputContract>,
     roots: Vec<NodeId>,
-    compiled: Result<Arc<PhysicalDAG>, Error>,
+    compiled: Result<Arc<PhysicalPostASAPDAG>, Error>,
 }
 
 /// Complete workload cost supplied by scoped optimizer/deployment evidence.
@@ -428,8 +433,8 @@ pub fn select_candidate<T>(
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct UncheckedCandidate {
-    precompute: Option<PhysicalDAG>,
-    query: PhysicalDAG,
+    precompute: Option<PhysicalPostASAPDAG>,
+    query: PhysicalPostASAPDAG,
     materialized_outputs: BTreeMap<NodeId, InputContract>,
 }
 impl TryFrom<UncheckedCandidate> for PhysicalCandidate {
@@ -488,10 +493,15 @@ mod tests {
     use planner_types::workload::*;
 
     fn compile_test_candidates(
-        candidates: impl IntoIterator<Item = (usize, planner_types::post_asap::PostASAPDAGAssignment)>,
+        candidates: impl IntoIterator<
+            Item = (
+                usize,
+                planner_types::post_asap::LogicalPostASAPDAGAssignment,
+            ),
+        >,
         inputs: BTreeMap<NodeId, InputContract>,
         roots: &[NodeId],
-    ) -> CandidatePhysicalDAGs<usize, String> {
+    ) -> CandidatePhysicalPostASAPDAGs<usize, String> {
         compile_physical_dag_candidates(
             candidates
                 .into_iter()
@@ -501,18 +511,18 @@ mod tests {
         )
     }
 
-    fn grouped_root() -> planner_types::post_asap::PostASAPDAG {
+    fn grouped_root() -> planner_types::post_asap::LogicalPostASAPDAG {
         logical_root("sum by(job)(rate(m[1m]))")
     }
 
-    fn logical_root(query: &str) -> planner_types::post_asap::PostASAPDAG {
+    fn logical_root(query: &str) -> planner_types::post_asap::LogicalPostASAPDAG {
         logical_root_at(query, planner_types::types::AccuracyTarget::Exact)
     }
 
     fn logical_root_at(
         query: &str,
         accuracy: planner_types::types::AccuracyTarget,
-    ) -> planner_types::post_asap::PostASAPDAG {
+    ) -> planner_types::post_asap::LogicalPostASAPDAG {
         let workload = PlanningWorkload {
             query_workload: QueryWorkload {
                 language: QueryLanguage::PromQL,
@@ -551,7 +561,7 @@ mod tests {
     }
 
     fn grouped_rate() -> (
-        PostASAPDAGTransport,
+        LogicalPostASAPDAGTransport,
         BTreeMap<NodeId, InputContract>,
         NodeId,
     ) {
@@ -574,7 +584,7 @@ mod tests {
     #[test]
     fn named_candidates_share_graphs_and_preserve_cuts() {
         use planner_types::post_asap::{
-            index_post_asap_dag, ExecutionTiming, PostASAPDAGAssignment,
+            index_post_asap_dag, ExecutionTiming, LogicalPostASAPDAGAssignment,
         };
         let root = grouped_root();
         let index = std::rc::Rc::new(index_post_asap_dag(&root).unwrap());
@@ -585,7 +595,7 @@ mod tests {
         let inputs = raw_input(&index.to_transport());
         let assignments =
             [ExecutionTiming::QueryTime, ExecutionTiming::IngestionTime].map(|phase| {
-                PostASAPDAGAssignment::new(
+                LogicalPostASAPDAGAssignment::new(
                     index.clone(),
                     index.node_views().iter().map(|n| (n.id, phase)).collect(),
                 )
@@ -628,8 +638,8 @@ mod tests {
         let mut illegal = assignments[1].phases().clone();
         let first = index.edges().first().unwrap();
         illegal.insert(first.producer, ExecutionTiming::QueryTime);
-        assert!(PostASAPDAGAssignment::new(index.clone(), illegal).is_err());
-        assert!(PostASAPDAGAssignment::new(index, BTreeMap::new()).is_err());
+        assert!(LogicalPostASAPDAGAssignment::new(index.clone(), illegal).is_err());
+        assert!(LogicalPostASAPDAGAssignment::new(index, BTreeMap::new()).is_err());
     }
 
     /// Binary placement changes lowering, so these candidates must not share
@@ -637,7 +647,7 @@ mod tests {
     #[test]
     fn binary_timing_gets_distinct_compilations_and_errors_keep_identity() {
         use planner_types::post_asap::{
-            index_post_asap_dag, ExecutionTiming, PostASAPDAGAssignment,
+            index_post_asap_dag, ExecutionTiming, LogicalPostASAPDAGAssignment,
         };
         let lhs = logical_root("m");
         let rhs = logical_root("n");
@@ -676,7 +686,7 @@ mod tests {
             .collect();
         let assignments =
             [ExecutionTiming::QueryTime, ExecutionTiming::IngestionTime].map(|phase| {
-                PostASAPDAGAssignment::new(
+                LogicalPostASAPDAGAssignment::new(
                     index.clone(),
                     index.node_views().iter().map(|n| (n.id, phase)).collect(),
                 )
@@ -711,7 +721,7 @@ mod tests {
     #[test]
     fn only_binary_lowering_depends_on_timing() {
         use planner_types::post_asap::{
-            index_post_asap_dag, ExecutionTiming, PostASAPDAGAssignment,
+            index_post_asap_dag, ExecutionTiming, LogicalPostASAPDAGAssignment,
         };
         use planner_types::types::AccuracyTarget::{Epsilon, Exact};
         let queries = [
@@ -737,7 +747,7 @@ mod tests {
             let roots = [u64::from(index.root_id.0)];
             let lowered =
                 [ExecutionTiming::QueryTime, ExecutionTiming::IngestionTime].map(|phase| {
-                    let assignment = PostASAPDAGAssignment::new(
+                    let assignment = LogicalPostASAPDAGAssignment::new(
                         index.clone(),
                         index.node_views().iter().map(|n| (n.id, phase)).collect(),
                     )
@@ -771,7 +781,8 @@ mod tests {
     #[test]
     fn candidates_match_independent_compilation_of_their_assignments() {
         use planner_types::post_asap::{
-            index_post_asap_dag, ExecutionTiming, PostASAPDAGAssignment, PostASAPDAGDocument,
+            index_post_asap_dag, ExecutionTiming, LogicalPostASAPDAGAssignment,
+            LogicalPostASAPDAGDocument,
         };
         let lhs = logical_root("m");
         let rhs = logical_root("n");
@@ -807,7 +818,7 @@ mod tests {
         let roots = [u64::from(index.root_id.0)];
         let assignments =
             [ExecutionTiming::QueryTime, ExecutionTiming::IngestionTime].map(|phase| {
-                PostASAPDAGAssignment::new(
+                LogicalPostASAPDAGAssignment::new(
                     index.clone(),
                     index.node_views().iter().map(|n| (n.id, phase)).collect(),
                 )
@@ -820,8 +831,9 @@ mod tests {
         );
         for (i, assignment) in assignments.iter().enumerate() {
             let bytes =
-                serde_json::to_vec(&PostASAPDAGDocument::new(assignment.to_transport())).unwrap();
-            let document: PostASAPDAGDocument = serde_json::from_slice(&bytes).unwrap();
+                serde_json::to_vec(&LogicalPostASAPDAGDocument::new(assignment.to_transport()))
+                    .unwrap();
+            let document: LogicalPostASAPDAGDocument = serde_json::from_slice(&bytes).unwrap();
             document.validate().unwrap();
             let frontier = frontier_from_timing(document.dag.as_view()).unwrap();
             let expected =
@@ -843,10 +855,10 @@ mod tests {
     #[test]
     fn shared_compilation_respects_contracts_and_roots() {
         use planner_types::post_asap::{
-            index_post_asap_dag, ExecutionTiming, PostASAPDAGAssignment,
+            index_post_asap_dag, ExecutionTiming, LogicalPostASAPDAGAssignment,
         };
         let index = std::rc::Rc::new(index_post_asap_dag(&grouped_root()).unwrap());
-        let assignment = PostASAPDAGAssignment::new(
+        let assignment = LogicalPostASAPDAGAssignment::new(
             index.clone(),
             index
                 .node_views()
@@ -901,9 +913,9 @@ mod tests {
     }
 
     fn with_timing(
-        dag: &PostASAPDAGTransport,
-        timing: impl Fn(&PostASAPDAGNode) -> planner_types::post_asap::ExecutionTiming,
-    ) -> PostASAPDAGTransport {
+        dag: &LogicalPostASAPDAGTransport,
+        timing: impl Fn(&LogicalPostASAPDAGNode) -> planner_types::post_asap::ExecutionTiming,
+    ) -> LogicalPostASAPDAGTransport {
         let mut timed = dag.clone();
         for node in &mut timed.nodes {
             node.output_state.timing = timing(node);
@@ -915,7 +927,7 @@ mod tests {
         timed
     }
 
-    fn raw_input(dag: &PostASAPDAGTransport) -> BTreeMap<NodeId, InputContract> {
+    fn raw_input(dag: &LogicalPostASAPDAGTransport) -> BTreeMap<NodeId, InputContract> {
         let raw = dag
             .nodes
             .iter()

@@ -7,19 +7,20 @@ There are no compatibility aliases for the former graph names.
 |---|---|
 | `QueryExpr`, `ResolvedQueryExpr`, `UnresolvedQueryExpr`, `QueryExprError` | `PreASAPNode`, `ResolvedPreASAPNode`, `UnresolvedPreASAPNode`, `PreASAPNodeError` |
 | `Rc<QueryExpr>` | `PreASAPDAG` (same shared root representation) |
-| `SummaryNode`, `Rc<SummaryNode>` | `PostASAPNode`, `PostASAPDAG` |
-| `PlanSpace<Id>` | `CandidatePostASAPDAGs<Id>` |
-| `PostAsapDag`, `PostAsapDagDocument` | `PostASAPDAGTransport`, `PostASAPDAGDocument` for explicit transport |
-| `PostAsapNodeId`, `PostAsapOperatorPayload`, `PostAsapDagNode`, `PostAsapDagEdge`, `PostAsapDagValidationError`, `PostAsapNodeIdentityMap`, `PostAsapSubstitution` | `PostASAPNodeId`, `PostASAPOperatorPayload`, `PostASAPDAGNode`, `PostASAPDAGEdge`, `PostASAPDAGValidationError`, `PostASAPNodeIdentityMap`, `PostASAPSubstitution` |
-| `InvalidPostAsapDag` error variants | `InvalidPostASAPDAG` |
+| `SummaryNode`, `Rc<SummaryNode>` | `PostASAPNode`, `LogicalPostASAPDAG` |
+| `PlanSpace<Id>` | `CandidateLogicalPostASAPDAGs<Id>` |
+| `PostAsapDag`, `PostAsapDagDocument` | `LogicalPostASAPDAGTransport`, `LogicalPostASAPDAGDocument` for explicit transport |
+| `PostAsapNodeId`, `PostAsapOperatorPayload`, `PostAsapDagNode`, `PostAsapDagEdge`, `PostAsapDagValidationError`, `PostAsapNodeIdentityMap`, `PostAsapSubstitution` | `PostASAPNodeId`, `PostASAPOperatorPayload`, `LogicalPostASAPDAGNode`, `LogicalPostASAPDAGEdge`, `LogicalPostASAPDAGValidationError`, `PostASAPNodeIdentityMap`, `PostASAPSubstitution` |
+| `InvalidPostAsapDag` error variants | `InvalidLogicalPostASAPDAG` |
 | `compile_post_asap_dag` | `export_post_asap_dag` |
-| `compile_post_asap_dag_with_node_ids`, `PostAsapDagCompilation` | `index_post_asap_dag` returning `PostASAPDAGIndex` (`node_ids`, `view()`, `to_transport()`) |
+| `compile_post_asap_dag_with_node_ids`, `PostAsapDagCompilation` | `index_post_asap_dag` returning `LogicalPostASAPDAGIndex` (`node_ids`, `view()`, `to_transport()`) |
 | `execution_timed_dag` | `export_timed_dag` for transport; use `execution_assignment` for shared compilation |
-| `CompiledPhysicalDag` | `PhysicalDAG` |
-| Runtime-bound `PhysicalDag` | `PhysicalExecution`, the execution handle returned by `PhysicalDAG::instantiate` |
+| `CompiledPhysicalDag` | `PhysicalPostASAPDAG` |
+| Runtime-bound `PhysicalDag` | `PhysicalExecution`, the execution handle returned by `PhysicalPostASAPDAG::instantiate` |
 | `compile(&dag, …)`, `frontier_from_timing(&dag)` over a transport | `compile(dag.as_view(), …)`, `frontier_from_timing(dag.as_view())`; an index or assignment passes `view()` |
 | `enumerate_summary_maintenance_lifecycles`, `SummaryMaintenanceLifecycleCandidates` | `CandidateLifecyclePostASAPDAGs` (see below) |
 | `SummaryMaintenanceLifecyclePlan`, `SummaryMaintenanceLifecyclePlanError` | `LifecyclePostASAPDAG` (same fields), `LifecyclePostASAPDAGError` |
+| Earlier #508/#480 names: `PostASAPDAG`, `CandidatePostASAPDAGs`, `PhysicalDAG`, `CandidatePhysicalDAGs`; `PostASAPDAG*` compounds (`Node`, `Edge`, `Transport`, `Document`, `ValidationError`, `View`, `Assignment`, `Index`); `InvalidPostASAPDAG` | `LogicalPostASAPDAG`, `CandidateLogicalPostASAPDAGs`, `PhysicalPostASAPDAG`, `CandidatePhysicalPostASAPDAGs`; `LogicalPostASAPDAG*` compounds; `InvalidLogicalPostASAPDAG` |
 
 ## Candidate generation
 
@@ -28,7 +29,7 @@ There are no compatibility aliases for the former graph names.
 and repeating entries retain their identities. Current frontends lower each
 entry deterministically. This function does not invoke an optimization pass.
 `search_workload` and the target-aware search APIs consume the same root/ID
-collection and produce the compact `CandidatePostASAPDAGs<Id>`.
+collection and produce the compact `CandidateLogicalPostASAPDAGs<Id>`.
 
 The normal stage transition is:
 
@@ -50,7 +51,7 @@ let physical = compile_physical_dag_candidates(
 ```
 
 `timed` has type `CandidateLifecyclePostASAPDAGs<'a, Id>`; `physical` has type
-`CandidatePhysicalDAGs<PostASAPCandidateMetadata<Id>, Rc<CandidateTimingError>>`.
+`CandidatePhysicalPostASAPDAGs<PostASAPCandidateMetadata<Id>, Rc<CandidateTimingError>>`.
 `CandidateTimingContext` binds the root's `WorkloadDemand`, planning clock,
 horizon, lifecycle capabilities and cost model. No winner-selection helper runs
 during these transitions.
@@ -74,15 +75,15 @@ is bound, and `select_lifecycles(logical_index, choices)` remains an explicit
 opt-in selection operation.
 
 `compile_physical_dag_candidates` accepts any iterator of
-`(metadata, Result<PostASAPDAGAssignment, E>)`, so the physical crate does not
+`(metadata, Result<LogicalPostASAPDAGAssignment, E>)`, so the physical crate does not
 depend on the mapping crate. Its contract resolver can supply different inputs
 and roots for different realizations. The physical collection keeps every
 timing or compilation failure with its original metadata:
 `PhysicalCandidateError::Timing(E)` keeps the caller's typed timing error, and
 `PhysicalCandidateError::Compile` holds a compilation error. It exposes shared
-`PhysicalDAG`s through `iter()`, frontiers through `frontier(index)`, and
+`PhysicalPostASAPDAG`s through `iter()`, frontiers through `frontier(index)`, and
 execution cuts through `materialize(index)`. Cut descriptors and compilation
-reuse are internal to `CandidatePhysicalDAGs`.
+reuse are internal to `CandidatePhysicalPostASAPDAGs`.
 
 Whole-workload selection must still account for shared state and compatible
 assignments across roots. Independent per-root minima do not prove a workload
@@ -90,7 +91,7 @@ minimum. Existing explicit selection helpers remain available.
 
 ## Representation and validation
 
-`PostASAPDAG` is the authoritative shared logical graph. Its index keeps the
+`LogicalPostASAPDAG` is the authoritative shared logical graph. Its index keeps the
 shared node references and projects node and edge records once for
 compilation; the compiler uses the same validator and operator compiler for
 those records and for imported transport documents. Export a flat graph

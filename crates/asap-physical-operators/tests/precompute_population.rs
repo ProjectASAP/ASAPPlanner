@@ -2,7 +2,7 @@
 use asap_physical_operators::{
     factory::create_planner_accumulator,
     operators::Operator,
-    physical_planner::{precompute, PhysicalDAG, Source},
+    physical_planner::{precompute, PhysicalPostASAPDAG, Source},
     runtime::{Limits, RunContext, Scope},
     values::{Batch, Value},
     Statistic,
@@ -44,14 +44,14 @@ fn finalized_shared_panes_rebuild_one_global_summary_after_recovery() {
         (SummaryInputExpr::Constant(1.), 4.),
     ] {
         let nodes = vec![
-            PostASAPDAGNode {
+            LogicalPostASAPDAGNode {
                 id: PostASAPNodeId(0),
                 payload: PostASAPOperatorPayload::SummaryMerge,
                 output_state: ExecutionDataState::INGESTION_SUMMARY,
                 output_schema: state_schema.clone(),
                 guarantee: None,
             },
-            PostASAPDAGNode {
+            LogicalPostASAPDAGNode {
                 id: PostASAPNodeId(1),
                 payload: PostASAPOperatorPayload::Value {
                     operation: ValueOperation::FinalizeExactAccumulator,
@@ -60,7 +60,7 @@ fn finalized_shared_panes_rebuild_one_global_summary_after_recovery() {
                 output_schema: value_schema.clone(),
                 guarantee: None,
             },
-            PostASAPDAGNode {
+            LogicalPostASAPDAGNode {
                 id: PostASAPNodeId(2),
                 payload: PostASAPOperatorPayload::Binary {
                     operator: BinaryOperator {
@@ -74,7 +74,7 @@ fn finalized_shared_panes_rebuild_one_global_summary_after_recovery() {
                 output_schema: value_schema.clone(),
                 guarantee: None,
             },
-            PostASAPDAGNode {
+            LogicalPostASAPDAGNode {
                 id: PostASAPNodeId(3),
                 payload: PostASAPOperatorPayload::SummaryAgg {
                     family: family.clone(),
@@ -97,7 +97,7 @@ fn finalized_shared_panes_rebuild_one_global_summary_after_recovery() {
             (2, 3, EdgeRole::Input),
         ]
         .into_iter()
-        .map(|(producer, consumer, role)| PostASAPDAGEdge {
+        .map(|(producer, consumer, role)| LogicalPostASAPDAGEdge {
             producer: PostASAPNodeId(producer),
             consumer: PostASAPNodeId(consumer),
             role,
@@ -107,7 +107,7 @@ fn finalized_shared_panes_rebuild_one_global_summary_after_recovery() {
             window: WindowEdgeCompatibility::NotApplicable,
         })
         .collect();
-        let dag = PostASAPDAGTransport {
+        let dag = LogicalPostASAPDAGTransport {
             nodes,
             edges,
             root: PostASAPNodeId(3),
@@ -136,7 +136,8 @@ fn finalized_shared_panes_rebuild_one_global_summary_after_recovery() {
         );
         let program = precompute::compile(&dag, &[0], &[3]).unwrap();
         let program =
-            serde_json::from_slice::<PhysicalDAG>(&serde_json::to_vec(&program).unwrap()).unwrap();
+            serde_json::from_slice::<PhysicalPostASAPDAG>(&serde_json::to_vec(&program).unwrap())
+                .unwrap();
         assert_eq!(program.input_contracts().count(), 1);
         for revision in [1, 2] {
             let rows = [
@@ -223,8 +224,8 @@ fn state_graph(
     family: SummaryFamilyType,
     target: Option<SummaryFamilyType>,
     merge: bool,
-) -> PhysicalDAG {
-    let mut nodes = vec![PostASAPDAGNode {
+) -> PhysicalPostASAPDAG {
+    let mut nodes = vec![LogicalPostASAPDAGNode {
         id: PostASAPNodeId(0),
         payload: PostASAPOperatorPayload::SummaryMerge,
         output_state: ExecutionDataState::INGESTION_SUMMARY,
@@ -232,14 +233,14 @@ fn state_graph(
         guarantee: None,
     }];
     if merge {
-        nodes.push(PostASAPDAGNode {
+        nodes.push(LogicalPostASAPDAGNode {
             id: PostASAPNodeId(1),
             payload: PostASAPOperatorPayload::SummaryMerge,
             ..nodes[0].clone()
         });
     }
     let read_id = nodes.len() as u32;
-    nodes.push(PostASAPDAGNode {
+    nodes.push(LogicalPostASAPDAGNode {
         id: PostASAPNodeId(read_id),
         payload: PostASAPOperatorPayload::Value {
             operation: ValueOperation::FinalizeExactAccumulator,
@@ -249,7 +250,7 @@ fn state_graph(
         guarantee: None,
     });
     if let Some(target) = target {
-        nodes.push(PostASAPDAGNode {
+        nodes.push(LogicalPostASAPDAGNode {
             id: PostASAPNodeId(nodes.len() as u32),
             payload: PostASAPOperatorPayload::SummaryAgg {
                 family: target.clone(),
@@ -263,7 +264,7 @@ fn state_graph(
         });
     }
     let edges = (1..nodes.len())
-        .map(|i| PostASAPDAGEdge {
+        .map(|i| LogicalPostASAPDAGEdge {
             producer: nodes[i - 1].id,
             consumer: nodes[i].id,
             role: EdgeRole::Input,
@@ -275,20 +276,21 @@ fn state_graph(
         .collect();
     let root = nodes.last().unwrap().id;
     precompute::compile(
-        &PostASAPDAGTransport { nodes, edges, root },
+        &LogicalPostASAPDAGTransport { nodes, edges, root },
         &[0],
         &[u64::from(root.0)],
     )
     .unwrap()
 }
 fn native_run(
-    program: &PhysicalDAG,
+    program: &PhysicalPostASAPDAG,
     family: SummaryFamilyType,
     states: Vec<Arc<dyn asap_physical_operators::AggregateCore>>,
     context: RunContext,
 ) -> Result<Vec<Vec<Value>>, asap_physical_operators::Error> {
     let program =
-        serde_json::from_slice::<PhysicalDAG>(&serde_json::to_vec(&program).unwrap()).unwrap();
+        serde_json::from_slice::<PhysicalPostASAPDAG>(&serde_json::to_vec(&program).unwrap())
+            .unwrap();
     let rows = states
         .into_iter()
         .enumerate()

@@ -361,7 +361,7 @@ returns the child's original subtree, and assembly keeps it as is.
 **Accuracy check during search**: binding sets no `guarantee` slot (§2.2), so the
 candidate filter in `search_workload_with_targets` and `prepare_compositions` run
 `derive_guarantees` on the candidate alone, with a fresh memo, then check its accuracy target. The derived
-copy is only read, then dropped: CandidatePostASAPDAGs keeps the original candidate, whose nodes are
+copy is only read, then dropped: CandidateLogicalPostASAPDAGs keeps the original candidate, whose nodes are
 shared with other queries.
 
 **Assembly** — one rule replaces `assemble_residual`:

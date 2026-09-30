@@ -80,7 +80,7 @@ pub fn series_row(
 /// TopK result; ranking remains a native physical operator.
 pub fn compile_current_series_readout(
     selected: &Rc<planner_types::post_asap::PostASAPNode>,
-) -> Result<PhysicalDAG, Error> {
+) -> Result<PhysicalPostASAPDAG, Error> {
     use planner_types::post_asap::{
         export_post_asap_dag, maintained_population::PopulationReadout, SummaryField,
     };
@@ -191,7 +191,13 @@ pub fn compile_current_series_readout(
 /// that frontier to ingestion time or authorize combining finalized rates.
 pub fn compile_rate_ranking(
     selected: &Rc<planner_types::post_asap::PostASAPNode>,
-) -> Result<(Rc<planner_types::post_asap::PostASAPNode>, PhysicalDAG), Error> {
+) -> Result<
+    (
+        Rc<planner_types::post_asap::PostASAPNode>,
+        PhysicalPostASAPDAG,
+    ),
+    Error,
+> {
     use planner_types::post_asap::{index_post_asap_dag, ExactKind, PostASAPNode, SummaryExpr};
     fn frontier(node: &Rc<PostASAPNode>) -> Option<Rc<PostASAPNode>> {
         match &node.expr {
@@ -244,7 +250,7 @@ pub fn compile_rate_ranking(
 /// Rate readouts runs at ingestion time: fresh aggregate state per closed
 /// window. The input is the complete collection of per-series counter states.
 pub fn compile_fixed_window_rate_aggregation(
-    dag: &planner_types::post_asap::PostASAPDAGTransport,
+    dag: &planner_types::post_asap::LogicalPostASAPDAGTransport,
 ) -> Result<PhysicalCandidate, Error> {
     use planner_types::post_asap::{ExactKind, ExecutionTiming, SketchAlgorithm};
     let sources = dag

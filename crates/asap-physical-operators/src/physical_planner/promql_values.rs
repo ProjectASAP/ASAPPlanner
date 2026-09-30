@@ -12,13 +12,13 @@ pub fn matrix_schema() -> Schema {
     crate::operators::vector_window::matrix_schema()
 }
 
-pub fn compile_scalar(value: f64) -> Result<PhysicalDAG, Error> {
+pub fn compile_scalar(value: f64) -> Result<PhysicalPostASAPDAG, Error> {
     let operator = Operator::scalar(
         crate::values::Value::Float64(value),
         planner_types::pre_asap::DataType::Float64,
     )?
     .with_output_schema(scalar_schema())?;
-    PhysicalDAG::from_operators(
+    PhysicalPostASAPDAG::from_operators(
         BTreeMap::new(),
         BTreeMap::from([(0, (vec![], operator))]),
         vec![0],
@@ -28,7 +28,7 @@ pub fn compile_scalar(value: f64) -> Result<PhysicalDAG, Error> {
 pub fn compile_temporal(
     intent: &AggIntent<ColumnRef>,
     preserve_metric_name: bool,
-) -> Result<PhysicalDAG, Error> {
+) -> Result<PhysicalPostASAPDAG, Error> {
     let operator = Operator::range_window(intent.clone())?;
     let mut operators = vec![operator];
     if !preserve_metric_name {
@@ -50,8 +50,8 @@ pub fn compile_temporal(
     unary(operators, matrix_schema())
 }
 
-pub fn compile_histogram_quantile() -> Result<PhysicalDAG, Error> {
-    PhysicalDAG::from_operators(
+pub fn compile_histogram_quantile() -> Result<PhysicalPostASAPDAG, Error> {
+    PhysicalPostASAPDAG::from_operators(
         BTreeMap::from([
             (0, InputContract::bounded(scalar_schema())),
             (1, InputContract::bounded(vector_schema())),
@@ -67,11 +67,11 @@ pub fn compile_binary(
     return_bool: bool,
     left_scalar: bool,
     right_scalar: bool,
-) -> Result<PhysicalDAG, Error> {
+) -> Result<PhysicalPostASAPDAG, Error> {
     let left = crate::operators::vector_binary::value_schema(left_scalar);
     let right = crate::operators::vector_binary::value_schema(right_scalar);
     let op = Operator::vector_binary(left.clone(), right.clone(), operator.clone(), return_bool)?;
-    PhysicalDAG::from_operators(
+    PhysicalPostASAPDAG::from_operators(
         BTreeMap::from([
             (0, InputContract::bounded(left)),
             (1, InputContract::bounded(right)),
@@ -81,9 +81,9 @@ pub fn compile_binary(
     )
 }
 
-fn unary(operators: Vec<Operator>, input: Schema) -> Result<PhysicalDAG, Error> {
+fn unary(operators: Vec<Operator>, input: Schema) -> Result<PhysicalPostASAPDAG, Error> {
     let root = operators.len() as u64;
-    PhysicalDAG::from_operators(
+    PhysicalPostASAPDAG::from_operators(
         BTreeMap::from([(0, InputContract::bounded(input))]),
         operators
             .into_iter()
@@ -134,7 +134,7 @@ fn vector_output(input: Schema, labels: usize, value: usize) -> Result<Operator,
 pub fn compile_aggregate(
     intent: &AggIntent<ColumnRef>,
     grouping: &GroupKeys<ColumnRef>,
-) -> Result<PhysicalDAG, Error> {
+) -> Result<PhysicalPostASAPDAG, Error> {
     let project = grouped(grouping)?;
     let reduction = match intent {
         AggIntent::Sum { .. } => Reduction::Sum(1),
@@ -153,7 +153,7 @@ pub fn compile_aggregate(
 pub fn compile_sort(
     descending: bool,
     grouping: &GroupKeys<ColumnRef>,
-) -> Result<PhysicalDAG, Error> {
+) -> Result<PhysicalPostASAPDAG, Error> {
     let project = grouped(grouping)?;
     let sort = Operator::sort(
         project.schema(),
@@ -172,14 +172,14 @@ pub fn compile_limit(
     n: u64,
     offset: u64,
     grouping: &GroupKeys<ColumnRef>,
-) -> Result<PhysicalDAG, Error> {
+) -> Result<PhysicalPostASAPDAG, Error> {
     let project = grouped(grouping)?;
     let limit = Operator::limit(project.schema(), n, offset, vec![2])?;
     let output = vector_output(limit.schema(), 0, 1)?;
     unary(vec![project, limit, output], vector_schema())
 }
 
-pub fn compile_negate(scalar: bool) -> Result<PhysicalDAG, Error> {
+pub fn compile_negate(scalar: bool) -> Result<PhysicalPostASAPDAG, Error> {
     let input = if scalar {
         scalar_schema()
     } else {
@@ -200,7 +200,7 @@ pub fn compile_negate(scalar: bool) -> Result<PhysicalDAG, Error> {
     unary(vec![Operator::project(input.clone(), columns)?], input)
 }
 
-pub fn compile_vector_to_scalar() -> Result<PhysicalDAG, Error> {
+pub fn compile_vector_to_scalar() -> Result<PhysicalPostASAPDAG, Error> {
     unary(
         vec![Operator::vector_to_scalar(vector_schema(), 1)?.with_output_schema(scalar_schema())?],
         vector_schema(),
@@ -224,7 +224,7 @@ pub fn compile_exact_readout(
     family: SummaryFamilyType,
     lookback_ms: u64,
     preserve_metric_name: bool,
-) -> Result<PhysicalDAG, Error> {
+) -> Result<PhysicalPostASAPDAG, Error> {
     use planner_types::post_asap::ExactKind;
     let statistic = match &family {
         SummaryFamilyType::ExactAggregate(kind, _) => match kind {

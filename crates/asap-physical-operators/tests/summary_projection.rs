@@ -3,7 +3,7 @@ use asap_physical_operators::{
     expressions::Expression,
     factory::create_planner_accumulator,
     operators::Operator,
-    physical_planner::{compile, InputContract, PhysicalDAG, Source},
+    physical_planner::{compile, InputContract, PhysicalPostASAPDAG, Source},
     runtime::{Limits, RunContext, Scope},
     values::{Batch, Value},
 };
@@ -44,16 +44,16 @@ fn post_asap_summary_projection_survives_recovery() {
         ],
         time_index: None,
     };
-    let dag = PostASAPDAGTransport {
+    let dag = LogicalPostASAPDAGTransport {
         nodes: vec![
-            PostASAPDAGNode {
+            LogicalPostASAPDAGNode {
                 id: PostASAPNodeId(0),
                 payload: PostASAPOperatorPayload::SummaryMerge,
                 output_schema: (*schema).clone(),
                 output_state: ExecutionDataState::INGESTION_SUMMARY,
                 guarantee: None,
             },
-            PostASAPDAGNode {
+            LogicalPostASAPDAGNode {
                 id: PostASAPNodeId(1),
                 payload: PostASAPOperatorPayload::Value {
                     operation: ValueOperation::Project {
@@ -72,7 +72,7 @@ fn post_asap_summary_projection_survives_recovery() {
                 guarantee: None,
             },
         ],
-        edges: vec![PostASAPDAGEdge {
+        edges: vec![LogicalPostASAPDAGEdge {
             producer: PostASAPNodeId(0),
             consumer: PostASAPNodeId(1),
             role: EdgeRole::Input,
@@ -90,11 +90,14 @@ fn post_asap_summary_projection_survives_recovery() {
     )
     .unwrap();
     let encoded = serde_json::to_vec(&program).unwrap();
-    let program = serde_json::from_slice::<PhysicalDAG>(&encoded).unwrap();
+    let program = serde_json::from_slice::<PhysicalPostASAPDAG>(&encoded).unwrap();
     let mut forged: serde_json::Value = serde_json::from_slice(&encoded).unwrap();
     forged["nodes"]["1"]["Operator"]["operator"]["output"]["fields"][1]["dtype"] =
         serde_json::json!({"Plain": "float64"});
-    assert!(serde_json::from_slice::<PhysicalDAG>(&serde_json::to_vec(&forged).unwrap()).is_err());
+    assert!(
+        serde_json::from_slice::<PhysicalPostASAPDAG>(&serde_json::to_vec(&forged).unwrap())
+            .is_err()
+    );
     assert!(Operator::project(
         schema.clone(),
         vec![("invalid".into(), Expression::Column(2))]

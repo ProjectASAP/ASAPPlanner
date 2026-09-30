@@ -57,8 +57,9 @@ pub use guarantee::{
 };
 pub use post_asap_dag::{
     export_post_asap_dag, index_post_asap_dag, EdgeRole, GroupingEdgeCompatibility,
-    PostASAPDAGAssignment, PostASAPDAGDocument, PostASAPDAGEdge, PostASAPDAGIndex, PostASAPDAGNode,
-    PostASAPDAGTransport, PostASAPDAGValidationError, PostASAPDAGView, PostASAPNodeId,
+    LogicalPostASAPDAGAssignment, LogicalPostASAPDAGDocument, LogicalPostASAPDAGEdge,
+    LogicalPostASAPDAGIndex, LogicalPostASAPDAGNode, LogicalPostASAPDAGTransport,
+    LogicalPostASAPDAGValidationError, LogicalPostASAPDAGView, PostASAPNodeId,
     PostASAPNodeIdentityMap, PostASAPOperatorPayload, WindowEdgeCompatibility,
     POST_ASAP_DAG_WIRE_VERSION,
 };
@@ -85,4 +86,4 @@ pub use summary_window::{
 
 /// Authoritative shared logical graph; lifecycle timing is an assignment over
 /// its nodes, not a second computation graph.
-pub type PostASAPDAG = std::rc::Rc<PostASAPNode>;
+pub type LogicalPostASAPDAG = std::rc::Rc<PostASAPNode>;

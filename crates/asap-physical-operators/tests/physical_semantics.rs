@@ -360,7 +360,7 @@ fn global_extrema_bind_with_planner_derived_schema() {
         .unwrap();
         let result = derived.columns[0].clone();
         let output = schema(&[(&result.name, result.dtype, result.nullable)]);
-        let node = PostASAPDAGNode {
+        let node = LogicalPostASAPDAGNode {
             id: PostASAPNodeId(1),
             payload: PostASAPOperatorPayload::Value {
                 operation: ValueOperation::Exact(ExactOperation::Aggregate {

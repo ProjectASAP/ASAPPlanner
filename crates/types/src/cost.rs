@@ -73,7 +73,7 @@ pub enum BaselineRef {
     /// — "do nothing" (never apply ASAP-aware replacement at all).
     PreAsapRecomputation,
     /// The best-ranked *non-selected* legal candidate for the same target
-    /// (`rank` into that target's own `CandidatePostASAPDAGs::cost_sorted` ordering,
+    /// (`rank` into that target's own `CandidateLogicalPostASAPDAGs::cost_sorted` ordering,
     /// `0` = best; a baseline referencing this variant is always `rank >=
     /// 1`, since `rank 0` is what got selected).
     HighestRankedNonSelectedCandidate { rank: usize },

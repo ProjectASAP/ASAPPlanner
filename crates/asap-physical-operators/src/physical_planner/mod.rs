@@ -10,8 +10,9 @@ use crate::{
 };
 use planner_types::{
     post_asap::{
-        ExactOperation, PostASAPDAGNode, PostASAPDAGTransport, PostASAPOperatorPayload as Payload,
-        SketchQuery, SummaryFamilyType, SummaryInputExpr, ValueOperation,
+        ExactOperation, LogicalPostASAPDAGNode, LogicalPostASAPDAGTransport,
+        PostASAPOperatorPayload as Payload, SketchQuery, SummaryFamilyType, SummaryInputExpr,
+        ValueOperation,
     },
     pre_asap::{
         AggIntent, ColumnRef, CompareOpKind, DataType, GroupKeys, PreASAPNode,
@@ -40,30 +41,30 @@ mod candidates;
 pub use candidates::{
     compile_candidate, compile_candidates, compile_physical_dag_candidates, cut_candidate,
     enumerate_frontiers, frontier_from_timing, select_candidate, CandidateCost,
-    CandidatePhysicalDAGs, CandidateSelection, PhysicalCandidate, PhysicalCandidateError,
+    CandidatePhysicalPostASAPDAGs, CandidateSelection, PhysicalCandidate, PhysicalCandidateError,
 };
 
 mod compiled;
-pub use compiled::{InputContract, PhysicalDAG};
+pub use compiled::{InputContract, PhysicalPostASAPDAG};
 
 mod row_values;
 
 /// Compile computation without opening or retaining deployment readers.
 /// Input contracts identify explicit boundaries selected by maintenance planning.
-/// The view is a transport document's ([`PostASAPDAGTransport::as_view`]), a
+/// The view is a transport document's ([`LogicalPostASAPDAGTransport::as_view`]), a
 /// shared index's, or a lifecycle assignment's timing over that index.
 pub fn compile(
-    dag: planner_types::post_asap::PostASAPDAGView<'_>,
+    dag: planner_types::post_asap::LogicalPostASAPDAGView<'_>,
     inputs: BTreeMap<NodeId, InputContract>,
     roots: &[NodeId],
-) -> Result<PhysicalDAG, Error> {
+) -> Result<PhysicalPostASAPDAG, Error> {
     compile_internal(&dag, inputs, roots)
 }
 
 /// Convenience for callers that already resolved inputs. Lowering still uses
 /// only their contracts, and instantiation checks those contracts again.
 pub fn bind<'a>(
-    dag: &PostASAPDAGTransport,
+    dag: &LogicalPostASAPDAGTransport,
     sources: BTreeMap<NodeId, Source<'a>>,
     roots: &[NodeId],
 ) -> Result<PhysicalExecution<'a, Batch, Schema>, Error> {
@@ -76,7 +77,7 @@ pub fn bind<'a>(
 
 /// Resolve raw scan connectors before invoking the reader-independent compiler.
 pub fn bind_with_data_sources<'a>(
-    dag: &PostASAPDAGTransport,
+    dag: &LogicalPostASAPDAGTransport,
     mut sources: BTreeMap<NodeId, Source<'a>>,
     roots: &[NodeId],
     data_sources: &crate::sources::DataSources,
@@ -126,10 +127,10 @@ fn helper_id(node: NodeId, index: u64) -> NodeId {
 }
 
 fn compile_internal(
-    dag: &planner_types::post_asap::PostASAPDAGView<'_>,
+    dag: &planner_types::post_asap::LogicalPostASAPDAGView<'_>,
     mut sources: BTreeMap<NodeId, InputContract>,
     roots: &[NodeId],
-) -> Result<PhysicalDAG, Error> {
+) -> Result<PhysicalPostASAPDAG, Error> {
     preflight_depth(dag)?;
     dag.validate().map_err(|e| invalid(e.to_string()))?;
     let nodes = dag
@@ -156,7 +157,7 @@ fn compile_internal(
         let consumer = u64::from(edge.consumer.0);
         if let (
             Payload::Fallback { expression },
-            Some(PostASAPDAGNode {
+            Some(LogicalPostASAPDAGNode {
                 payload: Payload::Binary { .. },
                 ..
             }),
@@ -182,7 +183,7 @@ fn compile_internal(
             || promql_fallback::raw_series_owner(*id).is_some_and(|owner| {
                 matches!(
                     nodes.get(&owner),
-                    Some(PostASAPDAGNode {
+                    Some(LogicalPostASAPDAGNode {
                         payload: Payload::Fallback { .. },
                         ..
                     })
@@ -213,7 +214,7 @@ fn compile_internal(
             }
         }
     }
-    let mut graph = PhysicalDAG::new(roots.to_vec());
+    let mut graph = PhysicalPostASAPDAG::new(roots.to_vec());
     for id in ordered {
         let node = nodes[&id];
         let mut auxiliary = helper_id(id, 0);
@@ -615,7 +616,7 @@ fn compile_internal(
 
 // Temporal summary readouts produce PromQL vectors, whose range functions drop
 // the metric name before matching/filtering. Stored state retains its full identity.
-fn temporal_readout_drops_name(node: &PostASAPDAGNode) -> bool {
+fn temporal_readout_drops_name(node: &LogicalPostASAPDAGNode) -> bool {
     node.output_schema
         .fields
         .iter()
@@ -636,13 +637,13 @@ fn temporal_readout_drops_name(node: &PostASAPDAGNode) -> bool {
 
 /// Bind a Planner node against the schemas supplied by its deployment edges.
 /// This is the same checked path used by complete DAG binding.
-pub fn compile_node(node: &PostASAPDAGNode, inputs: &[Schema]) -> Result<Operator, Error> {
+pub fn compile_node(node: &LogicalPostASAPDAGNode, inputs: &[Schema]) -> Result<Operator, Error> {
     compile_timed_node(node, node.output_state.timing, inputs)
 }
 
 /// Lower `node` under `timing`, which a lifecycle assignment may overlay.
 fn compile_timed_node(
-    node: &PostASAPDAGNode,
+    node: &LogicalPostASAPDAGNode,
     timing: planner_types::post_asap::ExecutionTiming,
     inputs: &[Schema],
 ) -> Result<Operator, Error> {
@@ -653,7 +654,7 @@ fn compile_timed_node(
 }
 
 fn bind_operation(
-    node: &PostASAPDAGNode,
+    node: &LogicalPostASAPDAGNode,
     timing: planner_types::post_asap::ExecutionTiming,
     inputs: &[Schema],
 ) -> Result<Operator, Error> {
@@ -1063,7 +1064,9 @@ impl PhysicalOperator<Batch, Schema> for CheckedSource<'_> {
 }
 
 // Bound recursion before invoking the upstream recursive provenance validator.
-fn preflight_depth(dag: &planner_types::post_asap::PostASAPDAGView<'_>) -> Result<(), Error> {
+fn preflight_depth(
+    dag: &planner_types::post_asap::LogicalPostASAPDAGView<'_>,
+) -> Result<(), Error> {
     let mut remaining = dag
         .nodes()
         .iter()

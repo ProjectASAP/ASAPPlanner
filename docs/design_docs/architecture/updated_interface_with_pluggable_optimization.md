@@ -7,14 +7,14 @@
 
 What that buys:
 
-* One call in place of six across three stages. `CandidatePostASAPDAGs` and
+* One call in place of six across three stages. `CandidateLogicalPostASAPDAGs` and
   `GlobalSelection` no longer appear in user code.
 * The root-to-entry bindings a caller used to build by hand are derived, and
   their ordering contract is checked rather than assumed.
 * A new optimization algorithm can be freely implemented as a trait implementation, rather than a
   rule disguised to fit a two-phase pipeline it does not share.
 
-Unchanged: `CandidatePostASAPDAGs`, `cost_sorted`, `global_selection`, and the interface
+Unchanged: `CandidateLogicalPostASAPDAGs`, `cost_sorted`, `global_selection`, and the interface
 [input, output, and workflows](input-output-workflow.md) describes.
 
 ```text
@@ -103,13 +103,13 @@ The variant follows from whether `lifecycle` was supplied in the input.
 `PlanOutput` is an opt-in selection helper's result. The candidate-preserving
 Planner pipeline outputs all legal candidates at each layer and does not pass
 through this single-selection result. `PlanOutput` is not a replacement for
-`CandidatePostASAPDAGs`: candidates the pass dropped are
+`CandidateLogicalPostASAPDAGs`: candidates the pass dropped are
 not in it, so selection with deployment-supplied prices uses the full
 candidate collection. Each selected
-logical graph is a `PostASAPDAG`, currently represented by `Rc<PostASAPNode>`.
+logical graph is a `LogicalPostASAPDAG`, currently represented by `Rc<PostASAPNode>`.
 The lifecycle layer alone supplies timing; `DagWithLifecycle` includes that
 choice, while `Dag` does not. Physical compilation then produces a
-`PhysicalDAG` (currently `PhysicalDAG`) and cuts a `PhysicalCandidate`.
+`PhysicalPostASAPDAG` (currently `PhysicalPostASAPDAG`) and cuts a `PhysicalCandidate`.
 These are design names, not renamed Rust APIs. See
 [output layers](input-output-workflow.md#output-layers).
 

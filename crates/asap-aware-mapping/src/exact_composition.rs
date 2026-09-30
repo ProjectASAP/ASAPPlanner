@@ -19,8 +19,8 @@
 //! `realize_child` takes the head of the child's own ranking): a
 //! [`Replacement::ExactComposition`] carries only the child *target*
 //! (`ExactComposition::child_target`, the same `Rc<PreASAPNode>` whose
-//! `TargetSubDAGCandidates` in `CandidatePostASAPDAGs` already holds every candidate for it). It is
-//! [`CandidatePostASAPDAGs::global_selection`](crate::replacement::CandidatePostASAPDAGs::global_selection)
+//! `TargetSubDAGCandidates` in `CandidateLogicalPostASAPDAGs` already holds every candidate for it). It is
+//! [`CandidateLogicalPostASAPDAGs::global_selection`](crate::replacement::CandidateLogicalPostASAPDAGs::global_selection)
 //! that commits the compatible parent/child pair — so the child's own
 //! cost-model ranking, workload-wide effective consumer count, and shared
 //! `Rc` identity (one inner summary serving two outer folds) all stay

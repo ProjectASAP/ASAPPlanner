@@ -4,7 +4,7 @@ Audience: developers embedding ASAPPlanner or adding strategies/models. This is
 a compact reference for the public workflow APIs, not an
 exhaustive symbol reference. The [CLI guide](../user_guide_docs/run-a-query.md) covers command-line inspection; the [design overview](../design_docs/architecture/README.md) defines ownership.
 
-ASAPPlanner's primary output is `CandidatePostASAPDAGs`; ranking is a view over its candidates.
+ASAPPlanner's primary output is `CandidateLogicalPostASAPDAGs`; ranking is a view over its candidates.
 Downstream owns physical binding and commitment. Selection/DAG assembly helpers
 do not deploy a plan, and a serializable DAG is not evidence of runtime readiness.
 
@@ -144,7 +144,7 @@ example, see [the CLI frontend example](../../crates/devtools/src/bin/show_pre_a
 ### Target sub-DAG candidates
 
 `TargetSubDAGCandidates` collects alternatives for one query subexpression
-discovered by search. `CandidatePostASAPDAGs` contains these per-target candidate sets and
+discovered by search. `CandidateLogicalPostASAPDAGs` contains these per-target candidate sets and
 the workload's query roots. A root is a whole query; an inner expression can
 also be a target.
 
@@ -165,9 +165,9 @@ search_workload_with_targets<'s, Id>(
     roots: Vec<(Id, Rc<PreASAPNode>, Option<AccuracyTarget>)>,
     strategies: &[Box<dyn ReplacementStrategy + 's>],
     accuracy_model: &dyn AccuracyModel,
-) -> CandidatePostASAPDAGs<Id>
+) -> CandidateLogicalPostASAPDAGs<Id>
 
-CandidatePostASAPDAGs::cost_sorted(&self, cost_model: &dyn CostModel)
+CandidateLogicalPostASAPDAGs::cost_sorted(&self, cost_model: &dyn CostModel)
     -> Vec<RankedTargetSubDAGCandidates<'_>>
 ```
 
@@ -181,7 +181,7 @@ CandidatePostASAPDAGs::cost_sorted(&self, cost_model: &dyn CostModel)
 
 `search_workload_with_targets` normally rejects candidates without a guarantee
 that satisfies the root target. One exception is a direct DDSketch quantile
-ratio: without input-domain evidence, it remains in `CandidatePostASAPDAGs` with
+ratio: without input-domain evidence, it remains in `CandidateLogicalPostASAPDAGs` with
 `guarantee: None` so selection with backend-supplied domain evidence can still consider it.
 Its presence does **not** mean it satisfies the target. `cost_sorted` still
 shows it, but `global_selection` skips it and DAG assembly uses the exact fallback
@@ -254,11 +254,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 | API (`asap_aware_mapping`, unless qualified) | Inputs | Output and limits |
 | --- | --- | --- |
-| `search_workload` | `(query_id, Rc<PreASAPNode>)` roots | `CandidatePostASAPDAGs` with built-in strategies/model; no explicit per-root target argument |
-| `search_workload_with` | Roots, strategy slice | `CandidatePostASAPDAGs`; callers choose context-free replacement strategies |
+| `search_workload` | `(query_id, Rc<PreASAPNode>)` roots | `CandidateLogicalPostASAPDAGs` with built-in strategies/model; no explicit per-root target argument |
+| `search_workload_with` | Roots, strategy slice | `CandidateLogicalPostASAPDAGs`; callers choose context-free replacement strategies |
 | `search_workload_with_targets` | Roots with optional end-to-end targets, strategies, accuracy model | Candidate space with supplied root-target checks; `None` does not supply a root-level requirement; uncertified direct DDSketch ratios remain available for backend selection |
-| `CandidatePostASAPDAGs::cost_sorted` | Cost model | `Vec<RankedTargetSubDAGCandidates>`; retains alternatives and pairs `candidates[i]` with `costs[i]` |
-| `CandidatePostASAPDAGs::cost_sorted_with_recurrence` | Cost model, recurrence profiles, optional horizon | Ranked per-target candidate sets or `RecurrenceError`; uses recurrence for applicable share/recompute comparisons |
+| `CandidateLogicalPostASAPDAGs::cost_sorted` | Cost model | `Vec<RankedTargetSubDAGCandidates>`; retains alternatives and pairs `candidates[i]` with `costs[i]` |
+| `CandidateLogicalPostASAPDAGs::cost_sorted_with_recurrence` | Cost model, recurrence profiles, optional horizon | Ranked per-target candidate sets or `RecurrenceError`; uses recurrence for applicable share/recompute comparisons |
 | `SketchAlgorithmStrategy::replacements` through `ReplacementStrategy` | One `TargetSubDAG` | Alternatives at that target; not whole-workload search |
 
 `cost_sorted` is a ranking view, not a request to discard all but the first
@@ -270,7 +270,7 @@ before physical selection; do not treat their presence as deployment permission.
 ### Enumerate candidate DAGs per root
 
 ```text
-CandidatePostASAPDAGs::enumerate_candidate_dags_for_root(&self, id: &Id, expansion_limit: usize)
+CandidateLogicalPostASAPDAGs::enumerate_candidate_dags_for_root(&self, id: &Id, expansion_limit: usize)
     -> Result<CandidateDagInventory<Id>, RealizationError>
 ```
 
@@ -286,7 +286,7 @@ finalized, deduplicated, and marked `ReplacementProvenance::RootPhysicalRealizat
 Callers do not apply `with_series_identity` themselves. Compile each with
 `promql_rows::compile_current_series_readout`; other queries keep their previous
 inventory. `global_selection` never commits these candidates; they are
-compiled, and the backend supplies their prices for selection. CandidatePostASAPDAGs lists no placement variants: node timing
+compiled, and the backend supplies their prices for selection. CandidateLogicalPostASAPDAGs lists no placement variants: node timing
 comes from the summary maintenance lifecycle.
 
 ## Choose strategies and models
@@ -536,7 +536,7 @@ hold. Workload legality and known cost evidence can further restrict alternative
 
 ```text
 global_selection_with_summary_maintenance_lifecycles<'a, Id>(
-    space: &'a CandidatePostASAPDAGs<Id>, demand: WorkloadDemand<'_>,
+    space: &'a CandidateLogicalPostASAPDAGs<Id>, demand: WorkloadDemand<'_>,
     now_ms: u64, horizon: Option<Horizon>,
     capabilities: SummaryMaintenanceLifecycleCapabilities, cost_model: &dyn CostModel,
 ) -> Result<GlobalSelection<'a>, SummaryMaintenanceLifecycleSelectionError>
@@ -578,14 +578,14 @@ entries, construct demand using all applicable indices.
 ```rust
 use asap_aware_mapping::{
     global_selection_with_summary_maintenance_lifecycles,
-    assemble_selected_dag_with_summary_maintenance_lifecycles, CostModel, Horizon, CandidatePostASAPDAGs,
+    assemble_selected_dag_with_summary_maintenance_lifecycles, CostModel, Horizon, CandidateLogicalPostASAPDAGs,
     SummaryMaintenanceLifecycleCapabilities, LifecyclePostASAPDAG,
     WorkloadDemand,
 };
 use asap_types::workload::PlanningWorkload;
 
 fn plan_batch_root(
-    space: &CandidatePostASAPDAGs<&str>,
+    space: &CandidateLogicalPostASAPDAGs<&str>,
     workload: &PlanningWorkload,
     entry_index: usize,
     now_ms: u64,
@@ -631,9 +631,9 @@ that prepared or retained shared state is supported.
 | Function | Inputs | Output / promise |
 | --- | --- | --- |
 | `plan_summary_maintenance_lifecycles` | Assembled logical DAG root, `WorkloadDemand`, `now_ms`, optional horizon, runtime capabilities, cost model | `Result<LifecyclePostASAPDAG, …>` for that fixed root; does not revisit all semantic candidates |
-| `global_selection_with_summary_maintenance_lifecycles` | `CandidatePostASAPDAGs`, workload/root-entry associations, time, horizon, capabilities, cost model | Lifecycle-aware compatible selection/error, using eligible cost evidence |
+| `global_selection_with_summary_maintenance_lifecycles` | `CandidateLogicalPostASAPDAGs`, workload/root-entry associations, time, horizon, capabilities, cost model | Lifecycle-aware compatible selection/error, using eligible cost evidence |
 | `assemble_selected_dag_with_summary_maintenance_lifecycles` | Selection, target root and lifecycle context | Optional lifecycle plan/error; attaches state deployment decisions |
-| `CandidatePostASAPDAGs::with_timing_for_root` | Root ID, `CandidateTimingContext`, logical and assignment expansion limits | `CandidateLifecyclePostASAPDAGs<'a, Id>`; lazy assignments and rejections, with shared logical graphs and lifecycle metadata |
+| `CandidateLogicalPostASAPDAGs::with_timing_for_root` | Root ID, `CandidateTimingContext`, logical and assignment expansion limits | `CandidateLifecyclePostASAPDAGs<'a, Id>`; lazy assignments and rejections, with shared logical graphs and lifecycle metadata |
 | Timed collection `lifecycle_guarantee(logical_index, state, lifecycle)` | A state and one of its lifecycle alternatives | The guarantee that choosing it would attach, so the deployment can supply its price; a lifecycle the state does not offer is rejected |
 | Timed collection `select_lifecycles(logical_index, choices)` | One `(PostASAPNodeId, SummaryMaintenanceLifecycle)` per state, copied from `lifecycle_alternatives(logical_index)` | The same lifecycle plan and validation as explicit Planner selection, with typed rejection on failure |
 
@@ -658,7 +658,7 @@ from that hook, as in Planner selection.
 
 A lifecycle choice then fixes each physical placement through timing: a
 continuously maintained state and its inputs run at ingestion time, while an
-ephemeral one stays at query time. Compile each query's `PostASAPDAGTransport` once and
+ephemeral one stays at query time. Compile each query's `LogicalPostASAPDAGTransport` once and
 cut every chosen assignment from that result:
 
 ```rust
@@ -734,10 +734,10 @@ Plain `global_selection()` does not automatically perform lifecycle planning or
 establish physical deployment feasibility. Use the corresponding evidence-aware
 workflow for those decisions. Downstream still owns physical commitment.
 
-| Method on `CandidatePostASAPDAGs` / `GlobalSelection` | Behavior |
+| Method on `CandidateLogicalPostASAPDAGs` / `GlobalSelection` | Behavior |
 | --- | --- |
-| `CandidatePostASAPDAGs::global_selection(&model)` | Compatible structural selection across targets; no recurrence or lifecycle planning implied |
-| `CandidatePostASAPDAGs::global_selection_with_recurrence(...)` | Compatible selection using supplied recurrence profiles/horizon; no lifecycle commitments implied |
+| `CandidateLogicalPostASAPDAGs::global_selection(&model)` | Compatible structural selection across targets; no recurrence or lifecycle planning implied |
+| `CandidateLogicalPostASAPDAGs::global_selection_with_recurrence(...)` | Compatible selection using supplied recurrence profiles/horizon; no lifecycle commitments implied |
 | `GlobalSelection::assemble_selected_dag(&target)` | `Result<Option<Rc<PostASAPNode>>, RealizationError>`; constructs semantic IR, not stored summary data |
 
 Use a target associated with the searched space; DAG assembly can return `None`
@@ -749,7 +749,7 @@ for checking complete physical alternatives and deployment constraints.
 ### API definition and example
 
 ```text
-CandidatePostASAPDAGs::global_selection(&self, cost_model: &dyn CostModel) -> GlobalSelection<'_>
+CandidateLogicalPostASAPDAGs::global_selection(&self, cost_model: &dyn CostModel) -> GlobalSelection<'_>
 GlobalSelection::assemble_selected_dag(&self, target: &Rc<PreASAPNode>)
     -> Result<Option<Rc<PostASAPNode>>, RealizationError>
 ```
@@ -796,7 +796,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let root = Rc::new(lower_promql_workload(&workload, 0)?.remove(0));
     let space = search_workload(vec![("q1", root)]);
     let selection = space.global_selection(&DefaultCostModel);
-    // Search may canonicalize roots; use the root returned by CandidatePostASAPDAGs.
+    // Search may canonicalize roots; use the root returned by CandidateLogicalPostASAPDAGs.
     if let Some(summary) = selection.assemble_selected_dag(&space.roots[0].1)? {
         let graph = asap_types::dag_export::export_summary(&summary);
         println!("{graph:#?}");
@@ -812,7 +812,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 | `asap_types::dag_export::export(&query)` | Pre-ASAP inspection graph |
 | `asap_types::dag_export::export_summary(&summary)` | Post-ASAP inspection graph |
 | `asap_types::post_asap::export_post_asap_dag(&root)` | Compile a semantic DAG with execution-data-state validation; not a physical plan |
-| `PostASAPDAGDocument::new(dag)` and `.validate()` | Versioned semantic envelope and explicit validation; constructing it alone does not validate |
+| `LogicalPostASAPDAGDocument::new(dag)` and `.validate()` | Versioned semantic envelope and explicit validation; constructing it alone does not validate |
 | `asap_aware_mapping::export_summary_maintenance_plan(&plan)` | Graph plus lifecycle deployments, alternatives and available cost/guarantee information |
 | `explain_replacements` / `explain_replacements_with` | Findings from default/custom-strategy search; not a complete physical feasibility report |
 

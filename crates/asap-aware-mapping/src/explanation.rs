@@ -22,7 +22,7 @@
 //! (issue #252) now *already* computes, for every
 //! [`TargetSubDAG`](crate::replacement::TargetSubDAG) in the workload, every
 //! semantically valid [`crate::replacement::ReplacementSubDAG`] a registered
-//! [`ReplacementStrategy`] can propose — a [`CandidatePostASAPDAGs`] of [`TargetSubDAGCandidates`]s. A
+//! [`ReplacementStrategy`] can propose — a [`CandidateLogicalPostASAPDAGs`] of [`TargetSubDAGCandidates`]s. A
 //! rule re-deriving the same yes/no fact from scratch would be answering a
 //! question the search already answered, via a second, independently
 //! maintained traversal that has to keep agreeing with the first one.
@@ -39,7 +39,7 @@
 //! genuine alternative to the status quo (share this already-shared subtree
 //! instead of recomputing it at every consumer), *is* an applicability
 //! finding — [`explain_replacements`] and
-//! [`explain_replacements_with`] just translate [`CandidatePostASAPDAGs`]'s
+//! [`explain_replacements_with`] just translate [`CandidateLogicalPostASAPDAGs`]'s
 //! [`TargetSubDAGCandidates`]s into that shape:
 //!
 //! - [`ExplanationKind::SketchApproximation`] — the `TargetSubDAG`'s
@@ -88,14 +88,14 @@
 //! (`fn optimization(&self) -> ExplanationKind` + `fn evaluate(&self, roots)
 //! -> Vec<ReplacementExplanation>`), the same shape [`crate::cost_model::CostModel`]
 //! and [`crate::replacement::Matcher`] use elsewhere in this crate. Once
-//! findings are a *view* over [`CandidatePostASAPDAGs`] rather than an independent
+//! findings are a *view* over [`CandidateLogicalPostASAPDAGs`] rather than an independent
 //! computation, that trait would be a second extension point answering a
 //! question [`ReplacementStrategy`] (issue #251) already answers: "does this
 //! `TargetSubDAG` have an alternative worth reporting, and why". A caller who
 //! wants a new optimization represented as a finding needs a new
 //! `impl ReplacementStrategy` wired into
 //! [`crate::replacement::search_workload_with`]'s strategy set *regardless*
-//! (that's the only way its candidates end up in the [`CandidatePostASAPDAGs`] this
+//! (that's the only way its candidates end up in the [`CandidateLogicalPostASAPDAGs`] this
 //! module reads) — adding an `ApplicabilityRule` too would mean maintaining
 //! two extension points for the same new capability, one of which (the rule)
 //! would just be re-describing candidates the other (the strategy) already
@@ -123,7 +123,7 @@
 //!    [`crate::replacement`] now instead of here.
 //! 2. **A node reachable via more than one path is one finding, not one per
 //!    path.** [`TargetSubDAGCandidates`]s are keyed by `Rc` pointer identity in
-//!    [`CandidatePostASAPDAGs`]'s internal map — there is exactly one group per distinct
+//!    [`CandidateLogicalPostASAPDAGs`]'s internal map — there is exactly one group per distinct
 //!    `Rc`, full stop, so a shared `Aggregate` reached via two different
 //!    `BinaryOp` branches (or two different workload roots) is exactly one
 //!    group, hence at most one [`ExplanationKind::SketchApproximation`]
@@ -131,16 +131,16 @@
 //!    [`tests::a_shared_sketchable_aggregate_is_reported_only_once`] pins
 //!    this directly.
 //!
-//! ## One thing [`CandidatePostASAPDAGs`] doesn't carry that this module still needs:
+//! ## One thing [`CandidateLogicalPostASAPDAGs`] doesn't carry that this module still needs:
 //! human-readable `location` text
 //!
-//! [`TargetSubDAGCandidates`]/[`CandidatePostASAPDAGs`] deliberately track only `Rc<PreASAPNode>`
+//! [`TargetSubDAGCandidates`]/[`CandidateLogicalPostASAPDAGs`] deliberately track only `Rc<PreASAPNode>`
 //! pointer identity — the currency the search itself needs — not
 //! caller-facing prose. [`ReplacementExplanation::location`] is prose (a
 //! breadcrumb like `root "dash_a" > lhs`), so this module keeps one small,
 //! self-contained walk of its own, [`collect_locations`], whose *only* job
 //! is turning "this `Rc`" into "the human-readable place(s) it occurs" for a
-//! finding already decided by [`CandidatePostASAPDAGs`]. This is not a reincarnation of
+//! finding already decided by [`CandidateLogicalPostASAPDAGs`]. This is not a reincarnation of
 //! the deleted rule traversal: it makes no applicability decision (it runs
 //! the same regardless of what any strategy found), and duplicating this
 //! small, self-contained shape rather than threading location strings
@@ -179,7 +179,7 @@
 //! [`Replacement::Rewrite`]: crate::replacement::Replacement::Rewrite
 //! [`SketchAlgorithmStrategy`]: crate::replacement::SketchAlgorithmStrategy
 //! [`SharedSubtreeStrategy`]: crate::replacement::SharedSubtreeStrategy
-//! [`CandidatePostASAPDAGs`]: crate::replacement::CandidatePostASAPDAGs
+//! [`CandidateLogicalPostASAPDAGs`]: crate::replacement::CandidateLogicalPostASAPDAGs
 //! [`TargetSubDAGCandidates`]: crate::replacement::TargetSubDAGCandidates
 
 use std::collections::HashMap;
@@ -191,7 +191,7 @@ use asap_types::pre_asap::cse::{structural_hash, HashCache};
 use asap_types::pre_asap::query_expr::PreASAPNode;
 
 use crate::replacement::{
-    self, CandidatePostASAPDAGs, Replacement, ReplacementStrategy, TargetSubDAGCandidates,
+    self, CandidateLogicalPostASAPDAGs, Replacement, ReplacementStrategy, TargetSubDAGCandidates,
 };
 
 /// Which kind of replacement a [`ReplacementExplanation`] is about.
@@ -302,7 +302,7 @@ pub fn explain_replacements_with<'s, Id: Display>(
 /// [`std::fmt::Debug`] for the breadcrumb text) doesn't need its own generic
 /// `Id` bound.
 fn findings_from_candidate_dags(
-    space: &CandidatePostASAPDAGs<String>,
+    space: &CandidateLogicalPostASAPDAGs<String>,
 ) -> Vec<ReplacementExplanation> {
     let locations = collect_locations(&space.roots);
     // One cache for the whole pass, mirroring `dag_export::export`'s own
@@ -427,7 +427,7 @@ fn is_sketch_realization(node: &PostASAPNode) -> bool {
 // ── location breadcrumbs ─────────────────────────────────────────────────
 
 /// Build `location` text for every distinct `TargetSubDAG` reachable from
-/// `roots` — see the module docs' "One thing `CandidatePostASAPDAGs` doesn't carry"
+/// `roots` — see the module docs' "One thing `CandidateLogicalPostASAPDAGs` doesn't carry"
 /// section for why this module needs its own small walk for this. Returns
 /// every breadcrumb path that reaches a given `Rc`, not just the first: a
 /// shared node referenced from two workload roots (or two branches of one

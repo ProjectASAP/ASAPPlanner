@@ -77,7 +77,7 @@ pub fn raw_sample_row(
 
 /// Input contract of a precompute boundary: raw sample rows for a raw time
 /// series scan, otherwise the stored population of its summary state.
-pub fn boundary_schema(node: &PostASAPDAGNode) -> Result<Schema, Error> {
+pub fn boundary_schema(node: &LogicalPostASAPDAGNode) -> Result<Schema, Error> {
     let Payload::Fallback { expression } = &node.payload else {
         return source_schema(&node.output_schema);
     };
@@ -154,10 +154,10 @@ pub fn is_population_schema(schema: &Schema) -> bool {
 /// Compile a complete selected precompute sub-DAG. Inputs are already-computed
 /// state boundaries; the deployment supplies groups, panes and states, never operations.
 pub fn compile(
-    dag: &PostASAPDAGTransport,
+    dag: &LogicalPostASAPDAGTransport,
     frontiers: &[NodeId],
     roots: &[NodeId],
-) -> Result<PhysicalDAG, Error> {
+) -> Result<PhysicalPostASAPDAG, Error> {
     preflight_depth(&dag.as_view())?;
     dag.validate().map_err(|e| invalid(e.to_string()))?;
     let nodes = dag
@@ -246,10 +246,10 @@ pub fn compile(
         outputs.insert(id, graph.output_contract(graph.roots()[0])?.schema);
         fragments.insert(id, (inputs, graph));
     }
-    PhysicalDAG::compose(sources, fragments, roots.to_vec())
+    PhysicalPostASAPDAG::compose(sources, fragments, roots.to_vec())
 }
 
-fn validate_value_output(node: &PostASAPDAGNode) -> Result<(), Error> {
+fn validate_value_output(node: &LogicalPostASAPDAGNode) -> Result<(), Error> {
     let schema = &node.output_schema;
     // Physical population rows already carry the complete identity in `$population`.
     // Typed logical plans may expose its opaque series-identity column as metadata.
@@ -289,10 +289,10 @@ fn validate_value_output(node: &PostASAPDAGNode) -> Result<(), Error> {
 }
 
 fn fragment(
-    node: &PostASAPDAGNode,
+    node: &LogicalPostASAPDAGNode,
     schemas: &[Schema],
-    parents: &[&PostASAPDAGNode],
-) -> Result<PhysicalDAG, Error> {
+    parents: &[&LogicalPostASAPDAGNode],
+) -> Result<PhysicalPostASAPDAG, Error> {
     let sources = schemas
         .iter()
         .enumerate()
@@ -547,7 +547,7 @@ fn fragment(
             ))
         }
     };
-    PhysicalDAG::from_operators(sources, operators, vec![root])
+    PhysicalPostASAPDAG::from_operators(sources, operators, vec![root])
 }
 
 /// Resolve keyed item identities over raw sample rows: labels (absent labels

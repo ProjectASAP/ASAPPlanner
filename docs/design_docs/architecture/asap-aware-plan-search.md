@@ -80,7 +80,7 @@ sets. This avoids copying every full plan when most structure is shared.
 
 ## Current implementation boundary
 
-`CandidatePostASAPDAGs` stores per-target candidates rather than eagerly enumerating their
+`CandidateLogicalPostASAPDAGs` stores per-target candidates rather than eagerly enumerating their
 Cartesian product. `cost_sorted` returns a `RankedTargetSubDAGCandidates` view
 for each target. `global_selection` coordinates supported sharing and
 composition choices; `assemble_selected_dag(root)` assembles one selected DAG

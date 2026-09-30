@@ -2,7 +2,7 @@
 
 Audience: ASAPPlanner library integrators, especially ASAPQuery-backend.
 
-`CandidatePostASAPDAGs` is a space of constructible logical alternatives, not a list of
+`CandidateLogicalPostASAPDAGs` is a space of constructible logical alternatives, not a list of
 certified deployment choices. Missing external evidence must not erase a
 candidate whose semantics and Post-ASAP shape are already known. It also must
 not turn an unknown guarantee into a satisfied accuracy requirement.
@@ -21,7 +21,7 @@ The exact `KeepPreAsap` path has an exact guarantee.
 |---|---|---|
 | Known guarantee | `ResultGuarantee` with evaluable bound and failure probability | Planner checks whether the guarantee satisfies the query's accuracy target. If this candidate is selected, the backend checks whether its implementation can realize the selected summary; it does not re-decide the accuracy target. |
 | Missing accuracy/domain evidence | Symbolic `BoundExpr::Unknown` or `ProbabilityExpr::Unknown`, or `guarantee: None` on a constructible summary | Inspect `ReplacementSubDAG::has_missing_accuracy_evidence()`, obtain applicable evidence or apply explicit policy; do not claim certification. |
-| Missing cost | `CostModel::candidate_cost()` returns `None` for a `ReplacementSubDAG` (including a non-finite or negative legacy estimate) | Keep that logical summary/rewrite candidate in `CandidatePostASAPDAGs` for inspection; provide a comparable cost before selecting it by cost. This does not make it a deployable physical plan. |
+| Missing cost | `CostModel::candidate_cost()` returns `None` for a `ReplacementSubDAG` (including a non-finite or negative legacy estimate) | Keep that logical summary/rewrite candidate in `CandidateLogicalPostASAPDAGs` for inspection; provide a comparable cost before selecting it by cost. This does not make it a deployable physical plan. |
 | Unknown runtime support | `ReplacementSubDAG::runtime_support_evidence(model)` returns `None` | Candidate remains visible; bind a concrete implementation and confirm support before deployment. |
 | Known invalid evidence or impossible semantics | No candidate; where supported, a `RejectedCandidate` records the error | Do not deploy. |
 
@@ -58,10 +58,10 @@ not emit a `RejectedCandidate` for that case.
 | HLL confidence | Symbolic failure probability | Reject a fully known unmet root target. |
 | Relative-value composition | Symbolic bound when input sign is unknown | Reject known signed input for this rule. |
 | Exact sum/average/extremum | Symbolic row-count probability term | Reject unsupported metric combinations. |
-| Cost/rate/physical evidence | `None` cost or missing workload rate; candidate remains in `CandidatePostASAPDAGs` | Physical/lifecycle evaluation reports unavailable or rejected evidence. |
-| Mixed exact/summary operator | Unknown runtime support; candidate remains in `CandidatePostASAPDAGs` | `Some(false)` prevents construction. |
+| Cost/rate/physical evidence | `None` cost or missing workload rate; candidate remains in `CandidateLogicalPostASAPDAGs` | Physical/lifecycle evaluation reports unavailable or rejected evidence. |
+| Mixed exact/summary operator | Unknown runtime support; candidate remains in `CandidateLogicalPostASAPDAGs` | `Some(false)` prevents construction. |
 
-Lifecycle assignments (`CandidateLifecyclePostASAPDAGs`) are a separate output from `CandidatePostASAPDAGs`; their
+Lifecycle assignments (`CandidateLifecyclePostASAPDAGs`) are a separate output from `CandidateLogicalPostASAPDAGs`; their
 capability/cost rejections do not erase the logical summary candidate. The
 backend must still check ordinary summary family, window, and state-operation
 capabilities before deployment.
@@ -87,7 +87,7 @@ capabilities before deployment.
 The default `global_selection()` skips summaries that
 `has_missing_accuracy_evidence()` identifies as uncertified. Its
 `GlobalSelection::assemble_selected_dag()` result is a selected logical plan,
-not an instruction to deploy every candidate in `CandidatePostASAPDAGs`. If no alternative
+not an instruction to deploy every candidate in `CandidateLogicalPostASAPDAGs`. If no alternative
 is chosen at a site, DAG assembly retains the exact `KeepPreAsap` path. The
 backend can inspect alternatives, apply its own evidence and policy, then choose a
 physically supported one; it must not equate candidate presence with approval.
@@ -108,7 +108,7 @@ backend.
 
 | PromQL input | Before this PR | After this PR |
 |---|---|---|
-| `count by(job)(up)` with an ε/δ target | Hydra's shared CMS/CountSketch alternatives are absent: missing shared-grid bounds make the strategy decline the target. | Both Hydra alternatives remain in `CandidatePostASAPDAGs` with symbolic unknown bound/probability terms. `has_missing_accuracy_evidence()` is true; default `global_selection()` does not choose either as a certified answer. |
+| `count by(job)(up)` with an ε/δ target | Hydra's shared CMS/CountSketch alternatives are absent: missing shared-grid bounds make the strategy decline the target. | Both Hydra alternatives remain in `CandidateLogicalPostASAPDAGs` with symbolic unknown bound/probability terms. `has_missing_accuracy_evidence()` is true; default `global_selection()` does not choose either as a certified answer. |
 | `entropy_over_time(m[5m])` with an ε target | The uncalibrated frequency readout has no `SummaryEstimate` candidate. | Its `SummaryEstimate` remains inspectable with `guarantee: None`. Default selection still skips it, so candidate visibility is not an accuracy certificate. |
 | `quantile_over_time(0.9,data[5m]) / quantile_over_time(0.5,data[5m])` with an ε target | The uncertified direct DDSketch ratio is **already** visible because of #449. | Still visible with `guarantee: None`, and still skipped by default selection. This is a regression/control example, not a new candidate introduced by this PR. |
 
@@ -139,7 +139,7 @@ The same loop applies to grouped Count with Hydra and to Count-ranked TopK:
 their symbolic guarantees keep them visible until shared-grid or interval
 evidence is available. Re-run planning with a provider when a certified
 Planner selection is needed; supplying evidence to the backend alone does
-not retroactively change the guarantees stored in the existing `CandidatePostASAPDAGs`.
+not retroactively change the guarantees stored in the existing `CandidateLogicalPostASAPDAGs`.
 
 Backend integration work is tracked in
 [ASAPQuery-backend#752](https://github.com/ProjectASAP/ASAPQuery-backend/issues/752).

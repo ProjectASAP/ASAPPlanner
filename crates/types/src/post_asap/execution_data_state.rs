@@ -232,7 +232,7 @@ impl ExecutionDataStateAssignment {
 }
 
 /// Initial layout proposed by semantic realization, not a restriction on physical
-/// operator placement. `PostASAPDAGTransport::with_execution_phases` assigns the final
+/// operator placement. `LogicalPostASAPDAGTransport::with_execution_phases` assigns the final
 /// phase independently of payload kind. Returns `None` for
 /// [`SummaryExpr::KeepPreAsap`], whose data_state is assigned by the edge reaching
 /// it (see the module docs).
