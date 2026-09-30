@@ -361,12 +361,20 @@ fn visit(
                     || !matches!(operator.kind, BinaryOpKind::Arithmetic(_))
                     || lhs.schema != rhs.schema
                     || lhs.schema != node.schema
+                    // The opaque identity is a key, not an extra maintenance value.
+                    || node.schema.fields.iter().filter(|field| {
+                        field.name == crate::pre_asap::schema::PROMQL_SERIES_IDENTITY
+                    }).count() > 1
                     || !node.schema.fields.iter().all(|field| {
                         !field.nullable
-                            && matches!(
-                                field.dtype,
-                                SummaryFamilyType::Plain(DataType::Float64 | DataType::Timestamp)
-                            )
+                            && if field.name == crate::pre_asap::schema::PROMQL_SERIES_IDENTITY {
+                                field.dtype == SummaryFamilyType::Plain(DataType::Utf8)
+                            } else {
+                                matches!(
+                                    field.dtype,
+                                    SummaryFamilyType::Plain(DataType::Float64 | DataType::Timestamp)
+                                )
+                            }
                     })
                     || node
                         .schema
@@ -896,6 +904,63 @@ mod tests {
             assignment.data_state_of(&root),
             Some(ExecutionDataState::INGESTION_SUMMARY)
         );
+    }
+
+    // Typed derived updates retain one opaque series identity without admitting arbitrary labels.
+    #[test]
+    fn maintenance_binary_accepts_only_well_typed_series_identity() {
+        use crate::pre_asap::{ArithmeticOpKind, BinaryOpKind};
+        let identity = crate::pre_asap::schema::PROMQL_SERIES_IDENTITY;
+        let validate = |schema: SummarySchema| {
+            let leaf = Rc::new(SummaryNode {
+                expr: SummaryExpr::KeepPreAsap(scan()),
+                schema: schema.clone(),
+                guarantee: None,
+            });
+            let binary = Rc::new(SummaryNode {
+                expr: SummaryExpr::BinaryOp {
+                    lhs: leaf.clone(),
+                    rhs: leaf,
+                    timing: ExecutionTiming::IngestionTime,
+                    operator: crate::post_asap::BinaryOperator {
+                        kind: BinaryOpKind::Arithmetic(ArithmeticOpKind::Add),
+                        vector_match: None,
+                        checked_relative_division: false,
+                        checked_finite_division: false,
+                    },
+                },
+                schema,
+                guarantee: None,
+            });
+            validate_execution_data_states(&estimate(agg(binary, kll()))).map(|_| ())
+        };
+        let mut schema = plain(&["value"]);
+        schema.fields.push(SummaryField {
+            name: "ts".into(),
+            dtype: SummaryFamilyType::Plain(DataType::Timestamp),
+            nullable: false,
+        });
+        schema.time_index = Some(1);
+        assert!(validate(schema.clone()).is_ok());
+        schema.fields.push(SummaryField {
+            name: identity.into(),
+            dtype: SummaryFamilyType::Plain(DataType::Utf8),
+            nullable: false,
+        });
+        assert!(validate(schema.clone()).is_ok());
+        for mutation in 0..4 {
+            let mut invalid = schema.clone();
+            match mutation {
+                0 => invalid.fields[2].nullable = true,
+                1 => invalid.fields[2].dtype = SummaryFamilyType::Plain(DataType::Timestamp),
+                2 => invalid.fields.push(invalid.fields[2].clone()),
+                _ => invalid.fields[2].name = "label".into(),
+            }
+            assert_eq!(
+                validate(invalid),
+                Err(ExecutionDataStateError::InvalidMaintenanceBinary)
+            );
+        }
     }
 
     #[test]
