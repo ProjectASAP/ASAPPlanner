@@ -95,7 +95,7 @@ rather than treating a rename as completion of the structural work.
 ## Implementation record
 
 - Named the existing node types and shared root aliases; added frontend
-  `lower_candidates` and the ID-preserving `CandidatePreASAPDAGs` collection.
+  `lower_pre_asap_dag_candidates` and the ID-preserving `CandidatePreASAPDAGs` collection.
 - Added `PostASAPDAGIndex`, retaining shared node references and edge metadata.
   Physical compilation accepts the root, index or timing assignment through a
   borrowed projection. Transport import and direct compilation share validation

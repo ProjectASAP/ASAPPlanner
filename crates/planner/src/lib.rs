@@ -196,7 +196,7 @@ pub enum PlanError {
 pub async fn e2e_plan(input: UserInput<'_>) -> Result<PlanOutput, PlanError> {
     input.validate()?;
 
-    let exprs = lower_candidates(&input)
+    let exprs = lower_pre_asap_dag_candidates(&input)
         .await?
         .into_iter()
         .map(|(_, dag)| dag)
@@ -216,7 +216,7 @@ pub async fn e2e_plan(input: UserInput<'_>) -> Result<PlanOutput, PlanError> {
 /// Generate frontend candidates without logical or lifecycle selection.
 /// IDs are normalized workload entry indices, including repeating entries.
 /// Current frontends lower deterministically: one candidate for each entry.
-pub async fn lower_candidates(
+pub async fn lower_pre_asap_dag_candidates(
     input: &UserInput<'_>,
 ) -> Result<asap_types::pre_asap::CandidatePreASAPDAGs<usize>, PlanError> {
     input.validate()?;

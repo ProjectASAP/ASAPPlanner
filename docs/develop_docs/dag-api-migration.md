@@ -17,7 +17,7 @@ There are no compatibility aliases for the former graph names.
 
 ## Candidate generation
 
-`asap_planner::lower_candidates(&input).await` returns
+`asap_planner::lower_pre_asap_dag_candidates(&input).await` returns
 `CandidatePreASAPDAGs<usize>`, keyed by normalized workload entry index. Batch
 and repeating entries retain their identities. Current frontends lower each
 entry deterministically. This function does not invoke an optimization pass.

@@ -76,7 +76,7 @@ passed between layers.
 | Design name | Meaning | Rust representation |
 |---|---|---|
 | `PreASAPDAG` | Frontend-lowered query semantics before summary rewrites | `PreASAPDAG<C> = Rc<PreASAPNode<C>>` |
-| `CandidatePreASAPDAGs` | Frontend candidates associated with workload entry IDs; current deterministic frontends produce one per entry | `CandidatePreASAPDAGs<Id> = Vec<(Id, PreASAPDAG)>`; `asap_planner::lower_candidates` emits normalized entry indices |
+| `CandidatePreASAPDAGs` | Frontend candidates associated with workload entry IDs; current deterministic frontends produce one per entry | `CandidatePreASAPDAGs<Id> = Vec<(Id, PreASAPDAG)>`; `asap_planner::lower_pre_asap_dag_candidates` emits normalized entry indices |
 | `PostASAPDAG` | One shared logical computation graph | `PostASAPDAG = Rc<PostASAPNode>` |
 | `CandidatePostASAPDAGs` | All legal logical candidates represented compactly; lifecycle enumeration attaches assignments without copying their graphs | `CandidatePostASAPDAGs<Id>`; bounded logical enumeration followed by lazy `SummaryMaintenanceLifecycleCandidates::assignments` |
 | `PhysicalDAG` | Compiled operators and kernels with typed inputs, before binding runtime sources | `PhysicalDAG` |

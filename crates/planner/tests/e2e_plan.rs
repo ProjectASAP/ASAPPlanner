@@ -82,7 +82,7 @@ async fn plans_every_query_in_entry_order() {
         PlanningModels::builtin(),
     );
 
-    let frontend = asap_planner::lower_candidates(&input)
+    let frontend = asap_planner::lower_pre_asap_dag_candidates(&input)
         .await
         .expect("frontend candidates");
     assert_eq!(
@@ -121,7 +121,7 @@ async fn lowers_repeating_sql_entries_too() {
         PlanningModels::builtin(),
     );
 
-    let frontend = asap_planner::lower_candidates(&input)
+    let frontend = asap_planner::lower_pre_asap_dag_candidates(&input)
         .await
         .expect("frontend candidates");
     assert_eq!(
