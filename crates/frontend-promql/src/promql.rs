@@ -1274,6 +1274,16 @@ fn selector_is_bucket(vs: &VectorSelector) -> bool {
 fn walk_binary(bin: &BinaryExpr) -> Result<Unresolved> {
     let lhs = scalar_or_vector(&bin.lhs)?;
     let rhs = scalar_or_vector(&bin.rhs)?;
+    // `VectorMatch` has no fill field; dropping fill would change which series
+    // are emitted and their values, so the query must fall back to exact
+    // execution instead.
+    if let Some(m) = &bin.modifier {
+        if m.fill_values.lhs.is_some() || m.fill_values.rhs.is_some() {
+            return Err(LoweringError::UnsupportedFeature(format!(
+                "`fill` vector-matching modifier: `{bin}`"
+            )));
+        }
+    }
     let op = match (binop(bin.op.id())?, bin.return_bool()) {
         (BinaryOpKind::Compare(op), true) => BinaryOpKind::CompareBool(op),
         (op, _) => op,
