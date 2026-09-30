@@ -15,5 +15,6 @@ formats, evidence, and verification workflows.
 - [Metrics-observability corpora](metrics-observability-corpora.md)
 - [Physical handoff cost references](physical-handoff-costs.md), [storage operations](storage-operation-costs.md)
 - [Replacement explanations](replacement-explanations.md)
+- [Physical compile coverage for deployment computation](physical-compile-coverage.md)
 
 - [Planner vocabulary migration (#427)](planner-vocabulary-migration.md)
