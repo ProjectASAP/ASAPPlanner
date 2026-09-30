@@ -302,9 +302,9 @@ async fn reduce_one(
         }
         return Ok(best.cloned().unwrap_or(Value::Null));
     }
-    let mut count = 0usize;
     let dtype = plain(input, column)?.0;
     if dtype == &DataType::Int64 {
+        let mut count = 0usize;
         let mut sum = 0i128;
         for v in values {
             work.checkpoint().await?;
@@ -324,20 +324,78 @@ async fn reduce_one(
             ))
         };
     }
-    let mut sum = -0.0;
+    let mut floats = Vec::with_capacity(rows.len());
     for v in values {
         work.checkpoint().await?;
         let Value::Float64(v) = v else {
             return Err(invalid("floating aggregate value required"));
         };
-        sum += v;
-        count += 1;
+        floats.push(*v);
     }
     Ok(Value::Float64(if matches!(measure, Reduction::Avg(_)) {
-        sum / count as f64
+        promql_avg(&floats)
     } else {
-        sum
+        // Prometheus starts `sum` from the first value; -0.0 keeps an
+        // all-negative-zero group's sign.
+        promql_sum(-0.0, &floats)
     }))
+}
+
+/// Prometheus `kahansum.Inc`: Kahan-Neumaier compensated addition, with the
+/// compensation cleared once the sum is infinite.
+fn kahan_inc(inc: f64, sum: f64, c: f64) -> (f64, f64) {
+    let t = sum + inc;
+    let c = if t.is_infinite() {
+        0.
+    } else if sum.abs() >= inc.abs() {
+        c + ((sum - t) + inc)
+    } else {
+        c + ((inc - t) + sum)
+    };
+    (t, c)
+}
+
+/// Prometheus `sum` and `sum_over_time` from `start`.
+pub(in crate::operators) fn promql_sum(start: f64, values: &[f64]) -> f64 {
+    let (sum, c) = values
+        .iter()
+        .fold((start, 0.), |(sum, c), &v| kahan_inc(v, sum, c));
+    if sum.is_infinite() {
+        sum
+    } else {
+        sum + c
+    }
+}
+
+/// Prometheus `avg` and `avg_over_time`: a compensated sum divided by the
+/// count until the running sum would overflow, then an incremental mean.
+/// NaN for no values.
+pub(in crate::operators) fn promql_avg(values: &[f64]) -> f64 {
+    let Some((&first, rest)) = values.split_first() else {
+        return f64::NAN;
+    };
+    let (mut sum, mut c, mut mean, mut incremental) = (first, 0., 0., false);
+    for (i, &v) in rest.iter().enumerate() {
+        let count = (i + 2) as f64;
+        if !incremental {
+            let (next, next_c) = kahan_inc(v, sum, c);
+            if !next.is_infinite() {
+                (sum, c) = (next, next_c);
+                continue;
+            }
+            incremental = true;
+            mean = sum / (count - 1.);
+            c /= count - 1.;
+        }
+        let q = (count - 1.) / count;
+        (mean, c) = kahan_inc(v / count, q * mean, q * c);
+    }
+    let count = values.len() as f64;
+    if incremental {
+        mean + c
+    } else {
+        sum / count + c / count
+    }
 }
 
 #[cfg(test)]
