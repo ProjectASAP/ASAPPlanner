@@ -110,6 +110,35 @@ pub(in crate::operators) fn window_value(
                 a
             }
         }))),
+        AggIntent::IRate | AggIntent::IDelta => {
+            let [.., (t0, v0), (t1, v1)] = points else {
+                return Ok(None);
+            };
+            let rate = matches!(intent, AggIntent::IRate);
+            // A counter reset makes the last value the increase.
+            let delta = if rate && v1 < v0 { *v1 } else { v1 - v0 };
+            match (rate, t1 - t0) {
+                (_, 0) => None,
+                (true, interval) => Some(Value::Float64(delta / (interval as f64 / 1000.))),
+                (false, _) => Some(Value::Float64(delta)),
+            }
+        }
+        AggIntent::Changes | AggIntent::Resets => {
+            let changed = |(a, b): (f64, f64)| match intent {
+                AggIntent::Changes => a != b && !(a.is_nan() && b.is_nan()),
+                _ => b < a,
+            };
+            let count = points
+                .windows(2)
+                .filter(|pair| changed((pair[0].1, pair[1].1)))
+                .count();
+            Some(Value::Float64(count as f64))
+        }
+        AggIntent::LastOverTime => points.last().map(|p| Value::Float64(p.1)),
+        AggIntent::Quantile { col: None, q, .. } => Some(Value::Float64(super::quantile(
+            *q,
+            points.iter().map(|p| p.1).collect(),
+        ))),
         _ => return Err(Error::Invalid("unsupported temporal intent".into())),
     })
 }

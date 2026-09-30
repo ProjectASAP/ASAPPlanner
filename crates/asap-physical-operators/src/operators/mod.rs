@@ -23,6 +23,7 @@ mod joins;
 mod limit;
 mod projection;
 mod scope_timestamp;
+mod series_labels;
 mod series_window;
 mod sort;
 mod source;
@@ -74,7 +75,15 @@ enum Kind {
         value: usize,
         range_ms: i64,
         offset_ms: i64,
+        at_ms: Option<i64>,
         steps: Option<SubquerySteps>,
+    },
+    SeriesLabels {
+        kind: planner_types::pre_asap::VectorMatchKind,
+        labels: Vec<String>,
+    },
+    SeriesBinary {
+        operator: planner_types::post_asap::BinaryOperator,
     },
     Project(Vec<Expression>),
     Filter(Expression),
@@ -248,6 +257,8 @@ impl PhysicalOperator<Batch, Schema> for Operator {
                 | Kind::HistogramQuantile
                 | Kind::CurrentSeries { .. }
                 | Kind::SeriesWindow { .. }
+                | Kind::SeriesLabels { .. }
+                | Kind::SeriesBinary { .. }
                 | Kind::Aggregate { .. }
                 | Kind::Window { .. }
                 | Kind::Join { .. }
@@ -291,6 +302,8 @@ impl PhysicalOperator<Batch, Schema> for Operator {
             Kind::RangeWindow { .. } => "RangeWindow",
             Kind::HistogramQuantile => "HistogramQuantile",
             Kind::SeriesWindow { .. } => "SeriesWindow",
+            Kind::SeriesLabels { .. } => "SeriesLabels",
+            Kind::SeriesBinary { .. } => "SeriesBinary",
             Kind::Project(_) => "Project",
             Kind::Filter(_) => "Filter",
             Kind::Limit { .. } => "Limit",
@@ -337,6 +350,9 @@ impl PhysicalOperator<Batch, Schema> for Operator {
             Kind::CurrentSeries { .. } => current_series::execute(self, inputs, context),
             Kind::ScopeTimestamp { .. } => scope_timestamp::execute(self, inputs, context),
             Kind::SeriesWindow { .. } => series_window::execute(self, inputs, context),
+            Kind::SeriesLabels { .. } | Kind::SeriesBinary { .. } => {
+                series_labels::execute(self, inputs, context)
+            }
             Kind::Filter(_) => filter::execute(self, inputs, context),
             Kind::Limit { .. } => limit::execute(self, inputs, context),
             Kind::Sort { .. } => sort::execute(self, inputs, context),
