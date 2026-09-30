@@ -2864,13 +2864,12 @@ fn construct_summary_agg(
     } else {
         reduction.clone()
     };
-    let per_series = matches!(reduction, Reduction::PerEntity);
-    let by: Vec<usize> = reduction
-        .group_keys()
-        .map(|g| g.to_vec())
-        .unwrap_or_default();
     let out_schema = node.output_schema()?;
-    let state_idx = summary_col_index(&out_schema, &by, per_series);
+    let measures = match node {
+        QueryExpr::Aggregate { measures, .. } => measures.len(),
+        _ => 1,
+    };
+    let state_idx = summary_col_index(&out_schema, reduction, measures);
 
     let readout_schema = if keyed_heap
         && matches!(node, QueryExpr::Aggregate { child, .. } if is_snapshot_weighted_topk(intent, child))
@@ -3617,16 +3616,19 @@ fn compose_guarantee(
 /// cross-series output is `by ++ [agg]` (the column after the keys);
 /// a per-series reduction keeps every label and replaces the sample value
 /// (named `value` — mirror `per_series_reduction_schema`'s fallback).
-/// `per_series` is the caller's already-read `Reduction` (issue #165) —
-/// this never re-derives it, so it can't disagree with the caller.
-fn summary_col_index(out_schema: &Schema, by: &[usize], per_series: bool) -> usize {
-    if per_series {
-        out_schema
+/// `reduction` is the caller's already-read `Reduction` (issue #165).
+/// `without` output is `kept labels ++ measures`, and its keys are the
+/// *excluded* labels, so the state column follows the kept labels instead.
+fn summary_col_index(out_schema: &Schema, reduction: &Reduction, measures: usize) -> usize {
+    match reduction {
+        Reduction::PerEntity => out_schema
             .column_id("value")
             .or_else(|| (0..out_schema.columns.len()).find(|&i| Some(i) != out_schema.time_index))
-            .unwrap_or(0)
-    } else {
-        by.len()
+            .unwrap_or(0),
+        Reduction::Reduce(keys) if keys.is_without() => {
+            out_schema.columns.len().saturating_sub(measures)
+        }
+        Reduction::Reduce(keys) => keys.len(),
     }
 }
 
