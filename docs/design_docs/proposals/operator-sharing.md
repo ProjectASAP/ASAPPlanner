@@ -73,7 +73,7 @@ pub fn derive_guarantees(
   memo: &mut DerivationMemo,
 ) -> Result<Rc<Operator>, AccuracyError>;
 /// Record the timings of a lifecycle assignment in the `timing` slots of one DAG root,
-/// then validate them (§5). The summary maintenance lifecycle layer chooses the assignment;
+/// then validate them (§5). Physical design (summary materialization) chooses the assignment;
 /// timing is never inferred from operator kinds.
 pub fn apply_lifecycle_timings(
   root: &Rc<Operator>,
@@ -257,7 +257,7 @@ Per node kind:
 ### 2.3 Timing: recorded from a lifecycle assignment
 
 The logical layer (PlanSpace, binding, assembly) decides *what* to compute, not where it
-runs. The summary maintenance lifecycle layer chooses a lifecycle per unique summary state;
+runs. Physical design (summary materialization) chooses a lifecycle per unique summary state;
 a chosen assignment determines every node's timing (plus window framework and retention).
 It is the only source of timing, and the deployment chooses among assignments with its own
 costs ([Output layers](../architecture/input-output-workflow.md#output-layers)).
@@ -391,7 +391,7 @@ root's guarantee, so it must see the derived tree. It then applies the chosen as
 with `apply_lifecycle_timings` (§2.3, §5).
 
 - **Illegal child** (e.g. a query-time `SummaryEstimate` under a `SummaryAgg`): an
-  assignment that places them so is rejected when applied. The lifecycle layer offers only
+  assignment that places them so is rejected when applied. Summary materialization offers only
   assignments it has checked (as `relink_summary` checks with
   `validate_execution_data_states_at` today), so an error from `apply_lifecycle_timings`
   is a bug, and planning fails with that error.
@@ -439,30 +439,36 @@ The `KeepPreAsap` / `BinaryOp` / `ValueOperation` / `RelationalJoin` arms of tod
 - `BinaryOp`'s ingestion-side constraints move into this arm.
 - `AmbiguousKeepPreAsap` is deleted: a subtree assigned two timings is copied (§4).
 
-## 6. Export: fragments in the post-ASAP DAG
+## 6. Export: one post-ASAP node per operator
 
 The four original-operator payloads (`fallback{expression: QueryExpr}`, `binary`,
 `value`, `relational_join`) become one:
 
 ```rust
 PostAsapOperatorPayload::Relational {
-    /// No ASAP node inside. Leaves are Scans, or Scan { source: Source::DagInput { role } }
-    /// for an incoming edge whose schema is the edge's intermediate_schema.
-    expression: Operator,
+    /// Exactly one non-ASAP operator. Its children are not embedded: they are
+    /// this node's incoming edges, in child-role order.
+    operator: NonASAPOpKind,
 }
 ```
 
-`compile_post_asap_dag` takes each **largest connected subtree without `ASAP`** as one
-fragment, cutting an edge with a `DagInput` leaf wherever it meets an `ASAP` node.
-`ASAP` nodes map one-to-one onto the existing summary payloads;
-`FinalizeExactAccumulator` / `MaintainPopulation` / `ReadPopulation` stay
-`value{operation}`. A backend lowers every fragment with its existing `QueryExpr`
-lowering plus a `DagInput` arm (an incoming edge as a materialized table); the
-`binary` / `value::Project` / `relational_join` lowerings go.
+`NonASAPOpKind` is a `NonASAPOp` variant with its child fields removed (the
+operator, its expressions and parameters, but no child subtrees). Export emits
+**one post-ASAP node per non-ASAP operator**, the same as it already does for each
+`ASAP` operator. An operator's children become edges; leaves are `Scan` nodes. No
+subtree is wrapped inside a node, so there is no `DagInput` placeholder.
 
-- **Wire 5 → 6**: three fewer payloads; `fallback` becomes `relational` with `DagInput`
-  leaves; `output_schema` / `intermediate_schema` become `Schema`. One cutover (§8
-  stage 4), together with the downstream readers.
+This gives physical compilation a node-by-node correspondence: each post-ASAP node
+lowers to one physical operator, or to a few helper operators numbered from that
+node. `ASAP` nodes map one-to-one onto the existing summary payloads;
+`FinalizeExactAccumulator` / `MaintainPopulation` / `ReadPopulation` stay
+`value{operation}`. The `fallback` whole-expression lowering and the `binary` /
+`value::Project` / `relational_join` special cases go. Each `Relational` node is
+lowered by the same per-operator lowering, reading its inputs from its edges.
+
+- **Wire 5 → 6**: three fewer payloads; `fallback` becomes per-operator
+  `relational` nodes; `output_schema` / `intermediate_schema` become `Schema`. One
+  cutover (§8 stage 4), together with the downstream readers.
 - **Timing and guarantee** are read from the node slots: timing as written by the applied
   lifecycle assignment, guarantee as derived. An `Unset` slot is rejected; for timing it
   means no assignment was applied. An edge's `data_state` is its producer's assigned
@@ -470,8 +476,13 @@ lowering plus a `DagInput` arm (an incoming edge as a materialized table); the
   query DAGs by that timing and no longer re-runs data-state validation.
 - **`SummaryMerge`** stays a wire payload, although its planner-side variant is
   unimplemented (§1.3, §10).
-- **Phases** become per fragment. Switching phase inside a fragment would need a
-  materialization point, and those are `ASAP` nodes, so nothing is lost.
+- **Phases** are per node, as for every other node. A phase switch between two
+  non-ASAP nodes must still satisfy §5 (ingestion work cannot read a query-time
+  result); summary materialization only places materialization points at `ASAP`
+  state, so an assignment that needs a switch elsewhere is rejected when applied.
+- **Node count.** A PromQL or SQL expression that used to be one `fallback` node
+  becomes one node per operator. CSE (§4) still shares identical operators, so a
+  subtree used twice is exported once.
 
 ## 7. Other consumers
 
@@ -479,8 +490,8 @@ lowering plus a `DagInput` arm (an incoming edge as a materialized table); the
 |---|---|
 | `post_asap/cse.rs` | delete; `share_common_subtrees` covers `ASAPOp` (derives `PartialEq` + serde) |
 | `dag_export.rs` | delete `build_summary` / `build_summary_hybrid` / `summary_kind_tag`; one exporter with an `ASAP` arm; update the viewer's `node-style.js` and the pin test `viewer_categorizes_exactly_the_exported_node_kinds` |
-| `summary_maintenance_cost/estimator.rs` (80 sites) | `KeepPreAsap` branches (`query_source_selections`, `retained_queries`) use the §6 fragment; `exact_binary` / `value_operation` costs fold into it. Also fixes the missing `RelationalJoin` arm in `summary_operation_evidence` |
-| `physical_plan_cost_model.rs::estimate_candidate` | every fragment goes through `lower_query_physical_dag` |
+| `summary_maintenance_cost/estimator.rs` (80 sites) | `KeepPreAsap` branches (`query_source_selections`, `retained_queries`) use the §6 `Relational` nodes; `exact_binary` / `value_operation` costs fold into it. Also fixes the missing `RelationalJoin` arm in `summary_operation_evidence` |
+| `physical_plan_cost_model.rs::estimate_candidate` | every `Relational` node goes through the per-operator lowering |
 | `summary_maintenance_lifecycle.rs` | `selected_raw_recompute` becomes `!contains_asap(root)`; the `keep_pre_asap(target)` fallback in `assemble_selected_dag_with_summary_maintenance_lifecycles` becomes `target` |
 | `maintained_population.rs` | `KeepPreAsap(source)` becomes `source`; `population.matches_input` reads an `NonASAP` child directly |
 | `exact_composition.rs` | `ExactOperation::Aggregate` becomes a `NonASAP(Aggregate)`, built over each child candidate as `prepare_compositions` does today |
@@ -522,7 +533,7 @@ the same early flat export, on the final types.
 - Each unused branch (§1.3) returns `Unimplemented` from `output_schema`, `derive_guarantees`, `apply_lifecycle_timings` and export.
 - `search_workload*` panics on a root containing `ASAP`.
 - Rewrite the 117 `SummaryExpr::` assertions in `sql_to_post_asap.rs` / `promql_to_post_asap.rs` / `exact_composition.rs`.
-- Wire 6 round trip with a `DagInput` fragment; a version-5 document is rejected.
+- Wire 6 round trip of a multi-operator relational chain exported as one node per operator; a version-5 document is rejected.
 - The 52 `execution_data_state.rs` tests keep their shapes; assertions read the `timing` slot after the default assignment is applied, instead of `ExecutionDataStateAssignment`.
 
 ## 9. Out of scope
@@ -541,5 +552,6 @@ the same early flat export, on the final types.
 
 - Does ASAPQuery insert `SummaryMerge` only on the exported post-ASAP DAG, or through ASAPPlanner's
   post-ASAP types? The planner-side variant is unimplemented (§1.3).
-- Which type carries a `LifecycleAssignment` (derived from `SummaryMaintenanceLifecyclePlan`
-  or a new one), and how the lifecycle layer expands a per-state choice to per-node timing.
+- `LifecycleAssignment`: #482 uses the existing `SummaryMaintenanceLifecyclePlan` and
+  expands its per-state choices to per-node timing in `execution_timed_dag()`; this
+  proposal should adopt that type rather than add a new one.
