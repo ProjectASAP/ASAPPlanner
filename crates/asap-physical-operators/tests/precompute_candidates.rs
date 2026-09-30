@@ -597,8 +597,8 @@ fn assert_cuts_match_recompilation(
         let cut = cut_candidate(&compiled, frontier).unwrap();
         let expected = recompiled_candidate(dag, &inputs, roots, frontier).unwrap();
         assert_eq!(
-            cut.encode().unwrap(),
-            expected.encode().unwrap(),
+            serde_json::to_vec(&cut).unwrap(),
+            serde_json::to_vec(&expected).unwrap(),
             "{frontier:?}"
         );
     }
