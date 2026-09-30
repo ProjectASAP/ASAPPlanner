@@ -1,4 +1,5 @@
 //! Compile immutable summary-input computation with explicit population and pane identity.
+use super::promql_rows::SERIES_IDENTITY_COLUMN as SERIES_IDENTITY;
 use super::*;
 use planner_types::{
     post_asap::{ExecutionTiming, GroupingStrategy, SummarySchema},
@@ -32,6 +33,93 @@ pub fn population_schema(family: SummaryFamilyType) -> Schema {
         ],
         time_index: Some(1),
     })
+}
+
+/// Raw sample rows at a precompute boundary. `$population` holds the series'
+/// complete label set, so it is the complete source identity of per-series
+/// summaries; `$timestamp` is the sample time and `value` a finite sample
+/// (stale markers are not samples). Rows are what the boundary's source scan
+/// selected; the deployment decides which rows and panes they are. Label sets
+/// must be canonical (sorted, unique, no empty values), since they are the
+/// population identity: build rows with [`raw_sample_row`].
+pub fn raw_sample_schema() -> Schema {
+    let mut schema = (*population_schema(SummaryFamilyType::Plain(DataType::Float64))).clone();
+    schema.fields[1].name = "$timestamp".into();
+    Arc::new(schema)
+}
+
+/// A raw sample row whose label set is sorted, unique and omits empty values,
+/// so one series always has one population identity.
+pub fn raw_sample_row(
+    labels: &BTreeMap<String, String>,
+    timestamp_ms: i64,
+    value: f64,
+) -> Vec<crate::values::Value> {
+    use crate::values::Value;
+    vec![
+        Value::Map(
+            labels
+                .iter()
+                .filter(|(_, v)| !v.is_empty())
+                .map(|(k, v)| {
+                    (
+                        Value::Utf8(k.as_str().into()),
+                        Value::Utf8(v.as_str().into()),
+                    )
+                })
+                .collect::<Vec<_>>()
+                .into(),
+        ),
+        Value::Timestamp(timestamp_ms),
+        Value::Float64(value),
+    ]
+}
+
+/// Input contract of a precompute boundary: raw sample rows for a raw time
+/// series scan, otherwise the stored population of its summary state.
+pub fn boundary_schema(node: &PostAsapDagNode) -> Result<Schema, Error> {
+    let Payload::Fallback { expression } = &node.payload else {
+        return source_schema(&node.output_schema);
+    };
+    let scan = match expression {
+        planner_types::pre_asap::QueryExpr::TimeRange { child, .. } => child.as_ref(),
+        expression => expression,
+    };
+    if !matches!(
+        scan,
+        planner_types::pre_asap::QueryExpr::Scan {
+            source: planner_types::pre_asap::Source::TimeSeries { .. },
+            ..
+        }
+    ) {
+        return source_schema(&node.output_schema);
+    }
+    let logical = &node.output_schema;
+    // Labels may be absent from a series; its label map then omits them.
+    let valid = logical
+        .fields
+        .iter()
+        .enumerate()
+        .all(|(i, field)| match &field.dtype {
+            SummaryFamilyType::Plain(DataType::Timestamp) => {
+                Some(i) == logical.time_index && !field.nullable
+            }
+            SummaryFamilyType::Plain(DataType::Float64) => field.name == "value" && !field.nullable,
+            SummaryFamilyType::Plain(DataType::Utf8) => true,
+            _ => false,
+        })
+        && !logical
+            .fields
+            .iter()
+            .any(|f| f.name.starts_with('$') && f.name != SERIES_IDENTITY)
+        && logical.time_index.is_some()
+        && logical.fields.iter().filter(|f| f.name == "value").count() == 1;
+    if !valid {
+        return Err(invalid(
+            "raw sample boundary requires labels, a timestamp and one Float64 value",
+        ));
+    }
+    Ok(raw_sample_schema())
 }
 
 /// Validate the adapter layout during installed-plan recovery without lowering operators.
@@ -132,7 +220,7 @@ pub fn compile(
     for id in ordered {
         let node = nodes[&id];
         if frontier.contains(&id) {
-            let schema = source_schema(&node.output_schema)?;
+            let schema = boundary_schema(node)?;
             sources.insert(id, InputContract::bounded(schema.clone()));
             outputs.insert(id, schema);
             continue;
@@ -281,15 +369,48 @@ fn fragment(
             let [input] = schemas else {
                 return Err(invalid("summary update requires one input"));
             };
-            if update.item.is_some()
-                || !matches!(grouping, GroupingStrategy::PerSubpopulationInstance)
-            {
+            // Item identities resolve against the complete label set of raw
+            // samples; finalized readouts carry no such identity.
+            let raw = *input == raw_sample_schema();
+            // A unit-frequency summary (HLL) observes each raw sample value.
+            let unit_frequency = raw
+                && crate::capability::is_unit_sample_frequency(update)
+                && matches!(family, SummaryFamilyType::Sketch(kind, _) if !matches!(
+                    kind.algorithm(),
+                    planner_types::post_asap::SketchAlgorithm::Cms
+                        | planner_types::post_asap::SketchAlgorithm::CountSketch
+                        | planner_types::post_asap::SketchAlgorithm::CmsWithHeap
+                        | planner_types::post_asap::SketchAlgorithm::CountSketchWithHeap
+                ));
+            let keyed = update.item.is_some() && !unit_frequency;
+            if (keyed && !raw) || !matches!(grouping, GroupingStrategy::PerSubpopulationInstance) {
                 return Err(invalid(
                     "precompute keyed/shared update needs its dedicated physical candidate",
                 ));
             }
             crate::capability::validate_summary_kernel(family, update, grouping)
                 .map_err(Error::Invalid)?;
+            if raw
+                && matches!(
+                    update.weight_domain,
+                    planner_types::post_asap::WeightDomain::NonNegative {
+                        proof: planner_types::post_asap::NonNegativeWeightProof::ResetAwareCounterDerivative
+                    }
+                )
+            {
+                return Err(invalid(
+                    "a counter-derivative weight cannot be read from raw cumulative samples",
+                ));
+            }
+            if keyed
+                && matches!(family, SummaryFamilyType::Sketch(kind, _) if kind.algorithm() == &planner_types::post_asap::SketchAlgorithm::CmsWithHeap)
+                && !matches!(
+                    update.weight_domain,
+                    planner_types::post_asap::WeightDomain::NonNegative { .. }
+                )
+            {
+                return Err(invalid("CMS requires a nonnegative weight contract"));
+            }
             let labels = match reduction {
                 PlannerReduction::PerEntity => Expression::Column(0),
                 PlannerReduction::Reduce(keys) => Expression::LabelSet {
@@ -302,8 +423,11 @@ fn fragment(
                                 .output_schema
                                 .fields
                                 .get(*key)
+                                // A raw label map omits absent labels; the
+                                // series identity is not one of its labels.
                                 .filter(|field| {
-                                    !field.nullable
+                                    (raw || !field.nullable)
+                                        && field.name != SERIES_IDENTITY
                                         && field.dtype == SummaryFamilyType::Plain(DataType::Utf8)
                                 })
                                 .map(|f| f.name.clone())
@@ -316,6 +440,7 @@ fn fragment(
                 },
             };
             let weight = match &update.weight {
+                _ if unit_frequency => Expression::Column(2),
                 SummaryInputExpr::Constant(value) => Expression::Literal {
                     value: crate::values::Value::Float64(*value),
                     dtype: DataType::Float64,
@@ -334,20 +459,45 @@ fn fragment(
                     ))
                 }
             };
-            let project = Operator::project(
-                input.clone(),
-                vec![
-                    ("$population".into(), labels),
-                    ("$window_end".into(), Expression::Column(1)),
-                    ("value".into(), Expression::FiniteFloat64(Box::new(weight))),
-                ],
-            )?
-            .with_output_schema(population_schema(SummaryFamilyType::Plain(
-                DataType::Float64,
-            )))?;
+            let mut columns = vec![
+                ("$population".into(), labels),
+                ("$window_end".into(), Expression::Column(1)),
+                ("value".into(), Expression::FiniteFloat64(Box::new(weight))),
+            ];
+            let mut fields = population_schema(SummaryFamilyType::Plain(DataType::Float64))
+                .fields
+                .clone();
+            if keyed {
+                let mut items = Vec::new();
+                raw_items(
+                    update.item.as_ref().expect("keyed item"),
+                    &parents[0].output_schema,
+                    &mut items,
+                )?;
+                for (index, (expression, dtype)) in items.into_iter().enumerate() {
+                    let name = format!("$item{index}");
+                    fields.push(planner_types::post_asap::SummaryField {
+                        name: name.clone(),
+                        dtype: SummaryFamilyType::Plain(dtype),
+                        nullable: false,
+                    });
+                    columns.push((name, expression));
+                }
+            }
+            let item_columns = (3..fields.len()).collect::<Vec<_>>();
+            let project = Operator::project(input.clone(), columns)?.with_output_schema(
+                Arc::new(SummarySchema {
+                    fields,
+                    time_index: Some(1),
+                }),
+            )?;
             let projected = project.schema();
             let project = add(vec![0], project)?;
-            let build = Operator::summary_build(projected, family.clone(), 2, Some(1), vec![0])?;
+            let build = if keyed {
+                Operator::keyed_summary_build(projected, family.clone(), 2, item_columns, vec![0])?
+            } else {
+                Operator::summary_build(projected, family.clone(), 2, Some(1), vec![0])?
+            };
             let built = build.schema();
             let build = add(vec![project], build)?;
             add(
@@ -381,4 +531,79 @@ fn fragment(
         }
     };
     CompiledPhysicalDag::from_operators(sources, operators, vec![root])
+}
+
+/// Resolve keyed item identities over raw sample rows: labels (absent labels
+/// read as empty, as in PromQL), the sample value, or the canonical encoding
+/// of the label set less excluded labels.
+fn raw_items(
+    expr: &SummaryInputExpr,
+    scan: &SummarySchema,
+    items: &mut Vec<(Expression, DataType)>,
+) -> Result<(), Error> {
+    // Open PromQL scans need not list every label, so any name that is not
+    // another scan column (value, time, series identity) reads as a label.
+    let label = |column: &ColumnRef| match column {
+        ColumnRef::Named(name) | ColumnRef::Qualified { name, .. }
+            if !name.starts_with('$')
+                && scan.fields.iter().all(|f| {
+                    &f.name != name || f.dtype == SummaryFamilyType::Plain(DataType::Utf8)
+                }) =>
+        {
+            Some(name.clone())
+        }
+        _ => None,
+    };
+    let identity = |excluding: Vec<String>| {
+        (
+            Expression::LabelIdentity {
+                column: 0,
+                excluding,
+            },
+            DataType::Utf8,
+        )
+    };
+    match expr {
+        SummaryInputExpr::Column(ColumnRef::SampleValue) => {
+            items.push((Expression::Column(2), DataType::Float64))
+        }
+        SummaryInputExpr::Column(ColumnRef::Named(name) | ColumnRef::Qualified { name, .. })
+            if name == "value" =>
+        {
+            items.push((Expression::Column(2), DataType::Float64))
+        }
+        SummaryInputExpr::Column(ColumnRef::Named(name) | ColumnRef::Qualified { name, .. })
+            if name == SERIES_IDENTITY =>
+        {
+            items.push(identity(vec![]))
+        }
+        SummaryInputExpr::Column(column) if label(column).is_some() => items.push((
+            Expression::Label {
+                column: 0,
+                name: label(column).expect("resolved label"),
+            },
+            DataType::Utf8,
+        )),
+        SummaryInputExpr::EntityIdentity(
+            planner_types::post_asap::EntityIdentity::PromqlLabelSet { excluding },
+        ) => items.push(identity(
+            excluding
+                .iter()
+                .map(|column| {
+                    label(column).ok_or_else(|| invalid("excluded identity label is not a label"))
+                })
+                .collect::<Result<_, _>>()?,
+        )),
+        SummaryInputExpr::Tuple(parts) if !parts.is_empty() => {
+            for part in parts {
+                raw_items(part, scan, items)?;
+            }
+        }
+        _ => {
+            return Err(invalid(
+                "keyed summary item does not resolve over raw samples",
+            ))
+        }
+    }
+    Ok(())
 }
