@@ -185,14 +185,23 @@ applying an assignment are:
 Physical design produces `CandidatePostASAPDAGs` with materialization
 annotations, containing one candidate for each admissible lifecycle assignment
 of a logical candidate. These are Post-ASAP graphs with execution timing
-assigned, not a new DAG representation or a single selected plan. The deployment prices the
-assignments and selects among the candidates. Each required lowering is
-compiled once, and compatible assignments share that `PhysicalDAG`; each
-candidate's cut is derived from it. The timing frontier contains the
-ingestion-time nodes read by query-time nodes, plus an ingestion-time root. An ingestion-time `Binary` is
-the one exception. It lowers differently from a query-time one, so its timing
-must match at compile time. Assignments that change this lowering need a
-matching compilation; other timing cuts can reuse the compiled graph.
+assigned, not a new DAG representation or a single selected plan. The
+deployment prices the assignments and selects among the candidates. The timing
+frontier contains the ingestion-time nodes read by query-time nodes, plus an
+ingestion-time root.
+
+**Timing can change a node's implementation.** For most nodes, timing only
+decides which side of the cut the node falls on, so one compilation serves every
+lifecycle assignment and each assignment is a different cut of it. A node whose
+physical operator depends on its timing is *timing-sensitive*. Today the only
+such node is `Binary`: at ingestion time it combines aligned row streams per pane
+and its result feeds a summary (`AlignedBinary`); at query time it matches
+readout vectors under PromQL rules (`series_binary`). Assignments share a
+compilation only when they give every timing-sensitive node the same timing;
+each distinct combination is compiled once. For example, in
+`quantile(0.9, sum_over_time(m[1m]) + sum_over_time(n[1m]))`, retaining the
+quantile state puts `+` at ingestion time, while making that state `Ephemeral`
+puts `+` at query time, so the two assignments need two compilations.
 
 ## Cost and selection
 
@@ -211,14 +220,14 @@ The deployment decides both placement and the summary family.
 * **Sharing.** A state shared by several queries is priced once, with all
   consumers' demand. This holds only when compilation would install one shared
   output: same window layout, evaluation interval and phase.
-* **Family.** Every summary-family candidate (for example KLL and DDSketch
-  for one quantile) reaches the deployment. The deployment compares their
-  physical candidates with its whole-plan quotes, alongside lifecycle and
-  placement choices. It must not prune families early through Planner's global
-  selection. Those helpers remain available to callers that explicitly ask
-  Planner to select; they are not an intermediate pruning stage. Known gap:
-  ASAPQuery-backend #795 still pre-selects families through
-  `global_selection`; this is to be changed.
+* **Family.** Planner does not prune families: every summary-family candidate
+  (for example KLL and DDSketch for one quantile) reaches the deployment. The
+  deployment compares their physical candidates with its whole-plan quotes,
+  alongside lifecycle and placement choices. Planner's global-selection helpers
+  select only when a caller explicitly asks; no Planner layer calls them as an
+  intermediate stage. Known gap: ASAPQuery-backend #795 currently calls
+  `global_selection` before pricing and so pre-selects families; this is being
+  changed.
 * Unknown cost stays unknown. It never becomes zero, and an alternative that
   cannot be priced is not selected.
 
