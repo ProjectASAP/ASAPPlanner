@@ -425,7 +425,7 @@ query-time nodes, or an ingestion-time root; a query-time node feeding an
 ingestion-time node is rejected. `cut_candidate(&compiled, &frontier)` then
 partitions the lowered operators: the frontier's ancestors form the precompute
 DAG and the rest form the query DAG. Helper operators are numbered by their
-Planner node (`u64::MAX - node_id`), so a cut is byte-identical to
+Planner node (`u64::MAX - (node_id << 16) - index`), so a cut is byte-identical to
 `compile_candidate` for that frontier. One exception: an ingestion-time
 `Binary` lowers differently, so its timing must match at compile time.
 `compile_candidate(s)` and `enumerate_frontiers` wrap the same path. Temporal

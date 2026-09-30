@@ -109,6 +109,15 @@ thread_local! {
     static LOWERED_NODES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
+/// Helper operators are numbered from their Planner node alone, above the u32
+/// Planner ID range, so every boundary choice yields a subgraph of the same
+/// lowering and candidate cuts need not renumber operators. A node lowering to
+/// several helpers takes consecutive indices below its base.
+fn helper_id(node: NodeId, index: u64) -> NodeId {
+    debug_assert!(node <= u64::from(u32::MAX) && index < 1 << 16);
+    u64::MAX - (node << 16) - index
+}
+
 fn compile_internal(
     dag: &PostAsapDag,
     mut sources: BTreeMap<NodeId, InputContract>,
@@ -167,10 +176,7 @@ fn compile_internal(
     let mut graph = CompiledPhysicalDag::new(roots.to_vec());
     for id in ordered {
         let node = nodes[&id];
-        // At most one helper operator per node, numbered above the u32 Planner
-        // ID range by its node alone, so every boundary choice yields a subgraph
-        // of the same lowering and candidate cuts need not renumber operators.
-        let auxiliary = u64::MAX - id;
+        let auxiliary = helper_id(id, 0);
         let output = Arc::new(node.output_schema.clone());
         crate::values::validate_schema(&output)?;
         if let Some(source) = sources.remove(&id) {
