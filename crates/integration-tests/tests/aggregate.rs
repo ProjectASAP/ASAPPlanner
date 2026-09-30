@@ -1,4 +1,4 @@
-//! `QueryExpr::Aggregate` — cross-series aggregation tests.
+//! `PreASAPNode::Aggregate` — cross-series aggregation tests.
 //!
 //! topk/bottomk are omitted — dispatch is deferred.
 //!
@@ -13,15 +13,15 @@ use std::time::Duration;
 
 use asap_integration_tests::fixtures::lower_promql;
 use asap_integration_tests::fixtures::metric_schema;
-use asap_types::pre_asap::{AggIntent, QueryExpr, Reduction, Source};
+use asap_types::pre_asap::{AggIntent, PreASAPNode, Reduction, Source};
 use asap_types::types::AccuracyTarget;
 
-fn lower(q: &str) -> QueryExpr {
+fn lower(q: &str) -> PreASAPNode {
     lower_promql(q, AccuracyTarget::Exact).unwrap_or_else(|e| panic!("lower failed for {q:?}: {e}"))
 }
 
-fn scan(metric: &str, labels: &[&str]) -> QueryExpr {
-    QueryExpr::Scan {
+fn scan(metric: &str, labels: &[&str]) -> PreASAPNode {
+    PreASAPNode::Scan {
         source: Source::TimeSeries {
             metric: metric.into(),
         },
@@ -30,13 +30,13 @@ fn scan(metric: &str, labels: &[&str]) -> QueryExpr {
     }
 }
 
-fn agg(by: Vec<usize>, intent: AggIntent, child: QueryExpr) -> QueryExpr {
-    QueryExpr::Aggregate {
+fn agg(by: Vec<usize>, intent: AggIntent, child: PreASAPNode) -> PreASAPNode {
+    PreASAPNode::Aggregate {
         reduction: Reduction::by(by),
         measures: vec![intent],
         output_names: vec!["".into()],
         having: None,
-        child: Rc::new(QueryExpr::TimeRange {
+        child: Rc::new(PreASAPNode::TimeRange {
             range: Duration::from_secs(1),
             child: Rc::new(child),
         }),

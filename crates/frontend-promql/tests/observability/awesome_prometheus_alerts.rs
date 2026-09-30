@@ -29,7 +29,7 @@
 use asap_frontend_promql::PromqlError as LoweringError;
 #[path = "../support.rs"]
 mod support;
-use asap_types::pre_asap::{AggIntent, BinaryOpKind, CompareOpKind, QueryExpr, Reduction};
+use asap_types::pre_asap::{AggIntent, BinaryOpKind, CompareOpKind, PreASAPNode, Reduction};
 use asap_types::types::AccuracyTarget;
 use support::lower_promql;
 
@@ -44,41 +44,41 @@ fn queries() -> impl Iterator<Item = &'static str> {
 }
 
 /// Lower, expecting success.
-fn ok(q: &str) -> QueryExpr {
+fn ok(q: &str) -> PreASAPNode {
     lower_promql(q, AccuracyTarget::Exact)
         .unwrap_or_else(|e| panic!("expected {q:?} to lower, got error: {e}"))
 }
 
 /// Every `AggIntent` in the tree.
-fn intents(e: &QueryExpr) -> Vec<AggIntent> {
+fn intents(e: &PreASAPNode) -> Vec<AggIntent> {
     let mut out = Vec::new();
-    fn go(e: &QueryExpr, out: &mut Vec<AggIntent>) {
+    fn go(e: &PreASAPNode, out: &mut Vec<AggIntent>) {
         match e {
-            QueryExpr::Aggregate {
+            PreASAPNode::Aggregate {
                 measures, child, ..
             } => {
                 out.extend(measures.iter().cloned());
                 go(child, out);
             }
-            QueryExpr::TimeRange { child, .. }
-            | QueryExpr::TimeShift { child, .. }
-            | QueryExpr::Filter { child, .. }
-            | QueryExpr::Sort { child, .. }
-            | QueryExpr::Limit { child, .. }
-            | QueryExpr::PromqlSubquery { child, .. }
-            | QueryExpr::Dedup { child, .. }
-            | QueryExpr::SQLWindowFunc { child, .. }
-            | QueryExpr::Project { child, .. }
-            | QueryExpr::PromqlRelabel { child, .. }
-            | QueryExpr::PromqlSeriesSample { child, .. }
-            | QueryExpr::PromqlInfoEnrich { child, .. } => go(child, out),
-            QueryExpr::BinaryOp { lhs, rhs, .. }
-            | QueryExpr::Join {
+            PreASAPNode::TimeRange { child, .. }
+            | PreASAPNode::TimeShift { child, .. }
+            | PreASAPNode::Filter { child, .. }
+            | PreASAPNode::Sort { child, .. }
+            | PreASAPNode::Limit { child, .. }
+            | PreASAPNode::PromqlSubquery { child, .. }
+            | PreASAPNode::Dedup { child, .. }
+            | PreASAPNode::SQLWindowFunc { child, .. }
+            | PreASAPNode::Project { child, .. }
+            | PreASAPNode::PromqlRelabel { child, .. }
+            | PreASAPNode::PromqlSeriesSample { child, .. }
+            | PreASAPNode::PromqlInfoEnrich { child, .. } => go(child, out),
+            PreASAPNode::BinaryOp { lhs, rhs, .. }
+            | PreASAPNode::Join {
                 left: lhs,
                 right: rhs,
                 ..
             }
-            | QueryExpr::SetOp {
+            | PreASAPNode::SetOp {
                 left: lhs,
                 right: rhs,
                 ..
@@ -86,36 +86,35 @@ fn intents(e: &QueryExpr) -> Vec<AggIntent> {
                 go(lhs, out);
                 go(rhs, out);
             }
-            QueryExpr::Concat { children, .. } => children.iter().for_each(|c| go(c, out)),
-            QueryExpr::PromqlVectorFromScalar(inner) | QueryExpr::PromqlScalarFromVector(inner) => {
-                go(inner, out)
-            }
+            PreASAPNode::Concat { children, .. } => children.iter().for_each(|c| go(c, out)),
+            PreASAPNode::PromqlVectorFromScalar(inner)
+            | PreASAPNode::PromqlScalarFromVector(inner) => go(inner, out),
             // `AggIntent` only ever lives in `Aggregate.measures`, never in a
             // scalar position (issue #205) — nothing to collect there.
-            QueryExpr::Scan { .. }
-            | QueryExpr::PromqlScalarBridge(_)
-            | QueryExpr::EvalTimestamp
-            | QueryExpr::CurrentTimestamp => {}
-            QueryExpr::Column(_)
-            | QueryExpr::Literal(_)
-            | QueryExpr::Compare { .. }
-            | QueryExpr::BoolAnd(_)
-            | QueryExpr::BoolOr(_)
-            | QueryExpr::Not(_)
-            | QueryExpr::IsNull(_)
-            | QueryExpr::IsNotNull(_)
-            | QueryExpr::Cast { .. }
-            | QueryExpr::InList { .. }
-            | QueryExpr::FunctionCall { .. }
-            | QueryExpr::Arithmetic { .. }
-            | QueryExpr::Case { .. } => {}
+            PreASAPNode::Scan { .. }
+            | PreASAPNode::PromqlScalarBridge(_)
+            | PreASAPNode::EvalTimestamp
+            | PreASAPNode::CurrentTimestamp => {}
+            PreASAPNode::Column(_)
+            | PreASAPNode::Literal(_)
+            | PreASAPNode::Compare { .. }
+            | PreASAPNode::BoolAnd(_)
+            | PreASAPNode::BoolOr(_)
+            | PreASAPNode::Not(_)
+            | PreASAPNode::IsNull(_)
+            | PreASAPNode::IsNotNull(_)
+            | PreASAPNode::Cast { .. }
+            | PreASAPNode::InList { .. }
+            | PreASAPNode::FunctionCall { .. }
+            | PreASAPNode::Arithmetic { .. }
+            | PreASAPNode::Case { .. } => {}
         }
     }
     go(e, &mut out);
     out
 }
 
-fn has<F: Fn(&AggIntent) -> bool>(e: &QueryExpr, p: F) -> bool {
+fn has<F: Fn(&AggIntent) -> bool>(e: &PreASAPNode, p: F) -> bool {
     intents(e).iter().any(p)
 }
 
@@ -180,15 +179,15 @@ fn vector_vs_vector_comparison_lowers_to_binaryop() {
     // Both operands are instant vectors → a `BinaryOp{Compare}` of two
     // ingestion-interval-bounded scans.
     let qe = ok("node_hwmon_temp_celsius > node_hwmon_temp_max_celsius");
-    let QueryExpr::BinaryOp { op, lhs, rhs, .. } = &qe else {
+    let PreASAPNode::BinaryOp { op, lhs, rhs, .. } = &qe else {
         panic!("expected BinaryOp, got {qe:?}");
     };
     assert_eq!(*op, BinaryOpKind::Compare(CompareOpKind::Gt));
     assert!(
-        matches!(lhs.as_ref(), QueryExpr::TimeRange { child, .. } if matches!(child.as_ref(), QueryExpr::Scan { .. }))
+        matches!(lhs.as_ref(), PreASAPNode::TimeRange { child, .. } if matches!(child.as_ref(), PreASAPNode::Scan { .. }))
     );
     assert!(
-        matches!(rhs.as_ref(), QueryExpr::TimeRange { child, .. } if matches!(child.as_ref(), QueryExpr::Scan { .. }))
+        matches!(rhs.as_ref(), PreASAPNode::TimeRange { child, .. } if matches!(child.as_ref(), PreASAPNode::Scan { .. }))
     );
 }
 
@@ -198,7 +197,7 @@ fn kube_replica_mismatch_comparison_lowers() {
     let qe = ok("kube_replicaset_spec_replicas != kube_replicaset_status_ready_replicas");
     assert!(matches!(
         &qe,
-        QueryExpr::BinaryOp { op, .. } if *op == BinaryOpKind::Compare(CompareOpKind::Ne)
+        PreASAPNode::BinaryOp { op, .. } if *op == BinaryOpKind::Compare(CompareOpKind::Ne)
     ));
 }
 
@@ -225,7 +224,7 @@ fn error_ratio_core_lowers() {
     // threshold: `sum(rate(failed[5m])) / sum(rate(total[5m]))` → a `BinaryOp(Div)`
     // of two cross-series sums over per-series rates.
     let qe = ok("sum(rate(litellm_proxy_failed_requests_metric_total[5m])) / sum(rate(litellm_proxy_total_requests_metric_total[5m]))");
-    let QueryExpr::BinaryOp { op, .. } = &qe else {
+    let PreASAPNode::BinaryOp { op, .. } = &qe else {
         panic!("expected BinaryOp, got {qe:?}");
     };
     assert!(matches!(op, BinaryOpKind::Arithmetic(_)));
@@ -250,7 +249,7 @@ fn all_targets_missing_core_lowers() {
     // Prometheus self-monitoring `sum by (job) (up)` (the corpus query is
     // `… == 0`). Cross-series sum grouped positionally on `job`.
     let qe = ok("sum by (job) (up)");
-    let QueryExpr::Aggregate {
+    let PreASAPNode::Aggregate {
         reduction,
         measures,
         ..
@@ -280,11 +279,11 @@ fn scalar_threshold_comparisons_lower_to_binaryop_scalar() {
         "increase(prometheus_tsdb_compactions_failed_total[1m]) > 0",
         "rate(alertmanager_notifications_failed_total[3m]) > 0.05",
     ] {
-        let QueryExpr::BinaryOp { rhs, .. } = ok(q) else {
+        let PreASAPNode::BinaryOp { rhs, .. } = ok(q) else {
             panic!("expected a BinaryOp for {q:?}");
         };
         assert!(
-            matches!(rhs.as_ref(), QueryExpr::PromqlScalarBridge(_)),
+            matches!(rhs.as_ref(), PreASAPNode::PromqlScalarBridge(_)),
             "scalar threshold operand for {q:?}, got {rhs:?}"
         );
     }
@@ -336,7 +335,7 @@ fn vector_literal_lowers_to_a_labelless_vector() {
     // `vector(1)` — used in dead-man's-switch ("always firing") alerts. Now
     // lowers to a `PromqlVectorFromScalar` over the scalar `1` (issue #48).
     let qe = ok("vector(1)");
-    let QueryExpr::PromqlVectorFromScalar(inner) = &qe else {
+    let PreASAPNode::PromqlVectorFromScalar(inner) = &qe else {
         panic!("expected PromqlVectorFromScalar, got {qe:?}");
     };
     assert_eq!(inner.as_promql_scalar(), Some(1.0));
@@ -352,10 +351,10 @@ fn without_grouping_lowers_to_the_exclusion_form() {
     // labels are stored and the kept set is runtime-resolved (issue #39).
     let qe = ok(r#"(min without (cpu) (rate(node_cpu_seconds_total{mode="idle"}[1h]))) > 0.8"#);
     // Top level is the `> 0.8` comparison; the `min without (cpu)` is its LHS.
-    let QueryExpr::BinaryOp { lhs, .. } = &qe else {
+    let PreASAPNode::BinaryOp { lhs, .. } = &qe else {
         panic!("expected a comparison BinaryOp, got {qe:?}");
     };
-    let QueryExpr::Aggregate {
+    let PreASAPNode::Aggregate {
         reduction,
         measures,
         ..

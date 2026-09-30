@@ -1,7 +1,7 @@
 //! End-to-end SQL query-string → post-ASAP IR pin (issue #191).
 //!
 //! The SQL counterpart of `promql_to_post_asap.rs`: drives SQL text —
-//! `lower_sql` (text → pre-ASAP `QueryExpr`) →
+//! `lower_sql` (text → pre-ASAP `PreASAPNode`) →
 //! `SketchAlgorithmStrategy::replacements` (pre-ASAP → post-ASAP
 //! `SummaryExpr`, see [`realize`] below) — and pins the resulting
 //! sketch-vs-exact-accumulator shape node by node, the way
@@ -9,7 +9,7 @@
 //!
 //! ## A structural wrinkle PromQL doesn't have
 //!
-//! `lower_promql` returns a *bare* `QueryExpr::Aggregate` for a top-level
+//! `lower_promql` returns a *bare* `PreASAPNode::Aggregate` for a top-level
 //! aggregation (`sum by (job) (m)`, `quantile(0.99, …)`), so [`realize`] can
 //! bind it directly at the tree root. `lower_sql` never does: DataFusion's
 //! planner always wraps even a single, unaliased aggregate in an identity
@@ -27,12 +27,12 @@ use asap_aware_mapping::{
 };
 use asap_frontend_sql::{lower_sql, lower_sql_dialect, SqlCatalog};
 use asap_types::post_asap::{
-    compile_post_asap_dag, EdgeRole, ExactKind, ExactParams, GroupingStrategy,
+    compile_post_asap_dag, EdgeRole, ExactKind, ExactParams, GroupingStrategy, PostASAPNode,
     PostAsapOperatorPayload, SketchAlgorithm, SketchKind, SketchParams, SketchQuery, SummaryExpr,
-    SummaryFamilyType, SummaryNode, SummarySchema, SummaryUpdate, ValueOperation,
+    SummaryFamilyType, SummarySchema, SummaryUpdate, ValueOperation,
 };
 use asap_types::pre_asap::expr_ir::ColumnRef;
-use asap_types::pre_asap::query_expr::{QueryExpr, Reduction};
+use asap_types::pre_asap::query_expr::{PreASAPNode, Reduction};
 use asap_types::pre_asap::schema::{Column, DataType, Schema};
 use asap_types::types::AccuracyTarget;
 use asap_types::workload::SqlDialect;
@@ -42,7 +42,7 @@ use asap_types::workload::SqlDialect;
 /// a caller decides what to keep. This test-only helper reproduces the
 /// take-the-first-(`cost_model`-preferred)-candidate pattern so the
 /// single-answer pins below don't all repeat it by hand.
-fn realize(expr: &QueryExpr) -> Result<Rc<SummaryNode>, RealizationError> {
+fn realize(expr: &PreASAPNode) -> Result<Rc<PostASAPNode>, RealizationError> {
     let root = Rc::new(expr.clone());
     let target = TargetSubDAG::new(&root);
     match SketchAlgorithmStrategy::default_cost_model()
@@ -89,7 +89,7 @@ fn catalog() -> SqlCatalog {
     )
 }
 
-async fn lower(sql: &str, accuracy: AccuracyTarget) -> QueryExpr {
+async fn lower(sql: &str, accuracy: AccuracyTarget) -> PreASAPNode {
     lower_sql(sql, &catalog(), accuracy)
         .await
         .unwrap_or_else(|e| panic!("lower failed for {sql:?}: {e}"))
@@ -138,9 +138,11 @@ async fn clickhouse_temporal_sql_reuses_rate_and_increase_physical_summaries() {
                 child.expr
             );
         };
-        assert!(matches!(raw.as_ref(), QueryExpr::TimeRange { range, child }
+        assert!(
+            matches!(raw.as_ref(), PreASAPNode::TimeRange { range, child }
             if *range == std::time::Duration::from_secs(300)
-                && matches!(child.as_ref(), QueryExpr::Project { .. })));
+                && matches!(child.as_ref(), PreASAPNode::Project { .. }))
+        );
     }
 }
 
@@ -173,7 +175,7 @@ async fn clickhouse_outer_sum_recursively_binds_inner_temporal_aggregate() {
             .expect("materialization failed")
             .expect("root must be discovered");
 
-        fn has_temporal_summary(node: &SummaryNode) -> bool {
+        fn has_temporal_summary(node: &PostASAPNode) -> bool {
             match &node.expr {
                 SummaryExpr::SummaryAgg {
                     family:
@@ -205,10 +207,10 @@ async fn clickhouse_outer_sum_recursively_binds_inner_temporal_aggregate() {
 
 /// The `Aggregate` node beneath the identity `Project` DataFusion's planner
 /// always wraps a top-level aggregate in — see the module docs above.
-fn inner_aggregate(qe: &QueryExpr) -> &QueryExpr {
+fn inner_aggregate(qe: &PreASAPNode) -> &PreASAPNode {
     match qe {
-        QueryExpr::Project { child, .. } => inner_aggregate(child),
-        QueryExpr::Aggregate { .. } => qe,
+        PreASAPNode::Project { child, .. } => inner_aggregate(child),
+        PreASAPNode::Aggregate { .. } => qe,
         other => panic!("expected a Project{{Aggregate}} shape, got {other:?}"),
     }
 }
@@ -223,7 +225,7 @@ async fn sql_full_query_retains_project_and_binds_inner_aggregate() {
     )
     .await;
     assert!(
-        matches!(pre_asap, QueryExpr::Project { .. }),
+        matches!(pre_asap, PreASAPNode::Project { .. }),
         "sanity: a SQL root is a Project, unlike lower_promql's bare Aggregate"
     );
     let pre_asap = Rc::new(pre_asap);
@@ -233,7 +235,7 @@ async fn sql_full_query_retains_project_and_binds_inner_aggregate() {
         .assemble_selected_dag(&space.roots[0].1)
         .expect("materialization failed")
         .expect("root must be discovered");
-    let QueryExpr::Project {
+    let PreASAPNode::Project {
         cols: expected_cols,
         qualifier: expected_qualifier,
         ..
@@ -299,7 +301,7 @@ async fn sql_join_recursively_binds_both_temporal_aggregate_children() {
     };
     assert!(matches!(
         &cols[1].expr,
-        QueryExpr::Arithmetic {
+        PreASAPNode::Arithmetic {
             op: asap_types::pre_asap::ArithmeticOpKind::Div,
             ..
         }
@@ -317,12 +319,12 @@ async fn sql_join_recursively_binds_both_temporal_aggregate_children() {
     assert_eq!(kind, &asap_types::pre_asap::JoinKind::Inner);
     assert!(matches!(
         pred.0.as_ref(),
-        QueryExpr::Compare {
+        PreASAPNode::Compare {
             left,
             op: asap_types::pre_asap::CompareOpKind::Eq,
             right,
-        } if matches!(left.as_ref(), QueryExpr::Column(0))
-            && matches!(right.as_ref(), QueryExpr::Column(2))
+        } if matches!(left.as_ref(), PreASAPNode::Column(0))
+            && matches!(right.as_ref(), PreASAPNode::Column(2))
     ));
     assert_eq!(
         join.schema
@@ -483,10 +485,10 @@ async fn sql_filter_keeps_read_predicate_and_summary_population_selection() {
         let mut node = pre_asap.as_ref();
         loop {
             match node {
-                QueryExpr::Filter { pred, .. } => break pred.clone(),
-                QueryExpr::Project { child, .. }
-                | QueryExpr::Sort { child, .. }
-                | QueryExpr::Limit { child, .. } => node = child,
+                PreASAPNode::Filter { pred, .. } => break pred.clone(),
+                PreASAPNode::Project { child, .. }
+                | PreASAPNode::Sort { child, .. }
+                | PreASAPNode::Limit { child, .. } => node = child,
                 other => panic!("expected a Filter above the aggregate, got {other:?}"),
             }
         }
@@ -495,12 +497,12 @@ async fn sql_filter_keeps_read_predicate_and_summary_population_selection() {
         let mut node = pre_asap.as_ref();
         loop {
             match node {
-                QueryExpr::Scan { predicates, .. } => break predicates.clone(),
-                QueryExpr::Project { child, .. }
-                | QueryExpr::Filter { child, .. }
-                | QueryExpr::Aggregate { child, .. }
-                | QueryExpr::Sort { child, .. }
-                | QueryExpr::Limit { child, .. } => node = child,
+                PreASAPNode::Scan { predicates, .. } => break predicates.clone(),
+                PreASAPNode::Project { child, .. }
+                | PreASAPNode::Filter { child, .. }
+                | PreASAPNode::Aggregate { child, .. }
+                | PreASAPNode::Sort { child, .. }
+                | PreASAPNode::Limit { child, .. } => node = child,
                 other => panic!("expected a unary SQL plan over Scan, got {other:?}"),
             }
         }
@@ -534,7 +536,7 @@ async fn sql_filter_keeps_read_predicate_and_summary_population_selection() {
                 let SummaryExpr::KeepPreAsap(raw_input) = &child.expr else {
                     panic!("expected raw summary population below SummaryAgg");
                 };
-                let QueryExpr::Scan { predicates, .. } = raw_input.as_ref() else {
+                let PreASAPNode::Scan { predicates, .. } = raw_input.as_ref() else {
                     panic!("expected source selection to remain a Scan");
                 };
                 assert_eq!(predicates, &expected_source_predicates);
@@ -588,7 +590,7 @@ async fn sql_filter_preserves_local_fallback_boundary_for_unsupported_child() {
             }
             SummaryExpr::KeepPreAsap(fallback) => {
                 assert!(
-                    matches!(fallback.as_ref(), QueryExpr::BinaryOp { .. }),
+                    matches!(fallback.as_ref(), PreASAPNode::BinaryOp { .. }),
                     "AVG's unsupported rewritten child should be opaque, got {fallback:?}"
                 );
                 break;
@@ -683,7 +685,7 @@ async fn sql_quantile_binds_kll_sketch_over_named_column() {
     let SummaryExpr::KeepPreAsap(kept_leaf) = &child.expr else {
         panic!("expected KeepPreAsap leaf, got {:?}", child.expr);
     };
-    assert!(matches!(kept_leaf.as_ref(), QueryExpr::Scan { .. }));
+    assert!(matches!(kept_leaf.as_ref(), PreASAPNode::Scan { .. }));
     assert!(
         child
             .schema
@@ -809,14 +811,14 @@ async fn map_projection_export_preserves_unsupported_child_boundary() {
     let dag = compile_post_asap_dag(&root).unwrap();
     assert!(dag.nodes.iter().any(|node| matches!(&node.payload,
         PostAsapOperatorPayload::Value { operation: ValueOperation::Project { cols, .. }, .. }
-        if cols.iter().any(|item| matches!(&item.expr, QueryExpr::FunctionCall { name, .. } if name == "map"))
+        if cols.iter().any(|item| matches!(&item.expr, PreASAPNode::FunctionCall { name, .. } if name == "map"))
     )));
     let mut node = root.as_ref();
     loop {
         match &node.expr {
             SummaryExpr::ValueOperation { child, .. } => node = child,
             SummaryExpr::KeepPreAsap(child) => {
-                assert!(matches!(child.as_ref(), QueryExpr::BinaryOp { .. }));
+                assert!(matches!(child.as_ref(), PreASAPNode::BinaryOp { .. }));
                 break;
             }
             other => panic!("unexpected map/fallback composition: {other:?}"),

@@ -2,12 +2,12 @@
 //! #223).
 //!
 //! Drives the full staged pipeline this issue lands: two independently
-//! lowered `QueryExpr` trees → `share_common_subtrees` (stage 1,
+//! lowered `PreASAPNode` trees → `share_common_subtrees` (stage 1,
 //! `asap-types::pre_asap::cse`, run internally by `search_workload`) →
 //! `search_workload` (stage 2, `asap-aware-mapping`) — and asserts the
 //! sharing that stage 1 decides survives into stage 2's discovered
 //! `CandidatePostASAPDAGs` as one genuinely shared `TargetSubDAGCandidates`, not just one shared
-//! `Rc<QueryExpr>`. This is the "real caller" the issue's landing plan
+//! `Rc<PreASAPNode>`. This is the "real caller" the issue's landing plan
 //! requires before `share_common_subtrees` is allowed to exist at all (its
 //! predecessor, `asap-plan::cse::dedupe_subtrees`, was deleted in #192 for
 //! being unwired dead code).
@@ -26,12 +26,12 @@ use std::rc::Rc;
 
 use asap_aware_mapping::{search_workload, Replacement};
 use asap_integration_tests::fixtures::lower_promql;
-use asap_types::pre_asap::query_expr::QueryExpr;
+use asap_types::pre_asap::query_expr::PreASAPNode;
 use asap_types::types::AccuracyTarget;
 
 /// Two workload entries that happen to submit the exact same query (a
 /// realistic case — two dashboards, or a query fired both standalone and as
-/// part of a larger batch) collapse onto one shared `Rc<QueryExpr>` after
+/// part of a larger batch) collapse onto one shared `Rc<PreASAPNode>` after
 /// `search_workload`'s internal `share_common_subtrees` pass, and onto one
 /// genuinely-shared [`TargetSubDAGCandidates`](asap_aware_mapping::TargetSubDAGCandidates) — carrying
 /// every candidate discovered for it exactly once, not once per root — no
@@ -63,7 +63,7 @@ fn duplicate_workload_queries_collapse_onto_one_memo_group() {
     // `share_common_subtrees` pass `search_workload` runs internally.
     assert!(
         Rc::ptr_eq(&space.roots[0].1, &space.roots[1].1),
-        "search_workload must collapse the two identical roots onto one Rc<QueryExpr>"
+        "search_workload must collapse the two identical roots onto one Rc<PreASAPNode>"
     );
 
     // The single shared root is one discovered TargetSubDAG, holding one
@@ -140,7 +140,7 @@ fn distinct_workload_queries_get_independent_memo_groups() {
 
 /// Single-query CSE (a repeated sub-expression within one query) also
 /// survives through `search_workload`: the two grouped-`Aggregate` branches
-/// of a `BinaryOp` collapse to one shared `Rc<QueryExpr>` in the internal
+/// of a `BinaryOp` collapse to one shared `Rc<PreASAPNode>` in the internal
 /// `share_common_subtrees` pass, and to one shared `TargetSubDAGCandidates` (with
 /// `consumer_count == 2`, one per branch) here.
 #[test]
@@ -152,12 +152,12 @@ fn single_query_repeated_subexpression_shares_one_memo_group() {
     let [(_, root)] = space.roots.as_slice() else {
         panic!("expected 1 root");
     };
-    let QueryExpr::BinaryOp { lhs, rhs, .. } = root.as_ref() else {
+    let PreASAPNode::BinaryOp { lhs, rhs, .. } = root.as_ref() else {
         panic!("expected a BinaryOp root, got {root:?}");
     };
     assert!(
         Rc::ptr_eq(lhs, rhs),
-        "the two identical sum-by-job branches must collapse onto one Rc<QueryExpr>"
+        "the two identical sum-by-job branches must collapse onto one Rc<PreASAPNode>"
     );
 
     let group = space

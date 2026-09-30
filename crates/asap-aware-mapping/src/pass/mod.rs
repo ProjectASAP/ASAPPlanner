@@ -2,7 +2,7 @@
 //!
 //! An [`OptimizationPass`] is the whole optimization stage behind one
 //! signature: pre-ASAP IR in, post-ASAP DAG out. The trait deliberately names
-//! none of this crate's two-phase vocabulary — no `PlanSpace`, no
+//! none of this crate's two-phase vocabulary — no `CandidatePostASAPDAGs`, no
 //! `TargetSubDAGCandidates`, no `ReplacementStrategy` — so an algorithm with no
 //! candidate-generation phase at all (a greedy MQO loop, say) can implement it
 //! without pretending to have phases it does not have. The shipped algorithm is
@@ -18,7 +18,7 @@ use std::collections::BTreeMap;
 use std::rc::Rc;
 
 use asap_types::parsed_workload::ParsedWorkload;
-use asap_types::post_asap::SummaryNode;
+use asap_types::post_asap::PostASAPNode;
 use asap_types::workload::WorkloadError;
 
 use crate::accuracy::{
@@ -170,7 +170,7 @@ pub enum OptimizationInputError {
 pub struct QueryPlan {
     /// Index into `QueryWorkload::entries()`.
     pub entry_index: usize,
-    pub dag: Rc<SummaryNode>,
+    pub dag: Rc<PostASAPNode>,
 }
 
 /// One query's DAG plus the maintenance decisions taken for it. The DAG is
@@ -200,7 +200,7 @@ impl PlanOutput {
     }
 
     /// The selected DAG root per query, whichever variant this is.
-    pub fn dags(&self) -> Vec<Rc<SummaryNode>> {
+    pub fn dags(&self) -> Vec<Rc<PostASAPNode>> {
         match self {
             Self::Dag { plans } => plans.iter().map(|p| Rc::clone(&p.dag)).collect(),
             Self::DagWithLifecycle { plans } => {

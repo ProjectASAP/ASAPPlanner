@@ -1,7 +1,7 @@
 use asap_frontend_promql::{
     lower_promql_workload, lower_promql_workload_with_histograms, HistogramCatalog, PromqlError,
 };
-use asap_types::pre_asap::QueryExpr;
+use asap_types::pre_asap::PreASAPNode;
 use asap_types::types::AccuracyTarget;
 use asap_types::workload::{
     AccuracyRequirement, BatchEntry, DataWorkload, DurationMs, Evidence, PlanningWorkload,
@@ -35,7 +35,7 @@ fn workload(query: &str, accuracy: AccuracyTarget) -> PlanningWorkload {
     }
 }
 
-pub fn lower_promql(query: &str, accuracy: AccuracyTarget) -> Result<QueryExpr, PromqlError> {
+pub fn lower_promql(query: &str, accuracy: AccuracyTarget) -> Result<PreASAPNode, PromqlError> {
     let mut lowered = lower_promql_workload(&workload(query, accuracy), 0)?;
     Ok(lowered.remove(0))
 }
@@ -45,7 +45,7 @@ pub fn lower_promql_with_histograms(
     query: &str,
     accuracy: AccuracyTarget,
     histograms: HistogramCatalog,
-) -> Result<QueryExpr, PromqlError> {
+) -> Result<PreASAPNode, PromqlError> {
     let mut lowered =
         lower_promql_workload_with_histograms(&workload(query, accuracy), histograms, 0)?;
     Ok(lowered.remove(0))

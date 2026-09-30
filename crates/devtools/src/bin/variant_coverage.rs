@@ -1,13 +1,13 @@
 // cargo run -p asap-lower --bin variant_coverage
 //
 // Lowers every query in every corpus we have (PromQL + SQL), walks the
-// resulting QueryExpr trees, and reports which enum variants show up — per
-// corpus, then rolled up globally. Used to find the minimal QueryExpr node set.
+// resulting PreASAPNode trees, and reports which enum variants show up — per
+// corpus, then rolled up globally. Used to find the minimal PreASAPNode node set.
 
 use asap_devtools::lower_promql_with_data_ingestion_interval;
 use asap_frontend_sql::{lower_sql_dialect, SqlCatalog};
 use asap_types::pre_asap::schema::{Column, DataType, Schema};
-use asap_types::pre_asap::QueryExpr;
+use asap_types::pre_asap::PreASAPNode;
 use asap_types::types::AccuracyTarget;
 use asap_types::workload::SqlDialect;
 use std::collections::BTreeSet;
@@ -38,114 +38,114 @@ const ALL_VARIANTS: &[&str] = &[
     "BinaryOp",
 ];
 
-fn walk(e: &QueryExpr, seen: &mut BTreeSet<&'static str>) {
+fn walk(e: &PreASAPNode, seen: &mut BTreeSet<&'static str>) {
     match e {
-        QueryExpr::Scan { .. } => {
+        PreASAPNode::Scan { .. } => {
             seen.insert("Scan");
         }
-        QueryExpr::PromqlScalarBridge(_) => {
+        PreASAPNode::PromqlScalarBridge(_) => {
             seen.insert("PromqlScalarBridge");
         }
-        QueryExpr::EvalTimestamp => {
+        PreASAPNode::EvalTimestamp => {
             seen.insert("EvalTimestamp");
         }
-        QueryExpr::CurrentTimestamp => {
+        PreASAPNode::CurrentTimestamp => {
             seen.insert("CurrentTimestamp");
         }
-        QueryExpr::PromqlVectorFromScalar(inner) => {
+        PreASAPNode::PromqlVectorFromScalar(inner) => {
             seen.insert("PromqlVectorFromScalar");
             walk(inner, seen);
         }
-        QueryExpr::PromqlScalarFromVector(inner) => {
+        PreASAPNode::PromqlScalarFromVector(inner) => {
             seen.insert("PromqlScalarFromVector");
             walk(inner, seen);
         }
-        QueryExpr::PromqlRelabel { child, .. } => {
+        PreASAPNode::PromqlRelabel { child, .. } => {
             seen.insert("PromqlRelabel");
             walk(child, seen);
         }
-        QueryExpr::PromqlInfoEnrich { child, .. } => {
+        PreASAPNode::PromqlInfoEnrich { child, .. } => {
             seen.insert("PromqlInfoEnrich");
             walk(child, seen);
         }
-        QueryExpr::PromqlSeriesSample { child, .. } => {
+        PreASAPNode::PromqlSeriesSample { child, .. } => {
             seen.insert("PromqlSeriesSample");
             walk(child, seen);
         }
-        QueryExpr::Filter { child, .. } => {
+        PreASAPNode::Filter { child, .. } => {
             seen.insert("Filter");
             walk(child, seen);
         }
-        QueryExpr::Project { child, .. } => {
+        PreASAPNode::Project { child, .. } => {
             seen.insert("Project");
             walk(child, seen);
         }
-        QueryExpr::Aggregate { child, .. } => {
+        PreASAPNode::Aggregate { child, .. } => {
             seen.insert("Aggregate");
             walk(child, seen);
         }
-        QueryExpr::Dedup { child, .. } => {
+        PreASAPNode::Dedup { child, .. } => {
             seen.insert("Dedup");
             walk(child, seen);
         }
-        QueryExpr::Concat { children, .. } => {
+        PreASAPNode::Concat { children, .. } => {
             seen.insert("Concat");
             children.iter().for_each(|c| walk(c, seen));
         }
-        QueryExpr::Join { left, right, .. } => {
+        PreASAPNode::Join { left, right, .. } => {
             seen.insert("Join");
             walk(left, seen);
             walk(right, seen);
         }
-        QueryExpr::SetOp { left, right, .. } => {
+        PreASAPNode::SetOp { left, right, .. } => {
             seen.insert("SetOp");
             walk(left, seen);
             walk(right, seen);
         }
-        QueryExpr::Sort { child, .. } => {
+        PreASAPNode::Sort { child, .. } => {
             seen.insert("Sort");
             walk(child, seen);
         }
-        QueryExpr::Limit { child, .. } => {
+        PreASAPNode::Limit { child, .. } => {
             seen.insert("Limit");
             walk(child, seen);
         }
-        QueryExpr::PromqlSubquery { child, .. } => {
+        PreASAPNode::PromqlSubquery { child, .. } => {
             seen.insert("PromqlSubquery");
             walk(child, seen);
         }
-        QueryExpr::TimeRange { child, .. } => {
+        PreASAPNode::TimeRange { child, .. } => {
             seen.insert("TimeRange");
             walk(child, seen);
         }
-        QueryExpr::TimeShift { child, .. } => {
+        PreASAPNode::TimeShift { child, .. } => {
             seen.insert("TimeShift");
             walk(child, seen);
         }
-        QueryExpr::SQLWindowFunc { child, .. } => {
+        PreASAPNode::SQLWindowFunc { child, .. } => {
             seen.insert("SQLWindowFunc");
             walk(child, seen);
         }
-        QueryExpr::BinaryOp { lhs, rhs, .. } => {
+        PreASAPNode::BinaryOp { lhs, rhs, .. } => {
             seen.insert("BinaryOp");
             walk(lhs, seen);
             walk(rhs, seen);
         }
         // Scalar expression variants (issue #205) aren't relational nodes;
         // this walk only reports on the relational skeleton, so stop here.
-        QueryExpr::Column(_)
-        | QueryExpr::Literal(_)
-        | QueryExpr::Compare { .. }
-        | QueryExpr::BoolAnd(_)
-        | QueryExpr::BoolOr(_)
-        | QueryExpr::Not(_)
-        | QueryExpr::IsNull(_)
-        | QueryExpr::IsNotNull(_)
-        | QueryExpr::Cast { .. }
-        | QueryExpr::InList { .. }
-        | QueryExpr::FunctionCall { .. }
-        | QueryExpr::Arithmetic { .. }
-        | QueryExpr::Case { .. } => {}
+        PreASAPNode::Column(_)
+        | PreASAPNode::Literal(_)
+        | PreASAPNode::Compare { .. }
+        | PreASAPNode::BoolAnd(_)
+        | PreASAPNode::BoolOr(_)
+        | PreASAPNode::Not(_)
+        | PreASAPNode::IsNull(_)
+        | PreASAPNode::IsNotNull(_)
+        | PreASAPNode::Cast { .. }
+        | PreASAPNode::InList { .. }
+        | PreASAPNode::FunctionCall { .. }
+        | PreASAPNode::Arithmetic { .. }
+        | PreASAPNode::Case { .. } => {}
     }
 }
 

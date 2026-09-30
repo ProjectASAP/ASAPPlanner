@@ -93,7 +93,7 @@ fn source(fail: bool) -> (Source, Rc<Cell<usize>>, Rc<Cell<usize>>) {
 #[test]
 fn shared_source_backpressure_and_reader_drop() {
     let (source, starts, polls) = source(false);
-    let mut dag = PhysicalDag::default();
+    let mut dag = BoundPhysicalDAG::default();
     dag.add(0, vec![], source).unwrap();
     let context = context();
     let mut readers = dag.execute(&[0, 0], context.clone()).unwrap();
@@ -124,7 +124,7 @@ fn shared_source_backpressure_and_reader_drop() {
 #[test]
 fn diamond_and_run_isolation() {
     let (source, starts, polls) = source(false);
-    let mut dag = PhysicalDag::default();
+    let mut dag = BoundPhysicalDAG::default();
     dag.add(0, vec![], source).unwrap();
     dag.add(1, vec![0], Identity).unwrap();
     dag.add(2, vec![0], Identity).unwrap();
@@ -151,7 +151,7 @@ fn diamond_and_run_isolation() {
 #[test]
 fn broadcast_error_and_cancel() {
     let (source, _, polls) = source(true);
-    let mut dag = PhysicalDag::default();
+    let mut dag = BoundPhysicalDAG::default();
     dag.add(0, vec![], source).unwrap();
     let mut outputs = dag.execute(&[0, 0], context()).unwrap();
     let a = outputs.pop().unwrap();
@@ -177,7 +177,7 @@ fn broadcast_error_and_cancel() {
 #[test]
 fn retained_outputs_count_against_budget() {
     let (source, _, _) = source(false);
-    let mut dag = PhysicalDag::default();
+    let mut dag = BoundPhysicalDAG::default();
     dag.add(0, vec![], source).unwrap();
     let run = RunContext::new(
         Scope::Query {
@@ -207,16 +207,16 @@ fn retained_outputs_count_against_budget() {
 #[test]
 fn invalid_graphs_do_not_start_sources() {
     let (source, starts, _) = source(false);
-    let mut dag = PhysicalDag::default();
+    let mut dag = BoundPhysicalDAG::default();
     dag.add(0, vec![], source).unwrap();
     dag.add(1, vec![2], Identity).unwrap();
     dag.add(2, vec![1], Identity).unwrap();
     assert!(dag.execute(&[0, 1], context()).is_err());
     assert_eq!(starts.get(), 0);
-    let mut missing = PhysicalDag::default();
+    let mut missing = BoundPhysicalDAG::default();
     missing.add(1, vec![9], Identity).unwrap();
     assert!(missing.validate(&[1]).is_err());
-    let mut arity = PhysicalDag::default();
+    let mut arity = BoundPhysicalDAG::default();
     arity.add(1, vec![], Identity).unwrap();
     assert!(arity.validate(&[1]).is_err());
 }
@@ -226,7 +226,7 @@ fn invalid_graphs_do_not_start_sources() {
 fn ready_sources_cooperate_with_cancellation() {
     let (mut source, _, polls) = source(false);
     source.end = 10_000;
-    let mut dag = PhysicalDag::default();
+    let mut dag = BoundPhysicalDAG::default();
     dag.add(0, vec![], source).unwrap();
     let context = context();
     let mut input = dag.execute(&[0], context.clone()).unwrap().remove(0);
@@ -253,7 +253,7 @@ fn ready_sources_cooperate_with_cancellation() {
 #[test]
 fn depth_limit_covers_shared_paths() {
     let (source, _, _) = source(false);
-    let mut dag = PhysicalDag::default();
+    let mut dag = BoundPhysicalDAG::default();
     dag.add(0, vec![], source).unwrap();
     for id in 1..129 {
         dag.add(id, vec![id - 1], Identity).unwrap();

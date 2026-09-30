@@ -1,7 +1,7 @@
 //! Blocking operators enforce resources before returning their first batch.
 use asap_physical_operators::{
     operators::Operator,
-    plan::{PhysicalDag, PhysicalOperator},
+    plan::{BoundPhysicalDAG, PhysicalOperator},
     runtime::{Limits, RunContext, Scope},
     values::{Batch, Schema, Value},
     Error,
@@ -9,7 +9,7 @@ use asap_physical_operators::{
 use futures::{executor::block_on, FutureExt, StreamExt};
 use planner_types::{
     post_asap::{SummaryFamilyType, SummaryField, SummarySchema},
-    pre_asap::{DataType, JoinKind, Predicate, QueryExpr, ScalarValue},
+    pre_asap::{DataType, JoinKind, PreASAPNode, Predicate, ScalarValue},
 };
 use std::sync::Arc;
 
@@ -38,8 +38,8 @@ fn context(max_bytes: usize) -> RunContext {
     )
     .unwrap()
 }
-fn source(n: usize) -> PhysicalDag<'static, Batch, Schema> {
-    let mut dag = PhysicalDag::default();
+fn source(n: usize) -> BoundPhysicalDAG<'static, Batch, Schema> {
+    let mut dag = BoundPhysicalDAG::default();
     dag.add(
         0,
         vec![],
@@ -57,9 +57,9 @@ fn cross_join() -> Operator {
         schema(1),
         schema(1),
         JoinKind::Cross,
-        &Predicate(std::rc::Rc::new(QueryExpr::Literal(ScalarValue::Boolean(
-            true,
-        )))),
+        &Predicate(std::rc::Rc::new(PreASAPNode::Literal(
+            ScalarValue::Boolean(true),
+        ))),
         schema(2),
     )
     .unwrap()
@@ -150,7 +150,7 @@ fn cooperative_sort_preserves_ties_across_chunks() {
             .collect(),
     )
     .unwrap();
-    let mut dag = PhysicalDag::default();
+    let mut dag = BoundPhysicalDAG::default();
     dag.add(0, vec![], Operator::source(schema(2), vec![batch]).unwrap())
         .unwrap();
     dag.add(
@@ -201,7 +201,7 @@ fn weighted_summary_build_yields_within_a_batch() {
         ],
         time_index: None,
     });
-    let mut sources = PhysicalDag::default();
+    let mut sources = BoundPhysicalDAG::default();
     let batch = Batch::try_new(
         input.clone(),
         (0..1500)

@@ -28,7 +28,7 @@
 //!
 //! ## What counts as a "near-duplicate", and why
 //!
-//! Two [`QueryExpr::Aggregate`] nodes are accuracy-near-duplicates here iff,
+//! Two [`PreASAPNode::Aggregate`] nodes are accuracy-near-duplicates here iff,
 //! **in this order**:
 //!
 //! 1. Both are the same bindable shape [`crate::replacement::SketchAlgorithmStrategy`]
@@ -153,7 +153,7 @@ use std::cmp::Ordering;
 use std::rc::Rc;
 
 use asap_types::pre_asap::agg_intent::AggIntent;
-use asap_types::pre_asap::query_expr::{QueryExpr, Reduction};
+use asap_types::pre_asap::query_expr::{PreASAPNode, Reduction};
 use asap_types::types::AccuracyTarget;
 
 use crate::replacement::{
@@ -169,7 +169,7 @@ type BindableAccuracyAggregate<'a> = (
     &'a AggIntent,
     &'a AccuracyTarget,
     &'a [String],
-    &'a Rc<QueryExpr>,
+    &'a Rc<PreASAPNode>,
 );
 
 /// The `(reduction, intent, accuracy, output_names, child)` shape this
@@ -181,8 +181,8 @@ type BindableAccuracyAggregate<'a> = (
 /// `Quantile` / `Cardinality` / `TopK`). `None` for anything else, including
 /// a multi-measure or `HAVING` aggregate, a non-`Aggregate` node, or an
 /// accuracy-free intent (`Sum`, `Avg`, …).
-fn bindable_accuracy_aggregate(node: &QueryExpr) -> Option<BindableAccuracyAggregate<'_>> {
-    let QueryExpr::Aggregate {
+fn bindable_accuracy_aggregate(node: &PreASAPNode) -> Option<BindableAccuracyAggregate<'_>> {
+    let PreASAPNode::Aggregate {
         reduction,
         measures,
         output_names,
@@ -274,7 +274,7 @@ fn strictly_tighter(a: &AccuracyTarget, b: &AccuracyTarget) -> bool {
 /// this strategy from the same post-CSE `Aggregate` sibling set it already
 /// builds for `RollupStrategy`.
 pub struct AccuracyReconciliationStrategy {
-    siblings: Vec<Rc<QueryExpr>>,
+    siblings: Vec<Rc<PreASAPNode>>,
 }
 
 impl AccuracyReconciliationStrategy {
@@ -282,7 +282,7 @@ impl AccuracyReconciliationStrategy {
     /// each as a candidate tighter-accuracy source (or looser-accuracy
     /// target) — typically the full set of `Aggregate` nodes a workload-wide
     /// discovery pass already found.
-    pub fn new(siblings: &[Rc<QueryExpr>]) -> Self {
+    pub fn new(siblings: &[Rc<PreASAPNode>]) -> Self {
         Self {
             siblings: siblings.to_vec(),
         }
@@ -307,14 +307,14 @@ impl AccuracyReconciliationStrategy {
     /// reports no unique key — see `cse.rs`'s "Legality" section) would get
     /// proposed for reconciliation even though nothing guarantees a second
     /// read of it lines up row-for-row with the first.
-    fn tighter_sources<'a>(&'a self, target: &TargetSubDAG<'_>) -> Vec<&'a Rc<QueryExpr>> {
+    fn tighter_sources<'a>(&'a self, target: &TargetSubDAG<'_>) -> Vec<&'a Rc<PreASAPNode>> {
         let Some((target_reduction, target_intent, target_accuracy, target_names, target_child)) =
             bindable_accuracy_aggregate(target.root)
         else {
             return Vec::new();
         };
 
-        let mut sources: Vec<&Rc<QueryExpr>> = self
+        let mut sources: Vec<&Rc<PreASAPNode>> = self
             .siblings
             .iter()
             .filter(|candidate| {
@@ -397,8 +397,8 @@ mod tests {
     /// willing to hoist it — see `Schema::has_unique_key`/`cse.rs`'s own
     /// "Legality" section: a producer with no provable unique key is always
     /// inserted fresh, never hoisted, regardless of structural equality.
-    fn metric_scan() -> Rc<QueryExpr> {
-        Rc::new(QueryExpr::Scan {
+    fn metric_scan() -> Rc<PreASAPNode> {
+        Rc::new(PreASAPNode::Scan {
             source: Source::TimeSeries { metric: "m".into() },
             predicates: vec![],
             schema: Schema::with_time_index(
@@ -413,8 +413,8 @@ mod tests {
         })
     }
 
-    fn agg(by: Vec<ColumnId>, intent: AggIntent, child: &Rc<QueryExpr>) -> Rc<QueryExpr> {
-        Rc::new(QueryExpr::Aggregate {
+    fn agg(by: Vec<ColumnId>, intent: AggIntent, child: &Rc<PreASAPNode>) -> Rc<PreASAPNode> {
+        Rc::new(PreASAPNode::Aggregate {
             reduction: Reduction::by(by),
             measures: vec![intent],
             output_names: vec![],
@@ -423,7 +423,7 @@ mod tests {
         })
     }
 
-    fn quantile(q: f64, accuracy: AccuracyTarget, child: &Rc<QueryExpr>) -> Rc<QueryExpr> {
+    fn quantile(q: f64, accuracy: AccuracyTarget, child: &Rc<PreASAPNode>) -> Rc<PreASAPNode> {
         agg(
             vec![2],
             AggIntent::Quantile {
@@ -439,7 +439,11 @@ mod tests {
     /// reports no unique key for an empty `by` (see `query_expr.rs`'s own
     /// `unique_keys = if by.is_empty() || has_count_values { vec![] } else
     /// { .. }`).
-    fn global_quantile(q: f64, accuracy: AccuracyTarget, child: &Rc<QueryExpr>) -> Rc<QueryExpr> {
+    fn global_quantile(
+        q: f64,
+        accuracy: AccuracyTarget,
+        child: &Rc<PreASAPNode>,
+    ) -> Rc<PreASAPNode> {
         agg(
             vec![],
             AggIntent::Quantile {
@@ -458,9 +462,9 @@ mod tests {
         q: f64,
         accuracy: AccuracyTarget,
         excluded: Vec<ColumnId>,
-        child: &Rc<QueryExpr>,
-    ) -> Rc<QueryExpr> {
-        Rc::new(QueryExpr::Aggregate {
+        child: &Rc<PreASAPNode>,
+    ) -> Rc<PreASAPNode> {
+        Rc::new(PreASAPNode::Aggregate {
             reduction: Reduction::Reduce(GroupKeys::without(excluded)),
             measures: vec![AggIntent::Quantile {
                 col: None,
@@ -678,10 +682,10 @@ mod tests {
 
         // The identical scan child, though, is still shared exactly as
         // before — this module changes nothing about that.
-        let QueryExpr::Aggregate { child: child_a, .. } = roots[0].1.as_ref() else {
+        let PreASAPNode::Aggregate { child: child_a, .. } = roots[0].1.as_ref() else {
             panic!("expected an Aggregate root");
         };
-        let QueryExpr::Aggregate { child: child_b, .. } = roots[1].1.as_ref() else {
+        let PreASAPNode::Aggregate { child: child_b, .. } = roots[1].1.as_ref() else {
             panic!("expected an Aggregate root");
         };
         assert!(Rc::ptr_eq(child_a, child_b));

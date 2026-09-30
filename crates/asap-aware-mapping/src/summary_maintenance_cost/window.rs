@@ -3,7 +3,7 @@ use super::*;
 /// One per-state window choice within a complete Planner candidate.
 #[derive(Debug, Clone)]
 pub struct StreamingWindowFrameworkAssignment {
-    pub summary: Rc<SummaryNode>,
+    pub summary: Rc<PostASAPNode>,
     /// `None` explicitly means that this state is not window-organized.
     pub framework: Option<SummaryWindowFramework>,
 }
@@ -29,11 +29,11 @@ pub struct StreamingWindowFrameworkCandidate {
     pub node_evidence: StreamingNodeEvidence,
 }
 
-pub(super) fn summary_aggregation_identities(root: &SummaryNode) -> HashSet<*const SummaryNode> {
+pub(super) fn summary_aggregation_identities(root: &PostASAPNode) -> HashSet<*const PostASAPNode> {
     fn visit(
-        node: &SummaryNode,
-        seen: &mut HashSet<*const SummaryNode>,
-        out: &mut HashSet<*const SummaryNode>,
+        node: &PostASAPNode,
+        seen: &mut HashSet<*const PostASAPNode>,
+        out: &mut HashSet<*const PostASAPNode>,
     ) {
         if !seen.insert(node as *const _) {
             return;

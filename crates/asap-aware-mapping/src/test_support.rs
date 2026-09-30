@@ -1,11 +1,11 @@
-use asap_types::pre_asap::QueryExpr;
+use asap_types::pre_asap::PreASAPNode;
 use asap_types::types::AccuracyTarget;
 use asap_types::workload::{
     AccuracyRequirement, BatchEntry, DataWorkload, DurationMs, Evidence, PlanningWorkload,
     Predictability, Query, QueryLanguage, QueryRequirements, QueryWorkload, TimeSelection,
 };
 
-pub(crate) fn lower_promql(query: &str, accuracy: AccuracyTarget) -> QueryExpr {
+pub(crate) fn lower_promql(query: &str, accuracy: AccuracyTarget) -> PreASAPNode {
     let workload = PlanningWorkload {
         query_workload: QueryWorkload {
             language: QueryLanguage::PromQL,

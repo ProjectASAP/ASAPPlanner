@@ -1,12 +1,12 @@
 //! Column-reference and scalar-operator vocabulary shared by the whole
-//! canonical [`QueryExpr`](super::query_expr::QueryExpr) tree.
+//! canonical [`PreASAPNode`](super::query_expr::PreASAPNode) tree.
 //!
 //! Issue #205: the scalar expression shapes (`Column`/`Literal`/`Compare`/…)
 //! used to live in a separate, self-recursive `Expr<C>` tree here, reachable
-//! from `QueryExpr` only through wrapper fields (`Predicate`, `ProjectItem`,
-//! `SortKey`). They're variants of `QueryExpr<C>` itself now — one recursive
+//! from `PreASAPNode` only through wrapper fields (`Predicate`, `ProjectItem`,
+//! `SortKey`). They're variants of `PreASAPNode<C>` itself now — one recursive
 //! tree, not two type families joined by wrappers — generic over the same
-//! column-reference state `C` the rest of `QueryExpr` already carries
+//! column-reference state `C` the rest of `PreASAPNode` already carries
 //! (issue #179): [`ColumnRef`] (name-based, front-end-emitted) or
 //! [`ColumnId`](super::schema::ColumnId) (positional, once bound).
 //!
@@ -19,7 +19,7 @@
 use serde::{Deserialize, Serialize};
 
 /// A name-based column reference — the front-end-emitted, unresolved state of
-/// [`QueryExpr::Column`](super::query_expr::QueryExpr::Column) (`C =
+/// [`PreASAPNode::Column`](super::query_expr::PreASAPNode::Column) (`C =
 /// ColumnRef`); the [`SchemaResolver`](super::schema_resolver::SchemaResolver) resolves it to a
 /// positional [`ColumnId`](super::schema::ColumnId). Includes the two
 /// PromQL-conventional synthetic columns.

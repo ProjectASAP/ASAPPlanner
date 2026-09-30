@@ -10,7 +10,7 @@ rollup expressions, step-relative durations, MetricsQL binary operators,
 aggregate limits, or-delimited matchers, and `keep_metric_names`.
 
 The frontend walks that AST directly and emits the existing canonical
-`QueryExpr`. It does not add MetricsQL fields to `QueryExpr`, SDS descriptors,
+`PreASAPNode`. It does not add MetricsQL fields to `PreASAPNode`, SDS descriptors,
 or the physical summary DAG.
 
 ```text
@@ -18,7 +18,7 @@ MetricsQL source
       |
 MetricsqlExpr (extension semantics retained)
       |
-canonical QueryExpr
+canonical PreASAPNode
       |
 existing ASAP-aware mapping and physical Summary DAG
 ```
@@ -33,8 +33,8 @@ existing ASAP-aware mapping and physical Summary DAG
 | Common rollups: rate/increase/derivatives and statistical `*_over_time` | Existing per-entity canonical intents over the lowered range. |
 | PromQL arithmetic, comparison, and set binary operators without modifiers | Existing canonical `BinaryOp`. |
 | `default_rollup(selector[range])` | Lower to `Aggregate(LastOverTime)` over the explicit `TimeRange`. |
-| `default_rollup(selector)` | Reject for exact fallback because the implicit lookbehind window depends on the runtime evaluation step, which is not a property of canonical `QueryExpr`. |
-| `expr keep_metric_names` | Parsed natively, then rejected for exact fallback because canonical `QueryExpr` does not carry metric-name lineage. |
+| `default_rollup(selector)` | Reject for exact fallback because the implicit lookbehind window depends on the runtime evaluation step, which is not a property of canonical `PreASAPNode`. |
+| `expr keep_metric_names` | Parsed natively, then rejected for exact fallback because canonical `PreASAPNode` does not carry metric-name lineage. |
 | `if`, `ifnot`, `default`, aggregate `limit`, or-delimited matchers, binary match modifiers | Parsed natively and rejected until the canonical executor has the exact semantics. |
 | `WITH` | Expanded by the native parser; the expanded expression lowers when every resulting node is supported. |
 

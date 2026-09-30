@@ -1,5 +1,5 @@
 //! Pre-ASAP structural common-subexpression elimination: bottom-up
-//! hash-consing over an already-`resolve_root`'d [`QueryExpr`] tree (issue
+//! hash-consing over an already-`resolve_root`'d [`PreASAPNode`] tree (issue
 //! #212, #222, #223).
 //!
 //! CSE only runs on an already-bound, already-canonicalized tree —
@@ -27,7 +27,7 @@
 //! subexpression reachable only through a wrapper position (`Predicate`,
 //! `ProjectItem.expr`, `Aggregate.having`, `SQLWindowFunc.args`, …) stays
 //! embedded as opaque data on its owning operator node, compared by
-//! `QueryExpr`'s derived `PartialEq` along with the rest of that node's
+//! `PreASAPNode`'s derived `PartialEq` along with the rest of that node's
 //! fields, rather than separately hash-consed — the same scope
 //! `canonicalize.rs` settled on ("none of the rewrite rules touch a scalar
 //! subtree, so there's nothing to gain by recursing into one"). Widening this
@@ -107,10 +107,10 @@ use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::rc::Rc;
 
-use super::query_expr::QueryExpr;
+use super::query_expr::PreASAPNode;
 
 /// Bottom-up hash-consing table: structurally-equal, sharing-legal
-/// [`QueryExpr`] nodes collapse onto one `Rc`.
+/// [`PreASAPNode`] nodes collapse onto one `Rc`.
 ///
 /// `buckets` is keyed by [`structural_hash`] — a coarse candidate filter
 /// only (see the module-level "Correctness" section). Every entry within one
@@ -118,7 +118,7 @@ use super::query_expr::QueryExpr;
 /// actually decides a match; a hash collision between structurally different
 /// nodes just means a (harmless) linear scan of a few extra candidates.
 struct InternTable {
-    buckets: HashMap<u64, Vec<Rc<QueryExpr>>>,
+    buckets: HashMap<u64, Vec<Rc<PreASAPNode>>>,
     /// Memoizes [`structural_hash`] per already-hashed `Rc` pointer, shared
     /// across every [`intern`](Self::intern) call for the table's whole
     /// lifetime — see [`structural_hash`]'s own doc on why this matters:
@@ -140,7 +140,7 @@ impl InternTable {
     /// [`structural_hash`], confirm with `PartialEq`, and — only when
     /// sharing is legal (see "Legality" above) — return the existing `Rc`
     /// instead of allocating a new one.
-    fn intern(&mut self, node: QueryExpr) -> Rc<QueryExpr> {
+    fn intern(&mut self, node: PreASAPNode) -> Rc<PreASAPNode> {
         let hash = structural_hash(&node, &mut self.hash_cache);
         // A node with no provable unique key is never *returned* as a match
         // for something else — it may still go on to occupy a fresh slot in
@@ -162,7 +162,7 @@ impl InternTable {
 }
 
 /// [`structural_hash`]'s memoization cache: maps an already-hashed node's
-/// `Rc` pointer to its computed hash. Not tied to any one `QueryExpr` — a
+/// `Rc` pointer to its computed hash. Not tied to any one `PreASAPNode` — a
 /// fresh, empty cache is correct to start with anywhere; what matters is
 /// letting it *persist* across every node in one bottom-up pass (as
 /// [`InternTable`] does via its own `hash_cache` field), rather than
@@ -174,12 +174,12 @@ impl InternTable {
 /// parallel reimplementation — the same "one real hash, reused everywhere
 /// it's needed" rationale [`structural_hash`]'s own doc gives for
 /// [`dag_export`](crate::dag_export)'s `pub(crate)` reuse.
-pub type HashCache = HashMap<*const QueryExpr, u64>;
+pub type HashCache = HashMap<*const PreASAPNode, u64>;
 
 /// Coarse structural hash used only to bucket [`InternTable::intern`]'s
 /// candidate search — never the actual sharing decision (`PartialEq` is).
 ///
-/// `QueryExpr` carries `f64`s (`Literal(ScalarValue::Float64)`, `AggIntent::Quantile.q`, …), so it
+/// `PreASAPNode` carries `f64`s (`Literal(ScalarValue::Float64)`, `AggIntent::Quantile.q`, …), so it
 /// cannot derive `std::hash::Hash`. Serializing to a canonical JSON string
 /// and hashing that sidesteps the `f64` problem — but only for `node`'s own
 /// tag and non-child fields, *not* its children's full values: each
@@ -218,13 +218,13 @@ pub type HashCache = HashMap<*const QueryExpr, u64>;
 /// candidate-narrowing filter this module's own [`InternTable::intern`]
 /// already uses, so it doesn't have to reinvent (and risk drifting from) it.
 ///
-/// Exhaustive over every `QueryExpr` variant, matching [`rebuild_children`]
+/// Exhaustive over every `PreASAPNode` variant, matching [`rebuild_children`]
 /// in which fields count as an operator child (must stay in sync — a new
 /// variant fails to compile in both places until both are extended).
-pub fn structural_hash(node: &QueryExpr, cache: &mut HashCache) -> u64 {
-    use QueryExpr::*;
+pub fn structural_hash(node: &PreASAPNode, cache: &mut HashCache) -> u64 {
+    use PreASAPNode::*;
 
-    fn child_hash(child: &Rc<QueryExpr>, cache: &mut HashCache) -> u64 {
+    fn child_hash(child: &Rc<PreASAPNode>, cache: &mut HashCache) -> u64 {
         let ptr = Rc::as_ptr(child);
         if let Some(&h) = cache.get(&ptr) {
             return h;
@@ -236,7 +236,7 @@ pub fn structural_hash(node: &QueryExpr, cache: &mut HashCache) -> u64 {
 
     /// Hash `own_fields` (this node's own tag and non-child scalar
     /// fields — anything JSON-serializable and small, i.e. never a
-    /// `QueryExpr` subtree) via the same canonical-JSON-string trick the
+    /// `PreASAPNode` subtree) via the same canonical-JSON-string trick the
     /// whole-subtree version used, just applied to `O(1)` fields instead
     /// of `O(subtree size)`.
     fn hash_own_fields(hasher: &mut impl Hasher, own_fields: &impl serde::Serialize) {
@@ -456,26 +456,29 @@ pub fn structural_hash(node: &QueryExpr, cache: &mut HashCache) -> u64 {
 /// counted as part of its owning operator node, the same node
 /// `rebuild_children` treats as a single opaque leaf for interning
 /// purposes.
-pub fn dag_node_count(root: &QueryExpr) -> usize {
-    let mut seen: std::collections::HashSet<*const QueryExpr> = std::collections::HashSet::new();
+pub fn dag_node_count(root: &PreASAPNode) -> usize {
+    let mut seen: std::collections::HashSet<*const PreASAPNode> = std::collections::HashSet::new();
     count_unique(root, &mut seen)
 }
 
 /// One node's own contribution (`1`) plus each *not-yet-seen* operator
-/// child's contribution — exhaustive over every `QueryExpr` variant,
+/// child's contribution — exhaustive over every `PreASAPNode` variant,
 /// enumerating the same fields [`rebuild_children`] does (kept as a
 /// separate, read-only traversal rather than threaded through
 /// `rebuild_children` itself, since that function consumes and rebuilds
 /// its input while this one only ever reads it).
-fn count_unique(node: &QueryExpr, seen: &mut std::collections::HashSet<*const QueryExpr>) -> usize {
-    use QueryExpr::*;
+fn count_unique(
+    node: &PreASAPNode,
+    seen: &mut std::collections::HashSet<*const PreASAPNode>,
+) -> usize {
+    use PreASAPNode::*;
 
     /// Visit one `Rc`-held child: counts (and recurses into) it only the
     /// first time its pointer is seen, `0` on every later occurrence —
     /// this is the actual dedup step.
     fn visit(
-        child: &Rc<QueryExpr>,
-        seen: &mut std::collections::HashSet<*const QueryExpr>,
+        child: &Rc<PreASAPNode>,
+        seen: &mut std::collections::HashSet<*const PreASAPNode>,
     ) -> usize {
         if seen.insert(Rc::as_ptr(child)) {
             count_unique(child, seen)
@@ -503,8 +506,8 @@ fn count_unique(node: &QueryExpr, seen: &mut std::collections::HashSet<*const Qu
         | TimeRange { child, .. }
         | TimeShift { child, .. }
         | SQLWindowFunc { child, .. } => visit(child, seen),
-        // `Concat`'s branches are stored by value (`Vec<QueryExpr>`, not
-        // `Rc<QueryExpr>` — see `rebuild_children`'s `intern_owned` use for
+        // `Concat`'s branches are stored by value (`Vec<PreASAPNode>`, not
+        // `Rc<PreASAPNode>` — see `rebuild_children`'s `intern_owned` use for
         // this variant), so a branch has no `Rc` identity of its own to
         // dedup on at this position; still recurse into each in case an
         // `Rc`-shared descendant appears further down.
@@ -541,7 +544,7 @@ fn count_unique(node: &QueryExpr, seen: &mut std::collections::HashSet<*const Qu
 /// went through a previous `share_common_subtrees` pass; a structural
 /// duplicate collapses right back onto `child` itself via `PartialEq`, an
 /// already-optimal no-op.
-fn intern_child(table: &mut InternTable, child: Rc<QueryExpr>) -> Rc<QueryExpr> {
+fn intern_child(table: &mut InternTable, child: Rc<PreASAPNode>) -> Rc<PreASAPNode> {
     match Rc::try_unwrap(child) {
         Ok(owned) => intern_bottom_up(table, owned),
         Err(shared) => intern_bottom_up(table, (*shared).clone()),
@@ -549,32 +552,32 @@ fn intern_child(table: &mut InternTable, child: Rc<QueryExpr>) -> Rc<QueryExpr> 
 }
 
 /// Like [`intern_child`], for a `Concat` branch — stored by value
-/// (`Vec<QueryExpr>`, not `Rc<QueryExpr>`), so this position itself can never
+/// (`Vec<PreASAPNode>`, not `Rc<PreASAPNode>`), so this position itself can never
 /// alias another parent. Interning it anyway still lets any `Rc`-typed
 /// descendant of the branch participate in sharing, and registers the
 /// branch's own hash/value in the table for a *different* `Concat` elsewhere
 /// with a structurally identical branch (which — being in its own `Vec`
 /// slot too — still can't literally share the `Rc`, but this keeps the
 /// interning behavior uniform and the table's bucket contents consistent).
-fn intern_owned(table: &mut InternTable, expr: QueryExpr) -> QueryExpr {
+fn intern_owned(table: &mut InternTable, expr: PreASAPNode) -> PreASAPNode {
     let rc = intern_bottom_up(table, expr);
     Rc::try_unwrap(rc).unwrap_or_else(|shared| (*shared).clone())
 }
 
 /// Bottom-up: rebuild `expr`'s children (recursively interning each), then
 /// intern the rebuilt node itself.
-fn intern_bottom_up(table: &mut InternTable, expr: QueryExpr) -> Rc<QueryExpr> {
+fn intern_bottom_up(table: &mut InternTable, expr: PreASAPNode) -> Rc<PreASAPNode> {
     let rebuilt = rebuild_children(table, expr);
     table.intern(rebuilt)
 }
 
 /// Rebuild `expr` with each **operator** child (see the module doc on scope)
-/// replaced by its interned `Rc`. Exhaustive over every `QueryExpr` variant,
+/// replaced by its interned `Rc`. Exhaustive over every `PreASAPNode` variant,
 /// matching `canonicalize.rs`'s `children_mut` exactly in which fields count
 /// as an operator child — new variants fail to compile here until this match
 /// is extended.
-fn rebuild_children(table: &mut InternTable, expr: QueryExpr) -> QueryExpr {
-    use QueryExpr::*;
+fn rebuild_children(table: &mut InternTable, expr: PreASAPNode) -> PreASAPNode {
+    use PreASAPNode::*;
     match expr {
         Scan { .. } | EvalTimestamp | CurrentTimestamp => expr,
         PromqlVectorFromScalar(c) => PromqlVectorFromScalar(intern_child(table, c)),
@@ -750,7 +753,7 @@ fn rebuild_children(table: &mut InternTable, expr: QueryExpr) -> QueryExpr {
 /// `Id` is caller-chosen — a `QueryWorkload` entry's own key, an index, a
 /// query name, whatever identifies one root through the pipeline; this
 /// module has no opinion on its shape.
-pub fn share_common_subtrees<Id>(roots: Vec<(Id, QueryExpr)>) -> Vec<(Id, Rc<QueryExpr>)> {
+pub fn share_common_subtrees<Id>(roots: Vec<(Id, PreASAPNode)>) -> Vec<(Id, Rc<PreASAPNode>)> {
     let mut table = InternTable::new();
     roots
         .into_iter()
@@ -767,8 +770,8 @@ mod tests {
     use crate::types::AccuracyTarget;
 
     /// `[ts, service, value, latency]`.
-    fn scan() -> QueryExpr {
-        QueryExpr::Scan {
+    fn scan() -> PreASAPNode {
+        PreASAPNode::Scan {
             source: Source::TimeSeries { metric: "m".into() },
             predicates: vec![],
             schema: Schema::with_time_index(
@@ -784,8 +787,8 @@ mod tests {
         }
     }
 
-    fn quantile_agg(by: Vec<usize>, col: Option<usize>, q: f64) -> QueryExpr {
-        QueryExpr::Aggregate {
+    fn quantile_agg(by: Vec<usize>, col: Option<usize>, q: f64) -> PreASAPNode {
+        PreASAPNode::Aggregate {
             reduction: Reduction::by(by),
             measures: vec![AggIntent::Quantile {
                 col,
@@ -871,7 +874,7 @@ mod tests {
         // workload of size 1 still interns bottom-up within this one tree —
         // no separate single-query mechanism needed.
         let agg = quantile_agg(vec![1], Some(2), 0.5);
-        let root = QueryExpr::BinaryOp {
+        let root = PreASAPNode::BinaryOp {
             op: BinaryOpKind::Compare(crate::pre_asap::expr_ir::CompareOpKind::Eq),
             lhs: Rc::new(agg.clone()),
             rhs: Rc::new(agg),
@@ -881,7 +884,7 @@ mod tests {
         let [(_, root)] = shared.as_slice() else {
             panic!("expected 1 root");
         };
-        let QueryExpr::BinaryOp { lhs, rhs, .. } = root.as_ref() else {
+        let PreASAPNode::BinaryOp { lhs, rhs, .. } = root.as_ref() else {
             panic!("expected BinaryOp root, got {root:?}");
         };
         assert!(
@@ -920,13 +923,13 @@ mod tests {
         // whole point of memoization is not changing the answer, only the
         // work needed to reach it.
         let agg = quantile_agg(vec![1], Some(2), 0.5);
-        let shared_root = QueryExpr::BinaryOp {
+        let shared_root = PreASAPNode::BinaryOp {
             op: BinaryOpKind::Compare(crate::pre_asap::expr_ir::CompareOpKind::Eq),
             lhs: Rc::new(agg.clone()),
             rhs: Rc::new(agg.clone()),
             vector_match: None,
         };
-        let unshared_root = QueryExpr::BinaryOp {
+        let unshared_root = PreASAPNode::BinaryOp {
             op: BinaryOpKind::Compare(crate::pre_asap::expr_ir::CompareOpKind::Eq),
             lhs: Rc::new(agg.clone()),
             rhs: Rc::new(agg), // a second, independently-allocated Rc with an equal value
@@ -949,7 +952,7 @@ mod tests {
         // recursive walk) for the second occurrence.
         let agg = quantile_agg(vec![1], Some(2), 0.5);
         let shared = Rc::new(agg);
-        let root = QueryExpr::BinaryOp {
+        let root = PreASAPNode::BinaryOp {
             op: BinaryOpKind::Compare(crate::pre_asap::expr_ir::CompareOpKind::Eq),
             lhs: Rc::clone(&shared),
             rhs: Rc::clone(&shared),
@@ -986,7 +989,7 @@ mod tests {
         // not 5 (which a tree-walk / naive serialization, counting the
         // shared branch's 2 nodes twice, would report).
         let agg = quantile_agg(vec![1], Some(2), 0.5);
-        let root = QueryExpr::BinaryOp {
+        let root = PreASAPNode::BinaryOp {
             op: BinaryOpKind::Compare(crate::pre_asap::expr_ir::CompareOpKind::Eq),
             lhs: Rc::new(agg.clone()),
             rhs: Rc::new(agg),
@@ -1033,7 +1036,7 @@ mod tests {
         // `Dedup { cols }` adds `cols` as a unique key — so two identical
         // `Dedup` subtrees over a keyed column *do* merge, exercising the
         // legality gate on a non-`Aggregate` node.
-        let dedup = |cols: Vec<usize>| QueryExpr::Dedup {
+        let dedup = |cols: Vec<usize>| PreASAPNode::Dedup {
             cols,
             child: Rc::new(scan()),
         };
@@ -1055,7 +1058,7 @@ mod tests {
         // grouping stays open (no unique key) even though `by` is
         // non-empty-shaped structurally, so two identical `without` groups
         // do not merge under the same gate that blocks the ungrouped case.
-        let without_agg = || QueryExpr::Aggregate {
+        let without_agg = || PreASAPNode::Aggregate {
             reduction: Reduction::Reduce(GroupKeys::without(vec![0])),
             measures: vec![AggIntent::Count {
                 accuracy: AccuracyTarget::Exact,

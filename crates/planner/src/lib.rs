@@ -14,7 +14,7 @@
 use std::rc::Rc;
 
 use asap_types::parsed_workload::{ParsedWorkload, ParsedWorkloadError};
-use asap_types::pre_asap::query_expr::QueryExpr;
+use asap_types::pre_asap::query_expr::PreASAPNode;
 use asap_types::workload::{PlanningWorkload, QueryLanguage, SqlDialect, WorkloadError};
 
 use asap_frontend_metricsql::{lower_metricsql, MetricsqlError};
@@ -196,7 +196,11 @@ pub enum PlanError {
 pub async fn e2e_plan(input: UserInput<'_>) -> Result<PlanOutput, PlanError> {
     input.validate()?;
 
-    let exprs = lower(&input).await?;
+    let exprs = lower_candidates(&input)
+        .await?
+        .into_iter()
+        .map(|(_, dag)| dag)
+        .collect();
     let parsed = ParsedWorkload::new(input.workload.clone(), exprs)?;
 
     let fallback = MajorPass;
@@ -209,13 +213,23 @@ pub async fn e2e_plan(input: UserInput<'_>) -> Result<PlanOutput, PlanError> {
     optimize(pass, optimization).map_err(PlanError::Optimize)
 }
 
+/// Generate frontend candidates without logical or lifecycle selection.
+/// IDs are normalized workload entry indices, including repeating entries.
+/// Current frontends lower deterministically: one candidate for each entry.
+pub async fn lower_candidates(
+    input: &UserInput<'_>,
+) -> Result<asap_types::pre_asap::CandidatePreASAPDAGs<usize>, PlanError> {
+    input.validate()?;
+    Ok(lower(input).await?.into_iter().enumerate().collect())
+}
+
 /// One expression per normalized entry, in `QueryWorkload::entries()` order.
 ///
 /// The SQL and MetricsQL frontends are driven one entry at a time rather than
 /// through `lower_sql_batch`, which walks `query_batch` alone and would drop
 /// every repeating query — exactly the entries whose recurrence the lifecycle
 /// stage needs.
-async fn lower(input: &UserInput<'_>) -> Result<Vec<Rc<QueryExpr>>, PlanError> {
+async fn lower(input: &UserInput<'_>) -> Result<Vec<Rc<PreASAPNode>>, PlanError> {
     let entries = || input.workload.query_workload.entries();
 
     match &input.frontend_specific {

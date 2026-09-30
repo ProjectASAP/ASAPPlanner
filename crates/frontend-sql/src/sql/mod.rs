@@ -1,12 +1,12 @@
 //! SQL → the canonical, unresolved
-//! [`UnresolvedQueryExpr`](asap_types::pre_asap::query_expr::UnresolvedQueryExpr)
-//! (`QueryExpr<ColumnRef>`).
+//! [`UnresolvedPreASAPNode`](asap_types::pre_asap::query_expr::UnresolvedPreASAPNode)
+//! (`PreASAPNode<ColumnRef>`).
 //!
 //! Parses SQL via DataFusion (over the catalog's registered tables), then
-//! walks the unoptimized `LogicalPlan` and emits `UnresolvedQueryExpr` nodes with
+//! walks the unoptimized `LogicalPlan` and emits `UnresolvedPreASAPNode` nodes with
 //! unresolved `ColumnRef`s directly (issue #179) — the same tree shape
 //! [`resolve_root`](asap_types::pre_asap::resolve_root) binds to canonical,
-//! positional `QueryExpr<ColumnId>`. Unlike PromQL's front end, SQL's
+//! positional `PreASAPNode<ColumnId>`. Unlike PromQL's front end, SQL's
 //! Ordinary SQL `Aggregate` nodes are `Reduction::Reduce`. The explicit
 //! `asap_rate`/`asap_increase` bridge is the narrow exception: it
 //! spells a time-series range reducer with an explicit value, time-index, and
@@ -54,7 +54,7 @@ use asap_sql_function_catalog::{AggSemantic, Arity, RewriteKind};
 use asap_types::pre_asap::agg_intent::AggIntent;
 use asap_types::pre_asap::query_expr::{
     GroupKeys, Predicate, ProjectItem, Reduction, SortKey, Source,
-    UnresolvedQueryExpr as Unresolved, WindowFrame, WindowFrameBound, WindowFrameOffset,
+    UnresolvedPreASAPNode as Unresolved, WindowFrame, WindowFrameBound, WindowFrameOffset,
     WindowFrameUnits,
 };
 use asap_types::pre_asap::schema::{DataType, Schema};
@@ -108,7 +108,7 @@ fn current_accuracy() -> AccuracyTarget {
     ACCURACY.with(|a| a.borrow().clone())
 }
 
-/// Lowers SQL strings to the canonical [`UnresolvedQueryExpr`](asap_types::pre_asap::UnresolvedQueryExpr)
+/// Lowers SQL strings to the canonical [`UnresolvedPreASAPNode`](asap_types::pre_asap::UnresolvedPreASAPNode)
 /// over a table [`SqlCatalog`]. Call
 /// [`resolve_root`](asap_types::pre_asap::resolve_root) on the result for
 /// the canonical, resolved tree.

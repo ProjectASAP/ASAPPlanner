@@ -1,11 +1,11 @@
-//! MetricsQL AST to canonical `QueryExpr` frontend.
+//! MetricsQL AST to canonical `PreASAPNode` frontend.
 
 use std::{rc::Rc, time::Duration};
 
 use asap_types::pre_asap::{
     resolve_root, AggIntent, ArithmeticOpKind, BinaryOpKind, ColumnRef, CompareOpKind, GroupKeys,
-    Predicate, PromQLVectorSetOpKind, QueryExpr, Reduction, ScalarValue, Source,
-    UnresolvedQueryExpr as U,
+    PreASAPNode, Predicate, PromQLVectorSetOpKind, Reduction, ScalarValue, Source,
+    UnresolvedPreASAPNode as U,
 };
 use asap_types::types::AccuracyTarget;
 use metricsql_parser::ast::{AggregateModifier, DurationExpr, Expr, MetricExpr, RollupExpr};
@@ -33,7 +33,10 @@ pub fn canonical_metricsql(query: &str) -> Result<String, MetricsqlError> {
     Ok(parse_metricsql(query)?.to_string())
 }
 
-pub fn lower_metricsql(query: &str, accuracy: AccuracyTarget) -> Result<QueryExpr, MetricsqlError> {
+pub fn lower_metricsql(
+    query: &str,
+    accuracy: AccuracyTarget,
+) -> Result<PreASAPNode, MetricsqlError> {
     let ast = parse_metricsql(query)?;
     let unresolved = Lowerer { accuracy }.lower(&ast)?;
     resolve_root(&unresolved).map_err(|e| MetricsqlError::Resolve(e.to_string()))

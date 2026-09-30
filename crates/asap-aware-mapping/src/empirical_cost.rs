@@ -3,7 +3,7 @@
 //! of an accuracy guarantee. CPU quantities are nanoseconds, never CPU operations.
 
 use asap_types::post_asap::{
-    GroupingStrategy, SketchAlgorithm, SketchParams, SummaryExpr, SummaryFamilyType, SummaryNode,
+    GroupingStrategy, PostASAPNode, SketchAlgorithm, SketchParams, SummaryExpr, SummaryFamilyType,
 };
 use asap_types::pre_asap::AggIntent;
 use serde::{Deserialize, Serialize};
@@ -214,7 +214,7 @@ impl EmpiricalEvidenceProvider {
     /// mixed with an existing deployment's unitless or CPU-operation costs.
     pub fn lifecycle_cost_inputs(
         &self,
-        summary: &SummaryNode,
+        summary: &PostASAPNode,
     ) -> SummaryMaintenanceLifecycleCostInputs {
         let SummaryExpr::SummaryAgg {
             family: SummaryFamilyType::Sketch(kind, GroupingStrategy::PerSubpopulationInstance),
@@ -280,7 +280,7 @@ impl CostModel for EmpiricalCostModel {
 
     fn summary_maintenance_lifecycle_cost_inputs(
         &self,
-        summary: &SummaryNode,
+        summary: &PostASAPNode,
     ) -> SummaryMaintenanceLifecycleCostInputs {
         self.provider.lifecycle_cost_inputs(summary)
     }

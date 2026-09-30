@@ -2,7 +2,7 @@
 
 > - Status: proposed, not implemented. 
 > - Problem statement: [#468](https://github.com/ProjectASAP/ASAPPlanner/issues/468). 
-> - Builds on [Decoupling operators from scalar expressions](decoupling_op_and_expr.md) (same PR), which splits `QueryExpr` into `NonASAPOp` and `ScalarExpr`. 
+> - Builds on [Decoupling operators from scalar expressions](decoupling_op_and_expr.md) (same PR), which splits `PreASAPNode` into `NonASAPOp` and `ScalarExpr`. 
 
 **The idea.** Today a post-ASAP plan is glued together from two sets of operator types. 
 This proposal keeps one operator language and makes summary operators extra node kinds in it: any relational operator can sit above a summary, and a summary can read any relational subtree. 
@@ -41,7 +41,7 @@ We define the `Operator` type structure based on the breadth of its attributes.
 
 ```rust
 pub enum Operator<C: ColState = ColumnId> {
-    NonASAP(NonASAPOp<C>),     // today's relational and timeseries operators in `QueryExpr` (§1.2)
+    NonASAP(NonASAPOp<C>),     // today's relational and timeseries operators in `PreASAPNode` (§1.2)
     ASAP(ASAPOp<C>),           // summary operators (§1.3)
 }
 
@@ -106,7 +106,7 @@ Operator<C>
 ### 1.2 `NonASAPOp`
 
 `NonASAPOp` is the non-ASAP category of `Operator`.
-It comes from splitting `QueryExpr` into "operator" and "scalar expression" parts ([decoupling doc](decoupling_op_and_expr.md#2-types)). 
+It comes from splitting `PreASAPNode` into "operator" and "scalar expression" parts ([decoupling doc](decoupling_op_and_expr.md#2-types)). 
 
 ```rust
 pub enum NonASAPOp<C: ColState = ColumnId> {
@@ -163,7 +163,7 @@ Following table shows how some legacy types get expressed in the new framework.
 | `ValueOperation::{Project, Filter, Sort, Limit}` | `NonASAPOp::{Project, Filter, Sort, Limit}` |
 | `SummaryExpr::{BinaryOp, RelationalJoin}` | `NonASAPOp::{BinaryOp, Join}` |
 | `ValueOperation::Exact(Aggregate)`, `ExactOperation` | `NonASAPOp::Aggregate` |
-| `SummaryNode` | `Operator` itself: `schema` is computed, `timing` / `guarantee` are slots on every variant (§2) |
+| `PostASAPNode` | `Operator` itself: `schema` is computed, `timing` / `guarantee` are slots on every variant (§2) |
 
 ### 1.4 Child field
 
@@ -178,7 +178,7 @@ Filter { pred: Predicate(Rc<ScalarExpr>),        Filter { pred: Predicate(Rc<Sca
 
 Now an original operator can also sit on ASAP operators, e.g. a `SetOp` sitting on two `SummaryEstimate` operators.
 
-`Concat.children` is `Vec<QueryExpr>` today: branches are stored by value and have no `Rc` identity, so the planner (§4), which identifies targets by pointer,
+`Concat.children` is `Vec<PreASAPNode>` today: branches are stored by value and have no `Rc` identity, so the planner (§4), which identifies targets by pointer,
 cannot replace a branch — e.g. the branches of SQL `ROLLUP` or PromQL `histogram_quantiles`. It becomes `Vec<Rc<Operator>>` (§8 stage 0).
 
 ## 2. Schema, Guarantee, and Timing
@@ -187,8 +187,8 @@ This section discusses three key per-node attributes, `schema`, `guarantee`, and
 
 | Field | Meaning | Today | After |
 |---|---|---|---|
-| `schema` | output columns and their types | pre-ASAP: computed by `QueryExpr::output_schema()`<br>post-ASAP: a `SummarySchema` stored on every `SummaryNode` | can be obtained by `output_schema()` |
-| `guarantee` | accuracy bound | pre-ASAP: none<br>post-ASAP: stored on every `SummaryNode` | can be obtained by `guarantee()`<br>binding stores only each operator's own error<br> complete error bound need to be derived by `derive_guarantees()` |
+| `schema` | output columns and their types | pre-ASAP: computed by `PreASAPNode::output_schema()`<br>post-ASAP: a `SummarySchema` stored on every `PostASAPNode` | can be obtained by `output_schema()` |
+| `guarantee` | accuracy bound | pre-ASAP: none<br>post-ASAP: stored on every `PostASAPNode` | can be obtained by `guarantee()`<br>binding stores only each operator's own error<br> complete error bound need to be derived by `derive_guarantees()` |
 | `timing` | execution time | pre-ASAP: none<br>post-ASAP, stored: a field on `BinaryOp` / `ValueOperation` / `SummaryMerge`<br>post-ASAP, not stored: `KeepPreAsap` from the consuming edge, `SummaryAgg` from the child. | can be obtained by `timing()`<br>set by binding (`SummaryAgg`) or the planner (`FinalizeExactAccumulator`)<br>timing of the rest of operators need to be derived by `derive_timings()` |
 
 ### 2.1 Schema: fused into one type
@@ -224,7 +224,7 @@ impl Field {
 
 | Node | Today | After |
 |---|---|---|
-| `NonASAPOp` | post-ASAP `KeepPreAsap`: `QueryExpr` schema lifted to `SummarySchema` and stored<br>post-ASAP `ValueOperation` / `BinaryOp` / `RelationalJoin` copies: stored at construction | using the same logic as `QueryExpr::output_schema()` |
+| `NonASAPOp` | post-ASAP `KeepPreAsap`: `PreASAPNode` schema lifted to `SummarySchema` and stored<br>post-ASAP `ValueOperation` / `BinaryOp` / `RelationalJoin` copies: stored at construction | using the same logic as `PreASAPNode::output_schema()` |
 | `SummaryAgg` | the replaced `Aggregate`'s output with the measure column retyped to `family` | grouping columns + one `ASAPType(family)` column |
 | `SummaryEstimate` | the replaced operator's output schema | the child's grouping columns + the value columns of the `SketchQuery` |
 | `FinalizeExactAccumulator` | the logical operator's output, lifted | the child's schema, `ASAPType(ExactAggregate ..)` columns changed into `DataType(..)` |
@@ -251,7 +251,7 @@ Per node kind:
 |---|---|---|
 | `SummaryEstimate` | stored at binding: the sketch's own error composed with the child's (`compose_guarantee`) | **derived**: `local_guarantee` composed with the child's. `local_guarantee` is set at binding: the sketch's error over an exact input, `None` when the model has no error model for the family |
 | `SummaryAgg` | stored: ExactAggregate family composed with the child's; sketch families `None` | **derived**: ExactAggregate family: exact, composed with the child's under `exact_rule`, except `ExactKind::Count`, exact whatever the child (as today); sketch families `Set(None)`, state has no guarantee |
-| `NonASAPOp` | pre-ASAP `QueryExpr`: none<br>post-ASAP `KeepPreAsap`: exact<br>post-ASAP `ValueOperation` / `BinaryOp` / `RelationalJoin` copies: composed at construction | **derived**: composed from the children; exact if no `ASAP` descendant |
+| `NonASAPOp` | pre-ASAP `PreASAPNode`: none<br>post-ASAP `KeepPreAsap`: exact<br>post-ASAP `ValueOperation` / `BinaryOp` / `RelationalJoin` copies: composed at construction | **derived**: composed from the children; exact if no `ASAP` descendant |
 | `FinalizeExactAccumulator` | copies the child's | **derived**: the child's |
 | `MaintainPopulation` / `ReadPopulation` | stored: exact | **derived**: exact |
 | unused variants | `None`: state has no guarantee of its own | unimplemented (§1.3) |
@@ -283,7 +283,7 @@ Per node kind:
 
 | Node | Today | After |
 |---|---|---|
-| `NonASAPOp` | pre-ASAP `QueryExpr`: none<br>post-ASAP `KeepPreAsap`: from the consuming edge<br>post-ASAP `ValueOperation` / `BinaryOp` copies: a stored field | **derived** from the consuming edge (§5) |
+| `NonASAPOp` | pre-ASAP `PreASAPNode`: none<br>post-ASAP `KeepPreAsap`: from the consuming edge<br>post-ASAP `ValueOperation` / `BinaryOp` copies: a stored field | **derived** from the consuming edge (§5) |
 | `SummaryAgg` | from the child; ingestion time under `KeepPreAsap` | **set** by binding, as today's fallback: `IngestionTime`, or `QueryTime` over a query-time child |
 | `FinalizeExactAccumulator` | a stored field, set by the planner | **set** by the planner: the same position allows either time |
 | `SummaryEstimate` | query time, fixed by the kind | **derived** from the kind: query time |
@@ -298,7 +298,7 @@ DAG and runs only after assembly.
 Today:
 
 ```
-search / binding   each SummaryNode's guarantee is composed when the node is built;
+search / binding   each PostASAPNode's guarantee is composed when the node is built;
                    BinaryOp / ValueOperation store their timing
 selection          reads each candidate's stored guarantee against its target
 assembly           assemble_residual builds kept nodes and composes their guarantee;
@@ -348,7 +348,7 @@ input (frontends after `resolve`, deserialized plans, test IR) with simpler type
 
 ```rust
 pub enum Replacement {
-    Subtree(Rc<Operator>),     // formerly Summary(Rc<SummaryNode>) and Rewrite(Rc<QueryExpr>)
+    Subtree(Rc<Operator>),     // formerly Summary(Rc<PostASAPNode>) and Rewrite(Rc<PreASAPNode>)
     ExactComposition { .. },   // its plan becomes Rc<Operator>
 }
 ```
@@ -404,7 +404,7 @@ Deleted: `assemble_residual`, `keep_pre_asap` / `keep_pre_asap_rc`, and the
 
 | #468 problem | Resolution |
 |---|---|
-| 1. A `Project` is a `QueryExpr` inside `KeepPreAsap` and a `ValueOperation` outside | one set of types |
+| 1. A `Project` is a `PreASAPNode` inside `KeepPreAsap` and a `ValueOperation` outside | one set of types |
 | 2. Nothing outside `KeepPreAsap` can reference the `Scan` inside, so an exact aggregate and a sketch cannot share a scan | `Aggregate` and `SummaryAgg` can point to the same `Scan`. This holds when both run at the same time; otherwise the scan is copied (above). With today's defaults the sketch runs at ingestion time and the exact `Aggregate` at query time, so they share only after the `QueryTime` default (separate PR, §2.3). Splitting a multi-measure `Aggregate` into exact + sketch is a binding rule, out of scope (§9) |
 | 3. `SetOp` and similar have no post-ASAP copy, so no summary below them | `SetOp` takes `None => t`; both children are assembled |
 
@@ -436,7 +436,7 @@ The `KeepPreAsap` / `BinaryOp` / `ValueOperation` / `RelationalJoin` arms of tod
 
 ## 6. Export: fragments in the post-ASAP DAG
 
-The four original-operator payloads (`fallback{expression: QueryExpr}`, `binary`,
+The four original-operator payloads (`fallback{expression: PreASAPNode}`, `binary`,
 `value`, `relational_join`) become one:
 
 ```rust
@@ -451,7 +451,7 @@ PostAsapOperatorPayload::Relational {
 fragment, cutting an edge with a `DagInput` leaf wherever it meets an `ASAP` node.
 `ASAP` nodes map one-to-one onto the existing summary payloads;
 `FinalizeExactAccumulator` / `MaintainPopulation` / `ReadPopulation` stay
-`value{operation}`. A backend lowers every fragment with its existing `QueryExpr`
+`value{operation}`. A backend lowers every fragment with its existing `PreASAPNode`
 lowering plus a `DagInput` arm (an incoming edge as a materialized table); the
 `binary` / `value::Project` / `relational_join` lowerings go.
 
@@ -493,9 +493,9 @@ lowering plus a `DagInput` arm (an incoming edge as a materialized table); the
 | 1 Split | [decoupling doc](decoupling_op_and_expr.md): `NonASAPOp` + `ScalarExpr`; children stay `Rc<NonASAPOp>` | scalar code ([decoupling doc §3](decoupling_op_and_expr.md#3-changes)) |
 | 2 Two levels | §1.1, §1.4: `Operator<C>`, an empty `ASAPOp`, `contains_asap()`, `expect_non_asap()`; child slots become `Rc<Operator<C>>`; every variant gets `timing` / `guarantee` slots, and nodes are built through constructors that leave both `Unset` | every crate; the same mechanical change everywhere |
 | 3 One schema | §2.1: `Column` → `Field` and `Schema.columns` → `fields` (serde keeps the name `columns` until stage 4); `FieldType`, `ASAPType`, `PlainField`, `Schema` everywhere except the `post_asap_dag.rs` wire types, which keep `SummarySchema` until stage 4. **No wire change** | `asap-types` + schema construction in every crate |
-| 4 New types | fill `ASAPOp`; `ASAP` arms of `output_schema`; `derive_guarantees` and `derive_timings` (§2.2, §5); the entry check (§3); `flatten(&SummaryNode) -> Rc<Operator>` so export runs on the new types, copying each node's guarantee and today's derived timing into the slots, so the export is unchanged; wire types become `Schema`, and `Schema.fields` serializes as `fields`. Wire → 6. **The only wire-breaking stage**; merged together with ASAPQuery-backend and ASAPCollector | `asap-types`, `devtools`, viewer |
+| 4 New types | fill `ASAPOp`; `ASAP` arms of `output_schema`; `derive_guarantees` and `derive_timings` (§2.2, §5); the entry check (§3); `flatten(&PostASAPNode) -> Rc<Operator>` so export runs on the new types, copying each node's guarantee and today's derived timing into the slots, so the export is unchanged; wire types become `Schema`, and `Schema.fields` serializes as `fields`. Wire → 6. **The only wire-breaking stage**; merged together with ASAPQuery-backend and ASAPCollector | `asap-types`, `devtools`, viewer |
 | 5 Planner | §4: candidates and assembly on `Rc<Operator>`; §7 moves to the new types; delete `flatten` | `asap-aware-mapping` |
-| 6 Cleanup | delete `SummaryExpr`, `SummaryNode`, extra `ValueOperation` variants, `ExactOperation`, `post_asap/cse.rs`; update `post-asap-ir.md`, `physical-plan-integration.md`, developer and viewer docs | docs |
+| 6 Cleanup | delete `SummaryExpr`, `PostASAPNode`, extra `ValueOperation` variants, `ExactOperation`, `post_asap/cse.rs`; update `post-asap-ir.md`, `physical-plan-integration.md`, developer and viewer docs | docs |
 
 Wrapping pre-ASAP operators in `ValueOperation` first is not planned: stage 4 gives
 the same early flat export, on the final types.

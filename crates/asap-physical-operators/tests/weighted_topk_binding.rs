@@ -15,13 +15,13 @@ use asap_physical_operators::dag::{
 use futures::{executor::block_on, StreamExt};
 use planner_types::{
     post_asap::*,
-    pre_asap::{DataType, QueryExpr},
+    pre_asap::{DataType, PreASAPNode},
     types::AccuracyTarget,
 };
 use std::{collections::BTreeMap, rc::Rc, sync::Arc};
 struct Evidence;
 impl AccuracyEvidenceProvider for Evidence {
-    fn topk_max_distinct_items(&self, _: &QueryExpr) -> Option<u64> {
+    fn topk_max_distinct_items(&self, _: &PreASAPNode) -> Option<u64> {
         Some(1000)
     }
     fn propagation_stats(
@@ -203,7 +203,7 @@ use planner_types::workload::{
 pub fn lower_promql(
     query: &str,
     accuracy: AccuracyTarget,
-) -> Result<QueryExpr, asap_frontend_promql::PromqlError> {
+) -> Result<PreASAPNode, asap_frontend_promql::PromqlError> {
     let workload = PlanningWorkload {
         query_workload: QueryWorkload {
             language: QueryLanguage::PromQL,
@@ -284,12 +284,12 @@ fn check_direct_rate_topk(dynamic: bool) {
     };
     let mut logical =
         lower_promql("topk by(job)(2, rate(m[1m]))", AccuracyTarget::Epsilon(0.1)).unwrap();
-    fn resolve_catalog(node: &mut QueryExpr) {
+    fn resolve_catalog(node: &mut PreASAPNode) {
         match node {
-            QueryExpr::Aggregate { child, .. } | QueryExpr::TimeRange { child, .. } => {
+            PreASAPNode::Aggregate { child, .. } | PreASAPNode::TimeRange { child, .. } => {
                 resolve_catalog(Rc::make_mut(child))
             }
-            QueryExpr::Scan { schema, .. } => {
+            PreASAPNode::Scan { schema, .. } => {
                 schema.closed = true;
                 schema
                     .columns
@@ -378,7 +378,7 @@ fn check_direct_rate_topk(dynamic: bool) {
                 matches!(
                     &node.payload,
                     PostAsapOperatorPayload::Fallback {
-                        expression: QueryExpr::TimeRange { .. }
+                        expression: PreASAPNode::TimeRange { .. }
                     }
                 )
             })
@@ -395,7 +395,7 @@ fn check_direct_rate_topk(dynamic: bool) {
         .unwrap();
         let bytes = serde_json::to_vec(&raw_compiled).unwrap();
         let raw_compiled = serde_json::from_slice::<
-            asap_physical_operators::physical_planner::CompiledPhysicalDag,
+            asap_physical_operators::physical_planner::PhysicalDAG,
         >(&bytes)
         .unwrap();
         // Each evaluation receives a complete raw window. A reset, a stopped
@@ -663,7 +663,7 @@ fn spatial_topk_exposes_signed_heap_candidate_over_complete_snapshot() {
             matches!(
                 &node.payload,
                 PostAsapOperatorPayload::Fallback {
-                    expression: QueryExpr::TimeRange { .. }
+                    expression: PreASAPNode::TimeRange { .. }
                 }
             )
         })
@@ -758,7 +758,7 @@ fn spatial_topk_exposes_signed_heap_candidate_over_complete_snapshot() {
 
 /// Deployment-side lifecycle choice: every summary state of `candidate` is
 /// continuously maintained, and the chosen lifecycles set execution timing.
-fn continuously_maintained_dag(candidate: &Rc<SummaryNode>) -> PostAsapDag {
+fn continuously_maintained_dag(candidate: &Rc<PostASAPNode>) -> PostASAPDAGTransport {
     use asap_aware_mapping::{
         cost_model::{Cost, CostModel},
         enumerate_summary_maintenance_lifecycles, CostRate, Horizon,
@@ -779,7 +779,7 @@ fn continuously_maintained_dag(candidate: &Rc<SummaryNode>) -> PostAsapDag {
         }
         fn summary_maintenance_lifecycle_cost_inputs(
             &self,
-            _: &SummaryNode,
+            _: &PostASAPNode,
         ) -> SummaryMaintenanceLifecycleCostInputs {
             SummaryMaintenanceLifecycleCostInputs {
                 build_cost: Some(Cost(10.)),
@@ -791,7 +791,7 @@ fn continuously_maintained_dag(candidate: &Rc<SummaryNode>) -> PostAsapDag {
         }
         fn summary_maintenance_capabilities(
             &self,
-            _: &SummaryNode,
+            _: &PostASAPNode,
         ) -> SummaryMaintenanceCapabilities {
             SummaryMaintenanceCapabilities {
                 incremental_update: true,
@@ -922,7 +922,7 @@ fn maintained_rate_heap_lifecycle_compiles_fixed_window_precompute() {
         );
         // Execute the selected split across a state serialization boundary.
         // Each run builds fresh weights from that window's counters.
-        let execute = |plan: &asap_physical_operators::physical_planner::CompiledPhysicalDag,
+        let execute = |plan: &asap_physical_operators::physical_planner::PhysicalDAG,
                        input: Batch,
                        scope: Scope| {
             let id = plan.input_contracts().next().unwrap().0;

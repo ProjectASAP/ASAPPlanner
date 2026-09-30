@@ -7,12 +7,12 @@ use asap_types::{
         maintained_population::{MaintainedPopulation, PopulationInput},
         share_common_summary_subtrees, SummaryExpr, ValueOperation,
     },
-    pre_asap::{Column, DataType, QueryExpr, Schema},
+    pre_asap::{Column, DataType, PreASAPNode, Schema},
     types::AccuracyTarget,
 };
 use std::rc::Rc;
 
-async fn aggregate(q: &str) -> Rc<QueryExpr> {
+async fn aggregate(q: &str) -> Rc<PreASAPNode> {
     let catalog = SqlCatalog::new().with_table(
         "samples",
         Schema::new(vec![
@@ -25,9 +25,9 @@ async fn aggregate(q: &str) -> Rc<QueryExpr> {
 }
 
 fn population(
-    mut node: &asap_types::post_asap::SummaryNode,
+    mut node: &asap_types::post_asap::PostASAPNode,
 ) -> (
-    &Rc<asap_types::post_asap::SummaryNode>,
+    &Rc<asap_types::post_asap::PostASAPNode>,
     &MaintainedPopulation,
 ) {
     while let SummaryExpr::ValueOperation {

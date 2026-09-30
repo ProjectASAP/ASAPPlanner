@@ -14,7 +14,7 @@
 pub mod fixtures {
     use asap_frontend_promql::lower_promql_workload;
     use asap_types::pre_asap::schema::{Column, DataType, Schema};
-    use asap_types::pre_asap::QueryExpr;
+    use asap_types::pre_asap::PreASAPNode;
     use asap_types::types::AccuracyTarget;
     use asap_types::workload::{
         AccuracyRequirement, BatchEntry, DataWorkload, DurationMs, Evidence, PlanningWorkload,
@@ -26,7 +26,7 @@ pub mod fixtures {
     pub fn lower_promql(
         query: &str,
         accuracy: AccuracyTarget,
-    ) -> Result<QueryExpr, asap_frontend_promql::PromqlError> {
+    ) -> Result<PreASAPNode, asap_frontend_promql::PromqlError> {
         let workload = PlanningWorkload {
             query_workload: QueryWorkload {
                 language: QueryLanguage::PromQL,

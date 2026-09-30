@@ -1,17 +1,17 @@
 # Decoupling Operators From Scalar Expressions
 
 > Status: proposed, not implemented. Companion to [Operator sharing](operator-sharing.md)
-> (same PR): this document splits `QueryExpr`; that one builds the shared operator
+> (same PR): this document splits `PreASAPNode`; that one builds the shared operator
 > language on the result. Code is referenced by file and function; counts are
 > approximate, measured on `main` at `8acb472`.
 
-**The idea.** `QueryExpr` holds two different kinds of node in one enum. This proposal
+**The idea.** `PreASAPNode` holds two different kinds of node in one enum. This proposal
 splits it into `NonASAPOp` (operators) and `ScalarExpr` (scalar expressions).
 
 ```
 Today                                        Proposed
-Filter { pred:  Rc<QueryExpr>,               Filter { pred:  Predicate(Rc<ScalarExpr>),
-         child: Rc<QueryExpr> }                       child: Rc<NonASAPOp> }
+Filter { pred:  Rc<PreASAPNode>,               Filter { pred:  Predicate(Rc<ScalarExpr>),
+         child: Rc<PreASAPNode> }                       child: Rc<NonASAPOp> }
 ```
 
 ## 1. Problem
@@ -31,10 +31,10 @@ Project                              ← operator: outputs a table
 - A **scalar expression** has no table of its own. `Column(4)` means "column 4 of the
   input of the operator I sit in"; outside that operator it means nothing.
 
-Today both are `QueryExpr` variants, told apart only by field position. The code already
+Today both are `PreASAPNode` variants, told apart only by field position. The code already
 separates them, but only by convention:
 
-- `QueryExpr::output_schema` returns `ScalarHasNoRowSchema` for all 13 scalar variants
+- `PreASAPNode::output_schema` returns `ScalarHasNoRowSchema` for all 13 scalar variants
   (`query_expr.rs`), so `Filter { child: Literal(2) }` compiles and fails at run time.
 - `pre_asap/cse.rs` never descends into a scalar, and repeats a "scalar: nothing to do"
   arm in each of its three traversals; `canonicalize` likewise never rewrites one.
@@ -66,7 +66,7 @@ NonASAPOp<C>
 ```
 
 - **Naming**: `NonASAPOp` is named for [Operator sharing](operator-sharing.md), where it
-  becomes the non-ASAP category of `Operator`. `QueryExpr` goes away.
+  becomes the non-ASAP category of `Operator`. `PreASAPNode` goes away.
 - **Scalar fields**: `Filter.pred`, `Join.pred`, `Aggregate.having` (`Predicate`);
   `Project.cols` (`ProjectItem`); `Sort` / `SQLWindowFunc` sort keys (`SortKey`);
   `SQLWindowFunc.args`; `PromqlRelabel.value`.
@@ -86,7 +86,7 @@ NonASAPOp<C>
 | `resolve`, `column_resolution.rs` | already separate: `resolve` walks operators and calls `resolve_expr` for scalars. Each scalar resolves against one schema its operator picks (usually the child's output; the `Aggregate`'s output for `HAVING`, left + right for a `Join` predicate, the `Scan`'s own schema for `Scan` predicates). The split only changes their signatures: `resolve` takes `NonASAPOp`, `resolve_expr` takes `ScalarExpr`. Leaf schemas are still inferred from scalar column references across the whole tree |
 | `canonicalize`, `pre_asap/cse.rs` | the "scalar: nothing to do" arms go; scalars are hashed as plain data |
 | `scalar_signature.rs`, `infer_expr_type` | take `ScalarExpr` |
-| `QueryExpr::output_schema` | becomes `NonASAPOp::output_schema`; the scalar arms and `ScalarHasNoRowSchema` go |
+| `PreASAPNode::output_schema` | becomes `NonASAPOp::output_schema`; the scalar arms and `ScalarHasNoRowSchema` go |
 
 ## 4. Implementation and tests
 
@@ -94,14 +94,14 @@ This is stage 1 of the joint plan ([Operator sharing §8](operator-sharing.md#8-
 children stay `Rc<NonASAPOp>`; operator sharing widens them to `Rc<Operator>` in its
 stage 2.
 
-**No wire change.** The `fallback` payload serializes a `QueryExpr`, externally tagged.
+**No wire change.** The `fallback` payload serializes a `PreASAPNode`, externally tagged.
 Variant names are kept, so a tree serializes the same; `ScalarBridge` keeps the name
 `PromqlScalarBridge` with `#[serde(rename)]`.
 
 - Existing tests pass unchanged apart from construction syntax.
 - Tests that place a scalar in operator position no longer compile and are rewritten or
   deleted: the `CurrentTimestamp` unit test, the `ScalarHasNoRowSchema` tests, and the
-  `post_asap_dag.rs` tests using `QueryExpr::Literal` as a `fallback` expression.
+  `post_asap_dag.rs` tests using `PreASAPNode::Literal` as a `fallback` expression.
 
 ## 5. Limits
 

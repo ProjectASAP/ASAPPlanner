@@ -22,8 +22,8 @@ use asap_aware_mapping::{
 use asap_frontend_promql::PromqlError as LoweringError;
 #[path = "../support.rs"]
 mod support;
-use asap_types::post_asap::{SummaryExpr, SummaryNode};
-use asap_types::pre_asap::query_expr::QueryExpr;
+use asap_types::post_asap::{PostASAPNode, SummaryExpr};
+use asap_types::pre_asap::query_expr::PreASAPNode;
 use asap_types::types::AccuracyTarget;
 use support::lower_promql;
 
@@ -33,7 +33,7 @@ use support::lower_promql;
 /// take-the-first-(`cost_model`-preferred)-candidate pattern so [`bind_tally`]
 /// gets one representative `Result` per query, matching what a totality
 /// check over the whole corpus wants.
-fn bind(expr: &QueryExpr) -> Result<Rc<SummaryNode>, RealizationError> {
+fn bind(expr: &PreASAPNode) -> Result<Rc<PostASAPNode>, RealizationError> {
     let root = Rc::new(expr.clone());
     let target = TargetSubDAG::new(&root);
     match SketchAlgorithmStrategy::default_cost_model()

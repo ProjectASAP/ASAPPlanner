@@ -38,9 +38,9 @@ asap-types = { git = "https://github.com/ProjectASAP/ASAPPlanner", rev = "e7fdb2
 
 | Public function | Required input | Output |
 | --- | --- | --- |
-| `asap_frontend_promql::lower_promql_workload` | PromQL `PlanningWorkload` with a nonzero `data_ingestion_interval` | All-or-nothing `Result<Vec<QueryExpr>, PromqlError>` for normalized batch and repeating entries |
-| `asap_frontend_metricsql::lower_metricsql` | Query string, `AccuracyTarget` | `Result<QueryExpr, MetricsqlError>` |
-| `asap_frontend_sql::lower_sql` | Query string, `SqlCatalog`, accuracy | Async `Result<QueryExpr, SqlError>`; default SQL dialect is DataFusionSQL |
+| `asap_frontend_promql::lower_promql_workload` | PromQL `PlanningWorkload` with a nonzero `data_ingestion_interval` | All-or-nothing `Result<Vec<PreASAPNode>, PromqlError>` for normalized batch and repeating entries |
+| `asap_frontend_metricsql::lower_metricsql` | Query string, `AccuracyTarget` | `Result<PreASAPNode, MetricsqlError>` |
+| `asap_frontend_sql::lower_sql` | Query string, `SqlCatalog`, accuracy | Async `Result<PreASAPNode, SqlError>`; default SQL dialect is DataFusionSQL |
 | `asap_frontend_sql::lower_sql_dialect` | Same inputs plus `SqlDialect` | Async resolved Pre-ASAP query or error |
 | `asap_frontend_sql::lower_sql_batch` | `QueryWorkload` and catalog | Per-query results for `query_batch`; does not iterate `repeating_queries` |
 
@@ -58,7 +58,7 @@ PromQL's public signature (types are imported from their respective crates):
 
 ```text
 lower_promql_workload(workload: &PlanningWorkload, now_ms: u64)
-    -> Result<Vec<QueryExpr>, PromqlError>
+    -> Result<Vec<PreASAPNode>, PromqlError>
 ```
 
 `DataWorkload.data_ingestion_interval` must contain a nonzero `Evidence<DurationMs>`.
@@ -125,9 +125,9 @@ For SQL, the corresponding signatures are:
 
 ```text
 async lower_sql(query: &str, catalog: &SqlCatalog, accuracy: AccuracyTarget)
-    -> Result<QueryExpr, SqlError>
+    -> Result<PreASAPNode, SqlError>
 async lower_sql_dialect(query: &str, catalog: &SqlCatalog,
-    dialect: SqlDialect, accuracy: AccuracyTarget) -> Result<QueryExpr, SqlError>
+    dialect: SqlDialect, accuracy: AccuracyTarget) -> Result<PreASAPNode, SqlError>
 ```
 
 | `SqlDialect` value | Current behavior |
@@ -162,7 +162,7 @@ It keeps the alternatives available; it does not select an entire workload plan.
 
 ```text
 search_workload_with_targets<'s, Id>(
-    roots: Vec<(Id, Rc<QueryExpr>, Option<AccuracyTarget>)>,
+    roots: Vec<(Id, Rc<PreASAPNode>, Option<AccuracyTarget>)>,
     strategies: &[Box<dyn ReplacementStrategy + 's>],
     accuracy_model: &dyn AccuracyModel,
 ) -> CandidatePostASAPDAGs<Id>
@@ -254,7 +254,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 | API (`asap_aware_mapping`, unless qualified) | Inputs | Output and limits |
 | --- | --- | --- |
-| `search_workload` | `(query_id, Rc<QueryExpr>)` roots | `CandidatePostASAPDAGs` with built-in strategies/model; no explicit per-root target argument |
+| `search_workload` | `(query_id, Rc<PreASAPNode>)` roots | `CandidatePostASAPDAGs` with built-in strategies/model; no explicit per-root target argument |
 | `search_workload_with` | Roots, strategy slice | `CandidatePostASAPDAGs`; callers choose context-free replacement strategies |
 | `search_workload_with_targets` | Roots with optional end-to-end targets, strategies, accuracy model | Candidate space with supplied root-target checks; `None` does not supply a root-level requirement; uncertified direct DDSketch ratios remain available for backend selection |
 | `CandidatePostASAPDAGs::cost_sorted` | Cost model | `Vec<RankedTargetSubDAGCandidates>`; retains alternatives and pairs `candidates[i]` with `costs[i]` |
@@ -525,7 +525,7 @@ Use this workflow when Planner owns summary-maintenance lifecycle decisions;
 otherwise the backend may make them from logical candidates. It includes both
 selection and DAG assembly, so callers do not first run the ordinary workflow.
 The first helper returns one `GlobalSelection`; the second is called per root
-and returns a plan containing `root: Rc<SummaryNode>` plus maintenance decisions.
+and returns a plan containing `root: Rc<PostASAPNode>` plus maintenance decisions.
 See the [workflow design](../design_docs/architecture/input-output-workflow.md#summary-maintenance-lifecycle-aware-helper).
 
 Two capabilities are distinct: the runtime can orchestrate a lifecycle, and the
@@ -542,7 +542,7 @@ global_selection_with_summary_maintenance_lifecycles<'a, Id>(
 ) -> Result<GlobalSelection<'a>, SummaryMaintenanceLifecycleSelectionError>
 
 assemble_selected_dag_with_summary_maintenance_lifecycles(
-    selection: &GlobalSelection<'_>, target: &Rc<QueryExpr>,
+    selection: &GlobalSelection<'_>, target: &Rc<PreASAPNode>,
     demand: WorkloadDemand<'_>, now_ms: u64, horizon: Option<Horizon>,
     capabilities: SummaryMaintenanceLifecycleCapabilities, cost_model: &dyn CostModel,
 ) -> Result<Option<SummaryMaintenanceLifecyclePlan>, SummaryMaintenanceLifecycleAssemblyError>
@@ -655,7 +655,7 @@ from that hook, as in Planner selection.
 
 A lifecycle choice then fixes each physical placement through timing: a
 continuously maintained state and its inputs run at ingestion time, while an
-ephemeral one stays at query time. Compile each query's `PostAsapDag` once and
+ephemeral one stays at query time. Compile each query's `PostASAPDAGTransport` once and
 cut every chosen assignment from that result:
 
 ```rust
@@ -735,7 +735,7 @@ workflow for those decisions. Downstream still owns physical commitment.
 | --- | --- |
 | `CandidatePostASAPDAGs::global_selection(&model)` | Compatible structural selection across targets; no recurrence or lifecycle planning implied |
 | `CandidatePostASAPDAGs::global_selection_with_recurrence(...)` | Compatible selection using supplied recurrence profiles/horizon; no lifecycle commitments implied |
-| `GlobalSelection::assemble_selected_dag(&target)` | `Result<Option<Rc<SummaryNode>>, RealizationError>`; constructs semantic IR, not stored summary data |
+| `GlobalSelection::assemble_selected_dag(&target)` | `Result<Option<Rc<PostASAPNode>>, RealizationError>`; constructs semantic IR, not stored summary data |
 
 Use a target associated with the searched space; DAG assembly can return `None`
 when that target is absent. A downstream integration can use these convenience
@@ -747,8 +747,8 @@ for checking complete physical alternatives and deployment constraints.
 
 ```text
 CandidatePostASAPDAGs::global_selection(&self, cost_model: &dyn CostModel) -> GlobalSelection<'_>
-GlobalSelection::assemble_selected_dag(&self, target: &Rc<QueryExpr>)
-    -> Result<Option<Rc<SummaryNode>>, RealizationError>
+GlobalSelection::assemble_selected_dag(&self, target: &Rc<PreASAPNode>)
+    -> Result<Option<Rc<PostASAPNode>>, RealizationError>
 ```
 
 For structural inspection only, this complete example selects a semantic root
@@ -809,7 +809,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 | `asap_types::dag_export::export(&query)` | Pre-ASAP inspection graph |
 | `asap_types::dag_export::export_summary(&summary)` | Post-ASAP inspection graph |
 | `asap_types::post_asap::compile_post_asap_dag(&root)` | Compile a semantic DAG with execution-data-state validation; not a physical plan |
-| `PostAsapDagDocument::new(dag)` and `.validate()` | Versioned semantic envelope and explicit validation; constructing it alone does not validate |
+| `PostASAPDAGDocument::new(dag)` and `.validate()` | Versioned semantic envelope and explicit validation; constructing it alone does not validate |
 | `asap_aware_mapping::export_summary_maintenance_plan(&plan)` | Graph plus lifecycle deployments, alternatives and available cost/guarantee information |
 | `explain_replacements` / `explain_replacements_with` | Findings from default/custom-strategy search; not a complete physical feasibility report |
 

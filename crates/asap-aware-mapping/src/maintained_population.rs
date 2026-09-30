@@ -3,11 +3,11 @@ use crate::replacement::{
     Replacement, ReplacementProvenance, ReplacementStrategy, ReplacementSubDAG, TargetSubDAG,
 };
 use asap_types::post_asap::{
-    maintained_population::*, ExecutionTiming, ResultGuarantee, SummaryExpr, SummaryFamilyType,
-    SummaryField, SummaryNode, SummarySchema, ValueOperation,
+    maintained_population::*, ExecutionTiming, PostASAPNode, ResultGuarantee, SummaryExpr,
+    SummaryFamilyType, SummaryField, SummarySchema, ValueOperation,
 };
 use asap_types::pre_asap::{
-    AggIntent, CompareOpKind, DataType, QueryExpr, Reduction, ScalarValue, Schema, Source,
+    AggIntent, CompareOpKind, DataType, PreASAPNode, Reduction, ScalarValue, Schema, Source,
 };
 use std::rc::Rc;
 
@@ -26,17 +26,19 @@ fn plain(schema: Schema) -> SummarySchema {
     }
 }
 
-fn strip_projection(mut root: &QueryExpr) -> &QueryExpr {
-    while let QueryExpr::Project { child, .. } = root {
+fn strip_projection(mut root: &PreASAPNode) -> &PreASAPNode {
+    while let PreASAPNode::Project { child, .. } = root {
         root = child;
     }
     root
 }
 
-fn recognize(root: &QueryExpr) -> Option<(MaintainedPopulation, PopulationReadout, Rc<QueryExpr>)> {
+fn recognize(
+    root: &PreASAPNode,
+) -> Option<(MaintainedPopulation, PopulationReadout, Rc<PreASAPNode>)> {
     let root = strip_projection(root);
     let (source, grouping, readout, value_column) = match root {
-        QueryExpr::Aggregate {
+        PreASAPNode::Aggregate {
             child,
             reduction: Reduction::Reduce(grouping),
             measures,
@@ -62,12 +64,12 @@ fn recognize(root: &QueryExpr) -> Option<(MaintainedPopulation, PopulationReadou
             }
             (child, grouping, readout, col)
         }
-        QueryExpr::Limit {
+        PreASAPNode::Limit {
             n,
             offset: 0,
             child,
         } => {
-            let QueryExpr::Sort {
+            let PreASAPNode::Sort {
                 child,
                 keys,
                 partition_by,
@@ -78,7 +80,7 @@ fn recognize(root: &QueryExpr) -> Option<(MaintainedPopulation, PopulationReadou
             let [key] = keys.as_slice() else {
                 return None;
             };
-            let QueryExpr::Column(col) = &key.expr else {
+            let PreASAPNode::Column(col) = &key.expr else {
                 return None;
             };
             if key.ascending {
@@ -93,7 +95,7 @@ fn recognize(root: &QueryExpr) -> Option<(MaintainedPopulation, PopulationReadou
         }
         _ => return None,
     };
-    if let QueryExpr::Scan {
+    if let PreASAPNode::Scan {
         source: Source::Table { .. },
         schema,
         ..
@@ -123,7 +125,7 @@ fn recognize(root: &QueryExpr) -> Option<(MaintainedPopulation, PopulationReadou
     // temporal input scope. Membership must expire at that horizon; retain
     // the wrapper as the maintained input so validation can check agreement.
     let (series_source, lookback_ms) = match source.as_ref() {
-        QueryExpr::TimeRange { range, child } => {
+        PreASAPNode::TimeRange { range, child } => {
             let ms = u64::try_from(range.as_millis()).ok()?;
             if ms == 0 || std::time::Duration::from_millis(ms) != *range {
                 return None;
@@ -132,7 +134,7 @@ fn recognize(root: &QueryExpr) -> Option<(MaintainedPopulation, PopulationReadou
         }
         other => (other, 300_000),
     };
-    let QueryExpr::Scan {
+    let PreASAPNode::Scan {
         source: Source::TimeSeries { metric },
         predicates,
         schema,
@@ -156,10 +158,10 @@ fn recognize(root: &QueryExpr) -> Option<(MaintainedPopulation, PopulationReadou
     };
     let mut matchers = Vec::new();
     for predicate in predicates {
-        let QueryExpr::Compare { left, op, right } = predicate.0.as_ref() else {
+        let PreASAPNode::Compare { left, op, right } = predicate.0.as_ref() else {
             return None;
         };
-        let (QueryExpr::Column(col), QueryExpr::Literal(ScalarValue::Utf8(value))) =
+        let (PreASAPNode::Column(col), PreASAPNode::Literal(ScalarValue::Utf8(value))) =
             (left.as_ref(), right.as_ref())
         else {
             return None;
@@ -208,23 +210,23 @@ fn recognize(root: &QueryExpr) -> Option<(MaintainedPopulation, PopulationReadou
 /// population updates and price the maintenance/readout boundary.
 /// The population is exact; max_k bounds the shared readout cache, not its members.
 pub struct MaintainedPopulationStrategy {
-    roots: Vec<Rc<QueryExpr>>,
+    roots: Vec<Rc<PreASAPNode>>,
 }
 impl MaintainedPopulationStrategy {
-    pub fn new(roots: &[Rc<QueryExpr>]) -> Self {
+    pub fn new(roots: &[Rc<PreASAPNode>]) -> Self {
         Self {
             roots: roots.to_vec(),
         }
     }
-    pub fn candidate(&self, root: &Rc<QueryExpr>) -> Option<Rc<SummaryNode>> {
-        if let QueryExpr::Project {
+    pub fn candidate(&self, root: &Rc<PreASAPNode>) -> Option<Rc<PostASAPNode>> {
+        if let PreASAPNode::Project {
             cols,
             qualifier,
             child,
         } = root.as_ref()
         {
             let child = self.candidate(child)?;
-            return Some(Rc::new(SummaryNode {
+            return Some(Rc::new(PostASAPNode {
                 guarantee: child.guarantee.clone(),
                 schema: plain(root.output_schema().ok()?),
                 expr: SummaryExpr::ValueOperation {
@@ -253,7 +255,7 @@ impl MaintainedPopulationStrategy {
             }
         }
         let input_schema = plain(source.output_schema().ok()?);
-        let scan = Rc::new(SummaryNode {
+        let scan = Rc::new(PostASAPNode {
             expr: SummaryExpr::KeepPreAsap(source),
             schema: input_schema.clone(),
             guarantee: Some(ResultGuarantee::exact("source samples")),
@@ -262,7 +264,7 @@ impl MaintainedPopulationStrategy {
         // retained at ingestion or rebuilt per query is its lifecycle choice
         // (`SummaryMaintenanceLifecyclePlan::execution_timed_dag`). The readout
         // and projection above it are query-time by construction.
-        let maintained = Rc::new(SummaryNode {
+        let maintained = Rc::new(PostASAPNode {
             expr: SummaryExpr::ValueOperation {
                 child: scan,
                 operation: ValueOperation::MaintainPopulation { population },
@@ -273,7 +275,7 @@ impl MaintainedPopulationStrategy {
                 "exact members under the declared population semantics",
             )),
         });
-        Some(Rc::new(SummaryNode {
+        Some(Rc::new(PostASAPNode {
             expr: SummaryExpr::ValueOperation {
                 child: maintained,
                 operation: ValueOperation::ReadPopulation { readout },
@@ -309,7 +311,7 @@ mod tests {
     use crate::test_support::lower_promql;
     use asap_types::post_asap::{compile_post_asap_dag, share_common_summary_subtrees};
 
-    fn lower(q: &str) -> Rc<QueryExpr> {
+    fn lower(q: &str) -> Rc<PreASAPNode> {
         Rc::new(lower_promql(q, asap_types::types::AccuracyTarget::Exact))
     }
 

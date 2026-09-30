@@ -24,7 +24,7 @@ pub fn decode_series_identity(encoded: &str) -> Result<BTreeMap<String, String>,
 
 /// Resolve the row representation before candidate search; see
 /// [`planner_types::pre_asap::schema::with_promql_series_identity`].
-pub fn with_series_identity(root: &QueryExpr) -> Result<QueryExpr, Error> {
+pub fn with_series_identity(root: &PreASAPNode) -> Result<PreASAPNode, Error> {
     planner_types::pre_asap::schema::with_promql_series_identity(root).map_err(invalid)
 }
 
@@ -79,8 +79,8 @@ pub fn series_row(
 /// source. The boundary supplies the complete eligible vector, not a truncated
 /// TopK result; ranking remains a native physical operator.
 pub fn compile_current_series_readout(
-    selected: &Rc<planner_types::post_asap::SummaryNode>,
-) -> Result<CompiledPhysicalDag, Error> {
+    selected: &Rc<planner_types::post_asap::PostASAPNode>,
+) -> Result<PhysicalDAG, Error> {
     use planner_types::post_asap::{
         compile_post_asap_dag, maintained_population::PopulationReadout, SummaryField,
     };
@@ -190,18 +190,12 @@ pub fn compile_current_series_readout(
 /// the heap is rebuilt independently for each evaluation. This does not move
 /// that frontier to ingestion time or authorize combining finalized rates.
 pub fn compile_rate_ranking(
-    selected: &Rc<planner_types::post_asap::SummaryNode>,
-) -> Result<
-    (
-        Rc<planner_types::post_asap::SummaryNode>,
-        CompiledPhysicalDag,
-    ),
-    Error,
-> {
+    selected: &Rc<planner_types::post_asap::PostASAPNode>,
+) -> Result<(Rc<planner_types::post_asap::PostASAPNode>, PhysicalDAG), Error> {
     use planner_types::post_asap::{
-        compile_post_asap_dag_with_node_ids, ExactKind, SummaryExpr, SummaryNode,
+        compile_post_asap_dag_with_node_ids, ExactKind, PostASAPNode, SummaryExpr,
     };
-    fn frontier(node: &Rc<SummaryNode>) -> Option<Rc<SummaryNode>> {
+    fn frontier(node: &Rc<PostASAPNode>) -> Option<Rc<PostASAPNode>> {
         match &node.expr {
             SummaryExpr::ValueOperation {
                 child,
@@ -211,7 +205,7 @@ pub fn compile_rate_ranking(
                     family: SummaryFamilyType::ExactAggregate(ExactKind::Rate, _),
                     reduction: planner_types::pre_asap::Reduction::PerEntity,
                     child: raw, ..
-                } if matches!(&raw.expr, SummaryExpr::KeepPreAsap(expr) if matches!(expr.as_ref(), QueryExpr::TimeRange { .. }))) =>
+                } if matches!(&raw.expr, SummaryExpr::KeepPreAsap(expr) if matches!(expr.as_ref(), PreASAPNode::TimeRange { .. }))) =>
             {
                 Some(Rc::clone(node))
             }
@@ -253,7 +247,7 @@ pub fn compile_rate_ranking(
 /// Rate readouts runs at ingestion time: fresh aggregate state per closed
 /// window. The input is the complete collection of per-series counter states.
 pub fn compile_fixed_window_rate_aggregation(
-    dag: &planner_types::post_asap::PostAsapDag,
+    dag: &planner_types::post_asap::PostASAPDAGTransport,
 ) -> Result<PhysicalCandidate, Error> {
     use planner_types::post_asap::{ExactKind, ExecutionTiming, SketchAlgorithm};
     let sources = dag

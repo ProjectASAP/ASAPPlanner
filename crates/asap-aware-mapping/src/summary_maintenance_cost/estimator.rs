@@ -1,7 +1,7 @@
 use super::*;
 
 pub(super) fn estimate_heterogeneous_summary(
-    root: &SummaryNode,
+    root: &PostASAPNode,
     deployments: &[CostedSummaryDeployment<'_>],
     evidence: &StreamingNodeEvidence,
     scope: &ComparisonScope,
@@ -20,8 +20,8 @@ pub(super) fn estimate_heterogeneous_summary(
         .collect();
     validate_summary_edges_and_physical_ids(root, evidence, &frameworks_by_node)?;
     fn summary_source_selections(
-        node: &SummaryNode,
-        seen: &mut HashSet<*const SummaryNode>,
+        node: &PostASAPNode,
+        seen: &mut HashSet<*const PostASAPNode>,
         out: &mut Vec<LogicalSourceSelection>,
     ) -> Result<(), AnalyticalCostError> {
         if !seen.insert(node as *const _) {
@@ -252,9 +252,9 @@ pub(super) fn estimate_heterogeneous_summary(
 
     #[expect(clippy::too_many_arguments, reason = "CPU and I/O traversal state")]
     fn visit_ops(
-        node: &SummaryNode,
+        node: &PostASAPNode,
         seen: &mut HashSet<String>,
-        by_node: &HashMap<*const SummaryNode, &CostedSummaryDeployment<'_>>,
+        by_node: &HashMap<*const PostASAPNode, &CostedSummaryDeployment<'_>>,
         evidence: &StreamingNodeEvidence,
         scope: &ComparisonScope,
         evaluation_count: u64,
@@ -405,9 +405,9 @@ pub(super) fn estimate_heterogeneous_summary(
                     .get(&(node as *const _))
                     .ok_or(AnalyticalCostError::MissingOrStale("summary_delete_owner"))?;
                 fn collect_aggs(
-                    node: &SummaryNode,
-                    seen: &mut HashSet<*const SummaryNode>,
-                    out: &mut Vec<*const SummaryNode>,
+                    node: &PostASAPNode,
+                    seen: &mut HashSet<*const PostASAPNode>,
+                    out: &mut Vec<*const PostASAPNode>,
                 ) {
                     if !seen.insert(node as *const _) {
                         return;
@@ -612,11 +612,11 @@ fn add_operator_io(
 }
 
 fn validate_summary_edges_and_physical_ids(
-    root: &SummaryNode,
+    root: &PostASAPNode,
     evidence: &StreamingNodeEvidence,
-    frameworks_by_node: &HashMap<*const SummaryNode, &Option<SummaryWindowFramework>>,
+    frameworks_by_node: &HashMap<*const PostASAPNode, &Option<SummaryWindowFramework>>,
 ) -> Result<(), AnalyticalCostError> {
-    fn children(node: &SummaryNode) -> Vec<&SummaryNode> {
+    fn children(node: &PostASAPNode) -> Vec<&PostASAPNode> {
         match &node.expr {
             SummaryExpr::KeepPreAsap(_) => vec![],
             SummaryExpr::SummaryAgg { child, .. } | SummaryExpr::ValueOperation { child, .. } => {
@@ -642,7 +642,7 @@ fn validate_summary_edges_and_physical_ids(
         }
     }
     fn metadata(
-        node: &SummaryNode,
+        node: &PostASAPNode,
         evidence: &StreamingNodeEvidence,
     ) -> Result<(String, Vec<EdgeStatistics>, EdgeStatistics), AnalyticalCostError> {
         match &node.expr {
@@ -682,10 +682,10 @@ fn validate_summary_edges_and_physical_ids(
         }
     }
     fn visit(
-        node: &SummaryNode,
+        node: &PostASAPNode,
         evidence: &StreamingNodeEvidence,
-        frameworks_by_node: &HashMap<*const SummaryNode, &Option<SummaryWindowFramework>>,
-        seen: &mut HashSet<*const SummaryNode>,
+        frameworks_by_node: &HashMap<*const PostASAPNode, &Option<SummaryWindowFramework>>,
+        seen: &mut HashSet<*const PostASAPNode>,
         physical: &mut HashMap<String, (Vec<EdgeStatistics>, EdgeStatistics, String)>,
     ) -> Result<EdgeStatistics, AnalyticalCostError> {
         if !seen.insert(node as *const _) {
@@ -756,7 +756,7 @@ fn validate_summary_edges_and_physical_ids(
 }
 
 fn summary_physical_id(
-    node: &SummaryNode,
+    node: &PostASAPNode,
     evidence: &StreamingNodeEvidence,
 ) -> Result<String, AnalyticalCostError> {
     match &node.expr {
@@ -785,10 +785,10 @@ fn summary_physical_id(
 /// child output buffers remain live until their final consumer executes;
 /// operator workspace and its output buffer coexist during that execution.
 pub(super) fn estimate_transient_liveness(
-    root: &SummaryNode,
+    root: &PostASAPNode,
     evidence: &StreamingNodeEvidence,
 ) -> Result<u64, AnalyticalCostError> {
-    fn children(node: &SummaryNode) -> Vec<&SummaryNode> {
+    fn children(node: &PostASAPNode) -> Vec<&PostASAPNode> {
         match &node.expr {
             SummaryExpr::KeepPreAsap(_) => vec![],
             SummaryExpr::SummaryAgg { child, .. } | SummaryExpr::ValueOperation { child, .. } => {
@@ -814,11 +814,11 @@ pub(super) fn estimate_transient_liveness(
         }
     }
     fn visit<'a>(
-        node: &'a SummaryNode,
+        node: &'a PostASAPNode,
         evidence: &StreamingNodeEvidence,
         seen: &mut HashSet<String>,
         uses: &mut HashMap<String, usize>,
-        order: &mut Vec<&'a SummaryNode>,
+        order: &mut Vec<&'a PostASAPNode>,
     ) -> Result<(), AnalyticalCostError> {
         if !seen.insert(summary_physical_id(node, evidence)?) {
             return Ok(());
@@ -833,7 +833,7 @@ pub(super) fn estimate_transient_liveness(
         Ok(())
     }
     fn memory(
-        node: &SummaryNode,
+        node: &PostASAPNode,
         evidence: &StreamingNodeEvidence,
     ) -> Result<(u64, u64), AnalyticalCostError> {
         match &node.expr {
@@ -901,12 +901,12 @@ pub(super) fn estimate_transient_liveness(
     Ok(peak)
 }
 #[cfg(test)]
-pub(super) fn evidence_nodes(root: &SummaryNode) -> (Vec<&SummaryNode>, Vec<&SummaryNode>) {
+pub(super) fn evidence_nodes(root: &PostASAPNode) -> (Vec<&PostASAPNode>, Vec<&PostASAPNode>) {
     fn visit<'a>(
-        node: &'a SummaryNode,
-        seen: &mut HashSet<*const SummaryNode>,
-        aggregations: &mut Vec<&'a SummaryNode>,
-        joins: &mut Vec<&'a SummaryNode>,
+        node: &'a PostASAPNode,
+        seen: &mut HashSet<*const PostASAPNode>,
+        aggregations: &mut Vec<&'a PostASAPNode>,
+        joins: &mut Vec<&'a PostASAPNode>,
     ) {
         if !seen.insert(node as *const _) {
             return;
@@ -969,7 +969,7 @@ struct SummaryOperationCounts {
 /// once; explicit delete frequency comes from deletion evidence.
 #[cfg(test)]
 pub(super) fn estimate_incremental_summary_maintenance(
-    root: &SummaryNode,
+    root: &PostASAPNode,
     guarantee: &SummaryMaintenanceLifecycleGuarantee,
     inputs: StreamingSummaryInputs,
     cpu: SummaryOperationCpuEvidence,
@@ -979,7 +979,7 @@ pub(super) fn estimate_incremental_summary_maintenance(
 }
 #[cfg(test)]
 pub(super) fn estimate_incremental_summary_maintenance_with_join(
-    root: &SummaryNode,
+    root: &PostASAPNode,
     guarantee: &SummaryMaintenanceLifecycleGuarantee,
     inputs: StreamingSummaryInputs,
     cpu: SummaryOperationCpuEvidence,
@@ -1236,13 +1236,13 @@ fn required_cpu_when(
 }
 
 #[cfg(test)]
-fn count_operations(root: &SummaryNode) -> Result<SummaryOperationCounts, AnalyticalCostError> {
+fn count_operations(root: &PostASAPNode) -> Result<SummaryOperationCounts, AnalyticalCostError> {
     fn visit(
-        node: &SummaryNode,
-        seen: &mut HashSet<*const SummaryNode>,
+        node: &PostASAPNode,
+        seen: &mut HashSet<*const PostASAPNode>,
         counts: &mut SummaryOperationCounts,
     ) -> Result<(), AnalyticalCostError> {
-        if !seen.insert(node as *const SummaryNode) {
+        if !seen.insert(node as *const PostASAPNode) {
             return Ok(());
         }
         match &node.expr {

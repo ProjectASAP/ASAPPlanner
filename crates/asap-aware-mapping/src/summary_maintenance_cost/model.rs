@@ -7,7 +7,7 @@ pub struct SummaryMaintenanceCostModel {
     pub node_evidence: StreamingNodeEvidence,
     pub calibration: ResourceCalibration,
     pub capabilities: SummaryMaintenanceCapabilities,
-    target_comparisons: HashMap<*const QueryExpr, StreamingTargetComparison>,
+    target_comparisons: HashMap<*const PreASAPNode, StreamingTargetComparison>,
     candidate_comparisons: HashMap<CandidateComparisonKey, BoundCandidateIdentity>,
     physical_plan_alternatives:
         HashMap<CandidateComparisonKey, Vec<StreamingPhysicalPlanAlternative>>,
@@ -15,17 +15,17 @@ pub struct SummaryMaintenanceCostModel {
         HashMap<CandidateComparisonKey, Vec<StreamingWindowFrameworkCandidate>>,
 }
 
-type CandidateComparisonKey = (*const QueryExpr, *const SummaryNode);
+type CandidateComparisonKey = (*const PreASAPNode, *const PostASAPNode);
 
 #[derive(Debug, Clone)]
 struct BoundCandidateIdentity {
-    _target: Rc<QueryExpr>,
-    _root: Rc<SummaryNode>,
+    _target: Rc<PreASAPNode>,
+    _root: Rc<PostASAPNode>,
 }
 
 #[derive(Debug, Clone)]
 struct StreamingTargetComparison {
-    _target: Rc<QueryExpr>,
+    _target: Rc<PreASAPNode>,
     scope: ComparisonScope,
     raw: StreamingRawInputEvidence,
 }
@@ -60,10 +60,10 @@ fn info_source(selector: &[InfoMatcher]) -> Result<Source, AnalyticalCostError> 
 }
 
 pub(super) fn query_source_selections(
-    query: &QueryExpr,
+    query: &PreASAPNode,
     out: &mut Vec<LogicalSourceSelection>,
 ) -> Result<(), AnalyticalCostError> {
-    use QueryExpr::*;
+    use PreASAPNode::*;
     match query {
         Scan {
             source, predicates, ..
@@ -121,7 +121,7 @@ pub(super) fn query_source_selections(
 }
 
 fn validate_query_scope(
-    target: &QueryExpr,
+    target: &PreASAPNode,
     scope: &ComparisonScope,
 ) -> Result<(), AnalyticalCostError> {
     let mut actual = Vec::new();
@@ -427,8 +427,8 @@ impl SummaryMaintenanceCostModel {
     /// rejected rather than silently replacing the canonical context.
     pub fn bind_candidate_comparison(
         &mut self,
-        target: &Rc<QueryExpr>,
-        root: &Rc<SummaryNode>,
+        target: &Rc<PreASAPNode>,
+        root: &Rc<PostASAPNode>,
         scope: ComparisonScope,
         raw: StreamingRawInputEvidence,
     ) -> Result<(), AnalyticalCostError> {
@@ -473,8 +473,8 @@ impl SummaryMaintenanceCostModel {
     /// candidate. Duplicate or empty provider identities are rejected.
     pub fn bind_physical_plan_alternative(
         &mut self,
-        target: &Rc<QueryExpr>,
-        root: &Rc<SummaryNode>,
+        target: &Rc<PreASAPNode>,
+        root: &Rc<PostASAPNode>,
         alternative: StreamingPhysicalPlanAlternative,
     ) -> Result<(), AnalyticalCostError> {
         let key = (Rc::as_ptr(target), Rc::as_ptr(root));
@@ -511,8 +511,8 @@ impl SummaryMaintenanceCostModel {
     /// evidence keep the implementations distinct during ranking.
     pub fn bind_window_framework_candidate(
         &mut self,
-        target: &Rc<QueryExpr>,
-        root: &Rc<SummaryNode>,
+        target: &Rc<PreASAPNode>,
+        root: &Rc<PostASAPNode>,
         candidate: StreamingWindowFrameworkCandidate,
     ) -> Result<(), AnalyticalCostError> {
         let key = (Rc::as_ptr(target), Rc::as_ptr(root));
@@ -564,8 +564,8 @@ impl SummaryMaintenanceCostModel {
 
     fn comparison_context(
         &self,
-        root: &SummaryNode,
-        target: Option<&QueryExpr>,
+        root: &PostASAPNode,
+        target: Option<&PreASAPNode>,
         horizon: Option<crate::recurrence::Horizon>,
         expected_reads: Option<f64>,
     ) -> Option<(CandidateComparisonKey, &StreamingTargetComparison)> {
@@ -599,7 +599,7 @@ impl SummaryMaintenanceCostModel {
 
     fn complete_cost_with_evidence(
         &self,
-        root: &SummaryNode,
+        root: &PostASAPNode,
         deployments: &[CostedSummaryDeployment<'_>],
         comparison: &StreamingTargetComparison,
         evidence: &StreamingNodeEvidence,
@@ -618,7 +618,7 @@ impl SummaryMaintenanceCostModel {
         )
     }
 
-    fn canonical_inputs(&self, summary: &SummaryNode) -> Option<StreamingAggregateEvidence> {
+    fn canonical_inputs(&self, summary: &PostASAPNode) -> Option<StreamingAggregateEvidence> {
         let evidence = self.node_evidence.aggregation(summary)?;
         evidence.inputs.validate().ok()?;
         Some(evidence)
@@ -630,7 +630,7 @@ impl SummaryMaintenanceCostModel {
 
     fn lifecycle_inputs(
         &self,
-        summary: &SummaryNode,
+        summary: &PostASAPNode,
         horizon: Option<crate::recurrence::Horizon>,
     ) -> Option<SummaryMaintenanceLifecycleCostInputs> {
         let evidence = self.canonical_inputs(summary)?;
@@ -699,14 +699,14 @@ impl CostModel for SummaryMaintenanceCostModel {
 
     fn summary_maintenance_lifecycle_cost_inputs(
         &self,
-        _summary: &SummaryNode,
+        _summary: &PostASAPNode,
     ) -> SummaryMaintenanceLifecycleCostInputs {
         SummaryMaintenanceLifecycleCostInputs::default()
     }
 
     fn summary_maintenance_lifecycle_cost_inputs_for_horizon(
         &self,
-        summary: &SummaryNode,
+        summary: &PostASAPNode,
         horizon: Option<crate::recurrence::Horizon>,
     ) -> SummaryMaintenanceLifecycleCostInputs {
         self.lifecycle_inputs(summary, horizon).unwrap_or_default()
@@ -714,15 +714,15 @@ impl CostModel for SummaryMaintenanceCostModel {
 
     fn summary_maintenance_capabilities(
         &self,
-        _summary: &SummaryNode,
+        _summary: &PostASAPNode,
     ) -> SummaryMaintenanceCapabilities {
         self.capabilities
     }
 
     fn complete_summary_candidate_cost(
         &self,
-        root: &SummaryNode,
-        target: Option<&QueryExpr>,
+        root: &PostASAPNode,
+        target: Option<&PreASAPNode>,
         deployments: &[CostedSummaryDeployment<'_>],
         horizon: Option<crate::recurrence::Horizon>,
         expected_reads: Option<f64>,
@@ -741,8 +741,8 @@ impl CostModel for SummaryMaintenanceCostModel {
 
     fn complete_summary_candidate_estimate(
         &self,
-        root: &SummaryNode,
-        target: Option<&QueryExpr>,
+        root: &PostASAPNode,
+        target: Option<&PreASAPNode>,
         deployments: &[CostedSummaryDeployment<'_>],
         horizon: Option<crate::recurrence::Horizon>,
         expected_reads: Option<f64>,
@@ -846,14 +846,14 @@ impl CostModel for SummaryMaintenanceCostModel {
         true
     }
 
-    fn raw_query_recompute_cost(&self, target: &QueryExpr) -> Option<Cost> {
+    fn raw_query_recompute_cost(&self, target: &PreASAPNode) -> Option<Cost> {
         let _ = target;
         None
     }
 
     fn raw_query_recompute_total_cost(
         &self,
-        target: &QueryExpr,
+        target: &PreASAPNode,
         expected_reads: f64,
     ) -> Option<Cost> {
         let target_ptr = target as *const _;
@@ -885,7 +885,7 @@ mod tests {
         SummaryMaintenanceLifecycleGuarantee, SummaryMaintenanceMode, SummarySchema,
     };
     use asap_types::pre_asap::{
-        agg_intent::AggIntent, Column, ColumnRef, DataType, QueryExpr, Reduction, Schema, Source,
+        agg_intent::AggIntent, Column, ColumnRef, DataType, PreASAPNode, Reduction, Schema, Source,
     };
     use asap_types::workload::{
         DataWorkload, Evidence, EvidenceSource, Predictability, Query, QueryLanguage,
@@ -902,7 +902,7 @@ mod tests {
     };
 
     fn estimate_test(
-        root: &SummaryNode,
+        root: &PostASAPNode,
         guarantee: &SummaryMaintenanceLifecycleGuarantee,
         inputs: StreamingSummaryInputs,
         cpu: SummaryOperationCpuEvidence,
@@ -911,7 +911,7 @@ mod tests {
     }
 
     fn estimate_join_test(
-        root: &SummaryNode,
+        root: &PostASAPNode,
         guarantee: &SummaryMaintenanceLifecycleGuarantee,
         inputs: StreamingSummaryInputs,
         cpu: SummaryOperationCpuEvidence,
@@ -1560,7 +1560,7 @@ mod tests {
             op: CompareOpKind::Eq,
             value: "api".into(),
         }];
-        let info_target = QueryExpr::PromqlInfoEnrich {
+        let info_target = PreASAPNode::PromqlInfoEnrich {
             selector: selector.clone(),
             child: target,
         };
@@ -2516,7 +2516,7 @@ mod tests {
             unreachable!();
         };
         let child = Rc::clone(child);
-        let nested = Rc::new(SummaryNode {
+        let nested = Rc::new(PostASAPNode {
             expr: SummaryExpr::SummaryAgg {
                 child,
                 family: SummaryFamilyType::ExactAggregate(ExactKind::Count, ExactParams::Count),
@@ -2855,7 +2855,7 @@ mod tests {
         assert_eq!(estimate.peak_memory_bytes(), 64); // 4 persistent states + join memory.
     }
 
-    fn summary_with_operations(merge: bool, subtract: bool, delete: bool) -> Rc<SummaryNode> {
+    fn summary_with_operations(merge: bool, subtract: bool, delete: bool) -> Rc<PostASAPNode> {
         let state_type = SummaryFamilyType::ExactAggregate(ExactKind::Count, ExactParams::Count);
         let schema = SummarySchema {
             fields: vec![SummaryField {
@@ -2865,8 +2865,8 @@ mod tests {
             }],
             time_index: None,
         };
-        let leaf = Rc::new(SummaryNode {
-            expr: SummaryExpr::KeepPreAsap(Rc::new(QueryExpr::Scan {
+        let leaf = Rc::new(PostASAPNode {
+            expr: SummaryExpr::KeepPreAsap(Rc::new(PreASAPNode::Scan {
                 source: Source::TimeSeries {
                     metric: "metrics".into(),
                 },
@@ -2883,7 +2883,7 @@ mod tests {
             schema: schema.clone(),
             guarantee: None,
         });
-        let agg = Rc::new(SummaryNode {
+        let agg = Rc::new(PostASAPNode {
             expr: SummaryExpr::SummaryAgg {
                 child: leaf,
                 family: state_type,
@@ -2896,7 +2896,7 @@ mod tests {
         });
         let mut root = Rc::clone(&agg);
         if merge {
-            root = Rc::new(SummaryNode {
+            root = Rc::new(PostASAPNode {
                 expr: SummaryExpr::SummaryMerge {
                     timing: asap_types::post_asap::ExecutionTiming::IngestionTime,
                     children: vec![Rc::clone(&agg), Rc::clone(&agg)],
@@ -2906,7 +2906,7 @@ mod tests {
             });
         }
         if subtract {
-            root = Rc::new(SummaryNode {
+            root = Rc::new(PostASAPNode {
                 expr: SummaryExpr::SummarySubtract {
                     left: Rc::clone(&root),
                     right: Rc::clone(&agg),
@@ -2916,7 +2916,7 @@ mod tests {
             });
         }
         if delete {
-            root = Rc::new(SummaryNode {
+            root = Rc::new(PostASAPNode {
                 expr: SummaryExpr::SummaryDelete {
                     summary_input: root,
                     key: ColumnRef::Wildcard,
@@ -2925,7 +2925,7 @@ mod tests {
                 guarantee: None,
             });
         }
-        Rc::new(SummaryNode {
+        Rc::new(PostASAPNode {
             expr: SummaryExpr::SummaryEstimate {
                 summary_input: root,
                 query: asap_types::post_asap::SketchQuery::PointCount {
@@ -2938,7 +2938,7 @@ mod tests {
         })
     }
 
-    fn summary_join() -> Rc<SummaryNode> {
+    fn summary_join() -> Rc<PostASAPNode> {
         let left = summary_with_operations(false, false, false);
         let right = summary_with_operations(false, false, false);
         let SummaryExpr::SummaryEstimate {
@@ -2956,7 +2956,7 @@ mod tests {
             unreachable!()
         };
         let schema = left.schema.clone();
-        let join = Rc::new(SummaryNode {
+        let join = Rc::new(PostASAPNode {
             expr: SummaryExpr::SummaryJoin {
                 outer: Rc::clone(left),
                 inner: Rc::clone(right),
@@ -2966,7 +2966,7 @@ mod tests {
             schema: schema.clone(),
             guarantee: None,
         });
-        Rc::new(SummaryNode {
+        Rc::new(PostASAPNode {
             expr: SummaryExpr::SummaryEstimate {
                 summary_input: join,
                 query: asap_types::post_asap::SketchQuery::PointCount {
@@ -2979,9 +2979,9 @@ mod tests {
         })
     }
 
-    fn summary_binary() -> Rc<SummaryNode> {
+    fn summary_binary() -> Rc<PostASAPNode> {
         let operand = summary_with_operations(false, false, false);
-        Rc::new(SummaryNode {
+        Rc::new(PostASAPNode {
             expr: SummaryExpr::BinaryOp {
                 timing: asap_types::post_asap::ExecutionTiming::QueryTime,
                 lhs: Rc::clone(&operand),
@@ -3038,8 +3038,8 @@ mod tests {
         assert!(plan.summary_total_cost.is_some());
     }
 
-    fn streaming_sum_query() -> Rc<QueryExpr> {
-        let scan = Rc::new(QueryExpr::Scan {
+    fn streaming_sum_query() -> Rc<PreASAPNode> {
+        let scan = Rc::new(PreASAPNode::Scan {
             source: Source::TimeSeries {
                 metric: "metrics".into(),
             },
@@ -3053,7 +3053,7 @@ mod tests {
                 vec![],
             ),
         });
-        Rc::new(QueryExpr::Aggregate {
+        Rc::new(PreASAPNode::Aggregate {
             reduction: Reduction::by(vec![]),
             measures: vec![AggIntent::Sum { col: None }],
             output_names: vec![],
@@ -3156,16 +3156,16 @@ mod tests {
 
     fn bind_comparison(
         model: &mut SummaryMaintenanceCostModel,
-        target: &Rc<QueryExpr>,
-        root: &Rc<SummaryNode>,
+        target: &Rc<PreASAPNode>,
+        root: &Rc<PostASAPNode>,
     ) {
         model
             .bind_candidate_comparison(target, root, streaming_scope(), streaming_raw())
             .unwrap();
         fn retained(
             model: &mut SummaryMaintenanceCostModel,
-            node: &Rc<SummaryNode>,
-            seen: &mut HashSet<*const SummaryNode>,
+            node: &Rc<PostASAPNode>,
+            seen: &mut HashSet<*const PostASAPNode>,
         ) {
             if !seen.insert(Rc::as_ptr(node)) {
                 return;
@@ -3242,8 +3242,8 @@ mod tests {
 
     fn bind_aggregations(
         model: &mut SummaryMaintenanceCostModel,
-        target: &Rc<QueryExpr>,
-        root: &Rc<SummaryNode>,
+        target: &Rc<PreASAPNode>,
+        root: &Rc<PostASAPNode>,
         inputs: StreamingSummaryInputs,
         cpu: SummaryOperationCpuEvidence,
     ) {
@@ -3279,8 +3279,8 @@ mod tests {
         }
         fn bind_ops(
             model: &mut SummaryMaintenanceCostModel,
-            node: &SummaryNode,
-            seen: &mut HashSet<*const SummaryNode>,
+            node: &PostASAPNode,
+            seen: &mut HashSet<*const PostASAPNode>,
             inputs: StreamingSummaryInputs,
             cpu: SummaryOperationCpuEvidence,
         ) {
@@ -3380,9 +3380,9 @@ mod tests {
                     .insert(node as *const _, operation);
                 if let SummaryExpr::SummaryDelete { summary_input, .. } = &node.expr {
                     fn owning_aggs(
-                        node: &SummaryNode,
-                        seen: &mut HashSet<*const SummaryNode>,
-                        owners: &mut Vec<*const SummaryNode>,
+                        node: &PostASAPNode,
+                        seen: &mut HashSet<*const PostASAPNode>,
+                        owners: &mut Vec<*const PostASAPNode>,
                     ) {
                         if !seen.insert(node as *const _) {
                             return;

@@ -1,7 +1,7 @@
 //! Finite-input contracts are validated before source execution.
 use asap_physical_operators::{
     operators::{Operator, SortKey},
-    plan::{Boundedness, Emission, PhysicalDag},
+    plan::{BoundPhysicalDAG, Boundedness, Emission},
     runtime::{Limits, OutputStream, RunContext, Scope},
     sources::{DataSources, RawSource},
     values::{Batch, Schema},
@@ -9,7 +9,7 @@ use asap_physical_operators::{
 };
 use planner_types::{
     post_asap::{SummaryFamilyType, SummaryField, SummarySchema},
-    pre_asap::{Column, DataType, QueryExpr, Schema as LogicalSchema, Source},
+    pre_asap::{Column, DataType, PreASAPNode, Schema as LogicalSchema, Source},
 };
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
@@ -64,13 +64,13 @@ fn blocking_inputs_require_an_explicit_finite_source() {
             )
             .unwrap();
         let scan = registry
-            .bind(&QueryExpr::Scan {
+            .bind(&PreASAPNode::Scan {
                 source: identity,
                 schema: LogicalSchema::new(vec![Column::new("v", DataType::Int64, false)]),
                 predicates: vec![],
             })
             .unwrap();
-        let mut dag = PhysicalDag::default();
+        let mut dag = BoundPhysicalDAG::default();
         dag.add(0, vec![], scan).unwrap();
         dag.add(
             1,

@@ -5,7 +5,7 @@
 This document compares ASAPPlanner's rule system with the Rust planner in
 ASAPQuery at upstream commit `2586400b3b0436a5414c901ebce07065d20b5223`.
 The comparison is by semantic capability, not source-file or function-name
-parity: ASAPPlanner operates on a front-end-independent `QueryExpr` DAG, while
+parity: ASAPPlanner operates on a front-end-independent `PreASAPNode` DAG, while
 ASAPQuery recognizes a smaller set of PromQL expression shapes.
 
 The audit covers ASAPQuery's `planner/patterns.rs`, `planner/window.rs`,

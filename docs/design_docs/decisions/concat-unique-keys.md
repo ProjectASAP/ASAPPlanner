@@ -14,7 +14,7 @@
 
 ## Context
 
-[`QueryExpr::Concat`](../../../crates/types/src/pre_asap/query_expr.rs) (the
+[`PreASAPNode::Concat`](../../../crates/types/src/pre_asap/query_expr.rs) (the
 n-ary exact `UNION ALL` node, renamed from `Merge` in #226) always drops
 `unique_keys` on its output — `merge_drops_the_branches_unique_keys` and
 `merge_and_setop_agree_on_unique_keys` pin this down. Issue #228 asks whether
@@ -61,7 +61,7 @@ Both current `Concat`-constructing call sites, and every consumer of
   site; wiring one in would mean *first* deciding to stop rejecting
   `GROUPING()` and surfacing `__grouping_id` as real IR — a separate, larger
   change outside #228's scope, not a small addition to this lowering.
-- **Every other `QueryExpr::Concat { … }` construction site** in the repo is
+- **Every other `PreASAPNode::Concat { … }` construction site** in the repo is
   a test/tooling AST match (`promql_lowering.rs`, `promql_conformance.rs`,
   `sql_lowering.rs`, `dag_export.rs`, `variant_coverage.rs`, netflow/synthetic
   test fixtures) — none of them builds a fresh `Concat` with a `Dedup` on top
@@ -98,7 +98,7 @@ for why it's fine to ship unused.
 
 ### What shipped
 
-`QueryExpr::Concat` gained an opt-in field, `discriminator_unique_key: Option<ConcatDiscriminatorKey<C>>`
+`PreASAPNode::Concat` gained an opt-in field, `discriminator_unique_key: Option<ConcatDiscriminatorKey<C>>`
 (`crates/types/src/pre_asap/query_expr.rs`), plus:
 
 - `ConcatDiscriminatorKey<C>` — a small struct with **private** `discriminator: C` /
@@ -112,11 +112,11 @@ for why it's fine to ship unused.
   arbitrary field values in untrusted JSON. Not a reachable concern today (see
   "Safety argument" below for why), but stated precisely rather than
   overclaimed.
-- `QueryExpr::concat(children)` — the ordinary constructor (`discriminator_unique_key: None`),
-  meant to replace the bare `QueryExpr::Concat { children }` struct literal
+- `PreASAPNode::concat(children)` — the ordinary constructor (`discriminator_unique_key: None`),
+  meant to replace the bare `PreASAPNode::Concat { children }` struct literal
   everywhere in the tree so a future field addition doesn't force every call
   site to re-litigate this choice.
-- `QueryExpr::concat_with_discriminator(children, discriminator, inner_key)` —
+- `PreASAPNode::concat_with_discriminator(children, discriminator, inner_key)` —
   the override constructor.
 - `output_schema()`'s `Concat` arm: unchanged default (`unique_keys` cleared
   unconditionally) when `discriminator_unique_key` is `None`; when `Some`,
@@ -155,7 +155,7 @@ there) and are not attempted here.
 Three independent things hold `discriminator_unique_key: None` as the
 observable behavior for every caller that doesn't ask for the override:
 
-1. **Every real construction path defaults to `None`.** `QueryExpr::concat`
+1. **Every real construction path defaults to `None`.** `PreASAPNode::concat`
    hardcodes it; every call site in the tree (including both real lowering
    call sites) uses `concat`, not `concat_with_discriminator`, so nothing in
    the current tree can produce `Some` at all.
@@ -189,7 +189,7 @@ file for its own `by`/`without` invariant. Concretely, this means:
   unique within every branch. The type system enforces "you named the
   columns," not "the compound key is valid." Both obligations are
   documented on `ConcatDiscriminatorKey` itself and have the same shape of
-  unverified claim `QueryExpr::Dedup.cols` already carries elsewhere in this
+  unverified claim `PreASAPNode::Dedup.cols` already carries elsewhere in this
   module (nothing checks a `Dedup`'s `cols` are actually a real key of its
   child either).
 - The `no_way_to_fabricate_a_unique_key_without_naming_a_discriminator` test
@@ -202,7 +202,7 @@ file for its own `by`/`without` invariant. Concretely, this means:
 guarantee against *other Rust code*, not against arbitrary data.** Derived
 deserialization builds the assertion directly from input values, bypassing
 `new()`. Deserialization must therefore be treated exactly like a direct
-caller assertion: an external `QueryExpr` boundary must reject this field or
+caller assertion: an external `PreASAPNode` boundary must reject this field or
 establish both obligations above before using it as uniqueness evidence.
 Rejecting unknown fields protects the assertion object from schema drift, but
 cannot prove facts about the underlying rows.

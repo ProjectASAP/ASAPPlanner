@@ -37,7 +37,7 @@
 
 use asap_frontend_sql::{lower_sql_dialect, SqlCatalog, SqlError as LoweringError};
 use asap_types::pre_asap::schema::{Column, DataType, Schema};
-use asap_types::pre_asap::{AggIntent, GroupKeys, QueryExpr};
+use asap_types::pre_asap::{AggIntent, GroupKeys, PreASAPNode};
 use asap_types::types::AccuracyTarget;
 use asap_types::workload::SqlDialect;
 use datafusion::error::DataFusionError;
@@ -92,7 +92,7 @@ fn queries() -> Vec<String> {
         .collect()
 }
 
-async fn lower(q: &str) -> Result<QueryExpr, LoweringError> {
+async fn lower(q: &str) -> Result<PreASAPNode, LoweringError> {
     lower_sql_dialect(
         q,
         &catalog(),
@@ -218,19 +218,19 @@ async fn corpus_lowering_matches_the_pinned_per_query_outcome() {
     );
 }
 
-fn first_aggregate(qe: &QueryExpr) -> Option<(&GroupKeys, &Vec<AggIntent>)> {
+fn first_aggregate(qe: &PreASAPNode) -> Option<(&GroupKeys, &Vec<AggIntent>)> {
     match qe {
-        QueryExpr::Aggregate {
+        PreASAPNode::Aggregate {
             reduction,
             measures,
             ..
         } => Some((reduction.expect_reduce(), measures)),
-        QueryExpr::Project { child, .. }
-        | QueryExpr::Filter { child, .. }
-        | QueryExpr::Sort { child, .. }
-        | QueryExpr::Limit { child, .. }
-        | QueryExpr::Dedup { child, .. }
-        | QueryExpr::PromqlSubquery { child, .. } => first_aggregate(child),
+        PreASAPNode::Project { child, .. }
+        | PreASAPNode::Filter { child, .. }
+        | PreASAPNode::Sort { child, .. }
+        | PreASAPNode::Limit { child, .. }
+        | PreASAPNode::Dedup { child, .. }
+        | PreASAPNode::PromqlSubquery { child, .. } => first_aggregate(child),
         _ => None,
     }
 }
@@ -260,7 +260,7 @@ async fn top_k_queries_are_count_grouped_by_prefix() {
             idx + 1
         );
         assert!(
-            matches!(qe, QueryExpr::Limit { .. }),
+            matches!(qe, PreASAPNode::Limit { .. }),
             "q{} ({label}) top-k shape keeps the LIMIT at the root: {qe:?}",
             idx + 1
         );

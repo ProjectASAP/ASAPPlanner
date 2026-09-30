@@ -49,13 +49,13 @@
 use std::rc::Rc;
 
 use asap_types::post_asap::{
-    ExactOperation, GroupingStrategy, HydraParams, ResultGuarantee, SketchAlgorithm, SketchParams,
-    SketchQuery, SummaryExpr, SummaryFamilyType, SummaryMaintenanceLifecycleGuarantee, SummaryNode,
-    SummaryWindowFramework,
+    ExactOperation, GroupingStrategy, HydraParams, PostASAPNode, ResultGuarantee, SketchAlgorithm,
+    SketchParams, SketchQuery, SummaryExpr, SummaryFamilyType,
+    SummaryMaintenanceLifecycleGuarantee, SummaryWindowFramework,
 };
 use asap_types::pre_asap::agg_intent::AggIntent;
 use asap_types::pre_asap::expr_ir::ColumnRef;
-use asap_types::pre_asap::query_expr::QueryExpr;
+use asap_types::pre_asap::query_expr::PreASAPNode;
 use asap_types::types::AccuracyTarget;
 
 use crate::exact_composition::{ExactComposition, OperationPlacement};
@@ -128,7 +128,7 @@ impl ValueOperationCapabilities {
 #[derive(Debug, Clone, Copy)]
 pub struct ExactCompositionCostRequest<'a> {
     /// The pre-ASAP target the composed candidate replaces.
-    pub target: &'a QueryExpr,
+    pub target: &'a PreASAPNode,
     /// The composition itself — placement, operator, child target.
     pub composition: &'a ExactComposition,
     /// For [`OperationPlacement::Read`]: the child target's *selected*
@@ -137,7 +137,7 @@ pub struct ExactCompositionCostRequest<'a> {
     /// transform that consumes its output (the `SummaryAgg` this transform
     /// feeds). Either way, the summary whose maintenance/read cost the
     /// formula charges.
-    pub summary: &'a SummaryNode,
+    pub summary: &'a PostASAPNode,
     /// How many times this site actually runs once ancestors' own choices
     /// are accounted for (see `CandidatePostASAPDAGs::global_selection`).
     pub effective_consumer_count: usize,
@@ -276,11 +276,11 @@ fn finite_rate(units_per_second: f64) -> Option<CostRate> {
 /// `docs/design_docs/cse-cost-model-decision.md`.
 pub struct CseCandidate<'a> {
     /// The shared pre-ASAP subtree itself.
-    pub subtree: &'a QueryExpr,
-    /// The `SummaryNode` this subtree bound to — gives the cost model the
+    pub subtree: &'a PreASAPNode,
+    /// The `PostASAPNode` this subtree bound to — gives the cost model the
     /// concrete `SummaryFamilyType`/`(kind, params)` actually at stake, not
     /// just the pre-ASAP shape.
-    pub bound_summary: &'a SummaryNode,
+    pub bound_summary: &'a PostASAPNode,
     /// How many workload roots reference this exact shared subtree, counted
     /// once up front over the whole workload (always >= 2 — a candidate is
     /// only ever constructed for an actually-shared subtree).
@@ -302,7 +302,7 @@ pub struct Cost(pub f64);
 /// node. Node identity is preserved so whole-DAG models can bind per-state
 /// evidence without relying on traversal order.
 pub struct CostedSummaryDeployment<'a> {
-    pub summary: &'a SummaryNode,
+    pub summary: &'a PostASAPNode,
     pub guarantee: &'a SummaryMaintenanceLifecycleGuarantee,
     pub selected_cost: Cost,
 }
@@ -359,7 +359,7 @@ impl std::ops::Mul<usize> for Cost {
 /// [`CseCandidate`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ShareDecision {
-    /// Reuse one bound `SummaryNode` across every consumer.
+    /// Reuse one bound `PostASAPNode` across every consumer.
     Share,
     /// Bind each occurrence independently — the shared-maintenance cost
     /// isn't worth it for this candidate.
@@ -382,7 +382,7 @@ pub enum ShareDecision {
 /// leaf costs little to recompute, a deep multi-join subtree costs a lot.
 /// A deployment with real per-row/per-update cost knowledge should
 /// override [`CostModel::cse_recompute_cost`] instead of relying on this.
-pub fn default_cse_recompute_cost(subtree: &QueryExpr) -> Cost {
+pub fn default_cse_recompute_cost(subtree: &PreASAPNode) -> Cost {
     Cost(asap_types::pre_asap::cse::dag_node_count(subtree) as f64)
 }
 
@@ -506,7 +506,7 @@ pub trait CostModel {
     /// Estimated number of distinct subpopulations produced by `target`'s
     /// grouping keys. `None` means the deployment has no cardinality estimate;
     /// grouping alternatives remain legal but keep their discovery order.
-    fn estimated_subpopulation_count(&self, _target: &QueryExpr) -> Option<usize> {
+    fn estimated_subpopulation_count(&self, _target: &PreASAPNode) -> Option<usize> {
         None
     }
 
@@ -598,7 +598,7 @@ pub trait CostModel {
         default_cse_shared_maintenance_cost(&family)
     }
 
-    /// Decide whether to reuse one shared `SummaryNode` across every
+    /// Decide whether to reuse one shared `PostASAPNode` across every
     /// consumer of `candidate`, or bind each occurrence independently — a
     /// Volcano/Cascades-style cost comparison (issue #237, #223 stage 4; see
     /// `docs/design_docs/cse-cost-model-decision.md`): share iff the estimated cost of
@@ -745,10 +745,10 @@ pub trait CostModel {
     ///
     /// One method covers both candidate shapes this crate ships:
     /// `candidate.replacement`'s [`Replacement::Summary`] arm (a
-    /// `SketchAlgorithmStrategy` candidate — the bound `SummaryNode` is right
+    /// `SketchAlgorithmStrategy` candidate — the bound `PostASAPNode` is right
     /// there, nothing to reconstruct) and its [`Replacement::Rewrite`] arm
     /// (a `SharedSubtreeStrategy` share-vs-recompute candidate — no bound
-    /// `SummaryNode` of its own, since sharing is a decision about a target
+    /// `PostASAPNode` of its own, since sharing is a decision about a target
     /// already bound some other way; a representative binding is recovered
     /// from `target` itself). `target` is threaded through explicitly
     /// (rather than only ever the target embedded in `candidate` — there
@@ -776,7 +776,7 @@ pub trait CostModel {
     /// optimistic zeroes.
     fn summary_maintenance_lifecycle_cost_inputs(
         &self,
-        _summary: &SummaryNode,
+        _summary: &PostASAPNode,
     ) -> SummaryMaintenanceLifecycleCostInputs {
         SummaryMaintenanceLifecycleCostInputs::default()
     }
@@ -786,7 +786,7 @@ pub trait CostModel {
     /// rate so the horizon integral equals one peak-capacity charge.
     fn summary_maintenance_lifecycle_cost_inputs_for_horizon(
         &self,
-        summary: &SummaryNode,
+        summary: &PostASAPNode,
         _horizon: Option<Horizon>,
     ) -> SummaryMaintenanceLifecycleCostInputs {
         self.summary_maintenance_lifecycle_cost_inputs(summary)
@@ -796,7 +796,7 @@ pub trait CostModel {
     /// conservative default advertises no long-lived maintenance capability.
     fn summary_maintenance_capabilities(
         &self,
-        _summary: &SummaryNode,
+        _summary: &PostASAPNode,
     ) -> SummaryMaintenanceCapabilities {
         SummaryMaintenanceCapabilities::default()
     }
@@ -807,8 +807,8 @@ pub trait CostModel {
     /// must not then reuse the partial per-state sum.
     fn complete_summary_candidate_cost(
         &self,
-        _root: &SummaryNode,
-        _target: Option<&QueryExpr>,
+        _root: &PostASAPNode,
+        _target: Option<&PreASAPNode>,
         deployments: &[CostedSummaryDeployment<'_>],
         _horizon: Option<Horizon>,
         _expected_reads: Option<f64>,
@@ -827,8 +827,8 @@ pub trait CostModel {
     /// that do not perform either decision.
     fn complete_summary_candidate_estimate(
         &self,
-        root: &SummaryNode,
-        target: Option<&QueryExpr>,
+        root: &PostASAPNode,
+        target: Option<&PreASAPNode>,
         deployments: &[CostedSummaryDeployment<'_>],
         horizon: Option<Horizon>,
         expected_reads: Option<f64>,
@@ -861,7 +861,7 @@ pub trait CostModel {
     /// Cost of evaluating `target` directly from its logical/raw inputs once.
     /// When known, lifecycle-aware materialization compares this fallback with
     /// the aggregate cost of the selected summary deployments.
-    fn raw_query_recompute_cost(&self, _target: &QueryExpr) -> Option<Cost> {
+    fn raw_query_recompute_cost(&self, _target: &PreASAPNode) -> Option<Cost> {
         None
     }
 
@@ -870,7 +870,7 @@ pub trait CostModel {
     /// cardinality changes between evaluations.
     fn raw_query_recompute_total_cost(
         &self,
-        target: &QueryExpr,
+        target: &PreASAPNode,
         expected_reads: f64,
     ) -> Option<Cost> {
         self.raw_query_recompute_cost(target)
@@ -879,7 +879,7 @@ pub trait CostModel {
     /// Physical feasibility evidence for a complete summary candidate.
     /// `None` defers admission to physical/deployment compilation; `Some(false)`
     /// excludes the candidate without changing its computation or parameters.
-    fn summary_support_evidence(&self, _summary: &SummaryNode) -> Option<bool> {
+    fn summary_support_evidence(&self, _summary: &PostASAPNode) -> Option<bool> {
         None
     }
 
@@ -948,7 +948,7 @@ pub trait CostModel {
 }
 
 fn sketch_state(
-    node: &SummaryNode,
+    node: &PostASAPNode,
 ) -> Option<(&asap_types::post_asap::SketchKind, &GroupingStrategy)> {
     match &node.expr {
         SummaryExpr::SummaryEstimate { summary_input, .. } => sketch_state(summary_input),
@@ -1035,7 +1035,7 @@ impl CostModel for DefaultCostModel {
     ///   [`default_cse_shared_maintenance_cost`] already orders candidates
     ///   by).
     /// - [`Replacement::Rewrite`]: recovers one representative bound
-    ///   `SummaryNode` for `target` via `realize_child` (the same
+    ///   `PostASAPNode` for `target` via `realize_child` (the same
     ///   rank-and-take-first helper `replacement::realize_child` reuses for the
     ///   identical need), then charges
     ///   `cse_shared_maintenance_cost` for the candidate that shares
@@ -1352,8 +1352,8 @@ mod tests {
     use asap_types::pre_asap::query_expr::Source;
     use asap_types::pre_asap::schema::{Column, DataType, Schema};
 
-    fn scan() -> QueryExpr {
-        QueryExpr::Scan {
+    fn scan() -> PreASAPNode {
+        PreASAPNode::Scan {
             source: Source::TimeSeries { metric: "m".into() },
             predicates: vec![],
             schema: Schema::with_time_index(
@@ -1367,10 +1367,10 @@ mod tests {
         }
     }
 
-    fn summary_node(family: SummaryFamilyType) -> SummaryNode {
-        SummaryNode {
+    fn summary_node(family: SummaryFamilyType) -> PostASAPNode {
+        PostASAPNode {
             expr: SummaryExpr::SummaryAgg {
-                child: std::rc::Rc::new(SummaryNode {
+                child: std::rc::Rc::new(PostASAPNode {
                     expr: SummaryExpr::KeepPreAsap(Rc::new(scan())),
                     schema: SummarySchema {
                         fields: vec![],
@@ -1400,7 +1400,7 @@ mod tests {
     #[test]
     fn default_recompute_cost_is_positive_and_grows_with_structural_size() {
         let leaf = scan();
-        let nested = QueryExpr::Dedup {
+        let nested = PreASAPNode::Dedup {
             cols: vec![0],
             child: std::rc::Rc::new(leaf.clone()),
         };
@@ -1420,18 +1420,18 @@ mod tests {
         use asap_types::pre_asap::query_expr::{JoinKind, Predicate};
 
         let true_pred = || {
-            Predicate(std::rc::Rc::new(QueryExpr::Literal(ScalarValue::Boolean(
-                true,
-            ))))
+            Predicate(std::rc::Rc::new(PreASAPNode::Literal(
+                ScalarValue::Boolean(true),
+            )))
         };
         let shared_leaf = std::rc::Rc::new(scan());
-        let no_sharing = QueryExpr::Join {
+        let no_sharing = PreASAPNode::Join {
             kind: JoinKind::Inner,
             pred: true_pred(),
             left: std::rc::Rc::new(scan()),
             right: std::rc::Rc::new(scan()),
         };
-        let with_sharing = QueryExpr::Join {
+        let with_sharing = PreASAPNode::Join {
             kind: JoinKind::Inner,
             pred: true_pred(),
             left: std::rc::Rc::clone(&shared_leaf),

@@ -35,7 +35,7 @@
 //! - **`without(...)` grouping** leaves an `Aggregate`'s own output schema
 //!   *open* (`closed: false`, see `without_output_schema`), while the
 //!   `Project` this strategy always wraps the rewrite in forces
-//!   `closed: true` (see `QueryExpr::output_schema`'s `Project` arm). Under
+//!   `closed: true` (see `PreASAPNode::output_schema`'s `Project` arm). Under
 //!   `without(...)` the rewritten form's `closed` flag would silently flip
 //!   relative to the original — exactly the kind of schema drift this
 //!   module exists to avoid.
@@ -61,7 +61,7 @@ use std::rc::Rc;
 
 use asap_types::pre_asap::agg_intent::AggIntent;
 use asap_types::pre_asap::expr_ir::ArithmeticOpKind;
-use asap_types::pre_asap::query_expr::{BinaryOpKind, ProjectItem, QueryExpr, Reduction};
+use asap_types::pre_asap::query_expr::{BinaryOpKind, PreASAPNode, ProjectItem, Reduction};
 use asap_types::pre_asap::schema::{ColumnId, DataType};
 use asap_types::types::AccuracyTarget;
 
@@ -72,8 +72,8 @@ use crate::replacement::{Replacement, ReplacementStrategy, ReplacementSubDAG, Ta
 /// the module docs' "Scope" for why `without(...)`/`PerEntity` are
 /// excluded). Returns the grouping key count and the summed column so
 /// [`build_rewrite`] doesn't have to re-match.
-fn avg_rewrite_target(node: &QueryExpr) -> Option<(usize, Option<ColumnId>)> {
-    let QueryExpr::Aggregate {
+fn avg_rewrite_target(node: &PreASAPNode) -> Option<(usize, Option<ColumnId>)> {
+    let PreASAPNode::Aggregate {
         reduction,
         measures,
         having: None,
@@ -123,14 +123,14 @@ fn avg_rewrite_target(node: &QueryExpr) -> Option<(usize, Option<ColumnId>)> {
 /// exactly regardless of the summed column's own type (integer division
 /// would otherwise silently reappear whenever the input column is itself
 /// integer-typed: `Sum`'s output type tracks its input, `Count`'s is always
-/// `Int64`, and `QueryExpr::output_schema`'s own `Arithmetic` type inference
+/// `Int64`, and `PreASAPNode::output_schema`'s own `Arithmetic` type inference
 /// types a `Div` of two `Int64` operands as `Int64` — the explicit operand
 /// `Cast` is what keeps both the division and rewritten `avg` column
 /// `Float64` the way the original always was, not an incidental extra step).
 // These are conditional physical components, never an unconditional Rewrite.
 // The caller must attach the finite-division execution guard before admission.
-pub(crate) fn temporal_average_components(root: &Rc<QueryExpr>) -> Option<Rc<QueryExpr>> {
-    let QueryExpr::Aggregate {
+pub(crate) fn temporal_average_components(root: &Rc<PreASAPNode>) -> Option<Rc<PreASAPNode>> {
+    let PreASAPNode::Aggregate {
         reduction: Reduction::PerEntity,
         measures,
         child,
@@ -143,7 +143,7 @@ pub(crate) fn temporal_average_components(root: &Rc<QueryExpr>) -> Option<Rc<Que
     let [AggIntent::Avg { col }] = measures.as_slice() else {
         return None;
     };
-    if !matches!(child.as_ref(), QueryExpr::TimeRange { .. }) {
+    if !matches!(child.as_ref(), PreASAPNode::TimeRange { .. }) {
         return None;
     }
     let schema = child.output_schema().ok()?;
@@ -154,7 +154,7 @@ pub(crate) fn temporal_average_components(root: &Rc<QueryExpr>) -> Option<Rc<Que
         return None;
     }
     let aggregate = |intent| {
-        Rc::new(QueryExpr::Aggregate {
+        Rc::new(PreASAPNode::Aggregate {
             reduction: Reduction::PerEntity,
             measures: vec![intent],
             output_names: vec![],
@@ -162,7 +162,7 @@ pub(crate) fn temporal_average_components(root: &Rc<QueryExpr>) -> Option<Rc<Que
             child: Rc::clone(child),
         })
     };
-    let rewritten = Rc::new(QueryExpr::BinaryOp {
+    let rewritten = Rc::new(PreASAPNode::BinaryOp {
         op: BinaryOpKind::Arithmetic(ArithmeticOpKind::Div),
         lhs: aggregate(AggIntent::Sum { col: *col }),
         rhs: aggregate(AggIntent::Count {
@@ -173,9 +173,9 @@ pub(crate) fn temporal_average_components(root: &Rc<QueryExpr>) -> Option<Rc<Que
     (root.output_schema().ok()? == rewritten.output_schema().ok()?).then_some(rewritten)
 }
 
-fn build_rewrite(root: &Rc<QueryExpr>) -> Option<Rc<QueryExpr>> {
+fn build_rewrite(root: &Rc<PreASAPNode>) -> Option<Rc<PreASAPNode>> {
     let (group_count, col) = avg_rewrite_target(root)?;
-    let QueryExpr::Aggregate {
+    let PreASAPNode::Aggregate {
         reduction,
         output_names,
         child,
@@ -187,7 +187,7 @@ fn build_rewrite(root: &Rc<QueryExpr>) -> Option<Rc<QueryExpr>> {
 
     // The original `avg` column's own name: `output_names[0]` if the
     // producing front end overrode it (SQL threading DataFusion's own
-    // generated name — see `QueryExpr::Aggregate::output_names`'s docs),
+    // generated name — see `PreASAPNode::Aggregate::output_names`'s docs),
     // else `AggIntent::Avg`'s synthetic default. Either way this is the
     // *only* thing about the original output column this rewrite needs to
     // reproduce — `AggIntent::Avg::output_column`'s `(Float64, nullable:
@@ -199,14 +199,14 @@ fn build_rewrite(root: &Rc<QueryExpr>) -> Option<Rc<QueryExpr>> {
         .cloned()
         .unwrap_or_else(|| "avg".to_string());
 
-    let sum_agg = Rc::new(QueryExpr::Aggregate {
+    let sum_agg = Rc::new(PreASAPNode::Aggregate {
         reduction: reduction.clone(),
         measures: vec![AggIntent::Sum { col }],
         output_names: Vec::new(),
         having: None,
         child: Rc::clone(child),
     });
-    let count_agg = Rc::new(QueryExpr::Aggregate {
+    let count_agg = Rc::new(PreASAPNode::Aggregate {
         reduction: reduction.clone(),
         measures: vec![AggIntent::Count {
             accuracy: AccuracyTarget::Exact,
@@ -220,24 +220,24 @@ fn build_rewrite(root: &Rc<QueryExpr>) -> Option<Rc<QueryExpr>> {
     let mut cols: Vec<ProjectItem> = (0..group_count)
         .map(|i| ProjectItem {
             alias: None,
-            expr: QueryExpr::Column(i),
+            expr: PreASAPNode::Column(i),
         })
         .collect();
     cols.push(ProjectItem {
         alias: Some(avg_name),
-        expr: QueryExpr::Cast {
-            expr: Rc::new(QueryExpr::Column(sum_idx)),
+        expr: PreASAPNode::Cast {
+            expr: Rc::new(PreASAPNode::Column(sum_idx)),
             to: DataType::Float64,
             try_cast: false,
         },
     });
 
-    let float_sum = Rc::new(QueryExpr::Project {
+    let float_sum = Rc::new(PreASAPNode::Project {
         cols,
         qualifier: None,
         child: sum_agg,
     });
-    Some(Rc::new(QueryExpr::BinaryOp {
+    Some(Rc::new(PreASAPNode::BinaryOp {
         op: BinaryOpKind::Arithmetic(ArithmeticOpKind::Div),
         lhs: float_sum,
         rhs: count_agg,
@@ -247,9 +247,9 @@ fn build_rewrite(root: &Rc<QueryExpr>) -> Option<Rc<QueryExpr>> {
 
 /// Compose adjacent per-entity and cross-entity accumulators when their
 /// algebra, rather than a query-language spelling, proves equivalence.
-pub(crate) fn composed_aggregate_rewrite(root: &Rc<QueryExpr>) -> Option<Rc<QueryExpr>> {
+pub(crate) fn composed_aggregate_rewrite(root: &Rc<PreASAPNode>) -> Option<Rc<PreASAPNode>> {
     let original_schema = root.output_schema().ok()?;
-    let QueryExpr::Aggregate {
+    let PreASAPNode::Aggregate {
         reduction: outer_reduction @ Reduction::Reduce(_),
         measures: outer_measures,
         output_names,
@@ -259,7 +259,7 @@ pub(crate) fn composed_aggregate_rewrite(root: &Rc<QueryExpr>) -> Option<Rc<Quer
     else {
         return None;
     };
-    let QueryExpr::Aggregate {
+    let PreASAPNode::Aggregate {
         reduction: Reduction::PerEntity,
         measures: inner_measures,
         having: None,
@@ -279,7 +279,7 @@ pub(crate) fn composed_aggregate_rewrite(root: &Rc<QueryExpr>) -> Option<Rc<Quer
         | (AggIntent::Max { col: None }, AggIntent::Max { .. }) => inner.clone(),
         _ => return None,
     };
-    let aggregate = Rc::new(QueryExpr::Aggregate {
+    let aggregate = Rc::new(PreASAPNode::Aggregate {
         reduction: outer_reduction.clone(),
         measures: vec![composed],
         output_names: output_names.clone(),
@@ -302,7 +302,7 @@ pub(crate) fn composed_aggregate_rewrite(root: &Rc<QueryExpr>) -> Option<Rc<Quer
         let mut cols: Vec<ProjectItem> = (0..by.keys().len())
             .map(|i| ProjectItem {
                 alias: None,
-                expr: QueryExpr::Column(i),
+                expr: PreASAPNode::Column(i),
             })
             .collect();
         cols.push(ProjectItem {
@@ -313,13 +313,13 @@ pub(crate) fn composed_aggregate_rewrite(root: &Rc<QueryExpr>) -> Option<Rc<Quer
                 .columns
                 .last()
                 .map(|column| column.name.clone()),
-            expr: QueryExpr::Cast {
-                expr: Rc::new(QueryExpr::Column(by.keys().len())),
+            expr: PreASAPNode::Cast {
+                expr: Rc::new(PreASAPNode::Column(by.keys().len())),
                 to: DataType::Float64,
                 try_cast: false,
             },
         });
-        Rc::new(QueryExpr::Project {
+        Rc::new(PreASAPNode::Project {
             cols,
             qualifier: None,
             child: aggregate,
@@ -395,21 +395,21 @@ mod tests {
     use asap_types::types::AccuracyTarget;
     use std::time::Duration;
 
-    fn metric_scan(labels: &[&str]) -> QueryExpr {
+    fn metric_scan(labels: &[&str]) -> PreASAPNode {
         let mut columns = vec![
             Column::new("ts", DataType::Timestamp, false),
             Column::new("value", DataType::Float64, false),
         ];
         columns.extend(labels.iter().map(|n| Column::new(*n, DataType::Utf8, true)));
-        QueryExpr::Scan {
+        PreASAPNode::Scan {
             source: Source::TimeSeries { metric: "m".into() },
             predicates: vec![],
             schema: Schema::with_time_index(columns, 0, vec![]),
         }
     }
 
-    fn avg_agg(by: Vec<ColumnId>, col: Option<ColumnId>, child: QueryExpr) -> QueryExpr {
-        QueryExpr::Aggregate {
+    fn avg_agg(by: Vec<ColumnId>, col: Option<ColumnId>, child: PreASAPNode) -> PreASAPNode {
+        PreASAPNode::Aggregate {
             reduction: Reduction::by(by),
             measures: vec![AggIntent::Avg { col }],
             output_names: vec![],
@@ -434,7 +434,7 @@ mod tests {
             root.output_schema().unwrap(),
             rewritten.output_schema().unwrap()
         );
-        assert!(matches!(rewritten.as_ref(), QueryExpr::BinaryOp { .. }));
+        assert!(matches!(rewritten.as_ref(), PreASAPNode::BinaryOp { .. }));
     }
 
     // ── matches ──────────────────────────────────────────────────────────
@@ -455,7 +455,7 @@ mod tests {
 
     #[test]
     fn does_not_match_a_multi_measure_aggregate() {
-        let q = Rc::new(QueryExpr::Aggregate {
+        let q = Rc::new(PreASAPNode::Aggregate {
             reduction: Reduction::by(vec![2]),
             measures: vec![AggIntent::Sum { col: None }, AggIntent::Avg { col: None }],
             output_names: vec![],
@@ -470,9 +470,9 @@ mod tests {
     #[test]
     fn does_not_match_a_having_bearing_avg_aggregate() {
         let mut q = avg_agg(vec![2], None, metric_scan(&["job"]));
-        if let QueryExpr::Aggregate { having, .. } = &mut q {
+        if let PreASAPNode::Aggregate { having, .. } = &mut q {
             *having = Some(asap_types::pre_asap::query_expr::Predicate(Rc::new(
-                QueryExpr::Literal(asap_types::pre_asap::expr_ir::ScalarValue::Boolean(true)),
+                PreASAPNode::Literal(asap_types::pre_asap::expr_ir::ScalarValue::Boolean(true)),
             )));
         }
         let q = Rc::new(q);
@@ -490,7 +490,7 @@ mod tests {
             },
             AggIntent::Min { col: None },
         ] {
-            let q = Rc::new(QueryExpr::Aggregate {
+            let q = Rc::new(PreASAPNode::Aggregate {
                 reduction: Reduction::by(vec![2]),
                 measures: vec![intent.clone()],
                 output_names: vec![],
@@ -508,7 +508,7 @@ mod tests {
 
     #[test]
     fn does_not_match_a_without_grouped_avg_aggregate() {
-        let q = Rc::new(QueryExpr::Aggregate {
+        let q = Rc::new(PreASAPNode::Aggregate {
             reduction: Reduction::Reduce(asap_types::pre_asap::query_expr::GroupKeys::without(
                 vec![2],
             )),
@@ -524,7 +524,7 @@ mod tests {
 
     #[test]
     fn does_not_match_a_per_entity_avg_aggregate() {
-        let q = Rc::new(QueryExpr::Aggregate {
+        let q = Rc::new(PreASAPNode::Aggregate {
             reduction: Reduction::PerEntity,
             measures: vec![AggIntent::Avg { col: None }],
             output_names: vec![],
@@ -562,20 +562,20 @@ mod tests {
             Replacement::Rewrite(rc) => rc,
             other => panic!("expected a Rewrite replacement, got {other:?}"),
         };
-        let QueryExpr::BinaryOp { lhs, rhs, .. } = rewritten.as_ref() else {
+        let PreASAPNode::BinaryOp { lhs, rhs, .. } = rewritten.as_ref() else {
             panic!("expected sum/count BinaryOp, got {rewritten:?}");
         };
-        let QueryExpr::Project { child: sum, .. } = lhs.as_ref() else {
+        let PreASAPNode::Project { child: sum, .. } = lhs.as_ref() else {
             panic!("expected cast Project above Sum, got {lhs:?}");
         };
         assert!(matches!(
             sum.as_ref(),
-            QueryExpr::Aggregate { measures, .. }
+            PreASAPNode::Aggregate { measures, .. }
                 if matches!(measures.as_slice(), [AggIntent::Sum { col: None }])
         ));
         assert!(matches!(
             rhs.as_ref(),
-            QueryExpr::Aggregate { measures, .. }
+            PreASAPNode::Aggregate { measures, .. }
                 if matches!(measures.as_slice(), [AggIntent::Count { accuracy: AccuracyTarget::Exact }])
         ));
 
@@ -593,7 +593,7 @@ mod tests {
     #[test]
     fn preserves_an_explicit_output_name_override() {
         let mut q = avg_agg(vec![], None, metric_scan(&[]));
-        if let QueryExpr::Aggregate { output_names, .. } = &mut q {
+        if let PreASAPNode::Aggregate { output_names, .. } = &mut q {
             *output_names = vec!["avg_latency".to_string()];
         }
         let original_schema = q.output_schema().unwrap();
@@ -644,7 +644,7 @@ mod tests {
         let mut found_sum = false;
         let mut found_count = false;
         for group in space.target_subdag_candidates() {
-            let QueryExpr::Aggregate { measures, .. } = group.target.as_ref() else {
+            let PreASAPNode::Aggregate { measures, .. } = group.target.as_ref() else {
                 continue;
             };
             let expected = matches!(measures.as_slice(), [AggIntent::Sum { .. }])
@@ -682,7 +682,7 @@ mod tests {
             Column::new("job", DataType::Utf8, true),
             Column::new("bytes", DataType::Int64, false),
         ];
-        let child = QueryExpr::Scan {
+        let child = PreASAPNode::Scan {
             source: Source::TimeSeries { metric: "m".into() },
             predicates: vec![],
             schema: {
@@ -713,15 +713,15 @@ mod tests {
             DataType::Float64
         );
 
-        let QueryExpr::BinaryOp { lhs, .. } = rewritten.as_ref() else {
+        let PreASAPNode::BinaryOp { lhs, .. } = rewritten.as_ref() else {
             panic!("expected sum/count BinaryOp");
         };
-        let QueryExpr::Project { cols, .. } = lhs.as_ref() else {
+        let PreASAPNode::Project { cols, .. } = lhs.as_ref() else {
             panic!("expected cast Project above Sum");
         };
         assert!(matches!(
             &cols.last().unwrap().expr,
-            QueryExpr::Cast {
+            PreASAPNode::Cast {
                 to: DataType::Float64,
                 ..
             }
@@ -730,7 +730,7 @@ mod tests {
 
     #[test]
     fn does_not_rewrite_avg_of_a_nullable_column_via_count_star() {
-        let child = QueryExpr::Scan {
+        let child = PreASAPNode::Scan {
             source: Source::TimeSeries { metric: "m".into() },
             predicates: vec![],
             schema: Schema::with_time_index(
@@ -750,18 +750,18 @@ mod tests {
         assert!(AvgToSumOverCountStrategy.replacements(&target).is_empty());
     }
 
-    fn nested_aggregate(outer: AggIntent, inner: AggIntent) -> Rc<QueryExpr> {
-        let temporal = QueryExpr::Aggregate {
+    fn nested_aggregate(outer: AggIntent, inner: AggIntent) -> Rc<PreASAPNode> {
+        let temporal = PreASAPNode::Aggregate {
             reduction: Reduction::PerEntity,
             measures: vec![inner],
             output_names: vec![],
             having: None,
-            child: Rc::new(QueryExpr::TimeRange {
+            child: Rc::new(PreASAPNode::TimeRange {
                 range: Duration::from_secs(300),
                 child: Rc::new(metric_scan(&["service"])),
             }),
         };
-        Rc::new(QueryExpr::Aggregate {
+        Rc::new(PreASAPNode::Aggregate {
             reduction: Reduction::by(vec![2]),
             measures: vec![outer],
             // Match the PromQL front end: an empty entry selects the intent's
@@ -798,11 +798,11 @@ mod tests {
                 rewritten.output_schema().unwrap()
             );
             let aggregate = match rewritten.as_ref() {
-                QueryExpr::Aggregate { .. } => rewritten.as_ref(),
-                QueryExpr::Project { child, .. } => child.as_ref(),
+                PreASAPNode::Aggregate { .. } => rewritten.as_ref(),
+                PreASAPNode::Project { child, .. } => child.as_ref(),
                 other => panic!("expected Aggregate or cast Project, got {other:?}"),
             };
-            let QueryExpr::Aggregate {
+            let PreASAPNode::Aggregate {
                 reduction: Reduction::Reduce(by),
                 measures,
                 child,
@@ -815,9 +815,9 @@ mod tests {
             assert_eq!(measures, &[expected]);
             assert!(matches!(
                 child.as_ref(),
-                QueryExpr::TimeRange { range, child }
+                PreASAPNode::TimeRange { range, child }
                     if *range == Duration::from_secs(300)
-                        && matches!(child.as_ref(), QueryExpr::Scan { .. })
+                        && matches!(child.as_ref(), PreASAPNode::Scan { .. })
             ));
         }
     }

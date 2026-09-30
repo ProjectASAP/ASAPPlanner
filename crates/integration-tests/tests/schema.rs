@@ -1,6 +1,6 @@
 //! `Schema::closed` propagation — open/closed invariant tests.
 //!
-//! Verifies that `QueryExpr::output_schema()` propagates the open/closed
+//! Verifies that `PreASAPNode::output_schema()` propagates the open/closed
 //! completeness flag correctly through a lowered query tree.
 //!
 //! Key invariant: a PromQL scan is always `closed: false` (open) because its
@@ -12,7 +12,7 @@
 use asap_integration_tests::fixtures::lower_promql;
 use asap_types::types::AccuracyTarget;
 
-fn lower(q: &str) -> asap_types::pre_asap::QueryExpr {
+fn lower(q: &str) -> asap_types::pre_asap::PreASAPNode {
     lower_promql(q, AccuracyTarget::Exact).unwrap_or_else(|e| panic!("lower failed for {q:?}: {e}"))
 }
 

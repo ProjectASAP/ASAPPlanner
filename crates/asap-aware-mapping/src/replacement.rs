@@ -18,7 +18,7 @@
 //!    `CostModel::size_params`, not a placeholder filled in later).
 //! 2. **Build**: for each candidate in that list, [`construct_summary`]
 //!    mechanically turns the already-decided `(kind, params)` into a real
-//!    [`SummaryNode`] — derives the child schema, resolves the summarized
+//!    [`PostASAPNode`] — derives the child schema, resolves the summarized
 //!    column, builds the readout query, recurses into the child (via
 //!    [`realize_child`], so a nested aggregate gets its own
 //!    independent enumeration, never the outer target's forced choice), and
@@ -31,13 +31,13 @@
 //! has to run regardless of how `(kind, params)` were chosen, so it lives
 //! directly inside the one method that needs it.
 //!
-//! - [`TargetSubDAG`] — a reference to a pre-ASAP [`QueryExpr`] node that is a
+//! - [`TargetSubDAG`] — a reference to a pre-ASAP [`PreASAPNode`] node that is a
 //!   candidate for replacement, plus how many places in the workload already
 //!   reference it (its `consumer_count`) — the one piece of cross-node
 //!   context [`SharedSubtreeStrategy`] needs that a bare node reference alone
 //!   doesn't carry.
 //! - [`ReplacementSubDAG`] — one candidate replacement for a `TargetSubDAG`:
-//!   either a fully bound [`SummaryNode`] or a pre-ASAP [`QueryExpr`] rewrite
+//!   either a fully bound [`PostASAPNode`] or a pre-ASAP [`PreASAPNode`] rewrite
 //!   (still logical, structurally different from the target but semantically
 //!   equivalent) — see [`Replacement`] — plus a human-readable `rationale`.
 //! - [`ReplacementStrategy`] — `matches` + `replacements`, the same
@@ -80,7 +80,7 @@
 //!   `asap_types::pre_asap::cse::share_common_subtrees`'s sharing decision.
 //!   Wherever a [`TargetSubDAG`] already has two or more consumers (i.e.
 //!   `share_common_subtrees` already collapsed two or more workload
-//!   locations onto the same `Rc<QueryExpr>` — [`discover_targets`] below
+//!   locations onto the same `Rc<PreASAPNode>` — [`discover_targets`] below
 //!   does the identical workload-wide discovery for [`search_workload_with`];
 //!   this module's own tests reuse the same dedup logic to build realistic
 //!   fixtures), it reports the two-way candidate CSE's own detection pass
@@ -143,12 +143,12 @@
 //!
 //! 1. **Per-target candidates, not flat plans.** [`TargetSubDAGCandidates`]
 //!    stores the alternatives for one distinct [`TargetSubDAG`] (identified by
-//!    its own `Rc<QueryExpr>` pointer identity — the same currency
+//!    its own `Rc<PreASAPNode>` pointer identity — the same currency
 //!    [`asap_types::pre_asap::cse::share_common_subtrees`] already
 //!    established across the workload) holding every
 //!    [`ReplacementSubDAG`] alternative discovered for it. [`CandidatePostASAPDAGs`] is
 //!    a collection of these groups, keyed by `TargetSubDAG` — a candidate
-//!    "plan" is never materialized as a distinct top-level `Rc<QueryExpr>`
+//!    "plan" is never materialized as a distinct top-level `Rc<PreASAPNode>`
 //!    at all; two logically-different overall choices at two different
 //!    targets are just two different entries in two different groups,
 //!    sharing every other node in the workload by construction (they *are*
@@ -157,7 +157,7 @@
 //!    discipline.** [`asap_types::pre_asap::cse::structural_hash`] (made
 //!    `pub` for exactly this reuse) is only ever a candidate-narrowing
 //!    filter; [`TargetSubDAGCandidates::add_candidate`]'s actual duplicate check is
-//!    `QueryExpr`'s derived `PartialEq` — the same "hash is a filter,
+//!    `PreASAPNode`'s derived `PartialEq` — the same "hash is a filter,
 //!    `PartialEq` is the decision, no exceptions" rule `cse.rs`'s own
 //!    "Correctness" section states and this module inherits rather than
 //!    reinvents. See [`is_duplicate_rewrite`] for the one deliberate
@@ -213,7 +213,7 @@
 //! own; see [`discover_new_descendant_targets`]) are scanned for pointers
 //! not already known, and any found become next round's frontier. Both shipped
 //! strategies are idempotent in exactly this sense: [`SketchAlgorithmStrategy`]
-//! produces terminal [`Replacement::Summary`] candidates (no `QueryExpr`
+//! produces terminal [`Replacement::Summary`] candidates (no `PreASAPNode`
 //! children to scan at all), and [`SharedSubtreeStrategy`]'s two
 //! [`Replacement::Rewrite`] candidates both reuse the target's own
 //! already-known child `Rc`s verbatim (`Rc::clone`/a shallow top-level
@@ -351,9 +351,9 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use asap_types::post_asap::{
     validate_execution_data_states_at, EntityIdentity, ExactKind, ExactOperation,
     ExactOperationSchemaError, ExactParams, ExecutionDataState, ExecutionDataStateError,
-    ExecutionTiming, GroupingStrategy, NonNegativeWeightProof, SamplingKind, SamplingParams,
-    SketchAlgorithm, SketchKind, SketchParams, SketchQuery as PostAsapSketchQuery, StatModelKind,
-    StatModelParams, SummaryExpr, SummaryFamilyType, SummaryField, SummaryInputExpr, SummaryNode,
+    ExecutionTiming, GroupingStrategy, NonNegativeWeightProof, PostASAPNode, SamplingKind,
+    SamplingParams, SketchAlgorithm, SketchKind, SketchParams, SketchQuery as PostAsapSketchQuery,
+    StatModelKind, StatModelParams, SummaryExpr, SummaryFamilyType, SummaryField, SummaryInputExpr,
     SummarySchema, SummaryUpdate, ValueOperation, WaveletKind, WaveletParams, WeightDomain,
 };
 use asap_types::post_asap::{AccuracyError, CompositionOperator, GuaranteeSource, ResultGuarantee};
@@ -361,7 +361,7 @@ use asap_types::pre_asap::agg_intent::{agg_is_mergeable, AggIntent};
 use asap_types::pre_asap::cse::{share_common_subtrees, structural_hash, HashCache};
 use asap_types::pre_asap::expr_ir::{ArithmeticOpKind, ColumnRef};
 use asap_types::pre_asap::query_expr::{
-    BinaryOpKind, Predicate, QueryExpr, QueryExprError, Reduction,
+    BinaryOpKind, PreASAPNode, PreASAPNodeError, Predicate, Reduction,
 };
 use asap_types::pre_asap::schema::{ColumnId, Schema};
 use asap_types::types::AccuracyTarget;
@@ -391,13 +391,13 @@ use crate::topk_reuse::TopKLimitReuseStrategy;
 /// ([`realize_child`] and [`keep_pre_asap`]). Moved here from the former
 /// `bind.rs` (issue #251): this is what a [`ReplacementStrategy`]
 /// implementor's own construction path can realistically fail with —
-/// schema derivation over a pre-ASAP [`QueryExpr`] — not something specific
+/// schema derivation over a pre-ASAP [`PreASAPNode`] — not something specific
 /// to workload-wide orchestration.
 #[derive(Debug, Error)]
 pub enum RealizationError {
     /// Schema derivation failed while lifting an edge to `SummarySchema`.
     #[error("schema derivation failed during pre-ASAP → post-ASAP binding: {0}")]
-    Schema(#[from] QueryExprError),
+    Schema(#[from] PreASAPNodeError),
     /// The candidate is accuracy-illegal (issue #172): its composed
     /// guarantee has no sound propagation rule, or misses the applicable
     /// `AccuracyTarget`. Fail-closed — the candidate is never constructed
@@ -424,10 +424,10 @@ pub enum RealizationError {
 
 /// A pre-ASAP sub-DAG a [`ReplacementStrategy`] knows how to replace.
 ///
-/// `root` is a reference into the workload's own [`QueryExpr`] tree (an
-/// `Rc<QueryExpr>`, the same currency [`search_workload`] and
+/// `root` is a reference into the workload's own [`PreASAPNode`] tree (an
+/// `Rc<PreASAPNode>`, the same currency [`search_workload`] and
 /// `asap_types::pre_asap::cse::share_common_subtrees` already thread through
-/// this crate's public API — not a bare `&QueryExpr` — so a strategy that
+/// this crate's public API — not a bare `&PreASAPNode` — so a strategy that
 /// needs the node's own `Rc` identity, not just its shape, has it available
 /// without the caller re-deriving it).
 ///
@@ -440,14 +440,14 @@ pub enum RealizationError {
 /// count; [`SharedSubtreeStrategy`] consults it directly.
 #[derive(Debug, Clone, Copy)]
 pub struct TargetSubDAG<'a> {
-    pub root: &'a Rc<QueryExpr>,
+    pub root: &'a Rc<PreASAPNode>,
     pub consumer_count: usize,
 }
 
 impl<'a> TargetSubDAG<'a> {
     /// A target assumed to have exactly one consumer — the common case for a
     /// caller that isn't already tracking cross-workload sharing.
-    pub fn new(root: &'a Rc<QueryExpr>) -> Self {
+    pub fn new(root: &'a Rc<PreASAPNode>) -> Self {
         Self {
             root,
             consumer_count: 1,
@@ -456,7 +456,7 @@ impl<'a> TargetSubDAG<'a> {
 
     /// A target with an explicit `consumer_count`, used by workload discovery
     /// and by callers that already know how many locations reference `root`.
-    pub fn with_consumer_count(root: &'a Rc<QueryExpr>, consumer_count: usize) -> Self {
+    pub fn with_consumer_count(root: &'a Rc<PreASAPNode>, consumer_count: usize) -> Self {
         Self {
             root,
             consumer_count,
@@ -474,11 +474,11 @@ impl<'a> TargetSubDAG<'a> {
 pub enum Replacement {
     /// A fully bound post-ASAP summary decision, for one particular
     /// candidate realization of the target.
-    Summary(Rc<SummaryNode>),
-    /// A pre-ASAP rewrite: still a logical [`QueryExpr`], structurally
+    Summary(Rc<PostASAPNode>),
+    /// A pre-ASAP rewrite: still a logical [`PreASAPNode`], structurally
     /// different from the target's own `root` (e.g. sharing vs. not sharing
     /// a subtree) but semantically equivalent to it.
-    Rewrite(Rc<QueryExpr>),
+    Rewrite(Rc<PreASAPNode>),
     /// An exact operator composed over another target's *own* selected
     /// decision across an explicit update/readout boundary (issue #171):
     /// `ValueOperationAtQueryTime` over a child's summary readout, or
@@ -486,7 +486,7 @@ pub enum Replacement {
     /// reference to the child target — [`CandidatePostASAPDAGs::global_selection`]
     /// commits the compatible parent/child pair and
     /// [`GlobalSelection::assemble_selected_dag`] links it into one validated
-    /// `SummaryNode`. See [`crate::exact_composition`].
+    /// `PostASAPNode`. See [`crate::exact_composition`].
     ExactComposition(ExactComposition),
 }
 
@@ -646,7 +646,7 @@ pub trait ReplacementStrategy {
     /// (for example, the PromQL series identity), so
     /// [`search_workload_with_targets`] asks only workload roots, once each.
     /// They decide what to compute, never placement. Default: none.
-    fn propose_for_root(&self, _root: &Rc<QueryExpr>, _target: &AccuracyTarget) -> Proposals {
+    fn propose_for_root(&self, _root: &Rc<PreASAPNode>, _target: &AccuracyTarget) -> Proposals {
         Proposals::default()
     }
 }
@@ -665,7 +665,7 @@ pub trait ReplacementStrategy {
 /// no separate function that computes just "the one" `Realization`
 /// independently of that list. [`SketchAlgorithmStrategy`] is the sole
 /// consumer: it wraps every entry of this list into its own bound
-/// [`SummaryNode`] and returns all of them, ranked — a caller wanting a
+/// [`PostASAPNode`] and returns all of them, ranked — a caller wanting a
 /// single answer keeps the first one itself (see the module docs above).
 #[derive(Debug, Clone, PartialEq)]
 pub enum Realization {
@@ -1303,10 +1303,10 @@ impl<'a> SketchAlgorithmStrategy<'a> {
     /// treats a range of historical samples as the instant vector.
     pub fn current_series_topk_candidates(
         &self,
-        root: &Rc<QueryExpr>,
+        root: &Rc<PreASAPNode>,
         accuracy: &AccuracyTarget,
     ) -> Proposals {
-        let QueryExpr::Limit {
+        let PreASAPNode::Limit {
             n,
             offset: 0,
             child,
@@ -1314,7 +1314,7 @@ impl<'a> SketchAlgorithmStrategy<'a> {
         else {
             return Proposals::default();
         };
-        let QueryExpr::Sort {
+        let PreASAPNode::Sort {
             keys,
             partition_by,
             child,
@@ -1325,7 +1325,7 @@ impl<'a> SketchAlgorithmStrategy<'a> {
         let [key] = keys.as_slice() else {
             return Proposals::default();
         };
-        let QueryExpr::Column(value) = key.expr else {
+        let PreASAPNode::Column(value) = key.expr else {
             return Proposals::default();
         };
         let Ok(schema) = child.output_schema() else {
@@ -1343,7 +1343,7 @@ impl<'a> SketchAlgorithmStrategy<'a> {
         {
             return Proposals::default();
         }
-        let ranked = Rc::new(QueryExpr::Aggregate {
+        let ranked = Rc::new(PreASAPNode::Aggregate {
             reduction: Reduction::Reduce(partition_by.clone()),
             measures: vec![AggIntent::TopK {
                 k: *n,
@@ -1363,7 +1363,11 @@ impl<'a> SketchAlgorithmStrategy<'a> {
     /// The whole enumeration for one target, with `intent_override`
     /// substituting the target's own intent (only ever its `AccuracyTarget`
     /// differs — see [`realize_child_with`]).
-    fn propose_with(&self, root: &Rc<QueryExpr>, intent_override: Option<&AggIntent>) -> Proposals {
+    fn propose_with(
+        &self,
+        root: &Rc<PreASAPNode>,
+        intent_override: Option<&AggIntent>,
+    ) -> Proposals {
         let mut proposals = Proposals::default();
         // A selected logical rewrite otherwise remains KeepPreAsap during DAG
         // assembly. Also expose its concrete summary realization for selection.
@@ -1470,7 +1474,7 @@ impl<'a> SketchAlgorithmStrategy<'a> {
             let Some(child) = aggregate_child(root) else {
                 continue;
             };
-            let QueryExpr::Aggregate { reduction, .. } = root.as_ref() else {
+            let PreASAPNode::Aggregate { reduction, .. } = root.as_ref() else {
                 continue;
             };
             let Ok(input) = realize_physical_summary_input(intent, &family, reduction, child)
@@ -1567,7 +1571,7 @@ impl Proposals {
     /// File one construction attempt: a legal node becomes a candidate, an
     /// [`RealizationError::Accuracy`] becomes a [`RejectedCandidate`], and a
     /// schema-derivation failure is skipped exactly as it always was.
-    fn record(&mut self, rationale: String, built: Result<Rc<SummaryNode>, RealizationError>) {
+    fn record(&mut self, rationale: String, built: Result<Rc<PostASAPNode>, RealizationError>) {
         match built {
             Ok(node) => self.candidates.push(ReplacementSubDAG {
                 strategy: "SketchAlgorithmStrategy",
@@ -1593,9 +1597,9 @@ impl Proposals {
 }
 
 /// The `child` of a [`bindable_intent`]-shaped `Aggregate`.
-fn aggregate_child(node: &QueryExpr) -> Option<&Rc<QueryExpr>> {
+fn aggregate_child(node: &PreASAPNode) -> Option<&Rc<PreASAPNode>> {
     match node {
-        QueryExpr::Aggregate { child, .. } => Some(child),
+        PreASAPNode::Aggregate { child, .. } => Some(child),
         _ => None,
     }
 }
@@ -1619,7 +1623,7 @@ impl ReplacementStrategy for SketchAlgorithmStrategy<'_> {
     /// for the identity-carrying root. Placement variants (for example,
     /// fixed-window or query-time Rate aggregation) are not listed here: the
     /// lifecycle assigns timing and the physical compiler reads it.
-    fn propose_for_root(&self, root: &Rc<QueryExpr>, target: &AccuracyTarget) -> Proposals {
+    fn propose_for_root(&self, root: &Rc<PreASAPNode>, target: &AccuracyTarget) -> Proposals {
         let Ok(typed) = asap_types::pre_asap::schema::with_promql_series_identity(root) else {
             return Proposals::default();
         };
@@ -1711,7 +1715,7 @@ pub(crate) fn describe_intent(intent: &AggIntent) -> String {
 
 // ── realize_child / keep_pre_asap: rank-and-take-first, and its fallback ──
 
-/// Rank-and-take-first selector for a single [`QueryExpr`] node: enumerate
+/// Rank-and-take-first selector for a single [`PreASAPNode`] node: enumerate
 /// every candidate via [`SketchAlgorithmStrategy::replacements`], keep the
 /// `cost_model`-preferred (first) one, and fall back to [`keep_pre_asap`]
 /// when there's no candidate at all — **not** a general single-answer API
@@ -1725,16 +1729,16 @@ pub(crate) fn describe_intent(intent: &AggIntent) -> String {
 /// ([`construct_summary_agg`], so a nested aggregate gets its own
 /// independent enumeration instead of inheriting the parent's forced
 /// candidate), from this module's own [`realize_one`] (the representative
-/// bound `SummaryNode` [`cse_preference`] needs for a
+/// bound `PostASAPNode` [`cse_preference`] needs for a
 /// [`CostModel::cse_share_decision`] comparison), and from
 /// [`crate::cost_model::DefaultCostModel::estimate_cost`] (the same
 /// representative-node need, for a [`Replacement::Rewrite`] candidate's own
 /// cost estimate). Every other caller goes through
 /// [`SketchAlgorithmStrategy::replacements`] directly and decides for itself.
 pub(crate) fn realize_child(
-    root: &Rc<QueryExpr>,
+    root: &Rc<PreASAPNode>,
     cost_model: &dyn CostModel,
-) -> Result<Rc<SummaryNode>, RealizationError> {
+) -> Result<Rc<PostASAPNode>, RealizationError> {
     realize_child_with(
         root,
         CandidatePlanningInputs::with_default_accuracy(cost_model),
@@ -1751,10 +1755,10 @@ pub(crate) fn realize_child(
 /// budget. A child whose declared target is `Exact` keeps it: an allocation
 /// never approximates something the caller declared exact.
 fn exact_topk_over_temporal_values(
-    root: &Rc<QueryExpr>,
+    root: &Rc<PreASAPNode>,
     planning_inputs: CandidatePlanningInputs<'_>,
-) -> Result<Option<Rc<SummaryNode>>, RealizationError> {
-    let QueryExpr::Aggregate {
+) -> Result<Option<Rc<PostASAPNode>>, RealizationError> {
+    let PreASAPNode::Aggregate {
         reduction,
         measures,
         output_names: _,
@@ -1767,7 +1771,7 @@ fn exact_topk_over_temporal_values(
     let [AggIntent::TopK { k, .. }] = measures.as_slice() else {
         return Ok(None);
     };
-    let QueryExpr::Aggregate {
+    let PreASAPNode::Aggregate {
         reduction: Reduction::PerEntity,
         child: input,
         ..
@@ -1775,7 +1779,7 @@ fn exact_topk_over_temporal_values(
     else {
         return Ok(None);
     };
-    if !matches!(input.as_ref(), QueryExpr::TimeRange { .. }) {
+    if !matches!(input.as_ref(), PreASAPNode::TimeRange { .. }) {
         return Ok(None);
     }
     let values = realize_child_with(child, planning_inputs, Some(&AccuracyTarget::Exact))?;
@@ -1795,14 +1799,14 @@ fn exact_topk_over_temporal_values(
         ))?
         .clone();
     let score = ranking_score_index(child, &values.schema)?;
-    let sorted = Rc::new(SummaryNode {
+    let sorted = Rc::new(PostASAPNode {
         guarantee: values.guarantee.clone(),
         schema: values.schema.clone(),
         expr: SummaryExpr::ValueOperation {
             child: values,
             operation: ValueOperation::Sort {
                 keys: vec![asap_types::pre_asap::SortKey {
-                    expr: QueryExpr::Column(score),
+                    expr: PreASAPNode::Column(score),
                     ascending: false,
                     nulls_first: false,
                 }],
@@ -1811,7 +1815,7 @@ fn exact_topk_over_temporal_values(
             timing: ExecutionTiming::QueryTime,
         },
     });
-    let node = Rc::new(SummaryNode {
+    let node = Rc::new(PostASAPNode {
         guarantee: sorted.guarantee.clone(),
         schema: sorted.schema.clone(),
         expr: SummaryExpr::ValueOperation {
@@ -1829,10 +1833,10 @@ fn exact_topk_over_temporal_values(
 }
 
 fn realize_temporal_average(
-    root: &Rc<QueryExpr>,
+    root: &Rc<PreASAPNode>,
     planning_inputs: CandidatePlanningInputs<'_>,
     target: Option<&AccuracyTarget>,
-) -> Result<Option<Rc<SummaryNode>>, RealizationError> {
+) -> Result<Option<Rc<PostASAPNode>>, RealizationError> {
     let Some(components) = crate::rewrite::temporal_average_components(root) else {
         return Ok(None);
     };
@@ -1846,10 +1850,10 @@ fn realize_temporal_average(
 }
 
 pub(crate) fn realize_child_with(
-    root: &Rc<QueryExpr>,
+    root: &Rc<PreASAPNode>,
     planning_inputs: CandidatePlanningInputs<'_>,
     end_to_end_target: Option<&AccuracyTarget>,
-) -> Result<Rc<SummaryNode>, RealizationError> {
+) -> Result<Rc<PostASAPNode>, RealizationError> {
     if let Some(node) = realize_temporal_average(root, planning_inputs, end_to_end_target)? {
         return Ok(node);
     }
@@ -1894,11 +1898,11 @@ pub(crate) fn realize_child_with(
 /// accelerated, return `None` so the caller keeps the whole query exact;
 /// mixed raw/summary snapshots are never constructed.
 fn realize_binary(
-    root: &Rc<QueryExpr>,
+    root: &Rc<PreASAPNode>,
     planning_inputs: CandidatePlanningInputs<'_>,
     end_to_end_target: Option<&AccuracyTarget>,
-) -> Result<Option<Rc<SummaryNode>>, RealizationError> {
-    let QueryExpr::BinaryOp {
+) -> Result<Option<Rc<PostASAPNode>>, RealizationError> {
+    let PreASAPNode::BinaryOp {
         op,
         lhs,
         rhs,
@@ -2083,7 +2087,7 @@ fn realize_binary(
         return Ok(None);
     }
 
-    Ok(Some(Rc::new(SummaryNode {
+    Ok(Some(Rc::new(PostASAPNode {
         expr: SummaryExpr::BinaryOp {
             timing: ExecutionTiming::QueryTime,
             lhs: lhs_node,
@@ -2107,17 +2111,17 @@ fn realize_binary(
 /// query-time value consumer. Approximate summaries must already carry a
 /// `SummaryEstimate`, so they deliberately do not pass this predicate.
 pub fn finalize_query_candidate(
-    node: Rc<SummaryNode>,
-    logical_output: &QueryExpr,
-) -> Result<Rc<SummaryNode>, RealizationError> {
+    node: Rc<PostASAPNode>,
+    logical_output: &PreASAPNode,
+) -> Result<Rc<PostASAPNode>, RealizationError> {
     finalize_exact_accumulator_at(node, logical_output, ExecutionTiming::QueryTime)
 }
 
 fn finalize_exact_accumulator_at(
-    node: Rc<SummaryNode>,
-    logical_output: &QueryExpr,
+    node: Rc<PostASAPNode>,
+    logical_output: &PreASAPNode,
     timing: ExecutionTiming,
-) -> Result<Rc<SummaryNode>, RealizationError> {
+) -> Result<Rc<PostASAPNode>, RealizationError> {
     let is_exact_state = matches!(
         node.expr,
         SummaryExpr::SummaryAgg {
@@ -2134,7 +2138,7 @@ fn finalize_exact_accumulator_at(
     // query-time operators that follow this node.
     let schema = lift(&logical_output.output_schema()?);
     let guarantee = node.guarantee.clone();
-    Ok(Rc::new(SummaryNode {
+    Ok(Rc::new(PostASAPNode {
         expr: SummaryExpr::ValueOperation {
             child: node,
             operation: ValueOperation::FinalizeExactAccumulator,
@@ -2145,10 +2149,10 @@ fn finalize_exact_accumulator_at(
     }))
 }
 
-fn is_supported_exact_binary(root: &QueryExpr) -> bool {
+fn is_supported_exact_binary(root: &PreASAPNode) -> bool {
     matches!(
         root,
-        QueryExpr::BinaryOp {
+        PreASAPNode::BinaryOp {
             op: BinaryOpKind::Arithmetic(_),
             vector_match: None,
             ..
@@ -2156,17 +2160,17 @@ fn is_supported_exact_binary(root: &QueryExpr) -> bool {
     )
 }
 
-fn is_promql_scalar(expr: &QueryExpr) -> bool {
+fn is_promql_scalar(expr: &PreASAPNode) -> bool {
     matches!(
         expr,
-        QueryExpr::PromqlScalarBridge(_) | QueryExpr::Literal(_)
+        PreASAPNode::PromqlScalarBridge(_) | PreASAPNode::Literal(_)
     )
 }
 
 /// Quantile operands inherit one workload target. A temporal mean is exact
 /// on its checked finite domain and needs no approximation budget.
-fn shared_quantile_target(lhs: &QueryExpr, rhs: &QueryExpr) -> Option<AccuracyTarget> {
-    let quantile_target = |expr: &QueryExpr| match bindable_intent(expr) {
+fn shared_quantile_target(lhs: &PreASAPNode, rhs: &PreASAPNode) -> Option<AccuracyTarget> {
+    let quantile_target = |expr: &PreASAPNode| match bindable_intent(expr) {
         Some(AggIntent::Quantile { accuracy, q, .. })
             if q.is_finite() && (0.0..=1.0).contains(q) =>
         {
@@ -2204,7 +2208,7 @@ fn ddsketch_ratio_operand_target(target: &AccuracyTarget) -> Option<AccuracyTarg
     }
 }
 
-fn ddsketch_quantile_alpha(node: &SummaryNode) -> Option<f64> {
+fn ddsketch_quantile_alpha(node: &PostASAPNode) -> Option<f64> {
     let SummaryExpr::SummaryEstimate {
         summary_input,
         query: PostAsapSketchQuery::Quantile { .. },
@@ -2225,7 +2229,7 @@ fn ddsketch_quantile_alpha(node: &SummaryNode) -> Option<f64> {
     }
 }
 
-fn has_missing_accuracy_evidence(node: &SummaryNode) -> bool {
+fn has_missing_accuracy_evidence(node: &PostASAPNode) -> bool {
     node.guarantee
         .as_ref()
         .is_none_or(ResultGuarantee::has_unknown)
@@ -2234,10 +2238,10 @@ fn has_missing_accuracy_evidence(node: &SummaryNode) -> bool {
 /// A direct ratio has an operator-specific DDSketch proof, so it must select
 /// DDSketch rather than the cost model's generally preferred KLL candidate.
 fn realize_ddsketch_quantile_operand(
-    operand: &Rc<QueryExpr>,
+    operand: &Rc<PreASAPNode>,
     planning_inputs: CandidatePlanningInputs<'_>,
     target: &AccuracyTarget,
-) -> Result<Rc<SummaryNode>, RealizationError> {
+) -> Result<Rc<PostASAPNode>, RealizationError> {
     let intent = bindable_intent(operand).and_then(|intent| match intent {
         AggIntent::Quantile { .. } => Some(override_accuracy(intent, target)),
         _ => None,
@@ -2256,12 +2260,12 @@ fn realize_ddsketch_quantile_operand(
 }
 
 fn realize_binary_operand(
-    operand: &Rc<QueryExpr>,
+    operand: &Rc<PreASAPNode>,
     planning_inputs: CandidatePlanningInputs<'_>,
     end_to_end_target: Option<&AccuracyTarget>,
-) -> Result<Rc<SummaryNode>, RealizationError> {
+) -> Result<Rc<PostASAPNode>, RealizationError> {
     if is_promql_scalar(operand) {
-        return Ok(Rc::new(SummaryNode {
+        return Ok(Rc::new(PostASAPNode {
             expr: SummaryExpr::KeepPreAsap(Rc::clone(operand)),
             schema: SummarySchema {
                 fields: Vec::new(),
@@ -2293,13 +2297,13 @@ fn override_accuracy(intent: &AggIntent, target: &AccuracyTarget) -> AggIntent {
 /// candidate for a target, or a deployment wants to force a node its own
 /// runtime can't actually implement — through the same fallback this
 /// crate's own dispatch uses, without duplicating the schema-lift logic.
-pub fn keep_pre_asap(expr: &Rc<QueryExpr>) -> Result<Rc<SummaryNode>, RealizationError> {
+pub fn keep_pre_asap(expr: &Rc<PreASAPNode>) -> Result<Rc<PostASAPNode>, RealizationError> {
     keep_pre_asap_rc(Rc::clone(expr))
 }
 
-fn keep_pre_asap_rc(expr: Rc<QueryExpr>) -> Result<Rc<SummaryNode>, RealizationError> {
+fn keep_pre_asap_rc(expr: Rc<PreASAPNode>) -> Result<Rc<PostASAPNode>, RealizationError> {
     let schema = expr.output_schema()?;
-    Ok(Rc::new(SummaryNode {
+    Ok(Rc::new(PostASAPNode {
         expr: SummaryExpr::KeepPreAsap(expr),
         schema: lift(&schema),
         // A kept pre-ASAP subtree is executed exactly by the runtime
@@ -2308,7 +2312,7 @@ fn keep_pre_asap_rc(expr: Rc<QueryExpr>) -> Result<Rc<SummaryNode>, RealizationE
     }))
 }
 
-// ── Construction: turn one already-decided Realization into a SummaryNode ─
+// ── Construction: turn one already-decided Realization into a PostASAPNode ─
 
 /// The bindable shape [`SketchAlgorithmStrategy`] targets: a single intent, no
 /// `HAVING`. A multi-intent node (SQL `SELECT SUM(a), AVG(b)`), or one with a
@@ -2317,8 +2321,8 @@ fn keep_pre_asap_rc(expr: Rc<QueryExpr>) -> Result<Rc<SummaryNode>, RealizationE
 /// [`SummaryExpr::KeepPreAsap`] subtree. Composable query-time value
 /// operators (`Project`, `Filter`, `Sort`, and `Limit`) are retained during final
 /// DAG assembly so their independently planned children remain visible.
-pub fn bindable_intent(node: &QueryExpr) -> Option<&AggIntent> {
-    if let QueryExpr::Aggregate {
+pub fn bindable_intent(node: &PreASAPNode) -> Option<&AggIntent> {
+    if let PreASAPNode::Aggregate {
         measures, having, ..
     } = node
     {
@@ -2352,13 +2356,13 @@ pub fn bindable_intent(node: &QueryExpr) -> Option<&AggIntent> {
 /// fail-closed answer for a composition with no sound rule or one that
 /// misses `intent`'s target.
 pub(crate) fn construct_summary_with(
-    expr: &QueryExpr,
+    expr: &PreASAPNode,
     intent: &AggIntent,
     realization: Realization,
     planning_inputs: CandidatePlanningInputs<'_>,
     child_target: Option<&AccuracyTarget>,
     allocation: Option<GuaranteeSource>,
-) -> Result<Rc<SummaryNode>, RealizationError> {
+) -> Result<Rc<PostASAPNode>, RealizationError> {
     let local_target = match allocation.as_ref() {
         Some(GuaranteeSource::BudgetAllocation { local_target, .. }) => Some(local_target),
         _ => accuracy_target(intent),
@@ -2375,7 +2379,7 @@ pub(crate) fn construct_summary_with(
         },
         other => other,
     };
-    if let QueryExpr::Aggregate {
+    if let PreASAPNode::Aggregate {
         reduction, child, ..
     } = expr
     {
@@ -2406,14 +2410,14 @@ pub(crate) fn construct_summary_with(
 }
 
 fn finish_weighted_topk(
-    candidate: Rc<SummaryNode>,
-    logical: &QueryExpr,
+    candidate: Rc<PostASAPNode>,
+    logical: &PreASAPNode,
     intent: &AggIntent,
-) -> Result<Rc<SummaryNode>, RealizationError> {
+) -> Result<Rc<PostASAPNode>, RealizationError> {
     let AggIntent::TopK { k, .. } = intent else {
         unreachable!()
     };
-    let QueryExpr::Aggregate {
+    let PreASAPNode::Aggregate {
         reduction: Reduction::Reduce(groups),
         child,
         ..
@@ -2452,12 +2456,12 @@ fn finish_weighted_topk(
             };
             Ok(asap_types::pre_asap::query_expr::ProjectItem {
                 alias: Some(field.name.clone()),
-                expr: QueryExpr::Column(source),
+                expr: PreASAPNode::Column(source),
             })
         })
         .collect::<Result<Vec<_>, _>>()?;
     let guarantee = candidate.guarantee.clone();
-    let projected = Rc::new(SummaryNode {
+    let projected = Rc::new(PostASAPNode {
         expr: SummaryExpr::ValueOperation {
             child: candidate,
             operation: ValueOperation::Project {
@@ -2469,12 +2473,12 @@ fn finish_weighted_topk(
         schema: schema.clone(),
         guarantee: guarantee.clone(),
     });
-    let sorted = Rc::new(SummaryNode {
+    let sorted = Rc::new(PostASAPNode {
         expr: SummaryExpr::ValueOperation {
             child: projected,
             operation: ValueOperation::Sort {
                 keys: vec![asap_types::pre_asap::SortKey {
-                    expr: QueryExpr::Column(score),
+                    expr: PreASAPNode::Column(score),
                     ascending: false,
                     nulls_first: false,
                 }],
@@ -2485,7 +2489,7 @@ fn finish_weighted_topk(
         schema: schema.clone(),
         guarantee: guarantee.clone(),
     });
-    let result = Rc::new(SummaryNode {
+    let result = Rc::new(PostASAPNode {
         expr: SummaryExpr::ValueOperation {
             child: sorted,
             operation: ValueOperation::Limit {
@@ -2502,24 +2506,24 @@ fn finish_weighted_topk(
     Ok(result)
 }
 
-fn is_current_series_source(child: &QueryExpr) -> bool {
+fn is_current_series_source(child: &PreASAPNode) -> bool {
     let source = match child {
-        QueryExpr::TimeRange { child, .. } => child.as_ref(),
+        PreASAPNode::TimeRange { child, .. } => child.as_ref(),
         source => source,
     };
-    matches!(source, QueryExpr::Scan {
+    matches!(source, PreASAPNode::Scan {
         source: asap_types::pre_asap::Source::TimeSeries { .. }, schema, ..
     } if schema.has_promql_series_identity())
 }
 
-fn is_snapshot_weighted_topk(intent: &AggIntent, child: &QueryExpr) -> bool {
+fn is_snapshot_weighted_topk(intent: &AggIntent, child: &PreASAPNode) -> bool {
     matches!(intent, AggIntent::TopK { .. })
         && (is_current_series_source(child)
             || matches!(child,
-            QueryExpr::Aggregate { measures, child, .. }
+            PreASAPNode::Aggregate { measures, child, .. }
                 if matches!(measures.as_slice(), [AggIntent::Rate | AggIntent::Increase])
                     || (matches!(measures.as_slice(), [AggIntent::Sum { .. }])
-                        && matches!(child.as_ref(), QueryExpr::Aggregate { measures, .. }
+                        && matches!(child.as_ref(), PreASAPNode::Aggregate { measures, .. }
                             if matches!(measures.as_slice(), [AggIntent::Rate | AggIntent::Increase])))))
 }
 
@@ -2553,7 +2557,7 @@ fn summary_family(realization: Realization) -> Option<(SummaryFamilyType, bool)>
 /// input value. Composite realizations can instead consume a larger
 /// logical sub-DAG and bind a different key or value.
 struct PhysicalSummaryInput {
-    child: Rc<QueryExpr>,
+    child: Rc<PreASAPNode>,
     input: SummaryUpdate,
 }
 
@@ -2567,7 +2571,7 @@ type PhysicalSummaryInputRule = fn(
     &AggIntent,
     &SummaryFamilyType,
     &Reduction,
-    &Rc<QueryExpr>,
+    &Rc<PreASAPNode>,
 ) -> PhysicalSummaryInputRuleResult;
 
 /// Ordered physical-realization rules for realizations that consume more
@@ -2585,7 +2589,7 @@ fn realize_value_frequency_summary_input(
     intent: &AggIntent,
     family: &SummaryFamilyType,
     _reduction: &Reduction,
-    child: &Rc<QueryExpr>,
+    child: &Rc<PreASAPNode>,
 ) -> PhysicalSummaryInputRuleResult {
     // Frequency counts hash sample values as items but add one per observation.
     // Using the sample as a weight would turn counts into sums and admit signed CMS updates.
@@ -2625,7 +2629,7 @@ fn realize_physical_summary_input(
     intent: &AggIntent,
     family: &SummaryFamilyType,
     reduction: &Reduction,
-    child: &Rc<QueryExpr>,
+    child: &Rc<PreASAPNode>,
 ) -> Result<PhysicalSummaryInput, RealizationError> {
     for rule in PHYSICAL_SUMMARY_INPUT_RULES {
         match rule(intent, family, reduction, child) {
@@ -2659,7 +2663,7 @@ fn realize_physical_summary_input(
 // on the update path. This is the initial layout for values feeding a summary;
 // lifecycle timing is authoritative. Read-time consumers keep their original
 // shared nodes.
-fn maintenance_exact_values(node: Rc<SummaryNode>) -> Option<Rc<SummaryNode>> {
+fn maintenance_exact_values(node: Rc<PostASAPNode>) -> Option<Rc<PostASAPNode>> {
     let expr = match &node.expr {
         // These guards can fall back at read time, but cannot recover a parent
         // sketch after an invalid value has entered its maintained state.
@@ -2707,7 +2711,7 @@ fn maintenance_exact_values(node: Rc<SummaryNode>) -> Option<Rc<SummaryNode>> {
         }
         _ => return Some(node),
     };
-    Some(Rc::new(SummaryNode {
+    Some(Rc::new(PostASAPNode {
         expr,
         schema: node.schema.clone(),
         guarantee: node.guarantee.clone(),
@@ -2716,7 +2720,7 @@ fn maintenance_exact_values(node: Rc<SummaryNode>) -> Option<Rc<SummaryNode>> {
 
 #[allow(clippy::too_many_arguments)]
 fn construct_summary_agg(
-    node: &QueryExpr,
+    node: &PreASAPNode,
     reduction: &Reduction,
     intent: &AggIntent,
     input: PhysicalSummaryInput,
@@ -2725,7 +2729,7 @@ fn construct_summary_agg(
     planning_inputs: CandidatePlanningInputs<'_>,
     child_target: Option<&AccuracyTarget>,
     allocation: Option<GuaranteeSource>,
-) -> Result<Rc<SummaryNode>, RealizationError> {
+) -> Result<Rc<PostASAPNode>, RealizationError> {
     // The single canonical pre-ASAP derivation (per-series vs cross-series,
     // name overrides) already computes the row shape; binding only retypes
     // the summary state column.
@@ -2735,7 +2739,7 @@ fn construct_summary_agg(
             SummaryFamilyType::Sketch(kind, _)
                 if matches!(kind.algorithm(), SketchAlgorithm::CmsWithHeap | SketchAlgorithm::CountSketchWithHeap)
         );
-    let snapshot_weighted = matches!(node, QueryExpr::Aggregate { child, .. }
+    let snapshot_weighted = matches!(node, PreASAPNode::Aggregate { child, .. }
         if is_snapshot_weighted_topk(intent, child));
     let mut family = family;
     let score_population = if snapshot_weighted {
@@ -2763,7 +2767,7 @@ fn construct_summary_agg(
         None
     };
     let physical_reduction = if snapshot_weighted {
-        let QueryExpr::Aggregate { child, .. } = node else {
+        let PreASAPNode::Aggregate { child, .. } = node else {
             unreachable!()
         };
         let source = input.child.output_schema()?;
@@ -2806,13 +2810,13 @@ fn construct_summary_agg(
     };
     let out_schema = node.output_schema()?;
     let measures = match node {
-        QueryExpr::Aggregate { measures, .. } => measures.len(),
+        PreASAPNode::Aggregate { measures, .. } => measures.len(),
         _ => 1,
     };
     let state_idx = summary_col_index(&out_schema, reduction, measures);
 
     let readout_schema = if keyed_heap
-        && matches!(node, QueryExpr::Aggregate { child, .. } if is_snapshot_weighted_topk(intent, child))
+        && matches!(node, PreASAPNode::Aggregate { child, .. } if is_snapshot_weighted_topk(intent, child))
     {
         keyed_heap_readout_schema(&input, node)?
     } else {
@@ -3002,7 +3006,7 @@ fn construct_summary_agg(
     // a genuine empty-`by` reduction apart from a per-entity shape with no
     // grouping concept at all (issue #163). `construct_summary_agg` is the
     // single place that decides this; nothing downstream re-derives it.
-    let agg = Rc::new(SummaryNode {
+    let agg = Rc::new(PostASAPNode {
         expr: SummaryExpr::SummaryAgg {
             child: bound_child,
             family,
@@ -3019,7 +3023,7 @@ fn construct_summary_agg(
         // The readout: downstream of the estimate the schema is the plain
         // pre-ASAP row shape again (the summary-state type does not
         // propagate).
-        Some(query) => Ok(Rc::new(SummaryNode {
+        Some(query) => Ok(Rc::new(PostASAPNode {
             expr: SummaryExpr::SummaryEstimate {
                 summary_input: agg,
                 query,
@@ -3035,11 +3039,11 @@ fn construct_summary_agg(
 // and an estimated score. They never inherit the exact-value producer's schema.
 fn keyed_heap_readout_schema(
     input: &PhysicalSummaryInput,
-    node: &QueryExpr,
+    node: &PreASAPNode,
 ) -> Result<SummarySchema, RealizationError> {
     let source = input.child.output_schema()?;
     let mut refs = Vec::new();
-    let QueryExpr::Aggregate {
+    let PreASAPNode::Aggregate {
         reduction, child, ..
     } = node
     else {
@@ -3159,7 +3163,7 @@ fn keyed_heap_readout_schema(
 }
 
 fn ranking_score_index(
-    logical: &QueryExpr,
+    logical: &PreASAPNode,
     values: &SummarySchema,
 ) -> Result<usize, RealizationError> {
     if is_current_series_source(logical) {
@@ -3175,7 +3179,7 @@ fn ranking_score_index(
                 "snapshot ranking requires the sample value column",
             ));
     }
-    let QueryExpr::Aggregate {
+    let PreASAPNode::Aggregate {
         reduction,
         measures,
         ..
@@ -3228,11 +3232,11 @@ fn realize_counter_value_summary_input(
     intent: &AggIntent,
     family: &SummaryFamilyType,
     output_reduction: &Reduction,
-    child: &Rc<QueryExpr>,
+    child: &Rc<PreASAPNode>,
 ) -> PhysicalSummaryInputRuleResult {
     if !matches!(intent, AggIntent::TopK { .. })
         || !matches!(family, SummaryFamilyType::Sketch(kind, _) if matches!(kind.algorithm(), SketchAlgorithm::CmsWithHeap | SketchAlgorithm::CountSketchWithHeap))
-        || !matches!(child.as_ref(), QueryExpr::Aggregate { reduction: Reduction::PerEntity, measures, .. } if matches!(measures.as_slice(), [AggIntent::Rate | AggIntent::Increase]))
+        || !matches!(child.as_ref(), PreASAPNode::Aggregate { reduction: Reduction::PerEntity, measures, .. } if matches!(measures.as_slice(), [AggIntent::Rate | AggIntent::Increase]))
     {
         return PhysicalSummaryInputRuleResult::NotApplicable;
     }
@@ -3286,7 +3290,7 @@ fn realize_current_series_summary_input(
     intent: &AggIntent,
     family: &SummaryFamilyType,
     output_reduction: &Reduction,
-    child: &Rc<QueryExpr>,
+    child: &Rc<PreASAPNode>,
 ) -> PhysicalSummaryInputRuleResult {
     if !matches!(intent, AggIntent::TopK { .. }) || !is_current_series_source(child) {
         return PhysicalSummaryInputRuleResult::NotApplicable;
@@ -3347,7 +3351,7 @@ fn realize_keyed_additive_summary_input(
     intent: &AggIntent,
     family: &SummaryFamilyType,
     output_reduction: &Reduction,
-    child: &Rc<QueryExpr>,
+    child: &Rc<PreASAPNode>,
 ) -> PhysicalSummaryInputRuleResult {
     if !matches!(intent, AggIntent::TopK { .. }) {
         return PhysicalSummaryInputRuleResult::NotApplicable;
@@ -3362,7 +3366,7 @@ fn realize_keyed_additive_summary_input(
     ) {
         return PhysicalSummaryInputRuleResult::NotApplicable;
     }
-    let QueryExpr::Aggregate {
+    let PreASAPNode::Aggregate {
         reduction,
         measures,
         having: None,
@@ -3373,7 +3377,7 @@ fn realize_keyed_additive_summary_input(
         return PhysicalSummaryInputRuleResult::NotApplicable;
     };
     let counter_input = matches!(measures.as_slice(), [AggIntent::Sum { .. }])
-        && matches!(raw_child.as_ref(), QueryExpr::Aggregate { measures, .. }
+        && matches!(raw_child.as_ref(), PreASAPNode::Aggregate { measures, .. }
             if matches!(measures.as_slice(), [AggIntent::Rate | AggIntent::Increase]));
     let weight = match measures.as_slice() {
         [AggIntent::Count { .. }] => SummaryInputExpr::Constant(1.0),
@@ -3465,7 +3469,7 @@ fn realize_keyed_additive_summary_input(
     })
 }
 
-fn schema_column_ref(child: &QueryExpr, index: usize) -> Option<ColumnRef> {
+fn schema_column_ref(child: &PreASAPNode, index: usize) -> Option<ColumnRef> {
     let schema = child.output_schema().ok()?;
     let column = schema.columns.get(index)?;
     Some(match &column.table {
@@ -3489,7 +3493,7 @@ fn schema_column_ref(child: &QueryExpr, index: usize) -> Option<ColumnRef> {
 fn compose_guarantee(
     family: &SummaryFamilyType,
     query: Option<&PostAsapSketchQuery>,
-    child: &SummaryNode,
+    child: &PostASAPNode,
     intent: &AggIntent,
     accuracy: &dyn AccuracyModel,
     evidence: &dyn AccuracyEvidenceProvider,
@@ -3770,7 +3774,7 @@ pub const MAX_SEARCH_ITERATIONS: usize = 1_000;
 // ── TargetSubDAGCandidates ──────────────────────────────────────────────
 
 /// Candidates for one distinct [`TargetSubDAG`] (its
-/// own `target` `Rc<QueryExpr>`, keyed by pointer identity in
+/// own `target` `Rc<PreASAPNode>`, keyed by pointer identity in
 /// [`CandidatePostASAPDAGs`]'s internal map — never re-derived by value) plus every
 /// [`ReplacementSubDAG`] alternative any registered [`ReplacementStrategy`]
 /// proposed for it.
@@ -3783,7 +3787,7 @@ pub const MAX_SEARCH_ITERATIONS: usize = 1_000;
 #[derive(Debug, Clone)]
 pub struct TargetSubDAGCandidates {
     /// The target sub-DAG this group is for.
-    pub target: Rc<QueryExpr>,
+    pub target: Rc<PreASAPNode>,
     /// How many operator-child positions across the whole workload
     /// reference this exact `Rc` — see [`discover_targets`].
     pub consumer_count: usize,
@@ -3800,7 +3804,7 @@ pub struct TargetSubDAGCandidates {
 }
 
 impl TargetSubDAGCandidates {
-    fn new(target: Rc<QueryExpr>, consumer_count: usize) -> Self {
+    fn new(target: Rc<PreASAPNode>, consumer_count: usize) -> Self {
         Self {
             target,
             consumer_count,
@@ -3844,7 +3848,7 @@ impl TargetSubDAGCandidates {
 /// Are `existing` and `candidate` the same [`Replacement::Rewrite`]
 /// candidate for a group targeting `target`?
 ///
-/// Structural (`QueryExpr`) value equality alone is *not* enough here: this
+/// Structural (`PreASAPNode`) value equality alone is *not* enough here: this
 /// module's one shipped multi-candidate `Replacement::Rewrite` source,
 /// [`SharedSubtreeStrategy`], deliberately returns **two** candidates that
 /// are value-equal to each other (`build once and share` vs. `build
@@ -3863,7 +3867,7 @@ impl TargetSubDAGCandidates {
 /// So: two candidates whose "is this the target's own `Rc`?" bit disagrees
 /// are never duplicates of each other, full stop. Only when that bit
 /// *agrees* does this fall through to the real dedup discipline —
-/// [`structural_hash`] as a candidate-narrowing filter, `QueryExpr`'s
+/// [`structural_hash`] as a candidate-narrowing filter, `PreASAPNode`'s
 /// derived `PartialEq` as the actual decision — protecting against the
 /// (currently hypothetical, since neither shipped strategy causes it)
 /// case of the exact same alternative being proposed twice. A fresh
@@ -3872,9 +3876,9 @@ impl TargetSubDAGCandidates {
 /// wider traversal to amortize the cache across the way `InternTable`'s own
 /// use of `structural_hash` does.
 fn is_duplicate_rewrite(
-    existing: &Rc<QueryExpr>,
-    candidate: &Rc<QueryExpr>,
-    target: &Rc<QueryExpr>,
+    existing: &Rc<PreASAPNode>,
+    candidate: &Rc<PreASAPNode>,
+    target: &Rc<PreASAPNode>,
 ) -> bool {
     let existing_is_target = Rc::ptr_eq(existing, target);
     let candidate_is_target = Rc::ptr_eq(candidate, target);
@@ -3889,9 +3893,9 @@ fn is_duplicate_rewrite(
 /// Are `existing` and `candidate` the same [`Replacement::Summary`]
 /// candidate?
 ///
-/// [`SummaryNode`] derives neither `PartialEq` nor `Hash` (it embeds
+/// [`PostASAPNode`] derives neither `PartialEq` nor `Hash` (it embeds
 /// `SketchParams`/`f64`-bearing accuracy targets deep inside `SummaryExpr`,
-/// the same reason `QueryExpr` can't derive `Hash` either — see
+/// the same reason `PreASAPNode` can't derive `Hash` either — see
 /// [`structural_hash`]'s own doc). Per this module's inherited "hash is a
 /// filter, `PartialEq` is the decision, no exceptions" rule, there is no
 /// real equality check to back a dedup *decision* here — and skipping the
@@ -3904,7 +3908,7 @@ fn is_duplicate_rewrite(
 /// shipped today already return a structurally distinct candidate for every
 /// entry of one `replacements()` call, so this is future-proofing against a
 /// hypothetical repeat call, not a gap either strategy's own tests exercise.
-fn is_duplicate_summary(_existing: &Rc<SummaryNode>, _candidate: &Rc<SummaryNode>) -> bool {
+fn is_duplicate_summary(_existing: &Rc<PostASAPNode>, _candidate: &Rc<PostASAPNode>) -> bool {
     false
 }
 
@@ -3913,34 +3917,34 @@ fn is_duplicate_summary(_existing: &Rc<SummaryNode>, _candidate: &Rc<SummaryNode
 /// The deduped candidate space [`search_workload`]/[`search_workload_with`]
 /// discover: one [`TargetSubDAGCandidates`] per distinct `TargetSubDAG` in the
 /// (already-CSE'd) workload, plus the workload's own post-CSE roots so a
-/// caller can still map a `Root`'s `Id` back to the `Rc<QueryExpr>` whose
+/// caller can still map a `Root`'s `Id` back to the `Rc<PreASAPNode>` whose
 /// group holds its alternatives.
 pub struct CandidatePostASAPDAGs<Id> {
     /// The workload's roots, after the one `share_common_subtrees` pass
     /// [`search_workload_with`] runs up front — the same post-CSE roots
     /// every `TargetSubDAG` in `groups` was discovered from.
-    pub roots: Vec<(Id, Rc<QueryExpr>)>,
-    groups: HashMap<*const QueryExpr, TargetSubDAGCandidates>,
+    pub roots: asap_types::pre_asap::CandidatePreASAPDAGs<Id>,
+    groups: HashMap<*const PreASAPNode, TargetSubDAGCandidates>,
     /// Discovery order — stable iteration for [`CandidatePostASAPDAGs::target_subdag_candidates`]/
     /// [`CandidatePostASAPDAGs::cost_sorted`], since `HashMap` iteration order isn't.
-    order: Vec<*const QueryExpr>,
+    order: Vec<*const PreASAPNode>,
     /// Composition proofs are computed with the search model, then retained
     /// through costing and DAG assembly so no later default can replace it.
     composition_plans: Vec<PreparedComposition>,
 }
 
 struct PreparedComposition {
-    target: *const QueryExpr,
+    target: *const PreASAPNode,
     operation: ExactComposition,
-    child: Rc<SummaryNode>,
-    plan: Rc<SummaryNode>,
+    child: Rc<PostASAPNode>,
+    plan: Rc<PostASAPNode>,
 }
 
 impl<Id> CandidatePostASAPDAGs<Id> {
     fn prepare_compositions(
         &mut self,
         accuracy: &dyn AccuracyModel,
-        targets: &HashMap<*const QueryExpr, Vec<AccuracyTarget>>,
+        targets: &HashMap<*const PreASAPNode, Vec<AccuracyTarget>>,
     ) {
         self.composition_plans.clear();
         for group in self.groups.values() {
@@ -4000,11 +4004,11 @@ impl<Id> CandidatePostASAPDAGs<Id> {
 /// never a silently truncated inventory presented as exhaustive.
 #[derive(Debug)]
 pub struct CandidateDagInventory<Id> {
-    pub candidates: Vec<Vec<(Id, Rc<SummaryNode>)>>,
+    pub candidates: Vec<Vec<(Id, Rc<PostASAPNode>)>>,
     pub rejected_assemblies: Vec<String>,
 }
 
-type CandidateDagChoice<'a> = (Option<&'a ReplacementSubDAG>, Option<Rc<SummaryNode>>);
+type CandidateDagChoice<'a> = (Option<&'a ReplacementSubDAG>, Option<Rc<PostASAPNode>>);
 
 impl<Id: Clone + PartialEq> CandidatePostASAPDAGs<Id> {
     pub fn enumerate_candidate_dags(
@@ -4039,7 +4043,7 @@ impl<Id: Clone + PartialEq> CandidatePostASAPDAGs<Id> {
 
     fn enumerate_candidate_roots(
         &self,
-        roots: &[(Id, Rc<QueryExpr>)],
+        roots: &[(Id, Rc<PreASAPNode>)],
         expansion_limit: usize,
     ) -> Result<CandidateDagInventory<Id>, RealizationError> {
         let mut reachable = Vec::new();
@@ -4246,25 +4250,25 @@ impl<Id: Clone + PartialEq> CandidatePostASAPDAGs<Id> {
 /// Lifecycle-aware whole-subplan costs keyed by target and candidate identity.
 #[derive(Default)]
 pub(crate) struct CandidateCostOverrides {
-    costs: HashMap<(*const QueryExpr, *const ReplacementSubDAG), Cost>,
-    raw_costs: HashMap<*const QueryExpr, Cost>,
+    costs: HashMap<(*const PreASAPNode, *const ReplacementSubDAG), Cost>,
+    raw_costs: HashMap<*const PreASAPNode, Cost>,
     /// Targets for which the caller requested an atomic raw-vs-summary
     /// decision. Other memo groups continue through ordinary CSE selection.
-    finalized_targets: HashSet<*const QueryExpr>,
+    finalized_targets: HashSet<*const PreASAPNode>,
 }
 
 impl CandidateCostOverrides {
-    pub(crate) fn finalize_target(&mut self, target: &Rc<QueryExpr>) {
+    pub(crate) fn finalize_target(&mut self, target: &Rc<PreASAPNode>) {
         self.finalized_targets.insert(Rc::as_ptr(target));
     }
 
-    fn finalizes(&self, target: &Rc<QueryExpr>) -> bool {
+    fn finalizes(&self, target: &Rc<PreASAPNode>) -> bool {
         self.finalized_targets.contains(&Rc::as_ptr(target))
     }
 
     pub(crate) fn insert(
         &mut self,
-        target: &Rc<QueryExpr>,
+        target: &Rc<PreASAPNode>,
         candidate: &ReplacementSubDAG,
         cost: Cost,
     ) {
@@ -4272,17 +4276,17 @@ impl CandidateCostOverrides {
             .insert((Rc::as_ptr(target), candidate as *const _), cost);
     }
 
-    fn get(&self, target: &Rc<QueryExpr>, candidate: &ReplacementSubDAG) -> Option<Cost> {
+    fn get(&self, target: &Rc<PreASAPNode>, candidate: &ReplacementSubDAG) -> Option<Cost> {
         self.costs
             .get(&(Rc::as_ptr(target), candidate as *const _))
             .copied()
     }
 
-    pub(crate) fn insert_raw(&mut self, target: &Rc<QueryExpr>, cost: Cost) {
+    pub(crate) fn insert_raw(&mut self, target: &Rc<PreASAPNode>, cost: Cost) {
         self.raw_costs.insert(Rc::as_ptr(target), cost);
     }
 
-    fn raw(&self, target: &Rc<QueryExpr>) -> Option<Cost> {
+    fn raw(&self, target: &Rc<PreASAPNode>) -> Option<Cost> {
         self.raw_costs.get(&Rc::as_ptr(target)).copied()
     }
 }
@@ -4299,7 +4303,7 @@ impl<Id> CandidatePostASAPDAGs<Id> {
     }
 
     /// Whether no targets were discovered at all (an empty workload, or one
-    /// with no `QueryExpr` nodes reachable from any root — never true for a
+    /// with no `PreASAPNode` nodes reachable from any root — never true for a
     /// non-empty `roots`, since every root is itself a target).
     pub fn is_empty(&self) -> bool {
         self.groups.is_empty()
@@ -4308,7 +4312,10 @@ impl<Id> CandidatePostASAPDAGs<Id> {
     /// The candidate set for `target`, if `target`'s own `Rc` is a discovered
     /// `TargetSubDAG` (i.e. `Rc::ptr_eq` to some node reachable from
     /// `roots`).
-    pub fn candidates_for_target(&self, target: &Rc<QueryExpr>) -> Option<&TargetSubDAGCandidates> {
+    pub fn candidates_for_target(
+        &self,
+        target: &Rc<PreASAPNode>,
+    ) -> Option<&TargetSubDAGCandidates> {
         self.groups.get(&Rc::as_ptr(target))
     }
 
@@ -4430,17 +4437,17 @@ impl<Id> CandidatePostASAPDAGs<Id> {
 /// half of issue #287. Looked up by `Rc` pointer identity, the same
 /// currency [`CandidatePostASAPDAGs::candidates_for_target`]/[`GlobalSelection::for_target`] already
 /// use.
-/// Holds an owned `Rc<QueryExpr>` clone alongside each profile (not just its
+/// Holds an owned `Rc<PreASAPNode>` clone alongside each profile (not just its
 /// raw pointer) so this map keeps every node it describes alive for as long
 /// as the map itself lives — a `RecurrenceProfileMap` is safe to outlive the
-/// `CandidatePostASAPDAGs` it was built from. Without this, a raw `*const QueryExpr` key
+/// `CandidatePostASAPDAGs` it was built from. Without this, a raw `*const PreASAPNode` key
 /// could, after the originating `CandidatePostASAPDAGs` (the only other owner of those
 /// `Rc`s) is dropped, collide with an unrelated, later allocation that
 /// happens to reuse the same freed address — silently returning a stale
 /// profile for the wrong node (issue #287 review, bug 4).
 #[derive(Debug, Clone)]
 pub struct RecurrenceProfileMap {
-    profiles: HashMap<*const QueryExpr, (Rc<QueryExpr>, RecurrenceProfile)>,
+    profiles: HashMap<*const PreASAPNode, (Rc<PreASAPNode>, RecurrenceProfile)>,
 }
 
 impl RecurrenceProfileMap {
@@ -4449,7 +4456,7 @@ impl RecurrenceProfileMap {
     /// in the [`CandidatePostASAPDAGs`] this map was built from (or carried no
     /// recurring/one-shot/update-rate metadata at all) — always a valid,
     /// "no metadata" answer, never a panic.
-    pub fn for_target(&self, target: &Rc<QueryExpr>) -> RecurrenceProfile {
+    pub fn for_target(&self, target: &Rc<PreASAPNode>) -> RecurrenceProfile {
         self.profiles
             .get(&Rc::as_ptr(target))
             .map(|(_, profile)| *profile)
@@ -4546,12 +4553,12 @@ impl<Id> CandidatePostASAPDAGs<Id> {
             }
         }
 
-        let mut rates: HashMap<*const QueryExpr, f64> = HashMap::new();
-        let mut one_shot_counts: HashMap<*const QueryExpr, usize> = HashMap::new();
+        let mut rates: HashMap<*const PreASAPNode, f64> = HashMap::new();
+        let mut one_shot_counts: HashMap<*const PreASAPNode, usize> = HashMap::new();
         // Sites actually reached by at least one root's own recurrence tag
         // during the walk below — see this method's own "Unreachable
         // sites" doc.
-        let mut reached: HashSet<*const QueryExpr> = HashSet::new();
+        let mut reached: HashSet<*const PreASAPNode> = HashSet::new();
 
         for ((_, root), recurrence) in self.roots.iter().zip(root_recurrence) {
             let recurrence = *recurrence;
@@ -4561,7 +4568,7 @@ impl<Id> CandidatePostASAPDAGs<Id> {
             // recomputed occurrence is evaluated twice as well; stopping
             // expansion after the first pointer visit undercounts exactly
             // the effective-consumer rate recurrence-aware costing needs.
-            let mut queue: VecDeque<(*const QueryExpr, usize)> = VecDeque::new();
+            let mut queue: VecDeque<(*const PreASAPNode, usize)> = VecDeque::new();
             queue.push_back((root_ptr, 1));
 
             while let Some((ptr, path_count)) = queue.pop_front() {
@@ -4705,7 +4712,7 @@ impl<Id> CandidatePostASAPDAGs<Id> {
         &self,
         workload: &QueryWorkload,
         root_workload_entries: &[usize],
-    ) -> Result<HashMap<*const QueryExpr, Vec<usize>>, RecurrenceError> {
+    ) -> Result<HashMap<*const PreASAPNode, Vec<usize>>, RecurrenceError> {
         let entry_count = workload.entries().count();
         if root_workload_entries.len() != self.roots.len() {
             return Err(RecurrenceError::RootCountMismatch {
@@ -4713,7 +4720,7 @@ impl<Id> CandidatePostASAPDAGs<Id> {
                 got: root_workload_entries.len(),
             });
         }
-        let mut bindings: HashMap<*const QueryExpr, HashSet<usize>> = HashMap::new();
+        let mut bindings: HashMap<*const PreASAPNode, HashSet<usize>> = HashMap::new();
         for ((_, root), &entry_index) in self.roots.iter().zip(root_workload_entries) {
             if entry_index >= entry_count {
                 return Err(RecurrenceError::InvalidWorkloadEntry {
@@ -4755,12 +4762,12 @@ impl<Id> CandidatePostASAPDAGs<Id> {
 /// child always has `edge_count >= 1` in practice, but this keeps the
 /// helper correct regardless).
 fn contribute(
-    ptr: *const QueryExpr,
+    ptr: *const PreASAPNode,
     times: usize,
     recurrence: RootRecurrence,
-    rates: &mut HashMap<*const QueryExpr, f64>,
-    one_shot_counts: &mut HashMap<*const QueryExpr, usize>,
-    reached: &mut HashSet<*const QueryExpr>,
+    rates: &mut HashMap<*const PreASAPNode, f64>,
+    one_shot_counts: &mut HashMap<*const PreASAPNode, usize>,
+    reached: &mut HashSet<*const PreASAPNode>,
 ) {
     if times == 0 {
         return;
@@ -4781,7 +4788,7 @@ fn contribute(
 /// [`CandidatePostASAPDAGs::cost_sorted`].
 #[derive(Debug)]
 pub struct RankedTargetSubDAGCandidates<'a> {
-    pub target: &'a Rc<QueryExpr>,
+    pub target: &'a Rc<PreASAPNode>,
     pub consumer_count: usize,
     pub candidates: Vec<&'a ReplacementSubDAG>,
     /// `costs[i]` is `candidates[i]`'s own grouping-state cost when available,
@@ -4935,7 +4942,7 @@ fn cse_preference(group: &TargetSubDAGCandidates, cost_model: &dyn CostModel) ->
     })
 }
 
-/// [`cse_preference`] only needs one representative bound [`SummaryNode`]
+/// [`cse_preference`] only needs one representative bound [`PostASAPNode`]
 /// for `target` (to build a [`CseCandidate`] for
 /// [`CostModel::cse_share_decision`]), not the full ranked candidate list
 /// [`SketchAlgorithmStrategy::replacements`] returns — so this just reuses
@@ -4943,7 +4950,7 @@ fn cse_preference(group: &TargetSubDAGCandidates, cost_model: &dyn CostModel) ->
 /// `construct_summary_agg`'s own recursion and
 /// [`crate::cost_model::DefaultCostModel::estimate_cost`] already use,
 /// wrapped to swallow the (here, uninteresting) error into `None`.
-fn realize_one(target: &Rc<QueryExpr>, cost_model: &dyn CostModel) -> Option<Rc<SummaryNode>> {
+fn realize_one(target: &Rc<PreASAPNode>, cost_model: &dyn CostModel) -> Option<Rc<PostASAPNode>> {
     realize_child(target, cost_model).ok()
 }
 
@@ -4958,7 +4965,7 @@ fn realize_one(target: &Rc<QueryExpr>, cost_model: &dyn CostModel) -> Option<Rc<
 /// code — the same "duplicate a small, self-contained traversal rather than
 /// restructure a test helper" call this file's own top doc already makes
 /// for [`discover_targets`].
-fn sketch_kind_of(node: &SummaryNode) -> Option<SketchAlgorithm> {
+fn sketch_kind_of(node: &PostASAPNode) -> Option<SketchAlgorithm> {
     match &node.expr {
         SummaryExpr::SummaryEstimate { summary_input, .. } => sketch_kind_of(summary_input),
         SummaryExpr::SummaryAgg {
@@ -4971,7 +4978,7 @@ fn sketch_kind_of(node: &SummaryNode) -> Option<SketchAlgorithm> {
 
 /// The grouping strategy used by a bound summary candidate, unwrapping its
 /// readout node when necessary.
-fn summary_grouping(node: &SummaryNode) -> Option<&GroupingStrategy> {
+fn summary_grouping(node: &PostASAPNode) -> Option<&GroupingStrategy> {
     match &node.expr {
         SummaryExpr::SummaryEstimate { summary_input, .. } => summary_grouping(summary_input),
         SummaryExpr::SummaryAgg { grouping, .. } => Some(grouping),
@@ -4999,7 +5006,7 @@ fn summary_grouping(node: &SummaryNode) -> Option<&GroupingStrategy> {
 #[derive(Debug)]
 pub struct TargetSubDAGSelection<'a> {
     /// The target sub-DAG this selection is for.
-    pub target: &'a Rc<QueryExpr>,
+    pub target: &'a Rc<PreASAPNode>,
     /// [`TargetSubDAGCandidates::consumer_count`] — how many operator-child positions
     /// directly reference `target`, ignoring every ancestor's own choice.
     pub consumer_count: usize,
@@ -5030,9 +5037,9 @@ pub struct TargetSubDAGSelection<'a> {
 #[derive(Debug)]
 pub struct CompositionDecision<'a> {
     /// The exact child/operation pair validated by the search accuracy model.
-    pub plan: Rc<SummaryNode>,
+    pub plan: Rc<PostASAPNode>,
     /// The child target the composed operator consumes.
-    pub child_target: &'a Rc<QueryExpr>,
+    pub child_target: &'a Rc<PreASAPNode>,
     /// For a read-time operation: the child's own candidate committed alongside
     /// (the summary readout the operator folds). `None` for an update-path
     /// transform, whose input is raw update data — its cost is charged to
@@ -5052,12 +5059,12 @@ pub struct CompositionDecision<'a> {
 /// [`CandidatePostASAPDAGs::cost_sorted`] use.
 #[derive(Debug)]
 pub struct GlobalSelection<'a> {
-    order: Vec<*const QueryExpr>,
-    groups: HashMap<*const QueryExpr, TargetSubDAGSelection<'a>>,
+    order: Vec<*const PreASAPNode>,
+    groups: HashMap<*const PreASAPNode, TargetSubDAGSelection<'a>>,
     /// [`Self::assemble_selected_dag`]'s memo — one bound node per target for the
     /// life of this selection, so two parents composing over one shared
-    /// child get the *same* `Rc<SummaryNode>`.
-    assembled_nodes: RefCell<HashMap<*const QueryExpr, Rc<SummaryNode>>>,
+    /// child get the *same* `Rc<PostASAPNode>`.
+    assembled_nodes: RefCell<HashMap<*const PreASAPNode, Rc<PostASAPNode>>>,
 }
 
 fn normalize_cross_input_equi_predicate(
@@ -5065,7 +5072,7 @@ fn normalize_cross_input_equi_predicate(
     left_width: usize,
     total_width: usize,
 ) -> Option<Predicate> {
-    let QueryExpr::Compare {
+    let PreASAPNode::Compare {
         left,
         op: asap_types::pre_asap::CompareOpKind::Eq,
         right,
@@ -5073,7 +5080,8 @@ fn normalize_cross_input_equi_predicate(
     else {
         return None;
     };
-    let (QueryExpr::Column(left_id), QueryExpr::Column(right_id)) = (left.as_ref(), right.as_ref())
+    let (PreASAPNode::Column(left_id), PreASAPNode::Column(right_id)) =
+        (left.as_ref(), right.as_ref())
     else {
         return None;
     };
@@ -5086,10 +5094,10 @@ fn normalize_cross_input_equi_predicate(
     } else {
         return None;
     };
-    Some(Predicate(Rc::new(QueryExpr::Compare {
-        left: Rc::new(QueryExpr::Column(left_id)),
+    Some(Predicate(Rc::new(PreASAPNode::Compare {
+        left: Rc::new(PreASAPNode::Column(left_id)),
         op: asap_types::pre_asap::CompareOpKind::Eq,
-        right: Rc::new(QueryExpr::Column(right_id)),
+        right: Rc::new(PreASAPNode::Column(right_id)),
     })))
 }
 
@@ -5111,13 +5119,13 @@ impl<'a> GlobalSelection<'a> {
     /// The selection for `target`, if `target`'s own `Rc` is a discovered
     /// site (i.e. `Rc::ptr_eq` to some node reachable from the workload's
     /// roots).
-    pub fn for_target(&self, target: &Rc<QueryExpr>) -> Option<&TargetSubDAGSelection<'a>> {
+    pub fn for_target(&self, target: &Rc<PreASAPNode>) -> Option<&TargetSubDAGSelection<'a>> {
         self.groups.get(&Rc::as_ptr(target))
     }
 
     /// Link this selection's per-site decisions into one data_state-validated
     /// post-ASAP DAG rooted at `target` — the one place a committed
-    /// composition's child *reference* becomes an actual `Rc<SummaryNode>`
+    /// composition's child *reference* becomes an actual `Rc<PostASAPNode>`
     /// edge (issue #171). `None` if `target` is not a discovered site.
     ///
     /// Per site: a [`Replacement::ExactComposition`] uses its validated
@@ -5131,8 +5139,8 @@ impl<'a> GlobalSelection<'a> {
     /// shared inner summary is one `Rc` no matter how many roots reach it.
     pub fn assemble_selected_dag(
         &self,
-        target: &Rc<QueryExpr>,
-    ) -> Result<Option<Rc<SummaryNode>>, RealizationError> {
+        target: &Rc<PreASAPNode>,
+    ) -> Result<Option<Rc<PostASAPNode>>, RealizationError> {
         if !self.groups.contains_key(&Rc::as_ptr(target)) {
             return Ok(None);
         }
@@ -5144,14 +5152,17 @@ impl<'a> GlobalSelection<'a> {
     /// callers exposing query results must use this boundary instead.
     pub fn assemble_selected_query(
         &self,
-        target: &Rc<QueryExpr>,
-    ) -> Result<Option<Rc<SummaryNode>>, RealizationError> {
+        target: &Rc<PreASAPNode>,
+    ) -> Result<Option<Rc<PostASAPNode>>, RealizationError> {
         self.assemble_selected_dag(target)?
             .map(|node| finalize_query_candidate(node, target))
             .transpose()
     }
 
-    fn assemble_target(&self, target: &Rc<QueryExpr>) -> Result<Rc<SummaryNode>, RealizationError> {
+    fn assemble_target(
+        &self,
+        target: &Rc<PreASAPNode>,
+    ) -> Result<Rc<PostASAPNode>, RealizationError> {
         let ptr = Rc::as_ptr(target);
         if let Some(node) = self.assembled_nodes.borrow().get(&ptr) {
             return Ok(Rc::clone(node));
@@ -5201,9 +5212,9 @@ impl<'a> GlobalSelection<'a> {
     /// one opaque `KeepPreAsap` subtree.
     fn assemble_residual(
         &self,
-        target: &Rc<QueryExpr>,
-    ) -> Result<Rc<SummaryNode>, RealizationError> {
-        if let QueryExpr::Join {
+        target: &Rc<PreASAPNode>,
+    ) -> Result<Rc<PostASAPNode>, RealizationError> {
+        if let PreASAPNode::Join {
             left,
             right,
             kind,
@@ -5222,7 +5233,7 @@ impl<'a> GlobalSelection<'a> {
             let right = finalize_query_candidate(self.assemble_target(right)?, right)?;
             let guarantee =
                 relational_join_guarantee(left.guarantee.as_ref(), right.guarantee.as_ref());
-            let node = Rc::new(SummaryNode {
+            let node = Rc::new(PostASAPNode {
                 expr: SummaryExpr::RelationalJoin {
                     left,
                     right,
@@ -5237,7 +5248,7 @@ impl<'a> GlobalSelection<'a> {
             return Ok(node);
         }
         let (child_target, operation) = match target.as_ref() {
-            QueryExpr::Project {
+            PreASAPNode::Project {
                 cols,
                 qualifier,
                 child,
@@ -5248,10 +5259,10 @@ impl<'a> GlobalSelection<'a> {
                     qualifier: qualifier.clone(),
                 },
             ),
-            QueryExpr::Filter { pred, child } => {
+            PreASAPNode::Filter { pred, child } => {
                 (child, ValueOperation::Filter { pred: pred.clone() })
             }
-            QueryExpr::Sort {
+            PreASAPNode::Sort {
                 keys,
                 partition_by,
                 child,
@@ -5262,18 +5273,18 @@ impl<'a> GlobalSelection<'a> {
                     partition_by: partition_by.clone(),
                 },
             ),
-            QueryExpr::Limit { n, offset, child } => (
+            PreASAPNode::Limit { n, offset, child } => (
                 child,
                 ValueOperation::Limit {
                     n: *n,
                     offset: *offset,
                     partition_by: match child.as_ref() {
-                        QueryExpr::Sort { partition_by, .. } => partition_by.clone(),
+                        PreASAPNode::Sort { partition_by, .. } => partition_by.clone(),
                         _ => Default::default(),
                     },
                 },
             ),
-            QueryExpr::Aggregate {
+            PreASAPNode::Aggregate {
                 reduction,
                 measures,
                 output_names,
@@ -5292,7 +5303,7 @@ impl<'a> GlobalSelection<'a> {
         };
         let child = finalize_query_candidate(self.assemble_target(child_target)?, child_target)?;
         let guarantee = child.guarantee.clone();
-        let node = Rc::new(SummaryNode {
+        let node = Rc::new(PostASAPNode {
             expr: SummaryExpr::ValueOperation {
                 child,
                 operation,
@@ -5310,10 +5321,10 @@ impl<'a> GlobalSelection<'a> {
     /// maintenance; otherwise keep the candidate exactly as constructed.
     fn relink_summary(
         &self,
-        node: &Rc<SummaryNode>,
-        target: &Rc<QueryExpr>,
-    ) -> Result<Rc<SummaryNode>, RealizationError> {
-        let QueryExpr::Aggregate {
+        node: &Rc<PostASAPNode>,
+        target: &Rc<PreASAPNode>,
+    ) -> Result<Rc<PostASAPNode>, RealizationError> {
+        let PreASAPNode::Aggregate {
             child: pre_child, ..
         } = target.as_ref()
         else {
@@ -5342,8 +5353,8 @@ impl<'a> GlobalSelection<'a> {
 /// reduction of the inner summary values. Maintaining the outer SUM directly
 /// would hide that inner temporal aggregate inside `KeepPreAsap` and lose its
 /// independently selected summary.
-fn query_time_nested_sum(target: &QueryExpr) -> bool {
-    let QueryExpr::Aggregate {
+fn query_time_nested_sum(target: &PreASAPNode) -> bool {
+    let PreASAPNode::Aggregate {
         measures,
         having: None,
         child,
@@ -5355,13 +5366,13 @@ fn query_time_nested_sum(target: &QueryExpr) -> bool {
     matches!(measures.as_slice(), [AggIntent::Sum { .. }]) && contains_aggregate(child)
 }
 
-fn contains_aggregate(expr: &QueryExpr) -> bool {
+fn contains_aggregate(expr: &PreASAPNode) -> bool {
     match expr {
-        QueryExpr::Aggregate { .. } => true,
-        QueryExpr::Project { child, .. }
-        | QueryExpr::Filter { child, .. }
-        | QueryExpr::Sort { child, .. }
-        | QueryExpr::Limit { child, .. } => contains_aggregate(child),
+        PreASAPNode::Aggregate { .. } => true,
+        PreASAPNode::Project { child, .. }
+        | PreASAPNode::Filter { child, .. }
+        | PreASAPNode::Sort { child, .. }
+        | PreASAPNode::Limit { child, .. } => contains_aggregate(child),
         _ => false,
     }
 }
@@ -5369,7 +5380,7 @@ fn contains_aggregate(expr: &QueryExpr) -> bool {
 /// Rebuild `node` (a `SummaryAgg`, possibly under a `SummaryEstimate`) with
 /// `new_child` as the `SummaryAgg`'s child, if the result still validates
 /// as maintained state; otherwise return `node` unchanged.
-fn relink_agg_child(node: &Rc<SummaryNode>, new_child: &Rc<SummaryNode>) -> Rc<SummaryNode> {
+fn relink_agg_child(node: &Rc<PostASAPNode>, new_child: &Rc<PostASAPNode>) -> Rc<PostASAPNode> {
     match &node.expr {
         SummaryExpr::SummaryEstimate {
             summary_input,
@@ -5379,7 +5390,7 @@ fn relink_agg_child(node: &Rc<SummaryNode>, new_child: &Rc<SummaryNode>) -> Rc<S
             if Rc::ptr_eq(&inner, summary_input) {
                 return Rc::clone(node);
             }
-            Rc::new(SummaryNode {
+            Rc::new(PostASAPNode {
                 expr: SummaryExpr::SummaryEstimate {
                     summary_input: inner,
                     query: query.clone(),
@@ -5398,7 +5409,7 @@ fn relink_agg_child(node: &Rc<SummaryNode>, new_child: &Rc<SummaryNode>) -> Rc<S
             if Rc::ptr_eq(child, new_child) {
                 return Rc::clone(node);
             }
-            let rebuilt = Rc::new(SummaryNode {
+            let rebuilt = Rc::new(PostASAPNode {
                 expr: SummaryExpr::SummaryAgg {
                     child: Rc::clone(new_child),
                     family: family.clone(),
@@ -5422,7 +5433,7 @@ fn relink_agg_child(node: &Rc<SummaryNode>, new_child: &Rc<SummaryNode>) -> Rc<S
 /// The maintained `SummaryAgg` a bound `Summary` candidate builds (under
 /// its `SummaryEstimate` readout, if any) — the summary an `ValueOperationAtIngestionTime`
 /// beneath it feeds, for `maintenance_operation_plan_cost_rate`.
-fn maintained_summary(node: &Rc<SummaryNode>) -> Option<&Rc<SummaryNode>> {
+fn maintained_summary(node: &Rc<PostASAPNode>) -> Option<&Rc<PostASAPNode>> {
     match &node.expr {
         SummaryExpr::SummaryEstimate { summary_input, .. } => maintained_summary(summary_input),
         SummaryExpr::SummaryAgg { .. } => Some(node),
@@ -5442,10 +5453,10 @@ struct CompositionContext {
     /// child target ptr → the child's candidate an ancestor's composition
     /// already committed to (a later parent must compose with the *same*
     /// one, and the child's own selection is forced to it).
-    committed_child: HashMap<*const QueryExpr, *const ReplacementSubDAG>,
+    committed_child: HashMap<*const PreASAPNode, *const ReplacementSubDAG>,
     /// site ptr → the maintained `SummaryAgg` directly above it, when its
     /// parent chose a bound `Summary` — what an `ValueOperationAtIngestionTime` here feeds.
-    maintaining_parent: HashMap<*const QueryExpr, Rc<SummaryNode>>,
+    maintaining_parent: HashMap<*const PreASAPNode, Rc<PostASAPNode>>,
 }
 
 /// One eligible composed alternative at a site, before the cheapest wins.
@@ -5461,7 +5472,7 @@ struct CompositionOption<'a> {
 /// option at all: the conservative `KeepPreAsap` path stays.
 fn composition_options<'a>(
     group: &'a TargetSubDAGCandidates,
-    groups: &'a HashMap<*const QueryExpr, TargetSubDAGCandidates>,
+    groups: &'a HashMap<*const PreASAPNode, TargetSubDAGCandidates>,
     effective: usize,
     cost_model: &dyn CostModel,
     context: &CompositionContext,
@@ -5480,7 +5491,7 @@ fn composition_options<'a>(
             continue;
         };
         let already_committed = context.committed_child.get(&child_ptr).copied();
-        let cost = |summary: &SummaryNode, shared: bool| {
+        let cost = |summary: &PostASAPNode, shared: bool| {
             let request = ExactCompositionCostRequest {
                 target: &group.target,
                 composition,
@@ -5628,8 +5639,8 @@ impl<Id> CandidatePostASAPDAGs<Id> {
         let topo = topological_order(&self.order, &graph);
 
         let mut effective_uses = graph.external_root_uses.clone();
-        let mut chosen_share: HashMap<*const QueryExpr, ShareDecision> = HashMap::new();
-        let mut groups: HashMap<*const QueryExpr, TargetSubDAGSelection<'_>> = HashMap::new();
+        let mut chosen_share: HashMap<*const PreASAPNode, ShareDecision> = HashMap::new();
+        let mut groups: HashMap<*const PreASAPNode, TargetSubDAGSelection<'_>> = HashMap::new();
         let mut context = CompositionContext::default();
 
         for ptr in &topo {
@@ -5856,7 +5867,7 @@ impl<Id> CandidatePostASAPDAGs<Id> {
             // Record the maintained summary this site's bound candidate
             // builds, for a child that may compose an `ValueOperationAtIngestionTime`
             // beneath it.
-            if let (Some(Replacement::Summary(node)), QueryExpr::Aggregate { child, .. }) =
+            if let (Some(Replacement::Summary(node)), PreASAPNode::Aggregate { child, .. }) =
                 (chosen.map(|c| &c.replacement), group.target.as_ref())
             {
                 if let Some(summary) = maintained_summary(node) {
@@ -5949,9 +5960,9 @@ fn is_automatically_selectable(candidate: &ReplacementSubDAG, cost_model: &dyn C
 /// ancestor sits anywhere on the path from a root to a site — see the
 /// module docs' "Whole-plan (cross-group) selection" section.
 fn multiplier(
-    parent_ptr: *const QueryExpr,
-    effective_uses: &HashMap<*const QueryExpr, usize>,
-    chosen_share: &HashMap<*const QueryExpr, ShareDecision>,
+    parent_ptr: *const PreASAPNode,
+    effective_uses: &HashMap<*const PreASAPNode, usize>,
+    chosen_share: &HashMap<*const PreASAPNode, ShareDecision>,
 ) -> usize {
     let effective = *effective_uses.get(&parent_ptr).expect(
         "topological_order guarantees a parent is processed (and its effective_consumer_count \
@@ -6070,17 +6081,17 @@ struct ReferenceGraph {
     /// [`walk_children`] itself uses (an edge count above 1 happens when
     /// one parent references the same child from two different fields,
     /// e.g. a `Join`'s `left`/`right` both being the same `Rc`).
-    parents_of: HashMap<*const QueryExpr, Vec<(*const QueryExpr, usize)>>,
+    parents_of: HashMap<*const PreASAPNode, Vec<(*const PreASAPNode, usize)>>,
     /// parent ptr -> every distinct child ptr it directly references — the
     /// reverse of `parents_of`, for [`topological_order`]'s Kahn's-algorithm
     /// traversal.
-    children_of: HashMap<*const QueryExpr, Vec<*const QueryExpr>>,
+    children_of: HashMap<*const PreASAPNode, Vec<*const PreASAPNode>>,
     /// How many of the workload's own `roots` point directly at each node —
     /// a node's "external" use. Nothing inside the tree decides this (it
     /// isn't a reference from another discovered site), so it's never
     /// subject to any ancestor's Share/Recompute choice — it's the base
     /// case [`CandidatePostASAPDAGs::global_selection`]'s recurrence starts from.
-    external_root_uses: HashMap<*const QueryExpr, usize>,
+    external_root_uses: HashMap<*const PreASAPNode, usize>,
 }
 
 /// Build an ordering graph containing every edge that could be selected:
@@ -6122,8 +6133,8 @@ fn reference_graph<Id>(space: &CandidatePostASAPDAGs<Id>) -> ReferenceGraph {
 /// [`ReferenceGraph`]'s fields), retaining the greatest multiplicity seen
 /// when the target and alternative rewrites expose the same edge.
 fn add_edge(
-    parent_ptr: *const QueryExpr,
-    child_ptr: *const QueryExpr,
+    parent_ptr: *const PreASAPNode,
+    child_ptr: *const PreASAPNode,
     edge_count: usize,
     graph: &mut ReferenceGraph,
 ) {
@@ -6139,8 +6150,8 @@ fn add_edge(
 }
 
 fn record_possible_edges(
-    parent_ptr: *const QueryExpr,
-    node: &QueryExpr,
+    parent_ptr: *const PreASAPNode,
+    node: &PreASAPNode,
     graph: &mut ReferenceGraph,
 ) {
     for (child_ptr, edge_count) in direct_child_counts(node) {
@@ -6150,8 +6161,8 @@ fn record_possible_edges(
 
 /// Direct relational-skeleton children and their edge multiplicities.
 /// `Concat` is transparent, matching [`walk_children`]'s site scope.
-fn direct_child_counts(node: &QueryExpr) -> Vec<(*const QueryExpr, usize)> {
-    fn push(children: &mut Vec<(*const QueryExpr, usize)>, child: &Rc<QueryExpr>) {
+fn direct_child_counts(node: &PreASAPNode) -> Vec<(*const PreASAPNode, usize)> {
+    fn push(children: &mut Vec<(*const PreASAPNode, usize)>, child: &Rc<PreASAPNode>) {
         let ptr = Rc::as_ptr(child);
         match children.iter_mut().find(|(existing, _)| *existing == ptr) {
             Some((_, count)) => *count += 1,
@@ -6159,8 +6170,8 @@ fn direct_child_counts(node: &QueryExpr) -> Vec<(*const QueryExpr, usize)> {
         }
     }
 
-    fn collect(node: &QueryExpr, children: &mut Vec<(*const QueryExpr, usize)>) {
-        use QueryExpr::*;
+    fn collect(node: &PreASAPNode, children: &mut Vec<(*const PreASAPNode, usize)>) {
+        use PreASAPNode::*;
         match node {
             Scan { .. } | PromqlScalarBridge(_) | EvalTimestamp | CurrentTimestamp => {}
             PromqlVectorFromScalar(c) | PromqlScalarFromVector(c) => {
@@ -6225,14 +6236,17 @@ fn direct_child_counts(node: &QueryExpr) -> Vec<(*const QueryExpr, usize)> {
 /// different root paths can have a parent that's discovered *after* it (see
 /// this function's own test for a worked diamond example), which is exactly
 /// backwards for [`CandidatePostASAPDAGs::global_selection`]'s recurrence.
-fn topological_order(order: &[*const QueryExpr], graph: &ReferenceGraph) -> Vec<*const QueryExpr> {
-    let mut in_degree: HashMap<*const QueryExpr, usize> = HashMap::new();
+fn topological_order(
+    order: &[*const PreASAPNode],
+    graph: &ReferenceGraph,
+) -> Vec<*const PreASAPNode> {
+    let mut in_degree: HashMap<*const PreASAPNode, usize> = HashMap::new();
     for ptr in order {
         let degree = graph.parents_of.get(ptr).map(Vec::len).unwrap_or(0);
         in_degree.insert(*ptr, degree);
     }
 
-    let mut queue: VecDeque<*const QueryExpr> = order
+    let mut queue: VecDeque<*const PreASAPNode> = order
         .iter()
         .copied()
         .filter(|ptr| in_degree[ptr] == 0)
@@ -6256,7 +6270,7 @@ fn topological_order(order: &[*const QueryExpr], graph: &ReferenceGraph) -> Vec<
     assert_eq!(
         topo.len(),
         order.len(),
-        "topological_order: the discovered-site reference graph has a cycle — every QueryExpr \
+        "topological_order: the discovered-site reference graph has a cycle — every PreASAPNode \
          node is built from Rc children, which can't form one, so this indicates a bug in \
          reference_graph rather than a real cyclic workload",
     );
@@ -6354,7 +6368,9 @@ pub fn default_strategies_with_evidence<'a>(
 /// `sorted_by(cost_model)` step. Use [`search_workload_with`] to plug in a
 /// custom strategy set (e.g. built via [`default_strategies_with`] for a
 /// deployment-specific [`CostModel`]).
-pub fn search_workload<Id>(roots: Vec<(Id, Rc<QueryExpr>)>) -> CandidatePostASAPDAGs<Id> {
+pub fn search_workload<Id>(
+    roots: asap_types::pre_asap::CandidatePreASAPDAGs<Id>,
+) -> CandidatePostASAPDAGs<Id> {
     search_workload_with(roots, &default_strategies())
 }
 
@@ -6377,7 +6393,7 @@ pub fn search_workload<Id>(roots: Vec<(Id, Rc<QueryExpr>)>) -> CandidatePostASAP
 /// [`SketchAlgorithmStrategy::new`]'s), and [`CandidatePostASAPDAGs::cost_sorted`]'s final
 /// ranking step takes one explicitly.
 pub fn search_workload_with<'s, Id>(
-    roots: Vec<(Id, Rc<QueryExpr>)>,
+    roots: asap_types::pre_asap::CandidatePreASAPDAGs<Id>,
     strategies: &[Box<dyn ReplacementStrategy + 's>],
 ) -> CandidatePostASAPDAGs<Id> {
     let mut space = search_cse_workload_with(cse_workload(roots), strategies);
@@ -6405,7 +6421,7 @@ pub fn search_workload_with<'s, Id>(
 /// Precedence against per-node `AggIntent.accuracy` is documented in
 /// [`crate::accuracy`]'s module docs.
 pub fn search_workload_with_targets<'s, Id>(
-    roots: Vec<(Id, Rc<QueryExpr>, Option<AccuracyTarget>)>,
+    roots: Vec<(Id, Rc<PreASAPNode>, Option<AccuracyTarget>)>,
     strategies: &[Box<dyn ReplacementStrategy + 's>],
     accuracy_model: &dyn AccuracyModel,
 ) -> CandidatePostASAPDAGs<Id> {
@@ -6419,7 +6435,7 @@ pub fn search_workload_with_targets<'s, Id>(
         .collect();
     let mut space = search_cse_workload_with(cse_workload(roots), strategies);
     // `cse_workload` preserves root order, so targets zip by position.
-    let root_ptrs: Vec<(*const QueryExpr, AccuracyTarget)> = space
+    let root_ptrs: Vec<(*const PreASAPNode, AccuracyTarget)> = space
         .roots
         .iter()
         .zip(targets)
@@ -6511,12 +6527,14 @@ pub fn search_workload_with_targets<'s, Id>(
     space
 }
 
-fn cse_workload<Id>(roots: Vec<(Id, Rc<QueryExpr>)>) -> Vec<(Id, Rc<QueryExpr>)> {
-    // `share_common_subtrees` wants owned `QueryExpr`s, not already-`Rc`
+fn cse_workload<Id>(
+    roots: asap_types::pre_asap::CandidatePreASAPDAGs<Id>,
+) -> asap_types::pre_asap::CandidatePreASAPDAGs<Id> {
+    // `share_common_subtrees` wants owned `PreASAPNode`s, not already-`Rc`
     // roots — the same `Rc::try_unwrap`-with-clone-fallback pattern
     // `asap_types::pre_asap::cse::intern_child` itself uses to recover an
     // owned node without cloning in the common (uniquely-owned) case.
-    let owned_roots: Vec<(Id, QueryExpr)> = roots
+    let owned_roots: Vec<(Id, PreASAPNode)> = roots
         .into_iter()
         .map(|(id, rc)| {
             let expr = Rc::try_unwrap(rc).unwrap_or_else(|shared| (*shared).clone());
@@ -6527,32 +6545,32 @@ fn cse_workload<Id>(roots: Vec<(Id, Rc<QueryExpr>)>) -> Vec<(Id, Rc<QueryExpr>)>
 }
 
 fn search_cse_workload_with<'s, Id>(
-    cse_roots: Vec<(Id, Rc<QueryExpr>)>,
+    cse_roots: asap_types::pre_asap::CandidatePreASAPDAGs<Id>,
     strategies: &[Box<dyn ReplacementStrategy + 's>],
 ) -> CandidatePostASAPDAGs<Id> {
     let mut order = Vec::new();
     let mut nodes = HashMap::new();
-    let mut counts: HashMap<*const QueryExpr, usize> = HashMap::new();
+    let mut counts: HashMap<*const PreASAPNode, usize> = HashMap::new();
     discover_targets(&cse_roots, &mut order, &mut nodes, &mut counts);
-    let siblings: Vec<Rc<QueryExpr>> = order
+    let siblings: Vec<Rc<PreASAPNode>> = order
         .iter()
         .filter_map(|ptr| {
             let node = &nodes[ptr];
-            matches!(node.as_ref(), QueryExpr::Aggregate { .. }).then(|| Rc::clone(node))
+            matches!(node.as_ref(), PreASAPNode::Aggregate { .. }).then(|| Rc::clone(node))
         })
         .collect();
     let rollup_strategy = RollupStrategy::new(&siblings);
     let accuracy_reconciliation_strategy = AccuracyReconciliationStrategy::new(&siblings);
-    let limits: Vec<Rc<QueryExpr>> = order
+    let limits: Vec<Rc<PreASAPNode>> = order
         .iter()
         .filter_map(|ptr| {
             let node = &nodes[ptr];
-            matches!(node.as_ref(), QueryExpr::Limit { .. }).then(|| Rc::clone(node))
+            matches!(node.as_ref(), PreASAPNode::Limit { .. }).then(|| Rc::clone(node))
         })
         .collect();
     let topk_reuse_strategy = TopKLimitReuseStrategy::new(&limits);
 
-    let mut groups: HashMap<*const QueryExpr, TargetSubDAGCandidates> = HashMap::new();
+    let mut groups: HashMap<*const PreASAPNode, TargetSubDAGCandidates> = HashMap::new();
     for ptr in &order {
         groups.insert(
             *ptr,
@@ -6677,10 +6695,11 @@ fn search_cse_workload_with<'s, Id>(
 /// ancestor is recomputed. We only do this when an ordinary repeated group
 /// proves that `SharedSubtreeStrategy` is part of this search's strategy set.
 fn add_effective_count_cse_candidates(
-    order: &[*const QueryExpr],
-    groups: &mut HashMap<*const QueryExpr, TargetSubDAGCandidates>,
+    order: &[*const PreASAPNode],
+    groups: &mut HashMap<*const PreASAPNode, TargetSubDAGCandidates>,
 ) {
-    let mut possible_children: HashMap<*const QueryExpr, Vec<*const QueryExpr>> = HashMap::new();
+    let mut possible_children: HashMap<*const PreASAPNode, Vec<*const PreASAPNode>> =
+        HashMap::new();
     for ptr in order {
         let group = &groups[ptr];
         let children = possible_children.entry(*ptr).or_default();
@@ -6748,10 +6767,10 @@ fn add_effective_count_cse_candidates(
 /// `Rc` and its real `consumer_count` — see the module docs' "Where
 /// `TargetSubDAG` discovery comes from" section for the full rationale.
 fn discover_targets<Id>(
-    roots: &[(Id, Rc<QueryExpr>)],
-    order: &mut Vec<*const QueryExpr>,
-    nodes: &mut HashMap<*const QueryExpr, Rc<QueryExpr>>,
-    counts: &mut HashMap<*const QueryExpr, usize>,
+    roots: &[(Id, Rc<PreASAPNode>)],
+    order: &mut Vec<*const PreASAPNode>,
+    nodes: &mut HashMap<*const PreASAPNode, Rc<PreASAPNode>>,
+    counts: &mut HashMap<*const PreASAPNode, usize>,
 ) {
     for (_, root) in roots {
         walk(root, order, nodes, counts);
@@ -6767,10 +6786,10 @@ fn discover_targets<Id>(
 /// child is already known — the case both shipped strategies always produce
 /// (see that section).
 fn discover_new_descendant_targets(
-    candidate: &Rc<QueryExpr>,
-    order: &mut Vec<*const QueryExpr>,
-    nodes: &mut HashMap<*const QueryExpr, Rc<QueryExpr>>,
-    counts: &mut HashMap<*const QueryExpr, usize>,
+    candidate: &Rc<PreASAPNode>,
+    order: &mut Vec<*const PreASAPNode>,
+    nodes: &mut HashMap<*const PreASAPNode, Rc<PreASAPNode>>,
+    counts: &mut HashMap<*const PreASAPNode, usize>,
 ) {
     walk_children(candidate, order, nodes, counts);
 }
@@ -6778,10 +6797,10 @@ fn discover_new_descendant_targets(
 /// Visit `node`: count this occurrence, and — the first time this exact
 /// `Rc` is seen — record it as a target and recurse into its children.
 fn walk(
-    node: &Rc<QueryExpr>,
-    order: &mut Vec<*const QueryExpr>,
-    nodes: &mut HashMap<*const QueryExpr, Rc<QueryExpr>>,
-    counts: &mut HashMap<*const QueryExpr, usize>,
+    node: &Rc<PreASAPNode>,
+    order: &mut Vec<*const PreASAPNode>,
+    nodes: &mut HashMap<*const PreASAPNode, Rc<PreASAPNode>>,
+    counts: &mut HashMap<*const PreASAPNode, usize>,
 ) {
     let ptr = Rc::as_ptr(node);
     let already_visited = counts.contains_key(&ptr);
@@ -6797,15 +6816,15 @@ fn walk(
 /// `asap_types::pre_asap::cse::share_common_subtrees`/`rebuild_children`
 /// itself uses (see that module's "Algorithm" section) and
 /// `tests::count_consumers` mirrors for its own fixtures. Exhaustive over
-/// every `QueryExpr` variant: a new variant fails to compile here until this
+/// every `PreASAPNode` variant: a new variant fails to compile here until this
 /// match is extended too.
 fn walk_children(
-    node: &QueryExpr,
-    order: &mut Vec<*const QueryExpr>,
-    nodes: &mut HashMap<*const QueryExpr, Rc<QueryExpr>>,
-    counts: &mut HashMap<*const QueryExpr, usize>,
+    node: &PreASAPNode,
+    order: &mut Vec<*const PreASAPNode>,
+    nodes: &mut HashMap<*const PreASAPNode, Rc<PreASAPNode>>,
+    counts: &mut HashMap<*const PreASAPNode, usize>,
 ) {
-    use QueryExpr::*;
+    use PreASAPNode::*;
     match node {
         Scan { .. } | PromqlScalarBridge(_) | EvalTimestamp | CurrentTimestamp => {}
         PromqlVectorFromScalar(c) | PromqlScalarFromVector(c) => walk(c, order, nodes, counts),
@@ -6866,7 +6885,7 @@ mod tests {
     use std::collections::HashMap;
 
     // Candidate shape without execution timing: what is computed, not where.
-    fn timing_free_shape(node: &Rc<SummaryNode>) -> serde_json::Value {
+    fn timing_free_shape(node: &Rc<PostASAPNode>) -> serde_json::Value {
         fn strip(value: &mut serde_json::Value) {
             match value {
                 serde_json::Value::Object(fields) => {
@@ -6917,7 +6936,7 @@ mod tests {
         let inventory = search_workload(vec![(0usize, root)])
             .enumerate_candidate_dags(4096)
             .unwrap();
-        let is_exact = |node: &SummaryNode, kind: ExactKind| {
+        let is_exact = |node: &PostASAPNode, kind: ExactKind| {
             matches!(&node.expr, SummaryExpr::SummaryAgg {
                 family: SummaryFamilyType::ExactAggregate(k, _), ..
             } if *k == kind)
@@ -7081,10 +7100,10 @@ mod tests {
     }
 
     fn equi_pred(left: ColumnId, right: ColumnId) -> Predicate {
-        Predicate(Rc::new(QueryExpr::Compare {
-            left: Rc::new(QueryExpr::Column(left)),
+        Predicate(Rc::new(PreASAPNode::Compare {
+            left: Rc::new(PreASAPNode::Column(left)),
             op: asap_types::pre_asap::CompareOpKind::Eq,
-            right: Rc::new(QueryExpr::Column(right)),
+            right: Rc::new(PreASAPNode::Column(right)),
         }))
     }
 
@@ -7192,7 +7211,7 @@ mod tests {
         impl AccuracyEvidenceProvider for Domain {
             fn quantile_input_domain(
                 &self,
-                _: &QueryExpr,
+                _: &PreASAPNode,
             ) -> Option<crate::accuracy::QuantileInputDomain> {
                 Some(crate::accuracy::QuantileInputDomain {
                     lower: 1.0,
@@ -7818,21 +7837,21 @@ mod tests {
 
     // ── SketchAlgorithmStrategy / SharedSubtreeStrategy fixtures ───────────
 
-    fn metric_scan(labels: &[&str]) -> QueryExpr {
+    fn metric_scan(labels: &[&str]) -> PreASAPNode {
         let mut columns = vec![
             Column::new("ts", DataType::Timestamp, false),
             Column::new("value", DataType::Float64, false),
         ];
         columns.extend(labels.iter().map(|n| Column::new(*n, DataType::Utf8, true)));
-        QueryExpr::Scan {
+        PreASAPNode::Scan {
             source: Source::TimeSeries { metric: "m".into() },
             predicates: vec![],
             schema: SchemaTy::with_time_index(columns, 0, vec![]),
         }
     }
 
-    fn agg(by: Vec<usize>, intent: AggIntent, child: QueryExpr) -> QueryExpr {
-        QueryExpr::Aggregate {
+    fn agg(by: Vec<usize>, intent: AggIntent, child: PreASAPNode) -> PreASAPNode {
+        PreASAPNode::Aggregate {
             reduction: ReductionTy::by(by),
             measures: vec![intent],
             output_names: vec![],
@@ -7854,7 +7873,7 @@ mod tests {
     fn does_not_match_a_multi_intent_or_having_aggregate() {
         let strategy = SketchAlgorithmStrategy::default_cost_model();
 
-        let multi = Rc::new(QueryExpr::Aggregate {
+        let multi = Rc::new(PreASAPNode::Aggregate {
             reduction: ReductionTy::by(vec![2]),
             measures: vec![AggIntent::Sum { col: None }, AggIntent::Avg { col: None }],
             output_names: vec![],
@@ -7866,9 +7885,9 @@ mod tests {
         assert!(strategy.replacements(&target).is_empty());
 
         let mut having_q = agg(vec![2], default_quantile(0.99), metric_scan(&["job"]));
-        if let QueryExpr::Aggregate { having, .. } = &mut having_q {
+        if let PreASAPNode::Aggregate { having, .. } = &mut having_q {
             *having = Some(asap_types::pre_asap::query_expr::Predicate(Rc::new(
-                QueryExpr::Literal(asap_types::pre_asap::expr_ir::ScalarValue::Boolean(true)),
+                PreASAPNode::Literal(asap_types::pre_asap::expr_ir::ScalarValue::Boolean(true)),
             )));
         }
         let having_q = Rc::new(having_q);
@@ -7890,7 +7909,7 @@ mod tests {
     #[test]
     fn approximate_quantile_enumerates_every_summary_candidate() {
         // Quantile's candidate list is [Kll, DDSketch] (summary_candidates) —
-        // every entry must come back as its own bound SummaryNode candidate,
+        // every entry must come back as its own bound PostASAPNode candidate,
         // not just Kll (the CostModel-ranked head realizations_for_intent commits to).
         let q = Rc::new(agg(vec![2], default_quantile(0.99), metric_scan(&["job"])));
         let target = TargetSubDAG::new(&q);
@@ -8090,7 +8109,7 @@ mod tests {
             vec![("q", Rc::clone(&outer))],
             &default_strategies_with(&PreferDDSketchViaCostModel),
         );
-        let QueryExpr::Aggregate { child, .. } = space.roots[0].1.as_ref() else {
+        let PreASAPNode::Aggregate { child, .. } = space.roots[0].1.as_ref() else {
             unreachable!()
         };
         let inner_group = space
@@ -8114,7 +8133,7 @@ mod tests {
     /// The `SummaryFamilyType`'s committed `SketchAlgorithm`, from the top
     /// `SummaryAgg` reachable under a (possibly `SummaryEstimate`-wrapped)
     /// bound root.
-    fn summary_family_algorithm(node: &SummaryNode) -> SketchAlgorithm {
+    fn summary_family_algorithm(node: &PostASAPNode) -> SketchAlgorithm {
         match &node.expr {
             asap_types::post_asap::SummaryExpr::SummaryEstimate { summary_input, .. } => {
                 summary_family_algorithm(summary_input)
@@ -8203,8 +8222,8 @@ mod tests {
     /// counted at the highest (maximal) point sharing starts. Test-only:
     /// this module deliberately does not ship a workload-wide discovery
     /// pass of its own (see the module docs' "Non-goals").
-    fn count_consumers(roots: &[Rc<QueryExpr>]) -> HashMap<*const QueryExpr, usize> {
-        fn walk(node: &Rc<QueryExpr>, counts: &mut HashMap<*const QueryExpr, usize>) {
+    fn count_consumers(roots: &[Rc<PreASAPNode>]) -> HashMap<*const PreASAPNode, usize> {
+        fn walk(node: &Rc<PreASAPNode>, counts: &mut HashMap<*const PreASAPNode, usize>) {
             let ptr = Rc::as_ptr(node);
             let already_visited = counts.contains_key(&ptr);
             *counts.entry(ptr).or_insert(0) += 1;
@@ -8212,8 +8231,8 @@ mod tests {
                 walk_children(node, counts);
             }
         }
-        fn walk_children(node: &QueryExpr, counts: &mut HashMap<*const QueryExpr, usize>) {
-            use QueryExpr::*;
+        fn walk_children(node: &PreASAPNode, counts: &mut HashMap<*const PreASAPNode, usize>) {
+            use PreASAPNode::*;
             match node {
                 Scan { .. } | PromqlScalarBridge(_) | EvalTimestamp | CurrentTimestamp => {}
                 PromqlVectorFromScalar(c) | PromqlScalarFromVector(c) => walk(c, counts),
@@ -8279,7 +8298,7 @@ mod tests {
         };
         assert!(Rc::ptr_eq(ra, rb), "fixture sanity: the two roots merged");
 
-        let roots: Vec<Rc<QueryExpr>> = shared.into_iter().map(|(_, rc)| rc).collect();
+        let roots: Vec<Rc<PreASAPNode>> = shared.into_iter().map(|(_, rc)| rc).collect();
         let counts = count_consumers(&roots);
         let count = counts[&Rc::as_ptr(&roots[0])];
         assert_eq!(count, 2);
@@ -8315,7 +8334,7 @@ mod tests {
 
         let agg_group = space
             .target_subdag_candidates()
-            .find(|g| matches!(g.target.as_ref(), QueryExpr::Aggregate { .. }))
+            .find(|g| matches!(g.target.as_ref(), PreASAPNode::Aggregate { .. }))
             .expect("an Aggregate group must be discovered");
         assert_eq!(agg_group.consumer_count, 1);
         assert_eq!(
@@ -8368,7 +8387,7 @@ mod tests {
 
         let scan_group = space
             .target_subdag_candidates()
-            .find(|g| matches!(g.target.as_ref(), QueryExpr::Scan { .. }))
+            .find(|g| matches!(g.target.as_ref(), PreASAPNode::Scan { .. }))
             .expect("a Scan group must be discovered");
         assert_eq!(scan_group.consumer_count, 1);
         assert!(
@@ -8383,7 +8402,7 @@ mod tests {
         let space = search_workload(vec![("q", root)]);
         let agg_group = space
             .target_subdag_candidates()
-            .find(|g| matches!(g.target.as_ref(), QueryExpr::Aggregate { .. }))
+            .find(|g| matches!(g.target.as_ref(), PreASAPNode::Aggregate { .. }))
             .unwrap();
         assert_eq!(agg_group.candidates.len(), 4);
         assert!(agg_group.candidates.iter().any(|candidate| matches!(
@@ -8506,12 +8525,12 @@ mod tests {
         // Different predicates so the two Filter *parents* stay distinct
         // (don't themselves merge under CSE) — only their shared `child`
         // should collapse onto one `Rc`.
-        let root_a = QueryExpr::Filter {
-            pred: Predicate(Rc::new(QueryExpr::Literal(ScalarValue::Int64(1)))),
+        let root_a = PreASAPNode::Filter {
+            pred: Predicate(Rc::new(PreASAPNode::Literal(ScalarValue::Int64(1)))),
             child: Rc::clone(&shared),
         };
-        let root_b = QueryExpr::Filter {
-            pred: Predicate(Rc::new(QueryExpr::Literal(ScalarValue::Int64(2)))),
+        let root_b = PreASAPNode::Filter {
+            pred: Predicate(Rc::new(PreASAPNode::Literal(ScalarValue::Int64(2)))),
             child: Rc::clone(&shared),
         };
 
@@ -8529,14 +8548,14 @@ mod tests {
         // pointer as) the pre-search `shared` variable. Recover it from the
         // post-CSE root's own `child` field instead of the stale `shared`
         // handle.
-        let QueryExpr::Filter {
+        let PreASAPNode::Filter {
             child: post_cse_shared_a,
             ..
         } = space.roots[0].1.as_ref()
         else {
             panic!("expected a Filter root");
         };
-        let QueryExpr::Filter {
+        let PreASAPNode::Filter {
             child: post_cse_shared_b,
             ..
         } = space.roots[1].1.as_ref()
@@ -8565,7 +8584,7 @@ mod tests {
     #[test]
     fn add_candidate_rejects_a_true_rewrite_duplicate() {
         // SharedSubtreeStrategy's `Replacement::Rewrite` candidates are
-        // real `QueryExpr` values with `PartialEq`, so `add_candidate` can
+        // real `PreASAPNode` values with `PartialEq`, so `add_candidate` can
         // (and must) actually reject a genuine repeat — unlike the
         // `Replacement::Summary` case (see the test below).
         let root = Rc::new(agg(
@@ -8603,7 +8622,7 @@ mod tests {
 
     #[test]
     fn add_candidate_never_dedups_summary_candidates() {
-        // Documented, deliberate consequence of `SummaryNode` deriving no
+        // Documented, deliberate consequence of `PostASAPNode` deriving no
         // `PartialEq` (see `is_duplicate_summary`'s own doc): re-proposing
         // the same `Replacement::Summary` candidates DOES grow the group —
         // this module refuses to guess at an equality check it can't back
@@ -8731,7 +8750,7 @@ mod tests {
         let ranked = space.cost_sorted(&PreferDDSketch);
         let agg_group = ranked
             .iter()
-            .find(|g| matches!(g.target.as_ref(), QueryExpr::Aggregate { .. }))
+            .find(|g| matches!(g.target.as_ref(), PreASAPNode::Aggregate { .. }))
             .unwrap();
         assert_eq!(agg_group.candidates.len(), 2);
         let first_kind = match &agg_group.candidates[0].replacement {
@@ -8754,7 +8773,7 @@ mod tests {
                 candidates.to_vec()
             }
 
-            fn estimated_subpopulation_count(&self, _target: &QueryExpr) -> Option<usize> {
+            fn estimated_subpopulation_count(&self, _target: &PreASAPNode) -> Option<usize> {
                 Some(self.0)
             }
         }
@@ -8777,7 +8796,7 @@ mod tests {
             let ranked = space.cost_sorted(&model);
             let aggregate = ranked
                 .iter()
-                .find(|group| matches!(group.target.as_ref(), QueryExpr::Aggregate { .. }))
+                .find(|group| matches!(group.target.as_ref(), PreASAPNode::Aggregate { .. }))
                 .expect("aggregate group");
             let Replacement::Summary(node) = &aggregate.candidates[0].replacement else {
                 panic!("grouping candidate must be a summary")
@@ -8808,7 +8827,7 @@ mod tests {
         let ranked = space.cost_sorted(&DefaultCostModel);
         let agg_group = ranked
             .iter()
-            .find(|g| matches!(g.target.as_ref(), QueryExpr::Aggregate { .. }))
+            .find(|g| matches!(g.target.as_ref(), PreASAPNode::Aggregate { .. }))
             .unwrap();
         assert_eq!(
             agg_group.costs.len(),
@@ -8934,7 +8953,7 @@ mod tests {
         let selected = space.global_selection(&DefaultCostModel);
         let scan_group = selected
             .target_selections()
-            .find(|g| matches!(g.target.as_ref(), QueryExpr::Scan { .. }))
+            .find(|g| matches!(g.target.as_ref(), PreASAPNode::Scan { .. }))
             .unwrap();
         assert!(scan_group.chosen.is_none());
         assert_eq!(scan_group.effective_consumer_count, 1);
@@ -8972,7 +8991,7 @@ mod tests {
         let selected = space.global_selection(&PreferDDSketch);
         let agg_group = selected
             .target_selections()
-            .find(|g| matches!(g.target.as_ref(), QueryExpr::Aggregate { .. }))
+            .find(|g| matches!(g.target.as_ref(), PreASAPNode::Aggregate { .. }))
             .unwrap();
         let kind = match &agg_group.chosen.unwrap().replacement {
             Replacement::Summary(node) => sketch_kind_of(node),
@@ -9017,7 +9036,7 @@ mod tests {
             },
             ReplacementSubDAG {
                 strategy: "TestStrategy",
-                replacement: Replacement::Rewrite(Rc::new(QueryExpr::CurrentTimestamp)),
+                replacement: Replacement::Rewrite(Rc::new(PreASAPNode::CurrentTimestamp)),
                 provenance: ReplacementProvenance::LogicalRewrite,
                 rationale: "different rewrite strategy".into(),
             },
@@ -9076,12 +9095,12 @@ mod tests {
         use asap_types::pre_asap::expr_ir::ScalarValue;
         use asap_types::pre_asap::query_expr::Predicate;
 
-        let c = || QueryExpr::Dedup {
+        let c = || PreASAPNode::Dedup {
             cols: vec![0],
             child: Rc::new(metric_scan(&["job"])),
         };
-        let a = || QueryExpr::Filter {
-            pred: Predicate(Rc::new(QueryExpr::Literal(ScalarValue::Boolean(true)))),
+        let a = || PreASAPNode::Filter {
+            pred: Predicate(Rc::new(PreASAPNode::Literal(ScalarValue::Boolean(true)))),
             child: Rc::new(c()),
         };
 
@@ -9097,7 +9116,7 @@ mod tests {
         // (non-mixed) two-candidate SharedSubtreeStrategy pairs.
         assert!(Rc::ptr_eq(&space.roots[0].1, &space.roots[1].1));
         let a_rc = &space.roots[0].1;
-        let QueryExpr::Filter { child: c_via_a, .. } = a_rc.as_ref() else {
+        let PreASAPNode::Filter { child: c_via_a, .. } = a_rc.as_ref() else {
             panic!("expected root1/root2 to still be a Filter");
         };
         assert!(Rc::ptr_eq(c_via_a, &space.roots[2].1));
@@ -9203,7 +9222,7 @@ mod tests {
             }
         }
 
-        let shared = Rc::new(QueryExpr::Dedup {
+        let shared = Rc::new(PreASAPNode::Dedup {
             cols: vec![0],
             child: Rc::new(metric_scan(&["job"])),
         });
@@ -9222,17 +9241,17 @@ mod tests {
         use asap_types::pre_asap::expr_ir::ScalarValue;
         use asap_types::pre_asap::query_expr::Predicate;
 
-        let c = || QueryExpr::Dedup {
+        let c = || PreASAPNode::Dedup {
             cols: vec![0],
             child: Rc::new(metric_scan(&["job"])),
         };
-        let a = || QueryExpr::Filter {
-            pred: Predicate(Rc::new(QueryExpr::Literal(ScalarValue::Boolean(true)))),
+        let a = || PreASAPNode::Filter {
+            pred: Predicate(Rc::new(PreASAPNode::Literal(ScalarValue::Boolean(true)))),
             child: Rc::new(c()),
         };
         let space = search_workload(vec![("root1", Rc::new(a())), ("root2", Rc::new(a()))]);
         let a_rc = &space.roots[0].1;
-        let QueryExpr::Filter { child: c_rc, .. } = a_rc.as_ref() else {
+        let PreASAPNode::Filter { child: c_rc, .. } = a_rc.as_ref() else {
             panic!("expected Filter root");
         };
 
@@ -9269,12 +9288,12 @@ mod tests {
             }
         }
 
-        let child = || QueryExpr::Dedup {
+        let child = || PreASAPNode::Dedup {
             cols: vec![0],
             child: Rc::new(metric_scan(&["job"])),
         };
-        let parent = || QueryExpr::Filter {
-            pred: Predicate(Rc::new(QueryExpr::Literal(ScalarValue::Boolean(true)))),
+        let parent = || PreASAPNode::Filter {
+            pred: Predicate(Rc::new(PreASAPNode::Literal(ScalarValue::Boolean(true)))),
             child: Rc::new(child()),
         };
         let space = search_workload(vec![
@@ -9282,7 +9301,7 @@ mod tests {
             ("root2", Rc::new(parent())),
         ]);
         let parent_rc = &space.roots[0].1;
-        let QueryExpr::Filter {
+        let PreASAPNode::Filter {
             child: child_rc, ..
         } = parent_rc.as_ref()
         else {
@@ -9314,13 +9333,13 @@ mod tests {
         struct ReplaceFilterChild;
         impl ReplacementStrategy for ReplaceFilterChild {
             fn matches(&self, target: &TargetSubDAG<'_>) -> bool {
-                matches!(target.root.as_ref(), QueryExpr::Filter { .. })
+                matches!(target.root.as_ref(), PreASAPNode::Filter { .. })
             }
 
             fn replacements(&self, _target: &TargetSubDAG<'_>) -> Vec<ReplacementSubDAG> {
                 vec![ReplacementSubDAG {
                     strategy: "ReplaceFilterChild",
-                    replacement: Replacement::Rewrite(Rc::new(QueryExpr::Dedup {
+                    replacement: Replacement::Rewrite(Rc::new(PreASAPNode::Dedup {
                         cols: vec![0],
                         child: Rc::new(metric_scan(&["replacement"])),
                     })),
@@ -9331,8 +9350,8 @@ mod tests {
         }
 
         let original_child = Rc::new(metric_scan(&["original"]));
-        let root = Rc::new(QueryExpr::Filter {
-            pred: Predicate(Rc::new(QueryExpr::Literal(ScalarValue::Boolean(true)))),
+        let root = Rc::new(PreASAPNode::Filter {
+            pred: Predicate(Rc::new(PreASAPNode::Literal(ScalarValue::Boolean(true)))),
             child: Rc::clone(&original_child),
         });
         let strategies: Vec<Box<dyn ReplacementStrategy>> = vec![Box::new(ReplaceFilterChild)];
@@ -9348,14 +9367,14 @@ mod tests {
         else {
             panic!("expected logical rewrite");
         };
-        let QueryExpr::Dedup {
+        let PreASAPNode::Dedup {
             child: replacement_child,
             ..
         } = rewrite.as_ref()
         else {
             panic!("expected Dedup rewrite");
         };
-        let QueryExpr::Filter {
+        let PreASAPNode::Filter {
             child: original_child,
             ..
         } = root.as_ref()
@@ -9394,7 +9413,7 @@ mod tests {
             fn candidate_cost(&self, _: &ReplacementSubDAG, _: &TargetSubDAG<'_>) -> Option<Cost> {
                 Some(Cost(1.0))
             }
-            fn summary_support_evidence(&self, _: &SummaryNode) -> Option<bool> {
+            fn summary_support_evidence(&self, _: &PostASAPNode) -> Option<bool> {
                 Some(false)
             }
         }
@@ -9559,12 +9578,12 @@ mod tests {
         use asap_types::pre_asap::query_expr::Predicate;
 
         let shared = agg(vec![2], AggIntent::Sum { col: None }, metric_scan(&["job"]));
-        let root_a = QueryExpr::Filter {
-            pred: Predicate(Rc::new(QueryExpr::Literal(ScalarValue::Int64(1)))),
+        let root_a = PreASAPNode::Filter {
+            pred: Predicate(Rc::new(PreASAPNode::Literal(ScalarValue::Int64(1)))),
             child: Rc::new(shared.clone()),
         };
-        let root_b = QueryExpr::Filter {
-            pred: Predicate(Rc::new(QueryExpr::Literal(ScalarValue::Int64(2)))),
+        let root_b = PreASAPNode::Filter {
+            pred: Predicate(Rc::new(PreASAPNode::Literal(ScalarValue::Int64(2)))),
             child: Rc::new(shared),
         };
         let roots = vec![("a", Rc::new(root_a)), ("b", Rc::new(root_b))];
@@ -9593,7 +9612,7 @@ mod tests {
         // Discovery-order sanity: root_b comes after the shared child in
         // discover_targets's own order (the exact non-topological case this
         // test exists to cover).
-        let QueryExpr::Filter {
+        let PreASAPNode::Filter {
             child: shared_via_a,
             ..
         } = space.roots[0].1.as_ref()
@@ -9657,12 +9676,12 @@ mod tests {
             self.next.set(n + 1);
             use asap_types::pre_asap::expr_ir::ScalarValue;
             use asap_types::pre_asap::query_expr::Predicate;
-            let fresh_inner_layer = QueryExpr::Filter {
-                pred: Predicate(Rc::new(QueryExpr::Literal(ScalarValue::Int64(n)))),
+            let fresh_inner_layer = PreASAPNode::Filter {
+                pred: Predicate(Rc::new(PreASAPNode::Literal(ScalarValue::Int64(n)))),
                 child: Rc::clone(target.root),
             };
-            let outer_wrapper = QueryExpr::Filter {
-                pred: Predicate(Rc::new(QueryExpr::Literal(ScalarValue::Boolean(true)))),
+            let outer_wrapper = PreASAPNode::Filter {
+                pred: Predicate(Rc::new(PreASAPNode::Literal(ScalarValue::Boolean(true)))),
                 child: Rc::new(fresh_inner_layer),
             };
             vec![ReplacementSubDAG {
@@ -9696,8 +9715,8 @@ mod tests {
     // pattern by hand since `realize_child` is `pub(crate)`), these tests
     // call `realize_child` directly.
 
-    fn agg_per_entity(intent: AggIntent, child: QueryExpr) -> QueryExpr {
-        QueryExpr::Aggregate {
+    fn agg_per_entity(intent: AggIntent, child: PreASAPNode) -> PreASAPNode {
+        PreASAPNode::Aggregate {
             reduction: ReductionTy::PerEntity,
             measures: vec![intent],
             output_names: vec![],
@@ -9715,13 +9734,13 @@ mod tests {
     }
 
     fn realize_first(
-        expr: &QueryExpr,
+        expr: &PreASAPNode,
         cost_model: &dyn CostModel,
-    ) -> Result<Rc<SummaryNode>, RealizationError> {
+    ) -> Result<Rc<PostASAPNode>, RealizationError> {
         realize_child(&Rc::new(expr.clone()), cost_model)
     }
 
-    fn realize(expr: &QueryExpr) -> Result<Rc<SummaryNode>, RealizationError> {
+    fn realize(expr: &PreASAPNode) -> Result<Rc<PostASAPNode>, RealizationError> {
         realize_first(expr, &DefaultCostModel)
     }
 
@@ -9778,7 +9797,7 @@ mod tests {
             )
         );
         assert!(matches!(child.expr, SummaryExpr::KeepPreAsap(ref e)
-            if matches!(**e, QueryExpr::Scan { .. })));
+            if matches!(**e, PreASAPNode::Scan { .. })));
     }
 
     /// A deployment-supplied [`CostModel`] can override the default KLL
@@ -9965,7 +9984,7 @@ mod tests {
         use std::time::Duration;
         let q = agg_per_entity(
             AggIntent::Rate,
-            QueryExpr::TimeRange {
+            PreASAPNode::TimeRange {
                 range: Duration::from_secs(300),
                 child: Rc::new(metric_scan(&["job"])),
             },
@@ -10003,7 +10022,7 @@ mod tests {
         use std::time::Duration;
         let q = agg_per_entity(
             default_quantile(0.99),
-            QueryExpr::TimeRange {
+            PreASAPNode::TimeRange {
                 range: Duration::from_secs(10),
                 child: Rc::new(metric_scan(&["job"])),
             },
@@ -10115,7 +10134,7 @@ mod tests {
     }
 
     /// The update expression of the first `SummaryAgg` in the tree.
-    fn find_summary_input(node: &SummaryNode) -> Option<SummaryInputExpr> {
+    fn find_summary_input(node: &PostASAPNode) -> Option<SummaryInputExpr> {
         match &node.expr {
             SummaryExpr::SummaryAgg { input, .. } if input.item.is_none() => {
                 Some(input.weight.clone())
@@ -10155,11 +10174,11 @@ mod tests {
         // logical.
         use asap_types::pre_asap::expr_ir::{CompareOpKind, ScalarValue};
         use asap_types::pre_asap::query_expr::Predicate;
-        let q = QueryExpr::Filter {
-            pred: Predicate(Rc::new(QueryExpr::Compare {
-                left: Rc::new(QueryExpr::Column(0)),
+        let q = PreASAPNode::Filter {
+            pred: Predicate(Rc::new(PreASAPNode::Compare {
+                left: Rc::new(PreASAPNode::Column(0)),
                 op: CompareOpKind::Gt,
-                right: Rc::new(QueryExpr::Literal(ScalarValue::Float64(0.5))),
+                right: Rc::new(PreASAPNode::Literal(ScalarValue::Float64(0.5))),
             })),
             child: Rc::new(agg(vec![], default_quantile(0.99), metric_scan(&[]))),
         };
@@ -10172,8 +10191,8 @@ mod tests {
         use asap_types::pre_asap::expr_ir::ScalarValue;
         use asap_types::pre_asap::query_expr::Predicate;
         let mut q = agg(vec![2], default_quantile(0.99), metric_scan(&["job"]));
-        if let QueryExpr::Aggregate { having, .. } = &mut q {
-            *having = Some(Predicate(Rc::new(QueryExpr::Literal(
+        if let PreASAPNode::Aggregate { having, .. } = &mut q {
+            *having = Some(Predicate(Rc::new(PreASAPNode::Literal(
                 ScalarValue::Boolean(true),
             ))));
         }
@@ -10182,7 +10201,7 @@ mod tests {
             SummaryExpr::KeepPreAsap(_)
         ));
 
-        let multi = QueryExpr::Aggregate {
+        let multi = PreASAPNode::Aggregate {
             reduction: ReductionTy::by(vec![2]),
             measures: vec![AggIntent::Sum { col: None }, AggIntent::Avg { col: None }],
             output_names: vec![],
@@ -10432,12 +10451,12 @@ mod tests {
 
     #[test]
     fn temporal_per_entity_topk_uses_series_identity_and_sample_value() {
-        let inner = QueryExpr::Aggregate {
+        let inner = PreASAPNode::Aggregate {
             reduction: ReductionTy::PerEntity,
             measures: vec![AggIntent::Sum { col: None }],
             output_names: vec![],
             having: None,
-            child: Rc::new(QueryExpr::TimeRange {
+            child: Rc::new(PreASAPNode::TimeRange {
                 range: std::time::Duration::from_secs(60),
                 child: Rc::new(metric_scan(&["service"])),
             }),
@@ -10594,7 +10613,7 @@ mod tests {
     fn sql_reducer_resolves_named_input_column() {
         // SUM(bytes) over a tabular scan: `col` resolves positionally to the
         // named column, not the PromQL sample value.
-        let scan = QueryExpr::Scan {
+        let scan = PreASAPNode::Scan {
             source: Source::Table {
                 table_ref: "t".into(),
             },
@@ -10677,7 +10696,7 @@ mod tests {
         }
     }
 
-    fn summary_child(node: &SummaryNode) -> &Rc<SummaryNode> {
+    fn summary_child(node: &PostASAPNode) -> &Rc<PostASAPNode> {
         match &node.expr {
             SummaryExpr::SummaryEstimate { summary_input, .. } => summary_child(summary_input),
             SummaryExpr::SummaryAgg { child, .. } => child,
@@ -10977,11 +10996,11 @@ mod tests {
     fn scoped_hll_evidence_sizes_and_certifies_without_a_deployment_model() {
         use crate::accuracy::EstimatorContract;
         struct SourceEvidence {
-            expression: QueryExpr,
+            expression: PreASAPNode,
             max_distinct: u32,
         }
         impl AccuracyEvidenceProvider for SourceEvidence {
-            fn estimator_contract(&self, expression: &QueryExpr) -> Option<EstimatorContract> {
+            fn estimator_contract(&self, expression: &PreASAPNode) -> Option<EstimatorContract> {
                 (expression == &self.expression).then_some(EstimatorContract::ClassicHll {
                     max_distinct_per_readout: self.max_distinct,
                 })
@@ -11091,9 +11110,9 @@ mod tests {
     #[test]
     fn residual_projection_finalizes_selected_exact_state() {
         let inner = Rc::new(agg(vec![], AggIntent::Sum { col: None }, metric_scan(&[])));
-        let root = Rc::new(QueryExpr::Project {
+        let root = Rc::new(PreASAPNode::Project {
             cols: vec![asap_types::pre_asap::ProjectItem {
-                expr: QueryExpr::Column(0),
+                expr: PreASAPNode::Column(0),
                 alias: Some("result".into()),
             }],
             qualifier: None,
@@ -11143,7 +11162,7 @@ mod tests {
     #[test]
     fn heap_readout_preserves_numeric_item_identity() {
         let mut raw = metric_scan(&["id", "description"]);
-        let QueryExpr::Scan { schema, .. } = &mut raw else {
+        let PreASAPNode::Scan { schema, .. } = &mut raw else {
             unreachable!()
         };
         schema.columns[2].dtype = DataType::Int64;

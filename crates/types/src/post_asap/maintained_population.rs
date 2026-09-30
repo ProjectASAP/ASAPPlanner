@@ -37,23 +37,23 @@ pub enum PopulationReadout {
 
 impl CurrentSeriesInput {
     /// Verify the named contract against the canonical maintenance input.
-    pub fn matches_input(&self, input: &crate::pre_asap::QueryExpr) -> bool {
-        use crate::pre_asap::{CompareOpKind, DataType, QueryExpr, ScalarValue, Source};
+    pub fn matches_input(&self, input: &crate::pre_asap::PreASAPNode) -> bool {
+        use crate::pre_asap::{CompareOpKind, DataType, PreASAPNode, ScalarValue, Source};
         // PromQL instant selectors carry an ingestion-interval `TimeRange` as
         // their input scope. The population must use the same expiry horizon;
         // shifted and otherwise transformed inputs still fail below.
         let input = match input {
-            QueryExpr::TimeRange { range, child }
+            PreASAPNode::TimeRange { range, child }
                 if self.lookback_ms > 0
                     && *range == std::time::Duration::from_millis(self.lookback_ms) =>
             {
                 child.as_ref()
             }
-            QueryExpr::TimeRange { .. } => return false,
+            PreASAPNode::TimeRange { .. } => return false,
             other if self.lookback_ms == 300_000 => other,
             _ => return false,
         };
-        let QueryExpr::Scan {
+        let PreASAPNode::Scan {
             source: Source::TimeSeries { metric },
             predicates,
             schema,
@@ -78,10 +78,10 @@ impl CurrentSeriesInput {
         }
         let mut matchers = Vec::new();
         for predicate in predicates {
-            let QueryExpr::Compare { left, op, right } = predicate.0.as_ref() else {
+            let PreASAPNode::Compare { left, op, right } = predicate.0.as_ref() else {
                 return false;
             };
-            let (QueryExpr::Column(col), QueryExpr::Literal(ScalarValue::Utf8(value))) =
+            let (PreASAPNode::Column(col), PreASAPNode::Literal(ScalarValue::Utf8(value))) =
                 (left.as_ref(), right.as_ref())
             else {
                 return false;
@@ -117,7 +117,7 @@ impl CurrentSeriesInput {
 pub enum PopulationInput {
     CurrentSeries(CurrentSeriesInput),
     Rows {
-        input: std::rc::Rc<crate::pre_asap::QueryExpr>,
+        input: std::rc::Rc<crate::pre_asap::PreASAPNode>,
         value_column: usize,
         grouping: crate::pre_asap::GroupKeys,
     },
@@ -131,7 +131,7 @@ pub struct MaintainedPopulation {
 }
 
 impl MaintainedPopulation {
-    pub fn matches_input(&self, input: &crate::pre_asap::QueryExpr) -> bool {
+    pub fn matches_input(&self, input: &crate::pre_asap::PreASAPNode) -> bool {
         match &self.input {
             PopulationInput::CurrentSeries(spec) => spec.matches_input(input),
             PopulationInput::Rows {
@@ -139,9 +139,9 @@ impl MaintainedPopulation {
                 value_column,
                 grouping,
             } => {
-                use crate::pre_asap::{DataType, QueryExpr, Source};
+                use crate::pre_asap::{DataType, PreASAPNode, Source};
                 expected.as_ref() == input
-                    && matches!(input, QueryExpr::Scan { source: Source::Table { .. }, schema, .. }
+                    && matches!(input, PreASAPNode::Scan { source: Source::Table { .. }, schema, .. }
                         if schema.closed && schema.columns.get(*value_column).is_some_and(|c| c.dtype == DataType::Float64 && !c.nullable)
                             && !grouping.is_without() && grouping.keys().iter().all(|k| *k < schema.columns.len()))
             }

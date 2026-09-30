@@ -19,14 +19,14 @@ pub(super) fn raw_series_owner(slot: NodeId) -> Option<NodeId> {
 }
 
 /// A selector expression and its raw-series row schema.
-pub type Selector = (QueryExpr, Schema);
+pub type Selector = (PreASAPNode, Schema);
 
 /// The selectors a Fallback expression reads, left to right, and the row
 /// schema of the raw series the deployment supplies for each at
 /// [`raw_series_input`]. The rows must cover the selector's window at every
 /// evaluation instant `T`, or at its `@` time: `(T - offset - range, T - offset]`;
 /// under a subquery `[R:S] offset O` that is `(T - O - R - offset - range, T - O - offset]`.
-pub fn raw_series(expression: &QueryExpr) -> Result<Vec<Selector>, Error> {
+pub fn raw_series(expression: &PreASAPNode) -> Result<Vec<Selector>, Error> {
     Ok(lower(expression)?.selectors)
 }
 
@@ -43,13 +43,13 @@ pub(super) struct Lowering {
     pub steps: Vec<(Operator, Vec<Input>)>,
 }
 
-pub(super) fn lower(expression: &QueryExpr) -> Result<Lowering, Error> {
+pub(super) fn lower(expression: &PreASAPNode) -> Result<Lowering, Error> {
     let mut lowering = Lowering::default();
     lowering.value(expression)?;
     Ok(lowering)
 }
 
-fn declared(expression: &QueryExpr) -> Result<Schema, Error> {
+fn declared(expression: &PreASAPNode) -> Result<Schema, Error> {
     let schema = expression
         .output_schema()
         .map_err(|error| invalid(error.to_string()))?;
@@ -69,10 +69,10 @@ fn at(shift: &planner_types::pre_asap::TimeShift) -> Result<Option<i64>, Error> 
     }
 }
 
-fn range_anchor(expression: &QueryExpr) -> Option<AtModifier> {
+fn range_anchor(expression: &PreASAPNode) -> Option<AtModifier> {
     match expression {
-        QueryExpr::TimeRange { child, .. } => range_anchor(child),
-        QueryExpr::TimeShift { shift, .. } => shift
+        PreASAPNode::TimeRange { child, .. } => range_anchor(child),
+        PreASAPNode::TimeShift { shift, .. } => shift
             .at
             .filter(|at| matches!(at, AtModifier::Start | AtModifier::End)),
         _ => None,
@@ -80,15 +80,15 @@ fn range_anchor(expression: &QueryExpr) -> Option<AtModifier> {
 }
 
 /// `TimeRange { range, [TimeShift { offset, @ }], Scan }`: range, offset, `@`.
-fn selector(expression: &QueryExpr) -> Result<(i64, i64, Option<i64>), Error> {
-    let QueryExpr::TimeRange { range, child } = expression else {
+fn selector(expression: &PreASAPNode) -> Result<(i64, i64, Option<i64>), Error> {
+    let PreASAPNode::TimeRange { range, child } = expression else {
         return Err(invalid("PromQL operand must be a series selector"));
     };
     let (offset, at, scan) = match child.as_ref() {
-        QueryExpr::TimeShift { shift, child } => (shift.offset_ms, at(shift)?, child.as_ref()),
+        PreASAPNode::TimeShift { shift, child } => (shift.offset_ms, at(shift)?, child.as_ref()),
         scan => (0, None, scan),
     };
-    if !matches!(scan, QueryExpr::Scan { .. }) {
+    if !matches!(scan, PreASAPNode::Scan { .. }) {
         return Err(invalid("PromQL selector must read one scan"));
     }
     Ok((millis(range)?, offset, at))
@@ -96,12 +96,12 @@ fn selector(expression: &QueryExpr) -> Result<(i64, i64, Option<i64>), Error> {
 
 /// PromQL scalar-valued expressions have no labels to match. A binary
 /// operator is scalar-valued when both operands are.
-pub(super) fn scalar(expression: &QueryExpr) -> bool {
+pub(super) fn scalar(expression: &PreASAPNode) -> bool {
     match expression {
-        QueryExpr::PromqlScalarBridge(_)
-        | QueryExpr::PromqlScalarFromVector(_)
-        | QueryExpr::EvalTimestamp => true,
-        QueryExpr::BinaryOp { lhs, rhs, .. } => scalar(lhs) && scalar(rhs),
+        PreASAPNode::PromqlScalarBridge(_)
+        | PreASAPNode::PromqlScalarFromVector(_)
+        | PreASAPNode::EvalTimestamp => true,
+        PreASAPNode::BinaryOp { lhs, rhs, .. } => scalar(lhs) && scalar(rhs),
         _ => false,
     }
 }
@@ -124,12 +124,12 @@ impl Lowering {
         &mut self,
         operator: Operator,
         inputs: Vec<Input>,
-        logical: &QueryExpr,
+        logical: &PreASAPNode,
     ) -> Result<Input, Error> {
         Ok(self.add(operator.with_output_schema(declared(logical)?)?, inputs))
     }
 
-    fn read(&mut self, selector: &QueryExpr) -> Result<Input, Error> {
+    fn read(&mut self, selector: &PreASAPNode) -> Result<Input, Error> {
         let schema = declared(selector)?;
         if !schema
             .fields
@@ -145,12 +145,12 @@ impl Lowering {
     }
 
     /// An instant vector, or a scalar for scalar-valued expressions.
-    fn value(&mut self, expression: &QueryExpr) -> Result<Input, Error> {
+    fn value(&mut self, expression: &PreASAPNode) -> Result<Input, Error> {
         match expression {
-            QueryExpr::Concat { children, .. } => {
+            PreASAPNode::Concat { children, .. } => {
                 if !children.iter().all(|branch| matches!(branch,
-                    QueryExpr::PromqlRelabel { child, .. } if matches!(child.as_ref(),
-                        QueryExpr::Aggregate { measures, .. } if matches!(measures.as_slice(), [AggIntent::HistogramQuantile { .. }])))) {
+                    PreASAPNode::PromqlRelabel { child, .. } if matches!(child.as_ref(),
+                        PreASAPNode::Aggregate { measures, .. } if matches!(measures.as_slice(), [AggIntent::HistogramQuantile { .. }])))) {
                     return Err(invalid("PromQL concatenation requires classic histogram quantile branches"));
                 }
                 let inputs = children
@@ -171,15 +171,17 @@ impl Lowering {
                     expression,
                 )
             }
-            QueryExpr::PromqlRelabel { dst, value, child } => {
+            PreASAPNode::PromqlRelabel { dst, value, child } => {
                 let step = self.value(child)?;
                 let input = self.schema(&step);
                 let (replacement, source_regex) = match value.as_ref() {
-                    QueryExpr::Literal(planner_types::pre_asap::ScalarValue::Utf8(value)) => {
+                    PreASAPNode::Literal(planner_types::pre_asap::ScalarValue::Utf8(value)) => {
                         (value.clone(), None)
                     }
-                    QueryExpr::FunctionCall { name, args } if name == "label_replace" => {
-                        let [QueryExpr::Column(source), QueryExpr::Literal(planner_types::pre_asap::ScalarValue::Utf8(pattern)), QueryExpr::Literal(planner_types::pre_asap::ScalarValue::Utf8(
+                    PreASAPNode::FunctionCall { name, args } if name == "label_replace" => {
+                        let [PreASAPNode::Column(source), PreASAPNode::Literal(planner_types::pre_asap::ScalarValue::Utf8(
+                            pattern,
+                        )), PreASAPNode::Literal(planner_types::pre_asap::ScalarValue::Utf8(
                             replacement,
                         ))] = args.as_slice()
                         else {
@@ -204,7 +206,7 @@ impl Lowering {
                 )?;
                 self.push(operator, vec![step], expression)
             }
-            QueryExpr::TimeRange { .. } => {
+            PreASAPNode::TimeRange { .. } => {
                 let (range, offset, at) = selector(expression)?;
                 let input = self.read(expression)?;
                 let schema = self.schema(&input);
@@ -215,7 +217,7 @@ impl Lowering {
                     expression,
                 )
             }
-            QueryExpr::Aggregate {
+            PreASAPNode::Aggregate {
                 reduction: planner_types::pre_asap::Reduction::PerEntity,
                 measures,
                 having: None,
@@ -233,7 +235,7 @@ impl Lowering {
                 let input = self.schema(&step);
                 Ok(self.add(Operator::series_without_name(input)?, vec![step]))
             }
-            QueryExpr::Aggregate {
+            PreASAPNode::Aggregate {
                 reduction: planner_types::pre_asap::Reduction::Reduce(keys),
                 measures,
                 having: None,
@@ -246,7 +248,7 @@ impl Lowering {
                 let input = self.value(child)?;
                 self.aggregate(input, measure, keys, expression)
             }
-            QueryExpr::Sort {
+            PreASAPNode::Sort {
                 keys,
                 partition_by,
                 child,
@@ -256,7 +258,7 @@ impl Lowering {
                 let keys = keys
                     .iter()
                     .map(|key| match key.expr {
-                        QueryExpr::Column(column) => Ok(SortKey {
+                        PreASAPNode::Column(column) => Ok(SortKey {
                             column,
                             descending: !key.ascending,
                             nulls_first: key.nulls_first,
@@ -267,12 +269,12 @@ impl Lowering {
                 let groups = groups(&input, partition_by)?;
                 self.push(Operator::sort(input, keys, groups)?, vec![step], expression)
             }
-            QueryExpr::Limit { n, offset, child } => {
+            PreASAPNode::Limit { n, offset, child } => {
                 let step = self.value(child)?;
                 let input = self.schema(&step);
                 // `topk by (...)` partitions through the Sort it limits.
                 let groups = match child.as_ref() {
-                    QueryExpr::Sort { partition_by, .. } => groups(&input, partition_by)?,
+                    PreASAPNode::Sort { partition_by, .. } => groups(&input, partition_by)?,
                     _ => vec![],
                 };
                 self.push(
@@ -281,7 +283,7 @@ impl Lowering {
                     expression,
                 )
             }
-            QueryExpr::BinaryOp {
+            PreASAPNode::BinaryOp {
                 op,
                 lhs,
                 rhs,
@@ -302,7 +304,7 @@ impl Lowering {
                 )?;
                 self.push(binary, sides, expression)
             }
-            QueryExpr::PromqlScalarFromVector(child) => {
+            PreASAPNode::PromqlScalarFromVector(child) => {
                 let step = self.value(child)?;
                 let input = self.schema(&step);
                 let value = named_column(&input, &ColumnRef::SampleValue)?;
@@ -312,7 +314,7 @@ impl Lowering {
                     expression,
                 )
             }
-            QueryExpr::PromqlVectorFromScalar(child) => {
+            PreASAPNode::PromqlVectorFromScalar(child) => {
                 let step = self.value(child)?;
                 let input = self.schema(&step);
                 Ok(self.add(
@@ -320,8 +322,10 @@ impl Lowering {
                     vec![step],
                 ))
             }
-            QueryExpr::EvalTimestamp => self.push(Operator::evaluation_time(), vec![], expression),
-            QueryExpr::PromqlScalarBridge(_) => {
+            PreASAPNode::EvalTimestamp => {
+                self.push(Operator::evaluation_time(), vec![], expression)
+            }
+            PreASAPNode::PromqlScalarBridge(_) => {
                 let value = row_values::scalar_literal(expression)
                     .ok_or_else(|| invalid("PromQL scalar must be a literal"))?;
                 self.push(
@@ -338,15 +342,17 @@ impl Lowering {
     fn range_function(
         &mut self,
         function: &AggIntent,
-        matrix: &QueryExpr,
-        logical: &QueryExpr,
+        matrix: &PreASAPNode,
+        logical: &PreASAPNode,
     ) -> Result<Input, Error> {
         let function = unbound(function)?;
         let (subquery, offset, at_ms) = match matrix {
-            QueryExpr::TimeShift { shift, child } => (child.as_ref(), shift.offset_ms, at(shift)?),
+            PreASAPNode::TimeShift { shift, child } => {
+                (child.as_ref(), shift.offset_ms, at(shift)?)
+            }
             other => (other, 0, None),
         };
-        let QueryExpr::PromqlSubquery {
+        let PreASAPNode::PromqlSubquery {
             range: outer,
             resolution,
             child,
@@ -373,7 +379,7 @@ impl Lowering {
         };
         // Each step evaluates a per-series selection or range function.
         let (inner, selected) = match child.as_ref() {
-            QueryExpr::Aggregate {
+            PreASAPNode::Aggregate {
                 reduction: planner_types::pre_asap::Reduction::PerEntity,
                 measures,
                 having: None,
@@ -423,7 +429,7 @@ impl Lowering {
         mut step: Input,
         measure: &AggIntent,
         keys: &GroupKeys,
-        logical: &QueryExpr,
+        logical: &PreASAPNode,
     ) -> Result<Input, Error> {
         let mut input = self.schema(&step);
         if let AggIntent::HistogramQuantile { q, le } = measure {

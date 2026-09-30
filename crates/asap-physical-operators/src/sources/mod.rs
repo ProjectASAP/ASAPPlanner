@@ -9,7 +9,7 @@ use crate::{
 use futures::{stream, StreamExt};
 use planner_types::{
     post_asap::{SummaryFamilyType, SummaryField, SummarySchema},
-    pre_asap::{DataType, QueryExpr, Source},
+    pre_asap::{DataType, PreASAPNode, Source},
 };
 use std::sync::Arc;
 
@@ -40,8 +40,8 @@ impl DataSources {
         self.sources.push((identity, source));
         Ok(())
     }
-    pub fn bind(&self, expression: &QueryExpr) -> Result<Scan, Error> {
-        let QueryExpr::Scan {
+    pub fn bind(&self, expression: &PreASAPNode) -> Result<Scan, Error> {
+        let PreASAPNode::Scan {
             source,
             predicates,
             schema,

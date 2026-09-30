@@ -82,12 +82,12 @@ pub fn boundary_schema(node: &PostAsapDagNode) -> Result<Schema, Error> {
         return source_schema(&node.output_schema);
     };
     let scan = match expression {
-        planner_types::pre_asap::QueryExpr::TimeRange { child, .. } => child.as_ref(),
+        planner_types::pre_asap::PreASAPNode::TimeRange { child, .. } => child.as_ref(),
         expression => expression,
     };
     if !matches!(
         scan,
-        planner_types::pre_asap::QueryExpr::Scan {
+        planner_types::pre_asap::PreASAPNode::Scan {
             source: planner_types::pre_asap::Source::TimeSeries { .. },
             ..
         }
@@ -154,10 +154,10 @@ pub fn is_population_schema(schema: &Schema) -> bool {
 /// Compile a complete selected precompute sub-DAG. Inputs are already-computed
 /// state boundaries; the deployment supplies groups, panes and states, never operations.
 pub fn compile(
-    dag: &PostAsapDag,
+    dag: &PostASAPDAGTransport,
     frontiers: &[NodeId],
     roots: &[NodeId],
-) -> Result<CompiledPhysicalDag, Error> {
+) -> Result<PhysicalDAG, Error> {
     preflight_depth(dag)?;
     dag.validate().map_err(|e| invalid(e.to_string()))?;
     let nodes = dag
@@ -246,7 +246,7 @@ pub fn compile(
         outputs.insert(id, graph.output_contract(graph.roots()[0])?.schema);
         fragments.insert(id, (inputs, graph));
     }
-    CompiledPhysicalDag::compose(sources, fragments, roots.to_vec())
+    PhysicalDAG::compose(sources, fragments, roots.to_vec())
 }
 
 fn validate_value_output(node: &PostAsapDagNode) -> Result<(), Error> {
@@ -292,7 +292,7 @@ fn fragment(
     node: &PostAsapDagNode,
     schemas: &[Schema],
     parents: &[&PostAsapDagNode],
-) -> Result<CompiledPhysicalDag, Error> {
+) -> Result<PhysicalDAG, Error> {
     let sources = schemas
         .iter()
         .enumerate()
@@ -547,7 +547,7 @@ fn fragment(
             ))
         }
     };
-    CompiledPhysicalDag::from_operators(sources, operators, vec![root])
+    PhysicalDAG::from_operators(sources, operators, vec![root])
 }
 
 /// Resolve keyed item identities over raw sample rows: labels (absent labels

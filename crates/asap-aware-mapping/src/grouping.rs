@@ -73,11 +73,11 @@ use std::rc::Rc;
 
 use asap_types::post_asap::{
     default_hydra_params, hydra_kind_for, AccuracyError, BoundExpr, CompositionOperator,
-    GroupingStrategy, GuaranteeSource, HydraKind, ProbabilityExpr, ResultGuarantee,
-    SketchAlgorithm, SketchParams, SummaryExpr, SummaryFamilyType, SummaryNode,
+    GroupingStrategy, GuaranteeSource, HydraKind, PostASAPNode, ProbabilityExpr, ResultGuarantee,
+    SketchAlgorithm, SketchParams, SummaryExpr, SummaryFamilyType,
 };
 use asap_types::pre_asap::agg_intent::AggIntent;
-use asap_types::pre_asap::query_expr::{QueryExpr, Reduction};
+use asap_types::pre_asap::query_expr::{PreASAPNode, Reduction};
 
 use crate::accuracy::{
     AccuracyBudgetAllocator, AccuracyEvidenceProvider, AccuracyModel, PropagationStats,
@@ -173,7 +173,7 @@ impl<'a> HydraGroupingStrategy<'a> {
     /// variant modeled.
     fn hydra_proposals(&self, target: &TargetSubDAG<'_>) -> Proposals {
         let mut proposals = Proposals::default();
-        let QueryExpr::Aggregate { reduction, .. } = target.root.as_ref() else {
+        let PreASAPNode::Aggregate { reduction, .. } = target.root.as_ref() else {
             return proposals;
         };
         if !has_subpopulations(reduction) {
@@ -212,7 +212,7 @@ impl<'a> HydraGroupingStrategy<'a> {
     /// axis owns.
     fn build_candidate(
         &self,
-        root: &Rc<QueryExpr>,
+        root: &Rc<PreASAPNode>,
         intent: &AggIntent,
         sketch_kind: SketchAlgorithm,
         hydra_kind: HydraKind,
@@ -313,7 +313,7 @@ impl<'a> HydraGroupingStrategy<'a> {
 
 impl ReplacementStrategy for HydraGroupingStrategy<'_> {
     fn matches(&self, target: &TargetSubDAG<'_>) -> bool {
-        let QueryExpr::Aggregate { reduction, .. } = target.root.as_ref() else {
+        let PreASAPNode::Aggregate { reduction, .. } = target.root.as_ref() else {
             return false;
         };
         if !has_subpopulations(reduction) {
@@ -357,7 +357,7 @@ impl ReplacementStrategy for HydraGroupingStrategy<'_> {
 /// destructures the right variant for `kind`; this function's only job is
 /// to find whatever `SketchParams` the bind decision already committed to
 /// and hand the whole thing over unchanged.
-fn per_subpopulation_sketch_params(node: &SummaryNode) -> Option<SketchParams> {
+fn per_subpopulation_sketch_params(node: &PostASAPNode) -> Option<SketchParams> {
     match &node.expr {
         SummaryExpr::SummaryEstimate { summary_input, .. } => {
             per_subpopulation_sketch_params(summary_input)
@@ -377,15 +377,15 @@ fn per_subpopulation_sketch_params(node: &SummaryNode) -> Option<SketchParams> {
 /// sketch candidate this module builds actually has) to reach the
 /// `SummaryAgg` underneath.
 fn with_grouping(
-    node: Rc<SummaryNode>,
+    node: Rc<PostASAPNode>,
     grouping: GroupingStrategy,
     stats: &PropagationStats,
-) -> Rc<SummaryNode> {
+) -> Rc<PostASAPNode> {
     match &node.expr {
         SummaryExpr::SummaryEstimate {
             summary_input,
             query,
-        } => Rc::new(SummaryNode {
+        } => Rc::new(PostASAPNode {
             expr: SummaryExpr::SummaryEstimate {
                 summary_input: with_grouping(Rc::clone(summary_input), grouping, stats),
                 query: query.clone(),
@@ -412,7 +412,7 @@ fn with_grouping(
                     field.dtype = SummaryFamilyType::Sketch(kind.clone(), grouping.clone());
                 }
             }
-            Rc::new(SummaryNode {
+            Rc::new(PostASAPNode {
                 expr: SummaryExpr::SummaryAgg {
                     child: Rc::clone(child),
                     family: grouped_family,
@@ -497,21 +497,21 @@ mod tests {
     use asap_types::pre_asap::schema::{Column, DataType, Schema};
     use asap_types::types::AccuracyTarget;
 
-    fn metric_scan(labels: &[&str]) -> QueryExpr {
+    fn metric_scan(labels: &[&str]) -> PreASAPNode {
         let mut columns = vec![
             Column::new("ts", DataType::Timestamp, false),
             Column::new("value", DataType::Float64, false),
         ];
         columns.extend(labels.iter().map(|n| Column::new(*n, DataType::Utf8, true)));
-        QueryExpr::Scan {
+        PreASAPNode::Scan {
             source: Source::TimeSeries { metric: "m".into() },
             predicates: vec![],
             schema: Schema::with_time_index(columns, 0, vec![]),
         }
     }
 
-    fn agg(by: Vec<usize>, intent: AggIntent, child: QueryExpr) -> QueryExpr {
-        QueryExpr::Aggregate {
+    fn agg(by: Vec<usize>, intent: AggIntent, child: PreASAPNode) -> PreASAPNode {
+        PreASAPNode::Aggregate {
             reduction: Reduction::by(by),
             measures: vec![intent],
             output_names: vec![],
@@ -520,8 +520,8 @@ mod tests {
         }
     }
 
-    fn agg_per_entity(intent: AggIntent, child: QueryExpr) -> QueryExpr {
-        QueryExpr::Aggregate {
+    fn agg_per_entity(intent: AggIntent, child: PreASAPNode) -> PreASAPNode {
+        PreASAPNode::Aggregate {
             reduction: Reduction::PerEntity,
             measures: vec![intent],
             output_names: vec![],
@@ -836,7 +836,7 @@ mod tests {
     fn does_not_match_a_multi_intent_or_having_aggregate() {
         let strategy = HydraGroupingStrategy::default_cost_model();
 
-        let multi = Rc::new(QueryExpr::Aggregate {
+        let multi = Rc::new(PreASAPNode::Aggregate {
             reduction: Reduction::by(vec![2]),
             measures: vec![AggIntent::Sum { col: None }, AggIntent::Avg { col: None }],
             output_names: vec![],

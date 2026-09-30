@@ -13,7 +13,7 @@ are unchanged. #453 separately defines the integration API surface.
 | `MaterializeSummaryMaintenanceLifecycleError` | `SummaryMaintenanceLifecycleAssemblyError` | Failure assembling a DAG or deriving maintenance decisions |
 | Error variant `Materialize` | `AssembleDag` | Wrap an underlying `RealizationError` from DAG assembly |
 | Internal `materialize_inner` / `materialize_residual` | `assemble_target` / `assemble_residual` | Assemble selected nodes, not runtime materialized views |
-| Internal assembly cache `materialized` | `assembled_nodes` | Preserve shared `Rc<SummaryNode>` identity |
+| Internal assembly cache `materialized` | `assembled_nodes` | Preserve shared `Rc<PostASAPNode>` identity |
 
 Update imports and calls together; old public names are not retained as aliases.
 Downstream Rust integrations using these symbols must migrate. No serialized

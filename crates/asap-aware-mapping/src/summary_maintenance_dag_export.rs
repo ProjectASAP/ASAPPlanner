@@ -12,8 +12,8 @@ use serde::Serialize;
 
 use asap_types::dag_export::{self, SummaryDagGraph};
 use asap_types::post_asap::{
-    PostAsapNodeId, ResultGuarantee, SummaryExpr, SummaryMaintenanceLifecycle,
-    SummaryMaintenanceLifecycleGuarantee, SummaryNode, SummaryWindowFramework,
+    PostASAPNode, PostAsapNodeId, ResultGuarantee, SummaryExpr, SummaryMaintenanceLifecycle,
+    SummaryMaintenanceLifecycleGuarantee, SummaryWindowFramework,
 };
 
 use crate::summary_maintenance_lifecycle::{
@@ -121,9 +121,9 @@ pub fn export_summary_maintenance_plan(
 /// This makes the decision visible to graph consumers without asking them to
 /// reconstruct pointer identity from graph position.
 fn annotate_lifecycle_deployments(
-    node: &SummaryNode,
+    node: &PostASAPNode,
     graph: &mut SummaryDagGraph,
-    deployments: &HashMap<*const SummaryNode, &SummaryMaintenanceDeploymentExport>,
+    deployments: &HashMap<*const PostASAPNode, &SummaryMaintenanceDeploymentExport>,
     next_node_id: &mut usize,
 ) {
     if !matches!(node.expr, SummaryExpr::KeepPreAsap(_)) {
@@ -132,14 +132,14 @@ fn annotate_lifecycle_deployments(
         }
     }
     let graph_node = &mut graph.nodes[*next_node_id];
-    if let Some(deployment) = deployments.get(&(node as *const SummaryNode)) {
+    if let Some(deployment) = deployments.get(&(node as *const PostASAPNode)) {
         graph_node.detail["summary_maintenance"] =
             serde_json::to_value(deployment).expect("lifecycle export is serializable");
     }
     *next_node_id += 1;
 }
 
-fn summary_children(expr: &SummaryExpr) -> Vec<&Rc<SummaryNode>> {
+fn summary_children(expr: &SummaryExpr) -> Vec<&Rc<PostASAPNode>> {
     match expr {
         SummaryExpr::KeepPreAsap(_) => vec![],
         SummaryExpr::BinaryOp { lhs, rhs, .. } => vec![lhs, rhs],

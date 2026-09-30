@@ -7,16 +7,16 @@
 
 use asap_frontend_promql::{HistogramCatalog, HistogramKind};
 mod support;
-use asap_types::pre_asap::{AggIntent, QueryExpr};
+use asap_types::pre_asap::{AggIntent, PreASAPNode};
 use asap_types::types::AccuracyTarget;
 use support::{lower_promql, lower_promql_with_histograms};
 
 /// The histogram/quantile intent kind in the lowered tree: `"HQ"` for the
 /// classic-bucket `HistogramQuantile`, `"Q"` for the sketch-able `Quantile`.
-fn quantile_kind(qe: &QueryExpr) -> &'static str {
-    fn walk(e: &QueryExpr) -> Option<&'static str> {
+fn quantile_kind(qe: &PreASAPNode) -> &'static str {
+    fn walk(e: &PreASAPNode) -> Option<&'static str> {
         match e {
-            QueryExpr::Aggregate {
+            PreASAPNode::Aggregate {
                 measures, child, ..
             } => measures
                 .iter()
@@ -26,12 +26,12 @@ fn quantile_kind(qe: &QueryExpr) -> &'static str {
                     _ => None,
                 })
                 .or_else(|| walk(child)),
-            QueryExpr::TimeRange { child, .. }
-            | QueryExpr::Filter { child, .. }
-            | QueryExpr::Sort { child, .. }
-            | QueryExpr::Limit { child, .. }
-            | QueryExpr::PromqlSubquery { child, .. }
-            | QueryExpr::Project { child, .. } => walk(child),
+            PreASAPNode::TimeRange { child, .. }
+            | PreASAPNode::Filter { child, .. }
+            | PreASAPNode::Sort { child, .. }
+            | PreASAPNode::Limit { child, .. }
+            | PreASAPNode::PromqlSubquery { child, .. }
+            | PreASAPNode::Project { child, .. } => walk(child),
             _ => None,
         }
     }

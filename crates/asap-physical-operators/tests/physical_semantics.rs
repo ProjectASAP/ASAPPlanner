@@ -4,14 +4,14 @@
 use asap_physical_operators::{
     expressions::CompiledExpression,
     operators::{Expression, Operator, Reduction, SortKey},
-    plan::PhysicalDag,
+    plan::BoundPhysicalDAG,
     runtime::{Limits, RunContext, Scope},
     values::{Batch, Schema, Value},
 };
 use futures::{executor::block_on, StreamExt};
 use planner_types::{
     post_asap::{SummaryFamilyType, SummaryField, SummarySchema},
-    pre_asap::{CompareOpKind, DataType, JoinKind, Predicate, QueryExpr},
+    pre_asap::{CompareOpKind, DataType, JoinKind, PreASAPNode, Predicate},
 };
 use std::{rc::Rc, sync::Arc};
 
@@ -41,7 +41,7 @@ fn context() -> RunContext {
     )
     .unwrap()
 }
-fn collect(dag: &PhysicalDag<'_, Batch, Schema>, root: u64) -> Vec<Vec<Value>> {
+fn collect(dag: &BoundPhysicalDAG<'_, Batch, Schema>, root: u64) -> Vec<Vec<Value>> {
     let run = context();
     let rows = block_on(async {
         let mut stream = dag.execute(&[root], run.clone()).unwrap().remove(0);
@@ -55,7 +55,7 @@ fn collect(dag: &PhysicalDag<'_, Batch, Schema>, root: u64) -> Vec<Vec<Value>> {
     rows
 }
 fn unary(input: Schema, batches: Vec<Vec<Vec<Value>>>, op: Operator) -> Vec<Vec<Value>> {
-    let mut dag = PhysicalDag::default();
+    let mut dag = BoundPhysicalDAG::default();
     let batches = batches
         .into_iter()
         .map(|rows| Batch::try_new(input.clone(), rows).unwrap())
@@ -71,10 +71,10 @@ fn keys(rows: &[Vec<Value>]) -> Vec<Vec<Vec<u8>>> {
         .collect()
 }
 fn eq_predicate() -> Predicate {
-    Predicate(Rc::new(QueryExpr::Compare {
-        left: Rc::new(QueryExpr::Column(0)),
+    Predicate(Rc::new(PreASAPNode::Compare {
+        left: Rc::new(PreASAPNode::Column(0)),
         op: CompareOpKind::Eq,
-        right: Rc::new(QueryExpr::Column(1)),
+        right: Rc::new(PreASAPNode::Column(1)),
     }))
 }
 fn join(left: Vec<Value>, right: Vec<Value>, kind: JoinKind, keyed: bool) -> Vec<Vec<Value>> {
@@ -93,7 +93,7 @@ fn join(left: Vec<Value>, right: Vec<Value>, kind: JoinKind, keyed: bool) -> Vec
         Operator::relational_join(input.clone(), input.clone(), kind, &eq_predicate(), output)
             .unwrap()
     };
-    let mut dag = PhysicalDag::default();
+    let mut dag = BoundPhysicalDAG::default();
     for (id, values) in [(0, left), (1, right)] {
         let batches = values
             .into_iter()
@@ -332,7 +332,7 @@ fn aggregate_empty_and_all_null_follow_asap_contract() {
 fn projection_rejects_expression_bound_to_another_schema() {
     let original = schema(&[("a", DataType::Int64, false), ("b", DataType::Int64, false)]);
     let current = schema(&[("a", DataType::Int64, false)]);
-    let expr = CompiledExpression::compile(&QueryExpr::Column(1), &original).unwrap();
+    let expr = CompiledExpression::compile(&PreASAPNode::Column(1), &original).unwrap();
     assert!(Operator::project(current, vec![("b".into(), Expression::planner(expr))]).is_err());
 }
 
@@ -399,10 +399,10 @@ fn planner_comparisons_handle_nan_without_execution_errors() {
         CompareOpKind::Gt,
         CompareOpKind::Ge,
     ] {
-        let expression = QueryExpr::Compare {
-            left: Rc::new(QueryExpr::Column(0)),
+        let expression = PreASAPNode::Compare {
+            left: Rc::new(PreASAPNode::Column(0)),
             op: op.clone(),
-            right: Rc::new(QueryExpr::Column(1)),
+            right: Rc::new(PreASAPNode::Column(1)),
         };
         let compiled = CompiledExpression::compile(&expression, &input).unwrap();
         for row in [
@@ -420,7 +420,7 @@ fn planner_comparisons_handle_nan_without_execution_errors() {
 #[test]
 fn limit_branch_finishes_without_blocking_shared_sibling() {
     let input = schema(&[("v", DataType::Int64, false)]);
-    let mut dag = PhysicalDag::default();
+    let mut dag = BoundPhysicalDAG::default();
     let batches = (0..100)
         .map(|v| Batch::try_new(input.clone(), vec![vec![Value::Int64(v)]]).unwrap())
         .collect();
@@ -466,10 +466,10 @@ fn mixed_numeric_comparisons_preserve_large_integer_precision() {
         ("a", DataType::Int64, false),
         ("b", DataType::Float64, false),
     ]);
-    let expr = QueryExpr::Compare {
-        left: Rc::new(QueryExpr::Column(0)),
+    let expr = PreASAPNode::Compare {
+        left: Rc::new(PreASAPNode::Column(0)),
         op: CompareOpKind::Gt,
-        right: Rc::new(QueryExpr::Column(1)),
+        right: Rc::new(PreASAPNode::Column(1)),
     };
     let compiled = CompiledExpression::compile(&expr, &input).unwrap();
     for (a, b, expected) in [
@@ -490,11 +490,11 @@ fn boolean_truth_tables_agree_between_expression_paths() {
     for and in [true, false] {
         for a in [None, Some(false), Some(true)] {
             for b in [None, Some(false), Some(true)] {
-                let parts = vec![QueryExpr::Column(0), QueryExpr::Column(1)];
+                let parts = vec![PreASAPNode::Column(0), PreASAPNode::Column(1)];
                 let planner = if and {
-                    QueryExpr::BoolAnd(parts)
+                    PreASAPNode::BoolAnd(parts)
                 } else {
-                    QueryExpr::BoolOr(parts)
+                    PreASAPNode::BoolOr(parts)
                 };
                 let native = if and {
                     Expression::And(
@@ -542,7 +542,7 @@ fn kll_partial_merge_and_multiple_readouts_preserve_population() {
         SketchKind::new(SketchAlgorithm::Kll, SketchParams::Kll { k: 512 }),
         Default::default(),
     );
-    let mut dag = PhysicalDag::default();
+    let mut dag = BoundPhysicalDAG::default();
     for (id, range) in [(0, 0..64), (1, 64..128), (2, 0..128)] {
         let rows = range.map(|n| vec![Value::Float64(n as f64)]).collect();
         dag.add(
@@ -626,7 +626,7 @@ fn zero_column_output_obeys_memory_limit() {
     use asap_physical_operators::Error;
     let input = schema(&[]);
     let batch = Batch::try_new(input.clone(), vec![vec![]; 200]).unwrap();
-    let mut dag = PhysicalDag::default();
+    let mut dag = BoundPhysicalDAG::default();
     dag.add(0, vec![], Operator::source(input, vec![batch]).unwrap())
         .unwrap();
     let run = RunContext::new(
@@ -668,7 +668,7 @@ fn empty_exact_summary_extrema_agree_with_ordinary_aggregation() {
         )
         .unwrap();
         let state = build.schema();
-        let mut dag = PhysicalDag::default();
+        let mut dag = BoundPhysicalDAG::default();
         dag.add(0, vec![], Operator::source(input.clone(), vec![]).unwrap())
             .unwrap();
         dag.add(1, vec![0], build).unwrap();

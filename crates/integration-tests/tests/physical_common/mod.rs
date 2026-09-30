@@ -1,17 +1,13 @@
 use asap_physical_operators::{
     operators::Operator,
-    physical_planner::{CompiledPhysicalDag, Source},
+    physical_planner::{PhysicalDAG, Source},
     runtime::{Limits, RunContext, Scope},
     values::Batch,
 };
 use futures::{executor::block_on, StreamExt};
 use std::collections::BTreeMap;
 
-pub fn execute(
-    plan: &CompiledPhysicalDag,
-    inputs: BTreeMap<u64, Batch>,
-    scope: Scope,
-) -> Vec<Vec<Batch>> {
+pub fn execute(plan: &PhysicalDAG, inputs: BTreeMap<u64, Batch>, scope: Scope) -> Vec<Vec<Batch>> {
     let sources = inputs
         .into_iter()
         .map(|(id, batch)| {

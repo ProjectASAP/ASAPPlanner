@@ -1,4 +1,4 @@
-//! `QueryExpr::Scan` — label matcher / predicate tests.
+//! `PreASAPNode::Scan` — label matcher / predicate tests.
 //!
 //! The Scan schema is always [ts(0), value(1), label_a(2), label_b(3), …]
 //! where labels are appended alphabetically after dedup by the SchemaResolver.
@@ -11,15 +11,15 @@ use std::time::Duration;
 
 use asap_integration_tests::fixtures::lower_promql;
 use asap_integration_tests::fixtures::metric_schema;
-use asap_types::pre_asap::{CompareOpKind, Predicate, QueryExpr, ScalarValue, Source};
+use asap_types::pre_asap::{CompareOpKind, PreASAPNode, Predicate, ScalarValue, Source};
 use asap_types::types::AccuracyTarget;
 
-fn lower(q: &str) -> QueryExpr {
+fn lower(q: &str) -> PreASAPNode {
     lower_promql(q, AccuracyTarget::Exact).unwrap_or_else(|e| panic!("lower failed for {q:?}: {e}"))
 }
 
-fn bare_scan(metric: &str, labels: &[&str]) -> QueryExpr {
-    QueryExpr::Scan {
+fn bare_scan(metric: &str, labels: &[&str]) -> PreASAPNode {
+    PreASAPNode::Scan {
         source: Source::TimeSeries {
             metric: metric.into(),
         },
@@ -28,42 +28,42 @@ fn bare_scan(metric: &str, labels: &[&str]) -> QueryExpr {
     }
 }
 
-fn instant(child: QueryExpr) -> QueryExpr {
-    QueryExpr::TimeRange {
+fn instant(child: PreASAPNode) -> PreASAPNode {
+    PreASAPNode::TimeRange {
         range: Duration::from_secs(1),
         child: Rc::new(child),
     }
 }
 
 fn eq_pred(col_id: usize, value: &str) -> Predicate {
-    Predicate(Rc::new(QueryExpr::Compare {
-        left: Rc::new(QueryExpr::Column(col_id)),
+    Predicate(Rc::new(PreASAPNode::Compare {
+        left: Rc::new(PreASAPNode::Column(col_id)),
         op: CompareOpKind::Eq,
-        right: Rc::new(QueryExpr::Literal(ScalarValue::Utf8(value.into()))),
+        right: Rc::new(PreASAPNode::Literal(ScalarValue::Utf8(value.into()))),
     }))
 }
 
 fn ne_pred(col_id: usize, value: &str) -> Predicate {
-    Predicate(Rc::new(QueryExpr::Compare {
-        left: Rc::new(QueryExpr::Column(col_id)),
+    Predicate(Rc::new(PreASAPNode::Compare {
+        left: Rc::new(PreASAPNode::Column(col_id)),
         op: CompareOpKind::Ne,
-        right: Rc::new(QueryExpr::Literal(ScalarValue::Utf8(value.into()))),
+        right: Rc::new(PreASAPNode::Literal(ScalarValue::Utf8(value.into()))),
     }))
 }
 
 fn regex_pred(col_id: usize, pattern: &str) -> Predicate {
-    Predicate(Rc::new(QueryExpr::Compare {
-        left: Rc::new(QueryExpr::Column(col_id)),
+    Predicate(Rc::new(PreASAPNode::Compare {
+        left: Rc::new(PreASAPNode::Column(col_id)),
         op: CompareOpKind::Regex,
-        right: Rc::new(QueryExpr::Literal(ScalarValue::Utf8(pattern.into()))),
+        right: Rc::new(PreASAPNode::Literal(ScalarValue::Utf8(pattern.into()))),
     }))
 }
 
 fn notregex_pred(col_id: usize, pattern: &str) -> Predicate {
-    Predicate(Rc::new(QueryExpr::Compare {
-        left: Rc::new(QueryExpr::Column(col_id)),
+    Predicate(Rc::new(PreASAPNode::Compare {
+        left: Rc::new(PreASAPNode::Column(col_id)),
         op: CompareOpKind::NotRegex,
-        right: Rc::new(QueryExpr::Literal(ScalarValue::Utf8(pattern.into()))),
+        right: Rc::new(PreASAPNode::Literal(ScalarValue::Utf8(pattern.into()))),
     }))
 }
 
@@ -80,7 +80,7 @@ fn q01_bare_scan() {
 //   schema: [ts(0), value(1), job(2)]
 #[test]
 fn q02_equality_predicate() {
-    let expected = instant(QueryExpr::Scan {
+    let expected = instant(PreASAPNode::Scan {
         source: Source::TimeSeries {
             metric: "http_requests_total".into(),
         },
@@ -94,7 +94,7 @@ fn q02_equality_predicate() {
 //   schema: [ts(0), value(1), status(2)]
 #[test]
 fn q03_inequality_predicate() {
-    let expected = instant(QueryExpr::Scan {
+    let expected = instant(PreASAPNode::Scan {
         source: Source::TimeSeries {
             metric: "http_requests_total".into(),
         },
@@ -108,7 +108,7 @@ fn q03_inequality_predicate() {
 //   schema: [ts(0), value(1), job(2)]
 #[test]
 fn q04_regex_predicate() {
-    let expected = instant(QueryExpr::Scan {
+    let expected = instant(PreASAPNode::Scan {
         source: Source::TimeSeries {
             metric: "http_requests_total".into(),
         },
@@ -122,7 +122,7 @@ fn q04_regex_predicate() {
 //   schema: [ts(0), value(1), job(2)]
 #[test]
 fn q_notregex_predicate() {
-    let expected = instant(QueryExpr::Scan {
+    let expected = instant(PreASAPNode::Scan {
         source: Source::TimeSeries {
             metric: "http_requests_total".into(),
         },
@@ -137,7 +137,7 @@ fn q_notregex_predicate() {
 //   predicates in same alphabetical order: job first, then status
 #[test]
 fn q_multi_two_predicates() {
-    let expected = instant(QueryExpr::Scan {
+    let expected = instant(PreASAPNode::Scan {
         source: Source::TimeSeries {
             metric: "http_requests_total".into(),
         },

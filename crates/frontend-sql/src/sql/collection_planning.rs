@@ -4,7 +4,7 @@ use super::types::{arrow_to_dtype, dtype_to_arrow, scalar_value_to_asap};
 use asap_types::pre_asap::scalar_signature::{
     element_access_type, struct_field_type, MapScalarFunction,
 };
-use asap_types::pre_asap::{Column, QueryExpr, Schema};
+use asap_types::pre_asap::{Column, PreASAPNode, Schema};
 use datafusion::arrow::datatypes::DataType;
 use datafusion::common::{DataFusionError, ExprSchema, Result};
 use datafusion::logical_expr::{
@@ -91,10 +91,10 @@ impl CollectionPlanningFunction {
                     if let Some(Expr::Literal(value)) = expressions.and_then(|args| args.get(index))
                     {
                         scalar_value_to_asap(value)
-                            .map(QueryExpr::Literal)
+                            .map(PreASAPNode::Literal)
                             .map_err(|error| DataFusionError::Plan(error.to_string()))
                     } else {
-                        Ok(QueryExpr::Column(index))
+                        Ok(PreASAPNode::Column(index))
                     }
                 })
                 .collect::<Result<Vec<_>>>()?;

@@ -75,17 +75,17 @@ passed between layers.
 
 | Design name | Meaning | Current Rust representation |
 |---|---|---|
-| `PreASAPDAG` | Frontend-lowered query semantics before summary rewrites | A graph rooted at `Rc<QueryExpr>` |
-| `CandidatePreASAPDAGs` | All legal frontend-lowered `PreASAPDAG` candidates; an unambiguous query can produce a singleton collection | A collection of graphs rooted at `Rc<QueryExpr>`; no public Rust collection type named `CandidatePreASAPDAGs` yet |
-| `PostASAPDAG` | A logical computation candidate; the lifecycle assignment adds timing to this same logical graph | A graph rooted at `Rc<SummaryNode>`; exported as `PostAsapDag` for physical compilation |
+| `PreASAPDAG` | Frontend-lowered query semantics before summary rewrites | A graph rooted at `Rc<PreASAPNode>` |
+| `CandidatePreASAPDAGs` | All legal frontend-lowered `PreASAPDAG` candidates; an unambiguous query can produce a singleton collection | A collection of graphs rooted at `Rc<PreASAPNode>`; no public Rust collection type named `CandidatePreASAPDAGs` yet |
+| `PostASAPDAG` | A logical computation candidate; the lifecycle assignment adds timing to this same logical graph | A graph rooted at `Rc<PostASAPNode>`; exported as `PostASAPDAGTransport` for physical compilation |
 | `CandidatePostASAPDAGs` | All legal logical `PostASAPDAG` candidates, represented compactly rather than necessarily materialized as a list; lifecycle enumeration produces their candidates with timing | `CandidatePostASAPDAGs<Id>` (renamed from the former candidate-space API in [#508](https://github.com/ProjectASAP/ASAPPlanner/pull/508)) |
-| `PhysicalDAG` | Compiled operators and kernels with typed inputs | `CompiledPhysicalDag` |
-| `CandidatePhysicalDAGs` | All supported physical DAG candidates produced from the timed logical candidates, before deployment selection | A collection of `CompiledPhysicalDag` realizations and their `PhysicalCandidate` cuts; no public Rust collection type named `CandidatePhysicalDAGs` yet |
+| `PhysicalDAG` | Compiled operators and kernels with typed inputs | `PhysicalDAG` |
+| `CandidatePhysicalDAGs` | All supported physical DAG candidates produced from the timed logical candidates, before deployment selection | A collection of `PhysicalDAG` realizations and their `PhysicalCandidate` cuts; no public Rust collection type named `CandidatePhysicalDAGs` yet |
 
 These DAG names are design conventions. The candidate-collection Rust API is
-renamed to `CandidatePostASAPDAGs` in #508; `QueryExpr`, `SummaryNode`, `PostAsapDag`,
-and `CompiledPhysicalDag` remain the graph representations shown above.
-`PostAsapDag` is the exported representation of `PostASAPDAG`, not a fourth
+renamed to `CandidatePostASAPDAGs` in #508; `PreASAPNode`, `PostASAPNode`, `PostASAPDAGTransport`,
+and `PhysicalDAG` remain the graph representations shown above.
+`PostASAPDAGTransport` is the exported representation of `PostASAPDAG`, not a fourth
 planning layer. `PhysicalCandidate` packages the precompute and query cuts
 of a `PhysicalDAG` with their typed input contracts. It is the Rust packaging
 for one member of `CandidatePhysicalDAGs`, not an additional layer output.

@@ -12,7 +12,7 @@
 //! lands, only the catalog impl swaps.
 
 use super::expr_ir::ColumnRef;
-use super::query_expr::UnresolvedQueryExpr;
+use super::query_expr::UnresolvedPreASAPNode;
 use super::schema::{Column, DataType, Schema};
 
 /// The DB / source-schema metadata source — resolves a source (metric /
@@ -71,7 +71,7 @@ impl<C: SchemaCatalog> SchemaResolver<C> {
     /// Contains the time axis, the synthetic `value` column, and one column
     /// per distinct name referenced anywhere in the tree — so positional
     /// `ColumnId` resolution downstream is total.
-    pub fn resolve_schema(&self, tree: &UnresolvedQueryExpr) -> Schema {
+    pub fn resolve_schema(&self, tree: &UnresolvedPreASAPNode) -> Schema {
         self.resolve_schema_with_inherited(tree, &[])
     }
 
@@ -83,7 +83,7 @@ impl<C: SchemaCatalog> SchemaResolver<C> {
     /// side's own matchers (issue #52).
     pub fn resolve_schema_with_inherited(
         &self,
-        tree: &UnresolvedQueryExpr,
+        tree: &UnresolvedPreASAPNode,
         inherited: &[String],
     ) -> Schema {
         let mut columns: Vec<Column> = leftmost_scan_name(tree)
@@ -136,12 +136,12 @@ fn push_ref_name(c: &ColumnRef, out: &mut Vec<String>) {
     }
 }
 
-/// The leftmost `Scan`'s source name in a canonical (`UnresolvedQueryExpr`) tree —
+/// The leftmost `Scan`'s source name in a canonical (`UnresolvedPreASAPNode`) tree —
 /// the [`collect_referenced_columns`] counterpart to what a dedicated
 /// `Source` leaf type would carry as a method; the canonical tree's `Scan`
 /// leaf needs this walk written out instead.
-fn leftmost_scan_name(tree: &UnresolvedQueryExpr) -> Option<&str> {
-    use UnresolvedQueryExpr as QE;
+fn leftmost_scan_name(tree: &UnresolvedPreASAPNode) -> Option<&str> {
+    use UnresolvedPreASAPNode as QE;
     match tree {
         QE::Scan { source, .. } => Some(match source {
             super::query_expr::Source::TimeSeries { metric } => metric.as_str(),
@@ -193,16 +193,16 @@ fn leftmost_scan_name(tree: &UnresolvedQueryExpr) -> Option<&str> {
 
 /// Collect every distinct column name referenced anywhere in `tree` that
 /// resolves positionally — every place a front end constructing
-/// [`QueryExpr<ColumnRef>`](super::query_expr::QueryExpr) directly (issue
+/// [`PreASAPNode<ColumnRef>`](super::query_expr::PreASAPNode) directly (issue
 /// #179) puts a name-based reference: `Scan.predicates`, `Aggregate`'s
 /// `reduction`/`having`/per-measure `col`, `Dedup.cols`, `PromqlSeriesSample.by`,
 /// `Filter.pred`, `Project.cols`, `Sort.keys`/`partition_by`,
 /// `SQLWindowFunc.args`/`partition_by`/`order_by`, `Join.pred`, `PromqlRelabel.value`.
 /// The SchemaResolver seeds these into the usage-derived leaf so positional
 /// resolution downstream is total.
-pub(crate) fn collect_referenced_columns(tree: &UnresolvedQueryExpr) -> Vec<String> {
-    use UnresolvedQueryExpr as QE;
-    fn named(expr: &UnresolvedQueryExpr, out: &mut Vec<String>) {
+pub(crate) fn collect_referenced_columns(tree: &UnresolvedPreASAPNode) -> Vec<String> {
+    use UnresolvedPreASAPNode as QE;
+    fn named(expr: &UnresolvedPreASAPNode, out: &mut Vec<String>) {
         for c in expr.columns_referenced() {
             push_ref_name(c, out);
         }
@@ -217,7 +217,7 @@ pub(crate) fn collect_referenced_columns(tree: &UnresolvedQueryExpr) -> Vec<Stri
             }
         }
     }
-    fn walk(node: &UnresolvedQueryExpr, out: &mut Vec<String>) {
+    fn walk(node: &UnresolvedPreASAPNode, out: &mut Vec<String>) {
         match node {
             QE::Scan { predicates, .. } => {
                 for super::query_expr::Predicate(p) in predicates {
@@ -354,7 +354,7 @@ pub(crate) fn collect_referenced_columns(tree: &UnresolvedQueryExpr) -> Vec<Stri
             | QE::FunctionCall { .. }
             | QE::Arithmetic { .. }
             | QE::Case { .. } => {
-                unreachable!("walk reached a scalar QueryExpr variant directly: {node:?}")
+                unreachable!("walk reached a scalar PreASAPNode variant directly: {node:?}")
             }
         }
     }
@@ -372,8 +372,8 @@ mod tests {
     use super::super::query_expr::{GroupKeys, Source};
     use super::*;
 
-    fn src(name: &str) -> UnresolvedQueryExpr {
-        UnresolvedQueryExpr::Scan {
+    fn src(name: &str) -> UnresolvedPreASAPNode {
+        UnresolvedPreASAPNode::Scan {
             source: Source::TimeSeries {
                 metric: name.into(),
             },
@@ -386,7 +386,7 @@ mod tests {
     #[test]
     fn pearson_corr_inputs_seed_usage_derived_schema() {
         use crate::pre_asap::{AggIntent, Reduction};
-        let tree = UnresolvedQueryExpr::Aggregate {
+        let tree = UnresolvedPreASAPNode::Aggregate {
             reduction: Reduction::by(vec![]),
             measures: vec![AggIntent::PearsonCorr {
                 left: ColumnRef::Named("x".into()),
@@ -415,9 +415,9 @@ mod tests {
     fn sort_partition_keys_land_in_schema() {
         // Per-group ranking keys (`topk by (host)` → `Sort.partition_by`) must be
         // seeded into the usage-derived leaf so they resolve positionally.
-        let tree = UnresolvedQueryExpr::Sort {
+        let tree = UnresolvedPreASAPNode::Sort {
             keys: vec![super::super::query_expr::SortKey {
-                expr: UnresolvedQueryExpr::Column(ColumnRef::SampleValue),
+                expr: UnresolvedPreASAPNode::Column(ColumnRef::SampleValue),
                 ascending: false,
                 nulls_first: false,
             }],
@@ -435,7 +435,7 @@ mod tests {
     /// column the caller correctly named.
     #[test]
     fn concat_discriminator_key_is_seeded_into_the_resolver_schema() {
-        let tree = UnresolvedQueryExpr::concat_with_discriminator(
+        let tree = UnresolvedPreASAPNode::concat_with_discriminator(
             vec![src("m")],
             ColumnRef::Named("phi".into()),
             vec![ColumnRef::Named("host".into())],

@@ -1,14 +1,14 @@
 //! End-to-end SQL → unresolved → canonical tree lowering tests (positional IR).
 //!
 //! Validates the DataFusion front end: SQL parses + plans, lowers directly to
-//! the canonical, unresolved shape (`QueryExpr<ColumnRef>`, issue #179), and
+//! the canonical, unresolved shape (`PreASAPNode<ColumnRef>`, issue #179), and
 //! the shared `resolve_root` produces the positional, resolved canonical
 //! tree (the same resolver the PromQL path uses).
 
 use asap_frontend_sql::{lower_sql, lower_sql_dialect, SqlCatalog, SqlError as LoweringError};
 use asap_types::pre_asap::schema::{Column, DataType, Schema};
 use asap_types::pre_asap::{
-    AggIntent, CompareOpKind, GroupKeys, JoinKind, QueryExpr, Reduction, ScalarValue, Source,
+    AggIntent, CompareOpKind, GroupKeys, JoinKind, PreASAPNode, Reduction, ScalarValue, Source,
     WindowFrameBound, WindowFrameOffset, WindowFrameUnits, WindowFuncKind,
 };
 use asap_types::types::AccuracyTarget;
@@ -43,7 +43,7 @@ fn catalog() -> SqlCatalog {
         )
 }
 
-async fn lower(sql: &str) -> QueryExpr {
+async fn lower(sql: &str) -> PreASAPNode {
     lower_sql(sql, &catalog(), AccuracyTarget::Exact)
         .await
         .unwrap_or_else(|e| panic!("lower failed for {sql:?}: {e}"))
@@ -57,13 +57,13 @@ async fn planning_subquery_bridge_reuses_canonical_promql_subquery() {
              SELECT sum(bytes) AS value FROM metrics))",
     )
     .await;
-    let QueryExpr::Project { child, .. } = query else {
+    let PreASAPNode::Project { child, .. } = query else {
         panic!("expected outer SQL projection");
     };
-    let QueryExpr::Aggregate { child, .. } = child.as_ref() else {
+    let PreASAPNode::Aggregate { child, .. } = child.as_ref() else {
         panic!("expected outer max aggregate, got {child:?}");
     };
-    let QueryExpr::PromqlSubquery {
+    let PreASAPNode::PromqlSubquery {
         range,
         resolution,
         child,
@@ -73,7 +73,7 @@ async fn planning_subquery_bridge_reuses_canonical_promql_subquery() {
     };
     assert_eq!(*range, std::time::Duration::from_secs(6 * 60 * 60));
     assert_eq!(*resolution, Some(std::time::Duration::from_secs(60)));
-    assert!(matches!(child.as_ref(), QueryExpr::Project { .. }));
+    assert!(matches!(child.as_ref(), PreASAPNode::Project { .. }));
 }
 
 #[tokio::test]
@@ -83,7 +83,7 @@ async fn planning_histogram_bridge_reuses_classic_bucket_intent() {
            SELECT service AS le, sum(bytes) AS value FROM metrics GROUP BY service)",
     )
     .await;
-    let QueryExpr::Aggregate {
+    let PreASAPNode::Aggregate {
         reduction,
         measures,
         child,
@@ -98,7 +98,7 @@ async fn planning_histogram_bridge_reuses_classic_bucket_intent() {
         measures.as_slice(),
         [AggIntent::HistogramQuantile { q, le: 0 }] if (*q - 0.95).abs() < 1e-12
     ));
-    assert!(matches!(child.as_ref(), QueryExpr::Project { .. }));
+    assert!(matches!(child.as_ref(), PreASAPNode::Project { .. }));
 }
 
 #[tokio::test]
@@ -134,31 +134,31 @@ async fn planning_relation_bridges_reject_ambiguous_shapes() {
 }
 
 /// Find the first `Aggregate` node along the single-child spine.
-fn find_aggregate(qe: &QueryExpr) -> Option<(&GroupKeys, &Vec<AggIntent>)> {
+fn find_aggregate(qe: &PreASAPNode) -> Option<(&GroupKeys, &Vec<AggIntent>)> {
     match qe {
-        QueryExpr::Aggregate {
+        PreASAPNode::Aggregate {
             reduction,
             measures,
             ..
         } => Some((reduction.expect_reduce(), measures)),
-        QueryExpr::Project { child, .. }
-        | QueryExpr::Filter { child, .. }
-        | QueryExpr::Dedup { child, .. }
-        | QueryExpr::Sort { child, .. }
-        | QueryExpr::Limit { child, .. }
-        | QueryExpr::PromqlSubquery { child, .. } => find_aggregate(child),
+        PreASAPNode::Project { child, .. }
+        | PreASAPNode::Filter { child, .. }
+        | PreASAPNode::Dedup { child, .. }
+        | PreASAPNode::Sort { child, .. }
+        | PreASAPNode::Limit { child, .. }
+        | PreASAPNode::PromqlSubquery { child, .. } => find_aggregate(child),
         _ => None,
     }
 }
 
 /// The first `Aggregate` node itself, for tests that need its child.
-fn find_aggregate_node(qe: &QueryExpr) -> Option<&QueryExpr> {
+fn find_aggregate_node(qe: &PreASAPNode) -> Option<&PreASAPNode> {
     match qe {
-        QueryExpr::Aggregate { .. } => Some(qe),
-        QueryExpr::Project { child, .. }
-        | QueryExpr::Filter { child, .. }
-        | QueryExpr::Sort { child, .. }
-        | QueryExpr::Limit { child, .. } => find_aggregate_node(child),
+        PreASAPNode::Aggregate { .. } => Some(qe),
+        PreASAPNode::Project { child, .. }
+        | PreASAPNode::Filter { child, .. }
+        | PreASAPNode::Sort { child, .. }
+        | PreASAPNode::Limit { child, .. } => find_aggregate_node(child),
         _ => None,
     }
 }
@@ -166,8 +166,8 @@ fn find_aggregate_node(qe: &QueryExpr) -> Option<&QueryExpr> {
 /// The names of the columns the first `Aggregate`'s reducers read, resolved
 /// against its child's schema, plus whether that child is a materializing
 /// `Project` (issue #110).
-fn reducer_input_names(qe: &QueryExpr) -> (Vec<String>, bool) {
-    let QueryExpr::Aggregate {
+fn reducer_input_names(qe: &PreASAPNode) -> (Vec<String>, bool) {
+    let PreASAPNode::Aggregate {
         measures, child, ..
     } = find_aggregate_node(qe).expect("expected an Aggregate")
     else {
@@ -179,34 +179,34 @@ fn reducer_input_names(qe: &QueryExpr) -> (Vec<String>, bool) {
         .flat_map(|a| a.input_cols())
         .map(|id| schema.columns[id].name.clone())
         .collect();
-    (names, matches!(**child, QueryExpr::Project { .. }))
+    (names, matches!(**child, PreASAPNode::Project { .. }))
 }
 
 /// Find the first `Join` node along the single-child spine.
-fn find_join(qe: &QueryExpr) -> Option<&QueryExpr> {
+fn find_join(qe: &PreASAPNode) -> Option<&PreASAPNode> {
     match qe {
-        QueryExpr::Join { .. } => Some(qe),
-        QueryExpr::Project { child, .. }
-        | QueryExpr::Filter { child, .. }
-        | QueryExpr::Aggregate { child, .. }
-        | QueryExpr::Dedup { child, .. }
-        | QueryExpr::Sort { child, .. }
-        | QueryExpr::Limit { child, .. }
-        | QueryExpr::PromqlSubquery { child, .. } => find_join(child),
+        PreASAPNode::Join { .. } => Some(qe),
+        PreASAPNode::Project { child, .. }
+        | PreASAPNode::Filter { child, .. }
+        | PreASAPNode::Aggregate { child, .. }
+        | PreASAPNode::Dedup { child, .. }
+        | PreASAPNode::Sort { child, .. }
+        | PreASAPNode::Limit { child, .. }
+        | PreASAPNode::PromqlSubquery { child, .. } => find_join(child),
         _ => None,
     }
 }
 
 /// The first `Filter` node along the single-child spine.
-fn find_filter(qe: &QueryExpr) -> Option<&QueryExpr> {
+fn find_filter(qe: &PreASAPNode) -> Option<&PreASAPNode> {
     match qe {
-        QueryExpr::Filter { .. } => Some(qe),
-        QueryExpr::Project { child, .. }
-        | QueryExpr::Aggregate { child, .. }
-        | QueryExpr::Dedup { child, .. }
-        | QueryExpr::Sort { child, .. }
-        | QueryExpr::Limit { child, .. }
-        | QueryExpr::PromqlSubquery { child, .. } => find_filter(child),
+        PreASAPNode::Filter { .. } => Some(qe),
+        PreASAPNode::Project { child, .. }
+        | PreASAPNode::Aggregate { child, .. }
+        | PreASAPNode::Dedup { child, .. }
+        | PreASAPNode::Sort { child, .. }
+        | PreASAPNode::Limit { child, .. }
+        | PreASAPNode::PromqlSubquery { child, .. } => find_filter(child),
         _ => None,
     }
 }
@@ -215,7 +215,7 @@ fn find_filter(qe: &QueryExpr) -> Option<&QueryExpr> {
 async fn select_star_with_where_folds_predicate_onto_scan() {
     // SELECT * elides the projection; WHERE folds onto the Scan predicates.
     let qe = lower("SELECT * FROM metrics WHERE service = 'api'").await;
-    let QueryExpr::Scan {
+    let PreASAPNode::Scan {
         source,
         predicates,
         schema,
@@ -315,7 +315,7 @@ async fn count_ranked_topk_is_heavy_hitter() {
         "count-ranked topk → heavy-hitter TopK, got {measures:?}"
     );
     // The inner child is the explicit Count, grouped by service (col 1).
-    let QueryExpr::Aggregate { child, .. } = &qe else {
+    let PreASAPNode::Aggregate { child, .. } = &qe else {
         panic!("expected outer Aggregate, got {qe:?}");
     };
     let (inner_by, inner_measures) = find_aggregate(child).expect("expected inner Count aggregate");
@@ -426,7 +426,7 @@ async fn select_distinct_lowers_to_distinct_with_positional_cols() {
     // (not name-based ColumnRefs). DataFusion's `Distinct::All` dedups on every
     // column, so `cols` is empty here — but the field type is now `Vec<ColumnId>`.
     let qe = lower("SELECT DISTINCT service FROM metrics").await;
-    let QueryExpr::Dedup { cols, .. } = &qe else {
+    let PreASAPNode::Dedup { cols, .. } = &qe else {
         panic!("expected a Dedup at the root, got {qe:?}");
     };
     let _: &Vec<usize> = cols; // compile-time: positional ids, not ColumnRefs
@@ -442,24 +442,24 @@ async fn inner_join_lowers_to_join_over_two_scans() {
     )
     .await;
     let join = find_join(&qe).expect("expected a Join in the tree");
-    let QueryExpr::Join {
+    let PreASAPNode::Join {
         kind, left, right, ..
     } = join
     else {
         unreachable!("find_join only returns Join");
     };
     assert_eq!(*kind, JoinKind::Inner);
-    assert!(matches!(left.as_ref(), QueryExpr::Scan { .. }));
-    assert!(matches!(right.as_ref(), QueryExpr::Scan { .. }));
+    assert!(matches!(left.as_ref(), PreASAPNode::Scan { .. }));
+    assert!(matches!(right.as_ref(), PreASAPNode::Scan { .. }));
 }
 
 /// The two `ColumnId`s an equijoin predicate `Column(l) = Column(r)` binds to,
 /// returned sorted so the assertion is independent of left/right ordering.
-fn join_eq_columns(join: &QueryExpr) -> [usize; 2] {
-    let QueryExpr::Join { pred, .. } = join else {
+fn join_eq_columns(join: &PreASAPNode) -> [usize; 2] {
+    let PreASAPNode::Join { pred, .. } = join else {
         unreachable!("expected a Join");
     };
-    let QueryExpr::Compare {
+    let PreASAPNode::Compare {
         left,
         op: CompareOpKind::Eq,
         right,
@@ -468,7 +468,7 @@ fn join_eq_columns(join: &QueryExpr) -> [usize; 2] {
         panic!("expected an equijoin Compare, got {:?}", pred.0);
     };
     match (left.as_ref(), right.as_ref()) {
-        (QueryExpr::Column(l), QueryExpr::Column(r)) => {
+        (PreASAPNode::Column(l), PreASAPNode::Column(r)) => {
             let mut cols = [*l, *r];
             cols.sort_unstable();
             cols
@@ -567,12 +567,12 @@ async fn qualified_where_over_join_resolves_to_right_side() {
     )
     .await;
     let filter = find_filter(&qe).expect("expected a Filter over the join");
-    let QueryExpr::Filter { pred, .. } = filter else {
+    let PreASAPNode::Filter { pred, .. } = filter else {
         unreachable!("find_filter only returns Filter");
     };
     assert!(
-        matches!(pred.0.as_ref(), QueryExpr::Compare { left, op: CompareOpKind::Eq, .. }
-            if matches!(left.as_ref(), QueryExpr::Column(4))),
+        matches!(pred.0.as_ref(), PreASAPNode::Compare { left, op: CompareOpKind::Eq, .. }
+            if matches!(left.as_ref(), PreASAPNode::Column(4))),
         "hosts.service must bind to concatenated position 4 (not the first `service`), got {:?}",
         pred.0
     );
@@ -638,8 +638,8 @@ async fn aggregate_over_join_binds_against_concatenated_schema() {
 // ── Issue #111: IN / EXISTS subquery predicates become semi / anti joins ────
 
 /// The first `Join` node's `(kind, predicate, left column count)`.
-fn join_parts(qe: &QueryExpr) -> (&JoinKind, &QueryExpr, usize) {
-    let QueryExpr::Join {
+fn join_parts(qe: &PreASAPNode) -> (&JoinKind, &PreASAPNode, usize) {
+    let PreASAPNode::Join {
         kind,
         pred,
         left,
@@ -665,13 +665,13 @@ async fn in_subquery_lowers_to_a_semi_join() {
     // `service` column, so a name-based lookup would bind *both* sides to the
     // left's — silently making this `service = service`, always true. The key is
     // projected under a synthetic name to make that impossible.
-    let QueryExpr::Compare { left, right, .. } = pred else {
+    let PreASAPNode::Compare { left, right, .. } = pred else {
         panic!("expected a comparison, got {pred:?}");
     };
-    assert_eq!(**left, QueryExpr::Column(1), "outer service");
+    assert_eq!(**left, PreASAPNode::Column(1), "outer service");
     assert_eq!(
         **right,
-        QueryExpr::Column(left_len),
+        PreASAPNode::Column(left_len),
         "the subquery key, not the outer column again"
     );
 }
@@ -723,13 +723,13 @@ async fn an_ordinary_conjunct_still_folds_onto_the_scan() {
          AND service IN (SELECT service FROM hosts)",
     )
     .await;
-    fn scan_has_predicate(qe: &QueryExpr) -> bool {
+    fn scan_has_predicate(qe: &PreASAPNode) -> bool {
         match qe {
-            QueryExpr::Scan { predicates, .. } => !predicates.is_empty(),
-            QueryExpr::Project { child, .. }
-            | QueryExpr::Filter { child, .. }
-            | QueryExpr::Aggregate { child, .. } => scan_has_predicate(child),
-            QueryExpr::Join { left, right, .. } => {
+            PreASAPNode::Scan { predicates, .. } => !predicates.is_empty(),
+            PreASAPNode::Project { child, .. }
+            | PreASAPNode::Filter { child, .. }
+            | PreASAPNode::Aggregate { child, .. } => scan_has_predicate(child),
+            PreASAPNode::Join { left, right, .. } => {
                 scan_has_predicate(left) || scan_has_predicate(right)
             }
             _ => false,
@@ -743,16 +743,16 @@ async fn an_ordinary_conjunct_still_folds_onto_the_scan() {
 }
 
 /// Find the first `SQLWindowFunc` node along the single-child spine.
-fn find_windowfunc(qe: &QueryExpr) -> Option<&QueryExpr> {
+fn find_windowfunc(qe: &PreASAPNode) -> Option<&PreASAPNode> {
     match qe {
-        QueryExpr::SQLWindowFunc { .. } => Some(qe),
-        QueryExpr::Project { child, .. }
-        | QueryExpr::Filter { child, .. }
-        | QueryExpr::Aggregate { child, .. }
-        | QueryExpr::Dedup { child, .. }
-        | QueryExpr::Sort { child, .. }
-        | QueryExpr::Limit { child, .. }
-        | QueryExpr::PromqlSubquery { child, .. } => find_windowfunc(child),
+        PreASAPNode::SQLWindowFunc { .. } => Some(qe),
+        PreASAPNode::Project { child, .. }
+        | PreASAPNode::Filter { child, .. }
+        | PreASAPNode::Aggregate { child, .. }
+        | PreASAPNode::Dedup { child, .. }
+        | PreASAPNode::Sort { child, .. }
+        | PreASAPNode::Limit { child, .. }
+        | PreASAPNode::PromqlSubquery { child, .. } => find_windowfunc(child),
         _ => None,
     }
 }
@@ -766,7 +766,7 @@ async fn window_function_lowers_to_positional_windowfunc() {
     )
     .await;
     let win = find_windowfunc(&qe).expect("expected a SQLWindowFunc node");
-    let QueryExpr::SQLWindowFunc {
+    let PreASAPNode::SQLWindowFunc {
         func,
         partition_by,
         order_by,
@@ -780,7 +780,7 @@ async fn window_function_lowers_to_positional_windowfunc() {
     assert_eq!(order_by.len(), 1);
     assert_eq!(
         order_by[0].expr,
-        QueryExpr::Column(3),
+        PreASAPNode::Column(3),
         "ORDER BY bytes → col 3"
     );
     assert!(!order_by[0].ascending, "DESC");
@@ -799,11 +799,15 @@ async fn window_function_lowers_to_positional_windowfunc() {
 async fn window_aggregate_lowers_to_windowfunc() {
     let qe = lower("SELECT service, SUM(bytes) OVER (PARTITION BY service) FROM metrics").await;
     let win = find_windowfunc(&qe).expect("expected a SQLWindowFunc node");
-    let QueryExpr::SQLWindowFunc { func, args, .. } = win else {
+    let PreASAPNode::SQLWindowFunc { func, args, .. } = win else {
         unreachable!();
     };
     assert_eq!(*func, WindowFuncKind::Sum);
-    assert_eq!(args, &vec![QueryExpr::Column(3)], "SUM(bytes) → arg col 3");
+    assert_eq!(
+        args,
+        &vec![PreASAPNode::Column(3)],
+        "SUM(bytes) → arg col 3"
+    );
 }
 
 // ── Window frames (issue #268) ───────────────────────────────────────────────
@@ -827,8 +831,8 @@ async fn window_frame_is_captured_not_dropped() {
     )
     .await;
 
-    let frame_of = |qe: &QueryExpr| {
-        let QueryExpr::SQLWindowFunc { frame, .. } = find_windowfunc(qe).unwrap() else {
+    let frame_of = |qe: &PreASAPNode| {
+        let PreASAPNode::SQLWindowFunc { frame, .. } = find_windowfunc(qe).unwrap() else {
             unreachable!();
         };
         frame
@@ -868,7 +872,7 @@ async fn range_interval_frame_is_preserved() {
          RANGE BETWEEN INTERVAL '1' HOUR PRECEDING AND CURRENT ROW) FROM metrics",
     )
     .await;
-    let QueryExpr::SQLWindowFunc {
+    let PreASAPNode::SQLWindowFunc {
         frame: Some(frame), ..
     } = find_windowfunc(&qe).unwrap()
     else {
@@ -900,8 +904,8 @@ async fn range_numeric_frames_remain_scalar_offsets() {
     )
     .await;
 
-    let start_bound = |qe: &QueryExpr| {
-        let QueryExpr::SQLWindowFunc {
+    let start_bound = |qe: &PreASAPNode| {
+        let PreASAPNode::SQLWindowFunc {
             frame: Some(frame), ..
         } = find_windowfunc(qe).unwrap()
         else {
@@ -939,30 +943,30 @@ async fn groups_frame_is_rejected() {
 // ── Nested query functions: derived tables / inline views (issue #27) ───────────
 
 /// Collect every `AggIntent` in the tree, root-to-leaf.
-fn all_intents(qe: &QueryExpr) -> Vec<AggIntent> {
+fn all_intents(qe: &PreASAPNode) -> Vec<AggIntent> {
     let mut out = Vec::new();
-    fn go(qe: &QueryExpr, out: &mut Vec<AggIntent>) {
+    fn go(qe: &PreASAPNode, out: &mut Vec<AggIntent>) {
         match qe {
-            QueryExpr::Aggregate {
+            PreASAPNode::Aggregate {
                 measures, child, ..
             } => {
                 out.extend(measures.iter().cloned());
                 go(child, out);
             }
-            QueryExpr::Project { child, .. }
-            | QueryExpr::Filter { child, .. }
-            | QueryExpr::Dedup { child, .. }
-            | QueryExpr::Sort { child, .. }
-            | QueryExpr::Limit { child, .. }
-            | QueryExpr::SQLWindowFunc { child, .. }
-            | QueryExpr::PromqlSubquery { child, .. } => go(child, out),
-            QueryExpr::BinaryOp { lhs, rhs, .. }
-            | QueryExpr::Join {
+            PreASAPNode::Project { child, .. }
+            | PreASAPNode::Filter { child, .. }
+            | PreASAPNode::Dedup { child, .. }
+            | PreASAPNode::Sort { child, .. }
+            | PreASAPNode::Limit { child, .. }
+            | PreASAPNode::SQLWindowFunc { child, .. }
+            | PreASAPNode::PromqlSubquery { child, .. } => go(child, out),
+            PreASAPNode::BinaryOp { lhs, rhs, .. }
+            | PreASAPNode::Join {
                 left: lhs,
                 right: rhs,
                 ..
             }
-            | QueryExpr::SetOp {
+            | PreASAPNode::SetOp {
                 left: lhs,
                 right: rhs,
                 ..
@@ -1072,15 +1076,15 @@ async fn correlated_exists_lifts_its_correlation_into_the_join() {
     .await;
     let (kind, pred, left_len) = join_parts(&qe);
     assert_eq!(kind, &JoinKind::Semi);
-    let QueryExpr::Compare { left, right, .. } = pred else {
+    let PreASAPNode::Compare { left, right, .. } = pred else {
         panic!("expected the correlation as a comparison, got {pred:?}");
     };
     assert_eq!(
         **left,
-        QueryExpr::Column(left_len),
+        PreASAPNode::Column(left_len),
         "h.service (right side)"
     );
-    assert_eq!(**right, QueryExpr::Column(1), "m.service (left side)");
+    assert_eq!(**right, PreASAPNode::Column(1), "m.service (left side)");
 }
 
 #[tokio::test]
@@ -1099,7 +1103,7 @@ async fn an_uncorrelated_exists_is_an_unconditional_semi_join() {
     let qe = lower("SELECT service FROM metrics WHERE EXISTS (SELECT 1 FROM hosts)").await;
     let (kind, pred, _) = join_parts(&qe);
     assert_eq!(kind, &JoinKind::Semi);
-    assert_eq!(*pred, QueryExpr::Literal(ScalarValue::Boolean(true)));
+    assert_eq!(*pred, PreASAPNode::Literal(ScalarValue::Boolean(true)));
 }
 
 #[tokio::test]
@@ -1281,7 +1285,7 @@ async fn time_bucketing_group_by_lowers_to_a_derived_key() {
     let qe =
         lower("SELECT date_trunc('minute', ts) AS m, SUM(bytes) FROM metrics GROUP BY m").await;
     let node = find_aggregate_node(&qe).expect("expected an Aggregate");
-    let QueryExpr::Aggregate {
+    let PreASAPNode::Aggregate {
         reduction,
         measures,
         child,
@@ -1291,7 +1295,7 @@ async fn time_bucketing_group_by_lowers_to_a_derived_key() {
         unreachable!()
     };
     assert!(
-        matches!(**child, QueryExpr::Project { .. }),
+        matches!(**child, PreASAPNode::Project { .. }),
         "expected a materializing Project beneath the Aggregate"
     );
     let schema = child.output_schema().expect("child schema");
@@ -1317,14 +1321,14 @@ async fn time_bucketing_keeps_the_scan_predicate() {
          WHERE bytes > 10 GROUP BY m",
     )
     .await;
-    fn scan_has_predicate(qe: &QueryExpr) -> bool {
+    fn scan_has_predicate(qe: &PreASAPNode) -> bool {
         match qe {
-            QueryExpr::Scan { predicates, .. } => !predicates.is_empty(),
-            QueryExpr::Project { child, .. }
-            | QueryExpr::Filter { child, .. }
-            | QueryExpr::Aggregate { child, .. }
-            | QueryExpr::Sort { child, .. }
-            | QueryExpr::Limit { child, .. } => scan_has_predicate(child),
+            PreASAPNode::Scan { predicates, .. } => !predicates.is_empty(),
+            PreASAPNode::Project { child, .. }
+            | PreASAPNode::Filter { child, .. }
+            | PreASAPNode::Aggregate { child, .. }
+            | PreASAPNode::Sort { child, .. }
+            | PreASAPNode::Limit { child, .. } => scan_has_predicate(child),
             _ => false,
         }
     }
@@ -1341,13 +1345,13 @@ async fn a_plain_group_by_inserts_no_projection() {
         "SELECT COUNT(*) FROM metrics",
     ] {
         let qe = lower(q).await;
-        let QueryExpr::Aggregate { child, .. } =
+        let PreASAPNode::Aggregate { child, .. } =
             find_aggregate_node(&qe).expect("expected an Aggregate")
         else {
             unreachable!()
         };
         assert!(
-            !matches!(**child, QueryExpr::Project { .. }),
+            !matches!(**child, PreASAPNode::Project { .. }),
             "{q} should not gain a projection"
         );
     }
@@ -1356,7 +1360,7 @@ async fn a_plain_group_by_inserts_no_projection() {
 #[tokio::test]
 async fn a_shared_expression_is_materialized_once() {
     let qe = lower("SELECT SUM(bytes * 2), MIN(bytes * 2) FROM metrics").await;
-    let QueryExpr::Aggregate {
+    let PreASAPNode::Aggregate {
         measures, child, ..
     } = find_aggregate_node(&qe).expect("expected an Aggregate")
     else {
@@ -1373,14 +1377,14 @@ async fn a_shared_expression_is_materialized_once() {
 // ── Issue #118: multi-level grouping expands into one Aggregate per level ───
 
 /// The branches of the first `Concat` along the single-child spine.
-fn merge_branches(qe: &QueryExpr) -> &Vec<QueryExpr> {
-    fn find(qe: &QueryExpr) -> Option<&Vec<QueryExpr>> {
+fn merge_branches(qe: &PreASAPNode) -> &Vec<PreASAPNode> {
+    fn find(qe: &PreASAPNode) -> Option<&Vec<PreASAPNode>> {
         match qe {
-            QueryExpr::Concat { children, .. } => Some(children),
-            QueryExpr::Project { child, .. }
-            | QueryExpr::Filter { child, .. }
-            | QueryExpr::Sort { child, .. }
-            | QueryExpr::Limit { child, .. } => find(child),
+            PreASAPNode::Concat { children, .. } => Some(children),
+            PreASAPNode::Project { child, .. }
+            | PreASAPNode::Filter { child, .. }
+            | PreASAPNode::Sort { child, .. }
+            | PreASAPNode::Limit { child, .. } => find(child),
             _ => None,
         }
     }
@@ -1388,14 +1392,14 @@ fn merge_branches(qe: &QueryExpr) -> &Vec<QueryExpr> {
 }
 
 /// `(group keys, column names)` of each merged grouping level.
-fn grouping_levels(qe: &QueryExpr) -> Vec<(GroupKeys, Vec<String>)> {
+fn grouping_levels(qe: &PreASAPNode) -> Vec<(GroupKeys, Vec<String>)> {
     merge_branches(qe)
         .iter()
         .map(|b| {
-            let QueryExpr::Project { child, .. } = b else {
+            let PreASAPNode::Project { child, .. } = b else {
                 panic!("expected a Project per level, got {b:?}");
             };
-            let QueryExpr::Aggregate { reduction, .. } = child.as_ref() else {
+            let PreASAPNode::Aggregate { reduction, .. } = child.as_ref() else {
                 panic!("expected an Aggregate under the Project, got {child:?}");
             };
             let names = b
@@ -1534,10 +1538,10 @@ async fn multi_level_grouping_composes_with_a_derived_reducer_argument() {
     // #110's materializing Project sits beneath every level's Aggregate.
     let qe = lower("SELECT service, SUM(bytes * 8) FROM metrics GROUP BY ROLLUP(service)").await;
     for b in merge_branches(&qe) {
-        let QueryExpr::Project { child, .. } = b else {
+        let PreASAPNode::Project { child, .. } = b else {
             panic!("expected a Project per level");
         };
-        let QueryExpr::Aggregate {
+        let PreASAPNode::Aggregate {
             measures, child, ..
         } = child.as_ref()
         else {
@@ -1548,7 +1552,7 @@ async fn multi_level_grouping_composes_with_a_derived_reducer_argument() {
             [AggIntent::Sum { col: Some(_) }]
         ));
         assert!(
-            matches!(**child, QueryExpr::Project { .. }),
+            matches!(**child, PreASAPNode::Project { .. }),
             "the derived-column projection should sit under each level"
         );
     }
@@ -1611,7 +1615,7 @@ async fn array_agg_is_deliberately_rejected() {
 // ── Issue #225: catalog-driven ClickHouse builtins (countIf, generalizing
 // uniqExact from #221) ───────────────────────────────────────────────────
 
-async fn lower_clickhouse(sql: &str) -> QueryExpr {
+async fn lower_clickhouse(sql: &str) -> PreASAPNode {
     lower_sql_dialect(
         sql,
         &catalog(),
@@ -1622,20 +1626,20 @@ async fn lower_clickhouse(sql: &str) -> QueryExpr {
     .unwrap_or_else(|e| panic!("lower failed for {sql:?}: {e}"))
 }
 
-fn temporal_aggregate(qe: &QueryExpr) -> (&AggIntent, std::time::Duration, &QueryExpr) {
+fn temporal_aggregate(qe: &PreASAPNode) -> (&AggIntent, std::time::Duration, &PreASAPNode) {
     match qe {
-        QueryExpr::Aggregate {
+        PreASAPNode::Aggregate {
             reduction: Reduction::PerEntity,
             measures,
             child,
             ..
         } => {
-            let QueryExpr::TimeRange { range, child } = child.as_ref() else {
+            let PreASAPNode::TimeRange { range, child } = child.as_ref() else {
                 panic!("temporal Aggregate must directly wrap TimeRange, got {child:?}");
             };
             (&measures[0], *range, child)
         }
-        QueryExpr::Project { child, .. } | QueryExpr::Filter { child, .. } => {
+        PreASAPNode::Project { child, .. } | PreASAPNode::Filter { child, .. } => {
             temporal_aggregate(child)
         }
         other => panic!("expected temporal Aggregate, got {other:?}"),
@@ -1656,15 +1660,15 @@ async fn explicit_temporal_aggregates_share_promql_intents_and_timerange() {
         let (intent, range, child) = temporal_aggregate(&qe);
         assert_eq!(intent, &expected);
         assert_eq!(range, std::time::Duration::from_secs(300));
-        assert!(matches!(child, QueryExpr::Project { child, .. }
-            if matches!(child.as_ref(), QueryExpr::Scan { predicates, .. } if predicates.len() == 1)));
+        assert!(matches!(child, PreASAPNode::Project { child, .. }
+            if matches!(child.as_ref(), PreASAPNode::Scan { predicates, .. } if predicates.len() == 1)));
 
-        let QueryExpr::Project { cols, .. } = &qe else {
+        let PreASAPNode::Project { cols, .. } = &qe else {
             panic!("SELECT list must remain a Project, got {qe:?}");
         };
-        assert!(matches!(cols[0].expr, QueryExpr::Column(2)));
+        assert!(matches!(cols[0].expr, PreASAPNode::Column(2)));
         assert_eq!(cols[1].alias.as_deref(), Some("v"));
-        assert!(matches!(cols[1].expr, QueryExpr::Column(1)));
+        assert!(matches!(cols[1].expr, PreASAPNode::Column(1)));
     }
 }
 
@@ -1825,10 +1829,10 @@ async fn project_filter_and_outer_aggregate_preserve_temporal_child() {
          ) r WHERE v >= 0",
     )
     .await;
-    let QueryExpr::Project { child, .. } = &qe else {
+    let PreASAPNode::Project { child, .. } = &qe else {
         panic!("expected outer SELECT Project, got {qe:?}");
     };
-    let QueryExpr::Aggregate {
+    let PreASAPNode::Aggregate {
         reduction: Reduction::Reduce(_),
         measures,
         child,
@@ -1838,7 +1842,7 @@ async fn project_filter_and_outer_aggregate_preserve_temporal_child() {
         panic!("expected outer Aggregate, got {child:?}");
     };
     assert!(matches!(measures.as_slice(), [AggIntent::Max { .. }]));
-    let QueryExpr::Filter { child, .. } = child.as_ref() else {
+    let PreASAPNode::Filter { child, .. } = child.as_ref() else {
         panic!("derived-table WHERE must remain above the inner query, got {child:?}");
     };
     let (intent, range, _) = temporal_aggregate(child);
@@ -2004,13 +2008,13 @@ async fn lag_in_frame_lowers_to_its_own_kind_not_lag() {
     )
     .await;
     let win = find_windowfunc(&qe).expect("expected a SQLWindowFunc node");
-    let QueryExpr::SQLWindowFunc { func, args, .. } = win else {
+    let PreASAPNode::SQLWindowFunc { func, args, .. } = win else {
         unreachable!();
     };
     assert_eq!(*func, WindowFuncKind::LagInFrame);
     assert_eq!(
         args,
-        &vec![QueryExpr::Column(3)],
+        &vec![PreASAPNode::Column(3)],
         "lagInFrame(bytes) → arg col 3"
     );
 }
@@ -2023,7 +2027,7 @@ async fn lead_in_frame_lowers_to_its_own_kind_not_lead() {
     )
     .await;
     let win = find_windowfunc(&qe).expect("expected a SQLWindowFunc node");
-    let QueryExpr::SQLWindowFunc { func, .. } = win else {
+    let PreASAPNode::SQLWindowFunc { func, .. } = win else {
         unreachable!();
     };
     assert_eq!(*func, WindowFuncKind::LeadInFrame);
@@ -2036,13 +2040,13 @@ async fn lead_in_frame_lowers_to_its_own_kind_not_lead() {
 async fn now_in_predicate_lowers_to_current_timestamp() {
     // SELECT * folds WHERE onto Scan.predicates (no explicit Filter node).
     let qe = lower("SELECT * FROM metrics WHERE ts < NOW()").await;
-    let QueryExpr::Scan { predicates, .. } = &qe else {
+    let PreASAPNode::Scan { predicates, .. } = &qe else {
         panic!("expected Scan at root, got {qe:?}");
     };
     assert_eq!(predicates.len(), 1);
     assert!(
-        matches!(predicates[0].0.as_ref(), QueryExpr::Compare { right, .. }
-            if matches!(right.as_ref(), QueryExpr::CurrentTimestamp)),
+        matches!(predicates[0].0.as_ref(), PreASAPNode::Compare { right, .. }
+            if matches!(right.as_ref(), PreASAPNode::CurrentTimestamp)),
         "NOW() must lower to CurrentTimestamp, got {:?}",
         predicates[0].0
     );
@@ -2053,13 +2057,13 @@ async fn now_in_predicate_lowers_to_current_timestamp() {
 #[tokio::test]
 async fn clickhouse_now_in_predicate_lowers_to_current_timestamp() {
     let qe = lower_clickhouse("SELECT * FROM metrics WHERE ts < now()").await;
-    let QueryExpr::Scan { predicates, .. } = &qe else {
+    let PreASAPNode::Scan { predicates, .. } = &qe else {
         panic!("expected Scan at root, got {qe:?}");
     };
     assert_eq!(predicates.len(), 1);
     assert!(
-        matches!(predicates[0].0.as_ref(), QueryExpr::Compare { right, .. }
-            if matches!(right.as_ref(), QueryExpr::CurrentTimestamp)),
+        matches!(predicates[0].0.as_ref(), PreASAPNode::Compare { right, .. }
+            if matches!(right.as_ref(), PreASAPNode::CurrentTimestamp)),
         "now() must lower to CurrentTimestamp, got {:?}",
         predicates[0].0
     );
@@ -2068,10 +2072,10 @@ async fn clickhouse_now_in_predicate_lowers_to_current_timestamp() {
 #[tokio::test]
 async fn current_timestamp_lowers_to_typed_current_timestamp_leaf() {
     let qe = lower("SELECT CURRENT_TIMESTAMP FROM metrics").await;
-    let QueryExpr::Project { cols, .. } = &qe else {
+    let PreASAPNode::Project { cols, .. } = &qe else {
         panic!("expected Project at root, got {qe:?}");
     };
-    assert!(matches!(&cols[0].expr, QueryExpr::CurrentTimestamp));
+    assert!(matches!(&cols[0].expr, PreASAPNode::CurrentTimestamp));
     let schema = cols[0].expr.output_schema().expect("timestamp schema");
     assert_eq!(schema.columns[0].dtype, DataType::Timestamp);
 }
@@ -2484,7 +2488,7 @@ async fn composite_distinct_counts_tuples() {
     )
     .await
     .unwrap();
-    let QueryExpr::Aggregate { measures, .. } =
+    let PreASAPNode::Aggregate { measures, .. } =
         find_aggregate_node(&composite).expect("expected an Aggregate")
     else {
         unreachable!()
@@ -2501,7 +2505,7 @@ async fn composite_distinct_counts_tuples() {
     )
     .await
     .unwrap();
-    let QueryExpr::Aggregate { measures, .. } =
+    let PreASAPNode::Aggregate { measures, .. } =
         find_aggregate_node(&single).expect("expected an Aggregate")
     else {
         unreachable!()

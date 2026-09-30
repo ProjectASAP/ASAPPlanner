@@ -167,13 +167,15 @@ pub const PROMQL_SERIES_IDENTITY: &str = "$promql_series_identity";
 /// Operators that rewrite or implicitly match dynamic label sets require their
 /// own realization; they must not accidentally treat the opaque identity as a
 /// user label or silently discard it.
-pub fn with_promql_series_identity(root: &super::QueryExpr) -> Result<super::QueryExpr, String> {
-    use super::{QueryExpr, Source};
+pub fn with_promql_series_identity(
+    root: &super::PreASAPNode,
+) -> Result<super::PreASAPNode, String> {
+    use super::{PreASAPNode, Source};
     use std::rc::Rc;
     let mut root = root.clone();
-    fn visit(node: &mut QueryExpr) -> Result<(), String> {
+    fn visit(node: &mut PreASAPNode) -> Result<(), String> {
         match node {
-            QueryExpr::Scan {
+            PreASAPNode::Scan {
                 source: Source::TimeSeries { .. },
                 schema,
                 ..
@@ -194,29 +196,29 @@ pub fn with_promql_series_identity(root: &super::QueryExpr) -> Result<super::Que
                 schema.closed = true;
                 Ok(())
             }
-            QueryExpr::TimeRange { child, .. }
-            | QueryExpr::Limit { child, .. }
-            | QueryExpr::TimeShift { child, .. }
-            | QueryExpr::PromqlSubquery { child, .. }
-            | QueryExpr::PromqlScalarFromVector(child)
-            | QueryExpr::PromqlRelabel { child, .. } => visit(Rc::make_mut(child)),
+            PreASAPNode::TimeRange { child, .. }
+            | PreASAPNode::Limit { child, .. }
+            | PreASAPNode::TimeShift { child, .. }
+            | PreASAPNode::PromqlSubquery { child, .. }
+            | PreASAPNode::PromqlScalarFromVector(child)
+            | PreASAPNode::PromqlRelabel { child, .. } => visit(Rc::make_mut(child)),
             // Constants read no series.
-            QueryExpr::PromqlScalarBridge(_)
-            | QueryExpr::EvalTimestamp
-            | QueryExpr::Literal(super::ScalarValue::Float64(_)) => Ok(()),
-            QueryExpr::PromqlVectorFromScalar(child) => visit(Rc::make_mut(child)),
-            QueryExpr::BinaryOp { lhs, rhs, .. } => {
+            PreASAPNode::PromqlScalarBridge(_)
+            | PreASAPNode::EvalTimestamp
+            | PreASAPNode::Literal(super::ScalarValue::Float64(_)) => Ok(()),
+            PreASAPNode::PromqlVectorFromScalar(child) => visit(Rc::make_mut(child)),
+            PreASAPNode::BinaryOp { lhs, rhs, .. } => {
                 visit(Rc::make_mut(lhs))?;
                 visit(Rc::make_mut(rhs))
             }
-            QueryExpr::Concat { children, .. } => {
+            PreASAPNode::Concat { children, .. } => {
                 for child in children {
                     visit(child)?;
                 }
                 Ok(())
             }
-            QueryExpr::Aggregate { child, .. } => visit(Rc::make_mut(child)),
-            QueryExpr::Sort {
+            PreASAPNode::Aggregate { child, .. } => visit(Rc::make_mut(child)),
+            PreASAPNode::Sort {
                 child,
                 partition_by,
                 ..
@@ -396,8 +398,8 @@ mod tests {
     // Direct scalar literals remain valid vector inputs when series typing runs.
     #[test]
     fn series_identity_accepts_direct_vector_literal() {
-        let root = super::super::QueryExpr::PromqlVectorFromScalar(std::rc::Rc::new(
-            super::super::QueryExpr::Literal(super::super::ScalarValue::Float64(1.0)),
+        let root = super::super::PreASAPNode::PromqlVectorFromScalar(std::rc::Rc::new(
+            super::super::PreASAPNode::Literal(super::super::ScalarValue::Float64(1.0)),
         ));
         assert!(with_promql_series_identity(&root).is_ok());
     }

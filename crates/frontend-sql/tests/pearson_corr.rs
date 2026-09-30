@@ -2,7 +2,7 @@
 use std::rc::Rc;
 
 use asap_frontend_sql::{lower_sql, SqlCatalog};
-use asap_types::pre_asap::{AggIntent, Column, DataType, QueryExpr, Schema};
+use asap_types::pre_asap::{AggIntent, Column, DataType, PreASAPNode, Schema};
 use asap_types::types::AccuracyTarget;
 
 fn catalog() -> SqlCatalog {
@@ -16,20 +16,20 @@ fn catalog() -> SqlCatalog {
         .with_table("b", schema)
 }
 
-async fn lower(sql: &str) -> QueryExpr {
+async fn lower(sql: &str) -> PreASAPNode {
     lower_sql(sql, &catalog(), AccuracyTarget::Exact)
         .await
         .unwrap()
 }
 
-fn aggregate(query: &QueryExpr) -> (&[AggIntent], &QueryExpr) {
+fn aggregate(query: &PreASAPNode) -> (&[AggIntent], &PreASAPNode) {
     match query {
-        QueryExpr::Aggregate {
+        PreASAPNode::Aggregate {
             measures, child, ..
         } => (measures, child),
-        QueryExpr::Project { child, .. }
-        | QueryExpr::Filter { child, .. }
-        | QueryExpr::Sort { child, .. } => aggregate(child),
+        PreASAPNode::Project { child, .. }
+        | PreASAPNode::Filter { child, .. }
+        | PreASAPNode::Sort { child, .. } => aggregate(child),
         other => panic!("expected aggregate, got {other:?}"),
     }
 }
@@ -46,13 +46,13 @@ async fn corr_materializes_both_arguments() {
         let query = lower(sql).await;
         let (measures, child) = aggregate(&query);
         assert_eq!(measures, &[AggIntent::PearsonCorr { left: 0, right: 1 }]);
-        let QueryExpr::Project { cols, .. } = child else {
+        let PreASAPNode::Project { cols, .. } = child else {
             panic!("derived inputs")
         };
         assert_eq!(cols.len(), 2);
         assert!(cols
             .iter()
-            .any(|col| !matches!(col.expr, QueryExpr::Column(_))));
+            .any(|col| !matches!(col.expr, PreASAPNode::Column(_))));
         assert_eq!(
             query.output_schema().unwrap().columns[0].dtype,
             DataType::Float64
@@ -66,11 +66,11 @@ async fn corr_preserves_qualified_join_inputs() {
     let query = lower("SELECT corr(a.x, b.x) FROM a JOIN b ON a.g = b.g").await;
     let (measures, child) = aggregate(&query);
     assert_eq!(measures[0].input_cols(), vec![0, 1]);
-    let QueryExpr::Project { cols, .. } = child else {
+    let PreASAPNode::Project { cols, .. } = child else {
         panic!("paired projection")
     };
-    assert_eq!(cols[0].expr, QueryExpr::Column(0));
-    assert_eq!(cols[1].expr, QueryExpr::Column(3));
+    assert_eq!(cols[0].expr, PreASAPNode::Column(0));
+    assert_eq!(cols[1].expr, PreASAPNode::Column(3));
 }
 
 // Grouping and sibling reducers cannot drop either correlation argument.
@@ -99,7 +99,7 @@ async fn corr_repeated_input_and_serialization() {
     let query = lower("SELECT corr(x, x) FROM a").await;
     assert_eq!(aggregate(&query).0[0].input_cols(), vec![0, 0]);
     let encoded = serde_json::to_string(&query).unwrap();
-    let decoded: QueryExpr = serde_json::from_str(&encoded).unwrap();
+    let decoded: PreASAPNode = serde_json::from_str(&encoded).unwrap();
     assert_eq!(query, decoded);
 }
 

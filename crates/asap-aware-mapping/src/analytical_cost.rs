@@ -3010,7 +3010,7 @@ mod tests {
     fn comparison_rejects_different_snapshot_predicate_time_or_horizon() {
         use std::rc::Rc;
 
-        use asap_types::pre_asap::query_expr::{Predicate, QueryExpr};
+        use asap_types::pre_asap::query_expr::{PreASAPNode, Predicate};
         use asap_types::workload::{DurationMs, TimestampMs};
 
         let raw = comparison_scope();
@@ -3026,7 +3026,7 @@ mod tests {
         candidate = raw.clone();
         candidate.sources[0]
             .predicates
-            .push(Predicate(Rc::new(QueryExpr::promql_scalar(1.0))));
+            .push(Predicate(Rc::new(PreASAPNode::promql_scalar(1.0))));
         assert_eq!(
             validate_comparison_scopes(&raw, &candidate),
             Err(AnalyticalCostError::ComparisonScopeMismatch("sources"))

@@ -37,7 +37,7 @@
 //! — every existing consumer pattern-matches the one-field shape — so its
 //! data_state is *assigned* by [`validate_execution_data_states`] from the edge that
 //! reaches it and reported in the returned [`ExecutionDataStateAssignment`]. What it may
-//! not do is stay ambiguous inside one mixed plan: the same `Rc<SummaryNode>`
+//! not do is stay ambiguous inside one mixed plan: the same `Rc<PostASAPNode>`
 //! reached once as update input and once as query-time fallback is
 //! [`ExecutionDataStateError::AmbiguousKeepPreAsap`], because no single execution of that
 //! subtree can serve both roles.
@@ -47,9 +47,9 @@ use std::rc::Rc;
 
 use thiserror::Error;
 
-use super::expr::{ExactOperation, SummaryExpr, SummaryNode, ValueOperation};
+use super::expr::{ExactOperation, PostASAPNode, SummaryExpr, ValueOperation};
 use super::schema::{SummaryFamilyType, SummaryField, SummarySchema};
-use crate::pre_asap::query_expr::{aggregate_output_schema, QueryExprError};
+use crate::pre_asap::query_expr::{aggregate_output_schema, PreASAPNodeError};
 use crate::pre_asap::schema::{Column, Schema};
 
 /// When a post-ASAP value is produced.
@@ -209,30 +209,30 @@ pub enum ExecutionDataStateError {
 }
 
 /// The data_state assigned to every node of a validated plan, keyed by
-/// `Rc<SummaryNode>` pointer identity — the explicit per-node "execution_data_state" a
+/// `Rc<PostASAPNode>` pointer identity — the explicit per-node "execution_data_state" a
 /// runtime or a DAG export reads instead of re-deriving it. For every
 /// non-`KeepPreAsap` node this equals [`produced_data_state`]; for a
 /// `KeepPreAsap` leaf it is the data_state the reaching edge assigned.
 #[derive(Debug, Clone, Default)]
 pub struct ExecutionDataStateAssignment {
-    domains: HashMap<*const SummaryNode, ExecutionDataState>,
+    domains: HashMap<*const PostASAPNode, ExecutionDataState>,
 }
 
 impl ExecutionDataStateAssignment {
     /// The data_state assigned to `node`, if it was part of the validated plan.
-    pub fn data_state_of(&self, node: &Rc<SummaryNode>) -> Option<ExecutionDataState> {
+    pub fn data_state_of(&self, node: &Rc<PostASAPNode>) -> Option<ExecutionDataState> {
         self.domains.get(&Rc::as_ptr(node)).copied()
     }
 
     /// The data_state assigned to the node at `ptr` — for callers walking a plan
     /// by reference rather than by `Rc`.
-    pub fn data_state_of_ptr(&self, ptr: *const SummaryNode) -> Option<ExecutionDataState> {
+    pub fn data_state_of_ptr(&self, ptr: *const PostASAPNode) -> Option<ExecutionDataState> {
         self.domains.get(&ptr).copied()
     }
 }
 
 /// Initial layout proposed by semantic realization, not a restriction on physical
-/// operator placement. `PostAsapDag::with_execution_phases` assigns the final
+/// operator placement. `PostASAPDAGTransport::with_execution_phases` assigns the final
 /// phase independently of payload kind. Returns `None` for
 /// [`SummaryExpr::KeepPreAsap`], whose data_state is assigned by the edge reaching
 /// it (see the module docs).
@@ -282,11 +282,11 @@ fn is_exact_accumulator_state(schema: &SummarySchema) -> Result<(), ExecutionDat
 
 /// Validate every edge of the DAG rooted at `root` against the module-level
 /// rules, returning each node's assigned data_state on success. Shared
-/// `Rc<SummaryNode>`s are visited once per reaching edge (the assignment is
+/// `Rc<PostASAPNode>`s are visited once per reaching edge (the assignment is
 /// per node, so a conflict between two edges is what
 /// [`ExecutionDataStateError::AmbiguousKeepPreAsap`] detects).
 pub fn validate_execution_data_states(
-    root: &Rc<SummaryNode>,
+    root: &Rc<PostASAPNode>,
 ) -> Result<ExecutionDataStateAssignment, ExecutionDataStateError> {
     // The root may be a readable value or bare maintained state (a
     // deployment may hand an `ExactAggregate` accumulator straight to a
@@ -307,7 +307,7 @@ pub fn validate_execution_data_states(
 /// legal update-path input. Validates every edge beneath `root` exactly
 /// as the whole-plan entry point does.
 pub fn validate_execution_data_states_at(
-    root: &Rc<SummaryNode>,
+    root: &Rc<PostASAPNode>,
     data_state: ExecutionDataState,
 ) -> Result<ExecutionDataStateAssignment, ExecutionDataStateError> {
     let mut assignment = ExecutionDataStateAssignment::default();
@@ -318,7 +318,7 @@ pub fn validate_execution_data_states_at(
 /// The source rows whose series a maintenance operand has one row for: a
 /// finalized per-series Sum or Count of those rows, or aligned arithmetic of
 /// operands over the same rows. Each emits exactly the series with a sample.
-fn per_series_rows(node: &SummaryNode) -> Option<&crate::pre_asap::QueryExpr> {
+fn per_series_rows(node: &PostASAPNode) -> Option<&crate::pre_asap::PreASAPNode> {
     use crate::post_asap::ExactKind;
     match &node.expr {
         SummaryExpr::ValueOperation {
@@ -353,7 +353,7 @@ fn per_series_rows(node: &SummaryNode) -> Option<&crate::pre_asap::QueryExpr> {
 /// Record `data_state` for `node` (detecting a conflicting earlier assignment
 /// for a `KeepPreAsap`), then check and recurse into every child edge.
 fn visit(
-    node: &Rc<SummaryNode>,
+    node: &Rc<PostASAPNode>,
     data_state: ExecutionDataState,
     assignment: &mut ExecutionDataStateAssignment,
 ) -> Result<(), ExecutionDataStateError> {
@@ -589,7 +589,7 @@ fn visit(
 /// under a state-only edge). For DAG export and other reporting that needs
 /// an explicit per-node data_state even on a plan that
 /// [`validate_execution_data_states`] would reject.
-pub fn assigned_child_data_state(parent: &SummaryExpr, child: &SummaryNode) -> ExecutionDataState {
+pub fn assigned_child_data_state(parent: &SummaryExpr, child: &PostASAPNode) -> ExecutionDataState {
     if let Some(avail) = produced_data_state(&child.expr) {
         return avail;
     }
@@ -625,7 +625,7 @@ pub fn assigned_child_data_state(parent: &SummaryExpr, child: &SummaryNode) -> E
 /// (checked via `accept`), or — for a `KeepPreAsap` leaf — the data_state the
 /// edge assigns it, derived from what that edge accepts.
 fn child_domain(
-    child: &Rc<SummaryNode>,
+    child: &Rc<PostASAPNode>,
     edge: ExecutionDataStateEdge,
     accept: impl Fn(ExecutionDataState) -> Result<(), ExecutionDataStateError>,
 ) -> Result<ExecutionDataState, ExecutionDataStateError> {
@@ -660,7 +660,7 @@ fn child_domain(
 }
 
 fn state_only(
-    child: &Rc<SummaryNode>,
+    child: &Rc<PostASAPNode>,
     edge: ExecutionDataStateEdge,
 ) -> Result<ExecutionDataState, ExecutionDataStateError> {
     child_domain(child, edge, |avail| match avail {
@@ -815,7 +815,7 @@ pub enum ExactOperationSchemaError {
     #[error("exact operator input carries summary state, not plain columns")]
     NonPlainInput,
     #[error("schema derivation failed: {0}")]
-    Schema(#[from] QueryExprError),
+    Schema(#[from] PreASAPNodeError),
 }
 
 #[cfg(test)]
@@ -824,7 +824,7 @@ mod tests {
     use crate::post_asap::{ExactKind, ExactParams, GroupingStrategy, SketchQuery};
     use crate::pre_asap::agg_intent::AggIntent;
     use crate::pre_asap::expr_ir::ColumnRef;
-    use crate::pre_asap::query_expr::{QueryExpr, Reduction, Source};
+    use crate::pre_asap::query_expr::{PreASAPNode, Reduction, Source};
     use crate::pre_asap::schema::DataType;
 
     /// Both execution phases use raw values, distinct from maintained state.
@@ -843,8 +843,8 @@ mod tests {
         assert_eq!(DataPrimitive::SummaryState.as_str(), "summary_state");
     }
 
-    fn scan() -> Rc<QueryExpr> {
-        Rc::new(QueryExpr::Scan {
+    fn scan() -> Rc<PreASAPNode> {
+        Rc::new(PreASAPNode::Scan {
             source: Source::TimeSeries { metric: "m".into() },
             predicates: vec![],
             schema: Schema::with_time_index(
@@ -859,10 +859,10 @@ mod tests {
         })
     }
 
-    fn keep() -> Rc<SummaryNode> {
+    fn keep() -> Rc<PostASAPNode> {
         let s = scan();
         let schema = lift_plain(&s.output_schema().unwrap());
-        Rc::new(SummaryNode {
+        Rc::new(PostASAPNode {
             expr: SummaryExpr::KeepPreAsap(s),
             schema,
             guarantee: None,
@@ -883,8 +883,8 @@ mod tests {
         }
     }
 
-    fn agg(child: Rc<SummaryNode>, family: SummaryFamilyType) -> Rc<SummaryNode> {
-        Rc::new(SummaryNode {
+    fn agg(child: Rc<PostASAPNode>, family: SummaryFamilyType) -> Rc<PostASAPNode> {
+        Rc::new(PostASAPNode {
             expr: SummaryExpr::SummaryAgg {
                 child,
                 family: family.clone(),
@@ -912,8 +912,8 @@ mod tests {
         )
     }
 
-    fn estimate(child: Rc<SummaryNode>) -> Rc<SummaryNode> {
-        Rc::new(SummaryNode {
+    fn estimate(child: Rc<PostASAPNode>) -> Rc<PostASAPNode> {
+        Rc::new(PostASAPNode {
             expr: SummaryExpr::SummaryEstimate {
                 summary_input: child,
                 query: SketchQuery::Quantile { q: 0.99 },
@@ -955,7 +955,7 @@ mod tests {
         let identity = crate::pre_asap::schema::PROMQL_SERIES_IDENTITY;
         // A finalized per-series Sum of `metric`'s rows.
         let operand = |metric: &str, schema: &SummarySchema| {
-            let rows = Rc::new(QueryExpr::Scan {
+            let rows = Rc::new(PreASAPNode::Scan {
                 source: Source::TimeSeries {
                     metric: metric.into(),
                 },
@@ -972,9 +972,9 @@ mod tests {
             let mut state = schema.clone();
             state.fields[0].dtype =
                 SummaryFamilyType::ExactAggregate(ExactKind::Sum, ExactParams::Sum);
-            let sum = Rc::new(SummaryNode {
+            let sum = Rc::new(PostASAPNode {
                 expr: SummaryExpr::SummaryAgg {
-                    child: Rc::new(SummaryNode {
+                    child: Rc::new(PostASAPNode {
                         expr: SummaryExpr::KeepPreAsap(rows),
                         schema: schema.clone(),
                         guarantee: None,
@@ -987,7 +987,7 @@ mod tests {
                 schema: state,
                 guarantee: None,
             });
-            Rc::new(SummaryNode {
+            Rc::new(PostASAPNode {
                 expr: SummaryExpr::ValueOperation {
                     child: sum,
                     operation: ValueOperation::FinalizeExactAccumulator,
@@ -998,7 +998,7 @@ mod tests {
             })
         };
         let validate = |schema: SummarySchema, rhs: &str| {
-            let binary = Rc::new(SummaryNode {
+            let binary = Rc::new(PostASAPNode {
                 expr: SummaryExpr::BinaryOp {
                     lhs: operand("m", &schema),
                     rhs: operand(rhs, &schema),
@@ -1078,7 +1078,7 @@ mod tests {
     #[test]
     fn query_time_operation_over_readout_is_legal_and_root_is_readout() {
         let inner = estimate(agg(keep(), kll()));
-        let root = Rc::new(SummaryNode {
+        let root = Rc::new(PostASAPNode {
             expr: SummaryExpr::ValueOperation {
                 child: inner,
                 operation: ValueOperation::Exact(max_op()),
@@ -1097,7 +1097,7 @@ mod tests {
     #[test]
     fn non_exact_operator_uses_the_same_read_domain_contract() {
         let inner = estimate(agg(keep(), kll()));
-        let root = Rc::new(SummaryNode {
+        let root = Rc::new(PostASAPNode {
             expr: SummaryExpr::ValueOperation {
                 child: inner,
                 operation: ValueOperation::Extension {
@@ -1119,7 +1119,7 @@ mod tests {
     #[test]
     fn query_time_values_can_feed_query_time_summary_construction() {
         let inner = estimate(agg(keep(), kll()));
-        let post = Rc::new(SummaryNode {
+        let post = Rc::new(PostASAPNode {
             expr: SummaryExpr::ValueOperation {
                 child: inner,
                 operation: ValueOperation::Exact(max_op()),
@@ -1135,7 +1135,7 @@ mod tests {
 
     #[test]
     fn function_under_summary_agg_is_legal_but_not_at_root() {
-        let operation = Rc::new(SummaryNode {
+        let operation = Rc::new(PostASAPNode {
             expr: SummaryExpr::ValueOperation {
                 child: keep(),
                 operation: ValueOperation::Exact(max_op()),
@@ -1159,7 +1159,7 @@ mod tests {
     #[test]
     fn function_over_readout_is_rejected() {
         let inner = estimate(agg(keep(), kll()));
-        let operation = Rc::new(SummaryNode {
+        let operation = Rc::new(PostASAPNode {
             expr: SummaryExpr::ValueOperation {
                 child: inner,
                 operation: ValueOperation::Exact(max_op()),
@@ -1199,7 +1199,7 @@ mod tests {
     fn summary_merge_runs_at_ingestion_or_query_time() {
         for timing in [ExecutionTiming::IngestionTime, ExecutionTiming::QueryTime] {
             let input = agg(keep(), kll());
-            let merged = Rc::new(SummaryNode {
+            let merged = Rc::new(PostASAPNode {
                 expr: SummaryExpr::SummaryMerge {
                     children: vec![input.clone()],
                     timing,
@@ -1226,7 +1226,7 @@ mod tests {
     #[test]
     fn ingestion_merge_cannot_depend_on_query_execution() {
         let input = agg(keep(), kll());
-        let query_merge = Rc::new(SummaryNode {
+        let query_merge = Rc::new(PostASAPNode {
             expr: SummaryExpr::SummaryMerge {
                 children: vec![input.clone()],
                 timing: ExecutionTiming::QueryTime,
@@ -1234,7 +1234,7 @@ mod tests {
             schema: input.schema.clone(),
             guarantee: None,
         });
-        let ingestion_merge = Rc::new(SummaryNode {
+        let ingestion_merge = Rc::new(PostASAPNode {
             expr: SummaryExpr::SummaryMerge {
                 children: vec![query_merge],
                 timing: ExecutionTiming::IngestionTime,
@@ -1252,7 +1252,7 @@ mod tests {
         // execution can serve both, so the plan is rejected.
         let shared = keep();
         let maintained = estimate(agg(Rc::clone(&shared), kll()));
-        let post_over_raw = Rc::new(SummaryNode {
+        let post_over_raw = Rc::new(PostASAPNode {
             expr: SummaryExpr::ValueOperation {
                 child: Rc::clone(&shared),
                 operation: ValueOperation::Exact(max_op()),
@@ -1261,11 +1261,11 @@ mod tests {
             schema: plain(&["max"]),
             guarantee: None,
         });
-        let root = Rc::new(SummaryNode {
+        let root = Rc::new(PostASAPNode {
             expr: SummaryExpr::SummaryMerge {
                 timing: ExecutionTiming::IngestionTime,
                 children: vec![
-                    Rc::new(SummaryNode {
+                    Rc::new(PostASAPNode {
                         expr: SummaryExpr::ValueOperation {
                             child: maintained,
                             operation: ValueOperation::Exact(max_op()),

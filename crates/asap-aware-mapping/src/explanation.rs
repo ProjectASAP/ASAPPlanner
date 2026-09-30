@@ -134,7 +134,7 @@
 //! ## One thing [`CandidatePostASAPDAGs`] doesn't carry that this module still needs:
 //! human-readable `location` text
 //!
-//! [`TargetSubDAGCandidates`]/[`CandidatePostASAPDAGs`] deliberately track only `Rc<QueryExpr>`
+//! [`TargetSubDAGCandidates`]/[`CandidatePostASAPDAGs`] deliberately track only `Rc<PreASAPNode>`
 //! pointer identity — the currency the search itself needs — not
 //! caller-facing prose. [`ReplacementExplanation::location`] is prose (a
 //! breadcrumb like `root "dash_a" > lhs`), so this module keeps one small,
@@ -186,9 +186,9 @@ use std::collections::HashMap;
 use std::fmt::Display;
 use std::rc::Rc;
 
-use asap_types::post_asap::{SummaryExpr, SummaryFamilyType, SummaryNode};
+use asap_types::post_asap::{PostASAPNode, SummaryExpr, SummaryFamilyType};
 use asap_types::pre_asap::cse::{structural_hash, HashCache};
-use asap_types::pre_asap::query_expr::QueryExpr;
+use asap_types::pre_asap::query_expr::PreASAPNode;
 
 use crate::replacement::{
     self, CandidatePostASAPDAGs, Replacement, ReplacementStrategy, TargetSubDAGCandidates,
@@ -235,9 +235,9 @@ pub enum ExplanationKind {
 ///
 /// `node_hash` is [`structural_hash`](asap_types::pre_asap::cse::structural_hash)
 /// of the `TargetSubDAG`'s own `target` subtree — the same function, on the
-/// same `Rc<QueryExpr>` shape, that [`asap_types::dag_export::DagNode::hash`]
+/// same `Rc<PreASAPNode>` shape, that [`asap_types::dag_export::DagNode::hash`]
 /// is computed with. A downstream consumer that independently exported the
-/// same `QueryExpr` (e.g. via `asap_types::dag_export::export`) can match
+/// same `PreASAPNode` (e.g. via `asap_types::dag_export::export`) can match
 /// this explanation to a `DagNode` by first comparing hashes and then
 /// confirming structural equality with [`ReplacementExplanation::target`].
 #[derive(Debug, Clone, PartialEq)]
@@ -249,7 +249,7 @@ pub struct ReplacementExplanation {
     /// The exact target expression the explanation describes. Reporting
     /// integrations use this together with `node_hash`: the hash narrows the
     /// search, and structural equality makes the final match collision-safe.
-    pub target: Rc<QueryExpr>,
+    pub target: Rc<PreASAPNode>,
 }
 
 /// Explain every replacement [`crate::replacement::search_workload`] finds
@@ -265,7 +265,7 @@ pub struct ReplacementExplanation {
 /// candidate-plan space, then reads findings off it — see the module docs'
 /// "The reframing" section for what that translation actually checks.
 pub fn explain_replacements<Id: Display>(
-    roots: Vec<(Id, QueryExpr)>,
+    roots: Vec<(Id, PreASAPNode)>,
 ) -> Vec<ReplacementExplanation> {
     explain_replacements_with(roots, &replacement::default_strategies())
 }
@@ -279,10 +279,10 @@ pub fn explain_replacements<Id: Display>(
 ///
 /// [`ReplacementStrategy`]: crate::replacement::ReplacementStrategy
 pub fn explain_replacements_with<'s, Id: Display>(
-    roots: Vec<(Id, QueryExpr)>,
+    roots: Vec<(Id, PreASAPNode)>,
     strategies: &[Box<dyn ReplacementStrategy + 's>],
 ) -> Vec<ReplacementExplanation> {
-    let ided: Vec<(String, Rc<QueryExpr>)> = roots
+    let ided: Vec<(String, Rc<PreASAPNode>)> = roots
         .into_iter()
         .map(|(id, expr)| (id.to_string(), Rc::new(expr)))
         .collect();
@@ -409,7 +409,7 @@ fn shared_subexpr_finding_reason(group: &TargetSubDAGCandidates) -> Option<Strin
 /// yes/no fact (a candidate's own `rationale` already names the specific
 /// `SketchKind`/`SketchAlgorithm` for a finding's `reason` text), so unlike
 /// `replacement.rs`'s counterpart this returns `bool`, not the kind itself.
-fn is_sketch_realization(node: &SummaryNode) -> bool {
+fn is_sketch_realization(node: &PostASAPNode) -> bool {
     if node
         .guarantee
         .as_ref()
@@ -432,8 +432,10 @@ fn is_sketch_realization(node: &SummaryNode) -> bool {
 /// every breadcrumb path that reaches a given `Rc`, not just the first: a
 /// shared node referenced from two workload roots (or two branches of one
 /// root) needs both breadcrumbs in its finding's `location`, not just one.
-fn collect_locations(roots: &[(String, Rc<QueryExpr>)]) -> HashMap<*const QueryExpr, Vec<String>> {
-    let mut locations: HashMap<*const QueryExpr, Vec<String>> = HashMap::new();
+fn collect_locations(
+    roots: &[(String, Rc<PreASAPNode>)],
+) -> HashMap<*const PreASAPNode, Vec<String>> {
+    let mut locations: HashMap<*const PreASAPNode, Vec<String>> = HashMap::new();
     for (id, root) in roots {
         visit(root, format!("root {id:?}"), &mut locations);
     }
@@ -444,9 +446,9 @@ fn collect_locations(roots: &[(String, Rc<QueryExpr>)]) -> HashMap<*const QueryE
 /// through its children. A shared ancestor is intentionally traversed once
 /// per incoming path so every descendant receives every valid breadcrumb.
 fn visit(
-    node: &Rc<QueryExpr>,
+    node: &Rc<PreASAPNode>,
     label: String,
-    locations: &mut HashMap<*const QueryExpr, Vec<String>>,
+    locations: &mut HashMap<*const PreASAPNode, Vec<String>>,
 ) {
     let ptr = Rc::as_ptr(node);
     locations.entry(ptr).or_default().push(label.clone());
@@ -456,14 +458,14 @@ fn visit(
 /// `node`'s own **relational-skeleton** operator children — the same scope
 /// `crate::replacement`'s own target-discovery `walk_children` (and
 /// `asap_types::pre_asap::cse::share_common_subtrees`'s `rebuild_children`)
-/// use. Exhaustive over every `QueryExpr` variant: a new variant fails to
+/// use. Exhaustive over every `PreASAPNode` variant: a new variant fails to
 /// compile here until this match is extended too.
 fn visit_children(
-    node: &QueryExpr,
+    node: &PreASAPNode,
     label: &str,
-    locations: &mut HashMap<*const QueryExpr, Vec<String>>,
+    locations: &mut HashMap<*const PreASAPNode, Vec<String>>,
 ) {
-    use QueryExpr::*;
+    use PreASAPNode::*;
     match node {
         Scan { .. } | PromqlScalarBridge(_) | EvalTimestamp | CurrentTimestamp => {}
         PromqlVectorFromScalar(c) | PromqlScalarFromVector(c) => {
@@ -519,21 +521,21 @@ mod tests {
     use asap_types::pre_asap::schema::{Column, DataType, Schema};
     use asap_types::types::AccuracyTarget;
 
-    fn metric_scan(labels: &[&str]) -> QueryExpr {
+    fn metric_scan(labels: &[&str]) -> PreASAPNode {
         let mut columns = vec![
             Column::new("ts", DataType::Timestamp, false),
             Column::new("value", DataType::Float64, false),
         ];
         columns.extend(labels.iter().map(|n| Column::new(*n, DataType::Utf8, true)));
-        QueryExpr::Scan {
+        PreASAPNode::Scan {
             source: Source::TimeSeries { metric: "m".into() },
             predicates: vec![],
             schema: Schema::with_time_index(columns, 0, vec![]),
         }
     }
 
-    fn agg(by: Vec<usize>, intent: AggIntent, child: QueryExpr) -> QueryExpr {
-        QueryExpr::Aggregate {
+    fn agg(by: Vec<usize>, intent: AggIntent, child: PreASAPNode) -> PreASAPNode {
+        PreASAPNode::Aggregate {
             reduction: Reduction::by(by),
             measures: vec![intent],
             output_names: vec![],
@@ -562,7 +564,7 @@ mod tests {
     }
 
     /// `node_hash` must be the literal `structural_hash` a downstream
-    /// consumer would compute over the *same* `QueryExpr` subtree via
+    /// consumer would compute over the *same* `PreASAPNode` subtree via
     /// `asap_types::dag_export::export` — the whole point of carrying it is
     /// that two independent exports of the same tree agree, with no
     /// string-matching against `location` required.
@@ -581,7 +583,7 @@ mod tests {
             Some(sketch.node_hash),
             expected_hash,
             "ReplacementExplanation::node_hash must match dag_export's DagNode::hash \
-             for the same QueryExpr subtree"
+             for the same PreASAPNode subtree"
         );
     }
 
@@ -643,7 +645,7 @@ mod tests {
     #[test]
     fn a_shared_sketchable_aggregate_is_reported_only_once() {
         let quantile = agg(vec![2], default_quantile(0.99), metric_scan(&["job"]));
-        let root = QueryExpr::BinaryOp {
+        let root = PreASAPNode::BinaryOp {
             op: asap_types::pre_asap::query_expr::BinaryOpKind::Compare(
                 asap_types::pre_asap::expr_ir::CompareOpKind::Eq,
             ),
@@ -737,7 +739,7 @@ mod tests {
         // The same shared branch appearing twice within one query (an `a/a`
         // shape) — single-query CSE.
         let branch = agg(vec![2], AggIntent::Sum { col: None }, metric_scan(&["job"]));
-        let q = QueryExpr::BinaryOp {
+        let q = PreASAPNode::BinaryOp {
             op: asap_types::pre_asap::query_expr::BinaryOpKind::Arithmetic(
                 asap_types::pre_asap::expr_ir::ArithmeticOpKind::Div,
             ),
@@ -772,12 +774,12 @@ mod tests {
         use asap_types::pre_asap::query_expr::Predicate;
 
         let shared = agg(vec![2], AggIntent::Sum { col: None }, metric_scan(&["job"]));
-        let root_a = QueryExpr::Filter {
-            pred: Predicate(Rc::new(QueryExpr::Literal(ScalarValue::Int64(1)))),
+        let root_a = PreASAPNode::Filter {
+            pred: Predicate(Rc::new(PreASAPNode::Literal(ScalarValue::Int64(1)))),
             child: Rc::new(shared.clone()),
         };
-        let root_b = QueryExpr::Filter {
-            pred: Predicate(Rc::new(QueryExpr::Literal(ScalarValue::Int64(2)))),
+        let root_b = PreASAPNode::Filter {
+            pred: Predicate(Rc::new(PreASAPNode::Literal(ScalarValue::Int64(2)))),
             child: Rc::new(shared),
         };
         let findings = explain_replacements(vec![("a", root_a), ("b", root_b)]);

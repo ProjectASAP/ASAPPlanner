@@ -3,10 +3,10 @@ use std::time::Duration;
 use asap_frontend_metricsql::{
     canonical_metricsql, lower_metricsql, parse_metricsql, MetricsqlError,
 };
-use asap_types::pre_asap::{AggIntent, QueryExpr, Reduction, Source};
+use asap_types::pre_asap::{AggIntent, PreASAPNode, Reduction, Source};
 use asap_types::types::AccuracyTarget;
 
-fn lower(query: &str) -> QueryExpr {
+fn lower(query: &str) -> PreASAPNode {
     lower_metricsql(query, AccuracyTarget::Epsilon(0.01)).unwrap()
 }
 
@@ -14,7 +14,7 @@ fn lower(query: &str) -> QueryExpr {
 fn selector_range_aggregate_and_call_share_the_canonical_shape() {
     let query = r#"sum by (job) (rate(http_requests_total{status=~"5.."}[5m]))"#;
     let tree = lower(query);
-    let QueryExpr::Aggregate {
+    let PreASAPNode::Aggregate {
         reduction,
         measures,
         child,
@@ -25,26 +25,26 @@ fn selector_range_aggregate_and_call_share_the_canonical_shape() {
     };
     assert_eq!(reduction, Reduction::by(vec![2]));
     assert!(matches!(measures.as_slice(), [AggIntent::Sum { .. }]));
-    let QueryExpr::Aggregate {
+    let PreASAPNode::Aggregate {
         measures, child, ..
     } = child.as_ref()
     else {
         panic!("expected rate aggregate");
     };
     assert!(matches!(measures.as_slice(), [AggIntent::Rate]));
-    let QueryExpr::TimeRange { range, child } = child.as_ref() else {
+    let PreASAPNode::TimeRange { range, child } = child.as_ref() else {
         panic!("expected range");
     };
     assert_eq!(*range, Duration::from_secs(300));
     assert!(
-        matches!(child.as_ref(), QueryExpr::Scan { source: Source::TimeSeries { metric }, predicates, .. } if metric == "http_requests_total" && predicates.len() == 1)
+        matches!(child.as_ref(), PreASAPNode::Scan { source: Source::TimeSeries { metric }, predicates, .. } if metric == "http_requests_total" && predicates.len() == 1)
     );
 }
 
 #[test]
 fn default_rollup_with_explicit_range_is_last_over_time() {
     let tree = lower("default_rollup(cpu_usage[5m])");
-    let QueryExpr::Aggregate {
+    let PreASAPNode::Aggregate {
         reduction,
         measures,
         child,
@@ -56,7 +56,7 @@ fn default_rollup_with_explicit_range_is_last_over_time() {
     assert_eq!(reduction, Reduction::PerEntity);
     assert!(matches!(measures.as_slice(), [AggIntent::LastOverTime]));
     assert!(
-        matches!(child.as_ref(), QueryExpr::TimeRange { range, .. } if *range == Duration::from_secs(300))
+        matches!(child.as_ref(), PreASAPNode::TimeRange { range, .. } if *range == Duration::from_secs(300))
     );
 }
 
@@ -147,7 +147,7 @@ fn metricsql_multi_argument_aggregates_fail_closed() {
 #[test]
 fn supported_parameterized_functions_require_their_exact_arity() {
     let quantile = lower("quantile(0.9, requests_total)");
-    assert!(matches!(quantile, QueryExpr::Aggregate { .. }));
+    assert!(matches!(quantile, PreASAPNode::Aggregate { .. }));
     let rollup = lower("quantile_over_time(0.9, requests_total[5m])");
-    assert!(matches!(rollup, QueryExpr::Aggregate { .. }));
+    assert!(matches!(rollup, PreASAPNode::Aggregate { .. }));
 }

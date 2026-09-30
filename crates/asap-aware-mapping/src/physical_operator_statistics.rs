@@ -278,7 +278,7 @@ pub struct PartitionStatistics {
 /// is the authoritative operator vocabulary: every one of its variants has a
 /// matching statistics variant here.
 ///
-/// This enum intentionally does not mirror either logical IR. `QueryExpr` and
+/// This enum intentionally does not mirror either logical IR. `PreASAPNode` and
 /// `SummaryExpr` are inputs to physical lowering, and one logical node may
 /// expand into several physical nodes or choose among several algorithms.
 /// Physical configuration such as a Top-K limit or hash-join build side lives

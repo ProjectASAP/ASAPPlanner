@@ -1,15 +1,15 @@
-//! Export the pre-ASAP [`QueryExpr`] tree as a generic node/edge graph, for tools
+//! Export the pre-ASAP [`PreASAPNode`] tree as a generic node/edge graph, for tools
 //! that need to render or diff the IR (the `dag_export` example + the
 //! `tools/dag-viewer` viewer — see issue #133) rather than walk it in Rust.
 //!
-//! `QueryExpr` already derives `Serialize`, but as a Rust-shaped tagged tree
+//! `PreASAPNode` already derives `Serialize`, but as a Rust-shaped tagged tree
 //! (`Rc` children nested inside each variant's own field). This module
 //! flattens that into an explicit node list + child-id edges — the shape a
 //! generic graph renderer wants — and additionally tags each node with
 //! [`structural_hash`](crate::pre_asap::cse::structural_hash), so a caller
 //! with several exported queries can spot identical subtrees (a
 //! shared `Scan`, a repeated `Aggregate` shape, …) by comparing hashes
-//! rather than re-implementing `QueryExpr: PartialEq` structural comparison
+//! rather than re-implementing `PreASAPNode: PartialEq` structural comparison
 //! client-side.
 //!
 //! This is literally the same hashing
@@ -33,7 +33,7 @@
 //! `asap_types`, never the reverse — can annotate an already-exported graph
 //! after the fact without this module needing to know anything about that
 //! layer's concepts. Concretely: `asap-aware-mapping`'s `explanation` module
-//! (issue #257) computes `structural_hash` over the same `QueryExpr`
+//! (issue #257) computes `structural_hash` over the same `PreASAPNode`
 //! subtrees this module does (via the identical function). The devtools
 //! exporter uses that hash to narrow candidates, then compares
 //! `ReplacementExplanation::target` with [`DagNode::source_expr`] for a
@@ -47,9 +47,9 @@ use std::rc::Rc;
 use serde::Serialize;
 
 use crate::cost::CostAnnotation;
-use crate::post_asap::{AccuracyError, ResultGuarantee, SummaryExpr, SummaryNode};
+use crate::post_asap::{AccuracyError, PostASAPNode, ResultGuarantee, SummaryExpr};
 use crate::pre_asap::cse::{structural_hash, HashCache};
-use crate::pre_asap::query_expr::{QueryExpr, Source};
+use crate::pre_asap::query_expr::{PreASAPNode, Source};
 
 /// One flattened IR node. `detail` holds this node's own scalar fields
 /// (predicates, aggregate funcs, schema, sort keys, …) — everything except
@@ -57,7 +57,7 @@ use crate::pre_asap::query_expr::{QueryExpr, Source};
 #[derive(Debug, Clone, Serialize)]
 pub struct DagNode {
     pub id: u32,
-    /// The `QueryExpr` variant name (e.g. `"Aggregate"`).
+    /// The `PreASAPNode` variant name (e.g. `"Aggregate"`).
     pub kind: &'static str,
     /// Short human-readable summary for a node's collapsed on-graph label.
     pub label: String,
@@ -83,7 +83,7 @@ pub struct DagNode {
     ///
     /// `None` for the same reason `source_expr` is `None` — a post-ASAP-
     /// originated node in an [`export_post_asap`] merged graph has no
-    /// `QueryExpr` to hash. Omitted from JSON entirely (rather than, say,
+    /// `PreASAPNode` to hash. Omitted from JSON entirely (rather than, say,
     /// serialized as `0`) so a consumer's shared-subtree-by-hash pass can
     /// tell "no hash" apart from a real hash that happens to collide with a
     /// placeholder — `0` is a legal `structural_hash` output, not a safe
@@ -95,14 +95,14 @@ pub struct DagNode {
     /// this value structurally to avoid treating a hash collision as node
     /// identity.
     ///
-    /// `None` for a node with no corresponding pre-ASAP `QueryExpr` at all —
+    /// `None` for a node with no corresponding pre-ASAP `PreASAPNode` at all —
     /// only possible for a post-ASAP-originated node inside a merged
     /// [`export_post_asap`] graph (a `SummaryAgg`/`SummaryJoin`/… node has no
-    /// single `QueryExpr` it corresponds to). Every node [`export`] itself
+    /// single `PreASAPNode` it corresponds to). Every node [`export`] itself
     /// produces is pre-ASAP by construction and always carries `Some`.
     #[serde(skip)]
-    pub source_expr: Option<QueryExpr>,
-    /// In-process identity of the source `QueryExpr`. Unlike `source_expr`'s
+    pub source_expr: Option<PreASAPNode>,
+    /// In-process identity of the source `PreASAPNode`. Unlike `source_expr`'s
     /// structural value, this preserves an `Rc` child reached from multiple
     /// parents so post-ASAP flattening can retain true DAG sharing.
     #[serde(skip)]
@@ -207,7 +207,7 @@ pub struct NamedGraph {
     pub name: String,
     /// The original query text (SQL or PromQL) this graph was lowered from,
     /// for display alongside the graph — not used by `export` itself, since
-    /// that only sees the already-lowered `QueryExpr`. Optional because not
+    /// that only sees the already-lowered `PreASAPNode`. Optional because not
     /// every producer of a `NamedGraph` has the source text on hand.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
@@ -231,8 +231,8 @@ pub struct NamedGraph {
     /// query: every node that has no winning replacement renders as an
     /// ordinary pre-ASAP [`DagNode`] (same shape [`export`] itself
     /// produces), and every node that does splices in its winning
-    /// candidate's shape instead — a rewritten [`QueryExpr`] subtree, or a
-    /// bound `SummaryNode` subtree, rendered inline in the very same node
+    /// candidate's shape instead — a rewritten [`PreASAPNode`] subtree, or a
+    /// bound `PostASAPNode` subtree, rendered inline in the very same node
     /// list. `None` unless a higher layer explicitly built one (e.g. the
     /// `dag_export` devtools binary's `--post-asap` flag); omitted from the
     /// JSON entirely when absent, so every existing producer/consumer of
@@ -285,8 +285,8 @@ pub struct WorkloadGraph {
 // ── Post-ASAP replacement export — a second, layering-seam-shaped feature ──
 //
 // Everything below this point is the post-ASAP counterpart of the pre-ASAP
-// flattening above: [`export_summary`] flattens a `SummaryNode` the same way
-// [`export`] flattens a `QueryExpr`, and [`TargetReplacement`] is the
+// flattening above: [`export_summary`] flattens a `PostASAPNode` the same way
+// [`export`] flattens a `PreASAPNode`, and [`TargetReplacement`] is the
 // generic, crate-agnostic "one replacement site, before and after" shape a
 // higher layer (`asap-aware-mapping`, via the `dag_export` devtools binary's
 // `--post-asap` flag) populates after running its own search — the exact
@@ -300,28 +300,28 @@ pub struct WorkloadGraph {
 //
 // A single whole-query "post-ASAP tree" isn't attempted here, and isn't
 // representable in the current type system either: `SummaryExpr` has no
-// variant letting a `SummaryNode` be embedded back inside a plain
-// `QueryExpr`'s child slot (`QueryExpr`'s own children are always
-// `Rc<QueryExpr>`, never `Rc<SummaryNode>`), so there is no way to splice a
+// variant letting a `PostASAPNode` be embedded back inside a plain
+// `PreASAPNode`'s child slot (`PreASAPNode`'s own children are always
+// `Rc<PreASAPNode>`, never `Rc<PostASAPNode>`), so there is no way to splice a
 // post-ASAP binding back into its original pre-ASAP tree in place. Inventing
 // a bridge type for that is a real `asap_types`/`asap-aware-mapping` IR
 // design decision, well beyond what a devtools visualization export should
 // decide unilaterally. Instead, each independently-discovered replacement
 // target gets its own small, self-contained `before`/`after` pair — the
-// target's own pre-ASAP subtree, and either the winning `SummaryNode` or the
-// winning rewritten `QueryExpr`, both of which *are* fully representable
+// target's own pre-ASAP subtree, and either the winning `PostASAPNode` or the
+// winning rewritten `PreASAPNode`, both of which *are* fully representable
 // today via [`export`]/[`export_summary`] as-is.
 
 /// One flattened post-ASAP node — the [`SummaryExpr`] analogue of
 /// [`DagNode`]. `detail` holds this node's own scalar fields (the summarized
 /// column, the summary family, grouping strategy, sketch-query kind, …) —
-/// everything except its `SummaryNode` children, which live in `children`
+/// everything except its `PostASAPNode` children, which live in `children`
 /// instead.
 ///
 /// Unlike [`DagNode`], this carries no `hash`/`source_expr` pair: nothing in
 /// this module ever needs to re-identify a particular `SummaryDagNode` the
 /// way `DagNode::hash` lets a higher layer re-identify a pre-ASAP node (a
-/// `SummaryNode` is always freshly exported for exactly one
+/// `PostASAPNode` is always freshly exported for exactly one
 /// [`TargetReplacementAfter::Summary`] site, never matched back against a
 /// separately-exported graph the way pre-ASAP notes are).
 ///
@@ -350,7 +350,7 @@ pub struct SummaryDagNode {
     /// `[outer, inner]`).
     pub children: Vec<u32>,
     /// The value's machine-readable accuracy guarantee (issue #172) —
-    /// [`SummaryNode::guarantee`] serialized structurally (metric, symbolic
+    /// [`PostASAPNode::guarantee`] serialized structurally (metric, symbolic
     /// bound, failure probability, provenance including any budget
     /// allocation), not as prose. Omitted when the node carries none (raw
     /// summary state, or a family with no error model), so every consumer
@@ -378,21 +378,21 @@ pub struct TargetRejection {
     pub error: AccuracyError,
 }
 
-/// One post-ASAP `SummaryNode` tree, flattened the same way [`DagGraph`]
-/// flattens a pre-ASAP `QueryExpr` tree.
+/// One post-ASAP `PostASAPNode` tree, flattened the same way [`DagGraph`]
+/// flattens a pre-ASAP `PreASAPNode` tree.
 #[derive(Debug, Clone, Serialize)]
 pub struct SummaryDagGraph {
     pub nodes: Vec<SummaryDagNode>,
     pub root: u32,
 }
 
-/// Flatten a [`SummaryNode`] the same way [`export`] flattens a `QueryExpr`
+/// Flatten a [`PostASAPNode`] the same way [`export`] flattens a `PreASAPNode`
 /// — post-order, one [`SummaryDagNode`] per [`SummaryExpr`] variant, no
-/// memoization of repeated `Rc<SummaryNode>` references (a shared
+/// memoization of repeated `Rc<PostASAPNode>` references (a shared
 /// sub-expression reachable through two parents is flattened twice, into two
 /// separate node entries — the same "this is a flattened tree view, not a
 /// pointer-identity-preserving graph" behavior [`build`] already has for
-/// `QueryExpr`).
+/// `PreASAPNode`).
 ///
 /// A `KeepPreAsap(inner)` leaf embeds the *whole* pre-ASAP subtree beneath it
 /// as a nested [`DagGraph`] (via [`export(inner)`](export)) inside its own
@@ -402,7 +402,7 @@ pub struct SummaryDagGraph {
 /// `Vec` isn't type-safe; nesting is. `label` for a `KeepPreAsap` node is
 /// `format!("KeepPreAsap({kind})")`, where `kind` is the inner subtree's own
 /// top-level `DagNode::kind`.
-pub fn export_summary(node: &SummaryNode) -> SummaryDagGraph {
+pub fn export_summary(node: &PostASAPNode) -> SummaryDagGraph {
     let mut nodes = Vec::new();
     let root = build_summary(node, &mut nodes);
     SummaryDagGraph { nodes, root }
@@ -563,12 +563,12 @@ fn summary_shape(expr: &SummaryExpr) -> (&'static str, String, serde_json::Value
     }
 }
 
-/// `expr`'s own `Rc<SummaryNode>` children, in the variant's field order
+/// `expr`'s own `Rc<PostASAPNode>` children, in the variant's field order
 /// (e.g. `SummaryJoin` is `[outer, inner]`) — empty for
-/// [`SummaryExpr::KeepPreAsap`], which has no `SummaryNode` children at all
-/// (only a boxed pre-ASAP `QueryExpr`). Shared by [`build_summary`] and
+/// [`SummaryExpr::KeepPreAsap`], which has no `PostASAPNode` children at all
+/// (only a boxed pre-ASAP `PreASAPNode`). Shared by [`build_summary`] and
 /// [`build_summary_hybrid`] for the same reason [`summary_shape`] is.
-fn summary_children(expr: &SummaryExpr) -> Vec<&Rc<SummaryNode>> {
+fn summary_children(expr: &SummaryExpr) -> Vec<&Rc<PostASAPNode>> {
     match expr {
         SummaryExpr::KeepPreAsap(_) => vec![],
         SummaryExpr::BinaryOp { lhs, rhs, .. } => vec![lhs, rhs],
@@ -587,8 +587,8 @@ fn summary_children(expr: &SummaryExpr) -> Vec<&Rc<SummaryNode>> {
 /// Recursively flatten `node`, appending [`SummaryDagNode`]s to `nodes` in
 /// post-order (children pushed before their parent), and return the pushed
 /// root's id. Exhaustive over every [`SummaryExpr`] variant, matching this
-/// file's own exhaustive style for `QueryExpr` in [`build`].
-fn build_summary(node: &SummaryNode, nodes: &mut Vec<SummaryDagNode>) -> u32 {
+/// file's own exhaustive style for `PreASAPNode` in [`build`].
+fn build_summary(node: &PostASAPNode, nodes: &mut Vec<SummaryDagNode>) -> u32 {
     if let SummaryExpr::KeepPreAsap(inner) = &node.expr {
         let pre_asap_subgraph = export(inner);
         let inner_kind = pre_asap_subgraph.nodes[pre_asap_subgraph.root as usize].kind;
@@ -689,7 +689,7 @@ pub enum TargetReplacementAfter {
 }
 
 /// Flatten `expr` into a [`DagGraph`].
-pub fn export(expr: &QueryExpr) -> DagGraph {
+pub fn export(expr: &PreASAPNode) -> DagGraph {
     let mut nodes = Vec::new();
     // One cache for the whole export — persisted across every `build`/
     // `push_node` call, not reset per node, so `structural_hash` memoizes
@@ -723,14 +723,14 @@ pub enum PostAsapSubstitution {
     /// [`build`]'s own doc for why `.0`'s own top level is rendered without
     /// re-querying `find_winner` on it (its descendants still are).
     Rewrite {
-        replacement: Rc<QueryExpr>,
+        replacement: Rc<PreASAPNode>,
         decision: DagDecision,
     },
     /// This exact node has a winning `Replacement::Summary` — switch to
-    /// rendering `.0`'s bound `SummaryNode` shape from here down, via
+    /// rendering `.0`'s bound `PostASAPNode` shape from here down, via
     /// [`build_summary_hybrid`].
     Summary {
-        replacement: Rc<SummaryNode>,
+        replacement: Rc<PostASAPNode>,
         decision: DagDecision,
     },
 }
@@ -745,7 +745,7 @@ pub enum PostAsapSubstitution {
 /// export" section doc for why *that* design doesn't attempt a single
 /// whole-query composite, and why this one can: this is a synthetic
 /// id/edge list, the same kind of thing [`DagGraph`] already is for the
-/// pre-ASAP side, not a real `QueryExpr`/`SummaryNode` value with a type
+/// pre-ASAP side, not a real `PreASAPNode`/`PostASAPNode` value with a type
 /// system to satisfy).
 ///
 /// `find_winner` is the whole layering seam: `asap_types` never runs
@@ -771,8 +771,8 @@ pub enum PostAsapSubstitution {
 /// for every registered strategy, not just the ones that happen not to
 /// return the target itself as a candidate.
 pub fn export_post_asap(
-    root: &QueryExpr,
-    find_winner: &mut dyn FnMut(&QueryExpr) -> Option<PostAsapSubstitution>,
+    root: &PreASAPNode,
+    find_winner: &mut dyn FnMut(&PreASAPNode) -> Option<PostAsapSubstitution>,
 ) -> DagGraph {
     let mut nodes = Vec::new();
     let mut cache = HashCache::new();
@@ -819,23 +819,23 @@ macro_rules! define_query_kind_tags {
         #[cfg(test)]
         const QUERY_KIND_TAGS: &[&str] = &[$($tag),+];
 
-        fn kind_tag(expr: &QueryExpr) -> &'static str {
+        fn kind_tag(expr: &PreASAPNode) -> &'static str {
             match expr {
                 $($pattern => $tag),+,
-                other @ (QueryExpr::Column(_)
-                | QueryExpr::Literal(_)
-                | QueryExpr::Compare { .. }
-                | QueryExpr::BoolAnd(_)
-                | QueryExpr::BoolOr(_)
-                | QueryExpr::Not(_)
-                | QueryExpr::IsNull(_)
-                | QueryExpr::IsNotNull(_)
-                | QueryExpr::Cast { .. }
-                | QueryExpr::InList { .. }
-                | QueryExpr::FunctionCall { .. }
-                | QueryExpr::Arithmetic { .. }
-                | QueryExpr::Case { .. }) => unreachable!(
-                    "kind_tag reached a scalar QueryExpr variant directly: {other:?}"
+                other @ (PreASAPNode::Column(_)
+                | PreASAPNode::Literal(_)
+                | PreASAPNode::Compare { .. }
+                | PreASAPNode::BoolAnd(_)
+                | PreASAPNode::BoolOr(_)
+                | PreASAPNode::Not(_)
+                | PreASAPNode::IsNull(_)
+                | PreASAPNode::IsNotNull(_)
+                | PreASAPNode::Cast { .. }
+                | PreASAPNode::InList { .. }
+                | PreASAPNode::FunctionCall { .. }
+                | PreASAPNode::Arithmetic { .. }
+                | PreASAPNode::Case { .. }) => unreachable!(
+                    "kind_tag reached a scalar PreASAPNode variant directly: {other:?}"
                 ),
             }
         }
@@ -843,29 +843,29 @@ macro_rules! define_query_kind_tags {
 }
 
 define_query_kind_tags! {
-    QueryExpr::Scan { .. } => "Scan",
-    QueryExpr::PromqlScalarBridge(_) => "PromqlScalarBridge",
-    QueryExpr::EvalTimestamp => "EvalTimestamp",
-    QueryExpr::CurrentTimestamp => "CurrentTimestamp",
-    QueryExpr::PromqlVectorFromScalar(_) => "PromqlVectorFromScalar",
-    QueryExpr::PromqlScalarFromVector(_) => "PromqlScalarFromVector",
-    QueryExpr::PromqlRelabel { .. } => "PromqlRelabel",
-    QueryExpr::PromqlInfoEnrich { .. } => "PromqlInfoEnrich",
-    QueryExpr::PromqlSeriesSample { .. } => "PromqlSeriesSample",
-    QueryExpr::Filter { .. } => "Filter",
-    QueryExpr::Project { .. } => "Project",
-    QueryExpr::Aggregate { .. } => "Aggregate",
-    QueryExpr::Dedup { .. } => "Dedup",
-    QueryExpr::Concat { .. } => "Concat",
-    QueryExpr::Join { .. } => "Join",
-    QueryExpr::SetOp { .. } => "SetOp",
-    QueryExpr::Sort { .. } => "Sort",
-    QueryExpr::Limit { .. } => "Limit",
-    QueryExpr::PromqlSubquery { .. } => "PromqlSubquery",
-    QueryExpr::TimeRange { .. } => "TimeRange",
-    QueryExpr::TimeShift { .. } => "TimeShift",
-    QueryExpr::SQLWindowFunc { .. } => "SQLWindowFunc",
-    QueryExpr::BinaryOp { .. } => "BinaryOp",
+    PreASAPNode::Scan { .. } => "Scan",
+    PreASAPNode::PromqlScalarBridge(_) => "PromqlScalarBridge",
+    PreASAPNode::EvalTimestamp => "EvalTimestamp",
+    PreASAPNode::CurrentTimestamp => "CurrentTimestamp",
+    PreASAPNode::PromqlVectorFromScalar(_) => "PromqlVectorFromScalar",
+    PreASAPNode::PromqlScalarFromVector(_) => "PromqlScalarFromVector",
+    PreASAPNode::PromqlRelabel { .. } => "PromqlRelabel",
+    PreASAPNode::PromqlInfoEnrich { .. } => "PromqlInfoEnrich",
+    PreASAPNode::PromqlSeriesSample { .. } => "PromqlSeriesSample",
+    PreASAPNode::Filter { .. } => "Filter",
+    PreASAPNode::Project { .. } => "Project",
+    PreASAPNode::Aggregate { .. } => "Aggregate",
+    PreASAPNode::Dedup { .. } => "Dedup",
+    PreASAPNode::Concat { .. } => "Concat",
+    PreASAPNode::Join { .. } => "Join",
+    PreASAPNode::SetOp { .. } => "SetOp",
+    PreASAPNode::Sort { .. } => "Sort",
+    PreASAPNode::Limit { .. } => "Limit",
+    PreASAPNode::PromqlSubquery { .. } => "PromqlSubquery",
+    PreASAPNode::TimeRange { .. } => "TimeRange",
+    PreASAPNode::TimeShift { .. } => "TimeShift",
+    PreASAPNode::SQLWindowFunc { .. } => "SQLWindowFunc",
+    PreASAPNode::BinaryOp { .. } => "BinaryOp",
 }
 
 /// Push one flattened node for `expr`. `expr` is the *whole* subtree this
@@ -877,7 +877,7 @@ define_query_kind_tags! {
 /// caller-supplied argument — see that function's doc for why.
 fn push_node(
     nodes: &mut Vec<DagNode>,
-    expr: &QueryExpr,
+    expr: &PreASAPNode,
     cache: &mut HashCache,
     label: String,
     detail: serde_json::Value,
@@ -898,20 +898,20 @@ fn push_node(
         workload_node_id: None,
         hash,
         source_expr: Some(expr.clone()),
-        source_ptr: Some(expr as *const QueryExpr as usize),
+        source_ptr: Some(expr as *const PreASAPNode as usize),
         notes: Vec::new(),
         decision: None,
     });
     id
 }
 
-/// Push one flattened node with no corresponding pre-ASAP `QueryExpr` at
+/// Push one flattened node with no corresponding pre-ASAP `PreASAPNode` at
 /// all — a post-ASAP-originated node inside [`export_post_asap`]'s merged
 /// graph (a `SummaryAgg`/`SummaryJoin`/… node, via [`build_summary_hybrid`]).
 /// `hash`/`source_expr`-based re-identification (see [`DagNode::hash`]'s own
-/// doc) has no meaning for a node with no `QueryExpr` behind it, so this
+/// doc) has no meaning for a node with no `PreASAPNode` behind it, so this
 /// pushes a fixed placeholder hash (`0`) and `source_expr: None` rather than
-/// inventing a hash over `SummaryExpr` (which, unlike `QueryExpr`, has no
+/// inventing a hash over `SummaryExpr` (which, unlike `PreASAPNode`, has no
 /// [`structural_hash`]-equivalent function at all — see [`SummaryDagNode`]'s
 /// own doc on why `SummaryExpr`'s fields don't even derive `Hash`/`PartialEq`
 /// consistently enough to build one).
@@ -941,7 +941,7 @@ fn push_summary_originated_node(
 }
 
 /// The [`build_summary`]/[`build_summary_hybrid`] counterpart of [`build`]
-/// for a bound [`SummaryNode`] reached while building
+/// for a bound [`PostASAPNode`] reached while building
 /// [`export_post_asap`]'s merged graph: appends into the *same* `nodes:
 /// Vec<DagNode>` list `build` itself is filling, instead of a separate
 /// [`SummaryDagGraph`]. A `KeepPreAsap(inner)` leaf recurses back into
@@ -952,10 +952,10 @@ fn push_summary_originated_node(
 /// wrapper (a nested aggregate a strategy independently found a
 /// replacement for, say) still gets spliced in correctly.
 fn build_summary_hybrid(
-    node: &SummaryNode,
+    node: &PostASAPNode,
     nodes: &mut Vec<DagNode>,
     cache: &mut HashCache,
-    find_winner: &mut dyn FnMut(&QueryExpr) -> Option<PostAsapSubstitution>,
+    find_winner: &mut dyn FnMut(&PreASAPNode) -> Option<PostAsapSubstitution>,
 ) -> u32 {
     if let SummaryExpr::KeepPreAsap(inner) = &node.expr {
         return build(inner, nodes, cache, find_winner);
@@ -1000,7 +1000,7 @@ fn source_label(source: &Source) -> String {
 
 /// Recursively flatten `expr`, appending nodes to `nodes` in post-order
 /// (children pushed before their parent), and return the id of the pushed
-/// root node. Exhaustive over every **operator** `QueryExpr` variant — a new
+/// root node. Exhaustive over every **operator** `PreASAPNode` variant — a new
 /// one fails to compile here until this match is extended, matching the rest
 /// of the IR's exhaustive-match style (e.g. `output_schema`). The scalar
 /// variants (issue #205) are never passed to `build` directly: every operator
@@ -1020,10 +1020,10 @@ fn source_label(source: &Source) -> String {
 /// through `build` again, so *they* still get a fresh `find_winner` call)
 /// rather than by looping back through this check a second time.
 fn build(
-    expr: &QueryExpr,
+    expr: &PreASAPNode,
     nodes: &mut Vec<DagNode>,
     cache: &mut HashCache,
-    find_winner: &mut dyn FnMut(&QueryExpr) -> Option<PostAsapSubstitution>,
+    find_winner: &mut dyn FnMut(&PreASAPNode) -> Option<PostAsapSubstitution>,
 ) -> u32 {
     match find_winner(expr) {
         Some(PostAsapSubstitution::Rewrite {
@@ -1070,19 +1070,19 @@ fn build(
 }
 
 /// The actual per-variant match [`build`] dispatches to once it has decided
-/// (by consulting `find_winner` exactly once) which `QueryExpr` value to
+/// (by consulting `find_winner` exactly once) which `PreASAPNode` value to
 /// render at this position — either `expr` itself (unchanged), or a winning
 /// `Replacement::Rewrite`'s own target. Every recursive call here goes back
 /// through [`build`] (not this function), so every child gets its own fresh
 /// `find_winner` query.
 fn build_no_recheck(
-    expr: &QueryExpr,
+    expr: &PreASAPNode,
     nodes: &mut Vec<DagNode>,
     cache: &mut HashCache,
-    find_winner: &mut dyn FnMut(&QueryExpr) -> Option<PostAsapSubstitution>,
+    find_winner: &mut dyn FnMut(&PreASAPNode) -> Option<PostAsapSubstitution>,
 ) -> u32 {
     match expr {
-        QueryExpr::Scan {
+        PreASAPNode::Scan {
             source,
             predicates,
             schema,
@@ -1100,7 +1100,7 @@ fn build_no_recheck(
         // `detail` JSON, same as every other scalar-typed field
         // (`Filter.pred`, `Project.cols`, …) rather than pushing it as a
         // separate DAG node.
-        QueryExpr::PromqlScalarBridge(inner) => {
+        PreASAPNode::PromqlScalarBridge(inner) => {
             let detail = serde_json::json!({ "value": inner });
             push_node(
                 nodes,
@@ -1111,7 +1111,7 @@ fn build_no_recheck(
                 vec![],
             )
         }
-        QueryExpr::EvalTimestamp => push_node(
+        PreASAPNode::EvalTimestamp => push_node(
             nodes,
             expr,
             cache,
@@ -1119,7 +1119,7 @@ fn build_no_recheck(
             serde_json::json!({}),
             vec![],
         ),
-        QueryExpr::CurrentTimestamp => push_node(
+        PreASAPNode::CurrentTimestamp => push_node(
             nodes,
             expr,
             cache,
@@ -1127,7 +1127,7 @@ fn build_no_recheck(
             serde_json::json!({}),
             vec![],
         ),
-        QueryExpr::PromqlVectorFromScalar(child) => {
+        PreASAPNode::PromqlVectorFromScalar(child) => {
             let c = build(child, nodes, cache, find_winner);
             push_node(
                 nodes,
@@ -1138,7 +1138,7 @@ fn build_no_recheck(
                 vec![c],
             )
         }
-        QueryExpr::PromqlScalarFromVector(child) => {
+        PreASAPNode::PromqlScalarFromVector(child) => {
             let c = build(child, nodes, cache, find_winner);
             push_node(
                 nodes,
@@ -1149,7 +1149,7 @@ fn build_no_recheck(
                 vec![c],
             )
         }
-        QueryExpr::PromqlRelabel { dst, value, child } => {
+        PreASAPNode::PromqlRelabel { dst, value, child } => {
             let c = build(child, nodes, cache, find_winner);
             let detail = serde_json::json!({ "dst": dst, "value": value });
             push_node(
@@ -1161,7 +1161,7 @@ fn build_no_recheck(
                 vec![c],
             )
         }
-        QueryExpr::PromqlInfoEnrich { selector, child } => {
+        PreASAPNode::PromqlInfoEnrich { selector, child } => {
             let c = build(child, nodes, cache, find_winner);
             let detail = serde_json::json!({ "selector": selector });
             push_node(
@@ -1173,7 +1173,7 @@ fn build_no_recheck(
                 vec![c],
             )
         }
-        QueryExpr::PromqlSeriesSample { by, kind, child } => {
+        PreASAPNode::PromqlSeriesSample { by, kind, child } => {
             let c = build(child, nodes, cache, find_winner);
             let detail = serde_json::json!({ "by": by, "kind": kind });
             push_node(
@@ -1185,12 +1185,12 @@ fn build_no_recheck(
                 vec![c],
             )
         }
-        QueryExpr::Filter { pred, child } => {
+        PreASAPNode::Filter { pred, child } => {
             let c = build(child, nodes, cache, find_winner);
             let detail = serde_json::json!({ "pred": pred });
             push_node(nodes, expr, cache, "Filter".into(), detail, vec![c])
         }
-        QueryExpr::Project {
+        PreASAPNode::Project {
             cols,
             qualifier,
             child,
@@ -1206,7 +1206,7 @@ fn build_no_recheck(
                 vec![c],
             )
         }
-        QueryExpr::Aggregate {
+        PreASAPNode::Aggregate {
             reduction,
             measures,
             output_names,
@@ -1229,7 +1229,7 @@ fn build_no_recheck(
                 vec![c],
             )
         }
-        QueryExpr::Dedup { cols, child } => {
+        PreASAPNode::Dedup { cols, child } => {
             let c = build(child, nodes, cache, find_winner);
             let detail = serde_json::json!({ "cols": cols });
             push_node(
@@ -1241,7 +1241,7 @@ fn build_no_recheck(
                 vec![c],
             )
         }
-        QueryExpr::Concat {
+        PreASAPNode::Concat {
             children,
             discriminator_unique_key,
         } => {
@@ -1254,7 +1254,7 @@ fn build_no_recheck(
                 serde_json::json!({ "discriminator_unique_key": discriminator_unique_key });
             push_node(nodes, expr, cache, label, detail, ids)
         }
-        QueryExpr::Join {
+        PreASAPNode::Join {
             kind,
             pred,
             left,
@@ -1272,7 +1272,7 @@ fn build_no_recheck(
                 vec![l, r],
             )
         }
-        QueryExpr::SetOp {
+        PreASAPNode::SetOp {
             kind,
             all,
             left,
@@ -1290,7 +1290,7 @@ fn build_no_recheck(
                 vec![l, r],
             )
         }
-        QueryExpr::Sort {
+        PreASAPNode::Sort {
             keys,
             partition_by,
             child,
@@ -1306,12 +1306,12 @@ fn build_no_recheck(
                 vec![c],
             )
         }
-        QueryExpr::Limit { n, offset, child } => {
+        PreASAPNode::Limit { n, offset, child } => {
             let c = build(child, nodes, cache, find_winner);
             let detail = serde_json::json!({ "n": n, "offset": offset });
             push_node(nodes, expr, cache, format!("Limit({n})"), detail, vec![c])
         }
-        QueryExpr::PromqlSubquery {
+        PreASAPNode::PromqlSubquery {
             range,
             resolution,
             child,
@@ -1320,7 +1320,7 @@ fn build_no_recheck(
             let detail = serde_json::json!({ "range": range, "resolution": resolution });
             push_node(nodes, expr, cache, "PromqlSubquery".into(), detail, vec![c])
         }
-        QueryExpr::TimeRange { range, child } => {
+        PreASAPNode::TimeRange { range, child } => {
             let c = build(child, nodes, cache, find_winner);
             let detail = serde_json::json!({ "range": range });
             push_node(
@@ -1332,12 +1332,12 @@ fn build_no_recheck(
                 vec![c],
             )
         }
-        QueryExpr::TimeShift { shift, child } => {
+        PreASAPNode::TimeShift { shift, child } => {
             let c = build(child, nodes, cache, find_winner);
             let detail = serde_json::json!({ "shift": shift });
             push_node(nodes, expr, cache, "TimeShift".into(), detail, vec![c])
         }
-        QueryExpr::SQLWindowFunc {
+        PreASAPNode::SQLWindowFunc {
             func,
             args,
             partition_by,
@@ -1364,7 +1364,7 @@ fn build_no_recheck(
                 vec![c],
             )
         }
-        QueryExpr::BinaryOp {
+        PreASAPNode::BinaryOp {
             op,
             lhs,
             rhs,
@@ -1382,20 +1382,22 @@ fn build_no_recheck(
                 vec![l, r],
             )
         }
-        other @ (QueryExpr::Column(_)
-        | QueryExpr::Literal(_)
-        | QueryExpr::Compare { .. }
-        | QueryExpr::BoolAnd(_)
-        | QueryExpr::BoolOr(_)
-        | QueryExpr::Not(_)
-        | QueryExpr::IsNull(_)
-        | QueryExpr::IsNotNull(_)
-        | QueryExpr::Cast { .. }
-        | QueryExpr::InList { .. }
-        | QueryExpr::FunctionCall { .. }
-        | QueryExpr::Arithmetic { .. }
-        | QueryExpr::Case { .. }) => {
-            unreachable!("dag_export::build reached a scalar QueryExpr variant directly: {other:?}")
+        other @ (PreASAPNode::Column(_)
+        | PreASAPNode::Literal(_)
+        | PreASAPNode::Compare { .. }
+        | PreASAPNode::BoolAnd(_)
+        | PreASAPNode::BoolOr(_)
+        | PreASAPNode::Not(_)
+        | PreASAPNode::IsNull(_)
+        | PreASAPNode::IsNotNull(_)
+        | PreASAPNode::Cast { .. }
+        | PreASAPNode::InList { .. }
+        | PreASAPNode::FunctionCall { .. }
+        | PreASAPNode::Arithmetic { .. }
+        | PreASAPNode::Case { .. }) => {
+            unreachable!(
+                "dag_export::build reached a scalar PreASAPNode variant directly: {other:?}"
+            )
         }
     }
 }
@@ -1411,8 +1413,8 @@ mod tests {
     use crate::pre_asap::schema::{Column, DataType, Schema};
     use crate::types::AccuracyTarget;
 
-    fn scan(table: &str, columns: Vec<Column>) -> QueryExpr {
-        QueryExpr::Scan {
+    fn scan(table: &str, columns: Vec<Column>) -> PreASAPNode {
+        PreASAPNode::Scan {
             source: Source::Table {
                 table_ref: table.into(),
             },
@@ -1472,16 +1474,16 @@ mod tests {
         // `export_post_asap` must merge them onto one node id. Sharing alone
         // is not physical cost evidence, so no edge cost may be fabricated.
         let shared_scan = Rc::new(scan("metrics", value_col()));
-        let left_branch = QueryExpr::Dedup {
+        let left_branch = PreASAPNode::Dedup {
             cols: vec![0],
             child: Rc::clone(&shared_scan),
         };
-        let right_branch = QueryExpr::Limit {
+        let right_branch = PreASAPNode::Limit {
             n: 5,
             offset: 0,
             child: Rc::clone(&shared_scan),
         };
-        let root = QueryExpr::Concat {
+        let root = PreASAPNode::Concat {
             children: vec![left_branch, right_branch],
             discriminator_unique_key: None,
         };
@@ -1503,9 +1505,9 @@ mod tests {
     #[test]
     fn a_single_parent_referencing_a_shared_child_twice_is_one_consumer_not_two() {
         let shared_scan = Rc::new(scan("metrics", value_col()));
-        let root = QueryExpr::Join {
+        let root = PreASAPNode::Join {
             kind: crate::pre_asap::query_expr::JoinKind::Inner,
-            pred: Predicate(Rc::new(QueryExpr::Literal(ScalarValue::Boolean(true)))),
+            pred: Predicate(Rc::new(PreASAPNode::Literal(ScalarValue::Boolean(true)))),
             left: Rc::clone(&shared_scan),
             right: Rc::clone(&shared_scan),
         };
@@ -1530,9 +1532,9 @@ mod tests {
         // pointer identity — even a workload-level shared subtree renders as
         // two independent tree nodes here, so there is nothing to annotate.
         let shared_scan = Rc::new(scan("metrics", value_col()));
-        let root = QueryExpr::Join {
+        let root = PreASAPNode::Join {
             kind: crate::pre_asap::query_expr::JoinKind::Inner,
-            pred: Predicate(Rc::new(QueryExpr::Literal(ScalarValue::Boolean(true)))),
+            pred: Predicate(Rc::new(PreASAPNode::Literal(ScalarValue::Boolean(true)))),
             left: Rc::clone(&shared_scan),
             right: Rc::clone(&shared_scan),
         };
@@ -1543,9 +1545,9 @@ mod tests {
 
     #[test]
     fn chain_preserves_shape_and_child_links() {
-        let expr = QueryExpr::Filter {
-            pred: Predicate(Rc::new(QueryExpr::Literal(ScalarValue::Boolean(true)))),
-            child: Rc::new(QueryExpr::Aggregate {
+        let expr = PreASAPNode::Filter {
+            pred: Predicate(Rc::new(PreASAPNode::Literal(ScalarValue::Boolean(true)))),
+            child: Rc::new(PreASAPNode::Aggregate {
                 reduction: Reduction::Reduce(GroupKeys::none()),
                 measures: vec![AggIntent::Count {
                     accuracy: AccuracyTarget::Exact,
@@ -1573,7 +1575,7 @@ mod tests {
 
     #[test]
     fn merge_keeps_every_branch_as_a_child() {
-        let expr = QueryExpr::concat(vec![
+        let expr = PreASAPNode::concat(vec![
             scan("a", value_col()),
             scan("b", value_col()),
             scan("c", value_col()),
@@ -1614,12 +1616,12 @@ mod tests {
         // though it's embedded at different depths / under different parents.
         let shared_shape = || scan("metrics", value_col());
 
-        let q1 = QueryExpr::Limit {
+        let q1 = PreASAPNode::Limit {
             n: 10,
             offset: 0,
             child: Rc::new(shared_shape()),
         };
-        let q2 = QueryExpr::Dedup {
+        let q2 = PreASAPNode::Dedup {
             cols: vec![0],
             child: Rc::new(shared_shape()),
         };
@@ -1660,9 +1662,9 @@ mod tests {
     fn every_node_hash_matches_cse_structural_hash_on_its_own_subtree() {
         // A multi-level tree: check the parity holds at every depth, not
         // just the root — each `DagNode::hash` must equal
-        // `structural_hash` applied to the actual `QueryExpr` subtree that
+        // `structural_hash` applied to the actual `PreASAPNode` subtree that
         // node represents.
-        let agg = QueryExpr::Aggregate {
+        let agg = PreASAPNode::Aggregate {
             reduction: Reduction::Reduce(GroupKeys::none()),
             measures: vec![AggIntent::Count {
                 accuracy: AccuracyTarget::Exact,
@@ -1671,8 +1673,8 @@ mod tests {
             having: None,
             child: Rc::new(scan("metrics", value_col())),
         };
-        let root = QueryExpr::Filter {
-            pred: Predicate(Rc::new(QueryExpr::Literal(ScalarValue::Boolean(true)))),
+        let root = PreASAPNode::Filter {
+            pred: Predicate(Rc::new(PreASAPNode::Literal(ScalarValue::Boolean(true)))),
             child: Rc::new(agg.clone()),
         };
 
@@ -1704,7 +1706,7 @@ mod tests {
             SummaryFamilyType, SummarySchema,
         };
         let leaf = Rc::new(scan("t", vec![Column::new("v", DataType::Float64, false)]));
-        let kept = Rc::new(SummaryNode {
+        let kept = Rc::new(PostASAPNode {
             expr: SummaryExpr::KeepPreAsap(Rc::clone(&leaf)),
             schema: SummarySchema {
                 fields: vec![],
@@ -1712,7 +1714,7 @@ mod tests {
             },
             guarantee: Some(ResultGuarantee::exact("KeepPreAsap")),
         });
-        let agg = Rc::new(SummaryNode {
+        let agg = Rc::new(PostASAPNode {
             expr: SummaryExpr::SummaryAgg {
                 child: kept,
                 family: SummaryFamilyType::Sketch(
@@ -1756,7 +1758,7 @@ mod tests {
                 },
             ],
         };
-        let root = SummaryNode {
+        let root = PostASAPNode {
             expr: SummaryExpr::SummaryEstimate {
                 summary_input: agg,
                 query: SketchQuery::Quantile { q: 0.99 },

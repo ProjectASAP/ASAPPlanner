@@ -4,17 +4,17 @@ use crate::operators::ReadoutQuery;
 use crate::summary_kernels::exact::ExactReadout;
 use crate::{
     operators::{Expression, Operator, Reduction, SortKey},
-    plan::{Boundedness, Emission, NodeId, PhysicalDag, PhysicalOperator, PlanProperties},
+    plan::{BoundPhysicalDAG, Boundedness, Emission, NodeId, PhysicalOperator, PlanProperties},
     values::{Batch, Schema},
     Error,
 };
 use planner_types::{
     post_asap::{
-        ExactOperation, PostAsapDag, PostAsapDagNode, PostAsapOperatorPayload as Payload,
+        ExactOperation, PostASAPDAGTransport, PostAsapDagNode, PostAsapOperatorPayload as Payload,
         SketchQuery, SummaryFamilyType, SummaryInputExpr, ValueOperation,
     },
     pre_asap::{
-        AggIntent, ColumnRef, CompareOpKind, DataType, GroupKeys, QueryExpr,
+        AggIntent, ColumnRef, CompareOpKind, DataType, GroupKeys, PreASAPNode,
         Reduction as PlannerReduction,
     },
 };
@@ -43,27 +43,27 @@ pub use candidates::{
 };
 
 mod compiled;
-pub use compiled::{CompiledPhysicalDag, InputContract};
+pub use compiled::{InputContract, PhysicalDAG};
 
 mod row_values;
 
 /// Compile computation without opening or retaining deployment readers.
 /// Input contracts identify explicit boundaries selected by maintenance planning.
 pub fn compile(
-    dag: &PostAsapDag,
+    dag: &PostASAPDAGTransport,
     inputs: BTreeMap<NodeId, InputContract>,
     roots: &[NodeId],
-) -> Result<CompiledPhysicalDag, Error> {
+) -> Result<PhysicalDAG, Error> {
     compile_internal(dag, inputs, roots)
 }
 
 /// Convenience for callers that already resolved inputs. Lowering still uses
 /// only their contracts, and instantiation checks those contracts again.
 pub fn bind<'a>(
-    dag: &PostAsapDag,
+    dag: &PostASAPDAGTransport,
     sources: BTreeMap<NodeId, Source<'a>>,
     roots: &[NodeId],
-) -> Result<PhysicalDag<'a, Batch, Schema>, Error> {
+) -> Result<BoundPhysicalDAG<'a, Batch, Schema>, Error> {
     let inputs = sources
         .iter()
         .map(|(&id, source)| (id, InputContract::from_source(source.as_ref())))
@@ -73,11 +73,11 @@ pub fn bind<'a>(
 
 /// Resolve raw scan connectors before invoking the reader-independent compiler.
 pub fn bind_with_data_sources<'a>(
-    dag: &PostAsapDag,
+    dag: &PostASAPDAGTransport,
     mut sources: BTreeMap<NodeId, Source<'a>>,
     roots: &[NodeId],
     data_sources: &crate::sources::DataSources,
-) -> Result<PhysicalDag<'a, Batch, Schema>, Error> {
+) -> Result<BoundPhysicalDAG<'a, Batch, Schema>, Error> {
     // Only resolve scans reachable below the selected input boundaries.
     let mut pending = roots.to_vec();
     let mut seen = BTreeSet::new();
@@ -91,7 +91,7 @@ pub fn bind_with_data_sources<'a>(
             .find(|n| u64::from(n.id.0) == id)
             .ok_or_else(|| invalid(format!("missing node {id}")))?;
         if let Payload::Fallback {
-            expression: expression @ QueryExpr::Scan { .. },
+            expression: expression @ PreASAPNode::Scan { .. },
         } = &node.payload
         {
             sources.insert(id, Box::new(data_sources.bind(expression)?));
@@ -123,10 +123,10 @@ fn helper_id(node: NodeId, index: u64) -> NodeId {
 }
 
 fn compile_internal(
-    dag: &PostAsapDag,
+    dag: &PostASAPDAGTransport,
     mut sources: BTreeMap<NodeId, InputContract>,
     roots: &[NodeId],
-) -> Result<CompiledPhysicalDag, Error> {
+) -> Result<PhysicalDAG, Error> {
     preflight_depth(dag)?;
     dag.validate().map_err(|e| invalid(e.to_string()))?;
     let nodes = dag
@@ -210,7 +210,7 @@ fn compile_internal(
             }
         }
     }
-    let mut graph = CompiledPhysicalDag::new(roots.to_vec());
+    let mut graph = PhysicalDAG::new(roots.to_vec());
     for id in ordered {
         let node = nodes[&id];
         let mut auxiliary = helper_id(id, 0);
@@ -246,7 +246,7 @@ fn compile_internal(
             let raw_rows = matches!(
                 &node.payload,
                 Payload::Fallback {
-                    expression: QueryExpr::TimeRange { .. }
+                    expression: PreASAPNode::TimeRange { .. }
                 }
             ) && dag.edges.iter().any(|e| u64::from(e.producer.0) == id);
             if let (Payload::Fallback { expression }, false) = (&node.payload, raw_rows) {
@@ -415,14 +415,14 @@ fn compile_internal(
                     return Err(invalid("per-entity summary requires one input"));
                 };
                 let Payload::Fallback {
-                    expression: QueryExpr::TimeRange { child, .. },
+                    expression: PreASAPNode::TimeRange { child, .. },
                 } = &nodes[input_id].payload
                 else {
                     return Err(invalid(
                         "per-entity summary requires a resolved raw time range",
                     ));
                 };
-                let QueryExpr::Scan { schema, .. } = child.as_ref() else {
+                let PreASAPNode::Scan { schema, .. } = child.as_ref() else {
                     return Err(invalid("per-entity summary requires a resolved source"));
                 };
                 if !schema.closed || update.item.is_some() {
@@ -580,7 +580,7 @@ fn compile_internal(
                         continue;
                     }
                     if let Payload::Fallback {
-                        expression: QueryExpr::TimeRange { range, .. },
+                        expression: PreASAPNode::TimeRange { range, .. },
                     } = &nodes[&ancestor].payload
                     {
                         ranges.insert(
@@ -747,7 +747,7 @@ fn bind_operation(node: &PostAsapDagNode, inputs: &[Schema]) -> Result<Operator,
                                 .name
                                 .clone(),
                             match &col.expr {
-                                QueryExpr::Column(index) => Expression::Column(*index),
+                                PreASAPNode::Column(index) => Expression::Column(*index),
                                 expr => expression(expr, input)?,
                             },
                         ))
@@ -761,7 +761,7 @@ fn bind_operation(node: &PostAsapDagNode, inputs: &[Schema]) -> Result<Operator,
                 input.clone(),
                 keys.iter()
                     .map(|key| {
-                        let QueryExpr::Column(column) = key.expr else {
+                        let PreASAPNode::Column(column) = key.expr else {
                             return Err(invalid(
                                 "sort expression must be projected before sorting",
                             ));
@@ -999,7 +999,7 @@ fn groups(input: &Schema, groups: &GroupKeys) -> Result<Vec<usize>, Error> {
     }
     Ok(groups.keys().to_vec())
 }
-fn expression(expr: &QueryExpr, input: &Schema) -> Result<Expression, Error> {
+fn expression(expr: &PreASAPNode, input: &Schema) -> Result<Expression, Error> {
     Ok(Expression::planner(
         crate::expressions::CompiledExpression::compile(expr, input)?,
     ))
@@ -1047,7 +1047,7 @@ impl PhysicalOperator<Batch, Schema> for CheckedSource<'_> {
 }
 
 // Bound recursion before invoking the upstream recursive provenance validator.
-fn preflight_depth(dag: &PostAsapDag) -> Result<(), Error> {
+fn preflight_depth(dag: &PostASAPDAGTransport) -> Result<(), Error> {
     let mut remaining = dag
         .nodes
         .iter()
@@ -1100,23 +1100,23 @@ fn preflight_depth(dag: &PostAsapDag) -> Result<(), Error> {
 
 /// Join predicates address the concatenated left/right schema.
 fn semi_join_keys(
-    expr: &QueryExpr,
+    expr: &PreASAPNode,
     left: usize,
     right: usize,
     keys: &mut Vec<(usize, usize)>,
 ) -> Result<(), Error> {
     match expr {
-        QueryExpr::BoolAnd(parts) => {
+        PreASAPNode::BoolAnd(parts) => {
             for part in parts {
                 semi_join_keys(part, left, right, keys)?;
             }
         }
-        QueryExpr::Compare {
+        PreASAPNode::Compare {
             left: a,
             op: CompareOpKind::Eq,
             right: b,
         } => {
-            let (QueryExpr::Column(a), QueryExpr::Column(b)) = (a.as_ref(), b.as_ref()) else {
+            let (PreASAPNode::Column(a), PreASAPNode::Column(b)) = (a.as_ref(), b.as_ref()) else {
                 return Err(invalid("semi-join requires column equality keys"));
             };
             let (a, b) = if a < b { (*a, *b) } else { (*b, *a) };

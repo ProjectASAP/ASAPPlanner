@@ -3,25 +3,25 @@
 //! hand-computed with Prometheus semantics.
 use asap_physical_operators::{
     operators::Operator,
-    physical_planner::{compile, promql_fallback, promql_rows, CompiledPhysicalDag, InputContract},
+    physical_planner::{compile, promql_fallback, promql_rows, InputContract, PhysicalDAG},
     runtime::{Limits, RunContext, Scope},
     values::{Batch, Value},
 };
 use futures::{executor::block_on, StreamExt};
 use planner_types::{
     post_asap::{execution_data_state::lift_plain, *},
-    pre_asap::QueryExpr,
+    pre_asap::PreASAPNode,
     types::AccuracyTarget,
     workload::*,
 };
 use std::{collections::BTreeMap, rc::Rc};
 
 /// Bare selectors look back one ingestion interval: 60s.
-fn parse(query: &str) -> QueryExpr {
+fn parse(query: &str) -> PreASAPNode {
     parse_with(query, AccuracyTarget::Exact)
 }
 
-fn parse_with(query: &str, accuracy: AccuracyTarget) -> QueryExpr {
+fn parse_with(query: &str, accuracy: AccuracyTarget) -> PreASAPNode {
     let workload = PlanningWorkload {
         query_workload: QueryWorkload {
             language: QueryLanguage::PromQL,
@@ -51,14 +51,14 @@ fn parse_with(query: &str, accuracy: AccuracyTarget) -> QueryExpr {
         .remove(0)
 }
 
-fn lower(query: &str) -> QueryExpr {
+fn lower(query: &str) -> PreASAPNode {
     promql_rows::with_series_identity(&parse(query)).unwrap()
 }
 
 /// The whole query retained as one pre-ASAP node.
-fn fallback_dag(expression: QueryExpr) -> PostAsapDag {
+fn fallback_dag(expression: PreASAPNode) -> PostASAPDAGTransport {
     let schema = lift_plain(&expression.output_schema().unwrap());
-    compile_post_asap_dag(&Rc::new(SummaryNode {
+    compile_post_asap_dag(&Rc::new(PostASAPNode {
         expr: SummaryExpr::KeepPreAsap(Rc::new(expression)),
         schema,
         guarantee: None,
@@ -82,24 +82,29 @@ fn labels(spec: &str) -> BTreeMap<String, String> {
 }
 
 /// The metric a selector reads.
-fn metric(selector: &QueryExpr) -> String {
+fn metric(selector: &PreASAPNode) -> String {
     match selector {
-        QueryExpr::Scan {
+        PreASAPNode::Scan {
             source: planner_types::pre_asap::Source::TimeSeries { metric },
             ..
         } => metric.clone(),
-        QueryExpr::TimeRange { child, .. } | QueryExpr::TimeShift { child, .. } => metric(child),
+        PreASAPNode::TimeRange { child, .. } | PreASAPNode::TimeShift { child, .. } => {
+            metric(child)
+        }
         other => panic!("not a selector: {other:?}"),
     }
 }
 
-fn compile_query(query: &str) -> Result<CompiledPhysicalDag, String> {
+fn compile_query(query: &str) -> Result<PhysicalDAG, String> {
     let expression = lower(query);
     compile_dag(&expression, &fallback_dag(expression.clone()))
 }
 
 /// Compile a DAG whose root is the Fallback computing `expression`.
-fn compile_dag(expression: &QueryExpr, dag: &PostAsapDag) -> Result<CompiledPhysicalDag, String> {
+fn compile_dag(
+    expression: &PreASAPNode,
+    dag: &PostASAPDAGTransport,
+) -> Result<PhysicalDAG, String> {
     let root = u64::from(dag.root.0);
     let inputs = promql_fallback::raw_series(expression)
         .map_err(|e| e.to_string())?
@@ -130,8 +135,8 @@ fn evaluate(
 
 #[allow(clippy::type_complexity)]
 fn evaluate_dag(
-    expression: &QueryExpr,
-    dag: &PostAsapDag,
+    expression: &PreASAPNode,
+    dag: &PostASAPDAGTransport,
     metrics: &[(&str, &[Sample])],
     at: i64,
 ) -> Result<Vec<(BTreeMap<String, String>, i64, f64)>, String> {
@@ -140,8 +145,8 @@ fn evaluate_dag(
 
 #[allow(clippy::type_complexity)]
 fn evaluate_dag_with_range(
-    expression: &QueryExpr,
-    dag: &PostAsapDag,
+    expression: &PreASAPNode,
+    dag: &PostASAPDAGTransport,
     metrics: &[(&str, &[Sample])],
     at: i64,
     bounds: Option<(i64, i64)>,
@@ -428,7 +433,7 @@ fn raw_series_contract_is_explicit() {
         .unwrap()
         .try_into()
         .unwrap();
-    assert!(matches!(selector, QueryExpr::TimeRange { .. }));
+    assert!(matches!(selector, PreASAPNode::TimeRange { .. }));
     let missing = compile(&dag, BTreeMap::new(), &[root]).err().unwrap();
     assert!(missing.to_string().contains("raw series input"));
     let mut wrong = (*schema).clone();
@@ -453,7 +458,7 @@ fn raw_series_contract_is_explicit() {
         output_schema: schema.clone(),
         guarantee: None,
     };
-    let consumed = PostAsapDag {
+    let consumed = PostASAPDAGTransport {
         nodes: vec![
             node(
                 0,
@@ -1285,7 +1290,7 @@ fn nonfinite_literals_round_trip_in_plans() {
     ] {
         let expression = lower(query);
         let json = serde_json::to_vec(&expression).unwrap();
-        let restored: QueryExpr = serde_json::from_slice(&json).unwrap();
+        let restored: PreASAPNode = serde_json::from_slice(&json).unwrap();
         let result = evaluate_dag(&restored, &fallback_dag(restored.clone()), &[], 60).unwrap();
         assert_eq!(result.len(), 1);
         if expected.is_nan() {
@@ -1579,7 +1584,7 @@ fn subquery_label_uniqueness_is_checked_per_evaluation_step() {
 #[test]
 fn logical_nonfinite_quantile_parameter_round_trips() {
     let expression = lower("histogram_quantile(NaN, x_bucket)");
-    let restored: QueryExpr =
+    let restored: PreASAPNode =
         serde_json::from_slice(&serde_json::to_vec(&expression).unwrap()).unwrap();
     let samples = buckets(&[("job=a", HISTOGRAM)]);
     let result = evaluate_dag(

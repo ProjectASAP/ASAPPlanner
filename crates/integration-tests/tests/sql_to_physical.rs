@@ -9,7 +9,7 @@ use asap_physical_operators::{
 };
 use asap_types::{
     post_asap::{compile_post_asap_dag, PostAsapOperatorPayload, SummaryFamilyType},
-    pre_asap::{Column, DataType, QueryExpr, Schema},
+    pre_asap::{Column, DataType, PreASAPNode, Schema},
     types::AccuracyTarget,
 };
 use futures::StreamExt;
@@ -49,7 +49,7 @@ async fn sql_filter_grouped_sum_executes_and_rebinds() {
                 matches!(
                     &node.payload,
                     PostAsapOperatorPayload::Fallback {
-                        expression: QueryExpr::Scan { .. }
+                        expression: PreASAPNode::Scan { .. }
                     }
                 )
             })
@@ -91,7 +91,7 @@ async fn sql_filter_grouped_sum_executes_and_rebinds() {
             let PostAsapOperatorPayload::Fallback { expression } = &scan.payload else {
                 unreachable!()
             };
-            let QueryExpr::Scan { source, .. } = expression else {
+            let PreASAPNode::Scan { source, .. } = expression else {
                 unreachable!()
             };
             let mut sources = DataSources::default();

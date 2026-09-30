@@ -10,18 +10,18 @@ first; use the [extension guide](extend-asap-aware-mapping.md) when changing one
 
 ### `TargetSubDAG`
 
-A pre-ASAP `QueryExpr` node that a strategy may replace.
+A pre-ASAP `PreASAPNode` node that a strategy may replace.
 
 ```rust
 pub struct TargetSubDAG<'a> {
-    pub root: &'a Rc<QueryExpr>,
+    pub root: &'a Rc<PreASAPNode>,
     pub consumer_count: usize,
 }
 ```
 
-`root` is the actual `Rc<QueryExpr>` from the workload.
+`root` is the actual `Rc<PreASAPNode>` from the workload.
 
-`consumer_count` counts structural references, not runtime executions. It is the number of places in the workload DAG that point to this exact `Rc<QueryExpr>` node.
+`consumer_count` counts structural references, not runtime executions. It is the number of places in the workload DAG that point to this exact `Rc<PreASAPNode>` node.
 
 For example, consider two top-level queries:
 
@@ -58,15 +58,15 @@ There are currently three forms:
 
 ```rust
 pub enum Replacement {
-    Summary(Rc<SummaryNode>),
-    Rewrite(Rc<QueryExpr>),
+    Summary(Rc<PostASAPNode>),
+    Rewrite(Rc<PreASAPNode>),
     ExactComposition(ExactComposition),
 }
 ```
 
 Use `Replacement::Summary` when the alternative is a constructed post-ASAP summary plan.
 
-Use `Replacement::Rewrite` when the alternative is still a logical pre-ASAP `QueryExpr`.
+Use `Replacement::Rewrite` when the alternative is still a logical pre-ASAP `PreASAPNode`.
 
 Use `Replacement::ExactComposition` when an exact operation refers to a child
 target whose realization must remain undecided. Selection coordinates the
@@ -77,7 +77,7 @@ Examples:
 
 ```text
 Quantile(...)
-    -> KLL SummaryNode
+    -> KLL PostASAPNode
 ```
 
 is a `Summary`; KLL (Karnin–Lang–Liberty) is a quantile-sketch algorithm.
@@ -297,14 +297,14 @@ A custom cost model does not necessarily need to override every hook. The curren
 // One TargetSubDAGCandidates per distinct TargetSubDAG in the whole workload —
 // never a flat list of fully assembled plans.
 pub struct TargetSubDAGCandidates {
-    pub target: Rc<QueryExpr>,
+    pub target: Rc<PreASAPNode>,
     pub consumer_count: usize,
     pub candidates: Vec<ReplacementSubDAG>,  // accepted alternatives, unranked
     pub rejected: Vec<RejectedCandidate>,    // failed accuracy checks
 }
 
 pub struct RankedTargetSubDAGCandidates<'a> {
-    pub target: &'a Rc<QueryExpr>,
+    pub target: &'a Rc<PreASAPNode>,
     pub consumer_count: usize,
     pub candidates: Vec<&'a ReplacementSubDAG>,  // same candidates, ranked
     pub costs: Vec<f64>,                         // costs[i] <-> candidates[i]
@@ -394,6 +394,6 @@ Explanations are derived from candidates already present in `CandidatePostASAPDA
 
 ### How it derives `location` text
 
-`CandidatePostASAPDAGs`/`TargetSubDAGCandidates` track `Rc<QueryExpr>` pointer identity, not human-readable breadcrumbs. `ReplacementExplanation::location` provides prose such as `root "dash_a" > lhs` so reporting consumers can identify the relevant part of the query without interpreting pointer identity. Location derivation does not make replacement or costing decisions.
+`CandidatePostASAPDAGs`/`TargetSubDAGCandidates` track `Rc<PreASAPNode>` pointer identity, not human-readable breadcrumbs. `ReplacementExplanation::location` provides prose such as `root "dash_a" > lhs` so reporting consumers can identify the relevant part of the query without interpreting pointer identity. Location derivation does not make replacement or costing decisions.
 
 ---

@@ -14,8 +14,8 @@ use thiserror::Error;
 use super::agg_intent::AggIntent;
 use super::expr_ir::ColumnRef;
 use super::query_expr::{
-    aggregate_output_schema, GroupKeys, QueryExpr, QueryExprError, Reduction, ResolvedQueryExpr,
-    UnresolvedQueryExpr,
+    aggregate_output_schema, GroupKeys, PreASAPNode, PreASAPNodeError, Reduction,
+    ResolvedPreASAPNode, UnresolvedPreASAPNode,
 };
 use super::schema::{ColumnId, DataType, Schema};
 
@@ -112,64 +112,64 @@ pub fn resolve_group_keys_promql(
         .collect()
 }
 
-/// Resolve a name-based scalar [`UnresolvedQueryExpr`] (one of `QueryExpr`'s scalar
-/// variants, issue #205) into a positional [`ResolvedQueryExpr`] by resolving every
+/// Resolve a name-based scalar [`UnresolvedPreASAPNode`] (one of `PreASAPNode`'s scalar
+/// variants, issue #205) into a positional [`ResolvedPreASAPNode`] by resolving every
 /// column reference against `schema`. Structural otherwise. `expr` must be
 /// one of the scalar variants — an operator variant here is a construction
 /// bug, not a shape this needs to handle silently.
 pub fn resolve_expr(
-    expr: &UnresolvedQueryExpr,
+    expr: &UnresolvedPreASAPNode,
     schema: &Schema,
-) -> Result<ResolvedQueryExpr, ResolveError> {
-    let rc = |e: &UnresolvedQueryExpr| -> Result<Rc<ResolvedQueryExpr>, ResolveError> {
+) -> Result<ResolvedPreASAPNode, ResolveError> {
+    let rc = |e: &UnresolvedPreASAPNode| -> Result<Rc<ResolvedPreASAPNode>, ResolveError> {
         Ok(Rc::new(resolve_expr(e, schema)?))
     };
-    let each = |es: &[UnresolvedQueryExpr]| -> Result<Vec<ResolvedQueryExpr>, ResolveError> {
+    let each = |es: &[UnresolvedPreASAPNode]| -> Result<Vec<ResolvedPreASAPNode>, ResolveError> {
         es.iter().map(|e| resolve_expr(e, schema)).collect()
     };
     Ok(match expr {
-        QueryExpr::Column(c) => QueryExpr::Column(resolve_column_ref(c, schema)?),
-        QueryExpr::Literal(s) => QueryExpr::Literal(s.clone()),
-        QueryExpr::EvalTimestamp => QueryExpr::EvalTimestamp,
-        QueryExpr::CurrentTimestamp => QueryExpr::CurrentTimestamp,
-        QueryExpr::Compare { left, op, right } => QueryExpr::Compare {
+        PreASAPNode::Column(c) => PreASAPNode::Column(resolve_column_ref(c, schema)?),
+        PreASAPNode::Literal(s) => PreASAPNode::Literal(s.clone()),
+        PreASAPNode::EvalTimestamp => PreASAPNode::EvalTimestamp,
+        PreASAPNode::CurrentTimestamp => PreASAPNode::CurrentTimestamp,
+        PreASAPNode::Compare { left, op, right } => PreASAPNode::Compare {
             left: rc(left)?,
             op: op.clone(),
             right: rc(right)?,
         },
-        QueryExpr::BoolAnd(v) => QueryExpr::BoolAnd(each(v)?),
-        QueryExpr::BoolOr(v) => QueryExpr::BoolOr(each(v)?),
-        QueryExpr::Not(e) => QueryExpr::Not(rc(e)?),
-        QueryExpr::IsNull(e) => QueryExpr::IsNull(rc(e)?),
-        QueryExpr::IsNotNull(e) => QueryExpr::IsNotNull(rc(e)?),
-        QueryExpr::Cast { expr, to, try_cast } => QueryExpr::Cast {
+        PreASAPNode::BoolAnd(v) => PreASAPNode::BoolAnd(each(v)?),
+        PreASAPNode::BoolOr(v) => PreASAPNode::BoolOr(each(v)?),
+        PreASAPNode::Not(e) => PreASAPNode::Not(rc(e)?),
+        PreASAPNode::IsNull(e) => PreASAPNode::IsNull(rc(e)?),
+        PreASAPNode::IsNotNull(e) => PreASAPNode::IsNotNull(rc(e)?),
+        PreASAPNode::Cast { expr, to, try_cast } => PreASAPNode::Cast {
             expr: rc(expr)?,
             to: to.clone(),
             try_cast: *try_cast,
         },
-        QueryExpr::InList {
+        PreASAPNode::InList {
             expr,
             list,
             negated,
-        } => QueryExpr::InList {
+        } => PreASAPNode::InList {
             expr: rc(expr)?,
             list: each(list)?,
             negated: *negated,
         },
-        QueryExpr::FunctionCall { name, args } => QueryExpr::FunctionCall {
+        PreASAPNode::FunctionCall { name, args } => PreASAPNode::FunctionCall {
             name: name.clone(),
             args: each(args)?,
         },
-        QueryExpr::Arithmetic { op, left, right } => QueryExpr::Arithmetic {
+        PreASAPNode::Arithmetic { op, left, right } => PreASAPNode::Arithmetic {
             op: op.clone(),
             left: rc(left)?,
             right: rc(right)?,
         },
-        QueryExpr::Case {
+        PreASAPNode::Case {
             operand,
             branches,
             else_expr,
-        } => QueryExpr::Case {
+        } => PreASAPNode::Case {
             operand: operand.as_deref().map(&rc).transpose()?,
             branches: branches
                 .iter()
@@ -177,12 +177,12 @@ pub fn resolve_expr(
                 .collect::<Result<Vec<_>, ResolveError>>()?,
             else_expr: else_expr.as_deref().map(&rc).transpose()?,
         },
-        other => unreachable!("resolve_expr called on a non-scalar QueryExpr variant: {other:?}"),
+        other => unreachable!("resolve_expr called on a non-scalar PreASAPNode variant: {other:?}"),
     })
 }
 
 /// Output schema produced by an `Aggregate { by, measures }` over `input`.
-/// Mirrors `QueryExpr::output_schema_in`'s `Aggregate` arm; out-of-range `by`
+/// Mirrors `PreASAPNode::output_schema_in`'s `Aggregate` arm; out-of-range `by`
 /// ids are silently dropped (callers needing the strict check resolve `by`
 /// via [`resolve_column_refs`], which surfaces `NotFound`).
 pub fn output_schema_for_aggregate(
@@ -190,9 +190,9 @@ pub fn output_schema_for_aggregate(
     by: &GroupKeys,
     measures: &[AggIntent],
     output_names: &[String],
-) -> Result<Schema, QueryExprError> {
+) -> Result<Schema, PreASAPNodeError> {
     // Delegate to the single canonical derivation so HAVING resolution can never
-    // drift from `QueryExpr::output_schema_in` (issue #41). HAVING is SQL-only
+    // drift from `PreASAPNode::output_schema_in` (issue #41). HAVING is SQL-only
     // and cross-series (SQL has no `without`), but detect the child-independent
     // per-entity case anyway (a lone `rate`/`increase`/`*_over_time` intent) so
     // the two agree on every shared input — the range-window child marker the
@@ -347,7 +347,7 @@ mod tests {
     #[test]
     fn having_schema_agrees_with_canonical_for_a_per_series_reduction() {
         // Issue #41: `output_schema_for_aggregate` (HAVING resolution) and the
-        // canonical `QueryExpr::output_schema_in` must produce identical schemas
+        // canonical `PreASAPNode::output_schema_in` must produce identical schemas
         // for the same aggregate. Before the dedup this diverged on a per-series
         // reduction — the HAVING mirror lacked the per-series branch and would
         // collapse `[ts, value]` to a single `rate` column.
@@ -362,19 +362,19 @@ mod tests {
             0,
             vec![],
         );
-        let scan = QueryExpr::Scan {
+        let scan = PreASAPNode::Scan {
             source: Source::TimeSeries { metric: "m".into() },
             predicates: vec![],
             schema: leaf_schema.clone(),
         };
         // Aggregate{ reduction: PerEntity, [Rate], child: TimeRange{ Scan } } —
         // a per-series reduction (label-preserving).
-        let agg = QueryExpr::Aggregate {
+        let agg = PreASAPNode::Aggregate {
             reduction: Reduction::PerEntity,
             measures: vec![AggIntent::Rate],
             output_names: vec![],
             having: None,
-            child: Rc::new(QueryExpr::TimeRange {
+            child: Rc::new(PreASAPNode::TimeRange {
                 range: Duration::from_secs(300),
                 child: Rc::new(scan),
             }),

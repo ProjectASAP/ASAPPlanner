@@ -2,13 +2,13 @@
 
 use std::{cell::RefCell, rc::Rc};
 
-use asap_types::post_asap::{SketchAlgorithm, SummaryExpr, SummaryNode};
-use asap_types::pre_asap::{AggIntent, QueryExpr};
+use asap_types::post_asap::{PostASAPNode, SketchAlgorithm, SummaryExpr};
+use asap_types::pre_asap::{AggIntent, PreASAPNode};
 use asap_types::resources::CacheProfile;
 
 use crate::analytical_cost::{
     estimate_physical_dag_comparison, AnalyticalCostError,
-    EvidenceBackedPhysicalDag as PhysicalDag, PhysicalDagComparisonEstimate,
+    EvidenceBackedPhysicalDag as BoundPhysicalDAG, PhysicalDagComparisonEstimate,
     PhysicalDagEstimateRequest, PhysicalNodeEvidence, ResourceCalibration,
 };
 use crate::cost_model::{Cost, CostModel, DefaultCostModel};
@@ -57,9 +57,9 @@ pub trait PlannerPhysicalPlanProvider {
     fn summary_physical_dag(
         &self,
         snapshot: &PhysicalEvidenceSnapshot,
-        summary: &Rc<SummaryNode>,
+        summary: &Rc<PostASAPNode>,
         target: &TargetSubDAG<'_>,
-    ) -> Result<PhysicalDag, AnalyticalCostError>;
+    ) -> Result<BoundPhysicalDAG, AnalyticalCostError>;
 }
 
 /// Dimensional comparison retained for explanations and verification.
@@ -91,10 +91,10 @@ pub struct PhysicalPlanCostModel<'a> {
 }
 
 struct CachedTargetEvidence {
-    root: Rc<QueryExpr>,
+    root: Rc<PreASAPNode>,
     consumer_count: usize,
     snapshot: PhysicalEvidenceSnapshot,
-    raw: PhysicalDag,
+    raw: BoundPhysicalDAG,
 }
 
 impl<'a> PhysicalPlanCostModel<'a> {
@@ -124,7 +124,7 @@ impl<'a> PhysicalPlanCostModel<'a> {
     fn target_evidence(
         &self,
         target: &TargetSubDAG<'_>,
-    ) -> Result<(PhysicalEvidenceSnapshot, PhysicalDag), AnalyticalCostError> {
+    ) -> Result<(PhysicalEvidenceSnapshot, BoundPhysicalDAG), AnalyticalCostError> {
         if let Some(cached) = self.target_evidence.borrow().iter().find(|cached| {
             Rc::ptr_eq(&cached.root, target.root) && cached.consumer_count == target.consumer_count
         }) {
@@ -359,7 +359,7 @@ mod tests {
     use std::cell::Cell;
     use std::collections::HashMap;
 
-    use asap_types::pre_asap::{Column, DataType, QueryExpr, Reduction, Schema, Source};
+    use asap_types::pre_asap::{Column, DataType, PreASAPNode, Reduction, Schema, Source};
     use asap_types::types::AccuracyTarget;
     use asap_types::workload::{
         DataArrival, DurationMs, QueryRecurrence, QueryTimeScope, TimeSelection, TimestampMs,
@@ -405,15 +405,15 @@ mod tests {
         }
     }
 
-    fn query() -> Rc<QueryExpr> {
-        Rc::new(QueryExpr::Aggregate {
+    fn query() -> Rc<PreASAPNode> {
+        Rc::new(PreASAPNode::Aggregate {
             reduction: Reduction::by(vec![]),
             measures: vec![AggIntent::Count {
                 accuracy: AccuracyTarget::Epsilon(0.01),
             }],
             output_names: vec![],
             having: None,
-            child: Rc::new(QueryExpr::Scan {
+            child: Rc::new(PreASAPNode::Scan {
                 source: Source::Table {
                     table_ref: "events".into(),
                 },
@@ -469,7 +469,7 @@ mod tests {
             }
         }
 
-        fn summary_dag(&self, scope: &ComparisonScope) -> PhysicalDag {
+        fn summary_dag(&self, scope: &ComparisonScope) -> BoundPhysicalDAG {
             let scan_statistics = scan_statistics(self.candidate_scan_bytes, edge(100, 800));
             let aggregate_statistics = aggregate_statistics(edge(100, 800), edge(1, 8));
             let read_statistics = pass_through_statistics(edge(1, 8));
@@ -499,7 +499,7 @@ mod tests {
                     },
                 ),
             ]);
-            PhysicalDag {
+            BoundPhysicalDAG {
                 nodes: vec![
                     PhysicalDagNode {
                         id: "candidate-scan".into(),
@@ -582,9 +582,9 @@ mod tests {
         fn summary_physical_dag(
             &self,
             snapshot: &PhysicalEvidenceSnapshot,
-            _summary: &Rc<SummaryNode>,
+            _summary: &Rc<PostASAPNode>,
             _target: &TargetSubDAG<'_>,
-        ) -> Result<PhysicalDag, AnalyticalCostError> {
+        ) -> Result<BoundPhysicalDAG, AnalyticalCostError> {
             assert_eq!(snapshot.version, "test-snapshot-1");
             self.summary_available
                 .then(|| self.summary_dag(&snapshot.scope))
@@ -912,9 +912,9 @@ mod tests {
             fn summary_physical_dag(
                 &self,
                 snapshot: &PhysicalEvidenceSnapshot,
-                summary: &Rc<SummaryNode>,
+                summary: &Rc<PostASAPNode>,
                 target: &TargetSubDAG<'_>,
-            ) -> Result<PhysicalDag, AnalyticalCostError> {
+            ) -> Result<BoundPhysicalDAG, AnalyticalCostError> {
                 self.0.summary_physical_dag(snapshot, summary, target)
             }
         }
@@ -1000,9 +1000,9 @@ mod tests {
             fn summary_physical_dag(
                 &self,
                 snapshot: &PhysicalEvidenceSnapshot,
-                summary: &Rc<SummaryNode>,
+                summary: &Rc<PostASAPNode>,
                 target: &TargetSubDAG<'_>,
-            ) -> Result<PhysicalDag, AnalyticalCostError> {
+            ) -> Result<BoundPhysicalDAG, AnalyticalCostError> {
                 let mut dag = self.0.summary_physical_dag(snapshot, summary, target)?;
                 dag.nodes[0]
                     .source_coverage
@@ -1052,9 +1052,9 @@ mod tests {
             fn summary_physical_dag(
                 &self,
                 _snapshot: &PhysicalEvidenceSnapshot,
-                _summary: &Rc<SummaryNode>,
+                _summary: &Rc<PostASAPNode>,
                 _target: &TargetSubDAG<'_>,
-            ) -> Result<PhysicalDag, AnalyticalCostError> {
+            ) -> Result<BoundPhysicalDAG, AnalyticalCostError> {
                 panic!("blank snapshot versions must fail before summary binding")
             }
         }

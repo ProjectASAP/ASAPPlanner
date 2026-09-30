@@ -18,7 +18,7 @@
 //! **not** pick that child itself (the way `construct_summary_agg`'s
 //! `realize_child` takes the head of the child's own ranking): a
 //! [`Replacement::ExactComposition`] carries only the child *target*
-//! (`ExactComposition::child_target`, the same `Rc<QueryExpr>` whose
+//! (`ExactComposition::child_target`, the same `Rc<PreASAPNode>` whose
 //! `TargetSubDAGCandidates` in `CandidatePostASAPDAGs` already holds every candidate for it). It is
 //! [`CandidatePostASAPDAGs::global_selection`](crate::replacement::CandidatePostASAPDAGs::global_selection)
 //! that commits the compatible parent/child pair — so the child's own
@@ -65,11 +65,11 @@ use std::rc::Rc;
 use asap_types::post_asap::execution_data_state::validate_execution_data_states_at;
 use asap_types::post_asap::{
     exact_operation_output_schema, produced_data_state, AccuracyError, ExactOperation,
-    ExecutionDataState, ExecutionDataStateError, ResultGuarantee, SummaryExpr, SummaryNode,
+    ExecutionDataState, ExecutionDataStateError, PostASAPNode, ResultGuarantee, SummaryExpr,
     SummarySchema, ValueOperation,
 };
 use asap_types::pre_asap::agg_intent::AggIntent;
-use asap_types::pre_asap::query_expr::{QueryExpr, Reduction};
+use asap_types::pre_asap::query_expr::{PreASAPNode, Reduction};
 use asap_types::types::AccuracyTarget;
 
 use crate::cost_model::CostModel;
@@ -120,7 +120,7 @@ pub struct ExactComposition {
     pub op: ExactOperation,
     /// The pre-ASAP child the operator consumes; its `TargetSubDAGCandidates` holds the
     /// candidates `global_selection` may commit this composition with.
-    pub child_target: Rc<QueryExpr>,
+    pub child_target: Rc<PreASAPNode>,
     /// The composed node's output schema — the target's own pre-ASAP
     /// output schema, lifted with every column `Plain` (an exact operator
     /// only ever produces plain values).
@@ -132,7 +132,7 @@ impl ExactComposition {
     /// (the child's produced data_state — a `KeepPreAsap` leaf takes the
     /// phase this edge assigns) plus the plain-operand rule, checked
     /// through the same schema derivation [`Self::compose`] uses.
-    pub fn accepts_child(&self, child: &SummaryNode) -> bool {
+    pub fn accepts_child(&self, child: &PostASAPNode) -> bool {
         let phase_ok = match produced_data_state(&child.expr) {
             None => true,
             Some(avail) => avail == self.placement.data_state(),
@@ -145,7 +145,7 @@ impl ExactComposition {
     /// `asap_types::post_asap::validate_execution_data_states`; an illegal
     /// placement is a typed [`RealizationError::ExecutionDataState`], never deferred to a
     /// runtime.
-    pub fn compose(&self, child: Rc<SummaryNode>) -> Result<Rc<SummaryNode>, RealizationError> {
+    pub fn compose(&self, child: Rc<PostASAPNode>) -> Result<Rc<PostASAPNode>, RealizationError> {
         self.compose_with_accuracy(child, &DefaultAccuracyModel)
     }
 
@@ -154,9 +154,9 @@ impl ExactComposition {
     /// unsupported folds fail closed with a typed accuracy error.
     pub fn compose_with_accuracy(
         &self,
-        child: Rc<SummaryNode>,
+        child: Rc<PostASAPNode>,
         accuracy_model: &dyn AccuracyModel,
-    ) -> Result<Rc<SummaryNode>, RealizationError> {
+    ) -> Result<Rc<PostASAPNode>, RealizationError> {
         if let Some(produced) = produced_data_state(&child.expr) {
             if produced != self.placement.data_state() {
                 let edge = match self.placement {
@@ -209,7 +209,7 @@ impl ExactComposition {
             operation: ValueOperation::Exact(self.op.clone()),
             timing,
         };
-        let node = Rc::new(SummaryNode {
+        let node = Rc::new(PostASAPNode {
             expr,
             schema,
             guarantee,
@@ -259,10 +259,10 @@ fn needs_readout(implementation: &Realization) -> bool {
 
 /// The `(op, child)` of a read-time operation-shaped target, or `None`.
 fn query_time_shape(
-    root: &QueryExpr,
+    root: &PreASAPNode,
     cost_model: &dyn CostModel,
-) -> Option<(ExactOperation, Rc<QueryExpr>, AggIntent)> {
-    let QueryExpr::Aggregate {
+) -> Option<(ExactOperation, Rc<PreASAPNode>, AggIntent)> {
+    let PreASAPNode::Aggregate {
         reduction,
         measures,
         output_names,
@@ -309,10 +309,10 @@ fn query_time_shape(
 /// The `(op, child)` of a function-shaped target — a per-entity exact
 /// transform with no accumulator form — or `None`.
 fn ingestion_time_shape(
-    root: &QueryExpr,
+    root: &PreASAPNode,
     cost_model: &dyn CostModel,
-) -> Option<(ExactOperation, Rc<QueryExpr>, AggIntent)> {
-    let QueryExpr::Aggregate {
+) -> Option<(ExactOperation, Rc<PreASAPNode>, AggIntent)> {
+    let PreASAPNode::Aggregate {
         reduction: Reduction::PerEntity,
         measures,
         output_names,
@@ -461,21 +461,21 @@ mod tests {
     use asap_types::pre_asap::query_expr::Source;
     use asap_types::pre_asap::schema::{Column, DataType, Schema};
 
-    fn metric_scan(labels: &[&str]) -> QueryExpr {
+    fn metric_scan(labels: &[&str]) -> PreASAPNode {
         let mut columns = vec![
             Column::new("ts", DataType::Timestamp, false),
             Column::new("value", DataType::Float64, false),
         ];
         columns.extend(labels.iter().map(|n| Column::new(*n, DataType::Utf8, true)));
-        QueryExpr::Scan {
+        PreASAPNode::Scan {
             source: Source::TimeSeries { metric: "m".into() },
             predicates: vec![],
             schema: Schema::with_time_index(columns, 0, vec![]),
         }
     }
 
-    fn agg(by: Vec<usize>, intent: AggIntent, child: QueryExpr) -> QueryExpr {
-        QueryExpr::Aggregate {
+    fn agg(by: Vec<usize>, intent: AggIntent, child: PreASAPNode) -> PreASAPNode {
+        PreASAPNode::Aggregate {
             reduction: Reduction::by(by),
             measures: vec![intent],
             output_names: vec![],
@@ -484,8 +484,8 @@ mod tests {
         }
     }
 
-    fn per_entity(intent: AggIntent, child: QueryExpr) -> QueryExpr {
-        QueryExpr::Aggregate {
+    fn per_entity(intent: AggIntent, child: PreASAPNode) -> PreASAPNode {
+        PreASAPNode::Aggregate {
             reduction: Reduction::PerEntity,
             measures: vec![intent],
             output_names: vec![],
@@ -495,7 +495,7 @@ mod tests {
     }
 
     /// `max by (zone) (quantile by (zone, host) (m))`.
-    fn max_over_quantile() -> Rc<QueryExpr> {
+    fn max_over_quantile() -> Rc<PreASAPNode> {
         let inner = agg(
             vec![2, 3],
             default_quantile(0.99),
@@ -523,7 +523,7 @@ mod tests {
             candidates[0].provenance,
             ReplacementProvenance::ValueOperationAtQueryTime
         );
-        let QueryExpr::Aggregate { child, .. } = root.as_ref() else {
+        let PreASAPNode::Aggregate { child, .. } = root.as_ref() else {
             unreachable!()
         };
         assert!(

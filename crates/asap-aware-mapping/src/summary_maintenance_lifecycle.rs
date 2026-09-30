@@ -22,12 +22,12 @@ use std::rc::Rc;
 
 use asap_types::post_asap::{
     compile_post_asap_dag_with_node_ids, EvaluationSchedule, ExecutionDataStateError,
-    ExecutionTiming, OutputRepresentation, PostAsapDag, PostAsapDagValidationError, PostAsapNodeId,
-    ResultGuarantee, SummaryExpr, SummaryMaintenanceLifecycle,
-    SummaryMaintenanceLifecycleGuarantee, SummaryMaintenanceMode, SummaryNode,
+    ExecutionTiming, OutputRepresentation, PostASAPDAGTransport, PostASAPNode,
+    PostAsapDagValidationError, PostAsapNodeId, ResultGuarantee, SummaryExpr,
+    SummaryMaintenanceLifecycle, SummaryMaintenanceLifecycleGuarantee, SummaryMaintenanceMode,
     SummaryWindowFramework, ValueOperation,
 };
-use asap_types::pre_asap::QueryExpr;
+use asap_types::pre_asap::PreASAPNode;
 use asap_types::types::AccuracyTarget;
 use asap_types::workload::{
     DataArrival, DataWorkload, Predictability, QueryRecurrence, QueryWorkload, RepeatedDemand,
@@ -170,7 +170,7 @@ pub struct SummaryMaintenanceDeployment {
     /// The unique materialized `SummaryAgg`, or maintained population
     /// (`MaintainPopulation`) not consumed by a `SummaryAgg`, represented by
     /// this deployment. Cost-model lifecycle hooks receive this node.
-    pub summary: Rc<SummaryNode>,
+    pub summary: Rc<PostASAPNode>,
     /// Lifecycle, evaluation, and representation commitment selected for this
     /// state, or `None` when no alternative is selectable.
     pub summary_maintenance_lifecycle_guarantee: Option<SummaryMaintenanceLifecycleGuarantee>,
@@ -186,7 +186,7 @@ pub struct SummaryMaintenanceDeployment {
 #[derive(Debug, Clone)]
 pub struct SummaryMaintenanceLifecyclePlan {
     /// Root of the materialized post-ASAP DAG being deployed.
-    pub root: Rc<SummaryNode>,
+    pub root: Rc<PostASAPNode>,
     /// One entry per unique reachable `SummaryAgg`, then per unique
     /// maintained population outside any `SummaryAgg`'s inputs; shared `Rc`
     /// nodes appear only once.
@@ -244,7 +244,9 @@ impl SummaryMaintenanceLifecyclePlan {
     /// maintained populations as to `SummaryAgg` states; a population feeding
     /// a `SummaryAgg` is one of its inputs. Timings already on the root are
     /// ignored.
-    pub fn execution_timed_dag(&self) -> Result<PostAsapDag, SummaryMaintenanceTimingError> {
+    pub fn execution_timed_dag(
+        &self,
+    ) -> Result<PostASAPDAGTransport, SummaryMaintenanceTimingError> {
         let compiled = compile_post_asap_dag_with_node_ids(&self.root)?;
         let dag = compiled.dag;
         for population in &standalone_populations(&self.root) {
@@ -389,7 +391,7 @@ pub struct SummaryMaintenanceLifecycleCandidates<'a> {
     arrival: DataArrival,
     required_accuracy: Vec<AccuracyTarget>,
     cost_model: &'a dyn CostModel,
-    comparison_target: Option<&'a QueryExpr>,
+    comparison_target: Option<&'a PreASAPNode>,
 }
 
 /// Why an explicit per-state lifecycle choice cannot be bound.
@@ -579,7 +581,7 @@ struct SummaryMaintenanceWorkloadFacts {
 /// unique summary state, and select the cheapest legal alternative whose cost
 /// is fully known.
 pub fn plan_summary_maintenance_lifecycles(
-    root: Rc<SummaryNode>,
+    root: Rc<PostASAPNode>,
     demand: WorkloadDemand<'_>,
     now_ms: u64,
     horizon: Option<Horizon>,
@@ -602,7 +604,7 @@ pub fn plan_summary_maintenance_lifecycles(
 /// alternatives itself binds its choice with
 /// [`SummaryMaintenanceLifecycleCandidates::select`].
 pub fn enumerate_summary_maintenance_lifecycles<'a>(
-    root: Rc<SummaryNode>,
+    root: Rc<PostASAPNode>,
     demand: WorkloadDemand<'_>,
     now_ms: u64,
     horizon: Option<Horizon>,
@@ -626,14 +628,14 @@ pub fn enumerate_summary_maintenance_lifecycles<'a>(
 /// DAG path multiplicity has been propagated by `CandidatePostASAPDAGs`.
 #[expect(clippy::too_many_arguments, reason = "internal bound planning context")]
 fn enumerate_with_profile<'a>(
-    root: Rc<SummaryNode>,
+    root: Rc<PostASAPNode>,
     demand: WorkloadDemand<'_>,
     now_ms: u64,
     horizon: Option<Horizon>,
     capabilities: SummaryMaintenanceLifecycleCapabilities,
     cost_model: &'a dyn CostModel,
     profile: Option<RecurrenceProfile>,
-    comparison_target: Option<&'a QueryExpr>,
+    comparison_target: Option<&'a PreASAPNode>,
 ) -> Result<SummaryMaintenanceLifecycleCandidates<'a>, SummaryMaintenanceLifecyclePlanError> {
     demand.workload.validate()?;
     if let Some(data) = demand.data_workload {
@@ -791,7 +793,7 @@ pub fn global_selection_with_summary_maintenance_lifecycles<'a, Id>(
 /// summary maintenance decisions. This does not create or maintain runtime state.
 pub fn assemble_selected_dag_with_summary_maintenance_lifecycles(
     selection: &GlobalSelection<'_>,
-    target: &Rc<QueryExpr>,
+    target: &Rc<PreASAPNode>,
     demand: WorkloadDemand<'_>,
     now_ms: u64,
     horizon: Option<Horizon>,
@@ -1274,9 +1276,9 @@ enum StateKind {
 
 /// Collect every unique node of `kind` reachable from `node`.
 fn collect_states(
-    node: &Rc<SummaryNode>,
-    seen: &mut HashSet<*const SummaryNode>,
-    output: &mut Vec<Rc<SummaryNode>>,
+    node: &Rc<PostASAPNode>,
+    seen: &mut HashSet<*const PostASAPNode>,
+    output: &mut Vec<Rc<PostASAPNode>>,
     kind: StateKind,
 ) {
     if !seen.insert(Rc::as_ptr(node)) {
@@ -1333,7 +1335,7 @@ fn collect_states(
 /// Maintained populations that are not an input of any `SummaryAgg`. A
 /// population feeding summary state is on that state's maintenance path, so
 /// that state's lifecycle times it, even when a readout also reads it directly.
-fn standalone_populations(root: &Rc<SummaryNode>) -> Vec<Rc<SummaryNode>> {
+fn standalone_populations(root: &Rc<PostASAPNode>) -> Vec<Rc<PostASAPNode>> {
     let mut summaries = Vec::new();
     collect_states(
         root,
@@ -1381,7 +1383,7 @@ pub(crate) fn evaluation_schedule(
 
 /// Summary states composed on one maintenance path must be produced on the
 /// same schedule. Return a component id for each collected state.
-fn summary_state_components(summaries: &[Rc<SummaryNode>]) -> Vec<usize> {
+fn summary_state_components(summaries: &[Rc<PostASAPNode>]) -> Vec<usize> {
     let indices: HashMap<_, _> = summaries
         .iter()
         .enumerate()
@@ -1432,10 +1434,10 @@ fn summary_state_components(summaries: &[Rc<SummaryNode>]) -> Vec<usize> {
 /// Inputs shared by every complete lifecycle-combination evaluation of one
 /// root, whether Planner searches combinations or a caller supplies one.
 struct CompleteCostContext<'a> {
-    root: &'a SummaryNode,
+    root: &'a PostASAPNode,
     components: &'a [usize],
     cost_model: &'a dyn CostModel,
-    comparison_target: Option<&'a QueryExpr>,
+    comparison_target: Option<&'a PreASAPNode>,
     horizon: Option<Horizon>,
     expected_reads: Option<f64>,
     required_accuracy: &'a [AccuracyTarget],
@@ -1524,12 +1526,12 @@ fn apply_selection(
 
 #[expect(clippy::too_many_arguments, reason = "complete combination context")]
 fn select_complete_lifecycle_combination(
-    root: &SummaryNode,
+    root: &PostASAPNode,
     deployments: &mut [SummaryMaintenanceDeployment],
     components: &[usize],
     arrival: DataArrival,
     cost_model: &dyn CostModel,
-    comparison_target: Option<&QueryExpr>,
+    comparison_target: Option<&PreASAPNode>,
     horizon: Option<Horizon>,
     expected_reads: Option<f64>,
     required_accuracy: &[AccuracyTarget],
@@ -1670,7 +1672,9 @@ mod tests {
         SketchAlgorithm, SummaryFamilyType, SummaryField, SummarySchema,
     };
     use asap_types::pre_asap::AggIntent;
-    use asap_types::pre_asap::{Column, ColumnRef, DataType, QueryExpr, Reduction, Schema, Source};
+    use asap_types::pre_asap::{
+        Column, ColumnRef, DataType, PreASAPNode, Reduction, Schema, Source,
+    };
     use asap_types::types::AccuracyTarget;
     use asap_types::workload::{
         BatchEntry, DataWorkload, DurationMs, Evidence, EvidenceSource, Predictability, Query,
@@ -1690,7 +1694,7 @@ mod tests {
 
         fn summary_maintenance_lifecycle_cost_inputs(
             &self,
-            _summary: &SummaryNode,
+            _summary: &PostASAPNode,
         ) -> SummaryMaintenanceLifecycleCostInputs {
             SummaryMaintenanceLifecycleCostInputs {
                 build_cost: Some(Cost(10.0)),
@@ -1703,7 +1707,7 @@ mod tests {
 
         fn summary_maintenance_capabilities(
             &self,
-            _summary: &SummaryNode,
+            _summary: &PostASAPNode,
         ) -> SummaryMaintenanceCapabilities {
             SummaryMaintenanceCapabilities {
                 incremental_update: true,
@@ -1726,19 +1730,19 @@ mod tests {
 
         fn summary_maintenance_lifecycle_cost_inputs(
             &self,
-            summary: &SummaryNode,
+            summary: &PostASAPNode,
         ) -> SummaryMaintenanceLifecycleCostInputs {
             UnitCosts.summary_maintenance_lifecycle_cost_inputs(summary)
         }
 
         fn summary_maintenance_capabilities(
             &self,
-            summary: &SummaryNode,
+            summary: &PostASAPNode,
         ) -> SummaryMaintenanceCapabilities {
             UnitCosts.summary_maintenance_capabilities(summary)
         }
 
-        fn raw_query_recompute_cost(&self, _target: &QueryExpr) -> Option<Cost> {
+        fn raw_query_recompute_cost(&self, _target: &PreASAPNode) -> Option<Cost> {
             Some(Cost(1.0))
         }
     }
@@ -1756,14 +1760,14 @@ mod tests {
 
         fn summary_maintenance_lifecycle_cost_inputs(
             &self,
-            summary: &SummaryNode,
+            summary: &PostASAPNode,
         ) -> SummaryMaintenanceLifecycleCostInputs {
             UnitCosts.summary_maintenance_lifecycle_cost_inputs(summary)
         }
 
         fn summary_maintenance_capabilities(
             &self,
-            _summary: &SummaryNode,
+            _summary: &PostASAPNode,
         ) -> SummaryMaintenanceCapabilities {
             SummaryMaintenanceCapabilities {
                 incremental_update: true,
@@ -1778,7 +1782,7 @@ mod tests {
     impl CostModel for SummaryMaintenancePrefersDdSketch {
         fn raw_query_recompute_total_cost(
             &self,
-            _target: &QueryExpr,
+            _target: &PreASAPNode,
             _expected_reads: f64,
         ) -> Option<Cost> {
             Some(Cost(1_000.0))
@@ -1796,7 +1800,7 @@ mod tests {
 
         fn summary_maintenance_lifecycle_cost_inputs(
             &self,
-            summary: &SummaryNode,
+            summary: &PostASAPNode,
         ) -> SummaryMaintenanceLifecycleCostInputs {
             let build = match sketch_algorithm(summary) {
                 Some(SketchAlgorithm::Kll) => 100.0,
@@ -1828,8 +1832,8 @@ mod tests {
 
         fn complete_summary_candidate_cost(
             &self,
-            _root: &SummaryNode,
-            _target: Option<&QueryExpr>,
+            _root: &PostASAPNode,
+            _target: Option<&PreASAPNode>,
             deployments: &[CostedSummaryDeployment<'_>],
             _horizon: Option<Horizon>,
             _expected_reads: Option<f64>,
@@ -1861,7 +1865,7 @@ mod tests {
 
         fn summary_maintenance_lifecycle_cost_inputs(
             &self,
-            summary: &SummaryNode,
+            summary: &PostASAPNode,
         ) -> SummaryMaintenanceLifecycleCostInputs {
             let is_leaf = matches!(
                 summary.expr,
@@ -1879,7 +1883,7 @@ mod tests {
 
         fn summary_maintenance_capabilities(
             &self,
-            _summary: &SummaryNode,
+            _summary: &PostASAPNode,
         ) -> SummaryMaintenanceCapabilities {
             SummaryMaintenanceCapabilities {
                 incremental_update: true,
@@ -1889,7 +1893,7 @@ mod tests {
         }
     }
 
-    fn sketch_algorithm(node: &SummaryNode) -> Option<SketchAlgorithm> {
+    fn sketch_algorithm(node: &PostASAPNode) -> Option<SketchAlgorithm> {
         match &node.expr {
             SummaryExpr::SummaryEstimate { summary_input, .. } => sketch_algorithm(summary_input),
             SummaryExpr::SummaryAgg {
@@ -1900,12 +1904,12 @@ mod tests {
         }
     }
 
-    fn query_root() -> Rc<QueryExpr> {
+    fn query_root() -> Rc<PreASAPNode> {
         query_root_for("m")
     }
 
-    fn query_root_for(metric: &str) -> Rc<QueryExpr> {
-        Rc::new(QueryExpr::Scan {
+    fn query_root_for(metric: &str) -> Rc<PreASAPNode> {
+        Rc::new(PreASAPNode::Scan {
             source: Source::TimeSeries {
                 metric: metric.into(),
             },
@@ -1921,8 +1925,8 @@ mod tests {
         })
     }
 
-    fn sum_query() -> Rc<QueryExpr> {
-        Rc::new(QueryExpr::Aggregate {
+    fn sum_query() -> Rc<PreASAPNode> {
+        Rc::new(PreASAPNode::Aggregate {
             reduction: Reduction::by(vec![]),
             measures: vec![AggIntent::Sum { col: None }],
             output_names: vec![],
@@ -1931,8 +1935,8 @@ mod tests {
         })
     }
 
-    fn quantile_query() -> Rc<QueryExpr> {
-        Rc::new(QueryExpr::Aggregate {
+    fn quantile_query() -> Rc<PreASAPNode> {
+        Rc::new(PreASAPNode::Aggregate {
             reduction: Reduction::by(vec![]),
             measures: vec![AggIntent::Quantile {
                 col: None,
@@ -1945,8 +1949,8 @@ mod tests {
         })
     }
 
-    fn summary() -> Rc<SummaryNode> {
-        let child = Rc::new(SummaryNode {
+    fn summary() -> Rc<PostASAPNode> {
+        let child = Rc::new(PostASAPNode {
             expr: SummaryExpr::KeepPreAsap(query_root()),
             schema: SummarySchema {
                 fields: vec![],
@@ -1955,7 +1959,7 @@ mod tests {
             guarantee: Some(ResultGuarantee::exact("raw")),
         });
         let family = SummaryFamilyType::ExactAggregate(ExactKind::Sum, ExactParams::Sum);
-        Rc::new(SummaryNode {
+        Rc::new(PostASAPNode {
             expr: SummaryExpr::SummaryAgg {
                 child,
                 family: family.clone(),
@@ -1977,10 +1981,10 @@ mod tests {
         })
     }
 
-    fn nested_summary() -> Rc<SummaryNode> {
+    fn nested_summary() -> Rc<PostASAPNode> {
         let child = summary();
         let family = SummaryFamilyType::ExactAggregate(ExactKind::Sum, ExactParams::Sum);
-        Rc::new(SummaryNode {
+        Rc::new(PostASAPNode {
             expr: SummaryExpr::SummaryAgg {
                 child,
                 family: family.clone(),
@@ -2670,7 +2674,7 @@ mod tests {
     #[test]
     fn lifecycle_cost_counts_one_shared_summary_node_once() {
         let shared = summary();
-        let root = Rc::new(SummaryNode {
+        let root = Rc::new(PostASAPNode {
             expr: SummaryExpr::SummaryMerge {
                 timing: asap_types::post_asap::ExecutionTiming::IngestionTime,
                 children: vec![Rc::clone(&shared), Rc::clone(&shared)],
@@ -2963,7 +2967,7 @@ mod tests {
     #[test]
     fn enumeration_lists_each_unique_summary_state_once() {
         let shared = summary();
-        let root = Rc::new(SummaryNode {
+        let root = Rc::new(PostASAPNode {
             expr: SummaryExpr::SummaryMerge {
                 timing: asap_types::post_asap::ExecutionTiming::IngestionTime,
                 children: vec![Rc::clone(&shared), Rc::clone(&shared), summary()],
@@ -2994,8 +2998,8 @@ mod tests {
             .any(|deployment| Rc::ptr_eq(&deployment.summary, &shared)));
     }
 
-    fn readout(state: &Rc<SummaryNode>) -> Rc<SummaryNode> {
-        Rc::new(SummaryNode {
+    fn readout(state: &Rc<PostASAPNode>) -> Rc<PostASAPNode> {
+        Rc::new(PostASAPNode {
             expr: SummaryExpr::ValueOperation {
                 child: Rc::clone(state),
                 operation: ValueOperation::FinalizeExactAccumulator,
@@ -3028,12 +3032,12 @@ mod tests {
     /// Bind the lifecycle `choose` picks for every state of `root`, then
     /// derive the timed DAG.
     fn timed_dag(
-        root: Rc<SummaryNode>,
+        root: Rc<PostASAPNode>,
         workload: &QueryWorkload,
         data: &DataWorkload,
         horizon: Option<Horizon>,
         choose: impl Fn(&SummaryMaintenanceDeployment) -> SummaryMaintenanceLifecycle,
-    ) -> PostAsapDag {
+    ) -> PostASAPDAGTransport {
         let candidates = enumerate_summary_maintenance_lifecycles(
             root,
             WorkloadDemand::new_with_data(workload, data, &[0]),
@@ -3058,7 +3062,7 @@ mod tests {
     }
 
     /// Operator kinds in node-id order, each paired with its timing.
-    fn timings(dag: &PostAsapDag) -> Vec<(&'static str, ExecutionTiming)> {
+    fn timings(dag: &PostASAPDAGTransport) -> Vec<(&'static str, ExecutionTiming)> {
         dag.nodes
             .iter()
             .map(|node| {
@@ -3151,7 +3155,7 @@ mod tests {
         let state = summary();
         let lhs = readout(&state);
         let rhs = Rc::new(lhs.as_ref().clone());
-        let root = Rc::new(SummaryNode {
+        let root = Rc::new(PostASAPNode {
             expr: SummaryExpr::BinaryOp {
                 lhs,
                 rhs,
@@ -3255,7 +3259,7 @@ mod tests {
     }
 
     /// A strategy-built `sum(a)` over one maintained current-series population.
-    fn population_readout() -> Rc<SummaryNode> {
+    fn population_readout() -> Rc<PostASAPNode> {
         let target = Rc::new(crate::test_support::lower_promql(
             "sum(a)",
             AccuracyTarget::Exact,
@@ -3267,7 +3271,7 @@ mod tests {
         .unwrap()
     }
 
-    fn is_population(node: &SummaryNode) -> bool {
+    fn is_population(node: &PostASAPNode) -> bool {
         matches!(
             node.expr,
             SummaryExpr::ValueOperation {
@@ -3277,7 +3281,7 @@ mod tests {
         )
     }
 
-    fn population_timings(dag: &PostAsapDag) -> Vec<(&'static str, ExecutionTiming)> {
+    fn population_timings(dag: &PostASAPDAGTransport) -> Vec<(&'static str, ExecutionTiming)> {
         dag.nodes
             .iter()
             .zip(timings(dag))
@@ -3430,7 +3434,7 @@ mod tests {
         else {
             unreachable!()
         };
-        let state = Rc::new(SummaryNode {
+        let state = Rc::new(PostASAPNode {
             expr: SummaryExpr::SummaryAgg {
                 child: Rc::clone(population),
                 family: family.clone(),
@@ -3497,7 +3501,7 @@ mod tests {
         else {
             unreachable!()
         };
-        let state = Rc::new(SummaryNode {
+        let state = Rc::new(PostASAPNode {
             expr: SummaryExpr::SummaryAgg {
                 child: Rc::clone(population),
                 family: family.clone(),
@@ -3507,8 +3511,8 @@ mod tests {
             },
             ..state.as_ref().clone()
         });
-        let binary = |lhs: Rc<SummaryNode>, rhs: Rc<SummaryNode>| {
-            Rc::new(SummaryNode {
+        let binary = |lhs: Rc<PostASAPNode>, rhs: Rc<PostASAPNode>| {
+            Rc::new(PostASAPNode {
                 schema: lhs.schema.clone(),
                 expr: SummaryExpr::BinaryOp {
                     lhs,

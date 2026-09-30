@@ -16,7 +16,7 @@
 //! ## What a guarantee says
 //!
 //! [`ResultGuarantee`] is attached to a finalized, caller-visible value —
-//! [`super::SummaryNode::guarantee`] on a `SummaryEstimate` readout, an
+//! [`super::PostASAPNode::guarantee`] on a `SummaryEstimate` readout, an
 //! exact accumulator, or a kept pre-ASAP subtree — never to raw summary
 //! state (a `SummaryAgg` sketch node carries `None`; its readout carries the
 //! guarantee). Its statement is:

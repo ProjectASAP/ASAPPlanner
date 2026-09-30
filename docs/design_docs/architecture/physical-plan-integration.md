@@ -10,7 +10,7 @@ the cost model from being coupled directly to either logical IR.
 The integration pipeline is:
 
 ```text
-pre-ASAP QueryExpr  ─┐
+pre-ASAP PreASAPNode  ─┐
                      ├─ physical lowering ─> PhysicalOperator DAG
 post-ASAP SummaryExpr┘                              │
                                                     v
@@ -30,7 +30,7 @@ Each representation is authoritative for a different concern:
 
 | Representation | Authoritative concern |
 |---|---|
-| `QueryExpr` | Original exact query semantics: sources, predicates, relational and PromQL operations, and output shape. |
+| `PreASAPNode` | Original exact query semantics: sources, predicates, relational and PromQL operations, and output shape. |
 | `SummaryExpr` | Logical summary semantics: selected family, grouping strategy, summary composition, and summary readout. |
 | `PhysicalOperator` DAG | Selected executable algorithms, their configuration, physical identity, edges, and execution multiplicity. |
 | `OperatorStatistics` | Workload-dependent evidence required by each selected physical operator's resource formula. |
@@ -66,7 +66,7 @@ Examples include:
 - shared logical sub-DAGs become shared physical nodes only when they refer to
   the same physical identity and compatible evidence.
 
-For this reason, aligning `OperatorStatistics` directly with `QueryExpr` would
+For this reason, aligning `OperatorStatistics` directly with `PreASAPNode` would
 lose post-ASAP summary implementations, while aligning it directly with
 `SummaryExpr` would lose raw query operators and physical algorithm choices.
 
@@ -91,7 +91,7 @@ its modeled descendants is invalid because it undercounts the candidate.
 
 ### Pre-ASAP lowering
 
-`KeepPreAsap` recursively lowers its contained `QueryExpr`. Typical physical
+`KeepPreAsap` recursively lowers its contained `PreASAPNode`. Typical physical
 operators include scans, filters, projections, hash aggregates, joins,
 ordering, bounded Top-K, limits, and PromQL-specific operators. The selected
 physical algorithm, rather than the logical spelling, determines the formula.
@@ -108,7 +108,7 @@ Every `SummaryExpr` operation also needs explicit physical realization:
 | `SummarySubtract` | subtract operator supported by the selected state representation |
 | `SummaryDelete` | physical deletion/update operator supported by the selected representation |
 | `SummaryEstimate` | family- and query-specific readout operator |
-| `KeepPreAsap` | recursive lowering of the contained `QueryExpr` |
+| `KeepPreAsap` | recursive lowering of the contained `PreASAPNode` |
 | `BinaryOp` | binary evaluation preserving operand order, execution timing and any typed finite/relative-division guard |
 | `ValueOperation` | concrete realization of the value operation with its required execution timing and data state |
 | `RelationalJoin` | concrete row-join algorithm preserving join kind and predicate |
@@ -120,7 +120,7 @@ statistics contract, validation rule, and resource formula for an operation,
 a candidate containing it is unavailable.
 
 The streaming integration can consume a complete binding through
-`StreamingNodeEvidence`. That binding is keyed to exact `SummaryNode`
+`StreamingNodeEvidence`. That binding is keyed to exact `PostASAPNode`
 identities and uses structured evidence for aggregate state, join, merge,
 subtract, delete, readout, and retained pre-ASAP work. It is a physical
 evidence boundary, not automatic physical lowering: a deployment must still
@@ -128,7 +128,7 @@ select each concrete implementation and provide all edges, resource facts,
 multiplicities, source ownership, and stable physical identities. The planner
 fails closed when any reachable `SummaryExpr` node lacks that binding.
 
-The raw/query portion of a streaming comparison remains a `PhysicalDag` using
+The raw/query portion of a streaming comparison remains a `BoundPhysicalDAG` using
 the canonical `PhysicalOperator` and `OperatorStatistics` pairing. Summary
 evidence is kept separate only where lifecycle-driven update, retention, and
 expiration multiplicities require facts beyond the query-DAG

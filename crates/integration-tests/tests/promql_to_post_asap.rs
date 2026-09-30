@@ -1,6 +1,6 @@
 //! End-to-end query-string → post-ASAP IR pin (issue #98).
 //!
-//! Drives the full pipeline — PromQL text → pre-ASAP `QueryExpr`
+//! Drives the full pipeline — PromQL text → pre-ASAP `PreASAPNode`
 //! (`lower_promql`) → post-ASAP `SummaryExpr` DAG (via
 //! `SketchAlgorithmStrategy::replacements`, see [`realize`] below) — and pins
 //! the summary-bound shape node by node, including the family `(Kind,
@@ -21,11 +21,11 @@ use asap_aware_mapping::{
 use asap_integration_tests::fixtures::lower_promql;
 use asap_types::post_asap::{
     compile_post_asap_dag, CompositionOperator, EntityIdentity, ExactKind, ExactParams,
-    GroupingStrategy, SketchAlgorithm, SketchKind, SketchParams, SketchQuery, SummaryExpr,
-    SummaryFamilyType, SummaryInputExpr, SummaryNode, SummarySchema, SummaryUpdate, ValueOperation,
+    GroupingStrategy, PostASAPNode, SketchAlgorithm, SketchKind, SketchParams, SketchQuery,
+    SummaryExpr, SummaryFamilyType, SummaryInputExpr, SummarySchema, SummaryUpdate, ValueOperation,
 };
 use asap_types::pre_asap::expr_ir::ColumnRef;
-use asap_types::pre_asap::query_expr::{QueryExpr, Reduction};
+use asap_types::pre_asap::query_expr::{PreASAPNode, Reduction};
 use asap_types::pre_asap::schema::DataType;
 use asap_types::types::AccuracyTarget;
 
@@ -34,7 +34,7 @@ use asap_types::types::AccuracyTarget;
 /// a caller decides what to keep. This test-only helper reproduces the
 /// take-the-first-(`cost_model`-preferred)-candidate pattern so the
 /// single-answer pins below don't all repeat it by hand.
-fn realize(expr: &QueryExpr) -> Result<Rc<SummaryNode>, RealizationError> {
+fn realize(expr: &PreASAPNode) -> Result<Rc<PostASAPNode>, RealizationError> {
     let root = Rc::new(expr.clone());
     let target = TargetSubDAG::new(&root);
     match SketchAlgorithmStrategy::default_cost_model()
@@ -72,7 +72,7 @@ fn distinct_over_time_offers_hll_cardinality_readout() {
     }), "no HLL cardinality candidate: {candidates:?}");
 }
 
-fn lower_search_and_materialize(query: &str) -> Rc<SummaryNode> {
+fn lower_search_and_materialize(query: &str) -> Rc<PostASAPNode> {
     let pre = Rc::new(lower_promql(query, AccuracyTarget::Exact).expect("lowering failed"));
     let space = search_workload(vec![("query", pre)]);
     let selection = space.global_selection(&DefaultCostModel);
@@ -177,7 +177,7 @@ fn dtype<'a>(schema: &'a SummarySchema, name: &str) -> &'a SummaryFamilyType {
         .dtype
 }
 
-fn lower_and_realize(query: &str) -> Rc<SummaryNode> {
+fn lower_and_realize(query: &str) -> Rc<PostASAPNode> {
     let pre = lower_promql(query, AccuracyTarget::Exact).expect("lowering failed");
     realize(&pre).expect("binding failed")
 }
@@ -247,7 +247,7 @@ fn value_ranked_topk_over_binary_ratio_finalizes_both_summary_operands() {
 struct SeparatedTopK;
 
 impl AccuracyEvidenceProvider for SeparatedTopK {
-    fn topk_max_distinct_items(&self, _: &QueryExpr) -> Option<u64> {
+    fn topk_max_distinct_items(&self, _: &PreASAPNode) -> Option<u64> {
         Some(1000)
     }
 
@@ -387,7 +387,7 @@ fn weighted_topk_exports_symbolic_evidence_requirements() {
 fn weighted_topk_rejects_invalid_population_evidence() {
     struct InvalidPopulation;
     impl AccuracyEvidenceProvider for InvalidPopulation {
-        fn topk_max_distinct_items(&self, _: &QueryExpr) -> Option<u64> {
+        fn topk_max_distinct_items(&self, _: &PreASAPNode) -> Option<u64> {
             Some(0)
         }
     }
@@ -525,7 +525,7 @@ fn rate_and_increase_topk_use_summary_scores_and_grouped_limits() {
 
 #[test]
 fn promql_binary_arithmetic_preserves_both_scalar_operand_orders() {
-    fn is_exact_readout_or_scalar(node: &SummaryNode) -> bool {
+    fn is_exact_readout_or_scalar(node: &PostASAPNode) -> bool {
         matches!(node.expr, SummaryExpr::KeepPreAsap(_))
             || matches!(
                 node.expr,
@@ -647,7 +647,7 @@ fn ddsketch_quantile_ratio_meets_the_shared_relative_error_target() {
     let SummaryExpr::BinaryOp { lhs, rhs, .. } = &shared[0].1.expr else {
         panic!("expected binary ratio")
     };
-    let producer = |readout: &Rc<SummaryNode>| match &readout.expr {
+    let producer = |readout: &Rc<PostASAPNode>| match &readout.expr {
         SummaryExpr::SummaryEstimate { summary_input, .. } => Rc::clone(summary_input),
         other => panic!("expected DDSketch readout, got {other:?}"),
     };
@@ -748,7 +748,7 @@ fn planner_only_e2e_temporal_topk_preserves_query_update_and_readout_contract() 
 
 /// Execute the ungrouped temporal TopK subset with exact state. This tests
 /// the emitted update contract, not sketch approximation or backend execution.
-fn execute_topk_reference(plan: &SummaryNode) -> Vec<(String, f64)> {
+fn execute_topk_reference(plan: &PostASAPNode) -> Vec<(String, f64)> {
     use std::collections::BTreeMap;
     let SummaryExpr::SummaryEstimate {
         summary_input,
@@ -770,10 +770,10 @@ fn execute_topk_reference(plan: &SummaryNode) -> Vec<(String, f64)> {
     let SummaryExpr::KeepPreAsap(raw) = &child.expr else {
         panic!("expected fused raw input")
     };
-    let QueryExpr::TimeRange { range, child } = raw.as_ref() else {
+    let PreASAPNode::TimeRange { range, child } = raw.as_ref() else {
         panic!("expected temporal input")
     };
-    let QueryExpr::Scan {
+    let PreASAPNode::Scan {
         source: asap_types::pre_asap::Source::TimeSeries { metric },
         predicates,
         ..
@@ -995,11 +995,11 @@ fn promql_quantile_of_rate_binds_kll_over_rate_accumulator() {
     let SummaryExpr::KeepPreAsap(kept_leaf) = &leaf.expr else {
         panic!("expected KeepPreAsap leaf, got {:?}", leaf.expr);
     };
-    let QueryExpr::TimeRange { range, child: scan } = kept_leaf.as_ref() else {
+    let PreASAPNode::TimeRange { range, child: scan } = kept_leaf.as_ref() else {
         panic!("expected TimeRange leaf, got {kept_leaf:?}");
     };
     assert_eq!(range.as_secs(), 300);
-    assert!(matches!(scan.as_ref(), QueryExpr::Scan { .. }));
+    assert!(matches!(scan.as_ref(), PreASAPNode::Scan { .. }));
     assert!(
         leaf.schema
             .fields
@@ -1070,10 +1070,10 @@ fn promql_sum_of_count_over_time_is_composed_by_default_search() {
     };
 
     assert_eq!(rewritten.output_schema().unwrap(), original_schema);
-    let QueryExpr::Project { child, .. } = rewritten.as_ref() else {
+    let PreASAPNode::Project { child, .. } = rewritten.as_ref() else {
         panic!("sum(count_over_time) needs a Float64 cast Project")
     };
-    let QueryExpr::Aggregate {
+    let PreASAPNode::Aggregate {
         reduction: Reduction::Reduce(by),
         measures,
         child,
@@ -1091,8 +1091,8 @@ fn promql_sum_of_count_over_time_is_composed_by_default_search() {
     ));
     assert!(matches!(
         child.as_ref(),
-        QueryExpr::TimeRange { range, child }
-            if range.as_secs() == 300 && matches!(child.as_ref(), QueryExpr::Scan { .. })
+        PreASAPNode::TimeRange { range, child }
+            if range.as_secs() == 300 && matches!(child.as_ref(), PreASAPNode::Scan { .. })
     ));
 }
 
@@ -1255,7 +1255,7 @@ struct FixtureQuantileDomain {
     upper: f64,
 }
 impl AccuracyEvidenceProvider for FixtureQuantileDomain {
-    fn quantile_input_domain(&self, _: &QueryExpr) -> Option<QuantileInputDomain> {
+    fn quantile_input_domain(&self, _: &PreASAPNode) -> Option<QuantileInputDomain> {
         Some(QuantileInputDomain {
             lower: self.lower,
             upper: self.upper,
@@ -1304,8 +1304,8 @@ fn ddsketch_ratio_rejects_unsafe_domains() {
 fn ddsketch_ratio_rejects_one_invalid_domain_when_the_other_is_missing() {
     struct PartialUnsafeDomain;
     impl AccuracyEvidenceProvider for PartialUnsafeDomain {
-        fn quantile_input_domain(&self, operand: &QueryExpr) -> Option<QuantileInputDomain> {
-            let QueryExpr::Aggregate { measures, .. } = operand else {
+        fn quantile_input_domain(&self, operand: &PreASAPNode) -> Option<QuantileInputDomain> {
+            let PreASAPNode::Aggregate { measures, .. } = operand else {
                 return None;
             };
             matches!(
@@ -1365,7 +1365,7 @@ fn ddsketch_ratio_bound_holds_for_signed_pinned_sketch_readouts() {
         let SummaryExpr::BinaryOp { lhs, rhs, .. } = &node.expr else {
             panic!("ratio")
         };
-        let alpha = |node: &SummaryNode| {
+        let alpha = |node: &PostASAPNode| {
             let SummaryExpr::SummaryEstimate { summary_input, .. } = &node.expr else {
                 panic!("readout")
             };
@@ -1412,7 +1412,7 @@ fn ddsketch_ratio_bound_holds_for_signed_pinned_sketch_readouts() {
 fn ddsketch_ratio_requires_a_supported_population_size() {
     struct PopulationEvidence(u64);
     impl AccuracyEvidenceProvider for PopulationEvidence {
-        fn quantile_input_domain(&self, _: &QueryExpr) -> Option<QuantileInputDomain> {
+        fn quantile_input_domain(&self, _: &PreASAPNode) -> Option<QuantileInputDomain> {
             Some(QuantileInputDomain {
                 lower: 1.,
                 upper: 10.,

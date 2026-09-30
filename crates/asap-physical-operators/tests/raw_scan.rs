@@ -8,7 +8,7 @@ use asap_physical_operators::dag::{
 use futures::{executor::block_on, stream, StreamExt};
 use planner_types::{
     post_asap::*,
-    pre_asap::{Column, DataType, GroupKeys, Predicate, QueryExpr, Source},
+    pre_asap::{Column, DataType, GroupKeys, PreASAPNode, Predicate, Source},
 };
 use std::{
     collections::BTreeMap,
@@ -19,7 +19,7 @@ use std::{
     },
 };
 
-fn fixture() -> (QueryExpr, Schema, Vec<Batch>) {
+fn fixture() -> (PreASAPNode, Schema, Vec<Batch>) {
     let schema =
         planner_types::pre_asap::Schema::new(vec![Column::new("value", DataType::Int64, true)]);
     let output = Arc::new(SummarySchema {
@@ -30,12 +30,12 @@ fn fixture() -> (QueryExpr, Schema, Vec<Batch>) {
         }],
         time_index: None,
     });
-    let scan = QueryExpr::Scan {
+    let scan = PreASAPNode::Scan {
         source: Source::Table {
             table_ref: "numbers".into(),
         },
-        predicates: vec![Predicate(Rc::new(QueryExpr::IsNotNull(Rc::new(
-            QueryExpr::Column(0),
+        predicates: vec![Predicate(Rc::new(PreASAPNode::IsNotNull(Rc::new(
+            PreASAPNode::Column(0),
         ))))],
         schema,
     };
@@ -53,7 +53,7 @@ fn fixture() -> (QueryExpr, Schema, Vec<Batch>) {
     ];
     (scan, output, batches)
 }
-fn plan(scan: QueryExpr, schema: &Schema, state: ExecutionDataState) -> PostAsapDag {
+fn plan(scan: PreASAPNode, schema: &Schema, state: ExecutionDataState) -> PostASAPDAGTransport {
     let node = |id, payload| PostAsapDagNode {
         id: PostAsapNodeId(id),
         payload,
@@ -70,7 +70,7 @@ fn plan(scan: QueryExpr, schema: &Schema, state: ExecutionDataState) -> PostAsap
         grouping: GroupingEdgeCompatibility::NotApplicable,
         window: WindowEdgeCompatibility::NotApplicable,
     };
-    PostAsapDag {
+    PostASAPDAGTransport {
         nodes: vec![
             node(0, PostAsapOperatorPayload::Fallback { expression: scan }),
             node(
@@ -78,7 +78,7 @@ fn plan(scan: QueryExpr, schema: &Schema, state: ExecutionDataState) -> PostAsap
                 PostAsapOperatorPayload::Value {
                     operation: ValueOperation::Sort {
                         keys: vec![planner_types::pre_asap::SortKey {
-                            expr: QueryExpr::Column(0),
+                            expr: PreASAPNode::Column(0),
                             ascending: false,
                             nulls_first: false,
                         }],
@@ -226,8 +226,8 @@ fn binding_errors_and_reader_errors_are_not_empty_results() {
         opened: opened.clone(),
         fail: true,
     }));
-    if let QueryExpr::Scan { predicates, .. } = &mut scan {
-        predicates.push(Predicate(Rc::new(QueryExpr::Column(0))));
+    if let PreASAPNode::Scan { predicates, .. } = &mut scan {
+        predicates.push(Predicate(Rc::new(PreASAPNode::Column(0))));
     }
     assert!(sources.bind(&scan).is_err());
     assert_eq!(opened.load(Ordering::SeqCst), 0);
@@ -294,17 +294,17 @@ fn schema_drift_and_memory_limits_fail_the_scan() {
 fn empty_sources_and_three_valued_predicates() {
     use planner_types::pre_asap::{CompareOpKind, ScalarValue};
     let (mut scan, schema, batches) = fixture();
-    if let QueryExpr::Scan {
+    if let PreASAPNode::Scan {
         predicates, source, ..
     } = &mut scan
     {
         *source = Source::TimeSeries {
             metric: "samples".into(),
         };
-        *predicates = vec![Predicate(Rc::new(QueryExpr::Compare {
-            left: Rc::new(QueryExpr::Column(0)),
+        *predicates = vec![Predicate(Rc::new(PreASAPNode::Compare {
+            left: Rc::new(PreASAPNode::Column(0)),
             op: CompareOpKind::Gt,
-            right: Rc::new(QueryExpr::Literal(ScalarValue::Int64(2))),
+            right: Rc::new(PreASAPNode::Literal(ScalarValue::Int64(2))),
         }))];
     }
     for (batches, expected) in [(vec![], 0), (batches, 2)] {

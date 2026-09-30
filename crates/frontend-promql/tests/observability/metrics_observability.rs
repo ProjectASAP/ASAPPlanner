@@ -13,8 +13,8 @@ use asap_aware_mapping::{
 use asap_frontend_promql::PromqlError;
 #[path = "../support.rs"]
 mod support;
-use asap_types::post_asap::{SummaryExpr, SummaryNode};
-use asap_types::pre_asap::query_expr::QueryExpr;
+use asap_types::post_asap::{PostASAPNode, SummaryExpr};
+use asap_types::pre_asap::query_expr::PreASAPNode;
 use asap_types::types::AccuracyTarget;
 use support::lower_promql;
 
@@ -64,7 +64,7 @@ fn queries(corpus: &str) -> impl Iterator<Item = &str> {
         .filter(|line| !line.is_empty() && !line.starts_with('#'))
 }
 
-fn post_asap_candidate(expr: &QueryExpr) -> Result<Rc<SummaryNode>, RealizationError> {
+fn post_asap_candidate(expr: &PreASAPNode) -> Result<Rc<PostASAPNode>, RealizationError> {
     let root = Rc::new(expr.clone());
     let target = TargetSubDAG::new(&root);
     match SketchAlgorithmStrategy::default_cost_model()

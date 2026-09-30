@@ -28,10 +28,10 @@ implementation library. Deployment systems such as ASAPQuery and asap-fusion
 own deployment compilation and operation. The lifecycle is a planning contract
 associated with the logical DAG, not a separate computation IR.
 
-The Logical Post-ASAP DAG is preceded by the Pre-ASAP DAG (`QueryExpr`), the
+The Logical Post-ASAP DAG is preceded by the Pre-ASAP DAG (`PreASAPNode`), the
 language-independent query semantics before summary selection. Both are
-logical. Planning builds Post-ASAP `SummaryNode` trees; `compile_post_asap_dag`
-exports the selected tree as a `PostAsapDag`, which is the Physical Plan
+logical. Planning builds Post-ASAP `PostASAPNode` trees; `compile_post_asap_dag`
+exports the selected tree as a `PostASAPDAGTransport`, which is the Physical Plan
 Compiler's input. Its per-node execution phase (ingestion or query time) is
 decided by the selected summary maintenance lifecycle, as the layer contract
 below states.
@@ -151,7 +151,7 @@ readiness; those require runtime checks. Physical location, encoding, scheduling
 and retention are separate execution/deployment contracts.
 
 Persisted semantic identity, its wire format and any tenant or dataset binding
-belong to the deployment. Planner provides the typed `PostAsapDag` that a
+belong to the deployment. Planner provides the typed `PostASAPDAGTransport` that a
 deployment canonicalizes; it does not define a stored-definition format.
 
 ### Running example
@@ -319,7 +319,7 @@ The **Physical Plan Compiler** consumes both computation semantics and maintenan
 requirements:
 
 ```text
-Logical Post-ASAP DAG (PostAsapDag)
+Logical Post-ASAP DAG (PostASAPDAGTransport)
 + Summary Maintenance Lifecycle
 + physical capabilities
         ↓
@@ -433,7 +433,7 @@ frontiers and cost evidence, including updates, retention, recurrence and sharin
 The lifecycle layer decides timing; physical compilation reads it. Lowering a
 node does not depend on the frontier, so each query DAG is lowered once and
 different lifecycle assignments are different cuts of that lowering.
-`compile(dag, inputs, roots)` yields the complete `CompiledPhysicalDag`.
+`compile(dag, inputs, roots)` yields the complete `PhysicalDAG`.
 `frontier_from_timing(&timed_dag)` reads an assignment's timed DAG (from
 `execution_timed_dag`) and returns its frontier: ingestion-time nodes read by
 query-time nodes, or an ingestion-time root; a query-time node feeding an

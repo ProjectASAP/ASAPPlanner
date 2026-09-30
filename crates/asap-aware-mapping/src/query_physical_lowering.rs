@@ -13,7 +13,7 @@ use crate::physical_operator_statistics::{
 };
 
 pub struct PhysicalNodeRequest<'a> {
-    pub logical_node: &'a asap_types::pre_asap::QueryExpr,
+    pub logical_node: &'a asap_types::pre_asap::PreASAPNode,
     pub operator: PhysicalOperator,
     pub occurrence: usize,
     pub synthetic: bool,
@@ -46,13 +46,13 @@ where
 /// complete query unavailable. Scalar expressions remain part of their
 /// containing operator's local cost.
 pub fn lower_query_physical_dag(
-    root: &Rc<asap_types::pre_asap::QueryExpr>,
+    root: &Rc<asap_types::pre_asap::PreASAPNode>,
     scope: &ComparisonScope,
     evidence: &dyn PhysicalNodeEvidenceProvider,
 ) -> Result<EvidenceBackedPhysicalDag, AnalyticalCostError> {
     use std::collections::HashMap;
 
-    use asap_types::pre_asap::{GroupKeys, QueryExpr, RelationalSetOpKind};
+    use asap_types::pre_asap::{GroupKeys, PreASAPNode, RelationalSetOpKind};
 
     scope.validate()?;
 
@@ -65,7 +65,7 @@ pub fn lower_query_physical_dag(
     }
 
     impl Lowerer<'_> {
-        fn lower(&mut self, query: &QueryExpr) -> Result<String, AnalyticalCostError> {
+        fn lower(&mut self, query: &PreASAPNode) -> Result<String, AnalyticalCostError> {
             let occurrence = self.next_id;
             self.next_id += 1;
             self.lower_new(query, occurrence)
@@ -73,7 +73,7 @@ pub fn lower_query_physical_dag(
 
         fn resolve(
             &self,
-            query: &QueryExpr,
+            query: &PreASAPNode,
             operator: PhysicalOperator,
             occurrence: usize,
             synthetic: bool,
@@ -128,10 +128,10 @@ pub fn lower_query_physical_dag(
 
         fn lower_unary(
             &mut self,
-            query: &QueryExpr,
+            query: &PreASAPNode,
             occurrence: usize,
             operator: PhysicalOperator,
-            child: &QueryExpr,
+            child: &PreASAPNode,
         ) -> Result<String, AnalyticalCostError> {
             let child_id = self.lower(child)?;
             let children = vec![child_id.clone()];
@@ -151,17 +151,17 @@ pub fn lower_query_physical_dag(
 
         fn lower_promql_unary(
             &mut self,
-            query: &QueryExpr,
+            query: &PreASAPNode,
             occurrence: usize,
             operator: PhysicalOperator,
-            child: &QueryExpr,
+            child: &PreASAPNode,
         ) -> Result<String, AnalyticalCostError> {
             self.lower_unary(query, occurrence, operator, child)
         }
 
         fn lower_promql_scalar_leaf(
             &mut self,
-            query: &QueryExpr,
+            query: &PreASAPNode,
             occurrence: usize,
         ) -> Result<String, AnalyticalCostError> {
             let operator = PhysicalOperator::PromqlScalarLeaf;
@@ -182,11 +182,11 @@ pub fn lower_query_physical_dag(
 
         fn lower_new(
             &mut self,
-            query: &QueryExpr,
+            query: &PreASAPNode,
             occurrence: usize,
         ) -> Result<String, AnalyticalCostError> {
             match query {
-                QueryExpr::Scan {
+                PreASAPNode::Scan {
                     source, predicates, ..
                 } => {
                     let coverage = bind_scan_coverage(
@@ -252,13 +252,13 @@ pub fn lower_query_physical_dag(
                     require_operator_statistics(filter_operator, &filter_evidence.statistics)?;
                     self.push(filter_evidence, filter_operator, children, None)
                 }
-                QueryExpr::Filter { pred, child } => {
+                PreASAPNode::Filter { pred, child } => {
                     let operator = PhysicalOperator::Filter {
                         predicate_operations_per_row: scalar_operation_count(&pred.0)?.max(1),
                     };
                     self.lower_unary(query, occurrence, operator, child)
                 }
-                QueryExpr::Project { cols, child, .. } => {
+                PreASAPNode::Project { cols, child, .. } => {
                     let expression_operations_per_row = cols
                         .iter()
                         .try_fold(0_u64, |total, item| {
@@ -280,7 +280,7 @@ pub fn lower_query_physical_dag(
                         child,
                     )
                 }
-                QueryExpr::Aggregate {
+                PreASAPNode::Aggregate {
                     reduction,
                     measures,
                     having,
@@ -334,7 +334,7 @@ pub fn lower_query_physical_dag(
                         child,
                     )
                 }
-                QueryExpr::Dedup { cols, child } => {
+                PreASAPNode::Dedup { cols, child } => {
                     let key_count = if cols.is_empty() {
                         child
                             .output_schema()
@@ -357,7 +357,7 @@ pub fn lower_query_physical_dag(
                         child,
                     )
                 }
-                QueryExpr::Sort {
+                PreASAPNode::Sort {
                     keys,
                     partition_by,
                     child,
@@ -377,8 +377,8 @@ pub fn lower_query_physical_dag(
                         child,
                     )
                 }
-                QueryExpr::Limit { n, offset, child } => {
-                    if let QueryExpr::Sort {
+                PreASAPNode::Limit { n, offset, child } => {
+                    if let PreASAPNode::Sort {
                         keys,
                         partition_by,
                         child: sorted_child,
@@ -438,7 +438,7 @@ pub fn lower_query_physical_dag(
                     require_operator_statistics(operator, statistics)?;
                     self.push(evidence, operator, children, None)
                 }
-                QueryExpr::SQLWindowFunc {
+                PreASAPNode::SQLWindowFunc {
                     func,
                     partition_by,
                     order_by,
@@ -468,7 +468,7 @@ pub fn lower_query_physical_dag(
                         child,
                     )
                 }
-                QueryExpr::TimeRange { range, child } => {
+                PreASAPNode::TimeRange { range, child } => {
                     let range_millis = duration_millis(*range, "range")?;
                     self.lower_promql_unary(
                         query,
@@ -477,7 +477,7 @@ pub fn lower_query_physical_dag(
                         child,
                     )
                 }
-                QueryExpr::PromqlSubquery {
+                PreASAPNode::PromqlSubquery {
                     range,
                     resolution,
                     child,
@@ -509,7 +509,7 @@ pub fn lower_query_physical_dag(
                     }
                     Ok(id)
                 }
-                QueryExpr::PromqlRelabel { value, child, .. } => self.lower_promql_unary(
+                PreASAPNode::PromqlRelabel { value, child, .. } => self.lower_promql_unary(
                     query,
                     occurrence,
                     PhysicalOperator::PromqlRelabel {
@@ -517,7 +517,7 @@ pub fn lower_query_physical_dag(
                     },
                     child,
                 ),
-                QueryExpr::PromqlSeriesSample {
+                PreASAPNode::PromqlSeriesSample {
                     by, kind, child, ..
                 } => {
                     if by.is_without() {
@@ -553,7 +553,7 @@ pub fn lower_query_physical_dag(
                         child,
                     )
                 }
-                QueryExpr::PromqlInfoEnrich { selector, child } => {
+                PreASAPNode::PromqlInfoEnrich { selector, child } => {
                     let left_id = self.lower(child)?;
                     let coverage = bind_info_coverage(
                         &format!("occurrence-{occurrence}-info"),
@@ -605,7 +605,7 @@ pub fn lower_query_physical_dag(
                     require_operator_statistics(operator, &evidence.statistics)?;
                     self.push(evidence, operator, children, None)
                 }
-                QueryExpr::BinaryOp {
+                PreASAPNode::BinaryOp {
                     op,
                     lhs,
                     rhs,
@@ -666,41 +666,41 @@ pub fn lower_query_physical_dag(
                     require_operator_statistics(operator, &evidence.statistics)?;
                     self.push(evidence, operator, children, None)
                 }
-                QueryExpr::PromqlVectorFromScalar(child) => self.lower_promql_unary(
+                PreASAPNode::PromqlVectorFromScalar(child) => self.lower_promql_unary(
                     query,
                     occurrence,
                     PhysicalOperator::PromqlScalarToVector,
                     child,
                 ),
-                QueryExpr::PromqlScalarFromVector(child) => self.lower_promql_unary(
+                PreASAPNode::PromqlScalarFromVector(child) => self.lower_promql_unary(
                     query,
                     occurrence,
                     PhysicalOperator::PromqlVectorToScalar,
                     child,
                 ),
-                QueryExpr::PromqlScalarBridge(inner)
+                PreASAPNode::PromqlScalarBridge(inner)
                     if matches!(
                         inner.as_ref(),
-                        QueryExpr::Literal(asap_types::pre_asap::ScalarValue::Float64(_))
+                        PreASAPNode::Literal(asap_types::pre_asap::ScalarValue::Float64(_))
                     ) =>
                 {
                     self.lower_promql_scalar_leaf(query, occurrence)
                 }
-                QueryExpr::EvalTimestamp => self.lower_promql_scalar_leaf(query, occurrence),
-                QueryExpr::TimeShift { shift, child } => {
+                PreASAPNode::EvalTimestamp => self.lower_promql_scalar_leaf(query, occurrence),
+                PreASAPNode::TimeShift { shift, child } => {
                     if !shift.is_identity() {
                         return Err(AnalyticalCostError::UnsupportedQueryOperator);
                     }
                     self.lower_unary(query, occurrence, PhysicalOperator::PassThrough, child)
                 }
-                QueryExpr::Concat { children, .. } => {
+                PreASAPNode::Concat { children, .. } => {
                     let child_ids = children
                         .iter()
                         .map(|child| self.lower(child))
                         .collect::<Result<Vec<_>, _>>()?;
                     self.lower_concat(query, occurrence, child_ids)
                 }
-                QueryExpr::SetOp {
+                PreASAPNode::SetOp {
                     kind: RelationalSetOpKind::Union,
                     all: true,
                     left,
@@ -710,7 +710,7 @@ pub fn lower_query_physical_dag(
                     let right_id = self.lower(right)?;
                     self.lower_concat(query, occurrence, vec![left_id, right_id])
                 }
-                QueryExpr::Join {
+                PreASAPNode::Join {
                     kind,
                     pred,
                     left,
@@ -760,7 +760,7 @@ pub fn lower_query_physical_dag(
 
         fn lower_concat(
             &mut self,
-            query: &QueryExpr,
+            query: &PreASAPNode,
             occurrence: usize,
             child_ids: Vec<String>,
         ) -> Result<String, AnalyticalCostError> {
@@ -1047,11 +1047,11 @@ fn promql_vector_cardinality(
 }
 
 fn hash_join_key_count(
-    expr: &asap_types::pre_asap::QueryExpr,
-    left: &asap_types::pre_asap::QueryExpr,
-    right: &asap_types::pre_asap::QueryExpr,
+    expr: &asap_types::pre_asap::PreASAPNode,
+    left: &asap_types::pre_asap::PreASAPNode,
+    right: &asap_types::pre_asap::PreASAPNode,
 ) -> Option<u64> {
-    use asap_types::pre_asap::{CompareOpKind, QueryExpr};
+    use asap_types::pre_asap::{CompareOpKind, PreASAPNode};
 
     let (Ok(left_schema), Ok(right_schema)) = (left.output_schema(), right.output_schema()) else {
         return None;
@@ -1069,14 +1069,14 @@ fn hash_join_key_count(
         }
     }
 
-    fn predicate(expr: &QueryExpr, left_width: usize, total_width: usize) -> Option<u64> {
+    fn predicate(expr: &PreASAPNode, left_width: usize, total_width: usize) -> Option<u64> {
         match expr {
-            QueryExpr::Compare {
+            PreASAPNode::Compare {
                 left,
                 op: CompareOpKind::Eq,
                 right,
             } => match (left.as_ref(), right.as_ref()) {
-                (QueryExpr::Column(left), QueryExpr::Column(right)) => match (
+                (PreASAPNode::Column(left), PreASAPNode::Column(right)) => match (
                     column_side(*left, left_width, total_width),
                     column_side(*right, left_width, total_width),
                 ) {
@@ -1085,7 +1085,7 @@ fn hash_join_key_count(
                 },
                 _ => None,
             },
-            QueryExpr::BoolAnd(parts) if !parts.is_empty() => {
+            PreASAPNode::BoolAnd(parts) if !parts.is_empty() => {
                 parts.iter().try_fold(0_u64, |count, part| {
                     count.checked_add(predicate(part, left_width, total_width)?)
                 })
@@ -1098,11 +1098,11 @@ fn hash_join_key_count(
 }
 
 fn scalar_operation_count(
-    expr: &asap_types::pre_asap::QueryExpr,
+    expr: &asap_types::pre_asap::PreASAPNode,
 ) -> Result<u64, AnalyticalCostError> {
-    use asap_types::pre_asap::QueryExpr;
+    use asap_types::pre_asap::PreASAPNode;
 
-    let add = |parts: &[&QueryExpr]| {
+    let add = |parts: &[&PreASAPNode]| {
         parts.iter().try_fold(0_u64, |total, part| {
             total
                 .checked_add(scalar_operation_count(part)?)
@@ -1115,14 +1115,14 @@ fn scalar_operation_count(
             .ok_or(AnalyticalCostError::Overflow)
     };
     match expr {
-        QueryExpr::Column(_)
-        | QueryExpr::Literal(_)
-        | QueryExpr::EvalTimestamp
-        | QueryExpr::CurrentTimestamp => Ok(0),
-        QueryExpr::Compare { left, right, .. } | QueryExpr::Arithmetic { left, right, .. } => {
+        PreASAPNode::Column(_)
+        | PreASAPNode::Literal(_)
+        | PreASAPNode::EvalTimestamp
+        | PreASAPNode::CurrentTimestamp => Ok(0),
+        PreASAPNode::Compare { left, right, .. } | PreASAPNode::Arithmetic { left, right, .. } => {
             with_local(&[left, right])
         }
-        QueryExpr::BoolAnd(parts) | QueryExpr::BoolOr(parts) => {
+        PreASAPNode::BoolAnd(parts) | PreASAPNode::BoolOr(parts) => {
             let children = parts.iter().collect::<Vec<_>>();
             add(&children)?
                 .checked_add(
@@ -1131,12 +1131,12 @@ fn scalar_operation_count(
                 )
                 .ok_or(AnalyticalCostError::Overflow)
         }
-        QueryExpr::Not(child)
-        | QueryExpr::IsNull(child)
-        | QueryExpr::IsNotNull(child)
-        | QueryExpr::PromqlScalarBridge(child) => with_local(&[child]),
-        QueryExpr::Cast { expr, .. } => with_local(&[expr]),
-        QueryExpr::InList { expr, list, .. } => {
+        PreASAPNode::Not(child)
+        | PreASAPNode::IsNull(child)
+        | PreASAPNode::IsNotNull(child)
+        | PreASAPNode::PromqlScalarBridge(child) => with_local(&[child]),
+        PreASAPNode::Cast { expr, .. } => with_local(&[expr]),
+        PreASAPNode::InList { expr, list, .. } => {
             let mut children = Vec::with_capacity(list.len() + 1);
             children.push(expr.as_ref());
             children.extend(list.iter());
@@ -1144,11 +1144,11 @@ fn scalar_operation_count(
                 .checked_add(u64::try_from(list.len()).map_err(|_| AnalyticalCostError::Overflow)?)
                 .ok_or(AnalyticalCostError::Overflow)
         }
-        QueryExpr::FunctionCall { args, .. } => {
+        PreASAPNode::FunctionCall { args, .. } => {
             let children = args.iter().collect::<Vec<_>>();
             with_local(&children)
         }
-        QueryExpr::Case {
+        PreASAPNode::Case {
             operand,
             branches,
             else_expr,
@@ -1242,13 +1242,13 @@ fn fixed_state_per_series_intent(intent: &asap_types::pre_asap::AggIntent) -> bo
     )
 }
 
-fn is_promql_scalar(query: &asap_types::pre_asap::QueryExpr) -> bool {
-    use asap_types::pre_asap::QueryExpr;
+fn is_promql_scalar(query: &asap_types::pre_asap::PreASAPNode) -> bool {
+    use asap_types::pre_asap::PreASAPNode;
     matches!(
         query,
-        QueryExpr::PromqlScalarBridge(_)
-            | QueryExpr::PromqlScalarFromVector(_)
-            | QueryExpr::EvalTimestamp
+        PreASAPNode::PromqlScalarBridge(_)
+            | PreASAPNode::PromqlScalarFromVector(_)
+            | PreASAPNode::EvalTimestamp
     )
 }
 
@@ -1448,17 +1448,17 @@ mod tests {
     #[test]
     fn correlation_lowers_to_physical_hash_aggregate() {
         use asap_types::pre_asap::{
-            AggIntent, Column, DataType, QueryExpr, Reduction, Schema, Source,
+            AggIntent, Column, DataType, PreASAPNode, Reduction, Schema, Source,
         };
         let source = Source::Table {
             table_ref: "pairs".into(),
         };
-        let root = Rc::new(QueryExpr::Aggregate {
+        let root = Rc::new(PreASAPNode::Aggregate {
             reduction: Reduction::by(vec![]),
             measures: vec![AggIntent::PearsonCorr { left: 0, right: 1 }],
             output_names: vec!["r".into()],
             having: None,
-            child: Rc::new(QueryExpr::Scan {
+            child: Rc::new(PreASAPNode::Scan {
                 source: source.clone(),
                 predicates: vec![],
                 schema: Schema::new(vec![
@@ -1496,39 +1496,39 @@ mod tests {
 
     #[test]
     fn query_lowering_recurses_and_fuses_global_sort_limit() {
-        use asap_types::pre_asap::{AggIntent, GroupKeys, QueryExpr, Reduction, SortKey, Source};
+        use asap_types::pre_asap::{AggIntent, GroupKeys, PreASAPNode, Reduction, SortKey, Source};
         use asap_types::pre_asap::{Column, DataType, Schema};
         use std::rc::Rc;
 
-        let scan = Rc::new(QueryExpr::Scan {
+        let scan = Rc::new(PreASAPNode::Scan {
             source: Source::Table {
                 table_ref: "events".into(),
             },
             predicates: vec![asap_types::pre_asap::Predicate(Rc::new(
-                QueryExpr::Literal(asap_types::pre_asap::ScalarValue::Boolean(true)),
+                PreASAPNode::Literal(asap_types::pre_asap::ScalarValue::Boolean(true)),
             ))],
             schema: Schema::new(vec![
                 Column::new("service", DataType::Utf8, false),
                 Column::new("value", DataType::Float64, false),
             ]),
         });
-        let aggregate = Rc::new(QueryExpr::Aggregate {
+        let aggregate = Rc::new(PreASAPNode::Aggregate {
             reduction: Reduction::by(vec![0]),
             measures: vec![AggIntent::Sum { col: Some(1) }],
             output_names: vec![],
             having: None,
             child: Rc::clone(&scan),
         });
-        let sort = Rc::new(QueryExpr::Sort {
+        let sort = Rc::new(PreASAPNode::Sort {
             keys: vec![SortKey {
-                expr: QueryExpr::Column(0),
+                expr: PreASAPNode::Column(0),
                 ascending: false,
                 nulls_first: false,
             }],
             partition_by: GroupKeys::none(),
             child: aggregate,
         });
-        let root = Rc::new(QueryExpr::Limit {
+        let root = Rc::new(PreASAPNode::Limit {
             n: 10,
             offset: 5,
             child: sort,
@@ -1539,7 +1539,7 @@ mod tests {
                 table_ref: "events".into(),
             },
             vec![asap_types::pre_asap::Predicate(Rc::new(
-                QueryExpr::Literal(asap_types::pre_asap::ScalarValue::Boolean(true)),
+                PreASAPNode::Literal(asap_types::pre_asap::ScalarValue::Boolean(true)),
             ))],
         );
         let scope = scope(vec![scan_coverage]);
@@ -1635,22 +1635,22 @@ mod tests {
     #[test]
     fn query_lowering_shares_only_provider_identified_physical_nodes() {
         use asap_types::pre_asap::{Column, CompareOpKind, DataType, Schema};
-        use asap_types::pre_asap::{JoinKind, Predicate, QueryExpr, Source};
+        use asap_types::pre_asap::{JoinKind, PreASAPNode, Predicate, Source};
         use std::rc::Rc;
 
-        let shared = Rc::new(QueryExpr::Scan {
+        let shared = Rc::new(PreASAPNode::Scan {
             source: Source::Table {
                 table_ref: "dimensions".into(),
             },
             predicates: vec![],
             schema: Schema::new(vec![Column::new("id", DataType::Int64, false)]),
         });
-        let root = Rc::new(QueryExpr::Join {
+        let root = Rc::new(PreASAPNode::Join {
             kind: JoinKind::Inner,
-            pred: Predicate(Rc::new(QueryExpr::Compare {
-                left: Rc::new(QueryExpr::Column(0)),
+            pred: Predicate(Rc::new(PreASAPNode::Compare {
+                left: Rc::new(PreASAPNode::Column(0)),
                 op: CompareOpKind::Eq,
-                right: Rc::new(QueryExpr::Column(1)),
+                right: Rc::new(PreASAPNode::Column(1)),
             })),
             left: Rc::clone(&shared),
             right: Rc::clone(&shared),
@@ -1778,12 +1778,12 @@ mod tests {
             ))
         );
 
-        let invalid = Rc::new(QueryExpr::Join {
+        let invalid = Rc::new(PreASAPNode::Join {
             kind: JoinKind::Inner,
-            pred: Predicate(Rc::new(QueryExpr::Compare {
-                left: Rc::new(QueryExpr::Column(0)),
+            pred: Predicate(Rc::new(PreASAPNode::Compare {
+                left: Rc::new(PreASAPNode::Column(0)),
                 op: CompareOpKind::Eq,
-                right: Rc::new(QueryExpr::Column(0)),
+                right: Rc::new(PreASAPNode::Column(0)),
             })),
             left: Rc::clone(&shared),
             right: Rc::clone(&shared),
@@ -1798,36 +1798,36 @@ mod tests {
     fn query_lowering_covers_relational_unary_operators() {
         use asap_types::pre_asap::{Column, DataType, ScalarValue, Schema};
         use asap_types::pre_asap::{
-            GroupKeys, Predicate, QueryExpr, SortKey, Source, TimeShift, WindowFuncKind,
+            GroupKeys, PreASAPNode, Predicate, SortKey, Source, TimeShift, WindowFuncKind,
         };
         use std::rc::Rc;
 
-        let scan = Rc::new(QueryExpr::Scan {
+        let scan = Rc::new(PreASAPNode::Scan {
             source: Source::Table {
                 table_ref: "events".into(),
             },
             predicates: vec![],
             schema: Schema::new(vec![Column::new("id", DataType::Int64, false)]),
         });
-        let filter = Rc::new(QueryExpr::Filter {
-            pred: Predicate(Rc::new(QueryExpr::Literal(ScalarValue::Boolean(true)))),
+        let filter = Rc::new(PreASAPNode::Filter {
+            pred: Predicate(Rc::new(PreASAPNode::Literal(ScalarValue::Boolean(true)))),
             child: scan,
         });
-        let project = Rc::new(QueryExpr::Project {
+        let project = Rc::new(PreASAPNode::Project {
             cols: vec![],
             qualifier: None,
             child: filter,
         });
-        let dedup = Rc::new(QueryExpr::Dedup {
+        let dedup = Rc::new(PreASAPNode::Dedup {
             cols: vec![0],
             child: project,
         });
-        let window = Rc::new(QueryExpr::SQLWindowFunc {
+        let window = Rc::new(PreASAPNode::SQLWindowFunc {
             func: WindowFuncKind::RowNumber,
             args: vec![],
             partition_by: GroupKeys::none(),
             order_by: vec![SortKey {
-                expr: QueryExpr::Column(0),
+                expr: PreASAPNode::Column(0),
                 ascending: true,
                 nulls_first: false,
             }],
@@ -1835,21 +1835,21 @@ mod tests {
             output_name: "rn".into(),
             child: dedup,
         });
-        let sort = Rc::new(QueryExpr::Sort {
+        let sort = Rc::new(PreASAPNode::Sort {
             keys: vec![SortKey {
-                expr: QueryExpr::Column(0),
+                expr: PreASAPNode::Column(0),
                 ascending: true,
                 nulls_first: false,
             }],
             partition_by: GroupKeys::by(vec![0]),
             child: window,
         });
-        let limit = Rc::new(QueryExpr::Limit {
+        let limit = Rc::new(PreASAPNode::Limit {
             n: 20,
             offset: 0,
             child: sort,
         });
-        let root = Rc::new(QueryExpr::TimeShift {
+        let root = Rc::new(PreASAPNode::TimeShift {
             shift: TimeShift::default(),
             child: limit,
         });
@@ -1971,17 +1971,17 @@ mod tests {
     #[test]
     fn query_lowering_maps_concat_and_union_all_but_rejects_distinct_set_ops() {
         use asap_types::pre_asap::{Column, DataType, Schema};
-        use asap_types::pre_asap::{QueryExpr, RelationalSetOpKind, Source};
+        use asap_types::pre_asap::{PreASAPNode, RelationalSetOpKind, Source};
         use std::rc::Rc;
 
-        let scan = |name: &str| QueryExpr::Scan {
+        let scan = |name: &str| PreASAPNode::Scan {
             source: Source::Table {
                 table_ref: name.into(),
             },
             predicates: vec![],
             schema: Schema::new(vec![Column::new("id", DataType::Int64, false)]),
         };
-        let union = Rc::new(QueryExpr::SetOp {
+        let union = Rc::new(PreASAPNode::SetOp {
             kind: RelationalSetOpKind::Union,
             all: true,
             left: Rc::new(scan("a")),
@@ -2030,14 +2030,14 @@ mod tests {
             ))
         );
 
-        let concat = Rc::new(QueryExpr::Concat {
+        let concat = Rc::new(PreASAPNode::Concat {
             children: vec![scan("a"), scan("b")],
             discriminator_unique_key: None,
         });
         let dag = lower_query_physical_dag(&concat, &scope, &scripted(&provided)).unwrap();
         assert_eq!(dag.nodes.last().unwrap().operator, PhysicalOperator::Concat);
 
-        let distinct_union = Rc::new(QueryExpr::SetOp {
+        let distinct_union = Rc::new(PreASAPNode::SetOp {
             kind: RelationalSetOpKind::Union,
             all: false,
             left: Rc::new(scan("a")),
@@ -2052,17 +2052,17 @@ mod tests {
     #[test]
     fn query_lowering_fails_closed_for_missing_or_inconsistent_statistics() {
         use asap_types::pre_asap::{Column, DataType, Schema};
-        use asap_types::pre_asap::{QueryExpr, Source};
+        use asap_types::pre_asap::{PreASAPNode, Source};
         use std::rc::Rc;
 
-        let scan = Rc::new(QueryExpr::Scan {
+        let scan = Rc::new(PreASAPNode::Scan {
             source: Source::Table {
                 table_ref: "events".into(),
             },
             predicates: vec![],
             schema: Schema::new(vec![Column::new("id", DataType::Int64, false)]),
         });
-        let root = Rc::new(QueryExpr::Project {
+        let root = Rc::new(PreASAPNode::Project {
             cols: vec![],
             qualifier: None,
             child: scan,
@@ -2168,21 +2168,21 @@ mod tests {
     #[test]
     fn query_lowering_accepts_a_consistently_empty_edge() {
         use asap_types::pre_asap::{Column, DataType, ScalarValue, Schema};
-        use asap_types::pre_asap::{Predicate, QueryExpr, Source};
+        use asap_types::pre_asap::{PreASAPNode, Predicate, Source};
         use std::rc::Rc;
 
-        let scan = Rc::new(QueryExpr::Scan {
+        let scan = Rc::new(PreASAPNode::Scan {
             source: Source::Table {
                 table_ref: "events".into(),
             },
             predicates: vec![],
             schema: Schema::new(vec![Column::new("id", DataType::Int64, false)]),
         });
-        let filter = Rc::new(QueryExpr::Filter {
-            pred: Predicate(Rc::new(QueryExpr::Literal(ScalarValue::Boolean(false)))),
+        let filter = Rc::new(PreASAPNode::Filter {
+            pred: Predicate(Rc::new(PreASAPNode::Literal(ScalarValue::Boolean(false)))),
             child: scan,
         });
-        let root = Rc::new(QueryExpr::Limit {
+        let root = Rc::new(PreASAPNode::Limit {
             n: 10,
             offset: 0,
             child: filter,
@@ -2228,14 +2228,14 @@ mod tests {
     #[test]
     fn query_lowering_rejects_aggregates_without_a_hash_implementation() {
         use asap_types::pre_asap::{
-            AggIntent, GroupKeys, QueryExpr, Reduction, Source, WindowFuncKind,
+            AggIntent, GroupKeys, PreASAPNode, Reduction, Source, WindowFuncKind,
         };
         use asap_types::pre_asap::{Column, DataType, Schema};
         use asap_types::types::AccuracyTarget;
         use std::rc::Rc;
 
         let scan = || {
-            Rc::new(QueryExpr::Scan {
+            Rc::new(PreASAPNode::Scan {
                 source: Source::Table {
                     table_ref: "events".into(),
                 },
@@ -2243,7 +2243,7 @@ mod tests {
                 schema: Schema::new(vec![Column::new("value", DataType::Float64, false)]),
             })
         };
-        let exact_quantile = Rc::new(QueryExpr::Aggregate {
+        let exact_quantile = Rc::new(PreASAPNode::Aggregate {
             reduction: Reduction::by(vec![]),
             measures: vec![AggIntent::Quantile {
                 col: Some(0),
@@ -2254,25 +2254,25 @@ mod tests {
             having: None,
             child: scan(),
         });
-        let empty_sort_limit = Rc::new(QueryExpr::Limit {
+        let empty_sort_limit = Rc::new(PreASAPNode::Limit {
             n: 10,
             offset: 0,
-            child: Rc::new(QueryExpr::Sort {
+            child: Rc::new(PreASAPNode::Sort {
                 keys: vec![],
                 partition_by: GroupKeys::none(),
                 child: scan(),
             }),
         });
-        let unsupported_window = Rc::new(QueryExpr::SQLWindowFunc {
+        let unsupported_window = Rc::new(PreASAPNode::SQLWindowFunc {
             func: WindowFuncKind::Lag,
-            args: vec![QueryExpr::Column(0)],
+            args: vec![PreASAPNode::Column(0)],
             partition_by: GroupKeys::none(),
             order_by: vec![],
             frame: None,
             output_name: "lag".into(),
             child: scan(),
         });
-        let shifted = Rc::new(QueryExpr::TimeShift {
+        let shifted = Rc::new(PreASAPNode::TimeShift {
             shift: asap_types::pre_asap::TimeShift {
                 offset_ms: 60_000,
                 at: None,
@@ -2301,14 +2301,14 @@ mod tests {
 
     #[test]
     fn scalar_work_counts_every_local_predicate_operation() {
-        use asap_types::pre_asap::{CompareOpKind, QueryExpr, ScalarValue};
+        use asap_types::pre_asap::{CompareOpKind, PreASAPNode, ScalarValue};
 
-        let comparison = || QueryExpr::Compare {
-            left: Rc::new(QueryExpr::Column(0)),
+        let comparison = || PreASAPNode::Compare {
+            left: Rc::new(PreASAPNode::Column(0)),
             op: CompareOpKind::Eq,
-            right: Rc::new(QueryExpr::Literal(ScalarValue::Int64(1))),
+            right: Rc::new(PreASAPNode::Literal(ScalarValue::Int64(1))),
         };
-        let predicate = QueryExpr::BoolAnd(vec![comparison(), comparison()]);
+        let predicate = PreASAPNode::BoolAnd(vec![comparison(), comparison()]);
 
         assert_eq!(scalar_operation_count(&predicate), Ok(3));
     }
@@ -2316,18 +2316,18 @@ mod tests {
     #[test]
     fn promql_presence_is_lowered_with_a_per_step_output_bound() {
         use asap_types::pre_asap::{
-            AggIntent, Column, DataType, QueryExpr, Reduction, Schema, Source,
+            AggIntent, Column, DataType, PreASAPNode, Reduction, Schema, Source,
         };
 
         let source = Source::TimeSeries {
             metric: "missing".into(),
         };
-        let scan = Rc::new(QueryExpr::Scan {
+        let scan = Rc::new(PreASAPNode::Scan {
             source: source.clone(),
             predicates: vec![],
             schema: Schema::new(vec![Column::new("value", DataType::Float64, false)]),
         });
-        let root = Rc::new(QueryExpr::Aggregate {
+        let root = Rc::new(PreASAPNode::Aggregate {
             reduction: Reduction::PerEntity,
             measures: vec![AggIntent::Absent],
             output_names: vec![],
@@ -2382,20 +2382,20 @@ mod tests {
 
     #[test]
     fn promql_range_and_subquery_preserve_internal_steps() {
-        use asap_types::pre_asap::{Column, DataType, QueryExpr, Schema, Source};
+        use asap_types::pre_asap::{Column, DataType, PreASAPNode, Schema, Source};
         use std::time::Duration;
 
         let source = Source::TimeSeries { metric: "m".into() };
-        let scan = Rc::new(QueryExpr::Scan {
+        let scan = Rc::new(PreASAPNode::Scan {
             source: source.clone(),
             predicates: vec![],
             schema: Schema::new(vec![Column::new("value", DataType::Float64, false)]),
         });
-        let range = Rc::new(QueryExpr::TimeRange {
+        let range = Rc::new(PreASAPNode::TimeRange {
             range: Duration::from_secs(300),
             child: scan,
         });
-        let root = Rc::new(QueryExpr::PromqlSubquery {
+        let root = Rc::new(PreASAPNode::PromqlSubquery {
             range: Duration::from_secs(300),
             resolution: Some(Duration::from_secs(60)),
             child: range,
@@ -2457,20 +2457,20 @@ mod tests {
     #[test]
     fn promql_binary_lowering_keeps_operation_and_matching_cardinality() {
         use asap_types::pre_asap::{
-            ArithmeticOpKind, BinaryOpKind, Column, DataType, GroupSide, QueryExpr, Schema, Source,
-            VectorGrouping, VectorMatch, VectorMatchKind,
+            ArithmeticOpKind, BinaryOpKind, Column, DataType, GroupSide, PreASAPNode, Schema,
+            Source, VectorGrouping, VectorMatch, VectorMatchKind,
         };
 
         let left_source = Source::TimeSeries { metric: "a".into() };
         let right_source = Source::TimeSeries { metric: "b".into() };
         let scan = |source| {
-            Rc::new(QueryExpr::Scan {
+            Rc::new(PreASAPNode::Scan {
                 source,
                 predicates: vec![],
                 schema: Schema::new(vec![Column::new("value", DataType::Float64, false)]),
             })
         };
-        let root = Rc::new(QueryExpr::BinaryOp {
+        let root = Rc::new(PreASAPNode::BinaryOp {
             op: BinaryOpKind::Arithmetic(ArithmeticOpKind::Div),
             lhs: scan(left_source.clone()),
             rhs: scan(right_source.clone()),
@@ -2540,29 +2540,29 @@ mod tests {
     #[test]
     fn promql_relabel_sample_and_per_series_lower_as_a_complete_chain() {
         use asap_types::pre_asap::{
-            AggIntent, Column, DataType, GroupKeys, QueryExpr, Reduction, SampleKind, ScalarValue,
-            Schema, Source,
+            AggIntent, Column, DataType, GroupKeys, PreASAPNode, Reduction, SampleKind,
+            ScalarValue, Schema, Source,
         };
 
         let source = Source::TimeSeries {
             metric: "requests".into(),
         };
-        let scan = Rc::new(QueryExpr::Scan {
+        let scan = Rc::new(PreASAPNode::Scan {
             source: source.clone(),
             predicates: vec![],
             schema: Schema::new(vec![Column::new("value", DataType::Float64, false)]),
         });
-        let relabel = Rc::new(QueryExpr::PromqlRelabel {
+        let relabel = Rc::new(PreASAPNode::PromqlRelabel {
             dst: "service".into(),
-            value: Rc::new(QueryExpr::Literal(ScalarValue::Utf8("api".into()))),
+            value: Rc::new(PreASAPNode::Literal(ScalarValue::Utf8("api".into()))),
             child: scan,
         });
-        let sample = Rc::new(QueryExpr::PromqlSeriesSample {
+        let sample = Rc::new(PreASAPNode::PromqlSeriesSample {
             by: GroupKeys::none(),
             kind: SampleKind::LimitK(5),
             child: relabel,
         });
-        let root = Rc::new(QueryExpr::Aggregate {
+        let root = Rc::new(PreASAPNode::Aggregate {
             reduction: Reduction::PerEntity,
             measures: vec![AggIntent::Sum { col: None }],
             output_names: vec![],

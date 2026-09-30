@@ -91,7 +91,7 @@ pub trait AccuracyEvidenceProvider {
     /// An observed cardinality is not an enforced population bound.
     fn estimator_contract(
         &self,
-        _expression: &asap_types::pre_asap::QueryExpr,
+        _expression: &asap_types::pre_asap::PreASAPNode,
     ) -> Option<EstimatorContract> {
         None
     }
@@ -101,7 +101,7 @@ pub trait AccuracyEvidenceProvider {
     /// selected candidates. Observed cardinality is not sufficient evidence.
     fn topk_max_distinct_items(
         &self,
-        _expression: &asap_types::pre_asap::QueryExpr,
+        _expression: &asap_types::pre_asap::PreASAPNode,
     ) -> Option<u64> {
         None
     }
@@ -110,7 +110,7 @@ pub trait AccuracyEvidenceProvider {
     /// filters, grouping and window. `None` means unknown, including emptiness.
     fn quantile_input_domain(
         &self,
-        _operand: &asap_types::pre_asap::query_expr::QueryExpr,
+        _operand: &asap_types::pre_asap::query_expr::PreASAPNode,
     ) -> Option<QuantileInputDomain> {
         None
     }

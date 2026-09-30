@@ -1,7 +1,7 @@
 //! Compile, persist and rebind dynamic-label computation without deployment lowering.
 use asap_physical_operators::{
     operators::Operator,
-    physical_planner::{promql_values::*, CompiledPhysicalDag, Source},
+    physical_planner::{promql_values::*, PhysicalDAG, Source},
     runtime::{Limits, RunContext, Scope},
     values::{Batch, Value},
 };
@@ -21,15 +21,15 @@ fn row(labels: &[(&str, &str)], value: f64) -> Vec<Value> {
         Value::Float64(value),
     ]
 }
-fn run(graph: CompiledPhysicalDag, rows: Vec<Vec<Value>>) -> Vec<Vec<Value>> {
+fn run(graph: PhysicalDAG, rows: Vec<Vec<Value>>) -> Vec<Vec<Value>> {
     run_inputs(graph, vec![Batch::try_new(vector_schema(), rows).unwrap()]).unwrap()
 }
 fn run_inputs(
-    graph: CompiledPhysicalDag,
+    graph: PhysicalDAG,
     batches: Vec<Batch>,
 ) -> Result<Vec<Vec<Value>>, asap_physical_operators::Error> {
-    let graph = serde_json::from_slice::<CompiledPhysicalDag>(&serde_json::to_vec(&graph).unwrap())
-        .unwrap();
+    let graph =
+        serde_json::from_slice::<PhysicalDAG>(&serde_json::to_vec(&graph).unwrap()).unwrap();
     let sources = batches
         .into_iter()
         .enumerate()
@@ -263,7 +263,7 @@ fn composed_ensemble_shares_a_producer_across_roots() {
         false,
     )
     .unwrap();
-    let graph = CompiledPhysicalDag::compose(
+    let graph = PhysicalDAG::compose(
         BTreeMap::from([(0, InputContract::bounded(vector_schema()))]),
         BTreeMap::from([
             (10, (vec![0], aggregate)),
@@ -273,8 +273,8 @@ fn composed_ensemble_shares_a_producer_across_roots() {
         vec![20, 30],
     )
     .unwrap();
-    let graph = serde_json::from_slice::<CompiledPhysicalDag>(&serde_json::to_vec(&graph).unwrap())
-        .unwrap();
+    let graph =
+        serde_json::from_slice::<PhysicalDAG>(&serde_json::to_vec(&graph).unwrap()).unwrap();
     assert_eq!(graph.input_contracts().count(), 1);
     let starts = std::rc::Rc::new(std::cell::Cell::new(0));
     for _ in 0..2 {

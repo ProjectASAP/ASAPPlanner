@@ -7,7 +7,7 @@ use super::sketch::{GroupingStrategy, SketchQuery, SummaryUpdate};
 use crate::pre_asap::agg_intent::AggIntent;
 use crate::pre_asap::query_expr::Predicate;
 use crate::pre_asap::{
-    BinaryOpKind, ColumnRef, GroupKeys, JoinKind, ProjectItem, QueryExpr, Reduction, SortKey,
+    BinaryOpKind, ColumnRef, GroupKeys, JoinKind, PreASAPNode, ProjectItem, Reduction, SortKey,
     VectorMatch,
 };
 
@@ -91,7 +91,7 @@ pub enum CandidateCompleteness {
 /// summary-state-typed columns (`SummaryFamilyType`'s non-`Plain` variants);
 /// the pre-ASAP `Schema` cannot.
 #[derive(Debug, Clone, PartialEq)]
-pub struct SummaryNode {
+pub struct PostASAPNode {
     pub expr: SummaryExpr,
     /// Output schema of `expr` — the schema of the data flowing on the edge
     /// leading *from* this node to its parent(s).
@@ -114,34 +114,34 @@ pub struct SummaryNode {
 
 /// Sketch-bound IR produced by post-ASAP binding and final selection. Binding
 /// rules selectively replace logical aggregates and joins in the pre-ASAP
-/// `QueryExpr` with summary-bound counterparts. Final selection can retain
+/// `PreASAPNode` with summary-bound counterparts. Final selection can retain
 /// supported read-time value operations around independently planned children;
-/// other unsupported subtrees pass through as `KeepPreAsap(Rc<QueryExpr>)`.
+/// other unsupported subtrees pass through as `KeepPreAsap(Rc<PreASAPNode>)`.
 ///
 /// Traversing from the root node yields a DAG; shared sub-expressions appear
-/// as multiple `Rc` references to the same `SummaryNode`.
+/// as multiple `Rc` references to the same `PostASAPNode`.
 #[derive(Debug, Clone, PartialEq)]
 pub enum SummaryExpr {
     /// A pre-ASAP subtree kept as-is because it has no selected implementation
     /// or supported residual decomposition. Output schema is the inner node's
     /// schema, lifted to `SummarySchema` with all fields as
     /// `SummaryFamilyType::Plain`.
-    KeepPreAsap(Rc<QueryExpr>),
+    KeepPreAsap(Rc<PreASAPNode>),
 
     /// A PromQL binary operation whose operands were planned independently.
     /// This keeps realizable summary/readout leaves visible instead of
     /// hiding the complete expression inside `KeepPreAsap`.
     BinaryOp {
         timing: ExecutionTiming,
-        lhs: Rc<SummaryNode>,
-        rhs: Rc<SummaryNode>,
+        lhs: Rc<PostASAPNode>,
+        rhs: Rc<PostASAPNode>,
         operator: BinaryOperator,
     },
 
     /// Plain-row semantics composed with a post-ASAP child. Timing is an
     /// independent physical choice, not part of the operation's identity.
     ValueOperation {
-        child: Rc<SummaryNode>,
+        child: Rc<PostASAPNode>,
         operation: ValueOperation,
         timing: super::execution_data_state::ExecutionTiming,
     },
@@ -150,8 +150,8 @@ pub enum SummaryExpr {
     /// distinct from [`SummaryJoin`](Self::SummaryJoin), which combines
     /// summary states for join estimation during maintenance.
     RelationalJoin {
-        left: Rc<SummaryNode>,
-        right: Rc<SummaryNode>,
+        left: Rc<PostASAPNode>,
+        right: Rc<PostASAPNode>,
         kind: JoinKind,
         pred: Predicate,
         /// Optional proof for candidate pruning; ranking remains a separate operation.
@@ -165,7 +165,7 @@ pub enum SummaryExpr {
     /// Output schema: grouping columns (verbatim) + one field carrying
     /// partial summary state per group, typed `family`.
     SummaryAgg {
-        child: Rc<SummaryNode>,
+        child: Rc<PostASAPNode>,
         /// Which summary family realizes this aggregation, and that
         /// family's own `(kind, params)`. Never `SummaryFamilyType::Plain`
         /// — this node always produces summary state, not a plain value.
@@ -206,8 +206,8 @@ pub enum SummaryExpr {
     /// Output schema: one field typed `family`, read by a downstream
     /// `SummaryEstimate`.
     SummaryJoin {
-        outer: Rc<SummaryNode>,
-        inner: Rc<SummaryNode>,
+        outer: Rc<PostASAPNode>,
+        inner: Rc<PostASAPNode>,
         key: ColumnRef,
         /// Never `SummaryFamilyType::Plain` — see [`SummaryAgg::family`](SummaryExpr::SummaryAgg).
         family: SummaryFamilyType,
@@ -218,15 +218,15 @@ pub enum SummaryExpr {
     /// `subtractable` must be true for the family.
     /// Output schema: one field (same family + params as inputs).
     SummarySubtract {
-        left: Rc<SummaryNode>,
-        right: Rc<SummaryNode>,
+        left: Rc<PostASAPNode>,
+        right: Rc<PostASAPNode>,
     },
 
     /// Delete a key from a summary (CMS update with −1, deletable Bloom
     /// filter). Catalog flag `deletable` must be true. Output schema =
     /// input schema unchanged in type (same field type as input).
     SummaryDelete {
-        summary_input: Rc<SummaryNode>,
+        summary_input: Rc<PostASAPNode>,
         key: ColumnRef,
     },
 
@@ -235,7 +235,7 @@ pub enum SummaryExpr {
     /// schema is a regular row-shaped schema (Float64 for quantile, Int64
     /// for count/cardinality, `[(key, count)]` for top-k).
     SummaryEstimate {
-        summary_input: Rc<SummaryNode>,
+        summary_input: Rc<PostASAPNode>,
         query: SketchQuery,
     },
 
@@ -246,7 +246,7 @@ pub enum SummaryExpr {
     /// allocator (not modeled in this crate) on cut edges.
     /// Output schema: one field (same family + params as inputs).
     SummaryMerge {
-        children: Vec<Rc<SummaryNode>>,
+        children: Vec<Rc<PostASAPNode>>,
         timing: ExecutionTiming,
     },
 }

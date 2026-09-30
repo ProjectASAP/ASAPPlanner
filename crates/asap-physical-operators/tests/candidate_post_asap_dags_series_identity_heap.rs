@@ -13,7 +13,7 @@ use asap_physical_operators::physical_planner::promql_rows::{
 };
 use planner_types::{
     post_asap::*,
-    pre_asap::QueryExpr,
+    pre_asap::PreASAPNode,
     types::AccuracyTarget,
     workload::{
         AccuracyRequirement, BatchEntry, DataWorkload, DurationMs, Evidence as WorkloadEvidence,
@@ -25,7 +25,7 @@ use std::rc::Rc;
 
 struct Evidence;
 impl AccuracyEvidenceProvider for Evidence {
-    fn topk_max_distinct_items(&self, _: &QueryExpr) -> Option<u64> {
+    fn topk_max_distinct_items(&self, _: &PreASAPNode) -> Option<u64> {
         Some(1000)
     }
     fn propagation_stats(
@@ -64,7 +64,7 @@ impl ReplacementStrategy for LogicalOnly {
     }
 }
 
-fn lower(query: &str, accuracy: &AccuracyTarget) -> Rc<QueryExpr> {
+fn lower(query: &str, accuracy: &AccuracyTarget) -> Rc<PreASAPNode> {
     let workload = PlanningWorkload {
         query_workload: QueryWorkload {
             language: QueryLanguage::PromQL,
@@ -96,7 +96,7 @@ fn lower(query: &str, accuracy: &AccuracyTarget) -> Rc<QueryExpr> {
     )
 }
 
-type Dag = Vec<(usize, Rc<SummaryNode>)>;
+type Dag = Vec<(usize, Rc<PostASAPNode>)>;
 
 /// Candidate DAGs for query 1 of a two-query workload, with and without
 /// whole-root proposals. Query 0 is a bystander that must not multiply them.
@@ -140,7 +140,7 @@ fn carries_identity(dag: &Dag) -> bool {
 }
 
 /// Shared acceptance checks; returns the added identity-carrying alternatives.
-fn added_alternatives(query: &str, accuracy: AccuracyTarget) -> Vec<Rc<SummaryNode>> {
+fn added_alternatives(query: &str, accuracy: AccuracyTarget) -> Vec<Rc<PostASAPNode>> {
     let (full, logical) = inventories(query, accuracy);
     for (index, dag) in full.iter().enumerate() {
         assert_eq!(dag.len(), 1, "one root per candidate, no workload product");

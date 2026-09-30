@@ -9,8 +9,8 @@ use asap_aware_mapping::{Replacement, ReplacementStrategy, SketchAlgorithmStrate
 mod support;
 use asap_types::post_asap::{
     compile_post_asap_dag, cse::share_common_summary_subtrees, AccuracyError, BoundExpr,
-    CompositionOperator, ErrorMetric, ProbabilityExpr, ResultGuarantee, SketchAlgorithm,
-    SketchQuery, SummaryExpr, SummaryFamilyType, SummaryInputExpr, SummaryNode,
+    CompositionOperator, ErrorMetric, PostASAPNode, ProbabilityExpr, ResultGuarantee,
+    SketchAlgorithm, SketchQuery, SummaryExpr, SummaryFamilyType, SummaryInputExpr,
 };
 use asap_types::types::AccuracyTarget;
 use support::lower_promql;
@@ -49,7 +49,7 @@ impl AccuracyModel for TestEvidence {
     }
 }
 
-fn candidate(query: &str, accuracy: AccuracyTarget) -> Rc<SummaryNode> {
+fn candidate(query: &str, accuracy: AccuracyTarget) -> Rc<PostASAPNode> {
     let root = lower_promql(query, accuracy).unwrap();
     SketchAlgorithmStrategy::new_with_planning_inputs(&DefaultCostModel, &TestEvidence, &EqualSplitAllocator)
         .replacements(&TargetSubDAG::new(&Rc::new(root)))

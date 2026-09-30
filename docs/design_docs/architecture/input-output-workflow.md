@@ -31,7 +31,7 @@ fields and [frontend dependencies](#frontend-specific-dependencies).
 | Output | Fields or contents | Meaning |
 |---|---|---|
 | `CandidatePostASAPDAGs` | All legal logical candidates for the workload, represented compactly as canonical roots, one candidate set per target sub-DAG, and cross-target composition information | The candidate space: nothing is selected yet |
-| `PlanOutput` | One selected PostASAPDAG root (`Rc<SummaryNode>`) per workload entry, optionally with summary-maintenance lifecycle decisions | One optimization pass's selection, returned by `e2e_plan` and `optimize` |
+| `PlanOutput` | One selected PostASAPDAG root (`Rc<PostASAPNode>`) per workload entry, optionally with summary-maintenance lifecycle decisions | One optimization pass's selection, returned by `e2e_plan` and `optimize` |
 
 `PlanOutput` is selected from the candidate space, not a second output beside
 it. [Output layers](#output-layers) places both in the `PreASAPDAG` →
@@ -227,7 +227,7 @@ fields expand as follows:
 | `TimeSelection` | `lookback` | Optional event-time duration selected before the upper bound. |
 | `TimeSelection` | `as_of` | Optional fixed upper-bound timestamp; `None` means planning/evaluation time. |
 
-Frontend lowering produces one Pre-ASAP `QueryExpr` root for each normalized
+Frontend lowering produces one Pre-ASAP `PreASAPNode` root for each normalized
 query entry. The caller must retain each root's association with its workload
 entry for later recurrence and lifecycle planning.
 
@@ -352,7 +352,7 @@ assembly connects choices after selection and does not replace this candidate
 interface.
 
 Here, a **root** is the top-level node of a workload query's `PreASAPDAG`
-(currently `Rc<QueryExpr>`). A
+(currently `Rc<PreASAPNode>`). A
 **target** is any discovered sub-DAG that may be replaced, including roots.
 For `count(up) + 1`, the addition is a root and `count(up)` can be an inner
 target. `TargetSubDAGCandidates` holds the candidates for one such target.
@@ -380,9 +380,9 @@ The [Planner and deployment layering](../proposals/planner-backend-layering.md)
 proposal describes the full contract, including deployment costs and mixed
 placement.
 
-The design names are `PreASAPDAG` (currently rooted at `Rc<QueryExpr>`),
-`PostASAPDAG` (currently rooted at `Rc<SummaryNode>`, exported as
-`PostAsapDag`), and `PhysicalDAG` (currently `CompiledPhysicalDag`). These
+The design names are `PreASAPDAG` (currently rooted at `Rc<PreASAPNode>`),
+`PostASAPDAG` (currently rooted at `Rc<PostASAPNode>`, exported as
+`PostASAPDAGTransport`), and `PhysicalDAG` (currently `PhysicalDAG`). These
 names do not imply that the Rust APIs have been renamed.
 
 | Layer | Form | Decides |
@@ -403,9 +403,9 @@ A deployment that prices candidates itself, such as ASAPQuery-backend, must
 enumerate the candidate collection, not read `PlanOutput`; otherwise candidates
 such as those added in #472 never reach its pricing.
 
-`PostAsapDag` exports the logical `PostASAPDAG` for physical compilation; it
+`PostASAPDAGTransport` exports the logical `PostASAPDAG` for physical compilation; it
 is not the compiled `PhysicalDAG`. `PlanOutput` carries logical graphs in the
-current `SummaryNode` representation. Its `DagWithLifecycle` variant is the
+current `PostASAPNode` representation. Its `DagWithLifecycle` variant is the
 library path doing layer 2 as well, under the
 caller's cost model; a pricing deployment makes that lifecycle choice itself.
 Both forms are described in
@@ -416,7 +416,7 @@ Placement does not belong to logical candidate generation. The grouped `Rate`→
 choice; #485 replaces it with one candidate placed by lifecycle choice.
 
 Cross-query sharing is expressed by common-subexpression elimination in the
-logical layer and by explicit node identity in a multi-root `PostAsapDag` at
+logical layer and by explicit node identity in a multi-root `PostASAPDAGTransport` at
 physical compilation. The per-query `Vec` in `PlanOutput` is not the sharing
 contract.
 
@@ -455,7 +455,7 @@ The return type is `Vec<RankedTargetSubDAGCandidates<'_>>`; each element has thi
 
 ```rust
 struct RankedTargetSubDAGCandidates<'a> {
-    target: &'a Rc<QueryExpr>,
+    target: &'a Rc<PreASAPNode>,
     consumer_count: usize,
     candidates: Vec<&'a ReplacementSubDAG>,
     costs: Vec<f64>, // costs[i] describes candidates[i]
@@ -495,7 +495,7 @@ the result for one query root.
 | **Output:** one selected logical [PostASAPDAG](../concepts/post-asap-ir.md) per query root |
 
 Each output DAG specifies the chosen operators, parameters, and accuracy
-guarantees. Its root is represented by `Rc<SummaryNode>`; the
+guarantees. Its root is represented by `Rc<PostASAPNode>`; the
 [API reference](../../develop_docs/library-api.md#api-definition-and-example)
 describes the function signatures and return handling.
 
@@ -554,7 +554,7 @@ facts remain unknown rather than being treated as zero.
 The per-query output, `SummaryMaintenanceLifecyclePlan`, **contains** the
 PostASAPDAG rather than being a parallel representation. It records:
 
-* the assembled PostASAPDAG root (`Rc<SummaryNode>`);
+* the assembled PostASAPDAG root (`Rc<PostASAPNode>`);
 * lifecycle choices for summary state;
 * planning horizon and expected reads/updates;
 * selected window implementation and guarantees;

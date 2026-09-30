@@ -18,8 +18,9 @@ use asap_physical_operators::{
     AggregateCore, KeyByLabelValues, Statistic,
 };
 use asap_types::post_asap::{
-    compile_post_asap_dag, EntityIdentity, ExactKind, PostAsapDag, PostAsapOperatorPayload,
-    SketchAlgorithm, SketchQuery, SummaryFamilyType, SummaryInputExpr, SummaryNode, SummaryUpdate,
+    compile_post_asap_dag, EntityIdentity, ExactKind, PostASAPDAGTransport, PostASAPNode,
+    PostAsapOperatorPayload, SketchAlgorithm, SketchQuery, SummaryFamilyType, SummaryInputExpr,
+    SummaryUpdate,
 };
 use asap_types::pre_asap::{expr_ir::ColumnRef, query_expr::Reduction};
 use asap_types::types::AccuracyTarget;
@@ -50,7 +51,7 @@ fn canonical(labels: &Series) -> Series {
 
 /// Every Planner candidate for `query`: the searched selection plus each
 /// summary replacement of the root.
-fn candidates(query: &str, accuracy: AccuracyTarget) -> Vec<Rc<SummaryNode>> {
+fn candidates(query: &str, accuracy: AccuracyTarget) -> Vec<Rc<PostASAPNode>> {
     let root = Rc::new(lower_promql(query, accuracy).expect("lowering failed"));
     let mut result = SketchAlgorithmStrategy::default_cost_model()
         .replacements(&TargetSubDAG::new(&root))
@@ -74,7 +75,7 @@ fn candidates(query: &str, accuracy: AccuracyTarget) -> Vec<Rc<SummaryNode>> {
 }
 
 /// Raw-input summary nodes: `(dag, raw source id, summary id)`.
-fn raw_summaries(dag: &PostAsapDag) -> Vec<(u64, u64)> {
+fn raw_summaries(dag: &PostASAPDAGTransport) -> Vec<(u64, u64)> {
     dag.nodes
         .iter()
         .filter(|node| matches!(node.payload, PostAsapOperatorPayload::SummaryAgg { .. }))
@@ -113,7 +114,7 @@ fn samples() -> Vec<(Series, i64, f64)> {
 }
 
 fn execute(
-    dag: &PostAsapDag,
+    dag: &PostASAPDAGTransport,
     source: u64,
     root: u64,
     rows: &[(Series, i64, f64)],
@@ -127,9 +128,9 @@ fn execute(
                 .map(|n| (&n.output_schema, &n.payload))
         );
     });
-    let program = serde_json::from_slice::<
-        asap_physical_operators::physical_planner::CompiledPhysicalDag,
-    >(&serde_json::to_vec(&program).unwrap())
+    let program = serde_json::from_slice::<asap_physical_operators::physical_planner::PhysicalDAG>(
+        &serde_json::to_vec(&program).unwrap(),
+    )
     .unwrap();
     let schema = precompute::raw_sample_schema();
     let batch = Batch::try_new(
@@ -273,7 +274,7 @@ fn readouts(state: &dyn AggregateCore, family: &SummaryFamilyType) -> Vec<f64> {
 /// or the family when it has no native state.
 fn check(
     query: &str,
-    dag: &PostAsapDag,
+    dag: &PostASAPDAGTransport,
     source: u64,
     root: u64,
     rows: &[(Series, i64, f64)],
@@ -454,7 +455,10 @@ fn raw_sample_summaries_compile_and_match_their_kernels() {
 
 /// Replace the raw summary of `sum by (service) (sum_over_time(m[5m]))` with
 /// another update, keeping its raw input and reduction.
-fn grouped_raw_summary(family: SummaryFamilyType, input: SummaryUpdate) -> (PostAsapDag, u64, u64) {
+fn grouped_raw_summary(
+    family: SummaryFamilyType,
+    input: SummaryUpdate,
+) -> (PostASAPDAGTransport, u64, u64) {
     let candidate = candidates(
         "sum by (service) (sum_over_time(m[5m]))",
         AccuracyTarget::Exact,

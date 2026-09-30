@@ -1,14 +1,14 @@
 //! PromQL string → the canonical, unresolved
-//! [`UnresolvedQueryExpr`](asap_types::pre_asap::query_expr::UnresolvedQueryExpr)
-//! (`QueryExpr<ColumnRef>`).
+//! [`UnresolvedPreASAPNode`](asap_types::pre_asap::query_expr::UnresolvedPreASAPNode)
+//! (`PreASAPNode<ColumnRef>`).
 //!
 //! - **Parsing** is delegated to `promql-parser` 0.8.
 //! - **Lowering** builds *directly in canonical shape* here (issue #179): the
 //!   walk interprets PromQL semantics (range vectors, aggregate operators,
-//!   label matchers) and emits `UnresolvedQueryExpr` nodes with unresolved
+//!   label matchers) and emits `UnresolvedPreASAPNode` nodes with unresolved
 //!   `ColumnRef`s — the same tree shape
 //!   [`resolve_root`](asap_types::pre_asap::resolve_root) later binds to
-//!   canonical, positional `QueryExpr<ColumnId>`. The structural decisions a
+//!   canonical, positional `PreASAPNode<ColumnId>`. The structural decisions a
 //!   separate converter stage would otherwise have to make (heavy-hitter
 //!   `topk` recognition, the `PerEntity`/`Reduce` reduction choice,
 //!   `without(...)` grouping) are made right here, since a front end
@@ -67,7 +67,7 @@ use promql_parser::parser::{
 use asap_types::pre_asap::agg_intent::{topk, AggIntent, MathFunc, TimeFunc};
 use asap_types::pre_asap::query_expr::{
     AtModifier, BinaryOpKind, GroupKeys, GroupSide, Predicate, PromQLVectorSetOpKind, Reduction,
-    SortKey, Source, TimeShift, UnresolvedQueryExpr as Unresolved, VectorGrouping, VectorMatch,
+    SortKey, Source, TimeShift, UnresolvedPreASAPNode as Unresolved, VectorGrouping, VectorMatch,
     VectorMatchKind,
 };
 use asap_types::pre_asap::{
@@ -576,7 +576,7 @@ fn outer_kind(agg: &AggregateExpr) -> Result<Outer> {
 /// build this node) decides `PerEntity` vs `Reduce(by)` *without* knowing
 /// about `without` yet — it only ever sees `by`-mode keys, since `without`'s
 /// excluded-labels list is applied here, after the fact, exactly like the
-/// pre-#179 legacy `relational::QueryExpr` tree's own `mark_without` did (its
+/// pre-#179 legacy `relational::PreASAPNode` tree's own `mark_without` did (its
 /// converter read `without` only after this front-end step had already set
 /// it). Whether
 /// `reduction_for` picked `PerEntity` (only possible when `keys` was empty)

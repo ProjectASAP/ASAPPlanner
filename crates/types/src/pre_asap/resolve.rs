@@ -1,21 +1,21 @@
-//! Resolve a front-end-emitted, unresolved [`UnresolvedQueryExpr`] (`QueryExpr<ColumnRef>`)
-//! into the canonical, positional [`ResolvedQueryExpr`] (`QueryExpr<ColumnId>`).
+//! Resolve a front-end-emitted, unresolved [`UnresolvedPreASAPNode`] (`PreASAPNode<ColumnRef>`)
+//! into the canonical, positional [`ResolvedPreASAPNode`] (`PreASAPNode<ColumnId>`).
 //!
 //! Both front ends (`asap-frontend-promql`, `asap-frontend-sql`) construct
-//! canonical `QueryExpr` shapes directly during their own `interpret` step
+//! canonical `PreASAPNode` shapes directly during their own `interpret` step
 //! (issue #179) — heavy-hitter `topk` recognition, the window-over-aggregate
 //! fold, the `PerEntity`/`Reduce` reduction choice, and every other
 //! *structural* decision happen right there, since a front end already knows
 //! the answer at parse time. What's left for [`resolve_root`] is exactly the
 //! "mechanical, schema-dependent substitution" #179 describes: a single
-//! generic, shape-preserving walk — every [`UnresolvedQueryExpr`] variant maps to the
-//! identical [`ResolvedQueryExpr`] variant — that resolves every [`ColumnRef`] to
+//! generic, shape-preserving walk — every [`UnresolvedPreASAPNode`] variant maps to the
+//! identical [`ResolvedPreASAPNode`] variant — that resolves every [`ColumnRef`] to
 //! the [`SchemaResolver`](super::schema_resolver::SchemaResolver)-computed positional [`ColumnId`].
 //!
 //! ## Why positional `ColumnId`, not just carrying names all the way through (issue #216)
 //!
 //! A mature query engine can legitimately choose either design — DataFusion's
-//! own logical plan (what `asap-frontend-sql` walks to build its `QueryExpr`)
+//! own logical plan (what `asap-frontend-sql` walks to build its `PreASAPNode`)
 //! and Calcite both keep names, with an optional table qualifier, all the way
 //! through logical optimization, only going positional once they lower to a
 //! physical plan. Resolving once, immediately after each front end's own
@@ -58,13 +58,13 @@ use super::column_resolution::{
 };
 use super::expr_ir::ColumnRef;
 use super::query_expr::{
-    aggregate_output_schema, ConcatDiscriminatorKey, GroupKeys, Predicate, ProjectItem,
-    QueryExprError, Reduction, ResolvedQueryExpr, SortKey, UnresolvedQueryExpr,
+    aggregate_output_schema, ConcatDiscriminatorKey, GroupKeys, PreASAPNodeError, Predicate,
+    ProjectItem, Reduction, ResolvedPreASAPNode, SortKey, UnresolvedPreASAPNode,
 };
 use super::schema::{ColumnId, Schema};
 use super::schema_resolver::SchemaResolver;
 
-/// Errors from resolving a canonical, unresolved [`UnresolvedQueryExpr`] tree.
+/// Errors from resolving a canonical, unresolved [`UnresolvedPreASAPNode`] tree.
 #[derive(Debug, Error)]
 pub enum ResolveTreeError {
     /// A column reference did not resolve against its in-scope schema.
@@ -73,23 +73,23 @@ pub enum ResolveTreeError {
     /// Deriving the schema of an already-resolved child failed (needed to
     /// resolve positional column references against it).
     #[error("schema derivation failed: {0}")]
-    Schema(#[from] QueryExprError),
+    Schema(#[from] PreASAPNodeError),
 }
 
-/// Resolve a whole [`UnresolvedQueryExpr`] tree rooted at `tree` into canonical
-/// [`ResolvedQueryExpr`]: binds every `ColumnRef` to a `ColumnId` via the
+/// Resolve a whole [`UnresolvedPreASAPNode`] tree rooted at `tree` into canonical
+/// [`ResolvedPreASAPNode`]: binds every `ColumnRef` to a `ColumnId` via the
 /// [`SchemaResolver`], then [`canonicalize`](super::canonicalize::canonicalize)s the
 /// result.
-pub fn resolve_root(tree: &UnresolvedQueryExpr) -> Result<ResolvedQueryExpr, ResolveTreeError> {
+pub fn resolve_root(tree: &UnresolvedPreASAPNode) -> Result<ResolvedPreASAPNode, ResolveTreeError> {
     resolve_root_with_inherited(tree, &[])
 }
 
 /// [`resolve_root`] with label names inherited from an enclosing scope seeded
 /// into the leaf schema, used when re-binding a `BinaryOp` side (issue #52).
 fn resolve_root_with_inherited(
-    tree: &UnresolvedQueryExpr,
+    tree: &UnresolvedPreASAPNode,
     inherited: &[String],
-) -> Result<ResolvedQueryExpr, ResolveTreeError> {
+) -> Result<ResolvedPreASAPNode, ResolveTreeError> {
     let fallback = SchemaResolver::new().resolve_schema_with_inherited(tree, inherited);
     let l3 = resolve(tree, &fallback)?;
     Ok(super::canonicalize::canonicalize(l3))
@@ -100,10 +100,10 @@ fn resolve_root_with_inherited(
 /// derived output schema — so a `JOIN`'s concatenated schema and a cross-
 /// series aggregate's frozen-closed output bind to the right positions.
 fn resolve(
-    tree: &UnresolvedQueryExpr,
+    tree: &UnresolvedPreASAPNode,
     fallback: &Schema,
-) -> Result<ResolvedQueryExpr, ResolveTreeError> {
-    use super::query_expr::QueryExpr as QE;
+) -> Result<ResolvedPreASAPNode, ResolveTreeError> {
+    use super::query_expr::PreASAPNode as QE;
     Ok(match tree {
         QE::Scan {
             source,
@@ -263,7 +263,7 @@ fn resolve(
                 .map(|key| -> Result<_, ResolveTreeError> {
                     let schema = children
                         .first()
-                        .ok_or(QueryExprError::EmptyConcat)?
+                        .ok_or(PreASAPNodeError::EmptyConcat)?
                         .output_schema()?;
                     Ok(ConcatDiscriminatorKey::new(
                         resolve_column_ref(key.discriminator(), &schema)?,
@@ -438,7 +438,7 @@ fn resolve(
         | QE::FunctionCall { .. }
         | QE::Arithmetic { .. }
         | QE::Case { .. }) => {
-            unreachable!("resolve reached a scalar QueryExpr variant directly: {other:?}")
+            unreachable!("resolve reached a scalar PreASAPNode variant directly: {other:?}")
         }
     })
 }
@@ -616,7 +616,7 @@ mod tests {
     use super::*;
     use crate::pre_asap::expr_ir::CompareOpKind;
     use crate::pre_asap::query_expr::{
-        BinaryOpKind, QueryExpr, Source, VectorMatch, VectorMatchKind,
+        BinaryOpKind, PreASAPNode, Source, VectorMatch, VectorMatchKind,
     };
 
     // Both sides resolve with qualifiers; an unknown right input is an error.
@@ -699,21 +699,21 @@ mod tests {
             labels: vec!["job".into()],
             grouping: None,
         };
-        let unresolved: UnresolvedQueryExpr = QueryExpr::BinaryOp {
+        let unresolved: UnresolvedPreASAPNode = PreASAPNode::BinaryOp {
             op: BinaryOpKind::Compare(CompareOpKind::Gt),
-            lhs: Rc::new(UnresolvedQueryExpr::Scan {
+            lhs: Rc::new(UnresolvedPreASAPNode::Scan {
                 source: Source::TimeSeries {
                     metric: "up".into(),
                 },
                 predicates: vec![],
                 schema: None,
             }),
-            rhs: Rc::new(UnresolvedQueryExpr::promql_scalar(1.0)),
+            rhs: Rc::new(UnresolvedPreASAPNode::promql_scalar(1.0)),
             vector_match: Some(vm.clone()),
         };
 
         let resolved = resolve_root(&unresolved).expect("resolves");
-        let QueryExpr::BinaryOp {
+        let PreASAPNode::BinaryOp {
             lhs,
             rhs,
             vector_match,
@@ -722,7 +722,7 @@ mod tests {
         else {
             panic!("expected a resolved BinaryOp, got {resolved:?}");
         };
-        assert!(matches!(lhs.as_ref(), QueryExpr::Scan { .. }));
+        assert!(matches!(lhs.as_ref(), PreASAPNode::Scan { .. }));
         assert_eq!(rhs.as_promql_scalar(), Some(1.0));
         assert_eq!(vector_match.as_ref(), Some(&vm));
 
@@ -744,19 +744,19 @@ mod tests {
     /// the branch's own (usage-derived) schema.
     #[test]
     fn resolve_root_seeds_and_resolves_an_otherwise_unreferenced_discriminator_column() {
-        let branch = || UnresolvedQueryExpr::Scan {
+        let branch = || UnresolvedPreASAPNode::Scan {
             source: Source::TimeSeries { metric: "m".into() },
             predicates: vec![],
             schema: None,
         };
-        let unresolved = UnresolvedQueryExpr::concat_with_discriminator(
+        let unresolved = UnresolvedPreASAPNode::concat_with_discriminator(
             vec![branch(), branch()],
             ColumnRef::Named("phi".into()),
             vec![ColumnRef::Named("host".into())],
         );
 
         let resolved = resolve_root(&unresolved).expect("resolves");
-        let QueryExpr::Concat {
+        let PreASAPNode::Concat {
             children,
             discriminator_unique_key,
         } = &resolved

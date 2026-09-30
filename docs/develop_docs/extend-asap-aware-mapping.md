@@ -257,7 +257,7 @@ flowchart LR
   A["Input TargetSubDAG<br/>root is a supported Aggregate"] --> B["SketchAlgorithmStrategy::matches<br/>check whether the target shape can produce summaries"]
   B -->|"true"| C["SketchAlgorithmStrategy::replacements<br/>use CostModel preferences and sizing while preserving<br/>every semantically valid realization"]
   B -->|"false"| NONE["Empty candidate list"]
-  C --> F["Output Vec&lt;ReplacementSubDAG&gt;<br/>each entry contains a constructed SummaryNode and rationale;<br/>all candidates retained in preferred order"]
+  C --> F["Output Vec&lt;ReplacementSubDAG&gt;<br/>each entry contains a constructed PostASAPNode and rationale;<br/>all candidates retained in preferred order"]
 ```
 
 For an approximate quantile, both KLL and DDSketch remain candidates when
@@ -277,7 +277,7 @@ let candidates = strategy.replacements(&target);
 for candidate in candidates {
     match candidate.replacement {
         Replacement::Summary(summary) => {
-            // Inspect or execute this constructed SummaryNode.
+            // Inspect or execute this constructed PostASAPNode.
         }
         Replacement::Rewrite(_) => unreachable!(
             "SketchAlgorithmStrategy produces summary candidates"
@@ -310,7 +310,7 @@ and returns two alternatives:
 2. Build independently for each consumer.
 ```
 
-The shared candidate reuses the same `Rc<QueryExpr>`:
+The shared candidate reuses the same `Rc<PreASAPNode>`:
 
 ```rust
 Replacement::Rewrite(Rc::clone(target.root))
@@ -778,7 +778,7 @@ Therefore, when adding a new built-in sketch algorithm, the intended flow is:
 flowchart LR
   MAP["1. Declare legality<br/>add the algorithm to summary_candidates<br/>for each AggIntent it can answer"]
   MAP --> MODEL["2. Define costing<br/>rank it, derive its SketchParams,<br/>and provide a comparable numeric cost"]
-  MODEL --> BUILD["3. Define realization behavior<br/>ensure the public strategy output contains a valid SummaryNode<br/>with the correct maintained state and readout"]
+  MODEL --> BUILD["3. Define realization behavior<br/>ensure the public strategy output contains a valid PostASAPNode<br/>with the correct maintained state and readout"]
   BUILD --> ACC["4. Certify accuracy<br/>derive from committed parameters;<br/>propagate and check the final target"]
   ACC --> ENUM["5. Verify integration<br/>SketchAlgorithmStrategy includes it automatically;<br/>tests confirm enumeration, ordering, sizing, and cost"]
 ```
@@ -895,7 +895,7 @@ silently disagree.
 
 ### Mistake: reimplementing summary construction inside a strategy
 
-If the candidate should produce a normal `SummaryNode`, use the existing
+If the candidate should produce a normal `PostASAPNode`, use the existing
 summary-construction path.
 
 A strategy should steer or wrap that path when necessary, not recreate schema derivation, column resolution, readout construction, or parameter sizing.
@@ -922,7 +922,7 @@ Workload-wide target discovery, deduplication, and consumer counting are separat
 
 For CSE-style decisions, pointer identity can encode actual sharing.
 
-Two `Rc<QueryExpr>` values can be structurally equal but deliberately represent independent computation.
+Two `Rc<PreASAPNode>` values can be structurally equal but deliberately represent independent computation.
 
 Use the distinction intentionally.
 

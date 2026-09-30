@@ -27,22 +27,22 @@ use asap_integration_tests::fixtures::lower_promql;
 use asap_types::dag_export;
 use asap_types::post_asap::{
     validate_execution_data_states, ExactKind, ExactOperation, ExecutionDataState, ExecutionTiming,
-    SketchAlgorithm, SummaryExpr, SummaryFamilyType, SummaryNode, SummaryUpdate,
+    PostASAPNode, SketchAlgorithm, SummaryExpr, SummaryFamilyType, SummaryUpdate,
 };
 use asap_types::pre_asap::agg_intent::{default_quantile, AggIntent};
-use asap_types::pre_asap::query_expr::{QueryExpr, Reduction, Source};
+use asap_types::pre_asap::query_expr::{PreASAPNode, Reduction, Source};
 use asap_types::pre_asap::schema::{Column, DataType, Schema};
 use asap_types::types::AccuracyTarget;
 
 // ── fixtures ────────────────────────────────────────────────────────────
 
-fn metric_scan(labels: &[&str]) -> QueryExpr {
+fn metric_scan(labels: &[&str]) -> PreASAPNode {
     let mut columns = vec![
         Column::new("ts", DataType::Timestamp, false),
         Column::new("value", DataType::Float64, false),
     ];
     columns.extend(labels.iter().map(|n| Column::new(*n, DataType::Utf8, true)));
-    QueryExpr::Scan {
+    PreASAPNode::Scan {
         source: Source::TimeSeries {
             metric: "latency".into(),
         },
@@ -51,8 +51,8 @@ fn metric_scan(labels: &[&str]) -> QueryExpr {
     }
 }
 
-fn agg(by: Vec<usize>, intent: AggIntent, child: Rc<QueryExpr>) -> Rc<QueryExpr> {
-    Rc::new(QueryExpr::Aggregate {
+fn agg(by: Vec<usize>, intent: AggIntent, child: Rc<PreASAPNode>) -> Rc<PreASAPNode> {
+    Rc::new(PreASAPNode::Aggregate {
         reduction: Reduction::by(by),
         measures: vec![intent],
         output_names: vec![],
@@ -61,8 +61,8 @@ fn agg(by: Vec<usize>, intent: AggIntent, child: Rc<QueryExpr>) -> Rc<QueryExpr>
     })
 }
 
-fn per_entity(intent: AggIntent, child: Rc<QueryExpr>) -> Rc<QueryExpr> {
-    Rc::new(QueryExpr::Aggregate {
+fn per_entity(intent: AggIntent, child: Rc<PreASAPNode>) -> Rc<PreASAPNode> {
+    Rc::new(PreASAPNode::Aggregate {
         reduction: Reduction::PerEntity,
         measures: vec![intent],
         output_names: vec![],
@@ -72,7 +72,7 @@ fn per_entity(intent: AggIntent, child: Rc<QueryExpr>) -> Rc<QueryExpr> {
 }
 
 /// `quantile by (zone, host) (latency)` — the fine-grained inner summary.
-fn fine_quantile() -> Rc<QueryExpr> {
+fn fine_quantile() -> Rc<PreASAPNode> {
     agg(
         vec![2, 3],
         default_quantile(0.99),
@@ -272,20 +272,20 @@ fn unknown_runtime_capability_keeps_candidate_but_prevents_selection() {
 }
 
 fn plan(
-    roots: Vec<(&'static str, Rc<QueryExpr>)>,
+    roots: Vec<(&'static str, Rc<PreASAPNode>)>,
     cost_model: &dyn CostModel,
 ) -> asap_aware_mapping::CandidatePostASAPDAGs<&'static str> {
     search_workload_with(roots, &default_strategies_with(cost_model))
 }
 
-fn is_plain(node: &SummaryNode) -> bool {
+fn is_plain(node: &PostASAPNode) -> bool {
     node.schema
         .fields
         .iter()
         .all(|f| matches!(f.dtype, SummaryFamilyType::Plain(_)))
 }
 
-fn names(node: &SummaryNode) -> Vec<&str> {
+fn names(node: &PostASAPNode) -> Vec<&str> {
     node.schema.fields.iter().map(|f| f.name.as_str()).collect()
 }
 
@@ -294,7 +294,7 @@ fn names(node: &SummaryNode) -> Vec<&str> {
 #[test]
 fn every_exact_accumulator_is_finalized_before_an_outer_sketch() {
     use std::time::Duration;
-    let cases: Vec<(Rc<QueryExpr>, ExactKind)> = vec![
+    let cases: Vec<(Rc<PreASAPNode>, ExactKind)> = vec![
         (
             agg(
                 vec![2],
@@ -332,7 +332,7 @@ fn every_exact_accumulator_is_finalized_before_an_outer_sketch() {
         (
             per_entity(
                 AggIntent::Rate,
-                Rc::new(QueryExpr::TimeRange {
+                Rc::new(PreASAPNode::TimeRange {
                     range: Duration::from_secs(300),
                     child: Rc::new(metric_scan(&["zone"])),
                 }),
@@ -342,7 +342,7 @@ fn every_exact_accumulator_is_finalized_before_an_outer_sketch() {
         (
             per_entity(
                 AggIntent::Increase,
-                Rc::new(QueryExpr::TimeRange {
+                Rc::new(PreASAPNode::TimeRange {
                     range: Duration::from_secs(300),
                     child: Rc::new(metric_scan(&["zone"])),
                 }),
@@ -396,7 +396,7 @@ fn max_and_avg_over_quantile_compose_at_query_time_with_statistics() {
         let root = agg(vec![0], intent.clone(), fine_quantile());
         let space = plan(vec![("q", Rc::clone(&root))], &StatsModel);
         let root = Rc::clone(&space.roots[0].1);
-        let QueryExpr::Aggregate { child: inner, .. } = root.as_ref() else {
+        let PreASAPNode::Aggregate { child: inner, .. } = root.as_ref() else {
             unreachable!()
         };
 
@@ -537,7 +537,7 @@ fn identity_and_genuine_multi_row_folds_both_compose() {
 /// One inner quantile consumed by two outer folds in two queries: CSE
 /// collapses the inner target onto one `Rc`, both compositions commit to
 /// the *same* child candidate, and both materializations share one
-/// `Rc<SummaryNode>` for it — the summary is maintained once.
+/// `Rc<PostASAPNode>` for it — the summary is maintained once.
 #[test]
 fn a_shared_inner_summary_is_materialized_once_for_several_outer_folds() {
     let max = agg(vec![0], AggIntent::Max { col: None }, fine_quantile());
@@ -545,9 +545,9 @@ fn a_shared_inner_summary_is_materialized_once_for_several_outer_folds() {
     let space = plan(vec![("max", max), ("min", min)], &StatsModel);
     let selection = space.global_selection(&StatsModel);
 
-    let roots: Vec<Rc<QueryExpr>> = space.roots.iter().map(|(_, r)| Rc::clone(r)).collect();
-    let inner_of = |r: &Rc<QueryExpr>| match r.as_ref() {
-        QueryExpr::Aggregate { child, .. } => Rc::clone(child),
+    let roots: Vec<Rc<PreASAPNode>> = space.roots.iter().map(|(_, r)| Rc::clone(r)).collect();
+    let inner_of = |r: &Rc<PreASAPNode>| match r.as_ref() {
+        PreASAPNode::Aggregate { child, .. } => Rc::clone(child),
         _ => unreachable!(),
     };
     assert!(
@@ -583,7 +583,7 @@ fn a_shared_inner_summary_is_materialized_once_for_several_outer_folds() {
         .iter()
         .map(|r| selection.assemble_selected_dag(r).unwrap().unwrap())
         .collect();
-    let child_of = |n: &Rc<SummaryNode>| match &n.expr {
+    let child_of = |n: &Rc<PostASAPNode>| match &n.expr {
         SummaryExpr::ValueOperation {
             child,
             timing: ExecutionTiming::QueryTime,
@@ -593,7 +593,7 @@ fn a_shared_inner_summary_is_materialized_once_for_several_outer_folds() {
     };
     assert!(
         Rc::ptr_eq(&child_of(&composed[0]), &child_of(&composed[1])),
-        "both folds compose over the same Rc<SummaryNode>"
+        "both folds compose over the same Rc<PostASAPNode>"
     );
 }
 
@@ -608,7 +608,7 @@ fn outer_summary_over_an_exact_function_composes_at_ingestion_time() {
     use std::time::Duration;
     let deriv = per_entity(
         AggIntent::Deriv,
-        Rc::new(QueryExpr::TimeRange {
+        Rc::new(PreASAPNode::TimeRange {
             range: Duration::from_secs(300),
             child: Rc::new(metric_scan(&["zone"])),
         }),
@@ -616,7 +616,7 @@ fn outer_summary_over_an_exact_function_composes_at_ingestion_time() {
     let root = agg(vec![], default_quantile(0.99), deriv);
     let space = plan(vec![("q", root)], &StatsModel);
     let root = Rc::clone(&space.roots[0].1);
-    let QueryExpr::Aggregate { child: deriv, .. } = root.as_ref() else {
+    let PreASAPNode::Aggregate { child: deriv, .. } = root.as_ref() else {
         unreachable!()
     };
     assert!(space
@@ -679,7 +679,7 @@ fn summary_construction_follows_its_value_input_phase() {
         .assemble_selected_dag(&space.roots[0].1)
         .unwrap()
         .unwrap();
-    let illegal = Rc::new(SummaryNode {
+    let illegal = Rc::new(PostASAPNode {
         expr: SummaryExpr::SummaryAgg {
             child: post,
             family: SummaryFamilyType::ExactAggregate(
@@ -716,7 +716,7 @@ fn a_runtime_without_mixed_execution_gets_no_composition_candidates() {
     let node = selection.assemble_selected_dag(&root).unwrap().unwrap();
     assert!(!matches!(node.expr, SummaryExpr::ValueOperation { .. }));
     // The inner quantile is still independently selectable.
-    let QueryExpr::Aggregate { child, .. } = root.as_ref() else {
+    let PreASAPNode::Aggregate { child, .. } = root.as_ref() else {
         unreachable!()
     };
     assert!(selection.for_target(child).unwrap().chosen.is_some());

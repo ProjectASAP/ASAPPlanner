@@ -6,12 +6,12 @@ Audience: developers moving computation from ASAPQuery-backend into
 ## Contract
 
 Logical selection decides what to compute. The maintenance lifecycle sets node
-timing. `physical_planner::compile` turns a timed `PostAsapDag` into physical
+timing. `physical_planner::compile` turns a timed `PostASAPDAGTransport` into physical
 operator DAGs. The backend owns ingestion, panes, storage, stored-state
 readout, external exact engines, pricing/selection, and execution scheduling.
 
 A backend lowering is *covered* when `compile` accepts the corresponding
-`PostAsapDag` node and produces operators with the same result. The backend
+`PostASAPDAGTransport` node and produces operators with the same result. The backend
 should then pass the timed DAG and its input contracts to `compile`. It should
 not rebuild operator choices from PromQL text or construct operators itself.
 
@@ -29,7 +29,7 @@ Status values:
 
 | # | Backend site | Computation | Planner node | Status at #475 | Notes |
 |---|---|---|---|---|---|
-| 1 | `query_time.rs` `Lower::lower`, `compile_logical` | PromQL AST → `QueryTimeOperator` graph for a native query | `Fallback { QueryExpr }` subtrees plus value payloads | Missing | `compile` lowers `Fallback` only as a raw `Scan` source. |
+| 1 | `query_time.rs` `Lower::lower`, `compile_logical` | PromQL AST → `QueryTimeOperator` graph for a native query | `Fallback { PreASAPNode }` subtrees plus value payloads | Missing | `compile` lowers `Fallback` only as a raw `Scan` source. |
 | 2 | `QueryTimeOperator::Aggregate` (sum/min/max/avg/count) | Grouped value aggregation | `Value::Exact(Aggregate)`; `SummaryAgg{ExactAggregate, Reduce}` over finalized values | Supported | Also `promql_values::compile_aggregate`. |
 | 3 | `QueryTimeOperator::Sort`, `Limit` (topk, sort, sort_desc) | Ordering and per-group limits | `Value::Sort`, `Value::Limit` | Supported | |
 | 4 | `QueryTimeOperator::Binary`, `QueryPlanNode::Binary` (vector ⊗ scalar) | Arithmetic with a scalar operand | `Binary` whose operand is `Fallback{PromqlScalarBridge(Literal)}` | Missing | Query-time `Binary` accepts only label-map vector schemas. The literal node has no native binding. |
@@ -56,7 +56,7 @@ Status values:
 | 25 | `raw_dag.rs` weight `Constant` | Unit/constant-weight update | `SummaryAgg` | Missing | `compile_node` requires a column weight. |
 | 26 | `raw_dag.rs` item `Column` / `Tuple` | Keyed update item | `SummaryAgg{item}` | Supported | `keyed_summary_build`. |
 | 27 | `raw_dag.rs` item `EntityIdentity` | Series-identity item | `SummaryAgg{item}` | Missing | Needs the series-identity column. |
-| 28 | `physical_values.rs` `compile`, `combine` | Translate `QueryTimeOperator` to `promql_values::*`; compose fragments | n/a | Supported | Exists only because of row 1. `CompiledPhysicalDag::compose` is Planner API. |
+| 28 | `physical_values.rs` `compile`, `combine` | Translate `QueryTimeOperator` to `promql_values::*`; compose fragments | n/a | Supported | Exists only because of row 1. `PhysicalDAG::compose` is Planner API. |
 | 29 | `query_plan.rs` `compile_native_fragment` (Semi join, Exact aggregate, Sort, Limit, Filter) | Relational value ops | `RelationalJoin`, `Value::*` | Supported | Already calls `compile`. |
 | 30 | `query_time.rs` `selected_query_time_nodes`, `selected_native_expression`, `selected_aggregate_operator` | Recover operator identity from original PromQL text | Payload variants (`ExactKind::Min`/`Max`, `AggIntent`) | Supported | Payloads already carry the identity. These witnesses are needed only while row 1 remains. |
 | 31 | Scan, ExactSubquery, CandidateExactSubquery, CurrentSeries ingest, ReadMaterialization, ExternalExact | Storage reads and external engines | Input contracts | Backend | |
@@ -76,7 +76,7 @@ Totals after this change: 17 Supported, 4 Partial, 8 Missing, 2 Backend.
 
 ## Covered by PromQL fallback compilation
 
-`compile` now lowers a `Fallback{QueryExpr}` node from its typed expression,
+`compile` now lowers a `Fallback{PreASAPNode}` node from its typed expression,
 realized with `promql_rows::with_series_identity`. The deployment supplies the
 raw rows of the `i`th selector returned by `promql_fallback::raw_series` at
 `promql_fallback::raw_series_input(node, i)`, with that selector's schema. Each

@@ -14,7 +14,7 @@ use asap_aware_mapping::{
 };
 use asap_frontend_promql::lower_promql_workload;
 use asap_types::post_asap::{
-    EvaluationSchedule, SummaryMaintenanceLifecycle, SummaryMaintenanceMode, SummaryNode,
+    EvaluationSchedule, PostASAPNode, SummaryMaintenanceLifecycle, SummaryMaintenanceMode,
 };
 use asap_types::pre_asap::agg_intent::AggIntent;
 use asap_types::types::AccuracyTarget;
@@ -32,7 +32,7 @@ struct FullyCostedRuntime;
 impl CostModel for FullyCostedRuntime {
     fn raw_query_recompute_total_cost(
         &self,
-        _target: &asap_types::pre_asap::QueryExpr,
+        _target: &asap_types::pre_asap::PreASAPNode,
         _expected_reads: f64,
     ) -> Option<Cost> {
         Some(Cost(1_000.0))
@@ -48,7 +48,7 @@ impl CostModel for FullyCostedRuntime {
 
     fn summary_maintenance_lifecycle_cost_inputs(
         &self,
-        _summary: &SummaryNode,
+        _summary: &PostASAPNode,
     ) -> SummaryMaintenanceLifecycleCostInputs {
         SummaryMaintenanceLifecycleCostInputs {
             build_cost: Some(Cost(10.0)),
@@ -61,7 +61,7 @@ impl CostModel for FullyCostedRuntime {
 
     fn summary_maintenance_capabilities(
         &self,
-        _summary: &SummaryNode,
+        _summary: &PostASAPNode,
     ) -> SummaryMaintenanceCapabilities {
         SummaryMaintenanceCapabilities {
             incremental_update: true,
@@ -217,7 +217,7 @@ fn selected_plan_with_horizon(
 
 fn selected_plan_for_lowered(
     workload: &PlanningWorkload,
-    lowered: asap_types::pre_asap::QueryExpr,
+    lowered: asap_types::pre_asap::PreASAPNode,
     model: &dyn CostModel,
     horizon: Horizon,
 ) -> asap_aware_mapping::SummaryMaintenanceLifecyclePlan {
@@ -448,7 +448,7 @@ fn quantile_workload(query: &str) -> PlanningWorkload {
 fn lifecycle_timed_dag(
     query: &str,
     lifecycle: &SummaryMaintenanceLifecycle,
-) -> (asap_types::post_asap::PostAsapDag, Vec<u64>) {
+) -> (asap_types::post_asap::PostASAPDAGTransport, Vec<u64>) {
     use asap_aware_mapping::enumerate_summary_maintenance_lifecycles;
     let workload = quantile_workload(query);
     let mut lowered = lower_promql_workload(&workload, 0).unwrap().remove(0);
@@ -489,7 +489,7 @@ fn lifecycle_timed_dag(
 
 /// Compile inputs for a timed DAG: its raw source, available at either phase.
 fn raw_inputs(
-    dag: &asap_types::post_asap::PostAsapDag,
+    dag: &asap_types::post_asap::PostASAPDAGTransport,
 ) -> std::collections::BTreeMap<u64, asap_physical_operators::physical_planner::InputContract> {
     let raw = dag
         .nodes
@@ -852,7 +852,7 @@ fn grouped_rate_sum_placement_is_a_lifecycle_choice() {
         )
         .unwrap(),
     );
-    let is_exact = |node: &SummaryNode, kind: ExactKind| {
+    let is_exact = |node: &PostASAPNode, kind: ExactKind| {
         matches!(&node.expr, SummaryExpr::SummaryAgg {
             family: SummaryFamilyType::ExactAggregate(k, _), ..
         } if *k == kind)
@@ -965,7 +965,7 @@ fn grouped_rate_sum_placement_is_a_lifecycle_choice() {
 
 /// The lifecycle-timed DAG Planner selects for `query` with upfront series
 /// typing, and whether it keeps an ingestion-time Binary.
-fn typed_selection(query: &str) -> (asap_types::post_asap::PostAsapDag, bool) {
+fn typed_selection(query: &str) -> (asap_types::post_asap::PostASAPDAGTransport, bool) {
     use asap_types::post_asap::{ExecutionTiming, PostAsapOperatorPayload};
     let workload = quantile_workload(query);
     let lowered = asap_types::pre_asap::schema::with_promql_series_identity(
@@ -985,7 +985,7 @@ fn typed_selection(query: &str) -> (asap_types::post_asap::PostAsapDag, bool) {
 /// Execute a timed DAG's precompute and query graphs over `samples`
 /// (`(metric, job, seconds, value)`) at 300s; returns the root's values.
 fn execute_timed(
-    dag: &asap_types::post_asap::PostAsapDag,
+    dag: &asap_types::post_asap::PostASAPDAGTransport,
     samples: &[(&str, &str, i64, f64)],
 ) -> Vec<f64> {
     use asap_physical_operators::{
@@ -997,7 +997,7 @@ fn execute_timed(
     };
     use asap_types::{
         post_asap::PostAsapOperatorPayload,
-        pre_asap::{QueryExpr, Source},
+        pre_asap::{PreASAPNode, Source},
     };
     use std::{collections::BTreeMap, sync::Arc};
     // Raw inputs: a selector Fallback is itself the input; a retained
@@ -1007,15 +1007,15 @@ fn execute_timed(
         let PostAsapOperatorPayload::Fallback { expression } = &node.payload else {
             continue;
         };
-        let metric = |selector: &QueryExpr| match selector {
-            QueryExpr::TimeRange { child, .. } => match child.as_ref() {
-                QueryExpr::Scan {
+        let metric = |selector: &PreASAPNode| match selector {
+            PreASAPNode::TimeRange { child, .. } => match child.as_ref() {
+                PreASAPNode::Scan {
                     source: Source::TimeSeries { metric },
                     ..
                 } => Some(metric.clone()),
                 _ => None,
             },
-            QueryExpr::Scan {
+            PreASAPNode::Scan {
                 source: Source::TimeSeries { metric },
                 ..
             } => Some(metric.clone()),
@@ -1063,7 +1063,7 @@ fn execute_timed(
         &frontier,
     )
     .unwrap();
-    let raw_sources = |plan: &asap_physical_operators::physical_planner::CompiledPhysicalDag| {
+    let raw_sources = |plan: &asap_physical_operators::physical_planner::PhysicalDAG| {
         plan.input_contracts()
             .filter_map(|(id, _)| raw.get(&id).map(|(schema, name)| (id, batch(schema, name))))
             .collect::<BTreeMap<_, _>>()

@@ -29,7 +29,7 @@ use asap_aware_mapping::{explain_replacements, ExplanationKind};
 use asap_devtools::lower_promql_with_data_ingestion_interval;
 use asap_frontend_sql::{lower_sql_dialect, SqlCatalog};
 use asap_types::pre_asap::schema::{Column, DataType, Schema};
-use asap_types::pre_asap::QueryExpr;
+use asap_types::pre_asap::PreASAPNode;
 use asap_types::types::AccuracyTarget;
 use asap_types::workload::SqlDialect;
 use std::collections::BTreeSet;
@@ -157,7 +157,7 @@ fn root_label(id: &str) -> String {
 /// reachable from.
 fn analyze_corpus(
     name: &'static str,
-    roots: Vec<(String, QueryExpr)>,
+    roots: Vec<(String, PreASAPNode)>,
     failed: usize,
 ) -> CorpusCoverage {
     let lowered = roots.len();

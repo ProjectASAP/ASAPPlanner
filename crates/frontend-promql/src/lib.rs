@@ -1,8 +1,8 @@
 //! PromQL front end: parse (via `promql-parser`) → the canonical, unresolved
 //! shape, built directly (issue #179) → [`resolve_root`].
 //!
-//! Emits [`UnresolvedQueryExpr`](asap_types::pre_asap::UnresolvedQueryExpr) itself — the
-//! canonical `QueryExpr`, generic over an unresolved
+//! Emits [`UnresolvedPreASAPNode`](asap_types::pre_asap::UnresolvedPreASAPNode) itself — the
+//! canonical `PreASAPNode`, generic over an unresolved
 //! [`ColumnRef`](asap_types::pre_asap::ColumnRef) — directly, rather than a
 //! separate per-language relational tree; `resolve_root` runs the
 //! [`SchemaResolver`](asap_types::pre_asap::SchemaResolver) for positional name resolution.
@@ -13,13 +13,13 @@ pub mod histogram;
 pub mod promql;
 
 use asap_types::pre_asap::resolve_root;
-use asap_types::pre_asap::QueryExpr;
+use asap_types::pre_asap::PreASAPNode;
 use asap_types::workload::{DurationMs, PlanningWorkload, QueryLanguage, WorkloadError};
 
 pub use error::PromqlError;
 pub use histogram::{HistogramCatalog, HistogramKind};
 
-/// Lower every normalized PromQL workload entry to a plan-ready `QueryExpr`.
+/// Lower every normalized PromQL workload entry to a plan-ready `PreASAPNode`.
 ///
 /// PromQL workloads must declare a non-zero `data_ingestion_interval`; it is
 /// injected around each bare instant selector. Explicit range selectors keep
@@ -29,7 +29,7 @@ pub use histogram::{HistogramCatalog, HistogramKind};
 pub fn lower_promql_workload(
     workload: &PlanningWorkload,
     now_ms: u64,
-) -> Result<Vec<QueryExpr>, PromqlError> {
+) -> Result<Vec<PreASAPNode>, PromqlError> {
     lower_promql_workload_inner(workload, now_ms)
 }
 
@@ -39,7 +39,7 @@ pub fn lower_promql_workload_with_histograms(
     workload: &PlanningWorkload,
     histograms: HistogramCatalog,
     now_ms: u64,
-) -> Result<Vec<QueryExpr>, PromqlError> {
+) -> Result<Vec<PreASAPNode>, PromqlError> {
     let _guard = histogram::CatalogGuard::install(histograms);
     lower_promql_workload_inner(workload, now_ms)
 }
@@ -47,7 +47,7 @@ pub fn lower_promql_workload_with_histograms(
 fn lower_promql_workload_inner(
     workload: &PlanningWorkload,
     now_ms: u64,
-) -> Result<Vec<QueryExpr>, PromqlError> {
+) -> Result<Vec<PreASAPNode>, PromqlError> {
     if !matches!(workload.query_workload.language, QueryLanguage::PromQL) {
         return Err(PromqlError::WrongLanguage(format!(
             "{:?}",
@@ -123,7 +123,7 @@ mod tests {
     }
     use std::time::Duration;
 
-    use asap_types::pre_asap::QueryExpr;
+    use asap_types::pre_asap::PreASAPNode;
     use asap_types::workload::{
         BatchEntry, DataWorkload, Evidence, PlanningWorkload, Query, QueryRequirements,
         QueryWorkload, TimeSelection,
@@ -158,24 +158,24 @@ mod tests {
     #[test]
     fn instant_selector_uses_declared_ingestion_interval() {
         let query = lower_promql_workload(&workload("sum by (job) (data)"), 0).unwrap();
-        let QueryExpr::Aggregate { child, .. } = &query[0] else {
+        let PreASAPNode::Aggregate { child, .. } = &query[0] else {
             panic!("expected aggregate")
         };
         assert!(
-            matches!(child.as_ref(), QueryExpr::TimeRange { range, child }
-            if *range == Duration::from_secs(1) && matches!(child.as_ref(), QueryExpr::Scan { .. }))
+            matches!(child.as_ref(), PreASAPNode::TimeRange { range, child }
+            if *range == Duration::from_secs(1) && matches!(child.as_ref(), PreASAPNode::Scan { .. }))
         );
     }
 
     #[test]
     fn explicit_range_selector_keeps_its_query_range() {
         let query = lower_promql_workload(&workload("sum_over_time(data[5m])"), 0).unwrap();
-        let QueryExpr::Aggregate { child, .. } = &query[0] else {
+        let PreASAPNode::Aggregate { child, .. } = &query[0] else {
             panic!("expected aggregate")
         };
         assert!(
-            matches!(child.as_ref(), QueryExpr::TimeRange { range, child }
-            if *range == Duration::from_secs(300) && matches!(child.as_ref(), QueryExpr::Scan { .. }))
+            matches!(child.as_ref(), PreASAPNode::TimeRange { range, child }
+            if *range == Duration::from_secs(300) && matches!(child.as_ref(), PreASAPNode::Scan { .. }))
         );
     }
 

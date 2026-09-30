@@ -42,17 +42,17 @@ pub(crate) struct Node<'a, V, S> {
     pub(crate) inputs: Vec<NodeId>,
     pub(crate) operator: Box<dyn PhysicalOperator<V, S> + 'a>,
 }
-pub struct PhysicalDag<'a, V, S> {
+pub struct BoundPhysicalDAG<'a, V, S> {
     pub(crate) nodes: BTreeMap<NodeId, Node<'a, V, S>>,
 }
-impl<V, S> Default for PhysicalDag<'_, V, S> {
+impl<V, S> Default for BoundPhysicalDAG<'_, V, S> {
     fn default() -> Self {
         Self {
             nodes: BTreeMap::new(),
         }
     }
 }
-impl<'a, V: 'a, S: Clone + PartialEq + Debug + 'a> PhysicalDag<'a, V, S> {
+impl<'a, V: 'a, S: Clone + PartialEq + Debug + 'a> BoundPhysicalDAG<'a, V, S> {
     pub fn add(
         &mut self,
         id: NodeId,
@@ -79,7 +79,7 @@ impl<'a, V: 'a, S: Clone + PartialEq + Debug + 'a> PhysicalDag<'a, V, S> {
     /// Derive properties while checking topology and schemas, before starting sources.
     pub fn properties(&self, roots: &[NodeId]) -> Result<BTreeMap<NodeId, PlanProperties>, Error> {
         fn visit<V, S: Clone + PartialEq + Debug>(
-            dag: &PhysicalDag<'_, V, S>,
+            dag: &BoundPhysicalDAG<'_, V, S>,
             id: NodeId,
             active: &mut BTreeSet<NodeId>,
             done: &mut BTreeMap<NodeId, (usize, PlanProperties)>,

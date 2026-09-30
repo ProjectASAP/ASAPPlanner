@@ -78,12 +78,12 @@ subtree's true `consumer_count` across the whole workload up front (the same
 role `implement_workload_with`'s pre-pass used to play, before that function
 was retired along with `bind.rs` — this crate no longer commits to one
 physically-materialized answer at all; picking and building one final
-`SummaryNode` per shared subtree is a downstream deployment's job, not this
+`PostASAPNode` per shared subtree is a downstream deployment's job, not this
 crate's). For a `TargetSubDAGCandidates` whose candidates are a
 [`SharedSubtreeStrategy`](../../../crates/asap-aware-mapping/src/replacement.rs)
 share-vs-recompute pair, `cost_sorted`'s ranking step (`rank_group`/
 `cse_preference`) asks `CostModel::cse_share_decision` once per group — using
-one representative bound `SummaryNode` built just for that comparison, not
+one representative bound `PostASAPNode` built just for that comparison, not
 cached anywhere — and sorts the pair so the preferred candidate (`Share` or
 `RecomputeIndependently`) comes first. Both candidates are still returned;
 ranking never drops one: a `CostModel` orders and parameterizes candidates; it

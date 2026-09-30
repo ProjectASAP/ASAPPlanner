@@ -3,7 +3,7 @@
 //
 // Lowers a batch of ad-hoc SQL/PromQL queries to pre-ASAP IR, then runs the
 // `asap-aware-mapping` pre-ASAP → post-ASAP binding pass and prints the
-// resulting **post-ASAP IR** (the sketch-bound IR: `SummaryExpr`/`SummaryNode`
+// resulting **post-ASAP IR** (the sketch-bound IR: `SummaryExpr`/`PostASAPNode`
 // — the concrete `SummaryKind`/`SummaryParams` committed per aggregate, or
 // `KeepPreAsap` for whatever the pass left untouched). See `show_pre_asap_ir`
 // for the sketch-agnostic IR one layer upstream.
@@ -25,7 +25,7 @@ use asap_aware_mapping::{
     Replacement, ReplacementStrategy, ReplacementSubDAG, SketchAlgorithmStrategy, TargetSubDAG,
 };
 use asap_devtools::{lower_promql_with_data_ingestion_interval, lower_sql, SqlCatalog};
-use asap_types::pre_asap::query_expr::QueryExpr;
+use asap_types::pre_asap::query_expr::PreASAPNode;
 use asap_types::pre_asap::schema::{Column, DataType, Schema};
 use asap_types::types::AccuracyTarget;
 use std::io::Read;
@@ -36,7 +36,7 @@ const ACCURACY: AccuracyTarget = AccuracyTarget::Epsilon(0.01);
 /// `SketchAlgorithmStrategy::replacements` returns every candidate. This
 /// debug tool prints all of them so callers can inspect the planner's choices.
 /// If the strategy has none, preserve the single pre-ASAP fallback output.
-fn bind_all(expr: &QueryExpr) -> Result<Vec<Rc<asap_types::post_asap::SummaryNode>>, String> {
+fn bind_all(expr: &PreASAPNode) -> Result<Vec<Rc<asap_types::post_asap::PostASAPNode>>, String> {
     let root = Rc::new(expr.clone());
     let target = TargetSubDAG::new(&root);
     let candidates = SketchAlgorithmStrategy::default_cost_model()

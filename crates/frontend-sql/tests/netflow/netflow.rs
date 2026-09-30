@@ -6,7 +6,7 @@
 
 use asap_frontend_sql::{lower_sql, SqlCatalog};
 use asap_types::pre_asap::schema::{Column, DataType, Schema};
-use asap_types::pre_asap::{AggIntent, GroupKeys, QueryExpr};
+use asap_types::pre_asap::{AggIntent, GroupKeys, PreASAPNode};
 use asap_types::types::AccuracyTarget;
 
 const CORPUS: &str = include_str!("data/netflow.sql");
@@ -123,7 +123,7 @@ async fn netflow_sql_corpus_lowers_to_expected_intents() {
     }
 }
 
-fn assert_expected(qe: &QueryExpr, expected: Expected, case_no: usize) {
+fn assert_expected(qe: &PreASAPNode, expected: Expected, case_no: usize) {
     match expected {
         Expected::Quantile { q, by } => {
             let (actual_by, measures) = first_aggregate(qe).expect("expected Aggregate");
@@ -190,49 +190,49 @@ impl AggKind {
     }
 }
 
-fn first_aggregate(qe: &QueryExpr) -> Option<(&GroupKeys, &Vec<AggIntent>)> {
+fn first_aggregate(qe: &PreASAPNode) -> Option<(&GroupKeys, &Vec<AggIntent>)> {
     match qe {
-        QueryExpr::Aggregate {
+        PreASAPNode::Aggregate {
             reduction,
             measures,
             ..
         } => Some((reduction.expect_reduce(), measures)),
-        QueryExpr::Project { child, .. }
-        | QueryExpr::Filter { child, .. }
-        | QueryExpr::Dedup { child, .. }
-        | QueryExpr::Sort { child, .. }
-        | QueryExpr::Limit { child, .. }
-        | QueryExpr::PromqlSubquery { child, .. } => first_aggregate(child),
+        PreASAPNode::Project { child, .. }
+        | PreASAPNode::Filter { child, .. }
+        | PreASAPNode::Dedup { child, .. }
+        | PreASAPNode::Sort { child, .. }
+        | PreASAPNode::Limit { child, .. }
+        | PreASAPNode::PromqlSubquery { child, .. } => first_aggregate(child),
         _ => None,
     }
 }
 
-fn has_scan_predicate(qe: &QueryExpr) -> bool {
+fn has_scan_predicate(qe: &PreASAPNode) -> bool {
     any_node(
         qe,
-        |node| matches!(node, QueryExpr::Scan { predicates, .. } if !predicates.is_empty()),
+        |node| matches!(node, PreASAPNode::Scan { predicates, .. } if !predicates.is_empty()),
     )
 }
 
-fn has_topk(qe: &QueryExpr, k: usize) -> bool {
+fn has_topk(qe: &PreASAPNode, k: usize) -> bool {
     any_node(qe, |node| {
         matches!(
             node,
-            QueryExpr::Aggregate { measures, .. }
+            PreASAPNode::Aggregate { measures, .. }
                 if measures.iter().any(|agg| matches!(agg, AggIntent::TopK { k: actual, .. } if *actual == k))
         )
     })
 }
 
 fn aggregate_by_with(
-    qe: &QueryExpr,
+    qe: &PreASAPNode,
     by: &'static [usize],
     pred: impl Fn(&AggIntent) -> bool,
 ) -> bool {
     let expected_by = GroupKeys::by(by.to_vec());
     let mut found = false;
     visit(qe, &mut |node| {
-        if let QueryExpr::Aggregate {
+        if let PreASAPNode::Aggregate {
             reduction,
             measures,
             ..
@@ -244,45 +244,45 @@ fn aggregate_by_with(
     found
 }
 
-fn all_intents(qe: &QueryExpr) -> Vec<AggIntent> {
+fn all_intents(qe: &PreASAPNode) -> Vec<AggIntent> {
     let mut intents = Vec::new();
     visit(qe, &mut |node| {
-        if let QueryExpr::Aggregate { measures, .. } = node {
+        if let PreASAPNode::Aggregate { measures, .. } = node {
             intents.extend(measures.iter().cloned());
         }
     });
     intents
 }
 
-fn any_node(qe: &QueryExpr, pred: impl Fn(&QueryExpr) -> bool) -> bool {
+fn any_node(qe: &PreASAPNode, pred: impl Fn(&PreASAPNode) -> bool) -> bool {
     let mut found = false;
     visit(qe, &mut |node| found |= pred(node));
     found
 }
 
-fn visit(qe: &QueryExpr, f: &mut impl FnMut(&QueryExpr)) {
+fn visit(qe: &PreASAPNode, f: &mut impl FnMut(&PreASAPNode)) {
     f(qe);
     match qe {
-        QueryExpr::Project { child, .. }
-        | QueryExpr::Filter { child, .. }
-        | QueryExpr::Aggregate { child, .. }
-        | QueryExpr::TimeRange { child, .. }
-        | QueryExpr::Sort { child, .. }
-        | QueryExpr::Limit { child, .. }
-        | QueryExpr::PromqlSubquery { child, .. }
-        | QueryExpr::Dedup { child, .. }
-        | QueryExpr::SQLWindowFunc { child, .. }
-        | QueryExpr::PromqlRelabel { child, .. }
-        | QueryExpr::PromqlSeriesSample { child, .. }
-        | QueryExpr::TimeShift { child, .. }
-        | QueryExpr::PromqlInfoEnrich { child, .. } => visit(child, f),
-        QueryExpr::BinaryOp { lhs, rhs, .. }
-        | QueryExpr::Join {
+        PreASAPNode::Project { child, .. }
+        | PreASAPNode::Filter { child, .. }
+        | PreASAPNode::Aggregate { child, .. }
+        | PreASAPNode::TimeRange { child, .. }
+        | PreASAPNode::Sort { child, .. }
+        | PreASAPNode::Limit { child, .. }
+        | PreASAPNode::PromqlSubquery { child, .. }
+        | PreASAPNode::Dedup { child, .. }
+        | PreASAPNode::SQLWindowFunc { child, .. }
+        | PreASAPNode::PromqlRelabel { child, .. }
+        | PreASAPNode::PromqlSeriesSample { child, .. }
+        | PreASAPNode::TimeShift { child, .. }
+        | PreASAPNode::PromqlInfoEnrich { child, .. } => visit(child, f),
+        PreASAPNode::BinaryOp { lhs, rhs, .. }
+        | PreASAPNode::Join {
             left: lhs,
             right: rhs,
             ..
         }
-        | QueryExpr::SetOp {
+        | PreASAPNode::SetOp {
             left: lhs,
             right: rhs,
             ..
@@ -290,32 +290,32 @@ fn visit(qe: &QueryExpr, f: &mut impl FnMut(&QueryExpr)) {
             visit(lhs, f);
             visit(rhs, f);
         }
-        QueryExpr::Concat { children, .. } => {
+        PreASAPNode::Concat { children, .. } => {
             for child in children {
                 visit(child, f);
             }
         }
-        QueryExpr::PromqlVectorFromScalar(child) | QueryExpr::PromqlScalarFromVector(child) => {
+        PreASAPNode::PromqlVectorFromScalar(child) | PreASAPNode::PromqlScalarFromVector(child) => {
             visit(child, f)
         }
-        QueryExpr::Scan { .. }
-        | QueryExpr::PromqlScalarBridge(_)
-        | QueryExpr::EvalTimestamp
-        | QueryExpr::CurrentTimestamp => {}
+        PreASAPNode::Scan { .. }
+        | PreASAPNode::PromqlScalarBridge(_)
+        | PreASAPNode::EvalTimestamp
+        | PreASAPNode::CurrentTimestamp => {}
         // Scalar expression variants (issue #205) aren't relational nodes;
         // this visitor only walks the relational tree, so stop here.
-        QueryExpr::Column(_)
-        | QueryExpr::Literal(_)
-        | QueryExpr::Compare { .. }
-        | QueryExpr::BoolAnd(_)
-        | QueryExpr::BoolOr(_)
-        | QueryExpr::Not(_)
-        | QueryExpr::IsNull(_)
-        | QueryExpr::IsNotNull(_)
-        | QueryExpr::Cast { .. }
-        | QueryExpr::InList { .. }
-        | QueryExpr::FunctionCall { .. }
-        | QueryExpr::Arithmetic { .. }
-        | QueryExpr::Case { .. } => {}
+        PreASAPNode::Column(_)
+        | PreASAPNode::Literal(_)
+        | PreASAPNode::Compare { .. }
+        | PreASAPNode::BoolAnd(_)
+        | PreASAPNode::BoolOr(_)
+        | PreASAPNode::Not(_)
+        | PreASAPNode::IsNull(_)
+        | PreASAPNode::IsNotNull(_)
+        | PreASAPNode::Cast { .. }
+        | PreASAPNode::InList { .. }
+        | PreASAPNode::FunctionCall { .. }
+        | PreASAPNode::Arithmetic { .. }
+        | PreASAPNode::Case { .. } => {}
     }
 }

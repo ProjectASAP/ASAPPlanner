@@ -65,7 +65,7 @@ fn sql_workload(
 }
 
 /// The facade turns a prepared workload into one selected DAG per query, in
-/// `QueryWorkload::entries()` order, without the caller touching `PlanSpace`.
+/// `QueryWorkload::entries()` order, without the caller touching `CandidatePostASAPDAGs`.
 #[tokio::test]
 async fn plans_every_query_in_entry_order() {
     let workload = sql_workload(

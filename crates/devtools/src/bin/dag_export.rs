@@ -55,7 +55,7 @@ use std::rc::Rc;
 use std::time::Instant;
 
 use asap_aware_mapping::analytical_cost::{
-    cache_hit_ratios, AnalyticalCostError, EvidenceBackedPhysicalDag as PhysicalDag,
+    cache_hit_ratios, AnalyticalCostError, EvidenceBackedPhysicalDag as BoundPhysicalDAG,
     PhysicalNodeEvidence, ResourceCalibration, ANALYTICAL_COST_MODEL_VERSION,
 };
 #[cfg(test)]
@@ -76,11 +76,11 @@ use asap_types::dag_export::{
     self, DagDecision, DagGraph, DagNote, NamedGraph, PostAsapSubstitution, TargetRejection,
     TargetReplacement, TargetReplacementAfter, WorkloadGraph,
 };
+use asap_types::post_asap::PostASAPNode;
 use asap_types::post_asap::SummaryExpr;
-use asap_types::post_asap::SummaryNode;
 use asap_types::post_asap::{CompositionOperator, SketchQuery, SummaryFamilyType};
 use asap_types::pre_asap::cse::{structural_hash, HashCache};
-use asap_types::pre_asap::query_expr::QueryExpr;
+use asap_types::pre_asap::query_expr::PreASAPNode;
 use asap_types::pre_asap::schema::{Column, DataType, Schema};
 use asap_types::resources::CacheProfile;
 use asap_types::types::AccuracyTarget;
@@ -116,7 +116,7 @@ fn parse_planner_cost_document(raw: &str) -> Result<PlannerCostDocument, String>
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct TargetPhysicalEvidence {
-    target: QueryExpr,
+    target: PreASAPNode,
     scope: ComparisonScopeEvidence,
     candidates: Vec<CandidatePhysicalEvidence>,
 }
@@ -171,7 +171,7 @@ impl ComparisonScopeEvidence {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct QueryNodePhysicalEvidence {
-    logical_node: QueryExpr,
+    logical_node: PreASAPNode,
     operator: asap_aware_mapping::analytical_cost::PhysicalOperator,
     occurrence: usize,
     synthetic: bool,
@@ -188,7 +188,7 @@ enum CandidatePhysicalEvidence {
     Summary {
         plan: serde_json::Value,
         query_nodes: Vec<QueryNodePhysicalEvidence>,
-        physical_dag: PhysicalDag,
+        physical_dag: BoundPhysicalDAG,
     },
 }
 
@@ -218,7 +218,7 @@ impl CandidatePhysicalEvidence {
         actual.is_ok_and(|actual| plan_values_match(&actual, self.plan()))
     }
 
-    fn summary_dag(&self) -> Option<&PhysicalDag> {
+    fn summary_dag(&self) -> Option<&BoundPhysicalDAG> {
         match self {
             Self::Summary { physical_dag, .. } => Some(physical_dag),
             Self::Rewrite { .. } => None,
@@ -348,9 +348,9 @@ impl PlannerPhysicalPlanProvider for ExportPhysicalProvider<'_> {
     fn summary_physical_dag(
         &self,
         snapshot: &PhysicalEvidenceSnapshot,
-        _summary: &Rc<SummaryNode>,
+        _summary: &Rc<PostASAPNode>,
         _target: &asap_aware_mapping::replacement::TargetSubDAG<'_>,
-    ) -> Result<PhysicalDag, AnalyticalCostError> {
+    ) -> Result<BoundPhysicalDAG, AnalyticalCostError> {
         if snapshot.scope != self.target.scope.resolve()? {
             return Err(AnalyticalCostError::ComparisonScopeMismatch(
                 "planner evidence snapshot",
@@ -408,7 +408,7 @@ impl ExportPlannerCostModel<'_> {
     fn annotations(
         &self,
         candidate: &ReplacementSubDAG,
-        target: &Rc<QueryExpr>,
+        target: &Rc<PreASAPNode>,
     ) -> (CostAnnotation, CostAnnotation, CostAnnotation) {
         let target = asap_aware_mapping::replacement::TargetSubDAG::new(target);
         let Some((provider, calibration)) = self.bound(candidate, &target) else {
@@ -946,7 +946,7 @@ fn annotate_with_explanations(
 /// never disagree about which candidate won for a given target.
 #[allow(dead_code)]
 struct Winner<'a> {
-    target: &'a Rc<QueryExpr>,
+    target: &'a Rc<PreASAPNode>,
     candidate: &'a ReplacementSubDAG,
     costs: (CostAnnotation, CostAnnotation, CostAnnotation),
 }
@@ -1010,7 +1010,7 @@ fn lookup_winner(
     by_hash: &HashMap<u64, Vec<usize>>,
     winners: &[Winner<'_>],
     cache: &mut HashCache,
-    expr: &QueryExpr,
+    expr: &PreASAPNode,
 ) -> Option<usize> {
     let hash = structural_hash(expr, cache);
     by_hash
@@ -1164,7 +1164,7 @@ fn assign_workload_node_ids(graphs: &mut [&mut DagGraph]) {
 /// which candidate won for a given target.
 #[allow(dead_code)]
 fn run_post_asap_with_progress(
-    lowered_queries: &[(String, String, QueryExpr)],
+    lowered_queries: &[(String, String, PreASAPNode)],
     progress: bool,
     cost_model: &dyn CostModel,
     export_model: Option<&ExportPlannerCostModel<'_>>,
@@ -1174,7 +1174,7 @@ fn run_post_asap_with_progress(
     if progress {
         eprintln!("[3/4] ASAP-aware mapping is running…");
     }
-    let roots: Vec<(String, Rc<QueryExpr>)> = lowered_queries
+    let roots: Vec<(String, Rc<PreASAPNode>)> = lowered_queries
         .iter()
         .map(|(name, _, qe)| (name.clone(), Rc::new(qe.clone())))
         .collect();
@@ -1188,7 +1188,7 @@ fn run_post_asap_with_progress(
     let selection = space.global_selection(cost_model);
 
     // A group's top candidate can be `keep_pre_asap`'s own conservative
-    // fallback — `Replacement::Summary(SummaryNode { expr:
+    // fallback — `Replacement::Summary(PostASAPNode { expr:
     // KeepPreAsap(Rc::new(target.clone())), .. })` — the *whole target*
     // wrapped as unbound, e.g. for a multi-measure/`HAVING`-bearing
     // aggregate, or (the case that actually surfaces this: `STDDEV_POP`/
@@ -1272,7 +1272,7 @@ fn run_post_asap_with_progress(
     }
     let post_started = Instant::now();
     let mut post_graph_cache = HashCache::new();
-    let mut find_winner = |expr: &QueryExpr| -> Option<PostAsapSubstitution> {
+    let mut find_winner = |expr: &PreASAPNode| -> Option<PostAsapSubstitution> {
         let i = lookup_winner(&by_hash, &winners, &mut post_graph_cache, expr)?;
         let winner = &winners[i];
         let (baseline_cost, selected_cost, benefit) = winner.costs.clone();
@@ -1419,7 +1419,7 @@ fn run_post_asap_with_progress(
 }
 
 #[cfg(test)]
-fn run_post_asap(lowered_queries: &[(String, String, QueryExpr)]) -> PostAsapResults {
+fn run_post_asap(lowered_queries: &[(String, String, PreASAPNode)]) -> PostAsapResults {
     run_post_asap_with_progress(lowered_queries, false, &DefaultCostModel, None, None)
 }
 
@@ -1639,19 +1639,19 @@ mod tests {
     use asap_devtools::PromqlError;
     use asap_types::pre_asap::{Column, DataType, Reduction, Schema, Source};
 
-    fn lower_promql(query: &str, accuracy: AccuracyTarget) -> Result<QueryExpr, PromqlError> {
+    fn lower_promql(query: &str, accuracy: AccuracyTarget) -> Result<PreASAPNode, PromqlError> {
         lower_promql_with_data_ingestion_interval(query, accuracy, 1_000)
     }
 
-    fn non_topk_query() -> QueryExpr {
-        QueryExpr::Aggregate {
+    fn non_topk_query() -> PreASAPNode {
+        PreASAPNode::Aggregate {
             reduction: Reduction::by(vec![]),
             measures: vec![asap_types::pre_asap::AggIntent::Count {
                 accuracy: AccuracyTarget::Epsilon(0.1),
             }],
             output_names: vec![],
             having: None,
-            child: Rc::new(QueryExpr::Scan {
+            child: Rc::new(PreASAPNode::Scan {
                 source: Source::Table {
                     table_ref: "events".into(),
                 },
@@ -1662,10 +1662,10 @@ mod tests {
     }
 
     fn fixture_raw_dag(
-        query: &QueryExpr,
+        query: &PreASAPNode,
         candidate: &ReplacementSubDAG,
         document: &PlannerCostDocument,
-    ) -> PhysicalDag {
+    ) -> BoundPhysicalDAG {
         let model = ExportPlannerCostModel { document };
         let root = Rc::new(query.clone());
         let target = asap_aware_mapping::replacement::TargetSubDAG::new(&root);
@@ -2126,7 +2126,7 @@ mod tests {
         EdgeStatistics { rows, bytes }
     }
 
-    fn query_evidence(query: &QueryExpr) -> Vec<QueryNodePhysicalEvidence> {
+    fn query_evidence(query: &PreASAPNode) -> Vec<QueryNodePhysicalEvidence> {
         let entries = RefCell::new(Vec::new());
         let scope = test_scope().resolve().unwrap();
         let provider = |request: PhysicalNodeRequest<'_>| {
@@ -2178,7 +2178,7 @@ mod tests {
         entries.into_inner()
     }
 
-    fn cheap_candidate_dag() -> PhysicalDag {
+    fn cheap_candidate_dag() -> BoundPhysicalDAG {
         let coverage = test_scope().sources[0].clone();
         let statistics = OperatorStatistics::Scan {
             edges: UnaryEdgeStatistics {
@@ -2188,7 +2188,7 @@ mod tests {
             },
             source_read_bytes: 64,
         };
-        PhysicalDag {
+        BoundPhysicalDAG {
             nodes: vec![PhysicalDagNode {
                 id: "summary-read".into(),
                 operator: PhysicalOperator::Scan,
@@ -2226,7 +2226,7 @@ mod tests {
         }
     }
 
-    fn cost_fixture() -> (QueryExpr, ReplacementSubDAG, PlannerCostDocument) {
+    fn cost_fixture() -> (PreASAPNode, ReplacementSubDAG, PlannerCostDocument) {
         let query = non_topk_query();
         let root = Rc::new(query.clone());
         let space = search_workload(vec![(String::from("q"), Rc::clone(&root))]);

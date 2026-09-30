@@ -3,20 +3,22 @@ use crate::{
     values::{Schema, Value},
     Error,
 };
-use planner_types::pre_asap::{ArithmeticOpKind, CompareOpKind, DataType, QueryExpr, ScalarValue};
+use planner_types::pre_asap::{
+    ArithmeticOpKind, CompareOpKind, DataType, PreASAPNode, ScalarValue,
+};
 use std::{cmp::Ordering, sync::Arc};
 
 pub(super) fn evaluate(
-    expr: &QueryExpr,
+    expr: &PreASAPNode,
     row: &[Value],
     schema: &planner_types::pre_asap::Schema,
 ) -> Result<Value, Error> {
     match expr {
-        QueryExpr::Column(index) => row.get(*index).cloned().ok_or(Error::Invalid(format!(
+        PreASAPNode::Column(index) => row.get(*index).cloned().ok_or(Error::Invalid(format!(
             "column {index} outside row width {}",
             row.len()
         ))),
-        QueryExpr::Literal(value) => Ok(match value {
+        PreASAPNode::Literal(value) => Ok(match value {
             ScalarValue::Interval {
                 months,
                 days,
@@ -32,18 +34,18 @@ pub(super) fn evaluate(
             ScalarValue::Boolean(value) => Value::Bool(*value),
             ScalarValue::Null => Value::Null,
         }),
-        QueryExpr::Compare { left, op, right } => {
+        PreASAPNode::Compare { left, op, right } => {
             let left = evaluate(left, row, schema)?;
             let right = evaluate(right, row, schema)?;
             compare(op, left, right)
         }
-        QueryExpr::Arithmetic { op, left, right } => arithmetic(
+        PreASAPNode::Arithmetic { op, left, right } => arithmetic(
             op,
             evaluate(left, row, schema)?,
             evaluate(right, row, schema)?,
         ),
-        QueryExpr::BoolAnd(parts) | QueryExpr::BoolOr(parts) => {
-            let and = matches!(expr, QueryExpr::BoolAnd(_));
+        PreASAPNode::BoolAnd(parts) | PreASAPNode::BoolOr(parts) => {
+            let and = matches!(expr, PreASAPNode::BoolAnd(_));
             let mut null = false;
             for part in parts {
                 match evaluate(part, row, schema)? {
@@ -55,20 +57,20 @@ pub(super) fn evaluate(
             }
             Ok(if null { Value::Null } else { Value::Bool(and) })
         }
-        QueryExpr::Not(value) => match evaluate(value, row, schema)? {
+        PreASAPNode::Not(value) => match evaluate(value, row, schema)? {
             Value::Bool(value) => Ok(Value::Bool(!value)),
             Value::Null => Ok(Value::Null),
             _ => Err(Error::Invalid("boolean predicate required".into())),
         },
-        QueryExpr::IsNull(value) => Ok(Value::Bool(matches!(
+        PreASAPNode::IsNull(value) => Ok(Value::Bool(matches!(
             evaluate(value, row, schema)?,
             Value::Null
         ))),
-        QueryExpr::IsNotNull(value) => Ok(Value::Bool(!matches!(
+        PreASAPNode::IsNotNull(value) => Ok(Value::Bool(!matches!(
             evaluate(value, row, schema)?,
             Value::Null
         ))),
-        QueryExpr::FunctionCall { name, args } => {
+        PreASAPNode::FunctionCall { name, args } => {
             use planner_types::pre_asap::scalar_signature::MapScalarFunction;
             if name.eq_ignore_ascii_case("asap_struct_field") {
                 expr.scalar_type(schema)
@@ -81,10 +83,10 @@ pub(super) fn evaluate(
                     unreachable!()
                 };
                 let offset = match &args[1] {
-                    QueryExpr::Literal(ScalarValue::Int64(index)) => {
+                    PreASAPNode::Literal(ScalarValue::Int64(index)) => {
                         usize::try_from(index - 1).ok()
                     }
-                    QueryExpr::Literal(ScalarValue::Utf8(name)) => {
+                    PreASAPNode::Literal(ScalarValue::Utf8(name)) => {
                         fields.iter().position(|field| &field.name == name)
                     }
                     _ => None,
@@ -331,16 +333,16 @@ fn cell_cmp(left: &Value, right: &Value) -> Option<Ordering> {
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
 pub struct CompiledExpression {
-    expression: QueryExpr,
+    expression: PreASAPNode,
     schema: planner_types::pre_asap::Schema,
     output: (DataType, bool),
 }
 impl CompiledExpression {
-    pub(crate) fn expression(&self) -> &QueryExpr {
+    pub(crate) fn expression(&self) -> &PreASAPNode {
         &self.expression
     }
 
-    pub fn compile(expression: &QueryExpr, input: &Schema) -> Result<Self, Error> {
+    pub fn compile(expression: &PreASAPNode, input: &Schema) -> Result<Self, Error> {
         let schema = input
             .fields
             .iter()
@@ -410,13 +412,13 @@ impl CompiledExpression {
         evaluate(&self.expression, row, &self.schema)
     }
 }
-fn validate(expr: &QueryExpr, schema: &planner_types::pre_asap::Schema) -> Result<(), Error> {
+fn validate(expr: &PreASAPNode, schema: &planner_types::pre_asap::Schema) -> Result<(), Error> {
     let invalid = || Error::Invalid(format!("unsupported scalar expression: {expr:?}"));
     expr.scalar_type(schema)
         .map_err(|e| Error::Invalid(e.to_string()))?;
     match expr {
-        QueryExpr::Column(_) | QueryExpr::Literal(_) => Ok(()),
-        QueryExpr::Arithmetic { left, right, .. } => {
+        PreASAPNode::Column(_) | PreASAPNode::Literal(_) => Ok(()),
+        PreASAPNode::Arithmetic { left, right, .. } => {
             for value in [left, right] {
                 validate(value, schema)?;
                 if !matches!(
@@ -431,7 +433,7 @@ fn validate(expr: &QueryExpr, schema: &planner_types::pre_asap::Schema) -> Resul
             }
             Ok(())
         }
-        QueryExpr::Compare { left, right, op } => {
+        PreASAPNode::Compare { left, right, op } => {
             if !matches!(
                 op,
                 CompareOpKind::Eq
@@ -475,7 +477,7 @@ fn validate(expr: &QueryExpr, schema: &planner_types::pre_asap::Schema) -> Resul
             }
             Ok(())
         }
-        QueryExpr::FunctionCall { name, args } => {
+        PreASAPNode::FunctionCall { name, args } => {
             if name != "asap_struct_field"
                 && name != "asap_element_access"
                 && planner_types::pre_asap::scalar_signature::MapScalarFunction::from_name(name)
@@ -488,7 +490,7 @@ fn validate(expr: &QueryExpr, schema: &planner_types::pre_asap::Schema) -> Resul
             }
             Ok(())
         }
-        QueryExpr::BoolAnd(parts) | QueryExpr::BoolOr(parts) => {
+        PreASAPNode::BoolAnd(parts) | PreASAPNode::BoolOr(parts) => {
             for part in parts {
                 validate(part, schema)?;
                 if !matches!(
@@ -502,7 +504,7 @@ fn validate(expr: &QueryExpr, schema: &planner_types::pre_asap::Schema) -> Resul
             }
             Ok(())
         }
-        QueryExpr::Not(value) => {
+        PreASAPNode::Not(value) => {
             validate(value, schema)?;
             if !matches!(
                 value
@@ -515,7 +517,7 @@ fn validate(expr: &QueryExpr, schema: &planner_types::pre_asap::Schema) -> Resul
             }
             Ok(())
         }
-        QueryExpr::IsNull(value) | QueryExpr::IsNotNull(value) => validate(value, schema),
+        PreASAPNode::IsNull(value) | PreASAPNode::IsNotNull(value) => validate(value, schema),
         _ => Err(invalid()),
     }
 }

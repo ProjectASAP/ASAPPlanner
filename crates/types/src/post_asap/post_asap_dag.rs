@@ -4,14 +4,14 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 use super::{
-    validate_execution_data_states, ExecutionDataState, ExecutionDataStateError, ResultGuarantee,
-    SummaryExpr, SummaryNode, SummarySchema,
+    validate_execution_data_states, ExecutionDataState, ExecutionDataStateError, PostASAPNode,
+    ResultGuarantee, SummaryExpr, SummarySchema,
 };
 use super::{
     BinaryOperator, CandidateCompleteness, ExecutionTiming, GroupingStrategy, SketchQuery,
     SummaryFamilyType, SummaryUpdate, ValueOperation,
 };
-use crate::pre_asap::{ColumnRef, JoinKind, Predicate, QueryExpr, Reduction};
+use crate::pre_asap::{ColumnRef, JoinKind, PreASAPNode, Predicate, Reduction};
 use thiserror::Error;
 
 pub const POST_ASAP_DAG_WIRE_VERSION: u32 = 5;
@@ -51,7 +51,7 @@ pub struct PostAsapNodeId(pub u32);
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum PostAsapOperatorPayload {
     Fallback {
-        expression: QueryExpr,
+        expression: PreASAPNode,
     },
     Binary {
         operator: BinaryOperator,
@@ -110,7 +110,7 @@ pub struct PostAsapDagEdge {
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct PostAsapDag {
+pub struct PostASAPDAGTransport {
     pub nodes: Vec<PostAsapDagNode>,
     pub edges: Vec<PostAsapDagEdge>,
     /// Semantic workload root. Physical query/precompute sinks are selected
@@ -123,9 +123,9 @@ pub struct PostAsapDag {
 /// Process boundaries exchange this envelope and call [`Self::validate`].
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct PostAsapDagDocument {
+pub struct PostASAPDAGDocument {
     pub schema_version: u32,
-    pub dag: PostAsapDag,
+    pub dag: PostASAPDAGTransport,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
@@ -167,8 +167,8 @@ pub enum PostAsapDagValidationError {
     SummaryGroupingMismatch { node: PostAsapNodeId },
 }
 
-impl PostAsapDagDocument {
-    pub fn new(dag: PostAsapDag) -> Self {
+impl PostASAPDAGDocument {
+    pub fn new(dag: PostASAPDAGTransport) -> Self {
         Self {
             schema_version: POST_ASAP_DAG_WIRE_VERSION,
             dag,
@@ -185,7 +185,7 @@ impl PostAsapDagDocument {
     }
 }
 
-impl PostAsapDag {
+impl PostASAPDAGTransport {
     /// Assign execution phases without changing operator semantics. Phase choices
     /// do not prove deployment support: callers must bind concrete implementations
     /// and storage boundaries before installing this plan.
@@ -338,36 +338,36 @@ impl PostAsapDag {
 /// together with their physical materialization/query IDs.
 #[derive(Debug, Clone)]
 pub struct PostAsapNodeIdentityMap {
-    nodes_by_id: Vec<Rc<SummaryNode>>,
+    nodes_by_id: Vec<Rc<PostASAPNode>>,
 }
 
 impl PostAsapNodeIdentityMap {
-    pub fn node_id(&self, node: &Rc<SummaryNode>) -> Option<PostAsapNodeId> {
+    pub fn node_id(&self, node: &Rc<PostASAPNode>) -> Option<PostAsapNodeId> {
         self.nodes_by_id
             .iter()
             .position(|candidate| Rc::ptr_eq(candidate, node))
             .map(|id| PostAsapNodeId(id as u32))
     }
 
-    pub fn summary_node(&self, id: PostAsapNodeId) -> Option<&Rc<SummaryNode>> {
+    pub fn summary_node(&self, id: PostAsapNodeId) -> Option<&Rc<PostASAPNode>> {
         self.nodes_by_id.get(id.0 as usize)
     }
 }
 
 #[derive(Debug, Clone)]
 pub struct PostAsapDagCompilation {
-    pub dag: PostAsapDag,
+    pub dag: PostASAPDAGTransport,
     pub node_ids: PostAsapNodeIdentityMap,
 }
 
 pub fn compile_post_asap_dag(
-    root: &Rc<SummaryNode>,
-) -> Result<PostAsapDag, ExecutionDataStateError> {
+    root: &Rc<PostASAPNode>,
+) -> Result<PostASAPDAGTransport, ExecutionDataStateError> {
     Ok(compile_post_asap_dag_with_node_ids(root)?.dag)
 }
 
 pub fn compile_post_asap_dag_with_node_ids(
-    root: &Rc<SummaryNode>,
+    root: &Rc<PostASAPNode>,
 ) -> Result<PostAsapDagCompilation, ExecutionDataStateError> {
     let assignment = validate_execution_data_states(root)?;
     let mut nodes = Vec::new();
@@ -376,17 +376,17 @@ pub fn compile_post_asap_dag_with_node_ids(
     let mut nodes_by_id = Vec::new();
 
     fn visit(
-        node: &Rc<SummaryNode>,
+        node: &Rc<PostASAPNode>,
         assignment: &super::ExecutionDataStateAssignment,
-        ids: &mut HashMap<*const SummaryNode, PostAsapNodeId>,
+        ids: &mut HashMap<*const PostASAPNode, PostAsapNodeId>,
         nodes: &mut Vec<PostAsapDagNode>,
         edges: &mut Vec<PostAsapDagEdge>,
-        nodes_by_id: &mut Vec<Rc<SummaryNode>>,
+        nodes_by_id: &mut Vec<Rc<PostASAPNode>>,
     ) -> PostAsapNodeId {
         if let Some(id) = ids.get(&Rc::as_ptr(node)) {
             return *id;
         }
-        let children: Vec<(&Rc<SummaryNode>, EdgeRole)> = match &node.expr {
+        let children: Vec<(&Rc<PostASAPNode>, EdgeRole)> = match &node.expr {
             SummaryExpr::KeepPreAsap(_) => vec![],
             SummaryExpr::BinaryOp { lhs, rhs, .. } => {
                 vec![(lhs, EdgeRole::Left), (rhs, EdgeRole::Right)]
@@ -553,7 +553,7 @@ pub fn compile_post_asap_dag_with_node_ids(
         &mut edges,
         &mut nodes_by_id,
     );
-    let dag = PostAsapDag { nodes, edges, root };
+    let dag = PostASAPDAGTransport { nodes, edges, root };
     dag.validate()
         .expect("compiler emits a valid post-ASAP DAG");
     Ok(PostAsapDagCompilation {
@@ -570,7 +570,7 @@ mod tests {
         SummaryUpdate, ValueOperation,
     };
     use crate::pre_asap::schema::{Column, Schema};
-    use crate::pre_asap::{ColumnRef, DataType, QueryExpr, Reduction, Source};
+    use crate::pre_asap::{ColumnRef, DataType, PreASAPNode, Reduction, Source};
     use std::collections::BTreeMap;
 
     #[test]
@@ -578,10 +578,10 @@ mod tests {
         use crate::post_asap::DataPrimitive;
         use crate::pre_asap::{ArithmeticOpKind, BinaryOpKind, JoinKind, Predicate, ScalarValue};
         let family = SummaryFamilyType::ExactAggregate(ExactKind::Sum, ExactParams::Sum);
-        let predicate = Predicate(Rc::new(QueryExpr::Literal(ScalarValue::Boolean(true))));
+        let predicate = Predicate(Rc::new(PreASAPNode::Literal(ScalarValue::Boolean(true))));
         let payloads = vec![
             PostAsapOperatorPayload::Fallback {
-                expression: QueryExpr::Literal(ScalarValue::Int64(1)),
+                expression: PreASAPNode::Literal(ScalarValue::Int64(1)),
             },
             PostAsapOperatorPayload::Binary {
                 operator: BinaryOperator {
@@ -636,7 +636,7 @@ mod tests {
                 | PostAsapOperatorPayload::SummaryDelete { .. }
                 | PostAsapOperatorPayload::SummaryMerge => DataPrimitive::SummaryState,
             };
-            let dag = PostAsapDag {
+            let dag = PostASAPDAGTransport {
                 root: PostAsapNodeId(0),
                 edges: vec![],
                 nodes: vec![PostAsapDagNode {
@@ -665,7 +665,10 @@ mod tests {
                 assert_eq!(placed.nodes[0].output_state.timing, phase);
                 let wire = serde_json::to_value(&placed).unwrap();
                 assert!(wire["nodes"][0]["payload"].get("timing").is_none());
-                assert_eq!(serde_json::from_value::<PostAsapDag>(wire).unwrap(), placed);
+                assert_eq!(
+                    serde_json::from_value::<PostASAPDAGTransport>(wire).unwrap(),
+                    placed
+                );
             }
             assert!(dag.with_execution_phases(&BTreeMap::new()).is_err());
         }
@@ -683,14 +686,14 @@ mod tests {
             .map(|id| PostAsapDagNode {
                 id: PostAsapNodeId(id),
                 payload: PostAsapOperatorPayload::Fallback {
-                    expression: QueryExpr::Literal(ScalarValue::Int64(1)),
+                    expression: PreASAPNode::Literal(ScalarValue::Int64(1)),
                 },
                 output_state: ExecutionDataState::QUERY_ROWS,
                 output_schema: schema.clone(),
                 guarantee: None,
             })
             .collect();
-        let dag = PostAsapDag {
+        let dag = PostASAPDAGTransport {
             nodes,
             root: PostAsapNodeId(1),
             edges: vec![PostAsapDagEdge {
@@ -725,12 +728,12 @@ mod tests {
 
     #[test]
     fn exports_summary_over_summary_as_typed_precompute_edges() {
-        let scan = Rc::new(QueryExpr::Scan {
+        let scan = Rc::new(PreASAPNode::Scan {
             source: Source::TimeSeries { metric: "m".into() },
             predicates: vec![],
             schema: Schema::new(vec![Column::new("value", DataType::Float64, false)]),
         });
-        let raw = Rc::new(SummaryNode {
+        let raw = Rc::new(PostASAPNode {
             expr: SummaryExpr::KeepPreAsap(scan),
             schema: SummarySchema {
                 fields: vec![SummaryField {
@@ -742,9 +745,9 @@ mod tests {
             },
             guarantee: None,
         });
-        let make_agg = |child: Rc<SummaryNode>, kind, params| {
+        let make_agg = |child: Rc<PostASAPNode>, kind, params| {
             let family = SummaryFamilyType::ExactAggregate(kind, params);
-            Rc::new(SummaryNode {
+            Rc::new(PostASAPNode {
                 expr: SummaryExpr::SummaryAgg {
                     child,
                     family: family.clone(),
@@ -765,7 +768,7 @@ mod tests {
         };
         let inner = make_agg(raw, ExactKind::Sum, ExactParams::Sum);
         let outer = make_agg(Rc::clone(&inner), ExactKind::Sum, ExactParams::Sum);
-        let root = Rc::new(SummaryNode {
+        let root = Rc::new(PostASAPNode {
             expr: SummaryExpr::ValueOperation {
                 child: outer,
                 operation: ValueOperation::FinalizeExactAccumulator,
@@ -814,14 +817,14 @@ mod tests {
             SummaryFamilyType::ExactAggregate(ExactKind::Sum, _)
         ));
         let encoded = serde_json::to_string(&dag).expect("serialize post-ASAP DAG");
-        let decoded: PostAsapDag =
+        let decoded: PostASAPDAGTransport =
             serde_json::from_str(&encoded).expect("deserialize post-ASAP DAG");
         assert_eq!(decoded, dag);
-        let document = PostAsapDagDocument::new(decoded);
+        let document = PostASAPDAGDocument::new(decoded);
         document.validate().unwrap();
         let mut invalid = serde_json::to_value(&document).unwrap();
         invalid["dag"]["nodes"][0]["operator"] = serde_json::json!("Binary");
-        assert!(serde_json::from_value::<PostAsapDagDocument>(invalid).is_err());
+        assert!(serde_json::from_value::<PostASAPDAGDocument>(invalid).is_err());
         assert!(document.dag.nodes.iter().all(|node| {
             let wire = serde_json::to_value(node).unwrap();
             wire.get("operator").is_none() && wire["payload"]["kind"].is_string()
@@ -834,7 +837,7 @@ mod tests {
         );
         let mut unknown = serde_json::to_value(&document).unwrap();
         unknown["unexpected"] = serde_json::json!(true);
-        assert!(serde_json::from_value::<PostAsapDagDocument>(unknown).is_err());
+        assert!(serde_json::from_value::<PostASAPDAGDocument>(unknown).is_err());
         assert!(matches!(
             dag.nodes[2].payload,
             PostAsapOperatorPayload::SummaryAgg {

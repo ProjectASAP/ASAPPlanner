@@ -3,14 +3,14 @@
 use asap_aware_mapping::{Replacement, ReplacementStrategy, SketchAlgorithmStrategy, TargetSubDAG};
 use asap_integration_tests::fixtures::lower_promql;
 use asap_types::post_asap::{
-    compile_post_asap_dag, ExactKind, SummaryExpr, SummaryFamilyType, SummaryInputExpr,
-    SummaryNode, SummaryUpdate,
+    compile_post_asap_dag, ExactKind, PostASAPNode, SummaryExpr, SummaryFamilyType,
+    SummaryInputExpr, SummaryUpdate,
 };
 use asap_types::pre_asap::{ColumnRef, Reduction};
 use asap_types::types::AccuracyTarget;
 use std::rc::Rc;
 
-fn plan(query: &str, accuracy: AccuracyTarget) -> Rc<SummaryNode> {
+fn plan(query: &str, accuracy: AccuracyTarget) -> Rc<PostASAPNode> {
     let pre = Rc::new(lower_promql(query, accuracy).unwrap());
     SketchAlgorithmStrategy::default_cost_model()
         .replacements(&TargetSubDAG::new(&pre))
@@ -21,7 +21,7 @@ fn plan(query: &str, accuracy: AccuracyTarget) -> Rc<SummaryNode> {
         })
         .unwrap_or_else(|| asap_aware_mapping::replacement::keep_pre_asap(&pre).unwrap())
 }
-fn aggregate(node: &SummaryNode) -> (&SummaryFamilyType, &SummaryUpdate, &Reduction) {
+fn aggregate(node: &PostASAPNode) -> (&SummaryFamilyType, &SummaryUpdate, &Reduction) {
     match &node.expr {
         SummaryExpr::SummaryAgg {
             family,

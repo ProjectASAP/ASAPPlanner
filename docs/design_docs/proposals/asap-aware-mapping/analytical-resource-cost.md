@@ -39,7 +39,7 @@ an unavailable estimate, never an assumed zero or a structural-cost fallback.
 The implementation keeps five layers distinct:
 
 - physical query lowering (`query_physical_lowering`), which recursively maps
-  supported resolved `QueryExpr` operators to the physical representation;
+  supported resolved `PreASAPNode` operators to the physical representation;
 - physical evidence (`physical_operator_statistics`), which pairs every
   physical operator with the statistics required by its formula;
 - analytical estimation (`analytical_cost`), which composes any evidenced DAG
@@ -279,7 +279,7 @@ resource formula.
 Neither logical IR is the statistics schema:
 
 ```text
-pre-ASAP QueryExpr  ─┐
+pre-ASAP PreASAPNode  ─┐
                      ├─ physical lowering ─> PhysicalDagNode/PhysicalOperator
 post-ASAP SummaryExpr┘                              │
                                                     v
@@ -590,7 +590,7 @@ deduplicated by physical identity.
 
 ### Query-DAG lowering and statistics contract
 
-`lower_query_physical_dag` recursively lowers a resolved `Rc<QueryExpr>` and
+`lower_query_physical_dag` recursively lowers a resolved `Rc<PreASAPNode>` and
 returns an `EvidenceBackedPhysicalDag` containing both its nodes and root ID.
 It consumes the existing query and physical-operator enums; it does not
 introduce a parallel logical operator vocabulary. For every occurrence, the lowerer sends a
@@ -634,7 +634,7 @@ The lowering validates every physical edge before costing:
 
 The supported mappings are:
 
-| Existing `QueryExpr` shape | Physical DAG |
+| Existing `PreASAPNode` shape | Physical DAG |
 |---|---|
 | Scan without predicates | Scan |
 | Scan with pushed predicates | Scan → Filter |
@@ -668,7 +668,7 @@ also uses the bound left and right output schemas to prove that every equality
 compares one column from each side; same-side or out-of-range `ColumnId`s fail
 closed.
 
-An `Rc<QueryExpr>` address is not physical identity. Every logical occurrence
+An `Rc<PreASAPNode>` address is not physical identity. Every logical occurrence
 is independent unless the provider returns the same non-empty `physical_id`.
 Repeated IDs deduplicate only when operator, children, coverage, statistics,
 and buffer evidence are identical; conflicting reuse fails closed. This
@@ -803,8 +803,8 @@ horizon. This deliberately avoids reconstructing raw work with a special-case
 `input_rows × cpu_per_row` formula that would omit joins, windows, sorts, or
 other operators.
 
-Flat single-summary evidence is bound to the exact `SummaryNode` and raw
-`QueryExpr` identities for which it was produced. It cannot be reused for a
+Flat single-summary evidence is bound to the exact `PostASAPNode` and raw
+`PreASAPNode` identities for which it was produced. It cannot be reused for a
 structurally similar node or for multiple summary states. A complete
 multi-summary `SummaryExpr` DAG requires per-node physical evidence and
 physical-identity deduplication.

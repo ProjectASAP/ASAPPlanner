@@ -13,7 +13,7 @@ Only operations that are semantically relevant to answering the query and select
 
 > Notes: **SQL and PromQL use different schema models**. SQL typically uses a closed schema, where tables, columns, and types are predefined, while PromQL uses an open (schemaless) schema, where metrics and labels can evolve without a fixed table schema. Closed schemas provide stronger structure and validation; open schemas provide greater flexibility and makes it easier to evolve or ingest diverse data, but can require more care around naming conventions, label cardinality, and query consistency.
 
-The pre-ASAP IR is defined using the `QueryExpr` enum. We discuss some of important enum types below.
+The pre-ASAP IR is defined using the `PreASAPNode` enum. We discuss some of important enum types below.
 
 ## Node index
 
@@ -464,7 +464,7 @@ did.
 up > 1
 ```
 
-**Fields:** a single unnamed child `QueryExpr` — the wrapped scalar sub-expression.
+**Fields:** a single unnamed child `PreASAPNode` — the wrapped scalar sub-expression.
 
 ### EvalTimestamp
 
@@ -488,7 +488,7 @@ patterns (`up or vector(0)`).
 vector(1)
 ```
 
-**Fields:** a single unnamed child `QueryExpr` — the scalar-typed expression being promoted to a vector.
+**Fields:** a single unnamed child `PreASAPNode` — the scalar-typed expression being promoted to a vector.
 
 ### PromqlScalarFromVector
 
@@ -499,7 +499,7 @@ its value (NaN at runtime if the input isn't exactly one series).
 scalar(up)
 ```
 
-**Fields:** a single unnamed child `QueryExpr` — the single-series vector being collapsed to a scalar.
+**Fields:** a single unnamed child `PreASAPNode` — the single-series vector being collapsed to a scalar.
 
 ### PromqlRelabel
 

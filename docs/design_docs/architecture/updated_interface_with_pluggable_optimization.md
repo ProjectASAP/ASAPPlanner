@@ -89,7 +89,7 @@ pub enum PlanOutput {
 
 pub struct QueryPlan {
     pub entry_index: usize,        // index into QueryWorkload::entries()
-    pub dag: Rc<SummaryNode>,
+    pub dag: Rc<PostASAPNode>,
 }
 
 pub struct QueryLifecyclePlan {
@@ -106,10 +106,10 @@ through this single-selection result. `PlanOutput` is not a replacement for
 `CandidatePostASAPDAGs`: candidates the pass dropped are
 not in it, so a deployment that prices candidates itself enumerates the full
 candidate collection. Each selected
-logical graph is a `PostASAPDAG`, currently represented by `Rc<SummaryNode>`.
+logical graph is a `PostASAPDAG`, currently represented by `Rc<PostASAPNode>`.
 The lifecycle layer alone supplies timing; `DagWithLifecycle` includes that
 choice, while `Dag` does not. Physical compilation then produces a
-`PhysicalDAG` (currently `CompiledPhysicalDag`) and cuts a `PhysicalCandidate`.
+`PhysicalDAG` (currently `PhysicalDAG`) and cuts a `PhysicalCandidate`.
 These are design names, not renamed Rust APIs. See
 [output layers](input-output-workflow.md#output-layers).
 

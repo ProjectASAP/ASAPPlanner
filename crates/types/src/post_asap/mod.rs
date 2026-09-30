@@ -8,7 +8,7 @@
 //! [`sketch::SamplingKind`]/[`sketch::SamplingParams`],
 //! [`sketch::WaveletKind`]/[`sketch::WaveletParams`],
 //! [`sketch::StatModelKind`]/[`sketch::StatModelParams`]), and
-//! [`expr::SummaryNode`] / [`expr::SummaryExpr`] describe the summary
+//! [`expr::PostASAPNode`] / [`expr::SummaryExpr`] describe the summary
 //! computation. The `Sketch` family is the one exception to that
 //! one-pair-per-family shape: it nests a third level, [`sketch::SketchKind`]
 //! (quantile/cardinality/frequency/top-k), which itself carries the
@@ -48,7 +48,8 @@ pub use execution_data_state::{
     ExecutionDataStateError, ExecutionTiming,
 };
 pub use expr::{
-    BinaryOperator, CandidateCompleteness, ExactOperation, SummaryExpr, SummaryNode, ValueOperation,
+    BinaryOperator, CandidateCompleteness, ExactOperation, PostASAPNode, SummaryExpr,
+    ValueOperation,
 };
 pub use guarantee::{
     AccuracyError, BoundExpr, CompositionOperator, ErrorMetric, GuaranteeSource, ProbabilityExpr,
@@ -56,7 +57,7 @@ pub use guarantee::{
 };
 pub use post_asap_dag::{
     compile_post_asap_dag, compile_post_asap_dag_with_node_ids, EdgeRole,
-    GroupingEdgeCompatibility, PostAsapDag, PostAsapDagCompilation, PostAsapDagDocument,
+    GroupingEdgeCompatibility, PostASAPDAGDocument, PostASAPDAGTransport, PostAsapDagCompilation,
     PostAsapDagEdge, PostAsapDagNode, PostAsapDagValidationError, PostAsapNodeId,
     PostAsapNodeIdentityMap, PostAsapOperatorPayload, WindowEdgeCompatibility,
     POST_ASAP_DAG_WIRE_VERSION,
@@ -81,3 +82,7 @@ pub use summary_window::{
     plan_pane_phase, validate_pane_coverage, PaneCoverageError, PaneLayout, SummaryWindowFramework,
     WindowEdgeCoverage,
 };
+
+/// Authoritative shared logical graph; lifecycle timing is an assignment over
+/// its nodes, not a second computation graph.
+pub type PostASAPDAG = std::rc::Rc<PostASAPNode>;

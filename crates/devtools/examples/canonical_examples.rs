@@ -1,6 +1,6 @@
 // cargo run -p asap-lower --example canonical_examples
 //
-// One-off: pretty-print the QueryExpr for one canonical query per variant,
+// One-off: pretty-print the PreASAPNode for one canonical query per variant,
 // plus custom Join/SetOp/Dedup/CTE probes, to eyeball the actual shape.
 
 use asap_devtools::lower_promql_with_data_ingestion_interval;

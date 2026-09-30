@@ -200,16 +200,16 @@ mod tests {
 #[cfg(test)]
 mod projection_tests {
     use super::*;
-    use crate::pre_asap::{Column, ProjectItem, QueryExpr, ScalarValue, Schema, Source};
+    use crate::pre_asap::{Column, PreASAPNode, ProjectItem, ScalarValue, Schema, Source};
     use std::rc::Rc;
-    fn project(expr: QueryExpr) -> QueryExpr {
-        QueryExpr::Project {
+    fn project(expr: PreASAPNode) -> PreASAPNode {
+        PreASAPNode::Project {
             cols: vec![ProjectItem {
                 alias: Some("result".into()),
                 expr,
             }],
             qualifier: None,
-            child: Rc::new(QueryExpr::Scan {
+            child: Rc::new(PreASAPNode::Scan {
                 source: Source::Table {
                     table_ref: "t".into(),
                 },
@@ -223,9 +223,9 @@ mod projection_tests {
     }
     #[test]
     fn canonical_projection_uses_map_signature_and_rejects_invalid_arity() {
-        let map = QueryExpr::FunctionCall {
+        let map = PreASAPNode::FunctionCall {
             name: "map".into(),
-            args: vec![QueryExpr::Column(0), QueryExpr::Column(1)],
+            args: vec![PreASAPNode::Column(0), PreASAPNode::Column(1)],
         };
         let schema = project(map.clone()).output_schema().unwrap();
         assert_eq!(
@@ -237,17 +237,20 @@ mod projection_tests {
             }
         );
         assert!(!schema.columns[0].nullable);
-        let lookup = QueryExpr::FunctionCall {
+        let lookup = PreASAPNode::FunctionCall {
             name: "asap_map_access".into(),
-            args: vec![map, QueryExpr::Literal(ScalarValue::Utf8("missing".into()))],
+            args: vec![
+                map,
+                PreASAPNode::Literal(ScalarValue::Utf8("missing".into())),
+            ],
         };
         assert_eq!(
             project(lookup).output_schema().unwrap().columns[0],
             Column::new("result", DataType::Int64, true)
         );
-        assert!(project(QueryExpr::FunctionCall {
+        assert!(project(PreASAPNode::FunctionCall {
             name: "map".into(),
-            args: vec![QueryExpr::Column(0)]
+            args: vec![PreASAPNode::Column(0)]
         })
         .output_schema()
         .is_err());
@@ -260,10 +263,10 @@ mod projection_tests {
 /// Dynamic/negative/defaulted selectors and nullable containers are intentionally
 /// unsupported here; this is not a claim of complete native tupleElement support.
 pub fn struct_field_type(
-    args: &[super::QueryExpr],
+    args: &[super::PreASAPNode],
     schema: &super::Schema,
 ) -> Result<(DataType, bool), String> {
-    use super::{QueryExpr, ScalarValue};
+    use super::{PreASAPNode, ScalarValue};
     let [input, selector] = args else {
         return Err("struct field access requires a struct and constant selector".into());
     };
@@ -277,11 +280,13 @@ pub fn struct_field_type(
         return Err("struct field access requires a Struct input".into());
     };
     let field = match selector {
-        QueryExpr::Literal(ScalarValue::Int64(index)) if *index > 0 => usize::try_from(*index - 1)
-            .ok()
-            .and_then(|index| fields.get(index))
-            .ok_or("struct field ordinal is out of bounds")?,
-        QueryExpr::Literal(ScalarValue::Utf8(name)) => {
+        PreASAPNode::Literal(ScalarValue::Int64(index)) if *index > 0 => {
+            usize::try_from(*index - 1)
+                .ok()
+                .and_then(|index| fields.get(index))
+                .ok_or("struct field ordinal is out of bounds")?
+        }
+        PreASAPNode::Literal(ScalarValue::Utf8(name)) => {
             let mut matches = fields.iter().filter(|field| field.name == *name);
             let field = matches.next().ok_or("struct field name does not exist")?;
             if matches.next().is_some() {
@@ -301,7 +306,7 @@ pub fn struct_field_type(
 #[cfg(test)]
 mod struct_field_tests {
     use super::*;
-    use crate::pre_asap::{Column, QueryExpr, ScalarValue, Schema};
+    use crate::pre_asap::{Column, PreASAPNode, ScalarValue, Schema};
     fn schema() -> Schema {
         Schema::new(vec![Column::new(
             "record",
@@ -320,23 +325,23 @@ mod struct_field_tests {
             false,
         )])
     }
-    fn access(selector: QueryExpr) -> QueryExpr {
-        QueryExpr::FunctionCall {
+    fn access(selector: PreASAPNode) -> PreASAPNode {
+        PreASAPNode::FunctionCall {
             name: "asap_struct_field".into(),
-            args: vec![QueryExpr::Column(0), selector],
+            args: vec![PreASAPNode::Column(0), selector],
         }
     }
     #[test]
     fn field_access_reuses_nested_field_type_and_nullability() {
         let schema = schema();
         assert_eq!(
-            access(QueryExpr::Literal(ScalarValue::Int64(1)))
+            access(PreASAPNode::Literal(ScalarValue::Int64(1)))
                 .scalar_type(&schema)
                 .unwrap(),
             (DataType::Int64, false)
         );
-        let named = access(QueryExpr::Literal(ScalarValue::Utf8("values".into())));
-        let ordinal = access(QueryExpr::Literal(ScalarValue::Int64(2)));
+        let named = access(PreASAPNode::Literal(ScalarValue::Utf8("values".into())));
+        let ordinal = access(PreASAPNode::Literal(ScalarValue::Int64(2)));
         assert_eq!(
             named.scalar_type(&schema).unwrap(),
             ordinal.scalar_type(&schema).unwrap()
@@ -350,18 +355,18 @@ mod struct_field_tests {
                 true
             )
         );
-        let roundtrip: QueryExpr =
+        let roundtrip: PreASAPNode =
             serde_json::from_str(&serde_json::to_string(&named).unwrap()).unwrap();
         assert_eq!(roundtrip, named);
     }
     #[test]
     fn unsupported_field_access_is_an_error_not_placeholder_typing() {
         for selector in [
-            QueryExpr::Column(0),
-            QueryExpr::Literal(ScalarValue::Int64(0)),
-            QueryExpr::Literal(ScalarValue::Int64(-1)),
-            QueryExpr::Literal(ScalarValue::Int64(3)),
-            QueryExpr::Literal(ScalarValue::Utf8("missing".into())),
+            PreASAPNode::Column(0),
+            PreASAPNode::Literal(ScalarValue::Int64(0)),
+            PreASAPNode::Literal(ScalarValue::Int64(-1)),
+            PreASAPNode::Literal(ScalarValue::Int64(3)),
+            PreASAPNode::Literal(ScalarValue::Utf8("missing".into())),
         ] {
             assert!(access(selector).scalar_type(&schema()).is_err());
         }
@@ -369,12 +374,12 @@ mod struct_field_tests {
         if let DataType::Struct { fields } = &mut ambiguous.columns[0].dtype {
             fields.push(Column::new("ts", DataType::Utf8, false));
         }
-        assert!(access(QueryExpr::Literal(ScalarValue::Utf8("ts".into())))
+        assert!(access(PreASAPNode::Literal(ScalarValue::Utf8("ts".into())))
             .scalar_type(&ambiguous)
             .is_err());
         let mut nullable = schema();
         nullable.columns[0].nullable = true;
-        assert!(access(QueryExpr::Literal(ScalarValue::Int64(1)))
+        assert!(access(PreASAPNode::Literal(ScalarValue::Int64(1)))
             .scalar_type(&nullable)
             .is_err());
     }
@@ -387,10 +392,10 @@ mod struct_field_tests {
 /// behavior depends on whether the input array is constant. Nullable containers
 /// are unsupported; nullable indices produce nullable results.
 pub fn element_access_type(
-    args: &[super::QueryExpr],
+    args: &[super::PreASAPNode],
     schema: &super::Schema,
 ) -> Result<(DataType, bool), String> {
-    use super::{QueryExpr, ScalarValue};
+    use super::{PreASAPNode, ScalarValue};
     let [input, index] = args else {
         return Err("element access requires a collection and index".into());
     };
@@ -405,7 +410,7 @@ pub fn element_access_type(
             if !matches!(key.0, DataType::Int64 | DataType::Null) {
                 return Err("List index must have integer type".into());
             }
-            if matches!(index, QueryExpr::Literal(ScalarValue::Int64(0))) {
+            if matches!(index, PreASAPNode::Literal(ScalarValue::Int64(0))) {
                 return Err(
                     "literal zero List index is unsupported without constant-array proof".into(),
                 );
@@ -422,11 +427,11 @@ pub fn element_access_type(
 #[cfg(test)]
 mod element_access_tests {
     use super::*;
-    use crate::pre_asap::{Column, QueryExpr, ScalarValue, Schema};
-    fn access(index: QueryExpr) -> QueryExpr {
-        QueryExpr::FunctionCall {
+    use crate::pre_asap::{Column, PreASAPNode, ScalarValue, Schema};
+    fn access(index: PreASAPNode) -> PreASAPNode {
+        PreASAPNode::FunctionCall {
             name: "asap_element_access".into(),
-            args: vec![QueryExpr::Column(0), index],
+            args: vec![PreASAPNode::Column(0), index],
         }
     }
     #[test]
@@ -449,34 +454,34 @@ mod element_access_tests {
         ]);
         for index in [1, -1, 100] {
             assert_eq!(
-                access(QueryExpr::Literal(ScalarValue::Int64(index)))
+                access(PreASAPNode::Literal(ScalarValue::Int64(index)))
                     .scalar_type(&schema)
                     .unwrap(),
                 (element.clone(), false)
             );
         }
         assert_eq!(
-            access(QueryExpr::Column(1)).scalar_type(&schema).unwrap(),
+            access(PreASAPNode::Column(1)).scalar_type(&schema).unwrap(),
             (element.clone(), true)
         );
-        assert!(access(QueryExpr::Literal(ScalarValue::Int64(0)))
+        assert!(access(PreASAPNode::Literal(ScalarValue::Int64(0)))
             .scalar_type(&schema)
             .is_err());
-        assert!(access(QueryExpr::Literal(ScalarValue::Float64(1.0)))
+        assert!(access(PreASAPNode::Literal(ScalarValue::Float64(1.0)))
             .scalar_type(&schema)
             .is_err());
-        let nested = QueryExpr::FunctionCall {
+        let nested = PreASAPNode::FunctionCall {
             name: "asap_struct_field".into(),
             args: vec![
-                access(QueryExpr::Literal(ScalarValue::Int64(1))),
-                QueryExpr::Literal(ScalarValue::Int64(2)),
+                access(PreASAPNode::Literal(ScalarValue::Int64(1))),
+                PreASAPNode::Literal(ScalarValue::Int64(2)),
             ],
         };
         assert_eq!(
             nested.scalar_type(&schema).unwrap(),
             (DataType::Float64, true)
         );
-        let roundtrip: QueryExpr =
+        let roundtrip: PreASAPNode =
             serde_json::from_value(serde_json::to_value(&nested).unwrap()).unwrap();
         assert_eq!(roundtrip, nested);
     }
@@ -491,10 +496,10 @@ mod element_access_tests {
             },
             false,
         )]);
-        let key = QueryExpr::Literal(ScalarValue::Utf8("k".into()));
-        let legacy = QueryExpr::FunctionCall {
+        let key = PreASAPNode::Literal(ScalarValue::Utf8("k".into()));
+        let legacy = PreASAPNode::FunctionCall {
             name: "asap_map_access".into(),
-            args: vec![QueryExpr::Column(0), key.clone()],
+            args: vec![PreASAPNode::Column(0), key.clone()],
         };
         assert_eq!(
             access(key).scalar_type(&schema).unwrap(),

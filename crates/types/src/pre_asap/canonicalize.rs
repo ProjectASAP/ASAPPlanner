@@ -1,4 +1,4 @@
-//! Shared post-lowering canonicalization of the resolved [`QueryExpr`].
+//! Shared post-lowering canonicalization of the resolved [`PreASAPNode`].
 //!
 //! Both language front ends funnel through [`resolve_root`](super::resolve::resolve_root),
 //! which runs this pass over the resolved tree. Its job is to erase
@@ -26,17 +26,17 @@ use std::rc::Rc;
 
 use super::agg_intent::{topk, AggIntent};
 use super::expr_ir::{CompareOpKind, ScalarValue};
-use super::query_expr::{Predicate, QueryExpr, Reduction, SortKey, WindowFuncKind};
+use super::query_expr::{PreASAPNode, Predicate, Reduction, SortKey, WindowFuncKind};
 use crate::types::AccuracyTarget;
 
 /// Rewrite `expr` into its canonical form (bottom-up). Idempotent: a tree that
 /// is already canonical is returned unchanged.
-pub fn canonicalize(mut expr: QueryExpr) -> QueryExpr {
+pub fn canonicalize(mut expr: PreASAPNode) -> PreASAPNode {
     canon(&mut expr);
     expr
 }
 
-fn canon(expr: &mut QueryExpr) {
+fn canon(expr: &mut PreASAPNode) {
     // A `Concat` asserting a caller-proven `discriminator_unique_key` (issue
     // #228) had that key's `ColumnId`s resolved, in `resolve.rs`, against
     // exactly the first branch's output schema *as it stood before this
@@ -50,7 +50,7 @@ fn canon(expr: &mut QueryExpr) {
     // was actually resolved against, right here, before recursing into the
     // children — this is the exact tree state `resolve.rs` saw.
     let discriminator_branch_schema_before = match expr {
-        QueryExpr::Concat {
+        PreASAPNode::Concat {
             children,
             discriminator_unique_key: Some(_),
         } => children.first().and_then(|c| c.output_schema().ok()),
@@ -71,7 +71,7 @@ fn canon(expr: &mut QueryExpr) {
     // `ConcatDiscriminatorKey`'s soundness doc — so this errs conservatively:
     // any difference at all (not just a column-count/type change) drops the
     // key, including the schema becoming undecidable in either direction.
-    if let QueryExpr::Concat {
+    if let PreASAPNode::Concat {
         children,
         discriminator_unique_key: key @ Some(_),
     } = expr
@@ -94,13 +94,13 @@ fn canon(expr: &mut QueryExpr) {
     }
 }
 
-/// A `&mut QueryExpr` out of a child `Rc<QueryExpr>` — clone-on-write via
+/// A `&mut PreASAPNode` out of a child `Rc<PreASAPNode>` — clone-on-write via
 /// [`Rc::make_mut`]: free (no clone) while `r` is uniquely owned, which is
 /// the overwhelmingly common case (a tree `canonicalize` was just handed by
 /// value); falls back to cloning just *this* node (its own fields — the
 /// grandchildren stay shared `Rc`s, not deep-copied) only when some other
 /// owner still holds the same `Rc`, e.g. a caller that kept its own clone
-/// around (`once.clone()` in `is_idempotent` below — `QueryExpr::clone()` is
+/// around (`once.clone()` in `is_idempotent` below — `PreASAPNode::clone()` is
 /// now a cheap `Rc`-bump, not a deep copy, so that clone shares structure
 /// with `once` until a rewrite here needs to touch it). `Rc::get_mut` would
 /// panic on exactly that case; `make_mut` degrades to a shallow copy instead
@@ -109,18 +109,18 @@ fn canon(expr: &mut QueryExpr) {
 /// subtree from a *different* query, this is also the mechanism that keeps
 /// canonicalizing one query from silently corrupting another's view of the
 /// same shared node.
-fn rc_mut(r: &mut Rc<QueryExpr>) -> &mut QueryExpr {
+fn rc_mut(r: &mut Rc<PreASAPNode>) -> &mut PreASAPNode {
     Rc::make_mut(r)
 }
 
-/// Mutable references to the direct **operator** `QueryExpr` children of a
+/// Mutable references to the direct **operator** `PreASAPNode` children of a
 /// node — `canon`'s own top-down/bottom-up walk only ever visits the
 /// relational skeleton, never descending into a scalar position (`Filter.pred`,
 /// `ProjectItem.expr`, …): none of the three rewrite rules rewrite anything
 /// inside a scalar subtree, so there's nothing to gain by recursing into one,
 /// and every scalar variant (issue #205) hits the catch-all below.
-fn children_mut(expr: &mut QueryExpr) -> Vec<&mut QueryExpr> {
-    use QueryExpr::*;
+fn children_mut(expr: &mut PreASAPNode) -> Vec<&mut PreASAPNode> {
+    use PreASAPNode::*;
     match expr {
         // `PromqlScalarBridge`'s child is a scalar-sub-language node (issue
         // #220), not the relational skeleton — same "no children to recurse
@@ -165,9 +165,9 @@ fn children_mut(expr: &mut QueryExpr) -> Vec<&mut QueryExpr> {
 /// `Limit { Sort { [Project] Aggregate([Count | Sum]) } }` and rewrite it to
 /// the canonical heavy-hitter `Aggregate([TopK])` over the explicit inner
 /// aggregate. Returns `None` when the shape does not match.
-fn try_promote_additive_top_ranking(expr: &QueryExpr) -> Option<QueryExpr> {
+fn try_promote_additive_top_ranking(expr: &PreASAPNode) -> Option<PreASAPNode> {
     // Limit k, no offset (an OFFSET means "not the top k").
-    let QueryExpr::Limit {
+    let PreASAPNode::Limit {
         n: k,
         offset: 0,
         child,
@@ -176,7 +176,7 @@ fn try_promote_additive_top_ranking(expr: &QueryExpr) -> Option<QueryExpr> {
         return None;
     };
     // A single ordering key on a column.
-    let QueryExpr::Sort {
+    let PreASAPNode::Sort {
         keys,
         partition_by,
         child: sort_child,
@@ -185,7 +185,7 @@ fn try_promote_additive_top_ranking(expr: &QueryExpr) -> Option<QueryExpr> {
         return None;
     };
     let [SortKey {
-        expr: QueryExpr::Column(sort_col),
+        expr: PreASAPNode::Column(sort_col),
         ascending,
         ..
     }] = keys.as_slice()
@@ -197,8 +197,8 @@ fn try_promote_additive_top_ranking(expr: &QueryExpr) -> Option<QueryExpr> {
     // projection (a bare-column SELECT list). Map the sort key through the
     // projection to the aggregate's own output column.
     let (agg_expr, ranked_col) = match sort_child.as_ref() {
-        QueryExpr::Project { cols, child, .. } => {
-            let QueryExpr::Column(underlying) = &cols.get(*sort_col)?.expr else {
+        PreASAPNode::Project { cols, child, .. } => {
+            let PreASAPNode::Column(underlying) = &cols.get(*sort_col)?.expr else {
                 return None;
             };
             (child.as_ref(), *underlying)
@@ -210,7 +210,7 @@ fn try_promote_additive_top_ranking(expr: &QueryExpr) -> Option<QueryExpr> {
     // index `by.len()` (after the group keys). A `PerEntity` reduction has no
     // `by` to rank a measure against — this shape can't be heavy-hitter
     // promoted, so it's a non-match rather than an error.
-    let QueryExpr::Aggregate {
+    let PreASAPNode::Aggregate {
         reduction,
         measures,
         child: aggregate_child,
@@ -243,7 +243,7 @@ fn try_promote_additive_top_ranking(expr: &QueryExpr) -> Option<QueryExpr> {
     // post-ASAP IR has no candidate-sidecar + exact-rerank node, so keep that
     // shape as Sort + Limit instead of treating a sketch estimate as final.
     if matches!(ranked_agg, AggIntent::Sum { .. })
-        && matches!(aggregate_child.as_ref(), QueryExpr::Aggregate { .. })
+        && matches!(aggregate_child.as_ref(), PreASAPNode::Aggregate { .. })
     {
         return None;
     }
@@ -257,7 +257,7 @@ fn try_promote_additive_top_ranking(expr: &QueryExpr) -> Option<QueryExpr> {
     // Outer heavy-hitter `TopK`, grouped by the ranking's partition (empty for a
     // global `ORDER BY … LIMIT k`; the `by` labels for a partitioned `topk by`),
     // over the unchanged inner additive aggregate.
-    Some(QueryExpr::Aggregate {
+    Some(PreASAPNode::Aggregate {
         reduction: Reduction::by(partition_by.to_vec()),
         measures: vec![AggIntent::TopK { k: *k, accuracy }],
         output_names: Vec::new(),
@@ -272,20 +272,20 @@ fn try_promote_additive_top_ranking(expr: &QueryExpr) -> Option<QueryExpr> {
 /// #24). The count-ranked case is then promoted to a heavy-hitter `TopK` by
 /// [`try_promote_additive_top_ranking`], so a SQL `ROW_NUMBER` top-k and the PromQL
 /// `topk by (…)` it mirrors converge on the same canonical shape.
-fn try_rewrite_rownumber_topk(expr: &QueryExpr) -> Option<QueryExpr> {
+fn try_rewrite_rownumber_topk(expr: &PreASAPNode) -> Option<PreASAPNode> {
     // Filter { pred: `Column(rn) <= k` }.
-    let QueryExpr::Filter { pred, child } = expr else {
+    let PreASAPNode::Filter { pred, child } = expr else {
         return None;
     };
     let Predicate(pred_expr) = pred;
-    let QueryExpr::Compare { left, op, right } = pred_expr.as_ref() else {
+    let PreASAPNode::Compare { left, op, right } = pred_expr.as_ref() else {
         return None;
     };
     // `rn <= k` (top-k). `rn < k` would be off-by-one; require `<=`.
     if *op != CompareOpKind::Le {
         return None;
     }
-    let (QueryExpr::Column(rn_col), QueryExpr::Literal(ScalarValue::Int64(k))) =
+    let (PreASAPNode::Column(rn_col), PreASAPNode::Literal(ScalarValue::Int64(k))) =
         (left.as_ref(), right.as_ref())
     else {
         return None;
@@ -297,8 +297,8 @@ fn try_rewrite_rownumber_topk(expr: &QueryExpr) -> Option<QueryExpr> {
     // Optionally strip a passthrough projection (the derived table's SELECT that
     // re-exposes the aggregate columns + rn), mapping the rn column through it.
     let (wf_expr, rn_in_wf) = match child.as_ref() {
-        QueryExpr::Project { cols, child, .. } => {
-            let QueryExpr::Column(underlying) = &cols.get(*rn_col)?.expr else {
+        PreASAPNode::Project { cols, child, .. } => {
+            let PreASAPNode::Column(underlying) = &cols.get(*rn_col)?.expr else {
                 return None;
             };
             (child.as_ref(), *underlying)
@@ -308,7 +308,7 @@ fn try_rewrite_rownumber_topk(expr: &QueryExpr) -> Option<QueryExpr> {
 
     // The filtered column must be a `ROW_NUMBER()` window output — the single
     // column the SQLWindowFunc appends after its input, i.e. the last one.
-    let QueryExpr::SQLWindowFunc {
+    let PreASAPNode::SQLWindowFunc {
         func: WindowFuncKind::RowNumber,
         partition_by,
         order_by,
@@ -328,10 +328,10 @@ fn try_rewrite_rownumber_topk(expr: &QueryExpr) -> Option<QueryExpr> {
 
     // Generic partitioned top-k. The window's ORDER BY keys are relative to its
     // input (`inner`), so they transfer directly to a `Sort` over `inner`.
-    Some(QueryExpr::Limit {
+    Some(PreASAPNode::Limit {
         n: *k as usize,
         offset: 0,
-        child: Rc::new(QueryExpr::Sort {
+        child: Rc::new(PreASAPNode::Sort {
             keys: order_by.clone(),
             partition_by: partition_by.clone(),
             child: Rc::new(inner.as_ref().clone()),
@@ -349,8 +349,8 @@ mod tests {
     use crate::pre_asap::schema::{Column, DataType, Schema};
     use crate::types::AccuracyTarget;
 
-    fn scan() -> QueryExpr {
-        QueryExpr::Scan {
+    fn scan() -> PreASAPNode {
+        PreASAPNode::Scan {
             source: Source::TimeSeries { metric: "m".into() },
             predicates: vec![],
             schema: Schema::with_time_index(
@@ -366,8 +366,8 @@ mod tests {
     }
 
     /// `Aggregate{ by: [1], [Count] }` over the scan — output cols `[service, count]`.
-    fn count_by_service() -> QueryExpr {
-        QueryExpr::Aggregate {
+    fn count_by_service() -> PreASAPNode {
+        PreASAPNode::Aggregate {
             reduction: Reduction::by(vec![1]),
             measures: vec![AggIntent::Count {
                 accuracy: AccuracyTarget::Exact,
@@ -380,33 +380,33 @@ mod tests {
 
     fn desc(col: usize) -> Vec<SortKey> {
         vec![SortKey {
-            expr: QueryExpr::Column(col),
+            expr: PreASAPNode::Column(col),
             ascending: false,
             nulls_first: false,
         }]
     }
 
-    fn limit(n: usize, offset: usize, child: QueryExpr) -> QueryExpr {
-        QueryExpr::Limit {
+    fn limit(n: usize, offset: usize, child: PreASAPNode) -> PreASAPNode {
+        PreASAPNode::Limit {
             n,
             offset,
             child: Rc::new(child),
         }
     }
 
-    fn sort(keys: Vec<SortKey>, child: QueryExpr) -> QueryExpr {
-        QueryExpr::Sort {
+    fn sort(keys: Vec<SortKey>, child: PreASAPNode) -> PreASAPNode {
+        PreASAPNode::Sort {
             keys,
             partition_by: GroupKeys::by(vec![]),
             child: Rc::new(child),
         }
     }
 
-    fn is_topk_over_count(qe: &QueryExpr) -> bool {
+    fn is_topk_over_count(qe: &PreASAPNode) -> bool {
         matches!(qe,
-            QueryExpr::Aggregate { measures, child, .. }
+            PreASAPNode::Aggregate { measures, child, .. }
                 if matches!(measures.as_slice(), [AggIntent::TopK { k: 5, .. }])
-                && matches!(child.as_ref(), QueryExpr::Aggregate { measures, .. }
+                && matches!(child.as_ref(), PreASAPNode::Aggregate { measures, .. }
                     if matches!(measures.as_slice(), [AggIntent::Count { .. }])))
     }
 
@@ -420,15 +420,15 @@ mod tests {
     #[test]
     fn promotes_through_a_passthrough_projection() {
         // …with a `SELECT service, count` projection between the Sort and the Agg.
-        let proj = QueryExpr::Project {
+        let proj = PreASAPNode::Project {
             cols: vec![
                 ProjectItem {
                     alias: None,
-                    expr: QueryExpr::Column(0),
+                    expr: PreASAPNode::Column(0),
                 },
                 ProjectItem {
                     alias: Some("c".into()),
-                    expr: QueryExpr::Column(1),
+                    expr: PreASAPNode::Column(1),
                 },
             ],
             qualifier: None,
@@ -460,12 +460,12 @@ mod tests {
     fn concat_discriminator_key_survives_canonicalize_when_first_branch_is_unaffected() {
         // A plain `Aggregate` first branch matches neither rewrite trigger,
         // so its schema is identical before and after canonicalize.
-        let q = QueryExpr::concat_with_discriminator(
+        let q = PreASAPNode::concat_with_discriminator(
             vec![count_by_service(), count_by_service()],
             /* discriminator */ 0,
             /* inner_key */ vec![1],
         );
-        let QueryExpr::Concat {
+        let PreASAPNode::Concat {
             discriminator_unique_key,
             ..
         } = canonicalize(q)
@@ -489,12 +489,12 @@ mod tests {
         // at index 0, `inner_key` = `count` at index 1) must not silently
         // survive pointing at the new 1-column schema.
         let promotable_branch = limit(5, 0, sort(desc(1), count_by_service()));
-        let q = QueryExpr::concat_with_discriminator(
+        let q = PreASAPNode::concat_with_discriminator(
             vec![promotable_branch, count_by_service()],
             /* discriminator */ 0,
             /* inner_key */ vec![1],
         );
-        let QueryExpr::Concat {
+        let PreASAPNode::Concat {
             children,
             discriminator_unique_key,
         } = canonicalize(q)
@@ -517,7 +517,7 @@ mod tests {
         // rejects it (needs descending), so it stays a generic Sort+Limit — the
         // same call PromQL `bottomk` makes (issue #38).
         let asc = vec![SortKey {
-            expr: QueryExpr::Column(1),
+            expr: PreASAPNode::Column(1),
             ascending: true,
             nulls_first: false,
         }];
@@ -541,7 +541,7 @@ mod tests {
 
     #[test]
     fn promotes_sum_ranked_limit_sort_as_weighted_heavy_hitter() {
-        let sum = QueryExpr::Aggregate {
+        let sum = PreASAPNode::Aggregate {
             reduction: Reduction::by(vec![1]),
             measures: vec![AggIntent::Sum { col: None }],
             output_names: vec![],
@@ -550,7 +550,7 @@ mod tests {
         };
         let q = limit(5, 0, sort(desc(1), sum));
         let out = canonicalize(q);
-        let QueryExpr::Aggregate {
+        let PreASAPNode::Aggregate {
             measures, child, ..
         } = out
         else {
@@ -561,7 +561,7 @@ mod tests {
             [AggIntent::TopK { k: 5, .. }]
         ));
         assert!(
-            matches!(child.as_ref(), QueryExpr::Aggregate { measures, .. }
+            matches!(child.as_ref(), PreASAPNode::Aggregate { measures, .. }
             if matches!(measures.as_slice(), [AggIntent::Sum { .. }]))
         );
     }
@@ -569,14 +569,14 @@ mod tests {
     #[test]
     fn keeps_sum_over_counter_reduction_as_exact_value_ranking() {
         for counter in [AggIntent::Rate, AggIntent::Increase] {
-            let derived = QueryExpr::Aggregate {
+            let derived = PreASAPNode::Aggregate {
                 reduction: Reduction::PerEntity,
                 measures: vec![counter],
                 output_names: vec![],
                 having: None,
                 child: Rc::new(scan()),
             };
-            let sum = QueryExpr::Aggregate {
+            let sum = PreASAPNode::Aggregate {
                 reduction: Reduction::by(vec![1]),
                 measures: vec![AggIntent::Sum { col: None }],
                 output_names: vec![],
@@ -584,19 +584,19 @@ mod tests {
                 child: Rc::new(derived),
             };
             let out = canonicalize(limit(5, 0, sort(desc(1), sum)));
-            assert!(matches!(out, QueryExpr::Limit { child, .. }
-                if matches!(child.as_ref(), QueryExpr::Sort { child, .. }
-                    if matches!(child.as_ref(), QueryExpr::Aggregate { measures, child, .. }
+            assert!(matches!(out, PreASAPNode::Limit { child, .. }
+                if matches!(child.as_ref(), PreASAPNode::Sort { child, .. }
+                    if matches!(child.as_ref(), PreASAPNode::Aggregate { measures, child, .. }
                         if matches!(measures.as_slice(), [AggIntent::Sum { .. }])
-                            && matches!(child.as_ref(), QueryExpr::Aggregate { .. })))));
+                            && matches!(child.as_ref(), PreASAPNode::Aggregate { .. })))));
         }
     }
 
     // ── ROW_NUMBER() partitioned top-k (issue #24) ──────────────────────────
 
     /// A scan with `[ts, service, region, value]`.
-    fn scan4() -> QueryExpr {
-        QueryExpr::Scan {
+    fn scan4() -> PreASAPNode {
+        PreASAPNode::Scan {
             source: Source::TimeSeries { metric: "m".into() },
             predicates: vec![],
             schema: Schema::with_time_index(
@@ -614,8 +614,8 @@ mod tests {
 
     /// `Aggregate{ by: [1,2] (service, region), [agg] }` — output `[service,
     /// region, <agg>]` (3 cols), so a ROW_NUMBER over it appends `rn` at index 3.
-    fn grouped(agg: AggIntent) -> QueryExpr {
-        QueryExpr::Aggregate {
+    fn grouped(agg: AggIntent) -> PreASAPNode {
+        PreASAPNode::Aggregate {
             reduction: Reduction::by(vec![1, 2]),
             measures: vec![agg],
             output_names: vec![],
@@ -636,13 +636,13 @@ mod tests {
 
     /// `Filter{ rn(3) <= 5 } { SQLWindowFunc{ RowNumber, PARTITION BY region(2),
     /// ORDER BY col(2) DESC } { agg } }`.
-    fn rownumber_topk(agg: QueryExpr) -> QueryExpr {
-        let wf = QueryExpr::SQLWindowFunc {
+    fn rownumber_topk(agg: PreASAPNode) -> PreASAPNode {
+        let wf = PreASAPNode::SQLWindowFunc {
             func: WindowFuncKind::RowNumber,
             args: vec![],
             partition_by: GroupKeys::by(vec![2]), // region
             order_by: vec![SortKey {
-                expr: QueryExpr::Column(2), // the aggregate output column
+                expr: PreASAPNode::Column(2), // the aggregate output column
                 ascending: false,
                 nulls_first: true,
             }],
@@ -650,11 +650,11 @@ mod tests {
             output_name: "rn".into(),
             child: Rc::new(agg),
         };
-        QueryExpr::Filter {
-            pred: Predicate(Rc::new(QueryExpr::Compare {
-                left: Rc::new(QueryExpr::Column(3)), // rn = the appended window column
+        PreASAPNode::Filter {
+            pred: Predicate(Rc::new(PreASAPNode::Compare {
+                left: Rc::new(PreASAPNode::Column(3)), // rn = the appended window column
                 op: CompareOpKind::Le,
-                right: Rc::new(QueryExpr::Literal(ScalarValue::Int64(5))),
+                right: Rc::new(PreASAPNode::Literal(ScalarValue::Int64(5))),
             })),
             child: Rc::new(wf),
         }
@@ -668,7 +668,7 @@ mod tests {
             accuracy: AccuracyTarget::Exact,
         }));
         let out = canonicalize(q);
-        let QueryExpr::Aggregate {
+        let PreASAPNode::Aggregate {
             reduction,
             measures,
             child,
@@ -686,7 +686,7 @@ mod tests {
         ));
         assert_eq!(**by, vec![2], "outer TopK partitioned by region");
         assert!(
-            matches!(child.as_ref(), QueryExpr::Aggregate { measures, .. }
+            matches!(child.as_ref(), PreASAPNode::Aggregate { measures, .. }
             if matches!(measures.as_slice(), [AggIntent::Count { .. }]))
         );
     }
@@ -697,11 +697,11 @@ mod tests {
         // top-k: Limit{5}{ Sort{ partition_by: [region] } }.
         let q = rownumber_topk(grouped(AggIntent::Avg { col: None }));
         let out = canonicalize(q);
-        let QueryExpr::Limit { n, child, .. } = &out else {
+        let PreASAPNode::Limit { n, child, .. } = &out else {
             panic!("expected a Limit, got {out:?}");
         };
         assert_eq!(*n, 5);
-        let QueryExpr::Sort {
+        let PreASAPNode::Sort {
             partition_by,
             child,
             ..
@@ -711,7 +711,7 @@ mod tests {
         };
         assert_eq!(**partition_by, vec![2], "partitioned by region");
         assert!(
-            matches!(child.as_ref(), QueryExpr::Aggregate { measures, .. }
+            matches!(child.as_ref(), PreASAPNode::Aggregate { measures, .. }
             if matches!(measures.as_slice(), [AggIntent::Avg { .. }]))
         );
     }
@@ -720,12 +720,12 @@ mod tests {
     fn filter_on_a_non_rownumber_column_is_left_alone() {
         // `WHERE service_len <= 5` (col 0, not the rn window column) must not be
         // mistaken for a top-k.
-        let wf = QueryExpr::SQLWindowFunc {
+        let wf = PreASAPNode::SQLWindowFunc {
             func: WindowFuncKind::RowNumber,
             args: vec![],
             partition_by: GroupKeys::by(vec![2]),
             order_by: vec![SortKey {
-                expr: QueryExpr::Column(2),
+                expr: PreASAPNode::Column(2),
                 ascending: false,
                 nulls_first: true,
             }],
@@ -735,16 +735,16 @@ mod tests {
                 accuracy: AccuracyTarget::Exact,
             })),
         };
-        let q = QueryExpr::Filter {
-            pred: Predicate(Rc::new(QueryExpr::Compare {
-                left: Rc::new(QueryExpr::Column(0)), // NOT the rn column (index 3)
+        let q = PreASAPNode::Filter {
+            pred: Predicate(Rc::new(PreASAPNode::Compare {
+                left: Rc::new(PreASAPNode::Column(0)), // NOT the rn column (index 3)
                 op: CompareOpKind::Le,
-                right: Rc::new(QueryExpr::Literal(ScalarValue::Int64(5))),
+                right: Rc::new(PreASAPNode::Literal(ScalarValue::Int64(5))),
             })),
             child: Rc::new(wf),
         };
         assert!(
-            matches!(canonicalize(q), QueryExpr::Filter { .. }),
+            matches!(canonicalize(q), PreASAPNode::Filter { .. }),
             "left as a Filter"
         );
     }

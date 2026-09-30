@@ -27,7 +27,7 @@ fn population_preserves_selector_horizon() {
     };
     assert_eq!(spec.lookback_ms, 1_000);
     asap_types::post_asap::compile_post_asap_dag(&candidate).unwrap();
-    let asap_types::pre_asap::QueryExpr::Aggregate { child: source, .. } = root.as_ref() else {
+    let asap_types::pre_asap::PreASAPNode::Aggregate { child: source, .. } = root.as_ref() else {
         panic!()
     };
     assert!(spec.matches_input(source));

@@ -17,7 +17,7 @@ flowchart TD
     W["PlanningWorkload: query demand + optional data facts"]
     F["Frontend dependencies: SQL catalog or PromQL time"]
     E["Strategy, accuracy model, and applicable evidence"]
-    PRE["Frontend lowering → canonical Pre-ASAP QueryExpr roots"]
+    PRE["Frontend lowering → canonical Pre-ASAP PreASAPNode roots"]
     SEARCH["Whole-workload candidate search: sharing, legality, accuracy"]
     SPACE["CandidatePostASAPDAGs: compact logical candidate DAG space"]
     RANK["Optional cost_sorted: ranked inspection view"]

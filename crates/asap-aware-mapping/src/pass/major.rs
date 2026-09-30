@@ -8,7 +8,7 @@
 
 use std::rc::Rc;
 
-use asap_types::pre_asap::query_expr::QueryExpr;
+use asap_types::pre_asap::query_expr::PreASAPNode;
 use asap_types::types::AccuracyTarget;
 
 use super::{
@@ -40,7 +40,7 @@ impl OptimizationPass for MajorPass {
         // search result carries the workload binding the lifecycle stage and
         // the output both need. CSE may make two identical queries share one
         // `Rc`, but it never drops or reorders a root, so this stays aligned.
-        let roots: Vec<(usize, Rc<QueryExpr>, Option<AccuracyTarget>)> = workload
+        let roots: Vec<(usize, Rc<PreASAPNode>, Option<AccuracyTarget>)> = workload
             .entries()
             .enumerate()
             .map(|(index, (entry, expr))| {
@@ -72,7 +72,7 @@ impl OptimizationPass for MajorPass {
             return Ok(PlanOutput::Dag { plans });
         };
 
-        // One index per root, in `PlanSpace::roots` order — which is the order
+        // One index per root, in `CandidatePostASAPDAGs::roots` order — which is the order
         // the roots went in, which is `entries()` order.
         let entry_indices: Vec<usize> = (0..workload.len()).collect();
         let demand = WorkloadDemand {

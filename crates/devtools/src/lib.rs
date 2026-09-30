@@ -23,7 +23,7 @@ pub fn lower_promql_with_data_ingestion_interval(
     query: &str,
     accuracy: asap_types::types::AccuracyTarget,
     interval_ms: u64,
-) -> Result<asap_types::pre_asap::QueryExpr, PromqlError> {
+) -> Result<asap_types::pre_asap::PreASAPNode, PromqlError> {
     use asap_types::workload::{
         BatchEntry, DataWorkload, DurationMs, Evidence, PlanningWorkload, Predictability, Query,
         QueryRequirements, QueryWorkload, TimeSelection,

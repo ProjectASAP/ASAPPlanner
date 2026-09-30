@@ -15,7 +15,7 @@
 
 use asap_devtools::{lower_promql_with_data_ingestion_interval, lower_sql, SqlCatalog};
 use asap_types::pre_asap::schema::{Column, DataType, Schema};
-use asap_types::pre_asap::{AggIntent, GroupKeys, QueryExpr};
+use asap_types::pre_asap::{AggIntent, GroupKeys, PreASAPNode};
 use asap_types::types::AccuracyTarget;
 
 fn col(name: &str, dtype: DataType) -> Column {
@@ -39,21 +39,21 @@ fn catalog() -> SqlCatalog {
     )
 }
 
-async fn sql(q: &str) -> QueryExpr {
+async fn sql(q: &str) -> PreASAPNode {
     lower_sql(q, &catalog(), AccuracyTarget::Exact)
         .await
         .unwrap_or_else(|e| panic!("SQL {q:?} failed to lower: {e:?}"))
 }
 
-fn promql(q: &str) -> QueryExpr {
+fn promql(q: &str) -> PreASAPNode {
     lower_promql_with_data_ingestion_interval(q, AccuracyTarget::Exact, 1_000)
         .unwrap_or_else(|e| panic!("PromQL {q:?} failed to lower: {e:?}"))
 }
 
 /// The canonical heavy-hitter shape: an outer `Aggregate([TopK{k}])` (grouped by
 /// `by`) over an inner `Aggregate([Count])`. Returns `(k, outer_by)`.
-fn heavy_hitter(qe: &QueryExpr) -> Option<(usize, GroupKeys)> {
-    let QueryExpr::Aggregate {
+fn heavy_hitter(qe: &PreASAPNode) -> Option<(usize, GroupKeys)> {
+    let PreASAPNode::Aggregate {
         reduction,
         measures,
         child,
@@ -67,7 +67,7 @@ fn heavy_hitter(qe: &QueryExpr) -> Option<(usize, GroupKeys)> {
     };
     // The child must be the explicit inner Count (not a raw Scan) — this is the
     // structural unification #25 asked for.
-    let QueryExpr::Aggregate {
+    let PreASAPNode::Aggregate {
         measures: inner, ..
     } = child.as_ref()
     else {
@@ -151,19 +151,19 @@ async fn ascending_count_ranked_topk_stays_generic_in_both_languages() {
     );
     // Both are the generic order-by-value + limit shape.
     assert!(
-        matches!(&s, QueryExpr::Limit { .. }),
+        matches!(&s, PreASAPNode::Limit { .. }),
         "SQL stays a Limit: {s:?}"
     );
     assert!(
-        matches!(&p, QueryExpr::Limit { .. }),
+        matches!(&p, PreASAPNode::Limit { .. }),
         "PromQL stays a Limit: {p:?}"
     );
 }
 
 /// Descend through a leading `Project` (the derived-table SELECT list).
-fn strip_project(qe: &QueryExpr) -> &QueryExpr {
+fn strip_project(qe: &PreASAPNode) -> &PreASAPNode {
     match qe {
-        QueryExpr::Project { child, .. } => strip_project(child),
+        PreASAPNode::Project { child, .. } => strip_project(child),
         other => other,
     }
 }
@@ -202,10 +202,10 @@ async fn sql_rownumber_avg_topk_is_a_generic_partitioned_sort_limit() {
         heavy_hitter(strip_project(&s9)).is_none(),
         "AVG-ranked is not a heavy-hitter"
     );
-    let QueryExpr::Limit { child, .. } = strip_project(&s9) else {
+    let PreASAPNode::Limit { child, .. } = strip_project(&s9) else {
         panic!("expected a Limit, got {:?}", strip_project(&s9));
     };
-    let QueryExpr::Sort { partition_by, .. } = child.as_ref() else {
+    let PreASAPNode::Sort { partition_by, .. } = child.as_ref() else {
         panic!("expected a Sort under the Limit");
     };
     assert!(!partition_by.is_empty(), "partitioned by region");

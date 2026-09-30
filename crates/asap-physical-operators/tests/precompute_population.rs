@@ -2,7 +2,7 @@
 use asap_physical_operators::{
     factory::create_planner_accumulator,
     operators::Operator,
-    physical_planner::{precompute, CompiledPhysicalDag, Source},
+    physical_planner::{precompute, PhysicalDAG, Source},
     runtime::{Limits, RunContext, Scope},
     values::{Batch, Value},
     Statistic,
@@ -107,7 +107,7 @@ fn finalized_shared_panes_rebuild_one_global_summary_after_recovery() {
             window: WindowEdgeCompatibility::NotApplicable,
         })
         .collect();
-        let dag = PostAsapDag {
+        let dag = PostASAPDAGTransport {
             nodes,
             edges,
             root: PostAsapNodeId(3),
@@ -136,8 +136,7 @@ fn finalized_shared_panes_rebuild_one_global_summary_after_recovery() {
         );
         let program = precompute::compile(&dag, &[0], &[3]).unwrap();
         let program =
-            serde_json::from_slice::<CompiledPhysicalDag>(&serde_json::to_vec(&program).unwrap())
-                .unwrap();
+            serde_json::from_slice::<PhysicalDAG>(&serde_json::to_vec(&program).unwrap()).unwrap();
         assert_eq!(program.input_contracts().count(), 1);
         for revision in [1, 2] {
             let rows = [
@@ -224,7 +223,7 @@ fn state_graph(
     family: SummaryFamilyType,
     target: Option<SummaryFamilyType>,
     merge: bool,
-) -> CompiledPhysicalDag {
+) -> PhysicalDAG {
     let mut nodes = vec![PostAsapDagNode {
         id: PostAsapNodeId(0),
         payload: PostAsapOperatorPayload::SummaryMerge,
@@ -276,21 +275,20 @@ fn state_graph(
         .collect();
     let root = nodes.last().unwrap().id;
     precompute::compile(
-        &PostAsapDag { nodes, edges, root },
+        &PostASAPDAGTransport { nodes, edges, root },
         &[0],
         &[u64::from(root.0)],
     )
     .unwrap()
 }
 fn native_run(
-    program: &CompiledPhysicalDag,
+    program: &PhysicalDAG,
     family: SummaryFamilyType,
     states: Vec<Arc<dyn asap_physical_operators::AggregateCore>>,
     context: RunContext,
 ) -> Result<Vec<Vec<Value>>, asap_physical_operators::Error> {
     let program =
-        serde_json::from_slice::<CompiledPhysicalDag>(&serde_json::to_vec(&program).unwrap())
-            .unwrap();
+        serde_json::from_slice::<PhysicalDAG>(&serde_json::to_vec(&program).unwrap()).unwrap();
     let rows = states
         .into_iter()
         .enumerate()

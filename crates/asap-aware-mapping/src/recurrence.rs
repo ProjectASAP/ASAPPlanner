@@ -780,16 +780,16 @@ mod tests {
 
     use crate::cost_model::CseCandidate;
     use asap_types::post_asap::{
-        ExactKind, ExactParams, GroupingStrategy, ResultGuarantee, SummaryExpr, SummaryFamilyType,
-        SummaryField, SummaryNode, SummarySchema,
+        ExactKind, ExactParams, GroupingStrategy, PostASAPNode, ResultGuarantee, SummaryExpr,
+        SummaryFamilyType, SummaryField, SummarySchema,
     };
     use asap_types::pre_asap::expr_ir::ColumnRef;
-    use asap_types::pre_asap::query_expr::{QueryExpr, Reduction, Source};
+    use asap_types::pre_asap::query_expr::{PreASAPNode, Reduction, Source};
     use asap_types::pre_asap::schema::{Column, DataType, Schema};
     use std::rc::Rc;
 
-    fn scan() -> QueryExpr {
-        QueryExpr::Scan {
+    fn scan() -> PreASAPNode {
+        PreASAPNode::Scan {
             source: Source::TimeSeries { metric: "m".into() },
             predicates: vec![],
             schema: Schema::with_time_index(
@@ -803,10 +803,10 @@ mod tests {
         }
     }
 
-    fn summary_node(family: SummaryFamilyType) -> SummaryNode {
-        SummaryNode {
+    fn summary_node(family: SummaryFamilyType) -> PostASAPNode {
+        PostASAPNode {
             expr: SummaryExpr::SummaryAgg {
-                child: Rc::new(SummaryNode {
+                child: Rc::new(PostASAPNode {
                     expr: SummaryExpr::KeepPreAsap(Rc::new(scan())),
                     schema: SummarySchema {
                         fields: vec![],
@@ -1141,8 +1141,8 @@ mod tests {
     /// real one, matching the pattern
     /// `replacement.rs`'s own CSE fixtures already use (`metric_scan`/`agg`
     /// grouped by a label column).
-    fn labeled_scan() -> QueryExpr {
-        QueryExpr::Scan {
+    fn labeled_scan() -> PreASAPNode {
+        PreASAPNode::Scan {
             source: Source::TimeSeries { metric: "m".into() },
             predicates: vec![],
             schema: Schema::with_time_index(
@@ -1157,8 +1157,8 @@ mod tests {
         }
     }
 
-    fn sum_agg() -> QueryExpr {
-        QueryExpr::Aggregate {
+    fn sum_agg() -> PreASAPNode {
+        PreASAPNode::Aggregate {
             reduction: QueryReduction::by(vec![2]),
             measures: vec![AggIntent::Sum { col: Some(1) }],
             output_names: vec![],
@@ -1175,9 +1175,9 @@ mod tests {
     /// `shared_aggregate_across_two_roots_gets_both_strategies_candidates`'s
     /// own doc) while letting `share_common_subtrees` unify their
     /// identical `sum_agg()` children onto one shared `Rc`.
-    fn filtered_root(distinguishing_literal: i64) -> QueryExpr {
-        QueryExpr::Filter {
-            pred: Predicate(Rc::new(QueryExpr::Literal(ScalarValue::Int64(
+    fn filtered_root(distinguishing_literal: i64) -> PreASAPNode {
+        PreASAPNode::Filter {
+            pred: Predicate(Rc::new(PreASAPNode::Literal(ScalarValue::Int64(
                 distinguishing_literal,
             )))),
             child: Rc::new(sum_agg()),
@@ -1193,7 +1193,7 @@ mod tests {
     /// roots sharing a sub-DAG" acceptance criteria.
     #[test]
     fn recurrence_profiles_aggregates_mixed_intervals_across_roots_sharing_a_subdag() {
-        let roots: Vec<(&str, Rc<QueryExpr>)> = vec![
+        let roots: Vec<(&str, Rc<PreASAPNode>)> = vec![
             ("root_a", Rc::new(filtered_root(1))),
             ("root_b", Rc::new(filtered_root(2))),
             ("root_c", Rc::new(filtered_root(3))),
@@ -1214,7 +1214,7 @@ mod tests {
         );
         let shared_group = space
             .target_subdag_candidates()
-            .find(|g| matches!(g.target.as_ref(), QueryExpr::Aggregate { .. }))
+            .find(|g| matches!(g.target.as_ref(), PreASAPNode::Aggregate { .. }))
             .expect("the shared sum_agg() is a discovered target");
         assert_eq!(shared_group.consumer_count, 3, "shared by all 3 roots");
 
@@ -1265,7 +1265,7 @@ mod tests {
         let space = search_workload(roots);
         let shared = space
             .target_subdag_candidates()
-            .find(|group| matches!(group.target.as_ref(), QueryExpr::Aggregate { .. }))
+            .find(|group| matches!(group.target.as_ref(), PreASAPNode::Aggregate { .. }))
             .expect("the aggregate is shared by both roots");
         let update_rate = Some(UpdateRate(10.0));
 
@@ -1324,7 +1324,7 @@ mod tests {
     #[test]
     fn recurrence_profiles_rejects_an_invalid_evaluation_rate() {
         let root = Rc::new(scan());
-        let roots: Vec<(&str, Rc<QueryExpr>)> = vec![("only", root)];
+        let roots: Vec<(&str, Rc<PreASAPNode>)> = vec![("only", root)];
         let space = search_workload(roots);
         let err = space
             .recurrence_profiles(&[RootRecurrence::Repeating(EvaluationRate(f64::NAN))], None)
@@ -1338,7 +1338,7 @@ mod tests {
     #[test]
     fn recurrence_profiles_reports_a_root_count_mismatch_as_an_error_not_a_panic() {
         let root = Rc::new(scan());
-        let roots: Vec<(&str, Rc<QueryExpr>)> = vec![("only", root)];
+        let roots: Vec<(&str, Rc<PreASAPNode>)> = vec![("only", root)];
         let space = search_workload(roots);
         let err = space.recurrence_profiles(&[], None).unwrap_err();
         assert_eq!(
@@ -1353,7 +1353,7 @@ mod tests {
     #[test]
     fn recurrence_profiles_rejects_an_invalid_update_rate() {
         let root = Rc::new(scan());
-        let roots: Vec<(&str, Rc<QueryExpr>)> = vec![("only", root)];
+        let roots: Vec<(&str, Rc<PreASAPNode>)> = vec![("only", root)];
         let space = search_workload(roots);
         let err = space
             .recurrence_profiles(
@@ -1381,14 +1381,14 @@ mod tests {
     /// `consumer_count`.
     #[test]
     fn recurrence_profiles_does_not_stamp_update_rate_on_a_site_unreachable_from_any_root() {
-        let avg_root = QueryExpr::Aggregate {
+        let avg_root = PreASAPNode::Aggregate {
             reduction: QueryReduction::by(vec![]),
             measures: vec![AggIntent::Avg { col: None }],
             output_names: vec![],
             having: None,
             child: Rc::new(scan()),
         };
-        let roots: Vec<(&str, Rc<QueryExpr>)> = vec![("q", Rc::new(avg_root))];
+        let roots: Vec<(&str, Rc<PreASAPNode>)> = vec![("q", Rc::new(avg_root))];
         let space = search_workload(roots);
 
         let count_group = space
@@ -1396,7 +1396,7 @@ mod tests {
             .find(|g| {
                 matches!(
                     g.target.as_ref(),
-                    QueryExpr::Aggregate { measures, .. }
+                    PreASAPNode::Aggregate { measures, .. }
                         if measures.iter().any(|m| matches!(m, AggIntent::Count { .. }))
                 )
             })
@@ -1435,7 +1435,7 @@ mod tests {
     /// reachability-set walk would (wrongly) collapse it to.
     #[test]
     fn recurrence_profiles_credits_a_direct_repeated_reference_by_its_multiplicity() {
-        let root = QueryExpr::BinaryOp {
+        let root = PreASAPNode::BinaryOp {
             op: asap_types::pre_asap::query_expr::BinaryOpKind::Compare(
                 asap_types::pre_asap::expr_ir::CompareOpKind::Eq,
             ),
@@ -1447,7 +1447,7 @@ mod tests {
 
         let shared_group = space
             .target_subdag_candidates()
-            .find(|g| matches!(g.target.as_ref(), QueryExpr::Aggregate { .. }))
+            .find(|g| matches!(g.target.as_ref(), PreASAPNode::Aggregate { .. }))
             .expect("sum_agg() should merge onto one shared Rc, referenced twice from BinaryOp");
         assert_eq!(
             shared_group.consumer_count, 2,
@@ -1470,7 +1470,7 @@ mod tests {
 
         let scan_group = space
             .target_subdag_candidates()
-            .find(|group| matches!(group.target.as_ref(), QueryExpr::Scan { .. }))
+            .find(|group| matches!(group.target.as_ref(), PreASAPNode::Scan { .. }))
             .expect("the shared aggregate has a scan descendant");
         assert_eq!(
             profiles

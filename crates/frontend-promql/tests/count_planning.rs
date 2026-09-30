@@ -135,9 +135,9 @@ fn frequency_count_candidates_use_unit_weights() {
 // This narrow test oracle interprets the emitted aggregate, not Prometheus ingestion,
 // staleness, or scrape scheduling. Unsupported plan shapes fail explicitly.
 fn aggregate_fixture(query: &str, series: &[Vec<f64>]) -> Vec<f64> {
-    use asap_types::pre_asap::{AggIntent, QueryExpr, Reduction};
+    use asap_types::pre_asap::{AggIntent, PreASAPNode, Reduction};
     let root = lower_promql(query, AccuracyTarget::Exact).unwrap();
-    let QueryExpr::Aggregate {
+    let PreASAPNode::Aggregate {
         reduction,
         measures,
         child,
@@ -147,13 +147,13 @@ fn aggregate_fixture(query: &str, series: &[Vec<f64>]) -> Vec<f64> {
         panic!("expected aggregate: {root:?}");
     };
     match child.as_ref() {
-        QueryExpr::Scan { .. } => assert!(series.iter().all(|samples| samples.len() == 1)),
-        QueryExpr::TimeRange { range, child } => {
+        PreASAPNode::Scan { .. } => assert!(series.iter().all(|samples| samples.len() == 1)),
+        PreASAPNode::TimeRange { range, child } => {
             assert!(matches!(range.as_secs(), 1 | 300));
             if range.as_secs() == 1 {
                 assert!(series.iter().all(|samples| samples.len() == 1));
             }
-            assert!(matches!(child.as_ref(), QueryExpr::Scan { .. }));
+            assert!(matches!(child.as_ref(), PreASAPNode::Scan { .. }));
         }
         other => panic!("unsupported fixture input: {other:?}"),
     }

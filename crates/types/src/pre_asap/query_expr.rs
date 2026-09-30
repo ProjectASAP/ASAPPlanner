@@ -1,7 +1,7 @@
 //! The canonical pre-ASAP intent algebra IR.
 //!
 //! Language- and deployment-independent. `Rc`-owned tree — a child field is
-//! `Rc<QueryExpr<C>>` rather than `Box<QueryExpr<C>>` so a structurally
+//! `Rc<PreASAPNode<C>>` rather than `Box<PreASAPNode<C>>` so a structurally
 //! identical sub-expression can be shared (the same `Rc`) across more than
 //! one parent, within one query or across a `QueryWorkload` batch, instead of
 //! being duplicated. Nothing in this module produces that sharing on its
@@ -23,12 +23,12 @@ use super::agg_intent::AggIntent;
 use super::expr_ir::{ArithmeticOpKind, ColumnRef, CompareOpKind, ScalarValue};
 use super::schema::{Column, ColumnId, DataType, Schema};
 
-/// The column-reference resolution state a [`QueryExpr<C>`] tree carries —
-/// [`ColumnId`] (the default, and what the bare `QueryExpr` name has always
+/// The column-reference resolution state a [`PreASAPNode<C>`] tree carries —
+/// [`ColumnId`] (the default, and what the bare `PreASAPNode` name has always
 /// meant) once the [`SchemaResolver`](super::schema_resolver::SchemaResolver) has resolved every
 /// reference positionally, or the front-end-emitted, name-based [`ColumnRef`]
 /// before binding. The only place the two states differ in *shape* rather
-/// than just in which type fills `C` is [`QueryExpr::Scan`]'s `schema` field:
+/// than just in which type fills `C` is [`PreASAPNode::Scan`]'s `schema` field:
 /// a bound tree's binding schema is always known (the SchemaResolver is total, so
 /// [`ScanSchema`](Self::ScanSchema) `= Schema`); an unresolved front-end
 /// `Scan` knows its schema only when the front end already has it without
@@ -37,7 +37,7 @@ use super::schema::{Column, ColumnId, DataType, Schema};
 pub trait ColState:
     Clone + std::fmt::Debug + PartialEq + Serialize + for<'de> Deserialize<'de>
 {
-    /// What [`QueryExpr::Scan`]'s `schema` field holds for a tree in this state.
+    /// What [`PreASAPNode::Scan`]'s `schema` field holds for a tree in this state.
     type ScanSchema: Clone + std::fmt::Debug + PartialEq + Serialize + for<'de> Deserialize<'de>;
 }
 
@@ -51,14 +51,14 @@ impl ColState for ColumnRef {
 
 /// Errors from schema derivation over a canonical tree.
 #[derive(Debug, Error)]
-pub enum QueryExprError {
+pub enum PreASAPNodeError {
     #[error("invalid scalar function signature: {0}")]
     InvalidScalarSignature(String),
     #[error("by-column id {0} out of range (input has {1} columns)")]
     InvalidGroupByColumn(ColumnId, usize),
     #[error("Concat requires at least one child")]
     EmptyConcat,
-    /// [`QueryExpr::output_schema`] called on (or reached, while recursing, a
+    /// [`PreASAPNode::output_schema`] called on (or reached, while recursing, a
     /// child that is) one of the scalar variants (issue #205) — those have no
     /// independent row schema of their own; a scalar expression's *type* only
     /// makes sense against the schema it's embedded in (see `infer_expr_type`,
@@ -251,10 +251,10 @@ impl Source {
 /// operator has exactly one representation (and one `Display`) across the IR.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BinaryOpKind {
-    /// Arithmetic — `Add/Sub/Mul/Div/Mod` (shared with `QueryExpr::Arithmetic`).
+    /// Arithmetic — `Add/Sub/Mul/Div/Mod` (shared with `PreASAPNode::Arithmetic`).
     Arithmetic(ArithmeticOpKind),
     /// Comparison — `Eq/Ne/Lt/Le/Gt/Ge` + `Like/ILike/Regex` family (shared
-    /// with `QueryExpr::Compare`). PromQL keeps the matched series whose
+    /// with `PreASAPNode::Compare`). PromQL keeps the matched series whose
     /// comparison holds.
     Compare(CompareOpKind),
     /// PromQL comparison with the `bool` modifier: every matched series
@@ -402,7 +402,7 @@ pub enum WindowFrameBound {
 }
 
 /// A symbolic label matcher on the **info metric** side of an
-/// [`QueryExpr::PromqlInfoEnrich`] (issue #84). Unlike a `Scan` predicate it is not
+/// [`PreASAPNode::PromqlInfoEnrich`] (issue #84). Unlike a `Scan` predicate it is not
 /// resolved positionally — it references the info metric's labels (`__name__`
 /// picks the metric, the rest constrain data labels), which aren't in the input
 /// vector's schema; the post-ASAP realization pass applies it against the info metric.
@@ -415,7 +415,7 @@ pub struct InfoMatcher {
 }
 
 /// Series-sampling selection mode (PromQL `limitk` / `limit_ratio`, issue #86).
-/// A [`QueryExpr::PromqlSeriesSample`] keeps a *subset of whole series*, unchanged — it does
+/// A [`PreASAPNode::PromqlSeriesSample`] keeps a *subset of whole series*, unchanged — it does
 /// not rank or reduce, so it is distinct from `TopK` and from `Sort → Limit`.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -431,7 +431,7 @@ pub enum SampleKind {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(bound(serialize = "C: ColState", deserialize = "C: ColState"))]
 pub struct SortKey<C: ColState = ColumnId> {
-    pub expr: QueryExpr<C>,
+    pub expr: PreASAPNode<C>,
     pub ascending: bool,
     pub nulls_first: bool,
 }
@@ -459,7 +459,7 @@ pub enum AtModifier {
 
 /// PromQL per-selector **time-shift** modifiers — `offset` and `@` (issue #40).
 /// Neither changes a selector's *schema*; both move *when* it is evaluated, so
-/// the shift is a pass-through wrapper ([`QueryExpr::TimeShift`]) over the
+/// the shift is a pass-through wrapper ([`PreASAPNode::TimeShift`]) over the
 /// selector rather than a new leaf shape. The runtime resolves the anchor and
 /// applies the offset.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -500,19 +500,19 @@ pub enum GroupSide {
 
 /// A row-level filter predicate (WHERE clause / PromQL label matcher).
 /// Boxed: `Predicate<C>` sits directly (not behind a `Vec`) in
-/// `Filter.pred`/`Join.pred`/`Aggregate.having`, and `QueryExpr<C>` is
+/// `Filter.pred`/`Join.pred`/`Aggregate.having`, and `PreASAPNode<C>` is
 /// self-recursive without further indirection once the scalar variants are
 /// part of it — the box is what makes the recursive type's size finite there.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(bound(serialize = "C: ColState", deserialize = "C: ColState"))]
-pub struct Predicate<C: ColState = ColumnId>(pub Rc<QueryExpr<C>>);
+pub struct Predicate<C: ColState = ColumnId>(pub Rc<PreASAPNode<C>>);
 
 /// One item in a SELECT projection list.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(bound(serialize = "C: ColState", deserialize = "C: ColState"))]
 pub struct ProjectItem<C: ColState = ColumnId> {
     pub alias: Option<String>,
-    pub expr: QueryExpr<C>,
+    pub expr: PreASAPNode<C>,
 }
 
 // ── Intent algebra IR ────────────────────────────────────────────────────────
@@ -568,8 +568,8 @@ impl<C> Reduction<C> {
     }
 }
 
-/// A caller-proven compound unique key for a [`QueryExpr::Concat`] (issue
-/// #228) — built only via [`QueryExpr::concat_with_discriminator`] /
+/// A caller-proven compound unique key for a [`PreASAPNode::Concat`] (issue
+/// #228) — built only via [`PreASAPNode::concat_with_discriminator`] /
 /// [`ConcatDiscriminatorKey::new`], never by naming `discriminator` directly
 /// in a struct literal (both fields are private): from *other Rust code*,
 /// the only way to end up with one of these is to hand over a specific
@@ -579,7 +579,7 @@ impl<C> Reduction<C> {
 /// derived `Deserialize` impl below builds a `ConcatDiscriminatorKey`
 /// directly from field values, bypassing `new()`. Deserialization is therefore
 /// equivalent to a caller supplying the assertion directly; it does not prove
-/// either fact below. An external boundary accepting `QueryExpr` data must
+/// either fact below. An external boundary accepting `PreASAPNode` data must
 /// reject this field or validate both obligations before treating it as
 /// uniqueness evidence.
 ///
@@ -598,7 +598,7 @@ impl<C> Reduction<C> {
 /// hold: `inner_key` uniquely identifies rows **within every branch**, and
 /// `discriminator`'s value is **guaranteed to differ between branches** — a
 /// literal the producer just tagged the branch with (PromQL φ riding along via
-/// [`QueryExpr::PromqlRelabel`], a Postgres-style synthetic `GROUPING()` id
+/// [`PreASAPNode::PromqlRelabel`], a Postgres-style synthetic `GROUPING()` id
 /// for `ROLLUP`/`CUBE`, …), never something inferred structurally from the
 /// branches' own data — then `discriminator` alone partitions rows into
 /// disjoint sets independent of what the branches actually contain, so
@@ -611,7 +611,7 @@ impl<C> Reduction<C> {
 /// repeats across branches, in which case the resulting `unique_keys` claim
 /// is simply wrong — `output_schema` trusts it without checking. The
 /// obligation is on the constructor call site, exactly as it is on
-/// [`QueryExpr::Dedup`]'s `cols` or any other unverified `unique_keys`
+/// [`PreASAPNode::Dedup`]'s `cols` or any other unverified `unique_keys`
 /// producer in this module.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -643,7 +643,7 @@ impl<C: ColState> ConcatDiscriminatorKey<C> {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(bound(serialize = "C: ColState", deserialize = "C: ColState"))]
-pub enum QueryExpr<C: ColState = ColumnId> {
+pub enum PreASAPNode<C: ColState = ColumnId> {
     /// Outermost leaf. `schema` is the **binding schema** — the resolved column
     /// set every positional `ColumnId` in the tree indexes into, *not* a full
     /// description of the runtime row — once bound (`schema: Schema`, always
@@ -682,7 +682,7 @@ pub enum QueryExpr<C: ColState = ColumnId> {
     /// `canonicalize`, and `resolve` now key off to tell "this operand has
     /// its own row schema" from "this is a nested scalar leaf with none,"
     /// in place of the old `PromqlScalar` vs. `Literal` variant tag.
-    PromqlScalarBridge(Rc<QueryExpr<C>>),
+    PromqlScalarBridge(Rc<PreASAPNode<C>>),
 
     /// The query **evaluation timestamp** as Unix seconds, exposed by PromQL
     /// `time()`. This is not inherently the current wall-clock time: its value
@@ -699,13 +699,13 @@ pub enum QueryExpr<C: ColState = ColumnId> {
     /// scalar-typed child to a single label-less series carrying the scalar's
     /// value at every step. Lets a scalar participate where a vector is required
     /// (`up or vector(0)` dead-man's-switch). Issue #48.
-    PromqlVectorFromScalar(Rc<QueryExpr<C>>),
+    PromqlVectorFromScalar(Rc<PreASAPNode<C>>),
 
     /// PromQL `scalar(v)` — the instant-vector→scalar bridge. Collapses a
     /// single-element vector to its value (NaN at runtime if the input is not
     /// exactly one series). Lets a vector feed a scalar position (`vector` /
     /// aggregation `k` args, thresholds). Issue #48.
-    PromqlScalarFromVector(Rc<QueryExpr<C>>),
+    PromqlScalarFromVector(Rc<PreASAPNode<C>>),
 
     /// ρ — a per-series **label rewrite** (PromQL `label_replace` /
     /// `label_join`). Every input row passes through unchanged except for the
@@ -717,8 +717,8 @@ pub enum QueryExpr<C: ColState = ColumnId> {
     PromqlRelabel {
         /// The label written by this rewrite (PromQL `dst_label`).
         dst: String,
-        value: Rc<QueryExpr<C>>,
-        child: Rc<QueryExpr<C>>,
+        value: Rc<PreASAPNode<C>>,
+        child: Rc<PreASAPNode<C>>,
     },
 
     /// PromQL `info(v, [selector])` — left-join **label enrichment** (#84). Each
@@ -734,7 +734,7 @@ pub enum QueryExpr<C: ColState = ColumnId> {
     PromqlInfoEnrich {
         #[serde(default)]
         selector: Vec<InfoMatcher>,
-        child: Rc<QueryExpr<C>>,
+        child: Rc<PreASAPNode<C>>,
     },
 
     /// Series-sampling **selection** — PromQL `limitk` / `limit_ratio` (#86).
@@ -745,13 +745,13 @@ pub enum QueryExpr<C: ColState = ColumnId> {
         #[serde(default)]
         by: GroupKeys<C>,
         kind: SampleKind,
-        child: Rc<QueryExpr<C>>,
+        child: Rc<PreASAPNode<C>>,
     },
 
     /// σ — row-level filter. Output schema = child schema.
     Filter {
         pred: Predicate<C>,
-        child: Rc<QueryExpr<C>>,
+        child: Rc<PreASAPNode<C>>,
     },
     /// π — column projection.
     Project {
@@ -760,7 +760,7 @@ pub enum QueryExpr<C: ColState = ColumnId> {
         /// table / inline view). `None` for an ordinary SELECT list.
         #[serde(default)]
         qualifier: Option<String>,
-        child: Rc<QueryExpr<C>>,
+        child: Rc<PreASAPNode<C>>,
     },
 
     /// γ + α — GROUP BY (positional) + aggregate intents.
@@ -777,18 +777,18 @@ pub enum QueryExpr<C: ColState = ColumnId> {
         output_names: Vec<String>,
         #[serde(default)]
         having: Option<Predicate<C>>,
-        child: Rc<QueryExpr<C>>,
+        child: Rc<PreASAPNode<C>>,
     },
 
     /// δ — SQL `DISTINCT` / row deduplication. Positional like every other
     /// column reference here; empty = dedup on all columns (`SELECT DISTINCT *`).
     Dedup {
         cols: Vec<C>,
-        child: Rc<QueryExpr<C>>,
+        child: Rc<PreASAPNode<C>>,
     },
     /// ⊕ — exact, n-ary `UNION ALL` of independent branches. Rows are
     /// concatenated, never deduplicated; SQL's `UNION`/`INTERSECT`/`EXCEPT` are
-    /// [`QueryExpr::SetOp`], not this.
+    /// [`PreASAPNode::SetOp`], not this.
     ///
     /// Used for the branches of one query that a single `Aggregate` cannot
     /// express — PromQL `histogram_quantiles` (one branch per φ, issue #109) and
@@ -804,19 +804,19 @@ pub enum QueryExpr<C: ColState = ColumnId> {
     /// A row may appear in several branches, so no branch's unique key survives
     /// the union — `unique_keys` is dropped, as in `SetOp`. **Unless** the
     /// constructor asserted `discriminator_unique_key` (issue #228,
-    /// [`QueryExpr::concat_with_discriminator`]): a caller-proven claim that
+    /// [`PreASAPNode::concat_with_discriminator`]): a caller-proven claim that
     /// one column's value is guaranteed distinct per branch, which makes
     /// `(discriminator, inner_key)` a sound compound unique key regardless of
     /// whether `inner_key` alone repeats across branches. `None` — every
     /// ordinary construction path, including the plain struct literal and
-    /// [`QueryExpr::concat`] — reproduces the old, unconditional-drop
+    /// [`PreASAPNode::concat`] — reproduces the old, unconditional-drop
     /// behavior exactly; see [`ConcatDiscriminatorKey`]'s doc for the
     /// soundness argument and the obligation this puts on whoever asserts it.
     ///
-    /// Empty children is an error ([`QueryExprError::EmptyConcat`]), not an
+    /// Empty children is an error ([`PreASAPNodeError::EmptyConcat`]), not an
     /// empty relation: there would be no schema to derive.
     Concat {
-        children: Vec<QueryExpr<C>>,
+        children: Vec<PreASAPNode<C>>,
         /// See the field-level doc above and [`ConcatDiscriminatorKey`].
         #[serde(default)]
         discriminator_unique_key: Option<ConcatDiscriminatorKey<C>>,
@@ -826,14 +826,14 @@ pub enum QueryExpr<C: ColState = ColumnId> {
     Join {
         kind: JoinKind,
         pred: Predicate<C>,
-        left: Rc<QueryExpr<C>>,
-        right: Rc<QueryExpr<C>>,
+        left: Rc<PreASAPNode<C>>,
+        right: Rc<PreASAPNode<C>>,
     },
     SetOp {
         kind: RelationalSetOpKind,
         all: bool,
-        left: Rc<QueryExpr<C>>,
-        right: Rc<QueryExpr<C>>,
+        left: Rc<PreASAPNode<C>>,
+        right: Rc<PreASAPNode<C>>,
     },
 
     /// Generic order-by for non-heavy-hitter cases.
@@ -850,12 +850,12 @@ pub enum QueryExpr<C: ColState = ColumnId> {
         keys: Vec<SortKey<C>>,
         #[serde(default)]
         partition_by: GroupKeys<C>,
-        child: Rc<QueryExpr<C>>,
+        child: Rc<PreASAPNode<C>>,
     },
     Limit {
         n: usize,
         offset: usize,
-        child: Rc<QueryExpr<C>>,
+        child: Rc<PreASAPNode<C>>,
     },
 
     /// PromQL sub-query (`<expr>[range:resolution]`). Logical pass-through.
@@ -863,7 +863,7 @@ pub enum QueryExpr<C: ColState = ColumnId> {
         range: Duration,
         #[serde(default)]
         resolution: Option<Duration>,
-        child: Rc<QueryExpr<C>>,
+        child: Rc<PreASAPNode<C>>,
     },
 
     /// Temporal range selection — "look back `range` of history for this
@@ -875,7 +875,7 @@ pub enum QueryExpr<C: ColState = ColumnId> {
     /// plain `Scan` or another `Aggregate` is a *cross-series* reduction.
     TimeRange {
         range: Duration,
-        child: Rc<QueryExpr<C>>,
+        child: Rc<PreASAPNode<C>>,
     },
 
     /// PromQL `offset` / `@` **time shift** on a selector (issue #40). A
@@ -889,7 +889,7 @@ pub enum QueryExpr<C: ColState = ColumnId> {
     /// selector when neither modifier is present).
     TimeShift {
         shift: TimeShift,
-        child: Rc<QueryExpr<C>>,
+        child: Rc<PreASAPNode<C>>,
     },
 
     /// SQL analytic window function: `func(args) OVER (PARTITION BY … ORDER BY …
@@ -899,7 +899,7 @@ pub enum QueryExpr<C: ColState = ColumnId> {
         func: WindowFuncKind,
         /// Operand expressions (`LAG(value)` → `[Column(value_id)]`); empty for
         /// the rank-only functions (`ROW_NUMBER`/`RANK`/`DENSE_RANK`).
-        args: Vec<QueryExpr<C>>,
+        args: Vec<PreASAPNode<C>>,
         partition_by: GroupKeys<C>,
         order_by: Vec<SortKey<C>>,
         /// `None` is accepted only for backward compatibility with serialized
@@ -911,14 +911,14 @@ pub enum QueryExpr<C: ColState = ColumnId> {
         /// The output column's name — DataFusion's window-expr field name, so a
         /// `Project` above resolves it (cf. `Aggregate.output_names`).
         output_name: String,
-        child: Rc<QueryExpr<C>>,
+        child: Rc<PreASAPNode<C>>,
     },
 
     /// Arithmetic / comparison / boolean composition (PromQL binary ops).
     BinaryOp {
         op: BinaryOpKind,
-        lhs: Rc<QueryExpr<C>>,
-        rhs: Rc<QueryExpr<C>>,
+        lhs: Rc<PreASAPNode<C>>,
+        rhs: Rc<PreASAPNode<C>>,
         #[serde(default)]
         vector_match: Option<VectorMatch>,
     },
@@ -935,7 +935,7 @@ pub enum QueryExpr<C: ColState = ColumnId> {
     // `Expr<C>` variant set did — nothing stops constructing, say, a `Scan`
     // where a `Compare`'s `left` operand belongs. `output_schema` and every
     // scalar-position consumer (`resolve`, `canonicalize`, `infer_expr_type`)
-    // reject a non-scalar variant found there instead (a `QueryExprError` or
+    // reject a non-scalar variant found there instead (a `PreASAPNodeError` or
     // an `unreachable!`, depending on the call site) — the accepted
     // replacement, since the alternative (a marker-trait/sub-enum bound
     // restricting which variants are constructible in a scalar position) adds
@@ -949,60 +949,60 @@ pub enum QueryExpr<C: ColState = ColumnId> {
     Literal(ScalarValue),
     /// `left op right` — binary comparison.
     Compare {
-        left: Rc<QueryExpr<C>>,
+        left: Rc<PreASAPNode<C>>,
         op: CompareOpKind,
-        right: Rc<QueryExpr<C>>,
+        right: Rc<PreASAPNode<C>>,
     },
     /// Flat conjunction (logical AND). An empty list is vacuously true.
-    BoolAnd(Vec<QueryExpr<C>>),
+    BoolAnd(Vec<PreASAPNode<C>>),
     /// Flat disjunction (logical OR). An empty list is vacuously false.
-    BoolOr(Vec<QueryExpr<C>>),
+    BoolOr(Vec<PreASAPNode<C>>),
     /// Logical NOT.
-    Not(Rc<QueryExpr<C>>),
+    Not(Rc<PreASAPNode<C>>),
     /// `expr IS NULL`.
-    IsNull(Rc<QueryExpr<C>>),
+    IsNull(Rc<PreASAPNode<C>>),
     /// `expr IS NOT NULL`.
-    IsNotNull(Rc<QueryExpr<C>>),
+    IsNotNull(Rc<PreASAPNode<C>>),
     /// `CAST(expr AS to)`; `try_cast` for SQL `TRY_CAST` (NULL on failure).
     Cast {
-        expr: Rc<QueryExpr<C>>,
+        expr: Rc<PreASAPNode<C>>,
         to: DataType,
         try_cast: bool,
     },
     /// `expr [NOT] IN (v1, v2, …)`.
     InList {
-        expr: Rc<QueryExpr<C>>,
-        list: Vec<QueryExpr<C>>,
+        expr: Rc<PreASAPNode<C>>,
+        list: Vec<PreASAPNode<C>>,
         negated: bool,
     },
     /// Scalar function call, e.g. `LOWER(col)`, `ABS(x)`.
     FunctionCall {
         name: String,
-        args: Vec<QueryExpr<C>>,
+        args: Vec<PreASAPNode<C>>,
     },
     /// Binary arithmetic: `left op right`.
     Arithmetic {
         op: ArithmeticOpKind,
-        left: Rc<QueryExpr<C>>,
-        right: Rc<QueryExpr<C>>,
+        left: Rc<PreASAPNode<C>>,
+        right: Rc<PreASAPNode<C>>,
     },
     /// SQL `CASE` (both searched and simple forms). `operand` present for the
     /// simple form (`CASE expr WHEN …`), absent for searched.
     Case {
-        operand: Option<Rc<QueryExpr<C>>>,
-        branches: Vec<(QueryExpr<C>, QueryExpr<C>)>,
-        else_expr: Option<Rc<QueryExpr<C>>>,
+        operand: Option<Rc<PreASAPNode<C>>>,
+        branches: Vec<(PreASAPNode<C>, PreASAPNode<C>)>,
+        else_expr: Option<Rc<PreASAPNode<C>>>,
     },
 }
 
-impl<C: ColState> QueryExpr<C> {
+impl<C: ColState> PreASAPNode<C> {
     /// Construct the [`PromqlScalarBridge`](Self::PromqlScalarBridge) leaf
     /// for a bare PromQL numeric literal / folded constant scalar (issue
     /// #220) — `Literal(ScalarValue::Float64(v))` at an operator-tree
     /// position. The one constructor every front end / test that used to
-    /// write `QueryExpr::PromqlScalar(v)` should use instead.
+    /// write `PreASAPNode::PromqlScalar(v)` should use instead.
     pub fn promql_scalar(v: f64) -> Self {
-        QueryExpr::PromqlScalarBridge(Rc::new(QueryExpr::Literal(ScalarValue::Float64(v))))
+        PreASAPNode::PromqlScalarBridge(Rc::new(PreASAPNode::Literal(ScalarValue::Float64(v))))
     }
 
     /// Build an ordinary [`Concat`](Self::Concat) — the ordinary/default
@@ -1012,8 +1012,8 @@ impl<C: ColState> QueryExpr<C> {
     /// [`concat_with_discriminator`](Self::concat_with_discriminator) instead
     /// when the caller can prove branch disjointness via a discriminator
     /// column.
-    pub fn concat(children: Vec<QueryExpr<C>>) -> Self {
-        QueryExpr::Concat {
+    pub fn concat(children: Vec<PreASAPNode<C>>) -> Self {
+        PreASAPNode::Concat {
             children,
             discriminator_unique_key: None,
         }
@@ -1027,11 +1027,11 @@ impl<C: ColState> QueryExpr<C> {
     /// checks that `inner_key` is unique within every branch or that
     /// `discriminator`'s value is distinct between branches.
     pub fn concat_with_discriminator(
-        children: Vec<QueryExpr<C>>,
+        children: Vec<PreASAPNode<C>>,
         discriminator: C,
         inner_key: Vec<C>,
     ) -> Self {
-        QueryExpr::Concat {
+        PreASAPNode::Concat {
             children,
             discriminator_unique_key: Some(ConcatDiscriminatorKey::new(discriminator, inner_key)),
         }
@@ -1044,8 +1044,8 @@ impl<C: ColState> QueryExpr<C> {
     /// something else (not constructed today, but not precluded by the type).
     pub fn as_promql_scalar(&self) -> Option<f64> {
         match self {
-            QueryExpr::PromqlScalarBridge(inner) => match inner.as_ref() {
-                QueryExpr::Literal(ScalarValue::Float64(v)) => Some(*v),
+            PreASAPNode::PromqlScalarBridge(inner) => match inner.as_ref() {
+                PreASAPNode::Literal(ScalarValue::Float64(v)) => Some(*v),
                 _ => None,
             },
             _ => None,
@@ -1054,18 +1054,18 @@ impl<C: ColState> QueryExpr<C> {
 
     /// If this expression is a `BoolAnd`, return its elements; otherwise a
     /// single-element slice containing `self`.
-    pub fn conjuncts(&self) -> &[QueryExpr<C>] {
+    pub fn conjuncts(&self) -> &[PreASAPNode<C>] {
         match self {
-            QueryExpr::BoolAnd(v) => v.as_slice(),
+            PreASAPNode::BoolAnd(v) => v.as_slice(),
             _ => std::slice::from_ref(self),
         }
     }
 
     /// If this expression is a `BoolOr`, return its elements; otherwise a
     /// single-element slice containing `self`.
-    pub fn disjuncts(&self) -> &[QueryExpr<C>] {
+    pub fn disjuncts(&self) -> &[PreASAPNode<C>] {
         match self {
-            QueryExpr::BoolOr(v) => v.as_slice(),
+            PreASAPNode::BoolOr(v) => v.as_slice(),
             _ => std::slice::from_ref(self),
         }
     }
@@ -1075,37 +1075,38 @@ impl<C: ColState> QueryExpr<C> {
     /// leaf schemas, and available to post-ASAP binding for column-lineage /
     /// selectivity.
     /// `self` must be one of the scalar variants (see the module doc on
-    /// [`QueryExpr`]'s scalar shapes) — every caller already only reaches
+    /// [`PreASAPNode`]'s scalar shapes) — every caller already only reaches
     /// this through a scalar-typed position (`Predicate`, `ProjectItem.expr`,
     /// …), so an operator variant here indicates a construction bug, not a
     /// shape this needs to handle silently.
     pub fn columns_referenced(&self) -> Vec<&C> {
         match self {
-            QueryExpr::Column(c) => vec![c],
-            QueryExpr::Literal(_) => vec![],
-            QueryExpr::EvalTimestamp => vec![],
-            QueryExpr::CurrentTimestamp => vec![],
-            QueryExpr::Compare { left, right, .. } | QueryExpr::Arithmetic { left, right, .. } => {
+            PreASAPNode::Column(c) => vec![c],
+            PreASAPNode::Literal(_) => vec![],
+            PreASAPNode::EvalTimestamp => vec![],
+            PreASAPNode::CurrentTimestamp => vec![],
+            PreASAPNode::Compare { left, right, .. }
+            | PreASAPNode::Arithmetic { left, right, .. } => {
                 let mut v = left.columns_referenced();
                 v.extend(right.columns_referenced());
                 v
             }
-            QueryExpr::BoolAnd(parts) | QueryExpr::BoolOr(parts) => {
+            PreASAPNode::BoolAnd(parts) | PreASAPNode::BoolOr(parts) => {
                 parts.iter().flat_map(|e| e.columns_referenced()).collect()
             }
-            QueryExpr::Not(e) | QueryExpr::IsNull(e) | QueryExpr::IsNotNull(e) => {
+            PreASAPNode::Not(e) | PreASAPNode::IsNull(e) | PreASAPNode::IsNotNull(e) => {
                 e.columns_referenced()
             }
-            QueryExpr::Cast { expr, .. } => expr.columns_referenced(),
-            QueryExpr::InList { expr, list, .. } => {
+            PreASAPNode::Cast { expr, .. } => expr.columns_referenced(),
+            PreASAPNode::InList { expr, list, .. } => {
                 let mut v = expr.columns_referenced();
                 v.extend(list.iter().flat_map(|e| e.columns_referenced()));
                 v
             }
-            QueryExpr::FunctionCall { args, .. } => {
+            PreASAPNode::FunctionCall { args, .. } => {
                 args.iter().flat_map(|e| e.columns_referenced()).collect()
             }
-            QueryExpr::Case {
+            PreASAPNode::Case {
                 operand,
                 branches,
                 else_expr,
@@ -1124,43 +1125,43 @@ impl<C: ColState> QueryExpr<C> {
                 v
             }
             other => unreachable!(
-                "columns_referenced called on a non-scalar QueryExpr variant: {other:?}"
+                "columns_referenced called on a non-scalar PreASAPNode variant: {other:?}"
             ),
         }
     }
 }
 
-/// The canonical, positional, resolved tree — what the bare `QueryExpr` name
+/// The canonical, positional, resolved tree — what the bare `PreASAPNode` name
 /// has always meant (the default `C = ColumnId`). Every existing consumer
-/// keeps using `QueryExpr` unparameterized; this alias exists only to name
+/// keeps using `PreASAPNode` unparameterized; this alias exists only to name
 /// the resolved state explicitly at a use site that also wants to name
-/// [`UnresolvedQueryExpr`] nearby.
-pub type ResolvedQueryExpr = QueryExpr<ColumnId>;
+/// [`UnresolvedPreASAPNode`] nearby.
+pub type ResolvedPreASAPNode = PreASAPNode<ColumnId>;
 
 /// The front-end-emitted, name-based, unresolved tree —
-/// `QueryExpr<ColumnRef>`: front ends construct this directly during their
+/// `PreASAPNode<ColumnRef>`: front ends construct this directly during their
 /// own `interpret` step (issue #179), and the [`SchemaResolver`](super::schema_resolver)
-/// resolves it into [`ResolvedQueryExpr`].
-pub type UnresolvedQueryExpr = QueryExpr<ColumnRef>;
+/// resolves it into [`ResolvedPreASAPNode`].
+pub type UnresolvedPreASAPNode = PreASAPNode<ColumnRef>;
 
 // `output_schema` needs a fully bound tree — it reads `Scan.schema` as a plain
 // `Schema` and resolves every scalar `Expr::Column` positionally — so it lives
-// only on the resolved instantiation, not `impl<C: ColState> QueryExpr<C>`.
+// only on the resolved instantiation, not `impl<C: ColState> PreASAPNode<C>`.
 // Same reasoning as `AggIntent`'s `output_column`/`requires`/`is_per_series`
 // (#205): a schema-shaped property that is only meaningful post-binding.
-impl QueryExpr<ColumnId> {
+impl PreASAPNode<ColumnId> {
     /// Infer a scalar expression against its input relation using the same
     /// canonical rules as projection schema derivation.
-    pub fn scalar_type(&self, input: &Schema) -> Result<(DataType, bool), QueryExprError> {
+    pub fn scalar_type(&self, input: &Schema) -> Result<(DataType, bool), PreASAPNodeError> {
         infer_expr_type(self, input)
     }
 
     /// Output schema of the root of a canonical tree.
-    pub fn output_schema(&self) -> Result<Schema, QueryExprError> {
+    pub fn output_schema(&self) -> Result<Schema, PreASAPNodeError> {
         match self {
-            QueryExpr::Scan { schema, .. } => Ok(schema.clone()),
+            PreASAPNode::Scan { schema, .. } => Ok(schema.clone()),
 
-            QueryExpr::Aggregate {
+            PreASAPNode::Aggregate {
                 reduction,
                 measures,
                 output_names,
@@ -1171,20 +1172,20 @@ impl QueryExpr<ColumnId> {
                 aggregate_output_schema(&in_schema, reduction, measures, output_names)
             }
 
-            QueryExpr::Filter { child, .. }
-            | QueryExpr::Sort { child, .. }
-            | QueryExpr::Limit { child, .. }
-            | QueryExpr::PromqlSubquery { child, .. }
+            PreASAPNode::Filter { child, .. }
+            | PreASAPNode::Sort { child, .. }
+            | PreASAPNode::Limit { child, .. }
+            | PreASAPNode::PromqlSubquery { child, .. }
             // Series sampling keeps a subset of whole series unchanged, so the
             // output schema (and row-uniqueness) is exactly the child's (#86).
-            | QueryExpr::PromqlSeriesSample { child, .. }
+            | PreASAPNode::PromqlSeriesSample { child, .. }
             // Info enrichment adds runtime info labels — the statically-known
             // schema is the child's (open), so it passes through (#84).
-            | QueryExpr::PromqlInfoEnrich { child, .. }
-            | QueryExpr::TimeRange { child, .. }
+            | PreASAPNode::PromqlInfoEnrich { child, .. }
+            | PreASAPNode::TimeRange { child, .. }
             // A time shift (`offset`/`@`) moves *when* the child is evaluated,
             // never its columns — schema passes through (#40).
-            | QueryExpr::TimeShift { child, .. } => child.output_schema(),
+            | PreASAPNode::TimeShift { child, .. } => child.output_schema(),
 
             // ρ — relabel preserves every input column and writes one label
             // `dst` (Utf8): overwritten in place if it already exists, else
@@ -1192,7 +1193,7 @@ impl QueryExpr<ColumnId> {
             // unset). The schema stays open (other labels remain runtime-only).
             // A rewrite can collapse two label sets into one, so row-uniqueness
             // is no longer provable — drop unique_keys.
-            QueryExpr::PromqlRelabel { dst, child, .. } => {
+            PreASAPNode::PromqlRelabel { dst, child, .. } => {
                 let mut out = child.output_schema()?;
                 if let Some(existing) = out.columns.iter_mut().find(|c| c.name == *dst) {
                     existing.dtype = DataType::Utf8;
@@ -1211,7 +1212,7 @@ impl QueryExpr<ColumnId> {
             // as a bare `Column` item (possibly reordered or aliased). Derived
             // expressions cannot carry key identity. `time_index` is re-found
             // by name.
-            QueryExpr::Project { cols, qualifier, child } => {
+            PreASAPNode::Project { cols, qualifier, child } => {
                 let in_schema = child.output_schema()?;
                 let columns: Vec<Column> = cols
                     .iter()
@@ -1231,7 +1232,7 @@ impl QueryExpr<ColumnId> {
                             None => c,
                         })
                     })
-                    .collect::<Result<Vec<_>, QueryExprError>>()?;
+                    .collect::<Result<Vec<_>, PreASAPNodeError>>()?;
                 let time_index = columns.iter().position(|c| c.name == "ts");
                 let unique_keys = in_schema
                     .unique_keys
@@ -1240,7 +1241,7 @@ impl QueryExpr<ColumnId> {
                         key.iter()
                             .map(|input_col| {
                                 cols.iter().position(|item| {
-                                    matches!(&item.expr, QueryExpr::Column(col) if col == input_col)
+                                    matches!(&item.expr, PreASAPNode::Column(col) if col == input_col)
                                 })
                             })
                             .collect::<Option<Vec<_>>>()
@@ -1255,7 +1256,7 @@ impl QueryExpr<ColumnId> {
                 })
             }
 
-            QueryExpr::Dedup { cols, child } => {
+            PreASAPNode::Dedup { cols, child } => {
                 let mut out = child.output_schema()?;
                 // Deduplicating on `cols` makes them a unique key of the result.
                 if !cols.is_empty() {
@@ -1273,13 +1274,13 @@ impl QueryExpr<ColumnId> {
             // assertion is trusted verbatim here, never checked: see
             // `ConcatDiscriminatorKey`'s doc for the soundness argument and
             // whose obligation it is.
-            QueryExpr::Concat {
+            PreASAPNode::Concat {
                 children,
                 discriminator_unique_key,
             } => {
                 let mut s = children
                     .first()
-                    .ok_or(QueryExprError::EmptyConcat)
+                    .ok_or(PreASAPNodeError::EmptyConcat)
                     .and_then(|c| c.output_schema())?;
                 s.unique_keys.clear();
                 if let Some(key) = discriminator_unique_key {
@@ -1292,7 +1293,7 @@ impl QueryExpr<ColumnId> {
             // Set operations are union-compatible: both sides share the left's
             // column shape, so the output schema is the left's. (Row identity
             // is not preserved across a UNION, so unique_keys are dropped.)
-            QueryExpr::SetOp { left, .. } => {
+            PreASAPNode::SetOp { left, .. } => {
                 let mut s = left.output_schema()?;
                 s.unique_keys.clear();
                 Ok(s)
@@ -1300,7 +1301,7 @@ impl QueryExpr<ColumnId> {
             // ⋈ — output is the concatenation of both inputs' columns. Outer
             // joins make the non-preserved side nullable. Post-join row
             // identity isn't provable in general, so unique_keys reset.
-            QueryExpr::Join {
+            PreASAPNode::Join {
                 kind, left, right, ..
             } => {
                 let l = left.output_schema()?;
@@ -1342,7 +1343,7 @@ impl QueryExpr<ColumnId> {
                 })
             }
             // ψ-analytic — child schema + one appended window-output column.
-            QueryExpr::SQLWindowFunc {
+            PreASAPNode::SQLWindowFunc {
                 func,
                 args,
                 output_name,
@@ -1353,7 +1354,7 @@ impl QueryExpr<ColumnId> {
                 // First operand's (dtype, nullable) from the child schema, owned
                 // so the borrow ends before we append.
                 let arg = args.first().and_then(|a| match a {
-                    QueryExpr::Column(id) => out.columns.get(*id),
+                    PreASAPNode::Column(id) => out.columns.get(*id),
                     _ => None,
                 });
                 let arg_dtype = || arg.map_or(DataType::Float64, |c| c.dtype.clone());
@@ -1387,14 +1388,14 @@ impl QueryExpr<ColumnId> {
             // `PromqlScalarBridge` constructed today wraps a plain
             // `Literal(Float64)` (issue #220), so the schema doesn't need to
             // inspect the inner node.
-            QueryExpr::PromqlScalarBridge(_) | QueryExpr::EvalTimestamp => Ok(Schema {
+            PreASAPNode::PromqlScalarBridge(_) | PreASAPNode::EvalTimestamp => Ok(Schema {
                 columns: vec![Column::new("value", DataType::Float64, false)],
                 time_index: None,
                 unique_keys: Vec::new(),
                 closed: true,
             }),
 
-            QueryExpr::CurrentTimestamp => Ok(Schema {
+            PreASAPNode::CurrentTimestamp => Ok(Schema {
                 columns: vec![Column::new("value", DataType::Timestamp, false)],
                 time_index: None,
                 unique_keys: Vec::new(),
@@ -1404,7 +1405,7 @@ impl QueryExpr<ColumnId> {
             // `vector(s)` yields a label-less instant vector: the (ts, value)
             // floor and nothing else. `closed` — its full label set (empty) is
             // known statically (#48).
-            QueryExpr::PromqlVectorFromScalar(_) => Ok(Schema {
+            PreASAPNode::PromqlVectorFromScalar(_) => Ok(Schema {
                 columns: vec![
                     Column::new("ts", DataType::Timestamp, false),
                     Column::new("value", DataType::Float64, false),
@@ -1416,7 +1417,7 @@ impl QueryExpr<ColumnId> {
 
             // `scalar(v)` collapses to a single `value`, no time index — the same
             // scalar shape as a constant or `time()` (#48).
-            QueryExpr::PromqlScalarFromVector(_) => Ok(Schema {
+            PreASAPNode::PromqlScalarFromVector(_) => Ok(Schema {
                 columns: vec![Column::new("value", DataType::Float64, false)],
                 time_index: None,
                 unique_keys: Vec::new(),
@@ -1427,11 +1428,11 @@ impl QueryExpr<ColumnId> {
             // <vector>`) is the vector side's — a scalar operand (a constant or
             // `time()`) contributes only its value, no labels. Prefer the
             // non-scalar side.
-            QueryExpr::BinaryOp { lhs, rhs, op, vector_match } => {
-                fn scalar(expression: &QueryExpr) -> bool {
+            PreASAPNode::BinaryOp { lhs, rhs, op, vector_match } => {
+                fn scalar(expression: &PreASAPNode) -> bool {
                     match expression {
-                        QueryExpr::PromqlScalarBridge(_) | QueryExpr::EvalTimestamp | QueryExpr::PromqlScalarFromVector(_) => true,
-                        QueryExpr::BinaryOp { lhs, rhs, .. } => scalar(lhs) && scalar(rhs),
+                        PreASAPNode::PromqlScalarBridge(_) | PreASAPNode::EvalTimestamp | PreASAPNode::PromqlScalarFromVector(_) => true,
+                        PreASAPNode::BinaryOp { lhs, rhs, .. } => scalar(lhs) && scalar(rhs),
                         _ => false,
                     }
                 }
@@ -1457,20 +1458,20 @@ impl QueryExpr<ColumnId> {
                 Ok(output)
             },
 
-            // The scalar variants (issue #205) — see `QueryExprError::ScalarHasNoRowSchema`.
-            QueryExpr::Column(_)
-            | QueryExpr::Literal(_)
-            | QueryExpr::Compare { .. }
-            | QueryExpr::BoolAnd(_)
-            | QueryExpr::BoolOr(_)
-            | QueryExpr::Not(_)
-            | QueryExpr::IsNull(_)
-            | QueryExpr::IsNotNull(_)
-            | QueryExpr::Cast { .. }
-            | QueryExpr::InList { .. }
-            | QueryExpr::FunctionCall { .. }
-            | QueryExpr::Arithmetic { .. }
-            | QueryExpr::Case { .. } => Err(QueryExprError::ScalarHasNoRowSchema),
+            // The scalar variants (issue #205) — see `PreASAPNodeError::ScalarHasNoRowSchema`.
+            PreASAPNode::Column(_)
+            | PreASAPNode::Literal(_)
+            | PreASAPNode::Compare { .. }
+            | PreASAPNode::BoolAnd(_)
+            | PreASAPNode::BoolOr(_)
+            | PreASAPNode::Not(_)
+            | PreASAPNode::IsNull(_)
+            | PreASAPNode::IsNotNull(_)
+            | PreASAPNode::Cast { .. }
+            | PreASAPNode::InList { .. }
+            | PreASAPNode::FunctionCall { .. }
+            | PreASAPNode::Arithmetic { .. }
+            | PreASAPNode::Case { .. } => Err(PreASAPNodeError::ScalarHasNoRowSchema),
         }
     }
 }
@@ -1480,18 +1481,21 @@ impl QueryExpr<ColumnId> {
 /// one value per series, so every label column of `input` is preserved and only
 /// the sample value is replaced — kept named `value` so the PromQL sample-value
 /// convention (and any outer `SampleValue` reference) still resolves it by name.
-fn per_series_reduction_schema(input: &Schema, agg: &AggIntent) -> Result<Schema, QueryExprError> {
+fn per_series_reduction_schema(
+    input: &Schema,
+    agg: &AggIntent,
+) -> Result<Schema, PreASAPNodeError> {
     let vi = if let Some(index) = agg.input_cols().first() {
         *index
     } else {
         super::column_resolution::resolve_column_ref(&ColumnRef::SampleValue, input)
-            .map_err(|error| QueryExprError::InvalidSampleColumn(error.to_string()))?
+            .map_err(|error| PreASAPNodeError::InvalidSampleColumn(error.to_string()))?
     };
     if !matches!(
         input.columns.get(vi).map(|column| &column.dtype),
         Some(DataType::Float64 | DataType::Int64)
     ) {
-        return Err(QueryExprError::InvalidSampleColumn(format!(
+        return Err(PreASAPNodeError::InvalidSampleColumn(format!(
             "column {vi} is not numeric"
         )));
     }
@@ -1518,7 +1522,7 @@ fn per_series_reduction_schema(input: &Schema, agg: &AggIntent) -> Result<Schema
 
 /// The output schema of an `Aggregate { reduction, measures }` over `in_schema` —
 /// the **single** canonical derivation shared by
-/// [`QueryExpr::output_schema`]'s `Aggregate` arm and the converter's
+/// [`PreASAPNode::output_schema`]'s `Aggregate` arm and the converter's
 /// HAVING-resolution path (`column_resolution::output_schema_for_aggregate`),
 /// so the two can never drift (issue #41).
 ///
@@ -1532,7 +1536,7 @@ pub fn aggregate_output_schema(
     reduction: &Reduction,
     measures: &[AggIntent],
     output_names: &[String],
-) -> Result<Schema, QueryExprError> {
+) -> Result<Schema, PreASAPNodeError> {
     let by = match reduction {
         Reduction::PerEntity => {
             debug_assert_eq!(
@@ -1559,7 +1563,7 @@ pub fn aggregate_output_schema(
         let c = in_schema
             .columns
             .get(id)
-            .ok_or(QueryExprError::InvalidGroupByColumn(
+            .ok_or(PreASAPNodeError::InvalidGroupByColumn(
                 id,
                 in_schema.columns.len(),
             ))?;
@@ -1610,7 +1614,7 @@ pub fn aggregate_output_schema(
         }
         if let Some((arg, _)) = intent
             .arg_selector_columns(in_schema)
-            .map_err(QueryExprError::InvalidScalarSignature)?
+            .map_err(PreASAPNodeError::InvalidScalarSignature)?
         {
             out.dtype = in_schema.columns[arg].dtype.clone();
             out.nullable = in_schema.columns[arg].nullable;
@@ -1652,10 +1656,10 @@ fn without_output_schema(
     excluded: &[ColumnId],
     measures: &[AggIntent],
     output_names: &[String],
-) -> Result<Schema, QueryExprError> {
+) -> Result<Schema, PreASAPNodeError> {
     for &id in excluded {
         if id >= in_schema.columns.len() {
-            return Err(QueryExprError::InvalidGroupByColumn(
+            return Err(PreASAPNodeError::InvalidGroupByColumn(
                 id,
                 in_schema.columns.len(),
             ));
@@ -1688,7 +1692,7 @@ fn without_output_schema(
         let mut out = intent.output_column(in_col);
         if let Some((arg, _)) = intent
             .arg_selector_columns(in_schema)
-            .map_err(QueryExprError::InvalidScalarSignature)?
+            .map_err(PreASAPNodeError::InvalidScalarSignature)?
         {
             out.dtype = in_schema.columns[arg].dtype.clone();
             out.nullable = in_schema.columns[arg].nullable;
@@ -1708,24 +1712,24 @@ fn without_output_schema(
     })
 }
 
-/// Infer the `(DataType, nullable)` a scalar [`QueryExpr`] produces against an
+/// Infer the `(DataType, nullable)` a scalar [`PreASAPNode`] produces against an
 /// input [`Schema`]. Used by `Project` schema derivation. Approximate here:
 /// unknown columns and bare `FunctionCall`s fall back to a permissive default
 /// (post-ASAP binding refines with a real function/type registry). `expr`
 /// must be one of the scalar variants (issue #205) — an operator variant here
 /// is a construction bug, not a shape this needs to handle silently.
 fn infer_expr_type(
-    expr: &QueryExpr<ColumnId>,
+    expr: &PreASAPNode<ColumnId>,
     schema: &Schema,
-) -> Result<(DataType, bool), QueryExprError> {
+) -> Result<(DataType, bool), PreASAPNodeError> {
     Ok(match expr {
-        QueryExpr::CurrentTimestamp => (DataType::Timestamp, false),
-        QueryExpr::Column(id) => schema
+        PreASAPNode::CurrentTimestamp => (DataType::Timestamp, false),
+        PreASAPNode::Column(id) => schema
             .columns
             .get(*id)
             .map(|c| (c.dtype.clone(), c.nullable))
             .unwrap_or((DataType::Float64, true)),
-        QueryExpr::Literal(s) => match s {
+        PreASAPNode::Literal(s) => match s {
             ScalarValue::Int64(_) => (DataType::Int64, false),
             ScalarValue::Float64(_) => (DataType::Float64, false),
             ScalarValue::Utf8(_) => (DataType::Utf8, false),
@@ -1734,14 +1738,14 @@ fn infer_expr_type(
             ScalarValue::Interval { .. } => (DataType::Interval, false),
         },
         // Boolean-valued expressions (SQL three-valued logic → nullable).
-        QueryExpr::Compare { .. }
-        | QueryExpr::BoolAnd(_)
-        | QueryExpr::BoolOr(_)
-        | QueryExpr::Not(_)
-        | QueryExpr::IsNull(_)
-        | QueryExpr::IsNotNull(_)
-        | QueryExpr::InList { .. } => (DataType::Bool, true),
-        QueryExpr::Arithmetic { op, left, right } => {
+        PreASAPNode::Compare { .. }
+        | PreASAPNode::BoolAnd(_)
+        | PreASAPNode::BoolOr(_)
+        | PreASAPNode::Not(_)
+        | PreASAPNode::IsNull(_)
+        | PreASAPNode::IsNotNull(_)
+        | PreASAPNode::InList { .. } => (DataType::Bool, true),
+        PreASAPNode::Arithmetic { op, left, right } => {
             let (lt, ln) = infer_expr_type(left, schema)?;
             let (rt, rn) = infer_expr_type(right, schema)?;
             // Temporal subtraction yields a fixed duration with a unit, not a
@@ -1751,7 +1755,7 @@ fn infer_expr_type(
                 && matches!(lt, DataType::Date | DataType::Timestamp)
                 && matches!(rt, DataType::Date | DataType::Timestamp)
             {
-                return Err(QueryExprError::InvalidScalarSignature(
+                return Err(PreASAPNodeError::InvalidScalarSignature(
                     "temporal subtraction produces an unsupported duration type".into(),
                 ));
             }
@@ -1777,17 +1781,17 @@ fn infer_expr_type(
             };
             (dtype, ln || rn)
         }
-        QueryExpr::Cast { to, try_cast, expr } => {
+        PreASAPNode::Cast { to, try_cast, expr } => {
             let (_, nullable) = infer_expr_type(expr, schema)?;
             (to.clone(), *try_cast || nullable)
         }
-        QueryExpr::FunctionCall { name, args } => {
+        PreASAPNode::FunctionCall { name, args } => {
             if name == "asap_element_access" {
                 super::scalar_signature::element_access_type(args, schema)
-                    .map_err(QueryExprError::InvalidScalarSignature)?
+                    .map_err(PreASAPNodeError::InvalidScalarSignature)?
             } else if name == "asap_struct_field" {
                 super::scalar_signature::struct_field_type(args, schema)
-                    .map_err(QueryExprError::InvalidScalarSignature)?
+                    .map_err(PreASAPNodeError::InvalidScalarSignature)?
             } else if let Some(function) =
                 super::scalar_signature::MapScalarFunction::from_name(name)
             {
@@ -1797,13 +1801,13 @@ fn infer_expr_type(
                     .collect::<Result<Vec<_>, _>>()?;
                 function
                     .output_type(&arguments)
-                    .map_err(QueryExprError::InvalidScalarSignature)?
+                    .map_err(PreASAPNodeError::InvalidScalarSignature)?
             } else {
                 // Legacy unknown functions retain their existing policy.
                 (DataType::Float64, true)
             }
         }
-        QueryExpr::Case {
+        PreASAPNode::Case {
             branches,
             else_expr,
             ..
@@ -1817,16 +1821,16 @@ fn infer_expr_type(
             }
         }
         other => {
-            unreachable!("infer_expr_type called on a non-scalar QueryExpr variant: {other:?}")
+            unreachable!("infer_expr_type called on a non-scalar PreASAPNode variant: {other:?}")
         }
     })
 }
 
 /// Default output-column name for a projection item with no explicit alias:
 /// a bare column keeps its (schema) name; anything else gets `col_{i}`.
-fn default_proj_name(expr: &QueryExpr<ColumnId>, idx: usize, schema: &Schema) -> String {
+fn default_proj_name(expr: &PreASAPNode<ColumnId>, idx: usize, schema: &Schema) -> String {
     match expr {
-        QueryExpr::Column(id) => schema
+        PreASAPNode::Column(id) => schema
             .columns
             .get(*id)
             .map(|c| c.name.clone())
@@ -1854,15 +1858,15 @@ mod tests {
             col("d", DataType::Date, false),
         ]);
         let thirty_days = || {
-            Rc::new(QueryExpr::Literal(ScalarValue::Interval {
+            Rc::new(PreASAPNode::Literal(ScalarValue::Interval {
                 months: 0,
                 days: 30,
                 nanos: 0,
             }))
         };
-        let shift = |column, op| QueryExpr::Arithmetic {
+        let shift = |column, op| PreASAPNode::Arithmetic {
             op,
-            left: Rc::new(QueryExpr::Column(column)),
+            left: Rc::new(PreASAPNode::Column(column)),
             right: thirty_days(),
         };
 
@@ -1881,7 +1885,7 @@ mod tests {
             DataType::Date
         );
         assert_eq!(
-            QueryExpr::Arithmetic {
+            PreASAPNode::Arithmetic {
                 op: ArithmeticOpKind::Add,
                 left: thirty_days(),
                 right: thirty_days(),
@@ -1897,8 +1901,8 @@ mod tests {
         columns: Vec<Column>,
         time_index: Option<ColumnId>,
         uk: Vec<Vec<ColumnId>>,
-    ) -> QueryExpr {
-        QueryExpr::Scan {
+    ) -> PreASAPNode {
+        PreASAPNode::Scan {
             source: Source::Table {
                 table_ref: "t".into(),
             },
@@ -1923,22 +1927,22 @@ mod tests {
             None,
             vec![vec![0, 1]],
         ));
-        let projected = QueryExpr::Project {
+        let projected = PreASAPNode::Project {
             cols: vec![
                 ProjectItem {
                     alias: Some("r".into()),
-                    expr: QueryExpr::Column(1),
+                    expr: PreASAPNode::Column(1),
                 },
                 ProjectItem {
                     alias: Some("t".into()),
-                    expr: QueryExpr::Column(0),
+                    expr: PreASAPNode::Column(0),
                 },
                 ProjectItem {
                     alias: None,
-                    expr: QueryExpr::Arithmetic {
+                    expr: PreASAPNode::Arithmetic {
                         op: ArithmeticOpKind::Add,
-                        left: Rc::new(QueryExpr::Column(2)),
-                        right: Rc::new(QueryExpr::Literal(ScalarValue::Int64(1))),
+                        left: Rc::new(PreASAPNode::Column(2)),
+                        right: Rc::new(PreASAPNode::Literal(ScalarValue::Int64(1))),
                     },
                 },
             ],
@@ -1962,10 +1966,10 @@ mod tests {
             None,
             vec![vec![0, 1]],
         ));
-        let projected = QueryExpr::Project {
+        let projected = PreASAPNode::Project {
             cols: vec![ProjectItem {
                 alias: None,
-                expr: QueryExpr::Column(0),
+                expr: PreASAPNode::Column(0),
             }],
             qualifier: None,
             child: input,
@@ -1976,7 +1980,7 @@ mod tests {
 
     #[test]
     fn legacy_window_json_without_frame_deserializes_as_unspecified() {
-        let window = QueryExpr::SQLWindowFunc {
+        let window = PreASAPNode::SQLWindowFunc {
             func: WindowFuncKind::RowNumber,
             args: vec![],
             partition_by: GroupKeys::by(vec![]),
@@ -1997,10 +2001,10 @@ mod tests {
             .unwrap()
             .remove("frame");
 
-        let decoded: QueryExpr = serde_json::from_value(json).unwrap();
+        let decoded: PreASAPNode = serde_json::from_value(json).unwrap();
         assert!(matches!(
             decoded,
-            QueryExpr::SQLWindowFunc { frame: None, .. }
+            PreASAPNode::SQLWindowFunc { frame: None, .. }
         ));
     }
 
@@ -2010,7 +2014,7 @@ mod tests {
     /// not have — `unique_keys` feeds CSE's producer-sharing legality check.
     #[test]
     fn merge_drops_the_branches_unique_keys() {
-        let branch = || QueryExpr::Dedup {
+        let branch = || PreASAPNode::Dedup {
             cols: vec![0],
             child: Rc::new(scan(
                 vec![
@@ -2027,7 +2031,7 @@ mod tests {
             "a Dedup branch does have a unique key on its own"
         );
 
-        let merged = QueryExpr::concat(vec![branch(), branch()]);
+        let merged = PreASAPNode::concat(vec![branch(), branch()]);
         let schema = merged.output_schema().unwrap();
         assert!(
             schema.unique_keys.is_empty(),
@@ -2040,12 +2044,12 @@ mod tests {
     /// Same rule as `SetOp`, which already dropped them.
     #[test]
     fn merge_and_setop_agree_on_unique_keys() {
-        let branch = || QueryExpr::Dedup {
+        let branch = || PreASAPNode::Dedup {
             cols: vec![0],
             child: Rc::new(scan(vec![col("k", DataType::Utf8, false)], None, vec![])),
         };
-        let merged = QueryExpr::concat(vec![branch(), branch()]);
-        let setop = QueryExpr::SetOp {
+        let merged = PreASAPNode::concat(vec![branch(), branch()]);
+        let setop = PreASAPNode::SetOp {
             kind: RelationalSetOpKind::Union,
             all: true,
             left: Rc::new(branch()),
@@ -2060,8 +2064,8 @@ mod tests {
     #[test]
     fn an_empty_merge_has_no_schema() {
         assert!(matches!(
-            QueryExpr::concat(vec![]).output_schema(),
-            Err(QueryExprError::EmptyConcat)
+            PreASAPNode::concat(vec![]).output_schema(),
+            Err(PreASAPNodeError::EmptyConcat)
         ));
     }
 
@@ -2079,7 +2083,7 @@ mod tests {
         // branch (PromQL φ, a synthetic `GROUPING()` id, ...) — this
         // schema-level test only checks the shape `output_schema` derives
         // from asserting one, not how a real caller proves distinctness.
-        let branch = || QueryExpr::Dedup {
+        let branch = || PreASAPNode::Dedup {
             cols: vec![0],
             child: Rc::new(scan(
                 vec![
@@ -2090,7 +2094,7 @@ mod tests {
                 vec![],
             )),
         };
-        let merged = QueryExpr::concat_with_discriminator(
+        let merged = PreASAPNode::concat_with_discriminator(
             vec![branch(), branch()],
             /* discriminator */ 1,
             /* inner_key */ vec![0],
@@ -2120,11 +2124,11 @@ mod tests {
     /// unchanged.
     #[test]
     fn ordinary_concat_struct_literal_still_drops_unique_keys_by_default() {
-        let branch = || QueryExpr::Dedup {
+        let branch = || PreASAPNode::Dedup {
             cols: vec![0],
             child: Rc::new(scan(vec![col("k", DataType::Utf8, false)], None, vec![])),
         };
-        let merged = QueryExpr::Concat {
+        let merged = PreASAPNode::Concat {
             children: vec![branch(), branch()],
             discriminator_unique_key: None,
         };
@@ -2141,13 +2145,13 @@ mod tests {
     /// as an explicit, named argument.
     #[test]
     fn no_way_to_fabricate_a_unique_key_without_naming_a_discriminator() {
-        let branch = || QueryExpr::Dedup {
+        let branch = || PreASAPNode::Dedup {
             cols: vec![0],
             child: Rc::new(scan(vec![col("k", DataType::Utf8, false)], None, vec![])),
         };
         // The ordinary builder.
         assert_eq!(
-            QueryExpr::concat(vec![branch(), branch()])
+            PreASAPNode::concat(vec![branch(), branch()])
                 .output_schema()
                 .unwrap()
                 .unique_keys,
@@ -2155,7 +2159,7 @@ mod tests {
         );
         // The bare struct literal, explicitly opting out.
         assert_eq!(
-            QueryExpr::Concat {
+            PreASAPNode::Concat {
                 children: vec![branch(), branch()],
                 discriminator_unique_key: None,
             }
@@ -2177,30 +2181,30 @@ mod tests {
             Some(0),
             vec![vec![0, 1]],
         );
-        let q = QueryExpr::Project {
+        let q = PreASAPNode::Project {
             qualifier: None,
             cols: vec![
                 // bare column passthrough keeps its (schema) name + type: host=col 1
                 ProjectItem {
                     alias: None,
-                    expr: QueryExpr::Column(1),
+                    expr: PreASAPNode::Column(1),
                 },
                 // arithmetic over value (col 2) → Float64
                 ProjectItem {
                     alias: Some("dbl".into()),
-                    expr: QueryExpr::Arithmetic {
+                    expr: PreASAPNode::Arithmetic {
                         op: ArithmeticOpKind::Add,
-                        left: Rc::new(QueryExpr::Column(2)),
-                        right: Rc::new(QueryExpr::Column(2)),
+                        left: Rc::new(PreASAPNode::Column(2)),
+                        right: Rc::new(PreASAPNode::Column(2)),
                     },
                 },
                 // comparison → Bool (nullable under 3-valued logic)
                 ProjectItem {
                     alias: Some("flag".into()),
-                    expr: QueryExpr::Compare {
-                        left: Rc::new(QueryExpr::Column(2)),
+                    expr: PreASAPNode::Compare {
+                        left: Rc::new(PreASAPNode::Column(2)),
                         op: CompareOpKind::Gt,
-                        right: Rc::new(QueryExpr::Literal(ScalarValue::Float64(0.0))),
+                        right: Rc::new(PreASAPNode::Literal(ScalarValue::Float64(0.0))),
                     },
                 },
             ],
@@ -2252,7 +2256,7 @@ mod tests {
         // kept labels are the input labels minus the excluded `instance` (and ts
         // / value), followed by the `sum` column, and the schema stays OPEN
         // (issue #39). `job` survives; `instance` is dropped.
-        let scan_node = QueryExpr::Scan {
+        let scan_node = PreASAPNode::Scan {
             source: Source::TimeSeries { metric: "m".into() },
             predicates: vec![],
             schema: Schema::with_time_index(
@@ -2266,7 +2270,7 @@ mod tests {
                 vec![],
             ),
         };
-        let agg = QueryExpr::Aggregate {
+        let agg = PreASAPNode::Aggregate {
             reduction: Reduction::Reduce(GroupKeys::without(vec![2])), // exclude `instance`
             measures: vec![AggIntent::Sum { col: None }],
             output_names: vec![],
@@ -2285,7 +2289,7 @@ mod tests {
     #[test]
     fn without_aggregate_drops_a_renamed_sample_value() {
         // `sum without (inst) (sum by (inst, job) (m))` over `[inst, job, sum]`.
-        let inner = QueryExpr::Scan {
+        let inner = PreASAPNode::Scan {
             source: Source::TimeSeries { metric: "m".into() },
             predicates: vec![],
             schema: Schema::new(vec![
@@ -2294,7 +2298,7 @@ mod tests {
                 col("sum", DataType::Float64, false),
             ]),
         };
-        let agg = QueryExpr::Aggregate {
+        let agg = PreASAPNode::Aggregate {
             reduction: Reduction::Reduce(GroupKeys::without(vec![0])),
             measures: vec![AggIntent::Sum { col: None }],
             output_names: vec![],
@@ -2319,7 +2323,7 @@ mod tests {
             Some(0),
             vec![],
         );
-        let shifted = QueryExpr::TimeShift {
+        let shifted = PreASAPNode::TimeShift {
             shift: TimeShift {
                 offset_ms: 3_600_000,
                 at: Some(AtModifier::Timestamp(1_609_746_000_000)),
@@ -2389,12 +2393,12 @@ mod tests {
             Some(0),
             vec![],
         );
-        let rate = QueryExpr::Aggregate {
+        let rate = PreASAPNode::Aggregate {
             reduction: Reduction::PerEntity,
             measures: vec![AggIntent::Rate],
             output_names: vec![],
             having: None,
-            child: Rc::new(QueryExpr::TimeRange {
+            child: Rc::new(PreASAPNode::TimeRange {
                 range: Duration::from_secs(300),
                 child: Rc::new(scan_node),
             }),
@@ -2427,12 +2431,12 @@ mod tests {
             Some(0),
             vec![],
         );
-        let avg_over_time = QueryExpr::Aggregate {
+        let avg_over_time = PreASAPNode::Aggregate {
             reduction: Reduction::PerEntity,
             measures: vec![AggIntent::Avg { col: None }],
             output_names: vec![],
             having: None,
-            child: Rc::new(QueryExpr::TimeRange {
+            child: Rc::new(PreASAPNode::TimeRange {
                 range: Duration::from_secs(300),
                 child: Rc::new(scan_node),
             }),
@@ -2457,7 +2461,7 @@ mod tests {
         // A schemaless (PromQL-style) leaf is *open*; it stays open through a
         // per-series reduction (`rate`), then is **frozen to closed** by a
         // cross-series aggregate (which enumerates exactly its output columns).
-        let open_leaf = QueryExpr::Scan {
+        let open_leaf = PreASAPNode::Scan {
             source: Source::TimeSeries { metric: "m".into() },
             predicates: vec![],
             // `with_time_index` defaults to `closed: false` (open).
@@ -2476,7 +2480,7 @@ mod tests {
             "schemaless leaf is open"
         );
 
-        let rate = QueryExpr::Aggregate {
+        let rate = PreASAPNode::Aggregate {
             reduction: Reduction::PerEntity,
             measures: vec![AggIntent::Rate],
             output_names: vec![],
@@ -2488,7 +2492,7 @@ mod tests {
             "per-series rate is label-preserving → stays open"
         );
 
-        let sum_by_job = QueryExpr::Aggregate {
+        let sum_by_job = PreASAPNode::Aggregate {
             reduction: Reduction::by(vec![2]), // `job`
             measures: vec![AggIntent::Sum { col: None }],
             output_names: vec![],
@@ -2511,17 +2515,17 @@ mod tests {
             Some(0),
             vec![],
         );
-        let q = QueryExpr::Project {
+        let q = PreASAPNode::Project {
             qualifier: None,
             cols: vec![
                 // value=col 1, ts=col 0
                 ProjectItem {
                     alias: None,
-                    expr: QueryExpr::Column(1),
+                    expr: PreASAPNode::Column(1),
                 },
                 ProjectItem {
                     alias: None,
-                    expr: QueryExpr::Column(0),
+                    expr: PreASAPNode::Column(0),
                 },
             ],
             child: Rc::new(child),
@@ -2532,12 +2536,12 @@ mod tests {
         assert_eq!(s.time_index, Some(1));
     }
 
-    fn join(kind: JoinKind) -> QueryExpr {
+    fn join(kind: JoinKind) -> PreASAPNode {
         let left = scan(vec![col("a", DataType::Int64, false)], None, vec![vec![0]]);
         let right = scan(vec![col("b", DataType::Utf8, false)], None, vec![]);
-        QueryExpr::Join {
+        PreASAPNode::Join {
             kind,
-            pred: Predicate(Rc::new(QueryExpr::Literal(ScalarValue::Boolean(true)))),
+            pred: Predicate(Rc::new(PreASAPNode::Literal(ScalarValue::Boolean(true)))),
             left: Rc::new(left),
             right: Rc::new(right),
         }
@@ -2585,7 +2589,7 @@ mod tests {
             None,
             vec![vec![0]],
         );
-        let q = QueryExpr::SetOp {
+        let q = PreASAPNode::SetOp {
             kind: RelationalSetOpKind::Union,
             all: false,
             left: Rc::new(left),
@@ -2602,17 +2606,19 @@ mod tests {
 
     // ── PromqlScalarBridge / Literal dedup (issue #220) ─────────────────────
 
-    /// `QueryExpr::promql_scalar(v)` — what every front end now constructs in
+    /// `PreASAPNode::promql_scalar(v)` — what every front end now constructs in
     /// place of the old `PromqlScalar(v)` leaf — wraps exactly
     /// `Literal(ScalarValue::Float64(v))`: the same value a SQL-emitted typed
     /// float literal in a scalar-sub-language position would carry, just at a
     /// different tree position. `as_promql_scalar` is the round-trip inverse.
     #[test]
     fn promql_scalar_bridges_a_literal_float_at_an_operator_position() {
-        let bridge = QueryExpr::<ColumnId>::promql_scalar(2.5);
+        let bridge = PreASAPNode::<ColumnId>::promql_scalar(2.5);
         assert_eq!(
             bridge,
-            QueryExpr::PromqlScalarBridge(Rc::new(QueryExpr::Literal(ScalarValue::Float64(2.5))))
+            PreASAPNode::PromqlScalarBridge(Rc::new(PreASAPNode::Literal(ScalarValue::Float64(
+                2.5
+            ))))
         );
         assert_eq!(bridge.as_promql_scalar(), Some(2.5));
 
@@ -2620,7 +2626,7 @@ mod tests {
         // its native (unwrapped, no row schema) scalar-sub-language position —
         // no longer a different variant, just not bridged to this tree
         // position.
-        let sql_literal = QueryExpr::<ColumnId>::Literal(ScalarValue::Float64(2.5));
+        let sql_literal = PreASAPNode::<ColumnId>::Literal(ScalarValue::Float64(2.5));
         assert_eq!(bridge.as_promql_scalar(), Some(2.5));
         assert_ne!(
             bridge, sql_literal,
@@ -2641,7 +2647,7 @@ mod tests {
     /// duplicate variants was used, only by whether the wrapper is present.
     #[test]
     fn row_schema_rides_on_the_bridge_wrapper_not_the_literal_variant() {
-        let bridged = QueryExpr::<ColumnId>::promql_scalar(42.0);
+        let bridged = PreASAPNode::<ColumnId>::promql_scalar(42.0);
         let schema = bridged.output_schema().expect("bridge has a row schema");
         assert_eq!(schema.columns.len(), 1);
         assert_eq!(schema.columns[0].name, "value");
@@ -2652,10 +2658,10 @@ mod tests {
         // `Compare`/`Arithmetic` operand would occupy) has no row schema of
         // its own — it's a construction bug to call `output_schema` on it
         // directly, caught as `ScalarHasNoRowSchema` rather than panicking.
-        let bare = QueryExpr::<ColumnId>::Literal(ScalarValue::Float64(42.0));
+        let bare = PreASAPNode::<ColumnId>::Literal(ScalarValue::Float64(42.0));
         assert!(matches!(
             bare.output_schema(),
-            Err(QueryExprError::ScalarHasNoRowSchema)
+            Err(PreASAPNodeError::ScalarHasNoRowSchema)
         ));
     }
 
@@ -2679,14 +2685,14 @@ mod tests {
             labels: vec!["host".into()],
             grouping: None,
         };
-        let op = QueryExpr::BinaryOp {
+        let op = PreASAPNode::BinaryOp {
             op: BinaryOpKind::Compare(CompareOpKind::Gt),
             lhs: Rc::new(vector.clone()),
-            rhs: Rc::new(QueryExpr::promql_scalar(1.0)),
+            rhs: Rc::new(PreASAPNode::promql_scalar(1.0)),
             vector_match: Some(vm.clone()),
         };
         assert_eq!(op.output_schema().unwrap(), vector.output_schema().unwrap());
-        let QueryExpr::BinaryOp { vector_match, .. } = &op else {
+        let PreASAPNode::BinaryOp { vector_match, .. } = &op else {
             unreachable!()
         };
         assert_eq!(vector_match.as_ref(), Some(&vm));

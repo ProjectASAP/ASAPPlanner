@@ -1,4 +1,4 @@
-//! `QueryExpr::TimeRange` — range / streaming function tests.
+//! `PreASAPNode::TimeRange` — range / streaming function tests.
 //!
 //! All range functions lower to `Aggregate { child: TimeRange { range, child: Scan } }`.
 //! The temporal range lives on the `TimeRange` node, not in the `AggIntent`.
@@ -12,15 +12,15 @@ use std::time::Duration;
 
 use asap_integration_tests::fixtures::lower_promql;
 use asap_integration_tests::fixtures::metric_schema;
-use asap_types::pre_asap::{AggIntent, QueryExpr, Reduction, Source};
+use asap_types::pre_asap::{AggIntent, PreASAPNode, Reduction, Source};
 use asap_types::types::AccuracyTarget;
 
-fn lower(q: &str) -> QueryExpr {
+fn lower(q: &str) -> PreASAPNode {
     lower_promql(q, AccuracyTarget::Exact).unwrap_or_else(|e| panic!("lower failed for {q:?}: {e}"))
 }
 
-fn scan(metric: &str) -> QueryExpr {
-    QueryExpr::Scan {
+fn scan(metric: &str) -> PreASAPNode {
+    PreASAPNode::Scan {
         source: Source::TimeSeries {
             metric: metric.into(),
         },
@@ -29,13 +29,13 @@ fn scan(metric: &str) -> QueryExpr {
     }
 }
 
-fn range_agg(range_secs: u64, intent: AggIntent, metric: &str) -> QueryExpr {
-    QueryExpr::Aggregate {
+fn range_agg(range_secs: u64, intent: AggIntent, metric: &str) -> PreASAPNode {
+    PreASAPNode::Aggregate {
         reduction: Reduction::PerEntity,
         measures: vec![intent],
         output_names: vec!["".into()],
         having: None,
-        child: Rc::new(QueryExpr::TimeRange {
+        child: Rc::new(PreASAPNode::TimeRange {
             range: Duration::from_secs(range_secs),
             child: Rc::new(scan(metric)),
         }),

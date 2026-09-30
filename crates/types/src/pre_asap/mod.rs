@@ -1,24 +1,24 @@
 //! The canonical pre-ASAP intent algebra IR.
 //!
 //! - [`query_expr`] — the canonical, language- and deployment-independent
-//!   intent algebra: one recursive [`QueryExpr`] tree (relational operators
+//!   intent algebra: one recursive [`PreASAPNode`] tree (relational operators
 //!   *and* scalar expression shapes both, since issue #205) + [`AggIntent`],
 //!   generic over the column-reference state (positional [`ColumnId`] once
 //!   bound, name-based [`ColumnRef`] before).
 //! - [`agg_intent`] — the aggregation-intent vocabulary.
 //! - [`expr_ir`] — the [`ColumnRef`] column-reference type and the scalar
 //!   operator/literal vocabulary ([`ScalarValue`], [`CompareOpKind`], [`ArithmeticOpKind`])
-//!   [`QueryExpr`]'s scalar variants are built from.
+//!   [`PreASAPNode`]'s scalar variants are built from.
 //! - [`schema`] — the per-edge [`Schema`] every node carries.
 //! - [`schema_resolver`] / [`column_resolution`] — name resolution: turn a `ColumnRef`
 //!   into a positional `ColumnId` against an in-scope [`Schema`].
-//! - [`resolve`] — binds a whole front-end-emitted [`UnresolvedQueryExpr`] tree to
-//!   canonical [`ResolvedQueryExpr`] (issue #179): both front ends
-//!   (`asap-frontend-promql`, `asap-frontend-sql`) construct `UnresolvedQueryExpr`
+//! - [`resolve`] — binds a whole front-end-emitted [`UnresolvedPreASAPNode`] tree to
+//!   canonical [`ResolvedPreASAPNode`] (issue #179): both front ends
+//!   (`asap-frontend-promql`, `asap-frontend-sql`) construct `UnresolvedPreASAPNode`
 //!   directly during their own `interpret` step and call
 //!   [`resolve_root`] on the result — there is no separate per-language
 //!   relational tree or converter anymore.
-//! - [`canonicalize`] — post-lowering structural normalization of [`QueryExpr`]
+//! - [`canonicalize`] — post-lowering structural normalization of [`PreASAPNode`]
 //!   (issue #34), run by [`resolve_root`].
 //! - [`cse`] — workload-level structural common-subexpression elimination
 //!   over an already-`resolve_root`'d tree (issue #212, #222, #223), run
@@ -28,7 +28,7 @@
 //! Formerly the separate `asap-l2` crate; folded in here since
 //! `schema_resolver`/`column_resolution`/`canonicalize`/`resolve` have no
 //! front-end-specific logic — they operate directly on this crate's own
-//! `QueryExpr`.
+//! `PreASAPNode`.
 
 pub mod agg_intent;
 pub mod canonicalize;
@@ -54,11 +54,19 @@ pub use cse::share_common_subtrees;
 pub use expr_ir::{ArithmeticOpKind, ColumnRef, CompareOpKind, ScalarValue};
 pub use query_expr::{
     aggregate_output_schema, AtModifier, BinaryOpKind, ColState, DataModel, GroupKeys, GroupSide,
-    InfoMatcher, JoinKind, Predicate, ProjectItem, PromQLVectorSetOpKind, QueryExpr,
-    QueryExprError, Reduction, RelationalSetOpKind, ResolvedQueryExpr, SampleKind, SortKey, Source,
-    TimeShift, UnresolvedQueryExpr, VectorGrouping, VectorMatch, VectorMatchKind, WindowFrame,
-    WindowFrameBound, WindowFrameOffset, WindowFrameUnits, WindowFuncKind,
+    InfoMatcher, JoinKind, PreASAPNode, PreASAPNodeError, Predicate, ProjectItem,
+    PromQLVectorSetOpKind, Reduction, RelationalSetOpKind, ResolvedPreASAPNode, SampleKind,
+    SortKey, Source, TimeShift, UnresolvedPreASAPNode, VectorGrouping, VectorMatch,
+    VectorMatchKind, WindowFrame, WindowFrameBound, WindowFrameOffset, WindowFrameUnits,
+    WindowFuncKind,
 };
 pub use resolve::{resolve_root, ResolveTreeError};
 pub use schema::{Column, ColumnId, DataType, Schema};
 pub use schema_resolver::{SchemaCatalog, SchemaResolver, UsageDerivedCatalog};
+
+/// Shared root of a frontend-lowered query graph.
+pub type PreASAPDAG<C = ColumnId> = std::rc::Rc<PreASAPNode<C>>;
+
+/// Frontend candidates keyed by normalized workload entry. Repeated IDs are
+/// alternative lowerings; distinct IDs are independent workload entries.
+pub type CandidatePreASAPDAGs<Id> = Vec<(Id, PreASAPDAG)>;

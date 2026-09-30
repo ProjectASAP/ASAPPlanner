@@ -55,7 +55,7 @@ The diagram below follows a workload of one or more query roots through target d
 Terminology used in the diagram:
 
 - A **workload** is the set of named queries planned together. A **query root**
-  is the top-level `QueryExpr` (the logical query-expression type) for one of
+  is the top-level `PreASAPNode` (the logical query-expression type) for one of
   those queries. **Pre-ASAP** means this logical input form, before the planner
   realizes an operation as a concrete ASAP realization; **post-ASAP** means
   the resulting realization form.
@@ -86,9 +86,9 @@ flowchart TB
   classDef report fill:#f2eafe,stroke:#7950b3,color:#34204f
 
   subgraph DISCOVERY[1. Discover every replaceable site]
-    WL["Input workload<br/>one or more named pre-ASAP QueryExpr roots"]:::input
+    WL["Input workload<br/>one or more named pre-ASAP PreASAPNode roots"]:::input
     SEARCH["search_workload_with<br/>run CSE once, then visit every node in every root DAG"]:::generate
-    TARGET["TargetSubDAG<br/>one candidate site plus the number of workload locations<br/>that reference the same Rc&lt;QueryExpr&gt;"]:::generate
+    TARGET["TargetSubDAG<br/>one candidate site plus the number of workload locations<br/>that reference the same Rc&lt;PreASAPNode&gt;"]:::generate
     WL -->|"roots"| SEARCH -->|"one target per distinct node"| TARGET
   end
 
@@ -157,7 +157,7 @@ flowchart LR
   classDef workload fill:#e7f7ef,stroke:#31835e,color:#173f2d
   classDef common fill:#fff6dd,stroke:#b78922,color:#513d0c
 
-  ROOTS["Input<br/>one or more named QueryExpr roots"]:::workload
+  ROOTS["Input<br/>one or more named PreASAPNode roots"]:::workload
   ROOTS --> CSE["Canonicalize sharing<br/>merge structurally identical, legally shareable subtrees"]:::workload
   CSE --> WALK["Discover sites<br/>walk the complete DAG, including nodes below unshared parents"]:::workload
   WALK --> T["Build TargetSubDAG<br/>retain the subtree's Rc identity and measured consumer_count"]:::workload
@@ -200,7 +200,7 @@ cost.
 The default context-free registry contains five `ReplacementStrategy` implementations:
 
 - `SketchAlgorithmStrategy` matches supported aggregate and binary shapes. Its
-  `replacements(target)` method constructs every legal post-ASAP `SummaryNode`,
+  `replacements(target)` method constructs every legal post-ASAP `PostASAPNode`,
   including applicable sketch, exact-accumulator, and pass-through
   realizations. Candidates are sized and ordered for the target's accuracy
   requirement; candidates without a sufficient guarantee are rejected before

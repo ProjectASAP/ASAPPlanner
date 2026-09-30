@@ -4,10 +4,10 @@ use planner_types::post_asap::maintained_population::PopulationReadout;
 use planner_types::pre_asap::{DataType, ScalarValue};
 
 /// A PromQL number literal has no row schema; its consumer folds it in.
-pub(super) fn scalar_literal(expression: &QueryExpr) -> Option<f64> {
+pub(super) fn scalar_literal(expression: &PreASAPNode) -> Option<f64> {
     match expression {
-        QueryExpr::PromqlScalarBridge(child) => scalar_literal(child),
-        QueryExpr::Literal(ScalarValue::Float64(value)) => Some(*value),
+        PreASAPNode::PromqlScalarBridge(child) => scalar_literal(child),
+        PreASAPNode::Literal(ScalarValue::Float64(value)) => Some(*value),
         _ => None,
     }
 }

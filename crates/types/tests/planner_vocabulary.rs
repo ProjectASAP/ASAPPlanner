@@ -1,7 +1,7 @@
 use asap_types::post_asap::{
     validate_pane_coverage, PaneLayout, WindowEdgeCompatibility, WindowEdgeCoverage,
 };
-use asap_types::pre_asap::{SchemaResolver, Source, UnresolvedQueryExpr};
+use asap_types::pre_asap::{SchemaResolver, Source, UnresolvedPreASAPNode};
 use asap_types::resources::{PhysicalHandoffBytes, PhysicalHandoffKind};
 
 // Renamed pane APIs still read and emit the deployed wire contract.
@@ -33,7 +33,7 @@ fn window_edge_names_preserve_wire_values() {
 // External consumers can use the new resolver and resource names without changing behavior.
 #[test]
 fn renamed_schema_and_handoff_apis_are_public() {
-    let tree = UnresolvedQueryExpr::Scan {
+    let tree = UnresolvedPreASAPNode::Scan {
         source: Source::TimeSeries {
             metric: "requests".into(),
         },

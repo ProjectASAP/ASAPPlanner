@@ -8,7 +8,7 @@ edition = "2021"
 # execution logic — removed, no real implementor existed; see issue #190).
 # No internal deps.
 [dependencies]
-# "rc" — QueryExpr's child fields are Rc<QueryExpr<C>> (issue #212, #222:
+# "rc" — PreASAPNode's child fields are Rc<PreASAPNode<C>> (issue #212, #222:
 # shared sub-expressions), and Rc<T>'s Serialize/Deserialize impls live behind
 # this feature flag. dag_export.rs / DagNode already flatten the tree to a
 # node+edge list for JSON export, so this does not change wire format — a

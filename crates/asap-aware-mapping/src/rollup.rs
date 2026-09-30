@@ -88,7 +88,7 @@
 //! - **No materialized roll-up operator.** Actually building a pre-aggregated
 //!   summary/scan leaf at execution time is separate, larger work outside
 //!   `asap-aware-mapping`'s scope (see issue #254's own "Non-goal" section)
-//!   — this module only constructs the pre-ASAP [`QueryExpr::Aggregate`]
+//!   — this module only constructs the pre-ASAP [`PreASAPNode::Aggregate`]
 //!   rewrite; a `CostModel`/search engine decides whether to prefer it.
 //! - **No cross-schema reconciliation** (see "`ColumnId` comparability"
 //!   above) and **no `without(...)` grouping support** — `without`'s kept
@@ -101,7 +101,7 @@ use std::collections::HashSet;
 use std::rc::Rc;
 
 use asap_types::pre_asap::agg_intent::AggIntent;
-use asap_types::pre_asap::query_expr::{GroupKeys, QueryExpr, Reduction};
+use asap_types::pre_asap::query_expr::{GroupKeys, PreASAPNode, Reduction};
 use asap_types::pre_asap::schema::{ColumnId, Schema};
 use asap_types::types::AccuracyTarget;
 
@@ -115,9 +115,9 @@ use crate::replacement::{Replacement, ReplacementStrategy, ReplacementSubDAG, Ta
 /// at all). `None` for anything else, including a multi-measure or `HAVING`
 /// aggregate, a non-`Aggregate` node, or a `PerEntity` reduction.
 fn bindable_grouped_aggregate(
-    node: &QueryExpr,
-) -> Option<(&GroupKeys, &AggIntent, &Rc<QueryExpr>)> {
-    let QueryExpr::Aggregate {
+    node: &PreASAPNode,
+) -> Option<(&GroupKeys, &AggIntent, &Rc<PreASAPNode>)> {
+    let PreASAPNode::Aggregate {
         reduction,
         measures,
         having,
@@ -259,7 +259,7 @@ fn is_strict_column_superset(finer: &[ColumnId], coarser: &[ColumnId]) -> bool {
 /// docs' "Non-goals" on why finding the full sibling set across a workload
 /// is a workload-wide traversal this strategy does not own.
 pub struct RollupStrategy {
-    siblings: Vec<Rc<QueryExpr>>,
+    siblings: Vec<Rc<PreASAPNode>>,
 }
 
 impl RollupStrategy {
@@ -267,7 +267,7 @@ impl RollupStrategy {
     /// each as a candidate roll-up source (or target) — typically the full set of `Aggregate`
     /// nodes a workload-wide discovery pass (issue #252) already found
     /// sharing at least one child `Rc` with something else.
-    pub fn new(siblings: &[Rc<QueryExpr>]) -> Self {
+    pub fn new(siblings: &[Rc<PreASAPNode>]) -> Self {
         Self {
             siblings: siblings.to_vec(),
         }
@@ -276,7 +276,7 @@ impl RollupStrategy {
     /// Every sibling that is a legal, strictly finer roll-up source for
     /// `target` — shared between `matches` and `replacements` so the two
     /// can never disagree about which siblings qualify.
-    fn finer_sources(&self, target: &TargetSubDAG<'_>) -> Vec<&Rc<QueryExpr>> {
+    fn finer_sources(&self, target: &TargetSubDAG<'_>) -> Vec<&Rc<PreASAPNode>> {
         let Some((coarser_by, coarser_intent, coarser_child)) =
             bindable_grouped_aggregate(target.root)
         else {
@@ -321,7 +321,7 @@ impl ReplacementStrategy for RollupStrategy {
         let Some((coarser_by, coarser_intent, _)) = bindable_grouped_aggregate(target.root) else {
             return Vec::new();
         };
-        let QueryExpr::Aggregate { output_names, .. } = target.root.as_ref() else {
+        let PreASAPNode::Aggregate { output_names, .. } = target.root.as_ref() else {
             unreachable!("bindable_grouped_aggregate already confirmed Aggregate");
         };
         self.finer_sources(target)
@@ -331,7 +331,7 @@ impl ReplacementStrategy for RollupStrategy {
     }
 }
 
-/// Build the coarser replacement: a new `QueryExpr::Aggregate` grouped by
+/// Build the coarser replacement: a new `PreASAPNode::Aggregate` grouped by
 /// `coarser_by`'s columns (repositioned into `finer`'s own output schema —
 /// see below), computing `rollup_combinator(intent, ..)` over `finer`'s own
 /// measure column, with `child = finer` instead of the original shared
@@ -346,7 +346,7 @@ impl ReplacementStrategy for RollupStrategy {
 /// position in the shared child to its position in `finer`'s output: the
 /// index its `ColumnId` occupies within `finer_by`'s own ordered list.
 fn build_rollup(
-    finer: &Rc<QueryExpr>,
+    finer: &Rc<PreASAPNode>,
     coarser_by: &GroupKeys,
     intent: &AggIntent,
     output_names: &[String],
@@ -363,7 +363,7 @@ fn build_rollup(
         .map(|id| finer_by.keys().iter().position(|f| f == id))
         .collect::<Option<Vec<_>>>()?;
 
-    let rewritten = QueryExpr::Aggregate {
+    let rewritten = PreASAPNode::Aggregate {
         reduction: Reduction::by(remapped_by),
         measures: vec![combinator],
         output_names: output_names.to_vec(),
@@ -394,8 +394,8 @@ mod tests {
     use asap_types::types::AccuracyTarget;
 
     /// `[ts(0), value(1), job(2), region(3)]`.
-    fn metric_scan() -> QueryExpr {
-        QueryExpr::Scan {
+    fn metric_scan() -> PreASAPNode {
+        PreASAPNode::Scan {
             source: Source::TimeSeries { metric: "m".into() },
             predicates: vec![],
             schema: Schema::with_time_index(
@@ -411,8 +411,8 @@ mod tests {
         }
     }
 
-    fn agg(by: Vec<ColumnId>, intent: AggIntent, child: &Rc<QueryExpr>) -> Rc<QueryExpr> {
-        Rc::new(QueryExpr::Aggregate {
+    fn agg(by: Vec<ColumnId>, intent: AggIntent, child: &Rc<PreASAPNode>) -> Rc<PreASAPNode> {
+        Rc::new(PreASAPNode::Aggregate {
             reduction: Reduction::by(by),
             measures: vec![intent],
             output_names: vec![],
@@ -424,9 +424,9 @@ mod tests {
     fn without_agg(
         excluded: Vec<ColumnId>,
         intent: AggIntent,
-        child: &Rc<QueryExpr>,
-    ) -> Rc<QueryExpr> {
-        Rc::new(QueryExpr::Aggregate {
+        child: &Rc<PreASAPNode>,
+    ) -> Rc<PreASAPNode> {
+        Rc::new(PreASAPNode::Aggregate {
             reduction: Reduction::Reduce(GroupKeys::without(excluded)),
             measures: vec![intent],
             output_names: vec![],
@@ -577,7 +577,7 @@ mod tests {
         let Replacement::Rewrite(rewritten) = &replacements[0].replacement else {
             panic!("expected a Rewrite replacement");
         };
-        let QueryExpr::Aggregate {
+        let PreASAPNode::Aggregate {
             reduction,
             measures,
             child,
@@ -638,7 +638,7 @@ mod tests {
         let Replacement::Rewrite(rewritten) = &replacements[0].replacement else {
             panic!("expected a Rewrite replacement");
         };
-        let QueryExpr::Aggregate { measures, .. } = rewritten.as_ref() else {
+        let PreASAPNode::Aggregate { measures, .. } = rewritten.as_ref() else {
             panic!("expected an Aggregate rewrite");
         };
         assert_eq!(
@@ -677,7 +677,7 @@ mod tests {
             .find(|group| {
                 matches!(
                     group.target.as_ref(),
-                    QueryExpr::Aggregate {
+                    PreASAPNode::Aggregate {
                         reduction: Reduction::Reduce(by),
                         ..
                     } if by.keys() == [2]
@@ -693,12 +693,12 @@ mod tests {
                 Replacement::Summary(_) | Replacement::ExactComposition(_) => None,
             })
             .expect("default search must include the roll-up rewrite");
-        let QueryExpr::Aggregate { child, .. } = rewrite.as_ref() else {
+        let PreASAPNode::Aggregate { child, .. } = rewrite.as_ref() else {
             panic!("expected aggregate rewrite, got {rewrite:?}");
         };
         assert!(matches!(
             child.as_ref(),
-            QueryExpr::Aggregate {
+            PreASAPNode::Aggregate {
                 reduction: Reduction::Reduce(by),
                 ..
             } if by.keys() == [2, 3]
@@ -718,7 +718,7 @@ mod tests {
             .find(|group| {
                 matches!(
                     group.target.as_ref(),
-                    QueryExpr::Aggregate {
+                    PreASAPNode::Aggregate {
                         reduction: Reduction::Reduce(by),
                         ..
                     } if by.keys() == [2]
@@ -736,7 +736,7 @@ mod tests {
     fn rollup_preserves_the_coarser_output_name() {
         let scan = Rc::new(metric_scan());
         let fine = agg(vec![2, 3], AggIntent::Sum { col: Some(1) }, &scan);
-        let coarse = Rc::new(QueryExpr::Aggregate {
+        let coarse = Rc::new(PreASAPNode::Aggregate {
             reduction: Reduction::by(vec![2]),
             measures: vec![AggIntent::Sum { col: Some(1) }],
             output_names: vec!["total_requests".into()],
@@ -753,7 +753,7 @@ mod tests {
         };
 
         assert_eq!(rewritten.output_schema().unwrap(), original_schema);
-        let QueryExpr::Aggregate { output_names, .. } = rewritten.as_ref() else {
+        let PreASAPNode::Aggregate { output_names, .. } = rewritten.as_ref() else {
             unreachable!();
         };
         assert_eq!(output_names, &vec!["total_requests".to_string()]);
@@ -859,7 +859,7 @@ mod tests {
     fn does_not_match_a_multi_measure_or_having_aggregate() {
         let scan = Rc::new(metric_scan());
         let fine = agg(vec![2, 3], AggIntent::Sum { col: Some(1) }, &scan);
-        let multi = Rc::new(QueryExpr::Aggregate {
+        let multi = Rc::new(PreASAPNode::Aggregate {
             reduction: Reduction::by(vec![2]),
             measures: vec![
                 AggIntent::Sum { col: Some(1) },

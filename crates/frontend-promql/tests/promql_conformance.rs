@@ -37,8 +37,8 @@ use asap_frontend_promql::PromqlError as LoweringError;
 mod support;
 use asap_types::pre_asap::schema::DataType;
 use asap_types::pre_asap::{
-    AggIntent, ArithmeticOpKind, AtModifier, BinaryOpKind, CompareOpKind, MathFunc,
-    PromQLVectorSetOpKind, QueryExpr, Reduction, SampleKind, Source, TimeFunc,
+    AggIntent, ArithmeticOpKind, AtModifier, BinaryOpKind, CompareOpKind, MathFunc, PreASAPNode,
+    PromQLVectorSetOpKind, Reduction, SampleKind, Source, TimeFunc,
 };
 use asap_types::types::AccuracyTarget;
 use support::lower_promql;
@@ -46,7 +46,7 @@ use support::lower_promql;
 // ── harness helpers ─────────────────────────────────────────────────────────────
 
 /// Lower, expecting success.
-fn ok(q: &str) -> QueryExpr {
+fn ok(q: &str) -> PreASAPNode {
     lower_promql(q, AccuracyTarget::Exact)
         .unwrap_or_else(|e| panic!("expected {q:?} to lower, got error: {e}"))
 }
@@ -60,71 +60,71 @@ fn rejected(q: &str) -> LoweringError {
 }
 
 /// Every `AggIntent` anywhere in the tree, root-to-leaf.
-fn intents(e: &QueryExpr) -> Vec<AggIntent> {
+fn intents(e: &PreASAPNode) -> Vec<AggIntent> {
     let mut out = Vec::new();
     collect(e, &mut out);
     out
 }
 
-fn collect(e: &QueryExpr, out: &mut Vec<AggIntent>) {
+fn collect(e: &PreASAPNode, out: &mut Vec<AggIntent>) {
     match e {
-        QueryExpr::Aggregate {
+        PreASAPNode::Aggregate {
             measures, child, ..
         } => {
             out.extend(measures.iter().cloned());
             collect(child, out);
         }
-        QueryExpr::TimeRange { child, .. }
-        | QueryExpr::TimeShift { child, .. }
-        | QueryExpr::Filter { child, .. }
-        | QueryExpr::Sort { child, .. }
-        | QueryExpr::Limit { child, .. }
-        | QueryExpr::PromqlSubquery { child, .. }
-        | QueryExpr::Dedup { child, .. }
-        | QueryExpr::SQLWindowFunc { child, .. }
-        | QueryExpr::Project { child, .. }
-        | QueryExpr::PromqlRelabel { child, .. }
-        | QueryExpr::PromqlSeriesSample { child, .. }
-        | QueryExpr::PromqlInfoEnrich { child, .. } => collect(child, out),
-        QueryExpr::BinaryOp { lhs, rhs, .. } => {
+        PreASAPNode::TimeRange { child, .. }
+        | PreASAPNode::TimeShift { child, .. }
+        | PreASAPNode::Filter { child, .. }
+        | PreASAPNode::Sort { child, .. }
+        | PreASAPNode::Limit { child, .. }
+        | PreASAPNode::PromqlSubquery { child, .. }
+        | PreASAPNode::Dedup { child, .. }
+        | PreASAPNode::SQLWindowFunc { child, .. }
+        | PreASAPNode::Project { child, .. }
+        | PreASAPNode::PromqlRelabel { child, .. }
+        | PreASAPNode::PromqlSeriesSample { child, .. }
+        | PreASAPNode::PromqlInfoEnrich { child, .. } => collect(child, out),
+        PreASAPNode::BinaryOp { lhs, rhs, .. } => {
             collect(lhs, out);
             collect(rhs, out);
         }
-        QueryExpr::Join { left, right, .. } | QueryExpr::SetOp { left, right, .. } => {
+        PreASAPNode::Join { left, right, .. } | PreASAPNode::SetOp { left, right, .. } => {
             collect(left, out);
             collect(right, out);
         }
-        QueryExpr::Concat { children, .. } => children.iter().for_each(|c| collect(c, out)),
-        QueryExpr::PromqlVectorFromScalar(inner) | QueryExpr::PromqlScalarFromVector(inner) => {
+        PreASAPNode::Concat { children, .. } => children.iter().for_each(|c| collect(c, out)),
+        PreASAPNode::PromqlVectorFromScalar(inner) | PreASAPNode::PromqlScalarFromVector(inner) => {
             collect(inner, out)
         }
         // `AggIntent` only ever lives in `Aggregate.measures`, never in a
         // scalar position (issue #205) — nothing to collect there.
-        QueryExpr::Scan { .. }
-        | QueryExpr::PromqlScalarBridge(_)
-        | QueryExpr::EvalTimestamp
-        | QueryExpr::CurrentTimestamp => {}
-        QueryExpr::Column(_)
-        | QueryExpr::Literal(_)
-        | QueryExpr::Compare { .. }
-        | QueryExpr::BoolAnd(_)
-        | QueryExpr::BoolOr(_)
-        | QueryExpr::Not(_)
-        | QueryExpr::IsNull(_)
-        | QueryExpr::IsNotNull(_)
-        | QueryExpr::Cast { .. }
-        | QueryExpr::InList { .. }
-        | QueryExpr::FunctionCall { .. }
-        | QueryExpr::Arithmetic { .. }
-        | QueryExpr::Case { .. } => {}
+        PreASAPNode::Scan { .. }
+        | PreASAPNode::PromqlScalarBridge(_)
+        | PreASAPNode::EvalTimestamp
+        | PreASAPNode::CurrentTimestamp => {}
+        PreASAPNode::Column(_)
+        | PreASAPNode::Literal(_)
+        | PreASAPNode::Compare { .. }
+        | PreASAPNode::BoolAnd(_)
+        | PreASAPNode::BoolOr(_)
+        | PreASAPNode::Not(_)
+        | PreASAPNode::IsNull(_)
+        | PreASAPNode::IsNotNull(_)
+        | PreASAPNode::Cast { .. }
+        | PreASAPNode::InList { .. }
+        | PreASAPNode::FunctionCall { .. }
+        | PreASAPNode::Arithmetic { .. }
+        | PreASAPNode::Case { .. } => {}
     }
 }
 
 /// The first `Scan` reached by descending single-child nodes, with its metric
 /// name and predicate count.
-fn first_scan(e: &QueryExpr) -> (String, usize) {
+fn first_scan(e: &PreASAPNode) -> (String, usize) {
     match e {
-        QueryExpr::Scan {
+        PreASAPNode::Scan {
             source, predicates, ..
         } => {
             let name = match source {
@@ -133,43 +133,43 @@ fn first_scan(e: &QueryExpr) -> (String, usize) {
             };
             (name, predicates.len())
         }
-        QueryExpr::TimeRange { child, .. }
-        | QueryExpr::TimeShift { child, .. }
-        | QueryExpr::Aggregate { child, .. }
-        | QueryExpr::Filter { child, .. }
-        | QueryExpr::Sort { child, .. }
-        | QueryExpr::Limit { child, .. }
-        | QueryExpr::PromqlSubquery { child, .. } => first_scan(child),
+        PreASAPNode::TimeRange { child, .. }
+        | PreASAPNode::TimeShift { child, .. }
+        | PreASAPNode::Aggregate { child, .. }
+        | PreASAPNode::Filter { child, .. }
+        | PreASAPNode::Sort { child, .. }
+        | PreASAPNode::Limit { child, .. }
+        | PreASAPNode::PromqlSubquery { child, .. } => first_scan(child),
         other => panic!("no Scan reachable from {other:?}"),
     }
 }
 
-fn has<F: Fn(&AggIntent) -> bool>(e: &QueryExpr, pred: F) -> bool {
+fn has<F: Fn(&AggIntent) -> bool>(e: &PreASAPNode, pred: F) -> bool {
     intents(e).iter().any(pred)
 }
 
 /// Whether the tree contains a `Mul`-by-`PromqlScalarBridge(-1)` anywhere — the shape unary
 /// negation lowers to (issue #36).
-fn negates_via_scalar(e: &QueryExpr) -> bool {
-    let is_neg_one = |q: &QueryExpr| {
+fn negates_via_scalar(e: &PreASAPNode) -> bool {
+    let is_neg_one = |q: &PreASAPNode| {
         q.as_promql_scalar()
             .is_some_and(|v| (v + 1.0).abs() < 1e-12)
     };
     match e {
-        QueryExpr::BinaryOp { op, lhs, rhs, .. } => {
+        PreASAPNode::BinaryOp { op, lhs, rhs, .. } => {
             (*op == BinaryOpKind::Arithmetic(ArithmeticOpKind::Mul)
                 && (is_neg_one(lhs) || is_neg_one(rhs)))
                 || negates_via_scalar(lhs)
                 || negates_via_scalar(rhs)
         }
-        QueryExpr::Aggregate { child, .. }
-        | QueryExpr::Sort { child, .. }
-        | QueryExpr::Limit { child, .. }
-        | QueryExpr::TimeRange { child, .. }
-        | QueryExpr::TimeShift { child, .. }
-        | QueryExpr::PromqlSubquery { child, .. }
-        | QueryExpr::Filter { child, .. }
-        | QueryExpr::Project { child, .. } => negates_via_scalar(child),
+        PreASAPNode::Aggregate { child, .. }
+        | PreASAPNode::Sort { child, .. }
+        | PreASAPNode::Limit { child, .. }
+        | PreASAPNode::TimeRange { child, .. }
+        | PreASAPNode::TimeShift { child, .. }
+        | PreASAPNode::PromqlSubquery { child, .. }
+        | PreASAPNode::Filter { child, .. }
+        | PreASAPNode::Project { child, .. } => negates_via_scalar(child),
         _ => false,
     }
 }
@@ -193,10 +193,10 @@ fn promql_scan_schema_is_open() {
     // runtime-only, so the binding schema lists only the (ts, value) floor +
     // referenced labels and may be a subset of the runtime row.
     let qe = ok("node_cpu_seconds_total");
-    let QueryExpr::TimeRange { child, .. } = &qe else {
+    let PreASAPNode::TimeRange { child, .. } = &qe else {
         panic!("expected a TimeRange for a bare selector, got {qe:?}");
     };
-    let QueryExpr::Scan { schema, .. } = child.as_ref() else {
+    let PreASAPNode::Scan { schema, .. } = child.as_ref() else {
         panic!("expected a Scan inside the TimeRange, got {qe:?}");
     };
     assert!(
@@ -241,7 +241,7 @@ fn range_vector_selector_is_time_range() {
     // SEMANTICS: `[5m]` turns an instant vector into a range vector,
     // represented in the canonical tree as a dedicated `TimeRange` node.
     let qe = ok("node_cpu_seconds_total[5m]");
-    let QueryExpr::TimeRange { range, .. } = &qe else {
+    let PreASAPNode::TimeRange { range, .. } = &qe else {
         panic!("expected TimeRange for a range-vector selector, got {qe:?}");
     };
     assert_eq!(*range, Duration::from_secs(300));
@@ -257,14 +257,14 @@ fn rate_range_lives_in_time_range_node() {
     // SEMANTICS: per-second average rate; the temporal range lives on the
     // enclosing `TimeRange` node, not inside the intent.
     let qe = ok("rate(http_requests_total[5m])");
-    let QueryExpr::Aggregate {
+    let PreASAPNode::Aggregate {
         measures, child, ..
     } = &qe
     else {
         panic!("expected Aggregate, got {qe:?}");
     };
     assert!(matches!(measures.as_slice(), [AggIntent::Rate]));
-    let QueryExpr::TimeRange { range, .. } = child.as_ref() else {
+    let PreASAPNode::TimeRange { range, .. } = child.as_ref() else {
         panic!("expected TimeRange child, got {child:?}");
     };
     assert_eq!(*range, Duration::from_secs(300));
@@ -281,14 +281,14 @@ fn irate_maps_to_its_own_intent() {
 #[test]
 fn increase_range_lives_in_time_range_node() {
     let qe = ok("increase(http_requests_total[1h])");
-    let QueryExpr::Aggregate {
+    let PreASAPNode::Aggregate {
         measures, child, ..
     } = &qe
     else {
         panic!("expected Aggregate, got {qe:?}");
     };
     assert!(matches!(measures.as_slice(), [AggIntent::Increase]));
-    let QueryExpr::TimeRange { range, .. } = child.as_ref() else {
+    let PreASAPNode::TimeRange { range, .. } = child.as_ref() else {
         panic!("expected TimeRange child, got {child:?}");
     };
     assert_eq!(*range, Duration::from_secs(3600));
@@ -303,7 +303,7 @@ fn increase_range_lives_in_time_range_node() {
 fn sum_collapses_all_series() {
     // SEMANTICS: `sum(v)` → one output series. No grouping → no Partition.
     let qe = ok("sum(node_filesystem_size_bytes)");
-    assert!(matches!(&qe, QueryExpr::Aggregate { .. }));
+    assert!(matches!(&qe, PreASAPNode::Aggregate { .. }));
     assert!(has(&qe, |i| matches!(i, AggIntent::Sum { .. })));
 }
 
@@ -314,7 +314,7 @@ fn sum_by_groups_via_positional_aggregate() {
     // name-based Partition). SchemaResolver leaf = [ts, value, instance, job] (referenced
     // keys appended sorted), so the keys resolve to columns [2, 3].
     let qe = ok("sum by(job, instance) (node_filesystem_size_bytes)");
-    let QueryExpr::Aggregate {
+    let PreASAPNode::Aggregate {
         reduction,
         measures,
         child,
@@ -330,7 +330,7 @@ fn sum_by_groups_via_positional_aggregate() {
     );
     assert!(matches!(measures.as_slice(), [AggIntent::Sum { .. }]));
     assert!(
-        matches!(child.as_ref(), QueryExpr::TimeRange { child, .. } if matches!(child.as_ref(), QueryExpr::Scan { .. }))
+        matches!(child.as_ref(), PreASAPNode::TimeRange { child, .. } if matches!(child.as_ref(), PreASAPNode::Scan { .. }))
     );
 }
 
@@ -369,7 +369,7 @@ fn sum_without_groups_by_the_complement() {
     // the runtime: the grouping is the exclusion form and the output schema
     // stays OPEN (unlike `by`, which freezes to closed).
     let qe = ok("sum without(instance) (node_filesystem_size_bytes)");
-    let QueryExpr::Aggregate {
+    let PreASAPNode::Aggregate {
         reduction,
         measures,
         ..
@@ -418,7 +418,7 @@ fn group_aggregator_lowers_to_a_distinct_intent() {
 fn sum_of_rate_is_two_levels() {
     // SEMANTICS: per-series rate, THEN cross-series sum. Both must survive.
     let qe = ok("sum(rate(http_requests_total[5m]))");
-    let QueryExpr::Aggregate {
+    let PreASAPNode::Aggregate {
         measures, child, ..
     } = &qe
     else {
@@ -427,7 +427,7 @@ fn sum_of_rate_is_two_levels() {
     assert!(matches!(measures.as_slice(), [AggIntent::Sum { .. }]));
     assert!(matches!(
         child.as_ref(),
-        QueryExpr::Aggregate { measures, .. } if matches!(measures.as_slice(), [AggIntent::Rate])
+        PreASAPNode::Aggregate { measures, .. } if matches!(measures.as_slice(), [AggIntent::Rate])
     ));
 }
 
@@ -436,7 +436,7 @@ fn sum_by_of_rate_groups_outer_level() {
     // Outer cross-series Sum grouped on positional `Aggregate.by` over the
     // label-preserving inner Rate. Leaf = [ts, value, instance] → by = [2].
     let qe = ok("sum by(instance) (rate(node_network_receive_bytes_total[5m]))");
-    let QueryExpr::Aggregate {
+    let PreASAPNode::Aggregate {
         reduction,
         measures,
         child,
@@ -450,7 +450,7 @@ fn sum_by_of_rate_groups_outer_level() {
     // child is the inner per-series Rate aggregate.
     assert!(matches!(
         child.as_ref(),
-        QueryExpr::Aggregate { measures, .. } if matches!(measures.as_slice(), [AggIntent::Rate])
+        PreASAPNode::Aggregate { measures, .. } if matches!(measures.as_slice(), [AggIntent::Rate])
     ));
 }
 
@@ -461,7 +461,7 @@ fn sum_by_of_over_time_groups_outer_level() {
     // preserving, so the key resolves positionally just like the rate case (no
     // name-based Partition). Leaf = [ts, value, instance] → by = [2].
     let qe = ok("sum by(instance) (avg_over_time(node_cpu_seconds_total[5m]))");
-    let QueryExpr::Aggregate {
+    let PreASAPNode::Aggregate {
         reduction,
         measures,
         child,
@@ -473,14 +473,14 @@ fn sum_by_of_over_time_groups_outer_level() {
     assert_eq!(reduction, &Reduction::by(vec![2]));
     assert!(matches!(measures.as_slice(), [AggIntent::Sum { .. }]));
     // child is the inner per-series reduction: Aggregate{Avg} over TimeRange.
-    let QueryExpr::Aggregate {
+    let PreASAPNode::Aggregate {
         measures, child, ..
     } = child.as_ref()
     else {
         panic!("expected Aggregate (per-series avg_over_time) under the Sum, got {child:?}");
     };
     assert!(matches!(measures.as_slice(), [AggIntent::Avg { .. }]));
-    assert!(matches!(child.as_ref(), QueryExpr::TimeRange { .. }));
+    assert!(matches!(child.as_ref(), PreASAPNode::TimeRange { .. }));
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -501,7 +501,7 @@ fn over_time_functions_reduce_over_time_range() {
     ] {
         let qe = ok(q);
         assert!(
-            matches!(&qe, QueryExpr::Aggregate { .. }),
+            matches!(&qe, PreASAPNode::Aggregate { .. }),
             "{q}: expected Aggregate"
         );
         let matched = intents(&qe).iter().any(|i| match want {
@@ -519,7 +519,7 @@ fn over_time_functions_reduce_over_time_range() {
 #[test]
 fn quantile_over_time_is_aggregate_over_time_range() {
     let qe = ok("quantile_over_time(0.9, request_latency_seconds[5m])");
-    assert!(matches!(&qe, QueryExpr::Aggregate { .. }));
+    assert!(matches!(&qe, PreASAPNode::Aggregate { .. }));
     assert!(has(
         &qe,
         |i| matches!(i, AggIntent::Quantile { q, .. } if (*q - 0.9).abs() < 1e-9)
@@ -536,7 +536,7 @@ fn histogram_quantile_over_rate() {
     // φ-quantile from bucket rates. The `_bucket` metric marks the classic
     // cumulative-bucket form → `HistogramQuantile` (even without `sum by (le)`).
     let qe = ok("histogram_quantile(0.9, rate(demo_api_request_duration_seconds_bucket[5m]))");
-    let QueryExpr::Aggregate { measures, .. } = &qe else {
+    let PreASAPNode::Aggregate { measures, .. } = &qe else {
         panic!("expected Aggregate{{HistogramQuantile}}, got {qe:?}");
     };
     assert!(
@@ -553,7 +553,7 @@ fn histogram_quantile_over_sum_by_le_preserves_le_grouping() {
     let qe = ok(
         "histogram_quantile(0.99, sum by(le) (rate(demo_api_request_duration_seconds_bucket[5m])))",
     );
-    let QueryExpr::Aggregate {
+    let PreASAPNode::Aggregate {
         measures, child, ..
     } = &qe
     else {
@@ -566,7 +566,7 @@ fn histogram_quantile_over_sum_by_le_preserves_le_grouping() {
     ));
     // `sum by(le)` now survives as a positional Aggregate (by = [2], `le`), over
     // the inner Rate — no name-based Partition.
-    let QueryExpr::Aggregate {
+    let PreASAPNode::Aggregate {
         reduction,
         measures,
         ..
@@ -586,7 +586,7 @@ fn histogram_quantile_over_sum_by_le_preserves_le_grouping() {
 #[test]
 fn vector_arithmetic() {
     let qe = ok("node_memory_MemFree_bytes + node_memory_Cached_bytes");
-    let QueryExpr::BinaryOp { op, .. } = &qe else {
+    let PreASAPNode::BinaryOp { op, .. } = &qe else {
         panic!("expected BinaryOp, got {qe:?}");
     };
     assert_eq!(*op, BinaryOpKind::Arithmetic(ArithmeticOpKind::Add));
@@ -597,7 +597,7 @@ fn on_matching_with_group_left() {
     // SEMANTICS: many-to-one matching on a label subset.
     let qe =
         ok("rate(demo_cpu_usage_seconds_total[1m]) / on(instance, job) group_left demo_num_cpus");
-    let QueryExpr::BinaryOp {
+    let PreASAPNode::BinaryOp {
         op, vector_match, ..
     } = &qe
     else {
@@ -617,7 +617,7 @@ fn vector_comparison_filters() {
     // SEMANTICS: `>` between two vectors keeps the LHS series where it holds.
     let qe = ok("go_goroutines > go_threads");
     assert!(
-        matches!(&qe, QueryExpr::BinaryOp { op, .. } if *op == BinaryOpKind::Compare(CompareOpKind::Gt))
+        matches!(&qe, PreASAPNode::BinaryOp { op, .. } if *op == BinaryOpKind::Compare(CompareOpKind::Gt))
     );
 }
 
@@ -643,7 +643,7 @@ fn unary_negation_lowers_as_multiply_by_minus_one() {
     }
 
     // `-some_metric` at the root: `Scan * PromqlScalarBridge(-1)`, schema follows the vector.
-    let QueryExpr::BinaryOp {
+    let PreASAPNode::BinaryOp {
         op,
         lhs,
         rhs,
@@ -654,7 +654,7 @@ fn unary_negation_lowers_as_multiply_by_minus_one() {
     };
     assert_eq!(*op, BinaryOpKind::Arithmetic(ArithmeticOpKind::Mul));
     assert!(
-        matches!(lhs.as_ref(), QueryExpr::TimeRange { child, .. } if matches!(child.as_ref(), QueryExpr::Scan { .. })),
+        matches!(lhs.as_ref(), PreASAPNode::TimeRange { child, .. } if matches!(child.as_ref(), PreASAPNode::Scan { .. })),
         "vector on the left"
     );
     assert!(
@@ -679,7 +679,7 @@ fn unary_negation_lowers_as_multiply_by_minus_one() {
 
     // `sum(-m)` — the negation lowers inside the aggregate argument (issue #27
     // nesting), so the outer node is the `Sum` aggregate over the `Mul`.
-    let QueryExpr::Aggregate {
+    let PreASAPNode::Aggregate {
         measures, child, ..
     } = &ok("sum(-node_cpu_seconds_total)")
     else {
@@ -688,7 +688,7 @@ fn unary_negation_lowers_as_multiply_by_minus_one() {
     assert!(matches!(measures.as_slice(), [AggIntent::Sum { .. }]));
     assert!(matches!(
         child.as_ref(),
-        QueryExpr::BinaryOp {
+        PreASAPNode::BinaryOp {
             op: BinaryOpKind::Arithmetic(ArithmeticOpKind::Mul),
             ..
         }
@@ -708,14 +708,14 @@ fn unary_negation_of_constant_folds_to_scalar() {
 fn double_unary_negation_nests() {
     // `- -some_metric` — negation of a negation: `(m * -1) * -1`. Both levels
     // lower; the value is unchanged but the structure is faithfully nested.
-    let QueryExpr::BinaryOp { op, lhs, .. } = &ok("- -some_metric") else {
+    let PreASAPNode::BinaryOp { op, lhs, .. } = &ok("- -some_metric") else {
         panic!("expected outer BinaryOp for `- -some_metric`");
     };
     assert_eq!(*op, BinaryOpKind::Arithmetic(ArithmeticOpKind::Mul));
     assert!(
         matches!(
             lhs.as_ref(),
-            QueryExpr::BinaryOp {
+            PreASAPNode::BinaryOp {
                 op: BinaryOpKind::Arithmetic(ArithmeticOpKind::Mul),
                 ..
             }
@@ -758,12 +758,12 @@ fn scalar_literal_operand_lowers_as_binaryop_scalar() {
     // `PromqlScalarBridge` operand of the `BinaryOp`, and constant arithmetic
     // (`10*1024*1024`) is folded. The output schema is the vector side's.
     let qe = ok("node_filesystem_avail_bytes > 10*1024*1024");
-    let QueryExpr::BinaryOp { op, lhs, rhs, .. } = &qe else {
+    let PreASAPNode::BinaryOp { op, lhs, rhs, .. } = &qe else {
         panic!("expected a BinaryOp, got {qe:?}");
     };
     assert_eq!(*op, BinaryOpKind::Compare(CompareOpKind::Gt));
     assert!(
-        matches!(lhs.as_ref(), QueryExpr::TimeRange { child, .. } if matches!(child.as_ref(), QueryExpr::Scan { .. })),
+        matches!(lhs.as_ref(), PreASAPNode::TimeRange { child, .. } if matches!(child.as_ref(), PreASAPNode::Scan { .. })),
         "vector on the left"
     );
     assert!(
@@ -780,7 +780,7 @@ fn scalar_arithmetic_scales_the_vector() {
     // `rate(m[5m]) * 100` — a unit conversion. Arithmetic BinaryOp of the vector
     // with a `PromqlScalarBridge(100)`.
     let qe = ok("rate(m[5m]) * 100");
-    let QueryExpr::BinaryOp { op, rhs, .. } = &qe else {
+    let PreASAPNode::BinaryOp { op, rhs, .. } = &qe else {
         panic!("expected a BinaryOp, got {qe:?}");
     };
     assert_eq!(*op, BinaryOpKind::Arithmetic(ArithmeticOpKind::Mul));
@@ -798,11 +798,11 @@ fn scalar_arithmetic_scales_the_vector() {
 fn set_ops_lower_to_binaryop() {
     // SEMANTICS: or = union of label sets; and = intersection; unless = difference.
     assert!(matches!(&ok("up{job=\"a\"} or up{job=\"b\"}"),
-        QueryExpr::BinaryOp { op, .. } if *op == BinaryOpKind::Set(PromQLVectorSetOpKind::Or)));
+        PreASAPNode::BinaryOp { op, .. } if *op == BinaryOpKind::Set(PromQLVectorSetOpKind::Or)));
     assert!(matches!(&ok("node_network_mtu_bytes and node_up"),
-        QueryExpr::BinaryOp { op, .. } if *op == BinaryOpKind::Set(PromQLVectorSetOpKind::And)));
+        PreASAPNode::BinaryOp { op, .. } if *op == BinaryOpKind::Set(PromQLVectorSetOpKind::And)));
     assert!(matches!(&ok("node_network_mtu_bytes unless node_down"),
-        QueryExpr::BinaryOp { op, .. } if *op == BinaryOpKind::Set(PromQLVectorSetOpKind::Unless)));
+        PreASAPNode::BinaryOp { op, .. } if *op == BinaryOpKind::Set(PromQLVectorSetOpKind::Unless)));
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -824,7 +824,7 @@ fn topk_over_count_is_heavy_hitter() {
 fn bottomk_is_generic_sort_limit() {
     // SEMANTICS: bottom-k → generic ascending order + limit (no sketch).
     let qe = ok("bottomk(3, count_over_time(http_requests_total[5m]))");
-    assert!(matches!(&qe, QueryExpr::Limit { .. }));
+    assert!(matches!(&qe, PreASAPNode::Limit { .. }));
 }
 
 #[test]
@@ -833,7 +833,7 @@ fn topk_over_nested_sum_preserves_weighted_topk_accuracy() {
     // The final rates are query-time values. Their ordering does not establish
     // frequency-sketch membership semantics.
     let qe = ok("topk(3, sum by(instance) (rate(node_cpu_seconds_total[5m])))");
-    let QueryExpr::Aggregate {
+    let PreASAPNode::Aggregate {
         measures, child, ..
     } = &qe
     else {
@@ -861,14 +861,14 @@ fn outer_aggregate_over_nested_aggregate_nests() {
     // flat two-level template rejected. Each level survives into the
     // canonical tree (issue #27).
     let qe = ok("max(sum by (job) (rate(http_requests_total[5m])))");
-    let QueryExpr::Aggregate {
+    let PreASAPNode::Aggregate {
         measures, child, ..
     } = &qe
     else {
         panic!("expected outer Aggregate, got {qe:?}");
     };
     assert!(matches!(measures.as_slice(), [AggIntent::Max { .. }]));
-    let QueryExpr::Aggregate {
+    let PreASAPNode::Aggregate {
         reduction,
         measures,
         ..
@@ -895,7 +895,7 @@ fn outer_group_key_absent_from_nested_aggregate_is_dropped() {
     // the query lowers with the provably-absent key dropped, exactly
     // `sum(sum by (group)(…))`.
     let qe = ok(r#"sum(sum by (group)(http_requests{job="api-server"})) by (job)"#);
-    let QueryExpr::Aggregate {
+    let PreASAPNode::Aggregate {
         reduction,
         measures,
         child,
@@ -910,7 +910,7 @@ fn outer_group_key_absent_from_nested_aggregate_is_dropped() {
         "absent `job` key dropped → global aggregate"
     );
     assert!(matches!(measures.as_slice(), [AggIntent::Sum { .. }]));
-    let QueryExpr::Aggregate { reduction, .. } = child.as_ref() else {
+    let PreASAPNode::Aggregate { reduction, .. } = child.as_ref() else {
         panic!("expected inner `sum by (group)` Aggregate, got {child:?}");
     };
     assert_eq!(
@@ -927,13 +927,13 @@ fn outer_group_key_present_after_inner_aggregate_still_resolves() {
     // resolving positionally — the absent-key drop only fires on provable
     // absence, never on a resolvable key.
     let qe = ok("sum(sum by (job, group)(http_requests)) by (job)");
-    let QueryExpr::Aggregate {
+    let PreASAPNode::Aggregate {
         reduction, child, ..
     } = &qe
     else {
         panic!("expected outer Aggregate, got {qe:?}");
     };
-    let QueryExpr::Aggregate {
+    let PreASAPNode::Aggregate {
         reduction: inner_reduction,
         ..
     } = child.as_ref()
@@ -957,7 +957,7 @@ fn outer_group_key_over_binary_op_resolves_on_both_sides() {
     // still resolve. Each `or` side is bound independently against its own
     // sub-tree, so the key is seeded as an inherited column on both sides.
     let qe = ok(r#"sum by (__name__)(metric_a{env="1"} or metric_b{env="2"})"#);
-    let QueryExpr::Aggregate {
+    let PreASAPNode::Aggregate {
         reduction, child, ..
     } = &qe
     else {
@@ -969,7 +969,7 @@ fn outer_group_key_over_binary_op_resolves_on_both_sides() {
         1,
         "grouped by the one `__name__` key"
     );
-    let QueryExpr::BinaryOp { lhs, rhs, .. } = child.as_ref() else {
+    let PreASAPNode::BinaryOp { lhs, rhs, .. } = child.as_ref() else {
         panic!("expected a BinaryOp child, got {child:?}");
     };
     // Both independently-bound sides carry `__name__` at the same position, so
@@ -984,7 +984,7 @@ fn outer_group_key_over_binary_op_resolves_on_both_sides() {
     // The general case (a plain label, not just `__name__`) also lowers.
     assert!(matches!(
         ok("sum by (job)(metric_a or metric_b)"),
-        QueryExpr::Aggregate { .. }
+        PreASAPNode::Aggregate { .. }
     ));
 }
 
@@ -994,7 +994,7 @@ fn aggregate_over_binary_op_nests() {
     // op over two range vectors. The old template only accepted a single inner
     // selector/call; now the binary op lowers and the outer sum wraps it.
     let qe = ok("sum(rate(a[5m]) + rate(b[5m]))");
-    let QueryExpr::Aggregate {
+    let PreASAPNode::Aggregate {
         measures, child, ..
     } = &qe
     else {
@@ -1002,7 +1002,7 @@ fn aggregate_over_binary_op_nests() {
     };
     assert!(matches!(measures.as_slice(), [AggIntent::Sum { .. }]));
     assert!(
-        matches!(child.as_ref(), QueryExpr::BinaryOp { .. }),
+        matches!(child.as_ref(), PreASAPNode::BinaryOp { .. }),
         "argument lowers as a BinaryOp, got {child:?}"
     );
 }
@@ -1015,7 +1015,7 @@ fn aggregate_over_binary_op_nests() {
 fn subquery_wraps_inner_query() {
     // SEMANTICS: `<inst>[range:res]` evaluates the inner query across a range.
     let qe = ok("rate(demo_api_request_duration_seconds_count[5m])[1h:]");
-    assert!(matches!(&qe, QueryExpr::PromqlSubquery { .. }));
+    assert!(matches!(&qe, PreASAPNode::PromqlSubquery { .. }));
     assert!(has(&qe, |i| matches!(i, AggIntent::Rate)));
 }
 
@@ -1026,7 +1026,7 @@ fn over_time_of_subquery_reduces_per_series() {
     // then `max_over_time` takes the max of those samples *per series*. It lowers
     // to a per-series `Max` reduction over a `PromqlSubquery` (issue #27).
     let qe = ok("max_over_time(rate(demo_api_request_duration_seconds_count[5m])[1h:])");
-    let QueryExpr::Aggregate {
+    let PreASAPNode::Aggregate {
         reduction,
         measures,
         child,
@@ -1044,7 +1044,7 @@ fn over_time_of_subquery_reduces_per_series() {
     // The reduction rides directly on the sub-query (the structural range marker
     // that keeps it label-preserving), which wraps the inner `rate`.
     assert!(
-        matches!(child.as_ref(), QueryExpr::PromqlSubquery { .. }),
+        matches!(child.as_ref(), PreASAPNode::PromqlSubquery { .. }),
         "the `Max` reduces over a PromqlSubquery, got {child:?}"
     );
     assert!(intents(&qe).iter().any(|i| matches!(i, AggIntent::Rate)));
@@ -1055,7 +1055,7 @@ fn quantile_over_time_of_subquery_carries_phi() {
     // The `quantile_over_time` φ parameter is read from arg 0; the sub-query is
     // arg 1. It lowers to a per-series `Quantile(φ)` over the `PromqlSubquery`.
     let qe = ok("quantile_over_time(0.9, rate(demo[5m])[1h:])");
-    let QueryExpr::Aggregate {
+    let PreASAPNode::Aggregate {
         measures, child, ..
     } = &qe
     else {
@@ -1064,7 +1064,7 @@ fn quantile_over_time_of_subquery_carries_phi() {
     assert!(
         matches!(measures.as_slice(), [AggIntent::Quantile { q, .. }] if (*q - 0.9).abs() < 1e-9)
     );
-    assert!(matches!(child.as_ref(), QueryExpr::PromqlSubquery { .. }));
+    assert!(matches!(child.as_ref(), PreASAPNode::PromqlSubquery { .. }));
 }
 
 #[test]
@@ -1074,7 +1074,7 @@ fn aggregation_over_over_time_of_subquery_keeps_labels() {
     // survives for the OUTER cross-series `sum by (job)` to group on. If the
     // inner `Max` collapsed labels, `job` would not resolve here.
     let qe = ok("sum by (job) (max_over_time(rate(demo{job=\"api\"}[5m])[1h:]))");
-    let QueryExpr::Aggregate {
+    let PreASAPNode::Aggregate {
         reduction,
         measures,
         child,
@@ -1089,7 +1089,7 @@ fn aggregation_over_over_time_of_subquery_keeps_labels() {
     );
     assert!(matches!(measures.as_slice(), [AggIntent::Sum { .. }]));
     // Inner node is the per-series `max_over_time` reduction over the subquery.
-    let QueryExpr::Aggregate {
+    let PreASAPNode::Aggregate {
         reduction: inner_reduction,
         measures: inner_measures,
         child: inner_child,
@@ -1102,7 +1102,7 @@ fn aggregation_over_over_time_of_subquery_keeps_labels() {
     assert!(matches!(inner_measures.as_slice(), [AggIntent::Max { .. }]));
     assert!(matches!(
         inner_child.as_ref(),
-        QueryExpr::PromqlSubquery { .. }
+        PreASAPNode::PromqlSubquery { .. }
     ));
 }
 
@@ -1124,7 +1124,7 @@ fn nested_subquery_from_prometheus_docs() {
     // the label-preserving `[ts, value]`.
     let qe = ok("max_over_time(deriv(rate(distance_covered_total[5s])[30s:5s])[10m:])");
 
-    let QueryExpr::Aggregate {
+    let PreASAPNode::Aggregate {
         reduction,
         measures,
         child,
@@ -1136,7 +1136,7 @@ fn nested_subquery_from_prometheus_docs() {
     assert_eq!(reduction, &Reduction::PerEntity);
     assert!(matches!(measures.as_slice(), [AggIntent::Max { .. }]));
 
-    let QueryExpr::PromqlSubquery {
+    let PreASAPNode::PromqlSubquery {
         range,
         resolution,
         child,
@@ -1147,7 +1147,7 @@ fn nested_subquery_from_prometheus_docs() {
     assert_eq!(*range, Duration::from_secs(600));
     assert_eq!(*resolution, None, "`[10m:]` keeps the default resolution");
 
-    let QueryExpr::Aggregate {
+    let PreASAPNode::Aggregate {
         reduction,
         measures,
         child,
@@ -1159,7 +1159,7 @@ fn nested_subquery_from_prometheus_docs() {
     assert_eq!(reduction, &Reduction::PerEntity);
     assert!(matches!(measures.as_slice(), [AggIntent::Deriv]));
 
-    let QueryExpr::PromqlSubquery {
+    let PreASAPNode::PromqlSubquery {
         range,
         resolution,
         child,
@@ -1170,14 +1170,14 @@ fn nested_subquery_from_prometheus_docs() {
     assert_eq!(*range, Duration::from_secs(30));
     assert_eq!(*resolution, Some(Duration::from_secs(5)));
 
-    let QueryExpr::Aggregate {
+    let PreASAPNode::Aggregate {
         measures, child, ..
     } = child.as_ref()
     else {
         panic!("expected the `rate` Aggregate, got {child:?}");
     };
     assert!(matches!(measures.as_slice(), [AggIntent::Rate]));
-    let QueryExpr::TimeRange { range, .. } = child.as_ref() else {
+    let PreASAPNode::TimeRange { range, .. } = child.as_ref() else {
         panic!("expected the `[5s]` TimeRange under rate, got {child:?}");
     };
     assert_eq!(*range, Duration::from_secs(5));
@@ -1205,21 +1205,21 @@ fn offset_modifier_lowers_to_a_time_shift() {
     // past — a `TimeShift` wrapper over the selector (signed ms; a negative
     // offset shifts forward). Schema is unchanged (the shift only moves *when*).
     let qe = ok("http_requests_total offset 5m");
-    let QueryExpr::TimeRange { child, .. } = &qe else {
+    let PreASAPNode::TimeRange { child, .. } = &qe else {
         panic!("expected an ingestion TimeRange, got {qe:?}");
     };
-    let QueryExpr::TimeShift { shift, child } = child.as_ref() else {
+    let PreASAPNode::TimeShift { shift, child } = child.as_ref() else {
         panic!("expected a TimeShift, got {qe:?}");
     };
     assert_eq!(shift.offset_ms, 300_000);
     assert!(shift.at.is_none());
-    assert!(matches!(child.as_ref(), QueryExpr::Scan { .. }));
+    assert!(matches!(child.as_ref(), PreASAPNode::Scan { .. }));
 
     // `offset -5m` shifts forward → negative ms.
-    let QueryExpr::TimeRange { child, .. } = &ok("http_requests_total offset -5m") else {
+    let PreASAPNode::TimeRange { child, .. } = &ok("http_requests_total offset -5m") else {
         panic!("expected an ingestion TimeRange");
     };
-    let QueryExpr::TimeShift { shift, .. } = child.as_ref() else {
+    let PreASAPNode::TimeShift { shift, .. } = child.as_ref() else {
         panic!("expected a TimeShift");
     };
     assert_eq!(shift.offset_ms, -300_000);
@@ -1230,29 +1230,29 @@ fn at_modifier_lowers_to_a_time_shift() {
     // SEMANTICS (PromQL, issue #40): `@ <ts>` pins the evaluation to an absolute
     // instant (PromQL seconds → IR milliseconds); `@ start()` / `@ end()` anchor
     // to the query range bounds.
-    let QueryExpr::TimeRange { child, .. } = &ok("http_requests_total @ 1609746000") else {
+    let PreASAPNode::TimeRange { child, .. } = &ok("http_requests_total @ 1609746000") else {
         panic!("expected an ingestion TimeRange");
     };
-    let QueryExpr::TimeShift { shift, .. } = child.as_ref() else {
+    let PreASAPNode::TimeShift { shift, .. } = child.as_ref() else {
         panic!("expected a TimeShift for `@ <ts>`");
     };
     assert_eq!(shift.at, Some(AtModifier::Timestamp(1_609_746_000_000)));
     assert_eq!(shift.offset_ms, 0);
 
-    let QueryExpr::TimeRange { child, .. } = &ok("http_requests_total @ start()") else {
+    let PreASAPNode::TimeRange { child, .. } = &ok("http_requests_total @ start()") else {
         panic!("expected an ingestion TimeRange");
     };
-    let QueryExpr::TimeShift { shift, .. } = child.as_ref() else {
+    let PreASAPNode::TimeShift { shift, .. } = child.as_ref() else {
         panic!("expected a TimeShift for `@ start()`");
     };
     assert_eq!(shift.at, Some(AtModifier::Start));
 
     // Offset and `@` compose: `@ end() offset 5m` carries both.
     let qe = ok("http_requests_total @ end() offset 5m");
-    let QueryExpr::TimeRange { child, .. } = &qe else {
+    let PreASAPNode::TimeRange { child, .. } = &qe else {
         panic!("expected an ingestion TimeRange, got {qe:?}");
     };
-    let QueryExpr::TimeShift { shift, .. } = child.as_ref() else {
+    let PreASAPNode::TimeShift { shift, .. } = child.as_ref() else {
         panic!("expected a TimeShift, got {qe:?}");
     };
     assert_eq!(shift.at, Some(AtModifier::End));
@@ -1265,21 +1265,21 @@ fn offset_on_a_ranged_selector_wraps_inside_the_time_range() {
     // `TimeShift` sits *under* the `TimeRange` (the 5m window is taken at the
     // shifted time), and the whole thing under the per-series `Rate` (#40).
     let qe = ok("rate(http_requests_total[5m] offset 1h)");
-    let QueryExpr::Aggregate {
+    let PreASAPNode::Aggregate {
         measures, child, ..
     } = &qe
     else {
         panic!("expected the rate Aggregate, got {qe:?}");
     };
     assert!(matches!(measures.as_slice(), [AggIntent::Rate]));
-    let QueryExpr::TimeRange { child, .. } = child.as_ref() else {
+    let PreASAPNode::TimeRange { child, .. } = child.as_ref() else {
         panic!("expected a TimeRange under rate, got {child:?}");
     };
-    let QueryExpr::TimeShift { shift, child } = child.as_ref() else {
+    let PreASAPNode::TimeShift { shift, child } = child.as_ref() else {
         panic!("expected a TimeShift under the TimeRange, got {child:?}");
     };
     assert_eq!(shift.offset_ms, 3_600_000);
-    assert!(matches!(child.as_ref(), QueryExpr::Scan { .. }));
+    assert!(matches!(child.as_ref(), PreASAPNode::Scan { .. }));
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1335,7 +1335,7 @@ fn counter_derivative_functions_lower_to_distinct_intents() {
         ("resets(m[1h])", AggIntent::Resets),
     ] {
         let qe = ok(q);
-        let QueryExpr::Aggregate {
+        let PreASAPNode::Aggregate {
             reduction,
             measures,
             child,
@@ -1355,7 +1355,7 @@ fn counter_derivative_functions_lower_to_distinct_intents() {
             "{q}: wrong intent"
         );
         assert!(
-            matches!(child.as_ref(), QueryExpr::TimeRange { .. }),
+            matches!(child.as_ref(), PreASAPNode::TimeRange { .. }),
             "{q}: reduction rides on a TimeRange, got {child:?}"
         );
     }
@@ -1366,7 +1366,7 @@ fn predict_linear_carries_horizon_seconds() {
     // `predict_linear(v[w], t)` — the 2nd (scalar) arg is the prediction horizon
     // in seconds; it must be carried in the intent (it changes the result).
     let qe = ok("predict_linear(node_filesystem_avail_bytes[3h], 86400)");
-    let QueryExpr::Aggregate {
+    let PreASAPNode::Aggregate {
         measures, child, ..
     } = &qe
     else {
@@ -1376,7 +1376,7 @@ fn predict_linear_carries_horizon_seconds() {
         measures.as_slice(),
         &[AggIntent::PredictLinear { seconds: 86400.0 }]
     );
-    assert!(matches!(child.as_ref(), QueryExpr::TimeRange { .. }));
+    assert!(matches!(child.as_ref(), PreASAPNode::TimeRange { .. }));
 }
 
 #[test]
@@ -1394,7 +1394,7 @@ fn aggregation_over_counter_derivative_keeps_labels() {
     // A counter-derivative is per-series (label-preserving), so an outer
     // `sum by (job)` can group on a label the inner `changes` preserved.
     let qe = ok(r#"sum by (job) (changes(m{job="api"}[15m]))"#);
-    let QueryExpr::Aggregate {
+    let PreASAPNode::Aggregate {
         reduction,
         measures,
         child,
@@ -1420,7 +1420,7 @@ fn outer_stat_over_counter_derivative_nests_two_levels() {
     // grouped outer (`avg by (dc)`) must resolve its key against the labels the
     // inner reduction preserved, threading any scalar param (predict horizon).
     let qe = ok("avg by (dc) (predict_linear(m[3h], 3600))");
-    let QueryExpr::Aggregate {
+    let PreASAPNode::Aggregate {
         reduction,
         measures,
         child,
@@ -1434,7 +1434,7 @@ fn outer_stat_over_counter_derivative_nests_two_levels() {
         "outer `avg by (dc)` groups on a label"
     );
     assert!(matches!(measures.as_slice(), [AggIntent::Avg { .. }]));
-    let QueryExpr::Aggregate {
+    let PreASAPNode::Aggregate {
         reduction: inner_reduction,
         measures: inner_measures,
         ..
@@ -1458,11 +1458,11 @@ fn topk_over_counter_derivative_is_generic_sort_limit() {
     // `topk(k, deriv(...))` ranks the per-series derivative values — a generic
     // `Sort + Limit`, NOT a heavy-hitter `TopK` (that's only `count_over_time`).
     let qe = ok("topk(3, deriv(m[5m]))");
-    let QueryExpr::Limit { n, child, .. } = &qe else {
+    let PreASAPNode::Limit { n, child, .. } = &qe else {
         panic!("expected Limit, got {qe:?}");
     };
     assert_eq!(*n, 3);
-    assert!(matches!(child.as_ref(), QueryExpr::Sort { .. }));
+    assert!(matches!(child.as_ref(), PreASAPNode::Sort { .. }));
     assert!(intents(&qe).iter().any(|i| matches!(i, AggIntent::Deriv)));
     assert!(
         !intents(&qe)
@@ -1477,28 +1477,28 @@ fn counter_derivative_composes_in_binary_ops() {
     // As a vector operand: `delta(a[5m]) / delta(b[5m])` is a BinaryOp of two
     // per-series Delta reductions.
     let ratio = ok("delta(a[5m]) / delta(b[5m])");
-    let QueryExpr::BinaryOp { op, lhs, rhs, .. } = &ratio else {
+    let PreASAPNode::BinaryOp { op, lhs, rhs, .. } = &ratio else {
         panic!("expected BinaryOp, got {ratio:?}");
     };
     assert_eq!(*op, BinaryOpKind::Arithmetic(ArithmeticOpKind::Div));
     assert!(
-        matches!(lhs.as_ref(), QueryExpr::Aggregate { measures, .. } if measures.as_slice() == [AggIntent::Delta])
+        matches!(lhs.as_ref(), PreASAPNode::Aggregate { measures, .. } if measures.as_slice() == [AggIntent::Delta])
     );
     assert!(
-        matches!(rhs.as_ref(), QueryExpr::Aggregate { measures, .. } if measures.as_slice() == [AggIntent::Delta])
+        matches!(rhs.as_ref(), PreASAPNode::Aggregate { measures, .. } if measures.as_slice() == [AggIntent::Delta])
     );
 
     // Under an aggregate over a binary op mixing a counter-derivative with
     // another per-series function: `sum(rate(m[5m]) + changes(m[5m]))`.
     let mixed = ok("sum(rate(m[5m]) + changes(m[5m]))");
-    let QueryExpr::Aggregate {
+    let PreASAPNode::Aggregate {
         measures, child, ..
     } = &mixed
     else {
         panic!("expected Aggregate, got {mixed:?}");
     };
     assert!(matches!(measures.as_slice(), [AggIntent::Sum { .. }]));
-    assert!(matches!(child.as_ref(), QueryExpr::BinaryOp { .. }));
+    assert!(matches!(child.as_ref(), PreASAPNode::BinaryOp { .. }));
     assert!(intents(&mixed).iter().any(|i| matches!(i, AggIntent::Rate)));
     assert!(intents(&mixed)
         .iter()
@@ -1522,7 +1522,7 @@ fn range_functions_over_a_subquery_reduce_per_series() {
         ("resets(sum(m)[5m:])", AggIntent::Resets),
     ] {
         let qe = ok(q);
-        let QueryExpr::Aggregate {
+        let PreASAPNode::Aggregate {
             reduction,
             measures,
             child,
@@ -1542,7 +1542,7 @@ fn range_functions_over_a_subquery_reduce_per_series() {
             "{q}: wrong intent"
         );
         assert!(
-            matches!(child.as_ref(), QueryExpr::PromqlSubquery { .. }),
+            matches!(child.as_ref(), PreASAPNode::PromqlSubquery { .. }),
             "{q}: reduces directly over the PromqlSubquery (no TimeRange), got {child:?}"
         );
     }
@@ -1624,7 +1624,7 @@ fn histogram_accessors_lower_to_per_series_intents() {
         ("histogram_stdvar(v)", AggIntent::HistogramStdVar),
     ] {
         let qe = ok(q);
-        let QueryExpr::Aggregate {
+        let PreASAPNode::Aggregate {
             reduction,
             measures,
             ..
@@ -1678,7 +1678,7 @@ fn math_functions_lower_to_per_series_math_intents() {
         ("rad(v)", MathFunc::Rad),
     ] {
         let qe = ok(q);
-        let QueryExpr::Aggregate {
+        let PreASAPNode::Aggregate {
             reduction,
             measures,
             ..
@@ -1763,7 +1763,7 @@ fn absent_keeps_matcher_labels_for_the_synthesized_output() {
 fn time_lowers_to_the_eval_time_scalar() {
     // SEMANTICS: `time()` is the query evaluation timestamp as a scalar — a leaf,
     // not an aggregate over any series.
-    assert!(matches!(ok("time()"), QueryExpr::EvalTimestamp));
+    assert!(matches!(ok("time()"), PreASAPNode::EvalTimestamp));
     // …and it is scalar-shaped: a single float `value`, no time index.
     let sch = ok("time()").output_schema().unwrap();
     assert_eq!(sch.columns.len(), 1);
@@ -1777,10 +1777,10 @@ fn time_minus_vector_is_the_uptime_pattern() {
     // The scalar `time()` broadcasts against the vector; the result takes the
     // vector's schema.
     let qe = ok("time() - process_start_time_seconds");
-    let QueryExpr::BinaryOp { lhs, op, .. } = &qe else {
+    let PreASAPNode::BinaryOp { lhs, op, .. } = &qe else {
         panic!("expected a BinaryOp, got {qe:?}");
     };
-    assert!(matches!(lhs.as_ref(), QueryExpr::EvalTimestamp));
+    assert!(matches!(lhs.as_ref(), PreASAPNode::EvalTimestamp));
     assert!(matches!(
         op,
         BinaryOpKind::Arithmetic(ArithmeticOpKind::Sub)
@@ -1817,7 +1817,7 @@ fn no_arg_calendar_function_reads_the_eval_time() {
     // `day_of_week()` with no argument computes over the evaluation time itself,
     // so it is a `TimeFn` aggregate whose child is the `EvalTimestamp` scalar.
     let qe = ok("day_of_week()");
-    let QueryExpr::Aggregate {
+    let PreASAPNode::Aggregate {
         measures, child, ..
     } = &qe
     else {
@@ -1827,7 +1827,7 @@ fn no_arg_calendar_function_reads_the_eval_time() {
         measures.as_slice(),
         [AggIntent::TimeFn(TimeFunc::DayOfWeek)]
     ));
-    assert!(matches!(child.as_ref(), QueryExpr::EvalTimestamp));
+    assert!(matches!(child.as_ref(), PreASAPNode::EvalTimestamp));
 }
 
 #[test]
@@ -1848,7 +1848,7 @@ fn vector_promotes_a_scalar_to_a_vector() {
     // SEMANTICS: `vector(s)` is the scalar→instant-vector bridge — a label-less
     // single series carrying the scalar's value.
     let qe = ok("vector(1)");
-    let QueryExpr::PromqlVectorFromScalar(inner) = &qe else {
+    let PreASAPNode::PromqlVectorFromScalar(inner) = &qe else {
         panic!("expected PromqlVectorFromScalar, got {qe:?}");
     };
     assert_eq!(inner.as_promql_scalar(), Some(1.0));
@@ -1862,7 +1862,7 @@ fn vector_promotes_a_scalar_to_a_vector() {
 fn scalar_collapses_a_vector_to_a_scalar() {
     // SEMANTICS: `scalar(v)` is the instant-vector→scalar bridge.
     let qe = ok("scalar(node_load1)");
-    let QueryExpr::PromqlScalarFromVector(inner) = &qe else {
+    let PreASAPNode::PromqlScalarFromVector(inner) = &qe else {
         panic!("expected PromqlScalarFromVector, got {qe:?}");
     };
     let (metric, _) = first_scan(inner);
@@ -1880,11 +1880,14 @@ fn vector_zero_is_a_vector_operand_of_a_set_op() {
     // vectors, so `vector(0)` must be a vector (a `PromqlVectorFromScalar`), never a
     // folded scalar operand.
     let qe = ok("up or vector(0)");
-    let QueryExpr::BinaryOp { rhs, op, .. } = &qe else {
+    let PreASAPNode::BinaryOp { rhs, op, .. } = &qe else {
         panic!("expected a BinaryOp, got {qe:?}");
     };
     assert_eq!(*op, BinaryOpKind::Set(PromQLVectorSetOpKind::Or));
-    assert!(matches!(rhs.as_ref(), QueryExpr::PromqlVectorFromScalar(_)));
+    assert!(matches!(
+        rhs.as_ref(),
+        PreASAPNode::PromqlVectorFromScalar(_)
+    ));
 }
 
 #[test]
@@ -1892,10 +1895,13 @@ fn scalar_of_a_vector_feeds_a_threshold_comparison() {
     // `node_load1 > scalar(node_cpu_count)` — `scalar(...)` is a scalar operand,
     // so the BinaryOp output takes the vector (lhs) side's schema.
     let qe = ok("node_load1 > scalar(node_cpu_count)");
-    let QueryExpr::BinaryOp { lhs, rhs, .. } = &qe else {
+    let PreASAPNode::BinaryOp { lhs, rhs, .. } = &qe else {
         panic!("expected a BinaryOp, got {qe:?}");
     };
-    assert!(matches!(rhs.as_ref(), QueryExpr::PromqlScalarFromVector(_)));
+    assert!(matches!(
+        rhs.as_ref(),
+        PreASAPNode::PromqlScalarFromVector(_)
+    ));
     // The BinaryOp output schema follows the vector (lhs) side, not the scalar.
     let (metric, _) = first_scan(lhs);
     assert_eq!(metric, "node_load1");
@@ -1909,7 +1915,7 @@ fn info_lowers_to_a_label_enrichment_join() {
     // (issue #84). The value/time axis pass through; the enriched labels are
     // runtime, so the schema stays the child's.
     let qe = ok("info(rate(http_requests_total[5m]))");
-    let QueryExpr::PromqlInfoEnrich { selector, child } = &qe else {
+    let PreASAPNode::PromqlInfoEnrich { selector, child } = &qe else {
         panic!("expected an PromqlInfoEnrich, got {qe:?}");
     };
     assert!(selector.is_empty(), "no selector → default target_info");
@@ -1925,7 +1931,7 @@ fn info_selector_carries_the_info_side_matchers() {
     // matchers are kept symbolically (not run through the single-metric selector
     // path).
     let qe = ok(r#"info(build_info, {__name__=~".+_info", another_data=~".+"})"#);
-    let QueryExpr::PromqlInfoEnrich { selector, .. } = &qe else {
+    let PreASAPNode::PromqlInfoEnrich { selector, .. } = &qe else {
         panic!("expected an PromqlInfoEnrich, got {qe:?}");
     };
     assert_eq!(
@@ -1950,11 +1956,11 @@ fn info_composes_under_an_aggregation_and_over_a_time_shift() {
     // (issue #40) — the enrichment composes over the shifted selector.
     assert!(matches!(
         ok("info(metric @ 60)"),
-        QueryExpr::PromqlInfoEnrich { .. }
+        PreASAPNode::PromqlInfoEnrich { .. }
     ));
     assert!(matches!(
         ok("info(metric offset 1m)"),
-        QueryExpr::PromqlInfoEnrich { .. }
+        PreASAPNode::PromqlInfoEnrich { .. }
     ));
 }
 
@@ -1967,7 +1973,7 @@ fn group_lowers_to_a_constant_group_intent() {
     // SEMANTICS: `group(v)` yields a constant 1 per group — a distinct intent,
     // NOT folded onto `sum` (which would return the value sum instead of 1).
     let qe = ok("group(up)");
-    let QueryExpr::Aggregate { measures, .. } = &qe else {
+    let PreASAPNode::Aggregate { measures, .. } = &qe else {
         panic!("expected an Aggregate, got {qe:?}");
     };
     assert!(matches!(measures.as_slice(), [AggIntent::Group]));
@@ -1991,7 +1997,7 @@ fn count_values_groups_by_value_and_synthesizes_a_label() {
     // value, counts each distinct value, and emits that value as a new label
     // `l`. The intent carries the label; schema gains a `Utf8` `l` column.
     let qe = ok(r#"count_values("version", build_version)"#);
-    let QueryExpr::Aggregate { measures, .. } = &qe else {
+    let PreASAPNode::Aggregate { measures, .. } = &qe else {
         panic!("expected an Aggregate, got {qe:?}");
     };
     assert!(
@@ -2047,14 +2053,14 @@ fn limitk_and_limit_ratio_lower_to_series_sampling() {
     // `PromqlSeriesSample` node, never `topk`'s `Sort → Limit` (issue #86).
     assert!(matches!(
         ok("limitk(2, http_requests)"),
-        QueryExpr::PromqlSeriesSample {
+        PreASAPNode::PromqlSeriesSample {
             kind: SampleKind::LimitK(2),
             ..
         }
     ));
     assert!(matches!(
         ok("limit_ratio(0.1, http_requests)"),
-        QueryExpr::PromqlSeriesSample { kind: SampleKind::LimitRatio(r), .. } if (r - 0.1).abs() < 1e-9
+        PreASAPNode::PromqlSeriesSample { kind: SampleKind::LimitRatio(r), .. } if (r - 0.1).abs() < 1e-9
     ));
     // Series-preserving: the output schema equals the input's (ts, value).
     let sch = ok("limitk(2, http_requests)").output_schema().unwrap();
@@ -2068,11 +2074,11 @@ fn limit_ratio_keeps_a_negative_ratio_and_clamps_out_of_range() {
     // be normalised away. Out-of-range magnitudes clamp to [-1, 1] (Prometheus).
     assert!(matches!(
         ok("limit_ratio(-0.5, http_requests)"),
-        QueryExpr::PromqlSeriesSample { kind: SampleKind::LimitRatio(r), .. } if (r + 0.5).abs() < 1e-9
+        PreASAPNode::PromqlSeriesSample { kind: SampleKind::LimitRatio(r), .. } if (r + 0.5).abs() < 1e-9
     ));
     assert!(matches!(
         ok("limit_ratio(1.1, http_requests)"),
-        QueryExpr::PromqlSeriesSample { kind: SampleKind::LimitRatio(r), .. } if (r - 1.0).abs() < 1e-9
+        PreASAPNode::PromqlSeriesSample { kind: SampleKind::LimitRatio(r), .. } if (r - 1.0).abs() < 1e-9
     ));
 }
 
@@ -2080,7 +2086,7 @@ fn limit_ratio_keeps_a_negative_ratio_and_clamps_out_of_range() {
 fn limitk_by_carries_the_grouping_and_composes_in_a_set_op() {
     // `limitk by (group)` samples per group; the grouping label is seeded.
     let qe = ok("limitk by (group) (2, http_requests)");
-    let QueryExpr::PromqlSeriesSample { by, .. } = &qe else {
+    let PreASAPNode::PromqlSeriesSample { by, .. } = &qe else {
         panic!("expected a PromqlSeriesSample, got {qe:?}");
     };
     assert!(!by.is_empty(), "grouped sampling keeps its `by` keys");
@@ -2106,20 +2112,20 @@ fn dynamic_and_non_finite_sample_params_are_rejected() {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Descend single-child nodes to the first `PromqlRelabel`.
-fn first_relabel(e: &QueryExpr) -> &QueryExpr {
+fn first_relabel(e: &PreASAPNode) -> &PreASAPNode {
     match e {
-        QueryExpr::PromqlRelabel { .. } => e,
-        QueryExpr::Aggregate { child, .. }
-        | QueryExpr::Filter { child, .. }
-        | QueryExpr::TimeRange { child, .. }
-        | QueryExpr::TimeShift { child, .. } => first_relabel(child),
+        PreASAPNode::PromqlRelabel { .. } => e,
+        PreASAPNode::Aggregate { child, .. }
+        | PreASAPNode::Filter { child, .. }
+        | PreASAPNode::TimeRange { child, .. }
+        | PreASAPNode::TimeShift { child, .. } => first_relabel(child),
         other => panic!("no PromqlRelabel reachable from {other:?}"),
     }
 }
 
 /// True when `value` is a `FunctionCall` with the given name.
-fn is_fn_named(value: &QueryExpr, name: &str) -> bool {
-    matches!(value, QueryExpr::FunctionCall { name: n, .. } if n == name)
+fn is_fn_named(value: &PreASAPNode, name: &str) -> bool {
+    matches!(value, PreASAPNode::FunctionCall { name: n, .. } if n == name)
 }
 
 #[test]
@@ -2127,7 +2133,7 @@ fn label_replace_is_a_relabel_over_the_vector() {
     // SEMANTICS: `label_replace(v, dst, repl, src, regex)` rewrites the `dst`
     // label per series from a regex over `src`; the sample value is untouched.
     let qe = ok(r#"label_replace(up, "host", "$1", "instance", "(.+):.*")"#);
-    let QueryExpr::PromqlRelabel { dst, value, child } = &qe else {
+    let PreASAPNode::PromqlRelabel { dst, value, child } = &qe else {
         panic!("expected a PromqlRelabel, got {qe:?}");
     };
     assert_eq!(dst, "host");
@@ -2148,7 +2154,7 @@ fn label_join_concatenates_source_labels() {
     // SEMANTICS: `label_join(v, dst, sep, src…)` joins the source labels with
     // `sep` into `dst`.
     let qe = ok(r#"label_join(up, "combined", "-", "job", "instance")"#);
-    let QueryExpr::PromqlRelabel { dst, value, .. } = &qe else {
+    let PreASAPNode::PromqlRelabel { dst, value, .. } = &qe else {
         panic!("expected a PromqlRelabel, got {qe:?}");
     };
     assert_eq!(dst, "combined");
@@ -2164,7 +2170,7 @@ fn label_replace_composes_under_an_aggregation() {
     let qe = ok(r#"sum by (host) (label_replace(up, "host", "$1", "instance", "(.+):.*"))"#);
     // A PromqlRelabel sits below the outer Sum.
     let relabel = first_relabel(&qe);
-    assert!(matches!(relabel, QueryExpr::PromqlRelabel { dst, .. } if dst == "host"));
+    assert!(matches!(relabel, PreASAPNode::PromqlRelabel { dst, .. } if dst == "host"));
     assert!(has(&qe, |i| matches!(i, AggIntent::Sum { .. })));
     let sch = qe.output_schema().unwrap();
     assert!(sch.columns.iter().any(|c| c.name == "host"));
@@ -2191,7 +2197,7 @@ fn extra_over_time_reducers_lower_to_per_series_intents() {
         assert!(has(&qe, |i| *i == want), "{q}: {:?}", intents(&qe));
         // Per-series: the range window survives as a `TimeRange`.
         assert!(
-            matches!(&qe, QueryExpr::Aggregate { child, .. } if matches!(child.as_ref(), QueryExpr::TimeRange { .. })),
+            matches!(&qe, PreASAPNode::Aggregate { child, .. } if matches!(child.as_ref(), PreASAPNode::TimeRange { .. })),
             "{q} keeps its range as a TimeRange"
         );
     }
@@ -2215,13 +2221,13 @@ fn sort_and_sort_desc_reorder_by_value_without_a_limit() {
         ("sort_desc(http_requests)", false),
     ] {
         let qe = ok(q);
-        let QueryExpr::Sort { keys, child, .. } = &qe else {
+        let PreASAPNode::Sort { keys, child, .. } = &qe else {
             panic!("{q}: expected a Sort, got {qe:?}");
         };
         assert_eq!(keys.len(), 1);
         assert_eq!(keys[0].ascending, ascending, "{q}");
         // No Limit above the Sort — every series is preserved.
-        assert!(!matches!(&qe, QueryExpr::Limit { .. }));
+        assert!(!matches!(&qe, PreASAPNode::Limit { .. }));
         // The value column is what it ranks on: descend to the scan.
         let (metric, _) = first_scan(child);
         assert_eq!(metric, "http_requests");
@@ -2233,7 +2239,7 @@ fn sort_by_label_orders_on_each_label_in_turn() {
     // `sort_by_label(v, "group", "instance", "job")` — one ascending sort key per
     // label, in argument order; the labels are seeded into the schema.
     let qe = ok(r#"sort_by_label(http_requests, "group", "instance", "job")"#);
-    let QueryExpr::Sort { keys, .. } = &qe else {
+    let PreASAPNode::Sort { keys, .. } = &qe else {
         panic!("expected a Sort, got {qe:?}");
     };
     assert_eq!(keys.len(), 3, "one key per label");
@@ -2250,7 +2256,7 @@ fn sort_by_label_orders_on_each_label_in_turn() {
 #[test]
 fn sort_by_label_desc_is_descending() {
     let qe = ok(r#"sort_by_label_desc(http_requests, "instance")"#);
-    let QueryExpr::Sort { keys, .. } = &qe else {
+    let PreASAPNode::Sort { keys, .. } = &qe else {
         panic!("expected a Sort, got {qe:?}");
     };
     assert!(keys.iter().all(|k| !k.ascending));
@@ -2270,7 +2276,7 @@ fn min_of_max_of_fold_constant_scalars() {
         Some(10.0)
     );
     let qe = ok("up > max_of(1, 2)");
-    let QueryExpr::BinaryOp { rhs, .. } = &qe else {
+    let PreASAPNode::BinaryOp { rhs, .. } = &qe else {
         panic!("{qe:?}")
     };
     assert_eq!(rhs.as_promql_scalar(), Some(2.0));

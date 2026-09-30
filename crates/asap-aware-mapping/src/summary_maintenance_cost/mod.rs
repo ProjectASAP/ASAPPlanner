@@ -8,12 +8,12 @@ use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use asap_types::post_asap::{
-    BoundExpr, ErrorMetric, ExactKind, GuaranteeSource, ProbabilityExpr, ResultGuarantee,
-    SketchAlgorithm, SummaryExpr, SummaryFamilyType, SummaryMaintenanceLifecycle,
-    SummaryMaintenanceLifecycleGuarantee, SummaryNode, SummaryWindowFramework,
+    BoundExpr, ErrorMetric, ExactKind, GuaranteeSource, PostASAPNode, ProbabilityExpr,
+    ResultGuarantee, SketchAlgorithm, SummaryExpr, SummaryFamilyType, SummaryMaintenanceLifecycle,
+    SummaryMaintenanceLifecycleGuarantee, SummaryWindowFramework,
 };
 use asap_types::pre_asap::{
-    agg_intent::AggIntent, CompareOpKind, InfoMatcher, Predicate, QueryExpr, Source,
+    agg_intent::AggIntent, CompareOpKind, InfoMatcher, PreASAPNode, Predicate, Source,
 };
 use asap_types::types::AccuracyTarget;
 use asap_types::workload::{DataArrival, DataWorkload, QueryRecurrence, RepeatedDemand};

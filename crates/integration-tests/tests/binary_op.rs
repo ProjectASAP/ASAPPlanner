@@ -1,4 +1,4 @@
-//! `QueryExpr::BinaryOp` — arithmetic, comparison, and vector-match tests.
+//! `PreASAPNode::BinaryOp` — arithmetic, comparison, and vector-match tests.
 //!
 //! Each side of a `BinaryOp` is bound independently by the SchemaResolver, so each
 //! gets its own scan schema derived from the labels it references.
@@ -11,24 +11,24 @@ use std::time::Duration;
 use asap_integration_tests::fixtures::lower_promql;
 use asap_integration_tests::fixtures::metric_schema;
 use asap_types::pre_asap::{
-    AggIntent, ArithmeticOpKind, BinaryOpKind, CompareOpKind, GroupSide, QueryExpr, Reduction,
+    AggIntent, ArithmeticOpKind, BinaryOpKind, CompareOpKind, GroupSide, PreASAPNode, Reduction,
     Source, VectorGrouping, VectorMatch, VectorMatchKind,
 };
 use asap_types::types::AccuracyTarget;
 
-fn lower(q: &str) -> QueryExpr {
+fn lower(q: &str) -> PreASAPNode {
     lower_promql(q, AccuracyTarget::Exact).unwrap_or_else(|e| panic!("lower failed for {q:?}: {e}"))
 }
 
-fn scan(metric: &str, labels: &[&str]) -> QueryExpr {
-    QueryExpr::TimeRange {
+fn scan(metric: &str, labels: &[&str]) -> PreASAPNode {
+    PreASAPNode::TimeRange {
         range: Duration::from_secs(1),
         child: Rc::new(source_scan(metric, labels)),
     }
 }
 
-fn source_scan(metric: &str, labels: &[&str]) -> QueryExpr {
-    QueryExpr::Scan {
+fn source_scan(metric: &str, labels: &[&str]) -> PreASAPNode {
+    PreASAPNode::Scan {
         source: Source::TimeSeries {
             metric: metric.into(),
         },
@@ -37,21 +37,21 @@ fn source_scan(metric: &str, labels: &[&str]) -> QueryExpr {
     }
 }
 
-fn rate_agg(metric: &str) -> QueryExpr {
-    QueryExpr::Aggregate {
+fn rate_agg(metric: &str) -> PreASAPNode {
+    PreASAPNode::Aggregate {
         reduction: Reduction::PerEntity,
         measures: vec![AggIntent::Rate],
         output_names: vec!["".into()],
         having: None,
-        child: Rc::new(QueryExpr::TimeRange {
+        child: Rc::new(PreASAPNode::TimeRange {
             range: Duration::from_secs(300),
             child: Rc::new(source_scan(metric, &[])),
         }),
     }
 }
 
-fn sum_by_job(metric: &str) -> QueryExpr {
-    QueryExpr::Aggregate {
+fn sum_by_job(metric: &str) -> PreASAPNode {
+    PreASAPNode::Aggregate {
         reduction: Reduction::by(vec![2]),
         measures: vec![AggIntent::Sum { col: None }],
         output_names: vec!["".into()],
@@ -63,7 +63,7 @@ fn sum_by_job(metric: &str) -> QueryExpr {
 // #18 — arithmetic binary op between two bare scans; no vector match
 #[test]
 fn q18_div_bare_scans() {
-    let expected = QueryExpr::BinaryOp {
+    let expected = PreASAPNode::BinaryOp {
         op: BinaryOpKind::Arithmetic(ArithmeticOpKind::Div),
         lhs: Rc::new(scan("http_requests_total", &[])),
         rhs: Rc::new(scan("http_requests_total", &[])),
@@ -75,7 +75,7 @@ fn q18_div_bare_scans() {
 // #19 — add with on(job) vector match; match labels are strings, not column ids
 #[test]
 fn q19_add_with_on_match() {
-    let expected = QueryExpr::BinaryOp {
+    let expected = PreASAPNode::BinaryOp {
         op: BinaryOpKind::Arithmetic(ArithmeticOpKind::Add),
         lhs: Rc::new(scan("http_requests_total", &[])),
         rhs: Rc::new(scan("http_requests_total", &[])),
@@ -94,7 +94,7 @@ fn q19_add_with_on_match() {
 // #20 — divide two rate aggregates over different metrics
 #[test]
 fn q20_div_two_rates() {
-    let expected = QueryExpr::BinaryOp {
+    let expected = PreASAPNode::BinaryOp {
         op: BinaryOpKind::Arithmetic(ArithmeticOpKind::Div),
         lhs: Rc::new(rate_agg("http_requests_total")),
         rhs: Rc::new(rate_agg("http_errors_total")),
@@ -111,7 +111,7 @@ fn q20_div_two_rates() {
 fn q_gt_comparison() {
     assert_eq!(
         lower("http_requests_total > http_errors_total"),
-        QueryExpr::BinaryOp {
+        PreASAPNode::BinaryOp {
             op: BinaryOpKind::Compare(CompareOpKind::Gt),
             lhs: Rc::new(scan("http_requests_total", &[])),
             rhs: Rc::new(scan("http_errors_total", &[])),
@@ -124,7 +124,7 @@ fn q_gt_comparison() {
 fn q_lt_comparison() {
     assert_eq!(
         lower("http_requests_total < http_errors_total"),
-        QueryExpr::BinaryOp {
+        PreASAPNode::BinaryOp {
             op: BinaryOpKind::Compare(CompareOpKind::Lt),
             lhs: Rc::new(scan("http_requests_total", &[])),
             rhs: Rc::new(scan("http_errors_total", &[])),
@@ -137,7 +137,7 @@ fn q_lt_comparison() {
 fn q_ge_comparison() {
     assert_eq!(
         lower("http_requests_total >= http_errors_total"),
-        QueryExpr::BinaryOp {
+        PreASAPNode::BinaryOp {
             op: BinaryOpKind::Compare(CompareOpKind::Ge),
             lhs: Rc::new(scan("http_requests_total", &[])),
             rhs: Rc::new(scan("http_errors_total", &[])),
@@ -150,7 +150,7 @@ fn q_ge_comparison() {
 fn q_le_comparison() {
     assert_eq!(
         lower("http_requests_total <= http_errors_total"),
-        QueryExpr::BinaryOp {
+        PreASAPNode::BinaryOp {
             op: BinaryOpKind::Compare(CompareOpKind::Le),
             lhs: Rc::new(scan("http_requests_total", &[])),
             rhs: Rc::new(scan("http_errors_total", &[])),
@@ -164,7 +164,7 @@ fn q_le_comparison() {
 fn q_add_with_ignoring() {
     assert_eq!(
         lower("http_requests_total + ignoring(job) http_errors_total"),
-        QueryExpr::BinaryOp {
+        PreASAPNode::BinaryOp {
             op: BinaryOpKind::Arithmetic(ArithmeticOpKind::Add),
             lhs: Rc::new(scan("http_requests_total", &[])),
             rhs: Rc::new(scan("http_errors_total", &[])),
@@ -182,7 +182,7 @@ fn q_add_with_ignoring() {
 fn q_mul_group_left() {
     assert_eq!(
         lower("http_requests_total * on(job) group_left() node_info"),
-        QueryExpr::BinaryOp {
+        PreASAPNode::BinaryOp {
             op: BinaryOpKind::Arithmetic(ArithmeticOpKind::Mul),
             lhs: Rc::new(scan("http_requests_total", &[])),
             rhs: Rc::new(scan("node_info", &[])),
@@ -203,7 +203,7 @@ fn q_mul_group_left() {
 fn q_mul_group_right() {
     assert_eq!(
         lower("node_info * on(job) group_right() http_requests_total"),
-        QueryExpr::BinaryOp {
+        PreASAPNode::BinaryOp {
             op: BinaryOpKind::Arithmetic(ArithmeticOpKind::Mul),
             lhs: Rc::new(scan("node_info", &[])),
             rhs: Rc::new(scan("http_requests_total", &[])),
@@ -223,7 +223,7 @@ fn q_mul_group_right() {
 //   each side: Aggregate{Sum, by=[2]} over Scan([ts, value, job])
 #[test]
 fn q21_div_two_sum_by_job() {
-    let expected = QueryExpr::BinaryOp {
+    let expected = PreASAPNode::BinaryOp {
         op: BinaryOpKind::Arithmetic(ArithmeticOpKind::Div),
         lhs: Rc::new(sum_by_job("http_requests_total")),
         rhs: Rc::new(sum_by_job("http_errors_total")),
@@ -239,10 +239,10 @@ fn q21_div_two_sum_by_job() {
 //   against PromqlScalarBridge(-1), no vector match. The vector side keeps its schema.
 #[test]
 fn q36_unary_negation_is_multiply_by_minus_one() {
-    let expected = QueryExpr::BinaryOp {
+    let expected = PreASAPNode::BinaryOp {
         op: BinaryOpKind::Arithmetic(ArithmeticOpKind::Mul),
         lhs: Rc::new(scan("some_metric", &[])),
-        rhs: Rc::new(QueryExpr::promql_scalar(-1.0)),
+        rhs: Rc::new(PreASAPNode::promql_scalar(-1.0)),
         vector_match: None,
     };
     assert_eq!(lower("-some_metric"), expected);
@@ -252,15 +252,15 @@ fn q36_unary_negation_is_multiply_by_minus_one() {
 //   `sum(-m)` → Aggregate{Sum} over the `m * -1` BinaryOp.
 #[test]
 fn q36_sum_of_negation_nests() {
-    let expected = QueryExpr::Aggregate {
+    let expected = PreASAPNode::Aggregate {
         reduction: Reduction::by(vec![]),
         measures: vec![AggIntent::Sum { col: None }],
         output_names: vec!["".into()],
         having: None,
-        child: Rc::new(QueryExpr::BinaryOp {
+        child: Rc::new(PreASAPNode::BinaryOp {
             op: BinaryOpKind::Arithmetic(ArithmeticOpKind::Mul),
             lhs: Rc::new(scan("node_cpu_seconds_total", &[])),
-            rhs: Rc::new(QueryExpr::promql_scalar(-1.0)),
+            rhs: Rc::new(PreASAPNode::promql_scalar(-1.0)),
             vector_match: None,
         }),
     };

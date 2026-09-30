@@ -3,7 +3,7 @@
 use std::time::Duration;
 
 use asap_types::pre_asap::{
-    AggIntent, ArithmeticOpKind, BinaryOpKind, CompareOpKind, QueryExpr, Reduction, ScalarValue,
+    AggIntent, ArithmeticOpKind, BinaryOpKind, CompareOpKind, PreASAPNode, Reduction, ScalarValue,
     Source,
 };
 use asap_types::types::AccuracyTarget;
@@ -16,7 +16,7 @@ use asap_frontend_promql::{lower_promql_workload, PromqlError as LoweringError};
 mod support;
 use support::lower_promql;
 
-fn lower(q: &str) -> QueryExpr {
+fn lower(q: &str) -> PreASAPNode {
     lower_promql(q, AccuracyTarget::Exact).unwrap_or_else(|e| panic!("lower failed for {q:?}: {e}"))
 }
 
@@ -77,10 +77,10 @@ fn distinct_over_time_preserves_cardinality_accuracy_and_nested_windows() {
 #[test]
 fn bare_selector_is_scan_with_predicates() {
     let qe = lower(r#"http_requests_total{env="prod",status!="500"}"#);
-    let QueryExpr::TimeRange { child, .. } = &qe else {
+    let PreASAPNode::TimeRange { child, .. } = &qe else {
         panic!("expected TimeRange, got {qe:?}");
     };
-    let QueryExpr::Scan {
+    let PreASAPNode::Scan {
         source, predicates, ..
     } = child.as_ref()
     else {
@@ -92,29 +92,29 @@ fn bare_selector_is_scan_with_predicates() {
     assert_eq!(predicates.len(), 2);
     assert!(predicates
         .iter()
-        .all(|p| matches!(p.0.as_ref(), QueryExpr::Compare { .. })));
+        .all(|p| matches!(p.0.as_ref(), PreASAPNode::Compare { .. })));
 }
 
 #[test]
 fn regex_matcher_lowers_to_regex_compareop() {
     let qe = lower(r#"http_requests_total{path=~"/api/.*"}"#);
-    let QueryExpr::TimeRange { child, .. } = &qe else {
+    let PreASAPNode::TimeRange { child, .. } = &qe else {
         panic!("expected TimeRange, got {qe:?}");
     };
-    let QueryExpr::Scan {
+    let PreASAPNode::Scan {
         predicates, schema, ..
     } = child.as_ref()
     else {
         panic!("expected Scan, got {qe:?}");
     };
-    let QueryExpr::Compare { left, op, right } = predicates[0].0.as_ref() else {
+    let PreASAPNode::Compare { left, op, right } = predicates[0].0.as_ref() else {
         panic!("expected Compare, got {:?}", predicates[0].0);
     };
     assert_eq!(*op, CompareOpKind::Regex);
     // The label matcher's column is resolved positionally against the scan schema.
     let path_id = schema.column_id("path").expect("path in scan schema");
-    assert!(matches!(left.as_ref(), QueryExpr::Column(id) if *id == path_id));
-    assert!(matches!(right.as_ref(), QueryExpr::Literal(ScalarValue::Utf8(v)) if v == "/api/.*"));
+    assert!(matches!(left.as_ref(), PreASAPNode::Column(id) if *id == path_id));
+    assert!(matches!(right.as_ref(), PreASAPNode::Literal(ScalarValue::Utf8(v)) if v == "/api/.*"));
 }
 
 // ── *_over_time → Aggregate over TimeRange ──────────────────────────────────────
@@ -122,7 +122,7 @@ fn regex_matcher_lowers_to_regex_compareop() {
 #[test]
 fn quantile_over_time_is_time_range_aggregate() {
     let qe = lower(r#"quantile_over_time(0.99, http_request_duration{env="prod"}[5m])"#);
-    let QueryExpr::Aggregate {
+    let PreASAPNode::Aggregate {
         reduction,
         measures,
         child,
@@ -135,12 +135,14 @@ fn quantile_over_time_is_time_range_aggregate() {
     assert!(
         matches!(measures.as_slice(), [AggIntent::Quantile { q, .. }] if (*q - 0.99).abs() < 1e-9)
     );
-    let QueryExpr::TimeRange { range, child } = child.as_ref() else {
+    let PreASAPNode::TimeRange { range, child } = child.as_ref() else {
         panic!("expected TimeRange child, got {child:?}");
     };
     assert_eq!(*range, Duration::from_secs(300));
     // The label matcher folded onto the Scan.
-    assert!(matches!(child.as_ref(), QueryExpr::Scan { predicates, .. } if predicates.len() == 1));
+    assert!(
+        matches!(child.as_ref(), PreASAPNode::Scan { predicates, .. } if predicates.len() == 1)
+    );
 }
 
 #[test]
@@ -151,7 +153,7 @@ fn outer_sum_by_over_quantile_over_time_groups_positionally() {
     // a name-based Partition. Leaf = [ts, value, host, service] (referenced
     // names appended sorted) → host = col 2.
     let qe = lower(r#"sum by (host) (quantile_over_time(0.99, latency{service="web"}[5m]))"#);
-    let QueryExpr::Aggregate {
+    let PreASAPNode::Aggregate {
         reduction,
         measures,
         child,
@@ -163,27 +165,27 @@ fn outer_sum_by_over_quantile_over_time_groups_positionally() {
     assert_eq!(reduction, &Reduction::by(vec![2]));
     assert!(matches!(measures.as_slice(), [AggIntent::Sum { .. }]));
     // Inner: Aggregate{Quantile} over TimeRange (per-series over_time reduction).
-    let QueryExpr::Aggregate {
+    let PreASAPNode::Aggregate {
         measures, child, ..
     } = child.as_ref()
     else {
         panic!("expected Aggregate (quantile_over_time) under the outer Sum, got {child:?}");
     };
     assert!(matches!(measures.as_slice(), [AggIntent::Quantile { .. }]));
-    assert!(matches!(child.as_ref(), QueryExpr::TimeRange { .. }));
+    assert!(matches!(child.as_ref(), PreASAPNode::TimeRange { .. }));
 }
 
 #[test]
 fn avg_over_time_maps_to_avg_intent() {
     let qe = lower("avg_over_time(cpu_seconds_total[10m])");
-    let QueryExpr::Aggregate {
+    let PreASAPNode::Aggregate {
         measures, child, ..
     } = &qe
     else {
         panic!("expected Aggregate, got {qe:?}");
     };
     assert!(matches!(measures.as_slice(), [AggIntent::Avg { .. }]));
-    let QueryExpr::TimeRange { range, .. } = child.as_ref() else {
+    let PreASAPNode::TimeRange { range, .. } = child.as_ref() else {
         panic!("expected TimeRange child, got {child:?}");
     };
     assert_eq!(*range, Duration::from_secs(600));
@@ -192,7 +194,7 @@ fn avg_over_time_maps_to_avg_intent() {
 #[test]
 fn stddev_and_stdvar_over_time() {
     let qe = lower("stddev_over_time(m[5m])");
-    let QueryExpr::Aggregate {
+    let PreASAPNode::Aggregate {
         measures, child, ..
     } = &qe
     else {
@@ -205,10 +207,10 @@ fn stddev_and_stdvar_over_time() {
             ..
         }]
     ));
-    assert!(matches!(child.as_ref(), QueryExpr::TimeRange { .. }));
+    assert!(matches!(child.as_ref(), PreASAPNode::TimeRange { .. }));
 
     let qe = lower("stdvar_over_time(m[5m])");
-    let QueryExpr::Aggregate {
+    let PreASAPNode::Aggregate {
         measures, child, ..
     } = &qe
     else {
@@ -221,7 +223,7 @@ fn stddev_and_stdvar_over_time() {
             ..
         }]
     ));
-    assert!(matches!(child.as_ref(), QueryExpr::TimeRange { .. }));
+    assert!(matches!(child.as_ref(), PreASAPNode::TimeRange { .. }));
 }
 
 #[test]
@@ -230,7 +232,7 @@ fn histogram_quantile_wraps_inner_in_quantile() {
     // not squashed away. The `_bucket` metric + `le` matcher mark the classic
     // form → `HistogramQuantile` over `Aggregate{Rate}` over Scan.
     let qe = lower(r#"histogram_quantile(0.95, rate(http_duration_seconds_bucket{le="0.5"}[5m]))"#);
-    let QueryExpr::Aggregate {
+    let PreASAPNode::Aggregate {
         measures, child, ..
     } = &qe
     else {
@@ -239,14 +241,14 @@ fn histogram_quantile_wraps_inner_in_quantile() {
     assert!(
         matches!(measures.as_slice(), [AggIntent::HistogramQuantile { q, .. }] if (*q - 0.95).abs() < 1e-9)
     );
-    let QueryExpr::Aggregate {
+    let PreASAPNode::Aggregate {
         measures, child, ..
     } = child.as_ref()
     else {
         panic!("expected inner Aggregate{{Rate}}, got {child:?}");
     };
     assert!(matches!(measures.as_slice(), [AggIntent::Rate]));
-    let QueryExpr::TimeRange {
+    let PreASAPNode::TimeRange {
         range,
         child: tr_child,
     } = child.as_ref()
@@ -255,7 +257,7 @@ fn histogram_quantile_wraps_inner_in_quantile() {
     };
     assert_eq!(*range, Duration::from_secs(300));
     assert!(
-        matches!(tr_child.as_ref(), QueryExpr::Scan { predicates, .. } if predicates.len() == 1)
+        matches!(tr_child.as_ref(), PreASAPNode::Scan { predicates, .. } if predicates.len() == 1)
     );
 }
 
@@ -266,7 +268,7 @@ fn histogram_quantile_over_sum_by_le_preserves_grouping() {
     // `sum by (le)` aggregate; now the `le` grouping survives into the
     // canonical tree.
     let qe = lower(r#"histogram_quantile(0.99, sum by (le) (rate(http_requests_bucket[5m])))"#);
-    let QueryExpr::Aggregate {
+    let PreASAPNode::Aggregate {
         measures, child, ..
     } = &qe
     else {
@@ -278,7 +280,7 @@ fn histogram_quantile_over_sum_by_le_preserves_grouping() {
     );
     // `sum by (le)` survives as a positional Aggregate (by = [2], `le`) over the
     // inner Rate — no name-based Partition.
-    let QueryExpr::Aggregate {
+    let PreASAPNode::Aggregate {
         reduction,
         measures,
         ..
@@ -292,8 +294,8 @@ fn histogram_quantile_over_sum_by_le_preserves_grouping() {
 
 /// The classic `histogram_quantile` aggregate: its `without` keys, `le`
 /// column, and output column names.
-fn classic_histogram(qe: &QueryExpr) -> (Vec<usize>, usize, Vec<String>) {
-    let QueryExpr::Aggregate {
+fn classic_histogram(qe: &PreASAPNode) -> (Vec<usize>, usize, Vec<String>) {
+    let PreASAPNode::Aggregate {
         reduction: Reduction::Reduce(by),
         measures,
         ..
@@ -321,7 +323,7 @@ fn classic_histogram(qe: &QueryExpr) -> (Vec<usize>, usize, Vec<String>) {
 fn classic_histogram_quantile_groups_without_le() {
     let qe = lower("histogram_quantile(0.9, rate(http_duration_seconds_bucket[5m]))");
     let (keys, le, names) = classic_histogram(&qe);
-    let QueryExpr::Aggregate { child, .. } = &qe else {
+    let PreASAPNode::Aggregate { child, .. } = &qe else {
         unreachable!()
     };
     let child = child.output_schema().unwrap();
@@ -349,14 +351,14 @@ fn classic_histogram_quantile_keeps_out_of_range_quantiles() {
         ("histogram_quantile(-1, x_bucket)", -1.),
         ("histogram_quantile(2, x_bucket)", 2.),
     ] {
-        let QueryExpr::Aggregate { measures, .. } = lower(query) else {
+        let PreASAPNode::Aggregate { measures, .. } = lower(query) else {
             panic!("{query}");
         };
         assert!(
             matches!(measures.as_slice(), [AggIntent::HistogramQuantile { q, .. }] if *q == expected)
         );
     }
-    let QueryExpr::Aggregate { measures, .. } = lower("histogram_quantile(NaN, x_bucket)") else {
+    let PreASAPNode::Aggregate { measures, .. } = lower("histogram_quantile(NaN, x_bucket)") else {
         panic!("NaN");
     };
     assert!(matches!(measures.as_slice(), [AggIntent::HistogramQuantile { q, .. }] if q.is_nan()));
@@ -379,14 +381,14 @@ fn classic_histogram_quantile_rejects_an_argument_without_le() {
 #[test]
 fn rate_has_time_range_child_not_window() {
     let qe = lower("rate(http_requests_total[5m])");
-    let QueryExpr::Aggregate {
+    let PreASAPNode::Aggregate {
         measures, child, ..
     } = &qe
     else {
         panic!("expected Aggregate for rate, got {qe:?}");
     };
     assert!(matches!(measures.as_slice(), [AggIntent::Rate]));
-    let QueryExpr::TimeRange { range, .. } = child.as_ref() else {
+    let PreASAPNode::TimeRange { range, .. } = child.as_ref() else {
         panic!("expected TimeRange child (not Window), got {child:?}");
     };
     assert_eq!(*range, Duration::from_secs(300));
@@ -395,14 +397,14 @@ fn rate_has_time_range_child_not_window() {
 #[test]
 fn increase_maps_to_increase_intent() {
     let qe = lower("increase(errors_total[1h])");
-    let QueryExpr::Aggregate {
+    let PreASAPNode::Aggregate {
         measures, child, ..
     } = &qe
     else {
         panic!("expected Aggregate for increase, got {qe:?}");
     };
     assert!(matches!(measures.as_slice(), [AggIntent::Increase]));
-    let QueryExpr::TimeRange { range, .. } = child.as_ref() else {
+    let PreASAPNode::TimeRange { range, .. } = child.as_ref() else {
         panic!("expected TimeRange child, got {child:?}");
     };
     assert_eq!(*range, Duration::from_secs(3600));
@@ -415,21 +417,21 @@ fn sum_over_rate_keeps_both_levels() {
     // Regression: `sum(rate(m[w]))` — the most common PromQL shape — must keep
     // the cross-series Sum, not collapse to a bare per-series Rate.
     let qe = lower("sum(rate(http_requests_total[5m]))");
-    let QueryExpr::Aggregate {
+    let PreASAPNode::Aggregate {
         measures, child, ..
     } = &qe
     else {
         panic!("expected outer Aggregate{{Sum}}, got {qe:?}");
     };
     assert!(matches!(measures.as_slice(), [AggIntent::Sum { .. }]));
-    let QueryExpr::Aggregate {
+    let PreASAPNode::Aggregate {
         measures, child, ..
     } = child.as_ref()
     else {
         panic!("expected inner Aggregate{{Rate}}, got {child:?}");
     };
     assert!(matches!(measures.as_slice(), [AggIntent::Rate]));
-    assert!(matches!(child.as_ref(), QueryExpr::TimeRange { .. }));
+    assert!(matches!(child.as_ref(), PreASAPNode::TimeRange { .. }));
 }
 
 #[test]
@@ -438,7 +440,7 @@ fn sum_by_over_rate_groups_the_outer_sum() {
     // on a positional `Aggregate.by` (the same shape SQL produces) over the
     // label-preserving inner Rate. Leaf = [ts, value, job] → by = [2].
     let qe = lower("sum by (job) (rate(http_requests_total[5m]))");
-    let QueryExpr::Aggregate {
+    let PreASAPNode::Aggregate {
         reduction,
         measures,
         child,
@@ -451,7 +453,7 @@ fn sum_by_over_rate_groups_the_outer_sum() {
     assert!(matches!(measures.as_slice(), [AggIntent::Sum { .. }]));
     assert!(matches!(
         child.as_ref(),
-        QueryExpr::Aggregate { measures, .. } if matches!(measures.as_slice(), [AggIntent::Rate])
+        PreASAPNode::Aggregate { measures, .. } if matches!(measures.as_slice(), [AggIntent::Rate])
     ));
 }
 
@@ -459,7 +461,7 @@ fn sum_by_over_rate_groups_the_outer_sum() {
 fn count_over_rate_keeps_both_levels() {
     // The `Outer::Count` sibling of the `sum(rate(...))` bug.
     let qe = lower("count(rate(http_requests_total[5m]))");
-    let QueryExpr::Aggregate {
+    let PreASAPNode::Aggregate {
         measures, child, ..
     } = &qe
     else {
@@ -468,7 +470,7 @@ fn count_over_rate_keeps_both_levels() {
     assert!(matches!(measures.as_slice(), [AggIntent::Count { .. }]));
     assert!(matches!(
         child.as_ref(),
-        QueryExpr::Aggregate { measures, .. } if matches!(measures.as_slice(), [AggIntent::Rate])
+        PreASAPNode::Aggregate { measures, .. } if matches!(measures.as_slice(), [AggIntent::Rate])
     ));
 }
 
@@ -487,7 +489,7 @@ fn count_over_distinct_over_time_preserves_both_aggregates() {
         ),
     ] {
         let tree = lower(query);
-        let QueryExpr::Aggregate {
+        let PreASAPNode::Aggregate {
             measures,
             reduction: actual,
             child,
@@ -501,7 +503,7 @@ fn count_over_distinct_over_time_preserves_both_aggregates() {
             "{query}: {tree:?}"
         );
         assert_eq!(actual, &reduction, "{query}");
-        let QueryExpr::Aggregate {
+        let PreASAPNode::Aggregate {
             measures,
             reduction,
             child,
@@ -516,7 +518,7 @@ fn count_over_distinct_over_time_preserves_both_aggregates() {
         );
         assert_eq!(reduction, &Reduction::PerEntity, "{query}");
         assert!(
-            matches!(child.as_ref(), QueryExpr::TimeRange { range, .. } if range.as_secs() == 300)
+            matches!(child.as_ref(), PreASAPNode::TimeRange { range, .. } if range.as_secs() == 300)
         );
     }
 }
@@ -552,14 +554,14 @@ fn count_never_lowers_to_distinct_sample_values() {
 #[test]
 fn count_over_time_is_count_intent() {
     let qe = lower("count_over_time(m[5m])");
-    let QueryExpr::Aggregate {
+    let PreASAPNode::Aggregate {
         measures, child, ..
     } = &qe
     else {
         panic!("expected Aggregate");
     };
     assert!(matches!(measures.as_slice(), [AggIntent::Count { .. }]));
-    assert!(matches!(child.as_ref(), QueryExpr::TimeRange { .. }));
+    assert!(matches!(child.as_ref(), PreASAPNode::TimeRange { .. }));
 }
 
 #[test]
@@ -568,7 +570,7 @@ fn outer_count_counts_series() {
     // over the window (label-preserving), outer cross-series row count grouped
     // on a positional `Aggregate.by`. Leaf = [ts, value, symbol] → symbol = col 2.
     let qe = lower("count by (symbol) (count_over_time(financial_last_trade_price[5m]))");
-    let QueryExpr::Aggregate {
+    let PreASAPNode::Aggregate {
         reduction,
         measures,
         child,
@@ -580,14 +582,14 @@ fn outer_count_counts_series() {
     assert_eq!(reduction, &Reduction::by(vec![2]));
     assert!(matches!(measures.as_slice(), [AggIntent::Count { .. }]));
     // Inner: Aggregate{Count} over TimeRange (per-series count_over_time).
-    let QueryExpr::Aggregate {
+    let PreASAPNode::Aggregate {
         measures, child, ..
     } = child.as_ref()
     else {
         panic!("expected Aggregate (count_over_time) under the outer count, got {child:?}");
     };
     assert!(matches!(measures.as_slice(), [AggIntent::Count { .. }]));
-    assert!(matches!(child.as_ref(), QueryExpr::TimeRange { .. }));
+    assert!(matches!(child.as_ref(), PreASAPNode::TimeRange { .. }));
 }
 
 // ── topk / bottomk ────────────────────────────────────────────────────────────
@@ -596,7 +598,7 @@ fn outer_count_counts_series() {
 fn topk_over_count_is_heavy_hitter_topk() {
     let qe = lower(r#"topk by (service) (10, count_over_time(requests{env="prod"}[1m]))"#);
     // Heavy-hitter: Aggregate{TopK} with grouping resolved to positional ids.
-    let QueryExpr::Aggregate {
+    let PreASAPNode::Aggregate {
         reduction,
         measures,
         child,
@@ -612,24 +614,24 @@ fn topk_over_count_is_heavy_hitter_topk() {
         [AggIntent::TopK { k: 10, .. }]
     ));
     // The count_over_time under the TopK is a TimeRange-backed aggregate.
-    let QueryExpr::Aggregate {
+    let PreASAPNode::Aggregate {
         measures, child, ..
     } = child.as_ref()
     else {
         panic!("expected Aggregate (count_over_time) under TopK, got {child:?}");
     };
     assert!(matches!(measures.as_slice(), [AggIntent::Count { .. }]));
-    let QueryExpr::TimeRange { range, child } = child.as_ref() else {
+    let PreASAPNode::TimeRange { range, child } = child.as_ref() else {
         panic!("expected TimeRange under Count aggregate, got {child:?}");
     };
     assert_eq!(*range, Duration::from_secs(60));
-    assert!(matches!(child.as_ref(), QueryExpr::Scan { .. }));
+    assert!(matches!(child.as_ref(), PreASAPNode::Scan { .. }));
 }
 
 #[test]
 fn topk_over_sum_is_value_weighted_heavy_hitter_topk() {
     let qe = lower(r#"topk by (service) (5, sum_over_time(requests{env="prod"}[1m]))"#);
-    let QueryExpr::Aggregate {
+    let PreASAPNode::Aggregate {
         reduction,
         measures,
         child,
@@ -643,25 +645,25 @@ fn topk_over_sum_is_value_weighted_heavy_hitter_topk() {
         measures.as_slice(),
         [AggIntent::TopK { k: 5, .. }]
     ));
-    let QueryExpr::Aggregate {
+    let PreASAPNode::Aggregate {
         measures, child, ..
     } = child.as_ref()
     else {
         panic!("expected Aggregate (sum_over_time) under TopK, got {child:?}");
     };
     assert!(matches!(measures.as_slice(), [AggIntent::Sum { .. }]));
-    assert!(matches!(child.as_ref(), QueryExpr::TimeRange { .. }));
+    assert!(matches!(child.as_ref(), PreASAPNode::TimeRange { .. }));
 }
 
 #[test]
 fn topk_over_avg_is_generic_sort_limit() {
     let qe = lower("topk by (host) (5, avg_over_time(cpu[5m]))");
-    let QueryExpr::Limit { n, offset, child } = &qe else {
+    let PreASAPNode::Limit { n, offset, child } = &qe else {
         panic!("expected Limit, got {qe:?}");
     };
     assert_eq!(*n, 5);
     assert_eq!(*offset, 0);
-    let QueryExpr::Sort {
+    let PreASAPNode::Sort {
         keys,
         partition_by,
         child,
@@ -678,7 +680,7 @@ fn topk_over_avg_is_generic_sort_limit() {
     // Underneath: the label-preserving windowed avg aggregate (by: []), no
     // intervening Partition.
     assert!(
-        matches!(child.as_ref(), QueryExpr::Aggregate { reduction, measures, .. }
+        matches!(child.as_ref(), PreASAPNode::Aggregate { reduction, measures, .. }
             if reduction == &Reduction::PerEntity && matches!(measures.as_slice(), [AggIntent::Avg { .. }])),
         "expected bare per-series Avg aggregate under Sort, got {child:?}"
     );
@@ -687,7 +689,7 @@ fn topk_over_avg_is_generic_sort_limit() {
 #[test]
 fn ungrouped_topk_over_sum_is_heavy_hitter() {
     let qe = lower("topk(5, sum_over_time(m[5m]))");
-    assert!(matches!(&qe, QueryExpr::Aggregate { .. }));
+    assert!(matches!(&qe, PreASAPNode::Aggregate { .. }));
     assert!(has_intent(&qe, |i| matches!(i, AggIntent::Sum { .. })));
     assert!(has_intent(&qe, |i| matches!(
         i,
@@ -699,11 +701,11 @@ fn ungrouped_topk_over_sum_is_heavy_hitter() {
 fn bottomk_over_count_is_generic_sort_ascending() {
     // `bottomk` is never a heavy-hitter (descending=false), even over count.
     let qe = lower("bottomk(3, count_over_time(m[5m]))");
-    let QueryExpr::Limit { n, child, .. } = &qe else {
+    let PreASAPNode::Limit { n, child, .. } = &qe else {
         panic!("expected Limit, got {qe:?}");
     };
     assert_eq!(*n, 3);
-    let QueryExpr::Sort { keys, .. } = child.as_ref() else {
+    let PreASAPNode::Sort { keys, .. } = child.as_ref() else {
         panic!("expected Sort");
     };
     assert!(keys[0].ascending, "bottomk ranks ascending");
@@ -715,11 +717,11 @@ fn bottomk_over_count_is_generic_sort_ascending() {
 #[test]
 fn bottomk_is_always_generic_sort_ascending() {
     let qe = lower("bottomk(3, count_over_time(m[5m]))");
-    let QueryExpr::Limit { n, child, .. } = &qe else {
+    let PreASAPNode::Limit { n, child, .. } = &qe else {
         panic!("expected Limit, got {qe:?}");
     };
     assert_eq!(*n, 3);
-    let QueryExpr::Sort { keys, .. } = child.as_ref() else {
+    let PreASAPNode::Sort { keys, .. } = child.as_ref() else {
         panic!("expected Sort");
     };
     assert!(keys[0].ascending, "bottomk ranks ascending");
@@ -731,7 +733,7 @@ fn topk_count_output_schema_carries_group_key() {
     // (`service`) flows through to the outer TopK's `by` column. Leaf schema =
     // [ts, value, service] → TopK groups on service (col 2).
     let qe = lower("topk by (service) (5, count_over_time(m[1m]))");
-    let QueryExpr::Aggregate {
+    let PreASAPNode::Aggregate {
         reduction,
         measures,
         child,
@@ -750,14 +752,14 @@ fn topk_count_output_schema_carries_group_key() {
         [AggIntent::TopK { k: 5, .. }]
     ));
     // Inner Count aggregate is visible with its TimeRange child.
-    let QueryExpr::Aggregate {
+    let PreASAPNode::Aggregate {
         measures, child, ..
     } = child.as_ref()
     else {
         panic!("expected inner Aggregate{{Count}}, got {child:?}");
     };
     assert!(matches!(measures.as_slice(), [AggIntent::Count { .. }]));
-    assert!(matches!(child.as_ref(), QueryExpr::TimeRange { .. }));
+    assert!(matches!(child.as_ref(), PreASAPNode::TimeRange { .. }));
 }
 
 // ── binary ops ────────────────────────────────────────────────────────────────
@@ -765,22 +767,22 @@ fn topk_count_output_schema_carries_group_key() {
 #[test]
 fn binary_op_division() {
     let qe = lower("rate(a[5m]) / rate(b[5m])");
-    let QueryExpr::BinaryOp { op, lhs, rhs, .. } = &qe else {
+    let PreASAPNode::BinaryOp { op, lhs, rhs, .. } = &qe else {
         panic!("expected BinaryOp, got {qe:?}");
     };
     assert_eq!(*op, BinaryOpKind::Arithmetic(ArithmeticOpKind::Div));
     assert!(
-        matches!(lhs.as_ref(), QueryExpr::Aggregate { measures, .. } if matches!(measures.as_slice(), [AggIntent::Rate]))
+        matches!(lhs.as_ref(), PreASAPNode::Aggregate { measures, .. } if matches!(measures.as_slice(), [AggIntent::Rate]))
     );
     assert!(
-        matches!(rhs.as_ref(), QueryExpr::Aggregate { measures, .. } if matches!(measures.as_slice(), [AggIntent::Rate]))
+        matches!(rhs.as_ref(), PreASAPNode::Aggregate { measures, .. } if matches!(measures.as_slice(), [AggIntent::Rate]))
     );
 }
 
 #[test]
 fn binary_op_with_on_grouping() {
     let qe = lower("a / on(host) b");
-    let QueryExpr::BinaryOp { vector_match, .. } = &qe else {
+    let PreASAPNode::BinaryOp { vector_match, .. } = &qe else {
         panic!("expected BinaryOp, got {qe:?}");
     };
     let vm = vector_match.as_ref().expect("vector_match present");
@@ -794,7 +796,7 @@ fn binary_op_with_on_grouping() {
 #[test]
 fn bool_comparisons_are_distinct() {
     let op = |q: &str| match lower(q) {
-        QueryExpr::BinaryOp { op, .. } => op,
+        PreASAPNode::BinaryOp { op, .. } => op,
         other => panic!("expected BinaryOp, got {other:?}"),
     };
     assert_eq!(op("a > 1"), BinaryOpKind::Compare(CompareOpKind::Gt));
@@ -814,7 +816,7 @@ fn binary_op_binds_each_branch_against_its_own_schema() {
     // single root schema threaded to both branches, the left scan would leak the
     // right's group key (and vice-versa). Per-branch binding keeps them separate.
     let qe = lower("count by (job) (a) / count by (region) (b)");
-    let QueryExpr::BinaryOp { lhs, rhs, .. } = &qe else {
+    let PreASAPNode::BinaryOp { lhs, rhs, .. } = &qe else {
         panic!("expected BinaryOp, got {qe:?}");
     };
     let lcols = scan_columns(lhs);
@@ -830,25 +832,25 @@ fn binary_op_binds_each_branch_against_its_own_schema() {
 }
 
 /// Collect every `AggIntent` in the tree, root-to-leaf.
-fn all_intents(e: &QueryExpr) -> Vec<AggIntent> {
+fn all_intents(e: &PreASAPNode) -> Vec<AggIntent> {
     let mut out = Vec::new();
     collect_intents(e, &mut out);
     out
 }
 
-fn collect_intents(e: &QueryExpr, out: &mut Vec<AggIntent>) {
+fn collect_intents(e: &PreASAPNode, out: &mut Vec<AggIntent>) {
     match e {
-        QueryExpr::Aggregate {
+        PreASAPNode::Aggregate {
             measures, child, ..
         } => {
             out.extend(measures.iter().cloned());
             collect_intents(child, out);
         }
-        QueryExpr::TimeRange { child, .. }
-        | QueryExpr::Filter { child, .. }
-        | QueryExpr::Sort { child, .. }
-        | QueryExpr::Limit { child, .. } => collect_intents(child, out),
-        QueryExpr::BinaryOp { lhs, rhs, .. } => {
+        PreASAPNode::TimeRange { child, .. }
+        | PreASAPNode::Filter { child, .. }
+        | PreASAPNode::Sort { child, .. }
+        | PreASAPNode::Limit { child, .. } => collect_intents(child, out),
+        PreASAPNode::BinaryOp { lhs, rhs, .. } => {
             collect_intents(lhs, out);
             collect_intents(rhs, out);
         }
@@ -857,19 +859,19 @@ fn collect_intents(e: &QueryExpr, out: &mut Vec<AggIntent>) {
 }
 
 /// True if any `AggIntent` anywhere in the tree satisfies `pred`.
-fn has_intent<F: Fn(&AggIntent) -> bool>(e: &QueryExpr, pred: F) -> bool {
+fn has_intent<F: Fn(&AggIntent) -> bool>(e: &PreASAPNode, pred: F) -> bool {
     all_intents(e).iter().any(pred)
 }
 
 /// Column names on the first `Scan` reachable by descending single-child nodes.
-fn scan_columns(e: &QueryExpr) -> Vec<String> {
+fn scan_columns(e: &PreASAPNode) -> Vec<String> {
     match e {
-        QueryExpr::Scan { schema, .. } => schema.columns.iter().map(|c| c.name.clone()).collect(),
-        QueryExpr::Aggregate { child, .. }
-        | QueryExpr::TimeRange { child, .. }
-        | QueryExpr::Filter { child, .. }
-        | QueryExpr::Sort { child, .. }
-        | QueryExpr::Limit { child, .. } => scan_columns(child),
+        PreASAPNode::Scan { schema, .. } => schema.columns.iter().map(|c| c.name.clone()).collect(),
+        PreASAPNode::Aggregate { child, .. }
+        | PreASAPNode::TimeRange { child, .. }
+        | PreASAPNode::Filter { child, .. }
+        | PreASAPNode::Sort { child, .. }
+        | PreASAPNode::Limit { child, .. } => scan_columns(child),
         _ => vec![],
     }
 }
@@ -883,7 +885,7 @@ fn without_grouping_lowers_to_the_exclusion_form() {
     // label is stored positionally (the SchemaResolver seeds it), the grouping is the
     // `without` form, and the output schema stays open.
     let qe = lower("sum without (instance) (rate(m[5m]))");
-    let QueryExpr::Aggregate {
+    let PreASAPNode::Aggregate {
         reduction,
         measures,
         child,
@@ -899,7 +901,7 @@ fn without_grouping_lowers_to_the_exclusion_form() {
     // The inner per-series rate is preserved (label-preserving) under the outer
     // cross-series `without` reduction.
     assert!(
-        matches!(child.as_ref(), QueryExpr::Aggregate { measures, .. }
+        matches!(child.as_ref(), PreASAPNode::Aggregate { measures, .. }
         if matches!(measures.as_slice(), [AggIntent::Rate]))
     );
     assert!(!qe.output_schema().unwrap().closed);
@@ -979,7 +981,7 @@ fn accuracy_target_flows_into_quantile_intent() {
         AccuracyTarget::Epsilon(0.01),
     )
     .unwrap();
-    let QueryExpr::Aggregate { measures, .. } = &qe else {
+    let PreASAPNode::Aggregate { measures, .. } = &qe else {
         panic!("expected Aggregate");
     };
     assert!(matches!(
@@ -998,7 +1000,7 @@ fn aggregate_output_schema_preserves_time_axis_and_labels() {
     // predicate columns) to the scan schema, so `env` appears as a column
     // even though it is only used as a filter.
     // per_series_reduction_schema preserves the time axis and all label columns.
-    let QueryExpr::Aggregate { .. } = &qe else {
+    let PreASAPNode::Aggregate { .. } = &qe else {
         panic!("expected Aggregate, got {qe:?}");
     };
     let schema = qe.output_schema().expect("aggregate schema");
@@ -1016,16 +1018,16 @@ fn scan_schema_carries_ts_value_and_group_keys() {
     // `service` is a group key → the SchemaResolver lands it in the self-contained
     // Scan schema (positional). `env` is only a filter, so it is not a column.
     let qe = lower("count by (service) (count_over_time(requests[1m]))");
-    fn find_scan(n: &QueryExpr) -> &QueryExpr {
+    fn find_scan(n: &PreASAPNode) -> &PreASAPNode {
         match n {
-            QueryExpr::Scan { .. } => n,
-            QueryExpr::TimeRange { child, .. }
-            | QueryExpr::Aggregate { child, .. }
-            | QueryExpr::Filter { child, .. } => find_scan(child),
+            PreASAPNode::Scan { .. } => n,
+            PreASAPNode::TimeRange { child, .. }
+            | PreASAPNode::Aggregate { child, .. }
+            | PreASAPNode::Filter { child, .. } => find_scan(child),
             other => panic!("unexpected node {other:?}"),
         }
     }
-    let QueryExpr::Scan { schema, .. } = find_scan(&qe) else {
+    let PreASAPNode::Scan { schema, .. } = find_scan(&qe) else {
         unreachable!()
     };
     let mut names: Vec<&str> = schema.columns.iter().map(|c| c.name.as_str()).collect();
@@ -1113,18 +1115,18 @@ fn reducing_group_by_lowers_to_aggregate_by() {
     // Cross-series reduce, no keys → bare `Aggregate { reduction: Reduce([]) }`.
     let q = lower("sum(http_requests_total)");
     assert!(
-        matches!(q, QueryExpr::Aggregate { ref reduction, .. } if reduction == &Reduction::by(vec![]))
+        matches!(q, PreASAPNode::Aggregate { ref reduction, .. } if reduction == &Reduction::by(vec![]))
     );
 
     // Cross-series reduce grouped by a label → `Aggregate.reduction`.
     let q = lower("sum by (job) (http_requests_total)");
-    assert!(matches!(q, QueryExpr::Aggregate { ref reduction, .. }
+    assert!(matches!(q, PreASAPNode::Aggregate { ref reduction, .. }
         if reduction.expect_reduce().len() == 1));
 
     // Reduce over a label-preserving `rate` grouped by a label → still
     // `Aggregate.reduction` (the keys resolve against rate's preserved schema).
     let q = lower("sum by (job) (rate(http_requests_total[5m]))");
-    assert!(matches!(q, QueryExpr::Aggregate { ref reduction, .. }
+    assert!(matches!(q, PreASAPNode::Aggregate { ref reduction, .. }
         if reduction.expect_reduce().len() == 1));
 }
 
@@ -1134,10 +1136,10 @@ fn generic_topk_grouping_lowers_to_sort_partition_by() {
     // reducing → the grouping rides on `Sort.partition_by`, and the windowed
     // reduction beneath stays label-preserving (`by: []`). No `Partition` node.
     let q = lower("topk by (host) (5, avg_over_time(cpu[5m]))");
-    let QueryExpr::Limit { child, .. } = &q else {
+    let PreASAPNode::Limit { child, .. } = &q else {
         panic!("expected Limit, got {q:?}");
     };
-    let QueryExpr::Sort {
+    let PreASAPNode::Sort {
         partition_by,
         child,
         ..
@@ -1147,7 +1149,7 @@ fn generic_topk_grouping_lowers_to_sort_partition_by() {
     };
     assert_eq!(partition_by, &vec![2], "host is col 2 in [ts, value, host]");
     assert!(
-        matches!(child.as_ref(), QueryExpr::Aggregate { reduction, .. } if reduction == &Reduction::PerEntity)
+        matches!(child.as_ref(), PreASAPNode::Aggregate { reduction, .. } if reduction == &Reduction::PerEntity)
     );
 }
 
@@ -1160,11 +1162,11 @@ fn topk_over_bare_selector_by_label_ranks_per_group() {
     // Partition→Sort.partition_by reframe in #12). Expected:
     //   Limit{3} → Sort{value desc, partition_by:[job]} → Scan
     let q = lower("topk(3, http_requests_total) by (job)");
-    let QueryExpr::Limit { n, child, .. } = &q else {
+    let PreASAPNode::Limit { n, child, .. } = &q else {
         panic!("expected Limit, got {q:?}");
     };
     assert_eq!(*n, 3);
-    let QueryExpr::Sort {
+    let PreASAPNode::Sort {
         keys,
         partition_by,
         child,
@@ -1177,7 +1179,7 @@ fn topk_over_bare_selector_by_label_ranks_per_group() {
     // No implicit reducing aggregate — the selector is label-preserving, so the
     // sort is directly over the selector horizon (the `job` label survives to partition by).
     assert!(
-        matches!(child.as_ref(), QueryExpr::TimeRange { child, .. } if matches!(child.as_ref(), QueryExpr::Scan { .. })),
+        matches!(child.as_ref(), PreASAPNode::TimeRange { child, .. } if matches!(child.as_ref(), PreASAPNode::Scan { .. })),
         "ranking is over the bare selector horizon, not a reducing Aggregate, got {child:?}"
     );
     assert!(
@@ -1191,10 +1193,10 @@ fn topk_over_bare_selector_ranks_raw_samples() {
     // Even without `by`, `topk(3, m)` ranks the raw instant-vector samples — it
     // does not sum them. The sort sits directly over the Scan, partition empty.
     let q = lower("topk(3, http_requests_total)");
-    let QueryExpr::Limit { child, .. } = &q else {
+    let PreASAPNode::Limit { child, .. } = &q else {
         panic!("expected Limit, got {q:?}");
     };
-    let QueryExpr::Sort {
+    let PreASAPNode::Sort {
         partition_by,
         child,
         ..
@@ -1204,7 +1206,7 @@ fn topk_over_bare_selector_ranks_raw_samples() {
     };
     assert!(partition_by.is_empty(), "no `by` → global ranking");
     assert!(
-        matches!(child.as_ref(), QueryExpr::TimeRange { child, .. } if matches!(child.as_ref(), QueryExpr::Scan { .. }))
+        matches!(child.as_ref(), PreASAPNode::TimeRange { child, .. } if matches!(child.as_ref(), PreASAPNode::Scan { .. }))
     );
     assert!(!has_intent(&q, |i| matches!(i, AggIntent::Sum { .. })));
 }
@@ -1212,20 +1214,20 @@ fn topk_over_bare_selector_ranks_raw_samples() {
 // ── Issue #109: histogram_quantiles fans out into one branch per φ ──────────
 
 /// The `(label value, intent)` of each `histogram_quantiles` branch.
-fn quantile_branches(q: &QueryExpr) -> Vec<(String, AggIntent)> {
-    let QueryExpr::Concat { children, .. } = q else {
+fn quantile_branches(q: &PreASAPNode) -> Vec<(String, AggIntent)> {
+    let PreASAPNode::Concat { children, .. } = q else {
         panic!("expected a Concat at the root, got {q:?}");
     };
     children
         .iter()
         .map(|c| {
-            let QueryExpr::PromqlRelabel { value, child, .. } = c else {
+            let PreASAPNode::PromqlRelabel { value, child, .. } = c else {
                 panic!("expected PromqlRelabel per branch, got {c:?}");
             };
-            let QueryExpr::Literal(ScalarValue::Utf8(v)) = value.as_ref() else {
+            let PreASAPNode::Literal(ScalarValue::Utf8(v)) = value.as_ref() else {
                 panic!("expected a literal label value, got {value:?}");
             };
-            let QueryExpr::Aggregate { measures, .. } = child.as_ref() else {
+            let PreASAPNode::Aggregate { measures, .. } = child.as_ref() else {
                 panic!("expected an Aggregate under the PromqlRelabel, got {child:?}");
             };
             (v.clone(), measures[0].clone())
@@ -1271,7 +1273,7 @@ fn histogram_quantiles_branches_are_union_compatible() {
     // `Concat` derives its schema from the first child, so every branch must
     // agree on column names — the φ lives in the label, not the column name.
     let q = lower(r#"histogram_quantiles(testhistogram3, "q", 0.5, 0.9)"#);
-    let QueryExpr::Concat { children, .. } = &q else {
+    let PreASAPNode::Concat { children, .. } = &q else {
         panic!("expected Concat");
     };
     let shapes: Vec<Vec<String>> = children
@@ -1297,10 +1299,10 @@ fn histogram_quantiles_branches_are_union_compatible() {
 #[test]
 fn histogram_quantiles_uses_the_given_label_name() {
     let q = lower(r#"histogram_quantiles(h, "phi", 0.5)"#);
-    let QueryExpr::Concat { children, .. } = &q else {
+    let PreASAPNode::Concat { children, .. } = &q else {
         panic!("expected Concat");
     };
-    let QueryExpr::PromqlRelabel { dst, .. } = &children[0] else {
+    let PreASAPNode::PromqlRelabel { dst, .. } = &children[0] else {
         panic!("expected PromqlRelabel");
     };
     assert_eq!(dst, "phi");
@@ -1331,16 +1333,16 @@ fn histogram_quantiles_rejects_an_out_of_range_quantile() {
 // A subquery's `offset`/`@` shift the whole subquery, so the tree keeps them.
 #[test]
 fn subquery_time_shift_is_retained() {
-    let QueryExpr::Aggregate { child, .. } = lower("max_over_time(m[5m:1m] offset 1m)") else {
+    let PreASAPNode::Aggregate { child, .. } = lower("max_over_time(m[5m:1m] offset 1m)") else {
         panic!("expected a range function");
     };
-    let QueryExpr::TimeShift { shift, child } = child.as_ref() else {
+    let PreASAPNode::TimeShift { shift, child } = child.as_ref() else {
         panic!("subquery offset was dropped: {child:?}");
     };
     assert_eq!(shift.offset_ms, 60_000);
-    assert!(matches!(child.as_ref(), QueryExpr::PromqlSubquery { .. }));
+    assert!(matches!(child.as_ref(), PreASAPNode::PromqlSubquery { .. }));
     assert!(matches!(
         lower("max_over_time(m[5m:1m] @ 100)"),
-        QueryExpr::Aggregate { child, .. } if matches!(child.as_ref(), QueryExpr::TimeShift { .. })
+        PreASAPNode::Aggregate { child, .. } if matches!(child.as_ref(), PreASAPNode::TimeShift { .. })
     ));
 }

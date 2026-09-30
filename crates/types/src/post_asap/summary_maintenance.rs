@@ -1,6 +1,6 @@
 //! Planner-level construction mode for a materialized summary.
 //!
-//! A [`super::SummaryNode`] is a logical summary expression and deliberately
+//! A [`super::PostASAPNode`] is a logical summary expression and deliberately
 //! does not carry this choice: the same candidate may be built directly for
 //! one workload or maintained incrementally for another. Planner search
 //! attaches the selected mode to its lifecycle guarantee; downstream physical

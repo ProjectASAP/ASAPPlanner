@@ -3,7 +3,7 @@
 use asap_frontend_sql::{lower_sql, SqlCatalog};
 use asap_integration_tests::fixtures::lower_promql;
 use asap_types::pre_asap::schema::{Column, DataType, Schema};
-use asap_types::pre_asap::QueryExpr;
+use asap_types::pre_asap::PreASAPNode;
 use asap_types::types::AccuracyTarget;
 
 /// PromQL exposes its evaluation time as Unix seconds, whereas SQL exposes
@@ -12,7 +12,7 @@ use asap_types::types::AccuracyTarget;
 #[tokio::test]
 async fn promql_eval_time_and_sql_current_timestamp_remain_distinct() {
     let promql = lower_promql("time()", AccuracyTarget::Exact).expect("lower PromQL time()");
-    assert!(matches!(promql, QueryExpr::EvalTimestamp));
+    assert!(matches!(promql, PreASAPNode::EvalTimestamp));
     let promql_schema = promql.output_schema().expect("PromQL time() schema");
     assert_eq!(promql_schema.columns[0].dtype, DataType::Float64);
 
@@ -27,10 +27,10 @@ async fn promql_eval_time_and_sql_current_timestamp_remain_distinct() {
     )
     .await
     .expect("lower SQL CURRENT_TIMESTAMP");
-    let QueryExpr::Project { cols, .. } = sql else {
+    let PreASAPNode::Project { cols, .. } = sql else {
         panic!("expected SQL projection, got {sql:?}");
     };
-    assert!(matches!(&cols[0].expr, QueryExpr::CurrentTimestamp));
+    assert!(matches!(&cols[0].expr, PreASAPNode::CurrentTimestamp));
     let sql_schema = cols[0]
         .expr
         .output_schema()
