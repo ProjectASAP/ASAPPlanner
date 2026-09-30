@@ -79,6 +79,9 @@ impl TryFrom<UncheckedOperator> for Operator {
             Kind::SeriesBinary { operator } => {
                 Operator::series_binary(input(0)?, input(1)?, operator)?
             }
+            Kind::SeriesHistogramQuantile { quantile, le } => {
+                Operator::series_histogram_quantile(input(0)?, f64::from_bits(quantile), le)?
+            }
             Kind::Project(expressions) => {
                 if expressions.len() != output.fields.len() {
                     return Err(invalid("projection width mismatch"));
