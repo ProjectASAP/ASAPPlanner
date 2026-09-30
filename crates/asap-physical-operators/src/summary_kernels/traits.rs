@@ -13,6 +13,10 @@ pub trait AggregateCore: Send + Sync {
 
     fn as_any(&self) -> &dyn std::any::Any;
 
+    /// Mutable downcast, so a deployment can apply ingest deltas and merges to
+    /// a cached state in place instead of copying it for every frame.
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any;
+
     /// Merge with a state of the same family and shape, leaving both inputs unchanged.
     fn merge_with(&self, other: &dyn AggregateCore) -> Result<Box<dyn AggregateCore>, KernelError>;
 
@@ -31,5 +35,27 @@ pub trait AggregateCore: Send + Sync {
 impl Clone for Box<dyn AggregateCore> {
     fn clone(&self) -> Self {
         self.clone_boxed_core()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::summary_kernels::DDSketchAccumulator;
+
+    // A state behind a trait object can be updated in place through the mutable downcast.
+    #[test]
+    fn mutable_downcast_updates_in_place() {
+        let mut state: Box<dyn AggregateCore> = Box::new(DDSketchAccumulator::new(0.01));
+        let dd = state
+            .as_any_mut()
+            .downcast_mut::<DDSketchAccumulator>()
+            .unwrap();
+        dd.inner.update(3.0);
+        let count = SketchQuery::PointCount {
+            key: planner_types::pre_asap::ColumnRef::SampleValue,
+            value: None,
+        };
+        assert_eq!(state.estimate(&count).unwrap(), 1.0);
     }
 }
