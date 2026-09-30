@@ -70,17 +70,19 @@ of this candidate-preserving pipeline.
 
 ### DAG names
 
-This design uses three names consistently. They describe graph artifacts,
-not three alternative outputs of the same stage.
+This design distinguishes individual DAGs from the collections of candidates
+passed between layers.
 
 | Design name | Meaning | Current Rust representation |
 |---|---|---|
 | `PreASAPDAG` | Frontend-lowered query semantics before summary rewrites | A graph rooted at `Rc<QueryExpr>` |
 | `PostASAPDAG` | A logical computation candidate; the lifecycle assignment adds timing to this same logical graph | A graph rooted at `Rc<SummaryNode>`; exported as `PostAsapDag` for physical compilation |
+| `CandidatePostASAPDAGs` | All legal logical `PostASAPDAG` candidates, represented compactly rather than necessarily materialized as a list; lifecycle enumeration produces their candidates with timing | `CandidatePostASAPDAGs<Id>` (renamed from the former candidate-space API in [#508](https://github.com/ProjectASAP/ASAPPlanner/pull/508)) |
 | `PhysicalDAG` | Compiled operators and kernels with typed inputs | `CompiledPhysicalDag` |
+| `CandidatePhysicalDAGs` | All supported physical DAG candidates produced from the timed logical candidates, before deployment selection | A collection of `CompiledPhysicalDag` realizations and their `PhysicalCandidate` cuts; no public Rust collection type named `CandidatePhysicalDAGs` yet |
 
 These DAG names are design conventions. The candidate-collection Rust API is
-renamed to `CandidatePostASAPDAGs`; `QueryExpr`, `SummaryNode`, `PostAsapDag`,
+renamed to `CandidatePostASAPDAGs` in #508; `QueryExpr`, `SummaryNode`, `PostAsapDag`,
 and `CompiledPhysicalDag` remain the graph representations shown above.
 `PostAsapDag` is the exported representation of `PostASAPDAG`, not a fourth
 planning layer. `PhysicalCandidate` packages the precompute and query cuts
