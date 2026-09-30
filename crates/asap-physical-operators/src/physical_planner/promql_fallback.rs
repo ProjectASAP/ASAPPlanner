@@ -252,6 +252,7 @@ impl Lowering {
                     vec![step],
                 ))
             }
+            QueryExpr::EvalTimestamp => self.push(Operator::evaluation_time(), vec![], expression),
             QueryExpr::PromqlScalarBridge(_) => {
                 let value = row_values::scalar_literal(expression)
                     .ok_or_else(|| invalid("PromQL scalar must be a literal"))?;

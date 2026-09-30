@@ -170,13 +170,6 @@ pub const PROMQL_SERIES_IDENTITY: &str = "$promql_series_identity";
 pub fn with_promql_series_identity(root: &super::QueryExpr) -> Result<super::QueryExpr, String> {
     use super::{QueryExpr, Source};
     use std::rc::Rc;
-    fn scalar_literal(expression: &QueryExpr) -> Option<f64> {
-        match expression {
-            QueryExpr::PromqlScalarBridge(child) => scalar_literal(child),
-            QueryExpr::Literal(super::ScalarValue::Float64(value)) => Some(*value),
-            _ => None,
-        }
-    }
     let mut root = root.clone();
     fn visit(node: &mut QueryExpr) -> Result<(), String> {
         match node {
@@ -207,13 +200,11 @@ pub fn with_promql_series_identity(root: &super::QueryExpr) -> Result<super::Que
             | QueryExpr::PromqlSubquery { child, .. }
             | QueryExpr::PromqlScalarFromVector(child) => visit(Rc::make_mut(child)),
             // Constants read no series.
-            QueryExpr::PromqlScalarBridge(_) => Ok(()),
-            QueryExpr::PromqlVectorFromScalar(child) if scalar_literal(child).is_some() => Ok(()),
-            QueryExpr::BinaryOp { lhs, rhs, .. }
-                if ![&*lhs, &*rhs]
-                    .into_iter()
-                    .any(|side| matches!(side.as_ref(), QueryExpr::EvalTimestamp)) =>
-            {
+            QueryExpr::PromqlScalarBridge(_)
+            | QueryExpr::EvalTimestamp
+            | QueryExpr::Literal(super::ScalarValue::Float64(_)) => Ok(()),
+            QueryExpr::PromqlVectorFromScalar(child) => visit(Rc::make_mut(child)),
+            QueryExpr::BinaryOp { lhs, rhs, .. } => {
                 visit(Rc::make_mut(lhs))?;
                 visit(Rc::make_mut(rhs))
             }
@@ -394,5 +385,13 @@ mod tests {
         let back: Column = serde_json::from_str(&serde_json::to_string(&c).unwrap()).unwrap();
         assert_eq!(back, c);
         assert_eq!(back.table.as_deref(), Some("hosts"));
+    }
+    // Direct scalar literals remain valid vector inputs when series typing runs.
+    #[test]
+    fn series_identity_accepts_direct_vector_literal() {
+        let root = super::super::QueryExpr::PromqlVectorFromScalar(std::rc::Rc::new(
+            super::super::QueryExpr::Literal(super::super::ScalarValue::Float64(1.0)),
+        ));
+        assert!(with_promql_series_identity(&root).is_ok());
     }
 }

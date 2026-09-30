@@ -387,7 +387,7 @@ fn anomaly_report(all: &[DumpRecord], language: &str, manual_notes: &str) -> Str
             "abstraction is intentional; PromQL defines different sampling behavior for ",
         );
         report.push_str("the two functions.\n");
-        report.push_str("- **Likely information-loss candidate:** `left_vector == bool fill(30) right_vector` and `left_vector == fill(30) right_vector` produce identical `BinaryOp` IR. PromQL's `bool` comparison modifier changes filtering into a 0/1-valued result, but the current `BinaryOp` representation has no return-bool field.\n");
+        report.push_str("- **Comparison modifiers:** `bool` is represented by `BinaryOpKind::CompareBool`; filtering comparisons use `Compare`. Unsupported `fill`, `fill_left`, and `fill_right` modifiers are rejected during lowering.\n");
         report.push_str("- **Apparently intentional canonicalization:** redundant parentheses, ");
         report.push_str(
             "duration spellings such as `50`/`50s`, and equivalent `@`/`offset` modifier ",

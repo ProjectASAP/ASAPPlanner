@@ -132,9 +132,10 @@ Grouped `sum`/`avg`, current-series `Sum`/`Average` readouts, and
 average switches to an incremental mean once the running sum would overflow.
 The grouped path also serves SQL `SUM`/`AVG` over Float64, which are now
 compensated the same way.
-Stored exact `Sum` state still sums without compensation, because a
-compensation term would change the stored state layout. Its checked
-`avg_over_time` division therefore fails instead of returning a finite mean.
+Stored exact `Sum` now retains a Kahan-Neumaier compensation term through
+updates, pane merges, and persistence. Its `SumV2` payload rejects the old
+uncompensated `Sum` encoding. A truly overflowing sum remains infinite; the
+checked `avg_over_time` division still rejects that case.
 
 Totals after this change: 20 Supported, 4 Partial, 5 Missing, 2 Backend.
 
@@ -204,7 +205,7 @@ Totals after this change: 21 Supported, 5 Partial, 3 Missing, 2 Backend.
 In order of backend usage:
 
 1. Rows 1 and 12, the remaining `Fallback` shapes:
-   - `time()` and other scalar functions as operands.
+   - Other scalar functions as operands.
    - Subquery operands other than one per-series function; implicit
      subquery resolution, which is a deployment default.
    - `@ start()` and `@ end()`, which need the range query's bounds in the
@@ -220,14 +221,19 @@ In order of backend usage:
 4. Row 16: a label-map sketch-state readout, the counterpart of
    `compile_exact_readout`, and MetricsQL `__name__` retention rules.
 5. Row 20: summary join, subtract, and delete.
-6. Compensated stored exact `Sum` state, a state-layout change shared with the
-   backend's stored-state decoding.
-7. Non-finite literals (`NaN`, `Inf`) in compiled operators do not survive a
-   JSON round trip of the program.
-8. `group_left` labels and `or`/`group_right` right-side labels onto
+6. `group_left` labels and `or`/`group_right` right-side labels onto
    aggregated (label-column) rows. The logical output schema, which is the left
    side's, has no column for them.
-9. An equal-label-set check for inner subquery functions, per step.
+7. An equal-label-set check for inner subquery functions, per step.
 
 `fill`, `fill_left`, and `fill_right` matching modifiers are rejected by the
 frontend (#494); they are never silently ignored.
+
+## Additional scalar and persistence coverage
+
+`time()` reads the run's evaluation timestamp in seconds and composes with
+scalar and vector operands, including `vector(time())`. Both logical literals
+and physical values encode NaN and infinities as explicit JSON strings instead
+of losing them as `null`; finite values remain numbers. Deployments continue
+to own outer document versioning. The exact Sum payload is independently tagged
+`SumV2`, so old uncompensated states fail decoding rather than being misread.

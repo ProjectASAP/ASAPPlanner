@@ -29,6 +29,7 @@ impl TryFrom<UncheckedOperator> for Operator {
         };
         let op = match kind {
             Kind::Source(_) => return Err(invalid("physical plans cannot serialize live sources")),
+            Kind::EvaluationTime => Operator::evaluation_time(),
             Kind::Constant { value, dtype } => Operator::scalar(value, dtype)?,
             Kind::ScopeTimestamp { .. } => Operator::scope_timestamp(input(0)?, output.clone())?,
             Kind::Union => Operator::union(input(0)?, inputs.len())?,
