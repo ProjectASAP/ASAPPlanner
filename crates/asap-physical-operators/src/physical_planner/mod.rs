@@ -464,25 +464,6 @@ fn compile_internal(
             if let Payload::Binary { operator } = &node.payload {
                 let query_time = node.output_state.timing
                     == planner_types::post_asap::ExecutionTiming::QueryTime;
-                // Per-series readouts keep `__name__` even where the range
-                // function drops it; only name-dropping operators ignore that.
-                let per_series = schemas.iter().any(|schema| {
-                    schema
-                        .fields
-                        .iter()
-                        .any(|f| f.name == promql_rows::SERIES_IDENTITY_COLUMN)
-                });
-                if per_series
-                    && matches!(
-                        operator.kind,
-                        planner_types::pre_asap::BinaryOpKind::Compare(_)
-                            | planner_types::pre_asap::BinaryOpKind::Set(_)
-                    )
-                {
-                    return Err(invalid(format!(
-                        "node {id}: per-series readouts do not apply the range function's __name__ rule"
-                    )));
-                }
                 if let Some(&(value, left)) = literals.get(&id) {
                     let [input] = schemas.as_slice() else {
                         return Err(invalid("scalar binary requires one row input"));
@@ -571,9 +552,19 @@ fn compile_internal(
                             )
                         })
                         .collect();
-                    let project = Operator::project(actual, columns)?.with_output_schema(output)?;
+                    let project =
+                        Operator::project(actual, columns)?.with_output_schema(output.clone())?;
                     graph.add(auxiliary, inputs, readout)?;
-                    graph.add(id, vec![auxiliary], project)?;
+                    if temporal_readout_drops_name(node) {
+                        graph.add(auxiliary - 1, vec![auxiliary], project)?;
+                        graph.add(
+                            id,
+                            vec![auxiliary - 1],
+                            Operator::series_without_name(output)?,
+                        )?;
+                    } else {
+                        graph.add(id, vec![auxiliary], project)?;
+                    }
                     auxiliary -= 1;
                     continue;
                 }
@@ -607,11 +598,37 @@ fn compile_internal(
                     operator = operator.with_counter_lookback(lookback)?;
                 }
             }
-            graph.add(id, inputs, operator)?;
+            if temporal_readout_drops_name(node) {
+                graph.add(auxiliary, inputs, operator)?;
+                graph.add(id, vec![auxiliary], Operator::series_without_name(output)?)?;
+            } else {
+                graph.add(id, inputs, operator)?;
+            }
         }
     }
     graph.validate()?;
     Ok(graph)
+}
+
+// Temporal summary readouts produce PromQL vectors, whose range functions drop
+// the metric name before matching/filtering. Stored state retains its full identity.
+fn temporal_readout_drops_name(node: &PostAsapDagNode) -> bool {
+    node.output_schema
+        .fields
+        .iter()
+        .any(|field| field.name == promql_rows::SERIES_IDENTITY_COLUMN)
+        && matches!(
+            &node.payload,
+            Payload::Value {
+                operation: ValueOperation::FinalizeExactAccumulator
+            } | Payload::SummaryEstimate {
+                query: SketchQuery::Quantile { .. }
+                    | SketchQuery::Cardinality
+                    | SketchQuery::PointCount { .. }
+                    | SketchQuery::FrequencyL2
+                    | SketchQuery::FrequencyEntropy
+            }
+        )
 }
 
 /// Bind a Planner node against the schemas supplied by its deployment edges.

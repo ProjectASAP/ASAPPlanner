@@ -156,7 +156,13 @@ fn grouped_rate_can_be_materialized_before_or_after_grouped_sum() {
                         Value::Utf8(if field.name == "job" {
                             "api".into()
                         } else {
-                            format!("series-{index}").into()
+                            serde_json::to_string(&BTreeMap::from([
+                                ("__name__", "m".to_string()),
+                                ("job", "api".to_string()),
+                                ("instance", format!("series-{index}")),
+                            ]))
+                            .unwrap()
+                            .into()
                         })
                     }
                     _ => panic!("unexpected input field {field:?}"),
