@@ -194,10 +194,10 @@ pub enum AggIntent<C = ColumnId> {
     /// carries no accuracy target and is a cross-series reduction over `le`
     /// (issue #43).
     ///
-    /// The enclosing `Aggregate` groups `without([le])`: one histogram is the
-    /// set of series that differ only in `le`. The output drops `le` and
-    /// `__name__`. `le` names the bucket-bound column so that execution need
-    /// not guess it from the excluded grouping keys.
+    /// PromQL groups the enclosing `Aggregate` `without([le])`: one histogram
+    /// is the set of series that differ only in `le`. The output drops `le`
+    /// and `__name__`. `le` names the bucket-bound column so that execution
+    /// need not guess it from the grouping keys.
     HistogramQuantile {
         q: f64,
         le: C,

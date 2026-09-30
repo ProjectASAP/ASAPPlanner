@@ -193,6 +193,9 @@ returns an empty vector for it. Candidate search keeps the classic form as one
 exact `KeepPreAsap` subtree for every accuracy target; it has no sketch
 candidate. `histogram_quantiles` lowers each branch the same way, but the
 Fallback compiler does not yet accept its `Concat` of relabeled branches.
+Aggregating or doing arithmetic over the result, as in
+`sum(histogram_quantile(…))`, fails like any expression over a nested
+aggregate's renamed value column.
 
 Totals after this change: 21 Supported, 5 Partial, 3 Missing, 2 Backend.
 
