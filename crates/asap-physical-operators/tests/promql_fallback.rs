@@ -1464,6 +1464,66 @@ fn range_bound_anchors_use_outer_query_bounds() {
     }
 }
 
+// Regression functions use float samples per series; prediction is anchored
+// at the evaluation time even when offset or @ selects an older window.
+#[test]
+fn regression_range_functions_use_evaluation_time_and_drop_names() {
+    let samples: &[Sample] = &[("job=x", 10, 3.), ("job=x", 30, 7.), ("job=x", 50, 11.)];
+    for (query, at, expected) in [
+        ("deriv(a[1m])", 60, 0.2),
+        ("predict_linear(a[1m], 10)", 60, 15.),
+        ("predict_linear(a[1m] offset 30s, 10)", 90, 21.),
+        ("predict_linear(a[1m] @ 60, 10)", 90, 21.),
+    ] {
+        let result = labeled(query, &[("a", samples)], at);
+        assert_eq!(result.len(), 1, "{query}");
+        assert_eq!(result[0].0, "job=x");
+        assert!(
+            (result[0].1 - expected).abs() < 1e-12,
+            "{query}: {result:?}"
+        );
+    }
+    let constant: &[Sample] = &[("job=x", 10, 1e300), ("job=x", 50, 1e300)];
+    assert_eq!(
+        labeled("deriv(a[1m])", &[("a", constant)], 60),
+        rows(&[("job=x", 0.)])
+    );
+    assert_eq!(
+        labeled("predict_linear(a[1m], 10)", &[("a", constant)], 60),
+        rows(&[("job=x", 1e300)])
+    );
+    assert!(labeled("deriv(a[1m])", &[("a", &samples[..1])], 60).is_empty());
+    let infinite: &[Sample] = &[("job=x", 10, f64::INFINITY), ("job=x", 50, f64::INFINITY)];
+    assert!(labeled("deriv(a[1m])", &[("a", infinite)], 60)[0]
+        .1
+        .is_nan());
+}
+
+// Dropping an inner range function's metric name rejects equal labels within
+// each subquery step, while allowing that labelset at different steps.
+#[test]
+fn subquery_label_uniqueness_is_checked_per_evaluation_step() {
+    let equal: &[Sample] = &[
+        ("job=x", 10, 1.),
+        ("job=x", 50, 2.),
+        ("__name__=b,job=x", 10, 1.),
+        ("__name__=b,job=x", 50, 4.),
+    ];
+    let query = "last_over_time(rate(a[1m])[2m:1m])";
+    let error = evaluate(query, &[("a", equal)], 60).unwrap_err();
+    assert!(error.contains("same labelset"), "{error}");
+    let disjoint: &[Sample] = &[
+        ("job=x", -50, 1.),
+        ("job=x", -10, 2.),
+        ("__name__=b,job=x", 10, 3.),
+        ("__name__=b,job=x", 50, 5.),
+    ];
+    let result = labeled(query, &[("a", disjoint)], 60);
+    assert_eq!(result.len(), 1);
+    assert_eq!(result[0].0, "job=x");
+    assert!((result[0].1 - 0.05).abs() < 1e-12);
+}
+
 // Non-finite histogram quantile parameters survive the logical DAG JSON boundary too.
 #[test]
 fn logical_nonfinite_quantile_parameter_round_trips() {

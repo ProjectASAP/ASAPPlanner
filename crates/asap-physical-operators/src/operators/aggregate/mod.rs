@@ -66,6 +66,8 @@ impl Operator {
         if !matches!(
             intent,
             AggIntent::Rate
+                | AggIntent::Deriv
+                | AggIntent::PredictLinear { .. }
                 | AggIntent::Increase
                 | AggIntent::Count { .. }
                 | AggIntent::Sum { col: None }
