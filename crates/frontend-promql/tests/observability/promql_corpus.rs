@@ -155,13 +155,16 @@ fn lowering_is_total_over_the_entire_corpus() {
     // rather than pin an exact count — ratchet them up as coverage lands.
     //
     // The 235 unparseable are parser-fork gaps (issue #108); the rejections are
-    // lowering gaps (#109). Both shrink over time, so these floors only ever rise.
+    // lowering gaps (#109). Both shrink over time, so these floors normally only
+    // rise. Exception: the testdata floor was lowered to the measured 1485 when
+    // the 44 `fill` vector-matching queries became rejected rather than
+    // silently lowered without their fill semantics.
     assert!(
         docs.lowered >= 47,
         "docs lowering coverage regressed: {docs:?}"
     );
     assert!(
-        td.lowered >= 1495,
+        td.lowered >= 1485,
         "testdata lowering coverage regressed: {td:?}"
     );
 }
