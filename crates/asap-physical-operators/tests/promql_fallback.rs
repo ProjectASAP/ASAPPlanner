@@ -1463,3 +1463,21 @@ fn range_bound_anchors_use_outer_query_bounds() {
         assert!(error.contains("query range bounds"), "{query}: {error}");
     }
 }
+
+// Non-finite histogram quantile parameters survive the logical DAG JSON boundary too.
+#[test]
+fn logical_nonfinite_quantile_parameter_round_trips() {
+    let expression = lower("histogram_quantile(NaN, x_bucket)");
+    let restored: QueryExpr =
+        serde_json::from_slice(&serde_json::to_vec(&expression).unwrap()).unwrap();
+    let samples = buckets(&[("job=a", HISTOGRAM)]);
+    let result = evaluate_dag(
+        &restored,
+        &fallback_dag(restored.clone()),
+        &[("x_bucket", &samples)],
+        60,
+    )
+    .unwrap();
+    assert_eq!(result.len(), 1);
+    assert!(result[0].2.is_nan());
+}
