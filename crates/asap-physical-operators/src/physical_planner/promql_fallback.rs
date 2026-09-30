@@ -4,7 +4,7 @@
 use super::*;
 use crate::operators::SubquerySteps;
 use planner_types::post_asap::execution_data_state::lift_plain;
-use planner_types::pre_asap::{AtModifier, BinaryOpKind, VectorMatch, VectorMatchKind};
+use planner_types::pre_asap::{AtModifier, VectorMatchKind};
 
 /// Input slot for the raw series read by the `selector`th selector (in
 /// [`raw_series`] order) of Fallback node `node`. The node's own ID names its
@@ -84,14 +84,16 @@ fn selector(expression: &QueryExpr) -> Result<(i64, i64, Option<i64>), Error> {
     Ok((millis(range)?, offset, at))
 }
 
-/// PromQL scalar-valued expressions have no labels to match.
-fn scalar(expression: &QueryExpr) -> bool {
-    matches!(
-        expression,
+/// PromQL scalar-valued expressions have no labels to match. A binary
+/// operator is scalar-valued when both operands are.
+pub(super) fn scalar(expression: &QueryExpr) -> bool {
+    match expression {
         QueryExpr::PromqlScalarBridge(_)
-            | QueryExpr::PromqlScalarFromVector(_)
-            | QueryExpr::EvalTimestamp
-    )
+        | QueryExpr::PromqlScalarFromVector(_)
+        | QueryExpr::EvalTimestamp => true,
+        QueryExpr::BinaryOp { lhs, rhs, .. } => scalar(lhs) && scalar(rhs),
+        _ => false,
+    }
 }
 
 impl Lowering {
@@ -155,7 +157,13 @@ impl Lowering {
                 let [function] = measures.as_slice() else {
                     return Err(invalid("range function requires one measure"));
                 };
-                self.range_function(function, child, expression)
+                let step = self.range_function(function, child, expression)?;
+                if matches!(function, AggIntent::LastOverTime) {
+                    return Ok(step);
+                }
+                // Other range functions drop the name; equal label sets then error.
+                let input = self.schema(&step);
+                Ok(self.add(Operator::series_without_name(input)?, vec![step]))
             }
             QueryExpr::Aggregate {
                 reduction: planner_types::pre_asap::Reduction::Reduce(keys),
@@ -206,57 +214,25 @@ impl Lowering {
                 )
             }
             QueryExpr::BinaryOp {
-                op: BinaryOpKind::Arithmetic(op),
+                op,
                 lhs,
                 rhs,
                 vector_match,
             } => {
-                let (vector, literal, literal_left) = match (
-                    row_values::scalar_literal(lhs),
-                    row_values::scalar_literal(rhs),
-                ) {
-                    (None, Some(value)) => (lhs, value, false),
-                    (Some(value), None) => (rhs, value, true),
-                    (None, None) => return self.match_vectors(expression, vector_match),
-                    _ => return Err(invalid("PromQL arithmetic between two literals")),
-                };
-                let step = self.value(vector)?;
-                let input = self.schema(&step);
-                let step = self.add(Operator::series_without_name(input.clone())?, vec![step]);
-                let value = named_column(&input, &ColumnRef::SampleValue)?;
-                let literal = Expression::Literal {
-                    value: crate::values::Value::Float64(literal),
-                    dtype: DataType::Float64,
-                };
+                let sides = vec![self.value(lhs)?, self.value(rhs)?];
                 let operator = planner_types::post_asap::BinaryOperator {
-                    kind: planner_types::pre_asap::BinaryOpKind::Arithmetic(op.clone()),
-                    vector_match: None,
+                    kind: op.clone(),
+                    vector_match: vector_match.clone(),
                     checked_relative_division: false,
                     checked_finite_division: false,
                 };
-                let (left, right) = if literal_left {
-                    (literal, Expression::Column(value))
-                } else {
-                    (Expression::Column(value), literal)
-                };
-                let columns = input
-                    .fields
-                    .iter()
-                    .enumerate()
-                    .map(|(i, field)| {
-                        let expression = if i == value {
-                            Expression::Binary {
-                                operator: operator.clone(),
-                                left: Box::new(left.clone()),
-                                right: Box::new(right.clone()),
-                            }
-                        } else {
-                            Expression::Column(i)
-                        };
-                        (field.name.clone(), expression)
-                    })
-                    .collect();
-                self.push(Operator::project(input, columns)?, vec![step], expression)
+                let binary = Operator::series_binary(
+                    self.schema(&sides[0]),
+                    self.schema(&sides[1]),
+                    operator,
+                    [scalar(lhs), scalar(rhs)],
+                )?;
+                self.push(binary, sides, expression)
             }
             QueryExpr::PromqlScalarFromVector(child) => {
                 let step = self.value(child)?;
@@ -287,54 +263,6 @@ impl Lowering {
             }
             _ => Err(invalid("PromQL expression has no native fallback lowering")),
         }
-    }
-
-    /// One-to-one vector arithmetic: both sides reduce to their matching
-    /// labels, which are also the result's labels.
-    fn match_vectors(
-        &mut self,
-        logical: &QueryExpr,
-        vector_match: &Option<VectorMatch>,
-    ) -> Result<Input, Error> {
-        let QueryExpr::BinaryOp {
-            op: kind, lhs, rhs, ..
-        } = logical
-        else {
-            unreachable!()
-        };
-        if scalar(lhs) || scalar(rhs) {
-            return Err(invalid("PromQL arithmetic with a non-literal scalar"));
-        }
-        let (matching, labels) = match vector_match {
-            None => (VectorMatchKind::Ignoring, vec![]),
-            Some(VectorMatch {
-                kind,
-                labels,
-                grouping: None,
-            }) => (kind.clone(), labels.clone()),
-            Some(_) => return Err(invalid("group_left/group_right matching is unsupported")),
-        };
-        let mut sides = Vec::new();
-        for side in [lhs, rhs] {
-            let step = self.value(side)?;
-            let input = self.schema(&step);
-            sides.push(self.add(
-                Operator::series_labels(input, matching.clone(), labels.clone())?,
-                vec![step],
-            ));
-        }
-        let (left, right) = (self.schema(&sides[0]), self.schema(&sides[1]));
-        let operator = planner_types::post_asap::BinaryOperator {
-            kind: kind.clone(),
-            vector_match: None,
-            checked_relative_division: false,
-            checked_finite_division: false,
-        };
-        self.push(
-            Operator::series_binary(left, right, operator)?,
-            sides,
-            logical,
-        )
     }
 
     /// `function(matrix)`, where the matrix is a range selector or a subquery.
@@ -390,11 +318,25 @@ impl Lowering {
         let (range, inner_offset, inner_at) = selector(selected)?;
         let raw = self.read(selected)?;
         let schema = self.schema(&raw);
-        let step = self.push(
-            Operator::series_window(schema, inner, range, inner_offset, inner_at, Some(steps))?,
+        let mut step = self.push(
+            Operator::series_window(
+                schema,
+                inner.clone(),
+                range,
+                inner_offset,
+                inner_at,
+                Some(steps),
+            )?,
             vec![raw],
             child,
         )?;
+        // The inner function drops the name too. A series repeats across
+        // steps, so this rewrite does not check for equal label sets.
+        if inner.is_some() && !matches!(inner, Some(AggIntent::LastOverTime)) {
+            let input = self.schema(&step);
+            let relabel = Operator::series_labels(input, VectorMatchKind::Ignoring, vec![])?;
+            step = self.add(relabel, vec![step]);
+        }
         let input = self.schema(&step);
         self.push(
             Operator::series_window(input, Some(function), steps.range_ms, offset, at_ms, None)?,
