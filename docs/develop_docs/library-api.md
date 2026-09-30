@@ -182,12 +182,12 @@ CandidatePostASAPDAGs::cost_sorted(&self, cost_model: &dyn CostModel)
 `search_workload_with_targets` normally rejects candidates without a guarantee
 that satisfies the root target. One exception is a direct DDSketch quantile
 ratio: without input-domain evidence, it remains in `CandidatePostASAPDAGs` with
-`guarantee: None` so the downstream backend can decide whether to select it.
+`guarantee: None` so selection with backend-supplied domain evidence can still consider it.
 Its presence does **not** mean it satisfies the target. `cost_sorted` still
 shows it, but `global_selection` skips it and DAG assembly uses the exact fallback
-unless a certified alternative is available. A backend that wants the
-uncertified candidate must explicitly inspect it and check its own domain
-evidence and execution requirements before selecting or deploying it.
+unless a certified alternative is available. Using the uncertified candidate
+requires the backend to supply domain evidence and execution requirements that
+certify it; without them it is not selected.
 
 ### Example
 
@@ -285,8 +285,8 @@ carrying the complete series identity (`$promql_series_identity`). They are
 finalized, deduplicated, and marked `ReplacementProvenance::RootPhysicalRealization`.
 Callers do not apply `with_series_identity` themselves. Compile each with
 `promql_rows::compile_current_series_readout`; other queries keep their previous
-inventory. `global_selection` never commits these candidates; the backend
-compiles and prices them. CandidatePostASAPDAGs lists no placement variants: node timing
+inventory. `global_selection` never commits these candidates; they are
+compiled, and the backend supplies their prices for selection. CandidatePostASAPDAGs lists no placement variants: node timing
 comes from the summary maintenance lifecycle.
 
 ## Choose strategies and models
@@ -634,7 +634,7 @@ that prepared or retained shared state is supported.
 | `global_selection_with_summary_maintenance_lifecycles` | `CandidatePostASAPDAGs`, workload/root-entry associations, time, horizon, capabilities, cost model | Lifecycle-aware compatible selection/error, using eligible cost evidence |
 | `assemble_selected_dag_with_summary_maintenance_lifecycles` | Selection, target root and lifecycle context | Optional lifecycle plan/error; attaches state deployment decisions |
 | `CandidatePostASAPDAGs::with_timing_for_root` | Root ID, `CandidateTimingContext`, logical and assignment expansion limits | `CandidatePostASAPDAGsWithTiming<'a, Id>`; lazy assignments and rejections, with shared logical graphs and lifecycle metadata |
-| Timed collection `lifecycle_guarantee(logical_index, lifecycle)` | One lifecycle alternative of a state | The guarantee that choosing it would attach, for pricing before binding |
+| Timed collection `lifecycle_guarantee(logical_index, state, lifecycle)` | A state and one of its lifecycle alternatives | The guarantee that choosing it would attach, so the deployment can supply its price; a lifecycle the state does not offer is rejected |
 | Timed collection `select_lifecycles(logical_index, choices)` | One `(PostASAPNodeId, SummaryMaintenanceLifecycle)` per state, copied from `lifecycle_alternatives(logical_index)` | The same lifecycle plan and validation as explicit Planner selection, with typed rejection on failure |
 
 Inspect `deployments`, their selected lifecycle/alternatives/rejections,
@@ -644,12 +644,12 @@ costed. A raw alternative remains a downstream execution obligation.
 
 Lifecycle feasibility and costs must affect final deployment comparison. Running
 lifecycle analysis after structural selection can evaluate the selected root,
-but does not make the earlier selection lifecycle-optimal. An application may
-consume ranked candidates and perform this comparison downstream instead.
+but does not make the earlier selection lifecycle-optimal. An application can
+instead supply its own prices to that comparison.
 
-A deployment that prices lifecycles itself calls
-`with_timing_for_root`, prices its candidates, and explicitly binds a choice
-with `select_lifecycles` when needed. Callers with an assembled root use
+A deployment that supplies its own lifecycle prices obtains the timed candidates
+with `with_timing_for_root`; selection over those prices binds one choice per
+state, through `select_lifecycles`, which validates a given choice. Callers with an assembled root use
 `CandidatePostASAPDAGsWithTiming::from_post_asap_dag` to enter the same timed collection.
 A choice is accepted only if Planner could select it:
 an alternative with `MissingCostEvidence` is accepted only when the cost model's

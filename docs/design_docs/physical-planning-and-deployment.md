@@ -54,28 +54,31 @@ below states.
 3. **Physical compile** (Planner) reads timing: ingestion-time nodes form the
    precompute DAG and the rest form the query DAG, joined by typed outputs. It
    does not see raw ingestion, panes, storage or stored-state readout.
-4. **Backend** chooses the lifecycle assignment with its own `CostModel`:
-   precompute CPU (`maintenance_cost_per_update`), sketch/summary store cost
+4. **Selection** (Planner) chooses the lifecycle assignment from prices the
+   backend supplies through its own `CostModel`: precompute CPU
+   (`maintenance_cost_per_update`), sketch/summary store cost
    (`retention_cost_rate`), query reads (`summary_read_cost`) and per-query
    builds (`build_cost`, for `Ephemeral`), counting shared state once.
    `Ephemeral` requires the deployment to supply the state's raw input as a
    query-time source.
 
-### Candidate generation and deployment selection
+### Candidate generation and selection with deployment prices
 
-Planner exposes the supported, semantically legal **physical plan candidates**.
-It does not discard a computation family or materialization placement merely
-because a deployment-independent cost estimate prefers another candidate.
-Logical candidates are an internal search stage, not the deployment handoff.
+Planner generates every supported, semantically legal **physical plan
+candidate** and selects among them with the deployment's prices. Generation does
+not discard a computation family or materialization placement merely because a
+deployment-independent cost estimate prefers another candidate. The deployment
+receives the one selected plan, not the candidates.
 
 ```text
 Query semantics + accuracy and lifecycle requirements
                     ↓ Planner
 Supported Physical DAG candidates + typed inputs/outputs + requirements
-                    ↓ backend
-Binding feasibility + runtime statistics + resource limits + ERP
-                    ↓ backend deployment compiler
+                    ↓ Planner selection, with backend-supplied binding
+                      feasibility, runtime statistics, resource limits and ERP
 Selected PrecomputePlan + QueryPlan + StoredOutputReferences
+                    ↓ backend deployment compiler
+Bound and installed plan
 ```
 
 Planner owns operators, dependencies, sharing, and each candidate's
@@ -259,22 +262,22 @@ two readouts. It does not determine when KLL states are built or retained.
 
 **Summary Maintenance Candidate Generation** enumerates legal lifecycle choices
 using workload demand, window/freshness requirements and supported physical
-implementations. Backend selection uses runtime feasibility and cost after
-physical compilation. The following example follows one candidate.
+implementations. Selection uses the backend's runtime feasibility and cost
+after physical compilation. The following example follows one candidate.
 
 Candidate generation and selection are separate steps. For every unique retained
 state, enumeration reports each lifecycle (ephemeral, prepared, shared,
 continuously maintained) as legal, with a Planner cost or explicitly unknown
 cost, or as rejected with a reason. Planner does not remove a legal alternative
-because its own estimate prefers another. A deployment prices the legal
-alternatives over the whole workload, counting shared state once, and binds one
-lifecycle per state. Binding checks that the choice is legal and that states on
+because its own estimate prefers another. A deployment supplies prices for the
+legal alternatives; selection compares them over the whole workload, counting
+shared state once, and binds one lifecycle per state. Binding checks that the choice is legal and that states on
 one maintenance path share an evaluation schedule. An alternative whose cost is
-unknown can be bound only when the deployment's cost model is authoritative for
+unknown can be bound only when the deployment-supplied cost model is authoritative for
 complete-candidate cost; unknown cost is never treated as zero. It then yields the same
 lifecycle guarantee and window framework the physical compiler consumes when
-Planner selects. Planner's own cheapest-alternative selection remains available
-for callers without deployment pricing. The window framework is decided for the
+Planner selects with its default costs. Planner's default-cost selection remains
+available for callers that supply no prices. The window framework is decided for the
 complete combination, not for one alternative in isolation.
 
 A maintained population (for example, the current series of `topk by(job)(1, m)`)

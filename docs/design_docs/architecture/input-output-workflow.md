@@ -46,8 +46,10 @@ its candidates do not choose precompute versus query-time placement: a chosen
 lifecycle assignment sets each node's execution timing.
 
 These candidates are logical `PostASAPDAG`s. Planner also compiles
-physical candidates. Downstream systems price lifecycle assignments, bind
-the compiled typed inputs, choose storage, install state, and execute the
+physical candidates. A deployment supplies prices for lifecycle assignments
+and physical candidates, with its accuracy requirements and capabilities;
+Planner selection returns the optimal plan. The deployment then binds the
+compiled typed inputs, owns storage, installs state, and executes the
 precompute and query DAGs. Planner does not install a deployment plan.
 
 ```text
@@ -318,7 +320,7 @@ a blanket reason to discard unrelated candidates. For the direct DDSketch
 ratio above, search retains a candidate without a proven root guarantee when
 domain evidence is missing; automatic `global_selection` does not choose it.
 See the [candidate-search reference](../../develop_docs/library-api.md#generate-and-rank-candidates)
-for this backend-selection path.
+for how such a candidate stays available to selection that uses deployment-supplied evidence.
 
 Additional inputs for a Planner-owned maintenance decision are listed with the
 [summary-maintenance-lifecycle-aware helper](#summary-maintenance-lifecycle-aware-helper).
@@ -340,9 +342,9 @@ implementation name, not an additional design stage. It contains:
 * information needed to select compatible candidates across targets.
 
 This collection represents a **space of logical DAG choices**, not a single plan.
-It is exposed to integrators because the backend may choose among candidates
-using implementation support, measured costs, and available resources that
-candidate search does not have. A summary that is cheap on one backend may be
+It is exposed to integrators because a deployment supplies prices from
+implementation support, measured costs, and available resources that candidate
+search does not have, and selection must consider every candidate under them. A summary that is cheap on one backend may be
 expensive or unsupported on another. Returning only one plan during search
 would discard those choices too early.
 
@@ -391,10 +393,11 @@ timing assignments, physical candidate generation and explicit transport exports
 | Layer | Form | Decides |
 |---|---|---|
 | 0. Frontends | `CandidatePreASAPDAGs` | Parse and lower PromQL, SQL, or MetricsQL; reject unsupported semantics such as PromQL `fill`. |
-| 1. Logical Post-ASAP | `CandidatePostASAPDAGs` | What to compute: summary families, rewrites, and exact candidates. No placement. `PlanOutput` is an optional library-selected logical result; deployments can enumerate candidates themselves. |
+| 1. Logical Post-ASAP | `CandidatePostASAPDAGs` | What to compute: summary families, rewrites, and exact candidates. No placement. `PlanOutput` is an optional library-selected logical result; selection with deployment prices uses the candidate collection itself. |
 | 2. Summary maintenance lifecycle | Lifecycle choices per unique summary state and maintained population → `CandidatePostASAPDAGs` with timing (`CandidatePostASAPDAGsWithTiming`) | `Ephemeral`, `Prepared`, `Shared`, or `ContinuouslyMaintained`. Each admissible assignment produces a candidate with node timing, window framework, and retention; this layer is the only source of timing. |
 | 3. Physical compilation | `CandidatePhysicalDAGs` | Compile operators and kernels once, then cut by timing into precompute and query DAGs with typed `InputContracts`. |
-| 4–5. Deployment | Deployment-owned | Prices lifecycle assignments with its own costs, including summary store cost; selects, binds, and executes. |
+| 4. Selection | Planner library function | Takes the deployment's prices (including summary store cost), accuracy requirements and capabilities, and returns one optimal physical plan. |
+| 5. Deployment execution | Deployment-owned | Binds, installs state, and executes the selected plan. |
 
 Each layer preserves all legal candidates under the supplied constraints;
 none selects a winner in this pipeline. Frontend output may be a singleton
@@ -402,15 +405,16 @@ set. Candidate sets may remain compact or be enumerated lazily, and rejected
 candidates retain reasons. The selection workflows below are opt-in library
 helpers, not mandatory stages that discard candidates before deployment.
 
-A deployment that prices candidates itself, such as ASAPQuery-backend, must
-enumerate the candidate collection, not read `PlanOutput`; otherwise candidates
-such as those added in #472 never reach its pricing.
+Selection with a deployment's prices, such as ASAPQuery-backend's, must see the
+whole candidate collection, not `PlanOutput`; otherwise candidates such as those
+added in #472 never reach pricing.
 
 `PostASAPDAGTransport` is an explicit export/import format. Physical compilation
 can read the shared logical graph directly through its indexed view. `PlanOutput` carries logical graphs in the
 current `PostASAPNode` representation. Its `DagWithLifecycle` variant is the
 library path doing layer 2 as well, under the
-caller's cost model; a pricing deployment makes that lifecycle choice itself.
+caller's cost model; with deployment-supplied prices, selection makes that
+lifecycle choice over the timed candidates.
 Both forms are described in
 [Post-ASAP IR](../concepts/post-asap-ir.md#tree-and-exported-dag-forms).
 
@@ -442,8 +446,8 @@ Then choose the operation matching the caller's responsibility:
 
 | Purpose | Operation | Result |
 |---|---|---|
-| Inspect candidates or let the backend choose | [Ranked view](#ranked-view), if ranking is useful | Per-target candidate lists and costs |
-| Ask Planner to choose logical computations; backend owns summary maintenance | [Selection and DAG assembly](#selection-and-dag-assembly) | One selected PostASAPDAG root per query |
+| Inspect candidates, e.g. to supply prices for them | [Ranked view](#ranked-view), if ranking is useful | Per-target candidate lists and costs |
+| Ask Planner to choose logical computations; summary maintenance decided separately | [Selection and DAG assembly](#selection-and-dag-assembly) | One selected PostASAPDAG root per query |
 | Ask Planner to also decide summary maintenance versus raw recomputation | [Summary-maintenance-lifecycle-aware helper](#summary-maintenance-lifecycle-aware-helper) | One plan containing a DAG root and maintenance decisions per query |
 
 ### Ranked view

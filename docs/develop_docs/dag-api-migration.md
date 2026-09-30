@@ -67,7 +67,8 @@ before installation.
 Callers with an already assembled logical graph enter the same collection via
 `CandidatePostASAPDAGsWithTiming::from_post_asap_dag(id, root, context, limit)`.
 `lifecycle_alternatives(logical_index)` supports inspection,
-`lifecycle_guarantee(logical_index, lifecycle)` prices an alternative before it
+`lifecycle_guarantee(logical_index, state, lifecycle)` answers the guarantee of one
+of a state's alternatives, so the deployment can supply its price before it
 is bound, and `select_lifecycles(logical_index, choices)` remains an explicit
 opt-in selection operation.
 

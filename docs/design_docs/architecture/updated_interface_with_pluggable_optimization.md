@@ -104,7 +104,7 @@ The variant follows from whether `lifecycle` was supplied in the input.
 Planner pipeline outputs all legal candidates at each layer and does not pass
 through this single-selection result. `PlanOutput` is not a replacement for
 `CandidatePostASAPDAGs`: candidates the pass dropped are
-not in it, so a deployment that prices candidates itself enumerates the full
+not in it, so selection with deployment-supplied prices uses the full
 candidate collection. Each selected
 logical graph is a `PostASAPDAG`, currently represented by `Rc<PostASAPNode>`.
 The lifecycle layer alone supplies timing; `DagWithLifecycle` includes that

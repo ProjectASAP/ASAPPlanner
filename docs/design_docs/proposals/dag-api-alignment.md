@@ -16,7 +16,8 @@ CandidatePreASAPDAGs
   -> CandidatePostASAPDAGs
   -> CandidatePostASAPDAGs with timing
   -> CandidatePhysicalDAGs
-  -> deployment selection and execution
+  -> selection with deployment-supplied prices
+  -> deployment execution of the selected plan
 ```
 
 Each generation stage retains supported legal alternatives. A workload entry
@@ -57,7 +58,7 @@ stack under #508; main does not contain them yet.
    owns shared `PhysicalDAG` realizations and lightweight candidate entries
    identifying their timing cuts, contracts and lifecycle metadata. Reuse the
    existing cut and validation implementation. Materialize precompute/query
-   execution graphs on demand, including after deployment selection. Preserve
+   execution graphs on demand, including after selection. Preserve
    separate compilations when timing changes operator lowering. Keep failures
    attributable to their candidates.
 6. **Update the public boundary and documentation.** Route collection APIs
@@ -116,7 +117,7 @@ rather than treating a rename as completion of the structural work.
 
 The Rust API migration is documented in
 [dag-api-migration.md](../../develop_docs/dag-api-migration.md). Downstream
-consumers must adopt the breaking names before repinning to this branch.
+consumers must adopt the breaking names when they update their Planner dependency.
 
 ## Collection boundary completion
 
@@ -125,8 +126,8 @@ The logical collection `CandidatePostASAPDAGs<Id>` and the timed collection
 collection encapsulates the existing lifecycle enumerator: `with_timing_for_root`
 handles logical realization, index sharing, assignment budgets and lazy
 generation, and single already-assembled graphs use `from_post_asap_dag`. It
-also answers `lifecycle_guarantee`, so a deployment can price an alternative
-before binding it. A state without lifecycle alternatives yields a diagnostic
+also answers `lifecycle_guarantee`, so a deployment can supply a price for an
+alternative before selection binds it. A state without lifecycle alternatives yields a diagnostic
 entry rather than disappearing.
 
 `compile_physical_dag_candidates` consumes the timed collection's entries and

@@ -109,7 +109,7 @@ failure probabilities are combined, and the score guarantee remains in the
 membership guarantee's child provenance. An exact request does not accept this
 approximate output path merely because its selected identities are certified.
 
-Deployment chooses ingestion time or query time for these operators. The
+The selected lifecycle assignment decides ingestion time or query time for these operators. The
 semantic constructor proposes a layout; `with_execution_phases` assigns the
 placement. Either deployment must give each evaluation a complete
 rate window and an isolated summary state, or maintain an equivalent replacement
