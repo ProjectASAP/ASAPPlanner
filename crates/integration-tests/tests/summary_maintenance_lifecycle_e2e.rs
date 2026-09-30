@@ -1102,19 +1102,28 @@ fn execute_timed(
         .collect()
 }
 
-/// Prometheus drops series without a match, so arithmetic over disjoint
-/// series is empty; different selectors never become aligned maintenance.
+/// Prometheus drops series without a match: arithmetic over different
+/// selectors keeps only label sets present on both sides (none when disjoint),
+/// and such arithmetic never becomes aligned maintenance.
 #[test]
-fn maintained_arithmetic_over_disjoint_series_is_empty() {
-    let samples = [
+fn maintained_arithmetic_over_different_selectors_matches_prometheus() {
+    let query = "sum(sum_over_time(m[1m]) + sum_over_time(n[1m]))";
+    let (dag, ingestion_binary) = typed_selection(query);
+    let disjoint = [
         ("m", "a", 250, 1.0),
         ("m", "a", 290, 2.0),
         ("n", "b", 250, 5.0),
     ];
-    let (dag, ingestion_binary) =
-        typed_selection("sum(sum_over_time(m[1m]) + sum_over_time(n[1m]))");
-    let values = execute_timed(&dag, &samples);
+    let values = execute_timed(&dag, &disjoint);
     assert!(values.is_empty(), "{values:?}");
+    // Only job a is on both sides: m_a + n_a = (1 + 2) + 7; m{job="b"} is dropped.
+    let overlapping = [
+        ("m", "a", 250, 1.0),
+        ("m", "a", 290, 2.0),
+        ("m", "b", 250, 5.0),
+        ("n", "a", 250, 7.0),
+    ];
+    assert_eq!(execute_timed(&dag, &overlapping), [10.0]);
     assert!(!ingestion_binary);
     // The quantile's exact fallback runs outside Planner; it must not be maintained either.
     let (_, ingestion_binary) =
@@ -1137,7 +1146,8 @@ fn maintained_arithmetic_over_one_selector_executes() {
             ("m", "b", 250, 5.0),
         ],
     );
-    // job a: 3 + 3 = 6; job b: 5 + 5 = 10.
-    assert_eq!(values.len(), 1);
-    assert!((6.0..=10.0).contains(&values[0]), "{values:?}");
+    // job a: 3 + 3 = 6; job b: 5 + 5 = 10 (mispairing a with b gives 8 and 8).
+    // KLL at epsilon 0.01 returns an input value within 0.01 of rank 0.9; of
+    // two values only the larger is.
+    assert_eq!(values, [10.0]);
 }

@@ -2900,6 +2900,9 @@ fn construct_summary_agg(
         // Maintenance arithmetic must satisfy the ingestion contract; e.g. a
         // per-series sum over different selectors has no exact aligned
         // layout, so this candidate fails closed and exact execution remains.
+        // Unlike checked division, it does not fall back to `keep_pre_asap`:
+        // that retains the range expression at ingestion time, where range
+        // functions cannot run (they need a query evaluation time).
         if matches!(child.expr, SummaryExpr::BinaryOp { .. }) {
             validate_execution_data_states_at(&child, ExecutionDataState::INGESTION_ROWS)?;
         }
