@@ -26,7 +26,8 @@ pub fn decode_series_identity(encoded: &str) -> Result<BTreeMap<String, String>,
 /// physical columns here: the final column contains every dynamic source label.
 /// It does not assert that the query's projected labels are the full label set.
 ///
-/// This realization supports explicit `by` grouping and per-series computation.
+/// This realization supports explicit `by` grouping, per-series computation,
+/// subqueries, `scalar()`, and arithmetic with a literal operand.
 /// Operators that rewrite or implicitly match dynamic label sets require their
 /// own realization; they must not accidentally treat the opaque identity as a
 /// user label or silently discard it.
@@ -60,8 +61,29 @@ pub fn with_series_identity(root: &QueryExpr) -> Result<QueryExpr, Error> {
                 schema.closed = true;
                 Ok(())
             }
-            QueryExpr::TimeRange { child, .. } | QueryExpr::Limit { child, .. } => {
-                visit(Rc::make_mut(child))
+            QueryExpr::TimeRange { child, .. }
+            | QueryExpr::Limit { child, .. }
+            | QueryExpr::TimeShift { child, .. }
+            | QueryExpr::PromqlSubquery { child, .. }
+            | QueryExpr::PromqlScalarFromVector(child) => visit(Rc::make_mut(child)),
+            // Constants read no series.
+            QueryExpr::PromqlScalarBridge(_) => Ok(()),
+            QueryExpr::PromqlVectorFromScalar(child)
+                if super::row_values::scalar_literal(child).is_some() =>
+            {
+                Ok(())
+            }
+            // Arithmetic with a literal matches no labels.
+            QueryExpr::BinaryOp {
+                op: planner_types::pre_asap::BinaryOpKind::Arithmetic(_),
+                lhs,
+                rhs,
+                vector_match: None,
+            } if super::row_values::scalar_literal(lhs).is_some()
+                || super::row_values::scalar_literal(rhs).is_some() =>
+            {
+                visit(Rc::make_mut(lhs))?;
+                visit(Rc::make_mut(rhs))
             }
             QueryExpr::Aggregate {
                 child, reduction, ..
