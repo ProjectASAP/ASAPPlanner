@@ -14,7 +14,8 @@ use planner_types::{
         SketchQuery, SummaryFamilyType, SummaryInputExpr, ValueOperation,
     },
     pre_asap::{
-        AggIntent, ColumnRef, CompareOpKind, GroupKeys, QueryExpr, Reduction as PlannerReduction,
+        AggIntent, ColumnRef, CompareOpKind, DataType, GroupKeys, QueryExpr,
+        Reduction as PlannerReduction,
     },
 };
 use std::{
@@ -145,7 +146,28 @@ fn compile_internal(
             },
         )
     });
+    // Scalar literal operands of query-time arithmetic are folded into the consumer.
+    let mut literals = BTreeMap::<NodeId, (f64, bool)>::new();
     for edge in edges {
+        let consumer = u64::from(edge.consumer.0);
+        if let (
+            Payload::Fallback { expression },
+            Some(PostAsapDagNode {
+                payload: Payload::Binary { .. },
+                ..
+            }),
+        ) = (
+            &nodes[&u64::from(edge.producer.0)].payload,
+            nodes.get(&consumer),
+        ) {
+            if let Some(value) = row_values::scalar_literal(expression) {
+                let left = edge.role == planner_types::post_asap::EdgeRole::Left;
+                if literals.insert(consumer, (value, left)).is_some() {
+                    return Err(invalid("binary with two scalar literals is not folded"));
+                }
+                continue;
+            }
+        }
         dependencies
             .entry(u64::from(edge.consumer.0))
             .or_default()
@@ -359,6 +381,38 @@ fn compile_internal(
                     Operator::scope_timestamp(compact, output)?,
                 )?;
                 continue;
+            }
+            if let Payload::Binary { operator } = &node.payload {
+                let query_time = node.output_state.timing
+                    == planner_types::post_asap::ExecutionTiming::QueryTime;
+                if let Some(&(value, left)) = literals.get(&id) {
+                    let [input] = schemas.as_slice() else {
+                        return Err(invalid("scalar binary requires one row input"));
+                    };
+                    if !query_time {
+                        return Err(invalid("scalar literal binary must run at query time"));
+                    }
+                    let project = row_values::scalar_binary(input, operator, value, left)
+                        .map_err(|error| invalid(format!("node {id}: {error}")))?;
+                    graph.add(id, inputs, project.with_output_schema(output)?)?;
+                    continue;
+                }
+                let label_map = |schema: &Schema| {
+                    schema
+                        .fields
+                        .iter()
+                        .any(|f| matches!(f.dtype, SummaryFamilyType::Plain(DataType::Map { .. })))
+                };
+                if let (true, [left, right]) = (query_time, schemas.as_slice()) {
+                    if !label_map(left) && !label_map(right) {
+                        let (join, project) = row_values::grouped_binary(left, right, operator)
+                            .map_err(|error| invalid(format!("node {id}: {error}")))?;
+                        graph.add(auxiliary, inputs, join)?;
+                        graph.add(id, vec![auxiliary], project.with_output_schema(output)?)?;
+                        auxiliary -= 1;
+                        continue;
+                    }
+                }
             }
             let mut operator = compile_node(node, &schemas)
                 .map_err(|error| invalid(format!("node {id}: {error}")))?;
