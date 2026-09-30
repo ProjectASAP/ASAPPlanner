@@ -362,7 +362,10 @@ Cartesian-product expansion of complete DAGs and preserves shared nodes.
 
 ### Output layers
 
-Planning proceeds through these layers, from what to compute to how to run it:
+Planning proceeds through these layers, from what to compute to how to run it.
+The [Planner and deployment layering](../proposals/planner-backend-layering.md)
+proposal describes the full contract, including deployment costs and mixed
+placement.
 
 | Layer | Form | Decides |
 |---|---|---|
@@ -386,7 +389,7 @@ Both forms are described in
 
 Placement does not belong to `PlanSpace`. The grouped `Rate`→`Sum`
 "maintenance versus query placement" candidate pair from #472 is a placement
-choice and is planned to move to the lifecycle layer.
+choice; #485 replaces it with one candidate placed by lifecycle choice.
 
 Cross-query sharing is expressed by common-subexpression elimination in the
 logical layer and by explicit node identity in a multi-root `PostAsapDag` at
