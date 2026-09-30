@@ -5,18 +5,35 @@ use asap_sketchlib::CountMinSketch;
 #[derive(Debug, Clone)]
 pub struct CountMinSketchAccumulator {
     pub inner: CountMinSketch,
+    /// Edge sampling probability; see [`super::sampling`]. Private so it stays in (0, 1].
+    sample_p: f64,
 }
 
 impl CountMinSketchAccumulator {
     pub fn new(row_num: usize, col_num: usize) -> Self {
         Self {
             inner: CountMinSketch::new(row_num, col_num),
+            sample_p: 1.0,
         }
     }
 
-    /// Estimated frequency of one item.
+    /// Adopt a sketch decoded from an edge frame whose updates were sampled
+    /// with probability `sample_p` in (0, 1]; `1` means unsampled.
+    pub fn from_sketch(sketch: CountMinSketch, sample_p: f64) -> Result<Self, KernelError> {
+        Ok(Self {
+            inner: sketch,
+            sample_p: super::sampling::checked(sample_p)?,
+        })
+    }
+
+    /// Edge sampling probability, for deployments that persist this state.
+    pub fn sample_p(&self) -> f64 {
+        self.sample_p
+    }
+
+    /// Estimated frequency of one item, scaled by `1/p` for a sampled sketch.
     pub fn query_key(&self, key: &KeyByLabelValues) -> f64 {
-        self.inner.estimate(&key.to_semicolon_str())
+        self.inner.estimate(&key.to_semicolon_str()) / self.sample_p
     }
 }
 
@@ -39,6 +56,7 @@ impl AggregateCore for CountMinSketchAccumulator {
             .ok_or("Count-Min Sketch merges only with Count-Min Sketch")?;
         Ok(Box::new(Self {
             inner: CountMinSketch::merge_refs(&[&self.inner, &other.inner])?,
+            sample_p: super::sampling::merged(self.sample_p, other.sample_p)?,
         }))
     }
 
@@ -75,5 +93,35 @@ mod tests {
         let cms = CountMinSketchAccumulator::new(3, 128);
         let kll = crate::summary_kernels::DatasketchesKLLAccumulator::new(200);
         assert!(cms.merge_with(&kll).is_err());
+    }
+
+    // A sampled Count-Min point frequency scales by 1/p (old kernel: 4x raw at p=0.25).
+    #[test]
+    fn sampled_point_count_is_rescaled() {
+        let key = KeyByLabelValues::new_with_labels(vec!["web".into()]);
+        let mut sketch = CountMinSketch::new(4, 1000);
+        sketch.update(&key.to_semicolon_str(), 10.0);
+        let raw = CountMinSketchAccumulator::from_sketch(sketch.clone(), 1.0).unwrap();
+        let sampled = CountMinSketchAccumulator::from_sketch(sketch.clone(), 0.25).unwrap();
+        assert!(raw.query_key(&key) >= 10.0);
+        assert!((sampled.query_key(&key) - raw.query_key(&key) * 4.0).abs() < 1e-9);
+        assert!(CountMinSketchAccumulator::from_sketch(sketch, f64::NAN).is_err());
+    }
+
+    // Merging with an unsampled base keeps p; two sampled probabilities do not merge.
+    #[test]
+    fn merge_carries_sample_p() {
+        let sampled =
+            CountMinSketchAccumulator::from_sketch(CountMinSketch::new(2, 3), 0.25).unwrap();
+        let merged = sampled
+            .merge_with(&CountMinSketchAccumulator::new(2, 3))
+            .unwrap();
+        let merged = merged
+            .as_any()
+            .downcast_ref::<CountMinSketchAccumulator>()
+            .unwrap();
+        assert_eq!(merged.sample_p(), 0.25);
+        let other = CountMinSketchAccumulator::from_sketch(CountMinSketch::new(2, 3), 0.5).unwrap();
+        assert!(sampled.merge_with(&other).is_err());
     }
 }
