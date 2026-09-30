@@ -56,7 +56,7 @@ fn grouped_rate() -> PostAsapDag {
     let space = grouped_rate_space();
     let selected = space
         .global_selection(&DefaultCostModel)
-        .assemble_selected_dag(&space.roots[0].1)
+        .assemble_selected_query(&space.roots[0].1)
         .unwrap()
         .unwrap();
     compile_post_asap_dag(&selected).unwrap()
@@ -108,7 +108,10 @@ fn grouped_rate_can_be_materialized_before_or_after_grouped_sum() {
                 PostAsapOperatorPayload::Value {
                     operation: ValueOperation::FinalizeExactAccumulator
                 }
-            )
+            ) && dag
+                .edges
+                .iter()
+                .any(|edge| edge.producer == state.id && edge.consumer == node.id)
         })
         .unwrap();
     let input_schema = Arc::new(state.output_schema.clone());

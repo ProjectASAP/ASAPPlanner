@@ -686,3 +686,133 @@ fn lifecycle_timing_cuts_one_compilation() {
         }
     }
 }
+
+/// Grouped Rate→Sum is one inventory candidate: retaining the Sum state puts
+/// Rate and Sum in precompute, while an `Ephemeral` Sum over a retained Rate
+/// state leaves Sum in the query DAG.
+#[test]
+fn grouped_rate_sum_placement_is_a_lifecycle_choice() {
+    use asap_aware_mapping::enumerate_summary_maintenance_lifecycles;
+    use asap_physical_operators::physical_planner::{compile_candidate, InputContract};
+    use asap_types::post_asap::{
+        ExactKind, PostAsapOperatorPayload, SummaryExpr, SummaryFamilyType,
+    };
+    use std::{collections::BTreeMap, sync::Arc};
+
+    let workload = quantile_workload("sum by(job)(rate(m[1m]))");
+    let root = Rc::new(
+        asap_physical_operators::physical_planner::promql_rows::with_series_identity(
+            &lower_promql_workload(&workload, 0).unwrap().remove(0),
+        )
+        .unwrap(),
+    );
+    let is_exact = |node: &SummaryNode, kind: ExactKind| {
+        matches!(&node.expr, SummaryExpr::SummaryAgg {
+            family: SummaryFamilyType::ExactAggregate(k, _), ..
+        } if *k == kind)
+    };
+    let inventory = asap_aware_mapping::search_workload(vec![("q", root)])
+        .enumerate_candidate_dags(4096)
+        .unwrap();
+    let candidates = inventory
+        .candidates
+        .into_iter()
+        .map(|mut forest| forest.remove(0).1)
+        .filter(|candidate| {
+            matches!(&candidate.expr, SummaryExpr::ValueOperation { child, .. }
+                if is_exact(child, ExactKind::Sum))
+        })
+        .collect::<Vec<_>>();
+    let [candidate] = candidates.as_slice() else {
+        panic!("one grouped Sum candidate, got {}", candidates.len());
+    };
+    let mut placements = Vec::new();
+    for sum_lifecycle in [
+        SummaryMaintenanceLifecycle::ContinuouslyMaintained,
+        SummaryMaintenanceLifecycle::Ephemeral,
+    ] {
+        let lifecycles = enumerate_summary_maintenance_lifecycles(
+            Rc::clone(candidate),
+            WorkloadDemand::new_with_data(
+                &workload.query_workload,
+                workload.data_workload.as_ref().unwrap(),
+                &[1],
+            ),
+            NOW_MS,
+            Some(Horizon(100.)),
+            SummaryMaintenanceLifecycleCapabilities::ALL,
+            &FullyCostedRuntime,
+        )
+        .unwrap();
+        let choices = lifecycles
+            .deployments()
+            .iter()
+            .map(|deployment| {
+                let lifecycle = if is_exact(&deployment.summary, ExactKind::Sum) {
+                    sum_lifecycle.clone()
+                } else {
+                    SummaryMaintenanceLifecycle::ContinuouslyMaintained
+                };
+                (deployment.post_asap_node_id, lifecycle)
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(choices.len(), 2, "Rate and Sum states");
+        let dag = lifecycles
+            .select(&choices)
+            .unwrap()
+            .execution_timed_dag()
+            .unwrap();
+        let raw = dag
+            .nodes
+            .iter()
+            .find(|node| matches!(node.payload, PostAsapOperatorPayload::Fallback { .. }))
+            .unwrap();
+        let frontier =
+            asap_physical_operators::physical_planner::frontier_from_timing(&dag).unwrap();
+        let [boundary] = frontier.as_slice() else {
+            panic!("one precompute output, got {frontier:?}");
+        };
+        let boundary = dag
+            .nodes
+            .iter()
+            .find(|node| u64::from(node.id.0) == *boundary)
+            .unwrap();
+        let physical = compile_candidate(
+            &dag,
+            BTreeMap::from([(
+                u64::from(raw.id.0),
+                InputContract::bounded(Arc::new(raw.output_schema.clone())),
+            )]),
+            &[u64::from(dag.root.0)],
+            &frontier,
+        )
+        .unwrap();
+        let json = |value| String::from_utf8(serde_json::to_vec(value).unwrap()).unwrap();
+        placements.push((
+            boundary.payload.clone(),
+            json(physical.precompute.as_ref().unwrap()),
+            json(&physical.query),
+        ));
+    }
+    let builds = |json: &str, kind: &str| {
+        json.contains(&format!(
+            r#"{{"SummaryBuild":{{"family":{{"ExactAggregate":["{kind}","{kind}"]}}"#
+        ))
+    };
+    let [(retained, retained_pre, retained_query), (ephemeral, ephemeral_pre, ephemeral_query)] =
+        placements.as_slice()
+    else {
+        unreachable!()
+    };
+    let state = |payload: &PostAsapOperatorPayload, kind: ExactKind| {
+        matches!(payload, PostAsapOperatorPayload::SummaryAgg {
+            family: SummaryFamilyType::ExactAggregate(k, _), ..
+        } if *k == kind)
+    };
+    assert!(state(retained, ExactKind::Sum));
+    assert!(builds(retained_pre, "Rate") && builds(retained_pre, "Sum"));
+    assert!(!retained_query.contains("SummaryBuild"));
+    assert!(state(ephemeral, ExactKind::Rate));
+    assert!(builds(ephemeral_pre, "Rate") && !builds(ephemeral_pre, "Sum"));
+    assert!(builds(ephemeral_query, "Sum"));
+}
