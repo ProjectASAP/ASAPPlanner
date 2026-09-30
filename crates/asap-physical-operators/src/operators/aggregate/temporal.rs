@@ -180,7 +180,7 @@ fn rate(points: &[(i64, f64)], start: i64, end: i64, counter: bool) -> Option<f6
     Some(delta * (span + to_start + to_end) / span / ((end as f64 - start as f64) / 1000.))
 }
 
-async fn bucket_quantile(
+pub(in crate::operators) async fn bucket_quantile(
     q: f64,
     mut b: Vec<(f64, f64)>,
     context: &RunContext,
@@ -215,7 +215,7 @@ async fn bucket_quantile(
     let mut prev = buckets[0].1;
     for p in buckets.iter_mut().skip(1) {
         work.checkpoint().await?;
-        if p.1 < prev || (p.1 - prev).abs() <= 1e-12 * (p.1.abs() + prev.abs()) {
+        if p.1 < prev || almost_equal(prev, p.1) {
             p.1 = prev;
         }
         prev = p.1;
@@ -234,7 +234,21 @@ async fn bucket_quantile(
     }
     let (start, base) = if idx == 0 { (0., 0.) } else { buckets[idx - 1] };
     let (end, upper) = buckets[idx];
-    Ok(start + (end - start) * (rank - base) / (upper - base))
+    Ok(start + (end - start) * ((rank - base) / (upper - base)))
+}
+
+/// Prometheus `almost.Equal` with its bucket tolerance of 1e-12.
+fn almost_equal(a: f64, b: f64) -> bool {
+    const EPSILON: f64 = 1e-12;
+    if a == b || (a.is_nan() && b.is_nan()) {
+        return true;
+    }
+    let sum = a.abs() + b.abs();
+    let diff = (a - b).abs();
+    if a == 0. || b == 0. || sum < f64::MIN_POSITIVE {
+        return diff < EPSILON * f64::MIN_POSITIVE;
+    }
+    diff / sum.min(f64::MAX) < EPSILON
 }
 
 #[cfg(test)]
@@ -338,5 +352,35 @@ mod tests {
         );
         assert!(bucket_quantile(0.5, vec![(1., 2.), (2., 4.)]).is_nan());
         assert_eq!(bucket_quantile(-0.1, vec![]), f64::NEG_INFINITY);
+    }
+
+    // Matches Prometheus bit for bit: interpolation divides before scaling,
+    // and an infinite count is not "almost equal" to a finite one.
+    #[test]
+    fn histogram_matches_prometheus_arithmetic() {
+        let context = RunContext::new(
+            Scope::Query {
+                evaluation_time_ms: 0,
+                revision: 0,
+            },
+            Limits::default(),
+        )
+        .unwrap();
+        let bucket_quantile = |q, buckets| {
+            futures::executor::block_on(super::bucket_quantile(q, buckets, &context)).unwrap()
+        };
+        // 0.5 + (0.8 - 0.5) * ((19.95 - 10) / 11) in Go.
+        assert_eq!(
+            bucket_quantile(0.95, vec![(0.5, 10.), (0.8, 21.), (f64::INFINITY, 21.)]),
+            0.7713636363636364
+        );
+        // Rank ∞ lies past every finite bucket.
+        assert_eq!(
+            bucket_quantile(
+                0.5,
+                vec![(1., 1.), (2., 2.), (f64::INFINITY, f64::INFINITY)]
+            ),
+            2.
+        );
     }
 }
