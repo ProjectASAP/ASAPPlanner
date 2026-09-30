@@ -687,6 +687,152 @@ fn lifecycle_timing_cuts_one_compilation() {
     }
 }
 
+
+/// A maintained current-series population is placed by its lifecycle choice:
+/// ContinuouslyMaintained stores the population in precompute, Ephemeral
+/// rebuilds it from the raw source at query time; both rank alike.
+#[test]
+fn chosen_population_lifecycle_decides_precompute_contents() {
+    use asap_aware_mapping::{
+        enumerate_summary_maintenance_lifecycles,
+        maintained_population::MaintainedPopulationStrategy,
+    };
+    use asap_physical_operators::{
+        physical_planner::{
+            compile_candidate,
+            promql_rows::{series_row, with_series_identity},
+            InputContract,
+        },
+        runtime::Scope,
+        values::{Batch, Value},
+    };
+    use asap_types::post_asap::{
+        maintained_population::PopulationInput, PostAsapOperatorPayload, ValueOperation,
+    };
+    use std::{collections::BTreeMap, sync::Arc};
+
+    let workload = quantile_workload("topk by(job)(1, m)");
+    let root = Rc::new(
+        with_series_identity(&lower_promql_workload(&workload, 0).unwrap().remove(0)).unwrap(),
+    );
+    let root = MaintainedPopulationStrategy::new(std::slice::from_ref(&root))
+        .candidate(&root)
+        .unwrap();
+    let mut answers = Vec::new();
+    for lifecycle in [
+        SummaryMaintenanceLifecycle::ContinuouslyMaintained,
+        SummaryMaintenanceLifecycle::Ephemeral,
+    ] {
+        let candidates = enumerate_summary_maintenance_lifecycles(
+            Rc::clone(&root),
+            WorkloadDemand::new_with_data(
+                &workload.query_workload,
+                workload.data_workload.as_ref().unwrap(),
+                &[1],
+            ),
+            NOW_MS,
+            Some(Horizon(100.)),
+            SummaryMaintenanceLifecycleCapabilities::ALL,
+            &FullyCostedRuntime,
+        )
+        .unwrap();
+        let [deployment] = candidates.deployments() else {
+            panic!("one population state");
+        };
+        let id = deployment.post_asap_node_id;
+        let dag = candidates
+            .select(&[(id, lifecycle.clone())])
+            .unwrap()
+            .execution_timed_dag()
+            .unwrap();
+        let population = dag.nodes.iter().find(|node| node.id == id).unwrap();
+        let PostAsapOperatorPayload::Value {
+            operation: ValueOperation::MaintainPopulation { population },
+        } = &population.payload
+        else {
+            panic!("the deployment is the maintained population");
+        };
+        let PopulationInput::CurrentSeries(spec) = &population.input else {
+            panic!("current-series population");
+        };
+        let lookback = i64::try_from(spec.lookback_ms).unwrap();
+        let raw = dag
+            .nodes
+            .iter()
+            .find(|node| matches!(node.payload, PostAsapOperatorPayload::Fallback { .. }))
+            .unwrap();
+        let (raw_id, schema) = (u64::from(raw.id.0), Arc::new(raw.output_schema.clone()));
+        let frontier = ingestion_frontier(&dag);
+        let candidate = compile_candidate(
+            &dag,
+            BTreeMap::from([(raw_id, InputContract::bounded(schema.clone()))]),
+            &[u64::from(dag.root.0)],
+            &frontier,
+        )
+        .unwrap();
+        let end = 60_000;
+        let rows = [("a", end - 1, 100.), ("a", end, 1.), ("b", end, 20.)]
+            .into_iter()
+            .map(|(instance, at, value)| {
+                series_row(
+                    &schema,
+                    &BTreeMap::from([
+                        ("job".into(), "api".into()),
+                        ("instance".into(), instance.into()),
+                    ]),
+                    at,
+                    value,
+                )
+                .unwrap()
+            })
+            .collect();
+        let raw_batch = Batch::try_new(schema.clone(), rows).unwrap();
+        let query_scope = Scope::Query {
+            evaluation_time_ms: end,
+            revision: 1,
+        };
+        let result = if lifecycle == SummaryMaintenanceLifecycle::Ephemeral {
+            assert!(frontier.is_empty());
+            assert!(candidate.precompute.is_none());
+            physical_common::execute(
+                &candidate.query,
+                BTreeMap::from([(raw_id, raw_batch)]),
+                query_scope,
+            )
+        } else {
+            let state = u64::from(id.0);
+            assert_eq!(frontier, [state]);
+            let stored = physical_common::execute(
+                candidate.precompute.as_ref().unwrap(),
+                BTreeMap::from([(raw_id, raw_batch)]),
+                Scope::Ingestion {
+                    window_start_ms: end - lookback,
+                    window_end_ms: end,
+                    revision: 1,
+                },
+            );
+            physical_common::execute(
+                &candidate.query,
+                BTreeMap::from([(state, stored[0][0].clone())]),
+                query_scope,
+            )
+        };
+        answers.push(
+            result[0]
+                .iter()
+                .flat_map(|batch| batch.rows())
+                .flat_map(|row| row.iter())
+                .filter_map(|value| match value {
+                    Value::Float64(value) => Some(*value),
+                    _ => None,
+                })
+                .collect::<Vec<_>>(),
+        );
+    }
+    assert_eq!(answers[0], answers[1]);
+    assert_eq!(answers[0], [20.]);
+}
+
 /// Grouped Rate→Sum is one inventory candidate: retaining the Sum state puts
 /// Rate and Sum in precompute, while an `Ephemeral` Sum over a retained Rate
 /// state leaves Sum in the query DAG.
