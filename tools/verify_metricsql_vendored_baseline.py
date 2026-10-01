@@ -41,7 +41,7 @@ EXPECTED_LIB_FAILURES = {
 EXPECTED_DOC_FAILURES = {
     'src/ast/expr.rs - ast::expr::Expr::series_names': 'a6353e9ca306eb6768c1e0453f9a18830fb9335f2675a30d5a1be0635f4d826e',
     'src/ast/expr.rs - ast::expr::MetricExpr': '9c330538f87885aae58319c4b527f83bd10a659f0fcb9f2318adb0610f852396',
-    'src/optimizer/simplifier.rs - optimizer::simplifier::ExprSimplifier::simplify': 'b8f549620335e16b37121a9ccdcb21ba33f066779459f32ddd13bbdcee07fd10',
+    'src/optimizer/simplifier.rs - optimizer::simplifier::ExprSimplifier::simplify': '4bfdb78c96ef5f81dc65b6bbf6f66f39536a44cd8a5280a6303f703083bf73ee',
 }
 
 

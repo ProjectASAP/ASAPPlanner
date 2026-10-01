@@ -170,12 +170,12 @@ pub fn resolve_expr(
             branches,
             else_expr,
         } => QueryExpr::Case {
-            operand: operand.as_deref().map(&rc).transpose()?,
+            operand: operand.as_deref().map(rc).transpose()?,
             branches: branches
                 .iter()
                 .map(|(w, t)| Ok((resolve_expr(w, schema)?, resolve_expr(t, schema)?)))
                 .collect::<Result<Vec<_>, ResolveError>>()?,
-            else_expr: else_expr.as_deref().map(&rc).transpose()?,
+            else_expr: else_expr.as_deref().map(rc).transpose()?,
         },
         other => unreachable!("resolve_expr called on a non-scalar QueryExpr variant: {other:?}"),
     })
