@@ -263,8 +263,7 @@ constraints:
 
 * A materialized output is stored for as long as any of its consumers still
   needs it.
-* Query-time work cannot feed ingestion-time work, so every node feeding an
-  ingestion-time sub-DAG also runs at ingestion time.
+* Every node upstream of an ingestion-time node also runs at ingestion time.
 
 The decision depends on the workload's `recurrence` and `predictability` and on
 the `DataWorkload`. Typical outcomes:
