@@ -129,11 +129,16 @@ Immutable nodes keep those plans independent: `with_*` and the attribute passes
 return new nodes. This requires allocation and explicit preservation of sharing
 within each resulting plan.
 
-**Preserve sharing while filling attributes.** Guarantee derivation and timing
-assignment return new nodes because the IR is immutable. If two queries share a
-`Scan`, processing their roots independently could create two replacement scans and
-lose that sharing. The design therefore requires each input node to map to one
-output node within a pass, across every root in the workload:
+**Preserve shared node instances while filling attributes.** Here, sharing means
+that multiple parents—within one query or across queries in the same workload—refer
+to the same node instance, such as one `Scan`. This differs from the title's use of
+“sharing”: pre-ASAP and post-ASAP use the same operator *types*. The memo does not
+make those two planning stages share node instances.
+
+Guarantee derivation and timing assignment return new nodes because the IR is
+immutable. Processing two roots independently could turn their shared `Scan` into
+two separate output scans. Each pass must instead preserve that common input as
+one common output across all workload roots:
 
 ```text
 Before the pass                 After the pass
@@ -153,10 +158,14 @@ Reusing it after a rewrite or for another assignment could return stale nodes.
 Today's `GlobalSelection.assembled_nodes` already uses this approach during assembly
 (`replacement.rs`); this proposal extends it to the attribute passes.
 
-`DerivationMemo` below names that temporary table. Its name, storage and exposure in
-these illustrative signatures are implementation details, not a new plan attribute
-or a required public API. The design requirement is to preserve sharing and detect
-timing conflicts.
+`DerivationMemo` below names this per-pass table. It maps the input `Scan` to a
+new `Scan′`; both output queries reference that same `Scan′`. The input and output
+scans are distinct objects. Guarantee derivation and timing assignment each use
+their own table.
+
+The table's name, storage and API are implementation details. The design requires
+preserving shared node instances within the resulting workload DAG and rejecting
+conflicting timings for any one of those nodes.
 
 ```rust
 /// Reuses each input node's output across all roots in one attribute pass.
