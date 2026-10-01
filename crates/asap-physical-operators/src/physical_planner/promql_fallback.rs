@@ -65,7 +65,17 @@ fn at(shift: &planner_types::pre_asap::TimeShift) -> Result<Option<i64>, Error> 
     match shift.at {
         None => Ok(None),
         Some(AtModifier::Timestamp(at)) => Ok(Some(at)),
-        Some(_) => Err(invalid("@ start() and @ end() depend on the range query")),
+        Some(AtModifier::Start | AtModifier::End) => Ok(None),
+    }
+}
+
+fn range_anchor(expression: &QueryExpr) -> Option<AtModifier> {
+    match expression {
+        QueryExpr::TimeRange { child, .. } => range_anchor(child),
+        QueryExpr::TimeShift { shift, .. } => shift
+            .at
+            .filter(|at| matches!(at, AtModifier::Start | AtModifier::End)),
+        _ => None,
     }
 }
 
@@ -137,12 +147,70 @@ impl Lowering {
     /// An instant vector, or a scalar for scalar-valued expressions.
     fn value(&mut self, expression: &QueryExpr) -> Result<Input, Error> {
         match expression {
+            QueryExpr::Concat { children, .. } => {
+                if !children.iter().all(|branch| matches!(branch,
+                    QueryExpr::PromqlRelabel { child, .. } if matches!(child.as_ref(),
+                        QueryExpr::Aggregate { measures, .. } if matches!(measures.as_slice(), [AggIntent::HistogramQuantile { .. }])))) {
+                    return Err(invalid("PromQL concatenation requires classic histogram quantile branches"));
+                }
+                let inputs = children
+                    .iter()
+                    .map(|child| self.value(child))
+                    .collect::<Result<Vec<_>, _>>()?;
+                let output = declared(expression)?;
+                if inputs.iter().any(|input| self.schema(input) != output) {
+                    return Err(invalid(
+                        "concatenated PromQL branches require equal schemas",
+                    ));
+                }
+                let union = self.add(Operator::union(output.clone(), inputs.len())?, inputs);
+                // Multi-quantile branches drop the metric name and form one vector.
+                self.push(
+                    Operator::series_without_name(output)?,
+                    vec![union],
+                    expression,
+                )
+            }
+            QueryExpr::PromqlRelabel { dst, value, child } => {
+                let step = self.value(child)?;
+                let input = self.schema(&step);
+                let (replacement, source_regex) = match value.as_ref() {
+                    QueryExpr::Literal(planner_types::pre_asap::ScalarValue::Utf8(value)) => {
+                        (value.clone(), None)
+                    }
+                    QueryExpr::FunctionCall { name, args } if name == "label_replace" => {
+                        let [QueryExpr::Column(source), QueryExpr::Literal(planner_types::pre_asap::ScalarValue::Utf8(pattern)), QueryExpr::Literal(planner_types::pre_asap::ScalarValue::Utf8(
+                            replacement,
+                        ))] = args.as_slice()
+                        else {
+                            return Err(invalid("invalid label_replace arguments"));
+                        };
+                        let source = input
+                            .fields
+                            .get(*source)
+                            .ok_or_else(|| invalid("label_replace source missing"))?
+                            .name
+                            .clone();
+                        (replacement.clone(), Some((source, pattern.clone())))
+                    }
+                    _ => return Err(invalid("unsupported PromQL label rewrite")),
+                };
+                let operator = Operator::series_relabel(
+                    input,
+                    declared(expression)?,
+                    dst.clone(),
+                    replacement,
+                    source_regex,
+                )?;
+                self.push(operator, vec![step], expression)
+            }
             QueryExpr::TimeRange { .. } => {
                 let (range, offset, at) = selector(expression)?;
                 let input = self.read(expression)?;
                 let schema = self.schema(&input);
                 self.push(
-                    Operator::series_window(schema, None, range, offset, at, None)?,
+                    Operator::series_window(schema, None, range, offset, at, None)?
+                        .with_series_range_bounds(range_anchor(expression), None)?,
                     vec![input],
                     expression,
                 )
@@ -252,6 +320,7 @@ impl Lowering {
                     vec![step],
                 ))
             }
+            QueryExpr::EvalTimestamp => self.push(Operator::evaluation_time(), vec![], expression),
             QueryExpr::PromqlScalarBridge(_) => {
                 let value = row_values::scalar_literal(expression)
                     .ok_or_else(|| invalid("PromQL scalar must be a literal"))?;
@@ -287,7 +356,8 @@ impl Lowering {
             let input = self.read(matrix)?;
             let schema = self.schema(&input);
             return self.push(
-                Operator::series_window(schema, Some(function), range, offset, at, None)?,
+                Operator::series_window(schema, Some(function), range, offset, at, None)?
+                    .with_series_range_bounds(range_anchor(matrix), None)?,
                 vec![input],
                 logical,
             );
@@ -326,20 +396,21 @@ impl Lowering {
                 inner_offset,
                 inner_at,
                 Some(steps),
-            )?,
+            )?
+            .with_series_range_bounds(range_anchor(selected), range_anchor(matrix))?,
             vec![raw],
             child,
         )?;
-        // The inner function drops the name too. A series repeats across
-        // steps, so this rewrite does not check for equal label sets.
+        // Name removal must validate each subquery evaluation step.
         if inner.is_some() && !matches!(inner, Some(AggIntent::LastOverTime)) {
             let input = self.schema(&step);
-            let relabel = Operator::series_labels(input, VectorMatchKind::Ignoring, vec![])?;
+            let relabel = Operator::series_without_name(input)?;
             step = self.add(relabel, vec![step]);
         }
         let input = self.schema(&step);
         self.push(
-            Operator::series_window(input, Some(function), steps.range_ms, offset, at_ms, None)?,
+            Operator::series_window(input, Some(function), steps.range_ms, offset, at_ms, None)?
+                .with_series_range_bounds(range_anchor(matrix), None)?,
             vec![step],
             logical,
         )
@@ -362,7 +433,17 @@ impl Lowering {
             let operator = Operator::series_histogram_quantile(input, *q, *le)?;
             return self.push(operator, vec![step], logical);
         }
-        let value = named_column(&input, &ColumnRef::SampleValue)?;
+        let value = input
+            .fields
+            .iter()
+            .enumerate()
+            .filter(|(_, f)| f.dtype == SummaryFamilyType::Plain(DataType::Float64))
+            .map(|(i, _)| i)
+            .collect::<Vec<_>>();
+        let [value] = value.as_slice() else {
+            return Err(invalid("PromQL aggregation requires one Float64 value"));
+        };
+        let value = *value;
         let reduction = match measure {
             AggIntent::Sum { col: None } => Reduction::Sum(value),
             AggIntent::Avg { col: None } => Reduction::Avg(value),
@@ -437,6 +518,8 @@ impl Lowering {
 fn unbound(intent: &AggIntent) -> Result<AggIntent<ColumnRef>, Error> {
     Ok(match intent {
         AggIntent::Rate => AggIntent::Rate,
+        AggIntent::Deriv => AggIntent::Deriv,
+        AggIntent::PredictLinear { seconds } => AggIntent::PredictLinear { seconds: *seconds },
         AggIntent::Increase => AggIntent::Increase,
         AggIntent::Delta => AggIntent::Delta,
         AggIntent::Count { accuracy } => AggIntent::Count {

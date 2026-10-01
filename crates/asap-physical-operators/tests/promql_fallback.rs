@@ -135,6 +135,17 @@ fn evaluate_dag(
     metrics: &[(&str, &[Sample])],
     at: i64,
 ) -> Result<Vec<(BTreeMap<String, String>, i64, f64)>, String> {
+    evaluate_dag_with_range(expression, dag, metrics, at, None)
+}
+
+#[allow(clippy::type_complexity)]
+fn evaluate_dag_with_range(
+    expression: &QueryExpr,
+    dag: &PostAsapDag,
+    metrics: &[(&str, &[Sample])],
+    at: i64,
+    bounds: Option<(i64, i64)>,
+) -> Result<Vec<(BTreeMap<String, String>, i64, f64)>, String> {
     let program = compile_dag(expression, dag)?;
     let mut sources = BTreeMap::new();
     let selectors = promql_fallback::raw_series(expression).unwrap();
@@ -166,6 +177,12 @@ fn evaluate_dag(
         Limits::default(),
     )
     .unwrap();
+    let context = match bounds {
+        Some((start, end)) => context
+            .with_query_range(start * 1000, end * 1000)
+            .map_err(|e| e.to_string())?,
+        None => context,
+    };
     block_on(async {
         let mut stream = graph
             .execute(program.roots(), context)
@@ -543,7 +560,9 @@ fn at_modifier_fixes_the_evaluation_instant() {
     // An inner @ pins every step to the same instant.
     assert_eq!(one("sum_over_time((m @ 60)[2m:1m])", samples, 180), 2.);
     // start() and end() depend on the range query, which is the deployment's.
-    assert!(compile_query("m @ start()").is_err());
+    assert!(evaluate("m @ start()", &[], 60)
+        .unwrap_err()
+        .contains("query range bounds"));
 }
 
 const A: &[Sample] = &[("job=x", 50, 10.), ("job=y", 50, 20.), ("job=w", 50, 0.)];
@@ -663,8 +682,7 @@ fn empty_labels_and_empty_sides_match_prometheus() {
     let pair: &[Sample] = &[("job=x,inst=1", 50, 1.), ("job=x,inst=2", 50, 2.)];
     assert!(labeled("a + on(job) b", &[("b", pair)], 60).is_empty());
     assert!(labeled("b + on(job) a", &[("b", pair)], 60).is_empty());
-    // `time()` has no row realization yet.
-    assert!(promql_rows::with_series_identity(&parse("a - time()")).is_err());
+    assert!(labeled("a - time()", &[], 60).is_empty());
 }
 
 // Sums and averages use Prometheus' Kahan-Neumaier compensation, and an
@@ -1240,4 +1258,337 @@ fn histogram_quantile_selection_keeps_the_exact_fallback() {
             assert_eq!(values, vec![1.75], "{query} {target:?}");
         }
     }
+}
+
+// time() uses the query evaluation instant in seconds in scalar and vector operands.
+#[test]
+fn evaluation_time_operands_use_runtime_scope() {
+    assert_eq!(labeled("time()", &[], 60), rows(&[("", 60.)]));
+    assert_eq!(labeled("vector(time())", &[], 60), rows(&[("", 60.)]));
+    assert_eq!(
+        labeled("a + time()", &[("a", A)], 60),
+        rows(&[("job=w", 60.), ("job=x", 70.), ("job=y", 80.)])
+    );
+    assert_eq!(
+        labeled("time() - scalar(b)", &[("b", &[("job=x", 60, 3.)])], 61),
+        rows(&[("", 58.)])
+    );
+}
+
+// Non-finite scalar operands survive both logical and physical plan JSON round trips.
+#[test]
+fn nonfinite_literals_round_trip_in_plans() {
+    for (query, expected) in [
+        ("vector(NaN)", f64::NAN),
+        ("vector(+Inf)", f64::INFINITY),
+        ("vector(-Inf)", f64::NEG_INFINITY),
+    ] {
+        let expression = lower(query);
+        let json = serde_json::to_vec(&expression).unwrap();
+        let restored: QueryExpr = serde_json::from_slice(&json).unwrap();
+        let result = evaluate_dag(&restored, &fallback_dag(restored.clone()), &[], 60).unwrap();
+        assert_eq!(result.len(), 1);
+        if expected.is_nan() {
+            assert!(result[0].2.is_nan());
+        } else {
+            assert_eq!(result[0].2, expected);
+        }
+    }
+}
+
+// Classic histogram results remain aggregatable and support multi-quantile label branches.
+#[test]
+fn histogram_quantiles_and_nested_aggregation() {
+    let samples = buckets(&[("job=a", HISTOGRAM), ("job=b", HISTOGRAM)]);
+    assert_eq!(
+        quantile("sum(histogram_quantile(0.5, x_bucket))", &samples),
+        rows(&[("", 3.5)])
+    );
+    assert_eq!(
+        quantile("histogram_quantiles(x_bucket, \"q\", 0.5, 0.9)", &samples),
+        rows(&[
+            ("job=a,q=0.5", 1.75),
+            ("job=a,q=0.9", 4.0),
+            ("job=b,q=0.5", 1.75),
+            ("job=b,q=0.9", 4.0)
+        ])
+    );
+}
+
+// Relabeling anchors regexes, expands captures, preserves nonmatches and removes empty labels.
+#[test]
+fn label_replace_preserves_promql_labels() {
+    let samples: &[Sample] = &[
+        ("job=api:one,team=old", 50, 1.0),
+        ("job=other,team=old", 50, 2.0),
+    ];
+    assert_eq!(
+        labeled(
+            "label_replace(a, \"team\", \"$1\", \"job\", \"(.*):.*\")",
+            &[("a", samples)],
+            60
+        ),
+        rows(&[
+            ("__name__=a,job=api:one,team=api", 1.0),
+            ("__name__=a,job=other,team=old", 2.0)
+        ])
+    );
+    assert_eq!(
+        labeled(
+            "label_replace(a, \"team\", \"\", \"job\", \".*\")",
+            &[("a", samples)],
+            60
+        ),
+        rows(&[
+            ("__name__=a,job=api:one", 1.0),
+            ("__name__=a,job=other", 2.0)
+        ])
+    );
+}
+
+// Binary results over aggregates retain labels contributed by the other operand.
+#[test]
+fn binary_aggregates_accept_additional_labels() {
+    let a: &[Sample] = &[("job=x", 50, 2.0)];
+    let info: &[Sample] = &[("job=x,team=blue", 50, 3.0)];
+    assert_eq!(
+        labeled(
+            "sum by(job)(a) * on(job) group_left(team) info",
+            &[("a", a), ("info", info)],
+            60
+        ),
+        rows(&[("job=x,team=blue", 6.0)])
+    );
+    assert_eq!(
+        labeled("sum by(job)(a) or info", &[("a", a), ("info", info)], 60),
+        rows(&[("job=x", 2.0), ("__name__=info,job=x,team=blue", 3.0)])
+    );
+}
+
+// Relabeling handles missing sources and named captures, and rejects label-set collisions.
+#[test]
+fn label_replace_missing_labels_named_captures_and_duplicates() {
+    let a: &[Sample] = &[("job=api:one", 50, 2.)];
+    assert_eq!(
+        labeled(
+            r#"label_replace(a, "team", "${part}", "job", "(?P<part>.*):.*")"#,
+            &[("a", a)],
+            60
+        ),
+        rows(&[("__name__=a,job=api:one,team=api", 2.)])
+    );
+    assert_eq!(
+        labeled(
+            r#"label_replace(a, "team", "unknown", "missing", "^$")"#,
+            &[("a", a)],
+            60
+        ),
+        rows(&[("__name__=a,job=api:one,team=unknown", 2.)])
+    );
+    assert!(evaluate(r#"label_replace(a, "", "x", "job", ".*")"#, &[("a", a)], 60).is_err());
+    let duplicate: &[Sample] = &[("job=a", 50, 1.), ("job=b", 50, 2.)];
+    assert!(evaluate(
+        r#"label_replace(a, "job", "same", "job", ".*")"#,
+        &[("a", duplicate)],
+        60
+    )
+    .unwrap_err()
+    .contains("same labelset"));
+}
+
+// Right-side grouped rows and group_right labels survive an aggregated left schema.
+#[test]
+fn grouped_binary_right_rows_preserve_all_labels() {
+    let a: &[Sample] = &[("job=x", 50, 2.)];
+    let info: &[Sample] = &[("job=x,team=blue", 50, 3.)];
+    let metrics = &[("a", a), ("info", info)];
+    assert_eq!(
+        labeled("sum by(job)(a) * on(job) group_right info", metrics, 60),
+        rows(&[("job=x,team=blue", 6.)])
+    );
+    assert_eq!(
+        labeled("sum by(job)(a) or sum by(job,team)(info)", metrics, 60),
+        rows(&[("job=x", 2.), ("job=x,team=blue", 3.)])
+    );
+    let samples = buckets(&[("job=a", HISTOGRAM)]);
+    assert!(evaluate(
+        r#"histogram_quantiles(x_bucket, "q", 0.5, 0.5)"#,
+        &[("x_bucket", &samples)],
+        60
+    )
+    .unwrap_err()
+    .contains("same labelset"));
+}
+
+// Range-bound anchors compile without freezing the evaluation instant into the plan.
+#[test]
+fn range_bound_anchors_compile() {
+    for query in [
+        "a @ start()",
+        "sum_over_time(a[1m] @ end())",
+        "max_over_time(a[2m:1m] @ start())",
+    ] {
+        assert!(compile_query(query).is_ok(), "{query}");
+    }
+}
+
+// Stored programs resolve outer range anchors per run, including offsets and subquery grids.
+#[test]
+fn range_bound_anchors_use_outer_query_bounds() {
+    let samples: &[Sample] = &[
+        ("job=a", 30, 1.),
+        ("job=a", 60, 2.),
+        ("job=a", 90, 3.),
+        ("job=a", 120, 4.),
+    ];
+    for (query, expected) in [
+        ("a @ start()", 2.),
+        ("a @ end()", 4.),
+        ("a @ start() offset 30s", 1.),
+        ("sum_over_time(a[1m] @ end())", 7.),
+        ("max_over_time(a[2m:1m] @ start())", 2.),
+        ("max_over_time(a[2m:1m] @ end())", 4.),
+        ("max_over_time(a[2m:1m] @ end() offset 1m)", 2.),
+        ("max_over_time(a @ end()[2m:1m])", 4.),
+    ] {
+        let expression = lower(query);
+        let dag = fallback_dag(expression.clone());
+        let output =
+            evaluate_dag_with_range(&expression, &dag, &[("a", samples)], 90, Some((60, 120)))
+                .unwrap();
+        assert_eq!(output.len(), 1, "{query}");
+        assert_eq!(output[0].2, expected, "{query}");
+        assert_eq!(output[0].1, 90_000, "{query}");
+        let error = evaluate_dag(&expression, &dag, &[("a", samples)], 90).unwrap_err();
+        assert!(error.contains("query range bounds"), "{query}: {error}");
+    }
+}
+
+// Regression functions use float samples per series; prediction is anchored
+// at the evaluation time even when offset or @ selects an older window.
+#[test]
+fn regression_range_functions_use_evaluation_time_and_drop_names() {
+    let samples: &[Sample] = &[("job=x", 10, 3.), ("job=x", 30, 7.), ("job=x", 50, 11.)];
+    for (query, at, expected) in [
+        ("deriv(a[1m])", 60, 0.2),
+        ("predict_linear(a[1m], 10)", 60, 15.),
+        ("predict_linear(a[1m] offset 30s, 10)", 90, 21.),
+        ("predict_linear(a[1m] @ 60, 10)", 90, 21.),
+    ] {
+        let result = labeled(query, &[("a", samples)], at);
+        assert_eq!(result.len(), 1, "{query}");
+        assert_eq!(result[0].0, "job=x");
+        assert!(
+            (result[0].1 - expected).abs() < 1e-12,
+            "{query}: {result:?}"
+        );
+    }
+    let constant: &[Sample] = &[("job=x", 10, 1e300), ("job=x", 50, 1e300)];
+    assert_eq!(
+        labeled("deriv(a[1m])", &[("a", constant)], 60),
+        rows(&[("job=x", 0.)])
+    );
+    assert_eq!(
+        labeled("predict_linear(a[1m], 10)", &[("a", constant)], 60),
+        rows(&[("job=x", 1e300)])
+    );
+    assert!(labeled("deriv(a[1m])", &[("a", &samples[..1])], 60).is_empty());
+    let infinite: &[Sample] = &[("job=x", 10, f64::INFINITY), ("job=x", 50, f64::INFINITY)];
+    assert!(labeled("deriv(a[1m])", &[("a", infinite)], 60)[0]
+        .1
+        .is_nan());
+}
+
+// An `@`-pinned range function is step-invariant, as in Prometheus: it is
+// evaluated once, at the query start or at the subquery's first step, so
+// predict_linear's anchor does not move with each evaluation step.
+#[test]
+fn pinned_range_functions_are_step_invariant() {
+    // `a` rises by one per second, sampled every 10 s.
+    let rising: Vec<Sample> = (0..=30)
+        .map(|i| ("job=x", i * 10, (i * 10) as f64))
+        .collect();
+    // (query, range-query bounds, Prometheus value at T = 300 s).
+    for (query, bounds, expected) in [
+        // Subquery grid (180, 300] steps 240 and 300; one evaluation at 240.
+        (
+            "max_over_time(predict_linear(a[1m] @ 100, 0)[2m:1m])",
+            None,
+            240.,
+        ),
+        // A range query starting at 240 evaluates its grid from (120, 240]: at 180.
+        (
+            "max_over_time(predict_linear(a[1m] @ 100, 0)[2m:1m])",
+            Some((240, 300)),
+            180.,
+        ),
+        (
+            "max_over_time(predict_linear(a[1m] @ start(), 0)[2m:1m])",
+            Some((240, 300)),
+            180.,
+        ),
+        // A top-level pinned call is evaluated at the query start.
+        ("predict_linear(a[1m] @ 100, 0)", Some((240, 300)), 240.),
+        ("predict_linear(a[1m] @ 100, 0)", None, 300.),
+        // Functions that do not read the evaluation time are unchanged.
+        ("max_over_time(deriv(a[1m] @ 100)[2m:1m])", None, 1.),
+        ("max_over_time(rate(a[1m] @ 100)[2m:1m])", None, 1.),
+        ("max_over_time(a @ 100[2m:1m])", None, 100.),
+        // Without `@`, the anchor is each step: the latest step, 300, wins.
+        ("max_over_time(predict_linear(a[1m], 0)[2m:1m])", None, 300.),
+    ] {
+        let expression = lower(query);
+        let dag = fallback_dag(expression.clone());
+        let output = evaluate_dag_with_range(&expression, &dag, &[("a", &rising)], 300, bounds)
+            .unwrap_or_else(|e| panic!("{query}: {e}"));
+        assert_eq!(output.len(), 1, "{query}");
+        assert!(
+            (output[0].2 - expected).abs() < 1e-9,
+            "{query} {bounds:?}: {} != {expected}",
+            output[0].2
+        );
+    }
+}
+
+// Dropping an inner range function's metric name rejects equal labels within
+// each subquery step, while allowing that labelset at different steps.
+#[test]
+fn subquery_label_uniqueness_is_checked_per_evaluation_step() {
+    let equal: &[Sample] = &[
+        ("job=x", 10, 1.),
+        ("job=x", 50, 2.),
+        ("__name__=b,job=x", 10, 1.),
+        ("__name__=b,job=x", 50, 4.),
+    ];
+    let query = "last_over_time(rate(a[1m])[2m:1m])";
+    let error = evaluate(query, &[("a", equal)], 60).unwrap_err();
+    assert!(error.contains("same labelset"), "{error}");
+    let disjoint: &[Sample] = &[
+        ("job=x", -50, 1.),
+        ("job=x", -10, 2.),
+        ("__name__=b,job=x", 10, 3.),
+        ("__name__=b,job=x", 50, 5.),
+    ];
+    let result = labeled(query, &[("a", disjoint)], 60);
+    assert_eq!(result.len(), 1);
+    assert_eq!(result[0].0, "job=x");
+    assert!((result[0].1 - 0.05).abs() < 1e-12);
+}
+
+// Non-finite histogram quantile parameters survive the logical DAG JSON boundary too.
+#[test]
+fn logical_nonfinite_quantile_parameter_round_trips() {
+    let expression = lower("histogram_quantile(NaN, x_bucket)");
+    let restored: QueryExpr =
+        serde_json::from_slice(&serde_json::to_vec(&expression).unwrap()).unwrap();
+    let samples = buckets(&[("job=a", HISTOGRAM)]);
+    let result = evaluate_dag(
+        &restored,
+        &fallback_dag(restored.clone()),
+        &[("x_bucket", &samples)],
+        60,
+    )
+    .unwrap();
+    assert_eq!(result.len(), 1);
+    assert!(result[0].2.is_nan());
 }

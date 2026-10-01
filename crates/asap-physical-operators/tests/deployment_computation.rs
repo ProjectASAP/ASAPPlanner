@@ -11,13 +11,17 @@ use planner_types::{post_asap::*, pre_asap::QueryExpr, types::AccuracyTarget, wo
 use std::{collections::BTreeMap, rc::Rc, sync::Arc};
 
 fn lower(query: &str) -> QueryExpr {
+    lower_with(query, AccuracyTarget::Exact)
+}
+
+fn lower_with(query: &str, accuracy: AccuracyTarget) -> QueryExpr {
     let workload = PlanningWorkload {
         query_workload: QueryWorkload {
             language: QueryLanguage::PromQL,
             query_batch: Some(vec![BatchEntry {
                 query: Query(query.into()),
                 requirements: QueryRequirements {
-                    accuracy: AccuracyRequirement::Explicit(AccuracyTarget::Exact),
+                    accuracy: AccuracyRequirement::Explicit(accuracy),
                     ..Default::default()
                 },
                 predictability: Predictability::Unknown,
@@ -382,7 +386,7 @@ fn grouped_comparisons_filter_or_return_bool() {
 }
 
 // A `bool` comparison Binary over per-series readouts matches one-to-one and
-// drops the metric name; a filter fails closed.
+// drops the metric name; a filter keeps the surviving left value.
 #[test]
 fn per_series_comparisons_filter_or_return_bool() {
     use planner_types::pre_asap::{BinaryOpKind::*, CompareOpKind::*};
@@ -393,9 +397,10 @@ fn per_series_comparisons_filter_or_return_bool() {
         .collect::<Vec<_>>();
     // rate: a{api} = a{db} = 50/300, b{api} = 25/300, b{db} = 100/300.
     let dag = exact_dag("rate(a[5m]) / rate(b[5m])");
-    // The readout keeps `__name__`, which rate drops, so a filter would keep it.
-    let error = run_series(&with_kind(dag.clone(), Compare(Gt)), &samples, 300_000).unwrap_err();
-    assert!(error.contains("__name__"), "{error}");
+    assert_eq!(
+        run_series(&with_kind(dag.clone(), Compare(Gt)), &samples, 300_000).unwrap(),
+        series(&[("api", "x", 50. / 300.)])
+    );
     assert_eq!(
         run_series(&with_kind(dag, CompareBool(Lt)), &samples, 300_000).unwrap(),
         series(&[("api", "x", 0.), ("db", "x", 1.)])
@@ -613,4 +618,106 @@ fn population_sums_and_averages_are_compensated() {
             "{query}"
         );
     }
+}
+
+// A bare count over stored Count-Min state compiles to a Planner readout that
+// returns the sketch's total update weight, including colliding items.
+#[test]
+fn stored_count_min_bare_count_compiles_to_a_readout() {
+    use asap_aware_mapping::{Replacement, ReplacementStrategy, TargetSubDAG};
+    use asap_physical_operators::summary_kernels::CountMinSketchAccumulator;
+    let root = Rc::new(lower_with("count(up)", AccuracyTarget::Epsilon(0.02)));
+    let dag =
+        asap_aware_mapping::SketchAlgorithmStrategy::new(&asap_aware_mapping::DefaultCostModel)
+            .replacements(&TargetSubDAG::new(&root))
+            .into_iter()
+            .find_map(|candidate| match candidate.replacement {
+                Replacement::Summary(node) => {
+                    let dag = compile_post_asap_dag(&node).ok()?;
+                    let bare_count = dag.nodes.iter().any(|n| {
+                        matches!(
+                            &n.payload,
+                            PostAsapOperatorPayload::SummaryEstimate {
+                                query: SketchQuery::PointCount { value: None, .. }
+                            }
+                        )
+                    });
+                    let count_min = dag.nodes.iter().any(|n| {
+                        matches!(&n.payload, PostAsapOperatorPayload::SummaryAgg {
+                        family: SummaryFamilyType::Sketch(kind, _), ..
+                    } if kind.algorithm() == &SketchAlgorithm::Cms)
+                    });
+                    (bare_count && count_min).then_some(dag)
+                }
+                _ => None,
+            })
+            .expect("Planner lists a Count-Min candidate for count(up)");
+    let state = dag
+        .nodes
+        .iter()
+        .find(|n| matches!(n.payload, PostAsapOperatorPayload::SummaryAgg { .. }))
+        .unwrap();
+    let PostAsapOperatorPayload::SummaryAgg {
+        family: SummaryFamilyType::Sketch(kind, _),
+        ..
+    } = &state.payload
+    else {
+        unreachable!()
+    };
+    let SketchParams::Cms { width, depth } = kind.params() else {
+        unreachable!()
+    };
+    let schema = Arc::new(state.output_schema.clone());
+    let program = compile(
+        &dag,
+        BTreeMap::from([(
+            u64::from(state.id.0),
+            InputContract::bounded(schema.clone()),
+        )]),
+        &[u64::from(dag.root.0)],
+    )
+    .unwrap();
+    let program: CompiledPhysicalDag =
+        serde_json::from_slice(&serde_json::to_vec(&program).unwrap()).unwrap();
+    let mut sketch = CountMinSketchAccumulator::new(*depth as usize, *width as usize);
+    sketch.inner.update("a", 3.0);
+    sketch.inner.update("b", 7.0);
+    let row = schema
+        .fields
+        .iter()
+        .map(|field| match &field.dtype {
+            SummaryFamilyType::Plain(_) => panic!("unexpected stored column {field:?}"),
+            family => Value::Summary {
+                family: family.clone(),
+                state: Arc::new(sketch.clone()),
+            },
+        })
+        .collect();
+    let batch = Batch::try_new(schema.clone(), vec![row]).unwrap();
+    let graph = program
+        .instantiate(BTreeMap::from([(
+            u64::from(state.id.0),
+            Box::new(Operator::source(schema, vec![batch]).unwrap()) as Source<'_>,
+        )]))
+        .unwrap();
+    let context = RunContext::new(
+        Scope::Query {
+            evaluation_time_ms: 0,
+            revision: 0,
+        },
+        Limits::default(),
+    )
+    .unwrap();
+    let values = block_on(async {
+        let mut stream = graph.execute(program.roots(), context).unwrap().remove(0);
+        let mut values = Vec::new();
+        while let Some(batch) = stream.next().await {
+            values.extend(batch.unwrap().rows().iter().map(|row| row[0].clone()));
+        }
+        values
+    });
+    assert!(
+        matches!(values.as_slice(), [Value::Int64(10)]),
+        "{values:?}"
+    );
 }

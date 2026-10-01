@@ -176,7 +176,8 @@ impl Operator {
         let result_type = if matches!(
             fields[state].dtype,
             SummaryFamilyType::ExactAggregate(planner_types::post_asap::ExactKind::Count, _)
-        ) {
+        ) || integral_count(family, &query)
+        {
             DataType::Int64
         } else {
             DataType::Float64
@@ -199,6 +200,20 @@ impl Operator {
             output: schema(fields),
         })
     }
+}
+/// The Planner reads a Count-Min bare count only for count intents, whose
+/// output is Int64 and whose updates have unit weight; execution rejects a
+/// non-integral total rather than rounding it.
+fn integral_count(family: &SummaryFamilyType, query: &ReadoutQuery) -> bool {
+    matches!(family, SummaryFamilyType::Sketch(kind, _)
+        if kind.algorithm() == &planner_types::post_asap::SketchAlgorithm::Cms)
+        && matches!(
+            query,
+            ReadoutQuery::Sketch(planner_types::post_asap::SketchQuery::PointCount {
+                value: None,
+                ..
+            })
+        )
 }
 pub(super) fn execute<'a>(
     operator: &'a Operator,
@@ -276,11 +291,24 @@ pub(super) fn execute<'a>(
                         return Err(invalid("summary value required"));
                     };
                     row[*state] = match query {
-                        ReadoutQuery::Sketch(query) => Value::Float64(
-                            summary
+                        ReadoutQuery::Sketch(query) => {
+                            let value = summary
                                 .estimate(query)
-                                .map_err(|e| Error::Operator(e.to_string()))?,
-                        ),
+                                .map_err(|e| Error::Operator(e.to_string()))?;
+                            if output.fields[*state].dtype
+                                == SummaryFamilyType::Plain(DataType::Int64)
+                            {
+                                // Below 2^53 an f64 sum of unit updates is exact.
+                                if value.fract() != 0.0 || !(0.0..9.007_199_254_740_992e15).contains(&value) {
+                                    return Err(Error::Operator(
+                                        "Count-Min count is not an exact integer".into(),
+                                    ));
+                                }
+                                Value::Int64(value as i64)
+                            } else {
+                                Value::Float64(value)
+                            }
+                        }
                         ReadoutQuery::Exact(readout) => {
                             let exact = summary
                                 .as_any()

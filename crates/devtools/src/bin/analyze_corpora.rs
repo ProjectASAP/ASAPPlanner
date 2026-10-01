@@ -379,7 +379,7 @@ fn anomaly_report(all: &[DumpRecord], language: &str, manual_notes: &str) -> Str
     }
 
     report.push_str("\n## Manual review findings\n\n");
-    report.push_str("- **Serialization caveat:** JSON renders non-finite floating-point values such as `NaN` and `±Inf` as `null`; use the `ir_debug` field in each per-query file when reviewing those values. Fingerprints use this lossless debug representation.\n");
+    report.push_str("- **Serialization caveat:** Scalar literals and intent parameters encode non-finite values as explicit `NaN`/`±Inf` strings; other floating fields may still render as `null`. Use the `ir_debug` field when reviewing those values. Fingerprints use this lossless debug representation.\n");
     if language == "PromQL" {
         report.push_str("- **Known semantic collapse to review:** `rate(cumulative[5m])` and `");
         report.push_str("`irate(cumulative[5m])` produces `AggIntent::IRate`. Confirm that this ");
@@ -387,7 +387,7 @@ fn anomaly_report(all: &[DumpRecord], language: &str, manual_notes: &str) -> Str
             "abstraction is intentional; PromQL defines different sampling behavior for ",
         );
         report.push_str("the two functions.\n");
-        report.push_str("- **Likely information-loss candidate:** `left_vector == bool fill(30) right_vector` and `left_vector == fill(30) right_vector` produce identical `BinaryOp` IR. PromQL's `bool` comparison modifier changes filtering into a 0/1-valued result, but the current `BinaryOp` representation has no return-bool field.\n");
+        report.push_str("- **Comparison modifiers:** `bool` is represented by `BinaryOpKind::CompareBool`; filtering comparisons use `Compare`. Unsupported `fill`, `fill_left`, and `fill_right` modifiers are rejected during lowering.\n");
         report.push_str("- **Apparently intentional canonicalization:** redundant parentheses, ");
         report.push_str(
             "duration spellings such as `50`/`50s`, and equivalent `@`/`offset` modifier ",

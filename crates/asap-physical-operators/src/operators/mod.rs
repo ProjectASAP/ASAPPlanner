@@ -43,6 +43,7 @@ enum Kind {
         value: Value,
         dtype: DataType,
     },
+    EvaluationTime,
     ScopeTimestamp {
         columns: Vec<Option<usize>>,
     },
@@ -77,6 +78,10 @@ enum Kind {
         offset_ms: i64,
         at_ms: Option<i64>,
         steps: Option<SubquerySteps>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        range_at: Option<planner_types::pre_asap::AtModifier>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        steps_range_at: Option<planner_types::pre_asap::AtModifier>,
     },
     SeriesLabels {
         kind: planner_types::pre_asap::VectorMatchKind,
@@ -86,6 +91,11 @@ enum Kind {
     SeriesBinary {
         operator: planner_types::post_asap::BinaryOperator,
         scalars: [bool; 2],
+    },
+    SeriesRelabel {
+        destination: String,
+        replacement: String,
+        source_regex: Option<(String, String)>,
     },
     SeriesHistogramQuantile {
         /// `f64` bits: JSON cannot encode the NaN and infinite quantiles.
@@ -267,6 +277,7 @@ impl PhysicalOperator<Batch, Schema> for Operator {
                 | Kind::SeriesLabels { .. }
                 | Kind::SeriesBinary { .. }
                 | Kind::SeriesHistogramQuantile { .. }
+                | Kind::SeriesRelabel { .. }
                 | Kind::Aggregate { .. }
                 | Kind::Window { .. }
                 | Kind::Join { .. }
@@ -279,7 +290,7 @@ impl PhysicalOperator<Batch, Schema> for Operator {
     }
     fn properties(&self, inputs: &[PlanProperties]) -> PlanProperties {
         let boundedness = match &self.kind {
-            Kind::Source(_) | Kind::Constant { .. } => Boundedness::Bounded,
+            Kind::Source(_) | Kind::Constant { .. } | Kind::EvaluationTime => Boundedness::Bounded,
             Kind::Limit { groups, .. } if groups.is_empty() => Boundedness::Bounded,
             _ => Boundedness::from_inputs(inputs),
         };
@@ -300,6 +311,7 @@ impl PhysicalOperator<Batch, Schema> for Operator {
     fn name(&self) -> &str {
         match self.kind {
             Kind::Source(_) => "Source",
+            Kind::EvaluationTime => "EvaluationTime",
             Kind::Constant { .. } => "Constant",
             Kind::ScopeTimestamp { .. } => "ScopeTimestamp",
             Kind::Union => "Union",
@@ -312,6 +324,7 @@ impl PhysicalOperator<Batch, Schema> for Operator {
             Kind::SeriesWindow { .. } => "SeriesWindow",
             Kind::SeriesLabels { .. } => "SeriesLabels",
             Kind::SeriesBinary { .. } => "SeriesBinary",
+            Kind::SeriesRelabel { .. } => "SeriesRelabel",
             Kind::SeriesHistogramQuantile { .. } => "SeriesHistogramQuantile",
             Kind::Project(_) => "Project",
             Kind::Filter(_) => "Filter",
@@ -347,9 +360,11 @@ impl PhysicalOperator<Batch, Schema> for Operator {
         context: RunContext,
     ) -> Result<OutputStream<'a, Batch>, Error> {
         match self.kind {
-            Kind::Source(_) | Kind::Constant { .. } | Kind::Union | Kind::VectorToScalar { .. } => {
-                source::execute(self, inputs, context)
-            }
+            Kind::Source(_)
+            | Kind::Constant { .. }
+            | Kind::EvaluationTime
+            | Kind::Union
+            | Kind::VectorToScalar { .. } => source::execute(self, inputs, context),
             Kind::VectorBinary { .. } => vector_binary::execute(self, inputs, context),
             Kind::AlignedBinary { .. } => aligned_binary::execute(self, inputs, context),
             Kind::RangeWindow { .. } | Kind::HistogramQuantile => {
@@ -361,7 +376,8 @@ impl PhysicalOperator<Batch, Schema> for Operator {
             Kind::SeriesWindow { .. } => series_window::execute(self, inputs, context),
             Kind::SeriesLabels { .. }
             | Kind::SeriesBinary { .. }
-            | Kind::SeriesHistogramQuantile { .. } => series_labels::execute(self, inputs, context),
+            | Kind::SeriesHistogramQuantile { .. }
+            | Kind::SeriesRelabel { .. } => series_labels::execute(self, inputs, context),
             Kind::Filter(_) => filter::execute(self, inputs, context),
             Kind::Limit { .. } => limit::execute(self, inputs, context),
             Kind::Sort { .. } => sort::execute(self, inputs, context),

@@ -1,5 +1,13 @@
 use super::*;
 impl Operator {
+    pub(crate) fn evaluation_time() -> Self {
+        Self {
+            kind: Kind::EvaluationTime,
+            inputs: vec![],
+            output: schema(vec![result_field("value", DataType::Float64, false)]),
+        }
+    }
+
     pub fn source(output: Schema, batches: Vec<Batch>) -> Result<Self, Error> {
         crate::values::validate_schema(&output)?;
         if batches.iter().any(|b| b.schema() != &output) {
@@ -57,6 +65,18 @@ pub(super) fn execute<'a>(
     if let Kind::Constant { value, .. } = &operator.kind {
         return Ok(futures::stream::once(async move {
             Batch::try_new(output, vec![vec![value.clone()]])
+        })
+        .boxed_local());
+    }
+    if matches!(operator.kind, Kind::EvaluationTime) {
+        let at = match context.scope {
+            crate::runtime::Scope::Query {
+                evaluation_time_ms, ..
+            } => evaluation_time_ms,
+            crate::runtime::Scope::Ingestion { window_end_ms, .. } => window_end_ms,
+        };
+        return Ok(futures::stream::once(async move {
+            Batch::try_new(output, vec![vec![Value::Float64(at as f64 / 1000.0)]])
         })
         .boxed_local());
     }

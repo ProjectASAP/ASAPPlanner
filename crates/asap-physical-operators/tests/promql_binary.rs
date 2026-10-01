@@ -302,3 +302,163 @@ fn label_map_bool_comparison_drops_the_name() {
         .all(|(k, _)| !matches!(k, Value::Utf8(k) if &**k == "__name__")));
     assert!(matches!(row[1], Value::Float64(v) if v == 1.));
 }
+
+// Stored temporal readouts drop metric names before filter comparisons and set matching.
+#[test]
+fn stored_series_readouts_support_filters_and_sets() {
+    use asap_physical_operators::{
+        physical_planner::compile, summary_kernels::exact::ExactAccumulator,
+    };
+    use planner_types::post_asap::*;
+    use planner_types::pre_asap::{
+        schema::PROMQL_SERIES_IDENTITY, CompareOpKind, PromQLVectorSetOpKind,
+    };
+    for (exact_kind, params) in [
+        (ExactKind::Sum, ExactParams::Sum),
+        (ExactKind::Count, ExactParams::Count),
+    ] {
+        let family = SummaryFamilyType::ExactAggregate(exact_kind.clone(), params);
+        let state_schema = Arc::new(SummarySchema {
+            fields: vec![
+                SummaryField {
+                    name: PROMQL_SERIES_IDENTITY.into(),
+                    dtype: SummaryFamilyType::Plain(DataType::Utf8),
+                    nullable: false,
+                },
+                SummaryField {
+                    name: "value".into(),
+                    dtype: family.clone(),
+                    nullable: false,
+                },
+            ],
+            time_index: None,
+        });
+        let mut value_schema = (*state_schema).clone();
+        value_schema.fields[1].dtype = SummaryFamilyType::Plain(DataType::Float64);
+        for kind in [
+            BinaryOpKind::Compare(CompareOpKind::Gt),
+            BinaryOpKind::Set(PromQLVectorSetOpKind::And),
+            BinaryOpKind::Set(PromQLVectorSetOpKind::Or),
+        ] {
+            let nodes = (0..5)
+                .map(|id| PostAsapDagNode {
+                    id: PostAsapNodeId(id),
+                    payload: match id {
+                        0 | 1 => PostAsapOperatorPayload::SummaryMerge,
+                        2 | 3 => PostAsapOperatorPayload::Value {
+                            operation: ValueOperation::FinalizeExactAccumulator,
+                        },
+                        _ => PostAsapOperatorPayload::Binary {
+                            operator: BinaryOperator {
+                                kind: kind.clone(),
+                                vector_match: None,
+                                checked_relative_division: false,
+                                checked_finite_division: false,
+                            },
+                        },
+                    },
+                    output_state: if id < 2 {
+                        ExecutionDataState::INGESTION_SUMMARY
+                    } else {
+                        ExecutionDataState::QUERY_ROWS
+                    },
+                    output_schema: if id < 2 {
+                        (*state_schema).clone()
+                    } else {
+                        value_schema.clone()
+                    },
+                    guarantee: None,
+                })
+                .collect::<Vec<_>>();
+            let edges = [
+                (0, 2, EdgeRole::Input),
+                (1, 3, EdgeRole::Input),
+                (2, 4, EdgeRole::Left),
+                (3, 4, EdgeRole::Right),
+            ]
+            .into_iter()
+            .map(|(producer, consumer, role)| PostAsapDagEdge {
+                producer: PostAsapNodeId(producer),
+                consumer: PostAsapNodeId(consumer),
+                role,
+                intermediate_schema: nodes[producer as usize].output_schema.clone(),
+                data_state: nodes[producer as usize].output_state,
+                grouping: GroupingEdgeCompatibility::NotApplicable,
+                window: WindowEdgeCompatibility::NotApplicable,
+            })
+            .collect();
+            let dag = PostAsapDag {
+                nodes,
+                edges,
+                root: PostAsapNodeId(4),
+            };
+            let graph = compile(
+                &dag,
+                BTreeMap::from([
+                    (0, InputContract::bounded(state_schema.clone())),
+                    (1, InputContract::bounded(state_schema.clone())),
+                ]),
+                &[4],
+            )
+            .unwrap();
+            let graph: CompiledPhysicalDag =
+                serde_json::from_slice(&serde_json::to_vec(&graph).unwrap()).unwrap();
+            let sources = [(0, "a", 6.), (1, "b", 2.)]
+                .into_iter()
+                .map(|(id, name, value)| {
+                    let mut state = ExactAccumulator::new(family.clone(), false).unwrap();
+                    if exact_kind == ExactKind::Count {
+                        for _ in 0..value as usize {
+                            state.update(None, 1.0, 0);
+                        }
+                    } else {
+                        state.update(None, value, 0);
+                    }
+                    let identity = serde_json::to_string(&BTreeMap::from([
+                        ("__name__", name),
+                        ("job", "api"),
+                    ]))
+                    .unwrap();
+                    let batch = Batch::try_new(
+                        state_schema.clone(),
+                        vec![vec![
+                            Value::Utf8(identity.into()),
+                            Value::Summary {
+                                family: family.clone(),
+                                state: Arc::new(state),
+                            },
+                        ]],
+                    )
+                    .unwrap();
+                    (
+                        id,
+                        Box::new(Operator::source(state_schema.clone(), vec![batch]).unwrap())
+                            as Source<'_>,
+                    )
+                })
+                .collect();
+            let bound = graph.instantiate(sources).unwrap();
+            let context = RunContext::new(
+                Scope::Query {
+                    evaluation_time_ms: 1,
+                    revision: 0,
+                },
+                Limits::default(),
+            )
+            .unwrap();
+            let result = block_on(async {
+                let mut stream = bound.execute(&[4], context).unwrap().remove(0);
+                let mut rows = vec![];
+                while let Some(batch) = stream.next().await {
+                    rows.extend(batch.unwrap().rows().iter().cloned());
+                }
+                rows
+            });
+            assert_eq!(result.len(), 1, "{kind:?}");
+            assert!(
+                matches!(&result[0][0], Value::Utf8(labels) if labels.as_ref()==r#"{"job":"api"}"#)
+            );
+            assert!(matches!(result[0][1], Value::Float64(6.)));
+        }
+    }
+}
