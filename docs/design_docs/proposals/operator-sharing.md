@@ -38,9 +38,57 @@ ValueOperation(Project)         ← a copy         NonASAP(Project)
 
 ### 1.1 Unified `Operator` type
 
-Common operations—children, schema, guarantee and timing—are methods on `Operator`.
-Each enum branch implements them for its category; variant-specific data, such as
-`Aggregate.measures` and `SummaryAgg.family`, stays on the variant.
+**Why one operator type?** Today a relational subtree inside `KeepPreAsap` is
+opaque to the surrounding summary plan. To put a `Project` above a summary, the
+planner needs a second project representation; to share the enclosed `Scan` with
+another computation, it must cross that wrapper. Both problems come from giving
+relational and summary plans different node types.
+
+Use `Operator` as the common node type, with `Rc<Operator>` children. Then
+`Project → SummaryEstimate → SummaryAgg → Scan` is one traversable DAG. Assembly,
+sharing and export can follow every edge using the same interface. Each relational
+operator keeps one definition wherever it appears in the plan.
+
+**Why keep two categories?** Relational operators describe ordinary query semantics;
+ASAP operators introduce summary state and its accuracy and lifecycle rules. Keeping
+`NonASAPOp` and `ASAPOp` separate lets schema and validation code handle those rules
+by category while common traversals work on `Operator`. A single flat enum could
+also express the DAG; the two-level enum keeps that semantic distinction explicit,
+at the cost of another match when dispatching to a variant. It does not prove that
+a whole subtree is non-ASAP: children can contain either category, so optimizer
+entry still validates frontend DAGs (§3).
+
+**Why a common interface?** Traversals need children, schema, guarantee and timing
+for every node. These are methods on `Operator`; each category implements its own
+rules. Data needed by only one operator, such as `Aggregate.measures` or
+`SummaryAgg.family`, stays on that variant. `map_children` lets assembly replace
+inputs while retaining the parent operator, including operators with no special
+summary-planning logic.
+
+The methods below expose a node's inputs and attributes. They are illustrative
+signatures, not a finalized API. `C` describes how column references are represented
+(e.g. `ColumnId`); `C: ColState` requires that representation to support the column
+operations used by the IR.
+
+| Method | Meaning and purpose | Example |
+|---|---|---|
+| `children()` | Read the node's immediate input operators. Generic traversals use this to walk the DAG without matching every operator kind. It does not return scalar expressions or all descendants. | A `Filter` has one input; a `Join` has two; a `Scan` has none. |
+| `map_children(f)` | Return a copy of this operator with `f` applied to each immediate input, keeping its other fields. Assembly uses it to connect selected child plans under an existing parent. It does not recursively rewrite the DAG by itself. | Keep a `Project` and its expressions, but replace its input aggregate with a selected summary-estimation subtree. |
+| `output_schema()` | Compute the output fields and their types, or report a schema error. Parents and export need this to interpret the node's result. | `SummaryAgg` outputs grouping fields and summary state; `SummaryEstimate` outputs grouping fields and estimated values. |
+| `guarantee()` | Read the stored accuracy result without computing it. Selection and validation use the result after guarantee derivation. | `Unset`: not derived; `Set(Some(g))`: known guarantee, including exactness; `Set(None)`: no guarantee established. |
+| `timing()` | Read the stored execution phase without choosing it. Export uses this after a lifecycle assignment has been applied. | `Unset`, `Set(IngestionTime)` or `Set(QueryTime)`. |
+| `with_guarantee(g)` | Return a copy of this node with its guarantee slot set to `Set(g)`. The guarantee pass uses it to record its calculation. | `with_guarantee(None)` records that derivation found no guarantee; it does not leave the slot unset. |
+| `with_timing(t)` | Return a copy of this node with its timing slot set to `Set(t)`. The timing pass uses it to record the lifecycle's choice. | `with_timing(QueryTime)` marks the copied node for query-time execution. |
+
+`&self` means the method reads the current node. `Self` means it returns a node of
+this same type; `with_*` and `map_children` do not mutate the original or rewrite its
+descendants. The passes are responsible for traversal and validation: setting a
+slot alone does not prove that its value is valid. After replacing children, rerun
+the attribute passes before export because the copied slots may be stale.
+
+`Rc` is a shared reference to a node. Thus `children()` returns borrowed references
+to existing inputs, while the callback passed to `map_children` returns the shared
+reference to use for each replacement input.
 
 ```rust
 pub enum Operator<C: ColState = ColumnId> {
@@ -57,13 +105,29 @@ impl<C: ColState> Operator<C> {   // implemented for every operator
     pub fn with_guarantee(&self, guarantee: Option<ResultGuarantee>) -> Self;
     pub fn with_timing(&self, timing: ExecutionTiming) -> Self;
 }
-
-/// `Slot` represents a value that may be unset or set.
-/// `guarantee` is filled by derivation (§2.2), `timing` by applying a lifecycle
-/// assignment (§2.3). Both are `Unset` on a freshly built node.
-pub enum Slot<T> { Unset, Set(T) }
-
 ```
+
+**Why defer attributes?** A node's complete accuracy guarantee depends on its
+assembled inputs; its execution timing depends on the chosen lifecycle. Construction
+therefore leaves both unresolved. Explicit passes fill them once that context is
+available (§2), so constructors do not guess timings or duplicate error-composition
+logic. Export reads the completed attributes and rejects an unfinished plan.
+
+`Slot` distinguishes “not computed yet” from a computed result. In particular,
+`Unset` means the guarantee pass has not run, while `Set(None)` means it ran but
+could not establish a guarantee. Collapsing those states would hide missing passes.
+Schema is computed from the operator and its children rather than stored as another
+copy that a rewrite could leave stale.
+
+```rust
+pub enum Slot<T> { Unset, Set(T) }
+```
+
+**Why return new nodes?** Candidate plans can share nodes. Mutating a node's timing
+for one candidate could change another candidate that needs a different lifecycle.
+Immutable nodes keep those plans independent: `with_*` and the attribute passes
+return new nodes. This requires allocation and explicit preservation of sharing
+within each resulting plan.
 
 **Preserve sharing while filling attributes.** Guarantee derivation and timing
 assignment return new nodes because the IR is immutable. If two queries share a
@@ -121,9 +185,10 @@ pub fn apply_lifecycle_timings(
 - **Recomputation:** `derive_guarantees` fills guarantee slots from local evidence
   and child guarantees. `apply_lifecycle_timings` overwrites timing slots from the
   assignment. Run rewrites before these passes.
-- **Equality:** timing participates in `PartialEq` and `Hash`; derived guarantees do
-  not. Equal subtrees derive equal guarantees under the same accuracy model and
-  evidence. `ResultGuarantee` contains `f64` and has no `Hash`.
+- **Equality:** timing participates in `PartialEq` and `Hash` because computations
+  assigned to different phases cannot be merged into one execution. Derived
+  guarantees do not: they describe the computation rather than identify it. Equal
+  subtrees derive equal guarantees under the same accuracy model and evidence.
 
 ```text
 Operator<C>
@@ -140,7 +205,9 @@ Operator<C>
 ### 1.2 `NonASAPOp`
 
 `NonASAPOp` contains the operator variants split from `QueryExpr` in the
-[decoupling proposal](decoupling_op_and_expr.md#2-types).
+[decoupling proposal](decoupling_op_and_expr.md#2-types). Keeping scalar expressions
+in operator fields makes the graph's edges represent table or state dependencies;
+scalar expressions remain data interpreted against the owning operator's schema.
 
 ```rust
 pub enum NonASAPOp<C: ColState = ColumnId> {
@@ -166,7 +233,10 @@ Every variant also carries the `timing` and `guarantee` slots (§1.1), omitted a
 ### 1.3 `ASAPOp`
 
 `ASAPOp` contains today's summary variants from `SummaryExpr` and the
-summary-specific variants of `ValueOperation`.
+summary-specific variants of `ValueOperation`. These remain distinct operations
+because building state and estimating a value have different output types and
+execution constraints. For example, one `SummaryAgg` can feed several estimates
+without duplicating the summary state.
 
 ```rust
 pub enum ASAPOp<C: ColState = ColumnId> {
@@ -203,8 +273,10 @@ Legacy types map to the new IR as follows:
 
 ### 1.4 Child field
 
-Non-ASAP operators now sit on the same level as ASAP operators, so their children must
-be `Rc<Operator>` to allow free placement:
+Children use `Rc<Operator>` for two reasons: `Operator` allows either category as
+an input, and `Rc` lets multiple consumers reference the same node. Keeping children
+as `Rc<NonASAPOp>` would still prevent a relational operator from reading a summary;
+storing children by value would represent separate copies instead of shared work:
 
 ```rust
 // After the decoupling doc                      // After this proposal
