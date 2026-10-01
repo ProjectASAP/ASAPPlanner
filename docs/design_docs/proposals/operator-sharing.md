@@ -18,6 +18,26 @@ relational operators outside those wrappers. This causes three problems:
 - An operator without a post-ASAP counterpart cannot naturally contain summary-based
   children.
 
+For example, consider a p99 latency query that projects its input columns, builds a
+KLL summary, and projects the estimated result. The trees below read from the result
+at the top to the data source at the bottom:
+
+```text
+Today                                      Proposed
+Post-ASAP projection                       Project
+└─ Summary estimation                      └─ Summary estimation
+   └─ KLL summary build                       └─ KLL summary build
+      └─ Wrapped relational subplan              └─ Project
+         └─ Ordinary projection                     └─ Scan latency
+            └─ Scan latency
+```
+
+Today the two projections need separate representations, and the scan is hidden
+inside the wrapped subplan. In the proposed graph, both projections use the same
+operator definition and the scan is directly visible. An exact aggregate can also
+consume that scan when sharing is valid, as shown in §4. Similarly, a union can
+consume summary estimates without needing a separate post-ASAP union definition.
+
 The design removes these representation barriers. It makes composition and sharing
 possible; whether a particular rewrite or shared computation is valid still depends
 on query semantics, accuracy and execution timing.
