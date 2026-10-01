@@ -90,8 +90,7 @@ introduce state construction and readout.
 `CurrentTimestamp`, `EvalTimestamp` and `PromqlScalarFromVector` belong to
 `ScalarExpr`, defined in the [companion proposal](decoupling_op_and_expr.md#22-scalar-expressions).
 A constant needs no bridge operator. The sketches use resolved `ColumnId`s and
-`Schema`; name resolution precedes construction of these nodes. Compatibility
-changes from current types are collected in §6.
+`Schema`; name resolution precedes construction of these nodes.
 
 `NonASAPOp` retains the query semantics needed before and after optimization:
 
@@ -529,38 +528,7 @@ execution phases. `TimeShift`, subquery grids and `EvalTimestamp` retain their
 source-language evaluation context. A shared node identity alone does not permit
 reusing a result across different evaluation times.
 
-## 3. Planning responsibilities
-
-These are the stages defined in
-[#509](https://github.com/ProjectASAP/ASAPPlanner/pull/509), shown here only to explain
-how they use the common operator model:
-
-| Stage from #509 | Use of the unified representation |
-|---|---|
-| Frontends | Represent queries using operators and scalar expressions; any referenced operator nodes are `NonASAP`. Preserve source-language semantics. |
-| Logical ASAP-aware optimization | Form candidate graphs containing ordinary and summary operators, with no wrappers hiding their dependencies. |
-| Physical ASAP-aware optimization | Determine executable alternatives, including materialization and execution timing, for those candidate graphs. |
-| Plan selection | Evaluate complete physical candidates using workload requirements and deployment-provided models and capabilities. |
-| Deployment execution | Execute the selected graph, preserving its dependencies and assigned phases. |
-
-## 4. Export preserves the graph
-
-Export one node per operator and represent its input dependencies as edges. Export
-a shared producer once, with edges to all its consumers. Include dependencies
-referenced by scalar conversions and subqueries. Preserve scalar queries as
-expressions and their operator dependencies; do not invent a bridge node for export.
-
-Export preserves result kinds, resolved schemas, scalar value types and evaluation
-context, together with the applicable guarantees and assigned execution phases.
-Physical compilation may lower one logical operation to several physical
-operations, but must preserve its dependencies and meaning. The execution layer
-does not invent missing planning decisions.
-
-Changing the exported representation requires coordinated adoption by the planner
-and downstream readers while preserving existing query semantics and the selected
-plan's execution requirements.
-
-## 5. Acceptance criteria
+## 3. Acceptance criteria
 
 The design is successful when:
 
@@ -574,39 +542,3 @@ The design is successful when:
   optimization, with no bridge nodes or hidden subplans.
 - Structural and timing validation include query subgraphs referenced by scalar
   expressions; planner assessment includes their accuracy dependencies.
-- Export preserves visible dependencies and shared producers.
-
-## 6. Scope and compatibility
-
-The two documents define one resolved interface: this document owns
-`OperatorNode`, `Operator`, operation payloads and schema/validation interfaces;
-the companion owns `ScalarExpr`, its wrappers and language-semantic mappings.
-Existing type names are retained where their meanings still apply.
-
-| Change from current code | Final representation and compatibility rule |
-|---|---|
-| Separate ordinary/summary models and relational wrappers | Both categories use `OperatorNode` dependencies; no wrapped relational subplan. |
-| Mixed operator/scalar `QueryExpr` | Owned scalar expressions in operator fields; explicit scalar conversions/subqueries reference `OperatorNode`. |
-| Different pre-/post-ASAP binary payloads | One `BinaryOp.operator: BinaryOperator`, retaining `kind`, `vector_match` and checked-division flags. `return_bool` on `BinaryOp` adds PromQL comparison mode. |
-| Limit and time selection differences | Retain post-ASAP `Limit.partition_by`; optional `n` supports offset-only queries. `TimeRange.kind` distinguishes instant/range selection. |
-| Reserved ASAP key references | `SummaryDelete.key` and `SummaryJoin.key` use resolved `ColumnId`s, like other column references in this graph. |
-| Missing relation constructor | `Values` represents SQL literal rows and the one empty input row for SELECT without FROM. |
-| Separate edge schemas | Common `Schema` uses `Field` / `FieldDataType` while keeping the existing identity/time metadata (§2.1). |
-| `SummaryFamilyType`, `Column`, `Schema.columns` | Renamed `FieldDataType`, `Field`, `Schema.fields`; variants and payloads unchanged. |
-
-A rewrite that moves arithmetic into a scalar expression must preserve applicable
-checked-division guards and exact fallback. `ExprSemantics` selects language rules;
-it does not replace those proof conditions. Reserved ASAP operations still require
-their own semantic/capability design.
-
-The [companion semantic tables](decoupling_op_and_expr.md#3-semantic-requirements)
-use DataFusion 55.1.0 and Prometheus 3.15.0 as design targets. Their gaps also apply
-here: a common `Operator` type does not supply missing aggregate modifiers, value
-types or function contracts. This proposal changes neither repository dependencies
-nor the set of implemented language features.
-
-New accuracy metrics, accuracy-composition rules, computation-sharing algorithms and
-lifecycle policies are outside this proposal. Planning responsibilities follow #509.
-The scalar/operator separation is specified in the companion document. Storage,
-traversal algorithms, serialization fields and a code migration sequence are also
-outside this document.
