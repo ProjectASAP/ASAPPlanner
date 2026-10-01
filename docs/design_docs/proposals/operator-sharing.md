@@ -45,14 +45,19 @@ on query semantics, accuracy and execution timing.
 
 ### 1.1 Unified `Operator` type
 
-Every relation or vector computation is represented by an `Operator` node.
-Scalar computations use the companion proposal's `ScalarExpr`. The operator type
-has two categories:
+Relation, vector and summary-state computations are represented by `Operator`
+nodes. Scalar computations use the companion proposal's `ScalarExpr`. The operator
+type has two categories:
 
 ```rust
 enum Operator {
     NonASAP(NonASAPOp),
     ASAP(ASAPOp),
+}
+
+enum QueryRoot {
+    Operator(Rc<Operator>),
+    Scalar(ScalarExpr),
 }
 ```
 
@@ -68,7 +73,8 @@ operator kinds.
 `CurrentTimestamp`, `EvalTimestamp` and `PromqlScalarFromVector` belong to scalar
 expressions. Constants need no `PromqlScalarBridge`; query roots may directly hold
 a scalar expression. The [companion proposal](decoupling_op_and_expr.md) defines
-these boundaries and their SQL/PromQL semantic coverage.
+these boundaries and their SQL/PromQL semantic coverage. A scalar-only frontend
+query, such as `time()`, therefore needs no operator node.
 
 `SummaryMerge`, `SummarySubtract`, `SummaryDelete`, `SummaryJoin` and `Extension`
 are reserved in the proposed planner model; listing them does not establish planner
@@ -77,8 +83,8 @@ proposal (§6).
 
 `NonASAPOp` and `ASAPOp` describe the operation performed by a node. Inputs in both
 categories connect to `Operator` nodes, so either category can consume the other
-when their schema and execution constraints permit it. `NonASAP` classifies one
-node; it does not require all of that node's descendants to be non-ASAP.
+when their result kind, schema and execution constraints permit it. `NonASAP`
+classifies one node; it does not require all of that node's descendants to be non-ASAP.
 
 Both categories use the same graph model. A projection can consume a summary
 estimate, and a summary can consume the result of a filter or join. There is no
@@ -103,10 +109,11 @@ the existing query and summary models, but the sketches combine several changes:
 | Separate scalar expressions from operators | A related proposal, described in the [companion document](decoupling_op_and_expr.md); not a consequence of categorization alone. |
 | Represent execution timing chosen during physical planning | Follow the planning-stage design in [#509](https://github.com/ProjectASAP/ASAPPlanner/pull/509), rather than introduce a new timing policy here (§2.3). |
 
-**Naming and compatibility.** The sketches retain current operation, field and
-payload-type names. `NonASAPOp`, `ASAPOp` and the companion proposal's `ScalarExpr`
-are the new structural concepts; ordinary payloads such as `Predicate`,
-`ProjectItem`, `AggIntent`, `SketchQuery` and `SummaryFamilyType` keep their names.
+**Naming and compatibility.** Reuse current names where their semantics match.
+The companion proposal defines deliberate additions and changes, including
+`Values`, scalar query roots and typed scalar conversions. Ordinary payloads such
+as `Predicate`, `ProjectItem`, `AggIntent`, `SketchQuery` and `SummaryFamilyType`
+keep their names; retaining a name does not establish complete language coverage.
 
 The following changes are explicit:
 
@@ -228,8 +235,8 @@ The summary fields distinguish state construction and readout:
 | `query` / `readout` | The result requested from summary or maintained-population state |
 | `population` | The population whose membership and values are maintained |
 
-Schema, derived accuracy and execution timing describe every `Operator`, regardless
-of category (§2). They are omitted from these operation-specific sketches. Timing
+Result kind, schema, derived accuracy and execution timing describe `Operator`
+nodes in both categories (§2). They are omitted from these operation-specific sketches. Timing
 comes from lifecycle planning rather than a fixed field value implied by an operator
 kind; the final accuracy assessment combines local evidence with the actual inputs.
 
@@ -257,6 +264,22 @@ visible graph dependencies with defined cardinality rules. This prevents an
 arbitrary expression from being mistaken for a table-producing plan. The
 [companion proposal](decoupling_op_and_expr.md) defines this distinction.
 
+Its pre-ASAP `Rc<NonASAPOp<C>>` references become `Rc<Operator>` in the unified
+model, including `QueryRoot` and the inputs to `PromqlScalarFromVector`,
+`ScalarSubquery`, `Exists` and `InSubquery`. Their cardinality, NULL and NaN rules
+remain unchanged.
+
+For example, in `scalar(sum(up))`, `sum(up)` is an operator subgraph producing an
+instant vector. The scalar expression `PromqlScalarFromVector` references its
+result to obtain one number. A valid ASAP rewrite may replace that producer with
+a summary readout, preserving the required vector and accuracy semantics; it cannot
+substitute raw summary state. Ordinary expressions such as `price * 2` reference
+columns and literals, not a query subgraph.
+
+These are **query subgraphs referenced by scalar expressions**. The reference is
+an edge to a producer in the common graph, not a copy of the subgraph embedded in
+the expression. Scalar ownership does not change the producer's graph identity.
+
 ### 1.3 Scope of operator sharing
 
 Here, sharing means pre-ASAP and post-ASAP use the same operator definitions.
@@ -268,15 +291,17 @@ it does not introduce rules for sharing computations across queries.
 
 | Property | Meaning | How it is determined |
 |---|---|---|
-| Output schema | What the node produces: field names, types and relevant identity/time information | From the operation and its inputs |
+| Result kind and output schema | Whether the node produces a relation, instant vector, range vector or state, and its fields, types and identity/time information | From the operation and its inputs |
 | Accuracy guarantee | What can be established about the result's accuracy | From local accuracy evidence and the guarantees of its inputs |
 | Execution timing | Whether work runs at ingestion time or query time | From a lifecycle choice for the complete plan |
 
 ### 2.1 One schema model for values and state
 
-A common graph needs a common description of its edges. Schemas must distinguish
-ordinary values from summary state, so a consumer can determine whether an input is
-usable.
+A common graph needs a common description of its edges. Validate result kind as
+well as schema: matching numeric columns do not make a relation, an instant vector
+and a range vector interchangeable. Summary state is also distinct from ordinary
+values. The operation determines the applicable input/output contract; this does
+not require adding the same result-kind field to every node.
 
 For example, a KLL build produces state; its p99 estimation produces a numeric value.
 A numeric predicate can consume the estimate, but cannot treat the KLL state itself
@@ -286,13 +311,16 @@ permit it; exact aggregate state must be finalized before use as an ordinary val
 Schema information must preserve grouping fields, time information, uniqueness and
 series identity where relevant. Sharing operators must not change SQL or PromQL
 meaning. After a rewrite, schemas must describe the new inputs rather than the plan
-that was replaced.
+that was replaced. Scalar expressions instead have value types and evaluation
+contexts. A scalar root does not need a fabricated relation schema.
 
 ### 2.2 Preserve existing accuracy semantics
 
 The unified representation must preserve the existing accuracy model, composition
 rules and result guarantees. An operation's guarantee must still account for its
-actual inputs; unknown accuracy must not be treated as exactness.
+actual inputs, including producers referenced by scalar expressions. Reading an
+approximate result through `PromqlScalarFromVector` or a SQL scalar subquery does
+not make it exact; unknown accuracy must not be treated as exactness.
 
 This proposal adds no accuracy fields or new guarantee-calculation workflow.
 Changing the operator representation must not change the accuracy meaning of the
@@ -313,6 +341,12 @@ The representation must preserve the resulting execution constraints: ingestion-
 work cannot depend on query-time results, and consumers must receive values or state
 that are available when needed. Materialization choices, retention and plan selection
 remain governed by #509; this document does not define another lifecycle policy.
+These constraints also apply to query subgraphs referenced by scalar expressions.
+
+PromQL evaluation timestamps and SQL statement time are separate from these
+execution phases. `TimeShift`, subquery grids and `EvalTimestamp` retain their
+source-language evaluation context. A shared node identity alone does not permit
+reusing a result across different evaluation times.
 
 ## 3. Planning responsibilities
 
@@ -322,7 +356,7 @@ how they use the common operator model:
 
 | Stage from #509 | Use of the unified representation |
 |---|---|
-| Frontends | Produce a graph containing only `NonASAP` operators, preserving source-language semantics. |
+| Frontends | Produce an operator or scalar query root; any referenced operator nodes are `NonASAP`. Preserve source-language semantics. |
 | Logical ASAP-aware optimization | Form candidate graphs containing ordinary and summary operators, with no wrappers hiding their dependencies. |
 | Physical ASAP-aware optimization | Determine executable alternatives, including materialization and execution timing, for those candidate graphs. |
 | Plan selection | Evaluate complete physical candidates using workload requirements and deployment-provided models and capabilities. |
@@ -346,9 +380,9 @@ This keeps the graph visible to costing, physical compilation, execution and pla
 inspection. Embedding a whole relational subtree in one exported node would hide
 its internal sharing and recreate the original boundary problem.
 
-Export carries the resolved schemas, assessed guarantees and assigned execution
-phases. Physical compilation may lower one logical operation to several physical
-operations, but must preserve its dependencies and meaning. The execution layer
+Export preserves result kinds, resolved schemas, scalar value types and evaluation
+context, together with the applicable guarantees and assigned execution phases.
+Physical compilation may lower one logical operation to several physical operations, but must preserve its dependencies and meaning. The execution layer
 does not invent missing planning decisions.
 
 Changing the exported representation requires coordinated adoption by the planner
@@ -365,6 +399,10 @@ The design is successful when:
   any shared inputs; it does not introduce new sharing rules.
 - Existing value/state, accuracy and execution constraints remain enforceable on
   the unified representation.
+- Scalar query roots and conversions use the same representation before and after
+  optimization, with no bridge nodes or hidden subplans.
+- Validation includes result kind and query subgraphs referenced by scalar
+  expressions when checking schema, accuracy and execution constraints.
 - Export preserves visible dependencies and shared producers.
 
 ## 6. Scope and compatibility
@@ -377,7 +415,15 @@ The pre-ASAP and post-ASAP versions of some operations carry different informati
 The unified `BinaryOp` must retain existing checked-division requirements, and
 `Limit` must retain the existing ability to limit within groups. These compatibility
 requirements belong in this design because removing duplicate operator definitions
-must not remove existing behavior.
+must not remove existing behavior. If a rewrite moves arithmetic into a scalar
+expression, it must preserve applicable checked-division guards and exact fallback;
+`ExprSemantics` selects language rules and does not replace those proof conditions.
+
+The [companion semantic tables](decoupling_op_and_expr.md#3-semantic-requirements)
+use DataFusion 55.1.0 and Prometheus 3.15.0 as design targets. Their gaps also apply
+here: a common `Operator` type does not supply missing aggregate modifiers, value
+types or function contracts. This proposal changes neither repository dependencies
+nor the set of implemented language features.
 
 New accuracy fields, accuracy-composition rules, computation-sharing algorithms and
 lifecycle policies are outside this proposal. Planning responsibilities follow #509.
