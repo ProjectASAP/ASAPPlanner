@@ -242,7 +242,7 @@ and resource management are TODO.
 
 #### Materialization
 
-Materialization decides, for each sub-DAG, whether its output is kept across
+Materialization decides, for each sub-DAG, whether its output is kept (persistent to disk or kept in memory) across
 (batch) query executions, and if so, when it is computed and how long it is
 stored. Materialization does not imply ingestion time; a sub-DAG has three
 options:
