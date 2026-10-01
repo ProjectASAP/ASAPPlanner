@@ -180,6 +180,20 @@ or value being summarized together with its grouping. The summary input data doe
 not include the window; the window-composition rule compares windows
 separately.
 
+The window-composition rule shares a summary across windows by splitting time
+into pieces that each carry their own summary:
+
+* A **pane** is a fixed-length, non-overlapping slice of time, for example one
+  minute, with one summary of the data that arrived in that slice. A query
+  window is answered by merging the summaries of the panes it covers. The pane
+  length is chosen so that every requested window is an exact union of panes:
+  for a 5-min window evaluated every 1 min, 1-min panes work, since each window
+  is exactly 5 consecutive panes.
+* A **bucket** of an Exponential Histogram plays the same role, but bucket
+  lengths grow with age: recent data sits in short buckets and older data in
+  longer ones. This keeps few buckets over a long history, at the cost that old
+  window boundaries may fall inside a bucket and are then approximate.
+
 | ASAP-aware CSE rule | Sharing condition | Shared computation |
 |---|---|---|
 | Identical-expression rule | The input and computation semantics are identical. | One common computation node serving multiple consumers. |
