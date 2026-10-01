@@ -146,8 +146,8 @@ placement are decided in later stages.
 #### Pass 1: Local candidate generation
 
 For each eligible sub-DAG, Pass 1 identifies its computation semantics, applies
-rewrite rules, and generates every candidate that can meet its accuracy
-requirement.
+rewrite rules, and generates every candidate that is not provably unable to
+meet its accuracy requirement.
 
 Example for summary candidates:
 
@@ -169,8 +169,8 @@ A summary-based candidate uses three kinds of summary nodes:
 * A **summary build node** builds and maintains a summary from input data, for
   example a KLL sketch over `latency_ms`.
 * A **summary merge node** combines summaries into one, for example merging
-  five 1-min KLL panes into one 5-min KLL, or merging lower-level summaries
-  into a coarser one.
+  five 1-min tumbling-window KLLs into one 5-min KLL, or merging lower-level
+  summaries into a coarser one.
 * A **summary estimation node** computes an answer from a summary, for example
   the p99 estimate from a KLL, or the entropy estimate from a UnivMon.
 * **summary subtract node** and **summary delete node** design is TODO. 
@@ -191,35 +191,44 @@ or value being summarized together with its grouping. The summary input data doe
 not include the window; the window-composition rule compares windows
 separately.
 
-The window-composition rule distinguishes what a query reads from what the
-planner stores:
+The window-composition rule distinguishes the window a query reads from the
+window summary that answers it:
 
 * A **window** is the time range one query evaluation reads, for example the
   last 5 min. Consecutive evaluations of a repeating query read overlapping
-  windows; this is a **sliding window**.
-* A **pane** is what the planner summarizes and stores. The time axis is cut
-  into back-to-back panes of equal length (a tumbling window), each with one
-  summary. A window is answered by merging the summaries of the panes it
-  covers, so overlapping windows reuse the same panes instead of each building
-  its own summary. Most summaries cannot remove old data, so one summary cannot
-  simply slide forward; panes avoid that, because the oldest pane is dropped
-  rather than subtracted. The pane length must divide both the window length
-  and the evaluation interval, so that every window starts and ends on a pane
-  boundary and never needs part of a pane: a 5-min window evaluated every
-  1 min uses 1-min panes, and each window merges exactly 5 whole panes.
-* A **bucket** of an Exponential Histogram plays the same role, but bucket
-  lengths grow with age: recent data sits in short buckets and older data in
-  longer ones. This keeps few buckets over a long history, at the cost that old
-  window boundaries may fall inside a bucket and are then approximate.
-* A **window summary** is a summary organized as panes or buckets so that it
-  can answer many windows, for example a sliding window of panes, a tumbling
-  window, or an Exponential Histogram.
+  windows. Most summaries cannot remove old data, so one summary cannot simply
+  slide forward with the window.
+* A **window summary** keeps summaries so that many windows can be answered.
+  Three window summaries are considered for now:
+  * **Sliding window:** one summary per active window. Each arriving sample is
+    inserted into every active window that contains it, and each evaluation
+    reads the window that has just completed, with no merge. For a 5-min
+    window evaluated every 1 min, 5 windows are active and each sample updates
+    all 5. It works for any summary, including ones that cannot be merged, at
+    the cost of more ingestion work and memory.
+  * **Tumbling window:** back-to-back, non-overlapping windows of one fixed
+    length, each with one summary. A longer query window is answered by
+    merging the tumbling windows it covers. The tumbling length must divide
+    both the query window length and the evaluation interval, so that every
+    query window starts and ends on a tumbling boundary: a 5-min window
+    evaluated every 1 min uses 1-min tumbling windows and merges exactly 5 of
+    them. It needs a mergeable summary.
+  * **Exponential Histogram (EH):** a sequence of EH buckets that covers a
+    long history. A query window is answered by merging the EH buckets it
+    covers. Few EH buckets cover a long history, at the cost that an old
+    query-window boundary may fall inside an EH bucket and is then
+    approximate.
+    * An **EH bucket** is one non-overlapping time range of the history with
+      one summary of the data in it. Unlike tumbling windows, EH buckets are
+      not all the same length: they grow with age, so recent data sits in
+      short EH buckets and older data in longer ones. Adjacent EH buckets are
+      merged into a longer one as they age.
 
 | ASAP-aware CSE rule | Sharing condition | Shared computation |
 |---|---|---|
 | Identical-expression rule | The input and computation semantics are identical. | One common computation node serving multiple consumers. |
 | Summary-capability rule | The computations have the same summary input data and the same window, and one summary supports all requested computations and their accuracy requirements. | One summary build node feeding several estimation nodes, e.g. UnivMon → distinct count, entropy, L2 norm. |
-| Window-composition rule | The computations have the same summary input data, and one window summary can reconstruct the requested windows within their accuracy requirements. | One window summary feeding per-window merge and estimation nodes, e.g. KLL panes in a sliding window, or KLL buckets in an Exponential Histogram. |
+| Window-composition rule | The computations have the same summary input data, and one window summary can answer the requested windows within their accuracy requirements. | One window summary feeding per-query merge (where needed) and estimation nodes, e.g. a sliding-window or tumbling-window KLL, or an Exponential Histogram with a KLL per EH bucket. |
 
 The examples behind these rules:
 
@@ -230,20 +239,23 @@ The examples behind these rules:
   distinct-count, an entropy and an L2 estimation node each compute their
   statistic from it. The UnivMon is sized for the strictest of the three accuracy
   requirements.
-* **Window-composition rule, sliding window (Example 3, Pattern B).** One
-  sliding window of 1-min KLL panes serves every evaluation of
-  `quantile_over_time(0.99, latency_ms[5m])`, repeated every minute. Each
-  evaluation merges the latest 5 panes with a merge node and computes p99 with
-  an estimation node, so consecutive evaluations share 4 of their 5 panes.
+* **Window-composition rule, sliding or tumbling window (Example 3,
+  Pattern B).** For `quantile_over_time(0.99, latency_ms[5m])` repeated every
+  minute, one window summary serves every evaluation. With a sliding-window
+  KLL, each sample updates the 5 active windows, and each evaluation reads the
+  one that has just completed. With 1-min tumbling-window KLLs, each sample
+  updates one window, and each evaluation merges the latest 5 with a merge
+  node; consecutive evaluations share 4 of them.
 * **Window-composition rule, Exponential Histogram (Example 3, Pattern A).**
-  One Exponential Histogram of KLL buckets over the last 5 years serves the p99
+  One Exponential Histogram over the last 5 years, with a KLL per EH bucket,
+  serves the p99
   queries over `[5y]`, `[1y]`, `[1y] offset 1y`, `[1y] offset 2y` and
-  `[3y] offset 2y`. Each query's merge node merges the buckets covering
+  `[3y] offset 2y`. Each query's merge node merges the EH buckets covering
   its interval, and its estimation node computes p99 from the merged KLL.
 * **Other quantiles share for free.** One KLL answers every quantile, so adding
   `quantile_over_time(0.5, latency_ms[5m])` to the sliding-window dashboard
-  adds only a p50 estimation node next to the p99 one, reading the same 5 merged
-  panes, with no new summary.
+  adds only a p50 estimation node next to the p99 one, reading the same KLL,
+  with no new summary.
 
 Rules are defined by each summary family's capabilities and semantic
 requirements. A shared summary must meet the strictest accuracy requirement
@@ -264,8 +276,8 @@ stored. Materialization does not imply ingestion time; a sub-DAG has three
 options:
 
 * **Materialized at ingestion time:** the sub-DAG runs as data arrives, and its
-  output is stored before any query asks for it. For example, the 1-min KLL
-  panes in Example 4, Pattern B.
+  output is stored before any query asks for it. For example, the 1-min
+  tumbling-window KLLs in Example 4, Pattern B.
 * **Materialized at query time:** the sub-DAG runs when a query first needs
   it, and its output is stored so that later executions, or other queries in
   the same batch, reuse it instead of recomputing it. For example, an
@@ -426,7 +438,7 @@ Combining them gives 1 × 3 = 3 workload candidates:
 | Count-Min | exact | Count-Min + heap |
 | Hydra | exact | Hydra |
 
-**Stage 1, Pass 2: 24 candidates.** Pass 2 applies two ASAP-aware CSE rules
+**Stage 1, Pass 2: 54 candidates.** Pass 2 applies two ASAP-aware CSE rules
 to each of the 3 candidates, and keeps every original:
 
 * **Identical-expression rule.** Both queries read the same range selector,
@@ -434,36 +446,33 @@ to each of the 3 candidates, and keeps every original:
   one input node. No summary is shared, because Q1 must be exact and no
   summary supports both queries.
 * **Window-composition rule.** Each query reads a 1-min window every 10 s, so
-  consecutive evaluations overlap by 50 s. For each query, Pass 2 adds a
-  variant that computes its window from **10-s panes**: 6 per-pane states,
-  merged at every refresh. Q1's per-series rates and sums, Q2's exact sums,
-  Count-Min sketches and Hydra sketches can all be built per pane and merged.
-  For Count-Min + heap, the per-pane heaps only approximate the merged top 10,
-  which the accuracy model accounts for in stage 3.
+  consecutive evaluations overlap by 50 s. For each query, Pass 2 adds two
+  variants: a **sliding window**, where each sample updates the 6 active 1-min
+  windows, and **10-s tumbling windows**, merged 6 at a time at every refresh.
+  Tumbling windows need a mergeable summary. Q1's rates and sums, Q2's exact
+  sums and Hydra merge exactly; Count-Min sketches do too, but their top-10
+  heaps merge only approximately, so that candidate is kept and the accuracy
+  model judges it in stage 3.
 
 Each Pass 1 candidate therefore has 2 input choices (separate or shared) ×
-2 choices for Q1 (no panes or panes) × 2 for Q2, so stage 1 outputs
-3 × 2 × 2 × 2 = 24 logical candidates. A candidate is named by its choices,
-for example *Hydra, Q1 panes, Q2 panes, shared input*.
+3 window forms for Q1 (none, sliding, tumbling) × 3 for Q2, so stage 1 outputs
+3 × 2 × 3 × 3 = 54 logical candidates.
 
-The two rules applied to the Hydra candidate:
+The window-composition rule applied to Q2 in the Hydra candidate:
 
 ```mermaid
 flowchart LR
-  subgraph SEP["Hydra · separate inputs, no panes"]
+  subgraph NO["Hydra · no window summary"]
     direction LR
-    a1[("http_requests_total")]:::data --> a2["range 1m"]:::exact --> a3["rate → sum by (job)"]:::exact
-    b1[("http_requests_total")]:::data --> b2["range 1m"]:::exact --> b3["Hydra"]:::summary --> b4(["top 10"]):::estimate
+    a1[("http_requests_total")]:::data --> a2["range 1m"]:::exact --> a3["Hydra"]:::summary --> a4(["top 10"]):::estimate
   end
-  subgraph SH["Hydra · shared input, no panes"]
+  subgraph SL["Hydra · sliding window"]
     direction LR
-    c1[("http_requests_total")]:::data --> c2["range 1m<br/>one shared input node"]:::exact
-    c2 --> c3["rate → sum by (job)"]:::exact
-    c2 --> c4["Hydra"]:::summary --> c5(["top 10"]):::estimate
+    b1[("http_requests_total")]:::data --> b2["insert each sample into<br/>6 active 1-min windows"]:::summary --> b3(["top 10 from the<br/>completed window"]):::estimate
   end
-  subgraph PN["Hydra · Q2 panes"]
+  subgraph TU["Hydra · 10-s tumbling windows"]
     direction LR
-    d1[("http_requests_total")]:::data --> d2["Hydra per<br/>10-s pane"]:::summary --> d3["merge latest<br/>6 panes"]:::exact --> d4(["top 10"]):::estimate
+    c1[("http_requests_total")]:::data --> c2["Hydra per<br/>10-s window"]:::summary --> c3["merge latest 6"]:::exact --> c4(["top 10"]):::estimate
   end
   classDef data fill:#f1f3f4,stroke:#5f6368,color:#000;
   classDef exact fill:#fff,stroke:#5f6368,color:#000;
@@ -471,96 +480,110 @@ flowchart LR
   classDef estimate fill:#e6f4ea,stroke:#188038,color:#000;
 ```
 
-**Stage 2: 75 candidates.** Stage 2 picks, for each query, when its state is
+**Stage 2: 156 candidates.** Stage 2 picks, for each query, when its state is
 computed and whether it is kept. What it can choose depends on the query's
-logical form from Pass 2:
+window form from Pass 2:
 
-| Query's logical form | Physical options |
+| Window form | Physical options |
 |---|---|
-| No panes | **Raw:** rebuild the state from the last 1 min of raw samples at every refresh. It cannot be materialized: the window slides every 10 s, and most summaries cannot drop old data. |
-| 10-s panes | **Ingestion panes:** build each pane as samples arrive and keep the last 6 (materialized at ingestion time). **Query panes:** at each refresh, build only the newest pane from the last 10 s of raw samples and reuse the 5 kept panes (materialized at query time). **Rebuilt panes:** at each refresh, build all 6 panes from the last 1 min of raw samples, merge them, and discard them (not materialized). |
+| None | **Raw:** rebuild the state from the last 1 min of raw samples at every refresh. It cannot be materialized: the window slides every 10 s, and most summaries cannot drop old data. |
+| Sliding window | **Sliding, ingestion time:** insert each sample into the 6 active windows as it arrives (materialized at ingestion time). **Sliding, query time:** at each refresh, insert the last 10 s of raw samples into the 6 kept active windows (materialized at query time). Building the window from raw samples at query time without keeping it is the same plan as Raw. |
+| 10-s tumbling windows | **Tumbling, ingestion time:** build each tumbling window as samples arrive and keep the last 6. **Tumbling, query time:** at each refresh, build only the newest tumbling window from the last 10 s of raw samples and reuse the 5 kept ones. **Tumbling, rebuilt:** at each refresh, build all 6 tumbling windows from the last 1 min of raw samples, merge them, and discard them (not materialized). |
 
 ```mermaid
 flowchart LR
   in[("http_requests_total<br/>samples")]:::data
 
-  subgraph R["Raw · no panes"]
+  subgraph R["Raw"]
     direction LR
     subgraph RQ["Query time, every 10 s"]
-      r1["range 1m"]:::exact --> r2["build state"]:::summary --> r3(["answer"]):::estimate
+      r1["last 1 min"]:::exact --> r2["build state"]:::summary --> r3(["answer"]):::estimate
     end
   end
 
-  subgraph IP["Ingestion panes"]
+  subgraph SI["Sliding, ingestion time"]
     direction LR
-    subgraph IPI["Ingestion time"]
-      i1["build 10-s pane<br/>keep last 6"]:::summary
+    subgraph SII["Ingestion time"]
+      s1["update 6 active<br/>windows per sample"]:::summary
     end
-    subgraph IPQ["Query time, every 10 s"]
-      i2["merge 6 panes"]:::exact --> i3(["answer"]):::estimate
+    subgraph SIQ["Query time, every 10 s"]
+      s2(["answer from the<br/>completed window"]):::estimate
     end
-    i1 --> i2
+    s1 --> s2
   end
 
-  subgraph QP["Query panes"]
+  subgraph SQ["Sliding, query time"]
     direction LR
-    subgraph QPQ["Query time, every 10 s"]
-      q1["range 10 s"]:::exact --> q2["build newest pane"]:::summary --> q3["merge with<br/>5 kept panes"]:::exact --> q4(["answer"]):::estimate
+    subgraph SQQ["Query time, every 10 s"]
+      t1["last 10 s"]:::exact --> t2["update 6 kept<br/>active windows"]:::summary --> t3(["answer from the<br/>completed window"]):::estimate
     end
   end
 
-  subgraph RB["Rebuilt panes"]
+  subgraph TI["Tumbling, ingestion time"]
     direction LR
-    subgraph RBQ["Query time, every 10 s"]
-      b1["range 1m"]:::exact --> b2["build 6 panes"]:::summary --> b3["merge 6 panes"]:::exact --> b4(["answer"]):::estimate
+    subgraph TII["Ingestion time"]
+      u1["build 10-s window<br/>keep last 6"]:::summary
+    end
+    subgraph TIQ["Query time, every 10 s"]
+      u2["merge 6"]:::exact --> u3(["answer"]):::estimate
+    end
+    u1 --> u2
+  end
+
+  subgraph TQ["Tumbling, query time"]
+    direction LR
+    subgraph TQQ["Query time, every 10 s"]
+      v1["last 10 s"]:::exact --> v2["build newest<br/>10-s window"]:::summary --> v3["merge with<br/>5 kept"]:::exact --> v4(["answer"]):::estimate
+    end
+  end
+
+  subgraph TR["Tumbling, rebuilt"]
+    direction LR
+    subgraph TRQ["Query time, every 10 s"]
+      w1["last 1 min"]:::exact --> w2["build 6<br/>10-s windows"]:::summary --> w3["merge 6"]:::exact --> w4(["answer"]):::estimate
     end
   end
 
   in --> r1
-  in --> i1
-  in --> q1
-  in --> b1
+  in --> s1
+  in --> t1
+  in --> u1
+  in --> v1
+  in --> w1
   classDef data fill:#f1f3f4,stroke:#5f6368,color:#000;
   classDef exact fill:#fff,stroke:#5f6368,color:#000;
   classDef summary fill:#e8f0fe,stroke:#1a73e8,stroke-width:2px,color:#000;
   classDef estimate fill:#e6f4ea,stroke:#188038,color:#000;
 ```
 
-Each query thus ends up with one of four options: Raw, Ingestion panes, Query
-panes or Rebuilt panes, giving 4 × 4 = 16 combinations per Q2 option. A shared
-input node only changes the plan when both queries read raw samples at query
-time, that is, when neither uses Ingestion panes; those 9 combinations also
-have a shared-input version:
-
-| Q1 \ Q2 | Raw | Ingestion panes | Query panes | Rebuilt panes |
-|---|---|---|---|---|
-| **Raw** | separate or shared input | one plan | separate or shared input | separate or shared input |
-| **Ingestion panes** | one plan | one plan | one plan | one plan |
-| **Query panes** | separate or shared input | one plan | separate or shared input | separate or shared input |
-| **Rebuilt panes** | separate or shared input | one plan | separate or shared input | separate or shared input |
-
-That is 16 + 9 = 25 plans for each of Q2's 3 options, or 75 physical
-candidates. A candidate is named by Q2's option and each query's physical
-option, for example *Hydra, Q1 ingestion panes, Q2 ingestion panes*.
+Across the three window forms, each query has 1 + 2 + 3 = 6 physical options,
+so each Q2 option gives 6 × 6 = 36 combinations. The shared-input variant only
+changes the plan when both queries read raw samples at query time, which 4 of
+the 6 options do (all except the two ingestion-time ones). That adds
+4 × 4 = 16 shared-input plans, for 52 plans per Q2 option and
+3 × 52 = 156 physical candidates.
 
 **Stage 3: 1 plan.** Selection first rejects invalid candidates. The
 deployment's accuracy model checks the summary candidates against ε = 0.01,
-δ = 0.001, including the approximate heap merge of Count-Min panes. Its cost
-model estimates Q2's latency against the 100 ms bound; for example, an exact
-top 10 rebuilt with Raw over one million series at every refresh may miss it.
-Among the rest, selection picks the cheapest plan for the whole workload:
+δ = 0.001, including the approximate heap merge of Count-Min with tumbling
+windows. Its cost model estimates Q2's latency against the 100 ms bound; for
+example, an exact top 10 rebuilt from one million series at every refresh may
+miss it. Among the rest, selection picks the cheapest plan for the whole
+workload. Typical winners:
 
-* **Usually:** both queries on ingestion panes, with Hydra when there are many
-  small jobs or Count-Min when there are a few large jobs. Each sample is
-  processed once, and each refresh only merges 6 small panes.
-* **When ingestion-time work is expensive:** query panes, which still build
-  each pane only once but do it at query time.
-* **When storage is expensive and raw data is available at query time:** Raw
-  for both queries with a shared input, which keeps nothing and reads the
-  last minute of samples once for both queries.
-* **Rarely:** Rebuilt panes. They do the same raw read as Raw plus extra merge
-  work, so the cost model usually ranks them below Raw. They stay in the
-  candidate set because they are valid; only selection rules them out.
+* **Hydra for Q2, with both queries on tumbling windows at ingestion time**,
+  when there are many small jobs: each sample updates one window, and each
+  refresh merges 6 small summaries.
+* **Count-Min + heap for Q2 on a sliding window at ingestion time**, with Q1
+  on tumbling windows, when there are a few large jobs: the heaps do not merge
+  cleanly, so updating 6 active windows per sample is worth it.
+* **Query-time variants** of either, when ingestion-time work is expensive.
+* **Raw with a shared input** for both queries, when storage is expensive and
+  raw data is available at query time.
+
+The other candidates, such as tumbling windows rebuilt at every refresh, stay
+in the candidate set because they are valid, and selection rules them out on
+cost.
 
 ### Example 2: One summary for several computations — the summary-capability rule in Pass 2
 
@@ -616,7 +639,10 @@ UnivMon build node feeding three estimation nodes**. It must be sized for the st
 requirement, ε = 0.01. The independent candidates are kept as well. Pass 2
 also adds candidates where only two of the three share a UnivMon and the third
 keeps any of its own 3 options (3 pairs × 3 = 9), so stage 1 outputs
-27 + 1 + 9 = 37 candidates. The figure shows the all-three case.
+27 + 1 + 9 = 37 candidates. The figure shows the all-three case. The
+window-composition rule would also add sliding-window and 10-s tumbling-window
+variants, exactly as in Example 1; they are left out here to keep the focus on
+the summary-capability rule.
 
 ```mermaid
 flowchart LR
@@ -680,10 +706,12 @@ The three UnivMon options from Pass 1 (dashed arrows) are merged by Pass 2 into
 one shared UnivMon. The independent candidates are kept, so stage 1 outputs
 both kinds.
 
-**Stage 2.** As in Example 1, every summary in every candidate can be
-materialized at ingestion time or rebuilt at each 10-s refresh. Because the
-dashboard repeats over arriving data, materializing at ingestion time is
-usually cheaper.
+**Stage 2.** The same options as in Example 1 apply: a summary without a
+window summary is rebuilt from raw samples at every refresh, while a
+sliding-window or tumbling-window UnivMon can be kept from ingestion time or
+from query time (and tumbling windows can also be rebuilt). Because the
+dashboard repeats over arriving data, ingestion-time window summaries are
+usually cheapest. UnivMon merges exactly, so tumbling windows suit it.
 
 **Stage 3.** Selection compares one UnivMon sized for ε = 0.01 against three
 separate summaries, each sized for its own requirement. The shared candidate
@@ -719,16 +747,17 @@ of data at rest, plus data still arriving.
   its own interval: five independent KLL candidates over overlapping data.
 * **Pass 2.** Every interval is a sub-interval of [T − 5 y, T], and KLL is
   mergeable. The window-composition rule adds a shared candidate: **one
-  Exponential Histogram of KLL buckets over [T − 5 y, T]**, with one
-  merge and estimation node per query that merges the buckets covering
+  Exponential Histogram over [T − 5 y, T], with a KLL per EH bucket**, with one
+  merge and estimation node per query that merges the EH buckets covering
   its interval. The independent candidates are kept.
 
-Counted at the workload level, Pass 1 gives each query 2 options (exact or
-KLL), so 2⁵ = 32 candidates. Pass 2 adds a candidate for every way of grouping
-two or more queries onto shared Exponential Histograms (one group of five, or
-several smaller groups such as two pairs) while the remaining queries keep
-their own options: 171 more, for 203 in total. Counts like this are why
-candidate sets may be enumerated lazily.
+Yearly tumbling windows would also work here, since every interval is a whole
+number of years; the Exponential Histogram is shown because it also handles
+intervals that are not. Counted at the workload level, Pass 1 gives each query
+2 options (exact or KLL), so 2⁵ = 32 candidates, and Pass 2 adds one candidate
+for every way of grouping two or more queries onto shared window summaries.
+That quickly reaches hundreds of candidates, which is why candidate sets may be
+enumerated lazily.
 
 The five query intervals overlap, and all lie inside the last five years:
 
@@ -750,19 +779,19 @@ and a merge and estimation node per query:
 
 ```mermaid
 flowchart LR
-  in[("latency_ms<br/>T − 5y to T")]:::data --> eh["Exponential Histogram<br/>of KLL buckets"]:::summary
-  eh --> m1["merge buckets<br/>T−5y … T"]:::exact --> o1(["q1 p99"]):::estimate
-  eh --> m2["merge buckets<br/>T−1y … T"]:::exact --> o2(["q2 p99"]):::estimate
-  eh --> m3["merge buckets<br/>T−2y … T−1y"]:::exact --> o3(["q3 p99"]):::estimate
-  eh --> m4["merge buckets<br/>T−3y … T−2y"]:::exact --> o4(["q4 p99"]):::estimate
-  eh --> m5["merge buckets<br/>T−5y … T−2y"]:::exact --> o5(["q5 p99"]):::estimate
+  in[("latency_ms<br/>T − 5y to T")]:::data --> eh["Exponential Histogram<br/>KLL per EH bucket"]:::summary
+  eh --> m1["merge EH buckets<br/>T−5y … T"]:::exact --> o1(["q1 p99"]):::estimate
+  eh --> m2["merge EH buckets<br/>T−1y … T"]:::exact --> o2(["q2 p99"]):::estimate
+  eh --> m3["merge EH buckets<br/>T−2y … T−1y"]:::exact --> o3(["q3 p99"]):::estimate
+  eh --> m4["merge EH buckets<br/>T−3y … T−2y"]:::exact --> o4(["q4 p99"]):::estimate
+  eh --> m5["merge EH buckets<br/>T−5y … T−2y"]:::exact --> o5(["q5 p99"]):::estimate
   classDef data fill:#f1f3f4,stroke:#5f6368,color:#000;
   classDef exact fill:#fff,stroke:#5f6368,color:#000;
   classDef summary fill:#e8f0fe,stroke:#1a73e8,stroke-width:2px,color:#000;
   classDef estimate fill:#e6f4ea,stroke:#188038,color:#000;
 ```
 
-**Pattern B: one repeating query over a sliding window.** A real-time p99 panel
+**Pattern B: one repeating query with overlapping windows.** A real-time p99 panel
 over the last 5 min, refreshed every minute.
 
 | Query | Repeats | `lookback` | `as_of` | Accuracy requirement | Latency requirement |
@@ -771,30 +800,32 @@ over the last 5 min, refreshed every minute.
 
 * **Pass 1.** One KLL over 5 min for each evaluation.
 * **Pass 2.** Consecutive evaluations overlap by 4 of their 5 minutes. The
-  window-composition rule adds a shared candidate: **a sliding window of
-  1-min KLL panes**, where each evaluation merges the latest 5 panes. With the
-  exact candidate, stage 1 outputs 3 candidates.
+  window-composition rule adds two shared candidates for each Pass 1 option:
+  a **sliding window**, where each sample updates the 5 active 5-min windows,
+  and **1-min tumbling windows**, where each evaluation merges the latest 5.
+  With exact and KLL from Pass 1, each in 3 window forms (none, sliding,
+  tumbling), stage 1 outputs 2 × 3 = 6 candidates.
 
-Each evaluation reads five 1-min panes, and consecutive evaluations share
-four of them:
+With 1-min tumbling windows, each evaluation merges five of them, and
+consecutive evaluations share four:
 
 ```mermaid
 gantt
-  title Pattern B · 1-min KLL panes and 5-min evaluations
+  title Pattern B · 1-min tumbling KLL windows and 5-min evaluations
   dateFormat HH:mm
   axisFormat %H:%M
-  section KLL panes
-  pane 1 :p1, 00:00, 1m
-  pane 2 :p2, 00:01, 1m
-  pane 3 :p3, 00:02, 1m
-  pane 4 :p4, 00:03, 1m
-  pane 5 :p5, 00:04, 1m
-  pane 6 :p6, 00:05, 1m
-  pane 7 :p7, 00:06, 1m
+  section 1-min tumbling windows
+  window 1 :p1, 00:00, 1m
+  window 2 :p2, 00:01, 1m
+  window 3 :p3, 00:02, 1m
+  window 4 :p4, 00:03, 1m
+  window 5 :p5, 00:04, 1m
+  window 6 :p6, 00:05, 1m
+  window 7 :p7, 00:06, 1m
   section Evaluations
-  eval at 00:05 (panes 1–5) :e1, 00:00, 5m
-  eval at 00:06 (panes 2–6) :e2, 00:01, 5m
-  eval at 00:07 (panes 3–7) :e3, 00:02, 5m
+  eval at 00:05 (windows 1–5) :e1, 00:00, 5m
+  eval at 00:06 (windows 2–6) :e2, 00:01, 5m
+  eval at 00:07 (windows 3–7) :e3, 00:02, 5m
 ```
 
 Example 4 shows how stage 2 decides whether to store these window summaries.
@@ -813,6 +844,7 @@ candidate from Example 3 gets its own physical candidates the same way.
 |---|---|---|
 | A1 | The Exponential Histogram, at query time | At query time, when the batch runs at T; read by all five queries, then discarded |
 | A2 | The Exponential Histogram, at ingestion time | At ingestion time, with each new sample; old data backfilled once |
+| A3 | Nothing | At query time, once per query: each of the five queries rebuilds it for itself and discards it |
 
 ```mermaid
 flowchart LR
@@ -833,6 +865,12 @@ flowchart LR
     end
     h4 --> r4
   end
+  subgraph A3["A3 · not materialized"]
+    direction LR
+    subgraph A3Q["Query time, once per query at T"]
+      s6[("5 years of<br/>stored samples")]:::data --> h6["build Exponential<br/>Histogram, ×5"]:::summary --> r6(["one estimate<br/>per rebuild"]):::estimate
+    end
+  end
   classDef data fill:#f1f3f4,stroke:#5f6368,color:#000;
   classDef exact fill:#fff,stroke:#5f6368,color:#000;
   classDef summary fill:#e8f0fe,stroke:#1a73e8,stroke-width:2px,color:#000;
@@ -842,43 +880,44 @@ flowchart LR
 Which candidate wins depends on the workload:
 
 * **As given** (`invocations: 1`, `ad_hoc`): selection picks A1. A2 would
-  maintain the histogram for years only to serve one batch.
+  maintain the histogram for years only to serve one batch, and A3 builds it
+  five times instead of once.
 * **Repeated monthly and `Predictable { known_at }`:** A2 can win, because its
   maintenance cost is shared by many batches.
 * **Data `"at_rest"`:** A2 is not generated, because there is no ingestion to
   maintain the histogram.
 
-**Pattern B (sliding window, repeating).**
+**Pattern B (overlapping windows, repeating).**
 
 | Candidate | Materialized | At ingestion time | At query time |
 |---|---|---|---|
-| B1 | 1-min KLL panes, retained 5 min | Build one KLL pane per minute | Merge the latest 5 panes, read p99 |
-| B2 | Nothing | Nothing | Read 5 min of raw samples, build one KLL, read p99 |
-| B3 | 1-min KLL panes, at query time, retained 5 min | Nothing | Build only the newest pane from raw samples, merge it with the 4 kept panes, read p99 |
+| B1 | 1-min tumbling KLLs, kept 5 min | Build one tumbling KLL per minute | Merge the latest 5, read p99 |
+| B2 | Nothing | Nothing | Read 5 min of raw samples, rebuild all 5 tumbling KLLs, merge them, read p99 |
+| B3 | 1-min tumbling KLLs, at query time, kept 5 min | Nothing | Build only the newest tumbling KLL from raw samples, merge it with the 4 kept ones, read p99 |
 
 ```mermaid
 flowchart LR
-  subgraph B1["B1 · panes materialized at ingestion time"]
+  subgraph B1["B1 · tumbling KLLs materialized at ingestion time"]
     direction LR
     subgraph B1I["Ingestion time"]
-      s1[("samples")]:::data --> p1["1-min KLL pane<br/>stored 5 min"]:::summary
+      s1[("samples")]:::data --> p1["1-min tumbling KLL<br/>kept 5 min"]:::summary
     end
     subgraph B1Q["Query time, every 1 min"]
-      g1["merge latest<br/>5 panes"]:::exact --> r1(["p99"]):::estimate
+      g1["merge latest 5"]:::exact --> r1(["p99"]):::estimate
     end
     p1 --> g1
   end
   subgraph B2["B2 · not materialized"]
     direction LR
     subgraph B2Q["Query time, every 1 min"]
-      s2[("5 min of<br/>raw samples")]:::data --> k2["build one KLL"]:::summary --> r2(["p99"]):::estimate
+      s2[("5 min of<br/>raw samples")]:::data --> k2["rebuild 5<br/>tumbling KLLs"]:::summary --> m2b["merge 5"]:::exact --> r2(["p99"]):::estimate
     end
   end
-  subgraph B3["B3 · panes materialized at query time"]
+  subgraph B3["B3 · tumbling KLLs materialized at query time"]
     direction LR
     subgraph B3Q["Query time, every 1 min"]
-      s5[("last 1 min of<br/>raw samples")]:::data --> k5["build newest<br/>1-min KLL pane"]:::summary --> g5["merge with 4<br/>kept panes"]:::exact --> r5(["p99"]):::estimate
-      kp["4 kept panes<br/>from earlier evaluations"]:::summary --> g5
+      s5[("last 1 min of<br/>raw samples")]:::data --> k5["build newest<br/>1-min tumbling KLL"]:::summary --> g5["merge with<br/>4 kept"]:::exact --> r5(["p99"]):::estimate
+      kp["4 kept tumbling KLLs<br/>from earlier evaluations"]:::summary --> g5
     end
   end
   classDef data fill:#f1f3f4,stroke:#5f6368,color:#000;
@@ -887,16 +926,22 @@ flowchart LR
   classDef estimate fill:#e6f4ea,stroke:#188038,color:#000;
 ```
 
-The query repeats every minute and the data is continuously ingesting, so B1
-builds each pane once and reuses it in five evaluations, while B2 rescans raw
-data every time. B3 also builds each pane once, but at query time, so it needs
-raw data at query time and adds the newest pane's build to each evaluation's
-latency. Selection usually picks B1. B3 can win when ingestion-time work is
-expensive, and B2 only when storage is expensive and raw data is available at
-query time.
+This table covers the tumbling-window candidate. The query repeats every
+minute and the data is continuously ingesting, so B1 builds each tumbling KLL
+once and reuses it in five evaluations, while B2 rescans raw data every time.
+B3 also builds each tumbling KLL once, but at query time, so it needs raw data
+at query time and adds the newest build to each evaluation's latency.
+Selection usually picks B1. B3 can win when ingestion-time work is expensive,
+and B2 only when storage is expensive and raw data is available at query time.
+
+The sliding-window candidate from Example 3 gets its own physical candidates
+the same way: kept from ingestion time (each sample updates the 5 active
+windows) or from query time (each evaluation inserts the last minute of raw
+samples into the 5 kept windows). It does more ingestion work than B1 but
+needs no merge, so it wins only for a summary that merges poorly.
 
 **What this shows.** The same logical candidate (one shared Exponential
-Histogram, or a sliding window of KLL panes) yields different physical plans depending
+Histogram, or 1-min tumbling KLL windows) yields different physical plans depending
 only on recurrence, predictability and data arrival. This is why window-summary
 replacement happens in logical planning, while materialization is decided
 separately in physical planning.
