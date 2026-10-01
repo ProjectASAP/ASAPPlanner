@@ -273,21 +273,22 @@ Per node kind:
   
 ### 2.3 Timing: written from a lifecycle assignment
 
-The logical layer — PlanSpace, binding, assembly — decides *what* to compute, not when.
-Timing is chosen by summary materialization: for every unique summary state it picks a
-lifecycle (maintain at ingestion time or recompute at query time, with window and
-retention), and that choice fixes the timing of every node that feeds or reads the state.
-One logical DAG can therefore have several assignments; the deployment chooses among
-them with its own costs ([Output layers](../architecture/input-output-workflow.md#output-layers), #480).
+The logical layer (PlanSpace, binding, assembly) decides *what* to compute. Summary
+materialization decides *when*: it picks a lifecycle per summary state (maintain at
+ingestion time or recompute at query time, with window and retention), and that choice
+fixes the timing of every node that feeds or reads the state. One logical DAG can have
+several assignments; the deployment picks one by its own costs
+([Output layers](../architecture/input-output-workflow.md#output-layers), #480).
 
-Nothing in the IR sets a timing. Binding sets no `SummaryAgg.timing`; the planner sets
-none on `FinalizeExactAccumulator` (`finalize_query_candidate`, §4, still inserts the
-node, its timing is assigned like any other). After assembly every `timing` slot is
-`Unset`. `apply_lifecycle_timings` writes the chosen assignment into the slots, top-down
-per root with one shared memo, and validates it (§5): an assignment under which
-ingestion work depends on a query-time result, or a node of fixed kind gets the wrong
-timing, is rejected, as is one that gives a shared node two timings (§4). `Unset` means
-no assignment was applied; physical compilation and export reject it.
+The IR never sets a timing: after assembly every `timing` slot is `Unset`.
+`apply_lifecycle_timings` writes the chosen assignment into the slots, top-down per root
+with one shared memo, and validates it (§5). It rejects an assignment that
+
+- makes ingestion work depend on a query-time result,
+- gives a node of fixed kind the wrong timing, e.g. an ingestion-time `SummaryEstimate`,
+- gives a shared node two timings (§4).
+
+Export and physical compilation reject an `Unset` slot: no assignment was applied.
 
 ```
                     assembly        after apply_lifecycle_timings
@@ -297,14 +298,12 @@ Project             Unset           QueryTime
       Scan t        Unset           IngestionTime   ← feeds a maintained state
 ```
 
-Some candidates fix a timing when they are built today: exact compositions carry
-`OperationPlacement::Read` / `Maintenance` (provenance `ValueOperationAtQueryTime` /
-`ValueOperationAtIngestionTime`), maintained populations are built at ingestion time,
-and #472's grouped `Rate`→`Sum` pair. Each becomes one logical candidate whose placement
-is a lifecycle choice (§8 stage 5). The **default assignment** reproduces today's
-timings — a `SummaryAgg` maintained at ingestion time, everything above a readout at
-query time — so exported timings do not change until lifecycle selection chooses
-otherwise.
+Candidates that fix a timing at construction today — exact compositions
+(`OperationPlacement::Read` / `Maintenance`), maintained populations, #472's grouped
+`Rate`→`Sum` pair — each become one logical candidate whose placement is a lifecycle
+choice (§8 stage 5). The **default assignment** reproduces today's timings (`SummaryAgg`
+at ingestion time, everything above a readout at query time), so exported timings do not
+change until lifecycle selection chooses otherwise.
 
 Per node kind:
 
@@ -317,7 +316,7 @@ Per node kind:
 | `MaintainPopulation` / `ReadPopulation` | a stored field, always ingestion / query time | **assigned**; validated: ingestion / query time only |
 | unused variants | `SummaryMerge`: a stored field; `Join` / `Subtract` / `Delete`: ingestion time | unimplemented (§1.3) |
 
-Unlike a guarantee, a timing is a property of the whole DAG and its assignment, so it is
+A timing, unlike a guarantee, depends on the whole DAG and its assignment, so it is
 applied only after assembly.
 
 ### 2.4 Workflow of setting up `guarantee` and `timing`: today vs. after
