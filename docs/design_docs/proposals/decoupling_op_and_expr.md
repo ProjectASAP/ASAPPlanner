@@ -217,7 +217,7 @@ references the query's producer; `ScalarExpr` holds its scalar expression. This
 enum adds no computation node:
 
 ```rust
-enum QueryRoot<C: ColState = ColumnId> {
+enum LogicalDAGRoot<C: ColState = ColumnId> {
     Operator(Rc<NonASAPOp<C>>),
     ScalarExpr(ScalarExpr<C>),
 }

@@ -48,12 +48,12 @@ on query semantics, accuracy and execution timing.
 The two computational categories are `Operator` and `ScalarExpr`. `Operator`
 describes a relation, vector or summary-state operation and has two variants.
 `OperatorNode` (§2) stores that operation together with its common properties.
-`QueryRoot` selects either an operator node or a scalar expression as the query
+`LogicalDAGRoot` selects either an operator node or a scalar expression as the query
 entry point; it is an enum, not an additional computation node. The structural
 overview below shows how these types fit together.
 
-`QueryRoot::Operator` is used for SQL query results and PromQL vector queries,
-such as `sum(up)`. `QueryRoot::ScalarExpr` is used for PromQL scalar queries, such
+`LogicalDAGRoot::Operator` is used for SQL query results and PromQL vector queries,
+such as `sum(up)`. `LogicalDAGRoot::ScalarExpr` is used for PromQL scalar queries, such
 as `2`, `time()` or `scalar(sum(up))`. Neither variant adds a wrapper operator.
 
 The table lists all operator kinds in this proposal. Aggregate functions, join
@@ -136,7 +136,7 @@ are shared by the detailed sections, not separate abbreviated types.
 
 ```rust
 // Query entry: an operator graph or an owned scalar expression.
-enum QueryRoot {
+enum LogicalDAGRoot {
     Operator(Rc<OperatorNode>),
     ScalarExpr(ScalarExpr),
 }
@@ -301,7 +301,7 @@ arbitrary expression from being mistaken for a table-producing plan. The
 [companion proposal](decoupling_op_and_expr.md) defines this distinction.
 
 Its pre-ASAP `Rc<NonASAPOp<C>>` references become `Rc<OperatorNode>` in the unified
-model, including `QueryRoot` and the inputs to `PromqlScalarFromVector`,
+model, including `LogicalDAGRoot` and the inputs to `PromqlScalarFromVector`,
 `ScalarSubquery`, `Exists` and `InSubquery`. Their cardinality, NULL and NaN rules
 remain unchanged.
 
