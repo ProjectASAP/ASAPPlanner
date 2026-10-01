@@ -87,6 +87,41 @@ categories make state-specific accuracy and execution constraints explicit. A
 frontend plan contains only `NonASAP` nodes. Optimization may introduce `ASAP`
 nodes later.
 
+**Relationship to the current code.** These structures are proposals, not copies
+of the current definitions with two category labels added. The operations come from
+the existing query and summary models, but the sketches combine several changes:
+
+| Change | Purpose and scope |
+|---|---|
+| Group ordinary operations under `NonASAP` and summary operations under `ASAP` | Organize the common operator model into two semantic categories. |
+| Give both categories inputs that refer to `Operator` nodes | Enable composition and shared producers across the category boundary. Two category labels alone do not enable sharing. |
+| Remove relational-subplan wrappers and duplicate relational operations | Make all dependencies visible and give each ordinary operation one definition. |
+| Separate scalar expressions from operators | A related proposal, described in the [companion document](decoupling_op_and_expr.md); not a consequence of categorization alone. |
+| Introduce `local_guarantee` and `exact_rule` on summary operations | Additional accuracy design: retain local evidence separately from the derived subtree guarantee (§2.2). These are not fields on today's corresponding summary operations. |
+| Assign execution timing through lifecycle planning | Additional planning design (§2.3), replacing timing stored or inferred differently by today's operators. |
+
+Existing operation semantics and field names should be retained unless a change is
+identified explicitly. The sketches use descriptive shorthand in several places;
+those names do not propose additional types or renames:
+
+| Sketch notation | Current counterpart |
+|---|---|
+| `columns: Vec<NamedExpr>` | `cols: Vec<ProjectItem>` on a projection |
+| `predicate` | `pred`, currently wrapped in `Predicate` |
+| `AggregateMeasure` | `AggIntent` |
+| `SummaryFamily` | The state-producing cases of `SummaryFamilyType` |
+| `SummaryQuery` | `SketchQuery` |
+| `AccuracyGuarantee` / `AccuracyCompositionRule` | `ResultGuarantee` / `CompositionOperator` |
+| `PopulationSpec` | `MaintainedPopulation` |
+| `child` on summary estimation or deletion | `summary_input` |
+
+Two differences need particular care. The proposed `Limit.partition_by` preserves a
+capability of today's post-ASAP limit that the pre-ASAP limit does not carry;
+unifying those definitions requires an explicit decision about its semantics.
+The window-function sketch shows a resolved `frame`, while the current definition
+allows an optional frame for compatibility. Neither difference should be treated
+as an incidental rename or a silently approved behavior change.
+
 **Proposed data structures.** The sketches below show the operation-specific data
 carried by each category. They use Rust-like notation to describe the design, not
 final API signatures. `NodeRef` means an edge to another `Operator` node; it does
