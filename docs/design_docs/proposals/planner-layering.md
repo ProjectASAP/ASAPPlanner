@@ -185,18 +185,22 @@ or value being summarized together with its grouping. The summary input data doe
 not include the window; the window-composition rule compares windows
 separately.
 
-The window-composition rule shares a summary across windows by splitting time
-into pieces that each carry their own summary:
+The window-composition rule distinguishes what a query reads from what the
+planner stores:
 
-* **Panes** split the time axis into consecutive fixed-length slices (for
-  example, 1 min each); no two panes overlap. Each pane holds one summary of
-  the data arriving in it. A window is answered by merging the summaries of
-  its panes. The pane length must divide both the window length and the
-  evaluation interval, so that every window is an exact run of panes: a 5-min
-  window evaluated every 1 min uses 1-min panes, and each window is 5
-  consecutive panes. The *windows* overlap, not the panes: in a **sliding
-  window**, consecutive windows share most of their panes (here 4 of 5), which
-  is why one set of panes can serve every evaluation.
+* A **window** is the time range one query evaluation reads, for example the
+  last 5 min. Consecutive evaluations of a repeating query read overlapping
+  windows; this is a **sliding window**.
+* A **pane** is what the planner summarizes and stores. The time axis is cut
+  into back-to-back panes of equal length (a tumbling window), each with one
+  summary. A window is answered by merging the summaries of the panes it
+  covers, so overlapping windows reuse the same panes instead of each building
+  its own summary. Most summaries cannot remove old data, so one summary cannot
+  simply slide forward; panes avoid that, because the oldest pane is dropped
+  rather than subtracted. The pane length must divide both the window length
+  and the evaluation interval, so that every window starts and ends on a pane
+  boundary and never needs part of a pane: a 5-min window evaluated every
+  1 min uses 1-min panes, and each window merges exactly 5 whole panes.
 * A **bucket** of an Exponential Histogram plays the same role, but bucket
   lengths grow with age: recent data sits in short buckets and older data in
   longer ones. This keeps few buckets over a long history, at the cost that old
@@ -441,50 +445,80 @@ flowchart LR
   end
   r --> q1a
   r --> q2a
-  pn["optional: 10-s panes<br/>window-composition rule, Example 3"]:::note -.-> q2a
   classDef data fill:#f1f3f4,stroke:#5f6368,color:#000;
   classDef exact fill:#fff,stroke:#5f6368,color:#000;
   classDef summary fill:#e8f0fe,stroke:#1a73e8,stroke-width:2px,color:#000;
   classDef estimate fill:#e6f4ea,stroke:#188038,color:#000;
-  classDef note fill:#fff,stroke:#9aa0a6,stroke-dasharray:4 3,color:#5f6368;
 ```
 
-**Stage 2.** Both panels repeat every 10 s over continuously arriving data, so
-stage 2 generates candidates that materialize each Q2 summary at ingestion time
-next to candidates that do not materialize it and rebuild it from raw samples
-at every evaluation. Q1 has only its exact
-candidate, so both candidates compute it the same way: a per-series rate
-followed by a grouped sum. Example 4 shows this materialization
-decision in detail.
+**Stage 2.** Stage 2 decides, for each query, whether to materialize its
+computation at ingestion time or to recompute it from raw samples at every
+refresh. Each query has its own two options:
 
 ```mermaid
 flowchart LR
-  subgraph C1["Candidate 1 · Q2 summary materialized at ingestion time"]
+  in[("http_requests_total<br/>samples")]:::data
+
+  subgraph Q1M["Q1 · materialized"]
     direction LR
-    subgraph C1I["Ingestion time"]
-      s1[("samples")]:::data --> b1["maintain Q2 summary<br/>as data arrives"]:::summary
+    subgraph Q1MI["Ingestion time"]
+      m1["maintain per-series rate<br/>and sum by (job)"]:::exact
     end
-    subgraph C1Q["Query time, every 10 s"]
-      e1(["top 10<br/>per job"]):::estimate
+    subgraph Q1MQ["Query time, every 10 s"]
+      m1r["read Q1 result"]:::exact
     end
-    b1 --> e1
+    m1 --> m1r
   end
-  subgraph C2["Candidate 2 · Q2 summary not materialized, rebuilt every evaluation"]
+
+  subgraph Q1N["Q1 · not materialized"]
     direction LR
-    subgraph C2Q["Query time, every 10 s"]
-      s2[("last 1 min of<br/>raw samples")]:::data --> b2["build Q2 summary"]:::summary --> e2(["top 10<br/>per job"]):::estimate
+    subgraph Q1NQ["Query time, every 10 s"]
+      n1a["range 1m"]:::exact --> n1b["rate<br/>per series"]:::exact --> n1c["sum by (job)"]:::exact
     end
   end
-  subgraph Q1L["Q1 · exact, computed the same way in Candidates 1 and 2"]
+
+  subgraph Q2M["Q2 · materialized"]
     direction LR
-    s3[("samples")]:::data --> r3["per-series rate"]:::exact --> g3["grouped sum<br/>by (job)"]:::exact
+    subgraph Q2MI["Ingestion time"]
+      m2["maintain Q2 summary<br/>Count-Min + heap or Hydra"]:::summary
+    end
+    subgraph Q2MQ["Query time, every 10 s"]
+      m2e(["top 10<br/>per job"]):::estimate
+    end
+    m2 --> m2e
   end
+
+  subgraph Q2N["Q2 · not materialized"]
+    direction LR
+    subgraph Q2NQ["Query time, every 10 s"]
+      n2a["range 1m"]:::exact --> n2b["build Q2 summary<br/>Count-Min + heap or Hydra"]:::summary --> n2c(["top 10<br/>per job"]):::estimate
+    end
+  end
+
+  in --> m1
+  in --> n1a
+  in --> m2
+  in --> n2a
   classDef data fill:#f1f3f4,stroke:#5f6368,color:#000;
   classDef exact fill:#fff,stroke:#5f6368,color:#000;
   classDef summary fill:#e8f0fe,stroke:#1a73e8,stroke-width:2px,color:#000;
   classDef estimate fill:#e6f4ea,stroke:#188038,color:#000;
-  classDef note fill:#fff,stroke:#9aa0a6,stroke-dasharray:4 3,color:#5f6368;
 ```
+
+Combining the two options per query gives four candidates:
+
+| Candidate | Q1 | Q2 | Shared input node from Pass 2 |
+|---|---|---|---|
+| 1 | materialized | materialized | not used: neither query reads the range at query time |
+| 2 | materialized | not materialized | not used: only Q2 reads the range |
+| 3 | not materialized | materialized | not used: only Q1 reads the range |
+| 4 | not materialized | not materialized | used: both read the same last minute of samples |
+
+Both panels refresh every 10 s over arriving data, so candidates that
+materialize usually cost less per refresh. Candidate 4 wins only when storage
+is expensive and raw data is available at query time; it is also the only
+candidate where the shared input node saves work. Example 4 covers
+materialization in more detail, including materializing at query time.
 
 **Stage 3.** The deployment's accuracy model checks that each summary candidate
 meets ε = 0.01, δ = 0.001, and its cost model compares per-`job` sketches with
