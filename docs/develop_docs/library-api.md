@@ -633,6 +633,8 @@ that prepared or retained shared state is supported.
 | `plan_summary_maintenance_lifecycles` | Assembled logical DAG root, `WorkloadDemand`, `now_ms`, optional horizon, runtime capabilities, cost model | `Result<SummaryMaintenanceLifecyclePlan, …>` for that fixed root; does not revisit all semantic candidates |
 | `global_selection_with_summary_maintenance_lifecycles` | `PlanSpace`, workload/root-entry associations, time, horizon, capabilities, cost model | Lifecycle-aware compatible selection/error, using eligible cost evidence |
 | `assemble_selected_dag_with_summary_maintenance_lifecycles` | Selection, target root and lifecycle context | Optional lifecycle plan/error; attaches state deployment decisions |
+| `enumerate_summary_maintenance_lifecycles` | Same inputs as `plan_summary_maintenance_lifecycles` | `SummaryMaintenanceLifecycleCandidates`: per unique retained state, every alternative with its cost or rejection; nothing selected. `guarantee(&lifecycle)` gives the mode/schedule that alternative would carry |
+| `SummaryMaintenanceLifecycleCandidates::select(choices)` | One `(PostAsapNodeId, SummaryMaintenanceLifecycle)` per state, copied from `deployments()` | The same `SummaryMaintenanceLifecyclePlan` Planner selection would produce for that combination, or `SummaryMaintenanceLifecycleChoiceError` when a choice is unknown, missing, duplicated, rejected, schedule-incompatible, or not completely estimable |
 
 Inspect `deployments`, their selected lifecycle/alternatives/rejections,
 `selected_raw_recompute`, and optional summary/raw costs. Success of a function
@@ -643,6 +645,52 @@ Lifecycle feasibility and costs must affect final deployment comparison. Running
 lifecycle analysis after structural selection can evaluate the selected root,
 but does not make the earlier selection lifecycle-optimal. An application may
 consume ranked candidates and perform this comparison downstream instead.
+
+A deployment that prices lifecycles itself calls
+`enumerate_summary_maintenance_lifecycles`, prices the alternatives, and binds
+its choice with `select`. A choice is accepted only if Planner could select it:
+an alternative with `MissingCostEvidence` is accepted only when the cost model's
+complete-candidate hook covers lifecycle costs. Window frameworks and totals come
+from that hook, as in Planner selection.
+
+A lifecycle choice then fixes each physical placement through timing: a
+continuously maintained state and its inputs run at ingestion time, while an
+ephemeral one stays at query time. Compile each query's `PostAsapDag` once and
+cut every chosen assignment from that result:
+
+```rust
+use asap_physical_operators::physical_planner::{
+    compile, cut_candidate, frontier_from_timing,
+};
+
+let compiled = compile(&dag, inputs, &roots)?; // each node lowered once
+for plan in lifecycle_plans {
+    let frontier = frontier_from_timing(&plan.execution_timed_dag()?)?;
+    // Precompute/query DAGs split at `frontier`; no logical lowering.
+    let candidate = cut_candidate(&compiled, &frontier)?;
+    // Check feasibility and price `candidate`; bind the selected one as is.
+}
+```
+
+The frontier is the set of ingestion-time nodes read by query-time nodes (or an
+ingestion-time root). `frontier_from_timing` rejects a query-time node feeding
+an ingestion-time node. `cut_candidate` returns exactly what
+`compile_candidate(&dag, inputs, &roots, &frontier)` returns and rejects the
+same invalid frontiers. If the DAG has an ingestion-time `Binary`, compile with
+the same timing for that node, because it lowers differently. Temporal pane
+candidates are a different lowering and still use
+`compile_temporal_pane_candidate`.
+
+Retained states are `SummaryAgg` nodes and `MaintainPopulation` nodes that do
+not feed a `SummaryAgg`; a population that does feed one is part of that
+state's input. The lifecycle cost hooks (`summary_maintenance_capabilities`,
+`summary_maintenance_lifecycle_cost_inputs_for_horizon`) and the complete-candidate
+hook therefore also receive `MaintainPopulation` nodes. A model that does not
+recognize one should return unknown costs, which keep its alternatives
+unselected; a model that prices every node uniformly now also prices
+populations, so population candidates can win lifecycle-aware selection. `SummaryMaintenanceLifecyclePlan::execution_timed_dag` times a
+population as it times a summary state: retained at ingestion, `Ephemeral` at
+query time from the raw source.
 
 ## Optional whole-plan selection and DAG assembly
 
