@@ -307,11 +307,23 @@ fn walk(expr: &Expr) -> Result<Unresolved> {
                 vector_match: None,
             }),
         },
-        Expr::Subquery(sq) => Ok(Unresolved::PromqlSubquery {
-            range: sq.range,
-            resolution: sq.step,
-            child: Rc::new(walk(&sq.expr)?),
-        }),
+        Expr::Subquery(sq) => {
+            let subquery = Unresolved::PromqlSubquery {
+                range: sq.range,
+                resolution: sq.step,
+                child: Rc::new(walk(&sq.expr)?),
+            };
+            // `offset`/`@` move the whole subquery, including its step grid.
+            let shift = time_shift(sq.offset.as_ref(), sq.at.as_ref())?;
+            Ok(if shift.is_identity() {
+                subquery
+            } else {
+                Unresolved::TimeShift {
+                    shift,
+                    child: Rc::new(subquery),
+                }
+            })
+        }
         Expr::VectorSelector(vs) => {
             let (metric, matchers, shift) = vs_parts(vs)?;
             Ok(instant_source(metric, matchers, shift))
