@@ -1,16 +1,16 @@
 # Decoupling Operators From Scalar Expressions
 
-> Status: proposed, not implemented. Companion to [Operator sharing](operator-sharing.md)
-> (same PR): this document splits `QueryExpr`; that one builds the shared operator
-> language on the result. Code is referenced by file and function; counts are
-> approximate, measured on `main` at `8acb472`.
+> Status: proposed, not implemented. Companion to [Operator sharing](operator-sharing.md):
+> this document splits `QueryExpr`; that one builds the shared operator language on the
+> result. Code is referenced by file and function; counts are approximate, measured on
+> `main` at `5a32b8b`.
 
 **The idea.** `QueryExpr` holds two different kinds of node in one enum. This proposal
 splits it into `NonASAPOp` (operators) and `ScalarExpr` (scalar expressions).
 
 ```
 Today                                        Proposed
-Filter { pred:  Rc<QueryExpr>,               Filter { pred:  Predicate(Rc<ScalarExpr>),
+Filter { pred:  Rc<QueryExpr>,               Filter { pred:  Predicate(ScalarExpr),    
          child: Rc<QueryExpr> }                       child: Rc<NonASAPOp> }
 ```
 
@@ -46,14 +46,14 @@ pub enum NonASAPOp<C: ColState = ColumnId> {
     Scan { .. }, Filter { pred: Predicate<C>, child: Rc<NonASAPOp<C>> }, Project { cols: Vec<ProjectItem<C>>, child },
     Aggregate { .. }, Join { .. }, SetOp { .. }, Concat { .. }, Dedup { .. }, Sort { .. }, Limit { .. }, BinaryOp { .. },
     SQLWindowFunc { .. }, TimeRange { .. }, TimeShift { .. }, Promql* { .. },
-    ScalarBridge(Rc<ScalarExpr<C>>),   // formerly PromqlScalarBridge (the `2` in PromQL `v * 2`)
+    ScalarBridge(ScalarExpr<C>),       // formerly PromqlScalarBridge (the `2` in PromQL `v * 2`)
     EvalTimestamp,                     // PromQL time()
 }
 pub enum ScalarExpr<C: ColState = ColumnId> {
     Column(C), Literal(ScalarValue), Compare { .. }, BoolAnd(..), BoolOr(..), Not(..), IsNull(..), IsNotNull(..),
     Cast { .. }, InList { .. }, FunctionCall { .. }, Arithmetic { .. }, Case { .. }, CurrentTimestamp,
 }
-pub struct Predicate<C>(pub Rc<ScalarExpr<C>>);
+pub struct Predicate<C>(pub ScalarExpr<C>);   // scalars are held by value: CSE hashes them as plain data, nothing shares them
 pub struct ProjectItem<C> { pub alias: Option<String>, pub expr: ScalarExpr<C> }
 ```
 
