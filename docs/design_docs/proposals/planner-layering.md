@@ -112,17 +112,20 @@ query's accuracy target), and every rejected candidate carries a reason.
 
 | Stage | Input | Decides | Output |
 |---|---|---|---|
-| 0. Frontends | Each `QueryWorkloadEntry.query` and `QueryWorkload.language` | Language semantics, and converting source-language queries into a common logical representation. Rejects constructs it cannot represent faithfully. | `CandidateLogicalDAGs`; nodes are logical operations with no summary operations |
-| 1. Logical ASAP-aware optimization | Logical DAGs, and each query's accuracy requirement, `time_selection` and repetition interval (from `recurrence`) across the workload | **Pass 1 — Summary replacement and query rewriting:** apply query rewriting rules to each eligible sub-DAG and generate exact and summary-based candidates that satisfy its semantics and accuracy requirements. **Pass 2 — ASAP-aware CSE:** apply traditional CSE and summary-specific CSE rules across sub-DAGs and queries to generate shared computation candidates, while preserving independent candidates. | `CandidateLogicalASAPDAGs`; nodes include summary and window-summary operations |
-| 2. Physical ASAP-aware optimization | Logical ASAP DAGs, each entry's `recurrence` and `predictability`, the `DataWorkload` | **Materialization:** for each sub-DAG, whether its output is materialized, when it is computed (ingestion time or query time), and how long it is retained. **Physical operator implementation:** physical operators for every node. **Parallelism, partitioning, resources:** TODO. | `CandidatePhysicalASAPDAGs` |
-| 3. Plan selection | Physical ASAP DAG candidates, `requirements`, the deployment's cost model, accuracy model and capabilities | Rejects candidates that miss an accuracy target, a latency bound or a capability; picks the cheapest valid plan for the whole workload. A shared state is costed once with all its consumers' demand. | One `PhysicalASAPDAG` |
-| 4. Execution (deployment) | The selected `PhysicalASAPDAG` | Executes ingestion, storage, precomputation and query-time computation. | Query results |
+| 0. Frontends | `query`, `language` | Parse and lower to a common logical form; reject what cannot be represented | `CandidateLogicalDAGs` |
+| 1. Logical ASAP-aware optimization | Logical DAGs; accuracy, `time_selection`, repetition interval | Summary replacement (Pass 1); ASAP-aware CSE (Pass 2) | `CandidateLogicalASAPDAGs` |
+| 2. Physical ASAP-aware optimization | Logical ASAP DAGs; `recurrence`, `predictability`, `DataWorkload` | Materialization; physical operators; parallelism and resources (TODO) | `CandidatePhysicalASAPDAGs` |
+| 3. Plan selection | Physical candidates; `requirements`; cost model, accuracy model, capabilities | Reject invalid candidates; pick the cheapest plan for the whole workload | One `PhysicalASAPDAG` |
+| 4. Execution (deployment) | The selected `PhysicalASAPDAG` | Run ingestion, storage and query-time computation | Query results |
+
+The sections below describe each stage.
 
 ### 0. Language-specific frontends
 
 The frontend converts each query into a `LogicalDAG`. Nodes represent logical
 query operations, including selectors, transformations, aggregations, grouping
-and window semantics. They contain no ASAP summary choices.
+and window semantics. They contain no ASAP summary choices. A construct that cannot be represented
+faithfully is rejected.
 
 The frontend preserves source-language behavior, including series identity,
 evaluation timing and missing-data semantics.
@@ -185,7 +188,15 @@ separately.
 The window-composition rule shares a summary across windows by splitting time
 into pieces that each carry their own summary:
 
-* **Panes** split the time axis into consecutive fixed-length slices (for example, 1 min each); no two panes overlap. Each pane holds one summary of the data arriving in it. A window is answered by merging the summaries of its panes. The pane length must divide both the window length and the evaluation interval, so that every window is an exact run of panes: a 5-min window evaluated every 1 min uses 1-min panes, and each window is 5 consecutive panes. The windows overlap, not the panes: in a sliding window, consecutive windows share most of their panes (here 4 of 5), which is why one set of panes can serve every evaluation.
+* **Panes** split the time axis into consecutive fixed-length slices (for
+  example, 1 min each); no two panes overlap. Each pane holds one summary of
+  the data arriving in it. A window is answered by merging the summaries of
+  its panes. The pane length must divide both the window length and the
+  evaluation interval, so that every window is an exact run of panes: a 5-min
+  window evaluated every 1 min uses 1-min panes, and each window is 5
+  consecutive panes. The *windows* overlap, not the panes: in a **sliding
+  window**, consecutive windows share most of their panes (here 4 of 5), which
+  is why one set of panes can serve every evaluation.
 * A **bucket** of an Exponential Histogram plays the same role, but bucket
   lengths grow with age: recent data sits in short buckets and older data in
   longer ones. This keeps few buckets over a long history, at the cost that old
@@ -279,11 +290,14 @@ merge and quantile estimation operators.
 
 ### 3. Plan selection
 
-Selection is the only stage that uses the deployment's cost and accuracy
-models, and the only stage that discards valid candidates. Accuracy is
+Selection rejects every candidate that misses an accuracy target or a latency
+bound, or that needs a capability the deployment lacks, and then picks the
+cheapest remaining plan. It is the only stage that uses the deployment's cost
+and accuracy models, and the only stage that discards valid candidates. Accuracy is
 estimated by the deployment's accuracy model, not assumed from a summary's
 nominal bound. Cost is evaluated for the whole workload rather than per query,
-which is what lets one shared summary beat several cheaper independent ones.
+which is what lets one shared summary beat several cheaper independent ones:
+a shared summary is costed once, with the demand of all its consumers.
 
 ### 4. Execution
 
