@@ -61,7 +61,7 @@ executes the plan: it supplies its own empirical cost estimation, empirical accu
 │ Physical planning — how to compute                                     │
 │                                                                        │
 │ 2. Physical ASAP-aware optimization                                    │
-│    Explore executable implementations of each logical candidate:       │
+│    Explore physical implementations of each logical candidate:       │
 │                                                                        │
 │      materialization decisions                                         │
 │      × physical operator implementations                               │
@@ -232,7 +232,7 @@ independent candidates, so selection can compare both.
 
 ### 2. Physical ASAP-aware optimization
 
-Physical optimization turns each logical candidate into executable candidates.
+Physical optimization turns each logical candidate into physical candidates.
 It makes two ASAP-specific decisions, described below. Parallelism, partitioning
 and resource management are TODO.
 
