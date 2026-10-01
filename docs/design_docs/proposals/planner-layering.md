@@ -334,15 +334,14 @@ Unless an example says otherwise, every example uses this data workload:
 | `DataWorkload` field | Meaning | Value |
 |---|---|---|
 | `arrival` | Whether the data is at rest, still arriving, or both | `continuously_ingesting` |
-| `data_ingestion_interval` | How often each series delivers one sample (the scrape interval in Prometheus). PromQL uses it as the look-back horizon of instant selectors. | 15 s (declared) |
+| `data_ingestion_interval` | How often each series delivers one sample (the scrape interval in Prometheus). PromQL uses it as the look-back horizon of instant selectors. | 15 s |
 | `ingestion_volume` | Total amount of ingested data | unknown |
-| `ingestion_rate` | Samples arriving per second across all series | about 66,667 samples/s (declared) |
-| `input_cardinality` | Number of distinct series (or keys) | 1,000,000 series (declared) |
-| `distribution` | How samples are spread over keys | `zipf` (declared) |
+| `ingestion_rate` | Samples arriving per second across all series | about 66,667 samples/s |
+| `input_cardinality` | Number of distinct series (or keys) | 1,000,000 series |
+| `distribution` | How samples are spread over keys | `zipf` |
 
-"Declared" is the value's `EvidenceSource`: the workload author stated it
-rather than the planner observing it. With 1,000,000 series each sampled every
-15 s, the ingestion rate is 1,000,000 / 15 ≈ 66,667 samples/s.
+With 1,000,000 series each sampled every 15 s, the ingestion rate is
+1,000,000 / 15 ≈ 66,667 samples/s.
 
 ### Example 1: Aggregation over dimensions — summary replacement in Pass 1
 
@@ -357,21 +356,37 @@ first needs an exact total; the second tolerates error.
 | `predictability` | `predictable` |
 | `time_selection.scope` | `real_time` |
 
-| Query | `lookback` | `as_of` | Accuracy | Latency |
+| Query | `lookback` | `as_of` | Accuracy requirement | Latency requirement |
 |---|---|---|---|---|
 | `sum by (job) (rate(http_requests_total[1m]))` | 1 m | evaluation time | exact (`implicit_exact`) | unspecified |
 | `topk by (job) (10, sum_over_time(http_requests_total[1m]))` | 1 m | evaluation time | ε = 0.01, δ = 0.001 | ≤ 100 ms |
 
-**Stage 0.** The two `LogicalDAG`s are
-`range http_requests_total[1m] → rate → sum by (job)` and
-`range http_requests_total[1m] → sum_over_time → topk by (job) (10)`.
+**Stage 0.** The frontend produces one `LogicalDAG` per query. Neither
+contains a summary:
+
+```mermaid
+flowchart LR
+  subgraph Q1["Q1 · sum by (job) (rate(http_requests_total[1m]))"]
+    direction LR
+    x1[("http_requests_total")]:::data --> x2["range 1m"]:::exact --> x3["rate"]:::exact --> x4["sum by (job)"]:::exact
+  end
+  subgraph Q2["Q2 · topk by (job) (10, sum_over_time(http_requests_total[1m]))"]
+    direction LR
+    y1[("http_requests_total")]:::data --> y2["range 1m"]:::exact --> y3["sum_over_time"]:::exact --> y4["topk by (job) (10)"]:::exact
+  end
+  classDef data fill:#f1f3f4,stroke:#5f6368,color:#000;
+  classDef exact fill:#fff,stroke:#5f6368,color:#000;
+  classDef summary fill:#e8f0fe,stroke:#1a73e8,stroke-width:2px,color:#000;
+  classDef estimate fill:#e6f4ea,stroke:#188038,color:#000;
+```
 
 **Stage 1, Pass 1.**
 
-* `sum by (job) (rate(...))`: the accuracy requirement is `implicit_exact`, and
-  an exact grouped sum already keeps one value per `job`. The only candidate is
-  a per-series Rate feeding an exact per-`job` Sum. No summary helps here.
-* `topk by (job) (10, ...)`: the exact candidate keeps a per-series sum and
+* Q1, `sum by (job) (rate(...))`: the accuracy requirement is `implicit_exact`,
+  and an exact grouped sum already keeps one value per `job`. The only
+  candidate is a per-series Rate feeding an exact per-`job` Sum. No summary
+  helps here.
+* Q2, `topk by (job) (10, ...)`: the exact candidate keeps a per-series sum and
   sorts within each `job`, which is costly at one million Zipf-distributed
   series. The `EpsilonDelta` target admits two summary candidates:
   1. **Count-Min Sketch with a top-*k* heap per `job`.** One sketch per group;
@@ -379,16 +394,12 @@ first needs an exact total; the second tolerates error.
   2. **Hydra over the whole `job` column.** One sketch covers every (`job`,
      series) key and answers the top 10 for any `job`.
 
-  Pass 1 keeps all three candidates. The better summary depends on the number
-  of jobs and on costs that only the deployment knows.
+  Pass 1 keeps all three candidates for Q2. The better summary depends on the
+  number of jobs and on costs that only the deployment knows.
 
 ```mermaid
 flowchart LR
-  subgraph L["Stage 0 · LogicalDAG"]
-    direction LR
-    a1[("http_requests_total<br/>last 1m")]:::data --> a2["sum_over_time"]:::exact --> a3["topk by (job) (10)"]:::exact
-  end
-  subgraph C["Stage 1, Pass 1 · CandidateLogicalASAPDAGs"]
+  subgraph C["Stage 1, Pass 1 · candidates for Q2"]
     direction TB
     subgraph E["Exact"]
       direction LR
@@ -403,12 +414,74 @@ flowchart LR
       h1[("input")]:::data --> h2["Hydra over<br/>(job, series)"]:::summary --> h3(["top 10<br/>for each job"]):::estimate
     end
   end
-  S{{"Stage 3 · cheapest valid candidate<br/>many small jobs → Hydra<br/>few large jobs → Count-Min per job"}}
-  L --> C --> S
   classDef data fill:#f1f3f4,stroke:#5f6368,color:#000;
   classDef exact fill:#fff,stroke:#5f6368,color:#000;
   classDef summary fill:#e8f0fe,stroke:#1a73e8,stroke-width:2px,color:#000;
   classDef estimate fill:#e6f4ea,stroke:#188038,color:#000;
+```
+
+**Stage 1, Pass 2.** Both queries read the same range selector,
+`http_requests_total[1m]`, so the identical-expression rule adds a candidate
+in which Q1 and Q2 share one input node. No summary is shared: Q1 needs an
+exact Rate and Sum, and no summary supports both Q1 and Q2. Both queries also
+evaluate a 1-min window every 10 s, so consecutive windows overlap; the
+window-composition rule could add 10-s panes for the mergeable candidates.
+Example 3 walks through that rule, so it is not expanded here.
+
+```mermaid
+flowchart LR
+  in[("http_requests_total")]:::data --> r["range 1m<br/>one shared input node"]:::exact
+  subgraph Q1P["Q1 · exact candidate"]
+    direction LR
+    q1a["rate<br/>per series"]:::exact --> q1b["sum by (job)"]:::exact
+  end
+  subgraph Q2P["Q2 · a summary candidate from Pass 1"]
+    direction LR
+    q2a["Count-Min + heap per job<br/>or Hydra"]:::summary --> q2b(["top 10<br/>per job"]):::estimate
+  end
+  r --> q1a
+  r --> q2a
+  pn["optional: 10-s panes<br/>window-composition rule, Example 3"]:::note -.-> q2a
+  classDef data fill:#f1f3f4,stroke:#5f6368,color:#000;
+  classDef exact fill:#fff,stroke:#5f6368,color:#000;
+  classDef summary fill:#e8f0fe,stroke:#1a73e8,stroke-width:2px,color:#000;
+  classDef estimate fill:#e6f4ea,stroke:#188038,color:#000;
+  classDef note fill:#fff,stroke:#9aa0a6,stroke-dasharray:4 3,color:#5f6368;
+```
+
+**Stage 2.** Both panels repeat every 10 s over continuously arriving data, so
+stage 2 generates candidates that materialize each Q2 summary at ingestion time
+next to candidates that build it at query time. The exact Q1 path is lowered to
+a per-series rate and a grouped sum. Example 4 shows this materialization
+decision in detail.
+
+```mermaid
+flowchart LR
+  subgraph C1["Candidate 1 · Q2 summary materialized at ingestion time"]
+    direction LR
+    subgraph C1I["Ingestion time"]
+      s1[("samples")]:::data --> b1["maintain Q2 summary<br/>as data arrives"]:::summary
+    end
+    subgraph C1Q["Query time, every 10 s"]
+      e1(["top 10<br/>per job"]):::estimate
+    end
+    b1 --> e1
+  end
+  subgraph C2["Candidate 2 · Q2 summary built at query time"]
+    direction LR
+    subgraph C2Q["Query time, every 10 s"]
+      s2[("last 1 min of<br/>raw samples")]:::data --> b2["build Q2 summary"]:::summary --> e2(["top 10<br/>per job"]):::estimate
+    end
+  end
+  subgraph Q1L["Q1 in both candidates · lowered exact path"]
+    direction LR
+    s3[("samples")]:::data --> r3["per-series rate"]:::exact --> g3["grouped sum<br/>by (job)"]:::exact
+  end
+  classDef data fill:#f1f3f4,stroke:#5f6368,color:#000;
+  classDef exact fill:#fff,stroke:#5f6368,color:#000;
+  classDef summary fill:#e8f0fe,stroke:#1a73e8,stroke-width:2px,color:#000;
+  classDef estimate fill:#e6f4ea,stroke:#188038,color:#000;
+  classDef note fill:#fff,stroke:#9aa0a6,stroke-dasharray:4 3,color:#5f6368;
 ```
 
 **Stage 3.** The deployment's accuracy model checks that each summary candidate
@@ -429,7 +502,7 @@ source IPs over the last minute.
 | `predictability` | `predictable` |
 | `time_selection.scope` | `real_time` |
 | `as_of` | evaluation time |
-| Latency | unspecified |
+| Latency requirement | unspecified |
 
 ```sql
 -- Q1: Distinct(src_ip)
@@ -456,7 +529,7 @@ FROM (
 );
 ```
 
-| Query | Computation | `lookback` | Accuracy |
+| Query | Computation | `lookback` | Accuracy requirement |
 |---|---|---|---|
 | Q1 | `Distinct(src_ip)` | 1 m | ε = 0.02, δ = 0.01 |
 | Q2 | `Entropy(src_ip)` | 1 m | ε = 0.05, δ = 0.01 |
@@ -466,7 +539,7 @@ The data workload differs from the shared one in two fields:
 
 | `DataWorkload` field | Value |
 |---|---|
-| `input_cardinality` | 10,000,000 distinct source IPs (declared) |
+| `input_cardinality` | 10,000,000 distinct source IPs |
 | `data_ingestion_interval` | not needed for SQL |
 
 **Pass 1.** Rewrite rules recognize the three computations, and each gets its
@@ -562,8 +635,8 @@ all executed together at time T.
 | `execute_at` | T |
 | `predictability` | `ad_hoc` |
 | `time_selection.scope` | `longitudinal` |
-| Accuracy | ε = 0.005, δ = 0.01 |
-| Latency | unspecified |
+| Accuracy requirement | ε = 0.005, δ = 0.01 |
+| Latency requirement | unspecified |
 
 | Query | `lookback` | `as_of` |
 |---|---|---|
@@ -627,7 +700,7 @@ over the last 5 min, refreshed every minute.
 | `predictability` | `predictable` |
 | `time_selection.scope` | `real_time` |
 
-| Query | `lookback` | `as_of` | Accuracy | Latency |
+| Query | `lookback` | `as_of` | Accuracy requirement | Latency requirement |
 |---|---|---|---|---|
 | `quantile_over_time(0.99, latency_ms[5m])` | 5 m | evaluation time | ε = 0.01, δ = 0.01 | ≤ 200 ms |
 
