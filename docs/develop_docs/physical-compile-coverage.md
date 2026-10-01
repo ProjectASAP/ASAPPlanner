@@ -132,9 +132,9 @@ Grouped `sum`/`avg`, current-series `Sum`/`Average` readouts, and
 average switches to an incremental mean once the running sum would overflow.
 The grouped path also serves SQL `SUM`/`AVG` over Float64, which are now
 compensated the same way.
-Stored exact `Sum` state still sums without compensation, because a
-compensation term would change the stored state layout. Its checked
-`avg_over_time` division therefore fails instead of returning a finite mean.
+Stored exact `Sum` now retains a Kahan-Neumaier compensation term through
+updates, pane merges, and persistence. A truly overflowing sum remains infinite; the
+checked `avg_over_time` division still rejects that case.
 
 Totals after this change: 20 Supported, 4 Partial, 5 Missing, 2 Backend.
 
@@ -163,21 +163,19 @@ Fallback and in query-time `Binary` nodes, following Prometheus'
 - Range functions other than `last_over_time` now drop `__name__` in the
   Fallback. Series whose label sets become equal are an error, as in
   Prometheus. Vector-scalar results are checked the same way. Inside a
-  subquery the inner function also drops the name, without that check,
-  because each series repeats across steps.
+  subquery the inner function also drops the name and checks identities
+  separately at each evaluation timestamp.
 
-A result is written in the left operand's schema. Without a series identity,
-its label columns must hold every label the right side can contribute
-(`or`, `group_right`, and `group_left` labels); otherwise `compile` rejects it.
-So `sum(a) or vector(0)` compiles, but
-`sum by (job) (a) * on(job) group_left(team) info` is rejected: the
-aggregate's schema has no `team` column.
+Binary result schemas now include labels contributed by `or`, `group_right`,
+and `group_left`, including a right-side series identity when needed. Thus
+`sum by (job) (a) * on(job) group_left(team) info` retains `team`, and
+`sum by(job)(a) or info` retains every right-side label.
 
 | Row | Change |
 |---|---|
 | 1 | Comparisons, `bool`, set operators, `group_left`/`group_right`, `scalar()` operands, and literals over aggregates whose value has another name, such as `sum by (job) (a) * 2`. Still Partial. |
 | 5 | Grouped `Binary` rows use the same operator instead of a relational join. A duplicate match group is now an error instead of a cross product. |
-| 7 | Fallback, grouped `Binary`, and per-series `bool` comparisons. Per-series filter comparisons and set operators on `Binary` nodes fail closed: stored readouts keep `__name__` even where the range function drops it. Now Partial. |
+| 7 | Fallback, grouped `Binary`, and per-series comparisons and sets. Temporal stored readouts drop `__name__` before matching, including exact Count conversion, and reject duplicate output identities. |
 
 Totals after this change: 20 Supported, 5 Partial, 4 Missing, 2 Backend.
 
@@ -191,11 +189,10 @@ An argument whose output provably lacks `le`, such as
 `sum by (job) (rate(x_bucket[5m]))`, is rejected at lowering. Prometheus
 returns an empty vector for it. Candidate search keeps the classic form as one
 exact `KeepPreAsap` subtree for every accuracy target; it has no sketch
-candidate. `histogram_quantiles` lowers each branch the same way, but the
-Fallback compiler does not yet accept its `Concat` of relabeled branches.
-Aggregating or doing arithmetic over the result, as in
-`sum(histogram_quantile(…))`, fails like any expression over a nested
-aggregate's renamed value column.
+candidate. `histogram_quantiles` lowers each branch the same way; the
+Fallback compiler accepts its `Concat` of relabeled branches and rejects
+duplicate output label sets. Nested aggregation, such as
+`sum(histogram_quantile(…))`, resolves the renamed sample-value column.
 
 Totals after this change: 21 Supported, 5 Partial, 3 Missing, 2 Backend.
 
@@ -204,30 +201,46 @@ Totals after this change: 21 Supported, 5 Partial, 3 Missing, 2 Backend.
 In order of backend usage:
 
 1. Rows 1 and 12, the remaining `Fallback` shapes:
-   - `time()` and other scalar functions as operands.
+   - Other scalar functions as operands.
    - Subquery operands other than one per-series function; implicit
      subquery resolution, which is a deployment default.
-   - `@ start()` and `@ end()`, which need the range query's bounds in the
-     run scope.
-   - Other functions, such as `deriv`, `predict_linear`,
-     `stddev_over_time`, `absent`, `label_replace`, and math functions.
+   - Other functions, such as `stddev_over_time`, `absent`, and math functions.
    After these shapes are covered, the backend can delete rows 28 and 30.
-2. Row 7: per-series readouts must drop `__name__` where their range
-   function does, and check for equal label sets. Then filter comparisons
-   and set operators over them can compile.
-3. Rows 25 and 27: constant weights and `EntityIdentity` items for precompute
+2. Rows 25 and 27: constant weights and `EntityIdentity` items for precompute
    `SummaryAgg`.
-4. Row 16: a label-map sketch-state readout, the counterpart of
+3. Row 16: a label-map sketch-state readout, the counterpart of
    `compile_exact_readout`, and MetricsQL `__name__` retention rules.
-5. Row 20: summary join, subtract, and delete.
-6. Compensated stored exact `Sum` state, a state-layout change shared with the
-   backend's stored-state decoding.
-7. Non-finite literals (`NaN`, `Inf`) in compiled operators do not survive a
-   JSON round trip of the program.
-8. `group_left` labels and `or`/`group_right` right-side labels onto
-   aggregated (label-column) rows. The logical output schema, which is the left
-   side's, has no column for them.
-9. An equal-label-set check for inner subquery functions, per step.
+4. Row 20: summary join, subtract, and delete.
 
 `fill`, `fill_left`, and `fill_right` matching modifiers are rejected by the
 frontend (#494); they are never silently ignored.
+
+## Additional scalar and persistence coverage
+
+`deriv` and `predict_linear` use per-series linear regression. Prediction
+uses the evaluation instant even when an offset selects older samples. As in
+Prometheus, an `@`-pinned call is step-invariant: it is evaluated once, at the
+first instant of the query or of its subquery grid, and reused at every step.
+Inner subquery functions validate label-set uniqueness per step.
+
+`time()` reads the run's evaluation timestamp in seconds and composes with
+scalar and vector operands, including `vector(time())`. Logical literals, floating intent parameters,
+and physical values encode NaN and infinities as explicit JSON strings instead
+of losing them as `null`; finite values remain numbers. Deployments continue
+to own document versioning.
+
+`label_replace` compiles to a native label rewrite with anchored regular
+expressions, capture expansion, non-match preservation, empty-label removal,
+and duplicate-label-set rejection. Multi-quantile branches use the same label
+rewrite for their constant quantile labels. These operators perform computation
+only; the backend still supplies raw selectors and stored inputs.
+
+`@ start()` and `@ end()` remain dynamic anchors in the compiled program,
+including selector offsets and subquery grids. The deployment supplies the
+outer query bounds with `RunContext::with_query_range(start_ms, end_ms)`;
+for an instant query both bounds equal its evaluation time. Executing an
+`@ start()`/`@ end()` program without those bounds fails before reading
+inputs. A literal `@` pin does not require bounds, but a range query must
+still supply them: without them each step runs as its own instant query, so a
+pinned call is re-evaluated per step. Query output timestamps still use the
+current evaluation instant.

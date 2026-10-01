@@ -962,3 +962,192 @@ fn grouped_rate_sum_placement_is_a_lifecycle_choice() {
     assert!(builds(ephemeral_pre, "Rate") && !builds(ephemeral_pre, "Sum"));
     assert!(builds(ephemeral_query, "Sum"));
 }
+
+/// The lifecycle-timed DAG Planner selects for `query` with upfront series
+/// typing, and whether it keeps an ingestion-time Binary.
+fn typed_selection(query: &str) -> (asap_types::post_asap::PostAsapDag, bool) {
+    use asap_types::post_asap::{ExecutionTiming, PostAsapOperatorPayload};
+    let workload = quantile_workload(query);
+    let lowered = asap_types::pre_asap::schema::with_promql_series_identity(
+        &lower_promql_workload(&workload, 0).unwrap().remove(0),
+    )
+    .unwrap();
+    let dag = selected_plan_for_lowered(&workload, lowered, &FullyCostedRuntime, Horizon(100.))
+        .execution_timed_dag()
+        .unwrap();
+    let ingestion_binary = dag.nodes.iter().any(|node| {
+        matches!(node.payload, PostAsapOperatorPayload::Binary { .. })
+            && node.output_state.timing == ExecutionTiming::IngestionTime
+    });
+    (dag, ingestion_binary)
+}
+
+/// Execute a timed DAG's precompute and query graphs over `samples`
+/// (`(metric, job, seconds, value)`) at 300s; returns the root's values.
+fn execute_timed(
+    dag: &asap_types::post_asap::PostAsapDag,
+    samples: &[(&str, &str, i64, f64)],
+) -> Vec<f64> {
+    use asap_physical_operators::{
+        physical_planner::{
+            compile_candidate, frontier_from_timing, promql_fallback, promql_rows, InputContract,
+        },
+        runtime::Scope,
+        values::{Batch, Value},
+    };
+    use asap_types::{
+        post_asap::PostAsapOperatorPayload,
+        pre_asap::{QueryExpr, Source},
+    };
+    use std::{collections::BTreeMap, sync::Arc};
+    // Raw inputs: a selector Fallback is itself the input; a retained
+    // expression reads each of its selectors through its raw-series slots.
+    let mut raw = BTreeMap::new();
+    for node in &dag.nodes {
+        let PostAsapOperatorPayload::Fallback { expression } = &node.payload else {
+            continue;
+        };
+        let metric = |selector: &QueryExpr| match selector {
+            QueryExpr::TimeRange { child, .. } => match child.as_ref() {
+                QueryExpr::Scan {
+                    source: Source::TimeSeries { metric },
+                    ..
+                } => Some(metric.clone()),
+                _ => None,
+            },
+            QueryExpr::Scan {
+                source: Source::TimeSeries { metric },
+                ..
+            } => Some(metric.clone()),
+            _ => None,
+        };
+        if let Some(name) = metric(expression) {
+            raw.insert(
+                u64::from(node.id.0),
+                (Arc::new(node.output_schema.clone()), name),
+            );
+        } else {
+            for (i, (selector, schema)) in promql_fallback::raw_series(expression)
+                .unwrap()
+                .into_iter()
+                .enumerate()
+            {
+                raw.insert(
+                    promql_fallback::raw_series_input(u64::from(node.id.0), i),
+                    (schema, metric(&selector).unwrap()),
+                );
+            }
+        }
+    }
+    let batch = |schema: &asap_physical_operators::values::Schema, name: &str| {
+        let rows = samples
+            .iter()
+            .filter(|sample| sample.0 == name)
+            .map(|(metric, job, seconds, value)| {
+                let labels = BTreeMap::from([
+                    ("__name__".to_string(), metric.to_string()),
+                    ("job".to_string(), job.to_string()),
+                ]);
+                promql_rows::series_row(schema, &labels, seconds * 1000, *value).unwrap()
+            })
+            .collect();
+        Batch::try_new(schema.clone(), rows).unwrap()
+    };
+    let frontier = frontier_from_timing(dag).unwrap();
+    let candidate = compile_candidate(
+        dag,
+        raw.iter()
+            .map(|(id, (schema, _))| (*id, InputContract::bounded(schema.clone())))
+            .collect(),
+        &[u64::from(dag.root.0)],
+        &frontier,
+    )
+    .unwrap();
+    let raw_sources = |plan: &asap_physical_operators::physical_planner::CompiledPhysicalDag| {
+        plan.input_contracts()
+            .filter_map(|(id, _)| raw.get(&id).map(|(schema, name)| (id, batch(schema, name))))
+            .collect::<BTreeMap<_, _>>()
+    };
+    let mut query_sources = raw_sources(&candidate.query);
+    if let Some(precompute) = &candidate.precompute {
+        let stored = physical_common::execute(
+            precompute,
+            raw_sources(precompute),
+            Scope::Ingestion {
+                window_start_ms: 240_000,
+                window_end_ms: 300_000,
+                revision: 1,
+            },
+        );
+        for (root, batches) in precompute.roots().iter().zip(stored) {
+            query_sources.insert(*root, batches[0].clone());
+        }
+    }
+    let result = physical_common::execute(
+        &candidate.query,
+        query_sources,
+        Scope::Query {
+            evaluation_time_ms: 300_000,
+            revision: 1,
+        },
+    );
+    result[0]
+        .iter()
+        .flat_map(|batch| batch.rows())
+        .flat_map(|row| row.iter())
+        .filter_map(|value| match value {
+            Value::Float64(value) => Some(*value),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Prometheus drops series without a match: arithmetic over different
+/// selectors keeps only label sets present on both sides (none when disjoint),
+/// and such arithmetic never becomes aligned maintenance.
+#[test]
+fn maintained_arithmetic_over_different_selectors_matches_prometheus() {
+    let query = "sum(sum_over_time(m[1m]) + sum_over_time(n[1m]))";
+    let (dag, ingestion_binary) = typed_selection(query);
+    let disjoint = [
+        ("m", "a", 250, 1.0),
+        ("m", "a", 290, 2.0),
+        ("n", "b", 250, 5.0),
+    ];
+    let values = execute_timed(&dag, &disjoint);
+    assert!(values.is_empty(), "{values:?}");
+    // Only job a is on both sides: m_a + n_a = (1 + 2) + 7; m{job="b"} is dropped.
+    let overlapping = [
+        ("m", "a", 250, 1.0),
+        ("m", "a", 290, 2.0),
+        ("m", "b", 250, 5.0),
+        ("n", "a", 250, 7.0),
+    ];
+    assert_eq!(execute_timed(&dag, &overlapping), [10.0]);
+    assert!(!ingestion_binary);
+    // The quantile's exact fallback runs outside Planner; it must not be maintained either.
+    let (_, ingestion_binary) =
+        typed_selection("quantile(0.9, sum_over_time(m[1m]) + sum_over_time(n[1m]))");
+    assert!(!ingestion_binary);
+}
+
+/// Arithmetic over one selector keeps its maintained layout and adds each
+/// series' two readouts before the quantile.
+#[test]
+fn maintained_arithmetic_over_one_selector_executes() {
+    let (dag, ingestion_binary) =
+        typed_selection("quantile(0.9, sum_over_time(m[1m]) + sum_over_time(m[1m]))");
+    assert!(ingestion_binary, "one selector shares its key set");
+    let values = execute_timed(
+        &dag,
+        &[
+            ("m", "a", 250, 1.0),
+            ("m", "a", 290, 2.0),
+            ("m", "b", 250, 5.0),
+        ],
+    );
+    // job a: 3 + 3 = 6; job b: 5 + 5 = 10 (mispairing a with b gives 8 and 8).
+    // KLL at epsilon 0.01 returns an input value within 0.01 of rank 0.9; of
+    // two values only the larger is.
+    assert_eq!(values, [10.0]);
+}

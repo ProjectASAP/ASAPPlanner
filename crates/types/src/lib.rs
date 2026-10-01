@@ -25,5 +25,6 @@ pub mod parsed_workload;
 pub mod post_asap;
 pub mod pre_asap;
 pub mod resources;
+pub mod serde_f64;
 pub mod types;
 pub mod workload;

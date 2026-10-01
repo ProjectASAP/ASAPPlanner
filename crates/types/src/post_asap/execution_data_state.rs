@@ -315,6 +315,41 @@ pub fn validate_execution_data_states_at(
     Ok(assignment)
 }
 
+/// The source rows whose series a maintenance operand has one row for: a
+/// finalized per-series Sum or Count of those rows, or aligned arithmetic of
+/// operands over the same rows. Each emits exactly the series with a sample.
+fn per_series_rows(node: &SummaryNode) -> Option<&crate::pre_asap::QueryExpr> {
+    use crate::post_asap::ExactKind;
+    match &node.expr {
+        SummaryExpr::ValueOperation {
+            child,
+            operation: ValueOperation::FinalizeExactAccumulator,
+            ..
+        } => match &child.expr {
+            SummaryExpr::SummaryAgg {
+                child,
+                family: SummaryFamilyType::ExactAggregate(ExactKind::Sum | ExactKind::Count, _),
+                reduction: crate::pre_asap::query_expr::Reduction::PerEntity,
+                ..
+            } => match &child.expr {
+                SummaryExpr::KeepPreAsap(rows) => Some(rows.as_ref()),
+                _ => None,
+            },
+            _ => None,
+        },
+        SummaryExpr::BinaryOp {
+            lhs,
+            rhs,
+            timing: ExecutionTiming::IngestionTime,
+            ..
+        } => {
+            let rows = per_series_rows(lhs)?;
+            (per_series_rows(rhs) == Some(rows)).then_some(rows)
+        }
+        _ => None,
+    }
+}
+
 /// Record `data_state` for `node` (detecting a conflicting earlier assignment
 /// for a `KeepPreAsap`), then check and recurse into every child edge.
 fn visit(
@@ -361,12 +396,26 @@ fn visit(
                     || !matches!(operator.kind, BinaryOpKind::Arithmetic(_))
                     || lhs.schema != rhs.schema
                     || lhs.schema != node.schema
+                    // The opaque identity is a key, not an extra maintenance value.
+                    || node.schema.fields.iter().filter(|field| {
+                        field.name == crate::pre_asap::schema::PROMQL_SERIES_IDENTITY
+                    }).count() > 1
+                    // Maintenance arithmetic pairs every row by identity, while
+                    // Prometheus drops unmatched series; it is exact only when
+                    // both operands provably produce the same series.
+                    || node.schema.fields.iter().any(|field| {
+                        field.name == crate::pre_asap::schema::PROMQL_SERIES_IDENTITY
+                    }) && per_series_rows(lhs).is_none_or(|rows| per_series_rows(rhs) != Some(rows))
                     || !node.schema.fields.iter().all(|field| {
                         !field.nullable
-                            && matches!(
-                                field.dtype,
-                                SummaryFamilyType::Plain(DataType::Float64 | DataType::Timestamp)
-                            )
+                            && if field.name == crate::pre_asap::schema::PROMQL_SERIES_IDENTITY {
+                                field.dtype == SummaryFamilyType::Plain(DataType::Utf8)
+                            } else {
+                                matches!(
+                                    field.dtype,
+                                    SummaryFamilyType::Plain(DataType::Float64 | DataType::Timestamp)
+                                )
+                            }
                     })
                     || node
                         .schema
@@ -896,6 +945,112 @@ mod tests {
             assignment.data_state_of(&root),
             Some(ExecutionDataState::INGESTION_SUMMARY)
         );
+    }
+
+    // Typed derived updates retain one opaque series identity only when both
+    // operands cover the same series; arbitrary labels are never admitted.
+    #[test]
+    fn maintenance_binary_accepts_only_well_typed_series_identity() {
+        use crate::pre_asap::{ArithmeticOpKind, BinaryOpKind};
+        let identity = crate::pre_asap::schema::PROMQL_SERIES_IDENTITY;
+        // A finalized per-series Sum of `metric`'s rows.
+        let operand = |metric: &str, schema: &SummarySchema| {
+            let rows = Rc::new(QueryExpr::Scan {
+                source: Source::TimeSeries {
+                    metric: metric.into(),
+                },
+                predicates: vec![],
+                schema: Schema::with_time_index(
+                    vec![
+                        Column::new("ts", DataType::Timestamp, false),
+                        Column::new("value", DataType::Float64, false),
+                    ],
+                    0,
+                    vec![],
+                ),
+            });
+            let mut state = schema.clone();
+            state.fields[0].dtype =
+                SummaryFamilyType::ExactAggregate(ExactKind::Sum, ExactParams::Sum);
+            let sum = Rc::new(SummaryNode {
+                expr: SummaryExpr::SummaryAgg {
+                    child: Rc::new(SummaryNode {
+                        expr: SummaryExpr::KeepPreAsap(rows),
+                        schema: schema.clone(),
+                        guarantee: None,
+                    }),
+                    family: SummaryFamilyType::ExactAggregate(ExactKind::Sum, ExactParams::Sum),
+                    input: crate::post_asap::SummaryUpdate::column(ColumnRef::SampleValue),
+                    reduction: Reduction::PerEntity,
+                    grouping: GroupingStrategy::default(),
+                },
+                schema: state,
+                guarantee: None,
+            });
+            Rc::new(SummaryNode {
+                expr: SummaryExpr::ValueOperation {
+                    child: sum,
+                    operation: ValueOperation::FinalizeExactAccumulator,
+                    timing: ExecutionTiming::IngestionTime,
+                },
+                schema: schema.clone(),
+                guarantee: None,
+            })
+        };
+        let validate = |schema: SummarySchema, rhs: &str| {
+            let binary = Rc::new(SummaryNode {
+                expr: SummaryExpr::BinaryOp {
+                    lhs: operand("m", &schema),
+                    rhs: operand(rhs, &schema),
+                    timing: ExecutionTiming::IngestionTime,
+                    operator: crate::post_asap::BinaryOperator {
+                        kind: BinaryOpKind::Arithmetic(ArithmeticOpKind::Add),
+                        vector_match: None,
+                        checked_relative_division: false,
+                        checked_finite_division: false,
+                    },
+                },
+                schema,
+                guarantee: None,
+            });
+            validate_execution_data_states(&estimate(agg(binary, kll()))).map(|_| ())
+        };
+        let mut schema = plain(&["value"]);
+        schema.fields.push(SummaryField {
+            name: "ts".into(),
+            dtype: SummaryFamilyType::Plain(DataType::Timestamp),
+            nullable: false,
+        });
+        schema.time_index = Some(1);
+        assert!(validate(schema.clone(), "m").is_ok());
+        assert!(
+            validate(schema.clone(), "n").is_ok(),
+            "no identity to align"
+        );
+        schema.fields.push(SummaryField {
+            name: identity.into(),
+            dtype: SummaryFamilyType::Plain(DataType::Utf8),
+            nullable: false,
+        });
+        assert!(validate(schema.clone(), "m").is_ok());
+        assert_eq!(
+            validate(schema.clone(), "n"),
+            Err(ExecutionDataStateError::InvalidMaintenanceBinary),
+            "different selectors may cover different series"
+        );
+        for mutation in 0..4 {
+            let mut invalid = schema.clone();
+            match mutation {
+                0 => invalid.fields[2].nullable = true,
+                1 => invalid.fields[2].dtype = SummaryFamilyType::Plain(DataType::Timestamp),
+                2 => invalid.fields.push(invalid.fields[2].clone()),
+                _ => invalid.fields[2].name = "label".into(),
+            }
+            assert_eq!(
+                validate(invalid, "m"),
+                Err(ExecutionDataStateError::InvalidMaintenanceBinary)
+            );
+        }
     }
 
     #[test]
