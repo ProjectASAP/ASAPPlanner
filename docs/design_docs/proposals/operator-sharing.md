@@ -48,13 +48,7 @@ on query semantics, accuracy and execution timing.
 The two computational categories are `Operator` and `ScalarExpr`. `Operator`
 describes a relation, vector or summary-state operation and has two variants.
 `OperatorNode` (§2) stores that operation together with its common properties.
-`LogicalDAGRoot` selects either an operator node or a scalar expression as the query
-entry point; it is an enum, not an additional computation node. The structural
-overview below shows how these types fit together.
-
-`LogicalDAGRoot::Operator` is used for SQL query results and PromQL vector queries,
-such as `sum(up)`. `LogicalDAGRoot::ScalarExpr` is used for PromQL scalar queries, such
-as `2`, `time()` or `scalar(sum(up))`. Neither variant adds a wrapper operator.
+The structural overview below shows how these types fit together.
 
 The table lists all operator kinds in this proposal. Aggregate functions, join
 kinds and scalar functions are choices within these operations, not additional
@@ -66,8 +60,8 @@ operator kinds.
 | `Operator::ASAP(ASAPOp)` | Operations on summary state and its results, including reserved operations | `SummaryAgg`, `SummaryEstimate`, `SummaryMerge`, `SummarySubtract`, `SummaryDelete`, `SummaryJoin`, `FinalizeExactAccumulator`, `MaintainPopulation`, `ReadPopulation`, `Extension` |
 
 `CurrentTimestamp`, `EvalTimestamp` and `PromqlScalarFromVector` belong to scalar
-expressions. Constants need no `PromqlScalarBridge`; query roots may directly hold
-a scalar expression. The [companion proposal](decoupling_op_and_expr.md) defines
+expressions. Constants need no `PromqlScalarBridge`; scalar queries use
+scalar expressions. The [companion proposal](decoupling_op_and_expr.md) defines
 these boundaries and their SQL/PromQL semantic coverage. A scalar-only frontend
 query, such as `time()`, therefore needs no operator node.
 
@@ -106,7 +100,7 @@ the existing query and summary models, but the sketches combine several changes:
 
 **Naming and compatibility.** Reuse current names where their semantics match.
 The companion proposal defines deliberate additions and changes, including
-`Values`, scalar query roots and typed scalar conversions. Ordinary payloads such
+`Values` and typed scalar conversions. Ordinary payloads such
 as `Predicate`, `ProjectItem`, `AggIntent`, `SketchQuery` and `SummaryFamilyType`
 keep their names; retaining a name does not establish complete language coverage.
 
@@ -135,12 +129,6 @@ operation variants and schema internals are expanded afterward. These declaratio
 are shared by the detailed sections, not separate abbreviated types.
 
 ```rust
-// Query entry: an operator graph or an owned scalar expression.
-enum LogicalDAGRoot {
-    Operator(Rc<OperatorNode>),
-    ScalarExpr(ScalarExpr),
-}
-
 // A graph node combines its operation with common planning properties (§2).
 struct OperatorNode {
     operator: Operator,
@@ -161,14 +149,13 @@ enum Operator {
 // Schema / OperatorResultKind: defined in §2.1.
 ```
 
-Read this structure from the query entry inward:
+The structure has three roles:
 
-- An operator root points to an `OperatorNode`. That node holds either a NonASAP
-  or ASAP operation and its result/schema, accuracy and execution-phase properties.
+- An `OperatorNode` holds either a NonASAP or ASAP operation and its result/schema, accuracy and execution-phase properties.
 - Operations reference input nodes through `Rc<OperatorNode>`, forming the graph.
   They also own scalar expressions where needed, such as a filter predicate or
   projection value. A scalar expression is not another operator category.
-- A scalar root owns its expression directly. An explicit conversion such as
+- A `ScalarExpr` describes value computation. An explicit conversion such as
   PromQL `scalar(v)` may reference an operator node producing `v`; that dependency
   is part of the same graph (§1.2).
 
@@ -293,7 +280,7 @@ operator is first created.
 A filter is an operator because it transforms a table. Its predicate, such as
 `latency > 100`, is a scalar expression evaluated in that table's schema.
 
-Scalar expressions belong to an operator field or a scalar query root. Predicates,
+Scalar expressions belong to an operator field or a scalar query. Predicates,
 projection expressions and sort keys describe value computation in that context.
 Explicit scalar conversions and subqueries may reference operators; those are
 visible graph dependencies with defined cardinality rules. This prevents an
@@ -301,7 +288,7 @@ arbitrary expression from being mistaken for a table-producing plan. The
 [companion proposal](decoupling_op_and_expr.md) defines this distinction.
 
 Its pre-ASAP `Rc<NonASAPOp<C>>` references become `Rc<OperatorNode>` in the unified
-model, including `LogicalDAGRoot` and the inputs to `PromqlScalarFromVector`,
+model, including the inputs to `PromqlScalarFromVector`,
 `ScalarSubquery`, `Exists` and `InSubquery`. Their cardinality, NULL and NaN rules
 remain unchanged.
 
@@ -458,7 +445,7 @@ Its `input` is the applicable column scope: the child schema for a projection,
 both input schemas for a join predicate, or aggregate outputs for `HAVING`.
 Explicit subquery/conversion expressions validate their referenced producer using
 the contracts above. Numeric expressions cannot consume state columns as numbers.
-A scalar root is checked with an empty column scope and needs no fabricated
+A standalone scalar expression is checked with an empty column scope and needs no fabricated
 relation output schema. `QueryExprError` retains the existing error-type name;
 result-kind and state-family mismatches require corresponding validation errors.
 
@@ -519,7 +506,7 @@ how they use the common operator model:
 
 | Stage from #509 | Use of the unified representation |
 |---|---|
-| Frontends | Produce an operator or scalar query root; any referenced operator nodes are `NonASAP`. Preserve source-language semantics. |
+| Frontends | Represent queries using operators and scalar expressions; any referenced operator nodes are `NonASAP`. Preserve source-language semantics. |
 | Logical ASAP-aware optimization | Form candidate graphs containing ordinary and summary operators, with no wrappers hiding their dependencies. |
 | Physical ASAP-aware optimization | Determine executable alternatives, including materialization and execution timing, for those candidate graphs. |
 | Plan selection | Evaluate complete physical candidates using workload requirements and deployment-provided models and capabilities. |
@@ -536,7 +523,7 @@ accuracy, costing or selection policies.
 
 Export one node per operator and represent its input dependencies as edges. Export
 a shared producer once, with edges to all its consumers. Include dependencies
-referenced by scalar conversions and subqueries. Preserve scalar query roots as
+referenced by scalar conversions and subqueries. Preserve scalar queries as
 expressions and their operator dependencies; do not invent a bridge node for export.
 
 This keeps the graph visible to costing, physical compilation, execution and plan
@@ -562,7 +549,7 @@ The design is successful when:
   any shared inputs; it does not introduce new sharing rules.
 - Existing value/state, accuracy and execution constraints remain enforceable on
   the unified representation.
-- Scalar query roots and conversions use the same representation before and after
+- Scalar expressions and conversions use the same representation before and after
   optimization, with no bridge nodes or hidden subplans.
 - Validation includes result kind and query subgraphs referenced by scalar
   expressions when checking schema, accuracy and execution constraints.

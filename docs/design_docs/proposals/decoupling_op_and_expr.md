@@ -35,7 +35,7 @@ compute values within the schema selected by their owning operators.
 `NonASAPOp` describes a relation or vector computation: reading data, selecting
 rows or samples, combining inputs, or reducing them. `ScalarExpr` computes one
 value in a column and evaluation context. An operator supplies that context;
-a scalar query root has no row columns. The distinction is about semantic role,
+a standalone scalar query has no row columns. The distinction is about semantic role,
 not whether the source language calls something an “expression”.
 
 Keep existing names where the semantics match. The proposal changes the boundary
@@ -210,21 +210,11 @@ These consume query results; they are not interchangeable bridge nodes. The SQL
 variants cover uncorrelated subqueries here. Correlation needs outer-scope bindings
 that this proposal does not define (§3.4).
 
-### 2.3 Query roots and composition without a bridge
+### 2.3 Composition without a bridge
 
-A query root selects one of the two representations. The `Operator` variant
-references the query's producer; `ScalarExpr` holds its scalar expression. This
-enum adds no computation node:
-
-```rust
-enum LogicalDAGRoot<C: ColState = ColumnId> {
-    Operator(Rc<NonASAPOp<C>>),
-    ScalarExpr(ScalarExpr<C>),
-}
-```
-
-SQL query results use the operator arm. PromQL numeric/string roots use the scalar
-arm; vector roots use the operator arm. A scalar root cannot contain free columns.
+Standalone scalar expressions have no input-column scope and cannot contain free
+column references. This proposal defines their semantics without introducing a
+separate query-entry data structure.
 `EvalTimestamp` reads the current PromQL evaluation time; `CurrentTimestamp` reads
 SQL's statement time. Moving `EvalTimestamp` into `ScalarExpr` must not make it
 constant across evaluation steps or nested subquery times.
@@ -232,11 +222,11 @@ constant across evaluation steps or nested subquery times.
 For float samples, the following plans need no `PromqlScalarBridge`:
 
 ```text
-2                    → Scalar root: Literal(2.0)
-time()               → Scalar root: EvalTimestamp
+2                    → ScalarExpr: Literal(2.0)
+time()               → ScalarExpr: EvalTimestamp
 up * 2               → Project(sample * 2.0, child = instant selection of up)
 vector(time())       → PromqlVectorFromScalar(EvalTimestamp)
-scalar(sum(up)) + 1   → Scalar root: Arithmetic(
+scalar(sum(up)) + 1   → ScalarExpr: Arithmetic(
                            PromqlScalarFromVector(Aggregate(...)), Literal(1.0))
 ```
 
@@ -252,7 +242,7 @@ schema nor a full identity value, this lowering is not valid.
 `vector(s)` remains a real conversion to a one-element, label-free vector.
 When combined with the [operator-sharing proposal](operator-sharing.md), all plan
 references above target the common `OperatorNode`, including references inside scalar
-expressions and query roots. Scalar expression trees do not acquire shared-node
+expressions. Scalar expression trees do not acquire shared-node
 identity.
 
 ## 3. Semantic requirements
@@ -284,7 +274,7 @@ older repository dependency. This documentation change upgrades neither dependen
 | SQL construct / example | Representation in §2 | Coverage and semantic condition |
 |---|---|---|
 | `FROM t`, `WHERE x > 1`, `SELECT x * 2` | `Scan`, `Filter`, `Project`; scalar `Compare`, `Arithmetic` | **Direct.** Resolve columns against the input; predicates must be Boolean and only TRUE passes. |
-| `VALUES (1), (2)`; `SELECT 1` | `Values`; `Project` over one empty row | **Direct.** SQL still returns a relation, unlike a PromQL scalar root. |
+| `VALUES (1), (2)`; `SELECT 1` | `Values`; `Project` over one empty row | **Direct.** SQL still returns a relation, unlike a PromQL scalar query. |
 | Literals, columns, `CASE`, `CAST`, `TRY_CAST`, `IN (...)`, `IS NULL`, Boolean logic | Corresponding `ScalarExpr` variants | **Direct** within supported types. Preserve coercion, NULL propagation and conditional evaluation. Type gaps are listed below. |
 | Unary minus, `BETWEEN`, `IS TRUE`, null-safe equality | `Negative`; compositions of `Compare`, `Case`, `IsNull`, Boolean expressions | **Direct/Lowered.** Evaluate reused nontrivial operands once, using a projected column where needed; do not duplicate volatile calls. |
 | Scalar functions and `NOW()` | Resolved `FunctionCall`; `CurrentTimestamp` | **Direct** for registered contracts. Preserve stable/volatile evaluation behavior; unresolved names are unsupported. |
@@ -311,7 +301,7 @@ range-vector expression. The request permits scalar or instant-vector roots.
 
 | PromQL construct / example | Representation in §2 | Coverage and semantic condition |
 |---|---|---|
-| Numeric/string literals; parentheses; `time()` | Scalar `Literal`, nested expression, `EvalTimestamp` | **Direct.** No bridge node; free columns are invalid at a scalar root. |
+| Numeric/string literals; parentheses; `time()` | Scalar `Literal`, nested expression, `EvalTimestamp` | **Direct.** No bridge node; standalone scalar queries cannot reference free columns. |
 | Scalar arithmetic, unary minus, `1 < bool 2` | `Arithmetic`, `Negative`, `Case(Compare(...), 1.0, 0.0)` | **Direct/Lowered** with PromQL numeric semantics. Scalar comparison without `bool` is invalid. |
 | `up{job="api"}` | Time-series `Scan` with predicates, `TimeRange(Instant)` | **Direct.** Label matching treats absent labels as empty and regexes as anchored. Selection uses lookback and staleness, not SQL row filtering alone. |
 | `up[5m]` | `TimeRange(Range)` over a time-series scan | **Direct.** Retain samples and their timestamps in the left-open, right-closed window. |
@@ -373,7 +363,7 @@ of complete SQL/PromQL support. Acceptance requires:
 - The SQL example in §1 retains its values, schema and predicate context.
 - Every Direct/Lowered mapping in §3 has a valid typed representation; each Gap is
   explicitly rejected until its payload or equivalent lowering is defined.
-- The scalar roots and mixed scalar/vector examples in §2.3 need no
+- The scalar queries and mixed scalar/vector examples in §2.3 need no
   `PromqlScalarBridge` or equivalent constant-wrapper node.
 - Operator dependencies inside scalar conversions/subqueries remain visible and
   shared; scalar trees remain owned. Invalid result-kind combinations are rejected.
