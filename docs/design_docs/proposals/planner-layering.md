@@ -110,6 +110,11 @@ be shared or enumerated lazily. A stage may prune a candidate early only when
 it is provably invalid (for example, a summary family that cannot meet the
 query's accuracy target), and every rejected candidate carries a reason.
 
+A candidate is a DAG for the **whole workload**, not for one query. Each stage
+combines its choices for every sub-DAG with the candidates it receives (the ×
+in the diagram), so the candidate set grows from stage to stage until
+selection picks one. Example 1 traces this growth step by step.
+
 | Stage | Input | Decides | Output |
 |---|---|---|---|
 | 0. Frontends | `query`, `language` | Parse and lower to a common logical form; reject what cannot be represented | `CandidateLogicalDAGs` |
@@ -322,7 +327,7 @@ is at most ε with probability at least 1 − δ.
 
 | Example | Shows |
 |---|---|
-| 1. Aggregation over dimensions | Pass 1: summary replacement |
+| 1. Aggregation over dimensions | How the candidate set grows through every stage |
 | 2. One summary for several computations | Pass 2: summary-capability rule |
 | 3. Aggregation over windows | Pass 1 and Pass 2: window-composition rule |
 | 4. Materialization of window summaries | Stage 2: materialization, decoupled from stage 1 |
@@ -347,7 +352,7 @@ Unless an example says otherwise, every example uses this data workload:
 With 1,000,000 series each sampled every 15 s, the ingestion rate is
 1,000,000 / 15 ≈ 66,667 samples/s.
 
-### Example 1: Aggregation over dimensions — summary replacement in Pass 1
+### Example 1: Aggregation over dimensions — the candidate set through every stage
 
 **Query workload.** Two PromQL dashboard panels over the last minute. The
 first needs an exact total; the second tolerates error.
@@ -365,8 +370,27 @@ first needs an exact total; the second tolerates error.
 | `sum by (job) (rate(http_requests_total[1m]))` | 1 m | evaluation time | exact (`implicit_exact`) | unspecified |
 | `topk by (job) (10, sum_over_time(http_requests_total[1m]))` | 1 m | evaluation time | ε = 0.01, δ = 0.001 | ≤ 100 ms |
 
-**Stage 0.** The frontend produces one `LogicalDAG` per query. Neither
-contains a summary:
+This example follows the workload's candidate set through every stage. Each
+candidate covers both queries. To keep the counts small, it leaves out the
+pane candidates that the window-composition rule would also add (Example 3
+covers them).
+
+```mermaid
+flowchart TB
+  s0["Stage 0 · 1 candidate<br/>the workload's LogicalDAG"]
+  p1["Stage 1, Pass 1 · 3 candidates<br/>Q2 exact, Count-Min + heap, or Hydra"]
+  p2["Stage 1, Pass 2 · 6 candidates<br/>each with separate or shared input"]
+  s2["Stage 2 · 15 candidates<br/>Q1 and Q2 each materialized or not"]
+  s3(["Stage 3 · 1 plan"]):::estimate
+  s0 -- "× summary choices" --> p1 -- "× sharing choices" --> p2 -- "× materialization choices" --> s2 -- "select" --> s3
+  classDef data fill:#f1f3f4,stroke:#5f6368,color:#000;
+  classDef exact fill:#fff,stroke:#5f6368,color:#000;
+  classDef summary fill:#e8f0fe,stroke:#1a73e8,stroke-width:2px,color:#000;
+  classDef estimate fill:#e6f4ea,stroke:#188038,color:#000;
+```
+
+**Stage 0: 1 candidate.** The frontend lowers both queries into one workload
+`LogicalDAG` with no summaries:
 
 ```mermaid
 flowchart LR
@@ -384,26 +408,20 @@ flowchart LR
   classDef estimate fill:#e6f4ea,stroke:#188038,color:#000;
 ```
 
-**Stage 1, Pass 1.**
+**Stage 1, Pass 1: 3 candidates.** Pass 1 finds local options for each query:
 
-* Q1, `sum by (job) (rate(...))`: the accuracy requirement is `implicit_exact`,
-  and an exact grouped sum already keeps one value per `job`. The only
-  candidate is a per-series Rate feeding an exact per-`job` Sum. No summary
-  helps here.
-* Q2, `topk by (job) (10, ...)`: the exact candidate keeps a per-series sum and
-  sorts within each `job`, which is costly at one million Zipf-distributed
-  series. The `EpsilonDelta` target admits two summary candidates:
-  1. **Count-Min Sketch with a top-*k* heap per `job`.** One sketch per group;
-     each answers its own top 10.
-  2. **Hydra over the whole `job` column.** One sketch covers every (`job`,
-     series) key and answers the top 10 for any `job`.
-
-  Pass 1 keeps all three candidates for Q2. The better summary depends on the
-  number of jobs and on costs that only the deployment knows.
+* **Q1** has one option, the exact per-series rate and per-`job` sum. Its
+  accuracy requirement is `implicit_exact`, and an exact grouped sum is
+  already small.
+* **Q2** has three options. The exact one keeps a per-series sum and sorts
+  within each `job`, which is costly at one million Zipf-distributed series.
+  The `EpsilonDelta` target also admits a **Count-Min Sketch with a top-*k*
+  heap per `job`**, and **Hydra over the whole `job` column**, where one sketch
+  covers every (`job`, series) key.
 
 ```mermaid
 flowchart LR
-  subgraph C["Stage 1, Pass 1 · candidates for Q2"]
+  subgraph C["Q2's three local options"]
     direction TB
     subgraph E["Exact"]
       direction LR
@@ -424,36 +442,42 @@ flowchart LR
   classDef estimate fill:#e6f4ea,stroke:#188038,color:#000;
 ```
 
-**Stage 1, Pass 2.** Both queries read the same range selector,
-`http_requests_total[1m]`, so the identical-expression rule adds a candidate
-in which Q1 and Q2 share one input node. No summary is shared: Q1 needs an
-exact Rate and Sum, and no summary supports both Q1 and Q2. Both queries also
-evaluate a 1-min window every 10 s, so consecutive windows overlap; the
-window-composition rule could add 10-s panes for the mergeable candidates.
-Example 3 walks through that rule, so it is not expanded here.
+Combining them gives 1 × 3 = 3 workload candidates:
+
+| Candidate | Q1 | Q2 |
+|---|---|---|
+| L1 | exact | exact |
+| L2 | exact | Count-Min + heap |
+| L3 | exact | Hydra |
+
+**Stage 1, Pass 2: 6 candidates.** Both queries read the same range selector,
+`http_requests_total[1m]`, so the identical-expression rule adds, for each of
+L1–L3, a variant in which Q1 and Q2 share one input node: L1s, L2s and L3s. The
+originals are kept. No summary is shared, because Q1 must be exact and no
+summary supports both queries.
 
 ```mermaid
 flowchart LR
-  in[("http_requests_total")]:::data --> r["range 1m<br/>one shared input node"]:::exact
-  subgraph Q1P["Q1 · exact candidate"]
+  subgraph SEP["L3 · separate inputs"]
     direction LR
-    q1a["rate<br/>per series"]:::exact --> q1b["sum by (job)"]:::exact
+    a1[("http_requests_total")]:::data --> a2["range 1m"]:::exact --> a3["rate → sum by (job)"]:::exact
+    b1[("http_requests_total")]:::data --> b2["range 1m"]:::exact --> b3["Hydra"]:::summary --> b4(["top 10"]):::estimate
   end
-  subgraph Q2P["Q2 · a summary candidate from Pass 1"]
+  subgraph SH["L3s · shared input"]
     direction LR
-    q2a["Count-Min + heap per job<br/>or Hydra"]:::summary --> q2b(["top 10<br/>per job"]):::estimate
+    c1[("http_requests_total")]:::data --> c2["range 1m<br/>one shared input node"]:::exact
+    c2 --> c3["rate → sum by (job)"]:::exact
+    c2 --> c4["Hydra"]:::summary --> c5(["top 10"]):::estimate
   end
-  r --> q1a
-  r --> q2a
   classDef data fill:#f1f3f4,stroke:#5f6368,color:#000;
   classDef exact fill:#fff,stroke:#5f6368,color:#000;
   classDef summary fill:#e8f0fe,stroke:#1a73e8,stroke-width:2px,color:#000;
   classDef estimate fill:#e6f4ea,stroke:#188038,color:#000;
 ```
 
-**Stage 2.** Stage 2 decides, for each query, whether to materialize its
-computation at ingestion time or to recompute it from raw samples at every
-refresh. Each query has its own two options:
+**Stage 2: 15 candidates.** For every logical candidate, stage 2 decides
+separately for Q1 and Q2 whether to materialize the computation at ingestion
+time or recompute it from raw samples at every refresh:
 
 ```mermaid
 flowchart LR
@@ -480,7 +504,7 @@ flowchart LR
   subgraph Q2M["Q2 · materialized"]
     direction LR
     subgraph Q2MI["Ingestion time"]
-      m2["maintain Q2 summary<br/>Count-Min + heap or Hydra"]:::summary
+      m2["maintain Q2's summary<br/>or exact state"]:::summary
     end
     subgraph Q2MQ["Query time, every 10 s"]
       m2e(["top 10<br/>per job"]):::estimate
@@ -491,7 +515,7 @@ flowchart LR
   subgraph Q2N["Q2 · not materialized"]
     direction LR
     subgraph Q2NQ["Query time, every 10 s"]
-      n2a["range 1m"]:::exact --> n2b["build Q2 summary<br/>Count-Min + heap or Hydra"]:::summary --> n2c(["top 10<br/>per job"]):::estimate
+      n2a["range 1m"]:::exact --> n2b["build Q2's summary<br/>or exact state"]:::summary --> n2c(["top 10<br/>per job"]):::estimate
     end
   end
 
@@ -505,25 +529,27 @@ flowchart LR
   classDef estimate fill:#e6f4ea,stroke:#188038,color:#000;
 ```
 
-Combining the two options per query gives four candidates:
+That gives 2 × 2 = 4 materialization choices per logical candidate. A shared
+input node only matters when both queries read raw samples at query time; in
+the other three choices, the shared-input variant is the same plan as its
+original. So each Q2 option yields 5 distinct physical candidates, 15 in all:
 
-| Candidate | Q1 | Q2 | Shared input node from Pass 2 |
-|---|---|---|---|
-| 1 | materialized | materialized | not used: neither query reads the range at query time |
-| 2 | materialized | not materialized | not used: only Q2 reads the range |
-| 3 | not materialized | materialized | not used: only Q1 reads the range |
-| 4 | not materialized | not materialized | used: both read the same last minute of samples |
+| Q2 option (logical candidates) | Q1 mat., Q2 mat. | Q1 mat., Q2 not | Q1 not, Q2 mat. | Q1 not, Q2 not, separate inputs | Q1 not, Q2 not, shared input |
+|---|---|---|---|---|---|
+| Exact (L1, L1s) | P1 | P2 | P3 | P4 | P5 |
+| Count-Min + heap (L2, L2s) | P6 | P7 | P8 | P9 | P10 |
+| Hydra (L3, L3s) | P11 | P12 | P13 | P14 | P15 |
 
-Both panels refresh every 10 s over arriving data, so candidates that
-materialize usually cost less per refresh. Candidate 4 wins only when storage
-is expensive and raw data is available at query time; it is also the only
-candidate where the shared input node saves work. Example 4 covers
-materialization in more detail, including materializing at query time.
-
-**Stage 3.** The deployment's accuracy model checks that each summary candidate
-meets ε = 0.01, δ = 0.001, and its cost model compares per-`job` sketches with
-one Hydra sketch. With many small jobs, one shared Hydra sketch can be
-cheaper; with a few large jobs, per-`job` Count-Min sketches may win.
+**Stage 3: 1 plan.** Selection first rejects invalid candidates. The
+deployment's accuracy model checks the summary candidates against ε = 0.01,
+δ = 0.001, and its cost model estimates Q2's latency against the 100 ms bound;
+for example, an exact top-k sorted over one million series at query time (P2,
+P4, P5) may miss it. Among the rest, it picks the cheapest for the whole
+workload. Because both panels refresh every 10 s over arriving data, a
+candidate that materializes both queries usually wins: with many small jobs,
+P11 (Hydra); with a few large jobs, P6 (Count-Min per `job`). The
+not-materialized candidates win only when storage is expensive and raw data is
+available at query time.
 
 ### Example 2: One summary for several computations — the summary-capability rule in Pass 2
 
@@ -580,13 +606,16 @@ The data workload differs from the shared one in two fields:
 
 **Pass 1.** Rewrite rules recognize the three computations, and each gets its
 local candidates from the Pass 1 table: exact, a specialized summary, or
-UnivMon.
+UnivMon. Combined, that is 3 × 3 × 3 = 27 workload candidates.
 
 **Pass 2.** All three computations have the same summary input data (`src_ip`
 from `flows`, no other filter) and the same 1-min window. UnivMon supports all three
 estimates, so the summary-capability rule adds a shared candidate: **one
 UnivMon build node feeding three estimation nodes**. It must be sized for the strictest
-requirement, ε = 0.01. The independent candidates are kept as well.
+requirement, ε = 0.01. The independent candidates are kept as well. Pass 2
+also adds candidates where only two of the three share a UnivMon and the third
+keeps any of its own 3 options (3 pairs × 3 = 9), so stage 1 outputs
+27 + 1 + 9 = 37 candidates. The figure shows the all-three case.
 
 ```mermaid
 flowchart LR
@@ -691,7 +720,13 @@ of data at rest, plus data still arriving.
   mergeable. The window-composition rule adds a shared candidate: **one
   Exponential Histogram of KLL buckets over [T − 5 y, T]**, with one
   merge and estimation node per query that merges the buckets covering
-  its interval. The five independent candidates are kept.
+  its interval. The independent candidates are kept.
+
+Counted at the workload level, Pass 1 gives each query 2 options (exact or
+KLL), so 2⁵ = 32 candidates. Pass 2 adds a candidate for every subset of two
+or more queries that shares one Exponential Histogram while the others keep
+their own options, 131 more, for 163 in total. Counts like this are why
+candidate sets may be enumerated lazily.
 
 The five query intervals overlap, and all lie inside the last five years:
 
@@ -743,7 +778,8 @@ over the last 5 min, refreshed every minute.
 * **Pass 1.** One KLL over 5 min for each evaluation.
 * **Pass 2.** Consecutive evaluations overlap by 4 of their 5 minutes. The
   window-composition rule adds a shared candidate: **a sliding window of
-  1-min KLL panes**, where each evaluation merges the latest 5 panes.
+  1-min KLL panes**, where each evaluation merges the latest 5 panes. With the
+  exact candidate, stage 1 outputs 3 candidates.
 
 Each evaluation reads five 1-min panes, and consecutive evaluations share
 four of them:
@@ -772,7 +808,9 @@ Example 4 shows how stage 2 decides whether to store these window summaries.
 ### Example 4: Materialization of window summaries in physical planning
 
 Stage 2 takes the shared window summaries from Example 3 and decides whether to
-materialize them. That choice is driven by the workload's `recurrence`,
+materialize them. This example shows only the physical candidates of the
+shared logical candidate; every other logical candidate from Example 3 gets
+its own physical candidates the same way. That choice is driven by the workload's `recurrence`,
 `predictability` and `data_workload.arrival`.
 
 **Pattern A (sub-interval batch).**
