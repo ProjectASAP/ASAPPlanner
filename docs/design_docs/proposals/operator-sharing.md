@@ -67,7 +67,7 @@ impl<C: ColState> Operator<C> {   // implemented for every operator
 /// assignment (§2.3). Both are `Unset` on a freshly built node.
 pub enum Slot<T> { Unset, Set(T) }
 
-/// Memo of one pass over a workload, keyed by (node pointer, timing).
+/// Memo of one pass over a workload, keyed by node pointer.
 /// One is shared by every root of a workload, so a node shared by two roots stays one `Rc`.
 pub struct DerivationMemo { .. }
 
@@ -80,7 +80,8 @@ pub fn derive_guarantees(
 ) -> Result<Rc<Operator>, AccuracyError>;
 /// Write the timings of one lifecycle assignment into the `timing` slots of one DAG
 /// root, top-down, then validate them (§5). Summary materialization chooses the
-/// assignment (§2.3); nothing is inferred from operator kinds.
+/// assignment (§2.3); nothing is inferred from operator kinds. A shared node reached
+/// with two different timings is an error (§4).
 pub fn apply_lifecycle_timings(
   root: &Rc<Operator>,
   assignment: &LifecycleAssignment,   // per-node timings, expanded from per-state lifecycle choices (§10)
@@ -254,7 +255,7 @@ A guarantee is filled in two steps:
 
 ```
 Project               p99 ±1%    ← the child's
-  SummaryEstimate     p99 ±1%    ← local ±1%, composed with the child's
+  SummaryEstimate     p99 ±1%    ← local ±1%, composed with Scan t's: looks through the SummaryAgg
     SummaryAgg(Kll)   None       ← state has no guarantee
       Scan t          exact      ← no ASAP descendant
 ```
@@ -263,7 +264,7 @@ Per node kind:
 
 | Node | Today | After |
 |---|---|---|
-| `SummaryEstimate` | stored at binding: the sketch's own error composed with the child's (`compose_guarantee`) | **derived**: `local_guarantee` composed with the child's. `local_guarantee` is set at binding: the sketch's error over an exact input, `None` when the model has no error model for the family |
+| `SummaryEstimate` | stored at binding: the sketch's own error composed with the child's (`compose_guarantee`) | **derived**: `local_guarantee` composed with the guarantee of the state's input, i.e. the child of the `SummaryAgg` below (the `SummaryAgg` itself has none). `local_guarantee` is set at binding: the sketch's error over an exact input, `None` when the model has no error model for the family |
 | `SummaryAgg` | stored: ExactAggregate family composed with the child's; sketch families `None` | **derived**: ExactAggregate family: exact, composed with the child's under `exact_rule`, except `ExactKind::Count`, exact whatever the child (as today); sketch families `Set(None)`, state has no guarantee |
 | `NonASAPOp` | pre-ASAP `QueryExpr`: none<br>post-ASAP `KeepPreAsap`: exact<br>post-ASAP `ValueOperation` / `BinaryOp` / `RelationalJoin` copies: composed at construction | **derived**: composed from the children; exact if no `ASAP` descendant |
 | `FinalizeExactAccumulator` | copies the child's | **derived**: the child's |
@@ -285,8 +286,8 @@ node, its timing is assigned like any other). After assembly every `timing` slot
 `Unset`. `apply_lifecycle_timings` writes the chosen assignment into the slots, top-down
 per root with one shared memo, and validates it (§5): an assignment under which
 ingestion work depends on a query-time result, or a node of fixed kind gets the wrong
-timing, is rejected. A node assigned two timings is copied (§4). `Unset` means no
-assignment was applied; physical compilation and export reject it.
+timing, is rejected, as is one that gives a shared node two timings (§4). `Unset` means
+no assignment was applied; physical compilation and export reject it.
 
 ```
                     assembly        after apply_lifecycle_timings
@@ -344,7 +345,7 @@ assembly           builds each root; kept NonASAP nodes stay as they are
 derive_guarantees  per root, one shared memo: fills guarantees bottom-up
 lifecycle          reads the derived guarantee; chooses a lifecycle per summary state
 apply_lifecycle_   per root, one shared memo: writes the assignment's timings
-  timings          top-down, validates them, copies a node assigned two timings
+  timings          top-down, validates them, rejects a shared node assigned two timings
 export             reads the slots; rejects an Unset one
 ```
 
@@ -466,9 +467,11 @@ it is (§9).
   with that error.
 - **A shared subtree assigned two timings**, e.g. a query-time `Aggregate` and an
   ingestion-time `SummaryAgg` reading one `Scan`: both placements are legal, only the
-  sharing is not. `apply_lifecycle_timings` memoizes by (pointer, timing), so it builds one
-  copy per timing; a subtree assigned one timing stays one `Rc`, within a root or across
-  roots.
+  sharing is not. `apply_lifecycle_timings` memoizes by pointer and records the timing it
+  wrote; reaching the node again with another timing is an error, and the assignment is
+  rejected like any other illegal one. A subtree assigned one timing stays one `Rc`,
+  within a root or across roots. Nothing is copied: a plan that needs the same subtree
+  in both phases must hold two `Rc`s before the pass (§10).
 
 `map_children` is `rebuild_children` from
 `pre_asap/cse.rs`, dispatching to `NonASAPOp::map_children` / `ASAPOp::map_children`.
@@ -482,7 +485,7 @@ child is a `NonASAP` subtree without an `Aggregate` — where `contains_aggregat
 | #468 problem | Resolution |
 |---|---|
 | 1. A `Project` is a `QueryExpr` inside `KeepPreAsap` and a `ValueOperation` outside | one set of types |
-| 2. Nothing outside `KeepPreAsap` can reference the `Scan` inside, so an exact aggregate and a sketch cannot share a scan | `Aggregate` and `SummaryAgg` can point to the same `Scan`. This holds when both run at the same time; otherwise the scan is copied (above). They share under an assignment that recomputes the sketch at query time; the default assignment maintains it at ingestion time, so there the scan is copied (§2.3). Splitting a multi-measure `Aggregate` into exact + sketch is a binding rule, out of scope (§9) |
+| 2. Nothing outside `KeepPreAsap` can reference the `Scan` inside, so an exact aggregate and a sketch cannot share a scan | `Aggregate` and `SummaryAgg` can point to the same `Scan`. This holds only when both run at the same time, e.g. under an assignment that recomputes the sketch at query time; an assignment that runs them in different phases over one `Rc` is rejected (above). Splitting a multi-measure `Aggregate` into exact + sketch is a binding rule, out of scope (§9) |
 | 3. `SetOp` and similar have no post-ASAP copy, so no summary below them | `SetOp` takes `None => t`; both children are assembled |
 
 ## 5. Timing: validating the assignment
@@ -510,7 +513,8 @@ The `KeepPreAsap` / `BinaryOp` / `ValueOperation` / `RelationalJoin` arms of tod
   (`Project` / `Filter` / `Sort` / `Limit` may pass `ExactAggregate` columns through).
   This rejects `Project(ASAP(SummaryAgg))`.
 - `BinaryOp`'s ingestion-side constraints move into this arm.
-- `AmbiguousKeepPreAsap` is deleted: a subtree assigned two timings is copied (§4).
+- `AmbiguousKeepPreAsap` is deleted: a shared subtree assigned two timings is rejected by
+  `apply_lifecycle_timings` (§4).
 
 ## 6. Export: one post-ASAP node per operator
 
@@ -595,9 +599,9 @@ the same early flat export, on the final types.
 
 - One integration test per #468 problem:
   1. `WITH metric AS (SELECT avg(CASE WHEN l_quantity BETWEEN 1 AND 50 THEN 1.0 ELSE 0.0 END) AS in_range FROM lineitem) SELECT in_range, in_range = 1.0 AS ok FROM metric` — no post-ASAP-only node besides `ASAP`; all `Project`s are one variant.
-  2. `SELECT avg(l_extendedprice), approx_percentile_cont(l_discount, 0.99) FROM lineitem` — the `avg` `Aggregate` and the KLL `SummaryAgg` share one `Scan` by `Rc::ptr_eq` when both run at the same time (once a binding rule splits measures); under the default assignment, which maintains the sketch at ingestion time, the `Scan` is copied.
+  2. `SELECT avg(l_extendedprice), approx_percentile_cont(l_discount, 0.99) FROM lineitem` — the `avg` `Aggregate` and the KLL `SummaryAgg` share one `Scan` by `Rc::ptr_eq` under an assignment that runs both at query time (once a binding rule splits measures).
   3. `SELECT approx_distinct(l_partkey) FROM lineitem UNION ALL SELECT approx_distinct(l_suppkey) FROM lineitem` — each side of the `SetOp` has a `SummaryEstimate`.
-- A shared `Scan` assigned two timings is copied once per timing; assigned one timing, it stays one `Rc`.
+- A shared `Scan` assigned two timings is rejected; assigned one timing, it stays one `Rc`.
 - A node shared by two roots, assembled in two calls, is still one `Rc` after `derive_guarantees` and `apply_lifecycle_timings`.
 - After both passes no slot is `Unset`; export rejects a tree with one, and a tree with no assignment applied.
 - Exported timings of today's plans are unchanged under the default assignment.
@@ -632,3 +636,11 @@ the same early flat export, on the final types.
 
 - Does ASAPQuery insert `SummaryMerge` only on the exported post-ASAP DAG, or through ASAPPlanner's
   post-ASAP types? The planner-side variant is unimplemented (§1.3).
+
+- Workload CSE can share one `Scan` between a query whose `SummaryAgg` is maintained at
+  ingestion time and another whose `Aggregate` runs at query time. Today `KeepPreAsap`
+  takes its timing from the consuming edge, so the two sides are effectively separate;
+  after this proposal the default assignment is rejected on that `Rc` (§4). Either
+  assembly un-shares a `NonASAP` subtree that `SummaryAgg` reads, or summary
+  materialization must treat the shared scan as one state with one lifecycle. Not
+  decided here.
