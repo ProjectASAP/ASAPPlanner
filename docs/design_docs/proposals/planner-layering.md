@@ -185,12 +185,7 @@ separately.
 The window-composition rule shares a summary across windows by splitting time
 into pieces that each carry their own summary:
 
-* A **pane** is a fixed-length, non-overlapping slice of time, for example one
-  minute, with one summary of the data that arrived in that slice. A query
-  window is answered by merging the summaries of the panes it covers. The pane
-  length is chosen so that every requested window is an exact union of panes:
-  for a 5-min window evaluated every 1 min, 1-min panes work, since each window
-  is exactly 5 consecutive panes.
+* **Panes** split the time axis into consecutive fixed-length slices (for example, 1 min each); no two panes overlap. Each pane holds one summary of the data arriving in it. A window is answered by merging the summaries of its panes. The pane length must divide both the window length and the evaluation interval, so that every window is an exact run of panes: a 5-min window evaluated every 1 min uses 1-min panes, and each window is 5 consecutive panes. The windows overlap, not the panes: in a sliding window, consecutive windows share most of their panes (here 4 of 5), which is why one set of panes can serve every evaluation.
 * A **bucket** of an Exponential Histogram plays the same role, but bucket
   lengths grow with age: recent data sits in short buckets and older data in
   longer ones. This keeps few buckets over a long history, at the cost that old
