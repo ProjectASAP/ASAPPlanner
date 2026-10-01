@@ -79,6 +79,13 @@ sample values does not preserve instant-vector semantics. Replacement, rank
 decrease, expiry, grouping and the required approximation guarantee must be
 validated before admitting that physical candidate.
 
+Planner's candidate space decides what to compute, not placement. For an
+instant-vector PromQL TopK, Planner resolves rows that carry the complete series
+identity and lists the current-series heap realizations per root with the other
+candidates, unranked. Precompute or query-time placement of Rate and grouped Sum
+is not a separate Planner candidate: the summary maintenance lifecycle assigns
+each node's timing, and the physical compiler reads it.
+
 This is the target ownership contract. A backend path that still reconstructs
 operators from logical candidates has not completed this integration.
 
