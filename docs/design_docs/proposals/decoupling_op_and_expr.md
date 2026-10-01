@@ -212,12 +212,14 @@ that this proposal does not define (§3.4).
 
 ### 2.3 Query roots and composition without a bridge
 
-A query root selects one of the two representations; this tag adds no computation:
+A query root selects one of the two representations. The `Operator` variant
+references the query's producer; `ScalarExpr` holds its scalar expression. This
+enum adds no computation node:
 
 ```rust
 enum QueryRoot<C: ColState = ColumnId> {
     Operator(Rc<NonASAPOp<C>>),
-    Scalar(ScalarExpr<C>),
+    ScalarExpr(ScalarExpr<C>),
 }
 ```
 
@@ -249,7 +251,7 @@ including unreferenced labels. If the input provides neither a complete label
 schema nor a full identity value, this lowering is not valid.
 `vector(s)` remains a real conversion to a one-element, label-free vector.
 When combined with the [operator-sharing proposal](operator-sharing.md), all plan
-references above target the common `Operator`, including references inside scalar
+references above target the common `OperatorNode`, including references inside scalar
 expressions and query roots. Scalar expression trees do not acquire shared-node
 identity.
 

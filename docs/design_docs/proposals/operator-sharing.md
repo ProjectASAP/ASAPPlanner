@@ -45,21 +45,27 @@ on query semantics, accuracy and execution timing.
 
 ### 1.1 Unified `Operator` type
 
-Relation, vector and summary-state computations are represented by `Operator`
-nodes. Scalar computations use the companion proposal's `ScalarExpr`. The operator
-node has common fields defined in §2 and an `expr` payload with two categories:
+The two computational categories are `Operator` and `ScalarExpr`. `Operator`
+describes a relation, vector or summary-state operation and has two variants.
+`OperatorNode` (§2) stores that operation together with its common properties.
+`QueryRoot` selects either an operator node or a scalar expression as the query
+entry point; it is an enum, not an additional computation node:
 
 ```rust
-enum OperatorExpr {
+enum Operator {
     NonASAP(NonASAPOp),
     ASAP(ASAPOp),
 }
 
 enum QueryRoot {
-    Operator(Rc<Operator>),
-    Scalar(ScalarExpr),
+    Operator(Rc<OperatorNode>),
+    ScalarExpr(ScalarExpr),
 }
 ```
+
+`QueryRoot::Operator` is used for SQL query results and PromQL vector queries,
+such as `sum(up)`. `QueryRoot::ScalarExpr` is used for PromQL scalar queries, such
+as `2`, `time()` or `scalar(sum(up))`. Neither variant adds a wrapper operator.
 
 The table lists all operator kinds in this proposal. Aggregate functions, join
 kinds and scalar functions are choices within these operations, not additional
@@ -67,8 +73,8 @@ operator kinds.
 
 | Category | Meaning | All operations |
 |---|---|---|
-| `OperatorExpr::NonASAP(NonASAPOp)` | Ordinary query operations that transform, combine or aggregate data | `Scan`, `Values`, `Filter`, `Project`, `Aggregate`, `Join`, `SetOp`, `Concat`, `Dedup`, `Sort`, `Limit`, `BinaryOp`, `SQLWindowFunc`, `TimeRange`, `TimeShift`, `PromqlVectorFromScalar`, `PromqlRelabel`, `PromqlInfoEnrich`, `PromqlSeriesSample`, `PromqlSubquery` |
-| `OperatorExpr::ASAP(ASAPOp)` | Operations on summary state and its results, including reserved operations | `SummaryAgg`, `SummaryEstimate`, `SummaryMerge`, `SummarySubtract`, `SummaryDelete`, `SummaryJoin`, `FinalizeExactAccumulator`, `MaintainPopulation`, `ReadPopulation`, `Extension` |
+| `Operator::NonASAP(NonASAPOp)` | Ordinary query operations that transform, combine or aggregate data | `Scan`, `Values`, `Filter`, `Project`, `Aggregate`, `Join`, `SetOp`, `Concat`, `Dedup`, `Sort`, `Limit`, `BinaryOp`, `SQLWindowFunc`, `TimeRange`, `TimeShift`, `PromqlVectorFromScalar`, `PromqlRelabel`, `PromqlInfoEnrich`, `PromqlSeriesSample`, `PromqlSubquery` |
+| `Operator::ASAP(ASAPOp)` | Operations on summary state and its results, including reserved operations | `SummaryAgg`, `SummaryEstimate`, `SummaryMerge`, `SummarySubtract`, `SummaryDelete`, `SummaryJoin`, `FinalizeExactAccumulator`, `MaintainPopulation`, `ReadPopulation`, `Extension` |
 
 `CurrentTimestamp`, `EvalTimestamp` and `PromqlScalarFromVector` belong to scalar
 expressions. Constants need no `PromqlScalarBridge`; query roots may directly hold
@@ -82,7 +88,7 @@ or runtime support. Defining new summary-composition semantics is outside this
 proposal (§6).
 
 `NonASAPOp` and `ASAPOp` describe the operation performed by a node. Inputs in both
-categories connect to `Operator` nodes, so either category can consume the other
+categories connect to `OperatorNode` instances, so either category can consume the other
 when their result kind, schema and execution constraints permit it. `NonASAP`
 classifies one node; it does not require all of that node's descendants to be non-ASAP.
 
@@ -104,7 +110,7 @@ the existing query and summary models, but the sketches combine several changes:
 | Change | Purpose and scope |
 |---|---|
 | Group ordinary operations under `NonASAP` and summary operations under `ASAP` | Organize the common operator model into two semantic categories. |
-| Give both categories inputs that refer to `Operator` nodes | Allow ordinary and summary operations to compose directly, without a wrapper hiding their dependencies. |
+| Give both categories inputs that refer to `OperatorNode` instances | Allow ordinary and summary operations to compose directly, without a wrapper hiding their dependencies. |
 | Remove relational-subplan wrappers and duplicate relational operations | Make all dependencies visible and give each ordinary operation one definition. |
 | Separate scalar expressions from operators | A related proposal, described in the [companion document](decoupling_op_and_expr.md); not a consequence of categorization alone. |
 | Represent execution timing chosen during physical planning | Follow the planning-stage design in [#509](https://github.com/ProjectASAP/ASAPPlanner/pull/509), rather than introduce a new timing policy here (§2.3). |
@@ -117,13 +123,13 @@ keep their names; retaining a name does not establish complete language coverage
 
 The following changes are explicit:
 
-- Operator inputs become references to the common `Operator`. The sketches use the
+- Operator inputs become references to the common `OperatorNode`. The sketches use the
   existing `Rc` notation for shared inputs and omit column-state generics for
   readability; column IDs and scan schemas below show the resolved form.
 - `Predicate`, `ProjectItem` and other scalar-bearing payloads keep their roles and
   own `ScalarExpr` values. The companion proposal defines owned scalar trees and
   shared operator inputs, including `Concat`. Explicit scalar conversions and SQL
-  subqueries also reference the common `Operator`; their dependencies remain visible.
+  subqueries also reference the common `OperatorNode`; their dependencies remain visible.
   This document uses those same structures.
 - `BinaryOp` reuses the existing post-ASAP `BinaryOperator` payload. It carries the
   binary operation, vector matching and checked-division requirements; the pre-ASAP
@@ -136,7 +142,7 @@ The following changes are explicit:
   in the companion. `SQLWindowFunc.frame` retains its current optional form.
 
 **Proposed data structures.** These sketches describe operation-specific data using
-current names. `Rc<Operator>` represents a shared input edge; no new reference type
+current names. `Rc<OperatorNode>` represents a shared input edge; no new reference type
 is introduced. Storage and traversal algorithms remain outside this design.
 
 `NonASAPOp` retains the query semantics needed before and after optimization:
@@ -147,37 +153,37 @@ enum NonASAPOp {
         source: Source, predicates: Vec<Predicate>, schema: Schema,
     },
     Values { rows: Vec<Vec<ScalarExpr>>, schema: Schema },
-    Filter { child: Rc<Operator>, pred: Predicate },
+    Filter { child: Rc<OperatorNode>, pred: Predicate },
     Project {
-        child: Rc<Operator>, cols: Vec<ProjectItem>, qualifier: Option<String>,
+        child: Rc<OperatorNode>, cols: Vec<ProjectItem>, qualifier: Option<String>,
     },
     Aggregate {
-        child: Rc<Operator>, reduction: Reduction, measures: Vec<AggIntent>,
+        child: Rc<OperatorNode>, reduction: Reduction, measures: Vec<AggIntent>,
         output_names: Vec<String>, having: Option<Predicate>,
     },
-    Join { left: Rc<Operator>, right: Rc<Operator>, kind: JoinKind, pred: Predicate },
-    SetOp { left: Rc<Operator>, right: Rc<Operator>, kind: RelationalSetOpKind, all: bool },
+    Join { left: Rc<OperatorNode>, right: Rc<OperatorNode>, kind: JoinKind, pred: Predicate },
+    SetOp { left: Rc<OperatorNode>, right: Rc<OperatorNode>, kind: RelationalSetOpKind, all: bool },
     Concat {
-        children: Vec<Rc<Operator>>, discriminator_unique_key: Option<ConcatDiscriminatorKey>,
+        children: Vec<Rc<OperatorNode>>, discriminator_unique_key: Option<ConcatDiscriminatorKey>,
     },
-    Dedup { child: Rc<Operator>, cols: Vec<ColumnId> },
-    Sort { child: Rc<Operator>, keys: Vec<SortKey>, partition_by: GroupKeys },
-    Limit { child: Rc<Operator>, n: Option<usize>, offset: usize, partition_by: GroupKeys },
+    Dedup { child: Rc<OperatorNode>, cols: Vec<ColumnId> },
+    Sort { child: Rc<OperatorNode>, keys: Vec<SortKey>, partition_by: GroupKeys },
+    Limit { child: Rc<OperatorNode>, n: Option<usize>, offset: usize, partition_by: GroupKeys },
     BinaryOp {
-        lhs: Rc<Operator>, rhs: Rc<Operator>, operator: BinaryOperator, return_bool: bool,
+        lhs: Rc<OperatorNode>, rhs: Rc<OperatorNode>, operator: BinaryOperator, return_bool: bool,
     },
     SQLWindowFunc {
-        child: Rc<Operator>, func: WindowFuncKind, args: Vec<ScalarExpr>,
+        child: Rc<OperatorNode>, func: WindowFuncKind, args: Vec<ScalarExpr>,
         partition_by: GroupKeys, order_by: Vec<SortKey>,
         frame: Option<WindowFrame>, output_name: String,
     },
-    TimeRange { child: Rc<Operator>, range: Duration, kind: TimeRangeKind },
-    TimeShift { child: Rc<Operator>, shift: TimeShift },
+    TimeRange { child: Rc<OperatorNode>, range: Duration, kind: TimeRangeKind },
+    TimeShift { child: Rc<OperatorNode>, shift: TimeShift },
     PromqlVectorFromScalar(ScalarExpr),
-    PromqlRelabel { child: Rc<Operator>, dst: String, value: ScalarExpr },
-    PromqlInfoEnrich { child: Rc<Operator>, selector: Vec<InfoMatcher> },
-    PromqlSeriesSample { child: Rc<Operator>, by: GroupKeys, kind: SampleKind },
-    PromqlSubquery { child: Rc<Operator>, range: Duration, resolution: Option<Duration> },
+    PromqlRelabel { child: Rc<OperatorNode>, dst: String, value: ScalarExpr },
+    PromqlInfoEnrich { child: Rc<OperatorNode>, selector: Vec<InfoMatcher> },
+    PromqlSeriesSample { child: Rc<OperatorNode>, by: GroupKeys, kind: SampleKind },
+    PromqlSubquery { child: Rc<OperatorNode>, range: Duration, resolution: Option<Duration> },
 }
 ```
 
@@ -203,24 +209,24 @@ summary or exact-accumulator cases, never its `Plain` case.
 ```rust
 enum ASAPOp {
     SummaryAgg {
-        child: Rc<Operator>, family: SummaryFamilyType, input: SummaryUpdate,
+        child: Rc<OperatorNode>, family: SummaryFamilyType, input: SummaryUpdate,
         reduction: Reduction, grouping: GroupingStrategy,
     },
     SummaryEstimate {
-        summary_input: Rc<Operator>, query: SketchQuery,
+        summary_input: Rc<OperatorNode>, query: SketchQuery,
     },
-    FinalizeExactAccumulator { child: Rc<Operator> },
-    MaintainPopulation { child: Rc<Operator>, population: MaintainedPopulation },
-    ReadPopulation { child: Rc<Operator>, readout: PopulationReadout },
+    FinalizeExactAccumulator { child: Rc<OperatorNode> },
+    MaintainPopulation { child: Rc<OperatorNode>, population: MaintainedPopulation },
+    ReadPopulation { child: Rc<OperatorNode>, readout: PopulationReadout },
 
     // Reserved operations; semantics and support require further design.
-    SummaryMerge { children: Vec<Rc<Operator>> },
-    SummarySubtract { left: Rc<Operator>, right: Rc<Operator> },
-    SummaryDelete { summary_input: Rc<Operator>, key: ColumnRef },
+    SummaryMerge { children: Vec<Rc<OperatorNode>> },
+    SummarySubtract { left: Rc<OperatorNode>, right: Rc<OperatorNode> },
+    SummaryDelete { summary_input: Rc<OperatorNode>, key: ColumnRef },
     SummaryJoin {
-        outer: Rc<Operator>, inner: Rc<Operator>, key: ColumnRef, family: SummaryFamilyType,
+        outer: Rc<OperatorNode>, inner: Rc<OperatorNode>, key: ColumnRef, family: SummaryFamilyType,
     },
-    Extension { child: Rc<Operator>, name: String },
+    Extension { child: Rc<OperatorNode>, name: String },
 }
 ```
 
@@ -235,7 +241,7 @@ The summary fields distinguish state construction and readout:
 | `query` / `readout` | The result requested from summary or maintained-population state |
 | `population` | The population whose membership and values are maintained |
 
-The payloads above describe operations and their inputs. The common `Operator`
+The payloads above describe operations and their inputs. The common `OperatorNode`
 fields and their derivation interfaces are defined once in §2; individual variants
 do not repeat schema, accuracy or execution timing.
 
@@ -263,7 +269,7 @@ visible graph dependencies with defined cardinality rules. This prevents an
 arbitrary expression from being mistaken for a table-producing plan. The
 [companion proposal](decoupling_op_and_expr.md) defines this distinction.
 
-Its pre-ASAP `Rc<NonASAPOp<C>>` references become `Rc<Operator>` in the unified
+Its pre-ASAP `Rc<NonASAPOp<C>>` references become `Rc<OperatorNode>` in the unified
 model, including `QueryRoot` and the inputs to `PromqlScalarFromVector`,
 `ScalarSubquery`, `Exists` and `InSubquery`. Their cardinality, NULL and NaN rules
 remain unchanged.
@@ -291,13 +297,13 @@ it does not introduce rules for sharing computations across queries.
 ## 2. Node properties and why they differ
 
 Both operation categories use this resolved node structure. It follows the current
-`SummaryNode` separation between `expr`, `schema` and `guarantee`, generalized to
-all operators. The former `Operator` category enum becomes `OperatorExpr` (§1.1)
-so common fields do not have to be repeated in every variant.
+`SummaryNode` separation between an operation and its metadata, generalized to
+all operators. The field is named `operator` because it holds `Operator` (§1.1),
+not a scalar expression. Common fields are defined here once, not in each variant.
 
 ```rust
-struct Operator {
-    expr: OperatorExpr,
+struct OperatorNode {
+    operator: Operator,
     result_kind: OperatorResultKind,
     schema: Schema,
     guarantee: Option<ResultGuarantee>,
@@ -313,12 +319,12 @@ enum ExecutionTiming {
 
 | Field | Meaning | How it is determined |
 |---|---|---|
-| `expr` | Operation category, parameters and dependencies | `OperatorExpr`, `NonASAPOp` and `ASAPOp` in §1 |
-| `result_kind`, `schema` | The output category and fields, including identity/time metadata | Derived from `expr` and its actual inputs, then retained on the resolved node (§2.1) |
+| `operator` | Operation category, parameters and dependencies | `Operator`, `NonASAPOp` and `ASAPOp` in §1 |
+| `result_kind`, `schema` | The output category and fields, including identity/time metadata | Derived from `operator` and its actual inputs, then retained on the resolved node (§2.1) |
 | `guarantee` | An established result-accuracy guarantee, when available | Existing `ResultGuarantee` and composition rules (§2.2); `None` never means exact |
 | `timing` | The assigned ingestion/query execution phase | Physical planning under #509 (§2.3); `None` means not assigned |
 
-`ResultGuarantee` retains its existing definition. `OperatorExpr`,
+`ResultGuarantee` retains its existing definition. `Operator`, `OperatorNode`,
 `OperatorResultKind` and the common node layout are proposed; `Schema` is unified
 as specified below. This is a resolved-plan interface: name resolution must finish
 before producing these concrete `ColumnId`/`Schema` nodes.
@@ -373,13 +379,13 @@ enum OperatorResultKind {
     State,
 }
 
-impl OperatorExpr {
+impl Operator {
     fn output_schema(&self) -> Result<Schema, QueryExprError>;
     fn output_kind(&self) -> Result<OperatorResultKind, QueryExprError>;
     fn validate_inputs(&self) -> Result<(), QueryExprError>;
 }
 
-impl Operator {
+impl OperatorNode {
     fn validate(&self) -> Result<(), QueryExprError>;
 }
 
@@ -406,16 +412,16 @@ pre-ASAP restriction even though the common schema can also express state.
 | `closed` | Whether `columns` completely describes the output. An open PromQL schema must retain unlisted labels through the existing complete-series-identity contract. |
 
 `OperatorResultKind` is derived from the operation and its inputs and retained as
-`Operator.result_kind`. `State` describes an output carrying unfinalized state; its
+`OperatorNode.result_kind`. `State` describes an output carrying unfinalized state; its
 schema may also contain ordinary grouping keys. `SummaryEstimate`,
 `FinalizeExactAccumulator` and other readouts derive the appropriate relation or
 vector kind from their operation and input context. Matching numeric columns do
 not make those kinds interchangeable.
 
-**Interface contracts.** `OperatorExpr::output_schema` derives the fields and
+**Interface contracts.** `Operator::output_schema` derives the fields and
 metadata for the actual inputs after a rewrite; `output_kind` derives the result
 category. `validate_inputs` checks producer/consumer compatibility, including query
-subgraphs referenced by scalar expressions. `Operator::validate` additionally
+subgraphs referenced by scalar expressions. `OperatorNode::validate` additionally
 checks that retained output metadata agrees with that derivation and that any
 guarantee or timing assignment is valid under the existing rules. For example,
 `PromqlScalarFromVector` requires an instant vector, and a summary readout requires the compatible state family. These checks
@@ -463,7 +469,7 @@ separates logical decisions about what to compute from physical decisions about 
 and when to compute it. This proposal follows that division.
 
 For example, a KLL summary build may execute at ingestion time or query time,
-depending on the materialization choice. `Operator.timing` records that assignment
+depending on the materialization choice. `OperatorNode.timing` records that assignment
 as `Some(ExecutionTiming::IngestionTime)` or `Some(ExecutionTiming::QueryTime)`.
 Logical nodes may retain `None`; physical-plan validation must reject unassigned
 executable nodes. Timing is common node metadata rather than a separate payload
