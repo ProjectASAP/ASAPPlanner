@@ -32,6 +32,23 @@ compute values within the schema selected by their owning operators.
 
 ## 2. Proposed data structures
 
+An **operator** describes a query computation with its own output schema. It reads
+from a source or other operators and produces a relation or time-series result.
+For example, `Scan` produces input rows, `Filter` selects rows, and `Project`
+produces a new set of columns. Operators form the nodes and input dependencies of
+the query plan.
+
+A **scalar expression** describes a value calculated within the context of an
+operator. For example, `l_quantity > 10` produces a Boolean used by a filter, and
+`l_quantity * 2` produces a value for a projected column. An expression has a value
+type, but no table output schema or independent data source. Its column references
+are interpreted using the schema chosen by the owning operator.
+
+In the example above, `Filter.child` is the `Scan` operator that supplies rows;
+`Filter.pred` is the expression `l_quantity > 10` evaluated on those rows. The
+predicate cannot replace the scan as the filter's input, and the scan cannot be
+used as its Boolean condition. This is the distinction the two types enforce.
+
 Split `QueryExpr` into `NonASAPOp` and `ScalarExpr`. Keep existing variant names,
 field names and semantics; change their types to express their roles:
 
