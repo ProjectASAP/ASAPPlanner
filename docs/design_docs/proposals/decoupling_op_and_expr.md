@@ -243,7 +243,8 @@ schema nor a full identity value, this lowering is not valid.
 When combined with the [operator-sharing proposal](operator-sharing.md), all plan
 references above target the common `OperatorNode`, including references inside scalar
 expressions. Scalar expression trees do not acquire shared-node
-identity.
+identity. The companion's [complete DAG example](operator-sharing.md#13-example-composing-a-logical-dag)
+shows these expressions inside ordinary operators before and after an ASAP rewrite.
 
 ## 3. Semantic requirements
 

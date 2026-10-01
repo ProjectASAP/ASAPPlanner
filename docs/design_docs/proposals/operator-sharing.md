@@ -263,18 +263,6 @@ The payloads above describe operations and their inputs. The common `OperatorNod
 fields and their derivation interfaces are defined once in §2; individual variants
 do not repeat schema, accuracy or execution timing.
 
-For example, arrows below show data flowing from producer to consumer:
-
-```text
-NonASAP(Scan) → NonASAP(Filter) → ASAP(SummaryAgg)
-             → ASAP(SummaryEstimate) → NonASAP(Project)
-```
-
-Each node describes its operation, inputs and output schema. An executable plan also
-needs an accuracy assessment and an execution phase for each relevant computation.
-These have different sources, described in §2; they are not all known when a logical
-operator is first created.
-
 ### 1.2 Operators and scalar expressions
 
 A filter is an operator because it transforms a table. Its predicate, such as
@@ -305,7 +293,94 @@ These are **query subgraphs referenced by scalar expressions**. The reference is
 an edge to a producer in the common graph, not a copy of the subgraph embedded in
 the expression. Scalar ownership does not change the producer's graph identity.
 
-### 1.3 Scope of operator sharing
+### 1.3 Example: composing a logical DAG
+
+Consider this SQL query, with integer `bytes` and `status` columns:
+
+```sql
+SELECT SUM(bytes) + 1 AS total_bytes
+FROM requests
+WHERE status = 200;
+```
+
+Before ASAP optimization, its logical DAG is composed as follows. Each box is an
+`OperatorNode`; arrows point from a consumer to its input producer. The scalar
+expressions shown beside nodes are owned fields, not additional DAG nodes.
+
+```text
+p: OperatorNode
+   operator = Operator::NonASAP(NonASAPOp::Project)
+   cols[0].expr = ScalarExpr::Arithmetic(Column(sum_bytes), Add, Literal(1))
+   │ child: Rc<OperatorNode>
+   ▼
+a: OperatorNode
+   operator = Operator::NonASAP(NonASAPOp::Aggregate)
+   measures = [AggIntent::Sum(bytes)]
+   │ child: Rc<OperatorNode>
+   ▼
+f: OperatorNode
+   operator = Operator::NonASAP(NonASAPOp::Filter)
+   pred = Predicate(ScalarExpr::Compare(Column(status), Eq, Literal(200)))
+   │ child: Rc<OperatorNode>
+   ▼
+s: OperatorNode
+   operator = Operator::NonASAP(NonASAPOp::Scan)
+   source = requests
+```
+
+This is abbreviated structural notation: `Column` and `Literal` above are
+`ScalarExpr` variants; column names stand for resolved `ColumnId`s. The arithmetic
+and comparison use `ExprSemantics::Sql`. The aggregate has no grouping keys and
+names its output `sum_bytes`; the projection names its output `total_bytes`.
+
+An eligible ASAP rewrite can implement the sum using an exact accumulator. The
+resulting logical DAG contains both operation categories:
+
+```text
+p': NonASAP(Project)                 owns the same scalar expression: sum_bytes + 1
+ │ child
+ ▼
+r:  ASAP(FinalizeExactAccumulator)   produces the ordinary sum_bytes value
+ │ child
+ ▼
+b:  ASAP(SummaryAgg)                 produces exact SUM accumulator state
+ │ child
+ ▼
+f:  NonASAP(Filter)                  owns the same predicate: status = 200
+ │ child
+ ▼
+s:  NonASAP(Scan)                    reads requests
+```
+
+The second diagram abbreviates the same nesting: `ASAP(SummaryAgg)` means an
+`OperatorNode` whose `operator` is `Operator::ASAP(ASAPOp::SummaryAgg { ... })`.
+Its family is `SummaryFamilyType::ExactAggregate(ExactKind::Sum, ExactParams::Sum)`;
+its update reads `bytes`, and it uses the same ungrouped reduction. Finalization
+must preserve SQL SUM's NULL and empty-input behavior. This example assumes the
+existing capability and rewrite checks permit that exact implementation.
+
+| Part of the design | Role in this example |
+|---|---|
+| `OperatorNode` | Every graph node, holding its operation and common result/schema, guarantee and timing properties. |
+| `Operator` | Selects the `NonASAP` or `ASAP` operation category in each node. |
+| `NonASAPOp` | Scan, filter, aggregate and projection before optimization; scan, filter and projection still use these definitions afterward. |
+| `ASAPOp` | Builds accumulator state and finalizes it after the rewrite. |
+| `ScalarExpr` | Computes `status = 200` and `sum_bytes + 1` within the filter and projection; neither computation needs a bridge node. |
+| `Rc<OperatorNode>` | Connects each consumer to its producer, including `Project.child` pointing to an ASAP finalization node. |
+
+The common properties also follow the new graph. Scan/filter/project and the
+finalized sum have `Relation` results with ordinary `Plain(DataType)` columns.
+The build has `State` result kind and an `ExactAggregate(...)` column; the
+projection cannot consume that state directly. Guarantees are assessed under the
+existing rules. At this logical stage, `timing` may remain `None`; physical planning
+later assigns execution phases. The query result is produced by `p` before the
+rewrite and `p'` afterward, without an additional query-root data structure.
+
+This illustrates the connection between the two proposals: scalar separation
+makes predicates and value expressions explicit; operator unification lets those
+same ordinary operations consume ASAP results through normal graph edges.
+
+### 1.4 Scope of operator sharing
 
 Here, sharing means pre-ASAP and post-ASAP use the same operator definitions.
 A `Project`, for example, has one representation whether its input is an ordinary
