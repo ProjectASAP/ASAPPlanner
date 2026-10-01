@@ -45,7 +45,9 @@ on query semantics, accuracy and execution timing.
 
 ### 1.1 Unified `Operator` type
 
-Every computation is represented by an `Operator` node. The type has two categories:
+Every relation or vector computation is represented by an `Operator` node.
+Scalar computations use the companion proposal's `ScalarExpr`. The operator type
+has two categories:
 
 ```rust
 enum Operator {
@@ -60,11 +62,13 @@ operator kinds.
 
 | Category | Meaning | All operations |
 |---|---|---|
-| `NonASAP(NonASAPOp)` | Ordinary query operations that transform, combine or aggregate data | `Scan`, `Filter`, `Project`, `Aggregate`, `Join`, `SetOp`, `Concat`, `Dedup`, `Sort`, `Limit`, `BinaryOp`, `SQLWindowFunc`, `TimeRange`, `TimeShift`, `PromqlScalarBridge`, `EvalTimestamp`, `PromqlVectorFromScalar`, `PromqlScalarFromVector`, `PromqlRelabel`, `PromqlInfoEnrich`, `PromqlSeriesSample`, `PromqlSubquery` |
+| `NonASAP(NonASAPOp)` | Ordinary query operations that transform, combine or aggregate data | `Scan`, `Values`, `Filter`, `Project`, `Aggregate`, `Join`, `SetOp`, `Concat`, `Dedup`, `Sort`, `Limit`, `BinaryOp`, `SQLWindowFunc`, `TimeRange`, `TimeShift`, `PromqlVectorFromScalar`, `PromqlRelabel`, `PromqlInfoEnrich`, `PromqlSeriesSample`, `PromqlSubquery` |
 | `ASAP(ASAPOp)` | Operations on summary state and its results, including reserved operations | `SummaryAgg`, `SummaryEstimate`, `SummaryMerge`, `SummarySubtract`, `SummaryDelete`, `SummaryJoin`, `FinalizeExactAccumulator`, `MaintainPopulation`, `ReadPopulation`, `Extension` |
 
-`PromqlScalarBridge` keeps its existing name.
-`CurrentTimestamp` belongs to scalar expressions, so it is not in this operator list.
+`CurrentTimestamp`, `EvalTimestamp` and `PromqlScalarFromVector` belong to scalar
+expressions. Constants need no `PromqlScalarBridge`; query roots may directly hold
+a scalar expression. The [companion proposal](decoupling_op_and_expr.md) defines
+these boundaries and their SQL/PromQL semantic coverage.
 
 `SummaryMerge`, `SummarySubtract`, `SummaryDelete`, `SummaryJoin` and `Extension`
 are reserved in the proposed planner model; listing them does not establish planner
@@ -111,14 +115,18 @@ The following changes are explicit:
   readability; column IDs and scan schemas below show the resolved form.
 - `Predicate`, `ProjectItem` and other scalar-bearing payloads keep their roles and
   own `ScalarExpr` values. The companion proposal defines owned scalar trees and
-  shared operator inputs, including `Concat`, as well as predicate and scalar-bridge
-  validation. This document uses those same structures.
+  shared operator inputs, including `Concat`. Explicit scalar conversions and SQL
+  subqueries also reference the common `Operator`; their dependencies remain visible.
+  This document uses those same structures.
 - `BinaryOp` reuses the existing post-ASAP `BinaryOperator` payload. It carries the
   binary operation, vector matching and checked-division requirements; the pre-ASAP
   `op` and `vector_match` semantics must be preserved when mapped into it.
+  The proposed `return_bool` field also retains PromQL comparison mode.
 - `Limit.partition_by` comes from the existing post-ASAP limit. Applying that field
   to the unified operator remains an explicit design choice, not new functionality
-  implied by a rename. `SQLWindowFunc.frame` retains its current optional form.
+  implied by a rename. Optional `Limit.n` adds offset-only queries, and
+  `TimeRange.kind` distinguishes instant selection from a range window, as specified
+  in the companion. `SQLWindowFunc.frame` retains its current optional form.
 
 **Proposed data structures.** These sketches describe operation-specific data using
 current names. `Rc<Operator>` represents a shared input edge; no new reference type
@@ -131,6 +139,7 @@ enum NonASAPOp {
     Scan {
         source: Source, predicates: Vec<Predicate>, schema: Schema,
     },
+    Values { rows: Vec<Vec<ScalarExpr>>, schema: Schema },
     Filter { child: Rc<Operator>, pred: Predicate },
     Project {
         child: Rc<Operator>, cols: Vec<ProjectItem>, qualifier: Option<String>,
@@ -146,19 +155,18 @@ enum NonASAPOp {
     },
     Dedup { child: Rc<Operator>, cols: Vec<ColumnId> },
     Sort { child: Rc<Operator>, keys: Vec<SortKey>, partition_by: GroupKeys },
-    Limit { child: Rc<Operator>, n: usize, offset: usize, partition_by: GroupKeys },
-    BinaryOp { lhs: Rc<Operator>, rhs: Rc<Operator>, operator: BinaryOperator },
+    Limit { child: Rc<Operator>, n: Option<usize>, offset: usize, partition_by: GroupKeys },
+    BinaryOp {
+        lhs: Rc<Operator>, rhs: Rc<Operator>, operator: BinaryOperator, return_bool: bool,
+    },
     SQLWindowFunc {
         child: Rc<Operator>, func: WindowFuncKind, args: Vec<ScalarExpr>,
         partition_by: GroupKeys, order_by: Vec<SortKey>,
         frame: Option<WindowFrame>, output_name: String,
     },
-    TimeRange { child: Rc<Operator>, range: Duration },
+    TimeRange { child: Rc<Operator>, range: Duration, kind: TimeRangeKind },
     TimeShift { child: Rc<Operator>, shift: TimeShift },
-    PromqlScalarBridge(ScalarExpr),
-    EvalTimestamp,
-    PromqlVectorFromScalar(Rc<Operator>),
-    PromqlScalarFromVector(Rc<Operator>),
+    PromqlVectorFromScalar(ScalarExpr),
     PromqlRelabel { child: Rc<Operator>, dst: String, value: ScalarExpr },
     PromqlInfoEnrich { child: Rc<Operator>, selector: Vec<InfoMatcher> },
     PromqlSeriesSample { child: Rc<Operator>, by: GroupKeys, kind: SampleKind },
@@ -169,7 +177,8 @@ enum NonASAPOp {
 The fields describe what an operator does to its inputs:
 
 - `child`, `left`, `right`, `lhs`, `rhs` and `children` are graph dependencies. They can lead to
-  either operator category, subject to the input's schema requirements.
+  either operator category, subject to the input's schema and result-kind requirements.
+  Dependencies referenced by scalar conversions/subqueries are edges in this same graph.
 - `Predicate` describes a row-level condition; `ProjectItem` contains a scalar
   expression and its optional output alias.
 - `reduction` describes whether aggregation combines groups or operates per entity;
@@ -241,10 +250,11 @@ operator is first created.
 A filter is an operator because it transforms a table. Its predicate, such as
 `latency > 100`, is a scalar expression evaluated in that table's schema.
 
-Keep scalar expressions within their owning operators. Graph edges then represent
-computation dependencies, while predicates, projection expressions and sort keys
-describe how an operator processes its input. This prevents an expression from
-being mistaken for a table-producing plan. The
+Scalar expressions belong to an operator field or a scalar query root. Predicates,
+projection expressions and sort keys describe value computation in that context.
+Explicit scalar conversions and subqueries may reference operators; those are
+visible graph dependencies with defined cardinality rules. This prevents an
+arbitrary expression from being mistaken for a table-producing plan. The
 [companion proposal](decoupling_op_and_expr.md) defines this distinction.
 
 ### 1.3 Scope of operator sharing
@@ -328,7 +338,9 @@ accuracy, costing or selection policies.
 ## 4. Export preserves the graph
 
 Export one node per operator and represent its input dependencies as edges. Export
-a shared producer once, with edges to all its consumers.
+a shared producer once, with edges to all its consumers. Include dependencies
+referenced by scalar conversions and subqueries. Preserve scalar query roots as
+expressions and their operator dependencies; do not invent a bridge node for export.
 
 This keeps the graph visible to costing, physical compilation, execution and plan
 inspection. Embedding a whole relational subtree in one exported node would hide
