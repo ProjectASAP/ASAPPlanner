@@ -20,7 +20,7 @@ Unchanged: `PlanSpace`, `cost_sorted`, `global_selection`, and the interface
 ```text
 PlanningWorkload ──lowering──▶ ParsedWorkload ──OptimizationPass──▶ PlanOutput
     + frontend deps                            + models
-                                               + optional lifecycle input
+                                               + lifecycle input
 ```
 
 ---
@@ -38,7 +38,7 @@ Inside, the workflow is composed of 2 phases: A fixed lowering phase and a plugg
 ```mermaid
 flowchart TD
     U["UserInput"]
-    OUT["PlanOutput: Dag, or DagWithLifecycle"]
+    OUT["PlanOutput"]
 
     subgraph e2e_plan
         direction TB
@@ -64,7 +64,7 @@ Details of these types are provided below.
 | `workload` | `&PlanningWorkload` |
 | `frontend_specific` | `Sql { catalog }` / `Promql { now_ms, histograms }` / `Metricsql`; fixed by `query_workload.language` |
 | `models` | Cost model, accuracy model, evidence provider; `PlanningModels::builtin()` for the defaults |
-| `lifecycle` | `Some` also asks for the maintenance-versus-recompute decision |
+| `lifecycle` | Planning clock and runtime capabilities for the maintenance-versus-recompute decision every plan carries |
 | `pass` | `None` uses `MajorPass` |
 
 ### `OptimizationInput`
@@ -73,7 +73,7 @@ Details of these types are provided below.
 pub struct OptimizationInput<'a> {
     pub workload: &'a ParsedWorkload,
     pub models: PlanningModels<'a>,          // same type UserInput uses
-    pub lifecycle: Option<LifecycleInput>,   // same type UserInput uses
+    pub lifecycle: LifecycleInput,           // same type UserInput uses
 }
 ```
 
@@ -82,23 +82,20 @@ pub struct OptimizationInput<'a> {
 ### `PlanOutput`
 
 ```rust
-pub enum PlanOutput {
-    Dag { plans: Vec<QueryPlan> },
-    DagWithLifecycle { plans: Vec<QueryLifecyclePlan> },
-}
-
-pub struct QueryPlan {
-    pub entry_index: usize,        // index into QueryWorkload::entries()
-    pub dag: Rc<SummaryNode>,
+pub struct PlanOutput {
+    pub plans: Vec<QueryLifecyclePlan>,   // one per workload entry, in entries() order
 }
 
 pub struct QueryLifecyclePlan {
-    pub entry_index: usize,
+    pub entry_index: usize,        // index into QueryWorkload::entries()
     pub plan: SummaryMaintenanceLifecyclePlan,   // its `root` is the DAG
 }
 ```
 
-The variant follows from whether `lifecycle` was supplied in the input.
+Every plan carries the maintenance decisions, so the pass always runs
+lifecycle-aware selection. A cost model that cannot price lifecycles
+(`DefaultCostModel` today) makes that selection fall back to raw recompute for
+every summary target; supply a model with the lifecycle cost hooks.
 
 ---
 
@@ -165,16 +162,16 @@ for name in registry.names() {
 ### 3.3 The three existing workflows, in this shape
 
 [Input, output, and workflows](input-output-workflow.md) describes three ways to
-use the candidate space. Two of them are now what a pass produces; the first is
-untouched.
+use the candidate space. Only the last is what a pass produces; the other two
+stay on the old interfaces.
 
 | Workflow there | Here |
 |---|---|
 | Ranked view (`cost_sorted`) | Not covered by this design, you should handle it with old interfaces |
-| Selection and DAG assembly | `lifecycle: None` → `PlanOutput::Dag` |
-| Summary-maintenance-lifecycle-aware helper | `lifecycle: Some(..)` → `PlanOutput::DagWithLifecycle` |
+| Selection and DAG assembly | Not covered either: `search_workload_with_targets` + `global_selection` + `assemble_selected_dag` |
+| Summary-maintenance-lifecycle-aware helper | `PlanOutput` |
 
-The second and third are no longer separate call sequences the caller drives.
+The third is no longer a call sequence the caller drives.
 Following is an example of how the old workflow maps to the new interface.
 
 ```rust
@@ -218,8 +215,8 @@ for (index, root) in &space.roots {
 // After.
 let output = e2e_plan(
     UserInput::new(&workload, FrontendInput::Sql { catalog: &catalog },
-                   PlanningModels::builtin())
-        .with_lifecycle(LifecycleInput::new(now_ms, capabilities).with_horizon(horizon))
+                   PlanningModels::builtin(),
+                   LifecycleInput::new(now_ms, capabilities).with_horizon(horizon))
 ).await?;
 ```
 

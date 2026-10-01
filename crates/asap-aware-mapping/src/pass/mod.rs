@@ -122,32 +122,31 @@ impl LifecycleInput {
 pub struct OptimizationInput<'a> {
     pub workload: &'a ParsedWorkload,
     pub models: PlanningModels<'a>,
-    pub lifecycle: Option<LifecycleInput>,
+    /// Every plan carries the maintenance-versus-recomputation decision, so
+    /// the planning clock and runtime capabilities are always required.
+    pub lifecycle: LifecycleInput,
 }
 
 impl<'a> OptimizationInput<'a> {
-    pub fn new(workload: &'a ParsedWorkload, models: PlanningModels<'a>) -> Self {
+    pub fn new(
+        workload: &'a ParsedWorkload,
+        models: PlanningModels<'a>,
+        lifecycle: LifecycleInput,
+    ) -> Self {
         Self {
             workload,
             models,
-            lifecycle: None,
+            lifecycle,
         }
-    }
-
-    pub fn with_lifecycle(mut self, lifecycle: LifecycleInput) -> Self {
-        self.lifecycle = Some(lifecycle);
-        self
     }
 
     pub fn validate(&self) -> Result<(), OptimizationInputError> {
         self.workload
             .validate()
             .map_err(OptimizationInputError::Workload)?;
-        if let Some(lifecycle) = &self.lifecycle {
-            if let Some(horizon) = lifecycle.horizon {
-                if !horizon.0.is_finite() || horizon.0 <= 0.0 {
-                    return Err(OptimizationInputError::InvalidHorizon(horizon.0));
-                }
+        if let Some(horizon) = self.lifecycle.horizon {
+            if !horizon.0.is_finite() || horizon.0 <= 0.0 {
+                return Err(OptimizationInputError::InvalidHorizon(horizon.0));
             }
         }
         Ok(())
@@ -165,55 +164,40 @@ pub enum OptimizationInputError {
 
 // ── Output ───────────────────────────────────────────────────────────────
 
-/// One query's selected post-ASAP DAG root.
-#[derive(Debug, Clone)]
-pub struct QueryPlan {
-    /// Index into `QueryWorkload::entries()`.
-    pub entry_index: usize,
-    pub dag: Rc<SummaryNode>,
-}
-
-/// One query's DAG plus the maintenance decisions taken for it. The DAG is
-/// `plan.root` — this is not a representation parallel to [`QueryPlan`].
+/// One query's selected post-ASAP DAG plus the maintenance decisions taken
+/// for it. The DAG is `plan.root`.
 #[derive(Debug, Clone)]
 pub struct QueryLifecyclePlan {
+    /// Index into `QueryWorkload::entries()`.
     pub entry_index: usize,
     pub plan: SummaryMaintenanceLifecyclePlan,
 }
 
-/// One variant per workflow. Which one comes back is decided by
-/// [`OptimizationInput::lifecycle`], and [`check_contract`] enforces that.
+/// One plan per workload entry, in `QueryWorkload::entries()` order;
+/// [`check_contract`] enforces that.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
-pub enum PlanOutput {
-    Dag { plans: Vec<QueryPlan> },
-    DagWithLifecycle { plans: Vec<QueryLifecyclePlan> },
+pub struct PlanOutput {
+    pub plans: Vec<QueryLifecyclePlan>,
 }
 
 impl PlanOutput {
-    /// Entry indices in output order, whichever variant this is.
-    pub fn entry_indices(&self) -> Vec<usize> {
-        match self {
-            Self::Dag { plans } => plans.iter().map(|p| p.entry_index).collect(),
-            Self::DagWithLifecycle { plans } => plans.iter().map(|p| p.entry_index).collect(),
-        }
+    pub fn new(plans: Vec<QueryLifecyclePlan>) -> Self {
+        Self { plans }
     }
 
-    /// The selected DAG root per query, whichever variant this is.
+    /// Entry indices in output order.
+    pub fn entry_indices(&self) -> Vec<usize> {
+        self.plans.iter().map(|p| p.entry_index).collect()
+    }
+
+    /// The selected DAG root per query.
     pub fn dags(&self) -> Vec<Rc<SummaryNode>> {
-        match self {
-            Self::Dag { plans } => plans.iter().map(|p| Rc::clone(&p.dag)).collect(),
-            Self::DagWithLifecycle { plans } => {
-                plans.iter().map(|p| Rc::clone(&p.plan.root)).collect()
-            }
-        }
+        self.plans.iter().map(|p| Rc::clone(&p.plan.root)).collect()
     }
 
     pub fn len(&self) -> usize {
-        match self {
-            Self::Dag { plans } => plans.len(),
-            Self::DagWithLifecycle { plans } => plans.len(),
-        }
+        self.plans.len()
     }
 
     pub fn is_empty(&self) -> bool {
@@ -249,10 +233,7 @@ pub enum OptimizeError {
 /// The optimization stage, end to end.
 ///
 /// Implementors are free to ignore any part of [`OptimizationInput`] they do
-/// not use, but must uphold the contract [`check_contract`] enforces. A pass
-/// that does not decide summary maintenance cannot build the
-/// [`PlanOutput::DagWithLifecycle`] variant, so it must reject an input whose
-/// `lifecycle` is `Some` rather than silently returning the other variant.
+/// not use, but must uphold the contract [`check_contract`] enforces.
 pub trait OptimizationPass {
     /// Registry key, also used in diagnostics.
     fn name(&self) -> &'static str;
@@ -272,29 +253,21 @@ pub fn optimize(
 ) -> Result<PlanOutput, OptimizeError> {
     input.validate()?;
     let expected_len = input.workload.len();
-    let wants_lifecycle = input.lifecycle.is_some();
 
     let output = pass.optimize(input)?;
-    check_contract(&output, pass.name(), expected_len, wants_lifecycle)?;
+    check_contract(&output, pass.name(), expected_len)?;
     Ok(output)
 }
 
-/// Structural checks only — that the shape matches what was asked for and that
-/// every query is accounted for. Whether the pass chose *well* is not checked.
+/// Structural checks only — that every query is accounted for, in order.
+/// Whether the pass chose *well* is not checked.
 fn check_contract(
     output: &PlanOutput,
     pass: &'static str,
     expected_len: usize,
-    wants_lifecycle: bool,
 ) -> Result<(), OptimizeError> {
     let violation = |detail: String| OptimizeError::ContractViolation { pass, detail };
 
-    let got_lifecycle = matches!(output, PlanOutput::DagWithLifecycle { .. });
-    if got_lifecycle != wants_lifecycle {
-        return Err(violation(format!(
-            "input asked for lifecycle={wants_lifecycle} but output variant has lifecycle={got_lifecycle}"
-        )));
-    }
     if output.len() != expected_len {
         return Err(violation(format!(
             "{} plan(s) for {expected_len} workload entry/entries",
@@ -382,36 +355,27 @@ mod tests {
             self.0
         }
         fn optimize(&self, _input: OptimizationInput<'_>) -> Result<PlanOutput, OptimizeError> {
-            Ok(PlanOutput::Dag { plans: Vec::new() })
+            Ok(PlanOutput::new(Vec::new()))
         }
-    }
-
-    /// A pass that returns the DAG-only variant for an input that asked for
-    /// lifecycle decisions is rejected, not silently accepted.
-    #[test]
-    fn contract_rejects_a_variant_the_input_did_not_ask_for() {
-        let output = PlanOutput::Dag { plans: Vec::new() };
-        let err = check_contract(&output, "stub", 0, true).unwrap_err();
-        assert!(matches!(
-            err,
-            OptimizeError::ContractViolation { pass: "stub", .. }
-        ));
     }
 
     /// Dropping a query is rejected: the output is positionally aligned with
     /// the workload's entries, so a short vector is not a partial result.
     #[test]
     fn contract_rejects_a_plan_count_that_does_not_cover_every_entry() {
-        let output = PlanOutput::Dag { plans: Vec::new() };
-        let err = check_contract(&output, "stub", 2, false).unwrap_err();
-        assert!(matches!(err, OptimizeError::ContractViolation { .. }));
+        let output = PlanOutput::new(Vec::new());
+        let err = check_contract(&output, "stub", 2).unwrap_err();
+        assert!(matches!(
+            err,
+            OptimizeError::ContractViolation { pass: "stub", .. }
+        ));
     }
 
-    /// The matching shape and count pass.
+    /// The matching count passes.
     #[test]
     fn contract_accepts_an_empty_workload() {
-        let output = PlanOutput::Dag { plans: Vec::new() };
-        assert!(check_contract(&output, "stub", 0, false).is_ok());
+        let output = PlanOutput::new(Vec::new());
+        assert!(check_contract(&output, "stub", 0).is_ok());
     }
 
     /// Registering a name twice fails instead of overwriting, so a comparison
