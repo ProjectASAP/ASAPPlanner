@@ -287,7 +287,7 @@ Per node kind:
 | `SummaryAgg` | from the child; ingestion time under `KeepPreAsap` | **set** by binding, as today's fallback: `IngestionTime`, or `QueryTime` over a query-time child |
 | `FinalizeExactAccumulator` | a stored field, set by the planner | **set** by the planner: the same position allows either time |
 | `SummaryEstimate` | query time, fixed by the kind | **derived** from the kind: query time |
-| `MaintainPopulation` / `ReadPopulation` | a stored field, always ingestion / query time | **derived** from the kind: ingestion / query time |
+| `MaintainPopulation` / `ReadPopulation` | a stored field: population timing set by its lifecycle; readout always query time | population: **set** by its lifecycle; readout: **derived**, query time |
 | unused variants | `SummaryMerge`: a stored field; `Join` / `Subtract` / `Delete`: ingestion time | unimplemented (§1.3) |
 
 Unlike a guarantee, a timing depends on the parents, so `derive_timings` needs the whole

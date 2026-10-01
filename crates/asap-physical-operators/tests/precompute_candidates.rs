@@ -4,7 +4,8 @@ use asap_physical_operators::{
     factory::create_planner_accumulator,
     operators::Operator,
     physical_planner::{
-        compile_candidates, select_candidate, CandidateCost, CompiledPhysicalDag, InputContract,
+        compile, compile_candidate, compile_candidates, cut_candidate, enumerate_frontiers,
+        select_candidate, CandidateCost, CompiledPhysicalDag, InputContract, PhysicalCandidate,
         Source,
     },
     runtime::{Limits, RunContext, Scope},
@@ -55,7 +56,7 @@ fn grouped_rate() -> PostAsapDag {
     let space = grouped_rate_space();
     let selected = space
         .global_selection(&DefaultCostModel)
-        .assemble_selected_dag(&space.roots[0].1)
+        .assemble_selected_query(&space.roots[0].1)
         .unwrap()
         .unwrap();
     compile_post_asap_dag(&selected).unwrap()
@@ -107,7 +108,10 @@ fn grouped_rate_can_be_materialized_before_or_after_grouped_sum() {
                 PostAsapOperatorPayload::Value {
                     operation: ValueOperation::FinalizeExactAccumulator
                 }
-            )
+            ) && dag
+                .edges
+                .iter()
+                .any(|edge| edge.producer == state.id && edge.consumer == node.id)
         })
         .unwrap();
     let input_schema = Arc::new(state.output_schema.clone());
@@ -545,4 +549,178 @@ fn enumerated_grouped_rate_candidates_execute_numeric_query_outputs() {
         executed >= 2,
         "must execute both stored and query-time grouped Rate candidates: {executed}"
     );
+}
+
+/// The per-frontier lowering used before compile-once cuts: each boundary
+/// choice lowers the precompute and query DAGs from the logical DAG again.
+fn recompiled_candidate(
+    dag: &PostAsapDag,
+    inputs: &BTreeMap<u64, InputContract>,
+    roots: &[u64],
+    frontier: &[u64],
+) -> Result<PhysicalCandidate, asap_physical_operators::Error> {
+    use asap_physical_operators::plan::Emission;
+    if frontier.is_empty() {
+        return Ok(PhysicalCandidate {
+            precompute: None,
+            query: compile(dag, inputs.clone(), roots)?,
+            materialized_outputs: BTreeMap::new(),
+        });
+    }
+    let precompute = compile(dag, inputs.clone(), frontier)?;
+    let mut materialized_outputs = BTreeMap::new();
+    for &id in frontier {
+        let mut output = precompute.output_contract(id)?;
+        output.properties.emission = Emission::Unknown;
+        materialized_outputs.insert(id, output);
+    }
+    let mut query_inputs = inputs.clone();
+    query_inputs.extend(materialized_outputs.clone());
+    Ok(PhysicalCandidate {
+        precompute: Some(precompute),
+        query: compile(dag, query_inputs, roots)?,
+        materialized_outputs,
+    })
+}
+
+fn assert_cuts_match_recompilation(
+    dag: &PostAsapDag,
+    inputs: BTreeMap<u64, InputContract>,
+    roots: &[u64],
+    min_frontiers: usize,
+) {
+    let compiled = compile(dag, inputs.clone(), roots).unwrap();
+    let frontiers = enumerate_frontiers(dag, &inputs, roots, 4096).unwrap();
+    assert!(frontiers.len() >= min_frontiers, "{frontiers:?}");
+    for frontier in &frontiers {
+        let cut = cut_candidate(&compiled, frontier).unwrap();
+        let expected = recompiled_candidate(dag, &inputs, roots, frontier).unwrap();
+        assert_eq!(
+            serde_json::to_vec(&cut).unwrap(),
+            serde_json::to_vec(&expected).unwrap(),
+            "{frontier:?}"
+        );
+    }
+}
+
+/// Every enumerated grouped Rate→Sum frontier (query-only, stored Rate,
+/// stored Sum) cuts to exactly the candidate that per-frontier lowering builds.
+#[test]
+fn grouped_rate_cuts_equal_per_frontier_compilation() {
+    let dag = grouped_rate();
+    let state = dag
+        .nodes
+        .iter()
+        .find(|node| matches!(node.payload, PostAsapOperatorPayload::SummaryAgg { .. }))
+        .unwrap();
+    let inputs = BTreeMap::from([(
+        u64::from(state.id.0),
+        InputContract::bounded(Arc::new(state.output_schema.clone())),
+    )]);
+    assert_cuts_match_recompilation(&dag, inputs, &[u64::from(dag.root.0)], 3);
+}
+
+/// Cuts of a DAG whose nodes lower to helper operators (current-series
+/// population read by Sort→Limit) keep the same operator IDs as recompilation.
+#[test]
+fn population_topk_cuts_equal_per_frontier_compilation() {
+    let workload = PlanningWorkload {
+        query_workload: QueryWorkload {
+            language: QueryLanguage::PromQL,
+            query_batch: Some(vec![BatchEntry {
+                query: Query("topk by(job)(1, m)".into()),
+                requirements: QueryRequirements {
+                    accuracy: AccuracyRequirement::Explicit(AccuracyTarget::Exact),
+                    ..Default::default()
+                },
+                predictability: Predictability::Unknown,
+                invocations: 1,
+                execute_at: None,
+                time_selection: TimeSelection::default(),
+            }]),
+            repeating_queries: None,
+        },
+        data_workload: Some(DataWorkload {
+            data_ingestion_interval: Evidence {
+                value: Some(DurationMs(60_000)),
+                ..Default::default()
+            },
+            ..Default::default()
+        }),
+    };
+    let original = asap_frontend_promql::lower_promql_workload(&workload, 0)
+        .unwrap()
+        .remove(0);
+    let root = Rc::new(
+        asap_physical_operators::physical_planner::promql_rows::with_series_identity(&original)
+            .unwrap(),
+    );
+    let selected = asap_aware_mapping::maintained_population::MaintainedPopulationStrategy::new(
+        std::slice::from_ref(&root),
+    )
+    .candidate(&root)
+    .unwrap();
+    let dag = compile_post_asap_dag(&selected).unwrap();
+    let raw = dag
+        .nodes
+        .iter()
+        .find(|node| matches!(node.payload, PostAsapOperatorPayload::Fallback { .. }))
+        .unwrap();
+    let inputs = BTreeMap::from([(
+        u64::from(raw.id.0),
+        InputContract::bounded(Arc::new(raw.output_schema.clone())),
+    )]);
+    let roots = [u64::from(dag.root.0)];
+    let compiled = compile(&dag, inputs.clone(), &roots).unwrap();
+    // The root reads its population through a Sort helper numbered by the root.
+    let helper = u64::MAX - (roots[0] << 16);
+    assert_eq!(compiled.operator_name(helper), Some("Sort"));
+    assert!(
+        cut_candidate(&compiled, &[helper]).is_err(),
+        "helper operators are not Planner boundaries"
+    );
+    assert_cuts_match_recompilation(&dag, inputs, &roots, 2);
+}
+
+/// Cuts reject frontiers that recompilation rejects: duplicates, inputs,
+/// unknown IDs, and an output shadowed by its descendant.
+#[test]
+fn cut_candidate_rejects_invalid_frontiers() {
+    let dag = grouped_rate();
+    let state = dag
+        .nodes
+        .iter()
+        .find(|node| matches!(node.payload, PostAsapOperatorPayload::SummaryAgg { .. }))
+        .unwrap();
+    let readout = dag
+        .nodes
+        .iter()
+        .find(|node| {
+            matches!(
+                node.payload,
+                PostAsapOperatorPayload::Value {
+                    operation: ValueOperation::FinalizeExactAccumulator
+                }
+            )
+        })
+        .unwrap();
+    let (state_id, rate_id, root) = (
+        u64::from(state.id.0),
+        u64::from(readout.id.0),
+        u64::from(dag.root.0),
+    );
+    let inputs = BTreeMap::from([(
+        state_id,
+        InputContract::bounded(Arc::new(state.output_schema.clone())),
+    )]);
+    let compiled = compile(&dag, inputs.clone(), &[root]).unwrap();
+    for frontier in [
+        vec![rate_id, rate_id],
+        vec![state_id],
+        vec![999],
+        vec![root, rate_id],
+    ] {
+        assert!(cut_candidate(&compiled, &frontier).is_err(), "{frontier:?}");
+        assert!(compile_candidate(&dag, inputs.clone(), &[root], &frontier).is_err());
+    }
 }

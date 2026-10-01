@@ -212,6 +212,15 @@ fn selected_plan_with_horizon(
         .into_iter()
         .next()
         .expect("one normalized workload entry");
+    selected_plan_for_lowered(workload, lowered, model, horizon)
+}
+
+fn selected_plan_for_lowered(
+    workload: &PlanningWorkload,
+    lowered: asap_types::pre_asap::QueryExpr,
+    model: &dyn CostModel,
+    horizon: Horizon,
+) -> asap_aware_mapping::SummaryMaintenanceLifecyclePlan {
     let root = Rc::new(lowered);
     let strategies = asap_aware_mapping::default_strategies_with(model);
     let space = search_workload_with(vec![("dashboard", Rc::clone(&root))], &strategies);
@@ -425,4 +434,531 @@ fn continuous_lifecycle_compiles_and_executes_spatial_kll() {
             "p99 rank must reflect the supplied population"
         );
     }
+}
+
+fn quantile_workload(query: &str) -> PlanningWorkload {
+    let mut workload = dashboard_workload();
+    workload.query_workload.query_batch.as_mut().unwrap()[0].query = Query(query.into());
+    workload.query_workload.repeating_queries.as_mut().unwrap()[0].query = Query(query.into());
+    workload
+}
+
+/// Timed DAG for `query` after binding every summary state to `lifecycle`.
+/// Grouped queries carry a physical series identity, as per-entity state needs.
+fn lifecycle_timed_dag(
+    query: &str,
+    lifecycle: &SummaryMaintenanceLifecycle,
+) -> (asap_types::post_asap::PostAsapDag, Vec<u64>) {
+    use asap_aware_mapping::enumerate_summary_maintenance_lifecycles;
+    let workload = quantile_workload(query);
+    let mut lowered = lower_promql_workload(&workload, 0).unwrap().remove(0);
+    if query.contains(" by(") {
+        lowered =
+            asap_physical_operators::physical_planner::promql_rows::with_series_identity(&lowered)
+                .unwrap();
+    }
+    let root =
+        selected_plan_for_lowered(&workload, lowered, &FullyCostedRuntime, Horizon(100.)).root;
+    let candidates = enumerate_summary_maintenance_lifecycles(
+        root,
+        WorkloadDemand::new_with_data(
+            &workload.query_workload,
+            workload.data_workload.as_ref().unwrap(),
+            &[1],
+        ),
+        NOW_MS,
+        Some(Horizon(100.)),
+        SummaryMaintenanceLifecycleCapabilities::ALL,
+        &FullyCostedRuntime,
+    )
+    .unwrap();
+    let choices: Vec<_> = candidates
+        .deployments()
+        .iter()
+        .map(|deployment| (deployment.post_asap_node_id, lifecycle.clone()))
+        .collect();
+    let mut states: Vec<_> = choices.iter().map(|(id, _)| u64::from(id.0)).collect();
+    states.sort_unstable();
+    let dag = candidates
+        .select(&choices)
+        .unwrap()
+        .execution_timed_dag()
+        .unwrap();
+    (dag, states)
+}
+
+/// Compile inputs for a timed DAG: its raw source, available at either phase.
+fn raw_inputs(
+    dag: &asap_types::post_asap::PostAsapDag,
+) -> std::collections::BTreeMap<u64, asap_physical_operators::physical_planner::InputContract> {
+    let raw = dag
+        .nodes
+        .iter()
+        .find(|node| {
+            matches!(
+                node.payload,
+                asap_types::post_asap::PostAsapOperatorPayload::Fallback { .. }
+            )
+        })
+        .unwrap();
+    std::collections::BTreeMap::from([(
+        u64::from(raw.id.0),
+        asap_physical_operators::physical_planner::InputContract::bounded(std::sync::Arc::new(
+            raw.output_schema.clone(),
+        )),
+    )])
+}
+
+/// For existing PromQL fixtures, Planner's own retained lifecycle selection
+/// reproduces the timing that realization strategies assign today.
+#[test]
+fn planner_lifecycle_selection_reproduces_strategy_timing() {
+    for query in [
+        "quantile_over_time(0.99, latency[5m])",
+        "quantile(0.99, latency)",
+        "sum by(job)(rate(m[1m]))",
+    ] {
+        let plan = selected_plan(&quantile_workload(query));
+        assert!(!plan.selected_raw_recompute, "{query}");
+        assert!(plan.deployments.iter().all(|deployment| {
+            deployment
+                .summary_maintenance_lifecycle_guarantee
+                .as_ref()
+                .is_some_and(|guarantee| {
+                    guarantee.summary_maintenance_lifecycle
+                        != SummaryMaintenanceLifecycle::Ephemeral
+                })
+        }));
+        let strategy = asap_types::post_asap::compile_post_asap_dag(&plan.root).unwrap();
+        assert_eq!(plan.execution_timed_dag().unwrap(), strategy, "{query}");
+    }
+}
+
+/// An explicitly chosen lifecycle reaches physical compilation through timing:
+/// ContinuouslyMaintained puts the state in precompute, Ephemeral leaves
+/// precompute empty and reads the raw source at query time; both answer alike.
+#[test]
+fn chosen_lifecycle_timing_decides_precompute_contents() {
+    use asap_physical_operators::{
+        physical_planner::{compile_candidate, frontier_from_timing},
+        runtime::Scope,
+        values::{Batch, Value},
+    };
+    use asap_types::{post_asap::SummaryFamilyType, pre_asap::DataType};
+    use std::collections::BTreeMap;
+
+    let mut answers = Vec::new();
+    for lifecycle in [
+        SummaryMaintenanceLifecycle::ContinuouslyMaintained,
+        SummaryMaintenanceLifecycle::Ephemeral,
+    ] {
+        let (dag, states) = lifecycle_timed_dag("quantile(0.99, latency)", &lifecycle);
+        let [state] = states[..] else {
+            panic!("one summary state");
+        };
+        let inputs = raw_inputs(&dag);
+        let (&raw_id, contract) = inputs.iter().next().unwrap();
+        let schema = contract.schema.clone();
+        let frontier = frontier_from_timing(&dag).unwrap();
+        let candidate =
+            compile_candidate(&dag, inputs, &[u64::from(dag.root.0)], &frontier).unwrap();
+        let rows = (1..=100)
+            .map(|value| {
+                schema
+                    .fields
+                    .iter()
+                    .map(|field| match field.dtype {
+                        SummaryFamilyType::Plain(DataType::Float64) => {
+                            Value::Float64(f64::from(value))
+                        }
+                        SummaryFamilyType::Plain(DataType::Timestamp) => Value::Timestamp(300_000),
+                        _ => panic!("unexpected field {field:?}"),
+                    })
+                    .collect()
+            })
+            .collect();
+        let raw_batch = Batch::try_new(schema.clone(), rows).unwrap();
+        let query_scope = Scope::Query {
+            evaluation_time_ms: 300_000,
+            revision: 1,
+        };
+        let result = if lifecycle == SummaryMaintenanceLifecycle::Ephemeral {
+            assert!(frontier.is_empty());
+            assert!(candidate.precompute.is_none());
+            physical_common::execute(
+                &candidate.query,
+                BTreeMap::from([(raw_id, raw_batch)]),
+                query_scope,
+            )
+        } else {
+            assert_eq!(frontier, [state]);
+            assert_eq!(
+                candidate
+                    .materialized_outputs
+                    .keys()
+                    .copied()
+                    .collect::<Vec<_>>(),
+                [state]
+            );
+            let stored = physical_common::execute(
+                candidate.precompute.as_ref().unwrap(),
+                BTreeMap::from([(raw_id, raw_batch)]),
+                Scope::Ingestion {
+                    window_start_ms: 0,
+                    window_end_ms: 300_000,
+                    revision: 1,
+                },
+            );
+            physical_common::execute(
+                &candidate.query,
+                BTreeMap::from([(state, stored[0][0].clone())]),
+                query_scope,
+            )
+        };
+        answers.push(
+            result[0]
+                .iter()
+                .flat_map(|batch| batch.rows())
+                .flat_map(|row| row.iter())
+                .filter_map(|value| match value {
+                    Value::Float64(value) => Some(*value),
+                    _ => None,
+                })
+                .collect::<Vec<_>>(),
+        );
+    }
+    assert_eq!(answers[0], answers[1]);
+    assert_eq!(answers[0].len(), 1);
+}
+
+/// One compilation, cut by each lifecycle assignment's timing, yields exactly
+/// the candidate `compile_candidate` builds for that timed DAG: the retained
+/// state is the frontier under ContinuouslyMaintained, and nothing under
+/// Ephemeral. Covers the KLL quantile fixture and grouped Rate→Sum.
+#[test]
+fn lifecycle_timing_cuts_one_compilation() {
+    use asap_physical_operators::physical_planner::{
+        compile, compile_candidate, cut_candidate, frontier_from_timing,
+    };
+    for query in ["quantile(0.99, latency)", "sum by(job)(rate(m[1m]))"] {
+        let ephemeral = SummaryMaintenanceLifecycle::Ephemeral;
+        let (compiled_dag, _) = lifecycle_timed_dag(query, &ephemeral);
+        let inputs = raw_inputs(&compiled_dag);
+        let roots = [u64::from(compiled_dag.root.0)];
+        let compiled = compile(&compiled_dag, inputs.clone(), &roots).unwrap();
+        for lifecycle in [
+            SummaryMaintenanceLifecycle::ContinuouslyMaintained,
+            ephemeral,
+        ] {
+            let (dag, states) = lifecycle_timed_dag(query, &lifecycle);
+            let frontier = frontier_from_timing(&dag).unwrap();
+            // Retained states read by a query-time consumer, or the root itself.
+            let query_time = |id: u64| {
+                dag.nodes.iter().any(|node| {
+                    u64::from(node.id.0) == id
+                        && node.output_state.timing
+                            == asap_types::post_asap::ExecutionTiming::QueryTime
+                })
+            };
+            let expected_frontier = if lifecycle == SummaryMaintenanceLifecycle::Ephemeral {
+                vec![]
+            } else {
+                states
+                    .iter()
+                    .copied()
+                    .filter(|state| {
+                        *state == u64::from(dag.root.0)
+                            || dag.edges.iter().any(|edge| {
+                                u64::from(edge.producer.0) == *state
+                                    && query_time(u64::from(edge.consumer.0))
+                            })
+                    })
+                    .collect()
+            };
+            assert_eq!(frontier, expected_frontier, "{query} {lifecycle:?}");
+            let cut = cut_candidate(&compiled, &frontier).unwrap();
+            let expected = compile_candidate(&dag, inputs.clone(), &roots, &frontier).unwrap();
+            assert_eq!(
+                serde_json::to_vec(&cut).unwrap(),
+                serde_json::to_vec(&expected).unwrap(),
+                "{query} {lifecycle:?}"
+            );
+        }
+    }
+}
+
+/// A maintained current-series population is placed by its lifecycle choice:
+/// ContinuouslyMaintained stores the population in precompute, Ephemeral
+/// rebuilds it from the raw source at query time; both rank alike.
+#[test]
+fn chosen_population_lifecycle_decides_precompute_contents() {
+    use asap_aware_mapping::{
+        enumerate_summary_maintenance_lifecycles,
+        maintained_population::MaintainedPopulationStrategy,
+    };
+    use asap_physical_operators::{
+        physical_planner::{
+            compile_candidate,
+            promql_rows::{series_row, with_series_identity},
+            InputContract,
+        },
+        runtime::Scope,
+        values::{Batch, Value},
+    };
+    use asap_types::post_asap::{
+        maintained_population::PopulationInput, PostAsapOperatorPayload, ValueOperation,
+    };
+    use std::{collections::BTreeMap, sync::Arc};
+
+    let workload = quantile_workload("topk by(job)(1, m)");
+    let root = Rc::new(
+        with_series_identity(&lower_promql_workload(&workload, 0).unwrap().remove(0)).unwrap(),
+    );
+    let root = MaintainedPopulationStrategy::new(std::slice::from_ref(&root))
+        .candidate(&root)
+        .unwrap();
+    let mut answers = Vec::new();
+    for lifecycle in [
+        SummaryMaintenanceLifecycle::ContinuouslyMaintained,
+        SummaryMaintenanceLifecycle::Ephemeral,
+    ] {
+        let candidates = enumerate_summary_maintenance_lifecycles(
+            Rc::clone(&root),
+            WorkloadDemand::new_with_data(
+                &workload.query_workload,
+                workload.data_workload.as_ref().unwrap(),
+                &[1],
+            ),
+            NOW_MS,
+            Some(Horizon(100.)),
+            SummaryMaintenanceLifecycleCapabilities::ALL,
+            &FullyCostedRuntime,
+        )
+        .unwrap();
+        let [deployment] = candidates.deployments() else {
+            panic!("one population state");
+        };
+        let id = deployment.post_asap_node_id;
+        let dag = candidates
+            .select(&[(id, lifecycle.clone())])
+            .unwrap()
+            .execution_timed_dag()
+            .unwrap();
+        let population = dag.nodes.iter().find(|node| node.id == id).unwrap();
+        let PostAsapOperatorPayload::Value {
+            operation: ValueOperation::MaintainPopulation { population },
+        } = &population.payload
+        else {
+            panic!("the deployment is the maintained population");
+        };
+        let PopulationInput::CurrentSeries(spec) = &population.input else {
+            panic!("current-series population");
+        };
+        let lookback = i64::try_from(spec.lookback_ms).unwrap();
+        let raw = dag
+            .nodes
+            .iter()
+            .find(|node| matches!(node.payload, PostAsapOperatorPayload::Fallback { .. }))
+            .unwrap();
+        let (raw_id, schema) = (u64::from(raw.id.0), Arc::new(raw.output_schema.clone()));
+        let frontier =
+            asap_physical_operators::physical_planner::frontier_from_timing(&dag).unwrap();
+        let candidate = compile_candidate(
+            &dag,
+            BTreeMap::from([(raw_id, InputContract::bounded(schema.clone()))]),
+            &[u64::from(dag.root.0)],
+            &frontier,
+        )
+        .unwrap();
+        let end = 60_000;
+        let rows = [("a", end - 1, 100.), ("a", end, 1.), ("b", end, 20.)]
+            .into_iter()
+            .map(|(instance, at, value)| {
+                series_row(
+                    &schema,
+                    &BTreeMap::from([
+                        ("job".into(), "api".into()),
+                        ("instance".into(), instance.into()),
+                    ]),
+                    at,
+                    value,
+                )
+                .unwrap()
+            })
+            .collect();
+        let raw_batch = Batch::try_new(schema.clone(), rows).unwrap();
+        let query_scope = Scope::Query {
+            evaluation_time_ms: end,
+            revision: 1,
+        };
+        let result = if lifecycle == SummaryMaintenanceLifecycle::Ephemeral {
+            assert!(frontier.is_empty());
+            assert!(candidate.precompute.is_none());
+            physical_common::execute(
+                &candidate.query,
+                BTreeMap::from([(raw_id, raw_batch)]),
+                query_scope,
+            )
+        } else {
+            let state = u64::from(id.0);
+            assert_eq!(frontier, [state]);
+            let stored = physical_common::execute(
+                candidate.precompute.as_ref().unwrap(),
+                BTreeMap::from([(raw_id, raw_batch)]),
+                Scope::Ingestion {
+                    window_start_ms: end - lookback,
+                    window_end_ms: end,
+                    revision: 1,
+                },
+            );
+            physical_common::execute(
+                &candidate.query,
+                BTreeMap::from([(state, stored[0][0].clone())]),
+                query_scope,
+            )
+        };
+        answers.push(
+            result[0]
+                .iter()
+                .flat_map(|batch| batch.rows())
+                .flat_map(|row| row.iter())
+                .filter_map(|value| match value {
+                    Value::Float64(value) => Some(*value),
+                    _ => None,
+                })
+                .collect::<Vec<_>>(),
+        );
+    }
+    assert_eq!(answers[0], answers[1]);
+    assert_eq!(answers[0], [20.]);
+}
+
+/// Grouped Rate→Sum is one inventory candidate: retaining the Sum state puts
+/// Rate and Sum in precompute, while an `Ephemeral` Sum over a retained Rate
+/// state leaves Sum in the query DAG.
+#[test]
+fn grouped_rate_sum_placement_is_a_lifecycle_choice() {
+    use asap_aware_mapping::enumerate_summary_maintenance_lifecycles;
+    use asap_physical_operators::physical_planner::{compile_candidate, InputContract};
+    use asap_types::post_asap::{
+        ExactKind, PostAsapOperatorPayload, SummaryExpr, SummaryFamilyType,
+    };
+    use std::{collections::BTreeMap, sync::Arc};
+
+    let workload = quantile_workload("sum by(job)(rate(m[1m]))");
+    let root = Rc::new(
+        asap_physical_operators::physical_planner::promql_rows::with_series_identity(
+            &lower_promql_workload(&workload, 0).unwrap().remove(0),
+        )
+        .unwrap(),
+    );
+    let is_exact = |node: &SummaryNode, kind: ExactKind| {
+        matches!(&node.expr, SummaryExpr::SummaryAgg {
+            family: SummaryFamilyType::ExactAggregate(k, _), ..
+        } if *k == kind)
+    };
+    let inventory = asap_aware_mapping::search_workload(vec![("q", root)])
+        .enumerate_candidate_dags(4096)
+        .unwrap();
+    let candidates = inventory
+        .candidates
+        .into_iter()
+        .map(|mut forest| forest.remove(0).1)
+        .filter(|candidate| {
+            matches!(&candidate.expr, SummaryExpr::ValueOperation { child, .. }
+                if is_exact(child, ExactKind::Sum))
+        })
+        .collect::<Vec<_>>();
+    let [candidate] = candidates.as_slice() else {
+        panic!("one grouped Sum candidate, got {}", candidates.len());
+    };
+    let mut placements = Vec::new();
+    for sum_lifecycle in [
+        SummaryMaintenanceLifecycle::ContinuouslyMaintained,
+        SummaryMaintenanceLifecycle::Ephemeral,
+    ] {
+        let lifecycles = enumerate_summary_maintenance_lifecycles(
+            Rc::clone(candidate),
+            WorkloadDemand::new_with_data(
+                &workload.query_workload,
+                workload.data_workload.as_ref().unwrap(),
+                &[1],
+            ),
+            NOW_MS,
+            Some(Horizon(100.)),
+            SummaryMaintenanceLifecycleCapabilities::ALL,
+            &FullyCostedRuntime,
+        )
+        .unwrap();
+        let choices = lifecycles
+            .deployments()
+            .iter()
+            .map(|deployment| {
+                let lifecycle = if is_exact(&deployment.summary, ExactKind::Sum) {
+                    sum_lifecycle.clone()
+                } else {
+                    SummaryMaintenanceLifecycle::ContinuouslyMaintained
+                };
+                (deployment.post_asap_node_id, lifecycle)
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(choices.len(), 2, "Rate and Sum states");
+        let dag = lifecycles
+            .select(&choices)
+            .unwrap()
+            .execution_timed_dag()
+            .unwrap();
+        let raw = dag
+            .nodes
+            .iter()
+            .find(|node| matches!(node.payload, PostAsapOperatorPayload::Fallback { .. }))
+            .unwrap();
+        let frontier =
+            asap_physical_operators::physical_planner::frontier_from_timing(&dag).unwrap();
+        let [boundary] = frontier.as_slice() else {
+            panic!("one precompute output, got {frontier:?}");
+        };
+        let boundary = dag
+            .nodes
+            .iter()
+            .find(|node| u64::from(node.id.0) == *boundary)
+            .unwrap();
+        let physical = compile_candidate(
+            &dag,
+            BTreeMap::from([(
+                u64::from(raw.id.0),
+                InputContract::bounded(Arc::new(raw.output_schema.clone())),
+            )]),
+            &[u64::from(dag.root.0)],
+            &frontier,
+        )
+        .unwrap();
+        let json = |value| String::from_utf8(serde_json::to_vec(value).unwrap()).unwrap();
+        placements.push((
+            boundary.payload.clone(),
+            json(physical.precompute.as_ref().unwrap()),
+            json(&physical.query),
+        ));
+    }
+    let builds = |json: &str, kind: &str| {
+        json.contains(&format!(
+            r#"{{"SummaryBuild":{{"family":{{"ExactAggregate":["{kind}","{kind}"]}}"#
+        ))
+    };
+    let [(retained, retained_pre, retained_query), (ephemeral, ephemeral_pre, ephemeral_query)] =
+        placements.as_slice()
+    else {
+        unreachable!()
+    };
+    let state = |payload: &PostAsapOperatorPayload, kind: ExactKind| {
+        matches!(payload, PostAsapOperatorPayload::SummaryAgg {
+            family: SummaryFamilyType::ExactAggregate(k, _), ..
+        } if *k == kind)
+    };
+    assert!(state(retained, ExactKind::Sum));
+    assert!(builds(retained_pre, "Rate") && builds(retained_pre, "Sum"));
+    assert!(!retained_query.contains("SummaryBuild"));
+    assert!(state(ephemeral, ExactKind::Rate));
+    assert!(builds(ephemeral_pre, "Rate") && !builds(ephemeral_pre, "Sum"));
+    assert!(builds(ephemeral_query, "Sum"));
 }
