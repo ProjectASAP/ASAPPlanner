@@ -5,7 +5,7 @@
 
 ## 1. Problem and goal
 
-The current query representation mixes table-producing operators and scalar
+The current query representation mixes query-plan operators and scalar
 expressions. Their roles are distinguished by where they occur, so an expression
 can be placed where a table input is expected and fail only when the plan is checked.
 
@@ -32,8 +32,9 @@ compute values within the schema selected by their owning operators.
 
 ## 2. Proposed data structures
 
-An **operator** describes a query computation with its own output schema. It reads
-from a source or other operators and produces a relation or time-series result.
+An **operator** describes a query-plan computation and its input dependencies.
+Its result may be a relation, a time-series vector or a query-level scalar; the
+plan must retain the result kind as well as its value types or output schema.
 For example, `Scan` produces input rows, `Filter` selects rows, and `Project`
 produces a new set of columns. Operators form the nodes and input dependencies of
 the query plan.
@@ -202,6 +203,12 @@ their role preserves their existing semantics.
 
 ## 3. Semantic requirements
 
+The split separates roles in the plan, not source-language result types. These
+requirements define valid plans; retaining an existing variant does not establish
+that its current implementation meets every requirement below.
+
+### 3.1 Expression context and result types
+
 Column resolution keeps its existing meaning:
 
 - Most expressions use the input operator's output schema.
@@ -209,23 +216,81 @@ Column resolution keeps its existing meaning:
 - An aggregate's `HAVING` expression uses the aggregate output schema.
 - A scan predicate uses the scanned data's schema.
 
-The type split establishes the operator/scalar boundary; it does not by itself
-prove that every scalar expression has the right value type. Two boundary rules
-must also be validated:
+A resolved `Predicate` must have Boolean type under the expression-typing and
+coercion rules. SQL conditions retain three-valued logic: `FALSE` and `NULL` do not
+pass a filter. Wrapping a numeric value in `Predicate` does not make it Boolean.
 
-- **Predicate:** a resolved predicate must have Boolean type under the existing
-  expression-typing and coercion rules. Wrapping a numeric literal in `Predicate`
-  does not make it a valid condition. Nullable Boolean results retain the source
-  language's existing null semantics.
-- **PromQL scalar bridge:** it has no input schema. Preserve its current role of
-  lifting a constant-folded PromQL scalar literal into an operator position; it
-  cannot accept free column references or arbitrary row-dependent expressions.
-  The existing scalar/vector conversion operators handle conversions involving
-  other operator results.
+PromQL scalar, instant-vector and range-vector are query result kinds, distinct
+from the internal `ScalarExpr` role. For example, `EvalTimestamp` and
+`PromqlScalarFromVector` remain operators even though they produce scalar results.
+Their consumers must validate the required result kind; a column schema alone
+must not make a scalar interchangeable with a vector.
 
-Splitting the representation must preserve evaluation behavior, inferred output
-types and source-language semantics. A scalar expression cannot serve as a table
-input, and a table-producing operator cannot appear where a scalar is expected.
+`PromqlScalarBridge` has no input schema and retains its current restricted role:
+lifting a constant-folded numeric literal into the plan. It cannot accept free
+column references. Other scalar-valued queries use operator nodes, including the
+existing scalar/vector conversions; PromQL scalar does not mean constant.
+
+### 3.2 PromQL binary and temporal operations
+
+`BinaryOp` operates on query results, including vector matching and label rules.
+`ScalarExpr::Arithmetic` and `ScalarExpr::Compare` compute values within an
+operator's context. Likewise, PromQL set operations remain distinct from SQL
+`SetOp` and scalar Boolean expressions.
+
+PromQL comparison must distinguish filtering from the `bool` mode: `up > 0`
+filters samples, whereas `up > bool 0` produces numeric `0` or `1` for matched,
+valid samples. Scalar/scalar comparisons require `bool`. The current `BinaryOp`
+payload and frontend conversion do not retain this mode. Supporting it requires
+preserving the distinction; otherwise the frontend must reject it rather than
+silently change the result.
+
+`TimeRange`, `PromqlSubquery` and `SQLWindowFunc` retain separate roles. A PromQL
+subquery evaluates its input over a time grid and produces a range vector; a SQL
+window computes values over partitions and frames of input rows. Subquery range,
+resolution, `offset` and `@` must retain their meaning and scope. The current
+subquery conversion retains only range, resolution and child. A design using the
+existing `TimeShift` must specify how it shifts or fixes the subquery evaluation
+time, including nested subqueries; unsupported modifiers must be rejected.
+
+These distinctions follow the PromQL references for
+[result types and subqueries](https://prometheus.io/docs/prometheus/latest/querying/basics/)
+and [binary operations](https://prometheus.io/docs/prometheus/latest/querying/operators/).
+
+### 3.3 SQL aggregate, window and subquery boundaries
+
+DataFusion 43's [`Expr`](https://github.com/apache/datafusion/blob/43.0.0/datafusion/expr/src/expr.rs)
+includes aggregate, window and subquery expressions as well as ordinary scalar
+expressions. It therefore does not map directly to this proposal's `ScalarExpr`.
+Aggregate and window computations belong to `Aggregate` and `SQLWindowFunc`;
+subsequent scalar expressions reference their output columns.
+
+Where an operator accepts only column references, an expression argument must be
+computed by an input `Project` or explicitly rejected. For example,
+`SUM(price * quantity)` can become a projection of the product followed by an
+aggregate over that column. The current aggregate conversion rejects such
+arguments; this example describes a valid extension, not existing support.
+The same rule applies to expression-valued grouping and partition keys.
+
+Aggregate `FILTER`, `DISTINCT`, internal `ORDER BY`, and aggregate/window null
+treatment must be preserved, translated equivalently or explicitly rejected.
+They cannot be dropped merely because the current payload lacks a field.
+General scalar subqueries remain outside this proposal's supported scope, as
+specified in §4; the split does not claim full DataFusion SQL coverage.
+
+### 3.4 Evaluation behavior
+
+Owning or copying a `ScalarExpr` does not authorize changing how often it is
+evaluated. Function resolution must retain the typing and evaluation properties
+needed to preserve semantics, whether through the existing function catalog or
+another established resolution mechanism.
+
+DataFusion distinguishes
+[immutable, stable and volatile functions](https://github.com/apache/datafusion/blob/43.0.0/datafusion/expr-common/src/signature.rs).
+`CurrentTimestamp` (`NOW()`) stays stable within a SQL query; separate calls to a
+volatile function such as `random()` may differ. Expression copying, sharing or
+movement must respect those properties. `EvalTimestamp` instead follows the
+PromQL evaluation timestamp, including evaluation inside a subquery.
 
 ## 4. Acceptance and scope
 
