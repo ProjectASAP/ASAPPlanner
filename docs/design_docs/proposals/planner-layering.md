@@ -19,31 +19,27 @@ executes the plan: it supplies its own empirical cost estimation, empirical accu
                        │
 ┌───────────────────────┴───────── ASAPPlanner ────────────────────┐
 │ 0. Frontends                                                     │
-│    Parse + lower -> CandidatePreASAPDAGs                         │
-│    Reject unsupported constructs, such as PromQL fill.           │
+│    Parse + lower
+     -> Output: LogicalDAG, CandidateLogicalDAGs                         │
+│    Reject unsupported query expressions.                         │
 │                      │                                           │
-│ Logical planning (what)                                          │
-│ 1. Logical optimization                                          │
-│    Summary families, rewrites, exact candidates                  │
-│    -> CandidateLogicalPostASAPDAGs                               │
+│ Logical planning (what to compute)                                          │
+│ 1. Logical ASAP-aware optimization                                          │
+│    ASAPPrimitives: Summary families x exact candidates x query rewrites x supporting multiple computation nodes with one summary node                  │
+│    -> Output: LogicalDAGswithASAPPrimitive, CandidateLogicalDAGswithASAPPrimitive         │
 │                      │                                           │
-│ Physical planning (how)                                          │
-│ 2. Summary lifecycle planning                                    │
-│    Per summary state: Ephemeral | Prepared | Shared |            │
-│    ContinuouslyMaintained -> node timing, window framework,      │
-│    retention -> CandidateLifecyclePostASAPDAGs                   │
+│ Physical planning (how to compute)                                          │                                │
+│ 2. Physical ASAP-aware optimization          |
+   Materialization or not for a subDAG x  Physical operator implementation selection x Parallelism & Partitioning x resource management |
+    -> Output: PhysicalDAGwithASAPPrimitives, CandidatePhysicalDAGswithASAPPrimitives                   │
 │                      │                                           │
-│ 3. Compilation                                                   │
-│    Lower each node to operators; cut by timing                   │
-│    -> CandidatePhysicalPostASAPDAGs                              │
-│                      │                                           │
-│ 4. Selection                                                     │
-│    Cost every candidate with the deployment's cost model;        │
+│ 3. Plan Selection                                                     │
+│    Cost every candidate with the deployment's cost model and accuracy model;        │
 │    choose the cheapest admissible one for the workload.          │
 └──────────────────────┬───────────────────────────────────────────┘
-          one optimal PhysicalPostASAPDAG (the boundary)
+          one optimal PhysicalDAGwithASAPPrimitives (the boundary)
 ┌──────────────────────┴──────── Deployment ───────────────────────┐
-│ 5. Execution: ingest, panes, storage, readout, run               │
+│ 5. Execution: ingest, storage, query                │
 └──────────────────────────────────────────────────────────────────┘
 ```
 
