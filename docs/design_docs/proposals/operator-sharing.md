@@ -46,13 +46,24 @@ on query semantics, accuracy and execution timing.
 
 ### 1.1 Unified `Operator` type
 
-Every computation is an operator node. Inputs are edges to other operator nodes,
-including inputs from either of these two categories:
+Every computation is represented by an `Operator` node. The type has two categories:
 
-| Category | Meaning | Examples |
+```rust
+enum Operator {
+    NonASAP(NonASAPOp),
+    ASAP(ASAPOp),
+}
+```
+
+| Category | Meaning | Example operations |
 |---|---|---|
-| Ordinary query operators | Transform, combine or aggregate query data | Scan, filter, project, join, aggregate, union, time selection |
-| ASAP operators | Build summary state or obtain results from it | Summary build, summary estimation, exact-state finalization, population maintenance and readout |
+| `NonASAP(NonASAPOp)` | Ordinary query operations that transform, combine or aggregate data | `Scan`, `Filter`, `Project`, `Join`, `Aggregate`, `SetOp`, time selection |
+| `ASAP(ASAPOp)` | Operations that build summary state or obtain results from it | `SummaryAgg`, `SummaryEstimate`, `FinalizeExactAccumulator`, `MaintainPopulation`, `ReadPopulation` |
+
+`NonASAPOp` and `ASAPOp` describe the operation performed by a node. Inputs in both
+categories connect to `Operator` nodes, so either category can consume the other
+when their schema and execution constraints permit it. `NonASAP` classifies one
+node; it does not require all of that node's descendants to be non-ASAP.
 
 Both categories use the same graph model. A projection can consume a summary
 estimate, and a summary can consume the result of a filter or join. There is no
@@ -62,13 +73,14 @@ The categories remain distinct because they have different semantic rules:
 ordinary operators consume query values, while summary operations may produce or
 consume state. A common graph lets planning reason about all dependencies; the
 categories make state-specific accuracy and execution constraints explicit. A
-frontend plan contains only ordinary query operators. Optimization may introduce
-ASAP operators later.
+frontend plan contains only `NonASAP` nodes. Optimization may introduce `ASAP`
+nodes later.
 
 For example, arrows below show data flowing from producer to consumer:
 
 ```text
-Scan → Filter → Summary build → Summary estimation → Project
+NonASAP(Scan) → NonASAP(Filter) → ASAP(SummaryAgg)
+             → ASAP(SummaryEstimate) → NonASAP(Project)
 ```
 
 Each node describes its operation, inputs and output schema. An executable plan also
