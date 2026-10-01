@@ -11,9 +11,7 @@ use std::rc::Rc;
 use asap_types::pre_asap::query_expr::QueryExpr;
 use asap_types::types::AccuracyTarget;
 
-use super::{
-    OptimizationInput, OptimizationPass, OptimizeError, PlanOutput, QueryLifecyclePlan, QueryPlan,
-};
+use super::{OptimizationInput, OptimizationPass, OptimizeError, PlanOutput, QueryLifecyclePlan};
 use crate::replacement::{default_strategies_with_evidence, search_workload_with_targets};
 use crate::summary_maintenance_lifecycle::{
     assemble_selected_dag_with_summary_maintenance_lifecycles,
@@ -54,23 +52,7 @@ impl OptimizationPass for MajorPass {
 
         let space = search_workload_with_targets(roots, &strategies, models.accuracy);
 
-        let Some(lifecycle) = input.lifecycle else {
-            let selection = space.global_selection(models.cost);
-            let mut plans = Vec::with_capacity(space.roots.len());
-            for (entry_index, root) in &space.roots {
-                let dag = selection.assemble_selected_dag(root).map_err(|source| {
-                    OptimizeError::Realization {
-                        entry_index: *entry_index,
-                        source,
-                    }
-                })?;
-                plans.push(QueryPlan {
-                    entry_index: *entry_index,
-                    dag: dag.ok_or_else(|| self.missing_group(*entry_index))?,
-                });
-            }
-            return Ok(PlanOutput::Dag { plans });
-        };
+        let lifecycle = input.lifecycle;
 
         // One index per root, in `PlanSpace::roots` order — which is the order
         // the roots went in, which is `entries()` order.
@@ -111,7 +93,7 @@ impl OptimizationPass for MajorPass {
                 plan: plan.ok_or_else(|| self.missing_group(*entry_index))?,
             });
         }
-        Ok(PlanOutput::DagWithLifecycle { plans })
+        Ok(PlanOutput::new(plans))
     }
 }
 

@@ -28,7 +28,7 @@ use asap_frontend_sql::{lower_sql_dialect, SqlCatalog, SqlError};
 // `e2e_plan` or straight to `optimize`.
 pub use asap_aware_mapping::pass::{
     optimize, LifecycleInput, MajorPass, OptimizationInput, OptimizationPass, OptimizeError,
-    PassRegistry, PlanOutput, PlanningModels, QueryLifecyclePlan, QueryPlan,
+    PassRegistry, PlanOutput, PlanningModels, QueryLifecyclePlan,
 };
 
 // ── Input ────────────────────────────────────────────────────────────────
@@ -55,9 +55,9 @@ pub struct UserInput<'a> {
     pub workload: &'a PlanningWorkload,
     pub frontend_specific: FrontendInput<'a>,
     pub models: PlanningModels<'a>,
-    /// `Some` asks the pass to also decide summary maintenance versus raw
-    /// recomputation.
-    pub lifecycle: Option<LifecycleInput>,
+    /// Planning clock and runtime capabilities for the
+    /// maintenance-versus-recomputation decision every plan carries.
+    pub lifecycle: LifecycleInput,
     /// `None` uses [`MajorPass`]. A black-box caller never sets this.
     pub pass: Option<&'a dyn OptimizationPass>,
 }
@@ -67,19 +67,15 @@ impl<'a> UserInput<'a> {
         workload: &'a PlanningWorkload,
         frontend_specific: FrontendInput<'a>,
         models: PlanningModels<'a>,
+        lifecycle: LifecycleInput,
     ) -> Self {
         Self {
             workload,
             frontend_specific,
             models,
-            lifecycle: None,
+            lifecycle,
             pass: None,
         }
-    }
-
-    pub fn with_lifecycle(mut self, lifecycle: LifecycleInput) -> Self {
-        self.lifecycle = Some(lifecycle);
-        self
     }
 
     pub fn with_pass(mut self, pass: &'a dyn OptimizationPass) -> Self {
@@ -107,21 +103,19 @@ impl<'a> UserInput<'a> {
             });
         }
 
-        if let Some(lifecycle) = &self.lifecycle {
-            if let Some(horizon) = lifecycle.horizon {
-                if !horizon.0.is_finite() || horizon.0 <= 0.0 {
-                    return Err(UserInputError::InvalidHorizon(horizon.0));
-                }
+        if let Some(horizon) = self.lifecycle.horizon {
+            if !horizon.0.is_finite() || horizon.0 <= 0.0 {
+                return Err(UserInputError::InvalidHorizon(horizon.0));
             }
-            // Two clocks would let the DAG be built for one instant and priced
-            // for another, with neither stage able to notice.
-            if let FrontendInput::Promql { now_ms, .. } = &self.frontend_specific {
-                if *now_ms != lifecycle.now_ms {
-                    return Err(UserInputError::PlanningTimeMismatch {
-                        frontend: *now_ms,
-                        lifecycle: lifecycle.now_ms,
-                    });
-                }
+        }
+        // Two clocks would let the DAG be built for one instant and priced
+        // for another, with neither stage able to notice.
+        if let FrontendInput::Promql { now_ms, .. } = &self.frontend_specific {
+            if *now_ms != self.lifecycle.now_ms {
+                return Err(UserInputError::PlanningTimeMismatch {
+                    frontend: *now_ms,
+                    lifecycle: self.lifecycle.now_ms,
+                });
             }
         }
         Ok(())
@@ -202,10 +196,7 @@ pub async fn e2e_plan(input: UserInput<'_>) -> Result<PlanOutput, PlanError> {
     let fallback = MajorPass;
     let pass: &dyn OptimizationPass = input.pass.unwrap_or(&fallback);
 
-    let mut optimization = OptimizationInput::new(&parsed, input.models);
-    if let Some(lifecycle) = input.lifecycle {
-        optimization = optimization.with_lifecycle(lifecycle);
-    }
+    let optimization = OptimizationInput::new(&parsed, input.models, input.lifecycle);
     optimize(pass, optimization).map_err(PlanError::Optimize)
 }
 
