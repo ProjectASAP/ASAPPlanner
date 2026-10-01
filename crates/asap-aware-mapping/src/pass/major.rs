@@ -72,13 +72,22 @@ impl OptimizationPass for MajorPass {
             models.cost,
         )
         .map_err(OptimizeError::LifecycleSelection)?;
+        // Each root's lifecycle is planned against the entries that consume
+        // it — the same binding selection costed it with — not the whole
+        // workload, so one query's reads never amortize another's state.
+        let bindings = space
+            .workload_entries_by_target(demand.workload, &entry_indices)
+            .map_err(|error| OptimizeError::LifecycleSelection(error.into()))?;
 
         let mut plans = Vec::with_capacity(space.roots.len());
         for (entry_index, root) in &space.roots {
             let plan = assemble_selected_dag_with_summary_maintenance_lifecycles(
                 &selection,
                 root,
-                demand,
+                WorkloadDemand {
+                    entry_indices: &bindings[&Rc::as_ptr(root)],
+                    ..demand
+                },
                 lifecycle.now_ms,
                 lifecycle.horizon,
                 lifecycle.capabilities,
