@@ -47,10 +47,10 @@ on query semantics, accuracy and execution timing.
 
 Relation, vector and summary-state computations are represented by `Operator`
 nodes. Scalar computations use the companion proposal's `ScalarExpr`. The operator
-type has two categories:
+node has common fields defined in §2 and an `expr` payload with two categories:
 
 ```rust
-enum Operator {
+enum OperatorExpr {
     NonASAP(NonASAPOp),
     ASAP(ASAPOp),
 }
@@ -67,8 +67,8 @@ operator kinds.
 
 | Category | Meaning | All operations |
 |---|---|---|
-| `NonASAP(NonASAPOp)` | Ordinary query operations that transform, combine or aggregate data | `Scan`, `Values`, `Filter`, `Project`, `Aggregate`, `Join`, `SetOp`, `Concat`, `Dedup`, `Sort`, `Limit`, `BinaryOp`, `SQLWindowFunc`, `TimeRange`, `TimeShift`, `PromqlVectorFromScalar`, `PromqlRelabel`, `PromqlInfoEnrich`, `PromqlSeriesSample`, `PromqlSubquery` |
-| `ASAP(ASAPOp)` | Operations on summary state and its results, including reserved operations | `SummaryAgg`, `SummaryEstimate`, `SummaryMerge`, `SummarySubtract`, `SummaryDelete`, `SummaryJoin`, `FinalizeExactAccumulator`, `MaintainPopulation`, `ReadPopulation`, `Extension` |
+| `OperatorExpr::NonASAP(NonASAPOp)` | Ordinary query operations that transform, combine or aggregate data | `Scan`, `Values`, `Filter`, `Project`, `Aggregate`, `Join`, `SetOp`, `Concat`, `Dedup`, `Sort`, `Limit`, `BinaryOp`, `SQLWindowFunc`, `TimeRange`, `TimeShift`, `PromqlVectorFromScalar`, `PromqlRelabel`, `PromqlInfoEnrich`, `PromqlSeriesSample`, `PromqlSubquery` |
+| `OperatorExpr::ASAP(ASAPOp)` | Operations on summary state and its results, including reserved operations | `SummaryAgg`, `SummaryEstimate`, `SummaryMerge`, `SummarySubtract`, `SummaryDelete`, `SummaryJoin`, `FinalizeExactAccumulator`, `MaintainPopulation`, `ReadPopulation`, `Extension` |
 
 `CurrentTimestamp`, `EvalTimestamp` and `PromqlScalarFromVector` belong to scalar
 expressions. Constants need no `PromqlScalarBridge`; query roots may directly hold
@@ -235,10 +235,9 @@ The summary fields distinguish state construction and readout:
 | `query` / `readout` | The result requested from summary or maintained-population state |
 | `population` | The population whose membership and values are maintained |
 
-Result kind, schema, derived accuracy and execution timing describe `Operator`
-nodes in both categories (§2). They are omitted from these operation-specific sketches. Timing
-comes from lifecycle planning rather than a fixed field value implied by an operator
-kind; the final accuracy assessment combines local evidence with the actual inputs.
+The payloads above describe operations and their inputs. The common `Operator`
+fields and their derivation interfaces are defined once in §2; individual variants
+do not repeat schema, accuracy or execution timing.
 
 For example, arrows below show data flowing from producer to consumer:
 
@@ -291,30 +290,157 @@ it does not introduce rules for sharing computations across queries.
 
 ## 2. Node properties and why they differ
 
-| Property | Meaning | How it is determined |
+Both operation categories use this resolved node structure. It follows the current
+`SummaryNode` separation between `expr`, `schema` and `guarantee`, generalized to
+all operators. The former `Operator` category enum becomes `OperatorExpr` (§1.1)
+so common fields do not have to be repeated in every variant.
+
+```rust
+struct Operator {
+    expr: OperatorExpr,
+    result_kind: OperatorResultKind,
+    schema: Schema,
+    guarantee: Option<ResultGuarantee>,
+    timing: Option<ExecutionTiming>,
+}
+
+// Existing enum; the node's Option represents an unassigned phase.
+enum ExecutionTiming {
+    IngestionTime,
+    QueryTime,
+}
+```
+
+| Field | Meaning | How it is determined |
 |---|---|---|
-| Result kind and output schema | Whether the node produces a relation, instant vector, range vector or state, and its fields, types and identity/time information | From the operation and its inputs |
-| Accuracy guarantee | What can be established about the result's accuracy | From local accuracy evidence and the guarantees of its inputs |
-| Execution timing | Whether work runs at ingestion time or query time | From a lifecycle choice for the complete plan |
+| `expr` | Operation category, parameters and dependencies | `OperatorExpr`, `NonASAPOp` and `ASAPOp` in §1 |
+| `result_kind`, `schema` | The output category and fields, including identity/time metadata | Derived from `expr` and its actual inputs, then retained on the resolved node (§2.1) |
+| `guarantee` | An established result-accuracy guarantee, when available | Existing `ResultGuarantee` and composition rules (§2.2); `None` never means exact |
+| `timing` | The assigned ingestion/query execution phase | Physical planning under #509 (§2.3); `None` means not assigned |
+
+`ResultGuarantee` retains its existing definition. `OperatorExpr`,
+`OperatorResultKind` and the common node layout are proposed; `Schema` is unified
+as specified below. This is a resolved-plan interface: name resolution must finish
+before producing these concrete `ColumnId`/`Schema` nodes.
+
+| Plan stage | Required property state |
+|---|---|
+| Resolved frontend / logical candidate | Valid `result_kind` and `schema`; `guarantee` only where established; `timing` may be `None`. |
+| Executable physical candidate | Valid output metadata, accuracy acceptable under the existing requirements, and `Some(timing)` for every executable operator. |
+
+Changing an operation or dependency requires re-deriving its output metadata and
+revalidating dependent guarantees and timing assignments. Derived fields must not
+retain facts from the plan that was replaced. This defines consistency, not a new
+caching or mutation mechanism.
 
 ### 2.1 One schema model for values and state
 
-A common graph needs a common description of its edges. Validate result kind as
-well as schema: matching numeric columns do not make a relation, an instant vector
-and a range vector interchangeable. Summary state is also distinct from ordinary
-values. The operation determines the applicable input/output contract; this does
-not require adding the same result-kind field to every node.
+Use one `Schema` for operator outputs before and after optimization. Reuse the
+existing `SummaryFamilyType` to distinguish ordinary values from state, and retain
+the current `Schema` metadata. The following is the proposed resolved interface;
+it is not the current Rust definition.
 
-For example, a KLL build produces state; its p99 estimation produces a numeric value.
-A numeric predicate can consume the estimate, but cannot treat the KLL state itself
-as a number. Ordinary operators may carry state through only where their semantics
-permit it; exact aggregate state must be finalized before use as an ordinary value.
+```rust
+struct Column<T = DataType> {
+    name: String,
+    dtype: T,
+    nullable: bool,
+    table: Option<String>,
+}
 
-Schema information must preserve grouping fields, time information, uniqueness and
-series identity where relevant. Sharing operators must not change SQL or PromQL
-meaning. After a rewrite, schemas must describe the new inputs rather than the plan
-that was replaced. Scalar expressions instead have value types and evaluation
-contexts. A scalar root does not need a fabricated relation schema.
+struct Schema {
+    columns: Vec<Column<SummaryFamilyType>>,
+    time_index: Option<ColumnId>,
+    unique_keys: Vec<Vec<ColumnId>>,
+    closed: bool,
+}
+
+// Existing variants and payload names, reused without renaming.
+enum SummaryFamilyType {
+    Plain(DataType),
+    ExactAggregate(ExactKind, ExactParams),
+    Sketch(SketchKind, GroupingStrategy),
+    Sample(SamplingKind, SamplingParams),
+    Wavelet(WaveletKind, WaveletParams),
+    StatModel(StatModelKind, StatModelParams),
+}
+
+// Proposed derived output classification, separate from column types.
+enum OperatorResultKind {
+    Relation,
+    InstantVector,
+    RangeVector,
+    State,
+}
+
+impl OperatorExpr {
+    fn output_schema(&self) -> Result<Schema, QueryExprError>;
+    fn output_kind(&self) -> Result<OperatorResultKind, QueryExprError>;
+    fn validate_inputs(&self) -> Result<(), QueryExprError>;
+}
+
+impl Operator {
+    fn validate(&self) -> Result<(), QueryExprError>;
+}
+
+impl ScalarExpr {
+    fn scalar_type(&self, input: &Schema) -> Result<(DataType, bool), QueryExprError>;
+}
+```
+
+**Relationship to current types.** `Column` gains a type parameter so the common
+operator schema can use `SummaryFamilyType`, while existing nested value types
+such as `DataType::List` still use ordinary `Column<DataType>`. The proposed common
+`Schema` replaces the separate operator-edge roles of pre-ASAP `Schema` and
+post-ASAP `SummarySchema` / `SummaryField`; it does not rename `DataType` or add a
+second summary-family enum. A pre-ASAP value column becomes `Plain(dtype)`.
+Frontend validation permits only ordinary value columns, preserving the current
+pre-ASAP restriction even though the common schema can also express state.
+
+| Field | Meaning and requirement |
+|---|---|
+| `columns` | Ordered named fields. `Plain(DataType)` is a readable value; other variants retain the identity and parameters of summary or exact-accumulator state. |
+| `Column.nullable`, `Column.table` | Preserve SQL nullability and qualified column resolution. |
+| `time_index` | Identifies the time column when present; it does not by itself distinguish an instant vector from a range vector. |
+| `unique_keys` | Proven column combinations identifying rows; an empty list asserts no known key. Recompute these proofs when a rewrite changes identity. |
+| `closed` | Whether `columns` completely describes the output. An open PromQL schema must retain unlisted labels through the existing complete-series-identity contract. |
+
+`OperatorResultKind` is derived from the operation and its inputs and retained as
+`Operator.result_kind`. `State` describes an output carrying unfinalized state; its
+schema may also contain ordinary grouping keys. `SummaryEstimate`,
+`FinalizeExactAccumulator` and other readouts derive the appropriate relation or
+vector kind from their operation and input context. Matching numeric columns do
+not make those kinds interchangeable.
+
+**Interface contracts.** `OperatorExpr::output_schema` derives the fields and
+metadata for the actual inputs after a rewrite; `output_kind` derives the result
+category. `validate_inputs` checks producer/consumer compatibility, including query
+subgraphs referenced by scalar expressions. `Operator::validate` additionally
+checks that retained output metadata agrees with that derivation and that any
+guarantee or timing assignment is valid under the existing rules. For example,
+`PromqlScalarFromVector` requires an instant vector, and a summary readout requires the compatible state family. These checks
+must succeed before a plan is accepted; sharing an enum does not make every
+producer/consumer combination legal.
+
+`scalar_type` keeps the existing method name and `(DataType, nullable)` result.
+Its `input` is the applicable column scope: the child schema for a projection,
+both input schemas for a join predicate, or aggregate outputs for `HAVING`.
+Explicit subquery/conversion expressions validate their referenced producer using
+the contracts above. Numeric expressions cannot consume state columns as numbers.
+A scalar root is checked with an empty column scope and needs no fabricated
+relation output schema. `QueryExprError` retains the existing error-type name;
+result-kind and state-family mismatches require corresponding validation errors.
+
+For example, a KLL build outputs `State` with a
+`Sketch(SketchKind, GroupingStrategy)` column identifying KLL and its parameters.
+Its p99 readout outputs an ordinary `Plain(Float64)` column in the appropriate
+relation/vector schema. A numeric predicate can use that readout, but not the KLL
+state. Exact accumulator state similarly requires `FinalizeExactAccumulator`.
+An ordinary operator may pass state through only where its input/output contract
+permits it. A bare-column projection can preserve the column's `SummaryFamilyType`
+directly during `output_schema` derivation; `scalar_type` applies when that column
+is used as a scalar value and rejects state. Copying a state column does not turn
+it into a readable scalar.
 
 ### 2.2 Preserve existing accuracy semantics
 
@@ -324,9 +450,11 @@ actual inputs, including producers referenced by scalar expressions. Reading an
 approximate result through `PromqlScalarFromVector` or a SQL scalar subquery does
 not make it exact; unknown accuracy must not be treated as exactness.
 
-This proposal adds no accuracy fields or new guarantee-calculation workflow.
-Changing the operator representation must not change the accuracy meaning of the
-same computation.
+The common node reuses `guarantee: Option<ResultGuarantee>` from `SummaryNode`.
+`Some` records an established guarantee; `None` covers an unassessed or unknown
+result, or state whose accuracy is only established at readout. Exactness must be
+explicitly established using the existing model. This proposal introduces no new
+accuracy metric or guarantee-calculation workflow.
 
 ### 2.3 Timing follows the planning-stage design
 
@@ -335,9 +463,11 @@ separates logical decisions about what to compute from physical decisions about 
 and when to compute it. This proposal follows that division.
 
 For example, a KLL summary build may execute at ingestion time or query time,
-depending on the materialization choice. The unified operator representation must
-carry the chosen execution timing without requiring separate operator definitions
-for the two phases.
+depending on the materialization choice. `Operator.timing` records that assignment
+as `Some(ExecutionTiming::IngestionTime)` or `Some(ExecutionTiming::QueryTime)`.
+Logical nodes may retain `None`; physical-plan validation must reject unassigned
+executable nodes. Timing is common node metadata rather than a separate payload
+field on selected `ASAPOp` variants.
 
 The representation must preserve the resulting execution constraints: ingestion-time
 work cannot depend on query-time results, and consumers must receive values or state
@@ -427,7 +557,7 @@ here: a common `Operator` type does not supply missing aggregate modifiers, valu
 types or function contracts. This proposal changes neither repository dependencies
 nor the set of implemented language features.
 
-New accuracy fields, accuracy-composition rules, computation-sharing algorithms and
+New accuracy metrics, accuracy-composition rules, computation-sharing algorithms and
 lifecycle policies are outside this proposal. Planning responsibilities follow #509.
 The scalar/operator separation is specified in the companion document. Storage,
 traversal algorithms, serialization fields and a code migration sequence are also
