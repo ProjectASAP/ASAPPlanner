@@ -61,7 +61,7 @@ executes the plan: it supplies its own empirical cost estimation, empirical accu
 │ Physical planning — how to compute                                     │
 │                                                                        │
 │ 2. Physical ASAP-aware optimization                                    │
-│    Explore physical implementations of each logical candidate:       │
+│    Explore executable implementations of each logical candidate:       │
 │                                                                        │
 │      materialization decisions                                         │
 │      × physical operator implementations                               │
@@ -155,21 +155,27 @@ Example for summary candidates:
 | `Quantile(x, window)` | Exact quantile, KLL over the requested window |
 
 Each candidate records its input expression, filter, grouping, window,
-supported readouts and accuracy requirement. Pass 2 uses these to decide
+supported estimates and accuracy requirement. Pass 2 uses these to decide
 whether candidates can share a summary node.
 
-A summary-based candidate has two kinds of nodes. The **summary node** builds
-and maintains the summary from the input data, for example a KLL sketch over
-`latency_ms`. A **readout node** computes a query's answer from that summary,
-for example the p99 estimate from the KLL, or the entropy estimate from a
-UnivMon. One summary node can feed several readout nodes, which is what Pass 2
+A summary-based candidate uses three kinds of summary nodes:
+
+* A **summary build node** builds and maintains a summary from input data, for
+  example a KLL sketch over `latency_ms`.
+* A **summary merge node** combines summaries into one, for example merging
+  five 1-min KLL panes into one 5-min KLL, or merging lower-level summaries
+  into a coarser one.
+* A **summary estimation node** computes an answer from a summary, for example
+  the p99 estimate from a KLL, or the entropy estimate from a UnivMon.
+
+One summary build node can feed several estimation nodes, which is what Pass 2
 exploits.
 
 #### Pass 2: ASAP-aware common-subexpression elimination
 
 ASAP-aware CSE extends traditional CSE with summary-specific sharing rules.
 Computations can share work when they use identical expressions, when one
-summary node supports several readouts, or when one window summary can answer
+summary build node supports several estimates, or when one window summary can answer
 their overlapping windows.
 
 The rules compare computations by their **summary input data**: what a summary for
@@ -198,8 +204,8 @@ into pieces that each carry their own summary:
 | ASAP-aware CSE rule | Sharing condition | Shared computation |
 |---|---|---|
 | Identical-expression rule | The input and computation semantics are identical. | One common computation node serving multiple consumers. |
-| Summary-capability rule | The computations have the same summary input data and the same window, and one summary supports all requested computations and their accuracy requirements. | One summary node feeding several readout nodes, e.g. UnivMon → distinct count, entropy, L2 norm. |
-| Window-composition rule | The computations have the same summary input data, and one window summary can reconstruct the requested windows within their accuracy requirements. | One window summary feeding per-window reconstruction and readout nodes, e.g. KLL panes in a sliding window, or KLL buckets in an Exponential Histogram. |
+| Summary-capability rule | The computations have the same summary input data and the same window, and one summary supports all requested computations and their accuracy requirements. | One summary build node feeding several estimation nodes, e.g. UnivMon → distinct count, entropy, L2 norm. |
+| Window-composition rule | The computations have the same summary input data, and one window summary can reconstruct the requested windows within their accuracy requirements. | One window summary feeding per-window merge and estimation nodes, e.g. KLL panes in a sliding window, or KLL buckets in an Exponential Histogram. |
 
 The examples behind these rules:
 
@@ -207,22 +213,22 @@ The examples behind these rules:
   `flows` in the last minute serves three queries refreshed every 10 s:
   `COUNT(DISTINCT src_ip)`, the entropy of the `src_ip` distribution, and the
   L2 norm of per-`src_ip` counts. Each flow record updates the UnivMon once; a
-  distinct-count, an entropy and an L2 readout node each read their statistic
-  from it. The UnivMon is sized for the strictest of the three accuracy
+  distinct-count, an entropy and an L2 estimation node each compute their
+  statistic from it. The UnivMon is sized for the strictest of the three accuracy
   requirements.
 * **Window-composition rule, sliding window (Example 3, Pattern B).** One
   sliding window of 1-min KLL panes serves every evaluation of
   `quantile_over_time(0.99, latency_ms[5m])`, repeated every minute. Each
-  evaluation's readout node merges the latest 5 panes, so consecutive
-  evaluations share 4 of their 5 panes.
+  evaluation merges the latest 5 panes with a merge node and computes p99 with
+  an estimation node, so consecutive evaluations share 4 of their 5 panes.
 * **Window-composition rule, Exponential Histogram (Example 3, Pattern A).**
   One Exponential Histogram of KLL buckets over the last 5 years serves the p99
   queries over `[5y]`, `[1y]`, `[1y] offset 1y`, `[1y] offset 2y` and
-  `[3y] offset 2y`. Each query's reconstruction node merges the buckets
-  covering its interval, and its readout node reads p99 from the merged KLL.
+  `[3y] offset 2y`. Each query's merge node merges the buckets covering
+  its interval, and its estimation node computes p99 from the merged KLL.
 * **Other quantiles share for free.** One KLL answers every quantile, so adding
   `quantile_over_time(0.5, latency_ms[5m])` to the sliding-window dashboard
-  adds only a p50 readout node next to the p99 one, reading the same 5 merged
+  adds only a p50 estimation node next to the p99 one, reading the same 5 merged
   panes, with no new summary.
 
 Rules are defined by each summary family's capabilities and semantic
@@ -232,7 +238,7 @@ independent candidates, so selection can compare both.
 
 ### 2. Physical ASAP-aware optimization
 
-Physical optimization turns each logical candidate into physical candidates.
+Physical optimization turns each logical candidate into executable candidates.
 It makes two ASAP-specific decisions, described below. Parallelism, partitioning
 and resource management are TODO.
 
@@ -261,8 +267,6 @@ constraints:
   needs it.
 * Query-time work cannot feed ingestion-time work, so every node feeding an
   ingestion-time sub-DAG also runs at ingestion time.
-* Readout nodes, which compute a query's answer from a summary, always run at
-  query time.
 
 The decision depends on the workload's `recurrence` and `predictability` and on
 the `DataWorkload`. Typical outcomes:
@@ -279,7 +283,7 @@ A shared summary is materialized once for all its consumers. See Example 4.
 
 Physical operator implementation lowers every node to physical operators, for
 example TopK as a sort followed by a limit, or a KLL node as summary build,
-merge and quantile readout operators.
+merge and quantile estimation operators.
 
 ### 3. Plan selection
 
@@ -299,8 +303,11 @@ given: it does not choose among summaries or decide what to materialize.
 Each example's workload is shown as tables. Field names in code font are the
 fields of
 [`workload.rs`](https://github.com/ProjectASAP/ASAPPlanner/blob/main/crates/types/src/workload.rs).
-An `as_of` of "evaluation time" means `as_of: None`: the window ends when the
-query runs. Approximate accuracy targets are `EpsilonDelta`: the answer's error
+Each query reads the event-time window [`as_of` − `lookback`, `as_of`] (fields
+of `TimeSelection`). `as_of` is the window's end; `lookback` is its length. An
+`as_of` of "evaluation time" means `as_of: None`: the window ends whenever the
+query runs, so it moves forward with each evaluation. A fixed `as_of`, such as
+T − 1 y, pins the window to a historical interval. Approximate accuracy targets are `EpsilonDelta`: the answer's error
 is at most ε with probability at least 1 − δ.
 
 | Example | Shows |
@@ -311,21 +318,25 @@ is at most ε with probability at least 1 − δ.
 | 4. Materialization of window summaries | Stage 2: materialization, decoupled from stage 1 |
 
 In the diagrams below, grey cylinders are input data, white boxes are exact
-operations, blue boxes are summary nodes, and green rounded boxes are readout
-nodes.
+operations and summary merges, blue boxes are summary build nodes, and green
+rounded boxes are summary estimation nodes.
 
 ### Shared data workload
 
 Unless an example says otherwise, every example uses this data workload:
 
-| `DataWorkload` field | Value |
-|---|---|
-| `arrival` | `continuously_ingesting` |
-| `data_ingestion_interval` | 15 s (declared) |
-| `ingestion_volume` | unknown |
-| `ingestion_rate` | about 66,667 samples/s (declared) |
-| `input_cardinality` | 1,000,000 series (declared) |
-| `distribution` | `zipf` (declared) |
+| `DataWorkload` field | Meaning | Value |
+|---|---|---|
+| `arrival` | Whether the data is at rest, still arriving, or both | `continuously_ingesting` |
+| `data_ingestion_interval` | How often each series delivers one sample (the scrape interval in Prometheus). PromQL uses it as the look-back horizon of instant selectors. | 15 s (declared) |
+| `ingestion_volume` | Total amount of ingested data | unknown |
+| `ingestion_rate` | Samples arriving per second across all series | about 66,667 samples/s (declared) |
+| `input_cardinality` | Number of distinct series (or keys) | 1,000,000 series (declared) |
+| `distribution` | How samples are spread over keys | `zipf` (declared) |
+
+"Declared" is the value's `EvidenceSource`: the workload author stated it
+rather than the planner observing it. With 1,000,000 series each sampled every
+15 s, the ingestion rate is 1,000,000 / 15 ≈ 66,667 samples/s.
 
 ### Example 1: Aggregation over dimensions — summary replacement in Pass 1
 
@@ -379,11 +390,11 @@ flowchart LR
     end
     subgraph CM["Count-Min + heap per job"]
       direction LR
-      c1[("input")]:::data --> c2["Count-Min Sketch +<br/>top-10 heap, one per job"]:::summary --> c3(["top 10<br/>per job"]):::readout
+      c1[("input")]:::data --> c2["Count-Min Sketch +<br/>top-10 heap, one per job"]:::summary --> c3(["top 10<br/>per job"]):::estimate
     end
     subgraph H["Hydra"]
       direction LR
-      h1[("input")]:::data --> h2["Hydra over<br/>(job, series)"]:::summary --> h3(["top 10<br/>for each job"]):::readout
+      h1[("input")]:::data --> h2["Hydra over<br/>(job, series)"]:::summary --> h3(["top 10<br/>for each job"]):::estimate
     end
   end
   S{{"Stage 3 · cheapest valid candidate<br/>many small jobs → Hydra<br/>few large jobs → Count-Min per job"}}
@@ -391,7 +402,7 @@ flowchart LR
   classDef data fill:#f1f3f4,stroke:#5f6368,color:#000;
   classDef exact fill:#fff,stroke:#5f6368,color:#000;
   classDef summary fill:#e8f0fe,stroke:#1a73e8,stroke-width:2px,color:#000;
-  classDef readout fill:#e6f4ea,stroke:#188038,color:#000;
+  classDef estimate fill:#e6f4ea,stroke:#188038,color:#000;
 ```
 
 **Stage 3.** The deployment's accuracy model checks that each summary candidate
@@ -458,8 +469,8 @@ UnivMon.
 
 **Pass 2.** All three computations have the same summary input data (`src_ip`
 from `flows`, no other filter) and the same 1-min window. UnivMon supports all three
-readouts, so the summary-capability rule adds a shared candidate: **one
-UnivMon node feeding three readout nodes**. It must be sized for the strictest
+estimates, so the summary-capability rule adds a shared candidate: **one
+UnivMon build node feeding three estimation nodes**. It must be sized for the strictest
 requirement, ε = 0.01. The independent candidates are kept as well.
 
 ```mermaid
@@ -498,9 +509,9 @@ flowchart LR
   subgraph P2["Stage 1, Pass 2 · summary-capability rule adds a shared candidate"]
     direction LR
     u["one UnivMon<br/>sized for ε = 0.01"]:::summary
-    u --> rd(["distinct count"]):::readout
-    u --> re(["entropy"]):::readout
-    u --> rl(["L2 norm"]):::readout
+    u --> rd(["distinct count"]):::estimate
+    u --> re(["entropy"]):::estimate
+    u --> rl(["L2 norm"]):::estimate
   end
 
   in --> P0
@@ -517,7 +528,7 @@ flowchart LR
   classDef data fill:#f1f3f4,stroke:#5f6368,color:#000;
   classDef exact fill:#fff,stroke:#5f6368,color:#000;
   classDef summary fill:#e8f0fe,stroke:#1a73e8,stroke-width:2px,color:#000;
-  classDef readout fill:#e6f4ea,stroke:#188038,color:#000;
+  classDef estimate fill:#e6f4ea,stroke:#188038,color:#000;
 ```
 
 The three UnivMon options from Pass 1 (dashed arrows) are merged by Pass 2 into
@@ -564,7 +575,7 @@ of data at rest, plus data still arriving.
 * **Pass 2.** Every interval is a sub-interval of [T − 5 y, T], and KLL is
   mergeable. The window-composition rule adds a shared candidate: **one
   Exponential Histogram of KLL buckets over [T − 5 y, T]**, with one
-  reconstruction and readout node per query that merges the buckets covering
+  merge and estimation node per query that merges the buckets covering
   its interval. The five independent candidates are kept.
 
 The five query intervals overlap, and all lie inside the last five years:
@@ -583,20 +594,20 @@ gantt
 ```
 
 The shared candidate replaces five KLL sketches with one Exponential Histogram
-and a reconstruction and readout node per query:
+and a merge and estimation node per query:
 
 ```mermaid
 flowchart LR
   in[("latency_ms<br/>T − 5y to T")]:::data --> eh["Exponential Histogram<br/>of KLL buckets"]:::summary
-  eh --> m1["merge buckets<br/>T−5y … T"]:::exact --> o1(["q1 p99"]):::readout
-  eh --> m2["merge buckets<br/>T−1y … T"]:::exact --> o2(["q2 p99"]):::readout
-  eh --> m3["merge buckets<br/>T−2y … T−1y"]:::exact --> o3(["q3 p99"]):::readout
-  eh --> m4["merge buckets<br/>T−3y … T−2y"]:::exact --> o4(["q4 p99"]):::readout
-  eh --> m5["merge buckets<br/>T−5y … T−2y"]:::exact --> o5(["q5 p99"]):::readout
+  eh --> m1["merge buckets<br/>T−5y … T"]:::exact --> o1(["q1 p99"]):::estimate
+  eh --> m2["merge buckets<br/>T−1y … T"]:::exact --> o2(["q2 p99"]):::estimate
+  eh --> m3["merge buckets<br/>T−2y … T−1y"]:::exact --> o3(["q3 p99"]):::estimate
+  eh --> m4["merge buckets<br/>T−3y … T−2y"]:::exact --> o4(["q4 p99"]):::estimate
+  eh --> m5["merge buckets<br/>T−5y … T−2y"]:::exact --> o5(["q5 p99"]):::estimate
   classDef data fill:#f1f3f4,stroke:#5f6368,color:#000;
   classDef exact fill:#fff,stroke:#5f6368,color:#000;
   classDef summary fill:#e8f0fe,stroke:#1a73e8,stroke-width:2px,color:#000;
-  classDef readout fill:#e6f4ea,stroke:#188038,color:#000;
+  classDef estimate fill:#e6f4ea,stroke:#188038,color:#000;
 ```
 
 **Pattern B: one repeating query over a sliding window.** A real-time p99 panel
@@ -662,7 +673,7 @@ flowchart LR
     direction LR
     subgraph A1Q["Query time, once at T"]
       s3[("5 years of<br/>stored samples")]:::data --> h3["build Exponential<br/>Histogram once"]:::summary
-      h3 --> r3(["q1 … q5<br/>readouts"]):::readout
+      h3 --> r3(["q1 … q5<br/>estimates"]):::estimate
     end
   end
   subgraph A2["A2 · materialized at ingestion time"]
@@ -671,14 +682,14 @@ flowchart LR
       s4[("each new sample<br/>+ one-time backfill")]:::data --> h4["maintain Exponential<br/>Histogram"]:::summary
     end
     subgraph A2Q["Query time, at T"]
-      r4(["q1 … q5<br/>readouts"]):::readout
+      r4(["q1 … q5<br/>estimates"]):::estimate
     end
     h4 --> r4
   end
   classDef data fill:#f1f3f4,stroke:#5f6368,color:#000;
   classDef exact fill:#fff,stroke:#5f6368,color:#000;
   classDef summary fill:#e8f0fe,stroke:#1a73e8,stroke-width:2px,color:#000;
-  classDef readout fill:#e6f4ea,stroke:#188038,color:#000;
+  classDef estimate fill:#e6f4ea,stroke:#188038,color:#000;
 ```
 
 Which candidate wins depends on the workload:
@@ -705,20 +716,20 @@ flowchart LR
       s1[("samples")]:::data --> p1["1-min KLL pane<br/>stored 5 min"]:::summary
     end
     subgraph B1Q["Query time, every 1 min"]
-      g1["merge latest<br/>5 panes"]:::exact --> r1(["p99"]):::readout
+      g1["merge latest<br/>5 panes"]:::exact --> r1(["p99"]):::estimate
     end
     p1 --> g1
   end
   subgraph B2["B2 · not materialized"]
     direction LR
     subgraph B2Q["Query time, every 1 min"]
-      s2[("5 min of<br/>raw samples")]:::data --> k2["build one KLL"]:::summary --> r2(["p99"]):::readout
+      s2[("5 min of<br/>raw samples")]:::data --> k2["build one KLL"]:::summary --> r2(["p99"]):::estimate
     end
   end
   classDef data fill:#f1f3f4,stroke:#5f6368,color:#000;
   classDef exact fill:#fff,stroke:#5f6368,color:#000;
   classDef summary fill:#e8f0fe,stroke:#1a73e8,stroke-width:2px,color:#000;
-  classDef readout fill:#e6f4ea,stroke:#188038,color:#000;
+  classDef estimate fill:#e6f4ea,stroke:#188038,color:#000;
 ```
 
 The query repeats every minute and the data is continuously ingesting, so B1
