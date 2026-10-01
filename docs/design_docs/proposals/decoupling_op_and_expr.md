@@ -119,12 +119,36 @@ enum NonASAPOp<C: ColState = ColumnId> {
 }
 ```
 
+The following structures describe scalar-bearing fields of `NonASAPOp`:
+`Predicate` is used by filters, joins and `HAVING`; `ProjectItem` by projections;
+and `SortKey` by sorting and window functions. Their expressions use `ScalarExpr`,
+defined in §2.2.
+
+```rust
+struct Predicate<C: ColState = ColumnId>(Rc<ScalarExpr<C>>);
+
+struct ProjectItem<C: ColState = ColumnId> {
+    alias: Option<String>,
+    expr: ScalarExpr<C>,
+}
+
+struct SortKey<C: ColState = ColumnId> {
+    expr: ScalarExpr<C>,
+    ascending: bool,
+    nulls_first: bool,
+}
+```
+
+`Predicate`, `ProjectItem` and `SortKey` keep their current names and roles. Only the
+expression type changes. A column reference remains meaningful in the schema
+selected by its owning operator; it is not an independent table input.
+
 This is the scalar/operator split alone. It retains the current pre-ASAP `BinaryOp`,
 `Limit` and `Concat` shapes. The [operator-sharing proposal](operator-sharing.md#11-unified-operator-type)
 separately widens operator inputs to the common `Operator` and reconciles differences
 between pre-ASAP and post-ASAP operations.
 
-### 2.2 Scalar expressions and their owning fields
+### 2.2 Scalar expressions
 
 `ScalarExpr` contains every current scalar variant, including `CurrentTimestamp`.
 Its recursive inputs are scalar expressions only.
@@ -152,24 +176,7 @@ enum ScalarExpr<C: ColState = ColumnId> {
     },
     CurrentTimestamp,
 }
-
-struct Predicate<C: ColState = ColumnId>(Rc<ScalarExpr<C>>);
-
-struct ProjectItem<C: ColState = ColumnId> {
-    alias: Option<String>,
-    expr: ScalarExpr<C>,
-}
-
-struct SortKey<C: ColState = ColumnId> {
-    expr: ScalarExpr<C>,
-    ascending: bool,
-    nulls_first: bool,
-}
 ```
-
-`Predicate`, `ProjectItem` and `SortKey` keep their current names and roles. Only the
-expression type changes. A column reference remains meaningful in the schema
-selected by its owning operator; it is not an independent table input.
 
 `PromqlScalarBridge`, `PromqlVectorFromScalar`, `PromqlScalarFromVector` and
 `EvalTimestamp` remain operators because they participate in query-level evaluation.
