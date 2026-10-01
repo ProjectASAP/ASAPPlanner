@@ -97,7 +97,7 @@ the existing query and summary models, but the sketches combine several changes:
 | Give both categories inputs that refer to `Operator` nodes | Allow ordinary and summary operations to compose directly, without a wrapper hiding their dependencies. |
 | Remove relational-subplan wrappers and duplicate relational operations | Make all dependencies visible and give each ordinary operation one definition. |
 | Separate scalar expressions from operators | A related proposal, described in the [companion document](decoupling_op_and_expr.md); not a consequence of categorization alone. |
-| Introduce `local_guarantee` and `exact_operation_rule` on summary operations | Additional accuracy design: retain local evidence separately from the derived subtree guarantee (§2.2). These are not fields on today's corresponding summary operations. |
+| Introduce `local_guarantee` on summary estimation | Additional accuracy design: retain local evidence separately from the derived subtree guarantee (§2.2). This field does not exist on today's summary estimation operation. |
 | Let physical/lifecycle planning decide when each node executes | Additional planning design (§2.3): logical construction leaves timing undecided; planning chooses ingestion-time or query-time execution under the workload constraints. |
 
 **Naming and compatibility.** The sketches retain current operation, field and
@@ -118,10 +118,9 @@ The following changes are explicit:
 - `Limit.partition_by` comes from the existing post-ASAP limit. Applying that field
   to the unified operator remains an explicit design choice, not new functionality
   implied by a rename. `SQLWindowFunc.frame` retains its current optional form.
-- `SummaryEstimate.local_guarantee` and `SummaryAgg.exact_operation_rule` are proposed
-  new fields, named after the existing accuracy-model concepts. Their types remain
-  `ResultGuarantee` and `CompositionOperator`; neither field exists on today's
-  corresponding summary operation (§2.2).
+- `SummaryEstimate.local_guarantee` is a proposed new field, named after the existing
+  accuracy-model concept and using `ResultGuarantee`. It does not exist on today's
+  summary estimation operation (§2.2).
 
 **Proposed data structures.** These sketches describe operation-specific data using
 current names. `Rc<Operator>` represents a shared input edge; no new reference type
@@ -192,7 +191,6 @@ enum ASAPOp {
     SummaryAgg {
         child: Rc<Operator>, family: SummaryFamilyType, input: SummaryUpdate,
         reduction: Reduction, grouping: GroupingStrategy,
-        exact_operation_rule: Option<CompositionOperator>, // proposed new field
     },
     SummaryEstimate {
         summary_input: Rc<Operator>, query: SketchQuery,
@@ -222,7 +220,7 @@ The summary fields distinguish state construction, readout and accuracy evidence
 | `reduction` | Which input entities contribute to each logical result |
 | `grouping` | Whether those groups use separate state instances or a supported shared structure |
 | `query` / `readout` | The result requested from summary or maintained-population state |
-| `local_guarantee` / `exact_operation_rule` | Local accuracy evidence or composition semantics; neither is the final guarantee of the complete subtree |
+| `local_guarantee` | Local accuracy evidence, not the final guarantee of the complete subtree |
 | `population` | The population whose membership and values are maintained |
 
 Schema, derived accuracy and execution timing describe every `Operator`, regardless
@@ -291,19 +289,20 @@ not the guarantee of a larger query: its input may already be approximate, and
 later operations may change the error. The planner must compose accuracy through
 the actual computation graph.
 
-**Existing concepts versus proposed fields.** The current code already calculates
-local guarantees and uses accuracy-composition rules, but neither `local_guarantee`
-nor `exact_operation_rule` is a field on the corresponding summary operation today:
+**Existing concept versus proposed field.** The current code already calculates
+local guarantees, but `local_guarantee` is not a field on summary estimation today:
 
 | Proposed field | Meaning | Current code | What this proposal changes |
 |---|---|---|---|
 | `SummaryEstimate.local_guarantee` | The guarantee for this summary readout over exact input; it excludes upstream error. | `AccuracyModel.local_guarantee(...)` already computes it. It is used when composing the result guarantee, rather than retained on the estimation operation. | Retain that local evidence so accuracy can be derived from the assembled graph's actual inputs. |
-| `SummaryAgg.exact_operation_rule` | The rule for propagating input error through an exact aggregate. “Exact” describes the operation, not a promise that approximate inputs become exact. | Composition rules already exist. Exact-aggregate binding selects a rule from the aggregate's registered semantics; the accuracy model also exposes `exact_operation_rule(...)` for exact operations. Neither is a stored field on `SummaryAgg`. | Retain the selected rule on the operation so later derivation does not need to recover the original binding context. |
 
 Today, the composed result is stored as the summary node's `guarantee`. The proposed
-fields retain inputs to that calculation; they do not replace the complete result
-guarantee. Adding them is an accuracy-design change, not a requirement of dividing
-operators into `NonASAP` and `ASAP`.
+`local_guarantee` field retains one input to that calculation; it does not replace
+the complete result guarantee. Adding it is an accuracy-design change, not a
+requirement of dividing operators into `NonASAP` and `ASAP`.
+
+Exact aggregates continue to use the existing accuracy-composition rules. This
+proposal does not add a field to store those rules on the operator.
 
 For example, a KLL estimate over exact input can carry the sketch's guarantee. If
 that input is approximate, the estimate must also account for the upstream error.
