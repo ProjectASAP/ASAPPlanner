@@ -451,8 +451,10 @@ flowchart LR
 
 **Stage 2.** Both panels repeat every 10 s over continuously arriving data, so
 stage 2 generates candidates that materialize each Q2 summary at ingestion time
-next to candidates that build it at query time. The exact Q1 path is lowered to
-a per-series rate and a grouped sum. Example 4 shows this materialization
+next to candidates that do not materialize it and rebuild it from raw samples
+at every evaluation. Q1 has only its exact
+candidate, so both candidates compute it the same way: a per-series rate
+followed by a grouped sum. Example 4 shows this materialization
 decision in detail.
 
 ```mermaid
@@ -467,13 +469,13 @@ flowchart LR
     end
     b1 --> e1
   end
-  subgraph C2["Candidate 2 · Q2 summary built at query time"]
+  subgraph C2["Candidate 2 · Q2 summary not materialized, rebuilt every evaluation"]
     direction LR
     subgraph C2Q["Query time, every 10 s"]
       s2[("last 1 min of<br/>raw samples")]:::data --> b2["build Q2 summary"]:::summary --> e2(["top 10<br/>per job"]):::estimate
     end
   end
-  subgraph Q1L["Q1 in both candidates · lowered exact path"]
+  subgraph Q1L["Q1 · exact, computed the same way in Candidates 1 and 2"]
     direction LR
     s3[("samples")]:::data --> r3["per-series rate"]:::exact --> g3["grouped sum<br/>by (job)"]:::exact
   end
