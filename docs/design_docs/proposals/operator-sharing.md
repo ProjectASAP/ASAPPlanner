@@ -150,13 +150,13 @@ Ordinary payload fields have these roles:
   that distinguishes branches together with their within-branch key.
 
 `ASAPOp` describes state construction, state operations and readout separately.
-`SummaryFamilyType` retains its current name; state-producing operations use its
+`FieldType` (§2.1) types every output field; state-producing operations use its
 summary or exact-accumulator cases, never its `Plain` case.
 
 ```rust
 enum ASAPOp {
     SummaryAgg {
-        child: Rc<OperatorNode>, family: SummaryFamilyType, input: SummaryUpdate,
+        child: Rc<OperatorNode>, family: FieldType, input: SummaryUpdate,
         reduction: Reduction, grouping: GroupingStrategy,
     },
     SummaryEstimate {
@@ -171,7 +171,7 @@ enum ASAPOp {
     SummarySubtract { left: Rc<OperatorNode>, right: Rc<OperatorNode> },
     SummaryDelete { summary_input: Rc<OperatorNode>, key: ColumnId },
     SummaryJoin {
-        outer: Rc<OperatorNode>, inner: Rc<OperatorNode>, key: ColumnId, family: SummaryFamilyType,
+        outer: Rc<OperatorNode>, inner: Rc<OperatorNode>, key: ColumnId, family: FieldType,
     },
     Extension { child: Rc<OperatorNode>, name: String },
 }
@@ -286,7 +286,7 @@ Scan node: NonASAP(Scan)
 
 The second diagram abbreviates the same nesting: `ASAP(SummaryAgg)` means an
 `OperatorNode` whose `operator` is `Operator::ASAP(ASAPOp::SummaryAgg { ... })`.
-Its family is `SummaryFamilyType::ExactAggregate(ExactKind::Sum, ExactParams::Sum)`;
+Its family is `FieldType::ExactAggregate(ExactKind::Sum, ExactParams::Sum)`;
 its update reads `bytes`, and it uses the same ungrouped reduction. Finalization
 must preserve SQL SUM's NULL and empty-input behavior. This example assumes the
 existing capability and rewrite checks permit that exact implementation.
@@ -366,28 +366,29 @@ caching or mutation mechanism.
 
 ### 2.1 One schema model for values and state
 
-Use one `Schema` for operator outputs before and after optimization. Reuse the
-existing `SummaryFamilyType` to distinguish ordinary values from state, and retain
-the current `Schema` metadata. The following is the proposed resolved interface;
-it is not the current Rust definition.
+Use one `Schema` for operator outputs before and after optimization. Rename today's
+`SummaryFamilyType` to `FieldType`: it types every field, and `Plain` is not a summary
+family. Rename `Column` to `Field` and `Schema.columns` to `Schema.fields`: the struct
+describes a column and holds none of its data. Retain the current `Schema` metadata.
+The following is the proposed resolved interface; it is not the current Rust definition.
 
 ```rust
-struct Column<T = DataType> {
+struct Field {
     name: String,
-    dtype: T,
+    dtype: FieldType,
     nullable: bool,
     table: Option<String>,
 }
 
 struct Schema {
-    columns: Vec<Column<SummaryFamilyType>>,
+    fields: Vec<Field>,
     time_index: Option<ColumnId>,
     unique_keys: Vec<Vec<ColumnId>>,
     closed: bool,
 }
 
-// Existing variants and payload names, reused without renaming.
-enum SummaryFamilyType {
+// Today's `SummaryFamilyType`, renamed; variants and payloads unchanged.
+enum FieldType {
     Plain(DataType),
     ExactAggregate(ExactKind, ExactParams),
     Sketch(SketchKind, GroupingStrategy),
@@ -420,22 +421,22 @@ impl ScalarExpr {
 }
 ```
 
-**Relationship to current types.** `Column` gains a type parameter so the common
-operator schema can use `SummaryFamilyType`, while existing nested value types
-such as `DataType::List` still use ordinary `Column<DataType>`. The proposed common
-`Schema` replaces the separate operator-edge roles of pre-ASAP `Schema` and
-post-ASAP `SummarySchema` / `SummaryField`; it does not rename `DataType` or add a
-second summary-family enum. A pre-ASAP value column becomes `Plain(dtype)`.
+**Relationship to current types.** `Field` is today's pre-ASAP `Column` with `dtype`
+widened from `DataType` to `FieldType`. `FieldType` is today's `SummaryFamilyType`
+under a name that also fits its `Plain` case. The proposed common `Schema` replaces
+the separate operator-edge roles of pre-ASAP `Schema` and post-ASAP `SummarySchema` /
+`SummaryField`; it does not rename `DataType`. A pre-ASAP value column becomes
+`Plain(dtype)`.
 Frontend validation permits only ordinary value columns, preserving the current
 pre-ASAP restriction even though the common schema can also express state.
 
 | Field | Meaning and requirement |
 |---|---|
-| `columns` | Ordered named fields. `Plain(DataType)` is a readable value; other variants retain the identity and parameters of summary or exact-accumulator state. |
-| `Column.nullable`, `Column.table` | Preserve SQL nullability and qualified column resolution. |
+| `fields` | Ordered named fields. `Plain(DataType)` is a readable value; other variants retain the identity and parameters of summary or exact-accumulator state. |
+| `Field.nullable`, `Field.table` | Preserve SQL nullability and qualified column resolution. |
 | `time_index` | Identifies the time column when present; it does not by itself distinguish an instant vector from a range vector. |
 | `unique_keys` | Proven column combinations identifying rows; an empty list asserts no known key. Recompute these proofs when a rewrite changes identity. |
-| `closed` | Whether `columns` completely describes the output. An open PromQL schema must retain unlisted labels through the existing complete-series-identity contract. |
+| `closed` | Whether `fields` completely describes the output. An open PromQL schema must retain unlisted labels through the existing complete-series-identity contract. |
 
 `OperatorResultKind` is derived from the operation and its inputs and retained as
 `OperatorNode.result_kind`. `State` describes an output carrying unfinalized state; its
@@ -485,7 +486,7 @@ Its p99 readout outputs an ordinary `Plain(Float64)` column in the appropriate
 relation/vector schema. A numeric predicate can use that readout, but not the KLL
 state. Exact accumulator state similarly requires `FinalizeExactAccumulator`.
 An ordinary operator may pass state through only where its input/output contract
-permits it. A bare-column projection can preserve the column's `SummaryFamilyType`
+permits it. A bare-column projection can preserve the field's `FieldType`
 directly during `output_schema` derivation; `scalar_type` applies when that column
 is used as a scalar value and rejects state. Copying a state column does not turn
 it into a readable scalar.
@@ -590,7 +591,8 @@ Existing type names are retained where their meanings still apply.
 | Limit and time selection differences | Retain post-ASAP `Limit.partition_by`; optional `n` supports offset-only queries. `TimeRange.kind` distinguishes instant/range selection. |
 | Reserved ASAP key references | `SummaryDelete.key` and `SummaryJoin.key` use resolved `ColumnId`s, like other column references in this graph. |
 | Missing relation constructor | `Values` represents SQL literal rows and the one empty input row for SELECT without FROM. |
-| Separate edge schemas | Common `Schema` uses `Column<SummaryFamilyType>` while keeping the existing identity/time metadata (§2.1). |
+| Separate edge schemas | Common `Schema` uses `Field` / `FieldType` while keeping the existing identity/time metadata (§2.1). |
+| `SummaryFamilyType`, `Column`, `Schema.columns` | Renamed `FieldType`, `Field`, `Schema.fields`; variants and payloads unchanged. |
 
 A rewrite that moves arithmetic into a scalar expression must preserve applicable
 checked-division guards and exact fallback. `ExprSemantics` selects language rules;
