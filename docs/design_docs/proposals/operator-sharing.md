@@ -49,19 +49,8 @@ The two computational categories are `Operator` and `ScalarExpr`. `Operator`
 describes a relation, vector or summary-state operation and has two variants.
 `OperatorNode` (§2) stores that operation together with its common properties.
 `QueryRoot` selects either an operator node or a scalar expression as the query
-entry point; it is an enum, not an additional computation node:
-
-```rust
-enum Operator {
-    NonASAP(NonASAPOp),
-    ASAP(ASAPOp),
-}
-
-enum QueryRoot {
-    Operator(Rc<OperatorNode>),
-    ScalarExpr(ScalarExpr),
-}
-```
+entry point; it is an enum, not an additional computation node. The structural
+overview below shows how these types fit together.
 
 `QueryRoot::Operator` is used for SQL query results and PromQL vector queries,
 such as `sum(up)`. `QueryRoot::ScalarExpr` is used for PromQL scalar queries, such
@@ -141,9 +130,51 @@ The following changes are explicit:
   `TimeRange.kind` distinguishes instant selection from a range window, as specified
   in the companion. `SQLWindowFunc.frame` retains its current optional form.
 
-**Proposed data structures.** These sketches describe operation-specific data using
-current names. `Rc<OperatorNode>` represents a shared input edge; no new reference type
-is introduced. Storage and traversal algorithms remain outside this design.
+**Proposed data structures — overview.** The complete outer structure is below;
+operation variants and schema internals are expanded afterward. These declarations
+are shared by the detailed sections, not separate abbreviated types.
+
+```rust
+// Query entry: an operator graph or an owned scalar expression.
+enum QueryRoot {
+    Operator(Rc<OperatorNode>),
+    ScalarExpr(ScalarExpr),
+}
+
+// A graph node combines its operation with common planning properties (§2).
+struct OperatorNode {
+    operator: Operator,
+    result_kind: OperatorResultKind,
+    schema: Schema,
+    guarantee: Option<ResultGuarantee>,
+    timing: Option<ExecutionTiming>,
+}
+
+// Operation payloads: each variant below defines its own inputs and parameters.
+enum Operator {
+    NonASAP(NonASAPOp),
+    ASAP(ASAPOp),
+}
+
+// NonASAPOp / ASAPOp: detailed below; their inputs are Rc<OperatorNode>.
+// ScalarExpr: an owned value-expression tree, defined in the companion proposal.
+// Schema / OperatorResultKind: defined in §2.1.
+```
+
+Read this structure from the query entry inward:
+
+- An operator root points to an `OperatorNode`. That node holds either a NonASAP
+  or ASAP operation and its result/schema, accuracy and execution-phase properties.
+- Operations reference input nodes through `Rc<OperatorNode>`, forming the graph.
+  They also own scalar expressions where needed, such as a filter predicate or
+  projection value. A scalar expression is not another operator category.
+- A scalar root owns its expression directly. An explicit conversion such as
+  PromQL `scalar(v)` may reference an operator node producing `v`; that dependency
+  is part of the same graph (§1.2).
+
+`Rc` retains the existing shared-reference notation. Storage and traversal
+algorithms remain outside this design. The following sketches expand the two
+operation payloads; §2 explains the common fields without declaring them again.
 
 `NonASAPOp` retains the query semantics needed before and after optimization:
 
@@ -296,20 +327,14 @@ it does not introduce rules for sharing computations across queries.
 
 ## 2. Node properties and why they differ
 
-Both operation categories use this resolved node structure. It follows the current
+Both operation categories use the `OperatorNode` declared in the §1.1 overview.
+That resolved node follows the current
 `SummaryNode` separation between an operation and its metadata, generalized to
 all operators. The field is named `operator` because it holds `Operator` (§1.1),
-not a scalar expression. Common fields are defined here once, not in each variant.
+not a scalar expression. The table below explains those common fields; individual
+operation variants do not repeat them.
 
 ```rust
-struct OperatorNode {
-    operator: Operator,
-    result_kind: OperatorResultKind,
-    schema: Schema,
-    guarantee: Option<ResultGuarantee>,
-    timing: Option<ExecutionTiming>,
-}
-
 // Existing enum; the node's Option represents an unassigned phase.
 enum ExecutionTiming {
     IngestionTime,
