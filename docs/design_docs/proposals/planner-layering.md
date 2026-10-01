@@ -113,7 +113,7 @@ query's accuracy target), and every rejected candidate carries a reason.
 A candidate is a DAG for the **whole workload**, not for one query. Each stage
 combines its choices for every sub-DAG with the candidates it receives (the ×
 in the diagram), so the candidate set grows from stage to stage until
-selection picks one. Example 1 traces this growth step by step.
+selection picks one; in the implementation, each stage can early prune invalid candidates. Example 1 traces this growth step by step.
 
 | Stage | Input | Decides | Output |
 |---|---|---|---|
