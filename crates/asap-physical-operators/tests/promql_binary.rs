@@ -49,17 +49,18 @@ fn row(name: &str, job: &str, value: f64) -> Vec<Value> {
     ]
 }
 fn program() -> CompiledPhysicalDag {
+    program_for(BinaryOperator {
+        kind: BinaryOpKind::Arithmetic(ArithmeticOpKind::Div),
+        vector_match: None,
+        checked_relative_division: true,
+        checked_finite_division: false,
+    })
+}
+fn program_for(operator: BinaryOperator) -> CompiledPhysicalDag {
     let schema = schema();
     let node = PostAsapDagNode {
         id: PostAsapNodeId(2),
-        payload: PostAsapOperatorPayload::Binary {
-            operator: BinaryOperator {
-                kind: BinaryOpKind::Arithmetic(ArithmeticOpKind::Div),
-                vector_match: None,
-                checked_relative_division: true,
-                checked_finite_division: false,
-            },
-        },
+        payload: PostAsapOperatorPayload::Binary { operator },
         output_state: ExecutionDataState::QUERY_ROWS,
         output_schema: (*schema).clone(),
         guarantee: None,
@@ -80,7 +81,13 @@ fn evaluate(
     left: Vec<Vec<Value>>,
     right: Vec<Vec<Value>>,
 ) -> Result<Vec<Vec<Value>>, asap_physical_operators::Error> {
-    let graph = program();
+    evaluate_with(program(), left, right)
+}
+fn evaluate_with(
+    graph: CompiledPhysicalDag,
+    left: Vec<Vec<Value>>,
+    right: Vec<Vec<Value>>,
+) -> Result<Vec<Vec<Value>>, asap_physical_operators::Error> {
     let sources = [left, right]
         .into_iter()
         .enumerate()
@@ -267,4 +274,31 @@ fn binary_obeys_memory_and_cancellation() {
                 | (false, Err(asap_physical_operators::Error::MemoryLimit))
         ));
     }
+}
+
+// A `bool` comparison over label-map vectors yields 1 or 0 and drops the name.
+#[test]
+fn label_map_bool_comparison_drops_the_name() {
+    let program = program_for(BinaryOperator {
+        kind: BinaryOpKind::CompareBool(planner_types::pre_asap::CompareOpKind::Gt),
+        vector_match: None,
+        checked_relative_division: false,
+        checked_finite_division: false,
+    });
+    let rows = evaluate_with(
+        program,
+        vec![row("a", "api", 6.)],
+        vec![row("b", "api", 2.)],
+    )
+    .unwrap();
+    let [row] = rows.as_slice() else {
+        panic!("expected one row, got {}", rows.len());
+    };
+    let Value::Map(labels) = &row[0] else {
+        panic!("expected labels");
+    };
+    assert!(labels
+        .iter()
+        .all(|(k, _)| !matches!(k, Value::Utf8(k) if &**k == "__name__")));
+    assert!(matches!(row[1], Value::Float64(v) if v == 1.));
 }

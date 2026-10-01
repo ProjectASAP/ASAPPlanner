@@ -540,7 +540,7 @@ fn histogram_quantile_over_rate() {
         panic!("expected Aggregate{{HistogramQuantile}}, got {qe:?}");
     };
     assert!(
-        matches!(measures.as_slice(), [AggIntent::HistogramQuantile { q }] if (*q - 0.9).abs() < 1e-9)
+        matches!(measures.as_slice(), [AggIntent::HistogramQuantile { q, .. }] if (*q - 0.9).abs() < 1e-9)
     );
     assert!(has(&qe, |i| matches!(i, AggIntent::Rate)));
 }
@@ -1582,7 +1582,7 @@ fn histogram_quantile_classic_bucket_vs_native() {
         assert!(
             has(
                 &qe,
-                |i| matches!(i, AggIntent::HistogramQuantile { q } if (*q - 0.9).abs() < 1e-9)
+                |i| matches!(i, AggIntent::HistogramQuantile { q, .. } if (*q - 0.9).abs() < 1e-9)
             ),
             "classic bucket form → HistogramQuantile: {classic}"
         );
