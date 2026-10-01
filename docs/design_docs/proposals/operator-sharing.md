@@ -277,10 +277,9 @@ The logical layer (PlanSpace, binding, assembly) decides *what* to compute. Summ
 materialization decides *when*: it picks a lifecycle per summary state (maintain at
 ingestion time or recompute at query time, with window and retention), and that choice
 fixes the timing of every node that feeds or reads the state. One logical DAG can have
-several assignments; the deployment picks one by its own costs
-([Output layers](../architecture/input-output-workflow.md#output-layers), #480).
+several assignments; the deployment picks one by its own costs.
 
-The IR never sets a timing: after assembly every `timing` slot is `Unset`.
+Operators never set a timing by themselves: after assembly every `timing` slot is `Unset`.
 `apply_lifecycle_timings` writes the chosen assignment into the slots, top-down per root
 with one shared memo, and validates it (§5). It rejects an assignment that
 
