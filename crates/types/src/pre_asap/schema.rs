@@ -168,8 +168,16 @@ pub const PROMQL_SERIES_IDENTITY: &str = "$promql_series_identity";
 /// own realization; they must not accidentally treat the opaque identity as a
 /// user label or silently discard it.
 pub fn with_promql_series_identity(root: &super::QueryExpr) -> Result<super::QueryExpr, String> {
-    use super::{QueryExpr, Reduction, Source};
+    use super::{QueryExpr, Source};
     use std::rc::Rc;
+    fn scalar_literal(expression: &QueryExpr) -> Option<f64> {
+        match expression {
+            QueryExpr::PromqlScalarBridge(child) => scalar_literal(child),
+            QueryExpr::Literal(super::ScalarValue::Float64(value)) => Some(*value),
+            _ => None,
+        }
+    }
+    let mut root = root.clone();
     fn visit(node: &mut QueryExpr) -> Result<(), String> {
         match node {
             QueryExpr::Scan {
@@ -193,17 +201,31 @@ pub fn with_promql_series_identity(root: &super::QueryExpr) -> Result<super::Que
                 schema.closed = true;
                 Ok(())
             }
-            QueryExpr::TimeRange { child, .. } | QueryExpr::Limit { child, .. } => {
-                visit(Rc::make_mut(child))
+            QueryExpr::TimeRange { child, .. }
+            | QueryExpr::Limit { child, .. }
+            | QueryExpr::TimeShift { child, .. }
+            | QueryExpr::PromqlSubquery { child, .. }
+            | QueryExpr::PromqlScalarFromVector(child) => visit(Rc::make_mut(child)),
+            // Constants read no series.
+            QueryExpr::PromqlScalarBridge(_) => Ok(()),
+            QueryExpr::PromqlVectorFromScalar(child) if scalar_literal(child).is_some() => Ok(()),
+            QueryExpr::BinaryOp {
+                op: super::BinaryOpKind::Arithmetic(_),
+                lhs,
+                rhs,
+                vector_match,
+            } if vector_match.as_ref().is_none_or(|m| m.grouping.is_none())
+                && ![&*lhs, &*rhs].into_iter().any(|side| {
+                    matches!(
+                        side.as_ref(),
+                        QueryExpr::PromqlScalarFromVector(_) | QueryExpr::EvalTimestamp
+                    )
+                }) =>
+            {
+                visit(Rc::make_mut(lhs))?;
+                visit(Rc::make_mut(rhs))
             }
-            QueryExpr::Aggregate {
-                child, reduction, ..
-            } => {
-                if matches!(reduction, Reduction::Reduce(keys) if keys.is_without()) {
-                    return Err("dynamic without grouping requires label-set projection".into());
-                }
-                visit(Rc::make_mut(child))
-            }
+            QueryExpr::Aggregate { child, .. } => visit(Rc::make_mut(child)),
             QueryExpr::Sort {
                 child,
                 partition_by,
@@ -217,7 +239,6 @@ pub fn with_promql_series_identity(root: &super::QueryExpr) -> Result<super::Que
             _ => Err("operator has no dynamic series-identity realization".into()),
         }
     }
-    let mut root = root.clone();
     visit(&mut root)?;
     root.output_schema().map_err(|error| error.to_string())?;
     Ok(root)

@@ -65,38 +65,7 @@ pub(in crate::operators) async fn reduce(
                     "duplicate or out-of-window timestamp".into(),
                 ));
             }
-            match intent {
-                AggIntent::Rate => rate(&points, start, end).map(Value::Float64),
-                AggIntent::Increase => rate(&points, start, end)
-                    .map(|v| Value::Float64(v * (end as f64 - start as f64) / 1000.)),
-                AggIntent::Count { .. } => Some(Value::Int64(
-                    i64::try_from(points.len())
-                        .map_err(|_| Error::Invalid("count overflow".into()))?,
-                )),
-                AggIntent::Sum { .. } => Some(Value::Float64(points.iter().map(|p| p.1).sum())),
-                AggIntent::Avg { .. } => Some(Value::Float64(
-                    points.iter().map(|p| p.1).sum::<f64>() / points.len() as f64,
-                )),
-                AggIntent::Min { .. } => {
-                    Some(Value::Float64(points.iter().fold(f64::NAN, |a, p| {
-                        if a.is_nan() || p.1 < a {
-                            p.1
-                        } else {
-                            a
-                        }
-                    })))
-                }
-                AggIntent::Max { .. } => {
-                    Some(Value::Float64(points.iter().fold(f64::NAN, |a, p| {
-                        if a.is_nan() || p.1 > a {
-                            p.1
-                        } else {
-                            a
-                        }
-                    })))
-                }
-                _ => return Err(Error::Invalid("unsupported temporal intent".into())),
-            }
+            window_value(intent, &points, start, end)?
         };
         if let Some(result) = result {
             keys.push(result);
@@ -106,7 +75,76 @@ pub(in crate::operators) async fn reduce(
     Ok(output)
 }
 
-fn rate(points: &[(i64, f64)], start: i64, end: i64) -> Option<f64> {
+/// One series' value over its sorted samples in the window `(start, end]`.
+/// `None` means PromQL emits no sample for this series.
+pub(in crate::operators) fn window_value(
+    intent: &AggIntent<ColumnRef>,
+    points: &[(i64, f64)],
+    start: i64,
+    end: i64,
+) -> Result<Option<Value>, Error> {
+    Ok(match intent {
+        AggIntent::Rate => rate(points, start, end, true).map(Value::Float64),
+        AggIntent::Delta => rate(points, start, end, false)
+            .map(|v| Value::Float64(v * (end as f64 - start as f64) / 1000.)),
+        AggIntent::Increase => rate(points, start, end, true)
+            .map(|v| Value::Float64(v * (end as f64 - start as f64) / 1000.)),
+        AggIntent::Count { .. } => Some(Value::Int64(
+            i64::try_from(points.len()).map_err(|_| Error::Invalid("count overflow".into()))?,
+        )),
+        AggIntent::Sum { .. } => Some(Value::Float64(points.iter().map(|p| p.1).sum())),
+        AggIntent::Avg { .. } => Some(Value::Float64(
+            points.iter().map(|p| p.1).sum::<f64>() / points.len() as f64,
+        )),
+        AggIntent::Min { .. } => Some(Value::Float64(points.iter().fold(f64::NAN, |a, p| {
+            if a.is_nan() || p.1 < a {
+                p.1
+            } else {
+                a
+            }
+        }))),
+        AggIntent::Max { .. } => Some(Value::Float64(points.iter().fold(f64::NAN, |a, p| {
+            if a.is_nan() || p.1 > a {
+                p.1
+            } else {
+                a
+            }
+        }))),
+        AggIntent::IRate | AggIntent::IDelta => {
+            let [.., (t0, v0), (t1, v1)] = points else {
+                return Ok(None);
+            };
+            let rate = matches!(intent, AggIntent::IRate);
+            // A counter reset makes the last value the increase.
+            let delta = if rate && v1 < v0 { *v1 } else { v1 - v0 };
+            match (rate, t1 - t0) {
+                (_, 0) => None,
+                (true, interval) => Some(Value::Float64(delta / (interval as f64 / 1000.))),
+                (false, _) => Some(Value::Float64(delta)),
+            }
+        }
+        AggIntent::Changes | AggIntent::Resets => {
+            let changed = |(a, b): (f64, f64)| match intent {
+                AggIntent::Changes => a != b && !(a.is_nan() && b.is_nan()),
+                _ => b < a,
+            };
+            let count = points
+                .windows(2)
+                .filter(|pair| changed((pair[0].1, pair[1].1)))
+                .count();
+            Some(Value::Float64(count as f64))
+        }
+        AggIntent::LastOverTime => points.last().map(|p| Value::Float64(p.1)),
+        AggIntent::Quantile { col: None, q, .. } => Some(Value::Float64(super::quantile(
+            *q,
+            points.iter().map(|p| p.1).collect(),
+        ))),
+        _ => return Err(Error::Invalid("unsupported temporal intent".into())),
+    })
+}
+
+/// Prometheus `extrapolatedRate`; `counter` enables reset correction and the zero bound.
+fn rate(points: &[(i64, f64)], start: i64, end: i64, counter: bool) -> Option<f64> {
     if points.len() < 2 {
         return None;
     }
@@ -118,7 +156,7 @@ fn rate(points: &[(i64, f64)], start: i64, end: i64) -> Option<f64> {
     }
     let mut delta = last - first;
     for pair in points.windows(2) {
-        if pair[1].1 < pair[0].1 {
+        if counter && pair[1].1 < pair[0].1 {
             delta += pair[0].1;
         }
     }
@@ -129,7 +167,7 @@ fn rate(points: &[(i64, f64)], start: i64, end: i64) -> Option<f64> {
         to_start = average / 2.;
     }
     // Apply the zero bound after the sparse-window half-interval cap.
-    if delta > 0. && first >= 0. {
+    if counter && delta > 0. && first >= 0. {
         to_start = to_start.min(span * first / delta);
     }
     if to_end >= average * 1.1 {
