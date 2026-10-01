@@ -12,6 +12,8 @@ executes the plan: it supplies its own empirical cost estimation, empirical accu
 
 ## Layers
 
+x represents Cartesian product for enumerating and combining different optimization angles in planning. 
+
 ```text
  Query workload
    (PromQL / SQL / MetricsQL,
