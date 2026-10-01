@@ -269,8 +269,10 @@ model, including `QueryRoot` and the inputs to `PromqlScalarFromVector`,
 `ScalarSubquery`, `Exists` and `InSubquery`. Their cardinality, NULL and NaN rules
 remain unchanged.
 
-For example, in `scalar(sum(up))`, `sum(up)` is an operator subgraph producing an
-instant vector. The scalar expression `PromqlScalarFromVector` references its
+In `scalar(sum(up))`, `scalar()` is Prometheus PromQL's built-in vector-to-scalar
+function, explicitly written by the query author. This proposal does not insert
+it automatically: `sum(up)` alone is a valid query returning an instant vector.
+The scalar expression `PromqlScalarFromVector` represents that function and references its
 result to obtain one number. A valid ASAP rewrite may replace that producer with
 a summary readout, preserving the required vector and accuracy semantics; it cannot
 substitute raw summary state. Ordinary expressions such as `price * 2` reference

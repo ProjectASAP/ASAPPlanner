@@ -238,6 +238,10 @@ scalar(sum(up)) + 1   → Scalar root: Arithmetic(
                            PromqlScalarFromVector(Aggregate(...)), Literal(1.0))
 ```
 
+Here, `scalar()` and `vector()` are Prometheus PromQL built-in conversion
+functions explicitly present in the query, not wrappers inserted by this proposal.
+`sum(up)` alone remains a valid instant-vector query.
+
 A PromQL projection retains the time and label fields required by the operation
 and applies its metric-name rules; it does not project only the numeric sample.
 For an open label schema, lowering must retain the complete series identity,
