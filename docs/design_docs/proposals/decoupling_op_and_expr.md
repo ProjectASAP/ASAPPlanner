@@ -10,6 +10,7 @@ expressions. Their roles are distinguished by where they occur, so an expression
 can be placed where a table input is expected and fail only when the plan is checked.
 
 Separate these concepts so the plan model expresses which combinations are valid.
+This also makes clear what the planner can replace or share as a computation.
 
 Consider:
 
@@ -30,134 +31,25 @@ Scan lineitem → Filter → Project
 The scan, filter and projection produce tables. The predicate and multiplication
 compute values within the schema selected by their owning operators.
 
-## 2. Proposed data structures
+## 2. Design and rationale
 
-Split `QueryExpr` into `NonASAPOp` and `ScalarExpr`. Keep existing variant names,
-field names and semantics; change their types to express their roles:
-
-| Position | Current type | Proposed type |
+| Concept | Meaning | Role in the plan |
 |---|---|---|
-| Operator input | `QueryExpr` | `NonASAPOp` |
-| Scalar expression | `QueryExpr` | `ScalarExpr` |
+| Operator | Produces a table, or summary state in the companion design | A graph node whose input computations may be replaced or shared |
+| Scalar expression | Computes a value in a particular schema context | Part of an operator's predicate, projection, sort key or other expression |
 
-The sketches retain existing `Rc` and collection shapes where possible; this
-proposal does not redesign storage. `C` remains the existing column representation:
-`ColumnRef` before resolution and `ColumnId` afterward. `C::ScanSchema` retains the
-corresponding unresolved or resolved scan schema.
+Operator inputs must be other operators. Scalar expressions may contain other
+scalar expressions, but do not contain operator subplans in this design.
 
-### 2.1 Operator nodes
+A column reference has meaning only in its schema context. Two identical-looking
+expressions in different operators may refer to different inputs. Keeping scalar
+expressions attached to their operators preserves that context; this proposal does
+not introduce independent shared scalar computations.
 
-`NonASAPOp` contains the current operator variants. Inputs reference other operators;
-predicates and expression-bearing fields use the scalar structures below.
-
-```rust
-enum NonASAPOp<C: ColState = ColumnId> {
-    Scan {
-        source: Source, predicates: Vec<Predicate<C>>, schema: C::ScanSchema,
-    },
-    Filter { pred: Predicate<C>, child: Rc<NonASAPOp<C>> },
-    Project {
-        cols: Vec<ProjectItem<C>>, qualifier: Option<String>, child: Rc<NonASAPOp<C>>,
-    },
-    Aggregate {
-        reduction: Reduction<C>, measures: Vec<AggIntent<C>>, output_names: Vec<String>,
-        having: Option<Predicate<C>>, child: Rc<NonASAPOp<C>>,
-    },
-    Dedup { cols: Vec<C>, child: Rc<NonASAPOp<C>> },
-    Concat {
-        children: Vec<NonASAPOp<C>>,
-        discriminator_unique_key: Option<ConcatDiscriminatorKey<C>>,
-    },
-    Join {
-        kind: JoinKind, pred: Predicate<C>,
-        left: Rc<NonASAPOp<C>>, right: Rc<NonASAPOp<C>>,
-    },
-    SetOp {
-        kind: RelationalSetOpKind, all: bool,
-        left: Rc<NonASAPOp<C>>, right: Rc<NonASAPOp<C>>,
-    },
-    Sort { keys: Vec<SortKey<C>>, partition_by: GroupKeys<C>, child: Rc<NonASAPOp<C>> },
-    Limit { n: usize, offset: usize, child: Rc<NonASAPOp<C>> },
-    BinaryOp {
-        op: BinaryOpKind, lhs: Rc<NonASAPOp<C>>, rhs: Rc<NonASAPOp<C>>,
-        vector_match: Option<VectorMatch>,
-    },
-    SQLWindowFunc {
-        func: WindowFuncKind, args: Vec<ScalarExpr<C>>, partition_by: GroupKeys<C>,
-        order_by: Vec<SortKey<C>>, frame: Option<WindowFrame>,
-        output_name: String, child: Rc<NonASAPOp<C>>,
-    },
-    TimeRange { range: Duration, child: Rc<NonASAPOp<C>> },
-    TimeShift { shift: TimeShift, child: Rc<NonASAPOp<C>> },
-    PromqlScalarBridge(Rc<ScalarExpr<C>>),
-    EvalTimestamp,
-    PromqlVectorFromScalar(Rc<NonASAPOp<C>>),
-    PromqlScalarFromVector(Rc<NonASAPOp<C>>),
-    PromqlRelabel { dst: String, value: Rc<ScalarExpr<C>>, child: Rc<NonASAPOp<C>> },
-    PromqlInfoEnrich { selector: Vec<InfoMatcher>, child: Rc<NonASAPOp<C>> },
-    PromqlSeriesSample { by: GroupKeys<C>, kind: SampleKind, child: Rc<NonASAPOp<C>> },
-    PromqlSubquery {
-        range: Duration, resolution: Option<Duration>, child: Rc<NonASAPOp<C>>,
-    },
-}
-```
-
-This is the scalar/operator split alone. It retains the current pre-ASAP `BinaryOp`,
-`Limit` and `Concat` shapes. The [operator-sharing proposal](operator-sharing.md#11-unified-operator-type)
-separately widens operator inputs to the common `Operator` and reconciles differences
-between pre-ASAP and post-ASAP operations.
-
-### 2.2 Scalar expressions and their owning fields
-
-`ScalarExpr` contains every current scalar variant, including `CurrentTimestamp`.
-Its recursive inputs are scalar expressions only.
-
-```rust
-enum ScalarExpr<C: ColState = ColumnId> {
-    Column(C),
-    Literal(ScalarValue),
-    Compare { left: Rc<ScalarExpr<C>>, op: CompareOpKind, right: Rc<ScalarExpr<C>> },
-    BoolAnd(Vec<ScalarExpr<C>>),
-    BoolOr(Vec<ScalarExpr<C>>),
-    Not(Rc<ScalarExpr<C>>),
-    IsNull(Rc<ScalarExpr<C>>),
-    IsNotNull(Rc<ScalarExpr<C>>),
-    Cast { expr: Rc<ScalarExpr<C>>, to: DataType, try_cast: bool },
-    InList { expr: Rc<ScalarExpr<C>>, list: Vec<ScalarExpr<C>>, negated: bool },
-    FunctionCall { name: String, args: Vec<ScalarExpr<C>> },
-    Arithmetic {
-        op: ArithmeticOpKind, left: Rc<ScalarExpr<C>>, right: Rc<ScalarExpr<C>>,
-    },
-    Case {
-        operand: Option<Rc<ScalarExpr<C>>>,
-        branches: Vec<(ScalarExpr<C>, ScalarExpr<C>)>,
-        else_expr: Option<Rc<ScalarExpr<C>>>,
-    },
-    CurrentTimestamp,
-}
-
-struct Predicate<C: ColState = ColumnId>(Rc<ScalarExpr<C>>);
-
-struct ProjectItem<C: ColState = ColumnId> {
-    alias: Option<String>,
-    expr: ScalarExpr<C>,
-}
-
-struct SortKey<C: ColState = ColumnId> {
-    expr: ScalarExpr<C>,
-    ascending: bool,
-    nulls_first: bool,
-}
-```
-
-`Predicate`, `ProjectItem` and `SortKey` keep their current names and roles. Only the
-expression type changes. A column reference remains meaningful in the schema
-selected by its owning operator; it is not an independent table input.
-
-`PromqlScalarBridge`, `PromqlVectorFromScalar`, `PromqlScalarFromVector` and
-`EvalTimestamp` remain operators because they participate in query-level evaluation.
-`CurrentTimestamp` (SQL `NOW()`) belongs to scalar expressions. Classifying these by
-their role preserves their existing semantics.
+The distinction depends on semantics, not on whether a result looks scalar. For
+example, a PromQL conversion between a scalar and a vector participates in the
+operator graph because it has query-level output semantics. SQL `NOW()` is an
+expression evaluated within its owning operator.
 
 ## 3. Semantic requirements
 
@@ -172,17 +64,23 @@ Splitting the representation must preserve evaluation behavior, inferred output
 types and source-language semantics. A scalar expression cannot serve as a table
 input, and a table-producing operator cannot appear where a scalar is expected.
 
+The [operator-sharing proposal](operator-sharing.md#11-unified-operator-type)
+extends the operator graph with summary operations. The scalar/operator distinction
+continues to hold before and after that optimization: replacing a projection's input
+with a summary estimate does not turn its scalar expressions into graph nodes.
+
 ## 4. Acceptance and scope
 
-The example query must retain its result and output schema. The filter predicate
-and projection expression must resolve in the same contexts as before. Invalid
-scalar/table combinations must be excluded by the plan model.
+The example query must retain its result and output schema. Planning can replace or
+share its table-producing computations while interpreting the filter predicate and
+projection expression in the correct contexts. Invalid scalar/table combinations
+must be excluded by the plan model.
 
 This separation alone does not require a change to the external plan format.
 The companion proposal addresses the separate decision to expose every operator in
 the exported graph.
 
 Scalar subqueries are outside this design. Filter `IN (SELECT …)` and `EXISTS` can
-be represented as joins; a general scalar subquery would require expressions to
-reference operator graphs and needs a separate design. This proposal adds no new
-optimization, accuracy or execution-timing behavior.
+be represented as joins, but a general scalar subquery introduces a dependency on
+another operator graph. Supporting that requires a separate design for its scope,
+dependencies and participation in optimization.
