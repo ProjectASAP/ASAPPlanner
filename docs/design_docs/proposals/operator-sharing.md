@@ -303,27 +303,27 @@ FROM requests
 WHERE status = 200;
 ```
 
-Before ASAP optimization, its logical DAG is composed as follows. Each box is an
+Before ASAP optimization, its logical DAG is composed as follows. Each named node is an
 `OperatorNode`; arrows point from a consumer to its input producer. The scalar
 expressions shown beside nodes are owned fields, not additional DAG nodes.
 
 ```text
-p: OperatorNode
+Project node: OperatorNode
    operator = Operator::NonASAP(NonASAPOp::Project)
    cols[0].expr = ScalarExpr::Arithmetic(Column(sum_bytes), Add, Literal(1))
    │ child: Rc<OperatorNode>
    ▼
-a: OperatorNode
+Aggregate node: OperatorNode
    operator = Operator::NonASAP(NonASAPOp::Aggregate)
    measures = [AggIntent::Sum(bytes)]
    │ child: Rc<OperatorNode>
    ▼
-f: OperatorNode
+Filter node: OperatorNode
    operator = Operator::NonASAP(NonASAPOp::Filter)
    pred = Predicate(ScalarExpr::Compare(Column(status), Eq, Literal(200)))
    │ child: Rc<OperatorNode>
    ▼
-s: OperatorNode
+Scan node: OperatorNode
    operator = Operator::NonASAP(NonASAPOp::Scan)
    source = requests
 ```
@@ -337,19 +337,24 @@ An eligible ASAP rewrite can implement the sum using an exact accumulator. The
 resulting logical DAG contains both operation categories:
 
 ```text
-p': NonASAP(Project)                 owns the same scalar expression: sum_bytes + 1
+Project node: NonASAP(Project)
+   expression: sum_bytes + 1
  │ child
  ▼
-r:  ASAP(FinalizeExactAccumulator)   produces the ordinary sum_bytes value
+Finalize node: ASAP(FinalizeExactAccumulator)
+   output: ordinary sum_bytes value
  │ child
  ▼
-b:  ASAP(SummaryAgg)                 produces exact SUM accumulator state
+Summary build node: ASAP(SummaryAgg)
+   output: exact SUM accumulator state
  │ child
  ▼
-f:  NonASAP(Filter)                  owns the same predicate: status = 200
+Filter node: NonASAP(Filter)
+   predicate: status = 200
  │ child
  ▼
-s:  NonASAP(Scan)                    reads requests
+Scan node: NonASAP(Scan)
+   source: requests
 ```
 
 The second diagram abbreviates the same nesting: `ASAP(SummaryAgg)` means an
@@ -373,8 +378,8 @@ finalized sum have `Relation` results with ordinary `Plain(DataType)` columns.
 The build has `State` result kind and an `ExactAggregate(...)` column; the
 projection cannot consume that state directly. Guarantees are assessed under the
 existing rules. At this logical stage, `timing` may remain `None`; physical planning
-later assigns execution phases. The query result is produced by `p` before the
-rewrite and `p'` afterward, without an additional query-root data structure.
+later assigns execution phases. The topmost Project node produces the query
+result in both diagrams, without an additional query-root data structure.
 
 This illustrates the connection between the two proposals: scalar separation
 makes predicates and value expressions explicit; operator unification lets those
