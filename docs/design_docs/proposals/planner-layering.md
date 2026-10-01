@@ -143,6 +143,7 @@ For each eligible sub-DAG, Pass 1 identifies its computation semantics, applies
 rewrite rules, and generates every candidate that can meet its accuracy
 requirement.
 
+Example for summary candidates:
 | Original computation | Local candidates |
 |---|---|
 | `Sum(x) by (g)` | Exact grouped sum |
