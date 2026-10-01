@@ -12,7 +12,7 @@ Nothing is wrapped and nothing is duplicated.
 
 `Operator` has two levels, `NonASAP(NonASAPOp)` and `ASAP(ASAPOp)`, rather than one flat
 enum of every variant: frontends, `resolve` and the per-operator export (§6) work on `NonASAP`
-trees only, and `NonASAPOp` gives them a precise type for that instead of a run-time check
+DAGs only, and `NonASAPOp` gives them a precise type for that instead of a run-time check
 on each node.
 
 ```
