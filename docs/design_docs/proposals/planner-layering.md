@@ -413,7 +413,7 @@ flowchart LR
 
 **Stage 3.** The deployment's accuracy model checks that each summary candidate
 meets ε = 0.01, δ = 0.001, and its cost model compares per-`job` sketches with
-one Hydra sketch. With many small jobs, one shared Hydra sketch is typically
+one Hydra sketch. With many small jobs, one shared Hydra sketch can be
 cheaper; with a few large jobs, per-`job` Count-Min sketches may win.
 
 ### Example 2: One summary for several computations — the summary-capability rule in Pass 2
