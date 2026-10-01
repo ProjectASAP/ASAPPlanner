@@ -92,10 +92,11 @@ async fn planning_histogram_bridge_reuses_classic_bucket_intent() {
     else {
         panic!("expected canonical histogram aggregate");
     };
+    // One histogram over all rows; the bucket bound is the child's column 0.
     assert!(reduction.expect_reduce().keys().is_empty());
     assert!(matches!(
         measures.as_slice(),
-        [AggIntent::HistogramQuantile { q }] if (*q - 0.95).abs() < 1e-12
+        [AggIntent::HistogramQuantile { q, le: 0 }] if (*q - 0.95).abs() < 1e-12
     ));
     assert!(matches!(child.as_ref(), QueryExpr::Project { .. }));
 }

@@ -209,18 +209,10 @@ pub fn with_promql_series_identity(root: &super::QueryExpr) -> Result<super::Que
             // Constants read no series.
             QueryExpr::PromqlScalarBridge(_) => Ok(()),
             QueryExpr::PromqlVectorFromScalar(child) if scalar_literal(child).is_some() => Ok(()),
-            QueryExpr::BinaryOp {
-                op: super::BinaryOpKind::Arithmetic(_),
-                lhs,
-                rhs,
-                vector_match,
-            } if vector_match.as_ref().is_none_or(|m| m.grouping.is_none())
-                && ![&*lhs, &*rhs].into_iter().any(|side| {
-                    matches!(
-                        side.as_ref(),
-                        QueryExpr::PromqlScalarFromVector(_) | QueryExpr::EvalTimestamp
-                    )
-                }) =>
+            QueryExpr::BinaryOp { lhs, rhs, .. }
+                if ![&*lhs, &*rhs]
+                    .into_iter()
+                    .any(|side| matches!(side.as_ref(), QueryExpr::EvalTimestamp)) =>
             {
                 visit(Rc::make_mut(lhs))?;
                 visit(Rc::make_mut(rhs))

@@ -111,9 +111,15 @@ Rate, Increase                                                    // counter der
 Changes, Delta, IDelta, Deriv, Resets,
 PredictLinear(seconds), DoubleExpSmoothing(sf, tf)                // range-vector functions
 HistogramCount, HistogramSum, HistogramAvg, HistogramStdDev,
-HistogramStdVar, HistogramFraction(lo, hi), HistogramQuantile(q)  // native-histogram accessors
+HistogramStdVar, HistogramFraction(lo, hi)                       // native-histogram accessors
+HistogramQuantile(q, le)                                          // classic-bucket quantile
 Math(func)                                                        // element-wise transform
 ```
+
+`HistogramQuantile { q, le }` names its bucket-bound column `le`. PromQL's
+`Aggregate` groups it `without([le])`, so one histogram is the set of series
+that differ only in `le`. The SQL `asap_histogram_quantile` bridge reads one
+histogram over all rows.
 
 `PearsonCorr { left, right }` has two value inputs. Both
 references resolve to positional column IDs, and `input_cols()` exposes both

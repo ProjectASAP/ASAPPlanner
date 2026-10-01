@@ -46,8 +46,14 @@ impl Operator {
         left: Schema,
         right: Schema,
         operator: BinaryOperator,
-        return_bool: bool,
+        mut return_bool: bool,
     ) -> Result<Self, Error> {
+        let mut operator = operator;
+        // The IR's `bool` comparison is this operator's `return_bool` mode.
+        if let BinaryOpKind::CompareBool(op) = &operator.kind {
+            operator.kind = BinaryOpKind::Compare(op.clone());
+            return_bool = true;
+        }
         let scalar = is_scalar(&left)? && is_scalar(&right)?;
         is_scalar(&right)?;
         let expression = Expression::Binary {

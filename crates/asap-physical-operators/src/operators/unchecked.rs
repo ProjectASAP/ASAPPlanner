@@ -65,11 +65,17 @@ impl TryFrom<UncheckedOperator> for Operator {
                 at_ms,
                 steps,
             )?,
-            Kind::SeriesLabels { kind, labels } => {
+            // The rebuilt kind must equal the serialized one, which rejects
+            // a unique rewrite with other matching labels.
+            Kind::SeriesLabels { unique: true, .. } => Operator::series_without_name(input(0)?)?,
+            Kind::SeriesLabels { kind, labels, .. } => {
                 Operator::series_labels(input(0)?, kind, labels)?
             }
-            Kind::SeriesBinary { operator } => {
-                Operator::series_binary(input(0)?, input(1)?, operator)?
+            Kind::SeriesBinary { operator, scalars } => {
+                Operator::series_binary(input(0)?, input(1)?, operator, scalars)?
+            }
+            Kind::SeriesHistogramQuantile { quantile, le } => {
+                Operator::series_histogram_quantile(input(0)?, f64::from_bits(quantile), le)?
             }
             Kind::Project(expressions) => {
                 if expressions.len() != output.fields.len() {

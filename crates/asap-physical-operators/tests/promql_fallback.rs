@@ -18,13 +18,17 @@ use std::{collections::BTreeMap, rc::Rc};
 
 /// Bare selectors look back one ingestion interval: 60s.
 fn parse(query: &str) -> QueryExpr {
+    parse_with(query, AccuracyTarget::Exact)
+}
+
+fn parse_with(query: &str, accuracy: AccuracyTarget) -> QueryExpr {
     let workload = PlanningWorkload {
         query_workload: QueryWorkload {
             language: QueryLanguage::PromQL,
             query_batch: Some(vec![BatchEntry {
                 query: Query(query.into()),
                 requirements: QueryRequirements {
-                    accuracy: AccuracyRequirement::Explicit(AccuracyTarget::Exact),
+                    accuracy: AccuracyRequirement::Explicit(accuracy),
                     ..Default::default()
                 },
                 predictability: Predictability::Unknown,
@@ -91,9 +95,13 @@ fn metric(selector: &QueryExpr) -> String {
 
 fn compile_query(query: &str) -> Result<CompiledPhysicalDag, String> {
     let expression = lower(query);
-    let dag = fallback_dag(expression.clone());
+    compile_dag(&expression, &fallback_dag(expression.clone()))
+}
+
+/// Compile a DAG whose root is the Fallback computing `expression`.
+fn compile_dag(expression: &QueryExpr, dag: &PostAsapDag) -> Result<CompiledPhysicalDag, String> {
     let root = u64::from(dag.root.0);
-    let inputs = promql_fallback::raw_series(&expression)
+    let inputs = promql_fallback::raw_series(expression)
         .map_err(|e| e.to_string())?
         .into_iter()
         .enumerate()
@@ -104,7 +112,7 @@ fn compile_query(query: &str) -> Result<CompiledPhysicalDag, String> {
             )
         })
         .collect();
-    let program = compile(&dag, inputs, &[root]).map_err(|e| e.to_string())?;
+    let program = compile(dag, inputs, &[root]).map_err(|e| e.to_string())?;
     Ok(serde_json::from_slice(&serde_json::to_vec(&program).unwrap()).unwrap())
 }
 
@@ -117,9 +125,19 @@ fn evaluate(
     at: i64,
 ) -> Result<Vec<(BTreeMap<String, String>, i64, f64)>, String> {
     let expression = lower(query);
-    let program = compile_query(query)?;
+    evaluate_dag(&expression, &fallback_dag(expression.clone()), metrics, at)
+}
+
+#[allow(clippy::type_complexity)]
+fn evaluate_dag(
+    expression: &QueryExpr,
+    dag: &PostAsapDag,
+    metrics: &[(&str, &[Sample])],
+    at: i64,
+) -> Result<Vec<(BTreeMap<String, String>, i64, f64)>, String> {
+    let program = compile_dag(expression, dag)?;
     let mut sources = BTreeMap::new();
-    let selectors = promql_fallback::raw_series(&expression).unwrap();
+    let selectors = promql_fallback::raw_series(expression).unwrap();
     for (i, (selector, schema)) in selectors.into_iter().enumerate() {
         let name = metric(&selector);
         let rows = metrics
@@ -128,7 +146,8 @@ fn evaluate(
             .flat_map(|(_, samples)| samples.iter())
             .map(|(spec, seconds, value)| {
                 let mut labels = labels(spec);
-                labels.insert("__name__".into(), name.clone());
+                // A sample may supply its own `__name__`, as a series of another metric.
+                labels.entry("__name__".into()).or_insert(name.clone());
                 promql_rows::series_row(&schema, &labels, seconds * 1000, *value).unwrap()
             })
             .collect();
@@ -579,7 +598,6 @@ fn on_and_ignoring_select_the_matching_labels() {
     assert!(evaluate("a + on(job) b", &[("a", a), ("b", pair)], 60).is_err());
     assert!(evaluate("a + on(job) b", &[("a", pair), ("b", b)], 60).is_err());
     assert!(labeled("a + on(job) b", &[("a", pair), ("b", other)], 60).is_empty());
-    assert!(promql_rows::with_series_identity(&parse("a + on(job) group_left b")).is_err());
 }
 
 // without() groups by every label except the listed ones and the metric name.
@@ -604,6 +622,32 @@ fn without_grouping_drops_labels_and_the_name() {
         vec![(String::new(), 4.)]
     );
     assert!(labeled("sum without (inst) (a)", &[], 60).is_empty());
+    // Series equal without the name share a group rather than colliding.
+    let named: &[Sample] = &[
+        ("job=x,inst=1", 50, 1.),
+        ("__name__=b,job=x,inst=1", 50, 2.),
+    ];
+    assert_eq!(
+        labeled("sum without (inst) (a)", &[("a", named)], 60),
+        vec![("job=x".into(), 3.)]
+    );
+}
+
+// Arithmetic with a literal drops the metric name; series that then share a
+// label set are an error, as in Prometheus.
+#[test]
+fn literal_arithmetic_drops_the_name_and_rejects_equal_label_sets() {
+    let a: &[Sample] = &[
+        ("job=x,inst=1", 50, 1.),
+        ("__name__=b,job=x,inst=2", 50, 2.),
+    ];
+    assert_eq!(
+        labeled("a * 2", &[("a", a)], 60),
+        vec![("inst=1,job=x".into(), 2.), ("inst=2,job=x".into(), 4.)]
+    );
+    let equal: &[Sample] = &[("job=x", 50, 1.), ("__name__=b,job=x", 50, 2.)];
+    let error = evaluate("a * 2", &[("a", equal)], 60).unwrap_err();
+    assert!(error.contains("same labelset"), "{error}");
 }
 
 // An empty label value is an absent label, and an empty side yields an empty
@@ -619,6 +663,581 @@ fn empty_labels_and_empty_sides_match_prometheus() {
     let pair: &[Sample] = &[("job=x,inst=1", 50, 1.), ("job=x,inst=2", 50, 2.)];
     assert!(labeled("a + on(job) b", &[("b", pair)], 60).is_empty());
     assert!(labeled("b + on(job) a", &[("b", pair)], 60).is_empty());
-    // A non-literal scalar operand has no identity realization yet.
-    assert!(promql_rows::with_series_identity(&parse("a + scalar(b)")).is_err());
+    // `time()` has no row realization yet.
+    assert!(promql_rows::with_series_identity(&parse("a - time()")).is_err());
+}
+
+// Sums and averages use Prometheus' Kahan-Neumaier compensation, and an
+// average whose running sum overflows switches to an incremental mean.
+#[test]
+fn sums_and_averages_are_compensated_like_prometheus() {
+    let cancel = &[("a", 10, 1e100), ("a", 20, 1.), ("a", 30, -1e100)];
+    assert_eq!(one("sum_over_time(m[1m])", cancel, 60), 1.);
+    assert_eq!(one("avg_over_time(m[1m])", cancel, 60), 1. / 3.);
+    let huge = &[("a", 10, 1.7e308), ("a", 20, 1.7e308)];
+    assert_eq!(one("avg_over_time(m[1m])", huge, 60), 1.7e308);
+    assert_eq!(one("sum_over_time(m[1m])", huge, 60), f64::INFINITY);
+    let infinite = &[("a", 10, f64::INFINITY), ("a", 20, 1.)];
+    assert_eq!(one("sum_over_time(m[1m])", infinite, 60), f64::INFINITY);
+    assert_eq!(one("avg_over_time(m[1m])", infinite, 60), f64::INFINITY);
+    let opposite = &[("a", 10, f64::INFINITY), ("a", 20, f64::NEG_INFINITY)];
+    assert!(one("sum_over_time(m[1m])", opposite, 60).is_nan());
+    assert!(one("avg_over_time(m[1m])", opposite, 60).is_nan());
+    let cancel = &[("a", 50, 1e100), ("b", 50, 1.), ("c", 50, -1e100)];
+    assert_eq!(one("sum(m)", cancel, 60), 1.);
+    assert_eq!(one("avg(m)", cancel, 60), 1. / 3.);
+    let huge = &[("a", 50, 1.7e308), ("b", 50, 1.7e308)];
+    assert_eq!(one("avg(m)", huge, 60), 1.7e308);
+}
+
+/// `(k=v,... sorted, value)` rows for readable expectations.
+fn rows(pairs: &[(&str, f64)]) -> Vec<(String, f64)> {
+    let mut rows = pairs
+        .iter()
+        .map(|(spec, value)| (spec.to_string(), *value))
+        .collect::<Vec<_>>();
+    rows.sort_by(|a, b| a.0.cmp(&b.0));
+    rows
+}
+
+/// `labeled`, with NaN values rendered comparable.
+fn labeled_nan(query: &str, metrics: &[(&str, &[Sample])], at: i64) -> Vec<(String, String)> {
+    labeled(query, metrics, at)
+        .into_iter()
+        .map(|(labels, value)| (labels, format!("{value:?}")))
+        .collect()
+}
+
+const C: &[Sample] = &[
+    ("job=x", 50, 10.),
+    ("job=y", 50, 20.),
+    ("job=w", 50, 0.),
+    ("job=n", 50, f64::NAN),
+];
+
+// A comparison with a scalar keeps the matching series with their value and
+// metric name, whichever side the scalar is on; `bool` yields 1 or 0 for every
+// series and drops the name. NaN compares unequal to everything.
+#[test]
+fn scalar_comparisons_filter_or_return_bool() {
+    let metrics = &[("a", C)];
+    let kept = rows(&[("__name__=a,job=x", 10.), ("__name__=a,job=y", 20.)]);
+    assert_eq!(labeled("a > 5", metrics, 60), kept);
+    assert_eq!(labeled("5 < a", metrics, 60), kept);
+    assert_eq!(
+        labeled("a <= 10", metrics, 60),
+        rows(&[("__name__=a,job=w", 0.), ("__name__=a,job=x", 10.)])
+    );
+    assert_eq!(
+        labeled("a > bool 5", metrics, 60),
+        rows(&[("job=n", 0.), ("job=w", 0.), ("job=x", 1.), ("job=y", 1.)])
+    );
+    assert_eq!(
+        labeled("10 == bool a", metrics, 60),
+        rows(&[("job=n", 0.), ("job=w", 0.), ("job=x", 1.), ("job=y", 0.)])
+    );
+    // scalar() of no series is NaN.
+    assert_eq!(labeled("a != scalar(b)", metrics, 60).len(), 4);
+    assert!(labeled("a == scalar(b)", metrics, 60).is_empty());
+    assert!(labeled("a > 5", &[], 60).is_empty());
+    // Only `bool` drops the name, so only it can make label sets collide.
+    let equal: &[Sample] = &[("job=x", 50, 1.), ("__name__=b,job=x", 50, 2.)];
+    assert_eq!(labeled("a > 0", &[("a", equal)], 60).len(), 2);
+    let error = evaluate("a > bool 0", &[("a", equal)], 60).unwrap_err();
+    assert!(error.contains("same labelset"), "{error}");
+}
+
+// Vector comparisons match one-to-one like arithmetic. A filter keeps the
+// left series, name included, unless `on` reduces its labels; `bool` drops the
+// name. A left duplicate is an error only if more than one of it is kept.
+#[test]
+fn vector_comparisons_match_one_to_one() {
+    let metrics = &[("a", A), ("b", B)];
+    assert_eq!(
+        labeled("a > b", metrics, 60),
+        rows(&[("__name__=a,job=x", 10.)])
+    );
+    assert_eq!(
+        labeled("a >= b", metrics, 60),
+        rows(&[("__name__=a,job=w", 0.), ("__name__=a,job=x", 10.)])
+    );
+    assert_eq!(
+        labeled("a > bool b", metrics, 60),
+        rows(&[("job=w", 0.), ("job=x", 1.)])
+    );
+    assert!(labeled("a < b", metrics, 60).is_empty());
+    let a: &[Sample] = &[("job=x,inst=1", 50, 10.)];
+    let b: &[Sample] = &[("job=x,inst=2", 50, 4.)];
+    let metrics = &[("a", a), ("b", b)];
+    assert_eq!(
+        labeled("a > on(job) b", metrics, 60),
+        rows(&[("job=x", 10.)])
+    );
+    assert_eq!(
+        labeled("a > ignoring(inst) b", metrics, 60),
+        rows(&[("__name__=a,job=x", 10.)])
+    );
+    let pair: &[Sample] = &[("job=x,inst=1", 50, 1.), ("job=x,inst=2", 50, 5.)];
+    let metrics = &[("a", pair), ("b", b)];
+    assert_eq!(
+        labeled("a > on(job) b", metrics, 60),
+        rows(&[("job=x", 5.)])
+    );
+    let error = evaluate("a > bool on(job) b", metrics, 60).unwrap_err();
+    assert!(error.contains("many-to-one"), "{error}");
+    let nan: &[Sample] = &[("job=x", 50, f64::NAN)];
+    let metrics = &[("a", nan), ("b", nan)];
+    assert_eq!(labeled("a == bool b", metrics, 60), rows(&[("job=x", 0.)]));
+    assert_eq!(
+        labeled_nan("a != b", metrics, 60),
+        vec![("__name__=a,job=x".into(), "NaN".into())]
+    );
+}
+
+const S: &[Sample] = &[
+    ("job=x", 50, 1.),
+    ("job=y", 50, 2.),
+    ("job=z,inst=1", 50, 3.),
+];
+const T: &[Sample] = &[
+    ("job=x", 50, 10.),
+    ("job=w", 50, 20.),
+    ("job=z,inst=2", 50, 30.),
+];
+
+// Set operators match label sets many-to-many, ignoring the name by default,
+// and return the original series unchanged.
+#[test]
+fn set_operators_match_label_sets() {
+    let metrics = &[("a", S), ("b", T)];
+    assert_eq!(
+        labeled("a and b", metrics, 60),
+        rows(&[("__name__=a,job=x", 1.)])
+    );
+    assert_eq!(
+        labeled("a and on(job) b", metrics, 60),
+        rows(&[("__name__=a,job=x", 1.), ("__name__=a,inst=1,job=z", 3.)])
+    );
+    assert_eq!(
+        labeled("a and ignoring(inst) b", metrics, 60),
+        labeled("a and on(job) b", metrics, 60)
+    );
+    assert_eq!(
+        labeled("a or b", metrics, 60),
+        rows(&[
+            ("__name__=a,job=x", 1.),
+            ("__name__=a,job=y", 2.),
+            ("__name__=a,inst=1,job=z", 3.),
+            ("__name__=b,job=w", 20.),
+            ("__name__=b,inst=2,job=z", 30.),
+        ])
+    );
+    assert_eq!(
+        labeled("a or on(job) b", metrics, 60),
+        rows(&[
+            ("__name__=a,job=x", 1.),
+            ("__name__=a,job=y", 2.),
+            ("__name__=a,inst=1,job=z", 3.),
+            ("__name__=b,job=w", 20.),
+        ])
+    );
+    assert_eq!(
+        labeled("a unless b", metrics, 60),
+        rows(&[("__name__=a,job=y", 2.), ("__name__=a,inst=1,job=z", 3.)])
+    );
+    assert_eq!(
+        labeled("a unless on(job) b", metrics, 60),
+        rows(&[("__name__=a,job=y", 2.)])
+    );
+    assert_eq!(labeled("a and on() b", metrics, 60).len(), 3);
+    // Empty sides, and duplicates on either side, which set operators allow.
+    let a_only = &[("a", S)];
+    assert!(labeled("a and b", a_only, 60).is_empty());
+    assert_eq!(labeled("a unless b", a_only, 60).len(), 3);
+    assert_eq!(labeled("b or a", a_only, 60).len(), 3);
+    let pair: &[Sample] = &[("job=x,inst=1", 50, 1.), ("job=x,inst=2", 50, f64::NAN)];
+    assert_eq!(
+        labeled_nan("a and on(job) b", &[("a", pair), ("b", pair)], 60),
+        vec![
+            ("__name__=a,inst=1,job=x".into(), "1.0".into()),
+            ("__name__=a,inst=2,job=x".into(), "NaN".into()),
+        ]
+    );
+}
+
+const MANY: &[Sample] = &[
+    ("job=x,inst=1", 50, 2.),
+    ("job=x,inst=2", 50, 3.),
+    ("job=y,inst=1", 50, 4.),
+];
+const ONE: &[Sample] = &[("job=x,team=t1", 50, 10.), ("job=y", 50, 100.)];
+
+// group_left/group_right match many series to one; the result keeps the many
+// side's labels plus the listed labels of the one side, which a missing label
+// removes. A filter keeps the left value.
+#[test]
+fn group_modifiers_match_many_to_one() {
+    let metrics = &[("a", MANY), ("info", ONE)];
+    assert_eq!(
+        labeled("a * on(job) group_left(team) info", metrics, 60),
+        rows(&[
+            ("inst=1,job=x,team=t1", 20.),
+            ("inst=2,job=x,team=t1", 30.),
+            ("inst=1,job=y", 400.),
+        ])
+    );
+    assert_eq!(
+        labeled("info - on(job) group_right a", metrics, 60),
+        rows(&[
+            ("inst=1,job=x", 8.),
+            ("inst=2,job=x", 7.),
+            ("inst=1,job=y", 96.)
+        ])
+    );
+    assert_eq!(
+        labeled("info > on(job) group_right a", metrics, 60),
+        rows(&[
+            ("__name__=a,inst=1,job=x", 10.),
+            ("__name__=a,inst=2,job=x", 10.),
+            ("__name__=a,inst=1,job=y", 100.),
+        ])
+    );
+    assert_eq!(
+        labeled("a > bool ignoring(inst, team) group_left info", metrics, 60),
+        rows(&[
+            ("inst=1,job=x", 0.),
+            ("inst=2,job=x", 0.),
+            ("inst=1,job=y", 0.)
+        ])
+    );
+    // Two "one" series for a match group, or two results with equal labels.
+    let two: &[Sample] = &[("job=x,team=t1", 50, 1.), ("job=x,team=t2", 50, 2.)];
+    let error = evaluate(
+        "a * on(job) group_left info",
+        &[("a", MANY), ("info", two)],
+        60,
+    )
+    .unwrap_err();
+    assert!(error.contains("duplicate series"), "{error}");
+    let error = evaluate(
+        "info * on(job) group_right a",
+        &[("a", two), ("info", MANY)],
+        60,
+    )
+    .unwrap_err();
+    assert!(error.contains("left hand-side"), "{error}");
+    let named: &[Sample] = &[("job=x", 50, 1.), ("__name__=c,job=x", 50, 2.)];
+    let error = evaluate(
+        "a * on(job) group_left info",
+        &[("a", named), ("info", ONE)],
+        60,
+    )
+    .unwrap_err();
+    assert!(error.contains("unique matches"), "{error}");
+    assert!(labeled("a * on(job) group_left info", &[("a", MANY)], 60).is_empty());
+}
+
+// A non-literal scalar applies like a literal; scalar-scalar arithmetic yields
+// a scalar; and a literal applies to aggregated rows whose value has another name.
+#[test]
+fn scalar_operands_and_aggregates() {
+    let three: &[Sample] = &[("job=b", 50, 3.)];
+    let metrics = &[("a", A), ("b", three)];
+    assert_eq!(
+        labeled("a * scalar(b)", metrics, 60),
+        rows(&[("job=w", 0.), ("job=x", 30.), ("job=y", 60.)])
+    );
+    assert_eq!(
+        labeled("a > scalar(b)", metrics, 60),
+        rows(&[("__name__=a,job=x", 10.), ("__name__=a,job=y", 20.)])
+    );
+    assert_eq!(labeled("scalar(b) * 2", metrics, 60), rows(&[("", 6.)]));
+    assert_eq!(
+        labeled("scalar(b) > bool 2", metrics, 60),
+        rows(&[("", 1.)])
+    );
+    // scalar() of several series is NaN.
+    assert!(labeled("scalar(a) - 1", metrics, 60)[0].1.is_nan());
+    assert_eq!(
+        labeled("sum by (job) (a) * 2", metrics, 60),
+        rows(&[("job=w", 0.), ("job=x", 20.), ("job=y", 40.)])
+    );
+    assert_eq!(
+        labeled("sum by (job) (a) > bool 5", metrics, 60),
+        rows(&[("job=w", 0.), ("job=x", 1.), ("job=y", 1.)])
+    );
+}
+
+// Range functions other than last_over_time drop the metric name, so series
+// that then share a label set are an error, as in Prometheus.
+#[test]
+fn range_functions_drop_the_name_and_reject_equal_label_sets() {
+    let equal: &[Sample] = &[
+        ("job=x", 10, 1.),
+        ("job=x", 50, 2.),
+        ("__name__=b,job=x", 10, 1.),
+        ("__name__=b,job=x", 50, 4.),
+    ];
+    let error = evaluate("rate(a[1m])", &[("a", equal)], 60).unwrap_err();
+    assert!(error.contains("same labelset"), "{error}");
+    assert_eq!(
+        labeled("last_over_time(a[1m])", &[("a", equal)], 60),
+        rows(&[("__name__=a,job=x", 2.), ("__name__=b,job=x", 4.)])
+    );
+    assert_eq!(
+        labeled("max_over_time(a[1m])", &[("a", &equal[..2])], 60),
+        rows(&[("job=x", 2.)])
+    );
+}
+
+// Scalar-valued expressions are scalars too; `or vector(0)` fills an empty
+// aggregate; a range function inside a subquery drops the name.
+#[test]
+fn scalar_expressions_or_vector_and_subquery_names() {
+    let three: &[Sample] = &[("job=b", 50, 3.)];
+    let metrics = &[("a", A), ("b", three)];
+    assert_eq!(
+        labeled("a + (scalar(b) * 2)", metrics, 60),
+        rows(&[("job=w", 6.), ("job=x", 16.), ("job=y", 26.)])
+    );
+    assert_eq!(
+        labeled("a + -scalar(b)", metrics, 60),
+        rows(&[("job=w", -3.), ("job=x", 7.), ("job=y", 17.)])
+    );
+    assert_eq!(
+        labeled("sum(a) or vector(0)", metrics, 60),
+        rows(&[("", 30.)])
+    );
+    assert_eq!(labeled("sum(a) or vector(0)", &[], 60), rows(&[("", 0.)]));
+    let counter: &[Sample] = &[("job=x", 0, 0.), ("job=x", 30, 3.), ("job=x", 60, 6.)];
+    let result = labeled("last_over_time(rate(a[1m])[2m:1m])", &[("a", counter)], 60);
+    assert_eq!(result.len(), 1);
+    assert_eq!(result[0].0, "job=x");
+}
+
+/// Instant `x_bucket` samples at 50s: `(labels without le, [(le, count)])`.
+fn buckets(series: &[(&'static str, &[(&'static str, f64)])]) -> Vec<Sample> {
+    series
+        .iter()
+        .flat_map(|(labels, buckets)| {
+            buckets.iter().map(move |(le, count)| {
+                let spec = if labels.is_empty() {
+                    format!("le={le}")
+                } else {
+                    format!("{labels},le={le}")
+                };
+                (&*Box::leak(spec.into_boxed_str()), 50, *count)
+            })
+        })
+        .collect()
+}
+
+fn quantile(query: &str, samples: &[Sample]) -> Vec<(String, f64)> {
+    labeled(query, &[("x_bucket", samples)], 60)
+}
+
+const HISTOGRAM: &[(&str, f64)] = &[("1", 2.), ("2", 6.), ("4", 8.), ("+Inf", 10.)];
+
+// histogram_quantile interpolates linearly within the bucket holding rank q·count,
+// returns the highest finite bound for the +Inf bucket, and maps q outside
+// [0, 1] to ∓Inf and a NaN q to NaN. Output labels drop le and __name__.
+#[test]
+fn histogram_quantile_interpolates_classic_buckets() {
+    let samples = buckets(&[("job=a", HISTOGRAM)]);
+    for (q, expected) in [
+        ("0", 0.),
+        ("0.1", 0.5),
+        ("0.5", 1.75),
+        ("0.9", 4.),
+        ("1", 4.),
+        ("-0.5", f64::NEG_INFINITY),
+        ("1.5", f64::INFINITY),
+    ] {
+        let query = format!("histogram_quantile({q}, x_bucket)");
+        assert_eq!(
+            quantile(&query, &samples),
+            vec![("job=a".into(), expected)],
+            "{query}"
+        );
+    }
+    let nan = quantile("histogram_quantile(NaN, x_bucket)", &samples);
+    assert!(matches!(nan.as_slice(), [(labels, v)] if labels == "job=a" && v.is_nan()));
+}
+
+// Each label set other than le is its own histogram. Degenerate histograms
+// yield NaN: no +Inf bucket, fewer than two buckets, or zero observations.
+#[test]
+fn histogram_quantile_groups_series_and_rejects_degenerate_histograms() {
+    let samples = buckets(&[
+        ("job=a", HISTOGRAM),
+        ("job=b", &[("1", 1.), ("2", 2.)]),
+        ("job=c", &[("+Inf", 5.)]),
+        ("job=d", &[("1", 0.), ("+Inf", 0.)]),
+        ("job=e,inst=1", HISTOGRAM),
+    ]);
+    let rows = quantile("histogram_quantile(0.5, x_bucket)", &samples);
+    let labels: Vec<_> = rows.iter().map(|(l, _)| l.as_str()).collect();
+    assert_eq!(
+        labels,
+        vec!["inst=1,job=e", "job=a", "job=b", "job=c", "job=d"]
+    );
+    assert_eq!(rows[0].1, 1.75);
+    assert_eq!(rows[1].1, 1.75);
+    assert!(rows[2..].iter().all(|(_, v)| v.is_nan()), "{rows:?}");
+}
+
+// Buckets sort by bound, unparsable or missing le values are skipped, equal
+// bounds merge, and decreasing cumulative counts are raised to be monotonic.
+#[test]
+fn histogram_quantile_normalizes_buckets_like_prometheus() {
+    let unordered = buckets(&[("job=a", &[("+Inf", 10.), ("4", 8.), ("1", 2.), ("2", 6.)])]);
+    assert_eq!(
+        quantile("histogram_quantile(0.5, x_bucket)", &unordered),
+        vec![("job=a".into(), 1.75)]
+    );
+    let mut invalid = buckets(&[("job=a", &[("abc", 100.), ("1", 2.), ("+Inf", 4.)])]);
+    invalid.push(("job=a", 50, 100.));
+    assert_eq!(
+        quantile("histogram_quantile(0.5, x_bucket)", &invalid),
+        vec![("job=a".into(), 1.)]
+    );
+    // Go's ParseFloat rejects an out-of-range bound rather than rounding it to +Inf.
+    let overflow = buckets(&[("job=a", &[("1", 1.), ("1e400", 2.)])]);
+    let rows = quantile("histogram_quantile(0.5, x_bucket)", &overflow);
+    assert!(
+        matches!(rows.as_slice(), [(_, v)] if v.is_nan()),
+        "{rows:?}"
+    );
+    let duplicate = buckets(&[("job=a", &[("1", 1.), ("1.0", 1.), ("+Inf", 4.)])]);
+    assert_eq!(
+        quantile("histogram_quantile(0.5, x_bucket)", &duplicate),
+        vec![("job=a".into(), 1.)]
+    );
+    // Counts [6, 2→6, 8, 8]: rank 7 lies in (2, 4], 1 of its 2 observations in.
+    let decreasing = buckets(&[("job=a", &[("1", 6.), ("2", 2.), ("4", 8.), ("+Inf", 8.)])]);
+    assert_eq!(
+        quantile("histogram_quantile(0.875, x_bucket)", &decreasing),
+        vec![("job=a".into(), 3.)]
+    );
+}
+
+// A lowest bucket with a non-positive bound is returned as is, not
+// interpolated from zero.
+#[test]
+fn histogram_quantile_non_positive_lowest_bucket() {
+    let samples = buckets(&[("job=a", &[("-1", 2.), ("1", 4.), ("+Inf", 4.)])]);
+    for (q, expected) in [("0.25", -1.), ("0.75", 0.)] {
+        let query = format!("histogram_quantile({q}, x_bucket)");
+        assert_eq!(
+            quantile(&query, &samples),
+            vec![("job=a".into(), expected)],
+            "{query}"
+        );
+    }
+}
+
+// The common shapes: an aggregated rate keeps its by labels other than le, and
+// a per-series rate keeps every label but le and __name__.
+#[test]
+fn histogram_quantile_over_rates_and_sums() {
+    // Each counter grows by c per minute, so its rate is c/60.
+    let counter = |labels: &'static str, le: &str, c: f64| {
+        let spec: &'static str = Box::leak(format!("{labels},le={le}").into_boxed_str());
+        (60..=240)
+            .step_by(60)
+            .map(move |t| (spec, t as i64, c * (t / 60) as f64))
+            .collect::<Vec<Sample>>()
+    };
+    let mut samples = Vec::new();
+    for inst in ["job=a,inst=1", "job=a,inst=2"] {
+        for (le, count) in HISTOGRAM {
+            samples.extend(counter(inst, le, *count));
+        }
+    }
+    let metrics = &[("x_bucket", samples.as_slice())];
+    let close = |rows: Vec<(String, f64)>, expected: &[(&str, f64)]| {
+        assert_eq!(rows.len(), expected.len(), "{rows:?}");
+        for ((labels, v), (want, w)) in rows.iter().zip(expected) {
+            assert_eq!(labels, want);
+            assert!((v - w).abs() < 1e-9, "{labels}: {v} vs {w}");
+        }
+    };
+    close(
+        labeled(
+            "histogram_quantile(0.5, sum by (le, job) (rate(x_bucket[5m])))",
+            metrics,
+            300,
+        ),
+        &[("job=a", 1.75)],
+    );
+    close(
+        labeled(
+            "histogram_quantile(0.5, sum by (le) (x_bucket))",
+            metrics,
+            250,
+        ),
+        &[("", 1.75)],
+    );
+    close(
+        labeled("histogram_quantile(0.5, rate(x_bucket[5m]))", metrics, 300),
+        &[("inst=1,job=a", 1.75), ("inst=2,job=a", 1.75)],
+    );
+}
+
+// Histograms that differ only in __name__ collide once it is dropped, which
+// Prometheus reports as an error rather than merging them.
+#[test]
+fn histogram_quantile_rejects_equal_output_label_sets() {
+    let mut samples = buckets(&[("job=a", HISTOGRAM)]);
+    samples.extend(buckets(&[("__name__=y_bucket,job=a", HISTOGRAM)]));
+    let error = evaluate(
+        "histogram_quantile(0.5, x_bucket)",
+        &[("x_bucket", &samples)],
+        60,
+    )
+    .unwrap_err();
+    assert!(error.contains("same labelset"), "{error}");
+}
+
+// Candidate search keeps a classic histogram_quantile whole and exact, even
+// for an approximate target, and the selected DAG compiles and executes.
+#[test]
+fn histogram_quantile_selection_keeps_the_exact_fallback() {
+    use asap_aware_mapping::{
+        accuracy::DefaultAccuracyModel, cost_model::DefaultCostModel, default_strategies,
+        search_workload_with_targets, Replacement,
+    };
+    let samples = buckets(&[("job=a", HISTOGRAM)]);
+    for target in [AccuracyTarget::Exact, AccuracyTarget::Epsilon(0.01)] {
+        for query in [
+            "histogram_quantile(0.5, x_bucket)",
+            "histogram_quantile(0.5, sum by (le, job) (x_bucket))",
+        ] {
+            let root = Rc::new(
+                promql_rows::with_series_identity(&parse_with(query, target.clone())).unwrap(),
+            );
+            let space = search_workload_with_targets(
+                vec![(query, root.clone(), Some(target.clone()))],
+                &default_strategies(),
+                &DefaultAccuracyModel,
+            );
+            let planned = &space.roots[0].1;
+            let candidates = &space.candidates_for_target(planned).unwrap().candidates;
+            assert!(
+                candidates.iter().all(|c| matches!(&c.replacement,
+                    Replacement::Summary(node) if matches!(&node.expr,
+                        SummaryExpr::KeepPreAsap(e) if **e == *root))),
+                "{query}: {candidates:?}"
+            );
+            let selected = space
+                .global_selection(&DefaultCostModel)
+                .assemble_selected_dag(planned)
+                .unwrap()
+                .unwrap();
+            let dag = compile_post_asap_dag(&selected).unwrap();
+            let rows = evaluate_dag(&root, &dag, &[("x_bucket", &samples)], 60).unwrap();
+            let values: Vec<_> = rows.iter().map(|(_, _, v)| *v).collect();
+            assert_eq!(values, vec![1.75], "{query} {target:?}");
+        }
+    }
 }

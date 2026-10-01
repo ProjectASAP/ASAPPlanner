@@ -213,7 +213,7 @@ fn histogram_quantile_core_lowers() {
         ok("histogram_quantile(0.95, sum(rate(http_request_duration_seconds_bucket[5m])) by (le))");
     assert!(has(
         &qe,
-        |i| matches!(i, AggIntent::HistogramQuantile { q } if (*q - 0.95).abs() < 1e-9)
+        |i| matches!(i, AggIntent::HistogramQuantile { q, .. } if (*q - 0.95).abs() < 1e-9)
     ));
     assert!(has(&qe, |i| matches!(i, AggIntent::Sum { .. })));
     assert!(has(&qe, |i| matches!(i, AggIntent::Rate)));

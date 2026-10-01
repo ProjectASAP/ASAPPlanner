@@ -25,7 +25,7 @@ pub fn evaluate_binary(
     right: f64,
 ) -> Result<crate::values::Value, crate::Error> {
     use crate::{values::Value, Error};
-    use planner_types::pre_asap::{ArithmeticOpKind, BinaryOpKind, CompareOpKind};
+    use planner_types::pre_asap::{ArithmeticOpKind, BinaryOpKind};
     let invalid =
         || Error::Invalid("unsupported binary operation or invalid checked-division domain".into());
     if operator.vector_match.is_some() {
@@ -49,15 +49,28 @@ pub fn evaluate_binary(
         BinaryOpKind::Arithmetic(ref op) => {
             Value::Float64(evaluate_float64_arithmetic(op, left, right))
         }
-        BinaryOpKind::Compare(ref op) => Value::Bool(match op {
-            CompareOpKind::Eq => left == right,
-            CompareOpKind::Ne => left != right,
-            CompareOpKind::Lt => left < right,
-            CompareOpKind::Le => left <= right,
-            CompareOpKind::Gt => left > right,
-            CompareOpKind::Ge => left >= right,
-            _ => return Err(invalid()),
-        }),
+        BinaryOpKind::Compare(ref op) => Value::Bool(compare(op, left, right).ok_or_else(invalid)?),
+        BinaryOpKind::CompareBool(ref op) => {
+            Value::Float64(if compare(op, left, right).ok_or_else(invalid)? {
+                1.
+            } else {
+                0.
+            })
+        }
         _ => return Err(invalid()),
+    })
+}
+
+/// IEEE comparison, as Go's: NaN is unequal to everything, itself included.
+fn compare(op: &planner_types::pre_asap::CompareOpKind, left: f64, right: f64) -> Option<bool> {
+    use planner_types::pre_asap::CompareOpKind;
+    Some(match op {
+        CompareOpKind::Eq => left == right,
+        CompareOpKind::Ne => left != right,
+        CompareOpKind::Lt => left < right,
+        CompareOpKind::Le => left <= right,
+        CompareOpKind::Gt => left > right,
+        CompareOpKind::Ge => left >= right,
+        _ => return None,
     })
 }
