@@ -55,7 +55,7 @@ impl OptimizationPass for MajorPass {
 
         let lifecycle = input.lifecycle;
 
-        // One index per root, in `PlanSpace::roots` order — which is the order
+        // One index per root, in `CandidateLogicalASAPDAGs::roots` order — which is the order
         // the roots went in, which is `entries()` order.
         let entry_indices: Vec<usize> = (0..workload.len()).collect();
         let demand = WorkloadDemand {

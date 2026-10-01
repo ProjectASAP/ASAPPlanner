@@ -43,7 +43,8 @@ use crate::recurrence::{
     CostRate, EvaluationRate, Horizon, RecurrenceError, RecurrenceProfile, UpdateRate,
 };
 use crate::replacement::{
-    CandidateCostOverrides, GlobalSelection, PlanSpace, RealizationError, Replacement,
+    CandidateCostOverrides, CandidateLogicalASAPDAGs, GlobalSelection, RealizationError,
+    Replacement,
 };
 
 /// Summary-maintenance lifecycle shapes supported by the target runtime.
@@ -623,7 +624,7 @@ pub fn enumerate_summary_maintenance_lifecycles<'a>(
 
 /// Internal candidate-costing form. The workload binding supplies temporal
 /// eligibility and data-arrival facts; `profile` supplies effective uses after
-/// DAG path multiplicity has been propagated by `PlanSpace`.
+/// DAG path multiplicity has been propagated by `CandidateLogicalASAPDAGs`.
 #[expect(clippy::too_many_arguments, reason = "internal bound planning context")]
 fn enumerate_with_profile<'a>(
     root: Rc<SummaryNode>,
@@ -732,7 +733,7 @@ fn enumerate_with_profile<'a>(
 /// another choice, that class reverts to independent costs and selection runs
 /// once more.
 pub fn global_selection_with_summary_maintenance_lifecycles<'a, Id>(
-    space: &'a PlanSpace<Id>,
+    space: &'a CandidateLogicalASAPDAGs<Id>,
     demand: WorkloadDemand<'_>,
     now_ms: u64,
     horizon: Option<Horizon>,
@@ -2946,7 +2947,7 @@ mod tests {
         };
         let workload = workload(vec![], vec![repeating(), repeating()], at_rest());
         // Whether each root selected a summary rather than raw recompute.
-        let summaries = |space: &PlanSpace<&str>, entries: &[usize]| {
+        let summaries = |space: &CandidateLogicalASAPDAGs<&str>, entries: &[usize]| {
             let selection = global_selection_with_summary_maintenance_lifecycles(
                 space,
                 WorkloadDemand::new_with_data(&workload, &at_rest(), entries),
@@ -2973,7 +2974,7 @@ mod tests {
     }
 
     #[test]
-    fn normalized_workload_drives_plan_space_recurrence_profiles() {
+    fn normalized_workload_drives_candidate_logical_asap_dags_recurrence_profiles() {
         let root = query_root();
         let space = crate::replacement::search_workload(vec![("dashboard", Rc::clone(&root))]);
         let workload = workload(vec![], vec![repeating()], continuous(1_000, 60_000));

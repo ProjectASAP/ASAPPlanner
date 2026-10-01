@@ -38,7 +38,7 @@ below states.
 
 ### Layer contract
 
-1. **Logical Post-ASAP** (`PlanSpace`) decides what to compute: summary
+1. **Logical Post-ASAP** (`CandidateLogicalASAPDAGs`) decides what to compute: summary
    families, readouts and sharing. It does not decide placement; timing that a
    realization strategy writes while building a candidate is provisional.
 2. **Summary maintenance lifecycle** (Planner) lists the lifecycle choices for
@@ -92,7 +92,7 @@ separate unsupported compilation, deployment infeasibility, missing evidence,
 and a feasible candidate that loses on cost. Absence is not a cost comparison.
 
 For `sum by(job)(rate(m[1m]))`, Rate remains per series before grouped Sum.
-`PlanSpace` offers one such candidate, with a per-series Rate state and a grouped
+`CandidateLogicalASAPDAGs` offers one such candidate, with a per-series Rate state and a grouped
 Sum state. Its lifecycle assignment places it: a retained Sum state finalizes
 Rate and builds Sum within a bounded precompute run; an `Ephemeral` Sum over a
 retained Rate state leaves the Rate readout and Sum in the query DAG. Storing a
@@ -330,7 +330,7 @@ Physical DAG(s)
 
 For the running example, the lifecycle creates two execution boundaries.
 
-These two halves are named as `PhysicalCandidate` names them, `precompute`
+These two halves are named as `PhysicalASAPDAG` names them, `precompute`
 and `query`. *Maintenance* stays the lifecycle's word (section 2): it covers
 how state is built, retained, reused and scheduled. A precompute DAG is the
 physical object that a maintenance lifecycle compiles to, so reusing
@@ -422,7 +422,7 @@ not equivalent. The counter-state build may be another precompute DAG; typed
 state inputs do not imply that a deployment can construct or bind those states.
 
 The shared library exposes `physical_planner::compile_candidates(...)` to lower
-explicit frontier candidates to `PhysicalCandidate { precompute, query,
+explicit frontier candidates to `PhysicalASAPDAG { precompute, query,
 materialized_outputs }`. `select_candidate(...)` accepts deployment feasibility
 and scoped complete-workload costs and chooses the lowest-cost feasible
 candidate. Costs must describe the same workload and planning horizon; missing

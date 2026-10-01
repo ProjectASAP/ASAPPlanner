@@ -5,7 +5,7 @@ use asap_physical_operators::{
     operators::Operator,
     physical_planner::{
         compile, compile_candidate, compile_candidates, cut_candidate, enumerate_frontiers,
-        select_candidate, CandidateCost, CompiledPhysicalDag, InputContract, PhysicalCandidate,
+        select_candidate, CandidateCost, CompiledPhysicalDag, InputContract, PhysicalASAPDAG,
         Source,
     },
     runtime::{Limits, RunContext, Scope},
@@ -15,7 +15,7 @@ use futures::{executor::block_on, StreamExt};
 use planner_types::{post_asap::*, pre_asap::DataType, types::AccuracyTarget, workload::*};
 use std::{collections::BTreeMap, rc::Rc, sync::Arc};
 
-fn grouped_rate_space() -> asap_aware_mapping::PlanSpace<&'static str> {
+fn grouped_rate_space() -> asap_aware_mapping::CandidateLogicalASAPDAGs<&'static str> {
     let workload = PlanningWorkload {
         query_workload: QueryWorkload {
             language: QueryLanguage::PromQL,
@@ -450,7 +450,7 @@ fn enumerated_grouped_rate_candidates_execute_numeric_query_outputs() {
             })
             .map(|node| u64::from(node.id.0))
             .unwrap_or(u64::from(dag.root.0));
-        let physical_candidates = compile_candidates(
+        let physical_asap_dags = compile_candidates(
             &dag,
             BTreeMap::from([(
                 u64::from(state.id.0),
@@ -505,7 +505,7 @@ fn enumerated_grouped_rate_candidates_execute_numeric_query_outputs() {
             })
             .collect();
         let batch = Batch::try_new(schema, rows).unwrap();
-        for physical in physical_candidates {
+        for physical in physical_asap_dags {
             let physical = physical.unwrap();
             let inputs = if let Some(precompute) = &physical.precompute {
                 let source_id = precompute.input_contracts().next().unwrap().0;
@@ -564,10 +564,10 @@ fn recompiled_candidate(
     inputs: &BTreeMap<u64, InputContract>,
     roots: &[u64],
     frontier: &[u64],
-) -> Result<PhysicalCandidate, asap_physical_operators::Error> {
+) -> Result<PhysicalASAPDAG, asap_physical_operators::Error> {
     use asap_physical_operators::plan::Emission;
     if frontier.is_empty() {
-        return Ok(PhysicalCandidate {
+        return Ok(PhysicalASAPDAG {
             precompute: None,
             query: compile(dag, inputs.clone(), roots)?,
             materialized_outputs: BTreeMap::new(),
@@ -582,7 +582,7 @@ fn recompiled_candidate(
     }
     let mut query_inputs = inputs.clone();
     query_inputs.extend(materialized_outputs.clone());
-    Ok(PhysicalCandidate {
+    Ok(PhysicalASAPDAG {
         precompute: Some(precompute),
         query: compile(dag, query_inputs, roots)?,
         materialized_outputs,

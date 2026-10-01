@@ -254,7 +254,7 @@ pub fn compile_rate_ranking(
 /// window. The input is the complete collection of per-series counter states.
 pub fn compile_fixed_window_rate_aggregation(
     dag: &planner_types::post_asap::PostAsapDag,
-) -> Result<PhysicalCandidate, Error> {
+) -> Result<PhysicalASAPDAG, Error> {
     use planner_types::post_asap::{ExactKind, ExecutionTiming, SketchAlgorithm};
     let sources = dag
         .nodes
