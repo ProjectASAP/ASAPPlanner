@@ -1,19 +1,20 @@
 # Sharing Operators Between Pre-ASAP IR and Post-ASAP IR
 
-> - Status: proposed, not implemented. 
-> - Problem statement: [#468](https://github.com/ProjectASAP/ASAPPlanner/issues/468). 
-> - Builds on [Decoupling operators from scalar expressions](decoupling_op_and_expr.md), which splits `QueryExpr` into `NonASAPOp` and `ScalarExpr`. 
-> - Code is referenced by file and function against `main` at `5a32b8b` (after #472, #478, #510).
-> - Timing follows the planner layering of #480 / #509: a node's timing is written from the summary maintenance lifecycle assignment chosen for the DAG, never inferred from the IR (§2.3).
+> Status: proposal, not implemented. Audience: planner developers and designers.
+> Addresses [#468](https://github.com/ProjectASAP/ASAPPlanner/issues/468) and builds on
+> [Decoupling operators from scalar expressions](decoupling_op_and_expr.md).
+> Code references use `main` at `5a32b8b` (after #472, #478 and #510).
 
-**The idea.** Today a post-ASAP plan is glued together from two sets of operator types. 
-This proposal keeps one operator language and makes summary operators extra node kinds in it: any relational operator can sit above a summary, and a summary can read any relational subtree. 
-Nothing is wrapped and nothing is duplicated.
+Use one operator language before and after ASAP optimization. Relational operators
+and summary operators can be children of each other, without `KeepPreAsap` wrappers
+or duplicate relational variants.
 
-`Operator` has two levels, `NonASAP(NonASAPOp)` and `ASAP(ASAPOp)`, rather than one flat
-enum of every variant: frontends, `resolve` and the per-operator export (§6) work on `NonASAP`
-DAGs only, and `NonASAPOp` gives them a precise type for that instead of a run-time check
-on each node.
+`Operator` has two categories: `NonASAP(NonASAPOp)` and `ASAP(ASAPOp)`. This separates
+relational and summary operations while giving both the same child type,
+`Rc<Operator>`. Frontend inputs must contain only `NonASAP` nodes (§3).
+
+Guarantees are derived from the DAG. Execution timings come from an explicit
+lifecycle assignment and are validated before export (§2).
 
 ```
 Today                                            Proposed
@@ -37,14 +38,9 @@ ValueOperation(Project)         ← a copy         NonASAP(Project)
 
 ### 1.1 Unified `Operator` type
 
-Operator attributes differ in how widely they apply. 
-We define the `Operator` type structure based on the breadth of its attributes.
-
-| Applies to | Examples | Defined as |
-|---|---|---|
-| every operator | children, schema, timing, guarantee | methods implemented for `Operator` |
-| one category | for all `NonASAP` operators, guarantee is derived from the children, and the assigned timing is checked against the consuming edge | implementation specified to one enum branch of `Operator` |
-| one operator | `Aggregate.measures`, `SummaryAgg.family` | fields of that variant |
+Common operations—children, schema, guarantee and timing—are methods on `Operator`.
+Each enum branch implements them for its category; variant-specific data, such as
+`Aggregate.measures` and `SummaryAgg.family`, stays on the variant.
 
 ```rust
 pub enum Operator<C: ColState = ColumnId> {
@@ -58,8 +54,8 @@ impl<C: ColState> Operator<C> {   // implemented for every operator
     pub fn output_schema(&self) -> Result<Schema, SchemaError>;  // schema: §2.1
     pub fn guarantee(&self) -> &Slot<Option<ResultGuarantee>>;   // accuracy guarantee: §2.2
     pub fn timing(&self) -> &Slot<ExecutionTiming>;              // execution timing: §2.3
-    pub fn with_guarantee(&self, guarantee: Option<ResultGuarantee>) -> Self;  // Setter of accuracy guarantee
-    pub fn with_timing(&self, timing: ExecutionTiming) -> Self;                // Setter of execution timing
+    pub fn with_guarantee(&self, guarantee: Option<ResultGuarantee>) -> Self;
+    pub fn with_timing(&self, timing: ExecutionTiming) -> Self;
 }
 
 /// `Slot` represents a value that may be unset or set.
@@ -89,24 +85,22 @@ pub fn apply_lifecycle_timings(
 ) -> Result<Rc<Operator>, ExecutionDataStateError>;
 ```
 
-- **Passes copy**: `derive_guarantees` and `apply_lifecycle_timings` return a new tree;
-  nodes are immutable and `with_*` build new ones. Pointers held before a pass
-  (`assembled_nodes`, planner memos) are not valid into its result; lifecycle selection
-  reads the guarantee-derived tree, export reads the timed tree (§2.4).
-- **Passes recompute**: `derive_guarantees` keeps the values set at construction (§2.2)
-  and recomputes every other slot; `apply_lifecycle_timings` overwrites every `timing`
-  slot. Every rewrite runs before them, so running either again gives the same slots.
-- **Equality**: the `timing` slot takes part in `PartialEq` and `Hash`, so CSE never merges
-  two nodes assigned different timings. The `guarantee` slot takes part in neither: it is
-  a function of the subtree, so equal subtrees derive equal guarantees, and
-  `ResultGuarantee` holds `f64` and has no `Hash`.
+- **Immutable passes:** both passes return a new DAG and preserve sharing with one
+  memo per pass across all workload roots. Lifecycle planning uses the
+  guarantee-derived DAG; export uses the timed DAG. Earlier pointers do not identify
+  nodes in those results.
+- **Recomputation:** `derive_guarantees` fills guarantee slots from local evidence
+  and child guarantees. `apply_lifecycle_timings` overwrites timing slots from the
+  assignment. Run rewrites before these passes.
+- **Equality:** timing participates in `PartialEq` and `Hash`; derived guarantees do
+  not. Equal subtrees derive equal guarantees under the same accuracy model and
+  evidence. `ResultGuarantee` contains `f64` and has no `Hash`.
 
-Following diagram conceptually displays the structure of `Operator<C>`:
 ```text
 Operator<C>
 ├─ NonASAP(NonASAPOp<C>)
 │   ├─ children:   Rc<Operator<C>>                  → back to Operator<C>: NonASAP or ASAP
-│   ├─ timing / guarantee 
+│   ├─ timing / guarantee
 │   └─ scalar expressions: Predicate<C> / ProjectItem<C> / SortKey<C> / ScalarBridge / ...
 │                              └─ ScalarExpr<C>: never contains an Operator
 └─ ASAP(ASAPOp<C>)
@@ -116,8 +110,8 @@ Operator<C>
 
 ### 1.2 `NonASAPOp`
 
-`NonASAPOp` is the non-ASAP category of `Operator`.
-It comes from splitting `QueryExpr` into "operator" and "scalar expression" parts ([decoupling doc](decoupling_op_and_expr.md#2-types)). 
+`NonASAPOp` contains the operator variants split from `QueryExpr` in the
+[decoupling proposal](decoupling_op_and_expr.md#2-types).
 
 ```rust
 pub enum NonASAPOp<C: ColState = ColumnId> {
@@ -138,12 +132,12 @@ pub enum NonASAPOp<C: ColState = ColumnId> {
 }
 ```
 
-Every variant also carries the `timing` and `guarantee` slots (§1.1), omitted above. 
+Every variant also carries the `timing` and `guarantee` slots (§1.1), omitted above.
 
 ### 1.3 `ASAPOp`
 
-`ASAPOp` is the ASAP category of `Operator`.
-`ASAPOp` comes from today's `SummaryExpr`: its summary variants, and the summary-specific `ValueOperation` variants.
+`ASAPOp` contains today's summary variants from `SummaryExpr` and the
+summary-specific variants of `ValueOperation`.
 
 ```rust
 pub enum ASAPOp<C: ColState = ColumnId> {
@@ -164,9 +158,11 @@ pub enum ASAPOp<C: ColState = ColumnId> {
 
 Every variant also carries the `timing` and `guarantee` slots (§1.1), omitted above.
 
-**Unused branches**: `SummaryMerge`, `SummarySubtract`, `SummaryDelete`, `SummaryJoin` and `Extension` are built only in tests today. They are migrated, but for safety, we have all their methods return `Unimplemented`.
+`SummaryMerge`, `SummarySubtract`, `SummaryDelete`, `SummaryJoin` and `Extension`
+are currently built only in tests. Migrate their variants, but return `Unimplemented`
+from schema, guarantee, timing and export operations.
 
-Following table shows how some legacy types get expressed in the new framework.
+Legacy types map to the new IR as follows:
 
 | Legacy types | Expressed as |
 |---|---|
@@ -183,7 +179,7 @@ be `Rc<Operator>` to allow free placement:
 
 ```rust
 // After the decoupling doc                      // After this proposal
-Filter { pred: Predicate(ScalarExpr),            Filter { pred: Predicate(ScalarExpr),    
+Filter { pred: Predicate(ScalarExpr),            Filter { pred: Predicate(ScalarExpr),
          child: Rc<NonASAPOp> }                           child: Rc<Operator> }   // NonASAP(..) or ASAP(SummaryEstimate ..)
 ```
 
@@ -194,34 +190,28 @@ cannot replace a branch — e.g. the branches of SQL `ROLLUP` or PromQL `histogr
 
 ## 2. Schema, Guarantee, and Timing
 
-This section discusses three key per-node attributes, `schema`, `guarantee`, and `timing`, as well as how they are stored and filled in the new framework.
+| Attribute | Proposed rule |
+|---|---|
+| `schema` | Computed by `output_schema()` using one schema type for all nodes |
+| `guarantee` | Binding records local evidence; `derive_guarantees()` fills the slots bottom-up |
+| `timing` | Unset during assembly; `apply_lifecycle_timings()` fills the slots from an explicit assignment |
 
-| Field | Meaning | Today | After |
-|---|---|---|---|
-| `schema` | output columns and their types | pre-ASAP: computed by `QueryExpr::output_schema()`<br>post-ASAP: a `SummarySchema` stored on every `SummaryNode` | can be obtained by `output_schema()` |
-| `guarantee` | accuracy bound | pre-ASAP: none<br>post-ASAP: stored on every `SummaryNode` | can be obtained by `guarantee()`<br>binding stores only each operator's own error<br> complete error bound need to be derived by `derive_guarantees()` |
-| `timing` | execution time | pre-ASAP: none<br>post-ASAP, stored: a field on `BinaryOp` / `ValueOperation` / `SummaryMerge`<br>post-ASAP, not stored: `KeepPreAsap` from the consuming edge, `SummaryAgg` from the child. | can be obtained by `timing()`<br>`Unset` after assembly<br>written for every node by `apply_lifecycle_timings()` from the chosen lifecycle assignment (§2.3) |
+A set guarantee of `None` means no guarantee is available. It is different from an
+`Unset` slot, which means the pass has not run.
 
 ### 2.1 Schema: fused into one type
 
-Today schemas of pre-ASAP operators and post-ASAP operators are different:
-- pre-ASAP uses `Schema { columns: Vec<Column>, time_index, unique_keys, closed }` with `Column.dtype: DataType` (plain values only),
-- post-ASAP stores a `SummarySchema { fields: Vec<SummaryField>, time_index }` on every node, with `SummaryField.dtype: SummaryFamilyType` (`Plain(DataType)` or summary state). 
-Now since the two operators types are unified into one, we need a unified schema type as well.
+Pre-ASAP uses `Schema` with plain `DataType` columns; post-ASAP stores a separate
+`SummarySchema` that also supports summary state. Use `Schema` for both:
 
-We implement the new schema type based on the original `Schema` type used in pre-ASAP operators, with two changes:
-
-- `Column` is renamed `Field`, and `Schema.columns` `Schema.fields`: the struct describes
-  a column and holds none of its data. (Arrow and DataFusion use the same names.)
-- `Field.dtype` widens from `DataType` to an enum `FieldType`, which covers both plain data types and ASAP summary types.
-
-`SummarySchema` / `SummaryField` are then redundant and deleted.
+- Rename `Column` to `Field` and `Schema.columns` to `Schema.fields`.
+- Widen `Field.dtype` to `FieldType`, covering plain values and ASAP state.
+- Delete `SummarySchema` and `SummaryField`.
 
 `Schema` keeps the reserved column `PROMQL_SERIES_IDENTITY` (`"$promql_series_identity"`,
 `pre_asap/schema.rs`) and `has_promql_series_identity()`: `maintained_population.rs` uses
 it to decide whether a closed PromQL schema still identifies a series (§7).
 
-Detailed code design is shown below.
 ```rust
 pub enum FieldType { DataType(DataType), ASAPType(ASAPType) }
 pub enum ASAPType {       // SummaryFamilyType without Plain
@@ -248,10 +238,10 @@ impl Field {
 
 ### 2.2 Guarantee: always derived
 
-A guarantee is filled in two steps:
-
-1. **Binding** records local accuracy guarantee: a `SummaryEstimate`'s `local_guarantee` (the sketch's error over an exact input) and an exact `SummaryAgg`'s `exact_rule`. No `guarantee` slot is set yet. To size a sketch and check its target, binding still needs the child's error, as today: it runs `derive_guarantees` on the child with a fresh memo, reads the result, and drops it.
-2. **`derive_guarantees`** fills every slot bottom-up: a node without an `ASAP` descendant is exact, and every other node composes its children's guarantees by its own rule.
+1. Binding records `SummaryEstimate.local_guarantee` (error over exact input) and
+   exact `SummaryAgg.exact_rule`, leaving guarantee slots unset. To size a sketch, it derives
+   the child's guarantee on a temporary copy, reads it, then drops the copy.
+2. `derive_guarantees` fills slots bottom-up using the rules below.
 
 ```
 Project               p99 ±1%    ← the child's
@@ -260,35 +250,27 @@ Project               p99 ±1%    ← the child's
       Scan t          exact      ← no ASAP descendant
 ```
 
-Per node kind:
+| Node | Guarantee rule |
+|---|---|
+| `SummaryEstimate` | Compose `local_guarantee` with the guarantee of the input below `SummaryAgg`; sketch state itself has no guarantee. The local guarantee is `None` if the family has no error model. |
+| `SummaryAgg` | ExactAggregate: compose with the child under `exact_rule`; `ExactKind::Count` stays exact regardless of the child. Sketch state: `Set(None)`. |
+| `NonASAPOp` | Compose child guarantees; exact when there is no ASAP descendant. |
+| `FinalizeExactAccumulator` | Copy the child's guarantee. |
+| `MaintainPopulation` / `ReadPopulation` | Exact. |
+| Unused variants | Return `Unimplemented` (§1.3). |
 
-| Node | Today | After |
-|---|---|---|
-| `SummaryEstimate` | stored at binding: the sketch's own error composed with the child's (`compose_guarantee`) | **derived**: `local_guarantee` composed with the guarantee of the state's input, i.e. the child of the `SummaryAgg` below (the `SummaryAgg` itself has none). `local_guarantee` is set at binding: the sketch's error over an exact input, `None` when the model has no error model for the family |
-| `SummaryAgg` | stored: ExactAggregate family composed with the child's; sketch families `None` | **derived**: ExactAggregate family: exact, composed with the child's under `exact_rule`, except `ExactKind::Count`, exact whatever the child (as today); sketch families `Set(None)`, state has no guarantee |
-| `NonASAPOp` | pre-ASAP `QueryExpr`: none<br>post-ASAP `KeepPreAsap`: exact<br>post-ASAP `ValueOperation` / `BinaryOp` / `RelationalJoin` copies: composed at construction | **derived**: composed from the children; exact if no `ASAP` descendant |
-| `FinalizeExactAccumulator` | copies the child's | **derived**: the child's |
-| `MaintainPopulation` / `ReadPopulation` | stored: exact | **derived**: exact |
-| unused variants | `None`: state has no guarantee of its own | unimplemented (§1.3) |
-  
 ### 2.3 Timing: written from a lifecycle assignment
 
-The logical layer (PlanSpace, binding, assembly) decides *what* to compute. Summary
-materialization decides *when*: it picks a lifecycle per summary state (maintain at
-ingestion time or recompute at query time, with window and retention), and that choice
-fixes the timing of every node that feeds or reads the state. One logical DAG can have
-several assignments; the deployment picks one by its own costs
-([Output layers](../architecture/input-output-workflow.md#output-layers), #480).
+Logical planning decides what to compute. Summary materialization chooses a lifecycle
+for each summary state, including execution timing and retention. One logical DAG can
+have several assignments; the planner selects among them using deployment-provided
+costs, consistent with the [planning-stages proposal](https://github.com/ProjectASAP/ASAPPlanner/pull/509).
 
-The IR never sets a timing: after assembly every `timing` slot is `Unset`.
-`apply_lifecycle_timings` writes the chosen assignment into the slots, top-down per root
-with one shared memo, and validates it (§5). It rejects an assignment that
-
-- makes ingestion work depend on a query-time result,
-- gives a node of fixed kind the wrong timing, e.g. an ingestion-time `SummaryEstimate`,
-- gives a shared node two timings (§4).
-
-Export and physical compilation reject an `Unset` slot: no assignment was applied.
+Assembly leaves every timing slot `Unset`. `apply_lifecycle_timings` writes the
+assignment with one memo across all roots and validates node and edge constraints
+(§5). It rejects ingestion work that depends on query-time results, fixed-kind timing
+violations, and conflicting timings on a shared node. Export and physical compilation
+reject unset slots.
 
 ```
                     assembly        after apply_lifecycle_timings
@@ -298,54 +280,39 @@ Project             Unset           QueryTime
       Scan t        Unset           IngestionTime   ← feeds a maintained state
 ```
 
-Candidates that fix a timing at construction today — exact compositions
-(`OperationPlacement::Read` / `Maintenance`), maintained populations, #472's grouped
-`Rate`→`Sum` pair — each become one logical candidate whose placement is a lifecycle
-choice (§8 stage 5). The **default assignment** reproduces today's timings (`SummaryAgg`
-at ingestion time, everything above a readout at query time), so exported timings do not
-change until lifecycle selection chooses otherwise.
+Exact compositions (`OperationPlacement::Read` / `Maintenance`), maintained
+populations and #472's grouped `Rate`→`Sum` pair currently fix timing during
+construction. Each becomes a logical candidate whose placement is a lifecycle choice
+(§8, stage 5).
 
-Per node kind:
+The default assignment aims to preserve today's timings. It cannot do so when one
+shared node requires both phases; resolving that conflict remains open (§10).
 
-| Node | Today | After |
-|---|---|---|
-| `NonASAPOp` | pre-ASAP `QueryExpr`: none<br>post-ASAP `KeepPreAsap`: from the consuming edge<br>post-ASAP `ValueOperation` / `BinaryOp` copies: a stored field | **assigned**; validated against its consuming edges (§5) |
-| `SummaryAgg` | from the child; ingestion time under `KeepPreAsap` | **assigned** by its state's lifecycle |
-| `FinalizeExactAccumulator` | a stored field, set by the planner | **assigned**; the position allows either time |
-| `SummaryEstimate` | query time, fixed by the kind | **assigned**; validated: query time only |
-| `MaintainPopulation` / `ReadPopulation` | a stored field, always ingestion / query time | **assigned**; validated: ingestion / query time only |
-| unused variants | `SummaryMerge`: a stored field; `Join` / `Subtract` / `Delete`: ingestion time | unimplemented (§1.3) |
+| Node | Timing constraint |
+|---|---|
+| `NonASAPOp` | Assigned timing must satisfy every consuming edge. |
+| `SummaryAgg` | Assigned by the state's lifecycle. |
+| `FinalizeExactAccumulator` | Either phase, subject to its inputs and consumers. |
+| `SummaryEstimate` | Query time only. |
+| `MaintainPopulation` / `ReadPopulation` | Ingestion time / query time only. |
+| Unused variants | Return `Unimplemented` (§1.3). |
 
-A timing, unlike a guarantee, depends on the whole DAG and its assignment, so it is
-applied only after assembly.
+Apply timing after assembly because it depends on the whole DAG and its lifecycle.
 
-### 2.4 Workflow of setting up `guarantee` and `timing`: today vs. after
+### 2.4 Workflow
 
-Today:
+Today, construction and assembly compose guarantees, and export derives remaining
+timings into a side table. The proposed sequence is:
 
-```
-search / binding   each SummaryNode's guarantee is composed when the node is built;
-                   BinaryOp / ValueOperation store their timing
-selection          reads each candidate's stored guarantee against its target
-assembly           assemble_residual builds kept nodes and composes their guarantee;
-                   relink_summary copies the old guarantee onto a relinked SummaryAgg
-lifecycle          reads the root's guarantee
-export             validate_execution_data_states, per root, derives the remaining
-                   timings into a side table and writes them onto the edges
-```
-
-After:
-
-```
-search / binding   sets only what cannot be derived: local_guarantee, exact_rule;
-                   no timing; checks accuracy on a derived copy, keeps the result on
-                   the candidate record (§4), drops the copy
-assembly           builds each root; kept NonASAP nodes stay as they are
-derive_guarantees  per root, one shared memo: fills guarantees bottom-up
-lifecycle          reads the derived guarantee; chooses a lifecycle per summary state
-apply_lifecycle_   per root, one shared memo: writes the assignment's timings
-  timings          top-down, validates them, rejects a shared node assigned two timings
-export             reads the slots; rejects an Unset one
+```text
+search / binding   record local accuracy evidence; leave timing unset
+                   check accuracy on a temporary derived copy (§4)
+assembly           build the selected roots, preserving shared nodes
+derive_guarantees  fill guarantees bottom-up, with one memo across roots
+lifecycle          choose per-state lifecycles using the derived DAG
+apply_lifecycle_timings
+                   write and validate timing, with one memo across roots
+export             read filled slots; reject any Unset slot
 ```
 
 ---
@@ -403,23 +370,17 @@ pub enum Replacement {
 }
 ```
 
-`runtime_support_evidence` (`replacement.rs`) asks the cost model whether the runtime
-supports a candidate, per variant: `Summary` → `summary_support_evidence`, `Rewrite` →
-`Some(true)`. With one `Subtree` variant it dispatches on the root: an `ASAP` root →
-`summary_support_evidence`, a `NonASAP` root → `Some(true)`. `ASAP` nodes below a
-`NonASAP` root were each asked when they were candidates themselves.
+**Runtime support.** `runtime_support_evidence` dispatches on the replacement root:
+`ASAP` uses `summary_support_evidence`; `NonASAP` returns `Some(true)`. Nested ASAP
+nodes were checked when their own candidates were built.
 
-**Candidates stay bottom-up, as today**: a candidate is built on a concrete child plan
-(`realize_child_with`, or each child candidate in `prepare_compositions`), so a chosen
-plan is complete. Where `realize_child_with` falls back to `keep_pre_asap` today, it
-returns the child's original subtree, and assembly keeps it as is.
+**Candidate construction.** Candidates remain bottom-up and contain concrete child
+plans (`realize_child_with`, `prepare_compositions`). The old `keep_pre_asap` fallback
+returns the original child subtree directly.
 
-**Accuracy check during search**: binding sets no `guarantee` slot (§2.2), so the
-candidate filter in `search_workload_with_targets` and `prepare_compositions` run
-`derive_guarantees` on the candidate alone, with a fresh memo, then check its accuracy target. The derived
-copy is dropped; its root guarantee is stored on the candidate's `ReplacementSubDAG`, where
-selection reads it (today's stored `guarantee` moved from the node to the candidate record).
-PlanSpace keeps the original candidate, whose nodes are shared with other queries.
+**Accuracy checks.** Search derives each candidate's guarantee with a fresh memo,
+checks its target, and stores the root guarantee on `ReplacementSubDAG` for selection.
+It drops the derived copy and keeps the original shared candidate in `PlanSpace`.
 
 **Assembly** — one rule replaces `assemble_residual`:
 
@@ -440,37 +401,22 @@ fn assemble(&self, t: &Rc<Operator>) -> Rc<Operator> {
 }
 ```
 
-Then `GlobalSelection::assemble_selected_dag` runs `derive_guarantees` (§2.2) on each
-root it assembles. The `DerivationMemo` lives on `GlobalSelection` next to
-`assembled_nodes`, so roots assembled one call at a time still share nodes.
-`assemble_selected_dag_with_summary_maintenance_lifecycles` plans lifecycles on that
-result, as today: lifecycle planning holds `Rc`s into the plan and reads the root's
-guarantee, so it must see the derived tree. The assignment it chooses is then written
-with `apply_lifecycle_timings` (§2.3, §5).
+`GlobalSelection::assemble_selected_dag` derives guarantees after assembly, sharing
+one `DerivationMemo` across roots. Lifecycle planning reads that derived DAG, then
+`apply_lifecycle_timings` applies the chosen assignment.
 
-`assemble_selected_query` stays the boundary for a query result (#472): it runs
-`assemble_selected_dag`, then `finalize_query_candidate`, which puts a query-time
-`FinalizeExactAccumulator` between maintained exact state and the query-time consumer
-(§2.3). The other callers of `finalize_query_candidate` — binding and the two sides of
-`BinaryOp` and `Join` — keep calling it, on `Rc<Operator>`. Today
-`assemble_selected_dag_with_summary_maintenance_lifecycles` (`summary_maintenance_lifecycle.rs`)
-calls `assemble_selected_dag` directly and skips that step; this proposal leaves that as
-it is (§9).
+`assemble_selected_query` remains the query-result boundary (#472): it calls
+`assemble_selected_dag`, then `finalize_query_candidate` to insert a
+`FinalizeExactAccumulator` where needed. Binding and the `BinaryOp` / `Join` callers
+keep this finalization step. The lifecycle assembly path still bypasses it (§9).
 
-- **Illegal placement** (e.g. a query-time `SummaryEstimate` under a `SummaryAgg`):
-  candidates carry no timing, so nothing is checked when they are built. The check moves
-  to `apply_lifecycle_timings`, which rejects an assignment that places a node illegally.
-  Summary materialization offers only assignments it has validated (today
-  `relink_summary` runs the same check through `validate_execution_data_states_at`), so an
-  error from `apply_lifecycle_timings` on a chosen assignment is a bug, and planning fails
-  with that error.
-- **A shared subtree assigned two timings**, e.g. a query-time `Aggregate` and an
-  ingestion-time `SummaryAgg` reading one `Scan`: both placements are legal, only the
-  sharing is not. `apply_lifecycle_timings` memoizes by pointer and records the timing it
-  wrote; reaching the node again with another timing is an error, and the assignment is
-  rejected like any other illegal one. A subtree assigned one timing stays one `Rc`,
-  within a root or across roots. Nothing is copied: a plan that needs the same subtree
-  in both phases must hold two `Rc`s before the pass (§10).
+Timing validation moves from candidate construction to lifecycle assignment:
+
+- Materialization must offer only valid assignments. Failure when applying a selected
+  assignment is a planning error.
+- A shared node must have one timing across all roots. The pass rejects a conflict;
+  it does not split the node by phase. Plans needing both phases must already contain
+  distinct nodes (§10).
 
 `map_children` is `rebuild_children` from
 `pre_asap/cse.rs`, dispatching to `NonASAPOp::map_children` / `ASAPOp::map_children`.
@@ -484,15 +430,14 @@ child is a `NonASAP` subtree without an `Aggregate` — where `contains_aggregat
 | #468 problem | Resolution |
 |---|---|
 | 1. A `Project` is a `QueryExpr` inside `KeepPreAsap` and a `ValueOperation` outside | one set of types |
-| 2. Nothing outside `KeepPreAsap` can reference the `Scan` inside, so an exact aggregate and a sketch cannot share a scan | `Aggregate` and `SummaryAgg` can point to the same `Scan`. This holds only when both run at the same time, e.g. under an assignment that recomputes the sketch at query time; an assignment that runs them in different phases over one `Rc` is rejected (above). Splitting a multi-measure `Aggregate` into exact + sketch is a binding rule, out of scope (§9) |
+| 2. Exact and summary operators cannot share a scan hidden in `KeepPreAsap` | Both can reference one `Scan` when their timings agree. Different phases require distinct nodes. Splitting a multi-measure aggregate remains out of scope (§9). |
 | 3. `SetOp` and similar have no post-ASAP copy, so no summary below them | `SetOp` takes `None => t`; both children are assembled |
 
 ## 5. Timing: validating the assignment
 
-`validate_execution_data_states` becomes the validation half of `apply_lifecycle_timings`.
-The `ExecutionDataStateAssignment` side table is deleted; instead of deriving a state per
-node, the pass checks the timing the assignment wrote into each slot against the node's
-kind and its consuming edges. Nothing is derived from the consuming edge any more:
+`apply_lifecycle_timings` replaces timing derivation with validation. It checks the
+assigned timing against node kinds and consuming edges; the old
+`ExecutionDataStateAssignment` side table is removed.
 
 | Node | Produced state |
 |---|---|
@@ -517,8 +462,8 @@ The `KeepPreAsap` / `BinaryOp` / `ValueOperation` / `RelationalJoin` arms of tod
 
 ## 6. Export: one post-ASAP node per operator
 
-The four original-operator payloads (`fallback{expression: QueryExpr}`, `binary`,
-`value`, `relational_join`) become one:
+The relational cases of `fallback{expression: QueryExpr}`, `binary`, `value` and
+`relational_join` become one payload:
 
 ```rust
 PostAsapOperatorPayload::Relational {
@@ -528,32 +473,26 @@ PostAsapOperatorPayload::Relational {
 }
 ```
 
-Export emits **one post-ASAP node per `NonASAP` operator**, exactly as it already does
-per `ASAP` operator: children become edges, leaves are `Scan` nodes. No subtree is
-embedded in a node, so there is no `DagInput` placeholder and no fragment. A `NonASAP`
-node shared by two consumers (one `Rc`, kept by CSE, §4) is exported once, with two
-outgoing edges. Physical compilation then corresponds node by node: each post-ASAP node
-lowers to one physical operator, or to a few helper operators numbered from it. `ASAP`
-nodes map one-to-one onto the existing summary payloads;
-`FinalizeExactAccumulator` / `MaintainPopulation` / `ReadPopulation` stay
-`value{operation}`. The `fallback` whole-expression lowering and the `binary` /
-`value::Project` / `relational_join` special cases go; every `Relational` node is lowered
-by one per-operator lowering that reads its inputs from its edges.
+Export emits one node per operator, with children represented by edges. A shared
+operator is exported once. Each relational node stores its kind, scalar expressions
+and parameters in `NonASAPOpKind`; it embeds no child subtree or `DagInput` placeholder.
 
-- **Wire 5 → 6**: three fewer payloads; `fallback` becomes `relational` nodes, one per
-  operator; `output_schema` / `intermediate_schema` become `Schema`. One cutover (§8
-  stage 4), together with the downstream readers.
-- **Timing and guarantee** are read from the node slots: timing as assigned, guarantee as
-  derived. An `Unset` slot is rejected; for timing it means no assignment was applied.
-  An edge's `data_state` is its producer's assigned timing plus the primitive of its kind
-  (§5). `compile_post_asap_dag` splits the precompute and query DAGs by that timing and
-  no longer re-runs data-state validation.
-- **`SummaryMerge`** stays a wire payload, although its planner-side variant is
-  unimplemented (§1.3, §10).
-- **Phases** are per node, from the assigned timing. A phase switch between two
-  `NonASAP` nodes must satisfy §5 (ingestion work cannot read a query-time result);
-  summary materialization places materialization points only at `ASAP` state, so an
-  assignment that would need one elsewhere is rejected when applied.
+Physical compilation lowers each node to one operator or a few helper operators.
+Relational lowering reads inputs from edges, replacing the old whole-expression
+`fallback` and the `binary`, `value::Project` and `relational_join` special cases.
+ASAP nodes retain their summary payloads; `FinalizeExactAccumulator`,
+`MaintainPopulation` and `ReadPopulation` retain `value{operation}`.
+
+- **Wire version 6:** replace relational payloads with per-operator `relational`
+  nodes and use `Schema` for output and intermediate schemas. Update downstream
+  readers together in stage 4 (§8).
+- **Attributes:** export reads derived guarantees and assigned timings, rejecting
+  unset slots. Edge data state combines the producer's timing with its primitive (§5).
+- **Compilation:** `compile_post_asap_dag` splits precompute and query DAGs by assigned
+  timing without repeating validation.
+- **Phase boundaries:** assignments must satisfy §5. This proposal materializes only
+  ASAP state; assignments requiring materialization elsewhere are rejected.
+- **`SummaryMerge`:** keep its wire payload; planner-side support remains open (§10).
 
 ## 7. Other consumers
 
@@ -581,18 +520,31 @@ by one per-operator lowering that reads its inputs from its edges.
 
 `main` builds and passes all tests after every stage.
 
-| Stage | Content | Touches |
+| Stage | Change | Main consumers |
 |---|---|---|
-| 0 Preparation | `Rc` for `Concat.children`; `rebuild_children` → `map_children`; `Column::plain` | `asap-types` |
-| 1 Split | [decoupling doc](decoupling_op_and_expr.md): `NonASAPOp` + `ScalarExpr`; children stay `Rc<NonASAPOp>` | scalar code ([decoupling doc §3](decoupling_op_and_expr.md#3-changes)) |
-| 2 Two levels | §1.1, §1.4: `Operator<C>`, an empty `ASAPOp`, `contains_asap()`, `expect_non_asap()`; child slots become `Rc<Operator<C>>`; every variant gets `timing` / `guarantee` slots, and nodes are built through constructors that leave both `Unset` (`timing` stays `Unset` until an assignment is applied) | every crate incl. `asap-planner`; the same mechanical change everywhere |
-| 3 One schema | §2.1: `Column` → `Field` and `Schema.columns` → `fields` (serde keeps the name `columns` until stage 4); `FieldType`, `ASAPType`, `PlainField`, `Schema` everywhere except the `post_asap_dag.rs` wire types, which keep `SummarySchema` until stage 4. **No wire change** | `asap-types` + schema construction in every crate |
-| 4 New types | fill `ASAPOp`; `ASAP` arms of `output_schema`; `derive_guarantees` and `apply_lifecycle_timings` (§2.2, §2.3, §5); the entry check (§3); `flatten(&SummaryNode) -> Rc<Operator>` so export runs on the new types, copying each node's guarantee into its slot and applying today's timings as the initial assignment, so the export is unchanged; wire types become `Schema`, and `Schema.fields` serializes as `fields`. Wire → 6. **The only wire-breaking stage**; merged together with ASAPQuery-backend and ASAPCollector | `asap-types`, `devtools`, viewer |
-| 5 Planner | §4: candidates and assembly on `Rc<Operator>`; §7 moves to the new types; delete `flatten`. Timing moves to the lifecycle: binding and candidates set none; the candidates that fix a timing today (§2.3) become one logical candidate each, their placement a lifecycle choice; paths without lifecycle selection apply the default assignment that reproduces today's timings | `asap-aware-mapping`, `asap-planner` |
-| 6 Cleanup | delete `SummaryExpr`, `SummaryNode`, extra `ValueOperation` variants, `ExactOperation`, `post_asap/cse.rs`, and today's timing fallbacks (`produced_data_state` defaults, `validate_execution_data_states_at`); `PlanOutput::dags()` and `ParsedWorkload` lose their `SummaryNode` / `QueryExpr` types; update `post-asap-ir.md` (execution phase comes from the assignment), `physical-plan-integration.md`, `updated_interface_with_pluggable_optimization.md`, developer and viewer docs | `asap-planner`, docs |
+| 0. Prepare | Give `Concat.children` `Rc` identity; rename `rebuild_children` to `map_children`; add `Column::plain`. | `asap-types` |
+| 1. Split | Separate `NonASAPOp` and `ScalarExpr`; keep `Rc<NonASAPOp>` children. | [Scalar consumers](decoupling_op_and_expr.md#3-changes) |
+| 2. Unify operators | Add `Operator`, an empty `ASAPOp`, entry helpers, and unset attribute slots. Widen children to `Rc<Operator>`. | All crates |
+| 3. Unify schemas | Introduce `Field`, `FieldType`, `ASAPType` and the shared `Schema`. Keep wire types and serialized names unchanged. | Schema consumers |
+| 4. Switch export | Fill `ASAPOp`, add attribute passes and entry validation, and export the new IR with wire version 6. | Types, devtools, viewer, backend, collector |
+| 5. Migrate planning | Build candidates and assemble directly on `Rc<Operator>`; move timing choices to lifecycle planning; migrate §7 consumers. | Mapping and planner crates |
+| 6. Remove legacy code | Delete old IR types, duplicate operators, CSE and timing fallbacks; update architecture and developer docs. | All remaining consumers |
 
-Wrapping pre-ASAP operators in `ValueOperation` first is not planned: stage 4 gives
-the same early flat export, on the final types.
+Stage 4 is the only wire-breaking stage and must land with ASAPQuery-backend and
+ASAPCollector updates. A temporary `flatten(&SummaryNode) -> Rc<Operator>` adapter
+copies existing guarantees and applies existing timings where valid. Wire schemas
+switch from `SummarySchema` to `Schema`, and `Schema.fields` serializes as `fields`
+instead of `columns`.
+
+Stage 5 deletes `flatten`. Binding leaves timing unset; lifecycle planning handles
+the placement choices listed in §2.3. Paths without lifecycle selection use the
+default assignment, subject to the shared-node conflict in §10.
+
+Stage 6 removes `SummaryExpr`, `SummaryNode`, duplicate `ValueOperation` variants,
+`ExactOperation`, `post_asap/cse.rs`, `produced_data_state` defaults and
+`validate_execution_data_states_at`. `PlanOutput::dags()` and `ParsedWorkload` finish
+moving to `Operator`. Update `post-asap-ir.md`, `physical-plan-integration.md`,
+`updated_interface_with_pluggable_optimization.md`, and developer/viewer docs.
 
 **Tests**:
 
@@ -603,7 +555,7 @@ the same early flat export, on the final types.
 - A shared `Scan` assigned two timings is rejected; assigned one timing, it stays one `Rc`.
 - A node shared by two roots, assembled in two calls, is still one `Rc` after `derive_guarantees` and `apply_lifecycle_timings`.
 - After both passes no slot is `Unset`; export rejects a tree with one, and a tree with no assignment applied.
-- Exported timings of today's plans are unchanged under the default assignment.
+- The default assignment preserves existing timings where valid; mixed-phase sharing is covered by the open question in §10.
 - `apply_lifecycle_timings` rejects an assignment that puts ingestion work over a query-time result, and one that gives a `SummaryEstimate` ingestion time.
 - A kept `NonASAP` node (e.g. a `SetOp`) reports the guarantee composed from its assembled children.
 - Each unused branch (§1.3) returns `Unimplemented` from `output_schema`, `derive_guarantees`, `apply_lifecycle_timings` and export.
@@ -629,17 +581,12 @@ the same early flat export, on the final types.
 
 ## 10. Open questions
 
-- `LifecycleAssignment` (§1.1): #482 adds `SummaryMaintenanceLifecyclePlan::execution_timed_dag()`,
-  which expands per-state lifecycle choices into per-node timings. This proposal should
-  take that type as the assignment rather than define its own.
-
-- Does ASAPQuery insert `SummaryMerge` only on the exported post-ASAP DAG, or through ASAPPlanner's
-  post-ASAP types? The planner-side variant is unimplemented (§1.3).
-
-- Workload CSE can share one `Scan` between a query whose `SummaryAgg` is maintained at
-  ingestion time and another whose `Aggregate` runs at query time. Today `KeepPreAsap`
-  takes its timing from the consuming edge, so the two sides are effectively separate;
-  after this proposal the default assignment is rejected on that `Rc` (§4). Either
-  assembly un-shares a `NonASAP` subtree that `SummaryAgg` reads, or summary
-  materialization must treat the shared scan as one state with one lifecycle. Not
-  decided here.
+- **Assignment type:** reuse the type returned by #482's
+  `SummaryMaintenanceLifecyclePlan::execution_timed_dag()` to expand state lifecycles
+  into per-node timings, rather than define a competing type.
+- **Summary merge:** does ASAPQuery insert `SummaryMerge` only in the exported DAG,
+  or through planner-side types? The latter remains unimplemented.
+- **Mixed-phase sharing:** one shared `Scan` may feed an ingestion-time `SummaryAgg`
+  and a query-time `Aggregate`. The default assignment then conflicts. Decide whether
+  assembly creates separate subtrees or materialization gives the shared state one
+  lifecycle. The timing pass itself must not silently split it.

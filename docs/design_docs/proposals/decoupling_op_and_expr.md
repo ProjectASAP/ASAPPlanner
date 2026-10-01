@@ -1,16 +1,16 @@
 # Decoupling Operators From Scalar Expressions
 
-> Status: proposed, not implemented. Companion to [Operator sharing](operator-sharing.md):
-> this document splits `QueryExpr`; that one builds the shared operator language on the
-> result. Code is referenced by file and function; counts are approximate, measured on
-> `main` at `5a32b8b`.
+> Status: proposal, not implemented. Audience: planner developers and designers.
+> Companion to [Operator sharing](operator-sharing.md). Code references use `main`
+> at `5a32b8b`.
 
-**The idea.** `QueryExpr` holds two different kinds of node in one enum. This proposal
-splits it into `NonASAPOp` (operators) and `ScalarExpr` (scalar expressions).
+Split `QueryExpr` into `NonASAPOp` for table-producing operators and `ScalarExpr`
+for expressions evaluated within an operator. This makes invalid combinations,
+such as a literal used as a filter's table input, unrepresentable.
 
 ```
 Today                                        Proposed
-Filter { pred:  Rc<QueryExpr>,               Filter { pred:  Predicate(ScalarExpr),    
+Filter { pred:  Rc<QueryExpr>,               Filter { pred:  Predicate(ScalarExpr),
          child: Rc<QueryExpr> }                       child: Rc<NonASAPOp> }
 ```
 
@@ -26,18 +26,14 @@ Project                              ← operator: outputs a table
     child: Scan lineitem             ← operator
 ```
 
-- An **operator** outputs a table. It is a node of the plan: the planner can replace it,
-  share it, or put a summary under it.
-- A **scalar expression** has no table of its own. `Column(4)` means "column 4 of the
-  input of the operator I sit in"; outside that operator it means nothing.
+Operators produce tables and can be replaced or shared by the planner. Scalars
+compute values within the schema chosen by their operator; `Column(4)` has no meaning without
+that context.
 
-Today both are `QueryExpr` variants, told apart only by field position. The code already
-separates them, but only by convention:
+Today both are `QueryExpr` variants, separated only by convention:
 
-- `QueryExpr::output_schema` returns `ScalarHasNoRowSchema` for all 13 scalar variants
-  (`query_expr.rs`), so `Filter { child: Literal(2) }` compiles and fails at run time.
-- `pre_asap/cse.rs` never descends into a scalar, and repeats a "scalar: nothing to do"
-  arm in each of its three traversals; `canonicalize` likewise never rewrites one.
+- `Filter { child: Literal(2) }` compiles, then fails with `ScalarHasNoRowSchema`.
+- CSE and canonicalization skip scalars using repeated special-case branches.
 
 ## 2. Types
 
@@ -53,9 +49,13 @@ pub enum ScalarExpr<C: ColState = ColumnId> {
     Column(C), Literal(ScalarValue), Compare { .. }, BoolAnd(..), BoolOr(..), Not(..), IsNull(..), IsNotNull(..),
     Cast { .. }, InList { .. }, FunctionCall { .. }, Arithmetic { .. }, Case { .. }, CurrentTimestamp,
 }
-pub struct Predicate<C>(pub ScalarExpr<C>);   // scalars are held by value: CSE hashes them as plain data, nothing shares them
+pub struct Predicate<C>(pub ScalarExpr<C>);
 pub struct ProjectItem<C> { pub alias: Option<String>, pub expr: ScalarExpr<C> }
 ```
+
+Operators own their scalar fields by value. CSE hashes these fields as data; scalars
+are not shared DAG nodes. Recursive scalar fields still require indirection such as
+`Box` or `Vec`; the type sketches omit those details.
 
 ```text
 NonASAPOp<C>
@@ -65,49 +65,50 @@ NonASAPOp<C>
                          └─ children: ScalarExpr<C> only, never an operator
 ```
 
-- **Naming**: `NonASAPOp` is named for [Operator sharing](operator-sharing.md), where it
-  becomes the non-ASAP category of `Operator`. `QueryExpr` goes away.
-- **Scalar fields**: `Filter.pred`, `Join.pred`, `Aggregate.having` (`Predicate`);
-  `Project.cols` (`ProjectItem`); `Sort` / `SQLWindowFunc` sort keys (`SortKey`);
-  `SQLWindowFunc.args`; `PromqlRelabel.value`.
-- **Borderline variants** go by position, not by look. `PromqlScalarBridge`,
-  `EvalTimestamp`, `PromqlScalarFromVector` and `PromqlVectorFromScalar` sit in operator
-  position with a row schema (e.g. a `BinaryOp` operand) → `NonASAPOp`. `CurrentTimestamp`
-  (SQL `NOW()`) is produced only by scalar lowering (`df_expr_to_unresolved`); its only
-  operator-position use is in a unit test → `ScalarExpr`.
-- **Gain**: neither a scalar in operator position nor an operator in scalar position is
-  expressible, and `ScalarHasNoRowSchema` is deleted.
+`QueryExpr` is removed. `NonASAPOp` is named for its role in the companion proposal.
+Scalar fields include predicates (`Filter`, `Join`, `HAVING`), project items, sort
+keys, window-function arguments and relabel values.
+
+Classify ambiguous variants by their position and schema:
+
+- `ScalarBridge`, `EvalTimestamp`, `PromqlScalarFromVector` and
+  `PromqlVectorFromScalar` remain operators because they have row schemas.
+- `CurrentTimestamp` (SQL `NOW()`) is a scalar. Its only operator-position use today
+  is a unit test.
+
+The split prevents scalars in operator positions and operators in scalar positions,
+eliminating `ScalarHasNoRowSchema`.
 
 ## 3. Changes
 
 | Location | Change |
 |---|---|
 | frontend expression lowering (`df_expr_to_unresolved`, PromQL `walk`) | scalar positions build `ScalarExpr`, operator positions `NonASAPOp` |
-| `resolve`, `column_resolution.rs` | already separate: `resolve` walks operators and calls `resolve_expr` for scalars. Each scalar resolves against one schema its operator picks (usually the child's output; the `Aggregate`'s output for `HAVING`, left + right for a `Join` predicate, the `Scan`'s own schema for `Scan` predicates). The split only changes their signatures: `resolve` takes `NonASAPOp`, `resolve_expr` takes `ScalarExpr`. Leaf schemas are still inferred from scalar column references across the whole tree |
+| `resolve`, `column_resolution.rs` | `resolve` takes `NonASAPOp`; `resolve_expr` takes `ScalarExpr`. Schema selection and leaf-schema inference are unchanged. |
 | `canonicalize`, `pre_asap/cse.rs` | the "scalar: nothing to do" arms go; scalars are hashed as plain data |
 | `scalar_signature.rs`, `infer_expr_type` | take `ScalarExpr` |
 | `QueryExpr::output_schema` | becomes `NonASAPOp::output_schema`; the scalar arms and `ScalarHasNoRowSchema` go |
 
+Scalars resolve against the schema chosen by their operator: usually the child's
+output, the aggregate output for `HAVING`, both inputs for a join predicate, or the
+scan schema for a scan predicate. Leaf schemas still use column references across
+the whole tree.
+
 ## 4. Implementation and tests
 
-This is stage 1 of the joint plan ([Operator sharing §8](operator-sharing.md#8-stages-and-tests)):
-children stay `Rc<NonASAPOp>`; operator sharing widens them to `Rc<Operator>` in its
-stage 2.
+This is [stage 1 of operator sharing](operator-sharing.md#8-stages-and-tests).
+Children stay `Rc<NonASAPOp>` until stage 2 widens them to `Rc<Operator>`.
 
-**No wire change.** The `fallback` payload serializes a `QueryExpr`, externally tagged.
-Variant names are kept, so a tree serializes the same; `ScalarBridge` keeps the name
-`PromqlScalarBridge` with `#[serde(rename)]`.
+The wire format stays unchanged: preserve the externally tagged variant names,
+including `PromqlScalarBridge` via `#[serde(rename)]`.
 
-- Existing tests pass unchanged apart from construction syntax.
-- Tests that place a scalar in operator position no longer compile and are rewritten or
-  deleted: the `CurrentTimestamp` unit test, the `ScalarHasNoRowSchema` tests, and the
-  `post_asap_dag.rs` tests using `QueryExpr::Literal` as a `fallback` expression.
+Update construction syntax in existing tests. Rewrite or remove tests that put
+scalars in operator positions: the `CurrentTimestamp`, `ScalarHasNoRowSchema`, and
+literal-as-`fallback` cases.
 
 ## 5. Limits
 
-The split relies on no scalar containing an operator. That holds today: SQL
-`IN (SELECT …)` / `EXISTS` in a filter lower to a semi-join (`lower_filter`), and every
-other subquery-valued expression is rejected (`frontend-sql/src/sql/expr.rs`). Supporting
-a scalar subquery (`WHERE x > (SELECT avg(x) …)`) would add `ScalarExpr::Subquery(Rc<..>)`,
-make the two types mutually recursive, and require CSE and the planner to look inside
-scalars.
+Scalars currently contain no operators: filter `IN (SELECT …)` and `EXISTS` lower
+to semi-joins; other subquery-valued expressions are rejected
+(`frontend-sql/src/sql/expr.rs`). Supporting scalar subqueries later would require
+mutually recursive types and traversal into scalars by CSE and the planner.
