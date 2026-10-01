@@ -98,7 +98,7 @@ the existing query and summary models, but the sketches combine several changes:
 | Remove relational-subplan wrappers and duplicate relational operations | Make all dependencies visible and give each ordinary operation one definition. |
 | Separate scalar expressions from operators | A related proposal, described in the [companion document](decoupling_op_and_expr.md); not a consequence of categorization alone. |
 | Introduce `local_guarantee` and `exact_rule` on summary operations | Additional accuracy design: retain local evidence separately from the derived subtree guarantee (§2.2). These are not fields on today's corresponding summary operations. |
-| Assign execution timing through lifecycle planning | Additional planning design (§2.3), replacing timing stored or inferred differently by today's operators. |
+| Let physical/lifecycle planning decide when each node executes | Additional planning design (§2.3): logical construction leaves timing undecided; planning chooses ingestion-time or query-time execution under the workload constraints. |
 
 Existing operation semantics and field names should be retained unless a change is
 identified explicitly. The sketches use descriptive shorthand in several places;
@@ -315,6 +315,20 @@ not the guarantee of a larger query: its input may already be approximate, and
 later operations may change the error. The planner must compose accuracy through
 the actual computation graph.
 
+**Existing concepts versus proposed fields.** The current code already calculates
+local guarantees and uses accuracy-composition rules, but neither `local_guarantee`
+nor `exact_rule` is a field on the corresponding summary operation today:
+
+| Proposed field | Meaning | Current code | What this proposal changes |
+|---|---|---|---|
+| `SummaryEstimate.local_guarantee` | The guarantee for this summary readout over exact input; it excludes upstream error. | `AccuracyModel.local_guarantee(...)` already computes it. It is used when composing the result guarantee, rather than retained on the estimation operation. | Retain that local evidence so accuracy can be derived from the assembled graph's actual inputs. |
+| `SummaryAgg.exact_rule` | The rule for propagating input error through an exact aggregate. “Exact” describes the operation, not a promise that approximate inputs become exact. | Composition rules already exist. Exact-aggregate binding selects a rule from the aggregate's registered semantics; there is no `exact_rule` field. | Retain the selected rule on the operation so later derivation does not need to recover the original binding context. |
+
+Today, the composed result is stored as the summary node's `guarantee`. The proposed
+fields retain inputs to that calculation; they do not replace the complete result
+guarantee. Adding them is an accuracy-design change, not a requirement of dividing
+operators into `NonASAP` and `ASAP`.
+
 For example, a KLL estimate over exact input can carry the sketch's guarantee. If
 that input is approximate, the estimate must also account for the upstream error.
 The summary state itself is not a query answer and need not have a value-level
@@ -331,6 +345,22 @@ as proof that a query's accuracy target is met. Candidate assessment and final-p
 validation must use the same accuracy semantics.
 
 ### 2.3 Timing is a planning choice
+
+**Who decides when a node executes?** This concerns responsibility for choosing
+an execution phase, not memory ownership or ownership of the data.
+
+| Current behavior | Proposed behavior |
+|---|---|
+| Some operations receive timing during construction; other timings are inferred from their inputs or consuming edges. | Logical construction describes what to compute. Physical/lifecycle planning explicitly chooses when it runs, using the complete workload and execution constraints. |
+
+For example, a KLL summary may be maintained at ingestion time or built at query
+time. The presence of a summary-build node does not itself choose either option.
+The planner compares those alternatives; the selected lifecycle determines timing
+for the build and its dependencies. Operator-specific restrictions still apply,
+such as summary estimation running at query time.
+
+This changes where the timing decision is made. It is a separate planning change,
+not an automatic consequence of putting operators into two categories.
 
 The same logical summary can be maintained as data arrives or computed when a query
 needs it. Its position in the graph alone does not choose between these behaviors.
