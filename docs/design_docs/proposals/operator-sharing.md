@@ -34,9 +34,8 @@ Post-ASAP projection                       Project
 
 Today the two projections need separate representations, and the scan is hidden
 inside the wrapped subplan. In the proposed graph, both projections use the same
-operator definition and the scan is directly visible. An exact aggregate can also
-consume that scan when sharing is valid, as shown in §4. Similarly, a union can
-consume summary estimates without needing a separate post-ASAP union definition.
+operator definition and the scan is directly visible. A union can likewise consume
+summary estimates without needing a separate post-ASAP union definition.
 
 The design removes these representation barriers. It makes composition and sharing
 possible; whether a particular rewrite or shared computation is valid still depends
@@ -69,7 +68,8 @@ operator kinds.
 
 `SummaryMerge`, `SummarySubtract`, `SummaryDelete`, `SummaryJoin` and `Extension`
 are reserved in the proposed planner model; listing them does not establish planner
-or runtime support. Summary composition remains an open design question (§7).
+or runtime support. Defining new summary-composition semantics is outside this
+proposal (§6).
 
 `NonASAPOp` and `ASAPOp` describe the operation performed by a node. Inputs in both
 categories connect to `Operator` nodes, so either category can consume the other
@@ -97,8 +97,7 @@ the existing query and summary models, but the sketches combine several changes:
 | Give both categories inputs that refer to `Operator` nodes | Allow ordinary and summary operations to compose directly, without a wrapper hiding their dependencies. |
 | Remove relational-subplan wrappers and duplicate relational operations | Make all dependencies visible and give each ordinary operation one definition. |
 | Separate scalar expressions from operators | A related proposal, described in the [companion document](decoupling_op_and_expr.md); not a consequence of categorization alone. |
-| Introduce `local_guarantee` on summary estimation | Additional accuracy design: retain local evidence separately from the derived subtree guarantee (§2.2). This field does not exist on today's summary estimation operation. |
-| Let physical/lifecycle planning decide when each node executes | Additional planning design (§2.3): logical construction leaves timing undecided; planning chooses ingestion-time or query-time execution under the workload constraints. |
+| Represent execution timing chosen during physical planning | Follow the planning-stage design in [#509](https://github.com/ProjectASAP/ASAPPlanner/pull/509), rather than introduce a new timing policy here (§2.3). |
 
 **Naming and compatibility.** The sketches retain current operation, field and
 payload-type names. `NonASAPOp`, `ASAPOp` and the companion proposal's `ScalarExpr`
@@ -118,9 +117,6 @@ The following changes are explicit:
 - `Limit.partition_by` comes from the existing post-ASAP limit. Applying that field
   to the unified operator remains an explicit design choice, not new functionality
   implied by a rename. `SQLWindowFunc.frame` retains its current optional form.
-- `SummaryEstimate.local_guarantee` is a proposed new field, named after the existing
-  accuracy-model concept and using `ResultGuarantee`. It does not exist on today's
-  summary estimation operation (§2.2).
 
 **Proposed data structures.** These sketches describe operation-specific data using
 current names. `Rc<Operator>` represents a shared input edge; no new reference type
@@ -194,7 +190,6 @@ enum ASAPOp {
     },
     SummaryEstimate {
         summary_input: Rc<Operator>, query: SketchQuery,
-        local_guarantee: Option<ResultGuarantee>, // proposed new field
     },
     FinalizeExactAccumulator { child: Rc<Operator> },
     MaintainPopulation { child: Rc<Operator>, population: MaintainedPopulation },
@@ -211,7 +206,7 @@ enum ASAPOp {
 }
 ```
 
-The summary fields distinguish state construction, readout and accuracy evidence:
+The summary fields distinguish state construction and readout:
 
 | Field | Design meaning |
 |---|---|
@@ -220,7 +215,6 @@ The summary fields distinguish state construction, readout and accuracy evidence
 | `reduction` | Which input entities contribute to each logical result |
 | `grouping` | Whether those groups use separate state instances or a supported shared structure |
 | `query` / `readout` | The result requested from summary or maintained-population state |
-| `local_guarantee` | Local accuracy evidence, not the final guarantee of the complete subtree |
 | `population` | The population whose membership and values are maintained |
 
 Schema, derived accuracy and execution timing describe every `Operator`, regardless
@@ -282,133 +276,54 @@ series identity where relevant. Sharing operators must not change SQL or PromQL
 meaning. After a rewrite, schemas must describe the new inputs rather than the plan
 that was replaced.
 
-### 2.2 Accuracy follows the computation
+### 2.2 Preserve existing accuracy semantics
 
-A summary's local error describes its behavior over an exact input. That alone is
-not the guarantee of a larger query: its input may already be approximate, and
-later operations may change the error. The planner must compose accuracy through
-the actual computation graph.
+The unified representation must preserve the existing accuracy model, composition
+rules and result guarantees. An operation's guarantee must still account for its
+actual inputs; unknown accuracy must not be treated as exactness.
 
-**Existing concept versus proposed field.** The current code already calculates
-local guarantees, but `local_guarantee` is not a field on summary estimation today:
+This proposal adds no accuracy fields or new guarantee-calculation workflow.
+Changing the operator representation must not change the accuracy meaning of the
+same computation.
 
-| Proposed field | Meaning | Current code | What this proposal changes |
-|---|---|---|---|
-| `SummaryEstimate.local_guarantee` | The guarantee for this summary readout over exact input; it excludes upstream error. | `AccuracyModel.local_guarantee(...)` already computes it. It is used when composing the result guarantee, rather than retained on the estimation operation. | Retain that local evidence so accuracy can be derived from the assembled graph's actual inputs. |
+### 2.3 Timing follows the planning-stage design
 
-Today, the composed result is stored as the summary node's `guarantee`. The proposed
-`local_guarantee` field retains one input to that calculation; it does not replace
-the complete result guarantee. Adding it is an accuracy-design change, not a
-requirement of dividing operators into `NonASAP` and `ASAP`.
+The [planning-stage design in #509](https://github.com/ProjectASAP/ASAPPlanner/pull/509)
+separates logical decisions about what to compute from physical decisions about how
+and when to compute it. This proposal follows that division.
 
-Exact aggregates continue to use the existing accuracy-composition rules. This
-proposal does not add a field to store those rules on the operator.
+For example, a KLL summary build may execute at ingestion time or query time,
+depending on the materialization choice. The unified operator representation must
+carry the chosen execution timing without requiring separate operator definitions
+for the two phases.
 
-For example, a KLL estimate over exact input can carry the sketch's guarantee. If
-that input is approximate, the estimate must also account for the upstream error.
-The summary state itself is not a query answer and need not have a value-level
-accuracy guarantee.
-
-Ordinary exact computations remain exact when their inputs and operation semantics
-justify it. Exact accumulator finalization preserves the established guarantee.
-Special cases, such as exact counting of the rows actually received, retain their
-operation-specific rules.
-
-Distinguish an assessment that has not happened from an assessment that found no
-supported guarantee. Missing accuracy evidence cannot be treated as exactness or
-as proof that a query's accuracy target is met. Candidate assessment and final-plan
-validation must use the same accuracy semantics.
-
-### 2.3 Timing is a planning choice
-
-**Who decides when a node executes?** This concerns responsibility for choosing
-an execution phase, not memory ownership or ownership of the data.
-
-| Current behavior | Proposed behavior |
-|---|---|
-| Some operations receive timing during construction; other timings are inferred from their inputs or consuming edges. | Logical construction describes what to compute. Physical/lifecycle planning explicitly chooses when it runs, using the complete workload and execution constraints. |
-
-For example, a KLL summary may be maintained at ingestion time or built at query
-time. The presence of a summary-build node does not itself choose either option.
-The planner compares those alternatives; the selected lifecycle determines timing
-for the build and its dependencies. Operator-specific restrictions still apply,
-such as summary estimation running at query time.
-
-This changes where the timing decision is made. It is a separate planning change,
-not an automatic consequence of putting operators into two categories.
-
-The same logical summary can be maintained as data arrives or computed when a query
-needs it. Its position in the graph alone does not choose between these behaviors.
-Logical planning therefore leaves timing undecided. Physical planning chooses
-materialization and lifecycle behavior, then determines execution phases across the
-complete graph.
-
-The planner evaluates alternatives using deployment-provided cost and accuracy
-models and capabilities. The deployment executes the selected plan, consistent with
-the [planning-stages proposal](https://github.com/ProjectASAP/ASAPPlanner/pull/509).
-
-A valid timing assignment must satisfy these constraints:
-
-- Ingestion-time work cannot depend on a query-time result.
-- Summary estimation runs at query time. Population maintenance and readout run at
-  ingestion time and query time, respectively.
-- A shared computation has one execution phase compatible with all its consumers.
-  A single producer cannot simultaneously mean two separate executions.
-- Stored state remains available for as long as its consumers need it.
-
-This proposal covers materialization at summary-state boundaries. Materializing
-arbitrary ordinary intermediate results requires a separate design.
+The representation must preserve the resulting execution constraints: ingestion-time
+work cannot depend on query-time results, and consumers must receive values or state
+that are available when needed. Materialization choices, retention and plan selection
+remain governed by #509; this document does not define another lifecycle policy.
 
 ## 3. Planning responsibilities
 
-The common representation separates what a plan computes from how it executes:
+These are the stages defined in
+[#509](https://github.com/ProjectASAP/ASAPPlanner/pull/509), shown here only to explain
+how they use the common operator model:
 
-| Responsibility | Required result |
+| Stage from #509 | Use of the unified representation |
 |---|---|
-| Frontend translation | An ordinary query graph preserving source-language semantics |
-| Logical optimization | Exact and summary-based alternatives, including legal shared computations |
-| Candidate assessment | Accuracy and capability evidence for the actual candidate graph |
-| Physical and lifecycle planning | Executable alternatives with materialization, retention and compatible timing |
-| Plan selection | A valid plan chosen using workload-level costs and requirements |
-| Export and execution | The selected graph with explicit dependencies and completed assessments |
+| Frontends | Produce a graph containing only `NonASAP` operators, preserving source-language semantics. |
+| Logical ASAP-aware optimization | Form candidate graphs containing ordinary and summary operators, with no wrappers hiding their dependencies. |
+| Physical ASAP-aware optimization | Determine executable alternatives, including materialization and execution timing, for those candidate graphs. |
+| Plan selection | Evaluate complete physical candidates using workload requirements and deployment-provided models and capabilities. |
+| Deployment execution | Execute the selected graph, preserving its dependencies and assigned phases. |
 
-Ordinary operators remain in the graph when their inputs are replaced by summary
-computations. For example, replacing an aggregate below a projection must not require
-replacing the projection with a separate post-ASAP operator.
+Ordinary operators remain the same operations when their inputs are replaced by
+summary computations. Replacing an aggregate below a projection, for example, does
+not require a separate post-ASAP projection definition.
 
-Changing a candidate's inputs can change its schema, accuracy and legal timing.
-Those properties must be checked against the resulting graph. A plan with unresolved
-execution timing or an unfinished accuracy assessment is not ready for export.
+This document changes the representation used by these stages, not their search,
+accuracy, costing or selection policies.
 
-This proposal changes the representation, not the search strategy. It does not
-require a new enumeration algorithm or change when candidates commit to particular
-child plans.
-
-## 4. Example: one scan serving exact and approximate queries
-
-Consider an exact average and an approximate p99 over the same input interval.
-Once a rewrite exposes the two computations, the common model can express:
-
-```text
-       ┌→ Exact average ─────────────────────→ query A
-Scan ──┤
-       └→ KLL summary build → p99 estimation → query B
-```
-
-If both branches run at query time, they may share the scan. Computing accuracy and
-assigning timing must retain that one producer for both consumers.
-
-If the KLL is maintained at ingestion time while the exact average reads raw data at
-query time, the depicted scan cannot serve both phases as one execution. The plan
-needs separate scans or a different lifecycle that makes sharing valid. The planner
-must represent that choice explicitly; timing validation rejects the conflicting
-shared plan.
-
-The representation enables the shared plan but does not supply the rewrite that
-splits a multi-measure aggregate into these branches. That rewrite is outside this
-proposal. How planning resolves the mixed-phase case remains open (§7).
-
-## 5. Export preserves the graph
+## 4. Export preserves the graph
 
 Export one node per operator and represent its input dependencies as edges. Export
 a shared producer once, with edges to all its consumers.
@@ -423,43 +338,35 @@ operations, but must preserve its dependencies and meaning. The execution layer
 does not invent missing planning decisions.
 
 Changing the exported representation requires coordinated adoption by the planner
-and downstream readers. Representation unification must preserve query semantics;
-it does not by itself guarantee unchanged timings for plans with unresolved sharing
-conflicts.
+and downstream readers while preserving existing query semantics and the selected
+plan's execution requirements.
 
-## 6. Acceptance criteria
+## 5. Acceptance criteria
 
 The design is successful when:
 
 - A projection uses the same semantics above and below summary computations.
-- An exact aggregate and a summary can share an input when all requirements agree.
 - A union or another ordinary operator can consume summary estimates on its inputs.
 - Unifying the representation preserves existing graph dependencies, including
   any shared inputs; it does not introduce new sharing rules.
-- Invalid value/state combinations, incompatible timing and unfinished plan
-  assessments are rejected before execution.
+- Existing value/state, accuracy and execution constraints remain enforceable on
+  the unified representation.
 - Export preserves visible dependencies and shared producers.
 
-## 7. Scope and open questions
+## 6. Scope and compatibility
 
-This proposal defines a common operator model and its correctness constraints. It includes the operation-specific data needed to express those semantics, but
-does not prescribe storage structures, public APIs, traversal algorithms,
-serialization fields or a code migration sequence.
+This proposal defines the common operator structure, its operation-specific data
+and how dependencies remain visible through export. Existing names and semantics
+are retained except for the structural changes identified in §1.1.
 
-The following decisions remain separate or unresolved:
+The pre-ASAP and post-ASAP versions of some operations carry different information.
+The unified `BinaryOp` must retain existing checked-division requirements, and
+`Limit` must retain the existing ability to limit within groups. These compatibility
+requirements belong in this design because removing duplicate operator definitions
+must not remove existing behavior.
 
-- **Mixed-phase sharing:** when consumers need different phases, should planning
-  separate the producer or find a common materialized lifecycle? Existing timing
-  behavior cannot be promised until this is resolved.
-- **Summary composition:** where are merge operations introduced—during planner
-  optimization or downstream? Accuracy rules for merge, subtract, delete and
-  summary joins need a separate design. A representable operation is not a claim of
-  runtime support.
-- **Lifecycle integration:** reuse the lifecycle concepts being developed in
-  [#482](https://github.com/ProjectASAP/ASAPPlanner/pull/482), without creating a second
-  competing source of timing decisions.
-- **Additional optimization:** rules that split exact and approximate measures,
-  new pruning strategies and deferred child-plan choices are outside this proposal.
-- **Finalization:** this representation change does not resolve the existing
-  difference between query-result assembly and lifecycle-plan assembly in adding
-  finalization of exact aggregate state.
+New accuracy fields, accuracy-composition rules, computation-sharing algorithms and
+lifecycle policies are outside this proposal. Planning responsibilities follow #509.
+The scalar/operator separation is specified in the companion document. Storage,
+traversal algorithms, serialization fields and a code migration sequence are also
+outside this document.
