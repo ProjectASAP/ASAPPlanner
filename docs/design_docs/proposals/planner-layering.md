@@ -403,25 +403,62 @@ requirement, ε = 0.01. The independent candidates are kept as well.
 
 ```mermaid
 flowchart LR
-  subgraph IND["Independent candidates (Pass 1, summary option shown)"]
-    direction LR
-    i1[("flows.src_ip<br/>last 1m")]:::data
-    i1 --> d1["distinct<br/>summary"]:::summary --> rd1(["distinct count"]):::readout
-    i1 --> en1["entropy<br/>summary"]:::summary --> re1(["entropy"]):::readout
-    i1 --> l1["norm<br/>summary"]:::summary --> rl1(["L2 norm"]):::readout
+  in[("flows.src_ip<br/>last 1m")]:::data
+ 
+  subgraph P0["Stage 0 · LogicalDAGs"]
+    direction TB
+    q1["Distinct(src_ip)"]:::exact
+    q2["Entropy(src_ip)"]:::exact
+    q3["L2(src_ip)"]:::exact
   end
-  subgraph SH["Shared candidate (Pass 2, summary-capability rule)"]
-    direction LR
-    i2[("flows.src_ip<br/>last 1m")]:::data --> u["UnivMon<br/>sized for ε = 0.01"]:::summary
-    u --> rd2(["distinct count"]):::readout
-    u --> re2(["entropy"]):::readout
-    u --> rl2(["L2 norm"]):::readout
+ 
+  subgraph P1["Stage 1, Pass 1 · local candidates per computation"]
+    direction TB
+    subgraph D["Distinct"]
+      direction LR
+      d0["exact distinct"]:::exact
+      d1["distinct summary"]:::summary
+      d2["UnivMon"]:::summary
+    end
+    subgraph E["Entropy"]
+      direction LR
+      e0["exact entropy"]:::exact
+      e1["entropy summary"]:::summary
+      e2["UnivMon"]:::summary
+    end
+    subgraph L["L2"]
+      direction LR
+      l0["exact L2"]:::exact
+      l1["norm summary"]:::summary
+      l2["UnivMon"]:::summary
+    end
   end
+ 
+  subgraph P2["Stage 1, Pass 2 · summary-capability rule adds a shared candidate"]
+    direction LR
+    u["one UnivMon<br/>sized for ε = 0.01"]:::summary
+    u --> rd(["distinct count"]):::readout
+    u --> re(["entropy"]):::readout
+    u --> rl(["L2 norm"]):::readout
+  end
+ 
+  in --> P0
+  q1 --> D
+  q2 --> E
+  q3 --> L
+  d2 -. "same summary input data<br/>and window" .-> u
+  e2 -.-> u
+  l2 -.-> u
+ 
+  OUT[["CandidateLogicalASAPDAGs:<br/>all Pass 1 candidates + the shared candidate"]]
+  P1 --> OUT
+  P2 --> OUT
   classDef data fill:#f1f3f4,stroke:#5f6368,color:#000;
   classDef exact fill:#fff,stroke:#5f6368,color:#000;
   classDef summary fill:#e8f0fe,stroke:#1a73e8,stroke-width:2px,color:#000;
   classDef readout fill:#e6f4ea,stroke:#188038,color:#000;
 ```
+ 
 
 Exact candidates for each computation are also kept but omitted from the
 diagram.
