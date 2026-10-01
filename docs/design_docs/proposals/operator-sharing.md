@@ -94,7 +94,7 @@ the existing query and summary models, but the sketches combine several changes:
 | Change | Purpose and scope |
 |---|---|
 | Group ordinary operations under `NonASAP` and summary operations under `ASAP` | Organize the common operator model into two semantic categories. |
-| Give both categories inputs that refer to `Operator` nodes | Enable composition and shared producers across the category boundary. Two category labels alone do not enable sharing. |
+| Give both categories inputs that refer to `Operator` nodes | Allow ordinary and summary operations to compose directly, without a wrapper hiding their dependencies. |
 | Remove relational-subplan wrappers and duplicate relational operations | Make all dependencies visible and give each ordinary operation one definition. |
 | Separate scalar expressions from operators | A related proposal, described in the [companion document](decoupling_op_and_expr.md); not a consequence of categorization alone. |
 | Introduce `local_guarantee` and `exact_operation_rule` on summary operations | Additional accuracy design: retain local evidence separately from the derived subtree guarantee (§2.2). These are not fields on today's corresponding summary operations. |
@@ -225,10 +225,6 @@ The summary fields distinguish state construction, readout and accuracy evidence
 | `local_guarantee` / `exact_operation_rule` | Local accuracy evidence or composition semantics; neither is the final guarantee of the complete subtree |
 | `population` | The population whose membership and values are maintained |
 
-For example, one KLL `SummaryAgg` can feed two `SummaryEstimate` nodes whose queries
-request p50 and p99. The build operation and its state are shared; the requested
-estimates differ.
-
 Schema, derived accuracy and execution timing describe every `Operator`, regardless
 of category (§2). They are omitted from these operation-specific sketches. Timing
 comes from lifecycle planning rather than a fixed field value implied by an operator
@@ -257,30 +253,12 @@ describe how an operator processes its input. This prevents an expression from
 being mistaken for a table-producing plan. The
 [companion proposal](decoupling_op_and_expr.md) defines this distinction.
 
-### 1.3 Two meanings of sharing
+### 1.3 Scope of operator sharing
 
-**Sharing the operator model** means pre-ASAP and post-ASAP use the same definitions
-for ordinary operators. It does not mean those two planning stages execute together
-or must reference the same node instances.
-
-**Sharing a computation** means multiple consumers within a workload use one
-producer. For example, two queries may read one scan, or two estimates may use one
-summary:
-
-```text
-                         ┌→ p50 estimation → query A
-Scan → KLL summary build ┤
-                         └→ p99 estimation → query B
-```
-
-The shared producer must satisfy every consumer's input, window, accuracy and timing
-requirements. Representing it once exposes reuse to planning and costing. Keeping
-multiple query roots in one workload graph is therefore part of the design.
-
-Adding accuracy information or execution timing must preserve that sharing. It must
-also leave alternative candidate plans independent: assigning a lifecycle to one
-candidate must not change another candidate's choices. How nodes are stored or
-reused is outside this design.
+Here, sharing means pre-ASAP and post-ASAP use the same operator definitions.
+A `Project`, for example, has one representation whether its input is an ordinary
+aggregate or a summary estimate. This proposal removes the representation boundary;
+it does not introduce rules for sharing computations across queries.
 
 ## 2. Node properties and why they differ
 
@@ -457,8 +435,8 @@ The design is successful when:
 - A projection uses the same semantics above and below summary computations.
 - An exact aggregate and a summary can share an input when all requirements agree.
 - A union or another ordinary operator can consume summary estimates on its inputs.
-- Shared producers remain shared when accuracy and timing are resolved, including
-  across different queries in the workload.
+- Unifying the representation preserves existing graph dependencies, including
+  any shared inputs; it does not introduce new sharing rules.
 - Invalid value/state combinations, incompatible timing and unfinished plan
   assessments are rejected before execution.
 - Export preserves visible dependencies and shared producers.
