@@ -1,16 +1,19 @@
-# ASAPPlanner Layering Design
+# ASAPPlanner Planning Stages Design
 
 Status: proposal. Audience: designers and developers of ASAPPlanner and of deployments such
 as ASAPQuery-backend.
 
+Read Stages for the overview, the stage sections for the rules, and the
+examples for why the rules are needed.
+
 ## Goal
 
-ASAPPlanner takes a [query workload](https://github.com/ProjectASAP/ASAPPlanner/blob/main/crates/types/src/workload.rs), a [data workload](https://github.com/ProjectASAP/ASAPPlanner/blob/main/crates/types/src/workload.rs#L531) and the [deployment's
-inputs](TODO: A data structure should be explicitly defined in another PR), and returns one optimal physical plan. It decides what is computed, how
+ASAPPlanner takes a [query workload](https://github.com/ProjectASAP/ASAPPlanner/blob/main/crates/types/src/workload.rs), a [data workload](https://github.com/ProjectASAP/ASAPPlanner/blob/main/crates/types/src/workload.rs#L531) and the deployment's
+inputs (TODO: define this data structure in a follow-up PR), and returns one optimal physical plan. It decides what is computed, how
 it is computed, and which plan is best. The deployment only supplies inputs and
 executes the plan: it supplies its own empirical cost estimation, empirical accuracy estimation and capabilities of deployment but never does the query planning or plan selection.
 
-## Layers
+## Stages
 
 `x` represents Cartesian product for enumerating and combining different optimization angles in planning. 
 
@@ -98,13 +101,7 @@ The planner receives three groups of inputs:
 | Data workload | Data arrival pattern, sampling cadence, ingestion volume and rate, cardinality, and distribution |
 | Deployment inputs | Empirical cost model, empirical accuracy model, and execution capabilities |
 
-Logical planning decides **what** to compute: summary families, query rewrites,
-and sharing across computations and windows. Physical planning decides **how**
-to compute it: materialization, execution placement, physical operators,
-partitioning, parallelism, and resource allocation. Selection evaluates
-complete physical candidates and chooses one plan for the whole workload.
-
-## Layers/DAGs and what decisions each layer makes
+## Stages and their decisions
 
 Stages 0 to 2 each output a candidate set holding every semantically equivalent
 and legal candidate DAG of that stage; stage 3 is the only step that chooses
@@ -116,8 +113,8 @@ query's accuracy target), and every rejected candidate carries a reason.
 | Stage | Input | Decides | Output |
 |---|---|---|---|
 | 0. Frontends | Each `QueryWorkloadEntry.query` and `QueryWorkload.language` | Language semantics, and converting source-language queries into a common logical representation. Rejects constructs it cannot represent faithfully. | `CandidateLogicalDAGs`; nodes are logical operations with no summary operations |
-| 1. Logical ASAP-aware optimization | Logical DAGs, and each query's accuracy requirements across the workload | **Pass 1 — Summary replacement and query rewriting:** apply query rewriting rules to each eligible sub-DAG and generate exact and summary-based candidates that satisfy its semantics and accuracy requirements. **Pass 2 — ASAP-aware CSE:** apply traditional CSE and summary-specific CSE rules across sub-DAGs and queries to generate shared computation candidates, while preserving independent candidates. | `CandidateLogicalASAPDAGs`; nodes include summary and window-primitive operations |
-| 2. Physical ASAP-aware optimization | Logical ASAP DAGs, each entry's `recurrence` and `predictability`, the `DataWorkload` | **Materialization:** for each sub-DAG, whether its output is materialized and therefore computed at ingestion time or query time, and how long it is retained. **Physical operator implementation:** physical operators for every node. **Parallelism, partitioning, resources:** TODO. | `CandidatePhysicalASAPDAGs` |
+| 1. Logical ASAP-aware optimization | Logical DAGs, and each query's accuracy requirement, `time_selection` and repetition interval (from `recurrence`) across the workload | **Pass 1 — Summary replacement and query rewriting:** apply query rewriting rules to each eligible sub-DAG and generate exact and summary-based candidates that satisfy its semantics and accuracy requirements. **Pass 2 — ASAP-aware CSE:** apply traditional CSE and summary-specific CSE rules across sub-DAGs and queries to generate shared computation candidates, while preserving independent candidates. | `CandidateLogicalASAPDAGs`; nodes include summary and window-summary operations |
+| 2. Physical ASAP-aware optimization | Logical ASAP DAGs, each entry's `recurrence` and `predictability`, the `DataWorkload` | **Materialization:** for each sub-DAG, whether its output is materialized, when it is computed (ingestion time or query time), and how long it is retained. **Physical operator implementation:** physical operators for every node. **Parallelism, partitioning, resources:** TODO. | `CandidatePhysicalASAPDAGs` |
 | 3. Plan selection | Physical ASAP DAG candidates, `requirements`, the deployment's cost model, accuracy model and capabilities | Rejects candidates that miss an accuracy target, a latency bound or a capability; picks the cheapest valid plan for the whole workload. A shared state is costed once with all its consumers' demand. | One `PhysicalASAPDAG` |
 | 4. Execution (deployment) | The selected `PhysicalASAPDAG` | Executes ingestion, storage, precomputation and query-time computation. | Query results |
 
@@ -128,8 +125,7 @@ query operations, including selectors, transformations, aggregations, grouping
 and window semantics. They contain no ASAP summary choices.
 
 The frontend preserves source-language behavior, including series identity,
-evaluation timing and missing-data semantics. A construct that cannot be
-represented faithfully is rejected.
+evaluation timing and missing-data semantics.
 
 ### 1. Logical ASAP-aware optimization
 
@@ -137,7 +133,9 @@ Logical optimization runs in two passes. Pass 1 generates candidates for each
 computation on its own; Pass 2 finds candidates that share computation across
 sub-DAGs and queries. Neither pass decides materialization or execution
 placement, and neither picks one summary per computation: every candidate is
-kept for selection.
+kept for selection. Stage 1 reads the repetition interval only to detect
+windows that overlap across evaluations; deciding when anything is computed is
+left to stage 2.
 
 #### Pass 1: Local candidate generation
 
@@ -158,7 +156,7 @@ Example for summary candidates:
 
 Each candidate records its input expression, filter, grouping, window,
 supported readouts and accuracy requirement. Pass 2 uses these to decide
-whether candidates can share a producer.
+whether candidates can share a summary node.
 
 A summary-based candidate has two kinds of nodes. The **summary node** builds
 and maintains the summary from the input data, for example a KLL sketch over
@@ -170,8 +168,8 @@ exploits.
 #### Pass 2: ASAP-aware common-subexpression elimination
 
 ASAP-aware CSE extends traditional CSE with summary-specific sharing rules.
-Computations can share a producer when they use identical expressions, when
-one summary supports multiple readouts, or when summary composition supports
+Computations can share work when they use identical expressions, when one
+summary node supports several readouts, or when one window summary can answer
 their overlapping windows.
 
 The rules compare computations by their **summary input data**: what a summary for
@@ -193,12 +191,39 @@ into pieces that each carry their own summary:
   lengths grow with age: recent data sits in short buckets and older data in
   longer ones. This keeps few buckets over a long history, at the cost that old
   window boundaries may fall inside a bucket and are then approximate.
+* A **window summary** is a summary organized as panes or buckets so that it
+  can answer many windows, for example a sliding window of panes, a tumbling
+  window, or an Exponential Histogram.
 
 | ASAP-aware CSE rule | Sharing condition | Shared computation |
 |---|---|---|
 | Identical-expression rule | The input and computation semantics are identical. | One common computation node serving multiple consumers. |
-| Summary-capability rule | The computations have the same summary input data and the same window, and one summary supports all requested computations and their accuracy requirements. | One summary node connected to multiple readout nodes; for example, one UnivMon over `src_ip` from `flows` in the last minute serves three queries refreshed every 10 s: `COUNT(DISTINCT src_ip)`, the entropy of the `src_ip` distribution, and the L2 norm of per-`src_ip` counts. Each flow record updates the one UnivMon node once; a distinct-count readout node, an entropy readout node and an L2 readout node each read their statistic from it. The UnivMon is sized for the strictest of the three accuracy requirements (Example 2). |
-| Window-composition rule | The computations have the same summary input data, and the summary's merge and window capabilities can reconstruct the requested windows within their accuracy requirements. | Shared window-summary nodes connected to window-specific reconstruction and readout nodes; for example, (1) one sliding window of 1-min KLL panes serves every evaluation of `quantile_over_time(0.99, latency_ms[5m])` repeated every minute: each evaluation's readout node merges the latest 5 panes, so consecutive evaluations share 4 of their 5 panes (Example 3, Pattern B); (2) one Exponential Histogram of KLL buckets over the last 5 years serves the p99 queries over `[5y]`, `[1y]`, `[1y] offset 1y`, `[1y] offset 2y` and `[3y] offset 2y`: each query's reconstruction node merges the buckets covering its interval, and its readout node reads p99 from the merged KLL (Example 3, Pattern A). The same panes or buckets also serve other quantiles, since one KLL answers every quantile: adding `quantile_over_time(0.5, latency_ms[5m])` to the dashboard in (1) adds only a p50 readout node next to the p99 one, both reading the same 5 merged panes, with no new summary. |
+| Summary-capability rule | The computations have the same summary input data and the same window, and one summary supports all requested computations and their accuracy requirements. | One summary node feeding several readout nodes, e.g. UnivMon → distinct count, entropy, L2 norm. |
+| Window-composition rule | The computations have the same summary input data, and one window summary can reconstruct the requested windows within their accuracy requirements. | One window summary feeding per-window reconstruction and readout nodes, e.g. KLL panes in a sliding window, or KLL buckets in an Exponential Histogram. |
+
+The examples behind these rules:
+
+* **Summary-capability rule (Example 2).** One UnivMon over `src_ip` from
+  `flows` in the last minute serves three queries refreshed every 10 s:
+  `COUNT(DISTINCT src_ip)`, the entropy of the `src_ip` distribution, and the
+  L2 norm of per-`src_ip` counts. Each flow record updates the UnivMon once; a
+  distinct-count, an entropy and an L2 readout node each read their statistic
+  from it. The UnivMon is sized for the strictest of the three accuracy
+  requirements.
+* **Window-composition rule, sliding window (Example 3, Pattern B).** One
+  sliding window of 1-min KLL panes serves every evaluation of
+  `quantile_over_time(0.99, latency_ms[5m])`, repeated every minute. Each
+  evaluation's readout node merges the latest 5 panes, so consecutive
+  evaluations share 4 of their 5 panes.
+* **Window-composition rule, Exponential Histogram (Example 3, Pattern A).**
+  One Exponential Histogram of KLL buckets over the last 5 years serves the p99
+  queries over `[5y]`, `[1y]`, `[1y] offset 1y`, `[1y] offset 2y` and
+  `[3y] offset 2y`. Each query's reconstruction node merges the buckets
+  covering its interval, and its readout node reads p99 from the merged KLL.
+* **Other quantiles share for free.** One KLL answers every quantile, so adding
+  `quantile_over_time(0.5, latency_ms[5m])` to the sliding-window dashboard
+  adds only a p50 readout node next to the p99 one, reading the same 5 merged
+  panes, with no new summary.
 
 Rules are defined by each summary family's capabilities and semantic
 requirements. A shared summary must meet the strictest accuracy requirement
@@ -240,7 +265,7 @@ constraints:
   query time.
 
 The decision depends on the workload's `recurrence` and `predictability` and on
-the `DataWorkload`, none of which logical planning reads. Typical outcomes:
+the `DataWorkload`. Typical outcomes:
 
 * Read by repeated queries while data keeps arriving: materialize at ingestion
   time.
@@ -258,16 +283,16 @@ merge and quantile readout operators.
 
 ### 3. Plan selection
 
-Selection rejects every physical candidate that the deployment's accuracy model
-estimates will miss an accuracy target, that misses a latency bound, or that
-needs a capability the deployment lacks. Among the remaining candidates, it
-uses the deployment's cost model to choose the cheapest plan for the whole
-workload. A shared state is costed once, with the demand of all its consumers.
+Selection is the only stage that uses the deployment's cost and accuracy
+models, and the only stage that discards valid candidates. Accuracy is
+estimated by the deployment's accuracy model, not assumed from a summary's
+nominal bound. Cost is evaluated for the whole workload rather than per query,
+which is what lets one shared summary beat several cheaper independent ones.
 
 ### 4. Execution
 
-The deployment executes the selected `PhysicalASAPDAG`: ingestion, storage,
-precomputation and query-time computation. It makes no planning decisions.
+Execution runs outside ASAPPlanner. The deployment runs the selected plan as
+given: it does not choose among summaries or decide what to materialize.
 
 ## End-to-end examples
 
@@ -275,7 +300,8 @@ Each example's workload is shown as tables. Field names in code font are the
 fields of
 [`workload.rs`](https://github.com/ProjectASAP/ASAPPlanner/blob/main/crates/types/src/workload.rs).
 An `as_of` of "evaluation time" means `as_of: None`: the window ends when the
-query runs.
+query runs. Approximate accuracy targets are `EpsilonDelta`: the answer's error
+is at most ε with probability at least 1 − δ.
 
 | Example | Shows |
 |---|---|
@@ -320,8 +346,8 @@ first needs an exact total; the second tolerates error.
 | `topk by (job) (10, sum_over_time(http_requests_total[1m]))` | 1 m | evaluation time | ε = 0.01, δ = 0.001 | ≤ 100 ms |
 
 **Stage 0.** The two `LogicalDAG`s are
-`range m[1m] → rate → sum by (job)` and
-`range m[1m] → sum_over_time → topk by (job) (10)`.
+`range http_requests_total[1m] → rate → sum by (job)` and
+`range http_requests_total[1m] → sum_over_time → topk by (job) (10)`.
 
 **Stage 1, Pass 1.**
 
@@ -385,13 +411,39 @@ source IPs over the last minute.
 | `demand` | every 10 s (`fixed_interval`) |
 | `predictability` | `predictable` |
 | `time_selection.scope` | `real_time` |
+| `as_of` | evaluation time |
 | Latency | unspecified |
 
-| Query | Computation | `lookback` | `as_of` | Accuracy |
-|---|---|---|---|---|
-| `SELECT COUNT(DISTINCT src_ip) FROM flows WHERE ts >= now() - INTERVAL '1 minute'` | `Distinct(src_ip)` | 1 m | evaluation time | ε = 0.02, δ = 0.01 |
-| `SELECT -SUM(p * LN(p)) FROM (SELECT COUNT(*) * 1.0 / SUM(COUNT(*)) OVER () AS p FROM flows WHERE ts >= now() - INTERVAL '1 minute' GROUP BY src_ip)` | `Entropy(src_ip)` | 1 m | evaluation time | ε = 0.05, δ = 0.01 |
-| `SELECT SQRT(SUM(c * c)) FROM (SELECT src_ip, COUNT(*) AS c FROM flows WHERE ts >= now() - INTERVAL '1 minute' GROUP BY src_ip)` | `L2(src_ip)` | 1 m | evaluation time | ε = 0.01, δ = 0.01 |
+```sql
+-- Q1: Distinct(src_ip)
+SELECT COUNT(DISTINCT src_ip)
+FROM flows
+WHERE ts >= now() - INTERVAL '1 minute';
+
+-- Q2: Entropy(src_ip)
+SELECT -SUM(p * LN(p))
+FROM (
+  SELECT COUNT(*) * 1.0 / SUM(COUNT(*)) OVER () AS p
+  FROM flows
+  WHERE ts >= now() - INTERVAL '1 minute'
+  GROUP BY src_ip
+);
+
+-- Q3: L2(src_ip)
+SELECT SQRT(SUM(c * c))
+FROM (
+  SELECT src_ip, COUNT(*) AS c
+  FROM flows
+  WHERE ts >= now() - INTERVAL '1 minute'
+  GROUP BY src_ip
+);
+```
+
+| Query | Computation | `lookback` | Accuracy |
+|---|---|---|---|
+| Q1 | `Distinct(src_ip)` | 1 m | ε = 0.02, δ = 0.01 |
+| Q2 | `Entropy(src_ip)` | 1 m | ε = 0.05, δ = 0.01 |
+| Q3 | `L2(src_ip)` | 1 m | ε = 0.01, δ = 0.01 |
 
 The data workload differs from the shared one in two fields:
 
@@ -589,51 +641,13 @@ gantt
   eval at 00:07 (panes 3–7) :e3, 00:02, 5m
 ```
 
-In both patterns, stage 1 decides only **which** window summary computes the
-answer. It says nothing about when panes or buckets are built or whether they
-are stored.
+Example 4 shows how stage 2 decides whether to store these window summaries.
 
 ### Example 4: Materialization of window summaries in physical planning
 
 Stage 2 takes the shared window summaries from Example 3 and decides whether to
 materialize them. That choice is driven by the workload's `recurrence`,
-`predictability` and `data_workload.arrival`, none of which stage 1 reads.
-
-**Pattern B (sliding window, repeating).**
-
-| Candidate | Materialized | At ingestion time | At query time |
-|---|---|---|---|
-| B1 | 1-min KLL panes, retained 5 min | Build one KLL pane per minute | Merge the latest 5 panes, read p99 |
-| B2 | Nothing | Nothing | Read 5 min of raw samples, build one KLL, read p99 |
-
-```mermaid
-flowchart LR
-  subgraph B1["B1 · panes materialized at ingestion time"]
-    direction LR
-    subgraph B1I["Ingestion time"]
-      s1[("samples")]:::data --> p1["1-min KLL pane<br/>stored 5 min"]:::summary
-    end
-    subgraph B1Q["Query time, every 1 min"]
-      g1["merge latest<br/>5 panes"]:::exact --> r1(["p99"]):::readout
-    end
-    p1 --> g1
-  end
-  subgraph B2["B2 · not materialized"]
-    direction LR
-    subgraph B2Q["Query time, every 1 min"]
-      s2[("5 min of<br/>raw samples")]:::data --> k2["build one KLL"]:::summary --> r2(["p99"]):::readout
-    end
-  end
-  classDef data fill:#f1f3f4,stroke:#5f6368,color:#000;
-  classDef exact fill:#fff,stroke:#5f6368,color:#000;
-  classDef summary fill:#e8f0fe,stroke:#1a73e8,stroke-width:2px,color:#000;
-  classDef readout fill:#e6f4ea,stroke:#188038,color:#000;
-```
-
-The query repeats every minute and the data is continuously ingesting, so B1
-builds each pane once and reuses it in five evaluations, while B2 rescans raw
-data every time. Selection usually picks B1. B2 wins only if storage is
-expensive and raw data is available at query time.
+`predictability` and `data_workload.arrival`.
 
 **Pattern A (sub-interval batch).**
 
@@ -676,8 +690,44 @@ Which candidate wins depends on the workload:
 * **Data `"at_rest"`:** A2 is not generated, because there is no ingestion to
   maintain the histogram.
 
-**What this shows.** The same logical candidate (a sliding window of KLL panes,
-or one shared Exponential Histogram) yields different physical plans depending
+**Pattern B (sliding window, repeating).**
+
+| Candidate | Materialized | At ingestion time | At query time |
+|---|---|---|---|
+| B1 | 1-min KLL panes, retained 5 min | Build one KLL pane per minute | Merge the latest 5 panes, read p99 |
+| B2 | Nothing | Nothing | Read 5 min of raw samples, build one KLL, read p99 |
+
+```mermaid
+flowchart LR
+  subgraph B1["B1 · panes materialized at ingestion time"]
+    direction LR
+    subgraph B1I["Ingestion time"]
+      s1[("samples")]:::data --> p1["1-min KLL pane<br/>stored 5 min"]:::summary
+    end
+    subgraph B1Q["Query time, every 1 min"]
+      g1["merge latest<br/>5 panes"]:::exact --> r1(["p99"]):::readout
+    end
+    p1 --> g1
+  end
+  subgraph B2["B2 · not materialized"]
+    direction LR
+    subgraph B2Q["Query time, every 1 min"]
+      s2[("5 min of<br/>raw samples")]:::data --> k2["build one KLL"]:::summary --> r2(["p99"]):::readout
+    end
+  end
+  classDef data fill:#f1f3f4,stroke:#5f6368,color:#000;
+  classDef exact fill:#fff,stroke:#5f6368,color:#000;
+  classDef summary fill:#e8f0fe,stroke:#1a73e8,stroke-width:2px,color:#000;
+  classDef readout fill:#e6f4ea,stroke:#188038,color:#000;
+```
+
+The query repeats every minute and the data is continuously ingesting, so B1
+builds each pane once and reuses it in five evaluations, while B2 rescans raw
+data every time. Selection usually picks B1. B2 wins only if storage is
+expensive and raw data is available at query time.
+
+**What this shows.** The same logical candidate (one shared Exponential
+Histogram, or a sliding window of KLL panes) yields different physical plans depending
 only on recurrence, predictability and data arrival. This is why window-summary
 replacement happens in logical planning, while materialization is decided
 separately in physical planning.
