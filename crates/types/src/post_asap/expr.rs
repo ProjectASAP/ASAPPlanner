@@ -18,6 +18,11 @@ pub enum ExactOperation {
         reduction: Reduction,
         measures: Vec<AggIntent>,
         output_names: Vec<String>,
+        /// Per-measure row predicates parallel to `measures`, positional
+        /// against the child's output rows — the same contract as
+        /// `QueryExpr::Aggregate.filters` (issue #466).
+        #[serde(default)]
+        filters: Vec<Option<Predicate>>,
         having: Option<Predicate>,
     },
 }
@@ -199,6 +204,14 @@ pub enum SummaryExpr {
         /// `GroupingStrategy::PerSubpopulationInstance` (its `Default`),
         /// so no existing behavior changes.
         grouping: GroupingStrategy,
+        /// Row predicate gating this summary's updates (issue #466): only
+        /// rows where it is `TRUE` update the state; grouping keys are
+        /// still read from every row. Positional against `child`'s output.
+        /// A field rather than a `Filter` child so summaries that differ
+        /// only in predicate can still share one child. No binding rule
+        /// sets it yet — a filtered pre-ASAP measure stays `KeepPreAsap` —
+        /// so every producer today writes `None`.
+        filter: Option<Predicate>,
     },
 
     /// Summary-aware join (KMV / theta for join-cardinality; join-sample for

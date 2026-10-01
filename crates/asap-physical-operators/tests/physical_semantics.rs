@@ -367,6 +367,7 @@ fn global_extrema_bind_with_planner_derived_schema() {
                     reduction: PlanReduction::Reduce(GroupKeys::by(vec![])),
                     measures: vec![measure],
                     output_names: vec![result.name],
+                    filters: vec![],
                     having: None,
                 }),
             },

@@ -2523,6 +2523,7 @@ mod tests {
                 input: asap_types::post_asap::SummaryUpdate::column(ColumnRef::Wildcard),
                 reduction: Reduction::by(vec![]),
                 grouping: GroupingStrategy::PerSubpopulationInstance,
+                filter: None,
             },
             schema: estimated.schema.clone(),
             guarantee: None,
@@ -2890,6 +2891,7 @@ mod tests {
                 input: asap_types::post_asap::SummaryUpdate::column(ColumnRef::Wildcard),
                 reduction: Reduction::by(vec![]),
                 grouping: GroupingStrategy::PerSubpopulationInstance,
+                filter: None,
             },
             schema: schema.clone(),
             guarantee: None,
@@ -3057,6 +3059,7 @@ mod tests {
             reduction: Reduction::by(vec![]),
             measures: vec![AggIntent::Sum { col: None }],
             output_names: vec![],
+            filters: vec![],
             having: None,
             child: scan,
         })

@@ -35,6 +35,7 @@ fn agg(by: Vec<usize>, intent: AggIntent, child: QueryExpr) -> QueryExpr {
         reduction: Reduction::by(by),
         measures: vec![intent],
         output_names: vec!["".into()],
+        filters: vec![],
         having: None,
         child: Rc::new(QueryExpr::TimeRange {
             range: Duration::from_secs(1),

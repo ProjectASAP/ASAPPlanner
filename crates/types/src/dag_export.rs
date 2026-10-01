@@ -1210,6 +1210,7 @@ fn build_no_recheck(
             reduction,
             measures,
             output_names,
+            filters,
             having,
             child,
         } => {
@@ -1218,6 +1219,7 @@ fn build_no_recheck(
                 "reduction": reduction,
                 "measures": measures,
                 "output_names": output_names,
+                "filters": filters,
                 "having": having,
             });
             push_node(
@@ -1551,6 +1553,7 @@ mod tests {
                     accuracy: AccuracyTarget::Exact,
                 }],
                 output_names: vec![],
+                filters: vec![],
                 having: None,
                 child: Rc::new(scan("metrics", value_col())),
             }),
@@ -1668,6 +1671,7 @@ mod tests {
                 accuracy: AccuracyTarget::Exact,
             }],
             output_names: vec![],
+            filters: vec![],
             having: None,
             child: Rc::new(scan("metrics", value_col())),
         };
@@ -1724,6 +1728,7 @@ mod tests {
                 ),
                 reduction: Reduction::by(vec![]),
                 grouping: GroupingStrategy::default(),
+                filter: None,
             },
             schema: SummarySchema {
                 fields: vec![],

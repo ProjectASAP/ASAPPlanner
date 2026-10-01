@@ -53,11 +53,11 @@ pub use column_resolution::{
 pub use cse::share_common_subtrees;
 pub use expr_ir::{ArithmeticOpKind, ColumnRef, CompareOpKind, ScalarValue};
 pub use query_expr::{
-    aggregate_output_schema, AtModifier, BinaryOpKind, ColState, DataModel, GroupKeys, GroupSide,
-    InfoMatcher, JoinKind, Predicate, ProjectItem, PromQLVectorSetOpKind, QueryExpr,
-    QueryExprError, Reduction, RelationalSetOpKind, ResolvedQueryExpr, SampleKind, SortKey, Source,
-    TimeShift, UnresolvedQueryExpr, VectorGrouping, VectorMatch, VectorMatchKind, WindowFrame,
-    WindowFrameBound, WindowFrameOffset, WindowFrameUnits, WindowFuncKind,
+    aggregate_output_schema, any_measure_filtered, AtModifier, BinaryOpKind, ColState, DataModel,
+    GroupKeys, GroupSide, InfoMatcher, JoinKind, Predicate, ProjectItem, PromQLVectorSetOpKind,
+    QueryExpr, QueryExprError, Reduction, RelationalSetOpKind, ResolvedQueryExpr, SampleKind,
+    SortKey, Source, TimeShift, UnresolvedQueryExpr, VectorGrouping, VectorMatch, VectorMatchKind,
+    WindowFrame, WindowFrameBound, WindowFrameOffset, WindowFrameUnits, WindowFuncKind,
 };
 pub use resolve::{resolve_root, ResolveTreeError};
 pub use schema::{Column, ColumnId, DataType, Schema};

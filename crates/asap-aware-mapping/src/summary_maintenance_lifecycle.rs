@@ -1926,6 +1926,7 @@ mod tests {
             reduction: Reduction::by(vec![]),
             measures: vec![AggIntent::Sum { col: None }],
             output_names: vec![],
+            filters: vec![],
             having: None,
             child: query_root(),
         })
@@ -1940,6 +1941,7 @@ mod tests {
                 accuracy: AccuracyTarget::Epsilon(0.1),
             }],
             output_names: vec![],
+            filters: vec![],
             having: None,
             child: query_root(),
         })
@@ -1964,6 +1966,7 @@ mod tests {
                 )),
                 reduction: Reduction::by(vec![]),
                 grouping: GroupingStrategy::default(),
+                filter: None,
             },
             schema: SummarySchema {
                 fields: vec![SummaryField {
@@ -1989,6 +1992,7 @@ mod tests {
                 )),
                 reduction: Reduction::by(vec![]),
                 grouping: GroupingStrategy::default(),
+                filter: None,
             },
             schema: SummarySchema {
                 fields: vec![SummaryField {
@@ -3437,6 +3441,7 @@ mod tests {
                 input: input.clone(),
                 reduction: reduction.clone(),
                 grouping: grouping.clone(),
+                filter: None,
             },
             ..state.as_ref().clone()
         });
@@ -3504,6 +3509,7 @@ mod tests {
                 input: input.clone(),
                 reduction: reduction.clone(),
                 grouping: grouping.clone(),
+                filter: None,
             },
             ..state.as_ref().clone()
         });

@@ -7,7 +7,8 @@ use asap_types::post_asap::{
     SummaryField, SummaryNode, SummarySchema, ValueOperation,
 };
 use asap_types::pre_asap::{
-    AggIntent, CompareOpKind, DataType, QueryExpr, Reduction, ScalarValue, Schema, Source,
+    any_measure_filtered, AggIntent, CompareOpKind, DataType, QueryExpr, Reduction, ScalarValue,
+    Schema, Source,
 };
 use std::rc::Rc;
 
@@ -40,12 +41,16 @@ fn recognize(root: &QueryExpr) -> Option<(MaintainedPopulation, PopulationReadou
             child,
             reduction: Reduction::Reduce(grouping),
             measures,
+            filters,
             having: None,
             ..
         } => {
             let [intent] = measures.as_slice() else {
                 return None;
             };
+            if any_measure_filtered(filters) {
+                return None;
+            }
             let (col, readout) = match intent {
                 AggIntent::Quantile { q, col, .. } if q.is_finite() => {
                     (*col, PopulationReadout::Quantile { q: *q })

@@ -382,7 +382,13 @@ fn fragment(
             input: update,
             reduction,
             grouping,
+            filter,
         } => {
+            if filter.is_some() {
+                return Err(invalid(
+                    "filtered summary update has no native implementation",
+                ));
+            }
             let [input] = schemas else {
                 return Err(invalid("summary update requires one input"));
             };
