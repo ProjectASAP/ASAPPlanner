@@ -57,10 +57,23 @@ field names and semantics; change their types to express their roles:
 | Operator input | `QueryExpr` | `NonASAPOp` |
 | Scalar expression | `QueryExpr` | `ScalarExpr` |
 
-The sketches retain existing `Rc` and collection shapes where possible; this
-proposal does not redesign storage. `C` remains the existing column representation:
-`ColumnRef` before resolution and `ColumnId` afterward. `C::ScanSchema` retains the
-corresponding unresolved or resolved scan schema.
+The split also makes ownership consistent with each structure's role:
+
+| Structure | Proposed rule | Reason |
+|---|---|---|
+| Operator inputs | Shared references, including every `Concat` child | All inputs are graph nodes; a multi-input operator should not embed copies while other operators reference nodes. |
+| Scalar fields on operators | Owned `ScalarExpr` values, including predicates, relabel values and scalar bridges | These expressions belong to the operator's schema context and need no independent graph identity. |
+| Scalar recursion | `Box<ScalarExpr>` for individual recursive children; `Vec<ScalarExpr>` for lists | Scalars form owned expression trees. `Box` gives recursive single-child fields finite size; `Vec` already provides that indirection for lists. |
+| Column parameter | Keep `C: ColState` on operators; use plain `C` on scalar expressions and their wrappers | Operators need `C::ScanSchema`; scalar expressions only carry column references. |
+
+`C` continues to represent `ColumnRef` before resolution and `ColumnId` afterward.
+No new column trait is introduced. Required cloning, comparison or serialization
+bounds belong on the corresponding implementations, not on scalar data structures
+through the unrelated scan-schema requirement.
+
+These are deliberate changes from the current mixed `Rc`/value representation.
+They preserve operation names and evaluation semantics; they do not add scalar
+sharing or a new optimization policy.
 
 ### 2.1 Operator nodes
 
@@ -82,7 +95,7 @@ enum NonASAPOp<C: ColState = ColumnId> {
     },
     Dedup { cols: Vec<C>, child: Rc<NonASAPOp<C>> },
     Concat {
-        children: Vec<NonASAPOp<C>>,
+        children: Vec<Rc<NonASAPOp<C>>>,
         discriminator_unique_key: Option<ConcatDiscriminatorKey<C>>,
     },
     Join {
@@ -106,11 +119,11 @@ enum NonASAPOp<C: ColState = ColumnId> {
     },
     TimeRange { range: Duration, child: Rc<NonASAPOp<C>> },
     TimeShift { shift: TimeShift, child: Rc<NonASAPOp<C>> },
-    PromqlScalarBridge(Rc<ScalarExpr<C>>),
+    PromqlScalarBridge(ScalarExpr<C>),
     EvalTimestamp,
     PromqlVectorFromScalar(Rc<NonASAPOp<C>>),
     PromqlScalarFromVector(Rc<NonASAPOp<C>>),
-    PromqlRelabel { dst: String, value: Rc<ScalarExpr<C>>, child: Rc<NonASAPOp<C>> },
+    PromqlRelabel { dst: String, value: ScalarExpr<C>, child: Rc<NonASAPOp<C>> },
     PromqlInfoEnrich { selector: Vec<InfoMatcher>, child: Rc<NonASAPOp<C>> },
     PromqlSeriesSample { by: GroupKeys<C>, kind: SampleKind, child: Rc<NonASAPOp<C>> },
     PromqlSubquery {
@@ -125,54 +138,58 @@ and `SortKey` by sorting and window functions. Their expressions use `ScalarExpr
 defined in §2.2.
 
 ```rust
-struct Predicate<C: ColState = ColumnId>(Rc<ScalarExpr<C>>);
+struct Predicate<C = ColumnId>(ScalarExpr<C>);
 
-struct ProjectItem<C: ColState = ColumnId> {
+struct ProjectItem<C = ColumnId> {
     alias: Option<String>,
     expr: ScalarExpr<C>,
 }
 
-struct SortKey<C: ColState = ColumnId> {
+struct SortKey<C = ColumnId> {
     expr: ScalarExpr<C>,
     ascending: bool,
     nulls_first: bool,
 }
 ```
 
-`Predicate`, `ProjectItem` and `SortKey` keep their current names and roles. Only the
-expression type changes. A column reference remains meaningful in the schema
-selected by its owning operator; it is not an independent table input.
+`Predicate`, `ProjectItem` and `SortKey` retain their names and roles and consistently
+own their scalar expressions. `Predicate` marks a Boolean-expression position;
+`ProjectItem` adds an alias, and `SortKey` adds ordering and null-placement rules.
+These are different operator requirements, so the wrappers remain separate.
 
-This is the scalar/operator split alone. It retains the current pre-ASAP `BinaryOp`,
-`Limit` and `Concat` shapes. The [operator-sharing proposal](operator-sharing.md#11-unified-operator-type)
-separately widens operator inputs to the common `Operator` and reconciles differences
-between pre-ASAP and post-ASAP operations.
+The pre-ASAP `BinaryOp` and `Limit` payloads remain unchanged. `Concat` now uses the
+same shared-input representation as other operators. The
+[operator-sharing proposal](operator-sharing.md#11-unified-operator-type) separately
+widens those inputs to the common `Operator` and reconciles pre-ASAP/post-ASAP
+operation differences.
 
 ### 2.2 Scalar expressions
 
 `ScalarExpr` contains every current scalar variant, including `CurrentTimestamp`.
-Its recursive inputs are scalar expressions only.
+Its recursive inputs are scalar expressions only. Individual recursive children
+are boxed; variable-length children are owned lists. Neither form gives a scalar
+expression shared DAG-node identity.
 
 ```rust
-enum ScalarExpr<C: ColState = ColumnId> {
+enum ScalarExpr<C = ColumnId> {
     Column(C),
     Literal(ScalarValue),
-    Compare { left: Rc<ScalarExpr<C>>, op: CompareOpKind, right: Rc<ScalarExpr<C>> },
+    Compare { left: Box<ScalarExpr<C>>, op: CompareOpKind, right: Box<ScalarExpr<C>> },
     BoolAnd(Vec<ScalarExpr<C>>),
     BoolOr(Vec<ScalarExpr<C>>),
-    Not(Rc<ScalarExpr<C>>),
-    IsNull(Rc<ScalarExpr<C>>),
-    IsNotNull(Rc<ScalarExpr<C>>),
-    Cast { expr: Rc<ScalarExpr<C>>, to: DataType, try_cast: bool },
-    InList { expr: Rc<ScalarExpr<C>>, list: Vec<ScalarExpr<C>>, negated: bool },
+    Not(Box<ScalarExpr<C>>),
+    IsNull(Box<ScalarExpr<C>>),
+    IsNotNull(Box<ScalarExpr<C>>),
+    Cast { expr: Box<ScalarExpr<C>>, to: DataType, try_cast: bool },
+    InList { expr: Box<ScalarExpr<C>>, list: Vec<ScalarExpr<C>>, negated: bool },
     FunctionCall { name: String, args: Vec<ScalarExpr<C>> },
     Arithmetic {
-        op: ArithmeticOpKind, left: Rc<ScalarExpr<C>>, right: Rc<ScalarExpr<C>>,
+        op: ArithmeticOpKind, left: Box<ScalarExpr<C>>, right: Box<ScalarExpr<C>>,
     },
     Case {
-        operand: Option<Rc<ScalarExpr<C>>>,
+        operand: Option<Box<ScalarExpr<C>>>,
         branches: Vec<(ScalarExpr<C>, ScalarExpr<C>)>,
-        else_expr: Option<Rc<ScalarExpr<C>>>,
+        else_expr: Option<Box<ScalarExpr<C>>>,
     },
     CurrentTimestamp,
 }
@@ -192,6 +209,20 @@ Column resolution keeps its existing meaning:
 - An aggregate's `HAVING` expression uses the aggregate output schema.
 - A scan predicate uses the scanned data's schema.
 
+The type split establishes the operator/scalar boundary; it does not by itself
+prove that every scalar expression has the right value type. Two boundary rules
+must also be validated:
+
+- **Predicate:** a resolved predicate must have Boolean type under the existing
+  expression-typing and coercion rules. Wrapping a numeric literal in `Predicate`
+  does not make it a valid condition. Nullable Boolean results retain the source
+  language's existing null semantics.
+- **PromQL scalar bridge:** it has no input schema. Preserve its current role of
+  lifting a constant-folded PromQL scalar literal into an operator position; it
+  cannot accept free column references or arbitrary row-dependent expressions.
+  The existing scalar/vector conversion operators handle conversions involving
+  other operator results.
+
 Splitting the representation must preserve evaluation behavior, inferred output
 types and source-language semantics. A scalar expression cannot serve as a table
 input, and a table-producing operator cannot appear where a scalar is expected.
@@ -200,7 +231,14 @@ input, and a table-producing operator cannot appear where a scalar is expected.
 
 The example query must retain its result and output schema. The filter predicate
 and projection expression must resolve in the same contexts as before. Invalid
-scalar/table combinations must be excluded by the plan model.
+scalar/table combinations must be excluded by the plan model. In particular:
+
+- A `Concat` input has the same graph-node identity behavior as any other input.
+- A scalar expression belongs to its owning operator; changing one operator's
+  expression cannot implicitly change another operator's expression.
+- Non-Boolean resolved predicates and column-dependent scalar bridges are rejected.
+- `CurrentTimestamp` remains scalar, and `EvalTimestamp` remains an operator with
+  its existing PromQL evaluation-time semantics.
 
 This separation alone does not require a change to the external plan format.
 The companion proposal addresses the separate decision to expose every operator in

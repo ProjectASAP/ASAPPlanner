@@ -109,8 +109,10 @@ The following changes are explicit:
 - Operator inputs become references to the common `Operator`. The sketches use the
   existing `Rc` notation for shared inputs and omit column-state generics for
   readability; column IDs and scan schemas below show the resolved form.
-- `Predicate`, `ProjectItem` and other scalar-bearing payloads keep their roles, but
-  contain `ScalarExpr` after the scalar/operator split.
+- `Predicate`, `ProjectItem` and other scalar-bearing payloads keep their roles and
+  own `ScalarExpr` values. The companion proposal defines owned scalar trees and
+  shared operator inputs, including `Concat`, as well as predicate and scalar-bridge
+  validation. This document uses those same structures.
 - `BinaryOp` reuses the existing post-ASAP `BinaryOperator` payload. It carries the
   binary operation, vector matching and checked-division requirements; the pre-ASAP
   `op` and `vector_match` semantics must be preserved when mapped into it.
@@ -153,11 +155,11 @@ enum NonASAPOp {
     },
     TimeRange { child: Rc<Operator>, range: Duration },
     TimeShift { child: Rc<Operator>, shift: TimeShift },
-    PromqlScalarBridge(Rc<ScalarExpr>),
+    PromqlScalarBridge(ScalarExpr),
     EvalTimestamp,
     PromqlVectorFromScalar(Rc<Operator>),
     PromqlScalarFromVector(Rc<Operator>),
-    PromqlRelabel { child: Rc<Operator>, dst: String, value: Rc<ScalarExpr> },
+    PromqlRelabel { child: Rc<Operator>, dst: String, value: ScalarExpr },
     PromqlInfoEnrich { child: Rc<Operator>, selector: Vec<InfoMatcher> },
     PromqlSeriesSample { child: Rc<Operator>, by: GroupKeys, kind: SampleKind },
     PromqlSubquery { child: Rc<Operator>, range: Duration, resolution: Option<Duration> },
