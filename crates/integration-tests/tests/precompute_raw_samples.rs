@@ -288,6 +288,7 @@ fn check(
         input,
         reduction,
         grouping,
+        ..
     } = &node.payload
     else {
         unreachable!()

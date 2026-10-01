@@ -593,6 +593,7 @@ fn mark_without(tree: Unresolved, without: bool) -> Unresolved {
             reduction,
             measures,
             output_names,
+            filters,
             having,
             child,
         } => {
@@ -604,6 +605,7 @@ fn mark_without(tree: Unresolved, without: bool) -> Unresolved {
                 reduction: Reduction::Reduce(GroupKeys::without(keys)),
                 measures,
                 output_names,
+                filters,
                 having,
                 child,
             }
@@ -733,6 +735,7 @@ fn classic_histogram_quantile(q: f64, output_name: &str, child: Unresolved) -> U
         reduction: Reduction::Reduce(GroupKeys::without(vec![le.clone()])),
         measures: vec![AggIntent::HistogramQuantile { q, le }],
         output_names: vec![output_name.into()],
+        filters: vec![],
         having: None,
         child: Rc::new(child),
     }
@@ -784,6 +787,7 @@ fn walk_histogram_quantiles(call: &Call) -> Result<Unresolved> {
                     reduction: reduction_for(&[], intent.is_per_series()),
                     measures: vec![intent],
                     output_names: vec!["value".into()],
+                    filters: vec![],
                     having: None,
                     child: Rc::new(child),
                 }
@@ -1535,6 +1539,7 @@ fn build(inner: Inner, keys: Vec<ColumnRef>, outer: Outer) -> Result<Unresolved>
                         accuracy: current_accuracy(),
                     }],
                     output_names: vec![],
+                    filters: vec![],
                     having: None,
                     child: Rc::new(ranked),
                 });
@@ -1576,6 +1581,7 @@ fn build(inner: Inner, keys: Vec<ColumnRef>, outer: Outer) -> Result<Unresolved>
                         accuracy: current_accuracy(),
                     }],
                     output_names: vec![],
+                    filters: vec![],
                     having: None,
                     child: Rc::new(ranked_agg),
                 })
@@ -1664,6 +1670,7 @@ fn windowed_aggregate(
         // PromQL's intent-keyed output names ("sum", "quantile_0_99", …)
         // instead.
         output_names: vec![String::new()],
+        filters: vec![],
         having: None,
         child: Rc::new(child),
     }
@@ -1682,6 +1689,7 @@ fn outer_aggregate(
         reduction,
         measures: vec![intent],
         output_names: vec![String::new()],
+        filters: vec![],
         having: None,
         child: Rc::new(child),
     }
@@ -1701,6 +1709,7 @@ fn per_series_aggregate(
         reduction,
         measures: vec![intent],
         output_names: vec![String::new()],
+        filters: vec![],
         having: None,
         child: Rc::new(child),
     }

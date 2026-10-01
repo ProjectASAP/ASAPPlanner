@@ -288,12 +288,20 @@ pub fn structural_hash(node: &QueryExpr, cache: &mut HashCache) -> u64 {
             reduction,
             measures,
             output_names,
+            filters,
             having,
             child,
         } => {
             hash_own_fields(
                 &mut hasher,
-                &("Aggregate", reduction, measures, output_names, having),
+                &(
+                    "Aggregate",
+                    reduction,
+                    measures,
+                    output_names,
+                    filters,
+                    having,
+                ),
             );
             child_hash(child, cache).hash(&mut hasher);
         }
@@ -610,12 +618,14 @@ fn rebuild_children(table: &mut InternTable, expr: QueryExpr) -> QueryExpr {
             reduction,
             measures,
             output_names,
+            filters,
             having,
             child,
         } => Aggregate {
             reduction,
             measures,
             output_names,
+            filters,
             having,
             child: intern_child(table, child),
         },
@@ -762,7 +772,8 @@ pub fn share_common_subtrees<Id>(roots: Vec<(Id, QueryExpr)>) -> Vec<(Id, Rc<Que
 mod tests {
     use super::*;
     use crate::pre_asap::agg_intent::AggIntent;
-    use crate::pre_asap::query_expr::{BinaryOpKind, GroupKeys, Reduction, Source};
+    use crate::pre_asap::expr_ir::{CompareOpKind, ScalarValue};
+    use crate::pre_asap::query_expr::{BinaryOpKind, GroupKeys, Predicate, Reduction, Source};
     use crate::pre_asap::schema::{Column, DataType, Schema};
     use crate::types::AccuracyTarget;
 
@@ -793,6 +804,7 @@ mod tests {
                 accuracy: AccuracyTarget::Exact,
             }],
             output_names: vec![],
+            filters: vec![],
             having: None,
             child: Rc::new(scan()),
         }
@@ -812,6 +824,28 @@ mod tests {
             !Rc::ptr_eq(ra, rb),
             "distinct-column Quantiles must not be shared"
         );
+        assert_ne!(ra, rb);
+    }
+
+    // Two aggregates that differ only in one measure's `FILTER` predicate
+    // compute different values, so structural sharing must keep them apart.
+    #[test]
+    fn filtered_and_unfiltered_aggregates_do_not_merge() {
+        let a = quantile_agg(vec![1], Some(2), 0.5);
+        let mut b = quantile_agg(vec![1], Some(2), 0.5);
+        let QueryExpr::Aggregate { filters, .. } = &mut b else {
+            unreachable!()
+        };
+        *filters = vec![Some(Predicate(Rc::new(QueryExpr::Compare {
+            left: Rc::new(QueryExpr::Column(3)),
+            op: CompareOpKind::Gt,
+            right: Rc::new(QueryExpr::Literal(ScalarValue::Float64(1.0))),
+        })))];
+        let shared = share_common_subtrees(vec![("a", a), ("b", b)]);
+        let [(_, ra), (_, rb)] = shared.as_slice() else {
+            panic!("expected 2 roots");
+        };
+        assert!(!Rc::ptr_eq(ra, rb), "a filtered measure must not be shared");
         assert_ne!(ra, rb);
     }
 
@@ -1061,6 +1095,7 @@ mod tests {
                 accuracy: AccuracyTarget::Exact,
             }],
             output_names: vec![],
+            filters: vec![],
             having: None,
             child: Rc::new(scan()),
         };

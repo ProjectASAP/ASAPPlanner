@@ -820,6 +820,7 @@ mod tests {
                 )),
                 reduction: Reduction::by(vec![]),
                 grouping: GroupingStrategy::default(),
+                filter: None,
             },
             schema: SummarySchema {
                 fields: vec![SummaryField {
@@ -1162,6 +1163,7 @@ mod tests {
             reduction: QueryReduction::by(vec![2]),
             measures: vec![AggIntent::Sum { col: Some(1) }],
             output_names: vec![],
+            filters: vec![],
             having: None,
             child: Rc::new(labeled_scan()),
         }
@@ -1385,6 +1387,7 @@ mod tests {
             reduction: QueryReduction::by(vec![]),
             measures: vec![AggIntent::Avg { col: None }],
             output_names: vec![],
+            filters: vec![],
             having: None,
             child: Rc::new(scan()),
         };

@@ -409,6 +409,7 @@ fn compile_internal(
                 input: update,
                 reduction: PlannerReduction::PerEntity,
                 grouping,
+                filter: None,
             } = &node.payload
             {
                 let [input_id] = inputs.as_slice() else {
@@ -789,8 +790,12 @@ fn bind_operation(node: &PostAsapDagNode, inputs: &[Schema]) -> Result<Operator,
                 reduction,
                 measures,
                 output_names,
+                filters,
                 having: None,
             }) => {
+                if filters.iter().any(Option::is_some) {
+                    return Err(invalid("filtered aggregate has no native implementation"));
+                }
                 if measures.len() != output_names.len() {
                     return Err(invalid("aggregate output names differ from measures"));
                 }
@@ -856,7 +861,13 @@ fn bind_operation(node: &PostAsapDagNode, inputs: &[Schema]) -> Result<Operator,
             input: update,
             reduction,
             grouping,
+            filter,
         } => {
+            if filter.is_some() {
+                return Err(invalid(
+                    "filtered summary update has no native implementation",
+                ));
+            }
             if let Some(item) = &update.item {
                 let PlannerReduction::Reduce(keys) = reduction else {
                     return Err(invalid("keyed summary requires explicit partitions"));

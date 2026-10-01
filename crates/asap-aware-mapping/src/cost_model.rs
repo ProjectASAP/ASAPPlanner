@@ -1324,6 +1324,7 @@ mod tests {
                     measures: vec![AggIntent::Max { col: None }],
                     output_names: vec![],
                     having: None,
+                    filters: vec![],
                 },
                 OperationPlacement::Read,
             ),
@@ -1384,6 +1385,7 @@ mod tests {
                 ),
                 reduction: asap_types::pre_asap::query_expr::Reduction::by(vec![]),
                 grouping: GroupingStrategy::default(),
+                filter: None,
             },
             schema: SummarySchema {
                 fields: vec![SummaryField {

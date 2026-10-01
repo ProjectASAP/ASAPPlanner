@@ -220,8 +220,9 @@ impl Lowering {
                 measures,
                 having: None,
                 child,
+                filters,
                 ..
-            } => {
+            } if filters.iter().all(Option::is_none) => {
                 let [function] = measures.as_slice() else {
                     return Err(invalid("range function requires one measure"));
                 };
@@ -238,8 +239,9 @@ impl Lowering {
                 measures,
                 having: None,
                 child,
+                filters,
                 ..
-            } => {
+            } if filters.iter().all(Option::is_none) => {
                 let [measure] = measures.as_slice() else {
                     return Err(invalid("vector aggregation requires one measure"));
                 };
