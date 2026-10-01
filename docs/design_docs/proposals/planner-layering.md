@@ -9,12 +9,14 @@ ASAPPlanner takes a [query workload](https://github.com/ProjectASAP/ASAPPlanner/
 inputs (concrete deployment-input types remain a follow-up), and returns the
 lowest-cost feasible physical plan within the explored search space, or an
 explanation that no candidate qualifies. It decides what is computed, how
-it is computed, and which plan is best. The deployment supplies cost/accuracy models and capabilities, then executes the
-selected plan. Planning and selection remain inside ASAPPlanner.
+it is computed, and which plan is best. The deployment supplies cost/accuracy
+models and capabilities, then executes the selected plan. Planning and selection remain inside ASAPPlanner.
 
 ## Stages
 
-In the diagram, × means the Cartesian product: each stage combines every option along one dimension with every option along the others.
+In the diagram, × denotes exploring combinations across the listed dimensions.
+Each combination must satisfy the stage contracts below; incompatible combinations
+are rejected and equivalent candidates may be deduplicated.
 
 ```text
  Query workload
@@ -47,7 +49,7 @@ In the diagram, × means the Cartesian product: each stage combines every option
 │ Logical planning — what to compute                                     │
 │                                                                        │
 │ 1. Logical ASAP-aware optimization                                     │
-│    Explore semantically equivalent and legal logical candidates:       │
+│    Explore exact rewrites and permitted approximate alternatives:      │
 │                                                                        │
 │      summary families                                                  │
 │      × query rewrites                                                  │
@@ -60,12 +62,12 @@ In the diagram, × means the Cartesian product: each stage combines every option
 │ Physical planning — how to compute                                     │
 │                                                                        │
 │ 2. Physical ASAP-aware optimization                                    │
-│    Explore executable implementations of each logical candidate:       │
+│    Specify complete implementations of each logical candidate:         │
 │                                                                        │
 │      materialization decisions                                         │
 │      × physical operator implementations                               │
-│      × parallelism and partitioning                                    │
-│      × resource management                                             │
+│      × parallelism and partitioning (design TODO)                      │
+│      × resource management (design TODO)                               │
 │                                                                        │
 │    Output: CandidatePhysicalASAPDAGs                                   │
 │                                                                        │
@@ -76,7 +78,7 @@ In the diagram, × means the Cartesian product: each stage combines every option
 │    empirical cost and accuracy models. Reject candidates that violate  │
 │    accuracy, latency, or capability constraints.                       │
 │                                                                        │
-│    Choose the cheapest valid plan for the whole workload.              │
+│    Choose the cheapest feasible workload plan among candidates.        │
 │                                                                        │
 └────────────────────────────────┬───────────────────────────────────────┘
                                  │
@@ -91,6 +93,12 @@ In the diagram, × means the Cartesian product: each stage combines every option
 │                                                                        │
 └────────────────────────────────────────────────────────────────────────┘
 ```
+
+The diagram shows the successful selection path. If no candidate qualifies,
+selection returns rejection reasons and execution does not begin. Physical
+candidates have complete execution decisions; deployment feasibility is still
+checked at selection. Dimensions marked TODO belong to physical planning, but
+their detailed contracts are outside this proposal.
 
 The planner receives three groups of inputs:
 
@@ -158,7 +166,12 @@ evaluation timing and missing-data semantics.
 
 Logical optimization runs in two passes. Pass 1 generates candidates for each
 computation on its own; Pass 2 finds candidates that share computation across
-sub-DAGs and queries. Physical planning assigns materialization and execution timing.
+sub-DAGs and queries. Exact rewrites preserve source-language results; summary
+replacements may approximate the requested result under its accuracy requirement.
+They must preserve the defined input, grouping, window and result contracts.
+Logical planning records the approximation obligations; selection establishes
+whether a concrete physical candidate meets them using deployment models.
+Physical planning assigns materialization and execution timing.
 
 #### Pass 1: Local candidate generation
 
@@ -234,9 +247,12 @@ Sharing adds alternatives; independent plans remain available to selection.
 
 ### 2. Physical ASAP-aware optimization
 
-Physical optimization turns each logical candidate into executable candidates.
-It makes two ASAP-specific decisions, described below. Parallelism, partitioning
-and resource management are TODO.
+Physical optimization gives each logical candidate concrete implementations,
+parameters, materialization and execution timing. Its output is structurally
+complete, but has not yet passed deployment capability, accuracy and latency
+checks. Selection performs those checks. The two decisions detailed below are
+materialization and operator implementation; parallelism, partitioning and resource
+management remain physical-planning responsibilities with contracts still TODO.
 
 #### Materialization
 
