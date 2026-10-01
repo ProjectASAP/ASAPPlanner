@@ -63,8 +63,39 @@ impl<C: ColState> Operator<C> {   // implemented for every operator
 /// assignment (§2.3). Both are `Unset` on a freshly built node.
 pub enum Slot<T> { Unset, Set(T) }
 
-/// Memo of one pass over a workload, keyed by node pointer.
-/// One is shared by every root of a workload, so a node shared by two roots stays one `Rc`.
+```
+
+**Preserve sharing while filling attributes.** Guarantee derivation and timing
+assignment return new nodes because the IR is immutable. If two queries share a
+`Scan`, processing their roots independently could create two replacement scans and
+lose that sharing. The design therefore requires each input node to map to one
+output node within a pass, across every root in the workload:
+
+```text
+Before the pass                 After the pass
+query A ─┐                      query A′ ─┐
+         ├─ shared Scan                  ├─ shared Scan′
+query B ─┘                      query B′ ─┘
+```
+
+A temporary lookup table can enforce this: record `input node → output node` on the
+first visit and reuse the output on later visits. Key it by node identity, not
+structural equality: the pass preserves existing sharing; it does not introduce
+new sharing between separate computations. For timing, a repeated visit must also
+agree with the timing already assigned, or the assignment is rejected (§4).
+
+Use a fresh table for each pass invocation, shared across its workload roots.
+Reusing it after a rewrite or for another assignment could return stale nodes.
+Today's `GlobalSelection.assembled_nodes` already uses this approach during assembly
+(`replacement.rs`); this proposal extends it to the attribute passes.
+
+`DerivationMemo` below names that temporary table. Its name, storage and exposure in
+these illustrative signatures are implementation details, not a new plan attribute
+or a required public API. The design requirement is to preserve sharing and detect
+timing conflicts.
+
+```rust
+/// Reuses each input node's output across all roots in one attribute pass.
 pub struct DerivationMemo { .. }
 
 /// Build the accuracy guarantee of one DAG root by derivation
@@ -85,10 +116,8 @@ pub fn apply_lifecycle_timings(
 ) -> Result<Rc<Operator>, ExecutionDataStateError>;
 ```
 
-- **Immutable passes:** both passes return a new DAG and preserve sharing with one
-  memo per pass across all workload roots. Lifecycle planning uses the
-  guarantee-derived DAG; export uses the timed DAG. Earlier pointers do not identify
-  nodes in those results.
+- **Pass results:** lifecycle planning uses the guarantee-derived DAG; export uses
+  the timed DAG. Earlier pointers do not identify nodes in those results.
 - **Recomputation:** `derive_guarantees` fills guarantee slots from local evidence
   and child guarantees. `apply_lifecycle_timings` overwrites timing slots from the
   assignment. Run rewrites before these passes.
@@ -401,8 +430,9 @@ fn assemble(&self, t: &Rc<Operator>) -> Rc<Operator> {
 }
 ```
 
-`GlobalSelection::assemble_selected_dag` derives guarantees after assembly, sharing
-one `DerivationMemo` across roots. Lifecycle planning reads that derived DAG, then
+`GlobalSelection::assemble_selected_dag` derives guarantees after assembly,
+preserving shared nodes across roots as described in §1.1. Lifecycle planning reads
+that derived DAG, then
 `apply_lifecycle_timings` applies the chosen assignment.
 
 `assemble_selected_query` remains the query-result boundary (#472): it calls
