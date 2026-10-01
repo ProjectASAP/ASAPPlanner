@@ -13,35 +13,98 @@ executes the plan: it supplies its own empirical cost estimation, empirical accu
 ## Layers
 
 ```text
-  Query workload (PromQL/SQL/MetricsQL, query repeating pattern, accuracy requirements, query latency requirement)
-  + Data workload (data arrival pattern: streaming data vs data at rest, data distribution, cardinality) 
-  + Deployment inputs: empirical cost estimation, empirical accuracy estimation, capabilities
-                       │
-┌───────────────────────┴───────── ASAPPlanner ────────────────────┐
-│ 0. Frontends                                                     │
-│    Parse + lower
-     -> Output: LogicalDAG, CandidateLogicalDAGs                         │
-│    Reject unsupported query expressions.                         │
-│                      │                                           │
-│ Logical planning (what to compute)                                          │
-│ 1. Logical ASAP-aware optimization                                          │
-│    ASAPPrimitives: Summary families x exact candidates x query rewrites x supporting multiple computation nodes with one summary node                  │
-│    -> Output: LogicalDAGswithASAPPrimitive, CandidateLogicalDAGswithASAPPrimitive         │
-│                      │                                           │
-│ Physical planning (how to compute)                                          │                                │
-│ 2. Physical ASAP-aware optimization          |
-   Materialization or not for a subDAG x  Physical operator implementation selection x Parallelism & Partitioning x resource management |
-    -> Output: PhysicalDAGwithASAPPrimitives, CandidatePhysicalDAGswithASAPPrimitives                   │
-│                      │                                           │
-│ 3. Plan Selection                                                     │
-│    Cost every candidate with the deployment's cost model and accuracy model;        │
-│    choose the cheapest admissible one for the workload.          │
-└──────────────────────┬───────────────────────────────────────────┘
-          one optimal PhysicalDAGwithASAPPrimitives (the boundary)
-┌──────────────────────┴──────── Deployment ───────────────────────┐
-│ 5. Execution: ingest, storage, query                │
-└──────────────────────────────────────────────────────────────────┘
+ Query workload
+   (PromQL / SQL / MetricsQL,
+    query recurrence,
+    accuracy requirements,
+    latency requirements)
+
+ + Data workload
+   (streaming vs. data at rest,
+    data distribution,
+    cardinality)
+
+ + Deployment inputs
+   (empirical cost model,
+    empirical accuracy model,
+    deployment capabilities)
+                         │
+                         ▼
+┌────────────────────────────── ASAPPlanner ──────────────────────────────┐
+│                                                                        │
+│ 0. Frontends                                                           │
+│    Parse and lower source-language queries into a common logical       │
+│    representation. Reject unsupported query expressions.               │
+│                                                                        │
+│    Output: CandidateLogicalQueryDAGs                                   │
+│                                                                        │
+│                         │                                              │
+│                         ▼                                              │
+│ Logical planning — what to compute                                     │
+│                                                                        │
+│ 1. Logical ASAP-aware optimization                                     │
+│    Explore semantically valid logical candidates:                      │
+│                                                                        │
+│      summary families                                                  │
+│      × exact candidates                                                │
+│      × query rewrites                                                  │
+│      × sharing one summary across multiple computations                │
+│                                                                        │
+│    Output: CandidateLogicalASAPDAGs                                    │
+│                                                                        │
+│                         │                                              │
+│                         ▼                                              │
+│ Physical planning — how to compute                                     │
+│                                                                        │
+│ 2. Physical ASAP-aware optimization                                    │
+│    Explore executable implementations of each logical candidate:       │
+│                                                                        │
+│      materialization decisions                                         │
+│      × physical operator implementations                               │
+│      × parallelism and partitioning                                    │
+│      × resource management                                             │
+│                                                                        │
+│    Output: CandidatePhysicalASAPDAGs                                   │
+│                                                                        │
+│                         │                                              │
+│                         ▼                                              │
+│ 3. Plan selection                                                      │
+│    Evaluate complete physical candidates using the deployment's        │
+│    empirical cost and accuracy models. Reject candidates that violate  │
+│    accuracy, latency, or capability constraints.                       │
+│                                                                        │
+│    Choose the cheapest admissible plan for the whole workload.         │
+│                                                                        │
+└────────────────────────────────┬───────────────────────────────────────┘
+                                 │
+                                 ▼
+                    one selected PhysicalASAPDAG
+                                 │
+                                 ▼
+┌────────────────────────────── Deployment ───────────────────────────────┐
+│                                                                        │
+│ 4. Execution                                                           │
+│    Bind inputs and execute ingestion, storage, precomputation, and     │
+│    query-time computation described by the selected plan.              │
+│                                                                        │
+└────────────────────────────────────────────────────────────────────────┘
 ```
+
+Each optimization stage produces a candidate plan space. Candidate sets are
+internal to ASAPPlanner and may be represented explicitly or enumerated lazily.
+The deployment never performs query planning or plan selection.
+
+Each stage adds a different class of decisions:
+
+- **Frontend:** represents the original query semantics.
+- **Logical ASAP-aware optimization:** decides **what computation** can satisfy
+  those semantics, including ASAP primitives, exact alternatives, rewrites,
+  and sharing.
+- **Physical ASAP-aware optimization:** decides **how that computation runs**,
+  including materialization, physical operators, partitioning, parallelism,
+  and resource allocation.
+- **Plan selection:** compares complete physical candidates and returns one
+  selected plan.
 
 Layers 0 to 3 each output a candidate set, `Candidate<DAG>s`, holding every
 legal candidate of their stage (for example KLL and DDSketch for one quantile,
