@@ -25,15 +25,15 @@ executes the plan: it supplies its own empirical cost estimation, empirical accu
     cardinality)
 
  + Deployment inputs
-   (empirical cost model,
-    empirical accuracy model,
+   (cost model,
+    accuracy model,
     deployment capabilities)
                          │
                          ▼
 ┌────────────────────────────── ASAPPlanner ──────────────────────────────┐
 │                                                                        │
-│ 0. Language-specific frontends                                                           │
-│    Parse and convert source-language queries into a common logical       │
+│ 0. Language-specific frontends                                         │
+│    Parse and convert source-language queries into a common logical     │
 │    representation. Reject unsupported query expressions.               │
 │                                                                        │
 │    Output: CandidateLogicalDAGs                                        │
