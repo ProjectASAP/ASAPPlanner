@@ -61,10 +61,10 @@ operator kinds.
 
 | Category | Meaning | All operations |
 |---|---|---|
-| `NonASAP(NonASAPOp)` | Ordinary query operations that transform, combine or aggregate data | `Scan`, `Filter`, `Project`, `Aggregate`, `Join`, `SetOp`, `Concat`, `Dedup`, `Sort`, `Limit`, `BinaryOp`, `SQLWindowFunc`, `TimeRange`, `TimeShift`, `ScalarBridge`, `EvalTimestamp`, `PromqlVectorFromScalar`, `PromqlScalarFromVector`, `PromqlRelabel`, `PromqlInfoEnrich`, `PromqlSeriesSample`, `PromqlSubquery` |
+| `NonASAP(NonASAPOp)` | Ordinary query operations that transform, combine or aggregate data | `Scan`, `Filter`, `Project`, `Aggregate`, `Join`, `SetOp`, `Concat`, `Dedup`, `Sort`, `Limit`, `BinaryOp`, `SQLWindowFunc`, `TimeRange`, `TimeShift`, `PromqlScalarBridge`, `EvalTimestamp`, `PromqlVectorFromScalar`, `PromqlScalarFromVector`, `PromqlRelabel`, `PromqlInfoEnrich`, `PromqlSeriesSample`, `PromqlSubquery` |
 | `ASAP(ASAPOp)` | Operations on summary state and its results, including reserved operations | `SummaryAgg`, `SummaryEstimate`, `SummaryMerge`, `SummarySubtract`, `SummaryDelete`, `SummaryJoin`, `FinalizeExactAccumulator`, `MaintainPopulation`, `ReadPopulation`, `Extension` |
 
-`ScalarBridge` is the proposed name for the existing `PromqlScalarBridge`.
+`PromqlScalarBridge` keeps its existing name.
 `CurrentTimestamp` belongs to scalar expressions, so it is not in this operator list.
 
 `SummaryMerge`, `SummarySubtract`, `SummaryDelete`, `SummaryJoin` and `Extension`
@@ -97,88 +97,84 @@ the existing query and summary models, but the sketches combine several changes:
 | Give both categories inputs that refer to `Operator` nodes | Enable composition and shared producers across the category boundary. Two category labels alone do not enable sharing. |
 | Remove relational-subplan wrappers and duplicate relational operations | Make all dependencies visible and give each ordinary operation one definition. |
 | Separate scalar expressions from operators | A related proposal, described in the [companion document](decoupling_op_and_expr.md); not a consequence of categorization alone. |
-| Introduce `local_guarantee` and `exact_rule` on summary operations | Additional accuracy design: retain local evidence separately from the derived subtree guarantee (§2.2). These are not fields on today's corresponding summary operations. |
+| Introduce `local_guarantee` and `exact_operation_rule` on summary operations | Additional accuracy design: retain local evidence separately from the derived subtree guarantee (§2.2). These are not fields on today's corresponding summary operations. |
 | Let physical/lifecycle planning decide when each node executes | Additional planning design (§2.3): logical construction leaves timing undecided; planning chooses ingestion-time or query-time execution under the workload constraints. |
 
-Existing operation semantics and field names should be retained unless a change is
-identified explicitly. The sketches use descriptive shorthand in several places;
-those names do not propose additional types or renames:
+**Naming and compatibility.** The sketches retain current operation, field and
+payload-type names. `NonASAPOp`, `ASAPOp` and the companion proposal's `ScalarExpr`
+are the new structural concepts; ordinary payloads such as `Predicate`,
+`ProjectItem`, `AggIntent`, `SketchQuery` and `SummaryFamilyType` keep their names.
 
-| Sketch notation | Current counterpart |
-|---|---|
-| `columns: Vec<NamedExpr>` | `cols: Vec<ProjectItem>` on a projection |
-| `predicate` | `pred`, currently wrapped in `Predicate` |
-| `AggregateMeasure` | `AggIntent` |
-| `SummaryFamily` | The state-producing cases of `SummaryFamilyType` |
-| `SummaryQuery` | `SketchQuery` |
-| `AccuracyGuarantee` / `AccuracyCompositionRule` | `ResultGuarantee` / `CompositionOperator` |
-| `PopulationSpec` | `MaintainedPopulation` |
-| `child` on summary estimation or deletion | `summary_input` |
+The following changes are explicit:
 
-Two differences need particular care. The proposed `Limit.partition_by` preserves a
-capability of today's post-ASAP limit that the pre-ASAP limit does not carry;
-unifying those definitions requires an explicit decision about its semantics.
-The window-function sketch shows a resolved `frame`, while the current definition
-allows an optional frame for compatibility. Neither difference should be treated
-as an incidental rename or a silently approved behavior change.
+- Operator inputs become references to the common `Operator`. The sketches use the
+  existing `Rc` notation for shared inputs and omit column-state generics for
+  readability; column IDs and scan schemas below show the resolved form.
+- `Predicate`, `ProjectItem` and other scalar-bearing payloads keep their roles, but
+  contain `ScalarExpr` after the scalar/operator split.
+- `BinaryOp` reuses the existing post-ASAP `BinaryOperator` payload. It carries the
+  binary operation, vector matching and checked-division requirements; the pre-ASAP
+  `op` and `vector_match` semantics must be preserved when mapped into it.
+- `Limit.partition_by` comes from the existing post-ASAP limit. Applying that field
+  to the unified operator remains an explicit design choice, not new functionality
+  implied by a rename. `SQLWindowFunc.frame` retains its current optional form.
+- `SummaryEstimate.local_guarantee` and `SummaryAgg.exact_operation_rule` are proposed
+  new fields, named after the existing accuracy-model concepts. Their types remain
+  `ResultGuarantee` and `CompositionOperator`; neither field exists on today's
+  corresponding summary operation (§2.2).
 
-**Proposed data structures.** The sketches below show the operation-specific data
-carried by each category. They use Rust-like notation to describe the design, not
-final API signatures. `NodeRef` means an edge to another `Operator` node; it does
-not prescribe a pointer or storage type. Multiple edges may refer to one producer.
-`ScalarExpr` means an expression within an operator, not another graph node.
+**Proposed data structures.** These sketches describe operation-specific data using
+current names. `Rc<Operator>` represents a shared input edge; no new reference type
+is introduced. Storage and traversal algorithms remain outside this design.
 
 `NonASAPOp` retains the query semantics needed before and after optimization:
 
 ```rust
 enum NonASAPOp {
     Scan {
-        source: Source, predicates: Vec<ScalarExpr>, schema: Schema,
+        source: Source, predicates: Vec<Predicate>, schema: Schema,
     },
-    Filter { child: NodeRef, predicate: ScalarExpr },
+    Filter { child: Rc<Operator>, pred: Predicate },
     Project {
-        child: NodeRef, columns: Vec<NamedExpr>, qualifier: Option<String>,
+        child: Rc<Operator>, cols: Vec<ProjectItem>, qualifier: Option<String>,
     },
     Aggregate {
-        child: NodeRef, reduction: Reduction, measures: Vec<AggregateMeasure>,
-        output_names: Vec<String>, having: Option<ScalarExpr>,
+        child: Rc<Operator>, reduction: Reduction, measures: Vec<AggIntent>,
+        output_names: Vec<String>, having: Option<Predicate>,
     },
-    Join { left: NodeRef, right: NodeRef, kind: JoinKind, predicate: ScalarExpr },
-    SetOp { left: NodeRef, right: NodeRef, kind: SetOpKind, all: bool },
+    Join { left: Rc<Operator>, right: Rc<Operator>, kind: JoinKind, pred: Predicate },
+    SetOp { left: Rc<Operator>, right: Rc<Operator>, kind: RelationalSetOpKind, all: bool },
     Concat {
-        children: Vec<NodeRef>, discriminator_unique_key: Option<UniqueKey>,
+        children: Vec<Rc<Operator>>, discriminator_unique_key: Option<ConcatDiscriminatorKey>,
     },
-    Dedup { child: NodeRef, columns: Vec<ColumnRef> },
-    Sort { child: NodeRef, keys: Vec<SortKey>, partition_by: GroupKeys },
-    Limit { child: NodeRef, count: usize, offset: usize, partition_by: GroupKeys },
-    BinaryOp {
-        left: NodeRef, right: NodeRef, operation: BinaryOpKind,
-        vector_match: Option<VectorMatch>,
-    },
+    Dedup { child: Rc<Operator>, cols: Vec<ColumnId> },
+    Sort { child: Rc<Operator>, keys: Vec<SortKey>, partition_by: GroupKeys },
+    Limit { child: Rc<Operator>, n: usize, offset: usize, partition_by: GroupKeys },
+    BinaryOp { lhs: Rc<Operator>, rhs: Rc<Operator>, operator: BinaryOperator },
     SQLWindowFunc {
-        child: NodeRef, function: WindowFunction, args: Vec<ScalarExpr>,
+        child: Rc<Operator>, func: WindowFuncKind, args: Vec<ScalarExpr>,
         partition_by: GroupKeys, order_by: Vec<SortKey>,
-        frame: WindowFrame, output_name: String,
+        frame: Option<WindowFrame>, output_name: String,
     },
-    TimeRange { child: NodeRef, range: Duration },
-    TimeShift { child: NodeRef, shift: TimeShiftSpec },
-    ScalarBridge { expression: ScalarExpr },
+    TimeRange { child: Rc<Operator>, range: Duration },
+    TimeShift { child: Rc<Operator>, shift: TimeShift },
+    PromqlScalarBridge(ScalarExpr),
     EvalTimestamp,
-    PromqlVectorFromScalar { child: NodeRef },
-    PromqlScalarFromVector { child: NodeRef },
-    PromqlRelabel { child: NodeRef, destination_label: String, value: ScalarExpr },
-    PromqlInfoEnrich { child: NodeRef, selector: Vec<InfoMatcher> },
-    PromqlSeriesSample { child: NodeRef, by: GroupKeys, kind: SampleKind },
-    PromqlSubquery { child: NodeRef, range: Duration, resolution: Option<Duration> },
+    PromqlVectorFromScalar(Rc<Operator>),
+    PromqlScalarFromVector(Rc<Operator>),
+    PromqlRelabel { child: Rc<Operator>, dst: String, value: ScalarExpr },
+    PromqlInfoEnrich { child: Rc<Operator>, selector: Vec<InfoMatcher> },
+    PromqlSeriesSample { child: Rc<Operator>, by: GroupKeys, kind: SampleKind },
+    PromqlSubquery { child: Rc<Operator>, range: Duration, resolution: Option<Duration> },
 }
 ```
 
 The fields describe what an operator does to its inputs:
 
-- `child`, `left`, `right` and `children` are graph dependencies. They can lead to
+- `child`, `left`, `right`, `lhs`, `rhs` and `children` are graph dependencies. They can lead to
   either operator category, subject to the input's schema requirements.
-- Predicates and named expressions describe row-level calculations. A named
-  expression contains a scalar expression and its optional output alias.
+- `Predicate` describes a row-level condition; `ProjectItem` contains a scalar
+  expression and its optional output alias.
 - `reduction` describes whether aggregation combines groups or operates per entity;
   `measures` describes the requested aggregates. Grouping is distinct from ordering
   or limiting within groups, represented by `partition_by`.
@@ -187,31 +183,33 @@ The fields describe what an operator does to its inputs:
   survive optimization. The optional concatenation key records a discriminator
   that distinguishes branches together with their within-branch key.
 
-`ASAPOp` describes state construction, state operations and readout separately:
+`ASAPOp` describes state construction, state operations and readout separately.
+`SummaryFamilyType` retains its current name; state-producing operations use its
+summary or exact-accumulator cases, never its `Plain` case.
 
 ```rust
 enum ASAPOp {
     SummaryAgg {
-        child: NodeRef, family: SummaryFamily, input: SummaryUpdate,
+        child: Rc<Operator>, family: SummaryFamilyType, input: SummaryUpdate,
         reduction: Reduction, grouping: GroupingStrategy,
-        exact_rule: Option<AccuracyCompositionRule>,
+        exact_operation_rule: Option<CompositionOperator>, // proposed new field
     },
     SummaryEstimate {
-        child: NodeRef, query: SummaryQuery,
-        local_guarantee: Option<AccuracyGuarantee>,
+        summary_input: Rc<Operator>, query: SketchQuery,
+        local_guarantee: Option<ResultGuarantee>, // proposed new field
     },
-    FinalizeExactAccumulator { child: NodeRef },
-    MaintainPopulation { child: NodeRef, population: PopulationSpec },
-    ReadPopulation { child: NodeRef, readout: PopulationReadout },
+    FinalizeExactAccumulator { child: Rc<Operator> },
+    MaintainPopulation { child: Rc<Operator>, population: MaintainedPopulation },
+    ReadPopulation { child: Rc<Operator>, readout: PopulationReadout },
 
     // Reserved operations; semantics and support require further design.
-    SummaryMerge { children: Vec<NodeRef> },
-    SummarySubtract { left: NodeRef, right: NodeRef },
-    SummaryDelete { child: NodeRef, key: ColumnRef },
+    SummaryMerge { children: Vec<Rc<Operator>> },
+    SummarySubtract { left: Rc<Operator>, right: Rc<Operator> },
+    SummaryDelete { summary_input: Rc<Operator>, key: ColumnRef },
     SummaryJoin {
-        outer: NodeRef, inner: NodeRef, key: ColumnRef, family: SummaryFamily,
+        outer: Rc<Operator>, inner: Rc<Operator>, key: ColumnRef, family: SummaryFamilyType,
     },
-    Extension { child: NodeRef, name: String },
+    Extension { child: Rc<Operator>, name: String },
 }
 ```
 
@@ -224,7 +222,7 @@ The summary fields distinguish state construction, readout and accuracy evidence
 | `reduction` | Which input entities contribute to each logical result |
 | `grouping` | Whether those groups use separate state instances or a supported shared structure |
 | `query` / `readout` | The result requested from summary or maintained-population state |
-| `local_guarantee` / `exact_rule` | Local accuracy evidence or composition semantics; neither is the final guarantee of the complete subtree |
+| `local_guarantee` / `exact_operation_rule` | Local accuracy evidence or composition semantics; neither is the final guarantee of the complete subtree |
 | `population` | The population whose membership and values are maintained |
 
 For example, one KLL `SummaryAgg` can feed two `SummaryEstimate` nodes whose queries
@@ -317,12 +315,12 @@ the actual computation graph.
 
 **Existing concepts versus proposed fields.** The current code already calculates
 local guarantees and uses accuracy-composition rules, but neither `local_guarantee`
-nor `exact_rule` is a field on the corresponding summary operation today:
+nor `exact_operation_rule` is a field on the corresponding summary operation today:
 
 | Proposed field | Meaning | Current code | What this proposal changes |
 |---|---|---|---|
 | `SummaryEstimate.local_guarantee` | The guarantee for this summary readout over exact input; it excludes upstream error. | `AccuracyModel.local_guarantee(...)` already computes it. It is used when composing the result guarantee, rather than retained on the estimation operation. | Retain that local evidence so accuracy can be derived from the assembled graph's actual inputs. |
-| `SummaryAgg.exact_rule` | The rule for propagating input error through an exact aggregate. “Exact” describes the operation, not a promise that approximate inputs become exact. | Composition rules already exist. Exact-aggregate binding selects a rule from the aggregate's registered semantics; there is no `exact_rule` field. | Retain the selected rule on the operation so later derivation does not need to recover the original binding context. |
+| `SummaryAgg.exact_operation_rule` | The rule for propagating input error through an exact aggregate. “Exact” describes the operation, not a promise that approximate inputs become exact. | Composition rules already exist. Exact-aggregate binding selects a rule from the aggregate's registered semantics; the accuracy model also exposes `exact_operation_rule(...)` for exact operations. Neither is a stored field on `SummaryAgg`. | Retain the selected rule on the operation so later derivation does not need to recover the original binding context. |
 
 Today, the composed result is stored as the summary node's `guarantee`. The proposed
 fields retain inputs to that calculation; they do not replace the complete result
