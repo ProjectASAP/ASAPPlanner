@@ -55,10 +55,21 @@ enum Operator {
 }
 ```
 
-| Category | Meaning | Example operations |
+The table lists all operator kinds in this proposal. Aggregate functions, join
+kinds and scalar functions are choices within these operations, not additional
+operator kinds.
+
+| Category | Meaning | All operations |
 |---|---|---|
-| `NonASAP(NonASAPOp)` | Ordinary query operations that transform, combine or aggregate data | `Scan`, `Filter`, `Project`, `Join`, `Aggregate`, `SetOp`, time selection |
-| `ASAP(ASAPOp)` | Operations that build summary state or obtain results from it | `SummaryAgg`, `SummaryEstimate`, `FinalizeExactAccumulator`, `MaintainPopulation`, `ReadPopulation` |
+| `NonASAP(NonASAPOp)` | Ordinary query operations that transform, combine or aggregate data | `Scan`, `Filter`, `Project`, `Aggregate`, `Join`, `SetOp`, `Concat`, `Dedup`, `Sort`, `Limit`, `BinaryOp`, `SQLWindowFunc`, `TimeRange`, `TimeShift`, `ScalarBridge`, `EvalTimestamp`, `PromqlVectorFromScalar`, `PromqlScalarFromVector`, `PromqlRelabel`, `PromqlInfoEnrich`, `PromqlSeriesSample`, `PromqlSubquery` |
+| `ASAP(ASAPOp)` | Operations on summary state and its results, including reserved operations | `SummaryAgg`, `SummaryEstimate`, `SummaryMerge`, `SummarySubtract`, `SummaryDelete`, `SummaryJoin`, `FinalizeExactAccumulator`, `MaintainPopulation`, `ReadPopulation`, `Extension` |
+
+`ScalarBridge` is the proposed name for the existing `PromqlScalarBridge`.
+`CurrentTimestamp` belongs to scalar expressions, so it is not in this operator list.
+
+`SummaryMerge`, `SummarySubtract`, `SummaryDelete`, `SummaryJoin` and `Extension`
+are reserved in the proposed planner model; listing them does not establish planner
+or runtime support. Summary composition remains an open design question (§7).
 
 `NonASAPOp` and `ASAPOp` describe the operation performed by a node. Inputs in both
 categories connect to `Operator` nodes, so either category can consume the other
