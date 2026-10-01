@@ -87,6 +87,120 @@ categories make state-specific accuracy and execution constraints explicit. A
 frontend plan contains only `NonASAP` nodes. Optimization may introduce `ASAP`
 nodes later.
 
+**Proposed data structures.** The sketches below show the operation-specific data
+carried by each category. They use Rust-like notation to describe the design, not
+final API signatures. `NodeRef` means an edge to another `Operator` node; it does
+not prescribe a pointer or storage type. Multiple edges may refer to one producer.
+`ScalarExpr` means an expression within an operator, not another graph node.
+
+`NonASAPOp` retains the query semantics needed before and after optimization:
+
+```rust
+enum NonASAPOp {
+    Scan {
+        source: Source, predicates: Vec<ScalarExpr>, schema: Schema,
+    },
+    Filter { child: NodeRef, predicate: ScalarExpr },
+    Project {
+        child: NodeRef, columns: Vec<NamedExpr>, qualifier: Option<String>,
+    },
+    Aggregate {
+        child: NodeRef, reduction: Reduction, measures: Vec<AggregateMeasure>,
+        output_names: Vec<String>, having: Option<ScalarExpr>,
+    },
+    Join { left: NodeRef, right: NodeRef, kind: JoinKind, predicate: ScalarExpr },
+    SetOp { left: NodeRef, right: NodeRef, kind: SetOpKind, all: bool },
+    Concat {
+        children: Vec<NodeRef>, discriminator_unique_key: Option<UniqueKey>,
+    },
+    Dedup { child: NodeRef, columns: Vec<ColumnRef> },
+    Sort { child: NodeRef, keys: Vec<SortKey>, partition_by: GroupKeys },
+    Limit { child: NodeRef, count: usize, offset: usize, partition_by: GroupKeys },
+    BinaryOp {
+        left: NodeRef, right: NodeRef, operation: BinaryOpKind,
+        vector_match: Option<VectorMatch>,
+    },
+    SQLWindowFunc {
+        child: NodeRef, function: WindowFunction, args: Vec<ScalarExpr>,
+        partition_by: GroupKeys, order_by: Vec<SortKey>,
+        frame: WindowFrame, output_name: String,
+    },
+    TimeRange { child: NodeRef, range: Duration },
+    TimeShift { child: NodeRef, shift: TimeShiftSpec },
+    ScalarBridge { expression: ScalarExpr },
+    EvalTimestamp,
+    PromqlVectorFromScalar { child: NodeRef },
+    PromqlScalarFromVector { child: NodeRef },
+    PromqlRelabel { child: NodeRef, destination_label: String, value: ScalarExpr },
+    PromqlInfoEnrich { child: NodeRef, selector: Vec<InfoMatcher> },
+    PromqlSeriesSample { child: NodeRef, by: GroupKeys, kind: SampleKind },
+    PromqlSubquery { child: NodeRef, range: Duration, resolution: Option<Duration> },
+}
+```
+
+The fields describe what an operator does to its inputs:
+
+- `child`, `left`, `right` and `children` are graph dependencies. They can lead to
+  either operator category, subject to the input's schema requirements.
+- Predicates and named expressions describe row-level calculations. A named
+  expression contains a scalar expression and its optional output alias.
+- `reduction` describes whether aggregation combines groups or operates per entity;
+  `measures` describes the requested aggregates. Grouping is distinct from ordering
+  or limiting within groups, represented by `partition_by`.
+- Join/set kinds, vector matching, window frames and time selections preserve
+  source-language semantics. Output names, qualifiers and proven uniqueness also
+  survive optimization. The optional concatenation key records a discriminator
+  that distinguishes branches together with their within-branch key.
+
+`ASAPOp` describes state construction, state operations and readout separately:
+
+```rust
+enum ASAPOp {
+    SummaryAgg {
+        child: NodeRef, family: SummaryFamily, input: SummaryUpdate,
+        reduction: Reduction, grouping: GroupingStrategy,
+        exact_rule: Option<AccuracyCompositionRule>,
+    },
+    SummaryEstimate {
+        child: NodeRef, query: SummaryQuery,
+        local_guarantee: Option<AccuracyGuarantee>,
+    },
+    FinalizeExactAccumulator { child: NodeRef },
+    MaintainPopulation { child: NodeRef, population: PopulationSpec },
+    ReadPopulation { child: NodeRef, readout: PopulationReadout },
+
+    // Reserved operations; semantics and support require further design.
+    SummaryMerge { children: Vec<NodeRef> },
+    SummarySubtract { left: NodeRef, right: NodeRef },
+    SummaryDelete { child: NodeRef, key: ColumnRef },
+    SummaryJoin {
+        outer: NodeRef, inner: NodeRef, key: ColumnRef, family: SummaryFamily,
+    },
+    Extension { child: NodeRef, name: String },
+}
+```
+
+The summary fields distinguish state construction, readout and accuracy evidence:
+
+| Field | Design meaning |
+|---|---|
+| `family` | The summary or exact accumulator chosen, including its family-specific parameters |
+| `input` | The item identity and observation or weight supplied to a state update |
+| `reduction` | Which input entities contribute to each logical result |
+| `grouping` | Whether those groups use separate state instances or a supported shared structure |
+| `query` / `readout` | The result requested from summary or maintained-population state |
+| `local_guarantee` / `exact_rule` | Local accuracy evidence or composition semantics; neither is the final guarantee of the complete subtree |
+| `population` | The population whose membership and values are maintained |
+
+For example, one KLL `SummaryAgg` can feed two `SummaryEstimate` nodes whose queries
+request p50 and p99. The build operation and its state are shared; the requested
+estimates differ.
+
+Schema, derived accuracy and execution timing describe every `Operator`, regardless
+of category (§2). They are omitted from these operation-specific sketches. Timing
+comes from lifecycle planning rather than a fixed field value implied by an operator
+kind; the final accuracy assessment combines local evidence with the actual inputs.
+
 For example, arrows below show data flowing from producer to consumer:
 
 ```text
@@ -288,9 +402,9 @@ The design is successful when:
 
 ## 7. Scope and open questions
 
-This proposal defines a common operator model and its correctness constraints. It
-does not define storage structures, public APIs, traversal algorithms, serialization
-fields or a code migration sequence.
+This proposal defines a common operator model and its correctness constraints. It includes the operation-specific data needed to express those semantics, but
+does not prescribe storage structures, public APIs, traversal algorithms,
+serialization fields or a code migration sequence.
 
 The following decisions remain separate or unresolved:
 
