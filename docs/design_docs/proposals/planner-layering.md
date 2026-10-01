@@ -11,11 +11,12 @@ examples for why the rules are needed.
 ASAPPlanner takes a [query workload](https://github.com/ProjectASAP/ASAPPlanner/blob/main/crates/types/src/workload.rs), a [data workload](https://github.com/ProjectASAP/ASAPPlanner/blob/main/crates/types/src/workload.rs#L531) and the deployment's
 inputs (TODO: define this data structure in a follow-up PR), and returns one optimal physical plan. It decides what is computed, how
 it is computed, and which plan is best. The deployment only supplies inputs and
-executes the plan: it supplies its own empirical cost estimation, empirical accuracy estimation and capabilities of deployment but never does the query planning or plan selection.
+executes the plan: it provides its empirical cost model, empirical accuracy
+model and capabilities, but never plans queries or selects plans.
 
 ## Stages
 
-`x` represents Cartesian product for enumerating and combining different optimization angles in planning. 
+In the diagram, × means the Cartesian product: each stage combines every option along one dimension with every option along the others.
 
 ```text
  Query workload
@@ -113,12 +114,12 @@ query's accuracy target), and every rejected candidate carries a reason.
 A candidate is a DAG for the **whole workload**, not for one query. Each stage
 combines its choices for every sub-DAG with the candidates it receives (the ×
 in the diagram), so the candidate set grows from stage to stage until
-selection picks one; in the implementation, each stage can early prune invalid candidates. Example 1 traces this growth step by step.
+selection picks one. Example 1 traces this growth step by step.
 
 | Stage | Input | Decides | Output |
 |---|---|---|---|
 | 0. Frontends | `query`, `language` | Parse and lower to a common logical form; reject what cannot be represented | `CandidateLogicalDAGs` |
-| 1. Logical ASAP-aware optimization | Logical DAGs; accuracy, `time_selection`, repetition interval | Summary replacement (Pass 1); ASAP-aware CSE (Pass 2) | `CandidateLogicalASAPDAGs` |
+| 1. Logical ASAP-aware optimization | Logical DAGs; accuracy requirements, `time_selection`, repetition interval | Summary replacement (Pass 1); ASAP-aware CSE (Pass 2) | `CandidateLogicalASAPDAGs` |
 | 2. Physical ASAP-aware optimization | Logical ASAP DAGs; `recurrence`, `predictability`, `DataWorkload` | Materialization; physical operators; parallelism and resources (TODO) | `CandidatePhysicalASAPDAGs` |
 | 3. Plan selection | Physical candidates; `requirements`; cost model, accuracy model, capabilities | Reject invalid candidates; pick the cheapest plan for the whole workload | One `PhysicalASAPDAG` |
 | 4. Execution (deployment) | The selected `PhysicalASAPDAG` | Run ingestion, storage and query-time computation | Query results |
@@ -139,8 +140,8 @@ evaluation timing and missing-data semantics.
 
 Logical optimization runs in two passes. Pass 1 generates candidates for each
 computation on its own; Pass 2 finds candidates that share computation across
-sub-DAGs and queries. Decisions about materialization, execution
-placement are taken in later stages.
+sub-DAGs and queries. Materialization and execution
+placement are decided in later stages.
 
 #### Pass 1: Local candidate generation
 
@@ -357,37 +358,13 @@ With 1,000,000 series each sampled every 15 s, the ingestion rate is
 **Query workload.** Two PromQL dashboard panels over the last minute. The
 first needs an exact total; the second tolerates error.
 
-| Workload field | Value (both queries) |
-|---|---|
-| `language` | `promql` |
-| Entry type | `repeating_queries` |
-| `demand` | every 10 s (`fixed_interval`) |
-| `predictability` | `predictable` |
-| `time_selection.scope` | `real_time` |
-
-| Query | `lookback` | `as_of` | Accuracy requirement | Latency requirement |
-|---|---|---|---|---|
-| `sum by (job) (rate(http_requests_total[1m]))` | 1 m | evaluation time | exact (`implicit_exact`) | unspecified |
-| `topk by (job) (10, sum_over_time(http_requests_total[1m]))` | 1 m | evaluation time | ε = 0.01, δ = 0.001 | ≤ 100 ms |
+| Query | Repeats | `lookback` | `as_of` | Accuracy requirement | Latency requirement |
+|---|---|---|---|---|---|
+| Q1: `sum by (job) (rate(http_requests_total[1m]))` | every 10 s | 1 m | evaluation time | exact | none |
+| Q2: `topk by (job) (10, sum_over_time(http_requests_total[1m]))` | every 10 s | 1 m | evaluation time | ε = 0.01, δ = 0.001 | ≤ 100 ms |
 
 This example follows the workload's candidate set through every stage. Each
-candidate covers both queries. To keep the counts small, it leaves out the
-pane candidates that the window-composition rule would also add (Example 3
-covers them).
-
-```mermaid
-flowchart TB
-  s0["Stage 0 · 1 candidate<br/>the workload's LogicalDAG"]
-  p1["Stage 1, Pass 1 · 3 candidates<br/>Q2 exact, Count-Min + heap, or Hydra"]
-  p2["Stage 1, Pass 2 · 6 candidates<br/>each with separate or shared input"]
-  s2["Stage 2 · 15 candidates<br/>Q1 and Q2 each materialized or not"]
-  s3(["Stage 3 · 1 plan"]):::estimate
-  s0 -- "× summary choices" --> p1 -- "× sharing choices" --> p2 -- "× materialization choices" --> s2 -- "select" --> s3
-  classDef data fill:#f1f3f4,stroke:#5f6368,color:#000;
-  classDef exact fill:#fff,stroke:#5f6368,color:#000;
-  classDef summary fill:#e8f0fe,stroke:#1a73e8,stroke-width:2px,color:#000;
-  classDef estimate fill:#e6f4ea,stroke:#188038,color:#000;
-```
+candidate covers both queries.
 
 **Stage 0: 1 candidate.** The frontend lowers both queries into one workload
 `LogicalDAG` with no summaries:
@@ -411,8 +388,7 @@ flowchart LR
 **Stage 1, Pass 1: 3 candidates.** Pass 1 finds local options for each query:
 
 * **Q1** has one option, the exact per-series rate and per-`job` sum. Its
-  accuracy requirement is `implicit_exact`, and an exact grouped sum is
-  already small.
+  accuracy requirement is exact, so no summary qualifies.
 * **Q2** has three options. The exact one keeps a per-series sum and sorts
   within each `job`, which is costly at one million Zipf-distributed series.
   The `EpsilonDelta` target also admits a **Count-Min Sketch with a top-*k*
@@ -444,127 +420,152 @@ flowchart LR
 
 Combining them gives 1 × 3 = 3 workload candidates:
 
-| Candidate | Q1 | Q2 |
+| Logical candidate | Q1 | Q2 |
 |---|---|---|
-| L1 | exact | exact |
-| L2 | exact | Count-Min + heap |
-| L3 | exact | Hydra |
+| Exact | exact | exact |
+| Count-Min | exact | Count-Min + heap |
+| Hydra | exact | Hydra |
 
-**Stage 1, Pass 2: 6 candidates.** Both queries read the same range selector,
-`http_requests_total[1m]`, so the identical-expression rule adds, for each of
-L1–L3, a variant in which Q1 and Q2 share one input node: L1s, L2s and L3s. The
-originals are kept. No summary is shared, because Q1 must be exact and no
-summary supports both queries.
+**Stage 1, Pass 2: 24 candidates.** Pass 2 applies two ASAP-aware CSE rules
+to each of the 3 candidates, and keeps every original:
+
+* **Identical-expression rule.** Both queries read the same range selector,
+  `http_requests_total[1m]`, so Pass 2 adds a variant in which Q1 and Q2 share
+  one input node. No summary is shared, because Q1 must be exact and no
+  summary supports both queries.
+* **Window-composition rule.** Each query reads a 1-min window every 10 s, so
+  consecutive evaluations overlap by 50 s. For each query, Pass 2 adds a
+  variant that computes its window from **10-s panes**: 6 per-pane states,
+  merged at every refresh. Q1's per-series rates and sums, Q2's exact sums,
+  Count-Min sketches and Hydra sketches can all be built per pane and merged.
+  For Count-Min + heap, the per-pane heaps only approximate the merged top 10,
+  which the accuracy model accounts for in stage 3.
+
+Each Pass 1 candidate therefore has 2 input choices (separate or shared) ×
+2 choices for Q1 (no panes or panes) × 2 for Q2, so stage 1 outputs
+3 × 2 × 2 × 2 = 24 logical candidates. A candidate is named by its choices,
+for example *Hydra, Q1 panes, Q2 panes, shared input*.
+
+The two rules applied to the Hydra candidate:
 
 ```mermaid
 flowchart LR
-  subgraph SEP["L3 · separate inputs"]
+  subgraph SEP["Hydra · separate inputs, no panes"]
     direction LR
     a1[("http_requests_total")]:::data --> a2["range 1m"]:::exact --> a3["rate → sum by (job)"]:::exact
     b1[("http_requests_total")]:::data --> b2["range 1m"]:::exact --> b3["Hydra"]:::summary --> b4(["top 10"]):::estimate
   end
-  subgraph SH["L3s · shared input"]
+  subgraph SH["Hydra · shared input, no panes"]
     direction LR
     c1[("http_requests_total")]:::data --> c2["range 1m<br/>one shared input node"]:::exact
     c2 --> c3["rate → sum by (job)"]:::exact
     c2 --> c4["Hydra"]:::summary --> c5(["top 10"]):::estimate
   end
+  subgraph PN["Hydra · Q2 panes"]
+    direction LR
+    d1[("http_requests_total")]:::data --> d2["Hydra per<br/>10-s pane"]:::summary --> d3["merge latest<br/>6 panes"]:::exact --> d4(["top 10"]):::estimate
+  end
   classDef data fill:#f1f3f4,stroke:#5f6368,color:#000;
   classDef exact fill:#fff,stroke:#5f6368,color:#000;
   classDef summary fill:#e8f0fe,stroke:#1a73e8,stroke-width:2px,color:#000;
   classDef estimate fill:#e6f4ea,stroke:#188038,color:#000;
 ```
 
-**Stage 2: 15 candidates.** For every logical candidate, stage 2 decides
-separately for Q1 and Q2 whether to materialize the computation at ingestion
-time or recompute it from raw samples at every refresh:
+**Stage 2: 75 candidates.** Stage 2 picks, for each query, when its state is
+computed and whether it is kept. What it can choose depends on the query's
+logical form from Pass 2:
+
+| Query's logical form | Physical options |
+|---|---|
+| No panes | **Raw:** rebuild the state from the last 1 min of raw samples at every refresh. It cannot be materialized: the window slides every 10 s, and most summaries cannot drop old data. |
+| 10-s panes | **Ingestion panes:** build each pane as samples arrive and keep the last 6 (materialized at ingestion time). **Query panes:** at each refresh, build only the newest pane from the last 10 s of raw samples and reuse the 5 kept panes (materialized at query time). **Rebuilt panes:** at each refresh, build all 6 panes from the last 1 min of raw samples, merge them, and discard them (not materialized). |
 
 ```mermaid
 flowchart LR
   in[("http_requests_total<br/>samples")]:::data
 
-  subgraph Q1M["Q1 · materialized"]
+  subgraph R["Raw · no panes"]
     direction LR
-    subgraph Q1MI["Ingestion time"]
-      m1["maintain per-series rate<br/>and sum by (job)"]:::exact
-    end
-    subgraph Q1MQ["Query time, every 10 s"]
-      m1r["read Q1 result"]:::exact
-    end
-    m1 --> m1r
-  end
-
-  subgraph Q1N["Q1 · not materialized"]
-    direction LR
-    subgraph Q1NQ["Query time, every 10 s"]
-      n1a["range 1m"]:::exact --> n1b["rate<br/>per series"]:::exact --> n1c["sum by (job)"]:::exact
+    subgraph RQ["Query time, every 10 s"]
+      r1["range 1m"]:::exact --> r2["build state"]:::summary --> r3(["answer"]):::estimate
     end
   end
 
-  subgraph Q2M["Q2 · materialized"]
+  subgraph IP["Ingestion panes"]
     direction LR
-    subgraph Q2MI["Ingestion time"]
-      m2["maintain Q2's summary<br/>or exact state"]:::summary
+    subgraph IPI["Ingestion time"]
+      i1["build 10-s pane<br/>keep last 6"]:::summary
     end
-    subgraph Q2MQ["Query time, every 10 s"]
-      m2e(["top 10<br/>per job"]):::estimate
+    subgraph IPQ["Query time, every 10 s"]
+      i2["merge 6 panes"]:::exact --> i3(["answer"]):::estimate
     end
-    m2 --> m2e
+    i1 --> i2
   end
 
-  subgraph Q2N["Q2 · not materialized"]
+  subgraph QP["Query panes"]
     direction LR
-    subgraph Q2NQ["Query time, every 10 s"]
-      n2a["range 1m"]:::exact --> n2b["build Q2's summary<br/>or exact state"]:::summary --> n2c(["top 10<br/>per job"]):::estimate
+    subgraph QPQ["Query time, every 10 s"]
+      q1["range 10 s"]:::exact --> q2["build newest pane"]:::summary --> q3["merge with<br/>5 kept panes"]:::exact --> q4(["answer"]):::estimate
     end
   end
 
-  in --> m1
-  in --> n1a
-  in --> m2
-  in --> n2a
+  subgraph RB["Rebuilt panes"]
+    direction LR
+    subgraph RBQ["Query time, every 10 s"]
+      b1["range 1m"]:::exact --> b2["build 6 panes"]:::summary --> b3["merge 6 panes"]:::exact --> b4(["answer"]):::estimate
+    end
+  end
+
+  in --> r1
+  in --> i1
+  in --> q1
+  in --> b1
   classDef data fill:#f1f3f4,stroke:#5f6368,color:#000;
   classDef exact fill:#fff,stroke:#5f6368,color:#000;
   classDef summary fill:#e8f0fe,stroke:#1a73e8,stroke-width:2px,color:#000;
   classDef estimate fill:#e6f4ea,stroke:#188038,color:#000;
 ```
 
-That gives 2 × 2 = 4 materialization choices per logical candidate. A shared
-input node only matters when both queries read raw samples at query time; in
-the other three choices, the shared-input variant is the same plan as its
-original. So each Q2 option yields 5 distinct physical candidates, 15 in all:
+Each query thus ends up with one of four options: Raw, Ingestion panes, Query
+panes or Rebuilt panes, giving 4 × 4 = 16 combinations per Q2 option. A shared
+input node only changes the plan when both queries read raw samples at query
+time, that is, when neither uses Ingestion panes; those 9 combinations also
+have a shared-input version:
 
-| Q2 option (logical candidates) | Q1 mat., Q2 mat. | Q1 mat., Q2 not | Q1 not, Q2 mat. | Q1 not, Q2 not, separate inputs | Q1 not, Q2 not, shared input |
-|---|---|---|---|---|---|
-| Exact (L1, L1s) | P1 | P2 | P3 | P4 | P5 |
-| Count-Min + heap (L2, L2s) | P6 | P7 | P8 | P9 | P10 |
-| Hydra (L3, L3s) | P11 | P12 | P13 | P14 | P15 |
+| Q1 \ Q2 | Raw | Ingestion panes | Query panes | Rebuilt panes |
+|---|---|---|---|---|
+| **Raw** | separate or shared input | one plan | separate or shared input | separate or shared input |
+| **Ingestion panes** | one plan | one plan | one plan | one plan |
+| **Query panes** | separate or shared input | one plan | separate or shared input | separate or shared input |
+| **Rebuilt panes** | separate or shared input | one plan | separate or shared input | separate or shared input |
+
+That is 16 + 9 = 25 plans for each of Q2's 3 options, or 75 physical
+candidates. A candidate is named by Q2's option and each query's physical
+option, for example *Hydra, Q1 ingestion panes, Q2 ingestion panes*.
 
 **Stage 3: 1 plan.** Selection first rejects invalid candidates. The
 deployment's accuracy model checks the summary candidates against ε = 0.01,
-δ = 0.001, and its cost model estimates Q2's latency against the 100 ms bound;
-for example, an exact top-k sorted over one million series at query time (P2,
-P4, P5) may miss it. Among the rest, it picks the cheapest for the whole
-workload. Because both panels refresh every 10 s over arriving data, a
-candidate that materializes both queries usually wins: with many small jobs,
-P11 (Hydra); with a few large jobs, P6 (Count-Min per `job`). The
-not-materialized candidates win only when storage is expensive and raw data is
-available at query time.
+δ = 0.001, including the approximate heap merge of Count-Min panes. Its cost
+model estimates Q2's latency against the 100 ms bound; for example, an exact
+top 10 rebuilt with Raw over one million series at every refresh may miss it.
+Among the rest, selection picks the cheapest plan for the whole workload:
+
+* **Usually:** both queries on ingestion panes, with Hydra when there are many
+  small jobs or Count-Min when there are a few large jobs. Each sample is
+  processed once, and each refresh only merges 6 small panes.
+* **When ingestion-time work is expensive:** query panes, which still build
+  each pane only once but do it at query time.
+* **When storage is expensive and raw data is available at query time:** Raw
+  for both queries with a shared input, which keeps nothing and reads the
+  last minute of samples once for both queries.
+* **Rarely:** Rebuilt panes. They do the same raw read as Raw plus extra merge
+  work, so the cost model usually ranks them below Raw. They stay in the
+  candidate set because they are valid; only selection rules them out.
 
 ### Example 2: One summary for several computations — the summary-capability rule in Pass 2
 
 **Query workload.** A network-monitoring dashboard computes three statistics of
 source IPs over the last minute.
-
-| Workload field | Value (all three queries) |
-|---|---|
-| `language` | `sql` (`datafusion_sql`) |
-| Entry type | `repeating_queries` |
-| `demand` | every 10 s (`fixed_interval`) |
-| `predictability` | `predictable` |
-| `time_selection.scope` | `real_time` |
-| `as_of` | evaluation time |
-| Latency requirement | unspecified |
 
 ```sql
 -- Q1: Distinct(src_ip)
@@ -591,11 +592,11 @@ FROM (
 );
 ```
 
-| Query | Computation | `lookback` | Accuracy requirement |
-|---|---|---|---|
-| Q1 | `Distinct(src_ip)` | 1 m | ε = 0.02, δ = 0.01 |
-| Q2 | `Entropy(src_ip)` | 1 m | ε = 0.05, δ = 0.01 |
-| Q3 | `L2(src_ip)` | 1 m | ε = 0.01, δ = 0.01 |
+| Query | Computation | Repeats | `lookback` | `as_of` | Accuracy requirement |
+|---|---|---|---|---|---|
+| Q1 | `Distinct(src_ip)` | every 10 s | 1 m | evaluation time | ε = 0.02, δ = 0.01 |
+| Q2 | `Entropy(src_ip)` | every 10 s | 1 m | evaluation time | ε = 0.05, δ = 0.01 |
+| Q3 | `L2(src_ip)` | every 10 s | 1 m | evaluation time | ε = 0.01, δ = 0.01 |
 
 The data workload differs from the shared one in two fields:
 
@@ -666,7 +667,7 @@ flowchart LR
   e2 -.-> u
   l2 -.-> u
 
-  OUT[["CandidateLogicalASAPDAGs:<br/>all Pass 1 candidates + the shared candidate"]]
+  OUT[["CandidateLogicalASAPDAGs:<br/>27 Pass 1 candidates + 10 shared candidates"]]
   P1 --> OUT
   P2 --> OUT
   classDef data fill:#f1f3f4,stroke:#5f6368,color:#000;
@@ -677,7 +678,12 @@ flowchart LR
 
 The three UnivMon options from Pass 1 (dashed arrows) are merged by Pass 2 into
 one shared UnivMon. The independent candidates are kept, so stage 1 outputs
-both.
+both kinds.
+
+**Stage 2.** As in Example 1, every summary in every candidate can be
+materialized at ingestion time or rebuilt at each 10-s refresh. Because the
+dashboard repeats over arriving data, materializing at ingestion time is
+usually cheaper.
 
 **Stage 3.** Selection compares one UnivMon sized for ε = 0.01 against three
 separate summaries, each sized for its own requirement. The shared candidate
@@ -694,14 +700,9 @@ all executed together at time T.
 
 | Workload field | Value (all five queries) |
 |---|---|
-| `language` | `promql` |
-| Entry type | `query_batch` |
-| `invocations` | 1 |
-| `execute_at` | T |
+| Entry type | `query_batch`, run once (`invocations: 1`) at T |
 | `predictability` | `ad_hoc` |
-| `time_selection.scope` | `longitudinal` |
 | Accuracy requirement | ε = 0.005, δ = 0.01 |
-| Latency requirement | unspecified |
 
 | Query | `lookback` | `as_of` |
 |---|---|---|
@@ -723,9 +724,10 @@ of data at rest, plus data still arriving.
   its interval. The independent candidates are kept.
 
 Counted at the workload level, Pass 1 gives each query 2 options (exact or
-KLL), so 2⁵ = 32 candidates. Pass 2 adds a candidate for every subset of two
-or more queries that shares one Exponential Histogram while the others keep
-their own options, 131 more, for 163 in total. Counts like this are why
+KLL), so 2⁵ = 32 candidates. Pass 2 adds a candidate for every way of grouping
+two or more queries onto shared Exponential Histograms (one group of five, or
+several smaller groups such as two pairs) while the remaining queries keep
+their own options: 171 more, for 203 in total. Counts like this are why
 candidate sets may be enumerated lazily.
 
 The five query intervals overlap, and all lie inside the last five years:
@@ -763,17 +765,9 @@ flowchart LR
 **Pattern B: one repeating query over a sliding window.** A real-time p99 panel
 over the last 5 min, refreshed every minute.
 
-| Workload field | Value |
-|---|---|
-| `language` | `promql` |
-| Entry type | `repeating_queries` |
-| `demand` | every 1 min (`fixed_interval`) |
-| `predictability` | `predictable` |
-| `time_selection.scope` | `real_time` |
-
-| Query | `lookback` | `as_of` | Accuracy requirement | Latency requirement |
-|---|---|---|---|---|
-| `quantile_over_time(0.99, latency_ms[5m])` | 5 m | evaluation time | ε = 0.01, δ = 0.01 | ≤ 200 ms |
+| Query | Repeats | `lookback` | `as_of` | Accuracy requirement | Latency requirement |
+|---|---|---|---|---|---|
+| `quantile_over_time(0.99, latency_ms[5m])` | every 1 min | 5 m | evaluation time | ε = 0.01, δ = 0.01 | ≤ 200 ms |
 
 * **Pass 1.** One KLL over 5 min for each evaluation.
 * **Pass 2.** Consecutive evaluations overlap by 4 of their 5 minutes. The
@@ -808,10 +802,10 @@ Example 4 shows how stage 2 decides whether to store these window summaries.
 ### Example 4: Materialization of window summaries in physical planning
 
 Stage 2 takes the shared window summaries from Example 3 and decides whether to
-materialize them. This example shows only the physical candidates of the
-shared logical candidate; every other logical candidate from Example 3 gets
-its own physical candidates the same way. That choice is driven by the workload's `recurrence`,
-`predictability` and `data_workload.arrival`.
+materialize them. That choice is driven by the workload's `recurrence`,
+`predictability` and `data_workload.arrival`. This example shows only the
+physical candidates of the shared logical candidate; every other logical
+candidate from Example 3 gets its own physical candidates the same way.
 
 **Pattern A (sub-interval batch).**
 
@@ -860,6 +854,7 @@ Which candidate wins depends on the workload:
 |---|---|---|---|
 | B1 | 1-min KLL panes, retained 5 min | Build one KLL pane per minute | Merge the latest 5 panes, read p99 |
 | B2 | Nothing | Nothing | Read 5 min of raw samples, build one KLL, read p99 |
+| B3 | 1-min KLL panes, at query time, retained 5 min | Nothing | Build only the newest pane from raw samples, merge it with the 4 kept panes, read p99 |
 
 ```mermaid
 flowchart LR
@@ -879,6 +874,13 @@ flowchart LR
       s2[("5 min of<br/>raw samples")]:::data --> k2["build one KLL"]:::summary --> r2(["p99"]):::estimate
     end
   end
+  subgraph B3["B3 · panes materialized at query time"]
+    direction LR
+    subgraph B3Q["Query time, every 1 min"]
+      s5[("last 1 min of<br/>raw samples")]:::data --> k5["build newest<br/>1-min KLL pane"]:::summary --> g5["merge with 4<br/>kept panes"]:::exact --> r5(["p99"]):::estimate
+      kp["4 kept panes<br/>from earlier evaluations"]:::summary --> g5
+    end
+  end
   classDef data fill:#f1f3f4,stroke:#5f6368,color:#000;
   classDef exact fill:#fff,stroke:#5f6368,color:#000;
   classDef summary fill:#e8f0fe,stroke:#1a73e8,stroke-width:2px,color:#000;
@@ -887,8 +889,11 @@ flowchart LR
 
 The query repeats every minute and the data is continuously ingesting, so B1
 builds each pane once and reuses it in five evaluations, while B2 rescans raw
-data every time. Selection usually picks B1. B2 wins only if storage is
-expensive and raw data is available at query time.
+data every time. B3 also builds each pane once, but at query time, so it needs
+raw data at query time and adds the newest pane's build to each evaluation's
+latency. Selection usually picks B1. B3 can win when ingestion-time work is
+expensive, and B2 only when storage is expensive and raw data is available at
+query time.
 
 **What this shows.** The same logical candidate (one shared Exponential
 Histogram, or a sliding window of KLL panes) yields different physical plans depending
