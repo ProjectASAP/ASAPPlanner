@@ -131,11 +131,8 @@ evaluation timing and missing-data semantics.
 
 Logical optimization runs in two passes. Pass 1 generates candidates for each
 computation on its own; Pass 2 finds candidates that share computation across
-sub-DAGs and queries. Neither pass decides materialization or execution
-placement, and neither picks one summary per computation: every candidate is
-kept for selection. Stage 1 reads the repetition interval only to detect
-windows that overlap across evaluations; deciding when anything is computed is
-left to stage 2.
+sub-DAGs and queries. Decisions about materialization, execution
+placement are taken in later stages.
 
 #### Pass 1: Local candidate generation
 
