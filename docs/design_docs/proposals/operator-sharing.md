@@ -45,84 +45,11 @@ on query semantics, accuracy and execution timing.
 
 ### 1.1 Unified `Operator` type
 
-The two computational categories are `Operator` and `ScalarExpr`. `Operator`
-describes a relation, vector or summary-state operation and has two variants.
-`OperatorNode` (§2) stores that operation together with its common properties.
-The structural overview below shows how these types fit together.
-
-The table lists all operator kinds in this proposal. Aggregate functions, join
-kinds and scalar functions are choices within these operations, not additional
-operator kinds.
-
-| Category | Meaning | All operations |
-|---|---|---|
-| `Operator::NonASAP(NonASAPOp)` | Ordinary query operations that transform, combine or aggregate data | `Scan`, `Values`, `Filter`, `Project`, `Aggregate`, `Join`, `SetOp`, `Concat`, `Dedup`, `Sort`, `Limit`, `BinaryOp`, `SQLWindowFunc`, `TimeRange`, `TimeShift`, `PromqlVectorFromScalar`, `PromqlRelabel`, `PromqlInfoEnrich`, `PromqlSeriesSample`, `PromqlSubquery` |
-| `Operator::ASAP(ASAPOp)` | Operations on summary state and its results, including reserved operations | `SummaryAgg`, `SummaryEstimate`, `SummaryMerge`, `SummarySubtract`, `SummaryDelete`, `SummaryJoin`, `FinalizeExactAccumulator`, `MaintainPopulation`, `ReadPopulation`, `Extension` |
-
-`CurrentTimestamp`, `EvalTimestamp` and `PromqlScalarFromVector` belong to scalar
-expressions. Constants need no `PromqlScalarBridge`; scalar queries use
-scalar expressions. The [companion proposal](decoupling_op_and_expr.md) defines
-these boundaries and their SQL/PromQL semantic coverage. A scalar-only frontend
-query, such as `time()`, therefore needs no operator node.
-
-`SummaryMerge`, `SummarySubtract`, `SummaryDelete`, `SummaryJoin` and `Extension`
-are reserved in the proposed planner model; listing them does not establish planner
-or runtime support. Defining new summary-composition semantics is outside this
-proposal (§6).
-
-`NonASAPOp` and `ASAPOp` describe the operation performed by a node. Inputs in both
-categories connect to `OperatorNode` instances, so either category can consume the other
-when their result kind, schema and execution constraints permit it. `NonASAP`
-classifies one node; it does not require all of that node's descendants to be non-ASAP.
-
-Both categories use the same graph model. A projection can consume a summary
-estimate, and a summary can consume the result of a filter or join. There is no
-separate relational subtree hidden inside a summary-plan node.
-
-The categories remain distinct because they have different semantic rules:
-ordinary operators consume query values, while summary operations may produce or
-consume state. A common graph lets planning reason about all dependencies; the
-categories make state-specific accuracy and execution constraints explicit. A
-frontend plan contains only `NonASAP` nodes. Optimization may introduce `ASAP`
-nodes later.
-
-**Relationship to the current code.** These structures are proposals, not copies
-of the current definitions with two category labels added. The operations come from
-the existing query and summary models, but the sketches combine several changes:
-
-| Change | Purpose and scope |
-|---|---|
-| Group ordinary operations under `NonASAP` and summary operations under `ASAP` | Organize the common operator model into two semantic categories. |
-| Give both categories inputs that refer to `OperatorNode` instances | Allow ordinary and summary operations to compose directly, without a wrapper hiding their dependencies. |
-| Remove relational-subplan wrappers and duplicate relational operations | Make all dependencies visible and give each ordinary operation one definition. |
-| Separate scalar expressions from operators | A related proposal, described in the [companion document](decoupling_op_and_expr.md); not a consequence of categorization alone. |
-| Represent execution timing chosen during physical planning | Follow the planning-stage design in [#509](https://github.com/ProjectASAP/ASAPPlanner/pull/509), rather than introduce a new timing policy here (§2.3). |
-
-**Naming and compatibility.** Reuse current names where their semantics match.
-The companion proposal defines deliberate additions and changes, including
-`Values` and typed scalar conversions. Ordinary payloads such
-as `Predicate`, `ProjectItem`, `AggIntent`, `SketchQuery` and `SummaryFamilyType`
-keep their names; retaining a name does not establish complete language coverage.
-
-The following changes are explicit:
-
-- Operator inputs become references to the common `OperatorNode`. The sketches use the
-  existing `Rc` notation for shared inputs and omit column-state generics for
-  readability; column IDs and scan schemas below show the resolved form.
-- `Predicate`, `ProjectItem` and other scalar-bearing payloads keep their roles and
-  own `ScalarExpr` values. The companion proposal defines owned scalar trees and
-  shared operator inputs, including `Concat`. Explicit scalar conversions and SQL
-  subqueries also reference the common `OperatorNode`; their dependencies remain visible.
-  This document uses those same structures.
-- `BinaryOp` reuses the existing post-ASAP `BinaryOperator` payload. It carries the
-  binary operation, vector matching and checked-division requirements; the pre-ASAP
-  `op` and `vector_match` semantics must be preserved when mapped into it.
-  The proposed `return_bool` field also retains PromQL comparison mode.
-- `Limit.partition_by` comes from the existing post-ASAP limit. Applying that field
-  to the unified operator remains an explicit design choice, not new functionality
-  implied by a rename. Optional `Limit.n` adds offset-only queries, and
-  `TimeRange.kind` distinguishes instant selection from a range window, as specified
-  in the companion. `SQLWindowFunc.frame` retains its current optional form.
+`Operator` describes an ordinary or ASAP operation; `OperatorNode` combines it
+with common planning properties. `ScalarExpr` describes value computation. The
+following overview and payload definitions are the canonical resolved interfaces
+used by both proposals. The companion document defines `ScalarExpr` and its
+operator-field wrappers; it does not define a second operator model.
 
 **Proposed data structures — overview.** The complete outer structure is below;
 operation variants and schema internals are expanded afterward. These declarations
@@ -149,19 +76,22 @@ enum Operator {
 // Schema / OperatorResultKind: defined in §2.1.
 ```
 
-The structure has three roles:
+An operator owns its scalar expressions and references input nodes through
+`Rc<OperatorNode>`. Either operation category can consume the other's outputs when
+the input contract permits it. `NonASAP` describes one operation, not its entire
+subgraph. Frontend graphs contain only NonASAP operations; ASAP optimization may
+introduce state construction and readout.
 
-- An `OperatorNode` holds either a NonASAP or ASAP operation and its result/schema, accuracy and execution-phase properties.
-- Operations reference input nodes through `Rc<OperatorNode>`, forming the graph.
-  They also own scalar expressions where needed, such as a filter predicate or
-  projection value. A scalar expression is not another operator category.
-- A `ScalarExpr` describes value computation. An explicit conversion such as
-  PromQL `scalar(v)` may reference an operator node producing `v`; that dependency
-  is part of the same graph (§1.2).
+| Category | Meaning | All operations |
+|---|---|---|
+| `Operator::NonASAP(NonASAPOp)` | Ordinary query operations that transform, combine or aggregate data | `Scan`, `Values`, `Filter`, `Project`, `Aggregate`, `Join`, `SetOp`, `Concat`, `Dedup`, `Sort`, `Limit`, `BinaryOp`, `SQLWindowFunc`, `TimeRange`, `TimeShift`, `PromqlVectorFromScalar`, `PromqlRelabel`, `PromqlInfoEnrich`, `PromqlSeriesSample`, `PromqlSubquery` |
+| `Operator::ASAP(ASAPOp)` | Operations on summary state and its results, including reserved operations | `SummaryAgg`, `SummaryEstimate`, `SummaryMerge`, `SummarySubtract`, `SummaryDelete`, `SummaryJoin`, `FinalizeExactAccumulator`, `MaintainPopulation`, `ReadPopulation`, `Extension` |
 
-`Rc` retains the existing shared-reference notation. Storage and traversal
-algorithms remain outside this design. The following sketches expand the two
-operation payloads; §2 explains the common fields without declaring them again.
+`CurrentTimestamp`, `EvalTimestamp` and `PromqlScalarFromVector` belong to
+`ScalarExpr`, defined in the [companion proposal](decoupling_op_and_expr.md#22-scalar-expressions).
+A constant needs no bridge operator. The sketches use resolved `ColumnId`s and
+`Schema`; name resolution precedes construction of these nodes. Compatibility
+changes from current types are collected in §6.
 
 `NonASAPOp` retains the query semantics needed before and after optimization:
 
@@ -203,13 +133,12 @@ enum NonASAPOp {
     PromqlSeriesSample { child: Rc<OperatorNode>, by: GroupKeys, kind: SampleKind },
     PromqlSubquery { child: Rc<OperatorNode>, range: Duration, resolution: Option<Duration> },
 }
+
+enum TimeRangeKind { Instant, Range }
 ```
 
-The fields describe what an operator does to its inputs:
+Ordinary payload fields have these roles:
 
-- `child`, `left`, `right`, `lhs`, `rhs` and `children` are graph dependencies. They can lead to
-  either operator category, subject to the input's schema and result-kind requirements.
-  Dependencies referenced by scalar conversions/subqueries are edges in this same graph.
 - `Predicate` describes a row-level condition; `ProjectItem` contains a scalar
   expression and its optional output alias.
 - `reduction` describes whether aggregation combines groups or operates per entity;
@@ -240,9 +169,9 @@ enum ASAPOp {
     // Reserved operations; semantics and support require further design.
     SummaryMerge { children: Vec<Rc<OperatorNode>> },
     SummarySubtract { left: Rc<OperatorNode>, right: Rc<OperatorNode> },
-    SummaryDelete { summary_input: Rc<OperatorNode>, key: ColumnRef },
+    SummaryDelete { summary_input: Rc<OperatorNode>, key: ColumnId },
     SummaryJoin {
-        outer: Rc<OperatorNode>, inner: Rc<OperatorNode>, key: ColumnRef, family: SummaryFamilyType,
+        outer: Rc<OperatorNode>, inner: Rc<OperatorNode>, key: ColumnId, family: SummaryFamilyType,
     },
     Extension { child: Rc<OperatorNode>, name: String },
 }
@@ -259,9 +188,9 @@ The summary fields distinguish state construction and readout:
 | `query` / `readout` | The result requested from summary or maintained-population state |
 | `population` | The population whose membership and values are maintained |
 
-The payloads above describe operations and their inputs. The common `OperatorNode`
-fields and their derivation interfaces are defined once in §2; individual variants
-do not repeat schema, accuracy or execution timing.
+The common `OperatorNode` fields are declared in the overview above and explained
+in §2. The operation variants do not repeat them. Reserved ASAP variants require
+further semantic and capability design before use.
 
 ### 1.2 Operators and scalar expressions
 
@@ -275,10 +204,9 @@ visible graph dependencies with defined cardinality rules. This prevents an
 arbitrary expression from being mistaken for a table-producing plan. The
 [companion proposal](decoupling_op_and_expr.md) defines this distinction.
 
-Its pre-ASAP `Rc<NonASAPOp<C>>` references become `Rc<OperatorNode>` in the unified
-model, including the inputs to `PromqlScalarFromVector`,
-`ScalarSubquery`, `Exists` and `InSubquery`. Their cardinality, NULL and NaN rules
-remain unchanged.
+The companion's `ScalarExpr` uses `Rc<OperatorNode>` for `PromqlScalarFromVector`,
+`ScalarSubquery`, `Exists` and `InSubquery`, so those expressions already reference
+this common graph before and after optimization.
 
 In `scalar(sum(up))`, `scalar()` is Prometheus PromQL's built-in vector-to-scalar
 function, explicitly written by the query author. This proposal does not insert
@@ -289,9 +217,8 @@ a summary readout, preserving the required vector and accuracy semantics; it can
 substitute raw summary state. Ordinary expressions such as `price * 2` reference
 columns and literals, not a query subgraph.
 
-These are **query subgraphs referenced by scalar expressions**. The reference is
-an edge to a producer in the common graph, not a copy of the subgraph embedded in
-the expression. Scalar ownership does not change the producer's graph identity.
+These are **query subgraphs referenced by scalar expressions**, with the same
+producer identity as any other operator dependency.
 
 ### 1.3 Example: composing a logical DAG
 
@@ -373,13 +300,19 @@ existing capability and rewrite checks permit that exact implementation.
 | `ScalarExpr` | Computes `status = 200` and `sum_bytes + 1` within the filter and projection; neither computation needs a bridge node. |
 | `Rc<OperatorNode>` | Connects each consumer to its producer, including `Project.child` pointing to an ASAP finalization node. |
 
-The common properties also follow the new graph. Scan/filter/project and the
-finalized sum have `Relation` results with ordinary `Plain(DataType)` columns.
-The build has `State` result kind and an `ExactAggregate(...)` column; the
-projection cannot consume that state directly. Guarantees are assessed under the
-existing rules. At this logical stage, `timing` may remain `None`; physical planning
-later assigns execution phases. The topmost Project node produces the query
-result in both diagrams, without an additional query-root data structure.
+For this example, assume `bytes` is nullable `Int64`. The output metadata is:
+
+| Node | `result_kind` | Output columns (`name: dtype`, nullability) |
+|---|---|---|
+| Aggregate before optimization | `Relation` | `sum_bytes: Plain(Int64)`, nullable |
+| Summary build after optimization | `State` | `sum_state: ExactAggregate(Sum, Sum)`, non-null accumulator state |
+| Finalize after optimization | `Relation` | `sum_bytes: Plain(Int64)`, nullable |
+| Project in either graph | `Relation` | `total_bytes: Plain(Int64)`, nullable |
+
+The empty accumulator finalizes to SQL NULL; the accumulator itself is state, not
+a nullable numeric value. The projection consumes the finalized column. Guarantees
+follow the existing assessment rules, while `timing` may remain `None` until
+physical planning. The topmost Project node produces the query result.
 
 This illustrates the connection between the two proposals: scalar separation
 makes predicates and value expressions explicit; operator unification lets those
@@ -478,7 +411,8 @@ impl Operator {
 }
 
 impl OperatorNode {
-    fn validate(&self) -> Result<(), QueryExprError>;
+    fn validate_structure(&self) -> Result<(), QueryExprError>;
+    fn validate_execution_timing(&self) -> Result<(), QueryExprError>;
 }
 
 impl ScalarExpr {
@@ -510,15 +444,30 @@ schema may also contain ordinary grouping keys. `SummaryEstimate`,
 vector kind from their operation and input context. Matching numeric columns do
 not make those kinds interchangeable.
 
-**Interface contracts.** `Operator::output_schema` derives the fields and
-metadata for the actual inputs after a rewrite; `output_kind` derives the result
-category. `validate_inputs` checks producer/consumer compatibility, including query
-subgraphs referenced by scalar expressions. `OperatorNode::validate` additionally
-checks that retained output metadata agrees with that derivation and that any
-guarantee or timing assignment is valid under the existing rules. For example,
-`PromqlScalarFromVector` requires an instant vector, and a summary readout requires the compatible state family. These checks
-must succeed before a plan is accepted; sharing an enum does not make every
-producer/consumer combination legal.
+**Interface contracts.** `Operator::output_schema` and `output_kind` derive output
+metadata from the payload and validated inputs. `validate_inputs` checks local
+producer/consumer compatibility, such as vector inputs for `BinaryOp` or the
+required state family for a summary readout. Scalar typing checks the input-kind
+contract of `PromqlScalarFromVector` and other scalar plan reads.
+
+| Validation entry | Scope and stage |
+|---|---|
+| `OperatorNode::validate_structure()` | Walks the reachable operator graph, including scalar plan references; checks input contracts, scalar typing and agreement between retained and derived output metadata. Valid for logical and physical plans; permits `timing = None`. |
+| `OperatorNode::validate_execution_timing()` | Includes structural validation, then requires assigned timing on every executable operator and checks phase dependencies. Used for executable physical candidates. |
+| Existing planner assessment and selection (#509) | Establishes guarantees using the existing accuracy models and checks them against request requirements and deployment capabilities. Neither node method re-proves a guarantee or decides request feasibility. |
+
+The two node methods need only the graph and its annotations. Request requirements
+and deployment models remain inputs to the existing planning/selection workflow,
+not implicit globals of `validate_structure`. Passing the timing check alone does
+not establish that a physical candidate satisfies the query's accuracy requirement.
+
+`Scan.schema` declares the source columns; `Values.schema` declares the constructed
+row shape. `OperatorNode.schema` is the derived output for any operation. A scan's
+predicates cannot change its declared output columns; a Values row must match the
+declared arity, types and nullability. These leaf outputs retain the declaration's
+column layout and time/identity information, with only justified metadata changes.
+The declaration and derived output therefore have distinct roles, and structural
+validation rejects disagreement rather than trusting two independent schemas.
 
 `scalar_type` keeps the existing method name and `(DataType, nullable)` result.
 Its `input` is the applicable column scope: the child schema for a projection,
@@ -527,7 +476,8 @@ Explicit subquery/conversion expressions validate their referenced producer usin
 the contracts above. Numeric expressions cannot consume state columns as numbers.
 A standalone scalar expression is checked with an empty column scope and needs no fabricated
 relation output schema. `QueryExprError` retains the existing error-type name;
-result-kind and state-family mismatches require corresponding validation errors.
+result-kind, state-family, schema and execution-phase mismatches require
+corresponding validation errors.
 
 For example, a KLL build outputs `State` with a
 `Sketch(SketchKind, GroupingStrategy)` column identifying KLL and its parameters.
@@ -563,7 +513,7 @@ and when to compute it. This proposal follows that division.
 For example, a KLL summary build may execute at ingestion time or query time,
 depending on the materialization choice. `OperatorNode.timing` records that assignment
 as `Some(ExecutionTiming::IngestionTime)` or `Some(ExecutionTiming::QueryTime)`.
-Logical nodes may retain `None`; physical-plan validation must reject unassigned
+Logical nodes may retain `None`; `validate_execution_timing` rejects unassigned
 executable nodes. Timing is common node metadata rather than a separate payload
 field on selected `ASAPOp` variants.
 
@@ -592,13 +542,6 @@ how they use the common operator model:
 | Plan selection | Evaluate complete physical candidates using workload requirements and deployment-provided models and capabilities. |
 | Deployment execution | Execute the selected graph, preserving its dependencies and assigned phases. |
 
-Ordinary operators remain the same operations when their inputs are replaced by
-summary computations. Replacing an aggregate below a projection, for example, does
-not require a separate post-ASAP projection definition.
-
-This document changes the representation used by these stages, not their search,
-accuracy, costing or selection policies.
-
 ## 4. Export preserves the graph
 
 Export one node per operator and represent its input dependencies as edges. Export
@@ -606,13 +549,10 @@ a shared producer once, with edges to all its consumers. Include dependencies
 referenced by scalar conversions and subqueries. Preserve scalar queries as
 expressions and their operator dependencies; do not invent a bridge node for export.
 
-This keeps the graph visible to costing, physical compilation, execution and plan
-inspection. Embedding a whole relational subtree in one exported node would hide
-its internal sharing and recreate the original boundary problem.
-
 Export preserves result kinds, resolved schemas, scalar value types and evaluation
 context, together with the applicable guarantees and assigned execution phases.
-Physical compilation may lower one logical operation to several physical operations, but must preserve its dependencies and meaning. The execution layer
+Physical compilation may lower one logical operation to several physical
+operations, but must preserve its dependencies and meaning. The execution layer
 does not invent missing planning decisions.
 
 Changing the exported representation requires coordinated adoption by the planner
@@ -631,23 +571,31 @@ The design is successful when:
   the unified representation.
 - Scalar expressions and conversions use the same representation before and after
   optimization, with no bridge nodes or hidden subplans.
-- Validation includes result kind and query subgraphs referenced by scalar
-  expressions when checking schema, accuracy and execution constraints.
+- Structural and timing validation include query subgraphs referenced by scalar
+  expressions; planner assessment includes their accuracy dependencies.
 - Export preserves visible dependencies and shared producers.
 
 ## 6. Scope and compatibility
 
-This proposal defines the common operator structure, its operation-specific data
-and how dependencies remain visible through export. Existing names and semantics
-are retained except for the structural changes identified in §1.1.
+The two documents define one resolved interface: this document owns
+`OperatorNode`, `Operator`, operation payloads and schema/validation interfaces;
+the companion owns `ScalarExpr`, its wrappers and language-semantic mappings.
+Existing type names are retained where their meanings still apply.
 
-The pre-ASAP and post-ASAP versions of some operations carry different information.
-The unified `BinaryOp` must retain existing checked-division requirements, and
-`Limit` must retain the existing ability to limit within groups. These compatibility
-requirements belong in this design because removing duplicate operator definitions
-must not remove existing behavior. If a rewrite moves arithmetic into a scalar
-expression, it must preserve applicable checked-division guards and exact fallback;
-`ExprSemantics` selects language rules and does not replace those proof conditions.
+| Change from current code | Final representation and compatibility rule |
+|---|---|
+| Separate ordinary/summary models and relational wrappers | Both categories use `OperatorNode` dependencies; no wrapped relational subplan. |
+| Mixed operator/scalar `QueryExpr` | Owned scalar expressions in operator fields; explicit scalar conversions/subqueries reference `OperatorNode`. |
+| Different pre-/post-ASAP binary payloads | One `BinaryOp.operator: BinaryOperator`, retaining `kind`, `vector_match` and checked-division flags. `return_bool` on `BinaryOp` adds PromQL comparison mode. |
+| Limit and time selection differences | Retain post-ASAP `Limit.partition_by`; optional `n` supports offset-only queries. `TimeRange.kind` distinguishes instant/range selection. |
+| Reserved ASAP key references | `SummaryDelete.key` and `SummaryJoin.key` use resolved `ColumnId`s, like other column references in this graph. |
+| Missing relation constructor | `Values` represents SQL literal rows and the one empty input row for SELECT without FROM. |
+| Separate edge schemas | Common `Schema` uses `Column<SummaryFamilyType>` while keeping the existing identity/time metadata (§2.1). |
+
+A rewrite that moves arithmetic into a scalar expression must preserve applicable
+checked-division guards and exact fallback. `ExprSemantics` selects language rules;
+it does not replace those proof conditions. Reserved ASAP operations still require
+their own semantic/capability design.
 
 The [companion semantic tables](decoupling_op_and_expr.md#3-semantic-requirements)
 use DataFusion 55.1.0 and Prometheus 3.15.0 as design targets. Their gaps also apply

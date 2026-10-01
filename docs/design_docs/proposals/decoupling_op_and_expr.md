@@ -52,74 +52,27 @@ where needed, rather than copying every current `QueryExpr` variant unchanged:
 
 ### 2.1 Operator nodes
 
-The sketches describe the proposed shape, not implemented Rust definitions.
-`C` remains `ColumnRef` before resolution and `ColumnId` afterward;
-`C::ScanSchema` retains its existing meaning. Operator references are shared,
-including `Concat` inputs. Scalar fields own expression trees.
+Use the canonical [`NonASAPOp` and `OperatorNode` definitions](operator-sharing.md#11-unified-operator-type)
+from the sharing proposal. Both documents describe the same resolved model:
+operator inputs and scalar query-result references use `Rc<OperatorNode>`.
+`NonASAPOp` is the payload of an ordinary operator, not a second graph-node type.
+`BinaryOp` likewise uses the single `BinaryOperator` payload specified there.
+
+Names are resolved to `ColumnId` before constructing these nodes. Parsing and
+unresolved `ColumnRef` handling remain frontend concerns; no alternative generic
+operator definition is proposed here. These wrappers belong to operator fields
+and use the `ScalarExpr` defined in §2.2:
 
 ```rust
-enum NonASAPOp<C: ColState = ColumnId> {
-    Scan {
-        source: Source, predicates: Vec<Predicate<C>>, schema: C::ScanSchema,
-    },
-    Values { rows: Vec<Vec<ScalarExpr<C>>>, schema: C::ScanSchema },
-    Filter { pred: Predicate<C>, child: Rc<NonASAPOp<C>> },
-    Project {
-        cols: Vec<ProjectItem<C>>, qualifier: Option<String>, child: Rc<NonASAPOp<C>>,
-    },
-    Aggregate {
-        reduction: Reduction<C>, measures: Vec<AggIntent<C>>, output_names: Vec<String>,
-        having: Option<Predicate<C>>, child: Rc<NonASAPOp<C>>,
-    },
-    Dedup { cols: Vec<C>, child: Rc<NonASAPOp<C>> },
-    Concat {
-        children: Vec<Rc<NonASAPOp<C>>>,
-        discriminator_unique_key: Option<ConcatDiscriminatorKey<C>>,
-    },
-    Join {
-        kind: JoinKind, pred: Predicate<C>,
-        left: Rc<NonASAPOp<C>>, right: Rc<NonASAPOp<C>>,
-    },
-    SetOp {
-        kind: RelationalSetOpKind, all: bool,
-        left: Rc<NonASAPOp<C>>, right: Rc<NonASAPOp<C>>,
-    },
-    Sort { keys: Vec<SortKey<C>>, partition_by: GroupKeys<C>, child: Rc<NonASAPOp<C>> },
-    Limit {
-        n: Option<usize>, offset: usize, partition_by: GroupKeys<C>,
-        child: Rc<NonASAPOp<C>>,
-    },
-    BinaryOp {
-        op: BinaryOpKind, lhs: Rc<NonASAPOp<C>>, rhs: Rc<NonASAPOp<C>>,
-        vector_match: Option<VectorMatch>, return_bool: bool,
-    },
-    SQLWindowFunc {
-        func: WindowFuncKind, args: Vec<ScalarExpr<C>>, partition_by: GroupKeys<C>,
-        order_by: Vec<SortKey<C>>, frame: Option<WindowFrame>,
-        output_name: String, child: Rc<NonASAPOp<C>>,
-    },
-    TimeRange { range: Duration, kind: TimeRangeKind, child: Rc<NonASAPOp<C>> },
-    TimeShift { shift: TimeShift, child: Rc<NonASAPOp<C>> },
-    PromqlVectorFromScalar(ScalarExpr<C>),
-    PromqlRelabel { dst: String, value: ScalarExpr<C>, child: Rc<NonASAPOp<C>> },
-    PromqlInfoEnrich { selector: Vec<InfoMatcher>, child: Rc<NonASAPOp<C>> },
-    PromqlSeriesSample { by: GroupKeys<C>, kind: SampleKind, child: Rc<NonASAPOp<C>> },
-    PromqlSubquery {
-        range: Duration, resolution: Option<Duration>, child: Rc<NonASAPOp<C>>,
-    },
-}
+struct Predicate(ScalarExpr);
 
-enum TimeRangeKind { Instant, Range }
-
-struct Predicate<C: ColState = ColumnId>(ScalarExpr<C>);
-
-struct ProjectItem<C: ColState = ColumnId> {
+struct ProjectItem {
     alias: Option<String>,
-    expr: ScalarExpr<C>,
+    expr: ScalarExpr,
 }
 
-struct SortKey<C: ColState = ColumnId> {
-    expr: ScalarExpr<C>,
+struct SortKey {
+    expr: ScalarExpr,
     ascending: bool,
     nulls_first: bool,
 }
@@ -147,42 +100,42 @@ time of that whole input. Existing signed offsets and `AtModifier` anchors remai
 Scalar recursion uses owned `Box` and `Vec` children. The only plan references are
 explicit operations that consume a query result to compute a value. Those edges
 remain visible to plan traversal and costing; they cannot hide a separate plan.
-Since these variants reference `NonASAPOp<C>`, `ScalarExpr` and its wrappers retain
-`C: ColState`; the earlier proposed removal of that bound no longer applies.
+The definitions below use resolved `ColumnId`s and the common `OperatorNode`;
+there is no separate pre-ASAP scalar representation.
 
 ```rust
-enum ScalarExpr<C: ColState = ColumnId> {
-    Column(C),
+enum ScalarExpr {
+    Column(ColumnId),
     Literal(ScalarValue),
-    Negative { expr: Box<ScalarExpr<C>>, semantics: ExprSemantics },
+    Negative { expr: Box<ScalarExpr>, semantics: ExprSemantics },
     Compare {
-        left: Box<ScalarExpr<C>>, op: CompareOpKind, right: Box<ScalarExpr<C>>,
+        left: Box<ScalarExpr>, op: CompareOpKind, right: Box<ScalarExpr>,
         semantics: ExprSemantics,
     },
-    BoolAnd(Vec<ScalarExpr<C>>),
-    BoolOr(Vec<ScalarExpr<C>>),
-    Not(Box<ScalarExpr<C>>),
-    IsNull(Box<ScalarExpr<C>>),
-    IsNotNull(Box<ScalarExpr<C>>),
-    Cast { expr: Box<ScalarExpr<C>>, to: DataType, try_cast: bool },
-    InList { expr: Box<ScalarExpr<C>>, list: Vec<ScalarExpr<C>>, negated: bool },
-    FunctionCall { name: String, args: Vec<ScalarExpr<C>> },
+    BoolAnd(Vec<ScalarExpr>),
+    BoolOr(Vec<ScalarExpr>),
+    Not(Box<ScalarExpr>),
+    IsNull(Box<ScalarExpr>),
+    IsNotNull(Box<ScalarExpr>),
+    Cast { expr: Box<ScalarExpr>, to: DataType, try_cast: bool },
+    InList { expr: Box<ScalarExpr>, list: Vec<ScalarExpr>, negated: bool },
+    FunctionCall { name: String, args: Vec<ScalarExpr> },
     Arithmetic {
-        op: ArithmeticOpKind, left: Box<ScalarExpr<C>>, right: Box<ScalarExpr<C>>,
+        op: ArithmeticOpKind, left: Box<ScalarExpr>, right: Box<ScalarExpr>,
         semantics: ExprSemantics,
     },
     Case {
-        operand: Option<Box<ScalarExpr<C>>>,
-        branches: Vec<(ScalarExpr<C>, ScalarExpr<C>)>,
-        else_expr: Option<Box<ScalarExpr<C>>>,
+        operand: Option<Box<ScalarExpr>>,
+        branches: Vec<(ScalarExpr, ScalarExpr)>,
+        else_expr: Option<Box<ScalarExpr>>,
     },
     CurrentTimestamp,
     EvalTimestamp,
-    PromqlScalarFromVector(Rc<NonASAPOp<C>>),
-    ScalarSubquery(Rc<NonASAPOp<C>>),
-    Exists { subquery: Rc<NonASAPOp<C>>, negated: bool },
+    PromqlScalarFromVector(Rc<OperatorNode>),
+    ScalarSubquery(Rc<OperatorNode>),
+    Exists { subquery: Rc<OperatorNode>, negated: bool },
     InSubquery {
-        expr: Box<ScalarExpr<C>>, subquery: Rc<NonASAPOp<C>>, negated: bool,
+        expr: Box<ScalarExpr>, subquery: Rc<OperatorNode>, negated: bool,
     },
 }
 
@@ -240,9 +193,7 @@ For an open label schema, lowering must retain the complete series identity,
 including unreferenced labels. If the input provides neither a complete label
 schema nor a full identity value, this lowering is not valid.
 `vector(s)` remains a real conversion to a one-element, label-free vector.
-When combined with the [operator-sharing proposal](operator-sharing.md), all plan
-references above target the common `OperatorNode`, including references inside scalar
-expressions. Scalar expression trees do not acquire shared-node
+Scalar expression trees are owned, while their operator references preserve graph
 identity. The companion's [complete DAG example](operator-sharing.md#13-example-composing-a-logical-dag)
 shows these expressions inside ordinary operators before and after an ASAP rewrite.
 
@@ -309,8 +260,8 @@ range-vector expression. The request permits scalar or instant-vector roots.
 | `-up` | `Project` with `Negative(sample)` | **Lowered** for float samples; retain series identity and unary-operation naming rules. |
 | `up * 2`, `2 / up`, `up * scalar(sum(other))` | `Project` with scalar arithmetic and, where needed, `PromqlScalarFromVector` | **Lowered** for float samples. Preserve operand order, time/label fields and metric-name removal. Scalar input is evaluated in the same query-time context. |
 | `up > 0`; `up > bool 0` | `Filter`; or `Project` with `Case(Compare(...), 1.0, 0.0)` | **Lowered** for float samples. Filtering preserves surviving sample values; bool mode produces numbers and removes the metric name. Scalar-on-left comparisons still retain the vector's sample value when filtering. |
-| `a / on(job) group_left b`; `a > bool b` | `BinaryOp` with `vector_match`, `return_bool` | **Direct.** Retain matching cardinality, labels and metric-name rules; unmatched elements disappear, not become false rows. |
-| `a and b`, `a or b`, `a unless b` | `BinaryOpKind::Set` | **Direct.** Label-set matching, not SQL Boolean evaluation or SQL bag set operations. |
+| `a / on(job) group_left b`; `a > bool b` | `BinaryOp` with `operator.vector_match`, `return_bool` | **Direct.** Retain matching cardinality, labels and metric-name rules; unmatched elements disappear, not become false rows. |
+| `a and b`, `a or b`, `a unless b` | `BinaryOp.operator.kind = BinaryOpKind::Set` | **Direct.** Label-set matching, not SQL Boolean evaluation or SQL bag set operations. |
 | `sum by(job)(up)`, `avg without(instance)(up)` | `Aggregate(Reduction::Reduce(...), AggIntent)` | **Direct** for represented intents; preserve PromQL label grouping and empty-input behavior. |
 | `topk(3, up)`, `bottomk(3, up)` with optional grouping | `Sort` + partitioned `Limit` | **Lowered** for constant parameters and float samples, retaining selected series labels and specified NaN ordering. Existing heavy-hitter `AggIntent::TopK` is not a substitute for sample-value ranking. |
 | `rate(x[5m])`, `sum_over_time(x[5m])` | Range input + `Aggregate(Reduction::PerEntity, corresponding AggIntent)` | **Direct** for existing contracts: counter resets, extrapolation and range reduction belong to the named intent, not ordinary SQL SUM. |
