@@ -146,6 +146,7 @@ rewrite rules, and generates every candidate that can meet its accuracy
 requirement.
 
 Example for summary candidates:
+
 | Original computation | Local candidates |
 |---|---|
 | `Sum(x) by (g)` | Exact grouped sum |
@@ -256,9 +257,11 @@ precomputation and query-time computation. It makes no planning decisions.
 
 ## End-to-end examples
 
-Every example below is a `PlanningWorkload` in the serialized form of
+Each example's workload is shown as tables. Field names in code font are the
+fields of
 [`workload.rs`](https://github.com/ProjectASAP/ASAPPlanner/blob/main/crates/types/src/workload.rs).
-Times and durations are milliseconds.
+An `as_of` of "evaluation time" means `as_of: None`: the window ends when the
+query runs.
 
 | Example | Shows |
 |---|---|
@@ -273,51 +276,34 @@ nodes.
 
 ### Shared data workload
 
-Unless an example says otherwise, the queried metric is scraped every 15 s
-from about one million series with Zipf-distributed keys, and is still
-arriving:
+Unless an example says otherwise, every example uses this data workload:
 
-```json
-"data_workload": {
-  "arrival": "continuously_ingesting",
-  "data_ingestion_interval": {"value": 15000, "source": "declared", "observed_at_ms": null, "valid_for_ms": null},
-  "ingestion_volume":        {"value": null,    "source": "unknown",  "observed_at_ms": null, "valid_for_ms": null},
-  "ingestion_rate":          {"value": 66667.0, "source": "declared", "observed_at_ms": null, "valid_for_ms": null},
-  "input_cardinality":       {"value": 1000000, "source": "declared", "observed_at_ms": null, "valid_for_ms": null},
-  "distribution":            {"value": "zipf",  "source": "declared", "observed_at_ms": null, "valid_for_ms": null}
-}
-```
+| `DataWorkload` field | Value |
+|---|---|
+| `arrival` | `continuously_ingesting` |
+| `data_ingestion_interval` | 15 s (declared) |
+| `ingestion_volume` | unknown |
+| `ingestion_rate` | about 66,667 samples/s (declared) |
+| `input_cardinality` | 1,000,000 series (declared) |
+| `distribution` | `zipf` (declared) |
 
 ### Example 1: Aggregation over dimensions — summary replacement in Pass 1
 
-**Query workload.** Two dashboard panels refresh every 10 s over the last
-minute. The first needs an exact total; the second tolerates error.
+**Query workload.** Two PromQL dashboard panels over the last minute. The
+first needs an exact total; the second tolerates error.
 
-```json
-"query_workload": {
-  "language": "promql",
-  "query_batch": null,
-  "repeating_queries": [
-    {
-      "query": "sum by (job) (rate(http_requests_total[1m]))",
-      "demand": {"fixed_interval": 10000},
-      "requirements": {"accuracy": "implicit_exact", "response_latency": "unspecified"},
-      "predictability": {"predictable": {"known_at": null}},
-      "time_selection": {"scope": "real_time", "lookback": 60000, "as_of": null}
-    },
-    {
-      "query": "topk by (job) (10, sum_over_time(http_requests_total[1m]))",
-      "demand": {"fixed_interval": 10000},
-      "requirements": {
-        "accuracy": {"explicit": {"EpsilonDelta": {"epsilon": 0.01, "delta": 0.001}}},
-        "response_latency": {"explicit_max_ms": 100.0}
-      },
-      "predictability": {"predictable": {"known_at": null}},
-      "time_selection": {"scope": "real_time", "lookback": 60000, "as_of": null}
-    }
-  ]
-}
-```
+| Workload field | Value (both queries) |
+|---|---|
+| `language` | `promql` |
+| Entry type | `repeating_queries` |
+| `demand` | every 10 s (`fixed_interval`) |
+| `predictability` | `predictable` |
+| `time_selection.scope` | `real_time` |
+
+| Query | `lookback` | `as_of` | Accuracy | Latency |
+|---|---|---|---|---|
+| `sum by (job) (rate(http_requests_total[1m]))` | 1 m | evaluation time | exact (`implicit_exact`) | unspecified |
+| `topk by (job) (10, sum_over_time(http_requests_total[1m]))` | 1 m | evaluation time | ε = 0.01, δ = 0.001 | ≤ 100 ms |
 
 **Stage 0.** The two `LogicalDAG`s are
 `range m[1m] → rate → sum by (job)` and
@@ -376,20 +362,29 @@ cheaper; with a few large jobs, per-`job` Count-Min sketches may win.
 ### Example 2: One summary for several computations — the summary-capability rule in Pass 2
 
 **Query workload.** A network-monitoring dashboard computes three statistics of
-source IPs over the last minute, every 10 s. Each SQL query below is one
-`RepeatingEntry` with `"demand": {"fixed_interval": 10000}` and
-`"time_selection": {"scope": "real_time", "lookback": 60000, "as_of": null}`,
-in a workload with `"language": {"sql": "datafusion_sql"}`.
+source IPs over the last minute.
 
-| Query | Computation | Accuracy |
-|---|---|---|
-| `SELECT COUNT(DISTINCT src_ip) FROM flows WHERE ts >= now() - INTERVAL '1 minute'` | `Distinct(src_ip)` | ε = 0.02, δ = 0.01 |
-| `SELECT -SUM(p * LN(p)) FROM (SELECT COUNT(*) * 1.0 / SUM(COUNT(*)) OVER () AS p FROM flows WHERE ts >= now() - INTERVAL '1 minute' GROUP BY src_ip)` | `Entropy(src_ip)` | ε = 0.05, δ = 0.01 |
-| `SELECT SQRT(SUM(c * c)) FROM (SELECT src_ip, COUNT(*) AS c FROM flows WHERE ts >= now() - INTERVAL '1 minute' GROUP BY src_ip)` | `L2(src_ip)` | ε = 0.01, δ = 0.01 |
+| Workload field | Value (all three queries) |
+|---|---|
+| `language` | `sql` (`datafusion_sql`) |
+| Entry type | `repeating_queries` |
+| `demand` | every 10 s (`fixed_interval`) |
+| `predictability` | `predictable` |
+| `time_selection.scope` | `real_time` |
+| Latency | unspecified |
 
-The data workload is as above, except that `input_cardinality` is the number of
-distinct source IPs (say 10 million) and `data_ingestion_interval` is not
-needed for SQL.
+| Query | Computation | `lookback` | `as_of` | Accuracy |
+|---|---|---|---|---|
+| `SELECT COUNT(DISTINCT src_ip) FROM flows WHERE ts >= now() - INTERVAL '1 minute'` | `Distinct(src_ip)` | 1 m | evaluation time | ε = 0.02, δ = 0.01 |
+| `SELECT -SUM(p * LN(p)) FROM (SELECT COUNT(*) * 1.0 / SUM(COUNT(*)) OVER () AS p FROM flows WHERE ts >= now() - INTERVAL '1 minute' GROUP BY src_ip)` | `Entropy(src_ip)` | 1 m | evaluation time | ε = 0.05, δ = 0.01 |
+| `SELECT SQRT(SUM(c * c)) FROM (SELECT src_ip, COUNT(*) AS c FROM flows WHERE ts >= now() - INTERVAL '1 minute' GROUP BY src_ip)` | `L2(src_ip)` | 1 m | evaluation time | ε = 0.01, δ = 0.01 |
+
+The data workload differs from the shared one in two fields:
+
+| `DataWorkload` field | Value |
+|---|---|
+| `input_cardinality` | 10,000,000 distinct source IPs (declared) |
+| `data_ingestion_interval` | not needed for SQL |
 
 **Pass 1.** Rewrite rules recognize the three computations, and each gets its
 local candidates from the Pass 1 table: exact, a specialized summary, or
@@ -404,14 +399,14 @@ requirement, ε = 0.01. The independent candidates are kept as well.
 ```mermaid
 flowchart LR
   in[("flows.src_ip<br/>last 1m")]:::data
- 
+
   subgraph P0["Stage 0 · LogicalDAGs"]
     direction TB
     q1["Distinct(src_ip)"]:::exact
     q2["Entropy(src_ip)"]:::exact
     q3["L2(src_ip)"]:::exact
   end
- 
+
   subgraph P1["Stage 1, Pass 1 · local candidates per computation"]
     direction TB
     subgraph D["Distinct"]
@@ -433,7 +428,7 @@ flowchart LR
       l2["UnivMon"]:::summary
     end
   end
- 
+
   subgraph P2["Stage 1, Pass 2 · summary-capability rule adds a shared candidate"]
     direction LR
     u["one UnivMon<br/>sized for ε = 0.01"]:::summary
@@ -441,7 +436,7 @@ flowchart LR
     u --> re(["entropy"]):::readout
     u --> rl(["L2 norm"]):::readout
   end
- 
+
   in --> P0
   q1 --> D
   q2 --> E
@@ -449,7 +444,7 @@ flowchart LR
   d2 -. "same summary input data<br/>and window" .-> u
   e2 -.-> u
   l2 -.-> u
- 
+
   OUT[["CandidateLogicalASAPDAGs:<br/>all Pass 1 candidates + the shared candidate"]]
   P1 --> OUT
   P2 --> OUT
@@ -458,10 +453,10 @@ flowchart LR
   classDef summary fill:#e8f0fe,stroke:#1a73e8,stroke-width:2px,color:#000;
   classDef readout fill:#e6f4ea,stroke:#188038,color:#000;
 ```
- 
 
-Exact candidates for each computation are also kept but omitted from the
-diagram.
+The three UnivMon options from Pass 1 (dashed arrows) are merged by Pass 2 into
+one shared UnivMon. The independent candidates are kept, so stage 1 outputs
+both.
 
 **Stage 3.** Selection compares one UnivMon sized for ε = 0.01 against three
 separate summaries, each sized for its own requirement. The shared candidate
@@ -474,7 +469,18 @@ summary.
 
 **Pattern A: a batch of sub-interval queries over historical data.** An analyst
 submits a batch of p99 latency reports over different historical intervals,
-executed together at T = `1790000000000`:
+all executed together at time T.
+
+| Workload field | Value (all five queries) |
+|---|---|
+| `language` | `promql` |
+| Entry type | `query_batch` |
+| `invocations` | 1 |
+| `execute_at` | T |
+| `predictability` | `ad_hoc` |
+| `time_selection.scope` | `longitudinal` |
+| Accuracy | ε = 0.005, δ = 0.01 |
+| Latency | unspecified |
 
 | Query | `lookback` | `as_of` |
 |---|---|---|
@@ -484,21 +490,8 @@ executed together at T = `1790000000000`:
 | `quantile_over_time(0.99, latency_ms[1y] offset 2y)` | 1 y | T − 2 y |
 | `quantile_over_time(0.99, latency_ms[3y] offset 2y)` | 3 y | T − 2 y |
 
-Each row is a `BatchEntry` such as:
-
-```json
-{
-  "query": "quantile_over_time(0.99, latency_ms[1y] offset 1y)",
-  "requirements": {"accuracy": {"explicit": {"EpsilonDelta": {"epsilon": 0.005, "delta": 0.01}}}, "response_latency": "unspecified"},
-  "predictability": "ad_hoc",
-  "invocations": 1,
-  "execute_at": 1790000000000,
-  "time_selection": {"scope": "longitudinal", "lookback": 31536000000, "as_of": 1758464000000}
-}
-```
-
-The data workload has `"arrival": "mixed"`: five years at rest plus data still
-arriving.
+The data workload is the shared one, except `arrival` is `mixed`: five years
+of data at rest, plus data still arriving.
 
 * **Pass 1.** Each `quantile_over_time` gets an exact candidate and a KLL over
   its own interval: five independent KLL candidates over overlapping data.
@@ -541,17 +534,19 @@ flowchart LR
 ```
 
 **Pattern B: one repeating query over a sliding window.** A real-time p99 panel
-over the last 5 min, refreshed every minute:
+over the last 5 min, refreshed every minute.
 
-```json
-{
-  "query": "quantile_over_time(0.99, latency_ms[5m])",
-  "demand": {"fixed_interval": 60000},
-  "requirements": {"accuracy": {"explicit": {"EpsilonDelta": {"epsilon": 0.01, "delta": 0.01}}}, "response_latency": {"explicit_max_ms": 200.0}},
-  "predictability": {"predictable": {"known_at": null}},
-  "time_selection": {"scope": "real_time", "lookback": 300000, "as_of": null}
-}
-```
+| Workload field | Value |
+|---|---|
+| `language` | `promql` |
+| Entry type | `repeating_queries` |
+| `demand` | every 1 min (`fixed_interval`) |
+| `predictability` | `predictable` |
+| `time_selection.scope` | `real_time` |
+
+| Query | `lookback` | `as_of` | Accuracy | Latency |
+|---|---|---|---|---|
+| `quantile_over_time(0.99, latency_ms[5m])` | 5 m | evaluation time | ε = 0.01, δ = 0.01 | ≤ 200 ms |
 
 * **Pass 1.** One KLL over 5 min for each evaluation.
 * **Pass 2.** Consecutive evaluations overlap by 4 of their 5 minutes. The
