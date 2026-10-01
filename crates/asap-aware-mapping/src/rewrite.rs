@@ -545,19 +545,44 @@ mod tests {
         assert!(AvgToSumOverCountStrategy.replacements(&target).is_empty());
     }
 
+    /// Matching schemas do not make range SUM/COUNT safe for unbounded samples.
     #[test]
-    fn does_not_match_a_per_entity_avg_aggregate() {
+    fn per_entity_avg_rewrite_is_rejected_without_arithmetic_proof() {
         let q = Rc::new(QueryExpr::Aggregate {
             reduction: Reduction::PerEntity,
             measures: vec![AggIntent::Avg { col: None }],
             output_names: vec![],
             filters: vec![],
             having: None,
-            child: Rc::new(metric_scan(&[])),
+            child: Rc::new(QueryExpr::TimeRange {
+                range: Duration::from_secs(300),
+                child: Rc::new(metric_scan(&["job", "instance"])),
+            }),
         });
         let target = TargetSubDAG::new(&q);
         assert!(!AvgToSumOverCountStrategy.matches(&target));
         assert!(AvgToSumOverCountStrategy.replacements(&target).is_empty());
+        assert!(build_rewrite(&q).is_none());
+    }
+
+    /// COUNT(*) cannot replace the denominator of a nullable sample average.
+    #[test]
+    fn per_entity_nullable_or_non_sample_average_is_not_rewritten() {
+        for (nullable, column) in [(true, None), (false, Some(2)), (false, Some(99))] {
+            let mut scan = metric_scan(&["job"]);
+            if let QueryExpr::Scan { schema, .. } = &mut scan {
+                schema.columns[1].nullable = nullable;
+            }
+            let root = Rc::new(QueryExpr::Aggregate {
+                reduction: Reduction::PerEntity,
+                measures: vec![AggIntent::Avg { col: column }],
+                output_names: vec![],
+                filters: vec![],
+                having: None,
+                child: Rc::new(scan),
+            });
+            assert!(build_rewrite(&root).is_none());
+        }
     }
 
     #[test]
