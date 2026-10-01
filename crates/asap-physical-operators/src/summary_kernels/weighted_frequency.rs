@@ -75,10 +75,12 @@ impl WeightedFrequency {
         Ok((algorithm, width as usize, depth as usize, capacity as usize))
     }
 
-    pub(crate) fn algorithm(&self) -> FrequencyAlgorithm {
+    /// Algorithm and `(width, depth, capacity)` shape, so a deployment can check
+    /// a decoded state against its declared family.
+    pub fn algorithm(&self) -> FrequencyAlgorithm {
         self.inner.algorithm()
     }
-    pub(crate) fn shape(&self) -> (usize, usize, usize) {
+    pub fn shape(&self) -> (usize, usize, usize) {
         self.inner.shape()
     }
     pub fn new(
@@ -112,6 +114,9 @@ impl AggregateCore for WeightedFrequency {
         Box::new(self.clone())
     }
     fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
         self
     }
     fn merge_with(

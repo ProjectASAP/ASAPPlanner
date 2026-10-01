@@ -23,6 +23,18 @@ pub enum Expression {
         labels: Vec<String>,
         without: bool,
     },
+    /// One label of a label map; an absent label reads as empty, as in PromQL.
+    Label {
+        column: usize,
+        name: String,
+    },
+    /// Canonical encoding of a label map less `excluding`, identical to
+    /// `promql_rows::encode_series_identity`.
+    LabelIdentity {
+        column: usize,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        excluding: Vec<String>,
+    },
     Literal {
         value: Value,
         dtype: DataType,
@@ -118,6 +130,21 @@ impl Expression {
                     ));
                 }
                 Ok((expected, false))
+            }
+            Label { column, .. } | LabelIdentity { column, .. } => {
+                if plain(input, *column)?
+                    != (
+                        &DataType::Map {
+                            key: Box::new(DataType::Utf8),
+                            value: Box::new(DataType::Utf8),
+                            value_nullable: false,
+                        },
+                        false,
+                    )
+                {
+                    return Err(invalid("label read requires a non-null Utf8 map"));
+                }
+                Ok((DataType::Utf8, false))
             }
             Column(i) => {
                 let (t, n) = plain(input, *i)?;
@@ -251,6 +278,41 @@ impl Expression {
                 }
             }
             Planner(expression) => expression.evaluate(row)?,
+            Label { column, name } => {
+                let Value::Map(entries) = &row[*column] else {
+                    return Err(invalid("label read requires a map"));
+                };
+                let mut found = None;
+                for (key, value) in entries.iter() {
+                    let (Value::Utf8(key), Value::Utf8(value)) = (key, value) else {
+                        return Err(invalid("label read requires Utf8 entries"));
+                    };
+                    if key.as_ref() == name.as_str() && found.replace(value.clone()).is_some() {
+                        return Err(invalid("duplicate label name"));
+                    }
+                }
+                Value::Utf8(found.unwrap_or_else(|| "".into()))
+            }
+            LabelIdentity { column, excluding } => {
+                let Value::Map(entries) = &row[*column] else {
+                    return Err(invalid("label identity requires a map"));
+                };
+                let mut labels = std::collections::BTreeMap::new();
+                for (key, value) in entries.iter() {
+                    let (Value::Utf8(key), Value::Utf8(value)) = (key, value) else {
+                        return Err(invalid("label identity requires Utf8 entries"));
+                    };
+                    if excluding.iter().any(|label| label.as_str() == key.as_ref()) {
+                        continue;
+                    }
+                    if labels.insert(key.to_string(), value.to_string()).is_some() {
+                        return Err(invalid("duplicate label name"));
+                    }
+                }
+                Value::Utf8(
+                    crate::physical_planner::promql_rows::encode_series_identity(&labels)?.into(),
+                )
+            }
             Column(i) => row[*i].clone(),
             Literal { value, .. } => value.clone(),
             Negate(v) => match v.evaluate(row)? {
