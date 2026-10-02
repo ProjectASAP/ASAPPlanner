@@ -746,7 +746,7 @@ fn a_runtime_without_mixed_execution_gets_no_composition_candidates() {
 /// site keeps a non-composed alternative, and the inner summary stays
 /// independently selectable.
 #[test]
-fn missing_cost_statistics_preserve_the_conservative_keep_pre_asap() {
+fn missing_cost_statistics_preserve_the_conservative_retain_exact() {
     let root = agg(vec![0], AggIntent::Max { col: None }, fine_quantile());
     let space = plan(vec![("q", root)], &DefaultCostModel);
     let root = Rc::clone(&space.roots[0].1);

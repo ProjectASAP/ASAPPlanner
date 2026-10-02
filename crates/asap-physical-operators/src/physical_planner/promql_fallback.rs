@@ -127,12 +127,6 @@ fn selector(expression: &OperatorNode) -> Result<(i64, i64, Option<i64>), Error>
     Ok((millis(range)?, offset, at))
 }
 
-/// PromQL scalar-valued expressions have no labels to match. A binary
-/// operator is scalar-valued when both operands are.
-pub(super) fn scalar(expression: &OperatorNode) -> bool {
-    expression.result_kind == planner_types::ir::OperatorResultKind::Scalar
-}
-
 impl Lowering {
     fn schema(&self, input: &Input) -> Schema {
         match input {
@@ -401,7 +395,7 @@ impl Lowering {
                     self.schema(&sides[0]),
                     self.schema(&sides[1]),
                     operator,
-                    [scalar(lhs), scalar(rhs)],
+                    [false, false],
                 )?;
                 self.push(binary, sides, expression)
             }

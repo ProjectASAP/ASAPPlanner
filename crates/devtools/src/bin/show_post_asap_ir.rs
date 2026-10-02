@@ -21,7 +21,7 @@
 // `metrics(ts, service, region, latency, bytes)` catalog — the same table
 // used in cross_language.rs and topk_ir.rs.
 
-use asap_aware_mapping::replacement::keep_pre_asap;
+use asap_aware_mapping::replacement::retain_exact;
 use asap_aware_mapping::{
     Replacement, ReplacementStrategy, ReplacementSubDAG, SketchAlgorithmStrategy, TargetSubDAG,
 };
@@ -52,7 +52,7 @@ fn bind_all(root: &Rc<OperatorNode>) -> Result<Vec<Rc<OperatorNode>>, String> {
         .collect::<Vec<_>>();
 
     if candidates.is_empty() {
-        Ok(vec![keep_pre_asap(root).map_err(|e| e.to_string())?])
+        Ok(vec![retain_exact(root).map_err(|e| e.to_string())?])
     } else {
         Ok(candidates)
     }

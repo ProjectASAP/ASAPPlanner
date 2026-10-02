@@ -456,11 +456,28 @@ impl ScalarExpr {
                         DataType::Interval
                     }
                     (DataType::Timestamp, DataType::Interval)
-                    | (DataType::Interval, DataType::Timestamp) => DataType::Timestamp,
-                    (DataType::Date, DataType::Interval) | (DataType::Interval, DataType::Date) => {
+                        if matches!(op, ArithmeticOpKind::Add | ArithmeticOpKind::Sub) =>
+                    {
+                        DataType::Timestamp
+                    }
+                    (DataType::Interval, DataType::Timestamp)
+                        if matches!(op, ArithmeticOpKind::Add) =>
+                    {
+                        DataType::Timestamp
+                    }
+                    (DataType::Date, DataType::Interval)
+                        if matches!(op, ArithmeticOpKind::Add | ArithmeticOpKind::Sub) =>
+                    {
                         DataType::Date
                     }
-                    (DataType::Interval, DataType::Interval) => DataType::Interval,
+                    (DataType::Interval, DataType::Date) if matches!(op, ArithmeticOpKind::Add) => {
+                        DataType::Date
+                    }
+                    (DataType::Interval, DataType::Interval)
+                        if matches!(op, ArithmeticOpKind::Add | ArithmeticOpKind::Sub) =>
+                    {
+                        DataType::Interval
+                    }
                     (DataType::Int64, DataType::Int64) => DataType::Int64,
                     _ if numeric(&lt) && numeric(&rt) => common_scalar_type(&lt, &rt)?,
                     _ => return Err(signature("invalid arithmetic operand types")),

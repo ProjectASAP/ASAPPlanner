@@ -1126,14 +1126,14 @@ fn target_replacement(
     }
 }
 
-/// Is `replacement` `keep_pre_asap`'s conservative no-op fallback — the
+/// Is `replacement` `retain_exact`'s conservative no-op fallback — the
 /// target itself, unbound, carrying only an exact "kept pre-ASAP" guarantee?
 /// `SketchAlgorithmStrategy` emits it for an intent with no summary
 /// realization at all (`STDDEV_POP`, `AVG`, ... dispatch to
 /// `Realization::PassThrough`). It is "nothing to bind here", not a
 /// replacement decision. A logical rewrite (no guarantee yet) and any subtree
 /// with an ASAP operator are real candidates.
-fn is_trivial_keep_pre_asap(replacement: &Replacement) -> bool {
+fn is_trivial_retain_exact(replacement: &Replacement) -> bool {
     matches!(
         replacement,
         Replacement::Subtree(node) if node.guarantee.is_some() && !node.contains_asap()
@@ -1242,9 +1242,9 @@ fn run_post_asap_with_progress(
     };
     let selection = space.global_selection(cost_model);
 
-    // A group's top candidate can be `keep_pre_asap`'s own conservative
+    // A group's top candidate can be `retain_exact`'s own conservative
     // fallback — the *whole target* itself, unbound, carrying only an exact
-    // "kept pre-ASAP" guarantee (see `is_trivial_keep_pre_asap`) — e.g. for
+    // "kept pre-ASAP" guarantee (see `is_trivial_retain_exact`) — e.g. for
     // a multi-measure/`HAVING`-bearing aggregate, or (the case that actually
     // surfaces this: `STDDEV_POP`/`AVG`/`VARIANCE` dispatch to
     // `Realization::PassThrough` with no alternative at all, per
@@ -1271,7 +1271,7 @@ fn run_post_asap_with_progress(
             if matches!(candidate.replacement, Replacement::ExactComposition(_)) {
                 return None;
             }
-            if is_trivial_keep_pre_asap(&candidate.replacement) {
+            if is_trivial_retain_exact(&candidate.replacement) {
                 return None;
             }
             Some(Winner {
@@ -2308,7 +2308,7 @@ mod tests {
         let candidate = group
             .candidates
             .iter()
-            .find(|candidate| !is_trivial_keep_pre_asap(&candidate.replacement))
+            .find(|candidate| !is_trivial_retain_exact(&candidate.replacement))
             .expect("summary candidate")
             .clone();
         let plan = candidate_plan(&candidate);
@@ -3139,7 +3139,7 @@ mod tests {
     /// against real corpus queries (a `STDDEV_POP` aggregate, which — like
     /// `AVG` — dispatches to `Realization::PassThrough` with no
     /// alternative strategy of its own, so its *only* candidate is
-    /// `keep_pre_asap`'s conservative fallback: the *entire target* itself,
+    /// `retain_exact`'s conservative fallback: the *entire target* itself,
     /// unbound, carrying only an exact "kept pre-ASAP" guarantee).
     /// `run_post_asap` must not treat that as a real winner: under the old
     /// IR, splicing it into `export_post_asap` recursed forever (the spliced
@@ -3151,7 +3151,7 @@ mod tests {
     /// free of a fake replacement: this test asserts both that
     /// `run_post_asap` returns at all and that it reports nothing.
     #[tokio::test]
-    async fn post_asap_does_not_recurse_forever_on_a_trivial_keep_pre_asap_winner() {
+    async fn post_asap_does_not_recurse_forever_on_a_trivial_retain_exact_winner() {
         let cat = default_catalog();
         let stddev_query = lower_sql(
             "SELECT STDDEV_POP(latency) FROM metrics",
@@ -3168,12 +3168,12 @@ mod tests {
 
         let results = run_post_asap(&lowered_queries);
 
-        // A trivial keep_pre_asap winner must be filtered before it ever
+        // A trivial retain_exact winner must be filtered before it ever
         // becomes a flat `TargetReplacement` — there's no real replacement
         // to report for a target with no alternative at all.
         assert!(
             results.replacements.is_empty(),
-            "a target whose only candidate is the trivial keep_pre_asap fallback \
+            "a target whose only candidate is the trivial retain_exact fallback \
              shouldn't produce a flat replacement entry: {:?}",
             results
                 .replacements

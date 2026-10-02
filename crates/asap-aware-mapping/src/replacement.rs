@@ -392,7 +392,7 @@ use crate::rollup::RollupStrategy;
 use crate::topk_reuse::TopKLimitReuseStrategy;
 
 /// Errors from the pre-ASAP → post-ASAP replacement/construction path
-/// ([`realize_child`] and [`keep_pre_asap`]). Moved here from the former
+/// ([`realize_child`] and [`retain_exact`]). Moved here from the former
 /// `bind.rs` (issue #251): this is what a [`ReplacementStrategy`]
 /// implementor's own construction path can realistically fail with —
 /// schema derivation over a pre-ASAP [`OperatorNode`] subtree — not
@@ -1686,7 +1686,7 @@ impl<'a> SketchAlgorithmStrategy<'a> {
         }
         if proposals.candidates.is_empty() {
             if let Some(error) = &proposals.domain_error {
-                if let Ok(node) = keep_pre_asap(root) {
+                if let Ok(node) = retain_exact(root) {
                     proposals.candidates.push(ReplacementSubDAG {
                         strategy: "SketchAlgorithmStrategy",
                         replacement: Replacement::Subtree(node),
@@ -1850,11 +1850,11 @@ pub(crate) fn describe_intent(intent: &AggIntent) -> String {
     }
 }
 
-// ── realize_child / keep_pre_asap: rank-and-take-first, and its fallback ──
+// ── realize_child / retain_exact: rank-and-take-first, and its fallback ──
 
 /// Rank-and-take-first selector for a single [`OperatorNode`]: enumerate
 /// every candidate via [`SketchAlgorithmStrategy::replacements`], keep the
-/// `cost_model`-preferred (first) one, and fall back to [`keep_pre_asap`]
+/// `cost_model`-preferred (first) one, and fall back to [`retain_exact`]
 /// when there's no candidate at all — **not** a general single-answer API
 /// for a whole workload. Use [`CandidateLogicalASAPDAGs::global_selection`] and DAG assembly
 /// for coordinated logical selection; physical deployment remains downstream.
@@ -2032,7 +2032,7 @@ pub(crate) fn realize_child_with(
         // candidate was accuracy-illegal — either way the same conservative
         // fallback `SketchAlgorithmStrategy::matches` uses: keep the
         // pre-ASAP subtree, executed exactly.
-        None => keep_pre_asap(root),
+        None => retain_exact(root),
     }
 }
 
@@ -2477,18 +2477,18 @@ fn override_accuracy(intent: &AggIntent, target: &AccuracyTarget) -> AggIntent {
 /// Keep an unrewritten pre-ASAP subtree as it is. There is no wrapper node:
 /// the subtree itself is the plan, carrying an exact guarantee. The same
 /// `Rc` is returned when the node already has a guarantee; otherwise a copy
-/// with `guarantee = exact("KeepPreAsap")` — only for a subtree with no
+/// with `guarantee = exact("RetainedExact")` — only for a subtree with no
 /// ASAP operator (a subtree containing one keeps whatever its construction
 /// established). `pub` so a caller can fall back to this explicitly — e.g.
 /// when `SketchAlgorithmStrategy::replacements()` returns no candidate for a
 /// target, or a deployment wants to force a node its own runtime can't
 /// actually implement — through the same fallback this crate's own dispatch
 /// uses.
-pub fn keep_pre_asap(expr: &Rc<OperatorNode>) -> Result<Rc<OperatorNode>, RealizationError> {
-    keep_pre_asap_rc(Rc::clone(expr))
+pub fn retain_exact(expr: &Rc<OperatorNode>) -> Result<Rc<OperatorNode>, RealizationError> {
+    retain_exact_rc(Rc::clone(expr))
 }
 
-fn keep_pre_asap_rc(expr: Rc<OperatorNode>) -> Result<Rc<OperatorNode>, RealizationError> {
+fn retain_exact_rc(expr: Rc<OperatorNode>) -> Result<Rc<OperatorNode>, RealizationError> {
     if expr.guarantee.is_some() || expr.contains_asap() {
         return Ok(expr);
     }
@@ -2517,7 +2517,7 @@ fn keep_pre_asap_rc(expr: Rc<OperatorNode>) -> Result<Rc<OperatorNode>, Realizat
             .clone()
             // A kept pre-ASAP subtree is executed exactly by the runtime
             // (`Realization::PassThrough`'s contract) — zero error.
-            .with_guarantee(Some(ResultGuarantee::exact("KeepPreAsap"))),
+            .with_guarantee(Some(ResultGuarantee::exact("RetainedExact"))),
     );
     KEPT.with(|memo| {
         let mut memo = memo.borrow_mut();
@@ -2535,7 +2535,7 @@ fn keep_pre_asap_rc(expr: Rc<OperatorNode>) -> Result<Rc<OperatorNode>, Realizat
 /// `HAVING`. A multi-intent node (SQL `SELECT SUM(a), AVG(b)`), or one with a
 /// `HAVING` predicate (the filter would need the estimate first), stays
 /// logical. Unsupported logical parents are conservatively kept as pre-ASAP
-/// subtrees ([`keep_pre_asap`]). Relational operators are retained during
+/// subtrees ([`retain_exact`]). Relational operators are retained during
 /// final DAG assembly so their independently planned children remain
 /// visible.
 pub fn bindable_intent(node: &OperatorNode) -> Option<&AggIntent> {
@@ -2556,7 +2556,7 @@ pub fn bindable_intent(node: &OperatorNode) -> Option<&AggIntent> {
 }
 
 /// `expr` must still be the [`bindable_intent`] shape for `realization` to
-/// have any effect; anything else falls back to [`keep_pre_asap`].
+/// have any effect; anything else falls back to [`retain_exact`].
 /// Only `expr`'s own top-level decision is forced — recursion into `expr`'s
 /// child goes back through [`realize_child`] (fresh candidate
 /// enumeration, not a forced pick), so choosing one candidate for a target
@@ -2628,7 +2628,7 @@ pub(crate) fn construct_summary_with(
             }
         }
     }
-    keep_pre_asap_rc(Rc::new(expr.clone()))
+    retain_exact_rc(Rc::new(expr.clone()))
 }
 
 fn finish_weighted_topk(
@@ -2748,7 +2748,7 @@ fn is_snapshot_weighted_topk(intent: &AggIntent, child: &OperatorNode) -> bool {
 
 /// Translate an [`Realization`] into the `(family, needs a
 /// SummaryEstimate readout)` pair [`construct_summary_agg`] needs, or `None`
-/// for `PassThrough` (the caller falls back to [`keep_pre_asap`]).
+/// for `PassThrough` (the caller falls back to [`retain_exact`]).
 ///
 /// Every family's partial state needs a readout to recover a value, except
 /// `ExactAggregate` — its partial state *is* the value already, so no
@@ -3107,7 +3107,7 @@ fn construct_summary_agg(
     } else {
         let child =
             finalize_exact_accumulator(bound_child, &input.child, ExecutionTiming::IngestionTime)?;
-        maintenance_exact_values(child).unwrap_or(keep_pre_asap(&input.child)?)
+        maintenance_exact_values(child).unwrap_or(retain_exact(&input.child)?)
     };
 
     // ── Guarantee (issue #172) ──────────────────────────────────────────
@@ -3862,7 +3862,7 @@ fn readout(
 
 /// Lift a pre-ASAP [`Schema`] to a [`Schema`] with every column
 /// `FieldDataType::Plain` — shared by [`construct_summary_agg`] and
-/// [`keep_pre_asap`], both in this module.
+/// [`retain_exact`], both in this module.
 fn lift(schema: &Schema) -> Schema {
     Schema::lifted(schema.fields.clone(), schema.time_index)
 }
@@ -4141,7 +4141,7 @@ impl<Id> CandidateLogicalASAPDAGs<Id> {
                         })
                         .collect(),
                     OperationPlacement::Maintenance => {
-                        keep_pre_asap(&operation.child_target).into_iter().collect()
+                        retain_exact(&operation.child_target).into_iter().collect()
                     }
                 };
                 for child in children {
@@ -5305,7 +5305,7 @@ impl<'a> GlobalSelection<'a> {
                 Some(Replacement::Subtree(node)) if node.contains_asap() => {
                     self.relink_summary(node, target)?
                 }
-                Some(Replacement::Subtree(kept)) => keep_pre_asap(kept)?,
+                Some(Replacement::Subtree(kept)) => retain_exact(kept)?,
                 Some(Replacement::ExactComposition(_)) => Rc::clone(
                     &self.groups[&ptr]
                         .composition
@@ -5336,7 +5336,7 @@ impl<'a> GlobalSelection<'a> {
     ) -> Result<Rc<OperatorNode>, RealizationError> {
         if target.children().is_empty() {
             // A leaf has nothing to assemble beneath it: keep it as it is.
-            return keep_pre_asap(target);
+            return retain_exact(target);
         }
         let mut operator = target.operator.clone();
         if let Operator::NonASAP(NonASAPOp::Join {
@@ -5352,7 +5352,7 @@ impl<'a> GlobalSelection<'a> {
                 .then(|| normalize_cross_input_equi_predicate(pred, left_width, total_width))
                 .flatten();
             let Some(normalized) = normalized_pred else {
-                return keep_pre_asap(target);
+                return retain_exact(target);
             };
             *pred = normalized;
         }
@@ -5402,7 +5402,7 @@ impl<'a> GlobalSelection<'a> {
                 .is_some_and(ResultGuarantee::is_exact)
         });
         if computes_values && approximate_input {
-            return keep_pre_asap(target);
+            return retain_exact(target);
         }
         let guarantee = match children.as_slice() {
             [child] => child.guarantee.clone(),
@@ -9786,7 +9786,7 @@ mod tests {
         })];
         let _ = search_workload_with(vec![("q", root)], &strategies);
     }
-    // ── realize_child / keep_pre_asap: end-to-end single-target realization ──
+    // ── realize_child / retain_exact: end-to-end single-target realization ──
     //
     // Moved from the former `bind.rs` (issue #251): `bind.rs`'s own
     // workload-wide orchestration (`implement_workload`/

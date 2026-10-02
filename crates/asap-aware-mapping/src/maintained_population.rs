@@ -307,6 +307,7 @@ mod tests {
     /// Time `root` under the default lifecycle assignment (which runs the
     /// data-state / population-contract validation) and export it.
     fn compile_post_asap_dag(root: &Rc<OperatorNode>) -> Result<(), String> {
+        root.validate_structure().map_err(|e| e.to_string())?;
         let timed = apply_lifecycle_timings(
             root,
             &LifecycleAssignment::default_maintained(),

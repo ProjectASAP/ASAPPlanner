@@ -170,8 +170,8 @@ impl<'a> SqlLowerer<'a> {
     /// a rule) that isn't wanted here — e.g. it independently rejects a
     /// multi-column `IN (subquery)` before `lower_in_subquery`'s own arity
     /// check would. Going straight to `ApplyFunctionRewrites` avoids that
-    /// entirely: zero behavior change for every query that doesn't call a
-    /// catalog-listed ClickHouse builtin.
+    /// entirely. TypeCoercion then records implicit conversions explicitly,
+    /// including timestamp literals in predicates, before IR validation.
     pub async fn lower(
         &self,
         sql: &str,

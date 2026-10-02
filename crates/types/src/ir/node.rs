@@ -25,8 +25,6 @@ pub enum OperatorResultKind {
     RangeVector,
     /// Unfinalized summary / accumulator state.
     State,
-    /// One value with no series: a PromQL scalar operand or scalar query.
-    Scalar,
 }
 
 /// The operation a node performs: an ordinary query operator or an ASAP
@@ -226,12 +224,6 @@ impl OperatorNode {
         out
     }
 
-    /// Validate the whole DAG reachable from this node: every operator's
-    /// input contract, scalar typing against the owning operator's input
-    /// schema, and agreement between each retained schema and the one
-    /// derived from the operator. For an ASAP node the planner may retain
-    /// more specific column names, so only the field types must agree.
-    /// `timing` may be `None`.
     /// Validate assigned phases without imposing any particular runtime implementation.
     pub fn validate_execution_timing(self: &Rc<Self>) -> Result<(), QueryExprError> {
         self.validate_structure()?;
@@ -252,8 +244,30 @@ impl OperatorNode {
         Ok(())
     }
 
+    /// Validate the whole DAG reachable from this node: every operator's
+    /// input contract, scalar typing against the owning operator's input
+    /// schema, and agreement between each retained schema and the one
+    /// derived from the operator. For an ASAP node the planner may retain
+    /// more specific column names, so only the field types must agree.
+    /// `timing` may be `None`.
     pub fn validate_structure(self: &Rc<Self>) -> Result<(), QueryExprError> {
         for node in Self::reachable(self) {
+            if node.schema.time_index.is_some_and(|i| {
+                node.schema
+                    .fields
+                    .get(i)
+                    .is_none_or(|f| f.plain_dtype() != Some(&crate::pre_asap::DataType::Timestamp))
+            }) || node
+                .schema
+                .unique_keys
+                .iter()
+                .flatten()
+                .any(|i| *i >= node.schema.fields.len())
+            {
+                return Err(QueryExprError::InvalidScalarSignature(
+                    "invalid time or identity column in schema".into(),
+                ));
+            }
             node.operator.validate_inputs()?;
             if node.result_kind != node.operator.output_kind() {
                 return Err(QueryExprError::InvalidScalarSignature(

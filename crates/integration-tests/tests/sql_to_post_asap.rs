@@ -19,7 +19,7 @@
 
 use std::rc::Rc;
 
-use asap_aware_mapping::replacement::{keep_pre_asap, RealizationError};
+use asap_aware_mapping::replacement::{retain_exact, RealizationError};
 use asap_aware_mapping::{
     search_workload, DefaultCostModel, Replacement, ReplacementStrategy, ReplacementSubDAG,
     SketchAlgorithmStrategy, TargetSubDAG,
@@ -56,8 +56,12 @@ fn realize(target: &Rc<OperatorNode>) -> Result<Rc<OperatorNode>, RealizationErr
             replacement: Replacement::Subtree(node),
             ..
         }) if node.contains_asap() => Ok(node),
-        _ => keep_pre_asap(target),
+        _ => retain_exact(target),
     }
+    .inspect(|node| {
+        node.validate_structure()
+            .expect("planned graph satisfies the unified IR contract")
+    })
 }
 
 /// The single input of a unary non-ASAP node (Project, Filter, Sort, ...) or

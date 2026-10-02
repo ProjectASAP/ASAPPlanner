@@ -13,7 +13,7 @@ use asap_aware_mapping::accuracy::{
     QuantileInputDomain,
 };
 use asap_aware_mapping::cost_model::DefaultCostModel;
-use asap_aware_mapping::replacement::{is_logical_rewrite, keep_pre_asap, RealizationError};
+use asap_aware_mapping::replacement::{is_logical_rewrite, retain_exact, RealizationError};
 use asap_aware_mapping::{
     search_workload, search_workload_with_targets, AccuracyModel, Replacement, ReplacementStrategy,
     ReplacementSubDAG, SketchAlgorithmStrategy, TargetSubDAG,
@@ -50,8 +50,12 @@ fn realize(root: &Rc<OperatorNode>) -> Result<Rc<OperatorNode>, RealizationError
             replacement: Replacement::Subtree(node),
             ..
         }) if !is_logical_rewrite(&node) => Ok(node),
-        _ => keep_pre_asap(root),
+        _ => retain_exact(root),
     }
+    .inspect(|node| {
+        node.validate_structure()
+            .expect("planned graph satisfies the unified IR contract")
+    })
 }
 
 #[test]
@@ -65,6 +69,11 @@ fn distinct_over_time_offers_hll_cardinality_readout() {
     .unwrap();
     let candidates =
         SketchAlgorithmStrategy::default_cost_model().replacements(&TargetSubDAG::new(&root));
+    for candidate in &candidates {
+        if let Replacement::Subtree(node) = &candidate.replacement {
+            node.validate_structure().unwrap();
+        }
+    }
     assert!(candidates.iter().any(|candidate| {
         let Replacement::Subtree(node) = &candidate.replacement else { return false };
         let Some(ASAPOp::SummaryEstimate { summary_input, query, .. }) = node.asap() else { return false };

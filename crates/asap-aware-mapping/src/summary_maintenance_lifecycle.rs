@@ -1028,7 +1028,7 @@ pub(crate) fn plan_assembled_dag(
                 .is_none_or(|summary| raw.0 <= summary.0)
         })
     {
-        plan.root = crate::replacement::keep_pre_asap(target)?;
+        plan.root = crate::replacement::retain_exact(target)?;
         plan.deployments.clear();
         plan.selected_raw_recompute = true;
         plan.selected_window_implementation_id = None;
@@ -3541,7 +3541,7 @@ mod tests {
             )
         );
         let raw = plan_summary_maintenance_lifecycles(
-            crate::replacement::keep_pre_asap(&sum_query()).unwrap(),
+            crate::replacement::retain_exact(&sum_query()).unwrap(),
             demand,
             1_000,
             None,

@@ -506,7 +506,7 @@ impl ReplacementStrategy for ExactCompositionStrategy<'_> {
 mod tests {
     use super::*;
     use crate::cost_model::{DefaultCostModel, ValueOperationCapabilities};
-    use crate::replacement::keep_pre_asap;
+    use crate::replacement::retain_exact;
     use crate::test_support::{agg, agg_per_entity as per_entity, metric_scan, timed};
     use asap_types::ir::ASAPOp;
     use asap_types::post_asap::{ExecutionDataStateError, FieldDataType, SketchAlgorithm};
@@ -688,7 +688,7 @@ mod tests {
             ))
         ));
         // Raw update input is fine.
-        let raw = keep_pre_asap(&comp.child_target).unwrap();
+        let raw = retain_exact(&comp.child_target).unwrap();
         assert!(comp.accepts_child(&raw));
         // Timing is no longer stored by composition: the composition's
         // placement is maintenance time, the composed exact operation is a

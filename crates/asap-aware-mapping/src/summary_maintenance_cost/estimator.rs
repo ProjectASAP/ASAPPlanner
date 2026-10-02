@@ -229,12 +229,12 @@ pub(super) fn estimate_heterogeneous_summary(
             let retained = evidence
                 .retained_queries
                 .get(&(node as *const _))
-                .ok_or(AnalyticalCostError::MissingOrStale("keep_pre_asap"))?;
+                .ok_or(AnalyticalCostError::MissingOrStale("retain_exact"))?;
             if !retained.preprocessing_cpu_ops_over_horizon.is_finite()
                 || retained.preprocessing_cpu_ops_over_horizon < 0.0
             {
                 return Err(AnalyticalCostError::InvalidOperationCost(
-                    "keep_pre_asap",
+                    "retain_exact",
                     retained.preprocessing_cpu_ops_over_horizon,
                 ));
             }
@@ -773,7 +773,7 @@ pub(super) fn estimate_transient_liveness(
                 .retained_queries
                 .get(&(node as *const _))
                 .map(|value| (value.working_memory_bytes, value.output_buffer_bytes))
-                .ok_or(AnalyticalCostError::MissingOrStale("keep_pre_asap"));
+                .ok_or(AnalyticalCostError::MissingOrStale("retain_exact"));
         }
         match &node.operator {
             Operator::ASAP(ASAPOp::SummaryAgg { .. }) => Ok((0, 0)),

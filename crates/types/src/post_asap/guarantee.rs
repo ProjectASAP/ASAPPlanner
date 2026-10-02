@@ -325,7 +325,7 @@ pub enum GuaranteeSource {
     /// Deterministic exact computation — zero error by construction.
     Exact {
         /// What made it exact (e.g. `"ExactAggregate(Sum)"`,
-        /// `"KeepPreAsap"`).
+        /// `"RetainedExact"`).
         reason: String,
     },
     /// The target this readout's sketch was sized against.

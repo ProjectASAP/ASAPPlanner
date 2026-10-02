@@ -147,7 +147,7 @@ async fn corr_filter_is_a_measure_filter() {
 #[tokio::test]
 async fn corr_survives_exact_plan_compilation() {
     let query = lower("SELECT corr(x, y) AS r FROM a").await;
-    let plan = asap_aware_mapping::replacement::keep_pre_asap(&query).unwrap();
+    let plan = asap_aware_mapping::replacement::retain_exact(&query).unwrap();
     assert!(plan.guarantee.as_ref().unwrap().is_exact());
     // The exact fallback is the query's own operator DAG, no ASAP node added.
     assert!(!plan.contains_asap(), "expected exact fallback");

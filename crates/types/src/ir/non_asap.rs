@@ -522,6 +522,7 @@ impl NonASAPOp {
                 measures,
                 output_names,
                 child,
+                filters,
                 ..
             } => {
                 let mut output =
@@ -529,8 +530,15 @@ impl NonASAPOp {
                 if child.result_kind == OperatorResultKind::Relation {
                     let offset = reduction.group_keys().map_or(0, |keys| keys.len());
                     for (index, measure) in measures.iter().enumerate() {
-                        if matches!(measure, AggIntent::Sum { .. } | AggIntent::Avg { .. }) {
+                        if matches!(
+                            measure,
+                            AggIntent::Sum { .. }
+                                | AggIntent::Avg { .. }
+                                | AggIntent::Min { .. }
+                                | AggIntent::Max { .. }
+                        ) {
                             let nullable = offset == 0
+                                || filters.get(index).is_some_and(Option::is_some)
                                 || measure
                                     .input_cols()
                                     .iter()
@@ -700,20 +708,19 @@ impl NonASAPOp {
                 ..
             } => {
                 let mut out = child.schema.clone();
-                let arg = args.first().and_then(|a| match a {
-                    ScalarExpr::Column(id) => out.fields.get(*id),
-                    _ => None,
-                });
+                let arg = args.first().map(|a| a.scalar_type(&out)).transpose()?;
                 let arg_dtype = || {
-                    arg.and_then(|c| c.plain_dtype().cloned())
-                        .unwrap_or(DataType::Float64)
+                    arg.as_ref()
+                        .map(|(ty, _)| ty.clone())
+                        .unwrap_or(DataType::Null)
                 };
                 let (dtype, nullable) = match func {
                     WindowFuncKind::RowNumber
                     | WindowFuncKind::Rank
                     | WindowFuncKind::DenseRank
                     | WindowFuncKind::Count => (DataType::Int64, false),
-                    WindowFuncKind::Sum | WindowFuncKind::Avg => (DataType::Float64, true),
+                    WindowFuncKind::Sum => (arg_dtype(), true),
+                    WindowFuncKind::Avg => (DataType::Float64, true),
                     WindowFuncKind::Lag
                     | WindowFuncKind::Lead
                     | WindowFuncKind::LagInFrame
@@ -721,9 +728,7 @@ impl NonASAPOp {
                     | WindowFuncKind::FirstValue
                     | WindowFuncKind::LastValue
                     | WindowFuncKind::NthValue(_) => (arg_dtype(), true),
-                    WindowFuncKind::Min | WindowFuncKind::Max => {
-                        (arg_dtype(), arg.is_none_or(|c| c.nullable))
-                    }
+                    WindowFuncKind::Min | WindowFuncKind::Max => (arg_dtype(), true),
                 };
                 out.fields
                     .push(Field::plain(output_name.clone(), dtype, nullable));
@@ -813,6 +818,7 @@ impl NonASAPOp {
                 | (_, OperatorResultKind::State) => OperatorResultKind::InstantVector,
                 (_, kind) => kind,
             },
+            Project { child, cols, .. } if cols.iter().any(|item| matches!(item.expr, ScalarExpr::Column(i) if child.schema.fields.get(i).is_some_and(|f| !f.is_plain()))) => OperatorResultKind::State,
             Filter { child, .. }
             | Project { child, .. }
             | Dedup { child, .. }

@@ -812,7 +812,7 @@ mod tests {
             scan()
                 .as_ref()
                 .clone()
-                .with_guarantee(Some(ResultGuarantee::exact("KeepPreAsap"))),
+                .with_guarantee(Some(ResultGuarantee::exact("RetainedExact"))),
         );
         OperatorNode::asap_node(
             ASAPOp::SummaryAgg {

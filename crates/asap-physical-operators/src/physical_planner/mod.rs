@@ -492,19 +492,11 @@ fn compile_internal(
                 // carry the series identity.
                 if let (true, [left, right]) = (query_time, schemas.as_slice()) {
                     if !label_map(left) && !label_map(right) {
-                        // A scalar-valued Fallback operand, such as `scalar(x)`, has no labels.
-                        let scalar = |input: &NodeId| {
-                            matches!(
-                                nodes.get(input).map(|node| &node.payload),
-                                Some(Payload::Relational { .. })
-                                    if promql_fallback::scalar(&restored[input])
-                            )
-                        };
                         let binary = Operator::series_binary(
                             left.clone(),
                             right.clone(),
                             operator.clone(),
-                            [scalar(&inputs[0]), scalar(&inputs[1])],
+                            [false, false],
                         )
                         .map_err(|error| invalid(format!("node {id}: {error}")))?;
                         graph.add(id, inputs, binary.with_output_schema(output)?)?;

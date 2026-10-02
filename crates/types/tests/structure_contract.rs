@@ -80,3 +80,87 @@ fn scalar_signatures_fail_closed() {
         assert!(expr.scalar_type(&scan().schema).is_err(), "{expr:?}");
     }
 }
+
+/// A state family is not interchangeable with another sketch or a scalar field.
+#[test]
+fn state_readouts_and_passthrough_keep_their_contracts() {
+    use asap_types::ir::{ASAPOp, Operator, ProjectItem};
+    use asap_types::post_asap::{
+        FieldDataType, GroupingStrategy, SketchAlgorithm, SketchKind, SketchParams, SketchQuery,
+        SummaryUpdate,
+    };
+    use asap_types::pre_asap::{ColumnRef, Reduction};
+    let family = FieldDataType::Sketch(
+        SketchKind::new(SketchAlgorithm::Kll, SketchParams::Kll { k: 100 }),
+        GroupingStrategy::default(),
+    );
+    let state = Rc::new(
+        OperatorNode::new(Operator::ASAP(ASAPOp::SummaryAgg {
+            child: scan(),
+            family,
+            input: SummaryUpdate::column(ColumnRef::Named("x".into())),
+            reduction: Reduction::by(vec![]),
+            grouping: GroupingStrategy::default(),
+            filter: None,
+        }))
+        .unwrap(),
+    );
+    state.validate_structure().unwrap();
+    let pass = OperatorNode::non_asap_node(NonASAPOp::Project {
+        child: state.clone(),
+        cols: vec![ProjectItem {
+            expr: ScalarExpr::Column(0),
+            alias: None,
+        }],
+        qualifier: None,
+    })
+    .unwrap();
+    pass.validate_structure().unwrap();
+    assert_eq!(pass.result_kind, OperatorResultKind::State);
+    assert!(ScalarExpr::Column(0).scalar_type(&pass.schema).is_err());
+    assert!(ASAPOp::SummaryEstimate {
+        summary_input: state.clone(),
+        query: SketchQuery::Cardinality
+    }
+    .validate_inputs()
+    .is_err());
+    assert!(ASAPOp::SummaryEstimate {
+        summary_input: state.clone(),
+        query: SketchQuery::Quantile { q: 0.99 }
+    }
+    .validate_inputs()
+    .is_ok());
+    assert!(ASAPOp::FinalizeExactAccumulator { child: state }
+        .validate_inputs()
+        .is_err());
+}
+
+/// Phase validation checks dependencies, without declaring a computation query-only.
+#[test]
+fn execution_timing_checks_edges_not_function_names() {
+    use asap_types::ir::ProjectItem;
+    use asap_types::post_asap::ExecutionTiming::{IngestionTime, QueryTime};
+    let input = Rc::new((*scan()).clone().with_timing(Some(IngestionTime)));
+    let mut project = OperatorNode::new(asap_types::ir::Operator::NonASAP(NonASAPOp::Project {
+        child: input,
+        cols: vec![ProjectItem {
+            expr: ScalarExpr::FunctionCall {
+                name: "promql_abs".into(),
+                args: vec![ScalarExpr::Column(0)],
+            },
+            alias: None,
+        }],
+        qualifier: None,
+    }))
+    .unwrap()
+    .with_timing(Some(IngestionTime));
+    Rc::new(project.clone())
+        .validate_execution_timing()
+        .unwrap();
+    if let asap_types::ir::Operator::NonASAP(NonASAPOp::Project { child, .. }) =
+        &mut project.operator
+    {
+        *child = Rc::new(child.as_ref().clone().with_timing(Some(QueryTime)));
+    }
+    assert!(Rc::new(project).validate_execution_timing().is_err());
+}

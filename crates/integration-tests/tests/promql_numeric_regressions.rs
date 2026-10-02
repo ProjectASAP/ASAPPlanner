@@ -20,7 +20,7 @@ fn plan(query: &str, accuracy: AccuracyTarget) -> Rc<OperatorNode> {
             Replacement::Subtree(n) if !is_logical_rewrite(&n) => Some(n),
             _ => None,
         })
-        .unwrap_or_else(|| asap_aware_mapping::replacement::keep_pre_asap(&pre).unwrap())
+        .unwrap_or_else(|| asap_aware_mapping::replacement::retain_exact(&pre).unwrap())
 }
 fn aggregate(node: &OperatorNode) -> (&FieldDataType, &SummaryUpdate, &Reduction) {
     match &node.operator {

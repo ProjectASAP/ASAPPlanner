@@ -235,3 +235,17 @@ async fn sql_sum_example_executes_with_sql_null_semantics() {
         }
     }
 }
+
+/// Empty window frames and filtered groups can yield NULL even on non-NULL input.
+#[tokio::test]
+async fn sql_window_and_filtered_aggregate_types() {
+    for query in [
+        "SELECT SUM(l_quantity) OVER (ORDER BY l_quantity ROWS BETWEEN 2 PRECEDING AND 1 PRECEDING) AS s FROM lineitem",
+        "SELECT MIN(l_quantity) OVER (ORDER BY l_quantity ROWS BETWEEN 2 PRECEDING AND 1 PRECEDING) AS s FROM lineitem",
+        "SELECT SUM(l_quantity) FILTER (WHERE l_quantity < 0) AS s FROM lineitem GROUP BY l_quantity",
+    ] {
+        let root = lower_sql(query, &catalog(), AccuracyTarget::Exact).await.unwrap();
+        root.validate_structure().unwrap();
+        assert_eq!(root.schema.fields[0], Field::plain("s", DataType::Int64, true), "{query}");
+    }
+}

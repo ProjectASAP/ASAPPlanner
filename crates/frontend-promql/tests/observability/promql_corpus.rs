@@ -15,7 +15,7 @@
 
 use std::rc::Rc;
 
-use asap_aware_mapping::replacement::{keep_pre_asap, RealizationError};
+use asap_aware_mapping::replacement::{retain_exact, RealizationError};
 use asap_aware_mapping::{
     Replacement, ReplacementStrategy, ReplacementSubDAG, SketchAlgorithmStrategy, TargetSubDAG,
 };
@@ -43,7 +43,7 @@ fn bind(root: &Rc<OperatorNode>) -> Result<Rc<OperatorNode>, RealizationError> {
             replacement: Replacement::Subtree(node),
             ..
         }) => Ok(node),
-        _ => keep_pre_asap(root),
+        _ => retain_exact(root),
     }
 }
 

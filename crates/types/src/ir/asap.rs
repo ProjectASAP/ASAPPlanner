@@ -218,33 +218,29 @@ impl ASAPOp {
                 reduction,
                 ..
             } => {
-                let input = &child.schema;
-                let mut fields = Vec::new();
-                if let Reduction::Reduce(by) = reduction {
-                    if !by.is_without() {
-                        for &id in by.keys() {
-                            let f = input.fields.get(id).ok_or(
-                                QueryExprError::InvalidGroupByColumn(id, input.fields.len()),
-                            )?;
-                            fields.push(f.clone());
-                        }
-                    }
-                }
-                fields.push(Field::new("state", family.clone(), false));
-                Schema::lifted(fields, None)
+                let mut schema = crate::pre_asap::aggregate_output_schema(
+                    &child.schema,
+                    reduction,
+                    &[crate::pre_asap::AggIntent::Sum { col: None }],
+                    &[],
+                )?;
+                let index = match reduction {
+                    Reduction::PerEntity => crate::pre_asap::resolve_column_ref(
+                        &crate::pre_asap::ColumnRef::SampleValue,
+                        &schema,
+                    )
+                    .map_err(|e| QueryExprError::InvalidScalarSignature(e.to_string()))?,
+                    Reduction::Reduce(_) => schema.fields.len() - 1,
+                };
+                schema.fields[index] = Field::new("state", family.clone(), false);
+                schema
             }
             SummaryEstimate {
                 summary_input,
                 query,
             } => {
                 let input = &summary_input.schema;
-                let mut fields: Vec<Field> = input
-                    .fields
-                    .iter()
-                    .filter(|f| f.is_plain())
-                    .cloned()
-                    .collect();
-                let (name, dtype) = match query {
+                let (name, mut dtype) = match query {
                     SketchQuery::Quantile { .. } => ("quantile", DataType::Float64),
                     SketchQuery::Cardinality => ("cardinality", DataType::Int64),
                     SketchQuery::PointCount { .. } => ("count", DataType::Int64),
@@ -252,11 +248,26 @@ impl ASAPOp {
                     SketchQuery::FrequencyEntropy => ("frequency_entropy", DataType::Float64),
                     SketchQuery::TopK { .. } => ("topk", DataType::Utf8),
                 };
-                fields.push(Field::plain(name, dtype, false));
-                Schema::lifted(fields, input.time_index)
+                if matches!(
+                    summary_input.asap(),
+                    Some(SummaryAgg {
+                        reduction: Reduction::PerEntity,
+                        ..
+                    })
+                ) && dtype == DataType::Int64
+                {
+                    dtype = DataType::Float64;
+                }
+                let mut schema = input.clone();
+                for field in &mut schema.fields {
+                    if !field.is_plain() {
+                        *field = Field::plain(name, dtype.clone(), false);
+                    }
+                }
+                schema
             }
             FinalizeExactAccumulator { child } => {
-                let sql_result = if let Some(ASAPOp::SummaryAgg {
+                let value_result = if let Some(ASAPOp::SummaryAgg {
                     child: source,
                     family: FieldDataType::ExactAggregate(kind, _),
                     input,
@@ -264,7 +275,7 @@ impl ASAPOp {
                     ..
                 }) = child.asap()
                 {
-                    if source.result_kind == OperatorResultKind::Relation {
+                    {
                         use crate::post_asap::{ExactKind, SummaryInputExpr};
                         use crate::pre_asap::AggIntent;
                         let column = match &input.weight {
@@ -283,7 +294,12 @@ impl ASAPOp {
                             ExactKind::Sum => Some(AggIntent::Sum { col: column }),
                             ExactKind::Min => Some(AggIntent::Min { col: column }),
                             ExactKind::Max => Some(AggIntent::Max { col: column }),
-                            _ => None,
+                            ExactKind::Count => Some(AggIntent::Count {
+                                accuracy: crate::types::AccuracyTarget::Exact,
+                            }),
+                            ExactKind::Rate => Some(AggIntent::Rate),
+                            ExactKind::IRate => Some(AggIntent::IRate),
+                            ExactKind::Increase => Some(AggIntent::Increase),
                         };
                         measure
                             .map(|measure| {
@@ -298,9 +314,12 @@ impl ASAPOp {
                                 .output_schema()
                             })
                             .transpose()?
-                            .and_then(|s| s.fields.last().cloned())
-                    } else {
-                        None
+                            .and_then(|s| match reduction {
+                                Reduction::PerEntity => {
+                                    s.column_id("value").and_then(|i| s.fields.get(i).cloned())
+                                }
+                                Reduction::Reduce(_) => s.fields.last().cloned(),
+                            })
                     }
                 } else {
                     None
@@ -308,7 +327,7 @@ impl ASAPOp {
                 let mut out = Schema::lifted(child.schema.fields.clone(), child.schema.time_index);
                 for f in &mut out.fields {
                     if let FieldDataType::ExactAggregate(kind, _) = &f.dtype {
-                        if let Some(result) = &sql_result {
+                        if let Some(result) = &value_result {
                             f.dtype = result.dtype.clone();
                             f.nullable = result.nullable;
                         } else {
@@ -322,22 +341,70 @@ impl ASAPOp {
                 Schema::lifted(child.schema.fields.clone(), child.schema.time_index)
             }
             ReadPopulation { child, readout } => {
-                let (name, dtype) = match readout {
-                    PopulationReadout::Quantile { .. } => ("quantile", DataType::Float64),
-                    PopulationReadout::TopK { .. } => ("topk", DataType::Utf8),
-                    PopulationReadout::Sum => ("sum", DataType::Float64),
-                    PopulationReadout::Count => ("count", DataType::Int64),
-                    PopulationReadout::Average => ("avg", DataType::Float64),
+                use crate::post_asap::maintained_population::PopulationInput;
+                use crate::pre_asap::{AggIntent, GroupKeys};
+                let Some(MaintainPopulation {
+                    child: source,
+                    population,
+                }) = child.asap()
+                else {
+                    return Err(QueryExprError::InvalidScalarSignature(
+                        "population readout requires maintained membership".into(),
+                    ));
                 };
-                let mut fields: Vec<Field> = child
-                    .schema
-                    .fields
-                    .iter()
-                    .filter(|f| f.is_plain() && f.name != "value")
-                    .cloned()
-                    .collect();
-                fields.push(Field::plain(name, dtype, false));
-                Schema::lifted(fields, None)
+                if matches!(readout, PopulationReadout::TopK { .. }) {
+                    source.schema.clone()
+                } else {
+                    let (keys, column) = match &population.input {
+                        PopulationInput::Rows {
+                            grouping,
+                            value_column,
+                            ..
+                        } => (grouping.clone(), Some(*value_column)),
+                        PopulationInput::CurrentSeries(spec) => {
+                            let keys = spec
+                                .grouping
+                                .iter()
+                                .map(|name| {
+                                    source.schema.column_id(name).ok_or_else(|| {
+                                        QueryExprError::InvalidScalarSignature(
+                                            "population grouping column is absent".into(),
+                                        )
+                                    })
+                                })
+                                .collect::<Result<Vec<_>, _>>()?;
+                            (
+                                if spec.without {
+                                    GroupKeys::without(keys)
+                                } else {
+                                    GroupKeys::by(keys)
+                                },
+                                None,
+                            )
+                        }
+                    };
+                    let accuracy = crate::types::AccuracyTarget::Exact;
+                    let measure = match readout {
+                        PopulationReadout::Quantile { q } => AggIntent::Quantile {
+                            q: *q,
+                            col: column,
+                            accuracy,
+                        },
+                        PopulationReadout::Sum => AggIntent::Sum { col: column },
+                        PopulationReadout::Count => AggIntent::Count { accuracy },
+                        PopulationReadout::Average => AggIntent::Avg { col: column },
+                        PopulationReadout::TopK { .. } => unreachable!(),
+                    };
+                    super::NonASAPOp::Aggregate {
+                        child: source.clone(),
+                        reduction: Reduction::Reduce(keys),
+                        measures: vec![measure],
+                        output_names: vec![],
+                        filters: vec![],
+                        having: None,
+                    }
+                    .output_schema()?
+                }
             }
             SummaryMerge { .. }
             | SummarySubtract { .. }
@@ -376,7 +443,42 @@ impl ASAPOp {
             }
         };
         match self {
-            SummaryEstimate { summary_input, .. } => needs_state(summary_input, "SummaryEstimate"),
+            SummaryEstimate {
+                summary_input,
+                query,
+            } => {
+                needs_state(summary_input, "SummaryEstimate")?;
+                use crate::post_asap::sketch::SketchCategory as C;
+                let states: Vec<_> = summary_input
+                    .schema
+                    .fields
+                    .iter()
+                    .filter(|f| !f.is_plain())
+                    .collect();
+                let valid = match states.as_slice() {
+                    [field] => match &field.dtype {
+                        FieldDataType::Sketch(kind, _) => matches!(
+                            (kind.category(), query),
+                            (C::Quantile, SketchQuery::Quantile { .. })
+                                | (C::Cardinality | C::Universal, SketchQuery::Cardinality)
+                                | (C::Frequency | C::Universal, SketchQuery::PointCount { .. })
+                                | (
+                                    C::Universal,
+                                    SketchQuery::FrequencyL2 | SketchQuery::FrequencyEntropy
+                                )
+                                | (C::TopK | C::Universal, SketchQuery::TopK { .. })
+                        ),
+                        _ => false,
+                    },
+                    _ => false,
+                };
+                if !valid {
+                    return Err(QueryExprError::InvalidScalarSignature(
+                        "readout does not match its summary family".into(),
+                    ));
+                }
+                Ok(())
+            }
             FinalizeExactAccumulator { child } => {
                 needs_state(child, "FinalizeExactAccumulator")?;
                 if child
@@ -391,8 +493,52 @@ impl ASAPOp {
                 }
                 Ok(())
             }
-            ReadPopulation { child, .. } => needs_state(child, "ReadPopulation"),
-            SummaryAgg { child, filter, .. } => {
+            ReadPopulation { child, readout } => {
+                needs_state(child, "ReadPopulation")?;
+                if !matches!(child.asap(), Some(MaintainPopulation { population, .. }) if population.supports(readout))
+                {
+                    return Err(QueryExprError::InvalidScalarSignature(
+                        "population readout requires compatible maintained membership".into(),
+                    ));
+                }
+                Ok(())
+            }
+            SummaryAgg {
+                child,
+                family,
+                input,
+                filter,
+                ..
+            } => {
+                if family.is_plain() || child.result_kind == OperatorResultKind::State {
+                    return Err(QueryExprError::InvalidScalarSignature(
+                        "summary aggregation requires values and produces a state family".into(),
+                    ));
+                }
+                fn check(
+                    expr: &crate::post_asap::SummaryInputExpr,
+                    schema: &Schema,
+                ) -> Result<(), QueryExprError> {
+                    use crate::post_asap::SummaryInputExpr;
+                    match expr {
+                        SummaryInputExpr::Column(col) => {
+                            crate::pre_asap::resolve_column_ref(col, schema).map_err(|e| {
+                                QueryExprError::InvalidScalarSignature(e.to_string())
+                            })?;
+                        }
+                        SummaryInputExpr::Tuple(items) => {
+                            for item in items {
+                                check(item, schema)?;
+                            }
+                        }
+                        _ => {}
+                    }
+                    Ok(())
+                }
+                check(&input.weight, &child.schema)?;
+                if let Some(item) = &input.item {
+                    check(item, &child.schema)?;
+                }
                 if let Some(filter) = filter {
                     if filter.0.scalar_type(&child.schema)?.0 != DataType::Bool {
                         return Err(QueryExprError::InvalidScalarSignature(
@@ -402,7 +548,14 @@ impl ASAPOp {
                 }
                 Ok(())
             }
-            MaintainPopulation { .. } => Ok(()),
+            MaintainPopulation { child, population } => {
+                if !population.matches_node(child) {
+                    return Err(QueryExprError::InvalidScalarSignature(
+                        "population input differs from its membership contract".into(),
+                    ));
+                }
+                Ok(())
+            }
             _ => Err(Self::unimplemented()),
         }
     }
