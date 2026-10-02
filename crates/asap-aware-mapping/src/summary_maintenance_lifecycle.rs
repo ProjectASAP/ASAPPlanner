@@ -2939,6 +2939,7 @@ mod tests {
                 }],
                 // A shared output name keeps p50 and p99 on one state.
                 output_names: vec!["value".into()],
+                filters: vec![],
                 having: None,
                 child: query_root(),
             })
