@@ -1,0 +1,11 @@
+[package]
+name = "asap-frontend-common"
+version = "0.1.0"
+edition = "2021"
+
+# Shared front-end layer: the name-based `UnresolvedOp` tree every front end
+# emits, and the resolver that binds it into the unified `OperatorNode` IR.
+[dependencies]
+asap-types = { path = "../types" }
+serde = { version = "1", features = ["derive", "rc"] }
+thiserror = "2"
