@@ -3,16 +3,92 @@
 Status: proposal. Audience: designers and developers of ASAPPlanner and of deployments such
 as ASAPQuery-backend.
 
-Read Stages for the overview, the stage sections for the rules, and the
-examples for why the rules are needed.
+Read Goal for the motivation and assumptions, Stages for the overview, the
+stage sections for the rules, the examples for why the rules are needed, and
+Scenarios for how the design is extended.
+
+## Contents
+
+- [Goal](#goal)
+  - [Motivation](#motivation)
+  - [Assumptions](#assumptions)
+- [Stages](#stages)
+- [Stages and their decisions](#stages-and-their-decisions)
+  - [0. Language-specific frontends](#0-language-specific-frontends)
+  - [1. Logical ASAP-aware optimization](#1-logical-asap-aware-optimization)
+    - [Pass 1: Local candidate generation](#pass-1-local-candidate-generation)
+    - [Pass 2: ASAP-aware common-subexpression elimination](#pass-2-asap-aware-common-subexpression-elimination)
+  - [2. Physical ASAP-aware optimization](#2-physical-asap-aware-optimization)
+    - [Materialization](#materialization)
+    - [Physical operator implementation](#physical-operator-implementation)
+  - [3. Plan selection](#3-plan-selection)
+  - [4. Execution](#4-execution)
+- [End-to-end examples](#end-to-end-examples)
+  - [Shared data workload](#shared-data-workload)
+  - [Example 1: Aggregation over dimensions — the candidate set through every stage](#example-1-aggregation-over-dimensions--the-candidate-set-through-every-stage)
+  - [Example 2: One summary for several computations — the summary-capability rule in Pass 2](#example-2-one-summary-for-several-computations--the-summary-capability-rule-in-pass-2)
+  - [Example 3: Aggregation over windows — the window-composition rule in Pass 2](#example-3-aggregation-over-windows--the-window-composition-rule-in-pass-2)
+  - [Example 4: Materialization of window summaries in physical planning](#example-4-materialization-of-window-summaries-in-physical-planning)
+- [Scenarios](#scenarios)
+  - [Adding a new query to a workload](#adding-a-new-query-to-a-workload)
+  - [Supporting a new query construct](#supporting-a-new-query-construct)
+  - [Adding a new summary family](#adding-a-new-summary-family)
+  - [Adding a better cost or accuracy estimation](#adding-a-better-cost-or-accuracy-estimation)
 
 ## Goal
 
+### Motivation
+
+* Existing database query engines and optimizers do not consider ASAP
+  primitives for optimizing the queries: summaries such as sketches that trade bounded error for lower
+  cost.
+* They also do not consider the query and data workloads of different use
+  cases, which have the potential to share the common optimization with ASAP primitives. Example use case workloads can be streaming or batch data input, and repeated, batch or ad hoc queries.
+* So existing query planners miss the opportunity to share the benefits of ASAP primitives across
+  domains and use cases.
+
+In order to achieve the goals, ASAPPlanner needs to abstract the modeling the following for use cases:
+
+| Modeling | Contents |
+|---|---|
+| Query workload | Queries with recurrence (repeated, batch, ad hoc), predictability, time selection, and accuracy and latency requirements |
+| Data workload | Arrival (streaming, at rest, or both), volume, rate, cardinality and distribution |
+| Deployment inputs | Empirical cost model, empirical accuracy model and execution capabilities |
+| ASAP replacement strategies | Rules that replace a sub-DAG of the query expression with summary expressions, and the summary families each computation may use |
+
 ASAPPlanner takes a [query workload](https://github.com/ProjectASAP/ASAPPlanner/blob/main/crates/types/src/workload.rs), a [data workload](https://github.com/ProjectASAP/ASAPPlanner/blob/main/crates/types/src/workload.rs#L531) and the deployment's
-inputs (TODO: define this data structure in a follow-up PR), and returns one optimal physical plan. It decides what is computed, how
+inputs (TODO: define this data structure, [#525](https://github.com/ProjectASAP/ASAPPlanner/issues/525)), and returns one optimal physical plan. It decides what is computed, how
 it is computed, and which plan is best. The deployment only supplies inputs and
 executes the plan: it provides its empirical cost model, empirical accuracy
 model and capabilities, but never plans queries or selects plans.
+
+### Assumptions
+
+ASAPPlanner relies on the assumptions below. 
+
+1. **Query rewrite rules are given.** Rewrite and replacement rules (for
+   example, `avg` as `sum`/`count`, or a TopK as a Count-Min Sketch with a
+   heap) are written by developers or algorithm designers. ASAPPlanner applies them; it does not
+   discover or generate them.
+2. **Summary-family capabilities are given.** For each summary family, a
+   developer declares which computations it can answer, which estimates it can
+   read out, how it is sized for an accuracy target, its error bound, and
+   whether it can be merged, subtracted or deleted. ASAPPlanner does not
+   automatically discover these capabilities.
+3. **Frontend semantics are given.** Each frontend preserves its source
+   language's behavior, and ASAPPlanner obeys their semantic behavior.
+4. **Workload descriptions are inputs.** Recurrence, predictability,
+   requirements and the data workload are supplied with the workload.
+   ASAPPlanner does not infer them from traffic.
+5. **Cost and accuracy come from models.** ASAPPlanner does not measure
+   execution. It uses the deployment's cost and accuracy models, or built-in
+   defaults when the deployment supplies none.
+6. **Optimal is relative to the candidate space.** The selected plan is the
+   cheapest valid plan among the candidates produced by the given rules and
+   capabilities, as estimated by the given models. It is not optimal over
+   plans those rules cannot produce.
+7. **The deployment executes the plan as given.** It does not change summary
+   choices or materialization.
 
 ## Stages
 
@@ -985,6 +1061,78 @@ Histogram, or 1-min tumbling KLL windows) yields different physical plans depend
 only on recurrence, predictability and data arrival. This is why window-summary
 replacement happens in logical planning, while materialization is decided
 separately in physical planning.
+
+## Scenarios
+
+Each scenario lists what a developer or user gives (Assumptions 1–4), what
+ASAPPlanner then does automatically, and what does not change.  
+
+### Adding a new query to a workload
+
+**Given:** one more workload entry: the query, its recurrence (repeating demand
+or batch), predictability, time selection and accuracy and latency
+requirements. No code changes.
+
+**Automatic:** the language-specific frontend converts the query. Pass 1 generates its
+exact and summary candidates from the existing rules and capabilities. Pass 2
+checks whether it can share a summary with the queries already in the workload.
+Physical planning and selection re-plan the whole workload, so adding a query can
+change the plan of other queries, for example when a summary becomes shared.
+
+**Unchanged:** rules, summary families, models and every other workload entry.
+
+### Supporting a new query construct
+
+For a function, operator or aggregate a frontend does not support yet.
+
+**Given:**
+
+1. The language-specific frontend conversion to the common IR, or an explicit
+   rejection.
+2. If it is a new computation, its semantics in the IR (an `AggIntent`), and
+   whether it is exact-only, mergeable, or approximable.
+3. If it is approximable, the rewrite rules and the summary families that may
+   answer it (Assumptions 1 and 2).
+4. Its exact physical operator implementation.
+
+**Automatic:** everything from Pass 1 onward, as for any other query.
+
+**Unchanged:** the stages, the selection rule and other queries' candidates.
+
+### Adding a new summary family
+
+For example, a new quantile sketch.
+
+**Given** (Assumption 2):
+
+1. The family and its parameters.
+2. The computations it answers and the estimates it reads out.
+3. Its sizing rule for an accuracy target and its error bound.
+4. Whether its states can be merged, subtracted or deleted.
+5. Which state fields identify it, so that equal states are shared in Pass 2.
+6. Its physical kernel: build, merge and estimate.
+
+**Automatic:** Pass 1 offers the family wherever its declared computations
+appear, sizes it per query and prunes it where it cannot meet the accuracy
+target. Pass 2 shares it across queries, sized for the strictest consumer.
+Selection compares it with every other candidate using the deployment's models.
+
+**Unchanged:** frontends, rewrite rules, the stages and existing queries.
+
+### Adding a better cost or accuracy estimation
+
+**Given:** a cost model or accuracy model supplied by the deployment, for
+example one fitted to its own measurements.
+
+**Automatic:** only plan selection changes. The candidate sets of the
+language-specific frontends, logical ASAP-aware optimization and physical
+ASAP-aware optimization stay the same, except where a model also changes sizing or admits a
+summary that has no built-in guarantee. The model is used for every
+query in the workload, and a shared summary is costed once.
+
+**Unchanged:** frontends, rules, summary families and the deployment's
+execution.
+
 
 [^smooth-histograms]: V. Braverman and R. Ostrovsky. [Smooth Histograms for Sliding Windows](https://web.cs.ucla.edu/~rafail/PUBLIC/82.pdf). FOCS 2007. An alternative to EH.
 [^microscope-sketch]: Y. Wu et al. [MicroscopeSketch: Accurate Sliding Estimation Using Adaptive Zooming](https://yangtonghome.github.io/uploads/MicroscopeSketch_SIGKDD_23_final_paper.pdf). KDD 2023.
