@@ -49,7 +49,7 @@ mod tests {
         let params = default_size_params(SketchAlgorithm::Kll, &q, 0.01, 0.01);
         let g = DefaultAccuracyModel
             .local_guarantee(
-                &SummaryFamilyType::Sketch(
+                &FieldDataType::Sketch(
                     SketchKind::new(SketchAlgorithm::Kll, params),
                     GroupingStrategy::default(),
                 ),

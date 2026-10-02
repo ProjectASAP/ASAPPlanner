@@ -1,0 +1,24 @@
+//! The unified operator IR: one operator language before and after ASAP
+//! optimization.
+//!
+//! - [`node`] — [`OperatorNode`] / [`Operator`]: the DAG node and its two
+//!   operator categories, with the common planning properties.
+//! - [`non_asap`] — [`NonASAPOp`]: ordinary query operators.
+//! - [`asap`] — [`ASAPOp`]: summary-state construction, operations and readouts.
+//! - [`scalar`] — [`ScalarExpr`]: value computation owned by operator fields.
+
+pub mod asap;
+pub mod canonicalize;
+pub mod cse;
+pub mod node;
+pub mod non_asap;
+pub mod scalar;
+pub mod timing;
+
+pub use asap::{ASAPOp, UNIMPLEMENTED_ASAP_OP};
+pub use node::{Operator, OperatorNode, OperatorResultKind};
+pub use non_asap::{NonASAPOp, TimeRangeKind};
+pub use scalar::{ExprSemantics, Predicate, ProjectItem, ScalarExpr, SortKey};
+pub use timing::{
+    apply_lifecycle_timings, data_state, split_shared_by_phase, LifecycleAssignment, TimingMemo,
+};

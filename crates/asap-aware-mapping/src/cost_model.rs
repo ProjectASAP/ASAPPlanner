@@ -50,7 +50,7 @@ use std::rc::Rc;
 
 use asap_types::post_asap::{
     ExactOperation, GroupingStrategy, HydraParams, ResultGuarantee, SketchAlgorithm, SketchParams,
-    SketchQuery, SummaryExpr, SummaryFamilyType, SummaryMaintenanceLifecycleGuarantee, SummaryNode,
+    SketchQuery, SummaryExpr, FieldDataType, SummaryMaintenanceLifecycleGuarantee, SummaryNode,
     SummaryWindowFramework,
 };
 use asap_types::pre_asap::agg_intent::AggIntent;
@@ -278,7 +278,7 @@ pub struct CseCandidate<'a> {
     /// The shared pre-ASAP subtree itself.
     pub subtree: &'a QueryExpr,
     /// The `SummaryNode` this subtree bound to — gives the cost model the
-    /// concrete `SummaryFamilyType`/`(kind, params)` actually at stake, not
+    /// concrete `FieldDataType`/`(kind, params)` actually at stake, not
     /// just the pre-ASAP shape.
     pub bound_summary: &'a SummaryNode,
     /// How many workload roots reference this exact shared subtree, counted
@@ -387,7 +387,7 @@ pub fn default_cse_recompute_cost(subtree: &QueryExpr) -> Cost {
 }
 
 /// Default [`CostModel::cse_shared_maintenance_cost`]: a small
-/// per-[`SummaryFamilyType`] weight, scaled to the same order of magnitude
+/// per-[`FieldDataType`] weight, scaled to the same order of magnitude
 /// as [`default_cse_recompute_cost`]'s typical output (a small node
 /// count, not a byte length), reflecting that families differ in how
 /// expensive they are to keep *continuously updated* for the life of a
@@ -398,15 +398,15 @@ pub fn default_cse_recompute_cost(subtree: &QueryExpr) -> Cost {
 /// deployment with real memory/update-cost numbers should override
 /// [`CostModel::cse_shared_maintenance_cost`] instead of relying on this
 /// table.
-pub fn default_cse_shared_maintenance_cost(family: &SummaryFamilyType) -> Cost {
+pub fn default_cse_shared_maintenance_cost(family: &FieldDataType) -> Cost {
     const UNIT: f64 = 1.0;
     let weight = match family {
-        SummaryFamilyType::Plain(_) => 1.0,
-        SummaryFamilyType::ExactAggregate(..) => 1.0,
-        SummaryFamilyType::Sketch(..) => 3.0,
-        SummaryFamilyType::Sample(..) => 3.0,
-        SummaryFamilyType::Wavelet(..) => 5.0,
-        SummaryFamilyType::StatModel(..) => 6.0,
+        FieldDataType::Plain(_) => 1.0,
+        FieldDataType::ExactAggregate(..) => 1.0,
+        FieldDataType::Sketch(..) => 3.0,
+        FieldDataType::Sample(..) => 3.0,
+        FieldDataType::Wavelet(..) => 5.0,
+        FieldDataType::StatModel(..) => 6.0,
     };
     Cost(weight * UNIT)
 }
@@ -590,9 +590,9 @@ pub trait CostModel {
             .fields
             .iter()
             .map(|f| &f.dtype)
-            .find(|dtype| !matches!(dtype, SummaryFamilyType::Plain(_)))
+            .find(|dtype| !matches!(dtype, FieldDataType::Plain(_)))
             .cloned()
-            .unwrap_or(SummaryFamilyType::Plain(
+            .unwrap_or(FieldDataType::Plain(
                 asap_types::pre_asap::DataType::Float64,
             ));
         default_cse_shared_maintenance_cost(&family)
@@ -953,7 +953,7 @@ fn sketch_state(
     match &node.expr {
         SummaryExpr::SummaryEstimate { summary_input, .. } => sketch_state(summary_input),
         SummaryExpr::SummaryAgg {
-            family: SummaryFamilyType::Sketch(kind, grouping),
+            family: FieldDataType::Sketch(kind, grouping),
             ..
         } => Some((kind, grouping)),
         _ => None,
@@ -1346,11 +1346,11 @@ mod tests {
     // ── CSE sharing (issue #237, #223 stage 4) ──────────────────────────
 
     use asap_types::post_asap::{
-        ExactKind, ExactParams, GroupingStrategy, SketchKind, SummaryExpr, SummaryField,
-        SummarySchema,
+        ExactKind, ExactParams, GroupingStrategy, SketchKind, SummaryExpr, Field,
+        Schema,
     };
     use asap_types::pre_asap::query_expr::Source;
-    use asap_types::pre_asap::schema::{Column, DataType, Schema};
+    use asap_types::pre_asap::schema::DataType;
 
     fn scan() -> QueryExpr {
         QueryExpr::Scan {
@@ -1358,8 +1358,8 @@ mod tests {
             predicates: vec![],
             schema: Schema::with_time_index(
                 vec![
-                    Column::new("ts", DataType::Timestamp, false),
-                    Column::new("value", DataType::Float64, false),
+                    Field::plain("ts", DataType::Timestamp, false),
+                    Field::plain("value", DataType::Float64, false),
                 ],
                 0,
                 vec![],
@@ -1367,15 +1367,12 @@ mod tests {
         }
     }
 
-    fn summary_node(family: SummaryFamilyType) -> SummaryNode {
+    fn summary_node(family: FieldDataType) -> SummaryNode {
         SummaryNode {
             expr: SummaryExpr::SummaryAgg {
                 child: std::rc::Rc::new(SummaryNode {
                     expr: SummaryExpr::KeepPreAsap(Rc::new(scan())),
-                    schema: SummarySchema {
-                        fields: vec![],
-                        time_index: None,
-                    },
+                    schema: Schema::lifted(vec![], None),
                     guarantee: None,
                 }),
                 family: family.clone(),
@@ -1385,14 +1382,7 @@ mod tests {
                 reduction: asap_types::pre_asap::query_expr::Reduction::by(vec![]),
                 grouping: GroupingStrategy::default(),
             },
-            schema: SummarySchema {
-                fields: vec![SummaryField {
-                    name: "state".into(),
-                    dtype: family,
-                    nullable: false,
-                }],
-                time_index: None,
-            },
+            schema: Schema::lifted(vec![Field::new("state", family, false)], None),
             guarantee: None,
         }
     }
@@ -1453,11 +1443,11 @@ mod tests {
 
     #[test]
     fn default_shared_maintenance_cost_orders_families_cheapest_to_priciest() {
-        let exact = default_cse_shared_maintenance_cost(&SummaryFamilyType::ExactAggregate(
+        let exact = default_cse_shared_maintenance_cost(&FieldDataType::ExactAggregate(
             ExactKind::Sum,
             ExactParams::Sum,
         ));
-        let sketch = default_cse_shared_maintenance_cost(&SummaryFamilyType::Sketch(
+        let sketch = default_cse_shared_maintenance_cost(&FieldDataType::Sketch(
             SketchKind::new(SketchAlgorithm::Hll, SketchParams::Hll { precision: 12 }),
             GroupingStrategy::default(),
         ));
@@ -1472,7 +1462,7 @@ mod tests {
     fn cse_share_decision_shares_when_recompute_dominates_maintenance() {
         let candidate = CseCandidate {
             subtree: &scan(),
-            bound_summary: &summary_node(SummaryFamilyType::ExactAggregate(
+            bound_summary: &summary_node(FieldDataType::ExactAggregate(
                 ExactKind::Sum,
                 ExactParams::Sum,
             )),
@@ -1490,7 +1480,7 @@ mod tests {
     fn cse_share_decision_recomputes_when_maintenance_dominates_recompute() {
         let candidate = CseCandidate {
             subtree: &scan(),
-            bound_summary: &summary_node(SummaryFamilyType::StatModel(
+            bound_summary: &summary_node(FieldDataType::StatModel(
                 asap_types::post_asap::StatModelKind::Parametric,
                 asap_types::post_asap::StatModelParams::Parametric {
                     family: "gaussian_mixture".into(),
@@ -1530,7 +1520,7 @@ mod tests {
         // hardcoding a comparison against its own defaults.
         let candidate = CseCandidate {
             subtree: &scan(),
-            bound_summary: &summary_node(SummaryFamilyType::StatModel(
+            bound_summary: &summary_node(FieldDataType::StatModel(
                 asap_types::post_asap::StatModelKind::Parametric,
                 asap_types::post_asap::StatModelParams::Parametric {
                     family: "gaussian_mixture".into(),
@@ -1568,7 +1558,7 @@ mod tests {
         let target = TargetSubDAG::new(&root);
         let candidate = ReplacementSubDAG {
             strategy: "TestStrategy",
-            replacement: Replacement::Summary(Rc::new(summary_node(SummaryFamilyType::Plain(
+            replacement: Replacement::Summary(Rc::new(summary_node(FieldDataType::Plain(
                 asap_types::pre_asap::DataType::Float64,
             )))),
             provenance: crate::replacement::ReplacementProvenance::SummaryRealization,
@@ -1593,14 +1583,14 @@ mod tests {
         let cheap = ReplacementSubDAG {
             strategy: "TestStrategy",
             replacement: Replacement::Summary(Rc::new(summary_node(
-                SummaryFamilyType::ExactAggregate(ExactKind::Sum, ExactParams::Sum),
+                FieldDataType::ExactAggregate(ExactKind::Sum, ExactParams::Sum),
             ))),
             provenance: crate::replacement::ReplacementProvenance::SummaryRealization,
             rationale: "exact accumulator".into(),
         };
         let pricey = ReplacementSubDAG {
             strategy: "TestStrategy",
-            replacement: Replacement::Summary(Rc::new(summary_node(SummaryFamilyType::StatModel(
+            replacement: Replacement::Summary(Rc::new(summary_node(FieldDataType::StatModel(
                 asap_types::post_asap::StatModelKind::Parametric,
                 asap_types::post_asap::StatModelParams::Parametric {
                     family: "gaussian_mixture".into(),

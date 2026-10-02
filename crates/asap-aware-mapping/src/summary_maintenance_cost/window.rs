@@ -148,7 +148,7 @@ impl StreamingWindowAccuracyEvidence {
                         matches!(
                             &assignment.summary.expr,
                             SummaryExpr::SummaryAgg {
-                                family: SummaryFamilyType::Sketch(kind, _),
+                                family: FieldDataType::Sketch(kind, _),
                                 ..
                             } if kind.algorithm() == &SketchAlgorithm::Kll
                         )
@@ -162,7 +162,7 @@ impl StreamingWindowAccuracyEvidence {
                         matches!(
                             &assignment.summary.expr,
                             SummaryExpr::SummaryAgg {
-                                family: SummaryFamilyType::ExactAggregate(
+                                family: FieldDataType::ExactAggregate(
                                     ExactKind::Count | ExactKind::Sum,
                                     _
                                 ),

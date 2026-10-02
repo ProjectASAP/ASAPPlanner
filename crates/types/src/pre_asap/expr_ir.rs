@@ -1,7 +1,7 @@
-//! Column-reference and scalar-operator vocabulary shared by the whole
+//! Field-reference and scalar-operator vocabulary shared by the whole
 //! canonical [`QueryExpr`](super::query_expr::QueryExpr) tree.
 //!
-//! Issue #205: the scalar expression shapes (`Column`/`Literal`/`Compare`/…)
+//! Issue #205: the scalar expression shapes (`Field`/`Literal`/`Compare`/…)
 //! used to live in a separate, self-recursive `Expr<C>` tree here, reachable
 //! from `QueryExpr` only through wrapper fields (`Predicate`, `ProjectItem`,
 //! `SortKey`). They're variants of `QueryExpr<C>` itself now — one recursive

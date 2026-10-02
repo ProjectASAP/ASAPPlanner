@@ -48,9 +48,8 @@ use std::rc::Rc;
 use thiserror::Error;
 
 use super::expr::{ExactOperation, SummaryExpr, SummaryNode, ValueOperation};
-use super::schema::{SummaryFamilyType, SummaryField, SummarySchema};
 use crate::pre_asap::query_expr::{aggregate_output_schema, QueryExprError};
-use crate::pre_asap::schema::{Column, Schema};
+use crate::pre_asap::schema::{FieldDataType, Schema};
 
 /// When a post-ASAP value is produced.
 #[derive(
@@ -206,6 +205,10 @@ pub enum ExecutionDataStateError {
     /// declared data_state.
     #[error("exact operator consumes non-plain column {column:?} ({dtype})")]
     NonPlainOperand { column: String, dtype: String },
+    /// A reserved ASAP operator (`SummaryMerge`, `SummarySubtract`,
+    /// `SummaryDelete`, `SummaryJoin`, `Extension`) in an executable plan.
+    #[error("{operator} is a reserved operator with no execution contract yet")]
+    UnimplementedOperator { operator: &'static str },
 }
 
 /// The data_state assigned to every node of a validated plan, keyed by
@@ -266,10 +269,10 @@ pub fn produced_data_state(expr: &SummaryExpr) -> Option<ExecutionDataState> {
 
 /// Is `family` the exact-accumulator family whose partial state *is* the
 /// value — the one summary state a `SummaryAgg` may re-accumulate?
-fn is_exact_accumulator_state(schema: &SummarySchema) -> Result<(), ExecutionDataStateError> {
+fn is_exact_accumulator_state(schema: &Schema) -> Result<(), ExecutionDataStateError> {
     for field in &schema.fields {
         match &field.dtype {
-            SummaryFamilyType::Plain(_) | SummaryFamilyType::ExactAggregate(..) => {}
+            FieldDataType::Plain(_) | FieldDataType::ExactAggregate(..) => {}
             other => {
                 return Err(ExecutionDataStateError::UnsupportedStateComposition {
                     family: format!("{other:?}"),
@@ -365,7 +368,7 @@ fn visit(
                         !field.nullable
                             && matches!(
                                 field.dtype,
-                                SummaryFamilyType::Plain(DataType::Float64 | DataType::Timestamp)
+                                FieldDataType::Plain(DataType::Float64 | DataType::Timestamp)
                             )
                     })
                     || node
@@ -373,7 +376,7 @@ fn visit(
                         .fields
                         .iter()
                         .filter(|field| {
-                            matches!(field.dtype, SummaryFamilyType::Plain(DataType::Float64))
+                            matches!(field.dtype, FieldDataType::Plain(DataType::Float64))
                         })
                         .count()
                         != 1
@@ -631,7 +634,7 @@ fn state_only(
 /// column.
 fn check_plain_operands(
     op: &ValueOperation,
-    input: &SummarySchema,
+    input: &Schema,
 ) -> Result<(), ExecutionDataStateError> {
     if matches!(
         op,
@@ -665,7 +668,7 @@ fn check_plain_operands(
         if !(implicit || referenced.contains(&i)) {
             continue;
         }
-        if !matches!(field.dtype, SummaryFamilyType::Plain(_)) {
+        if !matches!(field.dtype, FieldDataType::Plain(_)) {
             return Err(ExecutionDataStateError::NonPlainOperand {
                 column: field.name.clone(),
                 dtype: format!("{:?}", field.dtype),
@@ -675,11 +678,11 @@ fn check_plain_operands(
     Ok(())
 }
 
-fn check_plain_or_exact_values(input: &SummarySchema) -> Result<(), ExecutionDataStateError> {
+fn check_plain_or_exact_values(input: &Schema) -> Result<(), ExecutionDataStateError> {
     for field in &input.fields {
         if !matches!(
             field.dtype,
-            SummaryFamilyType::Plain(_) | SummaryFamilyType::ExactAggregate(..)
+            FieldDataType::Plain(_) | FieldDataType::ExactAggregate(..)
         ) {
             return Err(ExecutionDataStateError::NonPlainOperand {
                 column: field.name.clone(),
@@ -690,9 +693,9 @@ fn check_plain_or_exact_values(input: &SummarySchema) -> Result<(), ExecutionDat
     Ok(())
 }
 
-fn check_all_plain(input: &SummarySchema) -> Result<(), ExecutionDataStateError> {
+fn check_all_plain(input: &Schema) -> Result<(), ExecutionDataStateError> {
     for field in &input.fields {
-        if !matches!(field.dtype, SummaryFamilyType::Plain(_)) {
+        if !matches!(field.dtype, FieldDataType::Plain(_)) {
             return Err(ExecutionDataStateError::NonPlainOperand {
                 column: field.name.clone(),
                 dtype: format!("{:?}", field.dtype),
@@ -702,39 +705,18 @@ fn check_all_plain(input: &SummarySchema) -> Result<(), ExecutionDataStateError>
     Ok(())
 }
 
-/// The plain pre-ASAP `Schema` underlying an all-`Plain` `SummarySchema`, or
-/// `None` if any column carries summary state.
-pub fn plain_schema(schema: &SummarySchema) -> Option<Schema> {
-    let mut columns = Vec::with_capacity(schema.fields.len());
-    for field in &schema.fields {
-        let SummaryFamilyType::Plain(dtype) = &field.dtype else {
-            return None;
-        };
-        columns.push(Column::new(&field.name, dtype.clone(), field.nullable));
-    }
-    Some(Schema {
-        columns,
-        time_index: schema.time_index,
-        unique_keys: Vec::new(),
-        closed: true,
-    })
+/// `schema` with its reuse metadata dropped, or `None` if any field carries
+/// summary state — the shape an exact operator reads.
+pub fn plain_schema(schema: &Schema) -> Option<Schema> {
+    schema
+        .is_all_plain()
+        .then(|| Schema::lifted(schema.fields.clone(), schema.time_index))
 }
 
-/// Lift a plain pre-ASAP schema to a `SummarySchema` with every column
-/// `Plain` — the output of every exact operator.
-pub fn lift_plain(schema: &Schema) -> SummarySchema {
-    SummarySchema {
-        fields: schema
-            .columns
-            .iter()
-            .map(|c| SummaryField {
-                name: c.name.clone(),
-                dtype: SummaryFamilyType::Plain(c.dtype.clone()),
-                nullable: c.nullable,
-            })
-            .collect(),
-        time_index: schema.time_index,
-    }
+/// `schema` as a summary-planning node output: fields and time axis kept,
+/// unique keys dropped, closed.
+pub fn lift_plain(schema: &Schema) -> Schema {
+    Schema::lifted(schema.fields.clone(), schema.time_index)
 }
 
 /// Output schema of `op` applied to a child whose edge carries `input` —
@@ -744,8 +726,8 @@ pub fn lift_plain(schema: &Schema) -> SummarySchema {
 /// state the operator cannot read.
 pub fn exact_operation_output_schema(
     op: &ExactOperation,
-    input: &SummarySchema,
-) -> Result<SummarySchema, ExactOperationSchemaError> {
+    input: &Schema,
+) -> Result<Schema, ExactOperationSchemaError> {
     let plain = plain_schema(input).ok_or(ExactOperationSchemaError::NonPlainInput)?;
     let ExactOperation::Aggregate {
         reduction,
@@ -773,7 +755,7 @@ mod tests {
     use crate::pre_asap::agg_intent::AggIntent;
     use crate::pre_asap::expr_ir::ColumnRef;
     use crate::pre_asap::query_expr::{QueryExpr, Reduction, Source};
-    use crate::pre_asap::schema::DataType;
+    use crate::pre_asap::schema::{DataType, Field};
 
     /// Both execution phases use raw values, distinct from maintained state.
     #[test]
@@ -797,9 +779,9 @@ mod tests {
             predicates: vec![],
             schema: Schema::with_time_index(
                 vec![
-                    Column::new("ts", DataType::Timestamp, false),
-                    Column::new("value", DataType::Float64, false),
-                    Column::new("zone", DataType::Utf8, true),
+                    Field::plain("ts", DataType::Timestamp, false),
+                    Field::plain("value", DataType::Float64, false),
+                    Field::plain("zone", DataType::Utf8, true),
                 ],
                 0,
                 vec![],
@@ -817,21 +799,18 @@ mod tests {
         })
     }
 
-    fn plain(names: &[&str]) -> SummarySchema {
-        SummarySchema {
-            fields: names
+    fn plain(names: &[&str]) -> Schema {
+        Schema::lifted(names
                 .iter()
-                .map(|n| SummaryField {
+                .map(|n| Field {
                     name: (*n).into(),
-                    dtype: SummaryFamilyType::Plain(DataType::Float64),
-                    nullable: false,
+                    dtype: FieldDataType::Plain(DataType::Float64),
+                    nullable: false, table: None,
                 })
-                .collect(),
-            time_index: None,
-        }
+                .collect(), None)
     }
 
-    fn agg(child: Rc<SummaryNode>, family: SummaryFamilyType) -> Rc<SummaryNode> {
+    fn agg(child: Rc<SummaryNode>, family: FieldDataType) -> Rc<SummaryNode> {
         Rc::new(SummaryNode {
             expr: SummaryExpr::SummaryAgg {
                 child,
@@ -840,21 +819,18 @@ mod tests {
                 reduction: Reduction::by(vec![]),
                 grouping: GroupingStrategy::default(),
             },
-            schema: SummarySchema {
-                fields: vec![SummaryField {
+            schema: Schema::lifted(vec![Field {
                     name: "state".into(),
                     dtype: family,
-                    nullable: false,
-                }],
-                time_index: None,
-            },
+                    nullable: false, table: None,
+                }], None),
             guarantee: None,
         })
     }
 
-    fn kll() -> SummaryFamilyType {
+    fn kll() -> FieldDataType {
         use crate::post_asap::{SketchAlgorithm, SketchKind, SketchParams};
-        SummaryFamilyType::Sketch(
+        FieldDataType::Sketch(
             SketchKind::new(SketchAlgorithm::Kll, SketchParams::Kll { k: 200 }),
             GroupingStrategy::default(),
         )
@@ -899,7 +875,7 @@ mod tests {
     fn exact_accumulator_state_may_feed_another_summary_agg() {
         let inner = agg(
             keep(),
-            SummaryFamilyType::ExactAggregate(ExactKind::Sum, ExactParams::Sum),
+            FieldDataType::ExactAggregate(ExactKind::Sum, ExactParams::Sum),
         );
         let root = estimate(agg(inner, kll()));
         assert!(validate_execution_data_states(&root).is_ok());
@@ -1173,7 +1149,7 @@ mod tests {
         assert!(out
             .fields
             .iter()
-            .all(|f| matches!(f.dtype, SummaryFamilyType::Plain(_))));
+            .all(|f| matches!(f.dtype, FieldDataType::Plain(_))));
     }
 
     #[test]

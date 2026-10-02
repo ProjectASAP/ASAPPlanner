@@ -390,7 +390,7 @@ mod tests {
     use asap_types::post_asap::SketchAlgorithm;
     use asap_types::pre_asap::cse::share_common_subtrees;
     use asap_types::pre_asap::query_expr::{GroupKeys, Source};
-    use asap_types::pre_asap::schema::{Column, ColumnId, DataType, Schema};
+    use asap_types::pre_asap::schema::{Field, ColumnId, DataType, Schema};
 
     /// `[ts(0), value(1), job(2)]`.
     /// A unique-keyed scan (`[ts]`) so `share_common_subtrees` is actually
@@ -403,9 +403,9 @@ mod tests {
             predicates: vec![],
             schema: Schema::with_time_index(
                 vec![
-                    Column::new("ts", DataType::Timestamp, false),
-                    Column::new("value", DataType::Float64, false),
-                    Column::new("job", DataType::Utf8, true),
+                    Field::plain("ts", DataType::Timestamp, false),
+                    Field::plain("value", DataType::Float64, false),
+                    Field::plain("job", DataType::Utf8, true),
                 ],
                 0,
                 vec![vec![0]],

@@ -134,7 +134,7 @@ pub enum SketchCategory {
 /// quantile-style, cardinality-style, frequency-style, or heavy-hitter/
 /// top-k-style estimation — together with the concrete [`SketchAlgorithm`]
 /// and [`SketchParams`] realizing it. Sits between
-/// [`SummaryFamilyType::Sketch`](super::schema::SummaryFamilyType::Sketch)
+/// [`FieldDataType::Sketch`](super::schema::FieldDataType::Sketch)
 /// (the `Sketch` family as a whole, sibling to `Sample`/`Wavelet`/
 /// `StatModel`) and the bare algorithm: `Kll` vs. `DDSketch` is a choice
 /// *within* `Quantile`, not a choice *of* `SketchKind` — every `Quantile`
@@ -495,13 +495,13 @@ pub fn default_hydra_params(
 /// How a grouped aggregate's summary state is physically instantiated
 /// across its `by` subpopulations — orthogonal to *which*
 /// `SketchKind`/`SamplingKind`/`WaveletKind`/`StatModelKind` answers the
-/// intent (that choice lives alongside it on `SummaryFamilyType`). Lives here,
+/// intent (that choice lives alongside it on `FieldDataType`). Lives here,
 /// alongside `SketchKind`/`SketchParams` etc., rather than on any of those
 /// enums themselves, for exactly the reason explained in this section's
 /// module docs above.
 ///
 /// Carried both on `SummaryExpr::SummaryAgg` (where planning consults it)
-/// and on sketch-valued `SummaryFamilyType` edges (where it prevents
+/// and on sketch-valued `FieldDataType` edges (where it prevents
 /// incompatible shared and independent physical states from type-checking
 /// as merge-compatible).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

@@ -78,10 +78,10 @@ use asap_types::dag_export::{
 };
 use asap_types::post_asap::SummaryExpr;
 use asap_types::post_asap::SummaryNode;
-use asap_types::post_asap::{CompositionOperator, SketchQuery, SummaryFamilyType};
+use asap_types::post_asap::{CompositionOperator, SketchQuery, FieldDataType};
 use asap_types::pre_asap::cse::{structural_hash, HashCache};
 use asap_types::pre_asap::query_expr::QueryExpr;
-use asap_types::pre_asap::schema::{Column, DataType, Schema};
+use asap_types::pre_asap::schema::{Field, DataType, Schema};
 use asap_types::resources::CacheProfile;
 use asap_types::types::AccuracyTarget;
 
@@ -691,11 +691,11 @@ fn default_catalog() -> SqlCatalog {
             "metrics",
             Schema::with_time_index(
                 vec![
-                    Column::new("ts", DataType::Timestamp, false),
-                    Column::new("service", DataType::Utf8, false),
-                    Column::new("region", DataType::Utf8, false),
-                    Column::new("latency", DataType::Float64, false),
-                    Column::new("bytes", DataType::Int64, false),
+                    Field::plain("ts", DataType::Timestamp, false),
+                    Field::plain("service", DataType::Utf8, false),
+                    Field::plain("region", DataType::Utf8, false),
+                    Field::plain("latency", DataType::Float64, false),
+                    Field::plain("bytes", DataType::Int64, false),
                 ],
                 0,
                 vec![],
@@ -704,8 +704,8 @@ fn default_catalog() -> SqlCatalog {
         .with_table(
             "hosts",
             Schema::new(vec![
-                Column::new("service", DataType::Utf8, false),
-                Column::new("region", DataType::Utf8, false),
+                Field::plain("service", DataType::Utf8, false),
+                Field::plain("region", DataType::Utf8, false),
             ]),
         )
 }
@@ -721,7 +721,7 @@ fn catalog(custom: &[String]) -> SqlCatalog {
         let columns = value["columns"]
             .as_array()
             .expect("--table-schema.columns must be an array");
-        let columns: Vec<Column> = columns
+        let columns: Vec<Field> = columns
             .iter()
             .map(|column| {
                 let column_name = column["name"]
@@ -739,7 +739,7 @@ fn catalog(custom: &[String]) -> SqlCatalog {
                     "int64" | "bigint" => DataType::Int64,
                     other => panic!("unsupported column type {other:?}"),
                 };
-                Column::new(
+                Field::plain(
                     column_name,
                     data_type,
                     column["nullable"].as_bool().unwrap_or(true),
@@ -799,7 +799,7 @@ impl AccuracyEvidenceProvider for TopKMarginEvidence {
     fn propagation_stats(
         &self,
         op: &CompositionOperator,
-        _family: &SummaryFamilyType,
+        _family: &FieldDataType,
         _query: Option<&SketchQuery>,
     ) -> PropagationStats {
         if matches!(op, CompositionOperator::TopKSelection) {
@@ -1637,7 +1637,7 @@ mod tests {
     };
     use asap_aware_mapping::query_physical_lowering::lower_query_physical_dag;
     use asap_devtools::PromqlError;
-    use asap_types::pre_asap::{Column, DataType, Reduction, Schema, Source};
+    use asap_types::pre_asap::{Field, DataType, Reduction, Schema, Source};
 
     fn lower_promql(query: &str, accuracy: AccuracyTarget) -> Result<QueryExpr, PromqlError> {
         lower_promql_with_data_ingestion_interval(query, accuracy, 1_000)
@@ -1656,7 +1656,7 @@ mod tests {
                     table_ref: "events".into(),
                 },
                 predicates: vec![],
-                schema: Schema::new(vec![Column::new("v", DataType::Int64, false)]),
+                schema: Schema::new(vec![Field::plain("v", DataType::Int64, false)]),
             }),
         }
     }

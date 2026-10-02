@@ -14,12 +14,12 @@
 //! explicit inner `Aggregate([Count])`.
 
 use asap_devtools::{lower_promql_with_data_ingestion_interval, lower_sql, SqlCatalog};
-use asap_types::pre_asap::schema::{Column, DataType, Schema};
+use asap_types::pre_asap::schema::{Field, DataType, Schema};
 use asap_types::pre_asap::{AggIntent, GroupKeys, QueryExpr};
 use asap_types::types::AccuracyTarget;
 
-fn col(name: &str, dtype: DataType) -> Column {
-    Column::new(name, dtype, false)
+fn col(name: &str, dtype: DataType) -> Field {
+    Field::plain(name, dtype, false)
 }
 
 fn catalog() -> SqlCatalog {

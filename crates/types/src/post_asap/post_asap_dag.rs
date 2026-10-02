@@ -5,11 +5,11 @@ use std::rc::Rc;
 
 use super::{
     validate_execution_data_states, ExecutionDataState, ExecutionDataStateError, ResultGuarantee,
-    SummaryExpr, SummaryNode, SummarySchema,
+    SummaryExpr, SummaryNode, Schema,
 };
 use super::{
     BinaryOperator, CandidateCompleteness, ExecutionTiming, GroupingStrategy, SketchQuery,
-    SummaryFamilyType, SummaryUpdate, ValueOperation,
+    FieldDataType, SummaryUpdate, ValueOperation,
 };
 use crate::pre_asap::{ColumnRef, JoinKind, Predicate, QueryExpr, Reduction};
 use thiserror::Error;
@@ -65,14 +65,14 @@ pub enum PostAsapOperatorPayload {
         pruning: Option<CandidateCompleteness>,
     },
     SummaryAgg {
-        family: SummaryFamilyType,
+        family: FieldDataType,
         input: SummaryUpdate,
         reduction: Reduction,
         grouping: GroupingStrategy,
     },
     SummaryJoin {
         key: ColumnRef,
-        family: SummaryFamilyType,
+        family: FieldDataType,
     },
     SummarySubtract,
     SummaryDelete {
@@ -92,7 +92,7 @@ pub struct PostAsapDagNode {
     pub payload: PostAsapOperatorPayload,
     /// Phase is a placement choice for every operator, independent of payload kind.
     pub output_state: ExecutionDataState,
-    pub output_schema: SummarySchema,
+    pub output_schema: Schema,
     pub guarantee: Option<ResultGuarantee>,
 }
 
@@ -102,7 +102,7 @@ pub struct PostAsapDagEdge {
     pub producer: PostAsapNodeId,
     pub consumer: PostAsapNodeId,
     pub role: EdgeRole,
-    pub intermediate_schema: SummarySchema,
+    pub intermediate_schema: Schema,
     pub data_state: ExecutionDataState,
     pub grouping: GroupingEdgeCompatibility,
     pub window: WindowEdgeCompatibility,
@@ -227,7 +227,7 @@ impl PostAsapDag {
                     if &field.dtype == family {
                         found_family = true;
                     }
-                    if let SummaryFamilyType::Sketch(_, schema_grouping) = &field.dtype {
+                    if let FieldDataType::Sketch(_, schema_grouping) = &field.dtype {
                         if schema_grouping != grouping {
                             return Err(PostAsapDagValidationError::SummaryGroupingMismatch {
                                 node: node.id,
@@ -566,10 +566,10 @@ pub fn compile_post_asap_dag_with_node_ids(
 mod tests {
     use super::*;
     use crate::post_asap::{
-        ExactKind, ExactParams, ExecutionTiming, GroupingStrategy, SummaryFamilyType, SummaryField,
+        ExactKind, ExactParams, ExecutionTiming, GroupingStrategy, FieldDataType,
         SummaryUpdate, ValueOperation,
     };
-    use crate::pre_asap::schema::{Column, Schema};
+    use crate::pre_asap::schema::{Field, Schema};
     use crate::pre_asap::{ColumnRef, DataType, QueryExpr, Reduction, Source};
     use std::collections::BTreeMap;
 
@@ -577,7 +577,7 @@ mod tests {
     fn every_physical_payload_can_be_assigned_either_phase() {
         use crate::post_asap::DataPrimitive;
         use crate::pre_asap::{ArithmeticOpKind, BinaryOpKind, JoinKind, Predicate, ScalarValue};
-        let family = SummaryFamilyType::ExactAggregate(ExactKind::Sum, ExactParams::Sum);
+        let family = FieldDataType::ExactAggregate(ExactKind::Sum, ExactParams::Sum);
         let predicate = Predicate(Rc::new(QueryExpr::Literal(ScalarValue::Boolean(true))));
         let payloads = vec![
             PostAsapOperatorPayload::Fallback {
@@ -646,14 +646,11 @@ mod tests {
                         timing: ExecutionTiming::QueryTime,
                         primitive,
                     },
-                    output_schema: SummarySchema {
-                        fields: vec![SummaryField {
+                    output_schema: Schema::lifted(vec![Field {
                             name: "value".into(),
                             dtype: family.clone(),
-                            nullable: false,
-                        }],
-                        time_index: None,
-                    },
+                            nullable: false, table: None,
+                        }], None),
                     guarantee: None,
                 }],
             };
@@ -674,10 +671,7 @@ mod tests {
     #[test]
     fn phase_assignment_updates_edges_and_rejects_query_dependencies_in_ingestion() {
         use crate::pre_asap::ScalarValue;
-        let schema = SummarySchema {
-            fields: vec![],
-            time_index: None,
-        };
+        let schema = Schema::lifted(vec![], None);
         let nodes = [0, 1]
             .into_iter()
             .map(|id| PostAsapDagNode {
@@ -728,22 +722,19 @@ mod tests {
         let scan = Rc::new(QueryExpr::Scan {
             source: Source::TimeSeries { metric: "m".into() },
             predicates: vec![],
-            schema: Schema::new(vec![Column::new("value", DataType::Float64, false)]),
+            schema: Schema::new(vec![Field::plain("value", DataType::Float64, false)]),
         });
         let raw = Rc::new(SummaryNode {
             expr: SummaryExpr::KeepPreAsap(scan),
-            schema: SummarySchema {
-                fields: vec![SummaryField {
+            schema: Schema::lifted(vec![Field {
                     name: "value".into(),
-                    dtype: SummaryFamilyType::Plain(DataType::Float64),
-                    nullable: false,
-                }],
-                time_index: None,
-            },
+                    dtype: FieldDataType::Plain(DataType::Float64),
+                    nullable: false, table: None,
+                }], None),
             guarantee: None,
         });
         let make_agg = |child: Rc<SummaryNode>, kind, params| {
-            let family = SummaryFamilyType::ExactAggregate(kind, params);
+            let family = FieldDataType::ExactAggregate(kind, params);
             Rc::new(SummaryNode {
                 expr: SummaryExpr::SummaryAgg {
                     child,
@@ -752,14 +743,11 @@ mod tests {
                     reduction: Reduction::by(vec![]),
                     grouping: GroupingStrategy::default(),
                 },
-                schema: SummarySchema {
-                    fields: vec![SummaryField {
+                schema: Schema::lifted(vec![Field {
                         name: "value".into(),
                         dtype: family,
-                        nullable: false,
-                    }],
-                    time_index: None,
-                },
+                        nullable: false, table: None,
+                    }], None),
                 guarantee: None,
             })
         };
@@ -771,14 +759,11 @@ mod tests {
                 operation: ValueOperation::FinalizeExactAccumulator,
                 timing: ExecutionTiming::QueryTime,
             },
-            schema: SummarySchema {
-                fields: vec![SummaryField {
+            schema: Schema::lifted(vec![Field {
                     name: "value".into(),
-                    dtype: SummaryFamilyType::Plain(DataType::Float64),
-                    nullable: false,
-                }],
-                time_index: None,
-            },
+                    dtype: FieldDataType::Plain(DataType::Float64),
+                    nullable: false, table: None,
+                }], None),
             guarantee: None,
         });
 
@@ -811,7 +796,7 @@ mod tests {
         );
         assert!(matches!(
             dependency.intermediate_schema.fields[0].dtype,
-            SummaryFamilyType::ExactAggregate(ExactKind::Sum, _)
+            FieldDataType::ExactAggregate(ExactKind::Sum, _)
         ));
         let encoded = serde_json::to_string(&dag).expect("serialize post-ASAP DAG");
         let decoded: PostAsapDag =
@@ -838,7 +823,7 @@ mod tests {
         assert!(matches!(
             dag.nodes[2].payload,
             PostAsapOperatorPayload::SummaryAgg {
-                family: SummaryFamilyType::ExactAggregate(ExactKind::Sum, ExactParams::Sum),
+                family: FieldDataType::ExactAggregate(ExactKind::Sum, ExactParams::Sum),
                 reduction: Reduction::Reduce(_),
                 ..
             }

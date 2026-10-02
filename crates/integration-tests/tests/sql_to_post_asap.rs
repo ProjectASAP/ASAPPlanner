@@ -29,11 +29,11 @@ use asap_frontend_sql::{lower_sql, lower_sql_dialect, SqlCatalog};
 use asap_types::post_asap::{
     compile_post_asap_dag, EdgeRole, ExactKind, ExactParams, GroupingStrategy,
     PostAsapOperatorPayload, SketchAlgorithm, SketchKind, SketchParams, SketchQuery, SummaryExpr,
-    SummaryFamilyType, SummaryNode, SummarySchema, SummaryUpdate, ValueOperation,
+    FieldDataType, SummaryNode, SummaryUpdate, ValueOperation,
 };
 use asap_types::pre_asap::expr_ir::ColumnRef;
 use asap_types::pre_asap::query_expr::{QueryExpr, Reduction};
-use asap_types::pre_asap::schema::{Column, DataType, Schema};
+use asap_types::pre_asap::schema::{Field, DataType, Schema};
 use asap_types::types::AccuracyTarget;
 use asap_types::workload::SqlDialect;
 
@@ -58,7 +58,7 @@ fn realize(expr: &QueryExpr) -> Result<Rc<SummaryNode>, RealizationError> {
     }
 }
 
-fn dtype<'a>(schema: &'a SummarySchema, name: &str) -> &'a SummaryFamilyType {
+fn dtype<'a>(schema: &'a Schema, name: &str) -> &'a FieldDataType {
     &schema
         .fields
         .iter()
@@ -67,8 +67,8 @@ fn dtype<'a>(schema: &'a SummarySchema, name: &str) -> &'a SummaryFamilyType {
         .dtype
 }
 
-fn col(name: &str, dtype: DataType) -> Column {
-    Column::new(name, dtype, false)
+fn col(name: &str, dtype: DataType) -> Field {
+    Field::plain(name, dtype, false)
 }
 
 /// `metrics(ts, service, latency, bytes)` — mirrors
@@ -100,11 +100,11 @@ async fn clickhouse_temporal_sql_reuses_rate_and_increase_physical_summaries() {
     for (function, expected) in [
         (
             "asap_rate",
-            SummaryFamilyType::ExactAggregate(ExactKind::Rate, ExactParams::Rate),
+            FieldDataType::ExactAggregate(ExactKind::Rate, ExactParams::Rate),
         ),
         (
             "asap_increase",
-            SummaryFamilyType::ExactAggregate(ExactKind::Increase, ExactParams::Increase),
+            FieldDataType::ExactAggregate(ExactKind::Increase, ExactParams::Increase),
         ),
     ] {
         let sql = format!(
@@ -177,7 +177,7 @@ async fn clickhouse_outer_sum_recursively_binds_inner_temporal_aggregate() {
             match &node.expr {
                 SummaryExpr::SummaryAgg {
                     family:
-                        SummaryFamilyType::ExactAggregate(ExactKind::Rate | ExactKind::Increase, _),
+                        FieldDataType::ExactAggregate(ExactKind::Rate | ExactKind::Increase, _),
                     ..
                 } => true,
                 SummaryExpr::ValueOperation { child, .. }
@@ -254,7 +254,7 @@ async fn sql_full_query_retains_project_and_binds_inner_aggregate() {
     assert_eq!(root.schema.fields[0].name, "p99", "project output schema");
     assert_eq!(
         root.schema.fields[0].dtype,
-        SummaryFamilyType::Plain(DataType::Float64)
+        FieldDataType::Plain(DataType::Float64)
     );
     assert!(
         matches!(child.expr, SummaryExpr::SummaryEstimate { .. }),
@@ -352,7 +352,7 @@ async fn sql_join_recursively_binds_both_temporal_aggregate_children() {
         assert!(matches!(
             aggregate.expr,
             SummaryExpr::SummaryAgg {
-                family: SummaryFamilyType::ExactAggregate(ExactKind::Rate, ExactParams::Rate),
+                family: FieldDataType::ExactAggregate(ExactKind::Rate, ExactParams::Rate),
                 ..
             }
         ));
@@ -638,7 +638,7 @@ async fn sql_quantile_binds_kll_sketch_over_named_column() {
     );
     assert_eq!(
         root.schema.fields[0].dtype,
-        SummaryFamilyType::Plain(DataType::Float64),
+        FieldDataType::Plain(DataType::Float64),
         "the summary-state type must not propagate past the estimate"
     );
 
@@ -654,7 +654,7 @@ async fn sql_quantile_binds_kll_sketch_over_named_column() {
     };
     assert_eq!(
         family,
-        &SummaryFamilyType::Sketch(
+        &FieldDataType::Sketch(
             SketchKind::new(SketchAlgorithm::Kll, SketchParams::Kll { k: 269 }),
             GroupingStrategy::default()
         )
@@ -674,7 +674,7 @@ async fn sql_quantile_binds_kll_sketch_over_named_column() {
     );
     assert_eq!(
         summary_input.schema.fields[0].dtype,
-        SummaryFamilyType::Sketch(
+        FieldDataType::Sketch(
             SketchKind::new(SketchAlgorithm::Kll, SketchParams::Kll { k: 269 }),
             GroupingStrategy::default()
         )
@@ -689,7 +689,7 @@ async fn sql_quantile_binds_kll_sketch_over_named_column() {
             .schema
             .fields
             .iter()
-            .all(|f| matches!(f.dtype, SummaryFamilyType::Plain(_))),
+            .all(|f| matches!(f.dtype, FieldDataType::Plain(_))),
         "logical edges carry only plain columns"
     );
 }
@@ -720,7 +720,7 @@ async fn sql_count_distinct_with_epsilon_binds_hll_rse_over_named_column() {
     assert!(matches!(query, SketchQuery::Cardinality));
     assert_eq!(
         root.schema.fields[0].dtype,
-        SummaryFamilyType::Plain(DataType::Int64),
+        FieldDataType::Plain(DataType::Int64),
         "COUNT(DISTINCT …) reads back out as an integer count"
     );
 
@@ -735,7 +735,7 @@ async fn sql_count_distinct_with_epsilon_binds_hll_rse_over_named_column() {
     };
     assert_eq!(
         family,
-        &SummaryFamilyType::Sketch(
+        &FieldDataType::Sketch(
             SketchKind::new(SketchAlgorithm::Hll, SketchParams::Hll { precision: 14 }),
             GroupingStrategy::default()
         )
@@ -772,7 +772,7 @@ async fn sql_exact_workload_binds_accumulators_not_sketches() {
     };
     assert_eq!(
         family,
-        &SummaryFamilyType::ExactAggregate(ExactKind::Sum, ExactParams::Sum)
+        &FieldDataType::ExactAggregate(ExactKind::Sum, ExactParams::Sum)
     );
     assert_eq!(
         reduction,
@@ -781,7 +781,7 @@ async fn sql_exact_workload_binds_accumulators_not_sketches() {
     );
     assert_eq!(
         dtype(&root.schema, "service"),
-        &SummaryFamilyType::Plain(DataType::Utf8),
+        &FieldDataType::Plain(DataType::Utf8),
         "group keys pass through verbatim"
     );
 

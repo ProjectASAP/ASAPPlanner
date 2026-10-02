@@ -14,7 +14,7 @@
 //! tally** by outcome category -- see the module doc on [`Category`] for why.
 
 use asap_frontend_sql::{lower_sql_dialect, SqlCatalog, SqlError};
-use asap_types::pre_asap::schema::{Column, DataType, Schema};
+use asap_types::pre_asap::schema::{Field, DataType, Schema};
 use asap_types::types::AccuracyTarget;
 use asap_types::workload::SqlDialect;
 use datafusion::error::DataFusionError;
@@ -34,8 +34,8 @@ struct QueryCase {
     sql: String,
 }
 
-fn col(name: &str, dtype: DataType) -> Column {
-    Column::new(name, dtype, false)
+fn col(name: &str, dtype: DataType) -> Field {
+    Field::plain(name, dtype, false)
 }
 
 /// `bgp.bgp_updates`, widened past the 7-column `bgp_analytics` schema with

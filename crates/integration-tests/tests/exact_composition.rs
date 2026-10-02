@@ -27,21 +27,21 @@ use asap_integration_tests::fixtures::lower_promql;
 use asap_types::dag_export;
 use asap_types::post_asap::{
     validate_execution_data_states, ExactKind, ExactOperation, ExecutionDataState, ExecutionTiming,
-    SketchAlgorithm, SummaryExpr, SummaryFamilyType, SummaryNode, SummaryUpdate,
+    SketchAlgorithm, SummaryExpr, FieldDataType, SummaryNode, SummaryUpdate,
 };
 use asap_types::pre_asap::agg_intent::{default_quantile, AggIntent};
 use asap_types::pre_asap::query_expr::{QueryExpr, Reduction, Source};
-use asap_types::pre_asap::schema::{Column, DataType, Schema};
+use asap_types::pre_asap::schema::{Field, DataType, Schema};
 use asap_types::types::AccuracyTarget;
 
 // ── fixtures ────────────────────────────────────────────────────────────
 
 fn metric_scan(labels: &[&str]) -> QueryExpr {
     let mut columns = vec![
-        Column::new("ts", DataType::Timestamp, false),
-        Column::new("value", DataType::Float64, false),
+        Field::plain("ts", DataType::Timestamp, false),
+        Field::plain("value", DataType::Float64, false),
     ];
-    columns.extend(labels.iter().map(|n| Column::new(*n, DataType::Utf8, true)));
+    columns.extend(labels.iter().map(|n| Field::plain(*n, DataType::Utf8, true)));
     QueryExpr::Scan {
         source: Source::TimeSeries {
             metric: "latency".into(),
@@ -99,7 +99,7 @@ fn custom_accuracy_rule_survives_root_target_and_materialization() {
         }
         fn local_guarantee(
             &self,
-            family: &SummaryFamilyType,
+            family: &FieldDataType,
             query: &SketchQuery,
         ) -> Option<ResultGuarantee> {
             DefaultAccuracyModel.local_guarantee(family, query)
@@ -282,7 +282,7 @@ fn is_plain(node: &SummaryNode) -> bool {
     node.schema
         .fields
         .iter()
-        .all(|f| matches!(f.dtype, SummaryFamilyType::Plain(_)))
+        .all(|f| matches!(f.dtype, FieldDataType::Plain(_)))
 }
 
 fn names(node: &SummaryNode) -> Vec<&str> {
@@ -374,7 +374,7 @@ fn every_exact_accumulator_is_finalized_before_an_outer_sketch() {
         assert!(
             matches!(
                 &child.expr,
-                SummaryExpr::SummaryAgg { family: SummaryFamilyType::ExactAggregate(k, _), .. } if *k == kind
+                SummaryExpr::SummaryAgg { family: FieldDataType::ExactAggregate(k, _), .. } if *k == kind
             ),
             "{kind:?}: expected the exact accumulator under its finalization, got {:?}",
             child.expr
@@ -468,7 +468,7 @@ fn max_and_avg_over_quantile_compose_at_query_time_with_statistics() {
             names(&composed),
             root.output_schema()
                 .unwrap()
-                .columns
+                .fields
                 .iter()
                 .map(|c| c.name.as_str())
                 .collect::<Vec<_>>(),
@@ -682,7 +682,7 @@ fn summary_construction_follows_its_value_input_phase() {
     let illegal = Rc::new(SummaryNode {
         expr: SummaryExpr::SummaryAgg {
             child: post,
-            family: SummaryFamilyType::ExactAggregate(
+            family: FieldDataType::ExactAggregate(
                 ExactKind::Max,
                 asap_types::post_asap::ExactParams::Max,
             ),
@@ -690,10 +690,7 @@ fn summary_construction_follows_its_value_input_phase() {
             reduction: Reduction::by(vec![]),
             grouping: Default::default(),
         },
-        schema: asap_types::post_asap::SummarySchema {
-            fields: vec![],
-            time_index: None,
-        },
+        schema: asap_types::post_asap::Schema::lifted(vec![], None),
         guarantee: None,
     });
     let state = asap_types::post_asap::produced_data_state(&illegal.expr).unwrap();
@@ -777,7 +774,7 @@ fn dag_export_carries_explicit_stage_and_plain_schema_for_a_composed_plan() {
     // Pre-ASAP export of the same target still describes the same columns.
     let pre = dag_export::export(root);
     let pre_root = &pre.nodes[pre.root as usize];
-    let pre_cols: Vec<String> = pre_root.schema.as_ref().unwrap()["columns"]
+    let pre_cols: Vec<String> = pre_root.schema.as_ref().unwrap()["fields"]
         .as_array()
         .unwrap()
         .iter()

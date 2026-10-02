@@ -3,7 +3,7 @@
 use asap_aware_mapping::{Replacement, ReplacementStrategy, SketchAlgorithmStrategy, TargetSubDAG};
 use asap_integration_tests::fixtures::lower_promql;
 use asap_types::post_asap::{
-    compile_post_asap_dag, ExactKind, SummaryExpr, SummaryFamilyType, SummaryInputExpr,
+    compile_post_asap_dag, ExactKind, SummaryExpr, FieldDataType, SummaryInputExpr,
     SummaryNode, SummaryUpdate,
 };
 use asap_types::pre_asap::{ColumnRef, Reduction};
@@ -21,7 +21,7 @@ fn plan(query: &str, accuracy: AccuracyTarget) -> Rc<SummaryNode> {
         })
         .unwrap_or_else(|| asap_aware_mapping::replacement::keep_pre_asap(&pre).unwrap())
 }
-fn aggregate(node: &SummaryNode) -> (&SummaryFamilyType, &SummaryUpdate, &Reduction) {
+fn aggregate(node: &SummaryNode) -> (&FieldDataType, &SummaryUpdate, &Reduction) {
     match &node.expr {
         SummaryExpr::SummaryAgg {
             family,
@@ -34,10 +34,10 @@ fn aggregate(node: &SummaryNode) -> (&SummaryFamilyType, &SummaryUpdate, &Reduct
         other => panic!("not a maintained accumulator: {other:?}"),
     }
 }
-fn contribution(family: &SummaryFamilyType, update: &SummaryUpdate, value: f64) -> f64 {
+fn contribution(family: &FieldDataType, update: &SummaryUpdate, value: f64) -> f64 {
     if matches!(
         family,
-        SummaryFamilyType::ExactAggregate(ExactKind::Count, _)
+        FieldDataType::ExactAggregate(ExactKind::Count, _)
     ) {
         return 1.;
     }
@@ -55,7 +55,7 @@ fn count_up_counts_targets_even_when_values_repeat_or_change_sign() {
     let (family, update, _) = aggregate(&node);
     assert!(matches!(
         family,
-        SummaryFamilyType::ExactAggregate(ExactKind::Count, _)
+        FieldDataType::ExactAggregate(ExactKind::Count, _)
     ));
     for values in [[1., 1., 1.], [1., 1., 0.], [0., 0., 0.], [-1., -1., -1.]] {
         assert_eq!(
@@ -78,7 +78,7 @@ fn window_counts_and_sums_distinguish_one_zero_three_and_negative_values() {
     ] {
         let node = plan(query, AccuracyTarget::Exact);
         let (family, update, reduction) = aggregate(&node);
-        assert!(matches!(family, SummaryFamilyType::ExactAggregate(k, _) if *k == kind));
+        assert!(matches!(family, FieldDataType::ExactAggregate(k, _) if *k == kind));
         assert_eq!(*reduction, Reduction::PerEntity);
         for value in [1., 0., 3., -3.] {
             let got: f64 = (0..10).map(|_| contribution(family, update, value)).sum();
@@ -98,7 +98,7 @@ fn sum_rate_and_increase_have_real_exact_accumulator_nodes() {
     ] {
         let node = plan(query, AccuracyTarget::Exact);
         let (family, _, _) = aggregate(&node);
-        assert!(matches!(family, SummaryFamilyType::ExactAggregate(k, _) if *k == kind));
+        assert!(matches!(family, FieldDataType::ExactAggregate(k, _) if *k == kind));
         assert!(node.guarantee.as_ref().unwrap().is_exact());
         compile_post_asap_dag(&node).unwrap();
     }
@@ -173,7 +173,7 @@ impl asap_aware_mapping::accuracy::AccuracyEvidenceProvider for OneKeyTopKEviden
     fn propagation_stats(
         &self,
         op: &asap_types::post_asap::CompositionOperator,
-        _family: &SummaryFamilyType,
+        _family: &FieldDataType,
         _query: Option<&asap_types::post_asap::SketchQuery>,
     ) -> asap_aware_mapping::accuracy::PropagationStats {
         // Single-key fixture: no excluded keys; bounds cover every value below.
@@ -224,7 +224,7 @@ fn sketch_counts_use_unit_weights_and_signed_sums_keep_value_weights() {
                     return None;
                 };
                 let (family, _, _) = aggregate(node);
-                matches!(family, SummaryFamilyType::Sketch(kind, _) if kind.algorithm() == &wanted)
+                matches!(family, FieldDataType::Sketch(kind, _) if kind.algorithm() == &wanted)
                     .then_some(node)
             })
             .expect("weighted sketch candidate");
@@ -245,7 +245,7 @@ fn sketch_counts_use_unit_weights_and_signed_sums_keep_value_weights() {
             for c in &candidates {
                 if let Replacement::Summary(n) = &c.replacement {
                     assert!(
-                        !matches!(aggregate(n).0, SummaryFamilyType::Sketch(kind, _) if kind.algorithm() == &SketchAlgorithm::CmsWithHeap)
+                        !matches!(aggregate(n).0, FieldDataType::Sketch(kind, _) if kind.algorithm() == &SketchAlgorithm::CmsWithHeap)
                     );
                 }
             }

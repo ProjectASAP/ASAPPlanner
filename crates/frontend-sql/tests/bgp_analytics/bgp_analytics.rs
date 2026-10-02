@@ -36,7 +36,7 @@
 //! coverage so a regression (or a future improvement) is visible, not silent.
 
 use asap_frontend_sql::{lower_sql_dialect, SqlCatalog, SqlError as LoweringError};
-use asap_types::pre_asap::schema::{Column, DataType, Schema};
+use asap_types::pre_asap::schema::{Field, DataType, Schema};
 use asap_types::pre_asap::{AggIntent, GroupKeys, QueryExpr};
 use asap_types::types::AccuracyTarget;
 use asap_types::workload::SqlDialect;
@@ -44,8 +44,8 @@ use datafusion::error::DataFusionError;
 
 const CORPUS: &str = include_str!("data/bgp_analytics.sql");
 
-fn col(name: &str, dtype: DataType) -> Column {
-    Column::new(name, dtype, false)
+fn col(name: &str, dtype: DataType) -> Field {
+    Field::plain(name, dtype, false)
 }
 
 /// `bgp_updates(timestamp, collector, peer_ip, peer_asn, prefix, operation,

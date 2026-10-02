@@ -353,8 +353,8 @@ use asap_types::post_asap::{
     ExactOperationSchemaError, ExactParams, ExecutionDataState, ExecutionDataStateError,
     ExecutionTiming, GroupingStrategy, NonNegativeWeightProof, SamplingKind, SamplingParams,
     SketchAlgorithm, SketchKind, SketchParams, SketchQuery as PostAsapSketchQuery, StatModelKind,
-    StatModelParams, SummaryExpr, SummaryFamilyType, SummaryField, SummaryInputExpr, SummaryNode,
-    SummarySchema, SummaryUpdate, ValueOperation, WaveletKind, WaveletParams, WeightDomain,
+    StatModelParams, SummaryExpr, FieldDataType, Field, SummaryInputExpr, SummaryNode,
+    Schema, SummaryUpdate, ValueOperation, WaveletKind, WaveletParams, WeightDomain,
 };
 use asap_types::post_asap::{AccuracyError, CompositionOperator, GuaranteeSource, ResultGuarantee};
 use asap_types::pre_asap::agg_intent::{agg_is_mergeable, AggIntent};
@@ -363,7 +363,7 @@ use asap_types::pre_asap::expr_ir::{ArithmeticOpKind, ColumnRef};
 use asap_types::pre_asap::query_expr::{
     BinaryOpKind, Predicate, QueryExpr, QueryExprError, Reduction,
 };
-use asap_types::pre_asap::schema::{ColumnId, Schema};
+use asap_types::pre_asap::schema::ColumnId;
 use asap_types::types::AccuracyTarget;
 use asap_types::workload::{DataWorkload, QueryRecurrence, QueryWorkload, RepeatedDemand};
 use std::rc::Rc;
@@ -395,7 +395,7 @@ use crate::topk_reuse::TopKLimitReuseStrategy;
 /// to workload-wide orchestration.
 #[derive(Debug, Error)]
 pub enum RealizationError {
-    /// Schema derivation failed while lifting an edge to `SummarySchema`.
+    /// Schema derivation failed while lifting an edge to `Schema`.
     #[error("schema derivation failed during pre-ASAP → post-ASAP binding: {0}")]
     Schema(#[from] QueryExprError),
     /// The candidate is accuracy-illegal (issue #172): its composed
@@ -1321,7 +1321,7 @@ impl<'a> SketchAlgorithmStrategy<'a> {
             || partition_by.is_without()
             || !schema.has_promql_series_identity()
             || !schema
-                .columns
+                .fields
                 .get(value)
                 .is_some_and(|column| column.name == "value")
             || !is_current_series_source(child)
@@ -1354,7 +1354,7 @@ impl<'a> SketchAlgorithmStrategy<'a> {
                     operation: ValueOperation::FinalizeExactAccumulator,
                     timing,
                 } if matches!(&child.expr, SummaryExpr::SummaryAgg {
-                        family: SummaryFamilyType::ExactAggregate(ExactKind::Rate, _),
+                        family: FieldDataType::ExactAggregate(ExactKind::Rate, _),
                         reduction: Reduction::PerEntity, child: source, ..
                     } if matches!(&source.expr, SummaryExpr::KeepPreAsap(source) if matches!(source.as_ref(), QueryExpr::TimeRange { .. }))) =>
                 {
@@ -1379,14 +1379,14 @@ impl<'a> SketchAlgorithmStrategy<'a> {
             };
             if !dag.nodes.iter().any(|node| match &node.payload {
                 asap_types::post_asap::PostAsapOperatorPayload::SummaryAgg {
-                    family: SummaryFamilyType::Sketch(kind, _),
+                    family: FieldDataType::Sketch(kind, _),
                     ..
                 } => matches!(
                     kind.algorithm(),
                     SketchAlgorithm::CmsWithHeap | SketchAlgorithm::CountSketchWithHeap
                 ),
                 asap_types::post_asap::PostAsapOperatorPayload::SummaryAgg {
-                    family: SummaryFamilyType::ExactAggregate(ExactKind::Sum, _),
+                    family: FieldDataType::ExactAggregate(ExactKind::Sum, _),
                     ..
                 } => true,
                 _ => false,
@@ -1424,7 +1424,7 @@ impl<'a> SketchAlgorithmStrategy<'a> {
                 } if matches!(
                     &child.expr,
                     SummaryExpr::SummaryAgg {
-                        family: SummaryFamilyType::ExactAggregate(ExactKind::Rate, _),
+                        family: FieldDataType::ExactAggregate(ExactKind::Rate, _),
                         ..
                     }
                 ) =>
@@ -1441,7 +1441,7 @@ impl<'a> SketchAlgorithmStrategy<'a> {
         proposals.candidates.retain_mut(|candidate| {
             let Replacement::Summary(node) = &candidate.replacement else { return false };
             if !matches!(&node.expr, SummaryExpr::ValueOperation { child, operation: ValueOperation::FinalizeExactAccumulator, .. }
-                if matches!(&child.expr, SummaryExpr::SummaryAgg { family: SummaryFamilyType::ExactAggregate(ExactKind::Sum, _), .. })) { return false; }
+                if matches!(&child.expr, SummaryExpr::SummaryAgg { family: FieldDataType::ExactAggregate(ExactKind::Sum, _), .. })) { return false; }
             candidate.replacement = Replacement::Summary(query_time(node));
             candidate.rationale = "query-time grouped Sum over complete per-series Rate readouts".into();
             true
@@ -1559,7 +1559,7 @@ impl<'a> SketchAlgorithmStrategy<'a> {
             else {
                 continue;
             };
-            let family = SummaryFamilyType::Sketch(kind.clone(), GroupingStrategy::default());
+            let family = FieldDataType::Sketch(kind.clone(), GroupingStrategy::default());
             let Some(child) = aggregate_child(root) else {
                 continue;
             };
@@ -2183,7 +2183,7 @@ fn finalize_exact_accumulator_at(
     let is_exact_state = matches!(
         node.expr,
         SummaryExpr::SummaryAgg {
-            family: SummaryFamilyType::ExactAggregate(..),
+            family: FieldDataType::ExactAggregate(..),
             ..
         }
     );
@@ -2275,7 +2275,7 @@ fn ddsketch_quantile_alpha(node: &SummaryNode) -> Option<f64> {
         return None;
     };
     let SummaryExpr::SummaryAgg {
-        family: SummaryFamilyType::Sketch(kind, _),
+        family: FieldDataType::Sketch(kind, _),
         ..
     } = &summary_input.expr
     else {
@@ -2325,10 +2325,7 @@ fn realize_binary_operand(
     if is_promql_scalar(operand) {
         return Ok(Rc::new(SummaryNode {
             expr: SummaryExpr::KeepPreAsap(Rc::clone(operand)),
-            schema: SummarySchema {
-                fields: Vec::new(),
-                time_index: None,
-            },
+            schema: Schema::lifted(Vec::new(), None),
             guarantee: Some(ResultGuarantee::exact("PromQL scalar")),
         }));
     }
@@ -2350,7 +2347,7 @@ fn override_accuracy(intent: &AggIntent, target: &AccuracyTarget) -> AggIntent {
 }
 
 /// Wrap an unrewritten pre-ASAP subtree, lifting its schema with every column
-/// `SummaryFamilyType::Plain`. `pub` so a caller can fall back to this
+/// `FieldDataType::Plain`. `pub` so a caller can fall back to this
 /// explicitly — e.g. when `SketchAlgorithmStrategy::replacements()` returns no
 /// candidate for a target, or a deployment wants to force a node its own
 /// runtime can't actually implement — through the same fallback this
@@ -2592,19 +2589,19 @@ fn is_snapshot_weighted_topk(intent: &AggIntent, child: &QueryExpr) -> bool {
 /// Every family's partial state needs a readout to recover a value, except
 /// `ExactAggregate` — its partial state *is* the value already, so no
 /// estimate step follows it.
-fn summary_family(realization: Realization) -> Option<(SummaryFamilyType, bool)> {
+fn summary_family(realization: Realization) -> Option<(FieldDataType, bool)> {
     Some(match realization {
         Realization::ExactAggregate { kind, params } => {
-            (SummaryFamilyType::ExactAggregate(kind, params), false)
+            (FieldDataType::ExactAggregate(kind, params), false)
         }
         Realization::Sketch(kind) => (
-            SummaryFamilyType::Sketch(kind, GroupingStrategy::default()),
+            FieldDataType::Sketch(kind, GroupingStrategy::default()),
             true,
         ),
-        Realization::Sample { kind, params } => (SummaryFamilyType::Sample(kind, params), true),
-        Realization::Wavelet { kind, params } => (SummaryFamilyType::Wavelet(kind, params), true),
+        Realization::Sample { kind, params } => (FieldDataType::Sample(kind, params), true),
+        Realization::Wavelet { kind, params } => (FieldDataType::Wavelet(kind, params), true),
         Realization::StatModel { kind, params } => {
-            (SummaryFamilyType::StatModel(kind, params), true)
+            (FieldDataType::StatModel(kind, params), true)
         }
         Realization::PassThrough => return None,
     })
@@ -2627,7 +2624,7 @@ enum PhysicalSummaryInputRuleResult {
 
 type PhysicalSummaryInputRule = fn(
     &AggIntent,
-    &SummaryFamilyType,
+    &FieldDataType,
     &Reduction,
     &Rc<QueryExpr>,
 ) -> PhysicalSummaryInputRuleResult;
@@ -2645,13 +2642,13 @@ const PHYSICAL_SUMMARY_INPUT_RULES: &[PhysicalSummaryInputRule] = &[
 
 fn realize_value_frequency_summary_input(
     intent: &AggIntent,
-    family: &SummaryFamilyType,
+    family: &FieldDataType,
     _reduction: &Reduction,
     child: &Rc<QueryExpr>,
 ) -> PhysicalSummaryInputRuleResult {
     // Frequency counts hash sample values as items but add one per observation.
     // Using the sample as a weight would turn counts into sums and admit signed CMS updates.
-    if !matches!(family, SummaryFamilyType::Sketch(kind, _)
+    if !matches!(family, FieldDataType::Sketch(kind, _)
         if kind.algorithm() == &SketchAlgorithm::UnivMon
             || (matches!(intent, AggIntent::Count { .. })
                 && matches!(kind.algorithm(), SketchAlgorithm::Cms | SketchAlgorithm::CountSketch)))
@@ -2685,7 +2682,7 @@ fn realize_value_frequency_summary_input(
 
 fn realize_physical_summary_input(
     intent: &AggIntent,
-    family: &SummaryFamilyType,
+    family: &FieldDataType,
     reduction: &Reduction,
     child: &Rc<QueryExpr>,
 ) -> Result<PhysicalSummaryInput, RealizationError> {
@@ -2754,7 +2751,7 @@ fn maintenance_exact_values(node: Rc<SummaryNode>) -> Option<Rc<SummaryNode>> {
         } if matches!(
             child.expr,
             SummaryExpr::SummaryAgg {
-                family: SummaryFamilyType::ExactAggregate(..),
+                family: FieldDataType::ExactAggregate(..),
                 ..
             }
         ) =>
@@ -2780,7 +2777,7 @@ fn construct_summary_agg(
     reduction: &Reduction,
     intent: &AggIntent,
     input: PhysicalSummaryInput,
-    family: SummaryFamilyType,
+    family: FieldDataType,
     estimate: bool,
     planning_inputs: CandidatePlanningInputs<'_>,
     child_target: Option<&AccuracyTarget>,
@@ -2792,7 +2789,7 @@ fn construct_summary_agg(
     let keyed_heap = input.input.item.is_some()
         && matches!(
             &family,
-            SummaryFamilyType::Sketch(kind, _)
+            FieldDataType::Sketch(kind, _)
                 if matches!(kind.algorithm(), SketchAlgorithm::CmsWithHeap | SketchAlgorithm::CountSketchWithHeap)
         );
     let snapshot_weighted = matches!(node, QueryExpr::Aggregate { child, .. }
@@ -2805,7 +2802,7 @@ fn construct_summary_agg(
                 "invalid weighted TopK distinct-item bound",
             ));
         }
-        if let (Some(n), SummaryFamilyType::Sketch(kind, grouping)) = (bound, &family) {
+        if let (Some(n), FieldDataType::Sketch(kind, grouping)) = (bound, &family) {
             let (eps, delta) = accuracy_budget(accuracy_target(intent).expect("TopK target"));
             let params = default_size_params(
                 kind.algorithm().clone(),
@@ -2813,7 +2810,7 @@ fn construct_summary_agg(
                 eps,
                 delta / (2.0 * n as f64),
             );
-            family = SummaryFamilyType::Sketch(
+            family = FieldDataType::Sketch(
                 SketchKind::new(kind.algorithm().clone(), params),
                 grouping.clone(),
             );
@@ -2844,7 +2841,7 @@ fn construct_summary_agg(
                     RealizationError::PhysicalRealization("invalid TopK partition key"),
                 )?;
                 let matches = source
-                    .columns
+                    .fields
                     .iter()
                     .enumerate()
                     .filter(|(_, column)| column_ref(column) == reference)
@@ -2883,7 +2880,7 @@ fn construct_summary_agg(
     let summary_input = input.input;
     let query = estimate.then(|| {
         if snapshot_weighted {
-            if let SummaryFamilyType::Sketch(kind, _) = &family {
+            if let FieldDataType::Sketch(kind, _) = &family {
                 let capacity = match kind.params() {
                     SketchParams::CmsWithHeap { heap_size, .. }
                     | SketchParams::CountSketchWithHeap { heap_size, .. } => *heap_size,
@@ -2907,13 +2904,10 @@ fn construct_summary_agg(
             Vec::new()
         };
         fields.push(state);
-        state_schema = SummarySchema {
-            fields,
-            time_index: None,
-        };
+        state_schema = Schema::lifted(fields, None);
     } else if let Some(field) = state_schema.fields.get_mut(state_idx) {
         field.dtype = family.clone();
-        if matches!(&family, SummaryFamilyType::Sketch(kind, _) if kind.algorithm() == &SketchAlgorithm::UnivMon)
+        if matches!(&family, FieldDataType::Sketch(kind, _) if kind.algorithm() == &SketchAlgorithm::UnivMon)
         {
             // State identity is independent of which statistic reads it.
             field.name = "univmon".into();
@@ -3086,7 +3080,7 @@ fn construct_summary_agg(
 fn keyed_heap_readout_schema(
     input: &PhysicalSummaryInput,
     node: &QueryExpr,
-) -> Result<SummarySchema, RealizationError> {
+) -> Result<Schema, RealizationError> {
     let source = input.child.output_schema()?;
     let mut refs = Vec::new();
     let QueryExpr::Aggregate {
@@ -3127,7 +3121,7 @@ fn keyed_heap_readout_schema(
                         "dynamic label identity requires an explicit row representation",
                     ));
                 }
-                for (index, column) in schema.columns.iter().enumerate() {
+                for (index, column) in schema.fields.iter().enumerate() {
                     if Some(index) != schema.time_index && column.name != "value" {
                         let reference = match &column.table {
                             Some(table) => ColumnRef::Qualified {
@@ -3161,10 +3155,10 @@ fn keyed_heap_readout_schema(
         &source,
         &mut refs,
     )?;
-    let mut fields = Vec::<asap_types::post_asap::SummaryField>::new();
+    let mut fields = Vec::<asap_types::post_asap::Field>::new();
     for reference in refs {
         let matches: Vec<_> = source
-            .columns
+            .fields
             .iter()
             .filter(|column| match &reference {
                 ColumnRef::Named(name) => &column.name == name,
@@ -3186,31 +3180,28 @@ fn keyed_heap_readout_schema(
                 "heap keys must have distinct output names",
             ));
         }
-        fields.push(asap_types::post_asap::SummaryField {
-            name: column.name.clone(),
-            dtype: SummaryFamilyType::Plain(column.dtype.clone()),
-            nullable: column.nullable,
-        });
+        fields.push(Field::new(
+            column.name.clone(),
+            column.dtype.clone(),
+            column.nullable,
+        ));
     }
     if fields.is_empty() {
         return Err(RealizationError::PhysicalRealization(
             "heap readout has no identity columns",
         ));
     }
-    fields.push(asap_types::post_asap::SummaryField {
-        name: "__asap_estimate".into(),
-        dtype: SummaryFamilyType::Plain(asap_types::pre_asap::DataType::Float64),
-        nullable: false,
-    });
-    Ok(SummarySchema {
-        fields,
-        time_index: None,
-    })
+    fields.push(Field::new(
+        "__asap_estimate",
+        FieldDataType::Plain(asap_types::pre_asap::DataType::Float64),
+        false,
+    ));
+    Ok(Schema::lifted(fields, None))
 }
 
 fn ranking_score_index(
     logical: &QueryExpr,
-    values: &SummarySchema,
+    values: &Schema,
 ) -> Result<usize, RealizationError> {
     if is_current_series_source(logical) {
         return values
@@ -3219,7 +3210,7 @@ fn ranking_score_index(
             .position(|field| {
                 field.name == "value"
                     && field.dtype
-                        == SummaryFamilyType::Plain(asap_types::pre_asap::DataType::Float64)
+                        == FieldDataType::Plain(asap_types::pre_asap::DataType::Float64)
             })
             .ok_or(RealizationError::PhysicalRealization(
                 "snapshot ranking requires the sample value column",
@@ -3259,7 +3250,7 @@ fn ranking_score_index(
         || !values.fields.get(index).is_some_and(|field| {
             matches!(
                 field.dtype,
-                SummaryFamilyType::Plain(
+                FieldDataType::Plain(
                     asap_types::pre_asap::DataType::Int64 | asap_types::pre_asap::DataType::Float64
                 )
             )
@@ -3276,12 +3267,12 @@ fn ranking_score_index(
 /// The rate window is preserved; raw counter samples never become CMS weights.
 fn realize_counter_value_summary_input(
     intent: &AggIntent,
-    family: &SummaryFamilyType,
+    family: &FieldDataType,
     output_reduction: &Reduction,
     child: &Rc<QueryExpr>,
 ) -> PhysicalSummaryInputRuleResult {
     if !matches!(intent, AggIntent::TopK { .. })
-        || !matches!(family, SummaryFamilyType::Sketch(kind, _) if matches!(kind.algorithm(), SketchAlgorithm::CmsWithHeap | SketchAlgorithm::CountSketchWithHeap))
+        || !matches!(family, FieldDataType::Sketch(kind, _) if matches!(kind.algorithm(), SketchAlgorithm::CmsWithHeap | SketchAlgorithm::CountSketchWithHeap))
         || !matches!(child.as_ref(), QueryExpr::Aggregate { reduction: Reduction::PerEntity, measures, .. } if matches!(measures.as_slice(), [AggIntent::Rate | AggIntent::Increase]))
     {
         return PhysicalSummaryInputRuleResult::NotApplicable;
@@ -3309,7 +3300,7 @@ fn realize_counter_value_summary_input(
     // Retain the evaluation timestamp in each returned row. This sketch is a
     // snapshot, not an additive history of successive rate evaluations.
     let items = schema
-        .columns
+        .fields
         .iter()
         .enumerate()
         .filter(|(index, column)| column.name != "value" && !groups.contains(index))
@@ -3334,14 +3325,14 @@ fn realize_counter_value_summary_input(
 /// Rebuild the state for each evaluation; historical samples are not updates.
 fn realize_current_series_summary_input(
     intent: &AggIntent,
-    family: &SummaryFamilyType,
+    family: &FieldDataType,
     output_reduction: &Reduction,
     child: &Rc<QueryExpr>,
 ) -> PhysicalSummaryInputRuleResult {
     if !matches!(intent, AggIntent::TopK { .. }) || !is_current_series_source(child) {
         return PhysicalSummaryInputRuleResult::NotApplicable;
     }
-    let SummaryFamilyType::Sketch(kind, _) = family else {
+    let FieldDataType::Sketch(kind, _) = family else {
         return PhysicalSummaryInputRuleResult::NotApplicable;
     };
     match kind.algorithm() {
@@ -3369,7 +3360,7 @@ fn realize_current_series_summary_input(
         );
     };
     let items = schema
-        .columns
+        .fields
         .iter()
         .enumerate()
         .filter(|(index, column)| column.name != "value" && !groups.contains(index))
@@ -3395,14 +3386,14 @@ fn realize_current_series_summary_input(
 /// it does not consume an independently materialized Count result.
 fn realize_keyed_additive_summary_input(
     intent: &AggIntent,
-    family: &SummaryFamilyType,
+    family: &FieldDataType,
     output_reduction: &Reduction,
     child: &Rc<QueryExpr>,
 ) -> PhysicalSummaryInputRuleResult {
     if !matches!(intent, AggIntent::TopK { .. }) {
         return PhysicalSummaryInputRuleResult::NotApplicable;
     }
-    let SummaryFamilyType::Sketch(kind, _) = family else {
+    let FieldDataType::Sketch(kind, _) = family else {
         return PhysicalSummaryInputRuleResult::NotApplicable;
     };
     let heap_algorithm = kind.algorithm();
@@ -3517,7 +3508,7 @@ fn realize_keyed_additive_summary_input(
 
 fn schema_column_ref(child: &QueryExpr, index: usize) -> Option<ColumnRef> {
     let schema = child.output_schema().ok()?;
-    let column = schema.columns.get(index)?;
+    let column = schema.fields.get(index)?;
     Some(match &column.table {
         Some(table) => ColumnRef::Qualified {
             table: table.clone(),
@@ -3537,7 +3528,7 @@ fn schema_column_ref(child: &QueryExpr, index: usize) -> Option<ColumnRef> {
 /// (an approximate family the model has no local guarantee for, over an
 /// exact child) — unknown, never exact.
 fn compose_guarantee(
-    family: &SummaryFamilyType,
+    family: &FieldDataType,
     query: Option<&PostAsapSketchQuery>,
     child: &SummaryNode,
     intent: &AggIntent,
@@ -3546,7 +3537,7 @@ fn compose_guarantee(
     allocation: Option<GuaranteeSource>,
 ) -> Result<Option<ResultGuarantee>, AccuracyError> {
     let (op, local) = match (family, query) {
-        (SummaryFamilyType::ExactAggregate(kind, _), _) => {
+        (FieldDataType::ExactAggregate(kind, _), _) => {
             let op = match kind {
                 // A row count does not depend on the rows' values: exact
                 // regardless of the child's own error.
@@ -3623,7 +3614,7 @@ fn summary_col_index(out_schema: &Schema, by: &[usize], per_series: bool) -> usi
     if per_series {
         out_schema
             .column_id("value")
-            .or_else(|| (0..out_schema.columns.len()).find(|&i| Some(i) != out_schema.time_index))
+            .or_else(|| (0..out_schema.fields.len()).find(|&i| Some(i) != out_schema.time_index))
             .unwrap_or(0)
     } else {
         by.len()
@@ -3638,14 +3629,14 @@ fn summarised_column(intent: &AggIntent, child_schema: &Schema) -> ColumnRef {
     match intent
         .input_cols()
         .first()
-        .and_then(|id| child_schema.columns.get(*id))
+        .and_then(|id| child_schema.fields.get(*id))
     {
         Some(c) => column_ref(c),
         None => ColumnRef::SampleValue,
     }
 }
 
-fn column_ref(column: &asap_types::pre_asap::Column) -> ColumnRef {
+fn column_ref(column: &Field) -> ColumnRef {
     match &column.table {
         Some(t) => ColumnRef::Qualified {
             table: t.clone(),
@@ -3676,7 +3667,7 @@ fn summarised_input(
     }
     let legs = cols
         .iter()
-        .map(|id| child_schema.columns.get(*id).map(column_ref))
+        .map(|id| child_schema.fields.get(*id).map(column_ref))
         .collect::<Option<Vec<_>>>()
         .ok_or(RealizationError::PhysicalRealization(
             "a tuple column is outside the input schema",
@@ -3721,22 +3712,11 @@ fn readout(
     }
 }
 
-/// Lift a pre-ASAP [`Schema`] to a [`SummarySchema`] with every column
-/// `SummaryFamilyType::Plain` — shared by [`construct_summary_agg`] and
+/// Lift a pre-ASAP [`Schema`] to a [`Schema`] with every column
+/// `FieldDataType::Plain` — shared by [`construct_summary_agg`] and
 /// [`keep_pre_asap`], both in this module.
-fn lift(schema: &Schema) -> SummarySchema {
-    SummarySchema {
-        fields: schema
-            .columns
-            .iter()
-            .map(|c| SummaryField {
-                name: c.name.clone(),
-                dtype: SummaryFamilyType::Plain(c.dtype.clone()),
-                nullable: c.nullable,
-            })
-            .collect(),
-        time_index: schema.time_index,
-    }
+fn lift(schema: &Schema) -> Schema {
+    Schema::lifted(schema.fields.clone(), schema.time_index)
 }
 
 // ── SharedSubtreeStrategy ────────────────────────────────────────────────
@@ -5009,7 +4989,7 @@ fn sketch_kind_of(node: &SummaryNode) -> Option<SketchAlgorithm> {
     match &node.expr {
         SummaryExpr::SummaryEstimate { summary_input, .. } => sketch_kind_of(summary_input),
         SummaryExpr::SummaryAgg {
-            family: SummaryFamilyType::Sketch(kind, _),
+            family: FieldDataType::Sketch(kind, _),
             ..
         } => Some(kind.algorithm().clone()),
         _ => None,
@@ -5254,8 +5234,8 @@ impl<'a> GlobalSelection<'a> {
             pred,
         } = target.as_ref()
         {
-            let left_width = left.output_schema()?.columns.len();
-            let total_width = left_width + right.output_schema()?.columns.len();
+            let left_width = left.output_schema()?.fields.len();
+            let total_width = left_width + right.output_schema()?.fields.len();
             let normalized_pred = matches!(kind, asap_types::pre_asap::JoinKind::Inner)
                 .then(|| normalize_cross_input_equi_predicate(pred, left_width, total_width))
                 .flatten();
@@ -6882,7 +6862,7 @@ mod tests {
         agg_is_exact, default_cardinality, default_quantile, MathFunc, TimeFunc,
     };
     use asap_types::pre_asap::query_expr::{Reduction as ReductionTy, Source};
-    use asap_types::pre_asap::schema::{Column, DataType, Schema as SchemaTy};
+    use asap_types::pre_asap::schema::{Field, DataType, Schema as SchemaTy};
     use asap_types::types::AccuracyTarget;
     use std::collections::HashMap;
 
@@ -6907,7 +6887,7 @@ mod tests {
                             .schema
                             .fields
                             .iter()
-                            .all(|field| matches!(field.dtype, SummaryFamilyType::Plain(_))),
+                            .all(|field| matches!(field.dtype, FieldDataType::Plain(_))),
                         "direct candidate {query} leaks state"
                     );
                 }
@@ -6927,7 +6907,7 @@ mod tests {
                     node.schema
                         .fields
                         .iter()
-                        .all(|field| matches!(field.dtype, SummaryFamilyType::Plain(_))),
+                        .all(|field| matches!(field.dtype, FieldDataType::Plain(_))),
                     "{query}: query root leaks state: {:?}",
                     node.schema
                 );
@@ -7770,10 +7750,10 @@ mod tests {
 
     fn metric_scan(labels: &[&str]) -> QueryExpr {
         let mut columns = vec![
-            Column::new("ts", DataType::Timestamp, false),
-            Column::new("value", DataType::Float64, false),
+            Field::plain("ts", DataType::Timestamp, false),
+            Field::plain("value", DataType::Float64, false),
         ];
-        columns.extend(labels.iter().map(|n| Column::new(*n, DataType::Utf8, true)));
+        columns.extend(labels.iter().map(|n| Field::plain(*n, DataType::Utf8, true)));
         QueryExpr::Scan {
             source: Source::TimeSeries { metric: "m".into() },
             predicates: vec![],
@@ -8061,7 +8041,7 @@ mod tests {
         );
     }
 
-    /// The `SummaryFamilyType`'s committed `SketchAlgorithm`, from the top
+    /// The `FieldDataType`'s committed `SketchAlgorithm`, from the top
     /// `SummaryAgg` reachable under a (possibly `SummaryEstimate`-wrapped)
     /// bound root.
     fn summary_family_algorithm(node: &SummaryNode) -> SketchAlgorithm {
@@ -8070,7 +8050,7 @@ mod tests {
                 summary_family_algorithm(summary_input)
             }
             asap_types::post_asap::SummaryExpr::SummaryAgg { family, .. } => match family {
-                asap_types::post_asap::SummaryFamilyType::Sketch(kind, _) => {
+                asap_types::post_asap::FieldDataType::Sketch(kind, _) => {
                     kind.algorithm().clone()
                 }
                 other => panic!("expected a Sketch family, got {other:?}"),
@@ -9656,7 +9636,7 @@ mod tests {
         }
     }
 
-    fn field<'a>(schema: &'a SummarySchema, name: &str) -> &'a SummaryField {
+    fn field<'a>(schema: &'a Schema, name: &str) -> &'a Field {
         schema
             .fields
             .iter()
@@ -9693,11 +9673,11 @@ mod tests {
         // Estimate edge: plain row shape — group key + Float64 answer.
         assert_eq!(
             field(&root.schema, "quantile_0_99").dtype,
-            SummaryFamilyType::Plain(DataType::Float64)
+            FieldDataType::Plain(DataType::Float64)
         );
         assert_eq!(
             field(&root.schema, "job").dtype,
-            SummaryFamilyType::Plain(DataType::Utf8)
+            FieldDataType::Plain(DataType::Utf8)
         );
 
         let SummaryExpr::SummaryAgg {
@@ -9712,7 +9692,7 @@ mod tests {
         };
         assert_eq!(
             family,
-            &SummaryFamilyType::Sketch(
+            &FieldDataType::Sketch(
                 SketchKind::new(SketchAlgorithm::Kll, SketchParams::Kll { k: 269 }),
                 GroupingStrategy::default()
             )
@@ -9722,7 +9702,7 @@ mod tests {
         // SummaryAgg edge: the state column carries the committed family.
         assert_eq!(
             field(&summary_input.schema, "quantile_0_99").dtype,
-            SummaryFamilyType::Sketch(
+            FieldDataType::Sketch(
                 SketchKind::new(SketchAlgorithm::Kll, SketchParams::Kll { k: 269 }),
                 GroupingStrategy::default()
             )
@@ -9766,7 +9746,7 @@ mod tests {
         };
         assert!(matches!(
             family,
-            SummaryFamilyType::Sketch(kind, _) if kind.algorithm() == &SketchAlgorithm::Kll
+            FieldDataType::Sketch(kind, _) if kind.algorithm() == &SketchAlgorithm::Kll
         ));
 
         // With `PreferDDSketchViaCostModel`: DDSketch instead, same query.
@@ -9779,7 +9759,7 @@ mod tests {
         };
         assert_eq!(
             family,
-            &SummaryFamilyType::Sketch(
+            &FieldDataType::Sketch(
                 SketchKind::new(
                     SketchAlgorithm::DDSketch,
                     SketchParams::DDSketch { alpha: 0.01 }
@@ -9875,7 +9855,7 @@ mod tests {
         };
         assert_eq!(
             family,
-            &SummaryFamilyType::Sketch(
+            &FieldDataType::Sketch(
                 SketchKind::new(
                     SketchAlgorithm::CountSketch,
                     SketchParams::CountSketch {
@@ -9900,11 +9880,11 @@ mod tests {
         };
         assert_eq!(
             family,
-            &SummaryFamilyType::ExactAggregate(ExactKind::Sum, ExactParams::Sum)
+            &FieldDataType::ExactAggregate(ExactKind::Sum, ExactParams::Sum)
         );
         assert_eq!(
             field(&root.schema, "sum").dtype,
-            SummaryFamilyType::ExactAggregate(ExactKind::Sum, ExactParams::Sum)
+            FieldDataType::ExactAggregate(ExactKind::Sum, ExactParams::Sum)
         );
     }
 
@@ -9926,7 +9906,7 @@ mod tests {
         };
         assert_eq!(
             family,
-            &SummaryFamilyType::ExactAggregate(ExactKind::Rate, ExactParams::Rate)
+            &FieldDataType::ExactAggregate(ExactKind::Rate, ExactParams::Rate)
         );
         assert_eq!(
             root.schema
@@ -9938,7 +9918,7 @@ mod tests {
         );
         assert_eq!(
             field(&root.schema, "value").dtype,
-            SummaryFamilyType::ExactAggregate(ExactKind::Rate, ExactParams::Rate)
+            FieldDataType::ExactAggregate(ExactKind::Rate, ExactParams::Rate)
         );
         assert_eq!(root.schema.time_index, Some(0));
     }
@@ -10007,7 +9987,7 @@ mod tests {
         };
         assert!(matches!(
             family,
-            SummaryFamilyType::Sketch(kind, _) if kind.algorithm() == &SketchAlgorithm::Kll
+            FieldDataType::Sketch(kind, _) if kind.algorithm() == &SketchAlgorithm::Kll
         ));
         let SummaryExpr::ValueOperation {
             child,
@@ -10027,7 +10007,7 @@ mod tests {
         };
         assert_eq!(
             inner_family,
-            &SummaryFamilyType::ExactAggregate(ExactKind::Sum, ExactParams::Sum)
+            &FieldDataType::ExactAggregate(ExactKind::Sum, ExactParams::Sum)
         );
         assert!(matches!(leaf.expr, SummaryExpr::KeepPreAsap(_)));
     }
@@ -10193,7 +10173,7 @@ mod tests {
         fn propagation_stats(
             &self,
             op: &CompositionOperator,
-            _family: &SummaryFamilyType,
+            _family: &FieldDataType,
             _query: Option<&PostAsapSketchQuery>,
         ) -> PropagationStats {
             if matches!(op, CompositionOperator::TopKSelection) {
@@ -10312,7 +10292,7 @@ mod tests {
         );
         assert!(matches!(
             family,
-            SummaryFamilyType::Sketch(kind, _)
+            FieldDataType::Sketch(kind, _)
                 if kind.algorithm() == &SketchAlgorithm::CmsWithHeap
         ));
         assert!(matches!(child.expr, SummaryExpr::KeepPreAsap(_)));
@@ -10550,9 +10530,9 @@ mod tests {
             },
             predicates: vec![],
             schema: SchemaTy {
-                columns: vec![
-                    Column::new("host", DataType::Utf8, false),
-                    Column::new("bytes", DataType::Int64, false),
+                fields: vec![
+                    Field::plain("host", DataType::Utf8, false),
+                    Field::plain("bytes", DataType::Int64, false),
                 ],
                 time_index: None,
                 unique_keys: vec![],
@@ -10584,7 +10564,7 @@ mod tests {
     impl AccuracyModel for RankAdditiveModel {
         fn local_guarantee(
             &self,
-            family: &SummaryFamilyType,
+            family: &FieldDataType,
             query: &PostAsapSketchQuery,
         ) -> Option<ResultGuarantee> {
             DefaultAccuracyModel.local_guarantee(family, query)
@@ -10977,7 +10957,7 @@ mod tests {
             panic!("readout")
         };
         let SummaryExpr::SummaryAgg {
-            family: SummaryFamilyType::Sketch(kind, _),
+            family: FieldDataType::Sketch(kind, _),
             ..
         } = &summary_input.expr
         else {
@@ -11079,14 +11059,14 @@ mod tests {
             .schema
             .fields
             .iter()
-            .all(|field| matches!(field.dtype, SummaryFamilyType::Plain(_))));
+            .all(|field| matches!(field.dtype, FieldDataType::Plain(_))));
     }
     // A numeric group key must not be mistaken for the ranked aggregate score.
     #[test]
     fn ranking_uses_aggregate_output_position_not_first_numeric_column() {
         let logical = agg(vec![2], AggIntent::Sum { col: None }, metric_scan(&["id"]));
         let mut values = lift(&logical.output_schema().unwrap());
-        values.fields[0].dtype = SummaryFamilyType::Plain(DataType::Int64);
+        values.fields[0].dtype = FieldDataType::Plain(DataType::Int64);
         assert_eq!(ranking_score_index(&logical, &values).unwrap(), 1);
     }
     // A heap's key schema is derived from its encoded item, not all label columns.
@@ -11096,7 +11076,7 @@ mod tests {
         let QueryExpr::Scan { schema, .. } = &mut raw else {
             unreachable!()
         };
-        schema.columns[2].dtype = DataType::Int64;
+        schema.fields[2].dtype = FieldDataType::Plain(DataType::Int64);
         let node = agg(
             vec![],
             AggIntent::TopK {
@@ -11126,7 +11106,7 @@ mod tests {
         );
         assert_eq!(
             schema.fields[0].dtype,
-            SummaryFamilyType::Plain(DataType::Int64)
+            FieldDataType::Plain(DataType::Int64)
         );
     }
 }

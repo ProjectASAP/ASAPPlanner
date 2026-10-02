@@ -3,27 +3,16 @@ use crate::replacement::{
     Replacement, ReplacementProvenance, ReplacementStrategy, ReplacementSubDAG, TargetSubDAG,
 };
 use asap_types::post_asap::{
-    maintained_population::*, ExecutionTiming, ResultGuarantee, SummaryExpr, SummaryFamilyType,
-    SummaryField, SummaryNode, SummarySchema, ValueOperation,
+    maintained_population::*, ExecutionTiming, ResultGuarantee, Schema, SummaryExpr,
+    SummaryNode, ValueOperation,
 };
 use asap_types::pre_asap::{
-    AggIntent, CompareOpKind, DataType, QueryExpr, Reduction, ScalarValue, Schema, Source,
+    AggIntent, CompareOpKind, DataType, QueryExpr, Reduction, ScalarValue, Source,
 };
 use std::rc::Rc;
 
-fn plain(schema: Schema) -> SummarySchema {
-    SummarySchema {
-        time_index: schema.time_index,
-        fields: schema
-            .columns
-            .into_iter()
-            .map(|c| SummaryField {
-                name: c.name,
-                dtype: SummaryFamilyType::Plain(c.dtype),
-                nullable: c.nullable,
-            })
-            .collect(),
-    }
+fn plain(schema: Schema) -> Schema {
+    Schema::lifted(schema.fields, schema.time_index)
 }
 
 fn strip_projection(mut root: &QueryExpr) -> &QueryExpr {
@@ -57,7 +46,7 @@ fn recognize(root: &QueryExpr) -> Option<(MaintainedPopulation, PopulationReadou
                 _ => return None,
             };
             let schema = child.output_schema().ok()?;
-            if col.is_some_and(|c| schema.columns.get(c).is_none()) {
+            if col.is_some_and(|c| schema.fields.get(c).is_none()) {
                 return None;
             }
             (child, grouping, readout, col)
@@ -101,7 +90,7 @@ fn recognize(root: &QueryExpr) -> Option<(MaintainedPopulation, PopulationReadou
     {
         let value_column = value_column.or_else(|| {
             schema
-                .columns
+                .fields
                 .iter()
                 .position(|c| c.dtype == DataType::Float64 && !c.nullable)
         })?;
@@ -140,7 +129,7 @@ fn recognize(root: &QueryExpr) -> Option<(MaintainedPopulation, PopulationReadou
     else {
         return None;
     };
-    if value_column.is_some_and(|c| schema.columns.get(c).is_none_or(|c| c.name != "value")) {
+    if value_column.is_some_and(|c| schema.fields.get(c).is_none_or(|c| c.name != "value")) {
         return None;
     }
     // PromQL can retain open labels or resolve them into a complete identity column.
@@ -151,7 +140,7 @@ fn recognize(root: &QueryExpr) -> Option<(MaintainedPopulation, PopulationReadou
         return None;
     }
     let label = |col: usize| -> Option<String> {
-        let c = schema.columns.get(col)?;
+        let c = schema.fields.get(col)?;
         (c.dtype == DataType::Utf8).then(|| c.name.clone())
     };
     let mut matchers = Vec::new();

@@ -390,7 +390,7 @@ fn build_rollup(
 mod tests {
     use super::*;
     use asap_types::pre_asap::query_expr::Source;
-    use asap_types::pre_asap::schema::{Column, DataType};
+    use asap_types::pre_asap::schema::{Field, DataType};
     use asap_types::types::AccuracyTarget;
 
     /// `[ts(0), value(1), job(2), region(3)]`.
@@ -400,10 +400,10 @@ mod tests {
             predicates: vec![],
             schema: Schema::with_time_index(
                 vec![
-                    Column::new("ts", DataType::Timestamp, false),
-                    Column::new("value", DataType::Float64, false),
-                    Column::new("job", DataType::Utf8, true),
-                    Column::new("region", DataType::Utf8, true),
+                    Field::plain("ts", DataType::Timestamp, false),
+                    Field::plain("value", DataType::Float64, false),
+                    Field::plain("job", DataType::Utf8, true),
+                    Field::plain("region", DataType::Utf8, true),
                 ],
                 0,
                 vec![],

@@ -5,14 +5,14 @@
 //! optional `ORDER BY`/`LIMIT`, plus the nested aggregate shape.
 
 use asap_frontend_sql::{lower_sql, SqlCatalog};
-use asap_types::pre_asap::schema::{Column, DataType, Schema};
+use asap_types::pre_asap::schema::{Field, DataType, Schema};
 use asap_types::pre_asap::{AggIntent, GroupKeys, QueryExpr};
 use asap_types::types::AccuracyTarget;
 
 const CORPUS: &str = include_str!("data/netflow.sql");
 
-fn col(name: &str, dtype: DataType) -> Column {
-    Column::new(name, dtype, false)
+fn col(name: &str, dtype: DataType) -> Field {
+    Field::plain(name, dtype, false)
 }
 
 fn catalog() -> SqlCatalog {

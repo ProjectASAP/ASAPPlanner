@@ -1324,10 +1324,10 @@ mod tests {
     use super::*;
     use asap_types::post_asap::{
         ExactKind, ExactParams, GroupingStrategy, ResultGuarantee, SketchAlgorithm,
-        SummaryFamilyType, SummaryField, SummarySchema,
+        FieldDataType, Field, Schema,
     };
     use asap_types::pre_asap::AggIntent;
-    use asap_types::pre_asap::{Column, ColumnRef, DataType, QueryExpr, Reduction, Schema, Source};
+    use asap_types::pre_asap::{ColumnRef, DataType, QueryExpr, Reduction, Source};
     use asap_types::types::AccuracyTarget;
     use asap_types::workload::{
         BatchEntry, DataWorkload, DurationMs, Evidence, EvidenceSource, Predictability, Query,
@@ -1550,7 +1550,7 @@ mod tests {
         match &node.expr {
             SummaryExpr::SummaryEstimate { summary_input, .. } => sketch_algorithm(summary_input),
             SummaryExpr::SummaryAgg {
-                family: SummaryFamilyType::Sketch(kind, _),
+                family: FieldDataType::Sketch(kind, _),
                 ..
             } => Some(kind.algorithm().clone()),
             _ => None,
@@ -1569,8 +1569,8 @@ mod tests {
             predicates: vec![],
             schema: Schema::with_time_index(
                 vec![
-                    Column::new("ts", DataType::Timestamp, false),
-                    Column::new("value", DataType::Float64, false),
+                    Field::plain("ts", DataType::Timestamp, false),
+                    Field::plain("value", DataType::Float64, false),
                 ],
                 0,
                 vec![],
@@ -1605,13 +1605,10 @@ mod tests {
     fn summary() -> Rc<SummaryNode> {
         let child = Rc::new(SummaryNode {
             expr: SummaryExpr::KeepPreAsap(query_root()),
-            schema: SummarySchema {
-                fields: vec![],
-                time_index: None,
-            },
+            schema: Schema::lifted(vec![], None),
             guarantee: Some(ResultGuarantee::exact("raw")),
         });
-        let family = SummaryFamilyType::ExactAggregate(ExactKind::Sum, ExactParams::Sum);
+        let family = FieldDataType::ExactAggregate(ExactKind::Sum, ExactParams::Sum);
         Rc::new(SummaryNode {
             expr: SummaryExpr::SummaryAgg {
                 child,
@@ -1622,21 +1619,14 @@ mod tests {
                 reduction: Reduction::by(vec![]),
                 grouping: GroupingStrategy::default(),
             },
-            schema: SummarySchema {
-                fields: vec![SummaryField {
-                    name: "state".into(),
-                    dtype: family,
-                    nullable: false,
-                }],
-                time_index: None,
-            },
+            schema: Schema::lifted(vec![Field::new("state", family, false)], None),
             guarantee: Some(ResultGuarantee::exact("sum")),
         })
     }
 
     fn nested_summary() -> Rc<SummaryNode> {
         let child = summary();
-        let family = SummaryFamilyType::ExactAggregate(ExactKind::Sum, ExactParams::Sum);
+        let family = FieldDataType::ExactAggregate(ExactKind::Sum, ExactParams::Sum);
         Rc::new(SummaryNode {
             expr: SummaryExpr::SummaryAgg {
                 child,
@@ -1647,14 +1637,7 @@ mod tests {
                 reduction: Reduction::by(vec![]),
                 grouping: GroupingStrategy::default(),
             },
-            schema: SummarySchema {
-                fields: vec![SummaryField {
-                    name: "state".into(),
-                    dtype: family,
-                    nullable: false,
-                }],
-                time_index: None,
-            },
+            schema: Schema::lifted(vec![Field::new("state", family, false)], None),
             guarantee: Some(ResultGuarantee::exact("nested sum")),
         })
     }

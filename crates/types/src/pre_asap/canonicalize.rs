@@ -321,7 +321,7 @@ fn try_rewrite_rownumber_topk(expr: &QueryExpr) -> Option<QueryExpr> {
     if order_by.is_empty() {
         return None;
     }
-    let inner_cols = inner.output_schema().ok()?.columns.len();
+    let inner_cols = inner.output_schema().ok()?.fields.len();
     if rn_in_wf != inner_cols {
         return None; // the predicate ranks some other column, not the row number
     }
@@ -346,7 +346,7 @@ mod tests {
         GroupKeys, ProjectItem, Source, WindowFrame, WindowFrameBound, WindowFrameOffset,
         WindowFrameUnits,
     };
-    use crate::pre_asap::schema::{Column, DataType, Schema};
+    use crate::pre_asap::schema::{Field, DataType, Schema};
     use crate::types::AccuracyTarget;
 
     fn scan() -> QueryExpr {
@@ -355,9 +355,9 @@ mod tests {
             predicates: vec![],
             schema: Schema::with_time_index(
                 vec![
-                    Column::new("ts", DataType::Timestamp, false),
-                    Column::new("service", DataType::Utf8, false),
-                    Column::new("value", DataType::Float64, false),
+                    Field::plain("ts", DataType::Timestamp, false),
+                    Field::plain("service", DataType::Utf8, false),
+                    Field::plain("value", DataType::Float64, false),
                 ],
                 0,
                 vec![],
@@ -601,10 +601,10 @@ mod tests {
             predicates: vec![],
             schema: Schema::with_time_index(
                 vec![
-                    Column::new("ts", DataType::Timestamp, false),
-                    Column::new("service", DataType::Utf8, false),
-                    Column::new("region", DataType::Utf8, false),
-                    Column::new("value", DataType::Float64, false),
+                    Field::plain("ts", DataType::Timestamp, false),
+                    Field::plain("service", DataType::Utf8, false),
+                    Field::plain("region", DataType::Utf8, false),
+                    Field::plain("value", DataType::Float64, false),
                 ],
                 0,
                 vec![],

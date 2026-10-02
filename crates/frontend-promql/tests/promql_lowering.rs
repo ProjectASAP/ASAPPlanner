@@ -758,10 +758,10 @@ fn has_intent<F: Fn(&AggIntent) -> bool>(e: &QueryExpr, pred: F) -> bool {
     all_intents(e).iter().any(pred)
 }
 
-/// Column names on the first `Scan` reachable by descending single-child nodes.
+/// Field names on the first `Scan` reachable by descending single-child nodes.
 fn scan_columns(e: &QueryExpr) -> Vec<String> {
     match e {
-        QueryExpr::Scan { schema, .. } => schema.columns.iter().map(|c| c.name.clone()).collect(),
+        QueryExpr::Scan { schema, .. } => schema.fields.iter().map(|c| c.name.clone()).collect(),
         QueryExpr::Aggregate { child, .. }
         | QueryExpr::TimeRange { child, .. }
         | QueryExpr::Filter { child, .. }
@@ -877,7 +877,7 @@ fn aggregate_output_schema_preserves_time_axis_and_labels() {
         panic!("expected Aggregate, got {qe:?}");
     };
     let schema = qe.output_schema().expect("aggregate schema");
-    let names: Vec<&str> = schema.columns.iter().map(|c| c.name.as_str()).collect();
+    let names: Vec<&str> = schema.fields.iter().map(|c| c.name.as_str()).collect();
     assert_eq!(names, vec!["ts", "value", "env"]);
     assert_eq!(
         schema.time_index,
@@ -903,7 +903,7 @@ fn scan_schema_carries_ts_value_and_group_keys() {
     let QueryExpr::Scan { schema, .. } = find_scan(&qe) else {
         unreachable!()
     };
-    let mut names: Vec<&str> = schema.columns.iter().map(|c| c.name.as_str()).collect();
+    let mut names: Vec<&str> = schema.fields.iter().map(|c| c.name.as_str()).collect();
     names.sort();
     assert_eq!(names, vec!["service", "ts", "value"]);
     assert_eq!(schema.time_index, Some(0)); // ts
@@ -1154,7 +1154,7 @@ fn histogram_quantiles_branches_are_union_compatible() {
         .map(|c| {
             c.output_schema()
                 .expect("branch schema")
-                .columns
+                .fields
                 .iter()
                 .map(|c| c.name.clone())
                 .collect()
@@ -1163,7 +1163,7 @@ fn histogram_quantiles_branches_are_union_compatible() {
     assert_eq!(shapes[0], shapes[1], "branches must be union-compatible");
     assert_eq!(shapes[0], vec!["value".to_string(), "q".to_string()]);
     assert_eq!(
-        q.output_schema().expect("merged schema").columns.len(),
+        q.output_schema().expect("merged schema").fields.len(),
         2,
         "the merged schema describes every branch"
     );

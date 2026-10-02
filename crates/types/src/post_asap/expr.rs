@@ -2,7 +2,7 @@ use super::ExecutionTiming;
 use std::rc::Rc;
 
 use super::guarantee::ResultGuarantee;
-use super::schema::{SummaryFamilyType, SummarySchema};
+use crate::pre_asap::schema::{FieldDataType, Schema};
 use super::sketch::{GroupingStrategy, SketchQuery, SummaryUpdate};
 use crate::pre_asap::agg_intent::AggIntent;
 use crate::pre_asap::query_expr::Predicate;
@@ -87,15 +87,15 @@ pub enum CandidateCompleteness {
 // ── Post-ASAP DAG node ───────────────────────────────────────────────────────
 
 /// A node in the post-ASAP DAG: wraps the expression and its derived output
-/// schema so every edge carries a typed schema. `SummarySchema` may contain
-/// summary-state-typed columns (`SummaryFamilyType`'s non-`Plain` variants);
+/// schema so every edge carries a typed schema. `Schema` may contain
+/// summary-state-typed columns (`FieldDataType`'s non-`Plain` variants);
 /// the pre-ASAP `Schema` cannot.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SummaryNode {
     pub expr: SummaryExpr,
     /// Output schema of `expr` — the schema of the data flowing on the edge
     /// leading *from* this node to its parent(s).
-    pub schema: SummarySchema,
+    pub schema: Schema,
     /// The machine-readable accuracy guarantee of the *value* this node
     /// produces (issue #172) — `Some` on every finalized, caller-visible
     /// value: a `SummaryEstimate` readout, an `ExactAggregate`-family
@@ -124,8 +124,8 @@ pub struct SummaryNode {
 pub enum SummaryExpr {
     /// A pre-ASAP subtree kept as-is because it has no selected implementation
     /// or supported residual decomposition. Output schema is the inner node's
-    /// schema, lifted to `SummarySchema` with all fields as
-    /// `SummaryFamilyType::Plain`.
+    /// schema, lifted to `Schema` with all fields as
+    /// `FieldDataType::Plain`.
     KeepPreAsap(Rc<QueryExpr>),
 
     /// A PromQL binary operation whose operands were planned independently.
@@ -167,9 +167,9 @@ pub enum SummaryExpr {
     SummaryAgg {
         child: Rc<SummaryNode>,
         /// Which summary family realizes this aggregation, and that
-        /// family's own `(kind, params)`. Never `SummaryFamilyType::Plain`
+        /// family's own `(kind, params)`. Never `FieldDataType::Plain`
         /// — this node always produces summary state, not a plain value.
-        family: SummaryFamilyType,
+        family: FieldDataType,
         /// Optional multidimensional item identity and the observation/update
         /// weight fed into each state update. Subpopulation semantics remain
         /// on `reduction`; physical sharing remains on `grouping`.
@@ -209,8 +209,8 @@ pub enum SummaryExpr {
         outer: Rc<SummaryNode>,
         inner: Rc<SummaryNode>,
         key: ColumnRef,
-        /// Never `SummaryFamilyType::Plain` — see [`SummaryAgg::family`](SummaryExpr::SummaryAgg).
-        family: SummaryFamilyType,
+        /// Never `FieldDataType::Plain` — see [`SummaryAgg::family`](SummaryExpr::SummaryAgg).
+        family: FieldDataType,
     },
 
     /// Subtract one summary from another. Valid only for families with a

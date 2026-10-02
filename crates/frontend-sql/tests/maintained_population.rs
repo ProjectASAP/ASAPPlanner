@@ -7,7 +7,7 @@ use asap_types::{
         maintained_population::{MaintainedPopulation, PopulationInput},
         share_common_summary_subtrees, SummaryExpr, ValueOperation,
     },
-    pre_asap::{Column, DataType, QueryExpr, Schema},
+    pre_asap::{Field, DataType, QueryExpr, Schema},
     types::AccuracyTarget,
 };
 use std::rc::Rc;
@@ -16,8 +16,8 @@ async fn aggregate(q: &str) -> Rc<QueryExpr> {
     let catalog = SqlCatalog::new().with_table(
         "samples",
         Schema::new(vec![
-            Column::new("latency", DataType::Float64, false),
-            Column::new("job", DataType::Utf8, false),
+            Field::plain("latency", DataType::Float64, false),
+            Field::plain("job", DataType::Utf8, false),
         ]),
     );
     let root = lower_sql(q, &catalog, AccuracyTarget::Exact).await.unwrap();

@@ -62,7 +62,7 @@ mod tests {
         let count_sketch = default_size_params(SketchAlgorithm::CountSketch, &intent, 0.01, 0.01);
         let guarantee = DefaultAccuracyModel
             .local_guarantee(
-                &SummaryFamilyType::Sketch(
+                &FieldDataType::Sketch(
                     SketchKind::new(SketchAlgorithm::CountSketch, count_sketch),
                     GroupingStrategy::default(),
                 ),

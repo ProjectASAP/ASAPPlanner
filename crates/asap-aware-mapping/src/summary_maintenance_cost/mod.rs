@@ -9,7 +9,7 @@ use std::rc::Rc;
 
 use asap_types::post_asap::{
     BoundExpr, ErrorMetric, ExactKind, GuaranteeSource, ProbabilityExpr, ResultGuarantee,
-    SketchAlgorithm, SummaryExpr, SummaryFamilyType, SummaryMaintenanceLifecycle,
+    SketchAlgorithm, SummaryExpr, FieldDataType, SummaryMaintenanceLifecycle,
     SummaryMaintenanceLifecycleGuarantee, SummaryNode, SummaryWindowFramework,
 };
 use asap_types::pre_asap::{
