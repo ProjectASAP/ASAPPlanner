@@ -1,6 +1,4 @@
 //! Query text through summary selection: counts use observations, never value weights.
-use std::rc::Rc;
-
 use asap_aware_mapping::accuracy::DefaultAccuracyModel;
 use asap_aware_mapping::cost_model::DefaultCostModel;
 use asap_aware_mapping::{
@@ -8,12 +6,14 @@ use asap_aware_mapping::{
     SketchAlgorithmStrategy, TargetSubDAG,
 };
 mod support;
+use asap_types::ir::export::PostAsapOperatorPayload;
+use asap_types::ir::{ASAPOp, Operator};
 use asap_types::post_asap::{
-    compile_post_asap_dag, ExactKind, NonNegativeWeightProof, PostAsapOperatorPayload,
-    SketchAlgorithm, SummaryExpr, FieldDataType, SummaryInputExpr, WeightDomain,
+    ExactKind, FieldDataType, NonNegativeWeightProof, SketchAlgorithm, SummaryInputExpr,
+    WeightDomain,
 };
 use asap_types::types::AccuracyTarget;
-use support::lower_promql;
+use support::{lower_promql, post_asap_dag};
 
 #[test]
 fn grouped_count_keeps_uncertified_hydra_candidates_for_backend_review() {
@@ -21,7 +21,7 @@ fn grouped_count_keeps_uncertified_hydra_candidates_for_backend_review() {
         epsilon: 0.01,
         delta: 0.01,
     };
-    let root = Rc::new(lower_promql("count by(job)(up)", target.clone()).unwrap());
+    let root = lower_promql("count by(job)(up)", target.clone()).unwrap();
     let space = search_workload_with_targets(
         vec![("count", root, Some(target))],
         &default_strategies(),
@@ -51,14 +51,14 @@ fn grouped_count_keeps_uncertified_hydra_candidates_for_backend_review() {
 #[test]
 fn exact_counts_select_count_accumulators() {
     for query in ["count(up)", "count by(job)(up)", "count_over_time(up[5m])"] {
-        let root = Rc::new(lower_promql(query, AccuracyTarget::Exact).unwrap());
+        let root = lower_promql(query, AccuracyTarget::Exact).unwrap();
         let candidates =
             SketchAlgorithmStrategy::default_cost_model().replacements(&TargetSubDAG::new(&root));
         assert!(
             candidates.iter().any(|candidate| {
-                matches!(&candidate.replacement, Replacement::Summary(node)
-                if matches!(&node.expr, SummaryExpr::SummaryAgg {
-                    family: FieldDataType::ExactAggregate(ExactKind::Count, _), .. }))
+                matches!(&candidate.replacement, Replacement::Subtree(node)
+                if matches!(&node.operator, Operator::ASAP(ASAPOp::SummaryAgg {
+                    family: FieldDataType::ExactAggregate(ExactKind::Count, _), .. })))
             }),
             "{query}: {candidates:?}"
         );
@@ -69,22 +69,23 @@ fn exact_counts_select_count_accumulators() {
 #[test]
 fn frequency_count_candidates_use_unit_weights() {
     for query in ["count_over_time(up[5m])", "count(up)"] {
-        let root = Rc::new(lower_promql(query, AccuracyTarget::Epsilon(0.02)).unwrap());
+        let root = lower_promql(query, AccuracyTarget::Epsilon(0.02)).unwrap();
         let candidates =
             SketchAlgorithmStrategy::default_cost_model().replacements(&TargetSubDAG::new(&root));
         let mut algorithms = Vec::new();
         for candidate in &candidates {
-            let Replacement::Summary(node) = &candidate.replacement else {
+            let Replacement::Subtree(node) = &candidate.replacement else {
                 continue;
             };
-            let SummaryExpr::SummaryEstimate { summary_input, .. } = &node.expr else {
+            let Operator::ASAP(ASAPOp::SummaryEstimate { summary_input, .. }) = &node.operator
+            else {
                 continue;
             };
-            let SummaryExpr::SummaryAgg {
+            let Operator::ASAP(ASAPOp::SummaryAgg {
                 family: FieldDataType::Sketch(kind, _),
                 input,
                 ..
-            } = &summary_input.expr
+            }) = &summary_input.operator
             else {
                 continue;
             };
@@ -98,7 +99,7 @@ fn frequency_count_candidates_use_unit_weights() {
             ) {
                 continue;
             }
-            let dag = compile_post_asap_dag(node).unwrap();
+            let dag = post_asap_dag(node);
             assert!(
                 dag.nodes.iter().any(|node| matches!(
                     &node.payload,
@@ -135,25 +136,26 @@ fn frequency_count_candidates_use_unit_weights() {
 // This narrow test oracle interprets the emitted aggregate, not Prometheus ingestion,
 // staleness, or scrape scheduling. Unsupported plan shapes fail explicitly.
 fn aggregate_fixture(query: &str, series: &[Vec<f64>]) -> Vec<f64> {
-    use asap_types::pre_asap::{AggIntent, QueryExpr, Reduction};
+    use asap_types::ir::NonASAPOp;
+    use asap_types::pre_asap::{AggIntent, Reduction};
     let root = lower_promql(query, AccuracyTarget::Exact).unwrap();
-    let QueryExpr::Aggregate {
+    let NonASAPOp::Aggregate {
         reduction,
         measures,
         child,
         ..
-    } = &root
+    } = root.expect_non_asap()
     else {
         panic!("expected aggregate: {root:?}");
     };
-    match child.as_ref() {
-        QueryExpr::Scan { .. } => assert!(series.iter().all(|samples| samples.len() == 1)),
-        QueryExpr::TimeRange { range, child } => {
+    match child.expect_non_asap() {
+        NonASAPOp::Scan { .. } => assert!(series.iter().all(|samples| samples.len() == 1)),
+        NonASAPOp::TimeRange { range, child, .. } => {
             assert!(matches!(range.as_secs(), 1 | 300));
             if range.as_secs() == 1 {
                 assert!(series.iter().all(|samples| samples.len() == 1));
             }
-            assert!(matches!(child.as_ref(), QueryExpr::Scan { .. }));
+            assert!(matches!(child.expect_non_asap(), NonASAPOp::Scan { .. }));
         }
         other => panic!("unsupported fixture input: {other:?}"),
     }
@@ -225,17 +227,16 @@ fn count_over_time_counts_scrapes_not_sample_values() {
 #[test]
 fn cms_count_updates_total_ten_for_zero_positive_and_negative_samples() {
     use asap_types::pre_asap::ColumnRef;
-    let root =
-        Rc::new(lower_promql("count_over_time(up[5m])", AccuracyTarget::Epsilon(0.02)).unwrap());
+    let root = lower_promql("count_over_time(up[5m])", AccuracyTarget::Epsilon(0.02)).unwrap();
     let candidates =
         SketchAlgorithmStrategy::default_cost_model().replacements(&TargetSubDAG::new(&root));
     let dag = candidates
         .iter()
         .find_map(|candidate| {
-            let Replacement::Summary(node) = &candidate.replacement else {
+            let Replacement::Subtree(node) = &candidate.replacement else {
                 return None;
             };
-            let dag = compile_post_asap_dag(node).unwrap();
+            let dag = post_asap_dag(node);
             dag.nodes
                 .iter()
                 .any(|node| {

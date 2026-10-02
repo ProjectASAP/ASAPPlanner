@@ -1,33 +1,29 @@
 mod support;
 use asap_aware_mapping::maintained_population::MaintainedPopulationStrategy;
+use asap_types::ir::{ASAPOp, NonASAPOp, Operator};
 use asap_types::post_asap::maintained_population::PopulationInput;
-use asap_types::post_asap::{SummaryExpr, ValueOperation};
 use asap_types::types::AccuracyTarget;
-use std::rc::Rc;
 
 // A population for a one-second selector must expire members after one second.
 #[test]
 fn population_preserves_selector_horizon() {
-    let root = Rc::new(support::lower_promql("sum(a)", AccuracyTarget::Exact).unwrap());
+    let root = support::lower_promql("sum(a)", AccuracyTarget::Exact).unwrap();
     let candidate = MaintainedPopulationStrategy::new(std::slice::from_ref(&root))
         .candidate(&root)
         .unwrap();
-    let SummaryExpr::ValueOperation { child, .. } = &candidate.expr else {
+    // The readout sits over the maintained population.
+    let Operator::ASAP(ASAPOp::ReadPopulation { child, .. }) = &candidate.operator else {
         panic!()
     };
-    let SummaryExpr::ValueOperation {
-        operation: ValueOperation::MaintainPopulation { population },
-        ..
-    } = &child.expr
-    else {
+    let Operator::ASAP(ASAPOp::MaintainPopulation { population, .. }) = &child.operator else {
         panic!()
     };
     let PopulationInput::CurrentSeries(spec) = &population.input else {
         panic!()
     };
     assert_eq!(spec.lookback_ms, 1_000);
-    asap_types::post_asap::compile_post_asap_dag(&candidate).unwrap();
-    let asap_types::pre_asap::QueryExpr::Aggregate { child: source, .. } = root.as_ref() else {
+    support::post_asap_dag(&candidate);
+    let NonASAPOp::Aggregate { child: source, .. } = root.expect_non_asap() else {
         panic!()
     };
     assert!(spec.matches_input(source));

@@ -1,25 +1,27 @@
-//! PromQL front end: parse (via `promql-parser`) → the canonical, unresolved
-//! shape, built directly (issue #179) → [`resolve_root`].
+//! PromQL front end: parse (via `promql-parser`) → the name-based
+//! [`UnresolvedOp`](asap_frontend_common::UnresolvedOp) tree, built directly
+//! in canonical shape (issue #179) → [`resolve_root`].
 //!
-//! Emits [`UnresolvedQueryExpr`](asap_types::pre_asap::UnresolvedQueryExpr) itself — the
-//! canonical `QueryExpr`, generic over an unresolved
-//! [`ColumnRef`](asap_types::pre_asap::ColumnRef) — directly, rather than a
-//! separate per-language relational tree; `resolve_root` runs the
-//! [`SchemaResolver`](asap_types::pre_asap::SchemaResolver) for positional name resolution.
-//! Depends on the PromQL parser only — never on the SQL / DataFusion stack.
+//! `resolve_root` runs the
+//! [`SchemaResolver`](asap_frontend_common::SchemaResolver) for positional
+//! name resolution and returns the unified
+//! [`OperatorNode`](asap_types::ir::OperatorNode) DAG. Depends on the PromQL
+//! parser only — never on the SQL / DataFusion stack.
 
 pub mod error;
 pub mod histogram;
 pub mod promql;
 
-use asap_types::pre_asap::resolve_root;
-use asap_types::pre_asap::QueryExpr;
+use std::rc::Rc;
+
+use asap_frontend_common::resolve_root;
+use asap_types::ir::OperatorNode;
 use asap_types::workload::{DurationMs, PlanningWorkload, QueryLanguage, WorkloadError};
 
 pub use error::PromqlError;
 pub use histogram::{HistogramCatalog, HistogramKind};
 
-/// Lower every normalized PromQL workload entry to a plan-ready `QueryExpr`.
+/// Lower every normalized PromQL workload entry to a plan-ready operator DAG.
 ///
 /// PromQL workloads must declare a non-zero `data_ingestion_interval`; it is
 /// injected around each bare instant selector. Explicit range selectors keep
@@ -29,7 +31,7 @@ pub use histogram::{HistogramCatalog, HistogramKind};
 pub fn lower_promql_workload(
     workload: &PlanningWorkload,
     now_ms: u64,
-) -> Result<Vec<QueryExpr>, PromqlError> {
+) -> Result<Vec<Rc<OperatorNode>>, PromqlError> {
     lower_promql_workload_inner(workload, now_ms)
 }
 
@@ -39,7 +41,7 @@ pub fn lower_promql_workload_with_histograms(
     workload: &PlanningWorkload,
     histograms: HistogramCatalog,
     now_ms: u64,
-) -> Result<Vec<QueryExpr>, PromqlError> {
+) -> Result<Vec<Rc<OperatorNode>>, PromqlError> {
     let _guard = histogram::CatalogGuard::install(histograms);
     lower_promql_workload_inner(workload, now_ms)
 }
@@ -47,7 +49,7 @@ pub fn lower_promql_workload_with_histograms(
 fn lower_promql_workload_inner(
     workload: &PlanningWorkload,
     now_ms: u64,
-) -> Result<Vec<QueryExpr>, PromqlError> {
+) -> Result<Vec<Rc<OperatorNode>>, PromqlError> {
     if !matches!(workload.query_workload.language, QueryLanguage::PromQL) {
         return Err(PromqlError::WrongLanguage(format!(
             "{:?}",
@@ -123,7 +125,7 @@ mod tests {
     }
     use std::time::Duration;
 
-    use asap_types::pre_asap::QueryExpr;
+    use asap_types::ir::{NonASAPOp, TimeRangeKind};
     use asap_types::workload::{
         BatchEntry, DataWorkload, Evidence, PlanningWorkload, Query, QueryRequirements,
         QueryWorkload, TimeSelection,
@@ -155,27 +157,34 @@ mod tests {
         }
     }
 
+    // A bare instant selector reads the latest sample within the declared
+    // ingestion interval: an `Instant` lookback of that length.
     #[test]
     fn instant_selector_uses_declared_ingestion_interval() {
         let query = lower_promql_workload(&workload("sum by (job) (data)"), 0).unwrap();
-        let QueryExpr::Aggregate { child, .. } = &query[0] else {
+        let NonASAPOp::Aggregate { child, .. } = query[0].expect_non_asap() else {
             panic!("expected aggregate")
         };
         assert!(
-            matches!(child.as_ref(), QueryExpr::TimeRange { range, child }
-            if *range == Duration::from_secs(1) && matches!(child.as_ref(), QueryExpr::Scan { .. }))
+            matches!(child.expect_non_asap(), NonASAPOp::TimeRange { range, kind, child }
+            if *range == Duration::from_secs(1)
+                && *kind == TimeRangeKind::Instant
+                && matches!(child.expect_non_asap(), NonASAPOp::Scan { .. }))
         );
     }
 
+    // An explicit `m[5m]` keeps its own window as a `Range` selection.
     #[test]
     fn explicit_range_selector_keeps_its_query_range() {
         let query = lower_promql_workload(&workload("sum_over_time(data[5m])"), 0).unwrap();
-        let QueryExpr::Aggregate { child, .. } = &query[0] else {
+        let NonASAPOp::Aggregate { child, .. } = query[0].expect_non_asap() else {
             panic!("expected aggregate")
         };
         assert!(
-            matches!(child.as_ref(), QueryExpr::TimeRange { range, child }
-            if *range == Duration::from_secs(300) && matches!(child.as_ref(), QueryExpr::Scan { .. }))
+            matches!(child.expect_non_asap(), NonASAPOp::TimeRange { range, kind, child }
+            if *range == Duration::from_secs(300)
+                && *kind == TimeRangeKind::Range
+                && matches!(child.expect_non_asap(), NonASAPOp::Scan { .. }))
         );
     }
 

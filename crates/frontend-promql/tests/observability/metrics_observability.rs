@@ -13,8 +13,7 @@ use asap_aware_mapping::{
 use asap_frontend_promql::PromqlError;
 #[path = "../support.rs"]
 mod support;
-use asap_types::post_asap::{SummaryExpr, SummaryNode};
-use asap_types::pre_asap::query_expr::QueryExpr;
+use asap_types::ir::OperatorNode;
 use asap_types::types::AccuracyTarget;
 use support::lower_promql;
 
@@ -64,19 +63,18 @@ fn queries(corpus: &str) -> impl Iterator<Item = &str> {
         .filter(|line| !line.is_empty() && !line.starts_with('#'))
 }
 
-fn post_asap_candidate(expr: &QueryExpr) -> Result<Rc<SummaryNode>, RealizationError> {
-    let root = Rc::new(expr.clone());
-    let target = TargetSubDAG::new(&root);
+fn post_asap_candidate(root: &Rc<OperatorNode>) -> Result<Rc<OperatorNode>, RealizationError> {
+    let target = TargetSubDAG::new(root);
     match SketchAlgorithmStrategy::default_cost_model()
         .replacements(&target)
         .into_iter()
         .next()
     {
         Some(ReplacementSubDAG {
-            replacement: Replacement::Summary(node),
+            replacement: Replacement::Subtree(node),
             ..
         }) => Ok(node),
-        _ => keep_pre_asap(&root),
+        _ => keep_pre_asap(root),
     }
 }
 
@@ -99,9 +97,8 @@ fn benchmark_corpora_are_total_and_report_coverage() {
                 Ok(expr) => {
                     lowered += 1;
                     match post_asap_candidate(&expr) {
-                        Ok(node) if !matches!(node.expr, SummaryExpr::KeepPreAsap(_)) => {
-                            post_asap_candidates += 1
-                        }
+                        // An ASAP operator bound somewhere below the root.
+                        Ok(node) if node.contains_asap() => post_asap_candidates += 1,
                         Ok(_) => {
                             post_asap_unchanged += 1;
                             if std::env::var_os("METRICS_OBSERVABILITY_REPORT").is_some() {

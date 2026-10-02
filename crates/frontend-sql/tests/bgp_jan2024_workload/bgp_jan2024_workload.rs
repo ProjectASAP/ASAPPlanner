@@ -70,7 +70,7 @@ fn catalog() -> SqlCatalog {
         .with_table("bgp.bgp_updates", updates)
 }
 
-async fn lower(q: &str) -> Result<asap_types::pre_asap::QueryExpr, SqlError> {
+async fn lower(q: &str) -> Result<std::rc::Rc<asap_types::ir::OperatorNode>, SqlError> {
     lower_sql_dialect(
         q,
         &catalog(),

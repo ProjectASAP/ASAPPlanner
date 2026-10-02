@@ -31,22 +31,26 @@
 // `__GAP`-suffixed test names intentionally SHOUT the documented divergences.
 #![allow(non_snake_case)]
 
+use std::rc::Rc;
 use std::time::Duration;
 
 use asap_frontend_promql::PromqlError as LoweringError;
 mod support;
+use asap_types::ir::{
+    BinaryOperator, ExprSemantics, NonASAPOp, OperatorNode, ScalarExpr, TimeRangeKind,
+};
 use asap_types::pre_asap::schema::DataType;
 use asap_types::pre_asap::{
     AggIntent, ArithmeticOpKind, AtModifier, BinaryOpKind, CompareOpKind, MathFunc,
-    PromQLVectorSetOpKind, QueryExpr, Reduction, SampleKind, Source, TimeFunc,
+    PromQLVectorSetOpKind, Reduction, SampleKind, ScalarValue, Source, TimeFunc,
 };
 use asap_types::types::AccuracyTarget;
-use support::lower_promql;
+use support::{lower_promql, promql_scalar};
 
 // ── harness helpers ─────────────────────────────────────────────────────────────
 
 /// Lower, expecting success.
-fn ok(q: &str) -> QueryExpr {
+fn ok(q: &str) -> Rc<OperatorNode> {
     lower_promql(q, AccuracyTarget::Exact)
         .unwrap_or_else(|e| panic!("expected {q:?} to lower, got error: {e}"))
 }
@@ -60,71 +64,29 @@ fn rejected(q: &str) -> LoweringError {
 }
 
 /// Every `AggIntent` anywhere in the tree, root-to-leaf.
-fn intents(e: &QueryExpr) -> Vec<AggIntent> {
+fn intents(e: &OperatorNode) -> Vec<AggIntent> {
     let mut out = Vec::new();
     collect(e, &mut out);
     out
 }
 
-fn collect(e: &QueryExpr, out: &mut Vec<AggIntent>) {
-    match e {
-        QueryExpr::Aggregate {
-            measures, child, ..
-        } => {
-            out.extend(measures.iter().cloned());
-            collect(child, out);
-        }
-        QueryExpr::TimeRange { child, .. }
-        | QueryExpr::TimeShift { child, .. }
-        | QueryExpr::Filter { child, .. }
-        | QueryExpr::Sort { child, .. }
-        | QueryExpr::Limit { child, .. }
-        | QueryExpr::PromqlSubquery { child, .. }
-        | QueryExpr::Dedup { child, .. }
-        | QueryExpr::SQLWindowFunc { child, .. }
-        | QueryExpr::Project { child, .. }
-        | QueryExpr::PromqlRelabel { child, .. }
-        | QueryExpr::PromqlSeriesSample { child, .. }
-        | QueryExpr::PromqlInfoEnrich { child, .. } => collect(child, out),
-        QueryExpr::BinaryOp { lhs, rhs, .. } => {
-            collect(lhs, out);
-            collect(rhs, out);
-        }
-        QueryExpr::Join { left, right, .. } | QueryExpr::SetOp { left, right, .. } => {
-            collect(left, out);
-            collect(right, out);
-        }
-        QueryExpr::Concat { children, .. } => children.iter().for_each(|c| collect(c, out)),
-        QueryExpr::PromqlVectorFromScalar(inner) | QueryExpr::PromqlScalarFromVector(inner) => {
-            collect(inner, out)
-        }
-        // `AggIntent` only ever lives in `Aggregate.measures`, never in a
-        // scalar position (issue #205) — nothing to collect there.
-        QueryExpr::Scan { .. }
-        | QueryExpr::PromqlScalarBridge(_)
-        | QueryExpr::EvalTimestamp
-        | QueryExpr::CurrentTimestamp => {}
-        QueryExpr::Column(_)
-        | QueryExpr::Literal(_)
-        | QueryExpr::Compare { .. }
-        | QueryExpr::BoolAnd(_)
-        | QueryExpr::BoolOr(_)
-        | QueryExpr::Not(_)
-        | QueryExpr::IsNull(_)
-        | QueryExpr::IsNotNull(_)
-        | QueryExpr::Cast { .. }
-        | QueryExpr::InList { .. }
-        | QueryExpr::FunctionCall { .. }
-        | QueryExpr::Arithmetic { .. }
-        | QueryExpr::Case { .. } => {}
+/// `AggIntent` only ever lives in `Aggregate.measures`, never in a scalar
+/// position (issue #205); `children()` also descends into the operators a
+/// scalar position reads (`scalar(v)`).
+fn collect(e: &OperatorNode, out: &mut Vec<AggIntent>) {
+    if let Some(NonASAPOp::Aggregate { measures, .. }) = e.non_asap() {
+        out.extend(measures.iter().cloned());
+    }
+    for child in e.children() {
+        collect(child, out);
     }
 }
 
 /// The first `Scan` reached by descending single-child nodes, with its metric
 /// name and predicate count.
-fn first_scan(e: &QueryExpr) -> (String, usize) {
-    match e {
-        QueryExpr::Scan {
+fn first_scan(e: &OperatorNode) -> (String, usize) {
+    match e.expect_non_asap() {
+        NonASAPOp::Scan {
             source, predicates, ..
         } => {
             let name = match source {
@@ -133,43 +95,40 @@ fn first_scan(e: &QueryExpr) -> (String, usize) {
             };
             (name, predicates.len())
         }
-        QueryExpr::TimeRange { child, .. }
-        | QueryExpr::TimeShift { child, .. }
-        | QueryExpr::Aggregate { child, .. }
-        | QueryExpr::Filter { child, .. }
-        | QueryExpr::Sort { child, .. }
-        | QueryExpr::Limit { child, .. }
-        | QueryExpr::PromqlSubquery { child, .. } => first_scan(child),
+        NonASAPOp::TimeRange { child, .. }
+        | NonASAPOp::TimeShift { child, .. }
+        | NonASAPOp::Aggregate { child, .. }
+        | NonASAPOp::Filter { child, .. }
+        | NonASAPOp::Sort { child, .. }
+        | NonASAPOp::Limit { child, .. }
+        | NonASAPOp::PromqlSubquery { child, .. } => first_scan(child),
         other => panic!("no Scan reachable from {other:?}"),
     }
 }
 
-fn has<F: Fn(&AggIntent) -> bool>(e: &QueryExpr, pred: F) -> bool {
+fn has<F: Fn(&AggIntent) -> bool>(e: &OperatorNode, pred: F) -> bool {
     intents(e).iter().any(pred)
 }
 
 /// Whether the tree contains a `Mul`-by-`PromqlScalarBridge(-1)` anywhere — the shape unary
 /// negation lowers to (issue #36).
-fn negates_via_scalar(e: &QueryExpr) -> bool {
-    let is_neg_one = |q: &QueryExpr| {
-        q.as_promql_scalar()
-            .is_some_and(|v| (v + 1.0).abs() < 1e-12)
-    };
-    match e {
-        QueryExpr::BinaryOp { op, lhs, rhs, .. } => {
-            (*op == BinaryOpKind::Arithmetic(ArithmeticOpKind::Mul)
+fn negates_via_scalar(e: &OperatorNode) -> bool {
+    let is_neg_one = |q: &OperatorNode| promql_scalar(q).is_some_and(|v| (v + 1.0).abs() < 1e-12);
+    match e.expect_non_asap() {
+        NonASAPOp::BinaryOp { operator, lhs, rhs, .. } => {
+            (operator.kind == BinaryOpKind::Arithmetic(ArithmeticOpKind::Mul)
                 && (is_neg_one(lhs) || is_neg_one(rhs)))
                 || negates_via_scalar(lhs)
                 || negates_via_scalar(rhs)
         }
-        QueryExpr::Aggregate { child, .. }
-        | QueryExpr::Sort { child, .. }
-        | QueryExpr::Limit { child, .. }
-        | QueryExpr::TimeRange { child, .. }
-        | QueryExpr::TimeShift { child, .. }
-        | QueryExpr::PromqlSubquery { child, .. }
-        | QueryExpr::Filter { child, .. }
-        | QueryExpr::Project { child, .. } => negates_via_scalar(child),
+        NonASAPOp::Aggregate { child, .. }
+        | NonASAPOp::Sort { child, .. }
+        | NonASAPOp::Limit { child, .. }
+        | NonASAPOp::TimeRange { child, .. }
+        | NonASAPOp::TimeShift { child, .. }
+        | NonASAPOp::PromqlSubquery { child, .. }
+        | NonASAPOp::Filter { child, .. }
+        | NonASAPOp::Project { child, .. } => negates_via_scalar(child),
         _ => false,
     }
 }
@@ -193,10 +152,10 @@ fn promql_scan_schema_is_open() {
     // runtime-only, so the binding schema lists only the (ts, value) floor +
     // referenced labels and may be a subset of the runtime row.
     let qe = ok("node_cpu_seconds_total");
-    let QueryExpr::TimeRange { child, .. } = &qe else {
+    let NonASAPOp::TimeRange { child, .. } = qe.expect_non_asap() else {
         panic!("expected a TimeRange for a bare selector, got {qe:?}");
     };
-    let QueryExpr::Scan { schema, .. } = child.as_ref() else {
+    let NonASAPOp::Scan { schema, .. } = child.expect_non_asap() else {
         panic!("expected a Scan inside the TimeRange, got {qe:?}");
     };
     assert!(
@@ -241,7 +200,7 @@ fn range_vector_selector_is_time_range() {
     // SEMANTICS: `[5m]` turns an instant vector into a range vector,
     // represented in the canonical tree as a dedicated `TimeRange` node.
     let qe = ok("node_cpu_seconds_total[5m]");
-    let QueryExpr::TimeRange { range, .. } = &qe else {
+    let NonASAPOp::TimeRange { range, .. } = qe.expect_non_asap() else {
         panic!("expected TimeRange for a range-vector selector, got {qe:?}");
     };
     assert_eq!(*range, Duration::from_secs(300));
@@ -253,18 +212,34 @@ fn range_vector_selector_is_time_range() {
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[test]
+fn selector_time_ranges_carry_their_kind() {
+    // SEMANTICS: an instant selector reads the latest sample within the
+    // ingestion interval (`Instant`); `m[5m]` is a range selection (`Range`).
+    // Same length is not the same shape: `m` and `m[1s]` stay distinct.
+    assert!(matches!(
+        ok("node_cpu_seconds_total").expect_non_asap(),
+        NonASAPOp::TimeRange { kind: TimeRangeKind::Instant, .. }
+    ));
+    assert!(matches!(
+        ok("node_cpu_seconds_total[5m]").expect_non_asap(),
+        NonASAPOp::TimeRange { kind: TimeRangeKind::Range, .. }
+    ));
+    assert_ne!(ok("node_cpu_seconds_total"), ok("node_cpu_seconds_total[1s]"));
+}
+
+#[test]
 fn rate_range_lives_in_time_range_node() {
     // SEMANTICS: per-second average rate; the temporal range lives on the
     // enclosing `TimeRange` node, not inside the intent.
     let qe = ok("rate(http_requests_total[5m])");
-    let QueryExpr::Aggregate {
+    let NonASAPOp::Aggregate {
         measures, child, ..
-    } = &qe
+    } = qe.expect_non_asap()
     else {
         panic!("expected Aggregate, got {qe:?}");
     };
     assert!(matches!(measures.as_slice(), [AggIntent::Rate]));
-    let QueryExpr::TimeRange { range, .. } = child.as_ref() else {
+    let NonASAPOp::TimeRange { range, .. } = child.expect_non_asap() else {
         panic!("expected TimeRange child, got {child:?}");
     };
     assert_eq!(*range, Duration::from_secs(300));
@@ -281,14 +256,14 @@ fn irate_maps_to_its_own_intent() {
 #[test]
 fn increase_range_lives_in_time_range_node() {
     let qe = ok("increase(http_requests_total[1h])");
-    let QueryExpr::Aggregate {
+    let NonASAPOp::Aggregate {
         measures, child, ..
-    } = &qe
+    } = qe.expect_non_asap()
     else {
         panic!("expected Aggregate, got {qe:?}");
     };
     assert!(matches!(measures.as_slice(), [AggIntent::Increase]));
-    let QueryExpr::TimeRange { range, .. } = child.as_ref() else {
+    let NonASAPOp::TimeRange { range, .. } = child.expect_non_asap() else {
         panic!("expected TimeRange child, got {child:?}");
     };
     assert_eq!(*range, Duration::from_secs(3600));
@@ -303,7 +278,7 @@ fn increase_range_lives_in_time_range_node() {
 fn sum_collapses_all_series() {
     // SEMANTICS: `sum(v)` → one output series. No grouping → no Partition.
     let qe = ok("sum(node_filesystem_size_bytes)");
-    assert!(matches!(&qe, QueryExpr::Aggregate { .. }));
+    assert!(matches!(qe.expect_non_asap(), NonASAPOp::Aggregate { .. }));
     assert!(has(&qe, |i| matches!(i, AggIntent::Sum { .. })));
 }
 
@@ -314,12 +289,12 @@ fn sum_by_groups_via_positional_aggregate() {
     // name-based Partition). SchemaResolver leaf = [ts, value, instance, job] (referenced
     // keys appended sorted), so the keys resolve to columns [2, 3].
     let qe = ok("sum by(job, instance) (node_filesystem_size_bytes)");
-    let QueryExpr::Aggregate {
+    let NonASAPOp::Aggregate {
         reduction,
         measures,
         child,
         ..
-    } = &qe
+    } = qe.expect_non_asap()
     else {
         panic!("expected positional Aggregate for `by(...)`, got {qe:?}");
     };
@@ -330,7 +305,7 @@ fn sum_by_groups_via_positional_aggregate() {
     );
     assert!(matches!(measures.as_slice(), [AggIntent::Sum { .. }]));
     assert!(
-        matches!(child.as_ref(), QueryExpr::TimeRange { child, .. } if matches!(child.as_ref(), QueryExpr::Scan { .. }))
+        matches!(child.expect_non_asap(), NonASAPOp::TimeRange { child, .. } if matches!(child.expect_non_asap(), NonASAPOp::Scan { .. }))
     );
 }
 
@@ -369,11 +344,11 @@ fn sum_without_groups_by_the_complement() {
     // the runtime: the grouping is the exclusion form and the output schema
     // stays OPEN (unlike `by`, which freezes to closed).
     let qe = ok("sum without(instance) (node_filesystem_size_bytes)");
-    let QueryExpr::Aggregate {
+    let NonASAPOp::Aggregate {
         reduction,
         measures,
         ..
-    } = &qe
+    } = qe.expect_non_asap()
     else {
         panic!("expected an Aggregate, got {qe:?}");
     };
@@ -385,7 +360,7 @@ fn sum_without_groups_by_the_complement() {
     assert_eq!(by.keys().len(), 1, "the one excluded label (instance)");
     assert!(matches!(measures.as_slice(), [AggIntent::Sum { .. }]));
     assert!(
-        !qe.output_schema().unwrap().closed,
+        !qe.schema.clone().closed,
         "a `without` result keeps an open schema (kept label set is runtime-only)"
     );
 }
@@ -418,16 +393,16 @@ fn group_aggregator_lowers_to_a_distinct_intent() {
 fn sum_of_rate_is_two_levels() {
     // SEMANTICS: per-series rate, THEN cross-series sum. Both must survive.
     let qe = ok("sum(rate(http_requests_total[5m]))");
-    let QueryExpr::Aggregate {
+    let NonASAPOp::Aggregate {
         measures, child, ..
-    } = &qe
+    } = qe.expect_non_asap()
     else {
         panic!("expected outer Aggregate{{Sum}}, got {qe:?}");
     };
     assert!(matches!(measures.as_slice(), [AggIntent::Sum { .. }]));
     assert!(matches!(
-        child.as_ref(),
-        QueryExpr::Aggregate { measures, .. } if matches!(measures.as_slice(), [AggIntent::Rate])
+        child.expect_non_asap(),
+        NonASAPOp::Aggregate { measures, .. } if matches!(measures.as_slice(), [AggIntent::Rate])
     ));
 }
 
@@ -436,12 +411,12 @@ fn sum_by_of_rate_groups_outer_level() {
     // Outer cross-series Sum grouped on positional `Aggregate.by` over the
     // label-preserving inner Rate. Leaf = [ts, value, instance] → by = [2].
     let qe = ok("sum by(instance) (rate(node_network_receive_bytes_total[5m]))");
-    let QueryExpr::Aggregate {
+    let NonASAPOp::Aggregate {
         reduction,
         measures,
         child,
         ..
-    } = &qe
+    } = qe.expect_non_asap()
     else {
         panic!("expected outer Aggregate grouped by instance, got {qe:?}");
     };
@@ -449,8 +424,8 @@ fn sum_by_of_rate_groups_outer_level() {
     assert!(matches!(measures.as_slice(), [AggIntent::Sum { .. }]));
     // child is the inner per-series Rate aggregate.
     assert!(matches!(
-        child.as_ref(),
-        QueryExpr::Aggregate { measures, .. } if matches!(measures.as_slice(), [AggIntent::Rate])
+        child.expect_non_asap(),
+        NonASAPOp::Aggregate { measures, .. } if matches!(measures.as_slice(), [AggIntent::Rate])
     ));
 }
 
@@ -461,26 +436,26 @@ fn sum_by_of_over_time_groups_outer_level() {
     // preserving, so the key resolves positionally just like the rate case (no
     // name-based Partition). Leaf = [ts, value, instance] → by = [2].
     let qe = ok("sum by(instance) (avg_over_time(node_cpu_seconds_total[5m]))");
-    let QueryExpr::Aggregate {
+    let NonASAPOp::Aggregate {
         reduction,
         measures,
         child,
         ..
-    } = &qe
+    } = qe.expect_non_asap()
     else {
         panic!("expected outer Aggregate grouped by instance, got {qe:?}");
     };
     assert_eq!(reduction, &Reduction::by(vec![2]));
     assert!(matches!(measures.as_slice(), [AggIntent::Sum { .. }]));
     // child is the inner per-series reduction: Aggregate{Avg} over TimeRange.
-    let QueryExpr::Aggregate {
+    let NonASAPOp::Aggregate {
         measures, child, ..
-    } = child.as_ref()
+    } = child.expect_non_asap()
     else {
         panic!("expected Aggregate (per-series avg_over_time) under the Sum, got {child:?}");
     };
     assert!(matches!(measures.as_slice(), [AggIntent::Avg { .. }]));
-    assert!(matches!(child.as_ref(), QueryExpr::TimeRange { .. }));
+    assert!(matches!(child.expect_non_asap(), NonASAPOp::TimeRange { .. }));
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -501,7 +476,7 @@ fn over_time_functions_reduce_over_time_range() {
     ] {
         let qe = ok(q);
         assert!(
-            matches!(&qe, QueryExpr::Aggregate { .. }),
+            matches!(qe.expect_non_asap(), NonASAPOp::Aggregate { .. }),
             "{q}: expected Aggregate"
         );
         let matched = intents(&qe).iter().any(|i| match want {
@@ -519,7 +494,7 @@ fn over_time_functions_reduce_over_time_range() {
 #[test]
 fn quantile_over_time_is_aggregate_over_time_range() {
     let qe = ok("quantile_over_time(0.9, request_latency_seconds[5m])");
-    assert!(matches!(&qe, QueryExpr::Aggregate { .. }));
+    assert!(matches!(qe.expect_non_asap(), NonASAPOp::Aggregate { .. }));
     assert!(has(
         &qe,
         |i| matches!(i, AggIntent::Quantile { q, .. } if (*q - 0.9).abs() < 1e-9)
@@ -536,7 +511,7 @@ fn histogram_quantile_over_rate() {
     // φ-quantile from bucket rates. The `_bucket` metric marks the classic
     // cumulative-bucket form → `HistogramQuantile` (even without `sum by (le)`).
     let qe = ok("histogram_quantile(0.9, rate(demo_api_request_duration_seconds_bucket[5m]))");
-    let QueryExpr::Aggregate { measures, .. } = &qe else {
+    let NonASAPOp::Aggregate { measures, .. } = qe.expect_non_asap() else {
         panic!("expected Aggregate{{HistogramQuantile}}, got {qe:?}");
     };
     assert!(
@@ -553,9 +528,9 @@ fn histogram_quantile_over_sum_by_le_preserves_le_grouping() {
     let qe = ok(
         "histogram_quantile(0.99, sum by(le) (rate(demo_api_request_duration_seconds_bucket[5m])))",
     );
-    let QueryExpr::Aggregate {
+    let NonASAPOp::Aggregate {
         measures, child, ..
-    } = &qe
+    } = qe.expect_non_asap()
     else {
         panic!("expected outer Aggregate{{HistogramQuantile}}, got {qe:?}");
     };
@@ -566,11 +541,11 @@ fn histogram_quantile_over_sum_by_le_preserves_le_grouping() {
     ));
     // `sum by(le)` now survives as a positional Aggregate (by = [2], `le`), over
     // the inner Rate — no name-based Partition.
-    let QueryExpr::Aggregate {
+    let NonASAPOp::Aggregate {
         reduction,
         measures,
         ..
-    } = child.as_ref()
+    } = child.expect_non_asap()
     else {
         panic!("expected `sum by(le)` as a positional Aggregate, got {child:?}");
     };
@@ -586,7 +561,7 @@ fn histogram_quantile_over_sum_by_le_preserves_le_grouping() {
 #[test]
 fn vector_arithmetic() {
     let qe = ok("node_memory_MemFree_bytes + node_memory_Cached_bytes");
-    let QueryExpr::BinaryOp { op, .. } = &qe else {
+    let NonASAPOp::BinaryOp { operator: BinaryOperator { kind: op, .. }, .. } = qe.expect_non_asap() else {
         panic!("expected BinaryOp, got {qe:?}");
     };
     assert_eq!(*op, BinaryOpKind::Arithmetic(ArithmeticOpKind::Add));
@@ -597,14 +572,14 @@ fn on_matching_with_group_left() {
     // SEMANTICS: many-to-one matching on a label subset.
     let qe =
         ok("rate(demo_cpu_usage_seconds_total[1m]) / on(instance, job) group_left demo_num_cpus");
-    let QueryExpr::BinaryOp {
-        op, vector_match, ..
-    } = &qe
-    else {
+    let NonASAPOp::BinaryOp { operator, .. } = qe.expect_non_asap() else {
         panic!("expected BinaryOp, got {qe:?}");
     };
-    assert_eq!(*op, BinaryOpKind::Arithmetic(ArithmeticOpKind::Div));
-    let vm = vector_match.as_ref().expect("on(...) group_left present");
+    assert_eq!(operator.kind, BinaryOpKind::Arithmetic(ArithmeticOpKind::Div));
+    let vm = operator
+        .vector_match
+        .as_ref()
+        .expect("on(...) group_left present");
     assert_eq!(vm.labels, vec!["instance".to_string(), "job".to_string()]);
     assert!(
         vm.grouping.is_some(),
@@ -617,8 +592,35 @@ fn vector_comparison_filters() {
     // SEMANTICS: `>` between two vectors keeps the LHS series where it holds.
     let qe = ok("go_goroutines > go_threads");
     assert!(
-        matches!(&qe, QueryExpr::BinaryOp { op, .. } if *op == BinaryOpKind::Compare(CompareOpKind::Gt))
+        matches!(qe.expect_non_asap(), NonASAPOp::BinaryOp { operator: BinaryOperator { kind: op, .. }, .. } if *op == BinaryOpKind::Compare(CompareOpKind::Gt))
     );
+}
+
+#[test]
+fn comparison_bool_modifier_returns_zero_or_one() {
+    // SEMANTICS (operators.test): `bool` turns a filtering comparison into a
+    // 0/1-valued one. On a vector operand it is `return_bool` on the
+    // `BinaryOp`; between two scalars it is a `Case(Compare → 1, else 0)`
+    // scalar expression under PromQL numeric rules — and a scalar comparison
+    // without `bool` is not a PromQL expression at all.
+    let bool_flag = |q: &str| match ok(q).expect_non_asap() {
+        NonASAPOp::BinaryOp { return_bool, .. } => *return_bool,
+        other => panic!("expected BinaryOp for {q}, got {other:?}"),
+    };
+    assert!(bool_flag("go_goroutines > bool go_threads"));
+    assert!(bool_flag("go_goroutines > bool 0"));
+    assert!(!bool_flag("go_goroutines > go_threads"));
+    assert!(!bool_flag("go_goroutines > 0"));
+
+    let qe = ok("1 < bool 2");
+    let NonASAPOp::ScalarBridge(ScalarExpr::Case { branches, .. }) = qe.expect_non_asap() else {
+        panic!("expected a scalar Case, got {qe:?}");
+    };
+    assert!(matches!(
+        branches.as_slice(),
+        [(ScalarExpr::Compare { op: CompareOpKind::Lt, semantics: ExprSemantics::Promql, .. }, _)]
+    ));
+    rejected("1 < 2");
 }
 
 #[test]
@@ -643,31 +645,29 @@ fn unary_negation_lowers_as_multiply_by_minus_one() {
     }
 
     // `-some_metric` at the root: `Scan * PromqlScalarBridge(-1)`, schema follows the vector.
-    let QueryExpr::BinaryOp {
-        op,
-        lhs,
-        rhs,
-        vector_match,
-    } = &ok("-some_metric")
+    let negated = ok("-some_metric");
+    let NonASAPOp::BinaryOp {
+        operator, lhs, rhs, ..
+    } = negated.expect_non_asap()
     else {
         panic!("expected a BinaryOp for `-some_metric`");
     };
-    assert_eq!(*op, BinaryOpKind::Arithmetic(ArithmeticOpKind::Mul));
+    assert_eq!(operator.kind, BinaryOpKind::Arithmetic(ArithmeticOpKind::Mul));
     assert!(
-        matches!(lhs.as_ref(), QueryExpr::TimeRange { child, .. } if matches!(child.as_ref(), QueryExpr::Scan { .. })),
+        matches!(lhs.expect_non_asap(), NonASAPOp::TimeRange { child, .. } if matches!(child.expect_non_asap(), NonASAPOp::Scan { .. })),
         "vector on the left"
     );
     assert!(
-        rhs.as_promql_scalar()
+        promql_scalar(&rhs)
             .is_some_and(|v| (v + 1.0).abs() < 1e-12),
         "negation multiplies by PromqlScalarBridge(-1), got {rhs:?}"
     );
     assert!(
-        vector_match.is_none(),
+        operator.vector_match.is_none(),
         "scalar negation carries no vector match"
     );
     // Label-preserving: the schema is the vector operand's, unchanged.
-    let schema = ok("-some_metric").output_schema().unwrap();
+    let schema = ok("-some_metric").schema.clone();
     assert_eq!(
         schema
             .fields
@@ -679,17 +679,21 @@ fn unary_negation_lowers_as_multiply_by_minus_one() {
 
     // `sum(-m)` — the negation lowers inside the aggregate argument (issue #27
     // nesting), so the outer node is the `Sum` aggregate over the `Mul`.
-    let QueryExpr::Aggregate {
+    let summed = ok("sum(-node_cpu_seconds_total)");
+    let NonASAPOp::Aggregate {
         measures, child, ..
-    } = &ok("sum(-node_cpu_seconds_total)")
+    } = summed.expect_non_asap()
     else {
         panic!("expected an outer Aggregate for `sum(-m)`");
     };
     assert!(matches!(measures.as_slice(), [AggIntent::Sum { .. }]));
     assert!(matches!(
-        child.as_ref(),
-        QueryExpr::BinaryOp {
-            op: BinaryOpKind::Arithmetic(ArithmeticOpKind::Mul),
+        child.expect_non_asap(),
+        NonASAPOp::BinaryOp {
+            operator: BinaryOperator {
+                kind: BinaryOpKind::Arithmetic(ArithmeticOpKind::Mul),
+                ..
+            },
             ..
         }
     ));
@@ -699,8 +703,7 @@ fn unary_negation_lowers_as_multiply_by_minus_one() {
 fn unary_negation_of_constant_folds_to_scalar() {
     // `-(10*1024*1024)` — the operand is constant-foldable, so negation collapses
     // to a single negated `PromqlScalarBridge` leaf (no `BinaryOp`), just like a bare literal.
-    assert!(ok("-(10*1024*1024)")
-        .as_promql_scalar()
+    assert!(promql_scalar(&ok("-(10*1024*1024)"))
         .is_some_and(|v| (v + 10_485_760.0).abs() < 1e-6));
 }
 
@@ -708,15 +711,19 @@ fn unary_negation_of_constant_folds_to_scalar() {
 fn double_unary_negation_nests() {
     // `- -some_metric` — negation of a negation: `(m * -1) * -1`. Both levels
     // lower; the value is unchanged but the structure is faithfully nested.
-    let QueryExpr::BinaryOp { op, lhs, .. } = &ok("- -some_metric") else {
+    let twice = ok("- -some_metric");
+    let NonASAPOp::BinaryOp { operator, lhs, .. } = twice.expect_non_asap() else {
         panic!("expected outer BinaryOp for `- -some_metric`");
     };
-    assert_eq!(*op, BinaryOpKind::Arithmetic(ArithmeticOpKind::Mul));
+    assert_eq!(operator.kind, BinaryOpKind::Arithmetic(ArithmeticOpKind::Mul));
     assert!(
         matches!(
-            lhs.as_ref(),
-            QueryExpr::BinaryOp {
-                op: BinaryOpKind::Arithmetic(ArithmeticOpKind::Mul),
+            lhs.expect_non_asap(),
+            NonASAPOp::BinaryOp {
+                operator: BinaryOperator {
+                    kind: BinaryOpKind::Arithmetic(ArithmeticOpKind::Mul),
+                    ..
+                },
                 ..
             }
         ),
@@ -758,21 +765,21 @@ fn scalar_literal_operand_lowers_as_binaryop_scalar() {
     // `PromqlScalarBridge` operand of the `BinaryOp`, and constant arithmetic
     // (`10*1024*1024`) is folded. The output schema is the vector side's.
     let qe = ok("node_filesystem_avail_bytes > 10*1024*1024");
-    let QueryExpr::BinaryOp { op, lhs, rhs, .. } = &qe else {
+    let NonASAPOp::BinaryOp { operator: BinaryOperator { kind: op, .. }, lhs, rhs, .. } = qe.expect_non_asap() else {
         panic!("expected a BinaryOp, got {qe:?}");
     };
     assert_eq!(*op, BinaryOpKind::Compare(CompareOpKind::Gt));
     assert!(
-        matches!(lhs.as_ref(), QueryExpr::TimeRange { child, .. } if matches!(child.as_ref(), QueryExpr::Scan { .. })),
+        matches!(lhs.expect_non_asap(), NonASAPOp::TimeRange { child, .. } if matches!(child.expect_non_asap(), NonASAPOp::Scan { .. })),
         "vector on the left"
     );
     assert!(
-        rhs.as_promql_scalar()
+        promql_scalar(&rhs)
             .is_some_and(|v| (v - 10_485_760.0).abs() < 1e-6),
         "folded scalar threshold on the right, got {rhs:?}"
     );
-    // Schema derivation follows the vector side (a scalar contributes no labels).
-    assert!(qe.output_schema().is_ok());
+    // The schema follows the vector side (a scalar contributes no labels).
+    assert_eq!(qe.schema, lhs.schema);
 }
 
 #[test]
@@ -780,12 +787,11 @@ fn scalar_arithmetic_scales_the_vector() {
     // `rate(m[5m]) * 100` — a unit conversion. Arithmetic BinaryOp of the vector
     // with a `PromqlScalarBridge(100)`.
     let qe = ok("rate(m[5m]) * 100");
-    let QueryExpr::BinaryOp { op, rhs, .. } = &qe else {
+    let NonASAPOp::BinaryOp { operator: BinaryOperator { kind: op, .. }, rhs, .. } = qe.expect_non_asap() else {
         panic!("expected a BinaryOp, got {qe:?}");
     };
     assert_eq!(*op, BinaryOpKind::Arithmetic(ArithmeticOpKind::Mul));
-    assert!(rhs
-        .as_promql_scalar()
+    assert!(promql_scalar(&rhs)
         .is_some_and(|v| (v - 100.0).abs() < 1e-9));
 }
 
@@ -797,12 +803,22 @@ fn scalar_arithmetic_scales_the_vector() {
 #[test]
 fn set_ops_lower_to_binaryop() {
     // SEMANTICS: or = union of label sets; and = intersection; unless = difference.
-    assert!(matches!(&ok("up{job=\"a\"} or up{job=\"b\"}"),
-        QueryExpr::BinaryOp { op, .. } if *op == BinaryOpKind::Set(PromQLVectorSetOpKind::Or)));
-    assert!(matches!(&ok("node_network_mtu_bytes and node_up"),
-        QueryExpr::BinaryOp { op, .. } if *op == BinaryOpKind::Set(PromQLVectorSetOpKind::And)));
-    assert!(matches!(&ok("node_network_mtu_bytes unless node_down"),
-        QueryExpr::BinaryOp { op, .. } if *op == BinaryOpKind::Set(PromQLVectorSetOpKind::Unless)));
+    let set_op = |q: &str| match ok(q).expect_non_asap() {
+        NonASAPOp::BinaryOp { operator, .. } => operator.kind.clone(),
+        other => panic!("expected BinaryOp for {q}, got {other:?}"),
+    };
+    assert_eq!(
+        set_op("up{job=\"a\"} or up{job=\"b\"}"),
+        BinaryOpKind::Set(PromQLVectorSetOpKind::Or)
+    );
+    assert_eq!(
+        set_op("node_network_mtu_bytes and node_up"),
+        BinaryOpKind::Set(PromQLVectorSetOpKind::And)
+    );
+    assert_eq!(
+        set_op("node_network_mtu_bytes unless node_down"),
+        BinaryOpKind::Set(PromQLVectorSetOpKind::Unless)
+    );
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -824,7 +840,7 @@ fn topk_over_count_is_heavy_hitter() {
 fn bottomk_is_generic_sort_limit() {
     // SEMANTICS: bottom-k → generic ascending order + limit (no sketch).
     let qe = ok("bottomk(3, count_over_time(http_requests_total[5m]))");
-    assert!(matches!(&qe, QueryExpr::Limit { .. }));
+    assert!(matches!(qe.expect_non_asap(), NonASAPOp::Limit { .. }));
 }
 
 #[test]
@@ -833,9 +849,9 @@ fn topk_over_nested_sum_preserves_weighted_topk_accuracy() {
     // The final rates are query-time values. Their ordering does not establish
     // frequency-sketch membership semantics.
     let qe = ok("topk(3, sum by(instance) (rate(node_cpu_seconds_total[5m])))");
-    let QueryExpr::Aggregate {
+    let NonASAPOp::Aggregate {
         measures, child, ..
-    } = &qe
+    } = qe.expect_non_asap()
     else {
         panic!("expected weighted TopK aggregate, got {qe:?}");
     };
@@ -861,18 +877,18 @@ fn outer_aggregate_over_nested_aggregate_nests() {
     // flat two-level template rejected. Each level survives into the
     // canonical tree (issue #27).
     let qe = ok("max(sum by (job) (rate(http_requests_total[5m])))");
-    let QueryExpr::Aggregate {
+    let NonASAPOp::Aggregate {
         measures, child, ..
-    } = &qe
+    } = qe.expect_non_asap()
     else {
         panic!("expected outer Aggregate, got {qe:?}");
     };
     assert!(matches!(measures.as_slice(), [AggIntent::Max { .. }]));
-    let QueryExpr::Aggregate {
+    let NonASAPOp::Aggregate {
         reduction,
         measures,
         ..
-    } = child.as_ref()
+    } = child.expect_non_asap()
     else {
         panic!("expected inner `sum by (job)` Aggregate, got {child:?}");
     };
@@ -895,12 +911,12 @@ fn outer_group_key_absent_from_nested_aggregate_is_dropped() {
     // the query lowers with the provably-absent key dropped, exactly
     // `sum(sum by (group)(…))`.
     let qe = ok(r#"sum(sum by (group)(http_requests{job="api-server"})) by (job)"#);
-    let QueryExpr::Aggregate {
+    let NonASAPOp::Aggregate {
         reduction,
         measures,
         child,
         ..
-    } = &qe
+    } = qe.expect_non_asap()
     else {
         panic!("expected outer Aggregate, got {qe:?}");
     };
@@ -910,7 +926,7 @@ fn outer_group_key_absent_from_nested_aggregate_is_dropped() {
         "absent `job` key dropped → global aggregate"
     );
     assert!(matches!(measures.as_slice(), [AggIntent::Sum { .. }]));
-    let QueryExpr::Aggregate { reduction, .. } = child.as_ref() else {
+    let NonASAPOp::Aggregate { reduction, .. } = child.expect_non_asap() else {
         panic!("expected inner `sum by (group)` Aggregate, got {child:?}");
     };
     assert_eq!(
@@ -927,16 +943,16 @@ fn outer_group_key_present_after_inner_aggregate_still_resolves() {
     // resolving positionally — the absent-key drop only fires on provable
     // absence, never on a resolvable key.
     let qe = ok("sum(sum by (job, group)(http_requests)) by (job)");
-    let QueryExpr::Aggregate {
+    let NonASAPOp::Aggregate {
         reduction, child, ..
-    } = &qe
+    } = qe.expect_non_asap()
     else {
         panic!("expected outer Aggregate, got {qe:?}");
     };
-    let QueryExpr::Aggregate {
+    let NonASAPOp::Aggregate {
         reduction: inner_reduction,
         ..
-    } = child.as_ref()
+    } = child.expect_non_asap()
     else {
         panic!("expected inner Aggregate, got {child:?}");
     };
@@ -957,9 +973,9 @@ fn outer_group_key_over_binary_op_resolves_on_both_sides() {
     // still resolve. Each `or` side is bound independently against its own
     // sub-tree, so the key is seeded as an inherited column on both sides.
     let qe = ok(r#"sum by (__name__)(metric_a{env="1"} or metric_b{env="2"})"#);
-    let QueryExpr::Aggregate {
+    let NonASAPOp::Aggregate {
         reduction, child, ..
-    } = &qe
+    } = qe.expect_non_asap()
     else {
         panic!("expected outer Aggregate, got {qe:?}");
     };
@@ -969,12 +985,12 @@ fn outer_group_key_over_binary_op_resolves_on_both_sides() {
         1,
         "grouped by the one `__name__` key"
     );
-    let QueryExpr::BinaryOp { lhs, rhs, .. } = child.as_ref() else {
+    let NonASAPOp::BinaryOp { lhs, rhs, .. } = child.expect_non_asap() else {
         panic!("expected a BinaryOp child, got {child:?}");
     };
     // Both independently-bound sides carry `__name__` at the same position, so
     // the outer group key is consistent across the union.
-    let (ls, rs) = (lhs.output_schema().unwrap(), rhs.output_schema().unwrap());
+    let (ls, rs) = (lhs.schema.clone(), rhs.schema.clone());
     assert_eq!(ls.column_id("__name__"), rs.column_id("__name__"));
     assert_eq!(
         ls.column_id("__name__"),
@@ -983,8 +999,8 @@ fn outer_group_key_over_binary_op_resolves_on_both_sides() {
 
     // The general case (a plain label, not just `__name__`) also lowers.
     assert!(matches!(
-        ok("sum by (job)(metric_a or metric_b)"),
-        QueryExpr::Aggregate { .. }
+        ok("sum by (job)(metric_a or metric_b)").expect_non_asap(),
+        NonASAPOp::Aggregate { .. }
     ));
 }
 
@@ -994,15 +1010,15 @@ fn aggregate_over_binary_op_nests() {
     // op over two range vectors. The old template only accepted a single inner
     // selector/call; now the binary op lowers and the outer sum wraps it.
     let qe = ok("sum(rate(a[5m]) + rate(b[5m]))");
-    let QueryExpr::Aggregate {
+    let NonASAPOp::Aggregate {
         measures, child, ..
-    } = &qe
+    } = qe.expect_non_asap()
     else {
         panic!("expected outer Aggregate, got {qe:?}");
     };
     assert!(matches!(measures.as_slice(), [AggIntent::Sum { .. }]));
     assert!(
-        matches!(child.as_ref(), QueryExpr::BinaryOp { .. }),
+        matches!(child.expect_non_asap(), NonASAPOp::BinaryOp { .. }),
         "argument lowers as a BinaryOp, got {child:?}"
     );
 }
@@ -1015,7 +1031,7 @@ fn aggregate_over_binary_op_nests() {
 fn subquery_wraps_inner_query() {
     // SEMANTICS: `<inst>[range:res]` evaluates the inner query across a range.
     let qe = ok("rate(demo_api_request_duration_seconds_count[5m])[1h:]");
-    assert!(matches!(&qe, QueryExpr::PromqlSubquery { .. }));
+    assert!(matches!(qe.expect_non_asap(), NonASAPOp::PromqlSubquery { .. }));
     assert!(has(&qe, |i| matches!(i, AggIntent::Rate)));
 }
 
@@ -1026,12 +1042,12 @@ fn over_time_of_subquery_reduces_per_series() {
     // then `max_over_time` takes the max of those samples *per series*. It lowers
     // to a per-series `Max` reduction over a `PromqlSubquery` (issue #27).
     let qe = ok("max_over_time(rate(demo_api_request_duration_seconds_count[5m])[1h:])");
-    let QueryExpr::Aggregate {
+    let NonASAPOp::Aggregate {
         reduction,
         measures,
         child,
         ..
-    } = &qe
+    } = qe.expect_non_asap()
     else {
         panic!("expected an Aggregate at the root, got {qe:?}");
     };
@@ -1044,7 +1060,7 @@ fn over_time_of_subquery_reduces_per_series() {
     // The reduction rides directly on the sub-query (the structural range marker
     // that keeps it label-preserving), which wraps the inner `rate`.
     assert!(
-        matches!(child.as_ref(), QueryExpr::PromqlSubquery { .. }),
+        matches!(child.expect_non_asap(), NonASAPOp::PromqlSubquery { .. }),
         "the `Max` reduces over a PromqlSubquery, got {child:?}"
     );
     assert!(intents(&qe).iter().any(|i| matches!(i, AggIntent::Rate)));
@@ -1055,16 +1071,16 @@ fn quantile_over_time_of_subquery_carries_phi() {
     // The `quantile_over_time` φ parameter is read from arg 0; the sub-query is
     // arg 1. It lowers to a per-series `Quantile(φ)` over the `PromqlSubquery`.
     let qe = ok("quantile_over_time(0.9, rate(demo[5m])[1h:])");
-    let QueryExpr::Aggregate {
+    let NonASAPOp::Aggregate {
         measures, child, ..
-    } = &qe
+    } = qe.expect_non_asap()
     else {
         panic!("expected an Aggregate, got {qe:?}");
     };
     assert!(
         matches!(measures.as_slice(), [AggIntent::Quantile { q, .. }] if (*q - 0.9).abs() < 1e-9)
     );
-    assert!(matches!(child.as_ref(), QueryExpr::PromqlSubquery { .. }));
+    assert!(matches!(child.expect_non_asap(), NonASAPOp::PromqlSubquery { .. }));
 }
 
 #[test]
@@ -1074,12 +1090,12 @@ fn aggregation_over_over_time_of_subquery_keeps_labels() {
     // survives for the OUTER cross-series `sum by (job)` to group on. If the
     // inner `Max` collapsed labels, `job` would not resolve here.
     let qe = ok("sum by (job) (max_over_time(rate(demo{job=\"api\"}[5m])[1h:]))");
-    let QueryExpr::Aggregate {
+    let NonASAPOp::Aggregate {
         reduction,
         measures,
         child,
         ..
-    } = &qe
+    } = qe.expect_non_asap()
     else {
         panic!("expected outer Aggregate, got {qe:?}");
     };
@@ -1089,20 +1105,20 @@ fn aggregation_over_over_time_of_subquery_keeps_labels() {
     );
     assert!(matches!(measures.as_slice(), [AggIntent::Sum { .. }]));
     // Inner node is the per-series `max_over_time` reduction over the subquery.
-    let QueryExpr::Aggregate {
+    let NonASAPOp::Aggregate {
         reduction: inner_reduction,
         measures: inner_measures,
         child: inner_child,
         ..
-    } = child.as_ref()
+    } = child.expect_non_asap()
     else {
         panic!("expected inner Aggregate, got {child:?}");
     };
     assert_eq!(inner_reduction, &Reduction::PerEntity);
     assert!(matches!(inner_measures.as_slice(), [AggIntent::Max { .. }]));
     assert!(matches!(
-        inner_child.as_ref(),
-        QueryExpr::PromqlSubquery { .. }
+        inner_child.expect_non_asap(),
+        NonASAPOp::PromqlSubquery { .. }
     ));
 }
 
@@ -1124,66 +1140,66 @@ fn nested_subquery_from_prometheus_docs() {
     // the label-preserving `[ts, value]`.
     let qe = ok("max_over_time(deriv(rate(distance_covered_total[5s])[30s:5s])[10m:])");
 
-    let QueryExpr::Aggregate {
+    let NonASAPOp::Aggregate {
         reduction,
         measures,
         child,
         ..
-    } = &qe
+    } = qe.expect_non_asap()
     else {
         panic!("expected `max_over_time` Aggregate at the root, got {qe:?}");
     };
     assert_eq!(reduction, &Reduction::PerEntity);
     assert!(matches!(measures.as_slice(), [AggIntent::Max { .. }]));
 
-    let QueryExpr::PromqlSubquery {
+    let NonASAPOp::PromqlSubquery {
         range,
         resolution,
         child,
-    } = child.as_ref()
+    } = child.expect_non_asap()
     else {
         panic!("expected the outer `[10m:]` PromqlSubquery, got {child:?}");
     };
     assert_eq!(*range, Duration::from_secs(600));
     assert_eq!(*resolution, None, "`[10m:]` keeps the default resolution");
 
-    let QueryExpr::Aggregate {
+    let NonASAPOp::Aggregate {
         reduction,
         measures,
         child,
         ..
-    } = child.as_ref()
+    } = child.expect_non_asap()
     else {
         panic!("expected the `deriv` Aggregate, got {child:?}");
     };
     assert_eq!(reduction, &Reduction::PerEntity);
     assert!(matches!(measures.as_slice(), [AggIntent::Deriv]));
 
-    let QueryExpr::PromqlSubquery {
+    let NonASAPOp::PromqlSubquery {
         range,
         resolution,
         child,
-    } = child.as_ref()
+    } = child.expect_non_asap()
     else {
         panic!("expected the inner `[30s:5s]` PromqlSubquery, got {child:?}");
     };
     assert_eq!(*range, Duration::from_secs(30));
     assert_eq!(*resolution, Some(Duration::from_secs(5)));
 
-    let QueryExpr::Aggregate {
+    let NonASAPOp::Aggregate {
         measures, child, ..
-    } = child.as_ref()
+    } = child.expect_non_asap()
     else {
         panic!("expected the `rate` Aggregate, got {child:?}");
     };
     assert!(matches!(measures.as_slice(), [AggIntent::Rate]));
-    let QueryExpr::TimeRange { range, .. } = child.as_ref() else {
+    let NonASAPOp::TimeRange { range, .. } = child.expect_non_asap() else {
         panic!("expected the `[5s]` TimeRange under rate, got {child:?}");
     };
     assert_eq!(*range, Duration::from_secs(5));
 
     // Per-series end to end: the schema keeps the (ts, value) floor and stays open.
-    let schema = qe.output_schema().expect("schema derivation");
+    let schema = qe.schema.clone();
     assert_eq!(
         schema
             .fields
@@ -1205,21 +1221,22 @@ fn offset_modifier_lowers_to_a_time_shift() {
     // past — a `TimeShift` wrapper over the selector (signed ms; a negative
     // offset shifts forward). Schema is unchanged (the shift only moves *when*).
     let qe = ok("http_requests_total offset 5m");
-    let QueryExpr::TimeRange { child, .. } = &qe else {
+    let NonASAPOp::TimeRange { child, .. } = qe.expect_non_asap() else {
         panic!("expected an ingestion TimeRange, got {qe:?}");
     };
-    let QueryExpr::TimeShift { shift, child } = child.as_ref() else {
+    let NonASAPOp::TimeShift { shift, child } = child.expect_non_asap() else {
         panic!("expected a TimeShift, got {qe:?}");
     };
     assert_eq!(shift.offset_ms, 300_000);
     assert!(shift.at.is_none());
-    assert!(matches!(child.as_ref(), QueryExpr::Scan { .. }));
+    assert!(matches!(child.expect_non_asap(), NonASAPOp::Scan { .. }));
 
     // `offset -5m` shifts forward → negative ms.
-    let QueryExpr::TimeRange { child, .. } = &ok("http_requests_total offset -5m") else {
+    let qe = ok("http_requests_total offset -5m");
+    let NonASAPOp::TimeRange { child, .. } = qe.expect_non_asap() else {
         panic!("expected an ingestion TimeRange");
     };
-    let QueryExpr::TimeShift { shift, .. } = child.as_ref() else {
+    let NonASAPOp::TimeShift { shift, .. } = child.expect_non_asap() else {
         panic!("expected a TimeShift");
     };
     assert_eq!(shift.offset_ms, -300_000);
@@ -1230,29 +1247,31 @@ fn at_modifier_lowers_to_a_time_shift() {
     // SEMANTICS (PromQL, issue #40): `@ <ts>` pins the evaluation to an absolute
     // instant (PromQL seconds → IR milliseconds); `@ start()` / `@ end()` anchor
     // to the query range bounds.
-    let QueryExpr::TimeRange { child, .. } = &ok("http_requests_total @ 1609746000") else {
+    let qe = ok("http_requests_total @ 1609746000");
+    let NonASAPOp::TimeRange { child, .. } = qe.expect_non_asap() else {
         panic!("expected an ingestion TimeRange");
     };
-    let QueryExpr::TimeShift { shift, .. } = child.as_ref() else {
+    let NonASAPOp::TimeShift { shift, .. } = child.expect_non_asap() else {
         panic!("expected a TimeShift for `@ <ts>`");
     };
     assert_eq!(shift.at, Some(AtModifier::Timestamp(1_609_746_000_000)));
     assert_eq!(shift.offset_ms, 0);
 
-    let QueryExpr::TimeRange { child, .. } = &ok("http_requests_total @ start()") else {
+    let qe = ok("http_requests_total @ start()");
+    let NonASAPOp::TimeRange { child, .. } = qe.expect_non_asap() else {
         panic!("expected an ingestion TimeRange");
     };
-    let QueryExpr::TimeShift { shift, .. } = child.as_ref() else {
+    let NonASAPOp::TimeShift { shift, .. } = child.expect_non_asap() else {
         panic!("expected a TimeShift for `@ start()`");
     };
     assert_eq!(shift.at, Some(AtModifier::Start));
 
     // Offset and `@` compose: `@ end() offset 5m` carries both.
     let qe = ok("http_requests_total @ end() offset 5m");
-    let QueryExpr::TimeRange { child, .. } = &qe else {
+    let NonASAPOp::TimeRange { child, .. } = qe.expect_non_asap() else {
         panic!("expected an ingestion TimeRange, got {qe:?}");
     };
-    let QueryExpr::TimeShift { shift, .. } = child.as_ref() else {
+    let NonASAPOp::TimeShift { shift, .. } = child.expect_non_asap() else {
         panic!("expected a TimeShift, got {qe:?}");
     };
     assert_eq!(shift.at, Some(AtModifier::End));
@@ -1265,21 +1284,21 @@ fn offset_on_a_ranged_selector_wraps_inside_the_time_range() {
     // `TimeShift` sits *under* the `TimeRange` (the 5m window is taken at the
     // shifted time), and the whole thing under the per-series `Rate` (#40).
     let qe = ok("rate(http_requests_total[5m] offset 1h)");
-    let QueryExpr::Aggregate {
+    let NonASAPOp::Aggregate {
         measures, child, ..
-    } = &qe
+    } = qe.expect_non_asap()
     else {
         panic!("expected the rate Aggregate, got {qe:?}");
     };
     assert!(matches!(measures.as_slice(), [AggIntent::Rate]));
-    let QueryExpr::TimeRange { child, .. } = child.as_ref() else {
+    let NonASAPOp::TimeRange { child, .. } = child.expect_non_asap() else {
         panic!("expected a TimeRange under rate, got {child:?}");
     };
-    let QueryExpr::TimeShift { shift, child } = child.as_ref() else {
+    let NonASAPOp::TimeShift { shift, child } = child.expect_non_asap() else {
         panic!("expected a TimeShift under the TimeRange, got {child:?}");
     };
     assert_eq!(shift.offset_ms, 3_600_000);
-    assert!(matches!(child.as_ref(), QueryExpr::Scan { .. }));
+    assert!(matches!(child.expect_non_asap(), NonASAPOp::Scan { .. }));
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1313,7 +1332,7 @@ fn count_over_time_value_column_is_float64() {
     // #69: a per-series range reduction produces a PromQL sample value, which is
     // always float64. `count_over_time`'s `Count` intent types `Int64`, but the
     // derived `value` column must be `Float64` like every other range reducer.
-    let schema = ok("count_over_time(m[5m])").output_schema().unwrap();
+    let schema = ok("count_over_time(m[5m])").schema.clone();
     let value = schema
         .fields
         .iter()
@@ -1335,12 +1354,12 @@ fn counter_derivative_functions_lower_to_distinct_intents() {
         ("resets(m[1h])", AggIntent::Resets),
     ] {
         let qe = ok(q);
-        let QueryExpr::Aggregate {
+        let NonASAPOp::Aggregate {
             reduction,
             measures,
             child,
             ..
-        } = &qe
+        } = qe.expect_non_asap()
         else {
             panic!("expected an Aggregate for {q:?}, got {qe:?}");
         };
@@ -1355,7 +1374,7 @@ fn counter_derivative_functions_lower_to_distinct_intents() {
             "{q}: wrong intent"
         );
         assert!(
-            matches!(child.as_ref(), QueryExpr::TimeRange { .. }),
+            matches!(child.expect_non_asap(), NonASAPOp::TimeRange { .. }),
             "{q}: reduction rides on a TimeRange, got {child:?}"
         );
     }
@@ -1366,9 +1385,9 @@ fn predict_linear_carries_horizon_seconds() {
     // `predict_linear(v[w], t)` — the 2nd (scalar) arg is the prediction horizon
     // in seconds; it must be carried in the intent (it changes the result).
     let qe = ok("predict_linear(node_filesystem_avail_bytes[3h], 86400)");
-    let QueryExpr::Aggregate {
+    let NonASAPOp::Aggregate {
         measures, child, ..
-    } = &qe
+    } = qe.expect_non_asap()
     else {
         panic!("expected an Aggregate, got {qe:?}");
     };
@@ -1376,7 +1395,7 @@ fn predict_linear_carries_horizon_seconds() {
         measures.as_slice(),
         &[AggIntent::PredictLinear { seconds: 86400.0 }]
     );
-    assert!(matches!(child.as_ref(), QueryExpr::TimeRange { .. }));
+    assert!(matches!(child.expect_non_asap(), NonASAPOp::TimeRange { .. }));
 }
 
 #[test]
@@ -1394,12 +1413,12 @@ fn aggregation_over_counter_derivative_keeps_labels() {
     // A counter-derivative is per-series (label-preserving), so an outer
     // `sum by (job)` can group on a label the inner `changes` preserved.
     let qe = ok(r#"sum by (job) (changes(m{job="api"}[15m]))"#);
-    let QueryExpr::Aggregate {
+    let NonASAPOp::Aggregate {
         reduction,
         measures,
         child,
         ..
-    } = &qe
+    } = qe.expect_non_asap()
     else {
         panic!("expected outer Aggregate, got {qe:?}");
     };
@@ -1420,12 +1439,12 @@ fn outer_stat_over_counter_derivative_nests_two_levels() {
     // grouped outer (`avg by (dc)`) must resolve its key against the labels the
     // inner reduction preserved, threading any scalar param (predict horizon).
     let qe = ok("avg by (dc) (predict_linear(m[3h], 3600))");
-    let QueryExpr::Aggregate {
+    let NonASAPOp::Aggregate {
         reduction,
         measures,
         child,
         ..
-    } = &qe
+    } = qe.expect_non_asap()
     else {
         panic!("expected outer Aggregate, got {qe:?}");
     };
@@ -1434,11 +1453,11 @@ fn outer_stat_over_counter_derivative_nests_two_levels() {
         "outer `avg by (dc)` groups on a label"
     );
     assert!(matches!(measures.as_slice(), [AggIntent::Avg { .. }]));
-    let QueryExpr::Aggregate {
+    let NonASAPOp::Aggregate {
         reduction: inner_reduction,
         measures: inner_measures,
         ..
-    } = child.as_ref()
+    } = child.expect_non_asap()
     else {
         panic!("expected inner per-series Aggregate, got {child:?}");
     };
@@ -1458,11 +1477,11 @@ fn topk_over_counter_derivative_is_generic_sort_limit() {
     // `topk(k, deriv(...))` ranks the per-series derivative values — a generic
     // `Sort + Limit`, NOT a heavy-hitter `TopK` (that's only `count_over_time`).
     let qe = ok("topk(3, deriv(m[5m]))");
-    let QueryExpr::Limit { n, child, .. } = &qe else {
+    let NonASAPOp::Limit { n: Some(n), child, .. } = qe.expect_non_asap() else {
         panic!("expected Limit, got {qe:?}");
     };
     assert_eq!(*n, 3);
-    assert!(matches!(child.as_ref(), QueryExpr::Sort { .. }));
+    assert!(matches!(child.expect_non_asap(), NonASAPOp::Sort { .. }));
     assert!(intents(&qe).iter().any(|i| matches!(i, AggIntent::Deriv)));
     assert!(
         !intents(&qe)
@@ -1477,28 +1496,28 @@ fn counter_derivative_composes_in_binary_ops() {
     // As a vector operand: `delta(a[5m]) / delta(b[5m])` is a BinaryOp of two
     // per-series Delta reductions.
     let ratio = ok("delta(a[5m]) / delta(b[5m])");
-    let QueryExpr::BinaryOp { op, lhs, rhs, .. } = &ratio else {
+    let NonASAPOp::BinaryOp { operator: BinaryOperator { kind: op, .. }, lhs, rhs, .. } = ratio.expect_non_asap() else {
         panic!("expected BinaryOp, got {ratio:?}");
     };
     assert_eq!(*op, BinaryOpKind::Arithmetic(ArithmeticOpKind::Div));
     assert!(
-        matches!(lhs.as_ref(), QueryExpr::Aggregate { measures, .. } if measures.as_slice() == [AggIntent::Delta])
+        matches!(lhs.expect_non_asap(), NonASAPOp::Aggregate { measures, .. } if measures.as_slice() == [AggIntent::Delta])
     );
     assert!(
-        matches!(rhs.as_ref(), QueryExpr::Aggregate { measures, .. } if measures.as_slice() == [AggIntent::Delta])
+        matches!(rhs.expect_non_asap(), NonASAPOp::Aggregate { measures, .. } if measures.as_slice() == [AggIntent::Delta])
     );
 
     // Under an aggregate over a binary op mixing a counter-derivative with
     // another per-series function: `sum(rate(m[5m]) + changes(m[5m]))`.
     let mixed = ok("sum(rate(m[5m]) + changes(m[5m]))");
-    let QueryExpr::Aggregate {
+    let NonASAPOp::Aggregate {
         measures, child, ..
-    } = &mixed
+    } = mixed.expect_non_asap()
     else {
         panic!("expected Aggregate, got {mixed:?}");
     };
     assert!(matches!(measures.as_slice(), [AggIntent::Sum { .. }]));
-    assert!(matches!(child.as_ref(), QueryExpr::BinaryOp { .. }));
+    assert!(matches!(child.expect_non_asap(), NonASAPOp::BinaryOp { .. }));
     assert!(intents(&mixed).iter().any(|i| matches!(i, AggIntent::Rate)));
     assert!(intents(&mixed)
         .iter()
@@ -1522,12 +1541,12 @@ fn range_functions_over_a_subquery_reduce_per_series() {
         ("resets(sum(m)[5m:])", AggIntent::Resets),
     ] {
         let qe = ok(q);
-        let QueryExpr::Aggregate {
+        let NonASAPOp::Aggregate {
             reduction,
             measures,
             child,
             ..
-        } = &qe
+        } = qe.expect_non_asap()
         else {
             panic!("{q}: expected an Aggregate, got {qe:?}");
         };
@@ -1542,7 +1561,7 @@ fn range_functions_over_a_subquery_reduce_per_series() {
             "{q}: wrong intent"
         );
         assert!(
-            matches!(child.as_ref(), QueryExpr::PromqlSubquery { .. }),
+            matches!(child.expect_non_asap(), NonASAPOp::PromqlSubquery { .. }),
             "{q}: reduces directly over the PromqlSubquery (no TimeRange), got {child:?}"
         );
     }
@@ -1624,11 +1643,11 @@ fn histogram_accessors_lower_to_per_series_intents() {
         ("histogram_stdvar(v)", AggIntent::HistogramStdVar),
     ] {
         let qe = ok(q);
-        let QueryExpr::Aggregate {
+        let NonASAPOp::Aggregate {
             reduction,
             measures,
             ..
-        } = &qe
+        } = qe.expect_non_asap()
         else {
             panic!("{q}: expected an Aggregate, got {qe:?}");
         };
@@ -1678,11 +1697,11 @@ fn math_functions_lower_to_per_series_math_intents() {
         ("rad(v)", MathFunc::Rad),
     ] {
         let qe = ok(q);
-        let QueryExpr::Aggregate {
+        let NonASAPOp::Aggregate {
             reduction,
             measures,
             ..
-        } = &qe
+        } = qe.expect_non_asap()
         else {
             panic!("{q}: expected an Aggregate, got {qe:?}");
         };
@@ -1721,8 +1740,7 @@ fn clamp_and_round_carry_their_params() {
 #[test]
 fn pi_lowers_to_a_scalar_constant() {
     // `pi()` is the constant π — a `PromqlScalarBridge` leaf, not a `Math` intent.
-    assert!(ok("pi()")
-        .as_promql_scalar()
+    assert!(promql_scalar(&ok("pi()"))
         .is_some_and(|v| (v - std::f64::consts::PI).abs() < 1e-12));
 }
 
@@ -1747,7 +1765,7 @@ fn absent_keeps_matcher_labels_for_the_synthesized_output() {
     // `absent(v)` synthesizes its output labels from `v`'s equality matchers, so
     // those labels must survive into the schema — here `job` from `{job="x"}`.
     let qe = ok(r#"absent(up{job="x"})"#);
-    let cols = qe.output_schema().unwrap();
+    let cols = qe.schema.clone();
     assert!(
         cols.fields.iter().any(|c| c.name == "job"),
         "matcher label `job` kept, got {:?}",
@@ -1763,9 +1781,12 @@ fn absent_keeps_matcher_labels_for_the_synthesized_output() {
 fn time_lowers_to_the_eval_time_scalar() {
     // SEMANTICS: `time()` is the query evaluation timestamp as a scalar — a leaf,
     // not an aggregate over any series.
-    assert!(matches!(ok("time()"), QueryExpr::EvalTimestamp));
+    assert!(matches!(
+        ok("time()").expect_non_asap(),
+        NonASAPOp::ScalarBridge(ScalarExpr::EvalTimestamp)
+    ));
     // …and it is scalar-shaped: a single float `value`, no time index.
-    let sch = ok("time()").output_schema().unwrap();
+    let sch = ok("time()").schema.clone();
     assert_eq!(sch.fields.len(), 1);
     assert_eq!(sch.fields[0].name, "value");
     assert!(sch.time_index.is_none());
@@ -1777,15 +1798,21 @@ fn time_minus_vector_is_the_uptime_pattern() {
     // The scalar `time()` broadcasts against the vector; the result takes the
     // vector's schema.
     let qe = ok("time() - process_start_time_seconds");
-    let QueryExpr::BinaryOp { lhs, op, .. } = &qe else {
+    let NonASAPOp::BinaryOp {
+        operator, lhs, rhs, ..
+    } = qe.expect_non_asap()
+    else {
         panic!("expected a BinaryOp, got {qe:?}");
     };
-    assert!(matches!(lhs.as_ref(), QueryExpr::EvalTimestamp));
     assert!(matches!(
-        op,
+        lhs.expect_non_asap(),
+        NonASAPOp::ScalarBridge(ScalarExpr::EvalTimestamp)
+    ));
+    assert!(matches!(
+        operator.kind,
         BinaryOpKind::Arithmetic(ArithmeticOpKind::Sub)
     ));
-    assert!(qe.output_schema().is_ok());
+    assert_eq!(qe.schema, rhs.schema, "the result takes the vector's schema");
 }
 
 #[test]
@@ -1817,9 +1844,9 @@ fn no_arg_calendar_function_reads_the_eval_time() {
     // `day_of_week()` with no argument computes over the evaluation time itself,
     // so it is a `TimeFn` aggregate whose child is the `EvalTimestamp` scalar.
     let qe = ok("day_of_week()");
-    let QueryExpr::Aggregate {
+    let NonASAPOp::Aggregate {
         measures, child, ..
-    } = &qe
+    } = qe.expect_non_asap()
     else {
         panic!("expected an Aggregate, got {qe:?}");
     };
@@ -1827,7 +1854,7 @@ fn no_arg_calendar_function_reads_the_eval_time() {
         measures.as_slice(),
         [AggIntent::TimeFn(TimeFunc::DayOfWeek)]
     ));
-    assert!(matches!(child.as_ref(), QueryExpr::EvalTimestamp));
+    assert!(matches!(child.expect_non_asap(), NonASAPOp::ScalarBridge(ScalarExpr::EvalTimestamp)));
 }
 
 #[test]
@@ -1848,12 +1875,12 @@ fn vector_promotes_a_scalar_to_a_vector() {
     // SEMANTICS: `vector(s)` is the scalar→instant-vector bridge — a label-less
     // single series carrying the scalar's value.
     let qe = ok("vector(1)");
-    let QueryExpr::PromqlVectorFromScalar(inner) = &qe else {
+    let NonASAPOp::PromqlVectorFromScalar(inner) = qe.expect_non_asap() else {
         panic!("expected PromqlVectorFromScalar, got {qe:?}");
     };
-    assert_eq!(inner.as_promql_scalar(), Some(1.0));
+    assert!(matches!(inner, ScalarExpr::Literal(ScalarValue::Float64(v)) if *v == 1.0));
     // Vector-typed: schema has a time index (a scalar leaf has none).
-    let sch = qe.output_schema().unwrap();
+    let sch = qe.schema.clone();
     assert!(sch.time_index.is_some());
     assert!(sch.fields.iter().any(|c| c.name == "value"));
 }
@@ -1862,13 +1889,13 @@ fn vector_promotes_a_scalar_to_a_vector() {
 fn scalar_collapses_a_vector_to_a_scalar() {
     // SEMANTICS: `scalar(v)` is the instant-vector→scalar bridge.
     let qe = ok("scalar(node_load1)");
-    let QueryExpr::PromqlScalarFromVector(inner) = &qe else {
+    let NonASAPOp::ScalarBridge(ScalarExpr::PromqlScalarFromVector(inner)) = qe.expect_non_asap() else {
         panic!("expected PromqlScalarFromVector, got {qe:?}");
     };
     let (metric, _) = first_scan(inner);
     assert_eq!(metric, "node_load1");
     // PromqlScalarBridge-typed: single `value` column, no time index.
-    let sch = qe.output_schema().unwrap();
+    let sch = qe.schema.clone();
     assert!(sch.time_index.is_none());
     assert_eq!(sch.fields.len(), 1);
     assert_eq!(sch.fields[0].name, "value");
@@ -1880,11 +1907,11 @@ fn vector_zero_is_a_vector_operand_of_a_set_op() {
     // vectors, so `vector(0)` must be a vector (a `PromqlVectorFromScalar`), never a
     // folded scalar operand.
     let qe = ok("up or vector(0)");
-    let QueryExpr::BinaryOp { rhs, op, .. } = &qe else {
+    let NonASAPOp::BinaryOp { operator: BinaryOperator { kind: op, .. }, rhs, .. } = qe.expect_non_asap() else {
         panic!("expected a BinaryOp, got {qe:?}");
     };
     assert_eq!(*op, BinaryOpKind::Set(PromQLVectorSetOpKind::Or));
-    assert!(matches!(rhs.as_ref(), QueryExpr::PromqlVectorFromScalar(_)));
+    assert!(matches!(rhs.expect_non_asap(), NonASAPOp::PromqlVectorFromScalar(_)));
 }
 
 #[test]
@@ -1892,14 +1919,14 @@ fn scalar_of_a_vector_feeds_a_threshold_comparison() {
     // `node_load1 > scalar(node_cpu_count)` — `scalar(...)` is a scalar operand,
     // so the BinaryOp output takes the vector (lhs) side's schema.
     let qe = ok("node_load1 > scalar(node_cpu_count)");
-    let QueryExpr::BinaryOp { lhs, rhs, .. } = &qe else {
+    let NonASAPOp::BinaryOp { lhs, rhs, .. } = qe.expect_non_asap() else {
         panic!("expected a BinaryOp, got {qe:?}");
     };
-    assert!(matches!(rhs.as_ref(), QueryExpr::PromqlScalarFromVector(_)));
+    assert!(matches!(rhs.expect_non_asap(), NonASAPOp::ScalarBridge(ScalarExpr::PromqlScalarFromVector(_))));
     // The BinaryOp output schema follows the vector (lhs) side, not the scalar.
     let (metric, _) = first_scan(lhs);
     assert_eq!(metric, "node_load1");
-    assert!(qe.output_schema().unwrap().time_index.is_some());
+    assert!(qe.schema.clone().time_index.is_some());
 }
 
 #[test]
@@ -1909,13 +1936,13 @@ fn info_lowers_to_a_label_enrichment_join() {
     // (issue #84). The value/time axis pass through; the enriched labels are
     // runtime, so the schema stays the child's.
     let qe = ok("info(rate(http_requests_total[5m]))");
-    let QueryExpr::PromqlInfoEnrich { selector, child } = &qe else {
+    let NonASAPOp::PromqlInfoEnrich { selector, child } = qe.expect_non_asap() else {
         panic!("expected an PromqlInfoEnrich, got {qe:?}");
     };
     assert!(selector.is_empty(), "no selector → default target_info");
     // The child is the untouched input (a per-series rate reduction here).
     assert!(has(child, |i| *i == AggIntent::Rate));
-    assert!(qe.output_schema().unwrap().time_index.is_some());
+    assert!(qe.schema.clone().time_index.is_some());
 }
 
 #[test]
@@ -1925,7 +1952,7 @@ fn info_selector_carries_the_info_side_matchers() {
     // matchers are kept symbolically (not run through the single-metric selector
     // path).
     let qe = ok(r#"info(build_info, {__name__=~".+_info", another_data=~".+"})"#);
-    let QueryExpr::PromqlInfoEnrich { selector, .. } = &qe else {
+    let NonASAPOp::PromqlInfoEnrich { selector, .. } = qe.expect_non_asap() else {
         panic!("expected an PromqlInfoEnrich, got {qe:?}");
     };
     assert_eq!(
@@ -1949,12 +1976,12 @@ fn info_composes_under_an_aggregation_and_over_a_time_shift() {
     // `offset` / `@` on the input now lower to a `TimeShift` under the info-join
     // (issue #40) — the enrichment composes over the shifted selector.
     assert!(matches!(
-        ok("info(metric @ 60)"),
-        QueryExpr::PromqlInfoEnrich { .. }
+        ok("info(metric @ 60)").expect_non_asap(),
+        NonASAPOp::PromqlInfoEnrich { .. }
     ));
     assert!(matches!(
-        ok("info(metric offset 1m)"),
-        QueryExpr::PromqlInfoEnrich { .. }
+        ok("info(metric offset 1m)").expect_non_asap(),
+        NonASAPOp::PromqlInfoEnrich { .. }
     ));
 }
 
@@ -1967,12 +1994,12 @@ fn group_lowers_to_a_constant_group_intent() {
     // SEMANTICS: `group(v)` yields a constant 1 per group — a distinct intent,
     // NOT folded onto `sum` (which would return the value sum instead of 1).
     let qe = ok("group(up)");
-    let QueryExpr::Aggregate { measures, .. } = &qe else {
+    let NonASAPOp::Aggregate { measures, .. } = qe.expect_non_asap() else {
         panic!("expected an Aggregate, got {qe:?}");
     };
     assert!(matches!(measures.as_slice(), [AggIntent::Group]));
     // Output column is the constant-1 `group` value.
-    let sch = qe.output_schema().unwrap();
+    let sch = qe.schema.clone();
     assert!(sch.fields.iter().any(|c| c.name == "group"));
 }
 
@@ -1980,7 +2007,7 @@ fn group_lowers_to_a_constant_group_intent() {
 fn group_by_keeps_the_grouping_keys() {
     // `group by (job) (up)` — the grouping keys ride on `Aggregate.by`.
     let qe = ok("group by (job) (up)");
-    let sch = qe.output_schema().unwrap();
+    let sch = qe.schema.clone();
     assert!(sch.fields.iter().any(|c| c.name == "job"));
     assert!(has(&qe, |i| *i == AggIntent::Group));
 }
@@ -1991,13 +2018,13 @@ fn count_values_groups_by_value_and_synthesizes_a_label() {
     // value, counts each distinct value, and emits that value as a new label
     // `l`. The intent carries the label; schema gains a `Utf8` `l` column.
     let qe = ok(r#"count_values("version", build_version)"#);
-    let QueryExpr::Aggregate { measures, .. } = &qe else {
+    let NonASAPOp::Aggregate { measures, .. } = qe.expect_non_asap() else {
         panic!("expected an Aggregate, got {qe:?}");
     };
     assert!(
         matches!(measures.as_slice(), [AggIntent::CountValues { label }] if label == "version")
     );
-    let sch = qe.output_schema().unwrap();
+    let sch = qe.schema.clone();
     let version = sch
         .fields
         .iter()
@@ -2023,7 +2050,7 @@ fn count_values_accepts_a_parenthesised_label_and_by_grouping() {
         &qe,
         |i| matches!(i, AggIntent::CountValues { label } if label == "v")
     ));
-    let sch = qe.output_schema().unwrap();
+    let sch = qe.schema.clone();
     assert!(sch.fields.iter().any(|c| c.name == "job"));
     assert!(sch.fields.iter().any(|c| c.name == "v"));
 }
@@ -2034,7 +2061,7 @@ fn count_values_label_colliding_with_a_group_key_is_not_duplicated() {
     // with a group-by key. PromQL's synthesized label takes precedence; the
     // output must carry a single `job` column, never two.
     let qe = ok(r#"count_values by (job) ("job", version)"#);
-    let sch = qe.output_schema().unwrap();
+    let sch = qe.schema.clone();
     let jobs = sch.fields.iter().filter(|c| c.name == "job").count();
     assert_eq!(jobs, 1, "collision deduped, got {:?}", sch.fields);
     assert!(sch.fields.iter().any(|c| c.name == "count"));
@@ -2046,18 +2073,18 @@ fn limitk_and_limit_ratio_lower_to_series_sampling() {
     // series kept unchanged (NOT a ranking), so they lower to the dedicated
     // `PromqlSeriesSample` node, never `topk`'s `Sort → Limit` (issue #86).
     assert!(matches!(
-        ok("limitk(2, http_requests)"),
-        QueryExpr::PromqlSeriesSample {
+        ok("limitk(2, http_requests)").expect_non_asap(),
+        NonASAPOp::PromqlSeriesSample {
             kind: SampleKind::LimitK(2),
             ..
         }
     ));
     assert!(matches!(
-        ok("limit_ratio(0.1, http_requests)"),
-        QueryExpr::PromqlSeriesSample { kind: SampleKind::LimitRatio(r), .. } if (r - 0.1).abs() < 1e-9
+        ok("limit_ratio(0.1, http_requests)").expect_non_asap(),
+        NonASAPOp::PromqlSeriesSample { kind: SampleKind::LimitRatio(r), .. } if (r - 0.1).abs() < 1e-9
     ));
     // Series-preserving: the output schema equals the input's (ts, value).
-    let sch = ok("limitk(2, http_requests)").output_schema().unwrap();
+    let sch = ok("limitk(2, http_requests)").schema.clone();
     assert!(sch.fields.iter().any(|c| c.name == "value"));
     assert!(sch.time_index.is_some());
 }
@@ -2067,12 +2094,12 @@ fn limit_ratio_keeps_a_negative_ratio_and_clamps_out_of_range() {
     // A negative ratio selects the complementary fraction — it must survive, not
     // be normalised away. Out-of-range magnitudes clamp to [-1, 1] (Prometheus).
     assert!(matches!(
-        ok("limit_ratio(-0.5, http_requests)"),
-        QueryExpr::PromqlSeriesSample { kind: SampleKind::LimitRatio(r), .. } if (r + 0.5).abs() < 1e-9
+        ok("limit_ratio(-0.5, http_requests)").expect_non_asap(),
+        NonASAPOp::PromqlSeriesSample { kind: SampleKind::LimitRatio(r), .. } if (r + 0.5).abs() < 1e-9
     ));
     assert!(matches!(
-        ok("limit_ratio(1.1, http_requests)"),
-        QueryExpr::PromqlSeriesSample { kind: SampleKind::LimitRatio(r), .. } if (r - 1.0).abs() < 1e-9
+        ok("limit_ratio(1.1, http_requests)").expect_non_asap(),
+        NonASAPOp::PromqlSeriesSample { kind: SampleKind::LimitRatio(r), .. } if (r - 1.0).abs() < 1e-9
     ));
 }
 
@@ -2080,7 +2107,7 @@ fn limit_ratio_keeps_a_negative_ratio_and_clamps_out_of_range() {
 fn limitk_by_carries_the_grouping_and_composes_in_a_set_op() {
     // `limitk by (group)` samples per group; the grouping label is seeded.
     let qe = ok("limitk by (group) (2, http_requests)");
-    let QueryExpr::PromqlSeriesSample { by, .. } = &qe else {
+    let NonASAPOp::PromqlSeriesSample { by, .. } = qe.expect_non_asap() else {
         panic!("expected a PromqlSeriesSample, got {qe:?}");
     };
     assert!(!by.is_empty(), "grouped sampling keeps its `by` keys");
@@ -2106,20 +2133,20 @@ fn dynamic_and_non_finite_sample_params_are_rejected() {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Descend single-child nodes to the first `PromqlRelabel`.
-fn first_relabel(e: &QueryExpr) -> &QueryExpr {
-    match e {
-        QueryExpr::PromqlRelabel { .. } => e,
-        QueryExpr::Aggregate { child, .. }
-        | QueryExpr::Filter { child, .. }
-        | QueryExpr::TimeRange { child, .. }
-        | QueryExpr::TimeShift { child, .. } => first_relabel(child),
+fn first_relabel(e: &OperatorNode) -> &OperatorNode {
+    match e.expect_non_asap() {
+        NonASAPOp::PromqlRelabel { .. } => e,
+        NonASAPOp::Aggregate { child, .. }
+        | NonASAPOp::Filter { child, .. }
+        | NonASAPOp::TimeRange { child, .. }
+        | NonASAPOp::TimeShift { child, .. } => first_relabel(child),
         other => panic!("no PromqlRelabel reachable from {other:?}"),
     }
 }
 
 /// True when `value` is a `FunctionCall` with the given name.
-fn is_fn_named(value: &QueryExpr, name: &str) -> bool {
-    matches!(value, QueryExpr::FunctionCall { name: n, .. } if n == name)
+fn is_fn_named(value: &ScalarExpr, name: &str) -> bool {
+    matches!(value, ScalarExpr::FunctionCall { name: n, .. } if n == name)
 }
 
 #[test]
@@ -2127,7 +2154,7 @@ fn label_replace_is_a_relabel_over_the_vector() {
     // SEMANTICS: `label_replace(v, dst, repl, src, regex)` rewrites the `dst`
     // label per series from a regex over `src`; the sample value is untouched.
     let qe = ok(r#"label_replace(up, "host", "$1", "instance", "(.+):.*")"#);
-    let QueryExpr::PromqlRelabel { dst, value, child } = &qe else {
+    let NonASAPOp::PromqlRelabel { dst, value, child } = qe.expect_non_asap() else {
         panic!("expected a PromqlRelabel, got {qe:?}");
     };
     assert_eq!(dst, "host");
@@ -2137,7 +2164,7 @@ fn label_replace_is_a_relabel_over_the_vector() {
     // The value expression is a `label_replace` fn reading the `src` label.
     assert!(is_fn_named(value, "label_replace"));
     // Output: the child's columns + the synthesized `host` label; value & ts kept.
-    let sch = qe.output_schema().unwrap();
+    let sch = qe.schema.clone();
     assert!(sch.fields.iter().any(|c| c.name == "host"));
     assert!(sch.fields.iter().any(|c| c.name == "value"));
     assert!(sch.time_index.is_some(), "the vector's time axis survives");
@@ -2148,12 +2175,12 @@ fn label_join_concatenates_source_labels() {
     // SEMANTICS: `label_join(v, dst, sep, src…)` joins the source labels with
     // `sep` into `dst`.
     let qe = ok(r#"label_join(up, "combined", "-", "job", "instance")"#);
-    let QueryExpr::PromqlRelabel { dst, value, .. } = &qe else {
+    let NonASAPOp::PromqlRelabel { dst, value, .. } = qe.expect_non_asap() else {
         panic!("expected a PromqlRelabel, got {qe:?}");
     };
     assert_eq!(dst, "combined");
     assert!(is_fn_named(value, "label_join"));
-    let sch = qe.output_schema().unwrap();
+    let sch = qe.schema.clone();
     assert!(sch.fields.iter().any(|c| c.name == "combined"));
 }
 
@@ -2164,9 +2191,9 @@ fn label_replace_composes_under_an_aggregation() {
     let qe = ok(r#"sum by (host) (label_replace(up, "host", "$1", "instance", "(.+):.*"))"#);
     // A PromqlRelabel sits below the outer Sum.
     let relabel = first_relabel(&qe);
-    assert!(matches!(relabel, QueryExpr::PromqlRelabel { dst, .. } if dst == "host"));
+    assert!(matches!(relabel.expect_non_asap(), NonASAPOp::PromqlRelabel { dst, .. } if dst == "host"));
     assert!(has(&qe, |i| matches!(i, AggIntent::Sum { .. })));
-    let sch = qe.output_schema().unwrap();
+    let sch = qe.schema.clone();
     assert!(sch.fields.iter().any(|c| c.name == "host"));
 }
 
@@ -2191,7 +2218,7 @@ fn extra_over_time_reducers_lower_to_per_series_intents() {
         assert!(has(&qe, |i| *i == want), "{q}: {:?}", intents(&qe));
         // Per-series: the range window survives as a `TimeRange`.
         assert!(
-            matches!(&qe, QueryExpr::Aggregate { child, .. } if matches!(child.as_ref(), QueryExpr::TimeRange { .. })),
+            matches!(qe.expect_non_asap(), NonASAPOp::Aggregate { child, .. } if matches!(child.expect_non_asap(), NonASAPOp::TimeRange { .. })),
             "{q} keeps its range as a TimeRange"
         );
     }
@@ -2215,13 +2242,13 @@ fn sort_and_sort_desc_reorder_by_value_without_a_limit() {
         ("sort_desc(http_requests)", false),
     ] {
         let qe = ok(q);
-        let QueryExpr::Sort { keys, child, .. } = &qe else {
+        let NonASAPOp::Sort { keys, child, .. } = qe.expect_non_asap() else {
             panic!("{q}: expected a Sort, got {qe:?}");
         };
         assert_eq!(keys.len(), 1);
         assert_eq!(keys[0].ascending, ascending, "{q}");
         // No Limit above the Sort — every series is preserved.
-        assert!(!matches!(&qe, QueryExpr::Limit { .. }));
+        assert!(!matches!(qe.expect_non_asap(), NonASAPOp::Limit { .. }));
         // The value column is what it ranks on: descend to the scan.
         let (metric, _) = first_scan(child);
         assert_eq!(metric, "http_requests");
@@ -2233,12 +2260,12 @@ fn sort_by_label_orders_on_each_label_in_turn() {
     // `sort_by_label(v, "group", "instance", "job")` — one ascending sort key per
     // label, in argument order; the labels are seeded into the schema.
     let qe = ok(r#"sort_by_label(http_requests, "group", "instance", "job")"#);
-    let QueryExpr::Sort { keys, .. } = &qe else {
+    let NonASAPOp::Sort { keys, .. } = qe.expect_non_asap() else {
         panic!("expected a Sort, got {qe:?}");
     };
     assert_eq!(keys.len(), 3, "one key per label");
     assert!(keys.iter().all(|k| k.ascending));
-    let sch = qe.output_schema().unwrap();
+    let sch = qe.schema.clone();
     for label in ["group", "instance", "job"] {
         assert!(
             sch.fields.iter().any(|c| c.name == label),
@@ -2250,7 +2277,7 @@ fn sort_by_label_orders_on_each_label_in_turn() {
 #[test]
 fn sort_by_label_desc_is_descending() {
     let qe = ok(r#"sort_by_label_desc(http_requests, "instance")"#);
-    let QueryExpr::Sort { keys, .. } = &qe else {
+    let NonASAPOp::Sort { keys, .. } = qe.expect_non_asap() else {
         panic!("expected a Sort, got {qe:?}");
     };
     assert!(keys.iter().all(|k| !k.ascending));
@@ -2261,26 +2288,26 @@ fn min_of_max_of_fold_constant_scalars() {
     // `min_of`/`max_of` are n-ary scalar reducers. When every argument is a
     // constant they constant-fold to a `PromqlScalarBridge` leaf, just like scalar
     // arithmetic (#35) — the only form the intent algebra can hold (#89).
-    assert_eq!(ok("min_of(3, 5)").as_promql_scalar(), Some(3.0));
-    assert_eq!(ok("max_of(3, 5)").as_promql_scalar(), Some(5.0));
-    assert_eq!(ok("min_of(-2, -5)").as_promql_scalar(), Some(-5.0));
+    assert_eq!(promql_scalar(&ok("min_of(3, 5)")), Some(3.0));
+    assert_eq!(promql_scalar(&ok("max_of(3, 5)")), Some(5.0));
+    assert_eq!(promql_scalar(&ok("min_of(-2, -5)")), Some(-5.0));
     // Nested folds and use as a threshold operand.
     assert_eq!(
-        ok("max_of(min_of(2, 3), 10)").as_promql_scalar(),
+        promql_scalar(&ok("max_of(min_of(2, 3), 10)")),
         Some(10.0)
     );
     let qe = ok("up > max_of(1, 2)");
-    let QueryExpr::BinaryOp { rhs, .. } = &qe else {
+    let NonASAPOp::BinaryOp { rhs, .. } = qe.expect_non_asap() else {
         panic!("{qe:?}")
     };
-    assert_eq!(rhs.as_promql_scalar(), Some(2.0));
+    assert_eq!(promql_scalar(&rhs), Some(2.0));
 }
 
 #[test]
 fn min_of_max_of_ignore_nan_like_the_min_max_aggregators() {
     // A NaN argument is skipped (Prometheus `min`/`max` NaN semantics).
-    assert_eq!(ok("max_of(3, NaN)").as_promql_scalar(), Some(3.0));
-    assert_eq!(ok("min_of(NaN, 3)").as_promql_scalar(), Some(3.0));
+    assert_eq!(promql_scalar(&ok("max_of(3, NaN)")), Some(3.0));
+    assert_eq!(promql_scalar(&ok("min_of(NaN, 3)")), Some(3.0));
 }
 
 #[test]

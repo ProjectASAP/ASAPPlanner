@@ -39,7 +39,7 @@ async fn date_shifts_keep_their_type() {
             .await
             .unwrap();
         assert_eq!(
-            node.output_schema().unwrap().fields[0].dtype,
+            node.schema.fields[0].dtype,
             DataType::Date
         );
     }
@@ -55,7 +55,7 @@ async fn interval_cast_lowers_like_interval_literal() {
             .await
             .unwrap();
         assert_eq!(
-            node.output_schema().unwrap().fields[0].dtype,
+            node.schema.fields[0].dtype,
             DataType::Interval
         );
     }
@@ -91,7 +91,7 @@ async fn negative_intervals_keep_their_type() {
             .await
             .unwrap();
         assert_eq!(
-            node.output_schema().unwrap().fields[0].dtype,
+            node.schema.fields[0].dtype,
             DataType::Interval,
             "{query}"
         );
@@ -109,7 +109,7 @@ async fn sql_date_literals_keep_their_type() {
             .await
             .unwrap();
         assert_eq!(
-            node.output_schema().unwrap().fields[0].dtype,
+            node.schema.fields[0].dtype,
             DataType::Date
         );
     }

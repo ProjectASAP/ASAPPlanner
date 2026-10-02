@@ -22,8 +22,7 @@ use asap_aware_mapping::{
 use asap_frontend_promql::PromqlError as LoweringError;
 #[path = "../support.rs"]
 mod support;
-use asap_types::post_asap::{SummaryExpr, SummaryNode};
-use asap_types::pre_asap::query_expr::QueryExpr;
+use asap_types::ir::OperatorNode;
 use asap_types::types::AccuracyTarget;
 use support::lower_promql;
 
@@ -33,19 +32,18 @@ use support::lower_promql;
 /// take-the-first-(`cost_model`-preferred)-candidate pattern so [`bind_tally`]
 /// gets one representative `Result` per query, matching what a totality
 /// check over the whole corpus wants.
-fn bind(expr: &QueryExpr) -> Result<Rc<SummaryNode>, RealizationError> {
-    let root = Rc::new(expr.clone());
-    let target = TargetSubDAG::new(&root);
+fn bind(root: &Rc<OperatorNode>) -> Result<Rc<OperatorNode>, RealizationError> {
+    let target = TargetSubDAG::new(root);
     match SketchAlgorithmStrategy::default_cost_model()
         .replacements(&target)
         .into_iter()
         .next()
     {
         Some(ReplacementSubDAG {
-            replacement: Replacement::Summary(node),
+            replacement: Replacement::Subtree(node),
             ..
         }) => Ok(node),
-        _ => keep_pre_asap(&root),
+        _ => keep_pre_asap(root),
     }
 }
 
@@ -93,9 +91,10 @@ fn tally(corpus: &str) -> Tally {
 /// arm).
 #[derive(Default, Debug)]
 struct BindTally {
-    /// Root bound to `SummaryAgg`/`SummaryEstimate` — the pass did something.
+    /// An ASAP operator was bound somewhere below the root — the pass did
+    /// something.
     transformed: usize,
-    /// Root stayed `KeepPreAsap` — the pass left the query untouched.
+    /// The kept pre-ASAP tree — the pass left the query untouched.
     unchanged: usize,
     /// [`bind`] returned `Err` (schema derivation failed).
     errored: usize,
@@ -108,7 +107,7 @@ fn bind_tally(corpus: &str, accuracy: AccuracyTarget) -> BindTally {
             continue;
         };
         match bind(&tree) {
-            Ok(bound) if matches!(bound.expr, SummaryExpr::KeepPreAsap(_)) => t.unchanged += 1,
+            Ok(bound) if !bound.contains_asap() => t.unchanged += 1,
             Ok(_) => t.transformed += 1,
             Err(_) => t.errored += 1,
         }
