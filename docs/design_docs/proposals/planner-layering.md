@@ -36,21 +36,19 @@ model and capabilities, but never plans queries or selects plans.
 
 ### Assumptions
 
-ASAPPlanner relies only on the assumptions below. Anything not listed here is
-an input or a decision of a stage, not an implicit assumption.
+ASAPPlanner relies on the assumptions below. 
 
 1. **Query rewrite rules are given.** Rewrite and replacement rules (for
    example, `avg` as `sum`/`count`, or a TopK as a Count-Min Sketch with a
-   heap) are written by developers. ASAPPlanner applies them; it does not
+   heap) are written by developers or algorithm designers. ASAPPlanner applies them; it does not
    discover or generate them.
 2. **Summary-family capabilities are given.** For each summary family, a
    developer declares which computations it can answer, which estimates it can
    read out, how it is sized for an accuracy target, its error bound, and
    whether it can be merged, subtracted or deleted. ASAPPlanner does not
-   derive or learn these capabilities.
+   automatically discover these capabilities.
 3. **Frontend semantics are given.** Each frontend preserves its source
-   language's behavior. A construct a frontend cannot represent faithfully is
-   rejected, not approximated.
+   language's behavior, and ASAPPlanner obeys their semantic behavior.
 4. **Workload descriptions are inputs.** Recurrence, predictability,
    requirements and the data workload are supplied with the workload.
    ASAPPlanner does not infer them from traffic.
