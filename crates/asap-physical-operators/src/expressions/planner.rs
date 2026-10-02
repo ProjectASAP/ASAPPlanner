@@ -336,10 +336,6 @@ pub struct CompiledExpression {
     output: (DataType, bool),
 }
 impl CompiledExpression {
-    pub(crate) fn expression(&self) -> &QueryExpr {
-        &self.expression
-    }
-
     pub fn compile(expression: &QueryExpr, input: &SchemaRef) -> Result<Self, Error> {
         let schema = input
             .fields
