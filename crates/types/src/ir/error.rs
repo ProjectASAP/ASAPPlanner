@@ -1,13 +1,13 @@
 //! Typed failures from operator/scalar schema and type derivation.
 //!
-//! [`QueryExprError`] distinguishes invalid scalar signatures, out-of-range
+//! [`SchemaDerivationError`] distinguishes invalid scalar signatures, out-of-range
 //! grouping columns, empty concatenations, and invalid sample columns.
 //! Structural DAG and execution-timing validation have separate error types.
 use crate::pre_asap::ColumnId;
 use thiserror::Error;
 /// Errors from schema and type derivation over an operator DAG.
 #[derive(Debug, Error)]
-pub enum QueryExprError {
+pub enum SchemaDerivationError {
     #[error("invalid scalar function signature: {0}")]
     InvalidScalarSignature(String),
     #[error("by-column id {0} out of range (input has {1} columns)")]

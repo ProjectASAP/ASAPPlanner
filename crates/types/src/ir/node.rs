@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 
 use super::asap::ASAPOp;
 use super::non_asap::NonASAPOp;
-use crate::ir::QueryExprError;
+use crate::ir::SchemaDerivationError;
 use crate::post_asap::execution_data_state::ExecutionTiming;
 use crate::post_asap::guarantee::ResultGuarantee;
 use crate::pre_asap::schema::Schema;
@@ -50,7 +50,7 @@ impl Operator {
         }
     }
 
-    pub fn output_schema(&self) -> Result<Schema, QueryExprError> {
+    pub fn output_schema(&self) -> Result<Schema, SchemaDerivationError> {
         match self {
             Operator::NonASAP(op) => op.output_schema(),
             Operator::ASAP(op) => op.output_schema(),
@@ -64,7 +64,7 @@ impl Operator {
         }
     }
 
-    pub fn validate_inputs(&self) -> Result<(), QueryExprError> {
+    pub fn validate_inputs(&self) -> Result<(), SchemaDerivationError> {
         match self {
             Operator::NonASAP(op) => op.validate_inputs(),
             Operator::ASAP(op) => op.validate_inputs(),
@@ -101,7 +101,7 @@ impl OperatorNode {
     /// Build a node, deriving its schema and output category. Fails when the
     /// schema cannot be derived (a column reference out of range, a reserved
     /// ASAP operator, ...).
-    pub fn new(operator: Operator) -> Result<Self, QueryExprError> {
+    pub fn new(operator: Operator) -> Result<Self, SchemaDerivationError> {
         let schema = operator.output_schema()?;
         Ok(Self::with_schema(operator, schema))
     }
@@ -120,7 +120,7 @@ impl OperatorNode {
         }
     }
 
-    pub fn non_asap_node(op: NonASAPOp) -> Result<Rc<Self>, QueryExprError> {
+    pub fn non_asap_node(op: NonASAPOp) -> Result<Rc<Self>, SchemaDerivationError> {
         Self::new(Operator::NonASAP(op)).map(Rc::new)
     }
 
@@ -181,7 +181,7 @@ impl OperatorNode {
     pub fn map_children(
         &self,
         f: impl FnMut(&Rc<OperatorNode>) -> Rc<OperatorNode>,
-    ) -> Result<Self, QueryExprError> {
+    ) -> Result<Self, SchemaDerivationError> {
         let operator = self.operator.map_children(f);
         match &operator {
             Operator::NonASAP(_) => Self::new(operator),
@@ -225,18 +225,20 @@ impl OperatorNode {
     }
 
     /// Validate assigned phases without imposing any particular runtime implementation.
-    pub fn validate_execution_timing(self: &Rc<Self>) -> Result<(), QueryExprError> {
+    pub fn validate_execution_timing(self: &Rc<Self>) -> Result<(), SchemaDerivationError> {
         self.validate_structure()?;
         for node in Self::reachable(self) {
             let timing = node.timing.ok_or_else(|| {
-                QueryExprError::InvalidScalarSignature("execution timing is unassigned".into())
+                SchemaDerivationError::InvalidScalarSignature(
+                    "execution timing is unassigned".into(),
+                )
             })?;
             if timing == crate::post_asap::ExecutionTiming::IngestionTime
                 && node.children().iter().any(|child| {
                     child.timing != Some(crate::post_asap::ExecutionTiming::IngestionTime)
                 })
             {
-                return Err(QueryExprError::InvalidScalarSignature(
+                return Err(SchemaDerivationError::InvalidScalarSignature(
                     "ingestion-time operation depends on a query-time or unassigned input".into(),
                 ));
             }
@@ -250,7 +252,7 @@ impl OperatorNode {
     /// derived from the operator. For an ASAP node the planner may retain
     /// more specific column names, so only the field types must agree.
     /// `timing` may be `None`.
-    pub fn validate_structure(self: &Rc<Self>) -> Result<(), QueryExprError> {
+    pub fn validate_structure(self: &Rc<Self>) -> Result<(), SchemaDerivationError> {
         for node in Self::reachable(self) {
             if node.schema.time_index.is_some_and(|i| {
                 node.schema
@@ -264,13 +266,13 @@ impl OperatorNode {
                 .flatten()
                 .any(|i| *i >= node.schema.fields.len())
             {
-                return Err(QueryExprError::InvalidScalarSignature(
+                return Err(SchemaDerivationError::InvalidScalarSignature(
                     "invalid time or identity column in schema".into(),
                 ));
             }
             node.operator.validate_inputs()?;
             if node.result_kind != node.operator.output_kind() {
-                return Err(QueryExprError::InvalidScalarSignature(
+                return Err(SchemaDerivationError::InvalidScalarSignature(
                     "retained result kind disagrees with operation".into(),
                 ));
             }
@@ -287,7 +289,7 @@ impl OperatorNode {
                 }
             };
             if !agree {
-                return Err(QueryExprError::InvalidScalarSignature(format!(
+                return Err(SchemaDerivationError::InvalidScalarSignature(format!(
                     "retained schema of {} disagrees with its derived schema",
                     node.operator.kind_name()
                 )));

@@ -353,7 +353,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use asap_types::ir::cse::{share_common_subdags, structural_hash, HashCache};
 use asap_types::ir::operator_properties::{BinaryOpKind, JoinKind, Reduction};
 use asap_types::ir::timing::validate_default;
-use asap_types::ir::QueryExprError;
+use asap_types::ir::SchemaDerivationError;
 use asap_types::ir::{
     ASAPOp, BinaryOperator, NonASAPOp, Operator, OperatorNode, Predicate, ProjectItem, ScalarExpr,
     SortKey,
@@ -402,7 +402,7 @@ use crate::topk_reuse::TopKLimitReuseStrategy;
 pub enum RealizationError {
     /// Schema derivation failed while lifting an edge to `Schema`.
     #[error("schema derivation failed during pre-ASAP → post-ASAP binding: {0}")]
-    Schema(#[from] QueryExprError),
+    Schema(#[from] SchemaDerivationError),
     /// The candidate is accuracy-illegal (issue #172): its composed
     /// guarantee has no sound propagation rule, or misses the applicable
     /// `AccuracyTarget`. Fail-closed — the candidate is never constructed

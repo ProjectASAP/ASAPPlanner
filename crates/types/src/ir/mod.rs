@@ -34,4 +34,4 @@ pub use timing::{
 pub mod aggregate_schema;
 pub mod error;
 pub mod operator_properties;
-pub use error::QueryExprError;
+pub use error::SchemaDerivationError;

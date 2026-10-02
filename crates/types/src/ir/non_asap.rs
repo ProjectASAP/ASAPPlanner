@@ -13,7 +13,7 @@ use crate::ir::operator_properties::{
     BinaryOpKind, ConcatDiscriminatorKey, GroupKeys, InfoMatcher, JoinKind, Reduction,
     RelationalSetOpKind, SampleKind, Source, TimeShift, VectorMatch, WindowFrame, WindowFuncKind,
 };
-use crate::ir::QueryExprError;
+use crate::ir::SchemaDerivationError;
 use crate::pre_asap::agg_intent::AggIntent;
 use crate::pre_asap::schema::{ColumnId, DataType, Field, FieldDataType, Schema};
 
@@ -513,7 +513,7 @@ impl NonASAPOp {
 
     /// Output schema derived from this operator's parameters and its
     /// children's (already derived) schemas.
-    pub fn output_schema(&self) -> Result<Schema, QueryExprError> {
+    pub fn output_schema(&self) -> Result<Schema, SchemaDerivationError> {
         use NonASAPOp::*;
         Ok(match self {
             Scan { schema, .. } | Values { schema, .. } => schema.clone(),
@@ -612,7 +612,7 @@ impl NonASAPOp {
                             None => field,
                         })
                     })
-                    .collect::<Result<Vec<_>, QueryExprError>>()?;
+                    .collect::<Result<Vec<_>, SchemaDerivationError>>()?;
                 let time_index = fields.iter().position(|c| c.name == "ts");
                 let unique_keys = in_schema
                     .unique_keys
@@ -649,7 +649,7 @@ impl NonASAPOp {
             } => {
                 let mut s = children
                     .first()
-                    .ok_or(QueryExprError::EmptyConcat)?
+                    .ok_or(SchemaDerivationError::EmptyConcat)?
                     .schema
                     .clone();
                 s.unique_keys.clear();
@@ -839,19 +839,19 @@ impl NonASAPOp {
 
     /// Local producer/consumer contract checks that need only this operator
     /// and its children's output categories.
-    pub fn validate_inputs(&self) -> Result<(), QueryExprError> {
+    pub fn validate_inputs(&self) -> Result<(), SchemaDerivationError> {
         use NonASAPOp::*;
         let no_state = |node: &OperatorNode, what: &str| {
             if node.result_kind == OperatorResultKind::State {
-                Err(QueryExprError::InvalidScalarSignature(format!(
+                Err(SchemaDerivationError::InvalidScalarSignature(format!(
                     "{what} consumes summary state; read it out first"
                 )))
             } else {
                 Ok(())
             }
         };
-        let invalid = |message: &str| QueryExprError::InvalidScalarSignature(message.into());
-        let predicate = |pred: &Predicate, scope: &Schema| -> Result<(), QueryExprError> {
+        let invalid = |message: &str| SchemaDerivationError::InvalidScalarSignature(message.into());
+        let predicate = |pred: &Predicate, scope: &Schema| -> Result<(), SchemaDerivationError> {
             if matches!(
                 pred.0.scalar_type(scope)?.0,
                 DataType::Bool | DataType::Null
@@ -861,14 +861,14 @@ impl NonASAPOp {
                 Err(invalid("predicate must be boolean"))
             }
         };
-        let instant = |child: &OperatorNode| -> Result<(), QueryExprError> {
+        let instant = |child: &OperatorNode| -> Result<(), SchemaDerivationError> {
             if child.result_kind == OperatorResultKind::InstantVector {
                 Ok(())
             } else {
                 Err(invalid("operation requires an instant vector"))
             }
         };
-        let columns = |cols: &[usize], scope: &Schema| -> Result<(), QueryExprError> {
+        let columns = |cols: &[usize], scope: &Schema| -> Result<(), SchemaDerivationError> {
             if cols.iter().any(|i| *i >= scope.fields.len()) {
                 Err(invalid("column outside operator input scope"))
             } else {
@@ -1373,7 +1373,7 @@ mod tests {
     fn an_empty_merge_has_no_schema() {
         assert!(matches!(
             concat(vec![], None).output_schema(),
-            Err(QueryExprError::EmptyConcat)
+            Err(SchemaDerivationError::EmptyConcat)
         ));
     }
 

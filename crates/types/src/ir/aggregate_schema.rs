@@ -6,25 +6,28 @@
 //! and produces a Float64 sample value. This module derives schemas, not
 //! aggregate values or summary candidates.
 use super::operator_properties::*;
-use super::QueryExprError;
+use super::SchemaDerivationError;
 use crate::pre_asap::{AggIntent, ColumnId, ColumnRef, DataType, Field, FieldDataType, Schema};
 /// Output schema of a *per-series* window/range reduction (`rate`/`increase`,
 /// or an `*_over_time` reducer under a time `Window`). Such a reduction emits
 /// one value per series, so every label column of `input` is preserved and only
 /// the sample value is replaced — kept named `value` so the PromQL sample-value
 /// convention (and any outer `SampleValue` reference) still resolves it by name.
-fn per_series_reduction_schema(input: &Schema, agg: &AggIntent) -> Result<Schema, QueryExprError> {
+fn per_series_reduction_schema(
+    input: &Schema,
+    agg: &AggIntent,
+) -> Result<Schema, SchemaDerivationError> {
     let vi = if let Some(index) = agg.input_cols().first() {
         *index
     } else {
         crate::pre_asap::column_resolution::resolve_column_ref(&ColumnRef::SampleValue, input)
-            .map_err(|error| QueryExprError::InvalidSampleColumn(error.to_string()))?
+            .map_err(|error| SchemaDerivationError::InvalidSampleColumn(error.to_string()))?
     };
     if !matches!(
         input.fields.get(vi).map(|column| &column.dtype),
         Some(FieldDataType::Plain(DataType::Float64 | DataType::Int64))
     ) {
-        return Err(QueryExprError::InvalidSampleColumn(format!(
+        return Err(SchemaDerivationError::InvalidSampleColumn(format!(
             "column {vi} is not numeric"
         )));
     }
@@ -65,7 +68,7 @@ pub fn aggregate_output_schema(
     reduction: &Reduction,
     measures: &[AggIntent],
     output_names: &[String],
-) -> Result<Schema, QueryExprError> {
+) -> Result<Schema, SchemaDerivationError> {
     let by = match reduction {
         Reduction::PerEntity => {
             debug_assert_eq!(
@@ -92,7 +95,7 @@ pub fn aggregate_output_schema(
         let c = in_schema
             .fields
             .get(id)
-            .ok_or(QueryExprError::InvalidGroupByColumn(
+            .ok_or(SchemaDerivationError::InvalidGroupByColumn(
                 id,
                 in_schema.fields.len(),
             ))?;
@@ -143,7 +146,7 @@ pub fn aggregate_output_schema(
         }
         if let Some((arg, _)) = intent
             .arg_selector_columns(in_schema)
-            .map_err(QueryExprError::InvalidScalarSignature)?
+            .map_err(SchemaDerivationError::InvalidScalarSignature)?
         {
             out.dtype = in_schema.fields[arg].dtype.clone();
             out.nullable = in_schema.fields[arg].nullable;
@@ -185,10 +188,10 @@ fn without_output_schema(
     excluded: &[ColumnId],
     measures: &[AggIntent],
     output_names: &[String],
-) -> Result<Schema, QueryExprError> {
+) -> Result<Schema, SchemaDerivationError> {
     for &id in excluded {
         if id >= in_schema.fields.len() {
-            return Err(QueryExprError::InvalidGroupByColumn(
+            return Err(SchemaDerivationError::InvalidGroupByColumn(
                 id,
                 in_schema.fields.len(),
             ));
@@ -224,7 +227,7 @@ fn without_output_schema(
         let mut out = intent.output_column(in_col);
         if let Some((arg, _)) = intent
             .arg_selector_columns(in_schema)
-            .map_err(QueryExprError::InvalidScalarSignature)?
+            .map_err(SchemaDerivationError::InvalidScalarSignature)?
         {
             out.dtype = in_schema.fields[arg].dtype.clone();
             out.nullable = in_schema.fields[arg].nullable;

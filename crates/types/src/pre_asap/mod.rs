@@ -31,4 +31,4 @@ pub use expr_ir::{ArithmeticOpKind, ColumnRef, CompareOpKind, ScalarValue};
 pub use schema::{ColumnId, DataType, Field, FieldDataType, Schema};
 
 pub use crate::ir::aggregate_schema::aggregate_output_schema;
-pub use crate::ir::QueryExprError;
+pub use crate::ir::SchemaDerivationError;

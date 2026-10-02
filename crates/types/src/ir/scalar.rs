@@ -13,7 +13,7 @@ use std::rc::Rc;
 use serde::{Deserialize, Serialize};
 
 use super::node::OperatorNode;
-use crate::ir::QueryExprError;
+use crate::ir::SchemaDerivationError;
 use crate::pre_asap::expr_ir::{ArithmeticOpKind, CompareOpKind, ScalarValue};
 use crate::pre_asap::scalar_signature::MapScalarFunction;
 use crate::pre_asap::schema::{ColumnId, DataType, Schema};
@@ -339,7 +339,7 @@ impl ScalarExpr {
     /// input schema its owner evaluates it in. Unregistered functions are
     /// rejected. A reference to a field carrying summary state is an error:
     /// state must be read out before an expression can use it.
-    pub fn scalar_type(&self, schema: &Schema) -> Result<(DataType, bool), QueryExprError> {
+    pub fn scalar_type(&self, schema: &Schema) -> Result<(DataType, bool), SchemaDerivationError> {
         Ok(match self {
             ScalarExpr::CurrentTimestamp => (DataType::Timestamp, false),
             ScalarExpr::EvalTimestamp => (DataType::Float64, false),
@@ -347,7 +347,7 @@ impl ScalarExpr {
                 Some(c) => match c.plain_dtype() {
                     Some(dtype) => (dtype.clone(), c.nullable),
                     None => {
-                        return Err(QueryExprError::InvalidScalarSignature(format!(
+                        return Err(SchemaDerivationError::InvalidScalarSignature(format!(
                             "column `{}` carries summary state and cannot be read as a value",
                             c.name
                         )))
@@ -444,7 +444,7 @@ impl ScalarExpr {
                     && matches!(lt, DataType::Date | DataType::Timestamp)
                     && matches!(rt, DataType::Date | DataType::Timestamp)
                 {
-                    return Err(QueryExprError::InvalidScalarSignature(
+                    return Err(SchemaDerivationError::InvalidScalarSignature(
                         "temporal subtraction produces an unsupported duration type".into(),
                     ));
                 }
@@ -504,17 +504,17 @@ impl ScalarExpr {
                     (DataType::Float64, false)
                 } else if name == "promql_drop_metric_name" {
                     if args.len() != 1 || args[0].scalar_type(schema)? != (DataType::Utf8, false) {
-                        return Err(QueryExprError::InvalidScalarSignature(
+                        return Err(SchemaDerivationError::InvalidScalarSignature(
                             "metric-name removal requires one non-null series identity".into(),
                         ));
                     }
                     (DataType::Utf8, false)
                 } else if name == "asap_element_access" {
                     element_access_type(args, schema)
-                        .map_err(QueryExprError::InvalidScalarSignature)?
+                        .map_err(SchemaDerivationError::InvalidScalarSignature)?
                 } else if name == "asap_struct_field" {
                     struct_field_type(args, schema)
-                        .map_err(QueryExprError::InvalidScalarSignature)?
+                        .map_err(SchemaDerivationError::InvalidScalarSignature)?
                 } else if let Some(function) = MapScalarFunction::from_name(name) {
                     let arguments = args
                         .iter()
@@ -522,7 +522,7 @@ impl ScalarExpr {
                         .collect::<Result<Vec<_>, _>>()?;
                     function
                         .output_type(&arguments)
-                        .map_err(QueryExprError::InvalidScalarSignature)?
+                        .map_err(SchemaDerivationError::InvalidScalarSignature)?
                 } else {
                     sql_function_type(name, args, schema)?
                 }
@@ -578,20 +578,20 @@ impl ScalarExpr {
     }
 }
 
-fn signature(message: &str) -> QueryExprError {
-    QueryExprError::InvalidScalarSignature(message.into())
+fn signature(message: &str) -> SchemaDerivationError {
+    SchemaDerivationError::InvalidScalarSignature(message.into())
 }
 fn numeric(ty: &DataType) -> bool {
     matches!(ty, DataType::Int64 | DataType::Float64 | DataType::Null)
 }
-fn require_bool(ty: &DataType) -> Result<(), QueryExprError> {
+fn require_bool(ty: &DataType) -> Result<(), SchemaDerivationError> {
     if matches!(ty, DataType::Bool | DataType::Null) {
         Ok(())
     } else {
         Err(signature("boolean expression required"))
     }
 }
-fn common_scalar_type(a: &DataType, b: &DataType) -> Result<DataType, QueryExprError> {
+fn common_scalar_type(a: &DataType, b: &DataType) -> Result<DataType, SchemaDerivationError> {
     if a == b || *b == DataType::Null {
         Ok(a.clone())
     } else if *a == DataType::Null {
@@ -602,14 +602,16 @@ fn common_scalar_type(a: &DataType, b: &DataType) -> Result<DataType, QueryExprE
         Err(signature("incompatible scalar types"))
     }
 }
-fn relation(node: &OperatorNode) -> Result<(), QueryExprError> {
+fn relation(node: &OperatorNode) -> Result<(), SchemaDerivationError> {
     if node.result_kind == super::OperatorResultKind::Relation {
         Ok(())
     } else {
         Err(signature("SQL subquery requires a relation"))
     }
 }
-fn scalar_subquery_field(node: &OperatorNode) -> Result<&crate::pre_asap::Field, QueryExprError> {
+fn scalar_subquery_field(
+    node: &OperatorNode,
+) -> Result<&crate::pre_asap::Field, SchemaDerivationError> {
     relation(node)?;
     match node.schema.fields.as_slice() {
         [field] => Ok(field),
@@ -620,7 +622,7 @@ fn sql_function_type(
     name: &str,
     args: &[ScalarExpr],
     schema: &Schema,
-) -> Result<(DataType, bool), QueryExprError> {
+) -> Result<(DataType, bool), SchemaDerivationError> {
     let types = args
         .iter()
         .map(|a| a.scalar_type(schema))

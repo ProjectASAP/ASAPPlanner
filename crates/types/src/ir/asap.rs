@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use super::node::{OperatorNode, OperatorResultKind};
 use crate::ir::operator_properties::Reduction;
-use crate::ir::QueryExprError;
+use crate::ir::SchemaDerivationError;
 use crate::post_asap::maintained_population::{MaintainedPopulation, PopulationStatistic};
 use crate::post_asap::sketch::{GroupingStrategy, SketchStatistic, SummaryUpdate};
 use crate::pre_asap::schema::{ColumnId, DataType, Field, FieldDataType, Schema};
@@ -194,8 +194,8 @@ impl ASAPOp {
         )
     }
 
-    fn unimplemented() -> QueryExprError {
-        QueryExprError::InvalidScalarSignature(UNIMPLEMENTED_ASAP_OP.into())
+    fn unimplemented() -> SchemaDerivationError {
+        SchemaDerivationError::InvalidScalarSignature(UNIMPLEMENTED_ASAP_OP.into())
     }
 
     /// The summary state this operator produces, if it produces state.
@@ -210,7 +210,7 @@ impl ASAPOp {
     /// planning may retain a more specific schema (evaluation column naming)
     /// through [`OperatorNode::with_schema`]; the derived shape agrees with it
     /// in field types.
-    pub fn output_schema(&self) -> Result<Schema, QueryExprError> {
+    pub fn output_schema(&self) -> Result<Schema, SchemaDerivationError> {
         use ASAPOp::*;
         Ok(match self {
             SummaryAgg {
@@ -230,7 +230,7 @@ impl ASAPOp {
                         &crate::pre_asap::ColumnRef::SampleValue,
                         &schema,
                     )
-                    .map_err(|e| QueryExprError::InvalidScalarSignature(e.to_string()))?,
+                    .map_err(|e| SchemaDerivationError::InvalidScalarSignature(e.to_string()))?,
                     Reduction::Reduce(_) => schema.fields.len() - 1,
                 };
                 schema.fields[index] = Field::new("state", family.clone(), false);
@@ -286,7 +286,7 @@ impl ASAPOp {
                                     &source.schema,
                                 )
                                 .map_err(|e| {
-                                    QueryExprError::InvalidScalarSignature(e.to_string())
+                                    SchemaDerivationError::InvalidScalarSignature(e.to_string())
                                 })?,
                             ),
                             _ => None,
@@ -349,7 +349,7 @@ impl ASAPOp {
                     population,
                 }) = child.asap()
                 else {
-                    return Err(QueryExprError::InvalidScalarSignature(
+                    return Err(SchemaDerivationError::InvalidScalarSignature(
                         "population evaluation requires maintained membership".into(),
                     ));
                 };
@@ -368,7 +368,7 @@ impl ASAPOp {
                                 .iter()
                                 .map(|name| {
                                     source.schema.column_id(name).ok_or_else(|| {
-                                        QueryExprError::InvalidScalarSignature(
+                                        SchemaDerivationError::InvalidScalarSignature(
                                             "population grouping column is absent".into(),
                                         )
                                     })
@@ -433,11 +433,11 @@ impl ASAPOp {
     }
 
     /// Local input-contract checks.
-    pub fn validate_inputs(&self) -> Result<(), QueryExprError> {
+    pub fn validate_inputs(&self) -> Result<(), SchemaDerivationError> {
         use ASAPOp::*;
         let needs_state = |node: &OperatorNode, what: &str| {
             if node.result_kind != OperatorResultKind::State {
-                Err(QueryExprError::InvalidScalarSignature(format!(
+                Err(SchemaDerivationError::InvalidScalarSignature(format!(
                     "{what} requires summary state as input, got {:?}",
                     node.result_kind
                 )))
@@ -480,7 +480,7 @@ impl ASAPOp {
                     _ => false,
                 };
                 if !valid {
-                    return Err(QueryExprError::InvalidScalarSignature(
+                    return Err(SchemaDerivationError::InvalidScalarSignature(
                         "evaluation does not match its summary family".into(),
                     ));
                 }
@@ -494,7 +494,7 @@ impl ASAPOp {
                     .iter()
                     .all(|f| !matches!(f.dtype, FieldDataType::ExactAggregate(..)))
                 {
-                    return Err(QueryExprError::InvalidScalarSignature(
+                    return Err(SchemaDerivationError::InvalidScalarSignature(
                         "FinalizeExactAccumulator requires exact accumulator state".into(),
                     ));
                 }
@@ -504,7 +504,7 @@ impl ASAPOp {
                 needs_state(child, "EvaluatePopulation")?;
                 if !matches!(child.asap(), Some(MaintainPopulation { population, .. }) if population.supports(evaluation))
                 {
-                    return Err(QueryExprError::InvalidScalarSignature(
+                    return Err(SchemaDerivationError::InvalidScalarSignature(
                         "population evaluation requires compatible maintained membership".into(),
                     ));
                 }
@@ -518,19 +518,19 @@ impl ASAPOp {
                 ..
             } => {
                 if family.is_plain() || child.result_kind == OperatorResultKind::State {
-                    return Err(QueryExprError::InvalidScalarSignature(
+                    return Err(SchemaDerivationError::InvalidScalarSignature(
                         "summary aggregation requires values and produces a state family".into(),
                     ));
                 }
                 fn check(
                     expr: &crate::post_asap::SummaryInputExpr,
                     schema: &Schema,
-                ) -> Result<(), QueryExprError> {
+                ) -> Result<(), SchemaDerivationError> {
                     use crate::post_asap::SummaryInputExpr;
                     match expr {
                         SummaryInputExpr::Column(col) => {
                             crate::pre_asap::resolve_column_ref(col, schema).map_err(|e| {
-                                QueryExprError::InvalidScalarSignature(e.to_string())
+                                SchemaDerivationError::InvalidScalarSignature(e.to_string())
                             })?;
                         }
                         SummaryInputExpr::Tuple(items) => {
@@ -548,7 +548,7 @@ impl ASAPOp {
                 }
                 if let Some(filter) = filter {
                     if filter.0.scalar_type(&child.schema)?.0 != DataType::Bool {
-                        return Err(QueryExprError::InvalidScalarSignature(
+                        return Err(SchemaDerivationError::InvalidScalarSignature(
                             "summary filter must be boolean".into(),
                         ));
                     }
@@ -557,7 +557,7 @@ impl ASAPOp {
             }
             MaintainPopulation { child, population } => {
                 if !population.matches_node(child) {
-                    return Err(QueryExprError::InvalidScalarSignature(
+                    return Err(SchemaDerivationError::InvalidScalarSignature(
                         "population input differs from its membership contract".into(),
                     ));
                 }

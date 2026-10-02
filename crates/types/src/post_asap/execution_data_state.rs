@@ -8,7 +8,7 @@
 
 use thiserror::Error;
 
-use crate::ir::QueryExprError;
+use crate::ir::SchemaDerivationError;
 use crate::pre_asap::schema::Schema;
 
 /// When a post-ASAP value is produced.
@@ -156,7 +156,7 @@ pub enum ExactOperationSchemaError {
     #[error("exact operator input carries summary state, not plain columns")]
     NonPlainInput,
     #[error("schema derivation failed: {0}")]
-    Schema(#[from] QueryExprError),
+    Schema(#[from] SchemaDerivationError),
 }
 
 #[cfg(test)]

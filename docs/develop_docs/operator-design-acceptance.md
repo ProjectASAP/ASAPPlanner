@@ -37,7 +37,7 @@ and errors have dedicated modules:
 |---|---|---|
 | `ir::operator_properties` | Parameter types stored in operator payloads, rather than derived node metadata | `GroupKeys` for aggregation, `JoinKind` for joins, `WindowFrame` for SQL windows |
 | `ir::aggregate_schema` | Compute output columns and types from input schema and aggregate reduction | Preserve grouping columns and derive the aggregate result column |
-| `ir::error` | `QueryExprError` from schema/type derivation; other validation errors remain separate | Invalid grouping-column index or scalar-function signature |
+| `ir::error` | `SchemaDerivationError` from schema/type derivation; other validation errors remain separate | Invalid grouping-column index or scalar-function signature |
 
 Summary operations use “evaluation”;
 `SketchStatistic` specifies the statistic to compute, rather than another query.

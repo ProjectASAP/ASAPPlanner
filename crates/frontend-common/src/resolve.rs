@@ -24,7 +24,7 @@ use asap_types::ir::{NonASAPOp, OperatorNode, Predicate, ProjectItem, ScalarExpr
 use asap_types::pre_asap::column_resolution::resolve_group_keys_promql;
 use asap_types::pre_asap::{
     aggregate_output_schema, resolve_column_ref, resolve_column_refs, AggIntent, ColumnId,
-    ColumnRef, GroupKeys, QueryExprError, Reduction, ResolveError, Schema,
+    ColumnRef, GroupKeys, Reduction, ResolveError, Schema, SchemaDerivationError,
 };
 
 use crate::schema_resolver::{collect_referenced_columns, SchemaResolver};
@@ -39,7 +39,7 @@ pub enum ResolveTreeError {
     /// Deriving the schema of an already-resolved child failed (needed to
     /// resolve positional column references against it).
     #[error("schema derivation failed: {0}")]
-    Schema(#[from] QueryExprError),
+    Schema(#[from] SchemaDerivationError),
 }
 
 use asap_types::ir::canonicalize::canonicalize;
@@ -149,7 +149,7 @@ fn resolve(tree: &UnresolvedOp, fallback: &Schema) -> Result<Rc<OperatorNode>, R
                 child
             } else {
                 asap_types::pre_asap::schema::with_promql_series_identity(&child)
-                    .map_err(QueryExprError::InvalidScalarSignature)?
+                    .map_err(SchemaDerivationError::InvalidScalarSignature)?
             };
             let scalar = resolve_expr(scalar, &Schema::default())?;
             lower_scalar_vector(child, scalar, op, *scalar_left, *return_bool)
@@ -164,7 +164,7 @@ fn resolve(tree: &UnresolvedOp, fallback: &Schema) -> Result<Rc<OperatorNode>, R
                 child
             } else {
                 asap_types::pre_asap::schema::with_promql_series_identity(&child)
-                    .map_err(QueryExprError::InvalidScalarSignature)?
+                    .map_err(SchemaDerivationError::InvalidScalarSignature)?
             };
             let sample = resolve_expr(sample, &child.schema)?;
             project_sample(child, sample, *drop_metric_name)
@@ -286,7 +286,10 @@ fn resolve(tree: &UnresolvedOp, fallback: &Schema) -> Result<Rc<OperatorNode>, R
             let discriminator_unique_key = discriminator_unique_key
                 .as_ref()
                 .map(|key| {
-                    let schema = &children.first().ok_or(QueryExprError::EmptyConcat)?.schema;
+                    let schema = &children
+                        .first()
+                        .ok_or(SchemaDerivationError::EmptyConcat)?
+                        .schema;
                     Ok::<_, ResolveTreeError>(ConcatDiscriminatorKey::new(
                         resolve_column_ref(key.discriminator(), schema)?,
                         resolve_column_refs(key.inner_key(), schema)?,
@@ -743,7 +746,7 @@ fn lower_scalar_vector(
                 .next_back()
         })
         .ok_or_else(|| {
-            QueryExprError::InvalidScalarSignature("vector has no numeric sample".into())
+            SchemaDerivationError::InvalidScalarSignature("vector has no numeric sample".into())
         })?;
     let sample = ScalarExpr::Column(value);
     let (left, right) = if scalar_left {
@@ -779,7 +782,7 @@ fn lower_scalar_vector(
             }
         }
         BinaryOpKind::Set(_) => {
-            return Err(QueryExprError::InvalidScalarSignature(
+            return Err(SchemaDerivationError::InvalidScalarSignature(
                 "set operators require two vectors".into(),
             )
             .into())

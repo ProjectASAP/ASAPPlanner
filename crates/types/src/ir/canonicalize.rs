@@ -34,7 +34,7 @@ use super::node::{Operator, OperatorNode};
 use super::non_asap::NonASAPOp;
 use super::scalar::{ExprSemantics, Predicate, ProjectItem, ScalarExpr, SortKey};
 use crate::ir::operator_properties::{JoinKind, Reduction};
-use crate::ir::QueryExprError;
+use crate::ir::SchemaDerivationError;
 use crate::pre_asap::agg_intent::{topk, AggIntent};
 use crate::pre_asap::expr_ir::{CompareOpKind, ScalarValue};
 use crate::types::AccuracyTarget;
@@ -44,14 +44,14 @@ use crate::types::AccuracyTarget;
 /// nodes that change (or whose inputs change) are rebuilt; every untouched
 /// sub-DAG keeps its pointer identity, and a shared sub-DAG that is rewritten
 /// stays shared.
-pub fn canonicalize(root: Rc<OperatorNode>) -> Result<Rc<OperatorNode>, QueryExprError> {
+pub fn canonicalize(root: Rc<OperatorNode>) -> Result<Rc<OperatorNode>, SchemaDerivationError> {
     canon(&root, &mut HashMap::new())
 }
 
 fn canon(
     node: &Rc<OperatorNode>,
     memo: &mut HashMap<*const OperatorNode, Rc<OperatorNode>>,
-) -> Result<Rc<OperatorNode>, QueryExprError> {
+) -> Result<Rc<OperatorNode>, SchemaDerivationError> {
     if let Some(done) = memo.get(&Rc::as_ptr(node)) {
         return Ok(Rc::clone(done));
     }
@@ -135,7 +135,7 @@ type Memo = HashMap<*const OperatorNode, Rc<OperatorNode>>;
 fn apply_local_rules(
     mut current: Rc<OperatorNode>,
     memo: &mut Memo,
-) -> Result<Rc<OperatorNode>, QueryExprError> {
+) -> Result<Rc<OperatorNode>, SchemaDerivationError> {
     loop {
         let next = if let Some(next) = try_promote_additive_top_ranking(&current)? {
             next
@@ -165,7 +165,7 @@ fn operator_children(op: &Operator) -> Vec<&Rc<OperatorNode>> {
 /// aggregate. Returns `None` when the shape does not match.
 fn try_promote_additive_top_ranking(
     node: &OperatorNode,
-) -> Result<Option<Rc<OperatorNode>>, QueryExprError> {
+) -> Result<Option<Rc<OperatorNode>>, SchemaDerivationError> {
     // Limit k, no offset (an OFFSET means "not the top k").
     let Some(NonASAPOp::Limit {
         n: Some(k),
@@ -310,7 +310,7 @@ fn is_join_conjunct(conjunct: &ScalarExpr) -> bool {
 fn try_lower_subquery_conjunct(
     node: &OperatorNode,
     memo: &mut Memo,
-) -> Result<Option<Rc<OperatorNode>>, QueryExprError> {
+) -> Result<Option<Rc<OperatorNode>>, SchemaDerivationError> {
     let Some(NonASAPOp::Filter {
         pred: Predicate(pred),
         child,
@@ -382,7 +382,10 @@ fn try_lower_subquery_conjunct(
 /// an error when a scalar subquery yields more than one row (the cross join
 /// would duplicate the left's rows instead), and yields NULL when it yields
 /// none (the cross join yields no rows instead).
-fn filter(pred: ScalarExpr, child: Rc<OperatorNode>) -> Result<Rc<OperatorNode>, QueryExprError> {
+fn filter(
+    pred: ScalarExpr,
+    child: Rc<OperatorNode>,
+) -> Result<Rc<OperatorNode>, SchemaDerivationError> {
     OperatorNode::non_asap_node(NonASAPOp::Filter {
         pred: Predicate(pred),
         child,
