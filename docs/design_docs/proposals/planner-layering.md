@@ -62,7 +62,7 @@ In the diagram, × means the Cartesian product: each stage combines every option
 │ Physical planning — how to compute                                     │
 │                                                                        │
 │ 2. Physical ASAP-aware optimization                                    │
-│    Explore executable implementations of each logical candidate:       │
+│    Explore physical implementations of each logical candidate:         │
 │                                                                        │
 │      materialization decisions                                         │
 │      × physical operator implementations                               │
@@ -123,7 +123,7 @@ selection picks one. Example 1 traces this growth step by step.
 
 | Stage | Input | Decides | Output |
 |---|---|---|---|
-| 0. Frontends | `query`, `language` | Parse and lower to a common logical form; reject what cannot be represented | `CandidateLogicalDAGs` |
+| 0. Frontends | `query`, `language` | Parse and convert to a common logical form; reject what cannot be represented | `CandidateLogicalDAGs` |
 | 1. Logical ASAP-aware optimization | Logical DAGs; accuracy requirements, `time_selection`, repetition interval | Summary replacement (Pass 1); ASAP-aware CSE (Pass 2) | `CandidateLogicalASAPDAGs` |
 | 2. Physical ASAP-aware optimization | Logical ASAP DAGs; `recurrence`, `predictability`, `DataWorkload` | Materialization; physical operators; parallelism and resources (TODO) | `CandidatePhysicalASAPDAGs` |
 | 3. Plan selection | Physical candidates; `requirements`; cost model, accuracy model, capabilities | Reject invalid candidates; pick the cheapest plan for the whole workload | One `PhysicalASAPDAG` |
@@ -284,14 +284,14 @@ independent candidates, so selection can compare both.
 
 ### 2. Physical ASAP-aware optimization
 
-Physical optimization turns each logical candidate into executable candidates.
+Physical optimization turns each logical candidate into physical candidates.
 It makes two ASAP-specific decisions, described below. Parallelism, partitioning
 and resource management are TODO.
 
 #### Materialization
 
-Materialization decides, for each sub-DAG, whether its output is kept across
-(batch) query executions. Stage 2 makes this decision in three steps:
+Materialization decides, for each sub-DAG, whether its output is stored, on disk
+or in memory, across (batch) query executions. Stage 2 makes this decision in three steps:
 
 1. **Materialize or not.** A sub-DAG that is not materialized always runs at
    query time and keeps nothing.
@@ -299,7 +299,7 @@ Materialization decides, for each sub-DAG, whether its output is kept across
    is computed. A sub-DAG that runs at ingestion time is therefore always
    materialized, because its output must be kept until a query reads it.
 3. **Where and how long to store it:** on disk or in memory, and for how long.
-   The deployment's cost model prices each choice.
+   The deployment's cost model estimates the cost of each choice.
 
 This gives each sub-DAG three options:
 
@@ -334,7 +334,7 @@ A shared summary is materialized once for all its consumers. See Example 4.
 
 #### Physical operator implementation
 
-Physical operator implementation lowers every node to physical operators, for
+Physical operator implementation converts every node to physical operators, for
 example TopK as a sort followed by a limit, or a KLL node as summary build,
 merge and quantile estimation operators.
 
@@ -348,7 +348,8 @@ earlier stages only prune provably invalid ones. Accuracy is
 estimated by the deployment's accuracy model, not assumed from a summary's
 nominal bound. Cost is evaluated for the whole workload rather than per query,
 which is what lets one shared summary beat several cheaper independent ones:
-a shared summary is costed once, with the demand of all its consumers.
+the cost of a shared summary is estimated once, with the demand of all its
+consumers.
 
 ### 4. Execution
 
@@ -407,7 +408,7 @@ first needs an exact total; the second tolerates error.
 This example follows the workload's candidate set through every stage. Each
 candidate covers both queries.
 
-**Stage 0: 1 candidate.** The frontend lowers both queries into one workload
+**Stage 0: 1 candidate.** The frontend converts both queries into one workload
 `LogicalDAG` with no summaries:
 
 ```mermaid
@@ -435,7 +436,7 @@ flowchart TB
   within each `job`, which is costly at one million Zipf-distributed series.
   The `EpsilonDelta` target also admits a **Count-Min Sketch with a top-*k*
   heap per `job`**, and **Hydra over the whole `job` column**, where one sketch
-  covers every (`job`, series) key.
+  covers every (`job`, series) key and a top-*k* heap is still kept per `job`.
 
 ```mermaid
 flowchart LR
@@ -454,7 +455,7 @@ flowchart LR
     end
     subgraph H["Hydra"]
       direction LR
-      h1[("input")]:::data --> h2["one Hydra over all<br/>(job, series) keys"]:::summary --> h3(["top 10<br/>for each job"]):::estimate
+      h1[("input")]:::data --> h2["one Hydra over all<br/>(job, series) keys<br/>+ heap per job"]:::summary --> h3(["top 10<br/>for each job"]):::estimate
     end
   end
   classDef data fill:#f1f3f4,stroke:#5f6368,color:#000;
@@ -650,6 +651,9 @@ FROM (
   GROUP BY src_ip
 );
 ```
+
+The SQL frontend does not yet recognize the Q2 and Q3 forms as `Entropy` and
+`L2`. TODO: add this recognition to the per-language frontends.
 
 | Query | Computation | Repeats | `lookback` | `as_of` | Accuracy requirement |
 |---|---|---|---|---|---|
@@ -985,4 +989,4 @@ separately in physical planning.
 [^smooth-histograms]: V. Braverman and R. Ostrovsky. [Smooth Histograms for Sliding Windows](https://web.cs.ucla.edu/~rafail/PUBLIC/82.pdf). FOCS 2007. An alternative to EH.
 [^microscope-sketch]: Y. Wu et al. [MicroscopeSketch: Accurate Sliding Estimation Using Adaptive Zooming](https://yangtonghome.github.io/uploads/MicroscopeSketch_SIGKDD_23_final_paper.pdf). KDD 2023.
 [^sliding-sketches]: X. Gou et al. [Sliding Sketches: A Framework using Time Zones for Data Stream Processing in Sliding Windows](https://dl.acm.org/doi/10.1145/3394486.3403144). KDD 2020.
-[^sliding-merge]: [ACM DOI 10.1145/1055558.1055598](https://dl.acm.org/doi/10.1145/1055558.1055598). TODO: add authors, title and venue.
+[^sliding-merge]: A. Arasu and G. S. Manku. [Approximate Counts and Quantiles over Sliding Windows](https://dl.acm.org/doi/10.1145/1055558.1055598). PODS 2004.
