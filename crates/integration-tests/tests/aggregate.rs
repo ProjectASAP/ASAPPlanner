@@ -40,6 +40,7 @@ fn agg(by: Vec<usize>, intent: AggIntent, child: Rc<OperatorNode>) -> Rc<Operato
         reduction: Reduction::by(by),
         measures: vec![intent],
         output_names: vec!["".into()],
+        filters: vec![],
         having: None,
         child: node(NonASAPOp::TimeRange {
             range: Duration::from_secs(1),

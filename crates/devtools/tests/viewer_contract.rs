@@ -31,7 +31,6 @@ const NON_ASAP_KINDS: &[&str] = &[
     "PromqlInfoEnrich",
     "PromqlSeriesSample",
     "PromqlSubquery",
-    "ScalarBridge",
 ];
 
 /// Every `ASAPOp::kind_name()`.
@@ -76,7 +75,6 @@ fn kind_lists_track_every_variant(non_asap: &NonASAPOp, asap: &ASAPOp) {
             NonASAPOp::PromqlInfoEnrich { .. } => "PromqlInfoEnrich",
             NonASAPOp::PromqlSeriesSample { .. } => "PromqlSeriesSample",
             NonASAPOp::PromqlSubquery { .. } => "PromqlSubquery",
-            NonASAPOp::ScalarBridge(_) => "ScalarBridge",
         },
         NON_ASAP_KINDS,
     );

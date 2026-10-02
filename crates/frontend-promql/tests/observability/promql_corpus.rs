@@ -75,7 +75,10 @@ impl Tally {
 fn tally(corpus: &str) -> Tally {
     let mut t = Tally::default();
     for q in queries(corpus) {
-        match lower_promql(q, AccuracyTarget::Exact) {
+        match asap_frontend_promql::lower_promql_query_workload(
+            &support::workload(q, AccuracyTarget::Exact),
+            0,
+        ) {
             Ok(_) => t.lowered += 1,
             Err(LoweringError::Parse(_)) => t.unparseable += 1,
             Err(_) => t.rejected += 1,
@@ -154,13 +157,16 @@ fn lowering_is_total_over_the_entire_corpus() {
     // rather than pin an exact count — ratchet them up as coverage lands.
     //
     // The 235 unparseable are parser-fork gaps (issue #108); the rejections are
-    // lowering gaps (#109). Both shrink over time, so these floors only ever rise.
+    // lowering gaps (#109). Both shrink over time, so these floors normally only
+    // rise. Exception: the testdata floor was lowered to the measured 1485 when
+    // the 44 `fill` vector-matching queries became rejected rather than
+    // silently lowered without their fill semantics.
     assert!(
         docs.lowered >= 47,
         "docs lowering coverage regressed: {docs:?}"
     );
     assert!(
-        td.lowered >= 1495,
+        td.lowered >= 1485,
         "testdata lowering coverage regressed: {td:?}"
     );
 }

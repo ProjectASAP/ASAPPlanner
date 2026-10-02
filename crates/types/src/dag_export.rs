@@ -363,7 +363,7 @@ pub struct SummaryDagGraph {
 
 /// One replacement site a higher layer (the `dag_export` binary) found by
 /// running `asap_aware_mapping::replacement::search_workload_with` +
-/// `PlanSpace::cost_sorted` and picking the best-ranked candidate for one
+/// `CandidateLogicalASAPDAGs::cost_sorted` and picking the best-ranked candidate for one
 /// `TargetSubDAGCandidates` — `asap_types` never runs that search itself (same layering
 /// rule as [`DagNote`]: this crate defines the shape, a higher crate
 /// populates it).
@@ -390,7 +390,7 @@ pub struct TargetReplacement {
     /// not re-derived here).
     pub rationale: String,
     /// This candidate's rank among its `TargetSubDAGCandidates`'s alternatives after
-    /// `PlanSpace::cost_sorted` (`0` = best). Exposed so a renderer can show
+    /// `CandidateLogicalASAPDAGs::cost_sorted` (`0` = best). Exposed so a renderer can show
     /// "this was the best of N candidates" without re-deriving the ranking.
     pub rank: usize,
     /// This candidate's own estimated cost, straight off
@@ -443,7 +443,7 @@ pub enum TargetReplacementAfter {
 /// post-ASAP graph via [`export_post_asap`] — see that function's own doc
 /// for the full design. `asap_types` has no opinion on *how* this is
 /// decided (that's `asap_aware_mapping::replacement::search_workload_with` +
-/// `PlanSpace::cost_sorted`'s job, a higher layer, exactly the layering rule
+/// `CandidateLogicalASAPDAGs::cost_sorted`'s job, a higher layer, exactly the layering rule
 /// [`DagNode::notes`] already states); it only defines the shape a decision
 /// comes back in. Both variants render identically (one IR, one builder);
 /// they are kept apart so the caller's `Replacement` maps one-to-one.
@@ -512,7 +512,7 @@ pub fn export_summary(node: &Rc<OperatorNode>) -> SummaryDagGraph {
 ///
 /// `find_winner` is the whole layering seam: `asap_types` never runs
 /// `asap_aware_mapping::replacement::search_workload_with` or
-/// `PlanSpace::cost_sorted` itself, and has no idea what a `TargetSubDAGCandidates` or a
+/// `CandidateLogicalASAPDAGs::cost_sorted` itself, and has no idea what a `TargetSubDAGCandidates` or a
 /// `ReplacementProvenance` is — it only asks, for one node at a time, "did a
 /// higher layer already decide something for you?" A caller (e.g. the
 /// `dag_export` devtools binary) builds this closure once per workload
@@ -686,7 +686,6 @@ fn snake_case_kind(operator: &Operator) -> &'static str {
             NonASAPOp::PromqlInfoEnrich { .. } => "promql_info_enrich",
             NonASAPOp::PromqlSeriesSample { .. } => "promql_series_sample",
             NonASAPOp::PromqlSubquery { .. } => "promql_subquery",
-            NonASAPOp::ScalarBridge(_) => "scalar_bridge",
         },
         Operator::ASAP(op) => match op {
             ASAPOp::SummaryAgg { .. } => "summary_agg",
@@ -900,10 +899,6 @@ fn shape(
                 "PromqlSubquery".into(),
                 serde_json::json!({ "range": range, "resolution": resolution }),
             ),
-            NonASAPOp::ScalarBridge(value) => (
-                format!("ScalarBridge({})", scalar_summary(value)),
-                serde_json::json!({ "value": scalar(value) }),
-            ),
         },
         Operator::ASAP(op) => match op {
             ASAPOp::SummaryAgg {
@@ -953,34 +948,6 @@ fn shape(
                 serde_json::json!({ "name": name }),
             ),
         },
-    }
-}
-
-/// A few characters describing a scalar leaf for a `ScalarBridge` label —
-/// never the expression's `Debug` form, which would print every referenced
-/// operator subtree.
-fn scalar_summary(expr: &ScalarExpr) -> String {
-    match expr {
-        ScalarExpr::Literal(value) => format!("{value:?}"),
-        ScalarExpr::Column(id) => format!("col{id}"),
-        ScalarExpr::EvalTimestamp => "time()".into(),
-        ScalarExpr::CurrentTimestamp => "now()".into(),
-        ScalarExpr::PromqlScalarFromVector(_) => "scalar(..)".into(),
-        ScalarExpr::ScalarSubquery(_) => "subquery".into(),
-        ScalarExpr::Negative { .. } => "-..".into(),
-        ScalarExpr::Compare { op, .. } => format!("{op:?}"),
-        ScalarExpr::Arithmetic { op, .. } => format!("{op:?}"),
-        ScalarExpr::FunctionCall { name, .. } => format!("{name}(..)"),
-        ScalarExpr::BoolAnd(_) => "and".into(),
-        ScalarExpr::BoolOr(_) => "or".into(),
-        ScalarExpr::Not(_) => "not".into(),
-        ScalarExpr::IsNull(_) => "is null".into(),
-        ScalarExpr::IsNotNull(_) => "is not null".into(),
-        ScalarExpr::Cast { to, .. } => format!("cast({to:?})"),
-        ScalarExpr::InList { .. } => "in (..)".into(),
-        ScalarExpr::InSubquery { .. } => "in (subquery)".into(),
-        ScalarExpr::Exists { .. } => "exists".into(),
-        ScalarExpr::Case { .. } => "case".into(),
     }
 }
 
@@ -1137,6 +1104,7 @@ mod tests {
                 accuracy: AccuracyTarget::Exact,
             }],
             output_names: vec![],
+            filters: vec![],
             having: None,
             child,
         })
@@ -1169,6 +1137,7 @@ mod tests {
                 input: SummaryUpdate::column(ColumnRef::Named("v".into())),
                 reduction: Reduction::by(vec![]),
                 grouping: GroupingStrategy::default(),
+                filter: None,
             },
             Schema::lifted(vec![Field::new("state", family, false)], None),
             None,

@@ -21,8 +21,8 @@
 //! `realize_child` takes the head of the child's own ranking): a
 //! [`Replacement::ExactComposition`] carries only the child *target*
 //! (`ExactComposition::child_target`, the same `Rc<OperatorNode>` whose
-//! `TargetSubDAGCandidates` in `PlanSpace` already holds every candidate for it). It is
-//! [`PlanSpace::global_selection`](crate::replacement::PlanSpace::global_selection)
+//! `TargetSubDAGCandidates` in `CandidateLogicalASAPDAGs` already holds every candidate for it). It is
+//! [`CandidateLogicalASAPDAGs::global_selection`](crate::replacement::CandidateLogicalASAPDAGs::global_selection)
 //! that commits the compatible parent/child pair — so the child's own
 //! cost-model ranking, workload-wide effective consumer count, and shared
 //! `Rc` identity (one inner summary serving two outer folds) all stay
@@ -62,6 +62,7 @@
 //!   formulas (see `crate::cost_model::read_operation_plan_cost_rate` and
 //!   siblings). Missing statistics keep the conservative kept subtree.
 
+use asap_types::ir::non_asap::any_measure_filtered;
 use std::rc::Rc;
 
 use asap_types::ir::timing::{planned_data_state, validate_default};
@@ -95,6 +96,7 @@ pub enum ExactOperation {
         reduction: Reduction,
         measures: Vec<AggIntent>,
         output_names: Vec<String>,
+        filters: Vec<Option<Predicate>>,
         having: Option<Predicate>,
     },
 }
@@ -124,12 +126,14 @@ impl ExactOperation {
             reduction,
             measures,
             output_names,
+            filters,
             having,
         } = self;
         NonASAPOp::Aggregate {
             reduction,
             measures,
             output_names,
+            filters,
             having,
             child,
         }
@@ -308,12 +312,16 @@ fn query_time_shape(
         reduction,
         measures,
         output_names,
+        filters,
         having: None,
         child,
     }) = root.non_asap()
     else {
         return None;
     };
+    if any_measure_filtered(filters) {
+        return None;
+    }
     let Reduction::Reduce(by) = reduction else {
         return None;
     };
@@ -340,6 +348,7 @@ fn query_time_shape(
             reduction: reduction.clone(),
             measures: measures.clone(),
             output_names: output_names.clone(),
+            filters: filters.clone(),
             having: None,
         },
         Rc::clone(child),
@@ -357,12 +366,16 @@ fn ingestion_time_shape(
         reduction: Reduction::PerEntity,
         measures,
         output_names,
+        filters,
         having: None,
         child,
     }) = root.non_asap()
     else {
         return None;
     };
+    if any_measure_filtered(filters) {
+        return None;
+    }
     let [intent] = measures.as_slice() else {
         return None;
     };
@@ -383,6 +396,7 @@ fn ingestion_time_shape(
             reduction: Reduction::PerEntity,
             measures: measures.clone(),
             output_names: output_names.clone(),
+            filters: filters.clone(),
             having: None,
         },
         Rc::clone(child),
@@ -698,6 +712,7 @@ mod tests {
             reduction: Reduction::by(by),
             measures: vec![AggIntent::Max { col: None }],
             output_names: vec![],
+            filters: vec![],
             having: None,
         }
     }

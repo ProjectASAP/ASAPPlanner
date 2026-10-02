@@ -141,7 +141,7 @@
 //! priced with, reflecting "one more reference into a structure that's
 //! already being maintained" rather than "build a whole new one."
 //!
-//! `PlanSpace::global_selection` treats this rewrite as a cross-group edge:
+//! `CandidateLogicalASAPDAGs::global_selection` treats this rewrite as a cross-group edge:
 //! selecting it increments `rc`'s own `effective_consumer_count`, then lets
 //! that sibling group propagate the uses through its selected implementation.
 //! Accuracy edges are directed strictly from looser to tighter budgets, so
@@ -149,6 +149,7 @@
 //! same structural child, so adding the edge preserves the reference graph's
 //! parent-before-child topological ordering.
 
+use asap_types::ir::non_asap::any_measure_filtered;
 use std::cmp::Ordering;
 use std::rc::Rc;
 
@@ -187,6 +188,7 @@ fn bindable_accuracy_aggregate(node: &OperatorNode) -> Option<BindableAccuracyAg
         reduction,
         measures,
         output_names,
+        filters,
         having,
         child,
     }) = node.non_asap()
@@ -196,6 +198,9 @@ fn bindable_accuracy_aggregate(node: &OperatorNode) -> Option<BindableAccuracyAg
     let ([intent], None) = (measures.as_slice(), having) else {
         return None;
     };
+    if any_measure_filtered(filters) {
+        return None;
+    }
     let accuracy = accuracy_target(intent)?;
     Some((reduction, intent, accuracy, output_names.as_slice(), child))
 }
@@ -418,6 +423,7 @@ mod tests {
             reduction: Reduction::by(by),
             measures: vec![intent],
             output_names: vec![],
+            filters: vec![],
             having: None,
             child: Rc::clone(child),
         })
@@ -473,6 +479,7 @@ mod tests {
                 accuracy,
             }],
             output_names: vec![],
+            filters: vec![],
             having: None,
             child: Rc::clone(child),
         })

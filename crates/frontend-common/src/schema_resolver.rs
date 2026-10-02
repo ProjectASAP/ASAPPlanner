@@ -135,8 +135,9 @@ fn leftmost_scan_name(tree: &UnresolvedOp) -> Option<&str> {
             Source::TimeSeries { metric } => metric.as_str(),
             Source::Table { table_ref } => table_ref.as_str(),
         }),
-        U::Values { .. } | U::ScalarBridge(_) | U::PromqlVectorFromScalar(_) => None,
-        U::PromqlRelabel { child, .. }
+        U::Values { .. } | U::PromqlVectorFromScalar(_) => None,
+        U::PromqlScalarOp { child, .. }
+        | U::PromqlRelabel { child, .. }
         | U::PromqlInfoEnrich { child, .. }
         | U::PromqlSeriesSample { child, .. }
         | U::Filter { child, .. }
@@ -276,8 +277,9 @@ pub fn collect_referenced_columns(tree: &UnresolvedOp) -> Vec<String> {
                 walk(left, out);
                 walk(right, out);
             }
-            U::ScalarBridge(inner) | U::PromqlVectorFromScalar(inner) => named(inner, out),
-            U::PromqlInfoEnrich { child, .. }
+            U::PromqlVectorFromScalar(inner) => named(inner, out),
+            U::PromqlScalarOp { child, .. }
+            | U::PromqlInfoEnrich { child, .. }
             | U::PromqlSubquery { child, .. }
             | U::TimeRange { child, .. }
             | U::TimeShift { child, .. } => walk(child, out),
@@ -340,6 +342,7 @@ mod tests {
                 right: ColumnRef::Named("y".into()),
             }],
             output_names: vec![],
+            filters: vec![],
             having: None,
             child: Rc::new(src("m")),
         };

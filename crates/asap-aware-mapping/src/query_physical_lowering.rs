@@ -184,11 +184,9 @@ pub fn lower_query_physical_dag(
             self.push(evidence, operator, vec![], None)
         }
 
-        /// A PromQL scalar operand (`ScalarBridge`, or the scalar of
-        /// `vector(s)`): a literal or `time()` is a scalar leaf; `scalar(v)`
-        /// reads its vector through `PromqlVectorToScalar`. `query` is the
-        /// operator node that owns the scalar; `occurrence` is its own
-        /// occurrence for a bridge and a fresh one for a `vector(s)` operand.
+        /// Lower the owned scalar operand of `vector(s)`. A literal or
+        /// `time()` is a physical scalar leaf; `scalar(v)` reads its vector
+        /// through `PromqlVectorToScalar`.
         fn lower_scalar_operand(
             &mut self,
             query: &OperatorNode,
@@ -323,11 +321,15 @@ pub fn lower_query_physical_dag(
                 NonASAPOp::Aggregate {
                     reduction,
                     measures,
+                    filters,
                     having,
                     child,
                     ..
                 } => {
-                    if having.is_some() || measures.is_empty() {
+                    if having.is_some()
+                        || asap_types::ir::non_asap::any_measure_filtered(filters)
+                        || measures.is_empty()
+                    {
                         return Err(AnalyticalCostError::UnsupportedQueryOperator);
                     }
                     if matches!(reduction, asap_types::pre_asap::Reduction::PerEntity) {
@@ -659,28 +661,8 @@ pub fn lower_query_physical_dag(
                 } => {
                     let op = &operator.kind;
                     let vector_match = &operator.vector_match;
-                    let left_scalar = is_promql_scalar(lhs);
-                    let right_scalar = is_promql_scalar(rhs);
-                    if left_scalar && right_scalar {
-                        return Err(AnalyticalCostError::UnsupportedQueryOperator);
-                    }
                     let operation = promql_binary_operation(op);
-                    if (left_scalar || right_scalar)
-                        && !matches!(operation, PromqlBinaryOperation::ArithmeticOrComparison)
-                    {
-                        return Err(AnalyticalCostError::UnsupportedQueryOperator);
-                    }
-                    let operand_mode = match (left_scalar, right_scalar) {
-                        (false, false) => PromqlBinaryOperandMode::VectorVector,
-                        (false, true) => PromqlBinaryOperandMode::VectorScalar,
-                        (true, false) => PromqlBinaryOperandMode::ScalarVector,
-                        (true, true) => unreachable!("scalar/scalar returned above"),
-                    };
-                    if operand_mode != PromqlBinaryOperandMode::VectorVector
-                        && vector_match.is_some()
-                    {
-                        return Err(AnalyticalCostError::UnsupportedQueryOperator);
-                    }
+                    let operand_mode = PromqlBinaryOperandMode::VectorVector;
                     let cardinality = promql_vector_cardinality(vector_match.as_ref());
                     let left_id = self.lower(lhs)?;
                     let right_id = self.lower(rhs)?;
@@ -724,9 +706,6 @@ pub fn lower_query_physical_dag(
                         PhysicalOperator::PromqlScalarToVector,
                         child_id,
                     )
-                }
-                NonASAPOp::ScalarBridge(scalar) => {
-                    self.lower_scalar_operand(query, occurrence, scalar)
                 }
                 NonASAPOp::TimeShift { shift, child } => {
                     if !shift.is_identity() {
@@ -1276,10 +1255,6 @@ fn fixed_state_per_series_intent(intent: &asap_types::pre_asap::AggIntent) -> bo
     )
 }
 
-fn is_promql_scalar(query: &OperatorNode) -> bool {
-    query.is_scalar_leaf()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1484,6 +1459,7 @@ mod tests {
             reduction: Reduction::by(vec![]),
             measures: vec![AggIntent::PearsonCorr { left: 0, right: 1 }],
             output_names: vec!["r".into()],
+            filters: vec![],
             having: None,
             child: OperatorNode::non_asap_node(NonASAPOp::Scan {
                 source: source.clone(),
@@ -1546,6 +1522,7 @@ mod tests {
             reduction: Reduction::by(vec![0]),
             measures: vec![AggIntent::Sum { col: Some(1) }],
             output_names: vec![],
+            filters: vec![],
             having: None,
             child: Rc::clone(&scan),
         })
@@ -2303,6 +2280,7 @@ mod tests {
                 accuracy: AccuracyTarget::Exact,
             }],
             output_names: vec![],
+            filters: vec![],
             having: None,
             child: scan(),
         })
@@ -2389,6 +2367,7 @@ mod tests {
             reduction: Reduction::PerEntity,
             measures: vec![AggIntent::Absent],
             output_names: vec![],
+            filters: vec![],
             having: None,
             child: scan,
         })
@@ -2639,6 +2618,7 @@ mod tests {
             reduction: Reduction::PerEntity,
             measures: vec![AggIntent::Sum { col: None }],
             output_names: vec![],
+            filters: vec![],
             having: None,
             child: sample,
         })

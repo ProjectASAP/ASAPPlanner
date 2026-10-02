@@ -173,7 +173,7 @@ fn histogram_quantile_core_lowers() {
         ok("histogram_quantile(0.95, sum(rate(http_request_duration_seconds_bucket[5m])) by (le))");
     assert!(has(
         &qe,
-        |i| matches!(i, AggIntent::HistogramQuantile { q } if (*q - 0.95).abs() < 1e-9)
+        |i| matches!(i, AggIntent::HistogramQuantile { q, .. } if (*q - 0.95).abs() < 1e-9)
     ));
     assert!(has(&qe, |i| matches!(i, AggIntent::Sum { .. })));
     assert!(has(&qe, |i| matches!(i, AggIntent::Rate)));
@@ -237,7 +237,7 @@ fn all_targets_missing_core_lowers() {
 #[test]
 fn scalar_threshold_comparisons_lower_to_binaryop_scalar() {
     // ~822/949 corpus queries are `<vector> <cmp> <scalar>`. The numeric
-    // threshold is now a `PromqlScalarBridge` operand of the `BinaryOp` (issue
+    // threshold is now a `ScalarExpr` operand of the `BinaryOp` (issue
     // #35) — the single biggest unblock for real alerts.
     for q in [
         "prometheus_config_last_reload_successful != 1",
@@ -245,12 +245,9 @@ fn scalar_threshold_comparisons_lower_to_binaryop_scalar() {
         "rate(alertmanager_notifications_failed_total[3m]) > 0.05",
     ] {
         let qe = ok(q);
-        let NonASAPOp::BinaryOp { rhs, .. } = qe.expect_non_asap() else {
-            panic!("expected a BinaryOp for {q:?}");
-        };
         assert!(
-            matches!(rhs.expect_non_asap(), NonASAPOp::ScalarBridge(_)),
-            "scalar threshold operand for {q:?}, got {rhs:?}"
+            matches!(qe.expect_non_asap(), NonASAPOp::Filter { .. }),
+            "{q}"
         );
     }
 }
@@ -317,7 +314,7 @@ fn without_grouping_lowers_to_the_exclusion_form() {
     // labels are stored and the kept set is runtime-resolved (issue #39).
     let qe = ok(r#"(min without (cpu) (rate(node_cpu_seconds_total{mode="idle"}[1h]))) > 0.8"#);
     // Top level is the `> 0.8` comparison; the `min without (cpu)` is its LHS.
-    let NonASAPOp::BinaryOp { lhs, .. } = qe.expect_non_asap() else {
+    let NonASAPOp::Filter { child: lhs, .. } = qe.expect_non_asap() else {
         panic!("expected a comparison BinaryOp, got {qe:?}");
     };
     let NonASAPOp::Aggregate {

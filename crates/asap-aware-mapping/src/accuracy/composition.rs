@@ -1033,6 +1033,7 @@ mod tests {
             reduction: asap_types::pre_asap::Reduction::PerEntity,
             measures: vec![intent],
             output_names: vec![],
+            filters: vec![],
             having: None,
         };
         assert_eq!(

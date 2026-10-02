@@ -49,6 +49,7 @@ fn rate_agg(metric: &str) -> Rc<OperatorNode> {
         reduction: Reduction::PerEntity,
         measures: vec![AggIntent::Rate],
         output_names: vec!["".into()],
+        filters: vec![],
         having: None,
         child: node(NonASAPOp::TimeRange {
             range: Duration::from_secs(300),
@@ -63,6 +64,7 @@ fn sum_by_job(metric: &str) -> Rc<OperatorNode> {
         reduction: Reduction::by(vec![2]),
         measures: vec![AggIntent::Sum { col: None }],
         output_names: vec!["".into()],
+        filters: vec![],
         having: None,
         child: scan(metric, &["job"]),
     })
@@ -86,11 +88,6 @@ fn binary(
         lhs,
         rhs,
     })
-}
-
-/// A bare PromQL numeric literal at an operator position.
-fn promql_scalar(v: f64) -> Rc<OperatorNode> {
-    node(NonASAPOp::ScalarBridge(ScalarExpr::literal_f64(v)))
 }
 
 // #18 — arithmetic binary op between two bare scans; no vector match
@@ -269,34 +266,31 @@ fn q21_div_two_sum_by_job() {
 }
 
 // #36 — unary negation lowers as `expr * -1`: a Mul BinaryOp of the vector
-//   against a `ScalarBridge(-1)` leaf, no vector match. The vector side keeps
+//   against a `ScalarExpr(-1)` leaf, no vector match. The vector side keeps
 //   its schema.
 #[test]
 fn q36_unary_negation_is_multiply_by_minus_one() {
-    let expected = binary(
-        BinaryOpKind::Arithmetic(ArithmeticOpKind::Mul),
-        None,
-        scan("some_metric", &[]),
-        promql_scalar(-1.0),
+    let root = lower("-some_metric");
+    let NonASAPOp::Project { cols, child, .. } = root.expect_non_asap() else {
+        panic!()
+    };
+    assert!(child.schema.has_promql_series_identity());
+    assert!(
+        matches!(&cols[1].expr, ScalarExpr::Arithmetic { op: ArithmeticOpKind::Mul, right, .. } if **right == ScalarExpr::literal_f64(-1.0))
     );
-    assert_eq!(lower("-some_metric"), expected);
 }
 
 // #36 — negation nested inside an aggregate argument (issue #27 nesting):
 //   `sum(-m)` → Aggregate{Sum} over the `m * -1` BinaryOp.
 #[test]
 fn q36_sum_of_negation_nests() {
-    let expected = node(NonASAPOp::Aggregate {
-        reduction: Reduction::by(vec![]),
-        measures: vec![AggIntent::Sum { col: None }],
-        output_names: vec!["".into()],
-        having: None,
-        child: binary(
-            BinaryOpKind::Arithmetic(ArithmeticOpKind::Mul),
-            None,
-            scan("node_cpu_seconds_total", &[]),
-            promql_scalar(-1.0),
-        ),
-    });
-    assert_eq!(lower("sum(-node_cpu_seconds_total)"), expected);
+    let root = lower("sum(-node_cpu_seconds_total)");
+    let NonASAPOp::Aggregate {
+        child, measures, ..
+    } = root.expect_non_asap()
+    else {
+        panic!()
+    };
+    assert!(matches!(measures.as_slice(), [AggIntent::Sum { .. }]));
+    assert!(matches!(child.expect_non_asap(), NonASAPOp::Project { .. }));
 }

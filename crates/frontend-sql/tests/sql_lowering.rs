@@ -7,6 +7,7 @@
 //! resolution, so a successful `lower` already proves schema derivation is
 //! total over the tree.
 
+use asap_types::ir::Predicate;
 use std::rc::Rc;
 
 use asap_frontend_common::{UnresolvedOp, UnresolvedScalar};
@@ -105,10 +106,11 @@ async fn planning_histogram_bridge_reuses_classic_bucket_intent() {
     else {
         panic!("expected canonical histogram aggregate");
     };
+    // One histogram over all rows; the bucket bound is the child's column 0.
     assert!(reduction.expect_reduce().keys().is_empty());
     assert!(matches!(
         measures.as_slice(),
-        [AggIntent::HistogramQuantile { q }] if (*q - 0.95).abs() < 1e-12
+        [AggIntent::HistogramQuantile { q, le: 0 }] if (*q - 0.95).abs() < 1e-12
     ));
     assert!(matches!(op(child), NonASAPOp::Project { .. }));
 }
@@ -2068,11 +2070,9 @@ async fn count_if_lowers_to_a_sum_over_a_derived_indicator_column() {
     // ClickHouse's `countIf(cond)` has no DataFusion equivalent at all, so it
     // goes through the same stub-UDAF + catalog-driven `FunctionRewrite`
     // mechanism `uniqExact` (#221) does — rewritten, before `lower_agg_intent`
-    // ever runs, to `sum(CASE WHEN cond THEN 1 ELSE 0 END)`. Not a plain
-    // `count(...) FILTER (WHERE cond)`: `AggIntent::Count` never consults its
-    // argument (always a row count), so the filter would be silently dropped;
-    // summing a 0/1 indicator keeps `cond` observable through the ordinary
-    // `Sum` path instead.
+    // ever runs, to `sum(CASE WHEN cond THEN 1 ELSE 0 END)`. A per-measure
+    // filter (#466) could express it as a filtered `Count` now; that move is
+    // a follow-up, so the indicator sum is still the shape to expect.
     let qe = lower_clickhouse("SELECT countIf(bytes > 100) AS big FROM metrics").await;
     let (by, measures) = find_aggregate(&qe).expect("expected an Aggregate");
     assert!(by.is_empty());
@@ -2297,8 +2297,11 @@ async fn current_timestamp_lowers_to_typed_current_timestamp_leaf() {
     assert_eq!(qe.schema.fields[0].dtype, DataType::Timestamp);
 }
 
+// A `count` over a non-null input is a plain row count; over a nullable
+// input it keeps SQL's NULL-skipping as the measure's own filter (#466), and
+// only the multi-level grouping path, which cannot carry one, still rejects it.
 #[tokio::test]
-async fn count_preserves_non_null_inputs_and_rejects_erased_null_semantics() {
+async fn count_null_semantics_become_a_measure_filter() {
     let catalog = SqlCatalog::new().with_table(
         "samples",
         Schema::new(vec![
@@ -2312,25 +2315,50 @@ async fn count_preserves_non_null_inputs_and_rejects_erased_null_semantics() {
         "SELECT count(value) FROM samples",
         "SELECT count(value + 1) FROM samples",
     ] {
-        lower_sql(sql, &catalog, AccuracyTarget::Exact)
+        let qe = lower_sql(sql, &catalog, AccuracyTarget::Exact)
             .await
             .unwrap_or_else(|error| panic!("{sql}: {error}"));
+        assert!(
+            aggregate_filters(&qe).is_empty(),
+            "{sql}: unfiltered row count"
+        );
     }
     for sql in [
         "SELECT count(nullable_value) FROM samples",
         "SELECT count(NULL) FROM samples",
         "SELECT count(nullable_value + 1) FROM samples",
-        "SELECT count(*), count(nullable_value) FROM samples",
-        "SELECT count(nullable_value) FROM samples GROUP BY ROLLUP(value)",
     ] {
-        let error = lower_sql(sql, &catalog, AccuracyTarget::Exact)
+        let qe = lower_sql(sql, &catalog, AccuracyTarget::Exact)
             .await
-            .unwrap_err();
-        assert!(
-            error.to_string().contains("explicit per-aggregate"),
-            "{sql}: {error}"
-        );
+            .unwrap_or_else(|error| panic!("{sql}: {error}"));
+        let [Some(Predicate(cond))] = aggregate_filters(&qe) else {
+            panic!(
+                "{sql}: expected one filtered Count, got {:?}",
+                aggregate_filters(&qe)
+            );
+        };
+        assert!(matches!(cond, ScalarExpr::IsNotNull(_)), "{sql}: {cond:?}");
     }
+    // Only the second measure is filtered.
+    let qe = lower_sql(
+        "SELECT count(*), count(nullable_value) FROM samples",
+        &catalog,
+        AccuracyTarget::Exact,
+    )
+    .await
+    .unwrap();
+    assert!(matches!(aggregate_filters(&qe), [None, Some(_)]));
+    let error = lower_sql(
+        "SELECT count(nullable_value) FROM samples GROUP BY ROLLUP(value)",
+        &catalog,
+        AccuracyTarget::Exact,
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        matches!(error, LoweringError::UnsupportedFeature(_)),
+        "{error}"
+    );
 }
 
 /// A native SQL map grouping key retains its typed key/value schema.
@@ -2773,4 +2801,130 @@ async fn distinct_with_derived_sibling() {
         let result = lower_sql(sql, &catalog, AccuracyTarget::Exact).await;
         assert!(result.is_ok(), "{sql}: {result:?}");
     }
+}
+
+// ── Issue #466: per-measure FILTER predicates ─────────────────────────────────
+
+/// The first `Aggregate`'s `filters`, positional against its child.
+fn aggregate_filters(qe: &OperatorNode) -> &[Option<Predicate>] {
+    let Some(NonASAPOp::Aggregate { filters, .. }) =
+        find_aggregate_node(qe).map(|n| n.expect_non_asap())
+    else {
+        panic!("expected an Aggregate, got {qe:?}");
+    };
+    filters
+}
+
+// The motivating query: one scan, one grouping, one conditional count next to
+// a plain sum — a single `Aggregate` whose Count carries the condition, with no
+// `Join` and no derived column for the `CASE`.
+#[tokio::test]
+async fn conditional_count_lowers_to_a_filtered_measure() {
+    let qe = lower(
+        "SELECT service, count(CASE WHEN latency > 1.0 THEN 1 END), sum(bytes) \
+         FROM metrics GROUP BY service",
+    )
+    .await;
+    assert!(find_join(&qe).is_none(), "no join: {qe:?}");
+    let (by, measures) = find_aggregate(&qe).unwrap();
+    assert_eq!(by.keys(), &[1]);
+    assert!(
+        matches!(
+            measures.as_slice(),
+            [AggIntent::Count { .. }, AggIntent::Sum { col: Some(3) }]
+        ),
+        "{measures:?}"
+    );
+    let [Some(Predicate(cond)), None] = aggregate_filters(&qe) else {
+        panic!("expected [Some, None], got {:?}", aggregate_filters(&qe));
+    };
+    assert!(
+        matches!(cond, ScalarExpr::Compare { left, op: CompareOpKind::Gt, .. }
+            if matches!(left.as_ref(), ScalarExpr::Column(2))),
+        "latency > 1.0 against the scan, got {cond:?}"
+    );
+    let Some(NonASAPOp::Aggregate { child, .. }) =
+        find_aggregate_node(&qe).map(|n| n.expect_non_asap())
+    else {
+        unreachable!()
+    };
+    assert!(
+        matches!(child.expect_non_asap(), NonASAPOp::Scan { .. }),
+        "{child:?}"
+    );
+}
+
+// `FILTER (WHERE …)` parses under the DataFusion dialect and lands on exactly
+// the measure it annotates.
+#[tokio::test]
+async fn filter_clause_lowers_to_a_measure_filter() {
+    let qe = lower("SELECT sum(bytes) FILTER (WHERE service = 'a'), count(*) FROM metrics").await;
+    let [Some(Predicate(cond)), None] = aggregate_filters(&qe) else {
+        panic!("expected [Some, None], got {:?}", aggregate_filters(&qe));
+    };
+    assert!(
+        matches!(cond, ScalarExpr::Compare { left, op: CompareOpKind::Eq, right, .. }
+            if matches!(left.as_ref(), ScalarExpr::Column(1))
+                && matches!(right.as_ref(), ScalarExpr::Literal(ScalarValue::Utf8(s)) if s == "a")),
+        "{cond:?}"
+    );
+}
+
+// SQL `count(expr)` skips NULLs; canonical `Count` counts rows and never sees
+// `expr`, so a nullable argument becomes the measure filter `expr IS NOT NULL`
+// instead of being rejected (the pre-#466 behavior) or silently over-counted.
+#[tokio::test]
+async fn count_of_a_nullable_expression_filters_nulls() {
+    let qe = lower("SELECT count(nullif(bytes, 0)) FROM metrics").await;
+    let [Some(Predicate(cond))] = aggregate_filters(&qe) else {
+        panic!("expected [Some], got {:?}", aggregate_filters(&qe));
+    };
+    assert!(matches!(cond, ScalarExpr::IsNotNull(_)), "{cond:?}");
+    assert!(
+        matches!(
+            find_aggregate(&qe).unwrap().1.as_slice(),
+            [AggIntent::Count { .. }]
+        ),
+        "still a row count"
+    );
+}
+
+// The columns a measure filter reads must survive the derived-column
+// `Project` a reducer expression inserts beneath the aggregate.
+#[tokio::test]
+async fn measure_filter_columns_survive_a_derived_column_projection() {
+    let qe = lower("SELECT sum(bytes * 2) FILTER (WHERE latency > 1.0) FROM metrics").await;
+    let Some(NonASAPOp::Aggregate { child, .. }) =
+        find_aggregate_node(&qe).map(|n| n.expect_non_asap())
+    else {
+        unreachable!()
+    };
+    assert!(
+        matches!(child.expect_non_asap(), NonASAPOp::Project { .. }),
+        "{child:?}"
+    );
+    let [Some(Predicate(cond))] = aggregate_filters(&qe) else {
+        panic!("expected [Some], got {:?}", aggregate_filters(&qe));
+    };
+    let ScalarExpr::Compare { left, .. } = cond else {
+        panic!("{cond:?}");
+    };
+    let ScalarExpr::Column(id) = left.as_ref() else {
+        panic!("{left:?}");
+    };
+    assert_eq!(child.schema.fields[*id].name, "latency");
+}
+
+// `GROUP BY ROLLUP` fans one measure list out into one `Aggregate` per level;
+// a filtered measure there is rejected rather than silently unfiltered.
+#[tokio::test]
+async fn measure_filter_inside_a_rollup_is_rejected() {
+    let err = lower_sql(
+        "SELECT service, count(*) FILTER (WHERE latency > 1.0) FROM metrics GROUP BY ROLLUP(service)",
+        &catalog(),
+        AccuracyTarget::Exact,
+    )
+    .await
+    .unwrap_err();
+    assert!(matches!(err, LoweringError::UnsupportedFeature(_)), "{err}");
 }

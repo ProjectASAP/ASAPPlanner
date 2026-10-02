@@ -448,8 +448,6 @@ pub enum GroupSide {
     Right,
 }
 
-/// A row-level filter predicate (WHERE clause / PromQL label matcher).
-
 // ── Intent algebra IR ────────────────────────────────────────────────────────
 
 /// What kind of computation an `Aggregate` node performs — orthogonal to
@@ -665,9 +663,10 @@ pub fn aggregate_output_schema(
             ))?;
         out_cols.push(c.clone());
     }
-    let value_col_idx = in_schema
-        .column_id("value")
-        .or_else(|| (0..in_schema.fields.len()).find(|i| !by.contains(i)));
+    let value_col_idx =
+        super::column_resolution::resolve_column_ref(&ColumnRef::SampleValue, in_schema)
+            .ok()
+            .or_else(|| (0..in_schema.fields.len()).find(|i| !by.contains(i)));
     let probe = value_col_idx
         .and_then(|i| in_schema.fields.get(i))
         .cloned()
@@ -763,7 +762,9 @@ fn without_output_schema(
     let mut out_cols: Vec<Field> = Vec::new();
     for (i, col) in in_schema.fields.iter().enumerate() {
         let is_time = in_schema.time_index == Some(i);
-        let is_value = col.name == "value";
+        let is_value =
+            super::column_resolution::resolve_column_ref(&ColumnRef::SampleValue, in_schema).ok()
+                == Some(i);
         if !is_time && !is_value && !excluded.contains(&i) {
             out_cols.push(col.clone());
         }

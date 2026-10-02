@@ -307,6 +307,8 @@ pub enum NonASAPOpKind {
         #[serde(default)]
         output_names: Vec<String>,
         #[serde(default)]
+        filters: Vec<Option<WirePredicate>>,
+        #[serde(default)]
         having: Option<WirePredicate>,
     },
     Join {
@@ -378,9 +380,6 @@ pub enum NonASAPOpKind {
         #[serde(default)]
         resolution: Option<Duration>,
     },
-    ScalarBridge {
-        expr: WireScalarExpr,
-    },
 }
 
 impl NonASAPOpKind {
@@ -434,12 +433,17 @@ impl NonASAPOpKind {
                 reduction,
                 measures,
                 output_names,
+                filters,
                 having,
                 ..
             } => NonASAPOpKind::Aggregate {
                 reduction: reduction.clone(),
                 measures: measures.clone(),
                 output_names: output_names.clone(),
+                filters: filters
+                    .iter()
+                    .map(|p| p.as_ref().map(|p| WirePredicate::from_pred(p, id_of)))
+                    .collect(),
                 having: having.as_ref().map(|p| WirePredicate::from_pred(p, id_of)),
             },
             Op::Join { kind, pred, .. } => NonASAPOpKind::Join {
@@ -525,9 +529,6 @@ impl NonASAPOpKind {
                 range: *range,
                 resolution: *resolution,
             },
-            Op::ScalarBridge(e) => NonASAPOpKind::ScalarBridge {
-                expr: WireScalarExpr::from_expr(e, id_of),
-            },
         }
     }
 }
@@ -545,6 +546,8 @@ pub enum PostAsapOperatorPayload {
         input: SummaryUpdate,
         reduction: Reduction,
         grouping: GroupingStrategy,
+        #[serde(default)]
+        filter: Option<WirePredicate>,
     },
     SummaryEstimate {
         query: SketchQuery,
@@ -900,8 +903,16 @@ impl Exporter {
         for (child, role) in input_edges(&node.operator) {
             producers.push((self.visit(child)?, child, role));
         }
-        if let Operator::NonASAP(op) = &node.operator {
-            for expr in op.scalar_exprs() {
+        {
+            let scalars = match &node.operator {
+                Operator::NonASAP(op) => op.scalar_exprs(),
+                Operator::ASAP(ASAPOp::SummaryAgg {
+                    filter: Some(filter),
+                    ..
+                }) => vec![&filter.0],
+                _ => vec![],
+            };
+            for expr in scalars {
                 for referenced in expr.operator_refs() {
                     producers.push((self.visit(referenced)?, referenced, EdgeRole::ScalarRef));
                 }
@@ -973,8 +984,7 @@ fn input_edges(operator: &Operator) -> Vec<(&Rc<OperatorNode>, EdgeRole)> {
             | NonASAPOp::PromqlSubquery { child, .. } => vec![(child, EdgeRole::Input)],
             NonASAPOp::Scan { .. }
             | NonASAPOp::Values { .. }
-            | NonASAPOp::PromqlVectorFromScalar(_)
-            | NonASAPOp::ScalarBridge(_) => vec![],
+            | NonASAPOp::PromqlVectorFromScalar(_) => vec![],
         },
         Operator::ASAP(op) => match op {
             ASAPOp::SummarySubtract { left, right }
@@ -1013,12 +1023,14 @@ fn payload_of(
                 input,
                 reduction,
                 grouping,
+                filter,
                 ..
             } => PostAsapOperatorPayload::SummaryAgg {
                 family: family.clone(),
                 input: input.clone(),
                 reduction: reduction.clone(),
                 grouping: grouping.clone(),
+                filter: filter.as_ref().map(|p| WirePredicate::from_pred(p, id_of)),
             },
             ASAPOp::SummaryEstimate { query, .. } => PostAsapOperatorPayload::SummaryEstimate {
                 query: query.clone(),
@@ -1124,6 +1136,7 @@ mod tests {
                 input: SummaryUpdate::column(ColumnRef::SampleValue),
                 reduction: Reduction::by(vec![]),
                 grouping: GroupingStrategy::default(),
+                filter: None,
             }),
             Schema::lifted(vec![Field::new("value", family, false)], None),
         ))
@@ -1159,6 +1172,7 @@ mod tests {
                 input: SummaryUpdate::column(ColumnRef::SampleValue),
                 reduction: Reduction::by(vec![]),
                 grouping: GroupingStrategy::default(),
+                filter: None,
             },
             PostAsapOperatorPayload::SummaryEstimate {
                 query: SketchQuery::Cardinality,
@@ -1475,7 +1489,7 @@ mod tests {
             Field::plain("ts", DataType::Timestamp, false),
             Field::plain("value", DataType::Float64, false),
         ]);
-        let bridge = OperatorNode::non_asap_node(NonASAPOp::ScalarBridge(
+        let bridge = OperatorNode::non_asap_node(NonASAPOp::PromqlVectorFromScalar(
             ScalarExpr::PromqlScalarFromVector(vector),
         ))
         .unwrap();
@@ -1486,7 +1500,7 @@ mod tests {
         assert_eq!(
             dag.nodes[1].payload,
             PostAsapOperatorPayload::Relational {
-                operator: NonASAPOpKind::ScalarBridge {
+                operator: NonASAPOpKind::PromqlVectorFromScalar {
                     expr: WireScalarExpr::PromqlScalarFromVector(PostAsapNodeId(0)),
                 },
             }
@@ -1499,7 +1513,7 @@ mod tests {
         assert_eq!(wire["nodes"][1]["payload"]["kind"], "relational");
         assert_eq!(
             wire["nodes"][1]["payload"]["operator"]["kind"],
-            "scalar_bridge"
+            "promql_vector_from_scalar"
         );
         assert_eq!(
             wire["nodes"][1]["payload"]["operator"]["expr"]["PromqlScalarFromVector"],

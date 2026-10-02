@@ -33,7 +33,7 @@ pub enum ColumnRef {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum ScalarValue {
     Int64(i64),
-    Float64(f64),
+    Float64(#[serde(with = "crate::serde_f64")] f64),
     Utf8(String),
     Boolean(bool),
     Null,

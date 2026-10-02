@@ -27,6 +27,8 @@ pub enum ASAPOp {
         input: SummaryUpdate,
         reduction: Reduction,
         grouping: GroupingStrategy,
+        #[serde(default)]
+        filter: Option<super::scalar::Predicate>,
     },
     /// Read out a query result from built summary state. Output is a
     /// row-shaped schema.
@@ -77,8 +79,14 @@ impl ASAPOp {
     pub fn children(&self) -> Vec<&Rc<OperatorNode>> {
         use ASAPOp::*;
         match self {
-            SummaryAgg { child, .. }
-            | FinalizeExactAccumulator { child }
+            SummaryAgg { child, filter, .. } => {
+                let mut inputs = vec![child];
+                if let Some(filter) = filter {
+                    inputs.extend(filter.0.operator_refs());
+                }
+                inputs
+            }
+            FinalizeExactAccumulator { child }
             | MaintainPopulation { child, .. }
             | ReadPopulation { child, .. }
             | Extension { child, .. } => vec![child],
@@ -100,12 +108,16 @@ impl ASAPOp {
                 input,
                 reduction,
                 grouping,
+                filter,
             } => SummaryAgg {
                 child: f(child),
                 family: family.clone(),
                 input: input.clone(),
                 reduction: reduction.clone(),
                 grouping: grouping.clone(),
+                filter: filter
+                    .as_ref()
+                    .map(|p| super::scalar::Predicate(p.0.map_operator_refs(&mut f))),
             },
             SummaryEstimate {
                 summary_input,
@@ -326,7 +338,17 @@ impl ASAPOp {
                 Ok(())
             }
             ReadPopulation { child, .. } => needs_state(child, "ReadPopulation"),
-            SummaryAgg { .. } | MaintainPopulation { .. } => Ok(()),
+            SummaryAgg { child, filter, .. } => {
+                if let Some(filter) = filter {
+                    if filter.0.scalar_type(&child.schema)?.0 != DataType::Bool {
+                        return Err(QueryExprError::InvalidScalarSignature(
+                            "summary filter must be boolean".into(),
+                        ));
+                    }
+                }
+                Ok(())
+            }
+            MaintainPopulation { .. } => Ok(()),
             _ => Err(Self::unimplemented()),
         }
     }

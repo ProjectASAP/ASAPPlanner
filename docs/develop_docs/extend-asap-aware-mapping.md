@@ -325,7 +325,7 @@ Replacement::Subtree(
 This strategy does **not** decide whether sharing is cheaper.
 
 That preference belongs to the cost model.
-`PlanSpace::cost_sorted` calls `CostModel::cse_share_decision` when it ranks a
+`CandidateLogicalASAPDAGs::cost_sorted` calls `CostModel::cse_share_decision` when it ranks a
 share-versus-recompute candidate pair. The strategy still returns both
 alternatives because enumeration and ranking are separate steps:
 
@@ -709,7 +709,7 @@ fn estimate_cost(
 ) -> f64;
 ```
 
-The default returns `f64::NAN`, making the absence of a numeric model explicit. Override this hook when passing the model to `PlanSpace::cost_sorted` if downstream code displays or otherwise consumes the `costs` values. Prefer to derive the result from the same inputs used by `rank_candidates` and the CSE cost hooks so numeric costs do not disagree with relative ordering.
+The default returns `f64::NAN`, making the absence of a numeric model explicit. Override this hook when passing the model to `CandidateLogicalASAPDAGs::cost_sorted` if downstream code displays or otherwise consumes the `costs` values. Prefer to derive the result from the same inputs used by `rank_candidates` and the CSE cost hooks so numeric costs do not disagree with relative ordering.
 
 ---
 
@@ -982,9 +982,9 @@ Use this table to find the right place for a change.
 | Produce a normal (ranked-first) post-ASAP summary for one target | `SketchAlgorithmStrategy::replacements(...).into_iter().next()` |
 | Search a whole workload for supported legal candidates | `search_workload`/`search_workload_with` |
 | Enforce per-root result accuracy requirements | `search_workload_with_targets` |
-| Coordinate compatible choices across groups | `PlanSpace::global_selection` |
+| Coordinate compatible choices across groups | `CandidateLogicalASAPDAGs::global_selection` |
 | Assemble the selected logical DAG | `GlobalSelection::assemble_selected_dag` |
-| Get every candidate ranked best-first, across a whole workload | `PlanSpace::cost_sorted` |
+| Get every candidate ranked best-first, across a whole workload | `CandidateLogicalASAPDAGs::cost_sorted` |
 | Get a real numeric cost per candidate, not just a relative rank | `CostModel::estimate_cost` |
 | Enumerate valid sketch algorithms | `summary_candidates` |
 | Build a target with no workload context | `TargetSubDAG::new` |

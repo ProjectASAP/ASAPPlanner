@@ -90,6 +90,8 @@ pub enum NonASAPOp {
         #[serde(default)]
         output_names: Vec<String>,
         #[serde(default)]
+        filters: Vec<Option<Predicate>>,
+        #[serde(default)]
         having: Option<Predicate>,
         child: Rc<OperatorNode>,
     },
@@ -134,7 +136,7 @@ pub enum NonASAPOp {
         child: Rc<OperatorNode>,
     },
     /// Arithmetic / comparison / set composition of two operands (PromQL
-    /// binary operators). A scalar operand is a [`Self::ScalarBridge`] leaf.
+    /// binary operators). Mixed scalar/vector operations use Project or Filter.
     BinaryOp {
         operator: BinaryOperator,
         /// PromQL `bool` modifier: a comparison returns `0`/`1` instead of
@@ -195,10 +197,6 @@ pub enum NonASAPOp {
         resolution: Option<Duration>,
         child: Rc<OperatorNode>,
     },
-    /// A scalar expression at an operator position: a bare PromQL scalar
-    /// query (`5`, `time()`) or the scalar operand of `<vector> op <scalar>`.
-    /// Its output is one `value` column with no series.
-    ScalarBridge(ScalarExpr),
 }
 
 impl NonASAPOp {
@@ -207,7 +205,7 @@ impl NonASAPOp {
     pub fn children(&self) -> Vec<&Rc<OperatorNode>> {
         use NonASAPOp::*;
         let mut out: Vec<&Rc<OperatorNode>> = match self {
-            Scan { .. } | Values { .. } | PromqlVectorFromScalar(_) | ScalarBridge(_) => vec![],
+            Scan { .. } | Values { .. } | PromqlVectorFromScalar(_) => vec![],
             Filter { child, .. }
             | Project { child, .. }
             | Aggregate { child, .. }
@@ -239,13 +237,20 @@ impl NonASAPOp {
             Values { rows, .. } => rows.iter().flatten().collect(),
             Filter { pred, .. } | Join { pred, .. } => vec![&pred.0],
             Project { cols, .. } => cols.iter().map(|c| &c.expr).collect(),
-            Aggregate { having, .. } => having.iter().map(|p| &p.0).collect(),
+            Aggregate {
+                filters, having, ..
+            } => filters
+                .iter()
+                .flatten()
+                .chain(having.iter())
+                .map(|p| &p.0)
+                .collect(),
             Sort { keys, .. } => keys.iter().map(|k| &k.expr).collect(),
             SQLWindowFunc { args, order_by, .. } => args
                 .iter()
                 .chain(order_by.iter().map(|k| &k.expr))
                 .collect(),
-            PromqlVectorFromScalar(e) | ScalarBridge(e) => vec![e],
+            PromqlVectorFromScalar(e) => vec![e],
             PromqlRelabel { value, .. } => vec![value],
             SetOp { .. }
             | Concat { .. }
@@ -302,7 +307,6 @@ impl NonASAPOp {
                 schema: schema.clone(),
             },
             PromqlVectorFromScalar(e) => PromqlVectorFromScalar(map_scalar(e)),
-            ScalarBridge(e) => ScalarBridge(map_scalar(e)),
             Filter { pred, child } => {
                 let pred = map_pred(pred, &mut map_scalar);
                 Filter {
@@ -332,14 +336,20 @@ impl NonASAPOp {
                 reduction,
                 measures,
                 output_names,
+                filters,
                 having,
                 child,
             } => {
+                let filters = filters
+                    .iter()
+                    .map(|p| p.as_ref().map(|p| map_pred(p, &mut map_scalar)))
+                    .collect();
                 let having = having.as_ref().map(|p| map_pred(p, &mut map_scalar));
                 Aggregate {
                     reduction: reduction.clone(),
                     measures: measures.clone(),
                     output_names: output_names.clone(),
+                    filters,
                     having,
                     child: f(child),
                 }
@@ -497,23 +507,6 @@ impl NonASAPOp {
             PromqlInfoEnrich { .. } => "PromqlInfoEnrich",
             PromqlSeriesSample { .. } => "PromqlSeriesSample",
             PromqlSubquery { .. } => "PromqlSubquery",
-            ScalarBridge(_) => "ScalarBridge",
-        }
-    }
-
-    /// Whether this operator is a scalar-valued leaf (`ScalarBridge`): the
-    /// scalar operand of a PromQL `<vector> op <scalar>`.
-    pub fn is_scalar_leaf(&self) -> bool {
-        matches!(self, NonASAPOp::ScalarBridge(_))
-    }
-
-    /// The one-column schema of a scalar leaf.
-    fn scalar_schema(dtype: DataType) -> Schema {
-        Schema {
-            fields: vec![Field::plain("value", dtype, false)],
-            time_index: None,
-            unique_keys: Vec::new(),
-            closed: true,
         }
     }
 
@@ -718,14 +711,6 @@ impl NonASAPOp {
                 out
             }
 
-            ScalarBridge(expr) => {
-                let dtype = match expr {
-                    ScalarExpr::CurrentTimestamp => DataType::Timestamp,
-                    _ => DataType::Float64,
-                };
-                Self::scalar_schema(dtype)
-            }
-
             // `vector(s)` yields a label-less instant vector: the (ts, value)
             // floor and nothing else; its full label set (empty) is known.
             PromqlVectorFromScalar(_) => Schema {
@@ -741,12 +726,42 @@ impl NonASAPOp {
             // The output shape of `<vector> op <scalar>` is the vector side's:
             // a scalar operand contributes only its value, no labels. A `bool`
             // comparison still produces the vector's shape (values 0/1).
-            BinaryOp { lhs, rhs, .. } => {
-                if lhs.is_scalar_leaf() && !rhs.is_scalar_leaf() {
-                    rhs.schema.clone()
-                } else {
-                    lhs.schema.clone()
+            BinaryOp {
+                lhs, rhs, operator, ..
+            } => {
+                let mut output = lhs.schema.clone();
+                let grouping = operator
+                    .vector_match
+                    .as_ref()
+                    .and_then(|m| m.grouping.as_ref());
+                let right_rows = matches!(
+                    operator.kind,
+                    BinaryOpKind::Set(crate::pre_asap::PromQLVectorSetOpKind::Or)
+                ) || matches!(grouping, Some(g) if g.side == crate::pre_asap::GroupSide::Right);
+                let mut additions = Vec::new();
+                if right_rows {
+                    additions.extend(
+                        rhs.schema
+                            .fields
+                            .iter()
+                            .filter(|c| c.plain_dtype() == Some(&DataType::Utf8))
+                            .cloned(),
+                    );
                 }
+                if let Some(grouping) = grouping {
+                    additions.extend(
+                        grouping
+                            .labels
+                            .iter()
+                            .map(|name| Field::plain(name.clone(), DataType::Utf8, true)),
+                    );
+                }
+                for column in additions {
+                    if !output.fields.iter().any(|c| c.name == column.name) {
+                        output.fields.push(column);
+                    }
+                }
+                output
             }
         })
     }
@@ -766,7 +781,6 @@ impl NonASAPOp {
             },
             PromqlSubquery { .. } => OperatorResultKind::RangeVector,
             PromqlVectorFromScalar(_) => OperatorResultKind::InstantVector,
-            ScalarBridge(_) => OperatorResultKind::Scalar,
             // A per-entity range reduction turns a range vector into an
             // instant vector; a cross-series reduction keeps its input's
             // category (a SQL GROUP BY stays a relation).
@@ -790,15 +804,7 @@ impl NonASAPOp {
             Concat { children, .. } => children
                 .first()
                 .map_or(OperatorResultKind::Relation, |c| readable(c.result_kind)),
-            BinaryOp { lhs, rhs, .. } => {
-                if lhs.is_scalar_leaf() && !rhs.is_scalar_leaf() {
-                    readable(rhs.result_kind)
-                } else if lhs.is_scalar_leaf() && rhs.is_scalar_leaf() {
-                    OperatorResultKind::Scalar
-                } else {
-                    readable(lhs.result_kind)
-                }
-            }
+            BinaryOp { lhs, .. } => readable(lhs.result_kind),
         }
     }
 
@@ -851,6 +857,11 @@ fn default_proj_name(expr: &ScalarExpr, idx: usize, schema: &Schema) -> String {
             .unwrap_or_else(|| format!("col_{idx}")),
         _ => format!("col_{idx}"),
     }
+}
+
+/// Whether any aggregate measure has its own input predicate.
+pub fn any_measure_filtered(filters: &[Option<Predicate>]) -> bool {
+    filters.iter().any(Option::is_some)
 }
 
 #[cfg(test)]
@@ -952,6 +963,7 @@ mod tests {
             reduction: Reduction::PerEntity,
             measures: vec![AggIntent::Rate],
             output_names: vec![],
+            filters: vec![],
             having: None,
             child: node(child),
         }
@@ -1198,6 +1210,7 @@ mod tests {
             reduction: Reduction::Reduce(GroupKeys::without(vec![2])),
             measures: vec![AggIntent::Sum { col: None }],
             output_names: vec![],
+            filters: vec![],
             having: None,
             child: node(leaf),
         };
@@ -1239,6 +1252,7 @@ mod tests {
                 reduction: Reduction::PerEntity,
                 measures: vec![measure],
                 output_names: vec![],
+                filters: vec![],
                 having: None,
                 child: node(NonASAPOp::TimeRange {
                     range: Duration::from_secs(300),
@@ -1268,6 +1282,7 @@ mod tests {
             reduction: Reduction::by(vec![2]),
             measures: vec![AggIntent::Sum { col: None }],
             output_names: vec![],
+            filters: vec![],
             having: None,
             child: node(rate),
         };
@@ -1345,16 +1360,11 @@ mod tests {
         );
     }
 
-    /// A scalar at an operator position is one `value` column with no series.
+    /// Standalone constants are scalar roots and carry no operator schema.
     #[test]
-    fn scalar_bridge_has_a_single_value_row_schema() {
-        let s = NonASAPOp::ScalarBridge(ScalarExpr::literal_f64(42.0))
-            .output_schema()
-            .unwrap();
-        assert_eq!(s.fields.len(), 1);
-        assert_eq!(s.fields[0].name, "value");
-        assert_eq!(s.fields[0].dtype, DataType::Float64);
-        assert!(s.time_index.is_none());
+    fn constant_is_a_scalar_root() {
+        let root = crate::ir::QueryRoot::Scalar(ScalarExpr::literal_f64(42.0));
+        assert!(root.as_operator().is_none());
     }
 
     /// `<vector> op <scalar>` takes the vector side's schema; the vector
@@ -1383,7 +1393,7 @@ mod tests {
             },
             return_bool: false,
             lhs: Rc::clone(&vector),
-            rhs: node(NonASAPOp::ScalarBridge(ScalarExpr::literal_f64(1.0))),
+            rhs: Rc::clone(&vector),
         };
         assert_eq!(op.output_schema().unwrap(), vector.schema);
         let NonASAPOp::BinaryOp { operator, .. } = &op else {

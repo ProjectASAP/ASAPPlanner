@@ -57,6 +57,7 @@
 //! the rewritten form is actually worth picking, by letting the original
 //! and rewritten forms compete on cost — not this strategy.
 
+use asap_types::ir::non_asap::any_measure_filtered;
 use std::rc::Rc;
 
 use asap_types::ir::{BinaryOperator, NonASAPOp, OperatorNode, ProjectItem, ScalarExpr};
@@ -97,6 +98,7 @@ fn avg_rewrite_target(node: &OperatorNode) -> Option<(usize, Option<ColumnId>)> 
     let Some(NonASAPOp::Aggregate {
         reduction,
         measures,
+        filters,
         having: None,
         child,
         ..
@@ -104,6 +106,9 @@ fn avg_rewrite_target(node: &OperatorNode) -> Option<(usize, Option<ColumnId>)> 
     else {
         return None;
     };
+    if any_measure_filtered(filters) {
+        return None;
+    }
     let Reduction::Reduce(by) = reduction else {
         return None;
     };
@@ -154,6 +159,7 @@ pub(crate) fn temporal_average_components(root: &Rc<OperatorNode>) -> Option<Rc<
     let Some(NonASAPOp::Aggregate {
         reduction: Reduction::PerEntity,
         measures,
+        filters,
         child,
         having: None,
         ..
@@ -161,6 +167,9 @@ pub(crate) fn temporal_average_components(root: &Rc<OperatorNode>) -> Option<Rc<
     else {
         return None;
     };
+    if any_measure_filtered(filters) {
+        return None;
+    }
     let [AggIntent::Avg { col }] = measures.as_slice() else {
         return None;
     };
@@ -179,6 +188,7 @@ pub(crate) fn temporal_average_components(root: &Rc<OperatorNode>) -> Option<Rc<
             reduction: Reduction::PerEntity,
             measures: vec![intent],
             output_names: vec![],
+            filters: vec![],
             having: None,
             child: Rc::clone(child),
         })
@@ -224,6 +234,7 @@ fn build_rewrite(root: &Rc<OperatorNode>) -> Option<Rc<OperatorNode>> {
         reduction: reduction.clone(),
         measures: vec![AggIntent::Sum { col }],
         output_names: Vec::new(),
+        filters: vec![],
         having: None,
         child: Rc::clone(child),
     })
@@ -234,6 +245,7 @@ fn build_rewrite(root: &Rc<OperatorNode>) -> Option<Rc<OperatorNode>> {
             accuracy: AccuracyTarget::Exact,
         }],
         output_names: Vec::new(),
+        filters: vec![],
         having: None,
         child: Rc::clone(child),
     })
@@ -272,6 +284,7 @@ pub(crate) fn composed_aggregate_rewrite(root: &Rc<OperatorNode>) -> Option<Rc<O
         reduction: outer_reduction @ Reduction::Reduce(_),
         measures: outer_measures,
         output_names,
+        filters: outer_filters,
         having: None,
         child,
     }) = root.non_asap()
@@ -281,6 +294,7 @@ pub(crate) fn composed_aggregate_rewrite(root: &Rc<OperatorNode>) -> Option<Rc<O
     let Some(NonASAPOp::Aggregate {
         reduction: Reduction::PerEntity,
         measures: inner_measures,
+        filters: inner_filters,
         having: None,
         child: inner_child,
         ..
@@ -288,6 +302,9 @@ pub(crate) fn composed_aggregate_rewrite(root: &Rc<OperatorNode>) -> Option<Rc<O
     else {
         return None;
     };
+    if any_measure_filtered(outer_filters) || any_measure_filtered(inner_filters) {
+        return None;
+    }
     let ([outer], [inner]) = (outer_measures.as_slice(), inner_measures.as_slice()) else {
         return None;
     };
@@ -302,6 +319,7 @@ pub(crate) fn composed_aggregate_rewrite(root: &Rc<OperatorNode>) -> Option<Rc<O
         reduction: outer_reduction.clone(),
         measures: vec![composed],
         output_names: output_names.clone(),
+        filters: vec![],
         having: None,
         child: Rc::clone(inner_child),
     })
@@ -438,6 +456,7 @@ mod tests {
             reduction: Reduction::by(by),
             measures: vec![AggIntent::Avg { col }],
             output_names,
+            filters: vec![],
             having,
             child,
         })
@@ -482,6 +501,7 @@ mod tests {
             reduction: Reduction::by(vec![2]),
             measures: vec![AggIntent::Sum { col: None }, AggIntent::Avg { col: None }],
             output_names: vec![],
+            filters: vec![],
             having: None,
             child: metric_scan(&["job"]),
         })
@@ -520,6 +540,7 @@ mod tests {
                 reduction: Reduction::by(vec![2]),
                 measures: vec![intent.clone()],
                 output_names: vec![],
+                filters: vec![],
                 having: None,
                 child: metric_scan(&["job"]),
             })
@@ -541,6 +562,7 @@ mod tests {
             )),
             measures: vec![AggIntent::Avg { col: None }],
             output_names: vec![],
+            filters: vec![],
             having: None,
             child: metric_scan(&["job"]),
         })
@@ -556,6 +578,7 @@ mod tests {
             reduction: Reduction::PerEntity,
             measures: vec![AggIntent::Avg { col: None }],
             output_names: vec![],
+            filters: vec![],
             having: None,
             child: metric_scan(&[]),
         })
@@ -787,6 +810,7 @@ mod tests {
             reduction: Reduction::PerEntity,
             measures: vec![inner],
             output_names: vec![],
+            filters: vec![],
             having: None,
             child: OperatorNode::non_asap_node(NonASAPOp::TimeRange {
                 kind: TimeRangeKind::Range,
@@ -802,6 +826,7 @@ mod tests {
             // Match the PromQL front end: an empty entry selects the intent's
             // canonical output name rather than an explicit alias.
             output_names: vec![String::new()],
+            filters: vec![],
             having: None,
             child: temporal,
         })

@@ -57,8 +57,6 @@ use std::rc::Rc;
 
 use super::node::{Operator, OperatorNode};
 use super::non_asap::NonASAPOp;
-use super::scalar::ScalarExpr;
-use crate::pre_asap::expr_ir::ScalarValue;
 use crate::pre_asap::schema::Schema;
 
 /// [`structural_hash`]'s memoization cache: an already-hashed node's `Rc`
@@ -72,9 +70,10 @@ pub type HashCache = HashMap<*const OperatorNode, u64>;
 /// serializing or comparing a node leaves exactly the node's own fields.
 fn placeholder() -> Rc<OperatorNode> {
     Rc::new(OperatorNode::with_schema(
-        Operator::NonASAP(NonASAPOp::ScalarBridge(ScalarExpr::Literal(
-            ScalarValue::Null,
-        ))),
+        Operator::NonASAP(NonASAPOp::Values {
+            rows: vec![],
+            schema: Schema::lifted(vec![], None),
+        }),
         Schema::lifted(vec![], None),
     ))
 }
@@ -299,6 +298,7 @@ mod tests {
     use super::*;
     use crate::ir::asap::ASAPOp;
     use crate::ir::BinaryOperator;
+    use crate::ir::ScalarExpr;
     use crate::post_asap::guarantee::ResultGuarantee;
     use crate::post_asap::sketch::{
         GroupingStrategy, SketchAlgorithm, SketchKind, SketchParams, SummaryUpdate,
@@ -340,6 +340,7 @@ mod tests {
                 accuracy: AccuracyTarget::Exact,
             }],
             output_names: vec![],
+            filters: vec![],
             having: None,
             child: scan(),
         })
@@ -439,25 +440,26 @@ mod tests {
 
     // ── scalar-referenced subtrees ──────────────────────────────────────
 
-    /// `ScalarBridge(scalar(sum by (service) (up)))`.
+    /// `vector(scalar(sum by (service) (up)))`.
     fn scalar_of_vector() -> Rc<OperatorNode> {
         let sum_up = node(NonASAPOp::Aggregate {
             reduction: Reduction::by(vec![1]),
             measures: vec![AggIntent::Sum { col: Some(2) }],
             output_names: vec![],
+            filters: vec![],
             having: None,
             child: scan(),
         });
         assert!(sum_up.schema.has_unique_key(), "fixture sanity");
-        node(NonASAPOp::ScalarBridge(ScalarExpr::PromqlScalarFromVector(
-            sum_up,
-        )))
+        node(NonASAPOp::PromqlVectorFromScalar(
+            ScalarExpr::PromqlScalarFromVector(sum_up),
+        ))
     }
 
     fn bridged_vector(root: &Rc<OperatorNode>) -> &Rc<OperatorNode> {
         match root.non_asap() {
-            Some(NonASAPOp::ScalarBridge(ScalarExpr::PromqlScalarFromVector(v))) => v,
-            other => panic!("expected ScalarBridge(scalar(v)), got {other:?}"),
+            Some(NonASAPOp::PromqlVectorFromScalar(ScalarExpr::PromqlScalarFromVector(v))) => v,
+            other => panic!("expected vector(scalar(v)), got {other:?}"),
         }
     }
 
@@ -491,9 +493,9 @@ mod tests {
             4,
             "aggregate + scan cached once per root: {cache:?}"
         );
-        let other = node(NonASAPOp::ScalarBridge(ScalarExpr::PromqlScalarFromVector(
-            quantile_agg(vec![1], Some(2), 0.5),
-        )));
+        let other = node(NonASAPOp::PromqlVectorFromScalar(
+            ScalarExpr::PromqlScalarFromVector(quantile_agg(vec![1], Some(2), 0.5)),
+        ));
         assert_ne!(
             structural_hash(&a, &mut cache),
             structural_hash(&other, &mut cache)
@@ -517,6 +519,7 @@ mod tests {
                     input: SummaryUpdate::column(ColumnRef::SampleValue),
                     reduction: Reduction::PerEntity,
                     grouping: GroupingStrategy::default(),
+                    filter: None,
                 }),
                 schema,
             )
@@ -677,6 +680,7 @@ mod tests {
                     accuracy: AccuracyTarget::Exact,
                 }],
                 output_names: vec![],
+                filters: vec![],
                 having: None,
                 child: scan(),
             })

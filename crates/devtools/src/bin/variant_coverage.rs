@@ -40,7 +40,6 @@ const OPERATOR_VARIANTS: &[&str] = &[
     "PromqlInfoEnrich",
     "PromqlSeriesSample",
     "PromqlSubquery",
-    "ScalarBridge",
     // ASAPOp
     "SummaryAgg",
     "SummaryEstimate",

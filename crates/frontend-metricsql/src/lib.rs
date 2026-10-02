@@ -40,9 +40,27 @@ pub fn lower_metricsql(
     query: &str,
     accuracy: AccuracyTarget,
 ) -> Result<Rc<OperatorNode>, MetricsqlError> {
+    match lower_metricsql_query(query, accuracy)? {
+        asap_types::ir::QueryRoot::Operator(node) => Ok(node),
+        _ => Err(unsupported("scalar root: use lower_metricsql_query")),
+    }
+}
+
+/// Lower scalar constants without fabricating a relational operator.
+pub fn lower_metricsql_query(
+    query: &str,
+    accuracy: AccuracyTarget,
+) -> Result<asap_types::ir::QueryRoot, MetricsqlError> {
     let ast = parse_metricsql(query)?;
+    if let Expr::NumberLiteral(number) = &ast {
+        return Ok(asap_types::ir::QueryRoot::Scalar(
+            asap_types::ir::ScalarExpr::literal_f64(number.value),
+        ));
+    }
     let unresolved = Lowerer { accuracy }.lower(&ast)?;
-    resolve_root(&unresolved).map_err(|e| MetricsqlError::Resolve(e.to_string()))
+    resolve_root(&unresolved)
+        .map(asap_types::ir::QueryRoot::Operator)
+        .map_err(|e| MetricsqlError::Resolve(e.to_string()))
 }
 
 struct Lowerer {
@@ -56,13 +74,17 @@ impl Lowerer {
             Expr::Rollup(e) => self.rollup(e),
             Expr::Function(e) => self.function(e),
             Expr::Aggregation(e) => self.aggregate(e),
-            Expr::NumberLiteral(e) => Ok(U::promql_scalar(e.value)),
+            Expr::NumberLiteral(_) => {
+                Err(unsupported("scalar root requires lower_metricsql_query"))
+            }
             // Vector negation is `x * -1` (as in the PromQL front end).
-            Expr::UnaryOperator(e) => Ok(binary_op(
-                BinaryOpKind::Arithmetic(ArithmeticOpKind::Mul),
-                self.lower(&e.expr)?,
-                U::promql_scalar(-1.0),
-            )),
+            Expr::UnaryOperator(e) => Ok(U::PromqlScalarOp {
+                child: Rc::new(self.lower(&e.expr)?),
+                scalar: UnresolvedScalar::Literal(ScalarValue::Float64(-1.0)),
+                op: BinaryOpKind::Arithmetic(ArithmeticOpKind::Mul),
+                scalar_left: false,
+                return_bool: false,
+            }),
             Expr::BinaryOperator(e) => self.binary(e),
             Expr::Parens(e) if e.expressions.len() == 1 => self.lower(&e.expressions[0]),
             Expr::With(e) => self.lower(&e.expr),
@@ -265,6 +287,20 @@ impl Lowerer {
                 return Err(unsupported(format!("MetricsQL operator `{}`", expr.op)))
             }
         };
+        for (scalar, vector, scalar_left) in [
+            (&expr.left, &expr.right, true),
+            (&expr.right, &expr.left, false),
+        ] {
+            if let Expr::NumberLiteral(n) = scalar.as_ref() {
+                return Ok(U::PromqlScalarOp {
+                    child: Rc::new(self.lower(vector)?),
+                    scalar: UnresolvedScalar::Literal(ScalarValue::Float64(n.value)),
+                    op,
+                    scalar_left,
+                    return_bool: false,
+                });
+            }
+        }
         Ok(binary_op(
             op,
             self.lower(&expr.left)?,
@@ -298,6 +334,7 @@ fn aggregate(reduction: Reduction<ColumnRef>, intent: AggIntent<ColumnRef>, chil
         reduction,
         measures: vec![intent],
         output_names: vec![String::new()],
+        filters: vec![],
         having: None,
         child: Rc::new(child),
     }

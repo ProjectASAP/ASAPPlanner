@@ -109,7 +109,6 @@ async fn corr_repeated_input_and_serialization() {
 async fn corr_rejects_unrepresented_forms() {
     for sql in [
         "SELECT corr(DISTINCT x, y) FROM a",
-        "SELECT corr(x, y) FILTER (WHERE g > 0) FROM a",
         "SELECT corr(x, y ORDER BY g) FROM a",
         "SELECT corr(x, y) OVER () FROM a",
         "SELECT corr(x) FROM a",
@@ -121,6 +120,27 @@ async fn corr_rejects_unrepresented_forms() {
             "{sql}"
         );
     }
+}
+
+// A `FILTER` clause becomes the measure's own predicate (#466), leaving the
+// two inputs untouched.
+#[tokio::test]
+async fn corr_filter_is_a_measure_filter() {
+    let query = lower("SELECT corr(x, y) FILTER (WHERE g > 0) FROM a").await;
+    let (measures, _) = aggregate(&query);
+    assert_eq!(measures[0].input_cols(), vec![0, 1]);
+    fn filters(query: &OperatorNode) -> &[Option<asap_types::ir::Predicate>] {
+        match query.expect_non_asap() {
+            NonASAPOp::Aggregate { filters, .. } => filters,
+            NonASAPOp::Project { child, .. } | NonASAPOp::Filter { child, .. } => filters(child),
+            other => panic!("expected aggregate, got {other:?}"),
+        }
+    }
+    assert!(
+        matches!(filters(&query), [Some(_)]),
+        "{:?}",
+        filters(&query)
+    );
 }
 
 // Exact fallback retains the complete typed query and compiles to a post-ASAP DAG.

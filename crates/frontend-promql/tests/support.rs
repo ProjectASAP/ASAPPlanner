@@ -11,7 +11,7 @@ use asap_types::workload::{
     Predictability, Query, QueryLanguage, QueryRequirements, QueryWorkload, TimeSelection,
 };
 
-fn workload(query: &str, accuracy: AccuracyTarget) -> PlanningWorkload {
+pub fn workload(query: &str, accuracy: AccuracyTarget) -> PlanningWorkload {
     PlanningWorkload {
         query_workload: QueryWorkload {
             language: QueryLanguage::PromQL,
@@ -38,6 +38,7 @@ fn workload(query: &str, accuracy: AccuracyTarget) -> PlanningWorkload {
     }
 }
 
+#[allow(dead_code)]
 pub fn lower_promql(
     query: &str,
     accuracy: AccuracyTarget,
@@ -58,12 +59,12 @@ pub fn lower_promql_with_histograms(
 }
 
 /// The value of a bare PromQL numeric literal / folded constant at an
-/// operator position (`ScalarBridge(Literal(Float64(v)))`); `None` for any
+/// scalar position (`Literal(Float64(v))`); `None` for any
 /// other shape.
 #[allow(dead_code)]
-pub fn promql_scalar(node: &OperatorNode) -> Option<f64> {
-    match node.non_asap()? {
-        NonASAPOp::ScalarBridge(ScalarExpr::Literal(ScalarValue::Float64(v))) => Some(*v),
+pub fn promql_scalar(node: &ScalarExpr) -> Option<f64> {
+    match node {
+        ScalarExpr::Literal(ScalarValue::Float64(v)) => Some(*v),
         _ => None,
     }
 }
@@ -81,4 +82,29 @@ pub fn post_asap_dag(root: &Rc<OperatorNode>) -> asap_types::ir::export::PostAsa
     )
     .expect("default lifecycle timings");
     asap_types::ir::export::compile_post_asap_dag(&timed).expect("post-ASAP DAG export")
+}
+
+#[allow(dead_code)]
+pub fn scalar_root(query: &str) -> ScalarExpr {
+    match asap_frontend_promql::lower_promql_query_workload(
+        &workload(query, AccuracyTarget::Exact),
+        0,
+    )
+    .unwrap()
+    .remove(0)
+    {
+        asap_types::ir::QueryRoot::Scalar(expr) => expr,
+        _ => panic!("expected scalar root: {query}"),
+    }
+}
+
+#[allow(dead_code)]
+pub fn sample_expression(node: &OperatorNode) -> &ScalarExpr {
+    match node.expect_non_asap() {
+        NonASAPOp::Project { cols, .. } => {
+            &cols[node.schema.column_id("value").unwrap_or(cols.len() - 1)].expr
+        }
+        NonASAPOp::Filter { pred, .. } => &pred.0,
+        other => panic!("expected sample expression, got {other:?}"),
+    }
 }

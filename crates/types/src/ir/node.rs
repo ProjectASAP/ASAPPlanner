@@ -170,11 +170,6 @@ impl OperatorNode {
         })
     }
 
-    /// Whether this node is a scalar-valued leaf (a `ScalarBridge`).
-    pub fn is_scalar_leaf(&self) -> bool {
-        self.non_asap().is_some_and(NonASAPOp::is_scalar_leaf)
-    }
-
     /// Direct inputs, including the operator nodes referenced from this
     /// node's scalar expressions.
     pub fn children(&self) -> Vec<&Rc<OperatorNode>> {

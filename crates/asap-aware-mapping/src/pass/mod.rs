@@ -2,7 +2,7 @@
 //!
 //! An [`OptimizationPass`] is the whole optimization stage behind one
 //! signature: pre-ASAP IR in, post-ASAP DAG out. The trait deliberately names
-//! none of this crate's two-phase vocabulary — no `PlanSpace`, no
+//! none of this crate's two-phase vocabulary — no `CandidateLogicalASAPDAGs`, no
 //! `TargetSubDAGCandidates`, no `ReplacementStrategy` — so an algorithm with no
 //! candidate-generation phase at all (a greedy MQO loop, say) can implement it
 //! without pretending to have phases it does not have. The shipped algorithm is
@@ -175,29 +175,69 @@ pub struct QueryLifecyclePlan {
 
 /// One plan per workload entry, in `QueryWorkload::entries()` order;
 /// [`check_contract`] enforces that.
+///
+/// Plans are not deduplicated across entries: a summary state that several
+/// queries share appears in each of their plans as the same `Rc` (with the
+/// same lifecycle), so a consumer that deploys or costs the workload must
+/// dedupe deployments by `Rc::ptr_eq` on the summary node.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct PlanOutput {
     pub plans: Vec<QueryLifecyclePlan>,
+    /// Exact scalar expressions, keyed by workload entry; embedded plan reads remain visible.
+    pub scalar_roots: Vec<(usize, asap_types::ir::ScalarExpr)>,
 }
 
 impl PlanOutput {
     pub fn new(plans: Vec<QueryLifecyclePlan>) -> Self {
-        Self { plans }
+        Self {
+            plans,
+            scalar_roots: Vec::new(),
+        }
     }
 
     /// Entry indices in output order.
     pub fn entry_indices(&self) -> Vec<usize> {
-        self.plans.iter().map(|p| p.entry_index).collect()
+        let mut indices: Vec<_> = self
+            .plans
+            .iter()
+            .map(|p| p.entry_index)
+            .chain(self.scalar_roots.iter().map(|(i, _)| *i))
+            .collect();
+        if !self.scalar_roots.is_empty() {
+            indices.sort_unstable();
+        }
+        indices
     }
 
-    /// The selected DAG root per query.
+    /// All query roots in workload order, including standalone scalars.
+    pub fn roots(&self) -> Vec<asap_types::ir::QueryRoot> {
+        let mut roots: Vec<_> = self
+            .plans
+            .iter()
+            .map(|p| {
+                (
+                    p.entry_index,
+                    asap_types::ir::QueryRoot::Operator(Rc::clone(&p.plan.root)),
+                )
+            })
+            .chain(
+                self.scalar_roots
+                    .iter()
+                    .map(|(i, expr)| (*i, asap_types::ir::QueryRoot::Scalar(expr.clone()))),
+            )
+            .collect();
+        roots.sort_by_key(|(i, _)| *i);
+        roots.into_iter().map(|(_, root)| root).collect()
+    }
+
+    /// The selected operator roots. Use `roots()` to include scalar queries.
     pub fn dags(&self) -> Vec<Rc<OperatorNode>> {
         self.plans.iter().map(|p| Rc::clone(&p.plan.root)).collect()
     }
 
     pub fn len(&self) -> usize {
-        self.plans.len()
+        self.plans.len() + self.scalar_roots.len()
     }
 
     pub fn is_empty(&self) -> bool {

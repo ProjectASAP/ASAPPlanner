@@ -6,7 +6,6 @@
 const KIND_CATEGORY_JSON = `{
   "Scan": "data",
   "Values": "data",
-  "ScalarBridge": "data",
   "Filter": "filter",
   "PromqlSeriesSample": "sample",
   "Project": "derive",
@@ -42,7 +41,7 @@ const KIND_CATEGORY = Object.freeze(JSON.parse(KIND_CATEGORY_JSON));
 const CATEGORIES = {
   data: {
     label: 'Data',
-    description: 'Scan, Values, ScalarBridge — leaves that introduce a value',
+    description: 'Scan and Values — data sources',
     light: { bg: '#eef5fd', border: '#0369a1' },
     dark: { bg: '#0c2438', border: '#38bdf8' },
   },

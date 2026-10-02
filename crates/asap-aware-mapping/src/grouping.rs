@@ -420,6 +420,7 @@ fn with_grouping(
                     input: input.clone(),
                     reduction: reduction.clone(),
                     grouping,
+                    filter: None,
                 },
                 grouped_schema,
                 None,
@@ -800,6 +801,7 @@ mod tests {
             reduction: Reduction::by(vec![2]),
             measures: vec![AggIntent::Sum { col: None }, AggIntent::Avg { col: None }],
             output_names: vec![],
+            filters: vec![],
             having: None,
             child: metric_scan(&["job"]),
         })

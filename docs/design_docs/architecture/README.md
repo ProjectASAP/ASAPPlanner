@@ -7,7 +7,7 @@ as ASAPQuery-backend bind the candidates to physical alternatives, make the
 deployment-level decision, and run the selected contract.
 
 For the integration workflow, start with [ASAPPlanner input, output, and
-workflows](input-output-workflow.md). It defines inputs, `PlanSpace`, selection
+workflows](input-output-workflow.md). It defines inputs, `CandidateLogicalASAPDAGs`, selection
 and summary-maintenance lifecycle workflows, and future replanning support.
 
 ## Planner component flow
@@ -19,7 +19,7 @@ flowchart TD
     E["Strategy, accuracy model, and applicable evidence"]
     PRE["Frontend lowering → canonical Pre-ASAP OperatorNode roots"]
     SEARCH["Whole-workload candidate search: sharing, legality, accuracy"]
-    SPACE["PlanSpace: compact logical candidate DAG space"]
+    SPACE["CandidateLogicalASAPDAGs: compact logical candidate DAG space"]
     RANK["Optional cost_sorted: ranked inspection view"]
     SELECT["Optional global_selection + assemble_selected_dag"]
     DAG["Selected logical Post-ASAP DAG"]
@@ -39,7 +39,7 @@ flowchart TD
     LINPUT --> LIFE --> LMAT --> LPLAN --> BACKEND
 ```
 
-`PlanSpace` is the output of logical candidate search. Each target's candidate set holds
+`CandidateLogicalASAPDAGs` is the output of logical candidate search. Each target's candidate set holds
 alternatives and rejection reasons, but no selected maintenance lifecycle.
 Choose among the three branches: inspect candidates (optionally ranked), select
 and assemble logical DAGs, or select and assemble with summary-maintenance
@@ -49,7 +49,7 @@ call returns a `GlobalSelection`; the second returns a
 `SummaryMaintenanceLifecyclePlan` with an assembled DAG root and lifecycle
 decisions. No branch by itself deploys or executes a physical plan.
 Known-invalid evidence rejects a logical candidate. Missing accuracy evidence
-leaves a constructible candidate visible in `PlanSpace` but uncertified; default
+leaves a constructible candidate visible in `CandidateLogicalASAPDAGs` but uncertified; default
 selection does not commit it without the required guarantee. Cost evidence can
 rank eligible candidates, but it cannot establish a missing guarantee or turn
 an unsupported physical alternative into a deployable plan.
@@ -73,7 +73,7 @@ requirements, the planning horizon, available materialized state, downstream
 capabilities, and complete cost evidence. Missing or stale evidence must remain
 explicit rather than being treated as zero.
 
-The primary output is `PlanSpace`; `cost_sorted` derives an optional ranked
+The primary output is `CandidateLogicalASAPDAGs`; `cost_sorted` derives an optional ranked
 view with index-aligned costs. Downstream may inspect compatible choices
 across targets rather than assuming the first candidate is a feasible
 physical workload plan. Candidates carry logical summary algorithms,
@@ -88,7 +88,7 @@ serving, and operational feedback. Their physical planning can reorder
 candidates because it has evidence that the reusable Planner does not, but it
 must not silently change Planner-owned semantics.
 
-`PlanSpace::global_selection` optionally coordinates structural choices across
+`CandidateLogicalASAPDAGs::global_selection` optionally coordinates structural choices across
 targets; `GlobalSelection::assemble_selected_dag` constructs a selected semantic DAG.
 Those plain APIs do not establish physical feasibility or a
 maintenance-versus-recompute decision. The lifecycle-aware selection call uses

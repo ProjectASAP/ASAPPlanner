@@ -2,6 +2,7 @@
 use crate::replacement::{
     Replacement, ReplacementProvenance, ReplacementStrategy, ReplacementSubDAG, TargetSubDAG,
 };
+use asap_types::ir::non_asap::any_measure_filtered;
 use asap_types::ir::{ASAPOp, NonASAPOp, Operator, OperatorNode, ScalarExpr};
 use asap_types::post_asap::{maintained_population::*, ResultGuarantee, Schema};
 use asap_types::pre_asap::{AggIntent, CompareOpKind, DataType, Reduction, ScalarValue, Source};
@@ -27,12 +28,16 @@ fn recognize(
             child,
             reduction: Reduction::Reduce(grouping),
             measures,
+            filters,
             having: None,
             ..
         } => {
             let [intent] = measures.as_slice() else {
                 return None;
             };
+            if any_measure_filtered(filters) {
+                return None;
+            }
             let (col, readout) = match intent {
                 AggIntent::Quantile { q, col, .. } if q.is_finite() => {
                     (*col, PopulationReadout::Quantile { q: *q })
@@ -429,6 +434,29 @@ mod tests {
         assert!(p.without);
         assert_eq!(p.grouping, ["instance"]);
         assert_eq!(p.matchers[0].operation, CurrentSeriesMatch::Regex);
+    }
+    // Population timing is a lifecycle choice: a retained or rebuilt
+    // population both validate, while its readout must stay at query time.
+    #[test]
+    fn population_timing_is_not_structural() {
+        let root = lower("topk(5,a)");
+        let candidate = MaintainedPopulationStrategy::new(std::slice::from_ref(&root))
+            .candidate(&root)
+            .unwrap();
+        use asap_types::post_asap::ExecutionTiming;
+        let with_timings = |population: ExecutionTiming, readout: ExecutionTiming| {
+            let mut node = (*candidate).clone();
+            node.timing = Some(readout);
+            let Operator::ASAP(ASAPOp::ReadPopulation { child, .. }) = &mut node.operator else {
+                unreachable!()
+            };
+            Rc::make_mut(child).timing = Some(population);
+            compile_post_asap_dag(&Rc::new(node))
+        };
+        use ExecutionTiming::{IngestionTime, QueryTime};
+        assert!(with_timings(IngestionTime, QueryTime).is_ok());
+        assert!(with_timings(QueryTime, QueryTime).is_ok());
+        assert!(with_timings(IngestionTime, IngestionTime).is_err());
     }
     // A readout cannot reinterpret arbitrary rows as maintained state or exceed its producer's contract.
     #[test]

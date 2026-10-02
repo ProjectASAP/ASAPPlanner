@@ -110,29 +110,18 @@ fn has<F: Fn(&AggIntent) -> bool>(e: &OperatorNode, pred: F) -> bool {
     intents(e).iter().any(pred)
 }
 
-/// Whether the tree contains a `Mul`-by-`PromqlScalarBridge(-1)` anywhere — the shape unary
+/// Whether the tree contains a `Mul`-by-`ScalarExpr(-1)` anywhere — the shape unary
 /// negation lowers to (issue #36).
 fn negates_via_scalar(e: &OperatorNode) -> bool {
-    let is_neg_one = |q: &OperatorNode| promql_scalar(q).is_some_and(|v| (v + 1.0).abs() < 1e-12);
-    match e.expect_non_asap() {
-        NonASAPOp::BinaryOp {
-            operator, lhs, rhs, ..
-        } => {
-            (operator.kind == BinaryOpKind::Arithmetic(ArithmeticOpKind::Mul)
-                && (is_neg_one(lhs) || is_neg_one(rhs)))
-                || negates_via_scalar(lhs)
-                || negates_via_scalar(rhs)
-        }
-        NonASAPOp::Aggregate { child, .. }
-        | NonASAPOp::Sort { child, .. }
-        | NonASAPOp::Limit { child, .. }
-        | NonASAPOp::TimeRange { child, .. }
-        | NonASAPOp::TimeShift { child, .. }
-        | NonASAPOp::PromqlSubquery { child, .. }
-        | NonASAPOp::Filter { child, .. }
-        | NonASAPOp::Project { child, .. } => negates_via_scalar(child),
-        _ => false,
+    fn negative(expr: &ScalarExpr) -> bool {
+        matches!(expr, ScalarExpr::Arithmetic { op: ArithmeticOpKind::Mul, right, .. } if promql_scalar(right) == Some(-1.0))
+            || expr.children().iter().any(|e| negative(e))
     }
+    e.expect_non_asap()
+        .scalar_exprs()
+        .iter()
+        .any(|e| negative(e))
+        || e.children().iter().any(|e| negates_via_scalar(e))
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -529,7 +518,7 @@ fn histogram_quantile_over_rate() {
         panic!("expected Aggregate{{HistogramQuantile}}, got {qe:?}");
     };
     assert!(
-        matches!(measures.as_slice(), [AggIntent::HistogramQuantile { q }] if (*q - 0.9).abs() < 1e-9)
+        matches!(measures.as_slice(), [AggIntent::HistogramQuantile { q, .. }] if (*q - 0.9).abs() < 1e-9)
     );
     assert!(has(&qe, |i| matches!(i, AggIntent::Rate)));
 }
@@ -626,6 +615,8 @@ fn comparison_bool_modifier_returns_zero_or_one() {
     // without `bool` is not a PromQL expression at all.
     let bool_flag = |q: &str| match ok(q).expect_non_asap() {
         NonASAPOp::BinaryOp { return_bool, .. } => *return_bool,
+        NonASAPOp::Project { .. } => true,
+        NonASAPOp::Filter { .. } => false,
         other => panic!("expected BinaryOp for {q}, got {other:?}"),
     };
     assert!(bool_flag("go_goroutines > bool go_threads"));
@@ -633,8 +624,8 @@ fn comparison_bool_modifier_returns_zero_or_one() {
     assert!(!bool_flag("go_goroutines > go_threads"));
     assert!(!bool_flag("go_goroutines > 0"));
 
-    let qe = ok("1 < bool 2");
-    let NonASAPOp::ScalarBridge(ScalarExpr::Case { branches, .. }) = qe.expect_non_asap() else {
+    let qe = support::scalar_root("1 < bool 2");
+    let ScalarExpr::Case { branches, .. } = &qe else {
         panic!("expected a scalar Case, got {qe:?}");
     };
     assert!(matches!(
@@ -655,7 +646,7 @@ fn comparison_bool_modifier_returns_zero_or_one() {
 fn unary_negation_lowers_as_multiply_by_minus_one() {
     // SEMANTICS (PromQL, issue #36): `-expr` flips the sign of every sample.
     // Now that a scalar operand exists (#35), it lowers as `expr * -1` — a `Mul`
-    // BinaryOp of the (label-preserving) vector against `PromqlScalarBridge(-1)`. These are
+    // BinaryOp of the (label-preserving) vector against `ScalarExpr(-1)`. These are
     // the five cases the old `__GAP` test pinned as rejected.
     for q in [
         "-rate(http_errors_total[5m])",
@@ -665,102 +656,38 @@ fn unary_negation_lowers_as_multiply_by_minus_one() {
         "sum(-node_cpu_seconds_total)",
     ] {
         let qe = ok(q);
-        // A `Mul`-by-`-1` against a `PromqlScalarBridge(-1)` appears somewhere in every tree.
+        // A `Mul`-by-`-1` against a `ScalarExpr(-1)` appears somewhere in every tree.
         assert!(
             negates_via_scalar(&qe),
             "no `* -1` negation found in {q}: {qe:?}"
         );
     }
 
-    // `-some_metric` at the root: `Scan * PromqlScalarBridge(-1)`, schema follows the vector.
     let negated = ok("-some_metric");
-    let NonASAPOp::BinaryOp {
-        operator, lhs, rhs, ..
-    } = negated.expect_non_asap()
-    else {
-        panic!("expected a BinaryOp for `-some_metric`");
-    };
-    assert_eq!(
-        operator.kind,
-        BinaryOpKind::Arithmetic(ArithmeticOpKind::Mul)
-    );
-    assert!(
-        matches!(lhs.expect_non_asap(), NonASAPOp::TimeRange { child, .. } if matches!(child.expect_non_asap(), NonASAPOp::Scan { .. })),
-        "vector on the left"
-    );
-    assert!(
-        promql_scalar(&rhs).is_some_and(|v| (v + 1.0).abs() < 1e-12),
-        "negation multiplies by PromqlScalarBridge(-1), got {rhs:?}"
-    );
-    assert!(
-        operator.vector_match.is_none(),
-        "scalar negation carries no vector match"
-    );
-    // Label-preserving: the schema is the vector operand's, unchanged.
-    let schema = ok("-some_metric").schema.clone();
-    assert_eq!(
-        schema
-            .fields
-            .iter()
-            .map(|c| c.name.as_str())
-            .collect::<Vec<_>>(),
-        vec!["ts", "value"],
-    );
-
-    // `sum(-m)` — the negation lowers inside the aggregate argument (issue #27
-    // nesting), so the outer node is the `Sum` aggregate over the `Mul`.
+    assert!(negates_via_scalar(&negated));
+    assert!(negated.schema.has_promql_series_identity());
+    assert!(negated.schema.time_index.is_some());
     let summed = ok("sum(-node_cpu_seconds_total)");
-    let NonASAPOp::Aggregate {
-        measures, child, ..
-    } = summed.expect_non_asap()
-    else {
-        panic!("expected an outer Aggregate for `sum(-m)`");
-    };
-    assert!(matches!(measures.as_slice(), [AggIntent::Sum { .. }]));
-    assert!(matches!(
-        child.expect_non_asap(),
-        NonASAPOp::BinaryOp {
-            operator: BinaryOperator {
-                kind: BinaryOpKind::Arithmetic(ArithmeticOpKind::Mul),
-                ..
-            },
-            ..
-        }
-    ));
+    assert!(has(&summed, |i| matches!(i, AggIntent::Sum { .. })));
+    assert!(negates_via_scalar(&summed));
 }
 
 #[test]
 fn unary_negation_of_constant_folds_to_scalar() {
     // `-(10*1024*1024)` — the operand is constant-foldable, so negation collapses
-    // to a single negated `PromqlScalarBridge` leaf (no `BinaryOp`), just like a bare literal.
-    assert!(promql_scalar(&ok("-(10*1024*1024)")).is_some_and(|v| (v + 10_485_760.0).abs() < 1e-6));
+    // to a single negated `ScalarExpr` leaf (no `BinaryOp`), just like a bare literal.
+    assert!(promql_scalar(&support::scalar_root("-(10*1024*1024)"))
+        .is_some_and(|v| (v + 10_485_760.0).abs() < 1e-6));
 }
 
 #[test]
 fn double_unary_negation_nests() {
-    // `- -some_metric` — negation of a negation: `(m * -1) * -1`. Both levels
-    // lower; the value is unchanged but the structure is faithfully nested.
-    let twice = ok("- -some_metric");
-    let NonASAPOp::BinaryOp { operator, lhs, .. } = twice.expect_non_asap() else {
-        panic!("expected outer BinaryOp for `- -some_metric`");
+    let qe = ok("- -some_metric");
+    let NonASAPOp::Project { child, .. } = qe.expect_non_asap() else {
+        panic!()
     };
-    assert_eq!(
-        operator.kind,
-        BinaryOpKind::Arithmetic(ArithmeticOpKind::Mul)
-    );
-    assert!(
-        matches!(
-            lhs.expect_non_asap(),
-            NonASAPOp::BinaryOp {
-                operator: BinaryOperator {
-                    kind: BinaryOpKind::Arithmetic(ArithmeticOpKind::Mul),
-                    ..
-                },
-                ..
-            }
-        ),
-        "inner negation nests under the outer one"
-    );
+    assert!(matches!(child.expect_non_asap(), NonASAPOp::Project { .. }));
+    assert!(negates_via_scalar(child));
 }
 
 #[test]
@@ -793,47 +720,22 @@ fn count_maps_to_count_and_inherits_accuracy() {
 
 #[test]
 fn scalar_literal_operand_lowers_as_binaryop_scalar() {
-    // Issue #35: `<vector> op <scalar>` — the numeric threshold is a
-    // `PromqlScalarBridge` operand of the `BinaryOp`, and constant arithmetic
-    // (`10*1024*1024`) is folded. The output schema is the vector side's.
     let qe = ok("node_filesystem_avail_bytes > 10*1024*1024");
-    let NonASAPOp::BinaryOp {
-        operator: BinaryOperator { kind: op, .. },
-        lhs,
-        rhs,
-        ..
-    } = qe.expect_non_asap()
-    else {
-        panic!("expected a BinaryOp, got {qe:?}");
+    let ScalarExpr::Compare { op, right, .. } = support::sample_expression(&qe) else {
+        panic!()
     };
-    assert_eq!(*op, BinaryOpKind::Compare(CompareOpKind::Gt));
-    assert!(
-        matches!(lhs.expect_non_asap(), NonASAPOp::TimeRange { child, .. } if matches!(child.expect_non_asap(), NonASAPOp::Scan { .. })),
-        "vector on the left"
-    );
-    assert!(
-        promql_scalar(&rhs).is_some_and(|v| (v - 10_485_760.0).abs() < 1e-6),
-        "folded scalar threshold on the right, got {rhs:?}"
-    );
-    // The schema follows the vector side (a scalar contributes no labels).
-    assert_eq!(qe.schema, lhs.schema);
+    assert_eq!(*op, CompareOpKind::Gt);
+    assert_eq!(promql_scalar(right), Some(10_485_760.0));
 }
 
 #[test]
 fn scalar_arithmetic_scales_the_vector() {
-    // `rate(m[5m]) * 100` — a unit conversion. Arithmetic BinaryOp of the vector
-    // with a `PromqlScalarBridge(100)`.
     let qe = ok("rate(m[5m]) * 100");
-    let NonASAPOp::BinaryOp {
-        operator: BinaryOperator { kind: op, .. },
-        rhs,
-        ..
-    } = qe.expect_non_asap()
-    else {
-        panic!("expected a BinaryOp, got {qe:?}");
+    let ScalarExpr::Arithmetic { op, right, .. } = support::sample_expression(&qe) else {
+        panic!()
     };
-    assert_eq!(*op, BinaryOpKind::Arithmetic(ArithmeticOpKind::Mul));
-    assert!(promql_scalar(&rhs).is_some_and(|v| (v - 100.0).abs() < 1e-9));
+    assert_eq!(*op, ArithmeticOpKind::Mul);
+    assert_eq!(promql_scalar(right), Some(100.0));
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1663,7 +1565,7 @@ fn histogram_quantile_classic_bucket_vs_native() {
         assert!(
             has(
                 &qe,
-                |i| matches!(i, AggIntent::HistogramQuantile { q } if (*q - 0.9).abs() < 1e-9)
+                |i| matches!(i, AggIntent::HistogramQuantile { q, .. } if (*q - 0.9).abs() < 1e-9)
             ),
             "classic bucket form → HistogramQuantile: {classic}"
         );
@@ -1801,8 +1703,9 @@ fn clamp_and_round_carry_their_params() {
 
 #[test]
 fn pi_lowers_to_a_scalar_constant() {
-    // `pi()` is the constant π — a `PromqlScalarBridge` leaf, not a `Math` intent.
-    assert!(promql_scalar(&ok("pi()")).is_some_and(|v| (v - std::f64::consts::PI).abs() < 1e-12));
+    // `pi()` is the constant π — a `ScalarExpr` leaf, not a `Math` intent.
+    assert!(promql_scalar(&support::scalar_root("pi()"))
+        .is_some_and(|v| (v - std::f64::consts::PI).abs() < 1e-12));
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1840,43 +1743,19 @@ fn absent_keeps_matcher_labels_for_the_synthesized_output() {
 
 #[test]
 fn time_lowers_to_the_eval_time_scalar() {
-    // SEMANTICS: `time()` is the query evaluation timestamp as a scalar — a leaf,
-    // not an aggregate over any series.
     assert!(matches!(
-        ok("time()").expect_non_asap(),
-        NonASAPOp::ScalarBridge(ScalarExpr::EvalTimestamp)
+        support::scalar_root("time()"),
+        ScalarExpr::EvalTimestamp
     ));
-    // …and it is scalar-shaped: a single float `value`, no time index.
-    let sch = ok("time()").schema.clone();
-    assert_eq!(sch.fields.len(), 1);
-    assert_eq!(sch.fields[0].name, "value");
-    assert!(sch.time_index.is_none());
 }
 
 #[test]
 fn time_minus_vector_is_the_uptime_pattern() {
-    // `time() - process_start_time_seconds` — the canonical uptime expression.
-    // The scalar `time()` broadcasts against the vector; the result takes the
-    // vector's schema.
     let qe = ok("time() - process_start_time_seconds");
-    let NonASAPOp::BinaryOp {
-        operator, lhs, rhs, ..
-    } = qe.expect_non_asap()
-    else {
-        panic!("expected a BinaryOp, got {qe:?}");
-    };
-    assert!(matches!(
-        lhs.expect_non_asap(),
-        NonASAPOp::ScalarBridge(ScalarExpr::EvalTimestamp)
-    ));
-    assert!(matches!(
-        operator.kind,
-        BinaryOpKind::Arithmetic(ArithmeticOpKind::Sub)
-    ));
-    assert_eq!(
-        qe.schema, rhs.schema,
-        "the result takes the vector's schema"
+    assert!(
+        matches!(support::sample_expression(&qe), ScalarExpr::Arithmetic { op: ArithmeticOpKind::Sub, left, .. } if matches!(left.as_ref(), ScalarExpr::EvalTimestamp))
     );
+    assert!(qe.schema.time_index.is_some());
 }
 
 #[test]
@@ -1920,7 +1799,7 @@ fn no_arg_calendar_function_reads_the_eval_time() {
     ));
     assert!(matches!(
         child.expect_non_asap(),
-        NonASAPOp::ScalarBridge(ScalarExpr::EvalTimestamp)
+        NonASAPOp::PromqlVectorFromScalar(ScalarExpr::EvalTimestamp)
     ));
 }
 
@@ -1954,19 +1833,11 @@ fn vector_promotes_a_scalar_to_a_vector() {
 
 #[test]
 fn scalar_collapses_a_vector_to_a_scalar() {
-    // SEMANTICS: `scalar(v)` is the instant-vector→scalar bridge.
-    let qe = ok("scalar(node_load1)");
-    let NonASAPOp::ScalarBridge(ScalarExpr::PromqlScalarFromVector(inner)) = qe.expect_non_asap()
-    else {
-        panic!("expected PromqlScalarFromVector, got {qe:?}");
+    let qe = support::scalar_root("scalar(node_load1)");
+    let ScalarExpr::PromqlScalarFromVector(inner) = &qe else {
+        panic!()
     };
-    let (metric, _) = first_scan(inner);
-    assert_eq!(metric, "node_load1");
-    // PromqlScalarBridge-typed: single `value` column, no time index.
-    let sch = qe.schema.clone();
-    assert!(sch.time_index.is_none());
-    assert_eq!(sch.fields.len(), 1);
-    assert_eq!(sch.fields[0].name, "value");
+    assert_eq!(first_scan(inner).0, "node_load1");
 }
 
 #[test]
@@ -1992,20 +1863,15 @@ fn vector_zero_is_a_vector_operand_of_a_set_op() {
 
 #[test]
 fn scalar_of_a_vector_feeds_a_threshold_comparison() {
-    // `node_load1 > scalar(node_cpu_count)` — `scalar(...)` is a scalar operand,
-    // so the BinaryOp output takes the vector (lhs) side's schema.
     let qe = ok("node_load1 > scalar(node_cpu_count)");
-    let NonASAPOp::BinaryOp { lhs, rhs, .. } = qe.expect_non_asap() else {
-        panic!("expected a BinaryOp, got {qe:?}");
+    let ScalarExpr::Compare { right, .. } = support::sample_expression(&qe) else {
+        panic!()
     };
     assert!(matches!(
-        rhs.expect_non_asap(),
-        NonASAPOp::ScalarBridge(ScalarExpr::PromqlScalarFromVector(_))
+        right.as_ref(),
+        ScalarExpr::PromqlScalarFromVector(_)
     ));
-    // The BinaryOp output schema follows the vector (lhs) side, not the scalar.
-    let (metric, _) = first_scan(lhs);
-    assert_eq!(metric, "node_load1");
-    assert!(qe.schema.clone().time_index.is_some());
+    assert!(qe.schema.time_index.is_some());
 }
 
 #[test]
@@ -2364,25 +2230,43 @@ fn sort_by_label_desc_is_descending() {
 #[test]
 fn min_of_max_of_fold_constant_scalars() {
     // `min_of`/`max_of` are n-ary scalar reducers. When every argument is a
-    // constant they constant-fold to a `PromqlScalarBridge` leaf, just like scalar
+    // constant they constant-fold to a `ScalarExpr` leaf, just like scalar
     // arithmetic (#35) — the only form the intent algebra can hold (#89).
-    assert_eq!(promql_scalar(&ok("min_of(3, 5)")), Some(3.0));
-    assert_eq!(promql_scalar(&ok("max_of(3, 5)")), Some(5.0));
-    assert_eq!(promql_scalar(&ok("min_of(-2, -5)")), Some(-5.0));
+    assert_eq!(
+        promql_scalar(&support::scalar_root("min_of(3, 5)")),
+        Some(3.0)
+    );
+    assert_eq!(
+        promql_scalar(&support::scalar_root("max_of(3, 5)")),
+        Some(5.0)
+    );
+    assert_eq!(
+        promql_scalar(&support::scalar_root("min_of(-2, -5)")),
+        Some(-5.0)
+    );
     // Nested folds and use as a threshold operand.
-    assert_eq!(promql_scalar(&ok("max_of(min_of(2, 3), 10)")), Some(10.0));
+    assert_eq!(
+        promql_scalar(&support::scalar_root("max_of(min_of(2, 3), 10)")),
+        Some(10.0)
+    );
     let qe = ok("up > max_of(1, 2)");
-    let NonASAPOp::BinaryOp { rhs, .. } = qe.expect_non_asap() else {
+    let ScalarExpr::Compare { right: rhs, .. } = support::sample_expression(&qe) else {
         panic!("{qe:?}")
     };
-    assert_eq!(promql_scalar(&rhs), Some(2.0));
+    assert_eq!(promql_scalar(rhs), Some(2.0));
 }
 
 #[test]
 fn min_of_max_of_ignore_nan_like_the_min_max_aggregators() {
     // A NaN argument is skipped (Prometheus `min`/`max` NaN semantics).
-    assert_eq!(promql_scalar(&ok("max_of(3, NaN)")), Some(3.0));
-    assert_eq!(promql_scalar(&ok("min_of(NaN, 3)")), Some(3.0));
+    assert_eq!(
+        promql_scalar(&support::scalar_root("max_of(3, NaN)")),
+        Some(3.0)
+    );
+    assert_eq!(
+        promql_scalar(&support::scalar_root("min_of(NaN, 3)")),
+        Some(3.0)
+    );
 }
 
 #[test]

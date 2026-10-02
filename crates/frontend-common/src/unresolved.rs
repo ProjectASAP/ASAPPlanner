@@ -132,6 +132,7 @@ pub enum UnresolvedOp {
         reduction: Reduction<ColumnRef>,
         measures: Vec<AggIntent<ColumnRef>>,
         output_names: Vec<String>,
+        filters: Vec<Option<UnresolvedPredicate>>,
         having: Option<UnresolvedPredicate>,
         child: Rc<UnresolvedOp>,
     },
@@ -210,7 +211,14 @@ pub enum UnresolvedOp {
         resolution: Option<Duration>,
         child: Rc<UnresolvedOp>,
     },
-    ScalarBridge(UnresolvedScalar),
+    /// Bind the complete vector schema before lowering to Project or Filter.
+    PromqlScalarOp {
+        child: Rc<UnresolvedOp>,
+        scalar: UnresolvedScalar,
+        op: asap_types::pre_asap::BinaryOpKind,
+        scalar_left: bool,
+        return_bool: bool,
+    },
 }
 
 impl UnresolvedScalar {
@@ -299,12 +307,6 @@ impl UnresolvedScalar {
 }
 
 impl UnresolvedOp {
-    /// A bare PromQL numeric literal / folded constant at an operator
-    /// position: `ScalarBridge(Literal(Float64(v)))`.
-    pub fn promql_scalar(v: f64) -> Self {
-        UnresolvedOp::ScalarBridge(UnresolvedScalar::Literal(ScalarValue::Float64(v)))
-    }
-
     /// An ordinary `Concat` (no unique-key claim).
     pub fn concat(children: Vec<UnresolvedOp>) -> Self {
         UnresolvedOp::Concat {
@@ -326,17 +328,6 @@ impl UnresolvedOp {
         }
     }
 
-    /// The value of a [`promql_scalar`](Self::promql_scalar) leaf; `None` for
-    /// any other shape.
-    pub fn as_promql_scalar(&self) -> Option<f64> {
-        match self {
-            UnresolvedOp::ScalarBridge(UnresolvedScalar::Literal(ScalarValue::Float64(v))) => {
-                Some(*v)
-            }
-            _ => None,
-        }
-    }
-
     /// Every scalar expression this operator owns.
     pub fn scalar_exprs(&self) -> Vec<&UnresolvedScalar> {
         use UnresolvedOp::*;
@@ -345,13 +336,21 @@ impl UnresolvedOp {
             Values { rows, .. } => rows.iter().flatten().collect(),
             Filter { pred, .. } | Join { pred, .. } => vec![&pred.0],
             Project { cols, .. } => cols.iter().map(|c| &c.expr).collect(),
-            Aggregate { having, .. } => having.iter().map(|p| &p.0).collect(),
+            Aggregate {
+                filters, having, ..
+            } => filters
+                .iter()
+                .flatten()
+                .chain(having.iter())
+                .map(|p| &p.0)
+                .collect(),
             Sort { keys, .. } => keys.iter().map(|k| &k.expr).collect(),
             SQLWindowFunc { args, order_by, .. } => args
                 .iter()
                 .chain(order_by.iter().map(|k| &k.expr))
                 .collect(),
-            PromqlVectorFromScalar(e) | ScalarBridge(e) => vec![e],
+            PromqlVectorFromScalar(e) => vec![e],
+            PromqlScalarOp { scalar, .. } => vec![scalar],
             PromqlRelabel { value, .. } => vec![value],
             SetOp { .. }
             | Concat { .. }

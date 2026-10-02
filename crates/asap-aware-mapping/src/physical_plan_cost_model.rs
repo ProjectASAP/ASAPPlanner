@@ -421,6 +421,7 @@ mod tests {
                 accuracy: AccuracyTarget::Epsilon(0.01),
             }],
             output_names: vec![],
+            filters: vec![],
             having: None,
             child: scan,
         })

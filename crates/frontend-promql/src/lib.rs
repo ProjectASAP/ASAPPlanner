@@ -14,7 +14,6 @@ pub mod promql;
 
 use std::rc::Rc;
 
-use asap_frontend_common::resolve_root;
 use asap_types::ir::OperatorNode;
 use asap_types::workload::{DurationMs, PlanningWorkload, QueryLanguage, WorkloadError};
 
@@ -46,10 +45,42 @@ pub fn lower_promql_workload_with_histograms(
     lower_promql_workload_inner(workload, now_ms)
 }
 
+/// Lower scalar and vector query roots without introducing constant operators.
+pub fn lower_promql_query_workload(
+    workload: &PlanningWorkload,
+    now_ms: u64,
+) -> Result<Vec<asap_types::ir::QueryRoot>, PromqlError> {
+    lower_promql_query_workload_inner(workload, now_ms)
+}
+
+pub fn lower_promql_query_workload_with_histograms(
+    workload: &PlanningWorkload,
+    histograms: HistogramCatalog,
+    now_ms: u64,
+) -> Result<Vec<asap_types::ir::QueryRoot>, PromqlError> {
+    let _guard = histogram::CatalogGuard::install(histograms);
+    lower_promql_query_workload_inner(workload, now_ms)
+}
+
 fn lower_promql_workload_inner(
     workload: &PlanningWorkload,
     now_ms: u64,
 ) -> Result<Vec<Rc<OperatorNode>>, PromqlError> {
+    lower_promql_query_workload_inner(workload, now_ms)?
+        .into_iter()
+        .map(|root| match root {
+            asap_types::ir::QueryRoot::Operator(node) => Ok(node),
+            asap_types::ir::QueryRoot::Scalar(_) => Err(PromqlError::UnsupportedFeature(
+                "scalar root: use lower_promql_query_workload".into(),
+            )),
+        })
+        .collect()
+}
+
+fn lower_promql_query_workload_inner(
+    workload: &PlanningWorkload,
+    now_ms: u64,
+) -> Result<Vec<asap_types::ir::QueryRoot>, PromqlError> {
     if !matches!(workload.query_workload.language, QueryLanguage::PromQL) {
         return Err(PromqlError::WrongLanguage(format!(
             "{:?}",
@@ -68,12 +99,12 @@ fn lower_promql_workload_inner(
         .query_workload
         .entries()
         .map(|entry| {
-            let unresolved = promql::PromqlLowerer::lower_with_ingestion_interval(
+            let root = promql::PromqlLowerer::lower_query_with_ingestion_interval(
                 &entry.query.0,
                 &entry.requirements.accuracy.target(),
                 std::time::Duration::from_millis(interval_ms),
             )?;
-            Ok(resolve_root(&unresolved)?)
+            Ok(root)
         })
         .collect()
 }

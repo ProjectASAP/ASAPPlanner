@@ -39,6 +39,7 @@ fn range_agg(range_secs: u64, intent: AggIntent, metric: &str) -> Rc<OperatorNod
         reduction: Reduction::PerEntity,
         measures: vec![intent],
         output_names: vec!["".into()],
+        filters: vec![],
         having: None,
         child: node(NonASAPOp::TimeRange {
             range: Duration::from_secs(range_secs),

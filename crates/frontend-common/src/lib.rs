@@ -16,7 +16,7 @@ pub mod resolve;
 pub mod schema_resolver;
 pub mod unresolved;
 
-pub use resolve::{resolve_expr, resolve_root, ResolveTreeError};
+pub use resolve::{resolve_expr, resolve_root, resolve_scalar_root, ResolveTreeError};
 pub use schema_resolver::{SchemaCatalog, SchemaResolver, UsageDerivedCatalog};
 pub use unresolved::{
     UnresolvedOp, UnresolvedPredicate, UnresolvedProjectItem, UnresolvedScalar, UnresolvedSortKey,

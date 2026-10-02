@@ -1,0 +1,20 @@
+[package]
+name = "asap-physical-operators"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+futures = "0.3"
+planner-types = { package = "asap-types", path = "../types" }
+asap_sketchlib = { git = "https://github.com/ProjectASAP/asap_sketchlib", rev = "5f03ccbd798ed5fec62bdd839bcb331123cab369" }
+serde = { version = "1", features = ["derive", "rc"] }
+serde_json = "1"
+tracing = "0.1"
+thiserror = "2"
+regex = "1"
+
+
+[dev-dependencies]
+rmp-serde = "1"
+asap-aware-mapping = { path = "../asap-aware-mapping" }
+asap-frontend-promql = { path = "../frontend-promql" }

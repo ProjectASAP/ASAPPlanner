@@ -178,7 +178,7 @@ This guide uses the Cascades/Volcano terminology:
   operation. In this crate, that kind of candidate is a logical-rewrite
   `Replacement::Subtree`.
 - A **replacement candidate** packages either kind of result as a
-  `ReplacementSubDAG` for search. `PlanSpace` stores and ranks these candidates.
+  `ReplacementSubDAG` for search. `CandidateLogicalASAPDAGs` stores and ranks these candidates.
 - **Physical commitment and placement** happen downstream. An `Realization`
   therefore does not mean that the planner has committed the workload to that
   choice.
@@ -189,7 +189,7 @@ The concrete flow is:
 AggIntent
   -> realizations_for_intent(): enumerate Realization values
   -> SketchAlgorithmStrategy: construct ReplacementSubDAG candidates
-  -> PlanSpace: store and rank candidates
+  -> CandidateLogicalASAPDAGs: store and rank candidates
   -> downstream deployment: select and place a final choice
 ```
 
@@ -278,7 +278,7 @@ bounds, but does not execute workloads or own deployment measurements. Most hook
   fn cse_share_decision(&self, candidate: &CseCandidate) -> ShareDecision;
   ```
 
-- **`estimate_cost`** — attach a comparable numeric cost to an already-constructed replacement. `PlanSpace::cost_sorted` calls it for every candidate and keeps the returned values aligned with the ranked candidates. The trait default returns `f64::NAN` deliberately; override it when a custom model's callers need displayable or otherwise consumable numeric costs. `DefaultCostModel` provides real values derived from its CSE cost hooks.
+- **`estimate_cost`** — attach a comparable numeric cost to an already-constructed replacement. `CandidateLogicalASAPDAGs::cost_sorted` calls it for every candidate and keeps the returned values aligned with the ranked candidates. The trait default returns `f64::NAN` deliberately; override it when a custom model's callers need displayable or otherwise consumable numeric costs. `DefaultCostModel` provides real values derived from its CSE cost hooks.
 
   ```rust
   fn estimate_cost(
@@ -292,9 +292,9 @@ A custom cost model does not necessarily need to override every hook. The curren
 
 ---
 
-### `PlanSpace` / `TargetSubDAGCandidates` / `RankedTargetSubDAGCandidates` — the whole-workload view
+### `CandidateLogicalASAPDAGs` / `TargetSubDAGCandidates` / `RankedTargetSubDAGCandidates` — the whole-workload view
 
-`ReplacementStrategy` answers "what are the candidates for this one target?" `PlanSpace` answers the same question for every target in a whole workload at once, without enumerating `2^N` fully-copied plans for `N` independently-choosable sites.
+`ReplacementStrategy` answers "what are the candidates for this one target?" `CandidateLogicalASAPDAGs` answers the same question for every target in a whole workload at once, without enumerating `2^N` fully-copied plans for `N` independently-choosable sites.
 
 ```rust
 // replacement.rs
@@ -318,7 +318,7 @@ pub struct RankedTargetSubDAGCandidates<'a> {
 
 `search_workload(roots)` runs the shared-subtree pass once, discovers every target across every root's whole DAG (not just root-level sharing — a `SharedSubtreeStrategy` candidate three levels under an unshared `Filter` is exactly as real a site as a shared whole root), and asks every registered strategy to a fixpoint. Two logically different candidates at two different targets are never copied into two separate plans — they're two entries in two different `TargetSubDAGCandidates`s, sharing every other node in the workload by construction.
 
-`PlanSpace::cost_sorted(cost_model)` is the one ranking step: for each candidate set, it dispatches by candidate shape — the `SharedSubtreeStrategy` share/recompute pair (recognized by `ReplacementProvenance::CseShare`/`CseRecompute`) goes through `CostModel::cse_share_decision`; a set with a Hydra shared-grid alternative goes through `CostModel::grouping_state_cost`; a set whose candidates all realize sketches (a `SketchAlgorithmStrategy` choice) goes through `CostModel::rank_candidates`; and any other mixed set is ordered by `CostModel::candidate_cost`. Every candidate gets a numeric cost aligned index-for-index in `costs`. Count in, count out—nothing is dropped to produce a ranking. Legality checks
+`CandidateLogicalASAPDAGs::cost_sorted(cost_model)` is the one ranking step: for each candidate set, it dispatches by candidate shape — the `SharedSubtreeStrategy` share/recompute pair (recognized by `ReplacementProvenance::CseShare`/`CseRecompute`) goes through `CostModel::cse_share_decision`; a set with a Hydra shared-grid alternative goes through `CostModel::grouping_state_cost`; a set whose candidates all realize sketches (a `SketchAlgorithmStrategy` choice) goes through `CostModel::rank_candidates`; and any other mixed set is ordered by `CostModel::candidate_cost`. Every candidate gets a numeric cost aligned index-for-index in `costs`. Count in, count out—nothing is dropped to produce a ranking. Legality checks
 may already have removed proposals before this boundary. In particular,
 `search_workload_with_targets` checks explicit per-root targets, while retaining
 direct DDSketch ratios with missing domain evidence and no root guarantee for
@@ -375,11 +375,11 @@ The crate provides no default `Matcher` implementation because the answer depend
 
 ## 2. Replacement explanations (`explanation.rs`)
 
-`explanation::explain_replacements`/`explain_replacements_with` answer a different question than everything above: not "what could this target become" (`ReplacementStrategy::replacements`) but "why does the replacement already discovered for this target exist, and where." It is a **reporting view over `PlanSpace`**, not a second search or a second rule engine — this crate's *explanation of a replacement*, not an applicability classifier deciding admissibility from scratch.
+`explanation::explain_replacements`/`explain_replacements_with` answer a different question than everything above: not "what could this target become" (`ReplacementStrategy::replacements`) but "why does the replacement already discovered for this target exist, and where." It is a **reporting view over `CandidateLogicalASAPDAGs`**, not a second search or a second rule engine — this crate's *explanation of a replacement*, not an applicability classifier deciding admissibility from scratch.
 
 ### The rule
 
-> A `TargetSubDAG` is worth explaining exactly when its `PlanSpace` candidate list contains something beyond the trivial, no-op realization.
+> A `TargetSubDAG` is worth explaining exactly when its `CandidateLogicalASAPDAGs` candidate list contains something beyond the trivial, no-op realization.
 
 Concretely, `explanation.rs` reports three candidate kinds from each `TargetSubDAGCandidates`:
 
@@ -395,10 +395,10 @@ Each `ReplacementExplanation::reason` is copied verbatim from the matching candi
 
 ### Why there is no `ExplanationRule` trait
 
-Explanations are derived from candidates already present in `PlanSpace`. A new candidate kind therefore requires an `impl ReplacementStrategy` wired into `default_strategies`/`default_strategies_with`; a second explanation-specific trait would duplicate registration and could drift from the actual search space. Custom callers supply strategies through `explain_replacements_with`, using the same extension point exposed by `search_workload_with`.
+Explanations are derived from candidates already present in `CandidateLogicalASAPDAGs`. A new candidate kind therefore requires an `impl ReplacementStrategy` wired into `default_strategies`/`default_strategies_with`; a second explanation-specific trait would duplicate registration and could drift from the actual search space. Custom callers supply strategies through `explain_replacements_with`, using the same extension point exposed by `search_workload_with`.
 
 ### How it derives `location` text
 
-`PlanSpace`/`TargetSubDAGCandidates` track `Rc<OperatorNode>` pointer identity, not human-readable breadcrumbs. `ReplacementExplanation::location` provides prose such as `root "dash_a" > lhs` so reporting consumers can identify the relevant part of the query without interpreting pointer identity. Location derivation does not make replacement or costing decisions.
+`CandidateLogicalASAPDAGs`/`TargetSubDAGCandidates` track `Rc<OperatorNode>` pointer identity, not human-readable breadcrumbs. `ReplacementExplanation::location` provides prose such as `root "dash_a" > lhs` so reporting consumers can identify the relevant part of the query without interpreting pointer identity. Location derivation does not make replacement or costing decisions.
 
 ---

@@ -104,7 +104,7 @@ and provide your own models.
 The default strategy generates DDSketch quantile-ratio candidates even when no
 input-domain evidence is available. Such candidates have `guarantee: None`:
 they do not claim a certified end-to-end accuracy bound. They also remain
-visible in a target-aware `PlanSpace` so the downstream backend can decide
+visible in a target-aware `CandidateLogicalASAPDAGs` so the downstream backend can decide
 whether to select them using its own evidence. Planner's automatic
 `global_selection` skips them; their presence alone does not show that they
 meet the requested target.

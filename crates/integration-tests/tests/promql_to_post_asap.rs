@@ -21,7 +21,7 @@ use asap_aware_mapping::{
 use asap_integration_tests::fixtures::lower_promql;
 use asap_integration_tests::post_asap::{post_asap_dag, timed};
 use asap_types::ir::export::{NonASAPOpKind, PostAsapOperatorPayload};
-use asap_types::ir::{ASAPOp, NonASAPOp, Operator, OperatorNode};
+use asap_types::ir::{ASAPOp, NonASAPOp, Operator, OperatorNode, ScalarExpr};
 use asap_types::post_asap::{
     CompositionOperator, EntityIdentity, ExactKind, ExactParams, FieldDataType, GroupingStrategy,
     Schema, SketchAlgorithm, SketchKind, SketchParams, SketchQuery, SummaryInputExpr,
@@ -488,21 +488,22 @@ fn rate_and_increase_topk_use_summary_scores_and_grouped_limits() {
 
 #[test]
 fn promql_binary_arithmetic_preserves_both_scalar_operand_orders() {
-    fn is_exact_readout_or_scalar(node: &OperatorNode) -> bool {
-        !node.contains_asap()
-            || matches!(node.asap(), Some(ASAPOp::FinalizeExactAccumulator { .. }))
-    }
-    for query in ["rate(a[1m]) / 2", "2 / rate(a[1m])"] {
+    for (query, scalar_left) in [("rate(a[1m]) / 2", false), ("2 / rate(a[1m])", true)] {
         let root = lower_and_realize(query);
-        let Some(NonASAPOp::BinaryOp { lhs, rhs, .. }) = root.non_asap() else {
-            panic!("expected BinaryOp for {query}, got {:?}", root.operator);
+        let Some(NonASAPOp::Project { cols, .. }) = root.non_asap() else {
+            panic!("expected Project")
         };
-        assert!(is_exact_readout_or_scalar(lhs));
-        assert!(is_exact_readout_or_scalar(rhs));
-        assert!(
-            matches!(lhs.asap(), Some(ASAPOp::FinalizeExactAccumulator { .. }))
-                || matches!(rhs.asap(), Some(ASAPOp::FinalizeExactAccumulator { .. }))
-        );
+        let ScalarExpr::Arithmetic { left, right, .. } = &cols[1].expr else {
+            panic!()
+        };
+        let (scalar, sample) = if scalar_left {
+            (left, right)
+        } else {
+            (right, left)
+        };
+        assert_eq!(**scalar, ScalarExpr::literal_f64(2.0));
+        assert_eq!(**sample, ScalarExpr::Column(1));
+        assert!(root.schema.has_promql_series_identity());
     }
 }
 
@@ -515,7 +516,7 @@ fn promql_binary_arithmetic_falls_back_as_a_whole_for_unsupported_arm() {
 #[test]
 fn promql_binary_arithmetic_preserves_nested_structure_and_rejects_modifiers() {
     let nested = lower_and_realize("(rate(a[1m]) + rate(b[1m])) / 2");
-    let Some(NonASAPOp::BinaryOp { lhs, .. }) = nested.non_asap() else {
+    let Some(NonASAPOp::Project { child: lhs, .. }) = nested.non_asap() else {
         panic!("expected outer BinaryOp, got {:?}", nested.operator);
     };
     assert!(matches!(lhs.non_asap(), Some(NonASAPOp::BinaryOp { .. })));
@@ -825,7 +826,7 @@ fn planner_heap_topk_reference_execution_matches_ground_truth() {
 ///
 /// ```text
 /// SummaryEstimate { query: Quantile{0.99} }          → {quantile_0_99: Float64}
-/// └─ SummaryAgg { Kll{k:269}, input: SampleValue }   → {quantile_0_99: Sketch(Kll, {k:269})}
+/// └─ SummaryAgg { Kll{k:269}, input: SampleValue }   → {value: Sketch(Kll, {k:269})}
 ///    └─ SummaryAgg { Rate, input: SampleValue }      → {ts, value: ExactAggregate(Rate), …}
 ///       └─ TimeRange{5m} → Scan                      → {ts, value}
 /// ```
@@ -886,7 +887,7 @@ fn promql_quantile_of_rate_binds_kll_over_rate_accumulator() {
         "global quantile — no group keys, full reduction"
     );
     assert_eq!(
-        dtype(&summary_input.schema, "quantile_0_99"),
+        dtype(&summary_input.schema, "value"),
         &FieldDataType::Sketch(
             SketchKind::new(SketchAlgorithm::Kll, SketchParams::Kll { k: 269 }),
             GroupingStrategy::default()
@@ -1096,7 +1097,8 @@ fn physical_node_owns_phase_independently_of_binary_payload() {
     use asap_types::post_asap::ExecutionTiming;
     for (query, expected) in [
         (
-            "quantile(0.9, sum_over_time(m[1m]) + sum_over_time(n[1m]))",
+            // One selector: both operands cover the same series.
+            "quantile(0.9, sum_over_time(m[1m]) + sum_over_time(m[1m]))",
             ExecutionTiming::IngestionTime,
         ),
         (
@@ -1362,5 +1364,32 @@ fn ddsketch_ratio_requires_a_supported_population_size() {
             &evidence,
         );
         assert!(strategy.replacements(&TargetSubDAG::new(&pre)).is_empty());
+    }
+}
+
+// Every `without` aggregation candidate exports a valid DAG: its summary state
+// column carries the family instead of the readout's Float64 value.
+#[test]
+fn without_aggregation_candidates_export_valid_dags() {
+    for accuracy in [
+        AccuracyTarget::Exact,
+        AccuracyTarget::EpsilonDelta {
+            epsilon: 0.01,
+            delta: 0.01,
+        },
+    ] {
+        for query in ["sum without (pod) (m)", "quantile without (pod) (0.5, m)"] {
+            let root = lower_promql(query, accuracy.clone()).unwrap();
+            let space = search_workload_with_targets(
+                vec![(0, root, Some(accuracy.clone()))],
+                &asap_aware_mapping::default_strategies(),
+                &DefaultAccuracyModel,
+            );
+            let inventory = space.enumerate_candidate_dags_for_root(&0, 65_536).unwrap();
+            assert!(!inventory.candidates.is_empty(), "{query}");
+            for (_, node) in inventory.candidates.iter().flatten() {
+                post_asap_dag(node);
+            }
+        }
     }
 }

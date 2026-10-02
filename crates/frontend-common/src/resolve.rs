@@ -135,7 +135,23 @@ fn resolve(tree: &UnresolvedOp, fallback: &Schema) -> Result<Rc<OperatorNode>, R
 
         // A scalar at an operator position has no child scope; in practice a
         // literal, so `fallback` is never consulted for a column here.
-        U::ScalarBridge(inner) => node(NonASAPOp::ScalarBridge(expr(inner, fallback)?)),
+        U::PromqlScalarOp {
+            child,
+            scalar,
+            op,
+            scalar_left,
+            return_bool,
+        } => {
+            let child = resolve(child, fallback)?;
+            let child = if child.schema.closed {
+                child
+            } else {
+                asap_types::pre_asap::schema::with_promql_series_identity(&child)
+                    .map_err(QueryExprError::InvalidScalarSignature)?
+            };
+            let scalar = resolve_expr(scalar, &Schema::default())?;
+            lower_scalar_vector(child, scalar, op, *scalar_left, *return_bool)
+        }
         U::PromqlVectorFromScalar(inner) => {
             node(NonASAPOp::PromqlVectorFromScalar(expr(inner, fallback)?))
         }
@@ -197,6 +213,7 @@ fn resolve(tree: &UnresolvedOp, fallback: &Schema) -> Result<Rc<OperatorNode>, R
             reduction,
             measures,
             output_names,
+            filters,
             having,
             child,
         } => {
@@ -206,6 +223,10 @@ fn resolve(tree: &UnresolvedOp, fallback: &Schema) -> Result<Rc<OperatorNode>, R
                 .iter()
                 .map(|m| resolve_agg_intent(m, &child.schema))
                 .collect::<Result<Vec<_>, ResolveError>>()?;
+            let filters = filters
+                .iter()
+                .map(|p| p.as_ref().map(|p| pred(&p.0, &child.schema)).transpose())
+                .collect::<Result<Vec<_>, _>>()?;
             // HAVING is evaluated over the aggregate's own output.
             let having = having
                 .as_ref()
@@ -223,6 +244,7 @@ fn resolve(tree: &UnresolvedOp, fallback: &Schema) -> Result<Rc<OperatorNode>, R
                 reduction,
                 measures,
                 output_names: output_names.clone(),
+                filters,
                 having,
                 child,
             })
@@ -644,7 +666,10 @@ fn resolve_agg_intent(
             lower: *lower,
             upper: *upper,
         },
-        AggIntent::HistogramQuantile { q } => AggIntent::HistogramQuantile { q: *q },
+        AggIntent::HistogramQuantile { q, le } => AggIntent::HistogramQuantile {
+            q: *q,
+            le: resolve_column_ref(le, schema)?,
+        },
         AggIntent::Math(f) => AggIntent::Math(f.clone()),
         AggIntent::Absent => AggIntent::Absent,
         AggIntent::AbsentOverTime => AggIntent::AbsentOverTime,
@@ -668,6 +693,111 @@ fn resolve_agg_intent(
     })
 }
 
+/// Resolve a standalone scalar in an empty column scope; plan reads retain their own scope.
+pub fn resolve_scalar_root(tree: &UnresolvedScalar) -> Result<ScalarExpr, ResolveTreeError> {
+    let resolved = resolve_expr(tree, &Schema::default())?;
+    resolved.scalar_type(&Schema::default())?;
+    Ok(resolved)
+}
+
+fn lower_scalar_vector(
+    child: Rc<OperatorNode>,
+    scalar: ScalarExpr,
+    op: &asap_types::pre_asap::BinaryOpKind,
+    scalar_left: bool,
+    return_bool: bool,
+) -> Result<Rc<OperatorNode>, ResolveTreeError> {
+    use asap_types::ir::ExprSemantics;
+    use asap_types::pre_asap::{BinaryOpKind, DataType, ScalarValue};
+    let value = child
+        .schema
+        .column_id("value")
+        .or_else(|| {
+            child
+                .schema
+                .fields
+                .iter()
+                .enumerate()
+                .filter(|(i, f)| {
+                    Some(*i) != child.schema.time_index
+                        && matches!(f.plain_dtype(), Some(DataType::Float64 | DataType::Int64))
+                })
+                .map(|(i, _)| i)
+                .next_back()
+        })
+        .ok_or_else(|| {
+            QueryExprError::InvalidScalarSignature("vector has no numeric sample".into())
+        })?;
+    let sample = ScalarExpr::Column(value);
+    let (left, right) = if scalar_left {
+        (scalar, sample)
+    } else {
+        (sample, scalar)
+    };
+    let semantics = ExprSemantics::Promql;
+    let computed = match op {
+        BinaryOpKind::Arithmetic(op) => ScalarExpr::Arithmetic {
+            op: op.clone(),
+            left: Box::new(left),
+            right: Box::new(right),
+            semantics,
+        },
+        BinaryOpKind::Compare(op) => {
+            let predicate = ScalarExpr::Compare {
+                op: op.clone(),
+                left: Box::new(left),
+                right: Box::new(right),
+                semantics,
+            };
+            if !return_bool {
+                return node(NonASAPOp::Filter {
+                    child,
+                    pred: Predicate(predicate),
+                });
+            }
+            ScalarExpr::Case {
+                operand: None,
+                branches: vec![(predicate, ScalarExpr::Literal(ScalarValue::Float64(1.0)))],
+                else_expr: Some(Box::new(ScalarExpr::Literal(ScalarValue::Float64(0.0)))),
+            }
+        }
+        BinaryOpKind::Set(_) => {
+            return Err(QueryExprError::InvalidScalarSignature(
+                "set operators require two vectors".into(),
+            )
+            .into())
+        }
+    };
+    let cols = child
+        .schema
+        .fields
+        .iter()
+        .enumerate()
+        .filter(|(_, f)| f.name != "__name__")
+        .map(|(i, f)| {
+            let expr = if i == value {
+                computed.clone()
+            } else if f.name == asap_types::pre_asap::schema::PROMQL_SERIES_IDENTITY {
+                ScalarExpr::FunctionCall {
+                    name: "promql_drop_metric_name".into(),
+                    args: vec![ScalarExpr::Column(i)],
+                }
+            } else {
+                ScalarExpr::Column(i)
+            };
+            ProjectItem {
+                alias: Some(f.name.clone()),
+                expr,
+            }
+        })
+        .collect();
+    node(NonASAPOp::Project {
+        child,
+        cols,
+        qualifier: None,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -676,7 +806,7 @@ mod tests {
     use asap_types::ir::ExprSemantics;
     use asap_types::pre_asap::{
         BinaryOpKind, CompareOpKind, DataType, Field, JoinKind, PromQLVectorSetOpKind, ScalarValue,
-        Source, VectorMatch, VectorMatchKind,
+        Source, VectorMatch,
     };
     use asap_types::types::AccuracyTarget;
 
@@ -777,33 +907,29 @@ mod tests {
     // vector side binds positionally, the `VectorMatch` survives untouched, and
     // the node's schema follows the vector side.
     #[test]
-    fn resolve_root_threads_a_scalar_bridge_operand_and_preserves_vector_match() {
-        let vm = VectorMatch {
-            kind: VectorMatchKind::Ignoring,
-            labels: vec!["job".into()],
-            grouping: None,
-        };
-        let unresolved = UnresolvedOp::BinaryOp {
-            operator: binary(BinaryOpKind::Compare(CompareOpKind::Gt), Some(vm.clone())),
+    fn scalar_comparison_preserves_vector_values_and_labels() {
+        let unresolved = UnresolvedOp::PromqlScalarOp {
+            child: Rc::new(scan("up")),
+            scalar: UnresolvedScalar::Literal(ScalarValue::Float64(1.0)),
+            op: BinaryOpKind::Compare(CompareOpKind::Gt),
+            scalar_left: true,
             return_bool: false,
-            lhs: Rc::new(scan("up")),
-            rhs: Rc::new(UnresolvedOp::promql_scalar(1.0)),
         };
-
-        let resolved = resolve_root(&unresolved).expect("resolves");
-        let NonASAPOp::BinaryOp {
-            operator, lhs, rhs, ..
+        let resolved = resolve_root(&unresolved).unwrap();
+        let NonASAPOp::Filter {
+            child,
+            pred: Predicate(ScalarExpr::Compare { left, right, .. }),
         } = resolved.expect_non_asap()
         else {
-            panic!("expected a resolved BinaryOp, got {resolved:?}");
+            panic!("expected Filter")
         };
-        assert!(matches!(lhs.expect_non_asap(), NonASAPOp::Scan { .. }));
+        assert_eq!(**left, ScalarExpr::literal_f64(1.0));
         assert_eq!(
-            rhs.expect_non_asap(),
-            &NonASAPOp::ScalarBridge(ScalarExpr::literal_f64(1.0))
+            **right,
+            ScalarExpr::Column(child.schema.column_id("value").unwrap())
         );
-        assert_eq!(operator.vector_match.as_ref(), Some(&vm));
-        assert_eq!(resolved.schema, lhs.schema);
+        assert_eq!(resolved.schema, child.schema);
+        assert!(resolved.schema.has_promql_series_identity());
     }
 
     // A `Concat` discriminator column referenced nowhere else, over a
@@ -843,6 +969,7 @@ mod tests {
             reduction: Reduction::by(vec![ColumnRef::Named("job".into())]),
             measures: vec![AggIntent::Sum { col: None }],
             output_names: vec![],
+            filters: vec![],
             having: None,
             child: Rc::new(UnresolvedOp::BinaryOp {
                 operator: binary(BinaryOpKind::Set(PromQLVectorSetOpKind::Or), None),
@@ -880,6 +1007,7 @@ mod tests {
                 col: Some(ColumnRef::Named("v".into())),
             }],
             output_names: vec!["total".into()],
+            filters: vec![],
             having: Some(UnresolvedPredicate(UnresolvedScalar::Compare {
                 left: Box::new(named("total")),
                 op: CompareOpKind::Gt,
@@ -958,26 +1086,26 @@ mod tests {
             predicates: vec![UnresolvedPredicate(eq_lit(named("a"), "1"))],
             schema: None,
         };
-        let unresolved = UnresolvedOp::BinaryOp {
-            operator: binary(
-                BinaryOpKind::Arithmetic(asap_types::pre_asap::ArithmeticOpKind::Mul),
-                None,
-            ),
+        let unresolved = UnresolvedOp::PromqlScalarOp {
+            child: Rc::new(scan("m")),
+            scalar: UnresolvedScalar::PromqlScalarFromVector(Rc::new(x)),
+            op: BinaryOpKind::Arithmetic(asap_types::pre_asap::ArithmeticOpKind::Mul),
+            scalar_left: false,
             return_bool: false,
-            lhs: Rc::new(scan("m")),
-            rhs: Rc::new(UnresolvedOp::ScalarBridge(
-                UnresolvedScalar::PromqlScalarFromVector(Rc::new(x)),
-            )),
         };
-        let resolved = resolve_root(&unresolved).expect("resolves");
-        let NonASAPOp::BinaryOp { lhs, rhs, .. } = resolved.expect_non_asap() else {
-            panic!("expected BinaryOp");
+        let resolved = resolve_root(&unresolved).unwrap();
+        let NonASAPOp::Project {
+            child: lhs, cols, ..
+        } = resolved.expect_non_asap()
+        else {
+            panic!("expected Project")
         };
         assert!(lhs.schema.column_id("a").is_none());
-        let NonASAPOp::ScalarBridge(ScalarExpr::PromqlScalarFromVector(inner)) =
-            rhs.expect_non_asap()
-        else {
-            panic!("expected ScalarBridge(scalar(v))");
+        let ScalarExpr::Arithmetic { right, .. } = &cols[1].expr else {
+            panic!("expected arithmetic")
+        };
+        let ScalarExpr::PromqlScalarFromVector(inner) = right.as_ref() else {
+            panic!("expected scalar(v)")
         };
         let a = inner
             .schema
@@ -990,7 +1118,7 @@ mod tests {
             panic!("expected Compare");
         };
         assert_eq!(**left, ScalarExpr::Column(a));
-        assert_eq!(resolved.schema, lhs.schema);
+        assert_eq!(resolved.schema.fields.len(), lhs.schema.fields.len());
     }
 
     // PromQL grouping drops a key provably absent from a closed input (#53):
@@ -1001,6 +1129,7 @@ mod tests {
             reduction: Reduction::by(vec![ColumnRef::Named("group".into())]),
             measures: vec![AggIntent::Sum { col: None }],
             output_names: vec![],
+            filters: vec![],
             having: None,
             child: Rc::new(scan("m")),
         };
@@ -1008,6 +1137,7 @@ mod tests {
             reduction: Reduction::by(vec![ColumnRef::Named("job".into())]),
             measures: vec![AggIntent::Sum { col: None }],
             output_names: vec![],
+            filters: vec![],
             having: None,
             child: Rc::new(inner),
         };

@@ -2471,6 +2471,7 @@ mod tests {
                 input: SummaryUpdate::column(ColumnRef::Wildcard),
                 reduction: Reduction::by(vec![]),
                 grouping: GroupingStrategy::PerSubpopulationInstance,
+                filter: None,
             },
             count_state_schema(),
             None,
@@ -2837,6 +2838,7 @@ mod tests {
                 input: SummaryUpdate::column(ColumnRef::Wildcard),
                 reduction: Reduction::by(vec![]),
                 grouping: GroupingStrategy::PerSubpopulationInstance,
+                filter: None,
             },
             schema.clone(),
             None,
@@ -3064,6 +3066,7 @@ mod tests {
             reduction: Reduction::by(vec![]),
             measures: vec![AggIntent::Sum { col: None }],
             output_names: vec![],
+            filters: vec![],
             having: None,
             child: metrics_scan(),
         })

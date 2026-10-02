@@ -21,7 +21,7 @@
 //! | PromQL | Canonical shape |
 //! |---|---|
 //! | `quantile_over_time(φ, m{f}[w])` | `Aggregate{[Quantile(φ)], TimeRange{w, Scan{predicates}}}` |
-//! | `histogram_quantile(φ, <classic buckets>)` | `Aggregate{[HistogramQuantile(φ)]}` — cumulative-bucket interpolation (classic form recognised by `by (le)` / a `_bucket` metric / an `le` matcher) |
+//! | `histogram_quantile(φ, <classic buckets>)` | `Aggregate{without(le), [HistogramQuantile(φ, le)]}` — cumulative-bucket interpolation (classic form recognised by `by (le)` / a `_bucket` metric / an `le` matcher) |
 //! | `histogram_quantile(φ, <native hist / raw>)` | `Aggregate{[Quantile(φ)]}` over the fully-lowered arg (generic, sketch-able with an accuracy target) |
 //! | `histogram_quantiles(v, "l", φ…)` | `Concat{PromqlRelabel{l=φᵢ, <the histogram_quantile(φᵢ, v) branch>}…}` — one branch per φ (issue #109) |
 //! | `histogram_count/sum/avg/stddev/stdvar(v)`, `histogram_fraction(l,u,v)` | `Aggregate{[Histogram*]}` — per-series native-histogram accessors (issue #43) |
@@ -37,11 +37,11 @@
 //! | `increase(m[w])` | `Aggregate{[Increase], TimeRange{w}}` |
 //! | `changes`/`delta`/`idelta`/`deriv`/`resets`/`predict_linear`/`double_exponential_smoothing`(`m[w]`, …) | `Aggregate{[Changes/Delta/…], TimeRange{w}}` — per-series counter-derivative intents (issue #44) |
 //! | `absent(v)` / `absent_over_time(m[w])` / `present_over_time(m[w])` | `Aggregate{[Absent/AbsentOverTime/PresentOverTime]}` — presence intents; the empty→synthesized-sample logic is a post-ASAP concern (issue #47) |
-//! | `abs`/`ceil`/`sqrt`/`ln`/`clamp*`/`round`/trig(`v`), `pi()` | `Aggregate{[Math(f)]}` element-wise transform (issue #45); `pi()` → a `ScalarBridge(Literal)` leaf |
-//! | `time()` / `timestamp`/`hour`/`day_of_week`/… (`v`) | `ScalarBridge(EvalTimestamp)` leaf / `Aggregate{[TimeFn(f)]}` (issue #46) |
-//! | `vector(s)` / `scalar(v)` | `PromqlVectorFromScalar(s)` / `ScalarBridge(PromqlScalarFromVector(v))` — the scalar⇄vector bridges (issue #48) |
-//! | `<scalar> op <scalar>` (`time() - 1`, `1 < bool 2`, `-time()`) | `ScalarBridge(Arithmetic / Case(Compare → 1, else 0) / Negative)` — a scalar expression, never an operator |
-//! | `v op <scalar>`, `a op bool b`, `v > bool 0` | `BinaryOp{return_bool}` with a `ScalarBridge` leaf on the scalar side |
+//! | `abs`/`ceil`/`sqrt`/`ln`/`clamp*`/`round`/trig(`v`), `pi()` | `Aggregate{[Math(f)]}` element-wise transform (issue #45); `pi()` → a `ScalarExpr::Literal` root |
+//! | `time()` / `timestamp`/`hour`/`day_of_week`/… (`v`) | `ScalarExpr::EvalTimestamp` root / `Aggregate{[TimeFn(f)]}` (issue #46) |
+//! | `vector(s)` / `scalar(v)` | `PromqlVectorFromScalar(s)` / `ScalarExpr::PromqlScalarFromVector(v)` — the scalar⇄vector bridges (issue #48) |
+//! | `<scalar> op <scalar>` (`time() - 1`, `1 < bool 2`, `-time()`) | `ScalarExpr::{Arithmetic, Case, Negative}` — a scalar expression, never an operator |
+//! | `v op <scalar>`, `a op bool b`, `v > bool 0` | `Project`/`Filter` with owned scalar expressions; vector/vector uses `BinaryOp{return_bool}` |
 //! | `label_replace(v,…)` / `label_join(v,…)` | `PromqlRelabel{dst, value}` — per-series label rewrite; value unchanged (issue #50) |
 //! | `info(v, [selector])` | `PromqlInfoEnrich{selector}` — label-enrichment join against the info metric(s); join keys resolved during post-ASAP binding (issue #84) |
 //! | `group` / `offset` / `@` / `info` | **rejected** — distinct semantics with no intent-algebra representation yet (`info` label-join → #84) |
@@ -180,16 +180,24 @@ struct Inner {
 const MAX_DEPTH: usize = 256;
 
 impl PromqlLowerer {
-    pub(crate) fn lower_with_ingestion_interval(
+    pub(crate) fn lower_query_with_ingestion_interval(
         query: &str,
         accuracy: &AccuracyTarget,
         interval: Duration,
-    ) -> Result<Unresolved> {
+    ) -> Result<asap_types::ir::QueryRoot> {
         let _guard = AccuracyGuard::install(accuracy.clone());
         let _interval = IngestionIntervalGuard::install(interval);
         let ast = parser::parse(query).map_err(LoweringError::Parse)?;
         check_depth(&ast, MAX_DEPTH)?;
-        walk(&ast)
+        if ast.value_type() == ValueType::Scalar {
+            Ok(asap_types::ir::QueryRoot::Scalar(
+                asap_frontend_common::resolve_scalar_root(&lower_scalar(&ast)?)?,
+            ))
+        } else {
+            Ok(asap_types::ir::QueryRoot::Operator(
+                asap_frontend_common::resolve_root(&walk(&ast)?)?,
+            ))
+        }
     }
 }
 
@@ -284,7 +292,9 @@ fn walk(expr: &Expr) -> Result<Unresolved> {
     // A scalar-typed expression (`5`, `time() - 1`, `scalar(v)`, `1 < bool 2`)
     // is a scalar expression at an operator position, never an operator tree.
     if expr.value_type() == ValueType::Scalar {
-        return Ok(Unresolved::ScalarBridge(lower_scalar(expr)?));
+        return Err(LoweringError::UnsupportedFeature(
+            "scalar root requires query-root lowering".into(),
+        ));
     }
     match expr {
         Expr::Aggregate(agg) => walk_aggregate(agg),
@@ -303,20 +313,32 @@ fn walk(expr: &Expr) -> Result<Unresolved> {
         // identity and `-<literal>` to a negated `NumberLiteral`. A scalar
         // operand was dispatched to `lower_scalar` above (→ `Negative`), so this
         // is a vector whose samples must be sign-flipped: `x * -1`, a `Mul`
-        // against a `ScalarBridge(-1)` leaf. `Mul` is commutative, so operand
+        // against a the scalar literal `-1` leaf. `Mul` is commutative, so operand
         // order carries no hazard (#36).
-        Expr::Unary(u) => Ok(vector_binary(
-            BinaryOpKind::Arithmetic(ArithmeticOpKind::Mul),
-            None,
-            false,
-            walk(&u.expr)?,
-            Unresolved::promql_scalar(-1.0),
-        )),
-        Expr::Subquery(sq) => Ok(Unresolved::PromqlSubquery {
-            range: sq.range,
-            resolution: sq.step,
-            child: Rc::new(walk(&sq.expr)?),
+        Expr::Unary(u) => Ok(Unresolved::PromqlScalarOp {
+            child: Rc::new(walk(&u.expr)?),
+            scalar: Scalar::Literal(ScalarValue::Float64(-1.0)),
+            op: BinaryOpKind::Arithmetic(ArithmeticOpKind::Mul),
+            scalar_left: false,
+            return_bool: false,
         }),
+        Expr::Subquery(sq) => {
+            let subquery = Unresolved::PromqlSubquery {
+                range: sq.range,
+                resolution: sq.step,
+                child: Rc::new(walk(&sq.expr)?),
+            };
+            // `offset`/`@` move the whole subquery, including its step grid.
+            let shift = time_shift(sq.offset.as_ref(), sq.at.as_ref())?;
+            Ok(if shift.is_identity() {
+                subquery
+            } else {
+                Unresolved::TimeShift {
+                    shift,
+                    child: Rc::new(subquery),
+                }
+            })
+        }
         Expr::VectorSelector(vs) => {
             let (metric, matchers, shift) = vs_parts(vs)?;
             Ok(instant_source(metric, matchers, shift))
@@ -332,7 +354,7 @@ fn walk(expr: &Expr) -> Result<Unresolved> {
         // Scalar-typed, dispatched above; kept for exhaustiveness. String
         // literals only appear as function args (`label_replace`, …), so a
         // bare one is rejected (issue #35).
-        Expr::NumberLiteral(n) => Ok(Unresolved::promql_scalar(n.val)),
+        Expr::NumberLiteral(_) => unreachable!("scalar handled above"),
         Expr::StringLiteral(_) => Err(LoweringError::UnsupportedFeature(
             "bare string literal".into(),
         )),
@@ -413,8 +435,7 @@ fn lower_scalar_binary(bin: &BinaryExpr) -> Result<Scalar> {
     }
 }
 
-/// A `BinaryOp` over two operator operands (a scalar side is a `ScalarBridge`
-/// leaf, as `walk` produces for a scalar-typed expression).
+/// A binary operation over two vectors.
 fn vector_binary(
     kind: BinaryOpKind,
     vector_match: Option<VectorMatch>,
@@ -680,6 +701,7 @@ fn mark_without(tree: Unresolved, without: bool) -> Unresolved {
             reduction,
             measures,
             output_names,
+            filters,
             having,
             child,
         } => {
@@ -691,6 +713,7 @@ fn mark_without(tree: Unresolved, without: bool) -> Unresolved {
                 reduction: Reduction::Reduce(GroupKeys::without(keys)),
                 measures,
                 output_names,
+                filters,
                 having,
                 child,
             }
@@ -767,18 +790,12 @@ fn ranked_by_value(
     }
 }
 
-/// `histogram_quantile(φ, <expr>)` lowers `<expr>` in full — preserving any
-/// `sum by (le)` / `rate` structure inside it — and wraps the result in an
-/// `Aggregate{[Quantile(φ)]}`. The φ-quantile reduces across the `le` buckets,
-/// so the wrapper carries no grouping keys: the usage-derived schema can't
-/// enumerate the non-`le` labels to group by (the same limitation that rejects
-/// `without`). This handles the canonical
-/// `histogram_quantile(φ, sum by (le) (rate(m_bucket[w])))` pattern, which the
-/// old "extract the matrix and substitute a bare Quantile" path could not.
 /// The `histogram_*` function family (issues #43, histogram_quantile).
 ///
-/// `histogram_quantile(φ, <expr>)` lowers to a `Quantile` over the fully-lowered
-/// argument — it also covers the classic `le`-bucket form (`sum by (le) (…)`).
+/// `histogram_quantile(φ, <expr>)` lowers `<expr>` in full — preserving any
+/// `sum by (le)` / `rate` structure inside it. The classic `le`-bucket form
+/// becomes [`classic_histogram_quantile`]; a native histogram or raw samples
+/// become a `Quantile` over the whole argument.
 /// The native-histogram accessors (`histogram_count`/`sum`/`avg`/`stddev`/
 /// `stdvar`/`fraction`) each extract one float per series, lowering to a
 /// per-series `Aggregate{[accessor]}` directly over the (instant) argument.
@@ -799,14 +816,13 @@ fn walk_histogram(call: &Call) -> Result<Unresolved> {
         // The true signal is the argument's sample type: a declared
         // `HistogramKind` (issue #79) drives the choice when available, else we
         // fall back to the structural `by (le)`/`_bucket` heuristic (issue #43).
-        let func = if histogram_arg_is_sketchable(arg_expr) {
-            AggIntent::Quantile {
-                col: None,
-                q: phi,
-                accuracy: current_accuracy(),
-            }
-        } else {
-            AggIntent::HistogramQuantile { q: phi }
+        if !histogram_arg_is_sketchable(arg_expr) {
+            return Ok(classic_histogram_quantile(phi, "", walk(arg_expr)?));
+        }
+        let func = AggIntent::Quantile {
+            col: None,
+            q: phi,
+            accuracy: current_accuracy(),
         };
         return Ok(outer_aggregate(vec![], func, walk(arg_expr)?));
     }
@@ -827,6 +843,22 @@ fn walk_histogram(call: &Call) -> Result<Unresolved> {
         other => return Err(LoweringError::UnsupportedFunction(other.to_string())),
     };
     Ok(outer_aggregate(vec![], func, walk(arg(call, vec_idx)?)?))
+}
+
+/// Classic-bucket `histogram_quantile(φ, child)`. One histogram is the set of
+/// series that differ only in `le`, so the aggregate groups `without (le)`.
+/// That grouping also seeds `le` into a usage-derived source schema, even
+/// when no matcher names it. An empty `output_name` keeps the intent-keyed name.
+fn classic_histogram_quantile(q: f64, output_name: &str, child: Unresolved) -> Unresolved {
+    let le = ColumnRef::Named("le".into());
+    Unresolved::Aggregate {
+        reduction: Reduction::Reduce(GroupKeys::without(vec![le.clone()])),
+        measures: vec![AggIntent::HistogramQuantile { q, le }],
+        output_names: vec![output_name.into()],
+        filters: vec![],
+        having: None,
+        child: Rc::new(child),
+    }
 }
 
 /// `histogram_quantiles(v, "label", φ₀, φ₁, …)` — the experimental multi-quantile
@@ -861,26 +893,26 @@ fn walk_histogram_quantiles(call: &Call) -> Result<Unresolved> {
     let branches = (2..call.args.args.len())
         .map(|i| {
             let phi = bounded_quantile_param(num_arg(call, i)?)?;
-            let intent = if sketchable {
-                AggIntent::Quantile {
+            let child = walk(vec_expr)?;
+            // Each branch aliases its value column to "value" (not the
+            // intent-keyed default) so `Concat` — which derives its schema
+            // from the first branch — doesn't silently misdescribe the rest.
+            let quantile = if sketchable {
+                let intent = AggIntent::Quantile {
                     col: None,
                     q: phi,
                     accuracy: current_accuracy(),
+                };
+                Unresolved::Aggregate {
+                    reduction: reduction_for(&[], intent.is_per_series()),
+                    measures: vec![intent],
+                    output_names: vec!["value".into()],
+                    filters: vec![],
+                    having: None,
+                    child: Rc::new(child),
                 }
             } else {
-                AggIntent::HistogramQuantile { q: phi }
-            };
-            let child = walk(vec_expr)?;
-            let reduction = reduction_for(&[], intent.is_per_series());
-            let quantile = Unresolved::Aggregate {
-                reduction,
-                measures: vec![intent],
-                // Each branch aliases its value column to "value" (not the
-                // intent-keyed default) so `Concat` — which derives its schema
-                // from the first branch — doesn't silently misdescribe the rest.
-                output_names: vec!["value".into()],
-                having: None,
-                child: Rc::new(child),
+                classic_histogram_quantile(phi, "value", child)
             };
             Ok(Unresolved::PromqlRelabel {
                 dst: label.clone(),
@@ -956,7 +988,7 @@ fn is_time_fn(name: &str) -> bool {
 }
 
 /// `timestamp(v)` and the calendar accessors → `Aggregate{[TimeFn(f)]}` over
-/// the argument vector, or over `ScalarBridge(EvalTimestamp)` for the
+/// the argument vector, or over `PromqlVectorFromScalar(EvalTimestamp)` for the
 /// no-argument calendar forms (`hour()`, `day_of_week()`, …). Issue #46.
 fn walk_time(call: &Call) -> Result<Unresolved> {
     let func = match call.func.name {
@@ -974,7 +1006,7 @@ fn walk_time(call: &Call) -> Result<Unresolved> {
     // A calendar function with no argument reads the evaluation time; otherwise
     // it maps over each sample's timestamp in the argument vector.
     let inner = if call.args.args.is_empty() {
-        Unresolved::ScalarBridge(Scalar::EvalTimestamp)
+        Unresolved::PromqlVectorFromScalar(Scalar::EvalTimestamp)
     } else {
         walk(arg(call, 0)?)?
     };
@@ -1350,11 +1382,36 @@ fn selector_is_bucket(vs: &VectorSelector) -> bool {
 
 /// A binary op with at least one vector operand (a scalar/scalar op is
 /// scalar-typed and never reaches here). A scalar side lowers to a
-/// `ScalarBridge` leaf via `walk`; the `bool` modifier sets `return_bool`.
+/// scalar expression; mixed operations resolve to Project or Filter.
 fn walk_binary(bin: &BinaryExpr) -> Result<Unresolved> {
+    let op = binop(bin.op.id())?;
+    let scalar_left = bin.lhs.value_type() == ValueType::Scalar;
+    if scalar_left || bin.rhs.value_type() == ValueType::Scalar {
+        let (scalar, vector) = if scalar_left {
+            (&bin.lhs, &bin.rhs)
+        } else {
+            (&bin.rhs, &bin.lhs)
+        };
+        return Ok(Unresolved::PromqlScalarOp {
+            child: Rc::new(walk(vector)?),
+            scalar: lower_scalar(scalar)?,
+            op,
+            scalar_left,
+            return_bool: bin.return_bool(),
+        });
+    }
     let lhs = walk(&bin.lhs)?;
     let rhs = walk(&bin.rhs)?;
-    let op = binop(bin.op.id())?;
+    // `VectorMatch` has no fill field; dropping fill would change which series
+    // are emitted and their values, so the query must fall back to exact
+    // execution instead.
+    if let Some(m) = &bin.modifier {
+        if m.fill_values.lhs.is_some() || m.fill_values.rhs.is_some() {
+            return Err(LoweringError::UnsupportedFeature(format!(
+                "`fill` vector-matching modifier: `{bin}`"
+            )));
+        }
+    }
     let vector_match = bin.modifier.as_ref().map(|m| {
         let (kind, labels) = match &m.matching {
             Some(LabelModifier::Include(ls)) => (VectorMatchKind::On, ls.labels.clone()),
@@ -1590,6 +1647,7 @@ fn build(inner: Inner, keys: Vec<ColumnRef>, outer: Outer) -> Result<Unresolved>
                         accuracy: current_accuracy(),
                     }],
                     output_names: vec![],
+                    filters: vec![],
                     having: None,
                     child: Rc::new(ranked),
                 });
@@ -1631,6 +1689,7 @@ fn build(inner: Inner, keys: Vec<ColumnRef>, outer: Outer) -> Result<Unresolved>
                         accuracy: current_accuracy(),
                     }],
                     output_names: vec![],
+                    filters: vec![],
                     having: None,
                     child: Rc::new(ranked_agg),
                 })
@@ -1699,6 +1758,7 @@ fn windowed_aggregate(
         // PromQL's intent-keyed output names ("sum", "quantile_0_99", …)
         // instead.
         output_names: vec![String::new()],
+        filters: vec![],
         having: None,
         child: Rc::new(child),
     }
@@ -1717,6 +1777,7 @@ fn outer_aggregate(
         reduction,
         measures: vec![intent],
         output_names: vec![String::new()],
+        filters: vec![],
         having: None,
         child: Rc::new(child),
     }
@@ -1736,6 +1797,7 @@ fn per_series_aggregate(
         reduction,
         measures: vec![intent],
         output_names: vec![String::new()],
+        filters: vec![],
         having: None,
         child: Rc::new(child),
     }

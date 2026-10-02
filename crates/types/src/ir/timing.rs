@@ -115,6 +115,16 @@ fn forces_query_time(node: &OperatorNode, seen: &mut HashMap<*const OperatorNode
         _ if node.timing == Some(ExecutionTiming::QueryTime) => true,
         Operator::ASAP(ASAPOp::SummaryEstimate { .. })
         | Operator::ASAP(ASAPOp::ReadPopulation { .. }) => true,
+        Operator::NonASAP(NonASAPOp::BinaryOp { lhs, rhs, .. })
+            if node
+                .schema
+                .fields
+                .iter()
+                .any(|f| f.name == crate::pre_asap::schema::PROMQL_SERIES_IDENTITY)
+                && per_series_rows(lhs).is_none_or(|rows| per_series_rows(rhs) != Some(rows)) =>
+        {
+            true
+        }
         _ => node
             .children()
             .iter()
@@ -362,9 +372,12 @@ fn validate_asap(
             Ok(())
         }
         ASAPOp::MaintainPopulation { child, population } => {
-            let valid = timing == ExecutionTiming::IngestionTime
-                && population.matches_node(child)
-                && state_of(child) == ExecutionDataState::INGESTION_ROWS;
+            let valid = population.matches_node(child)
+                && state_of(child)
+                    == ExecutionDataState {
+                        timing,
+                        primitive: DataPrimitive::Raw,
+                    };
             if !valid {
                 return Err(ExecutionDataStateError::InvalidMaintainedPopulation);
             }
@@ -376,7 +389,7 @@ fn validate_asap(
                     &child.operator,
                     Operator::ASAP(ASAPOp::MaintainPopulation { population, .. })
                         if population.supports(readout)
-                            && child.timing == Some(ExecutionTiming::IngestionTime)
+                            && child.timing.is_some()
                 );
             if !valid {
                 return Err(ExecutionDataStateError::InvalidMaintainedPopulation);
@@ -490,10 +503,12 @@ fn validate_non_asap(
                 let plain_float_or_ts = |schema: &Schema| {
                     schema.fields.iter().all(|field| {
                         !field.nullable
-                            && matches!(
+                            && (matches!(
                                 field.dtype,
                                 FieldDataType::Plain(DataType::Float64 | DataType::Timestamp)
-                            )
+                            ) || (field.name
+                                == crate::pre_asap::schema::PROMQL_SERIES_IDENTITY
+                                && field.dtype == FieldDataType::Plain(DataType::Utf8)))
                     })
                 };
                 let float_count = node
@@ -506,6 +521,20 @@ fn validate_non_asap(
                     || !matches!(operator.kind, BinaryOpKind::Arithmetic(_))
                     || lhs.schema != rhs.schema
                     || lhs.schema != node.schema
+                    || node
+                        .schema
+                        .fields
+                        .iter()
+                        .filter(|f| f.name == crate::pre_asap::schema::PROMQL_SERIES_IDENTITY)
+                        .count()
+                        > 1
+                    || (node
+                        .schema
+                        .fields
+                        .iter()
+                        .any(|f| f.name == crate::pre_asap::schema::PROMQL_SERIES_IDENTITY)
+                        && per_series_rows(lhs)
+                            .is_none_or(|rows| per_series_rows(rhs) != Some(rows)))
                     || !plain_float_or_ts(&node.schema)
                     || float_count != 1
                 {
@@ -610,6 +639,28 @@ pub fn split_shared_by_phase(
     )
 }
 
+/// Maintenance arithmetic needs the same per-series population on both sides.
+fn per_series_rows(node: &OperatorNode) -> Option<&OperatorNode> {
+    use crate::post_asap::ExactKind;
+    match &node.operator {
+        Operator::ASAP(ASAPOp::FinalizeExactAccumulator { child }) => match &child.operator {
+            Operator::ASAP(ASAPOp::SummaryAgg {
+                child,
+                family: FieldDataType::ExactAggregate(ExactKind::Sum | ExactKind::Count, _),
+                reduction: crate::pre_asap::Reduction::PerEntity,
+                filter: None,
+                ..
+            }) => Some(child),
+            _ => None,
+        },
+        Operator::NonASAP(NonASAPOp::BinaryOp { lhs, rhs, .. }) => {
+            let rows = per_series_rows(lhs)?;
+            (per_series_rows(rhs) == Some(rows)).then_some(rows)
+        }
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -659,6 +710,7 @@ mod tests {
                 input: SummaryUpdate::column(ColumnRef::SampleValue),
                 reduction: Reduction::by(vec![]),
                 grouping: GroupingStrategy::default(),
+                filter: None,
             },
             Schema::lifted(vec![Field::new("state", family, false)], None),
             None,
@@ -684,6 +736,7 @@ mod tests {
             reduction: Reduction::by(vec![]),
             measures: vec![measure],
             output_names: vec![],
+            filters: vec![],
             having: None,
             child,
         })

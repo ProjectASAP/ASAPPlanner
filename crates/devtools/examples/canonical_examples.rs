@@ -48,7 +48,7 @@ fn bgp_catalog() -> SqlCatalog {
 async fn main() {
     let promql_examples: &[(&str, &str)] = &[
         ("Scan", "up"),
-        ("BinaryOp + PromqlScalarBridge", "up > 1"),
+        ("Filter + scalar predicate", "up > 1"),
         ("EvalTimestamp", "time()"),
         ("Aggregate", "sum(up)"),
         (

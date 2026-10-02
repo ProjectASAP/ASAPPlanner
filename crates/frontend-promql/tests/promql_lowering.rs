@@ -254,7 +254,7 @@ fn histogram_quantile_wraps_inner_in_quantile() {
         panic!("expected outer Aggregate{{HistogramQuantile}}, got {qe:?}");
     };
     assert!(
-        matches!(measures.as_slice(), [AggIntent::HistogramQuantile { q }] if (*q - 0.95).abs() < 1e-9)
+        matches!(measures.as_slice(), [AggIntent::HistogramQuantile { q, .. }] if (*q - 0.95).abs() < 1e-9)
     );
     let NonASAPOp::Aggregate {
         measures, child, ..
@@ -292,7 +292,7 @@ fn histogram_quantile_over_sum_by_le_preserves_grouping() {
     };
     // The `by (le)` grouping marks the classic cumulative-bucket form.
     assert!(
-        matches!(measures.as_slice(), [AggIntent::HistogramQuantile { q }] if (*q - 0.99).abs() < 1e-9)
+        matches!(measures.as_slice(), [AggIntent::HistogramQuantile { q, .. }] if (*q - 0.99).abs() < 1e-9)
     );
     // `sum by (le)` survives as a positional Aggregate (by = [2], `le`) over the
     // inner Rate — no name-based Partition.
@@ -306,6 +306,86 @@ fn histogram_quantile_over_sum_by_le_preserves_grouping() {
     };
     assert_eq!(reduction, &Reduction::by(vec![2]));
     assert!(matches!(measures.as_slice(), [AggIntent::Sum { .. }]));
+}
+
+/// The classic `histogram_quantile` aggregate: its `without` keys, `le`
+/// column, and output column names.
+fn classic_histogram(qe: &OperatorNode) -> (Vec<usize>, usize, Vec<String>) {
+    let NonASAPOp::Aggregate {
+        reduction: Reduction::Reduce(by),
+        measures,
+        ..
+    } = qe.expect_non_asap()
+    else {
+        panic!("expected a reducing Aggregate, got {qe:?}");
+    };
+    let [AggIntent::HistogramQuantile { le, .. }] = measures.as_slice() else {
+        panic!("expected HistogramQuantile, got {measures:?}");
+    };
+    assert!(by.is_without(), "histogram_quantile groups without (le)");
+    let names = qe.schema.fields.iter().map(|c| c.name.clone()).collect();
+    (by.keys().to_vec(), *le, names)
+}
+
+// A classic histogram_quantile groups `without (le)` and names the child's
+// `le` column, even when no matcher or grouping mentions `le`.
+#[test]
+fn classic_histogram_quantile_groups_without_le() {
+    let qe = lower("histogram_quantile(0.9, rate(http_duration_seconds_bucket[5m]))");
+    let (keys, le, names) = classic_histogram(&qe);
+    let NonASAPOp::Aggregate { child, .. } = qe.expect_non_asap() else {
+        unreachable!()
+    };
+    let child = &child.schema;
+    assert_eq!(child.fields[le].name, "le");
+    assert_eq!(keys, vec![le]);
+    assert_eq!(names, vec!["histogram_quantile"]);
+}
+
+// An explicit `sum by (le, job)` argument keeps `job` and drops `le` and the
+// renamed sample value from the output labels.
+#[test]
+fn classic_histogram_quantile_over_sum_by_keeps_other_labels() {
+    let qe =
+        lower("histogram_quantile(0.9, sum by (le, job) (rate(http_duration_seconds_bucket[5m])))");
+    let (keys, le, names) = classic_histogram(&qe);
+    // `sum by (le, job)` outputs `[job, le, sum]`.
+    assert_eq!((keys, le), (vec![1], 1));
+    assert_eq!(names, vec!["job", "histogram_quantile"]);
+}
+
+// Out-of-range and NaN quantiles lower unchanged; execution returns -Inf/+Inf/NaN.
+#[test]
+fn classic_histogram_quantile_keeps_out_of_range_quantiles() {
+    for (query, expected) in [
+        ("histogram_quantile(-1, x_bucket)", -1.),
+        ("histogram_quantile(2, x_bucket)", 2.),
+    ] {
+        let root = lower(query);
+        let NonASAPOp::Aggregate { measures, .. } = root.expect_non_asap() else {
+            panic!("{query}");
+        };
+        assert!(
+            matches!(measures.as_slice(), [AggIntent::HistogramQuantile { q, .. }] if *q == expected)
+        );
+    }
+    let root = lower("histogram_quantile(NaN, x_bucket)");
+    let NonASAPOp::Aggregate { measures, .. } = root.expect_non_asap() else {
+        panic!("NaN");
+    };
+    assert!(matches!(measures.as_slice(), [AggIntent::HistogramQuantile { q, .. }] if q.is_nan()));
+}
+
+// An argument whose closed output lacks `le` has no buckets. Prometheus
+// returns an empty vector; lowering rejects it rather than guess a column.
+#[test]
+fn classic_histogram_quantile_rejects_an_argument_without_le() {
+    let error = lower_promql(
+        "histogram_quantile(0.9, sum by (job) (rate(x_bucket[5m])))",
+        AccuracyTarget::Exact,
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("le"), "{error}");
 }
 
 // ── rate / increase carry their own window (no Window node) ─────────────────────
@@ -760,6 +840,45 @@ fn binary_op_with_on_grouping() {
     assert_eq!(vm.labels, vec!["host".to_string()]);
 }
 
+// `bool` changes a comparison from a filter to a 0/1 result, so the IR must
+// carry it.
+#[test]
+fn bool_comparisons_are_distinct() {
+    let op = |q: &str| match lower(q).expect_non_asap() {
+        NonASAPOp::BinaryOp {
+            operator,
+            return_bool,
+            ..
+        } => (operator.kind.clone(), *return_bool),
+        NonASAPOp::Filter {
+            pred: asap_types::ir::Predicate(ScalarExpr::Compare { op, .. }),
+            ..
+        } => (BinaryOpKind::Compare(op.clone()), false),
+        NonASAPOp::Project { cols, .. } => {
+            let ScalarExpr::Case { branches, .. } = &cols[1].expr else {
+                panic!()
+            };
+            let ScalarExpr::Compare { op, .. } = &branches[0].0 else {
+                panic!()
+            };
+            (BinaryOpKind::Compare(op.clone()), true)
+        }
+        other => panic!("expected BinaryOp, got {other:?}"),
+    };
+    assert_eq!(
+        op("a > 1"),
+        (BinaryOpKind::Compare(CompareOpKind::Gt), false)
+    );
+    assert_eq!(
+        op("a > bool 1"),
+        (BinaryOpKind::Compare(CompareOpKind::Gt), true)
+    );
+    assert_eq!(
+        op("a == bool on(job) b"),
+        (BinaryOpKind::Compare(CompareOpKind::Eq), true)
+    );
+}
+
 #[test]
 fn binary_op_binds_each_branch_against_its_own_schema() {
     // Each side scans a different metric and groups by a different label. With a
@@ -898,6 +1017,28 @@ fn pathologically_nested_query_is_rejected_not_stack_overflow() {
     let q = format!("{}m{}", "(".repeat(300), ")".repeat(300));
     let err = lower_promql(&q, AccuracyTarget::Exact).unwrap_err();
     assert!(format!("{err}").contains("nesting"), "got {err}");
+}
+
+// Behavior: every parser-accepted `fill` modifier form is rejected with a
+// fill-specific lowering error rather than silently dropped.
+#[test]
+fn fill_modifiers_are_rejected_not_ignored() {
+    for q in [
+        "a + fill(0) b",
+        "a + fill_left(1) b",
+        "a + fill_right(2) b",
+        "a + fill_left(1) fill_right(2) b",
+        "a + fill_right(2) fill_left(1) b",
+        "a + on(job) fill(0) b",
+        "a * ignoring(instance) group_left(env) fill_right(0) b",
+        "a > bool on(job) fill(0) b",
+        "sum(a - on(job) group_right fill_left(0) b)",
+    ] {
+        match lower_promql(q, AccuracyTarget::Exact) {
+            Err(LoweringError::UnsupportedFeature(m)) if m.contains("`fill`") => {}
+            other => panic!("expected fill rejection for {q:?}, got {other:?}"),
+        }
+    }
 }
 
 // ── accuracy propagation ──────────────────────────────────────────────────────
@@ -1316,36 +1457,23 @@ fn instant_and_range_selectors_of_equal_length_stay_distinct() {
 #[test]
 fn vector_scalar_comparison_without_bool_filters() {
     let qe = lower("up > 0");
-    let NonASAPOp::BinaryOp {
-        operator,
-        return_bool,
-        ..
-    } = qe.expect_non_asap()
-    else {
-        panic!("expected BinaryOp, got {qe:?}");
-    };
-    assert_eq!(operator.kind, BinaryOpKind::Compare(CompareOpKind::Gt));
-    assert!(!return_bool, "no `bool` modifier → a filtering comparison");
+    assert!(matches!(qe.expect_non_asap(), NonASAPOp::Filter { .. }));
+    assert!(matches!(
+        support::sample_expression(&qe),
+        ScalarExpr::Compare {
+            op: CompareOpKind::Gt,
+            ..
+        }
+    ));
 }
 
 #[test]
 fn vector_scalar_comparison_with_bool_sets_return_bool() {
-    // `up > bool 0` yields 0/1 per series instead of filtering.
     let qe = lower("up > bool 0");
-    let NonASAPOp::BinaryOp {
-        operator,
-        return_bool,
-        lhs,
-        rhs,
-    } = qe.expect_non_asap()
-    else {
-        panic!("expected BinaryOp, got {qe:?}");
-    };
-    assert!(*return_bool);
-    assert_eq!(operator.kind, BinaryOpKind::Compare(CompareOpKind::Gt));
-    assert!(matches!(lhs.expect_non_asap(), NonASAPOp::TimeRange { .. }));
-    assert_eq!(support::promql_scalar(rhs), Some(0.0));
-    // The modifier is part of the shape.
+    assert!(matches!(
+        support::sample_expression(&qe),
+        ScalarExpr::Case { .. }
+    ));
     assert_ne!(qe, lower("up > 0"));
 }
 
@@ -1393,34 +1521,35 @@ fn bool_modifier_composes_with_vector_matching() {
 fn scalar_negation_of_time_is_a_negative_expression() {
     // `-time()` is a scalar expression; its negation stays structural (the
     // operand is not a constant to fold) and follows PromQL numeric rules.
-    let qe = lower("-time()");
-    let NonASAPOp::ScalarBridge(ScalarExpr::Negative { expr, semantics }) = qe.expect_non_asap()
-    else {
-        panic!("expected ScalarBridge(Negative), got {qe:?}");
+    let qe = support::scalar_root("-time()");
+    let ScalarExpr::Negative { expr, semantics } = &qe else {
+        panic!("expected ScalarExpr(Negative), got {qe:?}");
     };
     assert_eq!(*semantics, ExprSemantics::Promql);
     assert!(matches!(expr.as_ref(), ScalarExpr::EvalTimestamp));
     // Scalar-shaped: no time index.
-    assert!(qe.schema.time_index.is_none());
 }
 
 #[test]
 fn scalar_negation_of_a_constant_still_folds() {
     // `-(2)` is constant: it folds to one literal rather than a `Negative`.
-    assert_eq!(support::promql_scalar(&lower("-(2)")), Some(-2.0));
+    assert_eq!(
+        support::promql_scalar(&support::scalar_root("-(2)")),
+        Some(-2.0)
+    );
 }
 
 #[test]
 fn scalar_arithmetic_carries_promql_semantics() {
-    let qe = lower("time() - 1");
-    let NonASAPOp::ScalarBridge(ScalarExpr::Arithmetic {
+    let qe = support::scalar_root("time() - 1");
+    let ScalarExpr::Arithmetic {
         op,
         left,
         right,
         semantics,
-    }) = qe.expect_non_asap()
+    } = &qe
     else {
-        panic!("expected ScalarBridge(Arithmetic), got {qe:?}");
+        panic!("expected scalar(Arithmetic), got {qe:?}");
     };
     assert_eq!(*op, ArithmeticOpKind::Sub);
     assert_eq!(*semantics, ExprSemantics::Promql);
@@ -1434,14 +1563,14 @@ fn scalar_arithmetic_carries_promql_semantics() {
 #[test]
 fn scalar_bool_comparison_is_a_zero_one_case_with_promql_semantics() {
     // `1 < bool 2` → `Case(Compare(1 < 2) → 1.0, else 0.0)`: PromQL yields 0/1.
-    let qe = lower("1 < bool 2");
-    let NonASAPOp::ScalarBridge(ScalarExpr::Case {
+    let qe = support::scalar_root("1 < bool 2");
+    let ScalarExpr::Case {
         operand,
         branches,
         else_expr,
-    }) = qe.expect_non_asap()
+    } = &qe
     else {
-        panic!("expected ScalarBridge(Case), got {qe:?}");
+        panic!("expected scalar(Case), got {qe:?}");
     };
     assert!(operand.is_none());
     let [(when, then)] = branches.as_slice() else {

@@ -10,3 +10,4 @@ extensions. A design document is not a promise of downstream runtime support.
 - [ASAP-aware mapping proposals](asap-aware-mapping/README.md)
 - [Operator sharing](operator-sharing.md)
 - [Decoupling operators from scalar expressions](decoupling_op_and_expr.md)
+- [ASAPPlanner layering](planner-layering.md)

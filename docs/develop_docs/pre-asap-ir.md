@@ -91,7 +91,7 @@ across consumers when its row identity is provable.
 Value computation lives in `ScalarExpr` (`crates/types/src/ir/scalar.rs`), owned **by value**
 by an operator field: `Scan.predicates`, `Filter.pred`, `Join.pred`, `Project.cols[i].expr`,
 `Aggregate.having`, `Sort.keys[i].expr`, `SQLWindowFunc.args`/`order_by`, `PromqlRelabel.value`,
-`Values.rows`, and the leaves `ScalarBridge` / `PromqlVectorFromScalar`. A scalar expression never
+`Values.rows`, and `QueryRoot::Scalar` and `PromqlVectorFromScalar`. A scalar expression never
 produces a table and is never a node of the DAG; it is evaluated against the input schema of
 the operator that owns it.
 
@@ -178,7 +178,7 @@ to one source language.
 - [`Concat`](#concat) — exact, untyped `UNION ALL` of union-compatible branches.
 
 **[Scalar-position nodes](#scalar-position-nodes)**
-- [`ScalarBridge`](#scalarbridge) — a scalar expression at an operator-tree position.
+- `QueryRoot::Scalar` — a standalone scalar expression, without an operator node.
 - [`PromqlVectorFromScalar`](#promqlvectorfromscalar) — promotes a scalar to a label-less instant vector.
 
 **[PromQL-specific nodes](#promql-specific-nodes)**
@@ -251,9 +251,15 @@ Rate, Increase                                                    // counter der
 Changes, Delta, IDelta, Deriv, Resets,
 PredictLinear(seconds), DoubleExpSmoothing(sf, tf)                // range-vector functions
 HistogramCount, HistogramSum, HistogramAvg, HistogramStdDev,
-HistogramStdVar, HistogramFraction(lo, hi), HistogramQuantile(q)  // native-histogram accessors
+HistogramStdVar, HistogramFraction(lo, hi)                       // native-histogram accessors
+HistogramQuantile(q, le)                                          // classic-bucket quantile
 Math(func)                                                        // element-wise transform
 ```
+
+`HistogramQuantile { q, le }` names its bucket-bound column `le`. PromQL's
+`Aggregate` groups it `without([le])`, so one histogram is the set of series
+that differ only in `le`. The SQL `asap_histogram_quantile` bridge reads one
+histogram over all rows.
 
 `PearsonCorr { left, right }` has two value inputs. Both
 references resolve to positional column IDs, and `input_cols()` exposes both
@@ -287,8 +293,9 @@ logical pass-through at any arity. Each SQL argument must be a bare column,
 qualifier preserved so a tuple over a join resolves to the correct side; an
 expression argument is rejected rather than reduced over a probe column.
 
-SQL `corr` currently rejects `DISTINCT`, aggregate `FILTER`, aggregate `ORDER BY`,
-explicit null treatment, and window usage (`OVER`). Further two-input statistics
+SQL `corr` currently rejects `DISTINCT`, aggregate `ORDER BY`,
+explicit null treatment, and window usage (`OVER`); a `FILTER` clause becomes the
+measure's own predicate (see `filters` below). Further two-input statistics
 (`covar`, the `regr_*` family) would each add their own variant, following the
 `StdDev` / `Variance` precedent, once they have explicit output and realization
 semantics.
@@ -302,8 +309,40 @@ meaningful summary implementation.
 - `output_names` — output column name per entry in `measures`; a non-empty entry overrides the
   synthetic default — SQL threads DataFusion's generated name (e.g. `"sum(metrics.bytes)"`)
   here so an enclosing `Project` can resolve the aggregate output by the name it references.
+- `filters` — one optional row predicate per entry in `measures`, with SQL
+  `FILTER (WHERE …)` semantics (#466): only rows where `filters[i]` is `TRUE` update
+  `measures[i]`; groups are still formed from every row. It is positional against
+  `child`'s output (like `Filter.pred`), not against the aggregate's output like `having`.
+  Empty means no measure is filtered; that is the only spelling of "unfiltered" a resolved
+  tree carries, so `[None, None]` is normalized to `[]`.
 - `having` — an optional post-aggregation filter predicate (SQL `HAVING`).
 - `child` — the input being aggregated.
+
+Example for `filters`:
+
+  ```sql
+  SELECT l_shipmode, count(CASE WHEN l_returnflag = 'R' THEN 1 END), sum(l_quantity)
+  FROM lineitem GROUP BY l_shipmode
+  ```
+
+  is one scan and one grouping, so it is one `Aggregate`. The conditional count is a plain
+  `Count` whose filter is the `CASE` condition; the sum is unfiltered:
+
+  ```text
+  Aggregate(
+      reduction = Reduce(by = [l_shipmode]),
+      measures = [Count, Sum(l_quantity)],
+      filters = [Some(l_returnflag = 'R'), None],
+      child = Scan("lineitem"),
+  )
+  ```
+
+  The SQL front end fills `filters` from an explicit `FILTER (WHERE p)`, from
+  `count(CASE WHEN p THEN x END)` (`p`, plus `x IS NOT NULL` when `x` is nullable), and from
+  `count(expr)` over any other nullable `expr` (`expr IS NOT NULL`), because canonical `Count`
+  counts rows and never consults its argument. A filtered measure has no summary binding yet:
+  `asap-aware-mapping` keeps such an `Aggregate` as `KeepPreAsap`, and canonicalization does
+  not promote a filtered count ranking to a heavy-hitter `TopK`.
 
 Example for `having`:
 
@@ -506,7 +545,7 @@ SELECT srcip, dstip FROM packets
 ### BinaryOp
 
 Arithmetic / comparison / set composition of two operands. PromQL binary operators between two vectors,
-a vector and a scalar, or two scalars; a scalar operand is a `ScalarBridge` leaf.
+two vectors. Mixed vector/scalar arithmetic uses `Project`; non-bool comparison uses `Filter`. Standalone scalar expressions are `QueryRoot::Scalar`.
 
 ```promql
 up > 1
@@ -614,20 +653,23 @@ histogram_quantiles(rate(http_request_duration_seconds_bucket[5m]), "le", 0.5, 0
 
 ## Scalar-position nodes
 
-### ScalarBridge
+### Scalar query roots
 
-A scalar expression sitting at an **operator-tree position**: a bare PromQL scalar query
-(`5`, `time()`) or the scalar operand of `<vector> op <scalar>`. Its output is one `value`
-column with no series (`OperatorResultKind::Scalar`). A PromQL number literal is
-`ScalarBridge(Literal(Float64(_)))`; a negated scalar (`-time()`) is
-`ScalarBridge(Negative { .. })`. A negated vector (`-v`) is instead `BinaryOp(v * -1)` with a
-`ScalarBridge(-1)` operand.
+`QueryRoot` distinguishes an operator result from an owned `ScalarExpr`. It is
+an API root discriminator, not an operator. `2`, `time()`, and
+`scalar(sum(up)) + 1` therefore introduce no constant-wrapper nodes.
 
-```promql
-up > 1
-```
+Use `lower_promql_query_workload` for mixed scalar/vector workloads. The
+operator-only convenience API rejects standalone scalar roots. `ParsedWorkload`
+retains each scalar's workload index; `PlanOutput::roots()` returns all results
+in workload order. Scalar plan reads remain exact and retain their operator
+references; summary selection currently operates on operator roots.
 
-**Fields:** a single unnamed `ScalarExpr`.
+`up * 2` projects the sample expression while retaining time and full series
+identity, removing the metric name. `up > 0` and `0 < up` filter the vector and
+retain its sample and name. `up > bool 0` projects a zero-or-one `Case`.
+Open label schemas acquire a full runtime series-identity field before this
+lowering. The runtime must populate that field with all labels.
 
 ### PromqlVectorFromScalar
 

@@ -3,7 +3,7 @@
 //!
 //! A [`ScalarExpr`] never produces a table. It is owned by value by an operator
 //! field (`Filter.pred`, `ProjectItem.expr`, `SortKey.expr`, `HAVING`, window
-//! arguments, relabel values) or by a [`super::NonASAPOp::ScalarBridge`] leaf.
+//! arguments, relabel values) or by a [`super::QueryRoot::Scalar`] query root.
 //! The only operator references inside a scalar tree are the explicit
 //! plan-reading variants (`PromqlScalarFromVector`, `ScalarSubquery`, `Exists`,
 //! `InSubquery`); every traversal of the operator DAG follows them.
@@ -417,7 +417,14 @@ impl ScalarExpr {
                 (to.clone(), *try_cast || nullable)
             }
             ScalarExpr::FunctionCall { name, args } => {
-                if name == "asap_element_access" {
+                if name == "promql_drop_metric_name" {
+                    if args.len() != 1 || args[0].scalar_type(schema)? != (DataType::Utf8, false) {
+                        return Err(QueryExprError::InvalidScalarSignature(
+                            "metric-name removal requires one non-null series identity".into(),
+                        ));
+                    }
+                    (DataType::Utf8, false)
+                } else if name == "asap_element_access" {
                     element_access_type(args, schema)
                         .map_err(QueryExprError::InvalidScalarSignature)?
                 } else if name == "asap_struct_field" {

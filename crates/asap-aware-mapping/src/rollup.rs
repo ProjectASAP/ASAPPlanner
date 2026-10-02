@@ -97,6 +97,7 @@
 //!   against a superset/subset relationship at all; [`is_legal_rollup_source`]
 //!   declines both directions.
 
+use asap_types::ir::non_asap::any_measure_filtered;
 use std::collections::HashSet;
 use std::rc::Rc;
 
@@ -121,6 +122,7 @@ fn bindable_grouped_aggregate(
     let Some(NonASAPOp::Aggregate {
         reduction,
         measures,
+        filters,
         having,
         child,
         ..
@@ -131,6 +133,9 @@ fn bindable_grouped_aggregate(
     let ([intent], None) = (measures.as_slice(), having) else {
         return None;
     };
+    if any_measure_filtered(filters) {
+        return None;
+    }
     let Reduction::Reduce(by) = reduction else {
         return None;
     };
@@ -365,6 +370,7 @@ fn build_rollup(
         reduction: Reduction::by(remapped_by),
         measures: vec![combinator],
         output_names: output_names.to_vec(),
+        filters: vec![],
         having: None,
         child: Rc::clone(finer),
     })
@@ -416,6 +422,7 @@ mod tests {
             reduction: Reduction::by(by),
             measures: vec![intent],
             output_names: vec![],
+            filters: vec![],
             having: None,
             child: Rc::clone(child),
         })
@@ -431,6 +438,7 @@ mod tests {
             reduction: Reduction::Reduce(GroupKeys::without(excluded)),
             measures: vec![intent],
             output_names: vec![],
+            filters: vec![],
             having: None,
             child: Rc::clone(child),
         })
@@ -741,6 +749,7 @@ mod tests {
             reduction: Reduction::by(vec![2]),
             measures: vec![AggIntent::Sum { col: Some(1) }],
             output_names: vec!["total_requests".into()],
+            filters: vec![],
             having: None,
             child: Rc::clone(&scan),
         })
@@ -862,6 +871,7 @@ mod tests {
                 },
             ],
             output_names: vec![],
+            filters: vec![],
             having: None,
             child: Rc::clone(&scan),
         })

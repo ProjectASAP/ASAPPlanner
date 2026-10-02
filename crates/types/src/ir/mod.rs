@@ -12,6 +12,8 @@ pub mod canonicalize;
 pub mod cse;
 pub mod export;
 pub mod node;
+pub mod query;
+pub use query::QueryRoot;
 pub mod non_asap;
 pub mod scalar;
 pub mod timing;

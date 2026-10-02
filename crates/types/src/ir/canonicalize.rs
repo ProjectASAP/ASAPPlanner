@@ -181,7 +181,7 @@ fn operator_children(op: &Operator) -> Vec<&Rc<OperatorNode>> {
     match op {
         Operator::ASAP(op) => op.children(),
         Operator::NonASAP(op) => match op {
-            Scan { .. } | Values { .. } | PromqlVectorFromScalar(_) | ScalarBridge(_) => vec![],
+            Scan { .. } | Values { .. } | PromqlVectorFromScalar(_) => vec![],
             Filter { child, .. }
             | Project { child, .. }
             | Aggregate { child, .. }
@@ -312,6 +312,7 @@ fn try_promote_additive_top_ranking(
         reduction: Reduction::by(partition_by.to_vec()),
         measures: vec![AggIntent::TopK { k: *k, accuracy }],
         output_names: Vec::new(),
+        filters: vec![],
         having: None,
         child: Rc::clone(agg_node),
     })
@@ -757,6 +758,7 @@ mod tests {
             reduction,
             measures: vec![agg],
             output_names: vec![],
+            filters: vec![],
             having: None,
             child,
         })

@@ -111,6 +111,7 @@ pub(crate) fn aggregate(
         reduction,
         measures,
         output_names,
+        filters: vec![],
         having,
         child,
     })
