@@ -267,6 +267,19 @@ async fn different_producers_are_not_shared() {
     }
 }
 
+/// Cross-series quantiles name their KLL state after the input column, not the
+/// quantile, so p50 and p99 over one selector share it.
+#[tokio::test]
+async fn cross_series_p50_and_p99_share_one_producer() {
+    let output = plan_promql(
+        &[("quantile(0.5, lat)", 0.01), ("quantile(0.99, lat)", 0.01)],
+        &CHEAP_SUMMARY,
+    )
+    .await;
+    assert!(same_states(&states(&output)));
+    assert_eq!(unique_deployments(&output), 1);
+}
+
 /// An ungrouped aggregate has no unique key, so pre-ASAP CSE keeps the two
 /// copies apart; their identical producers (rate, then sum) are shared here.
 #[tokio::test]
