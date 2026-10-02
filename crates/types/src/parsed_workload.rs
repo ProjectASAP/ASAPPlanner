@@ -1,5 +1,5 @@
 //! [`ParsedWorkload`] — a [`PlanningWorkload`] whose queries have been lowered
-//! to pre-ASAP IR.
+//! to the operator IR.
 //!
 //! This is the boundary between the frontend stage and the optimization stage
 //! (issues #429, #430). Everything downstream of lowering consumes this type
@@ -10,7 +10,7 @@
 
 use std::rc::Rc;
 
-use crate::pre_asap::query_expr::QueryExpr;
+use crate::ir::OperatorNode;
 use crate::workload::{
     DataWorkload, PlanningWorkload, QueryWorkload, QueryWorkloadEntry, WorkloadError,
 };
@@ -33,7 +33,7 @@ pub enum ParsedWorkloadError {
 #[derive(Debug, Clone)]
 pub struct ParsedWorkload {
     workload: PlanningWorkload,
-    exprs: Vec<Rc<QueryExpr>>,
+    exprs: Vec<Rc<OperatorNode>>,
 }
 
 impl ParsedWorkload {
@@ -41,7 +41,7 @@ impl ParsedWorkload {
     /// `i`-th entry.
     pub fn new(
         workload: PlanningWorkload,
-        exprs: Vec<Rc<QueryExpr>>,
+        exprs: Vec<Rc<OperatorNode>>,
     ) -> Result<Self, ParsedWorkloadError> {
         let entries = workload.query_workload.entries().count();
         if entries != exprs.len() {
@@ -65,7 +65,7 @@ impl ParsedWorkload {
         self.workload.data_workload.as_ref()
     }
 
-    pub fn exprs(&self) -> &[Rc<QueryExpr>] {
+    pub fn exprs(&self) -> &[Rc<OperatorNode>] {
         &self.exprs
     }
 
@@ -78,7 +78,7 @@ impl ParsedWorkload {
     }
 
     /// Normalized entries paired with their lowered expression.
-    pub fn entries(&self) -> impl Iterator<Item = (QueryWorkloadEntry, &Rc<QueryExpr>)> + '_ {
+    pub fn entries(&self) -> impl Iterator<Item = (QueryWorkloadEntry, &Rc<OperatorNode>)> + '_ {
         self.workload
             .query_workload
             .entries()

@@ -330,6 +330,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "asap-frontend-common"
+version = "0.1.0"
+dependencies = [
+ "asap-types",
+ "serde",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "asap-frontend-metricsql"
 version = "0.1.0"
 dependencies = [

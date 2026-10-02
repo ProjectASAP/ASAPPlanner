@@ -142,6 +142,37 @@ pub fn apply_lifecycle_timings(
     Ok(timed)
 }
 
+/// Validate the subtree below `root` under the default (every summary
+/// maintained) assignment, with `root` consumed at `root_timing`. For
+/// planning-time legality checks of a candidate before it is assembled into
+/// a workload DAG; nothing is kept.
+pub fn validate_default(
+    root: &Rc<OperatorNode>,
+    root_timing: ExecutionTiming,
+) -> Result<(), ExecutionDataStateError> {
+    let assignment = LifecycleAssignment::default_maintained();
+    let mut memo = TimingMemo::new();
+    let mut forced = HashMap::new();
+    let timed = write(root, root_timing, &assignment, &mut memo, &mut forced)?;
+    validate(&timed, &mut HashMap::new())
+}
+
+/// The data state `node` produces under the default assignment when its
+/// consumer runs at `consumer` — the planning-time answer to "what does this
+/// candidate's output look like" before any assignment is applied.
+pub fn planned_data_state(node: &Rc<OperatorNode>, consumer: ExecutionTiming) -> ExecutionDataState {
+    let mut forced = HashMap::new();
+    let timing = own_timing(node, consumer, &LifecycleAssignment::default_maintained(), &mut forced);
+    ExecutionDataState {
+        timing,
+        primitive: match &node.operator {
+            Operator::ASAP(op) if op.produced_state().is_some() => DataPrimitive::SummaryState,
+            Operator::ASAP(ASAPOp::MaintainPopulation { .. }) => DataPrimitive::SummaryState,
+            _ => DataPrimitive::Raw,
+        },
+    }
+}
+
 /// The timing `node` takes when its consumer runs at `consumer`.
 fn own_timing(
     node: &Rc<OperatorNode>,

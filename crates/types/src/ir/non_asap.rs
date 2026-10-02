@@ -8,14 +8,33 @@ use serde::{Deserialize, Serialize};
 
 use super::node::{OperatorNode, OperatorResultKind};
 use super::scalar::{Predicate, ProjectItem, ScalarExpr, SortKey};
-use crate::post_asap::expr::BinaryOperator;
 use crate::pre_asap::agg_intent::AggIntent;
 use crate::pre_asap::query_expr::{
-    aggregate_output_schema, ConcatDiscriminatorKey, GroupKeys, InfoMatcher, JoinKind,
-    QueryExprError, Reduction, RelationalSetOpKind, SampleKind, Source, TimeShift, WindowFrame,
-    WindowFuncKind,
+    aggregate_output_schema, BinaryOpKind, ConcatDiscriminatorKey, GroupKeys, InfoMatcher,
+    JoinKind, QueryExprError, Reduction, RelationalSetOpKind, SampleKind, Source, TimeShift,
+    VectorMatch, WindowFrame, WindowFuncKind,
 };
 use crate::pre_asap::schema::{ColumnId, DataType, Field, FieldDataType, Schema};
+
+/// All semantics owned by a binary operator.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct BinaryOperator {
+    /// Execute division only for finite operands, a nonzero divisor, and a
+    /// normal finite result; otherwise use exact execution. Required by the
+    /// relative-value division certificate, including floating-point range.
+    #[serde(default)]
+    pub checked_relative_division: bool,
+    /// Conditional exact rewrites (such as temporal average from sum/count)
+    /// require finite operands and quotient. Zero/subnormal results are valid;
+    /// overflow must fall back to the original query rather than emit infinity.
+    #[serde(default)]
+    pub checked_finite_division: bool,
+    pub kind: BinaryOpKind,
+    /// `None` is the only currently supported vector/vector matching mode.
+    /// The field is retained so execution never has to recover semantics by
+    /// re-parsing PromQL.
+    pub vector_match: Option<VectorMatch>,
+}
 
 /// Which samples a PromQL selector reads.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]

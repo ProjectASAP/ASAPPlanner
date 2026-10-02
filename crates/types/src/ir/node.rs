@@ -126,6 +126,11 @@ impl OperatorNode {
         Self::new(Operator::NonASAP(op)).map(Rc::new)
     }
 
+    /// An ASAP node with a planner-supplied schema and guarantee.
+    pub fn asap_node(op: ASAPOp, schema: Schema, guarantee: Option<ResultGuarantee>) -> Rc<Self> {
+        Rc::new(Self::with_schema(Operator::ASAP(op), schema).with_guarantee(guarantee))
+    }
+
     pub fn with_guarantee(mut self, guarantee: Option<ResultGuarantee>) -> Self {
         self.guarantee = guarantee;
         self
