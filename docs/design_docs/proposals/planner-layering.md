@@ -24,9 +24,9 @@ In order to achieve the goals, ASAPPlanner needs to abstract the modeling the fo
 | Modeling | Contents |
 |---|---|
 | Query workload | Queries with recurrence (repeated, batch, ad hoc), predictability, time selection, and accuracy and latency requirements |
-| Data workload | Arrival (streaming, at rest, or both), sampling cadence, volume, rate, cardinality and distribution |
+| Data workload | Arrival (streaming, at rest, or both), volume, rate, cardinality and distribution |
 | Deployment inputs | Empirical cost model, empirical accuracy model and execution capabilities |
-| ASAP replacement strategies | Rules that replace a sub-DAG of the query IR with summary nodes, and the summary families each computation may use |
+| ASAP replacement strategies | Rules that replace a sub-DAG of the query expression with summary expressions, and the summary families each computation may use |
 
 ASAPPlanner takes a [query workload](https://github.com/ProjectASAP/ASAPPlanner/blob/main/crates/types/src/workload.rs), a [data workload](https://github.com/ProjectASAP/ASAPPlanner/blob/main/crates/types/src/workload.rs#L531) and the deployment's
 inputs (TODO: define this data structure, [#525](https://github.com/ProjectASAP/ASAPPlanner/issues/525)), and returns one optimal physical plan. It decides what is computed, how
