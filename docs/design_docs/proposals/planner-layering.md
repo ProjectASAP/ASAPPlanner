@@ -1120,15 +1120,6 @@ Selection compares it with every other candidate using the deployment's models.
 
 **Unchanged:** frontends, rewrite rules, the stages and existing queries.
 
-**Today:** the declarations are spread over several places (candidate table,
-sizing and guarantee estimators, readout mapping, state naming, kernel and
-physical capability lists); see
-[extend-asap-aware-mapping.md](../../develop_docs/extend-asap-aware-mapping.md).
-A family needs both a planner-side guarantee and a native kernel to be
-selected and executed
-([#523](https://github.com/ProjectASAP/ASAPPlanner/issues/523),
-[#524](https://github.com/ProjectASAP/ASAPPlanner/issues/524)).
-
 ### Adding a better cost or accuracy estimation
 
 **Given:** a cost model or accuracy model supplied by the deployment, for
@@ -1141,12 +1132,6 @@ query in the workload, and a shared summary is costed once.
 
 **Unchanged:** frontends, rules, summary families and the deployment's
 execution.
-
-**Today:** a deployment's accuracy model is consulted only for the final
-check, not when Pass 1 admits candidates
-([#523](https://github.com/ProjectASAP/ASAPPlanner/issues/523)); the input
-structure for deployment inputs is TODO
-([#525](https://github.com/ProjectASAP/ASAPPlanner/issues/525)).
 
 
 [^smooth-histograms]: V. Braverman and R. Ostrovsky. [Smooth Histograms for Sliding Windows](https://web.cs.ucla.edu/~rafail/PUBLIC/82.pdf). FOCS 2007. An alternative to EH.
