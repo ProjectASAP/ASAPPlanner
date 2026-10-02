@@ -887,7 +887,7 @@ fn planner_heap_topk_reference_execution_matches_ground_truth() {
 ///
 /// ```text
 /// SummaryEstimate { query: Quantile{0.99} }          → {quantile_0_99: Float64}
-/// └─ SummaryAgg { Kll{k:269}, input: SampleValue }   → {quantile_0_99: Sketch(Kll, {k:269})}
+/// └─ SummaryAgg { Kll{k:269}, input: SampleValue }   → {value: Sketch(Kll, {k:269})}
 ///    └─ SummaryAgg { Rate, input: SampleValue }      → {ts, value: ExactAggregate(Rate), …}
 ///       └─ KeepPreAsap(TimeRange{5m} → Scan)         → {ts, value}
 /// ```
@@ -948,7 +948,7 @@ fn promql_quantile_of_rate_binds_kll_over_rate_accumulator() {
         "global quantile — no group keys, full reduction"
     );
     assert_eq!(
-        dtype(&summary_input.schema, "quantile_0_99"),
+        dtype(&summary_input.schema, "value"),
         &SummaryFamilyType::Sketch(
             SketchKind::new(SketchAlgorithm::Kll, SketchParams::Kll { k: 269 }),
             GroupingStrategy::default()

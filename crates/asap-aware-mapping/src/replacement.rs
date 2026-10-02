@@ -358,6 +358,7 @@ use asap_types::post_asap::{
 };
 use asap_types::post_asap::{AccuracyError, CompositionOperator, GuaranteeSource, ResultGuarantee};
 use asap_types::pre_asap::agg_intent::{agg_is_mergeable, AggIntent};
+use asap_types::pre_asap::column_resolution::resolve_column_ref;
 use asap_types::pre_asap::cse::{share_common_subtrees, structural_hash, HashCache};
 use asap_types::pre_asap::expr_ir::{ArithmeticOpKind, ColumnRef};
 use asap_types::pre_asap::query_expr::any_measure_filtered;
@@ -2867,6 +2868,15 @@ fn construct_summary_agg(
         {
             // State identity is independent of which statistic reads it.
             field.name = "univmon".into();
+        } else if let (AggIntent::Quantile { .. }, SummaryInputExpr::Column(col)) =
+            (intent, &summary_input.weight)
+        {
+            // The quantile is a readout parameter: name the state after the
+            // column it summarizes, not after the query's output column.
+            let child_schema = input.child.output_schema()?;
+            if let Ok(i) = resolve_column_ref(col, &child_schema) {
+                field.name = child_schema.columns[i].name.clone();
+            }
         }
     }
 
@@ -9791,9 +9801,10 @@ mod tests {
         );
         assert_eq!(input, &SummaryUpdate::column(ColumnRef::SampleValue));
         assert_eq!(reduction, &ReductionTy::by(vec![2]));
-        // SummaryAgg edge: the state column carries the committed family.
+        // SummaryAgg edge: the state column, named after its input, carries
+        // the committed family.
         assert_eq!(
-            field(&summary_input.schema, "quantile_0_99").dtype,
+            field(&summary_input.schema, "value").dtype,
             SummaryFamilyType::Sketch(
                 SketchKind::new(SketchAlgorithm::Kll, SketchParams::Kll { k: 269 }),
                 GroupingStrategy::default()
