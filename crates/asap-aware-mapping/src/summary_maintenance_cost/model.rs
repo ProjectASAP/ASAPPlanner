@@ -1,18 +1,18 @@
 use super::*;
 /// Adapter that supplies the existing lifecycle planner with analytical
-/// streaming costs. It does not define lifecycle policy: the planner's
-/// existing enums and legality checks remain authoritative.
+/// summary costs across at-rest and continuously ingesting workloads. The
+/// planner's existing lifecycle enums and legality checks remain authoritative.
 #[derive(Debug, Clone)]
 pub struct SummaryMaintenanceCostModel {
-    pub node_evidence: StreamingNodeEvidence,
+    pub node_evidence: SummaryNodeEvidence,
     pub calibration: ResourceCalibration,
     pub capabilities: SummaryMaintenanceCapabilities,
-    target_comparisons: HashMap<*const OperatorNode, StreamingTargetComparison>,
+    target_comparisons: HashMap<*const OperatorNode, SummaryTargetComparison>,
     candidate_comparisons: HashMap<CandidateComparisonKey, BoundCandidateIdentity>,
     physical_plan_alternatives:
-        HashMap<CandidateComparisonKey, Vec<StreamingPhysicalPlanAlternative>>,
+        HashMap<CandidateComparisonKey, Vec<SummaryPhysicalPlanAlternative>>,
     window_framework_candidates:
-        HashMap<CandidateComparisonKey, Vec<StreamingWindowFrameworkCandidate>>,
+        HashMap<CandidateComparisonKey, Vec<SummaryWindowFrameworkCandidate>>,
 }
 
 type CandidateComparisonKey = (*const OperatorNode, *const OperatorNode);
@@ -24,10 +24,10 @@ struct BoundCandidateIdentity {
 }
 
 #[derive(Debug, Clone)]
-struct StreamingTargetComparison {
+struct SummaryTargetComparison {
     _target: Rc<OperatorNode>,
     scope: ComparisonScope,
-    raw: StreamingRawInputEvidence,
+    raw: RawInputEvidence,
 }
 
 pub(super) type LogicalSourceSelection = (Source, Vec<Predicate>, Vec<InfoMatcher>);
@@ -198,9 +198,10 @@ fn reachable_physical_nodes(
 }
 
 fn validate_raw_snapshot_dimensions(
-    raw: &StreamingRawInputEvidence,
+    raw: &RawInputEvidence,
     scope: &ComparisonScope,
 ) -> Result<(), AnalyticalCostError> {
+    validate_arrival_rate(scope.data_arrival, raw.ingestion_rate_per_second)?;
     if scope.sources.len() != 1 {
         return Err(AnalyticalCostError::MissingComparisonScope(
             "single-source raw evolution",
@@ -297,7 +298,7 @@ fn validate_raw_snapshot_dimensions(
 }
 
 pub(super) fn ephemeral_rows_over_horizon(
-    inputs: StreamingSummaryInputs,
+    inputs: SummaryMaintenanceInputs,
     scope: &ComparisonScope,
 ) -> Result<u64, AnalyticalCostError> {
     evaluation_offsets_ms(scope)?
@@ -315,8 +316,8 @@ pub(super) fn ephemeral_rows_over_horizon(
 }
 
 pub(super) fn ephemeral_scan_bytes_over_horizon(
-    inputs: StreamingSummaryInputs,
-    raw: &StreamingRawInputEvidence,
+    inputs: SummaryMaintenanceInputs,
+    raw: &RawInputEvidence,
     scope: &ComparisonScope,
 ) -> Result<u64, AnalyticalCostError> {
     if inputs.initial_source_scan_bytes == 0 {
@@ -379,7 +380,7 @@ impl SummaryMaintenanceCostModel {
         capabilities: SummaryMaintenanceCapabilities,
     ) -> Self {
         Self {
-            node_evidence: StreamingNodeEvidence::default(),
+            node_evidence: SummaryNodeEvidence::default(),
             calibration,
             capabilities,
             target_comparisons: HashMap::new(),
@@ -397,7 +398,7 @@ impl SummaryMaintenanceCostModel {
         target: &Rc<OperatorNode>,
         root: &Rc<OperatorNode>,
         scope: ComparisonScope,
-        raw: StreamingRawInputEvidence,
+        raw: RawInputEvidence,
     ) -> Result<(), AnalyticalCostError> {
         scope.validate()?;
         validate_query_scope(target, &scope)?;
@@ -421,7 +422,7 @@ impl SummaryMaintenanceCostModel {
         // not carry one owning target; context identity is `(target, root)`.
         self.target_comparisons
             .entry(target_ptr)
-            .or_insert(StreamingTargetComparison {
+            .or_insert(SummaryTargetComparison {
                 _target: Rc::clone(target),
                 scope,
                 raw,
@@ -442,7 +443,7 @@ impl SummaryMaintenanceCostModel {
         &mut self,
         target: &Rc<OperatorNode>,
         root: &Rc<OperatorNode>,
-        alternative: StreamingPhysicalPlanAlternative,
+        alternative: SummaryPhysicalPlanAlternative,
     ) -> Result<(), AnalyticalCostError> {
         let key = (Rc::as_ptr(target), Rc::as_ptr(root));
         if !self.candidate_comparisons.contains_key(&key) {
@@ -480,7 +481,7 @@ impl SummaryMaintenanceCostModel {
         &mut self,
         target: &Rc<OperatorNode>,
         root: &Rc<OperatorNode>,
-        candidate: StreamingWindowFrameworkCandidate,
+        candidate: SummaryWindowFrameworkCandidate,
     ) -> Result<(), AnalyticalCostError> {
         let key = (Rc::as_ptr(target), Rc::as_ptr(root));
         if !self.candidate_comparisons.contains_key(&key) {
@@ -535,7 +536,7 @@ impl SummaryMaintenanceCostModel {
         target: Option<&OperatorNode>,
         horizon: Option<crate::recurrence::Horizon>,
         expected_reads: Option<f64>,
-    ) -> Option<(CandidateComparisonKey, &StreamingTargetComparison)> {
+    ) -> Option<(CandidateComparisonKey, &SummaryTargetComparison)> {
         let root_ptr = root as *const _;
         let target_ptr = match target {
             Some(target) => target as *const _,
@@ -568,8 +569,8 @@ impl SummaryMaintenanceCostModel {
         &self,
         root: &OperatorNode,
         deployments: &[CostedSummaryDeployment<'_>],
-        comparison: &StreamingTargetComparison,
-        evidence: &StreamingNodeEvidence,
+        comparison: &SummaryTargetComparison,
+        evidence: &SummaryNodeEvidence,
         window_frameworks: &[Option<SummaryWindowFramework>],
     ) -> Option<Cost> {
         self.calibrated(
@@ -585,7 +586,7 @@ impl SummaryMaintenanceCostModel {
         )
     }
 
-    fn canonical_inputs(&self, summary: &OperatorNode) -> Option<StreamingAggregateEvidence> {
+    fn canonical_inputs(&self, summary: &OperatorNode) -> Option<SummaryAggregateEvidence> {
         let evidence = self.node_evidence.aggregation(summary)?;
         evidence.inputs.validate().ok()?;
         Some(evidence)
@@ -871,7 +872,7 @@ mod tests {
     fn estimate_test(
         root: &OperatorNode,
         guarantee: &SummaryMaintenanceLifecycleGuarantee,
-        inputs: StreamingSummaryInputs,
+        inputs: SummaryMaintenanceInputs,
         cpu: SummaryOperationCpuEvidence,
     ) -> Result<ResourceEstimate, AnalyticalCostError> {
         estimate_incremental_summary_maintenance(root, guarantee, inputs, cpu, &streaming_scope())
@@ -880,7 +881,7 @@ mod tests {
     fn estimate_join_test(
         root: &OperatorNode,
         guarantee: &SummaryMaintenanceLifecycleGuarantee,
-        inputs: StreamingSummaryInputs,
+        inputs: SummaryMaintenanceInputs,
         cpu: SummaryOperationCpuEvidence,
         join: Option<SummaryJoinEvidence>,
     ) -> Result<ResourceEstimate, AnalyticalCostError> {
@@ -917,8 +918,8 @@ mod tests {
         .unwrap()
     }
 
-    fn physical() -> StreamingPhysicalInputEvidence {
-        StreamingPhysicalInputEvidence {
+    fn physical() -> SummaryPhysicalInputEvidence {
+        SummaryPhysicalInputEvidence {
             initial_input_bytes: 640,
             initial_source_scan_bytes: 640,
             active_window_count: 2,
@@ -954,6 +955,158 @@ mod tests {
         }
     }
 
+    /// A fixed snapshot needs cardinality evidence, but no stream-rate evidence.
+    #[test]
+    fn at_rest_workload_adapter_builds_once_without_arrivals() {
+        let mut data = streaming_data_workload();
+        data.arrival = DataArrival::AtRest;
+        data.ingestion_rate = Evidence::default();
+        data.input_cardinality = Evidence {
+            value: Some(10),
+            source: EvidenceSource::Declared,
+            ..Default::default()
+        };
+        let scope = scope_for(&data, &query(), 0, 5_000);
+        let inputs = SummaryMaintenanceInputs::from_workload(physical(), &data, &scope).unwrap();
+        assert_eq!(inputs.initial_input_rows, 10);
+        assert_eq!(inputs.ingestion_rate_per_second, 0.0);
+        let guarantee = SummaryMaintenanceLifecycleGuarantee {
+            summary_maintenance_lifecycle: SummaryMaintenanceLifecycle::Shared {
+                retention: asap_types::workload::DurationMs(5_000),
+            },
+            summary_maintenance_mode: SummaryMaintenanceMode::DirectBuild,
+            evaluation_schedule: EvaluationSchedule::OnRead,
+            output_representation: OutputRepresentation::SummaryState,
+        };
+        assert_eq!(
+            lifecycle_row_counts(inputs, &guarantee, &scope).unwrap(),
+            (10, 0, 5_000)
+        );
+    }
+
+    /// Arrival semantics cannot be overridden by missing or contradictory rate evidence.
+    #[test]
+    fn workload_adapter_checks_arrival_scope_and_rate_evidence() {
+        let mut data = streaming_data_workload();
+        data.input_cardinality = Evidence {
+            value: Some(10),
+            source: EvidenceSource::Declared,
+            ..Default::default()
+        };
+        let mut scope = scope_for(&data, &query(), 0, 5_000);
+        data.ingestion_rate = Evidence::default();
+        assert_eq!(
+            SummaryMaintenanceInputs::from_workload(physical(), &data, &scope),
+            Err(AnalyticalCostError::MissingOrStale("ingestion_rate"))
+        );
+        data.arrival = DataArrival::AtRest;
+        assert_eq!(
+            SummaryMaintenanceInputs::from_workload(physical(), &data, &scope),
+            Err(AnalyticalCostError::ComparisonScopeMismatch("data arrival"))
+        );
+        scope.data_arrival = DataArrival::AtRest;
+        for rate in [1.0, -1.0, f64::INFINITY, f64::NAN] {
+            data.ingestion_rate = Evidence {
+                value: Some(Rate(rate)),
+                source: EvidenceSource::Declared,
+                ..Default::default()
+            };
+            assert!(SummaryMaintenanceInputs::from_workload(physical(), &data, &scope).is_err());
+        }
+        data.ingestion_rate = Evidence::default();
+        data.input_cardinality = Evidence::default();
+        assert_eq!(
+            SummaryMaintenanceInputs::from_workload(physical(), &data, &scope),
+            Err(AnalyticalCostError::MissingOrStale("input_cardinality"))
+        );
+    }
+
+    /// The real lifecycle planner costs a fixed snapshot with the same node evidence API.
+    #[test]
+    fn lifecycle_planner_selects_fully_costed_at_rest_summary() {
+        let workload = streaming_workload();
+        let mut data = streaming_data_workload();
+        data.arrival = DataArrival::AtRest;
+        data.ingestion_rate = Evidence::default();
+        data.input_cardinality = Evidence {
+            value: Some(10),
+            source: EvidenceSource::Declared,
+            ..Default::default()
+        };
+        let mut scope = streaming_scope();
+        scope.data_arrival = DataArrival::AtRest;
+        let inputs = SummaryMaintenanceInputs::from_workload(physical(), &data, &scope).unwrap();
+        let target = streaming_sum_query();
+        let root = summary_with_operations(false, false, false);
+        let mut provider = streaming_model();
+        bind_aggregations(&mut provider, &target, &root, inputs, streaming_cpu());
+        let mut model = streaming_model();
+        model.node_evidence = provider.node_evidence;
+        let mut raw = streaming_raw();
+        raw.ingestion_rate_per_second = 0.0;
+        let edge = EdgeStatistics {
+            rows: 50,
+            bytes: 3_200,
+        };
+        raw.physical_dag
+            .evidence
+            .get_mut("raw-scan")
+            .unwrap()
+            .statistics = OperatorStatistics::Scan {
+            source_read_bytes: 3_200,
+            edges: UnaryEdgeStatistics {
+                input: edge,
+                output: edge,
+                promql: None,
+            },
+        };
+        model
+            .bind_candidate_comparison(&target, &root, scope.clone(), raw.clone())
+            .unwrap();
+        let plan = plan_summary_maintenance_lifecycles(
+            Rc::clone(&root),
+            WorkloadDemand::new_with_data(&workload, &data, &[0]),
+            0,
+            Some(Horizon(5.0)),
+            SummaryMaintenanceLifecycleCapabilities::ALL,
+            &model,
+        )
+        .unwrap();
+        assert!(plan.summary_total_cost.is_some());
+        assert!(!plan.selected_raw_recompute);
+        assert_eq!(
+            plan.deployments[0]
+                .summary_maintenance_lifecycle_guarantee
+                .as_ref()
+                .unwrap()
+                .summary_maintenance_mode,
+            SummaryMaintenanceMode::DirectBuild
+        );
+
+        // Directly supplied raw evidence must not bypass the workload invariant.
+        raw.ingestion_rate_per_second = 1.0;
+        assert_eq!(
+            streaming_model().bind_candidate_comparison(&target, &root, scope, raw),
+            Err(AnalyticalCostError::ComparisonScopeMismatch(
+                "at-rest ingestion rate"
+            ))
+        );
+        // Nor may a provider hide arrivals on a summary edge.
+        for aggregation in model.node_evidence.aggregations.values_mut() {
+            aggregation.inputs.ingestion_rate_per_second = 1.0;
+        }
+        let invalid = plan_summary_maintenance_lifecycles(
+            root,
+            WorkloadDemand::new_with_data(&workload, &data, &[0]),
+            0,
+            Some(Horizon(5.0)),
+            SummaryMaintenanceLifecycleCapabilities::ALL,
+            &model,
+        )
+        .unwrap();
+        assert_eq!(invalid.summary_total_cost, None);
+    }
+
     #[test]
     fn workload_adapter_derives_updates_and_reads_over_one_horizon() {
         let data = DataWorkload {
@@ -974,7 +1127,7 @@ mod tests {
         };
 
         let scope = scope_for(&data, &query(), 100, 5_000);
-        let inputs = StreamingSummaryInputs::from_workload(physical(), &data, &scope).unwrap();
+        let inputs = SummaryMaintenanceInputs::from_workload(physical(), &data, &scope).unwrap();
         assert_eq!(inputs.initial_input_rows, 10);
         assert_eq!(
             lifecycle_row_counts(inputs, &continuous_guarantee(), &scope)
@@ -1007,7 +1160,7 @@ mod tests {
         empty.initial_input_bytes = 0;
         empty.initial_source_scan_bytes = 0;
         let scope = scope_for(&data, &query(), 0, 5_000);
-        let inputs = StreamingSummaryInputs::from_workload(empty, &data, &scope).unwrap();
+        let inputs = SummaryMaintenanceInputs::from_workload(empty, &data, &scope).unwrap();
         let estimate = estimate_test(
             &summary_with_operations(false, false, false),
             &continuous_guarantee(),
@@ -1026,7 +1179,7 @@ mod tests {
 
     #[test]
     fn bootstrap_rows_and_bytes_must_be_present_together() {
-        let mut inputs = StreamingSummaryInputs {
+        let mut inputs = SummaryMaintenanceInputs {
             initial_input_rows: 0,
             initial_input_bytes: 8,
             initial_source_scan_bytes: 0,
@@ -1093,7 +1246,7 @@ mod tests {
 
     #[test]
     fn existing_lifecycle_planner_selects_a_fully_costed_streaming_alternative() {
-        let inputs = StreamingSummaryInputs {
+        let inputs = SummaryMaintenanceInputs {
             initial_input_rows: 10,
             initial_input_bytes: 640,
             initial_source_scan_bytes: 640,
@@ -1207,11 +1360,11 @@ mod tests {
             aggregate.inputs.retained_window_count = 2;
         }
         for alternative in [
-            StreamingPhysicalPlanAlternative {
+            SummaryPhysicalPlanAlternative {
                 physical_plan_id: "high-retention-layout".into(),
                 node_evidence: high_retention,
             },
-            StreamingPhysicalPlanAlternative {
+            SummaryPhysicalPlanAlternative {
                 physical_plan_id: "low-retention-layout".into(),
                 node_evidence: low_retention,
             },
@@ -1605,7 +1758,7 @@ mod tests {
         );
         model.node_evidence.insert_operation(
             &root,
-            StreamingSummaryOperatorEvidence::Binary(test_resource(
+            SummaryOperatorEvidence::Binary(test_resource(
                 "binary-edge",
                 vec![test_edge(), EdgeStatistics { rows: 2, bytes: 16 }],
                 1.0,
@@ -1681,7 +1834,7 @@ mod tests {
         );
         model.node_evidence.insert_operation(
             &Rc::new((*root).clone()),
-            StreamingSummaryOperatorEvidence::Binary(test_resource(
+            SummaryOperatorEvidence::Binary(test_resource(
                 "unused",
                 vec![test_edge(), test_edge()],
                 1.0,
@@ -1693,7 +1846,7 @@ mod tests {
         // its child's output.
         model.node_evidence.insert_operation(
             &root,
-            StreamingSummaryOperatorEvidence::Binary(test_resource(
+            SummaryOperatorEvidence::Binary(test_resource(
                 "binary-edge",
                 vec![test_edge(), EdgeStatistics { rows: 2, bytes: 16 }],
                 1.0,
@@ -1869,7 +2022,7 @@ mod tests {
         bind_comparison(&mut model, &target, &root);
         model.node_evidence.insert_aggregation(
             &aggregations[0],
-            StreamingAggregateEvidence {
+            SummaryAggregateEvidence {
                 physical_id: "left-state".into(),
                 input: test_edge(),
                 output: test_edge(),
@@ -1896,7 +2049,7 @@ mod tests {
         second_cpu.insert_cpu_ops = Some(5.0);
         model.node_evidence.insert_aggregation(
             &aggregations[1],
-            StreamingAggregateEvidence {
+            SummaryAggregateEvidence {
                 physical_id: "right-state".into(),
                 input: test_edge(),
                 output: test_edge(),
@@ -1910,7 +2063,7 @@ mod tests {
         // 64-byte output that stays live until the root BinaryOp consumes it.
         model.node_evidence.insert_operation(
             &left,
-            StreamingSummaryOperatorEvidence::ValueOperation(test_resource(
+            SummaryOperatorEvidence::ValueOperation(test_resource(
                 "left-evaluation",
                 vec![test_edge()],
                 6.0,
@@ -1920,7 +2073,7 @@ mod tests {
         );
         model.node_evidence.insert_operation(
             &right,
-            StreamingSummaryOperatorEvidence::ValueOperation(test_resource(
+            SummaryOperatorEvidence::ValueOperation(test_resource(
                 "right-evaluation",
                 vec![test_edge()],
                 3.0,
@@ -1930,7 +2083,7 @@ mod tests {
         );
         model.node_evidence.insert_operation(
             &root,
-            StreamingSummaryOperatorEvidence::Binary(test_resource(
+            SummaryOperatorEvidence::Binary(test_resource(
                 "root-binary",
                 vec![test_edge(), test_edge()],
                 3.0,
@@ -2039,31 +2192,31 @@ mod tests {
             aggregate.inputs.retained_window_count = 2;
         }
         for candidate in [
-            StreamingWindowFrameworkCandidate {
+            SummaryWindowFrameworkCandidate {
                 physical_plan_id: "tumbling-v1".into(),
-                assignments: vec![StreamingWindowFrameworkAssignment {
+                assignments: vec![SummaryWindowFrameworkAssignment {
                     summary: Rc::clone(&windowed_summary),
                     framework: Some(SummaryWindowFramework::Tumbling),
                 }],
-                accuracy: StreamingWindowAccuracyEvidence::Exact,
+                accuracy: SummaryWindowAccuracyEvidence::Exact,
                 node_evidence: tumbling,
             },
-            StreamingWindowFrameworkCandidate {
+            SummaryWindowFrameworkCandidate {
                 physical_plan_id: "sliding-v1".into(),
-                assignments: vec![StreamingWindowFrameworkAssignment {
+                assignments: vec![SummaryWindowFrameworkAssignment {
                     summary: Rc::clone(&windowed_summary),
                     framework: Some(SummaryWindowFramework::Sliding),
                 }],
-                accuracy: StreamingWindowAccuracyEvidence::Exact,
+                accuracy: SummaryWindowAccuracyEvidence::Exact,
                 node_evidence: sliding,
             },
-            StreamingWindowFrameworkCandidate {
+            SummaryWindowFrameworkCandidate {
                 physical_plan_id: "eh-v1".into(),
-                assignments: vec![StreamingWindowFrameworkAssignment {
+                assignments: vec![SummaryWindowFrameworkAssignment {
                     summary: Rc::clone(&windowed_summary),
                     framework: Some(SummaryWindowFramework::ExponentialHistogram),
                 }],
-                accuracy: StreamingWindowAccuracyEvidence::ExponentialHistogram(
+                accuracy: SummaryWindowAccuracyEvidence::ExponentialHistogram(
                     ExponentialHistogramAccuracyEvidence::UniversalGsum {
                         epsilon: 0.05,
                         failure_probability: 0.01,
@@ -2080,7 +2233,7 @@ mod tests {
         // Framework candidates are authoritative. Selection must not depend
         // on duplicating one arbitrary implementation into the legacy global
         // evidence map.
-        model.node_evidence = StreamingNodeEvidence::default();
+        model.node_evidence = SummaryNodeEvidence::default();
 
         let plan = plan_summary_maintenance_lifecycles(
             Rc::clone(&root),
@@ -2165,22 +2318,22 @@ mod tests {
         let empty = model.bind_window_framework_candidate(
             &target,
             &root,
-            StreamingWindowFrameworkCandidate {
+            SummaryWindowFrameworkCandidate {
                 physical_plan_id: "empty-assignments".into(),
                 assignments: vec![],
-                accuracy: StreamingWindowAccuracyEvidence::Exact,
+                accuracy: SummaryWindowAccuracyEvidence::Exact,
                 node_evidence: model.node_evidence.clone(),
             },
         );
         assert!(matches!(empty, Err(AnalyticalCostError::MissingOrZero(_))));
 
-        let candidate = StreamingWindowFrameworkCandidate {
+        let candidate = SummaryWindowFrameworkCandidate {
             physical_plan_id: "tumbling-v1".into(),
-            assignments: vec![StreamingWindowFrameworkAssignment {
+            assignments: vec![SummaryWindowFrameworkAssignment {
                 summary: windowed_summary,
                 framework: Some(SummaryWindowFramework::Tumbling),
             }],
-            accuracy: StreamingWindowAccuracyEvidence::Exact,
+            accuracy: SummaryWindowAccuracyEvidence::Exact,
             node_evidence: model.node_evidence.clone(),
         };
         model
@@ -2237,19 +2390,19 @@ mod tests {
                 .insert(Rc::as_ptr(child), shared_retained.clone());
         }
 
-        let candidate = StreamingWindowFrameworkCandidate {
+        let candidate = SummaryWindowFrameworkCandidate {
             physical_plan_id: "mixed-framework-binary".into(),
             assignments: vec![
-                StreamingWindowFrameworkAssignment {
+                SummaryWindowFrameworkAssignment {
                     summary: Rc::clone(&aggregation_nodes[0]),
                     framework: Some(SummaryWindowFramework::Tumbling),
                 },
-                StreamingWindowFrameworkAssignment {
+                SummaryWindowFrameworkAssignment {
                     summary: Rc::clone(&aggregation_nodes[1]),
                     framework: Some(SummaryWindowFramework::Sliding),
                 },
             ],
-            accuracy: StreamingWindowAccuracyEvidence::Exact,
+            accuracy: SummaryWindowAccuracyEvidence::Exact,
             node_evidence: model.node_evidence.clone(),
         };
         model
@@ -2270,7 +2423,7 @@ mod tests {
 
     #[test]
     fn promsketch_eh_accuracy_composes_registered_full_and_subwindow_bounds() {
-        let full = StreamingWindowAccuracyEvidence::ExponentialHistogram(
+        let full = SummaryWindowAccuracyEvidence::ExponentialHistogram(
             ExponentialHistogramAccuracyEvidence::KllRank {
                 eh_epsilon: 0.01,
                 kll_epsilon: 0.02,
@@ -2283,7 +2436,7 @@ mod tests {
         assert_eq!(full.metric, ErrorMetric::Rank);
         assert!((full.bound.evaluate().unwrap() - 0.04).abs() < f64::EPSILON);
 
-        let subwindow = StreamingWindowAccuracyEvidence::ExponentialHistogram(
+        let subwindow = SummaryWindowAccuracyEvidence::ExponentialHistogram(
             ExponentialHistogramAccuracyEvidence::KllRank {
                 eh_epsilon: 0.01,
                 kll_epsilon: 0.02,
@@ -2298,7 +2451,7 @@ mod tests {
         .unwrap();
         assert!((subwindow.bound.evaluate().unwrap() - 0.10).abs() < f64::EPSILON);
 
-        let gsum = StreamingWindowAccuracyEvidence::ExponentialHistogram(
+        let gsum = SummaryWindowAccuracyEvidence::ExponentialHistogram(
             ExponentialHistogramAccuracyEvidence::UniversalGsum {
                 epsilon: 0.05,
                 failure_probability: 0.30,
@@ -2316,7 +2469,7 @@ mod tests {
 
     #[test]
     fn eh_accuracy_rejects_negative_components_and_mismatched_summary_guarantees() {
-        let evidence = StreamingWindowAccuracyEvidence::ExponentialHistogram(
+        let evidence = SummaryWindowAccuracyEvidence::ExponentialHistogram(
             ExponentialHistogramAccuracyEvidence::KllRank {
                 eh_epsilon: -0.01,
                 kll_epsilon: 0.03,
@@ -2326,7 +2479,7 @@ mod tests {
         );
         assert!(evidence.guarantee(true).is_none());
 
-        let evidence = StreamingWindowAccuracyEvidence::ExponentialHistogram(
+        let evidence = SummaryWindowAccuracyEvidence::ExponentialHistogram(
             ExponentialHistogramAccuracyEvidence::KllRank {
                 eh_epsilon: 0.01,
                 kll_epsilon: 0.02,
@@ -2372,13 +2525,13 @@ mod tests {
             .bind_window_framework_candidate(
                 &target,
                 &root,
-                StreamingWindowFrameworkCandidate {
+                SummaryWindowFrameworkCandidate {
                     physical_plan_id: "invalid-eh".into(),
-                    assignments: vec![StreamingWindowFrameworkAssignment {
+                    assignments: vec![SummaryWindowFrameworkAssignment {
                         summary: Rc::clone(summary_input),
                         framework: Some(SummaryWindowFramework::ExponentialHistogram),
                     }],
-                    accuracy: StreamingWindowAccuracyEvidence::Exact,
+                    accuracy: SummaryWindowAccuracyEvidence::Exact,
                     node_evidence: model.node_evidence.clone(),
                 },
             )
@@ -2412,7 +2565,7 @@ mod tests {
         );
         model.node_evidence.insert_retained_query(
             &root,
-            StreamingRetainedQueryEvidence {
+            RetainedSubDagEvidence {
                 physical_id: "false-retained-root".into(),
                 output: test_edge(),
                 preprocessing_cpu_ops_over_horizon: 0.0,
@@ -2551,7 +2704,7 @@ mod tests {
         let mut scope = streaming_scope();
         scope.data_arrival = DataArrival::Mixed;
         assert_eq!(
-            StreamingSummaryInputs::from_workload(physical(), &data, &scope),
+            SummaryMaintenanceInputs::from_workload(physical(), &data, &scope),
             Err(AnalyticalCostError::UnsupportedDataArrival(
                 DataArrival::Mixed
             ))
@@ -2563,7 +2716,7 @@ mod tests {
         let estimate = estimate_test(
             &summary_with_operations(false, false, false),
             &continuous_guarantee(),
-            StreamingSummaryInputs {
+            SummaryMaintenanceInputs {
                 initial_input_rows: 10,
                 initial_input_bytes: 640,
                 initial_source_scan_bytes: 640,
@@ -2592,7 +2745,7 @@ mod tests {
         let estimate = estimate_test(
             &summary_with_operations(true, true, true),
             &continuous_guarantee(),
-            StreamingSummaryInputs {
+            SummaryMaintenanceInputs {
                 initial_input_rows: 1,
                 initial_input_bytes: 8,
                 initial_source_scan_bytes: 8,
@@ -2627,7 +2780,7 @@ mod tests {
             estimate_test(
                 &summary_with_operations(false, false, false),
                 &guarantee,
-                StreamingSummaryInputs {
+                SummaryMaintenanceInputs {
                     initial_input_rows: 1,
                     initial_input_bytes: 8,
                     initial_source_scan_bytes: 8,
@@ -2654,7 +2807,7 @@ mod tests {
             estimate_test(
                 &summary_with_operations(true, false, false),
                 &continuous_guarantee(),
-                StreamingSummaryInputs {
+                SummaryMaintenanceInputs {
                     initial_input_rows: 1,
                     initial_input_bytes: 8,
                     initial_source_scan_bytes: 8,
@@ -2685,7 +2838,7 @@ mod tests {
             estimate_test(
                 &summary_with_operations(false, false, false),
                 &guarantee,
-                StreamingSummaryInputs {
+                SummaryMaintenanceInputs {
                     initial_input_rows: 1,
                     initial_input_bytes: 8,
                     initial_source_scan_bytes: 8,
@@ -2720,7 +2873,7 @@ mod tests {
         let estimate = estimate_test(
             &summary_with_operations(false, false, false),
             &guarantee,
-            StreamingSummaryInputs {
+            SummaryMaintenanceInputs {
                 initial_input_rows: 10,
                 initial_input_bytes: 80,
                 initial_source_scan_bytes: 80,
@@ -2756,7 +2909,7 @@ mod tests {
         assert!(estimate_test(
             &summary_with_operations(false, false, false),
             &guarantee,
-            StreamingSummaryInputs {
+            SummaryMaintenanceInputs {
                 initial_input_rows: 1,
                 initial_input_bytes: 8,
                 initial_source_scan_bytes: 8,
@@ -2800,7 +2953,7 @@ mod tests {
     #[test]
     fn summary_join_requires_cardinality_and_working_memory_evidence() {
         let joined = summary_join();
-        let inputs = StreamingSummaryInputs {
+        let inputs = SummaryMaintenanceInputs {
             initial_input_rows: 1,
             initial_input_bytes: 8,
             initial_source_scan_bytes: 8,
@@ -3159,7 +3312,7 @@ mod tests {
         )
     }
 
-    fn streaming_raw() -> StreamingRawInputEvidence {
+    fn streaming_raw() -> RawInputEvidence {
         let scope = streaming_scope();
         let node = PhysicalDagNode {
             id: "raw-scan".into(),
@@ -3182,7 +3335,7 @@ mod tests {
                 promql: None,
             },
         };
-        StreamingRawInputEvidence {
+        RawInputEvidence {
             planning_time_input_rows: 10,
             planning_time_input_bytes: 640,
             planning_time_source_scan_bytes: 640,
@@ -3229,7 +3382,7 @@ mod tests {
             if is_retained(node) {
                 model.node_evidence.insert_retained_query(
                     node,
-                    StreamingRetainedQueryEvidence {
+                    RetainedSubDagEvidence {
                         physical_id: format!("retained-{node:p}"),
                         output: test_edge(),
                         preprocessing_cpu_ops_over_horizon: 1.0,
@@ -3246,8 +3399,8 @@ mod tests {
         retained(model, root, &mut HashSet::new());
     }
 
-    fn streaming_inputs() -> StreamingSummaryInputs {
-        StreamingSummaryInputs {
+    fn streaming_inputs() -> SummaryMaintenanceInputs {
+        SummaryMaintenanceInputs {
             initial_input_rows: 10,
             initial_input_bytes: 640,
             initial_source_scan_bytes: 640,
@@ -3276,7 +3429,7 @@ mod tests {
         model: &mut SummaryMaintenanceCostModel,
         target: &Rc<OperatorNode>,
         root: &Rc<OperatorNode>,
-        inputs: StreamingSummaryInputs,
+        inputs: SummaryMaintenanceInputs,
         cpu: SummaryOperationCpuEvidence,
     ) {
         bind_comparison(model, target, root);
@@ -3293,7 +3446,7 @@ mod tests {
             }
             model.node_evidence.aggregations.insert(
                 node as *const _,
-                StreamingAggregateEvidence {
+                SummaryAggregateEvidence {
                     physical_id: format!("agg-{node:p}"),
                     input: test_edge(),
                     output: test_edge(),
@@ -3329,7 +3482,7 @@ mod tests {
             model: &mut SummaryMaintenanceCostModel,
             node: &OperatorNode,
             seen: &mut HashSet<*const OperatorNode>,
-            inputs: StreamingSummaryInputs,
+            inputs: SummaryMaintenanceInputs,
             cpu: SummaryOperationCpuEvidence,
         ) {
             if !seen.insert(node as *const _) {
@@ -3341,7 +3494,7 @@ mod tests {
             let operation = match &node.operator {
                 Operator::NonASAP(NonASAPOp::BinaryOp { .. }) => {
                     cpu.evaluation_cpu_ops.map(|cpu_ops| {
-                        StreamingSummaryOperatorEvidence::Binary(resource(
+                        SummaryOperatorEvidence::Binary(resource(
                             format!("binary-{node:p}"),
                             vec![test_edge(), test_edge()],
                             cpu_ops,
@@ -3356,7 +3509,7 @@ mod tests {
                     | ASAPOp::MaintainPopulation { .. }
                     | ASAPOp::EvaluatePopulation { .. },
                 ) => cpu.evaluation_cpu_ops.map(|cpu_ops| {
-                    StreamingSummaryOperatorEvidence::ValueOperation(resource(
+                    SummaryOperatorEvidence::ValueOperation(resource(
                         format!("value-operation-{node:p}"),
                         vec![test_edge()],
                         cpu_ops,
@@ -3365,7 +3518,7 @@ mod tests {
                 }),
                 Operator::ASAP(ASAPOp::SummaryMerge { children }) => {
                     cpu.merge_cpu_ops.map(|cpu_ops| {
-                        StreamingSummaryOperatorEvidence::Merge(resource(
+                        SummaryOperatorEvidence::Merge(resource(
                             format!("merge-{node:p}"),
                             vec![test_edge(); children.len()],
                             cpu_ops,
@@ -3375,7 +3528,7 @@ mod tests {
                 }
                 Operator::ASAP(ASAPOp::SummarySubtract { .. }) => {
                     cpu.subtract_cpu_ops.map(|cpu_ops| {
-                        StreamingSummaryOperatorEvidence::Subtract(resource(
+                        SummaryOperatorEvidence::Subtract(resource(
                             format!("subtract-{node:p}"),
                             vec![test_edge(), test_edge()],
                             cpu_ops,
@@ -3385,7 +3538,7 @@ mod tests {
                 }
                 Operator::ASAP(ASAPOp::SummaryDelete { .. }) => {
                     cpu.delete_cpu_ops.and_then(|cpu_ops| {
-                        Some(StreamingSummaryOperatorEvidence::Delete {
+                        Some(SummaryOperatorEvidence::Delete {
                             resource: resource(
                                 format!("delete-{node:p}"),
                                 vec![test_edge()],
@@ -3399,7 +3552,7 @@ mod tests {
                 }
                 Operator::ASAP(ASAPOp::SummaryEstimate { .. }) => {
                     cpu.evaluation_cpu_ops.map(|cpu_ops| {
-                        StreamingSummaryOperatorEvidence::Evaluation(resource(
+                        SummaryOperatorEvidence::Evaluation(resource(
                             format!("evaluation-{node:p}"),
                             vec![test_edge()],
                             cpu_ops,

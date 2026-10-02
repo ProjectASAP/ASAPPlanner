@@ -1,11 +1,11 @@
 use super::*;
 
 /// Physical evidence that is not represented by [`DataWorkload`] for one
-/// incrementally maintained summary deployment. Window counts describe the
+/// summary deployment. Window counts describe the
 /// already-selected physical deployment; this layer does not define another
 /// tumbling/sliding policy enum.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-pub struct StreamingPhysicalInputEvidence {
+pub struct SummaryPhysicalInputEvidence {
     /// Logical bytes in the snapshot used to bootstrap the state.
     pub initial_input_bytes: u64,
     /// Source bytes read while bootstrapping. Arriving stream bytes are not a
@@ -24,10 +24,10 @@ pub struct StreamingPhysicalInputEvidence {
     pub state_bytes_per_summary: u64,
 }
 
-/// Workload-normalized inputs for incremental maintenance over one finite
+/// Workload-normalized inputs for summary construction and maintenance over one finite
 /// comparison horizon.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-pub struct StreamingSummaryInputs {
+pub struct SummaryMaintenanceInputs {
     pub initial_input_rows: u64,
     pub initial_input_bytes: u64,
     pub initial_source_scan_bytes: u64,
@@ -39,40 +39,52 @@ pub struct StreamingSummaryInputs {
     pub state_bytes_per_summary: u64,
 }
 
-impl StreamingSummaryInputs {
+impl SummaryMaintenanceInputs {
     /// Resolve snapshot size, arriving rows, and reads from the canonical
     /// workload. Positive fractional expected work rounds up conservatively.
     ///
+    /// `AtRest` needs snapshot cardinality and implies zero arrivals; continuous
+    /// ingestion additionally requires fresh rate evidence.
     /// `Mixed` fails closed because today's workload schema cannot distinguish
     /// its at-rest backlog from its continuing-arrival cardinality.
     pub fn from_workload(
-        physical: StreamingPhysicalInputEvidence,
+        physical: SummaryPhysicalInputEvidence,
         data: &DataWorkload,
         scope: &ComparisonScope,
     ) -> Result<Self, AnalyticalCostError> {
         let _ = scope.validate()?;
-        if data.arrival != DataArrival::ContinuouslyIngesting || scope.data_arrival != data.arrival
-        {
-            return Err(AnalyticalCostError::UnsupportedDataArrival(data.arrival));
+        if scope.data_arrival != data.arrival {
+            return Err(AnalyticalCostError::ComparisonScopeMismatch("data arrival"));
         }
         let initial_input_rows = data
             .input_cardinality
             .value_at(scope.planning_time.0)
             .copied()
             .ok_or(AnalyticalCostError::MissingOrStale("input_cardinality"))?;
-        let ingestion_rate = data
-            .ingestion_rate
-            .value_at(scope.planning_time.0)
-            .copied()
-            .ok_or(AnalyticalCostError::MissingOrStale("ingestion_rate"))?;
-        if !ingestion_rate.0.is_finite() || ingestion_rate.0 < 0.0 {
-            return Err(AnalyticalCostError::InvalidIngestionRate(ingestion_rate.0));
-        }
+        let ingestion_rate = match data.arrival {
+            DataArrival::AtRest => {
+                // A declared snapshot has no arrivals. Reject contradictory fresh
+                // evidence rather than silently pricing the wrong workload.
+                if let Some(rate) = data.ingestion_rate.value_at(scope.planning_time.0) {
+                    validate_arrival_rate(data.arrival, rate.0)?;
+                }
+                0.0
+            }
+            DataArrival::ContinuouslyIngesting => {
+                data.ingestion_rate
+                    .value_at(scope.planning_time.0)
+                    .copied()
+                    .ok_or(AnalyticalCostError::MissingOrStale("ingestion_rate"))?
+                    .0
+            }
+            arrival => return Err(AnalyticalCostError::UnsupportedDataArrival(arrival)),
+        };
+        validate_arrival_rate(data.arrival, ingestion_rate)?;
         Self {
             initial_input_rows,
             initial_input_bytes: physical.initial_input_bytes,
             initial_source_scan_bytes: physical.initial_source_scan_bytes,
-            ingestion_rate_per_second: ingestion_rate.0,
+            ingestion_rate_per_second: ingestion_rate,
             active_window_count: physical.active_window_count,
             bootstrap_window_count: physical.bootstrap_window_count,
             retained_window_count: physical.retained_window_count,
@@ -142,7 +154,7 @@ pub struct SummaryJoinEvidence {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct StreamingAggregateEvidence {
+pub struct SummaryAggregateEvidence {
     pub physical_id: String,
     pub input: EdgeStatistics,
     pub output: EdgeStatistics,
@@ -153,7 +165,7 @@ pub struct StreamingAggregateEvidence {
     /// Provider-owned identity of the physical bootstrap read. Equal source
     /// coverage alone does not prove two independent builds share I/O.
     pub bootstrap_read_identity: String,
-    pub inputs: StreamingSummaryInputs,
+    pub inputs: SummaryMaintenanceInputs,
     /// CPU operations to insert one routed row into one state instance.
     pub insert_cpu_ops: f64,
 }
@@ -175,7 +187,7 @@ pub struct SummaryOperatorResourceEvidence {
 /// Evidence is structured by logical summary operation so delete-only facts
 /// cannot be attached to merge, subtract, or evaluation nodes.
 #[derive(Debug, Clone, PartialEq)]
-pub enum StreamingSummaryOperatorEvidence {
+pub enum SummaryOperatorEvidence {
     /// Exact query-time arithmetic over two independently realized operands.
     Binary(SummaryOperatorResourceEvidence),
     /// Query-time or maintenance-time plain-value work. For `Sort`/`Limit`,
@@ -192,7 +204,7 @@ pub enum StreamingSummaryOperatorEvidence {
     Evaluation(SummaryOperatorResourceEvidence),
 }
 
-impl StreamingSummaryOperatorEvidence {
+impl SummaryOperatorEvidence {
     pub(super) fn resource(&self) -> &SummaryOperatorResourceEvidence {
         match self {
             Self::Binary(resource)
@@ -221,7 +233,7 @@ impl StreamingSummaryOperatorEvidence {
 /// horizon. Bootstrap/source I/O belongs exclusively to the owning aggregate,
 /// and summary insertion belongs exclusively to its insert evidence.
 #[derive(Debug, Clone, PartialEq)]
-pub struct StreamingRetainedQueryEvidence {
+pub struct RetainedSubDagEvidence {
     pub physical_id: String,
     /// Logical output edge consumed by the parent summary operator.
     pub output: EdgeStatistics,
@@ -234,19 +246,19 @@ pub struct StreamingRetainedQueryEvidence {
 /// Physical evidence bound to the selected DAG's `Rc` identity. A copied,
 /// structurally equal node is not silently treated as the same deployment.
 #[derive(Debug, Clone, Default)]
-pub struct StreamingNodeEvidence {
-    pub(super) aggregations: HashMap<*const OperatorNode, StreamingAggregateEvidence>,
+pub struct SummaryNodeEvidence {
+    pub(super) aggregations: HashMap<*const OperatorNode, SummaryAggregateEvidence>,
     pub(super) joins: HashMap<*const OperatorNode, SummaryJoinEvidence>,
-    pub(super) operations: HashMap<*const OperatorNode, StreamingSummaryOperatorEvidence>,
+    pub(super) operations: HashMap<*const OperatorNode, SummaryOperatorEvidence>,
     pub(super) operation_state_owners: HashMap<*const OperatorNode, *const OperatorNode>,
-    pub(super) retained_queries: HashMap<*const OperatorNode, StreamingRetainedQueryEvidence>,
+    pub(super) retained_queries: HashMap<*const OperatorNode, RetainedSubDagEvidence>,
 }
 
-impl StreamingNodeEvidence {
+impl SummaryNodeEvidence {
     pub fn insert_aggregation(
         &mut self,
         node: &Rc<OperatorNode>,
-        evidence: StreamingAggregateEvidence,
+        evidence: SummaryAggregateEvidence,
     ) {
         self.aggregations.insert(Rc::as_ptr(node), evidence);
     }
@@ -255,11 +267,7 @@ impl StreamingNodeEvidence {
         self.joins.insert(Rc::as_ptr(node), evidence);
     }
 
-    pub fn insert_operation(
-        &mut self,
-        node: &Rc<OperatorNode>,
-        evidence: StreamingSummaryOperatorEvidence,
-    ) {
+    pub fn insert_operation(&mut self, node: &Rc<OperatorNode>, evidence: SummaryOperatorEvidence) {
         self.operations.insert(Rc::as_ptr(node), evidence);
     }
 
@@ -269,7 +277,7 @@ impl StreamingNodeEvidence {
         &mut self,
         node: &Rc<OperatorNode>,
         state: &Rc<OperatorNode>,
-        evidence: StreamingSummaryOperatorEvidence,
+        evidence: SummaryOperatorEvidence,
     ) {
         self.operations.insert(Rc::as_ptr(node), evidence);
         self.operation_state_owners
@@ -279,20 +287,20 @@ impl StreamingNodeEvidence {
     pub fn insert_retained_query(
         &mut self,
         node: &Rc<OperatorNode>,
-        evidence: StreamingRetainedQueryEvidence,
+        evidence: RetainedSubDagEvidence,
     ) {
         self.retained_queries.insert(Rc::as_ptr(node), evidence);
     }
 
-    pub(super) fn aggregation(&self, node: &OperatorNode) -> Option<StreamingAggregateEvidence> {
+    pub(super) fn aggregation(&self, node: &OperatorNode) -> Option<SummaryAggregateEvidence> {
         self.aggregations.get(&(node as *const _)).cloned()
     }
 }
 
 pub(super) fn summary_operation_evidence<'a>(
     node: &OperatorNode,
-    evidence: &'a StreamingNodeEvidence,
-) -> Result<&'a StreamingSummaryOperatorEvidence, AnalyticalCostError> {
+    evidence: &'a SummaryNodeEvidence,
+) -> Result<&'a SummaryOperatorEvidence, AnalyticalCostError> {
     let operation = evidence
         .operations
         .get(&(node as *const _))
@@ -303,7 +311,7 @@ pub(super) fn summary_operation_evidence<'a>(
     let matches = match (&node.operator, operation) {
         (
             Operator::NonASAP(NonASAPOp::BinaryOp { .. } | NonASAPOp::Join { .. }),
-            StreamingSummaryOperatorEvidence::Binary(_),
+            SummaryOperatorEvidence::Binary(_),
         ) => true,
         (Operator::NonASAP(NonASAPOp::BinaryOp { .. } | NonASAPOp::Join { .. }), _) => false,
         (
@@ -313,23 +321,14 @@ pub(super) fn summary_operation_evidence<'a>(
                 | ASAPOp::MaintainPopulation { .. }
                 | ASAPOp::EvaluatePopulation { .. },
             ),
-            StreamingSummaryOperatorEvidence::ValueOperation(_),
+            SummaryOperatorEvidence::ValueOperation(_),
         ) => true,
-        (
-            Operator::ASAP(ASAPOp::SummaryMerge { .. }),
-            StreamingSummaryOperatorEvidence::Merge(_),
-        )
-        | (
-            Operator::ASAP(ASAPOp::SummarySubtract { .. }),
-            StreamingSummaryOperatorEvidence::Subtract(_),
-        )
-        | (
-            Operator::ASAP(ASAPOp::SummaryDelete { .. }),
-            StreamingSummaryOperatorEvidence::Delete { .. },
-        )
+        (Operator::ASAP(ASAPOp::SummaryMerge { .. }), SummaryOperatorEvidence::Merge(_))
+        | (Operator::ASAP(ASAPOp::SummarySubtract { .. }), SummaryOperatorEvidence::Subtract(_))
+        | (Operator::ASAP(ASAPOp::SummaryDelete { .. }), SummaryOperatorEvidence::Delete { .. })
         | (
             Operator::ASAP(ASAPOp::SummaryEstimate { .. }),
-            StreamingSummaryOperatorEvidence::Evaluation(_),
+            SummaryOperatorEvidence::Evaluation(_),
         ) => true,
         _ => false,
     };
@@ -347,7 +346,7 @@ pub(super) fn summary_operation_evidence<'a>(
 /// evaluation adds arrivals since planning time; `physical_dag` is therefore
 /// a once-counted DAG whose edge statistics already aggregate all evaluations.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct StreamingRawInputEvidence {
+pub struct RawInputEvidence {
     pub planning_time_input_rows: u64,
     pub planning_time_input_bytes: u64,
     pub planning_time_source_scan_bytes: u64,
@@ -361,10 +360,27 @@ pub struct StreamingRawInputEvidence {
 }
 
 /// One complete provider-enumerated physical implementation of the selected
-/// streaming summary DAG. The identifier is stable provenance; concrete
+/// summary DAG. The identifier is stable provenance; concrete
 /// framework selection is performed by ranking these complete alternatives.
 #[derive(Debug, Clone)]
-pub struct StreamingPhysicalPlanAlternative {
+pub struct SummaryPhysicalPlanAlternative {
     pub physical_plan_id: String,
-    pub node_evidence: StreamingNodeEvidence,
+    pub node_evidence: SummaryNodeEvidence,
+}
+
+/// Apply arrival semantics to both workload-derived and directly bound evidence.
+pub(super) fn validate_arrival_rate(
+    arrival: DataArrival,
+    rate: f64,
+) -> Result<(), AnalyticalCostError> {
+    if !rate.is_finite() || rate < 0.0 {
+        return Err(AnalyticalCostError::InvalidIngestionRate(rate));
+    }
+    match arrival {
+        DataArrival::AtRest if rate != 0.0 => Err(AnalyticalCostError::ComparisonScopeMismatch(
+            "at-rest ingestion rate",
+        )),
+        DataArrival::AtRest | DataArrival::ContinuouslyIngesting => Ok(()),
+        other => Err(AnalyticalCostError::UnsupportedDataArrival(other)),
+    }
 }

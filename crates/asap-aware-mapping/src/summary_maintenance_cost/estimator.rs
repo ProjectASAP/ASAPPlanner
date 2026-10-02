@@ -3,9 +3,9 @@ use super::*;
 pub(super) fn estimate_heterogeneous_summary(
     root: &OperatorNode,
     deployments: &[CostedSummaryDeployment<'_>],
-    evidence: &StreamingNodeEvidence,
+    evidence: &SummaryNodeEvidence,
     scope: &ComparisonScope,
-    raw: &StreamingRawInputEvidence,
+    raw: &RawInputEvidence,
     window_frameworks: &[Option<SummaryWindowFramework>],
 ) -> Result<ResourceEstimate, AnalyticalCostError> {
     if window_frameworks.len() != deployments.len() {
@@ -31,7 +31,7 @@ pub(super) fn estimate_heterogeneous_summary(
     let mut physical_states = HashMap::<
         String,
         (
-            StreamingAggregateEvidence,
+            SummaryAggregateEvidence,
             SummaryMaintenanceLifecycleGuarantee,
             String,
             Option<SummaryWindowFramework>,
@@ -45,6 +45,7 @@ pub(super) fn estimate_heterogeneous_summary(
             return Err(AnalyticalCostError::UnsupportedCandidate);
         };
         let inputs = node_evidence.inputs.validate()?;
+        validate_arrival_rate(scope.data_arrival, inputs.ingestion_rate_per_second)?;
         match node_evidence.source_coverage_index {
             Some(index) => {
                 let declared =
@@ -215,7 +216,7 @@ pub(super) fn estimate_heterogeneous_summary(
         node: &OperatorNode,
         seen: &mut HashSet<String>,
         by_node: &HashMap<*const OperatorNode, &CostedSummaryDeployment<'_>>,
-        evidence: &StreamingNodeEvidence,
+        evidence: &SummaryNodeEvidence,
         scope: &ComparisonScope,
         evaluation_count: u64,
         cpu_ops: &mut f64,
@@ -360,7 +361,7 @@ pub(super) fn estimate_heterogeneous_summary(
             }
             Operator::ASAP(ASAPOp::SummaryDelete { summary_input, .. }) => {
                 let delete = summary_operation_evidence(node, evidence)?;
-                let StreamingSummaryOperatorEvidence::Delete {
+                let SummaryOperatorEvidence::Delete {
                     resource: operation,
                     events_per_second,
                     routing_fanout,
@@ -558,18 +559,18 @@ fn add_operator_io(
 
 fn validate_summary_edges_and_physical_ids(
     root: &OperatorNode,
-    evidence: &StreamingNodeEvidence,
+    evidence: &SummaryNodeEvidence,
     frameworks_by_node: &HashMap<*const OperatorNode, &Option<SummaryWindowFramework>>,
 ) -> Result<(), AnalyticalCostError> {
     fn children<'a>(
         node: &'a OperatorNode,
-        evidence: &StreamingNodeEvidence,
+        evidence: &SummaryNodeEvidence,
     ) -> Vec<&'a OperatorNode> {
         summary_children(node, evidence)
     }
     fn metadata(
         node: &OperatorNode,
-        evidence: &StreamingNodeEvidence,
+        evidence: &SummaryNodeEvidence,
     ) -> Result<(String, Vec<EdgeStatistics>, EdgeStatistics), AnalyticalCostError> {
         if let Some(retained) = evidence.retained_queries.get(&(node as *const _)) {
             if node.contains_asap() {
@@ -610,7 +611,7 @@ fn validate_summary_edges_and_physical_ids(
     }
     fn visit(
         node: &OperatorNode,
-        evidence: &StreamingNodeEvidence,
+        evidence: &SummaryNodeEvidence,
         frameworks_by_node: &HashMap<*const OperatorNode, &Option<SummaryWindowFramework>>,
         seen: &mut HashSet<*const OperatorNode>,
         physical: &mut HashMap<String, (Vec<EdgeStatistics>, EdgeStatistics, String)>,
@@ -687,7 +688,7 @@ fn validate_summary_edges_and_physical_ids(
 /// provider bound retained-query evidence to it instead of per-operator
 /// evidence. Its children are then not visited. No ASAP descendant may be
 /// hidden by this boundary; graph validation rejects such evidence.
-fn has_retained_subdag_evidence(node: &OperatorNode, evidence: &StreamingNodeEvidence) -> bool {
+fn has_retained_subdag_evidence(node: &OperatorNode, evidence: &SummaryNodeEvidence) -> bool {
     evidence.retained_queries.contains_key(&(node as *const _)) && !node.contains_asap()
 }
 
@@ -695,7 +696,7 @@ fn has_retained_subdag_evidence(node: &OperatorNode, evidence: &StreamingNodeEvi
 /// sub-DAG, every direct input otherwise.
 fn summary_children<'a>(
     node: &'a OperatorNode,
-    evidence: &StreamingNodeEvidence,
+    evidence: &SummaryNodeEvidence,
 ) -> Vec<&'a OperatorNode> {
     if has_retained_subdag_evidence(node, evidence) {
         vec![]
@@ -709,7 +710,7 @@ fn summary_children<'a>(
 
 fn summary_physical_id(
     node: &OperatorNode,
-    evidence: &StreamingNodeEvidence,
+    evidence: &SummaryNodeEvidence,
 ) -> Result<String, AnalyticalCostError> {
     if has_retained_subdag_evidence(node, evidence) {
         return evidence
@@ -743,17 +744,17 @@ fn summary_physical_id(
 /// operator workspace and its output buffer coexist during that execution.
 pub(super) fn estimate_transient_liveness(
     root: &OperatorNode,
-    evidence: &StreamingNodeEvidence,
+    evidence: &SummaryNodeEvidence,
 ) -> Result<u64, AnalyticalCostError> {
     fn children<'a>(
         node: &'a OperatorNode,
-        evidence: &StreamingNodeEvidence,
+        evidence: &SummaryNodeEvidence,
     ) -> Vec<&'a OperatorNode> {
         summary_children(node, evidence)
     }
     fn visit<'a>(
         node: &'a OperatorNode,
-        evidence: &StreamingNodeEvidence,
+        evidence: &SummaryNodeEvidence,
         seen: &mut HashSet<String>,
         uses: &mut HashMap<String, usize>,
         order: &mut Vec<&'a OperatorNode>,
@@ -772,7 +773,7 @@ pub(super) fn estimate_transient_liveness(
     }
     fn memory(
         node: &OperatorNode,
-        evidence: &StreamingNodeEvidence,
+        evidence: &SummaryNodeEvidence,
     ) -> Result<(u64, u64), AnalyticalCostError> {
         if has_retained_subdag_evidence(node, evidence) {
             return evidence
@@ -878,7 +879,7 @@ struct SummaryOperationCounts {
 pub(super) fn estimate_incremental_summary_maintenance(
     root: &OperatorNode,
     guarantee: &SummaryMaintenanceLifecycleGuarantee,
-    inputs: StreamingSummaryInputs,
+    inputs: SummaryMaintenanceInputs,
     cpu: SummaryOperationCpuEvidence,
     scope: &ComparisonScope,
 ) -> Result<ResourceEstimate, AnalyticalCostError> {
@@ -888,7 +889,7 @@ pub(super) fn estimate_incremental_summary_maintenance(
 pub(super) fn estimate_incremental_summary_maintenance_with_join(
     root: &OperatorNode,
     guarantee: &SummaryMaintenanceLifecycleGuarantee,
-    inputs: StreamingSummaryInputs,
+    inputs: SummaryMaintenanceInputs,
     cpu: SummaryOperationCpuEvidence,
     join: Option<SummaryJoinEvidence>,
     scope: &ComparisonScope,
@@ -1027,10 +1028,11 @@ pub(super) fn estimate_incremental_summary_maintenance_with_join(
 }
 
 pub(super) fn lifecycle_row_counts(
-    inputs: StreamingSummaryInputs,
+    inputs: SummaryMaintenanceInputs,
     guarantee: &SummaryMaintenanceLifecycleGuarantee,
     scope: &ComparisonScope,
 ) -> Result<(u64, u64, u64), AnalyticalCostError> {
+    validate_arrival_rate(scope.data_arrival, inputs.ingestion_rate_per_second)?;
     let horizon_end = scope
         .planning_time
         .0

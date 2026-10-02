@@ -106,7 +106,7 @@ such as cache behavior, serialization overhead, compression, spill I/O, or
 data-distribution-dependent sketch error. Provenance and version information
 must accompany those facts so stale observations fail closed.
 
-`StreamingPhysicalPlanAlternative` is the current integration point for a
+`SummaryPhysicalPlanAlternative` is the current integration point for a
 complete provider-enumerated implementation. Its identity is returned with the
 winning lifecycle combination. More structured planner-owned realization
 contracts can refine the candidate space without moving executor
