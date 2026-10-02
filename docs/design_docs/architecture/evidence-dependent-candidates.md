@@ -15,7 +15,7 @@ target)` returns `true`. **Uncertified** means Planner cannot make that claim:
 the guarantee is absent, contains unknown terms, or is known not to meet the
 target. An uncertified summary may still be a well-formed logical candidate;
 this label says nothing about whether the backend can physically execute it.
-The exact `KeepPreAsap` path has an exact guarantee.
+The exact path (the pre-ASAP subtree kept by `keep_pre_asap`) has an exact guarantee.
 
 | State | Planner representation | Consequence / next step |
 |---|---|---|
@@ -88,7 +88,7 @@ The default `global_selection()` skips summaries that
 `has_missing_accuracy_evidence()` identifies as uncertified. Its
 `GlobalSelection::assemble_selected_dag()` result is a selected logical plan,
 not an instruction to deploy every candidate in `PlanSpace`. If no alternative
-is chosen at a site, DAG assembly retains the exact `KeepPreAsap` path. The
+is chosen at a site, DAG assembly retains the exact pre-ASAP subtree. The
 backend can inspect alternatives, apply its own evidence and policy, then choose a
 physically supported one; it must not equate candidate presence with approval.
 Models may explicitly opt into qualitative candidate ranking when no

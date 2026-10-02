@@ -90,7 +90,7 @@ def _compact(value: object) -> str:
 def _column(value: object, input_schema: object = None) -> str:
     if isinstance(value, int):
         if isinstance(input_schema, dict):
-            columns = input_schema.get("columns")
+            columns = input_schema.get("fields", input_schema.get("columns"))
             if isinstance(columns, list) and value < len(columns):
                 column = columns[value]
                 if isinstance(column, dict) and column.get("name"):
@@ -174,7 +174,11 @@ def _semantic_label(node: dict, input_schema: object = None) -> str:
             lines.append(f"within: {_compact(detail['partition_by'])}")
     elif kind == "Project":
         output_schema = node.get("schema")
-        output_columns = output_schema.get("columns") if isinstance(output_schema, dict) else None
+        output_columns = (
+            output_schema.get("fields", output_schema.get("columns"))
+            if isinstance(output_schema, dict)
+            else None
+        )
         if isinstance(output_columns, list) and output_columns:
             names = [str(column.get("name", "?")) for column in output_columns if isinstance(column, dict)]
             lines.append("columns: " + ", ".join(names))

@@ -64,12 +64,12 @@ flowchart TD
     D["data_workload: continuous arrival; declared ingestion interval 15 s"]
     T["Frontend argument: now_ms"]
     F["PromQL lowering"]
-    R["One canonical QueryExpr root"]
+    R["One canonical OperatorNode root"]
     S["Candidate search"]
     P["PlanSpace: logical choices for this root"]
     I["cost_sorted: inspect choices"]
     G["global_selection + assemble_selected_dag(root)"]
-    L["One selected Post-ASAP DAG; exact KeepPreAsap if no optimization is selected"]
+    L["One selected Post-ASAP DAG; the exact pre-ASAP subtree if no optimization is selected"]
     X["Extra lifecycle inputs: horizon; update rate; capabilities; comparable summary/raw costs"]
     H["Summary-maintenance-lifecycle-aware selection"]
     HM["Assemble one selected DAG and decide summary maintenance"]
@@ -100,7 +100,7 @@ flowchart LR
     Q["query_batch: SELECT COUNT(*) FROM metrics; invocations 1; AdHoc"]
     C["SqlCatalog: resolves metrics and its columns"]
     F["SQL lowering"]
-    R["One QueryExpr root"]
+    R["One OperatorNode root"]
     P["Candidate search → PlanSpace"]
     Q --> F
     C --> F
@@ -212,7 +212,7 @@ fields expand as follows:
 | `TimeSelection` | `lookback` | Optional event-time duration selected before the upper bound. |
 | `TimeSelection` | `as_of` | Optional fixed upper-bound timestamp; `None` means planning/evaluation time. |
 
-Frontend lowering produces one Pre-ASAP `QueryExpr` root for each normalized
+Frontend lowering produces one Pre-ASAP `Rc<OperatorNode>` root for each normalized
 query entry. The caller must retain each root's association with its workload
 entry for later recurrence and lifecycle planning.
 
@@ -332,7 +332,7 @@ below. A future higher-level API could hide `PlanSpace` behind those decisions;
 the current interface lets an integrator own them. DAG assembly connects choices
 after selection and does not replace this candidate interface.
 
-Here, a **root** is the top-level `Rc<QueryExpr>` for a workload query. A
+Here, a **root** is the top-level `Rc<OperatorNode>` for a workload query. A
 **target** is any discovered sub-DAG that may be replaced, including roots.
 For `count(up) + 1`, the addition is a root and `count(up)` can be an inner
 target. `TargetSubDAGCandidates` holds the alternatives for one such target.
@@ -359,7 +359,7 @@ All paths start by lowering the workload and searching for candidates:
 
 ```text
 PlanningWorkload + frontend dependencies + planning models/evidence
-    -> frontend lowering: one QueryExpr root per normalized query entry
+    -> frontend lowering: one OperatorNode root per normalized query entry
     -> search_workload_with_targets
     -> PlanSpace
 ```
@@ -388,7 +388,7 @@ The return type is `Vec<RankedTargetSubDAGCandidates<'_>>`; each element has thi
 
 ```rust
 struct RankedTargetSubDAGCandidates<'a> {
-    target: &'a Rc<QueryExpr>,
+    target: &'a Rc<OperatorNode>,
     consumer_count: usize,
     candidates: Vec<&'a ReplacementSubDAG>,
     costs: Vec<f64>, // costs[i] describes candidates[i]
@@ -428,7 +428,8 @@ the result for one query root.
 | **Output:** one selected logical [Post-ASAP DAG](../concepts/post-asap-ir.md) per query root |
 
 Each output DAG specifies the chosen operators, parameters, and accuracy
-guarantees. Its root is represented by `Rc<SummaryNode>`; the
+guarantees. Its root is an `Rc<OperatorNode>` (the same IR as the input,
+with some nodes now ASAP operators) and carries no execution timing yet; the
 [API reference](../../develop_docs/library-api.md#api-definition-and-example)
 describes the function signatures and return handling.
 
@@ -454,7 +455,7 @@ there is no need to run the ordinary selection/assembly workflow first:
    `Result<Option<SummaryMaintenanceLifecyclePlan>, SummaryMaintenanceLifecycleAssemblyError>`.
    When a summary does not beat a
    known raw cost, or a required comparable cost is unavailable, the result
-   retains the exact `KeepPreAsap` root and no summary deployments.
+   retains the exact pre-ASAP root (`keep_pre_asap`) and no summary deployments.
 
 As in ordinary selection, one selection call serves the workload and assembly
 is per root. The second helper calls `assemble_selected_dag` internally; callers
@@ -487,7 +488,7 @@ facts remain unknown rather than being treated as zero.
 The per-query output, `SummaryMaintenanceLifecyclePlan`, **contains** the
 Post-ASAP DAG rather than being a parallel representation. It records:
 
-* the assembled Post-ASAP DAG root (`Rc<SummaryNode>`);
+* the assembled Post-ASAP DAG root (`Rc<OperatorNode>`, with execution timing written);
 * lifecycle choices for summary state;
 * planning horizon and expected reads/updates;
 * selected window implementation and guarantees;

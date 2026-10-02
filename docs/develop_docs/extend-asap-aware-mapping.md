@@ -112,23 +112,20 @@ and let costing decide later.
 
 ---
 
-### Choose `Summary` vs. `Rewrite`
+### Summary subtree vs. logical rewrite
 
-Return:
-
-```rust
-Replacement::Summary(...)
-```
-
-when the candidate is a fully constructed post-ASAP summary.
-
-Return:
+Both are returned as:
 
 ```rust
-Replacement::Rewrite(...)
+Replacement::Subtree(node)
 ```
 
-when the candidate is a logical pre-ASAP rewrite.
+- A fully constructed post-ASAP summary: `node` contains an `ASAPOp`.
+- A logical pre-ASAP rewrite: `node` has only `NonASAPOp` nodes and no
+  guarantee. `is_logical_rewrite(&node)` checks this.
+
+Set `provenance` to say which one it is (`ReplacementProvenance::SummaryRealization`,
+`LogicalRewrite`, ...); selection reads provenance, not the subtree's shape.
 
 Use `Replacement::ExactComposition` when a candidate depends on a child target
 whose implementation must be selected compatibly later. Do not bind it to the
@@ -257,7 +254,7 @@ flowchart LR
   A["Input TargetSubDAG<br/>root is a supported Aggregate"] --> B["SketchAlgorithmStrategy::matches<br/>check whether the target shape can produce summaries"]
   B -->|"true"| C["SketchAlgorithmStrategy::replacements<br/>use CostModel preferences and sizing while preserving<br/>every semantically valid realization"]
   B -->|"false"| NONE["Empty candidate list"]
-  C --> F["Output Vec&lt;ReplacementSubDAG&gt;<br/>each entry contains a constructed SummaryNode and rationale;<br/>all candidates retained in preferred order"]
+  C --> F["Output Vec&lt;ReplacementSubDAG&gt;<br/>each entry contains a constructed summary subtree and rationale;<br/>all candidates retained in preferred order"]
 ```
 
 For an approximate quantile, both KLL and DDSketch remain candidates when
@@ -276,11 +273,12 @@ let candidates = strategy.replacements(&target);
 
 for candidate in candidates {
     match candidate.replacement {
-        Replacement::Summary(summary) => {
-            // Inspect or execute this constructed SummaryNode.
+        Replacement::Subtree(node) => {
+            // A constructed summary subtree (`node.is_asap()`), or a kept
+            // pre-ASAP subtree with an exact guarantee for pass-through.
         }
-        Replacement::Rewrite(_) => unreachable!(
-            "SketchAlgorithmStrategy produces summary candidates"
+        Replacement::ExactComposition(_) => unreachable!(
+            "SketchAlgorithmStrategy produces subtree candidates"
         ),
     }
 }
@@ -310,16 +308,16 @@ and returns two alternatives:
 2. Build independently for each consumer.
 ```
 
-The shared candidate reuses the same `Rc<QueryExpr>`:
+The shared candidate reuses the same `Rc<OperatorNode>`:
 
 ```rust
-Replacement::Rewrite(Rc::clone(target.root))
+Replacement::Subtree(Rc::clone(target.root))
 ```
 
 The independent candidate creates a structurally equal but separately allocated node:
 
 ```rust
-Replacement::Rewrite(
+Replacement::Subtree(
     Rc::new((**target.root).clone())
 )
 ```
@@ -778,7 +776,7 @@ Therefore, when adding a new built-in sketch algorithm, the intended flow is:
 flowchart LR
   MAP["1. Declare legality<br/>add the algorithm to summary_candidates<br/>for each AggIntent it can answer"]
   MAP --> MODEL["2. Define costing<br/>rank it, derive its SketchParams,<br/>and provide a comparable numeric cost"]
-  MODEL --> BUILD["3. Define realization behavior<br/>ensure the public strategy output contains a valid SummaryNode<br/>with the correct maintained state and readout"]
+  MODEL --> BUILD["3. Define realization behavior<br/>ensure the public strategy output contains a valid summary subtree<br/>with the correct maintained state and readout"]
   BUILD --> ACC["4. Certify accuracy<br/>derive from committed parameters;<br/>propagate and check the final target"]
   ACC --> ENUM["5. Verify integration<br/>SketchAlgorithmStrategy includes it automatically;<br/>tests confirm enumeration, ordering, sizing, and cost"]
 ```
@@ -895,7 +893,8 @@ silently disagree.
 
 ### Mistake: reimplementing summary construction inside a strategy
 
-If the candidate should produce a normal `SummaryNode`, use the existing
+If the candidate should produce a normal summary subtree (`SummaryAgg` /
+`SummaryEstimate`), use the existing
 summary-construction path.
 
 A strategy should steer or wrap that path when necessary, not recreate schema derivation, column resolution, readout construction, or parameter sizing.
@@ -922,7 +921,7 @@ Workload-wide target discovery, deduplication, and consumer counting are separat
 
 For CSE-style decisions, pointer identity can encode actual sharing.
 
-Two `Rc<QueryExpr>` values can be structurally equal but deliberately represent independent computation.
+Two `Rc<OperatorNode>` values can be structurally equal but deliberately represent independent computation.
 
 Use the distinction intentionally.
 
@@ -937,8 +936,8 @@ When adding a new strategy:
 - [ ] Implement `ReplacementStrategy::replacements`.
 - [ ] Return every semantically valid replacement.
 - [ ] Return an empty vector for non-matching targets.
-- [ ] Use `Replacement::Summary` for constructed post-ASAP output.
-- [ ] Use `Replacement::Rewrite` for logical pre-ASAP alternatives.
+- [ ] Return `Replacement::Subtree` for both constructed post-ASAP output and
+      logical pre-ASAP alternatives, with the matching `provenance`.
 - [ ] Add a useful rationale to every candidate.
 - [ ] Reuse existing legality and implementation logic instead of duplicating it.
 - [ ] Keep ranking and cost-based pruning out of the strategy.

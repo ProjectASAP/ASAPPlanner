@@ -185,7 +185,7 @@ for (index, entry) in workload.query_workload.entries().enumerate() {
     let accuracy = entry.requirements.accuracy.target();
     let expr = lower_sql_dialect(&entry.query.0, &catalog, dialect.clone(), accuracy.clone())
         .await?;
-    roots.push((index, Rc::new(expr), Some(accuracy)));
+    roots.push((index, expr, Some(accuracy)));
     entry_indices.push(index);
 }
 
