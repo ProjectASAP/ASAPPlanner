@@ -809,7 +809,7 @@ pub enum ExactOperationSchemaError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::post_asap::{ExactKind, ExactParams, GroupingStrategy, SketchQuery};
+    use crate::post_asap::{ExactKind, ExactParams, GroupingStrategy, SketchStatistic};
     use crate::pre_asap::agg_intent::AggIntent;
     use crate::pre_asap::expr_ir::ColumnRef;
     use crate::pre_asap::query_expr::{QueryExpr, Reduction, Source};
@@ -907,7 +907,7 @@ mod tests {
         Rc::new(SummaryNode {
             expr: SummaryExpr::SummaryEstimate {
                 summary_input: child,
-                query: SketchQuery::Quantile { q: 0.99 },
+                query: SketchStatistic::Quantile { q: 0.99 },
             },
             schema: plain(&["quantile_0_99"]),
             guarantee: None,

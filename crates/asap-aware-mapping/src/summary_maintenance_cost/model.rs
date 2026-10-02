@@ -3076,7 +3076,7 @@ mod tests {
         Rc::new(SummaryNode {
             expr: SummaryExpr::SummaryEstimate {
                 summary_input: root,
-                query: asap_types::post_asap::SketchQuery::PointCount {
+                query: asap_types::post_asap::SketchStatistic::PointCount {
                     key: ColumnRef::Wildcard,
                     value: None,
                 },
@@ -3117,7 +3117,7 @@ mod tests {
         Rc::new(SummaryNode {
             expr: SummaryExpr::SummaryEstimate {
                 summary_input: join,
-                query: asap_types::post_asap::SketchQuery::PointCount {
+                query: asap_types::post_asap::SketchStatistic::PointCount {
                     key: ColumnRef::Wildcard,
                     value: None,
                 },

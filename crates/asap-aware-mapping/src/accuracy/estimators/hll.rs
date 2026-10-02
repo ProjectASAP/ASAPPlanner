@@ -9,7 +9,7 @@ use super::*;
 pub(super) fn generic_guarantee(
     algorithm: &SketchAlgorithm,
     params: &SketchParams,
-    query: &SketchQuery,
+    query: &SketchStatistic,
 ) -> Option<ResultGuarantee> {
     let SketchParams::Hll { precision } = params else {
         return None;
@@ -241,7 +241,7 @@ mod tests {
                     SketchKind::new(SketchAlgorithm::Hll, params),
                     GroupingStrategy::default(),
                 ),
-                &SketchQuery::Cardinality,
+                &SketchStatistic::Cardinality,
             )
             .unwrap();
         assert_eq!(g.metric, ErrorMetric::Cardinality);

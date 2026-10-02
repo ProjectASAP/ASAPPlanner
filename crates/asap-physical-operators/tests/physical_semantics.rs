@@ -592,7 +592,7 @@ fn kll_partial_merge_and_multiple_readouts_preserve_population() {
                     state.clone(),
                     0,
                     asap_physical_operators::operators::ReadoutQuery::Sketch(
-                        planner_types::post_asap::SketchQuery::Quantile { q },
+                        planner_types::post_asap::SketchStatistic::Quantile { q },
                     ),
                 )
                 .unwrap(),

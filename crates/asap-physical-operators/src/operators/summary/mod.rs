@@ -2,7 +2,7 @@ use super::*;
 /// A summary readout: a sketch query, or an exact readout with typed parameters.
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum ReadoutQuery {
-    Sketch(planner_types::post_asap::SketchQuery),
+    Sketch(planner_types::post_asap::SketchStatistic),
     Exact(crate::summary_kernels::exact::ExactReadout),
 }
 
@@ -215,7 +215,7 @@ fn integral_count(family: &FieldDataType, query: &ReadoutQuery) -> bool {
         if kind.algorithm() == &planner_types::post_asap::SketchAlgorithm::Cms)
         && matches!(
             query,
-            ReadoutQuery::Sketch(planner_types::post_asap::SketchQuery::PointCount {
+            ReadoutQuery::Sketch(planner_types::post_asap::SketchStatistic::PointCount {
                 value: None,
                 ..
             })

@@ -19,7 +19,7 @@ use asap_physical_operators::{
 };
 use asap_types::post_asap::{
     compile_post_asap_dag, EntityIdentity, ExactKind, FieldDataType, PostAsapDAG,
-    PostAsapOperatorPayload, SketchAlgorithm, SketchQuery, SummaryInputExpr, SummaryNode,
+    PostAsapOperatorPayload, SketchAlgorithm, SketchStatistic, SummaryInputExpr, SummaryNode,
     SummaryUpdate,
 };
 use asap_types::pre_asap::{expr_ir::ColumnRef, query_expr::Reduction};
@@ -265,9 +265,9 @@ fn readouts(state: &dyn AggregateCore, family: &FieldDataType) -> Vec<f64> {
     match kind.algorithm() {
         SketchAlgorithm::Kll | SketchAlgorithm::DDSketch => [0.1, 0.5, 0.9]
             .into_iter()
-            .map(|q| state.estimate(&SketchQuery::Quantile { q }).unwrap())
+            .map(|q| state.estimate(&SketchStatistic::Quantile { q }).unwrap())
             .collect(),
-        SketchAlgorithm::Hll => vec![state.estimate(&SketchQuery::Cardinality).unwrap()],
+        SketchAlgorithm::Hll => vec![state.estimate(&SketchStatistic::Cardinality).unwrap()],
         other => panic!("unexpected unkeyed sketch {other:?}"),
     }
 }

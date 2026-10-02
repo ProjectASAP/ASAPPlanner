@@ -250,7 +250,7 @@ bounds, but does not execute workloads or own deployment measurements. Most hook
 - **`readout_extension`** — define how queries read an extension summary that `realize_extension` mapped to a `Sketch`. The two hooks are a pair: realization defines what is maintained; readout defines how it is queried. Override both for the same `ext_kind`. The default readout panics to prevent a silent wrong answer.
 
   ```rust
-  fn readout_extension(&self, ext_kind: &str, payload: &serde_json::Value, col: &ColumnRef) -> SketchQuery;
+  fn readout_extension(&self, ext_kind: &str, payload: &serde_json::Value, col: &ColumnRef) -> SketchStatistic;
   ```
 
 - **`cse_recompute_cost`** — estimate the one-time cost of recomputing a CSE candidate's sub-DAG independently at a single consumer. Default: `default_cse_recompute_cost`, a structural-size proxy.

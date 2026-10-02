@@ -14,7 +14,7 @@ pub mod univmon;
 pub(super) fn sketch_guarantee(
     algorithm: &SketchAlgorithm,
     params: &SketchParams,
-    query: &SketchQuery,
+    query: &SketchStatistic,
 ) -> Option<ResultGuarantee> {
     match params {
         SketchParams::Kll { .. } => kll::guarantee(algorithm, params, query),
@@ -36,7 +36,7 @@ pub(super) fn sketch_guarantee(
 fn bounded_guarantee(
     algorithm: &SketchAlgorithm,
     params: &SketchParams,
-    query: &SketchQuery,
+    query: &SketchStatistic,
     metric: ErrorMetric,
     bound: f64,
     delta: ProbabilityExpr,
@@ -57,7 +57,7 @@ fn bounded_guarantee(
 
 pub(super) fn local_guarantee(
     family: &FieldDataType,
-    query: &SketchQuery,
+    query: &SketchStatistic,
 ) -> Option<ResultGuarantee> {
     match family {
         FieldDataType::Plain(_) => Some(ResultGuarantee::exact("Plain value")),
@@ -196,9 +196,9 @@ impl AccuracyModel for EstimatorAccuracy<'_> {
     fn local_guarantee(
         &self,
         family: &FieldDataType,
-        query: &SketchQuery,
+        query: &SketchStatistic,
     ) -> Option<ResultGuarantee> {
-        if let (Some(_), FieldDataType::Sketch(kind, grouping), SketchQuery::Cardinality) =
+        if let (Some(_), FieldDataType::Sketch(kind, grouping), SketchStatistic::Cardinality) =
             (self.contract, family, query)
         {
             if let (SketchAlgorithm::Hll, SketchParams::Hll { precision }) =

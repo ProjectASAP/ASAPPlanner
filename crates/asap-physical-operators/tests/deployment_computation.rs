@@ -639,7 +639,7 @@ fn stored_count_min_bare_count_compiles_to_a_readout() {
                         matches!(
                             &n.payload,
                             PostAsapOperatorPayload::SummaryEstimate {
-                                query: SketchQuery::PointCount { value: None, .. }
+                                query: SketchStatistic::PointCount { value: None, .. }
                             }
                         )
                     });

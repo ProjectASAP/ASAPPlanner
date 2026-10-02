@@ -299,7 +299,7 @@ fn binding_rejects_unsupported_operations() {
         sum.schema(),
         0,
         asap_physical_operators::operators::ReadoutQuery::Sketch(
-            planner_types::post_asap::SketchQuery::Quantile { q: 0.5 }
+            planner_types::post_asap::SketchStatistic::Quantile { q: 0.5 }
         )
     )
     .is_err());
@@ -400,7 +400,7 @@ fn kll_raw_partial_and_precomputed_are_native_dags() {
                 state.clone(),
                 0,
                 asap_physical_operators::operators::ReadoutQuery::Sketch(
-                    planner_types::post_asap::SketchQuery::Quantile { q: 0.5 },
+                    planner_types::post_asap::SketchStatistic::Quantile { q: 0.5 },
                 ),
             )
             .unwrap(),

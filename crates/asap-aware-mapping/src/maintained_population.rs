@@ -23,7 +23,9 @@ fn strip_projection(mut root: &QueryExpr) -> &QueryExpr {
     root
 }
 
-fn recognize(root: &QueryExpr) -> Option<(MaintainedPopulation, PopulationReadout, Rc<QueryExpr>)> {
+fn recognize(
+    root: &QueryExpr,
+) -> Option<(MaintainedPopulation, PopulationStatistic, Rc<QueryExpr>)> {
     let root = strip_projection(root);
     let (source, grouping, readout, value_column) = match root {
         QueryExpr::Aggregate {
@@ -42,12 +44,12 @@ fn recognize(root: &QueryExpr) -> Option<(MaintainedPopulation, PopulationReadou
             }
             let (col, readout) = match intent {
                 AggIntent::Quantile { q, col, .. } if q.is_finite() => {
-                    (*col, PopulationReadout::Quantile { q: *q })
+                    (*col, PopulationStatistic::Quantile { q: *q })
                 }
-                AggIntent::TopK { k, .. } => (None, PopulationReadout::TopK { k: *k }),
-                AggIntent::Sum { col } => (*col, PopulationReadout::Sum),
-                AggIntent::Count { .. } => (None, PopulationReadout::Count),
-                AggIntent::Avg { col } => (*col, PopulationReadout::Average),
+                AggIntent::TopK { k, .. } => (None, PopulationStatistic::TopK { k: *k }),
+                AggIntent::Sum { col } => (*col, PopulationStatistic::Sum),
+                AggIntent::Count { .. } => (None, PopulationStatistic::Count),
+                AggIntent::Avg { col } => (*col, PopulationStatistic::Average),
                 _ => return None,
             };
             let schema = child.output_schema().ok()?;
@@ -81,7 +83,7 @@ fn recognize(root: &QueryExpr) -> Option<(MaintainedPopulation, PopulationReadou
             (
                 child,
                 partition_by,
-                PopulationReadout::TopK { k: *n },
+                PopulationStatistic::TopK { k: *n },
                 Some(*col),
             )
         }
@@ -237,11 +239,13 @@ impl MaintainedPopulationStrategy {
             if let Some((p, r, _)) = recognize(other) {
                 if p == identity {
                     match r {
-                        PopulationReadout::Quantile { .. } => population.quantiles = true,
-                        PopulationReadout::TopK { k } => population.max_k = population.max_k.max(k),
-                        PopulationReadout::Sum
-                        | PopulationReadout::Count
-                        | PopulationReadout::Average => {}
+                        PopulationStatistic::Quantile { .. } => population.quantiles = true,
+                        PopulationStatistic::TopK { k } => {
+                            population.max_k = population.max_k.max(k)
+                        }
+                        PopulationStatistic::Sum
+                        | PopulationStatistic::Count
+                        | PopulationStatistic::Average => {}
                     }
                 }
             }
@@ -469,7 +473,7 @@ mod tests {
             unreachable!()
         };
         *operation = ValueOperation::ReadPopulation {
-            readout: PopulationReadout::TopK { k: 6 },
+            readout: PopulationStatistic::TopK { k: 6 },
         };
         assert!(compile_post_asap_dag(&Rc::new(bad.clone())).is_err());
         let SummaryExpr::ValueOperation {
@@ -479,7 +483,7 @@ mod tests {
             unreachable!()
         };
         *operation = ValueOperation::ReadPopulation {
-            readout: PopulationReadout::TopK { k: 5 },
+            readout: PopulationStatistic::TopK { k: 5 },
         };
         let producer = Rc::make_mut(child);
         let SummaryExpr::ValueOperation {

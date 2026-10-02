@@ -96,7 +96,7 @@ struct StatsModel;
 fn custom_accuracy_rule_survives_root_target_and_materialization() {
     use asap_aware_mapping::{AccuracyModel, DefaultAccuracyModel, PropagationStats};
     use asap_types::post_asap::{
-        AccuracyError, CompositionOperator, ExactOperation, ResultGuarantee, SketchQuery,
+        AccuracyError, CompositionOperator, ExactOperation, ResultGuarantee, SketchStatistic,
     };
     struct Model;
     impl AccuracyModel for Model {
@@ -106,7 +106,7 @@ fn custom_accuracy_rule_survives_root_target_and_materialization() {
         fn local_guarantee(
             &self,
             family: &FieldDataType,
-            query: &SketchQuery,
+            query: &SketchStatistic,
         ) -> Option<ResultGuarantee> {
             DefaultAccuracyModel.local_guarantee(family, query)
         }

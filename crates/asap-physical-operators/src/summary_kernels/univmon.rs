@@ -2,7 +2,7 @@
 
 use crate::AggregateCore;
 use asap_sketchlib::{DataInput, UnivMon};
-use planner_types::{post_asap::SketchQuery, pre_asap::ColumnRef};
+use planner_types::{post_asap::SketchStatistic, pre_asap::ColumnRef};
 
 type Error = Box<dyn std::error::Error + Send + Sync>;
 
@@ -144,15 +144,15 @@ impl AggregateCore for UnivMonAccumulator {
 
     /// Sample count (a bare `PointCount`), distinct count, L2 norm and entropy
     /// of the sample-value frequencies.
-    fn estimate(&self, query: &SketchQuery) -> Result<f64, Error> {
+    fn estimate(&self, query: &SketchStatistic) -> Result<f64, Error> {
         Ok(match query {
-            SketchQuery::PointCount {
+            SketchStatistic::PointCount {
                 key: ColumnRef::SampleValue,
                 value: None,
             } => self.inner.calc_l1(),
-            SketchQuery::Cardinality => self.inner.calc_card(),
-            SketchQuery::FrequencyL2 => self.inner.calc_l2(),
-            SketchQuery::FrequencyEntropy => self.inner.calc_entropy(),
+            SketchStatistic::Cardinality => self.inner.calc_card(),
+            SketchStatistic::FrequencyL2 => self.inner.calc_l2(),
+            SketchStatistic::FrequencyEntropy => self.inner.calc_entropy(),
             other => return Err(format!("UnivMon does not answer {other:?}").into()),
         })
     }
@@ -162,8 +162,8 @@ impl AggregateCore for UnivMonAccumulator {
 mod tests {
     use super::*;
 
-    fn count() -> SketchQuery {
-        SketchQuery::PointCount {
+    fn count() -> SketchStatistic {
+        SketchStatistic::PointCount {
             key: ColumnRef::SampleValue,
             value: None,
         }
@@ -179,10 +179,12 @@ mod tests {
         }
         let read = |query| state.estimate(&query).unwrap();
         assert_eq!(read(count()), 4.0);
-        assert!((read(SketchQuery::Cardinality) - 2.0).abs() < 0.01);
-        assert!((read(SketchQuery::FrequencyL2) - 8.0f64.sqrt()).abs() < 0.01);
-        assert!((read(SketchQuery::FrequencyEntropy) - 1.0).abs() < 0.01);
-        assert!(state.estimate(&SketchQuery::Quantile { q: 0.5 }).is_err());
+        assert!((read(SketchStatistic::Cardinality) - 2.0).abs() < 0.01);
+        assert!((read(SketchStatistic::FrequencyL2) - 8.0f64.sqrt()).abs() < 0.01);
+        assert!((read(SketchStatistic::FrequencyEntropy) - 1.0).abs() < 0.01);
+        assert!(state
+            .estimate(&SketchStatistic::Quantile { q: 0.5 })
+            .is_err());
     }
 
     // A sketch taken out and adopted back answers the same readouts.
@@ -196,8 +198,8 @@ mod tests {
         assert_eq!(adopted.dimensions(), state.dimensions());
         for query in [
             count(),
-            SketchQuery::Cardinality,
-            SketchQuery::FrequencyEntropy,
+            SketchStatistic::Cardinality,
+            SketchStatistic::FrequencyEntropy,
         ] {
             assert_eq!(
                 adopted.estimate(&query).unwrap(),

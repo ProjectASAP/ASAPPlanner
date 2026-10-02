@@ -28,8 +28,8 @@ use asap_aware_mapping::{
 use asap_frontend_sql::{lower_sql, lower_sql_dialect, SqlCatalog};
 use asap_types::post_asap::{
     compile_post_asap_dag, EdgeRole, ExactKind, ExactParams, FieldDataType, GroupingStrategy,
-    PostAsapOperatorPayload, SketchAlgorithm, SketchKind, SketchParams, SketchQuery, SummaryExpr,
-    SummaryNode, SummaryUpdate, ValueOperation,
+    PostAsapOperatorPayload, SketchAlgorithm, SketchKind, SketchParams, SketchStatistic,
+    SummaryExpr, SummaryNode, SummaryUpdate, ValueOperation,
 };
 use asap_types::pre_asap::expr_ir::ColumnRef;
 use asap_types::pre_asap::query_expr::{QueryExpr, Reduction};
@@ -629,7 +629,7 @@ async fn sql_quantile_binds_kll_sketch_over_named_column() {
     else {
         panic!("expected SummaryEstimate root, got {:?}", root.expr);
     };
-    assert!(matches!(query, SketchQuery::Quantile { q } if *q == 0.99));
+    assert!(matches!(query, SketchStatistic::Quantile { q } if *q == 0.99));
     assert_eq!(
         root.schema.fields.len(),
         1,
@@ -716,7 +716,7 @@ async fn sql_count_distinct_with_epsilon_binds_hll_rse_over_named_column() {
     else {
         panic!("expected SummaryEstimate root, got {:?}", root.expr);
     };
-    assert!(matches!(query, SketchQuery::Cardinality));
+    assert!(matches!(query, SketchStatistic::Cardinality));
     assert_eq!(
         root.schema.fields[0].dtype,
         FieldDataType::Plain(DataType::Int64),

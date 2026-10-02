@@ -171,7 +171,7 @@ impl asap_aware_mapping::accuracy::AccuracyEvidenceProvider for OneKeyTopKEviden
         &self,
         op: &asap_types::post_asap::CompositionOperator,
         _family: &FieldDataType,
-        _query: Option<&asap_types::post_asap::SketchQuery>,
+        _query: Option<&asap_types::post_asap::SketchStatistic>,
     ) -> asap_aware_mapping::accuracy::PropagationStats {
         // Single-key fixture: no excluded keys; bounds cover every value below.
         if matches!(

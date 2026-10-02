@@ -11,7 +11,7 @@
 use crate::Error;
 use planner_types::post_asap::{
     ExactKind, ExactParams, FieldDataType, GroupingStrategy, SketchAlgorithm, SketchParams,
-    SketchQuery, SummaryUpdate,
+    SketchStatistic, SummaryUpdate,
 };
 
 /// Check the same contract used by `create_planner_accumulator` before a plan
@@ -185,14 +185,18 @@ pub fn validate_native_family(family: &FieldDataType) -> Result<(), Error> {
 }
 
 /// A sketch readout is native only for the families Planner can read directly.
-pub fn validate_sketch_readout(family: &FieldDataType, query: &SketchQuery) -> Result<(), Error> {
+pub fn validate_sketch_readout(
+    family: &FieldDataType,
+    query: &SketchStatistic,
+) -> Result<(), Error> {
     validate_native_family(family)?;
     use planner_types::post_asap::SketchAlgorithm as A;
     // A point count without an item value reads the total count.
-    let bare_count = matches!(query, SketchQuery::PointCount { value: None, .. });
+    let bare_count = matches!(query, SketchStatistic::PointCount { value: None, .. });
     let supported = match family {
         FieldDataType::Sketch(kind, _) => match (kind.algorithm(), query) {
-            (A::Kll, SketchQuery::Quantile { q }) | (A::DDSketch, SketchQuery::Quantile { q }) => {
+            (A::Kll, SketchStatistic::Quantile { q })
+            | (A::DDSketch, SketchStatistic::Quantile { q }) => {
                 if !(0.0..=1.0).contains(q) {
                     return Err(Error::Invalid(
                         "quantile readout requires quantile in [0,1]".into(),
@@ -201,7 +205,7 @@ pub fn validate_sketch_readout(family: &FieldDataType, query: &SketchQuery) -> R
                 true
             }
             (A::DDSketch, _) => bare_count,
-            (A::Hll, SketchQuery::Cardinality) => true,
+            (A::Hll, SketchStatistic::Cardinality) => true,
             (A::Hll, _) => bare_count,
             // Only count intents read a Count-Min bare count, and their
             // updates have unit weight; the readout is typed Int64 on that basis.

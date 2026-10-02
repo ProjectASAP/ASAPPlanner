@@ -651,7 +651,7 @@ fn readout_extension(
     ext_kind: &str,
     payload: &serde_json::Value,
     col: &ColumnRef,
-) -> SketchQuery;
+) -> SketchStatistic;
 ```
 
 This complements `realize_extension`: realization defines what gets maintained; readout defines how it is queried (see the [CostModel reference](asap-aware-mapping-contracts.md#costmodel)).

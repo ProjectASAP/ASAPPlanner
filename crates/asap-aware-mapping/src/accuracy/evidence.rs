@@ -119,7 +119,7 @@ pub trait AccuracyEvidenceProvider {
         &self,
         _op: &CompositionOperator,
         _family: &FieldDataType,
-        _query: Option<&SketchQuery>,
+        _query: Option<&SketchStatistic>,
     ) -> PropagationStats {
         PropagationStats::default()
     }
@@ -143,7 +143,7 @@ impl AccuracyEvidenceProvider for WorkloadAccuracyEvidence<'_> {
         &self,
         _op: &CompositionOperator,
         _family: &FieldDataType,
-        _query: Option<&SketchQuery>,
+        _query: Option<&SketchStatistic>,
     ) -> PropagationStats {
         PropagationStats {
             input_row_count: self.data.input_cardinality.value_at(self.now_ms).copied(),

@@ -28,7 +28,9 @@ fn build(values: &[f64]) -> Box<dyn AggregateCore> {
 }
 fn read(state: &dyn AggregateCore) -> f64 {
     state
-        .estimate(&asap_physical_operators::planner::post_asap::SketchQuery::Quantile { q: 0.5 })
+        .estimate(
+            &asap_physical_operators::planner::post_asap::SketchStatistic::Quantile { q: 0.5 },
+        )
         .unwrap()
 }
 
