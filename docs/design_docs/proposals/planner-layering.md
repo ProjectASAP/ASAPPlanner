@@ -1073,10 +1073,10 @@ ASAPPlanner then does automatically, and what does not change.
 or batch), predictability, time selection and accuracy and latency
 requirements. No code changes.
 
-**Automatic:** the language-specific frontend converts the query. Pass 1 generates its
-exact and summary candidates from the existing rules and capabilities. Pass 2
+**Automatic:** the language-specific frontend converts the query. Pass 1 of logical ASAP-aware optimization generates its
+exact and summary candidates from the existing rules and capabilities. Pass 2 of logical ASAP-aware optimization
 checks whether it can share a summary with the queries already in the workload.
-Physical planning and selection re-plan the whole workload, so adding a query can
+Physical ASAP-aware optimization and plan selection re-plan the whole workload, so adding a query can
 change the plan of other queries, for example when a summary becomes shared.
 
 **Unchanged:** rules, summary families, models and every other workload entry.
@@ -1095,7 +1095,7 @@ For a function, operator or aggregate a frontend does not support yet.
    answer it (Assumptions 1 and 2).
 4. Its exact physical operator implementation.
 
-**Automatic:** everything from Pass 1 onward, as for any other query.
+**Automatic:** everything from Pass 1 of logical ASAP-aware optimization onward, as for any other query.
 
 **Unchanged:** the stages, the selection rule and other queries' candidates.
 
@@ -1109,12 +1109,12 @@ For example, a new quantile sketch.
 2. The computations it answers and the estimates it reads out.
 3. Its sizing rule for an accuracy target and its error bound.
 4. Whether its states can be merged, subtracted or deleted.
-5. Which state fields identify it, so that equal states are shared in Pass 2.
+5. Which state fields identify it, so that equal states are shared in Pass 2 of logical ASAP-aware optimization.
 6. Its physical kernel: build, merge and estimate.
 
-**Automatic:** Pass 1 offers the family wherever its declared computations
+**Automatic:** Pass 1 of logical ASAP-aware optimization offers the family wherever its declared computations
 appear, sizes it per query and prunes it where it cannot meet the accuracy
-target. Pass 2 shares it across queries, sized for the strictest consumer.
+target. Pass 2 of logical ASAP-aware optimization shares it across queries, sized for the strictest consumer.
 Selection compares it with every other candidate using the deployment's models.
 
 **Unchanged:** frontends, rewrite rules, the stages and existing queries.
