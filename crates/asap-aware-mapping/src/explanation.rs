@@ -22,7 +22,7 @@
 //! (issue #252) now *already* computes, for every
 //! [`TargetSubDAG`](crate::replacement::TargetSubDAG) in the workload, every
 //! semantically valid [`crate::replacement::ReplacementSubDAG`] a registered
-//! [`ReplacementStrategy`] can propose — a [`PlanSpace`] of [`TargetSubDAGCandidates`]s. A
+//! [`ReplacementStrategy`] can propose — a [`CandidateLogicalASAPDAGs`] of [`TargetSubDAGCandidates`]s. A
 //! rule re-deriving the same yes/no fact from scratch would be answering a
 //! question the search already answered, via a second, independently
 //! maintained traversal that has to keep agreeing with the first one.
@@ -39,7 +39,7 @@
 //! genuine alternative to the status quo (share this already-shared subtree
 //! instead of recomputing it at every consumer), *is* an applicability
 //! finding — [`explain_replacements`] and
-//! [`explain_replacements_with`] just translate [`PlanSpace`]'s
+//! [`explain_replacements_with`] just translate [`CandidateLogicalASAPDAGs`]'s
 //! [`TargetSubDAGCandidates`]s into that shape:
 //!
 //! - [`ExplanationKind::SketchApproximation`] — the `TargetSubDAG`'s
@@ -88,14 +88,14 @@
 //! (`fn optimization(&self) -> ExplanationKind` + `fn evaluate(&self, roots)
 //! -> Vec<ReplacementExplanation>`), the same shape [`crate::cost_model::CostModel`]
 //! and [`crate::replacement::Matcher`] use elsewhere in this crate. Once
-//! findings are a *view* over [`PlanSpace`] rather than an independent
+//! findings are a *view* over [`CandidateLogicalASAPDAGs`] rather than an independent
 //! computation, that trait would be a second extension point answering a
 //! question [`ReplacementStrategy`] (issue #251) already answers: "does this
 //! `TargetSubDAG` have an alternative worth reporting, and why". A caller who
 //! wants a new optimization represented as a finding needs a new
 //! `impl ReplacementStrategy` wired into
 //! [`crate::replacement::search_workload_with`]'s strategy set *regardless*
-//! (that's the only way its candidates end up in the [`PlanSpace`] this
+//! (that's the only way its candidates end up in the [`CandidateLogicalASAPDAGs`] this
 //! module reads) — adding an `ApplicabilityRule` too would mean maintaining
 //! two extension points for the same new capability, one of which (the rule)
 //! would just be re-describing candidates the other (the strategy) already
@@ -123,7 +123,7 @@
 //!    [`crate::replacement`] now instead of here.
 //! 2. **A node reachable via more than one path is one finding, not one per
 //!    path.** [`TargetSubDAGCandidates`]s are keyed by `Rc` pointer identity in
-//!    [`PlanSpace`]'s internal map — there is exactly one group per distinct
+//!    [`CandidateLogicalASAPDAGs`]'s internal map — there is exactly one group per distinct
 //!    `Rc`, full stop, so a shared `Aggregate` reached via two different
 //!    `BinaryOp` branches (or two different workload roots) is exactly one
 //!    group, hence at most one [`ExplanationKind::SketchApproximation`]
@@ -131,16 +131,16 @@
 //!    [`tests::a_shared_sketchable_aggregate_is_reported_only_once`] pins
 //!    this directly.
 //!
-//! ## One thing [`PlanSpace`] doesn't carry that this module still needs:
+//! ## One thing [`CandidateLogicalASAPDAGs`] doesn't carry that this module still needs:
 //! human-readable `location` text
 //!
-//! [`TargetSubDAGCandidates`]/[`PlanSpace`] deliberately track only `Rc<QueryExpr>`
+//! [`TargetSubDAGCandidates`]/[`CandidateLogicalASAPDAGs`] deliberately track only `Rc<QueryExpr>`
 //! pointer identity — the currency the search itself needs — not
 //! caller-facing prose. [`ReplacementExplanation::location`] is prose (a
 //! breadcrumb like `root "dash_a" > lhs`), so this module keeps one small,
 //! self-contained walk of its own, [`collect_locations`], whose *only* job
 //! is turning "this `Rc`" into "the human-readable place(s) it occurs" for a
-//! finding already decided by [`PlanSpace`]. This is not a reincarnation of
+//! finding already decided by [`CandidateLogicalASAPDAGs`]. This is not a reincarnation of
 //! the deleted rule traversal: it makes no applicability decision (it runs
 //! the same regardless of what any strategy found), and duplicating this
 //! small, self-contained shape rather than threading location strings
@@ -161,7 +161,7 @@
 //!
 //! | Catalog entry | Status | Where a future `ExplanationKind` would come from |
 //! |---|---|---|
-//! | Semantic-equivalent rewriting (e.g. `avg` → `sum`/`count`) | [`AvgToSumOverCountStrategy`](crate::rewrite::AvgToSumOverCountStrategy) exists and is wired into `default_strategies()` (issue #253) — but still no `ExplanationKind` of its own below, since this table is about *direct* findings for a catalog entry, and this strategy's whole point is indirect: its `Replacement::Rewrite` candidate exposes `sum`/`count` as independently bindable discovered targets, which can then earn `CommonSubexpressionReuse` findings when the workload actually reuses them | A dedicated variant would need `findings_from_plan_space` to recognize a `LogicalRewrite`-provenance candidate as a finding in its own right, not just rely on what it exposes downstream |
+//! | Semantic-equivalent rewriting (e.g. `avg` → `sum`/`count`) | [`AvgToSumOverCountStrategy`](crate::rewrite::AvgToSumOverCountStrategy) exists and is wired into `default_strategies()` (issue #253) — but still no `ExplanationKind` of its own below, since this table is about *direct* findings for a catalog entry, and this strategy's whole point is indirect: its `Replacement::Rewrite` candidate exposes `sum`/`count` as independently bindable discovered targets, which can then earn `CommonSubexpressionReuse` findings when the workload actually reuses them | A dedicated variant would need `findings_from_candidate_logical_asap_dags` to recognize a `LogicalRewrite`-provenance candidate as a finding in its own right, not just rely on what it exposes downstream |
 //! | Roll-ups (fine-to-coarse group-by reuse) | [`RollupStrategy`](crate::rollup::RollupStrategy), derived from workload siblings after CSE/target discovery (issue #254) | Any `Replacement::Rewrite` candidate that rolls a coarse aggregate up from a compatible finer aggregate |
 //! | Wavelets/OMP | Params type exists (`WaveletKind`/`WaveletParams`), reachable only via a deployment `CostModel::realize_extension` (no core `AggIntent` dispatch picks it) | A `ReplacementStrategy` that inspects a deployment's own `CostModel`, once some intent shape actually maps to `Realization::Wavelet` |
 //! | Sampling | Same story as Wavelets: `SamplingKind`/`SamplingParams` exist, unreachable from core dispatch | Same hook as Wavelets, for `Realization::Sample` |
@@ -179,7 +179,7 @@
 //! [`Replacement::Rewrite`]: crate::replacement::Replacement::Rewrite
 //! [`SketchAlgorithmStrategy`]: crate::replacement::SketchAlgorithmStrategy
 //! [`SharedSubtreeStrategy`]: crate::replacement::SharedSubtreeStrategy
-//! [`PlanSpace`]: crate::replacement::PlanSpace
+//! [`CandidateLogicalASAPDAGs`]: crate::replacement::CandidateLogicalASAPDAGs
 //! [`TargetSubDAGCandidates`]: crate::replacement::TargetSubDAGCandidates
 
 use std::collections::HashMap;
@@ -191,7 +191,7 @@ use asap_types::pre_asap::cse::{structural_hash, HashCache};
 use asap_types::pre_asap::query_expr::QueryExpr;
 
 use crate::replacement::{
-    self, PlanSpace, Replacement, ReplacementStrategy, TargetSubDAGCandidates,
+    self, CandidateLogicalASAPDAGs, Replacement, ReplacementStrategy, TargetSubDAGCandidates,
 };
 
 /// Which kind of replacement a [`ReplacementExplanation`] is about.
@@ -287,7 +287,7 @@ pub fn explain_replacements_with<'s, Id: Display>(
         .map(|(id, expr)| (id.to_string(), Rc::new(expr)))
         .collect();
     let space = replacement::search_workload_with(ided, strategies);
-    findings_from_plan_space(&space)
+    findings_from_candidate_logical_asap_dags(&space)
 }
 
 /// Translate every discovered [`TargetSubDAGCandidates`] in `space` into zero, one, or two
@@ -301,7 +301,9 @@ pub fn explain_replacements_with<'s, Id: Display>(
 /// so this function (and [`collect_locations`], which formats `id` with
 /// [`std::fmt::Debug`] for the breadcrumb text) doesn't need its own generic
 /// `Id` bound.
-fn findings_from_plan_space(space: &PlanSpace<String>) -> Vec<ReplacementExplanation> {
+fn findings_from_candidate_logical_asap_dags(
+    space: &CandidateLogicalASAPDAGs<String>,
+) -> Vec<ReplacementExplanation> {
     let locations = collect_locations(&space.roots);
     // One cache for the whole pass, mirroring `dag_export::export`'s own
     // `HashCache` reuse — this is a bottom-up pass over every discovered
@@ -425,7 +427,7 @@ fn is_sketch_realization(node: &SummaryNode) -> bool {
 // ── location breadcrumbs ─────────────────────────────────────────────────
 
 /// Build `location` text for every distinct `TargetSubDAG` reachable from
-/// `roots` — see the module docs' "One thing `PlanSpace` doesn't carry"
+/// `roots` — see the module docs' "One thing `CandidateLogicalASAPDAGs` doesn't carry"
 /// section for why this module needs its own small walk for this. Returns
 /// every breadcrumb path that reaches a given `Rc`, not just the first: a
 /// shared node referenced from two workload roots (or two branches of one

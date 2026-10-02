@@ -94,7 +94,7 @@
 //! `share_common_subtrees`-actual sharing — see `dag_export`'s module doc).
 //! Stage 4 (issue #237) is implemented in
 //! `asap_aware_mapping::cost_model::CostModel::cse_share_decision`, called
-//! from `asap_aware_mapping::replacement::PlanSpace::cost_sorted` (via that
+//! from `asap_aware_mapping::replacement::CandidateLogicalASAPDAGs::cost_sorted` (via that
 //! module's own `cse_preference`) — a real, Volcano/Cascades-style cost
 //! comparison over what this module detects, not a fixed rule. See
 //! `docs/design_docs/cost-model.md`. This module's own

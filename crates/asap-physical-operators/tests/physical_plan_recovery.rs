@@ -71,7 +71,7 @@ fn recovery_retains_selected_operator_and_rejects_invalid_contracts() {
 
 #[test]
 fn candidate_recovery_preserves_materialization_boundary() {
-    use asap_physical_operators::physical_planner::PhysicalCandidate;
+    use asap_physical_operators::physical_planner::PhysicalASAPDAG;
     let precompute = sorted();
     let output = InputContract::bounded(precompute.output_contract(1).unwrap().schema);
     let query = CompiledPhysicalDag::from_operators(
@@ -86,13 +86,13 @@ fn candidate_recovery_preserves_materialization_boundary() {
         vec![2],
     )
     .unwrap();
-    let candidate = PhysicalCandidate {
+    let candidate = PhysicalASAPDAG {
         precompute: Some(precompute),
         query,
         materialized_outputs: BTreeMap::from([(1, output)]),
     };
     let bytes = serde_json::to_vec(&candidate).unwrap();
-    let restored = serde_json::from_slice::<PhysicalCandidate>(&bytes).unwrap();
+    let restored = serde_json::from_slice::<PhysicalASAPDAG>(&bytes).unwrap();
     assert_eq!(restored.precompute.as_ref().unwrap().roots(), &[1]);
     assert_eq!(restored.query.roots(), &[2]);
     assert_eq!(serde_json::to_vec(&restored).unwrap(), bytes);
@@ -100,6 +100,6 @@ fn candidate_recovery_preserves_materialization_boundary() {
     wire["materialized_outputs"]["1"]["schema"]["fields"][0]["dtype"] =
         serde_json::json!({"Plain":"utf8"});
     assert!(
-        serde_json::from_slice::<PhysicalCandidate>(&serde_json::to_vec(&wire).unwrap()).is_err()
+        serde_json::from_slice::<PhysicalASAPDAG>(&serde_json::to_vec(&wire).unwrap()).is_err()
     );
 }

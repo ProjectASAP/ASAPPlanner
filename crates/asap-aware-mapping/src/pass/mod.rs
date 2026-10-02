@@ -2,7 +2,7 @@
 //!
 //! An [`OptimizationPass`] is the whole optimization stage behind one
 //! signature: pre-ASAP IR in, post-ASAP DAG out. The trait deliberately names
-//! none of this crate's two-phase vocabulary — no `PlanSpace`, no
+//! none of this crate's two-phase vocabulary — no `CandidateLogicalASAPDAGs`, no
 //! `TargetSubDAGCandidates`, no `ReplacementStrategy` — so an algorithm with no
 //! candidate-generation phase at all (a greedy MQO loop, say) can implement it
 //! without pretending to have phases it does not have. The shipped algorithm is

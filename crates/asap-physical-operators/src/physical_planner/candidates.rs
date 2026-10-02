@@ -5,8 +5,8 @@ use super::*;
 /// it during optimization and deployment. Stored outputs have no storage identity.
 /// Deserialization validates the producer/reader boundary.
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
-#[serde(try_from = "UncheckedCandidate")]
-pub struct PhysicalCandidate {
+#[serde(try_from = "UncheckedPhysicalASAPDAG")]
+pub struct PhysicalASAPDAG {
     pub precompute: Option<CompiledPhysicalDag>,
     pub query: CompiledPhysicalDag,
     pub materialized_outputs: BTreeMap<NodeId, InputContract>,
@@ -25,7 +25,7 @@ pub fn compile_candidate(
     inputs: BTreeMap<NodeId, InputContract>,
     roots: &[NodeId],
     frontier: &[NodeId],
-) -> Result<PhysicalCandidate, Error> {
+) -> Result<PhysicalASAPDAG, Error> {
     cut_candidate(&compile(dag, inputs, roots)?, frontier)
 }
 
@@ -36,9 +36,9 @@ pub fn compile_candidate(
 pub fn cut_candidate(
     compiled: &CompiledPhysicalDag,
     frontier: &[NodeId],
-) -> Result<PhysicalCandidate, Error> {
+) -> Result<PhysicalASAPDAG, Error> {
     if frontier.is_empty() {
-        return Ok(PhysicalCandidate {
+        return Ok(PhysicalASAPDAG {
             precompute: None,
             query: compiled.clone(),
             materialized_outputs: BTreeMap::new(),
@@ -79,7 +79,7 @@ pub fn cut_candidate(
             "frontier contains an output shadowed by another boundary",
         ));
     }
-    Ok(PhysicalCandidate {
+    Ok(PhysicalASAPDAG {
         precompute: Some(precompute),
         query,
         materialized_outputs,
@@ -196,7 +196,7 @@ pub fn compile_candidates(
     inputs: BTreeMap<NodeId, InputContract>,
     roots: &[NodeId],
     frontiers: &[Vec<NodeId>],
-) -> Vec<Result<PhysicalCandidate, Error>> {
+) -> Vec<Result<PhysicalASAPDAG, Error>> {
     match compile(dag, inputs, roots) {
         Ok(compiled) => frontiers
             .iter()
@@ -216,7 +216,7 @@ pub struct CandidateCost {
     pub total_cost: f64,
 }
 
-pub struct CandidateSelection<T = PhysicalCandidate> {
+pub struct CandidateSelection<T = PhysicalASAPDAG> {
     pub candidate: T,
     pub candidate_index: usize,
     pub cost: CandidateCost,
@@ -271,14 +271,14 @@ pub fn select_candidate<T>(
 
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
-struct UncheckedCandidate {
+struct UncheckedPhysicalASAPDAG {
     precompute: Option<CompiledPhysicalDag>,
     query: CompiledPhysicalDag,
     materialized_outputs: BTreeMap<NodeId, InputContract>,
 }
-impl TryFrom<UncheckedCandidate> for PhysicalCandidate {
+impl TryFrom<UncheckedPhysicalASAPDAG> for PhysicalASAPDAG {
     type Error = Error;
-    fn try_from(candidate: UncheckedCandidate) -> Result<Self, Error> {
+    fn try_from(candidate: UncheckedPhysicalASAPDAG) -> Result<Self, Error> {
         let result = Self {
             precompute: candidate.precompute,
             query: candidate.query,
@@ -289,7 +289,7 @@ impl TryFrom<UncheckedCandidate> for PhysicalCandidate {
     }
 }
 
-impl PhysicalCandidate {
+impl PhysicalASAPDAG {
     /// Validate the physical handoff, including the producer/reader boundary.
     pub fn validate(&self) -> Result<(), Error> {
         self.query.validate()?;

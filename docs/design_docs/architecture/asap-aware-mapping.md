@@ -7,7 +7,7 @@ ASAP-aware mapping decides **whether and how a query intent can be answered usin
 Given a logical query plan, the mapping layer explores alternative plans that may use sketches, exact summaries, shared computation, roll-ups, semantic rewrites, or combinations of these techniques.
 
 Candidate search takes canonical **Pre-ASAP query roots** and produces
-`PlanSpace`, a compact set of **candidate Post-ASAP DAGs**. Ranking, selection,
+`CandidateLogicalASAPDAGs`, a compact set of **candidate Post-ASAP DAGs**. Ranking, selection,
 and summary-maintenance lifecycle decisions are subsequent operations over it;
 see [input, output, and workflows](input-output-workflow.md).
 
@@ -71,7 +71,7 @@ Check compatibility between replacement sub-DAGs
 Apply applicable accuracy and semantic checks
         |
         v
-PlanSpace: compact candidate Post-ASAP DAGs
+CandidateLogicalASAPDAGs: compact candidate Post-ASAP DAGs
         |
         +--> inspect / rank
         +--> select and assemble logical DAGs
