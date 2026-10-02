@@ -353,7 +353,7 @@ use asap_types::post_asap::{
     ExactOperationSchemaError, ExactParams, ExecutionDataState, ExecutionDataStateError,
     ExecutionTiming, Field, FieldDataType, GroupingStrategy, NonNegativeWeightProof, SamplingKind,
     SamplingParams, Schema, SketchAlgorithm, SketchKind, SketchParams,
-    SketchStatistic as PostAsapSketchQuery, StatModelKind, StatModelParams, SummaryExpr,
+    SketchStatistic as PostAsapSketchStatistic, StatModelKind, StatModelParams, SummaryExpr,
     SummaryInputExpr, SummaryNode, SummaryUpdate, ValueOperation, WaveletKind, WaveletParams,
     WeightDomain,
 };
@@ -2257,7 +2257,7 @@ fn ddsketch_ratio_operand_target(target: &AccuracyTarget) -> Option<AccuracyTarg
 fn ddsketch_quantile_alpha(node: &SummaryNode) -> Option<f64> {
     let SummaryExpr::SummaryEstimate {
         summary_input,
-        query: PostAsapSketchQuery::Quantile { .. },
+        query: PostAsapSketchStatistic::Quantile { .. },
     } = &node.expr
     else {
         return None;
@@ -2874,7 +2874,7 @@ fn construct_summary_agg(
                     | SketchParams::CountSketchWithHeap { heap_size, .. } => *heap_size,
                     _ => unreachable!(),
                 };
-                return PostAsapSketchQuery::TopK {
+                return PostAsapSketchStatistic::TopK {
                     k: capacity as usize,
                 };
             }
@@ -3534,7 +3534,7 @@ fn schema_column_ref(child: &QueryExpr, index: usize) -> Option<ColumnRef> {
 /// exact child) — unknown, never exact.
 fn compose_guarantee(
     family: &FieldDataType,
-    query: Option<&PostAsapSketchQuery>,
+    query: Option<&PostAsapSketchStatistic>,
     child: &SummaryNode,
     intent: &AggIntent,
     accuracy: &dyn AccuracyModel,
@@ -3566,7 +3566,7 @@ fn compose_guarantee(
             )
         }
         (_, Some(query)) => (
-            if matches!(query, PostAsapSketchQuery::TopK { .. }) {
+            if matches!(query, PostAsapSketchStatistic::TopK { .. }) {
                 CompositionOperator::TopKSelection
             } else {
                 CompositionOperator::ApproximateAggregate
@@ -3690,14 +3690,14 @@ fn readout(
     intent: &AggIntent,
     input: &SummaryUpdate,
     cost_model: &dyn CostModel,
-) -> PostAsapSketchQuery {
+) -> PostAsapSketchStatistic {
     match intent {
-        AggIntent::Quantile { q, .. } => PostAsapSketchQuery::Quantile { q: *q },
-        AggIntent::Cardinality { .. } => PostAsapSketchQuery::Cardinality,
-        AggIntent::FrequencyL2 { .. } => PostAsapSketchQuery::FrequencyL2,
-        AggIntent::FrequencyEntropy { .. } => PostAsapSketchQuery::FrequencyEntropy,
-        AggIntent::TopK { k, .. } => PostAsapSketchQuery::TopK { k: *k },
-        AggIntent::Count { .. } => PostAsapSketchQuery::PointCount {
+        AggIntent::Quantile { q, .. } => PostAsapSketchStatistic::Quantile { q: *q },
+        AggIntent::Cardinality { .. } => PostAsapSketchStatistic::Cardinality,
+        AggIntent::FrequencyL2 { .. } => PostAsapSketchStatistic::FrequencyL2,
+        AggIntent::FrequencyEntropy { .. } => PostAsapSketchStatistic::FrequencyEntropy,
+        AggIntent::TopK { k, .. } => PostAsapSketchStatistic::TopK { k: *k },
+        AggIntent::Count { .. } => PostAsapSketchStatistic::PointCount {
             key: match &input.weight {
                 SummaryInputExpr::Column(col) => col.clone(),
                 SummaryInputExpr::Constant(1.0) => ColumnRef::SampleValue,
@@ -9849,7 +9849,7 @@ mod tests {
         else {
             panic!("expected SummaryEstimate root, got {:?}", root.expr);
         };
-        assert!(matches!(query, PostAsapSketchQuery::Quantile { q } if *q == 0.99));
+        assert!(matches!(query, PostAsapSketchStatistic::Quantile { q } if *q == 0.99));
         // Estimate edge: plain row shape — group key + Float64 answer.
         assert_eq!(
             field(&root.schema, "quantile_0_99").dtype,
@@ -9985,10 +9985,10 @@ mod tests {
             ext_kind: &str,
             payload: &serde_json::Value,
             _col: &ColumnRef,
-        ) -> PostAsapSketchQuery {
+        ) -> PostAsapSketchStatistic {
             assert_eq!(ext_kind, "frequency");
             let value = payload["item"].as_str().map(str::to_string);
-            PostAsapSketchQuery::PointCount {
+            PostAsapSketchStatistic::PointCount {
                 key: ColumnRef::Named("item".into()),
                 value,
             }
@@ -10027,7 +10027,7 @@ mod tests {
         };
         assert!(matches!(
             query,
-            PostAsapSketchQuery::PointCount { key: ColumnRef::Named(k), value: Some(v) }
+            PostAsapSketchStatistic::PointCount { key: ColumnRef::Named(k), value: Some(v) }
                 if k == "item" && v == "checkout"
         ));
 
@@ -10375,7 +10375,7 @@ mod tests {
             &self,
             op: &CompositionOperator,
             _family: &FieldDataType,
-            _query: Option<&PostAsapSketchQuery>,
+            _query: Option<&PostAsapSketchStatistic>,
         ) -> PropagationStats {
             if matches!(op, CompositionOperator::TopKSelection) {
                 PropagationStats {
@@ -10470,7 +10470,7 @@ mod tests {
         else {
             panic!("expected Top-K readout")
         };
-        assert!(matches!(query, PostAsapSketchQuery::TopK { k: 10 }));
+        assert!(matches!(query, PostAsapSketchStatistic::TopK { k: 10 }));
         let SummaryExpr::SummaryAgg {
             child,
             family,
@@ -10546,7 +10546,7 @@ mod tests {
         else {
             panic!("expected Top-K readout")
         };
-        assert!(matches!(query, PostAsapSketchQuery::TopK { k: 5 }));
+        assert!(matches!(query, PostAsapSketchStatistic::TopK { k: 5 }));
         let SummaryExpr::SummaryAgg { child, input, .. } = &summary_input.expr else {
             panic!("expected fused summary aggregation")
         };
@@ -10767,7 +10767,7 @@ mod tests {
         fn local_guarantee(
             &self,
             family: &FieldDataType,
-            query: &PostAsapSketchQuery,
+            query: &PostAsapSketchStatistic,
         ) -> Option<ResultGuarantee> {
             DefaultAccuracyModel.local_guarantee(family, query)
         }
