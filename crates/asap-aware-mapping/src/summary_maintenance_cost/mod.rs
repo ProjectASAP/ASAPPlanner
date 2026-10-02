@@ -7,14 +7,13 @@
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
+use asap_types::ir::{ASAPOp, NonASAPOp, Operator, OperatorNode, Predicate};
 use asap_types::post_asap::{
     BoundExpr, ErrorMetric, ExactKind, GuaranteeSource, ProbabilityExpr, ResultGuarantee,
-    SketchAlgorithm, SummaryExpr, FieldDataType, SummaryMaintenanceLifecycle,
-    SummaryMaintenanceLifecycleGuarantee, SummaryNode, SummaryWindowFramework,
+    SketchAlgorithm, FieldDataType, SummaryMaintenanceLifecycle,
+    SummaryMaintenanceLifecycleGuarantee, SummaryWindowFramework,
 };
-use asap_types::pre_asap::{
-    agg_intent::AggIntent, CompareOpKind, InfoMatcher, Predicate, QueryExpr, Source,
-};
+use asap_types::pre_asap::{agg_intent::AggIntent, CompareOpKind, InfoMatcher, Source};
 use asap_types::types::AccuracyTarget;
 use asap_types::workload::{DataArrival, DataWorkload, QueryRecurrence, RepeatedDemand};
 use serde::{Deserialize, Serialize};

@@ -43,7 +43,7 @@
 //! [`TargetSubDAGCandidates`]s into that shape:
 //!
 //! - [`ExplanationKind::SketchApproximation`] — the `TargetSubDAG`'s
-//!   candidate list contains at least one [`Replacement::Summary`] that
+//!   candidate list contains at least one summary-realization [`Replacement::Subtree`] that
 //!   actually realizes a sketch family (`FieldDataType::Sketch`), i.e.
 //!   [`SketchAlgorithmStrategy`] found something to offer beyond whatever
 //!   exact/pass-through candidate [`crate::replacement`]'s own
@@ -134,7 +134,7 @@
 //! ## One thing [`PlanSpace`] doesn't carry that this module still needs:
 //! human-readable `location` text
 //!
-//! [`TargetSubDAGCandidates`]/[`PlanSpace`] deliberately track only `Rc<QueryExpr>`
+//! [`TargetSubDAGCandidates`]/[`PlanSpace`] deliberately track only `Rc<OperatorNode>`
 //! pointer identity — the currency the search itself needs — not
 //! caller-facing prose. [`ReplacementExplanation::location`] is prose (a
 //! breadcrumb like `root "dash_a" > lhs`), so this module keeps one small,
@@ -161,8 +161,8 @@
 //!
 //! | Catalog entry | Status | Where a future `ExplanationKind` would come from |
 //! |---|---|---|
-//! | Semantic-equivalent rewriting (e.g. `avg` → `sum`/`count`) | [`AvgToSumOverCountStrategy`](crate::rewrite::AvgToSumOverCountStrategy) exists and is wired into `default_strategies()` (issue #253) — but still no `ExplanationKind` of its own below, since this table is about *direct* findings for a catalog entry, and this strategy's whole point is indirect: its `Replacement::Rewrite` candidate exposes `sum`/`count` as independently bindable discovered targets, which can then earn `CommonSubexpressionReuse` findings when the workload actually reuses them | A dedicated variant would need `findings_from_plan_space` to recognize a `LogicalRewrite`-provenance candidate as a finding in its own right, not just rely on what it exposes downstream |
-//! | Roll-ups (fine-to-coarse group-by reuse) | [`RollupStrategy`](crate::rollup::RollupStrategy), derived from workload siblings after CSE/target discovery (issue #254) | Any `Replacement::Rewrite` candidate that rolls a coarse aggregate up from a compatible finer aggregate |
+//! | Semantic-equivalent rewriting (e.g. `avg` → `sum`/`count`) | [`AvgToSumOverCountStrategy`](crate::rewrite::AvgToSumOverCountStrategy) exists and is wired into `default_strategies()` (issue #253) — but still no `ExplanationKind` of its own below, since this table is about *direct* findings for a catalog entry, and this strategy's whole point is indirect: its `Replacement::Subtree` rewrite candidate exposes `sum`/`count` as independently bindable discovered targets, which can then earn `CommonSubexpressionReuse` findings when the workload actually reuses them | A dedicated variant would need `findings_from_plan_space` to recognize a `LogicalRewrite`-provenance candidate as a finding in its own right, not just rely on what it exposes downstream |
+//! | Roll-ups (fine-to-coarse group-by reuse) | [`RollupStrategy`](crate::rollup::RollupStrategy), derived from workload siblings after CSE/target discovery (issue #254) | Any `Replacement::Subtree` rewrite candidate that rolls a coarse aggregate up from a compatible finer aggregate |
 //! | Wavelets/OMP | Params type exists (`WaveletKind`/`WaveletParams`), reachable only via a deployment `CostModel::realize_extension` (no core `AggIntent` dispatch picks it) | A `ReplacementStrategy` that inspects a deployment's own `CostModel`, once some intent shape actually maps to `Realization::Wavelet` |
 //! | Sampling | Same story as Wavelets: `SamplingKind`/`SamplingParams` exist, unreachable from core dispatch | Same hook as Wavelets, for `Realization::Sample` |
 //! | Deep generative compression | No representation at all — no `Realization`/`FieldDataType` variant | Needs a new summary family added to `asap_types::post_asap` first |
@@ -175,8 +175,7 @@
 //! [`ReplacementStrategy`]: crate::replacement::ReplacementStrategy
 //! [`ReplacementSubDAG`]: crate::replacement::ReplacementSubDAG
 //! [`Replacement`]: crate::replacement::Replacement
-//! [`Replacement::Summary`]: crate::replacement::Replacement::Summary
-//! [`Replacement::Rewrite`]: crate::replacement::Replacement::Rewrite
+//! [`Replacement::Subtree`]: crate::replacement::Replacement::Subtree
 //! [`SketchAlgorithmStrategy`]: crate::replacement::SketchAlgorithmStrategy
 //! [`SharedSubtreeStrategy`]: crate::replacement::SharedSubtreeStrategy
 //! [`PlanSpace`]: crate::replacement::PlanSpace
@@ -186,9 +185,9 @@ use std::collections::HashMap;
 use std::fmt::Display;
 use std::rc::Rc;
 
-use asap_types::post_asap::{SummaryExpr, FieldDataType, SummaryNode};
-use asap_types::pre_asap::cse::{structural_hash, HashCache};
-use asap_types::pre_asap::query_expr::QueryExpr;
+use asap_types::ir::cse::{structural_hash, HashCache};
+use asap_types::ir::{ASAPOp, Operator, OperatorNode};
+use asap_types::post_asap::FieldDataType;
 
 use crate::replacement::{
     self, PlanSpace, Replacement, ReplacementStrategy, TargetSubDAGCandidates,
@@ -206,7 +205,7 @@ use crate::replacement::{
 #[non_exhaustive]
 pub enum ExplanationKind {
     /// A `TargetSubDAG`'s candidate list contains at least one
-    /// [`Replacement::Summary`] that realizes a sketch family —
+    /// [`Replacement::Subtree`] that realizes a sketch family —
     /// [`crate::replacement::SketchAlgorithmStrategy`] found a genuine sketch
     /// alternative for this `Aggregate`, beyond whatever exact/pass-through
     /// candidate `crate::replacement`'s own `realizations_for_intent` would
@@ -222,8 +221,8 @@ pub enum ExplanationKind {
     /// [`Replacement::ExactComposition`] —
     /// [`crate::exact_composition::ExactCompositionStrategy`] found an exact
     /// operator that can be composed with a summary plan across an explicit
-    /// update/readout boundary instead of collapsing the whole tree into
-    /// `KeepPreAsap` (issue #171).
+    /// update/readout boundary instead of keeping the whole tree as it is
+    /// (issue #171).
     ExactComposition,
 }
 
@@ -233,11 +232,11 @@ pub enum ExplanationKind {
 /// not machine parsing — literally the matching candidate's own
 /// [`crate::replacement::ReplacementSubDAG::rationale`]).
 ///
-/// `node_hash` is [`structural_hash`](asap_types::pre_asap::cse::structural_hash)
+/// `node_hash` is [`structural_hash`](asap_types::ir::cse::structural_hash)
 /// of the `TargetSubDAG`'s own `target` subtree — the same function, on the
-/// same `Rc<QueryExpr>` shape, that [`asap_types::dag_export::DagNode::hash`]
+/// same `Rc<OperatorNode>` shape, that [`asap_types::dag_export::DagNode::hash`]
 /// is computed with. A downstream consumer that independently exported the
-/// same `QueryExpr` (e.g. via `asap_types::dag_export::export`) can match
+/// same node (e.g. via `asap_types::dag_export::export`) can match
 /// this explanation to a `DagNode` by first comparing hashes and then
 /// confirming structural equality with [`ReplacementExplanation::target`].
 #[derive(Debug, Clone, PartialEq)]
@@ -249,7 +248,7 @@ pub struct ReplacementExplanation {
     /// The exact target expression the explanation describes. Reporting
     /// integrations use this together with `node_hash`: the hash narrows the
     /// search, and structural equality makes the final match collision-safe.
-    pub target: Rc<QueryExpr>,
+    pub target: Rc<OperatorNode>,
 }
 
 /// Explain every replacement [`crate::replacement::search_workload`] finds
@@ -265,7 +264,7 @@ pub struct ReplacementExplanation {
 /// candidate-plan space, then reads findings off it — see the module docs'
 /// "The reframing" section for what that translation actually checks.
 pub fn explain_replacements<Id: Display>(
-    roots: Vec<(Id, QueryExpr)>,
+    roots: Vec<(Id, Rc<OperatorNode>)>,
 ) -> Vec<ReplacementExplanation> {
     explain_replacements_with(roots, &replacement::default_strategies())
 }
@@ -279,12 +278,12 @@ pub fn explain_replacements<Id: Display>(
 ///
 /// [`ReplacementStrategy`]: crate::replacement::ReplacementStrategy
 pub fn explain_replacements_with<'s, Id: Display>(
-    roots: Vec<(Id, QueryExpr)>,
+    roots: Vec<(Id, Rc<OperatorNode>)>,
     strategies: &[Box<dyn ReplacementStrategy + 's>],
 ) -> Vec<ReplacementExplanation> {
-    let ided: Vec<(String, Rc<QueryExpr>)> = roots
+    let ided: Vec<(String, Rc<OperatorNode>)> = roots
         .into_iter()
-        .map(|(id, expr)| (id.to_string(), Rc::new(expr)))
+        .map(|(id, expr)| (id.to_string(), expr))
         .collect();
     let space = replacement::search_workload_with(ided, strategies);
     findings_from_plan_space(&space)
@@ -373,7 +372,7 @@ fn sketch_finding_reason(group: &TargetSubDAGCandidates) -> Option<String> {
         .candidates
         .iter()
         .filter(
-            |c| matches!(&c.replacement, Replacement::Summary(node) if is_sketch_realization(node)),
+            |c| matches!(&c.replacement, Replacement::Subtree(node) if is_sketch_realization(node)),
         )
         .map(|c| c.rationale.as_str())
         .collect();
@@ -385,7 +384,7 @@ fn sketch_finding_reason(group: &TargetSubDAGCandidates) -> Option<String> {
 }
 
 /// Does `group` have two or more consumers *and* a "build once and share"
-/// candidate (the [`Replacement::Rewrite`] whose `Rc` is the group's own
+/// candidate (the [`Replacement::Subtree`] whose `Rc` is the group's own
 /// `target`) in its candidate list? If so, the finding's `reason` is that
 /// candidate's own `rationale`.
 fn shared_subexpr_finding_reason(group: &TargetSubDAGCandidates) -> Option<String> {
@@ -396,7 +395,7 @@ fn shared_subexpr_finding_reason(group: &TargetSubDAGCandidates) -> Option<Strin
         .candidates
         .iter()
         .find(
-            |c| matches!(&c.replacement, Replacement::Rewrite(rc) if Rc::ptr_eq(rc, &group.target)),
+            |c| matches!(&c.replacement, Replacement::Subtree(rc) if Rc::ptr_eq(rc, &group.target)),
         )
         .map(|c| c.rationale.clone())
 }
@@ -407,7 +406,7 @@ fn shared_subexpr_finding_reason(group: &TargetSubDAGCandidates) -> Option<Strin
 /// yes/no fact (a candidate's own `rationale` already names the specific
 /// `SketchKind`/`SketchAlgorithm` for a finding's `reason` text), so unlike
 /// `replacement.rs`'s counterpart this returns `bool`, not the kind itself.
-fn is_sketch_realization(node: &SummaryNode) -> bool {
+fn is_sketch_realization(node: &OperatorNode) -> bool {
     if node
         .guarantee
         .as_ref()
@@ -415,9 +414,13 @@ fn is_sketch_realization(node: &SummaryNode) -> bool {
     {
         return false;
     }
-    match &node.expr {
-        SummaryExpr::SummaryEstimate { summary_input, .. } => is_sketch_realization(summary_input),
-        SummaryExpr::SummaryAgg { family, .. } => matches!(family, FieldDataType::Sketch(..)),
+    match &node.operator {
+        Operator::ASAP(ASAPOp::SummaryEstimate { summary_input, .. }) => {
+            is_sketch_realization(summary_input)
+        }
+        Operator::ASAP(ASAPOp::SummaryAgg { family, .. }) => {
+            matches!(family, FieldDataType::Sketch(..))
+        }
         _ => false,
     }
 }
@@ -430,8 +433,10 @@ fn is_sketch_realization(node: &SummaryNode) -> bool {
 /// every breadcrumb path that reaches a given `Rc`, not just the first: a
 /// shared node referenced from two workload roots (or two branches of one
 /// root) needs both breadcrumbs in its finding's `location`, not just one.
-fn collect_locations(roots: &[(String, Rc<QueryExpr>)]) -> HashMap<*const QueryExpr, Vec<String>> {
-    let mut locations: HashMap<*const QueryExpr, Vec<String>> = HashMap::new();
+fn collect_locations(
+    roots: &[(String, Rc<OperatorNode>)],
+) -> HashMap<*const OperatorNode, Vec<String>> {
+    let mut locations: HashMap<*const OperatorNode, Vec<String>> = HashMap::new();
     for (id, root) in roots {
         visit(root, format!("root {id:?}"), &mut locations);
     }
@@ -442,9 +447,9 @@ fn collect_locations(roots: &[(String, Rc<QueryExpr>)]) -> HashMap<*const QueryE
 /// through its children. A shared ancestor is intentionally traversed once
 /// per incoming path so every descendant receives every valid breadcrumb.
 fn visit(
-    node: &Rc<QueryExpr>,
+    node: &Rc<OperatorNode>,
     label: String,
-    locations: &mut HashMap<*const QueryExpr, Vec<String>>,
+    locations: &mut HashMap<*const OperatorNode, Vec<String>>,
 ) {
     let ptr = Rc::as_ptr(node);
     locations.entry(ptr).or_default().push(label.clone());
@@ -453,20 +458,25 @@ fn visit(
 
 /// `node`'s own **relational-skeleton** operator children — the same scope
 /// `crate::replacement`'s own target-discovery `walk_children` (and
-/// `asap_types::pre_asap::cse::share_common_subtrees`'s `rebuild_children`)
-/// use. Exhaustive over every `QueryExpr` variant: a new variant fails to
-/// compile here until this match is extended too.
+/// `asap_types::ir::cse::share_common_subtrees`) use. Exhaustive over every
+/// `NonASAPOp` variant: a new variant fails to compile here until this match
+/// is extended too. An ASAP node never occurs in a workload root.
 fn visit_children(
-    node: &QueryExpr,
+    node: &OperatorNode,
     label: &str,
-    locations: &mut HashMap<*const QueryExpr, Vec<String>>,
+    locations: &mut HashMap<*const OperatorNode, Vec<String>>,
 ) {
-    use QueryExpr::*;
-    match node {
-        Scan { .. } | PromqlScalarBridge(_) | EvalTimestamp | CurrentTimestamp => {}
-        PromqlVectorFromScalar(c) | PromqlScalarFromVector(c) => {
+    use asap_types::ir::{NonASAPOp::*, ScalarExpr};
+    let Operator::NonASAP(op) = &node.operator else {
+        return;
+    };
+    match op {
+        Scan { .. } | Values { .. } => {}
+        ScalarBridge(ScalarExpr::PromqlScalarFromVector(c))
+        | PromqlVectorFromScalar(ScalarExpr::PromqlScalarFromVector(c)) => {
             visit(c, format!("{label} > child"), locations)
         }
+        ScalarBridge(_) | PromqlVectorFromScalar(_) => {}
         PromqlRelabel { child, .. }
         | PromqlInfoEnrich { child, .. }
         | PromqlSeriesSample { child, .. }
@@ -482,7 +492,7 @@ fn visit_children(
         | Limit { child, .. } => visit(child, format!("{label} > child"), locations),
         Concat { children, .. } => {
             for (i, c) in children.iter().enumerate() {
-                visit_children(c, &format!("{label} > concat[{i}]"), locations);
+                visit(c, format!("{label} > concat[{i}]"), locations);
             }
         }
         Join { left, right, .. } | SetOp { left, right, .. } => {
@@ -493,19 +503,6 @@ fn visit_children(
             visit(lhs, format!("{label} > lhs"), locations);
             visit(rhs, format!("{label} > rhs"), locations);
         }
-        Column(_)
-        | Literal(_)
-        | Compare { .. }
-        | BoolAnd(_)
-        | BoolOr(_)
-        | Not(_)
-        | IsNull(_)
-        | IsNotNull(_)
-        | Cast { .. }
-        | InList { .. }
-        | FunctionCall { .. }
-        | Arithmetic { .. }
-        | Case { .. } => {}
     }
 }
 

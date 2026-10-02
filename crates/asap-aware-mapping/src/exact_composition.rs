@@ -7,9 +7,11 @@
 //! summary readout, or where a maintained summary consumes the values of an
 //! exact function that has no accumulator realization.
 //!
-//! Both cases use the general [`SummaryExpr::ValueOperation`] node. Its
-//! semantic [`ValueOperation`] is independent from [`ExecutionTiming`], so
-//! adding a function does not require adding a new physical node type.
+//! Both cases use an ordinary `NonASAPOp::Aggregate` node over the child
+//! plan. The node carries no timing: it runs when its consumer runs, so the
+//! same operator serves both placements and adding a function does not
+//! require adding a new physical node type. [`OperationPlacement`] is the
+//! search-time placement choice.
 //!
 //! ## Reference, don't select
 //!
@@ -18,7 +20,7 @@
 //! **not** pick that child itself (the way `construct_summary_agg`'s
 //! `realize_child` takes the head of the child's own ranking): a
 //! [`Replacement::ExactComposition`] carries only the child *target*
-//! (`ExactComposition::child_target`, the same `Rc<QueryExpr>` whose
+//! (`ExactComposition::child_target`, the same `Rc<OperatorNode>` whose
 //! `TargetSubDAGCandidates` in `PlanSpace` already holds every candidate for it). It is
 //! [`PlanSpace::global_selection`](crate::replacement::PlanSpace::global_selection)
 //! that commits the compatible parent/child pair — so the child's own
@@ -58,18 +60,19 @@
 //! - Decide whether a composition is *worth it*: that is
 //!   `global_selection`'s job, using the issue's cost-units-per-second
 //!   formulas (see `crate::cost_model::read_operation_plan_cost_rate` and
-//!   siblings). Missing statistics keep the conservative `KeepPreAsap`.
+//!   siblings). Missing statistics keep the conservative kept subtree.
 
 use std::rc::Rc;
 
-use asap_types::post_asap::execution_data_state::validate_execution_data_states_at;
+use asap_types::ir::timing::{planned_data_state, validate_default};
+use asap_types::ir::{NonASAPOp, Operator, OperatorNode, Predicate};
+use asap_types::post_asap::execution_data_state::lift_plain;
 use asap_types::post_asap::{
-    exact_operation_output_schema, produced_data_state, AccuracyError, ExactOperation,
-    ExecutionDataState, ExecutionDataStateError, ResultGuarantee, SummaryExpr, SummaryNode,
-    Schema, ValueOperation,
+    AccuracyError, ExactOperationSchemaError, ExecutionDataState, ExecutionDataStateError,
+    ResultGuarantee, Schema,
 };
 use asap_types::pre_asap::agg_intent::AggIntent;
-use asap_types::pre_asap::query_expr::{QueryExpr, Reduction};
+use asap_types::pre_asap::query_expr::{aggregate_output_schema, Reduction};
 use asap_types::types::AccuracyTarget;
 
 use crate::cost_model::CostModel;
@@ -84,6 +87,55 @@ use asap_types::post_asap::ExecutionTiming;
 
 /// Which side of the maintenance/read boundary an [`ExactComposition`]'s
 /// exact function executes on.
+/// The exact function an [`ExactComposition`] applies: the parameters of
+/// the `NonASAPOp::Aggregate` node the composition builds over its child.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ExactOperation {
+    Aggregate {
+        reduction: Reduction,
+        measures: Vec<AggIntent>,
+        output_names: Vec<String>,
+        having: Option<Predicate>,
+    },
+}
+
+impl ExactOperation {
+    /// Output schema of this operation over a child whose edge carries
+    /// `input` — the same canonical derivation the pre-ASAP `Aggregate`
+    /// node uses. `Err` when the child carries non-plain state the operator
+    /// cannot read.
+    pub fn output_schema(&self, input: &Schema) -> Result<Schema, ExactOperationSchemaError> {
+        if !input.is_all_plain() {
+            return Err(ExactOperationSchemaError::NonPlainInput);
+        }
+        let plain = lift_plain(input);
+        let ExactOperation::Aggregate {
+            reduction,
+            measures,
+            output_names,
+            ..
+        } = self;
+        let out = aggregate_output_schema(&plain, reduction, measures, output_names)?;
+        Ok(lift_plain(&out))
+    }
+
+    fn into_op(self, child: Rc<OperatorNode>) -> NonASAPOp {
+        let ExactOperation::Aggregate {
+            reduction,
+            measures,
+            output_names,
+            having,
+        } = self;
+        NonASAPOp::Aggregate {
+            reduction,
+            measures,
+            output_names,
+            having,
+            child,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum OperationPlacement {
     /// After the child's summary readout.
@@ -120,7 +172,7 @@ pub struct ExactComposition {
     pub op: ExactOperation,
     /// The pre-ASAP child the operator consumes; its `TargetSubDAGCandidates` holds the
     /// candidates `global_selection` may commit this composition with.
-    pub child_target: Rc<QueryExpr>,
+    pub child_target: Rc<OperatorNode>,
     /// The composed node's output schema — the target's own pre-ASAP
     /// output schema, lifted with every column `Plain` (an exact operator
     /// only ever produces plain values).
@@ -128,24 +180,27 @@ pub struct ExactComposition {
 }
 
 impl ExactComposition {
+    /// The data state `child` produces when this operation (its consumer)
+    /// runs at the placement's timing.
+    fn child_data_state(&self, child: &Rc<OperatorNode>) -> ExecutionDataState {
+        planned_data_state(child, self.placement.data_state().timing)
+    }
+
     /// Can `child` legally be this composition's input? Phase legality
-    /// (the child's produced data_state — a `KeepPreAsap` leaf takes the
+    /// (the child's produced data_state — a kept pre-ASAP subtree takes the
     /// phase this edge assigns) plus the plain-operand rule, checked
     /// through the same schema derivation [`Self::compose`] uses.
-    pub fn accepts_child(&self, child: &SummaryNode) -> bool {
-        let phase_ok = match produced_data_state(&child.expr) {
-            None => true,
-            Some(avail) => avail == self.placement.data_state(),
-        };
-        phase_ok && exact_operation_output_schema(&self.op, &child.schema).is_ok()
+    pub fn accepts_child(&self, child: &Rc<OperatorNode>) -> bool {
+        self.child_data_state(child) == self.placement.data_state()
+            && self.op.output_schema(&child.schema).is_ok()
     }
 
     /// Build the composed, data_state-validated node over `child`. Every edge of
     /// the result (including everything beneath `child`) is checked by
-    /// `asap_types::post_asap::validate_execution_data_states`; an illegal
+    /// `asap_types::ir::timing::validate_default`; an illegal
     /// placement is a typed [`RealizationError::ExecutionDataState`], never deferred to a
     /// runtime.
-    pub fn compose(&self, child: Rc<SummaryNode>) -> Result<Rc<SummaryNode>, RealizationError> {
+    pub fn compose(&self, child: Rc<OperatorNode>) -> Result<Rc<OperatorNode>, RealizationError> {
         self.compose_with_accuracy(child, &DefaultAccuracyModel)
     }
 
@@ -154,24 +209,23 @@ impl ExactComposition {
     /// unsupported folds fail closed with a typed accuracy error.
     pub fn compose_with_accuracy(
         &self,
-        child: Rc<SummaryNode>,
+        child: Rc<OperatorNode>,
         accuracy_model: &dyn AccuracyModel,
-    ) -> Result<Rc<SummaryNode>, RealizationError> {
-        if let Some(produced) = produced_data_state(&child.expr) {
-            if produced != self.placement.data_state() {
-                let edge = match self.placement {
-                    OperationPlacement::Maintenance => "ValueOperation.child (maintenance time)",
-                    OperationPlacement::Read => "ValueOperation.child (read time)",
-                };
-                return Err(RealizationError::ExecutionDataState(
-                    ExecutionDataStateError::IllegalChildDataState {
-                        edge,
-                        child: produced,
-                    },
-                ));
-            }
+    ) -> Result<Rc<OperatorNode>, RealizationError> {
+        let produced = self.child_data_state(&child);
+        if produced != self.placement.data_state() {
+            let edge = match self.placement {
+                OperationPlacement::Maintenance => "exact operation child (maintenance time)",
+                OperationPlacement::Read => "exact operation child (read time)",
+            };
+            return Err(RealizationError::ExecutionDataState(
+                ExecutionDataStateError::IllegalChildDataState {
+                    edge,
+                    child: produced,
+                },
+            ));
         }
-        let schema = exact_operation_output_schema(&self.op, &child.schema)?;
+        let schema = self.op.output_schema(&child.schema)?;
         let guarantee = match &child.guarantee {
             None => None,
             Some(input) if input.is_exact() => Some(ResultGuarantee::exact(format!(
@@ -198,23 +252,14 @@ impl ExactComposition {
                 None => None,
             },
         };
-        let timing = match self.placement {
-            OperationPlacement::Read => asap_types::post_asap::ExecutionTiming::QueryTime,
-            OperationPlacement::Maintenance => {
-                asap_types::post_asap::ExecutionTiming::IngestionTime
-            }
-        };
-        let expr = SummaryExpr::ValueOperation {
-            child,
-            operation: ValueOperation::Exact(self.op.clone()),
-            timing,
-        };
-        let node = Rc::new(SummaryNode {
-            expr,
-            schema,
-            guarantee,
-        });
-        validate_execution_data_states_at(&node, self.placement.data_state())?;
+        let node = Rc::new(
+            OperatorNode::with_schema(
+                Operator::NonASAP(self.op.clone().into_op(child)),
+                schema,
+            )
+            .with_guarantee(guarantee),
+        );
+        validate_default(&node, self.placement.data_state().timing)?;
         Ok(node)
     }
 
@@ -259,16 +304,16 @@ fn needs_readout(implementation: &Realization) -> bool {
 
 /// The `(op, child)` of a read-time operation-shaped target, or `None`.
 fn query_time_shape(
-    root: &QueryExpr,
+    root: &OperatorNode,
     cost_model: &dyn CostModel,
-) -> Option<(ExactOperation, Rc<QueryExpr>, AggIntent)> {
-    let QueryExpr::Aggregate {
+) -> Option<(ExactOperation, Rc<OperatorNode>, AggIntent)> {
+    let Some(NonASAPOp::Aggregate {
         reduction,
         measures,
         output_names,
         having: None,
         child,
-    } = root
+    }) = root.non_asap()
     else {
         return None;
     };
@@ -293,7 +338,6 @@ fn query_time_shape(
     }
     // Grouping keys must resolve in the child's output schema — the same
     // derivation the composed node's own schema will use.
-    root.output_schema().ok()?;
     Some((
         ExactOperation::Aggregate {
             reduction: reduction.clone(),
@@ -309,16 +353,16 @@ fn query_time_shape(
 /// The `(op, child)` of a function-shaped target — a per-entity exact
 /// transform with no accumulator form — or `None`.
 fn ingestion_time_shape(
-    root: &QueryExpr,
+    root: &OperatorNode,
     cost_model: &dyn CostModel,
-) -> Option<(ExactOperation, Rc<QueryExpr>, AggIntent)> {
-    let QueryExpr::Aggregate {
+) -> Option<(ExactOperation, Rc<OperatorNode>, AggIntent)> {
+    let Some(NonASAPOp::Aggregate {
         reduction: Reduction::PerEntity,
         measures,
         output_names,
         having: None,
         child,
-    } = root
+    }) = root.non_asap()
     else {
         return None;
     };
@@ -337,7 +381,6 @@ fn ingestion_time_shape(
     {
         return None;
     }
-    root.output_schema().ok()?;
     Some((
         ExactOperation::Aggregate {
             reduction: Reduction::PerEntity,
@@ -376,10 +419,7 @@ impl<'a> ExactCompositionStrategy<'a> {
     }
 
     fn candidates(&self, target: &TargetSubDAG<'_>) -> Vec<ReplacementSubDAG> {
-        let Ok(schema) = target.root.output_schema() else {
-            return Vec::new();
-        };
-        let schema = asap_types::post_asap::execution_data_state::lift_plain(&schema);
+        let schema = lift_plain(&target.root.schema);
         let mut out = Vec::new();
 
         if let Some((op, child, intent)) = query_time_shape(target.root, self.cost_model) {
@@ -401,8 +441,8 @@ impl<'a> ExactCompositionStrategy<'a> {
                     provenance: ReplacementProvenance::ValueOperationAtQueryTime,
                     rationale: format!(
                         "{} is an exact fold whose input is the readout of {} — a maintained \
-                         accumulator cannot consume query-time values, so instead of collapsing \
-                         the whole tree into KeepPreAsap this applies the fold as an \
+                         accumulator cannot consume query-time values, so instead of keeping \
+                         the whole tree pre-ASAP this applies the fold as an \
                          ExactRead over whichever summary readout global_selection \
                          commits for the child target (asap_aware_mapping::exact_composition)",
                         describe_intent(&intent),
@@ -431,7 +471,7 @@ impl<'a> ExactCompositionStrategy<'a> {
                         "{} is an exact per-entity function with no accumulator form; as an \
                          explicit ExactMaintenance on the update path its output can feed a \
                          maintained summary above it instead of being handed over as an opaque \
-                         raw KeepPreAsap blob (asap_aware_mapping::exact_composition)",
+                         raw kept subtree (asap_aware_mapping::exact_composition)",
                         describe_intent(&intent)
                     ),
                 });

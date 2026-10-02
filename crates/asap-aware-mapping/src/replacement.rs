@@ -18,7 +18,7 @@
 //!    `CostModel::size_params`, not a placeholder filled in later).
 //! 2. **Build**: for each candidate in that list, [`construct_summary`]
 //!    mechanically turns the already-decided `(kind, params)` into a real
-//!    [`SummaryNode`] — derives the child schema, resolves the summarized
+//!    [`OperatorNode`] — derives the child schema, resolves the summarized
 //!    column, builds the readout query, recurses into the child (via
 //!    [`realize_child`], so a nested aggregate gets its own
 //!    independent enumeration, never the outer target's forced choice), and
@@ -31,13 +31,13 @@
 //! has to run regardless of how `(kind, params)` were chosen, so it lives
 //! directly inside the one method that needs it.
 //!
-//! - [`TargetSubDAG`] — a reference to a pre-ASAP [`QueryExpr`] node that is a
+//! - [`TargetSubDAG`] — a reference to a pre-ASAP [`OperatorNode`] that is a
 //!   candidate for replacement, plus how many places in the workload already
 //!   reference it (its `consumer_count`) — the one piece of cross-node
 //!   context [`SharedSubtreeStrategy`] needs that a bare node reference alone
 //!   doesn't carry.
 //! - [`ReplacementSubDAG`] — one candidate replacement for a `TargetSubDAG`:
-//!   either a fully bound [`SummaryNode`] or a pre-ASAP [`QueryExpr`] rewrite
+//!   either a fully bound summary subtree or a pre-ASAP logical rewrite
 //!   (still logical, structurally different from the target but semantically
 //!   equivalent) — see [`Replacement`] — plus a human-readable `rationale`.
 //! - [`ReplacementStrategy`] — `matches` + `replacements`, the same
@@ -80,7 +80,7 @@
 //!   `asap_types::pre_asap::cse::share_common_subtrees`'s sharing decision.
 //!   Wherever a [`TargetSubDAG`] already has two or more consumers (i.e.
 //!   `share_common_subtrees` already collapsed two or more workload
-//!   locations onto the same `Rc<QueryExpr>` — [`discover_targets`] below
+//!   locations onto the same `Rc<OperatorNode>` — [`discover_targets`] below
 //!   does the identical workload-wide discovery for [`search_workload_with`];
 //!   this module's own tests reuse the same dedup logic to build realistic
 //!   fixtures), it reports the two-way candidate CSE's own detection pass
@@ -143,12 +143,12 @@
 //!
 //! 1. **Per-target candidates, not flat plans.** [`TargetSubDAGCandidates`]
 //!    stores the alternatives for one distinct [`TargetSubDAG`] (identified by
-//!    its own `Rc<QueryExpr>` pointer identity — the same currency
+//!    its own `Rc<OperatorNode>` pointer identity — the same currency
 //!    [`asap_types::pre_asap::cse::share_common_subtrees`] already
 //!    established across the workload) holding every
 //!    [`ReplacementSubDAG`] alternative discovered for it. [`PlanSpace`] is
 //!    a collection of these groups, keyed by `TargetSubDAG` — a candidate
-//!    "plan" is never materialized as a distinct top-level `Rc<QueryExpr>`
+//!    "plan" is never materialized as a distinct top-level `Rc<OperatorNode>`
 //!    at all; two logically-different overall choices at two different
 //!    targets are just two different entries in two different groups,
 //!    sharing every other node in the workload by construction (they *are*
@@ -157,7 +157,7 @@
 //!    discipline.** [`asap_types::pre_asap::cse::structural_hash`] (made
 //!    `pub` for exactly this reuse) is only ever a candidate-narrowing
 //!    filter; [`TargetSubDAGCandidates::add_candidate`]'s actual duplicate check is
-//!    `QueryExpr`'s derived `PartialEq` — the same "hash is a filter,
+//!    `OperatorNode`'s derived `PartialEq` — the same "hash is a filter,
 //!    `PartialEq` is the decision, no exceptions" rule `cse.rs`'s own
 //!    "Correctness" section states and this module inherits rather than
 //!    reinvents. See [`is_duplicate_rewrite`] for the one deliberate
@@ -213,9 +213,9 @@
 //! own; see [`discover_new_descendant_targets`]) are scanned for pointers
 //! not already known, and any found become next round's frontier. Both shipped
 //! strategies are idempotent in exactly this sense: [`SketchAlgorithmStrategy`]
-//! produces terminal [`Replacement::Summary`] candidates (no `QueryExpr`
-//! children to scan at all), and [`SharedSubtreeStrategy`]'s two
-//! [`Replacement::Rewrite`] candidates both reuse the target's own
+//! produces terminal bound-summary [`Replacement::Subtree`] candidates (no
+//! logical-rewrite children to scan at all), and [`SharedSubtreeStrategy`]'s
+//! two logical-rewrite [`Replacement::Subtree`] candidates both reuse the target's own
 //! already-known child `Rc`s verbatim (`Rc::clone`/a shallow top-level
 //! `.clone()` — see that strategy's own doc). So for both, the frontier is
 //! always empty after round one: real workloads converge in exactly one
@@ -348,21 +348,23 @@ use crate::accuracy::estimators::{
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet, VecDeque};
 
+use asap_types::ir::cse::{share_common_subtrees, structural_hash, HashCache};
+use asap_types::ir::timing::validate_default;
+use asap_types::ir::{
+    ASAPOp, BinaryOperator, NonASAPOp, Operator, OperatorNode, Predicate, ProjectItem, ScalarExpr,
+    SortKey,
+};
 use asap_types::post_asap::{
-    validate_execution_data_states_at, EntityIdentity, ExactKind, ExactOperation,
-    ExactOperationSchemaError, ExactParams, ExecutionDataState, ExecutionDataStateError,
+    EntityIdentity, ExactKind, ExactOperationSchemaError, ExactParams, ExecutionDataStateError,
     ExecutionTiming, GroupingStrategy, NonNegativeWeightProof, SamplingKind, SamplingParams,
     SketchAlgorithm, SketchKind, SketchParams, SketchQuery as PostAsapSketchQuery, StatModelKind,
-    StatModelParams, SummaryExpr, FieldDataType, Field, SummaryInputExpr, SummaryNode,
-    Schema, SummaryUpdate, ValueOperation, WaveletKind, WaveletParams, WeightDomain,
+    StatModelParams, FieldDataType, Field, SummaryInputExpr, Schema, SummaryUpdate, WaveletKind,
+    WaveletParams, WeightDomain,
 };
 use asap_types::post_asap::{AccuracyError, CompositionOperator, GuaranteeSource, ResultGuarantee};
 use asap_types::pre_asap::agg_intent::{agg_is_mergeable, AggIntent};
-use asap_types::pre_asap::cse::{share_common_subtrees, structural_hash, HashCache};
 use asap_types::pre_asap::expr_ir::{ArithmeticOpKind, ColumnRef};
-use asap_types::pre_asap::query_expr::{
-    BinaryOpKind, Predicate, QueryExpr, QueryExprError, Reduction,
-};
+use asap_types::pre_asap::query_expr::{BinaryOpKind, JoinKind, QueryExprError, Reduction};
 use asap_types::pre_asap::schema::ColumnId;
 use asap_types::types::AccuracyTarget;
 use asap_types::workload::{DataWorkload, QueryRecurrence, QueryWorkload, RepeatedDemand};
@@ -391,8 +393,8 @@ use crate::topk_reuse::TopKLimitReuseStrategy;
 /// ([`realize_child`] and [`keep_pre_asap`]). Moved here from the former
 /// `bind.rs` (issue #251): this is what a [`ReplacementStrategy`]
 /// implementor's own construction path can realistically fail with —
-/// schema derivation over a pre-ASAP [`QueryExpr`] — not something specific
-/// to workload-wide orchestration.
+/// schema derivation over a pre-ASAP [`OperatorNode`] subtree — not
+/// something specific to workload-wide orchestration.
 #[derive(Debug, Error)]
 pub enum RealizationError {
     /// Schema derivation failed while lifting an edge to `Schema`.
@@ -424,10 +426,10 @@ pub enum RealizationError {
 
 /// A pre-ASAP sub-DAG a [`ReplacementStrategy`] knows how to replace.
 ///
-/// `root` is a reference into the workload's own [`QueryExpr`] tree (an
-/// `Rc<QueryExpr>`, the same currency [`search_workload`] and
-/// `asap_types::pre_asap::cse::share_common_subtrees` already thread through
-/// this crate's public API — not a bare `&QueryExpr` — so a strategy that
+/// `root` is a reference into the workload's own [`OperatorNode`] tree (an
+/// `Rc<OperatorNode>`, the same currency [`search_workload`] and
+/// `asap_types::ir::cse::share_common_subtrees` already thread through
+/// this crate's public API — not a bare `&OperatorNode` — so a strategy that
 /// needs the node's own `Rc` identity, not just its shape, has it available
 /// without the caller re-deriving it).
 ///
@@ -440,14 +442,14 @@ pub enum RealizationError {
 /// count; [`SharedSubtreeStrategy`] consults it directly.
 #[derive(Debug, Clone, Copy)]
 pub struct TargetSubDAG<'a> {
-    pub root: &'a Rc<QueryExpr>,
+    pub root: &'a Rc<OperatorNode>,
     pub consumer_count: usize,
 }
 
 impl<'a> TargetSubDAG<'a> {
     /// A target assumed to have exactly one consumer — the common case for a
     /// caller that isn't already tracking cross-workload sharing.
-    pub fn new(root: &'a Rc<QueryExpr>) -> Self {
+    pub fn new(root: &'a Rc<OperatorNode>) -> Self {
         Self {
             root,
             consumer_count: 1,
@@ -456,7 +458,7 @@ impl<'a> TargetSubDAG<'a> {
 
     /// A target with an explicit `consumer_count`, used by workload discovery
     /// and by callers that already know how many locations reference `root`.
-    pub fn with_consumer_count(root: &'a Rc<QueryExpr>, consumer_count: usize) -> Self {
+    pub fn with_consumer_count(root: &'a Rc<OperatorNode>, consumer_count: usize) -> Self {
         Self {
             root,
             consumer_count,
@@ -472,13 +474,13 @@ impl<'a> TargetSubDAG<'a> {
 /// [`ReplacementSubDAG`].
 #[derive(Debug, Clone)]
 pub enum Replacement {
-    /// A fully bound post-ASAP summary decision, for one particular
-    /// candidate realization of the target.
-    Summary(Rc<SummaryNode>),
-    /// A pre-ASAP rewrite: still a logical [`QueryExpr`], structurally
-    /// different from the target's own `root` (e.g. sharing vs. not sharing
-    /// a subtree) but semantically equivalent to it.
-    Rewrite(Rc<QueryExpr>),
+    /// A subtree that replaces the target: either a bound summary decision
+    /// (a DAG containing ASAP operators, for one particular candidate
+    /// realization of the target) or a pre-ASAP rewrite (a logical subtree
+    /// with no ASAP operator, structurally different from the target's own
+    /// `root` — e.g. sharing vs. not sharing a subtree — but semantically
+    /// equivalent to it). [`is_logical_rewrite`] tells the two apart.
+    Subtree(Rc<OperatorNode>),
     /// An exact operator composed over another target's *own* selected
     /// decision across an explicit update/readout boundary (issue #171):
     /// `ValueOperationAtQueryTime` over a child's summary readout, or
@@ -486,8 +488,17 @@ pub enum Replacement {
     /// reference to the child target — [`PlanSpace::global_selection`]
     /// commits the compatible parent/child pair and
     /// [`GlobalSelection::assemble_selected_dag`] links it into one validated
-    /// `SummaryNode`. See [`crate::exact_composition`].
+    /// `OperatorNode` DAG. See [`crate::exact_composition`].
     ExactComposition(ExactComposition),
+}
+
+/// Whether a [`Replacement::Subtree`] is a pure logical rewrite: a subtree
+/// with no ASAP operator and no guarantee established yet (the shape every
+/// front end emits and every rewrite strategy builds). A bound summary
+/// decision contains an ASAP operator, or is a kept pre-ASAP subtree that
+/// already carries its exact guarantee.
+pub fn is_logical_rewrite(node: &OperatorNode) -> bool {
+    node.guarantee.is_none() && !node.contains_asap()
 }
 
 /// One candidate replacement for a [`TargetSubDAG`], plus a human-readable
@@ -512,11 +523,12 @@ pub struct ReplacementSubDAG {
 impl ReplacementSubDAG {
     /// Whether this summary still needs accuracy/domain evidence before it can
     /// be treated as certified. A missing guarantee on any summary candidate
-    /// is unknown; exact `KeepPreAsap` carries an explicit exact guarantee.
+    /// (a subtree whose root is an ASAP operator) is unknown; a kept
+    /// pre-ASAP subtree carries an explicit exact guarantee.
     pub fn has_missing_accuracy_evidence(&self) -> bool {
         matches!(
             &self.replacement,
-            Replacement::Summary(node) if has_missing_accuracy_evidence(node)
+            Replacement::Subtree(node) if node.is_asap() && has_missing_accuracy_evidence(node)
         )
     }
 
@@ -528,8 +540,10 @@ impl ReplacementSubDAG {
             Replacement::ExactComposition(composition) => {
                 cost_model.value_operation_support_evidence(&composition.op, composition.placement)
             }
-            Replacement::Summary(node) => cost_model.summary_support_evidence(node),
-            Replacement::Rewrite(_) => Some(true),
+            Replacement::Subtree(node) if node.is_asap() => {
+                cost_model.summary_support_evidence(node)
+            }
+            Replacement::Subtree(_) => Some(true),
         }
     }
 }
@@ -650,7 +664,7 @@ pub trait ReplacementStrategy {
 /// no separate function that computes just "the one" `Realization`
 /// independently of that list. [`SketchAlgorithmStrategy`] is the sole
 /// consumer: it wraps every entry of this list into its own bound
-/// [`SummaryNode`] and returns all of them, ranked — a caller wanting a
+/// [`OperatorNode`] and returns all of them, ranked — a caller wanting a
 /// single answer keeps the first one itself (see the module docs above).
 #[derive(Debug, Clone, PartialEq)]
 pub enum Realization {
@@ -1288,34 +1302,33 @@ impl<'a> SketchAlgorithmStrategy<'a> {
     /// treats a range of historical samples as the instant vector.
     pub fn current_series_topk_candidates(
         &self,
-        root: &Rc<QueryExpr>,
+        root: &Rc<OperatorNode>,
         accuracy: &AccuracyTarget,
     ) -> Proposals {
-        let QueryExpr::Limit {
-            n,
+        let Some(NonASAPOp::Limit {
+            n: Some(n),
             offset: 0,
             child,
-        } = root.as_ref()
+            ..
+        }) = root.non_asap()
         else {
             return Proposals::default();
         };
-        let QueryExpr::Sort {
+        let Some(NonASAPOp::Sort {
             keys,
             partition_by,
             child,
-        } = child.as_ref()
+        }) = child.non_asap()
         else {
             return Proposals::default();
         };
         let [key] = keys.as_slice() else {
             return Proposals::default();
         };
-        let QueryExpr::Column(value) = key.expr else {
+        let ScalarExpr::Column(value) = key.expr else {
             return Proposals::default();
         };
-        let Ok(schema) = child.output_schema() else {
-            return Proposals::default();
-        };
+        let schema = &child.schema;
         if key.ascending
             || key.nulls_first
             || partition_by.is_without()
@@ -1328,7 +1341,7 @@ impl<'a> SketchAlgorithmStrategy<'a> {
         {
             return Proposals::default();
         }
-        let ranked = Rc::new(QueryExpr::Aggregate {
+        let Ok(ranked) = OperatorNode::non_asap_node(NonASAPOp::Aggregate {
             reduction: Reduction::Reduce(partition_by.clone()),
             measures: vec![AggIntent::TopK {
                 k: *n,
@@ -1337,7 +1350,9 @@ impl<'a> SketchAlgorithmStrategy<'a> {
             output_names: vec![],
             having: None,
             child: Rc::clone(child),
-        });
+        }) else {
+            return Proposals::default();
+        };
         self.propose_with(&ranked, None)
     }
 
@@ -1345,47 +1360,62 @@ impl<'a> SketchAlgorithmStrategy<'a> {
     /// build a fresh heap or grouped Sum for that evaluation window. Deployment must provide
     /// a complete, synchronized population and bind the matching window; this
     /// candidate never incrementally adds one window's rates to another.
-    pub fn fixed_window_rate_candidates(&self, root: &Rc<QueryExpr>) -> Proposals {
-        fn place(node: &Rc<SummaryNode>) -> Option<Rc<SummaryNode>> {
-            let mut next = node.as_ref().clone();
-            match &mut next.expr {
-                SummaryExpr::ValueOperation {
-                    child,
-                    operation: ValueOperation::FinalizeExactAccumulator,
-                    timing,
-                } if matches!(&child.expr, SummaryExpr::SummaryAgg {
+    ///
+    /// The node DAG carries no timing: the `FinalizeExactAccumulator` over
+    /// the per-series `Rate` state runs when its consumer runs (at ingestion
+    /// time beneath the maintained heap/Sum), so `place` only checks that
+    /// the candidate has the fixed-window shape.
+    pub fn fixed_window_rate_candidates(&self, root: &Rc<OperatorNode>) -> Proposals {
+        fn place(node: &Rc<OperatorNode>) -> Option<Rc<OperatorNode>> {
+            match &node.operator {
+                Operator::ASAP(ASAPOp::FinalizeExactAccumulator { child })
+                    if matches!(&child.operator, Operator::ASAP(ASAPOp::SummaryAgg {
                         family: FieldDataType::ExactAggregate(ExactKind::Rate, _),
                         reduction: Reduction::PerEntity, child: source, ..
-                    } if matches!(&source.expr, SummaryExpr::KeepPreAsap(source) if matches!(source.as_ref(), QueryExpr::TimeRange { .. }))) =>
+                    }) if matches!(source.non_asap(), Some(NonASAPOp::TimeRange { .. }))) =>
                 {
-                    *timing = ExecutionTiming::IngestionTime;
+                    Some(Rc::clone(node))
                 }
-                SummaryExpr::ValueOperation { child, .. }
-                | SummaryExpr::SummaryAgg { child, .. } => *child = place(child)?,
-                SummaryExpr::SummaryEstimate { summary_input, .. } => {
-                    *summary_input = place(summary_input)?
+                Operator::ASAP(
+                    ASAPOp::FinalizeExactAccumulator { child }
+                    | ASAPOp::SummaryAgg { child, .. }
+                    | ASAPOp::SummaryEstimate {
+                        summary_input: child,
+                        ..
+                    },
+                ) => {
+                    place(child)?;
+                    Some(Rc::clone(node))
                 }
-                _ => return None,
+                _ => None,
             }
-            Some(Rc::new(next))
         }
+        let timed = |node: &Rc<OperatorNode>| {
+            asap_types::ir::timing::apply_lifecycle_timings(
+                node,
+                &asap_types::ir::timing::LifecycleAssignment::default_maintained(),
+                &mut asap_types::ir::timing::TimingMemo::new(),
+            )
+            .ok()
+            .and_then(|timed| asap_types::ir::export::compile_post_asap_dag(&timed).ok())
+        };
         let mut proposals = self.propose_with(root, None);
         proposals.candidates.retain_mut(|candidate| {
-            let Replacement::Summary(node) = &candidate.replacement else {
+            let Replacement::Subtree(node) = &candidate.replacement else {
                 return false;
             };
-            let Ok(dag) = asap_types::post_asap::compile_post_asap_dag(node) else {
+            let Some(dag) = timed(node) else {
                 return false;
             };
             if !dag.nodes.iter().any(|node| match &node.payload {
-                asap_types::post_asap::PostAsapOperatorPayload::SummaryAgg {
+                asap_types::ir::export::PostAsapOperatorPayload::SummaryAgg {
                     family: FieldDataType::Sketch(kind, _),
                     ..
                 } => matches!(
                     kind.algorithm(),
                     SketchAlgorithm::CmsWithHeap | SketchAlgorithm::CountSketchWithHeap
                 ),
-                asap_types::post_asap::PostAsapOperatorPayload::SummaryAgg {
+                asap_types::ir::export::PostAsapOperatorPayload::SummaryAgg {
                     family: FieldDataType::ExactAggregate(ExactKind::Sum, _),
                     ..
                 } => true,
@@ -1396,13 +1426,13 @@ impl<'a> SketchAlgorithmStrategy<'a> {
             let Some(placed) = place(node) else {
                 return false;
             };
-            if asap_types::post_asap::compile_post_asap_dag(&placed).is_err() {
+            if timed(&placed).is_none() {
                 return false;
             }
             let Ok(placed) = finalize_query_candidate(placed, root) else {
                 return false;
             };
-            candidate.replacement = Replacement::Summary(placed);
+            candidate.replacement = Replacement::Subtree(placed);
             candidate
                 .rationale
                 .push_str("; fixed-window precompute over complete per-series counter states");
@@ -1413,36 +1443,18 @@ impl<'a> SketchAlgorithmStrategy<'a> {
 
     /// Retain grouped Sum after a per-series Rate readout as a query-time
     /// candidate alongside its complete-window maintenance placement.
-    pub fn query_time_rate_aggregation_candidates(&self, root: &Rc<QueryExpr>) -> Proposals {
-        fn query_time(node: &Rc<SummaryNode>) -> Rc<SummaryNode> {
-            let mut next = node.as_ref().clone();
-            match &mut next.expr {
-                SummaryExpr::ValueOperation {
-                    child,
-                    operation: ValueOperation::FinalizeExactAccumulator,
-                    timing,
-                } if matches!(
-                    &child.expr,
-                    SummaryExpr::SummaryAgg {
-                        family: FieldDataType::ExactAggregate(ExactKind::Rate, _),
-                        ..
-                    }
-                ) =>
-                {
-                    *timing = ExecutionTiming::QueryTime;
-                }
-                SummaryExpr::ValueOperation { child, .. }
-                | SummaryExpr::SummaryAgg { child, .. } => *child = query_time(child),
-                _ => {}
-            }
-            Rc::new(next)
-        }
+    ///
+    /// The node DAG carries no timing, so this candidate has the same shape
+    /// as the fixed-window one; recomputing the grouped Sum at query time is
+    /// a lifecycle choice (`asap_types::ir::timing::LifecycleAssignment`)
+    /// made when the plan is timed, not a different node.
+    pub fn query_time_rate_aggregation_candidates(&self, root: &Rc<OperatorNode>) -> Proposals {
         let mut proposals = self.fixed_window_rate_candidates(root);
         proposals.candidates.retain_mut(|candidate| {
-            let Replacement::Summary(node) = &candidate.replacement else { return false };
-            if !matches!(&node.expr, SummaryExpr::ValueOperation { child, operation: ValueOperation::FinalizeExactAccumulator, .. }
-                if matches!(&child.expr, SummaryExpr::SummaryAgg { family: FieldDataType::ExactAggregate(ExactKind::Sum, _), .. })) { return false; }
-            candidate.replacement = Replacement::Summary(query_time(node));
+            let Replacement::Subtree(node) = &candidate.replacement else { return false };
+            if !matches!(&node.operator, Operator::ASAP(ASAPOp::FinalizeExactAccumulator { child })
+                if matches!(&child.operator, Operator::ASAP(ASAPOp::SummaryAgg { family: FieldDataType::ExactAggregate(ExactKind::Sum, _), .. }))) { return false; }
+            candidate.replacement = Replacement::Subtree(Rc::clone(node));
             candidate.rationale = "query-time grouped Sum over complete per-series Rate readouts".into();
             true
         });
@@ -1456,16 +1468,17 @@ impl<'a> SketchAlgorithmStrategy<'a> {
     /// The whole enumeration for one target, with `intent_override`
     /// substituting the target's own intent (only ever its `AccuracyTarget`
     /// differs — see [`realize_child_with`]).
-    fn propose_with(&self, root: &Rc<QueryExpr>, intent_override: Option<&AggIntent>) -> Proposals {
+    fn propose_with(&self, root: &Rc<OperatorNode>, intent_override: Option<&AggIntent>) -> Proposals {
         let mut proposals = Proposals::default();
-        // A selected logical rewrite otherwise remains KeepPreAsap during DAG
-        // assembly. Also expose its concrete summary realization for selection.
+        // A selected logical rewrite otherwise stays a kept pre-ASAP subtree
+        // during DAG assembly. Also expose its concrete summary realization
+        // for selection.
         if intent_override.is_none() {
             if let Some(rewritten) = crate::rewrite::composed_aggregate_rewrite(root) {
                 if let Ok(node) = realize_child_with(&rewritten, self.planning_inputs, None) {
-                    if !matches!(node.expr, SummaryExpr::KeepPreAsap(_)) {
+                    if node.contains_asap() {
                         proposals.candidates.push(ReplacementSubDAG {
-                            replacement: Replacement::Summary(node),
+                            replacement: Replacement::Subtree(node),
                             strategy: "SketchAlgorithmStrategy",
                             provenance: ReplacementProvenance::SummaryRealization,
                             rationale: "realize a schema-preserving composition of temporal and grouped accumulators".into(),
@@ -1476,7 +1489,7 @@ impl<'a> SketchAlgorithmStrategy<'a> {
         }
         if let Ok(Some(node)) = exact_topk_over_temporal_values(root, self.planning_inputs) {
             proposals.candidates.push(ReplacementSubDAG {
-                replacement: Replacement::Summary(node),
+                replacement: Replacement::Subtree(node),
                 strategy: "SketchAlgorithmStrategy",
                 provenance: ReplacementProvenance::SummaryRealization,
                 rationale: "select exact Top-K from independently maintained temporal values"
@@ -1486,7 +1499,7 @@ impl<'a> SketchAlgorithmStrategy<'a> {
         if intent_override.is_none() {
             if let Ok(Some(node)) = realize_temporal_average(root, self.planning_inputs, None) {
                 proposals.candidates.push(ReplacementSubDAG {
-                    replacement: Replacement::Summary(node),
+                    replacement: Replacement::Subtree(node),
                     strategy: "SketchAlgorithmStrategy",
                     provenance: ReplacementProvenance::SummaryRealization,
                     rationale: "read temporal average from sum/count only within the finite arithmetic domain; otherwise execute the original average".into(),
@@ -1501,7 +1514,7 @@ impl<'a> SketchAlgorithmStrategy<'a> {
                     "preserve exact PromQL arithmetic over independently realized summary operands"
                 };
                 proposals.candidates.push(ReplacementSubDAG {
-                    replacement: Replacement::Summary(node),
+                    replacement: Replacement::Subtree(node),
                     strategy: "SketchAlgorithmStrategy",
                     provenance: ReplacementProvenance::SummaryRealization,
                     rationale: rationale.into(),
@@ -1563,7 +1576,7 @@ impl<'a> SketchAlgorithmStrategy<'a> {
             let Some(child) = aggregate_child(root) else {
                 continue;
             };
-            let QueryExpr::Aggregate { reduction, .. } = root.as_ref() else {
+            let Some(NonASAPOp::Aggregate { reduction, .. }) = root.non_asap() else {
                 continue;
             };
             let Ok(input) = realize_physical_summary_input(intent, &family, reduction, child)
@@ -1641,7 +1654,7 @@ impl<'a> SketchAlgorithmStrategy<'a> {
                 if let Ok(node) = keep_pre_asap(root) {
                     proposals.candidates.push(ReplacementSubDAG {
                         strategy: "SketchAlgorithmStrategy",
-                        replacement: Replacement::Summary(node),
+                        replacement: Replacement::Subtree(node),
                         provenance: ReplacementProvenance::SummaryRealization,
                         rationale: format!(
                             "{} stays pre-ASAP because summary construction crosses an illegal \
@@ -1660,11 +1673,11 @@ impl Proposals {
     /// File one construction attempt: a legal node becomes a candidate, an
     /// [`RealizationError::Accuracy`] becomes a [`RejectedCandidate`], and a
     /// schema-derivation failure is skipped exactly as it always was.
-    fn record(&mut self, rationale: String, built: Result<Rc<SummaryNode>, RealizationError>) {
+    fn record(&mut self, rationale: String, built: Result<Rc<OperatorNode>, RealizationError>) {
         match built {
             Ok(node) => self.candidates.push(ReplacementSubDAG {
                 strategy: "SketchAlgorithmStrategy",
-                replacement: Replacement::Summary(node),
+                replacement: Replacement::Subtree(node),
                 provenance: ReplacementProvenance::SummaryRealization,
                 rationale,
             }),
@@ -1686,9 +1699,9 @@ impl Proposals {
 }
 
 /// The `child` of a [`bindable_intent`]-shaped `Aggregate`.
-fn aggregate_child(node: &QueryExpr) -> Option<&Rc<QueryExpr>> {
-    match node {
-        QueryExpr::Aggregate { child, .. } => Some(child),
+fn aggregate_child(node: &OperatorNode) -> Option<&Rc<OperatorNode>> {
+    match node.non_asap() {
+        Some(NonASAPOp::Aggregate { child, .. }) => Some(child),
         _ => None,
     }
 }
@@ -1773,7 +1786,7 @@ pub(crate) fn describe_intent(intent: &AggIntent) -> String {
 
 // ── realize_child / keep_pre_asap: rank-and-take-first, and its fallback ──
 
-/// Rank-and-take-first selector for a single [`QueryExpr`] node: enumerate
+/// Rank-and-take-first selector for a single [`OperatorNode`]: enumerate
 /// every candidate via [`SketchAlgorithmStrategy::replacements`], keep the
 /// `cost_model`-preferred (first) one, and fall back to [`keep_pre_asap`]
 /// when there's no candidate at all — **not** a general single-answer API
@@ -1787,16 +1800,16 @@ pub(crate) fn describe_intent(intent: &AggIntent) -> String {
 /// ([`construct_summary_agg`], so a nested aggregate gets its own
 /// independent enumeration instead of inheriting the parent's forced
 /// candidate), from this module's own [`realize_one`] (the representative
-/// bound `SummaryNode` [`cse_preference`] needs for a
+/// bound `OperatorNode` [`cse_preference`] needs for a
 /// [`CostModel::cse_share_decision`] comparison), and from
 /// [`crate::cost_model::DefaultCostModel::estimate_cost`] (the same
 /// representative-node need, for a [`Replacement::Rewrite`] candidate's own
 /// cost estimate). Every other caller goes through
 /// [`SketchAlgorithmStrategy::replacements`] directly and decides for itself.
 pub(crate) fn realize_child(
-    root: &Rc<QueryExpr>,
+    root: &Rc<OperatorNode>,
     cost_model: &dyn CostModel,
-) -> Result<Rc<SummaryNode>, RealizationError> {
+) -> Result<Rc<OperatorNode>, RealizationError> {
     realize_child_with(
         root,
         CandidatePlanningInputs::with_default_accuracy(cost_model),
@@ -1813,35 +1826,35 @@ pub(crate) fn realize_child(
 /// budget. A child whose declared target is `Exact` keeps it: an allocation
 /// never approximates something the caller declared exact.
 fn exact_topk_over_temporal_values(
-    root: &Rc<QueryExpr>,
+    root: &Rc<OperatorNode>,
     planning_inputs: CandidatePlanningInputs<'_>,
-) -> Result<Option<Rc<SummaryNode>>, RealizationError> {
-    let QueryExpr::Aggregate {
+) -> Result<Option<Rc<OperatorNode>>, RealizationError> {
+    let Some(NonASAPOp::Aggregate {
         reduction,
         measures,
         output_names: _,
         having: None,
         child,
-    } = root.as_ref()
+    }) = root.non_asap()
     else {
         return Ok(None);
     };
     let [AggIntent::TopK { k, .. }] = measures.as_slice() else {
         return Ok(None);
     };
-    let QueryExpr::Aggregate {
+    let Some(NonASAPOp::Aggregate {
         reduction: Reduction::PerEntity,
         child: input,
         ..
-    } = child.as_ref()
+    }) = child.non_asap()
     else {
         return Ok(None);
     };
-    if !matches!(input.as_ref(), QueryExpr::TimeRange { .. }) {
+    if !matches!(input.non_asap(), Some(NonASAPOp::TimeRange { .. })) {
         return Ok(None);
     }
     let values = realize_child_with(child, planning_inputs, Some(&AccuracyTarget::Exact))?;
-    if matches!(values.expr, SummaryExpr::KeepPreAsap(_))
+    if !values.contains_asap()
         || !values
             .guarantee
             .as_ref()
@@ -1857,61 +1870,63 @@ fn exact_topk_over_temporal_values(
         ))?
         .clone();
     let score = ranking_score_index(child, &values.schema)?;
-    let sorted = Rc::new(SummaryNode {
-        guarantee: values.guarantee.clone(),
-        schema: values.schema.clone(),
-        expr: SummaryExpr::ValueOperation {
-            child: values,
-            operation: ValueOperation::Sort {
-                keys: vec![asap_types::pre_asap::SortKey {
-                    expr: QueryExpr::Column(score),
+    let guarantee = values.guarantee.clone();
+    let schema = values.schema.clone();
+    let sorted = Rc::new(
+        OperatorNode::with_schema(
+            Operator::NonASAP(NonASAPOp::Sort {
+                keys: vec![SortKey {
+                    expr: ScalarExpr::Column(score),
                     ascending: false,
                     nulls_first: false,
                 }],
                 partition_by: partition_by.clone(),
-            },
-            timing: ExecutionTiming::QueryTime,
-        },
-    });
-    let node = Rc::new(SummaryNode {
-        guarantee: sorted.guarantee.clone(),
-        schema: sorted.schema.clone(),
-        expr: SummaryExpr::ValueOperation {
-            child: sorted,
-            operation: ValueOperation::Limit {
-                n: *k,
+                child: values,
+            }),
+            schema.clone(),
+        )
+        .with_guarantee(guarantee.clone()),
+    );
+    let node = Rc::new(
+        OperatorNode::with_schema(
+            Operator::NonASAP(NonASAPOp::Limit {
+                n: Some(*k),
                 offset: 0,
                 partition_by,
-            },
-            timing: ExecutionTiming::QueryTime,
-        },
-    });
-    validate_execution_data_states_at(&node, ExecutionDataState::QUERY_ROWS)?;
+                child: sorted,
+            }),
+            schema,
+        )
+        .with_guarantee(guarantee),
+    );
+    validate_default(&node, ExecutionTiming::QueryTime)?;
     Ok(Some(node))
 }
 
 fn realize_temporal_average(
-    root: &Rc<QueryExpr>,
+    root: &Rc<OperatorNode>,
     planning_inputs: CandidatePlanningInputs<'_>,
     target: Option<&AccuracyTarget>,
-) -> Result<Option<Rc<SummaryNode>>, RealizationError> {
+) -> Result<Option<Rc<OperatorNode>>, RealizationError> {
     let Some(components) = crate::rewrite::temporal_average_components(root) else {
         return Ok(None);
     };
     let mut node = realize_child_with(&components, planning_inputs, target)?;
-    let SummaryExpr::BinaryOp { operator, .. } = &mut Rc::make_mut(&mut node).expr else {
+    let Operator::NonASAP(NonASAPOp::BinaryOp { operator, .. }) =
+        &mut Rc::make_mut(&mut node).operator
+    else {
         return Ok(None);
     };
     operator.checked_finite_division = true;
-    validate_execution_data_states_at(&node, ExecutionDataState::QUERY_ROWS)?;
+    validate_default(&node, ExecutionTiming::QueryTime)?;
     Ok(Some(node))
 }
 
 pub(crate) fn realize_child_with(
-    root: &Rc<QueryExpr>,
+    root: &Rc<OperatorNode>,
     planning_inputs: CandidatePlanningInputs<'_>,
     end_to_end_target: Option<&AccuracyTarget>,
-) -> Result<Rc<SummaryNode>, RealizationError> {
+) -> Result<Rc<OperatorNode>, RealizationError> {
     if let Some(node) = realize_temporal_average(root, planning_inputs, end_to_end_target)? {
         return Ok(node);
     }
@@ -1932,14 +1947,14 @@ pub(crate) fn realize_child_with(
         .next()
     {
         Some(ReplacementSubDAG {
-            replacement: Replacement::Summary(node),
+            replacement: Replacement::Subtree(node),
             ..
         }) => Ok(node),
         Some(ReplacementSubDAG {
-            replacement: Replacement::Rewrite(_) | Replacement::ExactComposition(_),
+            replacement: Replacement::ExactComposition(_),
             ..
         }) => {
-            unreachable!("SketchAlgorithmStrategy never returns a Rewrite/composition candidate")
+            unreachable!("SketchAlgorithmStrategy never returns a composition candidate")
         }
         // No candidate at all: `root` isn't `bindable_intent` shape (or its
         // intent has no realization `realizations_for_intent` can't
@@ -1956,19 +1971,20 @@ pub(crate) fn realize_child_with(
 /// accelerated, return `None` so the caller keeps the whole query exact;
 /// mixed raw/summary snapshots are never constructed.
 fn realize_binary(
-    root: &Rc<QueryExpr>,
+    root: &Rc<OperatorNode>,
     planning_inputs: CandidatePlanningInputs<'_>,
     end_to_end_target: Option<&AccuracyTarget>,
-) -> Result<Option<Rc<SummaryNode>>, RealizationError> {
-    let QueryExpr::BinaryOp {
-        op,
+) -> Result<Option<Rc<OperatorNode>>, RealizationError> {
+    let Some(NonASAPOp::BinaryOp {
+        operator,
+        return_bool,
         lhs,
         rhs,
-        vector_match,
-    } = root.as_ref()
+    }) = root.non_asap()
     else {
         return Ok(None);
     };
+    let (op, vector_match) = (&operator.kind, &operator.vector_match);
     if !matches!(op, BinaryOpKind::Arithmetic(_)) || vector_match.is_some() {
         return Ok(None);
     }
@@ -2097,8 +2113,8 @@ fn realize_binary(
         return Ok(None);
     }
 
-    let lhs_accelerated = lhs_scalar || !matches!(lhs_node.expr, SummaryExpr::KeepPreAsap(_));
-    let rhs_accelerated = rhs_scalar || !matches!(rhs_node.expr, SummaryExpr::KeepPreAsap(_));
+    let lhs_accelerated = lhs_scalar || lhs_node.contains_asap();
+    let rhs_accelerated = rhs_scalar || rhs_node.contains_asap();
     if !lhs_accelerated || !rhs_accelerated {
         return Ok(None);
     }
@@ -2145,47 +2161,51 @@ fn realize_binary(
         return Ok(None);
     }
 
-    Ok(Some(Rc::new(SummaryNode {
-        expr: SummaryExpr::BinaryOp {
-            timing: ExecutionTiming::QueryTime,
-            lhs: lhs_node,
-            rhs: rhs_node,
-            operator: asap_types::post_asap::BinaryOperator {
-                checked_relative_division: false,
-                checked_finite_division: false,
-                kind: op.clone(),
-                vector_match: vector_match.clone(),
-            },
-        },
-        schema: lift(&root.output_schema()?),
+    Ok(Some(Rc::new(
+        OperatorNode::with_schema(
+            Operator::NonASAP(NonASAPOp::BinaryOp {
+                operator: BinaryOperator {
+                    checked_relative_division: false,
+                    checked_finite_division: false,
+                    kind: op.clone(),
+                    vector_match: vector_match.clone(),
+                },
+                return_bool: *return_bool,
+                lhs: lhs_node,
+                rhs: rhs_node,
+            }),
+            lift(&root.schema),
+        )
         // Exact arithmetic does not erase approximation error. Until the
         // accuracy algebra has an operator-specific rule (and any value-range
         // evidence needed by multiplication/division), unknown stays unknown.
-        guarantee,
-    })))
+        .with_guarantee(guarantee),
+    )))
 }
 
 /// Put an explicit read boundary between maintained exact state and a
 /// query-time value consumer. Approximate summaries must already carry a
 /// `SummaryEstimate`, so they deliberately do not pass this predicate.
 pub fn finalize_query_candidate(
-    node: Rc<SummaryNode>,
-    logical_output: &QueryExpr,
-) -> Result<Rc<SummaryNode>, RealizationError> {
-    finalize_exact_accumulator_at(node, logical_output, ExecutionTiming::QueryTime)
+    node: Rc<OperatorNode>,
+    logical_output: &OperatorNode,
+) -> Result<Rc<OperatorNode>, RealizationError> {
+    finalize_exact_accumulator(node, logical_output)
 }
 
-fn finalize_exact_accumulator_at(
-    node: Rc<SummaryNode>,
-    logical_output: &QueryExpr,
-    timing: ExecutionTiming,
-) -> Result<Rc<SummaryNode>, RealizationError> {
+/// The read boundary runs when its consumer runs (the node carries no
+/// timing): at query time under a query consumer, at ingestion time beneath
+/// a maintained summary.
+fn finalize_exact_accumulator(
+    node: Rc<OperatorNode>,
+    logical_output: &OperatorNode,
+) -> Result<Rc<OperatorNode>, RealizationError> {
     let is_exact_state = matches!(
-        node.expr,
-        SummaryExpr::SummaryAgg {
+        node.operator,
+        Operator::ASAP(ASAPOp::SummaryAgg {
             family: FieldDataType::ExactAggregate(..),
             ..
-        }
+        })
     );
     if !is_exact_state {
         return Ok(node);
@@ -2194,41 +2214,37 @@ fn finalize_exact_accumulator_at(
     // boundary produces the logical operator's ordinary values. Preserve the
     // canonical pre-ASAP output types instead of leaking ExactAggregate into
     // query-time operators that follow this node.
-    let schema = lift(&logical_output.output_schema()?);
+    let schema = lift(&logical_output.schema);
     let guarantee = node.guarantee.clone();
-    Ok(Rc::new(SummaryNode {
-        expr: SummaryExpr::ValueOperation {
-            child: node,
-            operation: ValueOperation::FinalizeExactAccumulator,
-            timing,
-        },
+    Ok(OperatorNode::asap_node(
+        ASAPOp::FinalizeExactAccumulator { child: node },
         schema,
         guarantee,
-    }))
+    ))
 }
 
-fn is_supported_exact_binary(root: &QueryExpr) -> bool {
+fn is_supported_exact_binary(root: &OperatorNode) -> bool {
     matches!(
-        root,
-        QueryExpr::BinaryOp {
-            op: BinaryOpKind::Arithmetic(_),
-            vector_match: None,
+        root.non_asap(),
+        Some(NonASAPOp::BinaryOp {
+            operator: BinaryOperator {
+                kind: BinaryOpKind::Arithmetic(_),
+                vector_match: None,
+                ..
+            },
             ..
-        }
+        })
     )
 }
 
-fn is_promql_scalar(expr: &QueryExpr) -> bool {
-    matches!(
-        expr,
-        QueryExpr::PromqlScalarBridge(_) | QueryExpr::Literal(_)
-    )
+fn is_promql_scalar(expr: &OperatorNode) -> bool {
+    expr.is_scalar_leaf()
 }
 
 /// Quantile operands inherit one workload target. A temporal mean is exact
 /// on its checked finite domain and needs no approximation budget.
-fn shared_quantile_target(lhs: &QueryExpr, rhs: &QueryExpr) -> Option<AccuracyTarget> {
-    let quantile_target = |expr: &QueryExpr| match bindable_intent(expr) {
+fn shared_quantile_target(lhs: &OperatorNode, rhs: &OperatorNode) -> Option<AccuracyTarget> {
+    let quantile_target = |expr: &OperatorNode| match bindable_intent(expr) {
         Some(AggIntent::Quantile { accuracy, q, .. })
             if q.is_finite() && (0.0..=1.0).contains(q) =>
         {
@@ -2266,18 +2282,18 @@ fn ddsketch_ratio_operand_target(target: &AccuracyTarget) -> Option<AccuracyTarg
     }
 }
 
-fn ddsketch_quantile_alpha(node: &SummaryNode) -> Option<f64> {
-    let SummaryExpr::SummaryEstimate {
+fn ddsketch_quantile_alpha(node: &OperatorNode) -> Option<f64> {
+    let Operator::ASAP(ASAPOp::SummaryEstimate {
         summary_input,
         query: PostAsapSketchQuery::Quantile { .. },
-    } = &node.expr
+    }) = &node.operator
     else {
         return None;
     };
-    let SummaryExpr::SummaryAgg {
+    let Operator::ASAP(ASAPOp::SummaryAgg {
         family: FieldDataType::Sketch(kind, _),
         ..
-    } = &summary_input.expr
+    }) = &summary_input.operator
     else {
         return None;
     };
@@ -2287,7 +2303,7 @@ fn ddsketch_quantile_alpha(node: &SummaryNode) -> Option<f64> {
     }
 }
 
-fn has_missing_accuracy_evidence(node: &SummaryNode) -> bool {
+fn has_missing_accuracy_evidence(node: &OperatorNode) -> bool {
     node.guarantee
         .as_ref()
         .is_none_or(ResultGuarantee::has_unknown)
@@ -2296,10 +2312,10 @@ fn has_missing_accuracy_evidence(node: &SummaryNode) -> bool {
 /// A direct ratio has an operator-specific DDSketch proof, so it must select
 /// DDSketch rather than the cost model's generally preferred KLL candidate.
 fn realize_ddsketch_quantile_operand(
-    operand: &Rc<QueryExpr>,
+    operand: &Rc<OperatorNode>,
     planning_inputs: CandidatePlanningInputs<'_>,
     target: &AccuracyTarget,
-) -> Result<Rc<SummaryNode>, RealizationError> {
+) -> Result<Rc<OperatorNode>, RealizationError> {
     let intent = bindable_intent(operand).and_then(|intent| match intent {
         AggIntent::Quantile { .. } => Some(override_accuracy(intent, target)),
         _ => None,
@@ -2318,16 +2334,20 @@ fn realize_ddsketch_quantile_operand(
 }
 
 fn realize_binary_operand(
-    operand: &Rc<QueryExpr>,
+    operand: &Rc<OperatorNode>,
     planning_inputs: CandidatePlanningInputs<'_>,
     end_to_end_target: Option<&AccuracyTarget>,
-) -> Result<Rc<SummaryNode>, RealizationError> {
+) -> Result<Rc<OperatorNode>, RealizationError> {
     if is_promql_scalar(operand) {
-        return Ok(Rc::new(SummaryNode {
-            expr: SummaryExpr::KeepPreAsap(Rc::clone(operand)),
-            schema: Schema::lifted(Vec::new(), None),
-            guarantee: Some(ResultGuarantee::exact("PromQL scalar")),
-        }));
+        // The scalar leaf itself, kept with its exact guarantee (its own
+        // one-column schema is retained: a non-ASAP node keeps the schema
+        // derived from its operator).
+        return Ok(Rc::new(
+            operand
+                .as_ref()
+                .clone()
+                .with_guarantee(Some(ResultGuarantee::exact("PromQL scalar"))),
+        ));
     }
     realize_child_with(operand, planning_inputs, end_to_end_target)
 }
@@ -2346,40 +2366,46 @@ fn override_accuracy(intent: &AggIntent, target: &AccuracyTarget) -> AggIntent {
     out
 }
 
-/// Wrap an unrewritten pre-ASAP subtree, lifting its schema with every column
-/// `FieldDataType::Plain`. `pub` so a caller can fall back to this
-/// explicitly — e.g. when `SketchAlgorithmStrategy::replacements()` returns no
-/// candidate for a target, or a deployment wants to force a node its own
-/// runtime can't actually implement — through the same fallback this
-/// crate's own dispatch uses, without duplicating the schema-lift logic.
-pub fn keep_pre_asap(expr: &Rc<QueryExpr>) -> Result<Rc<SummaryNode>, RealizationError> {
+/// Keep an unrewritten pre-ASAP subtree as it is. There is no wrapper node:
+/// the subtree itself is the plan, carrying an exact guarantee. The same
+/// `Rc` is returned when the node already has a guarantee; otherwise a copy
+/// with `guarantee = exact("KeepPreAsap")` — only for a subtree with no
+/// ASAP operator (a subtree containing one keeps whatever its construction
+/// established). `pub` so a caller can fall back to this explicitly — e.g.
+/// when `SketchAlgorithmStrategy::replacements()` returns no candidate for a
+/// target, or a deployment wants to force a node its own runtime can't
+/// actually implement — through the same fallback this crate's own dispatch
+/// uses.
+pub fn keep_pre_asap(expr: &Rc<OperatorNode>) -> Result<Rc<OperatorNode>, RealizationError> {
     keep_pre_asap_rc(Rc::clone(expr))
 }
 
-fn keep_pre_asap_rc(expr: Rc<QueryExpr>) -> Result<Rc<SummaryNode>, RealizationError> {
-    let schema = expr.output_schema()?;
-    Ok(Rc::new(SummaryNode {
-        expr: SummaryExpr::KeepPreAsap(expr),
-        schema: lift(&schema),
-        // A kept pre-ASAP subtree is executed exactly by the runtime
-        // (`Realization::PassThrough`'s contract) — zero error.
-        guarantee: Some(ResultGuarantee::exact("KeepPreAsap")),
-    }))
+fn keep_pre_asap_rc(expr: Rc<OperatorNode>) -> Result<Rc<OperatorNode>, RealizationError> {
+    if expr.guarantee.is_some() || expr.contains_asap() {
+        return Ok(expr);
+    }
+    Ok(Rc::new(
+        expr.as_ref()
+            .clone()
+            // A kept pre-ASAP subtree is executed exactly by the runtime
+            // (`Realization::PassThrough`'s contract) — zero error.
+            .with_guarantee(Some(ResultGuarantee::exact("KeepPreAsap"))),
+    ))
 }
 
-// ── Construction: turn one already-decided Realization into a SummaryNode ─
+// ── Construction: turn one already-decided Realization into an OperatorNode ─
 
 /// The bindable shape [`SketchAlgorithmStrategy`] targets: a single intent, no
 /// `HAVING`. A multi-intent node (SQL `SELECT SUM(a), AVG(b)`), or one with a
 /// `HAVING` predicate (the filter would need the estimate first), stays
-/// logical. Unsupported logical parents still conservatively become one
-/// [`SummaryExpr::KeepPreAsap`] subtree. Composable query-time value
-/// operators (`Project`, `Filter`, `Sort`, and `Limit`) are retained during final
-/// DAG assembly so their independently planned children remain visible.
-pub fn bindable_intent(node: &QueryExpr) -> Option<&AggIntent> {
-    if let QueryExpr::Aggregate {
+/// logical. Unsupported logical parents are conservatively kept as pre-ASAP
+/// subtrees ([`keep_pre_asap`]). Relational operators are retained during
+/// final DAG assembly so their independently planned children remain
+/// visible.
+pub fn bindable_intent(node: &OperatorNode) -> Option<&AggIntent> {
+    if let Some(NonASAPOp::Aggregate {
         measures, having, ..
-    } = node
+    }) = node.non_asap()
     {
         if let ([intent], None) = (measures.as_slice(), having) {
             return Some(intent);
@@ -2411,13 +2437,13 @@ pub fn bindable_intent(node: &QueryExpr) -> Option<&AggIntent> {
 /// fail-closed answer for a composition with no sound rule or one that
 /// misses `intent`'s target.
 pub(crate) fn construct_summary_with(
-    expr: &QueryExpr,
+    expr: &OperatorNode,
     intent: &AggIntent,
     realization: Realization,
     planning_inputs: CandidatePlanningInputs<'_>,
     child_target: Option<&AccuracyTarget>,
     allocation: Option<GuaranteeSource>,
-) -> Result<Rc<SummaryNode>, RealizationError> {
+) -> Result<Rc<OperatorNode>, RealizationError> {
     let local_target = match allocation.as_ref() {
         Some(GuaranteeSource::BudgetAllocation { local_target, .. }) => Some(local_target),
         _ => accuracy_target(intent),
@@ -2434,9 +2460,9 @@ pub(crate) fn construct_summary_with(
         },
         other => other,
     };
-    if let QueryExpr::Aggregate {
+    if let Some(NonASAPOp::Aggregate {
         reduction, child, ..
-    } = expr
+    }) = expr.non_asap()
     {
         // `bindable_intent` already established the shape: exactly one
         // intent, no HAVING. (Multi-intent nodes and HAVING stay logical.)
@@ -2465,24 +2491,24 @@ pub(crate) fn construct_summary_with(
 }
 
 fn finish_weighted_topk(
-    candidate: Rc<SummaryNode>,
-    logical: &QueryExpr,
+    candidate: Rc<OperatorNode>,
+    logical: &OperatorNode,
     intent: &AggIntent,
-) -> Result<Rc<SummaryNode>, RealizationError> {
+) -> Result<Rc<OperatorNode>, RealizationError> {
     let AggIntent::TopK { k, .. } = intent else {
         unreachable!()
     };
-    let QueryExpr::Aggregate {
+    let Some(NonASAPOp::Aggregate {
         reduction: Reduction::Reduce(groups),
         child,
         ..
-    } = logical
+    }) = logical.non_asap()
     else {
         return Err(RealizationError::PhysicalRealization(
             "TopK requires explicit grouping",
         ));
     };
-    let schema = lift(&child.output_schema()?);
+    let schema = lift(&child.schema);
     let score = ranking_score_index(child, &schema)?;
     let cols = schema
         .fields
@@ -2509,76 +2535,73 @@ fn finish_weighted_topk(
                     }
                 }
             };
-            Ok(asap_types::pre_asap::query_expr::ProjectItem {
+            Ok(ProjectItem {
                 alias: Some(field.name.clone()),
-                expr: QueryExpr::Column(source),
+                expr: ScalarExpr::Column(source),
             })
         })
         .collect::<Result<Vec<_>, _>>()?;
     let guarantee = candidate.guarantee.clone();
-    let projected = Rc::new(SummaryNode {
-        expr: SummaryExpr::ValueOperation {
-            child: candidate,
-            operation: ValueOperation::Project {
+    let projected = Rc::new(
+        OperatorNode::with_schema(
+            Operator::NonASAP(NonASAPOp::Project {
                 cols,
                 qualifier: None,
-            },
-            timing: ExecutionTiming::QueryTime,
-        },
-        schema: schema.clone(),
-        guarantee: guarantee.clone(),
-    });
-    let sorted = Rc::new(SummaryNode {
-        expr: SummaryExpr::ValueOperation {
-            child: projected,
-            operation: ValueOperation::Sort {
-                keys: vec![asap_types::pre_asap::SortKey {
-                    expr: QueryExpr::Column(score),
+                child: candidate,
+            }),
+            schema.clone(),
+        )
+        .with_guarantee(guarantee.clone()),
+    );
+    let sorted = Rc::new(
+        OperatorNode::with_schema(
+            Operator::NonASAP(NonASAPOp::Sort {
+                keys: vec![SortKey {
+                    expr: ScalarExpr::Column(score),
                     ascending: false,
                     nulls_first: false,
                 }],
                 partition_by: groups.clone(),
-            },
-            timing: ExecutionTiming::QueryTime,
-        },
-        schema: schema.clone(),
-        guarantee: guarantee.clone(),
-    });
-    let result = Rc::new(SummaryNode {
-        expr: SummaryExpr::ValueOperation {
-            child: sorted,
-            operation: ValueOperation::Limit {
-                n: *k,
+                child: projected,
+            }),
+            schema.clone(),
+        )
+        .with_guarantee(guarantee.clone()),
+    );
+    let result = Rc::new(
+        OperatorNode::with_schema(
+            Operator::NonASAP(NonASAPOp::Limit {
+                n: Some(*k),
                 offset: 0,
                 partition_by: groups.clone(),
-            },
-            timing: ExecutionTiming::QueryTime,
-        },
-        schema,
-        guarantee,
-    });
-    validate_execution_data_states_at(&result, ExecutionDataState::QUERY_ROWS)?;
+                child: sorted,
+            }),
+            schema,
+        )
+        .with_guarantee(guarantee),
+    );
+    validate_default(&result, ExecutionTiming::QueryTime)?;
     Ok(result)
 }
 
-fn is_current_series_source(child: &QueryExpr) -> bool {
-    let source = match child {
-        QueryExpr::TimeRange { child, .. } => child.as_ref(),
-        source => source,
+fn is_current_series_source(child: &OperatorNode) -> bool {
+    let source = match child.non_asap() {
+        Some(NonASAPOp::TimeRange { child, .. }) => child.as_ref(),
+        _ => child,
     };
-    matches!(source, QueryExpr::Scan {
+    matches!(source.non_asap(), Some(NonASAPOp::Scan {
         source: asap_types::pre_asap::Source::TimeSeries { .. }, schema, ..
-    } if schema.has_promql_series_identity())
+    }) if schema.has_promql_series_identity())
 }
 
-fn is_snapshot_weighted_topk(intent: &AggIntent, child: &QueryExpr) -> bool {
+fn is_snapshot_weighted_topk(intent: &AggIntent, child: &OperatorNode) -> bool {
     matches!(intent, AggIntent::TopK { .. })
         && (is_current_series_source(child)
-            || matches!(child,
-            QueryExpr::Aggregate { measures, child, .. }
+            || matches!(child.non_asap(),
+            Some(NonASAPOp::Aggregate { measures, child, .. })
                 if matches!(measures.as_slice(), [AggIntent::Rate | AggIntent::Increase])
                     || (matches!(measures.as_slice(), [AggIntent::Sum { .. }])
-                        && matches!(child.as_ref(), QueryExpr::Aggregate { measures, .. }
+                        && matches!(child.non_asap(), Some(NonASAPOp::Aggregate { measures, .. })
                             if matches!(measures.as_slice(), [AggIntent::Rate | AggIntent::Increase])))))
 }
 
@@ -2612,7 +2635,7 @@ fn summary_family(realization: Realization) -> Option<(FieldDataType, bool)> {
 /// input value. Composite realizations can instead consume a larger
 /// logical sub-DAG and bind a different key or value.
 struct PhysicalSummaryInput {
-    child: Rc<QueryExpr>,
+    child: Rc<OperatorNode>,
     input: SummaryUpdate,
 }
 
@@ -2626,7 +2649,7 @@ type PhysicalSummaryInputRule = fn(
     &AggIntent,
     &FieldDataType,
     &Reduction,
-    &Rc<QueryExpr>,
+    &Rc<OperatorNode>,
 ) -> PhysicalSummaryInputRuleResult;
 
 /// Ordered physical-realization rules for realizations that consume more
@@ -2644,7 +2667,7 @@ fn realize_value_frequency_summary_input(
     intent: &AggIntent,
     family: &FieldDataType,
     _reduction: &Reduction,
-    child: &Rc<QueryExpr>,
+    child: &Rc<OperatorNode>,
 ) -> PhysicalSummaryInputRuleResult {
     // Frequency counts hash sample values as items but add one per observation.
     // Using the sample as a weight would turn counts into sums and admit signed CMS updates.
@@ -2655,11 +2678,7 @@ fn realize_value_frequency_summary_input(
     {
         return PhysicalSummaryInputRuleResult::NotApplicable;
     }
-    let Ok(schema) = child.output_schema() else {
-        return PhysicalSummaryInputRuleResult::Unsupported(
-            "value frequency input needs a valid schema",
-        );
-    };
+    let schema = &child.schema;
     // One item per observation is a single value stream. `summary_candidates`
     // already withholds UnivMon from a distinct-tuple count; refused here too
     // so the invariant does not rest on that table alone.
@@ -2671,7 +2690,7 @@ fn realize_value_frequency_summary_input(
     PhysicalSummaryInputRuleResult::Realized(PhysicalSummaryInput {
         child: Rc::clone(child),
         input: SummaryUpdate {
-            item: Some(SummaryInputExpr::Column(summarised_column(intent, &schema))),
+            item: Some(SummaryInputExpr::Column(summarised_column(intent, schema))),
             weight: SummaryInputExpr::Constant(1.0),
             weight_domain: WeightDomain::NonNegative {
                 proof: NonNegativeWeightProof::UnitCount,
@@ -2684,7 +2703,7 @@ fn realize_physical_summary_input(
     intent: &AggIntent,
     family: &FieldDataType,
     reduction: &Reduction,
-    child: &Rc<QueryExpr>,
+    child: &Rc<OperatorNode>,
 ) -> Result<PhysicalSummaryInput, RealizationError> {
     for rule in PHYSICAL_SUMMARY_INPUT_RULES {
         match rule(intent, family, reduction, child) {
@@ -2696,7 +2715,7 @@ fn realize_physical_summary_input(
         }
     }
 
-    let child_schema = child.output_schema()?;
+    let child_schema = &child.schema;
     if matches!(intent, AggIntent::TopK { .. }) {
         return Err(RealizationError::PhysicalRealization(
             "Top-K needs an explicit item identity and additive update input",
@@ -2706,7 +2725,7 @@ fn realize_physical_summary_input(
         child: Rc::clone(child),
         input: SummaryUpdate {
             item: None,
-            weight: summarised_input(intent, &child_schema)?,
+            weight: summarised_input(intent, child_schema)?,
             weight_domain: WeightDomain::UnknownOrSigned,
         },
     })
@@ -2715,65 +2734,61 @@ fn realize_physical_summary_input(
 /// Emit `SummaryAgg` (recursively binding the child), plus the
 /// `SummaryEstimate` readout when `estimate` is set.
 // Retain the exact expression and schema while placing its value production
-// on the update path. Read-time consumers keep their original shared nodes.
-fn maintenance_exact_values(node: Rc<SummaryNode>) -> Option<Rc<SummaryNode>> {
-    let expr = match &node.expr {
+// on the update path (a node runs when its consumer runs, so beneath a
+// maintained summary this value production is ingestion-time work).
+// Read-time consumers keep their original shared nodes.
+fn maintenance_exact_values(node: Rc<OperatorNode>) -> Option<Rc<OperatorNode>> {
+    let operator = match &node.operator {
         // These guards can fall back at read time, but cannot recover a parent
         // sketch after an invalid value has entered its maintained state.
-        SummaryExpr::BinaryOp { operator, .. }
+        Operator::NonASAP(NonASAPOp::BinaryOp { operator, .. })
             if operator.checked_finite_division || operator.checked_relative_division =>
         {
             return None;
         }
-        SummaryExpr::BinaryOp {
-            lhs, rhs, operator, ..
-        } if operator.vector_match.is_none()
-            && matches!(
-                operator.kind,
-                asap_types::pre_asap::BinaryOpKind::Arithmetic(_)
-            )
+        Operator::NonASAP(NonASAPOp::BinaryOp {
+            lhs,
+            rhs,
+            operator,
+            return_bool,
+        }) if operator.vector_match.is_none()
+            && matches!(operator.kind, BinaryOpKind::Arithmetic(_))
             && node
                 .guarantee
                 .as_ref()
                 .is_some_and(ResultGuarantee::is_exact) =>
         {
-            SummaryExpr::BinaryOp {
+            Operator::NonASAP(NonASAPOp::BinaryOp {
                 lhs: maintenance_exact_values(lhs.clone())?,
                 rhs: maintenance_exact_values(rhs.clone())?,
                 operator: operator.clone(),
-                timing: ExecutionTiming::IngestionTime,
-            }
+                return_bool: *return_bool,
+            })
         }
-        SummaryExpr::ValueOperation {
-            child,
-            operation: ValueOperation::FinalizeExactAccumulator,
-            ..
-        } if matches!(
-            child.expr,
-            SummaryExpr::SummaryAgg {
-                family: FieldDataType::ExactAggregate(..),
-                ..
-            }
-        ) =>
+        Operator::ASAP(ASAPOp::FinalizeExactAccumulator { child })
+            if matches!(
+                child.operator,
+                Operator::ASAP(ASAPOp::SummaryAgg {
+                    family: FieldDataType::ExactAggregate(..),
+                    ..
+                })
+            ) =>
         {
-            SummaryExpr::ValueOperation {
+            Operator::ASAP(ASAPOp::FinalizeExactAccumulator {
                 child: child.clone(),
-                operation: ValueOperation::FinalizeExactAccumulator,
-                timing: ExecutionTiming::IngestionTime,
-            }
+            })
         }
         _ => return Some(node),
     };
-    Some(Rc::new(SummaryNode {
-        expr,
-        schema: node.schema.clone(),
-        guarantee: node.guarantee.clone(),
-    }))
+    Some(Rc::new(
+        OperatorNode::with_schema(operator, node.schema.clone())
+            .with_guarantee(node.guarantee.clone()),
+    ))
 }
 
 #[allow(clippy::too_many_arguments)]
 fn construct_summary_agg(
-    node: &QueryExpr,
+    node: &OperatorNode,
     reduction: &Reduction,
     intent: &AggIntent,
     input: PhysicalSummaryInput,
@@ -2782,7 +2797,7 @@ fn construct_summary_agg(
     planning_inputs: CandidatePlanningInputs<'_>,
     child_target: Option<&AccuracyTarget>,
     allocation: Option<GuaranteeSource>,
-) -> Result<Rc<SummaryNode>, RealizationError> {
+) -> Result<Rc<OperatorNode>, RealizationError> {
     // The single canonical pre-ASAP derivation (per-series vs cross-series,
     // name overrides) already computes the row shape; binding only retypes
     // the summary state column.
@@ -2792,7 +2807,7 @@ fn construct_summary_agg(
             FieldDataType::Sketch(kind, _)
                 if matches!(kind.algorithm(), SketchAlgorithm::CmsWithHeap | SketchAlgorithm::CountSketchWithHeap)
         );
-    let snapshot_weighted = matches!(node, QueryExpr::Aggregate { child, .. }
+    let snapshot_weighted = matches!(node.non_asap(), Some(NonASAPOp::Aggregate { child, .. })
         if is_snapshot_weighted_topk(intent, child));
     let mut family = family;
     let score_population = if snapshot_weighted {
@@ -2820,10 +2835,10 @@ fn construct_summary_agg(
         None
     };
     let physical_reduction = if snapshot_weighted {
-        let QueryExpr::Aggregate { child, .. } = node else {
+        let Some(NonASAPOp::Aggregate { child, .. }) = node.non_asap() else {
             unreachable!()
         };
-        let source = input.child.output_schema()?;
+        let source = &input.child.schema;
         let Reduction::Reduce(keys) = reduction else {
             return Err(RealizationError::PhysicalRealization(
                 "TopK requires explicit partitions",
@@ -2866,15 +2881,15 @@ fn construct_summary_agg(
         .group_keys()
         .map(|g| g.to_vec())
         .unwrap_or_default();
-    let out_schema = node.output_schema()?;
-    let state_idx = summary_col_index(&out_schema, &by, per_series);
+    let out_schema = &node.schema;
+    let state_idx = summary_col_index(out_schema, &by, per_series);
 
     let readout_schema = if keyed_heap
-        && matches!(node, QueryExpr::Aggregate { child, .. } if is_snapshot_weighted_topk(intent, child))
+        && matches!(node.non_asap(), Some(NonASAPOp::Aggregate { child, .. }) if is_snapshot_weighted_topk(intent, child))
     {
         keyed_heap_readout_schema(&input, node)?
     } else {
-        lift(&out_schema)
+        lift(out_schema)
     };
 
     let summary_input = input.input;
@@ -2894,7 +2909,7 @@ fn construct_summary_agg(
         readout(intent, &summary_input, planning_inputs.cost)
     });
 
-    let mut state_schema = lift(&out_schema);
+    let mut state_schema = lift(out_schema);
     if keyed_heap {
         let mut state = state_schema.fields[state_idx].clone();
         state.dtype = family.clone();
@@ -2934,7 +2949,7 @@ fn construct_summary_agg(
         .ok_or(RealizationError::PhysicalRealization(
             "snapshot ranking requires a supported current-series population",
         ))?;
-        let SummaryExpr::ValueOperation { child, .. } = &population.expr else {
+        let Operator::ASAP(ASAPOp::ReadPopulation { child, .. }) = &population.operator else {
             return Err(RealizationError::PhysicalRealization(
                 "missing population readout",
             ));
@@ -2945,11 +2960,7 @@ fn construct_summary_agg(
         // Moving rate snapshots must never accumulate across evaluations.
         finalize_query_candidate(bound_child, &input.child)?
     } else {
-        let child = finalize_exact_accumulator_at(
-            bound_child,
-            &input.child,
-            ExecutionTiming::IngestionTime,
-        )?;
+        let child = finalize_exact_accumulator(bound_child, &input.child)?;
         maintenance_exact_values(child).unwrap_or(keep_pre_asap(&input.child)?)
     };
 
@@ -3046,31 +3057,31 @@ fn construct_summary_agg(
     // a genuine empty-`by` reduction apart from a per-entity shape with no
     // grouping concept at all (issue #163). `construct_summary_agg` is the
     // single place that decides this; nothing downstream re-derives it.
-    let agg = Rc::new(SummaryNode {
-        expr: SummaryExpr::SummaryAgg {
+    let agg = OperatorNode::asap_node(
+        ASAPOp::SummaryAgg {
             child: bound_child,
             family,
             input: summary_input,
             reduction: physical_reduction,
             grouping: GroupingStrategy::default(),
         },
-        schema: state_schema,
+        state_schema,
         // Summary *state* carries no caller-visible guarantee; only a
         // finalized value does. An exact accumulator's state is its value.
-        guarantee: if estimate { None } else { guarantee.clone() },
-    });
+        if estimate { None } else { guarantee.clone() },
+    );
     match query {
         // The readout: downstream of the estimate the schema is the plain
         // pre-ASAP row shape again (the summary-state type does not
         // propagate).
-        Some(query) => Ok(Rc::new(SummaryNode {
-            expr: SummaryExpr::SummaryEstimate {
+        Some(query) => Ok(OperatorNode::asap_node(
+            ASAPOp::SummaryEstimate {
                 summary_input: agg,
                 query,
             },
-            schema: readout_schema,
+            readout_schema,
             guarantee,
-        })),
+        )),
         None => Ok(agg),
     }
 }
@@ -3079,13 +3090,13 @@ fn construct_summary_agg(
 // and an estimated score. They never inherit the exact-value producer's schema.
 fn keyed_heap_readout_schema(
     input: &PhysicalSummaryInput,
-    node: &QueryExpr,
+    node: &OperatorNode,
 ) -> Result<Schema, RealizationError> {
-    let source = input.child.output_schema()?;
+    let source = &input.child.schema;
     let mut refs = Vec::new();
-    let QueryExpr::Aggregate {
+    let Some(NonASAPOp::Aggregate {
         reduction, child, ..
-    } = node
+    }) = node.non_asap()
     else {
         return Err(RealizationError::PhysicalRealization(
             "heap readout requires an aggregate",
@@ -3152,7 +3163,7 @@ fn keyed_heap_readout_schema(
             .ok_or(RealizationError::PhysicalRealization(
                 "heap item identity is missing",
             ))?,
-        &source,
+        source,
         &mut refs,
     )?;
     let mut fields = Vec::<asap_types::post_asap::Field>::new();
@@ -3200,7 +3211,7 @@ fn keyed_heap_readout_schema(
 }
 
 fn ranking_score_index(
-    logical: &QueryExpr,
+    logical: &OperatorNode,
     values: &Schema,
 ) -> Result<usize, RealizationError> {
     if is_current_series_source(logical) {
@@ -3216,11 +3227,11 @@ fn ranking_score_index(
                 "snapshot ranking requires the sample value column",
             ));
     }
-    let QueryExpr::Aggregate {
+    let Some(NonASAPOp::Aggregate {
         reduction,
         measures,
         ..
-    } = logical
+    }) = logical.non_asap()
     else {
         return Err(RealizationError::PhysicalRealization(
             "ranking requires an explicit aggregate score",
@@ -3269,19 +3280,15 @@ fn realize_counter_value_summary_input(
     intent: &AggIntent,
     family: &FieldDataType,
     output_reduction: &Reduction,
-    child: &Rc<QueryExpr>,
+    child: &Rc<OperatorNode>,
 ) -> PhysicalSummaryInputRuleResult {
     if !matches!(intent, AggIntent::TopK { .. })
         || !matches!(family, FieldDataType::Sketch(kind, _) if matches!(kind.algorithm(), SketchAlgorithm::CmsWithHeap | SketchAlgorithm::CountSketchWithHeap))
-        || !matches!(child.as_ref(), QueryExpr::Aggregate { reduction: Reduction::PerEntity, measures, .. } if matches!(measures.as_slice(), [AggIntent::Rate | AggIntent::Increase]))
+        || !matches!(child.non_asap(), Some(NonASAPOp::Aggregate { reduction: Reduction::PerEntity, measures, .. }) if matches!(measures.as_slice(), [AggIntent::Rate | AggIntent::Increase]))
     {
         return PhysicalSummaryInputRuleResult::NotApplicable;
     }
-    let Ok(schema) = child.output_schema() else {
-        return PhysicalSummaryInputRuleResult::Unsupported(
-            "counter ranking needs a valid value schema",
-        );
-    };
+    let schema = &child.schema;
     if !schema.closed {
         return PhysicalSummaryInputRuleResult::Unsupported(
             "counter ranking needs the complete resolved series identity",
@@ -3327,7 +3334,7 @@ fn realize_current_series_summary_input(
     intent: &AggIntent,
     family: &FieldDataType,
     output_reduction: &Reduction,
-    child: &Rc<QueryExpr>,
+    child: &Rc<OperatorNode>,
 ) -> PhysicalSummaryInputRuleResult {
     if !matches!(intent, AggIntent::TopK { .. }) || !is_current_series_source(child) {
         return PhysicalSummaryInputRuleResult::NotApplicable;
@@ -3354,11 +3361,7 @@ fn realize_current_series_summary_input(
             "snapshot ranking requires resolved partitions",
         );
     }
-    let Ok(schema) = child.output_schema() else {
-        return PhysicalSummaryInputRuleResult::Unsupported(
-            "snapshot ranking requires a valid source schema",
-        );
-    };
+    let schema = &child.schema;
     let items = schema
         .fields
         .iter()
@@ -3388,7 +3391,7 @@ fn realize_keyed_additive_summary_input(
     intent: &AggIntent,
     family: &FieldDataType,
     output_reduction: &Reduction,
-    child: &Rc<QueryExpr>,
+    child: &Rc<OperatorNode>,
 ) -> PhysicalSummaryInputRuleResult {
     if !matches!(intent, AggIntent::TopK { .. }) {
         return PhysicalSummaryInputRuleResult::NotApplicable;
@@ -3403,18 +3406,18 @@ fn realize_keyed_additive_summary_input(
     ) {
         return PhysicalSummaryInputRuleResult::NotApplicable;
     }
-    let QueryExpr::Aggregate {
+    let Some(NonASAPOp::Aggregate {
         reduction,
         measures,
         having: None,
         child: raw_child,
         ..
-    } = child.as_ref()
+    }) = child.non_asap()
     else {
         return PhysicalSummaryInputRuleResult::NotApplicable;
     };
     let counter_input = matches!(measures.as_slice(), [AggIntent::Sum { .. }])
-        && matches!(raw_child.as_ref(), QueryExpr::Aggregate { measures, .. }
+        && matches!(raw_child.non_asap(), Some(NonASAPOp::Aggregate { measures, .. })
             if matches!(measures.as_slice(), [AggIntent::Rate | AggIntent::Increase]));
     let weight = match measures.as_slice() {
         [AggIntent::Count { .. }] => SummaryInputExpr::Constant(1.0),
@@ -3506,9 +3509,8 @@ fn realize_keyed_additive_summary_input(
     })
 }
 
-fn schema_column_ref(child: &QueryExpr, index: usize) -> Option<ColumnRef> {
-    let schema = child.output_schema().ok()?;
-    let column = schema.fields.get(index)?;
+fn schema_column_ref(child: &OperatorNode, index: usize) -> Option<ColumnRef> {
+    let column = child.schema.fields.get(index)?;
     Some(match &column.table {
         Some(table) => ColumnRef::Qualified {
             table: table.clone(),
@@ -3530,7 +3532,7 @@ fn schema_column_ref(child: &QueryExpr, index: usize) -> Option<ColumnRef> {
 fn compose_guarantee(
     family: &FieldDataType,
     query: Option<&PostAsapSketchQuery>,
-    child: &SummaryNode,
+    child: &OperatorNode,
     intent: &AggIntent,
     accuracy: &dyn AccuracyModel,
     evidence: &dyn AccuracyEvidenceProvider,
@@ -3721,7 +3723,7 @@ fn lift(schema: &Schema) -> Schema {
 
 // ── SharedSubtreeStrategy ────────────────────────────────────────────────
 
-/// Wraps `asap_types::pre_asap::cse::share_common_subtrees`'s sharing
+/// Wraps `asap_types::ir::cse::share_common_subtrees`'s sharing
 /// decision as an explicit candidate pair, wherever a [`TargetSubDAG`]
 /// already has two or more consumers.
 ///
@@ -3754,7 +3756,7 @@ impl ReplacementStrategy for SharedSubtreeStrategy {
                 strategy: "SharedSubtreeStrategy",
                 // The already-interned `Rc` itself: reusing it verbatim *is*
                 // "build once and share" — no new node to construct.
-                replacement: Replacement::Rewrite(Rc::clone(target.root)),
+                replacement: Replacement::Subtree(Rc::clone(target.root)),
                 provenance: ReplacementProvenance::CseShare,
                 rationale: format!(
                     "build once and share: share_common_subtrees already interned this \
@@ -3767,7 +3769,7 @@ impl ReplacementStrategy for SharedSubtreeStrategy {
                 // A structurally-identical but freshly-allocated `Rc`: same
                 // value (`PartialEq`), deliberately *not* the same pointer,
                 // representing "undo the sharing and recompute independently".
-                replacement: Replacement::Rewrite(Rc::new((**target.root).clone())),
+                replacement: Replacement::Subtree(Rc::new((**target.root).clone())),
                 provenance: ReplacementProvenance::CseRecompute,
                 rationale: format!(
                     "build independently: undo the sharing share_common_subtrees found and \
@@ -3797,7 +3799,7 @@ pub const MAX_SEARCH_ITERATIONS: usize = 1_000;
 // ── TargetSubDAGCandidates ──────────────────────────────────────────────
 
 /// Candidates for one distinct [`TargetSubDAG`] (its
-/// own `target` `Rc<QueryExpr>`, keyed by pointer identity in
+/// own `target` `Rc<OperatorNode>`, keyed by pointer identity in
 /// [`PlanSpace`]'s internal map — never re-derived by value) plus every
 /// [`ReplacementSubDAG`] alternative any registered [`ReplacementStrategy`]
 /// proposed for it.
@@ -3810,7 +3812,7 @@ pub const MAX_SEARCH_ITERATIONS: usize = 1_000;
 #[derive(Debug, Clone)]
 pub struct TargetSubDAGCandidates {
     /// The target sub-DAG this group is for.
-    pub target: Rc<QueryExpr>,
+    pub target: Rc<OperatorNode>,
     /// How many operator-child positions across the whole workload
     /// reference this exact `Rc` — see [`discover_targets`].
     pub consumer_count: usize,
@@ -3827,7 +3829,7 @@ pub struct TargetSubDAGCandidates {
 }
 
 impl TargetSubDAGCandidates {
-    fn new(target: Rc<QueryExpr>, consumer_count: usize) -> Self {
+    fn new(target: Rc<OperatorNode>, consumer_count: usize) -> Self {
         Self {
             target,
             consumer_count,
@@ -3844,10 +3846,12 @@ impl TargetSubDAGCandidates {
     fn add_candidate(&mut self, candidate: ReplacementSubDAG) -> bool {
         let is_duplicate = self.candidates.iter().any(|existing| {
             match (&existing.replacement, &candidate.replacement) {
-                (Replacement::Rewrite(existing_rc), Replacement::Rewrite(rc)) => {
+                (Replacement::Subtree(existing_rc), Replacement::Subtree(rc))
+                    if is_logical_rewrite(existing_rc) && is_logical_rewrite(rc) =>
+                {
                     is_duplicate_rewrite(existing_rc, rc, &self.target)
                 }
-                (Replacement::Summary(existing_node), Replacement::Summary(node)) => {
+                (Replacement::Subtree(existing_node), Replacement::Subtree(node)) => {
                     is_duplicate_summary(existing_node, node)
                 }
                 (
@@ -3868,11 +3872,11 @@ impl TargetSubDAGCandidates {
     }
 }
 
-/// Are `existing` and `candidate` the same [`Replacement::Rewrite`]
-/// candidate for a group targeting `target`?
+/// Are `existing` and `candidate` the same logical-rewrite
+/// [`Replacement::Subtree`] candidate for a group targeting `target`?
 ///
-/// Structural (`QueryExpr`) value equality alone is *not* enough here: this
-/// module's one shipped multi-candidate `Replacement::Rewrite` source,
+/// Structural (`OperatorNode`) value equality alone is *not* enough here:
+/// this module's one shipped multi-candidate logical-rewrite source,
 /// [`SharedSubtreeStrategy`], deliberately returns **two** candidates that
 /// are value-equal to each other (`build once and share` vs. `build
 /// independently` — see that strategy's own doc) but represent genuinely
@@ -3890,7 +3894,7 @@ impl TargetSubDAGCandidates {
 /// So: two candidates whose "is this the target's own `Rc`?" bit disagrees
 /// are never duplicates of each other, full stop. Only when that bit
 /// *agrees* does this fall through to the real dedup discipline —
-/// [`structural_hash`] as a candidate-narrowing filter, `QueryExpr`'s
+/// [`structural_hash`] as a candidate-narrowing filter, `OperatorNode`'s
 /// derived `PartialEq` as the actual decision — protecting against the
 /// (currently hypothetical, since neither shipped strategy causes it)
 /// case of the exact same alternative being proposed twice. A fresh
@@ -3899,9 +3903,9 @@ impl TargetSubDAGCandidates {
 /// wider traversal to amortize the cache across the way `InternTable`'s own
 /// use of `structural_hash` does.
 fn is_duplicate_rewrite(
-    existing: &Rc<QueryExpr>,
-    candidate: &Rc<QueryExpr>,
-    target: &Rc<QueryExpr>,
+    existing: &Rc<OperatorNode>,
+    candidate: &Rc<OperatorNode>,
+    target: &Rc<OperatorNode>,
 ) -> bool {
     let existing_is_target = Rc::ptr_eq(existing, target);
     let candidate_is_target = Rc::ptr_eq(candidate, target);
@@ -3913,16 +3917,16 @@ fn is_duplicate_rewrite(
         && existing == candidate
 }
 
-/// Are `existing` and `candidate` the same [`Replacement::Summary`]
-/// candidate?
+/// Are `existing` and `candidate` the same bound-summary
+/// [`Replacement::Subtree`] candidate?
 ///
-/// [`SummaryNode`] derives neither `PartialEq` nor `Hash` (it embeds
-/// `SketchParams`/`f64`-bearing accuracy targets deep inside `SummaryExpr`,
-/// the same reason `QueryExpr` can't derive `Hash` either — see
-/// [`structural_hash`]'s own doc). Per this module's inherited "hash is a
-/// filter, `PartialEq` is the decision, no exceptions" rule, there is no
-/// real equality check to back a dedup *decision* here — and skipping the
-/// check is the only choice that rule permits: never merging two candidates
+/// A bound summary embeds `SketchParams`/`f64`-bearing accuracy targets and
+/// guarantees, so value equality is not a dedup decision this module is
+/// willing to make (see [`structural_hash`]'s own doc on `f64` hashing).
+/// Per this module's inherited "hash is a filter, `PartialEq` is the
+/// decision, no exceptions" rule, there is no real equality check to back a
+/// dedup *decision* here — and skipping the check is the only choice that
+/// rule permits: never merging two candidates
 /// is harmless (at worst, a redundant entry in a group's candidate list),
 /// while comparing by some proxy this module can't actually verify (e.g.
 /// `Debug` text, or `ReplacementSubDAG::rationale` — documented elsewhere in
@@ -3931,7 +3935,7 @@ fn is_duplicate_rewrite(
 /// shipped today already return a structurally distinct candidate for every
 /// entry of one `replacements()` call, so this is future-proofing against a
 /// hypothetical repeat call, not a gap either strategy's own tests exercise.
-fn is_duplicate_summary(_existing: &Rc<SummaryNode>, _candidate: &Rc<SummaryNode>) -> bool {
+fn is_duplicate_summary(_existing: &Rc<OperatorNode>, _candidate: &Rc<OperatorNode>) -> bool {
     false
 }
 
@@ -3940,34 +3944,34 @@ fn is_duplicate_summary(_existing: &Rc<SummaryNode>, _candidate: &Rc<SummaryNode
 /// The deduped candidate space [`search_workload`]/[`search_workload_with`]
 /// discover: one [`TargetSubDAGCandidates`] per distinct `TargetSubDAG` in the
 /// (already-CSE'd) workload, plus the workload's own post-CSE roots so a
-/// caller can still map a `Root`'s `Id` back to the `Rc<QueryExpr>` whose
-/// group holds its alternatives.
+/// caller can still map a `Root`'s `Id` back to the `Rc<OperatorNode>` whose
+/// group holds its alternatives. Memos are keyed by `*const OperatorNode`.
 pub struct PlanSpace<Id> {
     /// The workload's roots, after the one `share_common_subtrees` pass
     /// [`search_workload_with`] runs up front — the same post-CSE roots
     /// every `TargetSubDAG` in `groups` was discovered from.
-    pub roots: Vec<(Id, Rc<QueryExpr>)>,
-    groups: HashMap<*const QueryExpr, TargetSubDAGCandidates>,
+    pub roots: Vec<(Id, Rc<OperatorNode>)>,
+    groups: HashMap<*const OperatorNode, TargetSubDAGCandidates>,
     /// Discovery order — stable iteration for [`PlanSpace::target_subdag_candidates`]/
     /// [`PlanSpace::cost_sorted`], since `HashMap` iteration order isn't.
-    order: Vec<*const QueryExpr>,
+    order: Vec<*const OperatorNode>,
     /// Composition proofs are computed with the search model, then retained
     /// through costing and DAG assembly so no later default can replace it.
     composition_plans: Vec<PreparedComposition>,
 }
 
 struct PreparedComposition {
-    target: *const QueryExpr,
+    target: *const OperatorNode,
     operation: ExactComposition,
-    child: Rc<SummaryNode>,
-    plan: Rc<SummaryNode>,
+    child: Rc<OperatorNode>,
+    plan: Rc<OperatorNode>,
 }
 
 impl<Id> PlanSpace<Id> {
     fn prepare_compositions(
         &mut self,
         accuracy: &dyn AccuracyModel,
-        targets: &HashMap<*const QueryExpr, Vec<AccuracyTarget>>,
+        targets: &HashMap<*const OperatorNode, Vec<AccuracyTarget>>,
     ) {
         self.composition_plans.clear();
         for group in self.groups.values() {
@@ -3982,7 +3986,10 @@ impl<Id> PlanSpace<Id> {
                         .into_iter()
                         .flat_map(|g| &g.candidates)
                         .filter_map(|c| match &c.replacement {
-                            Replacement::Summary(child) if operation.accepts_child(child) => {
+                            Replacement::Subtree(child)
+                                if !is_logical_rewrite(child)
+                                    && operation.accepts_child(child) =>
+                            {
                                 Some(Rc::clone(child))
                             }
                             _ => None,
@@ -4027,11 +4034,11 @@ impl<Id> PlanSpace<Id> {
 /// never a silently truncated inventory presented as exhaustive.
 #[derive(Debug)]
 pub struct CandidateDagInventory<Id> {
-    pub candidates: Vec<Vec<(Id, Rc<SummaryNode>)>>,
+    pub candidates: Vec<Vec<(Id, Rc<OperatorNode>)>>,
     pub rejected_assemblies: Vec<String>,
 }
 
-type CandidateDagChoice<'a> = (Option<&'a ReplacementSubDAG>, Option<Rc<SummaryNode>>);
+type CandidateDagChoice<'a> = (Option<&'a ReplacementSubDAG>, Option<Rc<OperatorNode>>);
 
 impl<Id: Clone + PartialEq> PlanSpace<Id> {
     pub fn enumerate_candidate_dags(
@@ -4066,7 +4073,7 @@ impl<Id: Clone + PartialEq> PlanSpace<Id> {
 
     fn enumerate_candidate_roots(
         &self,
-        roots: &[(Id, Rc<QueryExpr>)],
+        roots: &[(Id, Rc<OperatorNode>)],
         expansion_limit: usize,
     ) -> Result<CandidateDagInventory<Id>, RealizationError> {
         let mut reachable = Vec::new();
@@ -4082,8 +4089,10 @@ impl<Id: Clone + PartialEq> PlanSpace<Id> {
             cursor += 1;
             if let Some(group) = self.groups.get(&ptr) {
                 for candidate in &group.candidates {
-                    if let Replacement::Rewrite(rewritten) = &candidate.replacement {
-                        walk(rewritten, &mut reachable, &mut nodes, &mut counts);
+                    if let Replacement::Subtree(rewritten) = &candidate.replacement {
+                        if is_logical_rewrite(rewritten) {
+                            walk(rewritten, &mut reachable, &mut nodes, &mut counts);
+                        }
                     }
                 }
             }
@@ -4177,77 +4186,12 @@ impl<Id: Clone + PartialEq> PlanSpace<Id> {
                 .collect::<Result<Vec<_>, _>>();
             match roots {
                 Ok(roots) => {
-                    let roots = asap_types::post_asap::share_common_summary_subtrees(roots);
+                    let roots = share_common_subtrees(roots);
                     use std::hash::{Hash, Hasher};
                     let mut hash = std::collections::hash_map::DefaultHasher::new();
-                    let mut pending = roots
-                        .iter()
-                        .map(|(_, node)| node.as_ref())
-                        .collect::<Vec<_>>();
-                    while let Some(node) = pending.pop() {
-                        std::mem::discriminant(&node.expr).hash(&mut hash);
-                        let raw = match &node.expr {
-                            SummaryExpr::KeepPreAsap(raw) => Some(raw.as_ref()),
-                            _ => None,
-                        };
-                        let operation = match &node.expr {
-                            SummaryExpr::ValueOperation {
-                                timing, operation, ..
-                            } => serde_json::json!((timing, operation)),
-                            SummaryExpr::BinaryOp {
-                                timing, operator, ..
-                            } => serde_json::json!((timing, operator)),
-                            SummaryExpr::SummaryMerge { timing, .. } => serde_json::json!(timing),
-                            _ => serde_json::Value::Null,
-                        };
-                        let mut value =
-                            serde_json::to_value((&node.schema, &node.guarantee, raw, operation))
-                                .map_err(|_| {
-                                RealizationError::PhysicalRealization(
-                                    "candidate identity serialization failed",
-                                )
-                            })?;
-                        fn normalize(value: &mut serde_json::Value) {
-                            match value {
-                                serde_json::Value::Number(number)
-                                    if number.as_f64() == Some(0.0) =>
-                                {
-                                    *value = serde_json::json!(0);
-                                }
-                                serde_json::Value::Array(values) => {
-                                    values.iter_mut().for_each(normalize)
-                                }
-                                serde_json::Value::Object(values) => {
-                                    values.values_mut().for_each(normalize)
-                                }
-                                _ => {}
-                            }
-                        }
-                        normalize(&mut value);
-                        value.sort_all_objects();
-                        value.to_string().hash(&mut hash);
-                        match &node.expr {
-                            SummaryExpr::KeepPreAsap(_) => {}
-                            SummaryExpr::BinaryOp { lhs, rhs, .. } => {
-                                pending.extend([lhs.as_ref(), rhs.as_ref()])
-                            }
-                            SummaryExpr::RelationalJoin { left, right, .. }
-                            | SummaryExpr::SummarySubtract { left, right } => {
-                                pending.extend([left.as_ref(), right.as_ref()])
-                            }
-                            SummaryExpr::ValueOperation { child, .. }
-                            | SummaryExpr::SummaryAgg { child, .. } => pending.push(child.as_ref()),
-                            SummaryExpr::SummaryJoin { outer, inner, .. } => {
-                                pending.extend([outer.as_ref(), inner.as_ref()])
-                            }
-                            SummaryExpr::SummaryDelete { summary_input, .. }
-                            | SummaryExpr::SummaryEstimate { summary_input, .. } => {
-                                pending.push(summary_input.as_ref())
-                            }
-                            SummaryExpr::SummaryMerge { children, .. } => {
-                                pending.extend(children.iter().map(|child| child.as_ref()))
-                            }
-                        }
+                    let mut cache = HashCache::new();
+                    for (_, node) in &roots {
+                        structural_hash(node, &mut cache).hash(&mut hash);
                     }
                     let bucket = seen.entry(hash.finish()).or_default();
                     if !bucket
@@ -4273,25 +4217,25 @@ impl<Id: Clone + PartialEq> PlanSpace<Id> {
 /// Lifecycle-aware whole-subplan costs keyed by target and candidate identity.
 #[derive(Default)]
 pub(crate) struct CandidateCostOverrides {
-    costs: HashMap<(*const QueryExpr, *const ReplacementSubDAG), Cost>,
-    raw_costs: HashMap<*const QueryExpr, Cost>,
+    costs: HashMap<(*const OperatorNode, *const ReplacementSubDAG), Cost>,
+    raw_costs: HashMap<*const OperatorNode, Cost>,
     /// Targets for which the caller requested an atomic raw-vs-summary
     /// decision. Other memo groups continue through ordinary CSE selection.
-    finalized_targets: HashSet<*const QueryExpr>,
+    finalized_targets: HashSet<*const OperatorNode>,
 }
 
 impl CandidateCostOverrides {
-    pub(crate) fn finalize_target(&mut self, target: &Rc<QueryExpr>) {
+    pub(crate) fn finalize_target(&mut self, target: &Rc<OperatorNode>) {
         self.finalized_targets.insert(Rc::as_ptr(target));
     }
 
-    fn finalizes(&self, target: &Rc<QueryExpr>) -> bool {
+    fn finalizes(&self, target: &Rc<OperatorNode>) -> bool {
         self.finalized_targets.contains(&Rc::as_ptr(target))
     }
 
     pub(crate) fn insert(
         &mut self,
-        target: &Rc<QueryExpr>,
+        target: &Rc<OperatorNode>,
         candidate: &ReplacementSubDAG,
         cost: Cost,
     ) {
@@ -4299,17 +4243,17 @@ impl CandidateCostOverrides {
             .insert((Rc::as_ptr(target), candidate as *const _), cost);
     }
 
-    fn get(&self, target: &Rc<QueryExpr>, candidate: &ReplacementSubDAG) -> Option<Cost> {
+    fn get(&self, target: &Rc<OperatorNode>, candidate: &ReplacementSubDAG) -> Option<Cost> {
         self.costs
             .get(&(Rc::as_ptr(target), candidate as *const _))
             .copied()
     }
 
-    pub(crate) fn insert_raw(&mut self, target: &Rc<QueryExpr>, cost: Cost) {
+    pub(crate) fn insert_raw(&mut self, target: &Rc<OperatorNode>, cost: Cost) {
         self.raw_costs.insert(Rc::as_ptr(target), cost);
     }
 
-    fn raw(&self, target: &Rc<QueryExpr>) -> Option<Cost> {
+    fn raw(&self, target: &Rc<OperatorNode>) -> Option<Cost> {
         self.raw_costs.get(&Rc::as_ptr(target)).copied()
     }
 }
@@ -4326,7 +4270,7 @@ impl<Id> PlanSpace<Id> {
     }
 
     /// Whether no targets were discovered at all (an empty workload, or one
-    /// with no `QueryExpr` nodes reachable from any root — never true for a
+    /// with no `OperatorNode`s reachable from any root — never true for a
     /// non-empty `roots`, since every root is itself a target).
     pub fn is_empty(&self) -> bool {
         self.groups.is_empty()
@@ -4335,7 +4279,7 @@ impl<Id> PlanSpace<Id> {
     /// The candidate set for `target`, if `target`'s own `Rc` is a discovered
     /// `TargetSubDAG` (i.e. `Rc::ptr_eq` to some node reachable from
     /// `roots`).
-    pub fn candidates_for_target(&self, target: &Rc<QueryExpr>) -> Option<&TargetSubDAGCandidates> {
+    pub fn candidates_for_target(&self, target: &Rc<OperatorNode>) -> Option<&TargetSubDAGCandidates> {
         self.groups.get(&Rc::as_ptr(target))
     }
 
@@ -4457,17 +4401,17 @@ impl<Id> PlanSpace<Id> {
 /// half of issue #287. Looked up by `Rc` pointer identity, the same
 /// currency [`PlanSpace::candidates_for_target`]/[`GlobalSelection::for_target`] already
 /// use.
-/// Holds an owned `Rc<QueryExpr>` clone alongside each profile (not just its
-/// raw pointer) so this map keeps every node it describes alive for as long
-/// as the map itself lives — a `RecurrenceProfileMap` is safe to outlive the
-/// `PlanSpace` it was built from. Without this, a raw `*const QueryExpr` key
+/// Holds an owned `Rc<OperatorNode>` clone alongside each profile (not just
+/// its raw pointer) so this map keeps every node it describes alive for as
+/// long as the map itself lives — a `RecurrenceProfileMap` is safe to outlive
+/// the `PlanSpace` it was built from. Without this, a raw `*const OperatorNode` key
 /// could, after the originating `PlanSpace` (the only other owner of those
 /// `Rc`s) is dropped, collide with an unrelated, later allocation that
 /// happens to reuse the same freed address — silently returning a stale
 /// profile for the wrong node (issue #287 review, bug 4).
 #[derive(Debug, Clone)]
 pub struct RecurrenceProfileMap {
-    profiles: HashMap<*const QueryExpr, (Rc<QueryExpr>, RecurrenceProfile)>,
+    profiles: HashMap<*const OperatorNode, (Rc<OperatorNode>, RecurrenceProfile)>,
 }
 
 impl RecurrenceProfileMap {
@@ -4476,7 +4420,7 @@ impl RecurrenceProfileMap {
     /// in the [`PlanSpace`] this map was built from (or carried no
     /// recurring/one-shot/update-rate metadata at all) — always a valid,
     /// "no metadata" answer, never a panic.
-    pub fn for_target(&self, target: &Rc<QueryExpr>) -> RecurrenceProfile {
+    pub fn for_target(&self, target: &Rc<OperatorNode>) -> RecurrenceProfile {
         self.profiles
             .get(&Rc::as_ptr(target))
             .map(|(_, profile)| *profile)
@@ -4496,7 +4440,7 @@ impl<Id> PlanSpace<Id> {
     /// `self.roots[i]` — the same order [`search_workload`]/
     /// [`search_workload_with`] were originally called with (post-CSE
     /// dedup preserves both root count and order — see
-    /// `asap_types::pre_asap::cse::share_common_subtrees`'s own
+    /// `asap_types::ir::cse::share_common_subtrees`'s own
     /// `.map(...).collect()` body). This keeps `Id` fully opaque (no `Eq`/
     /// `Hash`/`Clone` bound needed on it at all — issue #287's "keep
     /// caller/query identifiers opaque" requirement) at the cost of the
@@ -4573,12 +4517,12 @@ impl<Id> PlanSpace<Id> {
             }
         }
 
-        let mut rates: HashMap<*const QueryExpr, f64> = HashMap::new();
-        let mut one_shot_counts: HashMap<*const QueryExpr, usize> = HashMap::new();
+        let mut rates: HashMap<*const OperatorNode, f64> = HashMap::new();
+        let mut one_shot_counts: HashMap<*const OperatorNode, usize> = HashMap::new();
         // Sites actually reached by at least one root's own recurrence tag
         // during the walk below — see this method's own "Unreachable
         // sites" doc.
-        let mut reached: HashSet<*const QueryExpr> = HashSet::new();
+        let mut reached: HashSet<*const OperatorNode> = HashSet::new();
 
         for ((_, root), recurrence) in self.roots.iter().zip(root_recurrence) {
             let recurrence = *recurrence;
@@ -4588,7 +4532,7 @@ impl<Id> PlanSpace<Id> {
             // recomputed occurrence is evaluated twice as well; stopping
             // expansion after the first pointer visit undercounts exactly
             // the effective-consumer rate recurrence-aware costing needs.
-            let mut queue: VecDeque<(*const QueryExpr, usize)> = VecDeque::new();
+            let mut queue: VecDeque<(*const OperatorNode, usize)> = VecDeque::new();
             queue.push_back((root_ptr, 1));
 
             while let Some((ptr, path_count)) = queue.pop_front() {
@@ -4732,7 +4676,7 @@ impl<Id> PlanSpace<Id> {
         &self,
         workload: &QueryWorkload,
         root_workload_entries: &[usize],
-    ) -> Result<HashMap<*const QueryExpr, Vec<usize>>, RecurrenceError> {
+    ) -> Result<HashMap<*const OperatorNode, Vec<usize>>, RecurrenceError> {
         let entry_count = workload.entries().count();
         if root_workload_entries.len() != self.roots.len() {
             return Err(RecurrenceError::RootCountMismatch {
@@ -4740,7 +4684,7 @@ impl<Id> PlanSpace<Id> {
                 got: root_workload_entries.len(),
             });
         }
-        let mut bindings: HashMap<*const QueryExpr, HashSet<usize>> = HashMap::new();
+        let mut bindings: HashMap<*const OperatorNode, HashSet<usize>> = HashMap::new();
         for ((_, root), &entry_index) in self.roots.iter().zip(root_workload_entries) {
             if entry_index >= entry_count {
                 return Err(RecurrenceError::InvalidWorkloadEntry {
@@ -4782,12 +4726,12 @@ impl<Id> PlanSpace<Id> {
 /// child always has `edge_count >= 1` in practice, but this keeps the
 /// helper correct regardless).
 fn contribute(
-    ptr: *const QueryExpr,
+    ptr: *const OperatorNode,
     times: usize,
     recurrence: RootRecurrence,
-    rates: &mut HashMap<*const QueryExpr, f64>,
-    one_shot_counts: &mut HashMap<*const QueryExpr, usize>,
-    reached: &mut HashSet<*const QueryExpr>,
+    rates: &mut HashMap<*const OperatorNode, f64>,
+    one_shot_counts: &mut HashMap<*const OperatorNode, usize>,
+    reached: &mut HashSet<*const OperatorNode>,
 ) {
     if times == 0 {
         return;
@@ -4808,7 +4752,7 @@ fn contribute(
 /// [`PlanSpace::cost_sorted`].
 #[derive(Debug)]
 pub struct RankedTargetSubDAGCandidates<'a> {
-    pub target: &'a Rc<QueryExpr>,
+    pub target: &'a Rc<OperatorNode>,
     pub consumer_count: usize,
     pub candidates: Vec<&'a ReplacementSubDAG>,
     /// `costs[i]` is `candidates[i]`'s own grouping-state cost when available,
@@ -4856,7 +4800,7 @@ fn rank_group<'a>(
     // estimate, compare N independent states with the shared grid directly.
     let target = TargetSubDAG::with_consumer_count(&group.target, group.consumer_count);
     let has_hydra = ranked.iter().any(|candidate| {
-        let Replacement::Summary(node) = &candidate.replacement else {
+        let Replacement::Subtree(node) = &candidate.replacement else {
             return false;
         };
         summary_grouping(node).is_some_and(|grouping| {
@@ -4896,16 +4840,16 @@ fn rank_group<'a>(
         let kinds: Option<Vec<SketchAlgorithm>> = ranked
             .iter()
             .map(|c| match &c.replacement {
-                Replacement::Summary(node) => sketch_kind_of(node),
-                Replacement::Rewrite(_) | Replacement::ExactComposition(_) => None,
+                Replacement::Subtree(node) => sketch_kind_of(node),
+                Replacement::ExactComposition(_) => None,
             })
             .collect();
         if let Some(kinds) = kinds {
             let order = crate::cost_model::validated_candidate_ranking(cost_model, intent, &kinds);
             ranked.sort_by_key(|c| {
                 let kind = match &c.replacement {
-                    Replacement::Summary(node) => sketch_kind_of(node),
-                    Replacement::Rewrite(_) | Replacement::ExactComposition(_) => None,
+                    Replacement::Subtree(node) => sketch_kind_of(node),
+                    Replacement::ExactComposition(_) => None,
                 };
                 kind.and_then(|k| order.iter().position(|o| *o == k))
                     .unwrap_or(usize::MAX)
@@ -4962,7 +4906,7 @@ fn cse_preference(group: &TargetSubDAGCandidates, cost_model: &dyn CostModel) ->
     })
 }
 
-/// [`cse_preference`] only needs one representative bound [`SummaryNode`]
+/// [`cse_preference`] only needs one representative bound [`OperatorNode`]
 /// for `target` (to build a [`CseCandidate`] for
 /// [`CostModel::cse_share_decision`]), not the full ranked candidate list
 /// [`SketchAlgorithmStrategy::replacements`] returns — so this just reuses
@@ -4970,13 +4914,13 @@ fn cse_preference(group: &TargetSubDAGCandidates, cost_model: &dyn CostModel) ->
 /// `construct_summary_agg`'s own recursion and
 /// [`crate::cost_model::DefaultCostModel::estimate_cost`] already use,
 /// wrapped to swallow the (here, uninteresting) error into `None`.
-fn realize_one(target: &Rc<QueryExpr>, cost_model: &dyn CostModel) -> Option<Rc<SummaryNode>> {
+fn realize_one(target: &Rc<OperatorNode>, cost_model: &dyn CostModel) -> Option<Rc<OperatorNode>> {
     realize_child(target, cost_model).ok()
 }
 
-/// The `SketchAlgorithm` a bound [`Replacement::Summary`] candidate ultimately
+/// The `SketchAlgorithm` a bound [`Replacement::Subtree`] candidate ultimately
 /// realizes, if any (`None` for an `ExactAggregate`/pass-through
-/// `Summary` — nothing to rank against another `SketchAlgorithm`).
+/// subtree — nothing to rank against another `SketchAlgorithm`).
 ///
 /// Mirrors this module's own `#[cfg(test)]`-only `summary_family_algorithm`
 /// helper (in the test module below), which does the identical
@@ -4985,23 +4929,27 @@ fn realize_one(target: &Rc<QueryExpr>, cost_model: &dyn CostModel) -> Option<Rc<
 /// code — the same "duplicate a small, self-contained traversal rather than
 /// restructure a test helper" call this file's own top doc already makes
 /// for [`discover_targets`].
-fn sketch_kind_of(node: &SummaryNode) -> Option<SketchAlgorithm> {
-    match &node.expr {
-        SummaryExpr::SummaryEstimate { summary_input, .. } => sketch_kind_of(summary_input),
-        SummaryExpr::SummaryAgg {
+fn sketch_kind_of(node: &OperatorNode) -> Option<SketchAlgorithm> {
+    match &node.operator {
+        Operator::ASAP(ASAPOp::SummaryEstimate { summary_input, .. }) => {
+            sketch_kind_of(summary_input)
+        }
+        Operator::ASAP(ASAPOp::SummaryAgg {
             family: FieldDataType::Sketch(kind, _),
             ..
-        } => Some(kind.algorithm().clone()),
+        }) => Some(kind.algorithm().clone()),
         _ => None,
     }
 }
 
 /// The grouping strategy used by a bound summary candidate, unwrapping its
 /// readout node when necessary.
-fn summary_grouping(node: &SummaryNode) -> Option<&GroupingStrategy> {
-    match &node.expr {
-        SummaryExpr::SummaryEstimate { summary_input, .. } => summary_grouping(summary_input),
-        SummaryExpr::SummaryAgg { grouping, .. } => Some(grouping),
+fn summary_grouping(node: &OperatorNode) -> Option<&GroupingStrategy> {
+    match &node.operator {
+        Operator::ASAP(ASAPOp::SummaryEstimate { summary_input, .. }) => {
+            summary_grouping(summary_input)
+        }
+        Operator::ASAP(ASAPOp::SummaryAgg { grouping, .. }) => Some(grouping),
         _ => None,
     }
 }
@@ -5026,7 +4974,7 @@ fn summary_grouping(node: &SummaryNode) -> Option<&GroupingStrategy> {
 #[derive(Debug)]
 pub struct TargetSubDAGSelection<'a> {
     /// The target sub-DAG this selection is for.
-    pub target: &'a Rc<QueryExpr>,
+    pub target: &'a Rc<OperatorNode>,
     /// [`TargetSubDAGCandidates::consumer_count`] — how many operator-child positions
     /// directly reference `target`, ignoring every ancestor's own choice.
     pub consumer_count: usize,
@@ -5057,9 +5005,9 @@ pub struct TargetSubDAGSelection<'a> {
 #[derive(Debug)]
 pub struct CompositionDecision<'a> {
     /// The exact child/operation pair validated by the search accuracy model.
-    pub plan: Rc<SummaryNode>,
+    pub plan: Rc<OperatorNode>,
     /// The child target the composed operator consumes.
-    pub child_target: &'a Rc<QueryExpr>,
+    pub child_target: &'a Rc<OperatorNode>,
     /// For a read-time operation: the child's own candidate committed alongside
     /// (the summary readout the operator folds). `None` for an update-path
     /// transform, whose input is raw update data — its cost is charged to
@@ -5068,7 +5016,7 @@ pub struct CompositionDecision<'a> {
     /// The composed plan's recurring rate — `read_operation_plan_cost_rate`
     /// or `maintenance_operation_plan_cost_rate`.
     pub cost_rate: CostRate,
-    /// `raw_recompute_cost_rate` — the `KeepPreAsap` baseline it beat.
+    /// `raw_recompute_cost_rate` — the kept-subtree baseline it beat.
     pub baseline_rate: CostRate,
     /// The statistics (and their provenance) both rates were computed from.
     pub inputs: ExactCompositionCostInputs,
@@ -5079,12 +5027,13 @@ pub struct CompositionDecision<'a> {
 /// [`PlanSpace::cost_sorted`] use.
 #[derive(Debug)]
 pub struct GlobalSelection<'a> {
-    order: Vec<*const QueryExpr>,
-    groups: HashMap<*const QueryExpr, TargetSubDAGSelection<'a>>,
+    order: Vec<*const OperatorNode>,
+    groups: HashMap<*const OperatorNode, TargetSubDAGSelection<'a>>,
     /// [`Self::assemble_selected_dag`]'s memo — one bound node per target for the
     /// life of this selection, so two parents composing over one shared
-    /// child get the *same* `Rc<SummaryNode>`.
-    assembled_nodes: RefCell<HashMap<*const QueryExpr, Rc<SummaryNode>>>,
+    /// child get the *same* `Rc<OperatorNode>` (a kept pre-ASAP subtree
+    /// shared by two parents stays one `Rc` the same way).
+    assembled_nodes: RefCell<HashMap<*const OperatorNode, Rc<OperatorNode>>>,
 }
 
 fn normalize_cross_input_equi_predicate(
@@ -5092,15 +5041,17 @@ fn normalize_cross_input_equi_predicate(
     left_width: usize,
     total_width: usize,
 ) -> Option<Predicate> {
-    let QueryExpr::Compare {
+    let ScalarExpr::Compare {
         left,
         op: asap_types::pre_asap::CompareOpKind::Eq,
         right,
-    } = pred.0.as_ref()
+        semantics,
+    } = &pred.0
     else {
         return None;
     };
-    let (QueryExpr::Column(left_id), QueryExpr::Column(right_id)) = (left.as_ref(), right.as_ref())
+    let (ScalarExpr::Column(left_id), ScalarExpr::Column(right_id)) =
+        (left.as_ref(), right.as_ref())
     else {
         return None;
     };
@@ -5113,21 +5064,14 @@ fn normalize_cross_input_equi_predicate(
     } else {
         return None;
     };
-    Some(Predicate(Rc::new(QueryExpr::Compare {
-        left: Rc::new(QueryExpr::Column(left_id)),
+    Some(Predicate(ScalarExpr::Compare {
+        left: Box::new(ScalarExpr::Column(left_id)),
         op: asap_types::pre_asap::CompareOpKind::Eq,
-        right: Rc::new(QueryExpr::Column(right_id)),
-    })))
+        right: Box::new(ScalarExpr::Column(right_id)),
+        semantics: *semantics,
+    }))
 }
 
-fn relational_join_guarantee(
-    left: Option<&ResultGuarantee>,
-    right: Option<&ResultGuarantee>,
-) -> Option<ResultGuarantee> {
-    left.zip(right)
-        .filter(|(left, right)| left.is_exact() && right.is_exact())
-        .map(|_| ResultGuarantee::exact("RelationalJoin over exact inputs"))
-}
 
 impl<'a> GlobalSelection<'a> {
     /// One selection per discovered target sub-DAG, in discovery order.
@@ -5138,28 +5082,30 @@ impl<'a> GlobalSelection<'a> {
     /// The selection for `target`, if `target`'s own `Rc` is a discovered
     /// site (i.e. `Rc::ptr_eq` to some node reachable from the workload's
     /// roots).
-    pub fn for_target(&self, target: &Rc<QueryExpr>) -> Option<&TargetSubDAGSelection<'a>> {
+    pub fn for_target(&self, target: &Rc<OperatorNode>) -> Option<&TargetSubDAGSelection<'a>> {
         self.groups.get(&Rc::as_ptr(target))
     }
 
     /// Link this selection's per-site decisions into one data_state-validated
     /// post-ASAP DAG rooted at `target` — the one place a committed
-    /// composition's child *reference* becomes an actual `Rc<SummaryNode>`
+    /// composition's child *reference* becomes an actual `Rc<OperatorNode>`
     /// edge (issue #171). `None` if `target` is not a discovered site.
     ///
     /// Per site: a [`Replacement::ExactComposition`] uses its validated
     /// operation/child plan, retaining the search model's guarantee;
-    /// a [`Replacement::Summary`] is
+    /// a bound-summary [`Replacement::Subtree`] is
     /// re-linked so its `SummaryAgg` child is the child target's own
     /// DAG assembly whenever that is phase-legal beneath maintenance
     /// (so a child that chose an `ValueOperationAtIngestionTime` actually ends up under
-    /// the summary); a [`Replacement::Rewrite`] or an unmatched site stays
-    /// the conservative `KeepPreAsap`. Memoized by target identity, so a
-    /// shared inner summary is one `Rc` no matter how many roots reach it.
+    /// the summary); a logical-rewrite [`Replacement::Subtree`] is kept
+    /// as it is (exact); an unmatched site keeps its own operator with each
+    /// child assembled independently ([`Self::assemble_residual`]).
+    /// Memoized by target identity, so a shared inner summary is one `Rc`
+    /// no matter how many roots reach it.
     pub fn assemble_selected_dag(
         &self,
-        target: &Rc<QueryExpr>,
-    ) -> Result<Option<Rc<SummaryNode>>, RealizationError> {
+        target: &Rc<OperatorNode>,
+    ) -> Result<Option<Rc<OperatorNode>>, RealizationError> {
         if !self.groups.contains_key(&Rc::as_ptr(target)) {
             return Ok(None);
         }
@@ -5171,14 +5117,14 @@ impl<'a> GlobalSelection<'a> {
     /// callers exposing query results must use this boundary instead.
     pub fn assemble_selected_query(
         &self,
-        target: &Rc<QueryExpr>,
-    ) -> Result<Option<Rc<SummaryNode>>, RealizationError> {
+        target: &Rc<OperatorNode>,
+    ) -> Result<Option<Rc<OperatorNode>>, RealizationError> {
         self.assemble_selected_dag(target)?
             .map(|node| finalize_query_candidate(node, target))
             .transpose()
     }
 
-    fn assemble_target(&self, target: &Rc<QueryExpr>) -> Result<Rc<SummaryNode>, RealizationError> {
+    fn assemble_target(&self, target: &Rc<OperatorNode>) -> Result<Rc<OperatorNode>, RealizationError> {
         let ptr = Rc::as_ptr(target);
         if let Some(node) = self.assembled_nodes.borrow().get(&ptr) {
             return Ok(Rc::clone(node));
@@ -5188,9 +5134,9 @@ impl<'a> GlobalSelection<'a> {
             .get(&ptr)
             .and_then(|sel| sel.chosen)
             .is_some_and(|candidate| matches!(&candidate.replacement,
-                Replacement::Summary(node) if matches!(&node.expr,
-                    SummaryExpr::SummaryAgg { child, .. }
-                    if matches!(&child.expr, SummaryExpr::KeepPreAsap(raw) if !contains_aggregate(raw)))));
+                Replacement::Subtree(node) if matches!(&node.operator,
+                    Operator::ASAP(ASAPOp::SummaryAgg { child, .. })
+                    if !child.contains_asap() && !contains_aggregate(child))));
         let node = if query_time_nested_sum(target) && !selected_composed_summary {
             self.assemble_residual(target)?
         } else {
@@ -5201,8 +5147,10 @@ impl<'a> GlobalSelection<'a> {
                 .map(|c| &c.replacement)
             {
                 None => self.assemble_residual(target)?,
-                Some(Replacement::Rewrite(rewritten)) => keep_pre_asap(rewritten)?,
-                Some(Replacement::Summary(node)) => self.relink_summary(node, target)?,
+                Some(Replacement::Subtree(node)) if node.contains_asap() => {
+                    self.relink_summary(node, target)?
+                }
+                Some(Replacement::Subtree(kept)) => keep_pre_asap(kept)?,
                 Some(Replacement::ExactComposition(_)) => Rc::clone(
                     &self.groups[&ptr]
                         .composition
@@ -5218,128 +5166,102 @@ impl<'a> GlobalSelection<'a> {
         Ok(node)
     }
 
-    /// Preserve composable query-time value operators in post-ASAP form even
-    /// when the operator itself has no summary realization. Its child is
-    /// assembled independently, so a selected summary remains visible
-    /// beneath `Project`/`Filter`/`Sort`/`Limit` instead of being swallowed by
-    /// one opaque `KeepPreAsap` subtree.
+    /// Keep `target`'s own operator and assemble each child independently,
+    /// so a selected summary remains visible beneath a relational operator
+    /// that has no summary realization of its own instead of being
+    /// swallowed by one opaque kept subtree. Every child that is a
+    /// discovered target is assembled (and finalized to query-time values);
+    /// any other child is kept as it is. The guarantee is composed from the
+    /// assembled children: all exact → exact; exactly one child → that
+    /// child's guarantee; otherwise unknown. An inner `Join` first has its
+    /// cross-input equi-predicate normalized; any other join is kept whole.
     fn assemble_residual(
         &self,
-        target: &Rc<QueryExpr>,
-    ) -> Result<Rc<SummaryNode>, RealizationError> {
-        if let QueryExpr::Join {
+        target: &Rc<OperatorNode>,
+    ) -> Result<Rc<OperatorNode>, RealizationError> {
+        if target.children().is_empty() {
+            // A leaf has nothing to assemble beneath it: keep it as it is.
+            return keep_pre_asap(target);
+        }
+        let mut operator = target.operator.clone();
+        if let Operator::NonASAP(NonASAPOp::Join {
             left,
             right,
             kind,
             pred,
-        } = target.as_ref()
+        }) = &mut operator
         {
-            let left_width = left.output_schema()?.fields.len();
-            let total_width = left_width + right.output_schema()?.fields.len();
-            let normalized_pred = matches!(kind, asap_types::pre_asap::JoinKind::Inner)
+            let left_width = left.schema.fields.len();
+            let total_width = left_width + right.schema.fields.len();
+            let normalized_pred = matches!(kind, JoinKind::Inner)
                 .then(|| normalize_cross_input_equi_predicate(pred, left_width, total_width))
                 .flatten();
-            let Some(pred) = normalized_pred else {
+            let Some(normalized) = normalized_pred else {
                 return keep_pre_asap(target);
             };
-            let left = finalize_query_candidate(self.assemble_target(left)?, left)?;
-            let right = finalize_query_candidate(self.assemble_target(right)?, right)?;
-            let guarantee =
-                relational_join_guarantee(left.guarantee.as_ref(), right.guarantee.as_ref());
-            let node = Rc::new(SummaryNode {
-                expr: SummaryExpr::RelationalJoin {
-                    left,
-                    right,
-                    kind: kind.clone(),
-                    pred,
-                    pruning: None,
-                },
-                schema: lift(&target.output_schema()?),
-                guarantee,
-            });
-            validate_execution_data_states_at(&node, ExecutionDataState::QUERY_ROWS)?;
-            return Ok(node);
+            *pred = normalized;
         }
-        let (child_target, operation) = match target.as_ref() {
-            QueryExpr::Project {
-                cols,
-                qualifier,
-                child,
-            } => (
-                child,
-                ValueOperation::Project {
-                    cols: cols.clone(),
-                    qualifier: qualifier.clone(),
-                },
-            ),
-            QueryExpr::Filter { pred, child } => {
-                (child, ValueOperation::Filter { pred: pred.clone() })
+        let mut failure = None;
+        let mut children = Vec::new();
+        let operator = operator.map_children(|child| {
+            if failure.is_some() {
+                return Rc::clone(child);
             }
-            QueryExpr::Sort {
-                keys,
-                partition_by,
-                child,
-            } => (
-                child,
-                ValueOperation::Sort {
-                    keys: keys.clone(),
-                    partition_by: partition_by.clone(),
-                },
-            ),
-            QueryExpr::Limit { n, offset, child } => (
-                child,
-                ValueOperation::Limit {
-                    n: *n,
-                    offset: *offset,
-                    partition_by: match child.as_ref() {
-                        QueryExpr::Sort { partition_by, .. } => partition_by.clone(),
-                        _ => Default::default(),
-                    },
-                },
-            ),
-            QueryExpr::Aggregate {
-                reduction,
-                measures,
-                output_names,
-                having,
-                child,
-            } if query_time_nested_sum(target) => (
-                child,
-                ValueOperation::Exact(ExactOperation::Aggregate {
-                    reduction: reduction.clone(),
-                    measures: measures.clone(),
-                    output_names: output_names.clone(),
-                    having: having.clone(),
-                }),
-            ),
-            _ => return keep_pre_asap(target),
-        };
-        let child = finalize_query_candidate(self.assemble_target(child_target)?, child_target)?;
-        let guarantee = child.guarantee.clone();
-        let node = Rc::new(SummaryNode {
-            expr: SummaryExpr::ValueOperation {
-                child,
-                operation,
-                timing: ExecutionTiming::QueryTime,
-            },
-            schema: lift(&target.output_schema()?),
-            guarantee,
+            let assembled = if self.groups.contains_key(&Rc::as_ptr(child)) {
+                self.assemble_target(child)
+                    .and_then(|node| finalize_query_candidate(node, child))
+            } else {
+                Ok(Rc::clone(child))
+            };
+            match assembled {
+                Ok(node) => {
+                    children.push(Rc::clone(&node));
+                    node
+                }
+                Err(error) => {
+                    failure = Some(error);
+                    Rc::clone(child)
+                }
+            }
         });
-        validate_execution_data_states_at(&node, ExecutionDataState::QUERY_ROWS)?;
+        if let Some(error) = failure {
+            return Err(error);
+        }
+        let guarantee = match children.as_slice() {
+            [child] => child.guarantee.clone(),
+            children
+                if children.iter().all(|child| {
+                    child
+                        .guarantee
+                        .as_ref()
+                        .is_some_and(ResultGuarantee::is_exact)
+                }) =>
+            {
+                Some(ResultGuarantee::exact(format!(
+                    "{} over exact inputs",
+                    target.operator.kind_name()
+                )))
+            }
+            _ => None,
+        };
+        let node = Rc::new(
+            OperatorNode::with_schema(operator, lift(&target.schema)).with_guarantee(guarantee),
+        );
+        validate_default(&node, ExecutionTiming::QueryTime)?;
         Ok(node)
     }
 
-    /// Re-link a bound `Summary` candidate's `SummaryAgg` child to the
+    /// Re-link a bound summary candidate's `SummaryAgg` child to the
     /// child target's own DAG assembly when that is legal beneath
     /// maintenance; otherwise keep the candidate exactly as constructed.
     fn relink_summary(
         &self,
-        node: &Rc<SummaryNode>,
-        target: &Rc<QueryExpr>,
-    ) -> Result<Rc<SummaryNode>, RealizationError> {
-        let QueryExpr::Aggregate {
+        node: &Rc<OperatorNode>,
+        target: &Rc<OperatorNode>,
+    ) -> Result<Rc<OperatorNode>, RealizationError> {
+        let Some(NonASAPOp::Aggregate {
             child: pre_child, ..
-        } = target.as_ref()
+        }) = target.non_asap()
         else {
             return Ok(Rc::clone(node));
         };
@@ -5364,28 +5286,30 @@ impl<'a> GlobalSelection<'a> {
 
 /// A mergeable outer SUM over a relationally wrapped aggregate is a read-time
 /// reduction of the inner summary values. Maintaining the outer SUM directly
-/// would hide that inner temporal aggregate inside `KeepPreAsap` and lose its
-/// independently selected summary.
-fn query_time_nested_sum(target: &QueryExpr) -> bool {
-    let QueryExpr::Aggregate {
+/// would hide that inner temporal aggregate inside one kept subtree and lose
+/// its independently selected summary.
+fn query_time_nested_sum(target: &OperatorNode) -> bool {
+    let Some(NonASAPOp::Aggregate {
         measures,
         having: None,
         child,
         ..
-    } = target
+    }) = target.non_asap()
     else {
         return false;
     };
     matches!(measures.as_slice(), [AggIntent::Sum { .. }]) && contains_aggregate(child)
 }
 
-fn contains_aggregate(expr: &QueryExpr) -> bool {
-    match expr {
-        QueryExpr::Aggregate { .. } => true,
-        QueryExpr::Project { child, .. }
-        | QueryExpr::Filter { child, .. }
-        | QueryExpr::Sort { child, .. }
-        | QueryExpr::Limit { child, .. } => contains_aggregate(child),
+fn contains_aggregate(expr: &OperatorNode) -> bool {
+    match expr.non_asap() {
+        Some(NonASAPOp::Aggregate { .. }) => true,
+        Some(
+            NonASAPOp::Project { child, .. }
+            | NonASAPOp::Filter { child, .. }
+            | NonASAPOp::Sort { child, .. }
+            | NonASAPOp::Limit { child, .. },
+        ) => contains_aggregate(child),
         _ => false,
     }
 }
@@ -5393,48 +5317,47 @@ fn contains_aggregate(expr: &QueryExpr) -> bool {
 /// Rebuild `node` (a `SummaryAgg`, possibly under a `SummaryEstimate`) with
 /// `new_child` as the `SummaryAgg`'s child, if the result still validates
 /// as maintained state; otherwise return `node` unchanged.
-fn relink_agg_child(node: &Rc<SummaryNode>, new_child: &Rc<SummaryNode>) -> Rc<SummaryNode> {
-    match &node.expr {
-        SummaryExpr::SummaryEstimate {
+fn relink_agg_child(node: &Rc<OperatorNode>, new_child: &Rc<OperatorNode>) -> Rc<OperatorNode> {
+    match &node.operator {
+        Operator::ASAP(ASAPOp::SummaryEstimate {
             summary_input,
             query,
-        } => {
+        }) => {
             let inner = relink_agg_child(summary_input, new_child);
             if Rc::ptr_eq(&inner, summary_input) {
                 return Rc::clone(node);
             }
-            Rc::new(SummaryNode {
-                expr: SummaryExpr::SummaryEstimate {
+            OperatorNode::asap_node(
+                ASAPOp::SummaryEstimate {
                     summary_input: inner,
                     query: query.clone(),
                 },
-                schema: node.schema.clone(),
-                guarantee: node.guarantee.clone(),
-            })
+                node.schema.clone(),
+                node.guarantee.clone(),
+            )
         }
-        SummaryExpr::SummaryAgg {
+        Operator::ASAP(ASAPOp::SummaryAgg {
             child,
             family,
             input,
             reduction,
             grouping,
-        } => {
+        }) => {
             if Rc::ptr_eq(child, new_child) {
                 return Rc::clone(node);
             }
-            let rebuilt = Rc::new(SummaryNode {
-                expr: SummaryExpr::SummaryAgg {
+            let rebuilt = OperatorNode::asap_node(
+                ASAPOp::SummaryAgg {
                     child: Rc::clone(new_child),
                     family: family.clone(),
                     input: input.clone(),
                     reduction: reduction.clone(),
                     grouping: grouping.clone(),
                 },
-                schema: node.schema.clone(),
-                guarantee: node.guarantee.clone(),
-            });
-            match validate_execution_data_states_at(&rebuilt, ExecutionDataState::INGESTION_SUMMARY)
-            {
+                node.schema.clone(),
+                node.guarantee.clone(),
+            );
+            match validate_default(&rebuilt, ExecutionTiming::IngestionTime) {
                 Ok(_) => rebuilt,
                 Err(_) => Rc::clone(node),
             }
@@ -5443,13 +5366,15 @@ fn relink_agg_child(node: &Rc<SummaryNode>, new_child: &Rc<SummaryNode>) -> Rc<S
     }
 }
 
-/// The maintained `SummaryAgg` a bound `Summary` candidate builds (under
+/// The maintained `SummaryAgg` a bound summary candidate builds (under
 /// its `SummaryEstimate` readout, if any) — the summary an `ValueOperationAtIngestionTime`
 /// beneath it feeds, for `maintenance_operation_plan_cost_rate`.
-fn maintained_summary(node: &Rc<SummaryNode>) -> Option<&Rc<SummaryNode>> {
-    match &node.expr {
-        SummaryExpr::SummaryEstimate { summary_input, .. } => maintained_summary(summary_input),
-        SummaryExpr::SummaryAgg { .. } => Some(node),
+fn maintained_summary(node: &Rc<OperatorNode>) -> Option<&Rc<OperatorNode>> {
+    match &node.operator {
+        Operator::ASAP(ASAPOp::SummaryEstimate { summary_input, .. }) => {
+            maintained_summary(summary_input)
+        }
+        Operator::ASAP(ASAPOp::SummaryAgg { .. }) => Some(node),
         _ => None,
     }
 }
@@ -5466,10 +5391,10 @@ struct CompositionContext {
     /// child target ptr → the child's candidate an ancestor's composition
     /// already committed to (a later parent must compose with the *same*
     /// one, and the child's own selection is forced to it).
-    committed_child: HashMap<*const QueryExpr, *const ReplacementSubDAG>,
+    committed_child: HashMap<*const OperatorNode, *const ReplacementSubDAG>,
     /// site ptr → the maintained `SummaryAgg` directly above it, when its
-    /// parent chose a bound `Summary` — what an `ValueOperationAtIngestionTime` here feeds.
-    maintaining_parent: HashMap<*const QueryExpr, Rc<SummaryNode>>,
+    /// parent chose a bound summary — what an `ValueOperationAtIngestionTime` here feeds.
+    maintaining_parent: HashMap<*const OperatorNode, Rc<OperatorNode>>,
 }
 
 /// One eligible composed alternative at a site, before the cheapest wins.
@@ -5482,10 +5407,10 @@ struct CompositionOption<'a> {
 /// composed-plan rate is *known* and beats the raw-recompute baseline —
 /// costed against each compatible child candidate already in `PlanSpace`
 /// (or the one an earlier parent committed). Unknown statistics yield no
-/// option at all: the conservative `KeepPreAsap` path stays.
+/// option at all: the conservative kept-subtree path stays.
 fn composition_options<'a>(
     group: &'a TargetSubDAGCandidates,
-    groups: &'a HashMap<*const QueryExpr, TargetSubDAGCandidates>,
+    groups: &'a HashMap<*const OperatorNode, TargetSubDAGCandidates>,
     effective: usize,
     cost_model: &dyn CostModel,
     context: &CompositionContext,
@@ -5504,7 +5429,7 @@ fn composition_options<'a>(
             continue;
         };
         let already_committed = context.committed_child.get(&child_ptr).copied();
-        let cost = |summary: &SummaryNode, shared: bool| {
+        let cost = |summary: &OperatorNode, shared: bool| {
             let request = ExactCompositionCostRequest {
                 target: &group.target,
                 composition,
@@ -5540,10 +5465,10 @@ fn composition_options<'a>(
                     if !is_automatically_selectable(child_candidate, cost_model) {
                         continue;
                     }
-                    let Replacement::Summary(summary) = &child_candidate.replacement else {
+                    let Replacement::Subtree(summary) = &child_candidate.replacement else {
                         continue;
                     };
-                    if !composition.accepts_child(summary) {
+                    if is_logical_rewrite(summary) || !composition.accepts_child(summary) {
                         continue;
                     }
                     let Some(prepared) = plans.iter().find(|p| {
@@ -5652,8 +5577,8 @@ impl<Id> PlanSpace<Id> {
         let topo = topological_order(&self.order, &graph);
 
         let mut effective_uses = graph.external_root_uses.clone();
-        let mut chosen_share: HashMap<*const QueryExpr, ShareDecision> = HashMap::new();
-        let mut groups: HashMap<*const QueryExpr, TargetSubDAGSelection<'_>> = HashMap::new();
+        let mut chosen_share: HashMap<*const OperatorNode, ShareDecision> = HashMap::new();
+        let mut groups: HashMap<*const OperatorNode, TargetSubDAGSelection<'_>> = HashMap::new();
         let mut context = CompositionContext::default();
 
         for ptr in &topo {
@@ -5880,8 +5805,8 @@ impl<Id> PlanSpace<Id> {
             // Record the maintained summary this site's bound candidate
             // builds, for a child that may compose an `ValueOperationAtIngestionTime`
             // beneath it.
-            if let (Some(Replacement::Summary(node)), QueryExpr::Aggregate { child, .. }) =
-                (chosen.map(|c| &c.replacement), group.target.as_ref())
+            if let (Some(Replacement::Subtree(node)), Some(NonASAPOp::Aggregate { child, .. })) =
+                (chosen.map(|c| &c.replacement), group.target.non_asap())
             {
                 if let Some(summary) = maintained_summary(node) {
                     context
@@ -5893,7 +5818,7 @@ impl<Id> PlanSpace<Id> {
             let outgoing_multiplier = multiplier(*ptr, &effective_uses, &chosen_share);
             match chosen {
                 Some(ReplacementSubDAG {
-                    replacement: Replacement::Rewrite(source),
+                    replacement: Replacement::Subtree(source),
                     provenance: ReplacementProvenance::AccuracyReconciliation,
                     ..
                 }) => {
@@ -5906,8 +5831,10 @@ impl<Id> PlanSpace<Id> {
                 }
                 _ => {
                     let selected_rewrite = match chosen.map(|candidate| &candidate.replacement) {
-                        Some(Replacement::Rewrite(rewrite)) => rewrite,
-                        Some(Replacement::Summary(_) | Replacement::ExactComposition(_)) | None => {
+                        Some(Replacement::Subtree(rewrite)) if is_logical_rewrite(rewrite) => {
+                            rewrite
+                        }
+                        Some(Replacement::Subtree(_) | Replacement::ExactComposition(_)) | None => {
                             &group.target
                         }
                     };
@@ -5972,9 +5899,9 @@ fn is_automatically_selectable(candidate: &ReplacementSubDAG, cost_model: &dyn C
 /// ancestor sits anywhere on the path from a root to a site — see the
 /// module docs' "Whole-plan (cross-group) selection" section.
 fn multiplier(
-    parent_ptr: *const QueryExpr,
-    effective_uses: &HashMap<*const QueryExpr, usize>,
-    chosen_share: &HashMap<*const QueryExpr, ShareDecision>,
+    parent_ptr: *const OperatorNode,
+    effective_uses: &HashMap<*const OperatorNode, usize>,
+    chosen_share: &HashMap<*const OperatorNode, ShareDecision>,
 ) -> usize {
     let effective = *effective_uses.get(&parent_ptr).expect(
         "topological_order guarantees a parent is processed (and its effective_consumer_count \
@@ -5998,7 +5925,7 @@ fn cse_candidate_pair(
     for candidate in &group.candidates {
         match candidate.provenance {
             ReplacementProvenance::CseShare => {
-                let Replacement::Rewrite(rc) = &candidate.replacement else {
+                let Replacement::Subtree(rc) = &candidate.replacement else {
                     return None;
                 };
                 if !Rc::ptr_eq(rc, &group.target) || share.replace(candidate).is_some() {
@@ -6006,7 +5933,7 @@ fn cse_candidate_pair(
                 }
             }
             ReplacementProvenance::CseRecompute => {
-                let Replacement::Rewrite(rc) = &candidate.replacement else {
+                let Replacement::Subtree(rc) = &candidate.replacement else {
                     return None;
                 };
                 if Rc::ptr_eq(rc, &group.target)
@@ -6093,17 +6020,17 @@ struct ReferenceGraph {
     /// [`walk_children`] itself uses (an edge count above 1 happens when
     /// one parent references the same child from two different fields,
     /// e.g. a `Join`'s `left`/`right` both being the same `Rc`).
-    parents_of: HashMap<*const QueryExpr, Vec<(*const QueryExpr, usize)>>,
+    parents_of: HashMap<*const OperatorNode, Vec<(*const OperatorNode, usize)>>,
     /// parent ptr -> every distinct child ptr it directly references — the
     /// reverse of `parents_of`, for [`topological_order`]'s Kahn's-algorithm
     /// traversal.
-    children_of: HashMap<*const QueryExpr, Vec<*const QueryExpr>>,
+    children_of: HashMap<*const OperatorNode, Vec<*const OperatorNode>>,
     /// How many of the workload's own `roots` point directly at each node —
     /// a node's "external" use. Nothing inside the tree decides this (it
     /// isn't a reference from another discovered site), so it's never
     /// subject to any ancestor's Share/Recompute choice — it's the base
     /// case [`PlanSpace::global_selection`]'s recurrence starts from.
-    external_root_uses: HashMap<*const QueryExpr, usize>,
+    external_root_uses: HashMap<*const OperatorNode, usize>,
 }
 
 /// Build an ordering graph containing every edge that could be selected:
@@ -6129,7 +6056,10 @@ fn reference_graph<Id>(space: &PlanSpace<Id>) -> ReferenceGraph {
         let group = &space.groups[ptr];
         record_possible_edges(*ptr, &group.target, &mut graph);
         for candidate in &group.candidates {
-            if let Replacement::Rewrite(rewrite) = &candidate.replacement {
+            if let Replacement::Subtree(rewrite) = &candidate.replacement {
+                if !is_logical_rewrite(rewrite) {
+                    continue;
+                }
                 if candidate.provenance == ReplacementProvenance::AccuracyReconciliation {
                     add_edge(*ptr, Rc::as_ptr(rewrite), 1, &mut graph);
                 } else {
@@ -6145,8 +6075,8 @@ fn reference_graph<Id>(space: &PlanSpace<Id>) -> ReferenceGraph {
 /// [`ReferenceGraph`]'s fields), retaining the greatest multiplicity seen
 /// when the target and alternative rewrites expose the same edge.
 fn add_edge(
-    parent_ptr: *const QueryExpr,
-    child_ptr: *const QueryExpr,
+    parent_ptr: *const OperatorNode,
+    child_ptr: *const OperatorNode,
     edge_count: usize,
     graph: &mut ReferenceGraph,
 ) {
@@ -6162,8 +6092,8 @@ fn add_edge(
 }
 
 fn record_possible_edges(
-    parent_ptr: *const QueryExpr,
-    node: &QueryExpr,
+    parent_ptr: *const OperatorNode,
+    node: &OperatorNode,
     graph: &mut ReferenceGraph,
 ) {
     for (child_ptr, edge_count) in direct_child_counts(node) {
@@ -6173,8 +6103,8 @@ fn record_possible_edges(
 
 /// Direct relational-skeleton children and their edge multiplicities.
 /// `Concat` is transparent, matching [`walk_children`]'s site scope.
-fn direct_child_counts(node: &QueryExpr) -> Vec<(*const QueryExpr, usize)> {
-    fn push(children: &mut Vec<(*const QueryExpr, usize)>, child: &Rc<QueryExpr>) {
+fn direct_child_counts(node: &OperatorNode) -> Vec<(*const OperatorNode, usize)> {
+    fn push(children: &mut Vec<(*const OperatorNode, usize)>, child: &Rc<OperatorNode>) {
         let ptr = Rc::as_ptr(child);
         match children.iter_mut().find(|(existing, _)| *existing == ptr) {
             Some((_, count)) => *count += 1,
@@ -6182,57 +6112,19 @@ fn direct_child_counts(node: &QueryExpr) -> Vec<(*const QueryExpr, usize)> {
         }
     }
 
-    fn collect(node: &QueryExpr, children: &mut Vec<(*const QueryExpr, usize)>) {
-        use QueryExpr::*;
-        match node {
-            Scan { .. } | PromqlScalarBridge(_) | EvalTimestamp | CurrentTimestamp => {}
-            PromqlVectorFromScalar(c) | PromqlScalarFromVector(c) => {
-                push(children, c);
+    fn collect(node: &OperatorNode, children: &mut Vec<(*const OperatorNode, usize)>) {
+        if let Some(NonASAPOp::Concat {
+            children: concat_children,
+            ..
+        }) = node.non_asap()
+        {
+            for c in concat_children {
+                collect(c, children);
             }
-            PromqlRelabel { child, .. }
-            | PromqlInfoEnrich { child, .. }
-            | PromqlSeriesSample { child, .. }
-            | Filter { child, .. }
-            | Project { child, .. }
-            | Aggregate { child, .. }
-            | Dedup { child, .. }
-            | PromqlSubquery { child, .. }
-            | TimeRange { child, .. }
-            | TimeShift { child, .. }
-            | SQLWindowFunc { child, .. }
-            | Sort { child, .. }
-            | Limit { child, .. } => {
-                push(children, child);
-            }
-            Concat {
-                children: concat_children,
-                ..
-            } => {
-                for c in concat_children {
-                    collect(c, children);
-                }
-            }
-            Join { left, right, .. } | SetOp { left, right, .. } => {
-                push(children, left);
-                push(children, right);
-            }
-            BinaryOp { lhs, rhs, .. } => {
-                push(children, lhs);
-                push(children, rhs);
-            }
-            Column(_)
-            | Literal(_)
-            | Compare { .. }
-            | BoolAnd(_)
-            | BoolOr(_)
-            | Not(_)
-            | IsNull(_)
-            | IsNotNull(_)
-            | Cast { .. }
-            | InList { .. }
-            | FunctionCall { .. }
-            | Arithmetic { .. }
-            | Case { .. } => {}
+            return;
+        }
+        for child in node.children() {
+            push(children, child);
         }
     }
 
@@ -6248,14 +6140,14 @@ fn direct_child_counts(node: &QueryExpr) -> Vec<(*const QueryExpr, usize)> {
 /// different root paths can have a parent that's discovered *after* it (see
 /// this function's own test for a worked diamond example), which is exactly
 /// backwards for [`PlanSpace::global_selection`]'s recurrence.
-fn topological_order(order: &[*const QueryExpr], graph: &ReferenceGraph) -> Vec<*const QueryExpr> {
-    let mut in_degree: HashMap<*const QueryExpr, usize> = HashMap::new();
+fn topological_order(order: &[*const OperatorNode], graph: &ReferenceGraph) -> Vec<*const OperatorNode> {
+    let mut in_degree: HashMap<*const OperatorNode, usize> = HashMap::new();
     for ptr in order {
         let degree = graph.parents_of.get(ptr).map(Vec::len).unwrap_or(0);
         in_degree.insert(*ptr, degree);
     }
 
-    let mut queue: VecDeque<*const QueryExpr> = order
+    let mut queue: VecDeque<*const OperatorNode> = order
         .iter()
         .copied()
         .filter(|ptr| in_degree[ptr] == 0)
@@ -6279,9 +6171,9 @@ fn topological_order(order: &[*const QueryExpr], graph: &ReferenceGraph) -> Vec<
     assert_eq!(
         topo.len(),
         order.len(),
-        "topological_order: the discovered-site reference graph has a cycle — every QueryExpr \
-         node is built from Rc children, which can't form one, so this indicates a bug in \
-         reference_graph rather than a real cyclic workload",
+        "topological_order: the discovered-site reference graph has a cycle — every \
+         OperatorNode is built from Rc children, which can't form one, so this indicates a bug \
+         in reference_graph rather than a real cyclic workload",
     );
     topo
 }
@@ -6377,7 +6269,7 @@ pub fn default_strategies_with_evidence<'a>(
 /// `sorted_by(cost_model)` step. Use [`search_workload_with`] to plug in a
 /// custom strategy set (e.g. built via [`default_strategies_with`] for a
 /// deployment-specific [`CostModel`]).
-pub fn search_workload<Id>(roots: Vec<(Id, Rc<QueryExpr>)>) -> PlanSpace<Id> {
+pub fn search_workload<Id>(roots: Vec<(Id, Rc<OperatorNode>)>) -> PlanSpace<Id> {
     search_workload_with(roots, &default_strategies())
 }
 
@@ -6400,7 +6292,7 @@ pub fn search_workload<Id>(roots: Vec<(Id, Rc<QueryExpr>)>) -> PlanSpace<Id> {
 /// [`SketchAlgorithmStrategy::new`]'s), and [`PlanSpace::cost_sorted`]'s final
 /// ranking step takes one explicitly.
 pub fn search_workload_with<'s, Id>(
-    roots: Vec<(Id, Rc<QueryExpr>)>,
+    roots: Vec<(Id, Rc<OperatorNode>)>,
     strategies: &[Box<dyn ReplacementStrategy + 's>],
 ) -> PlanSpace<Id> {
     let mut space = search_cse_workload_with(cse_workload(roots), strategies);
@@ -6411,7 +6303,7 @@ pub fn search_workload_with<'s, Id>(
 /// [`search_workload_with`] plus a per-root end-to-end `AccuracyTarget`
 /// (issue #172) — the workload's `QueryRequirements.accuracy`, threaded
 /// alongside each root. After the search, every root that carries a target
-/// has its group's bound [`Replacement::Summary`] candidates checked with
+/// has its group's bound-summary [`Replacement::Subtree`] candidates checked with
 /// `accuracy_model`'s [`AccuracyModel::satisfies`]: a candidate whose
 /// guarantee is fully known and misses the target is moved from
 /// [`TargetSubDAGCandidates::candidates`] to [`TargetSubDAGCandidates::rejected`] *before*
@@ -6419,16 +6311,16 @@ pub fn search_workload_with<'s, Id>(
 /// group. A constructible candidate with unknown accuracy remains visible for
 /// downstream review under an approximate target, but default whole-plan
 /// selection does not commit it. An exact target cannot accept an unknown
-/// approximate summary. A `KeepPreAsap` candidate is
+/// approximate summary. A kept pre-ASAP candidate is
 /// exact and always survives — the raw/pre-ASAP alternative is what an
-/// unsatisfiable root keeps. Logical [`Replacement::Rewrite`] candidates
-/// are not bound values and are left alone; the targets *inside* a rewrite
-/// are their own groups.
+/// unsatisfiable root keeps. Logical-rewrite [`Replacement::Subtree`]
+/// candidates are not bound values and are left alone; the targets *inside*
+/// a rewrite are their own groups.
 ///
 /// Precedence against per-node `AggIntent.accuracy` is documented in
 /// [`crate::accuracy`]'s module docs.
 pub fn search_workload_with_targets<'s, Id>(
-    roots: Vec<(Id, Rc<QueryExpr>, Option<AccuracyTarget>)>,
+    roots: Vec<(Id, Rc<OperatorNode>, Option<AccuracyTarget>)>,
     strategies: &[Box<dyn ReplacementStrategy + 's>],
     accuracy_model: &dyn AccuracyModel,
 ) -> PlanSpace<Id> {
@@ -6442,7 +6334,7 @@ pub fn search_workload_with_targets<'s, Id>(
         .collect();
     let mut space = search_cse_workload_with(cse_workload(roots), strategies);
     // `cse_workload` preserves root order, so targets zip by position.
-    let root_ptrs: Vec<(*const QueryExpr, AccuracyTarget)> = space
+    let root_ptrs: Vec<(*const OperatorNode, AccuracyTarget)> = space
         .roots
         .iter()
         .zip(targets)
@@ -6462,11 +6354,11 @@ pub fn search_workload_with_targets<'s, Id>(
                 .candidates
                 .drain(..)
                 .partition(|candidate| match &candidate.replacement {
-                    Replacement::Summary(node) => node.guarantee.as_ref().map_or_else(
+                    Replacement::Subtree(node) if is_logical_rewrite(node) => true,
+                    Replacement::Subtree(node) => node.guarantee.as_ref().map_or_else(
                         || !matches!(target, AccuracyTarget::Exact),
                         |g| accuracy_model.satisfies(&g.optimistic_floor(), &target),
                     ),
-                    Replacement::Rewrite(_) => true,
                     // A composition's guarantee depends on the concrete child;
                     // prepare_compositions checks those pairs after all roots.
                     Replacement::ExactComposition(_) => true,
@@ -6474,7 +6366,7 @@ pub fn search_workload_with_targets<'s, Id>(
         group.candidates = legal;
         group.rejected.extend(illegal.into_iter().map(|candidate| {
             let (metric, bound, failure_probability) = match &candidate.replacement {
-                Replacement::Summary(node) => node
+                Replacement::Subtree(node) => node
                     .guarantee
                     .as_ref()
                     .map(|g| {
@@ -6489,7 +6381,6 @@ pub fn search_workload_with_targets<'s, Id>(
                         None,
                         None,
                     )),
-                Replacement::Rewrite(_) => unreachable!("rewrites are never rejected here"),
                 Replacement::ExactComposition(_) => (
                     asap_types::post_asap::ErrorMetric::AbsoluteValue,
                     None,
@@ -6512,48 +6403,45 @@ pub fn search_workload_with_targets<'s, Id>(
     space
 }
 
-fn cse_workload<Id>(roots: Vec<(Id, Rc<QueryExpr>)>) -> Vec<(Id, Rc<QueryExpr>)> {
-    // `share_common_subtrees` wants owned `QueryExpr`s, not already-`Rc`
-    // roots — the same `Rc::try_unwrap`-with-clone-fallback pattern
-    // `asap_types::pre_asap::cse::intern_child` itself uses to recover an
-    // owned node without cloning in the common (uniquely-owned) case.
-    let owned_roots: Vec<(Id, QueryExpr)> = roots
-        .into_iter()
-        .map(|(id, rc)| {
-            let expr = Rc::try_unwrap(rc).unwrap_or_else(|shared| (*shared).clone());
-            (id, expr)
-        })
-        .collect();
-    share_common_subtrees(owned_roots)
+fn cse_workload<Id>(roots: Vec<(Id, Rc<OperatorNode>)>) -> Vec<(Id, Rc<OperatorNode>)> {
+    share_common_subtrees(roots)
 }
 
 fn search_cse_workload_with<'s, Id>(
-    cse_roots: Vec<(Id, Rc<QueryExpr>)>,
+    cse_roots: Vec<(Id, Rc<OperatorNode>)>,
     strategies: &[Box<dyn ReplacementStrategy + 's>],
 ) -> PlanSpace<Id> {
+    for (_, root) in &cse_roots {
+        assert!(
+            !root.contains_asap(),
+            "search_workload: a workload root already contains an ASAP operator \
+             ({}); replacement search takes the front end's pre-ASAP DAG only",
+            root.operator.kind_name()
+        );
+    }
     let mut order = Vec::new();
     let mut nodes = HashMap::new();
-    let mut counts: HashMap<*const QueryExpr, usize> = HashMap::new();
+    let mut counts: HashMap<*const OperatorNode, usize> = HashMap::new();
     discover_targets(&cse_roots, &mut order, &mut nodes, &mut counts);
-    let siblings: Vec<Rc<QueryExpr>> = order
+    let siblings: Vec<Rc<OperatorNode>> = order
         .iter()
         .filter_map(|ptr| {
             let node = &nodes[ptr];
-            matches!(node.as_ref(), QueryExpr::Aggregate { .. }).then(|| Rc::clone(node))
+            matches!(node.non_asap(), Some(NonASAPOp::Aggregate { .. })).then(|| Rc::clone(node))
         })
         .collect();
     let rollup_strategy = RollupStrategy::new(&siblings);
     let accuracy_reconciliation_strategy = AccuracyReconciliationStrategy::new(&siblings);
-    let limits: Vec<Rc<QueryExpr>> = order
+    let limits: Vec<Rc<OperatorNode>> = order
         .iter()
         .filter_map(|ptr| {
             let node = &nodes[ptr];
-            matches!(node.as_ref(), QueryExpr::Limit { .. }).then(|| Rc::clone(node))
+            matches!(node.non_asap(), Some(NonASAPOp::Limit { .. })).then(|| Rc::clone(node))
         })
         .collect();
     let topk_reuse_strategy = TopKLimitReuseStrategy::new(&limits);
 
-    let mut groups: HashMap<*const QueryExpr, TargetSubDAGCandidates> = HashMap::new();
+    let mut groups: HashMap<*const OperatorNode, TargetSubDAGCandidates> = HashMap::new();
     for ptr in &order {
         groups.insert(
             *ptr,
@@ -6637,8 +6525,10 @@ fn search_cse_workload_with<'s, Id>(
             }
 
             for candidate in &proposed {
-                if let Replacement::Rewrite(rc) = &candidate.replacement {
-                    discover_new_descendant_targets(rc, &mut order, &mut nodes, &mut counts);
+                if let Replacement::Subtree(rc) = &candidate.replacement {
+                    if is_logical_rewrite(rc) {
+                        discover_new_descendant_targets(rc, &mut order, &mut nodes, &mut counts);
+                    }
                 }
             }
 
@@ -6678,10 +6568,10 @@ fn search_cse_workload_with<'s, Id>(
 /// ancestor is recomputed. We only do this when an ordinary repeated group
 /// proves that `SharedSubtreeStrategy` is part of this search's strategy set.
 fn add_effective_count_cse_candidates(
-    order: &[*const QueryExpr],
-    groups: &mut HashMap<*const QueryExpr, TargetSubDAGCandidates>,
+    order: &[*const OperatorNode],
+    groups: &mut HashMap<*const OperatorNode, TargetSubDAGCandidates>,
 ) {
-    let mut possible_children: HashMap<*const QueryExpr, Vec<*const QueryExpr>> = HashMap::new();
+    let mut possible_children: HashMap<*const OperatorNode, Vec<*const OperatorNode>> = HashMap::new();
     for ptr in order {
         let group = &groups[ptr];
         let children = possible_children.entry(*ptr).or_default();
@@ -6691,7 +6581,10 @@ fn add_effective_count_cse_candidates(
             }
         }
         for candidate in &group.candidates {
-            if let Replacement::Rewrite(rewrite) = &candidate.replacement {
+            if let Replacement::Subtree(rewrite) = &candidate.replacement {
+                if !is_logical_rewrite(rewrite) {
+                    continue;
+                }
                 for (child, _) in direct_child_counts(rewrite) {
                     if !children.contains(&child) {
                         children.push(child);
@@ -6749,10 +6642,10 @@ fn add_effective_count_cse_candidates(
 /// `Rc` and its real `consumer_count` — see the module docs' "Where
 /// `TargetSubDAG` discovery comes from" section for the full rationale.
 fn discover_targets<Id>(
-    roots: &[(Id, Rc<QueryExpr>)],
-    order: &mut Vec<*const QueryExpr>,
-    nodes: &mut HashMap<*const QueryExpr, Rc<QueryExpr>>,
-    counts: &mut HashMap<*const QueryExpr, usize>,
+    roots: &[(Id, Rc<OperatorNode>)],
+    order: &mut Vec<*const OperatorNode>,
+    nodes: &mut HashMap<*const OperatorNode, Rc<OperatorNode>>,
+    counts: &mut HashMap<*const OperatorNode, usize>,
 ) {
     for (_, root) in roots {
         walk(root, order, nodes, counts);
@@ -6761,17 +6654,17 @@ fn discover_targets<Id>(
 
 /// Scan `candidate`'s **children** (deliberately never `candidate`'s own
 /// top-level pointer — see the module docs' "Termination" section: a
-/// [`Replacement::Rewrite`]'s value is an alternative *for* the target that
+/// logical rewrite's value is an alternative *for* the target that
 /// proposed it, never a new target of its own) for any `Rc` not already
 /// known, appending each to `order`/`nodes`/`counts` so
 /// [`search_workload_with`]'s next round processes it. A no-op when every
 /// child is already known — the case both shipped strategies always produce
 /// (see that section).
 fn discover_new_descendant_targets(
-    candidate: &Rc<QueryExpr>,
-    order: &mut Vec<*const QueryExpr>,
-    nodes: &mut HashMap<*const QueryExpr, Rc<QueryExpr>>,
-    counts: &mut HashMap<*const QueryExpr, usize>,
+    candidate: &Rc<OperatorNode>,
+    order: &mut Vec<*const OperatorNode>,
+    nodes: &mut HashMap<*const OperatorNode, Rc<OperatorNode>>,
+    counts: &mut HashMap<*const OperatorNode, usize>,
 ) {
     walk_children(candidate, order, nodes, counts);
 }
@@ -6779,10 +6672,10 @@ fn discover_new_descendant_targets(
 /// Visit `node`: count this occurrence, and — the first time this exact
 /// `Rc` is seen — record it as a target and recurse into its children.
 fn walk(
-    node: &Rc<QueryExpr>,
-    order: &mut Vec<*const QueryExpr>,
-    nodes: &mut HashMap<*const QueryExpr, Rc<QueryExpr>>,
-    counts: &mut HashMap<*const QueryExpr, usize>,
+    node: &Rc<OperatorNode>,
+    order: &mut Vec<*const OperatorNode>,
+    nodes: &mut HashMap<*const OperatorNode, Rc<OperatorNode>>,
+    counts: &mut HashMap<*const OperatorNode, usize>,
 ) {
     let ptr = Rc::as_ptr(node);
     let already_visited = counts.contains_key(&ptr);
@@ -6794,61 +6687,25 @@ fn walk(
     }
 }
 
-/// `node`'s own **relational-skeleton** operator children — the same scope
-/// `asap_types::pre_asap::cse::share_common_subtrees`/`rebuild_children`
-/// itself uses (see that module's "Algorithm" section) and
-/// `tests::count_consumers` mirrors for its own fixtures. Exhaustive over
-/// every `QueryExpr` variant: a new variant fails to compile here until this
-/// match is extended too.
+/// `node`'s own operator children ([`OperatorNode::children`]: operator
+/// inputs plus the operator nodes its scalar expressions read), the same
+/// scope `asap_types::ir::cse::share_common_subtrees` itself uses and
+/// `tests::count_consumers` mirrors for its own fixtures. `Concat` is
+/// transparent: its branches are walked in place of it.
 fn walk_children(
-    node: &QueryExpr,
-    order: &mut Vec<*const QueryExpr>,
-    nodes: &mut HashMap<*const QueryExpr, Rc<QueryExpr>>,
-    counts: &mut HashMap<*const QueryExpr, usize>,
+    node: &OperatorNode,
+    order: &mut Vec<*const OperatorNode>,
+    nodes: &mut HashMap<*const OperatorNode, Rc<OperatorNode>>,
+    counts: &mut HashMap<*const OperatorNode, usize>,
 ) {
-    use QueryExpr::*;
-    match node {
-        Scan { .. } | PromqlScalarBridge(_) | EvalTimestamp | CurrentTimestamp => {}
-        PromqlVectorFromScalar(c) | PromqlScalarFromVector(c) => walk(c, order, nodes, counts),
-        PromqlRelabel { child, .. }
-        | PromqlInfoEnrich { child, .. }
-        | PromqlSeriesSample { child, .. }
-        | Filter { child, .. }
-        | Project { child, .. }
-        | Aggregate { child, .. }
-        | Dedup { child, .. }
-        | PromqlSubquery { child, .. }
-        | TimeRange { child, .. }
-        | TimeShift { child, .. }
-        | SQLWindowFunc { child, .. }
-        | Sort { child, .. }
-        | Limit { child, .. } => walk(child, order, nodes, counts),
-        Concat { children, .. } => {
-            for c in children {
-                walk_children(c, order, nodes, counts);
-            }
+    if let Some(NonASAPOp::Concat { children, .. }) = node.non_asap() {
+        for c in children {
+            walk_children(c, order, nodes, counts);
         }
-        Join { left, right, .. } | SetOp { left, right, .. } => {
-            walk(left, order, nodes, counts);
-            walk(right, order, nodes, counts);
-        }
-        BinaryOp { lhs, rhs, .. } => {
-            walk(lhs, order, nodes, counts);
-            walk(rhs, order, nodes, counts);
-        }
-        Column(_)
-        | Literal(_)
-        | Compare { .. }
-        | BoolAnd(_)
-        | BoolOr(_)
-        | Not(_)
-        | IsNull(_)
-        | IsNotNull(_)
-        | Cast { .. }
-        | InList { .. }
-        | FunctionCall { .. }
-        | Arithmetic { .. }
-        | Case { .. } => {}
+        return;
+    }
+    for child in node.children() {
+        walk(child, order, nodes, counts);
     }
 }
 

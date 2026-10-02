@@ -1,18 +1,18 @@
 //! `asap-plan` — the cost-aware optimizer layer over the pre-ASAP intent algebra.
 //!
 //! This crate sits between the language-agnostic IR ([`asap_ir`]) and
-//! any runtime: it consumes pre-ASAP [`QueryExpr`](asap_types::pre_asap::QueryExpr)
-//! trees and makes the cost-aware decisions the pre-ASAP IR deliberately
+//! any runtime: it consumes pre-ASAP [`OperatorNode`](asap_types::ir::OperatorNode)
+//! DAGs and makes the cost-aware decisions the pre-ASAP IR deliberately
 //! leaves open — which sketch (if any) realises each approximate intent.
 //!
 //! **Common sub-expression elimination (CSE) is not this crate's job.**
-//! Detection is a primary pass over the pre-ASAP `QueryExpr` IR itself
-//! (`asap_types::pre_asap`, design tracked in issue #223), run before a
+//! Detection is a primary pass over the pre-ASAP operator IR itself
+//! (`asap_types::ir::cse`, design tracked in issue #223), run before a
 //! tree ever reaches [`replacement::SketchAlgorithmStrategy`] — see issue #222
 //! for why (batch query optimization needs to see shared work across a
 //! `QueryWorkload` before summary binding, not after). This crate may
 //! eventually run a second, narrower CSE pass of its own over an
-//! already-bound `SummaryExpr`/`SummaryNode` DAG, recognizing sharing that's invisible
+//! already-bound post-ASAP `OperatorNode` DAG, recognizing sharing that's invisible
 //! at the pre-ASAP level by construction — e.g. `Quantile(x, 0.99)` and
 //! `Quantile(x, 0.95)` are structurally distinct `AggIntent`s but can
 //! still share one built sketch, read out twice. That post-ASAP pass is
@@ -207,8 +207,9 @@ pub use recurrence::{
     UpdateRate,
 };
 pub use replacement::{
-    default_strategies, default_strategies_with, search_workload, search_workload_with,
-    search_workload_with_targets, summary_candidates, CompositionDecision, GlobalSelection,
+    default_strategies, default_strategies_with, is_logical_rewrite, search_workload,
+    search_workload_with, search_workload_with_targets, summary_candidates, CompositionDecision,
+    GlobalSelection,
     Matcher, PlanSpace, Proposals, RankedTargetSubDAGCandidates, Realization, RealizationError,
     RecurrenceProfileMap, RejectedCandidate, Replacement, ReplacementProvenance,
     ReplacementStrategy, ReplacementSubDAG, SharedSubtreeStrategy, SketchAlgorithmStrategy,

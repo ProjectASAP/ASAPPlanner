@@ -8,7 +8,7 @@
 
 use std::rc::Rc;
 
-use asap_types::pre_asap::query_expr::QueryExpr;
+use asap_types::ir::OperatorNode;
 use asap_types::types::AccuracyTarget;
 
 use super::{OptimizationInput, OptimizationPass, OptimizeError, PlanOutput, QueryLifecyclePlan};
@@ -38,7 +38,7 @@ impl OptimizationPass for MajorPass {
         // search result carries the workload binding the lifecycle stage and
         // the output both need. CSE may make two identical queries share one
         // `Rc`, but it never drops or reorders a root, so this stays aligned.
-        let roots: Vec<(usize, Rc<QueryExpr>, Option<AccuracyTarget>)> = workload
+        let roots: Vec<(usize, Rc<OperatorNode>, Option<AccuracyTarget>)> = workload
             .entries()
             .enumerate()
             .map(|(index, (entry, expr))| {

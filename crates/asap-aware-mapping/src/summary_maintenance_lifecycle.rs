@@ -19,13 +19,14 @@
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
+use asap_types::ir::export::{compile_post_asap_dag_with_node_ids, PostAsapNodeId};
+use asap_types::ir::timing::{apply_lifecycle_timings, LifecycleAssignment, TimingMemo};
+use asap_types::ir::{ASAPOp, Operator, OperatorNode};
 use asap_types::post_asap::{
-    compile_post_asap_dag_with_node_ids, EvaluationSchedule, ExecutionDataStateError,
-    OutputRepresentation, PostAsapNodeId, ResultGuarantee, SummaryExpr,
+    EvaluationSchedule, ExecutionDataStateError, OutputRepresentation, ResultGuarantee,
     SummaryMaintenanceLifecycle, SummaryMaintenanceLifecycleGuarantee, SummaryMaintenanceMode,
-    SummaryNode, SummaryWindowFramework,
+    SummaryWindowFramework,
 };
-use asap_types::pre_asap::QueryExpr;
 use asap_types::types::AccuracyTarget;
 use asap_types::workload::{
     DataArrival, DataWorkload, Predictability, QueryRecurrence, QueryWorkload, RepeatedDemand,
@@ -42,6 +43,7 @@ use crate::recurrence::{
 };
 use crate::replacement::{
     CandidateCostOverrides, GlobalSelection, PlanSpace, RealizationError, Replacement,
+    ReplacementProvenance,
 };
 
 /// Summary-maintenance lifecycle shapes supported by the target runtime.
@@ -166,7 +168,7 @@ pub struct SummaryMaintenanceDeployment {
     /// summary instance identity.
     pub post_asap_node_id: PostAsapNodeId,
     /// The unique materialized `SummaryAgg` represented by this deployment.
-    pub summary: Rc<SummaryNode>,
+    pub summary: Rc<OperatorNode>,
     /// Lifecycle, evaluation, and representation commitment selected for this
     /// state, or `None` when no alternative is selectable.
     pub summary_maintenance_lifecycle_guarantee: Option<SummaryMaintenanceLifecycleGuarantee>,
@@ -182,7 +184,7 @@ pub struct SummaryMaintenanceDeployment {
 #[derive(Debug, Clone)]
 pub struct SummaryMaintenanceLifecyclePlan {
     /// Root of the materialized post-ASAP DAG being deployed.
-    pub root: Rc<SummaryNode>,
+    pub root: Rc<OperatorNode>,
     /// One entry per unique reachable `SummaryAgg`; shared `Rc` nodes appear
     /// only once.
     pub deployments: Vec<SummaryMaintenanceDeployment>,
@@ -326,7 +328,7 @@ struct SummaryMaintenanceWorkloadFacts {
 /// unique summary state, and select the cheapest legal alternative whose cost
 /// is fully known.
 pub fn plan_summary_maintenance_lifecycles(
-    root: Rc<SummaryNode>,
+    root: Rc<OperatorNode>,
     demand: WorkloadDemand<'_>,
     now_ms: u64,
     horizon: Option<Horizon>,
@@ -350,14 +352,14 @@ pub fn plan_summary_maintenance_lifecycles(
 /// DAG path multiplicity has been propagated by `PlanSpace`.
 #[expect(clippy::too_many_arguments, reason = "internal bound planning context")]
 fn plan_summary_maintenance_lifecycles_with_profile(
-    root: Rc<SummaryNode>,
+    root: Rc<OperatorNode>,
     demand: WorkloadDemand<'_>,
     now_ms: u64,
     horizon: Option<Horizon>,
     capabilities: SummaryMaintenanceLifecycleCapabilities,
     cost_model: &dyn CostModel,
     profile: Option<RecurrenceProfile>,
-    comparison_target: Option<&QueryExpr>,
+    comparison_target: Option<&OperatorNode>,
 ) -> Result<SummaryMaintenanceLifecyclePlan, SummaryMaintenanceLifecyclePlanError> {
     demand.workload.validate()?;
     if let Some(data) = demand.data_workload {
@@ -390,7 +392,16 @@ fn plan_summary_maintenance_lifecycles_with_profile(
     }
     let mut summaries = Vec::new();
     collect_summary_aggs(&root, &mut HashSet::new(), &mut summaries);
-    let node_ids = compile_post_asap_dag_with_node_ids(&root)?.node_ids;
+    // Node ids come from the timed DAG. Costing below keeps the search-time
+    // nodes: every cost-model binding is keyed by their identity. The plan
+    // switches to the timed copies once the selection is final.
+    let mut timing_memo = TimingMemo::new();
+    let timed_root = apply_lifecycle_timings(
+        &root,
+        &LifecycleAssignment::default_maintained(),
+        &mut timing_memo,
+    )?;
+    let node_ids = compile_post_asap_dag_with_node_ids(&timed_root)?.node_ids;
     let components = summary_state_components(&summaries);
     let mut deployments: Vec<SummaryMaintenanceDeployment> = summaries
         .into_iter()
@@ -403,8 +414,9 @@ fn plan_summary_maintenance_lifecycles_with_profile(
                 cost_model.summary_maintenance_lifecycle_cost_inputs_for_horizon(&summary, horizon),
             );
             SummaryMaintenanceDeployment {
-                post_asap_node_id: node_ids
-                    .node_id(&summary)
+                post_asap_node_id: timing_memo
+                    .timed(&summary)
+                    .and_then(|timed| node_ids.node_id(timed))
                     .expect("collected summary belongs to the compiled DAG"),
                 summary,
                 summary_maintenance_lifecycle_guarantee: None,
@@ -431,9 +443,16 @@ fn plan_summary_maintenance_lifecycles_with_profile(
     let window_accuracy_guarantee = complete_estimate
         .as_ref()
         .and_then(|estimate| estimate.window_accuracy_guarantee.clone());
-    let selected_raw_recompute = matches!(root.expr, SummaryExpr::KeepPreAsap(_));
+    let selected_raw_recompute = !root.contains_asap();
+    for deployment in &mut deployments {
+        deployment.summary = Rc::clone(
+            timing_memo
+                .timed(&deployment.summary)
+                .expect("collected summary belongs to the timed DAG"),
+        );
+    }
     Ok(SummaryMaintenanceLifecyclePlan {
-        root,
+        root: timed_root,
         deployments,
         horizon,
         evaluation_rate: facts.evaluation_rate,
@@ -479,9 +498,14 @@ pub fn global_selection_with_summary_maintenance_lifecycles<'a, Id>(
             continue;
         };
         for candidate in &group.candidates {
-            let Replacement::Summary(summary) = &candidate.replacement else {
+            // Only summary realizations carry a maintenance lifecycle; a
+            // logical rewrite or CSE share/recompute candidate does not.
+            let Replacement::Subtree(summary) = &candidate.replacement else {
                 continue;
             };
+            if candidate.provenance != ReplacementProvenance::SummaryRealization {
+                continue;
+            }
             costs.finalize_target(&group.target);
             let plan = plan_summary_maintenance_lifecycles_with_profile(
                 Rc::clone(summary),
@@ -519,7 +543,7 @@ pub fn global_selection_with_summary_maintenance_lifecycles<'a, Id>(
 /// summary maintenance decisions. This does not create or maintain runtime state.
 pub fn assemble_selected_dag_with_summary_maintenance_lifecycles(
     selection: &GlobalSelection<'_>,
-    target: &Rc<QueryExpr>,
+    target: &Rc<OperatorNode>,
     demand: WorkloadDemand<'_>,
     now_ms: u64,
     horizon: Option<Horizon>,
@@ -548,7 +572,13 @@ pub fn assemble_selected_dag_with_summary_maintenance_lifecycles(
                         .is_none_or(|summary| raw.0 <= summary.0)
                 })
             {
-                plan.root = crate::replacement::keep_pre_asap(target)?;
+                let kept = crate::replacement::keep_pre_asap(target)?;
+                plan.root = apply_lifecycle_timings(
+                    &kept,
+                    &LifecycleAssignment::default_maintained(),
+                    &mut TimingMemo::new(),
+                )
+                .map_err(SummaryMaintenanceLifecyclePlanError::from)?;
                 plan.deployments.clear();
                 plan.selected_raw_recompute = true;
                 plan.selected_window_implementation_id = None;
@@ -994,47 +1024,18 @@ fn rejected(
 }
 
 fn collect_summary_aggs(
-    node: &Rc<SummaryNode>,
-    seen: &mut HashSet<*const SummaryNode>,
-    output: &mut Vec<Rc<SummaryNode>>,
+    node: &Rc<OperatorNode>,
+    seen: &mut HashSet<*const OperatorNode>,
+    output: &mut Vec<Rc<OperatorNode>>,
 ) {
     if !seen.insert(Rc::as_ptr(node)) {
         return;
     }
-    match &node.expr {
-        SummaryExpr::SummaryAgg { child, .. } => {
-            output.push(Rc::clone(node));
-            collect_summary_aggs(child, seen, output);
-        }
-        SummaryExpr::ValueOperation { child, .. } => collect_summary_aggs(child, seen, output),
-        SummaryExpr::SummaryJoin { outer, inner, .. }
-        | SummaryExpr::RelationalJoin {
-            left: outer,
-            right: inner,
-            ..
-        }
-        | SummaryExpr::BinaryOp {
-            lhs: outer,
-            rhs: inner,
-            ..
-        }
-        | SummaryExpr::SummarySubtract {
-            left: outer,
-            right: inner,
-        } => {
-            collect_summary_aggs(outer, seen, output);
-            collect_summary_aggs(inner, seen, output);
-        }
-        SummaryExpr::SummaryDelete { summary_input, .. }
-        | SummaryExpr::SummaryEstimate { summary_input, .. } => {
-            collect_summary_aggs(summary_input, seen, output)
-        }
-        SummaryExpr::SummaryMerge { children, .. } => {
-            for child in children {
-                collect_summary_aggs(child, seen, output);
-            }
-        }
-        SummaryExpr::KeepPreAsap(_) => {}
+    if matches!(node.operator, Operator::ASAP(ASAPOp::SummaryAgg { .. })) {
+        output.push(Rc::clone(node));
+    }
+    for child in node.children() {
+        collect_summary_aggs(child, seen, output);
     }
 }
 
@@ -1061,7 +1062,7 @@ pub(crate) fn evaluation_schedule(
 
 /// Summary states composed on one maintenance path must be produced on the
 /// same schedule. Return a component id for each collected `SummaryAgg`.
-fn summary_state_components(summaries: &[Rc<SummaryNode>]) -> Vec<usize> {
+fn summary_state_components(summaries: &[Rc<OperatorNode>]) -> Vec<usize> {
     let indices: HashMap<_, _> = summaries
         .iter()
         .enumerate()
@@ -1077,16 +1078,18 @@ fn summary_state_components(summaries: &[Rc<SummaryNode>]) -> Vec<usize> {
     }
 
     for (parent_index, summary) in summaries.iter().enumerate() {
-        let SummaryExpr::SummaryAgg { child, .. } = &summary.expr else {
+        let Operator::ASAP(ASAPOp::SummaryAgg { child, .. }) = &summary.operator else {
             continue;
         };
         if !matches!(
-            child.expr,
-            SummaryExpr::SummaryAgg { .. }
-                | SummaryExpr::SummaryJoin { .. }
-                | SummaryExpr::SummarySubtract { .. }
-                | SummaryExpr::SummaryDelete { .. }
-                | SummaryExpr::SummaryMerge { .. }
+            child.operator,
+            Operator::ASAP(
+                ASAPOp::SummaryAgg { .. }
+                    | ASAPOp::SummaryJoin { .. }
+                    | ASAPOp::SummarySubtract { .. }
+                    | ASAPOp::SummaryDelete { .. }
+                    | ASAPOp::SummaryMerge { .. }
+            )
         ) {
             continue;
         }
@@ -1106,12 +1109,12 @@ fn summary_state_components(summaries: &[Rc<SummaryNode>]) -> Vec<usize> {
 
 #[expect(clippy::too_many_arguments, reason = "complete combination context")]
 fn select_complete_lifecycle_combination(
-    root: &SummaryNode,
+    root: &OperatorNode,
     deployments: &mut [SummaryMaintenanceDeployment],
     components: &[usize],
     arrival: DataArrival,
     cost_model: &dyn CostModel,
-    comparison_target: Option<&QueryExpr>,
+    comparison_target: Option<&OperatorNode>,
     horizon: Option<Horizon>,
     expected_reads: Option<f64>,
     required_accuracy: &[AccuracyTarget],
@@ -1150,12 +1153,12 @@ fn select_complete_lifecycle_combination(
     )]
     fn visit(
         index: usize,
-        root: &SummaryNode,
+        root: &OperatorNode,
         deployments: &[SummaryMaintenanceDeployment],
         components: &[usize],
         arrival: DataArrival,
         cost_model: &dyn CostModel,
-        comparison_target: Option<&QueryExpr>,
+        comparison_target: Option<&OperatorNode>,
         horizon: Option<Horizon>,
         expected_reads: Option<f64>,
         required_accuracy: &[AccuracyTarget],

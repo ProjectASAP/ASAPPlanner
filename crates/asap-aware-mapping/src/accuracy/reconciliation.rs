@@ -28,7 +28,7 @@
 //!
 //! ## What counts as a "near-duplicate", and why
 //!
-//! Two [`QueryExpr::Aggregate`] nodes are accuracy-near-duplicates here iff,
+//! Two `NonASAPOp::Aggregate` nodes are accuracy-near-duplicates here iff,
 //! **in this order**:
 //!
 //! 1. Both are the same bindable shape [`crate::replacement::SketchAlgorithmStrategy`]
@@ -152,8 +152,9 @@
 use std::cmp::Ordering;
 use std::rc::Rc;
 
+use asap_types::ir::{NonASAPOp, OperatorNode};
 use asap_types::pre_asap::agg_intent::AggIntent;
-use asap_types::pre_asap::query_expr::{QueryExpr, Reduction};
+use asap_types::pre_asap::query_expr::Reduction;
 use asap_types::types::AccuracyTarget;
 
 use crate::replacement::{
@@ -169,7 +170,7 @@ type BindableAccuracyAggregate<'a> = (
     &'a AggIntent,
     &'a AccuracyTarget,
     &'a [String],
-    &'a Rc<QueryExpr>,
+    &'a Rc<OperatorNode>,
 );
 
 /// The `(reduction, intent, accuracy, output_names, child)` shape this
@@ -181,14 +182,14 @@ type BindableAccuracyAggregate<'a> = (
 /// `Quantile` / `Cardinality` / `TopK`). `None` for anything else, including
 /// a multi-measure or `HAVING` aggregate, a non-`Aggregate` node, or an
 /// accuracy-free intent (`Sum`, `Avg`, …).
-fn bindable_accuracy_aggregate(node: &QueryExpr) -> Option<BindableAccuracyAggregate<'_>> {
-    let QueryExpr::Aggregate {
+fn bindable_accuracy_aggregate(node: &OperatorNode) -> Option<BindableAccuracyAggregate<'_>> {
+    let Some(NonASAPOp::Aggregate {
         reduction,
         measures,
         output_names,
         having,
         child,
-    } = node
+    }) = node.non_asap()
     else {
         return None;
     };
@@ -274,7 +275,7 @@ fn strictly_tighter(a: &AccuracyTarget, b: &AccuracyTarget) -> bool {
 /// this strategy from the same post-CSE `Aggregate` sibling set it already
 /// builds for `RollupStrategy`.
 pub struct AccuracyReconciliationStrategy {
-    siblings: Vec<Rc<QueryExpr>>,
+    siblings: Vec<Rc<OperatorNode>>,
 }
 
 impl AccuracyReconciliationStrategy {
@@ -282,7 +283,7 @@ impl AccuracyReconciliationStrategy {
     /// each as a candidate tighter-accuracy source (or looser-accuracy
     /// target) — typically the full set of `Aggregate` nodes a workload-wide
     /// discovery pass already found.
-    pub fn new(siblings: &[Rc<QueryExpr>]) -> Self {
+    pub fn new(siblings: &[Rc<OperatorNode>]) -> Self {
         Self {
             siblings: siblings.to_vec(),
         }
@@ -307,14 +308,14 @@ impl AccuracyReconciliationStrategy {
     /// reports no unique key — see `cse.rs`'s "Legality" section) would get
     /// proposed for reconciliation even though nothing guarantees a second
     /// read of it lines up row-for-row with the first.
-    fn tighter_sources<'a>(&'a self, target: &TargetSubDAG<'_>) -> Vec<&'a Rc<QueryExpr>> {
+    fn tighter_sources<'a>(&'a self, target: &TargetSubDAG<'_>) -> Vec<&'a Rc<OperatorNode>> {
         let Some((target_reduction, target_intent, target_accuracy, target_names, target_child)) =
             bindable_accuracy_aggregate(target.root)
         else {
             return Vec::new();
         };
 
-        let mut sources: Vec<&Rc<QueryExpr>> = self
+        let mut sources: Vec<&Rc<OperatorNode>> = self
             .siblings
             .iter()
             .filter(|candidate| {
@@ -331,9 +332,7 @@ impl AccuracyReconciliationStrategy {
                     && (Rc::ptr_eq(child, target_child) || child == target_child)
                     && same_intent_except_accuracy(intent, target_intent)
                     && strictly_tighter(accuracy, target_accuracy)
-                    && candidate
-                        .output_schema()
-                        .is_ok_and(|schema| schema.has_unique_key())
+                    && candidate.schema.has_unique_key()
             })
             .collect();
         sources.sort_by(|a, b| {
@@ -365,7 +364,7 @@ impl ReplacementStrategy for AccuracyReconciliationStrategy {
                     .expect("tighter_sources only returns bindable_accuracy_aggregate matches");
                 ReplacementSubDAG {
                     strategy: self.name(),
-                    replacement: Replacement::Rewrite(Rc::clone(source)),
+                    replacement: Replacement::Subtree(Rc::clone(source)),
                     provenance: ReplacementProvenance::AccuracyReconciliation,
                     rationale: format!(
                         "reuses a near-duplicate sibling aggregate — identical intent and grouping \

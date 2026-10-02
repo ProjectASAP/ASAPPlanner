@@ -18,7 +18,7 @@ use std::collections::BTreeMap;
 use std::rc::Rc;
 
 use asap_types::parsed_workload::ParsedWorkload;
-use asap_types::post_asap::SummaryNode;
+use asap_types::ir::OperatorNode;
 use asap_types::workload::WorkloadError;
 
 use crate::accuracy::{
@@ -192,7 +192,7 @@ impl PlanOutput {
     }
 
     /// The selected DAG root per query.
-    pub fn dags(&self) -> Vec<Rc<SummaryNode>> {
+    pub fn dags(&self) -> Vec<Rc<OperatorNode>> {
         self.plans.iter().map(|p| Rc::clone(&p.plan.root)).collect()
     }
 

@@ -2,8 +2,9 @@
 
 use std::{cell::RefCell, rc::Rc};
 
-use asap_types::post_asap::{SketchAlgorithm, SummaryExpr, SummaryNode};
-use asap_types::pre_asap::{AggIntent, QueryExpr};
+use asap_types::ir::OperatorNode;
+use asap_types::post_asap::SketchAlgorithm;
+use asap_types::pre_asap::AggIntent;
 use asap_types::resources::CacheProfile;
 
 use crate::analytical_cost::{
@@ -40,7 +41,7 @@ pub struct PhysicalEvidenceSnapshot {
 /// operator. Post-ASAP summary operators need a physical plan provider because their
 /// implementation, placement, and retained-state layout are deployment
 /// choices; that provider must return the complete summary DAG, including any
-/// embedded `KeepPreAsap` work.
+/// non-ASAP work kept inside it.
 pub trait PlannerPhysicalPlanProvider {
     /// Atomically captures the comparison scope and evidence generation.
     fn capture_evidence_snapshot(
@@ -57,7 +58,7 @@ pub trait PlannerPhysicalPlanProvider {
     fn summary_physical_dag(
         &self,
         snapshot: &PhysicalEvidenceSnapshot,
-        summary: &Rc<SummaryNode>,
+        summary: &Rc<OperatorNode>,
         target: &TargetSubDAG<'_>,
     ) -> Result<PhysicalDag, AnalyticalCostError>;
 }
@@ -91,7 +92,7 @@ pub struct PhysicalPlanCostModel<'a> {
 }
 
 struct CachedTargetEvidence {
-    root: Rc<QueryExpr>,
+    root: Rc<OperatorNode>,
     consumer_count: usize,
     snapshot: PhysicalEvidenceSnapshot,
     raw: PhysicalDag,
@@ -188,15 +189,14 @@ impl<'a> PhysicalPlanCostModel<'a> {
             Replacement::ExactComposition(_) => {
                 return Err(AnalyticalCostError::UnsupportedCandidate)
             }
-            Replacement::Rewrite(query) => lower_query_physical_dag(query, scope, &evidence)?,
-            Replacement::Summary(summary) => match &summary.expr {
-                SummaryExpr::KeepPreAsap(query) => {
-                    lower_query_physical_dag(query, scope, &evidence)?
-                }
-                _ => self
-                    .provider
-                    .summary_physical_dag(&snapshot, summary, target)?,
-            },
+            // A subtree without summary state is the planner's own query
+            // lowering; anything with summary state is deployment-provided.
+            Replacement::Subtree(subtree) if !subtree.contains_asap() => {
+                lower_query_physical_dag(subtree, scope, &evidence)?
+            }
+            Replacement::Subtree(summary) => self
+                .provider
+                .summary_physical_dag(&snapshot, summary, target)?,
         };
         let resources = estimate_physical_dag_comparison(
             PhysicalDagEstimateRequest {

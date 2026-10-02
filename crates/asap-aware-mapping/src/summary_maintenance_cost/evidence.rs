@@ -235,29 +235,29 @@ pub struct StreamingRetainedQueryEvidence {
 /// structurally equal node is not silently treated as the same deployment.
 #[derive(Debug, Clone, Default)]
 pub struct StreamingNodeEvidence {
-    pub(super) aggregations: HashMap<*const SummaryNode, StreamingAggregateEvidence>,
-    pub(super) joins: HashMap<*const SummaryNode, SummaryJoinEvidence>,
-    pub(super) operations: HashMap<*const SummaryNode, StreamingSummaryOperatorEvidence>,
-    pub(super) operation_state_owners: HashMap<*const SummaryNode, *const SummaryNode>,
-    pub(super) retained_queries: HashMap<*const SummaryNode, StreamingRetainedQueryEvidence>,
+    pub(super) aggregations: HashMap<*const OperatorNode, StreamingAggregateEvidence>,
+    pub(super) joins: HashMap<*const OperatorNode, SummaryJoinEvidence>,
+    pub(super) operations: HashMap<*const OperatorNode, StreamingSummaryOperatorEvidence>,
+    pub(super) operation_state_owners: HashMap<*const OperatorNode, *const OperatorNode>,
+    pub(super) retained_queries: HashMap<*const OperatorNode, StreamingRetainedQueryEvidence>,
 }
 
 impl StreamingNodeEvidence {
     pub fn insert_aggregation(
         &mut self,
-        node: &Rc<SummaryNode>,
+        node: &Rc<OperatorNode>,
         evidence: StreamingAggregateEvidence,
     ) {
         self.aggregations.insert(Rc::as_ptr(node), evidence);
     }
 
-    pub fn insert_join(&mut self, node: &Rc<SummaryNode>, evidence: SummaryJoinEvidence) {
+    pub fn insert_join(&mut self, node: &Rc<OperatorNode>, evidence: SummaryJoinEvidence) {
         self.joins.insert(Rc::as_ptr(node), evidence);
     }
 
     pub fn insert_operation(
         &mut self,
-        node: &Rc<SummaryNode>,
+        node: &Rc<OperatorNode>,
         evidence: StreamingSummaryOperatorEvidence,
     ) {
         self.operations.insert(Rc::as_ptr(node), evidence);
@@ -267,8 +267,8 @@ impl StreamingNodeEvidence {
     /// aggregation deployment whose active interval it follows.
     pub fn insert_state_operation(
         &mut self,
-        node: &Rc<SummaryNode>,
-        state: &Rc<SummaryNode>,
+        node: &Rc<OperatorNode>,
+        state: &Rc<OperatorNode>,
         evidence: StreamingSummaryOperatorEvidence,
     ) {
         self.operations.insert(Rc::as_ptr(node), evidence);
@@ -278,52 +278,66 @@ impl StreamingNodeEvidence {
 
     pub fn insert_retained_query(
         &mut self,
-        node: &Rc<SummaryNode>,
+        node: &Rc<OperatorNode>,
         evidence: StreamingRetainedQueryEvidence,
     ) {
         self.retained_queries.insert(Rc::as_ptr(node), evidence);
     }
 
-    pub(super) fn aggregation(&self, node: &SummaryNode) -> Option<StreamingAggregateEvidence> {
+    pub(super) fn aggregation(&self, node: &OperatorNode) -> Option<StreamingAggregateEvidence> {
         self.aggregations.get(&(node as *const _)).cloned()
     }
 }
 
 pub(super) fn summary_operation_evidence<'a>(
-    node: &SummaryNode,
+    node: &OperatorNode,
     evidence: &'a StreamingNodeEvidence,
 ) -> Result<&'a StreamingSummaryOperatorEvidence, AnalyticalCostError> {
     let operation = evidence
         .operations
         .get(&(node as *const _))
         .ok_or(AnalyticalCostError::MissingOrStale("summary operation"))?;
-    let matches = matches!(
-        (&node.expr, operation),
+    // A binary operator or join over two inputs is `Binary` evidence; every
+    // other non-ASAP operator, and the accumulator/population boundaries,
+    // is a `ValueOperation`.
+    let matches = match (&node.operator, operation) {
         (
-            SummaryExpr::BinaryOp { .. },
-            StreamingSummaryOperatorEvidence::Binary(_)
-        ) | (
-            SummaryExpr::ValueOperation { .. },
-            StreamingSummaryOperatorEvidence::ValueOperation(_)
-        ) | (
-            SummaryExpr::SummaryMerge { .. },
-            StreamingSummaryOperatorEvidence::Merge(_)
-        ) | (
-            SummaryExpr::SummarySubtract { .. },
-            StreamingSummaryOperatorEvidence::Subtract(_)
-        ) | (
-            SummaryExpr::SummaryDelete { .. },
-            StreamingSummaryOperatorEvidence::Delete { .. }
-        ) | (
-            SummaryExpr::SummaryEstimate { .. },
-            StreamingSummaryOperatorEvidence::Readout(_)
+            Operator::NonASAP(NonASAPOp::BinaryOp { .. } | NonASAPOp::Join { .. }),
+            StreamingSummaryOperatorEvidence::Binary(_),
+        ) => true,
+        (Operator::NonASAP(NonASAPOp::BinaryOp { .. } | NonASAPOp::Join { .. }), _) => false,
+        (
+            Operator::NonASAP(_)
+            | Operator::ASAP(
+                ASAPOp::FinalizeExactAccumulator { .. }
+                | ASAPOp::MaintainPopulation { .. }
+                | ASAPOp::ReadPopulation { .. },
+            ),
+            StreamingSummaryOperatorEvidence::ValueOperation(_),
+        ) => true,
+        (
+            Operator::ASAP(ASAPOp::SummaryMerge { .. }),
+            StreamingSummaryOperatorEvidence::Merge(_),
         )
-    );
+        | (
+            Operator::ASAP(ASAPOp::SummarySubtract { .. }),
+            StreamingSummaryOperatorEvidence::Subtract(_),
+        )
+        | (
+            Operator::ASAP(ASAPOp::SummaryDelete { .. }),
+            StreamingSummaryOperatorEvidence::Delete { .. },
+        )
+        | (
+            Operator::ASAP(ASAPOp::SummaryEstimate { .. }),
+            StreamingSummaryOperatorEvidence::Readout(_),
+        ) => true,
+        _ => false,
+    };
     if matches {
         Ok(operation)
     } else {
         Err(AnalyticalCostError::InconsistentOperatorStatistics(
-            "summary operation evidence kind does not match SummaryExpr",
+            "summary operation evidence kind does not match the operator",
         ))
     }
 }

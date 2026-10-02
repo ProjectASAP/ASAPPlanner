@@ -88,7 +88,7 @@
 //! - **No materialized roll-up operator.** Actually building a pre-aggregated
 //!   summary/scan leaf at execution time is separate, larger work outside
 //!   `asap-aware-mapping`'s scope (see issue #254's own "Non-goal" section)
-//!   — this module only constructs the pre-ASAP [`QueryExpr::Aggregate`]
+//!   — this module only constructs the pre-ASAP `NonASAPOp::Aggregate`
 //!   rewrite; a `CostModel`/search engine decides whether to prefer it.
 //! - **No cross-schema reconciliation** (see "`ColumnId` comparability"
 //!   above) and **no `without(...)` grouping support** — `without`'s kept
@@ -100,8 +100,9 @@
 use std::collections::HashSet;
 use std::rc::Rc;
 
+use asap_types::ir::{NonASAPOp, OperatorNode};
 use asap_types::pre_asap::agg_intent::AggIntent;
-use asap_types::pre_asap::query_expr::{GroupKeys, QueryExpr, Reduction};
+use asap_types::pre_asap::query_expr::{GroupKeys, Reduction};
 use asap_types::pre_asap::schema::{ColumnId, Schema};
 use asap_types::types::AccuracyTarget;
 
@@ -115,15 +116,15 @@ use crate::replacement::{Replacement, ReplacementStrategy, ReplacementSubDAG, Ta
 /// at all). `None` for anything else, including a multi-measure or `HAVING`
 /// aggregate, a non-`Aggregate` node, or a `PerEntity` reduction.
 fn bindable_grouped_aggregate(
-    node: &QueryExpr,
-) -> Option<(&GroupKeys, &AggIntent, &Rc<QueryExpr>)> {
-    let QueryExpr::Aggregate {
+    node: &OperatorNode,
+) -> Option<(&GroupKeys, &AggIntent, &Rc<OperatorNode>)> {
+    let Some(NonASAPOp::Aggregate {
         reduction,
         measures,
         having,
         child,
         ..
-    } = node
+    }) = node.non_asap()
     else {
         return None;
     };
@@ -259,7 +260,7 @@ fn is_strict_column_superset(finer: &[ColumnId], coarser: &[ColumnId]) -> bool {
 /// docs' "Non-goals" on why finding the full sibling set across a workload
 /// is a workload-wide traversal this strategy does not own.
 pub struct RollupStrategy {
-    siblings: Vec<Rc<QueryExpr>>,
+    siblings: Vec<Rc<OperatorNode>>,
 }
 
 impl RollupStrategy {
@@ -267,7 +268,7 @@ impl RollupStrategy {
     /// each as a candidate roll-up source (or target) — typically the full set of `Aggregate`
     /// nodes a workload-wide discovery pass (issue #252) already found
     /// sharing at least one child `Rc` with something else.
-    pub fn new(siblings: &[Rc<QueryExpr>]) -> Self {
+    pub fn new(siblings: &[Rc<OperatorNode>]) -> Self {
         Self {
             siblings: siblings.to_vec(),
         }
@@ -276,7 +277,7 @@ impl RollupStrategy {
     /// Every sibling that is a legal, strictly finer roll-up source for
     /// `target` — shared between `matches` and `replacements` so the two
     /// can never disagree about which siblings qualify.
-    fn finer_sources(&self, target: &TargetSubDAG<'_>) -> Vec<&Rc<QueryExpr>> {
+    fn finer_sources(&self, target: &TargetSubDAG<'_>) -> Vec<&Rc<OperatorNode>> {
         let Some((coarser_by, coarser_intent, coarser_child)) =
             bindable_grouped_aggregate(target.root)
         else {
@@ -297,12 +298,9 @@ impl RollupStrategy {
                 if !Rc::ptr_eq(finer_child, coarser_child) && finer_child != coarser_child {
                     return false;
                 }
-                let Ok(finer_schema) = candidate.output_schema() else {
-                    return false;
-                };
                 is_legal_rollup_source(
                     finer_by,
-                    &finer_schema,
+                    &candidate.schema,
                     finer_intent,
                     coarser_by,
                     coarser_intent,
@@ -321,7 +319,7 @@ impl ReplacementStrategy for RollupStrategy {
         let Some((coarser_by, coarser_intent, _)) = bindable_grouped_aggregate(target.root) else {
             return Vec::new();
         };
-        let QueryExpr::Aggregate { output_names, .. } = target.root.as_ref() else {
+        let Some(NonASAPOp::Aggregate { output_names, .. }) = target.root.non_asap() else {
             unreachable!("bindable_grouped_aggregate already confirmed Aggregate");
         };
         self.finer_sources(target)
@@ -331,7 +329,7 @@ impl ReplacementStrategy for RollupStrategy {
     }
 }
 
-/// Build the coarser replacement: a new `QueryExpr::Aggregate` grouped by
+/// Build the coarser replacement: a new `NonASAPOp::Aggregate` grouped by
 /// `coarser_by`'s columns (repositioned into `finer`'s own output schema —
 /// see below), computing `rollup_combinator(intent, ..)` over `finer`'s own
 /// measure column, with `child = finer` instead of the original shared
@@ -346,7 +344,7 @@ impl ReplacementStrategy for RollupStrategy {
 /// position in the shared child to its position in `finer`'s output: the
 /// index its `ColumnId` occupies within `finer_by`'s own ordered list.
 fn build_rollup(
-    finer: &Rc<QueryExpr>,
+    finer: &Rc<OperatorNode>,
     coarser_by: &GroupKeys,
     intent: &AggIntent,
     output_names: &[String],
@@ -363,17 +361,18 @@ fn build_rollup(
         .map(|id| finer_by.keys().iter().position(|f| f == id))
         .collect::<Option<Vec<_>>>()?;
 
-    let rewritten = QueryExpr::Aggregate {
+    let rewritten = OperatorNode::non_asap_node(NonASAPOp::Aggregate {
         reduction: Reduction::by(remapped_by),
         measures: vec![combinator],
         output_names: output_names.to_vec(),
         having: None,
         child: Rc::clone(finer),
-    };
+    })
+    .ok()?;
 
     Some(ReplacementSubDAG {
         strategy: "RollupStrategy",
-        replacement: Replacement::Rewrite(Rc::new(rewritten)),
+        replacement: Replacement::Subtree(rewritten),
         provenance: crate::replacement::ReplacementProvenance::LogicalRewrite,
         rationale: format!(
             "rolls up from the finer Aggregate grouped by {:?} (a strict superset of this \

@@ -7,7 +7,7 @@
 //!
 //! ## Placement: planning metadata and edge-state type
 //!
-//! `SummaryExpr::SummaryAgg` carries the grouping choice next to the
+//! `ASAPOp::SummaryAgg` carries the grouping choice next to the
 //! `Reduction` whose `by` keys determine legality. The same choice is also
 //! committed to `FieldDataType::Sketch` on the aggregate's output edge.
 //! That duplication is intentional: the node field makes the choice easy to
@@ -71,13 +71,14 @@
 
 use std::rc::Rc;
 
+use asap_types::ir::{ASAPOp, NonASAPOp, Operator, OperatorNode};
 use asap_types::post_asap::{
     default_hydra_params, hydra_kind_for, AccuracyError, BoundExpr, CompositionOperator,
     GroupingStrategy, GuaranteeSource, HydraKind, ProbabilityExpr, ResultGuarantee,
-    SketchAlgorithm, SketchParams, SummaryExpr, FieldDataType, SummaryNode,
+    SketchAlgorithm, SketchParams, FieldDataType,
 };
 use asap_types::pre_asap::agg_intent::AggIntent;
-use asap_types::pre_asap::query_expr::{QueryExpr, Reduction};
+use asap_types::pre_asap::query_expr::Reduction;
 
 use crate::accuracy::{
     AccuracyBudgetAllocator, AccuracyEvidenceProvider, AccuracyModel, PropagationStats,
@@ -173,7 +174,7 @@ impl<'a> HydraGroupingStrategy<'a> {
     /// variant modeled.
     fn hydra_proposals(&self, target: &TargetSubDAG<'_>) -> Proposals {
         let mut proposals = Proposals::default();
-        let QueryExpr::Aggregate { reduction, .. } = target.root.as_ref() else {
+        let Some(NonASAPOp::Aggregate { reduction, .. }) = target.root.non_asap() else {
             return proposals;
         };
         if !has_subpopulations(reduction) {
@@ -212,7 +213,7 @@ impl<'a> HydraGroupingStrategy<'a> {
     /// axis owns.
     fn build_candidate(
         &self,
-        root: &Rc<QueryExpr>,
+        root: &Rc<OperatorNode>,
         intent: &AggIntent,
         sketch_kind: SketchAlgorithm,
         hydra_kind: HydraKind,
@@ -233,12 +234,12 @@ impl<'a> HydraGroupingStrategy<'a> {
             params,
         };
 
-        let (family, query) = match &node.expr {
-            SummaryExpr::SummaryEstimate {
+        let (family, query) = match &node.operator {
+            Operator::ASAP(ASAPOp::SummaryEstimate {
                 summary_input,
                 query,
-            } => match &summary_input.expr {
-                SummaryExpr::SummaryAgg { family, .. } => (family, Some(query)),
+            }) => match &summary_input.operator {
+                Operator::ASAP(ASAPOp::SummaryAgg { family, .. }) => (family, Some(query)),
                 _ => return None,
             },
             _ => return None,
@@ -295,7 +296,7 @@ impl<'a> HydraGroupingStrategy<'a> {
         }
         Some(ReplacementSubDAG {
             strategy: "HydraGroupingStrategy",
-            replacement: Replacement::Summary(patched),
+            replacement: Replacement::Subtree(patched),
             provenance: crate::replacement::ReplacementProvenance::SummaryRealization,
             rationale: format!(
                 "{} realizes as a shared {hydra_kind:?} structure over {sketch_kind:?} \
@@ -313,7 +314,7 @@ impl<'a> HydraGroupingStrategy<'a> {
 
 impl ReplacementStrategy for HydraGroupingStrategy<'_> {
     fn matches(&self, target: &TargetSubDAG<'_>) -> bool {
-        let QueryExpr::Aggregate { reduction, .. } = target.root.as_ref() else {
+        let Some(NonASAPOp::Aggregate { reduction, .. }) = target.root.non_asap() else {
             return false;
         };
         if !has_subpopulations(reduction) {
@@ -357,15 +358,15 @@ impl ReplacementStrategy for HydraGroupingStrategy<'_> {
 /// destructures the right variant for `kind`; this function's only job is
 /// to find whatever `SketchParams` the bind decision already committed to
 /// and hand the whole thing over unchanged.
-fn per_subpopulation_sketch_params(node: &SummaryNode) -> Option<SketchParams> {
-    match &node.expr {
-        SummaryExpr::SummaryEstimate { summary_input, .. } => {
+fn per_subpopulation_sketch_params(node: &OperatorNode) -> Option<SketchParams> {
+    match &node.operator {
+        Operator::ASAP(ASAPOp::SummaryEstimate { summary_input, .. }) => {
             per_subpopulation_sketch_params(summary_input)
         }
-        SummaryExpr::SummaryAgg {
+        Operator::ASAP(ASAPOp::SummaryAgg {
             family: FieldDataType::Sketch(kind, _),
             ..
-        } => Some(kind.params().clone()),
+        }) => Some(kind.params().clone()),
         _ => None,
     }
 }
@@ -377,29 +378,29 @@ fn per_subpopulation_sketch_params(node: &SummaryNode) -> Option<SketchParams> {
 /// sketch candidate this module builds actually has) to reach the
 /// `SummaryAgg` underneath.
 fn with_grouping(
-    node: Rc<SummaryNode>,
+    node: Rc<OperatorNode>,
     grouping: GroupingStrategy,
     stats: &PropagationStats,
-) -> Rc<SummaryNode> {
-    match &node.expr {
-        SummaryExpr::SummaryEstimate {
+) -> Rc<OperatorNode> {
+    match &node.operator {
+        Operator::ASAP(ASAPOp::SummaryEstimate {
             summary_input,
             query,
-        } => Rc::new(SummaryNode {
-            expr: SummaryExpr::SummaryEstimate {
+        }) => OperatorNode::asap_node(
+            ASAPOp::SummaryEstimate {
                 summary_input: with_grouping(Rc::clone(summary_input), grouping, stats),
                 query: query.clone(),
             },
-            schema: node.schema.clone(),
-            guarantee: node.guarantee.as_ref().map(|g| hydra_guarantee(g, stats)),
-        }),
-        SummaryExpr::SummaryAgg {
+            node.schema.clone(),
+            node.guarantee.as_ref().map(|g| hydra_guarantee(g, stats)),
+        ),
+        Operator::ASAP(ASAPOp::SummaryAgg {
             child,
             family,
             input,
             reduction,
             ..
-        } => {
+        }) => {
             let grouped_family = match family {
                 FieldDataType::Sketch(kind, _) => {
                     FieldDataType::Sketch(kind.clone(), grouping.clone())
@@ -412,17 +413,17 @@ fn with_grouping(
                     field.dtype = FieldDataType::Sketch(kind.clone(), grouping.clone());
                 }
             }
-            Rc::new(SummaryNode {
-                expr: SummaryExpr::SummaryAgg {
+            OperatorNode::asap_node(
+                ASAPOp::SummaryAgg {
                     child: Rc::clone(child),
                     family: grouped_family,
                     input: input.clone(),
                     reduction: reduction.clone(),
                     grouping,
                 },
-                schema: grouped_schema,
-                guarantee: None,
-            })
+                grouped_schema,
+                None,
+            )
         }
         // Never reached by this module's own callers (they only ever pass a
         // node `construct_summary_with` just bound for a `Sketch`

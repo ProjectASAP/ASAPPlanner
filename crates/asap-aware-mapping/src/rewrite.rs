@@ -35,7 +35,7 @@
 //! - **`without(...)` grouping** leaves an `Aggregate`'s own output schema
 //!   *open* (`closed: false`, see `without_output_schema`), while the
 //!   `Project` this strategy always wraps the rewrite in forces
-//!   `closed: true` (see `QueryExpr::output_schema`'s `Project` arm). Under
+//!   `closed: true` (see `NonASAPOp::output_schema`'s `Project` arm). Under
 //!   `without(...)` the rewritten form's `closed` flag would silently flip
 //!   relative to the original — exactly the kind of schema drift this
 //!   module exists to avoid.
@@ -59,9 +59,10 @@
 
 use std::rc::Rc;
 
+use asap_types::ir::{BinaryOperator, NonASAPOp, OperatorNode, ProjectItem, ScalarExpr};
 use asap_types::pre_asap::agg_intent::AggIntent;
 use asap_types::pre_asap::expr_ir::ArithmeticOpKind;
-use asap_types::pre_asap::query_expr::{BinaryOpKind, ProjectItem, QueryExpr, Reduction};
+use asap_types::pre_asap::query_expr::{BinaryOpKind, Reduction};
 use asap_types::pre_asap::schema::{ColumnId, DataType};
 use asap_types::types::AccuracyTarget;
 
@@ -72,14 +73,34 @@ use crate::replacement::{Replacement, ReplacementStrategy, ReplacementSubDAG, Ta
 /// the module docs' "Scope" for why `without(...)`/`PerEntity` are
 /// excluded). Returns the grouping key count and the summed column so
 /// [`build_rewrite`] doesn't have to re-match.
-fn avg_rewrite_target(node: &QueryExpr) -> Option<(usize, Option<ColumnId>)> {
-    let QueryExpr::Aggregate {
+/// `a / b` with PromQL arithmetic semantics and no vector matching.
+fn arithmetic(
+    op: ArithmeticOpKind,
+    lhs: Rc<OperatorNode>,
+    rhs: Rc<OperatorNode>,
+) -> Option<Rc<OperatorNode>> {
+    OperatorNode::non_asap_node(NonASAPOp::BinaryOp {
+        operator: BinaryOperator {
+            checked_relative_division: false,
+            checked_finite_division: false,
+            kind: BinaryOpKind::Arithmetic(op),
+            vector_match: None,
+        },
+        return_bool: false,
+        lhs,
+        rhs,
+    })
+    .ok()
+}
+
+fn avg_rewrite_target(node: &OperatorNode) -> Option<(usize, Option<ColumnId>)> {
+    let Some(NonASAPOp::Aggregate {
         reduction,
         measures,
         having: None,
         child,
         ..
-    } = node
+    }) = node.non_asap()
     else {
         return None;
     };
@@ -96,7 +117,7 @@ fn avg_rewrite_target(node: &QueryExpr) -> Option<(usize, Option<ColumnId>)> {
     // therefore be decomposed through it only when the averaged input is
     // provably non-null; otherwise NULL rows would incorrectly contribute to
     // the denominator.
-    let input_schema = child.output_schema().ok()?;
+    let input_schema = &child.schema;
     let value_col = col
         .or_else(|| input_schema.column_id("value"))
         .or_else(|| (0..input_schema.fields.len()).find(|i| !by.contains(i)))?;
@@ -123,30 +144,30 @@ fn avg_rewrite_target(node: &QueryExpr) -> Option<(usize, Option<ColumnId>)> {
 /// exactly regardless of the summed column's own type (integer division
 /// would otherwise silently reappear whenever the input column is itself
 /// integer-typed: `Sum`'s output type tracks its input, `Count`'s is always
-/// `Int64`, and `QueryExpr::output_schema`'s own `Arithmetic` type inference
+/// `Int64`, and `ScalarExpr::scalar_type`'s own `Arithmetic` type inference
 /// types a `Div` of two `Int64` operands as `Int64` — the explicit operand
 /// `Cast` is what keeps both the division and rewritten `avg` column
 /// `Float64` the way the original always was, not an incidental extra step).
 // These are conditional physical components, never an unconditional Rewrite.
 // The caller must attach the finite-division execution guard before admission.
-pub(crate) fn temporal_average_components(root: &Rc<QueryExpr>) -> Option<Rc<QueryExpr>> {
-    let QueryExpr::Aggregate {
+pub(crate) fn temporal_average_components(root: &Rc<OperatorNode>) -> Option<Rc<OperatorNode>> {
+    let Some(NonASAPOp::Aggregate {
         reduction: Reduction::PerEntity,
         measures,
         child,
         having: None,
         ..
-    } = root.as_ref()
+    }) = root.non_asap()
     else {
         return None;
     };
     let [AggIntent::Avg { col }] = measures.as_slice() else {
         return None;
     };
-    if !matches!(child.as_ref(), QueryExpr::TimeRange { .. }) {
+    if !matches!(child.non_asap(), Some(NonASAPOp::TimeRange { .. })) {
         return None;
     }
-    let schema = child.output_schema().ok()?;
+    let schema = &child.schema;
     let value = schema
         .fields
         .get(col.or_else(|| schema.column_id("value"))?)?;
@@ -154,40 +175,40 @@ pub(crate) fn temporal_average_components(root: &Rc<QueryExpr>) -> Option<Rc<Que
         return None;
     }
     let aggregate = |intent| {
-        Rc::new(QueryExpr::Aggregate {
+        OperatorNode::non_asap_node(NonASAPOp::Aggregate {
             reduction: Reduction::PerEntity,
             measures: vec![intent],
             output_names: vec![],
             having: None,
             child: Rc::clone(child),
         })
+        .ok()
     };
-    let rewritten = Rc::new(QueryExpr::BinaryOp {
-        op: BinaryOpKind::Arithmetic(ArithmeticOpKind::Div),
-        lhs: aggregate(AggIntent::Sum { col: *col }),
-        rhs: aggregate(AggIntent::Count {
+    let rewritten = arithmetic(
+        ArithmeticOpKind::Div,
+        aggregate(AggIntent::Sum { col: *col })?,
+        aggregate(AggIntent::Count {
             accuracy: AccuracyTarget::Exact,
-        }),
-        vector_match: None,
-    });
-    (root.output_schema().ok()? == rewritten.output_schema().ok()?).then_some(rewritten)
+        })?,
+    )?;
+    (root.schema == rewritten.schema).then_some(rewritten)
 }
 
-fn build_rewrite(root: &Rc<QueryExpr>) -> Option<Rc<QueryExpr>> {
+fn build_rewrite(root: &Rc<OperatorNode>) -> Option<Rc<OperatorNode>> {
     let (group_count, col) = avg_rewrite_target(root)?;
-    let QueryExpr::Aggregate {
+    let Some(NonASAPOp::Aggregate {
         reduction,
         output_names,
         child,
         ..
-    } = root.as_ref()
+    }) = root.non_asap()
     else {
         unreachable!("avg_rewrite_target already confirmed an Aggregate shape");
     };
 
     // The original `avg` column's own name: `output_names[0]` if the
     // producing front end overrode it (SQL threading DataFusion's own
-    // generated name — see `QueryExpr::Aggregate::output_names`'s docs),
+    // generated name — see `NonASAPOp::Aggregate::output_names`'s docs),
     // else `AggIntent::Avg`'s synthetic default. Either way this is the
     // *only* thing about the original output column this rewrite needs to
     // reproduce — `AggIntent::Avg::output_column`'s `(Float64, nullable:
@@ -199,14 +220,15 @@ fn build_rewrite(root: &Rc<QueryExpr>) -> Option<Rc<QueryExpr>> {
         .cloned()
         .unwrap_or_else(|| "avg".to_string());
 
-    let sum_agg = Rc::new(QueryExpr::Aggregate {
+    let sum_agg = OperatorNode::non_asap_node(NonASAPOp::Aggregate {
         reduction: reduction.clone(),
         measures: vec![AggIntent::Sum { col }],
         output_names: Vec::new(),
         having: None,
         child: Rc::clone(child),
-    });
-    let count_agg = Rc::new(QueryExpr::Aggregate {
+    })
+    .ok()?;
+    let count_agg = OperatorNode::non_asap_node(NonASAPOp::Aggregate {
         reduction: reduction.clone(),
         measures: vec![AggIntent::Count {
             accuracy: AccuracyTarget::Exact,
@@ -214,58 +236,55 @@ fn build_rewrite(root: &Rc<QueryExpr>) -> Option<Rc<QueryExpr>> {
         output_names: Vec::new(),
         having: None,
         child: Rc::clone(child),
-    });
+    })
+    .ok()?;
 
     let sum_idx = group_count;
     let mut cols: Vec<ProjectItem> = (0..group_count)
         .map(|i| ProjectItem {
             alias: None,
-            expr: QueryExpr::Column(i),
+            expr: ScalarExpr::Column(i),
         })
         .collect();
     cols.push(ProjectItem {
         alias: Some(avg_name),
-        expr: QueryExpr::Cast {
-            expr: Rc::new(QueryExpr::Column(sum_idx)),
+        expr: ScalarExpr::Cast {
+            expr: Box::new(ScalarExpr::Column(sum_idx)),
             to: DataType::Float64,
             try_cast: false,
         },
     });
 
-    let float_sum = Rc::new(QueryExpr::Project {
+    let float_sum = OperatorNode::non_asap_node(NonASAPOp::Project {
         cols,
         qualifier: None,
         child: sum_agg,
-    });
-    Some(Rc::new(QueryExpr::BinaryOp {
-        op: BinaryOpKind::Arithmetic(ArithmeticOpKind::Div),
-        lhs: float_sum,
-        rhs: count_agg,
-        vector_match: None,
-    }))
+    })
+    .ok()?;
+    arithmetic(ArithmeticOpKind::Div, float_sum, count_agg)
 }
 
 /// Compose adjacent per-entity and cross-entity accumulators when their
 /// algebra, rather than a query-language spelling, proves equivalence.
-pub(crate) fn composed_aggregate_rewrite(root: &Rc<QueryExpr>) -> Option<Rc<QueryExpr>> {
-    let original_schema = root.output_schema().ok()?;
-    let QueryExpr::Aggregate {
+pub(crate) fn composed_aggregate_rewrite(root: &Rc<OperatorNode>) -> Option<Rc<OperatorNode>> {
+    let original_schema = &root.schema;
+    let Some(NonASAPOp::Aggregate {
         reduction: outer_reduction @ Reduction::Reduce(_),
         measures: outer_measures,
         output_names,
         having: None,
         child,
-    } = root.as_ref()
+    }) = root.non_asap()
     else {
         return None;
     };
-    let QueryExpr::Aggregate {
+    let Some(NonASAPOp::Aggregate {
         reduction: Reduction::PerEntity,
         measures: inner_measures,
         having: None,
         child: inner_child,
         ..
-    } = child.as_ref()
+    }) = child.non_asap()
     else {
         return None;
     };
@@ -279,13 +298,14 @@ pub(crate) fn composed_aggregate_rewrite(root: &Rc<QueryExpr>) -> Option<Rc<Quer
         | (AggIntent::Max { col: None }, AggIntent::Max { .. }) => inner.clone(),
         _ => return None,
     };
-    let aggregate = Rc::new(QueryExpr::Aggregate {
+    let aggregate = OperatorNode::non_asap_node(NonASAPOp::Aggregate {
         reduction: outer_reduction.clone(),
         measures: vec![composed],
         output_names: output_names.clone(),
         having: None,
         child: Rc::clone(inner_child),
-    });
+    })
+    .ok()?;
 
     // The outer Sum sees PromQL's Float64 sample value, whereas the composed
     // Count accumulator is Int64. Keep the original observable type.
@@ -302,7 +322,7 @@ pub(crate) fn composed_aggregate_rewrite(root: &Rc<QueryExpr>) -> Option<Rc<Quer
         let mut cols: Vec<ProjectItem> = (0..by.keys().len())
             .map(|i| ProjectItem {
                 alias: None,
-                expr: QueryExpr::Column(i),
+                expr: ScalarExpr::Column(i),
             })
             .collect();
         cols.push(ProjectItem {
@@ -313,17 +333,18 @@ pub(crate) fn composed_aggregate_rewrite(root: &Rc<QueryExpr>) -> Option<Rc<Quer
                 .fields
                 .last()
                 .map(|column| column.name.clone()),
-            expr: QueryExpr::Cast {
-                expr: Rc::new(QueryExpr::Column(by.keys().len())),
+            expr: ScalarExpr::Cast {
+                expr: Box::new(ScalarExpr::Column(by.keys().len())),
                 to: DataType::Float64,
                 try_cast: false,
             },
         });
-        Rc::new(QueryExpr::Project {
+        OperatorNode::non_asap_node(NonASAPOp::Project {
             cols,
             qualifier: None,
             child: aggregate,
         })
+        .ok()?
     } else {
         aggregate
     };
@@ -331,7 +352,7 @@ pub(crate) fn composed_aggregate_rewrite(root: &Rc<QueryExpr>) -> Option<Rc<Quer
     // Positional keys, aliases, types, and nullability are part of the rule's
     // contract. A future schema change therefore disables rather than widens
     // the rewrite.
-    (original_schema == rewritten.output_schema().ok()?).then_some(rewritten)
+    (*original_schema == rewritten.schema).then_some(rewritten)
 }
 
 /// Rewrites `Aggregate{ measures: [Avg{col}], .. }` into the semantically
@@ -361,7 +382,7 @@ impl ReplacementStrategy for SemanticEquivalentRewriteStrategy {
         if let Some(rewritten) = composed_aggregate_rewrite(target.root) {
             return vec![ReplacementSubDAG {
                 strategy: "SemanticEquivalentRewriteStrategy",
-                replacement: Replacement::Rewrite(rewritten),
+                replacement: Replacement::Subtree(rewritten),
                 provenance: crate::replacement::ReplacementProvenance::LogicalRewrite,
                 rationale: "compose compatible per-entity and cross-entity accumulators using their algebraic intent while preserving the original output schema".into(),
             }];
@@ -371,7 +392,7 @@ impl ReplacementStrategy for SemanticEquivalentRewriteStrategy {
         };
         vec![ReplacementSubDAG {
             strategy: "AvgToSumOverCountStrategy",
-            replacement: Replacement::Rewrite(rewritten),
+            replacement: Replacement::Subtree(rewritten),
             provenance: crate::replacement::ReplacementProvenance::LogicalRewrite,
             rationale:
                 "avg has no summary realization at all (replacement::realizations_for_intent \

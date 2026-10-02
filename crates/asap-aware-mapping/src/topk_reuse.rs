@@ -7,7 +7,7 @@
 
 use std::rc::Rc;
 
-use asap_types::pre_asap::QueryExpr;
+use asap_types::ir::{NonASAPOp, OperatorNode};
 
 use crate::replacement::{
     Replacement, ReplacementProvenance, ReplacementStrategy, ReplacementSubDAG, TargetSubDAG,
@@ -15,22 +15,23 @@ use crate::replacement::{
 
 /// Derives a smaller top-k result from a compatible larger top-k sibling.
 pub struct TopKLimitReuseStrategy {
-    limits: Vec<Rc<QueryExpr>>,
+    limits: Vec<Rc<OperatorNode>>,
 }
 
 impl TopKLimitReuseStrategy {
-    pub fn new(limits: &[Rc<QueryExpr>]) -> Self {
+    pub fn new(limits: &[Rc<OperatorNode>]) -> Self {
         Self {
             limits: limits.to_vec(),
         }
     }
 
-    fn larger_sources<'a>(&'a self, target: &TargetSubDAG<'_>) -> Vec<&'a Rc<QueryExpr>> {
-        let QueryExpr::Limit {
-            n: target_n,
+    fn larger_sources<'a>(&'a self, target: &TargetSubDAG<'_>) -> Vec<&'a Rc<OperatorNode>> {
+        let Some(NonASAPOp::Limit {
+            n: Some(target_n),
             offset: 0,
             child: target_child,
-        } = target.root.as_ref()
+            ..
+        }) = target.root.non_asap()
         else {
             return Vec::new();
         };
@@ -42,11 +43,12 @@ impl TopKLimitReuseStrategy {
                 if Rc::ptr_eq(candidate, target.root) {
                     return false;
                 }
-                let QueryExpr::Limit {
-                    n,
+                let Some(NonASAPOp::Limit {
+                    n: Some(n),
                     offset: 0,
                     child,
-                } = candidate.as_ref()
+                    ..
+                }) = candidate.non_asap()
                 else {
                     return false;
                 };
@@ -56,8 +58,8 @@ impl TopKLimitReuseStrategy {
             .collect();
         // Prefer the smallest sufficient materialized top-k when several
         // larger siblings are available.
-        sources.sort_by_key(|source| match source.as_ref() {
-            QueryExpr::Limit { n, .. } => *n,
+        sources.sort_by_key(|source| match source.non_asap() {
+            Some(NonASAPOp::Limit { n: Some(n), .. }) => *n,
             _ => unreachable!(),
         });
         sources
@@ -70,34 +72,38 @@ impl ReplacementStrategy for TopKLimitReuseStrategy {
     }
 
     fn replacements(&self, target: &TargetSubDAG<'_>) -> Vec<ReplacementSubDAG> {
-        let QueryExpr::Limit {
-            n: target_n,
+        let Some(NonASAPOp::Limit {
+            n: Some(target_n),
             offset: 0,
+            partition_by,
             ..
-        } = target.root.as_ref()
+        }) = target.root.non_asap()
         else {
             return Vec::new();
         };
 
         self.larger_sources(target)
             .into_iter()
-            .map(|source| {
-                let source_n = match source.as_ref() {
-                    QueryExpr::Limit { n, .. } => *n,
+            .filter_map(|source| {
+                let source_n = match source.non_asap() {
+                    Some(NonASAPOp::Limit { n: Some(n), .. }) => *n,
                     _ => unreachable!(),
                 };
-                ReplacementSubDAG {
+                let rewritten = OperatorNode::non_asap_node(NonASAPOp::Limit {
+                    n: Some(*target_n),
+                    offset: 0,
+                    partition_by: partition_by.clone(),
+                    child: Rc::clone(source),
+                })
+                .ok()?;
+                Some(ReplacementSubDAG {
                     strategy: "TopKLimitReuseStrategy",
-                    replacement: Replacement::Rewrite(Rc::new(QueryExpr::Limit {
-                        n: *target_n,
-                        offset: 0,
-                        child: Rc::clone(source),
-                    })),
+                    replacement: Replacement::Subtree(rewritten),
                     provenance: ReplacementProvenance::LogicalRewrite,
                     rationale: format!(
                         "derives top-{target_n} from the compatible shared top-{source_n} result; both rank the identical input with the same ordering"
                     ),
-                }
+                })
             })
             .collect()
     }

@@ -20,12 +20,14 @@ pub use evidence::{
     QuantileInputDomain, WorkloadAccuracyEvidence,
 };
 
+use asap_types::ir::OperatorNode;
 use asap_types::post_asap::{
-    AccuracyError, BoundExpr, CompositionOperator, ErrorMetric, ExactOperation, GuaranteeSource,
-    ProbabilityExpr, ResultGuarantee, SketchAlgorithm, SketchParams, SketchQuery,
-    FieldDataType,
+    AccuracyError, BoundExpr, CompositionOperator, ErrorMetric, GuaranteeSource, ProbabilityExpr,
+    ResultGuarantee, SketchAlgorithm, SketchParams, SketchQuery, FieldDataType,
 };
 use asap_types::types::AccuracyTarget;
+
+use crate::exact_composition::ExactOperation;
 
 /// The deployment-extensible accuracy algebra. `asap-aware-mapping` ships
 /// [`DefaultAccuracyModel`]; a deployment with a proof for a composition the

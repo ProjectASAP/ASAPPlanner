@@ -89,29 +89,20 @@ pub trait AccuracyEvidenceProvider {
     /// Trusted estimator contract for this complete aggregate expression,
     /// including source, filters, grouping and all panes in each readout.
     /// An observed cardinality is not an enforced population bound.
-    fn estimator_contract(
-        &self,
-        _expression: &asap_types::pre_asap::QueryExpr,
-    ) -> Option<EstimatorContract> {
+    fn estimator_contract(&self, _expression: &OperatorNode) -> Option<EstimatorContract> {
         None
     }
 
     /// Enforced upper bound on distinct (partition, item) identities across a
     /// complete TopK readout. Used to union-bound score errors for adaptively
     /// selected candidates. Observed cardinality is not sufficient evidence.
-    fn topk_max_distinct_items(
-        &self,
-        _expression: &asap_types::pre_asap::QueryExpr,
-    ) -> Option<u64> {
+    fn topk_max_distinct_items(&self, _expression: &OperatorNode) -> Option<u64> {
         None
     }
 
     /// Proof scoped to this complete quantile expression, including its source,
     /// filters, grouping and window. `None` means unknown, including emptiness.
-    fn quantile_input_domain(
-        &self,
-        _operand: &asap_types::pre_asap::query_expr::QueryExpr,
-    ) -> Option<QuantileInputDomain> {
+    fn quantile_input_domain(&self, _operand: &OperatorNode) -> Option<QuantileInputDomain> {
         None
     }
 

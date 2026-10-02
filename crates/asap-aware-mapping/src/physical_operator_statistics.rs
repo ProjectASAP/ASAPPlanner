@@ -6,7 +6,8 @@
 
 use std::collections::HashMap;
 
-use asap_types::pre_asap::query_expr::{InfoMatcher, Predicate, Source};
+use asap_types::ir::Predicate;
+use asap_types::pre_asap::query_expr::{InfoMatcher, Source};
 use asap_types::workload::{
     DataArrival, DataWorkload, DurationMs, QueryRecurrence, QueryWorkloadEntry, RepeatedDemand,
     TimeSelection, TimestampMs,
@@ -278,8 +279,8 @@ pub struct PartitionStatistics {
 /// is the authoritative operator vocabulary: every one of its variants has a
 /// matching statistics variant here.
 ///
-/// This enum intentionally does not mirror either logical IR. `QueryExpr` and
-/// `SummaryExpr` are inputs to physical lowering, and one logical node may
+/// This enum intentionally does not mirror the logical IR. `OperatorNode`s
+/// are inputs to physical lowering, and one logical node may
 /// expand into several physical nodes or choose among several algorithms.
 /// Physical configuration such as a Top-K limit or hash-join build side lives
 /// on `PhysicalOperator`; this enum contains only workload/catalog evidence

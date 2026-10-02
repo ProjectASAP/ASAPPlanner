@@ -7,7 +7,7 @@ pub struct SummaryMaintenanceCostModel {
     pub node_evidence: StreamingNodeEvidence,
     pub calibration: ResourceCalibration,
     pub capabilities: SummaryMaintenanceCapabilities,
-    target_comparisons: HashMap<*const QueryExpr, StreamingTargetComparison>,
+    target_comparisons: HashMap<*const OperatorNode, StreamingTargetComparison>,
     candidate_comparisons: HashMap<CandidateComparisonKey, BoundCandidateIdentity>,
     physical_plan_alternatives:
         HashMap<CandidateComparisonKey, Vec<StreamingPhysicalPlanAlternative>>,
@@ -15,17 +15,17 @@ pub struct SummaryMaintenanceCostModel {
         HashMap<CandidateComparisonKey, Vec<StreamingWindowFrameworkCandidate>>,
 }
 
-type CandidateComparisonKey = (*const QueryExpr, *const SummaryNode);
+type CandidateComparisonKey = (*const OperatorNode, *const OperatorNode);
 
 #[derive(Debug, Clone)]
 struct BoundCandidateIdentity {
-    _target: Rc<QueryExpr>,
-    _root: Rc<SummaryNode>,
+    _target: Rc<OperatorNode>,
+    _root: Rc<OperatorNode>,
 }
 
 #[derive(Debug, Clone)]
 struct StreamingTargetComparison {
-    _target: Rc<QueryExpr>,
+    _target: Rc<OperatorNode>,
     scope: ComparisonScope,
     raw: StreamingRawInputEvidence,
 }
@@ -59,73 +59,40 @@ fn info_source(selector: &[InfoMatcher]) -> Result<Source, AnalyticalCostError> 
     })
 }
 
+/// Collect the source selections (scan sources with their predicates, and
+/// info-metric selectors) of every leaf reachable from `node`, visiting a
+/// shared node once.
 pub(super) fn query_source_selections(
-    query: &QueryExpr,
+    node: &OperatorNode,
+    seen: &mut HashSet<*const OperatorNode>,
     out: &mut Vec<LogicalSourceSelection>,
 ) -> Result<(), AnalyticalCostError> {
-    use QueryExpr::*;
-    match query {
-        Scan {
+    if !seen.insert(node as *const _) {
+        return Ok(());
+    }
+    match &node.operator {
+        Operator::NonASAP(NonASAPOp::Scan {
             source, predicates, ..
-        } => out.push((source.clone(), predicates.clone(), vec![])),
-        PromqlVectorFromScalar(child) | PromqlScalarFromVector(child) => {
-            query_source_selections(child, out)?
-        }
-        PromqlInfoEnrich { selector, child } => {
-            query_source_selections(child, out)?;
+        }) => out.push((source.clone(), predicates.clone(), vec![])),
+        Operator::NonASAP(NonASAPOp::PromqlInfoEnrich { selector, child }) => {
+            query_source_selections(child, seen, out)?;
             out.push((info_source(selector)?, vec![], selector.clone()));
         }
-        PromqlRelabel { child, .. }
-        | Filter { child, .. }
-        | Project { child, .. }
-        | Aggregate { child, .. }
-        | Dedup { child, .. }
-        | PromqlSubquery { child, .. }
-        | TimeRange { child, .. }
-        | TimeShift { child, .. }
-        | SQLWindowFunc { child, .. }
-        | PromqlSeriesSample { child, .. }
-        | Sort { child, .. }
-        | Limit { child, .. } => query_source_selections(child, out)?,
-        Concat { children, .. } => {
-            for child in children {
-                query_source_selections(child, out)?;
+        _ => {
+            for child in node.children() {
+                query_source_selections(child, seen, out)?;
             }
         }
-        Join { left, right, .. } | SetOp { left, right, .. } => {
-            query_source_selections(left, out)?;
-            query_source_selections(right, out)?;
-        }
-        BinaryOp { lhs, rhs, .. } => {
-            query_source_selections(lhs, out)?;
-            query_source_selections(rhs, out)?;
-        }
-        PromqlScalarBridge(_)
-        | EvalTimestamp
-        | CurrentTimestamp
-        | Column(_)
-        | Literal(_)
-        | Compare { .. }
-        | BoolAnd(_)
-        | BoolOr(_)
-        | Not(_)
-        | IsNull(_)
-        | IsNotNull(_)
-        | Cast { .. }
-        | InList { .. }
-        | FunctionCall { .. }
-        | Arithmetic { .. }
-        | Case { .. } => {}
     }
     Ok(())
 }
 
 fn validate_query_scope(
-    target: &QueryExpr,
+    target: &OperatorNode,
     scope: &ComparisonScope,
 ) -> Result<(), AnalyticalCostError> {
     let mut actual = Vec::new();
-    query_source_selections(target, &mut actual)?;
+    query_source_selections(target, &mut HashSet::new(), &mut actual)?;
     let actual = deduplicate_source_selections(actual);
     let mut declared: Vec<_> = scope
         .sources
@@ -427,8 +394,8 @@ impl SummaryMaintenanceCostModel {
     /// rejected rather than silently replacing the canonical context.
     pub fn bind_candidate_comparison(
         &mut self,
-        target: &Rc<QueryExpr>,
-        root: &Rc<SummaryNode>,
+        target: &Rc<OperatorNode>,
+        root: &Rc<OperatorNode>,
         scope: ComparisonScope,
         raw: StreamingRawInputEvidence,
     ) -> Result<(), AnalyticalCostError> {
@@ -473,8 +440,8 @@ impl SummaryMaintenanceCostModel {
     /// candidate. Duplicate or empty provider identities are rejected.
     pub fn bind_physical_plan_alternative(
         &mut self,
-        target: &Rc<QueryExpr>,
-        root: &Rc<SummaryNode>,
+        target: &Rc<OperatorNode>,
+        root: &Rc<OperatorNode>,
         alternative: StreamingPhysicalPlanAlternative,
     ) -> Result<(), AnalyticalCostError> {
         let key = (Rc::as_ptr(target), Rc::as_ptr(root));
@@ -511,8 +478,8 @@ impl SummaryMaintenanceCostModel {
     /// evidence keep the implementations distinct during ranking.
     pub fn bind_window_framework_candidate(
         &mut self,
-        target: &Rc<QueryExpr>,
-        root: &Rc<SummaryNode>,
+        target: &Rc<OperatorNode>,
+        root: &Rc<OperatorNode>,
         candidate: StreamingWindowFrameworkCandidate,
     ) -> Result<(), AnalyticalCostError> {
         let key = (Rc::as_ptr(target), Rc::as_ptr(root));
@@ -564,8 +531,8 @@ impl SummaryMaintenanceCostModel {
 
     fn comparison_context(
         &self,
-        root: &SummaryNode,
-        target: Option<&QueryExpr>,
+        root: &OperatorNode,
+        target: Option<&OperatorNode>,
         horizon: Option<crate::recurrence::Horizon>,
         expected_reads: Option<f64>,
     ) -> Option<(CandidateComparisonKey, &StreamingTargetComparison)> {
@@ -599,7 +566,7 @@ impl SummaryMaintenanceCostModel {
 
     fn complete_cost_with_evidence(
         &self,
-        root: &SummaryNode,
+        root: &OperatorNode,
         deployments: &[CostedSummaryDeployment<'_>],
         comparison: &StreamingTargetComparison,
         evidence: &StreamingNodeEvidence,
@@ -618,7 +585,7 @@ impl SummaryMaintenanceCostModel {
         )
     }
 
-    fn canonical_inputs(&self, summary: &SummaryNode) -> Option<StreamingAggregateEvidence> {
+    fn canonical_inputs(&self, summary: &OperatorNode) -> Option<StreamingAggregateEvidence> {
         let evidence = self.node_evidence.aggregation(summary)?;
         evidence.inputs.validate().ok()?;
         Some(evidence)
@@ -630,7 +597,7 @@ impl SummaryMaintenanceCostModel {
 
     fn lifecycle_inputs(
         &self,
-        summary: &SummaryNode,
+        summary: &OperatorNode,
         horizon: Option<crate::recurrence::Horizon>,
     ) -> Option<SummaryMaintenanceLifecycleCostInputs> {
         let evidence = self.canonical_inputs(summary)?;
@@ -680,8 +647,7 @@ impl CostModel for SummaryMaintenanceCostModel {
             // Lifecycle selection supplies a complete override. If it cannot,
             // the candidate remains unavailable rather than receiving this
             // trait's structural fallback.
-            Replacement::Summary(_) => None,
-            Replacement::Rewrite(_) => None,
+            Replacement::Subtree(_) => None,
         }
     }
 
@@ -699,14 +665,14 @@ impl CostModel for SummaryMaintenanceCostModel {
 
     fn summary_maintenance_lifecycle_cost_inputs(
         &self,
-        _summary: &SummaryNode,
+        _summary: &OperatorNode,
     ) -> SummaryMaintenanceLifecycleCostInputs {
         SummaryMaintenanceLifecycleCostInputs::default()
     }
 
     fn summary_maintenance_lifecycle_cost_inputs_for_horizon(
         &self,
-        summary: &SummaryNode,
+        summary: &OperatorNode,
         horizon: Option<crate::recurrence::Horizon>,
     ) -> SummaryMaintenanceLifecycleCostInputs {
         self.lifecycle_inputs(summary, horizon).unwrap_or_default()
@@ -714,15 +680,15 @@ impl CostModel for SummaryMaintenanceCostModel {
 
     fn summary_maintenance_capabilities(
         &self,
-        _summary: &SummaryNode,
+        _summary: &OperatorNode,
     ) -> SummaryMaintenanceCapabilities {
         self.capabilities
     }
 
     fn complete_summary_candidate_cost(
         &self,
-        root: &SummaryNode,
-        target: Option<&QueryExpr>,
+        root: &OperatorNode,
+        target: Option<&OperatorNode>,
         deployments: &[CostedSummaryDeployment<'_>],
         horizon: Option<crate::recurrence::Horizon>,
         expected_reads: Option<f64>,
@@ -741,8 +707,8 @@ impl CostModel for SummaryMaintenanceCostModel {
 
     fn complete_summary_candidate_estimate(
         &self,
-        root: &SummaryNode,
-        target: Option<&QueryExpr>,
+        root: &OperatorNode,
+        target: Option<&OperatorNode>,
         deployments: &[CostedSummaryDeployment<'_>],
         horizon: Option<crate::recurrence::Horizon>,
         expected_reads: Option<f64>,
@@ -846,14 +812,14 @@ impl CostModel for SummaryMaintenanceCostModel {
         true
     }
 
-    fn raw_query_recompute_cost(&self, target: &QueryExpr) -> Option<Cost> {
+    fn raw_query_recompute_cost(&self, target: &OperatorNode) -> Option<Cost> {
         let _ = target;
         None
     }
 
     fn raw_query_recompute_total_cost(
         &self,
-        target: &QueryExpr,
+        target: &OperatorNode,
         expected_reads: f64,
     ) -> Option<Cost> {
         let target_ptr = target as *const _;

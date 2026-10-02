@@ -3,7 +3,7 @@ use super::*;
 /// One per-state window choice within a complete Planner candidate.
 #[derive(Debug, Clone)]
 pub struct StreamingWindowFrameworkAssignment {
-    pub summary: Rc<SummaryNode>,
+    pub summary: Rc<OperatorNode>,
     /// `None` explicitly means that this state is not window-organized.
     pub framework: Option<SummaryWindowFramework>,
 }
@@ -29,46 +29,22 @@ pub struct StreamingWindowFrameworkCandidate {
     pub node_evidence: StreamingNodeEvidence,
 }
 
-pub(super) fn summary_aggregation_identities(root: &SummaryNode) -> HashSet<*const SummaryNode> {
+pub(super) fn summary_aggregation_identities(
+    root: &OperatorNode,
+) -> HashSet<*const OperatorNode> {
     fn visit(
-        node: &SummaryNode,
-        seen: &mut HashSet<*const SummaryNode>,
-        out: &mut HashSet<*const SummaryNode>,
+        node: &OperatorNode,
+        seen: &mut HashSet<*const OperatorNode>,
+        out: &mut HashSet<*const OperatorNode>,
     ) {
         if !seen.insert(node as *const _) {
             return;
         }
-        match &node.expr {
-            SummaryExpr::KeepPreAsap(_) => {}
-            SummaryExpr::SummaryAgg { child, .. } => {
-                out.insert(node as *const _);
-                visit(child, seen, out);
-            }
-            SummaryExpr::ValueOperation { child, .. } => visit(child, seen, out),
-            SummaryExpr::SummaryMerge { children, .. } => {
-                for child in children {
-                    visit(child, seen, out);
-                }
-            }
-            SummaryExpr::SummarySubtract { left, right }
-            | SummaryExpr::RelationalJoin { left, right, .. }
-            | SummaryExpr::BinaryOp {
-                lhs: left,
-                rhs: right,
-                ..
-            }
-            | SummaryExpr::SummaryJoin {
-                outer: left,
-                inner: right,
-                ..
-            } => {
-                visit(left, seen, out);
-                visit(right, seen, out);
-            }
-            SummaryExpr::SummaryDelete { summary_input, .. }
-            | SummaryExpr::SummaryEstimate { summary_input, .. } => {
-                visit(summary_input, seen, out);
-            }
+        if matches!(node.operator, Operator::ASAP(ASAPOp::SummaryAgg { .. })) {
+            out.insert(node as *const _);
+        }
+        for child in node.children() {
+            visit(child, seen, out);
         }
     }
 
@@ -146,11 +122,11 @@ impl StreamingWindowAccuracyEvidence {
                 eh_summaries.len() == 1
                     && eh_summaries.iter().all(|assignment| {
                         matches!(
-                            &assignment.summary.expr,
-                            SummaryExpr::SummaryAgg {
+                            &assignment.summary.operator,
+                            Operator::ASAP(ASAPOp::SummaryAgg {
                                 family: FieldDataType::Sketch(kind, _),
                                 ..
-                            } if kind.algorithm() == &SketchAlgorithm::Kll
+                            }) if kind.algorithm() == &SketchAlgorithm::Kll
                         )
                     })
             }
@@ -160,14 +136,14 @@ impl StreamingWindowAccuracyEvidence {
                 eh_summaries.len() == 1
                     && eh_summaries.iter().all(|assignment| {
                         matches!(
-                            &assignment.summary.expr,
-                            SummaryExpr::SummaryAgg {
+                            &assignment.summary.operator,
+                            Operator::ASAP(ASAPOp::SummaryAgg {
                                 family: FieldDataType::ExactAggregate(
                                     ExactKind::Count | ExactKind::Sum,
                                     _
                                 ),
                                 ..
-                            }
+                            })
                         )
                     })
             }

@@ -1,6 +1,8 @@
-//! Recursive lowering from the canonical query IR to evidenced physical DAGs.
+//! Recursive lowering from the operator IR to evidenced physical DAGs.
 
 use std::rc::Rc;
+
+use asap_types::ir::{NonASAPOp, OperatorNode, ScalarExpr};
 
 use crate::analytical_cost::{
     validate_operator_semantics, AnalyticalCostError, EvidenceBackedPhysicalDag,
@@ -13,7 +15,7 @@ use crate::physical_operator_statistics::{
 };
 
 pub struct PhysicalNodeRequest<'a> {
-    pub logical_node: &'a asap_types::pre_asap::QueryExpr,
+    pub logical_node: &'a OperatorNode,
     pub operator: PhysicalOperator,
     pub occurrence: usize,
     pub synthetic: bool,
@@ -40,19 +42,19 @@ where
     }
 }
 
-/// Lower a resolved query operator DAG to the physical operators understood by
+/// Lower a non-ASAP operator DAG to the physical operators understood by
 /// this cost model. The authoritative provider supplies statistics by the
 /// stable physical IDs owned by that provider; missing evidence makes the
 /// complete query unavailable. Scalar expressions remain part of their
-/// containing operator's local cost.
+/// containing operator's local cost. An ASAP node is unsupported here.
 pub fn lower_query_physical_dag(
-    root: &Rc<asap_types::pre_asap::QueryExpr>,
+    root: &Rc<OperatorNode>,
     scope: &ComparisonScope,
     evidence: &dyn PhysicalNodeEvidenceProvider,
 ) -> Result<EvidenceBackedPhysicalDag, AnalyticalCostError> {
     use std::collections::HashMap;
 
-    use asap_types::pre_asap::{GroupKeys, QueryExpr, RelationalSetOpKind};
+    use asap_types::pre_asap::{GroupKeys, RelationalSetOpKind};
 
     scope.validate()?;
 
@@ -65,7 +67,7 @@ pub fn lower_query_physical_dag(
     }
 
     impl Lowerer<'_> {
-        fn lower(&mut self, query: &QueryExpr) -> Result<String, AnalyticalCostError> {
+        fn lower(&mut self, query: &OperatorNode) -> Result<String, AnalyticalCostError> {
             let occurrence = self.next_id;
             self.next_id += 1;
             self.lower_new(query, occurrence)
@@ -73,7 +75,7 @@ pub fn lower_query_physical_dag(
 
         fn resolve(
             &self,
-            query: &QueryExpr,
+            query: &OperatorNode,
             operator: PhysicalOperator,
             occurrence: usize,
             synthetic: bool,
@@ -128,12 +130,23 @@ pub fn lower_query_physical_dag(
 
         fn lower_unary(
             &mut self,
-            query: &QueryExpr,
+            query: &OperatorNode,
             occurrence: usize,
             operator: PhysicalOperator,
-            child: &QueryExpr,
+            child: &OperatorNode,
         ) -> Result<String, AnalyticalCostError> {
             let child_id = self.lower(child)?;
+            self.push_unary(query, occurrence, operator, child_id)
+        }
+
+        /// `operator` over an already-lowered child.
+        fn push_unary(
+            &mut self,
+            query: &OperatorNode,
+            occurrence: usize,
+            operator: PhysicalOperator,
+            child_id: String,
+        ) -> Result<String, AnalyticalCostError> {
             let children = vec![child_id.clone()];
             let evidence = self.resolve(query, operator, occurrence, false, &children, None)?;
             let statistics = &evidence.statistics;
@@ -151,17 +164,17 @@ pub fn lower_query_physical_dag(
 
         fn lower_promql_unary(
             &mut self,
-            query: &QueryExpr,
+            query: &OperatorNode,
             occurrence: usize,
             operator: PhysicalOperator,
-            child: &QueryExpr,
+            child: &OperatorNode,
         ) -> Result<String, AnalyticalCostError> {
             self.lower_unary(query, occurrence, operator, child)
         }
 
         fn lower_promql_scalar_leaf(
             &mut self,
-            query: &QueryExpr,
+            query: &OperatorNode,
             occurrence: usize,
         ) -> Result<String, AnalyticalCostError> {
             let operator = PhysicalOperator::PromqlScalarLeaf;
@@ -169,6 +182,30 @@ pub fn lower_query_physical_dag(
             require_statistics_shape(&evidence.physical_id, &evidence.statistics, 0)?;
             require_operator_statistics(operator, &evidence.statistics)?;
             self.push(evidence, operator, vec![], None)
+        }
+
+        /// A PromQL scalar operand (`ScalarBridge`, or the scalar of
+        /// `vector(s)`): a literal or `time()` is a scalar leaf; `scalar(v)`
+        /// reads its vector through `PromqlVectorToScalar`. `query` is the
+        /// operator node that owns the scalar; `occurrence` is its own
+        /// occurrence for a bridge and a fresh one for a `vector(s)` operand.
+        fn lower_scalar_operand(
+            &mut self,
+            query: &OperatorNode,
+            occurrence: usize,
+            expr: &ScalarExpr,
+        ) -> Result<String, AnalyticalCostError> {
+            match expr {
+                ScalarExpr::Literal(asap_types::pre_asap::ScalarValue::Float64(_))
+                | ScalarExpr::EvalTimestamp => self.lower_promql_scalar_leaf(query, occurrence),
+                ScalarExpr::PromqlScalarFromVector(vector) => self.lower_promql_unary(
+                    query,
+                    occurrence,
+                    PhysicalOperator::PromqlVectorToScalar,
+                    vector,
+                ),
+                _ => Err(AnalyticalCostError::UnsupportedQueryOperator),
+            }
         }
 
         fn node_statistics(&self, id: &str) -> Result<&OperatorStatistics, AnalyticalCostError> {
@@ -182,11 +219,14 @@ pub fn lower_query_physical_dag(
 
         fn lower_new(
             &mut self,
-            query: &QueryExpr,
+            query: &OperatorNode,
             occurrence: usize,
         ) -> Result<String, AnalyticalCostError> {
-            match query {
-                QueryExpr::Scan {
+            let Some(op) = query.non_asap() else {
+                return Err(AnalyticalCostError::UnsupportedQueryOperator);
+            };
+            match op {
+                NonASAPOp::Scan {
                     source, predicates, ..
                 } => {
                     let coverage = bind_scan_coverage(
@@ -252,13 +292,13 @@ pub fn lower_query_physical_dag(
                     require_operator_statistics(filter_operator, &filter_evidence.statistics)?;
                     self.push(filter_evidence, filter_operator, children, None)
                 }
-                QueryExpr::Filter { pred, child } => {
+                NonASAPOp::Filter { pred, child } => {
                     let operator = PhysicalOperator::Filter {
                         predicate_operations_per_row: scalar_operation_count(&pred.0)?.max(1),
                     };
                     self.lower_unary(query, occurrence, operator, child)
                 }
-                QueryExpr::Project { cols, child, .. } => {
+                NonASAPOp::Project { cols, child, .. } => {
                     let expression_operations_per_row = cols
                         .iter()
                         .try_fold(0_u64, |total, item| {
@@ -280,7 +320,7 @@ pub fn lower_query_physical_dag(
                         child,
                     )
                 }
-                QueryExpr::Aggregate {
+                NonASAPOp::Aggregate {
                     reduction,
                     measures,
                     having,
@@ -334,13 +374,9 @@ pub fn lower_query_physical_dag(
                         child,
                     )
                 }
-                QueryExpr::Dedup { cols, child } => {
+                NonASAPOp::Dedup { cols, child } => {
                     let key_count = if cols.is_empty() {
-                        child
-                            .output_schema()
-                            .map_err(|_| AnalyticalCostError::UnsupportedQueryOperator)?
-                            .fields
-                            .len()
+                        child.schema.fields.len()
                     } else {
                         cols.len()
                     };
@@ -357,7 +393,7 @@ pub fn lower_query_physical_dag(
                         child,
                     )
                 }
-                QueryExpr::Sort {
+                NonASAPOp::Sort {
                     keys,
                     partition_by,
                     child,
@@ -377,13 +413,26 @@ pub fn lower_query_physical_dag(
                         child,
                     )
                 }
-                QueryExpr::Limit { n, offset, child } => {
-                    if let QueryExpr::Sort {
+                NonASAPOp::Limit {
+                    n,
+                    offset,
+                    partition_by: limit_partition_by,
+                    child,
+                } => {
+                    // Offset-only and per-group limits have no physical
+                    // operator here.
+                    let Some(n) = n else {
+                        return Err(AnalyticalCostError::UnsupportedQueryOperator);
+                    };
+                    if limit_partition_by != &GroupKeys::none() {
+                        return Err(AnalyticalCostError::UnsupportedQueryOperator);
+                    }
+                    if let Some(NonASAPOp::Sort {
                         keys,
                         partition_by,
                         child: sorted_child,
                         ..
-                    } = child.as_ref()
+                    }) = child.non_asap()
                     {
                         if !keys.is_empty() && partition_by == &GroupKeys::none() {
                             let child_id = self.lower(sorted_child)?;
@@ -438,7 +487,7 @@ pub fn lower_query_physical_dag(
                     require_operator_statistics(operator, statistics)?;
                     self.push(evidence, operator, children, None)
                 }
-                QueryExpr::SQLWindowFunc {
+                NonASAPOp::SQLWindowFunc {
                     func,
                     partition_by,
                     order_by,
@@ -468,7 +517,7 @@ pub fn lower_query_physical_dag(
                         child,
                     )
                 }
-                QueryExpr::TimeRange { range, child } => {
+                NonASAPOp::TimeRange { range, child, .. } => {
                     let range_millis = duration_millis(*range, "range")?;
                     self.lower_promql_unary(
                         query,
@@ -477,7 +526,7 @@ pub fn lower_query_physical_dag(
                         child,
                     )
                 }
-                QueryExpr::PromqlSubquery {
+                NonASAPOp::PromqlSubquery {
                     range,
                     resolution,
                     child,
@@ -509,7 +558,7 @@ pub fn lower_query_physical_dag(
                     }
                     Ok(id)
                 }
-                QueryExpr::PromqlRelabel { value, child, .. } => self.lower_promql_unary(
+                NonASAPOp::PromqlRelabel { value, child, .. } => self.lower_promql_unary(
                     query,
                     occurrence,
                     PhysicalOperator::PromqlRelabel {
@@ -517,7 +566,7 @@ pub fn lower_query_physical_dag(
                     },
                     child,
                 ),
-                QueryExpr::PromqlSeriesSample {
+                NonASAPOp::PromqlSeriesSample {
                     by, kind, child, ..
                 } => {
                     if by.is_without() {
@@ -553,7 +602,7 @@ pub fn lower_query_physical_dag(
                         child,
                     )
                 }
-                QueryExpr::PromqlInfoEnrich { selector, child } => {
+                NonASAPOp::PromqlInfoEnrich { selector, child } => {
                     let left_id = self.lower(child)?;
                     let coverage = bind_info_coverage(
                         &format!("occurrence-{occurrence}-info"),
@@ -605,12 +654,11 @@ pub fn lower_query_physical_dag(
                     require_operator_statistics(operator, &evidence.statistics)?;
                     self.push(evidence, operator, children, None)
                 }
-                QueryExpr::BinaryOp {
-                    op,
-                    lhs,
-                    rhs,
-                    vector_match,
+                NonASAPOp::BinaryOp {
+                    operator, lhs, rhs, ..
                 } => {
+                    let op = &operator.kind;
+                    let vector_match = &operator.vector_match;
                     let left_scalar = is_promql_scalar(lhs);
                     let right_scalar = is_promql_scalar(rhs);
                     if left_scalar && right_scalar {
@@ -666,41 +714,34 @@ pub fn lower_query_physical_dag(
                     require_operator_statistics(operator, &evidence.statistics)?;
                     self.push(evidence, operator, children, None)
                 }
-                QueryExpr::PromqlVectorFromScalar(child) => self.lower_promql_unary(
-                    query,
-                    occurrence,
-                    PhysicalOperator::PromqlScalarToVector,
-                    child,
-                ),
-                QueryExpr::PromqlScalarFromVector(child) => self.lower_promql_unary(
-                    query,
-                    occurrence,
-                    PhysicalOperator::PromqlVectorToScalar,
-                    child,
-                ),
-                QueryExpr::PromqlScalarBridge(inner)
-                    if matches!(
-                        inner.as_ref(),
-                        QueryExpr::Literal(asap_types::pre_asap::ScalarValue::Float64(_))
-                    ) =>
-                {
-                    self.lower_promql_scalar_leaf(query, occurrence)
+                NonASAPOp::PromqlVectorFromScalar(scalar) => {
+                    let scalar_occurrence = self.next_id;
+                    self.next_id += 1;
+                    let child_id = self.lower_scalar_operand(query, scalar_occurrence, scalar)?;
+                    self.push_unary(
+                        query,
+                        occurrence,
+                        PhysicalOperator::PromqlScalarToVector,
+                        child_id,
+                    )
                 }
-                QueryExpr::EvalTimestamp => self.lower_promql_scalar_leaf(query, occurrence),
-                QueryExpr::TimeShift { shift, child } => {
+                NonASAPOp::ScalarBridge(scalar) => {
+                    self.lower_scalar_operand(query, occurrence, scalar)
+                }
+                NonASAPOp::TimeShift { shift, child } => {
                     if !shift.is_identity() {
                         return Err(AnalyticalCostError::UnsupportedQueryOperator);
                     }
                     self.lower_unary(query, occurrence, PhysicalOperator::PassThrough, child)
                 }
-                QueryExpr::Concat { children, .. } => {
+                NonASAPOp::Concat { children, .. } => {
                     let child_ids = children
                         .iter()
                         .map(|child| self.lower(child))
                         .collect::<Result<Vec<_>, _>>()?;
                     self.lower_concat(query, occurrence, child_ids)
                 }
-                QueryExpr::SetOp {
+                NonASAPOp::SetOp {
                     kind: RelationalSetOpKind::Union,
                     all: true,
                     left,
@@ -710,7 +751,7 @@ pub fn lower_query_physical_dag(
                     let right_id = self.lower(right)?;
                     self.lower_concat(query, occurrence, vec![left_id, right_id])
                 }
-                QueryExpr::Join {
+                NonASAPOp::Join {
                     kind,
                     pred,
                     left,
@@ -760,7 +801,7 @@ pub fn lower_query_physical_dag(
 
         fn lower_concat(
             &mut self,
-            query: &QueryExpr,
+            query: &OperatorNode,
             occurrence: usize,
             child_ids: Vec<String>,
         ) -> Result<String, AnalyticalCostError> {
@@ -953,7 +994,7 @@ fn require_operator_statistics(
 fn bind_scan_coverage(
     node_id: &str,
     source: &asap_types::pre_asap::Source,
-    predicates: &[asap_types::pre_asap::Predicate],
+    predicates: &[asap_types::ir::Predicate],
     scope: &ComparisonScope,
 ) -> Result<SourceCoverage, AnalyticalCostError> {
     let mut matches = scope.sources.iter().filter(|coverage| {
@@ -1046,18 +1087,11 @@ fn promql_vector_cardinality(
     }
 }
 
-fn hash_join_key_count(
-    expr: &asap_types::pre_asap::QueryExpr,
-    left: &asap_types::pre_asap::QueryExpr,
-    right: &asap_types::pre_asap::QueryExpr,
-) -> Option<u64> {
-    use asap_types::pre_asap::{CompareOpKind, QueryExpr};
+fn hash_join_key_count(expr: &ScalarExpr, left: &OperatorNode, right: &OperatorNode) -> Option<u64> {
+    use asap_types::pre_asap::CompareOpKind;
 
-    let (Ok(left_schema), Ok(right_schema)) = (left.output_schema(), right.output_schema()) else {
-        return None;
-    };
-    let left_width = left_schema.fields.len();
-    let total_width = left_width.saturating_add(right_schema.fields.len());
+    let left_width = left.schema.fields.len();
+    let total_width = left_width.saturating_add(right.schema.fields.len());
 
     fn column_side(column: usize, left_width: usize, total_width: usize) -> Option<bool> {
         if column < left_width {
@@ -1069,14 +1103,15 @@ fn hash_join_key_count(
         }
     }
 
-    fn predicate(expr: &QueryExpr, left_width: usize, total_width: usize) -> Option<u64> {
+    fn predicate(expr: &ScalarExpr, left_width: usize, total_width: usize) -> Option<u64> {
         match expr {
-            QueryExpr::Compare {
+            ScalarExpr::Compare {
                 left,
                 op: CompareOpKind::Eq,
                 right,
+                ..
             } => match (left.as_ref(), right.as_ref()) {
-                (QueryExpr::Column(left), QueryExpr::Column(right)) => match (
+                (ScalarExpr::Column(left), ScalarExpr::Column(right)) => match (
                     column_side(*left, left_width, total_width),
                     column_side(*right, left_width, total_width),
                 ) {
@@ -1085,7 +1120,7 @@ fn hash_join_key_count(
                 },
                 _ => None,
             },
-            QueryExpr::BoolAnd(parts) if !parts.is_empty() => {
+            ScalarExpr::BoolAnd(parts) if !parts.is_empty() => {
                 parts.iter().try_fold(0_u64, |count, part| {
                     count.checked_add(predicate(part, left_width, total_width)?)
                 })
@@ -1097,12 +1132,8 @@ fn hash_join_key_count(
     predicate(expr, left_width, total_width)
 }
 
-fn scalar_operation_count(
-    expr: &asap_types::pre_asap::QueryExpr,
-) -> Result<u64, AnalyticalCostError> {
-    use asap_types::pre_asap::QueryExpr;
-
-    let add = |parts: &[&QueryExpr]| {
+fn scalar_operation_count(expr: &ScalarExpr) -> Result<u64, AnalyticalCostError> {
+    let add = |parts: &[&ScalarExpr]| {
         parts.iter().try_fold(0_u64, |total, part| {
             total
                 .checked_add(scalar_operation_count(part)?)
@@ -1115,14 +1146,14 @@ fn scalar_operation_count(
             .ok_or(AnalyticalCostError::Overflow)
     };
     match expr {
-        QueryExpr::Column(_)
-        | QueryExpr::Literal(_)
-        | QueryExpr::EvalTimestamp
-        | QueryExpr::CurrentTimestamp => Ok(0),
-        QueryExpr::Compare { left, right, .. } | QueryExpr::Arithmetic { left, right, .. } => {
+        ScalarExpr::Column(_)
+        | ScalarExpr::Literal(_)
+        | ScalarExpr::EvalTimestamp
+        | ScalarExpr::CurrentTimestamp => Ok(0),
+        ScalarExpr::Compare { left, right, .. } | ScalarExpr::Arithmetic { left, right, .. } => {
             with_local(&[left, right])
         }
-        QueryExpr::BoolAnd(parts) | QueryExpr::BoolOr(parts) => {
+        ScalarExpr::BoolAnd(parts) | ScalarExpr::BoolOr(parts) => {
             let children = parts.iter().collect::<Vec<_>>();
             add(&children)?
                 .checked_add(
@@ -1131,12 +1162,11 @@ fn scalar_operation_count(
                 )
                 .ok_or(AnalyticalCostError::Overflow)
         }
-        QueryExpr::Not(child)
-        | QueryExpr::IsNull(child)
-        | QueryExpr::IsNotNull(child)
-        | QueryExpr::PromqlScalarBridge(child) => with_local(&[child]),
-        QueryExpr::Cast { expr, .. } => with_local(&[expr]),
-        QueryExpr::InList { expr, list, .. } => {
+        ScalarExpr::Not(child) | ScalarExpr::IsNull(child) | ScalarExpr::IsNotNull(child) => {
+            with_local(&[child])
+        }
+        ScalarExpr::Cast { expr, .. } => with_local(&[expr]),
+        ScalarExpr::InList { expr, list, .. } => {
             let mut children = Vec::with_capacity(list.len() + 1);
             children.push(expr.as_ref());
             children.extend(list.iter());
@@ -1144,11 +1174,11 @@ fn scalar_operation_count(
                 .checked_add(u64::try_from(list.len()).map_err(|_| AnalyticalCostError::Overflow)?)
                 .ok_or(AnalyticalCostError::Overflow)
         }
-        QueryExpr::FunctionCall { args, .. } => {
+        ScalarExpr::FunctionCall { args, .. } => {
             let children = args.iter().collect::<Vec<_>>();
             with_local(&children)
         }
-        QueryExpr::Case {
+        ScalarExpr::Case {
             operand,
             branches,
             else_expr,
@@ -1242,14 +1272,8 @@ fn fixed_state_per_series_intent(intent: &asap_types::pre_asap::AggIntent) -> bo
     )
 }
 
-fn is_promql_scalar(query: &asap_types::pre_asap::QueryExpr) -> bool {
-    use asap_types::pre_asap::QueryExpr;
-    matches!(
-        query,
-        QueryExpr::PromqlScalarBridge(_)
-            | QueryExpr::PromqlScalarFromVector(_)
-            | QueryExpr::EvalTimestamp
-    )
+fn is_promql_scalar(query: &OperatorNode) -> bool {
+    query.is_scalar_leaf()
 }
 
 #[cfg(test)]
