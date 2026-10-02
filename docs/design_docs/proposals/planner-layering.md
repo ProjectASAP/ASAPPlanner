@@ -205,14 +205,25 @@ window summary that answers it:
   slide forward with the window.
 * A **window summary** keeps summaries so that many windows can be answered.
   Three window summaries are considered for now:
-  * **Sliding window:** one summary per active window. Each arriving sample is
-    inserted into every active window that contains it, and each evaluation
-    reads the window that has just completed, with no merge. For a 5-min
-    window evaluated every 1 min, 5 windows are active and each sample updates
-    all 5. It works for any summary, including ones that cannot be merged, at
-    the cost of more ingestion work and memory.
+  * **Sliding window:** summaries over windows of a fixed length L that start
+    every s (the slide), so several windows are active at once. Each arriving
+    sample is inserted into every active window that contains it, at the cost
+    of more ingestion work and memory. A query window of length W is answered
+    from completed windows:
+    * **L = W:** each evaluation reads one completed window, with no merge.
+      For a 5-min window evaluated every 1 min, L = 5 min and s = 1 min, so 5
+      windows are active and each sample updates all 5. This works even for
+      summaries that cannot be merged.
+    * **L shorter than W:** the query window is covered by W / L
+      non-overlapping completed windows, which are merged[^sliding-merge]. For
+      example, a 10-min window evaluated every 1 min merges two 5-min windows
+      with a 1-min slide. This needs a mergeable summary.
+
+    L must divide W, and s must divide both L and the evaluation interval, so
+    the windows a query needs have always just completed.
   * **Tumbling window:** back-to-back, non-overlapping windows of one fixed
-    length, each with one summary. A longer query window is answered by
+    length, each with one summary; a sliding window whose slide equals its
+    length. A longer query window is answered by
     merging the tumbling windows it covers. The tumbling length must divide
     both the query window length and the evaluation interval, so that every
     query window starts and ends on a tumbling boundary: a 5-min window
@@ -230,13 +241,8 @@ window summary that answers it:
       merged into a longer one as they age.
 
   TODO: evaluate other sliding-window frameworks for sketches as further
-  window summaries, for example:
-  * [Smooth Histograms for Sliding Windows](https://web.cs.ucla.edu/~rafail/PUBLIC/82.pdf)
-    (Braverman and Ostrovsky, FOCS 2007), an alternative to EH.
-  * [MicroscopeSketch: Accurate Sliding Estimation Using Adaptive Zooming](https://yangtonghome.github.io/uploads/MicroscopeSketch_SIGKDD_23_final_paper.pdf)
-    (Wu et al., KDD 2023).
-  * [Sliding Sketches: A Framework using Time Zones for Data Stream Processing in Sliding Windows](https://dl.acm.org/doi/10.1145/3394486.3403144)
-    (Gou et al., KDD 2020).
+  window summaries, such as Smooth Histograms[^smooth-histograms],
+  MicroscopeSketch[^microscope-sketch] and Sliding Sketches[^sliding-sketches].
 
 | ASAP-aware CSE rule | Sharing condition | Shared computation |
 |---|---|---|
@@ -474,8 +480,11 @@ to each of the 3 candidates, and keeps every original:
   summary supports both queries.
 * **Window-composition rule.** Each query reads a 1-min window every 10 s, so
   consecutive evaluations overlap by 50 s. For each query, Pass 2 adds two
-  variants: a **sliding window**, where each sample updates the 6 active 1-min
-  windows, and **10-s tumbling windows**, merged 6 at a time at every refresh.
+  variants: a **sliding window** with L = 1 min and a 10-s slide, where each
+  sample updates the 6 active windows, and **10-s tumbling windows**, merged 6
+  at a time at every refresh. (Shorter sliding windows that are merged, such
+  as 30-s windows with a 10-s slide, would add more candidates; this example
+  leaves them out.)
   Tumbling windows need a mergeable summary. Q1's rates and sums, Q2's exact
   sums and Hydra merge exactly; Count-Min sketches do too, but their top-10
   heaps merge only approximately, so that candidate is kept and the accuracy
@@ -972,3 +981,8 @@ Histogram, or 1-min tumbling KLL windows) yields different physical plans depend
 only on recurrence, predictability and data arrival. This is why window-summary
 replacement happens in logical planning, while materialization is decided
 separately in physical planning.
+
+[^smooth-histograms]: V. Braverman and R. Ostrovsky. [Smooth Histograms for Sliding Windows](https://web.cs.ucla.edu/~rafail/PUBLIC/82.pdf). FOCS 2007. An alternative to EH.
+[^microscope-sketch]: Y. Wu et al. [MicroscopeSketch: Accurate Sliding Estimation Using Adaptive Zooming](https://yangtonghome.github.io/uploads/MicroscopeSketch_SIGKDD_23_final_paper.pdf). KDD 2023.
+[^sliding-sketches]: X. Gou et al. [Sliding Sketches: A Framework using Time Zones for Data Stream Processing in Sliding Windows](https://dl.acm.org/doi/10.1145/3394486.3403144). KDD 2020.
+[^sliding-merge]: [ACM DOI 10.1145/1055558.1055598](https://dl.acm.org/doi/10.1145/1055558.1055598). TODO: add authors, title and venue.
