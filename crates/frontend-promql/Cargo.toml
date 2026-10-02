@@ -7,6 +7,7 @@ edition = "2021"
 # — both in asap-types. Pulls the PromQL parser only — never DataFusion.
 [dependencies]
 asap-types = { path = "../types" }
+asap-frontend-common = { path = "../frontend-common" }
 
 # Shared ProjectASAP parser contract. Keep this immutable revision aligned
 # with backend parsing and treat newly parsed functions as unsupported until

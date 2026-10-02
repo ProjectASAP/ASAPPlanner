@@ -324,3 +324,6 @@ fn require_arity(name: &str, actual: usize, expected: usize) -> Result<(), Metri
 fn unsupported(message: impl Into<String>) -> MetricsqlError {
     MetricsqlError::UnsupportedFeature(message.into())
 }
+
+/// Unified lowering, promoted to the root API at planner cutover.
+pub mod unified;
