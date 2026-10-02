@@ -3,9 +3,9 @@ use super::*;
 pub(super) fn estimate_heterogeneous_summary(
     root: &SummaryNode,
     deployments: &[CostedSummaryDeployment<'_>],
-    evidence: &StreamingNodeEvidence,
+    evidence: &SummaryNodeEvidence,
     scope: &ComparisonScope,
-    raw: &StreamingRawInputEvidence,
+    raw: &RawInputEvidence,
     window_frameworks: &[Option<SummaryWindowFramework>],
 ) -> Result<ResourceEstimate, AnalyticalCostError> {
     if window_frameworks.len() != deployments.len() {
@@ -71,7 +71,7 @@ pub(super) fn estimate_heterogeneous_summary(
     let mut physical_states = HashMap::<
         String,
         (
-            StreamingAggregateEvidence,
+            SummaryAggregateEvidence,
             SummaryMaintenanceLifecycleGuarantee,
             String,
             Option<SummaryWindowFramework>,
@@ -85,6 +85,7 @@ pub(super) fn estimate_heterogeneous_summary(
             return Err(AnalyticalCostError::UnsupportedCandidate);
         };
         let inputs = node_evidence.inputs.validate()?;
+        validate_arrival_rate(scope.data_arrival, inputs.ingestion_rate_per_second)?;
         match node_evidence.source_coverage_index {
             Some(index) => {
                 let declared =
@@ -255,7 +256,7 @@ pub(super) fn estimate_heterogeneous_summary(
         node: &SummaryNode,
         seen: &mut HashSet<String>,
         by_node: &HashMap<*const SummaryNode, &CostedSummaryDeployment<'_>>,
-        evidence: &StreamingNodeEvidence,
+        evidence: &SummaryNodeEvidence,
         scope: &ComparisonScope,
         evaluation_count: u64,
         cpu_ops: &mut f64,
@@ -392,7 +393,7 @@ pub(super) fn estimate_heterogeneous_summary(
             }
             SummaryExpr::SummaryDelete { summary_input, .. } => {
                 let delete = summary_operation_evidence(node, evidence)?;
-                let StreamingSummaryOperatorEvidence::Delete {
+                let SummaryOperatorEvidence::Delete {
                     resource: operation,
                     events_per_second,
                     routing_fanout,
@@ -613,7 +614,7 @@ fn add_operator_io(
 
 fn validate_summary_edges_and_physical_ids(
     root: &SummaryNode,
-    evidence: &StreamingNodeEvidence,
+    evidence: &SummaryNodeEvidence,
     frameworks_by_node: &HashMap<*const SummaryNode, &Option<SummaryWindowFramework>>,
 ) -> Result<(), AnalyticalCostError> {
     fn children(node: &SummaryNode) -> Vec<&SummaryNode> {
@@ -643,7 +644,7 @@ fn validate_summary_edges_and_physical_ids(
     }
     fn metadata(
         node: &SummaryNode,
-        evidence: &StreamingNodeEvidence,
+        evidence: &SummaryNodeEvidence,
     ) -> Result<(String, Vec<EdgeStatistics>, EdgeStatistics), AnalyticalCostError> {
         match &node.expr {
             SummaryExpr::KeepPreAsap(_) => {
@@ -683,7 +684,7 @@ fn validate_summary_edges_and_physical_ids(
     }
     fn visit(
         node: &SummaryNode,
-        evidence: &StreamingNodeEvidence,
+        evidence: &SummaryNodeEvidence,
         frameworks_by_node: &HashMap<*const SummaryNode, &Option<SummaryWindowFramework>>,
         seen: &mut HashSet<*const SummaryNode>,
         physical: &mut HashMap<String, (Vec<EdgeStatistics>, EdgeStatistics, String)>,
@@ -757,7 +758,7 @@ fn validate_summary_edges_and_physical_ids(
 
 fn summary_physical_id(
     node: &SummaryNode,
-    evidence: &StreamingNodeEvidence,
+    evidence: &SummaryNodeEvidence,
 ) -> Result<String, AnalyticalCostError> {
     match &node.expr {
         SummaryExpr::KeepPreAsap(_) => evidence
@@ -786,7 +787,7 @@ fn summary_physical_id(
 /// operator workspace and its output buffer coexist during that execution.
 pub(super) fn estimate_transient_liveness(
     root: &SummaryNode,
-    evidence: &StreamingNodeEvidence,
+    evidence: &SummaryNodeEvidence,
 ) -> Result<u64, AnalyticalCostError> {
     fn children(node: &SummaryNode) -> Vec<&SummaryNode> {
         match &node.expr {
@@ -815,7 +816,7 @@ pub(super) fn estimate_transient_liveness(
     }
     fn visit<'a>(
         node: &'a SummaryNode,
-        evidence: &StreamingNodeEvidence,
+        evidence: &SummaryNodeEvidence,
         seen: &mut HashSet<String>,
         uses: &mut HashMap<String, usize>,
         order: &mut Vec<&'a SummaryNode>,
@@ -834,7 +835,7 @@ pub(super) fn estimate_transient_liveness(
     }
     fn memory(
         node: &SummaryNode,
-        evidence: &StreamingNodeEvidence,
+        evidence: &SummaryNodeEvidence,
     ) -> Result<(u64, u64), AnalyticalCostError> {
         match &node.expr {
             SummaryExpr::KeepPreAsap(_) => evidence
@@ -971,7 +972,7 @@ struct SummaryOperationCounts {
 pub(super) fn estimate_incremental_summary_maintenance(
     root: &SummaryNode,
     guarantee: &SummaryMaintenanceLifecycleGuarantee,
-    inputs: StreamingSummaryInputs,
+    inputs: SummaryMaintenanceInputs,
     cpu: SummaryOperationCpuEvidence,
     scope: &ComparisonScope,
 ) -> Result<ResourceEstimate, AnalyticalCostError> {
@@ -981,7 +982,7 @@ pub(super) fn estimate_incremental_summary_maintenance(
 pub(super) fn estimate_incremental_summary_maintenance_with_join(
     root: &SummaryNode,
     guarantee: &SummaryMaintenanceLifecycleGuarantee,
-    inputs: StreamingSummaryInputs,
+    inputs: SummaryMaintenanceInputs,
     cpu: SummaryOperationCpuEvidence,
     join: Option<SummaryJoinEvidence>,
     scope: &ComparisonScope,
@@ -1120,10 +1121,11 @@ pub(super) fn estimate_incremental_summary_maintenance_with_join(
 }
 
 pub(super) fn lifecycle_row_counts(
-    inputs: StreamingSummaryInputs,
+    inputs: SummaryMaintenanceInputs,
     guarantee: &SummaryMaintenanceLifecycleGuarantee,
     scope: &ComparisonScope,
 ) -> Result<(u64, u64, u64), AnalyticalCostError> {
+    validate_arrival_rate(scope.data_arrival, inputs.ingestion_rate_per_second)?;
     let horizon_end = scope
         .planning_time
         .0
