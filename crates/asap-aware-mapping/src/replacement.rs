@@ -440,10 +440,16 @@ pub enum RealizationError {
 /// strategy against one node in isolation. A strategy that only cares about
 /// `root`'s shape (for example, [`SketchAlgorithmStrategy`]) can ignore the
 /// count; [`SharedSubtreeStrategy`] consults it directly.
+///
+/// `strictest_sibling_accuracy` is the strictest accuracy among workload
+/// siblings that read the same summary input as `root`, when stricter than
+/// `root`'s own. [`search_workload_with`] sets it; [`SketchAlgorithmStrategy`]
+/// also sizes a candidate to it.
 #[derive(Debug, Clone, Copy)]
 pub struct TargetSubDAG<'a> {
     pub root: &'a Rc<QueryExpr>,
     pub consumer_count: usize,
+    pub strictest_sibling_accuracy: Option<&'a AccuracyTarget>,
 }
 
 impl<'a> TargetSubDAG<'a> {
@@ -453,6 +459,7 @@ impl<'a> TargetSubDAG<'a> {
         Self {
             root,
             consumer_count: 1,
+            strictest_sibling_accuracy: None,
         }
     }
 
@@ -462,6 +469,7 @@ impl<'a> TargetSubDAG<'a> {
         Self {
             root,
             consumer_count,
+            strictest_sibling_accuracy: None,
         }
     }
 }
@@ -1356,7 +1364,7 @@ impl<'a> SketchAlgorithmStrategy<'a> {
             having: None,
             child: Rc::clone(child),
         });
-        self.propose_with(&ranked, None)
+        self.propose_with(&ranked, None, None)
     }
 
     pub(crate) fn from_planning_inputs(planning_inputs: CandidatePlanningInputs<'a>) -> Self {
@@ -1365,8 +1373,16 @@ impl<'a> SketchAlgorithmStrategy<'a> {
 
     /// The whole enumeration for one target, with `intent_override`
     /// substituting the target's own intent (only ever its `AccuracyTarget`
-    /// differs — see [`realize_child_with`]).
-    fn propose_with(&self, root: &Rc<QueryExpr>, intent_override: Option<&AggIntent>) -> Proposals {
+    /// differs — see [`realize_child_with`]). `strictest_sibling` adds each
+    /// sketch resized to that stricter sibling accuracy (#509 summary
+    /// capability): alone it only costs more, but post-ASAP CSE shares it
+    /// with the sibling that needs it.
+    fn propose_with(
+        &self,
+        root: &Rc<QueryExpr>,
+        intent_override: Option<&AggIntent>,
+        strictest_sibling: Option<&AccuracyTarget>,
+    ) -> Proposals {
         let mut proposals = Proposals::default();
         // A selected logical rewrite otherwise remains KeepPreAsap during DAG
         // assembly. Also expose its concrete summary realization for selection.
@@ -1460,6 +1476,32 @@ impl<'a> SketchAlgorithmStrategy<'a> {
                     None,
                 ),
             );
+
+            // Sized for the strictest sibling reading the same summary input,
+            // when that changes the parameters.
+            if let (Some(stricter), Realization::Sketch(kind)) = (strictest_sibling, &realization) {
+                let (eps, delta) = accuracy_budget(stricter);
+                let algorithm = kind.algorithm().clone();
+                let params =
+                    planning_inputs
+                        .cost
+                        .size_params(algorithm.clone(), intent, eps, delta);
+                if params != *kind.params() {
+                    proposals.record(
+                        format!(
+                            "{rationale}; sized for the strictest sibling consumer {stricter:?}"
+                        ),
+                        construct_summary_with(
+                            root,
+                            &override_accuracy(intent, stricter),
+                            Realization::Sketch(SketchKind::new(algorithm, params)),
+                            planning_inputs,
+                            None,
+                            None,
+                        ),
+                    );
+                }
+            }
 
             // Budget-split alternatives (issue #172, PR 2): re-size this
             // layer and the approximate child under each allocation of this
@@ -1613,7 +1655,7 @@ impl ReplacementStrategy for SketchAlgorithmStrategy<'_> {
     }
 
     fn propose(&self, target: &TargetSubDAG<'_>) -> Proposals {
-        self.propose_with(target.root, None)
+        self.propose_with(target.root, None, target.strictest_sibling_accuracy)
     }
 
     /// Heap realizations of an instant-vector ranking (current-series TopK).
@@ -1871,7 +1913,7 @@ pub(crate) fn realize_child_with(
         }
     });
     match SketchAlgorithmStrategy::from_planning_inputs(planning_inputs)
-        .propose_with(root, overridden.as_ref())
+        .propose_with(root, overridden.as_ref(), None)
         .candidates
         .into_iter()
         .next()
@@ -6540,6 +6582,74 @@ pub fn search_workload_with_targets<'s, Id>(
     space
 }
 
+/// The strictest accuracy among `siblings` that read the same summary input
+/// as `root` — same child, grouping and filters, and the same intent apart
+/// from its accuracy (and a quantile's rank, a readout parameter) — when
+/// stricter than `root`'s own. One summary sized for the strictest consumer
+/// serves every sibling: #509's summary-capability rule.
+fn strictest_sibling_accuracy(
+    root: &QueryExpr,
+    siblings: &[Rc<QueryExpr>],
+) -> Option<AccuracyTarget> {
+    fn approximate(intent: &AggIntent) -> Option<&AccuracyTarget> {
+        accuracy_target(intent).filter(|accuracy| !matches!(accuracy, AccuracyTarget::Exact))
+    }
+    let QueryExpr::Aggregate {
+        reduction,
+        filters,
+        child,
+        ..
+    } = root
+    else {
+        return None;
+    };
+    let intent = bindable_intent(root)?;
+    let own = accuracy_budget(approximate(intent)?);
+    let (mut eps, mut delta) = own;
+    for sibling in siblings {
+        let QueryExpr::Aggregate {
+            reduction: sibling_reduction,
+            filters: sibling_filters,
+            child: sibling_child,
+            ..
+        } = sibling.as_ref()
+        else {
+            continue;
+        };
+        let Some(other) = bindable_intent(sibling) else {
+            continue;
+        };
+        let Some(accuracy) = approximate(other) else {
+            continue;
+        };
+        let same_intent = match (intent, other) {
+            (AggIntent::Quantile { col, .. }, AggIntent::Quantile { col: other_col, .. }) => {
+                col == other_col
+            }
+            _ => override_accuracy(intent, accuracy) == *other,
+        };
+        if same_intent
+            && sibling_reduction == reduction
+            && sibling_filters == filters
+            && (Rc::ptr_eq(sibling_child, child) || sibling_child == child)
+        {
+            let (sibling_eps, sibling_delta) = accuracy_budget(accuracy);
+            eps = eps.min(sibling_eps);
+            delta = delta.min(sibling_delta);
+        }
+    }
+    if (eps, delta) == own {
+        None
+    } else if delta == DEFAULT_DELTA {
+        Some(AccuracyTarget::Epsilon(eps))
+    } else {
+        Some(AccuracyTarget::EpsilonDelta {
+            epsilon: eps,
+            delta,
+        })
+    }
+}
+
 fn cse_workload<Id>(roots: Vec<(Id, Rc<QueryExpr>)>) -> Vec<(Id, Rc<QueryExpr>)> {
     // `share_common_subtrees` wants owned `QueryExpr`s, not already-`Rc`
     // roots — the same `Rc::try_unwrap`-with-clone-fallback pattern
@@ -6615,7 +6725,9 @@ fn search_cse_workload_with<'s, Id>(
                 let group = &groups[ptr];
                 (Rc::clone(&group.target), group.consumer_count)
             };
-            let target = TargetSubDAG::with_consumer_count(&root, consumer_count);
+            let strictest = strictest_sibling_accuracy(&root, &siblings);
+            let mut target = TargetSubDAG::with_consumer_count(&root, consumer_count);
+            target.strictest_sibling_accuracy = strictest.as_ref();
 
             let mut proposed = Vec::new();
             let mut rejected = Vec::new();

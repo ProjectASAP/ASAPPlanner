@@ -3,15 +3,31 @@
 
 use std::rc::Rc;
 
+use asap_aware_mapping::accuracy::{
+    AccuracyModel, DefaultAccuracyModel, EqualSplitAllocator, PropagationStats,
+};
 use asap_aware_mapping::cost_model::Cost;
 use asap_aware_mapping::pass::{PlanOutput, PlanningModels};
+use asap_aware_mapping::replacement::{default_size_params, DEFAULT_DELTA};
+use asap_aware_mapping::{
+    global_selection_with_summary_maintenance_lifecycles, search_workload_with_targets,
+    ReplacementStrategy, SketchAlgorithmStrategy, WorkloadDemand,
+};
 use asap_aware_mapping::{
     CostModel, CostRate, DefaultCostModel, Horizon, LifecycleInput, SummaryMaintenanceCapabilities,
     SummaryMaintenanceLifecycleCapabilities, SummaryMaintenanceLifecycleCostInputs,
 };
+use asap_frontend_promql::lower_promql_workload;
 use asap_frontend_sql::SqlCatalog;
 use asap_planner::{e2e_plan, FrontendInput, UserInput};
-use asap_types::post_asap::{SketchAlgorithm, SummaryNode};
+use asap_types::post_asap::{
+    share_common_summary_subtrees, AccuracyError, BoundExpr, CompositionOperator, ErrorMetric,
+    ProbabilityExpr, ResultGuarantee, SketchQuery,
+};
+use asap_types::post_asap::{
+    SketchAlgorithm, SketchParams, SummaryExpr, SummaryFamilyType, SummaryNode,
+};
+use asap_types::pre_asap::agg_intent::default_quantile;
 use asap_types::pre_asap::schema::{Column, DataType, Schema};
 use asap_types::pre_asap::{AggIntent, QueryExpr};
 use asap_types::types::AccuracyTarget;
@@ -99,8 +115,8 @@ fn lifecycle() -> LifecycleInput {
         .with_horizon(Horizon(HORIZON_S))
 }
 
-async fn plan_promql(queries: &[(&str, f64)], costs: &FixedCosts) -> PlanOutput {
-    let workload = PlanningWorkload {
+fn promql_workload(queries: &[(&str, f64)]) -> PlanningWorkload {
+    PlanningWorkload {
         query_workload: QueryWorkload {
             language: QueryLanguage::PromQL,
             query_batch: None,
@@ -123,7 +139,11 @@ async fn plan_promql(queries: &[(&str, f64)], costs: &FixedCosts) -> PlanOutput 
             },
             ..Default::default()
         }),
-    };
+    }
+}
+
+async fn plan_promql(queries: &[(&str, f64)], costs: &FixedCosts) -> PlanOutput {
+    let workload = promql_workload(queries);
     let input = UserInput::new(
         &workload,
         FrontendInput::Promql {
@@ -240,8 +260,8 @@ async fn quantiles_with_equal_params_share_one_producer() {
     }
 }
 
-/// A different window, a stricter accuracy that changes the sketch's
-/// parameters, or a different label selector is a different producer.
+/// A different window or label selector is a different producer, even when
+/// one query asks for a stricter accuracy than the other.
 #[tokio::test]
 async fn different_producers_are_not_shared() {
     for queries in [
@@ -251,7 +271,11 @@ async fn different_producers_are_not_shared() {
         ],
         [
             ("quantile_over_time(0.5, lat[5m])", 0.01),
-            ("quantile_over_time(0.99, lat[5m])", 0.001),
+            ("quantile_over_time(0.99, lat[10m])", 0.001),
+        ],
+        [
+            ("quantile_over_time(0.5, lat{job=\"a\"}[5m])", 0.01),
+            ("quantile_over_time(0.99, lat{job=\"b\"}[5m])", 0.001),
         ],
         [
             ("quantile_over_time(0.5, lat{job=\"a\"}[5m])", 0.01),
@@ -261,10 +285,67 @@ async fn different_producers_are_not_shared() {
         let output = plan_promql(&queries, &CHEAP_SUMMARY).await;
         assert!(!same_states(&states(&output)), "{queries:?}");
         assert_eq!(unique_deployments(&output), 2, "{queries:?}");
-        for plan in &output.plans {
+        for (plan, (_, epsilon)) in output.plans.iter().zip(queries) {
             assert_eq!(plan.plan.expected_reads, Some(6.0), "{queries:?}");
+            assert_eq!(kll_k(plan), kll_k_for(epsilon), "{queries:?}");
         }
     }
+}
+
+/// The KLL `k` of the one state a plan deploys.
+fn kll_k(plan: &asap_aware_mapping::pass::QueryLifecyclePlan) -> u32 {
+    let [deployment] = plan.plan.deployments.as_slice() else {
+        panic!("one state: {:?}", plan.plan.deployments.len());
+    };
+    let SummaryExpr::SummaryAgg {
+        family: SummaryFamilyType::Sketch(kind, _),
+        ..
+    } = &deployment.summary.expr
+    else {
+        panic!("sketch state: {:?}", deployment.summary.expr);
+    };
+    let SketchParams::Kll { k } = kind.params() else {
+        panic!("KLL state: {kind:?}");
+    };
+    *k
+}
+
+/// The KLL `k` sized for `epsilon`.
+fn kll_k_for(epsilon: f64) -> u32 {
+    let SketchParams::Kll { k } = default_size_params(
+        SketchAlgorithm::Kll,
+        &default_quantile(0.5),
+        epsilon,
+        DEFAULT_DELTA,
+    ) else {
+        unreachable!()
+    };
+    k
+}
+
+/// p50 at ε=0.01 and p99 at ε=0.001 over the same input share one KLL sized
+/// for the strictest consumer; each reader's guarantee meets its own target.
+#[tokio::test]
+async fn quantiles_share_one_producer_sized_for_the_strictest_consumer() {
+    let p50 = ("quantile_over_time(0.5, lat[5m])", 0.01);
+    let p99 = ("quantile_over_time(0.99, lat[5m])", 0.001);
+    assert!(kll_k_for(0.001) > kll_k_for(0.01));
+
+    let output = plan_promql(&[p50, p99], &CHEAP_SUMMARY).await;
+    assert!(same_states(&states(&output)));
+    assert_eq!(unique_deployments(&output), 1);
+    for (plan, (_, epsilon)) in output.plans.iter().zip([p50, p99]) {
+        assert_eq!(kll_k(plan), kll_k_for(0.001));
+        let guarantee = plan.plan.root.guarantee.as_ref().expect("certified");
+        assert!(
+            guarantee.bound.evaluate().unwrap() <= epsilon,
+            "{guarantee:?}"
+        );
+    }
+
+    // Alone, the looser query keeps its own, smaller KLL.
+    let alone = plan_promql(&[p50], &CHEAP_SUMMARY).await;
+    assert_eq!(kll_k(&alone.plans[0]), kll_k_for(0.01));
 }
 
 /// Cross-series quantiles name their KLL state after the input column, not the
@@ -368,4 +449,111 @@ async fn shared_amortization_alone_can_beat_raw_recompute() {
     let output = plan_promql(&[p50, p99], &costs).await;
     assert!(same_states(&states(&output)));
     assert_eq!(unique_deployments(&output), 1);
+}
+
+/// Synthetic evidence certifying UnivMon readouts; it exercises sharing, never
+/// runtime accuracy.
+struct UnivMonEvidence;
+
+impl AccuracyModel for UnivMonEvidence {
+    fn local_guarantee(
+        &self,
+        family: &SummaryFamilyType,
+        query: &SketchQuery,
+    ) -> Option<ResultGuarantee> {
+        if matches!(family, SummaryFamilyType::Sketch(kind, _) if kind.algorithm() == &SketchAlgorithm::UnivMon)
+        {
+            let mut guarantee = ResultGuarantee::exact("SYNTHETIC test evidence; not measured");
+            guarantee.metric = ErrorMetric::RelativeValue;
+            guarantee.bound = BoundExpr::Constant { value: 0.01 };
+            guarantee.failure_probability = ProbabilityExpr::Constant { value: 0.01 };
+            Some(guarantee)
+        } else {
+            DefaultAccuracyModel.local_guarantee(family, query)
+        }
+    }
+
+    fn propagate(
+        &self,
+        op: &CompositionOperator,
+        inputs: &[ResultGuarantee],
+        local: Option<&ResultGuarantee>,
+        stats: &PropagationStats,
+    ) -> Result<ResultGuarantee, AccuracyError> {
+        DefaultAccuracyModel.propagate(op, inputs, local, stats)
+    }
+
+    fn satisfies(&self, guarantee: &ResultGuarantee, target: &AccuracyTarget) -> bool {
+        DefaultAccuracyModel.satisfies(guarantee, target)
+    }
+}
+
+/// Distinct count, entropy and L2 over one input, certified by an accuracy
+/// model, read one UnivMon state: #515 sharing is the summary-capability rule
+/// when the states are identical. `MajorPass` builds candidates with the
+/// built-in accuracy model, so this runs its pipeline with the test model.
+#[test]
+fn certified_frequency_readouts_share_one_univmon_state() {
+    let queries = [
+        ("distinct_over_time(m[5m])", 0.02),
+        ("entropy_over_time(m[5m])", 0.02),
+        ("l2_over_time(m[5m])", 0.02),
+    ];
+    let workload = promql_workload(&queries);
+    let roots = lower_promql_workload(&workload, NOW_MS)
+        .expect("lowers")
+        .into_iter()
+        .zip(queries)
+        .enumerate()
+        .map(|(index, (expr, (_, epsilon)))| {
+            (index, Rc::new(expr), Some(AccuracyTarget::Epsilon(epsilon)))
+        })
+        .collect();
+    let strategies: Vec<Box<dyn ReplacementStrategy>> =
+        vec![Box::new(SketchAlgorithmStrategy::new_with_planning_inputs(
+            &CHEAP_SUMMARY,
+            &UnivMonEvidence,
+            &EqualSplitAllocator,
+        ))];
+    let space = search_workload_with_targets(roots, &strategies, &UnivMonEvidence);
+    let entry_indices: Vec<usize> = (0..queries.len()).collect();
+    let selection = global_selection_with_summary_maintenance_lifecycles(
+        &space,
+        WorkloadDemand {
+            workload: &workload.query_workload,
+            data_workload: workload.data_workload.as_ref(),
+            entry_indices: &entry_indices,
+        },
+        NOW_MS,
+        Some(Horizon(HORIZON_S)),
+        SummaryMaintenanceLifecycleCapabilities::default(),
+        &CHEAP_SUMMARY,
+    )
+    .expect("selects");
+    let assembled = space
+        .roots
+        .iter()
+        .map(|(index, root)| {
+            let dag = selection
+                .assemble_selected_dag(root)
+                .expect("assembles")
+                .expect("root has a group");
+            (*index, dag)
+        })
+        .collect();
+    let mut states: Vec<Rc<SummaryNode>> = Vec::new();
+    for (_, root) in share_common_summary_subtrees(assembled) {
+        assert!(root.guarantee.is_some(), "{:?}", root.expr);
+        let SummaryExpr::SummaryEstimate { summary_input, .. } = &root.expr else {
+            panic!("summary readout: {:?}", root.expr);
+        };
+        assert!(matches!(
+            &summary_input.expr,
+            SummaryExpr::SummaryAgg { family: SummaryFamilyType::Sketch(kind, _), .. }
+                if kind.algorithm() == &SketchAlgorithm::UnivMon
+        ));
+        states.push(Rc::clone(summary_input));
+    }
+    assert_eq!(states.len(), 3);
+    assert!(states.iter().all(|state| Rc::ptr_eq(state, &states[0])));
 }
