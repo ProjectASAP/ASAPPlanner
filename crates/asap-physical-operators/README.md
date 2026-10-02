@@ -14,7 +14,7 @@ thread pool. Poll multiple root streams concurrently when they share inputs.
 
 `operators::Operator` implements native batch sources, scalar values,
 projection, filtering, grouped exact aggregation, semi-join, grouped Sort and
-Limit, vector-to-scalar conversion, Union, and summary construction/merge/readout.
+Limit, vector-to-scalar conversion, Union, and summary construction/merge/evaluation.
 Sort followed by Limit implements grouped ranking; no dedicated TopK physical
 operator is needed. Summary construction updates state batch by batch. End of
 input means the supplied query range or ingestion window is complete.
@@ -59,7 +59,7 @@ Plain values preserve Planner scalar/collection types and nullability. Numeric
 arithmetic uses matching Int64 or Float64 inputs; integer overflow is an error.
 Boolean predicates use three-valued logic. Native summary states currently cover
 exact Sum/Count/Min/Max/Rate/Increase, KLL, DDSketch, HLL and Float64 weighted CMS and CountSketch with candidate heaps. Binding checks family,
-parameters and readout compatibility; source batches also validate state payloads.
+parameters and evaluation compatibility; source batches also validate state payloads.
 Existing accumulator algorithms are reused as kernels behind these operators.
 
 This crate is owned by ASAPPlanner. Its `planner-types` dependency is the local
@@ -78,9 +78,9 @@ See [the design](../../docs/design_docs/physical-planning-and-deployment.md).
 - `operators`: projection, filter, joins, aggregate/window, sort, limit and summary implementations.
 - `sources`: raw-source interface, Scan and the memory connector.
 - `physical_planner`: native operator lowering, typed input contracts and checked instantiation.
-- `summary_kernels`: in-memory summary state over `asap_sketchlib` and exact Planner state: merge, typed readout and update adapters.
-- `readout`: readouts over merged exact summary states.
-- `capability`: explicit kernel, native-batch and typed readout validation.
+- `summary_kernels`: in-memory summary state over `asap_sketchlib` and exact Planner state: merge, typed evaluation and update adapters.
+- `evaluation`: evaluations over merged exact summary states.
+- `capability`: explicit kernel, native-batch and typed evaluation validation.
 
 The `dag`, `factory`, `traits` and `arithmetic` paths are re-exports. They contain no alternative
 execution implementations.

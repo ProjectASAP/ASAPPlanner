@@ -15,7 +15,6 @@
 //! label names its enclosing scope references (issue #52): the `job` in
 //! `sum by (job)(a or b)` appears in neither side's own matchers.
 
-use asap_types::ir::aggregate_schema::aggregate_output_schema;
 use std::rc::Rc;
 
 use thiserror::Error;
@@ -24,8 +23,8 @@ use asap_types::ir::operator_properties::ConcatDiscriminatorKey;
 use asap_types::ir::{NonASAPOp, OperatorNode, Predicate, ProjectItem, ScalarExpr, SortKey};
 use asap_types::pre_asap::column_resolution::resolve_group_keys_promql;
 use asap_types::pre_asap::{
-    resolve_column_ref, resolve_column_refs, AggIntent, ColumnId, ColumnRef, GroupKeys, Reduction,
-    ResolveError, Schema, SchemaDerivationError,
+    aggregate_output_schema, resolve_column_ref, resolve_column_refs, AggIntent, ColumnId,
+    ColumnRef, GroupKeys, Reduction, ResolveError, Schema, SchemaDerivationError,
 };
 
 use crate::schema_resolver::{collect_referenced_columns, SchemaResolver};
@@ -151,7 +150,7 @@ fn resolve(tree: &UnresolvedOp, fallback: &Schema) -> Result<Rc<OperatorNode>, R
             let child = if child.schema.closed {
                 child
             } else {
-                asap_types::ir::schema_support::with_promql_series_identity(&child)
+                asap_types::pre_asap::schema::with_promql_series_identity(&child)
                     .map_err(SchemaDerivationError::InvalidScalarSignature)?
             };
             let scalar = resolve_expr(scalar, &Schema::default())?;
@@ -166,7 +165,7 @@ fn resolve(tree: &UnresolvedOp, fallback: &Schema) -> Result<Rc<OperatorNode>, R
             let child = if child.schema.closed {
                 child
             } else {
-                asap_types::ir::schema_support::with_promql_series_identity(&child)
+                asap_types::pre_asap::schema::with_promql_series_identity(&child)
                     .map_err(SchemaDerivationError::InvalidScalarSignature)?
             };
             let sample = resolve_expr(sample, &child.schema)?;
@@ -758,7 +757,6 @@ fn lower_scalar_vector(
         (sample, scalar)
     };
     let semantics = ExprSemantics::Promql;
-    let return_bool = return_bool || matches!(op, BinaryOpKind::CompareBool(_));
     let computed = match op {
         BinaryOpKind::Arithmetic(op) => ScalarExpr::Arithmetic {
             op: op.clone(),
@@ -766,7 +764,7 @@ fn lower_scalar_vector(
             right: Box::new(right),
             semantics,
         },
-        BinaryOpKind::Compare(op) | BinaryOpKind::CompareBool(op) => {
+        BinaryOpKind::Compare(op) => {
             let predicate = ScalarExpr::Compare {
                 op: op.clone(),
                 left: Box::new(left),

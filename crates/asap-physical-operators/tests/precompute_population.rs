@@ -8,7 +8,11 @@ use asap_physical_operators::{
     Statistic,
 };
 use futures::{executor::block_on, StreamExt};
-use planner_types::pre_asap::Schema;
+use planner_types::ir::export::{
+    EdgeRole, GroupingEdgeCompatibility, PostAsapDAG, PostAsapDAGEdge, PostAsapDAGNode,
+    PostAsapNodeId, PostAsapOperatorPayload, WindowEdgeCompatibility,
+};
+use planner_types::ir::BinaryOperator;
 use planner_types::{
     post_asap::*,
     pre_asap::{ArithmeticOpKind, BinaryOpKind, ColumnRef, DataType, GroupKeys, Reduction},
@@ -19,9 +23,9 @@ use std::{collections::BTreeMap, sync::Arc};
 #[test]
 fn finalized_shared_panes_rebuild_one_global_summary_after_recovery() {
     let family = FieldDataType::ExactAggregate(ExactKind::Sum, ExactParams::Sum);
-    let schema = |dtype| Schema {
-        closed: true,
+    let schema = |dtype| planner_types::pre_asap::Schema {
         unique_keys: vec![],
+        closed: false,
         fields: vec![Field {
             table: None,
             name: "value".into(),
@@ -59,21 +63,22 @@ fn finalized_shared_panes_rebuild_one_global_summary_after_recovery() {
             },
             PostAsapDAGNode {
                 id: PostAsapNodeId(1),
-                payload: PostAsapOperatorPayload::Value {
-                    operation: ValueOperation::FinalizeExactAccumulator,
-                },
+                payload: PostAsapOperatorPayload::FinalizeExactAccumulator,
                 output_state: ExecutionDataState::INGESTION_ROWS,
                 output_schema: value_schema.clone(),
                 guarantee: None,
             },
             PostAsapDAGNode {
                 id: PostAsapNodeId(2),
-                payload: PostAsapOperatorPayload::Binary {
-                    operator: BinaryOperator {
-                        kind: BinaryOpKind::Arithmetic(ArithmeticOpKind::Add),
-                        vector_match: None,
-                        checked_relative_division: false,
-                        checked_finite_division: false,
+                payload: PostAsapOperatorPayload::Relational {
+                    operator: planner_types::ir::export::NonASAPOpKind::BinaryOp {
+                        operator: BinaryOperator {
+                            kind: BinaryOpKind::Arithmetic(ArithmeticOpKind::Add),
+                            vector_match: None,
+                            checked_relative_division: false,
+                            checked_finite_division: false,
+                        },
+                        return_bool: false,
                     },
                 },
                 output_state: ExecutionDataState::INGESTION_ROWS,
@@ -211,7 +216,7 @@ fn finalized_shared_panes_rebuild_one_global_summary_after_recovery() {
                     .as_any()
                     .downcast_ref::<asap_physical_operators::summary_kernels::exact::ExactAccumulator>()
                     .unwrap()
-                    .readout(Statistic::Sum, None, None)
+                    .evaluation(Statistic::Sum, None, None)
                     .unwrap()
                     .unwrap(),
                 expected
@@ -221,9 +226,9 @@ fn finalized_shared_panes_rebuild_one_global_summary_after_recovery() {
 }
 
 fn logical_schema(family: FieldDataType) -> Schema {
-    Schema {
-        closed: true,
+    planner_types::pre_asap::Schema {
         unique_keys: vec![],
+        closed: false,
         fields: vec![Field {
             table: None,
             name: "value".into(),
@@ -255,9 +260,7 @@ fn state_dag(
     let read_id = nodes.len() as u32;
     nodes.push(PostAsapDAGNode {
         id: PostAsapNodeId(read_id),
-        payload: PostAsapOperatorPayload::Value {
-            operation: ValueOperation::FinalizeExactAccumulator,
-        },
+        payload: PostAsapOperatorPayload::FinalizeExactAccumulator,
         output_state: ExecutionDataState::INGESTION_ROWS,
         output_schema: logical_schema(FieldDataType::Plain(DataType::Float64)),
         guarantee: None,
@@ -374,7 +377,7 @@ fn explicit_merge_changes_pane_cardinality() {
             .iter()
             .map(|row| match row[2] {
                 Value::Float64(v) => v,
-                _ => panic!("numeric readout expected"),
+                _ => panic!("numeric evaluation expected"),
             })
             .collect::<Vec<_>>();
         assert_eq!(values, expected);

@@ -7,6 +7,7 @@ use asap_physical_operators::{
 use futures::{executor::block_on, StreamExt};
 use std::collections::BTreeMap;
 
+#[allow(dead_code)]
 pub fn execute(
     plan: &CompiledPhysicalDAG,
     inputs: BTreeMap<u64, Batch>,
@@ -39,4 +40,16 @@ pub fn execute(
         }))
         .await
     })
+}
+
+#[allow(dead_code)]
+pub fn compile_post_asap_dag(
+    root: &std::rc::Rc<asap_types::ir::OperatorNode>,
+) -> Result<asap_types::ir::export::PostAsapDAG, Box<dyn std::error::Error>> {
+    let root = asap_types::ir::apply_lifecycle_timings(
+        root,
+        &Default::default(),
+        &mut Default::default(),
+    )?;
+    Ok(asap_types::ir::export::compile_post_asap_dag(&root)?)
 }

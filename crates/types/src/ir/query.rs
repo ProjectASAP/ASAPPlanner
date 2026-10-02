@@ -14,7 +14,7 @@ impl From<Rc<OperatorNode>> for QueryRoot {
     }
 }
 impl QueryRoot {
-    pub fn validate_structure(&self) -> Result<(), crate::ir::SchemaDerivationError> {
+    pub fn validate_structure(&self) -> Result<(), crate::pre_asap::SchemaDerivationError> {
         match self {
             Self::Operator(node) => node.validate_structure(),
             Self::Scalar(expr) => {

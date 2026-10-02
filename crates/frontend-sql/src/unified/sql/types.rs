@@ -364,7 +364,7 @@ mod bottom_map_tests {
     use super::*;
     #[test]
     fn empty_map_bottom_types_roundtrip_without_string_defaults() {
-        let (map, nullable) = asap_types::pre_asap::scalar_signature::MapScalarFunction::Construct
+        let (map, nullable) = asap_types::pre_asap::scalar_type_rules::MapScalarFunction::Construct
             .output_type(&[])
             .unwrap();
         assert!(!nullable);

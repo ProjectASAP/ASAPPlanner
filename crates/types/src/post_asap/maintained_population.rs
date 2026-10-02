@@ -1,4 +1,4 @@
-//! Language-independent maintained populations and their readouts.
+//! Language-independent maintained populations and their evaluations.
 //! Resource limits, ingestion placement and data structures belong to the executor.
 use serde::{Deserialize, Serialize};
 
@@ -33,130 +33,6 @@ pub enum PopulationStatistic {
     Sum,
     Count,
     Average,
-}
-
-impl CurrentSeriesInput {
-    /// Verify the named contract against the canonical maintenance input.
-    pub fn matches_input(&self, input: &crate::pre_asap::QueryExpr) -> bool {
-        use crate::pre_asap::{CompareOpKind, DataType, QueryExpr, ScalarValue, Source};
-        // PromQL instant selectors carry an ingestion-interval `TimeRange` as
-        // their input scope. The population must use the same expiry horizon;
-        // shifted and otherwise transformed inputs still fail below.
-        let input = match input {
-            QueryExpr::TimeRange { range, child }
-                if self.lookback_ms > 0
-                    && *range == std::time::Duration::from_millis(self.lookback_ms) =>
-            {
-                child.as_ref()
-            }
-            QueryExpr::TimeRange { .. } => return false,
-            other if self.lookback_ms == 300_000 => other,
-            _ => return false,
-        };
-        let QueryExpr::Scan {
-            source: Source::TimeSeries { metric },
-            predicates,
-            schema,
-        } = input
-        else {
-            return false;
-        };
-        if self.metric.is_empty()
-            || *metric != self.metric
-            || (schema.closed && !schema.has_promql_series_identity())
-            || schema.time_index.is_none()
-        {
-            return false;
-        }
-        if self.grouping.iter().any(|label| {
-            !schema
-                .fields
-                .iter()
-                .any(|c| c.name == *label && c.dtype == DataType::Utf8)
-        }) {
-            return false;
-        }
-        let mut matchers = Vec::new();
-        for predicate in predicates {
-            let QueryExpr::Compare { left, op, right } = predicate.0.as_ref() else {
-                return false;
-            };
-            let (QueryExpr::Column(col), QueryExpr::Literal(ScalarValue::Utf8(value))) =
-                (left.as_ref(), right.as_ref())
-            else {
-                return false;
-            };
-            let Some(column) = schema.fields.get(*col) else {
-                return false;
-            };
-            if column.dtype != DataType::Utf8 {
-                return false;
-            }
-            let operation = match op {
-                CompareOpKind::Eq => CurrentSeriesMatch::Equal,
-                CompareOpKind::Ne => CurrentSeriesMatch::NotEqual,
-                CompareOpKind::Regex => CurrentSeriesMatch::Regex,
-                CompareOpKind::NotRegex => CurrentSeriesMatch::NotRegex,
-                _ => return false,
-            };
-            matchers.push(CurrentSeriesMatcher {
-                label: column.name.clone(),
-                value: value.clone(),
-                operation,
-            });
-        }
-        matchers.sort();
-        matchers.dedup();
-        self.matchers == matchers && self.grouping.windows(2).all(|w| w[0] < w[1])
-    }
-}
-
-/// Membership is part of state identity. Table rows must never acquire implicit
-/// latest-per-series selection, stale markers, or a PromQL lookback.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub enum PopulationInput<N = crate::pre_asap::QueryExpr> {
-    CurrentSeries(CurrentSeriesInput),
-    Rows {
-        input: std::rc::Rc<N>,
-        value_column: usize,
-        grouping: crate::pre_asap::GroupKeys,
-    },
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct MaintainedPopulation<N = crate::pre_asap::QueryExpr> {
-    pub input: PopulationInput<N>,
-    pub max_k: usize,
-    pub quantiles: bool,
-}
-
-impl MaintainedPopulation {
-    pub fn matches_input(&self, input: &crate::pre_asap::QueryExpr) -> bool {
-        match &self.input {
-            PopulationInput::CurrentSeries(spec) => spec.matches_input(input),
-            PopulationInput::Rows {
-                input: expected,
-                value_column,
-                grouping,
-            } => {
-                use crate::pre_asap::{DataType, QueryExpr, Source};
-                expected.as_ref() == input
-                    && matches!(input, QueryExpr::Scan { source: Source::Table { .. }, schema, .. }
-                        if schema.closed && schema.fields.get(*value_column).is_some_and(|c| c.dtype == DataType::Float64 && !c.nullable)
-                            && !grouping.is_without() && grouping.keys().iter().all(|k| *k < schema.fields.len()))
-            }
-        }
-    }
-
-    pub fn supports(&self, readout: &PopulationStatistic) -> bool {
-        match readout {
-            PopulationStatistic::Quantile { q } => self.quantiles && q.is_finite(),
-            PopulationStatistic::TopK { k } => *k <= self.max_k,
-            PopulationStatistic::Sum
-            | PopulationStatistic::Count
-            | PopulationStatistic::Average => true,
-        }
-    }
 }
 
 impl CurrentSeriesInput {
@@ -239,7 +115,26 @@ impl CurrentSeriesInput {
     }
 }
 
-impl MaintainedPopulation<crate::ir::OperatorNode> {
+/// Membership is part of state identity. Table rows must never acquire implicit
+/// latest-per-series selection, stale markers, or a PromQL lookback.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum PopulationInput {
+    CurrentSeries(CurrentSeriesInput),
+    Rows {
+        input: std::rc::Rc<crate::ir::OperatorNode>,
+        value_column: usize,
+        grouping: crate::pre_asap::GroupKeys,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MaintainedPopulation {
+    pub input: PopulationInput,
+    pub max_k: usize,
+    pub quantiles: bool,
+}
+
+impl MaintainedPopulation {
     /// Whether `input` is the maintenance input this population declares.
     pub fn matches_node(&self, input: &crate::ir::OperatorNode) -> bool {
         use crate::ir::{NonASAPOp, Operator};

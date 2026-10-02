@@ -14,7 +14,7 @@ pub struct PhysicalASAPDAG {
 
 /// Compile an explicit materialization frontier selected by Planner maintenance
 /// search. Operators upstream of that frontier run in precompute, including
-/// readouts/reductions; query execution receives their typed output values.
+/// evaluations/reductions; query execution receives their typed output values.
 /// Empty frontiers retain the full computation in the query DAG.
 ///
 /// Repeated windows must be instantiated with the same evaluation/population
@@ -361,14 +361,20 @@ mod tests {
         let root = asap_frontend_promql::lower_promql_workload(&workload, 0)
             .unwrap()
             .remove(0);
-        let root = std::rc::Rc::new(promql_rows::with_series_identity(&root).unwrap());
+        let root = promql_rows::with_series_identity(&root).unwrap();
         let space = asap_aware_mapping::search_workload(vec![("q", root)]);
         let selected = space
             .global_selection(&asap_aware_mapping::cost_model::DefaultCostModel)
             .assemble_selected_dag(&space.roots[0].1)
             .unwrap()
             .unwrap();
-        let dag = planner_types::post_asap::compile_post_asap_dag(&selected).unwrap();
+        let selected = planner_types::ir::apply_lifecycle_timings(
+            &selected,
+            &Default::default(),
+            &mut Default::default(),
+        )
+        .unwrap();
+        let dag = planner_types::ir::export::compile_post_asap_dag(&selected).unwrap();
         let state = dag
             .nodes
             .iter()
@@ -417,7 +423,14 @@ mod tests {
         let raw = dag
             .nodes
             .iter()
-            .find(|node| matches!(node.payload, Payload::Fallback { .. }))
+            .find(|node| {
+                matches!(
+                    node.payload,
+                    Payload::Relational {
+                        operator: planner_types::ir::export::NonASAPOpKind::TimeRange { .. }
+                    }
+                )
+            })
             .unwrap();
         BTreeMap::from([(
             u64::from(raw.id.0),

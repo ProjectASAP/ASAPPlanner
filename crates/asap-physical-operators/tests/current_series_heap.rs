@@ -1,4 +1,5 @@
 //! Spatial heap weights come from a fresh instant vector, never sample history.
+mod common;
 use asap_physical_operators::{
     operators::Operator,
     physical_planner::{
@@ -8,15 +9,16 @@ use asap_physical_operators::{
     runtime::{Limits, RunContext, Scope},
     values::{Batch, Value},
 };
+use common::compile_post_asap_dag;
 use futures::{executor::block_on, StreamExt};
-use planner_types::pre_asap::Schema;
+use planner_types::ir::export::PostAsapOperatorPayload;
 use planner_types::{post_asap::*, pre_asap::DataType};
 use std::{collections::BTreeMap, sync::Arc};
 
 fn schema() -> Arc<Schema> {
-    Arc::new(Schema {
-        closed: true,
+    Arc::new(planner_types::pre_asap::Schema {
         unique_keys: vec![],
+        closed: false,
         fields: [
             ("ts", DataType::Timestamp),
             ("value", DataType::Float64),
@@ -169,9 +171,9 @@ fn spatial_heap_ranks_latest_values_in_independent_runs() {
         };
         let family = FieldDataType::Sketch(SketchKind::new(algorithm, params), Default::default());
         let build = Operator::keyed_summary_build(schema(), family, 1, vec![3], vec![2]).unwrap();
-        let output = Arc::new(Schema {
-            closed: true,
+        let output = Arc::new(planner_types::pre_asap::Schema {
             unique_keys: vec![],
+            closed: false,
             fields: vec![
                 schema().fields[2].clone(),
                 schema().fields[3].clone(),
@@ -179,7 +181,7 @@ fn spatial_heap_ranks_latest_values_in_independent_runs() {
             ],
             time_index: None,
         });
-        let read = Operator::keyed_readout(build.schema(), 1, 1, output).unwrap();
+        let read = Operator::keyed_evaluation(build.schema(), 1, 1, output).unwrap();
         let plan = CompiledPhysicalDAG::from_operators(
             BTreeMap::from([(0, InputContract::bounded(schema()))]),
             BTreeMap::from([
@@ -331,7 +333,7 @@ fn planner_current_series_candidate_compiles_with_dynamic_identity() {
         .candidate(&open_root)
         .unwrap();
     let snapshot_program =
-        asap_physical_operators::physical_planner::promql_rows::compile_current_series_readout(
+        asap_physical_operators::physical_planner::promql_rows::compile_current_series_evaluation(
             &open_selected,
         )
         .unwrap();
@@ -352,7 +354,14 @@ fn planner_current_series_candidate_compiles_with_dynamic_identity() {
     let raw = logical
         .nodes
         .iter()
-        .find(|node| matches!(node.payload, PostAsapOperatorPayload::Fallback { .. }))
+        .find(|node| {
+            matches!(
+                node.payload,
+                PostAsapOperatorPayload::Relational {
+                    operator: planner_types::ir::export::NonASAPOpKind::TimeRange { .. }
+                }
+            )
+        })
         .unwrap();
     let raw_schema = Arc::new(raw.output_schema.clone());
     let physical = compile(

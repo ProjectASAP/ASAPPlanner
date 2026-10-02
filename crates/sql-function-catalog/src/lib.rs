@@ -277,7 +277,7 @@ pub struct ClickHouseBuiltin {
 pub const CLICKHOUSE_BUILTINS: &[ClickHouseBuiltin] = &[
     // Explicit time-series reducers. These deliberately survive under their
     // own names: the SQL frontend validates (value, timestamp, window_ms) and
-    // lowers the window to QueryExpr::TimeRange rather than pretending these
+    // lowers the window to NonASAPOp::TimeRange rather than pretending these
     // are ordinary tabular aggregates.
     ClickHouseBuiltin {
         name: "asap_rate",

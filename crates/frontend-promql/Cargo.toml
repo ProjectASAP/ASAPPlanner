@@ -3,11 +3,12 @@ name = "asap-frontend-promql"
 version = "0.1.0"
 edition = "2021"
 
-# PromQL front end: L1 (parse) → L2 relational, then the shared L2→L3 converter
-# — both in asap-types. Pulls the PromQL parser only — never DataFusion.
+# PromQL front end: parse → the shared name-based `UnresolvedOp` tree
+# (asap-frontend-common) → the unified IR. Pulls the PromQL parser only —
+# never DataFusion.
 [dependencies]
-asap-types = { path = "../types" }
 asap-frontend-common = { path = "../frontend-common" }
+asap-types = { path = "../types" }
 
 # Shared ProjectASAP parser contract. Keep this immutable revision aligned
 # with backend parsing and treat newly parsed functions as unsupported until

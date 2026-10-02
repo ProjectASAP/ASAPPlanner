@@ -41,7 +41,7 @@ pub struct OfflineExactMeasurement {
 }
 
 /// The companion format binds otherwise query-agnostic sketch primitives to
-/// their measured readout and exact reference. Bindings describe state after
+/// their measured evaluation and exact reference. Bindings describe state after
 /// ingestion, without merges or intervening updates during the read sequence.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -247,7 +247,9 @@ pub fn recommend_offline(
                 || error.query.get("value_type").and_then(|v| v.as_str())
                     != Some(request.query.value_type.as_str())
             {
-                return Err("offline error observation has incompatible readout semantics".into());
+                return Err(
+                    "offline error observation has incompatible evaluation semantics".into(),
+                );
             }
             if error.metric != request.accuracy.metric
                 || error.trials < request.accuracy.minimum_trials
@@ -802,14 +804,14 @@ mod tests {
             }
             assert!(recommend_offline(&evidence, &request).is_err(), "{case}");
         }
-        for case in ["metric", "trials", "binding", "readout"] {
+        for case in ["metric", "trials", "binding", "evaluation"] {
             let mut evidence = evidence.clone();
             let mut request = request.clone();
             match case {
                 "metric" => request.accuracy.metric = "rank_error".into(),
                 "trials" => request.accuracy.minimum_trials = 100,
                 "binding" => evidence.query_bindings.clear(),
-                "readout" => {
+                "evaluation" => {
                     for row in &mut evidence.sketch_evidence.records {
                         row.error.as_mut().unwrap().query["kind"] =
                             serde_json::json!("total_count");

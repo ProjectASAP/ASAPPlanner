@@ -554,7 +554,7 @@ pub enum PostAsapOperatorPayload {
     },
     FinalizeExactAccumulator,
     MaintainPopulation {
-        population: MaintainedPopulation<OperatorNode>,
+        population: MaintainedPopulation,
     },
     EvaluatePopulation {
         evaluation: PopulationStatistic,

@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-asap-types = { path = "../types" }
 asap-frontend-common = { path = "../frontend-common" }
+asap-types = { path = "../types" }
 metricsql_parser = { path = "../metricsql-parser-vendored" }
 thiserror = "2"

@@ -1,6 +1,8 @@
 //! A bounded PromQL source row carries the entire label set, not just labels
 //! mentioned by the query. The source adapter owns this lossless encoding.
 use super::*;
+use planner_types::ir::export::{compile_post_asap_dag, compile_post_asap_dag_with_node_ids};
+use planner_types::post_asap::FieldDataType as SummaryFamilyType;
 use planner_types::pre_asap::DataType;
 use std::rc::Rc;
 
@@ -24,7 +26,7 @@ pub fn decode_series_identity(encoded: &str) -> Result<BTreeMap<String, String>,
 
 /// Resolve the row representation before candidate search; see
 /// [`planner_types::pre_asap::schema::with_promql_series_identity`].
-pub fn with_series_identity(root: &QueryExpr) -> Result<QueryExpr, Error> {
+pub fn with_series_identity(root: &Rc<OperatorNode>) -> Result<Rc<OperatorNode>, Error> {
     planner_types::pre_asap::schema::with_promql_series_identity(root).map_err(invalid)
 }
 
@@ -45,7 +47,10 @@ pub fn series_row(
         .enumerate()
         .map(|(index, field)| {
             if field.name == SERIES_IDENTITY_COLUMN {
-                if field.dtype != FieldDataType::Plain(DataType::Utf8) || field.nullable || found {
+                if field.dtype != SummaryFamilyType::Plain(DataType::Utf8)
+                    || field.nullable
+                    || found
+                {
                     return Err(invalid("invalid series identity column"));
                 }
                 found = true;
@@ -53,10 +58,10 @@ pub fn series_row(
             } else if Some(index) == schema.time_index {
                 Ok(Value::Timestamp(timestamp))
             } else if field.name == "value"
-                && field.dtype == FieldDataType::Plain(DataType::Float64)
+                && field.dtype == SummaryFamilyType::Plain(DataType::Float64)
             {
                 Ok(Value::Float64(value))
-            } else if field.dtype == FieldDataType::Plain(DataType::Utf8) {
+            } else if field.dtype == SummaryFamilyType::Plain(DataType::Utf8) {
                 Ok(labels.get(&field.name).map_or_else(
                     || Value::Utf8("".into()),
                     |value| Value::Utf8(value.clone().into()),
@@ -75,17 +80,23 @@ pub fn series_row(
 /// Compile the selected TopK computation above an existing maintained-population
 /// source. The boundary supplies the complete eligible vector, not a truncated
 /// TopK result; ranking remains a native physical operator.
-pub fn compile_current_series_readout(
-    selected: &Rc<planner_types::post_asap::SummaryNode>,
+pub fn compile_current_series_evaluation(
+    selected: &Rc<OperatorNode>,
 ) -> Result<CompiledPhysicalDAG, Error> {
     use planner_types::post_asap::{
-        compile_post_asap_dag, maintained_population::PopulationStatistic, Field,
+        maintained_population::PopulationStatistic, Field as SummaryField,
     };
-    let mut dag = compile_post_asap_dag(selected).map_err(|error| invalid(error.to_string()))?;
+    let selected = planner_types::ir::apply_lifecycle_timings(
+        selected,
+        &planner_types::ir::LifecycleAssignment::default_maintained(),
+        &mut planner_types::ir::TimingMemo::new(),
+    )
+    .map_err(|e| invalid(e.to_string()))?;
+    let mut dag = compile_post_asap_dag(&selected).map_err(|error| invalid(error.to_string()))?;
     // Typed snapshot candidates already carry full identity throughout the DAG.
-    // Cut at the population output, preserving all selected heap/readout nodes.
+    // Cut at the population output, preserving all selected heap/evaluation nodes.
     let populations = dag.nodes.iter().filter(|node| matches!(&node.payload,
-        Payload::Value { operation: ValueOperation::MaintainPopulation { population } }
+        Payload::MaintainPopulation { population }
             if matches!(population.input, planner_types::post_asap::maintained_population::PopulationInput::CurrentSeries(_))
     )).collect::<Vec<_>>();
     if let [population] = populations.as_slice() {
@@ -105,41 +116,26 @@ pub fn compile_current_series_readout(
             );
         }
     }
-    if dag.nodes.len() != 3
-        || !dag.nodes.iter().any(|node| {
-            node.id == dag.root
-                && matches!(
-                    node.payload,
-                    Payload::Value {
-                        operation: ValueOperation::ReadPopulation {
-                            readout: PopulationStatistic::TopK { .. }
-                        }
-                    }
-                )
-        })
-    {
-        return Err(invalid(
-            "expected one selected current-series TopK computation",
-        ));
-    }
     let mut frontier = None;
     for node in &mut dag.nodes {
         match &mut node.payload {
-            Payload::Fallback { expression } => {
-                *expression = with_series_identity(expression)?;
+            Payload::Relational { operator } => {
+                if let NonASAPOpKind::Scan { schema, .. } = operator {
+                    schema.fields.push(SummaryField::new(
+                        SERIES_IDENTITY_COLUMN,
+                        SummaryFamilyType::Plain(DataType::Utf8),
+                        false,
+                    ));
+                    schema.closed = true;
+                }
             }
-            Payload::Value {
-                operation: ValueOperation::MaintainPopulation { .. },
-            } => {
+            Payload::MaintainPopulation { .. } => {
                 frontier = Some(u64::from(node.id.0));
             }
-            Payload::Value {
-                operation:
-                    ValueOperation::ReadPopulation {
-                        readout: PopulationStatistic::TopK { .. },
-                    },
+            Payload::EvaluatePopulation {
+                evaluation: PopulationStatistic::TopK { .. },
             } => {}
-            _ => return Err(invalid("unsupported current-series readout dependency")),
+            _ => return Err(invalid("unsupported current-series evaluation dependency")),
         }
         if node
             .output_schema
@@ -151,11 +147,11 @@ pub fn compile_current_series_readout(
                 "current-series input already has a physical identity column",
             ));
         }
-        node.output_schema.fields.push(Field {
-            table: None,
+        node.output_schema.fields.push(SummaryField {
             name: SERIES_IDENTITY_COLUMN.into(),
-            dtype: FieldDataType::Plain(DataType::Utf8),
+            dtype: SummaryFamilyType::Plain(DataType::Utf8),
             nullable: false,
+            table: None,
         });
     }
     for edge in &mut dag.edges {
@@ -184,43 +180,31 @@ pub fn compile_current_series_readout(
 }
 
 /// Compile selected ranking or aggregation above an exact per-series Rate
-/// readout. Deployments bind complete window readouts at this boundary;
+/// evaluation. Deployments bind complete window evaluations at this boundary;
 /// the heap is rebuilt independently for each evaluation. This does not move
 /// that frontier to ingestion time or authorize combining finalized rates.
 pub fn compile_rate_ranking(
-    selected: &Rc<planner_types::post_asap::SummaryNode>,
-) -> Result<
-    (
-        Rc<planner_types::post_asap::SummaryNode>,
-        CompiledPhysicalDAG,
-    ),
-    Error,
-> {
-    use planner_types::post_asap::{
-        compile_post_asap_dag_with_node_ids, ExactKind, SummaryExpr, SummaryNode,
-    };
-    fn frontier(node: &Rc<SummaryNode>) -> Option<Rc<SummaryNode>> {
-        match &node.expr {
-            SummaryExpr::ValueOperation {
-                child,
-                operation: ValueOperation::FinalizeExactAccumulator,
-                timing: planner_types::post_asap::ExecutionTiming::QueryTime,
-            } if matches!(&child.expr, SummaryExpr::SummaryAgg {
-                    family: FieldDataType::ExactAggregate(ExactKind::Rate, _),
-                    reduction: planner_types::pre_asap::Reduction::PerEntity,
-                    child: raw, ..
-                } if matches!(&raw.expr, SummaryExpr::KeepPreAsap(expr) if matches!(expr.as_ref(), QueryExpr::TimeRange { .. }))) =>
-            {
-                Some(Rc::clone(node))
-            }
-            SummaryExpr::ValueOperation { child, .. } | SummaryExpr::SummaryAgg { child, .. } => {
-                frontier(child)
-            }
-            SummaryExpr::SummaryEstimate { summary_input, .. } => frontier(summary_input),
-            _ => None,
+    selected: &Rc<OperatorNode>,
+) -> Result<(Rc<OperatorNode>, CompiledPhysicalDAG), Error> {
+    use planner_types::post_asap::ExactKind;
+    fn frontier(node: &Rc<OperatorNode>) -> Option<Rc<OperatorNode>> {
+        if matches!(&node.operator, LogicalOperator::ASAP(ASAPOp::FinalizeExactAccumulator { child })
+            if matches!(&child.operator, LogicalOperator::ASAP(ASAPOp::SummaryAgg {
+                family: FieldDataType::ExactAggregate(ExactKind::Rate, _),
+                reduction: planner_types::pre_asap::Reduction::PerEntity, child: raw, ..
+            }) if matches!(raw.non_asap(), Some(NonASAPOp::TimeRange { .. }))))
+        {
+            return Some(Rc::clone(node));
         }
+        node.children().into_iter().find_map(frontier)
     }
-    let source = frontier(selected)
+    let selected = planner_types::ir::apply_lifecycle_timings(
+        selected,
+        &planner_types::ir::LifecycleAssignment::default_maintained(),
+        &mut planner_types::ir::TimingMemo::new(),
+    )
+    .map_err(|e| invalid(e.to_string()))?;
+    let source = frontier(&selected)
         .ok_or_else(|| invalid("ranking requires one exact per-series Rate frontier"))?;
     if !source
         .schema
@@ -230,7 +214,7 @@ pub fn compile_rate_ranking(
     {
         return Err(invalid("Rate ranking requires complete series identity"));
     }
-    let compiled = compile_post_asap_dag_with_node_ids(selected)
+    let compiled = compile_post_asap_dag_with_node_ids(&selected)
         .map_err(|error| invalid(error.to_string()))?;
     let id = u64::from(
         compiled
@@ -248,10 +232,10 @@ pub fn compile_rate_ranking(
 }
 
 /// Compile a lifecycle-timed DAG whose heap or grouped Sum over per-series
-/// Rate readouts runs at ingestion time: fresh aggregate state per closed
+/// Rate evaluations runs at ingestion time: fresh aggregate state per closed
 /// window. The input is the complete collection of per-series counter states.
 pub fn compile_fixed_window_rate_aggregation(
-    dag: &planner_types::post_asap::PostAsapDAG,
+    dag: &planner_types::ir::export::PostAsapDAG,
 ) -> Result<PhysicalASAPDAG, Error> {
     use planner_types::post_asap::{ExactKind, ExecutionTiming, SketchAlgorithm};
     let sources = dag
@@ -261,7 +245,7 @@ pub fn compile_fixed_window_rate_aggregation(
             matches!(
                 &n.payload,
                 Payload::SummaryAgg {
-                    family: FieldDataType::ExactAggregate(ExactKind::Rate, _),
+                    family: SummaryFamilyType::ExactAggregate(ExactKind::Rate, _),
                     reduction: planner_types::pre_asap::Reduction::PerEntity,
                     ..
                 }
@@ -275,14 +259,14 @@ pub fn compile_fixed_window_rate_aggregation(
             n.output_state.timing == ExecutionTiming::IngestionTime
                 && match &n.payload {
                     Payload::SummaryAgg {
-                        family: FieldDataType::Sketch(kind, _),
+                        family: SummaryFamilyType::Sketch(kind, _),
                         ..
                     } => matches!(
                         kind.algorithm(),
                         SketchAlgorithm::CmsWithHeap | SketchAlgorithm::CountSketchWithHeap
                     ),
                     Payload::SummaryAgg {
-                        family: FieldDataType::ExactAggregate(ExactKind::Sum, _),
+                        family: SummaryFamilyType::ExactAggregate(ExactKind::Sum, _),
                         ..
                     } => true,
                     _ => false,

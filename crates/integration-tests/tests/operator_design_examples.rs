@@ -1,0 +1,401 @@
+//! #511 examples: source text → unified dag → summary rewrite → flat export.
+use asap_frontend_sql::{lower_sql, SqlCatalog};
+use asap_types::ir::{ASAPOp, NonASAPOp, Operator, OperatorNode, ScalarExpr};
+use asap_types::post_asap::{
+    ExactKind, ExactParams, FieldDataType, GroupingStrategy, SummaryUpdate,
+};
+use asap_types::pre_asap::{AggIntent, ColumnRef, DataType, Field, Schema};
+use asap_types::types::AccuracyTarget;
+use std::rc::Rc;
+mod physical_common;
+
+fn catalog() -> SqlCatalog {
+    SqlCatalog::new()
+        .with_table(
+            "requests",
+            Schema::new(vec![
+                Field::plain("bytes", DataType::Int64, true),
+                Field::plain("status", DataType::Int64, false),
+            ]),
+        )
+        .with_table(
+            "lineitem",
+            Schema::new(vec![Field::plain("l_quantity", DataType::Int64, false)]),
+        )
+}
+
+/// The SQL scalar example keeps column scopes and a Boolean row predicate.
+#[tokio::test]
+async fn sql_filter_projection_example() {
+    let root = lower_sql(
+        "SELECT l_quantity * 2 AS q2 FROM lineitem WHERE l_quantity > 10",
+        &catalog(),
+        AccuracyTarget::Exact,
+    )
+    .await
+    .unwrap();
+    root.validate_structure().unwrap();
+    assert_eq!(
+        root.schema.fields[0],
+        Field::plain("q2", DataType::Int64, false)
+    );
+    assert!(
+        matches!(root.expect_non_asap(),NonASAPOp::Project { cols,.. } if matches!(cols[0].expr,ScalarExpr::Arithmetic { .. }))
+    );
+    let wire = physical_common::compile_post_asap_dag(&root).unwrap();
+    wire.validate().unwrap();
+    assert_eq!(wire.nodes.len(), OperatorNode::reachable(&root).len());
+}
+
+/// SUM's evaluation preserves integer type and SQL NULL behavior across the rewrite.
+#[tokio::test]
+async fn sql_sum_projection_before_and_after_summary_rewrite() {
+    let root = lower_sql(
+        "SELECT SUM(bytes) + 1 AS total_bytes FROM requests WHERE status = 200",
+        &catalog(),
+        AccuracyTarget::Exact,
+    )
+    .await
+    .unwrap();
+    root.validate_structure().unwrap();
+    assert_eq!(
+        root.schema.fields[0],
+        Field::plain("total_bytes", DataType::Int64, true)
+    );
+    fn rewrite(node: &Rc<OperatorNode>) -> Rc<OperatorNode> {
+        if let Some(NonASAPOp::Aggregate {
+            child,
+            reduction,
+            measures,
+            ..
+        }) = node.non_asap()
+        {
+            let [AggIntent::Sum { col: Some(column) }] = measures.as_slice() else {
+                panic!()
+            };
+            let state = Rc::new(
+                OperatorNode::new(Operator::ASAP(ASAPOp::SummaryAgg {
+                    child: Rc::clone(child),
+                    family: FieldDataType::ExactAggregate(ExactKind::Sum, ExactParams::Sum),
+                    input: SummaryUpdate::column(ColumnRef::Named(
+                        child.schema.fields[*column].name.clone(),
+                    )),
+                    reduction: reduction.clone(),
+                    grouping: GroupingStrategy::default(),
+                    filter: None,
+                }))
+                .unwrap(),
+            );
+            let finalize = std::rc::Rc::new(
+                OperatorNode::with_schema(
+                    asap_types::ir::Operator::ASAP(ASAPOp::FinalizeExactAccumulator {
+                        child: state,
+                    }),
+                    node.schema.clone(),
+                )
+                .with_guarantee(None),
+            );
+            return finalize;
+        }
+        Rc::new(node.map_children(rewrite).unwrap())
+    }
+    let rewritten = rewrite(&root);
+    rewritten.validate_structure().unwrap();
+    assert_eq!(rewritten.schema, root.schema);
+    let dag = OperatorNode::reachable(&rewritten);
+    assert!(dag
+        .iter()
+        .any(|n| matches!(n.asap(), Some(ASAPOp::SummaryAgg { .. }))));
+    assert!(dag
+        .iter()
+        .any(|n| matches!(n.asap(), Some(ASAPOp::FinalizeExactAccumulator { .. }))));
+    let wire = physical_common::compile_post_asap_dag(&rewritten).unwrap();
+    wire.validate().unwrap();
+    assert_eq!(wire.nodes.len(), dag.len());
+    let json = serde_json::to_string(&wire).unwrap();
+    assert!(!json.contains("KeepPreAsap") && !json.contains("ScalarBridge"));
+}
+
+/// Scalar subqueries survive normalization with shared, visible producers.
+#[tokio::test]
+async fn sql_scalar_subquery_retains_its_cardinality_contract() {
+    for query in [
+        "SELECT (SELECT bytes FROM requests) AS v FROM lineitem",
+        "SELECT l_quantity NOT IN (SELECT bytes FROM requests) AS present FROM lineitem",
+    ] {
+        let root = lower_sql(query, &catalog(), AccuracyTarget::Exact)
+            .await
+            .unwrap();
+        root.validate_structure().unwrap();
+        assert!(root.children().len() > 1);
+        let wire = physical_common::compile_post_asap_dag(&root).unwrap();
+        assert!(wire
+            .edges
+            .iter()
+            .any(|e| e.role == asap_types::ir::export::EdgeRole::ScalarRef));
+    }
+}
+
+/// Execute the SQL SUM example for nonempty, empty and all-NULL populations.
+#[tokio::test]
+async fn sql_sum_example_executes_with_sql_null_semantics() {
+    use asap_physical_operators::{
+        physical_planner::{compile, InputContract, Source},
+        runtime::{Limits, RunContext, Scope},
+        sources::{DataSources, MemorySource},
+        values::{Batch, Value},
+    };
+    use futures::StreamExt;
+    use std::{collections::BTreeMap, sync::Arc};
+    let root = lower_sql(
+        "SELECT SUM(bytes) + 1 AS total_bytes FROM requests WHERE status = 200",
+        &catalog(),
+        AccuracyTarget::Exact,
+    )
+    .await
+    .unwrap();
+    let logical_scan = OperatorNode::reachable(&root)
+        .into_iter()
+        .find(|node| matches!(node.non_asap(), Some(NonASAPOp::Scan { .. })))
+        .unwrap();
+    let NonASAPOp::Scan { source, .. } = logical_scan.expect_non_asap() else {
+        panic!()
+    };
+    let wire = physical_common::compile_post_asap_dag(&root).unwrap();
+    let scan = wire
+        .nodes
+        .iter()
+        .find(|node| {
+            matches!(
+                &node.payload,
+                asap_types::ir::export::PostAsapOperatorPayload::Relational {
+                    operator: asap_types::ir::export::NonASAPOpKind::Scan { .. }
+                }
+            )
+        })
+        .unwrap();
+    let schema = Arc::new(scan.output_schema.clone());
+    let plan = compile(
+        &wire,
+        BTreeMap::from([(u64::from(scan.id.0), InputContract::bounded(schema.clone()))]),
+        &[u64::from(wire.root.0)],
+    )
+    .unwrap();
+    for (rows, expected) in [
+        (
+            vec![
+                vec![Value::Int64(10), Value::Int64(200)],
+                vec![Value::Int64(20), Value::Int64(500)],
+                vec![Value::Null, Value::Int64(200)],
+            ],
+            Value::Int64(11),
+        ),
+        (vec![], Value::Null),
+        (vec![vec![Value::Null, Value::Int64(200)]], Value::Null),
+    ] {
+        let mut sources = DataSources::default();
+        sources
+            .register(
+                source.clone(),
+                Arc::new(
+                    MemorySource::new(
+                        schema.clone(),
+                        vec![Batch::try_new(schema.clone(), rows).unwrap()],
+                    )
+                    .unwrap(),
+                ),
+            )
+            .unwrap();
+        let bound = plan
+            .instantiate(BTreeMap::from([(
+                u64::from(scan.id.0),
+                Box::new(sources.bind(&logical_scan).unwrap()) as Source<'_>,
+            )]))
+            .unwrap();
+        let mut stream = bound
+            .execute(
+                plan.roots(),
+                RunContext::new(
+                    Scope::Query {
+                        evaluation_time_ms: 300_000,
+                        revision: 1,
+                    },
+                    Limits::default(),
+                )
+                .unwrap(),
+            )
+            .unwrap()
+            .remove(0);
+        let mut rows = vec![];
+        while let Some(batch) = stream.next().await {
+            rows.extend(batch.unwrap().rows().iter().cloned());
+        }
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].len(), 1);
+        match (&rows[0][0], expected) {
+            (Value::Null, Value::Null) => {}
+            (Value::Int64(actual), Value::Int64(expected)) => assert_eq!(*actual, expected),
+            other => panic!("{other:?}"),
+        }
+    }
+}
+
+/// Empty window frames and filtered groups can yield NULL even on non-NULL input.
+#[tokio::test]
+async fn sql_window_and_filtered_aggregate_types() {
+    for query in [
+        "SELECT SUM(l_quantity) OVER (ORDER BY l_quantity ROWS BETWEEN 2 PRECEDING AND 1 PRECEDING) AS s FROM lineitem",
+        "SELECT MIN(l_quantity) OVER (ORDER BY l_quantity ROWS BETWEEN 2 PRECEDING AND 1 PRECEDING) AS s FROM lineitem",
+        "SELECT SUM(l_quantity) FILTER (WHERE l_quantity < 0) AS s FROM lineitem GROUP BY l_quantity",
+    ] {
+        let root = lower_sql(query, &catalog(), AccuracyTarget::Exact).await.unwrap();
+        root.validate_structure().unwrap();
+        assert_eq!(root.schema.fields[0], Field::plain("s", DataType::Int64, true), "{query}");
+    }
+}
+
+/// A real query batch selects one shared SUM producer, retains two result roots,
+/// and executes both selected plans. No replacement dag is constructed by the test.
+#[tokio::test]
+async fn batch_planning_replaces_and_shares_summary_operators() {
+    use asap_aware_mapping::cost_model::{Cost, DefaultCostModel};
+    use asap_aware_mapping::pass::PlanningModels;
+    use asap_aware_mapping::{
+        CostModel, CostRate, LifecycleInput, SummaryMaintenanceLifecycleCapabilities,
+        SummaryMaintenanceLifecycleCostInputs,
+    };
+    use asap_physical_operators::{
+        physical_planner::{compile, InputContract},
+        runtime::Scope,
+        values::{Batch, Value},
+    };
+    use asap_planner::{e2e_plan, FrontendInput, UserInput};
+    use asap_types::post_asap::SketchAlgorithm;
+    use asap_types::workload::*;
+    use std::{collections::BTreeMap, sync::Arc};
+    struct Costs;
+    impl CostModel for Costs {
+        fn rank_candidates(
+            &self,
+            intent: &AggIntent,
+            candidates: &[SketchAlgorithm],
+        ) -> Vec<SketchAlgorithm> {
+            DefaultCostModel.rank_candidates(intent, candidates)
+        }
+        fn summary_maintenance_lifecycle_cost_inputs(
+            &self,
+            _: &OperatorNode,
+        ) -> SummaryMaintenanceLifecycleCostInputs {
+            SummaryMaintenanceLifecycleCostInputs {
+                build_cost: Some(Cost(1.0)),
+                maintenance_cost_per_update: Some(Cost::ZERO),
+                summary_read_cost: Some(Cost::ZERO),
+                retention_cost_rate: Some(CostRate(0.0)),
+                retirement_cost: Some(Cost::ZERO),
+            }
+        }
+        fn raw_query_recompute_cost(&self, _: &OperatorNode) -> Option<Cost> {
+            Some(Cost(1000.0))
+        }
+    }
+    let queries = [
+        "SELECT SUM(bytes) + 1 AS result FROM requests",
+        "SELECT SUM(bytes) * 2 AS result FROM requests",
+    ];
+    let workload = PlanningWorkload {
+        query_workload: QueryWorkload {
+            language: QueryLanguage::SQL(SqlDialect::DataFusionSQL),
+            query_batch: Some(
+                queries
+                    .iter()
+                    .map(|query| BatchEntry {
+                        query: Query((*query).into()),
+                        requirements: QueryRequirements {
+                            accuracy: AccuracyRequirement::Explicit(AccuracyTarget::Exact),
+                            ..Default::default()
+                        },
+                        predictability: Predictability::Unknown,
+                        invocations: 2,
+                        execute_at: None,
+                        time_selection: TimeSelection::default(),
+                    })
+                    .collect(),
+            ),
+            repeating_queries: None,
+        },
+        data_workload: Some(DataWorkload {
+            arrival: DataArrival::AtRest,
+            ..Default::default()
+        }),
+    };
+    let catalog = SqlCatalog::new().with_table(
+        "requests",
+        Schema::new(vec![Field::plain("bytes", DataType::Float64, false)]),
+    );
+    let output = e2e_plan(UserInput::new(
+        &workload,
+        FrontendInput::Sql { catalog: &catalog },
+        PlanningModels::builtin().with_cost(&Costs),
+        LifecycleInput::new(0, SummaryMaintenanceLifecycleCapabilities::default()),
+    ))
+    .await
+    .unwrap();
+    assert_eq!(output.entry_indices(), [0, 1]);
+    assert_eq!(output.roots().len(), 2);
+    let states: Vec<_> = output
+        .operators()
+        .into_iter()
+        .filter(|n| matches!(n.asap(), Some(ASAPOp::SummaryAgg { .. })))
+        .collect();
+    assert_eq!(states.len(), 1, "the batch owns one shared SUM state");
+    for (plan, expected) in output.plans.iter().zip([31.0, 60.0]) {
+        assert!(!plan.plan.selected_raw_recompute);
+        let root = &plan.plan.root;
+        root.validate_structure().unwrap();
+        assert!(OperatorNode::reachable(root)
+            .iter()
+            .any(|n| Rc::ptr_eq(n, &states[0])));
+        let wire = physical_common::compile_post_asap_dag(root).unwrap();
+        let scan = wire
+            .nodes
+            .iter()
+            .find(|n| {
+                matches!(
+                    n.payload,
+                    asap_types::ir::export::PostAsapOperatorPayload::Relational {
+                        operator: asap_types::ir::export::NonASAPOpKind::Scan { .. }
+                    }
+                )
+            })
+            .unwrap();
+        let schema = Arc::new(scan.output_schema.clone());
+        let program = compile(
+            &wire,
+            BTreeMap::from([(u64::from(scan.id.0), InputContract::bounded(schema.clone()))]),
+            &[u64::from(wire.root.0)],
+        )
+        .unwrap();
+        let result = physical_common::execute(
+            &program,
+            BTreeMap::from([(
+                u64::from(scan.id.0),
+                Batch::try_new(
+                    schema,
+                    vec![vec![Value::Float64(10.0)], vec![Value::Float64(20.0)]],
+                )
+                .unwrap(),
+            )]),
+            Scope::Query {
+                evaluation_time_ms: 0,
+                revision: 1,
+            },
+        );
+        let rows: Vec<_> = result[0].iter().flat_map(|batch| batch.rows()).collect();
+        assert_eq!(rows.len(), 1);
+        assert!(
+            matches!(rows[0][0], Value::Float64(v) if v == expected),
+            "{:?}",
+            rows
+        );
+    }
+}

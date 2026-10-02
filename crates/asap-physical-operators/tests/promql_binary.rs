@@ -6,19 +6,21 @@ use asap_physical_operators::{
     values::{Batch, SchemaRef, Value},
 };
 use futures::{executor::block_on, StreamExt};
+use planner_types::ir::export::{
+    EdgeRole, GroupingEdgeCompatibility, PostAsapDAG, PostAsapDAGEdge, PostAsapDAGNode,
+    PostAsapNodeId, PostAsapOperatorPayload, WindowEdgeCompatibility,
+};
+use planner_types::ir::BinaryOperator;
 use planner_types::{
-    post_asap::{
-        BinaryOperator, ExecutionDataState, Field, FieldDataType, PostAsapDAGNode, PostAsapNodeId,
-        PostAsapOperatorPayload, Schema,
-    },
+    post_asap::{ExecutionDataState, Field, FieldDataType},
     pre_asap::{ArithmeticOpKind, BinaryOpKind, DataType},
 };
 use std::{collections::BTreeMap, sync::Arc};
 
 fn schema() -> SchemaRef {
-    Arc::new(Schema {
-        closed: true,
+    Arc::new(planner_types::pre_asap::Schema {
         unique_keys: vec![],
+        closed: false,
         fields: vec![
             Field {
                 table: None,
@@ -61,10 +63,18 @@ fn program() -> CompiledPhysicalDAG {
     })
 }
 fn program_for(operator: BinaryOperator) -> CompiledPhysicalDAG {
+    program_for_bool(operator, false)
+}
+fn program_for_bool(operator: BinaryOperator, return_bool: bool) -> CompiledPhysicalDAG {
     let schema = schema();
     let node = PostAsapDAGNode {
         id: PostAsapNodeId(2),
-        payload: PostAsapOperatorPayload::Binary { operator },
+        payload: PostAsapOperatorPayload::Relational {
+            operator: planner_types::ir::export::NonASAPOpKind::BinaryOp {
+                operator,
+                return_bool,
+            },
+        },
         output_state: ExecutionDataState::QUERY_ROWS,
         output_schema: (*schema).clone(),
         guarantee: None,
@@ -156,12 +166,15 @@ fn scalar_broadcast_and_bool_comparison_are_distinct() {
     use planner_types::pre_asap::CompareOpKind;
     for return_bool in [false, true] {
         let physical_dag = promql_values::compile_binary(
-            &BinaryOperator {
-                kind: BinaryOpKind::Compare(CompareOpKind::Lt),
-                vector_match: None,
-                checked_relative_division: false,
-                checked_finite_division: false,
-            },
+            &asap_physical_operators::expressions::binary::BinaryOperator::from_logical(
+                &BinaryOperator {
+                    kind: BinaryOpKind::Compare(CompareOpKind::Lt),
+                    vector_match: None,
+                    checked_relative_division: false,
+                    checked_finite_division: false,
+                },
+                return_bool,
+            ),
             return_bool,
             true,
             false,
@@ -285,12 +298,15 @@ fn binary_obeys_memory_and_cancellation() {
 // A `bool` comparison over label-map vectors yields 1 or 0 and drops the name.
 #[test]
 fn label_map_bool_comparison_drops_the_name() {
-    let program = program_for(BinaryOperator {
-        kind: BinaryOpKind::CompareBool(planner_types::pre_asap::CompareOpKind::Gt),
-        vector_match: None,
-        checked_relative_division: false,
-        checked_finite_division: false,
-    });
+    let program = program_for_bool(
+        BinaryOperator {
+            kind: BinaryOpKind::Compare(planner_types::pre_asap::CompareOpKind::Gt),
+            vector_match: None,
+            checked_relative_division: false,
+            checked_finite_division: false,
+        },
+        true,
+    );
     let rows = evaluate_with(
         program,
         vec![row("a", "api", 6.)],
@@ -309,9 +325,9 @@ fn label_map_bool_comparison_drops_the_name() {
     assert!(matches!(row[1], Value::Float64(v) if v == 1.));
 }
 
-// Stored temporal readouts drop metric names before filter comparisons and set matching.
+// Stored temporal evaluations drop metric names before filter comparisons and set matching.
 #[test]
-fn stored_series_readouts_support_filters_and_sets() {
+fn stored_series_evaluations_support_filters_and_sets() {
     use asap_physical_operators::{
         physical_planner::compile, summary_kernels::exact::ExactAccumulator,
     };
@@ -319,14 +335,15 @@ fn stored_series_readouts_support_filters_and_sets() {
     use planner_types::pre_asap::{
         schema::PROMQL_SERIES_IDENTITY, CompareOpKind, PromQLVectorSetOpKind,
     };
+
     for (exact_kind, params) in [
         (ExactKind::Sum, ExactParams::Sum),
         (ExactKind::Count, ExactParams::Count),
     ] {
         let family = FieldDataType::ExactAggregate(exact_kind.clone(), params);
-        let state_schema = Arc::new(Schema {
-            closed: true,
+        let state_schema = Arc::new(planner_types::pre_asap::Schema {
             unique_keys: vec![],
+            closed: false,
             fields: vec![
                 Field {
                     table: None,
@@ -355,15 +372,16 @@ fn stored_series_readouts_support_filters_and_sets() {
                     id: PostAsapNodeId(id),
                     payload: match id {
                         0 | 1 => PostAsapOperatorPayload::SummaryMerge,
-                        2 | 3 => PostAsapOperatorPayload::Value {
-                            operation: ValueOperation::FinalizeExactAccumulator,
-                        },
-                        _ => PostAsapOperatorPayload::Binary {
-                            operator: BinaryOperator {
-                                kind: kind.clone(),
-                                vector_match: None,
-                                checked_relative_division: false,
-                                checked_finite_division: false,
+                        2 | 3 => PostAsapOperatorPayload::FinalizeExactAccumulator,
+                        _ => PostAsapOperatorPayload::Relational {
+                            operator: planner_types::ir::export::NonASAPOpKind::BinaryOp {
+                                operator: BinaryOperator {
+                                    kind: kind.clone(),
+                                    vector_match: None,
+                                    checked_relative_division: false,
+                                    checked_finite_division: false,
+                                },
+                                return_bool: false,
                             },
                         },
                     },

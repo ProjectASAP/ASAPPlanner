@@ -448,9 +448,7 @@ fn composed_provenance(
 }
 
 pub(super) fn exact_operation_rule(operation: &ExactOperation) -> Option<CompositionOperator> {
-    let ExactOperation::Aggregate { measures, .. } = operation else {
-        return None;
-    };
+    let ExactOperation::Aggregate { measures, .. } = operation;
     match measures.as_slice() {
         [intent] => crate::function_rules::function_rules(intent).map(|rules| rules.accuracy),
         // The remaining functions are exact over exact samples, but have
@@ -1035,8 +1033,8 @@ mod tests {
             reduction: asap_types::pre_asap::Reduction::PerEntity,
             measures: vec![intent],
             output_names: vec![],
-            having: None,
             filters: vec![],
+            having: None,
         };
         assert_eq!(
             DefaultAccuracyModel.exact_operation_rule(&operation(AggIntent::Rate)),

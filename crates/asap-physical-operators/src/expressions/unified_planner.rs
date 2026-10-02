@@ -115,8 +115,8 @@ pub(super) fn evaluate(
             Value::Null
         ))),
         ScalarExpr::FunctionCall { name, args } => {
-            use planner_types::pre_asap::scalar_signature::MapScalarFunction;
-            if planner_types::pre_asap::scalar_signature::promql_function_arity(name).is_some() {
+            use planner_types::pre_asap::scalar_type_rules::MapScalarFunction;
+            if planner_types::pre_asap::scalar_type_rules::promql_function_arity(name).is_some() {
                 let values = args
                     .iter()
                     .map(|arg| match evaluate(arg, row, schema)? {
@@ -642,10 +642,10 @@ fn validate(expr: &ScalarExpr, schema: &planner_types::pre_asap::Schema) -> Resu
         }
         ScalarExpr::FunctionCall { name, args } => {
             if name != "promql_drop_metric_name"
-                && planner_types::pre_asap::scalar_signature::promql_function_arity(name).is_none()
+                && planner_types::pre_asap::scalar_type_rules::promql_function_arity(name).is_none()
                 && name != "asap_struct_field"
                 && name != "asap_element_access"
-                && planner_types::pre_asap::scalar_signature::MapScalarFunction::from_name(name)
+                && planner_types::pre_asap::scalar_type_rules::MapScalarFunction::from_name(name)
                     .is_none()
             {
                 return Err(invalid());

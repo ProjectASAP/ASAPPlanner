@@ -2,6 +2,10 @@
 //! Planner's search space: `enumerate_candidate_dags_for_root` lists
 //! current-series TopK heaps without a caller-side series-identity pass, cost
 //! ranking, or workload Cartesian expansion. Placement variants are not listed.
+mod common;
+use common::compile_post_asap_dag;
+use planner_types::ir::OperatorNode as QueryExpr;
+
 use asap_aware_mapping::{
     accuracy::{AccuracyEvidenceProvider, DefaultAccuracyModel, PropagationStats},
     cost_model::DefaultCostModel,
@@ -9,11 +13,10 @@ use asap_aware_mapping::{
     search_workload_with_targets, Proposals, ReplacementStrategy, ReplacementSubDAG, TargetSubDAG,
 };
 use asap_physical_operators::physical_planner::promql_rows::{
-    compile_current_series_readout, SERIES_IDENTITY_COLUMN,
+    compile_current_series_evaluation, SERIES_IDENTITY_COLUMN,
 };
 use planner_types::{
     post_asap::*,
-    pre_asap::QueryExpr,
     types::AccuracyTarget,
     workload::{
         AccuracyRequirement, BatchEntry, DataWorkload, DurationMs, Evidence as WorkloadEvidence,
@@ -89,14 +92,12 @@ fn lower(query: &str, accuracy: &AccuracyTarget) -> Rc<QueryExpr> {
             ..Default::default()
         }),
     };
-    Rc::new(
-        asap_frontend_promql::lower_promql_workload(&workload, 0)
-            .unwrap()
-            .remove(0),
-    )
+    asap_frontend_promql::lower_promql_workload(&workload, 0)
+        .unwrap()
+        .remove(0)
 }
 
-type InventoryDAG = Vec<(usize, Rc<SummaryNode>)>;
+type InventoryDAG = Vec<(usize, Rc<planner_types::ir::OperatorNode>)>;
 
 /// Candidate DAGs for query 1 of a two-query workload, with and without
 /// whole-root proposals. Query 0 is a bystander that must not multiply them.
@@ -140,7 +141,10 @@ fn carries_identity(dag: &InventoryDAG) -> bool {
 }
 
 /// Shared acceptance checks; returns the added identity-carrying alternatives.
-fn added_alternatives(query: &str, accuracy: AccuracyTarget) -> Vec<Rc<SummaryNode>> {
+fn added_alternatives(
+    query: &str,
+    accuracy: AccuracyTarget,
+) -> Vec<Rc<planner_types::ir::OperatorNode>> {
     let (full, logical) = inventories(query, accuracy);
     for (index, dag) in full.iter().enumerate() {
         assert_eq!(dag.len(), 1, "one root per candidate, no workload product");
@@ -159,15 +163,18 @@ fn added_alternatives(query: &str, accuracy: AccuracyTarget) -> Vec<Rc<SummaryNo
 
 const CURRENT_SERIES_TOPK: &str = "topk by(job)(1, m)";
 
-// Instant-vector TopK lists finalized current-series heap readouts.
+// Instant-vector TopK lists finalized current-series heap evaluations.
 #[test]
-fn current_series_topk_lists_heap_readouts() {
+fn current_series_topk_lists_heap_evaluations() {
     let added = added_alternatives(CURRENT_SERIES_TOPK, AccuracyTarget::Epsilon(0.1));
     assert!(!added.is_empty());
     for root in added {
-        assert!(!matches!(root.expr, SummaryExpr::SummaryAgg { .. }));
+        assert!(!matches!(
+            root.operator,
+            planner_types::ir::Operator::ASAP(planner_types::ir::ASAPOp::SummaryAgg { .. })
+        ));
         assert!(
-            compile_current_series_readout(&root).is_ok(),
+            compile_current_series_evaluation(&root).is_ok(),
             "unbindable alternative {root:?}"
         );
     }

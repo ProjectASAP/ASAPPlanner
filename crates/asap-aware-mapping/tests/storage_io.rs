@@ -5,7 +5,7 @@ use asap_aware_mapping::analytical_cost::{
 use asap_aware_mapping::physical_operator_statistics::{
     ComparisonScope, EdgeStatistics, OperatorStatistics, SourceCoverage, UnaryEdgeStatistics,
 };
-use asap_types::pre_asap::query_expr::Source;
+use asap_types::ir::operator_properties::Source;
 use asap_types::workload::{
     DataArrival, DurationMs, QueryRecurrence, QueryTimeScope, TimeSelection, TimestampMs,
 };

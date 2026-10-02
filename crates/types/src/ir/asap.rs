@@ -45,7 +45,7 @@ pub enum ASAPOp {
     /// Maintain the full declared population, including membership changes.
     MaintainPopulation {
         child: Rc<OperatorNode>,
-        population: MaintainedPopulation<OperatorNode>,
+        population: MaintainedPopulation,
     },
     /// Read an aggregate or TopK prefix from the maintained population.
     EvaluatePopulation {
@@ -219,7 +219,7 @@ impl ASAPOp {
                 reduction,
                 ..
             } => {
-                let mut schema = crate::ir::aggregate_schema::aggregate_output_schema(
+                let mut schema = crate::pre_asap::aggregate_output_schema(
                     &child.schema,
                     reduction,
                     &[crate::pre_asap::AggIntent::Sum { col: None }],

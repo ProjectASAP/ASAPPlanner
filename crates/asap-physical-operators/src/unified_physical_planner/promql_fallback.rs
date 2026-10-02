@@ -426,7 +426,7 @@ impl Lowering {
                 continue;
             }
             if let ScalarExpr::FunctionCall { name, args } = &mut col.expr {
-                if planner_types::pre_asap::scalar_signature::promql_function_arity(name).is_none()
+                if planner_types::pre_asap::scalar_type_rules::promql_function_arity(name).is_none()
                     || args.first() != Some(&ScalarExpr::Column(value))
                 {
                     return Err(invalid("unsupported pointwise function"));

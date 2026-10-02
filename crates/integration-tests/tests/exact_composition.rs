@@ -1,5 +1,5 @@
 //! Issue #171 — composing exact operators with summary plans across
-//! explicit update/readout boundaries, end to end through
+//! explicit update/evaluation boundaries, end to end through
 //! `search_workload_with` → `CandidateLogicalASAPDAGs::global_selection` →
 //! `GlobalSelection::assemble_selected_dag` → `dag_export`.
 //!
@@ -16,27 +16,37 @@ use asap_aware_mapping::cost_model::{
     CostProvenance, CostUnit, ExactCompositionCostInputs, ExactCompositionCostRequest,
     ValueOperationCapabilities,
 };
+use asap_aware_mapping::exact_composition::ExactOperation;
 use asap_aware_mapping::replacement::{
-    default_strategies_with, search_workload_with, Replacement, ReplacementProvenance,
-    ReplacementStrategy, SketchAlgorithmStrategy, TargetSubDAG,
+    default_strategies_with, search_workload_with, ASAPStrategies, Replacement,
+    ReplacementProvenance, ReplacementStrategy, TargetSubDAG,
 };
 use asap_aware_mapping::{
     CostModel, DefaultCostModel, EvaluationRate, ExplanationKind, OperationPlacement,
 };
 use asap_integration_tests::fixtures::lower_promql;
+use asap_integration_tests::post_asap::{post_asap_dag, timed};
 use asap_types::dag_export;
+use asap_types::ir::export::{NonASAPOpKind, PostAsapOperatorPayload};
+use asap_types::ir::operator_properties::{Reduction, Source};
+use asap_types::ir::timing::data_state;
+use asap_types::ir::{ASAPOp, NonASAPOp, Operator, OperatorNode, TimeRangeKind};
 use asap_types::post_asap::{
-    validate_execution_data_states, ExactKind, ExactOperation, ExecutionDataState, ExecutionTiming,
-    FieldDataType, SketchAlgorithm, SummaryExpr, SummaryNode, SummaryUpdate,
+    ExactKind, ExecutionDataState, ExecutionTiming, FieldDataType, SketchAlgorithm, SummaryUpdate,
 };
 use asap_types::pre_asap::agg_intent::{default_quantile, AggIntent};
-use asap_types::pre_asap::query_expr::{QueryExpr, Reduction, Source};
 use asap_types::pre_asap::schema::{DataType, Field, Schema};
+
 use asap_types::types::AccuracyTarget;
 
 // ── fixtures ────────────────────────────────────────────────────────────
 
-fn metric_scan(labels: &[&str]) -> QueryExpr {
+fn node(op: NonASAPOp) -> Rc<OperatorNode> {
+    OperatorNode::new_shared(asap_types::ir::Operator::NonASAP(op))
+        .expect("fixture node derives its schema")
+}
+
+fn metric_scan(labels: &[&str]) -> Rc<OperatorNode> {
     let mut columns = vec![
         Field::plain("ts", DataType::Timestamp, false),
         Field::plain("value", DataType::Float64, false),
@@ -46,17 +56,17 @@ fn metric_scan(labels: &[&str]) -> QueryExpr {
             .iter()
             .map(|n| Field::plain(*n, DataType::Utf8, true)),
     );
-    QueryExpr::Scan {
+    node(NonASAPOp::Scan {
         source: Source::TimeSeries {
             metric: "latency".into(),
         },
         predicates: vec![],
         schema: Schema::with_time_index(columns, 0, vec![]),
-    }
+    })
 }
 
-fn agg(by: Vec<usize>, intent: AggIntent, child: Rc<QueryExpr>) -> Rc<QueryExpr> {
-    Rc::new(QueryExpr::Aggregate {
+fn agg(by: Vec<usize>, intent: AggIntent, child: Rc<OperatorNode>) -> Rc<OperatorNode> {
+    node(NonASAPOp::Aggregate {
         reduction: Reduction::by(by),
         measures: vec![intent],
         output_names: vec![],
@@ -66,8 +76,8 @@ fn agg(by: Vec<usize>, intent: AggIntent, child: Rc<QueryExpr>) -> Rc<QueryExpr>
     })
 }
 
-fn per_entity(intent: AggIntent, child: Rc<QueryExpr>) -> Rc<QueryExpr> {
-    Rc::new(QueryExpr::Aggregate {
+fn per_entity(intent: AggIntent, child: Rc<OperatorNode>) -> Rc<OperatorNode> {
+    node(NonASAPOp::Aggregate {
         reduction: Reduction::PerEntity,
         measures: vec![intent],
         output_names: vec![],
@@ -78,11 +88,11 @@ fn per_entity(intent: AggIntent, child: Rc<QueryExpr>) -> Rc<QueryExpr> {
 }
 
 /// `quantile by (zone, host) (latency)` — the fine-grained inner summary.
-fn fine_quantile() -> Rc<QueryExpr> {
+fn fine_quantile() -> Rc<OperatorNode> {
     agg(
         vec![2, 3],
         default_quantile(0.99),
-        Rc::new(metric_scan(&["zone", "host"])),
+        metric_scan(&["zone", "host"]),
     )
 }
 
@@ -96,7 +106,7 @@ struct StatsModel;
 fn custom_accuracy_rule_survives_root_target_and_materialization() {
     use asap_aware_mapping::{AccuracyModel, DefaultAccuracyModel, PropagationStats};
     use asap_types::post_asap::{
-        AccuracyError, CompositionOperator, ExactOperation, ResultGuarantee, SketchStatistic,
+        AccuracyError, CompositionOperator, ResultGuarantee, SketchStatistic,
     };
     struct Model;
     impl AccuracyModel for Model {
@@ -278,21 +288,31 @@ fn unknown_runtime_capability_keeps_candidate_but_prevents_selection() {
 }
 
 fn plan(
-    roots: Vec<(&'static str, Rc<QueryExpr>)>,
+    roots: Vec<(&'static str, Rc<OperatorNode>)>,
     cost_model: &dyn CostModel,
 ) -> asap_aware_mapping::CandidateLogicalASAPDAGs<&'static str> {
     search_workload_with(roots, &default_strategies_with(cost_model))
 }
 
-fn is_plain(node: &SummaryNode) -> bool {
+fn is_plain(node: &OperatorNode) -> bool {
     node.schema
         .fields
         .iter()
         .all(|f| matches!(f.dtype, FieldDataType::Plain(_)))
 }
 
-fn names(node: &SummaryNode) -> Vec<&str> {
+fn names(node: &OperatorNode) -> Vec<&str> {
     node.schema.fields.iter().map(|f| f.name.as_str()).collect()
+}
+
+/// The composed query-time shape: an exact `Aggregate` directly over a
+/// summary evaluation, at query time.
+fn is_query_time_fold(node: &OperatorNode) -> bool {
+    matches!(
+        node.non_asap(),
+        Some(NonASAPOp::Aggregate { child, .. })
+            if matches!(child.operator, Operator::ASAP(ASAPOp::SummaryEstimate { .. }))
+    )
 }
 
 // ── step 1: pin every already-supported exact-accumulator nesting ───────
@@ -300,12 +320,12 @@ fn names(node: &SummaryNode) -> Vec<&str> {
 #[test]
 fn every_exact_accumulator_is_finalized_before_an_outer_sketch() {
     use std::time::Duration;
-    let cases: Vec<(Rc<QueryExpr>, ExactKind)> = vec![
+    let cases: Vec<(Rc<OperatorNode>, ExactKind)> = vec![
         (
             agg(
                 vec![2],
                 AggIntent::Sum { col: None },
-                Rc::new(metric_scan(&["zone"])),
+                metric_scan(&["zone"]),
             ),
             ExactKind::Sum,
         ),
@@ -315,7 +335,7 @@ fn every_exact_accumulator_is_finalized_before_an_outer_sketch() {
                 AggIntent::Count {
                     accuracy: AccuracyTarget::Exact,
                 },
-                Rc::new(metric_scan(&["zone"])),
+                metric_scan(&["zone"]),
             ),
             ExactKind::Count,
         ),
@@ -323,7 +343,7 @@ fn every_exact_accumulator_is_finalized_before_an_outer_sketch() {
             agg(
                 vec![2],
                 AggIntent::Min { col: None },
-                Rc::new(metric_scan(&["zone"])),
+                metric_scan(&["zone"]),
             ),
             ExactKind::Min,
         ),
@@ -331,16 +351,17 @@ fn every_exact_accumulator_is_finalized_before_an_outer_sketch() {
             agg(
                 vec![2],
                 AggIntent::Max { col: None },
-                Rc::new(metric_scan(&["zone"])),
+                metric_scan(&["zone"]),
             ),
             ExactKind::Max,
         ),
         (
             per_entity(
                 AggIntent::Rate,
-                Rc::new(QueryExpr::TimeRange {
+                node(NonASAPOp::TimeRange {
                     range: Duration::from_secs(300),
-                    child: Rc::new(metric_scan(&["zone"])),
+                    kind: TimeRangeKind::Range,
+                    child: metric_scan(&["zone"]),
                 }),
             ),
             ExactKind::Rate,
@@ -348,9 +369,10 @@ fn every_exact_accumulator_is_finalized_before_an_outer_sketch() {
         (
             per_entity(
                 AggIntent::Increase,
-                Rc::new(QueryExpr::TimeRange {
+                node(NonASAPOp::TimeRange {
                     range: Duration::from_secs(300),
-                    child: Rc::new(metric_scan(&["zone"])),
+                    kind: TimeRangeKind::Range,
+                    child: metric_scan(&["zone"]),
                 }),
             ),
             ExactKind::Increase,
@@ -359,40 +381,43 @@ fn every_exact_accumulator_is_finalized_before_an_outer_sketch() {
     for (inner, kind) in cases {
         let outer = agg(vec![], default_quantile(0.9), inner);
         let target = TargetSubDAG::new(&outer);
-        let candidates = SketchAlgorithmStrategy::default_cost_model().replacements(&target);
-        let Replacement::Summary(root) = &candidates[0].replacement else {
+        let candidates = ASAPStrategies::default_cost_model().replacements(&target);
+        let Replacement::SubDAG(root) = &candidates[0].replacement else {
             unreachable!()
         };
-        let SummaryExpr::SummaryEstimate { summary_input, .. } = &root.expr else {
-            panic!("expected KLL readout, got {:?}", root.expr);
+        // Timing is not stored on the plan: time it (default lifecycle,
+        // which also validates every edge) and inspect the timed copy.
+        let root = timed(root);
+        let Operator::ASAP(ASAPOp::SummaryEstimate { summary_input, .. }) = &root.operator else {
+            panic!("expected KLL evaluation, got {:?}", root.operator);
         };
-        let SummaryExpr::SummaryAgg { child, .. } = &summary_input.expr else {
+        let Operator::ASAP(ASAPOp::SummaryAgg { child, .. }) = &summary_input.operator else {
             panic!("expected outer SummaryAgg");
         };
-        let SummaryExpr::ValueOperation {
-            child,
-            operation: asap_types::post_asap::ValueOperation::FinalizeExactAccumulator,
-            timing: ExecutionTiming::IngestionTime,
-        } = &child.expr
+        let Operator::ASAP(ASAPOp::FinalizeExactAccumulator { child: finalized }) = &child.operator
         else {
             panic!("{kind:?}: missing maintenance finalization");
         };
+        assert_eq!(
+            child.timing,
+            Some(ExecutionTiming::IngestionTime),
+            "{kind:?}: finalization runs at maintenance time"
+        );
         assert!(
             matches!(
-                &child.expr,
-                SummaryExpr::SummaryAgg { family: FieldDataType::ExactAggregate(k, _), .. } if *k == kind
+                &finalized.operator,
+                Operator::ASAP(ASAPOp::SummaryAgg { family: FieldDataType::ExactAggregate(k, _), .. }) if *k == kind
             ),
             "{kind:?}: expected the exact accumulator under its finalization, got {:?}",
-            child.expr
+            finalized.operator
         );
-        validate_execution_data_states(root).expect("accumulator state composes under maintenance");
     }
 }
 
-// ── direction 1: outer exact fold over an inner summary readout ────────
+// ── direction 1: outer exact fold over an inner summary evaluation ────────
 
-/// Before this PR both `max`/`avg` over a quantile collapsed into one
-/// opaque `KeepPreAsap`. Now: the outer group holds an `ValueOperationAtQueryTime`
+/// `max`/`avg` over a quantile does not collapse into one opaque kept
+/// sub-DAG: the outer group holds an `ValueOperationAtQueryTime`
 /// candidate referencing the inner target, the inner group keeps its own
 /// sketch candidates, and with statistics the pair is committed and
 /// materializes as `ValueOperationAtQueryTime → SummaryEstimate → SummaryAgg`.
@@ -402,7 +427,7 @@ fn max_and_avg_over_quantile_compose_at_query_time_with_statistics() {
         let root = agg(vec![0], intent.clone(), fine_quantile());
         let space = plan(vec![("q", Rc::clone(&root))], &StatsModel);
         let root = Rc::clone(&space.roots[0].1);
-        let QueryExpr::Aggregate { child: inner, .. } = root.as_ref() else {
+        let Some(NonASAPOp::Aggregate { child: inner, .. }) = root.non_asap() else {
             unreachable!()
         };
 
@@ -419,9 +444,9 @@ fn max_and_avg_over_quantile_compose_at_query_time_with_statistics() {
             inner_group
                 .candidates
                 .iter()
-                .any(|c| matches!(&c.replacement, Replacement::Summary(n)
-                    if matches!(n.expr, SummaryExpr::SummaryEstimate { .. }))),
-            "{intent:?}: the inner quantile keeps its own readout candidates"
+                .any(|c| matches!(&c.replacement, Replacement::SubDAG(n)
+                    if matches!(n.operator, Operator::ASAP(ASAPOp::SummaryEstimate { .. })))),
+            "{intent:?}: the inner quantile keeps its own evaluation candidates"
         );
 
         let selection = space.global_selection(&StatsModel);
@@ -449,18 +474,16 @@ fn max_and_avg_over_quantile_compose_at_query_time_with_statistics() {
         ));
 
         let composed = selection.assemble_selected_dag(&root).unwrap().unwrap();
-        let SummaryExpr::ValueOperation {
-            child,
-            timing: ExecutionTiming::QueryTime,
-            ..
-        } = &composed.expr
-        else {
+        let Some(NonASAPOp::Aggregate { child, .. }) = composed.non_asap() else {
             panic!(
                 "{intent:?}: expected ValueOperationAtQueryTime root, got {:?}",
-                composed.expr
+                composed.operator
             );
         };
-        assert!(matches!(child.expr, SummaryExpr::SummaryEstimate { .. }));
+        assert!(matches!(
+            child.operator,
+            Operator::ASAP(ASAPOp::SummaryEstimate { .. })
+        ));
         assert!(
             child.guarantee.is_some(),
             "child has its KLL rank guarantee"
@@ -472,15 +495,18 @@ fn max_and_avg_over_quantile_compose_at_query_time_with_statistics() {
         assert!(is_plain(&composed));
         assert_eq!(
             names(&composed),
-            root.output_schema()
-                .unwrap()
+            root.schema
                 .fields
                 .iter()
                 .map(|c| c.name.as_str())
                 .collect::<Vec<_>>(),
             "the composed plan's schema is the pre-ASAP target's own"
         );
-        validate_execution_data_states(&composed).unwrap();
+        assert_eq!(
+            timed(&composed).timing,
+            Some(ExecutionTiming::QueryTime),
+            "{intent:?}: the exact fold runs at query time"
+        );
     }
 }
 
@@ -490,11 +516,7 @@ fn max_and_avg_over_quantile_compose_at_query_time_with_statistics() {
 fn avg_over_quantile_keeps_the_sum_over_count_rewrite_as_a_competitor() {
     // `by (zone)` over `by (zone)`: the averaged column resolves to the
     // non-null quantile output, which is what the rewrite requires.
-    let inner = agg(
-        vec![2],
-        default_quantile(0.99),
-        Rc::new(metric_scan(&["zone"])),
-    );
+    let inner = agg(vec![2], default_quantile(0.99), metric_scan(&["zone"]));
     let root = agg(vec![0], AggIntent::Avg { col: None }, inner);
     let space = plan(vec![("q", root)], &StatsModel);
     let group = space.candidates_for_target(&space.roots[0].1).unwrap();
@@ -508,11 +530,7 @@ fn avg_over_quantile_keeps_the_sum_over_count_rewrite_as_a_competitor() {
 /// is the same, only the fold's row multiplicity differs.
 #[test]
 fn identity_and_genuine_multi_row_folds_both_compose() {
-    let identity_inner = agg(
-        vec![2],
-        default_quantile(0.99),
-        Rc::new(metric_scan(&["zone"])),
-    );
+    let identity_inner = agg(vec![2], default_quantile(0.99), metric_scan(&["zone"]));
     for (label, inner) in [
         ("identity", identity_inner),
         ("fine-to-coarse", fine_quantile()),
@@ -527,14 +545,17 @@ fn identity_and_genuine_multi_row_folds_both_compose() {
             .unwrap();
         assert!(
             matches!(
-                composed.expr,
-                SummaryExpr::ValueOperation {
-                    timing: ExecutionTiming::QueryTime,
-                    ..
-                }
+                composed.non_asap(),
+                Some(NonASAPOp::Aggregate { child, .. })
+                    if matches!(child.operator, Operator::ASAP(ASAPOp::SummaryEstimate { .. }))
             ),
             "{label}: {:?}",
-            composed.expr
+            composed.operator
+        );
+        assert_eq!(
+            timed(&composed).timing,
+            Some(ExecutionTiming::QueryTime),
+            "{label}"
         );
         assert_eq!(names(&composed), vec!["zone", "max"], "{label}");
     }
@@ -543,7 +564,7 @@ fn identity_and_genuine_multi_row_folds_both_compose() {
 /// One inner quantile consumed by two outer folds in two queries: CSE
 /// collapses the inner target onto one `Rc`, both compositions commit to
 /// the *same* child candidate, and both materializations share one
-/// `Rc<SummaryNode>` for it — the summary is maintained once.
+/// `Rc<OperatorNode>` for it — the summary is maintained once.
 #[test]
 fn a_shared_inner_summary_is_materialized_once_for_several_outer_folds() {
     let max = agg(vec![0], AggIntent::Max { col: None }, fine_quantile());
@@ -551,9 +572,9 @@ fn a_shared_inner_summary_is_materialized_once_for_several_outer_folds() {
     let space = plan(vec![("max", max), ("min", min)], &StatsModel);
     let selection = space.global_selection(&StatsModel);
 
-    let roots: Vec<Rc<QueryExpr>> = space.roots.iter().map(|(_, r)| Rc::clone(r)).collect();
-    let inner_of = |r: &Rc<QueryExpr>| match r.as_ref() {
-        QueryExpr::Aggregate { child, .. } => Rc::clone(child),
+    let roots: Vec<Rc<OperatorNode>> = space.roots.iter().map(|(_, r)| Rc::clone(r)).collect();
+    let inner_of = |r: &Rc<OperatorNode>| match r.non_asap() {
+        Some(NonASAPOp::Aggregate { child, .. }) => Rc::clone(child),
         _ => unreachable!(),
     };
     assert!(
@@ -589,17 +610,20 @@ fn a_shared_inner_summary_is_materialized_once_for_several_outer_folds() {
         .iter()
         .map(|r| selection.assemble_selected_dag(r).unwrap().unwrap())
         .collect();
-    let child_of = |n: &Rc<SummaryNode>| match &n.expr {
-        SummaryExpr::ValueOperation {
-            child,
-            timing: ExecutionTiming::QueryTime,
-            ..
-        } => Rc::clone(child),
-        other => panic!("expected ValueOperationAtQueryTime, got {other:?}"),
+    let child_of = |n: &Rc<OperatorNode>| match n.non_asap() {
+        Some(NonASAPOp::Aggregate { child, .. })
+            if matches!(
+                child.operator,
+                Operator::ASAP(ASAPOp::SummaryEstimate { .. })
+            ) =>
+        {
+            Rc::clone(child)
+        }
+        _ => panic!("expected ValueOperationAtQueryTime, got {:?}", n.operator),
     };
     assert!(
         Rc::ptr_eq(&child_of(&composed[0]), &child_of(&composed[1])),
-        "both folds compose over the same Rc<SummaryNode>"
+        "both folds compose over the same Rc<OperatorNode>"
     );
 }
 
@@ -614,15 +638,16 @@ fn outer_summary_over_an_exact_function_composes_at_ingestion_time() {
     use std::time::Duration;
     let deriv = per_entity(
         AggIntent::Deriv,
-        Rc::new(QueryExpr::TimeRange {
+        node(NonASAPOp::TimeRange {
             range: Duration::from_secs(300),
-            child: Rc::new(metric_scan(&["zone"])),
+            kind: TimeRangeKind::Range,
+            child: metric_scan(&["zone"]),
         }),
     );
     let root = agg(vec![], default_quantile(0.99), deriv);
     let space = plan(vec![("q", root)], &StatsModel);
     let root = Rc::clone(&space.roots[0].1);
-    let QueryExpr::Aggregate { child: deriv, .. } = root.as_ref() else {
+    let Some(NonASAPOp::Aggregate { child: deriv, .. }) = root.non_asap() else {
         unreachable!()
     };
     assert!(space
@@ -643,33 +668,25 @@ fn outer_summary_over_an_exact_function_composes_at_ingestion_time() {
     assert!(decision.cost_rate < decision.baseline_rate);
 
     let composed = selection.assemble_selected_dag(&root).unwrap().unwrap();
-    let SummaryExpr::SummaryEstimate { summary_input, .. } = &composed.expr else {
-        panic!("expected readout root, got {:?}", composed.expr);
+    // Walk the timed copy: timing is written by the lifecycle assignment.
+    let composed = timed(&composed);
+    let Operator::ASAP(ASAPOp::SummaryEstimate { summary_input, .. }) = &composed.operator else {
+        panic!("expected evaluation root, got {:?}", composed.operator);
     };
-    let SummaryExpr::SummaryAgg { child, .. } = &summary_input.expr else {
+    let Operator::ASAP(ASAPOp::SummaryAgg { child, .. }) = &summary_input.operator else {
         panic!("expected SummaryAgg");
     };
-    let SummaryExpr::ValueOperation {
-        child: raw,
-        timing: ExecutionTiming::IngestionTime,
-        ..
-    } = &child.expr
-    else {
+    let Some(NonASAPOp::Aggregate { child: raw, .. }) = child.non_asap() else {
         panic!(
             "expected ValueOperationAtIngestionTime under the maintained summary, got {:?}",
-            child.expr
+            child.operator
         );
     };
-    assert!(matches!(raw.expr, SummaryExpr::KeepPreAsap(_)));
-    let assignment = validate_execution_data_states(&composed).unwrap();
-    assert_eq!(
-        assignment.data_state_of(child),
-        Some(ExecutionDataState::INGESTION_ROWS)
-    );
-    assert_eq!(
-        assignment.data_state_of(raw),
-        Some(ExecutionDataState::INGESTION_ROWS)
-    );
+    // The raw input is kept as-is.
+    assert!(matches!(raw.non_asap(), Some(NonASAPOp::TimeRange { .. })));
+    assert!(!raw.contains_asap());
+    assert_eq!(data_state(child), Some(ExecutionDataState::INGESTION_ROWS));
+    assert_eq!(data_state(raw), Some(ExecutionDataState::INGESTION_ROWS));
 }
 
 // ── rejection, capability, statistics ───────────────────────────────────
@@ -685,24 +702,28 @@ fn summary_construction_follows_its_value_input_phase() {
         .assemble_selected_dag(&space.roots[0].1)
         .unwrap()
         .unwrap();
-    let illegal = Rc::new(SummaryNode {
-        expr: SummaryExpr::SummaryAgg {
-            child: post,
-            family: FieldDataType::ExactAggregate(
-                ExactKind::Max,
-                asap_types::post_asap::ExactParams::Max,
-            ),
-            input: SummaryUpdate::column(asap_types::pre_asap::ColumnRef::SampleValue),
-            reduction: Reduction::by(vec![]),
-            grouping: Default::default(),
-            filter: None,
-        },
-        schema: asap_types::post_asap::Schema::lifted(vec![], None),
-        guarantee: None,
-    });
-    let state = asap_types::post_asap::produced_data_state(&illegal.expr).unwrap();
+    let illegal = std::rc::Rc::new(
+        OperatorNode::with_schema(
+            asap_types::ir::Operator::ASAP(ASAPOp::SummaryAgg {
+                child: post,
+                family: FieldDataType::ExactAggregate(
+                    ExactKind::Max,
+                    asap_types::post_asap::ExactParams::Max,
+                ),
+                input: SummaryUpdate::column(asap_types::pre_asap::ColumnRef::SampleValue),
+                reduction: Reduction::by(vec![]),
+                grouping: Default::default(),
+                filter: None,
+            }),
+            Schema::lifted(vec![], None),
+        )
+        .with_guarantee(None),
+    );
+    // Even under an ingestion-time consumer the state is built at query
+    // time, because a evaluation sits below it.
+    let state = asap_types::ir::planned_data_state(&illegal, ExecutionTiming::IngestionTime);
     assert_eq!(state.timing, ExecutionTiming::QueryTime);
-    asap_types::post_asap::validate_execution_data_states_at(&illegal, state).unwrap();
+    asap_types::ir::validate_default(&illegal, state.timing).unwrap();
 }
 
 #[test]
@@ -718,9 +739,9 @@ fn a_runtime_without_mixed_execution_gets_no_composition_candidates() {
     let selection = space.global_selection(&NoCapabilityModel);
     assert!(selection.for_target(&root).unwrap().composition.is_none());
     let node = selection.assemble_selected_dag(&root).unwrap().unwrap();
-    assert!(!matches!(node.expr, SummaryExpr::ValueOperation { .. }));
+    assert!(!is_query_time_fold(&node));
     // The inner quantile is still independently selectable.
-    let QueryExpr::Aggregate { child, .. } = root.as_ref() else {
+    let Some(NonASAPOp::Aggregate { child, .. }) = root.non_asap() else {
         unreachable!()
     };
     assert!(selection.for_target(child).unwrap().chosen.is_some());
@@ -731,7 +752,7 @@ fn a_runtime_without_mixed_execution_gets_no_composition_candidates() {
 /// site keeps a non-composed alternative, and the inner summary stays
 /// independently selectable.
 #[test]
-fn missing_cost_statistics_preserve_the_conservative_keep_pre_asap() {
+fn missing_cost_statistics_preserve_the_conservative_retain_exact() {
     let root = agg(vec![0], AggIntent::Max { col: None }, fine_quantile());
     let space = plan(vec![("q", root)], &DefaultCostModel);
     let root = Rc::clone(&space.roots[0].1);
@@ -749,9 +770,9 @@ fn missing_cost_statistics_preserve_the_conservative_keep_pre_asap() {
         Some(Replacement::ExactComposition(_))
     ));
     let node = selection.assemble_selected_dag(&root).unwrap().unwrap();
-    assert!(!matches!(node.expr, SummaryExpr::ValueOperation { .. }));
+    assert!(!is_query_time_fold(&node));
 
-    let explanations = asap_aware_mapping::explain_replacements(vec![("q", (*root).clone())]);
+    let explanations = asap_aware_mapping::explain_replacements(vec![("q", Rc::clone(&root))]);
     assert!(explanations
         .iter()
         .any(|e| e.kind == ExplanationKind::ExactComposition));
@@ -771,12 +792,19 @@ fn dag_export_carries_explicit_stage_and_plain_schema_for_a_composed_plan() {
         .unwrap();
     let dag = dag_export::export_summary(&composed);
     let node = &dag.nodes[dag.root as usize];
-    assert_eq!(node.kind, "ValueOperation");
-    assert_eq!(node.detail["timing"], "query_time");
-    assert!(node.detail["operation"]
-        .as_str()
-        .unwrap()
-        .starts_with("Exact(Aggregate"));
+    assert_eq!(node.kind, "aggregate");
+    assert!(node.detail["measures"].is_array());
+    // Timing is explicit in the wire-6 DAG: the root is a relational
+    // aggregate placed at query time.
+    let wire = post_asap_dag(&composed);
+    let wire_root = wire.nodes.iter().find(|n| n.id == wire.root).unwrap();
+    assert!(matches!(
+        wire_root.payload,
+        PostAsapOperatorPayload::Relational {
+            operator: NonASAPOpKind::Aggregate { .. }
+        }
+    ));
+    assert_eq!(wire_root.output_state.timing, ExecutionTiming::QueryTime);
 
     // Pre-ASAP export of the same target still describes the same columns.
     let pre = dag_export::export(root);
@@ -798,7 +826,7 @@ fn promql_max_by_zone_over_quantile_over_time_composes() {
         AccuracyTarget::Epsilon(0.01),
     )
     .unwrap();
-    let space = plan(vec![("q", Rc::new(expr))], &StatsModel);
+    let space = plan(vec![("q", expr)], &StatsModel);
     let root = &space.roots[0].1;
     let selection = space.global_selection(&StatsModel);
     let selected = selection.for_target(root).unwrap();
@@ -815,13 +843,8 @@ fn promql_max_by_zone_over_quantile_over_time_composes() {
             .collect::<Vec<_>>()
     );
     let composed = selection.assemble_selected_dag(root).unwrap().unwrap();
-    assert!(matches!(
-        composed.expr,
-        SummaryExpr::ValueOperation {
-            timing: ExecutionTiming::QueryTime,
-            ..
-        }
-    ));
+    assert!(is_query_time_fold(&composed), "{:?}", composed.operator);
+    assert_eq!(timed(&composed).timing, Some(ExecutionTiming::QueryTime));
     assert_eq!(
         selected.composition.as_ref().map(|d| d.inputs.unit),
         Some(CostUnit::CostUnitsPerSecond)
