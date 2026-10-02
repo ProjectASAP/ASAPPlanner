@@ -1,151 +1,143 @@
-// cargo run -p asap-lower --bin variant_coverage
+// cargo run -p asap-lower --bin variant_coverage -- --data-ingestion-interval-ms 1000
 //
 // Lowers every query in every corpus we have (PromQL + SQL), walks the
-// resulting QueryExpr trees, and reports which enum variants show up — per
-// corpus, then rolled up globally. Used to find the minimal QueryExpr node set.
+// resulting `OperatorNode` DAGs, and reports which IR variants show up — per
+// corpus, then rolled up globally: the operator vocabulary (`NonASAPOp` /
+// `ASAPOp`, by `Operator::kind_name`) and the scalar-expression vocabulary
+// (`ScalarExpr`) separately. Used to find the minimal IR node set.
 
 use asap_devtools::lower_promql_with_data_ingestion_interval;
 use asap_frontend_sql::{lower_sql_dialect, SqlCatalog};
+use asap_types::ir::{OperatorNode, ScalarExpr};
 use asap_types::pre_asap::schema::{Field, DataType, Schema};
-use asap_types::pre_asap::QueryExpr;
 use asap_types::types::AccuracyTarget;
 use asap_types::workload::SqlDialect;
 use std::collections::BTreeSet;
+use std::rc::Rc;
 
-const ALL_VARIANTS: &[&str] = &[
+/// Every `Operator::kind_name()`: all `NonASAPOp` variants, then all `ASAPOp`
+/// variants. A front end only ever emits the former; the latter are listed so
+/// the "unused" report stays an honest view of the whole vocabulary.
+const OPERATOR_VARIANTS: &[&str] = &[
+    // NonASAPOp
     "Scan",
-    "PromqlScalarBridge",
-    "EvalTimestamp",
-    "CurrentTimestamp",
-    "PromqlVectorFromScalar",
-    "PromqlScalarFromVector",
-    "PromqlRelabel",
-    "PromqlInfoEnrich",
-    "PromqlSeriesSample",
+    "Values",
     "Filter",
     "Project",
     "Aggregate",
-    "Dedup",
-    "Concat",
     "Join",
     "SetOp",
+    "Concat",
+    "Dedup",
     "Sort",
     "Limit",
-    "PromqlSubquery",
+    "BinaryOp",
+    "SQLWindowFunc",
     "TimeRange",
     "TimeShift",
-    "SQLWindowFunc",
-    "BinaryOp",
+    "PromqlVectorFromScalar",
+    "PromqlRelabel",
+    "PromqlInfoEnrich",
+    "PromqlSeriesSample",
+    "PromqlSubquery",
+    "ScalarBridge",
+    // ASAPOp
+    "SummaryAgg",
+    "SummaryEstimate",
+    "FinalizeExactAccumulator",
+    "MaintainPopulation",
+    "ReadPopulation",
+    "SummaryMerge",
+    "SummarySubtract",
+    "SummaryDelete",
+    "SummaryJoin",
+    "Extension",
 ];
 
-fn walk(e: &QueryExpr, seen: &mut BTreeSet<&'static str>) {
+/// Every `ScalarExpr` variant, named as `scalar_kind_name` reports it.
+const SCALAR_VARIANTS: &[&str] = &[
+    "Column",
+    "Literal",
+    "Negative",
+    "Compare",
+    "BoolAnd",
+    "BoolOr",
+    "Not",
+    "IsNull",
+    "IsNotNull",
+    "Cast",
+    "InList",
+    "FunctionCall",
+    "Arithmetic",
+    "Case",
+    "CurrentTimestamp",
+    "EvalTimestamp",
+    "PromqlScalarFromVector",
+    "ScalarSubquery",
+    "Exists",
+    "InSubquery",
+];
+
+/// The variant name of a scalar expression. Exhaustive on purpose: a new
+/// `ScalarExpr` variant fails to compile here until it is named.
+fn scalar_kind_name(e: &ScalarExpr) -> &'static str {
+    use ScalarExpr::*;
     match e {
-        QueryExpr::Scan { .. } => {
-            seen.insert("Scan");
+        Column(_) => "Column",
+        Literal(_) => "Literal",
+        Negative { .. } => "Negative",
+        Compare { .. } => "Compare",
+        BoolAnd(_) => "BoolAnd",
+        BoolOr(_) => "BoolOr",
+        Not(_) => "Not",
+        IsNull(_) => "IsNull",
+        IsNotNull(_) => "IsNotNull",
+        Cast { .. } => "Cast",
+        InList { .. } => "InList",
+        FunctionCall { .. } => "FunctionCall",
+        Arithmetic { .. } => "Arithmetic",
+        Case { .. } => "Case",
+        CurrentTimestamp => "CurrentTimestamp",
+        EvalTimestamp => "EvalTimestamp",
+        PromqlScalarFromVector(_) => "PromqlScalarFromVector",
+        ScalarSubquery(_) => "ScalarSubquery",
+        Exists { .. } => "Exists",
+        InSubquery { .. } => "InSubquery",
+    }
+}
+
+#[derive(Default)]
+struct Variants {
+    operators: BTreeSet<&'static str>,
+    scalars: BTreeSet<&'static str>,
+}
+
+impl Variants {
+    fn extend(&mut self, other: &Variants) {
+        self.operators.extend(other.operators.iter().copied());
+        self.scalars.extend(other.scalars.iter().copied());
+    }
+}
+
+fn walk_scalar(e: &ScalarExpr, seen: &mut BTreeSet<&'static str>) {
+    seen.insert(scalar_kind_name(e));
+    for child in e.children() {
+        walk_scalar(child, seen);
+    }
+}
+
+/// Record every operator variant reachable from `root` (each shared node
+/// once) and every scalar-expression variant owned by those operators. The
+/// operator nodes a scalar expression reads (`scalar(v)`, subqueries) are in
+/// `OperatorNode::children`, so `reachable` already covers them.
+fn walk(root: &Rc<OperatorNode>, seen: &mut Variants) {
+    for node in OperatorNode::reachable(root) {
+        seen.operators.insert(node.operator.kind_name());
+        if let Some(op) = node.non_asap() {
+            for expr in op.scalar_exprs() {
+                walk_scalar(expr, &mut seen.scalars);
+            }
         }
-        QueryExpr::PromqlScalarBridge(_) => {
-            seen.insert("PromqlScalarBridge");
-        }
-        QueryExpr::EvalTimestamp => {
-            seen.insert("EvalTimestamp");
-        }
-        QueryExpr::CurrentTimestamp => {
-            seen.insert("CurrentTimestamp");
-        }
-        QueryExpr::PromqlVectorFromScalar(inner) => {
-            seen.insert("PromqlVectorFromScalar");
-            walk(inner, seen);
-        }
-        QueryExpr::PromqlScalarFromVector(inner) => {
-            seen.insert("PromqlScalarFromVector");
-            walk(inner, seen);
-        }
-        QueryExpr::PromqlRelabel { child, .. } => {
-            seen.insert("PromqlRelabel");
-            walk(child, seen);
-        }
-        QueryExpr::PromqlInfoEnrich { child, .. } => {
-            seen.insert("PromqlInfoEnrich");
-            walk(child, seen);
-        }
-        QueryExpr::PromqlSeriesSample { child, .. } => {
-            seen.insert("PromqlSeriesSample");
-            walk(child, seen);
-        }
-        QueryExpr::Filter { child, .. } => {
-            seen.insert("Filter");
-            walk(child, seen);
-        }
-        QueryExpr::Project { child, .. } => {
-            seen.insert("Project");
-            walk(child, seen);
-        }
-        QueryExpr::Aggregate { child, .. } => {
-            seen.insert("Aggregate");
-            walk(child, seen);
-        }
-        QueryExpr::Dedup { child, .. } => {
-            seen.insert("Dedup");
-            walk(child, seen);
-        }
-        QueryExpr::Concat { children, .. } => {
-            seen.insert("Concat");
-            children.iter().for_each(|c| walk(c, seen));
-        }
-        QueryExpr::Join { left, right, .. } => {
-            seen.insert("Join");
-            walk(left, seen);
-            walk(right, seen);
-        }
-        QueryExpr::SetOp { left, right, .. } => {
-            seen.insert("SetOp");
-            walk(left, seen);
-            walk(right, seen);
-        }
-        QueryExpr::Sort { child, .. } => {
-            seen.insert("Sort");
-            walk(child, seen);
-        }
-        QueryExpr::Limit { child, .. } => {
-            seen.insert("Limit");
-            walk(child, seen);
-        }
-        QueryExpr::PromqlSubquery { child, .. } => {
-            seen.insert("PromqlSubquery");
-            walk(child, seen);
-        }
-        QueryExpr::TimeRange { child, .. } => {
-            seen.insert("TimeRange");
-            walk(child, seen);
-        }
-        QueryExpr::TimeShift { child, .. } => {
-            seen.insert("TimeShift");
-            walk(child, seen);
-        }
-        QueryExpr::SQLWindowFunc { child, .. } => {
-            seen.insert("SQLWindowFunc");
-            walk(child, seen);
-        }
-        QueryExpr::BinaryOp { lhs, rhs, .. } => {
-            seen.insert("BinaryOp");
-            walk(lhs, seen);
-            walk(rhs, seen);
-        }
-        // Scalar expression variants (issue #205) aren't relational nodes;
-        // this walk only reports on the relational skeleton, so stop here.
-        QueryExpr::Column(_)
-        | QueryExpr::Literal(_)
-        | QueryExpr::Compare { .. }
-        | QueryExpr::BoolAnd(_)
-        | QueryExpr::BoolOr(_)
-        | QueryExpr::Not(_)
-        | QueryExpr::IsNull(_)
-        | QueryExpr::IsNotNull(_)
-        | QueryExpr::Cast { .. }
-        | QueryExpr::InList { .. }
-        | QueryExpr::FunctionCall { .. }
-        | QueryExpr::Arithmetic { .. }
-        | QueryExpr::Case { .. } => {}
     }
 }
 
@@ -237,13 +229,22 @@ struct CorpusResult {
     name: &'static str,
     lowered: usize,
     failed: usize,
-    variants: BTreeSet<&'static str>,
+    variants: Variants,
 }
 
 fn report(r: &CorpusResult) {
     println!("--- {} ---", r.name);
     println!("lowered: {}, failed: {}", r.lowered, r.failed);
-    println!("variants ({}): {:?}", r.variants.len(), r.variants);
+    println!(
+        "operator variants ({}): {:?}",
+        r.variants.operators.len(),
+        r.variants.operators
+    );
+    println!(
+        "scalar variants ({}): {:?}",
+        r.variants.scalars.len(),
+        r.variants.scalars
+    );
     println!();
 }
 
@@ -292,7 +293,7 @@ async fn main() {
         ),
     ];
     for (name, corpus) in promql_corpora {
-        let mut variants = BTreeSet::new();
+        let mut variants = Variants::default();
         let mut lowered = 0;
         let mut failed = 0;
         for q in promql_lines(corpus) {
@@ -320,7 +321,7 @@ async fn main() {
     ];
     for (name, corpus, catalog_fn) in sql_corpora {
         let catalog = catalog_fn();
-        let mut variants = BTreeSet::new();
+        let mut variants = Variants::default();
         let mut lowered = 0;
         let mut failed = 0;
         for q in sql_stmts(corpus) {
@@ -353,7 +354,7 @@ async fn main() {
         let corpus =
             include_str!("../../../frontend-sql/tests/bgp_analytics/data/bgp_analytics.sql");
         let catalog = bgp_catalog();
-        let mut variants = BTreeSet::new();
+        let mut variants = Variants::default();
         let mut lowered = 0;
         let mut failed = 0;
         for q in sql_stmts(corpus) {
@@ -384,25 +385,30 @@ async fn main() {
         report(r);
     }
 
-    let mut global: BTreeSet<&'static str> = BTreeSet::new();
+    let mut global = Variants::default();
     let mut total_lowered = 0;
     let mut total_failed = 0;
     for r in &results {
-        global.extend(r.variants.iter().copied());
+        global.extend(&r.variants);
         total_lowered += r.lowered;
         total_failed += r.failed;
     }
 
     println!("=== global ===");
     println!("total lowered: {total_lowered}, total failed: {total_failed}\n");
-    println!("used variants ({}):", global.len());
-    for v in &global {
-        println!("  {v}");
-    }
-    println!("\nunused variants ({}):", ALL_VARIANTS.len() - global.len());
-    for v in ALL_VARIANTS {
-        if !global.contains(v) {
+    for (label, used, all) in [
+        ("operator", &global.operators, OPERATOR_VARIANTS),
+        ("scalar", &global.scalars, SCALAR_VARIANTS),
+    ] {
+        println!("used {label} variants ({}):", used.len());
+        for v in used {
             println!("  {v}");
         }
+        let unused: Vec<_> = all.iter().filter(|v| !used.contains(*v)).collect();
+        println!("\nunused {label} variants ({}):", unused.len());
+        for v in unused {
+            println!("  {v}");
+        }
+        println!();
     }
 }

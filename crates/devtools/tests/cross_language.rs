@@ -4,7 +4,7 @@
 //! canonical intent algebra**, so a post-ASAP binding rule matching on
 //! `AggIntent` sees one spelling regardless of source language. These tests
 //! are the executable spec
-//! for the shared [`canonicalize`](asap_types::pre_asap::canonicalize) pass: they pin the
+//! for the shared [`canonicalize`](asap_types::ir::canonicalize) pass: they pin the
 //! canonical heavy-hitter shape and assert both front ends reach it.
 //!
 //! A literal `lower_sql(S) == lower_promql(P)` cannot hold — the two count
@@ -15,8 +15,10 @@
 
 use asap_devtools::{lower_promql_with_data_ingestion_interval, lower_sql, SqlCatalog};
 use asap_types::pre_asap::schema::{Field, DataType, Schema};
-use asap_types::pre_asap::{AggIntent, GroupKeys, QueryExpr};
+use asap_types::ir::{NonASAPOp, OperatorNode};
+use asap_types::pre_asap::{AggIntent, GroupKeys};
 use asap_types::types::AccuracyTarget;
+use std::rc::Rc;
 
 fn col(name: &str, dtype: DataType) -> Field {
     Field::plain(name, dtype, false)
@@ -39,26 +41,26 @@ fn catalog() -> SqlCatalog {
     )
 }
 
-async fn sql(q: &str) -> QueryExpr {
+async fn sql(q: &str) -> Rc<OperatorNode> {
     lower_sql(q, &catalog(), AccuracyTarget::Exact)
         .await
         .unwrap_or_else(|e| panic!("SQL {q:?} failed to lower: {e:?}"))
 }
 
-fn promql(q: &str) -> QueryExpr {
+fn promql(q: &str) -> Rc<OperatorNode> {
     lower_promql_with_data_ingestion_interval(q, AccuracyTarget::Exact, 1_000)
         .unwrap_or_else(|e| panic!("PromQL {q:?} failed to lower: {e:?}"))
 }
 
 /// The canonical heavy-hitter shape: an outer `Aggregate([TopK{k}])` (grouped by
 /// `by`) over an inner `Aggregate([Count])`. Returns `(k, outer_by)`.
-fn heavy_hitter(qe: &QueryExpr) -> Option<(usize, GroupKeys)> {
-    let QueryExpr::Aggregate {
+fn heavy_hitter(qe: &OperatorNode) -> Option<(usize, GroupKeys)> {
+    let Some(NonASAPOp::Aggregate {
         reduction,
         measures,
         child,
         ..
-    } = qe
+    }) = qe.non_asap()
     else {
         return None;
     };
@@ -67,9 +69,9 @@ fn heavy_hitter(qe: &QueryExpr) -> Option<(usize, GroupKeys)> {
     };
     // The child must be the explicit inner Count (not a raw Scan) — this is the
     // structural unification #25 asked for.
-    let QueryExpr::Aggregate {
+    let Some(NonASAPOp::Aggregate {
         measures: inner, ..
-    } = child.as_ref()
+    }) = child.non_asap()
     else {
         return None;
     };
@@ -151,20 +153,20 @@ async fn ascending_count_ranked_topk_stays_generic_in_both_languages() {
     );
     // Both are the generic order-by-value + limit shape.
     assert!(
-        matches!(&s, QueryExpr::Limit { .. }),
+        matches!(s.non_asap(), Some(NonASAPOp::Limit { .. })),
         "SQL stays a Limit: {s:?}"
     );
     assert!(
-        matches!(&p, QueryExpr::Limit { .. }),
+        matches!(p.non_asap(), Some(NonASAPOp::Limit { .. })),
         "PromQL stays a Limit: {p:?}"
     );
 }
 
 /// Descend through a leading `Project` (the derived-table SELECT list).
-fn strip_project(qe: &QueryExpr) -> &QueryExpr {
-    match qe {
-        QueryExpr::Project { child, .. } => strip_project(child),
-        other => other,
+fn strip_project(qe: &Rc<OperatorNode>) -> &Rc<OperatorNode> {
+    match qe.non_asap() {
+        Some(NonASAPOp::Project { child, .. }) => strip_project(child),
+        _ => qe,
     }
 }
 
@@ -202,10 +204,10 @@ async fn sql_rownumber_avg_topk_is_a_generic_partitioned_sort_limit() {
         heavy_hitter(strip_project(&s9)).is_none(),
         "AVG-ranked is not a heavy-hitter"
     );
-    let QueryExpr::Limit { child, .. } = strip_project(&s9) else {
+    let Some(NonASAPOp::Limit { child, .. }) = strip_project(&s9).non_asap() else {
         panic!("expected a Limit, got {:?}", strip_project(&s9));
     };
-    let QueryExpr::Sort { partition_by, .. } = child.as_ref() else {
+    let Some(NonASAPOp::Sort { partition_by, .. }) = child.non_asap() else {
         panic!("expected a Sort under the Limit");
     };
     assert!(!partition_by.is_empty(), "partitioned by region");
