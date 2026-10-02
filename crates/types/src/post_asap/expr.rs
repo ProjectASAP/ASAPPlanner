@@ -182,7 +182,7 @@ pub enum SummaryExpr {
         /// How this aggregation's output rows relate to `child`'s — the
         /// same [`Reduction`] the pre-ASAP `Aggregate` node it was bound
         /// from carried (issue #165), reused verbatim rather than
-        /// flattened to a bare `Vec<FieldId>`. `Reduction::Reduce(by)`
+        /// flattened to a bare `Vec<ColumnId>`. `Reduction::Reduce(by)`
         /// with an empty `by` is a genuine full reduction (merge every
         /// candidate into one group); `Reduction::PerEntity` has no
         /// grouping concept at all (never merge across entities) — the

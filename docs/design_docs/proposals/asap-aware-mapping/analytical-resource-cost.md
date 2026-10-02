@@ -665,7 +665,7 @@ per-series intents such as exact quantile, cardinality, and Top-K aggregate
 intents remain unavailable until they have an explicit physical algorithm.
 Hash-join lowering
 also uses the bound left and right output schemas to prove that every equality
-compares one column from each side; same-side or out-of-range `FieldId`s fail
+compares one column from each side; same-side or out-of-range `ColumnId`s fail
 closed.
 
 An `Rc<QueryExpr>` address is not physical identity. Every logical occurrence

@@ -8,14 +8,14 @@
 //!   label matchers) and emits `UnresolvedQueryExpr` nodes with unresolved
 //!   `ColumnRef`s — the same DAG shape
 //!   [`resolve_root`](asap_types::pre_asap::resolve_root) later binds to
-//!   canonical, positional `QueryExpr<FieldId>`. The structural decisions a
+//!   canonical, positional `QueryExpr<ColumnId>`. The structural decisions a
 //!   separate converter stage would otherwise have to make (heavy-hitter
 //!   `topk` recognition, the `PerEntity`/`Reduce` reduction choice,
 //!   `without(...)` grouping) are made right here, since a front end
 //!   building this shape already knows the answer at parse time — see
 //!   `reduction_for` and `mark_without`. `resolve_root` is left with exactly
 //!   the schema-*dependent* work: binding every `ColumnRef` to its
-//!   positional `FieldId`.
+//!   positional `ColumnId`.
 //!
 //! # PromQL → canonical unresolved-DAG mapping (summary)
 //!

@@ -1,7 +1,7 @@
 //! The **SchemaResolver** — name resolution as an explicit pass.
 //!
 //! [`SchemaResolver::resolve_schema`] produces the complete, self-contained [`Schema`] every
-//! `FieldId` in the canonical tree indexes into. [`resolve`](super::resolve)
+//! `ColumnId` in the canonical tree indexes into. [`resolve`](super::resolve)
 //! then becomes purely structural: it threads the SchemaResolver's schema and
 //! positional resolution downstream is **total**.
 //!
@@ -70,7 +70,7 @@ impl<C: SchemaCatalog> SchemaResolver<C> {
     ///
     /// Contains the time axis, the synthetic `value` column, and one column
     /// per distinct name referenced anywhere in the tree — so positional
-    /// `FieldId` resolution downstream is total.
+    /// `ColumnId` resolution downstream is total.
     pub fn resolve_schema(&self, tree: &UnresolvedQueryExpr) -> Schema {
         self.resolve_schema_with_inherited(tree, &[])
     }

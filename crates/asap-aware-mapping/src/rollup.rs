@@ -64,9 +64,9 @@
 //! asks for) consults it, and so does this module's `replacements`, so the
 //! two can never disagree about which intents are eligible.
 //!
-//! ## `FieldId` comparability — only sound for identical child IR
+//! ## `ColumnId` comparability — only sound for identical child IR
 //!
-//! A `FieldId` is a *position* into a specific `Schema` (`crates/types/src/pre_asap/schema.rs`'s
+//! A `ColumnId` is a *position* into a specific `Schema` (`crates/types/src/pre_asap/schema.rs`'s
 //! own doc: "the same edge, the same schema, the same positional numbering").
 //! Comparing the coarser aggregate's `by` positions against the finer
 //! aggregate's `by` positions is only meaningful when both aggregates have
@@ -74,7 +74,7 @@
 //! Thus both `by` lists index the same shape. The equality fallback matters
 //! for scans that CSE conservatively declines to alias because they have no
 //! declared unique key. Structurally different sources remain out of scope:
-//! this module never reconciles `FieldId`s across distinct schemas.
+//! this module never reconciles `ColumnId`s across distinct schemas.
 //!
 //! ## Non-goals (tracked separately, not attempted here — same split
 //! `replacement.rs`'s own module docs draw for `SharedSubDAGStrategy`'s
@@ -90,10 +90,10 @@
 //!   `asap-aware-mapping`'s scope (see issue #254's own "Non-goal" section)
 //!   — this module only constructs the pre-ASAP [`QueryExpr::Aggregate`]
 //!   rewrite; a `CostModel`/search engine decides whether to prefer it.
-//! - **No cross-schema reconciliation** (see "`FieldId` comparability"
+//! - **No cross-schema reconciliation** (see "`ColumnId` comparability"
 //!   above) and **no `without(...)` grouping support** — `without`'s kept
 //!   set is runtime-open (never enumerable at plan time, per
-//!   `GroupKeys`'s own doc), so there is no fixed `FieldId` set to compare
+//!   `GroupKeys`'s own doc), so there is no fixed `ColumnId` set to compare
 //!   against a superset/subset relationship at all; [`is_legal_rollup_source`]
 //!   declines both directions.
 
@@ -102,7 +102,7 @@ use std::rc::Rc;
 
 use asap_types::pre_asap::agg_intent::AggIntent;
 use asap_types::pre_asap::query_expr::{any_measure_filtered, GroupKeys, QueryExpr, Reduction};
-use asap_types::pre_asap::schema::{FieldId, Schema};
+use asap_types::pre_asap::schema::{ColumnId, Schema};
 use asap_types::types::AccuracyTarget;
 
 use crate::replacement::{Replacement, ReplacementStrategy, ReplacementSubDAG, TargetSubDAG};
@@ -153,7 +153,7 @@ fn bindable_grouped_aggregate(
 /// deliberately: `agg_is_mergeable` answers "does *some* partial-state merge
 /// exist", not "is self- or sum-recombination the right one," and this
 /// module only ever proposes a rewrite it can construct correctly.
-fn rollup_combinator(intent: &AggIntent, finer_measure_col: FieldId) -> Option<AggIntent> {
+fn rollup_combinator(intent: &AggIntent, finer_measure_col: ColumnId) -> Option<AggIntent> {
     match intent {
         // Self-combining: reapplying the identical operator over the finer
         // side's own output column is correct unchanged.
@@ -199,7 +199,7 @@ fn rollup_combinator(intent: &AggIntent, finer_measure_col: FieldId) -> Option<A
 ///    never `agg_is_mergeable` — and also excludes every `agg_is_mergeable`
 ///    intent this module doesn't specifically handle, e.g. `Rate`).
 /// 3. Neither grouping is a `without(...)` exclusion grouping — `without`'s
-///    kept set is runtime-open, so there is no fixed `FieldId` set to
+///    kept set is runtime-open, so there is no fixed `ColumnId` set to
 ///    compare a superset/subset relationship against (see the module docs).
 /// 4. `finer_output_schema` (the finer aggregate's own *output* schema, not
 ///    the shared child's) carries a provable unique key
@@ -212,7 +212,7 @@ fn rollup_combinator(intent: &AggIntent, finer_measure_col: FieldId) -> Option<A
 ///    exactly the property re-aggregating over `finer` as if it were a
 ///    fresh source requires.
 /// 5. `coarser_by` is a **strict, proper** subset of `finer_by` (same
-///    `FieldId`s, finer strictly more of them) — an *equal* `by` is
+///    `ColumnId`s, finer strictly more of them) — an *equal* `by` is
 ///    `SharedSubDAGStrategy`'s CSE-sharing question, not a roll-up, so
 ///    equality is deliberately excluded here, not treated as a degenerate
 ///    roll-up.
@@ -239,13 +239,13 @@ pub fn is_legal_rollup_source(
 }
 
 /// Whether `finer` is a strict, proper superset of `coarser` — every
-/// `FieldId` in `coarser` also appears in `finer`, and `finer` has more of
+/// `ColumnId` in `coarser` also appears in `finer`, and `finer` has more of
 /// them (an equal-length or shorter `finer` can never be a proper
 /// superset, so the length check alone rules out equality without a set
 /// comparison).
-fn is_strict_column_superset(finer: &[FieldId], coarser: &[FieldId]) -> bool {
-    let finer_set: HashSet<&FieldId> = finer.iter().collect();
-    let coarser_set: HashSet<&FieldId> = coarser.iter().collect();
+fn is_strict_column_superset(finer: &[ColumnId], coarser: &[ColumnId]) -> bool {
+    let finer_set: HashSet<&ColumnId> = finer.iter().collect();
+    let coarser_set: HashSet<&ColumnId> = coarser.iter().collect();
     if finer_set.len() <= coarser_set.len() {
         return false;
     }
@@ -341,14 +341,14 @@ impl ReplacementStrategy for RollupStrategy {
 /// measure column, with `child = finer` instead of the original shared
 /// source.
 ///
-/// `coarser_by`'s `FieldId`s are positions into the *shared child's*
-/// schema (the same schema `finer_by`'s `FieldId`s index into — see the
-/// module docs' "`FieldId` comparability" section). `finer`'s own output
+/// `coarser_by`'s `ColumnId`s are positions into the *shared child's*
+/// schema (the same schema `finer_by`'s `ColumnId`s index into — see the
+/// module docs' "`ColumnId` comparability" section). `finer`'s own output
 /// schema is a *different* schema (`finer_by`'s columns, in order, followed
 /// by its one measure column — `aggregate_output_schema`'s `by ++ measures`
 /// shape), so each of `coarser_by`'s columns must be translated from its
 /// position in the shared child to its position in `finer`'s output: the
-/// index its `FieldId` occupies within `finer_by`'s own ordered list.
+/// index its `ColumnId` occupies within `finer_by`'s own ordered list.
 fn build_rollup(
     finer: &Rc<QueryExpr>,
     coarser_by: &GroupKeys,
@@ -358,10 +358,10 @@ fn build_rollup(
     let (finer_by, _, _) = bindable_grouped_aggregate(finer)?;
     // `finer`'s own single measure sits right after its `by` columns in its
     // output schema (`aggregate_output_schema`'s `by ++ measures` layout).
-    let finer_measure_col: FieldId = finer_by.len();
+    let finer_measure_col: ColumnId = finer_by.len();
     let combinator = rollup_combinator(intent, finer_measure_col)?;
 
-    let remapped_by: Vec<FieldId> = coarser_by
+    let remapped_by: Vec<ColumnId> = coarser_by
         .keys()
         .iter()
         .map(|id| finer_by.keys().iter().position(|f| f == id))
@@ -416,7 +416,7 @@ mod tests {
         }
     }
 
-    fn agg(by: Vec<FieldId>, intent: AggIntent, child: &Rc<QueryExpr>) -> Rc<QueryExpr> {
+    fn agg(by: Vec<ColumnId>, intent: AggIntent, child: &Rc<QueryExpr>) -> Rc<QueryExpr> {
         Rc::new(QueryExpr::Aggregate {
             reduction: Reduction::by(by),
             measures: vec![intent],
@@ -428,7 +428,7 @@ mod tests {
     }
 
     fn without_agg(
-        excluded: Vec<FieldId>,
+        excluded: Vec<ColumnId>,
         intent: AggIntent,
         child: &Rc<QueryExpr>,
     ) -> Rc<QueryExpr> {

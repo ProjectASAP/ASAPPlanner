@@ -20,12 +20,14 @@ use crate::post_asap::sketch::{
     StatModelKind, StatModelParams, WaveletKind, WaveletParams,
 };
 
-/// Index into [`Schema::fields`] used everywhere a column position is
-/// referenced (group-by keys, unique-key sets, the time axis index).
+/// Zero-based position of a column in a particular operator's input or output.
 ///
-/// Kept as a named type so downstream code can pattern on the intent ("this
-/// is a column position, not just any number").
-pub type FieldId = usize;
+/// During planning, the position indexes [`Schema::fields`] to obtain metadata;
+/// during execution, it identifies the corresponding value in each input row.
+/// Expressions, grouping keys, and schema key/time metadata use the same position.
+/// It is local to that schema, not a stable field identity across projections or
+/// joins, and does not own data or prescribe a row/column-oriented storage layout.
+pub type ColumnId = usize;
 
 /// One field of a [`Schema`]: `name + dtype + nullable`, plus an optional
 /// table qualifier. The struct describes a column and holds none of its data.
@@ -212,7 +214,7 @@ pub enum DataType {
 /// Per-edge schema. Flowing between any two operators, on every node's
 /// input and output.
 ///
-/// `unique_keys` is metadata for reuse-aware planning: each inner `Vec<FieldId>`
+/// `unique_keys` is metadata for reuse-aware planning: each inner `Vec<ColumnId>`
 /// is a set of column indices that together uniquely identify rows. The
 /// outer `Vec` allows multiple unique-key sets (primary key + another
 /// unique constraint). Populated by per-node input/output spec —
@@ -226,12 +228,12 @@ pub struct Schema {
     /// Index into `fields` for the time axis, if any. PromQL leaves
     /// always carry one; SQL leaves may or may not.
     #[serde(default)]
-    pub time_index: Option<FieldId>,
+    pub time_index: Option<ColumnId>,
     /// Unique-key sets — each inner vec is a tuple of column indices
     /// that together uniquely identifies a row. Empty `Vec` means
     /// "no provable unique constraint" (the conservative default).
     #[serde(default)]
-    pub unique_keys: Vec<Vec<FieldId>>,
+    pub unique_keys: Vec<Vec<ColumnId>>,
     /// Whether this schema **completely enumerates** the columns at this point.
     ///
     /// - `true` (**closed**): there are no columns beyond these — a catalog-backed
@@ -265,9 +267,9 @@ struct SchemaWire {
     fields: Option<Vec<FieldWire>>,
     columns: Option<Vec<FieldWire>>,
     #[serde(default)]
-    time_index: Option<FieldId>,
+    time_index: Option<ColumnId>,
     #[serde(default)]
-    unique_keys: Vec<Vec<FieldId>>,
+    unique_keys: Vec<Vec<ColumnId>>,
     closed: Option<bool>,
 }
 
@@ -426,8 +428,8 @@ impl Schema {
     /// inferred unique keys (e.g. PromQL leaves: `[time_index, label_set]`).
     pub fn with_time_index(
         fields: Vec<Field>,
-        time_index: FieldId,
-        unique_keys: Vec<Vec<FieldId>>,
+        time_index: ColumnId,
+        unique_keys: Vec<Vec<ColumnId>>,
     ) -> Self {
         Self {
             fields,
@@ -440,7 +442,7 @@ impl Schema {
     /// The schema of a summary-planning node: `fields` and a time axis, no
     /// unique-key claim, closed. The shape every post-ASAP operator output
     /// carried before pre- and post-ASAP schemas were one type.
-    pub fn lifted(fields: Vec<Field>, time_index: Option<FieldId>) -> Self {
+    pub fn lifted(fields: Vec<Field>, time_index: Option<ColumnId>) -> Self {
         Self {
             fields,
             time_index,
@@ -455,14 +457,14 @@ impl Schema {
     }
 
     /// Look up a field by name (first match). `None` if not present.
-    pub fn column_id(&self, name: &str) -> Option<FieldId> {
+    pub fn column_id(&self, name: &str) -> Option<ColumnId> {
         self.fields.iter().position(|c| c.name == name)
     }
 
     /// Look up a field by `(table, name)` qualifier — disambiguates columns
     /// that share a `name` across a join (`a.k` vs `b.k`). `None` if no field
     /// has both that qualifier and name.
-    pub fn column_id_qualified(&self, table: &str, name: &str) -> Option<FieldId> {
+    pub fn column_id_qualified(&self, table: &str, name: &str) -> Option<ColumnId> {
         self.fields
             .iter()
             .position(|c| c.name == name && c.table.as_deref() == Some(table))
@@ -478,7 +480,7 @@ impl Schema {
     /// Append `cols` as an additional unique-key set if not already present.
     /// Used by `Dedup { cols }`: "the input schema with `unique_keys`
     /// tightened to include `cols`".
-    pub fn add_unique_key(&mut self, cols: Vec<FieldId>) {
+    pub fn add_unique_key(&mut self, cols: Vec<ColumnId>) {
         if !self.unique_keys.contains(&cols) {
             self.unique_keys.push(cols);
         }

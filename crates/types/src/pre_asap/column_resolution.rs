@@ -1,7 +1,7 @@
 //! Schema-driven column resolution.
 //!
 //! Front ends (issue #179) emit `ColumnRef` (name-based, optionally
-//! table-qualified); the canonical tree uses positional [`FieldId`] resolved
+//! table-qualified); the canonical tree uses positional [`ColumnId`] resolved
 //! against a per-node [`Schema`]. These helpers bridge the two — the
 //! [`SchemaResolver`](super::schema_resolver) builds the schema, and [`resolve_column_refs`]
 //! turns name-based refs (group keys, dedup columns) into positional ids,
@@ -17,7 +17,7 @@ use super::query_expr::{
     aggregate_output_schema, GroupKeys, QueryExpr, QueryExprError, Reduction, ResolvedQueryExpr,
     UnresolvedQueryExpr,
 };
-use super::schema::{DataType, FieldDataType, FieldId, Schema};
+use super::schema::{ColumnId, DataType, FieldDataType, Schema};
 
 /// Errors returned by the resolution helpers.
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -29,12 +29,12 @@ pub enum ResolveError {
     },
     #[error("ColumnRef::SampleValue has no `value` column in schema (have: {available:?})")]
     NoSampleValue { available: Vec<String> },
-    #[error("ColumnRef::Wildcard cannot be resolved to a single FieldId")]
+    #[error("ColumnRef::Wildcard cannot be resolved to a single ColumnId")]
     WildcardNotPositional,
 }
 
-/// Resolve a single [`ColumnRef`] to a positional [`FieldId`].
-pub fn resolve_column_ref(col: &ColumnRef, schema: &Schema) -> Result<FieldId, ResolveError> {
+/// Resolve a single [`ColumnRef`] to a positional [`ColumnId`].
+pub fn resolve_column_ref(col: &ColumnRef, schema: &Schema) -> Result<ColumnId, ResolveError> {
     match col {
         ColumnRef::Named(name) => schema
             .column_id(name)
@@ -62,7 +62,7 @@ pub fn resolve_column_ref(col: &ColumnRef, schema: &Schema) -> Result<FieldId, R
                 // of any type") avoids binding `SampleValue` to a label column in
                 // a `[ts, host:Utf8]`-shaped schema (#70), and still resolves an
                 // outer ranking's sort key (`topk(k, sum by (job) (…))`).
-                let numeric: Vec<FieldId> = (0..schema.fields.len())
+                let numeric: Vec<ColumnId> = (0..schema.fields.len())
                     .filter(|&i| Some(i) != schema.time_index)
                     .filter(|&i| {
                         matches!(
@@ -84,7 +84,7 @@ pub fn resolve_column_ref(col: &ColumnRef, schema: &Schema) -> Result<FieldId, R
 pub fn resolve_column_refs(
     cols: &[ColumnRef],
     schema: &Schema,
-) -> Result<Vec<FieldId>, ResolveError> {
+) -> Result<Vec<ColumnId>, ResolveError> {
     cols.iter().map(|c| resolve_column_ref(c, schema)).collect()
 }
 
@@ -106,7 +106,7 @@ pub fn resolve_column_refs(
 pub fn resolve_group_keys_promql(
     cols: &[ColumnRef],
     schema: &Schema,
-) -> Result<Vec<FieldId>, ResolveError> {
+) -> Result<Vec<ColumnId>, ResolveError> {
     cols.iter()
         .filter_map(|c| match resolve_column_ref(c, schema) {
             Err(ResolveError::NotFound { .. }) if schema.closed => None,

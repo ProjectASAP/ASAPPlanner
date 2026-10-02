@@ -16,19 +16,19 @@
 use serde::{Deserialize, Serialize};
 
 use crate::pre_asap::query_expr::DataModel;
-use crate::pre_asap::schema::{DataType, Field, FieldDataType, FieldId};
+use crate::pre_asap::schema::{ColumnId, DataType, Field, FieldDataType};
 use crate::types::AccuracyTarget;
 
 /// "What to compute" — the vocabulary the planner pivots on.
 ///
 /// Grouping for `TopK` rides on the enclosing `QueryExpr::Aggregate.by`
-/// (positional `FieldId`s), like every other aggregate; the intent itself
+/// (positional `ColumnId`s), like every other aggregate; the intent itself
 /// carries only `k` + the accuracy target.
 ///
 /// The single-column reducers (`Sum` / `Min` / `Max` / `Avg` / `StdDev` /
 /// `Variance` / `Quantile`) carry `col: Option<C>` — the input
 /// column they reduce, generic over the column-reference state the same way
-/// [`QueryExpr`](super::query_expr::QueryExpr) is: positional `FieldId` once
+/// [`QueryExpr`](super::query_expr::QueryExpr) is: positional `ColumnId` once
 /// bound (the default, and every existing use of the bare `AggIntent` name),
 /// or an unresolved name-based `ColumnRef` for a front end constructing this
 /// intent directly, before the [`SchemaResolver`](super::schema_resolver::SchemaResolver) has run.
@@ -43,7 +43,7 @@ use crate::types::AccuracyTarget;
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 #[serde(bound(serialize = "C: Serialize", deserialize = "C: Deserialize<'de>"))]
-pub enum AggIntent<C = FieldId> {
+pub enum AggIntent<C = ColumnId> {
     // ── Data-model-agnostic ──────────────────────────────────────────────
     Count {
         accuracy: AccuracyTarget,
@@ -386,7 +386,7 @@ pub enum MathFunc {
 // the `PerEntity`/`Reduce` reduction shape right at construction time (see
 // `asap_frontend_promql::promql::reduction_for`) — so they stay generic
 // alongside `input_col`, in one `impl<C>` block.
-impl AggIntent<FieldId> {
+impl AggIntent<ColumnId> {
     /// Resolve the existing SQL arg-selector extension using its child schema.
     /// The tuple is (selected value column, ordering column).
     /// Unknown extensions remain owned by their deployment model. Recognized
@@ -394,7 +394,7 @@ impl AggIntent<FieldId> {
     pub fn arg_selector_columns(
         &self,
         schema: &super::schema::Schema,
-    ) -> Result<Option<(FieldId, FieldId)>, String> {
+    ) -> Result<Option<(ColumnId, ColumnId)>, String> {
         let Self::Extension { ext_kind, payload } = self else {
             return Ok(None);
         };
@@ -407,7 +407,7 @@ impl AggIntent<FieldId> {
         if fields.len() != 2 {
             return Err("arg selector requires arg_col and val_col only".into());
         }
-        let resolve = |field: &str| -> Result<FieldId, String> {
+        let resolve = |field: &str| -> Result<ColumnId, String> {
             let reference: super::expr_ir::ColumnRef = serde_json::from_value(
                 fields
                     .get(field)
@@ -782,7 +782,7 @@ mod tests {
     fn output_column_names_are_intent_keyed() {
         let v = c("value", DataType::Float64);
         assert_eq!(
-            AggIntent::<FieldId>::Count {
+            AggIntent::<ColumnId>::Count {
                 accuracy: AccuracyTarget::Exact
             }
             .output_column(&v)
@@ -790,13 +790,13 @@ mod tests {
             "count"
         );
         assert_eq!(
-            AggIntent::<FieldId>::Sum { col: None }
+            AggIntent::<ColumnId>::Sum { col: None }
                 .output_column(&v)
                 .name,
             "sum"
         );
         assert_eq!(
-            AggIntent::<FieldId>::Quantile {
+            AggIntent::<ColumnId>::Quantile {
                 col: None,
                 q: 0.99,
                 accuracy: AccuracyTarget::Epsilon(0.01)
@@ -810,7 +810,7 @@ mod tests {
     #[test]
     fn sum_preserves_input_dtype() {
         assert!(matches!(
-            AggIntent::<FieldId>::Sum { col: None }
+            AggIntent::<ColumnId>::Sum { col: None }
                 .output_column(&c("c", DataType::Int64))
                 .dtype,
             FieldDataType::Plain(DataType::Int64)
@@ -871,12 +871,12 @@ mod tests {
     fn input_cols_tracks_only_reducers() {
         assert_eq!(AggIntent::Sum { col: Some(3) }.input_cols(), vec![3]);
         assert!(
-            AggIntent::<FieldId>::Avg { col: None }
+            AggIntent::<ColumnId>::Avg { col: None }
                 .input_cols()
                 .is_empty(),
             "empty = PromQL sample value"
         );
-        assert!(AggIntent::<FieldId>::Count {
+        assert!(AggIntent::<ColumnId>::Count {
             accuracy: AccuracyTarget::Exact
         }
         .input_cols()

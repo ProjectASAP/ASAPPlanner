@@ -6,7 +6,7 @@
 //! walks the unoptimized `LogicalPlan` and emits `UnresolvedQueryExpr` nodes with
 //! unresolved `ColumnRef`s directly (issue #179) — the same DAG shape
 //! [`resolve_root`](asap_types::pre_asap::resolve_root) binds to canonical,
-//! positional `QueryExpr<FieldId>`. Unlike PromQL's front end, SQL's
+//! positional `QueryExpr<ColumnId>`. Unlike PromQL's front end, SQL's
 //! Ordinary SQL `Aggregate` nodes are `Reduction::Reduce`. The explicit
 //! `asap_rate`/`asap_increase` bridge is the narrow exception: it
 //! spells a time-series range reducer with an explicit value, time-index, and
@@ -1704,7 +1704,7 @@ fn conditional_count_arm(expr: &Expr) -> Option<(&Expr, &Expr)> {
 /// modifier rule, the "reducer argument must be a bare column" rule
 /// (`reducer_col`), φ extraction from a literal argument, and the ambient
 /// `AccuracyTarget`. `resolve_root` resolves `col` to a positional
-/// `FieldId`; the output name (DataFusion's own, e.g.
+/// `ColumnId`; the output name (DataFusion's own, e.g.
 /// `"sum(metrics.bytes)"`) is threaded separately as `Aggregate.output_names`,
 /// not carried here.
 fn lower_agg_intent(expr: &Expr) -> Result<AggIntent<ColumnRef>, LoweringError> {
@@ -1734,7 +1734,7 @@ fn lower_agg_intent(expr: &Expr) -> Result<AggIntent<ColumnRef>, LoweringError> 
             // Value reducers (`reducer_col`) require a real column — `SUM(a*b)`
             // is rejected, not silently reduced over a probe column. Quantile
             // and CountDistinct reduce a column too, so they take the same path:
-            // `col` is `Option<FieldId>` once resolved, where `None` means "the
+            // `col` is `Option<ColumnId>` once resolved, where `None` means "the
             // PromQL sample value", which a SQL query never has. Taking an
             // expression here would set `col: None` and silently drop it (#115).
             let col = |args: &[Expr]| -> Result<Option<ColumnRef>, LoweringError> {
@@ -1890,7 +1890,7 @@ fn scalar_positive_u64(value: &DfScalarValue) -> Option<u64> {
 /// core variant (issue #232). Core treats `Extension` opaquely: both columns
 /// are kept only as validated bare-column names in `payload` (`reducer_col`'s
 /// same "no expression arguments" rule, issue #115) — they are **not** run
-/// through `resolve_agg_intent`'s positional `ColumnRef` -> `FieldId`
+/// through `resolve_agg_intent`'s positional `ColumnRef` -> `ColumnId`
 /// binding the way a real reducer's `col` is, since `Extension` carries no
 /// typed column field for core to resolve. Shared `arg_selector_columns` validates
 /// and resolves those names during aggregate schema derivation, preserving the
@@ -2104,7 +2104,7 @@ fn expand_grouping_set(gs: &logical_expr::GroupingSet) -> Vec<Vec<Expr>> {
 
 /// Derived columns materialized in a `Project` beneath an `Aggregate` (#110).
 ///
-/// `Aggregate.by` holds positional `FieldId`s and each reducer holds one input
+/// `Aggregate.by` holds positional `ColumnId`s and each reducer holds one input
 /// column, so neither can hold an expression. `GROUP BY date_trunc('minute', t)`
 /// and `SUM(bytes * 8)` are therefore rewritten to group/reduce over a projected
 /// column that carries the expression's value.
