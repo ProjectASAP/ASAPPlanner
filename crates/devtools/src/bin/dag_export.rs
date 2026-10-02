@@ -741,7 +741,7 @@ fn catalog(custom: &[String]) -> SqlCatalog {
             .expect("--table-schema.name must be a string");
         let columns = value["columns"]
             .as_array()
-            .expect("--table-schema.fields must be an array");
+            .expect("--table-schema.columns must be an array");
         let columns: Vec<Field> = columns
             .iter()
             .map(|column| {

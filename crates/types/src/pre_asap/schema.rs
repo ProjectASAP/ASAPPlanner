@@ -219,6 +219,7 @@ pub enum DataType {
 /// `Aggregate { by, .. }` emits `unique_keys = [by]`; `Dedup { cols }`
 /// adds `cols`; most other nodes pass through.
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(try_from = "SchemaWire")]
 pub struct Schema {
     /// Fields flowing on this edge, in positional order.
     pub fields: Vec<Field>,
@@ -249,6 +250,73 @@ pub struct Schema {
     /// — the conservative choice when completeness is unknown.
     #[serde(default)]
     pub closed: bool,
+}
+
+/// Deserialization form of [`Schema`]. Also reads the two layouts that
+/// predate the unified schema, so plans saved by older builds still load:
+///
+/// - pre-ASAP `Schema`: `columns` (not `fields`), each `dtype` a bare
+///   [`DataType`] (`"float64"`), with `closed` / `unique_keys` present;
+/// - post-ASAP `SummarySchema`: `fields` with tagged dtypes
+///   (`{"Plain":"float64"}`), but no `closed` / `unique_keys`. Those were the
+///   [`Schema::lifted`] shape, so a missing `closed` next to `fields` is closed.
+#[derive(Deserialize)]
+struct SchemaWire {
+    fields: Option<Vec<FieldWire>>,
+    columns: Option<Vec<FieldWire>>,
+    #[serde(default)]
+    time_index: Option<ColumnId>,
+    #[serde(default)]
+    unique_keys: Vec<Vec<ColumnId>>,
+    closed: Option<bool>,
+}
+
+#[derive(Deserialize)]
+struct FieldWire {
+    name: String,
+    dtype: FieldDataTypeWire,
+    nullable: bool,
+    #[serde(default)]
+    table: Option<String>,
+}
+
+/// A tagged [`FieldDataType`], or a bare [`DataType`] from a pre-ASAP column.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum FieldDataTypeWire {
+    Current(FieldDataType),
+    Legacy(DataType),
+}
+
+impl TryFrom<SchemaWire> for Schema {
+    type Error = String;
+
+    fn try_from(wire: SchemaWire) -> Result<Self, String> {
+        let legacy_summary = wire.fields.is_some();
+        let fields = match (wire.fields, wire.columns) {
+            (Some(fields), None) | (None, Some(fields)) => fields,
+            (Some(_), Some(_)) => return Err("schema has both `fields` and `columns`".into()),
+            (None, None) => return Err("missing field `fields`".into()),
+        };
+        let fields = fields
+            .into_iter()
+            .map(|field| Field {
+                name: field.name,
+                dtype: match field.dtype {
+                    FieldDataTypeWire::Current(dtype) => dtype,
+                    FieldDataTypeWire::Legacy(dtype) => FieldDataType::Plain(dtype),
+                },
+                nullable: field.nullable,
+                table: field.table,
+            })
+            .collect();
+        Ok(Self {
+            fields,
+            time_index: wire.time_index,
+            unique_keys: wire.unique_keys,
+            closed: wire.closed.unwrap_or(legacy_summary),
+        })
+    }
 }
 
 /// Reserved physical row column carrying canonical JSON of a complete PromQL
@@ -478,26 +546,54 @@ mod tests {
     }
 
     #[test]
-    fn schema_closed_defaults_to_open_when_absent() {
-        // `closed` is `#[serde(default)]` so schemas serialized before the field
-        // existed deserialize to `closed: false` (open) — the conservative
-        // default (don't claim completeness you can't prove).
-        let mut v = serde_json::to_value(Schema::new(vec![col("a", DataType::Utf8)])).unwrap();
-        assert!(v.as_object_mut().unwrap().remove("closed").is_some());
-        let back: Schema = serde_json::from_value(v).unwrap();
+    fn legacy_pre_asap_schema_deserializes() {
+        // Pre-unification `Schema`: `columns`, bare dtypes, explicit `closed`.
+        let json = r#"{"columns":[
+            {"name":"ts","dtype":"timestamp","nullable":false,"table":null},
+            {"name":"value","dtype":"float64","nullable":true,"table":"t"}
+        ],"time_index":0,"unique_keys":[[0]],"closed":true}"#;
+        let back: Schema = serde_json::from_str(json).unwrap();
+        let mut expected = Schema::with_time_index(
+            vec![
+                col("ts", DataType::Timestamp),
+                Field::plain("value", DataType::Float64, true).with_table("t"),
+            ],
+            0,
+            vec![vec![0]],
+        );
+        expected.closed = true;
+        assert_eq!(back, expected);
+    }
+
+    #[test]
+    fn legacy_pre_asap_schema_without_closed_or_table_is_open() {
+        // Older still: written before `closed` and `Field.table` existed.
+        let json = r#"{"columns":[{"name":"a","dtype":"utf8","nullable":false}]}"#;
+        let back: Schema = serde_json::from_str(json).unwrap();
+        assert_eq!(back, Schema::new(vec![col("a", DataType::Utf8)]));
         assert!(!back.closed, "absent `closed` ⇒ open");
     }
 
     #[test]
-    fn field_table_defaults_to_none_when_absent() {
-        // `Field.table` is `#[serde(default)]` so schemas serialized before the
-        // qualifier field existed still deserialize (to `table: None`) instead
-        // of erroring. Drop the key from a serialized field to simulate that.
-        let mut v = serde_json::to_value(col("svc", DataType::Utf8)).unwrap();
-        assert!(v.as_object_mut().unwrap().remove("table").is_some());
-        let back: Field = serde_json::from_value(v).unwrap();
-        assert_eq!(back, col("svc", DataType::Utf8));
-        assert!(back.table.is_none());
+    fn legacy_summary_schema_deserializes_as_lifted() {
+        // Pre-unification post-ASAP `SummarySchema`: no `closed`/`unique_keys`.
+        let json = r#"{"fields":[
+            {"name":"ts","dtype":{"Plain":"timestamp"},"nullable":false},
+            {"name":"v","dtype":{"Plain":"float64"},"nullable":false}
+        ],"time_index":0}"#;
+        let back: Schema = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            back,
+            Schema::lifted(
+                vec![col("ts", DataType::Timestamp), col("v", DataType::Float64)],
+                Some(0)
+            )
+        );
+    }
+
+    #[test]
+    fn schema_without_fields_is_rejected() {
+        assert!(serde_json::from_str::<Schema>(r#"{"closed":true}"#).is_err());
     }
 
     #[test]

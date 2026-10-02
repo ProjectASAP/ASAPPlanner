@@ -896,13 +896,14 @@ function computeSelectionWorkloadCost(selected) {
 
 function formatSchema(schema) {
   if (!schema || typeof schema !== 'object') return 'schema unavailable';
-  const fields = Array.isArray(schema.columns) ? schema.columns : schema.fields;
+  const fields = Array.isArray(schema.fields) ? schema.fields : schema.columns;
   if (!Array.isArray(fields) || fields.length === 0) return 'empty schema';
   const rows = fields.map((field, index) => {
     const name = field && field.name !== undefined ? field.name : '?';
-    const dtype = field && field.dtype !== undefined
-      ? (typeof field.dtype === 'string' ? field.dtype : JSON.stringify(field.dtype))
-      : '?';
+    // A plain value is tagged `{"Plain": <dtype>}`; older exports wrote it bare.
+    const raw = field && field.dtype !== undefined ? field.dtype : '?';
+    const plain = raw && typeof raw === 'object' && 'Plain' in raw ? raw.Plain : raw;
+    const dtype = typeof plain === 'string' ? plain : JSON.stringify(plain);
     return {
       name: String(name),
       dtype: String(dtype).toUpperCase(),
