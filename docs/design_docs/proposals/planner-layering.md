@@ -7,6 +7,34 @@ Read Goal for the motivation and assumptions, Stages for the overview, the
 stage sections for the rules, the examples for why the rules are needed, and
 Scenarios for how the design is extended.
 
+## Contents
+
+- [Goal](#goal)
+  - [Motivation](#motivation)
+  - [Assumptions](#assumptions)
+- [Stages](#stages)
+- [Stages and their decisions](#stages-and-their-decisions)
+  - [0. Language-specific frontends](#0-language-specific-frontends)
+  - [1. Logical ASAP-aware optimization](#1-logical-asap-aware-optimization)
+    - [Pass 1: Local candidate generation](#pass-1-local-candidate-generation)
+    - [Pass 2: ASAP-aware common-subexpression elimination](#pass-2-asap-aware-common-subexpression-elimination)
+  - [2. Physical ASAP-aware optimization](#2-physical-asap-aware-optimization)
+    - [Materialization](#materialization)
+    - [Physical operator implementation](#physical-operator-implementation)
+  - [3. Plan selection](#3-plan-selection)
+  - [4. Execution](#4-execution)
+- [End-to-end examples](#end-to-end-examples)
+  - [Shared data workload](#shared-data-workload)
+  - [Example 1: Aggregation over dimensions — the candidate set through every stage](#example-1-aggregation-over-dimensions--the-candidate-set-through-every-stage)
+  - [Example 2: One summary for several computations — the summary-capability rule in Pass 2](#example-2-one-summary-for-several-computations--the-summary-capability-rule-in-pass-2)
+  - [Example 3: Aggregation over windows — the window-composition rule in Pass 2](#example-3-aggregation-over-windows--the-window-composition-rule-in-pass-2)
+  - [Example 4: Materialization of window summaries in physical planning](#example-4-materialization-of-window-summaries-in-physical-planning)
+- [Scenarios](#scenarios)
+  - [Adding a new query to a workload](#adding-a-new-query-to-a-workload)
+  - [Supporting a new query construct](#supporting-a-new-query-construct)
+  - [Adding a new summary family](#adding-a-new-summary-family)
+  - [Adding a better cost or accuracy estimation](#adding-a-better-cost-or-accuracy-estimation)
+
 ## Goal
 
 ### Motivation
