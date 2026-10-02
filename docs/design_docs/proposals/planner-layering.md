@@ -3,16 +3,66 @@
 Status: proposal. Audience: designers and developers of ASAPPlanner and of deployments such
 as ASAPQuery-backend.
 
-Read Stages for the overview, the stage sections for the rules, and the
-examples for why the rules are needed.
+Read Goal for the motivation and assumptions, Stages for the overview, the
+stage sections for the rules, the examples for why the rules are needed, and
+Scenarios for how the design is extended.
 
 ## Goal
 
+### Motivation
+
+* Existing database query engines and optimizers do not consider ASAP
+  primitives: summaries such as sketches that trade bounded error for lower
+  cost.
+* They also do not consider the query and data workloads of different use
+  cases: streaming or batch data input, and repeated, batch or ad hoc queries.
+* So they miss the opportunity to share the benefits of ASAP primitives across
+  domains and use cases.
+
+ASAPPlanner therefore models, for an existing query IR:
+
+| Model | Contents |
+|---|---|
+| Query workload | Queries with recurrence (repeated, batch, ad hoc), predictability, time selection, and accuracy and latency requirements |
+| Data workload | Arrival (streaming, at rest, or both), sampling cadence, volume, rate, cardinality and distribution |
+| Deployment inputs | Empirical cost model, empirical accuracy model and execution capabilities |
+| ASAP replacement strategies | Rules that replace a sub-DAG of the query IR with summary nodes, and the summary families each computation may use |
+
 ASAPPlanner takes a [query workload](https://github.com/ProjectASAP/ASAPPlanner/blob/main/crates/types/src/workload.rs), a [data workload](https://github.com/ProjectASAP/ASAPPlanner/blob/main/crates/types/src/workload.rs#L531) and the deployment's
-inputs (TODO: define this data structure in a follow-up PR), and returns one optimal physical plan. It decides what is computed, how
+inputs (TODO: define this data structure, [#525](https://github.com/ProjectASAP/ASAPPlanner/issues/525)), and returns one optimal physical plan. It decides what is computed, how
 it is computed, and which plan is best. The deployment only supplies inputs and
 executes the plan: it provides its empirical cost model, empirical accuracy
 model and capabilities, but never plans queries or selects plans.
+
+### Assumptions
+
+ASAPPlanner relies only on the assumptions below. Anything not listed here is
+an input or a decision of a stage, not an implicit assumption.
+
+1. **Query rewrite rules are given.** Rewrite and replacement rules (for
+   example, `avg` as `sum`/`count`, or a TopK as a Count-Min Sketch with a
+   heap) are written by developers. ASAPPlanner applies them; it does not
+   discover or generate them.
+2. **Summary-family capabilities are given.** For each summary family, a
+   developer declares which computations it can answer, which estimates it can
+   read out, how it is sized for an accuracy target, its error bound, and
+   whether it can be merged, subtracted or deleted. ASAPPlanner does not
+   derive or learn these capabilities.
+3. **Frontend semantics are given.** Each frontend preserves its source
+   language's behavior. A construct a frontend cannot represent faithfully is
+   rejected, not approximated.
+4. **Workload descriptions are inputs.** Recurrence, predictability,
+   requirements and the data workload are supplied with the workload.
+   ASAPPlanner does not infer them from traffic.
+5. **Cost and accuracy come from models.** ASAPPlanner does not measure
+   execution. It uses the deployment's cost and accuracy models, or built-in
+   defaults when the deployment supplies none.
+6. **Optimal is relative to the candidate space.** The selected plan is the
+   cheapest valid plan among the candidates produced by the given rules and
+   capabilities, as estimated by the given models. It is not optimal over
+   plans those rules cannot produce.
+7. **The deployment executes the plan as given.** It does not change summary
+   choices or materialization.
 
 ## Stages
 
@@ -986,7 +1036,132 @@ only on recurrence, predictability and data arrival. This is why window-summary
 replacement happens in logical planning, while materialization is decided
 separately in physical planning.
 
+## Scenarios
+
+Each scenario lists what a developer or user gives (Assumptions 1–4), what
+ASAPPlanner then does automatically, and what does not change. "Today" notes
+where the implementation does not yet match this design.
+
+### Adding a new query to a workload
+
+**Given:** one more workload entry: the query, its recurrence (repeating demand
+or batch), predictability, time selection and accuracy and latency
+requirements. No code changes.
+
+**Automatic:** the frontend converts the query (stage 0). Pass 1 generates its
+exact and summary candidates from the existing rules and capabilities. Pass 2
+checks whether it can share a summary with the queries already in the workload.
+Physical planning and selection re-plan the whole workload, so adding a query can
+change the plan of other queries, for example when a summary becomes shared.
+
+**Unchanged:** rules, summary families, models and every other workload entry.
+
+**Today:** latency requirements are not checked
+([#526](https://github.com/ProjectASAP/ASAPPlanner/issues/526)); output is one
+plan per query, not one workload DAG
+([#521](https://github.com/ProjectASAP/ASAPPlanner/issues/521)).
+
+### Supporting a new query construct
+
+For a function, operator or aggregate a frontend does not support yet.
+
+**Given:**
+
+1. The frontend conversion to the common IR (stage 0), or an explicit
+   rejection.
+2. If it is a new computation, its semantics in the IR (an `AggIntent`), and
+   whether it is exact-only, mergeable, or approximable.
+3. If it is approximable, the rewrite rules and the summary families that may
+   answer it (Assumptions 1 and 2).
+4. Its exact physical operator implementation.
+
+**Automatic:** everything from Pass 1 onward, as for any other query.
+
+**Unchanged:** the stages, the selection rule and other queries' candidates.
+
+### Adding a new summary family
+
+For example, a new quantile sketch.
+
+**Given** (Assumption 2):
+
+1. The family and its parameters.
+2. The computations it answers and the estimates it reads out.
+3. Its sizing rule for an accuracy target and its error bound.
+4. Whether its states can be merged, subtracted or deleted.
+5. Which state fields identify it, so that equal states are shared in Pass 2.
+6. Its physical kernel: build, merge and estimate.
+
+**Automatic:** Pass 1 offers the family wherever its declared computations
+appear, sizes it per query and prunes it where it cannot meet the accuracy
+target. Pass 2 shares it across queries, sized for the strictest consumer.
+Selection compares it with every other candidate using the deployment's models.
+
+**Unchanged:** frontends, rewrite rules, the stages and existing queries.
+
+**Today:** the declarations are spread over several places (candidate table,
+sizing and guarantee estimators, readout mapping, state naming, kernel and
+physical capability lists); see
+[extend-asap-aware-mapping.md](../../develop_docs/extend-asap-aware-mapping.md).
+A family needs both a planner-side guarantee and a native kernel to be
+selected and executed
+([#523](https://github.com/ProjectASAP/ASAPPlanner/issues/523),
+[#524](https://github.com/ProjectASAP/ASAPPlanner/issues/524)).
+
+### Adding a better cost or accuracy estimation
+
+**Given:** a cost model or accuracy model supplied by the deployment, for
+example one fitted to its own measurements.
+
+**Automatic:** only selection changes (stage 3). The candidate sets of stages
+0–2 stay the same, except where a model also changes sizing or admits a
+summary that has no built-in guarantee. The model is used for every
+query in the workload, and a shared summary is costed once.
+
+**Unchanged:** frontends, rules, summary families and the deployment's
+execution.
+
+**Today:** a deployment's accuracy model is consulted only for the final
+check, not when Pass 1 admits candidates
+([#523](https://github.com/ProjectASAP/ASAPPlanner/issues/523)); the input
+structure for deployment inputs is TODO
+([#525](https://github.com/ProjectASAP/ASAPPlanner/issues/525)).
+
+### Adding a windowed sketch such as PromSketch
+
+PromSketch[^promsketch] answers PromQL range queries over arbitrary windows by
+keeping an Exponential Histogram whose buckets hold sketches such as KLL or
+UnivMon. In this design it is not a new kind of stage. It is two given parts:
+
+1. **The window summary.** The Exponential Histogram is one of the window
+   summaries of the window-composition rule (Pass 2), with its declared
+   boundary error.
+2. **The per-bucket summary families.** These are existing families, such as
+   KLL and UnivMon, or new ones added as in "Adding a new summary family".
+
+**Given:** the window summary's error bound and mergeability, the families it
+may hold, and its kernels.
+
+**Automatic:** Pass 2 groups queries with the same summary input data, chooses
+one window summary that answers all their windows within their accuracy
+requirements, and adds per-query merge and estimation nodes. Physical
+planning decides whether the window summary is materialized at ingestion time
+or at query time (Example 4). Selection compares it with exact recomputation,
+sliding windows and tumbling windows.
+
+**Unchanged:** frontends and the PromQL queries themselves.
+
+**Today:** the window is part of each summary's input, so queries over
+different windows cannot share a summary until the unified operator graph of
+[#511](https://github.com/ProjectASAP/ASAPPlanner/pull/511) is implemented.
+Window composition is tracked in
+[#518](https://github.com/ProjectASAP/ASAPPlanner/issues/518) (tumbling) and
+[#522](https://github.com/ProjectASAP/ASAPPlanner/issues/522) (sliding and
+Exponential Histogram), which also depends on the summary subtract and delete
+design (TODO above).
+
 [^smooth-histograms]: V. Braverman and R. Ostrovsky. [Smooth Histograms for Sliding Windows](https://web.cs.ucla.edu/~rafail/PUBLIC/82.pdf). FOCS 2007. An alternative to EH.
 [^microscope-sketch]: Y. Wu et al. [MicroscopeSketch: Accurate Sliding Estimation Using Adaptive Zooming](https://yangtonghome.github.io/uploads/MicroscopeSketch_SIGKDD_23_final_paper.pdf). KDD 2023.
 [^sliding-sketches]: X. Gou et al. [Sliding Sketches: A Framework using Time Zones for Data Stream Processing in Sliding Windows](https://dl.acm.org/doi/10.1145/3394486.3403144). KDD 2020.
 [^sliding-merge]: A. Arasu and G. S. Manku. [Approximate Counts and Quantiles over Sliding Windows](https://dl.acm.org/doi/10.1145/1055558.1055598). PODS 2004.
+[^promsketch]: Z. Zhu et al. PromSketch: Approximation-First Timeseries Query At Scale. VLDB 2025.
