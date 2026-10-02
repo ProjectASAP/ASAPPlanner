@@ -1054,11 +1054,6 @@ change the plan of other queries, for example when a summary becomes shared.
 
 **Unchanged:** rules, summary families, models and every other workload entry.
 
-**Today:** latency requirements are not checked
-([#526](https://github.com/ProjectASAP/ASAPPlanner/issues/526)); output is one
-plan per query, not one workload DAG
-([#521](https://github.com/ProjectASAP/ASAPPlanner/issues/521)).
-
 ### Supporting a new query construct
 
 For a function, operator or aggregate a frontend does not support yet.
@@ -1125,41 +1120,8 @@ check, not when Pass 1 admits candidates
 structure for deployment inputs is TODO
 ([#525](https://github.com/ProjectASAP/ASAPPlanner/issues/525)).
 
-### Adding a windowed sketch such as PromSketch
-
-PromSketch[^promsketch] answers PromQL range queries over arbitrary windows by
-keeping an Exponential Histogram whose buckets hold sketches such as KLL or
-UnivMon. In this design it is not a new kind of stage. It is two given parts:
-
-1. **The window summary.** The Exponential Histogram is one of the window
-   summaries of the window-composition rule (Pass 2), with its declared
-   boundary error.
-2. **The per-bucket summary families.** These are existing families, such as
-   KLL and UnivMon, or new ones added as in "Adding a new summary family".
-
-**Given:** the window summary's error bound and mergeability, the families it
-may hold, and its kernels.
-
-**Automatic:** Pass 2 groups queries with the same summary input data, chooses
-one window summary that answers all their windows within their accuracy
-requirements, and adds per-query merge and estimation nodes. Physical
-planning decides whether the window summary is materialized at ingestion time
-or at query time (Example 4). Selection compares it with exact recomputation,
-sliding windows and tumbling windows.
-
-**Unchanged:** frontends and the PromQL queries themselves.
-
-**Today:** the window is part of each summary's input, so queries over
-different windows cannot share a summary until the unified operator graph of
-[#511](https://github.com/ProjectASAP/ASAPPlanner/pull/511) is implemented.
-Window composition is tracked in
-[#518](https://github.com/ProjectASAP/ASAPPlanner/issues/518) (tumbling) and
-[#522](https://github.com/ProjectASAP/ASAPPlanner/issues/522) (sliding and
-Exponential Histogram), which also depends on the summary subtract and delete
-design (TODO above).
 
 [^smooth-histograms]: V. Braverman and R. Ostrovsky. [Smooth Histograms for Sliding Windows](https://web.cs.ucla.edu/~rafail/PUBLIC/82.pdf). FOCS 2007. An alternative to EH.
 [^microscope-sketch]: Y. Wu et al. [MicroscopeSketch: Accurate Sliding Estimation Using Adaptive Zooming](https://yangtonghome.github.io/uploads/MicroscopeSketch_SIGKDD_23_final_paper.pdf). KDD 2023.
 [^sliding-sketches]: X. Gou et al. [Sliding Sketches: A Framework using Time Zones for Data Stream Processing in Sliding Windows](https://dl.acm.org/doi/10.1145/3394486.3403144). KDD 2020.
 [^sliding-merge]: A. Arasu and G. S. Manku. [Approximate Counts and Quantiles over Sliding Windows](https://dl.acm.org/doi/10.1145/1055558.1055598). PODS 2004.
-[^promsketch]: Z. Zhu et al. PromSketch: Approximation-First Timeseries Query At Scale. VLDB 2025.
