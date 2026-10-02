@@ -200,7 +200,7 @@ mod tests {
 #[cfg(test)]
 mod projection_tests {
     use super::*;
-    use crate::pre_asap::{Column, ProjectItem, QueryExpr, ScalarValue, Schema, Source};
+    use crate::pre_asap::{Field, ProjectItem, QueryExpr, ScalarValue, Schema, Source};
     use std::rc::Rc;
     fn project(expr: QueryExpr) -> QueryExpr {
         QueryExpr::Project {
@@ -215,8 +215,8 @@ mod projection_tests {
                 },
                 predicates: vec![],
                 schema: Schema::new(vec![
-                    Column::new("k", DataType::Utf8, false),
-                    Column::new("v", DataType::Int64, true),
+                    Field::plain("k", DataType::Utf8, false),
+                    Field::plain("v", DataType::Int64, true),
                 ]),
             }),
         }
@@ -229,21 +229,21 @@ mod projection_tests {
         };
         let schema = project(map.clone()).output_schema().unwrap();
         assert_eq!(
-            schema.columns[0].dtype,
+            schema.fields[0].dtype,
             DataType::Map {
                 key: Box::new(DataType::Utf8),
                 value: Box::new(DataType::Int64),
                 value_nullable: true
             }
         );
-        assert!(!schema.columns[0].nullable);
+        assert!(!schema.fields[0].nullable);
         let lookup = QueryExpr::FunctionCall {
             name: "asap_map_access".into(),
             args: vec![map, QueryExpr::Literal(ScalarValue::Utf8("missing".into()))],
         };
         assert_eq!(
-            project(lookup).output_schema().unwrap().columns[0],
-            Column::new("result", DataType::Int64, true)
+            project(lookup).output_schema().unwrap().fields[0],
+            Field::plain("result", DataType::Int64, true)
         );
         assert!(project(QueryExpr::FunctionCall {
             name: "map".into(),
@@ -301,17 +301,17 @@ pub fn struct_field_type(
 #[cfg(test)]
 mod struct_field_tests {
     use super::*;
-    use crate::pre_asap::{Column, QueryExpr, ScalarValue, Schema};
+    use crate::pre_asap::{Field, FieldDataType, QueryExpr, ScalarValue, Schema};
     fn schema() -> Schema {
-        Schema::new(vec![Column::new(
+        Schema::new(vec![Field::plain(
             "record",
             DataType::Struct {
                 fields: vec![
-                    Column::new("ts", DataType::Int64, false),
-                    Column::new(
+                    Field::new("ts", DataType::Int64, false),
+                    Field::new(
                         "values",
                         DataType::List {
-                            element: Box::new(Column::new("item", DataType::Float64, true)),
+                            element: Box::new(Field::new("item", DataType::Float64, true)),
                         },
                         true,
                     ),
@@ -345,7 +345,7 @@ mod struct_field_tests {
             named.scalar_type(&schema).unwrap(),
             (
                 DataType::List {
-                    element: Box::new(Column::new("item", DataType::Float64, true))
+                    element: Box::new(Field::new("item", DataType::Float64, true))
                 },
                 true
             )
@@ -366,14 +366,14 @@ mod struct_field_tests {
             assert!(access(selector).scalar_type(&schema()).is_err());
         }
         let mut ambiguous = schema();
-        if let DataType::Struct { fields } = &mut ambiguous.columns[0].dtype {
-            fields.push(Column::new("ts", DataType::Utf8, false));
+        if let FieldDataType::Plain(DataType::Struct { fields }) = &mut ambiguous.fields[0].dtype {
+            fields.push(Field::new("ts", DataType::Utf8, false));
         }
         assert!(access(QueryExpr::Literal(ScalarValue::Utf8("ts".into())))
             .scalar_type(&ambiguous)
             .is_err());
         let mut nullable = schema();
-        nullable.columns[0].nullable = true;
+        nullable.fields[0].nullable = true;
         assert!(access(QueryExpr::Literal(ScalarValue::Int64(1)))
             .scalar_type(&nullable)
             .is_err());
@@ -422,7 +422,7 @@ pub fn element_access_type(
 #[cfg(test)]
 mod element_access_tests {
     use super::*;
-    use crate::pre_asap::{Column, QueryExpr, ScalarValue, Schema};
+    use crate::pre_asap::{Field, QueryExpr, ScalarValue, Schema};
     fn access(index: QueryExpr) -> QueryExpr {
         QueryExpr::FunctionCall {
             name: "asap_element_access".into(),
@@ -433,19 +433,19 @@ mod element_access_tests {
     fn list_index_preserves_nested_element_metadata() {
         let element = DataType::Struct {
             fields: vec![
-                Column::new("ts", DataType::Int64, false),
-                Column::new("value", DataType::Float64, true),
+                Field::new("ts", DataType::Int64, false),
+                Field::new("value", DataType::Float64, true),
             ],
         };
         let schema = Schema::new(vec![
-            Column::new(
+            Field::plain(
                 "samples",
                 DataType::List {
-                    element: Box::new(Column::new("item", element.clone(), false)),
+                    element: Box::new(Field::new("item", element.clone(), false)),
                 },
                 false,
             ),
-            Column::new("i", DataType::Int64, true),
+            Field::plain("i", DataType::Int64, true),
         ]);
         for index in [1, -1, 100] {
             assert_eq!(
@@ -482,7 +482,7 @@ mod element_access_tests {
     }
     #[test]
     fn generic_map_lookup_reuses_legacy_signature() {
-        let schema = Schema::new(vec![Column::new(
+        let schema = Schema::new(vec![Field::plain(
             "m",
             DataType::Map {
                 key: Box::new(DataType::Utf8),

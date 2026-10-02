@@ -61,7 +61,7 @@ pub fn evaluate_source(
 }
 
 fn evaluate_dag(
-    dag: PhysicalDAG<'_, Batch, crate::values::Schema>,
+    dag: PhysicalDAG<'_, Batch, crate::values::SchemaRef>,
     root: crate::plan::NodeId,
     context: RunContext,
 ) -> Result<Vec<SharedValue<Batch>>, Error> {
@@ -88,7 +88,7 @@ mod tests {
         values::Value,
     };
     use planner_types::{
-        post_asap::{SummaryFamilyType, SummaryField, SummarySchema},
+        post_asap::{Field, FieldDataType, Schema},
         pre_asap::DataType,
     };
     use std::sync::Arc;
@@ -96,10 +96,13 @@ mod tests {
     // Engine adapters can run the identical native chain from an outer executor.
     #[test]
     fn same_native_chain_inside_query_and_ingestion_execution() {
-        let schema = Arc::new(SummarySchema {
-            fields: vec![SummaryField {
+        let schema = Arc::new(Schema {
+            closed: true,
+            unique_keys: vec![],
+            fields: vec![Field {
+                table: None,
                 name: "value".into(),
-                dtype: SummaryFamilyType::Plain(DataType::Float64),
+                dtype: FieldDataType::Plain(DataType::Float64),
                 nullable: false,
             }],
             time_index: None,
@@ -139,7 +142,9 @@ mod tests {
     // Native sources may cross the runtime's cooperative batch quantum.
     #[test]
     fn in_memory_source_drives_cooperative_yields() {
-        let schema = Arc::new(SummarySchema {
+        let schema = Arc::new(Schema {
+            closed: true,
+            unique_keys: vec![],
             fields: vec![],
             time_index: None,
         });
@@ -159,7 +164,9 @@ mod tests {
     // An adapter-held output must retain its parent's reservation after execution.
     #[test]
     fn returned_batches_keep_their_resource_reservation() {
-        let schema = Arc::new(SummarySchema {
+        let schema = Arc::new(Schema {
+            closed: true,
+            unique_keys: vec![],
             fields: vec![],
             time_index: None,
         });
@@ -188,7 +195,9 @@ mod tests {
     // A cancelled surrounding execution also prevents its native computation.
     #[test]
     fn cancellation_is_not_bypassed_by_in_memory_execution() {
-        let schema = Arc::new(SummarySchema {
+        let schema = Arc::new(Schema {
+            closed: true,
+            unique_keys: vec![],
             fields: vec![],
             time_index: None,
         });

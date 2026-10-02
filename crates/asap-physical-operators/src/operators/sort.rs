@@ -1,6 +1,6 @@
 use super::*;
 impl Operator {
-    pub fn sort(input: Schema, keys: Vec<SortKey>, groups: Vec<usize>) -> Result<Self, Error> {
+    pub fn sort(input: SchemaRef, keys: Vec<SortKey>, groups: Vec<usize>) -> Result<Self, Error> {
         validate_groups(&input, &groups)?;
         for key in &keys {
             if !ordered(plain(&input, key.column)?.0) {

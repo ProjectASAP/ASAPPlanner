@@ -10,14 +10,14 @@
 //! owned by `binding`, which also validates schemas, expressions and inputs.
 use crate::Error;
 use planner_types::post_asap::{
-    ExactKind, ExactParams, GroupingStrategy, SketchAlgorithm, SketchParams, SketchQuery,
-    SummaryFamilyType, SummaryUpdate,
+    ExactKind, ExactParams, FieldDataType, GroupingStrategy, SketchAlgorithm, SketchParams,
+    SketchQuery, SummaryUpdate,
 };
 
 /// Check the same contract used by `create_planner_accumulator` before a plan
 /// is accepted. Execution timing is deliberately not a kernel property.
 pub fn validate_summary_kernel(
-    family: &SummaryFamilyType,
+    family: &FieldDataType,
     input: &SummaryUpdate,
     grouping: &GroupingStrategy,
 ) -> Result<(), String> {
@@ -25,7 +25,7 @@ pub fn validate_summary_kernel(
         return Err("shared summary grouping has no registered kernel".into());
     }
     let keyed = match family {
-        SummaryFamilyType::ExactAggregate(kind, params) => {
+        FieldDataType::ExactAggregate(kind, params) => {
             use ExactKind as K;
             use ExactParams as P;
             if !matches!(
@@ -41,7 +41,7 @@ pub fn validate_summary_kernel(
             }
             input.item.is_some()
         }
-        SummaryFamilyType::Sketch(kind, layout) => {
+        FieldDataType::Sketch(kind, layout) => {
             if layout != grouping {
                 return Err("Planner family and operator grouping disagree".into());
             }
@@ -138,9 +138,9 @@ pub(crate) fn is_unit_sample_frequency(update: &planner_types::post_asap::Summar
         )
 }
 
-pub fn validate_native_family(family: &SummaryFamilyType) -> Result<(), Error> {
+pub fn validate_native_family(family: &FieldDataType) -> Result<(), Error> {
     use planner_types::post_asap::SketchAlgorithm as A;
-    if let SummaryFamilyType::Sketch(kind, grouping) = family {
+    if let FieldDataType::Sketch(kind, grouping) = family {
         // Plain Count-Min is native as stored state only: it merges and reads
         // its bare count, but the DAG does not build it from rows.
         if let (A::Cms, SketchParams::Cms { width, depth }) = (kind.algorithm(), kind.params()) {
@@ -165,8 +165,8 @@ pub fn validate_native_family(family: &SummaryFamilyType) -> Result<(), Error> {
         }
     }
     match family {
-        SummaryFamilyType::ExactAggregate(..) => {}
-        SummaryFamilyType::Sketch(kind, _)
+        FieldDataType::ExactAggregate(..) => {}
+        FieldDataType::Sketch(kind, _)
             if matches!(kind.algorithm(), A::Kll | A::DDSketch | A::Hll) => {}
         _ => {
             return Err(Error::Invalid(
@@ -185,16 +185,13 @@ pub fn validate_native_family(family: &SummaryFamilyType) -> Result<(), Error> {
 }
 
 /// A sketch readout is native only for the families Planner can read directly.
-pub fn validate_sketch_readout(
-    family: &SummaryFamilyType,
-    query: &SketchQuery,
-) -> Result<(), Error> {
+pub fn validate_sketch_readout(family: &FieldDataType, query: &SketchQuery) -> Result<(), Error> {
     validate_native_family(family)?;
     use planner_types::post_asap::SketchAlgorithm as A;
     // A point count without an item value reads the total count.
     let bare_count = matches!(query, SketchQuery::PointCount { value: None, .. });
     let supported = match family {
-        SummaryFamilyType::Sketch(kind, _) => match (kind.algorithm(), query) {
+        FieldDataType::Sketch(kind, _) => match (kind.algorithm(), query) {
             (A::Kll, SketchQuery::Quantile { q }) | (A::DDSketch, SketchQuery::Quantile { q }) => {
                 if !(0.0..=1.0).contains(q) {
                     return Err(Error::Invalid(
@@ -223,7 +220,7 @@ pub fn validate_sketch_readout(
 
 /// An exact readout must match the exact family it reads.
 pub fn validate_exact_readout(
-    family: &SummaryFamilyType,
+    family: &FieldDataType,
     readout: &crate::summary_kernels::exact::ExactReadout,
 ) -> Result<(), Error> {
     validate_native_family(family)?;
@@ -231,15 +228,12 @@ pub fn validate_exact_readout(
     use planner_types::post_asap::ExactKind as E;
     let supported = matches!(
         (family, readout.statistic),
-        (SummaryFamilyType::ExactAggregate(E::Sum, _), S::Sum)
-            | (SummaryFamilyType::ExactAggregate(E::Count, _), S::Count)
-            | (SummaryFamilyType::ExactAggregate(E::Min, _), S::Min)
-            | (SummaryFamilyType::ExactAggregate(E::Max, _), S::Max)
-            | (SummaryFamilyType::ExactAggregate(E::Rate, _), S::Rate)
-            | (
-                SummaryFamilyType::ExactAggregate(E::Increase, _),
-                S::Increase
-            )
+        (FieldDataType::ExactAggregate(E::Sum, _), S::Sum)
+            | (FieldDataType::ExactAggregate(E::Count, _), S::Count)
+            | (FieldDataType::ExactAggregate(E::Min, _), S::Min)
+            | (FieldDataType::ExactAggregate(E::Max, _), S::Max)
+            | (FieldDataType::ExactAggregate(E::Rate, _), S::Rate)
+            | (FieldDataType::ExactAggregate(E::Increase, _), S::Increase)
     );
     if !supported {
         return Err(Error::Invalid(

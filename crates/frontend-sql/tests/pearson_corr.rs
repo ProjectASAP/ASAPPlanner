@@ -2,14 +2,14 @@
 use std::rc::Rc;
 
 use asap_frontend_sql::{lower_sql, SqlCatalog};
-use asap_types::pre_asap::{AggIntent, Column, DataType, QueryExpr, Schema};
+use asap_types::pre_asap::{AggIntent, DataType, Field, QueryExpr, Schema};
 use asap_types::types::AccuracyTarget;
 
 fn catalog() -> SqlCatalog {
     let schema = Schema::new(vec![
-        Column::new("x", DataType::Float64, true),
-        Column::new("y", DataType::Float64, true),
-        Column::new("g", DataType::Int64, false),
+        Field::plain("x", DataType::Float64, true),
+        Field::plain("y", DataType::Float64, true),
+        Field::plain("g", DataType::Int64, false),
     ]);
     SqlCatalog::new()
         .with_table("a", schema.clone())
@@ -54,7 +54,7 @@ async fn corr_materializes_both_arguments() {
             .iter()
             .any(|col| !matches!(col.expr, QueryExpr::Column(_))));
         assert_eq!(
-            query.output_schema().unwrap().columns[0].dtype,
+            query.output_schema().unwrap().fields[0].dtype,
             DataType::Float64
         );
     }
@@ -84,13 +84,13 @@ async fn corr_coexists_with_grouping_having_and_other_measures() {
         .unwrap();
     let schema = child.output_schema().unwrap();
     for id in pair.input_cols() {
-        assert!(id < schema.columns.len());
+        assert!(id < schema.fields.len());
     }
     assert!(measures.iter().any(|m| matches!(m, AggIntent::Sum { .. })));
     let output = query.output_schema().unwrap();
-    assert_eq!(output.columns[1].name, "r");
-    assert_eq!(output.columns[1].dtype, DataType::Float64);
-    assert!(output.columns[1].nullable);
+    assert_eq!(output.fields[1].name, "r");
+    assert_eq!(output.fields[1].dtype, DataType::Float64);
+    assert!(output.fields[1].nullable);
 }
 
 // Repeated inputs reuse their value while retaining two argument positions.

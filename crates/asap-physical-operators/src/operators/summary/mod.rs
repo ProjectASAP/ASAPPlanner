@@ -8,15 +8,15 @@ pub enum ReadoutQuery {
 
 impl Operator {
     pub fn keyed_summary_build(
-        input: Schema,
-        family: SummaryFamilyType,
+        input: SchemaRef,
+        family: FieldDataType,
         value: usize,
         items: Vec<usize>,
         groups: Vec<usize>,
     ) -> Result<Self, Error> {
         use crate::summary_kernels::weighted_frequency::WeightedFrequency;
         crate::values::validate_family(&family)?;
-        let SummaryFamilyType::Sketch(kind, _) = &family else {
+        let FieldDataType::Sketch(kind, _) = &family else {
             return Err(invalid("keyed sketch required"));
         };
         WeightedFrequency::configuration(kind)?;
@@ -43,7 +43,8 @@ impl Operator {
             .iter()
             .map(|&i| input.fields[i].clone())
             .collect::<Vec<_>>();
-        fields.push(SummaryField {
+        fields.push(Field {
+            table: None,
             name: "state".into(),
             dtype: family.clone(),
             nullable: false,
@@ -60,14 +61,14 @@ impl Operator {
         })
     }
     pub fn keyed_readout(
-        input: Schema,
+        input: SchemaRef,
         state: usize,
         k: usize,
-        output: Schema,
+        output: SchemaRef,
     ) -> Result<Self, Error> {
         use crate::summary_kernels::weighted_frequency::WeightedFrequency;
         crate::values::validate_family(&field(&input, state)?.dtype)?;
-        let SummaryFamilyType::Sketch(kind, _) = &field(&input, state)?.dtype else {
+        let FieldDataType::Sketch(kind, _) = &field(&input, state)?.dtype else {
             return Err(invalid("keyed readout requires summary state"));
         };
         let (_, _, _, capacity) = WeightedFrequency::configuration(kind)?;
@@ -76,7 +77,7 @@ impl Operator {
         }
         if state + 1 != input.fields.len()
             || output.fields[..state] != input.fields[..state]
-            || output.fields.last().unwrap().dtype != SummaryFamilyType::Plain(DataType::Float64)
+            || output.fields.last().unwrap().dtype != FieldDataType::Plain(DataType::Float64)
         {
             return Err(invalid(
                 "keyed readout must preserve partitions and return a Float64 score",
@@ -90,8 +91,8 @@ impl Operator {
         })
     }
     pub fn summary_build(
-        input: Schema,
-        family: SummaryFamilyType,
+        input: SchemaRef,
+        family: FieldDataType,
         value: usize,
         time: Option<usize>,
         groups: Vec<usize>,
@@ -109,7 +110,7 @@ impl Operator {
         if time.is_none()
             && matches!(
                 family,
-                SummaryFamilyType::ExactAggregate(
+                FieldDataType::ExactAggregate(
                     planner_types::post_asap::ExactKind::Rate
                         | planner_types::post_asap::ExactKind::Increase,
                     _
@@ -128,7 +129,8 @@ impl Operator {
             .iter()
             .map(|&i| input.fields[i].clone())
             .collect::<Vec<_>>();
-        fields.push(SummaryField {
+        fields.push(Field {
+            table: None,
             name: "state".into(),
             dtype: family.clone(),
             nullable: false,
@@ -144,10 +146,14 @@ impl Operator {
             output: schema(fields),
         })
     }
-    pub fn summary_merge(input: Schema, state: usize, groups: Vec<usize>) -> Result<Self, Error> {
+    pub fn summary_merge(
+        input: SchemaRef,
+        state: usize,
+        groups: Vec<usize>,
+    ) -> Result<Self, Error> {
         validate_groups(&input, &groups)?;
         crate::values::validate_family(&field(&input, state)?.dtype)?;
-        if matches!(field(&input, state)?.dtype, SummaryFamilyType::Plain(_)) {
+        if matches!(field(&input, state)?.dtype, FieldDataType::Plain(_)) {
             return Err(invalid("summary state required"));
         }
         let mut fields = groups
@@ -161,7 +167,7 @@ impl Operator {
             output: schema(fields),
         })
     }
-    pub fn readout(input: Schema, state: usize, query: ReadoutQuery) -> Result<Self, Error> {
+    pub fn readout(input: SchemaRef, state: usize, query: ReadoutQuery) -> Result<Self, Error> {
         let family = &field(&input, state)?.dtype;
         crate::values::validate_family(family)?;
         match &query {
@@ -175,7 +181,7 @@ impl Operator {
         let mut fields = input.fields.clone();
         let result_type = if matches!(
             fields[state].dtype,
-            SummaryFamilyType::ExactAggregate(planner_types::post_asap::ExactKind::Count, _)
+            FieldDataType::ExactAggregate(planner_types::post_asap::ExactKind::Count, _)
         ) || integral_count(family, &query)
         {
             DataType::Int64
@@ -187,7 +193,7 @@ impl Operator {
         let nullable = fields.len() == 1
             && matches!(
                 fields[state].dtype,
-                SummaryFamilyType::ExactAggregate(
+                FieldDataType::ExactAggregate(
                     planner_types::post_asap::ExactKind::Min
                         | planner_types::post_asap::ExactKind::Max,
                     _
@@ -204,8 +210,8 @@ impl Operator {
 /// The Planner reads a Count-Min bare count only for count intents, whose
 /// output is Int64 and whose updates have unit weight; execution rejects a
 /// non-integral total rather than rounding it.
-fn integral_count(family: &SummaryFamilyType, query: &ReadoutQuery) -> bool {
-    matches!(family, SummaryFamilyType::Sketch(kind, _)
+fn integral_count(family: &FieldDataType, query: &ReadoutQuery) -> bool {
+    matches!(family, FieldDataType::Sketch(kind, _)
         if kind.algorithm() == &planner_types::post_asap::SketchAlgorithm::Cms)
         && matches!(
             query,
@@ -266,7 +272,7 @@ pub(super) fn execute<'a>(
                         // The typed output schema restores epoch-millisecond
                         // timestamp keys from the kernel's Int64 representation.
                         for (value, field) in values.iter_mut().zip(&output.fields) {
-                            if field.dtype == SummaryFamilyType::Plain(DataType::Timestamp) {
+                            if field.dtype == FieldDataType::Plain(DataType::Timestamp) {
                                 if let Value::Int64(time) = value {
                                     *value = Value::Timestamp(*time);
                                 }
@@ -296,7 +302,7 @@ pub(super) fn execute<'a>(
                                 .estimate(query)
                                 .map_err(|e| Error::Operator(e.to_string()))?;
                             if output.fields[*state].dtype
-                                == SummaryFamilyType::Plain(DataType::Int64)
+                                == FieldDataType::Plain(DataType::Int64)
                             {
                                 // Below 2^53 an f64 sum of unit updates is exact.
                                 if value.fract() != 0.0 || !(0.0..9.007_199_254_740_992e15).contains(&value) {
@@ -314,7 +320,7 @@ pub(super) fn execute<'a>(
                                 .as_any()
                                 .downcast_ref::<crate::summary_kernels::exact::ExactAccumulator>()
                                 .ok_or_else(|| invalid("exact readout requires exact state"))?;
-                            if output.fields[*state].dtype == SummaryFamilyType::Plain(DataType::Int64) {
+                            if output.fields[*state].dtype == FieldDataType::Plain(DataType::Int64) {
                                 let count = exact.count().ok_or_else(|| {
                                     Error::Operator("exact count state lacks an integer count".into())
                                 })?;
@@ -366,7 +372,7 @@ pub(super) fn execute_merge<'a>(
 
 async fn build_summary(
     mut input: Input<'_, Batch>,
-    family: &SummaryFamilyType,
+    family: &FieldDataType,
     value: usize,
     time: Option<usize>,
     groups: &[usize],
@@ -397,7 +403,7 @@ async fn build_summary(
     }
     let ordered_time = matches!(
         family,
-        SummaryFamilyType::ExactAggregate(
+        FieldDataType::ExactAggregate(
             planner_types::post_asap::ExactKind::Rate
                 | planner_types::post_asap::ExactKind::Increase,
             _
@@ -466,7 +472,7 @@ async fn merge_summary(
     groups: &[usize],
     context: &RunContext,
 ) -> Result<Vec<Vec<Value>>, Error> {
-    type GroupState = (Vec<Value>, SummaryFamilyType, Arc<dyn crate::AggregateCore>);
+    type GroupState = (Vec<Value>, FieldDataType, Arc<dyn crate::AggregateCore>);
     let mut states: BTreeMap<Vec<Vec<u8>>, GroupState> = BTreeMap::new();
     let mut work = Cooperative::new(context);
     let mut memory = context.reserve(0)?;
@@ -525,14 +531,14 @@ async fn merge_summary(
 
 async fn build_keyed_summary(
     mut input: Input<'_, Batch>,
-    family: &SummaryFamilyType,
+    family: &FieldDataType,
     value: usize,
     items: &[usize],
     groups: &[usize],
     context: &RunContext,
 ) -> Result<Vec<Vec<Value>>, Error> {
     use crate::{summary_kernels::weighted_frequency::WeightedFrequency, AggregateCore};
-    let SummaryFamilyType::Sketch(kind, _) = family else {
+    let FieldDataType::Sketch(kind, _) = family else {
         unreachable!()
     };
     let (algorithm, width, depth, capacity) = WeightedFrequency::configuration(kind)?;

@@ -359,7 +359,7 @@ mod tests {
     use std::cell::Cell;
     use std::collections::HashMap;
 
-    use asap_types::pre_asap::{Column, DataType, QueryExpr, Reduction, Schema, Source};
+    use asap_types::pre_asap::{DataType, Field, QueryExpr, Reduction, Schema, Source};
     use asap_types::types::AccuracyTarget;
     use asap_types::workload::{
         DataArrival, DurationMs, QueryRecurrence, QueryTimeScope, TimeSelection, TimestampMs,
@@ -419,7 +419,7 @@ mod tests {
                     table_ref: "events".into(),
                 },
                 predicates: vec![],
-                schema: Schema::new(vec![Column::new("value", DataType::Float64, false)]),
+                schema: Schema::new(vec![Field::plain("value", DataType::Float64, false)]),
             }),
         })
     }

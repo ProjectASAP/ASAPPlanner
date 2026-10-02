@@ -58,6 +58,12 @@ operator inputs and scalar query-result references use `Rc<OperatorNode>`.
 `NonASAPOp` is the payload of an ordinary operator, not a second DAG-node type.
 `BinaryOp` likewise uses the single `BinaryOperator` payload specified there.
 
+`Field` describes schema metadata; `ColumnRef` and `ColumnId` identify columns
+read by expressions. Keep `ScalarExpr::Column(ColumnId)`: the ID selects a field
+for type checking and the corresponding input value for evaluation, independently
+of the executor's row/column storage layout. See the
+[fields versus column references contract](operator-sharing.md#21-one-schema-model-for-values-and-state).
+
 Names are resolved to `ColumnId` before constructing these nodes. Parsing and
 unresolved `ColumnRef` handling remain frontend concerns; no alternative generic
 operator definition is proposed here. These wrappers belong to operator fields

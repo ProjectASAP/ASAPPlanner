@@ -211,7 +211,7 @@ fn composed_ensemble_shares_a_producer_across_roots() {
         physical_planner::InputContract,
         plan::{PhysicalOperator, PlanProperties},
         runtime::{Input, OutputStream},
-        values::Schema,
+        values::SchemaRef,
     };
     use planner_types::{
         post_asap::BinaryOperator,
@@ -221,14 +221,14 @@ fn composed_ensemble_shares_a_producer_across_roots() {
         source: Operator,
         starts: std::rc::Rc<std::cell::Cell<usize>>,
     }
-    impl PhysicalOperator<Batch, Schema> for Counted {
+    impl PhysicalOperator<Batch, SchemaRef> for Counted {
         fn name(&self) -> &str {
             "CountedInput"
         }
-        fn input_schemas(&self) -> Vec<Schema> {
+        fn input_schemas(&self) -> Vec<SchemaRef> {
             vec![]
         }
-        fn output_schema(&self) -> Schema {
+        fn output_schema(&self) -> SchemaRef {
             self.source.schema()
         }
         fn output_bytes(&self, batch: &Batch) -> usize {
@@ -411,7 +411,7 @@ fn exact_state_readouts_recover_and_finalize_panes() {
         (ExactKind::Min, ExactParams::Min, 1.),
         (ExactKind::Max, ExactParams::Max, 5.),
     ] {
-        let family = SummaryFamilyType::ExactAggregate(kind, params);
+        let family = FieldDataType::ExactAggregate(kind, params);
         for preserve in [false, true] {
             let rows = [[1., 2.], [4., 5.]]
                 .into_iter()
@@ -459,7 +459,7 @@ fn recovered_exact_counter_uses_window_and_omits_insufficient_samples() {
         (ExactKind::Rate, ExactParams::Rate, 1.),
         (ExactKind::Increase, ExactParams::Increase, 60.),
     ] {
-        let family = SummaryFamilyType::ExactAggregate(kind, params);
+        let family = FieldDataType::ExactAggregate(kind, params);
         let rows = [1, 2]
             .into_iter()
             .map(|count| {

@@ -325,7 +325,7 @@ pub struct WorkloadDAG {
 /// [`TargetReplacementAfter::Summary`] site, never matched back against a
 /// separately-exported DAG the way pre-ASAP notes are).
 ///
-/// Several of `SummaryExpr`'s own fields (`SummaryFamilyType`,
+/// Several of `SummaryExpr`'s own fields (`FieldDataType`,
 /// `GroupingStrategy`, `SketchQuery`) derive neither `Serialize` nor
 /// `Deserialize` in `asap_types::post_asap` — they carry no reporting
 /// obligation there, since nothing before this module ever needed to
@@ -428,22 +428,22 @@ fn push_summary_node(
     id
 }
 
-/// A short, human-readable label for a [`crate::post_asap::SummaryFamilyType`]
+/// A short, human-readable label for a [`crate::post_asap::FieldDataType`]
 /// (e.g. `"Sketch(Kll)"`, `"ExactAggregate(Sum)"`) — for
 /// [`SummaryDAGNode::label`] text on a `SummaryAgg`/`SummaryJoin` node. Not
 /// exhaustive prose (mirrors `asap_aware_mapping::replacement::describe_intent`'s
 /// own "this is a label, not a decision" stance) — every variant is covered,
 /// but via `Debug` for the inner kind rather than hand-written prose per
 /// algorithm.
-fn family_label(family: &crate::post_asap::SummaryFamilyType) -> String {
-    use crate::post_asap::SummaryFamilyType;
+fn family_label(family: &crate::post_asap::FieldDataType) -> String {
+    use crate::post_asap::FieldDataType;
     match family {
-        SummaryFamilyType::Plain(dtype) => format!("Plain({dtype:?})"),
-        SummaryFamilyType::ExactAggregate(kind, _) => format!("ExactAggregate({kind:?})"),
-        SummaryFamilyType::Sketch(kind, _grouping) => format!("Sketch({:?})", kind.algorithm()),
-        SummaryFamilyType::Sample(kind, _) => format!("Sample({kind:?})"),
-        SummaryFamilyType::Wavelet(kind, _) => format!("Wavelet({kind:?})"),
-        SummaryFamilyType::StatModel(kind, _) => format!("StatModel({kind:?})"),
+        FieldDataType::Plain(dtype) => format!("Plain({dtype:?})"),
+        FieldDataType::ExactAggregate(kind, _) => format!("ExactAggregate({kind:?})"),
+        FieldDataType::Sketch(kind, _grouping) => format!("Sketch({:?})", kind.algorithm()),
+        FieldDataType::Sample(kind, _) => format!("Sample({kind:?})"),
+        FieldDataType::Wavelet(kind, _) => format!("Wavelet({kind:?})"),
+        FieldDataType::StatModel(kind, _) => format!("StatModel({kind:?})"),
     }
 }
 
@@ -980,7 +980,7 @@ fn build_summary_hybrid(
     id
 }
 
-fn summary_schema_json(schema: &crate::post_asap::SummarySchema) -> serde_json::Value {
+fn summary_schema_json(schema: &crate::post_asap::Schema) -> serde_json::Value {
     serde_json::json!({
         "fields": schema.fields.iter().map(|field| serde_json::json!({
             "name": field.name,
@@ -1410,17 +1410,17 @@ mod tests {
     use crate::pre_asap::agg_intent::AggIntent;
     use crate::pre_asap::expr_ir::ScalarValue;
     use crate::pre_asap::query_expr::{GroupKeys, Predicate, Reduction};
-    use crate::pre_asap::schema::{Column, DataType, Schema};
+    use crate::pre_asap::schema::{DataType, Field, Schema};
     use crate::types::AccuracyTarget;
 
-    fn scan(table: &str, columns: Vec<Column>) -> QueryExpr {
+    fn scan(table: &str, columns: Vec<Field>) -> QueryExpr {
         QueryExpr::Scan {
             source: Source::Table {
                 table_ref: table.into(),
             },
             predicates: vec![],
             schema: Schema {
-                columns,
+                fields: columns,
                 time_index: None,
                 unique_keys: vec![],
                 closed: true,
@@ -1428,8 +1428,8 @@ mod tests {
         }
     }
 
-    fn value_col() -> Vec<Column> {
-        vec![Column::new("value", DataType::Float64, false)]
+    fn value_col() -> Vec<Field> {
+        vec![Field::plain("value", DataType::Float64, false)]
     }
 
     #[test]
@@ -1703,23 +1703,20 @@ mod tests {
     #[test]
     fn export_carries_guarantee_allocation_and_rejection_reason() {
         use crate::post_asap::{
-            BoundExpr, CompositionOperator, ErrorMetric, GroupingStrategy, GuaranteeSource,
-            ProbabilityExpr, SketchAlgorithm, SketchKind, SketchParams, SketchQuery,
-            SummaryFamilyType, SummarySchema,
+            BoundExpr, CompositionOperator, ErrorMetric, FieldDataType, GroupingStrategy,
+            GuaranteeSource, ProbabilityExpr, Schema, SketchAlgorithm, SketchKind, SketchParams,
+            SketchQuery,
         };
-        let leaf = Rc::new(scan("t", vec![Column::new("v", DataType::Float64, false)]));
+        let leaf = Rc::new(scan("t", vec![Field::plain("v", DataType::Float64, false)]));
         let kept = Rc::new(SummaryNode {
             expr: SummaryExpr::KeepPreAsap(Rc::clone(&leaf)),
-            schema: SummarySchema {
-                fields: vec![],
-                time_index: None,
-            },
+            schema: Schema::lifted(vec![], None),
             guarantee: Some(ResultGuarantee::exact("KeepPreAsap")),
         });
         let agg = Rc::new(SummaryNode {
             expr: SummaryExpr::SummaryAgg {
                 child: kept,
-                family: SummaryFamilyType::Sketch(
+                family: FieldDataType::Sketch(
                     SketchKind::new(SketchAlgorithm::Kll, SketchParams::Kll { k: 40 }),
                     GroupingStrategy::default(),
                 ),
@@ -1730,10 +1727,7 @@ mod tests {
                 grouping: GroupingStrategy::default(),
                 filter: None,
             },
-            schema: SummarySchema {
-                fields: vec![],
-                time_index: None,
-            },
+            schema: Schema::lifted(vec![], None),
             guarantee: None,
         });
         let guarantee = ResultGuarantee {
@@ -1766,10 +1760,7 @@ mod tests {
                 summary_input: agg,
                 query: SketchQuery::Quantile { q: 0.99 },
             },
-            schema: SummarySchema {
-                fields: vec![],
-                time_index: None,
-            },
+            schema: Schema::lifted(vec![], None),
             guarantee: Some(guarantee),
         };
         let dag = export_summary(&root);

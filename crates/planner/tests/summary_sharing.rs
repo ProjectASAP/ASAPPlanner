@@ -25,10 +25,10 @@ use asap_types::post_asap::{
     ProbabilityExpr, ResultGuarantee, SketchQuery,
 };
 use asap_types::post_asap::{
-    SketchAlgorithm, SketchParams, SummaryExpr, SummaryFamilyType, SummaryNode,
+    FieldDataType, SketchAlgorithm, SketchParams, SummaryExpr, SummaryNode,
 };
 use asap_types::pre_asap::agg_intent::default_quantile;
-use asap_types::pre_asap::schema::{Column, DataType, Schema};
+use asap_types::pre_asap::schema::{DataType, Field, Schema};
 use asap_types::pre_asap::{AggIntent, QueryExpr};
 use asap_types::types::AccuracyTarget;
 use asap_types::workload::{
@@ -171,8 +171,8 @@ async fn plan_sql(queries: &[&str], costs: &FixedCosts) -> PlanOutput {
     let catalog = SqlCatalog::new().with_table(
         "lineitem",
         Schema::new(vec![
-            Column::new("l_orderkey", DataType::Int64, false),
-            Column::new("l_extendedprice", DataType::Float64, false),
+            Field::plain("l_orderkey", DataType::Int64, false),
+            Field::plain("l_extendedprice", DataType::Float64, false),
         ]),
     );
     let input = UserInput::new(
@@ -298,7 +298,7 @@ fn kll_k(plan: &asap_aware_mapping::pass::QueryLifecyclePlan) -> u32 {
         panic!("one state: {:?}", plan.plan.deployments.len());
     };
     let SummaryExpr::SummaryAgg {
-        family: SummaryFamilyType::Sketch(kind, _),
+        family: FieldDataType::Sketch(kind, _),
         ..
     } = &deployment.summary.expr
     else {
@@ -458,10 +458,10 @@ struct UnivMonEvidence;
 impl AccuracyModel for UnivMonEvidence {
     fn local_guarantee(
         &self,
-        family: &SummaryFamilyType,
+        family: &FieldDataType,
         query: &SketchQuery,
     ) -> Option<ResultGuarantee> {
-        if matches!(family, SummaryFamilyType::Sketch(kind, _) if kind.algorithm() == &SketchAlgorithm::UnivMon)
+        if matches!(family, FieldDataType::Sketch(kind, _) if kind.algorithm() == &SketchAlgorithm::UnivMon)
         {
             let mut guarantee = ResultGuarantee::exact("SYNTHETIC test evidence; not measured");
             guarantee.metric = ErrorMetric::RelativeValue;
@@ -549,7 +549,7 @@ fn certified_frequency_readouts_share_one_univmon_state() {
         };
         assert!(matches!(
             &summary_input.expr,
-            SummaryExpr::SummaryAgg { family: SummaryFamilyType::Sketch(kind, _), .. }
+            SummaryExpr::SummaryAgg { family: FieldDataType::Sketch(kind, _), .. }
                 if kind.algorithm() == &SketchAlgorithm::UnivMon
         ));
         states.push(Rc::clone(summary_input));

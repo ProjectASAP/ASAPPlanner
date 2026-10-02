@@ -293,6 +293,16 @@ class SemanticLabelTests(unittest.TestCase):
         }
         self.assertEqual(_semantic_label(node), "Sort\nsort: col[2] descending, nulls first")
 
+    def test_project_names_columns_from_fields_and_legacy_columns(self):
+        """Exports write `fields`; older ones wrote `columns`. Both name columns."""
+        for key, dtype in (("fields", {"Plain": "utf8"}), ("columns", "utf8")):
+            node = {
+                "kind": "Project",
+                "detail": {"cols": [0]},
+                "schema": {key: [{"name": "service", "dtype": dtype, "nullable": False}]},
+            }
+            self.assertEqual(_semantic_label(node), "Project\ncolumns: service", key)
+
     def test_prepares_before_after_and_whole_post_asap_dags(self):
         node = {
             "id": 0,

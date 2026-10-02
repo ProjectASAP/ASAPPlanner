@@ -780,12 +780,12 @@ mod tests {
 
     use crate::cost_model::CseCandidate;
     use asap_types::post_asap::{
-        ExactKind, ExactParams, GroupingStrategy, ResultGuarantee, SummaryExpr, SummaryFamilyType,
-        SummaryField, SummaryNode, SummarySchema,
+        ExactKind, ExactParams, Field, FieldDataType, GroupingStrategy, ResultGuarantee, Schema,
+        SummaryExpr, SummaryNode,
     };
     use asap_types::pre_asap::expr_ir::ColumnRef;
     use asap_types::pre_asap::query_expr::{QueryExpr, Reduction, Source};
-    use asap_types::pre_asap::schema::{Column, DataType, Schema};
+    use asap_types::pre_asap::schema::DataType;
     use std::rc::Rc;
 
     fn scan() -> QueryExpr {
@@ -794,8 +794,8 @@ mod tests {
             predicates: vec![],
             schema: Schema::with_time_index(
                 vec![
-                    Column::new("ts", DataType::Timestamp, false),
-                    Column::new("value", DataType::Float64, false),
+                    Field::plain("ts", DataType::Timestamp, false),
+                    Field::plain("value", DataType::Float64, false),
                 ],
                 0,
                 vec![],
@@ -803,15 +803,12 @@ mod tests {
         }
     }
 
-    fn summary_node(family: SummaryFamilyType) -> SummaryNode {
+    fn summary_node(family: FieldDataType) -> SummaryNode {
         SummaryNode {
             expr: SummaryExpr::SummaryAgg {
                 child: Rc::new(SummaryNode {
                     expr: SummaryExpr::KeepPreAsap(Rc::new(scan())),
-                    schema: SummarySchema {
-                        fields: vec![],
-                        time_index: None,
-                    },
+                    schema: Schema::lifted(vec![], None),
                     guarantee: Some(ResultGuarantee::exact("KeepPreAsap")),
                 }),
                 family: family.clone(),
@@ -822,14 +819,7 @@ mod tests {
                 grouping: GroupingStrategy::default(),
                 filter: None,
             },
-            schema: SummarySchema {
-                fields: vec![SummaryField {
-                    name: "state".into(),
-                    dtype: family,
-                    nullable: false,
-                }],
-                time_index: None,
-            },
+            schema: Schema::lifted(vec![Field::new("state", family, false)], None),
             guarantee: None,
         }
     }
@@ -837,7 +827,7 @@ mod tests {
     #[test]
     fn decide_falls_back_to_structural_decision_when_profile_is_empty() {
         let sub_dag = scan();
-        let bound = summary_node(SummaryFamilyType::ExactAggregate(
+        let bound = summary_node(FieldDataType::ExactAggregate(
             ExactKind::Sum,
             ExactParams::Sum,
         ));
@@ -863,7 +853,7 @@ mod tests {
     #[test]
     fn decide_rejects_mixed_one_shot_and_repeating_without_horizon() {
         let sub_dag = scan();
-        let bound = summary_node(SummaryFamilyType::ExactAggregate(
+        let bound = summary_node(FieldDataType::ExactAggregate(
             ExactKind::Sum,
             ExactParams::Sum,
         ));
@@ -882,7 +872,7 @@ mod tests {
     #[test]
     fn decide_accepts_mixed_one_shot_and_repeating_with_an_explicit_horizon() {
         let sub_dag = scan();
-        let bound = summary_node(SummaryFamilyType::ExactAggregate(
+        let bound = summary_node(FieldDataType::ExactAggregate(
             ExactKind::Sum,
             ExactParams::Sum,
         ));
@@ -943,7 +933,7 @@ mod tests {
     #[test]
     fn high_frequency_selects_maintained_low_frequency_selects_recompute() {
         let sub_dag = scan();
-        let bound = summary_node(SummaryFamilyType::ExactAggregate(
+        let bound = summary_node(FieldDataType::ExactAggregate(
             ExactKind::Sum,
             ExactParams::Sum,
         ));
@@ -999,7 +989,7 @@ mod tests {
     #[test]
     fn update_rate_only_affects_maintained_cost_evaluation_rate_affects_both() {
         let sub_dag = scan();
-        let bound = summary_node(SummaryFamilyType::ExactAggregate(
+        let bound = summary_node(FieldDataType::ExactAggregate(
             ExactKind::Sum,
             ExactParams::Sum,
         ));
@@ -1039,7 +1029,7 @@ mod tests {
     #[test]
     fn one_shot_only_consumer_decides_without_an_explicit_horizon() {
         let sub_dag = scan();
-        let bound = summary_node(SummaryFamilyType::ExactAggregate(
+        let bound = summary_node(FieldDataType::ExactAggregate(
             ExactKind::Sum,
             ExactParams::Sum,
         ));
@@ -1072,7 +1062,7 @@ mod tests {
     #[test]
     fn one_shot_only_single_consumer_does_not_unconditionally_prefer_share() {
         let sub_dag = scan();
-        let bound = summary_node(SummaryFamilyType::ExactAggregate(
+        let bound = summary_node(FieldDataType::ExactAggregate(
             ExactKind::Sum,
             ExactParams::Sum,
         ));
@@ -1099,7 +1089,7 @@ mod tests {
     #[test]
     fn batch_only_workload_does_not_unconditionally_prefer_share_under_default_cost_model() {
         let sub_dag = scan();
-        let bound = summary_node(SummaryFamilyType::ExactAggregate(
+        let bound = summary_node(FieldDataType::ExactAggregate(
             ExactKind::Sum,
             ExactParams::Sum,
         ));
@@ -1148,9 +1138,9 @@ mod tests {
             predicates: vec![],
             schema: Schema::with_time_index(
                 vec![
-                    Column::new("ts", DataType::Timestamp, false),
-                    Column::new("value", DataType::Float64, false),
-                    Column::new("job", DataType::Utf8, true),
+                    Field::plain("ts", DataType::Timestamp, false),
+                    Field::plain("value", DataType::Float64, false),
+                    Field::plain("job", DataType::Utf8, true),
                 ],
                 0,
                 vec![],
@@ -1490,7 +1480,7 @@ mod tests {
     #[test]
     fn decide_rejects_a_zero_or_negative_horizon() {
         let sub_dag = scan();
-        let bound = summary_node(SummaryFamilyType::ExactAggregate(
+        let bound = summary_node(FieldDataType::ExactAggregate(
             ExactKind::Sum,
             ExactParams::Sum,
         ));

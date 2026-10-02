@@ -4,11 +4,11 @@ use super::*;
 /// A typed execution boundary, without storage identity or a live reader.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct InputContract {
-    pub schema: Schema,
+    pub schema: SchemaRef,
     pub properties: PlanProperties,
 }
 impl InputContract {
-    pub fn bounded(schema: Schema) -> Self {
+    pub fn bounded(schema: SchemaRef) -> Self {
         Self {
             schema,
             properties: PlanProperties {
@@ -17,7 +17,7 @@ impl InputContract {
             },
         }
     }
-    pub fn from_source(source: &dyn PhysicalOperator<Batch, Schema>) -> Self {
+    pub fn from_source(source: &dyn PhysicalOperator<Batch, SchemaRef>) -> Self {
         Self {
             schema: source.output_schema(),
             properties: source.properties(&[]),
@@ -285,7 +285,7 @@ impl CompiledPhysicalDAG {
     pub fn instantiate<'a>(
         &self,
         mut sources: BTreeMap<NodeId, Source<'a>>,
-    ) -> Result<PhysicalDAG<'a, Batch, Schema>, Error> {
+    ) -> Result<PhysicalDAG<'a, Batch, SchemaRef>, Error> {
         let mut dag = PhysicalDAG::default();
         for (&id, node) in &self.nodes {
             match node {
@@ -326,14 +326,14 @@ impl CompiledPhysicalDAG {
         Ok(dag)
     }
 }
-impl PhysicalOperator<Batch, Schema> for InputContract {
+impl PhysicalOperator<Batch, SchemaRef> for InputContract {
     fn name(&self) -> &str {
         "UnresolvedInput"
     }
-    fn input_schemas(&self) -> Vec<Schema> {
+    fn input_schemas(&self) -> Vec<SchemaRef> {
         vec![]
     }
-    fn output_schema(&self) -> Schema {
+    fn output_schema(&self) -> SchemaRef {
         self.schema.clone()
     }
     fn properties(&self, _: &[PlanProperties]) -> PlanProperties {

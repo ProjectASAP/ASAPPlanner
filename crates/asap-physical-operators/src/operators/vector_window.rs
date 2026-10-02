@@ -1,13 +1,16 @@
 //! Window bounds are typed input data; aggregation and histogram semantics stay native.
 use super::*;
 use planner_types::pre_asap::AggIntent;
+use planner_types::pre_asap::Schema;
 
-pub(crate) fn matrix_schema() -> Schema {
+pub(crate) fn matrix_schema() -> SchemaRef {
     let mut fields = vector_binary::value_schema(false).fields.clone();
     fields.insert(1, result_field("timestamp", DataType::Timestamp, false));
     fields.push(result_field("window_start", DataType::Timestamp, false));
     fields.push(result_field("window_end", DataType::Timestamp, false));
-    Arc::new(SummarySchema {
+    Arc::new(Schema {
+        closed: true,
+        unique_keys: vec![],
         fields,
         time_index: Some(1),
     })

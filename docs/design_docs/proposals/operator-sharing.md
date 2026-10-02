@@ -420,6 +420,31 @@ impl ScalarExpr {
 }
 ```
 
+**Fields versus column references.** These names describe different roles, not
+competing representations of the same object:
+
+| Name | Role | Holds runtime values? |
+|---|---|---|
+| `Schema` | Ordered `Field` metadata, plus key/time/closedness information | No |
+| `Field` | Name, type, nullability and optional qualifier for one output column | No |
+| `ColumnRef` | Unresolved logical reference: `Named`, `Qualified`, `SampleValue`, or `Wildcard` | No |
+| `ColumnId = usize` | Resolved column position in a particular input/output schema | No |
+| Runtime batch | Values conforming to a schema; storage layout is executor-specific | Yes |
+
+Keep `ColumnRef`, `ColumnId`, and `ScalarExpr::Column(ColumnId)`. Renaming the
+metadata struct `Column` to `Field` does not rename column references to field
+references. The same position identifies metadata during planning and values
+during execution; it is not a stable field identity across projections or joins.
+Schema `unique_keys` and `time_index` also use these column positions.
+
+For example, resolving `t.bytes` to position `1` produces `ColumnId = 1`.
+`schema.fields[1]` supplies its type and nullability; evaluating
+`ScalarExpr::Column(1)` reads the corresponding value. The native executor
+currently reads `row[1]` from `Batch { schema, rows: Vec<Vec<Value>> }`. A columnar
+executor would select array `1` instead. No physical `Column` container is
+introduced by the metadata rename, and the old metadata `Column` struct is not
+retained as a second type.
+
 **Relationship to current types.** `Field` is today's pre-ASAP `Column` with `dtype`
 widened from `DataType` to `FieldDataType`. `FieldDataType` is today's `SummaryFamilyType`
 under a name that also fits its `Plain` case. The proposed common `Schema` replaces

@@ -21,8 +21,9 @@ use serde::{Deserialize, Serialize};
 /// A name-based column reference — the front-end-emitted, unresolved state of
 /// [`QueryExpr::Column`](super::query_expr::QueryExpr::Column) (`C =
 /// ColumnRef`); the [`SchemaResolver`](super::schema_resolver::SchemaResolver) resolves it to a
-/// positional [`ColumnId`](super::schema::ColumnId). Includes the two
-/// PromQL-conventional synthetic columns.
+/// positional [`ColumnId`](super::schema::ColumnId). This is a logical reference,
+/// not schema metadata or a runtime data array. `SampleValue` names the implicit
+/// PromQL sample column; `Wildcard` represents an all-columns/rows request.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ColumnRef {
     Named(String),

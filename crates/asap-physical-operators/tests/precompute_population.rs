@@ -8,6 +8,7 @@ use asap_physical_operators::{
     Statistic,
 };
 use futures::{executor::block_on, StreamExt};
+use planner_types::pre_asap::Schema;
 use planner_types::{
     post_asap::*,
     pre_asap::{ArithmeticOpKind, BinaryOpKind, ColumnRef, DataType, GroupKeys, Reduction},
@@ -17,9 +18,12 @@ use std::{collections::BTreeMap, sync::Arc};
 // Typed series identity survives finalization and derived precompute through population metadata.
 #[test]
 fn finalized_shared_panes_rebuild_one_global_summary_after_recovery() {
-    let family = SummaryFamilyType::ExactAggregate(ExactKind::Sum, ExactParams::Sum);
-    let schema = |dtype| SummarySchema {
-        fields: vec![SummaryField {
+    let family = FieldDataType::ExactAggregate(ExactKind::Sum, ExactParams::Sum);
+    let schema = |dtype| Schema {
+        closed: true,
+        unique_keys: vec![],
+        fields: vec![Field {
+            table: None,
             name: "value".into(),
             dtype,
             nullable: false,
@@ -27,16 +31,18 @@ fn finalized_shared_panes_rebuild_one_global_summary_after_recovery() {
         time_index: None,
     };
     let state_schema = schema(family.clone());
-    let mut value_schema = schema(SummaryFamilyType::Plain(DataType::Float64));
-    value_schema.fields.push(SummaryField {
+    let mut value_schema = schema(FieldDataType::Plain(DataType::Float64));
+    value_schema.fields.push(Field {
+        table: None,
         name: "time".into(),
-        dtype: SummaryFamilyType::Plain(DataType::Timestamp),
+        dtype: FieldDataType::Plain(DataType::Timestamp),
         nullable: false,
     });
     value_schema.time_index = Some(1);
-    value_schema.fields.push(SummaryField {
+    value_schema.fields.push(Field {
+        table: None,
         name: planner_types::pre_asap::schema::PROMQL_SERIES_IDENTITY.into(),
-        dtype: SummaryFamilyType::Plain(DataType::Utf8),
+        dtype: FieldDataType::Plain(DataType::Utf8),
         nullable: false,
     });
     for (weight, expected) in [
@@ -119,7 +125,7 @@ fn finalized_shared_panes_rebuild_one_global_summary_after_recovery() {
             let fields = &mut invalid_identity.nodes[1].output_schema.fields;
             match mutation {
                 0 => fields[2].nullable = true,
-                1 => fields[2].dtype = SummaryFamilyType::Plain(DataType::Float64),
+                1 => fields[2].dtype = FieldDataType::Plain(DataType::Float64),
                 _ => fields.push(fields[2].clone()),
             }
             assert!(precompute::compile(&invalid_identity, &[0], &[3]).is_err());
@@ -214,9 +220,12 @@ fn finalized_shared_panes_rebuild_one_global_summary_after_recovery() {
     }
 }
 
-fn logical_schema(family: SummaryFamilyType) -> SummarySchema {
-    SummarySchema {
-        fields: vec![SummaryField {
+fn logical_schema(family: FieldDataType) -> Schema {
+    Schema {
+        closed: true,
+        unique_keys: vec![],
+        fields: vec![Field {
+            table: None,
             name: "value".into(),
             dtype: family,
             nullable: false,
@@ -225,8 +234,8 @@ fn logical_schema(family: SummaryFamilyType) -> SummarySchema {
     }
 }
 fn state_dag(
-    family: SummaryFamilyType,
-    target: Option<SummaryFamilyType>,
+    family: FieldDataType,
+    target: Option<FieldDataType>,
     merge: bool,
 ) -> CompiledPhysicalDAG {
     let mut nodes = vec![PostAsapDAGNode {
@@ -250,7 +259,7 @@ fn state_dag(
             operation: ValueOperation::FinalizeExactAccumulator,
         },
         output_state: ExecutionDataState::INGESTION_ROWS,
-        output_schema: logical_schema(SummaryFamilyType::Plain(DataType::Float64)),
+        output_schema: logical_schema(FieldDataType::Plain(DataType::Float64)),
         guarantee: None,
     });
     if let Some(target) = target {
@@ -289,7 +298,7 @@ fn state_dag(
 }
 fn native_run(
     program: &CompiledPhysicalDAG,
-    family: SummaryFamilyType,
+    family: FieldDataType,
     states: Vec<Arc<dyn asap_physical_operators::AggregateCore>>,
     context: RunContext,
 ) -> Result<Vec<Vec<Value>>, asap_physical_operators::Error> {
@@ -337,7 +346,7 @@ fn ingestion_context(limits: Limits) -> RunContext {
 }
 fn sum_state(value: f64) -> Arc<dyn asap_physical_operators::AggregateCore> {
     let mut state = asap_physical_operators::summary_kernels::exact::ExactAccumulator::new(
-        planner_types::post_asap::SummaryFamilyType::ExactAggregate(
+        planner_types::post_asap::FieldDataType::ExactAggregate(
             planner_types::post_asap::ExactKind::Sum,
             planner_types::post_asap::ExactParams::Sum,
         ),
@@ -351,7 +360,7 @@ fn sum_state(value: f64) -> Arc<dyn asap_physical_operators::AggregateCore> {
 // Only an explicit merge may collapse distinct pane updates before finalization.
 #[test]
 fn explicit_merge_changes_pane_cardinality() {
-    let family = SummaryFamilyType::ExactAggregate(ExactKind::Sum, ExactParams::Sum);
+    let family = FieldDataType::ExactAggregate(ExactKind::Sum, ExactParams::Sum);
     for (merge, expected) in [(false, vec![2., 7.]), (true, vec![9.])] {
         let program = state_dag(family.clone(), None, merge);
         let rows = native_run(
@@ -376,8 +385,8 @@ fn explicit_merge_changes_pane_cardinality() {
 // Typed updates reject invalid domains before publishing any target state.
 #[test]
 fn precompute_rejects_nonfinite_and_nonpositive_dds_updates() {
-    let source = SummaryFamilyType::ExactAggregate(ExactKind::Sum, ExactParams::Sum);
-    let target = SummaryFamilyType::Sketch(
+    let source = FieldDataType::ExactAggregate(ExactKind::Sum, ExactParams::Sum);
+    let target = FieldDataType::Sketch(
         SketchKind::new(
             SketchAlgorithm::DDSketch,
             SketchParams::DDSketch { alpha: 0.01 },
@@ -407,7 +416,7 @@ fn precompute_rejects_nonfinite_and_nonpositive_dds_updates() {
 #[test]
 fn precompute_count_conversion_checks_precision() {
     use asap_physical_operators::summary_kernels::exact::ExactAccumulator;
-    let family = SummaryFamilyType::ExactAggregate(ExactKind::Count, ExactParams::Count);
+    let family = FieldDataType::ExactAggregate(ExactKind::Count, ExactParams::Count);
     let program = state_dag(family.clone(), None, false);
     for (count, valid) in [(3u64, true), ((1u64 << 53) + 1, false)] {
         let mut state =
@@ -427,7 +436,7 @@ fn precompute_count_conversion_checks_precision() {
 // DAG execution retains terminal cancellation and shared workspace limits.
 #[test]
 fn precompute_dag_enforces_cancellation_and_budget() {
-    let family = SummaryFamilyType::ExactAggregate(ExactKind::Sum, ExactParams::Sum);
+    let family = FieldDataType::ExactAggregate(ExactKind::Sum, ExactParams::Sum);
     let program = state_dag(family.clone(), None, true);
     let context = ingestion_context(Limits::default());
     context.cancel();

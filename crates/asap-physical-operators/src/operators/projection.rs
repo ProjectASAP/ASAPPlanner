@@ -1,6 +1,6 @@
 use super::*;
 impl Operator {
-    pub fn project(input: Schema, columns: Vec<(String, Expression)>) -> Result<Self, Error> {
+    pub fn project(input: SchemaRef, columns: Vec<(String, Expression)>) -> Result<Self, Error> {
         let fields = columns
             .iter()
             .map(|(name, e)| {

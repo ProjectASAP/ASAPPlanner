@@ -670,7 +670,7 @@ fn unary_negation_lowers_as_multiply_by_minus_one() {
     let schema = ok("-some_metric").output_schema().unwrap();
     assert_eq!(
         schema
-            .columns
+            .fields
             .iter()
             .map(|c| c.name.as_str())
             .collect::<Vec<_>>(),
@@ -1186,7 +1186,7 @@ fn nested_subquery_from_prometheus_docs() {
     let schema = qe.output_schema().expect("schema derivation");
     assert_eq!(
         schema
-            .columns
+            .fields
             .iter()
             .map(|c| c.name.as_str())
             .collect::<Vec<_>>(),
@@ -1315,7 +1315,7 @@ fn count_over_time_value_column_is_float64() {
     // derived `value` column must be `Float64` like every other range reducer.
     let schema = ok("count_over_time(m[5m])").output_schema().unwrap();
     let value = schema
-        .columns
+        .fields
         .iter()
         .find(|c| c.name == "value")
         .expect("value column");
@@ -1749,9 +1749,9 @@ fn absent_keeps_matcher_labels_for_the_synthesized_output() {
     let qe = ok(r#"absent(up{job="x"})"#);
     let cols = qe.output_schema().unwrap();
     assert!(
-        cols.columns.iter().any(|c| c.name == "job"),
+        cols.fields.iter().any(|c| c.name == "job"),
         "matcher label `job` kept, got {:?}",
-        cols.columns.iter().map(|c| &c.name).collect::<Vec<_>>()
+        cols.fields.iter().map(|c| &c.name).collect::<Vec<_>>()
     );
 }
 
@@ -1766,8 +1766,8 @@ fn time_lowers_to_the_eval_time_scalar() {
     assert!(matches!(ok("time()"), QueryExpr::EvalTimestamp));
     // …and it is scalar-shaped: a single float `value`, no time index.
     let sch = ok("time()").output_schema().unwrap();
-    assert_eq!(sch.columns.len(), 1);
-    assert_eq!(sch.columns[0].name, "value");
+    assert_eq!(sch.fields.len(), 1);
+    assert_eq!(sch.fields[0].name, "value");
     assert!(sch.time_index.is_none());
 }
 
@@ -1855,7 +1855,7 @@ fn vector_promotes_a_scalar_to_a_vector() {
     // Vector-typed: schema has a time index (a scalar leaf has none).
     let sch = qe.output_schema().unwrap();
     assert!(sch.time_index.is_some());
-    assert!(sch.columns.iter().any(|c| c.name == "value"));
+    assert!(sch.fields.iter().any(|c| c.name == "value"));
 }
 
 #[test]
@@ -1870,8 +1870,8 @@ fn scalar_collapses_a_vector_to_a_scalar() {
     // PromqlScalarBridge-typed: single `value` column, no time index.
     let sch = qe.output_schema().unwrap();
     assert!(sch.time_index.is_none());
-    assert_eq!(sch.columns.len(), 1);
-    assert_eq!(sch.columns[0].name, "value");
+    assert_eq!(sch.fields.len(), 1);
+    assert_eq!(sch.fields[0].name, "value");
 }
 
 #[test]
@@ -1973,7 +1973,7 @@ fn group_lowers_to_a_constant_group_intent() {
     assert!(matches!(measures.as_slice(), [AggIntent::Group]));
     // Output column is the constant-1 `group` value.
     let sch = qe.output_schema().unwrap();
-    assert!(sch.columns.iter().any(|c| c.name == "group"));
+    assert!(sch.fields.iter().any(|c| c.name == "group"));
 }
 
 #[test]
@@ -1981,7 +1981,7 @@ fn group_by_keeps_the_grouping_keys() {
     // `group by (job) (up)` — the grouping keys ride on `Aggregate.by`.
     let qe = ok("group by (job) (up)");
     let sch = qe.output_schema().unwrap();
-    assert!(sch.columns.iter().any(|c| c.name == "job"));
+    assert!(sch.fields.iter().any(|c| c.name == "job"));
     assert!(has(&qe, |i| *i == AggIntent::Group));
 }
 
@@ -1999,7 +1999,7 @@ fn count_values_groups_by_value_and_synthesizes_a_label() {
     );
     let sch = qe.output_schema().unwrap();
     let version = sch
-        .columns
+        .fields
         .iter()
         .find(|c| c.name == "version")
         .expect("synthesized `version` label column");
@@ -2009,7 +2009,7 @@ fn count_values_groups_by_value_and_synthesizes_a_label() {
         "the value becomes a string label"
     );
     assert!(
-        sch.columns.iter().any(|c| c.name == "count"),
+        sch.fields.iter().any(|c| c.name == "count"),
         "and a count column"
     );
 }
@@ -2024,8 +2024,8 @@ fn count_values_accepts_a_parenthesised_label_and_by_grouping() {
         |i| matches!(i, AggIntent::CountValues { label } if label == "v")
     ));
     let sch = qe.output_schema().unwrap();
-    assert!(sch.columns.iter().any(|c| c.name == "job"));
-    assert!(sch.columns.iter().any(|c| c.name == "v"));
+    assert!(sch.fields.iter().any(|c| c.name == "job"));
+    assert!(sch.fields.iter().any(|c| c.name == "v"));
 }
 
 #[test]
@@ -2035,9 +2035,9 @@ fn count_values_label_colliding_with_a_group_key_is_not_duplicated() {
     // output must carry a single `job` column, never two.
     let qe = ok(r#"count_values by (job) ("job", version)"#);
     let sch = qe.output_schema().unwrap();
-    let jobs = sch.columns.iter().filter(|c| c.name == "job").count();
-    assert_eq!(jobs, 1, "collision deduped, got {:?}", sch.columns);
-    assert!(sch.columns.iter().any(|c| c.name == "count"));
+    let jobs = sch.fields.iter().filter(|c| c.name == "job").count();
+    assert_eq!(jobs, 1, "collision deduped, got {:?}", sch.fields);
+    assert!(sch.fields.iter().any(|c| c.name == "count"));
 }
 
 #[test]
@@ -2058,7 +2058,7 @@ fn limitk_and_limit_ratio_lower_to_series_sampling() {
     ));
     // Series-preserving: the output schema equals the input's (ts, value).
     let sch = ok("limitk(2, http_requests)").output_schema().unwrap();
-    assert!(sch.columns.iter().any(|c| c.name == "value"));
+    assert!(sch.fields.iter().any(|c| c.name == "value"));
     assert!(sch.time_index.is_some());
 }
 
@@ -2138,8 +2138,8 @@ fn label_replace_is_a_relabel_over_the_vector() {
     assert!(is_fn_named(value, "label_replace"));
     // Output: the child's columns + the synthesized `host` label; value & ts kept.
     let sch = qe.output_schema().unwrap();
-    assert!(sch.columns.iter().any(|c| c.name == "host"));
-    assert!(sch.columns.iter().any(|c| c.name == "value"));
+    assert!(sch.fields.iter().any(|c| c.name == "host"));
+    assert!(sch.fields.iter().any(|c| c.name == "value"));
     assert!(sch.time_index.is_some(), "the vector's time axis survives");
 }
 
@@ -2154,7 +2154,7 @@ fn label_join_concatenates_source_labels() {
     assert_eq!(dst, "combined");
     assert!(is_fn_named(value, "label_join"));
     let sch = qe.output_schema().unwrap();
-    assert!(sch.columns.iter().any(|c| c.name == "combined"));
+    assert!(sch.fields.iter().any(|c| c.name == "combined"));
 }
 
 #[test]
@@ -2167,7 +2167,7 @@ fn label_replace_composes_under_an_aggregation() {
     assert!(matches!(relabel, QueryExpr::PromqlRelabel { dst, .. } if dst == "host"));
     assert!(has(&qe, |i| matches!(i, AggIntent::Sum { .. })));
     let sch = qe.output_schema().unwrap();
-    assert!(sch.columns.iter().any(|c| c.name == "host"));
+    assert!(sch.fields.iter().any(|c| c.name == "host"));
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -2240,10 +2240,7 @@ fn sort_by_label_orders_on_each_label_in_turn() {
     assert!(keys.iter().all(|k| k.ascending));
     let sch = qe.output_schema().unwrap();
     for label in ["group", "instance", "job"] {
-        assert!(
-            sch.columns.iter().any(|c| c.name == label),
-            "{label} seeded"
-        );
+        assert!(sch.fields.iter().any(|c| c.name == label), "{label} seeded");
     }
 }
 

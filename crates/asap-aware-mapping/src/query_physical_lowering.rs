@@ -343,7 +343,7 @@ pub fn lower_query_physical_dag(
                         child
                             .output_schema()
                             .map_err(|_| AnalyticalCostError::UnsupportedQueryOperator)?
-                            .columns
+                            .fields
                             .len()
                     } else {
                         cols.len()
@@ -1060,8 +1060,8 @@ fn hash_join_key_count(
     let (Ok(left_schema), Ok(right_schema)) = (left.output_schema(), right.output_schema()) else {
         return None;
     };
-    let left_width = left_schema.columns.len();
-    let total_width = left_width.saturating_add(right_schema.columns.len());
+    let left_width = left_schema.fields.len();
+    let total_width = left_width.saturating_add(right_schema.fields.len());
 
     fn column_side(column: usize, left_width: usize, total_width: usize) -> Option<bool> {
         if column < left_width {
@@ -1452,7 +1452,7 @@ mod tests {
     #[test]
     fn correlation_lowers_to_physical_hash_aggregate() {
         use asap_types::pre_asap::{
-            AggIntent, Column, DataType, QueryExpr, Reduction, Schema, Source,
+            AggIntent, DataType, Field, QueryExpr, Reduction, Schema, Source,
         };
         let source = Source::Table {
             table_ref: "pairs".into(),
@@ -1467,8 +1467,8 @@ mod tests {
                 source: source.clone(),
                 predicates: vec![],
                 schema: Schema::new(vec![
-                    Column::new("x", DataType::Float64, true),
-                    Column::new("y", DataType::Float64, true),
+                    Field::plain("x", DataType::Float64, true),
+                    Field::plain("y", DataType::Float64, true),
                 ]),
             }),
         });
@@ -1502,7 +1502,7 @@ mod tests {
     #[test]
     fn query_lowering_recurses_and_fuses_global_sort_limit() {
         use asap_types::pre_asap::{AggIntent, GroupKeys, QueryExpr, Reduction, SortKey, Source};
-        use asap_types::pre_asap::{Column, DataType, Schema};
+        use asap_types::pre_asap::{DataType, Field, Schema};
         use std::rc::Rc;
 
         let scan = Rc::new(QueryExpr::Scan {
@@ -1513,8 +1513,8 @@ mod tests {
                 QueryExpr::Literal(asap_types::pre_asap::ScalarValue::Boolean(true)),
             ))],
             schema: Schema::new(vec![
-                Column::new("service", DataType::Utf8, false),
-                Column::new("value", DataType::Float64, false),
+                Field::plain("service", DataType::Utf8, false),
+                Field::plain("value", DataType::Float64, false),
             ]),
         });
         let aggregate = Rc::new(QueryExpr::Aggregate {
@@ -1640,7 +1640,7 @@ mod tests {
 
     #[test]
     fn query_lowering_shares_only_provider_identified_physical_nodes() {
-        use asap_types::pre_asap::{Column, CompareOpKind, DataType, Schema};
+        use asap_types::pre_asap::{CompareOpKind, DataType, Field, Schema};
         use asap_types::pre_asap::{JoinKind, Predicate, QueryExpr, Source};
         use std::rc::Rc;
 
@@ -1649,7 +1649,7 @@ mod tests {
                 table_ref: "dimensions".into(),
             },
             predicates: vec![],
-            schema: Schema::new(vec![Column::new("id", DataType::Int64, false)]),
+            schema: Schema::new(vec![Field::plain("id", DataType::Int64, false)]),
         });
         let root = Rc::new(QueryExpr::Join {
             kind: JoinKind::Inner,
@@ -1802,7 +1802,7 @@ mod tests {
 
     #[test]
     fn query_lowering_covers_relational_unary_operators() {
-        use asap_types::pre_asap::{Column, DataType, ScalarValue, Schema};
+        use asap_types::pre_asap::{DataType, Field, ScalarValue, Schema};
         use asap_types::pre_asap::{
             GroupKeys, Predicate, QueryExpr, SortKey, Source, TimeShift, WindowFuncKind,
         };
@@ -1813,7 +1813,7 @@ mod tests {
                 table_ref: "events".into(),
             },
             predicates: vec![],
-            schema: Schema::new(vec![Column::new("id", DataType::Int64, false)]),
+            schema: Schema::new(vec![Field::plain("id", DataType::Int64, false)]),
         });
         let filter = Rc::new(QueryExpr::Filter {
             pred: Predicate(Rc::new(QueryExpr::Literal(ScalarValue::Boolean(true)))),
@@ -1976,7 +1976,7 @@ mod tests {
 
     #[test]
     fn query_lowering_maps_concat_and_union_all_but_rejects_distinct_set_ops() {
-        use asap_types::pre_asap::{Column, DataType, Schema};
+        use asap_types::pre_asap::{DataType, Field, Schema};
         use asap_types::pre_asap::{QueryExpr, RelationalSetOpKind, Source};
         use std::rc::Rc;
 
@@ -1985,7 +1985,7 @@ mod tests {
                 table_ref: name.into(),
             },
             predicates: vec![],
-            schema: Schema::new(vec![Column::new("id", DataType::Int64, false)]),
+            schema: Schema::new(vec![Field::plain("id", DataType::Int64, false)]),
         };
         let union = Rc::new(QueryExpr::SetOp {
             kind: RelationalSetOpKind::Union,
@@ -2057,7 +2057,7 @@ mod tests {
 
     #[test]
     fn query_lowering_fails_closed_for_missing_or_inconsistent_statistics() {
-        use asap_types::pre_asap::{Column, DataType, Schema};
+        use asap_types::pre_asap::{DataType, Field, Schema};
         use asap_types::pre_asap::{QueryExpr, Source};
         use std::rc::Rc;
 
@@ -2066,7 +2066,7 @@ mod tests {
                 table_ref: "events".into(),
             },
             predicates: vec![],
-            schema: Schema::new(vec![Column::new("id", DataType::Int64, false)]),
+            schema: Schema::new(vec![Field::plain("id", DataType::Int64, false)]),
         });
         let root = Rc::new(QueryExpr::Project {
             cols: vec![],
@@ -2173,7 +2173,7 @@ mod tests {
 
     #[test]
     fn query_lowering_accepts_a_consistently_empty_edge() {
-        use asap_types::pre_asap::{Column, DataType, ScalarValue, Schema};
+        use asap_types::pre_asap::{DataType, Field, ScalarValue, Schema};
         use asap_types::pre_asap::{Predicate, QueryExpr, Source};
         use std::rc::Rc;
 
@@ -2182,7 +2182,7 @@ mod tests {
                 table_ref: "events".into(),
             },
             predicates: vec![],
-            schema: Schema::new(vec![Column::new("id", DataType::Int64, false)]),
+            schema: Schema::new(vec![Field::plain("id", DataType::Int64, false)]),
         });
         let filter = Rc::new(QueryExpr::Filter {
             pred: Predicate(Rc::new(QueryExpr::Literal(ScalarValue::Boolean(false)))),
@@ -2236,7 +2236,7 @@ mod tests {
         use asap_types::pre_asap::{
             AggIntent, GroupKeys, QueryExpr, Reduction, Source, WindowFuncKind,
         };
-        use asap_types::pre_asap::{Column, DataType, Schema};
+        use asap_types::pre_asap::{DataType, Field, Schema};
         use asap_types::types::AccuracyTarget;
         use std::rc::Rc;
 
@@ -2246,7 +2246,7 @@ mod tests {
                     table_ref: "events".into(),
                 },
                 predicates: vec![],
-                schema: Schema::new(vec![Column::new("value", DataType::Float64, false)]),
+                schema: Schema::new(vec![Field::plain("value", DataType::Float64, false)]),
             })
         };
         let exact_quantile = Rc::new(QueryExpr::Aggregate {
@@ -2323,7 +2323,7 @@ mod tests {
     #[test]
     fn promql_presence_is_lowered_with_a_per_step_output_bound() {
         use asap_types::pre_asap::{
-            AggIntent, Column, DataType, QueryExpr, Reduction, Schema, Source,
+            AggIntent, DataType, Field, QueryExpr, Reduction, Schema, Source,
         };
 
         let source = Source::TimeSeries {
@@ -2332,7 +2332,7 @@ mod tests {
         let scan = Rc::new(QueryExpr::Scan {
             source: source.clone(),
             predicates: vec![],
-            schema: Schema::new(vec![Column::new("value", DataType::Float64, false)]),
+            schema: Schema::new(vec![Field::plain("value", DataType::Float64, false)]),
         });
         let root = Rc::new(QueryExpr::Aggregate {
             reduction: Reduction::PerEntity,
@@ -2390,14 +2390,14 @@ mod tests {
 
     #[test]
     fn promql_range_and_subquery_preserve_internal_steps() {
-        use asap_types::pre_asap::{Column, DataType, QueryExpr, Schema, Source};
+        use asap_types::pre_asap::{DataType, Field, QueryExpr, Schema, Source};
         use std::time::Duration;
 
         let source = Source::TimeSeries { metric: "m".into() };
         let scan = Rc::new(QueryExpr::Scan {
             source: source.clone(),
             predicates: vec![],
-            schema: Schema::new(vec![Column::new("value", DataType::Float64, false)]),
+            schema: Schema::new(vec![Field::plain("value", DataType::Float64, false)]),
         });
         let range = Rc::new(QueryExpr::TimeRange {
             range: Duration::from_secs(300),
@@ -2465,7 +2465,7 @@ mod tests {
     #[test]
     fn promql_binary_lowering_keeps_operation_and_matching_cardinality() {
         use asap_types::pre_asap::{
-            ArithmeticOpKind, BinaryOpKind, Column, DataType, GroupSide, QueryExpr, Schema, Source,
+            ArithmeticOpKind, BinaryOpKind, DataType, Field, GroupSide, QueryExpr, Schema, Source,
             VectorGrouping, VectorMatch, VectorMatchKind,
         };
 
@@ -2475,7 +2475,7 @@ mod tests {
             Rc::new(QueryExpr::Scan {
                 source,
                 predicates: vec![],
-                schema: Schema::new(vec![Column::new("value", DataType::Float64, false)]),
+                schema: Schema::new(vec![Field::plain("value", DataType::Float64, false)]),
             })
         };
         let root = Rc::new(QueryExpr::BinaryOp {
@@ -2548,7 +2548,7 @@ mod tests {
     #[test]
     fn promql_relabel_sample_and_per_series_lower_as_a_complete_chain() {
         use asap_types::pre_asap::{
-            AggIntent, Column, DataType, GroupKeys, QueryExpr, Reduction, SampleKind, ScalarValue,
+            AggIntent, DataType, Field, GroupKeys, QueryExpr, Reduction, SampleKind, ScalarValue,
             Schema, Source,
         };
 
@@ -2558,7 +2558,7 @@ mod tests {
         let scan = Rc::new(QueryExpr::Scan {
             source: source.clone(),
             predicates: vec![],
-            schema: Schema::new(vec![Column::new("value", DataType::Float64, false)]),
+            schema: Schema::new(vec![Field::plain("value", DataType::Float64, false)]),
         });
         let relabel = Rc::new(QueryExpr::PromqlRelabel {
             dst: "service".into(),

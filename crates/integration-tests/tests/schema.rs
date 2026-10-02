@@ -30,7 +30,7 @@ fn schema_filtered_scan_is_open() {
         .output_schema()
         .unwrap();
     assert!(!s.closed, "PromQL scan with predicates must remain open");
-    assert_eq!(s.columns.len(), 3, "[ts, value, job]");
+    assert_eq!(s.fields.len(), 3, "[ts, value, job]");
 }
 
 // per-series rate is label-preserving → output stays open

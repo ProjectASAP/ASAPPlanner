@@ -118,7 +118,7 @@ pub trait AccuracyEvidenceProvider {
     fn propagation_stats(
         &self,
         _op: &CompositionOperator,
-        _family: &SummaryFamilyType,
+        _family: &FieldDataType,
         _query: Option<&SketchQuery>,
     ) -> PropagationStats {
         PropagationStats::default()
@@ -142,7 +142,7 @@ impl AccuracyEvidenceProvider for WorkloadAccuracyEvidence<'_> {
     fn propagation_stats(
         &self,
         _op: &CompositionOperator,
-        _family: &SummaryFamilyType,
+        _family: &FieldDataType,
         _query: Option<&SketchQuery>,
     ) -> PropagationStats {
         PropagationStats {
@@ -180,7 +180,7 @@ mod tests {
         };
         let fresh = provider.propagation_stats(
             &CompositionOperator::ExactSum,
-            &SummaryFamilyType::ExactAggregate(
+            &FieldDataType::ExactAggregate(
                 asap_types::post_asap::ExactKind::Sum,
                 asap_types::post_asap::ExactParams::Sum,
             ),
@@ -195,7 +195,7 @@ mod tests {
         }
         .propagation_stats(
             &CompositionOperator::ExactSum,
-            &SummaryFamilyType::ExactAggregate(
+            &FieldDataType::ExactAggregate(
                 asap_types::post_asap::ExactKind::Sum,
                 asap_types::post_asap::ExactParams::Sum,
             ),

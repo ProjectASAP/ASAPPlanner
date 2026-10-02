@@ -21,8 +21,8 @@ use asap_aware_mapping::{
 use asap_integration_tests::fixtures::lower_promql;
 use asap_types::post_asap::{
     compile_post_asap_dag, CompositionOperator, EntityIdentity, ExactKind, ExactParams,
-    GroupingStrategy, SketchAlgorithm, SketchKind, SketchParams, SketchQuery, SummaryExpr,
-    SummaryFamilyType, SummaryInputExpr, SummaryNode, SummarySchema, SummaryUpdate, ValueOperation,
+    FieldDataType, GroupingStrategy, Schema, SketchAlgorithm, SketchKind, SketchParams,
+    SketchQuery, SummaryExpr, SummaryInputExpr, SummaryNode, SummaryUpdate, ValueOperation,
 };
 use asap_types::pre_asap::expr_ir::ColumnRef;
 use asap_types::pre_asap::query_expr::{QueryExpr, Reduction};
@@ -67,7 +67,7 @@ fn distinct_over_time_offers_hll_cardinality_readout() {
         let Replacement::Summary(node) = &candidate.replacement else { return false };
         let SummaryExpr::SummaryEstimate { summary_input, query, .. } = &node.expr else { return false };
         matches!(query, SketchQuery::Cardinality)
-            && matches!(&summary_input.expr, SummaryExpr::SummaryAgg { family: SummaryFamilyType::Sketch(kind, _), .. }
+            && matches!(&summary_input.expr, SummaryExpr::SummaryAgg { family: FieldDataType::Sketch(kind, _), .. }
                 if kind.algorithm() == &SketchAlgorithm::Hll)
     }), "no HLL cardinality candidate: {candidates:?}");
 }
@@ -122,7 +122,7 @@ fn value_ranked_topk_preserves_summary_children_in_post_asap_dag() {
             .schema
             .fields
             .iter()
-            .all(|field| matches!(field.dtype, SummaryFamilyType::Plain(_))));
+            .all(|field| matches!(field.dtype, FieldDataType::Plain(_))));
     }
 }
 
@@ -168,7 +168,7 @@ fn instant_topk_and_unsupported_child_remain_local_residuals() {
     }
 }
 
-fn dtype<'a>(schema: &'a SummarySchema, name: &str) -> &'a SummaryFamilyType {
+fn dtype<'a>(schema: &'a Schema, name: &str) -> &'a FieldDataType {
     &schema
         .fields
         .iter()
@@ -254,7 +254,7 @@ impl AccuracyEvidenceProvider for SeparatedTopK {
     fn propagation_stats(
         &self,
         op: &CompositionOperator,
-        _family: &SummaryFamilyType,
+        _family: &FieldDataType,
         _query: Option<&SketchQuery>,
     ) -> PropagationStats {
         matches!(op, CompositionOperator::TopKSelection)
@@ -298,7 +298,7 @@ fn grouped_rate_topk_consumes_finalized_rate_values() {
         asap_types::post_asap::PostAsapOperatorPayload::RelationalJoin { .. }
     )));
     let node = dag.nodes.iter().find(|node| matches!(&node.payload,
-        asap_types::post_asap::PostAsapOperatorPayload::SummaryAgg { family: SummaryFamilyType::Sketch(kind, _), .. }
+        asap_types::post_asap::PostAsapOperatorPayload::SummaryAgg { family: FieldDataType::Sketch(kind, _), .. }
         if kind.algorithm() == &SketchAlgorithm::CmsWithHeap)).unwrap();
     assert_eq!(
         node.output_state.timing,
@@ -326,7 +326,7 @@ fn weighted_topk_keeps_candidates_with_missing_population_evidence() {
         fn propagation_stats(
             &self,
             op: &CompositionOperator,
-            family: &SummaryFamilyType,
+            family: &FieldDataType,
             query: Option<&SketchQuery>,
         ) -> PropagationStats {
             SeparatedTopK.propagation_stats(op, family, query)
@@ -723,7 +723,7 @@ fn planner_only_e2e_temporal_topk_preserves_query_update_and_readout_contract() 
         else {
             panic!("expected structured Top-K state input")
         };
-        let SummaryFamilyType::Sketch(kind, _) = family else {
+        let FieldDataType::Sketch(kind, _) = family else {
             panic!("expected a heap-backed sketch family, got {family:?}")
         };
         assert_eq!(format!("{:?}", kind.algorithm()), expected_family);
@@ -915,7 +915,7 @@ fn promql_quantile_of_rate_binds_kll_over_rate_accumulator() {
     assert!(matches!(query, SketchQuery::Quantile { q } if *q == 0.99));
     assert_eq!(
         dtype(&root.schema, "quantile_0_99"),
-        &SummaryFamilyType::Plain(DataType::Float64),
+        &FieldDataType::Plain(DataType::Float64),
         "the summary-state type must not propagate past the estimate"
     );
 
@@ -936,7 +936,7 @@ fn promql_quantile_of_rate_binds_kll_over_rate_accumulator() {
     };
     assert_eq!(
         family,
-        &SummaryFamilyType::Sketch(
+        &FieldDataType::Sketch(
             SketchKind::new(SketchAlgorithm::Kll, SketchParams::Kll { k: 269 }),
             GroupingStrategy::default()
         )
@@ -949,7 +949,7 @@ fn promql_quantile_of_rate_binds_kll_over_rate_accumulator() {
     );
     assert_eq!(
         dtype(&summary_input.schema, "value"),
-        &SummaryFamilyType::Sketch(
+        &FieldDataType::Sketch(
             SketchKind::new(SketchAlgorithm::Kll, SketchParams::Kll { k: 269 }),
             GroupingStrategy::default()
         )
@@ -978,12 +978,12 @@ fn promql_quantile_of_rate_binds_kll_over_rate_accumulator() {
     };
     assert_eq!(
         family,
-        &SummaryFamilyType::ExactAggregate(ExactKind::Rate, ExactParams::Rate)
+        &FieldDataType::ExactAggregate(ExactKind::Rate, ExactParams::Rate)
     );
     assert_eq!(reduction, &Reduction::PerEntity);
     assert_eq!(
         dtype(&child.schema, "value"),
-        &SummaryFamilyType::ExactAggregate(ExactKind::Rate, ExactParams::Rate)
+        &FieldDataType::ExactAggregate(ExactKind::Rate, ExactParams::Rate)
     );
     assert_eq!(
         child.schema.time_index,
@@ -1004,7 +1004,7 @@ fn promql_quantile_of_rate_binds_kll_over_rate_accumulator() {
         leaf.schema
             .fields
             .iter()
-            .all(|f| matches!(f.dtype, SummaryFamilyType::Plain(_))),
+            .all(|f| matches!(f.dtype, FieldDataType::Plain(_))),
         "logical edges carry only plain columns"
     );
 }
@@ -1025,7 +1025,7 @@ fn promql_exact_workload_binds_accumulators_not_sketches() {
     };
     assert_eq!(
         family,
-        &SummaryFamilyType::ExactAggregate(ExactKind::Sum, ExactParams::Sum)
+        &FieldDataType::ExactAggregate(ExactKind::Sum, ExactParams::Sum)
     );
     assert_eq!(
         reduction,
@@ -1034,7 +1034,7 @@ fn promql_exact_workload_binds_accumulators_not_sketches() {
     );
     assert_eq!(
         dtype(&root.schema, "job"),
-        &SummaryFamilyType::Plain(DataType::Utf8),
+        &FieldDataType::Plain(DataType::Utf8),
         "group keys pass through verbatim"
     );
 
@@ -1141,7 +1141,7 @@ fn nested_summary_explicitly_finalizes_exact_child_at_ingestion_time() {
     assert!(matches!(
         source.expr,
         SummaryExpr::SummaryAgg {
-            family: SummaryFamilyType::ExactAggregate(ExactKind::Sum, _),
+            family: FieldDataType::ExactAggregate(ExactKind::Sum, _),
             ..
         }
     ));
@@ -1149,12 +1149,12 @@ fn nested_summary_explicitly_finalizes_exact_child_at_ingestion_time() {
         .schema
         .fields
         .iter()
-        .all(|field| matches!(field.dtype, SummaryFamilyType::Plain(_))));
+        .all(|field| matches!(field.dtype, FieldDataType::Plain(_))));
     assert!(child
         .schema
         .fields
         .iter()
-        .any(|field| matches!(field.dtype, SummaryFamilyType::Plain(DataType::Float64))));
+        .any(|field| matches!(field.dtype, FieldDataType::Plain(DataType::Float64))));
     compile_post_asap_dag(&plan).expect("explicit boundary is a valid post-ASAP DAG");
 }
 
@@ -1370,7 +1370,7 @@ fn ddsketch_ratio_bound_holds_for_signed_pinned_sketch_readouts() {
                 panic!("readout")
             };
             let SummaryExpr::SummaryAgg {
-                family: SummaryFamilyType::Sketch(kind, _),
+                family: FieldDataType::Sketch(kind, _),
                 ..
             } = &summary_input.expr
             else {

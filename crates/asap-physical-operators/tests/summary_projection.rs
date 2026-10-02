@@ -8,6 +8,7 @@ use asap_physical_operators::{
     values::{Batch, Value},
 };
 use futures::{executor::block_on, StreamExt};
+use planner_types::pre_asap::Schema;
 use planner_types::{
     post_asap::*,
     pre_asap::{ColumnRef, DataType, ProjectItem, QueryExpr},
@@ -18,26 +19,32 @@ use std::{collections::BTreeMap, sync::Arc};
 // the family and pass through the same immutable state, without decoding the payload.
 #[test]
 fn post_asap_summary_projection_survives_recovery() {
-    let family = SummaryFamilyType::ExactAggregate(ExactKind::Sum, ExactParams::Sum);
-    let schema = Arc::new(SummarySchema {
+    let family = FieldDataType::ExactAggregate(ExactKind::Sum, ExactParams::Sum);
+    let schema = Arc::new(Schema {
+        closed: true,
+        unique_keys: vec![],
         fields: vec![
-            SummaryField {
+            Field {
+                table: None,
                 name: "state".into(),
                 dtype: family.clone(),
                 nullable: false,
             },
-            SummaryField {
+            Field {
+                table: None,
                 name: "service".into(),
-                dtype: SummaryFamilyType::Plain(DataType::Utf8),
+                dtype: FieldDataType::Plain(DataType::Utf8),
                 nullable: false,
             },
         ],
         time_index: None,
     });
-    let output = SummarySchema {
+    let output = Schema {
+        closed: true,
+        unique_keys: vec![],
         fields: vec![
             schema.fields[1].clone(),
-            SummaryField {
+            Field {
                 name: "renamed".into(),
                 ..schema.fields[0].clone()
             },

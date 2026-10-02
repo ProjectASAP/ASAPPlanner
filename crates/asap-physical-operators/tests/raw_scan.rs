@@ -2,13 +2,14 @@
 use asap_physical_operators::dag::{
     planner::bind_with_data_sources,
     scan::{DataSources, MemorySource, RawSource},
-    values::{Batch, Schema, Value},
+    values::{Batch, SchemaRef, Value},
     Error, Limits, OutputStream, RunContext, Scope,
 };
 use futures::{executor::block_on, stream, StreamExt};
+use planner_types::pre_asap::Schema;
 use planner_types::{
     post_asap::*,
-    pre_asap::{Column, DataType, GroupKeys, Predicate, QueryExpr, Source},
+    pre_asap::{DataType, Field, GroupKeys, Predicate, QueryExpr, Source},
 };
 use std::{
     collections::BTreeMap,
@@ -19,13 +20,16 @@ use std::{
     },
 };
 
-fn fixture() -> (QueryExpr, Schema, Vec<Batch>) {
+fn fixture() -> (QueryExpr, SchemaRef, Vec<Batch>) {
     let schema =
-        planner_types::pre_asap::Schema::new(vec![Column::new("value", DataType::Int64, true)]);
-    let output = Arc::new(SummarySchema {
-        fields: vec![SummaryField {
+        planner_types::pre_asap::Schema::new(vec![Field::plain("value", DataType::Int64, true)]);
+    let output = Arc::new(Schema {
+        closed: true,
+        unique_keys: vec![],
+        fields: vec![Field {
+            table: None,
             name: "value".into(),
-            dtype: SummaryFamilyType::Plain(DataType::Int64),
+            dtype: FieldDataType::Plain(DataType::Int64),
             nullable: true,
         }],
         time_index: None,
@@ -53,7 +57,7 @@ fn fixture() -> (QueryExpr, Schema, Vec<Batch>) {
     ];
     (scan, output, batches)
 }
-fn plan(scan: QueryExpr, schema: &Schema, state: ExecutionDataState) -> PostAsapDAG {
+fn plan(scan: QueryExpr, schema: &SchemaRef, state: ExecutionDataState) -> PostAsapDAG {
     let node = |id, payload| PostAsapDAGNode {
         id: PostAsapNodeId(id),
         payload,
@@ -164,7 +168,7 @@ fn raw_scan_to_sort_limit_at_both_phases() {
     }
 }
 struct CountingSource {
-    schema: Schema,
+    schema: SchemaRef,
     opened: Arc<AtomicUsize>,
     fail: bool,
 }
@@ -172,7 +176,7 @@ impl RawSource for CountingSource {
     fn boundedness(&self) -> asap_physical_operators::plan::Boundedness {
         asap_physical_operators::plan::Boundedness::Bounded
     }
-    fn schema(&self) -> Schema {
+    fn schema(&self) -> SchemaRef {
         self.schema.clone()
     }
     fn scan(&self, _: RunContext) -> Result<OutputStream<'_, Batch>, Error> {
@@ -240,15 +244,15 @@ fn binding_errors_and_reader_errors_are_not_empty_results() {
     });
 }
 
-// Schema drift cannot enter the DAG, and connector batches obey execution limits.
+// SchemaRef drift cannot enter the DAG, and connector batches obey execution limits.
 #[test]
 fn schema_drift_and_memory_limits_fail_the_scan() {
     struct Drift {
-        expected: Schema,
+        expected: SchemaRef,
         batch: Batch,
     }
     impl RawSource for Drift {
-        fn schema(&self) -> Schema {
+        fn schema(&self) -> SchemaRef {
             self.expected.clone()
         }
         fn scan(&self, _: RunContext) -> Result<OutputStream<'_, Batch>, Error> {

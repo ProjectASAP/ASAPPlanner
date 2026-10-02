@@ -3,7 +3,7 @@
 //! of an accuracy guarantee. CPU quantities are nanoseconds, never CPU operations.
 
 use asap_types::post_asap::{
-    GroupingStrategy, SketchAlgorithm, SketchParams, SummaryExpr, SummaryFamilyType, SummaryNode,
+    FieldDataType, GroupingStrategy, SketchAlgorithm, SketchParams, SummaryExpr, SummaryNode,
 };
 use asap_types::pre_asap::AggIntent;
 use serde::{Deserialize, Serialize};
@@ -217,7 +217,7 @@ impl EmpiricalEvidenceProvider {
         summary: &SummaryNode,
     ) -> SummaryMaintenanceLifecycleCostInputs {
         let SummaryExpr::SummaryAgg {
-            family: SummaryFamilyType::Sketch(kind, GroupingStrategy::PerSubpopulationInstance),
+            family: FieldDataType::Sketch(kind, GroupingStrategy::PerSubpopulationInstance),
             grouping: GroupingStrategy::PerSubpopulationInstance,
             ..
         } = &summary.expr

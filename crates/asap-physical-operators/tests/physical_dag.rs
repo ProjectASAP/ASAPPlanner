@@ -2,31 +2,34 @@
 use asap_physical_operators::{
     dag::{
         operators::{Expression, Operator, Reduction, SortKey},
-        values::{Batch, Schema, Value},
+        values::{Batch, SchemaRef, Value},
         Limits, PhysicalDAG, RunContext, Scope,
     },
     Statistic,
 };
 use futures::{executor::block_on, StreamExt};
 use planner_types::{
-    post_asap::{ExactKind, ExactParams, SummaryFamilyType, SummaryField, SummarySchema},
+    post_asap::{ExactKind, ExactParams, Field, FieldDataType, Schema},
     pre_asap::DataType,
 };
 use std::sync::Arc;
-fn schema(fields: &[(&str, DataType, bool)]) -> Schema {
-    Arc::new(SummarySchema {
+fn schema(fields: &[(&str, DataType, bool)]) -> SchemaRef {
+    Arc::new(Schema {
+        closed: true,
+        unique_keys: vec![],
         fields: fields
             .iter()
-            .map(|(name, dtype, nullable)| SummaryField {
+            .map(|(name, dtype, nullable)| Field {
+                table: None,
                 name: (*name).into(),
-                dtype: SummaryFamilyType::Plain(dtype.clone()),
+                dtype: FieldDataType::Plain(dtype.clone()),
                 nullable: *nullable,
             })
             .collect(),
         time_index: None,
     })
 }
-fn run(dag: &PhysicalDAG<'_, Batch, Schema>, root: u64, scope: Scope) -> Vec<Vec<Value>> {
+fn run(dag: &PhysicalDAG<'_, Batch, SchemaRef>, root: u64, scope: Scope) -> Vec<Vec<Value>> {
     let context = RunContext::new(
         scope,
         Limits {
@@ -119,7 +122,7 @@ fn summary_construction_merge_and_readout_at_both_phases() {
     let batches = (1..=20)
         .map(|v| Batch::try_new(schema.clone(), vec![vec![Value::Float64(v as f64)]]).unwrap())
         .collect();
-    let family = SummaryFamilyType::ExactAggregate(ExactKind::Sum, ExactParams::Sum);
+    let family = FieldDataType::ExactAggregate(ExactKind::Sum, ExactParams::Sum);
     let build = Operator::summary_build(schema.clone(), family, 0, None, vec![]).unwrap();
     let state = build.schema();
     let mut dag = PhysicalDAG::default();
@@ -278,7 +281,7 @@ fn binding_rejects_unsupported_operations() {
     let schema = schema(&[("v", DataType::Float64, false)]);
     assert!(Operator::summary_build(
         schema.clone(),
-        SummaryFamilyType::ExactAggregate(ExactKind::Rate, ExactParams::Rate),
+        FieldDataType::ExactAggregate(ExactKind::Rate, ExactParams::Rate),
         0,
         None,
         vec![]
@@ -286,7 +289,7 @@ fn binding_rejects_unsupported_operations() {
     .is_err());
     let sum = Operator::summary_build(
         schema.clone(),
-        SummaryFamilyType::ExactAggregate(ExactKind::Sum, ExactParams::Sum),
+        FieldDataType::ExactAggregate(ExactKind::Sum, ExactParams::Sum),
         0,
         None,
         vec![],
@@ -308,7 +311,7 @@ fn binding_rejects_unsupported_operations() {
 fn kll_raw_partial_and_precomputed_are_native_dags() {
     use planner_types::post_asap::{GroupingStrategy, SketchAlgorithm, SketchKind, SketchParams};
     let input = schema(&[("value", DataType::Float64, false)]);
-    let family = SummaryFamilyType::Sketch(
+    let family = FieldDataType::Sketch(
         SketchKind::new(SketchAlgorithm::Kll, SketchParams::Kll { k: 512 }),
         GroupingStrategy::PerSubpopulationInstance,
     );
@@ -417,11 +420,14 @@ fn kll_raw_partial_and_precomputed_are_native_dags() {
 #[test]
 fn exact_state_and_family_validation() {
     use asap_physical_operators::summary_kernels::exact::ExactAccumulator;
-    let family = SummaryFamilyType::ExactAggregate(ExactKind::Sum, ExactParams::Sum);
+    let family = FieldDataType::ExactAggregate(ExactKind::Sum, ExactParams::Sum);
     let mut acc = ExactAccumulator::new(family.clone(), false).unwrap();
     acc.update(None, 7., 0);
-    let schema = Arc::new(SummarySchema {
-        fields: vec![SummaryField {
+    let schema = Arc::new(Schema {
+        closed: true,
+        unique_keys: vec![],
+        fields: vec![Field {
+            table: None,
             name: "state".into(),
             dtype: family.clone(),
             nullable: false,
@@ -461,7 +467,7 @@ fn exact_state_and_family_validation() {
     .unwrap();
     assert_eq!(floats(&run(&dag, 1, query()), 0), vec![7.]);
     let wrong = ExactAccumulator::new(
-        SummaryFamilyType::ExactAggregate(ExactKind::Max, ExactParams::Max),
+        FieldDataType::ExactAggregate(ExactKind::Max, ExactParams::Max),
         false,
     )
     .unwrap();
@@ -563,7 +569,7 @@ fn empty_exact_count_is_an_integer_state_readout() {
     let input = schema(&[("value", DataType::Float64, false)]);
     let build = Operator::summary_build(
         input.clone(),
-        SummaryFamilyType::ExactAggregate(ExactKind::Count, ExactParams::Count),
+        FieldDataType::ExactAggregate(ExactKind::Count, ExactParams::Count),
         0,
         None,
         vec![],
@@ -601,17 +607,17 @@ fn source_batches_must_match_the_bound_schema() {
     };
     use std::{cell::Cell, collections::BTreeMap, rc::Rc};
     struct WrongSource {
-        schema: Schema,
+        schema: SchemaRef,
         starts: Rc<Cell<usize>>,
     }
-    impl PhysicalOperator<Batch, Schema> for WrongSource {
+    impl PhysicalOperator<Batch, SchemaRef> for WrongSource {
         fn name(&self) -> &str {
             "ExternalSource"
         }
-        fn input_schemas(&self) -> Vec<Schema> {
+        fn input_schemas(&self) -> Vec<SchemaRef> {
             vec![]
         }
-        fn output_schema(&self) -> Schema {
+        fn output_schema(&self) -> SchemaRef {
             self.schema.clone()
         }
         fn output_bytes(&self, value: &Batch) -> usize {
@@ -712,21 +718,23 @@ fn planner_semijoin_sort_limit_contract_at_both_phases() {
         ("score", DataType::Float64, false),
     ]);
     let keys_schema = schema(&[("key", DataType::Utf8, false)]);
-    let node = |id, payload, schema: &Schema| PostAsapDAGNode {
+    let node = |id, payload, schema: &asap_physical_operators::values::SchemaRef| PostAsapDAGNode {
         id: PostAsapNodeId(id),
         payload,
         output_schema: (**schema).clone(),
         output_state: ExecutionDataState::QUERY_ROWS,
         guarantee: None,
     };
-    let edge = |producer, consumer, role, schema: &Schema| PostAsapDAGEdge {
-        producer: PostAsapNodeId(producer),
-        consumer: PostAsapNodeId(consumer),
-        role,
-        intermediate_schema: (**schema).clone(),
-        data_state: ExecutionDataState::QUERY_ROWS,
-        grouping: GroupingEdgeCompatibility::NotApplicable,
-        window: WindowEdgeCompatibility::NotApplicable,
+    let edge = |producer, consumer, role, schema: &asap_physical_operators::values::SchemaRef| {
+        PostAsapDAGEdge {
+            producer: PostAsapNodeId(producer),
+            consumer: PostAsapNodeId(consumer),
+            role,
+            intermediate_schema: (**schema).clone(),
+            data_state: ExecutionDataState::QUERY_ROWS,
+            grouping: GroupingEdgeCompatibility::NotApplicable,
+            window: WindowEdgeCompatibility::NotApplicable,
+        }
     };
     let groups = GroupKeys::by(vec![0]);
     let dag = PostAsapDAG {
@@ -1047,7 +1055,7 @@ fn assert_weighted_rate_topk(count_sketch: bool) {
         Some((0, 60_000)),
     )
     .unwrap();
-    let family = SummaryFamilyType::Sketch(
+    let family = FieldDataType::Sketch(
         SketchKind::new(
             if count_sketch {
                 SketchAlgorithm::CountSketchWithHeap
@@ -1138,12 +1146,12 @@ fn grouped_temporal_schema_compiles_and_executes_topk() {
         ValueOperation,
     };
     use planner_types::pre_asap::{
-        aggregate_output_schema, AggIntent, Column, GroupKeys, QueryExpr, Reduction as IrReduction,
+        aggregate_output_schema, AggIntent, Field, GroupKeys, QueryExpr, Reduction as IrReduction,
         Schema as IrSchema,
     };
     let grouped = IrSchema::new(vec![
-        Column::new("job", DataType::Utf8, false),
-        Column::new("sum", DataType::Float64, false),
+        Field::plain("job", DataType::Utf8, false),
+        Field::plain("sum", DataType::Float64, false),
     ]);
     let output = aggregate_output_schema(
         &grouped,
@@ -1154,9 +1162,15 @@ fn grouped_temporal_schema_compiles_and_executes_topk() {
     .unwrap();
     let input = schema(
         &output
-            .columns
+            .fields
             .iter()
-            .map(|c| (c.name.as_str(), c.dtype.clone(), c.nullable))
+            .map(|c| {
+                (
+                    c.name.as_str(),
+                    c.dtype.plain().unwrap().clone(),
+                    c.nullable,
+                )
+            })
             .collect::<Vec<_>>(),
     );
     let node = |id, operation| PostAsapDAGNode {

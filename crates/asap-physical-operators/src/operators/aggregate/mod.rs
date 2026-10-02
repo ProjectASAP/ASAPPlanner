@@ -1,7 +1,7 @@
 use super::*;
 impl Operator {
     pub fn aggregate(
-        input: Schema,
+        input: SchemaRef,
         groups: Vec<usize>,
         measures: Vec<(String, Reduction)>,
     ) -> Result<Self, Error> {
@@ -53,7 +53,7 @@ impl Operator {
         })
     }
     pub fn window(
-        input: Schema,
+        input: SchemaRef,
         intent: planner_types::pre_asap::AggIntent<ColumnRef>,
         coordinate: usize,
         value: usize,
@@ -177,7 +177,7 @@ async fn reduce(
     rows: Vec<Vec<Value>>,
     groups: &[usize],
     measures: &[Reduction],
-    input: &Schema,
+    input: &SchemaRef,
     context: &RunContext,
 ) -> Result<Vec<Vec<Value>>, Error> {
     let mut work = Cooperative::new(context);
@@ -239,7 +239,7 @@ pub(super) fn quantile(q: f64, mut values: Vec<f64>) -> f64 {
 async fn reduce_one(
     rows: &[Vec<Value>],
     measure: &Reduction,
-    input: &Schema,
+    input: &SchemaRef,
     work: &mut Cooperative,
 ) -> Result<Value, Error> {
     let column = match measure {

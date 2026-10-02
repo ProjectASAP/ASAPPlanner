@@ -65,8 +65,8 @@ use std::rc::Rc;
 use asap_types::post_asap::execution_data_state::validate_execution_data_states_at;
 use asap_types::post_asap::{
     exact_operation_output_schema, produced_data_state, AccuracyError, ExactOperation,
-    ExecutionDataState, ExecutionDataStateError, ResultGuarantee, SummaryExpr, SummaryNode,
-    SummarySchema, ValueOperation,
+    ExecutionDataState, ExecutionDataStateError, ResultGuarantee, Schema, SummaryExpr, SummaryNode,
+    ValueOperation,
 };
 use asap_types::pre_asap::agg_intent::AggIntent;
 use asap_types::pre_asap::query_expr::{any_measure_filtered, QueryExpr, Reduction};
@@ -124,7 +124,7 @@ pub struct ExactComposition {
     /// The composed node's output schema — the target's own pre-ASAP
     /// output schema, lifted with every column `Plain` (an exact operator
     /// only ever produces plain values).
-    pub schema: SummarySchema,
+    pub schema: Schema,
 }
 
 impl ExactComposition {
@@ -466,17 +466,21 @@ mod tests {
     use super::*;
     use crate::cost_model::{DefaultCostModel, ValueOperationCapabilities};
     use crate::replacement::keep_pre_asap;
-    use asap_types::post_asap::{ExecutionDataStateError, SketchAlgorithm, SummaryFamilyType};
+    use asap_types::post_asap::{ExecutionDataStateError, FieldDataType, SketchAlgorithm};
     use asap_types::pre_asap::agg_intent::default_quantile;
     use asap_types::pre_asap::query_expr::Source;
-    use asap_types::pre_asap::schema::{Column, DataType, Schema};
+    use asap_types::pre_asap::schema::{DataType, Field, Schema};
 
     fn metric_scan(labels: &[&str]) -> QueryExpr {
         let mut columns = vec![
-            Column::new("ts", DataType::Timestamp, false),
-            Column::new("value", DataType::Float64, false),
+            Field::plain("ts", DataType::Timestamp, false),
+            Field::plain("value", DataType::Float64, false),
         ];
-        columns.extend(labels.iter().map(|n| Column::new(*n, DataType::Utf8, true)));
+        columns.extend(
+            labels
+                .iter()
+                .map(|n| Field::plain(*n, DataType::Utf8, true)),
+        );
         QueryExpr::Scan {
             source: Source::TimeSeries { metric: "m".into() },
             predicates: vec![],
@@ -658,7 +662,7 @@ mod tests {
             .schema
             .fields
             .iter()
-            .all(|f| matches!(f.dtype, SummaryFamilyType::Plain(_))));
+            .all(|f| matches!(f.dtype, FieldDataType::Plain(_))));
     }
 
     #[test]

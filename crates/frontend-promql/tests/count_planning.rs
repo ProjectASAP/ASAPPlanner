@@ -9,8 +9,8 @@ use asap_aware_mapping::{
 };
 mod support;
 use asap_types::post_asap::{
-    compile_post_asap_dag, ExactKind, NonNegativeWeightProof, PostAsapOperatorPayload,
-    SketchAlgorithm, SummaryExpr, SummaryFamilyType, SummaryInputExpr, WeightDomain,
+    compile_post_asap_dag, ExactKind, FieldDataType, NonNegativeWeightProof,
+    PostAsapOperatorPayload, SketchAlgorithm, SummaryExpr, SummaryInputExpr, WeightDomain,
 };
 use asap_types::types::AccuracyTarget;
 use support::lower_promql;
@@ -58,7 +58,7 @@ fn exact_counts_select_count_accumulators() {
             candidates.iter().any(|candidate| {
                 matches!(&candidate.replacement, Replacement::Summary(node)
                 if matches!(&node.expr, SummaryExpr::SummaryAgg {
-                    family: SummaryFamilyType::ExactAggregate(ExactKind::Count, _), .. }))
+                    family: FieldDataType::ExactAggregate(ExactKind::Count, _), .. }))
             }),
             "{query}: {candidates:?}"
         );
@@ -81,7 +81,7 @@ fn frequency_count_candidates_use_unit_weights() {
                 continue;
             };
             let SummaryExpr::SummaryAgg {
-                family: SummaryFamilyType::Sketch(kind, _),
+                family: FieldDataType::Sketch(kind, _),
                 input,
                 ..
             } = &summary_input.expr
@@ -240,7 +240,7 @@ fn cms_count_updates_total_ten_for_zero_positive_and_negative_samples() {
                 .iter()
                 .any(|node| {
                     matches!(&node.payload,
-            PostAsapOperatorPayload::SummaryAgg { family: SummaryFamilyType::Sketch(kind, _), .. }
+            PostAsapOperatorPayload::SummaryAgg { family: FieldDataType::Sketch(kind, _), .. }
                 if kind.algorithm() == &SketchAlgorithm::Cms)
                 })
                 .then_some(dag)

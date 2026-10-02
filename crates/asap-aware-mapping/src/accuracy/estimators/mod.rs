@@ -56,21 +56,19 @@ fn bounded_guarantee(
 }
 
 pub(super) fn local_guarantee(
-    family: &SummaryFamilyType,
+    family: &FieldDataType,
     query: &SketchQuery,
 ) -> Option<ResultGuarantee> {
     match family {
-        SummaryFamilyType::Plain(_) => Some(ResultGuarantee::exact("Plain value")),
-        SummaryFamilyType::ExactAggregate(kind, _) => {
+        FieldDataType::Plain(_) => Some(ResultGuarantee::exact("Plain value")),
+        FieldDataType::ExactAggregate(kind, _) => {
             Some(ResultGuarantee::exact(format!("ExactAggregate({kind:?})")))
         }
-        SummaryFamilyType::Sketch(kind, _) => {
-            sketch_guarantee(kind.algorithm(), kind.params(), query)
-        }
+        FieldDataType::Sketch(kind, _) => sketch_guarantee(kind.algorithm(), kind.params(), query),
         // No error model is registered for these families.
-        SummaryFamilyType::Sample(..)
-        | SummaryFamilyType::Wavelet(..)
-        | SummaryFamilyType::StatModel(..) => None,
+        FieldDataType::Sample(..) | FieldDataType::Wavelet(..) | FieldDataType::StatModel(..) => {
+            None
+        }
     }
 }
 pub(crate) fn size_params(
@@ -197,10 +195,10 @@ impl AccuracyModel for EstimatorAccuracy<'_> {
     }
     fn local_guarantee(
         &self,
-        family: &SummaryFamilyType,
+        family: &FieldDataType,
         query: &SketchQuery,
     ) -> Option<ResultGuarantee> {
-        if let (Some(_), SummaryFamilyType::Sketch(kind, grouping), SketchQuery::Cardinality) =
+        if let (Some(_), FieldDataType::Sketch(kind, grouping), SketchQuery::Cardinality) =
             (self.contract, family, query)
         {
             if let (SketchAlgorithm::Hll, SketchParams::Hll { precision }) =

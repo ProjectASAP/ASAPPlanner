@@ -1,6 +1,6 @@
 //! Planner scalar expressions evaluated over native typed rows.
 use crate::{
-    values::{Schema, Value},
+    values::{SchemaRef, Value},
     Error,
 };
 use planner_types::pre_asap::{ArithmeticOpKind, CompareOpKind, DataType, QueryExpr, ScalarValue};
@@ -340,17 +340,17 @@ impl CompiledExpression {
         &self.expression
     }
 
-    pub fn compile(expression: &QueryExpr, input: &Schema) -> Result<Self, Error> {
+    pub fn compile(expression: &QueryExpr, input: &SchemaRef) -> Result<Self, Error> {
         let schema = input
             .fields
             .iter()
             .map(|field| {
-                let planner_types::post_asap::SummaryFamilyType::Plain(dtype) = &field.dtype else {
+                let planner_types::post_asap::FieldDataType::Plain(dtype) = &field.dtype else {
                     return Err(Error::Invalid(
                         "scalar expression cannot consume opaque summary state".into(),
                     ));
                 };
-                Ok(planner_types::pre_asap::Column::new(
+                Ok(planner_types::pre_asap::Field::plain(
                     field.name.clone(),
                     dtype.clone(),
                     field.nullable,
@@ -371,22 +371,20 @@ impl CompiledExpression {
     pub(crate) fn dtype(&self) -> (DataType, bool) {
         self.output.clone()
     }
-    pub(crate) fn validate_input(&self, input: &Schema) -> Result<(), Error> {
+    pub(crate) fn validate_input(&self, input: &SchemaRef) -> Result<(), Error> {
         let checked = Self::compile(&self.expression, input)?;
         if checked.output != self.output {
             return Err(Error::Invalid(
                 "persisted expression type differs from its semantics".into(),
             ));
         }
-        if input.fields.len() != self.schema.columns.len()
+        if input.fields.len() != self.schema.fields.len()
             || input
                 .fields
                 .iter()
-                .zip(&self.schema.columns)
+                .zip(&self.schema.fields)
                 .any(|(field, column)| {
-                    field.dtype
-                        != planner_types::post_asap::SummaryFamilyType::Plain(column.dtype.clone())
-                        || field.nullable != column.nullable
+                    field.dtype != column.dtype.clone() || field.nullable != column.nullable
                 })
         {
             return Err(Error::Invalid(
@@ -397,11 +395,13 @@ impl CompiledExpression {
     }
     /// Evaluate a row under the same typed schema used when binding the expression.
     pub fn evaluate(&self, row: &[Value]) -> Result<Value, Error> {
-        if row.len() != self.schema.columns.len()
-            || row
-                .iter()
-                .zip(&self.schema.columns)
-                .any(|(value, column)| !value.matches(&column.dtype, column.nullable))
+        if row.len() != self.schema.fields.len()
+            || row.iter().zip(&self.schema.fields).any(|(value, column)| {
+                !column
+                    .dtype
+                    .plain()
+                    .is_some_and(|dtype| value.matches(dtype, column.nullable))
+            })
         {
             return Err(Error::Invalid(
                 "expression input differs from its bound schema".into(),

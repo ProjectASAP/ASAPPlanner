@@ -5,13 +5,13 @@ use crate::summary_kernels::exact::ExactReadout;
 use crate::{
     operators::{Expression, Operator, Reduction, SortKey},
     plan::{Boundedness, Emission, NodeId, PhysicalDAG, PhysicalOperator, PlanProperties},
-    values::{Batch, Schema},
+    values::{Batch, SchemaRef},
     Error,
 };
 use planner_types::{
     post_asap::{
-        ExactOperation, PostAsapDAG, PostAsapDAGNode, PostAsapOperatorPayload as Payload,
-        SketchQuery, SummaryFamilyType, SummaryInputExpr, ValueOperation,
+        ExactOperation, FieldDataType, PostAsapDAG, PostAsapDAGNode,
+        PostAsapOperatorPayload as Payload, SketchQuery, SummaryInputExpr, ValueOperation,
     },
     pre_asap::{
         AggIntent, ColumnRef, CompareOpKind, DataType, GroupKeys, QueryExpr,
@@ -29,7 +29,7 @@ fn invalid(message: impl Into<String>) -> Error {
 /// Source nodes cut the DAG at an installed storage/ingestion frontier. The
 /// binding must have exactly the declared schema and no upstream dependencies.
 /// A deployment must authorize these frontiers before calling this function.
-pub type Source<'a> = Box<dyn PhysicalOperator<Batch, Schema> + 'a>;
+pub type Source<'a> = Box<dyn PhysicalOperator<Batch, SchemaRef> + 'a>;
 
 pub mod precompute;
 pub mod promql_fallback;
@@ -63,7 +63,7 @@ pub fn bind<'a>(
     dag: &PostAsapDAG,
     sources: BTreeMap<NodeId, Source<'a>>,
     roots: &[NodeId],
-) -> Result<PhysicalDAG<'a, Batch, Schema>, Error> {
+) -> Result<PhysicalDAG<'a, Batch, SchemaRef>, Error> {
     let inputs = sources
         .iter()
         .map(|(&id, source)| (id, InputContract::from_source(source.as_ref())))
@@ -77,7 +77,7 @@ pub fn bind_with_data_sources<'a>(
     mut sources: BTreeMap<NodeId, Source<'a>>,
     roots: &[NodeId],
     data_sources: &crate::sources::DataSources,
-) -> Result<PhysicalDAG<'a, Batch, Schema>, Error> {
+) -> Result<PhysicalDAG<'a, Batch, SchemaRef>, Error> {
     // Only resolve scans reachable below the selected input boundaries.
     let mut pending = roots.to_vec();
     let mut seen = BTreeSet::new();
@@ -495,11 +495,11 @@ fn compile_internal(
                     auxiliary -= 1;
                     continue;
                 }
-                let label_map = |schema: &Schema| {
+                let label_map = |schema: &SchemaRef| {
                     schema
                         .fields
                         .iter()
-                        .any(|f| matches!(f.dtype, SummaryFamilyType::Plain(DataType::Map { .. })))
+                        .any(|f| matches!(f.dtype, FieldDataType::Plain(DataType::Map { .. })))
                 };
                 // Grouped rows carry their labels as columns; per-series rows
                 // carry the series identity.
@@ -534,8 +534,8 @@ fn compile_internal(
                     .map_err(|error| invalid(format!("node {id}: {error}")))?;
                 let actual = readout.schema();
                 let converted = actual.fields.iter().zip(&output.fields).position(|(a, d)| {
-                    a.dtype == SummaryFamilyType::Plain(DataType::Int64)
-                        && d.dtype == SummaryFamilyType::Plain(DataType::Float64)
+                    a.dtype == FieldDataType::Plain(DataType::Int64)
+                        && d.dtype == FieldDataType::Plain(DataType::Float64)
                 });
                 if let Some(column) = converted {
                     let columns = actual
@@ -634,27 +634,27 @@ fn temporal_readout_drops_name(node: &PostAsapDAGNode) -> bool {
 
 /// Bind a Planner node against the schemas supplied by its deployment edges.
 /// This is the same checked path used by complete DAG binding.
-pub fn compile_node(node: &PostAsapDAGNode, inputs: &[Schema]) -> Result<Operator, Error> {
+pub fn compile_node(node: &PostAsapDAGNode, inputs: &[SchemaRef]) -> Result<Operator, Error> {
     for schema in inputs {
         crate::values::validate_schema(schema)?;
     }
     bind_operation(node, inputs)?.with_output_schema(Arc::new(node.output_schema.clone()))
 }
 
-fn bind_operation(node: &PostAsapDAGNode, inputs: &[Schema]) -> Result<Operator, Error> {
+fn bind_operation(node: &PostAsapDAGNode, inputs: &[SchemaRef]) -> Result<Operator, Error> {
     if let Payload::Binary { operator } = &node.payload {
         let [left, right] = inputs else {
             return Err(invalid("binary requires two inputs"));
         };
         if node.output_state.timing == planner_types::post_asap::ExecutionTiming::IngestionTime {
-            let value = |schema: &Schema| -> Result<usize, Error> {
+            let value = |schema: &SchemaRef| -> Result<usize, Error> {
                 let columns = schema
                     .fields
                     .iter()
                     .enumerate()
                     .filter(|(_, field)| {
                         field.dtype
-                            == SummaryFamilyType::Plain(planner_types::pre_asap::DataType::Float64)
+                            == FieldDataType::Plain(planner_types::pre_asap::DataType::Float64)
                     })
                     .map(|(i, _)| i)
                     .collect::<Vec<_>>();
@@ -834,7 +834,7 @@ fn bind_operation(node: &PostAsapDAGNode, inputs: &[Schema]) -> Result<Operator,
                 use crate::Statistic as S;
                 use planner_types::post_asap::ExactKind as E;
                 let statistic = match &input.fields[state].dtype {
-                    SummaryFamilyType::ExactAggregate(kind, _) => match kind {
+                    FieldDataType::ExactAggregate(kind, _) => match kind {
                         E::Sum => S::Sum,
                         E::Count => S::Count,
                         E::Min => S::Min,
@@ -877,7 +877,7 @@ fn bind_operation(node: &PostAsapDAGNode, inputs: &[Schema]) -> Result<Operator,
                         "keyed summary weight must be a finalized value column",
                     ));
                 };
-                if matches!(family, SummaryFamilyType::Sketch(kind, _) if kind.algorithm() == &planner_types::post_asap::SketchAlgorithm::CmsWithHeap)
+                if matches!(family, FieldDataType::Sketch(kind, _) if kind.algorithm() == &planner_types::post_asap::SketchAlgorithm::CmsWithHeap)
                     && !matches!(
                         update.weight_domain,
                         planner_types::post_asap::WeightDomain::NonNegative { .. }
@@ -887,7 +887,7 @@ fn bind_operation(node: &PostAsapDAGNode, inputs: &[Schema]) -> Result<Operator,
                 }
                 fn columns(
                     expr: &SummaryInputExpr,
-                    input: &Schema,
+                    input: &SchemaRef,
                     result: &mut Vec<usize>,
                 ) -> Result<(), Error> {
                     match expr {
@@ -963,12 +963,12 @@ fn bind_operation(node: &PostAsapDAGNode, inputs: &[Schema]) -> Result<Operator,
         )),
     }
 }
-fn summary_column(input: &Schema) -> Result<usize, Error> {
+fn summary_column(input: &SchemaRef) -> Result<usize, Error> {
     let columns = input
         .fields
         .iter()
         .enumerate()
-        .filter(|(_, f)| !matches!(f.dtype, SummaryFamilyType::Plain(_)))
+        .filter(|(_, f)| !matches!(f.dtype, FieldDataType::Plain(_)))
         .map(|(i, _)| i)
         .collect::<Vec<_>>();
     match columns.as_slice() {
@@ -976,11 +976,10 @@ fn summary_column(input: &Schema) -> Result<usize, Error> {
         _ => Err(invalid("one summary state column required")),
     }
 }
-fn named_column(input: &Schema, column: &ColumnRef) -> Result<usize, Error> {
+fn named_column(input: &SchemaRef, column: &ColumnRef) -> Result<usize, Error> {
     let name = match column {
-        // Executable SummarySchema retains column names, not table qualifiers.
-        // Frontend binding has resolved the qualifier; still reject ambiguous
-        // names here rather than guessing a join side.
+        // This summary-update lookup matches column names without qualifiers.
+        // Reject ambiguous names rather than guessing a join side.
         ColumnRef::Named(name) | ColumnRef::Qualified { name, .. } => name.as_str(),
         ColumnRef::SampleValue => "value",
         _ => {
@@ -1001,7 +1000,7 @@ fn named_column(input: &Schema, column: &ColumnRef) -> Result<usize, Error> {
         _ => Err(invalid("summary update column missing or ambiguous")),
     }
 }
-fn groups(input: &Schema, groups: &GroupKeys) -> Result<Vec<usize>, Error> {
+fn groups(input: &SchemaRef, groups: &GroupKeys) -> Result<Vec<usize>, Error> {
     if groups.is_without() {
         return Err(invalid("grouping without requires resolved label columns"));
     }
@@ -1010,7 +1009,7 @@ fn groups(input: &Schema, groups: &GroupKeys) -> Result<Vec<usize>, Error> {
     }
     Ok(groups.keys().to_vec())
 }
-fn expression(expr: &QueryExpr, input: &Schema) -> Result<Expression, Error> {
+fn expression(expr: &QueryExpr, input: &SchemaRef) -> Result<Expression, Error> {
     Ok(Expression::planner(
         crate::expressions::CompiledExpression::compile(expr, input)?,
     ))
@@ -1018,9 +1017,9 @@ fn expression(expr: &QueryExpr, input: &Schema) -> Result<Expression, Error> {
 
 struct CheckedSource<'a> {
     source: Source<'a>,
-    output: Schema,
+    output: SchemaRef,
 }
-impl PhysicalOperator<Batch, Schema> for CheckedSource<'_> {
+impl PhysicalOperator<Batch, SchemaRef> for CheckedSource<'_> {
     fn properties(&self, inputs: &[crate::plan::PlanProperties]) -> crate::plan::PlanProperties {
         self.source.properties(inputs)
     }
@@ -1028,10 +1027,10 @@ impl PhysicalOperator<Batch, Schema> for CheckedSource<'_> {
     fn name(&self) -> &str {
         self.source.name()
     }
-    fn input_schemas(&self) -> Vec<Schema> {
+    fn input_schemas(&self) -> Vec<SchemaRef> {
         vec![]
     }
-    fn output_schema(&self) -> Schema {
+    fn output_schema(&self) -> SchemaRef {
         self.output.clone()
     }
     fn output_bytes(&self, batch: &Batch) -> usize {
@@ -1145,8 +1144,8 @@ fn semi_join_keys(
 /// Deployments may use these positions to bind their source columns.
 pub fn equijoin_keys(
     pred: &planner_types::pre_asap::Predicate,
-    left: &planner_types::post_asap::SummarySchema,
-    right: &planner_types::post_asap::SummarySchema,
+    left: &planner_types::post_asap::Schema,
+    right: &planner_types::post_asap::Schema,
 ) -> Result<Vec<(usize, usize)>, Error> {
     let mut keys = Vec::new();
     semi_join_keys(&pred.0, left.fields.len(), right.fields.len(), &mut keys)?;

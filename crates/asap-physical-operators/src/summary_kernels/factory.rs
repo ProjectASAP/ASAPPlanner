@@ -6,7 +6,7 @@ use crate::summary_kernels::{
     HydraKllSketchAccumulator,
 };
 use crate::{AggregateCore, KeyByLabelValues};
-use planner_types::post_asap::{SketchAlgorithm, SketchParams, SummaryFamilyType};
+use planner_types::post_asap::{FieldDataType, SketchAlgorithm, SketchParams};
 
 /// Generate the clone-based `AccumulatorUpdater` methods for updaters whose
 /// inner `acc` field implements `Clone + AggregateCore`.
@@ -527,7 +527,7 @@ fn cms_heap_dims(params: &SketchParams) -> (usize, usize, usize) {
 /// Construct the kernel declared by a Planner SummaryAgg. No deployment config
 /// tags participate in this dispatch and unsupported payloads are errors.
 pub fn create_planner_accumulator(
-    family: &SummaryFamilyType,
+    family: &FieldDataType,
     input: &planner_types::post_asap::SummaryUpdate,
     grouping: &planner_types::post_asap::GroupingStrategy,
 ) -> Result<Box<dyn AccumulatorUpdater>, String> {
@@ -548,7 +548,7 @@ pub fn create_planner_accumulator(
     if grouping != &GroupingStrategy::PerSubpopulationInstance {
         return Err("shared summary grouping requires a supported Planner Hydra kernel".into());
     }
-    if matches!(family, SummaryFamilyType::ExactAggregate(..)) {
+    if matches!(family, FieldDataType::ExactAggregate(..)) {
         return Ok(Box::new(PlannerExactUpdater {
             acc: crate::summary_kernels::exact::ExactAccumulator::new(
                 family.clone(),
@@ -556,7 +556,7 @@ pub fn create_planner_accumulator(
             )?,
         }));
     }
-    let SummaryFamilyType::Sketch(kind, family_grouping) = family else {
+    let FieldDataType::Sketch(kind, family_grouping) = family else {
         return Err(format!("unsupported Planner summary family {family:?}"));
     };
     if family_grouping != grouping {
@@ -748,7 +748,7 @@ mod planner_parameter_regression {
                 },
             ),
         ] {
-            let family = SummaryFamilyType::Sketch(
+            let family = FieldDataType::Sketch(
                 SketchKind::new(algorithm.clone(), params),
                 Default::default(),
             );

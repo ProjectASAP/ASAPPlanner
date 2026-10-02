@@ -16,7 +16,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::pre_asap::query_expr::DataModel;
-use crate::pre_asap::schema::{Column, ColumnId, DataType};
+use crate::pre_asap::schema::{ColumnId, DataType, Field, FieldDataType};
 use crate::types::AccuracyTarget;
 
 /// "What to compute" — the vocabulary the planner pivots on.
@@ -532,7 +532,7 @@ impl<C: Clone> AggIntent<C> {
     /// Used by `QueryExpr::Aggregate`'s schema-derivation rule. The PromQL
     /// convention names the column after the intent kind so consumers can
     /// locate it without an alias lookup.
-    pub fn output_column(&self, input: &Column) -> Column {
+    pub fn output_column(&self, input: &Field) -> Field {
         match self {
             AggIntent::Count { .. } => col("count", DataType::Int64, false),
             AggIntent::Sum { .. } => col("sum", input.dtype.clone(), false),
@@ -613,8 +613,8 @@ impl<C: Clone> AggIntent<C> {
     }
 }
 
-fn col(name: &str, dtype: DataType, nullable: bool) -> Column {
-    Column::new(name, dtype, nullable)
+fn col(name: &str, dtype: impl Into<FieldDataType>, nullable: bool) -> Field {
+    Field::new(name, dtype.into(), nullable)
 }
 
 /// `0.99` → `"0_99"`, `0.5` → `"0_5"`. Used by `Quantile` output naming so
@@ -739,10 +739,10 @@ pub fn default_quantile(q: f64) -> AggIntent {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pre_asap::schema::{Column, DataType};
+    use crate::pre_asap::schema::{DataType, Field};
 
-    fn c(name: &str, dtype: DataType) -> Column {
-        Column::new(name, dtype, false)
+    fn c(name: &str, dtype: DataType) -> Field {
+        Field::plain(name, dtype, false)
     }
 
     // Correlation exposes both dependencies but cannot merge final scalar results.
@@ -813,7 +813,7 @@ mod tests {
             AggIntent::<ColumnId>::Sum { col: None }
                 .output_column(&c("c", DataType::Int64))
                 .dtype,
-            DataType::Int64
+            FieldDataType::Plain(DataType::Int64)
         ));
     }
 
@@ -970,7 +970,7 @@ mod arg_selector_contract_tests {
     use crate::pre_asap::{ColumnRef, Schema};
     #[test]
     fn arg_selector_rejects_missing_or_unresolved_arguments() {
-        let schema = Schema::new(vec![Column::new("value", DataType::Float64, false)]);
+        let schema = Schema::new(vec![Field::plain("value", DataType::Float64, false)]);
         for payload in [
             serde_json::json!({"arg_col": ColumnRef::Named("value".into())}),
             serde_json::json!({"arg_col": ColumnRef::Named("value".into()), "val_col": ColumnRef::Named("missing".into())}),

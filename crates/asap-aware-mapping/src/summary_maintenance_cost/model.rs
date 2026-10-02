@@ -881,12 +881,12 @@ mod tests {
     use std::rc::Rc;
 
     use asap_types::post_asap::{
-        EvaluationSchedule, ExactKind, ExactParams, GroupingStrategy, OutputRepresentation,
-        SummaryExpr, SummaryFamilyType, SummaryField, SummaryMaintenanceLifecycle,
-        SummaryMaintenanceLifecycleGuarantee, SummaryMaintenanceMode, SummarySchema,
+        EvaluationSchedule, ExactKind, ExactParams, Field, FieldDataType, GroupingStrategy,
+        OutputRepresentation, Schema, SummaryExpr, SummaryMaintenanceLifecycle,
+        SummaryMaintenanceLifecycleGuarantee, SummaryMaintenanceMode,
     };
     use asap_types::pre_asap::{
-        agg_intent::AggIntent, Column, ColumnRef, DataType, QueryExpr, Reduction, Schema, Source,
+        agg_intent::AggIntent, ColumnRef, DataType, QueryExpr, Reduction, Source,
     };
     use asap_types::workload::{
         DataWorkload, Evidence, EvidenceSource, Predictability, Query, QueryLanguage,
@@ -2672,7 +2672,7 @@ mod tests {
         let nested = Rc::new(SummaryNode {
             expr: SummaryExpr::SummaryAgg {
                 child,
-                family: SummaryFamilyType::ExactAggregate(ExactKind::Count, ExactParams::Count),
+                family: FieldDataType::ExactAggregate(ExactKind::Count, ExactParams::Count),
                 input: asap_types::post_asap::SummaryUpdate::column(ColumnRef::Wildcard),
                 reduction: Reduction::by(vec![]),
                 grouping: GroupingStrategy::PerSubpopulationInstance,
@@ -3010,15 +3010,8 @@ mod tests {
     }
 
     fn summary_with_operations(merge: bool, subtract: bool, delete: bool) -> Rc<SummaryNode> {
-        let state_type = SummaryFamilyType::ExactAggregate(ExactKind::Count, ExactParams::Count);
-        let schema = SummarySchema {
-            fields: vec![SummaryField {
-                name: "count".into(),
-                dtype: state_type.clone(),
-                nullable: false,
-            }],
-            time_index: None,
-        };
+        let state_type = FieldDataType::ExactAggregate(ExactKind::Count, ExactParams::Count);
+        let schema = Schema::lifted(vec![Field::new("count", state_type.clone(), false)], None);
         let leaf = Rc::new(SummaryNode {
             expr: SummaryExpr::KeepPreAsap(Rc::new(QueryExpr::Scan {
                 source: Source::TimeSeries {
@@ -3027,8 +3020,8 @@ mod tests {
                 predicates: vec![],
                 schema: Schema::with_time_index(
                     vec![
-                        Column::new("ts", DataType::Timestamp, false),
-                        Column::new("value", DataType::Float64, false),
+                        Field::plain("ts", DataType::Timestamp, false),
+                        Field::plain("value", DataType::Float64, false),
                     ],
                     0,
                     vec![],
@@ -3116,7 +3109,7 @@ mod tests {
                 outer: Rc::clone(left),
                 inner: Rc::clone(right),
                 key: ColumnRef::Wildcard,
-                family: SummaryFamilyType::ExactAggregate(ExactKind::Count, ExactParams::Count),
+                family: FieldDataType::ExactAggregate(ExactKind::Count, ExactParams::Count),
             },
             schema: schema.clone(),
             guarantee: None,
@@ -3150,14 +3143,14 @@ mod tests {
                     vector_match: None,
                 },
             },
-            schema: SummarySchema {
-                fields: vec![SummaryField {
-                    name: "value".into(),
-                    dtype: SummaryFamilyType::Plain(DataType::Float64),
-                    nullable: false,
-                }],
-                time_index: None,
-            },
+            schema: Schema::lifted(
+                vec![Field::new(
+                    "value",
+                    FieldDataType::Plain(DataType::Float64),
+                    false,
+                )],
+                None,
+            ),
             guarantee: Some(ResultGuarantee::exact("test binary")),
         })
     }
@@ -3201,8 +3194,8 @@ mod tests {
             predicates: vec![],
             schema: Schema::with_time_index(
                 vec![
-                    Column::new("ts", DataType::Timestamp, false),
-                    Column::new("value", DataType::Float64, false),
+                    Field::plain("ts", DataType::Timestamp, false),
+                    Field::plain("value", DataType::Float64, false),
                 ],
                 0,
                 vec![],

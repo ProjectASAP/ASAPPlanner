@@ -21,9 +21,8 @@ pub use evidence::{
 };
 
 use asap_types::post_asap::{
-    AccuracyError, BoundExpr, CompositionOperator, ErrorMetric, ExactOperation, GuaranteeSource,
-    ProbabilityExpr, ResultGuarantee, SketchAlgorithm, SketchParams, SketchQuery,
-    SummaryFamilyType,
+    AccuracyError, BoundExpr, CompositionOperator, ErrorMetric, ExactOperation, FieldDataType,
+    GuaranteeSource, ProbabilityExpr, ResultGuarantee, SketchAlgorithm, SketchParams, SketchQuery,
 };
 use asap_types::types::AccuracyTarget;
 
@@ -48,7 +47,7 @@ pub trait AccuracyModel {
     /// `Sample`/`Wavelet`/`StatModel`).
     fn local_guarantee(
         &self,
-        family: &SummaryFamilyType,
+        family: &FieldDataType,
         query: &SketchQuery,
     ) -> Option<ResultGuarantee>;
 
@@ -94,7 +93,7 @@ impl AccuracyModel for DefaultAccuracyModel {
     }
     fn local_guarantee(
         &self,
-        family: &SummaryFamilyType,
+        family: &FieldDataType,
         query: &SketchQuery,
     ) -> Option<ResultGuarantee> {
         estimators::local_guarantee(family, query)

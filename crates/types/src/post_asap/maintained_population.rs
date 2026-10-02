@@ -70,7 +70,7 @@ impl CurrentSeriesInput {
         }
         if self.grouping.iter().any(|label| {
             !schema
-                .columns
+                .fields
                 .iter()
                 .any(|c| c.name == *label && c.dtype == DataType::Utf8)
         }) {
@@ -86,7 +86,7 @@ impl CurrentSeriesInput {
             else {
                 return false;
             };
-            let Some(column) = schema.columns.get(*col) else {
+            let Some(column) = schema.fields.get(*col) else {
                 return false;
             };
             if column.dtype != DataType::Utf8 {
@@ -142,8 +142,8 @@ impl MaintainedPopulation {
                 use crate::pre_asap::{DataType, QueryExpr, Source};
                 expected.as_ref() == input
                     && matches!(input, QueryExpr::Scan { source: Source::Table { .. }, schema, .. }
-                        if schema.closed && schema.columns.get(*value_column).is_some_and(|c| c.dtype == DataType::Float64 && !c.nullable)
-                            && !grouping.is_without() && grouping.keys().iter().all(|k| *k < schema.columns.len()))
+                        if schema.closed && schema.fields.get(*value_column).is_some_and(|c| c.dtype == DataType::Float64 && !c.nullable)
+                            && !grouping.is_without() && grouping.keys().iter().all(|k| *k < schema.fields.len()))
             }
         }
     }

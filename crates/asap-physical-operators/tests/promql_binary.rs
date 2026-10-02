@@ -3,33 +3,37 @@ use asap_physical_operators::{
     operators::Operator,
     physical_planner::{compile_node, CompiledPhysicalDAG, InputContract, Source},
     runtime::{Limits, RunContext, Scope},
-    values::{Batch, Schema, Value},
+    values::{Batch, SchemaRef, Value},
 };
 use futures::{executor::block_on, StreamExt};
 use planner_types::{
     post_asap::{
-        BinaryOperator, ExecutionDataState, PostAsapDAGNode, PostAsapNodeId,
-        PostAsapOperatorPayload, SummaryFamilyType, SummaryField, SummarySchema,
+        BinaryOperator, ExecutionDataState, Field, FieldDataType, PostAsapDAGNode, PostAsapNodeId,
+        PostAsapOperatorPayload, Schema,
     },
     pre_asap::{ArithmeticOpKind, BinaryOpKind, DataType},
 };
 use std::{collections::BTreeMap, sync::Arc};
 
-fn schema() -> Schema {
-    Arc::new(SummarySchema {
+fn schema() -> SchemaRef {
+    Arc::new(Schema {
+        closed: true,
+        unique_keys: vec![],
         fields: vec![
-            SummaryField {
+            Field {
+                table: None,
                 name: "labels".into(),
-                dtype: SummaryFamilyType::Plain(DataType::Map {
+                dtype: FieldDataType::Plain(DataType::Map {
                     key: Box::new(DataType::Utf8),
                     value: Box::new(DataType::Utf8),
                     value_nullable: false,
                 }),
                 nullable: false,
             },
-            SummaryField {
+            Field {
+                table: None,
                 name: "value".into(),
-                dtype: SummaryFamilyType::Plain(DataType::Float64),
+                dtype: FieldDataType::Plain(DataType::Float64),
                 nullable: false,
             },
         ],
@@ -319,15 +323,19 @@ fn stored_series_readouts_support_filters_and_sets() {
         (ExactKind::Sum, ExactParams::Sum),
         (ExactKind::Count, ExactParams::Count),
     ] {
-        let family = SummaryFamilyType::ExactAggregate(exact_kind.clone(), params);
-        let state_schema = Arc::new(SummarySchema {
+        let family = FieldDataType::ExactAggregate(exact_kind.clone(), params);
+        let state_schema = Arc::new(Schema {
+            closed: true,
+            unique_keys: vec![],
             fields: vec![
-                SummaryField {
+                Field {
+                    table: None,
                     name: PROMQL_SERIES_IDENTITY.into(),
-                    dtype: SummaryFamilyType::Plain(DataType::Utf8),
+                    dtype: FieldDataType::Plain(DataType::Utf8),
                     nullable: false,
                 },
-                SummaryField {
+                Field {
+                    table: None,
                     name: "value".into(),
                     dtype: family.clone(),
                     nullable: false,
@@ -336,7 +344,7 @@ fn stored_series_readouts_support_filters_and_sets() {
             time_index: None,
         });
         let mut value_schema = (*state_schema).clone();
-        value_schema.fields[1].dtype = SummaryFamilyType::Plain(DataType::Float64);
+        value_schema.fields[1].dtype = FieldDataType::Plain(DataType::Float64);
         for kind in [
             BinaryOpKind::Compare(CompareOpKind::Gt),
             BinaryOpKind::Set(PromQLVectorSetOpKind::And),

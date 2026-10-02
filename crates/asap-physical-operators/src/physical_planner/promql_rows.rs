@@ -31,7 +31,7 @@ pub fn with_series_identity(root: &QueryExpr) -> Result<QueryExpr, Error> {
 /// Construct source rows only from full identities. The named label columns
 /// are projections of that same identity and cannot independently redefine it.
 pub fn series_row(
-    schema: &Schema,
+    schema: &SchemaRef,
     labels: &BTreeMap<String, String>,
     timestamp: i64,
     value: f64,
@@ -45,10 +45,7 @@ pub fn series_row(
         .enumerate()
         .map(|(index, field)| {
             if field.name == SERIES_IDENTITY_COLUMN {
-                if field.dtype != SummaryFamilyType::Plain(DataType::Utf8)
-                    || field.nullable
-                    || found
-                {
+                if field.dtype != FieldDataType::Plain(DataType::Utf8) || field.nullable || found {
                     return Err(invalid("invalid series identity column"));
                 }
                 found = true;
@@ -56,10 +53,10 @@ pub fn series_row(
             } else if Some(index) == schema.time_index {
                 Ok(Value::Timestamp(timestamp))
             } else if field.name == "value"
-                && field.dtype == SummaryFamilyType::Plain(DataType::Float64)
+                && field.dtype == FieldDataType::Plain(DataType::Float64)
             {
                 Ok(Value::Float64(value))
-            } else if field.dtype == SummaryFamilyType::Plain(DataType::Utf8) {
+            } else if field.dtype == FieldDataType::Plain(DataType::Utf8) {
                 Ok(labels.get(&field.name).map_or_else(
                     || Value::Utf8("".into()),
                     |value| Value::Utf8(value.clone().into()),
@@ -82,7 +79,7 @@ pub fn compile_current_series_readout(
     selected: &Rc<planner_types::post_asap::SummaryNode>,
 ) -> Result<CompiledPhysicalDAG, Error> {
     use planner_types::post_asap::{
-        compile_post_asap_dag, maintained_population::PopulationReadout, SummaryField,
+        compile_post_asap_dag, maintained_population::PopulationReadout, Field,
     };
     let mut dag = compile_post_asap_dag(selected).map_err(|error| invalid(error.to_string()))?;
     // Typed snapshot candidates already carry full identity throughout the DAG.
@@ -154,9 +151,10 @@ pub fn compile_current_series_readout(
                 "current-series input already has a physical identity column",
             ));
         }
-        node.output_schema.fields.push(SummaryField {
+        node.output_schema.fields.push(Field {
+            table: None,
             name: SERIES_IDENTITY_COLUMN.into(),
-            dtype: SummaryFamilyType::Plain(DataType::Utf8),
+            dtype: FieldDataType::Plain(DataType::Utf8),
             nullable: false,
         });
     }
@@ -208,7 +206,7 @@ pub fn compile_rate_ranking(
                 operation: ValueOperation::FinalizeExactAccumulator,
                 timing: planner_types::post_asap::ExecutionTiming::QueryTime,
             } if matches!(&child.expr, SummaryExpr::SummaryAgg {
-                    family: SummaryFamilyType::ExactAggregate(ExactKind::Rate, _),
+                    family: FieldDataType::ExactAggregate(ExactKind::Rate, _),
                     reduction: planner_types::pre_asap::Reduction::PerEntity,
                     child: raw, ..
                 } if matches!(&raw.expr, SummaryExpr::KeepPreAsap(expr) if matches!(expr.as_ref(), QueryExpr::TimeRange { .. }))) =>
@@ -263,7 +261,7 @@ pub fn compile_fixed_window_rate_aggregation(
             matches!(
                 &n.payload,
                 Payload::SummaryAgg {
-                    family: SummaryFamilyType::ExactAggregate(ExactKind::Rate, _),
+                    family: FieldDataType::ExactAggregate(ExactKind::Rate, _),
                     reduction: planner_types::pre_asap::Reduction::PerEntity,
                     ..
                 }
@@ -277,14 +275,14 @@ pub fn compile_fixed_window_rate_aggregation(
             n.output_state.timing == ExecutionTiming::IngestionTime
                 && match &n.payload {
                     Payload::SummaryAgg {
-                        family: SummaryFamilyType::Sketch(kind, _),
+                        family: FieldDataType::Sketch(kind, _),
                         ..
                     } => matches!(
                         kind.algorithm(),
                         SketchAlgorithm::CmsWithHeap | SketchAlgorithm::CountSketchWithHeap
                     ),
                     Payload::SummaryAgg {
-                        family: SummaryFamilyType::ExactAggregate(ExactKind::Sum, _),
+                        family: FieldDataType::ExactAggregate(ExactKind::Sum, _),
                         ..
                     } => true,
                     _ => false,

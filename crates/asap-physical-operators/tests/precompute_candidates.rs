@@ -93,7 +93,7 @@ fn grouped_rate_can_be_materialized_before_or_after_grouped_sum() {
             matches!(
                 node.payload,
                 PostAsapOperatorPayload::SummaryAgg {
-                    family: SummaryFamilyType::ExactAggregate(ExactKind::Rate, _),
+                    family: FieldDataType::ExactAggregate(ExactKind::Rate, _),
                     ..
                 }
             )
@@ -150,21 +150,19 @@ fn grouped_rate_can_be_materialized_before_or_after_grouped_sum() {
                 .fields
                 .iter()
                 .map(|field| match &field.dtype {
-                    SummaryFamilyType::ExactAggregate(..) => summary.clone(),
-                    SummaryFamilyType::Plain(DataType::Timestamp) => Value::Timestamp(2000),
-                    SummaryFamilyType::Plain(DataType::Utf8) => {
-                        Value::Utf8(if field.name == "job" {
-                            "api".into()
-                        } else {
-                            serde_json::to_string(&BTreeMap::from([
-                                ("__name__", "m".to_string()),
-                                ("job", "api".to_string()),
-                                ("instance", format!("series-{index}")),
-                            ]))
-                            .unwrap()
-                            .into()
-                        })
-                    }
+                    FieldDataType::ExactAggregate(..) => summary.clone(),
+                    FieldDataType::Plain(DataType::Timestamp) => Value::Timestamp(2000),
+                    FieldDataType::Plain(DataType::Utf8) => Value::Utf8(if field.name == "job" {
+                        "api".into()
+                    } else {
+                        serde_json::to_string(&BTreeMap::from([
+                            ("__name__", "m".to_string()),
+                            ("job", "api".to_string()),
+                            ("instance", format!("series-{index}")),
+                        ]))
+                        .unwrap()
+                        .into()
+                    }),
                     _ => panic!("unexpected input field {field:?}"),
                 })
                 .collect()
@@ -391,7 +389,7 @@ fn bounded_inventory_exposes_grouped_rate_physical_frontiers() {
             matches!(
                 &node.payload,
                 PostAsapOperatorPayload::SummaryAgg {
-                    family: SummaryFamilyType::ExactAggregate(ExactKind::Rate, _),
+                    family: FieldDataType::ExactAggregate(ExactKind::Rate, _),
                     ..
                 }
             )
@@ -429,7 +427,7 @@ fn enumerated_grouped_rate_candidates_execute_numeric_query_outputs() {
             matches!(
                 node.payload,
                 PostAsapOperatorPayload::SummaryAgg {
-                    family: SummaryFamilyType::ExactAggregate(ExactKind::Rate, _),
+                    family: FieldDataType::ExactAggregate(ExactKind::Rate, _),
                     ..
                 }
             )
@@ -443,7 +441,7 @@ fn enumerated_grouped_rate_candidates_execute_numeric_query_outputs() {
                 matches!(
                     node.payload,
                     PostAsapOperatorPayload::SummaryAgg {
-                        family: SummaryFamilyType::ExactAggregate(ExactKind::Sum, _),
+                        family: FieldDataType::ExactAggregate(ExactKind::Sum, _),
                         ..
                     }
                 )
@@ -484,9 +482,9 @@ fn enumerated_grouped_rate_candidates_execute_numeric_query_outputs() {
                     .fields
                     .iter()
                     .map(|field| match &field.dtype {
-                        SummaryFamilyType::ExactAggregate(..) => summary.clone(),
-                        SummaryFamilyType::Plain(DataType::Timestamp) => Value::Timestamp(60_000),
-                        SummaryFamilyType::Plain(DataType::Utf8)
+                        FieldDataType::ExactAggregate(..) => summary.clone(),
+                        FieldDataType::Plain(DataType::Timestamp) => Value::Timestamp(60_000),
+                        FieldDataType::Plain(DataType::Utf8)
                             if field.name == "$promql_series_identity" =>
                         {
                             Value::Utf8(
@@ -498,7 +496,7 @@ fn enumerated_grouped_rate_candidates_execute_numeric_query_outputs() {
                                 .into(),
                             )
                         }
-                        SummaryFamilyType::Plain(DataType::Utf8) => Value::Utf8("api".into()),
+                        FieldDataType::Plain(DataType::Utf8) => Value::Utf8("api".into()),
                         _ => panic!("unexpected input field {field:?}"),
                     })
                     .collect()
@@ -540,7 +538,7 @@ fn enumerated_grouped_rate_candidates_execute_numeric_query_outputs() {
                 .schema()
                 .fields
                 .iter()
-                .all(|field| matches!(field.dtype, SummaryFamilyType::Plain(_))));
+                .all(|field| matches!(field.dtype, FieldDataType::Plain(_))));
             assert!(
                 output[0].rows()[0]
                     .iter()

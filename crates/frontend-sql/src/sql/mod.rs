@@ -58,7 +58,7 @@ use asap_types::pre_asap::query_expr::{
     UnresolvedQueryExpr as Unresolved, WindowFrame, WindowFrameBound, WindowFrameOffset,
     WindowFrameUnits,
 };
-use asap_types::pre_asap::schema::{DataType, Schema};
+use asap_types::pre_asap::schema::{DataType, FieldDataType, Schema};
 use asap_types::pre_asap::{
     resolve_column_ref, resolve_root, ColumnRef, CompareOpKind, JoinKind, RelationalSetOpKind,
     ScalarValue, WindowFuncKind,
@@ -558,8 +558,8 @@ impl<'a> SqlLowerer<'a> {
             .get(table)
             .ok_or_else(|| LoweringError::TableNotFound(table.to_string()))?;
         let qualified = Schema {
-            columns: schema
-                .columns
+            fields: schema
+                .fields
                 .iter()
                 .cloned()
                 .map(|c| c.with_table(qualifier))
@@ -941,8 +941,8 @@ impl<'a> SqlLowerer<'a> {
         })?;
         if value_id == timestamp_id
             || !matches!(
-                input_schema.columns[value_id].dtype,
-                DataType::Int64 | DataType::Float64
+                input_schema.fields[value_id].dtype,
+                FieldDataType::Plain(DataType::Int64 | DataType::Float64)
             )
         {
             return Err(LoweringError::InvalidExpression(format!(

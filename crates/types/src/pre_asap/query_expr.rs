@@ -8,7 +8,7 @@
 //! own — construction still allocates a fresh `Rc` per node, the same shape
 //! as the old `Box` DAG — a separate CSE pass is what turns two
 //! independently constructed, structurally-equal sub-DAGs into two
-//! references to one `Rc` (issue #212, #222). Column identity is
+//! references to one `Rc` (issue #212, #222). Field identity is
 //! **positional** (`Aggregate.reduction: Reduction`, wrapping `GroupKeys`
 //! for the grouped case), resolved by the [`SchemaResolver`](super::schema_resolver) against
 //! the self-contained [`Schema`] carried on each `Scan`.
@@ -21,7 +21,7 @@ use thiserror::Error;
 
 use super::agg_intent::AggIntent;
 use super::expr_ir::{ArithmeticOpKind, ColumnRef, CompareOpKind, ScalarValue};
-use super::schema::{Column, ColumnId, DataType, Schema};
+use super::schema::{ColumnId, DataType, Field, FieldDataType, Schema};
 
 /// The column-reference resolution state a [`QueryExpr<C>`] DAG carries —
 /// [`ColumnId`] (the default, and what the bare `QueryExpr` name has always
@@ -1210,11 +1210,11 @@ impl QueryExpr<ColumnId> {
             // is no longer provable — drop unique_keys.
             QueryExpr::PromqlRelabel { dst, child, .. } => {
                 let mut out = child.output_schema()?;
-                if let Some(existing) = out.columns.iter_mut().find(|c| c.name == *dst) {
-                    existing.dtype = DataType::Utf8;
+                if let Some(existing) = out.fields.iter_mut().find(|c| c.name == *dst) {
+                    existing.dtype = FieldDataType::Plain(DataType::Utf8);
                     existing.nullable = true;
                 } else {
-                    out.columns.push(Column::new(dst.clone(), DataType::Utf8, true));
+                    out.fields.push(Field::plain(dst.clone(), DataType::Utf8, true));
                 }
                 out.unique_keys.clear();
                 Ok(out)
@@ -1224,12 +1224,12 @@ impl QueryExpr<ColumnId> {
             // inferred from its expression against the child schema; the name
             // is the explicit alias or a derived default. A child unique key
             // survives exactly when every one of its columns is passed through
-            // as a bare `Column` item (possibly reordered or aliased). Derived
+            // as a bare `Field` item (possibly reordered or aliased). Derived
             // expressions cannot carry key identity. `time_index` is re-found
             // by name.
             QueryExpr::Project { cols, qualifier, child } => {
                 let in_schema = child.output_schema()?;
-                let columns: Vec<Column> = cols
+                let columns: Vec<Field> = cols
                     .iter()
                     .enumerate()
                     .map(|(i, item)| {
@@ -1238,7 +1238,7 @@ impl QueryExpr<ColumnId> {
                             .alias
                             .clone()
                             .unwrap_or_else(|| default_proj_name(&item.expr, i, &in_schema));
-                        let c = Column::new(name, dtype, nullable);
+                        let c = Field::plain(name, dtype, nullable);
                         // A derived table re-qualifies its output columns with
                         // its alias, so `t.col` (and a join over two derived
                         // tables) resolves to the right relation.
@@ -1263,7 +1263,7 @@ impl QueryExpr<ColumnId> {
                     })
                     .collect();
                 Ok(Schema {
-                    columns,
+                    fields: columns,
                     time_index,
                     unique_keys,
                     // Projection enumerates exactly its items → closed.
@@ -1338,19 +1338,19 @@ impl QueryExpr<ColumnId> {
                     JoinKind::Inner | JoinKind::Cross => (false, false),
                     JoinKind::Semi | JoinKind::Anti => unreachable!("handled above"),
                 };
-                let l_len = l.columns.len();
-                let mut columns = Vec::with_capacity(l_len + r.columns.len());
-                columns.extend(l.columns.iter().cloned().map(|mut c| {
+                let l_len = l.fields.len();
+                let mut columns = Vec::with_capacity(l_len + r.fields.len());
+                columns.extend(l.fields.iter().cloned().map(|mut c| {
                     c.nullable |= left_null;
                     c
                 }));
-                columns.extend(r.columns.iter().cloned().map(|mut c| {
+                columns.extend(r.fields.iter().cloned().map(|mut c| {
                     c.nullable |= right_null;
                     c
                 }));
                 let time_index = l.time_index.or(r.time_index.map(|i| i + l_len));
                 Ok(Schema {
-                    columns,
+                    fields: columns,
                     time_index,
                     unique_keys: Vec::new(),
                     // The concatenation is complete only if both sides are.
@@ -1369,10 +1369,13 @@ impl QueryExpr<ColumnId> {
                 // First operand's (dtype, nullable) from the child schema, owned
                 // so the borrow ends before we append.
                 let arg = args.first().and_then(|a| match a {
-                    QueryExpr::Column(id) => out.columns.get(*id),
+                    QueryExpr::Column(id) => out.fields.get(*id),
                     _ => None,
                 });
-                let arg_dtype = || arg.map_or(DataType::Float64, |c| c.dtype.clone());
+                let arg_dtype = || {
+                    arg.and_then(|c| c.plain_dtype().cloned())
+                        .unwrap_or(DataType::Float64)
+                };
                 let (dtype, nullable) = match func {
                     WindowFuncKind::RowNumber
                     | WindowFuncKind::Rank
@@ -1391,8 +1394,8 @@ impl QueryExpr<ColumnId> {
                         (arg_dtype(), arg.is_none_or(|c| c.nullable))
                     }
                 };
-                out.columns
-                    .push(Column::new(output_name.clone(), dtype, nullable));
+                out.fields
+                    .push(Field::plain(output_name.clone(), dtype, nullable));
                 Ok(out)
             }
 
@@ -1404,14 +1407,14 @@ impl QueryExpr<ColumnId> {
             // `Literal(Float64)` (issue #220), so the schema doesn't need to
             // inspect the inner node.
             QueryExpr::PromqlScalarBridge(_) | QueryExpr::EvalTimestamp => Ok(Schema {
-                columns: vec![Column::new("value", DataType::Float64, false)],
+                fields: vec![Field::plain("value", DataType::Float64, false)],
                 time_index: None,
                 unique_keys: Vec::new(),
                 closed: true,
             }),
 
             QueryExpr::CurrentTimestamp => Ok(Schema {
-                columns: vec![Column::new("value", DataType::Timestamp, false)],
+                fields: vec![Field::plain("value", DataType::Timestamp, false)],
                 time_index: None,
                 unique_keys: Vec::new(),
                 closed: true,
@@ -1421,9 +1424,9 @@ impl QueryExpr<ColumnId> {
             // floor and nothing else. `closed` — its full label set (empty) is
             // known statically (#48).
             QueryExpr::PromqlVectorFromScalar(_) => Ok(Schema {
-                columns: vec![
-                    Column::new("ts", DataType::Timestamp, false),
-                    Column::new("value", DataType::Float64, false),
+                fields: vec![
+                    Field::plain("ts", DataType::Timestamp, false),
+                    Field::plain("value", DataType::Float64, false),
                 ],
                 time_index: Some(0),
                 unique_keys: Vec::new(),
@@ -1433,7 +1436,7 @@ impl QueryExpr<ColumnId> {
             // `scalar(v)` collapses to a single `value`, no time index — the same
             // scalar shape as a constant or `time()` (#48).
             QueryExpr::PromqlScalarFromVector(_) => Ok(Schema {
-                columns: vec![Column::new("value", DataType::Float64, false)],
+                fields: vec![Field::plain("value", DataType::Float64, false)],
                 time_index: None,
                 unique_keys: Vec::new(),
                 closed: true,
@@ -1460,14 +1463,14 @@ impl QueryExpr<ColumnId> {
                     || matches!(grouping, Some(g) if g.side == GroupSide::Right);
                 let mut additions = Vec::new();
                 if right_rows {
-                    additions.extend(right.columns.iter().filter(|c| c.dtype == DataType::Utf8).cloned());
+                    additions.extend(right.fields.iter().filter(|c| c.dtype == DataType::Utf8).cloned());
                 }
                 if let Some(grouping) = grouping {
-                    additions.extend(grouping.labels.iter().map(|name| Column::new(name.clone(), DataType::Utf8, true)));
+                    additions.extend(grouping.labels.iter().map(|name| Field::plain(name.clone(), DataType::Utf8, true)));
                 }
                 for column in additions {
-                    if !output.columns.iter().any(|c| c.name == column.name) {
-                        output.columns.push(column);
+                    if !output.fields.iter().any(|c| c.name == column.name) {
+                        output.fields.push(column);
                     }
                 }
                 Ok(output)
@@ -1504,14 +1507,14 @@ fn per_series_reduction_schema(input: &Schema, agg: &AggIntent) -> Result<Schema
             .map_err(|error| QueryExprError::InvalidSampleColumn(error.to_string()))?
     };
     if !matches!(
-        input.columns.get(vi).map(|column| &column.dtype),
-        Some(DataType::Float64 | DataType::Int64)
+        input.fields.get(vi).map(|column| &column.dtype),
+        Some(FieldDataType::Plain(DataType::Float64 | DataType::Int64))
     ) {
         return Err(QueryExprError::InvalidSampleColumn(format!(
             "column {vi} is not numeric"
         )));
     }
-    let mut columns = input.columns.clone();
+    let mut columns = input.fields.clone();
     {
         let mut out = agg.output_column(&columns[vi]);
         out.name = "value".into();
@@ -1519,11 +1522,11 @@ fn per_series_reduction_schema(input: &Schema, agg: &AggIntent) -> Result<Schema
         // always `float64` — override the reducer's own output dtype so
         // `count_over_time` (whose `Count` intent types `Int64`) matches every
         // other range reducer instead of leaking an `Int64` value column (#69).
-        out.dtype = DataType::Float64;
+        out.dtype = FieldDataType::Plain(DataType::Float64);
         columns[vi] = out;
     }
     Ok(Schema {
-        columns,
+        fields: columns,
         time_index: input.time_index,
         unique_keys: input.unique_keys.clone(),
         // Per-series reduction is label-preserving: it inherits its input's
@@ -1570,25 +1573,25 @@ pub fn aggregate_output_schema(
         return without_output_schema(in_schema, by.keys(), measures, output_names);
     }
 
-    let mut out_cols: Vec<Column> = Vec::with_capacity(by.len() + measures.len());
+    let mut out_cols: Vec<Field> = Vec::with_capacity(by.len() + measures.len());
     for &id in by.keys() {
         let c = in_schema
-            .columns
+            .fields
             .get(id)
             .ok_or(QueryExprError::InvalidGroupByColumn(
                 id,
-                in_schema.columns.len(),
+                in_schema.fields.len(),
             ))?;
         out_cols.push(c.clone());
     }
     let value_col_idx =
         super::column_resolution::resolve_column_ref(&ColumnRef::SampleValue, in_schema)
             .ok()
-            .or_else(|| (0..in_schema.columns.len()).find(|i| !by.contains(i)));
+            .or_else(|| (0..in_schema.fields.len()).find(|i| !by.contains(i)));
     let probe = value_col_idx
-        .and_then(|i| in_schema.columns.get(i))
+        .and_then(|i| in_schema.fields.get(i))
         .cloned()
-        .unwrap_or_else(|| Column::new("value", DataType::Float64, false));
+        .unwrap_or_else(|| Field::plain("value", DataType::Float64, false));
     // Each reducer types off its own input column (`SUM(bytes)` vs `AVG(latency)`
     // in one node); `None` falls back to the sample-value probe (PromQL's
     // single-column convention). A non-empty `output_names[i]` overrides the
@@ -1601,7 +1604,7 @@ pub fn aggregate_output_schema(
         // duplicate.
         if let AggIntent::CountValues { label } = intent {
             if !out_cols.iter().any(|c| c.name == *label) {
-                out_cols.push(Column::new(label.clone(), DataType::Utf8, false));
+                out_cols.push(Field::plain(label.clone(), DataType::Utf8, false));
             }
             let mut cnt = intent.output_column(&probe);
             if let Some(name) = output_names.get(i).filter(|s| !s.is_empty()) {
@@ -1616,7 +1619,7 @@ pub fn aggregate_output_schema(
         let in_col = intent
             .input_cols()
             .first()
-            .and_then(|id| in_schema.columns.get(*id))
+            .and_then(|id| in_schema.fields.get(*id))
             .unwrap_or(&probe);
         let mut out = intent.output_column(in_col);
         // A global extremum emits NULL for an empty input, even if its input
@@ -1628,8 +1631,8 @@ pub fn aggregate_output_schema(
             .arg_selector_columns(in_schema)
             .map_err(QueryExprError::InvalidScalarSignature)?
         {
-            out.dtype = in_schema.columns[arg].dtype.clone();
-            out.nullable = in_schema.columns[arg].nullable;
+            out.dtype = in_schema.fields[arg].dtype.clone();
+            out.nullable = in_schema.fields[arg].nullable;
         }
         if let Some(name) = output_names.get(i).filter(|s| !s.is_empty()) {
             out.name = name.clone();
@@ -1647,7 +1650,7 @@ pub fn aggregate_output_schema(
         vec![(0..by.len()).collect()]
     };
     Ok(Schema {
-        columns: out_cols,
+        fields: out_cols,
         time_index: None,
         unique_keys,
         // A cross-series aggregate enumerates exactly `by ++ measures`, so its output
@@ -1670,10 +1673,10 @@ fn without_output_schema(
     output_names: &[String],
 ) -> Result<Schema, QueryExprError> {
     for &id in excluded {
-        if id >= in_schema.columns.len() {
+        if id >= in_schema.fields.len() {
             return Err(QueryExprError::InvalidGroupByColumn(
                 id,
-                in_schema.columns.len(),
+                in_schema.fields.len(),
             ));
         }
     }
@@ -1681,17 +1684,17 @@ fn without_output_schema(
     // it is still the value, not a kept label.
     let value =
         super::column_resolution::resolve_column_ref(&ColumnRef::SampleValue, in_schema).ok();
-    let mut out_cols: Vec<Column> = Vec::new();
-    for (i, col) in in_schema.columns.iter().enumerate() {
+    let mut out_cols: Vec<Field> = Vec::new();
+    for (i, col) in in_schema.fields.iter().enumerate() {
         let is_time = in_schema.time_index == Some(i);
         if !is_time && value != Some(i) && !excluded.contains(&i) {
             out_cols.push(col.clone());
         }
     }
     let probe = value
-        .and_then(|i| in_schema.columns.get(i))
+        .and_then(|i| in_schema.fields.get(i))
         .cloned()
-        .unwrap_or_else(|| Column::new("value", DataType::Float64, false));
+        .unwrap_or_else(|| Field::plain("value", DataType::Float64, false));
     for (i, intent) in measures.iter().enumerate() {
         // Only the output *type* is read from here, so the leading column is
         // enough for the multi-column intents: `Cardinality` and `PearsonCorr`
@@ -1699,15 +1702,15 @@ fn without_output_schema(
         let in_col = intent
             .input_cols()
             .first()
-            .and_then(|id| in_schema.columns.get(*id))
+            .and_then(|id| in_schema.fields.get(*id))
             .unwrap_or(&probe);
         let mut out = intent.output_column(in_col);
         if let Some((arg, _)) = intent
             .arg_selector_columns(in_schema)
             .map_err(QueryExprError::InvalidScalarSignature)?
         {
-            out.dtype = in_schema.columns[arg].dtype.clone();
-            out.nullable = in_schema.columns[arg].nullable;
+            out.dtype = in_schema.fields[arg].dtype.clone();
+            out.nullable = in_schema.fields[arg].nullable;
         }
         if let Some(name) = output_names.get(i).filter(|s| !s.is_empty()) {
             out.name = name.clone();
@@ -1715,7 +1718,7 @@ fn without_output_schema(
         out_cols.push(out);
     }
     Ok(Schema {
-        columns: out_cols,
+        fields: out_cols,
         time_index: None,
         unique_keys: Vec::new(),
         // The kept label set is runtime-only, so — unlike `by` — this does not
@@ -1736,11 +1739,20 @@ fn infer_expr_type(
 ) -> Result<(DataType, bool), QueryExprError> {
     Ok(match expr {
         QueryExpr::CurrentTimestamp => (DataType::Timestamp, false),
-        QueryExpr::Column(id) => schema
-            .columns
-            .get(*id)
-            .map(|c| (c.dtype.clone(), c.nullable))
-            .unwrap_or((DataType::Float64, true)),
+        QueryExpr::Column(id) => match schema.fields.get(*id) {
+            Some(c) => match c.plain_dtype() {
+                Some(dtype) => (dtype.clone(), c.nullable),
+                // Summary state is not a scalar value: it has to be read
+                // out (estimated / finalized) before an expression can use it.
+                None => {
+                    return Err(QueryExprError::InvalidScalarSignature(format!(
+                        "column `{}` carries summary state and cannot be read as a value",
+                        c.name
+                    )))
+                }
+            },
+            None => (DataType::Float64, true),
+        },
         QueryExpr::Literal(s) => match s {
             ScalarValue::Int64(_) => (DataType::Int64, false),
             ScalarValue::Float64(_) => (DataType::Float64, false),
@@ -1843,7 +1855,7 @@ fn infer_expr_type(
 fn default_proj_name(expr: &QueryExpr<ColumnId>, idx: usize, schema: &Schema) -> String {
     match expr {
         QueryExpr::Column(id) => schema
-            .columns
+            .fields
             .get(*id)
             .map(|c| c.name.clone())
             .unwrap_or_else(|| format!("col_{idx}")),
@@ -1857,8 +1869,8 @@ mod tests {
     use crate::pre_asap::expr_ir::{ArithmeticOpKind, CompareOpKind};
     use crate::types::AccuracyTarget;
 
-    fn col(name: &str, dtype: DataType, nullable: bool) -> Column {
-        Column::new(name, dtype, nullable)
+    fn col(name: &str, dtype: DataType, nullable: bool) -> Field {
+        Field::plain(name, dtype, nullable)
     }
 
     /// Shifting an instant by a duration stays an instant, and shifting a date
@@ -1911,7 +1923,7 @@ mod tests {
     }
 
     fn scan(
-        columns: Vec<Column>,
+        columns: Vec<Field>,
         time_index: Option<ColumnId>,
         uk: Vec<Vec<ColumnId>>,
     ) -> QueryExpr {
@@ -1921,7 +1933,7 @@ mod tests {
             },
             predicates: vec![],
             schema: Schema {
-                columns,
+                fields: columns,
                 time_index,
                 unique_keys: uk,
                 closed: true,
@@ -2051,7 +2063,7 @@ mod tests {
             "the union of two deduplicated branches is not deduplicated"
         );
         // The column shape is still the first branch's.
-        assert_eq!(schema.columns.len(), 2);
+        assert_eq!(schema.fields.len(), 2);
     }
 
     /// Same rule as `SetOp`, which already dropped them.
@@ -2091,7 +2103,7 @@ mod tests {
     fn discriminator_override_produces_a_compound_unique_key() {
         // Two branches, each individually deduplicated on column 0 (`k`) —
         // but, per `merge_drops_the_branches_unique_keys`, that alone proves
-        // nothing about the union. Column 1 (`branch_id`) stands in for a
+        // nothing about the union. Field 1 (`branch_id`) stands in for a
         // discriminator the constructor has separately proven distinct per
         // branch (PromQL φ, a synthetic `GROUPING()` id, ...) — this
         // schema-level test only checks the shape `output_schema` derives
@@ -2119,7 +2131,7 @@ mod tests {
             "(discriminator, inner_key) is the sole asserted unique key"
         );
         assert_eq!(
-            schema.columns.len(),
+            schema.fields.len(),
             2,
             "column shape is still the first branch's"
         );
@@ -2224,10 +2236,10 @@ mod tests {
             child: Rc::new(child),
         };
         let s = q.output_schema().unwrap();
-        assert_eq!(s.columns.len(), 3);
-        assert_eq!(s.columns[0], col("host", DataType::Utf8, false));
-        assert_eq!(s.columns[1], col("dbl", DataType::Float64, false));
-        assert_eq!(s.columns[2], col("flag", DataType::Bool, true));
+        assert_eq!(s.fields.len(), 3);
+        assert_eq!(s.fields[0], col("host", DataType::Utf8, false));
+        assert_eq!(s.fields[1], col("dbl", DataType::Float64, false));
+        assert_eq!(s.fields[2], col("flag", DataType::Bool, true));
         // projection drops the time axis + unique keys (ts not retained)
         assert!(s.time_index.is_none());
         assert!(s.unique_keys.is_empty());
@@ -2292,7 +2304,7 @@ mod tests {
             child: Rc::new(scan_node),
         };
         let s = agg.output_schema().unwrap();
-        let names: Vec<_> = s.columns.iter().map(|c| c.name.as_str()).collect();
+        let names: Vec<_> = s.fields.iter().map(|c| c.name.as_str()).collect();
         assert_eq!(names, vec!["job", "sum"], "kept `job`, dropped `instance`");
         assert!(!s.closed, "a `without` result stays open");
         assert!(s.time_index.is_none());
@@ -2321,7 +2333,7 @@ mod tests {
             child: Rc::new(inner),
         };
         let s = agg.output_schema().unwrap();
-        let names: Vec<_> = s.columns.iter().map(|c| c.name.as_str()).collect();
+        let names: Vec<_> = s.fields.iter().map(|c| c.name.as_str()).collect();
         assert_eq!(names, vec!["job", "sum"]);
     }
 
@@ -2387,9 +2399,9 @@ mod tests {
         ] {
             let output =
                 aggregate_output_schema(&input, &Reduction::PerEntity, &[aggregate], &[]).unwrap();
-            assert_eq!(output.columns[0], input.columns[0]);
-            assert_eq!(output.columns[1].name, "value");
-            assert_eq!(output.columns[1].dtype, DataType::Float64);
+            assert_eq!(output.fields[0], input.fields[0]);
+            assert_eq!(output.fields[1].name, "value");
+            assert_eq!(output.fields[1].dtype, DataType::Float64);
         }
     }
 
@@ -2421,10 +2433,7 @@ mod tests {
         };
         let s = rate.output_schema().unwrap();
         assert_eq!(
-            s.columns
-                .iter()
-                .map(|c| c.name.as_str())
-                .collect::<Vec<_>>(),
+            s.fields.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(),
             vec!["ts", "value", "job"],
             "rate preserves all labels; only the sample value is replaced"
         );
@@ -2460,10 +2469,7 @@ mod tests {
         };
         let s = avg_over_time.output_schema().unwrap();
         assert_eq!(
-            s.columns
-                .iter()
-                .map(|c| c.name.as_str())
-                .collect::<Vec<_>>(),
+            s.fields.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(),
             vec!["ts", "value", "job"],
             "TimeRange-child marks per-series: labels preserved, value renamed"
         );
@@ -2550,8 +2556,8 @@ mod tests {
             child: Rc::new(child),
         };
         let s = q.output_schema().unwrap();
-        assert_eq!(s.columns[0].name, "value");
-        assert_eq!(s.columns[1].name, "ts");
+        assert_eq!(s.fields[0].name, "value");
+        assert_eq!(s.fields[1].name, "ts");
         assert_eq!(s.time_index, Some(1));
     }
 
@@ -2569,9 +2575,9 @@ mod tests {
     #[test]
     fn inner_join_concatenates_both_sides() {
         let s = join(JoinKind::Inner).output_schema().unwrap();
-        assert_eq!(s.columns.len(), 2);
-        assert_eq!(s.columns[0], col("a", DataType::Int64, false));
-        assert_eq!(s.columns[1], col("b", DataType::Utf8, false));
+        assert_eq!(s.fields.len(), 2);
+        assert_eq!(s.fields[0], col("a", DataType::Int64, false));
+        assert_eq!(s.fields[1], col("b", DataType::Utf8, false));
         // post-join row identity not provable → no unique keys
         assert!(s.unique_keys.is_empty());
     }
@@ -2579,15 +2585,15 @@ mod tests {
     #[test]
     fn left_join_makes_right_side_nullable() {
         let s = join(JoinKind::Left).output_schema().unwrap();
-        assert!(!s.columns[0].nullable, "preserved left side stays non-null");
-        assert!(s.columns[1].nullable, "right side nullable under LEFT JOIN");
+        assert!(!s.fields[0].nullable, "preserved left side stays non-null");
+        assert!(s.fields[1].nullable, "right side nullable under LEFT JOIN");
     }
 
     #[test]
     fn full_join_makes_both_sides_nullable() {
         let s = join(JoinKind::Full).output_schema().unwrap();
-        assert!(s.columns[0].nullable);
-        assert!(s.columns[1].nullable);
+        assert!(s.fields[0].nullable);
+        assert!(s.fields[1].nullable);
     }
 
     #[test]
@@ -2615,8 +2621,8 @@ mod tests {
             right: Rc::new(right),
         };
         let s = q.output_schema().unwrap();
-        assert_eq!(s.columns.len(), 2);
-        assert_eq!(s.columns[0].name, "k");
+        assert_eq!(s.fields.len(), 2);
+        assert_eq!(s.fields[0].name, "k");
         assert!(
             s.unique_keys.is_empty(),
             "UNION does not preserve row identity"
@@ -2666,9 +2672,9 @@ mod tests {
     fn row_schema_rides_on_the_bridge_wrapper_not_the_literal_variant() {
         let bridged = QueryExpr::<ColumnId>::promql_scalar(42.0);
         let schema = bridged.output_schema().expect("bridge has a row schema");
-        assert_eq!(schema.columns.len(), 1);
-        assert_eq!(schema.columns[0].name, "value");
-        assert_eq!(schema.columns[0].dtype, DataType::Float64);
+        assert_eq!(schema.fields.len(), 1);
+        assert_eq!(schema.fields[0].name, "value");
+        assert_eq!(schema.fields[0].dtype, DataType::Float64);
         assert!(schema.time_index.is_none());
 
         // The identical value, unwrapped (the scalar-sub-language position a

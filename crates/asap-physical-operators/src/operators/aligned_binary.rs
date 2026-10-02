@@ -7,8 +7,8 @@ impl Operator {
     /// Match every row by the declared identity columns. Unlike an inner join,
     /// incomplete or duplicate keys are errors: dropping an update changes state.
     pub fn aligned_binary(
-        left: Schema,
-        right: Schema,
+        left: SchemaRef,
+        right: SchemaRef,
         keys: Vec<(usize, usize)>,
         values: (usize, usize),
         operator: BinaryOperator,
@@ -22,9 +22,11 @@ impl Operator {
             ));
         }
         for (input, value) in [(&left, values.0), (&right, values.1)] {
-            if input.fields.get(value).is_none_or(|f| {
-                f.nullable || f.dtype != SummaryFamilyType::Plain(DataType::Float64)
-            }) {
+            if input
+                .fields
+                .get(value)
+                .is_none_or(|f| f.nullable || f.dtype != FieldDataType::Plain(DataType::Float64))
+            {
                 return Err(invalid(
                     "aligned arithmetic requires non-null Float64 values",
                 ));

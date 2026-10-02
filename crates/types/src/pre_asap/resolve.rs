@@ -307,7 +307,7 @@ fn resolve(
             let left = resolve_root_with_inherited(left, &[])?;
             let right = resolve_root_with_inherited(right, &[])?;
             let mut concat = left.output_schema()?;
-            concat.columns.extend(right.output_schema()?.columns);
+            concat.fields.extend(right.output_schema()?.fields);
             let pred = Predicate(Rc::new(resolve_expr(&pred.0, &concat)?));
             QE::Join {
                 kind: kind.clone(),
@@ -466,7 +466,7 @@ fn resolve(
 /// value)` floor.
 fn inherited_names(schema: &Schema) -> Vec<String> {
     schema
-        .columns
+        .fields
         .iter()
         .filter(|c| c.name != "ts" && c.name != "value")
         .map(|c| c.name.clone())
@@ -644,7 +644,7 @@ mod tests {
     fn resolve_measure_filters_against_the_child_schema() {
         use crate::pre_asap::expr_ir::ScalarValue;
         use crate::pre_asap::query_expr::Predicate;
-        use crate::pre_asap::{Column, DataType, GroupKeys};
+        use crate::pre_asap::{DataType, Field, GroupKeys};
         use crate::types::AccuracyTarget;
         let scan = || UnresolvedQueryExpr::Scan {
             source: Source::Table {
@@ -652,9 +652,9 @@ mod tests {
             },
             predicates: vec![],
             schema: Some(Schema::new(vec![
-                Column::new("service", DataType::Utf8, false),
-                Column::new("latency", DataType::Float64, false),
-                Column::new("bytes", DataType::Int64, false),
+                Field::plain("service", DataType::Utf8, false),
+                Field::plain("latency", DataType::Float64, false),
+                Field::plain("bytes", DataType::Int64, false),
             ])),
         };
         let aggregate = |filters| UnresolvedQueryExpr::Aggregate {
@@ -703,10 +703,10 @@ mod tests {
     // Both sides resolve with qualifiers; an unknown right input is an error.
     #[test]
     fn resolve_pearson_corr_inputs() {
-        use crate::pre_asap::{Column, DataType};
+        use crate::pre_asap::{DataType, Field};
         let schema = Schema::new(vec![
-            Column::new("x", DataType::Float64, true).with_table("a"),
-            Column::new("x", DataType::Float64, true).with_table("b"),
+            Field::plain("x", DataType::Float64, true).with_table("a"),
+            Field::plain("x", DataType::Float64, true).with_table("b"),
         ]);
         let intent = AggIntent::PearsonCorr {
             left: ColumnRef::Qualified {
@@ -736,11 +736,11 @@ mod tests {
     // fails rather than silently shortening the tuple.
     #[test]
     fn resolve_distinct_tuple_columns() {
-        use crate::pre_asap::{Column, DataType};
+        use crate::pre_asap::{DataType, Field};
         use crate::types::AccuracyTarget;
         let schema = Schema::new(vec![
-            Column::new("k", DataType::Int64, true).with_table("a"),
-            Column::new("k", DataType::Int64, true).with_table("b"),
+            Field::plain("k", DataType::Int64, true).with_table("a"),
+            Field::plain("k", DataType::Int64, true).with_table("b"),
         ]);
         let qualified = |table: &str| ColumnRef::Qualified {
             table: table.into(),

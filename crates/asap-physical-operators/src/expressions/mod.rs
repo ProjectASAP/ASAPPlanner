@@ -1,6 +1,6 @@
 //! Scalar semantics and typed expression binding. Planner expressions enter through CompiledExpression.
 use crate::{
-    values::{plain, Schema, Value},
+    values::{plain, SchemaRef, Value},
     Error,
 };
 use planner_types::pre_asap::{ArithmeticOpKind, DataType};
@@ -56,7 +56,7 @@ impl Expression {
     pub fn planner(expression: crate::expressions::CompiledExpression) -> Self {
         Self::Planner(Box::new(expression))
     }
-    pub(crate) fn dtype(&self, input: &Schema) -> Result<(DataType, bool), Error> {
+    pub(crate) fn dtype(&self, input: &SchemaRef) -> Result<(DataType, bool), Error> {
         use Expression::*;
         match self {
             Binary {

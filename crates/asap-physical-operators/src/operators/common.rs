@@ -2,21 +2,24 @@ use super::*;
 pub(super) fn invalid(message: &str) -> Error {
     Error::Invalid(message.into())
 }
-pub(super) fn schema(fields: Vec<SummaryField>) -> Schema {
-    Arc::new(SummarySchema {
+pub(super) fn schema(fields: Vec<Field>) -> SchemaRef {
+    Arc::new(Schema {
+        closed: true,
+        unique_keys: vec![],
         fields,
         time_index: None,
     })
 }
-pub(super) fn result_field(name: &str, dtype: DataType, nullable: bool) -> SummaryField {
-    SummaryField {
+pub(super) fn result_field(name: &str, dtype: DataType, nullable: bool) -> Field {
+    Field {
+        table: None,
         name: name.into(),
-        dtype: SummaryFamilyType::Plain(dtype),
+        dtype: FieldDataType::Plain(dtype),
         nullable,
     }
 }
 
-pub(super) fn validate_groups(input: &Schema, groups: &[usize]) -> Result<(), Error> {
+pub(super) fn validate_groups(input: &SchemaRef, groups: &[usize]) -> Result<(), Error> {
     for &i in groups {
         plain(input, i)?;
     }
@@ -73,3 +76,4 @@ pub(super) fn key_bytes(key: &[Vec<u8>]) -> usize {
         .map(|part| std::mem::size_of::<Vec<u8>>() + part.len())
         .sum::<usize>()
 }
+use planner_types::pre_asap::Schema;

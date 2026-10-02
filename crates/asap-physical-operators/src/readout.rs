@@ -54,10 +54,10 @@ pub fn exact_readout(
 #[cfg(test)]
 mod counter_tests {
     use super::*;
-    use planner_types::post_asap::{ExactKind, ExactParams, SummaryFamilyType};
+    use planner_types::post_asap::{ExactKind, ExactParams, FieldDataType};
 
     fn counter(kind: ExactKind, params: ExactParams, keyed: bool) -> ExactAccumulator {
-        ExactAccumulator::new(SummaryFamilyType::ExactAggregate(kind, params), keyed).unwrap()
+        ExactAccumulator::new(FieldDataType::ExactAggregate(kind, params), keyed).unwrap()
     }
 
     // A counter population with a single sample is absent, keyed or not.

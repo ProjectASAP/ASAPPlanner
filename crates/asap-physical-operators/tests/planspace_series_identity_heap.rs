@@ -31,7 +31,7 @@ impl AccuracyEvidenceProvider for Evidence {
     fn propagation_stats(
         &self,
         op: &CompositionOperator,
-        _: &SummaryFamilyType,
+        _: &FieldDataType,
         _: Option<&SketchQuery>,
     ) -> PropagationStats {
         if matches!(op, CompositionOperator::TopKSelection) {

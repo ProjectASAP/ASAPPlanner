@@ -5,8 +5,8 @@ use super::*;
 #[serde(deny_unknown_fields)]
 pub(super) struct UncheckedOperator {
     kind: Kind,
-    inputs: Vec<Schema>,
-    output: Schema,
+    inputs: Vec<SchemaRef>,
+    output: SchemaRef,
 }
 impl TryFrom<UncheckedOperator> for Operator {
     type Error = Error;

@@ -6,7 +6,7 @@
 //! DAG (the same resolver the PromQL path uses).
 
 use asap_frontend_sql::{lower_sql, lower_sql_dialect, SqlCatalog, SqlError as LoweringError};
-use asap_types::pre_asap::schema::{Column, DataType, Schema};
+use asap_types::pre_asap::schema::{DataType, Field, FieldDataType, Schema};
 use asap_types::pre_asap::{
     AggIntent, CompareOpKind, GroupKeys, JoinKind, Predicate, QueryExpr, Reduction, ScalarValue,
     Source, WindowFrameBound, WindowFrameOffset, WindowFrameUnits, WindowFuncKind,
@@ -14,8 +14,8 @@ use asap_types::pre_asap::{
 use asap_types::types::AccuracyTarget;
 use asap_types::workload::SqlDialect;
 
-fn col(name: &str, dtype: DataType) -> Column {
-    Column::new(name, dtype, false)
+fn col(name: &str, dtype: DataType) -> Field {
+    Field::plain(name, dtype, false)
 }
 
 /// `metrics(ts, service, latency, bytes)` + `hosts(service, region)`.
@@ -177,7 +177,7 @@ fn reducer_input_names(qe: &QueryExpr) -> (Vec<String>, bool) {
     let names = measures
         .iter()
         .flat_map(|a| a.input_cols())
-        .map(|id| schema.columns[id].name.clone())
+        .map(|id| schema.fields[id].name.clone())
         .collect();
     (names, matches!(**child, QueryExpr::Project { .. }))
 }
@@ -257,14 +257,14 @@ async fn projection_over_aggregate_resolves_output_types_via_output_names() {
     let schema = qe
         .output_schema()
         .expect("root projection schema derivation");
-    assert_eq!(schema.columns.len(), 2);
+    assert_eq!(schema.fields.len(), 2);
     assert_eq!(
-        schema.columns[0].dtype,
+        schema.fields[0].dtype,
         DataType::Int64,
         "SUM(bytes:Int64) resolves to Int64, not the Utf8 fallback"
     );
     assert_eq!(
-        schema.columns[1].dtype,
+        schema.fields[1].dtype,
         DataType::Float64,
         "AVG(latency) resolves to Float64"
     );
@@ -285,13 +285,13 @@ async fn single_agg_group_by_keeps_key_in_output_schema() {
 
     // Both the group key and the aggregate resolve in the root projection schema.
     let schema = qe.output_schema().expect("root projection schema");
-    assert_eq!(schema.columns.len(), 2);
+    assert_eq!(schema.fields.len(), 2);
     assert_eq!(
-        schema.columns[0].dtype,
+        schema.fields[0].dtype,
         DataType::Utf8,
         "service is in the output"
     );
-    assert_eq!(schema.columns[1].dtype, DataType::Int64, "SUM(bytes)");
+    assert_eq!(schema.fields[1].dtype, DataType::Int64, "SUM(bytes)");
 }
 
 #[tokio::test]
@@ -473,7 +473,7 @@ fn join_eq_columns(join: &QueryExpr) -> [usize; 2] {
             cols.sort_unstable();
             cols
         }
-        other => panic!("expected Column = Column, got {other:?}"),
+        other => panic!("expected Field = Field, got {other:?}"),
     }
 }
 
@@ -648,7 +648,7 @@ fn join_parts(qe: &QueryExpr) -> (&JoinKind, &QueryExpr, usize) {
     else {
         unreachable!()
     };
-    let left_len = left.output_schema().expect("left schema").columns.len();
+    let left_len = left.output_schema().expect("left schema").fields.len();
     (kind, pred.0.as_ref(), left_len)
 }
 
@@ -685,7 +685,7 @@ async fn a_semi_join_outputs_only_the_left_schema() {
     let names: Vec<_> = join
         .output_schema()
         .expect("join schema")
-        .columns
+        .fields
         .iter()
         .map(|c| c.name.clone())
         .collect();
@@ -789,9 +789,9 @@ async fn window_function_lowers_to_positional_windowfunc() {
     // and the enclosing projection resolves it (output_name threading).
     let schema = qe.output_schema().expect("root schema");
     assert!(
-        schema.columns.iter().any(|c| c.dtype == DataType::Int64),
+        schema.fields.iter().any(|c| c.dtype == DataType::Int64),
         "row_number output column present, got {:?}",
-        schema.columns
+        schema.fields
     );
 }
 
@@ -999,7 +999,7 @@ async fn derived_table_aggregate_over_aggregate_nests() {
     );
     // The whole nested DAG's output schema derives without error (positional
     // resolution is total across the derived-table boundary).
-    assert_eq!(qe.output_schema().unwrap().columns.len(), 1);
+    assert_eq!(qe.output_schema().unwrap().fields.len(), 1);
 }
 
 #[tokio::test]
@@ -1297,9 +1297,9 @@ async fn time_bucketing_group_by_lowers_to_a_derived_key() {
     let schema = child.output_schema().expect("child schema");
     assert_eq!(reduction, &Reduction::by(vec![0]));
     assert!(
-        schema.columns[0].name.contains("date_trunc"),
+        schema.fields[0].name.contains("date_trunc"),
         "group key should be the projected bucket, got {:?}",
-        schema.columns[0].name
+        schema.fields[0].name
     );
     // The reducer still binds its own column, not the bucket.
     assert!(matches!(
@@ -1363,7 +1363,7 @@ async fn a_shared_expression_is_materialized_once() {
         unreachable!()
     };
     assert_eq!(
-        child.output_schema().expect("child schema").columns.len(),
+        child.output_schema().expect("child schema").fields.len(),
         1,
         "the two reducers should share one derived column"
     );
@@ -1401,7 +1401,7 @@ fn grouping_levels(qe: &QueryExpr) -> Vec<(GroupKeys, Vec<String>)> {
             let names = b
                 .output_schema()
                 .expect("level schema")
-                .columns
+                .fields
                 .iter()
                 .map(|c| c.name.clone())
                 .collect();
@@ -1466,9 +1466,9 @@ async fn omitted_grouping_keys_become_typed_nulls() {
     let schema = merge_branches(&qe)[1]
         .output_schema()
         .expect("level schema");
-    assert_eq!(schema.columns[0].name, "service");
+    assert_eq!(schema.fields[0].name, "service");
     assert_eq!(
-        schema.columns[0].dtype,
+        schema.fields[0].dtype,
         DataType::Utf8,
         "the omitted key must keep its declared type"
     );
@@ -1485,7 +1485,7 @@ async fn grouping_levels_are_union_compatible() {
         .map(|b| {
             b.output_schema()
                 .expect("level schema")
-                .columns
+                .fields
                 .iter()
                 .map(|c| (c.name.clone(), c.dtype.clone()))
                 .collect::<Vec<_>>()
@@ -2071,7 +2071,7 @@ async fn current_timestamp_lowers_to_typed_current_timestamp_leaf() {
     };
     assert!(matches!(&cols[0].expr, QueryExpr::CurrentTimestamp));
     let schema = cols[0].expr.output_schema().expect("timestamp schema");
-    assert_eq!(schema.columns[0].dtype, DataType::Timestamp);
+    assert_eq!(schema.fields[0].dtype, DataType::Timestamp);
 }
 
 // A `count` over a non-null input is a plain row count; over a nullable
@@ -2082,8 +2082,8 @@ async fn count_null_semantics_become_a_measure_filter() {
     let catalog = SqlCatalog::new().with_table(
         "samples",
         Schema::new(vec![
-            Column::new("nullable_value", DataType::Float64, true),
-            Column::new("value", DataType::Float64, false),
+            Field::plain("nullable_value", DataType::Float64, true),
+            Field::plain("value", DataType::Float64, false),
         ]),
     );
     for sql in [
@@ -2164,7 +2164,7 @@ async fn grouped_map_column_preserves_map_type() {
     )
     .await
     .unwrap();
-    assert_eq!(query.output_schema().unwrap().columns[0].dtype, map);
+    assert_eq!(query.output_schema().unwrap().fields[0].dtype, map);
 }
 
 #[tokio::test]
@@ -2172,9 +2172,9 @@ async fn clickhouse_modulo_uses_native_arithmetic_types_and_nullability() {
     let catalog = SqlCatalog::new().with_table(
         "numbers",
         Schema::new(vec![
-            Column::new("i", DataType::Int64, false),
-            Column::new("n", DataType::Int64, true),
-            Column::new("f", DataType::Float64, false),
+            Field::plain("i", DataType::Int64, false),
+            Field::plain("n", DataType::Int64, true),
+            Field::plain("f", DataType::Float64, false),
         ]),
     );
     for (call, native) in [
@@ -2217,8 +2217,8 @@ async fn clickhouse_modulo_uses_native_arithmetic_types_and_nullability() {
     .unwrap()
     .output_schema()
     .unwrap();
-    assert_eq!(nullable.columns[0].dtype, DataType::Int64);
-    assert!(nullable.columns[0].nullable);
+    assert_eq!(nullable.fields[0].dtype, DataType::Int64);
+    assert!(nullable.fields[0].nullable);
 }
 
 #[tokio::test]
@@ -2226,10 +2226,10 @@ async fn original_o11y_map_queries_lower_with_typed_results() {
     let catalog = SqlCatalog::new().with_table(
         "raw_samples",
         Schema::new(vec![
-            Column::new("metric", DataType::Utf8, false),
-            Column::new("ts_ms", DataType::Int64, false),
-            Column::new("value", DataType::Float64, false),
-            Column::new(
+            Field::plain("metric", DataType::Utf8, false),
+            Field::plain("ts_ms", DataType::Int64, false),
+            Field::plain("value", DataType::Float64, false),
+            Field::plain(
                 "labels",
                 DataType::Map {
                     key: Box::new(DataType::Utf8),
@@ -2258,9 +2258,9 @@ async fn original_o11y_map_queries_lower_with_typed_results() {
         let schema = query.output_schema().unwrap();
         assert!(
             schema
-                .columns
+                .fields
                 .iter()
-                .any(|column| matches!(column.dtype, DataType::Map { .. })),
+                .any(|column| matches!(column.dtype, FieldDataType::Plain(DataType::Map { .. }))),
             "{schema:?}"
         );
     }
@@ -2287,7 +2287,7 @@ async fn clickhouse_modulo_preserves_projection_names_and_outer_references() {
         )
         .await
         .unwrap();
-        assert_eq!(query.output_schema().unwrap().columns[0].name, name);
+        assert_eq!(query.output_schema().unwrap().fields[0].name, name);
     }
 }
 
@@ -2296,7 +2296,7 @@ async fn clickhouse_map_access_keeps_generated_names_and_rejects_variant_coercio
     let catalog = SqlCatalog::new().with_table(
         "t",
         Schema::new(vec![
-            Column::new(
+            Field::plain(
                 "labels",
                 DataType::Map {
                     key: Box::new(DataType::Utf8),
@@ -2305,8 +2305,8 @@ async fn clickhouse_map_access_keeps_generated_names_and_rejects_variant_coercio
                 },
                 false,
             ),
-            Column::new("integer", DataType::Int64, false),
-            Column::new("floating", DataType::Float64, false),
+            Field::plain("integer", DataType::Int64, false),
+            Field::plain("floating", DataType::Float64, false),
         ]),
     );
     let query = lower_sql_dialect(
@@ -2318,9 +2318,9 @@ async fn clickhouse_map_access_keeps_generated_names_and_rejects_variant_coercio
     .await
     .unwrap();
     let output = query.output_schema().unwrap();
-    assert_eq!(output.columns[0].name, "arrayElement(labels, 'job')");
-    assert_eq!(output.columns[0].dtype, DataType::Utf8);
-    assert!(!output.columns[0].nullable);
+    assert_eq!(output.fields[0].name, "arrayElement(labels, 'job')");
+    assert_eq!(output.fields[0].dtype, DataType::Utf8);
+    assert!(!output.fields[0].nullable);
     assert!(lower_sql_dialect(
         "SELECT map()['a'] FROM t",
         &catalog,
@@ -2344,9 +2344,9 @@ async fn arg_selector_result_schema_tracks_selected_argument() {
     let catalog = SqlCatalog::new().with_table(
         "t",
         Schema::new(vec![
-            Column::new("v", DataType::Float64, false),
-            Column::new("text", DataType::Utf8, true),
-            Column::new("ts", DataType::Int64, true),
+            Field::plain("v", DataType::Float64, false),
+            Field::plain("text", DataType::Utf8, true),
+            Field::plain("ts", DataType::Int64, true),
         ]),
     );
     for (sql, dtype, nullable) in [
@@ -2370,8 +2370,8 @@ async fn arg_selector_result_schema_tracks_selected_argument() {
         .await
         .unwrap();
         let schema = query.output_schema().unwrap();
-        assert_eq!(schema.columns[0].dtype, dtype);
-        assert_eq!(schema.columns[0].nullable, nullable);
+        assert_eq!(schema.fields[0].dtype, dtype);
+        assert_eq!(schema.fields[0].nullable, nullable);
     }
 }
 
@@ -2380,14 +2380,14 @@ async fn clickhouse_list_element_uses_canonical_typed_access() {
     let catalog = SqlCatalog::new().with_table(
         "t",
         Schema::new(vec![
-            Column::new(
+            Field::plain(
                 "samples",
                 DataType::List {
-                    element: Box::new(Column::new("item", DataType::Int64, false)),
+                    element: Box::new(Field::new("item", DataType::Int64, false)),
                 },
                 false,
             ),
-            Column::new("index", DataType::Int64, true),
+            Field::plain("index", DataType::Int64, true),
         ]),
     );
     for (sql, nullable) in [
@@ -2404,8 +2404,8 @@ async fn clickhouse_list_element_uses_canonical_typed_access() {
         .await
         .unwrap();
         let output = query.output_schema().unwrap();
-        assert_eq!(output.columns[0].dtype, DataType::Int64);
-        assert_eq!(output.columns[0].nullable, nullable);
+        assert_eq!(output.fields[0].dtype, DataType::Int64);
+        assert_eq!(output.fields[0].nullable, nullable);
         let serialized = serde_json::to_string(&query).unwrap();
         assert!(serialized.contains("asap_element_access"), "{serialized}");
     }
@@ -2429,17 +2429,17 @@ async fn clickhouse_tuple_element_preserves_declared_field_metadata() {
     let catalog = SqlCatalog::new().with_table(
         "t",
         Schema::new(vec![
-            Column::new(
+            Field::plain(
                 "sample",
                 DataType::Struct {
                     fields: vec![
-                        Column::new("time", DataType::Int64, false),
-                        Column::new("value", DataType::Float64, true),
+                        Field::new("time", DataType::Int64, false),
+                        Field::new("value", DataType::Float64, true),
                     ],
                 },
                 false,
             ),
-            Column::new("index", DataType::Int64, false),
+            Field::plain("index", DataType::Int64, false),
         ]),
     );
     for (sql, dtype, nullable) in [
@@ -2463,8 +2463,8 @@ async fn clickhouse_tuple_element_preserves_declared_field_metadata() {
         .await
         .unwrap();
         let output = query.output_schema().unwrap();
-        assert_eq!(output.columns[0].dtype, dtype);
-        assert_eq!(output.columns[0].nullable, nullable);
+        assert_eq!(output.fields[0].dtype, dtype);
+        assert_eq!(output.fields[0].nullable, nullable);
         assert!(serde_json::to_string(&query)
             .unwrap()
             .contains("asap_struct_field"));
@@ -2490,9 +2490,9 @@ async fn clickhouse_tuple_element_preserves_declared_field_metadata() {
 async fn corr_result_is_nullable_float() {
     let query = lower("SELECT corr(latency, bytes) AS correlation FROM metrics").await;
     let schema = query.output_schema().unwrap();
-    assert_eq!(schema.columns[0].name, "correlation");
-    assert_eq!(schema.columns[0].dtype, DataType::Float64);
-    assert!(schema.columns[0].nullable);
+    assert_eq!(schema.fields[0].name, "correlation");
+    assert_eq!(schema.fields[0].dtype, DataType::Float64);
+    assert!(schema.fields[0].nullable);
 }
 
 // A multi-column DISTINCT counts tuples; one column stays the single-column
@@ -2502,8 +2502,8 @@ async fn composite_distinct_counts_tuples() {
     let cat = SqlCatalog::new().with_table(
         "t",
         Schema::new(vec![
-            Column::new("a", DataType::Int64, false),
-            Column::new("b", DataType::Int64, false),
+            Field::plain("a", DataType::Int64, false),
+            Field::plain("b", DataType::Int64, false),
         ]),
     );
     let composite = lower_sql(
@@ -2548,8 +2548,8 @@ async fn composite_distinct_rejects_expression_arguments() {
     let cat = SqlCatalog::new().with_table(
         "t",
         Schema::new(vec![
-            Column::new("a", DataType::Int64, false),
-            Column::new("b", DataType::Int64, false),
+            Field::plain("a", DataType::Int64, false),
+            Field::plain("b", DataType::Int64, false),
         ]),
     );
     let error = lower_sql(
@@ -2572,8 +2572,8 @@ async fn distinct_with_derived_sibling() {
     let catalog = SqlCatalog::new().with_table(
         "t",
         Schema::new(vec![
-            Column::new("a", DataType::Int64, false),
-            Column::new("b", DataType::Int64, false),
+            Field::plain("a", DataType::Int64, false),
+            Field::plain("b", DataType::Int64, false),
         ]),
     );
     for sql in [
@@ -2689,7 +2689,7 @@ async fn measure_filter_columns_survive_a_derived_column_projection() {
     let QueryExpr::Column(id) = left.as_ref() else {
         panic!("{left:?}");
     };
-    assert_eq!(child.output_schema().unwrap().columns[*id].name, "latency");
+    assert_eq!(child.output_schema().unwrap().fields[*id].name, "latency");
 }
 
 // `GROUP BY ROLLUP` fans one measure list out into one `Aggregate` per level;

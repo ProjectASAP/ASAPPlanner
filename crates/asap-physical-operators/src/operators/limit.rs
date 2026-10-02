@@ -1,6 +1,6 @@
 use super::*;
 impl Operator {
-    pub fn limit(input: Schema, n: u64, offset: u64, groups: Vec<usize>) -> Result<Self, Error> {
+    pub fn limit(input: SchemaRef, n: u64, offset: u64, groups: Vec<usize>) -> Result<Self, Error> {
         validate_groups(&input, &groups)?;
         Ok(Self {
             kind: Kind::Limit { n, offset, groups },
