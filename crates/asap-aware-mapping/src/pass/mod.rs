@@ -175,6 +175,11 @@ pub struct QueryLifecyclePlan {
 
 /// One plan per workload entry, in `QueryWorkload::entries()` order;
 /// [`check_contract`] enforces that.
+///
+/// Plans are not deduplicated across entries: a summary state that several
+/// queries share appears in each of their plans as the same `Rc` (with the
+/// same lifecycle), so a consumer that deploys or costs the workload must
+/// dedupe deployments by `Rc::ptr_eq` on the summary node.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct PlanOutput {

@@ -21,11 +21,11 @@ use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use asap_types::post_asap::{
-    compile_post_asap_dag_with_node_ids, EvaluationSchedule, ExecutionDataStateError,
-    ExecutionTiming, OutputRepresentation, PostAsapDag, PostAsapDagValidationError, PostAsapNodeId,
-    ResultGuarantee, SummaryExpr, SummaryMaintenanceLifecycle,
-    SummaryMaintenanceLifecycleGuarantee, SummaryMaintenanceMode, SummaryNode,
-    SummaryWindowFramework, ValueOperation,
+    compile_post_asap_dag_with_node_ids, share_common_summary_subtrees, EvaluationSchedule,
+    ExecutionDataStateError, ExecutionTiming, OutputRepresentation, PostAsapDag,
+    PostAsapDagValidationError, PostAsapNodeId, ResultGuarantee, SummaryExpr,
+    SummaryMaintenanceLifecycle, SummaryMaintenanceLifecycleGuarantee, SummaryMaintenanceMode,
+    SummaryNode, SummaryWindowFramework, ValueOperation,
 };
 use asap_types::pre_asap::QueryExpr;
 use asap_types::types::AccuracyTarget;
@@ -723,6 +723,14 @@ fn enumerate_with_profile<'a>(
 /// selection. The candidate space stays compact; only cost overrides are
 /// attached, so shared `Rc` identity and exact-composition commitments remain
 /// the responsibility of `GlobalSelection`.
+///
+/// Summary candidates of different targets whose outermost `SummaryAgg` is
+/// structurally identical (for example p50 and p99 over one KLL) form a class.
+/// When [`shared_state_cost`] can cost that state once against the union of
+/// the targets' entries, each member is offered an equal split of it instead
+/// of its independent cost. If selection then leaves any member of a class on
+/// another choice, that class reverts to independent costs and selection runs
+/// once more.
 pub fn global_selection_with_summary_maintenance_lifecycles<'a, Id>(
     space: &'a PlanSpace<Id>,
     demand: WorkloadDemand<'_>,
@@ -745,6 +753,8 @@ pub fn global_selection_with_summary_maintenance_lifecycles<'a, Id>(
     )?;
     let bindings = space.workload_entries_by_target(workload, root_workload_entries)?;
     let mut costs = CandidateCostOverrides::default();
+    // Finalized summary candidates, as sharing-class members.
+    let mut members = Vec::new();
     for group in space.target_subdag_candidates() {
         let Some(entry_indices) = bindings.get(&Rc::as_ptr(&group.target)) else {
             continue;
@@ -780,11 +790,148 @@ pub fn global_selection_with_summary_maintenance_lifecycles<'a, Id>(
                     if let Some(total) = plan.summary_total_cost {
                         costs.insert(&group.target, candidate, total);
                     }
+                    members.push((group, candidate, Rc::clone(summary)));
                 }
             }
         }
     }
-    Ok(space.global_selection_with_candidate_costs(cost_model, &profiles, horizon, &costs)?)
+
+    // Intern every member once; members whose outermost state (the
+    // `SummaryAgg` every other state of the candidate feeds) interns to the
+    // same node share it. Classes are kept in first-member order.
+    let interned = share_common_summary_subtrees(
+        members
+            .iter()
+            .enumerate()
+            .map(|(index, (_, _, summary))| (index, Rc::clone(summary)))
+            .collect(),
+    );
+    let mut classes: Vec<(Rc<SummaryNode>, Vec<usize>)> = Vec::new();
+    for (index, root) in interned {
+        let states = summary_states(&root);
+        let Some(state) = states
+            .iter()
+            .find(|state| summary_states(state).len() == states.len())
+        else {
+            continue;
+        };
+        if !standalone_populations(&root).is_empty() {
+            continue;
+        }
+        match classes.iter_mut().find(|(s, _)| Rc::ptr_eq(s, state)) {
+            Some((_, class)) => class.push(index),
+            None => classes.push((Rc::clone(state), vec![index])),
+        }
+    }
+    let mut shared = Vec::new();
+    for (state, class) in classes {
+        let mut targets: Vec<&Rc<QueryExpr>> = Vec::new();
+        for &index in &class {
+            let target = &members[index].0.target;
+            if !targets.iter().any(|t| Rc::ptr_eq(t, target)) {
+                targets.push(target);
+            }
+        }
+        if targets.len() < 2 {
+            continue;
+        }
+        let mut entries: Vec<usize> = targets
+            .iter()
+            .flat_map(|target| bindings[&Rc::as_ptr(target)].iter().copied())
+            .collect();
+        entries.sort_unstable();
+        entries.dedup();
+        let Some(cost) = shared_state_cost(
+            &state,
+            WorkloadDemand {
+                workload,
+                data_workload,
+                entry_indices: &entries,
+            },
+            now_ms,
+            horizon,
+            capabilities,
+            cost_model,
+        )?
+        else {
+            continue;
+        };
+        shared.push((class, Cost(cost.0 / targets.len() as f64)));
+    }
+
+    let with_shared = |kept: &[(Vec<usize>, Cost)]| {
+        let mut costs = costs.clone();
+        for (class, split) in kept {
+            for &index in class {
+                let (group, candidate, _) = &members[index];
+                costs.insert(&group.target, candidate, *split);
+            }
+        }
+        costs
+    };
+    let selection = space.global_selection_with_candidate_costs(
+        cost_model,
+        &profiles,
+        horizon,
+        &with_shared(&shared),
+    )?;
+    let before = shared.len();
+    shared.retain(|(class, _)| {
+        class.iter().all(|&index| {
+            let target = &members[index].0.target;
+            let chosen = selection.for_target(target).and_then(|s| s.chosen);
+            class.iter().any(|&other| {
+                Rc::ptr_eq(&members[other].0.target, target)
+                    && chosen.is_some_and(|chosen| std::ptr::eq(chosen, members[other].1))
+            })
+        })
+    });
+    if shared.len() == before {
+        return Ok(selection);
+    }
+    Ok(space.global_selection_with_candidate_costs(
+        cost_model,
+        &profiles,
+        horizon,
+        &with_shared(&shared),
+    )?)
+}
+
+/// Cost of one `SummaryAgg` state maintained once for every entry in
+/// `demand`, or `None` when no lifecycle alternative is selectable for it.
+/// No comparison target is supplied: the state serves several queries.
+pub(crate) fn shared_state_cost(
+    state: &Rc<SummaryNode>,
+    demand: WorkloadDemand<'_>,
+    now_ms: u64,
+    horizon: Option<Horizon>,
+    capabilities: SummaryMaintenanceLifecycleCapabilities,
+    cost_model: &dyn CostModel,
+) -> Result<Option<Cost>, SummaryMaintenanceLifecyclePlanError> {
+    Ok(enumerate_with_profile(
+        Rc::clone(state),
+        demand,
+        now_ms,
+        horizon,
+        capabilities,
+        cost_model,
+        None,
+        None,
+    )?
+    .select_cheapest()
+    .summary_total_cost)
+}
+
+/// Every unique `SummaryAgg` reachable from `root`.
+pub(crate) fn summary_states(root: &Rc<SummaryNode>) -> Vec<Rc<SummaryNode>> {
+    let mut states = Vec::new();
+    collect_states(
+        root,
+        &mut HashSet::new(),
+        &mut states,
+        StateKind::SummaryAgg,
+    );
+    states
 }
 
 /// Assemble a globally selected phase-valid DAG and attach workload-aware
@@ -801,36 +948,59 @@ pub fn assemble_selected_dag_with_summary_maintenance_lifecycles(
     selection
         .assemble_selected_dag(target)?
         .map(|root| {
-            let mut plan = enumerate_with_profile(
+            plan_assembled_dag(
                 root,
+                target,
                 demand,
                 now_ms,
                 horizon,
                 capabilities,
                 cost_model,
-                None,
-                Some(target),
-            )?
-            .select_cheapest();
-            plan.raw_recompute_total_cost = plan
-                .expected_reads
-                .and_then(|reads| cost_model.raw_query_recompute_total_cost(target, reads));
-            if !plan.selected_raw_recompute
-                && plan.raw_recompute_total_cost.is_none_or(|raw| {
-                    plan.summary_total_cost
-                        .is_none_or(|summary| raw.0 <= summary.0)
-                })
-            {
-                plan.root = crate::replacement::keep_pre_asap(target)?;
-                plan.deployments.clear();
-                plan.selected_raw_recompute = true;
-                plan.selected_window_implementation_id = None;
-                plan.summary_total_cost = None;
-                plan.window_accuracy_guarantee = None;
-            }
-            Ok(plan)
+            )
         })
         .transpose()
+}
+
+/// The lifecycle half of
+/// [`assemble_selected_dag_with_summary_maintenance_lifecycles`], for a root
+/// the caller already assembled (and possibly interned across queries).
+pub(crate) fn plan_assembled_dag(
+    root: Rc<SummaryNode>,
+    target: &Rc<QueryExpr>,
+    demand: WorkloadDemand<'_>,
+    now_ms: u64,
+    horizon: Option<Horizon>,
+    capabilities: SummaryMaintenanceLifecycleCapabilities,
+    cost_model: &dyn CostModel,
+) -> Result<SummaryMaintenanceLifecyclePlan, SummaryMaintenanceLifecycleAssemblyError> {
+    let mut plan = enumerate_with_profile(
+        root,
+        demand,
+        now_ms,
+        horizon,
+        capabilities,
+        cost_model,
+        None,
+        Some(target),
+    )?
+    .select_cheapest();
+    plan.raw_recompute_total_cost = plan
+        .expected_reads
+        .and_then(|reads| cost_model.raw_query_recompute_total_cost(target, reads));
+    if !plan.selected_raw_recompute
+        && plan.raw_recompute_total_cost.is_none_or(|raw| {
+            plan.summary_total_cost
+                .is_none_or(|summary| raw.0 <= summary.0)
+        })
+    {
+        plan.root = crate::replacement::keep_pre_asap(target)?;
+        plan.deployments.clear();
+        plan.selected_raw_recompute = true;
+        plan.selected_window_implementation_id = None;
+        plan.summary_total_cost = None;
+        plan.window_accuracy_guarantee = None;
+    }
+    Ok(plan)
 }
 
 fn workload_facts(
@@ -2702,6 +2872,104 @@ mod tests {
             selected_summary_maintenance_lifecycle(&plan.deployments[0]),
             Some(SummaryMaintenanceLifecycle::Shared { .. })
         ));
+    }
+
+    /// A state costs 10 however often it is read. Recomputing p50 raw costs
+    /// 1 and p99 costs 8.
+    struct P50PrefersRaw;
+
+    impl CostModel for P50PrefersRaw {
+        fn rank_candidates(
+            &self,
+            _intent: &AggIntent,
+            candidates: &[SketchAlgorithm],
+        ) -> Vec<SketchAlgorithm> {
+            candidates.to_vec()
+        }
+
+        fn summary_maintenance_lifecycle_cost_inputs(
+            &self,
+            _summary: &SummaryNode,
+        ) -> SummaryMaintenanceLifecycleCostInputs {
+            SummaryMaintenanceLifecycleCostInputs {
+                build_cost: Some(Cost(10.0)),
+                maintenance_cost_per_update: Some(Cost::ZERO),
+                summary_read_cost: Some(Cost::ZERO),
+                retention_cost_rate: Some(CostRate(0.0)),
+                retirement_cost: Some(Cost::ZERO),
+            }
+        }
+
+        fn summary_maintenance_capabilities(
+            &self,
+            summary: &SummaryNode,
+        ) -> SummaryMaintenanceCapabilities {
+            UnitCosts.summary_maintenance_capabilities(summary)
+        }
+
+        fn raw_query_recompute_total_cost(
+            &self,
+            target: &QueryExpr,
+            _expected_reads: f64,
+        ) -> Option<Cost> {
+            match target {
+                QueryExpr::Aggregate { measures, .. } => match measures[..] {
+                    [AggIntent::Quantile { q: 0.5, .. }] => Some(Cost(1.0)),
+                    _ => Some(Cost(8.0)),
+                },
+                _ => None,
+            }
+        }
+    }
+
+    /// p50 and p99 form a sharing class over one state (5 each), but p50's
+    /// raw recompute (1) still wins. The class reverts, so p99 is reselected
+    /// at its independent cost (10) and recomputes raw (8), as it does alone.
+    /// Checked at selection: the assembled plan's own raw comparison would
+    /// recompute p99 raw either way.
+    #[test]
+    fn sharing_class_reverts_when_a_member_selects_elsewhere() {
+        let quantile = |q| {
+            Rc::new(QueryExpr::Aggregate {
+                reduction: Reduction::by(vec![]),
+                measures: vec![AggIntent::Quantile {
+                    col: None,
+                    q,
+                    accuracy: AccuracyTarget::Epsilon(0.1),
+                }],
+                // A shared output name keeps p50 and p99 on one state.
+                output_names: vec!["value".into()],
+                filters: vec![],
+                having: None,
+                child: query_root(),
+            })
+        };
+        let workload = workload(vec![], vec![repeating(), repeating()], at_rest());
+        // Whether each root selected a summary rather than raw recompute.
+        let summaries = |space: &PlanSpace<&str>, entries: &[usize]| {
+            let selection = global_selection_with_summary_maintenance_lifecycles(
+                space,
+                WorkloadDemand::new_with_data(&workload, &at_rest(), entries),
+                1_000,
+                Some(Horizon(10.0)),
+                SummaryMaintenanceLifecycleCapabilities::ALL,
+                &P50PrefersRaw,
+            )
+            .unwrap();
+            space
+                .roots
+                .iter()
+                .map(|(_, target)| selection.for_target(target).unwrap().chosen.is_some())
+                .collect::<Vec<_>>()
+        };
+
+        let space = crate::replacement::search_workload(vec![
+            ("p50", quantile(0.5)),
+            ("p99", quantile(0.99)),
+        ]);
+        let alone = crate::replacement::search_workload(vec![("p99", quantile(0.99))]);
+        assert_eq!(summaries(&space, &[0, 1]), vec![false, false]);
+        assert_eq!(summaries(&alone, &[1]), vec![false]);
     }
 
     #[test]

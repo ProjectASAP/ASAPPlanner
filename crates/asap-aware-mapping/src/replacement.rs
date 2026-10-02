@@ -4256,7 +4256,7 @@ impl<Id: Clone + PartialEq> PlanSpace<Id> {
 }
 
 /// Lifecycle-aware whole-subplan costs keyed by target and candidate identity.
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub(crate) struct CandidateCostOverrides {
     costs: HashMap<(*const QueryExpr, *const ReplacementSubDAG), Cost>,
     raw_costs: HashMap<*const QueryExpr, Cost>,
