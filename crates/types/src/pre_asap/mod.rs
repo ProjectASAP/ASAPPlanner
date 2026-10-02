@@ -8,7 +8,7 @@
 //! - [`schema`] — the per-edge [`Schema`] every node carries.
 //! - [`column_resolution`] — turn a name-based `ColumnRef` into a positional
 //!   `ColumnId` against a [`Schema`] (used by front-end name resolution).
-//! - [`scalar_type_rules`] — type rules of the map scalar functions.
+//! - [`scalar_type_rules`] — shared scalar type and nullability rules.
 
 pub mod agg_intent;
 pub mod column_resolution;

@@ -1,5 +1,5 @@
-//! Shared type rules for structural map scalar expressions.
-//! Execution must separately implement the documented ordering/default semantics.
+//! Shared type and nullability rules used to validate scalar expressions.
+//! These rules do not evaluate expressions or define physical representations.
 use super::schema::DataType;
 
 /// Names are resolved once against this closed builtin set; unknown functions

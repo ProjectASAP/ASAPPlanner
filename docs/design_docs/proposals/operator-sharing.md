@@ -405,18 +405,18 @@ enum OperatorResultKind {
 }
 
 impl Operator {
-    fn output_schema(&self) -> Result<Schema, QueryExprError>;
-    fn output_kind(&self) -> Result<OperatorResultKind, QueryExprError>;
-    fn validate_inputs(&self) -> Result<(), QueryExprError>;
+    fn output_schema(&self) -> Result<Schema, SchemaDerivationError>;
+    fn output_kind(&self) -> Result<OperatorResultKind, SchemaDerivationError>;
+    fn validate_inputs(&self) -> Result<(), SchemaDerivationError>;
 }
 
 impl OperatorNode {
-    fn validate_structure(&self) -> Result<(), QueryExprError>;
-    fn validate_execution_timing(&self) -> Result<(), QueryExprError>;
+    fn validate_structure(&self) -> Result<(), SchemaDerivationError>;
+    fn validate_execution_timing(&self) -> Result<(), SchemaDerivationError>;
 }
 
 impl ScalarExpr {
-    fn scalar_type(&self, input: &Schema) -> Result<(DataType, bool), QueryExprError>;
+    fn scalar_type(&self, input: &Schema) -> Result<(DataType, bool), SchemaDerivationError>;
 }
 ```
 
@@ -500,7 +500,7 @@ both input schemas for a join predicate, or aggregate outputs for `HAVING`.
 Explicit subquery/conversion expressions validate their referenced producer using
 the contracts above. Numeric expressions cannot consume state columns as numbers.
 A standalone scalar expression is checked with an empty column scope and needs no fabricated
-relation output schema. `QueryExprError` retains the existing error-type name;
+relation output schema. `SchemaDerivationError` retains the existing error-type name;
 result-kind, state-family, schema and execution-phase mismatches require
 corresponding validation errors.
 
