@@ -3,9 +3,9 @@
 //! under "Key concepts (not yet implemented)", implemented for real (issue
 //! #251, part of #33).
 //!
-//! ## One step, not two: `SketchAlgorithmStrategy::replacements()` decides *and* builds
+//! ## One step, not two: `ASAPStrategies::replacements()` decides *and* builds
 //!
-//! For a bindable `Aggregate`, `SketchAlgorithmStrategy::replacements()` is the
+//! For a bindable `Aggregate`, `ASAPStrategies::replacements()` is the
 //! single place this crate both decides what an `AggIntent` may become and
 //! turns each of those candidates into a real, executable
 //! [`ReplacementSubDAG`]:
@@ -72,7 +72,7 @@
 //!
 //! ## The two strategies, and why these two
 //!
-//! - [`SketchAlgorithmStrategy`] wraps [`realizations_for_intent`]'s exhaustive,
+//! - [`ASAPStrategies`] wraps [`realizations_for_intent`]'s exhaustive,
 //!   ranked list directly: for the same bindable-`Aggregate` shape this crate
 //!   binds (single intent, no `HAVING`), every entry becomes its own bound
 //!   candidate.
@@ -98,7 +98,7 @@
 //!   unchanged.** Same inputs still produce the same exhaustive, ranked
 //!   list — only its home moved (from a separate `implementation` module
 //!   into this one) and its own visibility dropped to module-private, since
-//!   [`SketchAlgorithmStrategy`] is now its only caller.
+//!   [`ASAPStrategies`] is now its only caller.
 //!
 //! ## Workload-wide search — merged in from the former `search.rs` (issue #252, part of #33)
 //!
@@ -212,7 +212,7 @@
 //! an alternative *for* the target just processed, not a new target of its
 //! own; see [`discover_new_descendant_targets`]) are scanned for pointers
 //! not already known, and any found become next round's frontier. Both shipped
-//! strategies are idempotent in exactly this sense: [`SketchAlgorithmStrategy`]
+//! strategies are idempotent in exactly this sense: [`ASAPStrategies`]
 //! produces terminal bound-summary [`Replacement::SubDag`] candidates (no
 //! logical-rewrite children to scan at all), and [`SharedSubDagStrategy`]'s
 //! two logical-rewrite [`Replacement::SubDag`] candidates both reuse the target's own
@@ -248,7 +248,7 @@
 //!   share-vs-recompute pair is ranked by calling
 //!   [`CostModel::cse_share_decision`] via this module's own
 //!   [`cse_preference`] — rather than re-deriving a competing comparison.
-//! - A group whose candidates are [`SketchAlgorithmStrategy`]'s sketch-family
+//! - A group whose candidates are [`ASAPStrategies`]'s sketch-family
 //!   candidates is ranked via [`CostModel::rank_candidates`] (the same hook
 //!   `realizations_for_intent` itself consults), applied to the
 //!   candidates' own [`SketchAlgorithm`]s.
@@ -317,8 +317,8 @@
 //! documented follow-up rather than silently overclaimed:
 //!
 //! - [`CostModel::rank_candidates`]/[`CostModel::size_params`] — the hooks
-//!   [`SketchAlgorithmStrategy`] groups rank by — take no `consumer_count`
-//!   parameter at all today, so a `SketchAlgorithmStrategy` group's selection
+//!   [`ASAPStrategies`] groups rank by — take no `consumer_count`
+//!   parameter at all today, so a `ASAPStrategies` group's selection
 //!   here still falls back to [`rank_group`]'s ordinary (consumer-count-
 //!   blind) local ranking, even though its own
 //!   [`TargetSubDAGSelection::effective_consumer_count`] is computed and exposed
@@ -406,7 +406,7 @@ pub enum RealizationError {
     /// The candidate is accuracy-illegal (issue #172): its composed
     /// guarantee has no sound propagation rule, or misses the applicable
     /// `AccuracyTarget`. Fail-closed — the candidate is never constructed
-    /// with the child "treated as exact". [`SketchAlgorithmStrategy::propose`]
+    /// with the child "treated as exact". [`ASAPStrategies::propose`]
     /// records it as a [`RejectedCandidate`] instead of a candidate.
     #[error("accuracy-illegal candidate: {0}")]
     Accuracy(#[from] AccuracyError),
@@ -441,12 +441,12 @@ pub enum RealizationError {
 /// [`search_workload_with`] computes the workload-wide value during target
 /// discovery. [`TargetSubDAG::new`] defaults it to `1` for callers invoking a
 /// strategy against one node in isolation. A strategy that only cares about
-/// `root`'s shape (for example, [`SketchAlgorithmStrategy`]) can ignore the
+/// `root`'s shape (for example, [`ASAPStrategies`]) can ignore the
 /// count; [`SharedSubDagStrategy`] consults it directly.
 ///
 /// `strictest_sibling_accuracy` is the strictest accuracy among workload
 /// siblings that read the same summary input as `root`, when stricter than
-/// `root`'s own. [`search_workload_with`] sets it; [`SketchAlgorithmStrategy`]
+/// `root`'s own. [`search_workload_with`] sets it; [`ASAPStrategies`]
 /// also sizes a candidate to it.
 #[derive(Debug, Clone, Copy)]
 pub struct TargetSubDAG<'a> {
@@ -632,7 +632,7 @@ pub struct Proposals {
 /// of this trait or any existing strategy required.
 ///
 /// `replacements` is only meaningful when `matches` would return `true` for
-/// the same target; both [`SketchAlgorithmStrategy`] and [`SharedSubDagStrategy`]
+/// the same target; both [`ASAPStrategies`] and [`SharedSubDagStrategy`]
 /// return an empty `Vec` rather than panicking when called on a target they
 /// don't match, so a caller that skips the `matches` check first still gets a
 /// safe (merely uninformative) answer instead of a crash.
@@ -691,7 +691,7 @@ pub trait ReplacementStrategy {
 /// [`realizations_for_intent`] is where every valid realization gets
 /// enumerated, exhaustive and ranked (most-preferred first) — this crate has
 /// no separate function that computes just "the one" `Realization`
-/// independently of that list. [`SketchAlgorithmStrategy`] is the sole
+/// independently of that list. [`ASAPStrategies`] is the sole
 /// consumer: it wraps every entry of this list into its own bound
 /// [`OperatorNode`] and returns all of them, ranked — a caller wanting a
 /// single answer keeps the first one itself (see the module docs above).
@@ -844,7 +844,7 @@ pub fn accuracy_target(intent: &AggIntent) -> Option<&AccuracyTarget> {
 /// (most-preferred first via `cost_model`) — the *only* place this crate
 /// decides what an `AggIntent` may become. Nothing in this crate computes
 /// "the one" `Realization` independently of this list:
-/// [`SketchAlgorithmStrategy`] keeps every entry as a candidate, and a caller
+/// [`ASAPStrategies`] keeps every entry as a candidate, and a caller
 /// that wants a single executable answer takes the head of *that* strategy's
 /// output itself.
 ///
@@ -852,7 +852,7 @@ pub fn accuracy_target(intent: &AggIntent) -> Option<&AccuracyTarget> {
 /// explicit realization is a compile error, and the coverage-matrix test pins
 /// each variant's category.
 ///
-/// `pub(crate)`: [`SketchAlgorithmStrategy::replacements`] is this module's
+/// `pub(crate)`: [`ASAPStrategies::replacements`] is this module's
 /// own caller; `grouping::HydraGroupingStrategy` (issue #256) is the one
 /// caller outside it, needing the exact same already-ranked candidate list
 /// to find the `Realization::Sketch` matching the Hydra-eligible kind it
@@ -1207,9 +1207,9 @@ pub fn posterior_aware_size_params(
     }
 }
 
-// ── SketchAlgorithmStrategy ─────────────────────────────────────────────────
+// ── ASAPStrategies ─────────────────────────────────────────────────
 
-/// A single static instance so [`SketchAlgorithmStrategy::default_cost_model`]
+/// A single static instance so [`ASAPStrategies::default_cost_model`]
 /// can hand out a `&'static dyn CostModel` without heap-allocating one —
 /// `DefaultCostModel` is a unit struct with no state, so one instance serves
 /// every caller.
@@ -1244,13 +1244,16 @@ impl<'a> CandidatePlanningInputs<'a> {
     }
 }
 
-/// Wraps [`realizations_for_intent`]'s exhaustive, ranked list directly: for
-/// a bindable `Aggregate`, every valid candidate summary realization as its
-/// own [`ReplacementSubDAG`].
+/// Proposes the supported ASAP realizations for a bindable aggregate, including
+/// exact accumulators, approximate sketches, and supported maintained populations.
+/// Each valid realization becomes its own [`ReplacementSubDAG`].
+///
+/// [`realizations_for_intent`] enumerates summary families; extension hooks can
+/// supply additional supported families. This is not limited to sketch algorithms.
 ///
 /// Ranked (only to *order the enumeration*, never to drop a candidate) via a
 /// [`CostModel`] — [`DefaultCostModel`] unless constructed with
-/// [`SketchAlgorithmStrategy::new`] — so a deployment-specific cost model's
+/// [`ASAPStrategies::new`] — so a deployment-specific cost model's
 /// other hooks (`size_params`, `realize_extension`, `evaluation_extension`) are
 /// still consulted while binding each candidate.
 ///
@@ -1262,11 +1265,11 @@ impl<'a> CandidatePlanningInputs<'a> {
 /// [`ReplacementStrategy::propose`] as a [`RejectedCandidate`]. See
 /// [`crate::accuracy`]'s module docs for the rules and the precedence
 /// between root and per-node targets.
-pub struct SketchAlgorithmStrategy<'a> {
+pub struct ASAPStrategies<'a> {
     planning_inputs: CandidatePlanningInputs<'a>,
 }
 
-impl SketchAlgorithmStrategy<'static> {
+impl ASAPStrategies<'static> {
     /// A strategy that ranks/binds via the built-in [`DefaultCostModel`] —
     /// what a deployment gets with no custom cost model plugged in.
     pub fn default_cost_model() -> Self {
@@ -1276,7 +1279,7 @@ impl SketchAlgorithmStrategy<'static> {
     }
 }
 
-impl<'a> SketchAlgorithmStrategy<'a> {
+impl<'a> ASAPStrategies<'a> {
     /// A strategy that ranks/binds via `cost_model` instead of the built-in
     /// static preference order — the same customization point
     /// [`realizations_for_intent`] already offers. Accuracy legality stays
@@ -1489,7 +1492,7 @@ impl<'a> SketchAlgorithmStrategy<'a> {
                     if node.contains_asap() {
                         proposals.candidates.push(ReplacementSubDAG {
                             replacement: Replacement::SubDag(node),
-                            strategy: "SketchAlgorithmStrategy",
+                            strategy: "ASAPStrategies",
                             provenance: ReplacementProvenance::SummaryRealization,
                             rationale: "realize a schema-preserving composition of temporal and grouped accumulators".into(),
                         });
@@ -1500,7 +1503,7 @@ impl<'a> SketchAlgorithmStrategy<'a> {
         if let Ok(Some(node)) = exact_topk_over_temporal_values(root, self.planning_inputs) {
             proposals.candidates.push(ReplacementSubDAG {
                 replacement: Replacement::SubDag(node),
-                strategy: "SketchAlgorithmStrategy",
+                strategy: "ASAPStrategies",
                 provenance: ReplacementProvenance::SummaryRealization,
                 rationale: "select exact Top-K from independently maintained temporal values"
                     .into(),
@@ -1510,7 +1513,7 @@ impl<'a> SketchAlgorithmStrategy<'a> {
             if let Ok(Some(node)) = realize_temporal_average(root, self.planning_inputs, None) {
                 proposals.candidates.push(ReplacementSubDAG {
                     replacement: Replacement::SubDag(node),
-                    strategy: "SketchAlgorithmStrategy",
+                    strategy: "ASAPStrategies",
                     provenance: ReplacementProvenance::SummaryRealization,
                     rationale: "read temporal average from sum/count only within the finite arithmetic domain; otherwise execute the original average".into(),
                 });
@@ -1525,7 +1528,7 @@ impl<'a> SketchAlgorithmStrategy<'a> {
                 };
                 proposals.candidates.push(ReplacementSubDAG {
                     replacement: Replacement::SubDag(node),
-                    strategy: "SketchAlgorithmStrategy",
+                    strategy: "ASAPStrategies",
                     provenance: ReplacementProvenance::SummaryRealization,
                     rationale: rationale.into(),
                 });
@@ -1633,7 +1636,7 @@ impl<'a> SketchAlgorithmStrategy<'a> {
             let allocations = planning_inputs.allocator.allocations(target, &shape);
             if allocations.is_empty() {
                 proposals.rejected.push(RejectedCandidate {
-                    strategy: "SketchAlgorithmStrategy",
+                    strategy: "ASAPStrategies",
                     description: rationale.clone(),
                     error: AccuracyError::NoLegalAllocation {
                         target: target.clone(),
@@ -1689,7 +1692,7 @@ impl<'a> SketchAlgorithmStrategy<'a> {
             if let Some(error) = &proposals.domain_error {
                 if let Ok(node) = retain_exact(root) {
                     proposals.candidates.push(ReplacementSubDAG {
-                        strategy: "SketchAlgorithmStrategy",
+                        strategy: "ASAPStrategies",
                         replacement: Replacement::SubDag(node),
                         provenance: ReplacementProvenance::SummaryRealization,
                         rationale: format!(
@@ -1712,13 +1715,13 @@ impl Proposals {
     fn record(&mut self, rationale: String, built: Result<Rc<OperatorNode>, RealizationError>) {
         match built {
             Ok(node) => self.candidates.push(ReplacementSubDAG {
-                strategy: "SketchAlgorithmStrategy",
+                strategy: "ASAPStrategies",
                 replacement: Replacement::SubDag(node),
                 provenance: ReplacementProvenance::SummaryRealization,
                 rationale,
             }),
             Err(RealizationError::Accuracy(error)) => self.rejected.push(RejectedCandidate {
-                strategy: "SketchAlgorithmStrategy",
+                strategy: "ASAPStrategies",
                 description: rationale,
                 error,
             }),
@@ -1742,7 +1745,7 @@ fn aggregate_child(node: &OperatorNode) -> Option<&Rc<OperatorNode>> {
     }
 }
 
-impl ReplacementStrategy for SketchAlgorithmStrategy<'_> {
+impl ReplacementStrategy for ASAPStrategies<'_> {
     fn matches(&self, target: &TargetSubDAG<'_>) -> bool {
         bindable_intent(target.root).is_some() || is_supported_exact_binary(target.root)
     }
@@ -1854,7 +1857,7 @@ pub(crate) fn describe_intent(intent: &AggIntent) -> String {
 // ── realize_child / retain_exact: rank-and-take-first, and its fallback ──
 
 /// Rank-and-take-first selector for a single [`OperatorNode`]: enumerate
-/// every candidate via [`SketchAlgorithmStrategy::replacements`], keep the
+/// every candidate via [`ASAPStrategies::replacements`], keep the
 /// `cost_model`-preferred (first) one, and fall back to [`retain_exact`]
 /// when there's no candidate at all — **not** a general single-answer API
 /// for a whole workload. Use [`CandidateLogicalASAPDAGs::global_selection`] and DAG assembly
@@ -1872,7 +1875,7 @@ pub(crate) fn describe_intent(intent: &AggIntent) -> String {
 /// [`crate::cost_model::DefaultCostModel::estimate_cost`] (the same
 /// representative-node need, for a [`Replacement::Rewrite`] candidate's own
 /// cost estimate). Every other caller goes through
-/// [`SketchAlgorithmStrategy::replacements`] directly and decides for itself.
+/// [`ASAPStrategies::replacements`] directly and decides for itself.
 pub(crate) fn realize_child(
     root: &Rc<OperatorNode>,
     cost_model: &dyn CostModel,
@@ -2011,7 +2014,7 @@ pub(crate) fn realize_child_with(
             Some(_) => Some(override_accuracy(declared, target)),
         }
     });
-    match SketchAlgorithmStrategy::from_planning_inputs(planning_inputs)
+    match ASAPStrategies::from_planning_inputs(planning_inputs)
         .propose_with(root, overridden.as_ref(), None)
         .candidates
         .into_iter()
@@ -2025,13 +2028,13 @@ pub(crate) fn realize_child_with(
             replacement: Replacement::ExactComposition(_),
             ..
         }) => {
-            unreachable!("SketchAlgorithmStrategy never returns a composition candidate")
+            unreachable!("ASAPStrategies never returns a composition candidate")
         }
         // No candidate at all: `root` isn't `bindable_intent` shape (or its
         // intent has no realization `realizations_for_intent` can't
         // produce — never happens, that match is exhaustive), or every
         // candidate was accuracy-illegal — either way the same conservative
-        // fallback `SketchAlgorithmStrategy::matches` uses: keep the
+        // fallback `ASAPStrategies::matches` uses: keep the
         // pre-ASAP sub-DAG, executed exactly.
         None => retain_exact(root),
     }
@@ -2481,7 +2484,7 @@ fn override_accuracy(intent: &AggIntent, target: &AccuracyTarget) -> AggIntent {
 /// with `guarantee = exact("RetainedExact")` — only for a sub-DAG with no
 /// ASAP operator (a sub-DAG containing one keeps whatever its construction
 /// established). `pub` so a caller can fall back to this explicitly — e.g.
-/// when `SketchAlgorithmStrategy::replacements()` returns no candidate for a
+/// when `ASAPStrategies::replacements()` returns no candidate for a
 /// target, or a deployment wants to force a node its own runtime can't
 /// actually implement — through the same fallback this crate's own dispatch
 /// uses.
@@ -2532,7 +2535,7 @@ fn retain_exact_rc(expr: Rc<OperatorNode>) -> Result<Rc<OperatorNode>, Realizati
 
 // ── Construction: turn one already-decided Realization into an OperatorNode ─
 
-/// The bindable shape [`SketchAlgorithmStrategy`] targets: a single intent, no
+/// The bindable shape [`ASAPStrategies`] targets: a single intent, no
 /// `HAVING`. A multi-intent node (SQL `SELECT SUM(a), AVG(b)`), or one with a
 /// `HAVING` predicate (the filter would need the estimate first), stays
 /// logical. Unsupported logical parents are conservatively kept as pre-ASAP
@@ -2565,7 +2568,7 @@ pub fn bindable_intent(node: &OperatorNode) -> Option<&AggIntent> {
 ///
 /// `pub(crate)`: `grouping::HydraGroupingStrategy` (issue #256) is the one
 /// caller outside this module — the same first-class,
-/// one-candidate-at-a-time primitive [`SketchAlgorithmStrategy`] itself
+/// one-candidate-at-a-time primitive [`ASAPStrategies`] itself
 /// calls once per candidate, reused rather than duplicated so a Hydra
 /// candidate gets exactly the same schema derivation/column
 /// resolution/evaluation construction as every other candidate, patching only
@@ -3941,7 +3944,7 @@ impl ReplacementStrategy for SharedSubDagStrategy {
 /// A generous, documented backstop against a hypothetically ill-behaved
 /// future [`ReplacementStrategy`] (see the module docs' "Termination"
 /// section) — not a bound either shipped strategy could ever approach.
-/// [`SketchAlgorithmStrategy`] and [`SharedSubDagStrategy`] both converge in
+/// [`ASAPStrategies`] and [`SharedSubDagStrategy`] both converge in
 /// exactly 2 passes over a fixed target set, regardless of workload size.
 pub const MAX_SEARCH_ITERATIONS: usize = 1_000;
 
@@ -4983,7 +4986,7 @@ fn rank_group<'a>(
         return ranked;
     }
 
-    // Shape 3: `SketchAlgorithmStrategy`'s sketch-family candidates (every
+    // Shape 3: `ASAPStrategies`'s sketch-family candidates (every
     // candidate is a `Summary` that realizes a `SketchAlgorithm`) — rank via
     // `CostModel::rank_candidates`, the same hook `realizations_for_intent`
     // itself consults.
@@ -5060,7 +5063,7 @@ fn cse_preference(group: &TargetSubDAGCandidates, cost_model: &dyn CostModel) ->
 /// [`cse_preference`] only needs one representative bound [`OperatorNode`]
 /// for `target` (to build a [`CseCandidate`] for
 /// [`CostModel::cse_share_decision`]), not the full ranked candidate list
-/// [`SketchAlgorithmStrategy::replacements`] returns — so this just reuses
+/// [`ASAPStrategies::replacements`] returns — so this just reuses
 /// [`realize_child`], the same rank-and-take-first helper
 /// `construct_summary_agg`'s own recursion and
 /// [`crate::cost_model::DefaultCostModel::estimate_cost`] already use,
@@ -6387,13 +6390,13 @@ fn topological_order(
 /// the target itself) exactly like [`SharedSubDagStrategy`], so it belongs
 /// in this list rather than being derived per-workload the way
 /// [`RollupStrategy`] is. Rewriting `avg` into `sum`/`count` upfront is what
-/// lets [`SketchAlgorithmStrategy`] and [`SharedSubDagStrategy`] see a
+/// lets [`ASAPStrategies`] and [`SharedSubDagStrategy`] see a
 /// mergeable accumulator to sketch or share at all — see that module's own
 /// doc comment for why a bare `avg` node otherwise never becomes a
 /// [`ReplacementStrategy`] target for anything.
 pub fn default_strategies() -> Vec<Box<dyn ReplacementStrategy>> {
     vec![
-        Box::new(SketchAlgorithmStrategy::default_cost_model()),
+        Box::new(ASAPStrategies::default_cost_model()),
         Box::new(HydraGroupingStrategy::default_cost_model()),
         Box::new(SharedSubDagStrategy),
         Box::new(crate::rewrite::AvgToSumOverCountStrategy),
@@ -6401,14 +6404,14 @@ pub fn default_strategies() -> Vec<Box<dyn ReplacementStrategy>> {
     ]
 }
 
-/// Like [`default_strategies`], but [`SketchAlgorithmStrategy`] ranks/binds via
+/// Like [`default_strategies`], but [`ASAPStrategies`] ranks/binds via
 /// `cost_model` instead of the built-in [`DefaultCostModel`] — the same
-/// customization point [`SketchAlgorithmStrategy::new`] itself offers.
+/// customization point [`ASAPStrategies::new`] itself offers.
 pub fn default_strategies_with<'a>(
     cost_model: &'a dyn CostModel,
 ) -> Vec<Box<dyn ReplacementStrategy + 'a>> {
     vec![
-        Box::new(SketchAlgorithmStrategy::new(cost_model)),
+        Box::new(ASAPStrategies::new(cost_model)),
         Box::new(HydraGroupingStrategy::new(cost_model)),
         Box::new(SharedSubDagStrategy),
         Box::new(crate::rewrite::SemanticEquivalentRewriteStrategy),
@@ -6418,21 +6421,19 @@ pub fn default_strategies_with<'a>(
 
 /// Default context-free strategies with both deployment costing and typed
 /// planning-time accuracy evidence. This is the production counterpart of
-/// constructing [`SketchAlgorithmStrategy::new_with_planning_inputs_and_evidence`] and
+/// constructing [`ASAPStrategies::new_with_planning_inputs_and_evidence`] and
 /// [`HydraGroupingStrategy::new_with_planning_inputs_and_evidence`] separately.
 pub fn default_strategies_with_evidence<'a>(
     cost_model: &'a dyn CostModel,
     evidence: &'a dyn AccuracyEvidenceProvider,
 ) -> Vec<Box<dyn ReplacementStrategy + 'a>> {
     vec![
-        Box::new(
-            SketchAlgorithmStrategy::new_with_planning_inputs_and_evidence(
-                cost_model,
-                &DEFAULT_ACCURACY_MODEL,
-                &DEFAULT_ALLOCATOR,
-                evidence,
-            ),
-        ),
+        Box::new(ASAPStrategies::new_with_planning_inputs_and_evidence(
+            cost_model,
+            &DEFAULT_ACCURACY_MODEL,
+            &DEFAULT_ALLOCATOR,
+            evidence,
+        )),
         Box::new(
             HydraGroupingStrategy::new_with_planning_inputs_and_evidence(
                 cost_model,
@@ -6452,7 +6453,7 @@ pub fn default_strategies_with_evidence<'a>(
 /// Search a whole workload's pre-ASAP roots for every candidate replacement
 /// [`default_strategies`] can find, deduped into a [`CandidateLogicalASAPDAGs`]. Candidate
 /// *generation* uses the built-in [`DefaultCostModel`] (via
-/// [`default_strategies`], the same way [`SketchAlgorithmStrategy::default_cost_model`]
+/// [`default_strategies`], the same way [`ASAPStrategies::default_cost_model`]
 /// does); call [`CandidateLogicalASAPDAGs::cost_sorted`] on the result for the final
 /// `sorted_by(cost_model)` step. Use [`search_workload_with`] to plug in a
 /// custom strategy set (e.g. built via [`default_strategies_with`] for a
@@ -6477,7 +6478,7 @@ pub fn search_workload<Id>(roots: Vec<(Id, Rc<OperatorNode>)>) -> CandidateLogic
 /// section). Deduping candidate plans this way needs no
 /// [`CostModel`] at all — that only enters at two well-defined points: each
 /// [`ReplacementStrategy`] in `strategies` may already carry its own (e.g.
-/// [`SketchAlgorithmStrategy::new`]'s), and [`CandidateLogicalASAPDAGs::cost_sorted`]'s final
+/// [`ASAPStrategies::new`]'s), and [`CandidateLogicalASAPDAGs::cost_sorted`]'s final
 /// ranking step takes one explicitly.
 pub fn search_workload_with<'s, Id>(
     roots: Vec<(Id, Rc<OperatorNode>)>,
@@ -6742,7 +6743,7 @@ fn search_cse_workload_with<'s, Id>(
             "search_workload: fixpoint search did not converge within {MAX_SEARCH_ITERATIONS} \
              rounds — a registered ReplacementStrategy's Replacement::Rewrite candidates keep \
              exposing new, never-before-seen descendant structure every round. \
-             SketchAlgorithmStrategy/SharedSubDagStrategy never do this (see replacement.rs's \
+             ASAPStrategies/SharedSubDagStrategy never do this (see replacement.rs's \
              module docs' \"Termination\" section); check any custom strategies passed to \
              search_workload_with.",
         );
@@ -7085,7 +7086,7 @@ mod tests {
             let space = search_workload(vec![(0usize, root.clone())]);
             let inventory = space.enumerate_candidate_dags(4096).unwrap();
             assert!(!inventory.candidates.is_empty());
-            let strategy = SketchAlgorithmStrategy::new(&DefaultCostModel);
+            let strategy = ASAPStrategies::new(&DefaultCostModel);
             for candidate in strategy.propose(&TargetSubDAG::new(&root)).candidates {
                 if let Replacement::SubDag(node) = candidate.replacement {
                     let output = finalize_query_candidate(node, &root).unwrap();
@@ -7231,7 +7232,7 @@ mod tests {
     fn temporal_average_requires_finite_division_guard() {
         let root = lower_promql("avg_over_time(a[5m])", AccuracyTarget::Exact);
         let candidates =
-            SketchAlgorithmStrategy::default_cost_model().replacements(&TargetSubDAG::new(&root));
+            ASAPStrategies::default_cost_model().replacements(&TargetSubDAG::new(&root));
         let operator = candidates
             .iter()
             .find_map(|c| match &c.replacement {
@@ -8000,20 +8001,20 @@ mod tests {
         );
     }
 
-    // ── SketchAlgorithmStrategy / SharedSubDagStrategy fixtures ───────────
+    // ── ASAPStrategies / SharedSubDagStrategy fixtures ───────────
 
-    // ── SketchAlgorithmStrategy ─────────────────────────────────────────────
+    // ── ASAPStrategies ─────────────────────────────────────────────
 
     #[test]
     fn matches_a_bindable_aggregate() {
         let q = agg(vec![2], default_quantile(0.99), metric_scan(&["job"]));
         let target = TargetSubDAG::new(&q);
-        assert!(SketchAlgorithmStrategy::default_cost_model().matches(&target));
+        assert!(ASAPStrategies::default_cost_model().matches(&target));
     }
 
     #[test]
     fn does_not_match_a_multi_intent_or_having_aggregate() {
-        let strategy = SketchAlgorithmStrategy::default_cost_model();
+        let strategy = ASAPStrategies::default_cost_model();
 
         let multi = OperatorNode::non_asap_node(NonASAPOp::Aggregate {
             reduction: ReductionTy::by(vec![2]),
@@ -8046,8 +8047,8 @@ mod tests {
     fn does_not_match_a_non_aggregate_node() {
         let scan = metric_scan(&["job"]);
         let target = TargetSubDAG::new(&scan);
-        assert!(!SketchAlgorithmStrategy::default_cost_model().matches(&target));
-        assert!(SketchAlgorithmStrategy::default_cost_model()
+        assert!(!ASAPStrategies::default_cost_model().matches(&target));
+        assert!(ASAPStrategies::default_cost_model()
             .replacements(&target)
             .is_empty());
     }
@@ -8059,7 +8060,7 @@ mod tests {
         // not just Kll (the CostModel-ranked head realizations_for_intent commits to).
         let q = agg(vec![2], default_quantile(0.99), metric_scan(&["job"]));
         let target = TargetSubDAG::new(&q);
-        let replacements = SketchAlgorithmStrategy::default_cost_model().replacements(&target);
+        let replacements = ASAPStrategies::default_cost_model().replacements(&target);
         assert_eq!(
             replacements.len(),
             2,
@@ -8087,7 +8088,7 @@ mod tests {
     fn cardinality_epsilon_delta_keeps_unknown_accuracy_candidates() {
         let q = agg(vec![2], default_cardinality(), metric_scan(&["job"]));
         let target = TargetSubDAG::new(&q);
-        let replacements = SketchAlgorithmStrategy::default_cost_model().replacements(&target);
+        let replacements = ASAPStrategies::default_cost_model().replacements(&target);
         let kinds: Vec<SketchAlgorithm> = replacements
             .iter()
             .map(|r| match &r.replacement {
@@ -8118,7 +8119,7 @@ mod tests {
             },
             metric_scan(&["job"]),
         );
-        let kinds: Vec<_> = SketchAlgorithmStrategy::default_cost_model()
+        let kinds: Vec<_> = ASAPStrategies::default_cost_model()
             .replacements(&TargetSubDAG::new(&q))
             .iter()
             .map(|r| match &r.replacement {
@@ -8150,7 +8151,7 @@ mod tests {
         };
         let q = agg(vec![2], intent, metric_scan(&["job"]));
         let target = TargetSubDAG::new(&q);
-        let replacements = SketchAlgorithmStrategy::default_cost_model().replacements(&target);
+        let replacements = ASAPStrategies::default_cost_model().replacements(&target);
         assert_eq!(replacements.len(), 1, "{replacements:?}");
         assert!(matches!(
             &replacements[0].replacement,
@@ -8163,7 +8164,7 @@ mod tests {
     fn exact_mergeable_intent_yields_exactly_one_accumulator_candidate() {
         let q = agg(vec![2], AggIntent::Sum { col: None }, metric_scan(&["job"]));
         let target = TargetSubDAG::new(&q);
-        let replacements = SketchAlgorithmStrategy::default_cost_model().replacements(&target);
+        let replacements = ASAPStrategies::default_cost_model().replacements(&target);
         assert_eq!(replacements.len(), 1, "{replacements:?}");
         assert!(matches!(
             &replacements[0].replacement,
@@ -8199,7 +8200,7 @@ mod tests {
         let q = agg(vec![2], default_quantile(0.99), metric_scan(&["job"]));
         let target = TargetSubDAG::new(&q);
         let custom = PreferDDSketch;
-        let replacements = SketchAlgorithmStrategy::new(&custom).replacements(&target);
+        let replacements = ASAPStrategies::new(&custom).replacements(&target);
         let kinds: Vec<SketchAlgorithm> = replacements
             .iter()
             .map(|r| match &r.replacement {
@@ -8230,7 +8231,7 @@ mod tests {
         let inner = agg(vec![2], default_quantile(0.5), metric_scan(&["job"]));
         let outer = agg(vec![], default_quantile(0.99), inner);
         let target = TargetSubDAG::new(&outer);
-        let replacements = SketchAlgorithmStrategy::new_with_planning_inputs(
+        let replacements = ASAPStrategies::new_with_planning_inputs(
             &DefaultCostModel,
             &RankAdditiveModel,
             &EqualSplitAllocator,
@@ -8556,7 +8557,7 @@ mod tests {
         // Two independently-built, structurally identical Sum aggregates:
         // share_common_subdags (run inside search_workload) collapses them
         // onto one Rc with consumer_count 2, so this single group should
-        // carry SketchAlgorithmStrategy's one ExactAggregate candidate *and*
+        // carry ASAPStrategies's one ExactAggregate candidate *and*
         // SharedSubDagStrategy's share-vs-recompute pair.
         let a = agg(vec![2], AggIntent::Sum { col: None }, metric_scan(&["job"]));
         let b = agg(vec![2], AggIntent::Sum { col: None }, metric_scan(&["job"]));
@@ -8721,7 +8722,7 @@ mod tests {
         // twice for the same target.
         let root = agg(vec![2], default_quantile(0.99), metric_scan(&["job"]));
         let mut group = TargetSubDAGCandidates::new(Rc::clone(&root), 1);
-        let strategy = SketchAlgorithmStrategy::default_cost_model();
+        let strategy = ASAPStrategies::default_cost_model();
         let target = TargetSubDAG::new(&root);
         for candidate in strategy.replacements(&target) {
             group.add_candidate(candidate);
@@ -9037,7 +9038,7 @@ mod tests {
 
     #[test]
     fn global_selection_falls_back_to_local_ranking_for_sketch_family_groups() {
-        // SketchAlgorithmStrategy groups have no cross-group-aware cost hook
+        // ASAPStrategies groups have no cross-group-aware cost hook
         // (rank_candidates takes no consumer_count) — global_selection must
         // still return cost_sorted's own top pick for them (documented in
         // the module docs' "Whole-plan (cross-group) selection" section),
@@ -9157,7 +9158,7 @@ mod tests {
         // `a` and `c` are both non-`Aggregate` nodes (`Filter`/`Dedup`) so
         // neither is bindable — each group is a *clean* two-candidate
         // SharedSubDagStrategy share-vs-recompute pair, with no
-        // SketchAlgorithmStrategy `Summary` candidate mixed in to complicate
+        // ASAPStrategies `Summary` candidate mixed in to complicate
         // ranking (see `shared_aggregate_across_two_roots_gets_both_strategies_candidates`
         // for what a *mixed*-shape group looks like — deliberately avoided
         // here to isolate the SharedSubDagStrategy-only interaction).
@@ -9529,7 +9530,7 @@ mod tests {
     fn grouped_temporal_sum_has_one_summary_producer_candidate() {
         let root = lower_promql("sum by(job)(sum_over_time(a[1m]))", AccuracyTarget::Exact);
         let candidates =
-            SketchAlgorithmStrategy::default_cost_model().replacements(&TargetSubDAG::new(&root));
+            ASAPStrategies::default_cost_model().replacements(&TargetSubDAG::new(&root));
         assert!(candidates
             .iter()
             .any(|candidate| matches!(&candidate.replacement,
@@ -10361,7 +10362,7 @@ mod tests {
             inner,
         );
         let proposals =
-            SketchAlgorithmStrategy::default_cost_model().replacements(&TargetSubDAG::new(&root));
+            ASAPStrategies::default_cost_model().replacements(&TargetSubDAG::new(&root));
         assert!(!proposals.is_empty());
         assert!(proposals.iter().any(|candidate| matches!(
             &candidate.replacement,
@@ -10416,7 +10417,7 @@ mod tests {
             },
             inner,
         );
-        let strategy = SketchAlgorithmStrategy::new_with_planning_inputs_and_evidence(
+        let strategy = ASAPStrategies::new_with_planning_inputs_and_evidence(
             &DefaultCostModel,
             &DefaultAccuracyModel,
             &EqualSplitAllocator,
@@ -10450,7 +10451,7 @@ mod tests {
             },
             inner,
         );
-        let strategy = SketchAlgorithmStrategy::new_with_planning_inputs_and_evidence(
+        let strategy = ASAPStrategies::new_with_planning_inputs_and_evidence(
             &DefaultCostModel,
             &DefaultAccuracyModel,
             &EqualSplitAllocator,
@@ -10517,7 +10518,7 @@ mod tests {
             },
             inner,
         );
-        let strategy = SketchAlgorithmStrategy::new_with_planning_inputs_and_evidence(
+        let strategy = ASAPStrategies::new_with_planning_inputs_and_evidence(
             &DefaultCostModel,
             &DefaultAccuracyModel,
             &EqualSplitAllocator,
@@ -10589,7 +10590,7 @@ mod tests {
             },
             inner,
         );
-        let strategy = SketchAlgorithmStrategy::new_with_planning_inputs_and_evidence(
+        let strategy = ASAPStrategies::new_with_planning_inputs_and_evidence(
             &DefaultCostModel,
             &DefaultAccuracyModel,
             &EqualSplitAllocator,
@@ -10641,7 +10642,7 @@ mod tests {
             },
             inner,
         );
-        let strategy = SketchAlgorithmStrategy::new_with_planning_inputs_and_evidence(
+        let strategy = ASAPStrategies::new_with_planning_inputs_and_evidence(
             &DefaultCostModel,
             &DefaultAccuracyModel,
             &EqualSplitAllocator,
@@ -10694,7 +10695,7 @@ mod tests {
             },
             inner,
         );
-        let strategy = SketchAlgorithmStrategy::new_with_planning_inputs_and_evidence(
+        let strategy = ASAPStrategies::new_with_planning_inputs_and_evidence(
             &DefaultCostModel,
             &DefaultAccuracyModel,
             &EqualSplitAllocator,
@@ -10835,8 +10836,7 @@ mod tests {
         // typed reason and the raw/pre-ASAP alternative is what remains.
         let inner = agg(vec![2], default_quantile(0.5), metric_scan(&["job"]));
         let outer = agg(vec![], default_quantile(0.99), inner);
-        let proposals =
-            SketchAlgorithmStrategy::default_cost_model().propose(&TargetSubDAG::new(&outer));
+        let proposals = ASAPStrategies::default_cost_model().propose(&TargetSubDAG::new(&outer));
         assert!(
             proposals.candidates.is_empty(),
             "no outer sketch may be proposed over an approximate child without a rule: {:?}",
@@ -10868,8 +10868,7 @@ mod tests {
         // Cross-metric: a quantile over a cardinality estimate.
         let inner = agg(vec![2], default_cardinality(), metric_scan(&["job"]));
         let outer = agg(vec![], default_quantile(0.99), inner);
-        let proposals =
-            SketchAlgorithmStrategy::default_cost_model().propose(&TargetSubDAG::new(&outer));
+        let proposals = ASAPStrategies::default_cost_model().propose(&TargetSubDAG::new(&outer));
         assert!(proposals.candidates.is_empty());
         assert!(proposals.rejected.iter().all(|r| matches!(
             &r.error,
@@ -10954,7 +10953,7 @@ mod tests {
         // summary levels explicit while preserving the composed guarantee.
         let inner = agg(vec![2], quantile_eps(0.5, 0.1), metric_scan(&["job"]));
         let outer = agg(vec![], quantile_eps(0.99, 0.1), inner);
-        let strategy = SketchAlgorithmStrategy::new_with_planning_inputs(
+        let strategy = ASAPStrategies::new_with_planning_inputs(
             &DefaultCostModel,
             &RankAdditiveModel,
             &EqualSplitAllocator,
@@ -10982,7 +10981,7 @@ mod tests {
         let inner = agg(vec![2], quantile_eps(0.5, 0.1), metric_scan(&["job"]));
         let outer = agg(vec![], quantile_eps(0.99, 0.1), inner);
         let strategies: Vec<Box<dyn ReplacementStrategy>> =
-            vec![Box::new(SketchAlgorithmStrategy::new_with_planning_inputs(
+            vec![Box::new(ASAPStrategies::new_with_planning_inputs(
                 &DefaultCostModel,
                 &RankAdditiveModel,
                 &EqualSplitAllocator,
@@ -11158,7 +11157,7 @@ mod tests {
             expression: (*root).clone(),
             max_distinct: 128,
         };
-        let strategy = SketchAlgorithmStrategy::new_with_planning_inputs_and_evidence(
+        let strategy = ASAPStrategies::new_with_planning_inputs_and_evidence(
             &DefaultCostModel,
             &DefaultAccuracyModel,
             &EqualSplitAllocator,
@@ -11198,8 +11197,7 @@ mod tests {
                 precision: expected
             }
         );
-        let absent =
-            SketchAlgorithmStrategy::default_cost_model().replacements(&TargetSubDAG::new(&root));
+        let absent = ASAPStrategies::default_cost_model().replacements(&TargetSubDAG::new(&root));
         assert!(!absent.iter().any(|candidate| matches!(&candidate.replacement, Replacement::SubDag(node)
             if summary_family_algorithm(node) == SketchAlgorithm::Hll && node.guarantee.as_ref().is_some_and(|g| DefaultAccuracyModel.satisfies(g, &target)))));
         // Invalid contracts, infeasible targets and evidence for another source
@@ -11230,7 +11228,7 @@ mod tests {
                 },
                 max_distinct,
             };
-            let strategy = SketchAlgorithmStrategy::new_with_planning_inputs_and_evidence(
+            let strategy = ASAPStrategies::new_with_planning_inputs_and_evidence(
                 &DefaultCostModel,
                 &DefaultAccuracyModel,
                 &EqualSplitAllocator,

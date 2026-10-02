@@ -44,7 +44,7 @@ There are four decisions to make.
 
 `matches` should contain the minimum structural and semantic checks needed to determine whether the strategy applies.
 
-For example, the aggregate path in `SketchAlgorithmStrategy` requires a
+For example, the aggregate path in `ASAPStrategies` requires a
 supported shape:
 
 - the node is an `Aggregate`,
@@ -201,7 +201,7 @@ how to realize it, wrap that logic.
 
 Do not create a second implementation of the same semantics inside the strategy.
 
-The existing `SketchAlgorithmStrategy` is the model to follow: it reuses
+The existing `ASAPStrategies` is the model to follow: it reuses
 `replacement.rs`'s existing candidate list and summary-construction path.
 
 ---
@@ -226,23 +226,23 @@ If your transformation requires context not currently represented in `TargetSubD
 
 ---
 
-### Example: current `SketchAlgorithmStrategy`
+### Example: current `ASAPStrategies`
 
-`SketchAlgorithmStrategy` is the reference implementation for a strategy that
+`ASAPStrategies` is the reference implementation for a strategy that
 produces constructed post-ASAP summaries.
 
 Construction:
 
 ```rust
 let strategy =
-    SketchAlgorithmStrategy::default_cost_model();
+    ASAPStrategies::default_cost_model();
 ```
 
 or with a custom cost model:
 
 ```rust
 let model = MyCostModel; // illustrative
-let strategy = SketchAlgorithmStrategy::new(&model);
+let strategy = ASAPStrategies::new(&model);
 ```
 
 The strategy matches supported aggregate nodes.
@@ -251,8 +251,8 @@ At a high level:
 
 ```mermaid
 flowchart LR
-  A["Input TargetSubDAG<br/>root is a supported Aggregate"] --> B["SketchAlgorithmStrategy::matches<br/>check whether the target shape can produce summaries"]
-  B -->|"true"| C["SketchAlgorithmStrategy::replacements<br/>use CostModel preferences and sizing while preserving<br/>every semantically valid realization"]
+  A["Input TargetSubDAG<br/>root is a supported Aggregate"] --> B["ASAPStrategies::matches<br/>check whether the target shape can produce summaries"]
+  B -->|"true"| C["ASAPStrategies::replacements<br/>use CostModel preferences and sizing while preserving<br/>every semantically valid realization"]
   B -->|"false"| NONE["Empty candidate list"]
   C --> F["Output Vec&lt;ReplacementSubDAG&gt;<br/>each entry contains a constructed summary sub-DAG and rationale;<br/>all candidates retained in preferred order"]
 ```
@@ -268,7 +268,7 @@ even if the cost model prefers one. When only one realization is legal, such as 
 Call the public strategy interface and inspect every returned candidate:
 
 ```rust
-let strategy = SketchAlgorithmStrategy::new(&cost_model);
+let strategy = ASAPStrategies::new(&cost_model);
 let candidates = strategy.replacements(&target);
 
 for candidate in candidates {
@@ -278,7 +278,7 @@ for candidate in candidates {
             // pre-ASAP sub-DAG with an exact guarantee for pass-through.
         }
         Replacement::ExactComposition(_) => unreachable!(
-            "SketchAlgorithmStrategy produces sub-DAG candidates"
+            "ASAPStrategies produces sub-DAG candidates"
         ),
     }
 }
@@ -351,7 +351,7 @@ The basic calling pattern is:
 ```rust
 let target = TargetSubDAG::new(&root);
 let strategy =
-    SketchAlgorithmStrategy::default_cost_model();
+    ASAPStrategies::default_cost_model();
 
 if strategy.matches(&target) {
     let candidates =
@@ -544,13 +544,13 @@ Then inject it into code that accepts a `&dyn CostModel`:
 let model = PreferDDSketch;
 
 let strategy =
-    SketchAlgorithmStrategy::new(&model);
+    ASAPStrategies::new(&model);
 
 let replacements =
     strategy.replacements(&target);
 ```
 
-Important: changing `rank_candidates` changes the preferred ordering, but `SketchAlgorithmStrategy` still enumerates every valid sketch candidate.
+Important: changing `rank_candidates` changes the preferred ordering, but `ASAPStrategies` still enumerates every valid sketch candidate.
 
 A custom cost model should not change which alternatives are semantically legal.
 
@@ -739,7 +739,7 @@ For example:
 
 ```rust
 let strategy =
-    SketchAlgorithmStrategy::new(&model);
+    ASAPStrategies::new(&model);
 
 let replacements =
     strategy.replacements(&target);
@@ -768,7 +768,7 @@ Declare built-in sketch applicability through the public candidate registry:
 summary_candidates(intent)
 ```
 
-`SketchAlgorithmStrategy` consumes this registry through its public `replacements` method.
+`ASAPStrategies` consumes this registry through its public `replacements` method.
 
 Therefore, when adding a new built-in sketch algorithm, the intended flow is:
 
@@ -778,7 +778,7 @@ flowchart LR
   MAP --> MODEL["2. Define costing<br/>rank it, derive its SketchParams,<br/>and provide a comparable numeric cost"]
   MODEL --> BUILD["3. Define realization behavior<br/>ensure the public strategy output contains a valid summary sub-DAG<br/>with the correct maintained state and evaluation"]
   BUILD --> ACC["4. Certify accuracy<br/>derive from committed parameters;<br/>propagate and check the final target"]
-  ACC --> ENUM["5. Verify integration<br/>SketchAlgorithmStrategy includes it automatically;<br/>tests confirm enumeration, ordering, sizing, and cost"]
+  ACC --> ENUM["5. Verify integration<br/>ASAPStrategies includes it automatically;<br/>tests confirm enumeration, ordering, sizing, and cost"]
 ```
 
 This keeps one source of truth for sketch applicability. Applicability alone
@@ -793,7 +793,7 @@ See the [accuracy implementation companion](end-to-end-accuracy-guarantees.md)
 for formulas and evidence requirements. For a new algorithm, also update its
 parameter, evaluation, schema and serialization definitions in `asap-types`.
 
-Do not special-case the new sketch inside `SketchAlgorithmStrategy` unless the strategy itself needs fundamentally new behavior.
+Do not special-case the new sketch inside `ASAPStrategies` unless the strategy itself needs fundamentally new behavior.
 
 ### Verifying a new sketch algorithm
 
@@ -802,7 +802,7 @@ or malformed evidence, incompatible metrics and unsupported composition. Test
 root-target checking before cost ranking, exact fallback, and exported rejection
 or guarantee data. A cheaper estimate must never admit an accuracy-illegal plan.
 
-After wiring the new algorithm into `summary_candidates` and giving the cost model a real `rank_candidates`/`size_params` opinion about it, check two things. First, that `SketchAlgorithmStrategy::replacements()` for a matching `TargetSubDAG` actually includes a candidate realizing the new algorithm — extend a test shaped like `replacement.rs`'s own test-module coverage-matrix tests (e.g. `agg_intent_to_summary_kind_coverage_matrix`) to cover the new algorithm's `AggIntent`. Second, that `cost_sorted`/`estimate_cost` produce sane, comparable numbers for the new candidate rather than a `NaN` placeholder or an outlier that swamps every other candidate.
+After wiring the new algorithm into `summary_candidates` and giving the cost model a real `rank_candidates`/`size_params` opinion about it, check two things. First, that `ASAPStrategies::replacements()` for a matching `TargetSubDAG` actually includes a candidate realizing the new algorithm — extend a test shaped like `replacement.rs`'s own test-module coverage-matrix tests (e.g. `agg_intent_to_summary_kind_coverage_matrix`) to cover the new algorithm's `AggIntent`. Second, that `cost_sorted`/`estimate_cost` produce sane, comparable numbers for the new candidate rather than a `NaN` placeholder or an outlier that swamps every other candidate.
 
 ---
 
@@ -956,7 +956,7 @@ When adding a new cost model:
 - [ ] Use CSE hooks for recompute-vs.-sharing costs.
 - [ ] Override `estimate_cost` if consumers require numeric costs instead of `NaN`.
 - [ ] Test the hook directly.
-- [ ] Test integration through a consumer such as `SketchAlgorithmStrategy`.
+- [ ] Test integration through a consumer such as `ASAPStrategies`.
 - [ ] Verify that changing cost preferences does not silently remove valid replacement candidates.
 
 ---
@@ -979,7 +979,7 @@ Use this table to find the right place for a change.
 | Change shared-maintenance cost | `CostModel::cse_shared_maintenance_cost` |
 | Change current share/recompute choice | `CostModel::cse_share_decision` |
 | Decide whether an available implementation satisfies a required one | `impl Matcher` |
-| Produce a normal (ranked-first) post-ASAP summary for one target | `SketchAlgorithmStrategy::replacements(...).into_iter().next()` |
+| Produce a normal (ranked-first) post-ASAP summary for one target | `ASAPStrategies::replacements(...).into_iter().next()` |
 | Search a whole workload for supported legal candidates | `search_workload`/`search_workload_with` |
 | Enforce per-root result accuracy requirements | `search_workload_with_targets` |
 | Coordinate compatible choices across groups | `CandidateLogicalASAPDAGs::global_selection` |

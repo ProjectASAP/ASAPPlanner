@@ -26,7 +26,7 @@
 //! than overloading these ones across incompatible `Kind`/`Params` types.
 //!
 //! Every entry point that doesn't take an explicit `&dyn CostModel`
-//! ([`SketchAlgorithmStrategy::default_cost_model`](crate::replacement::SketchAlgorithmStrategy::default_cost_model),
+//! ([`ASAPStrategies::default_cost_model`](crate::replacement::ASAPStrategies::default_cost_model),
 //! [`search_workload`](crate::replacement::search_workload)) runs against
 //! [`DefaultCostModel`], so a deployment that never plugs in its own cost
 //! model keeps today's static-preference-order behavior exactly, byte for
@@ -738,14 +738,14 @@ pub trait CostModel {
     /// on [`CandidateLogicalASAPDAGs::cost_sorted`](crate::replacement::CandidateLogicalASAPDAGs::cost_sorted)),
     /// not just order candidates against each other — that ordering job
     /// already belongs to [`rank_candidates`](Self::rank_candidates) (for a
-    /// [`SketchAlgorithmStrategy`](crate::replacement::SketchAlgorithmStrategy)
+    /// [`ASAPStrategies`](crate::replacement::ASAPStrategies)
     /// group) and [`cse_share_decision`](Self::cse_share_decision) (for a
     /// [`SharedSubDagStrategy`](crate::replacement::SharedSubDagStrategy)
     /// group).
     ///
     /// One method covers both candidate shapes this crate ships:
     /// `candidate.replacement`'s [`Replacement::SubDag`] from a summary
-    /// realization (a `SketchAlgorithmStrategy` candidate — the bound node is
+    /// realization (a `ASAPStrategies` candidate — the bound node is
     /// right there, nothing to reconstruct) and the same arm from a rewrite
     /// (a `SharedSubDagStrategy` share-vs-recompute candidate — no bound
     /// summary of its own, since sharing is a decision about a target
@@ -1030,7 +1030,7 @@ impl CostModel for DefaultCostModel {
     /// second formula:
     ///
     /// - A [`ReplacementProvenance::SummaryRealization`] candidate (a
-    ///   `SketchAlgorithmStrategy` binding): `cse_recompute_cost` (the one-time
+    ///   `ASAPStrategies` binding): `cse_recompute_cost` (the one-time
     ///   structural cost of building `target` at all) plus
     ///   `cse_shared_maintenance_cost` of the candidate's own bound family
     ///   (a pricier family — a sketch over an exact accumulator, say —

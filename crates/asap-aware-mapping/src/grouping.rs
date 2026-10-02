@@ -41,7 +41,7 @@
 //! An earlier draft of this module (written against the very first draft of
 //! #251) reused a `CostModel`-wrapping adapter that "steered" a
 //! whole-recursive-bind decision procedure toward a specific `SketchKind`,
-//! the same pattern [`crate::replacement::SketchAlgorithmStrategy`]'s own module
+//! the same pattern [`crate::replacement::ASAPStrategies`]'s own module
 //! docs explain was deliberately deleted from this crate as an anti-pattern:
 //! forcing a choice via a whole-tree `CostModel` adapter had a real bug where
 //! the forced choice could leak into a target's own nested aggregates. This
@@ -53,7 +53,7 @@
 //! passes that exact,
 //! already-decided `Realization` to
 //! [`crate::replacement::construct_summary`] — the same first-class,
-//! one-candidate-at-a-time primitive [`crate::replacement::SketchAlgorithmStrategy`]
+//! one-candidate-at-a-time primitive [`crate::replacement::ASAPStrategies`]
 //! itself calls once per candidate. No adapter, no steering, no risk of a
 //! forced choice leaking into nested aggregates.
 //!
@@ -111,15 +111,15 @@ pub fn has_subpopulations(reduction: &Reduction) -> bool {
 
 /// A single static instance so [`HydraGroupingStrategy::default_cost_model`]
 /// can hand out a `&'static dyn CostModel` without heap-allocating one — same
-/// pattern [`crate::replacement::SketchAlgorithmStrategy`] uses.
+/// pattern [`crate::replacement::ASAPStrategies`] uses.
 static DEFAULT_COST_MODEL: DefaultCostModel = DefaultCostModel;
 
 /// Wraps the `GroupingStrategy` axis (issue #256) as a
-/// [`ReplacementStrategy`]: for a target [`SketchAlgorithmStrategy`](crate::replacement::SketchAlgorithmStrategy)
+/// [`ReplacementStrategy`]: for a target [`ASAPStrategies`](crate::replacement::ASAPStrategies)
 /// already has an opinion on, offers an additional
 /// `GroupingStrategy::SharedMultiSubpopulation` candidate wherever the
 /// legality conditions in the module docs above hold — alongside, not
-/// instead of, the per-subpopulation candidates `SketchAlgorithmStrategy`
+/// instead of, the per-subpopulation candidates `ASAPStrategies`
 /// itself enumerates. The workload search composes both strategies over the
 /// same target, so it sees every summary-family alternative *and* the Hydra
 /// alternative; the built-in workload search registers both strategies, and
@@ -133,7 +133,7 @@ pub struct HydraGroupingStrategy<'a> {
 impl HydraGroupingStrategy<'static> {
     /// A strategy that ranks/binds via the built-in [`DefaultCostModel`] —
     /// what a deployment gets with no custom cost model plugged in, the same
-    /// default [`crate::replacement::SketchAlgorithmStrategy::default_cost_model`]
+    /// default [`crate::replacement::ASAPStrategies::default_cost_model`]
     /// offers.
     pub fn default_cost_model() -> Self {
         Self {
@@ -145,7 +145,7 @@ impl HydraGroupingStrategy<'static> {
 impl<'a> HydraGroupingStrategy<'a> {
     /// A strategy that ranks/binds via `cost_model` instead of the built-in
     /// static preference order — the same customization point
-    /// [`crate::replacement::SketchAlgorithmStrategy::new`] already offers.
+    /// [`crate::replacement::ASAPStrategies::new`] already offers.
     pub fn new(cost_model: &'a dyn CostModel) -> Self {
         Self {
             planning_inputs: CandidatePlanningInputs::with_default_accuracy(cost_model),
@@ -814,7 +814,7 @@ mod tests {
     /// A custom `CostModel` doesn't change *which* candidate is offered —
     /// only which sketch candidate `realizations_for_intent` itself would
     /// have ranked first, and how that candidate's own params are sized —
-    /// same guarantee `SketchAlgorithmStrategy` makes for its own candidates.
+    /// same guarantee `ASAPStrategies` makes for its own candidates.
     struct PreferDDSketch;
     impl CostModel for PreferDDSketch {
         fn rank_candidates(

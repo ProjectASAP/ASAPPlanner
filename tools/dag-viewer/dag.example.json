@@ -210,7 +210,7 @@
         {
           "decision_id": 0,
           "target_pre_id": 1,
-          "strategy": "SketchAlgorithmStrategy",
+          "strategy": "ASAPStrategies",
           "rationale": "count realizes as a Cms sketch",
           "rank": 0,
           "cost": 1.14001088,
@@ -556,7 +556,7 @@
             "hash": 2606922452740434172,
             "decision": {
               "id": 0,
-              "strategy": "SketchAlgorithmStrategy",
+              "strategy": "ASAPStrategies",
               "rationale": "count realizes as a Cms sketch",
               "rank": 0,
               "cost": 1.14001088,
@@ -662,7 +662,7 @@
             "workload_node_id": 1,
             "decision": {
               "id": 0,
-              "strategy": "SketchAlgorithmStrategy",
+              "strategy": "ASAPStrategies",
               "rationale": "count realizes as a Cms sketch",
               "rank": 0,
               "cost": 1.14001088,
@@ -761,7 +761,7 @@
             "workload_node_id": 2,
             "decision": {
               "id": 0,
-              "strategy": "SketchAlgorithmStrategy",
+              "strategy": "ASAPStrategies",
               "rationale": "count realizes as a Cms sketch",
               "rank": 0,
               "cost": 1.14001088,

@@ -691,7 +691,7 @@ mod tests {
             version: "unused-base-v1".into(),
         };
         let candidates =
-            crate::replacement::SketchAlgorithmStrategy::default_cost_model().replacements(&target);
+            crate::replacement::ASAPStrategies::default_cost_model().replacements(&target);
         provider.storage_io = Some(profile.clone());
         let model = PhysicalPlanCostModel::new(&provider, base.clone()).unwrap();
         let estimate = model.estimate_candidate(&candidates[0], &target).unwrap();
@@ -722,7 +722,7 @@ mod tests {
         let root = query();
         let target = TargetSubDAG::new(&root);
         let candidates =
-            crate::replacement::SketchAlgorithmStrategy::default_cost_model().replacements(&target);
+            crate::replacement::ASAPStrategies::default_cost_model().replacements(&target);
         let provider = TestProvider::new(true, 800);
         let model = PhysicalPlanCostModel::new(&provider, calibration()).unwrap();
         let estimate = model.estimate_candidate(&candidates[0], &target).unwrap();
@@ -1019,7 +1019,7 @@ mod tests {
         }
 
         let root = query();
-        let candidates = crate::replacement::SketchAlgorithmStrategy::default_cost_model()
+        let candidates = crate::replacement::ASAPStrategies::default_cost_model()
             .replacements(&TargetSubDAG::new(&root));
         let provider = WrongScope(TestProvider::new(true, 800));
         let model = PhysicalPlanCostModel::new(&provider, calibration()).unwrap();
@@ -1065,7 +1065,7 @@ mod tests {
         }
 
         let root = query();
-        let candidates = crate::replacement::SketchAlgorithmStrategy::default_cost_model()
+        let candidates = crate::replacement::ASAPStrategies::default_cost_model()
             .replacements(&TargetSubDAG::new(&root));
         let model = PhysicalPlanCostModel::new(&BlankVersionProvider, calibration()).unwrap();
         assert_eq!(
@@ -1092,7 +1092,7 @@ mod tests {
     #[test]
     fn sibling_candidates_share_one_scope_and_raw_baseline() {
         let root = query();
-        let candidates = crate::replacement::SketchAlgorithmStrategy::default_cost_model()
+        let candidates = crate::replacement::ASAPStrategies::default_cost_model()
             .replacements(&TargetSubDAG::new(&root));
         assert!(candidates.len() >= 2);
         let provider = TestProvider::new(true, 800);

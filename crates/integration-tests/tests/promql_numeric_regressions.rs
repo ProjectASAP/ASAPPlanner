@@ -1,7 +1,7 @@
 //! Numeric regression fixtures: actual PromQL lowering plus numeric update/evaluation checks.
 //! The count/sum interpreter below verifies planner update semantics, not a deployed backend.
 use asap_aware_mapping::replacement::is_logical_rewrite;
-use asap_aware_mapping::{Replacement, ReplacementStrategy, SketchAlgorithmStrategy, TargetSubDAG};
+use asap_aware_mapping::{ASAPStrategies, Replacement, ReplacementStrategy, TargetSubDAG};
 use asap_integration_tests::fixtures::lower_promql;
 use asap_integration_tests::post_asap::post_asap_dag;
 use asap_types::ir::{ASAPOp, NonASAPOp, Operator, OperatorNode};
@@ -12,7 +12,7 @@ use std::rc::Rc;
 
 fn plan(query: &str, accuracy: AccuracyTarget) -> Rc<OperatorNode> {
     let pre = lower_promql(query, accuracy).unwrap();
-    SketchAlgorithmStrategy::default_cost_model()
+    ASAPStrategies::default_cost_model()
         .replacements(&TargetSubDAG::new(&pre))
         .into_iter()
         .find_map(|r| match r.replacement {
@@ -201,7 +201,7 @@ fn sketch_counts_use_unit_weights_and_signed_sums_keep_value_weights() {
     use asap_aware_mapping::accuracy::{DefaultAccuracyModel, EqualSplitAllocator};
     use asap_aware_mapping::cost_model::DefaultCostModel;
     use asap_types::post_asap::{NonNegativeWeightProof, SketchAlgorithm, WeightDomain};
-    let strategy = SketchAlgorithmStrategy::new_with_planning_inputs_and_evidence(
+    let strategy = ASAPStrategies::new_with_planning_inputs_and_evidence(
         &DefaultCostModel,
         &DefaultAccuracyModel,
         &EqualSplitAllocator,

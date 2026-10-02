@@ -31,7 +31,7 @@
 //! collapses into a single question this module asks of *that* data instead:
 //! **for a given `TargetSubDAG`, does its candidate list contain anything
 //! other than the trivial, no-op realization?** A `TargetSubDAG` whose only
-//! candidate is "the one thing `SketchAlgorithmStrategy` would have committed
+//! candidate is "the one thing `ASAPStrategies` would have committed
 //! to anyway, with no alternative" has no optimization to report — that
 //! candidate isn't an *opportunity*, it's just the target's existing shape
 //! reflected back. A `TargetSubDAG` with more than one candidate (several
@@ -45,7 +45,7 @@
 //! - [`ExplanationKind::SketchApproximation`] — the `TargetSubDAG`'s
 //!   candidate list contains at least one summary-realization [`Replacement::SubDag`] that
 //!   actually realizes a sketch family (`FieldDataType::Sketch`), i.e.
-//!   [`SketchAlgorithmStrategy`] found something to offer beyond whatever
+//!   [`ASAPStrategies`] found something to offer beyond whatever
 //!   exact/pass-through candidate [`crate::replacement`]'s own
 //!   `realizations_for_intent` would have committed to on its own.
 //! - [`ExplanationKind::CommonSubexpressionReuse`] — the `TargetSubDAG`
@@ -103,7 +103,7 @@
 //! [`ReplacementStrategy`] already *is* that extension point, one layer
 //! down, and [`explain_replacements_with`]'s own `strategies`
 //! parameter is where a caller plugs in a custom one (or a custom
-//! `CostModel`, via [`crate::replacement::SketchAlgorithmStrategy::new`]) — the identical spot
+//! `CostModel`, via [`crate::replacement::ASAPStrategies::new`]) — the identical spot
 //! [`crate::replacement::search_workload_with`] itself exposes.
 //!
 //! ## Two guarantees the old traversal made, re-verified against the new one
@@ -176,7 +176,7 @@
 //! [`ReplacementSubDAG`]: crate::replacement::ReplacementSubDAG
 //! [`Replacement`]: crate::replacement::Replacement
 //! [`Replacement::SubDag`]: crate::replacement::Replacement::SubDag
-//! [`SketchAlgorithmStrategy`]: crate::replacement::SketchAlgorithmStrategy
+//! [`ASAPStrategies`]: crate::replacement::ASAPStrategies
 //! [`SharedSubDagStrategy`]: crate::replacement::SharedSubDagStrategy
 //! [`CandidateLogicalASAPDAGs`]: crate::replacement::CandidateLogicalASAPDAGs
 //! [`TargetSubDAGCandidates`]: crate::replacement::TargetSubDAGCandidates
@@ -206,7 +206,7 @@ use crate::replacement::{
 pub enum ExplanationKind {
     /// A `TargetSubDAG`'s candidate list contains at least one
     /// [`Replacement::SubDag`] that realizes a sketch family —
-    /// [`crate::replacement::SketchAlgorithmStrategy`] found a genuine sketch
+    /// [`crate::replacement::ASAPStrategies`] found a genuine sketch
     /// alternative for this `Aggregate`, beyond whatever exact/pass-through
     /// candidate `crate::replacement`'s own `realizations_for_intent` would
     /// have committed to on its own.
@@ -273,7 +273,7 @@ pub fn explain_replacements<Id: Display>(
 /// instead of [`crate::replacement::default_strategies`] — the extension
 /// point for a deployment-specific [`ReplacementStrategy`], or a custom
 /// `CostModel` plugged into
-/// [`crate::replacement::SketchAlgorithmStrategy::new`] (e.g. via
+/// [`crate::replacement::ASAPStrategies::new`] (e.g. via
 /// [`crate::replacement::default_strategies_with`]).
 ///
 /// [`ReplacementStrategy`]: crate::replacement::ReplacementStrategy
@@ -839,7 +839,7 @@ mod tests {
         let q = agg(vec![2], default_quantile(0.99), metric_scan(&["job"]));
         let custom_model = AlwaysDDSketch;
         let strategies: Vec<Box<dyn ReplacementStrategy + '_>> = vec![Box::new(
-            crate::replacement::SketchAlgorithmStrategy::new(&custom_model),
+            crate::replacement::ASAPStrategies::new(&custom_model),
         )];
         let findings = explain_replacements_with(vec![("q", q)], &strategies);
         assert_eq!(findings.len(), 1);

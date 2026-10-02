@@ -623,31 +623,30 @@ fn stored_count_min_bare_count_compiles_to_a_evaluation() {
     use asap_aware_mapping::{Replacement, ReplacementStrategy, TargetSubDAG};
     use asap_physical_operators::summary_kernels::CountMinSketchAccumulator;
     let root = lower_with("count(up)", AccuracyTarget::Epsilon(0.02));
-    let dag =
-        asap_aware_mapping::SketchAlgorithmStrategy::new(&asap_aware_mapping::DefaultCostModel)
-            .replacements(&TargetSubDAG::new(&root))
-            .into_iter()
-            .find_map(|candidate| match candidate.replacement {
-                Replacement::SubDag(node) => {
-                    let dag = compile_post_asap_dag(&node).ok()?;
-                    let bare_count = dag.nodes.iter().any(|n| {
-                        matches!(
-                            &n.payload,
-                            PostAsapOperatorPayload::SummaryEstimate {
-                                query: SketchStatistic::PointCount { value: None, .. }
-                            }
-                        )
-                    });
-                    let count_min = dag.nodes.iter().any(|n| {
-                        matches!(&n.payload, PostAsapOperatorPayload::SummaryAgg {
+    let dag = asap_aware_mapping::ASAPStrategies::new(&asap_aware_mapping::DefaultCostModel)
+        .replacements(&TargetSubDAG::new(&root))
+        .into_iter()
+        .find_map(|candidate| match candidate.replacement {
+            Replacement::SubDag(node) => {
+                let dag = compile_post_asap_dag(&node).ok()?;
+                let bare_count = dag.nodes.iter().any(|n| {
+                    matches!(
+                        &n.payload,
+                        PostAsapOperatorPayload::SummaryEstimate {
+                            query: SketchStatistic::PointCount { value: None, .. }
+                        }
+                    )
+                });
+                let count_min = dag.nodes.iter().any(|n| {
+                    matches!(&n.payload, PostAsapOperatorPayload::SummaryAgg {
                         family: FieldDataType::Sketch(kind, _), ..
                     } if kind.algorithm() == &SketchAlgorithm::Cms)
-                    });
-                    (bare_count && count_min).then_some(dag)
-                }
-                _ => None,
-            })
-            .expect("Planner lists a Count-Min candidate for count(up)");
+                });
+                (bare_count && count_min).then_some(dag)
+            }
+            _ => None,
+        })
+        .expect("Planner lists a Count-Min candidate for count(up)");
     let state = dag
         .nodes
         .iter()

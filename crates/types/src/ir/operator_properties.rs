@@ -1,8 +1,12 @@
-//! Parameters shared by ordinary and summary operators: sources, grouping,
-//! matching, temporal selection, joins, sets, and windows.
+//! Supporting parameter types used inside operator payloads.
+//!
+//! For example, `Aggregate.by` uses [`GroupKeys`], a join chooses [`JoinKind`],
+//! and a SQL window carries [`WindowFrame`]. These types describe what an
+//! operator does. Derived node metadata (schema, guarantee, timing) lives on
+//! [`super::OperatorNode`], not in this module.
 use crate::pre_asap::{ArithmeticOpKind, ColumnId, ColumnRef, CompareOpKind, ScalarValue};
 use serde::{Deserialize, Serialize};
-/// The column-reference type a vocabulary item is generic over:
+/// The column-reference type an operator parameter is generic over:
 /// positional [`ColumnId`] once bound, name-based [`ColumnRef`] before.
 pub trait ColState:
     Clone + std::fmt::Debug + PartialEq + Serialize + for<'de> Deserialize<'de>

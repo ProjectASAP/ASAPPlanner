@@ -2,8 +2,8 @@
 use asap_aware_mapping::accuracy::DefaultAccuracyModel;
 use asap_aware_mapping::cost_model::DefaultCostModel;
 use asap_aware_mapping::{
-    default_strategies, search_workload_with_targets, Replacement, ReplacementStrategy,
-    SketchAlgorithmStrategy, TargetSubDAG,
+    default_strategies, search_workload_with_targets, ASAPStrategies, Replacement,
+    ReplacementStrategy, TargetSubDAG,
 };
 mod support;
 use asap_types::ir::export::PostAsapOperatorPayload;
@@ -53,7 +53,7 @@ fn exact_counts_select_count_accumulators() {
     for query in ["count(up)", "count by(job)(up)", "count_over_time(up[5m])"] {
         let root = lower_promql(query, AccuracyTarget::Exact).unwrap();
         let candidates =
-            SketchAlgorithmStrategy::default_cost_model().replacements(&TargetSubDAG::new(&root));
+            ASAPStrategies::default_cost_model().replacements(&TargetSubDAG::new(&root));
         assert!(
             candidates.iter().any(|candidate| {
                 matches!(&candidate.replacement, Replacement::SubDag(node)
@@ -71,7 +71,7 @@ fn frequency_count_candidates_use_unit_weights() {
     for query in ["count_over_time(up[5m])", "count(up)"] {
         let root = lower_promql(query, AccuracyTarget::Epsilon(0.02)).unwrap();
         let candidates =
-            SketchAlgorithmStrategy::default_cost_model().replacements(&TargetSubDAG::new(&root));
+            ASAPStrategies::default_cost_model().replacements(&TargetSubDAG::new(&root));
         let mut algorithms = Vec::new();
         for candidate in &candidates {
             let Replacement::SubDag(node) = &candidate.replacement else {
@@ -228,8 +228,7 @@ fn count_over_time_counts_scrapes_not_sample_values() {
 fn cms_count_updates_total_ten_for_zero_positive_and_negative_samples() {
     use asap_types::pre_asap::ColumnRef;
     let root = lower_promql("count_over_time(up[5m])", AccuracyTarget::Epsilon(0.02)).unwrap();
-    let candidates =
-        SketchAlgorithmStrategy::default_cost_model().replacements(&TargetSubDAG::new(&root));
+    let candidates = ASAPStrategies::default_cost_model().replacements(&TargetSubDAG::new(&root));
     let dag = candidates
         .iter()
         .find_map(|candidate| {

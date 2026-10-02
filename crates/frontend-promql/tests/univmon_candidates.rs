@@ -5,7 +5,7 @@ use asap_aware_mapping::accuracy::{
 };
 use asap_aware_mapping::cost_model::DefaultCostModel;
 use asap_aware_mapping::replacement::{default_strategies, search_workload_with_targets};
-use asap_aware_mapping::{Replacement, ReplacementStrategy, SketchAlgorithmStrategy, TargetSubDAG};
+use asap_aware_mapping::{ASAPStrategies, Replacement, ReplacementStrategy, TargetSubDAG};
 mod support;
 use asap_types::ir::cse::share_common_subdags;
 use asap_types::ir::{ASAPOp, Operator, OperatorNode};
@@ -52,7 +52,7 @@ impl AccuracyModel for TestEvidence {
 
 fn candidate(query: &str, accuracy: AccuracyTarget) -> Rc<OperatorNode> {
     let root = lower_promql(query, accuracy).unwrap();
-    SketchAlgorithmStrategy::new_with_planning_inputs(&DefaultCostModel, &TestEvidence, &EqualSplitAllocator)
+    ASAPStrategies::new_with_planning_inputs(&DefaultCostModel, &TestEvidence, &EqualSplitAllocator)
         .replacements(&TargetSubDAG::new(&root))
         .into_iter()
         .find_map(|candidate| {
@@ -136,8 +136,8 @@ fn uncalibrated_frequency_evaluations_do_not_bypass_accuracy_targets() {
             },
         ] {
             let root = lower_promql(query, target.clone()).unwrap();
-            let candidates = SketchAlgorithmStrategy::default_cost_model()
-                .replacements(&TargetSubDAG::new(&root));
+            let candidates =
+                ASAPStrategies::default_cost_model().replacements(&TargetSubDAG::new(&root));
             let unknown = candidates
                 .iter()
                 .filter(|candidate| {

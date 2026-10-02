@@ -2,7 +2,7 @@
 //!
 //! The SQL counterpart of `promql_to_post_asap.rs`: drives SQL text —
 //! `lower_sql` (text → non-ASAP `OperatorNode` tree) →
-//! `SketchAlgorithmStrategy::replacements` (→ a tree with ASAP operators,
+//! `ASAPStrategies::replacements` (→ a tree with ASAP operators,
 //! see [`realize`] below) — and pins the resulting sketch-vs-exact-accumulator
 //! shape node by node, the way `promql_to_post_asap.rs` does for PromQL.
 //!
@@ -21,8 +21,8 @@ use std::rc::Rc;
 
 use asap_aware_mapping::replacement::{retain_exact, RealizationError};
 use asap_aware_mapping::{
-    search_workload, DefaultCostModel, Replacement, ReplacementStrategy, ReplacementSubDAG,
-    SketchAlgorithmStrategy, TargetSubDAG,
+    search_workload, ASAPStrategies, DefaultCostModel, Replacement, ReplacementStrategy,
+    ReplacementSubDAG, TargetSubDAG,
 };
 use asap_frontend_sql::{lower_sql, lower_sql_dialect, SqlCatalog};
 use asap_integration_tests::post_asap::post_asap_dag;
@@ -41,13 +41,13 @@ use asap_types::types::AccuracyTarget;
 use asap_types::workload::SqlDialect;
 
 /// This crate has no "bind me one tree" public API any more —
-/// `SketchAlgorithmStrategy::replacements` always returns every candidate, and
+/// `ASAPStrategies::replacements` always returns every candidate, and
 /// a caller decides what to keep. This test-only helper reproduces the
 /// take-the-first-(`cost_model`-preferred)-summary-candidate pattern so the
 /// single-answer pins below don't all repeat it by hand.
 fn realize(target: &Rc<OperatorNode>) -> Result<Rc<OperatorNode>, RealizationError> {
     let target_dag = TargetSubDAG::new(target);
-    match SketchAlgorithmStrategy::default_cost_model()
+    match ASAPStrategies::default_cost_model()
         .replacements(&target_dag)
         .into_iter()
         .next()

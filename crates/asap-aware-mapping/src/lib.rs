@@ -8,7 +8,7 @@
 //! **Common sub-expression elimination (CSE) is not this crate's job.**
 //! Detection is a primary pass over the pre-ASAP operator IR itself
 //! (`asap_types::ir::cse`, design tracked in issue #223), run before a
-//! tree ever reaches [`replacement::SketchAlgorithmStrategy`] — see issue #222
+//! tree ever reaches [`replacement::ASAPStrategies`] — see issue #222
 //! for why (batch query optimization needs to see shared work across a
 //! `QueryWorkload` before summary binding, not after). This crate may
 //! eventually run a second, narrower CSE pass of its own over an
@@ -92,7 +92,7 @@
 //!   #33) is an additional `ReplacementStrategy`: the orthogonal
 //!   `GroupingStrategy` axis (one summary instance per `by` subpopulation
 //!   versus one shared Hydra-family structure serving all of them), offered
-//!   alongside the candidates [`replacement::SketchAlgorithmStrategy`]
+//!   alongside the candidates [`replacement::ASAPStrategies`]
 //!   enumerates for the same target.
 //! - [`rewrite`] — the "semantic-equivalent rewriting (e.g. `avg` →
 //!   `sum`/`count`) to increase how often the [sharing/sketch] optimizations
@@ -117,7 +117,7 @@
 //! |---|---|---|
 //! | Schema resolution | Derive input schemas and resolve column names to positions | `asap_types::pre_asap::SchemaResolver::resolve_schema`, `resolve_root` |
 //! | Realization | Enumerate ranked physical forms for one aggregate intent | `replacement::realizations_for_intent` |
-//! | Replacement | Construct each candidate summary sub-DAG | [`replacement::SketchAlgorithmStrategy`] |
+//! | Replacement | Construct each candidate summary sub-DAG | [`replacement::ASAPStrategies`] |
 //! | Search | Enumerate and compare alternatives across a workload | [`replacement::search_workload`] |
 //! | Runtime placement | Choose deployment locations and concrete executors | Downstream physical plan providers |
 //!
@@ -208,12 +208,12 @@ pub use recurrence::{
 };
 pub use replacement::{
     default_strategies, default_strategies_with, is_logical_rewrite, search_workload,
-    search_workload_with, search_workload_with_targets, summary_candidates,
+    search_workload_with, search_workload_with_targets, summary_candidates, ASAPStrategies,
     CandidateLogicalASAPDAGs, CompositionDecision, GlobalSelection, Matcher, Proposals,
     RankedTargetSubDAGCandidates, Realization, RealizationError, RecurrenceProfileMap,
     RejectedCandidate, Replacement, ReplacementProvenance, ReplacementStrategy, ReplacementSubDAG,
-    SharedSubDagStrategy, SketchAlgorithmStrategy, TargetSubDAG, TargetSubDAGCandidates,
-    TargetSubDAGSelection, MAX_SEARCH_ITERATIONS,
+    SharedSubDagStrategy, TargetSubDAG, TargetSubDAGCandidates, TargetSubDAGSelection,
+    MAX_SEARCH_ITERATIONS,
 };
 pub use rewrite::{AvgToSumOverCountStrategy, SemanticEquivalentRewriteStrategy};
 pub use summary_maintenance_dag_export::{

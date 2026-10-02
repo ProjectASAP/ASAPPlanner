@@ -8,7 +8,7 @@ use std::rc::Rc;
 
 use asap_aware_mapping::replacement::{retain_exact, RealizationError};
 use asap_aware_mapping::{
-    Replacement, ReplacementStrategy, ReplacementSubDAG, SketchAlgorithmStrategy, TargetSubDAG,
+    ASAPStrategies, Replacement, ReplacementStrategy, ReplacementSubDAG, TargetSubDAG,
 };
 use asap_frontend_promql::PromqlError;
 #[path = "../support.rs"]
@@ -65,7 +65,7 @@ fn queries(corpus: &str) -> impl Iterator<Item = &str> {
 
 fn post_asap_candidate(root: &Rc<OperatorNode>) -> Result<Rc<OperatorNode>, RealizationError> {
     let target = TargetSubDAG::new(root);
-    match SketchAlgorithmStrategy::default_cost_model()
+    match ASAPStrategies::default_cost_model()
         .replacements(&target)
         .into_iter()
         .next()

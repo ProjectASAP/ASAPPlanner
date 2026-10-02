@@ -17,7 +17,7 @@ use std::rc::Rc;
 
 use asap_aware_mapping::replacement::{retain_exact, RealizationError};
 use asap_aware_mapping::{
-    Replacement, ReplacementStrategy, ReplacementSubDAG, SketchAlgorithmStrategy, TargetSubDAG,
+    ASAPStrategies, Replacement, ReplacementStrategy, ReplacementSubDAG, TargetSubDAG,
 };
 use asap_frontend_promql::PromqlError as LoweringError;
 #[path = "../support.rs"]
@@ -27,14 +27,14 @@ use asap_types::types::AccuracyTarget;
 use support::lower_promql;
 
 /// This crate has no "bind me one tree" public API any more —
-/// `SketchAlgorithmStrategy::replacements` always returns every candidate, and
+/// `ASAPStrategies::replacements` always returns every candidate, and
 /// a caller decides what to keep. This test-only helper reproduces the
 /// take-the-first-(`cost_model`-preferred)-candidate pattern so [`bind_tally`]
 /// gets one representative `Result` per query, matching what a totality
 /// check over the whole corpus wants.
 fn bind(root: &Rc<OperatorNode>) -> Result<Rc<OperatorNode>, RealizationError> {
     let target = TargetSubDAG::new(root);
-    match SketchAlgorithmStrategy::default_cost_model()
+    match ASAPStrategies::default_cost_model()
         .replacements(&target)
         .into_iter()
         .next()

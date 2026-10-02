@@ -13,7 +13,7 @@ use asap_aware_mapping::pass::{PlanOutput, PlanningModels};
 use asap_aware_mapping::replacement::{default_size_params, DEFAULT_DELTA};
 use asap_aware_mapping::{
     global_selection_with_summary_maintenance_lifecycles, search_workload_with_targets,
-    ReplacementStrategy, SketchAlgorithmStrategy, WorkloadDemand,
+    ASAPStrategies, ReplacementStrategy, WorkloadDemand,
 };
 use asap_aware_mapping::{
     CostModel, CostRate, DefaultCostModel, Horizon, LifecycleInput, SummaryMaintenanceCapabilities,
@@ -508,7 +508,7 @@ fn certified_frequency_evaluations_share_one_univmon_state() {
         .map(|(index, (expr, (_, epsilon)))| (index, expr, Some(AccuracyTarget::Epsilon(epsilon))))
         .collect();
     let strategies: Vec<Box<dyn ReplacementStrategy>> =
-        vec![Box::new(SketchAlgorithmStrategy::new_with_planning_inputs(
+        vec![Box::new(ASAPStrategies::new_with_planning_inputs(
             &CHEAP_SUMMARY,
             &UnivMonEvidence,
             &EqualSplitAllocator,

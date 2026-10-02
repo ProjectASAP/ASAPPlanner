@@ -43,7 +43,7 @@
 //! Both are follow-ups (issue #253 itself scopes to "the concrete case in
 //! Peilin's comment"), not correctness bugs in what ships here — a node
 //! outside this scope simply doesn't `match`, the same "safe but
-//! uninformative" fallback [`SketchAlgorithmStrategy`]/[`SharedSubDagStrategy`]
+//! uninformative" fallback [`ASAPStrategies`]/[`SharedSubDagStrategy`]
 //! already use for shapes they don't have an opinion on.
 //!
 //! ## Non-goals (mirrors [`replacement`]'s own discipline)
@@ -379,7 +379,7 @@ pub(crate) fn composed_aggregate_rewrite(root: &Rc<OperatorNode>) -> Option<Rc<O
 /// a `BinaryOp` — see the module docs for why keeping the accumulators in
 /// separate relational nodes lets later strategies reach them independently.
 ///
-/// A unit struct: unlike [`SketchAlgorithmStrategy`], this strategy doesn't
+/// A unit struct: unlike [`ASAPStrategies`], this strategy doesn't
 /// bind anything (its one [`Replacement`] is always [`Replacement::Rewrite`],
 /// never [`Replacement::Summary`]) and so has no [`CostModel`](crate::CostModel)
 /// to hold a reference to — the same "no state needed" shape

@@ -31,7 +31,7 @@
 //! Two `NonASAPOp::Aggregate` nodes are accuracy-near-duplicates here iff,
 //! **in this order**:
 //!
-//! 1. Both are the same bindable shape [`crate::replacement::SketchAlgorithmStrategy`]
+//! 1. Both are the same bindable shape [`crate::replacement::ASAPStrategies`]
 //!    itself targets — a single measure, no `HAVING` (`bindable_intent`'s own
 //!    scope) — **and** that one measure is one of the four accuracy-bearing
 //!    [`AggIntent`] variants ([`crate::replacement::accuracy_target`]'s own
@@ -105,7 +105,7 @@
 //!
 //! Like every [`ReplacementStrategy`], this only ever *proposes* — the
 //! looser-accuracy consumer's own independently-sized candidate (from
-//! [`crate::replacement::SketchAlgorithmStrategy`]) stays in its
+//! [`crate::replacement::ASAPStrategies`]) stays in its
 //! [`crate::replacement::TargetSubDAGCandidates`] right alongside this strategy's
 //! "read the tighter sibling instead" [`Replacement::Rewrite`] candidate;
 //! [`crate::cost_model::CostModel`]-driven ranking picks between them;
@@ -176,7 +176,7 @@ type BindableAccuracyAggregate<'a> = (
 
 /// The `(reduction, intent, accuracy, output_names, child)` shape this
 /// module operates on: the same single-measure, no-`HAVING` bindable shape
-/// [`crate::replacement::SketchAlgorithmStrategy`] targets (see that
+/// [`crate::replacement::ASAPStrategies`] targets (see that
 /// module's private `bindable_intent`), further narrowed to a measure whose
 /// intent actually carries an [`AccuracyTarget`]
 /// ([`crate::replacement::accuracy_target`]'s own scope: `Count` /
@@ -838,7 +838,7 @@ mod tests {
             "global_selection must commit to some candidate for a single-consumer looser target"
         );
         // With no recompute term at all (it never rebuilds `target`), this
-        // candidate strictly undercuts every SketchAlgorithmStrategy
+        // candidate strictly undercuts every ASAPStrategies
         // candidate (which each pay a recompute term on top of their own
         // maintenance term) under DefaultCostModel's numbers — the sane
         // direction: reading an already-necessary sibling should be able to

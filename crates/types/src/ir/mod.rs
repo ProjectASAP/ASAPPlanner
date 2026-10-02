@@ -6,6 +6,9 @@
 //! - [`non_asap`] — [`NonASAPOp`]: ordinary query operators.
 //! - [`asap`] — [`ASAPOp`]: summary-state construction, operations and evaluations.
 //! - [`scalar`] — [`ScalarExpr`]: value computation owned by operator fields.
+//! - [`operator_properties`] — operator parameters, such as grouping and window frames.
+//! - [`aggregate_schema`] — aggregate output-column/type derivation.
+//! - [`error`] — errors from schema and type derivation.
 
 pub mod asap;
 pub mod canonicalize;

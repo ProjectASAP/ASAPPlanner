@@ -18,8 +18,8 @@ use asap_aware_mapping::cost_model::{
 };
 use asap_aware_mapping::exact_composition::ExactOperation;
 use asap_aware_mapping::replacement::{
-    default_strategies_with, search_workload_with, Replacement, ReplacementProvenance,
-    ReplacementStrategy, SketchAlgorithmStrategy, TargetSubDAG,
+    default_strategies_with, search_workload_with, ASAPStrategies, Replacement,
+    ReplacementProvenance, ReplacementStrategy, TargetSubDAG,
 };
 use asap_aware_mapping::{
     CostModel, DefaultCostModel, EvaluationRate, ExplanationKind, OperationPlacement,
@@ -380,7 +380,7 @@ fn every_exact_accumulator_is_finalized_before_an_outer_sketch() {
     for (inner, kind) in cases {
         let outer = agg(vec![], default_quantile(0.9), inner);
         let target = TargetSubDAG::new(&outer);
-        let candidates = SketchAlgorithmStrategy::default_cost_model().replacements(&target);
+        let candidates = ASAPStrategies::default_cost_model().replacements(&target);
         let Replacement::SubDag(root) = &candidates[0].replacement else {
             unreachable!()
         };

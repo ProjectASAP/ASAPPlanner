@@ -1,4 +1,10 @@
-//! Schema derivation for grouped and per-series aggregates.
+//! Derive aggregate output columns and types from input schema and reduction.
+//!
+//! [`aggregate_output_schema`] handles grouping keys and aggregate results.
+//! For example, SQL `GROUP BY host` retains the grouping column and adds the
+//! aggregate result; a PromQL per-series range reduction preserves labels
+//! and produces a Float64 sample value. This module derives schemas, not
+//! aggregate values or summary candidates.
 use super::operator_properties::*;
 use super::QueryExprError;
 use crate::pre_asap::{AggIntent, ColumnId, ColumnRef, DataType, Field, FieldDataType, Schema};

@@ -130,7 +130,7 @@ a selected replacement directly contains:
 {
   "decision": {
     "id": 7,
-    "strategy": "SketchAlgorithmStrategy",
+    "strategy": "ASAPStrategies",
     "rationale": "count realizes as a Cms sketch",
     "rank": 0,
     "cost": 1.14001088,

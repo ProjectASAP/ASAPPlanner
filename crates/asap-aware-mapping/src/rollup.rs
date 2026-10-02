@@ -112,7 +112,7 @@ use crate::replacement::{Replacement, ReplacementStrategy, ReplacementSubDAG, Ta
 
 /// The `(by, intent, child)` shape this strategy operates on: a single
 /// measure, no `HAVING` — the same bindable shape
-/// [`crate::replacement::SketchAlgorithmStrategy`] requires (see that module's
+/// [`crate::replacement::ASAPStrategies`] requires (see that module's
 /// private `bindable_intent`) — **plus** a genuine [`Reduction::Reduce`]
 /// grouping to compare (not [`Reduction::PerEntity`], which has no `by` set
 /// at all). `None` for anything else, including a multi-measure or `HAVING`

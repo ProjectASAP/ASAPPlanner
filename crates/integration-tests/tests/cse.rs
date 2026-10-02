@@ -67,7 +67,7 @@ fn duplicate_workload_queries_collapse_onto_one_memo_group() {
     );
 
     // The single shared root is one discovered TargetSubDAG, holding one
-    // TargetSubDAGCandidates with consumer_count 2 — SketchAlgorithmStrategy's one
+    // TargetSubDAGCandidates with consumer_count 2 — ASAPStrategies's one
     // ExactAggregate candidate *and* SharedSubDagStrategy's share-vs-
     // recompute pair, exactly as `shared_aggregate_across_two_roots_gets_both_strategies_candidates`
     // (asap-aware-mapping::replacement's own equivalent, internal test)

@@ -6,7 +6,7 @@ set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/../.."
 
 # --epsilon asks for an approximate accuracy target instead of the default
-# Exact, so SketchAlgorithmStrategy actually has a sketch alternative to
+# Exact, so ASAPStrategies actually has a sketch alternative to
 # report — without it, no query below would ever pick up a `notes` badge
 # (see crates/devtools/src/bin/dag_export.rs's own `--epsilon` doc comment).
 cargo run -p asap-devtools --bin dag_export -- \

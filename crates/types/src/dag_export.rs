@@ -1562,7 +1562,7 @@ mod tests {
             workload_cost: None,
             rejections: vec![TargetRejection {
                 target_pre_id: 0,
-                strategy: "SketchAlgorithmStrategy".into(),
+                strategy: "ASAPStrategies".into(),
                 description: "quantile over quantile".into(),
                 error: AccuracyError::UnsupportedComposition {
                     operator: CompositionOperator::ApproximateAggregate,

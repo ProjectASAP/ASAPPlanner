@@ -15,7 +15,7 @@
 //
 // `--epsilon <f64>` (default 0.01) sets the `AccuracyTarget` every query in
 // every corpus lowers with. Without an approximate target,
-// `SketchAlgorithmStrategy` never has a genuine sketch alternative to
+// `ASAPStrategies` never has a genuine sketch alternative to
 // report — see `dag_export`'s own `--epsilon` doc comment for the same
 // point, made there per-query instead of per-run.
 //

@@ -23,7 +23,7 @@
 
 use asap_aware_mapping::replacement::retain_exact;
 use asap_aware_mapping::{
-    Replacement, ReplacementStrategy, ReplacementSubDAG, SketchAlgorithmStrategy, TargetSubDAG,
+    ASAPStrategies, Replacement, ReplacementStrategy, ReplacementSubDAG, TargetSubDAG,
 };
 use asap_devtools::{lower_promql_with_data_ingestion_interval, lower_sql, SqlCatalog};
 use asap_types::ir::OperatorNode;
@@ -34,12 +34,12 @@ use std::rc::Rc;
 
 const ACCURACY: AccuracyTarget = AccuracyTarget::Epsilon(0.01);
 
-/// `SketchAlgorithmStrategy::replacements` returns every candidate. This
+/// `ASAPStrategies::replacements` returns every candidate. This
 /// debug tool prints all of them so callers can inspect the planner's choices.
 /// If the strategy has none, preserve the single pre-ASAP fallback output.
 fn bind_all(root: &Rc<OperatorNode>) -> Result<Vec<Rc<OperatorNode>>, String> {
     let target = TargetSubDAG::new(root);
-    let candidates = SketchAlgorithmStrategy::default_cost_model()
+    let candidates = ASAPStrategies::default_cost_model()
         .replacements(&target)
         .into_iter()
         .filter_map(|candidate| match candidate {
@@ -149,7 +149,7 @@ mod tests {
             1_000,
         )
         .expect("query lowers to pre-ASAP IR");
-        let expected = SketchAlgorithmStrategy::default_cost_model()
+        let expected = ASAPStrategies::default_cost_model()
             .replacements(&TargetSubDAG::new(&expr))
             .len();
 

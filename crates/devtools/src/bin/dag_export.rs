@@ -12,7 +12,7 @@
 // `--epsilon <f64>` is optional and applies to every query in the run: it
 // lowers with `AccuracyTarget::Epsilon(<f64>)` instead of the default
 // `AccuracyTarget::Exact`. Without it, every `AggIntent` lowers exact and
-// `asap_aware_mapping::SketchAlgorithmStrategy` never has a genuine sketch
+// `asap_aware_mapping::ASAPStrategies` never has a genuine sketch
 // alternative to report — so no node ever picks up a `SketchApproximation`
 // note. Pass it to actually exercise that path, e.g.:
 //   cargo run -p asap-lower --bin dag_export -- \
@@ -41,7 +41,7 @@
 //     `asap_types::dag_export::export_post_asap`.
 //
 // Together these surface every one of the four concrete replacement kinds:
-// the sketch family `SketchAlgorithmStrategy`/`HydraGroupingStrategy` bound,
+// the sketch family `ASAPStrategies`/`HydraGroupingStrategy` bound,
 // the CSE share/recompute choice `SharedSubDagStrategy` found, the
 // workload-aware roll-up `RollupStrategy` derived, and the `avg ->
 // sum/count` rewrite `AvgToSumOverCountStrategy` proposes. Without
@@ -1128,7 +1128,7 @@ fn target_replacement(
 
 /// Is `replacement` `retain_exact`'s conservative no-op fallback — the
 /// target itself, unbound, carrying only an exact "kept pre-ASAP" guarantee?
-/// `SketchAlgorithmStrategy` emits it for an intent with no summary
+/// `ASAPStrategies` emits it for an intent with no summary
 /// realization at all (`STDDEV_POP`, `AVG`, ... dispatch to
 /// `Realization::PassThrough`). It is "nothing to bind here", not a
 /// replacement decision. A logical rewrite (no guarantee yet) and any sub-DAG
@@ -1250,7 +1250,7 @@ fn run_post_asap_with_progress(
     // `Realization::PassThrough` with no alternative at all, per
     // `realizations_for_intent`'s own doc) an intent with no summary
     // realization whatsoever. This isn't a replacement decision — it's
-    // `SketchAlgorithmStrategy` saying "nothing to bind here" — the
+    // `ASAPStrategies` saying "nothing to bind here" — the
     // identical "no-op candidate" concept `explanation.rs`'s own
     // `sketch_finding_reason` already excludes from being reported as a
     // finding ("a candidate list containing only the trivial no-op

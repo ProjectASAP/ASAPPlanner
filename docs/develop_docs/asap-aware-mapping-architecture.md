@@ -201,7 +201,7 @@ cost.
 
 The default context-free registry contains five `ReplacementStrategy` implementations:
 
-- `SketchAlgorithmStrategy` matches supported aggregate and binary shapes. Its
+- `ASAPStrategies` matches supported aggregate and binary shapes. Its
   `replacements(target)` method constructs every legal post-ASAP summary sub-DAG,
   including applicable sketch, exact-accumulator, and pass-through
   realizations. Candidates are sized and ordered for the target's accuracy

@@ -162,7 +162,7 @@ aggregation must compute without committing to a physical summary algorithm.
 A realization may be an approximate sketch, an exact mergeable
 accumulator, or a pass-through that keeps the original operation instead of
 building a summary. `realizations_for_intent` enumerates these concrete
-realizations; `SketchAlgorithmStrategy::replacements()` constructs each one as
+realizations; `ASAPStrategies::replacements()` constructs each one as
 a `ReplacementSubDAG`. It returns all
 candidates in preferred order without selecting a winner. At workload scale,
 `search_workload`/`search_workload_with` preserve all supported legal alternatives
@@ -188,7 +188,7 @@ The concrete flow is:
 ```text
 AggIntent
   -> realizations_for_intent(): enumerate Realization values
-  -> SketchAlgorithmStrategy: construct ReplacementSubDAG candidates
+  -> ASAPStrategies: construct ReplacementSubDAG candidates
   -> CandidateLogicalASAPDAGs: store and rank candidates
   -> downstream deployment: select and place a final choice
 ```
@@ -318,7 +318,7 @@ pub struct RankedTargetSubDAGCandidates<'a> {
 
 `search_workload(roots)` runs the shared-sub-DAG pass once, discovers every target across every root's whole DAG (not just root-level sharing — a `SharedSubDagStrategy` candidate three levels under an unshared `Filter` is exactly as real a site as a shared whole root), and asks every registered strategy to a fixpoint. Two logically different candidates at two different targets are never copied into two separate plans — they're two entries in two different `TargetSubDAGCandidates`s, sharing every other node in the workload by construction.
 
-`CandidateLogicalASAPDAGs::cost_sorted(cost_model)` is the one ranking step: for each candidate set, it dispatches by candidate shape — the `SharedSubDagStrategy` share/recompute pair (recognized by `ReplacementProvenance::CseShare`/`CseRecompute`) goes through `CostModel::cse_share_decision`; a set with a Hydra shared-grid alternative goes through `CostModel::grouping_state_cost`; a set whose candidates all realize sketches (a `SketchAlgorithmStrategy` choice) goes through `CostModel::rank_candidates`; and any other mixed set is ordered by `CostModel::candidate_cost`. Every candidate gets a numeric cost aligned index-for-index in `costs`. Count in, count out—nothing is dropped to produce a ranking. Legality checks
+`CandidateLogicalASAPDAGs::cost_sorted(cost_model)` is the one ranking step: for each candidate set, it dispatches by candidate shape — the `SharedSubDagStrategy` share/recompute pair (recognized by `ReplacementProvenance::CseShare`/`CseRecompute`) goes through `CostModel::cse_share_decision`; a set with a Hydra shared-grid alternative goes through `CostModel::grouping_state_cost`; a set whose candidates all realize sketches (a `ASAPStrategies` choice) goes through `CostModel::rank_candidates`; and any other mixed set is ordered by `CostModel::candidate_cost`. Every candidate gets a numeric cost aligned index-for-index in `costs`. Count in, count out—nothing is dropped to produce a ranking. Legality checks
 may already have removed proposals before this boundary. In particular,
 `search_workload_with_targets` checks explicit per-root targets, while retaining
 direct DDSketch ratios with missing domain evidence and no root guarantee for
@@ -345,7 +345,7 @@ to the selected algorithm and classifies the pair into its category. The public
 `.category()`, `.algorithm()`, and `.params()` accessors expose the committed
 values without permitting an invalid combination.
 
-Where this matters in practice: `CostModel::rank_candidates`, `CostModel::size_params`, and `SketchAlgorithmStrategy::replacements` operate at the **algorithm** level. `summary_candidates(intent)` returns a list of `SketchAlgorithm`s (`[Kll, DDSketch]` for a `Quantile` intent), never a bare `SketchKind` with nothing chosen underneath it. `SketchKind` appears after an algorithm has been selected and sized—on `Realization::Sketch(SketchKind)` and `FieldDataType::Sketch(SketchKind, GroupingStrategy)`.
+Where this matters in practice: `CostModel::rank_candidates`, `CostModel::size_params`, and `ASAPStrategies::replacements` operate at the **algorithm** level. `summary_candidates(intent)` returns a list of `SketchAlgorithm`s (`[Kll, DDSketch]` for a `Quantile` intent), never a bare `SketchKind` with nothing chosen underneath it. `SketchKind` appears after an algorithm has been selected and sized—on `Realization::Sketch(SketchKind)` and `FieldDataType::Sketch(SketchKind, GroupingStrategy)`.
 
 `Sample`, `Wavelet`, and `StatModel` each use a flat `(Kind, Params)` pair. `Sketch` needs the additional algorithm level because multiple algorithms can serve the same purpose—for example, KLL and DDSketch both answer quantile queries.
 

@@ -260,7 +260,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 | `search_workload_with_targets` | Roots with optional end-to-end targets, strategies, accuracy model | Candidate space with supplied root-target checks; `None` does not supply a root-level requirement; uncertified direct DDSketch ratios remain available for backend selection |
 | `CandidateLogicalASAPDAGs::cost_sorted` | Cost model | `Vec<RankedTargetSubDAGCandidates>`; retains alternatives and pairs `candidates[i]` with `costs[i]` |
 | `CandidateLogicalASAPDAGs::cost_sorted_with_recurrence` | Cost model, recurrence profiles, optional horizon | Ranked per-target candidate sets or `RecurrenceError`; uses recurrence for applicable share/recompute comparisons |
-| `SketchAlgorithmStrategy::replacements` through `ReplacementStrategy` | One `TargetSubDAG` | Alternatives at that target; not whole-workload search |
+| `ASAPStrategies::replacements` through `ReplacementStrategy` | One `TargetSubDAG` | Alternatives at that target; not whole-workload search |
 
 `cost_sorted` is a ranking view, not a request to discard all but the first
 candidate. Display costs follow model hooks and may be unavailable/non-finite;
@@ -280,7 +280,7 @@ choices are not multiplied in. Exceeding `expansion_limit` is an error, never a
 partial inventory.
 
 For PromQL roots that carry a target, `search_workload_with_targets` also asks
-each strategy's `ReplacementStrategy::propose_for_root`. `SketchAlgorithmStrategy`
+each strategy's `ReplacementStrategy::propose_for_root`. `ASAPStrategies`
 answers an instant-vector TopK with current-series heap realizations over rows
 carrying the complete series identity (`$promql_series_identity`). They are
 finalized, deduplicated, and marked `ReplacementProvenance::RootPhysicalRealization`.
@@ -301,7 +301,7 @@ pass. An omitted strategy contributes no proposals of its own.
 
 | Value to put inside `Box::new(...)` | Meaning | In default factories? |
 | --- | --- | --- |
-| `SketchAlgorithmStrategy::new(&model)` | Enumerates supported exact/sketch implementations and parameter choices for aggregate targets | Yes |
+| `ASAPStrategies::new(&model)` | Enumerates supported exact/sketch implementations and parameter choices for aggregate targets | Yes |
 | `HydraGroupingStrategy::new(&model)` | Considers a shared multi-subpopulation structure for supported grouped sketch families, subject to accuracy evidence | Yes |
 | `SharedSubDagStrategy` | Proposes sharing versus independent recomputation at reused sub-DAGs | Yes |
 | `SemanticEquivalentRewriteStrategy` | Proposes supported equivalent aggregate rewrites, including decomposing average into sum/count | Yes |
@@ -353,7 +353,7 @@ use asap_types::workload::{
 };
 use asap_aware_mapping::{
     search_workload_with_targets, DefaultAccuracyModel, DefaultCostModel,
-    ReplacementStrategy, SketchAlgorithmStrategy, SharedSubDagStrategy,
+    ReplacementStrategy, ASAPStrategies, SharedSubDagStrategy,
 };
 use asap_types::types::AccuracyTarget;
 
@@ -386,7 +386,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let root = lower_promql_workload(&workload, 0)?.remove(0);
     let model = DefaultCostModel;
     let strategies: Vec<Box<dyn ReplacementStrategy + '_>> = vec![
-        Box::new(SketchAlgorithmStrategy::new(&model)),
+        Box::new(ASAPStrategies::new(&model)),
         Box::new(SharedSubDagStrategy),
     ];
     let space = search_workload_with_targets(
@@ -442,7 +442,7 @@ accuracy guarantees.
 ```rust
 use asap_aware_mapping::{
     DefaultAccuracyModel, DefaultCostModel, EqualSplitAllocator,
-    NoAccuracyEvidence, ReplacementStrategy, SketchAlgorithmStrategy,
+    NoAccuracyEvidence, ReplacementStrategy, ASAPStrategies,
 };
 
 fn main() {
@@ -451,7 +451,7 @@ fn main() {
     let allocation = EqualSplitAllocator;
     let evidence = NoAccuracyEvidence;
     let strategies: Vec<Box<dyn ReplacementStrategy + '_>> = vec![Box::new(
-        SketchAlgorithmStrategy::new_with_planning_inputs_and_evidence(
+        ASAPStrategies::new_with_planning_inputs_and_evidence(
             &cost, &accuracy, &allocation, &evidence,
         ),
     )];
@@ -463,16 +463,16 @@ fn main() {
 Constructor definition:
 
 ```text
-SketchAlgorithmStrategy::new_with_planning_inputs_and_evidence(
+ASAPStrategies::new_with_planning_inputs_and_evidence(
     cost_model: &dyn CostModel,
     accuracy_model: &dyn AccuracyModel,
     allocator: &dyn AccuracyBudgetAllocator,
     evidence: &dyn AccuracyEvidenceProvider,
-) -> SketchAlgorithmStrategy
+) -> ASAPStrategies
 ```
 
 All provider arguments are required for this constructor. They must outlive the
-strategy vector. `SketchAlgorithmStrategy::new(&cost_model)` is the shorter
+strategy vector. `ASAPStrategies::new(&cost_model)` is the shorter
 constructor using default accuracy/allocation and no extra evidence.
 
 | Extension point | What it controls | What it cannot establish alone |
@@ -488,7 +488,7 @@ with the intended model/evidence; replacing only the final sorting model does no
 regenerate parameter choices. For evidence-aware defaults, use
 `asap_aware_mapping::replacement::default_strategies_with_evidence`.
 For custom accuracy/allocation/evidence on sketches,
-`SketchAlgorithmStrategy::new_with_planning_inputs_and_evidence` exposes these providers.
+`ASAPStrategies::new_with_planning_inputs_and_evidence` exposes these providers.
 Keep each provider's evidence scope and freshness valid for the query population.
 
 ## Workload inputs and defaults

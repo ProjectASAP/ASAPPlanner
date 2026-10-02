@@ -8,7 +8,7 @@ use std::{collections::BTreeMap, collections::BTreeSet, rc::Rc, sync::Arc};
 
 use asap_aware_mapping::cost_model::DefaultCostModel;
 use asap_aware_mapping::{
-    search_workload, Replacement, ReplacementStrategy, ReplacementSubDAG, SketchAlgorithmStrategy,
+    search_workload, ASAPStrategies, Replacement, ReplacementStrategy, ReplacementSubDAG,
     TargetSubDAG,
 };
 use asap_integration_tests::fixtures::lower_promql;
@@ -56,7 +56,7 @@ fn canonical(labels: &Series) -> Series {
 /// summary replacement of the root.
 fn candidates(query: &str, accuracy: AccuracyTarget) -> Vec<Rc<OperatorNode>> {
     let root = lower_promql(query, accuracy).expect("lowering failed");
-    let mut result = SketchAlgorithmStrategy::default_cost_model()
+    let mut result = ASAPStrategies::default_cost_model()
         .replacements(&TargetSubDAG::new(&root))
         .into_iter()
         .filter_map(|candidate| match candidate {

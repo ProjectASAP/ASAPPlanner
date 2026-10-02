@@ -2,7 +2,7 @@
 //!
 //! Drives the full pipeline — PromQL text → non-ASAP `OperatorNode`
 //! (`lower_promql`) → post-ASAP `OperatorNode` DAG (via
-//! `SketchAlgorithmStrategy::replacements`, see [`realize`] below) — and pins
+//! `ASAPStrategies::replacements`, see [`realize`] below) — and pins
 //! the summary-bound shape node by node, including the family `(Kind,
 //! Params)` committed on each edge's schema.
 
@@ -15,8 +15,8 @@ use asap_aware_mapping::accuracy::{
 use asap_aware_mapping::cost_model::DefaultCostModel;
 use asap_aware_mapping::replacement::{is_logical_rewrite, retain_exact, RealizationError};
 use asap_aware_mapping::{
-    search_workload, search_workload_with_targets, AccuracyModel, Replacement, ReplacementStrategy,
-    ReplacementSubDAG, SketchAlgorithmStrategy, TargetSubDAG,
+    search_workload, search_workload_with_targets, ASAPStrategies, AccuracyModel, Replacement,
+    ReplacementStrategy, ReplacementSubDAG, TargetSubDAG,
 };
 use asap_integration_tests::fixtures::lower_promql;
 use asap_integration_tests::post_asap::{post_asap_dag, timed};
@@ -33,13 +33,13 @@ use asap_types::pre_asap::schema::DataType;
 use asap_types::types::AccuracyTarget;
 
 /// This crate has no "bind me one tree" public API any more —
-/// `SketchAlgorithmStrategy::replacements` always returns every candidate, and
+/// `ASAPStrategies::replacements` always returns every candidate, and
 /// a caller decides what to keep. This test-only helper reproduces the
 /// take-the-first-(`cost_model`-preferred)-candidate pattern so the
 /// single-answer pins below don't all repeat it by hand.
 fn realize(root: &Rc<OperatorNode>) -> Result<Rc<OperatorNode>, RealizationError> {
     let target = TargetSubDAG::new(root);
-    match SketchAlgorithmStrategy::default_cost_model()
+    match ASAPStrategies::default_cost_model()
         .replacements(&target)
         .into_iter()
         .next()
@@ -67,8 +67,7 @@ fn distinct_over_time_offers_hll_cardinality_evaluation() {
         AccuracyTarget::Epsilon(0.02),
     )
     .unwrap();
-    let candidates =
-        SketchAlgorithmStrategy::default_cost_model().replacements(&TargetSubDAG::new(&root));
+    let candidates = ASAPStrategies::default_cost_model().replacements(&TargetSubDAG::new(&root));
     for candidate in &candidates {
         if let Replacement::SubDag(node) = &candidate.replacement {
             node.validate_structure().unwrap();
@@ -267,7 +266,7 @@ fn grouped_rate_topk_consumes_finalized_rate_values() {
         AccuracyTarget::Epsilon(0.01),
     )
     .unwrap();
-    let strategy = SketchAlgorithmStrategy::new_with_planning_inputs_and_evidence(
+    let strategy = ASAPStrategies::new_with_planning_inputs_and_evidence(
         &DefaultCostModel,
         &DefaultAccuracyModel,
         &EqualSplitAllocator,
@@ -333,7 +332,7 @@ fn weighted_topk_keeps_candidates_with_missing_population_evidence() {
         AccuracyTarget::Epsilon(0.01),
     )
     .unwrap();
-    let strategy = SketchAlgorithmStrategy::new_with_planning_inputs_and_evidence(
+    let strategy = ASAPStrategies::new_with_planning_inputs_and_evidence(
         &DefaultCostModel,
         &DefaultAccuracyModel,
         &EqualSplitAllocator,
@@ -357,8 +356,7 @@ fn weighted_topk_exports_symbolic_evidence_requirements() {
         },
     )
     .unwrap();
-    let candidates =
-        SketchAlgorithmStrategy::default_cost_model().replacements(&TargetSubDAG::new(&root));
+    let candidates = ASAPStrategies::default_cost_model().replacements(&TargetSubDAG::new(&root));
     let candidate = candidates
         .iter()
         .find(|candidate| candidate.rationale.contains("CmsWithHeap"))
@@ -388,7 +386,7 @@ fn weighted_topk_rejects_invalid_population_evidence() {
         AccuracyTarget::Epsilon(0.01),
     )
     .unwrap();
-    let strategy = SketchAlgorithmStrategy::new_with_planning_inputs_and_evidence(
+    let strategy = ASAPStrategies::new_with_planning_inputs_and_evidence(
         &DefaultCostModel,
         &DefaultAccuracyModel,
         &EqualSplitAllocator,
@@ -413,7 +411,7 @@ fn rate_and_increase_topk_use_summary_scores_and_grouped_limits() {
             },
         )
         .unwrap();
-        let strategy = SketchAlgorithmStrategy::new_with_planning_inputs_and_evidence(
+        let strategy = ASAPStrategies::new_with_planning_inputs_and_evidence(
             &DefaultCostModel,
             &DefaultAccuracyModel,
             &EqualSplitAllocator,
@@ -641,7 +639,7 @@ fn planner_only_e2e_temporal_topk_preserves_query_update_and_evaluation_contract
             },
         )
         .expect("lower temporal Top-K");
-        let strategy = SketchAlgorithmStrategy::new_with_planning_inputs_and_evidence(
+        let strategy = ASAPStrategies::new_with_planning_inputs_and_evidence(
             &DefaultCostModel,
             &DefaultAccuracyModel,
             &EqualSplitAllocator,
@@ -810,7 +808,7 @@ fn planner_heap_topk_reference_execution_matches_ground_truth() {
             },
         )
         .unwrap();
-        let strategy = SketchAlgorithmStrategy::new_with_planning_inputs_and_evidence(
+        let strategy = ASAPStrategies::new_with_planning_inputs_and_evidence(
             &DefaultCostModel,
             &DefaultAccuracyModel,
             &EqualSplitAllocator,
@@ -1230,7 +1228,7 @@ fn ddsketch_ratio_rejects_unsafe_domains() {
             AccuracyTarget::Epsilon(0.01),
         )
         .unwrap();
-        let strategy = SketchAlgorithmStrategy::new_with_planning_inputs_and_evidence(
+        let strategy = ASAPStrategies::new_with_planning_inputs_and_evidence(
             &DefaultCostModel,
             &DefaultAccuracyModel,
             &EqualSplitAllocator,
@@ -1271,7 +1269,7 @@ fn ddsketch_ratio_rejects_one_invalid_domain_when_the_other_is_missing() {
         AccuracyTarget::Epsilon(0.01),
     )
     .unwrap();
-    let strategy = SketchAlgorithmStrategy::new_with_planning_inputs_and_evidence(
+    let strategy = ASAPStrategies::new_with_planning_inputs_and_evidence(
         &DefaultCostModel,
         &DefaultAccuracyModel,
         &EqualSplitAllocator,
@@ -1293,7 +1291,7 @@ fn ddsketch_ratio_bound_holds_for_signed_pinned_sketch_evaluations() {
             AccuracyTarget::Epsilon(0.01),
         )
         .unwrap();
-        let strategy = SketchAlgorithmStrategy::new_with_planning_inputs_and_evidence(
+        let strategy = ASAPStrategies::new_with_planning_inputs_and_evidence(
             &DefaultCostModel,
             &DefaultAccuracyModel,
             &EqualSplitAllocator,
@@ -1369,7 +1367,7 @@ fn ddsketch_ratio_requires_a_supported_population_size() {
     .unwrap();
     for count in [0, (1u64 << 53) + 1] {
         let evidence = PopulationEvidence(count);
-        let strategy = SketchAlgorithmStrategy::new_with_planning_inputs_and_evidence(
+        let strategy = ASAPStrategies::new_with_planning_inputs_and_evidence(
             &DefaultCostModel,
             &DefaultAccuracyModel,
             &EqualSplitAllocator,

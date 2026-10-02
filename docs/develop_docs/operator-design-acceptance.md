@@ -31,10 +31,22 @@ roots. Replacement regions and CSE use `SubDag` and `share_common_subdags`.
 Bulk retained-sub-DAG cost evidence may cover only ordinary operators; it is
 rejected if any descendant is an ASAP operator, so summary work cannot be hidden.
 Supporting operator parameters live in `ir::operator_properties`; schema derivation
-and errors have dedicated modules. Summary operations use “evaluation”;
+and errors have dedicated modules:
+
+| Module | Responsibility | Example |
+|---|---|---|
+| `ir::operator_properties` | Parameter types stored in operator payloads, rather than derived node metadata | `GroupKeys` for aggregation, `JoinKind` for joins, `WindowFrame` for SQL windows |
+| `ir::aggregate_schema` | Compute output columns and types from input schema and aggregate reduction | Preserve grouping columns and derive the aggregate result column |
+| `ir::error` | `QueryExprError` from schema/type derivation; other validation errors remain separate | Invalid grouping-column index or scalar-function signature |
+
+Summary operations use “evaluation”;
 `SketchStatistic` specifies the statistic to compute, rather than another query.
 Wire version 7 reflects these renamed serialized variants and fields. Regenerate
 older exported graphs and native programs; no legacy-name aliases are provided.
+
+`ASAPStrategies` proposes supported ASAP realizations, including exact
+accumulators and sketches; its name does not restrict candidates to sketches.
+The API, diagnostics, caller imports, and current documentation use this name.
 
 ## Document examples
 
