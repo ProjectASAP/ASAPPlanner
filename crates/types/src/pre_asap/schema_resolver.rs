@@ -86,7 +86,7 @@ impl<C: SchemaCatalog> SchemaResolver<C> {
         dag: &UnresolvedQueryExpr,
         inherited: &[String],
     ) -> Schema {
-        let mut columns: Vec<Field> = leftmost_scan_name(tree)
+        let mut columns: Vec<Field> = leftmost_scan_name(dag)
             .and_then(|name| self.catalog.columns_for(name))
             .unwrap_or_else(default_leaf_columns);
 
