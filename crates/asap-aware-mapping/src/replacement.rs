@@ -528,7 +528,7 @@ impl ReplacementSubDAG {
     pub fn has_missing_accuracy_evidence(&self) -> bool {
         matches!(
             &self.replacement,
-            Replacement::Subtree(node) if node.is_asap() && has_missing_accuracy_evidence(node)
+            Replacement::Subtree(node) if !is_logical_rewrite(node) && has_missing_accuracy_evidence(node)
         )
     }
 
@@ -540,7 +540,9 @@ impl ReplacementSubDAG {
             Replacement::ExactComposition(composition) => {
                 cost_model.value_operation_support_evidence(&composition.op, composition.placement)
             }
-            Replacement::Subtree(node) if node.is_asap() => {
+            // Any summary decision, including one rooted in a relational
+            // operator above its readouts, asks the deployment for support.
+            Replacement::Subtree(node) if !is_logical_rewrite(node) => {
                 cost_model.summary_support_evidence(node)
             }
             Replacement::Subtree(_) => Some(true),
@@ -1361,34 +1363,9 @@ impl<'a> SketchAlgorithmStrategy<'a> {
     /// a complete, synchronized population and bind the matching window; this
     /// candidate never incrementally adds one window's rates to another.
     ///
-    /// The node DAG carries no timing: the `FinalizeExactAccumulator` over
-    /// the per-series `Rate` state runs when its consumer runs (at ingestion
-    /// time beneath the maintained heap/Sum), so `place` only checks that
-    /// the candidate has the fixed-window shape.
     pub fn fixed_window_rate_candidates(&self, root: &Rc<OperatorNode>) -> Proposals {
         fn place(node: &Rc<OperatorNode>) -> Option<Rc<OperatorNode>> {
-            match &node.operator {
-                Operator::ASAP(ASAPOp::FinalizeExactAccumulator { child })
-                    if matches!(&child.operator, Operator::ASAP(ASAPOp::SummaryAgg {
-                        family: FieldDataType::ExactAggregate(ExactKind::Rate, _),
-                        reduction: Reduction::PerEntity, child: source, ..
-                    }) if matches!(source.non_asap(), Some(NonASAPOp::TimeRange { .. }))) =>
-                {
-                    Some(Rc::clone(node))
-                }
-                Operator::ASAP(
-                    ASAPOp::FinalizeExactAccumulator { child }
-                    | ASAPOp::SummaryAgg { child, .. }
-                    | ASAPOp::SummaryEstimate {
-                        summary_input: child,
-                        ..
-                    },
-                ) => {
-                    place(child)?;
-                    Some(Rc::clone(node))
-                }
-                _ => None,
-            }
+            retime_rate_finalize(node, ExecutionTiming::IngestionTime, true)
         }
         let timed = |node: &Rc<OperatorNode>| {
             asap_types::ir::timing::apply_lifecycle_timings(
@@ -1444,17 +1421,14 @@ impl<'a> SketchAlgorithmStrategy<'a> {
     /// Retain grouped Sum after a per-series Rate readout as a query-time
     /// candidate alongside its complete-window maintenance placement.
     ///
-    /// The node DAG carries no timing, so this candidate has the same shape
-    /// as the fixed-window one; recomputing the grouped Sum at query time is
-    /// a lifecycle choice (`asap_types::ir::timing::LifecycleAssignment`)
-    /// made when the plan is timed, not a different node.
     pub fn query_time_rate_aggregation_candidates(&self, root: &Rc<OperatorNode>) -> Proposals {
         let mut proposals = self.fixed_window_rate_candidates(root);
         proposals.candidates.retain_mut(|candidate| {
             let Replacement::Subtree(node) = &candidate.replacement else { return false };
             if !matches!(&node.operator, Operator::ASAP(ASAPOp::FinalizeExactAccumulator { child })
                 if matches!(&child.operator, Operator::ASAP(ASAPOp::SummaryAgg { family: FieldDataType::ExactAggregate(ExactKind::Sum, _), .. }))) { return false; }
-            candidate.replacement = Replacement::Subtree(Rc::clone(node));
+            let Some(query_time) = retime_rate_finalize(node, ExecutionTiming::QueryTime, false) else { return false };
+            candidate.replacement = Replacement::Subtree(query_time);
             candidate.rationale = "query-time grouped Sum over complete per-series Rate readouts".into();
             true
         });
@@ -2183,6 +2157,60 @@ fn realize_binary(
     )))
 }
 
+/// Rebuild the summary chain above a per-series `Rate` accumulator with its
+/// `FinalizeExactAccumulator` placed at `timing`. `strict` additionally
+/// requires the fixed-window shape (a `PerEntity` Rate over a `TimeRange`);
+/// `None` when no such boundary exists (strict only).
+fn retime_rate_finalize(
+    node: &Rc<OperatorNode>,
+    timing: ExecutionTiming,
+    strict: bool,
+) -> Option<Rc<OperatorNode>> {
+    let is_rate_boundary = |child: &OperatorNode| match &child.operator {
+        Operator::ASAP(ASAPOp::SummaryAgg {
+            family: FieldDataType::ExactAggregate(ExactKind::Rate, _),
+            reduction,
+            child: source,
+            ..
+        }) => {
+            !strict
+                || (matches!(reduction, Reduction::PerEntity)
+                    && matches!(source.non_asap(), Some(NonASAPOp::TimeRange { .. })))
+        }
+        _ => false,
+    };
+    let rebuilt = |operator: Operator, timing: Option<ExecutionTiming>| {
+        Rc::new(OperatorNode {
+            operator,
+            timing,
+            ..node.as_ref().clone()
+        })
+    };
+    match &node.operator {
+        Operator::ASAP(ASAPOp::FinalizeExactAccumulator { child }) if is_rate_boundary(child) => {
+            Some(rebuilt(node.operator.clone(), Some(timing)))
+        }
+        Operator::ASAP(
+            ASAPOp::FinalizeExactAccumulator { child }
+            | ASAPOp::SummaryAgg { child, .. }
+            | ASAPOp::SummaryEstimate {
+                summary_input: child,
+                ..
+            },
+        ) => {
+            let placed = match retime_rate_finalize(child, timing, strict) {
+                Some(placed) => placed,
+                None if strict => return None,
+                None => return Some(Rc::clone(node)),
+            };
+            let operator = node.operator.map_children(|_| Rc::clone(&placed));
+            Some(rebuilt(operator, node.timing))
+        }
+        _ if strict => None,
+        _ => Some(Rc::clone(node)),
+    }
+}
+
 /// Put an explicit read boundary between maintained exact state and a
 /// query-time value consumer. Approximate summaries must already carry a
 /// `SummaryEstimate`, so they deliberately do not pass this predicate.
@@ -2190,15 +2218,17 @@ pub fn finalize_query_candidate(
     node: Rc<OperatorNode>,
     logical_output: &OperatorNode,
 ) -> Result<Rc<OperatorNode>, RealizationError> {
-    finalize_exact_accumulator(node, logical_output)
+    finalize_exact_accumulator(node, logical_output, ExecutionTiming::QueryTime)
 }
 
-/// The read boundary runs when its consumer runs (the node carries no
-/// timing): at query time under a query consumer, at ingestion time beneath
-/// a maintained summary.
+/// The read boundary's placement is fixed here, where the candidate's
+/// semantics decide it (a fresh query-time summary over this evaluation's
+/// finalized values vs. finalized values feeding maintenance); the lifecycle
+/// timing pass honors it.
 fn finalize_exact_accumulator(
     node: Rc<OperatorNode>,
     logical_output: &OperatorNode,
+    placement: ExecutionTiming,
 ) -> Result<Rc<OperatorNode>, RealizationError> {
     let is_exact_state = matches!(
         node.operator,
@@ -2216,10 +2246,13 @@ fn finalize_exact_accumulator(
     // query-time operators that follow this node.
     let schema = lift(&logical_output.schema);
     let guarantee = node.guarantee.clone();
-    Ok(OperatorNode::asap_node(
-        ASAPOp::FinalizeExactAccumulator { child: node },
-        schema,
-        guarantee,
+    Ok(Rc::new(
+        OperatorNode::with_schema(
+            Operator::ASAP(ASAPOp::FinalizeExactAccumulator { child: node }),
+            schema,
+        )
+        .with_guarantee(guarantee)
+        .with_timing(Some(placement)),
     ))
 }
 
@@ -2988,7 +3021,11 @@ fn construct_summary_agg(
         // Moving rate snapshots must never accumulate across evaluations.
         finalize_query_candidate(bound_child, &input.child)?
     } else {
-        let child = finalize_exact_accumulator(bound_child, &input.child)?;
+        let child = finalize_exact_accumulator(
+            bound_child,
+            &input.child,
+            ExecutionTiming::IngestionTime,
+        )?;
         maintenance_exact_values(child).unwrap_or(keep_pre_asap(&input.child)?)
     };
 
@@ -5255,6 +5292,24 @@ impl<'a> GlobalSelection<'a> {
         if let Some(error) = failure {
             return Err(error);
         }
+        // An operator that computes new values from its input rows has no
+        // sound accuracy composition over an approximate input (e.g. `max`
+        // over a quantile readout's rank error). Without a selected
+        // composition such a node stays an exact pre-ASAP subtree; only the
+        // read-time nested SUM keeps its assembled children.
+        let computes_values = matches!(
+            target.non_asap(),
+            Some(NonASAPOp::Aggregate { .. } | NonASAPOp::BinaryOp { .. } | NonASAPOp::SQLWindowFunc { .. })
+        ) && !query_time_nested_sum(target);
+        let approximate_input = children.iter().any(|child| {
+            !child
+                .guarantee
+                .as_ref()
+                .is_some_and(ResultGuarantee::is_exact)
+        });
+        if computes_values && approximate_input {
+            return keep_pre_asap(target);
+        }
         let guarantee = match children.as_slice() {
             [child] => child.guarantee.clone(),
             children
@@ -6742,7 +6797,8 @@ mod tests {
     use super::*;
     use crate::accuracy::PropagationStats;
     use crate::cost_model::Cost;
-    use crate::test_support::lower_promql;
+    use crate::test_support::{agg, agg_per_entity, lower_promql, metric_scan, timed};
+    use asap_types::ir::TimeRangeKind;
     use asap_types::pre_asap::agg_intent::{
         agg_is_exact, default_cardinality, default_quantile, MathFunc, TimeFunc,
     };
@@ -6896,10 +6952,11 @@ mod tests {
     }
 
     fn equi_pred(left: ColumnId, right: ColumnId) -> Predicate {
-        Predicate(QueryExpr::Compare {
-            left: Rc::new(ScalarExpr::Column(left)),
+        Predicate(ScalarExpr::Compare {
+            left: Box::new(ScalarExpr::Column(left)),
             op: asap_types::pre_asap::CompareOpKind::Eq,
-            right: Rc::new(ScalarExpr::Column(right)),
+            right: Box::new(ScalarExpr::Column(right)),
+            semantics: asap_types::ir::ExprSemantics::Sql,
         })
     }
 
@@ -6944,7 +7001,7 @@ mod tests {
             .unwrap()
             .expect("exact ranking is legal for an approximate request");
         assert!(node.guarantee.as_ref().unwrap().is_exact());
-        asap_types::post_asap::compile_post_asap_dag(&node).unwrap();
+        crate::test_support::time_and_export(&node).unwrap();
     }
 
     // Exact Top-K consumes the Planner's maintained temporal values.
@@ -6962,29 +7019,21 @@ mod tests {
                 .unwrap()
                 .expect("exact Top-K candidate");
             assert!(node.guarantee.as_ref().unwrap().is_exact());
-            let SummaryExpr::ValueOperation {
+            let Operator::NonASAP(NonASAPOp::Limit {
                 child: sorted,
-                operation:
-                    ValueOperation::Limit {
-                        n,
-                        offset,
-                        partition_by,
-                    },
-                ..
-            } = &node.operator
+                n,
+                offset,
+                partition_by,
+            }) = &node.operator
             else {
                 panic!("temporal TopK must compose Sort and Limit");
             };
-            assert_eq!((*n, *offset), (5, 0));
-            let SummaryExpr::ValueOperation {
-                operation:
-                    ValueOperation::Sort {
-                        keys,
-                        partition_by: sort_groups,
-                    },
+            assert_eq!((*n, *offset), (Some(5), 0));
+            let Operator::NonASAP(NonASAPOp::Sort {
+                keys,
+                partition_by: sort_groups,
                 child: values,
-                ..
-            } = &sorted.operator
+            }) = &sorted.operator
             else {
                 panic!("Limit must consume sorted temporal values");
             };
@@ -6996,7 +7045,7 @@ mod tests {
             assert_eq!(keys.len(), 1);
             assert!(!keys[0].ascending);
             assert_eq!(node.schema, values.schema);
-            asap_types::post_asap::compile_post_asap_dag(&node).unwrap();
+            crate::test_support::time_and_export(&node).unwrap();
         }
     }
 
@@ -7077,11 +7126,64 @@ mod tests {
 
     #[test]
     fn relational_join_is_exact_only_when_both_inputs_are_exact() {
-        let exact = ResultGuarantee::exact("test exact input");
-        assert!(relational_join_guarantee(Some(&exact), Some(&exact))
-            .is_some_and(|guarantee| guarantee.is_exact()));
-        assert!(relational_join_guarantee(Some(&exact), None).is_none());
-        assert!(relational_join_guarantee(None, Some(&exact)).is_none());
+        // `relational_join_guarantee` folded into assembly's generic
+        // "keep the operator, assemble its children" branch: an assembled
+        // inner equi-`Join` is exact exactly when both assembled inputs are.
+        let join = |left_intent: AggIntent, right_intent: AggIntent| {
+            let left = agg(vec![2], left_intent, metric_scan(&["job"]));
+            let right = agg(vec![2], right_intent, crate::test_support::scan(
+                "n",
+                metric_scan(&["job"]).schema.clone(),
+            ));
+            OperatorNode::non_asap_node(NonASAPOp::Join {
+                kind: asap_types::pre_asap::query_expr::JoinKind::Inner,
+                pred: equi_pred(0, 2),
+                left,
+                right,
+            })
+            .unwrap()
+        };
+        let is_exact = |node: &OperatorNode| {
+            node.guarantee
+                .as_ref()
+                .is_some_and(ResultGuarantee::is_exact)
+        };
+        for (root, both_exact_expected) in [
+            (
+                join(AggIntent::Sum { col: None }, AggIntent::Sum { col: None }),
+                true,
+            ),
+            (
+                join(AggIntent::Sum { col: None }, quantile_eps_intent(0.5, 0.05)),
+                false,
+            ),
+        ] {
+            let space = search_workload(vec![(0usize, Rc::clone(&root))]);
+            let assembled = space
+                .global_selection(&DefaultCostModel)
+                .assemble_selected_query(&space.roots[0].1)
+                .unwrap()
+                .unwrap();
+            let Some(NonASAPOp::Join { left, right, .. }) = assembled.non_asap() else {
+                panic!("the join is kept and its inputs assembled: {assembled:?}");
+            };
+            assert_eq!(
+                is_exact(&assembled),
+                is_exact(left) && is_exact(right),
+                "join guarantee must be exact iff both inputs are exact"
+            );
+            if both_exact_expected {
+                assert!(is_exact(&assembled), "exact inputs give an exact join");
+            }
+        }
+    }
+
+    fn quantile_eps_intent(q: f64, e: f64) -> AggIntent {
+        AggIntent::Quantile {
+            col: None,
+            q,
+            accuracy: AccuracyTarget::Epsilon(e),
+        }
     }
 
     fn eps(e: f64) -> AccuracyTarget {
@@ -7633,28 +7735,7 @@ mod tests {
 
     // ── SketchAlgorithmStrategy / SharedSubtreeStrategy fixtures ───────────
 
-    fn metric_scan(labels: &[&str]) -> QueryExpr {
-        let mut columns = vec![
-            Field::plain("ts", DataType::Timestamp, false),
-            Field::plain("value", DataType::Float64, false),
-        ];
-        columns.extend(labels.iter().map(|n| Field::plain(*n, DataType::Utf8, true)));
-        OperatorNode::non_asap_node(NonASAPOp::Scan {
-            source: Source::TimeSeries { metric: "m".into() },
-            predicates: vec![],
-            schema: SchemaTy::with_time_index(columns, 0, vec![]),
-        }).unwrap()
-    }
 
-    fn agg(by: Vec<usize>, intent: AggIntent, child: QueryExpr) -> QueryExpr {
-        OperatorNode::non_asap_node(NonASAPOp::Aggregate {
-            reduction: ReductionTy::by(by),
-            measures: vec![intent],
-            output_names: vec![],
-            having: None,
-            child: Rc::new(child),
-        }).unwrap()
-    }
 
     // ── SketchAlgorithmStrategy ─────────────────────────────────────────────
 
@@ -7680,13 +7761,15 @@ mod tests {
         assert!(!strategy.matches(&target));
         assert!(strategy.replacements(&target).is_empty());
 
-        let mut having_q = agg(vec![2], default_quantile(0.99), metric_scan(&["job"]));
-        if let Some(NonASAPOp::Aggregate { having, .. }) = &mut having_q {
-            *having = Some(asap_types::ir::Predicate(
-                ScalarExpr::Literal(asap_types::pre_asap::expr_ir::ScalarValue::Boolean(true)),
-            ));
-        }
-        let having_q = Rc::new(having_q);
+        let having_q = crate::test_support::aggregate(
+            ReductionTy::by(vec![2]),
+            vec![default_quantile(0.99)],
+            vec![],
+            Some(asap_types::ir::Predicate(ScalarExpr::Literal(
+                asap_types::pre_asap::expr_ir::ScalarValue::Boolean(true),
+            ))),
+            metric_scan(&["job"]),
+        );
         let target = TargetSubDAG::new(&having_q);
         assert!(!strategy.matches(&target));
         assert!(strategy.replacements(&target).is_empty());
@@ -7894,7 +7977,7 @@ mod tests {
         assert_eq!(replacements.len(), 2, "{replacements:?}");
         assert!(replacements
             .iter()
-            .all(|candidate| { matches!(candidate.replacement, Replacement::Subtree(_)) }));
+            .all(|candidate| { matches!(&candidate.replacement, Replacement::Subtree(n) if n.contains_asap()) }));
         // The inner target is still independently enumerated and ranked —
         // a custom cost model that prefers DDSketch for it is honored, and
         // nothing about the outer target's choice reaches it.
@@ -8025,49 +8108,14 @@ mod tests {
             }
         }
         fn walk_children(node: &OperatorNode, counts: &mut HashMap<*const OperatorNode, usize>) {
-            use QueryExpr::*;
-            match node {
-                Scan { .. } | PromqlScalarBridge(_) | EvalTimestamp | CurrentTimestamp => {}
-                PromqlVectorFromScalar(c) | PromqlScalarFromVector(c) => walk(c, counts),
-                PromqlRelabel { child, .. }
-                | PromqlInfoEnrich { child, .. }
-                | PromqlSeriesSample { child, .. }
-                | Filter { child, .. }
-                | Project { child, .. }
-                | Aggregate { child, .. }
-                | Dedup { child, .. }
-                | PromqlSubquery { child, .. }
-                | TimeRange { child, .. }
-                | TimeShift { child, .. }
-                | SQLWindowFunc { child, .. }
-                | Sort { child, .. }
-                | Limit { child, .. } => walk(child, counts),
-                Concat { children, .. } => {
-                    for c in children {
-                        walk_children(c, counts);
-                    }
+            if let Some(NonASAPOp::Concat { children, .. }) = node.non_asap() {
+                for c in children {
+                    walk_children(c, counts);
                 }
-                Join { left, right, .. } | SetOp { left, right, .. } => {
-                    walk(left, counts);
-                    walk(right, counts);
-                }
-                BinaryOp { lhs, rhs, .. } => {
-                    walk(lhs, counts);
-                    walk(rhs, counts);
-                }
-                Column(_)
-                | Literal(_)
-                | Compare { .. }
-                | BoolAnd(_)
-                | BoolOr(_)
-                | Not(_)
-                | IsNull(_)
-                | IsNotNull(_)
-                | Cast { .. }
-                | InList { .. }
-                | FunctionCall { .. }
-                | Arithmetic { .. }
-                | Case { .. } => {}
+                return;
+            }
+            for child in node.children() {
+                walk(child, counts);
             }
         }
 
@@ -8139,7 +8187,7 @@ mod tests {
         assert!(agg_group
             .candidates
             .iter()
-            .all(|c| matches!(c.replacement, Replacement::Subtree(_))));
+            .all(|c| matches!(&c.replacement, Replacement::Subtree(n) if n.contains_asap())));
         assert_eq!(
             agg_group
                 .candidates
@@ -8261,7 +8309,7 @@ mod tests {
         // SharedSubtreeStrategy's share-vs-recompute pair.
         let a = agg(vec![2], AggIntent::Sum { col: None }, metric_scan(&["job"]));
         let b = agg(vec![2], AggIntent::Sum { col: None }, metric_scan(&["job"]));
-        let space = search_workload(vec![("a", Rc::new(a)), ("b", Rc::new(b))]);
+        let space = search_workload(vec![("a", a), ("b", b)]);
 
         // roots[0] and roots[1] must have merged onto the same Rc.
         assert!(Rc::ptr_eq(&space.roots[0].1, &space.roots[1].1));
@@ -8275,15 +8323,17 @@ mod tests {
             group.candidates
         );
 
+        // Old `Replacement::Summary` ↔ a `Subtree` containing an ASAP node;
+        // old `Replacement::Rewrite` ↔ a pure pre-ASAP `Subtree`.
         let summary_count = group
             .candidates
             .iter()
-            .filter(|c| matches!(c.replacement, Replacement::Subtree(_)))
+            .filter(|c| matches!(&c.replacement, Replacement::Subtree(n) if n.contains_asap()))
             .count();
         let rewrite_count = group
             .candidates
             .iter()
-            .filter(|c| matches!(c.replacement, Replacement::Subtree(_)))
+            .filter(|c| matches!(&c.replacement, Replacement::Subtree(n) if !n.contains_asap()))
             .count();
         assert_eq!(summary_count, 1);
         assert_eq!(rewrite_count, 2);
@@ -8327,7 +8377,7 @@ mod tests {
             child: Rc::clone(&shared),
         }).unwrap();
 
-        let space = search_workload(vec![("a", Rc::new(root_a)), ("b", Rc::new(root_b))]);
+        let space = search_workload(vec![("a", root_a), ("b", root_b)]);
         assert_eq!(
             space.len(),
             4,
@@ -8488,7 +8538,7 @@ mod tests {
         let mut roots = Vec::new();
         let shared = agg(vec![2], AggIntent::Sum { col: None }, metric_scan(&["job"]));
         for i in 0..20 {
-            roots.push((i, Rc::new(shared.clone())));
+            roots.push((i, Rc::new((*shared).clone())));
         }
         let space = search_workload(roots);
         let group = space.candidates_for_target(&space.roots[0].1).unwrap();
@@ -8506,7 +8556,7 @@ mod tests {
         let rewrites: Vec<&ReplacementSubDAG> = ranked_group
             .candidates
             .iter()
-            .filter(|c| matches!(c.replacement, Replacement::Subtree(_)))
+            .filter(|c| matches!(&c.replacement, Replacement::Subtree(n) if !n.contains_asap()))
             .copied()
             .collect();
         assert_eq!(rewrites.len(), 2);
@@ -8829,7 +8879,12 @@ mod tests {
             },
             ReplacementSubDAG {
                 strategy: "TestStrategy",
-                replacement: Replacement::Subtree(Rc::new(QueryExpr::CurrentTimestamp)),
+                replacement: Replacement::Subtree(
+                    OperatorNode::non_asap_node(NonASAPOp::ScalarBridge(
+                        ScalarExpr::CurrentTimestamp,
+                    ))
+                    .unwrap(),
+                ),
                 provenance: ReplacementProvenance::LogicalRewrite,
                 rationale: "different rewrite strategy".into(),
             },
@@ -8894,13 +8949,13 @@ mod tests {
         }).unwrap();
         let a = || OperatorNode::non_asap_node(NonASAPOp::Filter {
             pred: Predicate(ScalarExpr::Literal(ScalarValue::Boolean(true))),
-            child: Rc::new(c()),
+            child: c(),
         }).unwrap();
 
         let space = search_workload(vec![
-            ("root1", Rc::new(a())),
-            ("root2", Rc::new(a())),
-            ("root3", Rc::new(c())),
+            ("root1", a()),
+            ("root2", a()),
+            ("root3", c()),
         ]);
 
         // Fixture sanity: root1/root2 merged onto one shared `a`, and `c`
@@ -9040,9 +9095,9 @@ mod tests {
         }).unwrap();
         let a = || OperatorNode::non_asap_node(NonASAPOp::Filter {
             pred: Predicate(ScalarExpr::Literal(ScalarValue::Boolean(true))),
-            child: Rc::new(c()),
+            child: c(),
         }).unwrap();
-        let space = search_workload(vec![("root1", Rc::new(a())), ("root2", Rc::new(a()))]);
+        let space = search_workload(vec![("root1", a()), ("root2", a())]);
         let a_rc = &space.roots[0].1;
         let Some(NonASAPOp::Filter { child: c_rc, .. }) = a_rc.non_asap() else {
             panic!("expected Filter root");
@@ -9087,11 +9142,11 @@ mod tests {
         }).unwrap();
         let parent = || OperatorNode::non_asap_node(NonASAPOp::Filter {
             pred: Predicate(ScalarExpr::Literal(ScalarValue::Boolean(true))),
-            child: Rc::new(child()),
+            child: child(),
         }).unwrap();
         let space = search_workload(vec![
-            ("root1", Rc::new(parent())),
-            ("root2", Rc::new(parent())),
+            ("root1", parent()),
+            ("root2", parent()),
         ]);
         let parent_rc = &space.roots[0].1;
         let Some(NonASAPOp::Filter {
@@ -9373,13 +9428,13 @@ mod tests {
         let shared = agg(vec![2], AggIntent::Sum { col: None }, metric_scan(&["job"]));
         let root_a = OperatorNode::non_asap_node(NonASAPOp::Filter {
             pred: Predicate(ScalarExpr::Literal(ScalarValue::Int64(1))),
-            child: Rc::new(shared.clone()),
+            child: shared.clone(),
         }).unwrap();
         let root_b = OperatorNode::non_asap_node(NonASAPOp::Filter {
             pred: Predicate(ScalarExpr::Literal(ScalarValue::Int64(2))),
-            child: Rc::new(shared),
+            child: shared,
         }).unwrap();
-        let roots = vec![("a", Rc::new(root_a)), ("b", Rc::new(root_b))];
+        let roots = vec![("a", root_a), ("b", root_b)];
 
         let mut order = Vec::new();
         let mut nodes = HashMap::new();
@@ -9441,7 +9496,7 @@ mod tests {
         // module docs — so this always converges in exactly 2 passes).
         let a = agg(vec![2], default_quantile(0.99), metric_scan(&["job"]));
         let b = agg(vec![2], default_quantile(0.99), metric_scan(&["job"]));
-        let space = search_workload(vec![("a", Rc::new(a)), ("b", Rc::new(b))]);
+        let space = search_workload(vec![("a", a), ("b", b)]);
         assert!(!space.is_empty());
     }
 
@@ -9475,11 +9530,11 @@ mod tests {
             }).unwrap();
             let outer_wrapper = OperatorNode::non_asap_node(NonASAPOp::Filter {
                 pred: Predicate(ScalarExpr::Literal(ScalarValue::Boolean(true))),
-                child: Rc::new(fresh_inner_layer),
+                child: fresh_inner_layer,
             }).unwrap();
             vec![ReplacementSubDAG {
                 strategy: "AlwaysGrowingStrategy",
-                replacement: Replacement::Subtree(Rc::new(outer_wrapper)),
+                replacement: Replacement::Subtree(outer_wrapper),
                 provenance: ReplacementProvenance::LogicalRewrite,
                 rationale: format!("pathological candidate #{n}"),
             }]
@@ -9508,15 +9563,6 @@ mod tests {
     // pattern by hand since `realize_child` is `pub(crate)`), these tests
     // call `realize_child` directly.
 
-    fn agg_per_entity(intent: AggIntent, child: QueryExpr) -> QueryExpr {
-        OperatorNode::non_asap_node(NonASAPOp::Aggregate {
-            reduction: ReductionTy::PerEntity,
-            measures: vec![intent],
-            output_names: vec![],
-            having: None,
-            child: Rc::new(child),
-        }).unwrap()
-    }
 
     fn field<'a>(schema: &'a Schema, name: &str) -> &'a Field {
         schema
@@ -9589,8 +9635,9 @@ mod tests {
                 GroupingStrategy::default()
             )
         );
-        assert!(matches!(child.operator, SummaryExpr::KeepPreAsap(ref e)
-            if matches!(**e, Some(NonASAPOp::Scan { .. }))));
+        // The kept pre-ASAP leaf is the Scan node itself (no wrapper).
+        assert!(matches!(child.non_asap(), Some(NonASAPOp::Scan { .. })));
+        assert!(!child.contains_asap());
     }
 
     /// A deployment-supplied [`CostModel`] can override the default KLL
@@ -9861,7 +9908,9 @@ mod tests {
         // accumulator.
         let inner = agg(vec![2], AggIntent::Sum { col: None }, metric_scan(&["job"]));
         let outer = agg(vec![], default_quantile(0.9), inner);
-        let root = realize(&outer).unwrap();
+        // Timing is not stored during realization: time the candidate under
+        // the default lifecycle assignment to read the maintenance boundary.
+        let root = timed(&realize(&outer).unwrap());
 
         let Operator::ASAP(ASAPOp::SummaryEstimate { summary_input, .. }) = &root.operator else {
             panic!("expected estimate root, got {:?}", root.operator);
@@ -9873,12 +9922,8 @@ mod tests {
             family,
             FieldDataType::Sketch(kind, _) if kind.algorithm() == &SketchAlgorithm::Kll
         ));
-        let SummaryExpr::ValueOperation {
-            child,
-            operation: ValueOperation::FinalizeExactAccumulator,
-            timing: ExecutionTiming::IngestionTime,
-        } = &child.operator
-        else {
+        assert_eq!(child.timing, Some(ExecutionTiming::IngestionTime));
+        let Operator::ASAP(ASAPOp::FinalizeExactAccumulator { child }) = &child.operator else {
             panic!("expected explicit maintenance readout");
         };
         let Operator::ASAP(ASAPOp::SummaryAgg {
@@ -9955,9 +10000,10 @@ mod tests {
         ] {
             let q = agg(vec![2], intent.clone(), metric_scan(&["job"]));
             let root = realize(&q).unwrap();
+            // Kept pass-through: the pre-ASAP node itself, not a wrapper.
             assert!(
-                matches!(root.operator, SummaryExpr::KeepPreAsap(ref e) if **e == q),
-                "expected KeepPreAsap passthrough for {intent:?}"
+                !root.contains_asap() && root.operator == q.operator && root.schema == q.schema,
+                "expected kept pre-ASAP passthrough for {intent:?}"
             );
         }
     }
@@ -9970,27 +10016,32 @@ mod tests {
         use asap_types::pre_asap::expr_ir::{CompareOpKind, ScalarValue};
         use asap_types::ir::Predicate;
         let q = OperatorNode::non_asap_node(NonASAPOp::Filter {
-            pred: Predicate(QueryExpr::Compare {
-                left: Rc::new(ScalarExpr::Column(0)),
+            pred: Predicate(ScalarExpr::Compare {
+                left: Box::new(ScalarExpr::Column(0)),
                 op: CompareOpKind::Gt,
-                right: Rc::new(ScalarExpr::Literal(ScalarValue::Float64(0.5))),
+                right: Box::new(ScalarExpr::Literal(ScalarValue::Float64(0.5))),
+                semantics: asap_types::ir::ExprSemantics::Promql,
             }),
             child: agg(vec![], default_quantile(0.99), metric_scan(&[])),
         }).unwrap();
         let root = realize(&q).unwrap();
-        assert!(matches!(root.operator, SummaryExpr::KeepPreAsap(ref e) if **e == q));
+        assert!(
+            !root.contains_asap() && root.operator == q.operator && root.schema == q.schema,
+            "expected the whole Filter subtree kept pre-ASAP"
+        );
     }
 
     #[test]
     fn having_and_multi_intent_stay_logical() {
         use asap_types::pre_asap::expr_ir::ScalarValue;
         use asap_types::ir::Predicate;
-        let mut q = agg(vec![2], default_quantile(0.99), metric_scan(&["job"]));
-        if let Some(NonASAPOp::Aggregate { having, .. }) = &mut q {
-            *having = Some(Predicate(ScalarExpr::Literal(
-                ScalarValue::Boolean(true),
-            )));
-        }
+        let q = crate::test_support::aggregate(
+            ReductionTy::by(vec![2]),
+            vec![default_quantile(0.99)],
+            vec![],
+            Some(Predicate(ScalarExpr::Literal(ScalarValue::Boolean(true)))),
+            metric_scan(&["job"]),
+        );
         assert!(!realize(&q).unwrap().contains_asap());
 
         let multi = OperatorNode::non_asap_node(NonASAPOp::Aggregate {
@@ -10653,9 +10704,13 @@ mod tests {
         let group = space.candidates_for_target(root).unwrap();
         assert!(!group.rejected.is_empty());
         assert!(group.candidates.iter().all(|c| match &c.replacement {
-            Replacement::Subtree(node) => node.guarantee.as_ref().is_some_and(|g| {
-                DefaultAccuracyModel.satisfies(g, &AccuracyTarget::Epsilon(0.1))
-            }),
+            // A summary candidate (old `Replacement::Summary`) contains an
+            // ASAP node; a logical rewrite (old `Replacement::Rewrite`) does not.
+            Replacement::Subtree(node) if node.contains_asap() => {
+                node.guarantee.as_ref().is_some_and(|g| {
+                    DefaultAccuracyModel.satisfies(g, &AccuracyTarget::Epsilon(0.1))
+                })
+            }
             Replacement::Subtree(_) => false,
             Replacement::ExactComposition(_) => false,
         }));
@@ -10691,7 +10746,7 @@ mod tests {
         assert!(group
             .candidates
             .iter()
-            .all(|c| matches!(c.replacement, Replacement::Subtree(_))));
+            .all(|c| matches!(&c.replacement, Replacement::Subtree(n) if !n.contains_asap())));
         assert!(group.rejected.iter().all(|r| matches!(
             r.error,
             AccuracyError::TargetNotSatisfied { target: AccuracyTarget::Epsilon(e), .. } if e == 0.001
@@ -10710,7 +10765,7 @@ mod tests {
         assert!(group
             .candidates
             .iter()
-            .any(|c| matches!(c.replacement, Replacement::Subtree(_))));
+            .any(|c| matches!(&c.replacement, Replacement::Subtree(n) if n.contains_asap())));
 
         // An `Exact` root target admits only exact candidates.
         let space = search_workload_with_targets(
@@ -10720,7 +10775,7 @@ mod tests {
         );
         let group = space.candidates_for_target(&space.roots[0].1).unwrap();
         assert!(group.candidates.iter().all(|c| match &c.replacement {
-            Replacement::Subtree(node) => node
+            Replacement::Subtree(node) if node.contains_asap() => node
                 .guarantee
                 .as_ref()
                 .is_some_and(ResultGuarantee::is_exact),
@@ -10786,7 +10841,7 @@ mod tests {
     fn scoped_hll_evidence_sizes_and_certifies_without_a_deployment_model() {
         use crate::accuracy::EstimatorContract;
         struct SourceEvidence {
-            expression: QueryExpr,
+            expression: OperatorNode,
             max_distinct: u32,
         }
         impl AccuracyEvidenceProvider for SourceEvidence {
@@ -10878,7 +10933,7 @@ mod tests {
             );
             let evidence = SourceEvidence {
                 expression: if wrong_scope {
-                    metric_scan(&["other"])
+                    (*metric_scan(&["other"])).clone()
                 } else {
                     (*query).clone()
                 },
@@ -10901,7 +10956,7 @@ mod tests {
     fn residual_projection_finalizes_selected_exact_state() {
         let inner = agg(vec![], AggIntent::Sum { col: None }, metric_scan(&[]));
         let root = OperatorNode::non_asap_node(NonASAPOp::Project {
-            cols: vec![asap_types::pre_asap::ProjectItem {
+            cols: vec![ProjectItem {
                 expr: ScalarExpr::Column(0),
                 alias: Some("result".into()),
             }],
@@ -10914,25 +10969,25 @@ mod tests {
             &DefaultAccuracyModel,
         );
         let selected = space.global_selection(&DefaultCostModel);
+        // CSE re-interns the workload, so the space's root/child `Rc`s are not
+        // the fixture's. Assembly only assembles children that are discovered
+        // targets, so seed the memo under the space's own child pointer.
+        let root = Rc::clone(&space.roots[0].1);
+        let Some(NonASAPOp::Project { child: inner, .. }) = root.non_asap() else {
+            unreachable!()
+        };
+        assert!(space.candidates_for_target(inner).is_some());
         selected
             .assembled_nodes
             .borrow_mut()
-            .insert(Rc::as_ptr(&inner), realize(inner.as_ref()).unwrap());
+            .insert(Rc::as_ptr(inner), realize(inner.as_ref()).unwrap());
         let node = selected.assemble_target(&root).unwrap();
-        let SummaryExpr::ValueOperation {
-            child,
-            operation: ValueOperation::Project { .. },
-            ..
-        } = &node.operator
-        else {
+        let Operator::NonASAP(NonASAPOp::Project { child, .. }) = &node.operator else {
             panic!("expected Project");
         };
         assert!(matches!(
             child.operator,
-            SummaryExpr::ValueOperation {
-                operation: ValueOperation::FinalizeExactAccumulator,
-                ..
-            }
+            Operator::ASAP(ASAPOp::FinalizeExactAccumulator { .. })
         ));
         assert!(child
             .schema
@@ -10951,11 +11006,9 @@ mod tests {
     // A heap's key schema is derived from its encoded item, not all label columns.
     #[test]
     fn heap_readout_preserves_numeric_item_identity() {
-        let mut raw = metric_scan(&["id", "description"]);
-        let Some(NonASAPOp::Scan { schema, .. }) = &mut raw else {
-            unreachable!()
-        };
+        let mut schema = metric_scan(&["id", "description"]).schema.clone();
         schema.fields[2].dtype = FieldDataType::Plain(DataType::Int64);
+        let raw = crate::test_support::scan("m", schema);
         let node = agg(
             vec![],
             AggIntent::TopK {
@@ -10965,7 +11018,7 @@ mod tests {
             agg(vec![2], AggIntent::Sum { col: None }, raw.clone()),
         );
         let input = PhysicalSummaryInput {
-            child: Rc::new(raw),
+            child: raw,
             input: SummaryUpdate {
                 item: Some(SummaryInputExpr::Column(ColumnRef::Named("id".into()))),
                 weight: SummaryInputExpr::Constant(1.0),

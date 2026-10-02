@@ -509,32 +509,50 @@ fn visit_children(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use asap_types::ir::{BinaryOperator, NonASAPOp, OperatorNode, Predicate, ScalarExpr};
     use asap_types::pre_asap::agg_intent::{default_quantile, AggIntent};
-    use asap_types::pre_asap::query_expr::{Reduction, Source};
+    use asap_types::pre_asap::query_expr::{BinaryOpKind, Reduction, Source};
     use asap_types::pre_asap::schema::{Field, DataType, Schema};
     use asap_types::types::AccuracyTarget;
 
-    fn metric_scan(labels: &[&str]) -> QueryExpr {
+    fn metric_scan(labels: &[&str]) -> Rc<OperatorNode> {
         let mut columns = vec![
             Field::plain("ts", DataType::Timestamp, false),
             Field::plain("value", DataType::Float64, false),
         ];
         columns.extend(labels.iter().map(|n| Field::plain(*n, DataType::Utf8, true)));
-        QueryExpr::Scan {
+        OperatorNode::non_asap_node(NonASAPOp::Scan {
             source: Source::TimeSeries { metric: "m".into() },
             predicates: vec![],
             schema: Schema::with_time_index(columns, 0, vec![]),
-        }
+        })
+        .unwrap()
     }
 
-    fn agg(by: Vec<usize>, intent: AggIntent, child: QueryExpr) -> QueryExpr {
-        QueryExpr::Aggregate {
+    fn agg(by: Vec<usize>, intent: AggIntent, child: Rc<OperatorNode>) -> Rc<OperatorNode> {
+        OperatorNode::non_asap_node(NonASAPOp::Aggregate {
             reduction: Reduction::by(by),
             measures: vec![intent],
             output_names: vec![],
             having: None,
-            child: Rc::new(child),
-        }
+            child,
+        })
+        .unwrap()
+    }
+
+    fn binary(kind: BinaryOpKind, lhs: Rc<OperatorNode>, rhs: Rc<OperatorNode>) -> Rc<OperatorNode> {
+        OperatorNode::non_asap_node(NonASAPOp::BinaryOp {
+            operator: BinaryOperator {
+                kind,
+                vector_match: None,
+                checked_relative_division: false,
+                checked_finite_division: false,
+            },
+            return_bool: false,
+            lhs,
+            rhs,
+        })
+        .unwrap()
     }
 
     // ── SketchApproximation ──────────────────────────────────────────────
@@ -557,7 +575,7 @@ mod tests {
     }
 
     /// `node_hash` must be the literal `structural_hash` a downstream
-    /// consumer would compute over the *same* `QueryExpr` subtree via
+    /// consumer would compute over the *same* `OperatorNode` subtree via
     /// `asap_types::dag_export::export` — the whole point of carrying it is
     /// that two independent exports of the same tree agree, with no
     /// string-matching against `location` required.
@@ -576,7 +594,7 @@ mod tests {
             Some(sketch.node_hash),
             expected_hash,
             "ReplacementExplanation::node_hash must match dag_export's DagNode::hash \
-             for the same QueryExpr subtree"
+             for the same OperatorNode subtree"
         );
     }
 
@@ -638,14 +656,11 @@ mod tests {
     #[test]
     fn a_shared_sketchable_aggregate_is_reported_only_once() {
         let quantile = agg(vec![2], default_quantile(0.99), metric_scan(&["job"]));
-        let root = QueryExpr::BinaryOp {
-            op: asap_types::pre_asap::query_expr::BinaryOpKind::Compare(
-                asap_types::pre_asap::expr_ir::CompareOpKind::Eq,
-            ),
-            lhs: Rc::new(quantile.clone()),
-            rhs: Rc::new(quantile),
-            vector_match: None,
-        };
+        let root = binary(
+            BinaryOpKind::Compare(asap_types::pre_asap::expr_ir::CompareOpKind::Eq),
+            Rc::clone(&quantile),
+            quantile,
+        );
         let findings = explain_replacements(vec![("ratio", root)]);
         let sketch: Vec<_> = findings
             .iter()
@@ -685,8 +700,8 @@ mod tests {
     #[test]
     fn descendant_of_a_shared_root_keeps_every_root_breadcrumb() {
         let inner = agg(vec![2], default_quantile(0.99), metric_scan(&["job"]));
-        let outer = agg(vec![2], AggIntent::Sum { col: None }, inner);
-        let findings = explain_replacements(vec![("dash_a", outer.clone()), ("dash_b", outer)]);
+        let outer = agg(vec![0], AggIntent::Sum { col: None }, inner);
+        let findings = explain_replacements(vec![("dash_a", Rc::clone(&outer)), ("dash_b", outer)]);
         let inner_sketch = findings
             .iter()
             .find(|f| {
@@ -732,14 +747,11 @@ mod tests {
         // The same shared branch appearing twice within one query (an `a/a`
         // shape) — single-query CSE.
         let branch = agg(vec![2], AggIntent::Sum { col: None }, metric_scan(&["job"]));
-        let q = QueryExpr::BinaryOp {
-            op: asap_types::pre_asap::query_expr::BinaryOpKind::Arithmetic(
-                asap_types::pre_asap::expr_ir::ArithmeticOpKind::Div,
-            ),
-            lhs: Rc::new(branch.clone()),
-            rhs: Rc::new(branch),
-            vector_match: None,
-        };
+        let q = binary(
+            BinaryOpKind::Arithmetic(asap_types::pre_asap::expr_ir::ArithmeticOpKind::Div),
+            Rc::clone(&branch),
+            branch,
+        );
         let findings = explain_replacements(vec![("ratio", q)]);
         let reuse: Vec<_> = findings
             .iter()
@@ -764,17 +776,18 @@ mod tests {
     #[test]
     fn a_deeply_shared_subtree_under_different_parents_is_reported_once() {
         use asap_types::pre_asap::expr_ir::ScalarValue;
-        use asap_types::pre_asap::query_expr::Predicate;
 
         let shared = agg(vec![2], AggIntent::Sum { col: None }, metric_scan(&["job"]));
-        let root_a = QueryExpr::Filter {
-            pred: Predicate(Rc::new(QueryExpr::Literal(ScalarValue::Int64(1)))),
-            child: Rc::new(shared.clone()),
-        };
-        let root_b = QueryExpr::Filter {
-            pred: Predicate(Rc::new(QueryExpr::Literal(ScalarValue::Int64(2)))),
-            child: Rc::new(shared),
-        };
+        let root_a = OperatorNode::non_asap_node(NonASAPOp::Filter {
+            pred: Predicate(ScalarExpr::Literal(ScalarValue::Int64(1))),
+            child: Rc::clone(&shared),
+        })
+        .unwrap();
+        let root_b = OperatorNode::non_asap_node(NonASAPOp::Filter {
+            pred: Predicate(ScalarExpr::Literal(ScalarValue::Int64(2))),
+            child: shared,
+        })
+        .unwrap();
         let findings = explain_replacements(vec![("a", root_a), ("b", root_b)]);
         let reuse: Vec<_> = findings
             .iter()

@@ -492,44 +492,13 @@ fn hydra_guarantee(inner: &ResultGuarantee, stats: &PropagationStats) -> ResultG
 mod tests {
     use super::*;
     use crate::accuracy::{DefaultAccuracyModel, EqualSplitAllocator};
+    use crate::test_support::{agg, agg_per_entity, metric_scan};
     use asap_types::post_asap::ErrorMetric;
     use asap_types::pre_asap::agg_intent::{default_cardinality, default_quantile};
-    use asap_types::pre_asap::query_expr::Source;
-    use asap_types::pre_asap::schema::{Field, DataType, Schema};
     use asap_types::types::AccuracyTarget;
 
-    fn metric_scan(labels: &[&str]) -> QueryExpr {
-        let mut columns = vec![
-            Field::plain("ts", DataType::Timestamp, false),
-            Field::plain("value", DataType::Float64, false),
-        ];
-        columns.extend(labels.iter().map(|n| Field::plain(*n, DataType::Utf8, true)));
-        QueryExpr::Scan {
-            source: Source::TimeSeries { metric: "m".into() },
-            predicates: vec![],
-            schema: Schema::with_time_index(columns, 0, vec![]),
-        }
-    }
 
-    fn agg(by: Vec<usize>, intent: AggIntent, child: QueryExpr) -> QueryExpr {
-        QueryExpr::Aggregate {
-            reduction: Reduction::by(by),
-            measures: vec![intent],
-            output_names: vec![],
-            having: None,
-            child: Rc::new(child),
-        }
-    }
 
-    fn agg_per_entity(intent: AggIntent, child: QueryExpr) -> QueryExpr {
-        QueryExpr::Aggregate {
-            reduction: Reduction::PerEntity,
-            measures: vec![intent],
-            output_names: vec![],
-            having: None,
-            child: Rc::new(child),
-        }
-    }
 
     // ── has_subpopulations ────────────────────────────────────────────────
 
@@ -597,7 +566,7 @@ mod tests {
                 delta: 0.01,
             },
         };
-        let q = Rc::new(agg(vec![2], intent, metric_scan(&["job"])));
+        let q = agg(vec![2], intent, metric_scan(&["job"]));
         let target = TargetSubDAG::new(&q);
         assert!(HydraGroupingStrategy::default_cost_model().matches(&target));
     }
@@ -605,7 +574,7 @@ mod tests {
     #[test]
     fn does_not_match_an_empty_by_aggregate() {
         // Global reduction — no subpopulation concept, no Hydra alternative.
-        let q = Rc::new(agg(vec![], default_quantile(0.99), metric_scan(&["job"])));
+        let q = agg(vec![], default_quantile(0.99), metric_scan(&["job"]));
         let target = TargetSubDAG::new(&q);
         let strategy = HydraGroupingStrategy::default_cost_model();
         assert!(!strategy.matches(&target));
@@ -614,10 +583,10 @@ mod tests {
 
     #[test]
     fn does_not_match_a_per_entity_aggregate() {
-        let q = Rc::new(agg_per_entity(
+        let q = agg_per_entity(
             default_quantile(0.99),
             metric_scan(&["job"]),
-        ));
+        );
         let target = TargetSubDAG::new(&q);
         let strategy = HydraGroupingStrategy::default_cost_model();
         assert!(!strategy.matches(&target));
@@ -626,14 +595,14 @@ mod tests {
 
     #[test]
     fn does_not_match_a_non_aggregate_node() {
-        let scan = Rc::new(metric_scan(&["job"]));
+        let scan = metric_scan(&["job"]);
         let target = TargetSubDAG::new(&scan);
         assert!(!HydraGroupingStrategy::default_cost_model().matches(&target));
     }
 
     #[test]
     fn quantile_has_no_hydra_candidate_without_a_modeled_error_bound() {
-        let q = Rc::new(agg(vec![2], default_quantile(0.99), metric_scan(&["job"])));
+        let q = agg(vec![2], default_quantile(0.99), metric_scan(&["job"]));
         let target = TargetSubDAG::new(&q);
         let replacements = HydraGroupingStrategy::default_cost_model().replacements(&target);
         assert!(replacements.is_empty(), "{replacements:?}");
@@ -647,13 +616,13 @@ mod tests {
                 delta: 0.01,
             },
         };
-        let q = Rc::new(agg(vec![2], intent, metric_scan(&["job"])));
+        let q = agg(vec![2], intent, metric_scan(&["job"]));
         let target = TargetSubDAG::new(&q);
         let replacements = HydraGroupingStrategy::default_cost_model().replacements(&target);
         assert_eq!(replacements.len(), 2, "{replacements:?}");
         assert!(replacements.iter().all(|candidate| matches!(
             &candidate.replacement,
-            Replacement::Summary(node)
+            Replacement::Subtree(node)
                 if node.guarantee.as_ref().is_some_and(|guarantee|
                     guarantee.bound.evaluate().is_none()
                         && guarantee.failure_probability.evaluate().is_none())
@@ -685,7 +654,7 @@ mod tests {
                 delta: 0.01,
             },
         };
-        let q = Rc::new(agg(vec![2], intent, metric_scan(&["job"])));
+        let q = agg(vec![2], intent, metric_scan(&["job"]));
         let strategy = HydraGroupingStrategy::new_with_planning_inputs_and_evidence(
             &DefaultCostModel,
             &DefaultAccuracyModel,
@@ -696,7 +665,7 @@ mod tests {
         assert_eq!(replacements.len(), 2, "{replacements:?}");
         assert!(replacements.iter().all(|candidate| matches!(
             &candidate.replacement,
-            Replacement::Summary(node)
+            Replacement::Subtree(node)
                 if node.guarantee.as_ref().is_some_and(|g|
                     g.bound.evaluate().is_some()
                         && g.failure_probability.evaluate().is_some())
@@ -725,7 +694,7 @@ mod tests {
                 delta: 0.01,
             },
         };
-        let q = Rc::new(agg(vec![2], intent, metric_scan(&["job"])));
+        let q = agg(vec![2], intent, metric_scan(&["job"]));
         let strategy = HydraGroupingStrategy::new_with_planning_inputs_and_evidence(
             &DefaultCostModel,
             &DefaultAccuracyModel,
@@ -765,7 +734,7 @@ mod tests {
                 }
             }
         }
-        let q = Rc::new(agg(
+        let q = agg(
             vec![2],
             AggIntent::Count {
                 accuracy: AccuracyTarget::EpsilonDelta {
@@ -774,7 +743,7 @@ mod tests {
                 },
             },
             metric_scan(&["job"]),
-        ));
+        );
         let strategy = HydraGroupingStrategy::new_with_planning_inputs_and_evidence(
             &DefaultCostModel,
             &DefaultAccuracyModel,
@@ -795,7 +764,7 @@ mod tests {
         // summary_candidates(Cardinality) = [Hll, Theta, Kmv] — none have a
         // modeled Hydra variant, so no candidate at all (not an error, just
         // an empty result, same conservatism as every other strategy here).
-        let q = Rc::new(agg(vec![2], default_cardinality(), metric_scan(&["job"])));
+        let q = agg(vec![2], default_cardinality(), metric_scan(&["job"]));
         let target = TargetSubDAG::new(&q);
         let strategy = HydraGroupingStrategy::default_cost_model();
         assert!(!strategy.matches(&target));
@@ -811,7 +780,7 @@ mod tests {
             q: 0.99,
             accuracy: AccuracyTarget::Exact,
         };
-        let q = Rc::new(agg(vec![2], intent, metric_scan(&["job"])));
+        let q = agg(vec![2], intent, metric_scan(&["job"]));
         let target = TargetSubDAG::new(&q);
         let strategy = HydraGroupingStrategy::default_cost_model();
         assert!(!strategy.matches(&target));
@@ -822,11 +791,11 @@ mod tests {
     fn exact_mergeable_intent_has_no_hydra_candidate() {
         // Sum's exact accumulator has no candidate summary families at all
         // (summary_candidates only covers approximate-capable intents).
-        let q = Rc::new(agg(
+        let q = agg(
             vec![2],
             AggIntent::Sum { col: None },
             metric_scan(&["job"]),
-        ));
+        );
         let target = TargetSubDAG::new(&q);
         let strategy = HydraGroupingStrategy::default_cost_model();
         assert!(!strategy.matches(&target));
@@ -837,13 +806,13 @@ mod tests {
     fn does_not_match_a_multi_intent_or_having_aggregate() {
         let strategy = HydraGroupingStrategy::default_cost_model();
 
-        let multi = Rc::new(QueryExpr::Aggregate {
+        let multi = OperatorNode::non_asap_node(NonASAPOp::Aggregate {
             reduction: Reduction::by(vec![2]),
             measures: vec![AggIntent::Sum { col: None }, AggIntent::Avg { col: None }],
             output_names: vec![],
             having: None,
-            child: Rc::new(metric_scan(&["job"])),
-        });
+            child: metric_scan(&["job"]),
+        }).unwrap();
         let target = TargetSubDAG::new(&multi);
         assert!(!strategy.matches(&target));
         assert!(strategy.replacements(&target).is_empty());
@@ -871,7 +840,7 @@ mod tests {
 
     #[test]
     fn custom_cost_model_cannot_enable_unproven_hydra_kll() {
-        let q = Rc::new(agg(vec![2], default_quantile(0.99), metric_scan(&["job"])));
+        let q = agg(vec![2], default_quantile(0.99), metric_scan(&["job"]));
         let target = TargetSubDAG::new(&q);
         let custom = PreferDDSketch;
         let replacements = HydraGroupingStrategy::new(&custom).replacements(&target);

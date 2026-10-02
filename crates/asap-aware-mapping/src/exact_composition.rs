@@ -496,52 +496,22 @@ mod tests {
     use super::*;
     use crate::cost_model::{DefaultCostModel, ValueOperationCapabilities};
     use crate::replacement::keep_pre_asap;
+    use crate::test_support::{agg, agg_per_entity as per_entity, metric_scan, timed};
+    use asap_types::ir::ASAPOp;
     use asap_types::post_asap::{ExecutionDataStateError, SketchAlgorithm, FieldDataType};
     use asap_types::pre_asap::agg_intent::default_quantile;
-    use asap_types::pre_asap::query_expr::Source;
-    use asap_types::pre_asap::schema::{Field, DataType, Schema};
 
-    fn metric_scan(labels: &[&str]) -> QueryExpr {
-        let mut columns = vec![
-            Field::plain("ts", DataType::Timestamp, false),
-            Field::plain("value", DataType::Float64, false),
-        ];
-        columns.extend(labels.iter().map(|n| Field::plain(*n, DataType::Utf8, true)));
-        QueryExpr::Scan {
-            source: Source::TimeSeries { metric: "m".into() },
-            predicates: vec![],
-            schema: Schema::with_time_index(columns, 0, vec![]),
-        }
-    }
 
-    fn agg(by: Vec<usize>, intent: AggIntent, child: QueryExpr) -> QueryExpr {
-        QueryExpr::Aggregate {
-            reduction: Reduction::by(by),
-            measures: vec![intent],
-            output_names: vec![],
-            having: None,
-            child: Rc::new(child),
-        }
-    }
 
-    fn per_entity(intent: AggIntent, child: QueryExpr) -> QueryExpr {
-        QueryExpr::Aggregate {
-            reduction: Reduction::PerEntity,
-            measures: vec![intent],
-            output_names: vec![],
-            having: None,
-            child: Rc::new(child),
-        }
-    }
 
     /// `max by (zone) (quantile by (zone, host) (m))`.
-    fn max_over_quantile() -> Rc<QueryExpr> {
+    fn max_over_quantile() -> Rc<OperatorNode> {
         let inner = agg(
             vec![2, 3],
             default_quantile(0.99),
             metric_scan(&["zone", "host"]),
         );
-        Rc::new(agg(vec![0], AggIntent::Max { col: None }, inner))
+        agg(vec![0], AggIntent::Max { col: None }, inner)
     }
 
     #[test]
@@ -563,7 +533,7 @@ mod tests {
             candidates[0].provenance,
             ReplacementProvenance::ValueOperationAtQueryTime
         );
-        let QueryExpr::Aggregate { child, .. } = root.as_ref() else {
+        let Some(NonASAPOp::Aggregate { child, .. }) = root.non_asap() else {
             unreachable!()
         };
         assert!(
@@ -577,7 +547,7 @@ mod tests {
     #[test]
     fn proposes_query_time_operation_for_avg_over_quantile_alongside_the_rewrite() {
         let inner = agg(vec![2], default_quantile(0.99), metric_scan(&["zone"]));
-        let root = Rc::new(agg(vec![0], AggIntent::Avg { col: None }, inner));
+        let root = agg(vec![0], AggIntent::Avg { col: None }, inner);
         let target = TargetSubDAG::new(&root);
         assert_eq!(
             ExactCompositionStrategy::default_cost_model()
@@ -591,7 +561,7 @@ mod tests {
 
     #[test]
     fn proposes_ingestion_time_operation_for_a_per_entity_pass_through_over_raw_input() {
-        let root = Rc::new(per_entity(AggIntent::Deriv, metric_scan(&["zone"])));
+        let root = per_entity(AggIntent::Deriv, metric_scan(&["zone"]));
         let target = TargetSubDAG::new(&root);
         let candidates = ExactCompositionStrategy::default_cost_model().replacements(&target);
         assert_eq!(candidates.len(), 1);
@@ -610,14 +580,14 @@ mod tests {
             AggIntent::Sum { col: None },
             metric_scan(&["zone", "host"]),
         );
-        let root = Rc::new(agg(vec![0], AggIntent::Sum { col: None }, inner));
+        let root = agg(vec![0], AggIntent::Sum { col: None }, inner);
         assert!(!ExactCompositionStrategy::default_cost_model().matches(&TargetSubDAG::new(&root)));
         // rate is an exact accumulator — directly nestable, no separate value operation.
-        let rate = Rc::new(per_entity(AggIntent::Rate, metric_scan(&[])));
+        let rate = per_entity(AggIntent::Rate, metric_scan(&[]));
         assert!(!ExactCompositionStrategy::default_cost_model().matches(&TargetSubDAG::new(&rate)));
         // A sketch-capable outer intent is not an exact fold.
         let inner = agg(vec![2], default_quantile(0.5), metric_scan(&["zone"]));
-        let root = Rc::new(agg(vec![0], default_quantile(0.99), inner));
+        let root = agg(vec![0], default_quantile(0.99), inner);
         assert!(!ExactCompositionStrategy::default_cost_model().matches(&TargetSubDAG::new(&root)));
     }
 
@@ -642,7 +612,7 @@ mod tests {
         let strategy = ExactCompositionStrategy::new(&NoMixedExecution);
         assert!(!strategy.matches(&target));
         assert!(strategy.replacements(&target).is_empty());
-        let deriv = Rc::new(per_entity(AggIntent::Deriv, metric_scan(&[])));
+        let deriv = per_entity(AggIntent::Deriv, metric_scan(&[]));
         assert!(!strategy.matches(&TargetSubDAG::new(&deriv)));
     }
 
@@ -658,7 +628,7 @@ mod tests {
         // input — the operator would be consuming sketch state.
         let state_child =
             crate::replacement::realize_child(&comp.child_target, &DefaultCostModel).unwrap();
-        let SummaryExpr::SummaryEstimate { summary_input, .. } = &state_child.expr else {
+        let Operator::ASAP(ASAPOp::SummaryEstimate { summary_input, .. }) = &state_child.operator else {
             panic!("expected the child to realize to a readout");
         };
         assert!(!comp.accepts_child(summary_input));
@@ -676,12 +646,13 @@ mod tests {
             "rank error has no registered conversion through max"
         );
         assert!(matches!(
-            composed.expr,
-            SummaryExpr::ValueOperation {
-                timing: ExecutionTiming::QueryTime,
-                ..
-            }
+            composed.operator,
+            Operator::NonASAP(NonASAPOp::Aggregate { .. })
         ));
+        // Timing is no longer stored by composition: under the default
+        // lifecycle assignment the composed read-time operation runs at
+        // query time.
+        assert_eq!(timed(&composed).timing, Some(ExecutionTiming::QueryTime));
         assert!(composed
             .schema
             .fields
@@ -692,7 +663,7 @@ mod tests {
     #[test]
     fn compose_rejects_a_readout_child_for_a_ingestion_time_operation() {
         let inner = agg(vec![2], default_quantile(0.99), metric_scan(&["zone"]));
-        let root = Rc::new(per_entity(AggIntent::Deriv, inner));
+        let root = per_entity(AggIntent::Deriv, inner);
         let candidates =
             ExactCompositionStrategy::default_cost_model().replacements(&TargetSubDAG::new(&root));
         let Replacement::ExactComposition(comp) = &candidates[0].replacement else {
@@ -710,12 +681,20 @@ mod tests {
         // Raw update input is fine.
         let raw = keep_pre_asap(&comp.child_target).unwrap();
         assert!(comp.accepts_child(&raw));
+        // Timing is no longer stored by composition: the composition's
+        // placement is maintenance time, the composed exact operation is a
+        // plain Aggregate over the raw rows, and it is legal (and planned to
+        // run) at ingestion time.
+        assert_eq!(comp.placement, OperationPlacement::Maintenance);
+        let composed = comp.compose(raw).unwrap();
         assert!(matches!(
-            comp.compose(raw).unwrap().expr,
-            SummaryExpr::ValueOperation {
-                timing: ExecutionTiming::IngestionTime,
-                ..
-            }
+            composed.operator,
+            Operator::NonASAP(NonASAPOp::Aggregate { .. })
         ));
+        validate_default(&composed, ExecutionTiming::IngestionTime).unwrap();
+        assert_eq!(
+            planned_data_state(&composed, ExecutionTiming::IngestionTime).timing,
+            ExecutionTiming::IngestionTime
+        );
     }
 }

@@ -5,7 +5,7 @@ use crate::replacement::{
 use asap_types::ir::{ASAPOp, NonASAPOp, Operator, OperatorNode, ScalarExpr};
 use asap_types::post_asap::{maintained_population::*, ResultGuarantee, Schema};
 use asap_types::pre_asap::{
-    AggIntent, CompareOpKind, DataType, QueryExpr, Reduction, ScalarValue, Source,
+    AggIntent, CompareOpKind, DataType, Reduction, ScalarValue, Source,
 };
 use std::rc::Rc;
 
@@ -84,18 +84,11 @@ fn recognize(
         _ => return None,
     };
     if let Some(NonASAPOp::Scan {
-        source: table_source @ Source::Table { .. },
-        predicates,
+        source: Source::Table { .. },
         schema,
+        ..
     }) = source.non_asap()
     {
-        // `PopulationInput::Rows` still names its input as a pre-ASAP scan
-        // (source + schema). A scan with pushed-down predicates has no such
-        // description, so it is not recognized rather than merged with an
-        // unfiltered population of the same table.
-        if !predicates.is_empty() {
-            return None;
-        }
         let value_column = value_column.or_else(|| {
             schema
                 .fields
@@ -104,11 +97,7 @@ fn recognize(
         })?;
         let population = MaintainedPopulation {
             input: PopulationInput::Rows {
-                input: Rc::new(QueryExpr::Scan {
-                    source: table_source.clone(),
-                    predicates: Vec::new(),
-                    schema: schema.clone(),
-                }),
+                input: Rc::clone(source),
                 value_column,
                 grouping: grouping.clone(),
             },
@@ -308,10 +297,25 @@ impl ReplacementStrategy for MaintainedPopulationStrategy {
 mod tests {
     use super::*;
     use crate::test_support::lower_promql;
-    use asap_types::post_asap::{compile_post_asap_dag, share_common_summary_subtrees};
+    use asap_types::ir::cse::share_common_subtrees;
+    use asap_types::ir::export::compile_post_asap_dag as export_timed;
+    use asap_types::ir::timing::{apply_lifecycle_timings, LifecycleAssignment, TimingMemo};
 
-    fn lower(q: &str) -> Rc<QueryExpr> {
-        Rc::new(lower_promql(q, asap_types::types::AccuracyTarget::Exact))
+    /// Time `root` under the default lifecycle assignment (which runs the
+    /// data-state / population-contract validation) and export it.
+    fn compile_post_asap_dag(root: &Rc<OperatorNode>) -> Result<(), String> {
+        let timed = apply_lifecycle_timings(
+            root,
+            &LifecycleAssignment::default_maintained(),
+            &mut TimingMemo::new(),
+        )
+        .map_err(|e| format!("{e:?}"))?;
+        export_timed(&timed).map_err(|e| format!("{e:?}"))?;
+        Ok(())
+    }
+
+    fn lower(q: &str) -> Rc<OperatorNode> {
+        lower_promql(q, asap_types::types::AccuracyTarget::Exact)
     }
 
     // Instant scalar aggregations share the same retractable series population.
@@ -360,7 +364,7 @@ mod tests {
             .target_subdag_candidates()
             .flat_map(|g| &g.candidates)
             .any(|c| c.strategy == "MaintainedPopulationStrategy"));
-        let plans = share_common_summary_subtrees(
+        let plans = share_common_subtrees(
             roots
                 .iter()
                 .enumerate()
@@ -370,18 +374,10 @@ mod tests {
         let mut producers = Vec::new();
         for (_, plan) in &plans {
             compile_post_asap_dag(plan).unwrap();
-            let SummaryExpr::ValueOperation {
-                child,
-                operation: ValueOperation::ReadPopulation { .. },
-                ..
-            } = &plan.expr
-            else {
+            let Operator::ASAP(ASAPOp::ReadPopulation { child, .. }) = &plan.operator else {
                 panic!("missing typed readout")
             };
-            let SummaryExpr::ValueOperation {
-                operation: ValueOperation::MaintainPopulation { population },
-                ..
-            } = &child.expr
+            let Operator::ASAP(ASAPOp::MaintainPopulation { population, .. }) = &child.operator
             else {
                 panic!("missing maintained population")
             };
@@ -407,13 +403,10 @@ mod tests {
         let (p, _, _) = recognize(&roots[0]).unwrap();
         assert!(matches!(p.input, PopulationInput::CurrentSeries(ref s) if s.grouping.is_empty()));
         let candidate = strategy.candidate(&roots[0]).unwrap();
-        let SummaryExpr::ValueOperation { child, .. } = &candidate.expr else {
+        let Operator::ASAP(ASAPOp::ReadPopulation { child, .. }) = &candidate.operator else {
             unreachable!()
         };
-        let SummaryExpr::ValueOperation {
-            operation: ValueOperation::MaintainPopulation { population },
-            ..
-        } = &child.expr
+        let Operator::ASAP(ASAPOp::MaintainPopulation { population, .. }) = &child.operator
         else {
             unreachable!()
         };
@@ -446,28 +439,19 @@ mod tests {
         let root = lower("topk(5,a)");
         let strategy = MaintainedPopulationStrategy::new(std::slice::from_ref(&root));
         let candidate = strategy.candidate(&root).unwrap();
+        compile_post_asap_dag(&candidate).expect("the unmodified candidate is legal");
         let mut bad = (*candidate).clone();
-        let SummaryExpr::ValueOperation { operation, .. } = &mut bad.expr else {
+        let Operator::ASAP(ASAPOp::ReadPopulation { readout, .. }) = &mut bad.operator else {
             unreachable!()
         };
-        *operation = ValueOperation::ReadPopulation {
-            readout: PopulationReadout::TopK { k: 6 },
-        };
+        *readout = PopulationReadout::TopK { k: 6 };
         assert!(compile_post_asap_dag(&Rc::new(bad.clone())).is_err());
-        let SummaryExpr::ValueOperation {
-            child, operation, ..
-        } = &mut bad.expr
-        else {
+        let Operator::ASAP(ASAPOp::ReadPopulation { child, readout }) = &mut bad.operator else {
             unreachable!()
         };
-        *operation = ValueOperation::ReadPopulation {
-            readout: PopulationReadout::TopK { k: 5 },
-        };
+        *readout = PopulationReadout::TopK { k: 5 };
         let producer = Rc::make_mut(child);
-        let SummaryExpr::ValueOperation {
-            operation: ValueOperation::MaintainPopulation { population },
-            ..
-        } = &mut producer.expr
+        let Operator::ASAP(ASAPOp::MaintainPopulation { population, .. }) = &mut producer.operator
         else {
             unreachable!()
         };

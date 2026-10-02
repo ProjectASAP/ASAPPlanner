@@ -26,8 +26,8 @@ fn population_preserves_selector_horizon() {
     let NonASAPOp::Aggregate { child: source, .. } = root.expect_non_asap() else {
         panic!()
     };
-    assert!(spec.matches_input(source));
+    assert!(spec.matches_node(source));
     let mut wrong = spec.clone();
     wrong.lookback_ms = 300_000;
-    assert!(!wrong.matches_input(source));
+    assert!(!wrong.matches_node(source));
 }

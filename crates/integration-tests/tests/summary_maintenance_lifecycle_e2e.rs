@@ -13,8 +13,9 @@ use asap_aware_mapping::{
     SummaryMaintenanceLifecycleCostInputs, SummaryMaintenanceLifecycleRejection, WorkloadDemand,
 };
 use asap_frontend_promql::lower_promql_workload;
+use asap_types::ir::OperatorNode;
 use asap_types::post_asap::{
-    EvaluationSchedule, SummaryMaintenanceLifecycle, SummaryMaintenanceMode, SummaryNode,
+    EvaluationSchedule, SummaryMaintenanceLifecycle, SummaryMaintenanceMode,
 };
 use asap_types::pre_asap::agg_intent::AggIntent;
 use asap_types::types::AccuracyTarget;
@@ -32,7 +33,7 @@ struct FullyCostedRuntime;
 impl CostModel for FullyCostedRuntime {
     fn raw_query_recompute_total_cost(
         &self,
-        _target: &asap_types::pre_asap::QueryExpr,
+        _target: &OperatorNode,
         _expected_reads: f64,
     ) -> Option<Cost> {
         Some(Cost(1_000.0))
@@ -48,7 +49,7 @@ impl CostModel for FullyCostedRuntime {
 
     fn summary_maintenance_lifecycle_cost_inputs(
         &self,
-        _summary: &SummaryNode,
+        _summary: &OperatorNode,
     ) -> SummaryMaintenanceLifecycleCostInputs {
         SummaryMaintenanceLifecycleCostInputs {
             build_cost: Some(Cost(10.0)),
@@ -61,7 +62,7 @@ impl CostModel for FullyCostedRuntime {
 
     fn summary_maintenance_capabilities(
         &self,
-        _summary: &SummaryNode,
+        _summary: &OperatorNode,
     ) -> SummaryMaintenanceCapabilities {
         SummaryMaintenanceCapabilities {
             incremental_update: true,
@@ -121,12 +122,11 @@ fn promql_dashboard_materializes_continuous_summary_with_explained_rejections() 
     let workload = dashboard_workload();
     workload.validate().unwrap();
 
-    let lowered = lower_promql_workload(&workload, 0)
+    let root = lower_promql_workload(&workload, 0)
         .expect("valid PromQL workload")
         .into_iter()
         .next()
         .expect("one normalized workload entry");
-    let root = Rc::new(lowered);
     let strategies = asap_aware_mapping::default_strategies_with(&FullyCostedRuntime);
     let space = search_workload_with(vec![("dashboard", Rc::clone(&root))], &strategies);
     let target = Rc::clone(&space.roots[0].1);
@@ -224,8 +224,8 @@ fn promql_dashboard_materializes_continuous_summary_with_explained_rejections() 
         .as_array()
         .unwrap()
         .iter()
-        .find(|node| node["kind"] == "SummaryAgg")
-        .expect("exported SummaryAgg node");
+        .find(|node| node["kind"] == "summary_agg")
+        .expect("exported summary_agg node");
     assert_eq!(
         summary_node["detail"]["summary_maintenance"]["selected"]["lifecycle"]["kind"],
         "continuously_maintained"

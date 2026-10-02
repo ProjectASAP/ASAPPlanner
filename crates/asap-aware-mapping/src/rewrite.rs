@@ -416,73 +416,78 @@ mod tests {
     use asap_types::types::AccuracyTarget;
     use std::time::Duration;
 
-    fn metric_scan(labels: &[&str]) -> QueryExpr {
-        let mut columns = vec![
-            Field::plain("ts", DataType::Timestamp, false),
-            Field::plain("value", DataType::Float64, false),
-        ];
-        columns.extend(labels.iter().map(|n| Field::plain(*n, DataType::Utf8, true)));
-        QueryExpr::Scan {
-            source: Source::TimeSeries { metric: "m".into() },
-            predicates: vec![],
-            schema: Schema::with_time_index(columns, 0, vec![]),
-        }
+    use crate::test_support::metric_scan;
+    use asap_types::ir::TimeRangeKind;
+
+    fn avg_agg(
+        by: Vec<ColumnId>,
+        col: Option<ColumnId>,
+        child: Rc<OperatorNode>,
+    ) -> Rc<OperatorNode> {
+        avg_agg_with(by, col, vec![], None, child)
     }
 
-    fn avg_agg(by: Vec<ColumnId>, col: Option<ColumnId>, child: QueryExpr) -> QueryExpr {
-        QueryExpr::Aggregate {
+    fn avg_agg_with(
+        by: Vec<ColumnId>,
+        col: Option<ColumnId>,
+        output_names: Vec<String>,
+        having: Option<asap_types::ir::Predicate>,
+        child: Rc<OperatorNode>,
+    ) -> Rc<OperatorNode> {
+        OperatorNode::non_asap_node(NonASAPOp::Aggregate {
             reduction: Reduction::by(by),
             measures: vec![AggIntent::Avg { col }],
-            output_names: vec![],
-            having: None,
-            child: Rc::new(child),
-        }
+            output_names,
+            having,
+            child,
+        })
+        .unwrap()
     }
 
     // Temporal averages expose two single-measure children without closing labels.
     #[test]
     fn temporal_average_components_preserves_schema_and_exposes_sum_count() {
-        let root = Rc::new(lower_promql(
+        let root = lower_promql(
             "avg_over_time(a{job=\"api\"}[5m])",
             AccuracyTarget::Exact,
-        ));
+        );
         assert!(SemanticEquivalentRewriteStrategy
             .replacements(&TargetSubDAG::new(&root))
             .is_empty());
         let rewritten =
             temporal_average_components(&root).expect("conditional sum/count components");
         assert_eq!(
-            root.output_schema().unwrap(),
-            rewritten.output_schema().unwrap()
+            root.schema.clone(),
+            rewritten.schema.clone()
         );
-        assert!(matches!(rewritten.as_ref(), QueryExpr::BinaryOp { .. }));
+        assert!(matches!(rewritten.non_asap(), Some(NonASAPOp::BinaryOp { .. })));
     }
 
     // ── matches ──────────────────────────────────────────────────────────
 
     #[test]
     fn matches_a_bare_avg_aggregate() {
-        let q = Rc::new(avg_agg(vec![], None, metric_scan(&[])));
+        let q = avg_agg(vec![], None, metric_scan(&[]));
         let target = TargetSubDAG::new(&q);
         assert!(AvgToSumOverCountStrategy.matches(&target));
     }
 
     #[test]
     fn matches_a_grouped_avg_aggregate() {
-        let q = Rc::new(avg_agg(vec![2], None, metric_scan(&["job"])));
+        let q = avg_agg(vec![2], None, metric_scan(&["job"]));
         let target = TargetSubDAG::new(&q);
         assert!(AvgToSumOverCountStrategy.matches(&target));
     }
 
     #[test]
     fn does_not_match_a_multi_measure_aggregate() {
-        let q = Rc::new(QueryExpr::Aggregate {
+        let q = OperatorNode::non_asap_node(NonASAPOp::Aggregate {
             reduction: Reduction::by(vec![2]),
             measures: vec![AggIntent::Sum { col: None }, AggIntent::Avg { col: None }],
             output_names: vec![],
             having: None,
-            child: Rc::new(metric_scan(&["job"])),
-        });
+            child: metric_scan(&["job"]),
+        }).unwrap();
         let target = TargetSubDAG::new(&q);
         assert!(!AvgToSumOverCountStrategy.matches(&target));
         assert!(AvgToSumOverCountStrategy.replacements(&target).is_empty());
@@ -490,13 +495,15 @@ mod tests {
 
     #[test]
     fn does_not_match_a_having_bearing_avg_aggregate() {
-        let mut q = avg_agg(vec![2], None, metric_scan(&["job"]));
-        if let QueryExpr::Aggregate { having, .. } = &mut q {
-            *having = Some(asap_types::pre_asap::query_expr::Predicate(Rc::new(
-                QueryExpr::Literal(asap_types::pre_asap::expr_ir::ScalarValue::Boolean(true)),
-            )));
-        }
-        let q = Rc::new(q);
+        let q = avg_agg_with(
+            vec![2],
+            None,
+            vec![],
+            Some(asap_types::ir::Predicate(ScalarExpr::Literal(
+                asap_types::pre_asap::expr_ir::ScalarValue::Boolean(true),
+            ))),
+            metric_scan(&["job"]),
+        );
         let target = TargetSubDAG::new(&q);
         assert!(!AvgToSumOverCountStrategy.matches(&target));
         assert!(AvgToSumOverCountStrategy.replacements(&target).is_empty());
@@ -511,13 +518,13 @@ mod tests {
             },
             AggIntent::Min { col: None },
         ] {
-            let q = Rc::new(QueryExpr::Aggregate {
+            let q = OperatorNode::non_asap_node(NonASAPOp::Aggregate {
                 reduction: Reduction::by(vec![2]),
                 measures: vec![intent.clone()],
                 output_names: vec![],
                 having: None,
-                child: Rc::new(metric_scan(&["job"])),
-            });
+                child: metric_scan(&["job"]),
+            }).unwrap();
             let target = TargetSubDAG::new(&q);
             assert!(
                 !AvgToSumOverCountStrategy.matches(&target),
@@ -529,15 +536,15 @@ mod tests {
 
     #[test]
     fn does_not_match_a_without_grouped_avg_aggregate() {
-        let q = Rc::new(QueryExpr::Aggregate {
+        let q = OperatorNode::non_asap_node(NonASAPOp::Aggregate {
             reduction: Reduction::Reduce(asap_types::pre_asap::query_expr::GroupKeys::without(
                 vec![2],
             )),
             measures: vec![AggIntent::Avg { col: None }],
             output_names: vec![],
             having: None,
-            child: Rc::new(metric_scan(&["job"])),
-        });
+            child: metric_scan(&["job"]),
+        }).unwrap();
         let target = TargetSubDAG::new(&q);
         assert!(!AvgToSumOverCountStrategy.matches(&target));
         assert!(AvgToSumOverCountStrategy.replacements(&target).is_empty());
@@ -545,13 +552,13 @@ mod tests {
 
     #[test]
     fn does_not_match_a_per_entity_avg_aggregate() {
-        let q = Rc::new(QueryExpr::Aggregate {
+        let q = OperatorNode::non_asap_node(NonASAPOp::Aggregate {
             reduction: Reduction::PerEntity,
             measures: vec![AggIntent::Avg { col: None }],
             output_names: vec![],
             having: None,
-            child: Rc::new(metric_scan(&[])),
-        });
+            child: metric_scan(&[]),
+        }).unwrap();
         let target = TargetSubDAG::new(&q);
         assert!(!AvgToSumOverCountStrategy.matches(&target));
         assert!(AvgToSumOverCountStrategy.replacements(&target).is_empty());
@@ -559,7 +566,7 @@ mod tests {
 
     #[test]
     fn does_not_match_a_non_aggregate_node() {
-        let scan = Rc::new(metric_scan(&["job"]));
+        let scan = metric_scan(&["job"]);
         let target = TargetSubDAG::new(&scan);
         assert!(!AvgToSumOverCountStrategy.matches(&target));
         assert!(AvgToSumOverCountStrategy.replacements(&target).is_empty());
@@ -572,7 +579,7 @@ mod tests {
     #[test]
     fn avg_rewrites_and_schema_matches_exactly_when_ungrouped() {
         let original = avg_agg(vec![], None, metric_scan(&[]));
-        let original_rc = Rc::new(original.clone());
+        let original_rc = Rc::clone(&original);
         let target = TargetSubDAG::new(&original_rc);
 
         let replacements = AvgToSumOverCountStrategy.replacements(&target);
@@ -580,28 +587,26 @@ mod tests {
         assert!(!replacements[0].rationale.is_empty());
 
         let rewritten = match &replacements[0].replacement {
-            Replacement::Rewrite(rc) => rc,
+            Replacement::Subtree(rc) => rc,
             other => panic!("expected a Rewrite replacement, got {other:?}"),
         };
-        let QueryExpr::BinaryOp { lhs, rhs, .. } = rewritten.as_ref() else {
+        let Some(NonASAPOp::BinaryOp { lhs, rhs, .. }) = rewritten.non_asap() else {
             panic!("expected sum/count BinaryOp, got {rewritten:?}");
         };
-        let QueryExpr::Project { child: sum, .. } = lhs.as_ref() else {
+        let Some(NonASAPOp::Project { child: sum, .. }) = lhs.non_asap() else {
             panic!("expected cast Project above Sum, got {lhs:?}");
         };
-        assert!(matches!(
-            sum.as_ref(),
-            QueryExpr::Aggregate { measures, .. }
+        assert!(matches!(sum.non_asap(),
+            Some(NonASAPOp::Aggregate { measures, .. })
                 if matches!(measures.as_slice(), [AggIntent::Sum { col: None }])
         ));
-        assert!(matches!(
-            rhs.as_ref(),
-            QueryExpr::Aggregate { measures, .. }
+        assert!(matches!(rhs.non_asap(),
+            Some(NonASAPOp::Aggregate { measures, .. })
                 if matches!(measures.as_slice(), [AggIntent::Count { accuracy: AccuracyTarget::Exact }])
         ));
 
-        let original_schema = original.output_schema().unwrap();
-        let rewritten_schema = rewritten.output_schema().unwrap();
+        let original_schema = original.schema.clone();
+        let rewritten_schema = rewritten.schema.clone();
         assert_eq!(
             original_schema, rewritten_schema,
             "the rewritten tree must report exactly the same output schema as the original avg"
@@ -613,20 +618,22 @@ mod tests {
     /// synthetic `"avg"` default.
     #[test]
     fn preserves_an_explicit_output_name_override() {
-        let mut q = avg_agg(vec![], None, metric_scan(&[]));
-        if let QueryExpr::Aggregate { output_names, .. } = &mut q {
-            *output_names = vec!["avg_latency".to_string()];
-        }
-        let original_schema = q.output_schema().unwrap();
-        let q = Rc::new(q);
+        let q = avg_agg_with(
+            vec![],
+            None,
+            vec!["avg_latency".to_string()],
+            None,
+            metric_scan(&[]),
+        );
+        let original_schema = q.schema.clone();
         let target = TargetSubDAG::new(&q);
 
         let replacements = AvgToSumOverCountStrategy.replacements(&target);
         let rewritten = match &replacements[0].replacement {
-            Replacement::Rewrite(rc) => rc,
+            Replacement::Subtree(rc) => rc,
             other => panic!("expected a Rewrite replacement, got {other:?}"),
         };
-        let rewritten_schema = rewritten.output_schema().unwrap();
+        let rewritten_schema = rewritten.schema.clone();
         assert_eq!(original_schema, rewritten_schema);
         assert_eq!(rewritten_schema.fields[0].name, "avg_latency");
     }
@@ -636,23 +643,23 @@ mod tests {
     #[test]
     fn grouped_avg_rewrite_preserves_the_whole_schema() {
         let original = avg_agg(vec![2], None, metric_scan(&["job"]));
-        let original_schema = original.output_schema().unwrap();
-        let original_rc = Rc::new(original);
+        let original_schema = original.schema.clone();
+        let original_rc = Rc::clone(&original);
         let target = TargetSubDAG::new(&original_rc);
 
         let replacements = AvgToSumOverCountStrategy.replacements(&target);
         let rewritten = match &replacements[0].replacement {
-            Replacement::Rewrite(rc) => rc,
+            Replacement::Subtree(rc) => rc,
             other => panic!("expected a Rewrite replacement, got {other:?}"),
         };
-        let rewritten_schema = rewritten.output_schema().unwrap();
+        let rewritten_schema = rewritten.schema.clone();
 
         assert_eq!(rewritten_schema, original_schema);
     }
 
     #[test]
     fn default_search_discovers_bindable_sum_and_count_targets() {
-        let root = Rc::new(avg_agg(vec![2], None, metric_scan(&["job"])));
+        let root = avg_agg(vec![2], None, metric_scan(&["job"]));
         let space = crate::replacement::search_workload(vec![("avg", Rc::clone(&root))]);
 
         let avg_group = space
@@ -665,7 +672,7 @@ mod tests {
         let mut found_sum = false;
         let mut found_count = false;
         for group in space.target_subdag_candidates() {
-            let QueryExpr::Aggregate { measures, .. } = group.target.as_ref() else {
+            let Some(NonASAPOp::Aggregate { measures, .. }) = group.target.non_asap() else {
                 continue;
             };
             let expected = matches!(measures.as_slice(), [AggIntent::Sum { .. }])
@@ -682,7 +689,8 @@ mod tests {
                 group
                     .candidates
                     .iter()
-                    .any(|candidate| matches!(candidate.replacement, Replacement::Summary(_))),
+                    .any(|candidate| matches!(&candidate.replacement,
+                        Replacement::Subtree(node) if node.contains_asap())),
                 "rewritten accumulator must be independently bindable: {measures:?}"
             );
             found_sum |= matches!(measures.as_slice(), [AggIntent::Sum { .. }]);
@@ -703,25 +711,25 @@ mod tests {
             Field::plain("job", DataType::Utf8, true),
             Field::plain("bytes", DataType::Int64, false),
         ];
-        let child = QueryExpr::Scan {
+        let child = OperatorNode::non_asap_node(NonASAPOp::Scan {
             source: Source::TimeSeries { metric: "m".into() },
             predicates: vec![],
             schema: {
                 let cols = std::mem::take(&mut schema_cols);
                 Schema::with_time_index(cols, 0, vec![])
             },
-        };
+        }).unwrap();
         let original = avg_agg(vec![1], Some(2), child);
-        let original_schema = original.output_schema().unwrap();
-        let original_rc = Rc::new(original);
+        let original_schema = original.schema.clone();
+        let original_rc = Rc::clone(&original);
         let target = TargetSubDAG::new(&original_rc);
 
         let replacements = AvgToSumOverCountStrategy.replacements(&target);
         let rewritten = match &replacements[0].replacement {
-            Replacement::Rewrite(rc) => rc,
+            Replacement::Subtree(rc) => rc,
             other => panic!("expected a Rewrite replacement, got {other:?}"),
         };
-        let rewritten_schema = rewritten.output_schema().unwrap();
+        let rewritten_schema = rewritten.schema.clone();
 
         // The whole reason for the explicit `Cast` in `build_rewrite`: an
         // `Int64` input column (`bytes`) makes `Sum`'s own output `Int64`
@@ -734,15 +742,15 @@ mod tests {
             DataType::Float64
         );
 
-        let QueryExpr::BinaryOp { lhs, .. } = rewritten.as_ref() else {
+        let Some(NonASAPOp::BinaryOp { lhs, .. }) = rewritten.non_asap() else {
             panic!("expected sum/count BinaryOp");
         };
-        let QueryExpr::Project { cols, .. } = lhs.as_ref() else {
+        let Some(NonASAPOp::Project { cols, .. }) = lhs.non_asap() else {
             panic!("expected cast Project above Sum");
         };
         assert!(matches!(
             &cols.last().unwrap().expr,
-            QueryExpr::Cast {
+            ScalarExpr::Cast {
                 to: DataType::Float64,
                 ..
             }
@@ -751,7 +759,7 @@ mod tests {
 
     #[test]
     fn does_not_rewrite_avg_of_a_nullable_column_via_count_star() {
-        let child = QueryExpr::Scan {
+        let child = OperatorNode::non_asap_node(NonASAPOp::Scan {
             source: Source::TimeSeries { metric: "m".into() },
             predicates: vec![],
             schema: Schema::with_time_index(
@@ -763,34 +771,35 @@ mod tests {
                 0,
                 vec![],
             ),
-        };
-        let q = Rc::new(avg_agg(vec![], Some(2), child));
+        }).unwrap();
+        let q = avg_agg(vec![], Some(2), child);
         let target = TargetSubDAG::new(&q);
 
         assert!(!AvgToSumOverCountStrategy.matches(&target));
         assert!(AvgToSumOverCountStrategy.replacements(&target).is_empty());
     }
 
-    fn nested_aggregate(outer: AggIntent, inner: AggIntent) -> Rc<QueryExpr> {
-        let temporal = QueryExpr::Aggregate {
+    fn nested_aggregate(outer: AggIntent, inner: AggIntent) -> Rc<OperatorNode> {
+        let temporal = OperatorNode::non_asap_node(NonASAPOp::Aggregate {
             reduction: Reduction::PerEntity,
             measures: vec![inner],
             output_names: vec![],
             having: None,
-            child: Rc::new(QueryExpr::TimeRange {
+            child: OperatorNode::non_asap_node(NonASAPOp::TimeRange {
+                kind: TimeRangeKind::Range,
                 range: Duration::from_secs(300),
-                child: Rc::new(metric_scan(&["service"])),
-            }),
-        };
-        Rc::new(QueryExpr::Aggregate {
+                child: metric_scan(&["service"]),
+            }).unwrap(),
+        }).unwrap();
+        OperatorNode::non_asap_node(NonASAPOp::Aggregate {
             reduction: Reduction::by(vec![2]),
             measures: vec![outer],
             // Match the PromQL front end: an empty entry selects the intent's
             // canonical output name rather than an explicit alias.
             output_names: vec![String::new()],
             having: None,
-            child: Rc::new(temporal),
-        })
+            child: temporal,
+        }).unwrap()
     }
 
     #[test]
@@ -811,34 +820,33 @@ mod tests {
             let [candidate] = candidates.as_slice() else {
                 panic!("supported pair should produce exactly one rewrite")
             };
-            let Replacement::Rewrite(rewritten) = &candidate.replacement else {
+            let Replacement::Subtree(rewritten) = &candidate.replacement else {
                 panic!("expected a logical rewrite")
             };
             assert_eq!(
-                original.output_schema().unwrap(),
-                rewritten.output_schema().unwrap()
+                original.schema.clone(),
+                rewritten.schema.clone()
             );
-            let aggregate = match rewritten.as_ref() {
-                QueryExpr::Aggregate { .. } => rewritten.as_ref(),
-                QueryExpr::Project { child, .. } => child.as_ref(),
+            let aggregate = match rewritten.non_asap() {
+                Some(NonASAPOp::Aggregate { .. }) => rewritten.as_ref(),
+                Some(NonASAPOp::Project { child, .. }) => child.as_ref(),
                 other => panic!("expected Aggregate or cast Project, got {other:?}"),
             };
-            let QueryExpr::Aggregate {
+            let Some(NonASAPOp::Aggregate {
                 reduction: Reduction::Reduce(by),
                 measures,
                 child,
                 ..
-            } = aggregate
+            }) = aggregate.non_asap()
             else {
                 panic!("expected composed cross-entity aggregate")
             };
             assert_eq!(by.keys(), &[2]);
             assert_eq!(measures, &[expected]);
-            assert!(matches!(
-                child.as_ref(),
-                QueryExpr::TimeRange { range, child }
+            assert!(matches!(child.non_asap(),
+                Some(NonASAPOp::TimeRange { range, child, .. })
                     if *range == Duration::from_secs(300)
-                        && matches!(child.as_ref(), QueryExpr::Scan { .. })
+                        && matches!(child.non_asap(), Some(NonASAPOp::Scan { .. }))
             ));
         }
     }
@@ -871,9 +879,9 @@ mod tests {
             .iter()
             .find(|candidate| candidate.strategy == "SemanticEquivalentRewriteStrategy")
             .expect("default search should run semantic rewrites");
-        let Replacement::Rewrite(rewritten) = &candidate.replacement else {
+        let Replacement::Subtree(rewritten) = &candidate.replacement else {
             panic!("expected logical rewrite")
         };
-        assert_eq!(rewritten.output_schema().unwrap().fields[1].name, "sum");
+        assert_eq!(rewritten.schema.clone().fields[1].name, "sum");
     }
 }

@@ -112,6 +112,7 @@ fn forces_query_time(node: &OperatorNode, seen: &mut HashMap<*const OperatorNode
         return cached;
     }
     let forced = match &node.operator {
+        _ if node.timing == Some(ExecutionTiming::QueryTime) => true,
         Operator::ASAP(ASAPOp::SummaryEstimate { .. })
         | Operator::ASAP(ASAPOp::ReadPopulation { .. }) => true,
         _ => node
@@ -180,6 +181,12 @@ fn own_timing(
     assignment: &LifecycleAssignment,
     forced: &mut HashMap<*const OperatorNode, bool>,
 ) -> ExecutionTiming {
+    // A placement fixed when the candidate was built (an exact-state read
+    // boundary that must run at query time, or one that feeds maintenance)
+    // is honored; a conflicting consumer is rejected by validation.
+    if let Some(placed) = node.timing {
+        return placed;
+    }
     match &node.operator {
         Operator::ASAP(ASAPOp::SummaryEstimate { .. })
         | Operator::ASAP(ASAPOp::ReadPopulation { .. }) => ExecutionTiming::QueryTime,

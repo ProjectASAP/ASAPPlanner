@@ -1325,12 +1325,15 @@ mod tests {
         }
     }
     use super::*;
+    use asap_types::ir::{BinaryOperator, NonASAPOp};
     use asap_types::post_asap::{
-        ExactKind, ExactParams, GroupingStrategy, ResultGuarantee, SketchAlgorithm,
-        FieldDataType, Field, Schema,
+        ExactKind, ExactParams, Field, FieldDataType, GroupingStrategy, ResultGuarantee, Schema,
+        SketchAlgorithm,
     };
     use asap_types::pre_asap::AggIntent;
-    use asap_types::pre_asap::{ColumnRef, DataType, QueryExpr, Reduction, Source};
+    use asap_types::pre_asap::{
+        ArithmeticOpKind, BinaryOpKind, ColumnRef, DataType, Reduction, Source,
+    };
     use asap_types::types::AccuracyTarget;
     use asap_types::workload::{
         BatchEntry, DataWorkload, DurationMs, Evidence, EvidenceSource, Predictability, Query,
@@ -1350,7 +1353,7 @@ mod tests {
 
         fn summary_maintenance_lifecycle_cost_inputs(
             &self,
-            _summary: &SummaryNode,
+            _summary: &OperatorNode,
         ) -> SummaryMaintenanceLifecycleCostInputs {
             SummaryMaintenanceLifecycleCostInputs {
                 build_cost: Some(Cost(10.0)),
@@ -1363,7 +1366,7 @@ mod tests {
 
         fn summary_maintenance_capabilities(
             &self,
-            _summary: &SummaryNode,
+            _summary: &OperatorNode,
         ) -> SummaryMaintenanceCapabilities {
             SummaryMaintenanceCapabilities {
                 incremental_update: true,
@@ -1386,19 +1389,19 @@ mod tests {
 
         fn summary_maintenance_lifecycle_cost_inputs(
             &self,
-            summary: &SummaryNode,
+            summary: &OperatorNode,
         ) -> SummaryMaintenanceLifecycleCostInputs {
             UnitCosts.summary_maintenance_lifecycle_cost_inputs(summary)
         }
 
         fn summary_maintenance_capabilities(
             &self,
-            summary: &SummaryNode,
+            summary: &OperatorNode,
         ) -> SummaryMaintenanceCapabilities {
             UnitCosts.summary_maintenance_capabilities(summary)
         }
 
-        fn raw_query_recompute_cost(&self, _target: &QueryExpr) -> Option<Cost> {
+        fn raw_query_recompute_cost(&self, _target: &OperatorNode) -> Option<Cost> {
             Some(Cost(1.0))
         }
     }
@@ -1416,14 +1419,14 @@ mod tests {
 
         fn summary_maintenance_lifecycle_cost_inputs(
             &self,
-            summary: &SummaryNode,
+            summary: &OperatorNode,
         ) -> SummaryMaintenanceLifecycleCostInputs {
             UnitCosts.summary_maintenance_lifecycle_cost_inputs(summary)
         }
 
         fn summary_maintenance_capabilities(
             &self,
-            _summary: &SummaryNode,
+            _summary: &OperatorNode,
         ) -> SummaryMaintenanceCapabilities {
             SummaryMaintenanceCapabilities {
                 incremental_update: true,
@@ -1438,7 +1441,7 @@ mod tests {
     impl CostModel for SummaryMaintenancePrefersDdSketch {
         fn raw_query_recompute_total_cost(
             &self,
-            _target: &QueryExpr,
+            _target: &OperatorNode,
             _expected_reads: f64,
         ) -> Option<Cost> {
             Some(Cost(1_000.0))
@@ -1456,7 +1459,7 @@ mod tests {
 
         fn summary_maintenance_lifecycle_cost_inputs(
             &self,
-            summary: &SummaryNode,
+            summary: &OperatorNode,
         ) -> SummaryMaintenanceLifecycleCostInputs {
             let build = match sketch_algorithm(summary) {
                 Some(SketchAlgorithm::Kll) => 100.0,
@@ -1488,8 +1491,8 @@ mod tests {
 
         fn complete_summary_candidate_cost(
             &self,
-            _root: &SummaryNode,
-            _target: Option<&QueryExpr>,
+            _root: &OperatorNode,
+            _target: Option<&OperatorNode>,
             deployments: &[CostedSummaryDeployment<'_>],
             _horizon: Option<Horizon>,
             _expected_reads: Option<f64>,
@@ -1521,12 +1524,13 @@ mod tests {
 
         fn summary_maintenance_lifecycle_cost_inputs(
             &self,
-            summary: &SummaryNode,
+            summary: &OperatorNode,
         ) -> SummaryMaintenanceLifecycleCostInputs {
+            // A leaf summary is one built directly over kept pre-ASAP rows
+            // (its child is not an ASAP node); a nested one reads state.
             let is_leaf = matches!(
-                summary.expr,
-                SummaryExpr::SummaryAgg { ref child, .. }
-                    if matches!(child.expr, SummaryExpr::KeepPreAsap(_))
+                &summary.operator,
+                Operator::ASAP(ASAPOp::SummaryAgg { child, .. }) if !child.is_asap()
             );
             SummaryMaintenanceLifecycleCostInputs {
                 build_cost: Some(Cost(if is_leaf { 1.0 } else { 100.0 })),
@@ -1539,7 +1543,7 @@ mod tests {
 
         fn summary_maintenance_capabilities(
             &self,
-            _summary: &SummaryNode,
+            _summary: &OperatorNode,
         ) -> SummaryMaintenanceCapabilities {
             SummaryMaintenanceCapabilities {
                 incremental_update: true,
@@ -1549,23 +1553,27 @@ mod tests {
         }
     }
 
-    fn sketch_algorithm(node: &SummaryNode) -> Option<SketchAlgorithm> {
-        match &node.expr {
-            SummaryExpr::SummaryEstimate { summary_input, .. } => sketch_algorithm(summary_input),
-            SummaryExpr::SummaryAgg {
-                family: FieldDataType::Sketch(kind, _),
-                ..
-            } => Some(kind.algorithm().clone()),
-            _ => None,
+    /// The sketch algorithm of the first `SummaryAgg` reachable from `node`
+    /// (through a readout or any relational operator kept above it).
+    fn sketch_algorithm(node: &OperatorNode) -> Option<SketchAlgorithm> {
+        if let Operator::ASAP(ASAPOp::SummaryAgg {
+            family: FieldDataType::Sketch(kind, _),
+            ..
+        }) = &node.operator
+        {
+            return Some(kind.algorithm().clone());
         }
+        node.children()
+            .into_iter()
+            .find_map(|child| sketch_algorithm(child))
     }
 
-    fn query_root() -> Rc<QueryExpr> {
+    fn query_root() -> Rc<OperatorNode> {
         query_root_for("m")
     }
 
-    fn query_root_for(metric: &str) -> Rc<QueryExpr> {
-        Rc::new(QueryExpr::Scan {
+    fn query_root_for(metric: &str) -> Rc<OperatorNode> {
+        OperatorNode::non_asap_node(NonASAPOp::Scan {
             source: Source::TimeSeries {
                 metric: metric.into(),
             },
@@ -1579,20 +1587,22 @@ mod tests {
                 vec![],
             ),
         })
+        .unwrap()
     }
 
-    fn sum_query() -> Rc<QueryExpr> {
-        Rc::new(QueryExpr::Aggregate {
+    fn sum_query() -> Rc<OperatorNode> {
+        OperatorNode::non_asap_node(NonASAPOp::Aggregate {
             reduction: Reduction::by(vec![]),
             measures: vec![AggIntent::Sum { col: None }],
             output_names: vec![],
             having: None,
             child: query_root(),
         })
+        .unwrap()
     }
 
-    fn quantile_query() -> Rc<QueryExpr> {
-        Rc::new(QueryExpr::Aggregate {
+    fn quantile_query() -> Rc<OperatorNode> {
+        OperatorNode::non_asap_node(NonASAPOp::Aggregate {
             reduction: Reduction::by(vec![]),
             measures: vec![AggIntent::Quantile {
                 col: None,
@@ -1603,17 +1613,20 @@ mod tests {
             having: None,
             child: query_root(),
         })
+        .unwrap()
     }
 
-    fn summary() -> Rc<SummaryNode> {
-        let child = Rc::new(SummaryNode {
-            expr: SummaryExpr::KeepPreAsap(query_root()),
-            schema: Schema::lifted(vec![], None),
-            guarantee: Some(ResultGuarantee::exact("raw")),
-        });
+    /// An exact sum accumulator over the kept pre-ASAP scan.
+    fn summary() -> Rc<OperatorNode> {
+        let child = Rc::new(
+            query_root()
+                .as_ref()
+                .clone()
+                .with_guarantee(Some(ResultGuarantee::exact("raw"))),
+        );
         let family = FieldDataType::ExactAggregate(ExactKind::Sum, ExactParams::Sum);
-        Rc::new(SummaryNode {
-            expr: SummaryExpr::SummaryAgg {
+        OperatorNode::asap_node(
+            ASAPOp::SummaryAgg {
                 child,
                 family: family.clone(),
                 input: asap_types::post_asap::SummaryUpdate::column(ColumnRef::Named(
@@ -1622,16 +1635,16 @@ mod tests {
                 reduction: Reduction::by(vec![]),
                 grouping: GroupingStrategy::default(),
             },
-            schema: Schema::lifted(vec![Field::new("state", family, false)], None),
-            guarantee: Some(ResultGuarantee::exact("sum")),
-        })
+            Schema::lifted(vec![Field::new("state", family, false)], None),
+            Some(ResultGuarantee::exact("sum")),
+        )
     }
 
-    fn nested_summary() -> Rc<SummaryNode> {
+    fn nested_summary() -> Rc<OperatorNode> {
         let child = summary();
         let family = FieldDataType::ExactAggregate(ExactKind::Sum, ExactParams::Sum);
-        Rc::new(SummaryNode {
-            expr: SummaryExpr::SummaryAgg {
+        OperatorNode::asap_node(
+            ASAPOp::SummaryAgg {
                 child,
                 family: family.clone(),
                 input: asap_types::post_asap::SummaryUpdate::column(ColumnRef::Named(
@@ -1640,9 +1653,9 @@ mod tests {
                 reduction: Reduction::by(vec![]),
                 grouping: GroupingStrategy::default(),
             },
-            schema: Schema::lifted(vec![Field::new("state", family, false)], None),
-            guarantee: Some(ResultGuarantee::exact("nested sum")),
-        })
+            Schema::lifted(vec![Field::new("state", family, false)], None),
+            Some(ResultGuarantee::exact("nested sum")),
+        )
     }
 
     fn batch(predictability: Predictability) -> BatchEntry {
@@ -2134,7 +2147,10 @@ mod tests {
         assert_eq!(plan.raw_recompute_total_cost, Some(Cost(1.0)));
         assert_eq!(plan.summary_total_cost, None);
         assert!(plan.deployments.is_empty());
-        assert!(matches!(plan.root.expr, SummaryExpr::KeepPreAsap(_)));
+        // The kept pre-ASAP query itself, timed: no ASAP operator anywhere.
+        assert!(!plan.root.contains_asap());
+        assert!(matches!(plan.root.non_asap(), Some(NonASAPOp::Aggregate { .. })));
+        assert!(plan.root.timing.is_some());
 
         let exported =
             crate::summary_maintenance_dag_export::export_summary_maintenance_plan(&plan);
@@ -2256,7 +2272,8 @@ mod tests {
         .unwrap();
         assert!(plan.selected_raw_recompute);
         assert!(plan.raw_recompute_total_cost.is_none());
-        assert!(matches!(plan.root.expr, SummaryExpr::KeepPreAsap(_)));
+        assert!(!plan.root.contains_asap());
+        assert!(matches!(plan.root.non_asap(), Some(NonASAPOp::Aggregate { .. })));
     }
 
     #[test]
@@ -2281,7 +2298,8 @@ mod tests {
         assert_eq!(plan.raw_recompute_total_cost, Some(Cost(1.0)));
         assert_eq!(plan.summary_total_cost, None);
         assert!(plan.deployments.is_empty());
-        assert!(matches!(plan.root.expr, SummaryExpr::KeepPreAsap(_)));
+        assert!(!plan.root.contains_asap());
+        assert!(matches!(plan.root.non_asap(), Some(NonASAPOp::Scan { .. })));
     }
 
     #[test]
@@ -2312,15 +2330,29 @@ mod tests {
 
     #[test]
     fn lifecycle_cost_counts_one_shared_summary_node_once() {
+        // One shared exact accumulator read twice by the same root: a
+        // query-time `sum + sum` over one finalized state. (`SummaryMerge`
+        // is reserved in the unified IR, so the sharing is expressed through
+        // a relational consumer instead.)
         let shared = summary();
-        let root = Rc::new(SummaryNode {
-            expr: SummaryExpr::SummaryMerge {
-                timing: asap_types::post_asap::ExecutionTiming::IngestionTime,
-                children: vec![Rc::clone(&shared), Rc::clone(&shared)],
+        let finalized = Rc::new(
+            OperatorNode::new(Operator::ASAP(ASAPOp::FinalizeExactAccumulator {
+                child: Rc::clone(&shared),
+            }))
+            .unwrap(),
+        );
+        let root = OperatorNode::non_asap_node(NonASAPOp::BinaryOp {
+            operator: BinaryOperator {
+                checked_relative_division: false,
+                checked_finite_division: false,
+                kind: BinaryOpKind::Arithmetic(ArithmeticOpKind::Add),
+                vector_match: None,
             },
-            schema: shared.schema.clone(),
-            guarantee: None,
-        });
+            return_bool: false,
+            lhs: Rc::clone(&finalized),
+            rhs: finalized,
+        })
+        .unwrap();
         let workload = workload(
             vec![batch(Predictability::AdHoc), batch(Predictability::AdHoc)],
             vec![],

@@ -359,7 +359,8 @@ mod tests {
     use std::cell::Cell;
     use std::collections::HashMap;
 
-    use asap_types::pre_asap::{Field, DataType, QueryExpr, Reduction, Schema, Source};
+    use asap_types::ir::{NonASAPOp, OperatorNode};
+    use asap_types::pre_asap::{Field, DataType, Reduction, Schema, Source};
     use asap_types::types::AccuracyTarget;
     use asap_types::workload::{
         DataArrival, DurationMs, QueryRecurrence, QueryTimeScope, TimeSelection, TimestampMs,
@@ -405,22 +406,25 @@ mod tests {
         }
     }
 
-    fn query() -> Rc<QueryExpr> {
-        Rc::new(QueryExpr::Aggregate {
+    fn query() -> Rc<OperatorNode> {
+        let scan = OperatorNode::non_asap_node(NonASAPOp::Scan {
+            source: Source::Table {
+                table_ref: "events".into(),
+            },
+            predicates: vec![],
+            schema: Schema::new(vec![Field::plain("value", DataType::Float64, false)]),
+        })
+        .unwrap();
+        OperatorNode::non_asap_node(NonASAPOp::Aggregate {
             reduction: Reduction::by(vec![]),
             measures: vec![AggIntent::Count {
                 accuracy: AccuracyTarget::Epsilon(0.01),
             }],
             output_names: vec![],
             having: None,
-            child: Rc::new(QueryExpr::Scan {
-                source: Source::Table {
-                    table_ref: "events".into(),
-                },
-                predicates: vec![],
-                schema: Schema::new(vec![Field::plain("value", DataType::Float64, false)]),
-            }),
+            child: scan,
         })
+        .unwrap()
     }
 
     fn scope() -> ComparisonScope {
@@ -582,7 +586,7 @@ mod tests {
         fn summary_physical_dag(
             &self,
             snapshot: &PhysicalEvidenceSnapshot,
-            _summary: &Rc<SummaryNode>,
+            _summary: &Rc<OperatorNode>,
             _target: &TargetSubDAG<'_>,
         ) -> Result<PhysicalDag, AnalyticalCostError> {
             assert_eq!(snapshot.version, "test-snapshot-1");
@@ -912,7 +916,7 @@ mod tests {
             fn summary_physical_dag(
                 &self,
                 snapshot: &PhysicalEvidenceSnapshot,
-                summary: &Rc<SummaryNode>,
+                summary: &Rc<OperatorNode>,
                 target: &TargetSubDAG<'_>,
             ) -> Result<PhysicalDag, AnalyticalCostError> {
                 self.0.summary_physical_dag(snapshot, summary, target)
@@ -1000,7 +1004,7 @@ mod tests {
             fn summary_physical_dag(
                 &self,
                 snapshot: &PhysicalEvidenceSnapshot,
-                summary: &Rc<SummaryNode>,
+                summary: &Rc<OperatorNode>,
                 target: &TargetSubDAG<'_>,
             ) -> Result<PhysicalDag, AnalyticalCostError> {
                 let mut dag = self.0.summary_physical_dag(snapshot, summary, target)?;
@@ -1052,7 +1056,7 @@ mod tests {
             fn summary_physical_dag(
                 &self,
                 _snapshot: &PhysicalEvidenceSnapshot,
-                _summary: &Rc<SummaryNode>,
+                _summary: &Rc<OperatorNode>,
                 _target: &TargetSubDAG<'_>,
             ) -> Result<PhysicalDag, AnalyticalCostError> {
                 panic!("blank snapshot versions must fail before summary binding")

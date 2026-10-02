@@ -12,7 +12,6 @@ use asap_aware_mapping::{
 };
 use asap_frontend_sql::{lower_sql_dialect, SqlCatalog};
 use asap_planner::{e2e_plan, FrontendInput, PlanError, UserInput, UserInputError};
-use asap_types::post_asap::SummaryExpr;
 use asap_types::pre_asap::schema::{Field, DataType, Schema};
 use asap_types::types::AccuracyTarget;
 use asap_types::workload::{
@@ -137,7 +136,7 @@ async fn builtin_cost_model_cannot_price_lifecycles_and_falls_back_to_raw_recomp
         )
         .await
         .expect("lowers");
-        roots.push((index, Rc::new(expr), Some(accuracy)));
+        roots.push((index, expr, Some(accuracy)));
     }
     let strategies = default_strategies_with_evidence(models.cost, models.evidence);
     let space = search_workload_with_targets(roots, &strategies, models.accuracy);
@@ -150,12 +149,12 @@ async fn builtin_cost_model_cannot_price_lifecycles_and_falls_back_to_raw_recomp
             .expect("assembles")
             .expect("root has a group");
         assert!(
-            !matches!(cost_only.expr, SummaryExpr::KeepPreAsap(_)),
+            cost_only.contains_asap(),
             "entry {}: cost-only selection was expected to pick a summary",
             plan.entry_index
         );
         assert!(
-            matches!(plan.plan.root.expr, SummaryExpr::KeepPreAsap(_))
+            !plan.plan.root.contains_asap()
                 && plan.plan.selected_raw_recompute
                 && plan.plan.deployments.is_empty()
                 && plan.plan.summary_total_cost.is_none()

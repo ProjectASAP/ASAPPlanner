@@ -112,38 +112,39 @@ impl ReplacementStrategy for TopKLimitReuseStrategy {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use asap_types::pre_asap::{Schema, Source};
+    use asap_types::pre_asap::query_expr::GroupKeys;
+    use asap_types::pre_asap::Schema;
+    use crate::test_support::scan;
 
-    fn scan_named(metric: &str) -> Rc<QueryExpr> {
-        Rc::new(QueryExpr::Scan {
-            source: Source::TimeSeries {
-                metric: metric.into(),
-            },
-            predicates: vec![],
-            schema: Schema::with_time_index(vec![], 0, vec![]),
+    fn scan_named(metric: &str) -> Rc<OperatorNode> {
+        scan(metric, Schema::with_time_index(vec![], 0, vec![]))
+    }
+
+    fn limit(n: usize, offset: usize, child: Rc<OperatorNode>) -> Rc<OperatorNode> {
+        OperatorNode::non_asap_node(NonASAPOp::Limit {
+            n: Some(n),
+            offset,
+            partition_by: GroupKeys::none(),
+            child,
         })
+        .unwrap()
     }
 
     #[test]
     fn smaller_limit_reuses_larger_compatible_limit() {
         let child = scan_named("m");
-        let small = Rc::new(QueryExpr::Limit {
-            n: 5,
-            offset: 0,
-            child: Rc::clone(&child),
-        });
-        let large = Rc::new(QueryExpr::Limit {
-            n: 10,
-            offset: 0,
-            child,
-        });
+        let small = limit(5, 0, Rc::clone(&child));
+        let large = limit(10, 0, child);
         let strategy = TopKLimitReuseStrategy::new(&[Rc::clone(&small), Rc::clone(&large)]);
         let replacements = strategy.replacements(&TargetSubDAG::new(&small));
         assert_eq!(replacements.len(), 1);
-        let Replacement::Rewrite(rewrite) = &replacements[0].replacement else {
+        let Replacement::Subtree(rewrite) = &replacements[0].replacement else {
             panic!()
         };
-        let QueryExpr::Limit { n: 5, child, .. } = rewrite.as_ref() else {
+        let Some(NonASAPOp::Limit {
+            n: Some(5), child, ..
+        }) = rewrite.non_asap()
+        else {
             panic!()
         };
         assert!(Rc::ptr_eq(child, &large));
@@ -153,21 +154,9 @@ mod tests {
     fn offset_or_different_input_is_not_reused() {
         let a = scan_named("a");
         let b = scan_named("b");
-        let small = Rc::new(QueryExpr::Limit {
-            n: 5,
-            offset: 0,
-            child: a,
-        });
-        let large = Rc::new(QueryExpr::Limit {
-            n: 10,
-            offset: 0,
-            child: b,
-        });
-        let offset = Rc::new(QueryExpr::Limit {
-            n: 20,
-            offset: 1,
-            child: scan_named("a"),
-        });
+        let small = limit(5, 0, a);
+        let large = limit(10, 0, b);
+        let offset = limit(20, 1, scan_named("a"));
         let strategy = TopKLimitReuseStrategy::new(&[Rc::clone(&small), large, offset]);
         assert!(!strategy.matches(&TargetSubDAG::new(&small)));
     }

@@ -14,7 +14,8 @@
 pub mod fixtures {
     use asap_frontend_promql::lower_promql_workload;
     use asap_types::pre_asap::schema::{Field, DataType, Schema};
-    use asap_types::pre_asap::QueryExpr;
+    use asap_types::ir::OperatorNode;
+    use std::rc::Rc;
     use asap_types::types::AccuracyTarget;
     use asap_types::workload::{
         AccuracyRequirement, BatchEntry, DataWorkload, DurationMs, Evidence, PlanningWorkload,
@@ -26,7 +27,7 @@ pub mod fixtures {
     pub fn lower_promql(
         query: &str,
         accuracy: AccuracyTarget,
-    ) -> Result<QueryExpr, asap_frontend_promql::PromqlError> {
+    ) -> Result<Rc<OperatorNode>, asap_frontend_promql::PromqlError> {
         let workload = PlanningWorkload {
             query_workload: QueryWorkload {
                 language: QueryLanguage::PromQL,
@@ -81,5 +82,28 @@ pub mod fixtures {
             // runtime-only; this lists just the referenced labels).
             closed: false,
         }
+    }
+}
+
+/// Timing and export helpers for post-ASAP plans.
+pub mod post_asap {
+    use asap_types::ir::export::{compile_post_asap_dag, PostAsapDag};
+    use asap_types::ir::{apply_lifecycle_timings, LifecycleAssignment, OperatorNode, TimingMemo};
+    use std::rc::Rc;
+
+    /// Time `root` under the default (every summary maintained) lifecycle
+    /// assignment. Returns the timed copy; read `node.timing` on it.
+    pub fn timed(root: &Rc<OperatorNode>) -> Rc<OperatorNode> {
+        apply_lifecycle_timings(
+            root,
+            &LifecycleAssignment::default_maintained(),
+            &mut TimingMemo::new(),
+        )
+        .expect("default lifecycle timing failed")
+    }
+
+    /// Time `root` (default assignment), then export the wire-6 DAG.
+    pub fn post_asap_dag(root: &Rc<OperatorNode>) -> PostAsapDag {
+        compile_post_asap_dag(&timed(root)).expect("post-ASAP DAG export failed")
     }
 }

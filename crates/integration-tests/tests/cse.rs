@@ -2,12 +2,12 @@
 //! #223).
 //!
 //! Drives the full staged pipeline this issue lands: two independently
-//! lowered `QueryExpr` trees → `share_common_subtrees` (stage 1,
-//! `asap-types::pre_asap::cse`, run internally by `search_workload`) →
+//! lowered `OperatorNode` DAGs → `share_common_subtrees` (stage 1,
+//! `asap-types::ir::cse`, run internally by `search_workload`) →
 //! `search_workload` (stage 2, `asap-aware-mapping`) — and asserts the
 //! sharing that stage 1 decides survives into stage 2's discovered
 //! `PlanSpace` as one genuinely shared `TargetSubDAGCandidates`, not just one shared
-//! `Rc<QueryExpr>`. This is the "real caller" the issue's landing plan
+//! `Rc<OperatorNode>`. This is the "real caller" the issue's landing plan
 //! requires before `share_common_subtrees` is allowed to exist at all (its
 //! predecessor, `asap-plan::cse::dedupe_subtrees`, was deleted in #192 for
 //! being unwired dead code).
@@ -24,14 +24,14 @@
 
 use std::rc::Rc;
 
-use asap_aware_mapping::{search_workload, Replacement};
+use asap_aware_mapping::{is_logical_rewrite, search_workload, Replacement};
 use asap_integration_tests::fixtures::lower_promql;
-use asap_types::pre_asap::query_expr::QueryExpr;
+use asap_types::ir::NonASAPOp;
 use asap_types::types::AccuracyTarget;
 
 /// Two workload entries that happen to submit the exact same query (a
 /// realistic case — two dashboards, or a query fired both standalone and as
-/// part of a larger batch) collapse onto one shared `Rc<QueryExpr>` after
+/// part of a larger batch) collapse onto one shared `Rc<OperatorNode>` after
 /// `search_workload`'s internal `share_common_subtrees` pass, and onto one
 /// genuinely-shared [`TargetSubDAGCandidates`](asap_aware_mapping::TargetSubDAGCandidates) — carrying
 /// every candidate discovered for it exactly once, not once per root — no
@@ -41,7 +41,7 @@ use asap_types::types::AccuracyTarget;
 fn duplicate_workload_queries_collapse_onto_one_memo_group() {
     // Grouped (`by (job)`), so the shared `Aggregate`'s output schema carries
     // a provable unique key — the legality gate `share_common_subtrees`
-    // enforces (see `asap-types::pre_asap::cse`'s module doc) — and its
+    // enforces (see `asap-types::ir::cse`'s module doc) — and its
     // `ExactAggregate(Sum)` realization is deterministic regardless of the
     // accuracy target, so this pins the sharing mechanism itself rather than
     // any one particular summary-family choice.
@@ -57,13 +57,13 @@ fn duplicate_workload_queries_collapse_onto_one_memo_group() {
         "fixture sanity: identical query text lowers identically"
     );
 
-    let space = search_workload(vec![("a", Rc::new(a)), ("b", Rc::new(b))]);
+    let space = search_workload(vec![("a", a), ("b", b)]);
 
     // roots[0] and roots[1] must have merged onto the same Rc — the
     // `share_common_subtrees` pass `search_workload` runs internally.
     assert!(
         Rc::ptr_eq(&space.roots[0].1, &space.roots[1].1),
-        "search_workload must collapse the two identical roots onto one Rc<QueryExpr>"
+        "search_workload must collapse the two identical roots onto one Rc<OperatorNode>"
     );
 
     // The single shared root is one discovered TargetSubDAG, holding one
@@ -79,19 +79,21 @@ fn duplicate_workload_queries_collapse_onto_one_memo_group() {
     assert_eq!(
         group.candidates.len(),
         3,
-        "1 ExactAggregate Summary + 2 Rewrite (share/recompute): {:?}",
+        "1 ExactAggregate summary + 2 logical rewrites (share/recompute): {:?}",
         group.candidates
     );
 
+    // A bound summary is a `Subtree` with an ASAP operator in it; a logical
+    // rewrite is a `Subtree` with none (`is_logical_rewrite`).
     let summary_count = group
         .candidates
         .iter()
-        .filter(|c| matches!(c.replacement, Replacement::Summary(_)))
+        .filter(|c| matches!(&c.replacement, Replacement::Subtree(n) if n.contains_asap()))
         .count();
     let rewrite_count = group
         .candidates
         .iter()
-        .filter(|c| matches!(c.replacement, Replacement::Rewrite(_)))
+        .filter(|c| matches!(&c.replacement, Replacement::Subtree(n) if is_logical_rewrite(n)))
         .count();
     assert_eq!(summary_count, 1);
     assert_eq!(rewrite_count, 2);
@@ -100,12 +102,14 @@ fn duplicate_workload_queries_collapse_onto_one_memo_group() {
     // "false-positive dedup" failure mode `is_duplicate_rewrite` exists to
     // prevent): one shares the group's own target `Rc`, the other is a
     // structurally-identical but independently-built `Rc`.
-    let one_is_the_target = group.candidates.iter().any(
-        |c| matches!(&c.replacement, Replacement::Rewrite(rc) if Rc::ptr_eq(rc, &group.target)),
-    );
-    let one_is_not = group.candidates.iter().any(
-        |c| matches!(&c.replacement, Replacement::Rewrite(rc) if !Rc::ptr_eq(rc, &group.target)),
-    );
+    let one_is_the_target = group.candidates.iter().any(|c| {
+        matches!(&c.replacement, Replacement::Subtree(rc)
+            if is_logical_rewrite(rc) && Rc::ptr_eq(rc, &group.target))
+    });
+    let one_is_not = group.candidates.iter().any(|c| {
+        matches!(&c.replacement, Replacement::Subtree(rc)
+            if is_logical_rewrite(rc) && !Rc::ptr_eq(rc, &group.target))
+    });
     assert!(one_is_the_target && one_is_not);
 }
 
@@ -121,7 +125,7 @@ fn distinct_workload_queries_get_independent_memo_groups() {
         .expect("query b failed to lower");
     assert_ne!(a, b, "fixture sanity: the two queries differ");
 
-    let space = search_workload(vec![("a", Rc::new(a)), ("b", Rc::new(b))]);
+    let space = search_workload(vec![("a", a), ("b", b)]);
     assert!(!Rc::ptr_eq(&space.roots[0].1, &space.roots[1].1));
 
     let group_a = space
@@ -140,7 +144,7 @@ fn distinct_workload_queries_get_independent_memo_groups() {
 
 /// Single-query CSE (a repeated sub-expression within one query) also
 /// survives through `search_workload`: the two grouped-`Aggregate` branches
-/// of a `BinaryOp` collapse to one shared `Rc<QueryExpr>` in the internal
+/// of a `BinaryOp` collapse to one shared `Rc<OperatorNode>` in the internal
 /// `share_common_subtrees` pass, and to one shared `TargetSubDAGCandidates` (with
 /// `consumer_count == 2`, one per branch) here.
 #[test]
@@ -148,16 +152,16 @@ fn single_query_repeated_subexpression_shares_one_memo_group() {
     let query = "sum by (job) (http_requests_total) / sum by (job) (http_requests_total)";
     let expr = lower_promql(query, AccuracyTarget::Exact).expect("query failed to lower");
 
-    let space = search_workload(vec![("q", Rc::new(expr))]);
+    let space = search_workload(vec![("q", expr)]);
     let [(_, root)] = space.roots.as_slice() else {
         panic!("expected 1 root");
     };
-    let QueryExpr::BinaryOp { lhs, rhs, .. } = root.as_ref() else {
+    let Some(NonASAPOp::BinaryOp { lhs, rhs, .. }) = root.non_asap() else {
         panic!("expected a BinaryOp root, got {root:?}");
     };
     assert!(
         Rc::ptr_eq(lhs, rhs),
-        "the two identical sum-by-job branches must collapse onto one Rc<QueryExpr>"
+        "the two identical sum-by-job branches must collapse onto one Rc<OperatorNode>"
     );
 
     let group = space

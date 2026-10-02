@@ -387,7 +387,7 @@ mod tests {
     use super::*;
     use crate::cost_model::{CostModel, DefaultCostModel};
     use asap_types::post_asap::SketchAlgorithm;
-    use asap_types::pre_asap::cse::share_common_subtrees;
+    use asap_types::ir::cse::share_common_subtrees;
     use asap_types::pre_asap::query_expr::{GroupKeys, Source};
     use asap_types::pre_asap::schema::{Field, ColumnId, DataType, Schema};
 
@@ -396,8 +396,8 @@ mod tests {
     /// willing to hoist it — see `Schema::has_unique_key`/`cse.rs`'s own
     /// "Legality" section: a producer with no provable unique key is always
     /// inserted fresh, never hoisted, regardless of structural equality.
-    fn metric_scan() -> Rc<QueryExpr> {
-        Rc::new(QueryExpr::Scan {
+    fn metric_scan() -> Rc<OperatorNode> {
+        OperatorNode::non_asap_node(NonASAPOp::Scan {
             source: Source::TimeSeries { metric: "m".into() },
             predicates: vec![],
             schema: Schema::with_time_index(
@@ -409,20 +409,20 @@ mod tests {
                 0,
                 vec![vec![0]],
             ),
-        })
+        }).unwrap()
     }
 
-    fn agg(by: Vec<ColumnId>, intent: AggIntent, child: &Rc<QueryExpr>) -> Rc<QueryExpr> {
-        Rc::new(QueryExpr::Aggregate {
+    fn agg(by: Vec<ColumnId>, intent: AggIntent, child: &Rc<OperatorNode>) -> Rc<OperatorNode> {
+        OperatorNode::non_asap_node(NonASAPOp::Aggregate {
             reduction: Reduction::by(by),
             measures: vec![intent],
             output_names: vec![],
             having: None,
             child: Rc::clone(child),
-        })
+        }).unwrap()
     }
 
-    fn quantile(q: f64, accuracy: AccuracyTarget, child: &Rc<QueryExpr>) -> Rc<QueryExpr> {
+    fn quantile(q: f64, accuracy: AccuracyTarget, child: &Rc<OperatorNode>) -> Rc<OperatorNode> {
         agg(
             vec![2],
             AggIntent::Quantile {
@@ -438,7 +438,7 @@ mod tests {
     /// reports no unique key for an empty `by` (see `query_expr.rs`'s own
     /// `unique_keys = if by.is_empty() || has_count_values { vec![] } else
     /// { .. }`).
-    fn global_quantile(q: f64, accuracy: AccuracyTarget, child: &Rc<QueryExpr>) -> Rc<QueryExpr> {
+    fn global_quantile(q: f64, accuracy: AccuracyTarget, child: &Rc<OperatorNode>) -> Rc<OperatorNode> {
         agg(
             vec![],
             AggIntent::Quantile {
@@ -457,9 +457,9 @@ mod tests {
         q: f64,
         accuracy: AccuracyTarget,
         excluded: Vec<ColumnId>,
-        child: &Rc<QueryExpr>,
-    ) -> Rc<QueryExpr> {
-        Rc::new(QueryExpr::Aggregate {
+        child: &Rc<OperatorNode>,
+    ) -> Rc<OperatorNode> {
+        OperatorNode::non_asap_node(NonASAPOp::Aggregate {
             reduction: Reduction::Reduce(GroupKeys::without(excluded)),
             measures: vec![AggIntent::Quantile {
                 col: None,
@@ -469,7 +469,7 @@ mod tests {
             output_names: vec![],
             having: None,
             child: Rc::clone(child),
-        })
+        }).unwrap()
     }
 
     // ── dominates / strictly_tighter ─────────────────────────────────────
@@ -541,7 +541,7 @@ mod tests {
         assert!(strategy.matches(&TargetSubDAG::new(&loose)));
         let replacements = strategy.replacements(&TargetSubDAG::new(&loose));
         assert_eq!(replacements.len(), 1);
-        let Replacement::Rewrite(rc) = &replacements[0].replacement else {
+        let Replacement::Subtree(rc) = &replacements[0].replacement else {
             panic!("expected a Rewrite candidate");
         };
         assert!(Rc::ptr_eq(rc, &tight));
@@ -573,7 +573,7 @@ mod tests {
         assert!(
             loose_group.candidates.iter().any(|candidate| {
                 candidate.strategy == "AccuracyReconciliationStrategy"
-                    && matches!(candidate.replacement, Replacement::Rewrite(_))
+                    && matches!(candidate.replacement, Replacement::Subtree(_))
             }),
             "expected an AccuracyReconciliationStrategy candidate for the looser consumer, got: \
              {:?}",
@@ -662,8 +662,8 @@ mod tests {
         // is the *only* place cross-accuracy sharing gets proposed, never
         // `share_common_subtrees` itself.
         let scan = metric_scan();
-        let a = (*quantile(0.99, AccuracyTarget::Epsilon(0.01), &scan)).clone();
-        let b = (*quantile(0.99, AccuracyTarget::Epsilon(0.05), &scan)).clone();
+        let a = quantile(0.99, AccuracyTarget::Epsilon(0.01), &scan);
+        let b = quantile(0.99, AccuracyTarget::Epsilon(0.05), &scan);
 
         let roots = share_common_subtrees(vec![("a", a), ("b", b)]);
         assert!(
@@ -677,10 +677,10 @@ mod tests {
 
         // The identical scan child, though, is still shared exactly as
         // before — this module changes nothing about that.
-        let QueryExpr::Aggregate { child: child_a, .. } = roots[0].1.as_ref() else {
+        let Some(NonASAPOp::Aggregate { child: child_a, .. }) = roots[0].1.non_asap() else {
             panic!("expected an Aggregate root");
         };
-        let QueryExpr::Aggregate { child: child_b, .. } = roots[1].1.as_ref() else {
+        let Some(NonASAPOp::Aggregate { child: child_b, .. }) = roots[1].1.non_asap() else {
             panic!("expected an Aggregate root");
         };
         assert!(Rc::ptr_eq(child_a, child_b));
@@ -693,8 +693,8 @@ mod tests {
         // exact equality — unrelated to this module, but pins the contrast
         // with the test above.
         let scan = metric_scan();
-        let a = (*quantile(0.99, AccuracyTarget::Epsilon(0.01), &scan)).clone();
-        let b = (*quantile(0.99, AccuracyTarget::Epsilon(0.01), &scan)).clone();
+        let a = quantile(0.99, AccuracyTarget::Epsilon(0.01), &scan);
+        let b = quantile(0.99, AccuracyTarget::Epsilon(0.01), &scan);
 
         let roots = share_common_subtrees(vec![("a", a), ("b", b)]);
         assert!(Rc::ptr_eq(&roots[0].1, &roots[1].1));
@@ -714,7 +714,7 @@ mod tests {
         let loose = global_quantile(0.99, AccuracyTarget::Epsilon(0.05), &scan);
 
         assert!(
-            !tight.output_schema().unwrap().has_unique_key(),
+            !tight.schema.clone().has_unique_key(),
             "fixture sanity: a globally-grouped aggregate has no provable unique key"
         );
 
@@ -734,7 +734,7 @@ mod tests {
         let loose = without_quantile(0.99, AccuracyTarget::Epsilon(0.05), vec![2], &scan);
 
         assert!(
-            !tight.output_schema().unwrap().has_unique_key(),
+            !tight.schema.clone().has_unique_key(),
             "fixture sanity: a without(...) aggregate has no provable unique key"
         );
 

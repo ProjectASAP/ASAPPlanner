@@ -826,50 +826,23 @@ pub(super) fn estimate_transient_liveness(
     Ok(peak)
 }
 #[cfg(test)]
-pub(super) fn evidence_nodes(root: &SummaryNode) -> (Vec<&SummaryNode>, Vec<&SummaryNode>) {
+pub(super) fn evidence_nodes(root: &OperatorNode) -> (Vec<&OperatorNode>, Vec<&OperatorNode>) {
     fn visit<'a>(
-        node: &'a SummaryNode,
-        seen: &mut HashSet<*const SummaryNode>,
-        aggregations: &mut Vec<&'a SummaryNode>,
-        joins: &mut Vec<&'a SummaryNode>,
+        node: &'a OperatorNode,
+        seen: &mut HashSet<*const OperatorNode>,
+        aggregations: &mut Vec<&'a OperatorNode>,
+        joins: &mut Vec<&'a OperatorNode>,
     ) {
         if !seen.insert(node as *const _) {
             return;
         }
-        match &node.expr {
-            SummaryExpr::SummaryAgg { child, .. } => {
-                aggregations.push(node);
-                visit(child, seen, aggregations, joins);
-            }
-            SummaryExpr::ValueOperation { child, .. } => visit(child, seen, aggregations, joins),
-            SummaryExpr::SummaryMerge { children, .. } => {
-                for child in children {
-                    visit(child, seen, aggregations, joins);
-                }
-            }
-            SummaryExpr::SummarySubtract { left, right }
-            | SummaryExpr::RelationalJoin { left, right, .. }
-            | SummaryExpr::BinaryOp {
-                lhs: left,
-                rhs: right,
-                ..
-            }
-            | SummaryExpr::SummaryJoin {
-                outer: left,
-                inner: right,
-                ..
-            } => {
-                if matches!(&node.expr, SummaryExpr::SummaryJoin { .. }) {
-                    joins.push(node);
-                }
-                visit(left, seen, aggregations, joins);
-                visit(right, seen, aggregations, joins);
-            }
-            SummaryExpr::SummaryDelete { summary_input, .. }
-            | SummaryExpr::SummaryEstimate { summary_input, .. } => {
-                visit(summary_input, seen, aggregations, joins);
-            }
-            SummaryExpr::KeepPreAsap(_) => {}
+        match &node.operator {
+            Operator::ASAP(ASAPOp::SummaryAgg { .. }) => aggregations.push(node),
+            Operator::ASAP(ASAPOp::SummaryJoin { .. }) => joins.push(node),
+            _ => {}
+        }
+        for child in node.children() {
+            visit(child, seen, aggregations, joins);
         }
     }
     let mut aggregations = Vec::new();
@@ -894,7 +867,7 @@ struct SummaryOperationCounts {
 /// once; explicit delete frequency comes from deletion evidence.
 #[cfg(test)]
 pub(super) fn estimate_incremental_summary_maintenance(
-    root: &SummaryNode,
+    root: &OperatorNode,
     guarantee: &SummaryMaintenanceLifecycleGuarantee,
     inputs: StreamingSummaryInputs,
     cpu: SummaryOperationCpuEvidence,
@@ -904,7 +877,7 @@ pub(super) fn estimate_incremental_summary_maintenance(
 }
 #[cfg(test)]
 pub(super) fn estimate_incremental_summary_maintenance_with_join(
-    root: &SummaryNode,
+    root: &OperatorNode,
     guarantee: &SummaryMaintenanceLifecycleGuarantee,
     inputs: StreamingSummaryInputs,
     cpu: SummaryOperationCpuEvidence,
@@ -1161,25 +1134,23 @@ fn required_cpu_when(
 }
 
 #[cfg(test)]
-fn count_operations(root: &SummaryNode) -> Result<SummaryOperationCounts, AnalyticalCostError> {
+fn count_operations(root: &OperatorNode) -> Result<SummaryOperationCounts, AnalyticalCostError> {
     fn visit(
-        node: &SummaryNode,
-        seen: &mut HashSet<*const SummaryNode>,
+        node: &OperatorNode,
+        seen: &mut HashSet<*const OperatorNode>,
         counts: &mut SummaryOperationCounts,
     ) -> Result<(), AnalyticalCostError> {
-        if !seen.insert(node as *const SummaryNode) {
+        if !seen.insert(node as *const OperatorNode) {
             return Ok(());
         }
-        match &node.expr {
-            SummaryExpr::KeepPreAsap(_) => {}
-            SummaryExpr::SummaryAgg { child, .. } => {
+        match &node.operator {
+            Operator::ASAP(ASAPOp::SummaryAgg { .. }) => {
                 counts.state_builds = counts
                     .state_builds
                     .checked_add(1)
                     .ok_or(AnalyticalCostError::Overflow)?;
-                visit(child, seen, counts)?;
             }
-            SummaryExpr::SummaryMerge { children, .. } => {
+            Operator::ASAP(ASAPOp::SummaryMerge { children }) => {
                 if children.is_empty() {
                     return Err(AnalyticalCostError::InvalidPhysicalDag(
                         "summary merge has no children",
@@ -1189,50 +1160,43 @@ fn count_operations(root: &SummaryNode) -> Result<SummaryOperationCounts, Analyt
                     .merges_per_read
                     .checked_add(children.len().saturating_sub(1) as u64)
                     .ok_or(AnalyticalCostError::Overflow)?;
-                for child in children {
-                    visit(child, seen, counts)?;
-                }
             }
-            SummaryExpr::SummarySubtract { left, right } => {
+            Operator::ASAP(ASAPOp::SummarySubtract { .. }) => {
                 counts.subtracts_per_read = counts
                     .subtracts_per_read
                     .checked_add(1)
                     .ok_or(AnalyticalCostError::Overflow)?;
-                visit(left, seen, counts)?;
-                visit(right, seen, counts)?;
             }
-            SummaryExpr::BinaryOp { lhs, rhs, .. } => {
-                visit(lhs, seen, counts)?;
-                visit(rhs, seen, counts)?;
-            }
-            SummaryExpr::RelationalJoin { left, right, .. } => {
-                visit(left, seen, counts)?;
-                visit(right, seen, counts)?;
-            }
-
-            SummaryExpr::ValueOperation { child, .. } => visit(child, seen, counts)?,
-            SummaryExpr::SummaryDelete { summary_input, .. } => {
+            Operator::ASAP(ASAPOp::SummaryDelete { .. }) => {
                 counts.deletes_per_update = counts
                     .deletes_per_update
                     .checked_add(1)
                     .ok_or(AnalyticalCostError::Overflow)?;
-                visit(summary_input, seen, counts)?;
             }
-            SummaryExpr::SummaryEstimate { summary_input, .. } => {
+            Operator::ASAP(ASAPOp::SummaryEstimate { .. }) => {
                 counts.readouts_per_read = counts
                     .readouts_per_read
                     .checked_add(1)
                     .ok_or(AnalyticalCostError::Overflow)?;
-                visit(summary_input, seen, counts)?;
             }
-            SummaryExpr::SummaryJoin { outer, inner, .. } => {
+            Operator::ASAP(ASAPOp::SummaryJoin { .. }) => {
                 counts.joins_per_read = counts
                     .joins_per_read
                     .checked_add(1)
                     .ok_or(AnalyticalCostError::Overflow)?;
-                visit(outer, seen, counts)?;
-                visit(inner, seen, counts)?;
             }
+            // Retained relational work, accumulator/population boundaries and
+            // exact query-time operators add no summary operation.
+            Operator::NonASAP(_)
+            | Operator::ASAP(
+                ASAPOp::FinalizeExactAccumulator { .. }
+                | ASAPOp::MaintainPopulation { .. }
+                | ASAPOp::ReadPopulation { .. }
+                | ASAPOp::Extension { .. },
+            ) => {}
+        }
+        for child in node.children() {
+            visit(child, seen, counts)?;
         }
         Ok(())
     }

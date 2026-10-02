@@ -1351,15 +1351,15 @@ mod tests {
 
     // ── CSE sharing (issue #237, #223 stage 4) ──────────────────────────
 
+    use asap_types::ir::{NonASAPOp, Predicate, ScalarExpr};
     use asap_types::post_asap::{
-        ExactKind, ExactParams, GroupingStrategy, SketchKind, SummaryExpr, Field,
-        Schema,
+        ExactKind, ExactParams, GroupingStrategy, SketchKind, Field, Schema,
     };
     use asap_types::pre_asap::query_expr::Source;
     use asap_types::pre_asap::schema::DataType;
 
-    fn scan() -> QueryExpr {
-        QueryExpr::Scan {
+    fn scan() -> Rc<OperatorNode> {
+        OperatorNode::non_asap_node(NonASAPOp::Scan {
             source: Source::TimeSeries { metric: "m".into() },
             predicates: vec![],
             schema: Schema::with_time_index(
@@ -1370,17 +1370,16 @@ mod tests {
                 0,
                 vec![],
             ),
-        }
+        })
+        .unwrap()
     }
 
-    fn summary_node(family: FieldDataType) -> SummaryNode {
-        SummaryNode {
-            expr: SummaryExpr::SummaryAgg {
-                child: std::rc::Rc::new(SummaryNode {
-                    expr: SummaryExpr::KeepPreAsap(Rc::new(scan())),
-                    schema: Schema::lifted(vec![], None),
-                    guarantee: None,
-                }),
+    /// A `SummaryAgg` over the kept `scan()` subtree (the old
+    /// `KeepPreAsap` wrapper is gone: the scan node is the child itself).
+    fn summary_node(family: FieldDataType) -> Rc<OperatorNode> {
+        OperatorNode::asap_node(
+            ASAPOp::SummaryAgg {
+                child: scan(),
                 family: family.clone(),
                 input: asap_types::post_asap::SummaryUpdate::column(
                     asap_types::pre_asap::expr_ir::ColumnRef::Named("value".into()),
@@ -1388,18 +1387,19 @@ mod tests {
                 reduction: asap_types::pre_asap::query_expr::Reduction::by(vec![]),
                 grouping: GroupingStrategy::default(),
             },
-            schema: Schema::lifted(vec![Field::new("state", family, false)], None),
-            guarantee: None,
-        }
+            Schema::lifted(vec![Field::new("state", family, false)], None),
+            None,
+        )
     }
 
     #[test]
     fn default_recompute_cost_is_positive_and_grows_with_structural_size() {
         let leaf = scan();
-        let nested = QueryExpr::Dedup {
+        let nested = OperatorNode::non_asap_node(NonASAPOp::Dedup {
             cols: vec![0],
-            child: std::rc::Rc::new(leaf.clone()),
-        };
+            child: Rc::clone(&leaf),
+        })
+        .unwrap();
         assert!(default_cse_recompute_cost(&leaf) > Cost::ZERO);
         assert!(default_cse_recompute_cost(&nested) > default_cse_recompute_cost(&leaf));
     }
@@ -1413,26 +1413,24 @@ mod tests {
     #[test]
     fn default_recompute_cost_does_not_double_count_an_internally_shared_descendant() {
         use asap_types::pre_asap::expr_ir::ScalarValue;
-        use asap_types::pre_asap::query_expr::{JoinKind, Predicate};
+        use asap_types::pre_asap::query_expr::JoinKind;
 
-        let true_pred = || {
-            Predicate(std::rc::Rc::new(QueryExpr::Literal(ScalarValue::Boolean(
-                true,
-            ))))
-        };
-        let shared_leaf = std::rc::Rc::new(scan());
-        let no_sharing = QueryExpr::Join {
+        let true_pred = || Predicate(ScalarExpr::Literal(ScalarValue::Boolean(true)));
+        let shared_leaf = scan();
+        let no_sharing = OperatorNode::non_asap_node(NonASAPOp::Join {
             kind: JoinKind::Inner,
             pred: true_pred(),
-            left: std::rc::Rc::new(scan()),
-            right: std::rc::Rc::new(scan()),
-        };
-        let with_sharing = QueryExpr::Join {
+            left: scan(),
+            right: scan(),
+        })
+        .unwrap();
+        let with_sharing = OperatorNode::non_asap_node(NonASAPOp::Join {
             kind: JoinKind::Inner,
             pred: true_pred(),
-            left: std::rc::Rc::clone(&shared_leaf),
-            right: std::rc::Rc::clone(&shared_leaf),
-        };
+            left: Rc::clone(&shared_leaf),
+            right: Rc::clone(&shared_leaf),
+        })
+        .unwrap();
         assert_eq!(
             default_cse_recompute_cost(&no_sharing),
             Cost(3.0),
@@ -1560,20 +1558,20 @@ mod tests {
             }
         }
 
-        let root = Rc::new(scan());
+        let root = scan();
         let target = TargetSubDAG::new(&root);
         let candidate = ReplacementSubDAG {
             strategy: "TestStrategy",
-            replacement: Replacement::Summary(Rc::new(summary_node(FieldDataType::Plain(
+            replacement: Replacement::Subtree(summary_node(FieldDataType::Plain(
                 asap_types::pre_asap::DataType::Float64,
-            )))),
+            ))),
             provenance: crate::replacement::ReplacementProvenance::SummaryRealization,
             rationale: "whatever".into(),
         };
         assert!(RankOnly.estimate_cost(&candidate, &target).is_nan());
     }
 
-    /// `DefaultCostModel::estimate_cost` for a [`Replacement::Summary`]
+    /// `DefaultCostModel::estimate_cost` for a summary-rooted [`Replacement::Subtree`]
     /// candidate reuses [`default_cse_shared_maintenance_cost`]'s own
     /// per-family ordering: a candidate bound to a cheap-to-maintain family
     /// (an exact accumulator) must cost less than one bound to an
@@ -1583,25 +1581,26 @@ mod tests {
     /// above.
     #[test]
     fn estimate_cost_for_summary_orders_candidates_by_family_cheapest_to_priciest() {
-        let root = Rc::new(scan());
+        let root = scan();
         let target = TargetSubDAG::new(&root);
 
         let cheap = ReplacementSubDAG {
             strategy: "TestStrategy",
-            replacement: Replacement::Summary(Rc::new(summary_node(
-                FieldDataType::ExactAggregate(ExactKind::Sum, ExactParams::Sum),
+            replacement: Replacement::Subtree(summary_node(FieldDataType::ExactAggregate(
+                ExactKind::Sum,
+                ExactParams::Sum,
             ))),
             provenance: crate::replacement::ReplacementProvenance::SummaryRealization,
             rationale: "exact accumulator".into(),
         };
         let pricey = ReplacementSubDAG {
             strategy: "TestStrategy",
-            replacement: Replacement::Summary(Rc::new(summary_node(FieldDataType::StatModel(
+            replacement: Replacement::Subtree(summary_node(FieldDataType::StatModel(
                 asap_types::post_asap::StatModelKind::Parametric,
                 asap_types::post_asap::StatModelParams::Parametric {
                     family: "gaussian_mixture".into(),
                 },
-            )))),
+            ))),
             provenance: crate::replacement::ReplacementProvenance::SummaryRealization,
             rationale: "fitted statistical model".into(),
         };
@@ -1619,7 +1618,7 @@ mod tests {
         );
     }
 
-    /// `DefaultCostModel::estimate_cost` for a [`Replacement::Rewrite`] pair
+    /// `DefaultCostModel::estimate_cost` for a relational [`Replacement::Subtree`] pair
     /// (the `SharedSubtreeStrategy` share-vs-recompute shape) agrees with
     /// what `cse_share_decision` would already pick for the same target: with
     /// many consumers of a cheap-to-recompute leaf, the "share" candidate
@@ -1630,18 +1629,18 @@ mod tests {
     /// directly.
     #[test]
     fn estimate_cost_for_rewrite_prefers_sharing_when_recompute_dominates_maintenance() {
-        let target_root = Rc::new(scan());
+        let target_root = scan();
         let target = TargetSubDAG::with_consumer_count(&target_root, 20);
 
         let share = ReplacementSubDAG {
             strategy: "TestStrategy",
-            replacement: Replacement::Rewrite(Rc::clone(&target_root)),
+            replacement: Replacement::Subtree(Rc::clone(&target_root)),
             provenance: crate::replacement::ReplacementProvenance::CseShare,
             rationale: "build once and share".into(),
         };
         let recompute = ReplacementSubDAG {
             strategy: "TestStrategy",
-            replacement: Replacement::Rewrite(Rc::new((*target_root).clone())),
+            replacement: Replacement::Subtree(Rc::new((*target_root).clone())),
             provenance: crate::replacement::ReplacementProvenance::CseRecompute,
             rationale: "build independently".into(),
         };

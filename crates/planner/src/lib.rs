@@ -14,7 +14,7 @@
 use std::rc::Rc;
 
 use asap_types::parsed_workload::{ParsedWorkload, ParsedWorkloadError};
-use asap_types::pre_asap::query_expr::QueryExpr;
+use asap_types::ir::OperatorNode;
 use asap_types::workload::{PlanningWorkload, QueryLanguage, SqlDialect, WorkloadError};
 
 use asap_frontend_metricsql::{lower_metricsql, MetricsqlError};
@@ -206,7 +206,7 @@ pub async fn e2e_plan(input: UserInput<'_>) -> Result<PlanOutput, PlanError> {
 /// through `lower_sql_batch`, which walks `query_batch` alone and would drop
 /// every repeating query — exactly the entries whose recurrence the lifecycle
 /// stage needs.
-async fn lower(input: &UserInput<'_>) -> Result<Vec<Rc<QueryExpr>>, PlanError> {
+async fn lower(input: &UserInput<'_>) -> Result<Vec<Rc<OperatorNode>>, PlanError> {
     let entries = || input.workload.query_workload.entries();
 
     match &input.frontend_specific {
@@ -229,7 +229,7 @@ async fn lower(input: &UserInput<'_>) -> Result<Vec<Rc<QueryExpr>>, PlanError> {
                     entry_index: Some(index),
                     source: LoweringError::Sql(source),
                 })?;
-                lowered.push(Rc::new(expr));
+                lowered.push(expr);
             }
             Ok(lowered)
         }
@@ -248,7 +248,7 @@ async fn lower(input: &UserInput<'_>) -> Result<Vec<Rc<QueryExpr>>, PlanError> {
                 entry_index: None,
                 source: LoweringError::Promql(source),
             })?;
-            Ok(lowered.into_iter().map(Rc::new).collect())
+            Ok(lowered)
         }
         FrontendInput::Metricsql => {
             let mut lowered = Vec::new();
@@ -258,7 +258,7 @@ async fn lower(input: &UserInput<'_>) -> Result<Vec<Rc<QueryExpr>>, PlanError> {
                         entry_index: Some(index),
                         source: LoweringError::Metricsql(source),
                     })?;
-                lowered.push(Rc::new(expr));
+                lowered.push(expr);
             }
             Ok(lowered)
         }

@@ -197,7 +197,7 @@ impl CurrentSeriesInput {
 pub enum PopulationInput {
     CurrentSeries(CurrentSeriesInput),
     Rows {
-        input: std::rc::Rc<crate::pre_asap::QueryExpr>,
+        input: std::rc::Rc<crate::ir::OperatorNode>,
         value_column: usize,
         grouping: crate::pre_asap::GroupKeys,
     },
@@ -214,17 +214,9 @@ impl MaintainedPopulation {
     pub fn matches_input(&self, input: &crate::pre_asap::QueryExpr) -> bool {
         match &self.input {
             PopulationInput::CurrentSeries(spec) => spec.matches_input(input),
-            PopulationInput::Rows {
-                input: expected,
-                value_column,
-                grouping,
-            } => {
-                use crate::pre_asap::{DataType, QueryExpr, Source};
-                expected.as_ref() == input
-                    && matches!(input, QueryExpr::Scan { source: Source::Table { .. }, schema, .. }
-                        if schema.closed && schema.fields.get(*value_column).is_some_and(|c| c.dtype == DataType::Float64 && !c.nullable)
-                            && !grouping.is_without() && grouping.keys().iter().all(|k| *k < schema.fields.len()))
-            }
+            // Table populations are described over the unified IR; see
+            // `matches_node`.
+            PopulationInput::Rows { .. } => false,
         }
     }
 
@@ -247,21 +239,10 @@ impl MaintainedPopulation {
                 else {
                     return false;
                 };
-                // The expected rows input is still described by a pre-ASAP
-                // tree; compare on the scan source and schema it names.
-                let same_source = match expected.as_ref() {
-                    crate::pre_asap::QueryExpr::Scan {
-                        source: expected_source,
-                        schema: expected_schema,
-                        ..
-                    } => {
-                        matches!(
-                            (&input.operator, expected_source),
-                            (Operator::NonASAP(NonASAPOp::Scan { source, .. }), e) if source == e
-                        ) && expected_schema == schema
-                    }
-                    _ => false,
-                };
+                // The same computation, whatever accuracy or timing has
+                // been attached to the node since.
+                let same_source =
+                    expected.operator == input.operator && expected.schema == input.schema;
                 same_source
                     && schema.closed
                     && schema

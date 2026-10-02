@@ -1289,6 +1289,7 @@ mod tests {
     use asap_types::workload::{
         DataArrival, DurationMs, QueryRecurrence, QueryTimeScope, TimeSelection, TimestampMs,
     };
+    use asap_types::ir::{BinaryOperator, ExprSemantics, Predicate, SortKey, TimeRangeKind};
     use std::collections::HashMap;
 
     fn edge(rows: u64, bytes: u64) -> EdgeStatistics {
@@ -1423,7 +1424,7 @@ mod tests {
 
     fn coverage(
         source: asap_types::pre_asap::Source,
-        predicates: Vec<asap_types::pre_asap::Predicate>,
+        predicates: Vec<Predicate>,
     ) -> SourceCoverage {
         SourceCoverage {
             source,
@@ -1472,25 +1473,25 @@ mod tests {
     #[test]
     fn correlation_lowers_to_physical_hash_aggregate() {
         use asap_types::pre_asap::{
-            AggIntent, Field, DataType, QueryExpr, Reduction, Schema, Source,
+            AggIntent, Field, DataType, Reduction, Schema, Source,
         };
         let source = Source::Table {
             table_ref: "pairs".into(),
         };
-        let root = Rc::new(QueryExpr::Aggregate {
+        let root = OperatorNode::non_asap_node(NonASAPOp::Aggregate {
             reduction: Reduction::by(vec![]),
             measures: vec![AggIntent::PearsonCorr { left: 0, right: 1 }],
             output_names: vec!["r".into()],
             having: None,
-            child: Rc::new(QueryExpr::Scan {
+            child: OperatorNode::non_asap_node(NonASAPOp::Scan {
                 source: source.clone(),
                 predicates: vec![],
                 schema: Schema::new(vec![
                     Field::plain("x", DataType::Float64, true),
                     Field::plain("y", DataType::Float64, true),
                 ]),
-            }),
-        });
+            }).unwrap(),
+        }).unwrap();
         let scope = scope(vec![coverage(source, vec![])]);
         let provided = HashMap::from([
             (
@@ -1520,50 +1521,51 @@ mod tests {
 
     #[test]
     fn query_lowering_recurses_and_fuses_global_sort_limit() {
-        use asap_types::pre_asap::{AggIntent, GroupKeys, QueryExpr, Reduction, SortKey, Source};
+        use asap_types::pre_asap::{AggIntent, GroupKeys, Reduction, Source};
         use asap_types::pre_asap::{Field, DataType, Schema};
         use std::rc::Rc;
 
-        let scan = Rc::new(QueryExpr::Scan {
+        let scan = OperatorNode::non_asap_node(NonASAPOp::Scan {
             source: Source::Table {
                 table_ref: "events".into(),
             },
-            predicates: vec![asap_types::pre_asap::Predicate(Rc::new(
-                QueryExpr::Literal(asap_types::pre_asap::ScalarValue::Boolean(true)),
+            predicates: vec![Predicate(ScalarExpr::Literal(
+                asap_types::pre_asap::ScalarValue::Boolean(true),
             ))],
             schema: Schema::new(vec![
                 Field::plain("service", DataType::Utf8, false),
                 Field::plain("value", DataType::Float64, false),
             ]),
-        });
-        let aggregate = Rc::new(QueryExpr::Aggregate {
+        }).unwrap();
+        let aggregate = OperatorNode::non_asap_node(NonASAPOp::Aggregate {
             reduction: Reduction::by(vec![0]),
             measures: vec![AggIntent::Sum { col: Some(1) }],
             output_names: vec![],
             having: None,
             child: Rc::clone(&scan),
-        });
-        let sort = Rc::new(QueryExpr::Sort {
+        }).unwrap();
+        let sort = OperatorNode::non_asap_node(NonASAPOp::Sort {
             keys: vec![SortKey {
-                expr: QueryExpr::Column(0),
+                expr: ScalarExpr::Column(0),
                 ascending: false,
                 nulls_first: false,
             }],
             partition_by: GroupKeys::none(),
             child: aggregate,
-        });
-        let root = Rc::new(QueryExpr::Limit {
-            n: 10,
+        }).unwrap();
+        let root = OperatorNode::non_asap_node(NonASAPOp::Limit {
+            n: Some(10),
             offset: 5,
+            partition_by: GroupKeys::none(),
             child: sort,
-        });
+        }).unwrap();
 
         let scan_coverage = coverage(
             Source::Table {
                 table_ref: "events".into(),
             },
-            vec![asap_types::pre_asap::Predicate(Rc::new(
-                QueryExpr::Literal(asap_types::pre_asap::ScalarValue::Boolean(true)),
+            vec![Predicate(ScalarExpr::Literal(
+                asap_types::pre_asap::ScalarValue::Boolean(true),
             ))],
         );
         let scope = scope(vec![scan_coverage]);
@@ -1659,26 +1661,28 @@ mod tests {
     #[test]
     fn query_lowering_shares_only_provider_identified_physical_nodes() {
         use asap_types::pre_asap::{Field, CompareOpKind, DataType, Schema};
-        use asap_types::pre_asap::{JoinKind, Predicate, QueryExpr, Source};
+        use asap_types::pre_asap::{JoinKind, Source};
         use std::rc::Rc;
 
-        let shared = Rc::new(QueryExpr::Scan {
+        let shared = OperatorNode::non_asap_node(NonASAPOp::Scan {
             source: Source::Table {
                 table_ref: "dimensions".into(),
             },
             predicates: vec![],
             schema: Schema::new(vec![Field::plain("id", DataType::Int64, false)]),
-        });
-        let root = Rc::new(QueryExpr::Join {
+        }).unwrap();
+        let root = OperatorNode::non_asap_node(NonASAPOp::Join {
             kind: JoinKind::Inner,
-            pred: Predicate(Rc::new(QueryExpr::Compare {
-                left: Rc::new(QueryExpr::Column(0)),
+            pred: Predicate(ScalarExpr::Compare {
+                left: Box::new(ScalarExpr::Column(0)),
                 op: CompareOpKind::Eq,
-                right: Rc::new(QueryExpr::Column(1)),
-            })),
+                right: Box::new(ScalarExpr::Column(1)),
+                semantics: ExprSemantics::Sql,
+            }),
             left: Rc::clone(&shared),
             right: Rc::clone(&shared),
-        });
+        })
+        .unwrap();
         let source_coverage = coverage(
             Source::Table {
                 table_ref: "dimensions".into(),
@@ -1802,16 +1806,18 @@ mod tests {
             ))
         );
 
-        let invalid = Rc::new(QueryExpr::Join {
+        let invalid = OperatorNode::non_asap_node(NonASAPOp::Join {
             kind: JoinKind::Inner,
-            pred: Predicate(Rc::new(QueryExpr::Compare {
-                left: Rc::new(QueryExpr::Column(0)),
+            pred: Predicate(ScalarExpr::Compare {
+                left: Box::new(ScalarExpr::Column(0)),
                 op: CompareOpKind::Eq,
-                right: Rc::new(QueryExpr::Column(0)),
-            })),
+                right: Box::new(ScalarExpr::Column(0)),
+                semantics: ExprSemantics::Sql,
+            }),
             left: Rc::clone(&shared),
             right: Rc::clone(&shared),
-        });
+        })
+        .unwrap();
         assert_eq!(
             lower_query_physical_dag(&invalid, &shared_scope, &shared_provider),
             Err(AnalyticalCostError::UnsupportedQueryOperator)
@@ -1822,61 +1828,61 @@ mod tests {
     fn query_lowering_covers_relational_unary_operators() {
         use asap_types::pre_asap::{Field, DataType, ScalarValue, Schema};
         use asap_types::pre_asap::{
-            GroupKeys, Predicate, QueryExpr, SortKey, Source, TimeShift, WindowFuncKind,
+            GroupKeys, Source, TimeShift, WindowFuncKind,
         };
-        use std::rc::Rc;
 
-        let scan = Rc::new(QueryExpr::Scan {
+        let scan = OperatorNode::non_asap_node(NonASAPOp::Scan {
             source: Source::Table {
                 table_ref: "events".into(),
             },
             predicates: vec![],
             schema: Schema::new(vec![Field::plain("id", DataType::Int64, false)]),
-        });
-        let filter = Rc::new(QueryExpr::Filter {
-            pred: Predicate(Rc::new(QueryExpr::Literal(ScalarValue::Boolean(true)))),
+        }).unwrap();
+        let filter = OperatorNode::non_asap_node(NonASAPOp::Filter {
+            pred: Predicate(ScalarExpr::Literal(ScalarValue::Boolean(true))),
             child: scan,
-        });
-        let project = Rc::new(QueryExpr::Project {
+        }).unwrap();
+        let project = OperatorNode::non_asap_node(NonASAPOp::Project {
             cols: vec![],
             qualifier: None,
             child: filter,
-        });
-        let dedup = Rc::new(QueryExpr::Dedup {
+        }).unwrap();
+        let dedup = OperatorNode::non_asap_node(NonASAPOp::Dedup {
             cols: vec![0],
             child: project,
-        });
-        let window = Rc::new(QueryExpr::SQLWindowFunc {
+        }).unwrap();
+        let window = OperatorNode::non_asap_node(NonASAPOp::SQLWindowFunc {
             func: WindowFuncKind::RowNumber,
             args: vec![],
             partition_by: GroupKeys::none(),
             order_by: vec![SortKey {
-                expr: QueryExpr::Column(0),
+                expr: ScalarExpr::Column(0),
                 ascending: true,
                 nulls_first: false,
             }],
             frame: None,
             output_name: "rn".into(),
             child: dedup,
-        });
-        let sort = Rc::new(QueryExpr::Sort {
+        }).unwrap();
+        let sort = OperatorNode::non_asap_node(NonASAPOp::Sort {
             keys: vec![SortKey {
-                expr: QueryExpr::Column(0),
+                expr: ScalarExpr::Column(0),
                 ascending: true,
                 nulls_first: false,
             }],
             partition_by: GroupKeys::by(vec![0]),
             child: window,
-        });
-        let limit = Rc::new(QueryExpr::Limit {
-            n: 20,
+        }).unwrap();
+        let limit = OperatorNode::non_asap_node(NonASAPOp::Limit {
+            n: Some(20),
             offset: 0,
+            partition_by: GroupKeys::none(),
             child: sort,
-        });
-        let root = Rc::new(QueryExpr::TimeShift {
+        }).unwrap();
+        let root = OperatorNode::non_asap_node(NonASAPOp::TimeShift {
             shift: TimeShift::default(),
             child: limit,
-        });
+        }).unwrap();
 
         let source_coverage = coverage(
             Source::Table {
@@ -1995,22 +2001,24 @@ mod tests {
     #[test]
     fn query_lowering_maps_concat_and_union_all_but_rejects_distinct_set_ops() {
         use asap_types::pre_asap::{Field, DataType, Schema};
-        use asap_types::pre_asap::{QueryExpr, RelationalSetOpKind, Source};
-        use std::rc::Rc;
+        use asap_types::pre_asap::{RelationalSetOpKind, Source};
 
-        let scan = |name: &str| QueryExpr::Scan {
-            source: Source::Table {
-                table_ref: name.into(),
-            },
-            predicates: vec![],
-            schema: Schema::new(vec![Field::plain("id", DataType::Int64, false)]),
+        let scan = |name: &str| {
+            OperatorNode::non_asap_node(NonASAPOp::Scan {
+                source: Source::Table {
+                    table_ref: name.into(),
+                },
+                predicates: vec![],
+                schema: Schema::new(vec![Field::plain("id", DataType::Int64, false)]),
+            })
+            .unwrap()
         };
-        let union = Rc::new(QueryExpr::SetOp {
+        let union = OperatorNode::non_asap_node(NonASAPOp::SetOp {
             kind: RelationalSetOpKind::Union,
             all: true,
-            left: Rc::new(scan("a")),
-            right: Rc::new(scan("b")),
-        });
+            left: scan("a"),
+            right: scan("b"),
+        }).unwrap();
         let scope = scope(vec![
             coverage(
                 Source::Table {
@@ -2054,19 +2062,19 @@ mod tests {
             ))
         );
 
-        let concat = Rc::new(QueryExpr::Concat {
+        let concat = OperatorNode::non_asap_node(NonASAPOp::Concat {
             children: vec![scan("a"), scan("b")],
             discriminator_unique_key: None,
-        });
+        }).unwrap();
         let dag = lower_query_physical_dag(&concat, &scope, &scripted(&provided)).unwrap();
         assert_eq!(dag.nodes.last().unwrap().operator, PhysicalOperator::Concat);
 
-        let distinct_union = Rc::new(QueryExpr::SetOp {
+        let distinct_union = OperatorNode::non_asap_node(NonASAPOp::SetOp {
             kind: RelationalSetOpKind::Union,
             all: false,
-            left: Rc::new(scan("a")),
-            right: Rc::new(scan("b")),
-        });
+            left: scan("a"),
+            right: scan("b"),
+        }).unwrap();
         assert_eq!(
             lower_query_physical_dag(&distinct_union, &scope, &scripted(&provided)),
             Err(AnalyticalCostError::UnsupportedQueryOperator)
@@ -2076,21 +2084,20 @@ mod tests {
     #[test]
     fn query_lowering_fails_closed_for_missing_or_inconsistent_statistics() {
         use asap_types::pre_asap::{Field, DataType, Schema};
-        use asap_types::pre_asap::{QueryExpr, Source};
-        use std::rc::Rc;
+        use asap_types::pre_asap::{Source};
 
-        let scan = Rc::new(QueryExpr::Scan {
+        let scan = OperatorNode::non_asap_node(NonASAPOp::Scan {
             source: Source::Table {
                 table_ref: "events".into(),
             },
             predicates: vec![],
             schema: Schema::new(vec![Field::plain("id", DataType::Int64, false)]),
-        });
-        let root = Rc::new(QueryExpr::Project {
+        }).unwrap();
+        let root = OperatorNode::non_asap_node(NonASAPOp::Project {
             cols: vec![],
             qualifier: None,
             child: scan,
-        });
+        }).unwrap();
 
         let comparison_scope = scope(vec![coverage(
             Source::Table {
@@ -2192,25 +2199,25 @@ mod tests {
     #[test]
     fn query_lowering_accepts_a_consistently_empty_edge() {
         use asap_types::pre_asap::{Field, DataType, ScalarValue, Schema};
-        use asap_types::pre_asap::{Predicate, QueryExpr, Source};
-        use std::rc::Rc;
+        use asap_types::pre_asap::{GroupKeys, Source};
 
-        let scan = Rc::new(QueryExpr::Scan {
+        let scan = OperatorNode::non_asap_node(NonASAPOp::Scan {
             source: Source::Table {
                 table_ref: "events".into(),
             },
             predicates: vec![],
             schema: Schema::new(vec![Field::plain("id", DataType::Int64, false)]),
-        });
-        let filter = Rc::new(QueryExpr::Filter {
-            pred: Predicate(Rc::new(QueryExpr::Literal(ScalarValue::Boolean(false)))),
+        }).unwrap();
+        let filter = OperatorNode::non_asap_node(NonASAPOp::Filter {
+            pred: Predicate(ScalarExpr::Literal(ScalarValue::Boolean(false))),
             child: scan,
-        });
-        let root = Rc::new(QueryExpr::Limit {
-            n: 10,
+        }).unwrap();
+        let root = OperatorNode::non_asap_node(NonASAPOp::Limit {
+            n: Some(10),
             offset: 0,
+            partition_by: GroupKeys::none(),
             child: filter,
-        });
+        }).unwrap();
 
         let scope = scope(vec![coverage(
             Source::Table {
@@ -2252,22 +2259,21 @@ mod tests {
     #[test]
     fn query_lowering_rejects_aggregates_without_a_hash_implementation() {
         use asap_types::pre_asap::{
-            AggIntent, GroupKeys, QueryExpr, Reduction, Source, WindowFuncKind,
+            AggIntent, GroupKeys, Reduction, Source, WindowFuncKind,
         };
         use asap_types::pre_asap::{Field, DataType, Schema};
         use asap_types::types::AccuracyTarget;
-        use std::rc::Rc;
 
         let scan = || {
-            Rc::new(QueryExpr::Scan {
+            OperatorNode::non_asap_node(NonASAPOp::Scan {
                 source: Source::Table {
                     table_ref: "events".into(),
                 },
                 predicates: vec![],
                 schema: Schema::new(vec![Field::plain("value", DataType::Float64, false)]),
-            })
+            }).unwrap()
         };
-        let exact_quantile = Rc::new(QueryExpr::Aggregate {
+        let exact_quantile = OperatorNode::non_asap_node(NonASAPOp::Aggregate {
             reduction: Reduction::by(vec![]),
             measures: vec![AggIntent::Quantile {
                 col: Some(0),
@@ -2277,32 +2283,33 @@ mod tests {
             output_names: vec![],
             having: None,
             child: scan(),
-        });
-        let empty_sort_limit = Rc::new(QueryExpr::Limit {
-            n: 10,
+        }).unwrap();
+        let empty_sort_limit = OperatorNode::non_asap_node(NonASAPOp::Limit {
+            n: Some(10),
             offset: 0,
-            child: Rc::new(QueryExpr::Sort {
+            partition_by: GroupKeys::none(),
+            child: OperatorNode::non_asap_node(NonASAPOp::Sort {
                 keys: vec![],
                 partition_by: GroupKeys::none(),
                 child: scan(),
-            }),
-        });
-        let unsupported_window = Rc::new(QueryExpr::SQLWindowFunc {
+            }).unwrap(),
+        }).unwrap();
+        let unsupported_window = OperatorNode::non_asap_node(NonASAPOp::SQLWindowFunc {
             func: WindowFuncKind::Lag,
-            args: vec![QueryExpr::Column(0)],
+            args: vec![ScalarExpr::Column(0)],
             partition_by: GroupKeys::none(),
             order_by: vec![],
             frame: None,
             output_name: "lag".into(),
             child: scan(),
-        });
-        let shifted = Rc::new(QueryExpr::TimeShift {
+        }).unwrap();
+        let shifted = OperatorNode::non_asap_node(NonASAPOp::TimeShift {
             shift: asap_types::pre_asap::TimeShift {
                 offset_ms: 60_000,
                 at: None,
             },
             child: scan(),
-        });
+        }).unwrap();
         let scope = scope(vec![coverage(
             Source::Table {
                 table_ref: "events".into(),
@@ -2325,14 +2332,15 @@ mod tests {
 
     #[test]
     fn scalar_work_counts_every_local_predicate_operation() {
-        use asap_types::pre_asap::{CompareOpKind, QueryExpr, ScalarValue};
+        use asap_types::pre_asap::{CompareOpKind, ScalarValue};
 
-        let comparison = || QueryExpr::Compare {
-            left: Rc::new(QueryExpr::Column(0)),
+        let comparison = || ScalarExpr::Compare {
+            left: Box::new(ScalarExpr::Column(0)),
             op: CompareOpKind::Eq,
-            right: Rc::new(QueryExpr::Literal(ScalarValue::Int64(1))),
+            right: Box::new(ScalarExpr::Literal(ScalarValue::Int64(1))),
+            semantics: ExprSemantics::Sql,
         };
-        let predicate = QueryExpr::BoolAnd(vec![comparison(), comparison()]);
+        let predicate = ScalarExpr::BoolAnd(vec![comparison(), comparison()]);
 
         assert_eq!(scalar_operation_count(&predicate), Ok(3));
     }
@@ -2340,24 +2348,24 @@ mod tests {
     #[test]
     fn promql_presence_is_lowered_with_a_per_step_output_bound() {
         use asap_types::pre_asap::{
-            AggIntent, Field, DataType, QueryExpr, Reduction, Schema, Source,
+            AggIntent, Field, DataType, Reduction, Schema, Source,
         };
 
         let source = Source::TimeSeries {
             metric: "missing".into(),
         };
-        let scan = Rc::new(QueryExpr::Scan {
+        let scan = OperatorNode::non_asap_node(NonASAPOp::Scan {
             source: source.clone(),
             predicates: vec![],
             schema: Schema::new(vec![Field::plain("value", DataType::Float64, false)]),
-        });
-        let root = Rc::new(QueryExpr::Aggregate {
+        }).unwrap();
+        let root = OperatorNode::non_asap_node(NonASAPOp::Aggregate {
             reduction: Reduction::PerEntity,
             measures: vec![AggIntent::Absent],
             output_names: vec![],
             having: None,
             child: scan,
-        });
+        }).unwrap();
         let vector = promql_edge(0, 2, PromqlValueKind::Vector);
         let scan_statistics = OperatorStatistics::Scan {
             edges: promql_unary_edges(edge(0, 0), edge(0, 0), vector, vector),
@@ -2406,24 +2414,25 @@ mod tests {
 
     #[test]
     fn promql_range_and_subquery_preserve_internal_steps() {
-        use asap_types::pre_asap::{Field, DataType, QueryExpr, Schema, Source};
+        use asap_types::pre_asap::{Field, DataType, Schema, Source};
         use std::time::Duration;
 
         let source = Source::TimeSeries { metric: "m".into() };
-        let scan = Rc::new(QueryExpr::Scan {
+        let scan = OperatorNode::non_asap_node(NonASAPOp::Scan {
             source: source.clone(),
             predicates: vec![],
             schema: Schema::new(vec![Field::plain("value", DataType::Float64, false)]),
-        });
-        let range = Rc::new(QueryExpr::TimeRange {
+        }).unwrap();
+        let range = OperatorNode::non_asap_node(NonASAPOp::TimeRange {
             range: Duration::from_secs(300),
+            kind: TimeRangeKind::Range,
             child: scan,
-        });
-        let root = Rc::new(QueryExpr::PromqlSubquery {
+        }).unwrap();
+        let root = OperatorNode::non_asap_node(NonASAPOp::PromqlSubquery {
             range: Duration::from_secs(300),
             resolution: Some(Duration::from_secs(60)),
             child: range,
-        });
+        }).unwrap();
         let vector = promql_edge(10, 6, PromqlValueKind::Vector);
         let range_vector = promql_edge(10, 6, PromqlValueKind::RangeVector);
         let outer_range = promql_edge(10, 1, PromqlValueKind::RangeVector);
@@ -2481,32 +2490,38 @@ mod tests {
     #[test]
     fn promql_binary_lowering_keeps_operation_and_matching_cardinality() {
         use asap_types::pre_asap::{
-            ArithmeticOpKind, BinaryOpKind, Field, DataType, GroupSide, QueryExpr, Schema, Source,
+            ArithmeticOpKind, BinaryOpKind, Field, DataType, GroupSide, Schema, Source,
             VectorGrouping, VectorMatch, VectorMatchKind,
         };
 
         let left_source = Source::TimeSeries { metric: "a".into() };
         let right_source = Source::TimeSeries { metric: "b".into() };
         let scan = |source| {
-            Rc::new(QueryExpr::Scan {
+            OperatorNode::non_asap_node(NonASAPOp::Scan {
                 source,
                 predicates: vec![],
                 schema: Schema::new(vec![Field::plain("value", DataType::Float64, false)]),
-            })
+            }).unwrap()
         };
-        let root = Rc::new(QueryExpr::BinaryOp {
-            op: BinaryOpKind::Arithmetic(ArithmeticOpKind::Div),
+        let root = OperatorNode::non_asap_node(NonASAPOp::BinaryOp {
+            operator: BinaryOperator {
+                kind: BinaryOpKind::Arithmetic(ArithmeticOpKind::Div),
+                vector_match: Some(VectorMatch {
+                    kind: VectorMatchKind::On,
+                    labels: vec!["service".into()],
+                    grouping: Some(VectorGrouping {
+                        side: GroupSide::Left,
+                        labels: vec!["region".into()],
+                    }),
+                }),
+                checked_relative_division: false,
+                checked_finite_division: false,
+            },
+            return_bool: false,
             lhs: scan(left_source.clone()),
             rhs: scan(right_source.clone()),
-            vector_match: Some(VectorMatch {
-                kind: VectorMatchKind::On,
-                labels: vec!["service".into()],
-                grouping: Some(VectorGrouping {
-                    side: GroupSide::Left,
-                    labels: vec!["region".into()],
-                }),
-            }),
-        });
+        })
+        .unwrap();
         let left_promql = promql_edge(10, 10, PromqlValueKind::Vector);
         let right_promql = promql_edge(5, 10, PromqlValueKind::Vector);
         let output_promql = promql_edge(8, 10, PromqlValueKind::Vector);
@@ -2564,35 +2579,35 @@ mod tests {
     #[test]
     fn promql_relabel_sample_and_per_series_lower_as_a_complete_chain() {
         use asap_types::pre_asap::{
-            AggIntent, Field, DataType, GroupKeys, QueryExpr, Reduction, SampleKind, ScalarValue,
+            AggIntent, Field, DataType, GroupKeys, Reduction, SampleKind, ScalarValue,
             Schema, Source,
         };
 
         let source = Source::TimeSeries {
             metric: "requests".into(),
         };
-        let scan = Rc::new(QueryExpr::Scan {
+        let scan = OperatorNode::non_asap_node(NonASAPOp::Scan {
             source: source.clone(),
             predicates: vec![],
             schema: Schema::new(vec![Field::plain("value", DataType::Float64, false)]),
-        });
-        let relabel = Rc::new(QueryExpr::PromqlRelabel {
+        }).unwrap();
+        let relabel = OperatorNode::non_asap_node(NonASAPOp::PromqlRelabel {
             dst: "service".into(),
-            value: Rc::new(QueryExpr::Literal(ScalarValue::Utf8("api".into()))),
+            value: ScalarExpr::Literal(ScalarValue::Utf8("api".into())),
             child: scan,
-        });
-        let sample = Rc::new(QueryExpr::PromqlSeriesSample {
+        }).unwrap();
+        let sample = OperatorNode::non_asap_node(NonASAPOp::PromqlSeriesSample {
             by: GroupKeys::none(),
             kind: SampleKind::LimitK(5),
             child: relabel,
-        });
-        let root = Rc::new(QueryExpr::Aggregate {
+        }).unwrap();
+        let root = OperatorNode::non_asap_node(NonASAPOp::Aggregate {
             reduction: Reduction::PerEntity,
             measures: vec![AggIntent::Sum { col: None }],
             output_names: vec![],
             having: None,
             child: sample,
-        });
+        }).unwrap();
 
         let input = edge(100, 1_600);
         let sampled = edge(50, 800);
