@@ -52,17 +52,16 @@ use datafusion::prelude::{SessionConfig, SessionContext};
 
 use asap_frontend_common::{
     resolve_root, UnresolvedOp as Unresolved, UnresolvedPredicate as Predicate,
-    UnresolvedProjectItem as ProjectItem, UnresolvedScalar as Scalar,
-    UnresolvedSortKey as SortKey,
+    UnresolvedProjectItem as ProjectItem, UnresolvedScalar as Scalar, UnresolvedSortKey as SortKey,
 };
 use asap_sql_function_catalog::{AggSemantic, Arity, RewriteKind};
 use asap_types::ir::TimeRangeKind;
 use asap_types::pre_asap::agg_intent::AggIntent;
-use asap_types::pre_asap::query_expr::{
+use asap_types::pre_asap::schema::{DataType, FieldDataType, Schema};
+use asap_types::pre_asap::vocabulary::{
     GroupKeys, Reduction, Source, WindowFrame, WindowFrameBound, WindowFrameOffset,
     WindowFrameUnits,
 };
-use asap_types::pre_asap::schema::{DataType, FieldDataType, Schema};
 use asap_types::pre_asap::{
     resolve_column_ref, ColumnRef, CompareOpKind, JoinKind, RelationalSetOpKind, ScalarValue,
     WindowFuncKind,
@@ -419,9 +418,8 @@ impl<'a> SqlLowerer<'a> {
     fn lower_filter(&self, filter: &logical_expr::Filter) -> Result<Unresolved, LoweringError> {
         let mut conjuncts = Vec::new();
         split_conjunction(&filter.predicate, &mut conjuncts);
-        let (subqueries, residual): (Vec<_>, Vec<_>) = conjuncts
-            .into_iter()
-            .partition(|e| reads_subquery(e));
+        let (subqueries, residual): (Vec<_>, Vec<_>) =
+            conjuncts.into_iter().partition(|e| reads_subquery(e));
 
         let input = self.lower_plan(&filter.input)?;
         let mut node = match rebuild_conjunction(&residual) {

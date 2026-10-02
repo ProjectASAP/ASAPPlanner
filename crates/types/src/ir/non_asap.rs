@@ -9,12 +9,12 @@ use serde::{Deserialize, Serialize};
 use super::node::{OperatorNode, OperatorResultKind};
 use super::scalar::{Predicate, ProjectItem, ScalarExpr, SortKey};
 use crate::pre_asap::agg_intent::AggIntent;
-use crate::pre_asap::query_expr::{
+use crate::pre_asap::schema::{ColumnId, DataType, Field, FieldDataType, Schema};
+use crate::pre_asap::vocabulary::{
     aggregate_output_schema, BinaryOpKind, ConcatDiscriminatorKey, GroupKeys, InfoMatcher,
     JoinKind, QueryExprError, Reduction, RelationalSetOpKind, SampleKind, Source, TimeShift,
     VectorMatch, WindowFrame, WindowFuncKind,
 };
-use crate::pre_asap::schema::{ColumnId, DataType, Field, FieldDataType, Schema};
 
 /// All semantics owned by a binary operator.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -241,9 +241,10 @@ impl NonASAPOp {
             Project { cols, .. } => cols.iter().map(|c| &c.expr).collect(),
             Aggregate { having, .. } => having.iter().map(|p| &p.0).collect(),
             Sort { keys, .. } => keys.iter().map(|k| &k.expr).collect(),
-            SQLWindowFunc { args, order_by, .. } => {
-                args.iter().chain(order_by.iter().map(|k| &k.expr)).collect()
-            }
+            SQLWindowFunc { args, order_by, .. } => args
+                .iter()
+                .chain(order_by.iter().map(|k| &k.expr))
+                .collect(),
             PromqlVectorFromScalar(e) | ScalarBridge(e) => vec![e],
             PromqlRelabel { value, .. } => vec![value],
             SetOp { .. }
@@ -265,10 +266,7 @@ impl NonASAPOp {
     pub fn map_children(&self, mut f: impl FnMut(&Rc<OperatorNode>) -> Rc<OperatorNode>) -> Self {
         use NonASAPOp::*;
         let mut map_scalar = |e: &ScalarExpr| e.map_operator_refs(&mut f);
-        fn map_pred(
-            p: &Predicate,
-            f: &mut impl FnMut(&ScalarExpr) -> ScalarExpr,
-        ) -> Predicate {
+        fn map_pred(p: &Predicate, f: &mut impl FnMut(&ScalarExpr) -> ScalarExpr) -> Predicate {
             Predicate(f(&p.0))
         }
         fn map_keys(
@@ -552,7 +550,8 @@ impl NonASAPOp {
                     existing.dtype = FieldDataType::Plain(DataType::Utf8);
                     existing.nullable = true;
                 } else {
-                    out.fields.push(Field::plain(dst.clone(), DataType::Utf8, true));
+                    out.fields
+                        .push(Field::plain(dst.clone(), DataType::Utf8, true));
                 }
                 out.unique_keys.clear();
                 out
@@ -851,5 +850,545 @@ fn default_proj_name(expr: &ScalarExpr, idx: usize, schema: &Schema) -> String {
             .map(|c| c.name.clone())
             .unwrap_or_else(|| format!("col_{idx}")),
         _ => format!("col_{idx}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ir::scalar::ExprSemantics;
+    use crate::pre_asap::expr_ir::{ArithmeticOpKind, CompareOpKind, ScalarValue};
+    use crate::pre_asap::vocabulary::{
+        AtModifier, VectorMatchKind, WindowFrameBound, WindowFrameOffset, WindowFrameUnits,
+    };
+
+    fn col(name: &str, dtype: DataType, nullable: bool) -> Field {
+        Field::plain(name, dtype, nullable)
+    }
+
+    fn node(op: NonASAPOp) -> Rc<OperatorNode> {
+        OperatorNode::non_asap_node(op).unwrap()
+    }
+
+    fn scan(
+        columns: Vec<Field>,
+        time_index: Option<ColumnId>,
+        uk: Vec<Vec<ColumnId>>,
+    ) -> NonASAPOp {
+        NonASAPOp::Scan {
+            source: Source::Table {
+                table_ref: "t".into(),
+            },
+            predicates: vec![],
+            schema: Schema {
+                fields: columns,
+                time_index,
+                unique_keys: uk,
+                closed: true,
+            },
+        }
+    }
+
+    /// `[ts, value, job]` time-series leaf; open, as a PromQL leaf is.
+    fn series_scan() -> NonASAPOp {
+        NonASAPOp::Scan {
+            source: Source::TimeSeries { metric: "m".into() },
+            predicates: vec![],
+            schema: Schema::with_time_index(
+                vec![
+                    col("ts", DataType::Timestamp, false),
+                    col("value", DataType::Float64, false),
+                    col("job", DataType::Utf8, true),
+                ],
+                0,
+                vec![],
+            ),
+        }
+    }
+
+    fn item(alias: Option<&str>, expr: ScalarExpr) -> ProjectItem {
+        ProjectItem {
+            alias: alias.map(Into::into),
+            expr,
+        }
+    }
+
+    fn add(left: ScalarExpr, right: ScalarExpr) -> ScalarExpr {
+        ScalarExpr::Arithmetic {
+            op: ArithmeticOpKind::Add,
+            left: Box::new(left),
+            right: Box::new(right),
+            semantics: ExprSemantics::Sql,
+        }
+    }
+
+    fn project(cols: Vec<ProjectItem>, child: NonASAPOp) -> NonASAPOp {
+        NonASAPOp::Project {
+            cols,
+            qualifier: None,
+            child: node(child),
+        }
+    }
+
+    fn dedup_branch(columns: Vec<Field>) -> Rc<OperatorNode> {
+        node(NonASAPOp::Dedup {
+            cols: vec![0],
+            child: node(scan(columns, None, vec![])),
+        })
+    }
+
+    fn concat(
+        children: Vec<Rc<OperatorNode>>,
+        discriminator_unique_key: Option<ConcatDiscriminatorKey>,
+    ) -> NonASAPOp {
+        NonASAPOp::Concat {
+            children,
+            discriminator_unique_key,
+        }
+    }
+
+    fn rate_over(child: NonASAPOp) -> NonASAPOp {
+        NonASAPOp::Aggregate {
+            reduction: Reduction::PerEntity,
+            measures: vec![AggIntent::Rate],
+            output_names: vec![],
+            having: None,
+            child: node(child),
+        }
+    }
+
+    #[test]
+    fn project_preserves_unique_keys_that_are_passed_through() {
+        let input = scan(
+            vec![
+                col("tenant", DataType::Utf8, false),
+                col("region", DataType::Utf8, false),
+                col("value", DataType::Int64, false),
+            ],
+            None,
+            vec![vec![0, 1]],
+        );
+        let projected = project(
+            vec![
+                item(Some("r"), ScalarExpr::Column(1)),
+                item(Some("t"), ScalarExpr::Column(0)),
+                item(
+                    None,
+                    add(
+                        ScalarExpr::Column(2),
+                        ScalarExpr::Literal(ScalarValue::Int64(1)),
+                    ),
+                ),
+            ],
+            input,
+        );
+        assert_eq!(
+            projected.output_schema().unwrap().unique_keys,
+            vec![vec![1, 0]]
+        );
+    }
+
+    #[test]
+    fn project_drops_a_unique_key_when_a_key_column_is_omitted() {
+        let input = scan(
+            vec![
+                col("tenant", DataType::Utf8, false),
+                col("region", DataType::Utf8, false),
+            ],
+            None,
+            vec![vec![0, 1]],
+        );
+        let projected = project(vec![item(None, ScalarExpr::Column(0))], input);
+        assert!(projected.output_schema().unwrap().unique_keys.is_empty());
+    }
+
+    #[test]
+    fn project_retypes_and_renames_per_item() {
+        let child = scan(
+            vec![
+                col("ts", DataType::Timestamp, false),
+                col("host", DataType::Utf8, false),
+                col("value", DataType::Float64, false),
+            ],
+            Some(0),
+            vec![vec![0, 1]],
+        );
+        let q = project(
+            vec![
+                // A bare column keeps its name and type.
+                item(None, ScalarExpr::Column(1)),
+                item(
+                    Some("dbl"),
+                    add(ScalarExpr::Column(2), ScalarExpr::Column(2)),
+                ),
+                // A comparison is a nullable Bool under 3-valued logic.
+                item(
+                    Some("flag"),
+                    ScalarExpr::Compare {
+                        left: Box::new(ScalarExpr::Column(2)),
+                        op: CompareOpKind::Gt,
+                        right: Box::new(ScalarExpr::Literal(ScalarValue::Float64(0.0))),
+                        semantics: ExprSemantics::Sql,
+                    },
+                ),
+            ],
+            child,
+        );
+        let s = q.output_schema().unwrap();
+        assert_eq!(s.fields.len(), 3);
+        assert_eq!(s.fields[0], col("host", DataType::Utf8, false));
+        assert_eq!(s.fields[1], col("dbl", DataType::Float64, false));
+        assert_eq!(s.fields[2], col("flag", DataType::Bool, true));
+        // `ts` is not retained: no time axis, and the key is lost.
+        assert!(s.time_index.is_none());
+        assert!(s.unique_keys.is_empty());
+    }
+
+    #[test]
+    fn project_keeps_time_index_when_ts_passed_through() {
+        let child = scan(
+            vec![
+                col("ts", DataType::Timestamp, false),
+                col("value", DataType::Float64, false),
+            ],
+            Some(0),
+            vec![],
+        );
+        let q = project(
+            vec![
+                item(None, ScalarExpr::Column(1)),
+                item(None, ScalarExpr::Column(0)),
+            ],
+            child,
+        );
+        let s = q.output_schema().unwrap();
+        assert_eq!(s.fields[0].name, "value");
+        assert_eq!(s.fields[1].name, "ts");
+        assert_eq!(s.time_index, Some(1));
+    }
+
+    #[test]
+    fn legacy_window_json_without_frame_deserializes_as_unspecified() {
+        let window = NonASAPOp::SQLWindowFunc {
+            func: WindowFuncKind::RowNumber,
+            args: vec![],
+            partition_by: GroupKeys::by(vec![]),
+            order_by: vec![],
+            frame: Some(WindowFrame {
+                units: WindowFrameUnits::Range,
+                start_bound: WindowFrameBound::Preceding(WindowFrameOffset::Scalar(
+                    ScalarValue::Null,
+                )),
+                end_bound: WindowFrameBound::CurrentRow,
+            }),
+            output_name: "row_number".into(),
+            child: node(scan(vec![col("v", DataType::Int64, false)], None, vec![])),
+        };
+        let mut json = serde_json::to_value(window).unwrap();
+        json.get_mut("SQLWindowFunc")
+            .and_then(serde_json::Value::as_object_mut)
+            .unwrap()
+            .remove("frame");
+        let decoded: NonASAPOp = serde_json::from_value(json).unwrap();
+        assert!(matches!(
+            decoded,
+            NonASAPOp::SQLWindowFunc { frame: None, .. }
+        ));
+    }
+
+    /// A row can appear in more than one branch, so no branch's unique key is
+    /// a key of the union — `unique_keys` feeds CSE's sharing legality check.
+    #[test]
+    fn merge_drops_the_branches_unique_keys() {
+        let branch = || {
+            dedup_branch(vec![
+                col("k", DataType::Utf8, false),
+                col("v", DataType::Int64, false),
+            ])
+        };
+        assert_eq!(
+            branch().schema.unique_keys,
+            vec![vec![0]],
+            "a Dedup branch does have a unique key on its own"
+        );
+        let schema = concat(vec![branch(), branch()], None)
+            .output_schema()
+            .unwrap();
+        assert!(
+            schema.unique_keys.is_empty(),
+            "the union of two deduplicated branches is not deduplicated"
+        );
+        assert_eq!(schema.fields.len(), 2, "column shape is the first branch's");
+    }
+
+    #[test]
+    fn merge_and_setop_agree_on_unique_keys() {
+        let branch = || dedup_branch(vec![col("k", DataType::Utf8, false)]);
+        let merged = concat(vec![branch(), branch()], None);
+        let setop = NonASAPOp::SetOp {
+            kind: RelationalSetOpKind::Union,
+            all: true,
+            left: branch(),
+            right: branch(),
+        };
+        assert_eq!(
+            merged.output_schema().unwrap().unique_keys,
+            setop.output_schema().unwrap().unique_keys,
+        );
+    }
+
+    #[test]
+    fn an_empty_merge_has_no_schema() {
+        assert!(matches!(
+            concat(vec![], None).output_schema(),
+            Err(QueryExprError::EmptyConcat)
+        ));
+    }
+
+    /// Issue #228: an asserted discriminator yields the compound
+    /// `(discriminator, inner_key)` unique key, although each branch's own
+    /// `inner_key` repeats across branches.
+    #[test]
+    fn discriminator_override_produces_a_compound_unique_key() {
+        let branch = || {
+            dedup_branch(vec![
+                col("k", DataType::Utf8, false),
+                col("branch_id", DataType::Int64, false),
+            ])
+        };
+        let schema = concat(
+            vec![branch(), branch()],
+            Some(ConcatDiscriminatorKey::new(1, vec![0])),
+        )
+        .output_schema()
+        .unwrap();
+        assert_eq!(schema.unique_keys, vec![vec![1, 0]]);
+        assert_eq!(schema.fields.len(), 2, "column shape is the first branch's");
+    }
+
+    /// Without a named discriminator a `Concat` never claims a unique key.
+    #[test]
+    fn no_way_to_fabricate_a_unique_key_without_naming_a_discriminator() {
+        let branch = || dedup_branch(vec![col("k", DataType::Utf8, false)]);
+        assert!(concat(vec![branch(), branch()], None)
+            .output_schema()
+            .unwrap()
+            .unique_keys
+            .is_empty());
+    }
+
+    #[test]
+    fn without_aggregate_keeps_open_schema_minus_excluded() {
+        // `sum without (instance) (m)` over `[ts, value, instance, job]`.
+        let leaf = NonASAPOp::Scan {
+            source: Source::TimeSeries { metric: "m".into() },
+            predicates: vec![],
+            schema: Schema::with_time_index(
+                vec![
+                    col("ts", DataType::Timestamp, false),
+                    col("value", DataType::Float64, false),
+                    col("instance", DataType::Utf8, true),
+                    col("job", DataType::Utf8, true),
+                ],
+                0,
+                vec![],
+            ),
+        };
+        let agg = NonASAPOp::Aggregate {
+            reduction: Reduction::Reduce(GroupKeys::without(vec![2])),
+            measures: vec![AggIntent::Sum { col: None }],
+            output_names: vec![],
+            having: None,
+            child: node(leaf),
+        };
+        let s = agg.output_schema().unwrap();
+        let names: Vec<_> = s.fields.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, vec!["job", "sum"], "kept `job`, dropped `instance`");
+        assert!(!s.closed, "a `without` result stays open");
+        assert!(s.time_index.is_none());
+        assert!(s.unique_keys.is_empty(), "kept set unknown → no unique key");
+    }
+
+    #[test]
+    fn time_shift_is_schema_pass_through() {
+        let leaf = node(scan(
+            vec![
+                col("ts", DataType::Timestamp, false),
+                col("value", DataType::Float64, false),
+                col("job", DataType::Utf8, true),
+            ],
+            Some(0),
+            vec![],
+        ));
+        let shifted = NonASAPOp::TimeShift {
+            shift: TimeShift {
+                offset_ms: 3_600_000,
+                at: Some(AtModifier::Timestamp(1_609_746_000_000)),
+            },
+            child: Rc::clone(&leaf),
+        };
+        assert_eq!(shifted.output_schema().unwrap(), leaf.schema);
+    }
+
+    /// `rate` and `*_over_time` are per-series: every label survives and only
+    /// the sample value is replaced (kept named `value`).
+    #[test]
+    fn per_series_reductions_preserve_labels() {
+        for measure in [AggIntent::Rate, AggIntent::Avg { col: None }] {
+            let reduced = NonASAPOp::Aggregate {
+                reduction: Reduction::PerEntity,
+                measures: vec![measure],
+                output_names: vec![],
+                having: None,
+                child: node(NonASAPOp::TimeRange {
+                    range: Duration::from_secs(300),
+                    kind: TimeRangeKind::Range,
+                    child: node(series_scan()),
+                }),
+            };
+            let s = reduced.output_schema().unwrap();
+            let names: Vec<_> = s.fields.iter().map(|c| c.name.as_str()).collect();
+            assert_eq!(names, vec!["ts", "value", "job"]);
+            assert_eq!(s.time_index, Some(0));
+        }
+    }
+
+    /// An open leaf stays open through a per-series `rate` and is frozen to
+    /// closed by a cross-series aggregate.
+    #[test]
+    fn completeness_open_leaf_freezes_to_closed_at_cross_series_aggregate() {
+        let leaf = series_scan();
+        assert!(
+            !leaf.output_schema().unwrap().closed,
+            "schemaless leaf is open"
+        );
+        let rate = rate_over(leaf);
+        assert!(!rate.output_schema().unwrap().closed, "rate stays open");
+        let sum_by_job = NonASAPOp::Aggregate {
+            reduction: Reduction::by(vec![2]),
+            measures: vec![AggIntent::Sum { col: None }],
+            output_names: vec![],
+            having: None,
+            child: node(rate),
+        };
+        assert!(sum_by_job.output_schema().unwrap().closed);
+    }
+
+    fn join(kind: JoinKind) -> NonASAPOp {
+        NonASAPOp::Join {
+            kind,
+            pred: Predicate(ScalarExpr::Literal(ScalarValue::Boolean(true))),
+            left: node(scan(
+                vec![col("a", DataType::Int64, false)],
+                None,
+                vec![vec![0]],
+            )),
+            right: node(scan(vec![col("b", DataType::Utf8, false)], None, vec![])),
+        }
+    }
+
+    #[test]
+    fn inner_join_concatenates_both_sides() {
+        let s = join(JoinKind::Inner).output_schema().unwrap();
+        assert_eq!(
+            s.fields,
+            vec![
+                col("a", DataType::Int64, false),
+                col("b", DataType::Utf8, false)
+            ]
+        );
+        assert!(
+            s.unique_keys.is_empty(),
+            "post-join row identity not provable"
+        );
+    }
+
+    #[test]
+    fn left_join_makes_right_side_nullable() {
+        let s = join(JoinKind::Left).output_schema().unwrap();
+        assert!(!s.fields[0].nullable);
+        assert!(s.fields[1].nullable);
+    }
+
+    #[test]
+    fn full_join_makes_both_sides_nullable() {
+        let s = join(JoinKind::Full).output_schema().unwrap();
+        assert!(s.fields[0].nullable);
+        assert!(s.fields[1].nullable);
+    }
+
+    #[test]
+    fn setop_takes_left_shape_and_drops_unique_keys() {
+        let side = || {
+            node(scan(
+                vec![
+                    col("k", DataType::Utf8, false),
+                    col("v", DataType::Int64, false),
+                ],
+                None,
+                vec![vec![0]],
+            ))
+        };
+        let s = NonASAPOp::SetOp {
+            kind: RelationalSetOpKind::Union,
+            all: false,
+            left: side(),
+            right: side(),
+        }
+        .output_schema()
+        .unwrap();
+        assert_eq!(s.fields.len(), 2);
+        assert_eq!(s.fields[0].name, "k");
+        assert!(
+            s.unique_keys.is_empty(),
+            "UNION does not preserve row identity"
+        );
+    }
+
+    /// A scalar at an operator position is one `value` column with no series.
+    #[test]
+    fn scalar_bridge_has_a_single_value_row_schema() {
+        let s = NonASAPOp::ScalarBridge(ScalarExpr::literal_f64(42.0))
+            .output_schema()
+            .unwrap();
+        assert_eq!(s.fields.len(), 1);
+        assert_eq!(s.fields[0].name, "value");
+        assert_eq!(s.fields[0].dtype, DataType::Float64);
+        assert!(s.time_index.is_none());
+    }
+
+    /// `<vector> op <scalar>` takes the vector side's schema; the vector
+    /// match modifier is kept on the operator.
+    #[test]
+    fn binary_op_schema_follows_the_vector_side_over_a_scalar_bridge() {
+        let vector = node(scan(
+            vec![
+                col("host", DataType::Utf8, false),
+                col("value", DataType::Float64, false),
+            ],
+            None,
+            vec![],
+        ));
+        let vm = VectorMatch {
+            kind: VectorMatchKind::On,
+            labels: vec!["host".into()],
+            grouping: None,
+        };
+        let op = NonASAPOp::BinaryOp {
+            operator: BinaryOperator {
+                checked_relative_division: false,
+                checked_finite_division: false,
+                kind: BinaryOpKind::Compare(CompareOpKind::Gt),
+                vector_match: Some(vm.clone()),
+            },
+            return_bool: false,
+            lhs: Rc::clone(&vector),
+            rhs: node(NonASAPOp::ScalarBridge(ScalarExpr::literal_f64(1.0))),
+        };
+        assert_eq!(op.output_schema().unwrap(), vector.schema);
+        let NonASAPOp::BinaryOp { operator, .. } = &op else {
+            unreachable!()
+        };
+        assert_eq!(operator.vector_match.as_ref(), Some(&vm));
     }
 }

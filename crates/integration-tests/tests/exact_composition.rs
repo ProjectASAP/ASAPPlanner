@@ -16,6 +16,7 @@ use asap_aware_mapping::cost_model::{
     CostProvenance, CostUnit, ExactCompositionCostInputs, ExactCompositionCostRequest,
     ValueOperationCapabilities,
 };
+use asap_aware_mapping::exact_composition::ExactOperation;
 use asap_aware_mapping::replacement::{
     default_strategies_with, search_workload_with, Replacement, ReplacementProvenance,
     ReplacementStrategy, SketchAlgorithmStrategy, TargetSubDAG,
@@ -23,7 +24,6 @@ use asap_aware_mapping::replacement::{
 use asap_aware_mapping::{
     CostModel, DefaultCostModel, EvaluationRate, ExplanationKind, OperationPlacement,
 };
-use asap_aware_mapping::exact_composition::ExactOperation;
 use asap_integration_tests::fixtures::lower_promql;
 use asap_integration_tests::post_asap::{post_asap_dag, timed};
 use asap_types::dag_export;
@@ -34,8 +34,8 @@ use asap_types::post_asap::{
     ExactKind, ExecutionDataState, ExecutionTiming, FieldDataType, SketchAlgorithm, SummaryUpdate,
 };
 use asap_types::pre_asap::agg_intent::{default_quantile, AggIntent};
-use asap_types::pre_asap::query_expr::{Reduction, Source};
 use asap_types::pre_asap::schema::{DataType, Field, Schema};
+use asap_types::pre_asap::vocabulary::{Reduction, Source};
 use asap_types::types::AccuracyTarget;
 
 // ── fixtures ────────────────────────────────────────────────────────────
@@ -49,7 +49,11 @@ fn metric_scan(labels: &[&str]) -> Rc<OperatorNode> {
         Field::plain("ts", DataType::Timestamp, false),
         Field::plain("value", DataType::Float64, false),
     ];
-    columns.extend(labels.iter().map(|n| Field::plain(*n, DataType::Utf8, true)));
+    columns.extend(
+        labels
+            .iter()
+            .map(|n| Field::plain(*n, DataType::Utf8, true)),
+    );
     node(NonASAPOp::Scan {
         source: Source::TimeSeries {
             metric: "latency".into(),
@@ -97,9 +101,7 @@ struct StatsModel;
 #[test]
 fn custom_accuracy_rule_survives_root_target_and_materialization() {
     use asap_aware_mapping::{AccuracyModel, DefaultAccuracyModel, PropagationStats};
-    use asap_types::post_asap::{
-        AccuracyError, CompositionOperator, ResultGuarantee, SketchQuery,
-    };
+    use asap_types::post_asap::{AccuracyError, CompositionOperator, ResultGuarantee, SketchQuery};
     struct Model;
     impl AccuracyModel for Model {
         fn exact_operation_rule(&self, _: &ExactOperation) -> Option<CompositionOperator> {
@@ -298,7 +300,7 @@ fn names(node: &OperatorNode) -> Vec<&str> {
 }
 
 /// The composed query-time shape: an exact `Aggregate` directly over a
-/// summary readout (formerly `ValueOperation { timing: QueryTime }`).
+/// summary readout, at query time.
 fn is_query_time_fold(node: &OperatorNode) -> bool {
     matches!(
         node.non_asap(),
@@ -408,8 +410,8 @@ fn every_exact_accumulator_is_finalized_before_an_outer_sketch() {
 
 // ── direction 1: outer exact fold over an inner summary readout ────────
 
-/// Before this PR both `max`/`avg` over a quantile collapsed into one
-/// opaque `KeepPreAsap`. Now: the outer group holds an `ValueOperationAtQueryTime`
+/// `max`/`avg` over a quantile does not collapse into one opaque kept
+/// subtree: the outer group holds an `ValueOperationAtQueryTime`
 /// candidate referencing the inner target, the inner group keeps its own
 /// sketch candidates, and with statistics the pair is committed and
 /// materializes as `ValueOperationAtQueryTime → SummaryEstimate → SummaryAgg`.
@@ -508,11 +510,7 @@ fn max_and_avg_over_quantile_compose_at_query_time_with_statistics() {
 fn avg_over_quantile_keeps_the_sum_over_count_rewrite_as_a_competitor() {
     // `by (zone)` over `by (zone)`: the averaged column resolves to the
     // non-null quantile output, which is what the rewrite requires.
-    let inner = agg(
-        vec![2],
-        default_quantile(0.99),
-        metric_scan(&["zone"]),
-    );
+    let inner = agg(vec![2], default_quantile(0.99), metric_scan(&["zone"]));
     let root = agg(vec![0], AggIntent::Avg { col: None }, inner);
     let space = plan(vec![("q", root)], &StatsModel);
     let group = space.candidates_for_target(&space.roots[0].1).unwrap();
@@ -526,11 +524,7 @@ fn avg_over_quantile_keeps_the_sum_over_count_rewrite_as_a_competitor() {
 /// is the same, only the fold's row multiplicity differs.
 #[test]
 fn identity_and_genuine_multi_row_folds_both_compose() {
-    let identity_inner = agg(
-        vec![2],
-        default_quantile(0.99),
-        metric_scan(&["zone"]),
-    );
+    let identity_inner = agg(vec![2], default_quantile(0.99), metric_scan(&["zone"]));
     for (label, inner) in [
         ("identity", identity_inner),
         ("fine-to-coarse", fine_quantile()),
@@ -564,7 +558,7 @@ fn identity_and_genuine_multi_row_folds_both_compose() {
 /// One inner quantile consumed by two outer folds in two queries: CSE
 /// collapses the inner target onto one `Rc`, both compositions commit to
 /// the *same* child candidate, and both materializations share one
-/// `Rc<SummaryNode>` for it — the summary is maintained once.
+/// `Rc<OperatorNode>` for it — the summary is maintained once.
 #[test]
 fn a_shared_inner_summary_is_materialized_once_for_several_outer_folds() {
     let max = agg(vec![0], AggIntent::Max { col: None }, fine_quantile());
@@ -612,7 +606,10 @@ fn a_shared_inner_summary_is_materialized_once_for_several_outer_folds() {
         .collect();
     let child_of = |n: &Rc<OperatorNode>| match n.non_asap() {
         Some(NonASAPOp::Aggregate { child, .. })
-            if matches!(child.operator, Operator::ASAP(ASAPOp::SummaryEstimate { .. })) =>
+            if matches!(
+                child.operator,
+                Operator::ASAP(ASAPOp::SummaryEstimate { .. })
+            ) =>
         {
             Rc::clone(child)
         }
@@ -679,7 +676,7 @@ fn outer_summary_over_an_exact_function_composes_at_ingestion_time() {
             child.operator
         );
     };
-    // The raw input is kept as-is (formerly a `KeepPreAsap` wrapper).
+    // The raw input is kept as-is.
     assert!(matches!(raw.non_asap(), Some(NonASAPOp::TimeRange { .. })));
     assert!(!raw.contains_asap());
     assert_eq!(data_state(child), Some(ExecutionDataState::INGESTION_ROWS));

@@ -105,8 +105,7 @@ fn four_readouts_share_one_value_frequency_state_and_keep_honest_guarantees() {
             assert!(root.guarantee.as_ref().is_some_and(|g| g.is_exact()));
         } else {
             assert!(!root.guarantee.as_ref().unwrap().is_exact());
-            let Operator::ASAP(ASAPOp::SummaryAgg { family, .. }) = &summary_input.operator
-            else {
+            let Operator::ASAP(ASAPOp::SummaryAgg { family, .. }) = &summary_input.operator else {
                 panic!()
             };
             assert!(

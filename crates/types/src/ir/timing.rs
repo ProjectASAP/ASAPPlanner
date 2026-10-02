@@ -40,8 +40,8 @@ use super::non_asap::NonASAPOp;
 use crate::post_asap::execution_data_state::{
     DataPrimitive, ExecutionDataState, ExecutionDataStateError, ExecutionTiming,
 };
-use crate::pre_asap::query_expr::BinaryOpKind;
 use crate::pre_asap::schema::{DataType, FieldDataType, Schema};
+use crate::pre_asap::vocabulary::BinaryOpKind;
 
 /// The per-state lifecycle choice summary materialization made: for each
 /// `SummaryAgg` node (by identity), whether its state is maintained at
@@ -133,7 +133,13 @@ pub fn apply_lifecycle_timings(
     memo: &mut TimingMemo,
 ) -> Result<Rc<OperatorNode>, ExecutionDataStateError> {
     let mut forced = HashMap::new();
-    let timed = write(root, ExecutionTiming::QueryTime, assignment, memo, &mut forced)?;
+    let timed = write(
+        root,
+        ExecutionTiming::QueryTime,
+        assignment,
+        memo,
+        &mut forced,
+    )?;
     if timed.timing == Some(ExecutionTiming::IngestionTime)
         && data_state(&timed).map(|s| s.primitive) == Some(DataPrimitive::Raw)
     {
@@ -161,9 +167,17 @@ pub fn validate_default(
 /// The data state `node` produces under the default assignment when its
 /// consumer runs at `consumer` — the planning-time answer to "what does this
 /// candidate's output look like" before any assignment is applied.
-pub fn planned_data_state(node: &Rc<OperatorNode>, consumer: ExecutionTiming) -> ExecutionDataState {
+pub fn planned_data_state(
+    node: &Rc<OperatorNode>,
+    consumer: ExecutionTiming,
+) -> ExecutionDataState {
     let mut forced = HashMap::new();
-    let timing = own_timing(node, consumer, &LifecycleAssignment::default_maintained(), &mut forced);
+    let timing = own_timing(
+        node,
+        consumer,
+        &LifecycleAssignment::default_maintained(),
+        &mut forced,
+    );
     ExecutionDataState {
         timing,
         primitive: match &node.operator {
@@ -213,7 +227,7 @@ fn write(
     if let Some(done) = memo.done.get(&Rc::as_ptr(node)) {
         let previous = done.timing.expect("memoized node is timed");
         if previous != timing {
-            return Err(ExecutionDataStateError::AmbiguousKeepPreAsap {
+            return Err(ExecutionDataStateError::ConflictingTiming {
                 first: ExecutionDataState {
                     timing: previous,
                     primitive: data_state(done).map_or(DataPrimitive::Raw, |s| s.primitive),
@@ -227,15 +241,16 @@ fn write(
         return Ok(Rc::clone(done));
     }
     let mut error = None;
-    let operator = node.operator.map_children(|child| {
-        match write(child, timing, assignment, memo, forced) {
-            Ok(timed) => timed,
-            Err(e) => {
-                error.get_or_insert(e);
-                Rc::clone(child)
-            }
-        }
-    });
+    let operator =
+        node.operator.map_children(
+            |child| match write(child, timing, assignment, memo, forced) {
+                Ok(timed) => timed,
+                Err(e) => {
+                    error.get_or_insert(e);
+                    Rc::clone(child)
+                }
+            },
+        );
     if let Some(e) = error {
         return Err(e);
     }
@@ -536,7 +551,13 @@ pub fn split_shared_by_phase(
             collect(child, timing, assignment, reached, forced);
         }
     }
-    collect(root, ExecutionTiming::QueryTime, assignment, &mut reached, &mut forced);
+    collect(
+        root,
+        ExecutionTiming::QueryTime,
+        assignment,
+        &mut reached,
+        &mut forced,
+    );
     if reached.values().all(|timings| timings.len() <= 1) {
         return Rc::clone(root);
     }
@@ -587,4 +608,238 @@ pub fn split_shared_by_phase(
         &mut copies,
         &mut forced,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ir::non_asap::NonASAPOp;
+    use crate::post_asap::sketch::{
+        ExactKind, ExactParams, GroupingStrategy, SketchAlgorithm, SketchKind, SketchParams,
+        SketchQuery, SummaryUpdate,
+    };
+    use crate::pre_asap::agg_intent::AggIntent;
+    use crate::pre_asap::expr_ir::ColumnRef;
+    use crate::pre_asap::schema::Field;
+    use crate::pre_asap::vocabulary::{Reduction, Source};
+
+    fn scan_with(fields: Vec<Field>) -> Rc<OperatorNode> {
+        OperatorNode::non_asap_node(NonASAPOp::Scan {
+            source: Source::TimeSeries { metric: "m".into() },
+            predicates: vec![],
+            schema: Schema::with_time_index(fields, 0, vec![]),
+        })
+        .unwrap()
+    }
+
+    fn scan() -> Rc<OperatorNode> {
+        scan_with(vec![
+            Field::plain("ts", DataType::Timestamp, false),
+            Field::plain("value", DataType::Float64, false),
+            Field::plain("zone", DataType::Utf8, true),
+        ])
+    }
+
+    fn kll() -> FieldDataType {
+        FieldDataType::Sketch(
+            SketchKind::new(SketchAlgorithm::Kll, SketchParams::Kll { k: 200 }),
+            GroupingStrategy::default(),
+        )
+    }
+
+    fn exact_sum() -> FieldDataType {
+        FieldDataType::ExactAggregate(ExactKind::Sum, ExactParams::Sum)
+    }
+
+    fn agg(child: Rc<OperatorNode>, family: FieldDataType) -> Rc<OperatorNode> {
+        OperatorNode::asap_node(
+            ASAPOp::SummaryAgg {
+                child,
+                family: family.clone(),
+                input: SummaryUpdate::column(ColumnRef::SampleValue),
+                reduction: Reduction::by(vec![]),
+                grouping: GroupingStrategy::default(),
+            },
+            Schema::lifted(vec![Field::new("state", family, false)], None),
+            None,
+        )
+    }
+
+    fn estimate(child: Rc<OperatorNode>) -> Rc<OperatorNode> {
+        OperatorNode::asap_node(
+            ASAPOp::SummaryEstimate {
+                summary_input: child,
+                query: SketchQuery::Quantile { q: 0.99 },
+            },
+            Schema::lifted(
+                vec![Field::plain("quantile_0_99", DataType::Float64, false)],
+                None,
+            ),
+            None,
+        )
+    }
+
+    fn aggregate(measure: AggIntent, child: Rc<OperatorNode>) -> Rc<OperatorNode> {
+        OperatorNode::non_asap_node(NonASAPOp::Aggregate {
+            reduction: Reduction::by(vec![]),
+            measures: vec![measure],
+            output_names: vec![],
+            having: None,
+            child,
+        })
+        .unwrap()
+    }
+
+    fn max(child: Rc<OperatorNode>) -> Rc<OperatorNode> {
+        aggregate(AggIntent::Max { col: None }, child)
+    }
+
+    /// `node` with its timing fixed in advance, as a candidate builder does
+    /// for an operator that must feed maintenance.
+    fn placed_at_ingestion(node: Rc<OperatorNode>) -> Rc<OperatorNode> {
+        Rc::new(
+            (*node)
+                .clone()
+                .with_timing(Some(ExecutionTiming::IngestionTime)),
+        )
+    }
+
+    fn apply(root: &Rc<OperatorNode>) -> Result<Rc<OperatorNode>, ExecutionDataStateError> {
+        apply_lifecycle_timings(
+            root,
+            &LifecycleAssignment::default_maintained(),
+            &mut TimingMemo::new(),
+        )
+    }
+
+    fn child(node: &Rc<OperatorNode>) -> Rc<OperatorNode> {
+        Rc::clone(node.children()[0])
+    }
+
+    #[test]
+    fn summary_agg_input_runs_at_ingestion_time() {
+        let root = apply(&agg(scan(), kll())).unwrap();
+        assert_eq!(
+            data_state(&root),
+            Some(ExecutionDataState::INGESTION_SUMMARY)
+        );
+        assert_eq!(
+            data_state(&child(&root)),
+            Some(ExecutionDataState::INGESTION_ROWS)
+        );
+    }
+
+    #[test]
+    fn exact_accumulator_state_may_feed_another_summary_agg() {
+        let inner = agg(scan(), exact_sum());
+        assert!(apply(&estimate(agg(inner, kll()))).is_ok());
+    }
+
+    #[test]
+    fn readout_can_feed_summary_construction_at_query_time() {
+        let inner = estimate(agg(scan(), kll()));
+        let root = apply(&estimate(agg(inner, kll()))).unwrap();
+        assert_eq!(child(&root).timing, Some(ExecutionTiming::QueryTime));
+    }
+
+    /// Any non-ASAP operator over a readout runs at query time.
+    #[test]
+    fn query_time_operation_over_readout_is_legal_and_root_is_readout() {
+        let readout = || estimate(agg(scan(), kll()));
+        let sorted = OperatorNode::non_asap_node(NonASAPOp::Sort {
+            keys: vec![],
+            partition_by: Default::default(),
+            child: readout(),
+        })
+        .unwrap();
+        for root in [max(readout()), sorted] {
+            let root = apply(&root).unwrap();
+            assert_eq!(data_state(&root), Some(ExecutionDataState::QUERY_ROWS));
+        }
+    }
+
+    #[test]
+    fn query_time_values_can_feed_query_time_summary_construction() {
+        let post = max(estimate(agg(scan(), kll())));
+        let root = apply(&estimate(agg(post, kll()))).unwrap();
+        assert_eq!(child(&root).timing, Some(ExecutionTiming::QueryTime));
+    }
+
+    #[test]
+    fn function_under_summary_agg_is_legal_but_not_at_root() {
+        let operation = placed_at_ingestion(max(scan()));
+        assert_eq!(
+            apply(&operation).err(),
+            Some(ExecutionDataStateError::MaintenanceRowsAtRoot)
+        );
+        let root = apply(&estimate(agg(operation, kll()))).unwrap();
+        let timed_operation = child(&child(&root));
+        assert_eq!(
+            data_state(&timed_operation),
+            Some(ExecutionDataState::INGESTION_ROWS)
+        );
+    }
+
+    #[test]
+    fn function_over_readout_is_rejected() {
+        let operation = placed_at_ingestion(max(estimate(agg(scan(), kll()))));
+        assert!(matches!(
+            apply(&estimate(agg(operation, kll()))),
+            Err(ExecutionDataStateError::IllegalChildDataState {
+                child: ExecutionDataState::QUERY_ROWS,
+                ..
+            })
+        ));
+    }
+
+    /// One shared subtree reached as maintenance input and as query-time
+    /// input cannot be executed once for both; splitting it by phase first
+    /// makes the plan timeable.
+    #[test]
+    fn a_shared_subtree_reached_at_two_timings_conflicts() {
+        let shared = scan();
+        let root = OperatorNode::non_asap_node(NonASAPOp::Concat {
+            children: vec![
+                max(estimate(agg(Rc::clone(&shared), kll()))),
+                max(Rc::clone(&shared)),
+            ],
+            discriminator_unique_key: None,
+        })
+        .unwrap();
+        assert_eq!(
+            apply(&root).err(),
+            Some(ExecutionDataStateError::ConflictingTiming {
+                first: ExecutionDataState::INGESTION_ROWS,
+                second: ExecutionDataState::QUERY_ROWS,
+            })
+        );
+        let split = split_shared_by_phase(&root, &LifecycleAssignment::default_maintained());
+        assert!(apply(&split).is_ok());
+    }
+
+    /// Both paired operands must be plain; an unrelated state column is not
+    /// an input.
+    #[test]
+    fn pearson_corr_checks_both_operand_states() {
+        let corr_over = |state_column: usize| {
+            let mut fields = vec![
+                Field::plain("ts", DataType::Timestamp, false),
+                Field::plain("x", DataType::Float64, false),
+                Field::plain("y", DataType::Float64, false),
+                Field::plain("unused", DataType::Float64, false),
+            ];
+            fields[state_column].dtype = kll();
+            aggregate(
+                AggIntent::PearsonCorr { left: 1, right: 2 },
+                scan_with(fields),
+            )
+        };
+        for operand in [1, 2] {
+            assert!(matches!(
+                validate_default(&corr_over(operand), ExecutionTiming::QueryTime),
+                Err(ExecutionDataStateError::NonPlainOperand { .. })
+            ));
+        }
+        validate_default(&corr_over(3), ExecutionTiming::QueryTime).unwrap();
+    }
 }

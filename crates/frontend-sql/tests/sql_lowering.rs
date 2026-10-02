@@ -1032,8 +1032,8 @@ async fn scalar_subquery_in_predicate_lowers_through_a_cross_join() {
     // cross join against the (one-column) subquery, so the comparison binds
     // to `Column(|left|)` and the left's columns are restored by a positional
     // `Project`. (This used to be rejected outright.)
-    let qe = lower("SELECT service FROM metrics WHERE bytes > (SELECT AVG(bytes) FROM metrics)")
-        .await;
+    let qe =
+        lower("SELECT service FROM metrics WHERE bytes > (SELECT AVG(bytes) FROM metrics)").await;
     let filter = find_filter(&qe).expect("expected the comparison as a Filter over the join");
     let NonASAPOp::Filter { pred, child } = op(filter) else {
         unreachable!("find_filter only returns Filter");
@@ -1045,11 +1045,16 @@ async fn scalar_subquery_in_predicate_lowers_through_a_cross_join() {
         panic!("expected a cross join under the Filter, got {child:?}");
     };
     assert_eq!(*kind, JoinKind::Cross);
-    assert!(matches!(op(left), NonASAPOp::Scan { .. }), "left is metrics");
+    assert!(
+        matches!(op(left), NonASAPOp::Scan { .. }),
+        "left is metrics"
+    );
     let left_len = left.schema.fields.len();
     assert_eq!(right.schema.fields.len(), 1, "the subquery's single column");
     assert!(
-        all_intents(right).iter().any(|i| matches!(i, AggIntent::Avg { .. })),
+        all_intents(right)
+            .iter()
+            .any(|i| matches!(i, AggIntent::Avg { .. })),
         "the subquery's AVG survives on the right side"
     );
     assert!(
@@ -1059,7 +1064,11 @@ async fn scalar_subquery_in_predicate_lowers_through_a_cross_join() {
         pred.0
     );
     assert_eq!(
-        qe.schema.fields.iter().map(|f| f.name.as_str()).collect::<Vec<_>>(),
+        qe.schema
+            .fields
+            .iter()
+            .map(|f| f.name.as_str())
+            .collect::<Vec<_>>(),
         ["service"],
         "the subquery column does not leak into the SELECT list"
     );
@@ -1130,7 +1139,10 @@ async fn where_exists_resolves_to_a_semi_join_over_the_subquery() {
     };
     assert_eq!(*kind, JoinKind::Semi);
     assert_eq!(pred.0, ScalarExpr::Literal(ScalarValue::Boolean(true)));
-    assert!(matches!(op(left), NonASAPOp::Scan { .. }), "left is metrics");
+    assert!(
+        matches!(op(left), NonASAPOp::Scan { .. }),
+        "left is metrics"
+    );
     let NonASAPOp::Project { child: scan, .. } = op(right) else {
         panic!("expected the subquery's projection on the right, got {right:?}");
     };
@@ -1218,8 +1230,8 @@ async fn scalar_subquery_in_projection_lowers_to_a_scalar_subquery_item() {
 async fn exists_and_in_subqueries_lower_to_scalar_filter_conjuncts() {
     // The front end no longer builds the semi join itself: `EXISTS` / `IN
     // (…)` are `Filter` predicates reading the subquery operator.
-    let tree = lower_unresolved("SELECT service FROM metrics WHERE EXISTS (SELECT 1 FROM hosts)")
-        .await;
+    let tree =
+        lower_unresolved("SELECT service FROM metrics WHERE EXISTS (SELECT 1 FROM hosts)").await;
     let UnresolvedOp::Project { child, .. } = &tree else {
         panic!("expected a Project, got {tree:?}");
     };
@@ -1286,7 +1298,11 @@ async fn values_lowers_to_one_row_per_values_row() {
     assert_eq!(schema.fields[0].dtype, DataType::Int64);
     assert_eq!(schema.fields[1].dtype, DataType::Utf8);
     assert_eq!(
-        qe.schema.fields.iter().map(|f| f.name.as_str()).collect::<Vec<_>>(),
+        qe.schema
+            .fields
+            .iter()
+            .map(|f| f.name.as_str())
+            .collect::<Vec<_>>(),
         ["n", "s"]
     );
 }
@@ -1316,7 +1332,13 @@ async fn sql_comparisons_and_arithmetic_carry_sql_semantics() {
         panic!("expected Project at root, got {qe:?}");
     };
     assert!(
-        matches!(&cols[0].expr, ScalarExpr::Arithmetic { semantics: ExprSemantics::Sql, .. }),
+        matches!(
+            &cols[0].expr,
+            ScalarExpr::Arithmetic {
+                semantics: ExprSemantics::Sql,
+                ..
+            }
+        ),
         "got {:?}",
         cols[0].expr
     );
@@ -1324,7 +1346,13 @@ async fn sql_comparisons_and_arithmetic_carry_sql_semantics() {
         panic!("expected the WHERE folded onto the Scan, got {child:?}");
     };
     assert!(
-        matches!(&predicates[0].0, ScalarExpr::Compare { semantics: ExprSemantics::Sql, .. }),
+        matches!(
+            &predicates[0].0,
+            ScalarExpr::Compare {
+                semantics: ExprSemantics::Sql,
+                ..
+            }
+        ),
         "got {:?}",
         predicates[0].0
     );
@@ -2421,10 +2449,7 @@ async fn original_o11y_map_queries_lower_with_typed_results() {
             schema
                 .fields
                 .iter()
-                .any(|column| matches!(
-                    column.dtype,
-                    FieldDataType::Plain(DataType::Map { .. })
-                )),
+                .any(|column| matches!(column.dtype, FieldDataType::Plain(DataType::Map { .. }))),
             "{schema:?}"
         );
     }

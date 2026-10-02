@@ -36,9 +36,7 @@ fn schema_filtered_scan_is_open() {
 // per-series rate is label-preserving → output stays open
 #[test]
 fn schema_rate_stays_open() {
-    let s = lower("rate(http_requests_total[5m])")
-        .schema
-        .clone();
+    let s = lower("rate(http_requests_total[5m])").schema.clone();
     assert!(!s.closed, "per-series rate is label-preserving; stays open");
 }
 
@@ -61,9 +59,7 @@ fn schema_sum_freezes_to_closed() {
 // cross-series sum grouped by job also freezes to closed
 #[test]
 fn schema_sum_by_job_freezes_to_closed() {
-    let s = lower("sum by (job) (http_requests_total)")
-        .schema
-        .clone();
+    let s = lower("sum by (job) (http_requests_total)").schema.clone();
     assert!(
         s.closed,
         "grouped cross-series aggregate must freeze to closed"

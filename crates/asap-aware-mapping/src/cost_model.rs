@@ -48,11 +48,11 @@
 
 use std::rc::Rc;
 
-use asap_types::ir::{ASAPOp, Operator, OperatorNode};
 use crate::exact_composition::ExactOperation;
+use asap_types::ir::{ASAPOp, Operator, OperatorNode};
 use asap_types::post_asap::{
-    GroupingStrategy, HydraParams, ResultGuarantee, SketchAlgorithm, SketchParams,
-    SketchQuery, FieldDataType, SummaryMaintenanceLifecycleGuarantee, SummaryWindowFramework,
+    FieldDataType, GroupingStrategy, HydraParams, ResultGuarantee, SketchAlgorithm, SketchParams,
+    SketchQuery, SummaryMaintenanceLifecycleGuarantee, SummaryWindowFramework,
 };
 use asap_types::pre_asap::agg_intent::AggIntent;
 use asap_types::pre_asap::expr_ir::ColumnRef;
@@ -1326,7 +1326,7 @@ mod tests {
         assert_eq!(
             DefaultCostModel.value_operation_support_evidence(
                 &ExactOperation::Aggregate {
-                    reduction: asap_types::pre_asap::query_expr::Reduction::by(vec![]),
+                    reduction: asap_types::pre_asap::vocabulary::Reduction::by(vec![]),
                     measures: vec![AggIntent::Max { col: None }],
                     output_names: vec![],
                     having: None,
@@ -1353,10 +1353,10 @@ mod tests {
 
     use asap_types::ir::{NonASAPOp, Predicate, ScalarExpr};
     use asap_types::post_asap::{
-        ExactKind, ExactParams, GroupingStrategy, SketchKind, Field, Schema,
+        ExactKind, ExactParams, Field, GroupingStrategy, Schema, SketchKind,
     };
-    use asap_types::pre_asap::query_expr::Source;
     use asap_types::pre_asap::schema::DataType;
+    use asap_types::pre_asap::vocabulary::Source;
 
     fn scan() -> Rc<OperatorNode> {
         OperatorNode::non_asap_node(NonASAPOp::Scan {
@@ -1374,8 +1374,7 @@ mod tests {
         .unwrap()
     }
 
-    /// A `SummaryAgg` over the kept `scan()` subtree (the old
-    /// `KeepPreAsap` wrapper is gone: the scan node is the child itself).
+    /// A `SummaryAgg` directly over the kept `scan()` subtree.
     fn summary_node(family: FieldDataType) -> Rc<OperatorNode> {
         OperatorNode::asap_node(
             ASAPOp::SummaryAgg {
@@ -1384,7 +1383,7 @@ mod tests {
                 input: asap_types::post_asap::SummaryUpdate::column(
                     asap_types::pre_asap::expr_ir::ColumnRef::Named("value".into()),
                 ),
-                reduction: asap_types::pre_asap::query_expr::Reduction::by(vec![]),
+                reduction: asap_types::pre_asap::vocabulary::Reduction::by(vec![]),
                 grouping: GroupingStrategy::default(),
             },
             Schema::lifted(vec![Field::new("state", family, false)], None),
@@ -1413,7 +1412,7 @@ mod tests {
     #[test]
     fn default_recompute_cost_does_not_double_count_an_internally_shared_descendant() {
         use asap_types::pre_asap::expr_ir::ScalarValue;
-        use asap_types::pre_asap::query_expr::JoinKind;
+        use asap_types::pre_asap::vocabulary::JoinKind;
 
         let true_pred = || Predicate(ScalarExpr::Literal(ScalarValue::Boolean(true)));
         let shared_leaf = scan();

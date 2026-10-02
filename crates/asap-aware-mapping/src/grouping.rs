@@ -74,11 +74,11 @@ use std::rc::Rc;
 use asap_types::ir::{ASAPOp, NonASAPOp, Operator, OperatorNode};
 use asap_types::post_asap::{
     default_hydra_params, hydra_kind_for, AccuracyError, BoundExpr, CompositionOperator,
-    GroupingStrategy, GuaranteeSource, HydraKind, ProbabilityExpr, ResultGuarantee,
-    SketchAlgorithm, SketchParams, FieldDataType,
+    FieldDataType, GroupingStrategy, GuaranteeSource, HydraKind, ProbabilityExpr, ResultGuarantee,
+    SketchAlgorithm, SketchParams,
 };
 use asap_types::pre_asap::agg_intent::AggIntent;
-use asap_types::pre_asap::query_expr::Reduction;
+use asap_types::pre_asap::vocabulary::Reduction;
 
 use crate::accuracy::{
     AccuracyBudgetAllocator, AccuracyEvidenceProvider, AccuracyModel, PropagationStats,
@@ -497,9 +497,6 @@ mod tests {
     use asap_types::pre_asap::agg_intent::{default_cardinality, default_quantile};
     use asap_types::types::AccuracyTarget;
 
-
-
-
     // ── has_subpopulations ────────────────────────────────────────────────
 
     #[test]
@@ -519,7 +516,7 @@ mod tests {
 
     #[test]
     fn without_grouping_has_a_subpopulation_concept_even_when_empty() {
-        use asap_types::pre_asap::query_expr::GroupKeys;
+        use asap_types::pre_asap::vocabulary::GroupKeys;
         // `without([])` groups by every remaining label — a real
         // subpopulation concept, unlike `by([])`'s genuine full reduction.
         assert!(has_subpopulations(&Reduction::Reduce(GroupKeys::without(
@@ -583,10 +580,7 @@ mod tests {
 
     #[test]
     fn does_not_match_a_per_entity_aggregate() {
-        let q = agg_per_entity(
-            default_quantile(0.99),
-            metric_scan(&["job"]),
-        );
+        let q = agg_per_entity(default_quantile(0.99), metric_scan(&["job"]));
         let target = TargetSubDAG::new(&q);
         let strategy = HydraGroupingStrategy::default_cost_model();
         assert!(!strategy.matches(&target));
@@ -791,11 +785,7 @@ mod tests {
     fn exact_mergeable_intent_has_no_hydra_candidate() {
         // Sum's exact accumulator has no candidate summary families at all
         // (summary_candidates only covers approximate-capable intents).
-        let q = agg(
-            vec![2],
-            AggIntent::Sum { col: None },
-            metric_scan(&["job"]),
-        );
+        let q = agg(vec![2], AggIntent::Sum { col: None }, metric_scan(&["job"]));
         let target = TargetSubDAG::new(&q);
         let strategy = HydraGroupingStrategy::default_cost_model();
         assert!(!strategy.matches(&target));
@@ -812,7 +802,8 @@ mod tests {
             output_names: vec![],
             having: None,
             child: metric_scan(&["job"]),
-        }).unwrap();
+        })
+        .unwrap();
         let target = TargetSubDAG::new(&multi);
         assert!(!strategy.matches(&target));
         assert!(strategy.replacements(&target).is_empty());

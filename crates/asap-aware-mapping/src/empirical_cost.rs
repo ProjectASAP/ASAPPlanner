@@ -3,9 +3,7 @@
 //! of an accuracy guarantee. CPU quantities are nanoseconds, never CPU operations.
 
 use asap_types::ir::{ASAPOp, Operator, OperatorNode};
-use asap_types::post_asap::{
-    GroupingStrategy, SketchAlgorithm, SketchParams, FieldDataType,
-};
+use asap_types::post_asap::{FieldDataType, GroupingStrategy, SketchAlgorithm, SketchParams};
 use asap_types::pre_asap::AggIntent;
 use serde::{Deserialize, Serialize};
 

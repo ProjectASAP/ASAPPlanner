@@ -64,8 +64,8 @@ use crate::cost::CostAnnotation;
 use crate::ir::cse::{structural_hash, HashCache};
 use crate::ir::{ASAPOp, NonASAPOp, Operator, OperatorNode, ScalarExpr};
 use crate::post_asap::{AccuracyError, ResultGuarantee};
-use crate::pre_asap::query_expr::Source;
 use crate::pre_asap::schema::FieldDataType;
+use crate::pre_asap::vocabulary::Source;
 
 /// One flattened IR node. `detail` holds this node's own scalar fields
 /// (predicates, aggregate funcs, schema, sort keys, …) — everything except
@@ -730,11 +730,13 @@ fn source_label(source: &Source) -> String {
 /// here until this match is extended, matching the rest of the IR's
 /// exhaustive-match style. Scalar expressions are rendered through
 /// [`scalar_json`] with `ids` resolving their operator references.
-fn shape(node: &OperatorNode, ids: &HashMap<*const OperatorNode, u32>) -> (String, serde_json::Value) {
+fn shape(
+    node: &OperatorNode,
+    ids: &HashMap<*const OperatorNode, u32>,
+) -> (String, serde_json::Value) {
     let scalar = |expr: &ScalarExpr| scalar_json(expr, ids);
-    let scalars = |exprs: &[ScalarExpr]| -> Vec<serde_json::Value> {
-        exprs.iter().map(scalar).collect()
-    };
+    let scalars =
+        |exprs: &[ScalarExpr]| -> Vec<serde_json::Value> { exprs.iter().map(scalar).collect() };
     let predicate = |pred: &crate::ir::Predicate| scalar(&pred.0);
     let sort_keys = |keys: &[crate::ir::SortKey]| -> Vec<serde_json::Value> {
         keys.iter()
@@ -985,7 +987,10 @@ fn scalar_summary(expr: &ScalarExpr) -> String {
 /// `{"scalar_ref": <id>}` for an operator node a scalar expression reads.
 /// The node is one of the owning operator's children, so it has already
 /// been exported by the time its parent's `detail` is built.
-fn scalar_ref(node: &Rc<OperatorNode>, ids: &HashMap<*const OperatorNode, u32>) -> serde_json::Value {
+fn scalar_ref(
+    node: &Rc<OperatorNode>,
+    ids: &HashMap<*const OperatorNode, u32>,
+) -> serde_json::Value {
     serde_json::json!({ "scalar_ref": ids.get(&Rc::as_ptr(node)).copied() })
 }
 
@@ -1097,8 +1102,8 @@ mod tests {
     };
     use crate::pre_asap::agg_intent::AggIntent;
     use crate::pre_asap::expr_ir::{ColumnRef, ScalarValue};
-    use crate::pre_asap::query_expr::{GroupKeys, JoinKind, Reduction};
     use crate::pre_asap::schema::{DataType, Field, Schema};
+    use crate::pre_asap::vocabulary::{GroupKeys, JoinKind, Reduction};
     use crate::types::AccuracyTarget;
 
     fn scan(table: &str, columns: Vec<Field>) -> Rc<OperatorNode> {
@@ -1362,7 +1367,11 @@ mod tests {
         let graph = export(&root);
         assert_eq!(graph.nodes.len(), 3);
         let filter = &graph.nodes[graph.root as usize];
-        assert_eq!(filter.children.len(), 2, "operator input, then the scalar reference");
+        assert_eq!(
+            filter.children.len(),
+            2,
+            "operator input, then the scalar reference"
+        );
         let input = &graph.nodes[filter.children[0] as usize];
         let referenced = &graph.nodes[filter.children[1] as usize];
         assert_eq!(input.label, "Scan(metrics)");
@@ -1660,7 +1669,10 @@ mod tests {
             Some((7, "replacement_region"))
         );
         let scan_node = &graph.nodes[agg.children[0] as usize];
-        assert_eq!(scan_node.id, 0, "the summary reuses the already-exported input");
+        assert_eq!(
+            scan_node.id, 0,
+            "the summary reuses the already-exported input"
+        );
         assert!(
             scan_node.decision.is_none(),
             "a node exported before the splice is not tagged by it"
@@ -1699,7 +1711,10 @@ mod tests {
         assert_eq!(graph.nodes.len(), 2);
         assert_eq!(graph.nodes[graph.root as usize].kind, "Aggregate");
         assert_eq!(
-            graph.nodes[graph.root as usize].decision.as_ref().map(|d| d.role),
+            graph.nodes[graph.root as usize]
+                .decision
+                .as_ref()
+                .map(|d| d.role),
             Some("replacement_root")
         );
     }
@@ -1734,7 +1749,7 @@ mod tests {
             None,
         );
         let root = OperatorNode::non_asap_node(NonASAPOp::SQLWindowFunc {
-            func: crate::pre_asap::query_expr::WindowFuncKind::RowNumber,
+            func: crate::pre_asap::vocabulary::WindowFuncKind::RowNumber,
             args: vec![],
             partition_by: GroupKeys::none(),
             order_by: vec![],

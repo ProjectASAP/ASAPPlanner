@@ -360,7 +360,7 @@ mod tests {
     use std::collections::HashMap;
 
     use asap_types::ir::{NonASAPOp, OperatorNode};
-    use asap_types::pre_asap::{Field, DataType, Reduction, Schema, Source};
+    use asap_types::pre_asap::{DataType, Field, Reduction, Schema, Source};
     use asap_types::types::AccuracyTarget;
     use asap_types::workload::{
         DataArrival, DurationMs, QueryRecurrence, QueryTimeScope, TimeSelection, TimestampMs,

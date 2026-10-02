@@ -13,14 +13,14 @@
 
 pub mod fixtures {
     use asap_frontend_promql::lower_promql_workload;
-    use asap_types::pre_asap::schema::{Field, DataType, Schema};
     use asap_types::ir::OperatorNode;
-    use std::rc::Rc;
+    use asap_types::pre_asap::schema::{DataType, Field, Schema};
     use asap_types::types::AccuracyTarget;
     use asap_types::workload::{
         AccuracyRequirement, BatchEntry, DataWorkload, DurationMs, Evidence, PlanningWorkload,
         Predictability, Query, QueryLanguage, QueryRequirements, QueryWorkload, TimeSelection,
     };
+    use std::rc::Rc;
 
     /// Lower one query through the plan-ready workload API using the test
     /// suite's declared one-second source cadence.

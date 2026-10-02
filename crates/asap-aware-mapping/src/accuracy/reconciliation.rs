@@ -154,7 +154,7 @@ use std::rc::Rc;
 
 use asap_types::ir::{NonASAPOp, OperatorNode};
 use asap_types::pre_asap::agg_intent::AggIntent;
-use asap_types::pre_asap::query_expr::Reduction;
+use asap_types::pre_asap::vocabulary::Reduction;
 use asap_types::types::AccuracyTarget;
 
 use crate::replacement::{
@@ -386,10 +386,10 @@ impl ReplacementStrategy for AccuracyReconciliationStrategy {
 mod tests {
     use super::*;
     use crate::cost_model::{CostModel, DefaultCostModel};
-    use asap_types::post_asap::SketchAlgorithm;
     use asap_types::ir::cse::share_common_subtrees;
-    use asap_types::pre_asap::query_expr::{GroupKeys, Source};
-    use asap_types::pre_asap::schema::{Field, ColumnId, DataType, Schema};
+    use asap_types::post_asap::SketchAlgorithm;
+    use asap_types::pre_asap::schema::{ColumnId, DataType, Field, Schema};
+    use asap_types::pre_asap::vocabulary::{GroupKeys, Source};
 
     /// `[ts(0), value(1), job(2)]`.
     /// A unique-keyed scan (`[ts]`) so `share_common_subtrees` is actually
@@ -409,7 +409,8 @@ mod tests {
                 0,
                 vec![vec![0]],
             ),
-        }).unwrap()
+        })
+        .unwrap()
     }
 
     fn agg(by: Vec<ColumnId>, intent: AggIntent, child: &Rc<OperatorNode>) -> Rc<OperatorNode> {
@@ -419,7 +420,8 @@ mod tests {
             output_names: vec![],
             having: None,
             child: Rc::clone(child),
-        }).unwrap()
+        })
+        .unwrap()
     }
 
     fn quantile(q: f64, accuracy: AccuracyTarget, child: &Rc<OperatorNode>) -> Rc<OperatorNode> {
@@ -435,10 +437,14 @@ mod tests {
     }
 
     /// A globally-grouped (`by(vec![])`) quantile — `aggregate_output_schema`
-    /// reports no unique key for an empty `by` (see `query_expr.rs`'s own
+    /// reports no unique key for an empty `by` (see `vocabulary.rs`'s own
     /// `unique_keys = if by.is_empty() || has_count_values { vec![] } else
     /// { .. }`).
-    fn global_quantile(q: f64, accuracy: AccuracyTarget, child: &Rc<OperatorNode>) -> Rc<OperatorNode> {
+    fn global_quantile(
+        q: f64,
+        accuracy: AccuracyTarget,
+        child: &Rc<OperatorNode>,
+    ) -> Rc<OperatorNode> {
         agg(
             vec![],
             AggIntent::Quantile {
@@ -469,7 +475,8 @@ mod tests {
             output_names: vec![],
             having: None,
             child: Rc::clone(child),
-        }).unwrap()
+        })
+        .unwrap()
     }
 
     // ── dominates / strictly_tighter ─────────────────────────────────────

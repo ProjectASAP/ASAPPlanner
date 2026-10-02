@@ -78,8 +78,8 @@ use asap_types::dag_export::{
 };
 use asap_types::ir::cse::{structural_hash, HashCache};
 use asap_types::ir::OperatorNode;
-use asap_types::post_asap::{CompositionOperator, SketchQuery, FieldDataType};
-use asap_types::pre_asap::schema::{Field, DataType, Schema};
+use asap_types::post_asap::{CompositionOperator, FieldDataType, SketchQuery};
+use asap_types::pre_asap::schema::{DataType, Field, Schema};
 use asap_types::resources::CacheProfile;
 use asap_types::types::AccuracyTarget;
 
@@ -1639,7 +1639,7 @@ mod tests {
     use asap_aware_mapping::query_physical_lowering::lower_query_physical_dag;
     use asap_devtools::PromqlError;
     use asap_types::ir::NonASAPOp;
-    use asap_types::pre_asap::{Field, DataType, Reduction, Schema, Source};
+    use asap_types::pre_asap::{DataType, Field, Reduction, Schema, Source};
 
     fn lower_promql(
         query: &str,

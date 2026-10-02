@@ -102,8 +102,8 @@ use std::rc::Rc;
 
 use asap_types::ir::{NonASAPOp, OperatorNode};
 use asap_types::pre_asap::agg_intent::AggIntent;
-use asap_types::pre_asap::query_expr::{GroupKeys, Reduction};
 use asap_types::pre_asap::schema::{ColumnId, Schema};
+use asap_types::pre_asap::vocabulary::{GroupKeys, Reduction};
 use asap_types::types::AccuracyTarget;
 
 use crate::replacement::{Replacement, ReplacementStrategy, ReplacementSubDAG, TargetSubDAG};
@@ -388,8 +388,8 @@ fn build_rollup(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use asap_types::pre_asap::query_expr::Source;
-    use asap_types::pre_asap::schema::{Field, DataType};
+    use asap_types::pre_asap::schema::{DataType, Field};
+    use asap_types::pre_asap::vocabulary::Source;
     use asap_types::types::AccuracyTarget;
 
     /// `[ts(0), value(1), job(2), region(3)]`.
@@ -407,7 +407,8 @@ mod tests {
                 0,
                 vec![],
             ),
-        }).unwrap()
+        })
+        .unwrap()
     }
 
     fn agg(by: Vec<ColumnId>, intent: AggIntent, child: &Rc<OperatorNode>) -> Rc<OperatorNode> {
@@ -417,7 +418,8 @@ mod tests {
             output_names: vec![],
             having: None,
             child: Rc::clone(child),
-        }).unwrap()
+        })
+        .unwrap()
     }
 
     fn without_agg(
@@ -431,7 +433,8 @@ mod tests {
             output_names: vec![],
             having: None,
             child: Rc::clone(child),
-        }).unwrap()
+        })
+        .unwrap()
     }
 
     // ── is_legal_rollup_source (the standalone predicate) ───────────────
@@ -740,7 +743,8 @@ mod tests {
             output_names: vec!["total_requests".into()],
             having: None,
             child: Rc::clone(&scan),
-        }).unwrap();
+        })
+        .unwrap();
         let original_schema = coarse.schema.clone();
 
         let siblings = vec![Rc::clone(&fine), Rc::clone(&coarse)];
@@ -835,16 +839,8 @@ mod tests {
         // Scans without unique keys are deliberately not pointer-aliased by
         // CSE. Structural equality still proves identical schemas and makes
         // the two aggregates' positional ColumnIds comparable.
-        let fine = agg(
-            vec![2, 3],
-            AggIntent::Sum { col: Some(1) },
-            &metric_scan(),
-        );
-        let coarse = agg(
-            vec![2],
-            AggIntent::Sum { col: Some(1) },
-            &metric_scan(),
-        );
+        let fine = agg(vec![2, 3], AggIntent::Sum { col: Some(1) }, &metric_scan());
+        let coarse = agg(vec![2], AggIntent::Sum { col: Some(1) }, &metric_scan());
 
         let siblings = vec![Rc::clone(&fine), Rc::clone(&coarse)];
         let strategy = RollupStrategy::new(&siblings);
@@ -868,7 +864,8 @@ mod tests {
             output_names: vec![],
             having: None,
             child: Rc::clone(&scan),
-        }).unwrap();
+        })
+        .unwrap();
 
         let siblings = vec![Rc::clone(&fine), Rc::clone(&multi)];
         let strategy = RollupStrategy::new(&siblings);

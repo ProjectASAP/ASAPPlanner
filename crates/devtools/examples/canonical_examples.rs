@@ -5,7 +5,7 @@
 
 use asap_devtools::lower_promql_with_data_ingestion_interval;
 use asap_frontend_sql::{lower_sql_dialect, SqlCatalog};
-use asap_types::pre_asap::schema::{Field, DataType, Schema};
+use asap_types::pre_asap::schema::{DataType, Field, Schema};
 use asap_types::types::AccuracyTarget;
 use asap_types::workload::SqlDialect;
 

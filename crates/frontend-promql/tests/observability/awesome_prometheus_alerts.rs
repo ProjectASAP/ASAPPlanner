@@ -134,7 +134,13 @@ fn vector_vs_vector_comparison_lowers_to_binaryop() {
     // Both operands are instant vectors → a `BinaryOp{Compare}` of two
     // ingestion-interval-bounded scans.
     let qe = ok("node_hwmon_temp_celsius > node_hwmon_temp_max_celsius");
-    let NonASAPOp::BinaryOp { operator: BinaryOperator { kind: op, .. }, lhs, rhs, .. } = qe.expect_non_asap() else {
+    let NonASAPOp::BinaryOp {
+        operator: BinaryOperator { kind: op, .. },
+        lhs,
+        rhs,
+        ..
+    } = qe.expect_non_asap()
+    else {
         panic!("expected BinaryOp, got {qe:?}");
     };
     assert_eq!(*op, BinaryOpKind::Compare(CompareOpKind::Gt));
@@ -179,7 +185,11 @@ fn error_ratio_core_lowers() {
     // threshold: `sum(rate(failed[5m])) / sum(rate(total[5m]))` → a `BinaryOp(Div)`
     // of two cross-series sums over per-series rates.
     let qe = ok("sum(rate(litellm_proxy_failed_requests_metric_total[5m])) / sum(rate(litellm_proxy_total_requests_metric_total[5m]))");
-    let NonASAPOp::BinaryOp { operator: BinaryOperator { kind: op, .. }, .. } = qe.expect_non_asap() else {
+    let NonASAPOp::BinaryOp {
+        operator: BinaryOperator { kind: op, .. },
+        ..
+    } = qe.expect_non_asap()
+    else {
         panic!("expected BinaryOp, got {qe:?}");
     };
     assert!(matches!(op, BinaryOpKind::Arithmetic(_)));

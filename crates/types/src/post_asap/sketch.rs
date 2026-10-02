@@ -500,7 +500,7 @@ pub fn default_hydra_params(
 /// enums themselves, for exactly the reason explained in this section's
 /// module docs above.
 ///
-/// Carried both on `SummaryExpr::SummaryAgg` (where planning consults it)
+/// Carried both on `ASAPOp::SummaryAgg` (where planning consults it)
 /// and on sketch-valued `FieldDataType` edges (where it prevents
 /// incompatible shared and independent physical states from type-checking
 /// as merge-compatible).

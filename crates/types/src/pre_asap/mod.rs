@@ -1,64 +1,35 @@
-//! The canonical pre-ASAP intent algebra IR.
+//! Shared vocabulary of the operator IR. The operators themselves live in
+//! [`crate::ir`]; this module holds the field types they are built from.
 //!
-//! - [`query_expr`] — the canonical, language- and deployment-independent
-//!   intent algebra: one recursive [`QueryExpr`] tree (relational operators
-//!   *and* scalar expression shapes both, since issue #205) + [`AggIntent`],
-//!   generic over the column-reference state (positional [`ColumnId`] once
-//!   bound, name-based [`ColumnRef`] before).
-//! - [`agg_intent`] — the aggregation-intent vocabulary.
-//! - [`expr_ir`] — the [`ColumnRef`] column-reference type and the scalar
-//!   operator/literal vocabulary ([`ScalarValue`], [`CompareOpKind`], [`ArithmeticOpKind`])
-//!   [`QueryExpr`]'s scalar variants are built from.
+//! - [`vocabulary`] — operator field types (grouping keys, reductions,
+//!   sources, join / set-op / window kinds, PromQL modifiers) and
+//!   [`aggregate_output_schema`].
+//! - [`agg_intent`] — the aggregation-intent vocabulary ([`AggIntent`]).
+//! - [`expr_ir`] — [`ColumnRef`] and the scalar literal / operator kinds
+//!   ([`ScalarValue`], [`CompareOpKind`], [`ArithmeticOpKind`]).
 //! - [`schema`] — the per-edge [`Schema`] every node carries.
-//! - [`schema_resolver`] / [`column_resolution`] — name resolution: turn a `ColumnRef`
-//!   into a positional `ColumnId` against an in-scope [`Schema`].
-//! - [`resolve`] — binds a whole front-end-emitted [`UnresolvedQueryExpr`] tree to
-//!   canonical [`ResolvedQueryExpr`] (issue #179): both front ends
-//!   (`asap-frontend-promql`, `asap-frontend-sql`) construct `UnresolvedQueryExpr`
-//!   directly during their own `interpret` step and call
-//!   [`resolve_root`] on the result — there is no separate per-language
-//!   relational tree or converter anymore.
-//! - [`canonicalize`] — post-lowering structural normalization of [`QueryExpr`]
-//!   (issue #34), run by [`resolve_root`].
-//! - [`cse`] — workload-level structural common-subexpression elimination
-//!   over an already-`resolve_root`'d tree (issue #212, #222, #223), run
-//!   *after* `resolve_root` / `canonicalize` and *before* implementation
-//!   (`asap_aware_mapping::replacement`).
-//!
-//! Formerly the separate `asap-l2` crate; folded in here since
-//! `schema_resolver`/`column_resolution`/`canonicalize`/`resolve` have no
-//! front-end-specific logic — they operate directly on this crate's own
-//! `QueryExpr`.
+//! - [`column_resolution`] — turn a name-based `ColumnRef` into a positional
+//!   `ColumnId` against a [`Schema`] (used by front-end name resolution).
+//! - [`scalar_signature`] — type rules of the map scalar functions.
 
 pub mod agg_intent;
-pub mod canonicalize;
 pub mod column_resolution;
-pub mod cse;
 pub mod expr_ir;
-pub mod query_expr;
-pub mod resolve;
 pub mod scalar_signature;
 pub mod schema;
-pub mod schema_resolver;
+pub mod vocabulary;
 
 pub use agg_intent::{
     agg_accuracy, agg_is_exact, agg_is_mergeable, default_cardinality, default_quantile, AggIntent,
     MathFunc, TimeFunc,
 };
-pub use canonicalize::canonicalize;
-pub use column_resolution::{
-    output_schema_for_aggregate, resolve_column_ref, resolve_column_refs, resolve_expr,
-    ResolveError,
-};
-pub use cse::share_common_subtrees;
+pub use column_resolution::{resolve_column_ref, resolve_column_refs, ResolveError};
 pub use expr_ir::{ArithmeticOpKind, ColumnRef, CompareOpKind, ScalarValue};
-pub use query_expr::{
-    aggregate_output_schema, AtModifier, BinaryOpKind, ColState, DataModel, GroupKeys, GroupSide,
-    InfoMatcher, JoinKind, Predicate, ProjectItem, PromQLVectorSetOpKind, QueryExpr,
-    QueryExprError, Reduction, RelationalSetOpKind, ResolvedQueryExpr, SampleKind, SortKey, Source,
-    TimeShift, UnresolvedQueryExpr, VectorGrouping, VectorMatch, VectorMatchKind, WindowFrame,
-    WindowFrameBound, WindowFrameOffset, WindowFrameUnits, WindowFuncKind,
-};
-pub use resolve::{resolve_root, ResolveTreeError};
 pub use schema::{ColumnId, DataType, Field, FieldDataType, Schema};
-pub use schema_resolver::{SchemaCatalog, SchemaResolver, UsageDerivedCatalog};
+pub use vocabulary::{
+    aggregate_output_schema, AtModifier, BinaryOpKind, ColState, ConcatDiscriminatorKey, DataModel,
+    GroupKeys, GroupSide, InfoMatcher, JoinKind, PromQLVectorSetOpKind, QueryExprError, Reduction,
+    RelationalSetOpKind, SampleKind, Source, TimeShift, VectorGrouping, VectorMatch,
+    VectorMatchKind, WindowFrame, WindowFrameBound, WindowFrameOffset, WindowFrameUnits,
+    WindowFuncKind,
+};

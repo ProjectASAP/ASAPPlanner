@@ -694,7 +694,10 @@ fn summary_children<'a>(
     if is_retained_query(node, evidence) {
         vec![]
     } else {
-        node.children().into_iter().map(|child| child.as_ref()).collect()
+        node.children()
+            .into_iter()
+            .map(|child| child.as_ref())
+            .collect()
     }
 }
 

@@ -8,8 +8,8 @@ use serde::{Deserialize, Serialize};
 use super::node::{OperatorNode, OperatorResultKind};
 use crate::post_asap::maintained_population::{MaintainedPopulation, PopulationReadout};
 use crate::post_asap::sketch::{GroupingStrategy, SketchQuery, SummaryUpdate};
-use crate::pre_asap::query_expr::{QueryExprError, Reduction};
 use crate::pre_asap::schema::{ColumnId, DataType, Field, FieldDataType, Schema};
+use crate::pre_asap::vocabulary::{QueryExprError, Reduction};
 
 /// Why an ASAP operator cannot be used yet.
 pub const UNIMPLEMENTED_ASAP_OP: &str =
@@ -36,7 +36,9 @@ pub enum ASAPOp {
     },
     /// Read an exact accumulator's state as its finalized value: the
     /// maintenance-to-read boundary before query-time operators.
-    FinalizeExactAccumulator { child: Rc<OperatorNode> },
+    FinalizeExactAccumulator {
+        child: Rc<OperatorNode>,
+    },
     /// Maintain the full declared population, including membership changes.
     MaintainPopulation {
         child: Rc<OperatorNode>,
@@ -48,7 +50,9 @@ pub enum ASAPOp {
         readout: PopulationReadout,
     },
     // ── Reserved: migrated but unimplemented (§1.3 of the proposal) ──
-    SummaryMerge { children: Vec<Rc<OperatorNode>> },
+    SummaryMerge {
+        children: Vec<Rc<OperatorNode>>,
+    },
     SummarySubtract {
         left: Rc<OperatorNode>,
         right: Rc<OperatorNode>,
@@ -222,8 +226,12 @@ impl ASAPOp {
                 query,
             } => {
                 let input = &summary_input.schema;
-                let mut fields: Vec<Field> =
-                    input.fields.iter().filter(|f| f.is_plain()).cloned().collect();
+                let mut fields: Vec<Field> = input
+                    .fields
+                    .iter()
+                    .filter(|f| f.is_plain())
+                    .cloned()
+                    .collect();
                 let (name, dtype) = match query {
                     SketchQuery::Quantile { .. } => ("quantile", DataType::Float64),
                     SketchQuery::Cardinality => ("cardinality", DataType::Int64),
@@ -244,10 +252,9 @@ impl ASAPOp {
                 }
                 out
             }
-            MaintainPopulation { child, .. } => Schema::lifted(
-                child.schema.fields.clone(),
-                child.schema.time_index,
-            ),
+            MaintainPopulation { child, .. } => {
+                Schema::lifted(child.schema.fields.clone(), child.schema.time_index)
+            }
             ReadPopulation { child, readout } => {
                 let (name, dtype) = match readout {
                     PopulationReadout::Quantile { .. } => ("quantile", DataType::Float64),

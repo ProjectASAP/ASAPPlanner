@@ -27,7 +27,7 @@ use asap_aware_mapping::{
 };
 use asap_devtools::{lower_promql_with_data_ingestion_interval, lower_sql, SqlCatalog};
 use asap_types::ir::OperatorNode;
-use asap_types::pre_asap::schema::{Field, DataType, Schema};
+use asap_types::pre_asap::schema::{DataType, Field, Schema};
 use asap_types::types::AccuracyTarget;
 use std::io::Read;
 use std::rc::Rc;

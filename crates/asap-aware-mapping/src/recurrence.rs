@@ -786,8 +786,8 @@ mod tests {
         ExactKind, ExactParams, Field, FieldDataType, GroupingStrategy, ResultGuarantee, Schema,
     };
     use asap_types::pre_asap::expr_ir::ColumnRef;
-    use asap_types::pre_asap::query_expr::{Reduction, Source};
     use asap_types::pre_asap::schema::DataType;
+    use asap_types::pre_asap::vocabulary::{Reduction, Source};
     use std::rc::Rc;
 
     fn scan() -> Rc<OperatorNode> {
@@ -1127,7 +1127,7 @@ mod tests {
     use crate::replacement::search_workload;
     use asap_types::pre_asap::agg_intent::AggIntent;
     use asap_types::pre_asap::expr_ir::{CompareOpKind, ScalarValue};
-    use asap_types::pre_asap::query_expr::Reduction as QueryReduction;
+    use asap_types::pre_asap::vocabulary::Reduction as QueryReduction;
 
     /// Like `scan()`, plus a "job" label column to group by — CSE's
     /// sharing legality gate requires a provable unique key
@@ -1441,7 +1441,7 @@ mod tests {
             operator: BinaryOperator {
                 checked_relative_division: false,
                 checked_finite_division: false,
-                kind: asap_types::pre_asap::query_expr::BinaryOpKind::Compare(CompareOpKind::Eq),
+                kind: asap_types::pre_asap::vocabulary::BinaryOpKind::Compare(CompareOpKind::Eq),
                 vector_match: None,
             },
             return_bool: false,

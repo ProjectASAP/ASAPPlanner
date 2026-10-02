@@ -427,8 +427,7 @@ mod tests {
     #[test]
     fn qualified_field_serde_roundtrip() {
         let c = col("service", DataType::Utf8).with_table("hosts");
-        let back: Field =
-            serde_json::from_str(&serde_json::to_string(&c).unwrap()).unwrap();
+        let back: Field = serde_json::from_str(&serde_json::to_string(&c).unwrap()).unwrap();
         assert_eq!(back, c);
         assert_eq!(back.table.as_deref(), Some("hosts"));
     }
@@ -438,6 +437,9 @@ mod tests {
     fn plain_field_type_compares_with_data_type() {
         assert!(FieldDataType::Plain(DataType::Utf8) == DataType::Utf8);
         assert!(FieldDataType::Plain(DataType::Utf8) != DataType::Int64);
-        assert_eq!(col("a", DataType::Int64).plain_dtype(), Some(&DataType::Int64));
+        assert_eq!(
+            col("a", DataType::Int64).plain_dtype(),
+            Some(&DataType::Int64)
+        );
     }
 }

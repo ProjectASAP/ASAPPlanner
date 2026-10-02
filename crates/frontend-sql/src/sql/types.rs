@@ -9,7 +9,7 @@ use datafusion::arrow::datatypes::{
 };
 use datafusion::common::ScalarValue as DfScalarValue;
 
-use asap_types::pre_asap::schema::{Field, DataType, Schema};
+use asap_types::pre_asap::schema::{DataType, Field, Schema};
 use asap_types::pre_asap::ScalarValue;
 
 use crate::error::SqlError as LoweringError;
@@ -150,7 +150,9 @@ pub(super) fn dtype_to_arrow(dt: &DataType) -> ArrowDataType {
         DataType::Struct { fields } => ArrowDataType::Struct(
             fields
                 .iter()
-                .map(|field| ArrowField::new(&field.name, dtype_to_arrow(&field.dtype), field.nullable))
+                .map(|field| {
+                    ArrowField::new(&field.name, dtype_to_arrow(&field.dtype), field.nullable)
+                })
                 .collect::<Vec<_>>()
                 .into(),
         ),
@@ -195,7 +197,9 @@ pub(super) fn schema_to_arrow(schema: &Schema) -> ArrowSchema {
     let fields: Fields = schema
         .fields
         .iter()
-        .map(|c: &Field| ArrowField::new(&c.name, dtype_to_arrow(c.expect_plain_dtype()), c.nullable))
+        .map(|c: &Field| {
+            ArrowField::new(&c.name, dtype_to_arrow(c.expect_plain_dtype()), c.nullable)
+        })
         .collect();
     ArrowSchema::new(fields)
 }

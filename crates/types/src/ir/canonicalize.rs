@@ -52,8 +52,8 @@ use super::non_asap::NonASAPOp;
 use super::scalar::{ExprSemantics, Predicate, ProjectItem, ScalarExpr, SortKey};
 use crate::pre_asap::agg_intent::{topk, AggIntent};
 use crate::pre_asap::expr_ir::{CompareOpKind, ScalarValue};
-use crate::pre_asap::query_expr::{JoinKind, QueryExprError, Reduction, WindowFuncKind};
 use crate::pre_asap::schema::ColumnId;
+use crate::pre_asap::vocabulary::{JoinKind, QueryExprError, Reduction, WindowFuncKind};
 use crate::types::AccuracyTarget;
 
 /// Rewrite the DAG under `root` into its canonical form (bottom-up).
@@ -291,7 +291,10 @@ fn try_promote_additive_top_ranking(
     // values to rerank sketch candidates, and the post-ASAP IR has no
     // candidate-sidecar + exact-rerank node, so that shape keeps Sort + Limit.
     if matches!(ranked_agg, AggIntent::Sum { .. })
-        && matches!(aggregate_child.non_asap(), Some(NonASAPOp::Aggregate { .. }))
+        && matches!(
+            aggregate_child.non_asap(),
+            Some(NonASAPOp::Aggregate { .. })
+        )
     {
         return Ok(None);
     }
@@ -719,11 +722,11 @@ fn rewrite_scalar(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pre_asap::query_expr::{
+    use crate::pre_asap::schema::{DataType, Field, Schema};
+    use crate::pre_asap::vocabulary::{
         ConcatDiscriminatorKey, GroupKeys, Source, WindowFrame, WindowFrameBound,
         WindowFrameOffset, WindowFrameUnits,
     };
-    use crate::pre_asap::schema::{DataType, Field, Schema};
 
     fn node(op: NonASAPOp) -> Rc<OperatorNode> {
         Rc::new(OperatorNode::new(Operator::NonASAP(op)).expect("fixture derives a schema"))
@@ -745,7 +748,11 @@ mod tests {
         })
     }
 
-    fn aggregate(reduction: Reduction, agg: AggIntent, child: Rc<OperatorNode>) -> Rc<OperatorNode> {
+    fn aggregate(
+        reduction: Reduction,
+        agg: AggIntent,
+        child: Rc<OperatorNode>,
+    ) -> Rc<OperatorNode> {
         node(NonASAPOp::Aggregate {
             reduction,
             measures: vec![agg],
@@ -812,7 +819,10 @@ mod tests {
         })
     }
 
-    fn concat(children: Vec<Rc<OperatorNode>>, key: Option<ConcatDiscriminatorKey>) -> Rc<OperatorNode> {
+    fn concat(
+        children: Vec<Rc<OperatorNode>>,
+        key: Option<ConcatDiscriminatorKey>,
+    ) -> Rc<OperatorNode> {
         node(NonASAPOp::Concat {
             children,
             discriminator_unique_key: key,
@@ -827,7 +837,10 @@ mod tests {
     }
 
     fn is_topk_over_count(n: &OperatorNode) -> bool {
-        let Some(NonASAPOp::Aggregate { measures, child, .. }) = n.non_asap() else {
+        let Some(NonASAPOp::Aggregate {
+            measures, child, ..
+        }) = n.non_asap()
+        else {
             return false;
         };
         matches!(measures.as_slice(), [AggIntent::TopK { k: 5, .. }])
@@ -959,7 +972,10 @@ mod tests {
             discriminator_unique_key.is_none(),
             "a stale discriminator key must be dropped, never silently kept wrong"
         );
-        assert!(out.schema.unique_keys.is_empty(), "the dropped key leaves the schema");
+        assert!(
+            out.schema.unique_keys.is_empty(),
+            "the dropped key leaves the schema"
+        );
     }
 
     #[test]
@@ -1001,10 +1017,16 @@ mod tests {
     fn promotes_sum_ranked_limit_sort_as_weighted_heavy_hitter() {
         let sum = aggregate(Reduction::by(vec![1]), AggIntent::Sum { col: None }, scan());
         let out = canonicalize(limit(5, 0, sort(desc(1), sum))).unwrap();
-        let Some(NonASAPOp::Aggregate { measures, child, .. }) = out.non_asap() else {
+        let Some(NonASAPOp::Aggregate {
+            measures, child, ..
+        }) = out.non_asap()
+        else {
             panic!("expected weighted TopK aggregate");
         };
-        assert!(matches!(measures.as_slice(), [AggIntent::TopK { k: 5, .. }]));
+        assert!(matches!(
+            measures.as_slice(),
+            [AggIntent::TopK { k: 5, .. }]
+        ));
         assert!(matches!(self::measures(child), [AggIntent::Sum { .. }]));
     }
 
@@ -1012,7 +1034,11 @@ mod tests {
     fn keeps_sum_over_counter_reduction_as_exact_value_ranking() {
         for counter in [AggIntent::Rate, AggIntent::Increase] {
             let derived = aggregate(Reduction::PerEntity, counter, scan());
-            let sum = aggregate(Reduction::by(vec![1]), AggIntent::Sum { col: None }, derived);
+            let sum = aggregate(
+                Reduction::by(vec![1]),
+                AggIntent::Sum { col: None },
+                derived,
+            );
             let out = canonicalize(limit(5, 0, sort(desc(1), sum))).unwrap();
             let Some(NonASAPOp::Limit { child, .. }) = out.non_asap() else {
                 panic!("expected Limit, got {out:?}");
@@ -1020,11 +1046,17 @@ mod tests {
             let Some(NonASAPOp::Sort { child, .. }) = child.non_asap() else {
                 panic!("expected Sort under the Limit");
             };
-            let Some(NonASAPOp::Aggregate { measures, child, .. }) = child.non_asap() else {
+            let Some(NonASAPOp::Aggregate {
+                measures, child, ..
+            }) = child.non_asap()
+            else {
                 panic!("expected Aggregate under the Sort");
             };
             assert!(matches!(measures.as_slice(), [AggIntent::Sum { .. }]));
-            assert!(matches!(child.non_asap(), Some(NonASAPOp::Aggregate { .. })));
+            assert!(matches!(
+                child.non_asap(),
+                Some(NonASAPOp::Aggregate { .. })
+            ));
         }
     }
 
@@ -1115,7 +1147,10 @@ mod tests {
         let Reduction::Reduce(by) = reduction else {
             panic!("expected a Reduce grouping, got {reduction:?}");
         };
-        assert!(matches!(measures.as_slice(), [AggIntent::TopK { k: 5, .. }]));
+        assert!(matches!(
+            measures.as_slice(),
+            [AggIntent::TopK { k: 5, .. }]
+        ));
         assert_eq!(**by, vec![2], "outer TopK partitioned by region");
         assert!(matches!(self::measures(child), [AggIntent::Count { .. }]));
     }

@@ -14,8 +14,8 @@
 //! explicit inner `Aggregate([Count])`.
 
 use asap_devtools::{lower_promql_with_data_ingestion_interval, lower_sql, SqlCatalog};
-use asap_types::pre_asap::schema::{Field, DataType, Schema};
 use asap_types::ir::{NonASAPOp, OperatorNode};
+use asap_types::pre_asap::schema::{DataType, Field, Schema};
 use asap_types::pre_asap::{AggIntent, GroupKeys};
 use asap_types::types::AccuracyTarget;
 use std::rc::Rc;

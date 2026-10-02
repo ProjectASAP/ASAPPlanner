@@ -18,9 +18,9 @@ pub mod timing;
 
 pub use asap::{ASAPOp, UNIMPLEMENTED_ASAP_OP};
 pub use node::{Operator, OperatorNode, OperatorResultKind};
+pub use non_asap::BinaryOperator;
 pub use non_asap::{NonASAPOp, TimeRangeKind};
 pub use scalar::{ExprSemantics, Predicate, ProjectItem, ScalarExpr, SortKey};
-pub use non_asap::BinaryOperator;
 pub use timing::{
     apply_lifecycle_timings, data_state, planned_data_state, split_shared_by_phase,
     validate_default, LifecycleAssignment, TimingMemo,

@@ -1,6 +1,6 @@
 use asap_frontend_sql::{lower_sql, SqlCatalog};
 use asap_types::{
-    pre_asap::schema::{Field, DataType, Schema},
+    pre_asap::schema::{DataType, Field, Schema},
     types::AccuracyTarget,
 };
 fn catalog() -> SqlCatalog {
@@ -38,10 +38,7 @@ async fn date_shifts_keep_their_type() {
         let node = lower_sql(query, &catalog(), AccuracyTarget::Exact)
             .await
             .unwrap();
-        assert_eq!(
-            node.schema.fields[0].dtype,
-            DataType::Date
-        );
+        assert_eq!(node.schema.fields[0].dtype, DataType::Date);
     }
 }
 // Interval literals and explicit interval casts must both cross the Arrow bridge.
@@ -54,10 +51,7 @@ async fn interval_cast_lowers_like_interval_literal() {
         let node = lower_sql(query, &catalog(), AccuracyTarget::Exact)
             .await
             .unwrap();
-        assert_eq!(
-            node.schema.fields[0].dtype,
-            DataType::Interval
-        );
+        assert_eq!(node.schema.fields[0].dtype, DataType::Interval);
     }
 }
 
@@ -90,11 +84,7 @@ async fn negative_intervals_keep_their_type() {
         let node = lower_sql(query, &catalog(), AccuracyTarget::Exact)
             .await
             .unwrap();
-        assert_eq!(
-            node.schema.fields[0].dtype,
-            DataType::Interval,
-            "{query}"
-        );
+        assert_eq!(node.schema.fields[0].dtype, DataType::Interval, "{query}");
     }
 }
 
@@ -108,9 +98,6 @@ async fn sql_date_literals_keep_their_type() {
         let node = lower_sql(query, &catalog(), AccuracyTarget::Exact)
             .await
             .unwrap();
-        assert_eq!(
-            node.schema.fields[0].dtype,
-            DataType::Date
-        );
+        assert_eq!(node.schema.fields[0].dtype, DataType::Date);
     }
 }

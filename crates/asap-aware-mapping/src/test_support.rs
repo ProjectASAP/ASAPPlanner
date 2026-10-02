@@ -53,8 +53,8 @@ use std::time::Duration;
 use asap_types::ir::timing::{apply_lifecycle_timings, LifecycleAssignment, TimingMemo};
 use asap_types::ir::{NonASAPOp, Predicate, ScalarExpr, TimeRangeKind};
 use asap_types::pre_asap::agg_intent::AggIntent;
-use asap_types::pre_asap::query_expr::{GroupKeys, Reduction, Source};
 use asap_types::pre_asap::schema::{ColumnId, DataType, Field, Schema};
+use asap_types::pre_asap::vocabulary::{GroupKeys, Reduction, Source};
 
 /// A `TimeSeries("m")` scan over `[ts(0), value(1), labels...]`, time index 0,
 /// no unique key.
@@ -72,7 +72,11 @@ pub(crate) fn metric_scan_with_keys(
         Field::plain("ts", DataType::Timestamp, false),
         Field::plain("value", DataType::Float64, false),
     ];
-    columns.extend(labels.iter().map(|n| Field::plain(*n, DataType::Utf8, true)));
+    columns.extend(
+        labels
+            .iter()
+            .map(|n| Field::plain(*n, DataType::Utf8, true)),
+    );
     scan("m", Schema::with_time_index(columns, 0, unique_keys))
 }
 
@@ -114,7 +118,11 @@ pub(crate) fn aggregate(
 }
 
 /// `intent by (by)` — a single-measure, `HAVING`-free grouped aggregate.
-pub(crate) fn agg(by: Vec<ColumnId>, intent: AggIntent, child: Rc<OperatorNode>) -> Rc<OperatorNode> {
+pub(crate) fn agg(
+    by: Vec<ColumnId>,
+    intent: AggIntent,
+    child: Rc<OperatorNode>,
+) -> Rc<OperatorNode> {
     aggregate(Reduction::by(by), vec![intent], vec![], None, child)
 }
 

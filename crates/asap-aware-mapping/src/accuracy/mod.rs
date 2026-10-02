@@ -22,8 +22,8 @@ pub use evidence::{
 
 use asap_types::ir::OperatorNode;
 use asap_types::post_asap::{
-    AccuracyError, BoundExpr, CompositionOperator, ErrorMetric, GuaranteeSource, ProbabilityExpr,
-    ResultGuarantee, SketchAlgorithm, SketchParams, SketchQuery, FieldDataType,
+    AccuracyError, BoundExpr, CompositionOperator, ErrorMetric, FieldDataType, GuaranteeSource,
+    ProbabilityExpr, ResultGuarantee, SketchAlgorithm, SketchParams, SketchQuery,
 };
 use asap_types::types::AccuracyTarget;
 

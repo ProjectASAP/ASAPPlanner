@@ -146,7 +146,9 @@ fn quantile_over_time_is_time_range_aggregate() {
     };
     assert_eq!(*range, Duration::from_secs(300));
     // The label matcher folded onto the Scan.
-    assert!(matches!(child.expect_non_asap(), NonASAPOp::Scan { predicates, .. } if predicates.len() == 1));
+    assert!(
+        matches!(child.expect_non_asap(), NonASAPOp::Scan { predicates, .. } if predicates.len() == 1)
+    );
 }
 
 #[test]
@@ -176,7 +178,10 @@ fn outer_sum_by_over_quantile_over_time_groups_positionally() {
         panic!("expected Aggregate (quantile_over_time) under the outer Sum, got {child:?}");
     };
     assert!(matches!(measures.as_slice(), [AggIntent::Quantile { .. }]));
-    assert!(matches!(child.expect_non_asap(), NonASAPOp::TimeRange { .. }));
+    assert!(matches!(
+        child.expect_non_asap(),
+        NonASAPOp::TimeRange { .. }
+    ));
 }
 
 #[test]
@@ -211,7 +216,10 @@ fn stddev_and_stdvar_over_time() {
             ..
         }]
     ));
-    assert!(matches!(child.expect_non_asap(), NonASAPOp::TimeRange { .. }));
+    assert!(matches!(
+        child.expect_non_asap(),
+        NonASAPOp::TimeRange { .. }
+    ));
 
     let qe = lower("stdvar_over_time(m[5m])");
     let NonASAPOp::Aggregate {
@@ -227,7 +235,10 @@ fn stddev_and_stdvar_over_time() {
             ..
         }]
     ));
-    assert!(matches!(child.expect_non_asap(), NonASAPOp::TimeRange { .. }));
+    assert!(matches!(
+        child.expect_non_asap(),
+        NonASAPOp::TimeRange { .. }
+    ));
 }
 
 #[test]
@@ -352,7 +363,10 @@ fn sum_over_rate_keeps_both_levels() {
         panic!("expected inner Aggregate{{Rate}}, got {child:?}");
     };
     assert!(matches!(measures.as_slice(), [AggIntent::Rate]));
-    assert!(matches!(child.expect_non_asap(), NonASAPOp::TimeRange { .. }));
+    assert!(matches!(
+        child.expect_non_asap(),
+        NonASAPOp::TimeRange { .. }
+    ));
 }
 
 #[test]
@@ -482,7 +496,10 @@ fn count_over_time_is_count_intent() {
         panic!("expected Aggregate");
     };
     assert!(matches!(measures.as_slice(), [AggIntent::Count { .. }]));
-    assert!(matches!(child.expect_non_asap(), NonASAPOp::TimeRange { .. }));
+    assert!(matches!(
+        child.expect_non_asap(),
+        NonASAPOp::TimeRange { .. }
+    ));
 }
 
 #[test]
@@ -510,7 +527,10 @@ fn outer_count_counts_series() {
         panic!("expected Aggregate (count_over_time) under the outer count, got {child:?}");
     };
     assert!(matches!(measures.as_slice(), [AggIntent::Count { .. }]));
-    assert!(matches!(child.expect_non_asap(), NonASAPOp::TimeRange { .. }));
+    assert!(matches!(
+        child.expect_non_asap(),
+        NonASAPOp::TimeRange { .. }
+    ));
 }
 
 // ── topk / bottomk ────────────────────────────────────────────────────────────
@@ -573,13 +593,22 @@ fn topk_over_sum_is_value_weighted_heavy_hitter_topk() {
         panic!("expected Aggregate (sum_over_time) under TopK, got {child:?}");
     };
     assert!(matches!(measures.as_slice(), [AggIntent::Sum { .. }]));
-    assert!(matches!(child.expect_non_asap(), NonASAPOp::TimeRange { .. }));
+    assert!(matches!(
+        child.expect_non_asap(),
+        NonASAPOp::TimeRange { .. }
+    ));
 }
 
 #[test]
 fn topk_over_avg_is_generic_sort_limit() {
     let qe = lower("topk by (host) (5, avg_over_time(cpu[5m]))");
-    let NonASAPOp::Limit { n: Some(n), offset, child, .. } = qe.expect_non_asap() else {
+    let NonASAPOp::Limit {
+        n: Some(n),
+        offset,
+        child,
+        ..
+    } = qe.expect_non_asap()
+    else {
         panic!("expected Limit, got {qe:?}");
     };
     assert_eq!(*n, 5);
@@ -622,7 +651,10 @@ fn ungrouped_topk_over_sum_is_heavy_hitter() {
 fn bottomk_over_count_is_generic_sort_ascending() {
     // `bottomk` is never a heavy-hitter (descending=false), even over count.
     let qe = lower("bottomk(3, count_over_time(m[5m]))");
-    let NonASAPOp::Limit { n: Some(n), child, .. } = qe.expect_non_asap() else {
+    let NonASAPOp::Limit {
+        n: Some(n), child, ..
+    } = qe.expect_non_asap()
+    else {
         panic!("expected Limit, got {qe:?}");
     };
     assert_eq!(*n, 3);
@@ -638,7 +670,10 @@ fn bottomk_over_count_is_generic_sort_ascending() {
 #[test]
 fn bottomk_is_always_generic_sort_ascending() {
     let qe = lower("bottomk(3, count_over_time(m[5m]))");
-    let NonASAPOp::Limit { n: Some(n), child, .. } = qe.expect_non_asap() else {
+    let NonASAPOp::Limit {
+        n: Some(n), child, ..
+    } = qe.expect_non_asap()
+    else {
         panic!("expected Limit, got {qe:?}");
     };
     assert_eq!(*n, 3);
@@ -680,7 +715,10 @@ fn topk_count_output_schema_carries_group_key() {
         panic!("expected inner Aggregate{{Count}}, got {child:?}");
     };
     assert!(matches!(measures.as_slice(), [AggIntent::Count { .. }]));
-    assert!(matches!(child.expect_non_asap(), NonASAPOp::TimeRange { .. }));
+    assert!(matches!(
+        child.expect_non_asap(),
+        NonASAPOp::TimeRange { .. }
+    ));
 }
 
 // ── binary ops ────────────────────────────────────────────────────────────────
@@ -688,7 +726,13 @@ fn topk_count_output_schema_carries_group_key() {
 #[test]
 fn binary_op_division() {
     let qe = lower("rate(a[5m]) / rate(b[5m])");
-    let NonASAPOp::BinaryOp { operator: BinaryOperator { kind: op, .. }, lhs, rhs, .. } = qe.expect_non_asap() else {
+    let NonASAPOp::BinaryOp {
+        operator: BinaryOperator { kind: op, .. },
+        lhs,
+        rhs,
+        ..
+    } = qe.expect_non_asap()
+    else {
         panic!("expected BinaryOp, got {qe:?}");
     };
     assert_eq!(*op, BinaryOpKind::Arithmetic(ArithmeticOpKind::Div));
@@ -703,7 +747,11 @@ fn binary_op_division() {
 #[test]
 fn binary_op_with_on_grouping() {
     let qe = lower("a / on(host) b");
-    let NonASAPOp::BinaryOp { operator: BinaryOperator { vector_match, .. }, .. } = qe.expect_non_asap() else {
+    let NonASAPOp::BinaryOp {
+        operator: BinaryOperator { vector_match, .. },
+        ..
+    } = qe.expect_non_asap()
+    else {
         panic!("expected BinaryOp, got {qe:?}");
     };
     let vm = vector_match.as_ref().expect("vector_match present");
@@ -1000,14 +1048,18 @@ fn reducing_group_by_lowers_to_aggregate_by() {
 
     // Cross-series reduce grouped by a label → `Aggregate.reduction`.
     let q = lower("sum by (job) (http_requests_total)");
-    assert!(matches!(q.expect_non_asap(), NonASAPOp::Aggregate { reduction, .. }
-        if reduction.expect_reduce().len() == 1));
+    assert!(
+        matches!(q.expect_non_asap(), NonASAPOp::Aggregate { reduction, .. }
+        if reduction.expect_reduce().len() == 1)
+    );
 
     // Reduce over a label-preserving `rate` grouped by a label → still
     // `Aggregate.reduction` (the keys resolve against rate's preserved schema).
     let q = lower("sum by (job) (rate(http_requests_total[5m]))");
-    assert!(matches!(q.expect_non_asap(), NonASAPOp::Aggregate { reduction, .. }
-        if reduction.expect_reduce().len() == 1));
+    assert!(
+        matches!(q.expect_non_asap(), NonASAPOp::Aggregate { reduction, .. }
+        if reduction.expect_reduce().len() == 1)
+    );
 }
 
 #[test]
@@ -1042,7 +1094,10 @@ fn topk_over_bare_selector_by_label_ranks_per_group() {
     // Partition→Sort.partition_by reframe in #12). Expected:
     //   Limit{3} → Sort{value desc, partition_by:[job]} → Scan
     let q = lower("topk(3, http_requests_total) by (job)");
-    let NonASAPOp::Limit { n: Some(n), child, .. } = q.expect_non_asap() else {
+    let NonASAPOp::Limit {
+        n: Some(n), child, ..
+    } = q.expect_non_asap()
+    else {
         panic!("expected Limit, got {q:?}");
     };
     assert_eq!(*n, 3);
@@ -1159,7 +1214,8 @@ fn histogram_quantiles_branches_are_union_compatible() {
     let shapes: Vec<Vec<String>> = children
         .iter()
         .map(|c| {
-            c.schema.clone()
+            c.schema
+                .clone()
                 .fields
                 .iter()
                 .map(|c| c.name.clone())
@@ -1241,7 +1297,10 @@ fn explicit_range_selector_is_a_range_time_range() {
     let qe = lower("m[5m]");
     assert!(matches!(
         qe.expect_non_asap(),
-        NonASAPOp::TimeRange { kind: TimeRangeKind::Range, .. }
+        NonASAPOp::TimeRange {
+            kind: TimeRangeKind::Range,
+            ..
+        }
     ));
 }
 
@@ -1308,10 +1367,7 @@ fn vector_vector_comparison_with_bool_sets_return_bool() {
     assert_eq!(operator.kind, BinaryOpKind::Compare(CompareOpKind::Gt));
     assert!(matches!(lhs.expect_non_asap(), NonASAPOp::TimeRange { .. }));
     assert!(matches!(rhs.expect_non_asap(), NonASAPOp::TimeRange { .. }));
-    assert!(!lower("a > b")
-        .expect_non_asap()
-        .children()
-        .is_empty());
+    assert!(!lower("a > b").expect_non_asap().children().is_empty());
     assert_ne!(qe, lower("a > b"));
 }
 
@@ -1433,6 +1489,9 @@ fn label_matcher_predicates_carry_promql_semantics() {
     };
     assert!(matches!(
         &predicates[0].0,
-        ScalarExpr::Compare { semantics: ExprSemantics::Promql, .. }
+        ScalarExpr::Compare {
+            semantics: ExprSemantics::Promql,
+            ..
+        }
     ));
 }

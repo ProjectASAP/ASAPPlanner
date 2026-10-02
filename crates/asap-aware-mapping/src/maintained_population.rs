@@ -4,9 +4,7 @@ use crate::replacement::{
 };
 use asap_types::ir::{ASAPOp, NonASAPOp, Operator, OperatorNode, ScalarExpr};
 use asap_types::post_asap::{maintained_population::*, ResultGuarantee, Schema};
-use asap_types::pre_asap::{
-    AggIntent, CompareOpKind, DataType, Reduction, ScalarValue, Source,
-};
+use asap_types::pre_asap::{AggIntent, CompareOpKind, DataType, Reduction, ScalarValue, Source};
 use std::rc::Rc;
 
 fn plain(schema: Schema) -> Schema {
@@ -406,8 +404,7 @@ mod tests {
         let Operator::ASAP(ASAPOp::ReadPopulation { child, .. }) = &candidate.operator else {
             unreachable!()
         };
-        let Operator::ASAP(ASAPOp::MaintainPopulation { population, .. }) = &child.operator
-        else {
+        let Operator::ASAP(ASAPOp::MaintainPopulation { population, .. }) = &child.operator else {
             unreachable!()
         };
         assert_eq!(population.max_k, 5);

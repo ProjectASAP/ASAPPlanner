@@ -13,8 +13,8 @@
 
 use std::rc::Rc;
 
-use asap_types::parsed_workload::{ParsedWorkload, ParsedWorkloadError};
 use asap_types::ir::OperatorNode;
+use asap_types::parsed_workload::{ParsedWorkload, ParsedWorkloadError};
 use asap_types::workload::{PlanningWorkload, QueryLanguage, SqlDialect, WorkloadError};
 
 use asap_frontend_metricsql::{lower_metricsql, MetricsqlError};

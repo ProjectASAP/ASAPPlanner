@@ -9,8 +9,8 @@ use std::rc::Rc;
 
 use asap_types::ir::{ASAPOp, NonASAPOp, Operator, OperatorNode, Predicate};
 use asap_types::post_asap::{
-    BoundExpr, ErrorMetric, ExactKind, GuaranteeSource, ProbabilityExpr, ResultGuarantee,
-    SketchAlgorithm, FieldDataType, SummaryMaintenanceLifecycle,
+    BoundExpr, ErrorMetric, ExactKind, FieldDataType, GuaranteeSource, ProbabilityExpr,
+    ResultGuarantee, SketchAlgorithm, SummaryMaintenanceLifecycle,
     SummaryMaintenanceLifecycleGuarantee, SummaryWindowFramework,
 };
 use asap_types::pre_asap::{agg_intent::AggIntent, CompareOpKind, InfoMatcher, Source};

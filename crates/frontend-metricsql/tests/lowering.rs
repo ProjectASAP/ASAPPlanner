@@ -150,7 +150,13 @@ fn metricsql_multi_argument_aggregates_fail_closed() {
 #[test]
 fn supported_parameterized_functions_require_their_exact_arity() {
     let quantile = lower("quantile(0.9, requests_total)");
-    assert!(matches!(quantile.expect_non_asap(), NonASAPOp::Aggregate { .. }));
+    assert!(matches!(
+        quantile.expect_non_asap(),
+        NonASAPOp::Aggregate { .. }
+    ));
     let rollup = lower("quantile_over_time(0.9, requests_total[5m])");
-    assert!(matches!(rollup.expect_non_asap(), NonASAPOp::Aggregate { .. }));
+    assert!(matches!(
+        rollup.expect_non_asap(),
+        NonASAPOp::Aggregate { .. }
+    ));
 }

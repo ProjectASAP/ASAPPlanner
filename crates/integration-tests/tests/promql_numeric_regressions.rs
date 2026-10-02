@@ -40,10 +40,7 @@ fn aggregate(node: &OperatorNode) -> (&FieldDataType, &SummaryUpdate, &Reduction
     }
 }
 fn contribution(family: &FieldDataType, update: &SummaryUpdate, value: f64) -> f64 {
-    if matches!(
-        family,
-        FieldDataType::ExactAggregate(ExactKind::Count, _)
-    ) {
+    if matches!(family, FieldDataType::ExactAggregate(ExactKind::Count, _)) {
         return 1.;
     }
     match update.weight {
@@ -117,7 +114,8 @@ fn checked_ratio_must_not_certify_cross_zero_interpolation() {
         AccuracyTarget::Epsilon(0.01),
     );
     assert!(
-        matches!(node.operator, Operator::NonASAP(NonASAPOp::BinaryOp { .. })) && node.contains_asap(),
+        matches!(node.operator, Operator::NonASAP(NonASAPOp::BinaryOp { .. }))
+            && node.contains_asap(),
         "direct quantile ratio should remain an available candidate"
     );
     assert!(node.guarantee.is_none());

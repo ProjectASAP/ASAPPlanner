@@ -511,8 +511,8 @@ mod tests {
     use super::*;
     use asap_types::ir::{BinaryOperator, NonASAPOp, OperatorNode, Predicate, ScalarExpr};
     use asap_types::pre_asap::agg_intent::{default_quantile, AggIntent};
-    use asap_types::pre_asap::query_expr::{BinaryOpKind, Reduction, Source};
-    use asap_types::pre_asap::schema::{Field, DataType, Schema};
+    use asap_types::pre_asap::schema::{DataType, Field, Schema};
+    use asap_types::pre_asap::vocabulary::{BinaryOpKind, Reduction, Source};
     use asap_types::types::AccuracyTarget;
 
     fn metric_scan(labels: &[&str]) -> Rc<OperatorNode> {
@@ -520,7 +520,11 @@ mod tests {
             Field::plain("ts", DataType::Timestamp, false),
             Field::plain("value", DataType::Float64, false),
         ];
-        columns.extend(labels.iter().map(|n| Field::plain(*n, DataType::Utf8, true)));
+        columns.extend(
+            labels
+                .iter()
+                .map(|n| Field::plain(*n, DataType::Utf8, true)),
+        );
         OperatorNode::non_asap_node(NonASAPOp::Scan {
             source: Source::TimeSeries { metric: "m".into() },
             predicates: vec![],
@@ -540,7 +544,11 @@ mod tests {
         .unwrap()
     }
 
-    fn binary(kind: BinaryOpKind, lhs: Rc<OperatorNode>, rhs: Rc<OperatorNode>) -> Rc<OperatorNode> {
+    fn binary(
+        kind: BinaryOpKind,
+        lhs: Rc<OperatorNode>,
+        rhs: Rc<OperatorNode>,
+    ) -> Rc<OperatorNode> {
         OperatorNode::non_asap_node(NonASAPOp::BinaryOp {
             operator: BinaryOperator {
                 kind,

@@ -27,8 +27,7 @@ use asap_aware_mapping::{
 use asap_frontend_sql::{lower_sql, lower_sql_dialect, SqlCatalog};
 use asap_integration_tests::post_asap::post_asap_dag;
 use asap_types::ir::export::{
-    EdgeRole, NonASAPOpKind, PostAsapNodeId, PostAsapOperatorPayload, WirePredicate,
-    WireScalarExpr,
+    EdgeRole, NonASAPOpKind, PostAsapNodeId, PostAsapOperatorPayload, WirePredicate, WireScalarExpr,
 };
 use asap_types::ir::{ASAPOp, NonASAPOp, Operator, OperatorNode, Predicate, ScalarExpr};
 use asap_types::post_asap::{
@@ -36,8 +35,8 @@ use asap_types::post_asap::{
     SketchParams, SketchQuery, SummaryUpdate,
 };
 use asap_types::pre_asap::expr_ir::ColumnRef;
-use asap_types::pre_asap::query_expr::Reduction;
 use asap_types::pre_asap::schema::{DataType, Field, Schema};
+use asap_types::pre_asap::vocabulary::Reduction;
 use asap_types::types::AccuracyTarget;
 use asap_types::workload::SqlDialect;
 
@@ -168,9 +167,11 @@ async fn clickhouse_temporal_sql_reuses_rate_and_increase_physical_summaries() {
             "expected a retained temporal SQL input, got {:?}",
             child.operator
         );
-        assert!(matches!(child.non_asap(), Some(NonASAPOp::TimeRange { range, child, .. })
+        assert!(
+            matches!(child.non_asap(), Some(NonASAPOp::TimeRange { range, child, .. })
             if *range == std::time::Duration::from_secs(300)
-                && matches!(child.non_asap(), Some(NonASAPOp::Project { .. }))));
+                && matches!(child.non_asap(), Some(NonASAPOp::Project { .. })))
+        );
     }
 }
 
@@ -204,8 +205,7 @@ async fn clickhouse_outer_sum_recursively_binds_inner_temporal_aggregate() {
         fn has_temporal_summary(node: &OperatorNode) -> bool {
             match &node.operator {
                 Operator::ASAP(ASAPOp::SummaryAgg {
-                    family:
-                        FieldDataType::ExactAggregate(ExactKind::Rate | ExactKind::Increase, _),
+                    family: FieldDataType::ExactAggregate(ExactKind::Rate | ExactKind::Increase, _),
                     ..
                 }) => true,
                 Operator::ASAP(ASAPOp::SummaryEstimate { summary_input, .. }) => {
@@ -333,7 +333,10 @@ async fn sql_join_recursively_binds_both_temporal_aggregate_children() {
         pred,
     }) = join.non_asap()
     else {
-        panic!("expected read-time relational join, got {:?}", join.operator);
+        panic!(
+            "expected read-time relational join, got {:?}",
+            join.operator
+        );
     };
     assert_eq!(kind, &asap_types::pre_asap::JoinKind::Inner);
     assert!(matches!(
@@ -846,7 +849,10 @@ async fn map_projection_export_preserves_unsupported_child_boundary() {
     let mut node = root.as_ref();
     loop {
         if let Some(NonASAPOp::BinaryOp { .. }) = node.non_asap() {
-            assert!(is_kept_non_asap(node), "fallback child must stay whole: {node:?}");
+            assert!(
+                is_kept_non_asap(node),
+                "fallback child must stay whole: {node:?}"
+            );
             break;
         }
         node = unary_child(node)

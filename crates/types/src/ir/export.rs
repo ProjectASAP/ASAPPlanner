@@ -25,11 +25,11 @@ use crate::post_asap::maintained_population::{MaintainedPopulation, PopulationRe
 use crate::post_asap::sketch::{GroupingStrategy, SketchQuery, SummaryUpdate};
 use crate::pre_asap::agg_intent::AggIntent;
 use crate::pre_asap::expr_ir::{ArithmeticOpKind, CompareOpKind, ScalarValue};
-use crate::pre_asap::query_expr::{
+use crate::pre_asap::schema::{ColumnId, DataType, FieldDataType, Schema};
+use crate::pre_asap::vocabulary::{
     ConcatDiscriminatorKey, GroupKeys, InfoMatcher, JoinKind, Reduction, RelationalSetOpKind,
     SampleKind, Source, TimeShift, WindowFrame, WindowFuncKind,
 };
-use crate::pre_asap::schema::{ColumnId, DataType, FieldDataType, Schema};
 
 pub const POST_ASAP_DAG_WIRE_VERSION: u32 = 6;
 
@@ -61,9 +61,7 @@ pub enum WindowEdgeCompatibility {
 }
 
 /// Stable identity of a node within one exported post-ASAP semantic DAG.
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
-)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct PostAsapNodeId(pub u32);
 
@@ -162,7 +160,9 @@ impl WireScalarExpr {
             es: &[ScalarExpr],
             id_of: &mut impl FnMut(&Rc<OperatorNode>) -> PostAsapNodeId,
         ) -> Vec<WireScalarExpr> {
-            es.iter().map(|e| WireScalarExpr::from_expr(e, id_of)).collect()
+            es.iter()
+                .map(|e| WireScalarExpr::from_expr(e, id_of))
+                .collect()
         }
         match expr {
             ScalarExpr::Column(id) => WireScalarExpr::Column(*id),
@@ -885,7 +885,10 @@ struct Exporter {
 }
 
 impl Exporter {
-    fn visit(&mut self, node: &Rc<OperatorNode>) -> Result<PostAsapNodeId, ExecutionDataStateError> {
+    fn visit(
+        &mut self,
+        node: &Rc<OperatorNode>,
+    ) -> Result<PostAsapNodeId, ExecutionDataStateError> {
         if let Some(id) = self.ids.get(&Rc::as_ptr(node)) {
             return Ok(*id);
         }
@@ -1049,13 +1052,16 @@ fn payload_of(
 
 /// Grouping compatibility between two `SummaryAgg`s by their reductions.
 fn grouping_compatibility(producer: &Operator, consumer: &Operator) -> GroupingEdgeCompatibility {
-    let (Operator::ASAP(ASAPOp::SummaryAgg {
-        reduction: producer,
-        ..
-    }), Operator::ASAP(ASAPOp::SummaryAgg {
-        reduction: consumer,
-        ..
-    })) = (producer, consumer)
+    let (
+        Operator::ASAP(ASAPOp::SummaryAgg {
+            reduction: producer,
+            ..
+        }),
+        Operator::ASAP(ASAPOp::SummaryAgg {
+            reduction: consumer,
+            ..
+        }),
+    ) = (producer, consumer)
     else {
         return GroupingEdgeCompatibility::NotApplicable;
     };
@@ -1181,9 +1187,7 @@ mod tests {
                 key: 0,
                 family: family.clone(),
             },
-            PostAsapOperatorPayload::Extension {
-                name: "ext".into(),
-            },
+            PostAsapOperatorPayload::Extension { name: "ext".into() },
         ];
         for payload in payloads {
             // This checks physical identity and placement, not kernel availability.
@@ -1298,7 +1302,10 @@ mod tests {
         ));
         let dag = compiled.dag;
         assert_eq!(dag.root, PostAsapNodeId(3));
-        assert_eq!(dag.nodes[0].output_state, ExecutionDataState::INGESTION_ROWS);
+        assert_eq!(
+            dag.nodes[0].output_state,
+            ExecutionDataState::INGESTION_ROWS
+        );
         assert_eq!(
             dag.nodes[1].output_state,
             ExecutionDataState::INGESTION_SUMMARY
@@ -1377,8 +1384,14 @@ mod tests {
         assert_eq!(dag.edges.len(), 4);
         assert_eq!(relational_count(&dag), 3);
         assert_eq!(dag.root, PostAsapNodeId(4));
-        assert_eq!(dag.nodes[0].output_state, ExecutionDataState::INGESTION_ROWS);
-        assert_eq!(dag.nodes[1].output_state, ExecutionDataState::INGESTION_ROWS);
+        assert_eq!(
+            dag.nodes[0].output_state,
+            ExecutionDataState::INGESTION_ROWS
+        );
+        assert_eq!(
+            dag.nodes[1].output_state,
+            ExecutionDataState::INGESTION_ROWS
+        );
         assert_eq!(dag.nodes[4].output_state, ExecutionDataState::QUERY_ROWS);
         assert!(matches!(
             &dag.nodes[1].payload,
@@ -1397,7 +1410,10 @@ mod tests {
         // Filter -> SummaryAgg: both at ingestion time, so pane alignment is
         // a lowering obligation; the relational producer has no grouping.
         let edge = &dag.edges[1];
-        assert_eq!((edge.producer, edge.consumer), (PostAsapNodeId(1), PostAsapNodeId(2)));
+        assert_eq!(
+            (edge.producer, edge.consumer),
+            (PostAsapNodeId(1), PostAsapNodeId(2))
+        );
         assert_eq!(edge.grouping, GroupingEdgeCompatibility::NotApplicable);
         assert_eq!(
             edge.window,
@@ -1481,7 +1497,10 @@ mod tests {
         assert_eq!(dag.edges[0].consumer, PostAsapNodeId(1));
         let wire = serde_json::to_value(&dag).unwrap();
         assert_eq!(wire["nodes"][1]["payload"]["kind"], "relational");
-        assert_eq!(wire["nodes"][1]["payload"]["operator"]["kind"], "scalar_bridge");
+        assert_eq!(
+            wire["nodes"][1]["payload"]["operator"]["kind"],
+            "scalar_bridge"
+        );
         assert_eq!(
             wire["nodes"][1]["payload"]["operator"]["expr"]["PromqlScalarFromVector"],
             0

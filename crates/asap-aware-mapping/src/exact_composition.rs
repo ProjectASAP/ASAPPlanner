@@ -72,7 +72,7 @@ use asap_types::post_asap::{
     ResultGuarantee, Schema,
 };
 use asap_types::pre_asap::agg_intent::AggIntent;
-use asap_types::pre_asap::query_expr::{aggregate_output_schema, Reduction};
+use asap_types::pre_asap::vocabulary::{aggregate_output_schema, Reduction};
 use asap_types::types::AccuracyTarget;
 
 use crate::cost_model::CostModel;
@@ -253,11 +253,8 @@ impl ExactComposition {
             },
         };
         let node = Rc::new(
-            OperatorNode::with_schema(
-                Operator::NonASAP(self.op.clone().into_op(child)),
-                schema,
-            )
-            .with_guarantee(guarantee),
+            OperatorNode::with_schema(Operator::NonASAP(self.op.clone().into_op(child)), schema)
+                .with_guarantee(guarantee),
         );
         validate_default(&node, self.placement.data_state().timing)?;
         Ok(node)
@@ -498,11 +495,8 @@ mod tests {
     use crate::replacement::keep_pre_asap;
     use crate::test_support::{agg, agg_per_entity as per_entity, metric_scan, timed};
     use asap_types::ir::ASAPOp;
-    use asap_types::post_asap::{ExecutionDataStateError, SketchAlgorithm, FieldDataType};
+    use asap_types::post_asap::{ExecutionDataStateError, FieldDataType, SketchAlgorithm};
     use asap_types::pre_asap::agg_intent::default_quantile;
-
-
-
 
     /// `max by (zone) (quantile by (zone, host) (m))`.
     fn max_over_quantile() -> Rc<OperatorNode> {
@@ -628,7 +622,8 @@ mod tests {
         // input — the operator would be consuming sketch state.
         let state_child =
             crate::replacement::realize_child(&comp.child_target, &DefaultCostModel).unwrap();
-        let Operator::ASAP(ASAPOp::SummaryEstimate { summary_input, .. }) = &state_child.operator else {
+        let Operator::ASAP(ASAPOp::SummaryEstimate { summary_input, .. }) = &state_child.operator
+        else {
             panic!("expected the child to realize to a readout");
         };
         assert!(!comp.accepts_child(summary_input));
@@ -696,5 +691,42 @@ mod tests {
             planned_data_state(&composed, ExecutionTiming::IngestionTime).timing,
             ExecutionTiming::IngestionTime
         );
+    }
+
+    fn max_op(by: Vec<usize>) -> ExactOperation {
+        ExactOperation::Aggregate {
+            reduction: Reduction::by(by),
+            measures: vec![AggIntent::Max { col: None }],
+            output_names: vec![],
+            having: None,
+        }
+    }
+
+    #[test]
+    fn exact_operator_schema_matches_pre_asap_aggregate_derivation() {
+        let child = lift_plain(&metric_scan(&["zone"]).schema);
+        let out = max_op(vec![2]).output_schema(&child).unwrap();
+        let names: Vec<_> = out.fields.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(names, vec!["zone", "max"]);
+        assert!(out.is_all_plain());
+    }
+
+    #[test]
+    fn exact_operator_rejects_non_plain_input() {
+        let state = Schema::lifted(
+            vec![asap_types::pre_asap::Field::new(
+                "state",
+                FieldDataType::ExactAggregate(
+                    asap_types::post_asap::ExactKind::Sum,
+                    asap_types::post_asap::ExactParams::Sum,
+                ),
+                false,
+            )],
+            None,
+        );
+        assert!(matches!(
+            max_op(vec![]).output_schema(&state),
+            Err(ExactOperationSchemaError::NonPlainInput)
+        ));
     }
 }

@@ -64,13 +64,11 @@ pub(super) fn local_guarantee(
         FieldDataType::ExactAggregate(kind, _) => {
             Some(ResultGuarantee::exact(format!("ExactAggregate({kind:?})")))
         }
-        FieldDataType::Sketch(kind, _) => {
-            sketch_guarantee(kind.algorithm(), kind.params(), query)
-        }
+        FieldDataType::Sketch(kind, _) => sketch_guarantee(kind.algorithm(), kind.params(), query),
         // No error model is registered for these families.
-        FieldDataType::Sample(..)
-        | FieldDataType::Wavelet(..)
-        | FieldDataType::StatModel(..) => None,
+        FieldDataType::Sample(..) | FieldDataType::Wavelet(..) | FieldDataType::StatModel(..) => {
+            None
+        }
     }
 }
 pub(crate) fn size_params(

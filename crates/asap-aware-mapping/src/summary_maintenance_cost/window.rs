@@ -29,9 +29,7 @@ pub struct StreamingWindowFrameworkCandidate {
     pub node_evidence: StreamingNodeEvidence,
 }
 
-pub(super) fn summary_aggregation_identities(
-    root: &OperatorNode,
-) -> HashSet<*const OperatorNode> {
+pub(super) fn summary_aggregation_identities(root: &OperatorNode) -> HashSet<*const OperatorNode> {
     fn visit(
         node: &OperatorNode,
         seen: &mut HashSet<*const OperatorNode>,

@@ -209,9 +209,8 @@ pub use recurrence::{
 pub use replacement::{
     default_strategies, default_strategies_with, is_logical_rewrite, search_workload,
     search_workload_with, search_workload_with_targets, summary_candidates, CompositionDecision,
-    GlobalSelection,
-    Matcher, PlanSpace, Proposals, RankedTargetSubDAGCandidates, Realization, RealizationError,
-    RecurrenceProfileMap, RejectedCandidate, Replacement, ReplacementProvenance,
+    GlobalSelection, Matcher, PlanSpace, Proposals, RankedTargetSubDAGCandidates, Realization,
+    RealizationError, RecurrenceProfileMap, RejectedCandidate, Replacement, ReplacementProvenance,
     ReplacementStrategy, ReplacementSubDAG, SharedSubtreeStrategy, SketchAlgorithmStrategy,
     TargetSubDAG, TargetSubDAGCandidates, TargetSubDAGSelection, MAX_SEARCH_ITERATIONS,
 };

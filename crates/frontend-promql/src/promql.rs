@@ -71,7 +71,7 @@ use asap_frontend_common::{
 };
 use asap_types::ir::{BinaryOperator, ExprSemantics, TimeRangeKind};
 use asap_types::pre_asap::agg_intent::{topk, AggIntent, MathFunc, TimeFunc};
-use asap_types::pre_asap::query_expr::{
+use asap_types::pre_asap::vocabulary::{
     AtModifier, BinaryOpKind, GroupKeys, GroupSide, PromQLVectorSetOpKind, Reduction, Source,
     TimeShift, VectorGrouping, VectorMatch, VectorMatchKind,
 };
@@ -663,7 +663,7 @@ fn outer_kind(agg: &AggregateExpr) -> Result<Outer> {
 /// build this node) decides `PerEntity` vs `Reduce(by)` *without* knowing
 /// about `without` yet — it only ever sees `by`-mode keys, since `without`'s
 /// excluded-labels list is applied here, after the fact, exactly like the
-/// pre-#179 legacy `relational::QueryExpr` tree's own `mark_without` did (its
+/// pre-#179 legacy relational tree's own `mark_without` did (its
 /// converter read `without` only after this front-end step had already set
 /// it). Whether
 /// `reduction_for` picked `PerEntity` (only possible when `keys` was empty)

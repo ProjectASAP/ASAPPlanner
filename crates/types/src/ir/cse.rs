@@ -184,7 +184,7 @@ fn same_node(left: &OperatorNode, right: &OperatorNode, memo: &mut EqMemo) -> bo
         && left.schema == right.schema
         && left.timing == right.timing
         && same_value(&left.guarantee, &right.guarantee)
-        && own_fields(left) == own_fields(right)
+        && same_value(&own_fields(left), &own_fields(right))
 }
 
 /// Bottom-up hash-consing table: structurally-equal, sharing-legal nodes
@@ -298,15 +298,15 @@ pub fn share_common_subtrees<Id>(
 mod tests {
     use super::*;
     use crate::ir::asap::ASAPOp;
-    use crate::post_asap::expr::BinaryOperator;
+    use crate::ir::BinaryOperator;
     use crate::post_asap::guarantee::ResultGuarantee;
     use crate::post_asap::sketch::{
         GroupingStrategy, SketchAlgorithm, SketchKind, SketchParams, SummaryUpdate,
     };
     use crate::pre_asap::agg_intent::AggIntent;
     use crate::pre_asap::expr_ir::{ColumnRef, CompareOpKind};
-    use crate::pre_asap::query_expr::{BinaryOpKind, GroupKeys, Reduction, Source};
     use crate::pre_asap::schema::{DataType, Field, FieldDataType, Schema};
+    use crate::pre_asap::vocabulary::{BinaryOpKind, GroupKeys, Reduction, Source};
     use crate::types::AccuracyTarget;
 
     fn node(op: NonASAPOp) -> Rc<OperatorNode> {
@@ -728,5 +728,56 @@ mod tests {
             .recv_timeout(std::time::Duration::from_secs(5))
             .expect("comparison expanded the shared DAG");
         worker.join().unwrap();
+    }
+
+    /// A keyed (hence shareable) projection emitting the literal `value`.
+    fn keyed_literal(value: f64) -> Rc<OperatorNode> {
+        let keyed = node(NonASAPOp::Scan {
+            source: Source::TimeSeries { metric: "m".into() },
+            predicates: vec![],
+            schema: Schema::with_time_index(
+                vec![
+                    Field::plain("ts", DataType::Timestamp, false),
+                    Field::plain("service", DataType::Utf8, false),
+                ],
+                0,
+                vec![vec![1]],
+            ),
+        });
+        node(NonASAPOp::Project {
+            cols: vec![
+                crate::ir::ProjectItem {
+                    alias: None,
+                    expr: ScalarExpr::Column(1),
+                },
+                crate::ir::ProjectItem {
+                    alias: Some("v".into()),
+                    expr: ScalarExpr::literal_f64(value),
+                },
+            ],
+            qualifier: None,
+            child: keyed,
+        })
+    }
+
+    /// Sharing preserves IEEE signed zero, and JSON's `null` encoding of
+    /// non-finite floats never becomes the equality decision.
+    #[test]
+    fn signed_zero_and_nonfinite_values_remain_distinct() {
+        assert!(
+            keyed_literal(0.0).schema.has_unique_key(),
+            "fixture is shareable"
+        );
+        for (a, b) in [
+            (0.0, -0.0),
+            (-0.0, 0.0),
+            (f64::INFINITY, f64::NEG_INFINITY),
+            (f64::NAN, f64::NAN),
+        ] {
+            let (ra, rb) = two_roots(keyed_literal(a), keyed_literal(b));
+            assert!(!Rc::ptr_eq(&ra, &rb), "{a} and {b} must not be shared");
+        }
+        let (ra, rb) = two_roots(keyed_literal(f64::INFINITY), keyed_literal(f64::INFINITY));
+        assert!(Rc::ptr_eq(&ra, &rb));
     }
 }

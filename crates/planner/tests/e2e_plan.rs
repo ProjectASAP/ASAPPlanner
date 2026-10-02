@@ -12,7 +12,7 @@ use asap_aware_mapping::{
 };
 use asap_frontend_sql::{lower_sql_dialect, SqlCatalog};
 use asap_planner::{e2e_plan, FrontendInput, PlanError, UserInput, UserInputError};
-use asap_types::pre_asap::schema::{Field, DataType, Schema};
+use asap_types::pre_asap::schema::{DataType, Field, Schema};
 use asap_types::types::AccuracyTarget;
 use asap_types::workload::{
     AccuracyRequirement, BatchEntry, DataArrival, DataWorkload, DurationMs, Evidence,

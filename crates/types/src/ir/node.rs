@@ -12,8 +12,8 @@ use super::asap::ASAPOp;
 use super::non_asap::NonASAPOp;
 use crate::post_asap::execution_data_state::ExecutionTiming;
 use crate::post_asap::guarantee::ResultGuarantee;
-use crate::pre_asap::query_expr::QueryExprError;
 use crate::pre_asap::schema::Schema;
+use crate::pre_asap::vocabulary::QueryExprError;
 
 /// The output category of an operator, derived from the operation and its
 /// inputs. Matching column schemas do not make categories interchangeable.
@@ -203,9 +203,9 @@ impl OperatorNode {
             if node.is_asap() {
                 return true;
             }
-            node.children().iter().any(|child| {
-                seen.insert(Rc::as_ptr(child)) && walk(child, seen)
-            })
+            node.children()
+                .iter()
+                .any(|child| seen.insert(Rc::as_ptr(child)) && walk(child, seen))
         }
         walk(self, &mut HashSet::new())
     }

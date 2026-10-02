@@ -23,13 +23,13 @@ use asap_integration_tests::post_asap::{post_asap_dag, timed};
 use asap_types::ir::export::{NonASAPOpKind, PostAsapOperatorPayload};
 use asap_types::ir::{ASAPOp, NonASAPOp, Operator, OperatorNode};
 use asap_types::post_asap::{
-    CompositionOperator, EntityIdentity, ExactKind, ExactParams, GroupingStrategy,
-    SketchAlgorithm, SketchKind, SketchParams, SketchQuery, FieldDataType, SummaryInputExpr,
-    Schema, SummaryUpdate,
+    CompositionOperator, EntityIdentity, ExactKind, ExactParams, FieldDataType, GroupingStrategy,
+    Schema, SketchAlgorithm, SketchKind, SketchParams, SketchQuery, SummaryInputExpr,
+    SummaryUpdate,
 };
 use asap_types::pre_asap::expr_ir::ColumnRef;
-use asap_types::pre_asap::query_expr::Reduction;
 use asap_types::pre_asap::schema::DataType;
+use asap_types::pre_asap::vocabulary::Reduction;
 use asap_types::types::AccuracyTarget;
 
 /// This crate has no "bind me one tree" public API any more —
@@ -91,15 +91,30 @@ fn value_ranked_topk_preserves_summary_children_in_post_asap_dag() {
         "topk by (job) (2, max_over_time(memory_bytes[6h]))",
     ] {
         let root = timed(&lower_search_and_materialize(query));
-        let Some(NonASAPOp::Limit { n, offset, child: sort, .. }) = root.non_asap() else {
-            panic!("expected query-time Limit for {query}, got {:?}", root.operator);
+        let Some(NonASAPOp::Limit {
+            n,
+            offset,
+            child: sort,
+            ..
+        }) = root.non_asap()
+        else {
+            panic!(
+                "expected query-time Limit for {query}, got {:?}",
+                root.operator
+            );
         };
-        assert_eq!(root.timing, Some(asap_types::post_asap::ExecutionTiming::QueryTime));
+        assert_eq!(
+            root.timing,
+            Some(asap_types::post_asap::ExecutionTiming::QueryTime)
+        );
         assert!(n.is_some_and(|n| n > 0) && *offset == 0);
         let Some(NonASAPOp::Sort { child, .. }) = sort.non_asap() else {
             panic!("expected query-time Sort under Limit for {query}");
         };
-        assert_eq!(sort.timing, Some(asap_types::post_asap::ExecutionTiming::QueryTime));
+        assert_eq!(
+            sort.timing,
+            Some(asap_types::post_asap::ExecutionTiming::QueryTime)
+        );
         let Some(ASAPOp::FinalizeExactAccumulator { child: state }) = child.asap() else {
             panic!(
                 "Sort must consume finalized values for {query}: {:?}",
@@ -171,7 +186,10 @@ fn promql_binary_arithmetic_retains_two_summary_leaves() {
         };
         for operand in [lhs, rhs] {
             let Some(ASAPOp::FinalizeExactAccumulator { child }) = operand.asap() else {
-                panic!("expected an explicit exact readout, got {:?}", operand.operator);
+                panic!(
+                    "expected an explicit exact readout, got {:?}",
+                    operand.operator
+                );
             };
             assert!(matches!(child.asap(), Some(ASAPOp::SummaryAgg { .. })));
         }
@@ -236,10 +254,10 @@ impl AccuracyEvidenceProvider for SeparatedTopK {
 #[test]
 fn grouped_rate_topk_consumes_finalized_rate_values() {
     let root = lower_promql(
-            "topk by(job)(2, sum by(service, job)(rate(m[1m])))",
-            AccuracyTarget::Epsilon(0.01),
-        )
-        .unwrap();
+        "topk by(job)(2, sum by(service, job)(rate(m[1m])))",
+        AccuracyTarget::Epsilon(0.01),
+    )
+    .unwrap();
     let strategy = SketchAlgorithmStrategy::new_with_planning_inputs_and_evidence(
         &DefaultCostModel,
         &DefaultAccuracyModel,
@@ -261,15 +279,20 @@ fn grouped_rate_topk_consumes_finalized_rate_values() {
             operator: NonASAPOpKind::Join { .. }
         }
     )));
-    let node = dag.nodes.iter().find(|node| matches!(&node.payload,
+    let node = dag
+        .nodes
+        .iter()
+        .find(|node| {
+            matches!(&node.payload,
         PostAsapOperatorPayload::SummaryAgg { family: FieldDataType::Sketch(kind, _), .. }
-        if kind.algorithm() == &SketchAlgorithm::CmsWithHeap)).unwrap();
+        if kind.algorithm() == &SketchAlgorithm::CmsWithHeap)
+        })
+        .unwrap();
     assert_eq!(
         node.output_state.timing,
         asap_types::post_asap::ExecutionTiming::QueryTime
     );
-    let PostAsapOperatorPayload::SummaryAgg { input, .. } = &node.payload
-    else {
+    let PostAsapOperatorPayload::SummaryAgg { input, .. } = &node.payload else {
         unreachable!()
     };
     assert_eq!(
@@ -297,10 +320,10 @@ fn weighted_topk_keeps_candidates_with_missing_population_evidence() {
         }
     }
     let root = lower_promql(
-            "topk by(job)(2, sum by(service, job)(rate(m[1m])))",
-            AccuracyTarget::Epsilon(0.01),
-        )
-        .unwrap();
+        "topk by(job)(2, sum by(service, job)(rate(m[1m])))",
+        AccuracyTarget::Epsilon(0.01),
+    )
+    .unwrap();
     let strategy = SketchAlgorithmStrategy::new_with_planning_inputs_and_evidence(
         &DefaultCostModel,
         &DefaultAccuracyModel,
@@ -318,13 +341,13 @@ fn weighted_topk_keeps_candidates_with_missing_population_evidence() {
 #[test]
 fn weighted_topk_exports_symbolic_evidence_requirements() {
     let root = lower_promql(
-            "topk by(job)(2, sum by(service, job)(rate(m[1m])))",
-            AccuracyTarget::EpsilonDelta {
-                epsilon: 0.01,
-                delta: 0.01,
-            },
-        )
-        .unwrap();
+        "topk by(job)(2, sum by(service, job)(rate(m[1m])))",
+        AccuracyTarget::EpsilonDelta {
+            epsilon: 0.01,
+            delta: 0.01,
+        },
+    )
+    .unwrap();
     let candidates =
         SketchAlgorithmStrategy::default_cost_model().replacements(&TargetSubDAG::new(&root));
     let candidate = candidates
@@ -352,10 +375,10 @@ fn weighted_topk_rejects_invalid_population_evidence() {
         }
     }
     let root = lower_promql(
-            "topk by(job)(2, sum by(service, job)(rate(m[1m])))",
-            AccuracyTarget::Epsilon(0.01),
-        )
-        .unwrap();
+        "topk by(job)(2, sum by(service, job)(rate(m[1m])))",
+        AccuracyTarget::Epsilon(0.01),
+    )
+    .unwrap();
     let strategy = SketchAlgorithmStrategy::new_with_planning_inputs_and_evidence(
         &DefaultCostModel,
         &DefaultAccuracyModel,
@@ -374,13 +397,13 @@ fn rate_and_increase_topk_use_summary_scores_and_grouped_limits() {
         "topk(2, sum by(job)(increase(m[6h])))",
     ] {
         let root = lower_promql(
-                query,
-                AccuracyTarget::EpsilonDelta {
-                    epsilon: 0.01,
-                    delta: 0.01,
-                },
-            )
-            .unwrap();
+            query,
+            AccuracyTarget::EpsilonDelta {
+                epsilon: 0.01,
+                delta: 0.01,
+            },
+        )
+        .unwrap();
         let strategy = SketchAlgorithmStrategy::new_with_planning_inputs_and_evidence(
             &DefaultCostModel,
             &DefaultAccuracyModel,
@@ -477,7 +500,8 @@ fn promql_binary_arithmetic_preserves_both_scalar_operand_orders() {
         assert!(is_exact_readout_or_scalar(lhs));
         assert!(is_exact_readout_or_scalar(rhs));
         assert!(
-            matches!(lhs.asap(), Some(ASAPOp::FinalizeExactAccumulator { .. })) || matches!(rhs.asap(), Some(ASAPOp::FinalizeExactAccumulator { .. }))
+            matches!(lhs.asap(), Some(ASAPOp::FinalizeExactAccumulator { .. }))
+                || matches!(rhs.asap(), Some(ASAPOp::FinalizeExactAccumulator { .. }))
         );
     }
 }
@@ -529,10 +553,10 @@ fn ddsketch_quantile_ratio_meets_the_shared_relative_error_target() {
         delta: 0.01,
     };
     let query = lower_promql(
-            "quantile_over_time(0.9, data[5m]) / quantile_over_time(0.5, data[5m])",
-            target.clone(),
-        )
-        .expect("lowering failed");
+        "quantile_over_time(0.9, data[5m]) / quantile_over_time(0.5, data[5m])",
+        target.clone(),
+    )
+    .expect("lowering failed");
 
     let evidence = FixtureQuantileDomain {
         lower: 1.0,
@@ -562,8 +586,7 @@ fn ddsketch_quantile_ratio_meets_the_shared_relative_error_target() {
         "ratio guarantee should satisfy the requested target: {guarantee:?}"
     );
 
-    let shared =
-        asap_types::ir::cse::share_common_subtrees(vec![("ratio", node.clone())]);
+    let shared = asap_types::ir::cse::share_common_subtrees(vec![("ratio", node.clone())]);
     let Some(NonASAPOp::BinaryOp { lhs, rhs, .. }) = shared[0].1.non_asap() else {
         panic!("expected binary ratio")
     };
@@ -598,13 +621,13 @@ fn planner_only_e2e_temporal_topk_preserves_query_update_and_readout_contract() 
     ];
     for (source, expected_update, expected_family, excluded_labels) in cases {
         let pre = lower_promql(
-                source,
-                AccuracyTarget::EpsilonDelta {
-                    epsilon: 0.01,
-                    delta: 0.01,
-                },
-            )
-            .expect("lower temporal Top-K");
+            source,
+            AccuracyTarget::EpsilonDelta {
+                epsilon: 0.01,
+                delta: 0.01,
+            },
+        )
+        .expect("lower temporal Top-K");
         let strategy = SketchAlgorithmStrategy::new_with_planning_inputs_and_evidence(
             &DefaultCostModel,
             &DefaultAccuracyModel,
@@ -637,7 +660,8 @@ fn planner_only_e2e_temporal_topk_preserves_query_update_and_readout_contract() 
             family,
             child,
             ..
-        }) = summary_input.asap() else {
+        }) = summary_input.asap()
+        else {
             panic!("expected structured Top-K state input")
         };
         let FieldDataType::Sketch(kind, _) = family else {
@@ -679,7 +703,8 @@ fn execute_topk_reference(plan: &OperatorNode) -> Vec<(String, f64)> {
         child,
         reduction,
         ..
-    }) = summary_input.asap() else {
+    }) = summary_input.asap()
+    else {
         panic!("expected summary updates")
     };
     assert_eq!(reduction, &Reduction::by(vec![]));
@@ -765,13 +790,13 @@ fn planner_heap_topk_reference_execution_matches_ground_truth() {
         ),
     ] {
         let pre = lower_promql(
-                query,
-                AccuracyTarget::EpsilonDelta {
-                    epsilon: 0.01,
-                    delta: 0.01,
-                },
-            )
-            .unwrap();
+            query,
+            AccuracyTarget::EpsilonDelta {
+                epsilon: 0.01,
+                delta: 0.01,
+            },
+        )
+        .unwrap();
         let strategy = SketchAlgorithmStrategy::new_with_planning_inputs_and_evidence(
             &DefaultCostModel,
             &DefaultAccuracyModel,
@@ -802,7 +827,7 @@ fn planner_heap_topk_reference_execution_matches_ground_truth() {
 /// SummaryEstimate { query: Quantile{0.99} }          → {quantile_0_99: Float64}
 /// └─ SummaryAgg { Kll{k:269}, input: SampleValue }   → {quantile_0_99: Sketch(Kll, {k:269})}
 ///    └─ SummaryAgg { Rate, input: SampleValue }      → {ts, value: ExactAggregate(Rate), …}
-///       └─ KeepPreAsap(TimeRange{5m} → Scan)         → {ts, value}
+///       └─ TimeRange{5m} → Scan                      → {ts, value}
 /// ```
 ///
 /// The nested tree exercises both realizations: the approximate quantile
@@ -843,7 +868,8 @@ fn promql_quantile_of_rate_binds_kll_over_rate_accumulator() {
         input,
         reduction,
         ..
-    }) = summary_input.asap() else {
+    }) = summary_input.asap()
+    else {
         panic!("expected SummaryAgg, got {:?}", summary_input.operator);
     };
     assert_eq!(
@@ -879,8 +905,12 @@ fn promql_quantile_of_rate_binds_kll_over_rate_accumulator() {
         family,
         reduction,
         ..
-    }) = child.asap() else {
-        panic!("expected inner SummaryAgg for rate, got {:?}", child.operator);
+    }) = child.asap()
+    else {
+        panic!(
+            "expected inner SummaryAgg for rate, got {:?}",
+            child.operator
+        );
     };
     assert_eq!(
         family,
@@ -899,8 +929,15 @@ fn promql_quantile_of_rate_binds_kll_over_rate_accumulator() {
 
     // The leaf: unrewritten pass-through — TimeRange marker over the Scan.
     // The kept leaf is the non-ASAP subtree itself.
-    assert!(!leaf.contains_asap(), "expected kept leaf, got {:?}", leaf.operator);
-    let Some(NonASAPOp::TimeRange { range, child: scan, .. }) = leaf.non_asap() else {
+    assert!(
+        !leaf.contains_asap(),
+        "expected kept leaf, got {:?}",
+        leaf.operator
+    );
+    let Some(NonASAPOp::TimeRange {
+        range, child: scan, ..
+    }) = leaf.non_asap()
+    else {
         panic!("expected TimeRange leaf, got {:?}", leaf.operator);
     };
     assert_eq!(range.as_secs(), 300);
@@ -924,7 +961,8 @@ fn promql_exact_workload_binds_accumulators_not_sketches() {
     let root = realize(&pre_asap).expect("binding failed");
     let Some(ASAPOp::SummaryAgg {
         family, reduction, ..
-    }) = root.asap() else {
+    }) = root.asap()
+    else {
         panic!("expected SummaryAgg, got {:?}", root.operator);
     };
     assert_eq!(
@@ -954,10 +992,10 @@ fn promql_exact_workload_binds_accumulators_not_sketches() {
 #[test]
 fn promql_sum_of_count_over_time_is_composed_by_default_search() {
     let original = lower_promql(
-            "sum by (service) (count_over_time(metrics[5m]))",
-            AccuracyTarget::Exact,
-        )
-        .expect("lowering failed");
+        "sum by (service) (count_over_time(metrics[5m]))",
+        AccuracyTarget::Exact,
+    )
+    .expect("lowering failed");
     let original_schema = original.schema.clone();
     let space = search_workload(vec![("query", original)]);
     let root = &space.roots[0].1;
@@ -1004,10 +1042,10 @@ fn nested_summary_explicitly_finalizes_exact_child_at_ingestion_time() {
     // Real workload selection must expose the state-to-value edge; an outer
     // sketch must not interpret exact accumulator bytes as input samples.
     let pre = lower_promql(
-            "quantile(0.9, sum_over_time(m[1m]))",
-            AccuracyTarget::Epsilon(0.05),
-        )
-        .unwrap();
+        "quantile(0.9, sum_over_time(m[1m]))",
+        AccuracyTarget::Epsilon(0.05),
+    )
+    .unwrap();
     let space = search_workload(vec![("query", pre)]);
     let selected = space.global_selection(&DefaultCostModel);
     let plan = selected
@@ -1109,11 +1147,7 @@ fn ddsketch_ratio_without_domain_proof_is_uncertified() {
     assert!(matches!(root.non_asap(), Some(NonASAPOp::BinaryOp { .. })));
     assert!(root.guarantee.is_none());
     let space = search_workload_with_targets(
-        vec![(
-            "unproven",
-            pre,
-            Some(AccuracyTarget::Epsilon(0.01)),
-        )],
+        vec![("unproven", pre, Some(AccuracyTarget::Epsilon(0.01)))],
         &asap_aware_mapping::default_strategies(),
         &DefaultAccuracyModel,
     );
@@ -1178,10 +1212,10 @@ fn ddsketch_ratio_rejects_unsafe_domains() {
     ] {
         let evidence = FixtureQuantileDomain { lower, upper };
         let pre = lower_promql(
-                "quantile_over_time(0.9, data[5m]) / quantile_over_time(0.5, data[5m])",
-                AccuracyTarget::Epsilon(0.01),
-            )
-            .unwrap();
+            "quantile_over_time(0.9, data[5m]) / quantile_over_time(0.5, data[5m])",
+            AccuracyTarget::Epsilon(0.01),
+        )
+        .unwrap();
         let strategy = SketchAlgorithmStrategy::new_with_planning_inputs_and_evidence(
             &DefaultCostModel,
             &DefaultAccuracyModel,
@@ -1219,10 +1253,10 @@ fn ddsketch_ratio_rejects_one_invalid_domain_when_the_other_is_missing() {
     }
 
     let pre = lower_promql(
-            "quantile_over_time(0.9, data[5m]) / quantile_over_time(0.5, data[5m])",
-            AccuracyTarget::Epsilon(0.01),
-        )
-        .unwrap();
+        "quantile_over_time(0.9, data[5m]) / quantile_over_time(0.5, data[5m])",
+        AccuracyTarget::Epsilon(0.01),
+    )
+    .unwrap();
     let strategy = SketchAlgorithmStrategy::new_with_planning_inputs_and_evidence(
         &DefaultCostModel,
         &DefaultAccuracyModel,
@@ -1241,10 +1275,10 @@ fn ddsketch_ratio_bound_holds_for_signed_pinned_sketch_readouts() {
             upper: if sign < 0. { -1. } else { 100. },
         };
         let pre = lower_promql(
-                "quantile_over_time(0.9, data[5m]) / quantile_over_time(0.5, data[5m])",
-                AccuracyTarget::Epsilon(0.01),
-            )
-            .unwrap();
+            "quantile_over_time(0.9, data[5m]) / quantile_over_time(0.5, data[5m])",
+            AccuracyTarget::Epsilon(0.01),
+        )
+        .unwrap();
         let strategy = SketchAlgorithmStrategy::new_with_planning_inputs_and_evidence(
             &DefaultCostModel,
             &DefaultAccuracyModel,
@@ -1265,7 +1299,8 @@ fn ddsketch_ratio_bound_holds_for_signed_pinned_sketch_readouts() {
             let Some(ASAPOp::SummaryAgg {
                 family: FieldDataType::Sketch(kind, _),
                 ..
-            }) = summary_input.asap() else {
+            }) = summary_input.asap()
+            else {
                 panic!("sketch")
             };
             let SketchParams::DDSketch { alpha } = kind.params() else {
@@ -1314,10 +1349,10 @@ fn ddsketch_ratio_requires_a_supported_population_size() {
         }
     }
     let pre = lower_promql(
-            "quantile_over_time(0.9, data[5m]) / quantile_over_time(0.5, data[5m])",
-            AccuracyTarget::Epsilon(0.01),
-        )
-        .unwrap();
+        "quantile_over_time(0.9, data[5m]) / quantile_over_time(0.5, data[5m])",
+        AccuracyTarget::Epsilon(0.01),
+    )
+    .unwrap();
     for count in [0, (1u64 << 53) + 1] {
         let evidence = PopulationEvidence(count);
         let strategy = SketchAlgorithmStrategy::new_with_planning_inputs_and_evidence(

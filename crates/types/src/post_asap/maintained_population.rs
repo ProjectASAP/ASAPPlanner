@@ -37,82 +37,6 @@ pub enum PopulationReadout {
 
 impl CurrentSeriesInput {
     /// Verify the named contract against the canonical maintenance input.
-    pub fn matches_input(&self, input: &crate::pre_asap::QueryExpr) -> bool {
-        use crate::pre_asap::{CompareOpKind, DataType, QueryExpr, ScalarValue, Source};
-        // PromQL instant selectors carry an ingestion-interval `TimeRange` as
-        // their input scope. The population must use the same expiry horizon;
-        // shifted and otherwise transformed inputs still fail below.
-        let input = match input {
-            QueryExpr::TimeRange { range, child }
-                if self.lookback_ms > 0
-                    && *range == std::time::Duration::from_millis(self.lookback_ms) =>
-            {
-                child.as_ref()
-            }
-            QueryExpr::TimeRange { .. } => return false,
-            other if self.lookback_ms == 300_000 => other,
-            _ => return false,
-        };
-        let QueryExpr::Scan {
-            source: Source::TimeSeries { metric },
-            predicates,
-            schema,
-        } = input
-        else {
-            return false;
-        };
-        if self.metric.is_empty()
-            || *metric != self.metric
-            || (schema.closed && !schema.has_promql_series_identity())
-            || schema.time_index.is_none()
-        {
-            return false;
-        }
-        if self.grouping.iter().any(|label| {
-            !schema
-                .fields
-                .iter()
-                .any(|c| c.name == *label && c.dtype == DataType::Utf8)
-        }) {
-            return false;
-        }
-        let mut matchers = Vec::new();
-        for predicate in predicates {
-            let QueryExpr::Compare { left, op, right } = predicate.0.as_ref() else {
-                return false;
-            };
-            let (QueryExpr::Column(col), QueryExpr::Literal(ScalarValue::Utf8(value))) =
-                (left.as_ref(), right.as_ref())
-            else {
-                return false;
-            };
-            let Some(column) = schema.fields.get(*col) else {
-                return false;
-            };
-            if column.dtype != DataType::Utf8 {
-                return false;
-            }
-            let operation = match op {
-                CompareOpKind::Eq => CurrentSeriesMatch::Equal,
-                CompareOpKind::Ne => CurrentSeriesMatch::NotEqual,
-                CompareOpKind::Regex => CurrentSeriesMatch::Regex,
-                CompareOpKind::NotRegex => CurrentSeriesMatch::NotRegex,
-                _ => return false,
-            };
-            matchers.push(CurrentSeriesMatcher {
-                label: column.name.clone(),
-                value: value.clone(),
-                operation,
-            });
-        }
-        matchers.sort();
-        matchers.dedup();
-        self.matchers == matchers && self.grouping.windows(2).all(|w| w[0] < w[1])
-    }
-}
-
-impl CurrentSeriesInput {
-    /// [`Self::matches_input`] over the unified operator IR.
     pub fn matches_node(&self, input: &crate::ir::OperatorNode) -> bool {
         use crate::ir::{NonASAPOp, Operator, ScalarExpr, TimeRangeKind};
         use crate::pre_asap::{CompareOpKind, DataType, ScalarValue, Source};
@@ -211,16 +135,7 @@ pub struct MaintainedPopulation {
 }
 
 impl MaintainedPopulation {
-    pub fn matches_input(&self, input: &crate::pre_asap::QueryExpr) -> bool {
-        match &self.input {
-            PopulationInput::CurrentSeries(spec) => spec.matches_input(input),
-            // Table populations are described over the unified IR; see
-            // `matches_node`.
-            PopulationInput::Rows { .. } => false,
-        }
-    }
-
-    /// [`Self::matches_input`] over the unified operator IR.
+    /// Whether `input` is the maintenance input this population declares.
     pub fn matches_node(&self, input: &crate::ir::OperatorNode) -> bool {
         use crate::ir::{NonASAPOp, Operator};
         use crate::pre_asap::{DataType, Source};

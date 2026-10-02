@@ -21,7 +21,7 @@ use thiserror::Error;
 
 use asap_types::ir::{NonASAPOp, OperatorNode, Predicate, ProjectItem, ScalarExpr, SortKey};
 use asap_types::pre_asap::column_resolution::resolve_group_keys_promql;
-use asap_types::pre_asap::query_expr::ConcatDiscriminatorKey;
+use asap_types::pre_asap::vocabulary::ConcatDiscriminatorKey;
 use asap_types::pre_asap::{
     aggregate_output_schema, resolve_column_ref, resolve_column_refs, AggIntent, ColumnId,
     ColumnRef, GroupKeys, QueryExprError, Reduction, ResolveError, Schema,
@@ -672,8 +672,8 @@ fn resolve_agg_intent(
 mod tests {
     use super::*;
     use crate::unresolved::UnresolvedPredicate;
+    use asap_types::ir::BinaryOperator;
     use asap_types::ir::ExprSemantics;
-    use asap_types::post_asap::BinaryOperator;
     use asap_types::pre_asap::{
         BinaryOpKind, CompareOpKind, DataType, Field, JoinKind, PromQLVectorSetOpKind, ScalarValue,
         Source, VectorMatch, VectorMatchKind,

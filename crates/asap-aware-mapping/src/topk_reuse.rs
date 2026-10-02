@@ -112,9 +112,9 @@ impl ReplacementStrategy for TopKLimitReuseStrategy {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use asap_types::pre_asap::query_expr::GroupKeys;
-    use asap_types::pre_asap::Schema;
     use crate::test_support::scan;
+    use asap_types::pre_asap::vocabulary::GroupKeys;
+    use asap_types::pre_asap::Schema;
 
     fn scan_named(metric: &str) -> Rc<OperatorNode> {
         scan(metric, Schema::with_time_index(vec![], 0, vec![]))

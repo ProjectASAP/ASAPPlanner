@@ -2149,7 +2149,10 @@ mod tests {
         assert!(plan.deployments.is_empty());
         // The kept pre-ASAP query itself, timed: no ASAP operator anywhere.
         assert!(!plan.root.contains_asap());
-        assert!(matches!(plan.root.non_asap(), Some(NonASAPOp::Aggregate { .. })));
+        assert!(matches!(
+            plan.root.non_asap(),
+            Some(NonASAPOp::Aggregate { .. })
+        ));
         assert!(plan.root.timing.is_some());
 
         let exported =
@@ -2273,7 +2276,10 @@ mod tests {
         assert!(plan.selected_raw_recompute);
         assert!(plan.raw_recompute_total_cost.is_none());
         assert!(!plan.root.contains_asap());
-        assert!(matches!(plan.root.non_asap(), Some(NonASAPOp::Aggregate { .. })));
+        assert!(matches!(
+            plan.root.non_asap(),
+            Some(NonASAPOp::Aggregate { .. })
+        ));
     }
 
     #[test]

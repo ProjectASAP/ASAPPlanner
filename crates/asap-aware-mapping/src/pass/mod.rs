@@ -17,8 +17,8 @@ mod major;
 use std::collections::BTreeMap;
 use std::rc::Rc;
 
-use asap_types::parsed_workload::ParsedWorkload;
 use asap_types::ir::OperatorNode;
+use asap_types::parsed_workload::ParsedWorkload;
 use asap_types::workload::WorkloadError;
 
 use crate::accuracy::{
