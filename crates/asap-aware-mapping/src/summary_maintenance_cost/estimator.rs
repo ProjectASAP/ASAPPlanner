@@ -572,6 +572,11 @@ fn validate_summary_edges_and_physical_ids(
         evidence: &StreamingNodeEvidence,
     ) -> Result<(String, Vec<EdgeStatistics>, EdgeStatistics), AnalyticalCostError> {
         if let Some(retained) = evidence.retained_queries.get(&(node as *const _)) {
+            if node.contains_asap() {
+                return Err(AnalyticalCostError::InvalidPhysicalDag(
+                    "retained sub-DAG evidence covers summary operators",
+                ));
+            }
             return Ok((retained.physical_id.clone(), vec![], retained.output));
         }
         match &node.operator {
@@ -680,9 +685,10 @@ fn validate_summary_edges_and_physical_ids(
 
 /// Whether `node` is a retained non-ASAP sub-DAG costed as one unit: the
 /// provider bound retained-query evidence to it instead of per-operator
-/// evidence. Its children are then not visited.
+/// evidence. Its children are then not visited. No ASAP descendant may be
+/// hidden by this boundary; graph validation rejects such evidence.
 fn has_retained_subdag_evidence(node: &OperatorNode, evidence: &StreamingNodeEvidence) -> bool {
-    !node.is_asap() && evidence.retained_queries.contains_key(&(node as *const _))
+    evidence.retained_queries.contains_key(&(node as *const _)) && !node.contains_asap()
 }
 
 /// The inputs the estimator visits below `node`: none for a retained

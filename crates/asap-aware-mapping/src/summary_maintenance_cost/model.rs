@@ -2396,6 +2396,42 @@ mod tests {
         assert_eq!(plan.summary_total_cost, None);
     }
 
+    /// Bulk relational evidence cannot hide summary operators below an ordinary root.
+    #[test]
+    fn retained_subdag_evidence_cannot_hide_summary_work() {
+        let workload = streaming_workload();
+        let target = streaming_sum_query();
+        let root = add_shared_summary_result();
+        let mut model = streaming_model();
+        bind_aggregations(
+            &mut model,
+            &target,
+            &root,
+            streaming_inputs(),
+            streaming_cpu(),
+        );
+        model.node_evidence.insert_retained_query(
+            &root,
+            StreamingRetainedQueryEvidence {
+                physical_id: "false-retained-root".into(),
+                output: test_edge(),
+                preprocessing_cpu_ops_over_horizon: 0.0,
+                working_memory_bytes: 0,
+                output_buffer_bytes: 0,
+            },
+        );
+        let plan = plan_summary_maintenance_lifecycles(
+            root,
+            WorkloadDemand::new_with_data(&workload, &streaming_data_workload(), &[0]),
+            0,
+            Some(Horizon(5.0)),
+            SummaryMaintenanceLifecycleCapabilities::ALL,
+            &model,
+        )
+        .unwrap();
+        assert_eq!(plan.summary_total_cost, None);
+    }
+
     #[test]
     fn whole_dag_fails_closed_for_missing_retained_work_or_false_source_lineage() {
         let workload = streaming_workload();
