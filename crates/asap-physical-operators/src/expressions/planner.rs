@@ -34,6 +34,32 @@ pub(super) fn evaluate(
             ScalarValue::Boolean(value) => Value::Bool(*value),
             ScalarValue::Null => Value::Null,
         }),
+        ScalarExpr::Cast { expr, to, .. } => {
+            let value = evaluate(expr, row, schema)?;
+            match (value, to) {
+                (Value::Null, _) => Ok(Value::Null),
+                (Value::Int64(value), DataType::Float64) => Ok(Value::Float64(value as f64)),
+                (value, _)
+                    if expr
+                        .scalar_type(schema)
+                        .map_err(|e| Error::Invalid(e.to_string()))?
+                        .0
+                        == *to =>
+                {
+                    Ok(value)
+                }
+                _ => Err(Error::Invalid("unsupported cast".into())),
+            }
+        }
+        ScalarExpr::Negative { expr, .. } => match evaluate(expr, row, schema)? {
+            Value::Float64(v) => Ok(Value::Float64(-v)),
+            Value::Int64(v) => v
+                .checked_neg()
+                .map(Value::Int64)
+                .ok_or_else(|| Error::Invalid("integer negation overflow".into())),
+            Value::Null => Ok(Value::Null),
+            _ => Err(Error::Invalid("invalid negation input".into())),
+        },
         ScalarExpr::Compare {
             left, op, right, ..
         } => {
@@ -90,6 +116,16 @@ pub(super) fn evaluate(
         ))),
         ScalarExpr::FunctionCall { name, args } => {
             use planner_types::pre_asap::scalar_signature::MapScalarFunction;
+            if planner_types::pre_asap::scalar_signature::promql_function_arity(name).is_some() {
+                let values = args
+                    .iter()
+                    .map(|arg| match evaluate(arg, row, schema)? {
+                        Value::Float64(v) => Ok(v),
+                        _ => Err(Error::Invalid("PromQL function requires floats".into())),
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                return Ok(Value::Float64(promql_function(name, &values)?));
+            }
             if name == "promql_drop_metric_name" {
                 let Value::Utf8(encoded) = evaluate(&args[0], row, schema)? else {
                     return Err(Error::Invalid("series identity must be Utf8".into()));
@@ -362,6 +398,102 @@ fn cell_cmp(left: &Value, right: &Value) -> Option<Ordering> {
     }
 }
 
+fn promql_function(name: &str, args: &[f64]) -> Result<f64, Error> {
+    let x = args[0];
+    Ok(match &name[7..] {
+        "abs" => x.abs(),
+        "ceil" => x.ceil(),
+        "floor" => x.floor(),
+        "exp" => x.exp(),
+        "ln" => x.ln(),
+        "log2" => x.log2(),
+        "log10" => x.log10(),
+        "sqrt" => x.sqrt(),
+        "sgn" => {
+            if x.is_nan() {
+                f64::NAN
+            } else if x == 0.0 {
+                0.0
+            } else {
+                x.signum()
+            }
+        }
+        "sin" => x.sin(),
+        "cos" => x.cos(),
+        "tan" => x.tan(),
+        "asin" => x.asin(),
+        "acos" => x.acos(),
+        "atan" => x.atan(),
+        "sinh" => x.sinh(),
+        "cosh" => x.cosh(),
+        "tanh" => x.tanh(),
+        "asinh" => x.asinh(),
+        "acosh" => x.acosh(),
+        "atanh" => x.atanh(),
+        "deg" => x.to_degrees(),
+        "rad" => x.to_radians(),
+        "round" => {
+            let inverse = 1.0 / args[1];
+            (x * inverse + 0.5).floor() / inverse
+        }
+        "clamp_min" => {
+            if x.is_nan() || args[1].is_nan() {
+                f64::NAN
+            } else {
+                x.max(args[1])
+            }
+        }
+        "clamp_max" => {
+            if x.is_nan() || args[1].is_nan() {
+                f64::NAN
+            } else {
+                x.min(args[1])
+            }
+        }
+        "clamp" => {
+            if args.iter().any(|x| x.is_nan()) {
+                f64::NAN
+            } else {
+                x.max(args[1]).min(args[2])
+            }
+        }
+        part => {
+            use chrono::{Datelike, Timelike};
+            if !x.is_finite() || x < i64::MIN as f64 || x >= i64::MAX as f64 {
+                return Ok(f64::NAN);
+            }
+            let Some(date) = chrono::DateTime::from_timestamp(x as i64, 0) else {
+                return Ok(f64::NAN);
+            };
+            match part {
+                "minute" => date.minute() as f64,
+                "hour" => date.hour() as f64,
+                "day_of_week" => date.weekday().num_days_from_sunday() as f64,
+                "day_of_month" => date.day() as f64,
+                "day_of_year" => date.ordinal() as f64,
+                "month" => date.month() as f64,
+                "year" => date.year() as f64,
+                "days_in_month" => {
+                    let year = date.year();
+                    let leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
+                    match date.month() {
+                        2 => {
+                            if leap {
+                                29.0
+                            } else {
+                                28.0
+                            }
+                        }
+                        4 | 6 | 9 | 11 => 30.0,
+                        _ => 31.0,
+                    }
+                }
+                _ => return Err(Error::Invalid("unregistered PromQL function".into())),
+            }
+        }
+    })
+}
+
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
 pub struct CompiledExpression {
     expression: ScalarExpr,
@@ -437,6 +569,20 @@ fn validate(expr: &ScalarExpr, schema: &planner_types::pre_asap::Schema) -> Resu
         .map_err(|e| Error::Invalid(e.to_string()))?;
     match expr {
         ScalarExpr::Column(_) | ScalarExpr::Literal(_) => Ok(()),
+        ScalarExpr::Cast { expr, to, .. } => {
+            let source = expr
+                .scalar_type(schema)
+                .map_err(|e| Error::Invalid(e.to_string()))?
+                .0;
+            if source != *to
+                && source != DataType::Null
+                && !(source == DataType::Int64 && *to == DataType::Float64)
+            {
+                return Err(invalid());
+            }
+            validate(expr, schema)
+        }
+        ScalarExpr::Negative { expr, .. } => validate(expr, schema),
         ScalarExpr::Arithmetic { left, right, .. } => {
             for value in [left, right] {
                 validate(value, schema)?;
@@ -500,6 +646,7 @@ fn validate(expr: &ScalarExpr, schema: &planner_types::pre_asap::Schema) -> Resu
         }
         ScalarExpr::FunctionCall { name, args } => {
             if name != "promql_drop_metric_name"
+                && planner_types::pre_asap::scalar_signature::promql_function_arity(name).is_none()
                 && name != "asap_struct_field"
                 && name != "asap_element_access"
                 && planner_types::pre_asap::scalar_signature::MapScalarFunction::from_name(name)

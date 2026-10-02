@@ -232,9 +232,34 @@ impl OperatorNode {
     /// derived from the operator. For an ASAP node the planner may retain
     /// more specific column names, so only the field types must agree.
     /// `timing` may be `None`.
+    /// Validate assigned phases without imposing any particular runtime implementation.
+    pub fn validate_execution_timing(self: &Rc<Self>) -> Result<(), QueryExprError> {
+        self.validate_structure()?;
+        for node in Self::reachable(self) {
+            let timing = node.timing.ok_or_else(|| {
+                QueryExprError::InvalidScalarSignature("execution timing is unassigned".into())
+            })?;
+            if timing == crate::post_asap::ExecutionTiming::IngestionTime
+                && node.children().iter().any(|child| {
+                    child.timing != Some(crate::post_asap::ExecutionTiming::IngestionTime)
+                })
+            {
+                return Err(QueryExprError::InvalidScalarSignature(
+                    "ingestion-time operation depends on a query-time or unassigned input".into(),
+                ));
+            }
+        }
+        Ok(())
+    }
+
     pub fn validate_structure(self: &Rc<Self>) -> Result<(), QueryExprError> {
         for node in Self::reachable(self) {
             node.operator.validate_inputs()?;
+            if node.result_kind != node.operator.output_kind() {
+                return Err(QueryExprError::InvalidScalarSignature(
+                    "retained result kind disagrees with operation".into(),
+                ));
+            }
             let derived = node.operator.output_schema()?;
             let agree = match &node.operator {
                 Operator::NonASAP(_) => derived == node.schema,
@@ -244,7 +269,7 @@ impl OperatorNode {
                             .fields
                             .iter()
                             .zip(&node.schema.fields)
-                            .all(|(d, r)| d.dtype.is_plain() == r.dtype.is_plain())
+                            .all(|(d, r)| d.dtype == r.dtype && d.nullable == r.nullable)
                 }
             };
             if !agree {

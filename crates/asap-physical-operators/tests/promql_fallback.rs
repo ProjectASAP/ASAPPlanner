@@ -1593,3 +1593,56 @@ fn logical_nonfinite_quantile_parameter_round_trips() {
     assert_eq!(result.len(), 1);
     assert!(result[0].2.is_nan());
 }
+
+/// The proposal's pointwise projections preserve names only for unary minus.
+#[test]
+fn pointwise_projection_names_and_dynamic_parameters() {
+    let samples = [("job=a", 300, -2.5)];
+    assert_eq!(
+        labeled("-m", &[("m", &samples)], 300),
+        [("__name__=m,job=a".into(), 2.5)]
+    );
+    assert_eq!(
+        labeled("abs(m)", &[("m", &samples)], 300),
+        [("job=a".into(), 2.5)]
+    );
+    assert_eq!(
+        run("round(m, scalar(vector(2)))", &samples, 300).unwrap(),
+        [("a".into(), 300_000, -2.0)]
+    );
+    assert_eq!(
+        run("clamp(m, time()-301, time())", &samples, 300).unwrap(),
+        [("a".into(), 300_000, -1.0)]
+    );
+    assert!(run("clamp(m, 2, 1)", &samples, 300).unwrap().is_empty());
+    assert_eq!(
+        run("year(m)", &[("a", 300, 0.0)], 300).unwrap(),
+        [("a".into(), 300_000, 1970.0)]
+    );
+    assert_eq!(
+        run("hour()", &[], 3600).unwrap(),
+        [("".into(), 3_600_000, 1.0)]
+    );
+}
+
+/// Execute every PromQL root/conversion example in the scalar design document.
+#[test]
+fn scalar_design_document_examples_execute() {
+    let samples = [("job=a", 300, 1.0), ("job=b", 300, 2.0)];
+    for (query, expected) in [
+        ("2", 2.0),
+        ("time()", 300.0),
+        ("vector(time())", 300.0),
+        ("scalar(sum(up)) + 1", 4.0),
+    ] {
+        let root = parse_root(query, AccuracyTarget::Exact);
+        root.validate_structure().unwrap();
+        let output = evaluate(query, &[("up", &samples)], 300).unwrap();
+        assert_eq!(output.len(), 1, "{query}");
+        assert_eq!(output[0].2, expected, "{query}");
+    }
+    assert_eq!(
+        labeled("up * 2", &[("up", &samples)], 300),
+        [("job=a".into(), 2.0), ("job=b".into(), 4.0)]
+    );
+}

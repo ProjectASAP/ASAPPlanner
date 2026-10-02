@@ -136,7 +136,8 @@ fn leftmost_scan_name(tree: &UnresolvedOp) -> Option<&str> {
             Source::Table { table_ref } => table_ref.as_str(),
         }),
         U::Values { .. } | U::PromqlVectorFromScalar(_) => None,
-        U::PromqlScalarOp { child, .. }
+        U::PromqlMap { child, .. }
+        | U::PromqlScalarOp { child, .. }
         | U::PromqlRelabel { child, .. }
         | U::PromqlInfoEnrich { child, .. }
         | U::PromqlSeriesSample { child, .. }
@@ -278,7 +279,8 @@ pub fn collect_referenced_columns(tree: &UnresolvedOp) -> Vec<String> {
                 walk(right, out);
             }
             U::PromqlVectorFromScalar(inner) => named(inner, out),
-            U::PromqlScalarOp { child, .. }
+            U::PromqlMap { child, .. }
+            | U::PromqlScalarOp { child, .. }
             | U::PromqlInfoEnrich { child, .. }
             | U::PromqlSubquery { child, .. }
             | U::TimeRange { child, .. }

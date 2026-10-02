@@ -3056,6 +3056,7 @@ fn construct_summary_agg(
         state_schema = Schema::lifted(fields, None);
     } else if let Some(field) = state_schema.fields.get_mut(state_idx) {
         field.dtype = family.clone();
+        field.nullable = false;
         if matches!(&family, FieldDataType::Sketch(kind, _) if kind.algorithm() == &SketchAlgorithm::UnivMon)
         {
             // State identity is independent of which statistic reads it.

@@ -58,7 +58,9 @@ fn resolve_root_with_inherited(
 ) -> Result<Rc<OperatorNode>, ResolveTreeError> {
     let fallback = SchemaResolver::new().resolve_schema_with_inherited(tree, inherited);
     let root = resolve(tree, &fallback)?;
-    Ok(canonicalize(root)?)
+    let root = canonicalize(root)?;
+    root.validate_structure()?;
+    Ok(root)
 }
 
 /// Bind `tree` as a root in its own scope, inheriting from `enclosing` the
@@ -151,6 +153,21 @@ fn resolve(tree: &UnresolvedOp, fallback: &Schema) -> Result<Rc<OperatorNode>, R
             };
             let scalar = resolve_expr(scalar, &Schema::default())?;
             lower_scalar_vector(child, scalar, op, *scalar_left, *return_bool)
+        }
+        U::PromqlMap {
+            child,
+            sample,
+            drop_metric_name,
+        } => {
+            let child = resolve(child, fallback)?;
+            let child = if child.schema.closed {
+                child
+            } else {
+                asap_types::pre_asap::schema::with_promql_series_identity(&child)
+                    .map_err(QueryExprError::InvalidScalarSignature)?
+            };
+            let sample = resolve_expr(sample, &child.schema)?;
+            project_sample(child, sample, *drop_metric_name)
         }
         U::PromqlVectorFromScalar(inner) => {
             node(NonASAPOp::PromqlVectorFromScalar(expr(inner, fallback)?))
@@ -768,16 +785,30 @@ fn lower_scalar_vector(
             .into())
         }
     };
+    project_sample(child, computed, true)
+}
+
+fn project_sample(
+    child: Rc<OperatorNode>,
+    computed: ScalarExpr,
+    drop_metric_name: bool,
+) -> Result<Rc<OperatorNode>, ResolveTreeError> {
+    let value = asap_types::pre_asap::column_resolution::resolve_column_ref(
+        &ColumnRef::SampleValue,
+        &child.schema,
+    )?;
     let cols = child
         .schema
         .fields
         .iter()
         .enumerate()
-        .filter(|(_, f)| f.name != "__name__")
+        .filter(|(_, f)| !drop_metric_name || f.name != "__name__")
         .map(|(i, f)| {
             let expr = if i == value {
                 computed.clone()
-            } else if f.name == asap_types::pre_asap::schema::PROMQL_SERIES_IDENTITY {
+            } else if drop_metric_name
+                && f.name == asap_types::pre_asap::schema::PROMQL_SERIES_IDENTITY
+            {
                 ScalarExpr::FunctionCall {
                     name: "promql_drop_metric_name".into(),
                     args: vec![ScalarExpr::Column(i)],

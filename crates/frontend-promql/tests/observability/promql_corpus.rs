@@ -150,23 +150,17 @@ fn lowering_is_total_over_the_entire_corpus() {
         "testdata corpus unexpectedly small: {td:?}"
     );
 
-    // Coverage tripwire: a code change that breaks lowering for a large slice of
-    // real PromQL trips this. Current numbers on the private promql-parser `asap`
-    // branch: docs 48 lowered / 1 rejected, testdata 1512 lowered / 76 rejected /
-    // 235 unparseable. The floors sit ~1% under those, so they guard regressions
-    // rather than pin an exact count — ratchet them up as coverage lands.
-    //
-    // The 235 unparseable are parser-fork gaps (issue #108); the rejections are
-    // lowering gaps (#109). Both shrink over time, so these floors normally only
-    // rise. Exception: the testdata floor was lowered to the measured 1485 when
-    // the 44 `fill` vector-matching queries became rejected rather than
-    // silently lowered without their fill semantics.
+    // Coverage tripwire after rejecting unrepresented native histogram samples:
+    // docs 48 lowered / 1 rejected; testdata 1121 lowered / 469 rejected /
+    // 233 parser gaps. Earlier coverage counted native histogram operations
+    // incorrectly treated as float quantiles. Keep the rejection cases in the
+    // corpus: accepting them requires a native histogram sample representation.
     assert!(
         docs.lowered >= 47,
         "docs lowering coverage regressed: {docs:?}"
     );
     assert!(
-        td.lowered >= 1485,
+        td.lowered >= 1121,
         "testdata lowering coverage regressed: {td:?}"
     );
 }

@@ -12,6 +12,7 @@ serde_json = "1"
 tracing = "0.1"
 thiserror = "2"
 regex = "1"
+chrono = { version = "=0.4.39", default-features = false, features = ["std"] }
 
 
 [dev-dependencies]

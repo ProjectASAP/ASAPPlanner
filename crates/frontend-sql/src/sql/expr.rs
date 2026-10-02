@@ -220,16 +220,6 @@ impl SqlLowerer<'_> {
                 negated: ex.negated,
             }),
             Expr::InSubquery(is) => {
-                if is.negated {
-                    // `NOT IN` is not an anti-join. Under three-valued logic a
-                    // single NULL among the subquery's rows makes `c NOT IN (…)`
-                    // UNKNOWN for every `c`, so the query returns nothing —
-                    // while an anti-join returns every unmatched left row.
-                    // Reject rather than mislower.
-                    return Err(LoweringError::UnsupportedFeature(
-                        "NOT IN (subquery): its NULL semantics are not an anti-join".into(),
-                    ));
-                }
                 let fields = is.subquery.subquery.schema().fields().len();
                 if fields != 1 {
                     return Err(LoweringError::InvalidExpression(format!(
@@ -241,7 +231,7 @@ impl SqlLowerer<'_> {
                     subquery: Rc::new(
                         self.lower_uncorrelated_subquery(&is.subquery, "IN (subquery)")?,
                     ),
-                    negated: false,
+                    negated: is.negated,
                 })
             }
 

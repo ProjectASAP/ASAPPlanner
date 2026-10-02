@@ -81,3 +81,48 @@ fn scalar_plan_dependencies_remain_visible() {
     };
     assert_eq!(node.children().len(), 2);
 }
+
+/// Pointwise functions own scalar parameters, including vector-to-scalar reads.
+#[test]
+fn pointwise_functions_are_typed_scalar_projections() {
+    for query in [
+        "abs(up)",
+        "round(up, scalar(sum(other)))",
+        "clamp(up, time() - 1, time())",
+        "year(up)",
+        "hour()",
+    ] {
+        let QueryRoot::Operator(node) = root(query) else {
+            panic!()
+        };
+        let NonASAPOp::Project { cols, .. } = node.expect_non_asap() else {
+            panic!("{query}: expected projection")
+        };
+        assert!(matches!(
+            &cols[node.schema.column_id("value").unwrap()].expr,
+            ScalarExpr::FunctionCall { .. }
+        ));
+        node.validate_structure().unwrap();
+    }
+}
+
+/// Negation preserves the metric name and complete identity unlike multiplication.
+#[test]
+fn unary_minus_preserves_identity() {
+    let QueryRoot::Operator(node) = root("-up") else {
+        panic!()
+    };
+    let NonASAPOp::Project { child, cols, .. } = node.expect_non_asap() else {
+        panic!()
+    };
+    assert_eq!(node.schema, child.schema);
+    assert!(matches!(
+        &cols[node.schema.column_id("value").unwrap()].expr,
+        ScalarExpr::Negative { .. }
+    ));
+    for (index, col) in cols.iter().enumerate() {
+        if index != node.schema.column_id("value").unwrap() {
+            assert_eq!(col.expr, ScalarExpr::Column(index));
+        }
+    }
+}

@@ -14,6 +14,19 @@ impl From<Rc<OperatorNode>> for QueryRoot {
     }
 }
 impl QueryRoot {
+    pub fn validate_structure(&self) -> Result<(), crate::pre_asap::QueryExprError> {
+        match self {
+            Self::Operator(node) => node.validate_structure(),
+            Self::Scalar(expr) => {
+                expr.scalar_type(&crate::pre_asap::Schema::default())?;
+                for node in expr.operator_refs() {
+                    node.validate_structure()?;
+                }
+                Ok(())
+            }
+        }
+    }
+
     pub fn as_operator(&self) -> Option<&Rc<OperatorNode>> {
         match self {
             Self::Operator(node) => Some(node),

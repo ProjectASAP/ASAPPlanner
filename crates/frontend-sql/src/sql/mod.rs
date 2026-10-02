@@ -200,6 +200,8 @@ impl<'a> SqlLowerer<'a> {
         let plan = state.statement_to_plan(statement).await?;
         let rewriter = ApplyFunctionRewrites::new(vec![Arc::new(ClickHouseBuiltinRewrite)]);
         let plan = rewriter.analyze(plan, ctx.state().options())?;
+        let plan = datafusion::optimizer::analyzer::type_coercion::TypeCoercion::new()
+            .analyze(plan, ctx.state().options())?;
         // Output schemas omit predicate and nested-expression types. Check the
         // typed SQL plan before lowering erases fixed-duration units.
         plan.apply_with_subqueries(|node| {
@@ -615,6 +617,10 @@ impl<'a> SqlLowerer<'a> {
             .window_expr
             .first()
             .ok_or_else(|| LoweringError::InvalidExpression("empty window expression".into()))?;
+        let first = match first {
+            Expr::Alias(alias) => alias.expr.as_ref(),
+            other => other,
+        };
         let Expr::WindowFunction(wf) = first else {
             return Err(LoweringError::InvalidExpression(
                 "expected a window function in Window plan node".into(),

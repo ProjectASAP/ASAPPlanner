@@ -22,27 +22,10 @@
 //!
 //! ## Subquery lowering
 //!
-//! The SQL front end leaves `[NOT] EXISTS (…)`, `x IN (…)` and scalar
-//! subqueries as the scalar variants `ScalarExpr::{Exists, InSubquery,
-//! ScalarSubquery}` inside `Filter` predicates and `Project` items. This pass
-//! lowers them to the join shapes the planner and the physical lowering
-//! match on (`|l|` is the left input's column count; the join predicate of a
-//! semi/anti join resolves against `left ++ right` even though its output is
-//! the left's columns alone):
-//!
-//! ```text
-//! Filter { EXISTS (s) ∧ rest }{ l }     → Filter { rest }{ Join { Semi, true, l, s } }
-//! Filter { NOT EXISTS (s) ∧ rest }{ l } → Filter { rest }{ Join { Anti, true, l, s } }
-//! Filter { x IN (s) ∧ rest }{ l }       → Filter { rest }{ Join { Semi, x = Column(|l|), l, s } }
-//! Project { … (s) … }{ l }              → Project { … Column(|l|) … }{ Join { Cross, true, l, s } }
-//! Filter { … (s) … }{ l }               → Project { l's columns }{
-//!                                             Filter { … Column(|l|) … }{ Join { Cross, true, l, s } } }
-//! ```
-//!
-//! `NOT IN (s)` is left as is: under SQL three-valued logic a NULL on either
-//! side makes it UNKNOWN, which no anti-join reproduces (the front end rejects
-//! it anyway). A lifted subquery is canonicalized like any other operator
-//! input, so the result is a fixpoint of this pass.
+//! EXISTS/NOT EXISTS and positive IN filter conjuncts may use semi/anti joins.
+//! Scalar subqueries remain explicit: a cross join does not preserve their
+//! zero-row NULL or multiple-row error semantics. All scalar plan references
+//! participate in DAG traversal and canonicalization.
 
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -52,8 +35,7 @@ use super::non_asap::NonASAPOp;
 use super::scalar::{ExprSemantics, Predicate, ProjectItem, ScalarExpr, SortKey};
 use crate::pre_asap::agg_intent::{topk, AggIntent};
 use crate::pre_asap::expr_ir::{CompareOpKind, ScalarValue};
-use crate::pre_asap::schema::ColumnId;
-use crate::pre_asap::vocabulary::{JoinKind, QueryExprError, Reduction, WindowFuncKind};
+use crate::pre_asap::vocabulary::{JoinKind, QueryExprError, Reduction};
 use crate::types::AccuracyTarget;
 
 /// Rewrite the DAG under `root` into its canonical form (bottom-up).
@@ -154,13 +136,9 @@ fn apply_local_rules(
     memo: &mut Memo,
 ) -> Result<Rc<OperatorNode>, QueryExprError> {
     loop {
-        let next = if let Some(next) = try_rewrite_rownumber_topk(&current)? {
-            next
-        } else if let Some(next) = try_promote_additive_top_ranking(&current)? {
+        let next = if let Some(next) = try_promote_additive_top_ranking(&current)? {
             next
         } else if let Some(next) = try_lower_subquery_conjunct(&current, memo)? {
-            next
-        } else if let Some(next) = try_lower_scalar_subquery(&current, memo)? {
             next
         } else {
             break;
@@ -177,29 +155,7 @@ fn apply_local_rules(
 /// place (`NOT IN`, an `EXISTS` outside a `Filter` conjunct) stays as the
 /// front end emitted it.
 fn operator_children(op: &Operator) -> Vec<&Rc<OperatorNode>> {
-    use NonASAPOp::*;
-    match op {
-        Operator::ASAP(op) => op.children(),
-        Operator::NonASAP(op) => match op {
-            Scan { .. } | Values { .. } | PromqlVectorFromScalar(_) => vec![],
-            Filter { child, .. }
-            | Project { child, .. }
-            | Aggregate { child, .. }
-            | Dedup { child, .. }
-            | Sort { child, .. }
-            | Limit { child, .. }
-            | SQLWindowFunc { child, .. }
-            | TimeRange { child, .. }
-            | TimeShift { child, .. }
-            | PromqlRelabel { child, .. }
-            | PromqlInfoEnrich { child, .. }
-            | PromqlSeriesSample { child, .. }
-            | PromqlSubquery { child, .. } => vec![child],
-            Join { left, right, .. } | SetOp { left, right, .. } => vec![left, right],
-            BinaryOp { lhs, rhs, .. } => vec![lhs, rhs],
-            Concat { children, .. } => children.iter().collect(),
-        },
-    }
+    op.children()
 }
 
 /// Recognise an additive-ranked
@@ -319,93 +275,8 @@ fn try_promote_additive_top_ranking(
     .map(Some)
 }
 
-/// Recognise the SQL partitioned-top-k idiom — `WHERE rn <= k` over a
-/// `ROW_NUMBER() OVER (PARTITION BY p ORDER BY o)` — and rewrite it to the
-/// generic partitioned top-k `Limit{k, partition_by: p} { Sort{ o,
-/// partition_by: p } }` (issue #24). The count-ranked case is then promoted
-/// to a heavy-hitter `TopK` by [`try_promote_additive_top_ranking`], so a SQL
-/// `ROW_NUMBER` top-k and the PromQL `topk by (…)` it mirrors converge on the
-/// same canonical shape.
-fn try_rewrite_rownumber_topk(
-    node: &OperatorNode,
-) -> Result<Option<Rc<OperatorNode>>, QueryExprError> {
-    // Filter { pred: `Column(rn) <= k` }.
-    let Some(NonASAPOp::Filter {
-        pred: Predicate(pred_expr),
-        child,
-    }) = node.non_asap()
-    else {
-        return Ok(None);
-    };
-    let ScalarExpr::Compare {
-        left, op, right, ..
-    } = pred_expr
-    else {
-        return Ok(None);
-    };
-    // `rn <= k` (top-k). `rn < k` would be off-by-one; require `<=`.
-    if *op != CompareOpKind::Le {
-        return Ok(None);
-    }
-    let (ScalarExpr::Column(rn_col), ScalarExpr::Literal(ScalarValue::Int64(k))) =
-        (left.as_ref(), right.as_ref())
-    else {
-        return Ok(None);
-    };
-    if *k < 0 {
-        return Ok(None);
-    }
-
-    // Optionally strip a passthrough projection (the derived table's SELECT
-    // that re-exposes the aggregate columns + rn), mapping rn through it.
-    let (wf_node, rn_in_wf) = match child.non_asap() {
-        Some(NonASAPOp::Project { cols, child, .. }) => {
-            let Some(ProjectItem {
-                expr: ScalarExpr::Column(underlying),
-                ..
-            }) = cols.get(*rn_col)
-            else {
-                return Ok(None);
-            };
-            (child, *underlying)
-        }
-        _ => (child, *rn_col),
-    };
-
-    // The filtered column must be a `ROW_NUMBER()` window output — the single
-    // column the SQLWindowFunc appends after its input, i.e. the last one.
-    let Some(NonASAPOp::SQLWindowFunc {
-        func: WindowFuncKind::RowNumber,
-        partition_by,
-        order_by,
-        child: inner,
-        ..
-    }) = wf_node.non_asap()
-    else {
-        return Ok(None);
-    };
-    if order_by.is_empty() {
-        return Ok(None);
-    }
-    if rn_in_wf != inner.schema.fields.len() {
-        return Ok(None); // the predicate ranks some other column, not the row number
-    }
-
-    // Generic partitioned top-k. The window's ORDER BY keys are relative to
-    // its input (`inner`), so they transfer directly to a `Sort` over `inner`.
-    let sort = OperatorNode::non_asap_node(NonASAPOp::Sort {
-        keys: order_by.clone(),
-        partition_by: partition_by.clone(),
-        child: Rc::clone(inner),
-    })?;
-    OperatorNode::non_asap_node(NonASAPOp::Limit {
-        n: Some(*k as usize),
-        offset: 0,
-        partition_by: partition_by.clone(),
-        child: sort,
-    })
-    .map(Some)
-}
+// ROW_NUMBER filters retain the window output. Eliminating it without a
+// consumer-aware rewrite drops a visible column and invalidates outer scopes.
 
 /// `Predicate(true)`: the unconditional join predicate the SQL front end
 /// emits for an uncorrelated `EXISTS` and for a `CROSS JOIN`.
@@ -510,84 +381,10 @@ fn try_lower_subquery_conjunct(
 /// an error when a scalar subquery yields more than one row (the cross join
 /// would duplicate the left's rows instead), and yields NULL when it yields
 /// none (the cross join yields no rows instead).
-fn try_lower_scalar_subquery(
-    node: &OperatorNode,
-    memo: &mut Memo,
-) -> Result<Option<Rc<OperatorNode>>, QueryExprError> {
-    match node.non_asap() {
-        Some(NonASAPOp::Project {
-            cols,
-            qualifier,
-            child,
-        }) => {
-            let Some(sub) = cols.iter().find_map(|c| find_scalar_subquery(&c.expr)) else {
-                return Ok(None);
-            };
-            let column = child.schema.fields.len();
-            let cols = cols
-                .iter()
-                .map(|c| ProjectItem {
-                    alias: c.alias.clone(),
-                    expr: replace_scalar_subquery(&c.expr, sub, column),
-                })
-                .collect();
-            OperatorNode::non_asap_node(NonASAPOp::Project {
-                cols,
-                qualifier: qualifier.clone(),
-                child: cross_join(child, sub, memo)?,
-            })
-            .map(Some)
-        }
-        Some(NonASAPOp::Filter {
-            pred: Predicate(pred),
-            child,
-        }) => {
-            let Some(sub) = find_scalar_subquery(pred) else {
-                return Ok(None);
-            };
-            let column = child.schema.fields.len();
-            let filtered = filter(
-                replace_scalar_subquery(pred, sub, column),
-                cross_join(child, sub, memo)?,
-            )?;
-            // The predicate may still hold subquery conjuncts (an `IN` whose
-            // probe read this scalar subquery); lower them before the
-            // positional projection hides the `Filter` from the loop.
-            let filtered = apply_local_rules(filtered, memo)?;
-            OperatorNode::non_asap_node(NonASAPOp::Project {
-                cols: (0..column)
-                    .map(|id| ProjectItem {
-                        alias: None,
-                        expr: ScalarExpr::Column(id),
-                    })
-                    .collect(),
-                qualifier: None,
-                child: filtered,
-            })
-            .map(Some)
-        }
-        _ => Ok(None),
-    }
-}
-
 fn filter(pred: ScalarExpr, child: Rc<OperatorNode>) -> Result<Rc<OperatorNode>, QueryExprError> {
     OperatorNode::non_asap_node(NonASAPOp::Filter {
         pred: Predicate(pred),
         child,
-    })
-}
-
-/// `left × subquery`, with the subquery canonicalized on the way in.
-fn cross_join(
-    left: &Rc<OperatorNode>,
-    subquery: &Rc<OperatorNode>,
-    memo: &mut Memo,
-) -> Result<Rc<OperatorNode>, QueryExprError> {
-    OperatorNode::non_asap_node(NonASAPOp::Join {
-        kind: JoinKind::Cross,
-        pred: always_true(),
-        left: Rc::clone(left),
-        right: canon(subquery, memo)?,
     })
 }
 
@@ -601,129 +398,11 @@ fn find_scalar_subquery(expr: &ScalarExpr) -> Option<&Rc<OperatorNode>> {
     expr.children().into_iter().find_map(find_scalar_subquery)
 }
 
-/// `expr` with every `ScalarSubquery(sub)` occurrence (the same node, by
-/// pointer identity) replaced by `Column(column)`.
-fn replace_scalar_subquery(
-    expr: &ScalarExpr,
-    sub: &Rc<OperatorNode>,
-    column: ColumnId,
-) -> ScalarExpr {
-    rewrite_scalar(expr, &mut |e| match e {
-        ScalarExpr::ScalarSubquery(node) if Rc::ptr_eq(node, sub) => {
-            Some(ScalarExpr::Column(column))
-        }
-        _ => None,
-    })
-}
-
-/// Rebuild `expr` top-down: where `f` returns `Some`, that replaces the
-/// subtree (which is not descended into); elsewhere the node is rebuilt over
-/// its rewritten scalar children. Operator nodes referenced from the tree
-/// are a separate scope and are left as they are.
-fn rewrite_scalar(
-    expr: &ScalarExpr,
-    f: &mut impl FnMut(&ScalarExpr) -> Option<ScalarExpr>,
-) -> ScalarExpr {
-    if let Some(replaced) = f(expr) {
-        return replaced;
-    }
-    fn boxed(
-        e: &ScalarExpr,
-        f: &mut impl FnMut(&ScalarExpr) -> Option<ScalarExpr>,
-    ) -> Box<ScalarExpr> {
-        Box::new(rewrite_scalar(e, f))
-    }
-    fn each(
-        es: &[ScalarExpr],
-        f: &mut impl FnMut(&ScalarExpr) -> Option<ScalarExpr>,
-    ) -> Vec<ScalarExpr> {
-        es.iter().map(|e| rewrite_scalar(e, f)).collect()
-    }
-    match expr {
-        ScalarExpr::Column(_)
-        | ScalarExpr::Literal(_)
-        | ScalarExpr::CurrentTimestamp
-        | ScalarExpr::EvalTimestamp
-        | ScalarExpr::PromqlScalarFromVector(_)
-        | ScalarExpr::ScalarSubquery(_)
-        | ScalarExpr::Exists { .. } => expr.clone(),
-        ScalarExpr::Negative { expr, semantics } => ScalarExpr::Negative {
-            expr: boxed(expr, f),
-            semantics: *semantics,
-        },
-        ScalarExpr::Compare {
-            left,
-            op,
-            right,
-            semantics,
-        } => ScalarExpr::Compare {
-            left: boxed(left, f),
-            op: op.clone(),
-            right: boxed(right, f),
-            semantics: *semantics,
-        },
-        ScalarExpr::BoolAnd(parts) => ScalarExpr::BoolAnd(each(parts, f)),
-        ScalarExpr::BoolOr(parts) => ScalarExpr::BoolOr(each(parts, f)),
-        ScalarExpr::Not(e) => ScalarExpr::Not(boxed(e, f)),
-        ScalarExpr::IsNull(e) => ScalarExpr::IsNull(boxed(e, f)),
-        ScalarExpr::IsNotNull(e) => ScalarExpr::IsNotNull(boxed(e, f)),
-        ScalarExpr::Cast { expr, to, try_cast } => ScalarExpr::Cast {
-            expr: boxed(expr, f),
-            to: to.clone(),
-            try_cast: *try_cast,
-        },
-        ScalarExpr::InList {
-            expr,
-            list,
-            negated,
-        } => ScalarExpr::InList {
-            expr: boxed(expr, f),
-            list: each(list, f),
-            negated: *negated,
-        },
-        ScalarExpr::FunctionCall { name, args } => ScalarExpr::FunctionCall {
-            name: name.clone(),
-            args: each(args, f),
-        },
-        ScalarExpr::Arithmetic {
-            op,
-            left,
-            right,
-            semantics,
-        } => ScalarExpr::Arithmetic {
-            op: op.clone(),
-            left: boxed(left, f),
-            right: boxed(right, f),
-            semantics: *semantics,
-        },
-        ScalarExpr::Case {
-            operand,
-            branches,
-            else_expr,
-        } => ScalarExpr::Case {
-            operand: operand.as_ref().map(|e| boxed(e, f)),
-            branches: branches
-                .iter()
-                .map(|(w, t)| (rewrite_scalar(w, f), rewrite_scalar(t, f)))
-                .collect(),
-            else_expr: else_expr.as_ref().map(|e| boxed(e, f)),
-        },
-        ScalarExpr::InSubquery {
-            expr,
-            subquery,
-            negated,
-        } => ScalarExpr::InSubquery {
-            expr: boxed(expr, f),
-            subquery: Rc::clone(subquery),
-            negated: *negated,
-        },
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::pre_asap::schema::{DataType, Field, Schema};
+    use crate::pre_asap::vocabulary::WindowFuncKind;
     use crate::pre_asap::vocabulary::{
         ConcatDiscriminatorKey, GroupKeys, Source, WindowFrame, WindowFrameBound,
         WindowFrameOffset, WindowFrameUnits,
@@ -1134,55 +813,24 @@ mod tests {
 
     #[test]
     fn rownumber_count_topk_becomes_a_partitioned_heavy_hitter() {
-        // Count-ranked ROW_NUMBER top-k → outer TopK grouped by the partition
-        // (region, col 2) over the explicit inner Count.
-        let out = canonicalize(rownumber_topk(grouped(count()))).unwrap();
-        let Some(NonASAPOp::Aggregate {
-            reduction,
-            measures,
-            child,
-            ..
-        }) = out.non_asap()
-        else {
-            panic!("expected outer Aggregate([TopK]), got {out:?}");
-        };
-        let Reduction::Reduce(by) = reduction else {
-            panic!("expected a Reduce grouping, got {reduction:?}");
-        };
-        assert!(matches!(
-            measures.as_slice(),
-            [AggIntent::TopK { k: 5, .. }]
-        ));
-        assert_eq!(**by, vec![2], "outer TopK partitioned by region");
-        assert!(matches!(self::measures(child), [AggIntent::Count { .. }]));
+        let original = rownumber_topk(grouped(count()));
+        let out = canonicalize(Rc::clone(&original)).unwrap();
+        assert_eq!(out.schema, original.schema);
+        assert!(
+            matches!(out.non_asap(),Some(NonASAPOp::Filter { child,.. }) if matches!(child.non_asap(),Some(NonASAPOp::SQLWindowFunc { .. })))
+        );
+        assert_idempotent(&out);
     }
 
     #[test]
     fn rownumber_avg_topk_becomes_a_partitioned_sort_limit() {
-        // Avg-ranked (not a frequency heavy-hitter) → generic partitioned
-        // top-k: Limit{5, partition_by: [region]}{ Sort{ partition_by: [region] } }.
-        let out = canonicalize(rownumber_topk(grouped(AggIntent::Avg { col: None }))).unwrap();
-        let Some(NonASAPOp::Limit {
-            n,
-            partition_by: limit_partition,
-            child,
-            ..
-        }) = out.non_asap()
-        else {
-            panic!("expected a Limit, got {out:?}");
-        };
-        assert_eq!(*n, Some(5));
-        assert_eq!(**limit_partition, vec![2], "limit applied per region");
-        let Some(NonASAPOp::Sort {
-            partition_by,
-            child,
-            ..
-        }) = child.non_asap()
-        else {
-            panic!("expected a Sort under the Limit");
-        };
-        assert_eq!(**partition_by, vec![2], "partitioned by region");
-        assert!(matches!(self::measures(child), [AggIntent::Avg { .. }]));
+        let original = rownumber_topk(grouped(AggIntent::Avg { col: None }));
+        let out = canonicalize(Rc::clone(&original)).unwrap();
+        assert_eq!(out.schema, original.schema);
+        assert!(
+            matches!(out.non_asap(),Some(NonASAPOp::Filter { child,.. }) if matches!(child.non_asap(),Some(NonASAPOp::SQLWindowFunc { .. })))
+        );
+        assert_idempotent(&out);
     }
 
     #[test]
@@ -1204,14 +852,43 @@ mod tests {
     }
 
     /// `SELECT service FROM scan` — a one-column subquery.
-    fn one_column_subquery() -> Rc<OperatorNode> {
-        node(NonASAPOp::Project {
-            cols: vec![ProjectItem {
-                alias: None,
-                expr: ScalarExpr::Column(1),
-            }],
-            qualifier: None,
+    /// Scalar reads retain cardinality/null semantics and a shared producer.
+    #[test]
+    fn scalar_subqueries_remain_explicit_and_shared() {
+        let sub = one_column_subquery();
+        let root = node(NonASAPOp::Project {
             child: scan(),
+            qualifier: None,
+            cols: vec![
+                ProjectItem {
+                    alias: Some("a".into()),
+                    expr: ScalarExpr::ScalarSubquery(Rc::clone(&sub)),
+                },
+                ProjectItem {
+                    alias: Some("b".into()),
+                    expr: ScalarExpr::ScalarSubquery(Rc::clone(&sub)),
+                },
+            ],
+        });
+        let out = canonicalize(root).unwrap();
+        let NonASAPOp::Project { cols, child, .. } = out.expect_non_asap() else {
+            panic!()
+        };
+        assert!(matches!(child.expect_non_asap(), NonASAPOp::Scan { .. }));
+        for col in cols {
+            assert!(matches!(&col.expr,ScalarExpr::ScalarSubquery(node) if Rc::ptr_eq(node,&sub)));
+        }
+        assert!(out.schema.fields.iter().all(|f| f.nullable));
+        assert_idempotent(&out);
+    }
+
+    fn one_column_subquery() -> Rc<OperatorNode> {
+        node(NonASAPOp::Scan {
+            source: Source::Table {
+                table_ref: "sub".into(),
+            },
+            predicates: vec![],
+            schema: Schema::new(vec![Field::plain("value", DataType::Float64, false)]),
         })
     }
 
@@ -1368,135 +1045,6 @@ mod tests {
         let (kind, _, l, r) = join_parts(inner);
         assert_eq!(kind, JoinKind::Semi);
         assert!(Rc::ptr_eq(l, &left) && Rc::ptr_eq(r, &a));
-        assert_idempotent(&out);
-    }
-
-    #[test]
-    fn scalar_subquery_in_projection_becomes_cross_join() {
-        // `SELECT service, value - (SELECT …)` → the subquery's column is
-        // `Column(3)` after the cross join.
-        let (left, sub) = (scan(), one_column_subquery());
-        let minus = |rhs: ScalarExpr| ScalarExpr::Arithmetic {
-            op: crate::pre_asap::expr_ir::ArithmeticOpKind::Sub,
-            left: Box::new(ScalarExpr::Column(2)),
-            right: Box::new(rhs),
-            semantics: ExprSemantics::Sql,
-        };
-        let q = node(NonASAPOp::Project {
-            cols: vec![
-                ProjectItem {
-                    alias: None,
-                    expr: ScalarExpr::Column(1),
-                },
-                ProjectItem {
-                    alias: Some("delta".into()),
-                    expr: minus(ScalarExpr::ScalarSubquery(Rc::clone(&sub))),
-                },
-            ],
-            qualifier: None,
-            child: Rc::clone(&left),
-        });
-        let out = canonicalize(q).unwrap();
-        let Some(NonASAPOp::Project { cols, child, .. }) = out.non_asap() else {
-            panic!("expected a Project, got {out:?}");
-        };
-        assert_eq!(cols[0].expr, ScalarExpr::Column(1));
-        assert_eq!(cols[1].alias.as_deref(), Some("delta"));
-        assert_eq!(cols[1].expr, minus(ScalarExpr::Column(3)));
-        let (kind, pred, l, r) = join_parts(child);
-        assert_eq!(kind, JoinKind::Cross);
-        assert_eq!(*pred, literal_true());
-        assert!(Rc::ptr_eq(l, &left) && Rc::ptr_eq(r, &sub));
-        assert_eq!(out.schema.fields.len(), 2);
-        assert_idempotent(&out);
-    }
-
-    #[test]
-    fn each_scalar_subquery_gets_its_own_cross_join() {
-        // Two distinct subqueries: the first lands at Column(3), the second
-        // (joined further out) at Column(4); the left's ids never shift.
-        let (left, a, b) = (scan(), one_column_subquery(), one_column_subquery());
-        let q = node(NonASAPOp::Project {
-            cols: vec![
-                ProjectItem {
-                    alias: None,
-                    expr: ScalarExpr::ScalarSubquery(Rc::clone(&a)),
-                },
-                ProjectItem {
-                    alias: None,
-                    expr: ScalarExpr::ScalarSubquery(Rc::clone(&b)),
-                },
-                ProjectItem {
-                    alias: None,
-                    expr: ScalarExpr::Column(2),
-                },
-            ],
-            qualifier: None,
-            child: Rc::clone(&left),
-        });
-        let out = canonicalize(q).unwrap();
-        let Some(NonASAPOp::Project { cols, child, .. }) = out.non_asap() else {
-            panic!("expected a Project, got {out:?}");
-        };
-        let exprs: Vec<_> = cols.iter().map(|c| c.expr.clone()).collect();
-        assert_eq!(
-            exprs,
-            vec![
-                ScalarExpr::Column(3),
-                ScalarExpr::Column(4),
-                ScalarExpr::Column(2)
-            ]
-        );
-        let (kind, _, inner, r) = join_parts(child);
-        assert_eq!(kind, JoinKind::Cross);
-        assert!(Rc::ptr_eq(r, &b));
-        let (kind, _, l, r) = join_parts(inner);
-        assert_eq!(kind, JoinKind::Cross);
-        assert!(Rc::ptr_eq(l, &left) && Rc::ptr_eq(r, &a));
-        assert_idempotent(&out);
-    }
-
-    #[test]
-    fn scalar_subquery_in_filter_restores_the_left_schema() {
-        // `WHERE value > (SELECT …)` → Project{ left's cols }{ Filter{ value >
-        // Column(3) }{ Cross{ left, sub } } }.
-        let (left, sub) = (scan(), one_column_subquery());
-        let gt = |rhs: ScalarExpr| ScalarExpr::Compare {
-            left: Box::new(ScalarExpr::Column(2)),
-            op: CompareOpKind::Gt,
-            right: Box::new(rhs),
-            semantics: ExprSemantics::Sql,
-        };
-        let q = filter_of(
-            gt(ScalarExpr::ScalarSubquery(Rc::clone(&sub))),
-            Rc::clone(&left),
-        );
-        let out = canonicalize(q).unwrap();
-        let Some(NonASAPOp::Project { cols, child, .. }) = out.non_asap() else {
-            panic!("expected a restoring Project, got {out:?}");
-        };
-        let exprs: Vec<_> = cols.iter().map(|c| c.expr.clone()).collect();
-        assert_eq!(
-            exprs,
-            vec![
-                ScalarExpr::Column(0),
-                ScalarExpr::Column(1),
-                ScalarExpr::Column(2)
-            ]
-        );
-        let names: Vec<_> = out.schema.fields.iter().map(|f| f.name.as_str()).collect();
-        assert_eq!(names, vec!["ts", "service", "value"]);
-        let Some(NonASAPOp::Filter {
-            pred: Predicate(pred),
-            child,
-        }) = child.non_asap()
-        else {
-            panic!("expected a Filter under the Project");
-        };
-        assert_eq!(*pred, gt(ScalarExpr::Column(3)));
-        let (kind, _, l, r) = join_parts(child);
-        assert_eq!(kind, JoinKind::Cross);
-        assert!(Rc::ptr_eq(l, &left) && Rc::ptr_eq(r, &sub));
         assert_idempotent(&out);
     }
 

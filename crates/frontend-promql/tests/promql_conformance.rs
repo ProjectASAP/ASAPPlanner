@@ -41,8 +41,8 @@ use asap_types::ir::{
 };
 use asap_types::pre_asap::schema::DataType;
 use asap_types::pre_asap::{
-    AggIntent, ArithmeticOpKind, AtModifier, BinaryOpKind, CompareOpKind, MathFunc,
-    PromQLVectorSetOpKind, Reduction, SampleKind, ScalarValue, Source, TimeFunc,
+    AggIntent, ArithmeticOpKind, AtModifier, BinaryOpKind, CompareOpKind, PromQLVectorSetOpKind,
+    Reduction, SampleKind, ScalarValue, Source, TimeFunc,
 };
 use asap_types::types::AccuracyTarget;
 use support::{lower_promql, promql_scalar};
@@ -114,8 +114,7 @@ fn has<F: Fn(&AggIntent) -> bool>(e: &OperatorNode, pred: F) -> bool {
 /// negation lowers to (issue #36).
 fn negates_via_scalar(e: &OperatorNode) -> bool {
     fn negative(expr: &ScalarExpr) -> bool {
-        matches!(expr, ScalarExpr::Arithmetic { op: ArithmeticOpKind::Mul, right, .. } if promql_scalar(right) == Some(-1.0))
-            || expr.children().iter().any(|e| negative(e))
+        matches!(expr, ScalarExpr::Negative { .. }) || expr.children().iter().any(|e| negative(e))
     }
     e.expect_non_asap()
         .scalar_exprs()
@@ -1553,8 +1552,8 @@ fn predict_linear_and_double_exp_over_a_subquery_carry_params() {
 #[test]
 fn histogram_quantile_classic_bucket_vs_native() {
     // Two lowerings of `histogram_quantile(φ, …)`: the classic cumulative-bucket
-    // form → exact `HistogramQuantile`; a native-histogram / raw-samples argument
-    // → the generic (sketch-able) `Quantile`. The classic form is recognised by
+    // form → exact `HistogramQuantile`; native samples require a new type.
+    // The classic form is recognised by
     // `by (le)`, a `_bucket` metric, or an `le` matcher (issue #43).
     for classic in [
         "histogram_quantile(0.9, sum by (le) (rate(x_bucket[5m])))",
@@ -1578,65 +1577,27 @@ fn histogram_quantile_classic_bucket_vs_native() {
         "histogram_quantile(0.9, my_native_histogram)",
         "histogram_quantile(0.9, request_duration_seconds)", // raw samples (your extension)
     ] {
-        let qe = ok(native);
-        assert!(
-            has(
-                &qe,
-                |i| matches!(i, AggIntent::Quantile { q, .. } if (*q - 0.9).abs() < 1e-9)
-            ),
-            "native/raw form → generic Quantile: {native}"
-        );
-        assert!(
-            !has(&qe, |i| matches!(i, AggIntent::HistogramQuantile { .. })),
-            "{native}"
-        );
+        rejected(native);
     }
 }
 
 #[test]
-fn histogram_accessors_lower_to_per_series_intents() {
-    // `histogram_<accessor>(v)` extracts a float per series from a native
-    // histogram — a per-series `Aggregate{[accessor]}` directly over the
-    // (instant) argument, no grouping. (`histogram_quantile` has its own two
-    // lowerings — see `histogram_quantile_classic_bucket_vs_native`.)
-    for (q, want) in [
-        ("histogram_count(v)", AggIntent::HistogramCount),
-        ("histogram_sum(v)", AggIntent::HistogramSum),
-        ("histogram_avg(v)", AggIntent::HistogramAvg),
-        ("histogram_stddev(v)", AggIntent::HistogramStdDev),
-        ("histogram_stdvar(v)", AggIntent::HistogramStdVar),
+fn native_histogram_accessors_are_explicit_gaps() {
+    // Native histogram samples have no typed representation yet.
+    for q in [
+        "histogram_count(v)",
+        "histogram_sum(v)",
+        "histogram_avg(v)",
+        "histogram_stddev(v)",
+        "histogram_stdvar(v)",
     ] {
-        let qe = ok(q);
-        let NonASAPOp::Aggregate {
-            reduction,
-            measures,
-            ..
-        } = qe.expect_non_asap()
-        else {
-            panic!("{q}: expected an Aggregate, got {qe:?}");
-        };
-        assert_eq!(
-            reduction,
-            &Reduction::PerEntity,
-            "{q}: per-series, no grouping"
-        );
-        assert_eq!(
-            measures.as_slice(),
-            std::slice::from_ref(&want),
-            "{q}: wrong intent"
-        );
+        rejected(q);
     }
 }
 
 #[test]
-fn histogram_fraction_carries_its_bounds() {
-    // `histogram_fraction(lower, upper, v)` — bounds from args 0/1, vector arg 2.
-    let qe = ok("histogram_fraction(0, 0.2, v)");
-    assert!(intents(&qe).iter().any(|i| matches!(
-        i,
-        AggIntent::HistogramFraction { lower, upper }
-            if *lower == 0.0 && (*upper - 0.2).abs() < 1e-9
-    )));
+fn histogram_fraction_is_an_explicit_gap() {
+    rejected("histogram_fraction(0, 0.2, v)");
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1644,61 +1605,36 @@ fn histogram_fraction_carries_its_bounds() {
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[test]
-fn math_functions_lower_to_per_series_math_intents() {
-    // Each `f(v)` is a per-series element-wise value transform — a per-series
-    // `Aggregate{[Math(f)]}` over the (instant) argument, no grouping.
-    for (q, want) in [
-        ("abs(v)", MathFunc::Abs),
-        ("ceil(v)", MathFunc::Ceil),
-        ("floor(v)", MathFunc::Floor),
-        ("sqrt(v)", MathFunc::Sqrt),
-        ("ln(v)", MathFunc::Ln),
-        ("log2(v)", MathFunc::Log2),
-        ("sgn(v)", MathFunc::Sgn),
-        ("sin(v)", MathFunc::Sin),
-        ("atanh(v)", MathFunc::Atanh),
-        ("deg(v)", MathFunc::Deg),
-        ("rad(v)", MathFunc::Rad),
+fn math_functions_lower_to_typed_scalar_projections() {
+    for name in [
+        "abs", "ceil", "floor", "sqrt", "ln", "log2", "sgn", "sin", "atanh", "deg", "rad",
     ] {
-        let qe = ok(q);
-        let NonASAPOp::Aggregate {
-            reduction,
-            measures,
-            ..
-        } = qe.expect_non_asap()
-        else {
-            panic!("{q}: expected an Aggregate, got {qe:?}");
-        };
-        assert_eq!(
-            reduction,
-            &Reduction::PerEntity,
-            "{q}: per-series, no grouping"
-        );
+        let query = ok(&format!("{name}(v)"));
         assert!(
-            matches!(measures.as_slice(), [AggIntent::Math(m)] if *m == want),
-            "{q}: wrong intent, got {measures:?}"
+            matches!(support::sample_expression(&query),ScalarExpr::FunctionCall { name:n,args } if n==&format!("promql_{name}") && args.len()==1)
         );
+        query.validate_structure().unwrap();
     }
 }
 
 #[test]
 fn clamp_and_round_carry_their_params() {
-    assert!(intents(&ok("clamp(v, 0, 100)")).iter().any(
-        |i| matches!(i, AggIntent::Math(MathFunc::Clamp { min, max }) if *min == 0.0 && *max == 100.0)
-    ));
-    assert!(intents(&ok("clamp_min(v, 1)"))
-        .iter()
-        .any(|i| matches!(i, AggIntent::Math(MathFunc::ClampMin { min }) if *min == 1.0)));
-    assert!(intents(&ok("clamp_max(v, 5)"))
-        .iter()
-        .any(|i| matches!(i, AggIntent::Math(MathFunc::ClampMax { max }) if *max == 5.0)));
-    // `round(v)` defaults the step to 1; `round(v, 5)` reads it.
-    assert!(intents(&ok("round(v)")).iter().any(
-        |i| matches!(i, AggIntent::Math(MathFunc::Round { to_nearest }) if *to_nearest == 1.0)
-    ));
-    assert!(intents(&ok("round(v, 5)")).iter().any(
-        |i| matches!(i, AggIntent::Math(MathFunc::Round { to_nearest }) if *to_nearest == 5.0)
-    ));
+    for (query, params) in [
+        ("clamp(v,0,100)", vec![0.0, 100.0]),
+        ("clamp_min(v,1)", vec![1.0]),
+        ("clamp_max(v,5)", vec![5.0]),
+        ("round(v)", vec![1.0]),
+        ("round(v,5)", vec![5.0]),
+    ] {
+        let node = ok(query);
+        let ScalarExpr::FunctionCall { args, .. } = support::sample_expression(&node) else {
+            panic!()
+        };
+        assert_eq!(
+            args.iter().skip(1).map(promql_scalar).collect::<Vec<_>>(),
+            params.into_iter().map(Some).collect::<Vec<_>>()
+        );
+    }
 }
 
 #[test]
@@ -1760,47 +1696,38 @@ fn time_minus_vector_is_the_uptime_pattern() {
 
 #[test]
 fn calendar_functions_lower_to_time_fn_intents() {
-    // SEMANTICS: each of these is a per-series float transform of its argument's
-    // timestamp (or, for `timestamp`, the sample's own time). functions.test.
-    for (q, want) in [
-        ("timestamp(up)", TimeFunc::Timestamp),
-        ("minute(v)", TimeFunc::Minute),
-        ("hour(v)", TimeFunc::Hour),
-        ("day_of_week(v)", TimeFunc::DayOfWeek),
-        ("day_of_month(v)", TimeFunc::DayOfMonth),
-        ("day_of_year(v)", TimeFunc::DayOfYear),
-        ("month(v)", TimeFunc::Month),
-        ("year(v)", TimeFunc::Year),
-        ("days_in_month(v)", TimeFunc::DaysInMonth),
+    assert!(has(&ok("timestamp(up)"), |i| *i
+        == AggIntent::TimeFn(TimeFunc::Timestamp)));
+    for name in [
+        "minute",
+        "hour",
+        "day_of_week",
+        "day_of_month",
+        "day_of_year",
+        "month",
+        "year",
+        "days_in_month",
     ] {
-        let qe = ok(q);
+        let query = ok(&format!("{name}(v)"));
         assert!(
-            has(&qe, |i| *i == AggIntent::TimeFn(want)),
-            "{q} → TimeFn({want:?}), got {:?}",
-            intents(&qe)
+            matches!(support::sample_expression(&query),ScalarExpr::FunctionCall { name:n,args } if n==&format!("promql_{name}") && args.len()==1)
         );
     }
 }
 
 #[test]
 fn no_arg_calendar_function_reads_the_eval_time() {
-    // `day_of_week()` with no argument computes over the evaluation time itself,
-    // so it is a `TimeFn` aggregate whose child is the `EvalTimestamp` scalar.
-    let qe = ok("day_of_week()");
-    let NonASAPOp::Aggregate {
-        measures, child, ..
-    } = qe.expect_non_asap()
-    else {
-        panic!("expected an Aggregate, got {qe:?}");
+    let query = ok("day_of_week()");
+    let NonASAPOp::Project { child, .. } = query.expect_non_asap() else {
+        panic!()
     };
-    assert!(matches!(
-        measures.as_slice(),
-        [AggIntent::TimeFn(TimeFunc::DayOfWeek)]
-    ));
     assert!(matches!(
         child.expect_non_asap(),
         NonASAPOp::PromqlVectorFromScalar(ScalarExpr::EvalTimestamp)
     ));
+    assert!(
+        matches!(support::sample_expression(&query),ScalarExpr::FunctionCall { name,.. } if name=="promql_day_of_week")
+    );
 }
 
 #[test]

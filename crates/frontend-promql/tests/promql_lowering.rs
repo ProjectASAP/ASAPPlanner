@@ -991,7 +991,7 @@ fn out_of_range_quantile_phi_is_accepted() {
     for query in [
         "quantile(1.5, up)",
         "quantile_over_time(1.5, m[5m])",
-        "histogram_quantile(2.0, rate(b[5m]))",
+        "histogram_quantile(2.0, rate(b_bucket[5m]))",
     ] {
         assert!(
             lower_promql(query, AccuracyTarget::Exact).is_ok(),
@@ -1312,24 +1312,12 @@ fn quantile_branches(q: &OperatorNode) -> Vec<(String, AggIntent)> {
 }
 
 #[test]
-fn histogram_quantiles_fans_out_over_native_histograms() {
-    // Raw / native-histogram argument → the sketch-able `Quantile` intent,
-    // exactly as the single-quantile `histogram_quantile` would choose.
-    let q = lower(r#"histogram_quantiles(testhistogram3, "q", 0, 0.25, 1)"#);
-    let branches = quantile_branches(&q);
-    assert_eq!(branches.len(), 3);
-    let labels: Vec<_> = branches.iter().map(|(l, _)| l.as_str()).collect();
-    assert_eq!(
-        labels,
-        ["0.0", "0.25", "1.0"],
-        "OpenMetrics float formatting"
-    );
-    for (_, intent) in &branches {
-        assert!(
-            matches!(intent, AggIntent::Quantile { .. }),
-            "native histogram → sketch-able Quantile, got {intent:?}"
-        );
-    }
+fn histogram_quantiles_rejects_unrepresented_native_histograms() {
+    assert!(lower_promql(
+        r#"histogram_quantiles(testhistogram3, "q", 0, 0.25, 1)"#,
+        AccuracyTarget::Exact
+    )
+    .is_err());
 }
 
 #[test]
@@ -1348,7 +1336,7 @@ fn histogram_quantiles_over_classic_buckets_interpolates() {
 fn histogram_quantiles_branches_are_union_compatible() {
     // `Concat` derives its schema from the first child, so every branch must
     // agree on column names — the φ lives in the label, not the column name.
-    let q = lower(r#"histogram_quantiles(testhistogram3, "q", 0.5, 0.9)"#);
+    let q = lower(r#"histogram_quantiles(testhistogram3_bucket, "q", 0.5, 0.9)"#);
     let NonASAPOp::Concat { children, .. } = q.expect_non_asap() else {
         panic!("expected Concat");
     };
@@ -1374,7 +1362,7 @@ fn histogram_quantiles_branches_are_union_compatible() {
 
 #[test]
 fn histogram_quantiles_uses_the_given_label_name() {
-    let q = lower(r#"histogram_quantiles(h, "phi", 0.5)"#);
+    let q = lower(r#"histogram_quantiles(h_bucket, "phi", 0.5)"#);
     let NonASAPOp::Concat { children, .. } = q.expect_non_asap() else {
         panic!("expected Concat");
     };
@@ -1387,7 +1375,7 @@ fn histogram_quantiles_uses_the_given_label_name() {
 #[test]
 fn histogram_quantiles_formats_small_quantiles_like_prometheus() {
     // `labels.FormatOpenMetricsFloat`: Go's %g, so exponent form below 1e-4.
-    let q = lower(r#"histogram_quantiles(h, "q", 0.00001)"#);
+    let q = lower(r#"histogram_quantiles(h_bucket, "q", 0.00001)"#);
     assert_eq!(quantile_branches(&q)[0].0, "1e-05");
 }
 
@@ -1395,9 +1383,9 @@ fn histogram_quantiles_formats_small_quantiles_like_prometheus() {
 fn histogram_quantiles_rejects_an_out_of_range_quantile() {
     // Same rule as `histogram_quantile(φ, …)` — one bad φ fails the whole call.
     for q in [
-        r#"histogram_quantiles(h, "q", -0.1)"#,
-        r#"histogram_quantiles(h, "q", 1.01)"#,
-        r#"histogram_quantiles(h, "q", 0.5, NaN)"#,
+        r#"histogram_quantiles(h_bucket, "q", -0.1)"#,
+        r#"histogram_quantiles(h_bucket, "q", 1.01)"#,
+        r#"histogram_quantiles(h_bucket, "q", 0.5, NaN)"#,
     ] {
         assert!(
             lower_promql(q, AccuracyTarget::Exact).is_err(),

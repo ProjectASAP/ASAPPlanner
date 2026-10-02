@@ -37,7 +37,7 @@
 //! | `increase(m[w])` | `Aggregate{[Increase], TimeRange{w}}` |
 //! | `changes`/`delta`/`idelta`/`deriv`/`resets`/`predict_linear`/`double_exponential_smoothing`(`m[w]`, …) | `Aggregate{[Changes/Delta/…], TimeRange{w}}` — per-series counter-derivative intents (issue #44) |
 //! | `absent(v)` / `absent_over_time(m[w])` / `present_over_time(m[w])` | `Aggregate{[Absent/AbsentOverTime/PresentOverTime]}` — presence intents; the empty→synthesized-sample logic is a post-ASAP concern (issue #47) |
-//! | `abs`/`ceil`/`sqrt`/`ln`/`clamp*`/`round`/trig(`v`), `pi()` | `Aggregate{[Math(f)]}` element-wise transform (issue #45); `pi()` → a `ScalarExpr::Literal` root |
+//! | `abs`/`ceil`/`sqrt`/`ln`/`clamp*`/`round`/trig(`v`), `pi()` | typed scalar `Project` (issue #45); `pi()` → a `ScalarExpr::Literal` root |
 //! | `time()` / `timestamp`/`hour`/`day_of_week`/… (`v`) | `ScalarExpr::EvalTimestamp` root / `Aggregate{[TimeFn(f)]}` (issue #46) |
 //! | `vector(s)` / `scalar(v)` | `PromqlVectorFromScalar(s)` / `ScalarExpr::PromqlScalarFromVector(v)` — the scalar⇄vector bridges (issue #48) |
 //! | `<scalar> op <scalar>` (`time() - 1`, `1 < bool 2`, `-time()`) | `ScalarExpr::{Arithmetic, Case, Negative}` — a scalar expression, never an operator |
@@ -70,7 +70,7 @@ use asap_frontend_common::{
     UnresolvedOp as Unresolved, UnresolvedPredicate, UnresolvedScalar as Scalar, UnresolvedSortKey,
 };
 use asap_types::ir::{BinaryOperator, ExprSemantics, TimeRangeKind};
-use asap_types::pre_asap::agg_intent::{topk, AggIntent, MathFunc, TimeFunc};
+use asap_types::pre_asap::agg_intent::{topk, AggIntent, TimeFunc};
 use asap_types::pre_asap::vocabulary::{
     AtModifier, BinaryOpKind, GroupKeys, GroupSide, PromQLVectorSetOpKind, Reduction, Source,
     TimeShift, VectorGrouping, VectorMatch, VectorMatchKind,
@@ -189,6 +189,17 @@ impl PromqlLowerer {
         let _interval = IngestionIntervalGuard::install(interval);
         let ast = parser::parse(query).map_err(LoweringError::Parse)?;
         check_depth(&ast, MAX_DEPTH)?;
+        let mut metrics = Vec::new();
+        collect_metric_names(&ast, &mut metrics);
+        if metrics.iter().any(|metric| {
+            crate::histogram::current_kind_of(metric)
+                == Some(crate::histogram::HistogramKind::Native)
+        }) {
+            return Err(LoweringError::UnsupportedFeature(
+                "native histogram samples have no IR representation".into(),
+            ));
+        }
+
         if ast.value_type() == ValueType::Scalar {
             Ok(asap_types::ir::QueryRoot::Scalar(
                 asap_frontend_common::resolve_scalar_root(&lower_scalar(&ast)?)?,
@@ -312,15 +323,14 @@ fn walk(expr: &Expr) -> Result<Unresolved> {
         // `UnaryExpr` is built only by negation (`Neg`); unary `+` is folded to
         // identity and `-<literal>` to a negated `NumberLiteral`. A scalar
         // operand was dispatched to `lower_scalar` above (→ `Negative`), so this
-        // is a vector whose samples must be sign-flipped: `x * -1`, a `Mul`
-        // against a the scalar literal `-1` leaf. `Mul` is commutative, so operand
-        // order carries no hazard (#36).
-        Expr::Unary(u) => Ok(Unresolved::PromqlScalarOp {
+        // is a vector projection. Unary negation retains the metric name.
+        Expr::Unary(u) => Ok(Unresolved::PromqlMap {
             child: Rc::new(walk(&u.expr)?),
-            scalar: Scalar::Literal(ScalarValue::Float64(-1.0)),
-            op: BinaryOpKind::Arithmetic(ArithmeticOpKind::Mul),
-            scalar_left: false,
-            return_bool: false,
+            sample: Scalar::Negative {
+                expr: Box::new(Scalar::Column(ColumnRef::SampleValue)),
+                semantics: ExprSemantics::Promql,
+            },
+            drop_metric_name: false,
         }),
         Expr::Subquery(sq) => {
             let subquery = Unresolved::PromqlSubquery {
@@ -816,7 +826,7 @@ fn walk_histogram(call: &Call) -> Result<Unresolved> {
         // The true signal is the argument's sample type: a declared
         // `HistogramKind` (issue #79) drives the choice when available, else we
         // fall back to the structural `by (le)`/`_bucket` heuristic (issue #43).
-        if !histogram_arg_is_sketchable(arg_expr) {
+        if !histogram_arg_is_sketchable(arg_expr)? {
             return Ok(classic_histogram_quantile(phi, "", walk(arg_expr)?));
         }
         let func = AggIntent::Quantile {
@@ -826,23 +836,9 @@ fn walk_histogram(call: &Call) -> Result<Unresolved> {
         };
         return Ok(outer_aggregate(vec![], func, walk(arg_expr)?));
     }
-    // (histogram_quantile handled above; accessors below)
-    let (func, vec_idx) = match call.func.name {
-        "histogram_count" => (AggIntent::HistogramCount, 0),
-        "histogram_sum" => (AggIntent::HistogramSum, 0),
-        "histogram_avg" => (AggIntent::HistogramAvg, 0),
-        "histogram_stddev" => (AggIntent::HistogramStdDev, 0),
-        "histogram_stdvar" => (AggIntent::HistogramStdVar, 0),
-        "histogram_fraction" => (
-            AggIntent::HistogramFraction {
-                lower: num_arg(call, 0)?,
-                upper: num_arg(call, 1)?,
-            },
-            2,
-        ),
-        other => return Err(LoweringError::UnsupportedFunction(other.to_string())),
-    };
-    Ok(outer_aggregate(vec![], func, walk(arg(call, vec_idx)?)?))
+    Err(LoweringError::UnsupportedFeature(
+        "native histogram samples have no IR representation".into(),
+    ))
 }
 
 /// Classic-bucket `histogram_quantile(φ, child)`. One histogram is the set of
@@ -889,7 +885,7 @@ fn walk_histogram_quantiles(call: &Call) -> Result<Unresolved> {
         ));
     }
     // The bucket-vs-native choice is a property of the argument, not of φ.
-    let sketchable = histogram_arg_is_sketchable(vec_expr);
+    let sketchable = histogram_arg_is_sketchable(vec_expr)?;
     let branches = (2..call.args.args.len())
         .map(|i| {
             let phi = bounded_quantile_param(num_arg(call, i)?)?;
@@ -991,26 +987,27 @@ fn is_time_fn(name: &str) -> bool {
 /// the argument vector, or over `PromqlVectorFromScalar(EvalTimestamp)` for the
 /// no-argument calendar forms (`hour()`, `day_of_week()`, …). Issue #46.
 fn walk_time(call: &Call) -> Result<Unresolved> {
-    let func = match call.func.name {
-        "timestamp" => TimeFunc::Timestamp,
-        "minute" => TimeFunc::Minute,
-        "hour" => TimeFunc::Hour,
-        "day_of_week" => TimeFunc::DayOfWeek,
-        "day_of_month" => TimeFunc::DayOfMonth,
-        "day_of_year" => TimeFunc::DayOfYear,
-        "month" => TimeFunc::Month,
-        "year" => TimeFunc::Year,
-        "days_in_month" => TimeFunc::DaysInMonth,
-        other => return Err(LoweringError::UnsupportedFunction(other.to_string())),
-    };
-    // A calendar function with no argument reads the evaluation time; otherwise
-    // it maps over each sample's timestamp in the argument vector.
-    let inner = if call.args.args.is_empty() {
+    // timestamp() reads the selected sample's timestamp, not its value.
+    if call.func.name == "timestamp" {
+        return Ok(outer_aggregate(
+            vec![],
+            AggIntent::TimeFn(TimeFunc::Timestamp),
+            walk(arg(call, 0)?)?,
+        ));
+    }
+    let child = if call.args.args.is_empty() {
         Unresolved::PromqlVectorFromScalar(Scalar::EvalTimestamp)
     } else {
         walk(arg(call, 0)?)?
     };
-    Ok(outer_aggregate(vec![], AggIntent::TimeFn(func), inner))
+    Ok(Unresolved::PromqlMap {
+        child: Rc::new(child),
+        sample: Scalar::FunctionCall {
+            name: format!("promql_{}", call.func.name),
+            args: vec![Scalar::Column(ColumnRef::SampleValue)],
+        },
+        drop_metric_name: true,
+    })
 }
 
 /// The presence functions (issue #47).
@@ -1228,56 +1225,24 @@ fn is_math_fn(name: &str) -> bool {
 }
 
 /// A math / trig function — a per-series element-wise value transform, lowered
-/// to a per-series `Aggregate{[Math(f)]}` over the (instant) argument vector.
+/// to a typed scalar projection over the instant-vector argument.
 /// `pi()` is scalar-typed and lowers in `lower_scalar` (issue #45).
 fn walk_math(call: &Call) -> Result<Unresolved> {
-    let func = match call.func.name {
-        "abs" => MathFunc::Abs,
-        "ceil" => MathFunc::Ceil,
-        "floor" => MathFunc::Floor,
-        "exp" => MathFunc::Exp,
-        "ln" => MathFunc::Ln,
-        "log2" => MathFunc::Log2,
-        "log10" => MathFunc::Log10,
-        "sqrt" => MathFunc::Sqrt,
-        "sgn" => MathFunc::Sgn,
-        "sin" => MathFunc::Sin,
-        "cos" => MathFunc::Cos,
-        "tan" => MathFunc::Tan,
-        "asin" => MathFunc::Asin,
-        "acos" => MathFunc::Acos,
-        "atan" => MathFunc::Atan,
-        "sinh" => MathFunc::Sinh,
-        "cosh" => MathFunc::Cosh,
-        "tanh" => MathFunc::Tanh,
-        "asinh" => MathFunc::Asinh,
-        "acosh" => MathFunc::Acosh,
-        "atanh" => MathFunc::Atanh,
-        "deg" => MathFunc::Deg,
-        "rad" => MathFunc::Rad,
-        // `round(v)` defaults the step to 1; `round(v, to)` reads arg 1.
-        "round" => MathFunc::Round {
-            to_nearest: if call.args.args.len() >= 2 {
-                num_arg(call, 1)?
-            } else {
-                1.0
-            },
+    let mut args = vec![Scalar::Column(ColumnRef::SampleValue)];
+    for index in 1..call.args.args.len() {
+        args.push(lower_scalar(arg(call, index)?)?);
+    }
+    if call.func.name == "round" && args.len() == 1 {
+        args.push(Scalar::Literal(ScalarValue::Float64(1.0)));
+    }
+    Ok(Unresolved::PromqlMap {
+        child: Rc::new(walk(arg(call, 0)?)?),
+        sample: Scalar::FunctionCall {
+            name: format!("promql_{}", call.func.name),
+            args,
         },
-        "clamp" => MathFunc::Clamp {
-            min: num_arg(call, 1)?,
-            max: num_arg(call, 2)?,
-        },
-        "clamp_min" => MathFunc::ClampMin {
-            min: num_arg(call, 1)?,
-        },
-        "clamp_max" => MathFunc::ClampMax {
-            max: num_arg(call, 1)?,
-        },
-        other => return Err(LoweringError::UnsupportedFunction(other.to_string())),
-    };
-    // The value being transformed is always arg 0 (a vector).
-    let inner = walk(arg(call, 0)?)?;
-    Ok(outer_aggregate(vec![], AggIntent::Math(func), inner))
+        drop_metric_name: true,
+    })
 }
 
 /// Whether `expr` is a **classic cumulative-bucket** `histogram_quantile`
@@ -1300,15 +1265,31 @@ fn walk_math(call: &Call) -> Result<Unresolved> {
 /// declared `RawSamples`) and the false-negative (a suffix-less classic
 /// histogram declared `ClassicBucket`) of the structural heuristic. With no
 /// declaration, fall back to the structural `by (le)`/`_bucket` heuristic.
-fn histogram_arg_is_sketchable(arg: &Expr) -> bool {
+fn histogram_arg_is_sketchable(arg: &Expr) -> Result<bool> {
     let mut metrics = Vec::new();
     collect_metric_names(arg, &mut metrics);
-    for metric in &metrics {
-        if let Some(kind) = crate::histogram::current_kind_of(metric) {
-            return kind.is_sketchable();
-        }
+    let kinds = metrics
+        .iter()
+        .filter_map(|metric| crate::histogram::current_kind_of(metric))
+        .collect::<Vec<_>>();
+    if kinds.contains(&crate::histogram::HistogramKind::Native) {
+        return Err(LoweringError::UnsupportedFeature(
+            "native histogram samples have no IR representation".into(),
+        ));
     }
-    !is_classic_bucket_arg(arg)
+    if let Some(kind) = kinds.first() {
+        if kinds.iter().any(|other| other != kind) {
+            return Err(LoweringError::UnsupportedFeature(
+                "mixed histogram sample contracts".into(),
+            ));
+        }
+        return Ok(kind.is_sketchable());
+    }
+    if is_classic_bucket_arg(arg) {
+        Ok(false)
+    } else {
+        Err(LoweringError::UnsupportedFeature("histogram_quantile requires classic buckets; use quantile for float samples or explicitly declare the RawSamples extension".into()))
+    }
 }
 
 /// Collect the metric names of every vector/matrix selector reachable in `expr`

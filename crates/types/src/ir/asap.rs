@@ -256,10 +256,64 @@ impl ASAPOp {
                 Schema::lifted(fields, input.time_index)
             }
             FinalizeExactAccumulator { child } => {
+                let sql_result = if let Some(ASAPOp::SummaryAgg {
+                    child: source,
+                    family: FieldDataType::ExactAggregate(kind, _),
+                    input,
+                    reduction,
+                    ..
+                }) = child.asap()
+                {
+                    if source.result_kind == OperatorResultKind::Relation {
+                        use crate::post_asap::{ExactKind, SummaryInputExpr};
+                        use crate::pre_asap::AggIntent;
+                        let column = match &input.weight {
+                            SummaryInputExpr::Column(col) => Some(
+                                crate::pre_asap::column_resolution::resolve_column_ref(
+                                    col,
+                                    &source.schema,
+                                )
+                                .map_err(|e| {
+                                    QueryExprError::InvalidScalarSignature(e.to_string())
+                                })?,
+                            ),
+                            _ => None,
+                        };
+                        let measure = match kind {
+                            ExactKind::Sum => Some(AggIntent::Sum { col: column }),
+                            ExactKind::Min => Some(AggIntent::Min { col: column }),
+                            ExactKind::Max => Some(AggIntent::Max { col: column }),
+                            _ => None,
+                        };
+                        measure
+                            .map(|measure| {
+                                super::NonASAPOp::Aggregate {
+                                    child: Rc::clone(source),
+                                    reduction: reduction.clone(),
+                                    measures: vec![measure],
+                                    output_names: vec![],
+                                    filters: vec![],
+                                    having: None,
+                                }
+                                .output_schema()
+                            })
+                            .transpose()?
+                            .and_then(|s| s.fields.last().cloned())
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
                 let mut out = Schema::lifted(child.schema.fields.clone(), child.schema.time_index);
                 for f in &mut out.fields {
                     if let FieldDataType::ExactAggregate(kind, _) = &f.dtype {
-                        f.dtype = FieldDataType::Plain(finalized_data_type(kind));
+                        if let Some(result) = &sql_result {
+                            f.dtype = result.dtype.clone();
+                            f.nullable = result.nullable;
+                        } else {
+                            f.dtype = FieldDataType::Plain(finalized_data_type(kind));
+                        }
                     }
                 }
                 out

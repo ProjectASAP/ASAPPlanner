@@ -275,9 +275,7 @@ fn q36_unary_negation_is_multiply_by_minus_one() {
         panic!()
     };
     assert!(child.schema.has_promql_series_identity());
-    assert!(
-        matches!(&cols[1].expr, ScalarExpr::Arithmetic { op: ArithmeticOpKind::Mul, right, .. } if **right == ScalarExpr::literal_f64(-1.0))
-    );
+    assert!(matches!(&cols[1].expr, ScalarExpr::Negative { .. }));
 }
 
 // #36 — negation nested inside an aggregate argument (issue #27 nesting):

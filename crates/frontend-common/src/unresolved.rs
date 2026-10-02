@@ -212,6 +212,12 @@ pub enum UnresolvedOp {
         child: Rc<UnresolvedOp>,
     },
     /// Bind the complete vector schema before lowering to Project or Filter.
+    /// Frontend-only expansion to a projection preserving the complete series identity.
+    PromqlMap {
+        child: Rc<UnresolvedOp>,
+        sample: UnresolvedScalar,
+        drop_metric_name: bool,
+    },
     PromqlScalarOp {
         child: Rc<UnresolvedOp>,
         scalar: UnresolvedScalar,
@@ -351,6 +357,7 @@ impl UnresolvedOp {
                 .collect(),
             PromqlVectorFromScalar(e) => vec![e],
             PromqlScalarOp { scalar, .. } => vec![scalar],
+            PromqlMap { sample, .. } => vec![sample],
             PromqlRelabel { value, .. } => vec![value],
             SetOp { .. }
             | Concat { .. }

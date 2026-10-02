@@ -123,6 +123,21 @@ fn common_type(left: &DataType, right: &DataType) -> Result<DataType, String> {
     ))
 }
 
+/// Closed, namespaced contracts for PromQL pointwise float functions.
+/// Date functions consume Unix seconds; `timestamp` remains a sample-selection
+/// operation because its operand is a sample timestamp rather than its value.
+pub fn promql_function_arity(name: &str) -> Option<usize> {
+    Some(match name.strip_prefix("promql_")? {
+        "abs" | "ceil" | "floor" | "exp" | "ln" | "log2" | "log10" | "sqrt" | "sgn" | "sin"
+        | "cos" | "tan" | "asin" | "acos" | "atan" | "sinh" | "cosh" | "tanh" | "asinh"
+        | "acosh" | "atanh" | "deg" | "rad" | "minute" | "hour" | "day_of_week"
+        | "day_of_month" | "day_of_year" | "month" | "year" | "days_in_month" => 1,
+        "round" | "clamp_min" | "clamp_max" => 2,
+        "clamp" => 3,
+        _ => return None,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

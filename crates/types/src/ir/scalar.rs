@@ -336,9 +336,8 @@ impl ScalarExpr {
     }
 
     /// Infer the `(DataType, nullable)` this expression produces against the
-    /// input schema its owner evaluates it in. Approximate for unknown
-    /// functions (post-ASAP binding refines with a real function/type
-    /// registry). A reference to a field carrying summary state is an error:
+    /// input schema its owner evaluates it in. Unregistered functions are
+    /// rejected. A reference to a field carrying summary state is an error:
     /// state must be read out before an expression can use it.
     pub fn scalar_type(&self, schema: &Schema) -> Result<(DataType, bool), QueryExprError> {
         Ok(match self {
@@ -354,7 +353,7 @@ impl ScalarExpr {
                         )))
                     }
                 },
-                None => (DataType::Float64, true),
+                None => return Err(signature("column outside scalar input scope")),
             },
             ScalarExpr::Literal(s) => match s {
                 ScalarValue::Int64(_) => (DataType::Int64, false),
@@ -364,18 +363,73 @@ impl ScalarExpr {
                 ScalarValue::Null => (DataType::Null, true),
                 ScalarValue::Interval { .. } => (DataType::Interval, false),
             },
-            // Boolean-valued expressions (SQL three-valued logic → nullable).
-            ScalarExpr::Compare { .. }
-            | ScalarExpr::BoolAnd(_)
-            | ScalarExpr::BoolOr(_)
-            | ScalarExpr::Not(_)
-            | ScalarExpr::IsNull(_)
-            | ScalarExpr::IsNotNull(_)
-            | ScalarExpr::InList { .. }
-            | ScalarExpr::Exists { .. }
-            | ScalarExpr::InSubquery { .. } => (DataType::Bool, true),
+            ScalarExpr::Compare {
+                left, right, op, ..
+            } => {
+                let (lt, ln) = left.scalar_type(schema)?;
+                let (rt, rn) = right.scalar_type(schema)?;
+                common_scalar_type(&lt, &rt)?;
+                if matches!(
+                    op,
+                    CompareOpKind::Regex
+                        | CompareOpKind::NotRegex
+                        | CompareOpKind::Like
+                        | CompareOpKind::NotLike
+                        | CompareOpKind::ILike
+                        | CompareOpKind::NotILike
+                ) && (lt != DataType::Utf8 || rt != DataType::Utf8)
+                {
+                    return Err(signature("pattern comparison requires strings"));
+                }
+                (DataType::Bool, ln || rn)
+            }
+            ScalarExpr::BoolAnd(parts) | ScalarExpr::BoolOr(parts) => {
+                let mut nullable = false;
+                for part in parts {
+                    let (ty, n) = part.scalar_type(schema)?;
+                    require_bool(&ty)?;
+                    nullable |= n;
+                }
+                (DataType::Bool, nullable)
+            }
+            ScalarExpr::Not(expr) => {
+                let (ty, n) = expr.scalar_type(schema)?;
+                require_bool(&ty)?;
+                (DataType::Bool, n)
+            }
+            ScalarExpr::IsNull(expr) | ScalarExpr::IsNotNull(expr) => {
+                expr.scalar_type(schema)?;
+                (DataType::Bool, false)
+            }
+            ScalarExpr::InList { expr, list, .. } => {
+                let (ty, mut nullable) = expr.scalar_type(schema)?;
+                for item in list {
+                    let (other, n) = item.scalar_type(schema)?;
+                    common_scalar_type(&ty, &other)?;
+                    nullable |= n;
+                }
+                (DataType::Bool, nullable)
+            }
+            ScalarExpr::Exists { subquery, .. } => {
+                relation(subquery)?;
+                (DataType::Bool, false)
+            }
+            ScalarExpr::InSubquery { expr, subquery, .. } => {
+                let (ty, _) = expr.scalar_type(schema)?;
+                let field = scalar_subquery_field(subquery)?;
+                common_scalar_type(
+                    &ty,
+                    field
+                        .plain_dtype()
+                        .ok_or_else(|| signature("subquery returns state"))?,
+                )?;
+                (DataType::Bool, true)
+            }
             ScalarExpr::Negative { expr, .. } => {
                 let (dtype, nullable) = expr.scalar_type(schema)?;
+                if !numeric(&dtype) && dtype != DataType::Interval {
+                    return Err(signature("negation requires a number or interval"));
+                }
                 (dtype, nullable)
             }
             ScalarExpr::Arithmetic {
@@ -408,7 +462,8 @@ impl ScalarExpr {
                     }
                     (DataType::Interval, DataType::Interval) => DataType::Interval,
                     (DataType::Int64, DataType::Int64) => DataType::Int64,
-                    _ => DataType::Float64,
+                    _ if numeric(&lt) && numeric(&rt) => common_scalar_type(&lt, &rt)?,
+                    _ => return Err(signature("invalid arithmetic operand types")),
                 };
                 (dtype, ln || rn)
             }
@@ -417,7 +472,20 @@ impl ScalarExpr {
                 (to.clone(), *try_cast || nullable)
             }
             ScalarExpr::FunctionCall { name, args } => {
-                if name == "promql_drop_metric_name" {
+                if let Some(arity) = crate::pre_asap::scalar_signature::promql_function_arity(name)
+                {
+                    if args.len() != arity
+                        || args
+                            .iter()
+                            .map(|a| a.scalar_type(schema))
+                            .collect::<Result<Vec<_>, _>>()?
+                            .iter()
+                            .any(|t| *t != (DataType::Float64, false))
+                    {
+                        return Err(signature("PromQL function requires non-null float arguments of the declared arity"));
+                    }
+                    (DataType::Float64, false)
+                } else if name == "promql_drop_metric_name" {
                     if args.len() != 1 || args[0].scalar_type(schema)? != (DataType::Utf8, false) {
                         return Err(QueryExprError::InvalidScalarSignature(
                             "metric-name removal requires one non-null series identity".into(),
@@ -439,42 +507,150 @@ impl ScalarExpr {
                         .output_type(&arguments)
                         .map_err(QueryExprError::InvalidScalarSignature)?
                 } else {
-                    // Unknown functions retain the permissive legacy policy.
-                    (DataType::Float64, true)
+                    sql_function_type(name, args, schema)?
                 }
             }
             ScalarExpr::Case {
+                operand,
                 branches,
                 else_expr,
-                ..
             } => {
-                if let Some((_, then)) = branches.first() {
-                    (then.scalar_type(schema)?.0, true)
-                } else if let Some(other) = else_expr {
-                    other.scalar_type(schema)?
-                } else {
-                    (DataType::Null, true)
+                let operand = operand
+                    .as_ref()
+                    .map(|e| e.scalar_type(schema))
+                    .transpose()?;
+                let mut dtype = DataType::Null;
+                let mut nullable = else_expr.is_none();
+                for (condition, value) in branches {
+                    let (condition, _) = condition.scalar_type(schema)?;
+                    if let Some((ty, _)) = &operand {
+                        common_scalar_type(ty, &condition)?;
+                    } else {
+                        require_bool(&condition)?;
+                    }
+                    let (ty, n) = value.scalar_type(schema)?;
+                    dtype = common_scalar_type(&dtype, &ty)?;
+                    nullable |= n;
                 }
+                if let Some(value) = else_expr {
+                    let (ty, n) = value.scalar_type(schema)?;
+                    dtype = common_scalar_type(&dtype, &ty)?;
+                    nullable |= n;
+                }
+                (dtype, nullable)
             }
             // `scalar(v)` is one float sample (NaN when the vector is not
             // exactly one series); a scalar subquery is its single column.
-            ScalarExpr::PromqlScalarFromVector(_) => (DataType::Float64, false),
-            ScalarExpr::ScalarSubquery(node) => match node.schema.fields.first() {
-                Some(field) => match field.plain_dtype() {
-                    Some(dtype) => (dtype.clone(), true),
-                    None => {
-                        return Err(QueryExprError::InvalidScalarSignature(
-                            "scalar subquery column carries summary state".into(),
-                        ))
-                    }
-                },
-                None => {
-                    return Err(QueryExprError::InvalidScalarSignature(
-                        "scalar subquery produces no column".into(),
-                    ))
+            ScalarExpr::PromqlScalarFromVector(node) => {
+                if node.result_kind != super::OperatorResultKind::InstantVector {
+                    return Err(signature("scalar() requires an instant vector"));
                 }
-            },
+                (DataType::Float64, false)
+            }
+            ScalarExpr::ScalarSubquery(node) => {
+                let field = scalar_subquery_field(node)?;
+                (
+                    field
+                        .plain_dtype()
+                        .ok_or_else(|| signature("scalar subquery returns state"))?
+                        .clone(),
+                    true,
+                )
+            }
         })
+    }
+}
+
+fn signature(message: &str) -> QueryExprError {
+    QueryExprError::InvalidScalarSignature(message.into())
+}
+fn numeric(ty: &DataType) -> bool {
+    matches!(ty, DataType::Int64 | DataType::Float64 | DataType::Null)
+}
+fn require_bool(ty: &DataType) -> Result<(), QueryExprError> {
+    if matches!(ty, DataType::Bool | DataType::Null) {
+        Ok(())
+    } else {
+        Err(signature("boolean expression required"))
+    }
+}
+fn common_scalar_type(a: &DataType, b: &DataType) -> Result<DataType, QueryExprError> {
+    if a == b || *b == DataType::Null {
+        Ok(a.clone())
+    } else if *a == DataType::Null {
+        Ok(b.clone())
+    } else if numeric(a) && numeric(b) {
+        Ok(DataType::Float64)
+    } else {
+        Err(signature("incompatible scalar types"))
+    }
+}
+fn relation(node: &OperatorNode) -> Result<(), QueryExprError> {
+    if node.result_kind == super::OperatorResultKind::Relation {
+        Ok(())
+    } else {
+        Err(signature("SQL subquery requires a relation"))
+    }
+}
+fn scalar_subquery_field(node: &OperatorNode) -> Result<&crate::pre_asap::Field, QueryExprError> {
+    relation(node)?;
+    match node.schema.fields.as_slice() {
+        [field] => Ok(field),
+        _ => Err(signature("scalar subquery requires exactly one column")),
+    }
+}
+fn sql_function_type(
+    name: &str,
+    args: &[ScalarExpr],
+    schema: &Schema,
+) -> Result<(DataType, bool), QueryExprError> {
+    let types = args
+        .iter()
+        .map(|a| a.scalar_type(schema))
+        .collect::<Result<Vec<_>, _>>()?;
+    let nullable = types.iter().any(|(_, n)| *n);
+    let name = name.to_ascii_lowercase();
+    match (name.as_str(), types.as_slice()) {
+        ("abs" | "ceil" | "floor" | "round", [(ty, _)]) if numeric(ty) => {
+            Ok((ty.clone(), nullable))
+        }
+        ("sqrt" | "exp" | "ln" | "log2" | "log10" | "sin" | "cos" | "tan", [(ty, _)])
+            if numeric(ty) =>
+        {
+            Ok((DataType::Float64, nullable))
+        }
+        ("lower" | "upper" | "trim" | "btrim" | "ltrim" | "rtrim", [(DataType::Utf8, _)]) => {
+            Ok((DataType::Utf8, nullable))
+        }
+        ("length" | "char_length" | "character_length" | "octet_length", [(DataType::Utf8, _)]) => {
+            Ok((DataType::Int64, nullable))
+        }
+        ("label_replace", [(DataType::Utf8, _), (DataType::Utf8, _), (DataType::Utf8, _)]) => {
+            Ok((DataType::Utf8, false))
+        }
+        ("label_join" | "concat", [_, ..]) if types.iter().all(|(t, _)| *t == DataType::Utf8) => {
+            Ok((DataType::Utf8, nullable))
+        }
+        ("date_trunc", [(DataType::Utf8, _), (DataType::Timestamp, _)]) => {
+            Ok((DataType::Timestamp, nullable))
+        }
+        ("regexp_like", [(DataType::Utf8, _), (DataType::Utf8, _)]) => {
+            Ok((DataType::Bool, nullable))
+        }
+        ("nullif", [(a, _), (b, _)]) => {
+            common_scalar_type(a, b)?;
+            Ok((a.clone(), true))
+        }
+        ("coalesce", [_, ..]) => {
+            let mut ty = DataType::Null;
+            for (arg, _) in &types {
+                ty = common_scalar_type(&ty, arg)?;
+            }
+            Ok((ty, types.iter().all(|(_, n)| *n)))
+        }
+        _ => Err(signature(&format!(
+            "unregistered scalar function or invalid signature: {name}"
+        ))),
     }
 }
 

@@ -10,7 +10,11 @@ type Error = Box<dyn std::error::Error + Send + Sync>;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 enum ScalarState {
-    Sum { sum: f64, compensation: f64 },
+    Sum {
+        sum: f64,
+        compensation: f64,
+        seen: bool,
+    },
     Count(u64),
     Min(Option<f64>),
     Max(Option<f64>),
@@ -90,7 +94,9 @@ impl ExactAccumulator {
             _ => return Err("readout population differs from installed layout".into()),
         };
         match state {
-            ScalarState::Sum { sum, compensation } => Ok(Some(sum + compensation)),
+            ScalarState::Sum {
+                sum, compensation, ..
+            } => Ok(Some(sum + compensation)),
             ScalarState::Count(count) => Ok(Some(*count as f64)),
             ScalarState::Min(value) | ScalarState::Max(value) => Ok(*value),
             ScalarState::Counter(Some(counter)) => counter
@@ -98,6 +104,11 @@ impl ExactAccumulator {
                 .map(Some),
             ScalarState::Counter(None) => Err("empty counter population".into()),
         }
+    }
+
+    /// SQL SUM distinguishes an empty/all-NULL input from an observed zero.
+    pub(crate) fn is_empty_sum(&self) -> bool {
+        self.keyed.is_none() && matches!(self.scalar, ScalarState::Sum { seen: false, .. })
     }
 
     /// Exact integer count of an unkeyed Count state.
@@ -135,6 +146,7 @@ impl ExactAccumulator {
             SummaryFamilyType::ExactAggregate(K::Sum, P::Sum) => ScalarState::Sum {
                 sum: 0.0,
                 compensation: 0.0,
+                seen: false,
             },
             SummaryFamilyType::ExactAggregate(K::Count, P::Count) => ScalarState::Count(0),
             SummaryFamilyType::ExactAggregate(K::Min, P::Min) => ScalarState::Min(None),
@@ -190,7 +202,14 @@ impl ExactAccumulator {
             _ => panic!("exact update population layout differs from installed DAG"),
         };
         match state {
-            ScalarState::Sum { sum, compensation } => compensated_add(sum, compensation, value),
+            ScalarState::Sum {
+                sum,
+                compensation,
+                seen,
+            } => {
+                compensated_add(sum, compensation, value);
+                *seen = true;
+            }
             ScalarState::Count(count) => {
                 *count = count.checked_add(1).expect("exact count overflow")
             }
@@ -246,16 +265,22 @@ fn merge_scalar(left: &ScalarState, right: &ScalarState) -> Result<ScalarState, 
             ScalarState::Sum {
                 sum: a,
                 compensation: ac,
+                seen: a_seen,
             },
             ScalarState::Sum {
                 sum: b,
                 compensation: bc,
+                seen: b_seen,
             },
         ) => {
             let (mut sum, mut compensation) = (*a, *ac);
             compensated_add(&mut sum, &mut compensation, *b);
             compensated_add(&mut sum, &mut compensation, *bc);
-            ScalarState::Sum { sum, compensation }
+            ScalarState::Sum {
+                sum,
+                compensation,
+                seen: *a_seen || *b_seen,
+            }
         }
         (ScalarState::Count(a), ScalarState::Count(b)) => {
             ScalarState::Count(a.checked_add(*b).ok_or("exact count overflow")?)
@@ -392,6 +417,7 @@ mod tests {
             scalar: ScalarState::Sum {
                 sum: 0.0,
                 compensation: 0.0,
+                seen: false,
             },
             keyed: Some(HashMap::from([(key, ScalarState::Max(Some(1.0)))])),
         };
@@ -406,6 +432,7 @@ mod tests {
             scalar: ScalarState::Sum {
                 sum: 0.0,
                 compensation: 0.0,
+                seen: false,
             },
             keyed: None,
         };

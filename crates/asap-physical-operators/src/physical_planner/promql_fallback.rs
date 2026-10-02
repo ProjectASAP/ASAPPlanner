@@ -287,12 +287,19 @@ impl Lowering {
                     &child.schema,
                 )
                 .map_err(|e| invalid(e.to_string()))?;
+                let sample = cols
+                    .iter()
+                    .find(|col| {
+                        col.alias.as_deref() == Some(child.schema.fields[value].name.as_str())
+                    })
+                    .ok_or_else(|| invalid("missing sample projection"))?;
+                let keep_name = matches!(sample.expr, ScalarExpr::Negative { .. });
                 let fields: Vec<_> = child
                     .schema
                     .fields
                     .iter()
                     .enumerate()
-                    .filter(|(_, field)| field.name != "__name__")
+                    .filter(|(_, field)| keep_name || field.name != "__name__")
                     .collect();
                 if qualifier.is_some() || cols.len() != fields.len() {
                     return Err(invalid("unsupported temporal projection shape"));
@@ -305,8 +312,8 @@ impl Lowering {
                     if index == value {
                         computed = Some(col);
                     } else {
-                        let expected = if field.name
-                            == planner_types::pre_asap::schema::PROMQL_SERIES_IDENTITY
+                        let expected = if !keep_name
+                            && field.name == planner_types::pre_asap::schema::PROMQL_SERIES_IDENTITY
                         {
                             ScalarExpr::FunctionCall {
                                 name: "promql_drop_metric_name".into(),
@@ -321,6 +328,12 @@ impl Lowering {
                     }
                 }
                 let computed = computed.ok_or_else(|| invalid("no computed sample"))?;
+                if matches!(
+                    computed.expr,
+                    ScalarExpr::Negative { .. } | ScalarExpr::FunctionCall { .. }
+                ) {
+                    return self.pointwise_projection(cols, child, value, expression, keep_name);
+                }
                 self.sample_scalar_operation(&computed.expr, child, value, expression)
             }
             NonASAPOp::Filter { pred, child } => {
@@ -404,6 +417,90 @@ impl Lowering {
         }
     }
 
+    fn pointwise_projection(
+        &mut self,
+        cols: &[planner_types::ir::ProjectItem],
+        child: &OperatorNode,
+        value: usize,
+        output: &OperatorNode,
+        keep_name: bool,
+    ) -> Result<Input, Error> {
+        let mut input = self.value(child)?;
+        let mut projected = cols.to_vec();
+        for col in &mut projected {
+            if col.alias.as_deref() != Some(child.schema.fields[value].name.as_str()) {
+                continue;
+            }
+            if let ScalarExpr::FunctionCall { name, args } = &mut col.expr {
+                if planner_types::pre_asap::scalar_signature::promql_function_arity(name).is_none()
+                    || args.first() != Some(&ScalarExpr::Column(value))
+                {
+                    return Err(invalid("unsupported pointwise function"));
+                }
+                for arg in args.iter_mut().skip(1) {
+                    let scalar = self.scalar_value(arg)?;
+                    let left = self.schema(&input);
+                    let right = self.schema(&scalar);
+                    let index = left.fields.len();
+                    let mut schema = (*left).clone();
+                    schema.fields.extend(right.fields.clone());
+                    let join = Operator::relational_join(
+                        left,
+                        right,
+                        planner_types::pre_asap::JoinKind::Inner,
+                        &planner_types::ir::Predicate(ScalarExpr::Literal(
+                            planner_types::pre_asap::ScalarValue::Boolean(true),
+                        )),
+                        Arc::new(schema),
+                    )?;
+                    input = self.add(join, vec![input, scalar]);
+                    *arg = ScalarExpr::Column(index);
+                }
+                if name == "promql_clamp" {
+                    let predicate = ScalarExpr::Not(Box::new(ScalarExpr::Compare {
+                        left: Box::new(args[1].clone()),
+                        right: Box::new(args[2].clone()),
+                        op: planner_types::pre_asap::CompareOpKind::Gt,
+                        semantics: planner_types::ir::ExprSemantics::Promql,
+                    }));
+                    let schema = self.schema(&input);
+                    let predicate =
+                        crate::expressions::CompiledExpression::compile(&predicate, &schema)?;
+                    input = self.add(
+                        Operator::filter(
+                            schema,
+                            crate::expressions::Expression::planner(predicate),
+                        )?,
+                        vec![input],
+                    );
+                }
+            }
+        }
+        let schema = self.schema(&input);
+        let columns = projected
+            .iter()
+            .map(|col| {
+                Ok((
+                    col.alias.clone().unwrap(),
+                    crate::expressions::Expression::planner(
+                        crate::expressions::CompiledExpression::compile(&col.expr, &schema)?,
+                    ),
+                ))
+            })
+            .collect::<Result<Vec<_>, Error>>()?;
+        let project = Operator::project(schema, columns)?;
+        let result = self.push(project, vec![input], output)?;
+        if keep_name {
+            Ok(result)
+        } else {
+            self.push(
+                Operator::series_without_name(self.schema(&result))?,
+                vec![result],
+                output,
+            )
+        }
+    }
+
     fn sample_scalar_operation(
         &mut self,
         expr: &ScalarExpr,
@@ -448,7 +545,17 @@ impl Lowering {
             ScalarExpr::PromqlScalarFromVector(child) => {
                 let step = self.value(child)?;
                 let input = self.schema(&step);
-                let value = named_column(&input, &ColumnRef::SampleValue)?;
+                let values: Vec<_> = input
+                    .fields
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, f)| f.dtype == FieldDataType::Plain(DataType::Float64))
+                    .map(|(i, _)| i)
+                    .collect();
+                let [value] = values.as_slice() else {
+                    return Err(invalid("scalar() requires one float sample column"));
+                };
+                let value = *value;
                 Ok(self.add(Operator::vector_to_scalar(input, value)?, vec![step]))
             }
             ScalarExpr::Negative { expr, .. } => {

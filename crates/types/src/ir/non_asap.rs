@@ -523,7 +523,26 @@ impl NonASAPOp {
                 output_names,
                 child,
                 ..
-            } => aggregate_output_schema(&child.schema, reduction, measures, output_names)?,
+            } => {
+                let mut output =
+                    aggregate_output_schema(&child.schema, reduction, measures, output_names)?;
+                if child.result_kind == OperatorResultKind::Relation {
+                    let offset = reduction.group_keys().map_or(0, |keys| keys.len());
+                    for (index, measure) in measures.iter().enumerate() {
+                        if matches!(measure, AggIntent::Sum { .. } | AggIntent::Avg { .. }) {
+                            let nullable = offset == 0
+                                || measure
+                                    .input_cols()
+                                    .iter()
+                                    .any(|i| child.schema.fields[*i].nullable);
+                            if let Some(field) = output.fields.get_mut(offset + index) {
+                                field.nullable = nullable;
+                            }
+                        }
+                    }
+                }
+                output
+            }
 
             Filter { child, .. }
             | Sort { child, .. }
@@ -775,6 +794,9 @@ impl NonASAPOp {
                 Source::Table { .. } => OperatorResultKind::Relation,
             },
             Values { .. } | SQLWindowFunc { .. } => OperatorResultKind::Relation,
+            TimeRange { child, .. } if child.result_kind == OperatorResultKind::Relation => {
+                OperatorResultKind::Relation
+            }
             TimeRange { kind, .. } => match kind {
                 TimeRangeKind::Instant => OperatorResultKind::InstantVector,
                 TimeRangeKind::Range => OperatorResultKind::RangeVector,
@@ -821,19 +843,210 @@ impl NonASAPOp {
                 Ok(())
             }
         };
+        let invalid = |message: &str| QueryExprError::InvalidScalarSignature(message.into());
+        let predicate = |pred: &Predicate, scope: &Schema| -> Result<(), QueryExprError> {
+            if matches!(
+                pred.0.scalar_type(scope)?.0,
+                DataType::Bool | DataType::Null
+            ) {
+                Ok(())
+            } else {
+                Err(invalid("predicate must be boolean"))
+            }
+        };
+        let instant = |child: &OperatorNode| -> Result<(), QueryExprError> {
+            if child.result_kind == OperatorResultKind::InstantVector {
+                Ok(())
+            } else {
+                Err(invalid("operation requires an instant vector"))
+            }
+        };
+        let columns = |cols: &[usize], scope: &Schema| -> Result<(), QueryExprError> {
+            if cols.iter().any(|i| *i >= scope.fields.len()) {
+                Err(invalid("column outside operator input scope"))
+            } else {
+                Ok(())
+            }
+        };
         match self {
-            BinaryOp { lhs, rhs, .. } => {
+            Scan {
+                predicates, schema, ..
+            } => {
+                for pred in predicates {
+                    predicate(pred, schema)?;
+                }
+            }
+            Values { rows, schema } => {
+                for row in rows {
+                    if row.len() != schema.fields.len() {
+                        return Err(invalid("Values row width differs from its schema"));
+                    }
+                    for (expr, field) in row.iter().zip(&schema.fields) {
+                        let (ty, nullable) = expr.scalar_type(&Schema::default())?;
+                        if field
+                            .plain_dtype()
+                            .is_none_or(|declared| *declared != ty && ty != DataType::Null)
+                            || nullable && !field.nullable
+                        {
+                            return Err(invalid(
+                                "Values expression differs from declared type/nullability",
+                            ));
+                        }
+                    }
+                }
+            }
+            Filter { child, pred } => {
+                no_state(child, "Filter")?;
+                predicate(pred, &child.schema)?;
+            }
+            Project { child, cols, .. } => {
+                for col in cols {
+                    if let ScalarExpr::Column(index) = col.expr {
+                        columns(&[index], &child.schema)?;
+                    } else {
+                        col.expr.scalar_type(&child.schema)?;
+                    }
+                }
+            }
+            BinaryOp {
+                lhs,
+                rhs,
+                operator,
+                return_bool,
+            } => {
                 no_state(lhs, "BinaryOp")?;
-                no_state(rhs, "BinaryOp")
+                no_state(rhs, "BinaryOp")?;
+                if lhs.result_kind != rhs.result_kind
+                    || lhs.result_kind == OperatorResultKind::RangeVector
+                {
+                    return Err(invalid("binary operands have incompatible result kinds"));
+                }
+                if *return_bool && !matches!(operator.kind, BinaryOpKind::Compare(_)) {
+                    return Err(invalid("bool mode requires a comparison"));
+                }
             }
-            Join { left, right, .. } | SetOp { left, right, .. } => {
-                no_state(left, self.kind_name())?;
-                no_state(right, self.kind_name())
+            Join {
+                left, right, pred, ..
+            } => {
+                no_state(left, "Join")?;
+                no_state(right, "Join")?;
+                if left.result_kind != OperatorResultKind::Relation
+                    || right.result_kind != OperatorResultKind::Relation
+                {
+                    return Err(invalid("SQL join requires relations"));
+                }
+                let scope = Schema::new(
+                    left.schema
+                        .fields
+                        .iter()
+                        .chain(&right.schema.fields)
+                        .cloned()
+                        .collect(),
+                );
+                predicate(pred, &scope)?;
             }
-            Concat { children, .. } => children.iter().try_for_each(|c| no_state(c, "Concat")),
-            Aggregate { child, .. } | Dedup { child, .. } => no_state(child, self.kind_name()),
-            _ => Ok(()),
+            SetOp { left, right, .. } => {
+                no_state(left, "SetOp")?;
+                no_state(right, "SetOp")?;
+                if left.result_kind != OperatorResultKind::Relation
+                    || right.result_kind != OperatorResultKind::Relation
+                {
+                    return Err(invalid("SQL set operation requires relations"));
+                }
+            }
+            Concat { children, .. } => {
+                for child in children {
+                    no_state(child, "Concat")?;
+                }
+            }
+            Aggregate {
+                child,
+                filters,
+                measures,
+                having,
+                reduction,
+                ..
+            } => {
+                no_state(child, "Aggregate")?;
+                if let Reduction::Reduce(keys) = reduction {
+                    columns(keys.keys(), &child.schema)?;
+                }
+                for measure in measures {
+                    columns(&measure.input_cols(), &child.schema)?;
+                }
+                if !filters.is_empty() && filters.len() != measures.len() {
+                    return Err(invalid("aggregate filter count differs from measure count"));
+                }
+                for pred in filters.iter().flatten() {
+                    predicate(pred, &child.schema)?;
+                }
+                if let Some(pred) = having {
+                    predicate(pred, &self.output_schema()?)?;
+                }
+            }
+            Dedup { child, cols } => {
+                no_state(child, "Dedup")?;
+                columns(cols, &child.schema)?;
+            }
+            Sort {
+                child,
+                keys,
+                partition_by,
+            } => {
+                columns(partition_by.keys(), &child.schema)?;
+                for key in keys {
+                    key.expr.scalar_type(&child.schema)?;
+                }
+            }
+            Limit {
+                child,
+                partition_by,
+                ..
+            } => columns(partition_by.keys(), &child.schema)?,
+            SQLWindowFunc {
+                child,
+                args,
+                order_by,
+                partition_by,
+                ..
+            } => {
+                if child.result_kind != OperatorResultKind::Relation {
+                    return Err(invalid("SQL window requires a relation"));
+                }
+                columns(partition_by.keys(), &child.schema)?;
+                for expr in args.iter().chain(order_by.iter().map(|k| &k.expr)) {
+                    expr.scalar_type(&child.schema)?;
+                }
+            }
+            PromqlVectorFromScalar(expr) => {
+                if expr.scalar_type(&Schema::default())? != (DataType::Float64, false) {
+                    return Err(invalid("vector() requires a non-null float scalar"));
+                }
+            }
+            PromqlSubquery { child, .. }
+            | PromqlInfoEnrich { child, .. }
+            | PromqlSeriesSample { child, .. } => instant(child)?,
+            PromqlRelabel { child, value, .. } => {
+                instant(child)?;
+                if value.scalar_type(&child.schema)?.0 != DataType::Utf8 {
+                    return Err(invalid("label expression requires a string"));
+                }
+            }
+            TimeRange { child, .. } => {
+                if child.result_kind != OperatorResultKind::Relation {
+                    instant(child)?;
+                }
+            }
+            TimeShift { child, .. } => {
+                if !matches!(
+                    child.result_kind,
+                    OperatorResultKind::InstantVector | OperatorResultKind::RangeVector
+                ) {
+                    return Err(invalid("time shift requires a vector"));
+                }
+            }
         }
+        Ok(())
     }
 }
 
@@ -1050,7 +1263,7 @@ mod tests {
         assert_eq!(s.fields.len(), 3);
         assert_eq!(s.fields[0], col("host", DataType::Utf8, false));
         assert_eq!(s.fields[1], col("dbl", DataType::Float64, false));
-        assert_eq!(s.fields[2], col("flag", DataType::Bool, true));
+        assert_eq!(s.fields[2], col("flag", DataType::Bool, false));
         // `ts` is not retained: no time axis, and the key is lost.
         assert!(s.time_index.is_none());
         assert!(s.unique_keys.is_empty());

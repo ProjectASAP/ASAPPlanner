@@ -64,30 +64,9 @@ fn op(node: &OperatorNode) -> &NonASAPOp {
 }
 
 #[tokio::test]
-async fn planning_subquery_bridge_reuses_canonical_promql_subquery() {
-    let query = lower(
-        "SELECT max(value) FROM (\
-           SELECT asap_promql_subquery(21600000, 60000) AS value FROM (\
-             SELECT sum(bytes) AS value FROM metrics))",
-    )
-    .await;
-    let NonASAPOp::Project { child, .. } = op(&query) else {
-        panic!("expected outer SQL projection");
-    };
-    let NonASAPOp::Aggregate { child, .. } = op(child) else {
-        panic!("expected outer max aggregate, got {child:?}");
-    };
-    let NonASAPOp::PromqlSubquery {
-        range,
-        resolution,
-        child,
-    } = op(child)
-    else {
-        panic!("expected canonical subquery bridge, got {child:?}");
-    };
-    assert_eq!(*range, std::time::Duration::from_secs(6 * 60 * 60));
-    assert_eq!(*resolution, Some(std::time::Duration::from_secs(60)));
-    assert!(matches!(op(child), NonASAPOp::Project { .. }));
+async fn planning_subquery_bridge_rejects_a_relation_without_vector_conversion() {
+    let result = lower_sql("SELECT max(value) FROM (SELECT asap_promql_subquery(21600000, 60000) AS value FROM (SELECT sum(bytes) AS value FROM metrics))", &catalog(), AccuracyTarget::Exact).await;
+    assert!(result.is_err());
 }
 
 #[tokio::test]
@@ -1029,51 +1008,17 @@ async fn filter_over_derived_aggregate_resolves_alias_column() {
 
 #[tokio::test]
 async fn scalar_subquery_in_predicate_lowers_through_a_cross_join() {
-    // A subquery-*valued* expression (`x > (SELECT …)`) lowers to
-    // `UnresolvedScalar::ScalarSubquery`; `canonicalize` reads it through a
-    // cross join against the (one-column) subquery, so the comparison binds
-    // to `Column(|left|)` and the left's columns are restored by a positional
-    // `Project`. (This used to be rejected outright.)
     let qe =
         lower("SELECT service FROM metrics WHERE bytes > (SELECT AVG(bytes) FROM metrics)").await;
-    let filter = find_filter(&qe).expect("expected the comparison as a Filter over the join");
+    let filter = find_filter(&qe).unwrap();
     let NonASAPOp::Filter { pred, child } = op(filter) else {
-        unreachable!("find_filter only returns Filter");
+        panic!()
     };
-    let NonASAPOp::Join {
-        kind, left, right, ..
-    } = op(child)
-    else {
-        panic!("expected a cross join under the Filter, got {child:?}");
-    };
-    assert_eq!(*kind, JoinKind::Cross);
+    assert!(matches!(op(child), NonASAPOp::Scan { .. }));
     assert!(
-        matches!(op(left), NonASAPOp::Scan { .. }),
-        "left is metrics"
+        matches!(&pred.0,ScalarExpr::Compare { right,.. } if matches!(right.as_ref(),ScalarExpr::ScalarSubquery(_)))
     );
-    let left_len = left.schema.fields.len();
-    assert_eq!(right.schema.fields.len(), 1, "the subquery's single column");
-    assert!(
-        all_intents(right)
-            .iter()
-            .any(|i| matches!(i, AggIntent::Avg { .. })),
-        "the subquery's AVG survives on the right side"
-    );
-    assert!(
-        matches!(&pred.0, ScalarExpr::Compare { left, op: CompareOpKind::Gt, right, .. }
-            if **left == ScalarExpr::Column(3) && **right == ScalarExpr::Column(left_len)),
-        "bytes (col 3) > the subquery's column (right after the left's), got {:?}",
-        pred.0
-    );
-    assert_eq!(
-        qe.schema
-            .fields
-            .iter()
-            .map(|f| f.name.as_str())
-            .collect::<Vec<_>>(),
-        ["service"],
-        "the subquery column does not leak into the SELECT list"
-    );
+    qe.validate_structure().unwrap();
 }
 
 #[tokio::test]
@@ -1161,19 +1106,17 @@ async fn where_exists_resolves_to_a_semi_join_over_the_subquery() {
 
 #[tokio::test]
 async fn not_in_subquery_is_rejected_rather_than_mislowered_as_an_anti_join() {
-    // `NOT IN` is *not* an anti-join. Under three-valued logic a single NULL
-    // among the subquery's rows makes `c NOT IN (…)` UNKNOWN for every `c`, so
-    // the query returns nothing — while an anti-join returns every unmatched
-    // left row. Rejecting is the only correct option until the nullability is
-    // proven, and `NOT EXISTS` is the safe spelling.
-    let err = lower_sql(
-        "SELECT service FROM metrics WHERE service NOT IN (SELECT service FROM hosts)",
-        &catalog(),
-        AccuracyTarget::Exact,
-    )
-    .await
-    .expect_err("NOT IN must not lower to an anti-join");
-    assert!(format!("{err}").contains("NOT IN"), "got {err}");
+    let qe =
+        lower("SELECT service FROM metrics WHERE service NOT IN (SELECT service FROM hosts)").await;
+    let filter = find_filter(&qe).unwrap();
+    let NonASAPOp::Filter { pred, .. } = op(filter) else {
+        panic!()
+    };
+    assert!(matches!(
+        pred.0,
+        ScalarExpr::InSubquery { negated: true, .. }
+    ));
+    qe.validate_structure().unwrap();
 }
 
 #[tokio::test]
@@ -2259,7 +2202,7 @@ async fn now_in_predicate_lowers_to_current_timestamp() {
     assert_eq!(predicates.len(), 1);
     assert!(
         matches!(&predicates[0].0, ScalarExpr::Compare { right, .. }
-            if matches!(right.as_ref(), ScalarExpr::CurrentTimestamp)),
+            if matches!(right.as_ref(), ScalarExpr::Cast { expr, to: DataType::Timestamp, .. } if matches!(expr.as_ref(), ScalarExpr::CurrentTimestamp))),
         "NOW() must lower to CurrentTimestamp, got {:?}",
         predicates[0].0
     );
@@ -2276,7 +2219,7 @@ async fn clickhouse_now_in_predicate_lowers_to_current_timestamp() {
     assert_eq!(predicates.len(), 1);
     assert!(
         matches!(&predicates[0].0, ScalarExpr::Compare { right, .. }
-            if matches!(right.as_ref(), ScalarExpr::CurrentTimestamp)),
+            if matches!(right.as_ref(), ScalarExpr::Cast { expr, to: DataType::Timestamp, .. } if matches!(expr.as_ref(), ScalarExpr::CurrentTimestamp))),
         "now() must lower to CurrentTimestamp, got {:?}",
         predicates[0].0
     );

@@ -316,7 +316,8 @@ pub(super) fn execute<'a>(
                                 .as_any()
                                 .downcast_ref::<crate::summary_kernels::exact::ExactAccumulator>()
                                 .ok_or_else(|| invalid("exact readout requires exact state"))?;
-                            if output.fields[*state].dtype == SummaryFamilyType::Plain(DataType::Int64) {
+                            if output.fields[*state].nullable && exact.is_empty_sum() { Value::Null }
+                            else if output.fields[*state].dtype == SummaryFamilyType::Plain(DataType::Int64) {
                                 let count = exact.count().ok_or_else(|| {
                                     Error::Operator("exact count state lacks an integer count".into())
                                 })?;
