@@ -75,7 +75,7 @@ fn sql_workload(
 }
 
 /// The facade turns a prepared workload into one selected DAG per query, in
-/// `QueryWorkload::entries()` order, without the caller touching `PlanSpace`.
+/// `QueryWorkload::entries()` order, without the caller touching `CandidateLogicalASAPDAGs`.
 #[tokio::test]
 async fn plans_every_query_in_entry_order() {
     let workload = sql_workload(
@@ -391,4 +391,49 @@ async fn lifecycle_decisions_ride_inside_each_plan() {
     assert_eq!(output.plans[0].entry_index, 0);
     let _: &Rc<_> = &output.plans[0].plan.root;
     assert_eq!(output.dags().len(), 1);
+}
+
+/// Each root's lifecycle is planned against the entries that read it: a
+/// query polled every minute and an unrelated one polled every ten minutes
+/// each see only their own reads over the hour, not the workload's 66.
+#[tokio::test]
+async fn each_plan_counts_only_its_own_entries_reads() {
+    let repeating = |query: &str, interval_ms: u32| RepeatingEntry {
+        query: Query(query.into()),
+        demand: RepeatedDemand::FixedInterval(RepetitionInterval(interval_ms)),
+        requirements: approximate(),
+        predictability: Predictability::Unknown,
+        time_selection: TimeSelection::default(),
+    };
+    let workload = PlanningWorkload {
+        query_workload: QueryWorkload {
+            language: QueryLanguage::PromQL,
+            query_batch: None,
+            repeating_queries: Some(vec![
+                repeating("count_over_time(up[5m])", 60_000),
+                repeating("sum_over_time(latency[5m])", 600_000),
+            ]),
+        },
+        data_workload: Some(DataWorkload {
+            arrival: DataArrival::ContinuouslyIngesting,
+            data_ingestion_interval: Evidence {
+                value: Some(DurationMs(15_000)),
+                ..Default::default()
+            },
+            ..Default::default()
+        }),
+    };
+    let input = UserInput::new(
+        &workload,
+        FrontendInput::Promql {
+            now_ms: NOW_MS,
+            histograms: None,
+        },
+        PlanningModels::builtin(),
+        lifecycle().with_horizon(Horizon(3_600.0)),
+    );
+
+    let output = e2e_plan(input).await.expect("workload plans");
+    let reads: Vec<_> = output.plans.iter().map(|p| p.plan.expected_reads).collect();
+    assert_eq!(reads, vec![Some(60.0), Some(6.0)]);
 }

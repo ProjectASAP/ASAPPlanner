@@ -22,7 +22,7 @@
 //! | PromQL | Canonical shape |
 //! |---|---|
 //! | `quantile_over_time(φ, m{f}[w])` | `Aggregate{[Quantile(φ)], TimeRange{w, Scan{predicates}}}` |
-//! | `histogram_quantile(φ, <classic buckets>)` | `Aggregate{[HistogramQuantile(φ)]}` — cumulative-bucket interpolation (classic form recognised by `by (le)` / a `_bucket` metric / an `le` matcher) |
+//! | `histogram_quantile(φ, <classic buckets>)` | `Aggregate{without(le), [HistogramQuantile(φ, le)]}` — cumulative-bucket interpolation (classic form recognised by `by (le)` / a `_bucket` metric / an `le` matcher) |
 //! | `histogram_quantile(φ, <native hist / raw>)` | `Aggregate{[Quantile(φ)]}` over the fully-lowered arg (generic, sketch-able with an accuracy target) |
 //! | `histogram_quantiles(v, "l", φ…)` | `Concat{PromqlRelabel{l=φᵢ, <the histogram_quantile(φᵢ, v) branch>}…}` — one branch per φ (issue #109) |
 //! | `histogram_count/sum/avg/stddev/stdvar(v)`, `histogram_fraction(l,u,v)` | `Aggregate{[Histogram*]}` — per-series native-histogram accessors (issue #43) |
@@ -307,11 +307,23 @@ fn walk(expr: &Expr) -> Result<Unresolved> {
                 vector_match: None,
             }),
         },
-        Expr::Subquery(sq) => Ok(Unresolved::PromqlSubquery {
-            range: sq.range,
-            resolution: sq.step,
-            child: Rc::new(walk(&sq.expr)?),
-        }),
+        Expr::Subquery(sq) => {
+            let subquery = Unresolved::PromqlSubquery {
+                range: sq.range,
+                resolution: sq.step,
+                child: Rc::new(walk(&sq.expr)?),
+            };
+            // `offset`/`@` move the whole subquery, including its step grid.
+            let shift = time_shift(sq.offset.as_ref(), sq.at.as_ref())?;
+            Ok(if shift.is_identity() {
+                subquery
+            } else {
+                Unresolved::TimeShift {
+                    shift,
+                    child: Rc::new(subquery),
+                }
+            })
+        }
         Expr::VectorSelector(vs) => {
             let (metric, matchers, shift) = vs_parts(vs)?;
             Ok(instant_source(metric, matchers, shift))
@@ -581,6 +593,7 @@ fn mark_without(tree: Unresolved, without: bool) -> Unresolved {
             reduction,
             measures,
             output_names,
+            filters,
             having,
             child,
         } => {
@@ -592,6 +605,7 @@ fn mark_without(tree: Unresolved, without: bool) -> Unresolved {
                 reduction: Reduction::Reduce(GroupKeys::without(keys)),
                 measures,
                 output_names,
+                filters,
                 having,
                 child,
             }
@@ -656,18 +670,12 @@ fn build_over_subtree(outer: Outer, keys: Vec<ColumnRef>, child: Unresolved) -> 
     })
 }
 
-/// `histogram_quantile(φ, <expr>)` lowers `<expr>` in full — preserving any
-/// `sum by (le)` / `rate` structure inside it — and wraps the result in an
-/// `Aggregate{[Quantile(φ)]}`. The φ-quantile reduces across the `le` buckets,
-/// so the wrapper carries no grouping keys: the usage-derived schema can't
-/// enumerate the non-`le` labels to group by (the same limitation that rejects
-/// `without`). This handles the canonical
-/// `histogram_quantile(φ, sum by (le) (rate(m_bucket[w])))` pattern, which the
-/// old "extract the matrix and substitute a bare Quantile" path could not.
 /// The `histogram_*` function family (issues #43, histogram_quantile).
 ///
-/// `histogram_quantile(φ, <expr>)` lowers to a `Quantile` over the fully-lowered
-/// argument — it also covers the classic `le`-bucket form (`sum by (le) (…)`).
+/// `histogram_quantile(φ, <expr>)` lowers `<expr>` in full — preserving any
+/// `sum by (le)` / `rate` structure inside it. The classic `le`-bucket form
+/// becomes [`classic_histogram_quantile`]; a native histogram or raw samples
+/// become a `Quantile` over the whole argument.
 /// The native-histogram accessors (`histogram_count`/`sum`/`avg`/`stddev`/
 /// `stdvar`/`fraction`) each extract one float per series, lowering to a
 /// per-series `Aggregate{[accessor]}` directly over the (instant) argument.
@@ -688,14 +696,13 @@ fn walk_histogram(call: &Call) -> Result<Unresolved> {
         // The true signal is the argument's sample type: a declared
         // `HistogramKind` (issue #79) drives the choice when available, else we
         // fall back to the structural `by (le)`/`_bucket` heuristic (issue #43).
-        let func = if histogram_arg_is_sketchable(arg_expr) {
-            AggIntent::Quantile {
-                col: None,
-                q: phi,
-                accuracy: current_accuracy(),
-            }
-        } else {
-            AggIntent::HistogramQuantile { q: phi }
+        if !histogram_arg_is_sketchable(arg_expr) {
+            return Ok(classic_histogram_quantile(phi, "", walk(arg_expr)?));
+        }
+        let func = AggIntent::Quantile {
+            col: None,
+            q: phi,
+            accuracy: current_accuracy(),
         };
         return Ok(outer_aggregate(vec![], func, walk(arg_expr)?));
     }
@@ -716,6 +723,22 @@ fn walk_histogram(call: &Call) -> Result<Unresolved> {
         other => return Err(LoweringError::UnsupportedFunction(other.to_string())),
     };
     Ok(outer_aggregate(vec![], func, walk(arg(call, vec_idx)?)?))
+}
+
+/// Classic-bucket `histogram_quantile(φ, child)`. One histogram is the set of
+/// series that differ only in `le`, so the aggregate groups `without (le)`.
+/// That grouping also seeds `le` into a usage-derived source schema, even
+/// when no matcher names it. An empty `output_name` keeps the intent-keyed name.
+fn classic_histogram_quantile(q: f64, output_name: &str, child: Unresolved) -> Unresolved {
+    let le = ColumnRef::Named("le".into());
+    Unresolved::Aggregate {
+        reduction: Reduction::Reduce(GroupKeys::without(vec![le.clone()])),
+        measures: vec![AggIntent::HistogramQuantile { q, le }],
+        output_names: vec![output_name.into()],
+        filters: vec![],
+        having: None,
+        child: Rc::new(child),
+    }
 }
 
 /// `histogram_quantiles(v, "label", φ₀, φ₁, …)` — the experimental multi-quantile
@@ -750,26 +773,26 @@ fn walk_histogram_quantiles(call: &Call) -> Result<Unresolved> {
     let branches = (2..call.args.args.len())
         .map(|i| {
             let phi = bounded_quantile_param(num_arg(call, i)?)?;
-            let intent = if sketchable {
-                AggIntent::Quantile {
+            let child = walk(vec_expr)?;
+            // Each branch aliases its value column to "value" (not the
+            // intent-keyed default) so `Concat` — which derives its schema
+            // from the first branch — doesn't silently misdescribe the rest.
+            let quantile = if sketchable {
+                let intent = AggIntent::Quantile {
                     col: None,
                     q: phi,
                     accuracy: current_accuracy(),
+                };
+                Unresolved::Aggregate {
+                    reduction: reduction_for(&[], intent.is_per_series()),
+                    measures: vec![intent],
+                    output_names: vec!["value".into()],
+                    filters: vec![],
+                    having: None,
+                    child: Rc::new(child),
                 }
             } else {
-                AggIntent::HistogramQuantile { q: phi }
-            };
-            let child = walk(vec_expr)?;
-            let reduction = reduction_for(&[], intent.is_per_series());
-            let quantile = Unresolved::Aggregate {
-                reduction,
-                measures: vec![intent],
-                // Each branch aliases its value column to "value" (not the
-                // intent-keyed default) so `Concat` — which derives its schema
-                // from the first branch — doesn't silently misdescribe the rest.
-                output_names: vec!["value".into()],
-                having: None,
-                child: Rc::new(child),
+                classic_histogram_quantile(phi, "value", child)
             };
             Ok(Unresolved::PromqlRelabel {
                 dst: label.clone(),
@@ -1262,7 +1285,20 @@ fn selector_is_bucket(vs: &VectorSelector) -> bool {
 fn walk_binary(bin: &BinaryExpr) -> Result<Unresolved> {
     let lhs = scalar_or_vector(&bin.lhs)?;
     let rhs = scalar_or_vector(&bin.rhs)?;
-    let op = binop(bin.op.id())?;
+    // `VectorMatch` has no fill field; dropping fill would change which series
+    // are emitted and their values, so the query must fall back to exact
+    // execution instead.
+    if let Some(m) = &bin.modifier {
+        if m.fill_values.lhs.is_some() || m.fill_values.rhs.is_some() {
+            return Err(LoweringError::UnsupportedFeature(format!(
+                "`fill` vector-matching modifier: `{bin}`"
+            )));
+        }
+    }
+    let op = match (binop(bin.op.id())?, bin.return_bool()) {
+        (BinaryOpKind::Compare(op), true) => BinaryOpKind::CompareBool(op),
+        (op, _) => op,
+    };
     let vector_match = bin.modifier.as_ref().map(|m| {
         let (kind, labels) = match &m.matching {
             Some(LabelModifier::Include(ls)) => (VectorMatchKind::On, ls.labels.clone()),
@@ -1503,6 +1539,7 @@ fn build(inner: Inner, keys: Vec<ColumnRef>, outer: Outer) -> Result<Unresolved>
                         accuracy: current_accuracy(),
                     }],
                     output_names: vec![],
+                    filters: vec![],
                     having: None,
                     child: Rc::new(ranked),
                 });
@@ -1544,6 +1581,7 @@ fn build(inner: Inner, keys: Vec<ColumnRef>, outer: Outer) -> Result<Unresolved>
                         accuracy: current_accuracy(),
                     }],
                     output_names: vec![],
+                    filters: vec![],
                     having: None,
                     child: Rc::new(ranked_agg),
                 })
@@ -1632,6 +1670,7 @@ fn windowed_aggregate(
         // PromQL's intent-keyed output names ("sum", "quantile_0_99", …)
         // instead.
         output_names: vec![String::new()],
+        filters: vec![],
         having: None,
         child: Rc::new(child),
     }
@@ -1650,6 +1689,7 @@ fn outer_aggregate(
         reduction,
         measures: vec![intent],
         output_names: vec![String::new()],
+        filters: vec![],
         having: None,
         child: Rc::new(child),
     }
@@ -1669,6 +1709,7 @@ fn per_series_aggregate(
         reduction,
         measures: vec![intent],
         output_names: vec![String::new()],
+        filters: vec![],
         having: None,
         child: Rc::new(child),
     }

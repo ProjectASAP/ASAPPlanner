@@ -419,6 +419,7 @@ fn with_grouping(
                     input: input.clone(),
                     reduction: reduction.clone(),
                     grouping,
+                    filter: None,
                 },
                 schema: grouped_schema,
                 guarantee: None,
@@ -515,6 +516,7 @@ mod tests {
             reduction: Reduction::by(by),
             measures: vec![intent],
             output_names: vec![],
+            filters: vec![],
             having: None,
             child: Rc::new(child),
         }
@@ -525,6 +527,7 @@ mod tests {
             reduction: Reduction::PerEntity,
             measures: vec![intent],
             output_names: vec![],
+            filters: vec![],
             having: None,
             child: Rc::new(child),
         }
@@ -840,6 +843,7 @@ mod tests {
             reduction: Reduction::by(vec![2]),
             measures: vec![AggIntent::Sum { col: None }, AggIntent::Avg { col: None }],
             output_names: vec![],
+            filters: vec![],
             having: None,
             child: Rc::new(metric_scan(&["job"])),
         });

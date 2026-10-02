@@ -412,6 +412,7 @@ mod tests {
                 accuracy: AccuracyTarget::Epsilon(0.01),
             }],
             output_names: vec![],
+            filters: vec![],
             having: None,
             child: Rc::new(QueryExpr::Scan {
                 source: Source::Table {

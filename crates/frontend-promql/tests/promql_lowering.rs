@@ -237,7 +237,7 @@ fn histogram_quantile_wraps_inner_in_quantile() {
         panic!("expected outer Aggregate{{HistogramQuantile}}, got {qe:?}");
     };
     assert!(
-        matches!(measures.as_slice(), [AggIntent::HistogramQuantile { q }] if (*q - 0.95).abs() < 1e-9)
+        matches!(measures.as_slice(), [AggIntent::HistogramQuantile { q, .. }] if (*q - 0.95).abs() < 1e-9)
     );
     let QueryExpr::Aggregate {
         measures, child, ..
@@ -274,7 +274,7 @@ fn histogram_quantile_over_sum_by_le_preserves_grouping() {
     };
     // The `by (le)` grouping marks the classic cumulative-bucket form.
     assert!(
-        matches!(measures.as_slice(), [AggIntent::HistogramQuantile { q }] if (*q - 0.99).abs() < 1e-9)
+        matches!(measures.as_slice(), [AggIntent::HistogramQuantile { q, .. }] if (*q - 0.99).abs() < 1e-9)
     );
     // `sum by (le)` survives as a positional Aggregate (by = [2], `le`) over the
     // inner Rate — no name-based Partition.
@@ -288,6 +288,90 @@ fn histogram_quantile_over_sum_by_le_preserves_grouping() {
     };
     assert_eq!(reduction, &Reduction::by(vec![2]));
     assert!(matches!(measures.as_slice(), [AggIntent::Sum { .. }]));
+}
+
+/// The classic `histogram_quantile` aggregate: its `without` keys, `le`
+/// column, and output column names.
+fn classic_histogram(qe: &QueryExpr) -> (Vec<usize>, usize, Vec<String>) {
+    let QueryExpr::Aggregate {
+        reduction: Reduction::Reduce(by),
+        measures,
+        ..
+    } = qe
+    else {
+        panic!("expected a reducing Aggregate, got {qe:?}");
+    };
+    let [AggIntent::HistogramQuantile { le, .. }] = measures.as_slice() else {
+        panic!("expected HistogramQuantile, got {measures:?}");
+    };
+    assert!(by.is_without(), "histogram_quantile groups without (le)");
+    let names = qe
+        .output_schema()
+        .unwrap()
+        .columns
+        .iter()
+        .map(|c| c.name.clone())
+        .collect();
+    (by.keys().to_vec(), *le, names)
+}
+
+// A classic histogram_quantile groups `without (le)` and names the child's
+// `le` column, even when no matcher or grouping mentions `le`.
+#[test]
+fn classic_histogram_quantile_groups_without_le() {
+    let qe = lower("histogram_quantile(0.9, rate(http_duration_seconds_bucket[5m]))");
+    let (keys, le, names) = classic_histogram(&qe);
+    let QueryExpr::Aggregate { child, .. } = &qe else {
+        unreachable!()
+    };
+    let child = child.output_schema().unwrap();
+    assert_eq!(child.columns[le].name, "le");
+    assert_eq!(keys, vec![le]);
+    assert_eq!(names, vec!["histogram_quantile"]);
+}
+
+// An explicit `sum by (le, job)` argument keeps `job` and drops `le` and the
+// renamed sample value from the output labels.
+#[test]
+fn classic_histogram_quantile_over_sum_by_keeps_other_labels() {
+    let qe =
+        lower("histogram_quantile(0.9, sum by (le, job) (rate(http_duration_seconds_bucket[5m])))");
+    let (keys, le, names) = classic_histogram(&qe);
+    // `sum by (le, job)` outputs `[job, le, sum]`.
+    assert_eq!((keys, le), (vec![1], 1));
+    assert_eq!(names, vec!["job", "histogram_quantile"]);
+}
+
+// Out-of-range and NaN quantiles lower unchanged; execution returns -Inf/+Inf/NaN.
+#[test]
+fn classic_histogram_quantile_keeps_out_of_range_quantiles() {
+    for (query, expected) in [
+        ("histogram_quantile(-1, x_bucket)", -1.),
+        ("histogram_quantile(2, x_bucket)", 2.),
+    ] {
+        let QueryExpr::Aggregate { measures, .. } = lower(query) else {
+            panic!("{query}");
+        };
+        assert!(
+            matches!(measures.as_slice(), [AggIntent::HistogramQuantile { q, .. }] if *q == expected)
+        );
+    }
+    let QueryExpr::Aggregate { measures, .. } = lower("histogram_quantile(NaN, x_bucket)") else {
+        panic!("NaN");
+    };
+    assert!(matches!(measures.as_slice(), [AggIntent::HistogramQuantile { q, .. }] if q.is_nan()));
+}
+
+// An argument whose closed output lacks `le` has no buckets. Prometheus
+// returns an empty vector; lowering rejects it rather than guess a column.
+#[test]
+fn classic_histogram_quantile_rejects_an_argument_without_le() {
+    let error = lower_promql(
+        "histogram_quantile(0.9, sum by (job) (rate(x_bucket[5m])))",
+        AccuracyTarget::Exact,
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("le"), "{error}");
 }
 
 // ── rate / increase carry their own window (no Window node) ─────────────────────
@@ -705,6 +789,25 @@ fn binary_op_with_on_grouping() {
     assert_eq!(vm.labels, vec!["host".to_string()]);
 }
 
+// `bool` changes a comparison from a filter to a 0/1 result, so the IR must
+// carry it.
+#[test]
+fn bool_comparisons_are_distinct() {
+    let op = |q: &str| match lower(q) {
+        QueryExpr::BinaryOp { op, .. } => op,
+        other => panic!("expected BinaryOp, got {other:?}"),
+    };
+    assert_eq!(op("a > 1"), BinaryOpKind::Compare(CompareOpKind::Gt));
+    assert_eq!(
+        op("a > bool 1"),
+        BinaryOpKind::CompareBool(CompareOpKind::Gt)
+    );
+    assert_eq!(
+        op("a == bool on(job) b"),
+        BinaryOpKind::CompareBool(CompareOpKind::Eq)
+    );
+}
+
 #[test]
 fn binary_op_binds_each_branch_against_its_own_schema() {
     // Each side scans a different metric and groups by a different label. With a
@@ -843,6 +946,28 @@ fn pathologically_nested_query_is_rejected_not_stack_overflow() {
     let q = format!("{}m{}", "(".repeat(300), ")".repeat(300));
     let err = lower_promql(&q, AccuracyTarget::Exact).unwrap_err();
     assert!(format!("{err}").contains("nesting"), "got {err}");
+}
+
+// Behavior: every parser-accepted `fill` modifier form is rejected with a
+// fill-specific lowering error rather than silently dropped.
+#[test]
+fn fill_modifiers_are_rejected_not_ignored() {
+    for q in [
+        "a + fill(0) b",
+        "a + fill_left(1) b",
+        "a + fill_right(2) b",
+        "a + fill_left(1) fill_right(2) b",
+        "a + fill_right(2) fill_left(1) b",
+        "a + on(job) fill(0) b",
+        "a * ignoring(instance) group_left(env) fill_right(0) b",
+        "a > bool on(job) fill(0) b",
+        "sum(a - on(job) group_right fill_left(0) b)",
+    ] {
+        match lower_promql(q, AccuracyTarget::Exact) {
+            Err(LoweringError::UnsupportedFeature(m)) if m.contains("`fill`") => {}
+            other => panic!("expected fill rejection for {q:?}, got {other:?}"),
+        }
+    }
 }
 
 // ── accuracy propagation ──────────────────────────────────────────────────────
@@ -1201,4 +1326,21 @@ fn histogram_quantiles_rejects_an_out_of_range_quantile() {
             "{q} should be rejected"
         );
     }
+}
+
+// A subquery's `offset`/`@` shift the whole subquery, so the tree keeps them.
+#[test]
+fn subquery_time_shift_is_retained() {
+    let QueryExpr::Aggregate { child, .. } = lower("max_over_time(m[5m:1m] offset 1m)") else {
+        panic!("expected a range function");
+    };
+    let QueryExpr::TimeShift { shift, child } = child.as_ref() else {
+        panic!("subquery offset was dropped: {child:?}");
+    };
+    assert_eq!(shift.offset_ms, 60_000);
+    assert!(matches!(child.as_ref(), QueryExpr::PromqlSubquery { .. }));
+    assert!(matches!(
+        lower("max_over_time(m[5m:1m] @ 100)"),
+        QueryExpr::Aggregate { child, .. } if matches!(child.as_ref(), QueryExpr::TimeShift { .. })
+    ));
 }

@@ -7,7 +7,8 @@ use asap_types::post_asap::{
     SummaryField, SummaryNode, SummarySchema, ValueOperation,
 };
 use asap_types::pre_asap::{
-    AggIntent, CompareOpKind, DataType, QueryExpr, Reduction, ScalarValue, Schema, Source,
+    any_measure_filtered, AggIntent, CompareOpKind, DataType, QueryExpr, Reduction, ScalarValue,
+    Schema, Source,
 };
 use std::rc::Rc;
 
@@ -40,12 +41,16 @@ fn recognize(root: &QueryExpr) -> Option<(MaintainedPopulation, PopulationReadou
             child,
             reduction: Reduction::Reduce(grouping),
             measures,
+            filters,
             having: None,
             ..
         } => {
             let [intent] = measures.as_slice() else {
                 return None;
             };
+            if any_measure_filtered(filters) {
+                return None;
+            }
             let (col, readout) = match intent {
                 AggIntent::Quantile { q, col, .. } if q.is_finite() => {
                     (*col, PopulationReadout::Quantile { q: *q })
@@ -258,11 +263,15 @@ impl MaintainedPopulationStrategy {
             schema: input_schema.clone(),
             guarantee: Some(ResultGuarantee::exact("source samples")),
         });
+        // Query time is only the initial layout: whether the population is
+        // retained at ingestion or rebuilt per query is its lifecycle choice
+        // (`SummaryMaintenanceLifecyclePlan::execution_timed_dag`). The readout
+        // and projection above it are query-time by construction.
         let maintained = Rc::new(SummaryNode {
             expr: SummaryExpr::ValueOperation {
                 child: scan,
                 operation: ValueOperation::MaintainPopulation { population },
-                timing: ExecutionTiming::IngestionTime,
+                timing: ExecutionTiming::QueryTime,
             },
             schema: input_schema,
             guarantee: Some(ResultGuarantee::exact(
@@ -434,6 +443,31 @@ mod tests {
         assert!(p.without);
         assert_eq!(p.grouping, ["instance"]);
         assert_eq!(p.matchers[0].operation, CurrentSeriesMatch::Regex);
+    }
+    // Population timing is a lifecycle choice: a retained or rebuilt
+    // population both validate, while its readout must stay at query time.
+    #[test]
+    fn population_timing_is_not_structural() {
+        let root = lower("topk(5,a)");
+        let candidate = MaintainedPopulationStrategy::new(std::slice::from_ref(&root))
+            .candidate(&root)
+            .unwrap();
+        let with_timings = |population: ExecutionTiming, readout: ExecutionTiming| {
+            let mut node = (*candidate).clone();
+            let SummaryExpr::ValueOperation { child, timing, .. } = &mut node.expr else {
+                unreachable!()
+            };
+            *timing = readout;
+            let SummaryExpr::ValueOperation { timing, .. } = &mut Rc::make_mut(child).expr else {
+                unreachable!()
+            };
+            *timing = population;
+            compile_post_asap_dag(&Rc::new(node))
+        };
+        use ExecutionTiming::{IngestionTime, QueryTime};
+        assert!(with_timings(IngestionTime, QueryTime).is_ok());
+        assert!(with_timings(QueryTime, QueryTime).is_ok());
+        assert!(with_timings(IngestionTime, IngestionTime).is_err());
     }
     // A readout cannot reinterpret arbitrary rows as maintained state or exceed its producer's contract.
     #[test]

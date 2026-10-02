@@ -276,6 +276,7 @@ fn aggregate(reduction: Reduction<ColumnRef>, intent: AggIntent<ColumnRef>, chil
         reduction,
         measures: vec![intent],
         output_names: vec![String::new()],
+        filters: vec![],
         having: None,
         child: Rc::new(child),
     }

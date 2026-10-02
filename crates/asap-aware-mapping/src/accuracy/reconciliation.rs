@@ -141,7 +141,7 @@
 //! priced with, reflecting "one more reference into a structure that's
 //! already being maintained" rather than "build a whole new one."
 //!
-//! `PlanSpace::global_selection` treats this rewrite as a cross-group edge:
+//! `CandidateLogicalASAPDAGs::global_selection` treats this rewrite as a cross-group edge:
 //! selecting it increments `rc`'s own `effective_consumer_count`, then lets
 //! that sibling group propagate the uses through its selected implementation.
 //! Accuracy edges are directed strictly from looser to tighter budgets, so
@@ -153,7 +153,7 @@ use std::cmp::Ordering;
 use std::rc::Rc;
 
 use asap_types::pre_asap::agg_intent::AggIntent;
-use asap_types::pre_asap::query_expr::{QueryExpr, Reduction};
+use asap_types::pre_asap::query_expr::{any_measure_filtered, QueryExpr, Reduction};
 use asap_types::types::AccuracyTarget;
 
 use crate::replacement::{
@@ -186,6 +186,7 @@ fn bindable_accuracy_aggregate(node: &QueryExpr) -> Option<BindableAccuracyAggre
         reduction,
         measures,
         output_names,
+        filters,
         having,
         child,
     } = node
@@ -195,6 +196,9 @@ fn bindable_accuracy_aggregate(node: &QueryExpr) -> Option<BindableAccuracyAggre
     let ([intent], None) = (measures.as_slice(), having) else {
         return None;
     };
+    if any_measure_filtered(filters) {
+        return None;
+    }
     let accuracy = accuracy_target(intent)?;
     Some((reduction, intent, accuracy, output_names.as_slice(), child))
 }
@@ -418,6 +422,7 @@ mod tests {
             reduction: Reduction::by(by),
             measures: vec![intent],
             output_names: vec![],
+            filters: vec![],
             having: None,
             child: Rc::clone(child),
         })
@@ -468,6 +473,7 @@ mod tests {
                 accuracy,
             }],
             output_names: vec![],
+            filters: vec![],
             having: None,
             child: Rc::clone(child),
         })

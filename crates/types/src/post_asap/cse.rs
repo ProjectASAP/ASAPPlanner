@@ -81,6 +81,7 @@ fn same_node(left: &SummaryNode, right: &SummaryNode) -> bool {
                 input: ai,
                 reduction: ar,
                 grouping: ag,
+                filter: afl,
             },
             SummaryAgg {
                 child: bc,
@@ -88,8 +89,16 @@ fn same_node(left: &SummaryNode, right: &SummaryNode) -> bool {
                 input: bi,
                 reduction: br,
                 grouping: bg,
+                filter: bfl,
             },
-        ) => Rc::ptr_eq(ac, bc) && af == bf && same_value(ai, bi) && ar == br && ag == bg,
+        ) => {
+            Rc::ptr_eq(ac, bc)
+                && af == bf
+                && same_value(ai, bi)
+                && ar == br
+                && ag == bg
+                && same_value(afl, bfl)
+        }
         (
             SummaryJoin {
                 outer: ao,
@@ -168,6 +177,13 @@ fn same_node(left: &SummaryNode, right: &SummaryNode) -> bool {
 /// coercions are performed. All roots must belong to the same data snapshot or
 /// maintenance scope. Downstream realization must still check physical
 /// implementation compatibility. Use separate calls for independent executions.
+///
+/// When the selected states are identical, this is the planner's
+/// summary-capability rule (#509 Pass 2): one summary build node feeds every
+/// readout it supports, e.g. one KLL for p50 and p99, or one UnivMon for
+/// distinct count, entropy and L2. Candidate generation sizes a variant for
+/// the strictest sibling consumer so differing accuracy targets can reach
+/// identical states here.
 pub fn share_common_summary_subtrees<Id>(
     roots: Vec<(Id, Rc<SummaryNode>)>,
 ) -> Vec<(Id, Rc<SummaryNode>)> {
@@ -363,6 +379,7 @@ mod tests {
                     input: SummaryUpdate::column(ColumnRef::SampleValue),
                     reduction: Reduction::PerEntity,
                     grouping: GroupingStrategy::default(),
+                    filter: None,
                 },
                 schema: SummarySchema {
                     fields: vec![],

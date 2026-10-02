@@ -13,3 +13,6 @@ asap-aware-mapping = { path = "../asap-aware-mapping" }
 asap_sketchlib = { workspace = true }
 serde_json = "1"
 tokio = { version = "1", features = ["rt", "macros", "rt-multi-thread"] }
+
+asap-physical-operators = { path = "../asap-physical-operators" }
+futures = "0.3"

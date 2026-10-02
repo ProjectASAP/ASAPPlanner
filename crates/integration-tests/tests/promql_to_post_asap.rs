@@ -887,7 +887,7 @@ fn planner_heap_topk_reference_execution_matches_ground_truth() {
 ///
 /// ```text
 /// SummaryEstimate { query: Quantile{0.99} }          → {quantile_0_99: Float64}
-/// └─ SummaryAgg { Kll{k:269}, input: SampleValue }   → {quantile_0_99: Sketch(Kll, {k:269})}
+/// └─ SummaryAgg { Kll{k:269}, input: SampleValue }   → {value: Sketch(Kll, {k:269})}
 ///    └─ SummaryAgg { Rate, input: SampleValue }      → {ts, value: ExactAggregate(Rate), …}
 ///       └─ KeepPreAsap(TimeRange{5m} → Scan)         → {ts, value}
 /// ```
@@ -948,7 +948,7 @@ fn promql_quantile_of_rate_binds_kll_over_rate_accumulator() {
         "global quantile — no group keys, full reduction"
     );
     assert_eq!(
-        dtype(&summary_input.schema, "quantile_0_99"),
+        dtype(&summary_input.schema, "value"),
         &SummaryFamilyType::Sketch(
             SketchKind::new(SketchAlgorithm::Kll, SketchParams::Kll { k: 269 }),
             GroupingStrategy::default()
@@ -1163,7 +1163,8 @@ fn physical_node_owns_phase_independently_of_binary_payload() {
     use asap_types::post_asap::{ExecutionTiming, PostAsapOperatorPayload};
     for (query, expected) in [
         (
-            "quantile(0.9, sum_over_time(m[1m]) + sum_over_time(n[1m]))",
+            // One selector: both operands cover the same series.
+            "quantile(0.9, sum_over_time(m[1m]) + sum_over_time(m[1m]))",
             ExecutionTiming::IngestionTime,
         ),
         (
@@ -1172,6 +1173,8 @@ fn physical_node_owns_phase_independently_of_binary_payload() {
         ),
     ] {
         let input = lower_promql(query, AccuracyTarget::Epsilon(0.05)).unwrap();
+        // Backend lowering carries opaque series identity before candidate export.
+        let input = asap_types::pre_asap::schema::with_promql_series_identity(&input).unwrap();
         let search = search_workload(vec![("q", Rc::new(input))]);
         let choice = search.global_selection(&DefaultCostModel);
         let plan = choice
@@ -1434,5 +1437,32 @@ fn ddsketch_ratio_requires_a_supported_population_size() {
             &evidence,
         );
         assert!(strategy.replacements(&TargetSubDAG::new(&pre)).is_empty());
+    }
+}
+
+// Every `without` aggregation candidate exports a valid DAG: its summary state
+// column carries the family instead of the readout's Float64 value.
+#[test]
+fn without_aggregation_candidates_export_valid_dags() {
+    for accuracy in [
+        AccuracyTarget::Exact,
+        AccuracyTarget::EpsilonDelta {
+            epsilon: 0.01,
+            delta: 0.01,
+        },
+    ] {
+        for query in ["sum without (pod) (m)", "quantile without (pod) (0.5, m)"] {
+            let root = Rc::new(lower_promql(query, accuracy.clone()).unwrap());
+            let space = search_workload_with_targets(
+                vec![(0, root, Some(accuracy.clone()))],
+                &asap_aware_mapping::default_strategies(),
+                &DefaultAccuracyModel,
+            );
+            let inventory = space.enumerate_candidate_dags_for_root(&0, 65_536).unwrap();
+            assert!(!inventory.candidates.is_empty(), "{query}");
+            for (_, node) in inventory.candidates.iter().flatten() {
+                compile_post_asap_dag(node).unwrap_or_else(|e| panic!("{query}: {e}"));
+            }
+        }
     }
 }

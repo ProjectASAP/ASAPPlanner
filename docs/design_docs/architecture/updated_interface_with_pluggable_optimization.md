@@ -7,14 +7,14 @@
 
 What that buys:
 
-* One call in place of six across three stages. `PlanSpace` and
+* One call in place of six across three stages. `CandidateLogicalASAPDAGs` and
   `GlobalSelection` no longer appear in user code.
 * The root-to-entry bindings a caller used to build by hand are derived, and
   their ordering contract is checked rather than assumed.
 * A new optimization algorithm can be freely implemented as a trait implementation, rather than a
   rule disguised to fit a two-phase pipeline it does not share.
 
-Unchanged: `PlanSpace`, `cost_sorted`, `global_selection`, and the interface
+Unchanged: `CandidateLogicalASAPDAGs`, `cost_sorted`, `global_selection`, and the interface
 [input, output, and workflows](input-output-workflow.md) describes.
 
 ```text

@@ -1,4 +1,4 @@
-//! Analytical resource cost for incrementally maintained summary deployments.
+//! Analytical resource cost for at-rest and incrementally maintained summary deployments.
 //!
 //! The canonical workload and lifecycle types own deployment semantics. This
 //! module only adds physical evidence absent from those schemas: state size,
@@ -40,7 +40,7 @@ use crate::summary_maintenance_lifecycle::{
     SummaryMaintenanceLifecycleCostInputs,
 };
 
-pub const SUMMARY_MAINTENANCE_COST_MODEL_VERSION: &str = "summary-maintenance-resource-v1";
+pub const SUMMARY_MAINTENANCE_COST_MODEL_VERSION: &str = "summary-maintenance-resource-v2";
 
 mod estimator;
 mod evidence;

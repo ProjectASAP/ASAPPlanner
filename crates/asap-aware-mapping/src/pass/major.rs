@@ -8,14 +8,15 @@
 
 use std::rc::Rc;
 
+use asap_types::post_asap::{share_common_summary_subtrees, SummaryNode};
 use asap_types::pre_asap::query_expr::QueryExpr;
 use asap_types::types::AccuracyTarget;
 
 use super::{OptimizationInput, OptimizationPass, OptimizeError, PlanOutput, QueryLifecyclePlan};
 use crate::replacement::{default_strategies_with_evidence, search_workload_with_targets};
 use crate::summary_maintenance_lifecycle::{
-    assemble_selected_dag_with_summary_maintenance_lifecycles,
-    global_selection_with_summary_maintenance_lifecycles, WorkloadDemand,
+    global_selection_with_summary_maintenance_lifecycles, plan_assembled_dag, shared_state_cost,
+    summary_states, WorkloadDemand,
 };
 
 /// The shipped algorithm. Unit struct: its strategy set is the crate default,
@@ -54,7 +55,7 @@ impl OptimizationPass for MajorPass {
 
         let lifecycle = input.lifecycle;
 
-        // One index per root, in `PlanSpace::roots` order — which is the order
+        // One index per root, in `CandidateLogicalASAPDAGs::roots` order — which is the order
         // the roots went in, which is `entries()` order.
         let entry_indices: Vec<usize> = (0..workload.len()).collect();
         let demand = WorkloadDemand {
@@ -72,13 +73,102 @@ impl OptimizationPass for MajorPass {
             models.cost,
         )
         .map_err(OptimizeError::LifecycleSelection)?;
+        // Each root's lifecycle is planned against the entries that consume
+        // it — the same binding selection costed it with — not the whole
+        // workload, so one query's reads never amortize another's state.
+        let bindings = space
+            .workload_entries_by_target(demand.workload, &entry_indices)
+            .map_err(|error| OptimizeError::LifecycleSelection(error.into()))?;
+
+        // Assemble every root, then intern structurally identical summary
+        // producers across them once, so two queries that selected the same
+        // `SummaryAgg` reach one `Rc` (consumers dedupe states by pointer).
+        let mut assembled = Vec::with_capacity(space.roots.len());
+        for (entry_index, root) in &space.roots {
+            let dag = selection
+                .assemble_selected_dag(root)
+                .map_err(|source| OptimizeError::LifecycleAssembly {
+                    entry_index: *entry_index,
+                    source: source.into(),
+                })?
+                .ok_or_else(|| self.missing_group(*entry_index))?;
+            assembled.push(dag);
+        }
+        let interned =
+            share_common_summary_subtrees(assembled.iter().cloned().enumerate().collect());
+        let states: Vec<_> = interned
+            .iter()
+            .map(|(_, dag)| summary_states(dag))
+            .collect();
+
+        // A state reached from several roots is planned once against all of
+        // their entries, in every plan that reaches it, so each plan picks
+        // the same lifecycle for it. When that union cannot be costed the
+        // roots keep their own, unshared DAG and entries.
+        let mut shared_entries: Vec<(Rc<SummaryNode>, Option<Vec<usize>>)> = Vec::new();
+        for (position, (entry_index, root)) in space.roots.iter().enumerate() {
+            for state in &states[position] {
+                if shared_entries.iter().any(|(s, _)| Rc::ptr_eq(s, state)) {
+                    continue;
+                }
+                let readers: Vec<_> = (0..space.roots.len())
+                    .filter(|&other| states[other].iter().any(|s| Rc::ptr_eq(s, state)))
+                    .map(|other| &space.roots[other].1)
+                    .collect();
+                if readers.iter().all(|reader| Rc::ptr_eq(reader, root)) {
+                    continue;
+                }
+                let mut entries: Vec<usize> = readers
+                    .iter()
+                    .flat_map(|reader| bindings[&Rc::as_ptr(reader)].iter().copied())
+                    .collect();
+                entries.sort_unstable();
+                entries.dedup();
+                let cost = shared_state_cost(
+                    state,
+                    WorkloadDemand {
+                        entry_indices: &entries,
+                        ..demand
+                    },
+                    lifecycle.now_ms,
+                    lifecycle.horizon,
+                    lifecycle.capabilities,
+                    models.cost,
+                )
+                .map_err(|source| OptimizeError::LifecycleAssembly {
+                    entry_index: *entry_index,
+                    source: source.into(),
+                })?;
+                shared_entries.push((Rc::clone(state), cost.map(|_| entries)));
+            }
+        }
 
         let mut plans = Vec::with_capacity(space.roots.len());
-        for (entry_index, root) in &space.roots {
-            let plan = assemble_selected_dag_with_summary_maintenance_lifecycles(
-                &selection,
+        for (position, (entry_index, root)) in space.roots.iter().enumerate() {
+            let mut entries = bindings[&Rc::as_ptr(root)].clone();
+            let mut dag = Rc::clone(&interned[position].1);
+            for (state, shared) in &shared_entries {
+                if !states[position].iter().any(|s| Rc::ptr_eq(s, state)) {
+                    continue;
+                }
+                match shared {
+                    Some(shared) => entries.extend(shared),
+                    None => {
+                        entries = bindings[&Rc::as_ptr(root)].clone();
+                        dag = Rc::clone(&assembled[position]);
+                        break;
+                    }
+                }
+            }
+            entries.sort_unstable();
+            entries.dedup();
+            let plan = plan_assembled_dag(
+                dag,
                 root,
-                demand,
+                WorkloadDemand {
+                    entry_indices: &entries,
+                    ..demand
+                },
                 lifecycle.now_ms,
                 lifecycle.horizon,
                 lifecycle.capabilities,
@@ -90,7 +180,7 @@ impl OptimizationPass for MajorPass {
             })?;
             plans.push(QueryLifecyclePlan {
                 entry_index: *entry_index,
-                plan: plan.ok_or_else(|| self.missing_group(*entry_index))?,
+                plan,
             });
         }
         Ok(PlanOutput::new(plans))

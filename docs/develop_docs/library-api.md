@@ -4,7 +4,7 @@ Audience: developers embedding ASAPPlanner or adding strategies/models. This is
 a compact reference for the public workflow APIs, not an
 exhaustive symbol reference. The [CLI guide](../user_guide_docs/run-a-query.md) covers command-line inspection; the [design overview](../design_docs/architecture/README.md) defines ownership.
 
-ASAPPlanner's primary output is `PlanSpace`; ranking is a view over its candidates.
+ASAPPlanner's primary output is `CandidateLogicalASAPDAGs`; ranking is a view over its candidates.
 Downstream owns physical binding and commitment. Selection/DAG assembly helpers
 do not deploy a plan, and a serializable DAG is not evidence of runtime readiness.
 
@@ -144,7 +144,7 @@ example, see [the CLI frontend example](../../crates/devtools/src/bin/show_pre_a
 ### Target sub-DAG candidates
 
 `TargetSubDAGCandidates` collects alternatives for one query subexpression
-discovered by search. `PlanSpace` contains these per-target candidate sets and
+discovered by search. `CandidateLogicalASAPDAGs` contains these per-target candidate sets and
 the workload's query roots. A root is a whole query; an inner expression can
 also be a target.
 
@@ -165,9 +165,9 @@ search_workload_with_targets<'s, Id>(
     roots: Vec<(Id, Rc<QueryExpr>, Option<AccuracyTarget>)>,
     strategies: &[Box<dyn ReplacementStrategy + 's>],
     accuracy_model: &dyn AccuracyModel,
-) -> PlanSpace<Id>
+) -> CandidateLogicalASAPDAGs<Id>
 
-PlanSpace::cost_sorted(&self, cost_model: &dyn CostModel)
+CandidateLogicalASAPDAGs::cost_sorted(&self, cost_model: &dyn CostModel)
     -> Vec<RankedTargetSubDAGCandidates<'_>>
 ```
 
@@ -181,7 +181,7 @@ PlanSpace::cost_sorted(&self, cost_model: &dyn CostModel)
 
 `search_workload_with_targets` normally rejects candidates without a guarantee
 that satisfies the root target. One exception is a direct DDSketch quantile
-ratio: without input-domain evidence, it remains in `PlanSpace` with
+ratio: without input-domain evidence, it remains in `CandidateLogicalASAPDAGs` with
 `guarantee: None` so the downstream backend can decide whether to select it.
 Its presence does **not** mean it satisfies the target. `cost_sorted` still
 shows it, but `global_selection` skips it and DAG assembly uses the exact fallback
@@ -254,11 +254,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 | API (`asap_aware_mapping`, unless qualified) | Inputs | Output and limits |
 | --- | --- | --- |
-| `search_workload` | `(query_id, Rc<QueryExpr>)` roots | `PlanSpace` with built-in strategies/model; no explicit per-root target argument |
-| `search_workload_with` | Roots, strategy slice | `PlanSpace`; callers choose context-free replacement strategies |
+| `search_workload` | `(query_id, Rc<QueryExpr>)` roots | `CandidateLogicalASAPDAGs` with built-in strategies/model; no explicit per-root target argument |
+| `search_workload_with` | Roots, strategy slice | `CandidateLogicalASAPDAGs`; callers choose context-free replacement strategies |
 | `search_workload_with_targets` | Roots with optional end-to-end targets, strategies, accuracy model | Candidate space with supplied root-target checks; `None` does not supply a root-level requirement; uncertified direct DDSketch ratios remain available for backend selection |
-| `PlanSpace::cost_sorted` | Cost model | `Vec<RankedTargetSubDAGCandidates>`; retains alternatives and pairs `candidates[i]` with `costs[i]` |
-| `PlanSpace::cost_sorted_with_recurrence` | Cost model, recurrence profiles, optional horizon | Ranked per-target candidate sets or `RecurrenceError`; uses recurrence for applicable share/recompute comparisons |
+| `CandidateLogicalASAPDAGs::cost_sorted` | Cost model | `Vec<RankedTargetSubDAGCandidates>`; retains alternatives and pairs `candidates[i]` with `costs[i]` |
+| `CandidateLogicalASAPDAGs::cost_sorted_with_recurrence` | Cost model, recurrence profiles, optional horizon | Ranked per-target candidate sets or `RecurrenceError`; uses recurrence for applicable share/recompute comparisons |
 | `SketchAlgorithmStrategy::replacements` through `ReplacementStrategy` | One `TargetSubDAG` | Alternatives at that target; not whole-workload search |
 
 `cost_sorted` is a ranking view, not a request to discard all but the first
@@ -266,6 +266,28 @@ candidate. Display costs follow model hooks and may be unavailable/non-finite;
 they are not necessarily a globally sortable physical-cost scalar. Unavailable
 cost alternatives may remain for explanation. Inspect eligibility and evidence
 before physical selection; do not treat their presence as deployment permission.
+
+### Enumerate candidate DAGs per root
+
+```text
+CandidateLogicalASAPDAGs::enumerate_candidate_dags_for_root(&self, id: &Id, expansion_limit: usize)
+    -> Result<CandidateDagInventory<Id>, RealizationError>
+```
+
+Returns every distinct finalized DAG for one root, unranked; other roots'
+choices are not multiplied in. Exceeding `expansion_limit` is an error, never a
+partial inventory.
+
+For PromQL roots that carry a target, `search_workload_with_targets` also asks
+each strategy's `ReplacementStrategy::propose_for_root`. `SketchAlgorithmStrategy`
+answers an instant-vector TopK with current-series heap realizations over rows
+carrying the complete series identity (`$promql_series_identity`). They are
+finalized, deduplicated, and marked `ReplacementProvenance::RootPhysicalRealization`.
+Callers do not apply `with_series_identity` themselves. Compile each with
+`promql_rows::compile_current_series_readout`; other queries keep their previous
+inventory. `global_selection` never commits these candidates; the backend
+compiles and prices them. CandidateLogicalASAPDAGs lists no placement variants: node timing
+comes from the summary maintenance lifecycle.
 
 ## Choose strategies and models
 
@@ -514,7 +536,7 @@ hold. Workload legality and known cost evidence can further restrict alternative
 
 ```text
 global_selection_with_summary_maintenance_lifecycles<'a, Id>(
-    space: &'a PlanSpace<Id>, demand: WorkloadDemand<'_>,
+    space: &'a CandidateLogicalASAPDAGs<Id>, demand: WorkloadDemand<'_>,
     now_ms: u64, horizon: Option<Horizon>,
     capabilities: SummaryMaintenanceLifecycleCapabilities, cost_model: &dyn CostModel,
 ) -> Result<GlobalSelection<'a>, SummaryMaintenanceLifecycleSelectionError>
@@ -556,14 +578,14 @@ entries, construct demand using all applicable indices.
 ```rust
 use asap_aware_mapping::{
     global_selection_with_summary_maintenance_lifecycles,
-    assemble_selected_dag_with_summary_maintenance_lifecycles, CostModel, Horizon, PlanSpace,
+    assemble_selected_dag_with_summary_maintenance_lifecycles, CostModel, Horizon, CandidateLogicalASAPDAGs,
     SummaryMaintenanceLifecycleCapabilities, SummaryMaintenanceLifecyclePlan,
     WorkloadDemand,
 };
 use asap_types::workload::PlanningWorkload;
 
 fn plan_batch_root(
-    space: &PlanSpace<&str>,
+    space: &CandidateLogicalASAPDAGs<&str>,
     workload: &PlanningWorkload,
     entry_index: usize,
     now_ms: u64,
@@ -609,8 +631,10 @@ that prepared or retained shared state is supported.
 | Function | Inputs | Output / promise |
 | --- | --- | --- |
 | `plan_summary_maintenance_lifecycles` | Assembled logical DAG root, `WorkloadDemand`, `now_ms`, optional horizon, runtime capabilities, cost model | `Result<SummaryMaintenanceLifecyclePlan, …>` for that fixed root; does not revisit all semantic candidates |
-| `global_selection_with_summary_maintenance_lifecycles` | `PlanSpace`, workload/root-entry associations, time, horizon, capabilities, cost model | Lifecycle-aware compatible selection/error, using eligible cost evidence |
+| `global_selection_with_summary_maintenance_lifecycles` | `CandidateLogicalASAPDAGs`, workload/root-entry associations, time, horizon, capabilities, cost model | Lifecycle-aware compatible selection/error, using eligible cost evidence |
 | `assemble_selected_dag_with_summary_maintenance_lifecycles` | Selection, target root and lifecycle context | Optional lifecycle plan/error; attaches state deployment decisions |
+| `enumerate_summary_maintenance_lifecycles` | Same inputs as `plan_summary_maintenance_lifecycles` | `SummaryMaintenanceLifecycleCandidates`: per unique retained state, every alternative with its cost or rejection; nothing selected. `guarantee(&lifecycle)` gives the mode/schedule that alternative would carry |
+| `SummaryMaintenanceLifecycleCandidates::select(choices)` | One `(PostAsapNodeId, SummaryMaintenanceLifecycle)` per state, copied from `deployments()` | The same `SummaryMaintenanceLifecyclePlan` Planner selection would produce for that combination, or `SummaryMaintenanceLifecycleChoiceError` when a choice is unknown, missing, duplicated, rejected, schedule-incompatible, or not completely estimable |
 
 Inspect `deployments`, their selected lifecycle/alternatives/rejections,
 `selected_raw_recompute`, and optional summary/raw costs. Success of a function
@@ -621,6 +645,52 @@ Lifecycle feasibility and costs must affect final deployment comparison. Running
 lifecycle analysis after structural selection can evaluate the selected root,
 but does not make the earlier selection lifecycle-optimal. An application may
 consume ranked candidates and perform this comparison downstream instead.
+
+A deployment that prices lifecycles itself calls
+`enumerate_summary_maintenance_lifecycles`, prices the alternatives, and binds
+its choice with `select`. A choice is accepted only if Planner could select it:
+an alternative with `MissingCostEvidence` is accepted only when the cost model's
+complete-candidate hook covers lifecycle costs. Window frameworks and totals come
+from that hook, as in Planner selection.
+
+A lifecycle choice then fixes each physical placement through timing: a
+continuously maintained state and its inputs run at ingestion time, while an
+ephemeral one stays at query time. Compile each query's `PostAsapDag` once and
+cut every chosen assignment from that result:
+
+```rust
+use asap_physical_operators::physical_planner::{
+    compile, cut_candidate, frontier_from_timing,
+};
+
+let compiled = compile(&dag, inputs, &roots)?; // each node lowered once
+for plan in lifecycle_plans {
+    let frontier = frontier_from_timing(&plan.execution_timed_dag()?)?;
+    // Precompute/query DAGs split at `frontier`; no logical lowering.
+    let candidate = cut_candidate(&compiled, &frontier)?;
+    // Check feasibility and price `candidate`; bind the selected one as is.
+}
+```
+
+The frontier is the set of ingestion-time nodes read by query-time nodes (or an
+ingestion-time root). `frontier_from_timing` rejects a query-time node feeding
+an ingestion-time node. `cut_candidate` returns exactly what
+`compile_candidate(&dag, inputs, &roots, &frontier)` returns and rejects the
+same invalid frontiers. If the DAG has an ingestion-time `Binary`, compile with
+the same timing for that node, because it lowers differently. Temporal pane
+candidates are a different lowering and still use
+`compile_temporal_pane_candidate`.
+
+Retained states are `SummaryAgg` nodes and `MaintainPopulation` nodes that do
+not feed a `SummaryAgg`; a population that does feed one is part of that
+state's input. The lifecycle cost hooks (`summary_maintenance_capabilities`,
+`summary_maintenance_lifecycle_cost_inputs_for_horizon`) and the complete-candidate
+hook therefore also receive `MaintainPopulation` nodes. A model that does not
+recognize one should return unknown costs, which keep its alternatives
+unselected; a model that prices every node uniformly now also prices
+populations, so population candidates can win lifecycle-aware selection. `SummaryMaintenanceLifecyclePlan::execution_timed_dag` times a
+population as it times a summary state: retained at ingestion, `Ephemeral` at
+query time from the raw source.
 
 ## Optional whole-plan selection and DAG assembly
 
@@ -661,10 +731,10 @@ Plain `global_selection()` does not automatically perform lifecycle planning or
 establish physical deployment feasibility. Use the corresponding evidence-aware
 workflow for those decisions. Downstream still owns physical commitment.
 
-| Method on `PlanSpace` / `GlobalSelection` | Behavior |
+| Method on `CandidateLogicalASAPDAGs` / `GlobalSelection` | Behavior |
 | --- | --- |
-| `PlanSpace::global_selection(&model)` | Compatible structural selection across targets; no recurrence or lifecycle planning implied |
-| `PlanSpace::global_selection_with_recurrence(...)` | Compatible selection using supplied recurrence profiles/horizon; no lifecycle commitments implied |
+| `CandidateLogicalASAPDAGs::global_selection(&model)` | Compatible structural selection across targets; no recurrence or lifecycle planning implied |
+| `CandidateLogicalASAPDAGs::global_selection_with_recurrence(...)` | Compatible selection using supplied recurrence profiles/horizon; no lifecycle commitments implied |
 | `GlobalSelection::assemble_selected_dag(&target)` | `Result<Option<Rc<SummaryNode>>, RealizationError>`; constructs semantic IR, not stored summary data |
 
 Use a target associated with the searched space; DAG assembly can return `None`
@@ -676,7 +746,7 @@ for checking complete physical alternatives and deployment constraints.
 ### API definition and example
 
 ```text
-PlanSpace::global_selection(&self, cost_model: &dyn CostModel) -> GlobalSelection<'_>
+CandidateLogicalASAPDAGs::global_selection(&self, cost_model: &dyn CostModel) -> GlobalSelection<'_>
 GlobalSelection::assemble_selected_dag(&self, target: &Rc<QueryExpr>)
     -> Result<Option<Rc<SummaryNode>>, RealizationError>
 ```
@@ -723,7 +793,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let root = Rc::new(lower_promql_workload(&workload, 0)?.remove(0));
     let space = search_workload(vec![("q1", root)]);
     let selection = space.global_selection(&DefaultCostModel);
-    // Search may canonicalize roots; use the root returned by PlanSpace.
+    // Search may canonicalize roots; use the root returned by CandidateLogicalASAPDAGs.
     if let Some(summary) = selection.assemble_selected_dag(&space.roots[0].1)? {
         let graph = asap_types::dag_export::export_summary(&summary);
         println!("{graph:#?}");

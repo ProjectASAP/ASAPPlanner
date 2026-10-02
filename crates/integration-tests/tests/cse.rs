@@ -6,7 +6,7 @@
 //! `asap-types::pre_asap::cse`, run internally by `search_workload`) →
 //! `search_workload` (stage 2, `asap-aware-mapping`) — and asserts the
 //! sharing that stage 1 decides survives into stage 2's discovered
-//! `PlanSpace` as one genuinely shared `TargetSubDAGCandidates`, not just one shared
+//! `CandidateLogicalASAPDAGs` as one genuinely shared `TargetSubDAGCandidates`, not just one shared
 //! `Rc<QueryExpr>`. This is the "real caller" the issue's landing plan
 //! requires before `share_common_subtrees` is allowed to exist at all (its
 //! predecessor, `asap-plan::cse::dedupe_subtrees`, was deleted in #192 for
@@ -16,7 +16,7 @@
 //! workload (the former `implement_workload`/`implement_workload_with`,
 //! which this test file used to drive instead of `search_workload`) is out
 //! of `asap-aware-mapping`'s scope — see that crate's `lib.rs` `## Status`
-//! section — so these tests assert on the discovered `PlanSpace` shape
+//! section — so these tests assert on the discovered `CandidateLogicalASAPDAGs` shape
 //! directly, the same way `asap-aware-mapping::replacement`'s own
 //! `shared_aggregate_across_two_roots_gets_both_strategies_candidates` test
 //! does, just exercised through the crate's public API from this external

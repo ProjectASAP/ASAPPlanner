@@ -254,8 +254,13 @@ pub enum BinaryOpKind {
     /// Arithmetic — `Add/Sub/Mul/Div/Mod` (shared with `QueryExpr::Arithmetic`).
     Arithmetic(ArithmeticOpKind),
     /// Comparison — `Eq/Ne/Lt/Le/Gt/Ge` + `Like/ILike/Regex` family (shared
-    /// with `QueryExpr::Compare`).
+    /// with `QueryExpr::Compare`). PromQL keeps the matched series whose
+    /// comparison holds.
     Compare(CompareOpKind),
+    /// PromQL comparison with the `bool` modifier: every matched series
+    /// yields 1 or 0 and loses its metric name. A separate variant, not a
+    /// flag, because only comparisons take `bool`.
+    CompareBool(CompareOpKind),
     /// PromQL vector-set operation.
     Set(PromQLVectorSetOpKind),
 }
@@ -265,6 +270,7 @@ impl std::fmt::Display for BinaryOpKind {
         match self {
             BinaryOpKind::Arithmetic(op) => write!(f, "{op}"),
             BinaryOpKind::Compare(op) => write!(f, "{op}"),
+            BinaryOpKind::CompareBool(op) => write!(f, "{op} bool"),
             BinaryOpKind::Set(PromQLVectorSetOpKind::And) => f.write_str("AND"),
             BinaryOpKind::Set(PromQLVectorSetOpKind::Or) => f.write_str("OR"),
             BinaryOpKind::Set(PromQLVectorSetOpKind::Unless) => f.write_str("unless"),
@@ -500,6 +506,13 @@ pub enum GroupSide {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(bound(serialize = "C: ColState", deserialize = "C: ColState"))]
 pub struct Predicate<C: ColState = ColumnId>(pub Rc<QueryExpr<C>>);
+
+/// Whether any entry of an `Aggregate.filters` vector is set — the shape
+/// no binding rule accepts yet (issue #466): a filtered measure stays
+/// `KeepPreAsap`, and heavy-hitter promotion skips it.
+pub fn any_measure_filtered<C: ColState>(filters: &[Option<Predicate<C>>]) -> bool {
+    filters.iter().any(Option::is_some)
+}
 
 /// One item in a SELECT projection list.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -769,6 +782,15 @@ pub enum QueryExpr<C: ColState = ColumnId> {
         /// (PromQL's convention).
         #[serde(default)]
         output_names: Vec<String>,
+        /// Per-measure row predicates, parallel to `measures` — SQL
+        /// `FILTER (WHERE …)` semantics (issue #466): only rows where
+        /// `filters[i]` is `TRUE` update `measures[i]`; groups are still
+        /// formed from every row. Positional against `child`'s output
+        /// schema, like `Filter.pred` — not against this node's output like
+        /// `having`. `None` (or an entry past the end of a shorter vec) is
+        /// an unfiltered measure, so an empty vec is the pre-#466 shape.
+        #[serde(default)]
+        filters: Vec<Option<Predicate<C>>>,
         #[serde(default)]
         having: Option<Predicate<C>>,
         child: Rc<QueryExpr<C>>,
@@ -878,7 +900,8 @@ pub enum QueryExpr<C: ColState = ColumnId> {
     /// unchanged. Wraps the shifted selector directly — `m offset 1h` →
     /// `TimeShift { Scan }`; a ranged selector `m[5m] offset 1h` →
     /// `TimeRange { 5m, TimeShift { Scan } }` (the range is taken at the shifted
-    /// time). Never carries the identity shift (the converter emits a bare
+    /// time). A shifted subquery wraps the `PromqlSubquery`, moving its step
+    /// grid. Never carries the identity shift (the converter emits a bare
     /// selector when neither modifier is present).
     TimeShift {
         shift: TimeShift,
@@ -1420,14 +1443,34 @@ impl QueryExpr<ColumnId> {
             // <vector>`) is the vector side's — a scalar operand (a constant or
             // `time()`) contributes only its value, no labels. Prefer the
             // non-scalar side.
-            QueryExpr::BinaryOp { lhs, rhs, .. } => match (lhs.as_ref(), rhs.as_ref()) {
-                (
-                    QueryExpr::PromqlScalarBridge(_)
-                    | QueryExpr::EvalTimestamp
-                    | QueryExpr::PromqlScalarFromVector(_),
-                    r,
-                ) => r.output_schema(),
-                (l, _) => l.output_schema(),
+            QueryExpr::BinaryOp { lhs, rhs, op, vector_match } => {
+                fn scalar(expression: &QueryExpr) -> bool {
+                    match expression {
+                        QueryExpr::PromqlScalarBridge(_) | QueryExpr::EvalTimestamp | QueryExpr::PromqlScalarFromVector(_) => true,
+                        QueryExpr::BinaryOp { lhs, rhs, .. } => scalar(lhs) && scalar(rhs),
+                        _ => false,
+                    }
+                }
+                let left = lhs.output_schema()?;
+                let right = rhs.output_schema()?;
+                if scalar(lhs) { return Ok(right); }
+                let mut output = left;
+                let grouping = vector_match.as_ref().and_then(|m| m.grouping.as_ref());
+                let right_rows = matches!(op, BinaryOpKind::Set(PromQLVectorSetOpKind::Or))
+                    || matches!(grouping, Some(g) if g.side == GroupSide::Right);
+                let mut additions = Vec::new();
+                if right_rows {
+                    additions.extend(right.columns.iter().filter(|c| c.dtype == DataType::Utf8).cloned());
+                }
+                if let Some(grouping) = grouping {
+                    additions.extend(grouping.labels.iter().map(|name| Column::new(name.clone(), DataType::Utf8, true)));
+                }
+                for column in additions {
+                    if !output.columns.iter().any(|c| c.name == column.name) {
+                        output.columns.push(column);
+                    }
+                }
+                Ok(output)
             },
 
             // The scalar variants (issue #205) — see `QueryExprError::ScalarHasNoRowSchema`.
@@ -1538,9 +1581,10 @@ pub fn aggregate_output_schema(
             ))?;
         out_cols.push(c.clone());
     }
-    let value_col_idx = in_schema
-        .column_id("value")
-        .or_else(|| (0..in_schema.columns.len()).find(|i| !by.contains(i)));
+    let value_col_idx =
+        super::column_resolution::resolve_column_ref(&ColumnRef::SampleValue, in_schema)
+            .ok()
+            .or_else(|| (0..in_schema.columns.len()).find(|i| !by.contains(i)));
     let probe = value_col_idx
         .and_then(|i| in_schema.columns.get(i))
         .cloned()
@@ -1633,16 +1677,18 @@ fn without_output_schema(
             ));
         }
     }
+    // A nested aggregate renames the sample value (`sum by (le) (…)` → `sum`);
+    // it is still the value, not a kept label.
+    let value =
+        super::column_resolution::resolve_column_ref(&ColumnRef::SampleValue, in_schema).ok();
     let mut out_cols: Vec<Column> = Vec::new();
     for (i, col) in in_schema.columns.iter().enumerate() {
         let is_time = in_schema.time_index == Some(i);
-        let is_value = col.name == "value";
-        if !is_time && !is_value && !excluded.contains(&i) {
+        if !is_time && value != Some(i) && !excluded.contains(&i) {
             out_cols.push(col.clone());
         }
     }
-    let probe = in_schema
-        .column_id("value")
+    let probe = value
         .and_then(|i| in_schema.columns.get(i))
         .cloned()
         .unwrap_or_else(|| Column::new("value", DataType::Float64, false));
@@ -1809,6 +1855,7 @@ fn default_proj_name(expr: &QueryExpr<ColumnId>, idx: usize, schema: &Schema) ->
 mod tests {
     use super::*;
     use crate::pre_asap::expr_ir::{ArithmeticOpKind, CompareOpKind};
+    use crate::types::AccuracyTarget;
 
     fn col(name: &str, dtype: DataType, nullable: bool) -> Column {
         Column::new(name, dtype, nullable)
@@ -2240,6 +2287,7 @@ mod tests {
             reduction: Reduction::Reduce(GroupKeys::without(vec![2])), // exclude `instance`
             measures: vec![AggIntent::Sum { col: None }],
             output_names: vec![],
+            filters: vec![],
             having: None,
             child: Rc::new(scan_node),
         };
@@ -2249,6 +2297,32 @@ mod tests {
         assert!(!s.closed, "a `without` result stays open");
         assert!(s.time_index.is_none());
         assert!(s.unique_keys.is_empty(), "kept set unknown → no unique key");
+    }
+
+    // A nested aggregate's renamed sample value is not a kept label.
+    #[test]
+    fn without_aggregate_drops_a_renamed_sample_value() {
+        // `sum without (inst) (sum by (inst, job) (m))` over `[inst, job, sum]`.
+        let inner = QueryExpr::Scan {
+            source: Source::TimeSeries { metric: "m".into() },
+            predicates: vec![],
+            schema: Schema::new(vec![
+                col("inst", DataType::Utf8, true),
+                col("job", DataType::Utf8, true),
+                col("sum", DataType::Float64, false),
+            ]),
+        };
+        let agg = QueryExpr::Aggregate {
+            reduction: Reduction::Reduce(GroupKeys::without(vec![0])),
+            measures: vec![AggIntent::Sum { col: None }],
+            output_names: vec![],
+            filters: vec![],
+            having: None,
+            child: Rc::new(inner),
+        };
+        let s = agg.output_schema().unwrap();
+        let names: Vec<_> = s.columns.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, vec!["job", "sum"]);
     }
 
     #[test]
@@ -2338,6 +2412,7 @@ mod tests {
             reduction: Reduction::PerEntity,
             measures: vec![AggIntent::Rate],
             output_names: vec![],
+            filters: vec![],
             having: None,
             child: Rc::new(QueryExpr::TimeRange {
                 range: Duration::from_secs(300),
@@ -2376,6 +2451,7 @@ mod tests {
             reduction: Reduction::PerEntity,
             measures: vec![AggIntent::Avg { col: None }],
             output_names: vec![],
+            filters: vec![],
             having: None,
             child: Rc::new(QueryExpr::TimeRange {
                 range: Duration::from_secs(300),
@@ -2425,6 +2501,7 @@ mod tests {
             reduction: Reduction::PerEntity,
             measures: vec![AggIntent::Rate],
             output_names: vec![],
+            filters: vec![],
             having: None,
             child: Rc::new(open_leaf),
         };
@@ -2437,6 +2514,7 @@ mod tests {
             reduction: Reduction::by(vec![2]), // `job`
             measures: vec![AggIntent::Sum { col: None }],
             output_names: vec![],
+            filters: vec![],
             having: None,
             child: Rc::new(rate),
         };
@@ -2609,6 +2687,57 @@ mod tests {
     /// modifier survives unchanged alongside it — the relational binary-op
     /// path (issue #220's Instance 2, left as follow-up) is untouched by the
     /// Instance-1 `PromqlScalar` → `PromqlScalarBridge` collapse.
+    // `filters` (#466) round-trips, and an `Aggregate` serialized before the
+    // field existed still deserializes as unfiltered.
+    #[test]
+    fn aggregate_filters_serde_round_trip_and_default() {
+        let child = Rc::new(scan(
+            vec![
+                col("service", DataType::Utf8, false),
+                col("latency", DataType::Float64, false),
+            ],
+            None,
+            vec![],
+        ));
+        let filtered = QueryExpr::Aggregate {
+            reduction: Reduction::by(vec![0]),
+            measures: vec![
+                AggIntent::Count {
+                    accuracy: AccuracyTarget::Exact,
+                },
+                AggIntent::Sum { col: Some(1) },
+            ],
+            output_names: vec![],
+            filters: vec![
+                Some(Predicate(Rc::new(QueryExpr::Compare {
+                    left: Rc::new(QueryExpr::Column(1)),
+                    op: CompareOpKind::Gt,
+                    right: Rc::new(QueryExpr::Literal(ScalarValue::Float64(1.0))),
+                }))),
+                None,
+            ],
+            having: None,
+            child: Rc::clone(&child),
+        };
+        let json = serde_json::to_value(&filtered).unwrap();
+        assert_eq!(
+            serde_json::from_value::<QueryExpr>(json.clone()).unwrap(),
+            filtered
+        );
+
+        let mut legacy = json;
+        legacy["Aggregate"]
+            .as_object_mut()
+            .unwrap()
+            .remove("filters")
+            .expect("fixture sanity: filters was serialized");
+        let decoded: QueryExpr = serde_json::from_value(legacy).unwrap();
+        let QueryExpr::Aggregate { filters, .. } = &decoded else {
+            unreachable!()
+        };
+        assert!(filters.is_empty());
+    }
+
     #[test]
     fn binary_op_schema_follows_the_vector_side_over_a_scalar_bridge_with_vector_match_intact() {
         let vector = scan(

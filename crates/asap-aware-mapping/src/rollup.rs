@@ -101,7 +101,7 @@ use std::collections::HashSet;
 use std::rc::Rc;
 
 use asap_types::pre_asap::agg_intent::AggIntent;
-use asap_types::pre_asap::query_expr::{GroupKeys, QueryExpr, Reduction};
+use asap_types::pre_asap::query_expr::{any_measure_filtered, GroupKeys, QueryExpr, Reduction};
 use asap_types::pre_asap::schema::{ColumnId, Schema};
 use asap_types::types::AccuracyTarget;
 
@@ -120,6 +120,7 @@ fn bindable_grouped_aggregate(
     let QueryExpr::Aggregate {
         reduction,
         measures,
+        filters,
         having,
         child,
         ..
@@ -130,6 +131,9 @@ fn bindable_grouped_aggregate(
     let ([intent], None) = (measures.as_slice(), having) else {
         return None;
     };
+    if any_measure_filtered(filters) {
+        return None;
+    }
     let Reduction::Reduce(by) = reduction else {
         return None;
     };
@@ -367,6 +371,7 @@ fn build_rollup(
         reduction: Reduction::by(remapped_by),
         measures: vec![combinator],
         output_names: output_names.to_vec(),
+        filters: vec![],
         having: None,
         child: Rc::clone(finer),
     };
@@ -416,6 +421,7 @@ mod tests {
             reduction: Reduction::by(by),
             measures: vec![intent],
             output_names: vec![],
+            filters: vec![],
             having: None,
             child: Rc::clone(child),
         })
@@ -430,6 +436,7 @@ mod tests {
             reduction: Reduction::Reduce(GroupKeys::without(excluded)),
             measures: vec![intent],
             output_names: vec![],
+            filters: vec![],
             having: None,
             child: Rc::clone(child),
         })
@@ -740,6 +747,7 @@ mod tests {
             reduction: Reduction::by(vec![2]),
             measures: vec![AggIntent::Sum { col: Some(1) }],
             output_names: vec!["total_requests".into()],
+            filters: vec![],
             having: None,
             child: Rc::clone(&scan),
         });
@@ -868,6 +876,7 @@ mod tests {
                 },
             ],
             output_names: vec![],
+            filters: vec![],
             having: None,
             child: Rc::clone(&scan),
         });

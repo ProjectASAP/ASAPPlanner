@@ -120,7 +120,7 @@ statistics contract, validation rule, and resource formula for an operation,
 a candidate containing it is unavailable.
 
 The streaming integration can consume a complete binding through
-`StreamingNodeEvidence`. That binding is keyed to exact `SummaryNode`
+`SummaryNodeEvidence`. That binding is keyed to exact `SummaryNode`
 identities and uses structured evidence for aggregate state, join, merge,
 subtract, delete, readout, and retained pre-ASAP work. It is a physical
 evidence boundary, not automatic physical lowering: a deployment must still
@@ -443,6 +443,14 @@ storage readiness, schemas and approximation guarantees remain separate checks.
 Post-ASAP DAG wire version 4 removes the special membership operator, its edge
 roles and the duplicate operator phase fields without compatibility aliases.
 
+Post-ASAP DAG wire version 6 adds a per-measure row predicate to the aggregate
+operators (#466): `filters` on the exact aggregate value operation, parallel to
+its measures, and `filter` on `SummaryAgg`, gating which rows update the
+summary state. The version bump makes an older reader fail loudly instead of
+taking a filtered aggregate as unfiltered. No planner rule sets `SummaryAgg.filter`
+yet; a filtered pre-ASAP measure is retained as an exact fallback.
+The native physical planner rejects either field when set.
+
 The candidate row producer derives its key columns from the summary update's
 item identity and subpopulation keys. Its last column, `__asap_estimate`, is the
 summary score; it is never substituted for an authoritative value. The join
@@ -460,3 +468,35 @@ candidate completeness; that evidence belongs to the semi-join's pruning step.
 The semantic `SummaryExpr` constructors still propose an initial execution
 layout. Uniform phase assignment applies to the exported post-ASAP DAG;
 it is not a claim that every deployment has implemented every placement.
+
+
+## Summary cost evidence across data-arrival modes
+
+`SummaryMaintenanceCostModel` binds `SummaryNodeEvidence` and
+`SummaryOperatorEvidence` independently of data-arrival mode. `ComparisonScope`
+and the canonical `DataWorkload` determine arrival semantics; individual operator
+resource records do not define another workload model.
+
+`SummaryMaintenanceInputs::from_workload` requires fresh snapshot cardinality.
+For `AtRest`, it derives zero arrivals without requiring ingestion-rate evidence;
+a fresh nonzero or invalid rate contradicts that declaration and is rejected.
+For `ContinuouslyIngesting`, fresh, finite, nonnegative rate evidence remains
+mandatory. Missing continuous rate evidence is never treated as zero.
+Raw and summary evidence supplied directly by a provider obey the same arrival
+invariant. Their source lineage, horizon, evaluation count, and snapshot dimensions
+must still match. The existing lifecycle planner selects direct builds for a fixed
+snapshot and charges bootstrap work, result evaluation, and retention; it charges
+no arrival updates. This does not add computation-placement policy.
+
+`Mixed` and `Unknown` remain unsupported for analytical comparisons: the current
+workload schema cannot identify separate backlog and arrival populations. The
+adapter fails explicitly rather than guessing a split. The estimator version is
+`summary-maintenance-resource-v2`; evidence type names drop the `Streaming` prefix
+(`SummaryMaintenanceInputs`, `SummaryPhysicalInputEvidence`, `SummaryAggregateEvidence`,
+`RetainedSubDagEvidence`, `RawInputEvidence`, and the summary window/alternative
+types). Update source imports; no legacy-name aliases are provided.
+
+Regressions cover a fixed snapshot with no rate evidence, contradictory arrival
+rates, scope mismatches, missing continuous-rate/cardinality evidence, and actual
+lifecycle selection of a completely costed at-rest summary against its raw scan.
+The existing continuous-ingestion and mixed-arrival rejection tests remain.
