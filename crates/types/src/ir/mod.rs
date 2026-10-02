@@ -15,3 +15,12 @@ pub use node::{Operator, OperatorNode, OperatorResultKind};
 pub use non_asap::{BinaryOperator, NonASAPOp, TimeRangeKind};
 pub use query::QueryRoot;
 pub use scalar::{ExprSemantics, Predicate, ProjectItem, ScalarExpr, SortKey};
+
+pub mod canonicalize;
+pub mod cse;
+pub mod export;
+pub mod timing;
+pub use timing::{
+    apply_lifecycle_timings, data_state, planned_data_state, split_shared_by_phase,
+    validate_default, LifecycleAssignment, TimingMemo,
+};
