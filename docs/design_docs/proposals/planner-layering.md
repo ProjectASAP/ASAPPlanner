@@ -19,9 +19,9 @@ Scenarios for how the design is extended.
 * So existing query planners miss the opportunity to share the benefits of ASAP primitives across
   domains and use cases.
 
-ASAPPlanner therefore models, for an existing query IR:
+In order to achieve the goals, ASAPPlanner needs to abstract the modeling the following for use cases:
 
-| Model | Contents |
+| Modeling | Contents |
 |---|---|
 | Query workload | Queries with recurrence (repeated, batch, ad hoc), predictability, time selection, and accuracy and latency requirements |
 | Data workload | Arrival (streaming, at rest, or both), sampling cadence, volume, rate, cardinality and distribution |
