@@ -278,8 +278,7 @@ async fn identical_ungrouped_queries_share_their_producers() {
 }
 
 /// The SQL frontend reaches the same sharing for two copies of one filtered
-/// percentile. (Its state schema names the query's output column, so p50 and
-/// p99 over one SQL sketch are not yet structurally identical.)
+/// percentile.
 #[tokio::test]
 async fn identical_sql_percentiles_share_one_producer() {
     let query =
@@ -287,6 +286,55 @@ async fn identical_sql_percentiles_share_one_producer() {
     let output = plan_sql(&[query, query], &CHEAP_SUMMARY).await;
     assert!(same_states(&states(&output)));
     assert_eq!(unique_deployments(&output), 1);
+}
+
+/// The quantile is a readout parameter: SQL p50 and p99 over one filtered
+/// column build one KLL, named after its input, while each query keeps its
+/// own output column.
+#[tokio::test]
+async fn sql_p50_and_p99_share_one_producer() {
+    let p50 =
+        "SELECT approx_percentile_cont(l_extendedprice, 0.5) FROM lineitem WHERE l_orderkey > 10";
+    let p99 =
+        "SELECT approx_percentile_cont(l_extendedprice, 0.99) FROM lineitem WHERE l_orderkey > 10";
+    let output = plan_sql(&[p50, p99], &CHEAP_SUMMARY).await;
+    assert!(same_states(&states(&output)));
+    assert_eq!(unique_deployments(&output), 1);
+    let names: Vec<_> = output
+        .plans
+        .iter()
+        .map(|plan| {
+            plan.plan
+                .root
+                .schema
+                .fields
+                .iter()
+                .map(|field| field.name.clone())
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    assert_eq!(
+        names,
+        [
+            ["approx_percentile_cont(lineitem.l_extendedprice,Float64(0.5))"],
+            ["approx_percentile_cont(lineitem.l_extendedprice,Float64(0.99))"],
+        ]
+    );
+
+    for queries in [
+        [
+            p50,
+            "SELECT approx_percentile_cont(l_extendedprice, 0.99) FROM lineitem WHERE l_orderkey > 20",
+        ],
+        [
+            p50,
+            "SELECT approx_percentile_cont(l_orderkey, 0.99) FROM lineitem WHERE l_orderkey > 10",
+        ],
+    ] {
+        let output = plan_sql(&queries, &CHEAP_SUMMARY).await;
+        assert!(!same_states(&states(&output)), "{queries:?}");
+        assert_eq!(unique_deployments(&output), 2, "{queries:?}");
+    }
 }
 
 /// A state costs 100 and recomputing a query costs 60 over its six reads:
