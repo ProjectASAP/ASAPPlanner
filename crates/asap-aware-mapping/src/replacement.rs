@@ -6197,9 +6197,8 @@ fn pick_shared_subtree_candidate(
 /// The parent/child structure [`CandidateLogicalASAPDAGs::global_selection`]'s DP walks —
 /// built separately from [`discover_targets`]'s own `order`/`nodes`/`counts`
 /// maps (which only track *aggregate* reference counts, not per-parent
-/// breakdown or direction) rather than extending that already-reviewed,
-/// already-tested pass. Same "small duplicated traversal over reshaping
-/// proven code" call as [`is_shared_sub-DAG_group`].
+/// breakdown or direction). Selection needs per-parent edge counts to
+/// distinguish shared producers from repeated uses within one consumer.
 struct ReferenceGraph {
     /// child ptr -> `(parent ptr, edge count from that one parent)`, for
     /// every direct operator-child edge in the relational-skeleton scope

@@ -28,6 +28,8 @@ and [#530](https://github.com/ProjectASAP/ASAPPlanner/issues/530).
 `PlanOutput` is one multi-root workload DAG: `operator_roots()` exposes operator
 roots, and `operators()` inventories shared nodes once across operator and scalar
 roots. Replacement regions and CSE use `SubDag` and `share_common_subdags`.
+Bulk retained-sub-DAG cost evidence may cover only ordinary operators; it is
+rejected if any descendant is an ASAP operator, so summary work cannot be hidden.
 Supporting operator parameters live in `ir::operator_properties`; schema derivation
 and errors have dedicated modules. Summary operations use “evaluation”;
 `SketchStatistic` specifies the statistic to compute, rather than another query.
