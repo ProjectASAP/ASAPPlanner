@@ -12,11 +12,11 @@ Scenarios for how the design is extended.
 ### Motivation
 
 * Existing database query engines and optimizers do not consider ASAP
-  primitives: summaries such as sketches that trade bounded error for lower
+  primitives for optimizing the queries: summaries such as sketches that trade bounded error for lower
   cost.
 * They also do not consider the query and data workloads of different use
-  cases: streaming or batch data input, and repeated, batch or ad hoc queries.
-* So they miss the opportunity to share the benefits of ASAP primitives across
+  cases, which have the potential to share the common optimization with ASAP primitives. Example use case workloads can be streaming or batch data input, and repeated, batch or ad hoc queries.
+* So existing query planners miss the opportunity to share the benefits of ASAP primitives across
   domains and use cases.
 
 ASAPPlanner therefore models, for an existing query IR:
