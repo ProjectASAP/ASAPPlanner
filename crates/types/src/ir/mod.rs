@@ -1,6 +1,5 @@
 //! Unified operator and scalar representation from #511.
-//! Legacy consumers remain on their existing representation until the
-//! planner cutover.
+//! Legacy consumers remain on their existing representation until the planner cutover.
 pub mod aggregate_schema;
 pub mod asap;
 pub mod error;
@@ -21,3 +20,4 @@ pub mod cse;
 pub mod flat;
 /// Semantic observation coverage, separate from field layout and physical timing.
 pub mod summary_coverage;
+pub mod schema_support;
