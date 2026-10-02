@@ -2,19 +2,19 @@
 use asap_physical_operators::{
     dag::{
         operators::{Expression, Operator, Reduction, SortKey},
-        values::{Batch, Schema, Value},
+        values::{Batch, SchemaRef, Value},
         Limits, PhysicalDAG, RunContext, Scope,
     },
     Statistic,
 };
 use futures::{executor::block_on, StreamExt};
 use planner_types::{
-    post_asap::{ExactKind, ExactParams, Field, FieldDataType, Schema as PlannerSchema},
+    post_asap::{ExactKind, ExactParams, Field, FieldDataType, Schema},
     pre_asap::DataType,
 };
 use std::sync::Arc;
-fn schema(fields: &[(&str, DataType, bool)]) -> Schema {
-    Arc::new(PlannerSchema {
+fn schema(fields: &[(&str, DataType, bool)]) -> SchemaRef {
+    Arc::new(Schema {
         closed: true,
         unique_keys: vec![],
         fields: fields
@@ -29,7 +29,7 @@ fn schema(fields: &[(&str, DataType, bool)]) -> Schema {
         time_index: None,
     })
 }
-fn run(dag: &PhysicalDAG<'_, Batch, Schema>, root: u64, scope: Scope) -> Vec<Vec<Value>> {
+fn run(dag: &PhysicalDAG<'_, Batch, SchemaRef>, root: u64, scope: Scope) -> Vec<Vec<Value>> {
     let context = RunContext::new(
         scope,
         Limits {
@@ -423,7 +423,7 @@ fn exact_state_and_family_validation() {
     let family = FieldDataType::ExactAggregate(ExactKind::Sum, ExactParams::Sum);
     let mut acc = ExactAccumulator::new(family.clone(), false).unwrap();
     acc.update(None, 7., 0);
-    let schema = Arc::new(PlannerSchema {
+    let schema = Arc::new(Schema {
         closed: true,
         unique_keys: vec![],
         fields: vec![Field {
@@ -607,17 +607,17 @@ fn source_batches_must_match_the_bound_schema() {
     };
     use std::{cell::Cell, collections::BTreeMap, rc::Rc};
     struct WrongSource {
-        schema: Schema,
+        schema: SchemaRef,
         starts: Rc<Cell<usize>>,
     }
-    impl PhysicalOperator<Batch, Schema> for WrongSource {
+    impl PhysicalOperator<Batch, SchemaRef> for WrongSource {
         fn name(&self) -> &str {
             "ExternalSource"
         }
-        fn input_schemas(&self) -> Vec<Schema> {
+        fn input_schemas(&self) -> Vec<SchemaRef> {
             vec![]
         }
-        fn output_schema(&self) -> Schema {
+        fn output_schema(&self) -> SchemaRef {
             self.schema.clone()
         }
         fn output_bytes(&self, value: &Batch) -> usize {
@@ -718,14 +718,14 @@ fn planner_semijoin_sort_limit_contract_at_both_phases() {
         ("score", DataType::Float64, false),
     ]);
     let keys_schema = schema(&[("key", DataType::Utf8, false)]);
-    let node = |id, payload, schema: &asap_physical_operators::values::Schema| PostAsapDAGNode {
+    let node = |id, payload, schema: &asap_physical_operators::values::SchemaRef| PostAsapDAGNode {
         id: PostAsapNodeId(id),
         payload,
         output_schema: (**schema).clone(),
         output_state: ExecutionDataState::QUERY_ROWS,
         guarantee: None,
     };
-    let edge = |producer, consumer, role, schema: &asap_physical_operators::values::Schema| {
+    let edge = |producer, consumer, role, schema: &asap_physical_operators::values::SchemaRef| {
         PostAsapDAGEdge {
             producer: PostAsapNodeId(producer),
             consumer: PostAsapNodeId(consumer),

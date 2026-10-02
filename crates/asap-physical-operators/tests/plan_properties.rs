@@ -4,11 +4,11 @@ use asap_physical_operators::{
     plan::{Boundedness, Emission, PhysicalDAG},
     runtime::{Limits, OutputStream, RunContext, Scope},
     sources::{DataSources, RawSource},
-    values::{Batch, Schema},
+    values::{Batch, SchemaRef},
     Error,
 };
 use planner_types::{
-    post_asap::{Field, FieldDataType, Schema as PlannerSchema},
+    post_asap::{Field, FieldDataType, Schema},
     pre_asap::{DataType, QueryExpr, Source},
 };
 use std::sync::{
@@ -16,12 +16,12 @@ use std::sync::{
     Arc,
 };
 struct DeclaredSource {
-    schema: Schema,
+    schema: SchemaRef,
     boundedness: Boundedness,
     opens: Arc<AtomicUsize>,
 }
 impl RawSource for DeclaredSource {
-    fn schema(&self) -> Schema {
+    fn schema(&self) -> SchemaRef {
         self.schema.clone()
     }
     fn boundedness(&self) -> Boundedness {
@@ -35,7 +35,7 @@ impl RawSource for DeclaredSource {
 // A blocking parent must reject unknown and unbounded Scan inputs without opening a reader.
 #[test]
 fn blocking_inputs_require_an_explicit_finite_source() {
-    let schema = Arc::new(PlannerSchema {
+    let schema = Arc::new(Schema {
         closed: true,
         unique_keys: vec![],
         fields: vec![Field {
@@ -69,7 +69,7 @@ fn blocking_inputs_require_an_explicit_finite_source() {
         let scan = registry
             .bind(&QueryExpr::Scan {
                 source: identity,
-                schema: PlannerSchema::new(vec![Field::plain("v", DataType::Int64, false)]),
+                schema: Schema::new(vec![Field::plain("v", DataType::Int64, false)]),
                 predicates: vec![],
             })
             .unwrap();

@@ -19,7 +19,7 @@ pub(super) fn raw_series_owner(slot: NodeId) -> Option<NodeId> {
 }
 
 /// A selector expression and its raw-series row schema.
-pub type Selector = (QueryExpr, Schema);
+pub type Selector = (QueryExpr, SchemaRef);
 
 /// The selectors a Fallback expression reads, left to right, and the row
 /// schema of the raw series the deployment supplies for each at
@@ -49,7 +49,7 @@ pub(super) fn lower(expression: &QueryExpr) -> Result<Lowering, Error> {
     Ok(lowering)
 }
 
-fn declared(expression: &QueryExpr) -> Result<Schema, Error> {
+fn declared(expression: &QueryExpr) -> Result<SchemaRef, Error> {
     let schema = expression
         .output_schema()
         .map_err(|error| invalid(error.to_string()))?;
@@ -107,7 +107,7 @@ pub(super) fn scalar(expression: &QueryExpr) -> bool {
 }
 
 impl Lowering {
-    fn schema(&self, input: &Input) -> Schema {
+    fn schema(&self, input: &Input) -> SchemaRef {
         match input {
             Input::Raw(i) => self.selectors[*i].1.clone(),
             Input::Step(i) => self.steps[*i].0.schema(),

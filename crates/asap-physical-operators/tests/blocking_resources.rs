@@ -3,18 +3,18 @@ use asap_physical_operators::{
     operators::Operator,
     plan::{PhysicalDAG, PhysicalOperator},
     runtime::{Limits, RunContext, Scope},
-    values::{Batch, Schema, Value},
+    values::{Batch, SchemaRef, Value},
     Error,
 };
 use futures::{executor::block_on, FutureExt, StreamExt};
 use planner_types::{
-    post_asap::{Field, FieldDataType, Schema as PlannerSchema},
+    post_asap::{Field, FieldDataType, Schema},
     pre_asap::{DataType, JoinKind, Predicate, QueryExpr, ScalarValue},
 };
 use std::sync::Arc;
 
-fn schema(width: usize) -> Schema {
-    Arc::new(PlannerSchema {
+fn schema(width: usize) -> SchemaRef {
+    Arc::new(Schema {
         closed: true,
         unique_keys: vec![],
         fields: (0..width)
@@ -41,7 +41,7 @@ fn context(max_bytes: usize) -> RunContext {
     )
     .unwrap()
 }
-fn source(n: usize) -> PhysicalDAG<'static, Batch, Schema> {
+fn source(n: usize) -> PhysicalDAG<'static, Batch, SchemaRef> {
     let mut dag = PhysicalDAG::default();
     dag.add(
         0,
@@ -189,7 +189,7 @@ fn cooperative_sort_preserves_ties_across_chunks() {
 #[test]
 fn weighted_summary_build_yields_within_a_batch() {
     use planner_types::post_asap::{SketchAlgorithm, SketchKind, SketchParams};
-    let input = Arc::new(PlannerSchema {
+    let input = Arc::new(Schema {
         closed: true,
         unique_keys: vec![],
         fields: vec![

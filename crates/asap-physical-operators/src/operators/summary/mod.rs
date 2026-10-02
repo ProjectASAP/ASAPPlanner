@@ -8,7 +8,7 @@ pub enum ReadoutQuery {
 
 impl Operator {
     pub fn keyed_summary_build(
-        input: Schema,
+        input: SchemaRef,
         family: FieldDataType,
         value: usize,
         items: Vec<usize>,
@@ -61,10 +61,10 @@ impl Operator {
         })
     }
     pub fn keyed_readout(
-        input: Schema,
+        input: SchemaRef,
         state: usize,
         k: usize,
-        output: Schema,
+        output: SchemaRef,
     ) -> Result<Self, Error> {
         use crate::summary_kernels::weighted_frequency::WeightedFrequency;
         crate::values::validate_family(&field(&input, state)?.dtype)?;
@@ -91,7 +91,7 @@ impl Operator {
         })
     }
     pub fn summary_build(
-        input: Schema,
+        input: SchemaRef,
         family: FieldDataType,
         value: usize,
         time: Option<usize>,
@@ -146,7 +146,11 @@ impl Operator {
             output: schema(fields),
         })
     }
-    pub fn summary_merge(input: Schema, state: usize, groups: Vec<usize>) -> Result<Self, Error> {
+    pub fn summary_merge(
+        input: SchemaRef,
+        state: usize,
+        groups: Vec<usize>,
+    ) -> Result<Self, Error> {
         validate_groups(&input, &groups)?;
         crate::values::validate_family(&field(&input, state)?.dtype)?;
         if matches!(field(&input, state)?.dtype, FieldDataType::Plain(_)) {
@@ -163,7 +167,7 @@ impl Operator {
             output: schema(fields),
         })
     }
-    pub fn readout(input: Schema, state: usize, query: ReadoutQuery) -> Result<Self, Error> {
+    pub fn readout(input: SchemaRef, state: usize, query: ReadoutQuery) -> Result<Self, Error> {
         let family = &field(&input, state)?.dtype;
         crate::values::validate_family(family)?;
         match &query {

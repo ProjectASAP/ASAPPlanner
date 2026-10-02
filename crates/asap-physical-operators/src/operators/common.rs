@@ -2,8 +2,8 @@ use super::*;
 pub(super) fn invalid(message: &str) -> Error {
     Error::Invalid(message.into())
 }
-pub(super) fn schema(fields: Vec<Field>) -> Schema {
-    Arc::new(PlannerSchema {
+pub(super) fn schema(fields: Vec<Field>) -> SchemaRef {
+    Arc::new(Schema {
         closed: true,
         unique_keys: vec![],
         fields,
@@ -19,7 +19,7 @@ pub(super) fn result_field(name: &str, dtype: DataType, nullable: bool) -> Field
     }
 }
 
-pub(super) fn validate_groups(input: &Schema, groups: &[usize]) -> Result<(), Error> {
+pub(super) fn validate_groups(input: &SchemaRef, groups: &[usize]) -> Result<(), Error> {
     for &i in groups {
         plain(input, i)?;
     }
@@ -76,4 +76,4 @@ pub(super) fn key_bytes(key: &[Vec<u8>]) -> usize {
         .map(|part| std::mem::size_of::<Vec<u8>>() + part.len())
         .sum::<usize>()
 }
-use planner_types::pre_asap::Schema as PlannerSchema;
+use planner_types::pre_asap::Schema;

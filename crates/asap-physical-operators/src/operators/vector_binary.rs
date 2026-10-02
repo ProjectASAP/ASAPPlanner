@@ -2,7 +2,7 @@
 use super::*;
 use planner_types::{post_asap::BinaryOperator, pre_asap::BinaryOpKind};
 
-pub(crate) fn value_schema(scalar: bool) -> Schema {
+pub(crate) fn value_schema(scalar: bool) -> SchemaRef {
     let mut fields = Vec::new();
     if !scalar {
         fields.push(result_field(
@@ -23,7 +23,7 @@ pub(crate) fn value_schema(scalar: bool) -> Schema {
     schema(fields)
 }
 
-fn is_scalar(input: &Schema) -> Result<bool, Error> {
+fn is_scalar(input: &SchemaRef) -> Result<bool, Error> {
     for scalar in [true, false] {
         let expected = value_schema(scalar);
         if input.fields.len() == expected.fields.len()
@@ -43,8 +43,8 @@ fn is_scalar(input: &Schema) -> Result<bool, Error> {
 
 impl Operator {
     pub fn vector_binary(
-        left: Schema,
-        right: Schema,
+        left: SchemaRef,
+        right: SchemaRef,
         operator: BinaryOperator,
         mut return_bool: bool,
     ) -> Result<Self, Error> {

@@ -1033,7 +1033,7 @@ fn execute_timed(
             }
         }
     }
-    let batch = |schema: &asap_physical_operators::values::Schema, name: &str| {
+    let batch = |schema: &asap_physical_operators::values::SchemaRef, name: &str| {
         let rows = samples
             .iter()
             .filter(|sample| sample.0 == name)

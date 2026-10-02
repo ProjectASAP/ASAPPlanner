@@ -8,7 +8,7 @@ use asap_physical_operators::{
     values::{Batch, Value},
 };
 use futures::{executor::block_on, StreamExt};
-use planner_types::pre_asap::Schema as PlannerSchema;
+use planner_types::pre_asap::Schema;
 use planner_types::{
     post_asap::*,
     pre_asap::{ColumnRef, DataType, ProjectItem, QueryExpr},
@@ -20,7 +20,7 @@ use std::{collections::BTreeMap, sync::Arc};
 #[test]
 fn post_asap_summary_projection_survives_recovery() {
     let family = FieldDataType::ExactAggregate(ExactKind::Sum, ExactParams::Sum);
-    let schema = Arc::new(PlannerSchema {
+    let schema = Arc::new(Schema {
         closed: true,
         unique_keys: vec![],
         fields: vec![
@@ -39,7 +39,7 @@ fn post_asap_summary_projection_survives_recovery() {
         ],
         time_index: None,
     });
-    let output = PlannerSchema {
+    let output = Schema {
         closed: true,
         unique_keys: vec![],
         fields: vec![

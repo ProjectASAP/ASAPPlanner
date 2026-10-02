@@ -211,7 +211,7 @@ fn composed_ensemble_shares_a_producer_across_roots() {
         physical_planner::InputContract,
         plan::{PhysicalOperator, PlanProperties},
         runtime::{Input, OutputStream},
-        values::Schema,
+        values::SchemaRef,
     };
     use planner_types::{
         post_asap::BinaryOperator,
@@ -221,14 +221,14 @@ fn composed_ensemble_shares_a_producer_across_roots() {
         source: Operator,
         starts: std::rc::Rc<std::cell::Cell<usize>>,
     }
-    impl PhysicalOperator<Batch, Schema> for Counted {
+    impl PhysicalOperator<Batch, SchemaRef> for Counted {
         fn name(&self) -> &str {
             "CountedInput"
         }
-        fn input_schemas(&self) -> Vec<Schema> {
+        fn input_schemas(&self) -> Vec<SchemaRef> {
             vec![]
         }
-        fn output_schema(&self) -> Schema {
+        fn output_schema(&self) -> SchemaRef {
             self.source.schema()
         }
         fn output_bytes(&self, batch: &Batch) -> usize {

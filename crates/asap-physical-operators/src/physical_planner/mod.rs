@@ -5,7 +5,7 @@ use crate::summary_kernels::exact::ExactReadout;
 use crate::{
     operators::{Expression, Operator, Reduction, SortKey},
     plan::{Boundedness, Emission, NodeId, PhysicalDAG, PhysicalOperator, PlanProperties},
-    values::{Batch, Schema},
+    values::{Batch, SchemaRef},
     Error,
 };
 use planner_types::{
@@ -29,7 +29,7 @@ fn invalid(message: impl Into<String>) -> Error {
 /// Source nodes cut the DAG at an installed storage/ingestion frontier. The
 /// binding must have exactly the declared schema and no upstream dependencies.
 /// A deployment must authorize these frontiers before calling this function.
-pub type Source<'a> = Box<dyn PhysicalOperator<Batch, Schema> + 'a>;
+pub type Source<'a> = Box<dyn PhysicalOperator<Batch, SchemaRef> + 'a>;
 
 pub mod precompute;
 pub mod promql_fallback;
@@ -63,7 +63,7 @@ pub fn bind<'a>(
     dag: &PostAsapDAG,
     sources: BTreeMap<NodeId, Source<'a>>,
     roots: &[NodeId],
-) -> Result<PhysicalDAG<'a, Batch, Schema>, Error> {
+) -> Result<PhysicalDAG<'a, Batch, SchemaRef>, Error> {
     let inputs = sources
         .iter()
         .map(|(&id, source)| (id, InputContract::from_source(source.as_ref())))
@@ -77,7 +77,7 @@ pub fn bind_with_data_sources<'a>(
     mut sources: BTreeMap<NodeId, Source<'a>>,
     roots: &[NodeId],
     data_sources: &crate::sources::DataSources,
-) -> Result<PhysicalDAG<'a, Batch, Schema>, Error> {
+) -> Result<PhysicalDAG<'a, Batch, SchemaRef>, Error> {
     // Only resolve scans reachable below the selected input boundaries.
     let mut pending = roots.to_vec();
     let mut seen = BTreeSet::new();
@@ -495,7 +495,7 @@ fn compile_internal(
                     auxiliary -= 1;
                     continue;
                 }
-                let label_map = |schema: &Schema| {
+                let label_map = |schema: &SchemaRef| {
                     schema
                         .fields
                         .iter()
@@ -634,20 +634,20 @@ fn temporal_readout_drops_name(node: &PostAsapDAGNode) -> bool {
 
 /// Bind a Planner node against the schemas supplied by its deployment edges.
 /// This is the same checked path used by complete DAG binding.
-pub fn compile_node(node: &PostAsapDAGNode, inputs: &[Schema]) -> Result<Operator, Error> {
+pub fn compile_node(node: &PostAsapDAGNode, inputs: &[SchemaRef]) -> Result<Operator, Error> {
     for schema in inputs {
         crate::values::validate_schema(schema)?;
     }
     bind_operation(node, inputs)?.with_output_schema(Arc::new(node.output_schema.clone()))
 }
 
-fn bind_operation(node: &PostAsapDAGNode, inputs: &[Schema]) -> Result<Operator, Error> {
+fn bind_operation(node: &PostAsapDAGNode, inputs: &[SchemaRef]) -> Result<Operator, Error> {
     if let Payload::Binary { operator } = &node.payload {
         let [left, right] = inputs else {
             return Err(invalid("binary requires two inputs"));
         };
         if node.output_state.timing == planner_types::post_asap::ExecutionTiming::IngestionTime {
-            let value = |schema: &Schema| -> Result<usize, Error> {
+            let value = |schema: &SchemaRef| -> Result<usize, Error> {
                 let columns = schema
                     .fields
                     .iter()
@@ -887,7 +887,7 @@ fn bind_operation(node: &PostAsapDAGNode, inputs: &[Schema]) -> Result<Operator,
                 }
                 fn columns(
                     expr: &SummaryInputExpr,
-                    input: &Schema,
+                    input: &SchemaRef,
                     result: &mut Vec<usize>,
                 ) -> Result<(), Error> {
                     match expr {
@@ -963,7 +963,7 @@ fn bind_operation(node: &PostAsapDAGNode, inputs: &[Schema]) -> Result<Operator,
         )),
     }
 }
-fn summary_column(input: &Schema) -> Result<usize, Error> {
+fn summary_column(input: &SchemaRef) -> Result<usize, Error> {
     let columns = input
         .fields
         .iter()
@@ -976,7 +976,7 @@ fn summary_column(input: &Schema) -> Result<usize, Error> {
         _ => Err(invalid("one summary state column required")),
     }
 }
-fn named_column(input: &Schema, column: &ColumnRef) -> Result<usize, Error> {
+fn named_column(input: &SchemaRef, column: &ColumnRef) -> Result<usize, Error> {
     let name = match column {
         // This summary-update lookup matches column names without qualifiers.
         // Reject ambiguous names rather than guessing a join side.
@@ -1000,7 +1000,7 @@ fn named_column(input: &Schema, column: &ColumnRef) -> Result<usize, Error> {
         _ => Err(invalid("summary update column missing or ambiguous")),
     }
 }
-fn groups(input: &Schema, groups: &GroupKeys) -> Result<Vec<usize>, Error> {
+fn groups(input: &SchemaRef, groups: &GroupKeys) -> Result<Vec<usize>, Error> {
     if groups.is_without() {
         return Err(invalid("grouping without requires resolved label columns"));
     }
@@ -1009,7 +1009,7 @@ fn groups(input: &Schema, groups: &GroupKeys) -> Result<Vec<usize>, Error> {
     }
     Ok(groups.keys().to_vec())
 }
-fn expression(expr: &QueryExpr, input: &Schema) -> Result<Expression, Error> {
+fn expression(expr: &QueryExpr, input: &SchemaRef) -> Result<Expression, Error> {
     Ok(Expression::planner(
         crate::expressions::CompiledExpression::compile(expr, input)?,
     ))
@@ -1017,9 +1017,9 @@ fn expression(expr: &QueryExpr, input: &Schema) -> Result<Expression, Error> {
 
 struct CheckedSource<'a> {
     source: Source<'a>,
-    output: Schema,
+    output: SchemaRef,
 }
-impl PhysicalOperator<Batch, Schema> for CheckedSource<'_> {
+impl PhysicalOperator<Batch, SchemaRef> for CheckedSource<'_> {
     fn properties(&self, inputs: &[crate::plan::PlanProperties]) -> crate::plan::PlanProperties {
         self.source.properties(inputs)
     }
@@ -1027,10 +1027,10 @@ impl PhysicalOperator<Batch, Schema> for CheckedSource<'_> {
     fn name(&self) -> &str {
         self.source.name()
     }
-    fn input_schemas(&self) -> Vec<Schema> {
+    fn input_schemas(&self) -> Vec<SchemaRef> {
         vec![]
     }
-    fn output_schema(&self) -> Schema {
+    fn output_schema(&self) -> SchemaRef {
         self.output.clone()
     }
     fn output_bytes(&self, batch: &Batch) -> usize {

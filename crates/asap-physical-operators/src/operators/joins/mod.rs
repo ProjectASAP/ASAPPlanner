@@ -1,8 +1,8 @@
 use super::*;
 impl Operator {
     pub fn semi_join(
-        left: Schema,
-        right: Schema,
+        left: SchemaRef,
+        right: SchemaRef,
         keys: Vec<(usize, usize)>,
     ) -> Result<Self, Error> {
         if keys.is_empty() {
@@ -42,11 +42,11 @@ impl Operator {
         }
     }
     pub fn relational_join(
-        left: Schema,
-        right: Schema,
+        left: SchemaRef,
+        right: SchemaRef,
         kind: planner_types::pre_asap::JoinKind,
         predicate: &planner_types::pre_asap::Predicate,
-        output: Schema,
+        output: SchemaRef,
     ) -> Result<Self, Error> {
         use planner_types::pre_asap::JoinKind;
         let mut joined = left.fields.clone();

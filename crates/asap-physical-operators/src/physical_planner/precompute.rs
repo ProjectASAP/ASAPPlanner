@@ -2,14 +2,14 @@
 use super::promql_rows::SERIES_IDENTITY_COLUMN as SERIES_IDENTITY;
 use super::*;
 use planner_types::{
-    post_asap::{ExecutionTiming, GroupingStrategy, Schema as PlannerSchema},
+    post_asap::{ExecutionTiming, GroupingStrategy, Schema},
     pre_asap::DataType,
 };
 
 /// Physical rows carry the population and pane coordinate alongside the logical value.
 /// These fields preserve identities which are implicit in a stored summary instance.
-pub fn population_schema(family: FieldDataType) -> Schema {
-    Arc::new(PlannerSchema {
+pub fn population_schema(family: FieldDataType) -> SchemaRef {
+    Arc::new(Schema {
         closed: true,
         unique_keys: vec![],
         fields: vec![
@@ -47,7 +47,7 @@ pub fn population_schema(family: FieldDataType) -> Schema {
 /// selected; the deployment decides which rows and panes they are. Label sets
 /// must be canonical (sorted, unique, no empty values), since they are the
 /// population identity: build rows with [`raw_sample_row`].
-pub fn raw_sample_schema() -> Schema {
+pub fn raw_sample_schema() -> SchemaRef {
     let mut schema = (*population_schema(FieldDataType::Plain(DataType::Float64))).clone();
     schema.fields[1].name = "$timestamp".into();
     Arc::new(schema)
@@ -82,7 +82,7 @@ pub fn raw_sample_row(
 
 /// Input contract of a precompute boundary: raw sample rows for a raw time
 /// series scan, otherwise the stored population of its summary state.
-pub fn boundary_schema(node: &PostAsapDAGNode) -> Result<Schema, Error> {
+pub fn boundary_schema(node: &PostAsapDAGNode) -> Result<SchemaRef, Error> {
     let Payload::Fallback { expression } = &node.payload else {
         return source_schema(&node.output_schema);
     };
@@ -128,9 +128,9 @@ pub fn boundary_schema(node: &PostAsapDAGNode) -> Result<Schema, Error> {
 }
 
 /// Validate the adapter layout during installed-plan recovery without lowering operators.
-/// `PlannerSchema` is an import alias for the shared planner `Schema`; the return
-/// type is the runtime `Arc<PlannerSchema>` handle for the population adapter layout.
-pub fn source_schema(logical: &PlannerSchema) -> Result<Schema, Error> {
+/// Borrows shared schema metadata and returns an Arc-owned schema for the
+/// population adapter layout.
+pub fn source_schema(logical: &Schema) -> Result<SchemaRef, Error> {
     let states = logical
         .fields
         .iter()
@@ -151,7 +151,7 @@ pub fn source_schema(logical: &PlannerSchema) -> Result<Schema, Error> {
     Ok(population_schema(state.dtype.clone()))
 }
 
-pub fn is_population_schema(schema: &Schema) -> bool {
+pub fn is_population_schema(schema: &SchemaRef) -> bool {
     schema
         .fields
         .get(2)
@@ -223,7 +223,7 @@ pub fn compile(
     }
     let mut sources = BTreeMap::new();
     let mut fragments = BTreeMap::new();
-    let mut outputs = BTreeMap::<NodeId, Schema>::new();
+    let mut outputs = BTreeMap::<NodeId, SchemaRef>::new();
     for id in ordered {
         let node = nodes[&id];
         if frontier.contains(&id) {
@@ -303,7 +303,7 @@ fn validate_value_output(node: &PostAsapDAGNode) -> Result<(), Error> {
 
 fn fragment(
     node: &PostAsapDAGNode,
-    schemas: &[Schema],
+    schemas: &[SchemaRef],
     parents: &[&PostAsapDAGNode],
 ) -> Result<CompiledPhysicalDAG, Error> {
     let sources = schemas
@@ -520,7 +520,7 @@ fn fragment(
             }
             let item_columns = (3..fields.len()).collect::<Vec<_>>();
             let project = Operator::project(input.clone(), columns)?.with_output_schema(
-                Arc::new(PlannerSchema {
+                Arc::new(Schema {
                     closed: true,
                     unique_keys: vec![],
                     fields,
@@ -574,7 +574,7 @@ fn fragment(
 /// of the label set less excluded labels.
 fn raw_items(
     expr: &SummaryInputExpr,
-    scan: &PlannerSchema,
+    scan: &Schema,
     items: &mut Vec<(Expression, DataType)>,
 ) -> Result<(), Error> {
     // Open PromQL scans need not list every label, so any name that is not

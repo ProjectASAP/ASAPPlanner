@@ -8,7 +8,7 @@ impl Operator {
         }
     }
 
-    pub fn source(output: Schema, batches: Vec<Batch>) -> Result<Self, Error> {
+    pub fn source(output: SchemaRef, batches: Vec<Batch>) -> Result<Self, Error> {
         crate::values::validate_schema(&output)?;
         if batches.iter().any(|b| b.schema() != &output) {
             return Err(invalid("source schema mismatch"));
@@ -32,7 +32,7 @@ impl Operator {
             output,
         })
     }
-    pub fn vector_to_scalar(input: Schema, column: usize) -> Result<Self, Error> {
+    pub fn vector_to_scalar(input: SchemaRef, column: usize) -> Result<Self, Error> {
         if plain(&input, column)? != (&DataType::Float64, false) {
             return Err(invalid("scalar conversion requires non-null Float64"));
         }
@@ -42,7 +42,7 @@ impl Operator {
             output: schema(vec![result_field("value", DataType::Float64, false)]),
         })
     }
-    pub fn union(input: Schema, arity: usize) -> Result<Self, Error> {
+    pub fn union(input: SchemaRef, arity: usize) -> Result<Self, Error> {
         if arity == 0 {
             return Err(invalid("union needs at least one input"));
         }

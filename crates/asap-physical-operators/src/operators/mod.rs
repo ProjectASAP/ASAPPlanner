@@ -3,7 +3,7 @@ mod aligned_binary;
 use crate::plan::{Boundedness, Emission, PhysicalOperator, PlanProperties};
 use crate::{
     runtime::{Cooperative, Input, OutputStream, Reservation, RunContext},
-    values::{field, group_key, plain, Batch, Schema, Value},
+    values::{field, group_key, plain, Batch, SchemaRef, Value},
     Error,
 };
 use futures::StreamExt;
@@ -162,8 +162,8 @@ enum Kind {
 #[serde(try_from = "unchecked::UncheckedOperator")]
 pub struct Operator {
     kind: Kind,
-    inputs: Vec<Schema>,
-    output: Schema,
+    inputs: Vec<SchemaRef>,
+    output: SchemaRef,
 }
 impl Operator {
     pub(crate) fn row_preserving_input(&self) -> Option<usize> {
@@ -237,7 +237,7 @@ impl Operator {
         Ok(Some((start, end)))
     }
 
-    pub(crate) fn with_output_schema(mut self, output: Schema) -> Result<Self, Error> {
+    pub(crate) fn with_output_schema(mut self, output: SchemaRef) -> Result<Self, Error> {
         if self.output.fields.len() != output.fields.len()
             || self
                 .output
@@ -259,11 +259,11 @@ impl Operator {
         self.output = output;
         Ok(self)
     }
-    pub fn schema(&self) -> Schema {
+    pub fn schema(&self) -> SchemaRef {
         self.output.clone()
     }
 }
-impl PhysicalOperator<Batch, Schema> for Operator {
+impl PhysicalOperator<Batch, SchemaRef> for Operator {
     fn requires_bounded_input(&self) -> bool {
         matches!(
             self.kind,
@@ -345,10 +345,10 @@ impl PhysicalOperator<Batch, Schema> for Operator {
         series_window::validate_context(self, context)?;
         self.readout_range(context).map(|_| ())
     }
-    fn input_schemas(&self) -> Vec<Schema> {
+    fn input_schemas(&self) -> Vec<SchemaRef> {
         self.inputs.clone()
     }
-    fn output_schema(&self) -> Schema {
+    fn output_schema(&self) -> SchemaRef {
         self.output.clone()
     }
     fn output_bytes(&self, value: &Batch) -> usize {

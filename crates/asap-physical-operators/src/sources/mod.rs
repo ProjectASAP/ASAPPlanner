@@ -3,12 +3,12 @@ use crate::{
     expressions::CompiledExpression,
     plan::PhysicalOperator,
     runtime::{Input, OutputStream, RunContext},
-    values::{Batch, Schema, Value},
+    values::{Batch, SchemaRef, Value},
     Error,
 };
 use futures::{stream, StreamExt};
 use planner_types::{
-    post_asap::{FieldDataType, Schema as PlannerSchema},
+    post_asap::{FieldDataType, Schema},
     pre_asap::{DataType, QueryExpr, Source},
 };
 use std::sync::Arc;
@@ -18,7 +18,7 @@ use std::sync::Arc;
 /// and must honor cancellation and bound their own I/O buffers. Dropping a cursor
 /// must release its resources. A connector error is never an empty successful scan.
 pub trait RawSource {
-    fn schema(&self) -> Schema;
+    fn schema(&self) -> SchemaRef;
     /// Declare a finite snapshot/window explicitly; execution scope alone does not bound a cursor.
     fn boundedness(&self) -> crate::plan::Boundedness {
         crate::plan::Boundedness::Unknown
@@ -51,10 +51,7 @@ impl DataSources {
                 "raw Scan requires a Planner Scan leaf".into(),
             ));
         };
-        let output = Arc::new(PlannerSchema::lifted(
-            schema.fields.clone(),
-            schema.time_index,
-        ));
+        let output = Arc::new(Schema::lifted(schema.fields.clone(), schema.time_index));
         crate::values::validate_schema(&output)?;
         let reader = self
             .sources
@@ -87,10 +84,10 @@ impl DataSources {
 
 pub struct Scan {
     reader: Arc<dyn RawSource>,
-    output: Schema,
+    output: SchemaRef,
     predicates: Vec<CompiledExpression>,
 }
-impl PhysicalOperator<Batch, Schema> for Scan {
+impl PhysicalOperator<Batch, SchemaRef> for Scan {
     fn properties(&self, _: &[crate::plan::PlanProperties]) -> crate::plan::PlanProperties {
         crate::plan::PlanProperties {
             boundedness: self.reader.boundedness(),
@@ -101,10 +98,10 @@ impl PhysicalOperator<Batch, Schema> for Scan {
     fn name(&self) -> &str {
         "Scan"
     }
-    fn input_schemas(&self) -> Vec<Schema> {
+    fn input_schemas(&self) -> Vec<SchemaRef> {
         vec![]
     }
-    fn output_schema(&self) -> Schema {
+    fn output_schema(&self) -> SchemaRef {
         self.output.clone()
     }
     fn output_bytes(&self, batch: &Batch) -> usize {

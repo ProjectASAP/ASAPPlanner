@@ -3,20 +3,20 @@ use asap_physical_operators::{
     operators::Operator,
     physical_planner::{compile_node, CompiledPhysicalDAG, InputContract, Source},
     runtime::{Limits, RunContext, Scope},
-    values::{Batch, Schema, Value},
+    values::{Batch, SchemaRef, Value},
 };
 use futures::{executor::block_on, StreamExt};
 use planner_types::{
     post_asap::{
         BinaryOperator, ExecutionDataState, Field, FieldDataType, PostAsapDAGNode, PostAsapNodeId,
-        PostAsapOperatorPayload, Schema as PlannerSchema,
+        PostAsapOperatorPayload, Schema,
     },
     pre_asap::{ArithmeticOpKind, BinaryOpKind, DataType},
 };
 use std::{collections::BTreeMap, sync::Arc};
 
-fn schema() -> Schema {
-    Arc::new(PlannerSchema {
+fn schema() -> SchemaRef {
+    Arc::new(Schema {
         closed: true,
         unique_keys: vec![],
         fields: vec![
@@ -324,7 +324,7 @@ fn stored_series_readouts_support_filters_and_sets() {
         (ExactKind::Count, ExactParams::Count),
     ] {
         let family = FieldDataType::ExactAggregate(exact_kind.clone(), params);
-        let state_schema = Arc::new(PlannerSchema {
+        let state_schema = Arc::new(Schema {
             closed: true,
             unique_keys: vec![],
             fields: vec![

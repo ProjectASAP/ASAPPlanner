@@ -1,6 +1,6 @@
 use super::*;
 impl Operator {
-    pub fn filter(input: Schema, predicate: Expression) -> Result<Self, Error> {
+    pub fn filter(input: SchemaRef, predicate: Expression) -> Result<Self, Error> {
         if predicate.dtype(&input)?.0 != DataType::Bool {
             return Err(invalid("filter predicate must be boolean"));
         }

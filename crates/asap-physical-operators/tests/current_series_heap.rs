@@ -9,12 +9,12 @@ use asap_physical_operators::{
     values::{Batch, Value},
 };
 use futures::{executor::block_on, StreamExt};
-use planner_types::pre_asap::Schema as PlannerSchema;
+use planner_types::pre_asap::Schema;
 use planner_types::{post_asap::*, pre_asap::DataType};
 use std::{collections::BTreeMap, sync::Arc};
 
-fn schema() -> Arc<PlannerSchema> {
-    Arc::new(PlannerSchema {
+fn schema() -> Arc<Schema> {
+    Arc::new(Schema {
         closed: true,
         unique_keys: vec![],
         fields: [
@@ -169,7 +169,7 @@ fn spatial_heap_ranks_latest_values_in_independent_runs() {
         };
         let family = FieldDataType::Sketch(SketchKind::new(algorithm, params), Default::default());
         let build = Operator::keyed_summary_build(schema(), family, 1, vec![3], vec![2]).unwrap();
-        let output = Arc::new(PlannerSchema {
+        let output = Arc::new(Schema {
             closed: true,
             unique_keys: vec![],
             fields: vec![

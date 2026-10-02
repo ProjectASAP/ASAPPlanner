@@ -30,7 +30,9 @@ and a runtime row for its value. Group keys, unique keys, and `time_index` also
 use these column positions. They are not stable identities across projections
 or joins, so the positional reference remains `ColumnId`, not `FieldId`.
 
-The native runtime currently stores `Batch { schema, rows: Vec<Vec<Value>> }`.
+The native runtime names shared ownership `SchemaRef = Arc<Schema>` and stores
+`Batch { schema: SchemaRef, rows: Vec<Vec<Value>> }`. `Schema` is the same metadata
+model during planning and execution; the `Ref` suffix only distinguishes ownership.
 It has no physical `Column`/array container. A column reference expresses what
 to read independently of whether an executor stores its data as rows or arrays.
 For example, resolving `t.bytes` to `ColumnId = 1` obtains its type from

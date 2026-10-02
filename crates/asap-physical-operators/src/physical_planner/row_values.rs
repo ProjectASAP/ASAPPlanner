@@ -14,7 +14,7 @@ pub(super) fn scalar_literal(expression: &QueryExpr) -> Option<f64> {
 
 /// Aggregate readouts of a maintained current-series population, as a chain.
 pub(super) fn population_aggregate(
-    input: &Schema,
+    input: &SchemaRef,
     grouping: &[String],
     readout: &PopulationReadout,
 ) -> Result<Vec<Operator>, Error> {

@@ -54,7 +54,7 @@ impl Operator {
     /// markers. A series is every column except the time and `value` columns.
     /// Output rows keep the input schema, with time `t` and the result value.
     pub fn series_window(
-        input: Schema,
+        input: SchemaRef,
         function: Option<AggIntent<ColumnRef>>,
         range_ms: i64,
         offset_ms: i64,

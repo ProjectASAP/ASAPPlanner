@@ -2,13 +2,13 @@
 use crate::AggregateCore;
 use crate::Error;
 use planner_types::{
-    post_asap::{Field, FieldDataType, Schema as PlannerSchema},
+    post_asap::{Field, FieldDataType, Schema},
     pre_asap::DataType,
 };
 use std::{cmp::Ordering, sync::Arc};
-/// Shared runtime handle to the same schema metadata used by the planner.
-/// This alias changes ownership, not the schema model or its field types.
-pub type Schema = Arc<PlannerSchema>;
+/// Shared ownership of schema metadata; the field model is identical at planning
+/// and execution time.
+pub type SchemaRef = Arc<Schema>;
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub enum Value {
     Null,
@@ -200,11 +200,11 @@ impl Value {
 }
 #[derive(Clone, Debug)]
 pub struct Batch {
-    schema: Schema,
+    schema: SchemaRef,
     rows: Vec<Vec<Value>>,
 }
 impl Batch {
-    pub fn try_new(schema: Schema, rows: Vec<Vec<Value>>) -> Result<Self, Error> {
+    pub fn try_new(schema: SchemaRef, rows: Vec<Vec<Value>>) -> Result<Self, Error> {
         validate_schema(&schema)?;
         for row in &rows {
             if row.len() != schema.fields.len() {
@@ -230,7 +230,7 @@ impl Batch {
         }
         Ok(Self { schema, rows })
     }
-    pub fn schema(&self) -> &Schema {
+    pub fn schema(&self) -> &SchemaRef {
         &self.schema
     }
     pub fn rows(&self) -> &[Vec<Value>] {
@@ -320,7 +320,7 @@ fn validate_state(family: &FieldDataType, state: &dyn AggregateCore) -> Result<(
     }
 }
 
-pub(crate) fn validate_schema(schema: &Schema) -> Result<(), Error> {
+pub(crate) fn validate_schema(schema: &SchemaRef) -> Result<(), Error> {
     if schema.time_index.is_some_and(|index| {
         schema
             .fields
@@ -344,13 +344,13 @@ pub(crate) fn validate_schema(schema: &Schema) -> Result<(), Error> {
     Ok(())
 }
 
-pub(crate) fn field(schema: &Schema, column: usize) -> Result<&Field, Error> {
+pub(crate) fn field(schema: &SchemaRef, column: usize) -> Result<&Field, Error> {
     schema
         .fields
         .get(column)
         .ok_or_else(|| Error::Invalid("column out of range".into()))
 }
-pub(crate) fn plain(schema: &Schema, column: usize) -> Result<(&DataType, bool), Error> {
+pub(crate) fn plain(schema: &SchemaRef, column: usize) -> Result<(&DataType, bool), Error> {
     let f = field(schema, column)?;
     let FieldDataType::Plain(dtype) = &f.dtype else {
         return Err(Error::Invalid("plain value required".into()));

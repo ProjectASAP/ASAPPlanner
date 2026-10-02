@@ -3,7 +3,7 @@ use super::*;
 
 impl Operator {
     pub fn current_series(
-        input: Schema,
+        input: SchemaRef,
         identity: usize,
         coordinate: usize,
         value: usize,

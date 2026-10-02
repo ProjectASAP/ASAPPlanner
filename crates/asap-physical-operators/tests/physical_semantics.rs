@@ -6,17 +6,17 @@ use asap_physical_operators::{
     operators::{Expression, Operator, Reduction, SortKey},
     plan::PhysicalDAG,
     runtime::{Limits, RunContext, Scope},
-    values::{Batch, Schema, Value},
+    values::{Batch, SchemaRef, Value},
 };
 use futures::{executor::block_on, StreamExt};
 use planner_types::{
-    post_asap::{Field, FieldDataType, Schema as PlannerSchema},
+    post_asap::{Field, FieldDataType, Schema},
     pre_asap::{CompareOpKind, DataType, JoinKind, Predicate, QueryExpr},
 };
 use std::{rc::Rc, sync::Arc};
 
-fn schema(fields: &[(&str, DataType, bool)]) -> Schema {
-    Arc::new(PlannerSchema {
+fn schema(fields: &[(&str, DataType, bool)]) -> SchemaRef {
+    Arc::new(Schema {
         closed: true,
         unique_keys: vec![],
         fields: fields
@@ -44,7 +44,7 @@ fn context() -> RunContext {
     )
     .unwrap()
 }
-fn collect(dag: &PhysicalDAG<'_, Batch, Schema>, root: u64) -> Vec<Vec<Value>> {
+fn collect(dag: &PhysicalDAG<'_, Batch, SchemaRef>, root: u64) -> Vec<Vec<Value>> {
     let run = context();
     let rows = block_on(async {
         let mut stream = dag.execute(&[root], run.clone()).unwrap().remove(0);
@@ -57,7 +57,7 @@ fn collect(dag: &PhysicalDAG<'_, Batch, Schema>, root: u64) -> Vec<Vec<Value>> {
     assert_eq!(run.retained_bytes(), 0);
     rows
 }
-fn unary(input: Schema, batches: Vec<Vec<Vec<Value>>>, op: Operator) -> Vec<Vec<Value>> {
+fn unary(input: SchemaRef, batches: Vec<Vec<Vec<Value>>>, op: Operator) -> Vec<Vec<Value>> {
     let mut dag = PhysicalDAG::default();
     let batches = batches
         .into_iter()

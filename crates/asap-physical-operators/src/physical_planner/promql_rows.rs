@@ -31,7 +31,7 @@ pub fn with_series_identity(root: &QueryExpr) -> Result<QueryExpr, Error> {
 /// Construct source rows only from full identities. The named label columns
 /// are projections of that same identity and cannot independently redefine it.
 pub fn series_row(
-    schema: &Schema,
+    schema: &SchemaRef,
     labels: &BTreeMap<String, String>,
     timestamp: i64,
     value: f64,

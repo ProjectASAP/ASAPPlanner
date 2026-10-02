@@ -2,11 +2,11 @@ use super::*;
 /// Immutable in-memory raw data. The connector owns the resident input; each
 /// cursor clones only the next requested batch, not the entire data set.
 pub struct MemorySource {
-    schema: Schema,
+    schema: SchemaRef,
     batches: Vec<Batch>,
 }
 impl MemorySource {
-    pub fn new(schema: Schema, batches: Vec<Batch>) -> Result<Self, Error> {
+    pub fn new(schema: SchemaRef, batches: Vec<Batch>) -> Result<Self, Error> {
         crate::values::validate_schema(&schema)?;
         if schema
             .fields
@@ -27,7 +27,7 @@ impl RawSource for MemorySource {
     fn boundedness(&self) -> crate::plan::Boundedness {
         crate::plan::Boundedness::Bounded
     }
-    fn schema(&self) -> Schema {
+    fn schema(&self) -> SchemaRef {
         self.schema.clone()
     }
     fn scan(&self, context: RunContext) -> Result<OutputStream<'_, Batch>, Error> {

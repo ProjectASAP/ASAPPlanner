@@ -3,7 +3,7 @@ use super::*;
 use crate::runtime::Scope;
 
 impl Operator {
-    pub(crate) fn scope_timestamp(input: Schema, output: Schema) -> Result<Self, Error> {
+    pub(crate) fn scope_timestamp(input: SchemaRef, output: SchemaRef) -> Result<Self, Error> {
         crate::values::validate_schema(&output)?;
         let coordinate = output
             .time_index

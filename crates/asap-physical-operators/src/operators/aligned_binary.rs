@@ -7,8 +7,8 @@ impl Operator {
     /// Match every row by the declared identity columns. Unlike an inner join,
     /// incomplete or duplicate keys are errors: dropping an update changes state.
     pub fn aligned_binary(
-        left: Schema,
-        right: Schema,
+        left: SchemaRef,
+        right: SchemaRef,
         keys: Vec<(usize, usize)>,
         values: (usize, usize),
         operator: BinaryOperator,

@@ -308,7 +308,7 @@ mod tests {
         values::Batch,
     };
     use planner_types::{
-        post_asap::{Field, FieldDataType, Schema as PlannerSchema},
+        post_asap::{Field, FieldDataType, Schema},
         pre_asap::DataType,
         types::AccuracyTarget,
     };
@@ -317,7 +317,7 @@ mod tests {
     // The same window operator must give the same answer in either engine phase.
     #[test]
     fn temporal_windows_execute_in_both_phases_and_count_is_integer() {
-        let schema = Arc::new(PlannerSchema {
+        let schema = Arc::new(Schema {
             closed: true,
             unique_keys: vec![],
             fields: vec![

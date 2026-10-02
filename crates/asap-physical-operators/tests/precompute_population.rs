@@ -8,7 +8,7 @@ use asap_physical_operators::{
     Statistic,
 };
 use futures::{executor::block_on, StreamExt};
-use planner_types::pre_asap::Schema as PlannerSchema;
+use planner_types::pre_asap::Schema;
 use planner_types::{
     post_asap::*,
     pre_asap::{ArithmeticOpKind, BinaryOpKind, ColumnRef, DataType, GroupKeys, Reduction},
@@ -19,7 +19,7 @@ use std::{collections::BTreeMap, sync::Arc};
 #[test]
 fn finalized_shared_panes_rebuild_one_global_summary_after_recovery() {
     let family = FieldDataType::ExactAggregate(ExactKind::Sum, ExactParams::Sum);
-    let schema = |dtype| PlannerSchema {
+    let schema = |dtype| Schema {
         closed: true,
         unique_keys: vec![],
         fields: vec![Field {
@@ -220,8 +220,8 @@ fn finalized_shared_panes_rebuild_one_global_summary_after_recovery() {
     }
 }
 
-fn logical_schema(family: FieldDataType) -> PlannerSchema {
-    PlannerSchema {
+fn logical_schema(family: FieldDataType) -> Schema {
+    Schema {
         closed: true,
         unique_keys: vec![],
         fields: vec![Field {

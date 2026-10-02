@@ -1,6 +1,6 @@
 //! Planner scalar expressions evaluated over native typed rows.
 use crate::{
-    values::{Schema, Value},
+    values::{SchemaRef, Value},
     Error,
 };
 use planner_types::pre_asap::{ArithmeticOpKind, CompareOpKind, DataType, QueryExpr, ScalarValue};
@@ -340,7 +340,7 @@ impl CompiledExpression {
         &self.expression
     }
 
-    pub fn compile(expression: &QueryExpr, input: &Schema) -> Result<Self, Error> {
+    pub fn compile(expression: &QueryExpr, input: &SchemaRef) -> Result<Self, Error> {
         let schema = input
             .fields
             .iter()
@@ -371,7 +371,7 @@ impl CompiledExpression {
     pub(crate) fn dtype(&self) -> (DataType, bool) {
         self.output.clone()
     }
-    pub(crate) fn validate_input(&self, input: &Schema) -> Result<(), Error> {
+    pub(crate) fn validate_input(&self, input: &SchemaRef) -> Result<(), Error> {
         let checked = Self::compile(&self.expression, input)?;
         if checked.output != self.output {
             return Err(Error::Invalid(

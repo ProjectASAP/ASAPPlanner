@@ -18,7 +18,7 @@ struct Layout {
     value: usize,
 }
 
-fn layout(input: &Schema) -> Result<Layout, Error> {
+fn layout(input: &SchemaRef) -> Result<Layout, Error> {
     let mut identity = None;
     let mut labels = Vec::new();
     let mut value = None;
@@ -39,7 +39,7 @@ fn layout(input: &Schema) -> Result<Layout, Error> {
 }
 
 impl Layout {
-    fn read(&self, input: &Schema, row: &[Value]) -> Result<Labels, Error> {
+    fn read(&self, input: &SchemaRef, row: &[Value]) -> Result<Labels, Error> {
         if let Some(i) = self.identity {
             let Value::Utf8(encoded) = &row[i] else {
                 return Err(invalid("series identity must be Utf8"));
@@ -64,7 +64,7 @@ impl Layout {
     }
 
     /// Replace the row's labels; a label column absent from `labels` is empty.
-    fn write(&self, input: &Schema, row: &mut [Value], labels: &Labels) -> Result<(), Error> {
+    fn write(&self, input: &SchemaRef, row: &mut [Value], labels: &Labels) -> Result<(), Error> {
         if let Some(i) = self.identity {
             let encoded = serde_json::to_string(labels).map_err(|e| invalid(&e.to_string()))?;
             row[i] = Value::Utf8(encoded.into());
@@ -79,8 +79,8 @@ impl Layout {
 
 impl Operator {
     pub(crate) fn series_relabel(
-        input: Schema,
-        output: Schema,
+        input: SchemaRef,
+        output: SchemaRef,
         destination: String,
         replacement: String,
         source_regex: Option<(String, String)>,
@@ -127,7 +127,7 @@ impl Operator {
     /// Rewrite each row's label set to PromQL's matching labels: `On` keeps
     /// only `labels`; `Ignoring` drops `labels` and the metric name.
     pub fn series_labels(
-        input: Schema,
+        input: SchemaRef,
         kind: VectorMatchKind,
         labels: Vec<String>,
     ) -> Result<Self, Error> {
@@ -146,7 +146,7 @@ impl Operator {
     /// Drop the metric name from each row's label set, as PromQL arithmetic
     /// with a literal does. Unlike matching labels, the result is itself a
     /// vector, so two rows that become equal are an error, as in Prometheus.
-    pub fn series_without_name(input: Schema) -> Result<Self, Error> {
+    pub fn series_without_name(input: SchemaRef) -> Result<Self, Error> {
         layout(&input)?;
         Ok(Self {
             kind: Kind::SeriesLabels {
@@ -162,7 +162,7 @@ impl Operator {
     /// PromQL `histogram_quantile` over classic buckets: one histogram per
     /// label set other than the `le` column's label. The result drops `le`,
     /// `__name__` and the time column; its value is the quantile.
-    pub fn series_histogram_quantile(input: Schema, q: f64, le: usize) -> Result<Self, Error> {
+    pub fn series_histogram_quantile(input: SchemaRef, q: f64, le: usize) -> Result<Self, Error> {
         let layout = layout(&input)?;
         if !layout.labels.contains(&le) {
             return Err(invalid("histogram bucket bound must be a label column"));
@@ -190,8 +190,8 @@ impl Operator {
     /// between vectors; label columns without a series identity must hold
     /// every label the result can take from the right side.
     pub fn series_binary(
-        left: Schema,
-        right: Schema,
+        left: SchemaRef,
+        right: SchemaRef,
         operator: BinaryOperator,
         scalars: [bool; 2],
     ) -> Result<Self, Error> {

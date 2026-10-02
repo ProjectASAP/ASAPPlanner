@@ -5,13 +5,13 @@ use asap_physical_operators::{
     physical_planner::{CompiledPhysicalDAG, InputContract},
 };
 use planner_types::{
-    post_asap::{Field, FieldDataType, Schema as PlannerSchema},
+    post_asap::{Field, FieldDataType, Schema},
     pre_asap::DataType,
 };
 use std::{collections::BTreeMap, sync::Arc};
 
 fn sorted() -> CompiledPhysicalDAG {
-    let schema = Arc::new(PlannerSchema {
+    let schema = Arc::new(Schema {
         closed: true,
         unique_keys: vec![],
         fields: vec![Field {

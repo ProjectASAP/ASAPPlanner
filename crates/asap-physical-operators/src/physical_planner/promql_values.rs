@@ -1,14 +1,14 @@
 //! Physical scalar/vector contracts preserve complete label sets across native computation.
 use super::*;
 
-pub fn scalar_schema() -> Schema {
+pub fn scalar_schema() -> SchemaRef {
     crate::operators::vector_binary::value_schema(true)
 }
-pub fn vector_schema() -> Schema {
+pub fn vector_schema() -> SchemaRef {
     crate::operators::vector_binary::value_schema(false)
 }
 
-pub fn matrix_schema() -> Schema {
+pub fn matrix_schema() -> SchemaRef {
     crate::operators::vector_window::matrix_schema()
 }
 
@@ -81,7 +81,7 @@ pub fn compile_binary(
     )
 }
 
-fn unary(operators: Vec<Operator>, input: Schema) -> Result<CompiledPhysicalDAG, Error> {
+fn unary(operators: Vec<Operator>, input: SchemaRef) -> Result<CompiledPhysicalDAG, Error> {
     let root = operators.len() as u64;
     CompiledPhysicalDAG::from_operators(
         BTreeMap::from([(0, InputContract::bounded(input))]),
@@ -120,7 +120,7 @@ fn grouped(grouping: &GroupKeys<ColumnRef>) -> Result<Operator, Error> {
     )
 }
 
-fn vector_output(input: Schema, labels: usize, value: usize) -> Result<Operator, Error> {
+fn vector_output(input: SchemaRef, labels: usize, value: usize) -> Result<Operator, Error> {
     let value = Expression::ExactFloat64(value);
     Operator::project(
         input,
@@ -209,7 +209,7 @@ pub fn compile_vector_to_scalar() -> Result<CompiledPhysicalDAG, Error> {
 
 /// A stored exact-state input retains the complete population identity. The
 /// deployment supplies eligible panes; merging and finalization are computation.
-pub fn exact_state_schema(family: FieldDataType) -> Result<Schema, Error> {
+pub fn exact_state_schema(family: FieldDataType) -> Result<SchemaRef, Error> {
     if !matches!(family, FieldDataType::ExactAggregate(..)) {
         return Err(invalid("exact-state input requires an exact family"));
     }

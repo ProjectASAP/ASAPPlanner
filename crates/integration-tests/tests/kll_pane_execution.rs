@@ -6,13 +6,12 @@ use asap_physical_operators::{
     plan::{PhysicalDAG, PhysicalOperator, PlanProperties},
     runtime::{Input, Limits, OutputStream, RunContext, Scope},
     summary_kernels::datasketches_kll::DatasketchesKLLAccumulator,
-    values::{Batch, Schema, Value},
+    values::{Batch, SchemaRef, Value},
     AggregateCore, Error,
 };
 use asap_types::{
     post_asap::{
-        Field, FieldDataType, Schema as PlannerSchema, SketchAlgorithm, SketchKind, SketchParams,
-        SketchQuery,
+        Field, FieldDataType, Schema, SketchAlgorithm, SketchKind, SketchParams, SketchQuery,
     },
     pre_asap::DataType,
 };
@@ -31,8 +30,8 @@ fn family(k: u32) -> FieldDataType {
         Default::default(),
     )
 }
-fn raw_schema() -> Schema {
-    Arc::new(PlannerSchema {
+fn raw_schema() -> SchemaRef {
+    Arc::new(Schema {
         closed: true,
         unique_keys: vec![],
         fields: vec![Field {
@@ -50,7 +49,7 @@ fn query_scope() -> Scope {
         revision: 1,
     }
 }
-fn fixture() -> (CompiledPhysicalDAG, Operator, Schema) {
+fn fixture() -> (CompiledPhysicalDAG, Operator, SchemaRef) {
     let raw = raw_schema();
     let build = Operator::summary_build(raw.clone(), family(200), 0, None, vec![]).unwrap();
     let state = build.schema();
@@ -84,7 +83,7 @@ fn pane_state(maintenance: &CompiledPhysicalDAG, pane: i64) -> Arc<dyn Aggregate
     };
     state.clone()
 }
-fn restore(schema: Schema, states: &[Arc<dyn AggregateCore>]) -> Batch {
+fn restore(schema: SchemaRef, states: &[Arc<dyn AggregateCore>]) -> Batch {
     Batch::try_new(
         schema,
         states
@@ -99,14 +98,14 @@ fn restore(schema: Schema, states: &[Arc<dyn AggregateCore>]) -> Batch {
     )
     .unwrap()
 }
-fn readout(schema: Schema, q: f64) -> Operator {
+fn readout(schema: SchemaRef, q: f64) -> Operator {
     Operator::readout(schema, 0, ReadoutQuery::Sketch(SketchQuery::Quantile { q })).unwrap()
 }
 struct CountStarts {
     operator: Operator,
     starts: Arc<AtomicUsize>,
 }
-impl PhysicalOperator<Batch, Schema> for CountStarts {
+impl PhysicalOperator<Batch, SchemaRef> for CountStarts {
     fn name(&self) -> &str {
         self.operator.name()
     }
@@ -116,10 +115,10 @@ impl PhysicalOperator<Batch, Schema> for CountStarts {
     fn requires_bounded_input(&self) -> bool {
         self.operator.requires_bounded_input()
     }
-    fn input_schemas(&self) -> Vec<Schema> {
+    fn input_schemas(&self) -> Vec<SchemaRef> {
         self.operator.input_schemas()
     }
-    fn output_schema(&self) -> Schema {
+    fn output_schema(&self) -> SchemaRef {
         self.operator.output_schema()
     }
     fn output_bytes(&self, batch: &Batch) -> usize {
