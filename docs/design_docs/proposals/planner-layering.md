@@ -1065,8 +1065,7 @@ separately in physical planning.
 ## Scenarios
 
 Each scenario lists what a developer or user gives (Assumptions 1–4), what
-ASAPPlanner then does automatically, and what does not change. "Today" notes
-where the implementation does not yet match this design.
+ASAPPlanner then does automatically, and what does not change.  
 
 ### Adding a new query to a workload
 
