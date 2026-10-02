@@ -191,3 +191,6 @@ mod tests {
         ));
     }
 }
+
+/// Unified lowering, promoted to the root API at planner cutover.
+pub mod unified;
