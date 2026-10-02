@@ -171,7 +171,7 @@ fn execute_relabeled(
             )
         })
         .collect();
-    let graph = program.instantiate(sources).map_err(|e| e.to_string())?;
+    let physical_dag = program.instantiate(sources).map_err(|e| e.to_string())?;
     let context = RunContext::new(
         Scope::Query {
             evaluation_time_ms: end,
@@ -181,7 +181,7 @@ fn execute_relabeled(
     )
     .unwrap();
     block_on(async {
-        let mut stream = graph
+        let mut stream = physical_dag
             .execute(program.roots(), context)
             .map_err(|e| e.to_string())?
             .remove(0);
@@ -694,7 +694,7 @@ fn stored_count_min_bare_count_compiles_to_a_readout() {
         })
         .collect();
     let batch = Batch::try_new(schema.clone(), vec![row]).unwrap();
-    let graph = program
+    let physical_dag = program
         .instantiate(BTreeMap::from([(
             u64::from(state.id.0),
             Box::new(Operator::source(schema, vec![batch]).unwrap()) as Source<'_>,
@@ -709,7 +709,10 @@ fn stored_count_min_bare_count_compiles_to_a_readout() {
     )
     .unwrap();
     let values = block_on(async {
-        let mut stream = graph.execute(program.roots(), context).unwrap().remove(0);
+        let mut stream = physical_dag
+            .execute(program.roots(), context)
+            .unwrap()
+            .remove(0);
         let mut values = Vec::new();
         while let Some(batch) = stream.next().await {
             values.extend(batch.unwrap().rows().iter().map(|row| row[0].clone()));

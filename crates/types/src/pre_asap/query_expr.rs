@@ -1,13 +1,13 @@
 //! The canonical pre-ASAP intent algebra IR.
 //!
-//! Language- and deployment-independent. `Rc`-owned tree — a child field is
+//! Language- and deployment-independent. `Rc`-owned DAG — a child field is
 //! `Rc<QueryExpr<C>>` rather than `Box<QueryExpr<C>>` so a structurally
 //! identical sub-expression can be shared (the same `Rc`) across more than
 //! one parent, within one query or across a `QueryWorkload` batch, instead of
 //! being duplicated. Nothing in this module produces that sharing on its
 //! own — construction still allocates a fresh `Rc` per node, the same shape
-//! as the old `Box` tree — a separate CSE pass is what turns two
-//! independently constructed, structurally-equal subtrees into two
+//! as the old `Box` DAG — a separate CSE pass is what turns two
+//! independently constructed, structurally-equal sub-DAGs into two
 //! references to one `Rc` (issue #212, #222). Column identity is
 //! **positional** (`Aggregate.reduction: Reduction`, wrapping `GroupKeys`
 //! for the grouped case), resolved by the [`SchemaResolver`](super::schema_resolver) against
@@ -23,13 +23,13 @@ use super::agg_intent::AggIntent;
 use super::expr_ir::{ArithmeticOpKind, ColumnRef, CompareOpKind, ScalarValue};
 use super::schema::{Column, ColumnId, DataType, Schema};
 
-/// The column-reference resolution state a [`QueryExpr<C>`] tree carries —
+/// The column-reference resolution state a [`QueryExpr<C>`] DAG carries —
 /// [`ColumnId`] (the default, and what the bare `QueryExpr` name has always
 /// meant) once the [`SchemaResolver`](super::schema_resolver::SchemaResolver) has resolved every
 /// reference positionally, or the front-end-emitted, name-based [`ColumnRef`]
 /// before binding. The only place the two states differ in *shape* rather
 /// than just in which type fills `C` is [`QueryExpr::Scan`]'s `schema` field:
-/// a bound tree's binding schema is always known (the SchemaResolver is total, so
+/// a bound DAG's binding schema is always known (the SchemaResolver is total, so
 /// [`ScanSchema`](Self::ScanSchema) `= Schema`); an unresolved front-end
 /// `Scan` knows its schema only when the front end already has it without
 /// binding — a SQL leaf, catalog-backed (`Some`) — `None` (PromQL) defers to
@@ -37,7 +37,7 @@ use super::schema::{Column, ColumnId, DataType, Schema};
 pub trait ColState:
     Clone + std::fmt::Debug + PartialEq + Serialize + for<'de> Deserialize<'de>
 {
-    /// What [`QueryExpr::Scan`]'s `schema` field holds for a tree in this state.
+    /// What [`QueryExpr::Scan`]'s `schema` field holds for a DAG in this state.
     type ScanSchema: Clone + std::fmt::Debug + PartialEq + Serialize + for<'de> Deserialize<'de>;
 }
 
@@ -49,7 +49,7 @@ impl ColState for ColumnRef {
     type ScanSchema = Option<Schema>;
 }
 
-/// Errors from schema derivation over a canonical tree.
+/// Errors from schema derivation over a canonical DAG.
 #[derive(Debug, Error)]
 pub enum QueryExprError {
     #[error("invalid scalar function signature: {0}")]
@@ -652,7 +652,7 @@ impl<C: ColState> ConcatDiscriminatorKey<C> {
 #[serde(bound(serialize = "C: ColState", deserialize = "C: ColState"))]
 pub enum QueryExpr<C: ColState = ColumnId> {
     /// Outermost leaf. `schema` is the **binding schema** — the resolved column
-    /// set every positional `ColumnId` in the tree indexes into, *not* a full
+    /// set every positional `ColumnId` in the DAG indexes into, *not* a full
     /// description of the runtime row — once bound (`schema: Schema`, always
     /// present: the [`SchemaResolver`](super::schema_resolver) is total). Before binding, a
     /// front-end-emitted `Scan` (`C = ColumnRef`) knows it only when the front
@@ -671,7 +671,7 @@ pub enum QueryExpr<C: ColState = ColumnId> {
         predicates: Vec<Predicate<C>>,
         schema: C::ScanSchema,
     },
-    /// A scalar sub-expression sitting in an **operator-tree position** — a
+    /// A scalar sub-expression sitting in an **operator-DAG position** — a
     /// [`BinaryOp`](Self::BinaryOp) operand for `<vector> op <scalar>`
     /// thresholds / unit conversions (#35), a
     /// [`PromqlVectorFromScalar`](Self::PromqlVectorFromScalar) child, or a
@@ -680,7 +680,7 @@ pub enum QueryExpr<C: ColState = ColumnId> {
     /// Formerly its own leaf variant, `PromqlScalar(f64)`. Issue #220: that
     /// variant held exactly the same value [`Literal`](Self::Literal) does
     /// (every PromQL scalar is `f64`), duplicating it for no reason but
-    /// *which tree position* it was allowed to appear in. This wrapper
+    /// *which DAG position* it was allowed to appear in. This wrapper
     /// carries that position instead of the value — the inner node is an
     /// ordinary scalar sub-language expression (in practice always
     /// `Literal(ScalarValue::Float64(_))`, since a front end only ever
@@ -941,9 +941,9 @@ pub enum QueryExpr<C: ColState = ColumnId> {
 
     // ── Scalar expression shapes (issue #205) ───────────────────────────
     //
-    // Formerly a separate, self-recursive `Expr<C>` tree, reachable from the
+    // Formerly a separate, self-recursive `Expr<C>` DAG, reachable from the
     // operator variants above only through wrapper fields (`Predicate`,
-    // `ProjectItem`, `SortKey`). They're variants of this same tree now — a
+    // `ProjectItem`, `SortKey`). They're variants of this same DAG now — a
     // scalar sub-expression is only ever reachable through one of those same
     // wrapper positions (`Filter.pred`, `ProjectItem.expr`, `Aggregate.having`,
     // `PromqlRelabel.value`, `SQLWindowFunc.args`, …), which is a *convention* this
@@ -957,7 +957,7 @@ pub enum QueryExpr<C: ColState = ColumnId> {
     // restricting which variants are constructible in a scalar position) adds
     // real type-level machinery for a distinction every constructor already
     // has to get right structurally anyway (a `Filter` is never built with an
-    // operator subtree as its `pred`).
+    // operator sub-DAG as its `pred`).
     /// A column reference — unresolved [`ColumnRef`] (front-end-emitted, `C =
     /// ColumnRef`) or positional [`ColumnId`] (once bound, `C = ColumnId`).
     Column(C),
@@ -1014,7 +1014,7 @@ pub enum QueryExpr<C: ColState = ColumnId> {
 impl<C: ColState> QueryExpr<C> {
     /// Construct the [`PromqlScalarBridge`](Self::PromqlScalarBridge) leaf
     /// for a bare PromQL numeric literal / folded constant scalar (issue
-    /// #220) — `Literal(ScalarValue::Float64(v))` at an operator-tree
+    /// #220) — `Literal(ScalarValue::Float64(v))` at an operator-DAG
     /// position. The one constructor every front end / test that used to
     /// write `QueryExpr::PromqlScalar(v)` should use instead.
     pub fn promql_scalar(v: f64) -> Self {
@@ -1086,7 +1086,7 @@ impl<C: ColState> QueryExpr<C> {
         }
     }
 
-    /// Recursively collect every column reference in a **scalar** subtree —
+    /// Recursively collect every column reference in a **scalar** sub-DAG —
     /// used by the [`SchemaResolver`](super::schema_resolver::SchemaResolver) to seed usage-derived
     /// leaf schemas, and available to post-ASAP binding for column-lineage /
     /// selectivity.
@@ -1146,20 +1146,20 @@ impl<C: ColState> QueryExpr<C> {
     }
 }
 
-/// The canonical, positional, resolved tree — what the bare `QueryExpr` name
+/// The canonical, positional, resolved DAG — what the bare `QueryExpr` name
 /// has always meant (the default `C = ColumnId`). Every existing consumer
 /// keeps using `QueryExpr` unparameterized; this alias exists only to name
 /// the resolved state explicitly at a use site that also wants to name
 /// [`UnresolvedQueryExpr`] nearby.
 pub type ResolvedQueryExpr = QueryExpr<ColumnId>;
 
-/// The front-end-emitted, name-based, unresolved tree —
+/// The front-end-emitted, name-based, unresolved DAG —
 /// `QueryExpr<ColumnRef>`: front ends construct this directly during their
 /// own `interpret` step (issue #179), and the [`SchemaResolver`](super::schema_resolver)
 /// resolves it into [`ResolvedQueryExpr`].
 pub type UnresolvedQueryExpr = QueryExpr<ColumnRef>;
 
-// `output_schema` needs a fully bound tree — it reads `Scan.schema` as a plain
+// `output_schema` needs a fully bound DAG — it reads `Scan.schema` as a plain
 // `Schema` and resolves every scalar `Expr::Column` positionally — so it lives
 // only on the resolved instantiation, not `impl<C: ColState> QueryExpr<C>`.
 // Same reasoning as `AggIntent`'s `output_column`/`requires`/`is_per_series`
@@ -1171,7 +1171,7 @@ impl QueryExpr<ColumnId> {
         infer_expr_type(self, input)
     }
 
-    /// Output schema of the root of a canonical tree.
+    /// Output schema of the root of a canonical DAG.
     pub fn output_schema(&self) -> Result<Schema, QueryExprError> {
         match self {
             QueryExpr::Scan { schema, .. } => Ok(schema.clone()),
@@ -2629,7 +2629,7 @@ mod tests {
     /// place of the old `PromqlScalar(v)` leaf — wraps exactly
     /// `Literal(ScalarValue::Float64(v))`: the same value a SQL-emitted typed
     /// float literal in a scalar-sub-language position would carry, just at a
-    /// different tree position. `as_promql_scalar` is the round-trip inverse.
+    /// different DAG position. `as_promql_scalar` is the round-trip inverse.
     #[test]
     fn promql_scalar_bridges_a_literal_float_at_an_operator_position() {
         let bridge = QueryExpr::<ColumnId>::promql_scalar(2.5);
@@ -2641,7 +2641,7 @@ mod tests {
 
         // The same value a SQL `Compare`/`Arithmetic` operand would carry, in
         // its native (unwrapped, no row schema) scalar-sub-language position —
-        // no longer a different variant, just not bridged to this tree
+        // no longer a different variant, just not bridged to this DAG
         // position.
         let sql_literal = QueryExpr::<ColumnId>::Literal(ScalarValue::Float64(2.5));
         assert_eq!(bridge.as_promql_scalar(), Some(2.5));
@@ -2655,9 +2655,9 @@ mod tests {
         assert_eq!(scan(vec![], None, vec![]).as_promql_scalar(), None);
     }
 
-    /// Pins the tree-position distinction issue #220 asks for: the very same
+    /// Pins the DAG-position distinction issue #220 asks for: the very same
     /// `Literal(ScalarValue::Float64(_))` value has a row schema when it sits
-    /// at the operator-tree position (wrapped in `PromqlScalarBridge` — a
+    /// at the operator-DAG position (wrapped in `PromqlScalarBridge` — a
     /// `BinaryOp` operand, `PromqlVectorFromScalar` child, or a query root),
     /// and has none when it sits bare, in a scalar-sub-language position
     /// (`Compare`/`Arithmetic`/… operand) — no longer decided by which of two

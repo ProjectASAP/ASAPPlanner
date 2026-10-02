@@ -3,20 +3,20 @@
 //!
 //! ## The gap this closes
 //!
-//! `asap_types::pre_asap::cse::share_common_subtrees` (pre-ASAP CSE) only
-//! ever merges two subtrees that are *exactly* [`PartialEq`]-equal,
+//! `asap_types::pre_asap::cse::share_common_sub_dags` (pre-ASAP CSE) only
+//! ever merges two sub-DAGs that are *exactly* [`PartialEq`]-equal,
 //! including their [`AggIntent`]'s `accuracy: AccuracyTarget` field. Two
 //! otherwise-identical aggregates that differ *only* in how tight an
 //! accuracy bound they ask for — `quantile(0.99, x)` at `epsilon=0.01` for
 //! one consumer, the same `quantile(0.99, x)` at `epsilon=0.05` for
 //! another — are therefore never the same `Rc`, never collapse into one
-//! [`crate::replacement::TargetSubDAGCandidates`], and [`crate::replacement::SharedSubtreeStrategy`]
+//! [`crate::replacement::TargetSubDAGCandidates`], and [`crate::replacement::SharedSubDagStrategy`]
 //! never even gets a `TargetSubDAG` with `consumer_count >= 2` to propose
 //! sharing for. This crate would build two entirely independent sketches
 //! for what is conceptually one computation, even though a single sketch
 //! built to the tighter of the two bounds would answer both.
 //!
-//! This module is **additive**, not a relaxation of `share_common_subtrees`
+//! This module is **additive**, not a relaxation of `share_common_sub_dags`
 //! itself: `accuracy` still participates in exact structural equality
 //! everywhere else in this crate (correctness elsewhere — e.g. a downstream
 //! consumer that pattern-matches on a specific `AccuracyTarget` — depends on
@@ -24,7 +24,7 @@
 //! enough to share" that sits entirely inside the [`ReplacementStrategy`]
 //! extension point: one more candidate a [`crate::cost_model::CostModel`]
 //! may or may not prefer, never a forced rewrite and never a change to what
-//! `share_common_subtrees` itself merges.
+//! `share_common_sub_dags` itself merges.
 //!
 //! ## What counts as a "near-duplicate", and why
 //!
@@ -39,7 +39,7 @@
 //!    intent has no `AccuracyTarget` to reconcile in the first place.
 //! 2. Same `reduction` (grouping), same `output_names`, and the same shared
 //!    `child` (`Rc::ptr_eq`, or value-equal for two independently-built but
-//!    identical subtrees CSE conservatively declined to alias) — the same
+//!    identical sub-DAGs CSE conservatively declined to alias) — the same
 //!    "identical everything else" bar [`crate::rollup::RollupStrategy`] and
 //!    [`crate::topk_reuse::TopKLimitReuseStrategy`] already hold their own
 //!    sibling-reuse candidates to.
@@ -50,7 +50,7 @@
 //!    trivially "always tightest").
 //! 5. The tighter candidate's own **output** schema carries a provable
 //!    unique key (`Schema::has_unique_key`) — the exact legality gate
-//!    `share_common_subtrees` itself applies (see `cse.rs`'s "Legality"
+//!    `share_common_sub_dags` itself applies (see `cse.rs`'s "Legality"
 //!    section) and [`crate::rollup::RollupStrategy::is_legal_rollup_source`]
 //!    already reuses verbatim for the identical reason: a producer's output
 //!    is only safely reusable across a second, independent consumer when
@@ -120,12 +120,12 @@
 //! tag), because it needs its own cost treatment in
 //! [`crate::cost_model::DefaultCostModel::estimate_cost`], not just its own
 //! label. Every other `Replacement::Rewrite` shape that reaches
-//! `estimate_cost` (`SharedSubtreeStrategy`'s `CseRecompute`, `Rollup`'s and
+//! `estimate_cost` (`SharedSubDagStrategy`'s `CseRecompute`, `Rollup`'s and
 //! `TopKLimitReuse`'s `LogicalRewrite`) really does rebuild `target` from a
 //! different source, so pricing it as "one `cse_recompute_cost` of `target`
 //! itself, per consumer" is the right shape of cost. This strategy's
 //! candidate never rebuilds `target` at all — it reads `rc` (the tighter
-//! sibling), which — per this module's own safety argument — is a subtree
+//! sibling), which — per this module's own safety argument — is a sub-DAG
 //! this crate is already going to build regardless of whether `target`
 //! reads from it too. Pricing it with the same "rebuild `target`, once per
 //! consumer" formula would charge it for work it never does, and — because
@@ -137,7 +137,7 @@
 //! pin against. `estimate_cost` instead prices this shape as a
 //! [`crate::cost_model::CostModel::cse_shared_maintenance_cost`] read
 //! against `rc`'s **own** bound summary — the same order-of-magnitude,
-//! per-family cost `SharedSubtreeStrategy`'s own `CseShare` candidate is
+//! per-family cost `SharedSubDagStrategy`'s own `CseShare` candidate is
 //! priced with, reflecting "one more reference into a structure that's
 //! already being maintained" rather than "build a whole new one."
 //!
@@ -146,7 +146,7 @@
 //! that sibling group propagate the uses through its selected implementation.
 //! Accuracy edges are directed strictly from looser to tighter budgets, so
 //! they cannot cycle among themselves; both near-duplicates also have the
-//! same structural child, so adding the edge preserves the reference graph's
+//! same structural child, so adding the edge preserves the reference DAG's
 //! parent-before-child topological ordering.
 
 use std::cmp::Ordering;
@@ -301,7 +301,7 @@ impl AccuracyReconciliationStrategy {
     ///
     /// Also requires the candidate's own *output* schema to carry a provable
     /// unique key ([`Schema::has_unique_key`]) — the exact legality gate
-    /// `pre_asap::cse::share_common_subtrees` already applies to its own
+    /// `pre_asap::cse::share_common_sub_dags` already applies to its own
     /// sharing decisions, and [`crate::rollup::RollupStrategy`] already
     /// reuses verbatim for the identical reason (see that module's
     /// `is_legal_rollup_source` doc, point 4): a producer's output is only
@@ -392,12 +392,12 @@ mod tests {
     use super::*;
     use crate::cost_model::{CostModel, DefaultCostModel};
     use asap_types::post_asap::SketchAlgorithm;
-    use asap_types::pre_asap::cse::share_common_subtrees;
+    use asap_types::pre_asap::cse::share_common_sub_dags;
     use asap_types::pre_asap::query_expr::{GroupKeys, Source};
     use asap_types::pre_asap::schema::{Column, ColumnId, DataType, Schema};
 
     /// `[ts(0), value(1), job(2)]`.
-    /// A unique-keyed scan (`[ts]`) so `share_common_subtrees` is actually
+    /// A unique-keyed scan (`[ts]`) so `share_common_sub_dags` is actually
     /// willing to hoist it — see `Schema::has_unique_key`/`cse.rs`'s own
     /// "Legality" section: a producer with no provable unique key is always
     /// inserted fresh, never hoisted, regardless of structural equality.
@@ -658,24 +658,24 @@ mod tests {
         assert!(!strategy.matches(&TargetSubDAG::new(&exact)));
     }
 
-    // ── exact structural equality / share_common_subtrees is unchanged ────
+    // ── exact structural equality / share_common_sub_dags is unchanged ────
 
     #[test]
-    fn share_common_subtrees_still_never_merges_differing_accuracy() {
+    fn share_common_sub_dags_still_never_merges_differing_accuracy() {
         // The additive guarantee this issue explicitly must not violate:
         // pre-ASAP CSE's own exact-equality merge stays exact. Two
         // aggregates differing only in `accuracy` must come back as two
         // distinct `Rc`s, not one shared `Rc` — AccuracyReconciliationStrategy
         // is the *only* place cross-accuracy sharing gets proposed, never
-        // `share_common_subtrees` itself.
+        // `share_common_sub_dags` itself.
         let scan = metric_scan();
         let a = (*quantile(0.99, AccuracyTarget::Epsilon(0.01), &scan)).clone();
         let b = (*quantile(0.99, AccuracyTarget::Epsilon(0.05), &scan)).clone();
 
-        let roots = share_common_subtrees(vec![("a", a), ("b", b)]);
+        let roots = share_common_sub_dags(vec![("a", a), ("b", b)]);
         assert!(
             !Rc::ptr_eq(&roots[0].1, &roots[1].1),
-            "share_common_subtrees must not merge aggregates with different AccuracyTarget"
+            "share_common_sub_dags must not merge aggregates with different AccuracyTarget"
         );
         assert_ne!(
             roots[0].1, roots[1].1,
@@ -696,14 +696,14 @@ mod tests {
     #[test]
     fn identical_accuracy_still_merges_via_ordinary_cse() {
         // Sanity check the fixture itself: truly identical aggregates
-        // (same accuracy too) still merge via share_common_subtrees's own
+        // (same accuracy too) still merge via share_common_sub_dags's own
         // exact equality — unrelated to this module, but pins the contrast
         // with the test above.
         let scan = metric_scan();
         let a = (*quantile(0.99, AccuracyTarget::Epsilon(0.01), &scan)).clone();
         let b = (*quantile(0.99, AccuracyTarget::Epsilon(0.01), &scan)).clone();
 
-        let roots = share_common_subtrees(vec![("a", a), ("b", b)]);
+        let roots = share_common_sub_dags(vec![("a", a), ("b", b)]);
         assert!(Rc::ptr_eq(&roots[0].1, &roots[1].1));
     }
 
@@ -714,7 +714,7 @@ mod tests {
         // `by(vec![])` (global aggregation) reports no unique key
         // (`aggregate_output_schema`'s own `unique_keys = if by.is_empty() ..
         // { vec![] } ..`) — the same legality gate
-        // `share_common_subtrees`/`RollupStrategy` apply, which this
+        // `share_common_sub_dags`/`RollupStrategy` apply, which this
         // strategy must not bypass (module docs, point 5).
         let scan = metric_scan();
         let tight = global_quantile(0.99, AccuracyTarget::Epsilon(0.01), &scan);
@@ -848,7 +848,7 @@ mod tests {
         // independently-built but structurally identical loose queries
         // merge onto one Rc via ordinary CSE), *and* a separate,
         // single-consumer tight sibling exists over the same input — the
-        // scenario the issue itself targets: `SharedSubtreeStrategy`'s own
+        // scenario the issue itself targets: `SharedSubDagStrategy`'s own
         // CseShare/CseRecompute pair is on the table for the loose target's
         // own 2 consumers at the same time as this strategy's "read the
         // tight sibling instead" candidate.

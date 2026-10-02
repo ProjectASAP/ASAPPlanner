@@ -55,7 +55,7 @@ where needed, rather than copying every current `QueryExpr` variant unchanged:
 Use the canonical [`NonASAPOp` and `OperatorNode` definitions](operator-sharing.md#11-unified-operator-type)
 from the sharing proposal. Both documents describe the same resolved model:
 operator inputs and scalar query-result references use `Rc<OperatorNode>`.
-`NonASAPOp` is the payload of an ordinary operator, not a second graph-node type.
+`NonASAPOp` is the payload of an ordinary operator, not a second DAG-node type.
 `BinaryOp` likewise uses the single `BinaryOperator` payload specified there.
 
 Names are resolved to `ColumnId` before constructing these nodes. Parsing and
@@ -193,7 +193,7 @@ For an open label schema, lowering must retain the complete series identity,
 including unreferenced labels. If the input provides neither a complete label
 schema nor a full identity value, this lowering is not valid.
 `vector(s)` remains a real conversion to a one-element, label-free vector.
-Scalar expression trees are owned, while their operator references preserve graph
+Scalar expression DAGs are owned, while their operator references preserve DAG
 identity. The companion's [complete DAG example](operator-sharing.md#13-example-composing-a-logical-dag)
 shows these expressions inside ordinary operators before and after an ASAP rewrite.
 
@@ -241,7 +241,7 @@ older repository dependency. This documentation change upgrades neither dependen
 | `DISTINCT`, `UNION`, `INTERSECT`, `EXCEPT`, their supported `ALL` forms | `Dedup`, `Concat` / `SetOp` | **Direct.** Preserve bag multiplicity and SQL duplicate/NULL equality rules. |
 | `ORDER BY`, `LIMIT`, offset-only queries | `Sort`, `Limit` | **Direct.** Preserve direction and NULL placement; `n = None` means no fetch limit. |
 | Uncorrelated scalar subquery, `EXISTS`, `IN` / `NOT IN (SELECT ...)` | Explicit scalar plan-reading variants | **Direct.** Preserve the cardinality and NULL contracts in §2.2, including when used in a SELECT list. |
-| Derived tables and nonrecursive CTEs | Existing operator subgraphs; aliases resolved to output columns | **Lowered.** Naming alone needs no computation node. Reuse must not alter volatile evaluation. |
+| Derived tables and nonrecursive CTEs | Existing operator sub-DAGs; aliases resolved to output columns | **Lowered.** Naming alone needs no computation node. Reuse must not alter volatile evaluation. |
 
 ### 3.3 PromQL semantic mapping
 
@@ -318,13 +318,13 @@ of complete SQL/PromQL support. Acceptance requires:
 - The scalar queries and mixed scalar/vector examples in §2.3 need no
   `PromqlScalarBridge` or equivalent constant-wrapper node.
 - Operator dependencies inside scalar conversions/subqueries remain visible and
-  shared; scalar trees remain owned. Invalid result-kind combinations are rejected.
+  shared; scalar DAGs remain owned. Invalid result-kind combinations are rejected.
 - SQL NULL/cardinality rules, PromQL labels and evaluation times survive conversion.
 
 Implementation will require frontend, validation and plan-format migration for
 these explicit structural changes. DDL/DML, session commands, physical execution,
 new optimization algorithms, accuracy and execution-timing policy are outside this
-proposal. The companion document defines the common pre-/post-ASAP operator graph.
+proposal. The companion document defines the common pre-/post-ASAP operator DAG.
 
 [df-release]: https://github.com/apache/datafusion/releases/tag/55.1.0
 [prom-release]: https://github.com/prometheus/prometheus/releases/tag/v3.15.0

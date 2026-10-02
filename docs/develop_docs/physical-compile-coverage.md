@@ -29,7 +29,7 @@ Status values:
 
 | # | Backend site | Computation | Planner node | Status at #475 | Notes |
 |---|---|---|---|---|---|
-| 1 | `query_time.rs` `Lower::lower`, `compile_logical` | PromQL AST → `QueryTimeOperator` graph for a native query | `Fallback { QueryExpr }` subtrees plus value payloads | Missing | `compile` lowers `Fallback` only as a raw `Scan` source. |
+| 1 | `query_time.rs` `Lower::lower`, `compile_logical` | PromQL AST → `QueryTimeOperator` DAG for a native query | `Fallback { QueryExpr }` sub-DAGs plus value payloads | Missing | `compile` lowers `Fallback` only as a raw `Scan` source. |
 | 2 | `QueryTimeOperator::Aggregate` (sum/min/max/avg/count) | Grouped value aggregation | `Value::Exact(Aggregate)`; `SummaryAgg{ExactAggregate, Reduce}` over finalized values | Supported | Also `promql_values::compile_aggregate`. |
 | 3 | `QueryTimeOperator::Sort`, `Limit` (topk, sort, sort_desc) | Ordering and per-group limits | `Value::Sort`, `Value::Limit` | Supported | |
 | 4 | `QueryTimeOperator::Binary`, `QueryPlanNode::Binary` (vector ⊗ scalar) | Arithmetic with a scalar operand | `Binary` whose operand is `Fallback{PromqlScalarBridge(Literal)}` | Missing | Query-time `Binary` accepts only label-map vector schemas. The literal node has no native binding. |
@@ -188,7 +188,7 @@ Totals after this change: 20 Supported, 5 Partial, 4 Missing, 2 Backend.
 An argument whose output provably lacks `le`, such as
 `sum by (job) (rate(x_bucket[5m]))`, is rejected at lowering. Prometheus
 returns an empty vector for it. Candidate search keeps the classic form as one
-exact `KeepPreAsap` subtree for every accuracy target; it has no sketch
+exact `KeepPreAsap` sub-DAG for every accuracy target; it has no sketch
 candidate. `histogram_quantiles` lowers each branch the same way; the
 Fallback compiler accepts its `Concat` of relabeled branches and rejects
 duplicate output label sets. Nested aggregation, such as

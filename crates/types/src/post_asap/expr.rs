@@ -104,7 +104,7 @@ pub struct SummaryNode {
     /// The machine-readable accuracy guarantee of the *value* this node
     /// produces (issue #172) — `Some` on every finalized, caller-visible
     /// value: a `SummaryEstimate` readout, an `ExactAggregate`-family
-    /// `SummaryAgg` (its state *is* the value), or a `KeepPreAsap` subtree
+    /// `SummaryAgg` (its state *is* the value), or a `KeepPreAsap` sub-DAG
     /// (executed exactly). `None` on raw summary state — a sketch-family
     /// `SummaryAgg`, `SummaryMerge`, `SummarySubtract`, `SummaryDelete`,
     /// `SummaryJoin` — whose guarantee only exists once something reads it
@@ -121,13 +121,13 @@ pub struct SummaryNode {
 /// rules selectively replace logical aggregates and joins in the pre-ASAP
 /// `QueryExpr` with summary-bound counterparts. Final selection can retain
 /// supported read-time value operations around independently planned children;
-/// other unsupported subtrees pass through as `KeepPreAsap(Rc<QueryExpr>)`.
+/// other unsupported sub-DAGs pass through as `KeepPreAsap(Rc<QueryExpr>)`.
 ///
 /// Traversing from the root node yields a DAG; shared sub-expressions appear
 /// as multiple `Rc` references to the same `SummaryNode`.
 #[derive(Debug, Clone, PartialEq)]
 pub enum SummaryExpr {
-    /// A pre-ASAP subtree kept as-is because it has no selected implementation
+    /// A pre-ASAP sub-DAG kept as-is because it has no selected implementation
     /// or supported residual decomposition. Output schema is the inner node's
     /// schema, lifted to `SummarySchema` with all fields as
     /// `SummaryFamilyType::Plain`.

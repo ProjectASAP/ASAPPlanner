@@ -48,7 +48,7 @@ tests, not proof of Backend candidate selection or durable deployment execution.
 
 Spatial heap candidates use the same complete series identity. Planner's
 `current_series_topk_candidates` explores a CountSketch-with-heap realization
-of canonical Sort/Limit under an explicit accuracy target. The physical graph
+of canonical Sort/Limit under an explicit accuracy target. The physical DAG
 selects the latest eligible samples before building a fresh heap. A maintained
 population boundary can supply that snapshot directly. Arbitrary signed metric
 values do not authorize CMS; counter Rate's non-negative proof is separate.

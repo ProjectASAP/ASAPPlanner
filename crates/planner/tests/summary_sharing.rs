@@ -21,7 +21,7 @@ use asap_frontend_promql::lower_promql_workload;
 use asap_frontend_sql::SqlCatalog;
 use asap_planner::{e2e_plan, FrontendInput, UserInput};
 use asap_types::post_asap::{
-    share_common_summary_subtrees, AccuracyError, BoundExpr, CompositionOperator, ErrorMetric,
+    share_common_summary_sub_dags, AccuracyError, BoundExpr, CompositionOperator, ErrorMetric,
     ProbabilityExpr, ResultGuarantee, SketchQuery,
 };
 use asap_types::post_asap::{
@@ -542,7 +542,7 @@ fn certified_frequency_readouts_share_one_univmon_state() {
         })
         .collect();
     let mut states: Vec<Rc<SummaryNode>> = Vec::new();
-    for (_, root) in share_common_summary_subtrees(assembled) {
+    for (_, root) in share_common_summary_sub_dags(assembled) {
         assert!(root.guarantee.is_some(), "{:?}", root.expr);
         let SummaryExpr::SummaryEstimate { summary_input, .. } = &root.expr else {
             panic!("summary readout: {:?}", root.expr);

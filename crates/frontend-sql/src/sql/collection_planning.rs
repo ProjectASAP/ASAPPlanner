@@ -164,7 +164,7 @@ impl ScalarUDFImpl for CollectionPlanningFunction {
         }
     }
     fn invoke_batch(&self, _args: &[ColumnarValue], _number_rows: usize) -> Result<ColumnarValue> {
-        Err(DataFusionError::NotImplemented("collection planning adapter cannot execute; use a capable query engine or external exact subtree".into()))
+        Err(DataFusionError::NotImplemented("collection planning adapter cannot execute; use a capable query engine or external exact sub-DAG".into()))
     }
 }
 

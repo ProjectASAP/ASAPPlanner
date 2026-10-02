@@ -1,7 +1,7 @@
 # L1 — query string → canonical intent algebra
 
 Per-language front ends, one per supported query language. Each turns a
-raw query string all the way into the canonical intent tree that L2
+raw query string all the way into the canonical intent DAG that L2
 (see [`l2-intent-algebra.md`](./l2-intent-algebra.md)) is the vocabulary
 for. That journey is **two passes**, and this doc is organized around
 that split (see `design.md`'s representation/pass table for the
@@ -36,7 +36,7 @@ language A's native AST                    language B's native AST
    │  interpret directly into                 │  interpret directly into
    │  the canonical shape                     │  the canonical shape
    ▼                                          ▼
-        canonical-shaped tree, named column references
+        canonical-shaped DAG, named column references
    ═══════════════ pass 1 done; pass 2 starts ═══════════════
                                         │  one shared pass, for every language:
                                         │    1. resolve — bind names to schema
@@ -44,7 +44,7 @@ language A's native AST                    language B's native AST
                                         │    2. canonicalize — cross-language /
                                         │       cross-phrasing normalization
                                         ▼
-                    canonical intent tree  ← L1's output, L2's vocabulary
+                    canonical intent DAG  ← L1's output, L2's vocabulary
                                               columns are positions
                                               + a self-contained schema on every scan
 ```
@@ -52,7 +52,7 @@ language A's native AST                    language B's native AST
 ## Pass 1 — interpret
 
 Different front ends can look nothing alike where they start — one may
-begin from a bare AST, another from an already-planned tree — but every
+begin from a bare AST, another from an already-planned DAG — but every
 front end produces the same canonical shape as its output, through the
 same node vocabulary, regardless of source language.
 
@@ -66,10 +66,10 @@ to positions is pass 2's job, once a schema exists to resolve against.
 
 ### The nesting contract
 
-Nesting — an operator tree inside a source clause or a function
+Nesting — an operator DAG inside a source clause or a function
 argument, an aggregate over an aggregate, a binary operation over two
-subtrees, a range function over a sub-query, and so on — is required to
-lower **structurally**: the canonical intent tree is a recursive,
+sub-DAGs, a range function over a sub-query, and so on — is required to
+lower **structurally**: the canonical intent DAG is a recursive,
 arbitrarily-nestable structure, so "an operation over a sub-query"
 needs no special-cased IR shape. Any language whose grammar allows
 nesting must be able to express it this way, using the same recursive
@@ -88,7 +88,7 @@ language — does two things in order:
 
 1. **Resolve.** Bind names to schema positions (see "Name resolution:
    binding" below), then substitute every column reference throughout
-   the tree — a generic walk over the already-canonical-shaped tree
+   the DAG — a generic walk over the already-canonical-shaped DAG
    pass 1 produced.
 2. **Canonicalize.** Run a cross-language normalization pass so that
    semantically equivalent queries, from any supported language or
@@ -102,12 +102,12 @@ language — does two things in order:
    dedicated `topk(k, count_over_time(…))` produces directly in pass 1.
 
 This ordering matters: canonicalization operates on an already-resolved
-tree, so its pattern-matching rules work over stable schema positions,
+DAG, so its pattern-matching rules work over stable schema positions,
 not per-language surface syntax.
 
 ### Name resolution: binding
 
-Binding walks the canonical-shaped, named-reference tree pass 1
+Binding walks the canonical-shaped, named-reference DAG pass 1
 produced and derives one self-contained schema that every column
 reference indexes into: it seeds columns from whatever catalog is
 available (or a minimal always-present floor if the catalog knows
@@ -119,7 +119,7 @@ inline while interpreting, in pass 1:
 
 - **Everything downstream becomes purely structural and total.** Take
   those two words literally: *structural* means later steps match on
-  tree shape and column position, never on a name string again — the
+  DAG shape and column position, never on a name string again — the
   string comparisons all happened once, here. *Total* is the
   computer-science sense — a function defined for every input, with no
   case left unhandled — applied to column resolution: once binding has
@@ -136,7 +136,7 @@ inline while interpreting, in pass 1:
   complement is represented and deferred to serving time, rather than
   resolved eagerly.
 
-Each independent sub-tree (e.g. either side of a binary operation)
+Each independent sub-DAG (e.g. either side of a binary operation)
 binds against its own schema, since the two sides may reference
 entirely different sources — but a side must still see names
 referenced by an *enclosing* operation (a grouping key mentioned above,
@@ -209,7 +209,7 @@ pub trait SchemaCatalog {
 
 pub struct Binder<C: SchemaCatalog = UsageDerivedCatalog> { .. }
 impl<C: SchemaCatalog> Binder<C> {
-    pub fn bind(&self, tree: &QueryExpr) -> Schema;
+    pub fn bind(&self, dag: &QueryExpr) -> Schema;
 }
 ```
 
@@ -225,7 +225,7 @@ with the default:
 
 ```rust
 // PromQL: `sum by (job) (http_requests_total)`, no catalog available.
-let schema = Binder::default().bind(&tree);
+let schema = Binder::default().bind(&dag);
 // -> Schema { columns: [ts, value, job], time_index: Some(0), closed: false }
 //    ("job" was seeded because the query references it; anything the
 //    query never mentions is simply absent from this schema)
@@ -243,7 +243,7 @@ impl SchemaCatalog for SqlCatalog {
         ..
     }
 }
-let schema = Binder::with_catalog(SqlCatalog { .. }).bind(&tree);
+let schema = Binder::with_catalog(SqlCatalog { .. }).bind(&dag);
 // -> Schema { columns: [host, bytes], time_index: None, closed: true }
 //    (the catalog's declared columns are used verbatim, regardless of
 //    which ones the query actually references)
@@ -254,10 +254,10 @@ migration tracked in #179, since it already operates on the canonical
 type either way:
 
 ```rust
-pub fn canonicalize(tree: QueryExpr) -> QueryExpr;
+pub fn canonicalize(dag: QueryExpr) -> QueryExpr;
 ```
 
-Idempotent, bottom-up: rewrites a tree already in canonical shape into
+Idempotent, bottom-up: rewrites a DAG already in canonical shape into
 its normal form (e.g. promoting a generic `Limit{Sort{Aggregate([Count])}}`
 shape to the explicit heavy-hitter `Aggregate{aggs:[TopK]}` form) —
 same type in, same type out.

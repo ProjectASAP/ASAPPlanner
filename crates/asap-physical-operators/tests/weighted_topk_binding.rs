@@ -159,13 +159,13 @@ fn assert_weighted_binding(evidence: &dyn AccuracyEvidenceProvider, algorithm: S
             &[dag.root.0 as u64],
         )
         .unwrap();
-        let graph = compiled
+        let physical_dag = compiled
             .instantiate(BTreeMap::from([(rate_id.0 as u64, source)]))
             .unwrap();
         let context = RunContext::new(scope, Limits::default()).unwrap();
         let output = block_on(async {
             let mut output = Vec::new();
-            let mut stream = graph
+            let mut stream = physical_dag
                 .execute(&[dag.root.0 as u64], context)
                 .unwrap()
                 .remove(0);
@@ -468,13 +468,13 @@ fn check_direct_rate_topk(dynamic: bool) {
                 let source = Box::new(
                     Operator::source(raw_schema.clone(), vec![raw_batch.clone()]).unwrap(),
                 ) as Source<'static>;
-                let graph = raw_compiled
+                let physical_dag = raw_compiled
                     .instantiate(BTreeMap::from([(u64::from(raw.id.0), source)]))
                     .unwrap();
                 let context = RunContext::new(scope, Limits::default()).unwrap();
                 let mut raw_scores = block_on(async {
                     let mut scores = Vec::new();
-                    let mut stream = graph
+                    let mut stream = physical_dag
                         .execute(&[u64::from(dag.root.0)], context)
                         .unwrap()
                         .remove(0);
@@ -584,13 +584,13 @@ fn check_direct_rate_topk(dynamic: bool) {
                 let source =
                     Box::new(Operator::source(schema.clone(), vec![batch.clone()]).unwrap())
                         as Source<'static>;
-                let graph = compiled
+                let physical_dag = compiled
                     .instantiate(BTreeMap::from([(u64::from(input_id.0), source)]))
                     .unwrap();
                 let context = RunContext::new(scope, Limits::default()).unwrap();
                 let mut scores = block_on(async {
                     let mut scores = vec![];
-                    let mut stream = graph
+                    let mut stream = physical_dag
                         .execute(&[u64::from(dag.root.0)], context)
                         .unwrap()
                         .remove(0);
@@ -707,7 +707,7 @@ fn spatial_topk_exposes_signed_heap_candidate_over_complete_snapshot() {
             })
             .collect();
         let batch = Batch::try_new(schema.clone(), rows).unwrap();
-        let graph = program
+        let physical_dag = program
             .instantiate(BTreeMap::from([(
                 u64::from(raw.id.0),
                 Box::new(Operator::source(schema.clone(), vec![batch]).unwrap()) as Source<'_>,
@@ -722,7 +722,10 @@ fn spatial_topk_exposes_signed_heap_candidate_over_complete_snapshot() {
                 Limits::default(),
             )
             .unwrap();
-            let mut stream = graph.execute(program.roots(), context).unwrap().remove(0);
+            let mut stream = physical_dag
+                .execute(program.roots(), context)
+                .unwrap()
+                .remove(0);
             let mut result = Vec::new();
             while let Some(batch) = stream.next().await {
                 let batch = batch.unwrap();
@@ -928,9 +931,9 @@ fn maintained_rate_heap_lifecycle_compiles_fixed_window_precompute() {
             let id = plan.input_contracts().next().unwrap().0;
             let source = Box::new(Operator::source(input.schema().clone(), vec![input]).unwrap())
                 as Source<'static>;
-            let graph = plan.instantiate(BTreeMap::from([(id, source)])).unwrap();
+            let physical_dag = plan.instantiate(BTreeMap::from([(id, source)])).unwrap();
             block_on(async {
-                let mut stream = graph
+                let mut stream = physical_dag
                     .execute(
                         plan.roots(),
                         RunContext::new(scope, Limits::default()).unwrap(),

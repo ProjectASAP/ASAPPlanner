@@ -579,7 +579,7 @@ The parent/child compatibility rules are:
 | `PerEvaluation` | `PerEvaluation` | valid |
 | `PerEvaluation` | `Once` | valid only when the child exposes retained state |
 
-For a tree-shaped pipeline, peak memory is normally the maximum live pipeline
+For a linear pipeline, peak memory is normally the maximum live pipeline
 state, not the sum of every node's memory. At a fan-out, join, merge, or nested
 summary boundary, multiple child states may coexist and must be combined.
 

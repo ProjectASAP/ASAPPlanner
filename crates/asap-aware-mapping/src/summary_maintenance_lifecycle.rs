@@ -21,7 +21,7 @@ use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use asap_types::post_asap::{
-    compile_post_asap_dag_with_node_ids, share_common_summary_subtrees, EvaluationSchedule,
+    compile_post_asap_dag_with_node_ids, share_common_summary_sub_dags, EvaluationSchedule,
     ExecutionDataStateError, ExecutionTiming, OutputRepresentation, PostAsapDag,
     PostAsapDagValidationError, PostAsapNodeId, ResultGuarantee, SummaryExpr,
     SummaryMaintenanceLifecycle, SummaryMaintenanceLifecycleGuarantee, SummaryMaintenanceMode,
@@ -800,7 +800,7 @@ pub fn global_selection_with_summary_maintenance_lifecycles<'a, Id>(
     // Intern every member once; members whose outermost state (the
     // `SummaryAgg` every other state of the candidate feeds) interns to the
     // same node share it. Classes are kept in first-member order.
-    let interned = share_common_summary_subtrees(
+    let interned = share_common_summary_sub_dags(
         members
             .iter()
             .enumerate()

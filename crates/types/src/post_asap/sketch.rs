@@ -606,7 +606,7 @@ pub enum SketchQuery {
     /// `count(cms_metric{item="checkout"})` — `key` is `item`, `value` is
     /// `"checkout"`). `value` is carried here rather than resolved by the
     /// `SummaryExecutor` from a `Filter` predicate because `readout`'s
-    /// trait signature has no tree access — see `CostModel::readout_extension`.
+    /// trait signature has no DAG access — see `CostModel::readout_extension`.
     PointCount {
         key: ColumnRef,
         value: Option<String>,

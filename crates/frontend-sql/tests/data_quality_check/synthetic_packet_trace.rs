@@ -65,9 +65,9 @@ fn queries() -> Vec<String> {
         .collect()
 }
 
-// ── tree helpers ──────────────────────────────────────────────────────────────
+// ── DAG helpers ──────────────────────────────────────────────────────────────
 
-/// Every `AggIntent` in the tree, root-to-leaf.
+/// Every `AggIntent` in the DAG, root-to-leaf.
 fn intents(e: &QueryExpr) -> Vec<AggIntent> {
     let mut out = Vec::new();
     fn go(e: &QueryExpr, out: &mut Vec<AggIntent>) {
@@ -114,7 +114,7 @@ fn intents(e: &QueryExpr) -> Vec<AggIntent> {
             | QueryExpr::CurrentTimestamp => {}
             // Scalar expression variants (issue #205): `AggIntent` only ever
             // lives in `Aggregate.measures`, never nested inside a scalar
-            // expression tree, so there's nothing to recurse into here.
+            // expression DAG, so there's nothing to recurse into here.
             QueryExpr::Column(_)
             | QueryExpr::Literal(_)
             | QueryExpr::Compare { .. }

@@ -1,4 +1,4 @@
-//! Compile a retained PromQL subtree (`Fallback`) from its typed expression.
+//! Compile a retained PromQL sub-DAG (`Fallback`) from its typed expression.
 //! The deployment supplies the raw series of each selector; the Planner
 //! computes selection, range functions, subqueries, matching and aggregation.
 use super::*;

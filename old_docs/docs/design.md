@@ -27,7 +27,7 @@ query string
     ▼
 per-language AST/DAG, unresolved column references ← L1
     │  pass': resolve (bind names to schema positions, substitute them
-    │        throughout the already-canonical-shaped tree)
+    │        throughout the already-canonical-shaped DAG)
     ▼
     │  pass'': canonicalize (cross-language / cross-phrasing pattern
     │        normalization — e.g. promoting a generic
@@ -75,7 +75,7 @@ language, or differently-phrased within the same language — converge
 on the identical canonical shape. `canonicalize` catches the cases
 where a language has no dedicated syntax for an intent — e.g. SQL's
 `ORDER BY count DESC LIMIT k` has no `topk()`-shaped AST node; a
-pattern-detection pass over the already-assembled tree recognizes it as
+pattern-detection pass over the already-assembled DAG recognizes it as
 the same `Aggregate{aggs:[TopK]}` shape PromQL's dedicated `topk()`
 produces directly in pass 1.
 
@@ -93,14 +93,14 @@ flowchart LR
 
 ## L2 — intent algebra
 
-**Job: define the canonical intent tree's vocabulary — the shape L1's
+**Job: define the canonical intent DAG's vocabulary — the shape L1's
 passes produce — expressed declaratively (e.g. "a quantile to this
 accuracy," "the top-k by this ranking"), with implementation
 strategy left to L3.** L2 is the vocabulary/rule set
 L1's output conforms to, enforced by construction: every front end's
 output runs through the same `resolve`+`canonicalize`.
 - The result is a language- and deployment-independent canonical
-  intent tree: what to compute, without committing to how. Deployment
+  intent DAG: what to compute, without committing to how. Deployment
   here refers to a physical execution context — e.g. parallelism and
   the lifecycle stage a computation runs at — a different sense of
   "deployment" than the Glossary's "Deployment model" entry below;
@@ -111,12 +111,12 @@ output runs through the same `resolve`+`canonicalize`.
   sub-computations are properties of this canonical form. Both depend
   on L1's `canonicalize` pass having already converged
   semantically-equivalent queries onto the same shape: only
-  structurally-identical sub-trees can be recognized as the same
+  structurally-identical sub-DAGs can be recognized as the same
   reusable computation.
 
 ```mermaid
 flowchart LR
-    L1T["canonical intent tree\n(from L1)"] --> V["intent vocabulary\n+ design rules"]
+    L1T["canonical intent DAG\n(from L1)"] --> V["intent vocabulary\n+ design rules"]
     V --> L2G["governs what a valid\nL1 output looks like"]
 ```
 

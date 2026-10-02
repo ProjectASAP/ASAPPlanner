@@ -2,13 +2,13 @@
 //!
 //! This crate sits between the language-agnostic IR ([`asap_ir`]) and
 //! any runtime: it consumes pre-ASAP [`QueryExpr`](asap_types::pre_asap::QueryExpr)
-//! trees and makes the cost-aware decisions the pre-ASAP IR deliberately
+//! DAGs and makes the cost-aware decisions the pre-ASAP IR deliberately
 //! leaves open — which sketch (if any) realises each approximate intent.
 //!
 //! **Common sub-expression elimination (CSE) is not this crate's job.**
 //! Detection is a primary pass over the pre-ASAP `QueryExpr` IR itself
 //! (`asap_types::pre_asap`, design tracked in issue #223), run before a
-//! tree ever reaches [`replacement::SketchAlgorithmStrategy`] — see issue #222
+//! DAG ever reaches [`replacement::SketchAlgorithmStrategy`] — see issue #222
 //! for why (batch query optimization needs to see shared work across a
 //! `QueryWorkload` before summary binding, not after). This crate may
 //! eventually run a second, narrower CSE pass of its own over an
@@ -74,7 +74,7 @@
 //!   prose), meant for the same downstream consumer (e.g. a
 //!   DAG-visualization view) the crate doc's planning workflows section above
 //!   already names for [`replacement::CandidateLogicalASAPDAGs`] itself. Superseded PR
-//!   #247's own rule-based traversal, which re-walked the tree once per
+//!   #247's own rule-based traversal, which re-walked the DAG once per
 //!   optimization before [`replacement::search_workload`] existed to read
 //!   from instead — see that module's docs for the full reframing.
 //! - [`rollup`] — [`rollup::RollupStrategy`] wraps group-by-lattice roll-up
@@ -83,7 +83,7 @@
 //!   re-deriving it from an already-computed, strictly finer sibling
 //!   `Aggregate` over identical child IR instead of an independent pass
 //!   over the raw source — the cross-aggregate sibling of
-//!   `pre_asap::cse::share_common_subtrees`'s identical-subtree sharing.
+//!   `pre_asap::cse::share_common_sub_dags`'s identical-sub-DAG sharing.
 //!   [`rollup::is_legal_rollup_source`] is the standalone legality predicate
 //!   other axes (e.g. issue #256's `GroupingStrategy`) are expected to
 //!   consult directly, so it and this module's `RollupStrategy` can never
@@ -101,7 +101,7 @@
 //!   is a [`replacement::ReplacementStrategy`] that reshapes a bare `avg`
 //!   node — which [`replacement::realizations_for_intent`] can only
 //!   dispatch to `Realization::PassThrough`, so it can never be a
-//!   [`replacement::SharedSubtreeStrategy`] target — into a `sum`/`count`
+//!   [`replacement::SharedSubDagStrategy`] target — into a `sum`/`count`
 //!   pair under the same grouping, re-divided back by a wrapping `Project`,
 //!   so those *are* ordinary mergeable accumulators sharing/sketching can
 //!   reach. It only reshapes; [`replacement::search_workload`]'s cost-based
@@ -211,7 +211,7 @@ pub use replacement::{
     search_workload_with_targets, summary_candidates, CandidateLogicalASAPDAGs,
     CompositionDecision, GlobalSelection, Matcher, Proposals, RankedTargetSubDAGCandidates,
     Realization, RealizationError, RecurrenceProfileMap, RejectedCandidate, Replacement,
-    ReplacementProvenance, ReplacementStrategy, ReplacementSubDAG, SharedSubtreeStrategy,
+    ReplacementProvenance, ReplacementStrategy, ReplacementSubDAG, SharedSubDAGStrategy,
     SketchAlgorithmStrategy, TargetSubDAG, TargetSubDAGCandidates, TargetSubDAGSelection,
     MAX_SEARCH_ITERATIONS,
 };

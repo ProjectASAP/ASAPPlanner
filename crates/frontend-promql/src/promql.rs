@@ -6,7 +6,7 @@
 //! - **Lowering** builds *directly in canonical shape* here (issue #179): the
 //!   walk interprets PromQL semantics (range vectors, aggregate operators,
 //!   label matchers) and emits `UnresolvedQueryExpr` nodes with unresolved
-//!   `ColumnRef`s — the same tree shape
+//!   `ColumnRef`s — the same DAG shape
 //!   [`resolve_root`](asap_types::pre_asap::resolve_root) later binds to
 //!   canonical, positional `QueryExpr<ColumnId>`. The structural decisions a
 //!   separate converter stage would otherwise have to make (heavy-hitter
@@ -17,7 +17,7 @@
 //!   the schema-*dependent* work: binding every `ColumnRef` to its
 //!   positional `ColumnId`.
 //!
-//! # PromQL → canonical unresolved-tree mapping (summary)
+//! # PromQL → canonical unresolved-DAG mapping (summary)
 //!
 //! | PromQL | Canonical shape |
 //! |---|---|
@@ -79,7 +79,7 @@ use crate::error::PromqlError as LoweringError;
 
 type Result<T> = std::result::Result<T, LoweringError>;
 
-/// Parses and lowers (→ the canonical, unresolved tree) a PromQL query string.
+/// Parses and lowers (→ the canonical, unresolved DAG) a PromQL query string.
 pub(crate) struct PromqlLowerer;
 
 #[derive(Debug, Clone)]
@@ -357,8 +357,8 @@ fn walk(expr: &Expr) -> Result<Unresolved> {
 /// `extract_matrix` can't accept it. Lower the sub-query recursively and reduce
 /// it per series (issue #27).
 fn walk_call(call: &Call) -> Result<Unresolved> {
-    if let Some(tree) = range_fn_over_subquery(call)? {
-        return Ok(tree);
+    if let Some(dag) = range_fn_over_subquery(call)? {
+        return Ok(dag);
     }
     build(lower_inner_call(call)?, vec![], Outer::None)
 }
@@ -491,7 +491,7 @@ fn walk_aggregate(agg: &AggregateExpr) -> Result<Unresolved> {
     // exclusion form when the modifier was `without(...)`.
     let built = match lower_inner(&agg.expr) {
         Ok(inner) => build(inner, keys, outer)?,
-        Err(_) => build_over_subtree(outer, keys, walk(&agg.expr)?)?,
+        Err(_) => build_over_sub_dag(outer, keys, walk(&agg.expr)?)?,
     };
     Ok(mark_without(built, without))
 }
@@ -555,13 +555,13 @@ fn outer_kind(agg: &AggregateExpr) -> Result<Outer> {
     })
 }
 
-/// Wrap an already-lowered Unresolved subtree in the outer aggregation. This is the
+/// Wrap an already-lowered Unresolved sub-DAG in the outer aggregation. This is the
 /// general-nesting counterpart to [`build`]: where `build` assembles the
 /// two-level shape from a flat [`Inner`], this composes the outer operator over
 /// an arbitrary child (`max(sum by (job) (…))`, `sum(a + b)`, …).
 ///
 /// A heavy-hitter `TopK` is only recognised on the flat `count_over_time` shape
-/// (handled in `build`); over a general subtree, `topk`/`bottomk` is a generic
+/// (handled in `build`); over a general sub-DAG, `topk`/`bottomk` is a generic
 /// order-by-value + limit — the same `Sort{partition_by} → Limit` pair `build`
 /// emits for any non-heavy-hitter ranking.
 /// Flip the outer `Aggregate` produced for a `without(...)` grouping into the
@@ -576,7 +576,7 @@ fn outer_kind(agg: &AggregateExpr) -> Result<Outer> {
 /// build this node) decides `PerEntity` vs `Reduce(by)` *without* knowing
 /// about `without` yet — it only ever sees `by`-mode keys, since `without`'s
 /// excluded-labels list is applied here, after the fact, exactly like the
-/// pre-#179 legacy `relational::QueryExpr` tree's own `mark_without` did (its
+/// pre-#179 legacy `relational::QueryExpr` DAG's own `mark_without` did (its
 /// converter read `without` only after this front-end step had already set
 /// it). Whether
 /// `reduction_for` picked `PerEntity` (only possible when `keys` was empty)
@@ -584,11 +584,11 @@ fn outer_kind(agg: &AggregateExpr) -> Result<Outer> {
 /// `Reduce(without(keys))`: a `without` grouping is never label-preserving —
 /// per-entity requires `!by.is_without()` — so this both re-tags an existing
 /// `Reduce` and upgrades a wrongly-early `PerEntity` guess, uniformly.
-fn mark_without(tree: Unresolved, without: bool) -> Unresolved {
+fn mark_without(dag: Unresolved, without: bool) -> Unresolved {
     if !without {
-        return tree;
+        return dag;
     }
-    match tree {
+    match dag {
         Unresolved::Aggregate {
             reduction,
             measures,
@@ -614,7 +614,7 @@ fn mark_without(tree: Unresolved, without: bool) -> Unresolved {
     }
 }
 
-fn build_over_subtree(outer: Outer, keys: Vec<ColumnRef>, child: Unresolved) -> Result<Unresolved> {
+fn build_over_sub_dag(outer: Outer, keys: Vec<ColumnRef>, child: Unresolved) -> Result<Unresolved> {
     Ok(match outer {
         // `walk_aggregate` always passes a real aggregator; `None` can't occur.
         Outer::None => child,
@@ -750,7 +750,7 @@ fn classic_histogram_quantile(q: f64, output_name: &str, child: Unresolved) -> U
 /// (`HistogramQuantile`), native histograms / raw samples take the sketch-able
 /// `Quantile` (issues #43 / #79) — so the two functions cannot diverge.
 ///
-/// The vector argument is lowered once per branch, duplicating the subtree —
+/// The vector argument is lowered once per branch, duplicating the sub-DAG —
 /// a future workload-level reuse pass could hoist it back into a single
 /// producer.
 ///
@@ -906,7 +906,7 @@ fn is_presence_fn(name: &str) -> bool {
 /// `absent(v)` / `absent_over_time(m[w])` / `present_over_time(m[w])` — lowered
 /// to an `Aggregate{[Absent/…]}` over the (instant or range) argument. The
 /// empty-result → synthesized-1-sample logic is a post-ASAP/runtime concern;
-/// the canonical tree only marks the operation (issue #47).
+/// the canonical DAG only marks the operation (issue #47).
 fn walk_presence(call: &Call) -> Result<Unresolved> {
     let func = match call.func.name {
         "absent" => AggIntent::Absent,
@@ -1470,7 +1470,7 @@ fn lower_inner_call(call: &Call) -> Result<Inner> {
     }
 }
 
-/// Assemble the Layer-2 tree from a lowered inner vector, the resolved group
+/// Assemble the Layer-2 DAG from a lowered inner vector, the resolved group
 /// keys, and the enclosing aggregator shape.
 fn build(inner: Inner, keys: Vec<ColumnRef>, outer: Outer) -> Result<Unresolved> {
     match outer {
@@ -1558,7 +1558,7 @@ fn build(inner: Inner, keys: Vec<ColumnRef>, outer: Outer) -> Result<Unresolved>
             };
             let additive_ranking = measure.is_supported(descending);
             if additive_ranking {
-                // Preserve the ranked aggregate intent in the canonical tree so the
+                // Preserve the ranked aggregate intent in the canonical DAG so the
                 // intent algebra is explicit about what is being computed.
                 // Post-ASAP binding may fuse the Count and TopK into a
                 // single-pass heavy-hitter sketch (SpaceSaving /
@@ -1622,7 +1622,7 @@ fn build(inner: Inner, keys: Vec<ColumnRef>, outer: Outer) -> Result<Unresolved>
 
 /// Decide `PerEntity` vs `Reduce(by)` for a canonical `Aggregate`, entirely
 /// from local PromQL semantics: the keys and whether this operation preserves
-/// each input series. It never infers entity reduction from the child tree's
+/// each input series. It never infers entity reduction from the child DAG's
 /// temporal shape. `without()` is applied
 /// separately, post-hoc, by `mark_without` — see its doc for why that's still
 /// correct here.
@@ -1676,7 +1676,7 @@ fn windowed_aggregate(
     }
 }
 
-/// `Aggregate{reduction, [intent]}` directly over an existing Unresolved subtree — the
+/// `Aggregate{reduction, [intent]}` directly over an existing Unresolved sub-DAG — the
 /// OUTER level of a two-level aggregation such as `sum(rate(…))` or the
 /// `Aggregate{[Quantile]}` that wraps a `histogram_quantile` argument.
 fn outer_aggregate(

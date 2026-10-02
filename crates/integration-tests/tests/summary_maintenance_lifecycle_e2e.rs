@@ -174,8 +174,8 @@ fn promql_dashboard_materializes_continuous_summary_with_explained_rejections() 
         alternative["lifecycle"]["kind"] == "shared"
             && alternative["rejection"] == "unsupported_by_runtime"
     }));
-    assert!(exported["graph"]["nodes"].as_array().is_some());
-    let summary_node = exported["graph"]["nodes"]
+    assert!(exported["dag"]["nodes"].as_array().is_some());
+    let summary_node = exported["dag"]["nodes"]
         .as_array()
         .unwrap()
         .iter()
@@ -982,7 +982,7 @@ fn typed_selection(query: &str) -> (asap_types::post_asap::PostAsapDag, bool) {
     (dag, ingestion_binary)
 }
 
-/// Execute a timed DAG's precompute and query graphs over `samples`
+/// Execute a timed DAG's precompute and query DAGs over `samples`
 /// (`(metric, job, seconds, value)`) at 300s; returns the root's values.
 fn execute_timed(
     dag: &asap_types::post_asap::PostAsapDag,

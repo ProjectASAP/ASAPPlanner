@@ -12,12 +12,12 @@
 //! comment on why: `Avg`/`StdDev`/`Variance` "need richer partial state"
 //! than a bare sketch/exact accumulator gives, so there is no summary
 //! realization for a bare `avg` node to bind to at all. A logical `avg`
-//! node therefore can never be a [`SharedSubtreeStrategy`] target either:
+//! node therefore can never be a [`SharedSubDagStrategy`] target either:
 //! CSE-style sharing needs *some* mergeable accumulator underneath, and
 //! `PassThrough` has none.
 //!
 //! `Sum` and `Count` are both ordinary mergeable accumulators
-//! (`agg_is_mergeable`) — exactly the shape [`SharedSubtreeStrategy`] and a
+//! (`agg_is_mergeable`) — exactly the shape [`SharedSubDagStrategy`] and a
 //! future sketch-family search already know how to reuse across a
 //! workload. Rewriting `Aggregate{ measures: [Avg{col}], .. }` into two
 //! independent single-measure `Sum` and `Count` aggregates, divided with a
@@ -43,7 +43,7 @@
 //! Both are follow-ups (issue #253 itself scopes to "the concrete case in
 //! Peilin's comment"), not correctness bugs in what ships here — a node
 //! outside this scope simply doesn't `match`, the same "safe but
-//! uninformative" fallback [`SketchAlgorithmStrategy`]/[`SharedSubtreeStrategy`]
+//! uninformative" fallback [`SketchAlgorithmStrategy`]/[`SharedSubDagStrategy`]
 //! already use for shapes they don't have an opinion on.
 //!
 //! ## Non-goals (mirrors [`replacement`]'s own discipline)
@@ -112,7 +112,7 @@ fn avg_rewrite_target(node: &QueryExpr) -> Option<(usize, Option<ColumnId>)> {
     Some((by.keys().len(), *col))
 }
 
-/// Build the rewritten `Project{ cast(sum) } / Aggregate{ Count }` tree for
+/// Build the rewritten `Project{ cast(sum) } / Aggregate{ Count }` DAG for
 /// `root`, or `None` if `root` isn't [`avg_rewrite_target`]'s shape. `Sum` and
 /// `Count` deliberately live in separate, single-measure aggregates so the
 /// replacement fixpoint discovers each as an independently bindable target.
@@ -362,7 +362,7 @@ pub(crate) fn composed_aggregate_rewrite(root: &Rc<QueryExpr>) -> Option<Rc<Quer
 /// bind anything (its one [`Replacement`] is always [`Replacement::Rewrite`],
 /// never [`Replacement::Summary`]) and so has no [`CostModel`](crate::CostModel)
 /// to hold a reference to — the same "no state needed" shape
-/// [`SharedSubtreeStrategy`] already has.
+/// [`SharedSubDagStrategy`] already has.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct SemanticEquivalentRewriteStrategy;
 
@@ -397,7 +397,7 @@ impl ReplacementStrategy for SemanticEquivalentRewriteStrategy {
                         dispatches it to PassThrough) and so can never share or sketch; \
                         rewriting it into sum/count under the same grouping — re-divided back \
                         into the original avg column by a wrapping Project — computes the same \
-                        result from two ordinary mergeable accumulators SharedSubtreeStrategy \
+                        result from two ordinary mergeable accumulators SharedSubDAGStrategy \
                         (and a future sketch-family search) can actually reuse across the \
                         workload"
                     .to_string(),
@@ -570,7 +570,7 @@ mod tests {
 
     // ── replacements / schema round-trip ─────────────────────────────────
 
-    /// The rewritten tree must keep `Sum` and `Count` in separate aggregates,
+    /// The rewritten DAG must keep `Sum` and `Count` in separate aggregates,
     /// and its `output_schema()` must equal the original `Avg` aggregate's.
     #[test]
     fn avg_rewrites_and_schema_matches_exactly_when_ungrouped() {
@@ -607,7 +607,7 @@ mod tests {
         let rewritten_schema = rewritten.output_schema().unwrap();
         assert_eq!(
             original_schema, rewritten_schema,
-            "the rewritten tree must report exactly the same output schema as the original avg"
+            "the rewritten DAG must report exactly the same output schema as the original avg"
         );
     }
 

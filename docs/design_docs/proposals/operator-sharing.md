@@ -7,7 +7,7 @@
 ## Goal and problem
 
 Use one operator model before and after ASAP optimization, so ordinary query
-operations and summary operations can form one visible computation graph.
+operations and summary operations can form one visible computation DAG.
 
 Today, the post-ASAP representation wraps relational subplans and duplicates some
 relational operators outside those wrappers. This causes three problems:
@@ -19,7 +19,7 @@ relational operators outside those wrappers. This causes three problems:
   children.
 
 For example, consider a p99 latency query that projects its input columns, builds a
-KLL summary, and projects the estimated result. The trees below read from the result
+KLL summary, and projects the estimated result. The DAGs below read from the result
 at the top to the data source at the bottom:
 
 ```text
@@ -33,7 +33,7 @@ Post-ASAP projection                       Project
 ```
 
 Today the two projections need separate representations, and the scan is hidden
-inside the wrapped subplan. In the proposed graph, both projections use the same
+inside the wrapped subplan. In the proposed DAG, both projections use the same
 operator definition and the scan is directly visible. A union can likewise consume
 summary estimates without needing a separate post-ASAP union definition.
 
@@ -56,7 +56,7 @@ operation variants and schema internals are expanded afterward. These declaratio
 are shared by the detailed sections, not separate abbreviated types.
 
 ```rust
-// A graph node combines its operation with common planning properties (§2).
+// A DAG node combines its operation with common planning properties (§2).
 struct OperatorNode {
     operator: Operator,
     result_kind: OperatorResultKind,
@@ -72,14 +72,14 @@ enum Operator {
 }
 
 // NonASAPOp / ASAPOp: detailed below; their inputs are Rc<OperatorNode>.
-// ScalarExpr: an owned value-expression tree, defined in the companion proposal.
+// ScalarExpr: an owned, unshared value expression, defined in the companion proposal.
 // Schema / OperatorResultKind: defined in §2.1.
 ```
 
 An operator owns its scalar expressions and references input nodes through
 `Rc<OperatorNode>`. Either operation category can consume the other's outputs when
 the input contract permits it. `NonASAP` describes one operation, not its entire
-subgraph. Frontend graphs contain only NonASAP operations; ASAP optimization may
+sub-DAG. Frontend DAGs contain only NonASAP operations; ASAP optimization may
 introduce state construction and readout.
 
 | Category | Meaning | All operations |
@@ -199,13 +199,13 @@ A filter is an operator because it transforms a table. Its predicate, such as
 Scalar expressions belong to an operator field or a scalar query. Predicates,
 projection expressions and sort keys describe value computation in that context.
 Explicit scalar conversions and subqueries may reference operators; those are
-visible graph dependencies with defined cardinality rules. This prevents an
+visible DAG dependencies with defined cardinality rules. This prevents an
 arbitrary expression from being mistaken for a table-producing plan. The
 [companion proposal](decoupling_op_and_expr.md) defines this distinction.
 
 The companion's `ScalarExpr` uses `Rc<OperatorNode>` for `PromqlScalarFromVector`,
 `ScalarSubquery`, `Exists` and `InSubquery`, so those expressions already reference
-this common graph before and after optimization.
+this common DAG before and after optimization.
 
 In `scalar(sum(up))`, `scalar()` is Prometheus PromQL's built-in vector-to-scalar
 function, explicitly written by the query author. This proposal does not insert
@@ -214,9 +214,9 @@ The scalar expression `PromqlScalarFromVector` represents that function and refe
 result to obtain one number. A valid ASAP rewrite may replace that producer with
 a summary readout, preserving the required vector and accuracy semantics; it cannot
 substitute raw summary state. Ordinary expressions such as `price * 2` reference
-columns and literals, not a query subgraph.
+columns and literals, not a query sub-DAG.
 
-These are **query subgraphs referenced by scalar expressions**, with the same
+These are **query sub-DAGs referenced by scalar expressions**, with the same
 producer identity as any other operator dependency.
 
 ### 1.3 Example: composing a logical DAG
@@ -292,7 +292,7 @@ existing capability and rewrite checks permit that exact implementation.
 
 | Part of the design | Role in this example |
 |---|---|
-| `OperatorNode` | Every graph node, holding its operation and common result/schema, guarantee and timing properties. |
+| `OperatorNode` | Every DAG node, holding its operation and common result/schema, guarantee and timing properties. |
 | `Operator` | Selects the `NonASAP` or `ASAP` operation category in each node. |
 | `NonASAPOp` | Scan, filter, aggregate and projection before optimization; scan, filter and projection still use these definitions afterward. |
 | `ASAPOp` | Builds accumulator state and finalizes it after the rewrite. |
@@ -306,7 +306,7 @@ For this example, assume `bytes` is nullable `Int64`. The output metadata is:
 | Aggregate before optimization | `Relation` | `sum_bytes: Plain(Int64)`, nullable |
 | Summary build after optimization | `State` | `sum_state: ExactAggregate(Sum, Sum)`, non-null accumulator state |
 | Finalize after optimization | `Relation` | `sum_bytes: Plain(Int64)`, nullable |
-| Project in either graph | `Relation` | `total_bytes: Plain(Int64)`, nullable |
+| Project in either DAG | `Relation` | `total_bytes: Plain(Int64)`, nullable |
 
 The empty accumulator finalizes to SQL NULL; the accumulator itself is state, not
 a nullable numeric value. The projection consumes the finalized column. Guarantees
@@ -315,7 +315,7 @@ physical planning. The topmost Project node produces the query result.
 
 This illustrates the connection between the two proposals: scalar separation
 makes predicates and value expressions explicit; operator unification lets those
-same ordinary operations consume ASAP results through normal graph edges.
+same ordinary operations consume ASAP results through normal DAG edges.
 
 ### 1.4 Scope of operator sharing
 
@@ -452,11 +452,11 @@ contract of `PromqlScalarFromVector` and other scalar plan reads.
 
 | Validation entry | Scope and stage |
 |---|---|
-| `OperatorNode::validate_structure()` | Walks the reachable operator graph, including scalar plan references; checks input contracts, scalar typing and agreement between retained and derived output metadata. Valid for logical and physical plans; permits `timing = None`. |
+| `OperatorNode::validate_structure()` | Walks the reachable operator DAG, including scalar plan references; checks input contracts, scalar typing and agreement between retained and derived output metadata. Valid for logical and physical plans; permits `timing = None`. |
 | `OperatorNode::validate_execution_timing()` | Includes structural validation, then requires assigned timing on every executable operator and checks phase dependencies. Used for executable physical candidates. |
 | Existing planner assessment and selection (#509) | Establishes guarantees using the existing accuracy models and checks them against request requirements and deployment capabilities. Neither node method re-proves a guarantee or decides request feasibility. |
 
-The two node methods need only the graph and its annotations. Request requirements
+The two node methods need only the DAG and its annotations. Request requirements
 and deployment models remain inputs to the existing planning/selection workflow,
 not implicit globals of `validate_structure`. Passing the timing check alone does
 not establish that a physical candidate satisfies the query's accuracy requirement.
@@ -521,7 +521,7 @@ The representation must preserve the resulting execution constraints: ingestion-
 work cannot depend on query-time results, and consumers must receive values or state
 that are available when needed. Materialization choices, retention and plan selection
 remain governed by #509; this document does not define another lifecycle policy.
-These constraints also apply to query subgraphs referenced by scalar expressions.
+These constraints also apply to query sub-DAGs referenced by scalar expressions.
 
 PromQL evaluation timestamps and SQL statement time are separate from these
 execution phases. `TimeShift`, subquery grids and `EvalTimestamp` retain their
@@ -534,11 +534,11 @@ The design is successful when:
 
 - A projection uses the same semantics above and below summary computations.
 - A union or another ordinary operator can consume summary estimates on its inputs.
-- Unifying the representation preserves existing graph dependencies, including
+- Unifying the representation preserves existing DAG dependencies, including
   any shared inputs; it does not introduce new sharing rules.
 - Existing value/state, accuracy and execution constraints remain enforceable on
   the unified representation.
 - Scalar expressions and conversions use the same representation before and after
   optimization, with no bridge nodes or hidden subplans.
-- Structural and timing validation include query subgraphs referenced by scalar
+- Structural and timing validation include query sub-DAGs referenced by scalar
   expressions; planner assessment includes their accuracy dependencies.

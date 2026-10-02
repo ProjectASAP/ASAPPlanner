@@ -533,7 +533,7 @@ pub fn compile_post_asap_dag_with_node_ids(
                 consumer: id,
                 role,
                 intermediate_schema: child.schema.clone(),
-                // The whole-graph validator owns contextual state assignment,
+                // The whole-DAG validator owns contextual state assignment,
                 // especially for shared KeepPreAsap leaves. Export that
                 // authoritative result instead of independently deriving the
                 // edge state a second time.

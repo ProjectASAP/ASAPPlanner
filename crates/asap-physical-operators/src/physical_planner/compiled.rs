@@ -35,7 +35,7 @@ enum Node {
 
 /// Selected native operators and input slots. Rebinding never repeats lowering.
 /// Serde is format-agnostic; deployments choose the encoding and its versioning.
-/// Deserialization validates the graph before it is usable.
+/// Deserialization validates the DAG before it is usable.
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 #[serde(try_from = "UncheckedDag")]
 pub struct CompiledPhysicalDag {
@@ -63,7 +63,7 @@ impl TryFrom<UncheckedDag> for CompiledPhysicalDag {
 impl CompiledPhysicalDag {
     /// Link already-selected physical fragments without lowering operators again.
     /// Fragment keys and source keys share a namespace; repeated dependency IDs
-    /// therefore remain one producer in the composed graph.
+    /// therefore remain one producer in the composed DAG.
     pub fn compose(
         sources: BTreeMap<NodeId, InputContract>,
         fragments: BTreeMap<NodeId, (Vec<NodeId>, Self)>,
@@ -286,7 +286,7 @@ impl CompiledPhysicalDag {
         &self,
         mut sources: BTreeMap<NodeId, Source<'a>>,
     ) -> Result<PhysicalDag<'a, Batch, Schema>, Error> {
-        let mut graph = PhysicalDag::default();
+        let mut dag = PhysicalDag::default();
         for (&id, node) in &self.nodes {
             match node {
                 Node::Input(contract) => {
@@ -305,7 +305,7 @@ impl CompiledPhysicalDag {
                             "physical input {id} violates its compiled contract"
                         )));
                     }
-                    graph.add_boxed(
+                    dag.add_boxed(
                         id,
                         vec![],
                         Box::new(CheckedSource {
@@ -315,15 +315,15 @@ impl CompiledPhysicalDag {
                     )?;
                 }
                 Node::Operator { inputs, operator } => {
-                    graph.add(id, inputs.clone(), operator.clone())?;
+                    dag.add(id, inputs.clone(), operator.clone())?;
                 }
             }
         }
         if !sources.is_empty() {
             return Err(invalid("unexpected physical input binding"));
         }
-        graph.validate(&self.roots)?;
-        Ok(graph)
+        dag.validate(&self.roots)?;
+        Ok(dag)
     }
 }
 impl PhysicalOperator<Batch, Schema> for InputContract {

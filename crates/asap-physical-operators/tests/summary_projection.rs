@@ -131,7 +131,7 @@ fn post_asap_summary_projection_survives_recovery() {
         ]],
     )
     .unwrap();
-    let graph = program
+    let physical_dag = program
         .instantiate(BTreeMap::from([(
             0,
             Box::new(Operator::source(schema, vec![batch]).unwrap()) as Source<'_>,
@@ -146,7 +146,7 @@ fn post_asap_summary_projection_survives_recovery() {
     )
     .unwrap();
     block_on(async {
-        let mut output = graph.execute(&[1], context).unwrap().remove(0);
+        let mut output = physical_dag.execute(&[1], context).unwrap().remove(0);
         let batch = output.next().await.unwrap().unwrap();
         assert!(matches!(&batch.rows()[0][0], Value::Utf8(label) if label.as_ref() == "api"));
         let Value::Summary {

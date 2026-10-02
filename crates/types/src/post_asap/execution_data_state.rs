@@ -40,7 +40,7 @@
 //! not do is stay ambiguous inside one mixed plan: the same `Rc<SummaryNode>`
 //! reached once as update input and once as query-time fallback is
 //! [`ExecutionDataStateError::AmbiguousKeepPreAsap`], because no single execution of that
-//! subtree can serve both roles.
+//! sub-DAG can serve both roles.
 
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -187,7 +187,7 @@ pub enum ExecutionDataStateError {
     /// One shared `KeepPreAsap` node reached both as update-path raw input
     /// and as a query-time fallback — see the module docs.
     #[error(
-        "KeepPreAsap subtree is data_state-ambiguous: reached as {first} and as {second} in the same \
+        "KeepPreAsap sub-DAG is data_state-ambiguous: reached as {first} and as {second} in the same \
          plan"
     )]
     AmbiguousKeepPreAsap {
@@ -635,7 +635,7 @@ fn child_domain(
             Ok(avail)
         }
         None => {
-            // A raw pre-ASAP subtree executes at whichever data_state its consumer
+            // A raw pre-ASAP sub-DAG executes at whichever data_state its consumer
             // needs: update-path input for maintenance-time operation edges,
             // query-time fallback for a read-time edge. State-only edges
             // can't consume plain rows at all.
@@ -1254,7 +1254,7 @@ mod tests {
 
     #[test]
     fn a_shared_keep_pre_asap_reached_in_two_domains_is_ambiguous() {
-        // One raw subtree used both as update input (under a SummaryAgg) and
+        // One raw sub-DAG used both as update input (under a SummaryAgg) and
         // as a query-time fallback (under an ExactRead) — no single
         // execution can serve both, so the plan is rejected.
         let shared = keep();

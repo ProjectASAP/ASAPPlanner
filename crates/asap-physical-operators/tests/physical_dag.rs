@@ -1266,7 +1266,7 @@ fn certified_pruning_rejects_missing_authoritative_values_after_recovery() {
                 }),
             },
         };
-        let graph = CompiledPhysicalDag::from_operators(
+        let dag = CompiledPhysicalDag::from_operators(
             [
                 (0, InputContract::bounded(schema.clone())),
                 (1, InputContract::bounded(schema.clone())),
@@ -1283,11 +1283,10 @@ fn certified_pruning_rejects_missing_authoritative_values_after_recovery() {
             vec![2],
         )
         .unwrap();
-        let graph =
-            serde_json::from_slice::<CompiledPhysicalDag>(&serde_json::to_vec(&graph).unwrap())
-                .unwrap();
+        let dag = serde_json::from_slice::<CompiledPhysicalDag>(&serde_json::to_vec(&dag).unwrap())
+            .unwrap();
         assert_eq!(
-            graph.certified_pruning_keys(2),
+            dag.certified_pruning_keys(2),
             certified.then_some(&[(0, 0)][..])
         );
         for complete in [false, true] {
@@ -1315,11 +1314,11 @@ fn certified_pruning_rejects_missing_authoritative_values_after_recovery() {
                 )
             })
             .collect::<BTreeMap<_, _>>();
-            let bound = graph.instantiate(sources).unwrap();
+            let bound = dag.instantiate(sources).unwrap();
             let result = block_on(async {
                 let mut stream = bound
                     .execute(
-                        graph.roots(),
+                        dag.roots(),
                         RunContext::new(query(), Limits::default()).unwrap(),
                     )
                     .unwrap()
@@ -1422,9 +1421,9 @@ fn compiled_ingestion_binary_preserves_alignment_and_rejects_missing_updates() {
                 )
             })
             .collect::<BTreeMap<_, _>>();
-        let graph = program.instantiate(sources).unwrap();
+        let dag = program.instantiate(sources).unwrap();
         let result = block_on(async {
-            let mut stream = graph
+            let mut stream = dag
                 .execute(
                     program.roots(),
                     RunContext::new(query(), Limits::default()).unwrap(),

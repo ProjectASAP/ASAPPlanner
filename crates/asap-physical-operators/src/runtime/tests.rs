@@ -203,9 +203,9 @@ fn retained_outputs_count_against_budget() {
     assert_eq!(run.retained_bytes(), 0);
 }
 
-// Invalid graphs fail before even starting a source.
+// Invalid DAGs fail before even starting a source.
 #[test]
-fn invalid_graphs_do_not_start_sources() {
+fn invalid_dags_do_not_start_sources() {
     let (source, starts, _) = source(false);
     let mut dag = PhysicalDag::default();
     dag.add(0, vec![], source).unwrap();

@@ -36,7 +36,7 @@ fn run(program: &CompiledPhysicalDag, data: Batch, end: i64) -> Result<Vec<Batch
     )
     .map_err(|e| e.to_string())?;
     let input_id = recovered.input_contracts().next().unwrap().0;
-    let graph = recovered
+    let dag = recovered
         .instantiate(BTreeMap::from([(
             input_id,
             Box::new(Operator::source(data.schema().clone(), vec![data]).unwrap()) as Source<'_>,
@@ -51,7 +51,7 @@ fn run(program: &CompiledPhysicalDag, data: Batch, end: i64) -> Result<Vec<Batch
     )
     .unwrap();
     block_on(async {
-        let mut stream = graph.execute(recovered.roots(), context).unwrap().remove(0);
+        let mut stream = dag.execute(recovered.roots(), context).unwrap().remove(0);
         let mut batches = Vec::new();
         while let Some(batch) = stream.next().await {
             batches.push((*batch.map_err(|e| e.to_string())?).clone());
@@ -230,7 +230,7 @@ fn current_series_observes_resource_limits() {
     let plan = snapshot_plan();
     for cancelled in [false, true] {
         let data = input(&[("one", 50_000, 1.)]);
-        let graph = plan
+        let dag = plan
             .instantiate(BTreeMap::from([(
                 0,
                 Box::new(Operator::source(data.schema().clone(), vec![data]).unwrap())
@@ -251,7 +251,7 @@ fn current_series_observes_resource_limits() {
         if cancelled {
             context.cancel();
         }
-        let result = match graph.execute(&[1], context.clone()) {
+        let result = match dag.execute(&[1], context.clone()) {
             Err(error) => Err(error),
             Ok(mut streams) => block_on(streams.remove(0).next()).unwrap().map(|_| ()),
         };

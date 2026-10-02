@@ -27,7 +27,7 @@ use asap_types::pre_asap::query_expr::QueryExpr;
 use asap_types::types::AccuracyTarget;
 use support::lower_promql;
 
-/// This crate has no "bind me one tree" public API any more —
+/// This crate has no "bind me one DAG" public API any more —
 /// `SketchAlgorithmStrategy::replacements` always returns every candidate, and
 /// a caller decides what to keep. This test-only helper reproduces the
 /// take-the-first-(`cost_model`-preferred)-candidate pattern so [`bind_tally`]
@@ -104,10 +104,10 @@ struct BindTally {
 fn bind_tally(corpus: &str, accuracy: AccuracyTarget) -> BindTally {
     let mut t = BindTally::default();
     for q in queries(corpus) {
-        let Ok(tree) = lower_promql(q, accuracy.clone()) else {
+        let Ok(dag) = lower_promql(q, accuracy.clone()) else {
             continue;
         };
-        match bind(&tree) {
+        match bind(&dag) {
             Ok(bound) if matches!(bound.expr, SummaryExpr::KeepPreAsap(_)) => t.unchanged += 1,
             Ok(_) => t.transformed += 1,
             Err(_) => t.errored += 1,

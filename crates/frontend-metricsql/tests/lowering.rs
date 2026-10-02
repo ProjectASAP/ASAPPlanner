@@ -13,13 +13,13 @@ fn lower(query: &str) -> QueryExpr {
 #[test]
 fn selector_range_aggregate_and_call_share_the_canonical_shape() {
     let query = r#"sum by (job) (rate(http_requests_total{status=~"5.."}[5m]))"#;
-    let tree = lower(query);
+    let dag = lower(query);
     let QueryExpr::Aggregate {
         reduction,
         measures,
         child,
         ..
-    } = tree
+    } = dag
     else {
         panic!("expected outer aggregate");
     };
@@ -43,13 +43,13 @@ fn selector_range_aggregate_and_call_share_the_canonical_shape() {
 
 #[test]
 fn default_rollup_with_explicit_range_is_last_over_time() {
-    let tree = lower("default_rollup(cpu_usage[5m])");
+    let dag = lower("default_rollup(cpu_usage[5m])");
     let QueryExpr::Aggregate {
         reduction,
         measures,
         child,
         ..
-    } = tree
+    } = dag
     else {
         panic!("expected aggregate");
     };

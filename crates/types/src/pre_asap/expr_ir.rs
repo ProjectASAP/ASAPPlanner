@@ -1,11 +1,11 @@
 //! Column-reference and scalar-operator vocabulary shared by the whole
-//! canonical [`QueryExpr`](super::query_expr::QueryExpr) tree.
+//! canonical [`QueryExpr`](super::query_expr::QueryExpr) DAG.
 //!
 //! Issue #205: the scalar expression shapes (`Column`/`Literal`/`Compare`/…)
-//! used to live in a separate, self-recursive `Expr<C>` tree here, reachable
+//! used to live in a separate, self-recursive `Expr<C>` DAG here, reachable
 //! from `QueryExpr` only through wrapper fields (`Predicate`, `ProjectItem`,
 //! `SortKey`). They're variants of `QueryExpr<C>` itself now — one recursive
-//! tree, not two type families joined by wrappers — generic over the same
+//! DAG, not two type families joined by wrappers — generic over the same
 //! column-reference state `C` the rest of `QueryExpr` already carries
 //! (issue #179): [`ColumnRef`] (name-based, front-end-emitted) or
 //! [`ColumnId`](super::schema::ColumnId) (positional, once bound).

@@ -6,7 +6,7 @@
 //! neither reached [`CostModel`]'s CSE share-vs-recompute decision
 //! ([`CostModel::cse_share_decision`]): that decision only ever compared a
 //! *structural* consumer count (how many workload locations reference a
-//! shared subtree) against a flat per-family maintenance weight — it had no
+//! shared sub-DAG) against a flat per-family maintenance weight — it had no
 //! notion of how *often* those consumers actually run.
 //!
 //! This module adds that notion as a generic cost context, not a scheduler:
@@ -836,13 +836,13 @@ mod tests {
 
     #[test]
     fn decide_falls_back_to_structural_decision_when_profile_is_empty() {
-        let subtree = scan();
+        let sub_dag = scan();
         let bound = summary_node(SummaryFamilyType::ExactAggregate(
             ExactKind::Sum,
             ExactParams::Sum,
         ));
         let candidate = CseCandidate {
-            subtree: &subtree,
+            sub_dag: &sub_dag,
             bound_summary: &bound,
             consumer_count: 1000,
         };
@@ -862,13 +862,13 @@ mod tests {
 
     #[test]
     fn decide_rejects_mixed_one_shot_and_repeating_without_horizon() {
-        let subtree = scan();
+        let sub_dag = scan();
         let bound = summary_node(SummaryFamilyType::ExactAggregate(
             ExactKind::Sum,
             ExactParams::Sum,
         ));
         let candidate = CseCandidate {
-            subtree: &subtree,
+            sub_dag: &sub_dag,
             bound_summary: &bound,
             consumer_count: 2,
         };
@@ -881,13 +881,13 @@ mod tests {
 
     #[test]
     fn decide_accepts_mixed_one_shot_and_repeating_with_an_explicit_horizon() {
-        let subtree = scan();
+        let sub_dag = scan();
         let bound = summary_node(SummaryFamilyType::ExactAggregate(
             ExactKind::Sum,
             ExactParams::Sum,
         ));
         let candidate = CseCandidate {
-            subtree: &subtree,
+            sub_dag: &sub_dag,
             bound_summary: &bound,
             consumer_count: 2,
         };
@@ -942,13 +942,13 @@ mod tests {
     /// it's read.
     #[test]
     fn high_frequency_selects_maintained_low_frequency_selects_recompute() {
-        let subtree = scan();
+        let sub_dag = scan();
         let bound = summary_node(SummaryFamilyType::ExactAggregate(
             ExactKind::Sum,
             ExactParams::Sum,
         ));
         let candidate = CseCandidate {
-            subtree: &subtree,
+            sub_dag: &sub_dag,
             bound_summary: &bound,
             consumer_count: 1,
         };
@@ -998,13 +998,13 @@ mod tests {
     /// cost" acceptance criterion directly against the trait hooks.
     #[test]
     fn update_rate_only_affects_maintained_cost_evaluation_rate_affects_both() {
-        let subtree = scan();
+        let sub_dag = scan();
         let bound = summary_node(SummaryFamilyType::ExactAggregate(
             ExactKind::Sum,
             ExactParams::Sum,
         ));
         let candidate = CseCandidate {
-            subtree: &subtree,
+            sub_dag: &sub_dag,
             bound_summary: &bound,
             consumer_count: 1,
         };
@@ -1038,13 +1038,13 @@ mod tests {
     /// `raw_recompute_cost` is expensive.
     #[test]
     fn one_shot_only_consumer_decides_without_an_explicit_horizon() {
-        let subtree = scan();
+        let sub_dag = scan();
         let bound = summary_node(SummaryFamilyType::ExactAggregate(
             ExactKind::Sum,
             ExactParams::Sum,
         ));
         let candidate = CseCandidate {
-            subtree: &subtree,
+            sub_dag: &sub_dag,
             bound_summary: &bound,
             consumer_count: 1,
         };
@@ -1071,13 +1071,13 @@ mod tests {
     /// single one-shot consumer strictly prefers `RecomputeIndependently`.
     #[test]
     fn one_shot_only_single_consumer_does_not_unconditionally_prefer_share() {
-        let subtree = scan();
+        let sub_dag = scan();
         let bound = summary_node(SummaryFamilyType::ExactAggregate(
             ExactKind::Sum,
             ExactParams::Sum,
         ));
         let candidate = CseCandidate {
-            subtree: &subtree,
+            sub_dag: &sub_dag,
             bound_summary: &bound,
             consumer_count: 1,
         };
@@ -1098,13 +1098,13 @@ mod tests {
     /// own `DeterministicUnitCostModel`.
     #[test]
     fn batch_only_workload_does_not_unconditionally_prefer_share_under_default_cost_model() {
-        let subtree = scan();
+        let sub_dag = scan();
         let bound = summary_node(SummaryFamilyType::ExactAggregate(
             ExactKind::Sum,
             ExactParams::Sum,
         ));
         let candidate = CseCandidate {
-            subtree: &subtree,
+            sub_dag: &sub_dag,
             bound_summary: &bound,
             consumer_count: 1,
         };
@@ -1175,7 +1175,7 @@ mod tests {
     /// themselves structurally distinct (so they don't collapse into one
     /// root the way whole-root-identical fixtures do — see
     /// `shared_aggregate_across_two_roots_gets_both_strategies_candidates`'s
-    /// own doc) while letting `share_common_subtrees` unify their
+    /// own doc) while letting `share_common_sub_dags` unify their
     /// identical `sum_agg()` children onto one shared `Rc`.
     fn filtered_root(distinguishing_literal: i64) -> QueryExpr {
         QueryExpr::Filter {
@@ -1366,7 +1366,7 @@ mod tests {
         assert!(matches!(err, RecurrenceError::InvalidUpdateRate(_)));
     }
 
-    /// Issue #287 review bug 2: a site no root's own structural tree
+    /// Issue #287 review bug 2: a site no root's own structural DAG
     /// actually reaches must not have the caller-supplied `update_rate`
     /// stamped onto it. `AvgToSumOverCountStrategy` (part of
     /// `default_strategies`, so included by `search_workload`) is a real,
@@ -1417,7 +1417,7 @@ mod tests {
         assert_eq!(
             count_profile,
             RecurrenceProfile::EMPTY,
-            "a site unreachable from any root's own structural tree must fall back to \
+            "a site unreachable from any root's own structural DAG must fall back to \
              RecurrenceProfile::EMPTY (no update_rate, no evaluation_rate, no one-shot \
              consumers), not just an evaluation-rate-free profile that still carries the \
              caller's update_rate"
@@ -1489,13 +1489,13 @@ mod tests {
 
     #[test]
     fn decide_rejects_a_zero_or_negative_horizon() {
-        let subtree = scan();
+        let sub_dag = scan();
         let bound = summary_node(SummaryFamilyType::ExactAggregate(
             ExactKind::Sum,
             ExactParams::Sum,
         ));
         let candidate = CseCandidate {
-            subtree: &subtree,
+            sub_dag: &sub_dag,
             bound_summary: &bound,
             consumer_count: 2,
         };

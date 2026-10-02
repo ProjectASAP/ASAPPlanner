@@ -40,7 +40,7 @@ pub mod summary_maintenance;
 pub mod summary_maintenance_lifecycle;
 pub mod summary_window;
 
-pub use cse::share_common_summary_subtrees;
+pub use cse::share_common_summary_sub_dags;
 pub use execution_data_state::{
     assigned_child_data_state, exact_operation_output_schema, produced_data_state,
     validate_execution_data_states, validate_execution_data_states_at, DataPrimitive,

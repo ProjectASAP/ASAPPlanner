@@ -17,7 +17,7 @@
 //!
 //! Earlier (PR #247, superseded by this module — see "What this replaces"
 //! below), "is optimization X applicable here?" was a yes/no fact each rule
-//! re-derived by walking the tree itself. That made sense before there was
+//! re-derived by walking the DAG itself. That made sense before there was
 //! any other structure to consult. But [`crate::replacement::search_workload`]
 //! (issue #252) now *already* computes, for every
 //! [`TargetSubDAG`](crate::replacement::TargetSubDAG) in the workload, every
@@ -36,7 +36,7 @@
 //! candidate isn't an *opportunity*, it's just the target's existing shape
 //! reflected back. A `TargetSubDAG` with more than one candidate (several
 //! sketch families to choose between), or one candidate that is itself a
-//! genuine alternative to the status quo (share this already-shared subtree
+//! genuine alternative to the status quo (share this already-shared sub-DAG
 //! instead of recomputing it at every consumer), *is* an applicability
 //! finding — [`explain_replacements`] and
 //! [`explain_replacements_with`] just translate [`CandidateLogicalASAPDAGs`]'s
@@ -50,8 +50,8 @@
 //!   `realizations_for_intent` would have committed to on its own.
 //! - [`ExplanationKind::CommonSubexpressionReuse`] — the `TargetSubDAG`
 //!   has two or more consumers *and* its candidate list contains the
-//!   [`SharedSubtreeStrategy`] "build once and share" candidate (the one
-//!   whose `Rc` is the group's own `target`) — i.e. sharing this subtree
+//!   [`SharedSubDagStrategy`] "build once and share" candidate (the one
+//!   whose `Rc` is the group's own `target`) — i.e. sharing this sub-DAG
 //!   instead of recomputing it independently is a real, reported choice, not
 //!   just an accident of how the workload happened to be built.
 //!
@@ -76,7 +76,7 @@
 //! [`crate::replacement::search_workload`]/[`crate::replacement::search_workload_with`]'s
 //! own signature shape. Only the *data source* changed: this module now
 //! calls those two functions and translates the result, rather than running
-//! its own rules and their supporting traversal over the tree a second time.
+//! its own rules and their supporting traversal over the DAG a second time.
 //! All of that old traversal is deleted, not kept alongside the new
 //! implementation — see "Two guarantees the old traversal made, re-verified"
 //! below for the two properties it's important that deletion didn't quietly
@@ -178,7 +178,7 @@
 //! [`Replacement::Summary`]: crate::replacement::Replacement::Summary
 //! [`Replacement::Rewrite`]: crate::replacement::Replacement::Rewrite
 //! [`SketchAlgorithmStrategy`]: crate::replacement::SketchAlgorithmStrategy
-//! [`SharedSubtreeStrategy`]: crate::replacement::SharedSubtreeStrategy
+//! [`SharedSubDagStrategy`]: crate::replacement::SharedSubDagStrategy
 //! [`CandidateLogicalASAPDAGs`]: crate::replacement::CandidateLogicalASAPDAGs
 //! [`TargetSubDAGCandidates`]: crate::replacement::TargetSubDAGCandidates
 
@@ -213,7 +213,7 @@ pub enum ExplanationKind {
     /// have committed to on its own.
     SketchApproximation,
     /// A `TargetSubDAG` has two or more consumers *and* its candidate list
-    /// contains [`crate::replacement::SharedSubtreeStrategy`]'s "build once
+    /// contains [`crate::replacement::SharedSubDagStrategy`]'s "build once
     /// and share" candidate — the catalog's cross-statistic / cross-metrics /
     /// cross-subpopulation reuse entries, all the same underlying structural
     /// fact.
@@ -222,7 +222,7 @@ pub enum ExplanationKind {
     /// [`Replacement::ExactComposition`] —
     /// [`crate::exact_composition::ExactCompositionStrategy`] found an exact
     /// operator that can be composed with a summary plan across an explicit
-    /// update/readout boundary instead of collapsing the whole tree into
+    /// update/readout boundary instead of collapsing the whole DAG into
     /// `KeepPreAsap` (issue #171).
     ExactComposition,
 }
@@ -234,7 +234,7 @@ pub enum ExplanationKind {
 /// [`crate::replacement::ReplacementSubDAG::rationale`]).
 ///
 /// `node_hash` is [`structural_hash`](asap_types::pre_asap::cse::structural_hash)
-/// of the `TargetSubDAG`'s own `target` subtree — the same function, on the
+/// of the `TargetSubDAG`'s own `target` sub-DAG — the same function, on the
 /// same `Rc<QueryExpr>` shape, that [`asap_types::dag_export::DagNode::hash`]
 /// is computed with. A downstream consumer that independently exported the
 /// same `QueryExpr` (e.g. via `asap_types::dag_export::export`) can match
@@ -455,7 +455,7 @@ fn visit(
 
 /// `node`'s own **relational-skeleton** operator children — the same scope
 /// `crate::replacement`'s own target-discovery `walk_children` (and
-/// `asap_types::pre_asap::cse::share_common_subtrees`'s `rebuild_children`)
+/// `asap_types::pre_asap::cse::share_common_sub_dags`'s `rebuild_children`)
 /// use. Exhaustive over every `QueryExpr` variant: a new variant fails to
 /// compile here until this match is extended too.
 fn visit_children(
@@ -563,15 +563,15 @@ mod tests {
     }
 
     /// `node_hash` must be the literal `structural_hash` a downstream
-    /// consumer would compute over the *same* `QueryExpr` subtree via
+    /// consumer would compute over the *same* `QueryExpr` sub-DAG via
     /// `asap_types::dag_export::export` — the whole point of carrying it is
-    /// that two independent exports of the same tree agree, with no
+    /// that two independent exports of the same DAG agree, with no
     /// string-matching against `location` required.
     #[test]
-    fn node_hash_matches_dag_export_hash_for_the_same_subtree() {
+    fn node_hash_matches_dag_export_hash_for_the_same_sub_dag() {
         let q = agg(vec![2], default_quantile(0.99), metric_scan(&["job"]));
-        let graph = asap_types::dag_export::export(&q);
-        let expected_hash = graph.nodes[graph.root as usize].hash;
+        let dag = asap_types::dag_export::export(&q);
+        let expected_hash = dag.nodes[dag.root as usize].hash;
 
         let findings = explain_replacements(vec![("dashboard_p99", q)]);
         let sketch = findings
@@ -582,7 +582,7 @@ mod tests {
             Some(sketch.node_hash),
             expected_hash,
             "ReplacementExplanation::node_hash must match dag_export's DagNode::hash \
-             for the same QueryExpr subtree"
+             for the same QueryExpr sub-DAG"
         );
     }
 
@@ -637,7 +637,7 @@ mod tests {
 
     /// A sketch-applicable `Aggregate` reachable via two paths that CSE
     /// collapses onto one `Rc` — the same `median(x) == median(x)` shape
-    /// `pre_asap::cse`'s own `single_query_shares_its_own_repeated_subtree`
+    /// `pre_asap::cse`'s own `single_query_shares_its_own_repeated_sub_dag`
     /// test uses — must be reported once, not once per path: it is exactly
     /// one [`crate::replacement::TargetSubDAGCandidates`], keyed by `Rc` pointer identity,
     /// not one per path that reaches it.
@@ -670,7 +670,7 @@ mod tests {
     #[test]
     fn two_roots_with_the_same_grouped_aggregate_share_a_reuse_finding() {
         // Grouped (`by (job)`), so the shared `Aggregate`'s output schema
-        // carries a provable unique key — share_common_subtrees's legality
+        // carries a provable unique key — share_common_sub_dags's legality
         // gate — and identical across both roots, so it is shareable.
         let a = agg(vec![2], AggIntent::Sum { col: None }, metric_scan(&["job"]));
         let b = agg(vec![2], AggIntent::Sum { col: None }, metric_scan(&["job"]));
@@ -722,7 +722,7 @@ mod tests {
 
     #[test]
     fn ungrouped_identical_aggregates_are_not_shareable_so_no_finding() {
-        // Empty `by`: no provable unique key — share_common_subtrees never
+        // Empty `by`: no provable unique key — share_common_sub_dags never
         // hoists these, so consumer_count stays 1 for each and this module
         // must not report a finding either.
         let a = agg(vec![], AggIntent::Sum { col: None }, metric_scan(&["job"]));
@@ -762,13 +762,13 @@ mod tests {
 
     /// A shared node nested three levels under two *different*, unshared
     /// `Filter` parents (mirrors `crate::replacement::tests::
-    /// nested_shared_subtree_below_an_unshared_parent_is_still_discovered`)
+    /// nested_shared_sub_dag_below_an_unshared_parent_is_still_discovered`)
     /// must still be exactly one finding — the maximal-`TargetSubDAG`
     /// guarantee the module docs describe, now provided by
     /// `crate::replacement`'s own target discovery rather than this module's
     /// (deleted) traversal.
     #[test]
-    fn a_deeply_shared_subtree_under_different_parents_is_reported_once() {
+    fn a_deeply_shared_sub_dag_under_different_parents_is_reported_once() {
         use asap_types::pre_asap::expr_ir::ScalarValue;
         use asap_types::pre_asap::query_expr::Predicate;
 

@@ -72,7 +72,7 @@ See [the design](../../docs/design_docs/physical-planning-and-deployment.md).
 
 ## Module boundaries
 
-- `plan`: immutable graph, operator interface, schemas and execution properties.
+- `plan`: immutable DAG, operator interface, schemas and execution properties.
 - `runtime`: per-run streams, shared producers, memory reservations and cancellation.
 - `expressions`: scalar evaluation; typed builders and the Planner expression adapter.
 - `operators`: projection, filter, joins, aggregate/window, sort, limit and summary implementations.
@@ -111,7 +111,7 @@ schemas, input ordering, sharing and boundedness before deployment source access
 
 A deployment calls `CompiledPhysicalDag::instantiate` with exactly the declared
 inputs. This checks source schemas and execution properties and constructs the
-runnable graph without repeating logical lowering. The graph executes through
+runnable DAG without repeating logical lowering. The DAG executes through
 the shared runtime with independent per-run state. Window coverage, revision and
 maintenance-policy admission remain deployment/planning contracts; this compiler
 does not discover storage or silently change a selected maintenance strategy.

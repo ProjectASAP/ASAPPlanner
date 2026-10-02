@@ -226,7 +226,7 @@ pub fn compile(
             continue;
         }
         if node.output_state.timing != ExecutionTiming::IngestionTime {
-            return Err(invalid("precompute graph contains a query-time operation"));
+            return Err(invalid("precompute DAG contains a query-time operation"));
         }
         let inputs = dependencies.get(&id).cloned().unwrap_or_default();
         let schemas = inputs
@@ -238,13 +238,18 @@ pub fn compile(
                     .ok_or_else(|| invalid("missing precompute input"))
             })
             .collect::<Result<Vec<_>, _>>()?;
-        let graph = fragment(
+        let physical_dag = fragment(
             node,
             &schemas,
             &inputs.iter().map(|id| nodes[id]).collect::<Vec<_>>(),
         )?;
-        outputs.insert(id, graph.output_contract(graph.roots()[0])?.schema);
-        fragments.insert(id, (inputs, graph));
+        outputs.insert(
+            id,
+            physical_dag
+                .output_contract(physical_dag.roots()[0])?
+                .schema,
+        );
+        fragments.insert(id, (inputs, physical_dag));
     }
     CompiledPhysicalDag::compose(sources, fragments, roots.to_vec())
 }

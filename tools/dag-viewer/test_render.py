@@ -34,12 +34,12 @@ except ImportError:
     py_mini_racer = None
 
 
-def named_graph(name: str, source: str = "SELECT 1") -> dict:
-    """A minimal well-formed NamedGraph: one leaf Scan node, its own root."""
+def named_dag(name: str, source: str = "SELECT 1") -> dict:
+    """A minimal well-formed NamedDAG: one leaf Scan node, its own root."""
     return {
         "name": name,
         "source": source,
-        "graph": {
+        "dag": {
             "nodes": [
                 {
                     "id": 0,
@@ -58,7 +58,7 @@ def named_graph(name: str, source: str = "SELECT 1") -> dict:
 class LoadWorkloadTests(unittest.TestCase):
     def test_boundary_terms_and_provenance_survive_standalone_export(self):
         """The standalone viewer retains byte totals, physical terms, and provenance."""
-        graph = named_graph("boundary-example")
+        dag = named_dag("boundary-example")
         annotation = {
             "value": 1080.0,
             "unit": "CostUnits",
@@ -72,15 +72,15 @@ class LoadWorkloadTests(unittest.TestCase):
                 {"name": "boundary:persist:materialization_bytes", "value": 40, "unit": "bytes"},
             ],
         }
-        graph["graph"]["nodes"][0]["selected_cost"] = annotation
-        html = render({"queries": [graph]})
+        dag["dag"]["nodes"][0]["selected_cost"] = annotation
+        html = render({"queries": [dag]})
         for term in annotation["inputs"]:
             self.assertIn(term["name"], html)
         self.assertIn(annotation["model_version"], html)
         self.assertIn(annotation["evidence_version"], html)
 
     def test_loads_summary_maintenance_export_as_a_lifecycle_plan(self):
-        graph = named_graph("unused")["graph"]
+        dag = named_dag("unused")["dag"]
         summary = {
             "selected_raw_recompute": True,
             "summary_total_cost": None,
@@ -92,23 +92,23 @@ class LoadWorkloadTests(unittest.TestCase):
         }
         with tempfile.TemporaryDirectory() as d:
             path = Path(d) / "lifecycle.json"
-            path.write_text(json.dumps({"graph": graph, "deployments": [], **summary}))
+            path.write_text(json.dumps({"dag": dag, "deployments": [], **summary}))
             workload = load_workload([path])
 
         query = workload["queries"][0]
         self.assertEqual(query["name"], "lifecycle")
         self.assertTrue(query["lifecycle_plan"])
-        self.assertEqual(query["post_graph"], graph)
+        self.assertEqual(query["post_dag"], dag)
         self.assertEqual(
             query["lifecycle_summary"],
             {**summary, "deployment_count": 0},
         )
 
     def test_preserves_summary_plan_deployment_count(self):
-        graph = named_graph("unused")["graph"]
+        dag = named_dag("unused")["dag"]
         with tempfile.TemporaryDirectory() as d:
             path = Path(d) / "lifecycle.json"
-            path.write_text(json.dumps({"graph": graph, "deployments": [{}, {}]}))
+            path.write_text(json.dumps({"dag": dag, "deployments": [{}, {}]}))
             workload = load_workload([path])
 
         self.assertEqual(
@@ -120,8 +120,8 @@ class LoadWorkloadTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             f1 = Path(d) / "a.json"
             f2 = Path(d) / "b.json"
-            f1.write_text(json.dumps({"queries": [named_graph("q1")]}))
-            f2.write_text(json.dumps({"queries": [named_graph("q2")]}))
+            f1.write_text(json.dumps({"queries": [named_dag("q1")]}))
+            f2.write_text(json.dumps({"queries": [named_dag("q2")]}))
 
             workload = load_workload([f1, f2])
 
@@ -134,8 +134,8 @@ class LoadWorkloadTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             f1 = Path(d) / "a.json"
             f2 = Path(d) / "b.json"
-            f1.write_text(json.dumps({"queries": [named_graph("q1")]}))
-            f2.write_text(json.dumps({"queries": [named_graph("q1")]}))
+            f1.write_text(json.dumps({"queries": [named_dag("q1")]}))
+            f2.write_text(json.dumps({"queries": [named_dag("q1")]}))
 
             workload = load_workload([f1, f2])
 
@@ -145,7 +145,7 @@ class LoadWorkloadTests(unittest.TestCase):
     def test_non_colliding_names_pass_through_unchanged(self):
         with tempfile.TemporaryDirectory() as d:
             f1 = Path(d) / "a.json"
-            f1.write_text(json.dumps({"queries": [named_graph("q1"), named_graph("q2")]}))
+            f1.write_text(json.dumps({"queries": [named_dag("q1"), named_dag("q2")]}))
 
             workload = load_workload([f1])
 
@@ -158,12 +158,12 @@ class RenderTests(unittest.TestCase):
         # header comment (which documents index.html's <script src=...>
         # usage in prose) once that file is inlined verbatim -- so match the
         # real tag shape instead of a bare substring.
-        workload = {"queries": [named_graph("q1"), named_graph("q2")]}
+        workload = {"queries": [named_dag("q1"), named_dag("q2")]}
         html = render(workload)
         self.assertNotRegex(html, r'<script src="[^"]+"></script>')
 
     def test_embedded_workload_round_trips(self):
-        workload = {"queries": [named_graph("q1"), named_graph("q2")]}
+        workload = {"queries": [named_dag("q1"), named_dag("q2")]}
         html = render(workload)
 
         m = re.search(
@@ -177,7 +177,7 @@ class RenderTests(unittest.TestCase):
     def test_standalone_export_carries_the_bulk_selection_control(self):
         """A generated page gets Select-all for free: render.py inlines the
         markup and viewer.js verbatim, so neither fix needs its own step."""
-        html = render({"queries": [named_graph("q1"), named_graph("q2")]})
+        html = render({"queries": [named_dag("q1"), named_dag("q2")]})
         self.assertIn('id="selectAllToggle"', html)
         self.assertIn("function bulkSelectionState(", html)
         # And it must stay a selection control, not a second Clear all: the
@@ -190,14 +190,14 @@ class RenderTests(unittest.TestCase):
     def test_standalone_export_lanes_are_pannable(self):
         """Dragging the lane background pans the viewport in the generated
         page too -- `grabbable: false` alone made it a dead zone."""
-        html = render({"queries": [named_graph("q1")]})
+        html = render({"queries": [named_dag("q1")]})
         lanes = re.findall(r"classes: 'laneParent'[^}]*}", html)
         self.assertEqual(len(lanes), 2, "expected the union and single-query lanes")
         for lane in lanes:
             self.assertIn("pannable: true", lane)
 
     def test_render_does_not_mutate_callers_workload(self):
-        workload = {"queries": [named_graph("q1")]}
+        workload = {"queries": [named_dag("q1")]}
         original = json.loads(json.dumps(workload))
         render(workload)
         self.assertEqual(workload, original)
@@ -207,7 +207,7 @@ class RenderTests(unittest.TestCase):
         # (which documents the window.__DAG_RENDER__ config object in prose)
         # once that file is inlined verbatim -- match the actual assignment
         # statement instead.
-        workload = {"queries": [named_graph("q1"), named_graph("q2")]}
+        workload = {"queries": [named_dag("q1"), named_dag("q2")]}
         html = render(workload)
         self.assertNotRegex(html, r"window\.__DAG_RENDER__ =")
 
@@ -216,14 +216,14 @@ class RenderTests(unittest.TestCase):
         # synchronously as soon as it runs, so it must appear earlier in the
         # document than viewer.js's own inlined
         # <script> block.
-        workload = {"queries": [named_graph("q1"), named_graph("q2")]}
+        workload = {"queries": [named_dag("q1"), named_dag("q2")]}
         html = render(workload)
         embedded_pos = html.index('id="embedded-workload"')
         viewer_pos = html.index("cytoscape.use(window.cytoscapeDagre)")  # viewer.js's first line
         self.assertLess(embedded_pos, viewer_pos)
 
     def test_inlined_edge_cost_key_contains_no_literal_nul(self):
-        html = render({"queries": [named_graph("q1")]})
+        html = render({"queries": [named_dag("q1")]})
         self.assertNotIn("\x00", html)
         self.assertIn(r"\u0000", html)
 
@@ -231,7 +231,7 @@ class RenderTests(unittest.TestCase):
         # A pathological (but legal JSON) query source containing a literal
         # "</script>" substring must not prematurely close the embedded
         # <script type="application/json"> tag when the browser parses it.
-        workload = {"queries": [named_graph("q1", source="SELECT '</script><script>evil()</script>'")]}
+        workload = {"queries": [named_dag("q1", source="SELECT '</script><script>evil()</script>'")]}
         html = render(workload)
 
         m = re.search(
@@ -293,7 +293,7 @@ class SemanticLabelTests(unittest.TestCase):
         }
         self.assertEqual(_semantic_label(node), "Sort\nsort: col[2] descending, nulls first")
 
-    def test_prepares_before_after_and_whole_post_asap_graphs(self):
+    def test_prepares_before_after_and_whole_post_asap_dags(self):
         node = {
             "id": 0,
             "kind": "Aggregate",
@@ -301,22 +301,22 @@ class SemanticLabelTests(unittest.TestCase):
             "detail": {"measures": [{"kind": "avg", "col": 3}]},
             "children": [],
         }
-        def graph():
+        def dag():
             return {"nodes": [dict(node)], "root": 0}
         workload = {
             "queries": [
                 {
-                    "graph": graph(),
-                    "post_graph": graph(),
-                    "replacements": [{"before": graph(), "after": {"graph": graph()}}],
+                    "dag": dag(),
+                    "post_dag": dag(),
+                    "replacements": [{"before": dag(), "after": {"dag": dag()}}],
                 }
             ]
         }
         prepared = prepare_workload(workload)
         query = prepared["queries"][0]
         labels = [
-            query["graph"]["nodes"][0]["label"],
-            query["post_graph"]["nodes"][0]["label"],
+            query["dag"]["nodes"][0]["label"],
+            query["post_dag"]["nodes"][0]["label"],
         ]
         self.assertEqual(labels, ["Aggregate\nmeasure: avg(col[3])"] * 2)
         self.assertEqual(
@@ -324,13 +324,13 @@ class SemanticLabelTests(unittest.TestCase):
             "Aggregate(1 measures)",
         )
 
-    def test_replacement_subgraphs_are_not_prepared_for_the_current_viewer(self):
-        def graph():
+    def test_replacement_sub_dags_are_not_prepared_for_the_current_viewer(self):
+        def dag():
             return {"nodes": [{"id": 0, "kind": "Scan", "label": "legacy", "detail": {}, "children": []}], "root": 0}
-        workload = {"queries": [{"graph": graph(), "replacements": [{"before": graph(), "after": {"graph": graph()}}]}]}
+        workload = {"queries": [{"dag": dag(), "replacements": [{"before": dag(), "after": {"dag": dag()}}]}]}
         replacement = prepare_workload(workload)["queries"][0]["replacements"][0]
         self.assertEqual(replacement["before"]["nodes"][0]["label"], "legacy")
-        self.assertEqual(replacement["after"]["graph"]["nodes"][0]["label"], "legacy")
+        self.assertEqual(replacement["after"]["dag"]["nodes"][0]["label"], "legacy")
 
 
 class MainCliTests(unittest.TestCase):
@@ -381,7 +381,7 @@ class ViewerCacheTests(unittest.TestCase):
                 result["cache_profile"] = cache
             return result
 
-        return {"sourceBatch": batch, "post_graph": {"nodes": [{"decision": {
+        return {"sourceBatch": batch, "post_dag": {"nodes": [{"decision": {
             "id": 1,
             "baseline_cost": annotation(10, profile),
             "selected_cost": annotation(4, selected_profile or profile),
@@ -438,7 +438,7 @@ class ViewerCacheTests(unittest.TestCase):
 
     def test_cache_profile_and_inputs_are_rendered(self):
         """The sidebar exposes the assumptions behind a cache-adjusted cost."""
-        annotation = self.query("warm-cache-v1")["post_graph"]["nodes"][0]["decision"]["baseline_cost"]
+        annotation = self.query("warm-cache-v1")["post_dag"]["nodes"][0]["decision"]["baseline_cost"]
         annotation["inputs"] = [{"name": "result_cache_hit_ratio", "value": 0.5, "unit": "ratio"}]
         html = self.js.call("renderCostAnnotation", "Baseline", annotation)
         self.assertIn("cache warm-cache-v1", html)

@@ -1,7 +1,7 @@
 //! The canonical pre-ASAP intent algebra IR.
 //!
 //! - [`query_expr`] — the canonical, language- and deployment-independent
-//!   intent algebra: one recursive [`QueryExpr`] tree (relational operators
+//!   intent algebra: one recursive [`QueryExpr`] DAG (relational operators
 //!   *and* scalar expression shapes both, since issue #205) + [`AggIntent`],
 //!   generic over the column-reference state (positional [`ColumnId`] once
 //!   bound, name-based [`ColumnRef`] before).
@@ -12,16 +12,16 @@
 //! - [`schema`] — the per-edge [`Schema`] every node carries.
 //! - [`schema_resolver`] / [`column_resolution`] — name resolution: turn a `ColumnRef`
 //!   into a positional `ColumnId` against an in-scope [`Schema`].
-//! - [`resolve`] — binds a whole front-end-emitted [`UnresolvedQueryExpr`] tree to
+//! - [`resolve`] — binds a whole front-end-emitted [`UnresolvedQueryExpr`] DAG to
 //!   canonical [`ResolvedQueryExpr`] (issue #179): both front ends
 //!   (`asap-frontend-promql`, `asap-frontend-sql`) construct `UnresolvedQueryExpr`
 //!   directly during their own `interpret` step and call
 //!   [`resolve_root`] on the result — there is no separate per-language
-//!   relational tree or converter anymore.
+//!   relational DAG or converter anymore.
 //! - [`canonicalize`] — post-lowering structural normalization of [`QueryExpr`]
 //!   (issue #34), run by [`resolve_root`].
 //! - [`cse`] — workload-level structural common-subexpression elimination
-//!   over an already-`resolve_root`'d tree (issue #212, #222, #223), run
+//!   over an already-`resolve_root`'d DAG (issue #212, #222, #223), run
 //!   *after* `resolve_root` / `canonicalize` and *before* implementation
 //!   (`asap_aware_mapping::replacement`).
 //!
@@ -50,7 +50,7 @@ pub use column_resolution::{
     output_schema_for_aggregate, resolve_column_ref, resolve_column_refs, resolve_expr,
     ResolveError,
 };
-pub use cse::share_common_subtrees;
+pub use cse::share_common_sub_dags;
 pub use expr_ir::{ArithmeticOpKind, ColumnRef, CompareOpKind, ScalarValue};
 pub use query_expr::{
     aggregate_output_schema, any_measure_filtered, AtModifier, BinaryOpKind, ColState, DataModel,
@@ -59,6 +59,6 @@ pub use query_expr::{
     SortKey, Source, TimeShift, UnresolvedQueryExpr, VectorGrouping, VectorMatch, VectorMatchKind,
     WindowFrame, WindowFrameBound, WindowFrameOffset, WindowFrameUnits, WindowFuncKind,
 };
-pub use resolve::{resolve_root, ResolveTreeError};
+pub use resolve::{resolve_root, ResolveDAGError};
 pub use schema::{Column, ColumnId, DataType, Schema};
 pub use schema_resolver::{SchemaCatalog, SchemaResolver, UsageDerivedCatalog};

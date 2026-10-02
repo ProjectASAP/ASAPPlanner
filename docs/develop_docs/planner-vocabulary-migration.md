@@ -36,8 +36,8 @@ names.
 | `SketchAlgorithmStrategy::with_models_and_evidence` | `SketchAlgorithmStrategy::new_with_planning_inputs_and_evidence` |
 | `HydraGroupingStrategy::with_models_and_evidence` | `HydraGroupingStrategy::new_with_planning_inputs_and_evidence` |
 
-For example, `Binder::new().bind(&tree)` becomes
-`SchemaResolver::new().resolve_schema(&tree)`. Cost-model implementations that
+For example, `Binder::new().bind(&dag)` becomes
+`SchemaResolver::new().resolve_schema(&dag)`. Cost-model implementations that
 accept or return `Implementation` now use `Realization`; variants and ranking
 contracts remain the same.
 

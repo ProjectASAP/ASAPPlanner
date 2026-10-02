@@ -43,7 +43,7 @@
 //! whole-recursive-bind decision procedure toward a specific `SketchKind`,
 //! the same pattern [`crate::replacement::SketchAlgorithmStrategy`]'s own module
 //! docs explain was deliberately deleted from this crate as an anti-pattern:
-//! forcing a choice via a whole-tree `CostModel` adapter had a real bug where
+//! forcing a choice via a whole-DAG `CostModel` adapter had a real bug where
 //! the forced choice could leak into a target's own nested aggregates. This
 //! module never needs that: [`crate::replacement::realizations_for_intent`]
 //! already returns every ranked candidate `Realization` directly, so

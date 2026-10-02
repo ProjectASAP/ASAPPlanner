@@ -312,7 +312,7 @@ impl ReplacementStrategy for MaintainedPopulationStrategy {
 mod tests {
     use super::*;
     use crate::test_support::lower_promql;
-    use asap_types::post_asap::{compile_post_asap_dag, share_common_summary_subtrees};
+    use asap_types::post_asap::{compile_post_asap_dag, share_common_summary_sub_dags};
 
     fn lower(q: &str) -> Rc<QueryExpr> {
         Rc::new(lower_promql(q, asap_types::types::AccuracyTarget::Exact))
@@ -364,7 +364,7 @@ mod tests {
             .target_subdag_candidates()
             .flat_map(|g| &g.candidates)
             .any(|c| c.strategy == "MaintainedPopulationStrategy"));
-        let plans = share_common_summary_subtrees(
+        let plans = share_common_summary_sub_dags(
             roots
                 .iter()
                 .enumerate()

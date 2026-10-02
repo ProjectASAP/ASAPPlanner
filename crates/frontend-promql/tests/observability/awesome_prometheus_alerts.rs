@@ -5,7 +5,7 @@
 //! host/hardware, node-exporter, databases, message brokers, Kubernetes, and
 //! more (`tests/data/awesome_prometheus_alerts.txt`).
 //!
-//! We *lower* (parse → the canonical tree), we do not execute. Two guarantees:
+//! We *lower* (parse → the canonical DAG), we do not execute. Two guarantees:
 //!   1. **Totality** — every real-world query returns `Ok` or a clean
 //!      `LoweringError` and never panics.
 //!   2. **Parseability** — none of them fail at the *parse* stage; the private
@@ -49,7 +49,7 @@ fn ok(q: &str) -> QueryExpr {
         .unwrap_or_else(|e| panic!("expected {q:?} to lower, got error: {e}"))
 }
 
-/// Every `AggIntent` in the tree.
+/// Every `AggIntent` in the DAG.
 fn intents(e: &QueryExpr) -> Vec<AggIntent> {
     let mut out = Vec::new();
     fn go(e: &QueryExpr, out: &mut Vec<AggIntent>) {

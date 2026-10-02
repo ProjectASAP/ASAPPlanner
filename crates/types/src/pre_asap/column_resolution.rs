@@ -1,7 +1,7 @@
 //! Schema-driven column resolution.
 //!
 //! Front ends (issue #179) emit `ColumnRef` (name-based, optionally
-//! table-qualified); the canonical tree uses positional [`ColumnId`] resolved
+//! table-qualified); the canonical DAG uses positional [`ColumnId`] resolved
 //! against a per-node [`Schema`]. These helpers bridge the two — the
 //! [`SchemaResolver`](super::schema_resolver) builds the schema, and [`resolve_column_refs`]
 //! turns name-based refs (group keys, dedup columns) into positional ids,

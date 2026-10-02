@@ -31,7 +31,7 @@ Only semantics that affect correctness, summary applicability, or cost become fi
 
 ### PromQL-specific
 
-- PromqlScalarBridge — holds a scalar sub-expression at an operator-tree position.
+- PromqlScalarBridge — holds a scalar sub-expression at an operator-DAG position.
 - EvalTimestamp — provides the evaluation timestamp as a scalar.
 - PromqlVectorFromScalar — promotes a scalar to a label-less instant vector.
 - PromqlScalarFromVector — collapses a single-series vector to a scalar.

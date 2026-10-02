@@ -3,7 +3,7 @@
 //     --promql "topk(5, rate(http_requests_total[5m]))" --name q2
 //
 // Lowers each given SQL/PromQL query to pre-ASAP IR and prints a single
-// `asap_types::dag_export::WorkloadGraph` as JSON on stdout — the input format
+// `asap_types::dag_export::WorkloadDAG` as JSON on stdout — the input format
 // for `tools/dag-viewer` (issue #133). Redirect to a file and load it there:
 //   cargo run -p asap-lower --bin dag_export -- --sql "..." --name q1 > /tmp/dag.json
 //
@@ -31,23 +31,23 @@
 // candidate per group feeds two additive outputs:
 //
 //   - one `asap_types::dag_export::TargetReplacement` per group on whichever
-//     query's `NamedGraph.replacements` contains that target node (matched
+//     query's `NamedDAG.replacements` contains that target node (matched
 //     by `DagNode::hash` + structural equality, the same collision-safe
 //     pattern `annotate_with_explanations` below already uses for notes) —
 //     a small, self-contained "before -> after" pair per replacement site;
-//   - one merged `NamedGraph.post_graph`: a single flattened graph per
+//   - one merged `NamedDAG.post_dag`: a single flattened DAG per
 //     query with every winning candidate spliced directly into the query's
 //     own pre-ASAP shape in place, built via
 //     `asap_types::dag_export::export_post_asap`.
 //
 // Together these surface every one of the four concrete replacement kinds:
 // the sketch family `SketchAlgorithmStrategy`/`HydraGroupingStrategy` bound,
-// the CSE share/recompute choice `SharedSubtreeStrategy` found, the
+// the CSE share/recompute choice `SharedSubDagStrategy` found, the
 // workload-aware roll-up `RollupStrategy` derived, and the `avg ->
 // sum/count` rewrite `AvgToSumOverCountStrategy` proposes. Without
 // `--post-asap`, every existing invocation of this binary produces
-// byte-identical output to before (`NamedGraph.replacements` is empty and
-// `post_graph` is `None`, both skipped from the JSON entirely in that
+// byte-identical output to before (`NamedDAG.replacements` is empty and
+// `post_dag` is `None`, both skipped from the JSON entirely in that
 // case). E.g.:
 //   cargo run -p asap-lower --bin dag_export -- \
 //       --post-asap --default-cost --epsilon 0.01 \
@@ -94,8 +94,8 @@ use asap_aware_mapping::replacement::{
 use asap_aware_mapping::{AccuracyEvidenceProvider, PropagationStats};
 use asap_types::cost::{BaselineRef, CostAnnotation, CostInput, CostSource, CostUnit};
 use asap_types::dag_export::{
-    self, DagDecision, DagGraph, DagNote, NamedGraph, PostAsapSubstitution, TargetRejection,
-    TargetReplacement, TargetReplacementAfter, WorkloadGraph,
+    self, DagDecision, DagNote, ExportDAG, NamedDAG, PostAsapSubstitution, TargetRejection,
+    TargetReplacement, TargetReplacementAfter, WorkloadDAG,
 };
 use asap_types::post_asap::SummaryExpr;
 use asap_types::post_asap::SummaryNode;
@@ -249,7 +249,7 @@ impl CandidatePhysicalEvidence {
 
 /// Compare complete exported-plan identity while tolerating the one-ULP
 /// decimal round trip that `serde_json::Value` can introduce for derived
-/// floating-point guarantees. Integer configuration and graph identity stay
+/// floating-point guarantees. Integer configuration and DAG identity stay
 /// exact; no guarantee field is dropped or otherwise normalized away.
 fn plan_values_match(actual: &serde_json::Value, expected: &serde_json::Value) -> bool {
     plan_values_match_inner(actual, expected, false)
@@ -960,19 +960,19 @@ fn parse_args_from(argv: impl Iterator<Item = String>) -> ParsedArgs {
     }
 }
 
-/// Attach workload-wide replacement explanations to their exact graph nodes.
+/// Attach workload-wide replacement explanations to their exact DAG nodes.
 /// `node_hash` is only a narrowing filter; `source_expr == Some(target)` is
 /// the collision-safe identity check (`source_expr` is `None` only for a
-/// post-ASAP-originated node inside a `--post-asap` `post_graph`, which this
+/// post-ASAP-originated node inside a `--post-asap` `post_dag`, which this
 /// function is never called on — every node it sees, from an ordinary
 /// [`dag_export::export`], carries `Some`).
 fn annotate_with_explanations(
-    graph: &mut DagGraph,
+    dag: &mut ExportDAG,
     explanations: &[asap_aware_mapping::ReplacementExplanation],
     matched: &mut [bool],
 ) {
     for (i, explanation) in explanations.iter().enumerate() {
-        for node in graph.nodes.iter_mut() {
+        for node in dag.nodes.iter_mut() {
             if node.hash == Some(explanation.node_hash)
                 && node.source_expr.as_ref() == Some(explanation.target.as_ref())
             {
@@ -988,7 +988,7 @@ fn annotate_with_explanations(
 
 /// One `TargetSubDAGCandidates`'s best-ranked candidate, kept alongside its own `target`
 /// — the unit both [`PostAsapResults::replacements`] and
-/// [`PostAsapResults::post_graphs`] are built from, so the two outputs can
+/// [`PostAsapResults::post_dags`] are built from, so the two outputs can
 /// never disagree about which candidate won for a given target.
 #[allow(dead_code)]
 struct Winner<'a> {
@@ -1012,15 +1012,15 @@ fn decision_rationale(winner: &Winner<'_>) -> String {
             "Composes compatible nested aggregates using their declared algebraic intent while preserving the output schema."
                 .to_string()
         }
-        "SharedSubtreeStrategy" => match winner.candidate.provenance {
+        "SharedSubDAGStrategy" => match winner.candidate.provenance {
             asap_aware_mapping::replacement::ReplacementProvenance::CseShare => {
-                "Builds the repeated subtree once and shares it across consumers.".to_string()
+                "Builds the repeated sub-DAG once and shares it across consumers.".to_string()
             }
             asap_aware_mapping::replacement::ReplacementProvenance::CseRecompute => {
-                "Recomputes the subtree per consumer because that has the lower estimated cost."
+                "Recomputes the sub-DAG per consumer because that has the lower estimated cost."
                     .to_string()
             }
-            _ => "Chooses the lowest-cost handling of the repeated subtree.".to_string(),
+            _ => "Chooses the lowest-cost handling of the repeated sub-DAG.".to_string(),
         },
         "RollupStrategy" => {
             "Answers this aggregate from a compatible finer-grained aggregate.".to_string()
@@ -1067,15 +1067,15 @@ fn lookup_winner(
 }
 
 /// One `(decision.id, baseline_cost, selected_cost)` triple per *distinct*
-/// [`DagDecision`] carried anywhere in `graph` — collapsing every node that
+/// [`DagDecision`] carried anywhere in `dag` — collapsing every node that
 /// shares one `decision.id` (a replacement region can span many nodes, all
 /// carrying an identical clone of the same decision) down to a single
 /// entry, so a caller summing these never counts one decision's cost once
 /// per node it happens to touch.
-fn decision_cost_entries(graph: &DagGraph) -> Vec<(u32, CostAnnotation, CostAnnotation)> {
+fn decision_cost_entries(dag: &ExportDAG) -> Vec<(u32, CostAnnotation, CostAnnotation)> {
     let mut seen = std::collections::HashSet::new();
     let mut entries = Vec::new();
-    for node in &graph.nodes {
+    for node in &dag.nodes {
         let Some(decision) = &node.decision else {
             continue;
         };
@@ -1135,44 +1135,44 @@ fn target_replacement(
 /// usage doc for what each is for.
 struct PostAsapResults {
     /// One `(query_name, TargetReplacement)` pair per discovered replacement
-    /// site whose target node is found in that query's own exported graph. A
+    /// site whose target node is found in that query's own exported DAG. A
     /// target can in principle be reachable from more than one query's root
-    /// after CSE (a shared subtree), in which case it yields one pair per
+    /// after CSE (a shared sub-DAG), in which case it yields one pair per
     /// matching query, each with that query's own `target_pre_id`.
     replacements: Vec<(String, TargetReplacement)>,
-    /// One merged, whole-query [`DagGraph`] per query, built via
+    /// One merged, whole-query [`ExportDAG`] per query, built via
     /// [`dag_export::export_post_asap`] — every winning candidate spliced
     /// directly into that query's own pre-ASAP shape in place.
-    post_graphs: Vec<(String, DagGraph)>,
+    post_dags: Vec<(String, ExportDAG)>,
     /// One `(query_name, TargetRejection)` per accuracy-illegal candidate
     /// the search refused (`TargetSubDAGCandidates::rejected`, issue #172) whose target
-    /// node is found in that query's own exported graph.
+    /// node is found in that query's own exported DAG.
     rejections: Vec<(String, TargetRejection)>,
 }
 
 fn raw_only_post_asap_results() -> PostAsapResults {
     PostAsapResults {
         replacements: Vec::new(),
-        post_graphs: Vec::new(),
+        post_dags: Vec::new(),
         rejections: Vec::new(),
     }
 }
 
 /// Assign collision-free, explicit identities to structurally equal nodes
-/// across a set of exported query graphs. The full canonical subtree string
+/// across a set of exported query DAGs. The full canonical sub-DAG string
 /// is the equality key; the compact integer is what JSON consumers receive.
 /// Consequently the viewer never needs to guess identity from labels,
 /// hashes, or a client-side node signature.
-fn assign_workload_node_ids(graphs: &mut [&mut DagGraph]) {
-    fn key_for(id: u32, graph: &DagGraph, memo: &mut HashMap<u32, String>) -> String {
+fn assign_workload_node_ids(dags: &mut [&mut ExportDAG]) {
+    fn key_for(id: u32, dag: &ExportDAG, memo: &mut HashMap<u32, String>) -> String {
         if let Some(key) = memo.get(&id) {
             return key.clone();
         }
-        let node = &graph.nodes[id as usize];
+        let node = &dag.nodes[id as usize];
         let child_keys: Vec<_> = node
             .children
             .iter()
-            .map(|child| key_for(*child, graph, memo))
+            .map(|child| key_for(*child, dag, memo))
             .collect();
         let key = serde_json::to_string(&(node.kind, &node.detail, &node.schema, child_keys))
             .expect("exported DAG node content is serializable");
@@ -1182,14 +1182,14 @@ fn assign_workload_node_ids(graphs: &mut [&mut DagGraph]) {
 
     let mut ids = HashMap::<String, u32>::new();
     let mut next_id = 0_u32;
-    for graph in graphs.iter_mut() {
+    for dag in dags.iter_mut() {
         let mut memo = HashMap::new();
-        let keys: Vec<_> = graph
+        let keys: Vec<_> = dag
             .nodes
             .iter()
-            .map(|node| key_for(node.id, graph, &mut memo))
+            .map(|node| key_for(node.id, dag, &mut memo))
             .collect();
-        for (node, key) in graph.nodes.iter_mut().zip(keys) {
+        for (node, key) in dag.nodes.iter_mut().zip(keys) {
             let id = *ids.entry(key).or_insert_with(|| {
                 let id = next_id;
                 next_id += 1;
@@ -1206,7 +1206,7 @@ fn assign_workload_node_ids(graphs: &mut [&mut DagGraph]) {
 /// needed) over every lowered query, rank each discovered `TargetSubDAGCandidates` via
 /// `CandidateLogicalASAPDAGs::global_selection`, and build both `--post-asap` outputs from the
 /// exact same set of winning candidates (see [`Winner`]), so the flat
-/// `replacements` list and the merged `post_graph` can never disagree about
+/// `replacements` list and the merged `post_dag` can never disagree about
 /// which candidate won for a given target.
 #[allow(dead_code)]
 fn run_post_asap_with_progress(
@@ -1298,7 +1298,7 @@ fn run_post_asap_with_progress(
         );
     }
 
-    // ---- Merged, whole-query `post_graph`, one per query ---------------
+    // ---- Merged, whole-query `post_dag`, one per query ---------------
     //
     // Built *before* the flat `replacements` pass below, not after: a
     // winner whose target only exists inside another winner's own
@@ -1306,10 +1306,10 @@ fn run_post_asap_with_progress(
     // `AvgToSumOverCountStrategy`'s rewrite exposes, which
     // `default_strategies()` — #282 — now discovers and independently
     // sketch-ranks in the same search pass) can never appear in any query's
-    // *original*, pre-rewrite `graph` — there's nothing wrong with that
-    // winner, it's just nested. `post_graph` is where it's expected to
+    // *original*, pre-rewrite `dag` — there's nothing wrong with that
+    // winner, it's just nested. `post_dag` is where it's expected to
     // surface instead (`export_post_asap`'s recursive `find_winner`
-    // threading walks straight through a rewritten subtree and re-checks
+    // threading walks straight through a rewritten sub-DAG and re-checks
     // every node inside it too), so the flat-`replacements` pass below
     // checks there before deciding a miss is a real anomaly worth a
     // warning.
@@ -1317,9 +1317,9 @@ fn run_post_asap_with_progress(
         eprintln!("[4/4] Post-ASAP DAG generation is running…");
     }
     let post_started = Instant::now();
-    let mut post_graph_cache = HashCache::new();
+    let mut post_dag_cache = HashCache::new();
     let mut find_winner = |expr: &QueryExpr| -> Option<PostAsapSubstitution> {
-        let i = lookup_winner(&by_hash, &winners, &mut post_graph_cache, expr)?;
+        let i = lookup_winner(&by_hash, &winners, &mut post_dag_cache, expr)?;
         let winner = &winners[i];
         let (baseline_cost, selected_cost, benefit) = winner.costs.clone();
         // Derived from `selected_cost`; see `target_replacement`'s identical
@@ -1350,7 +1350,7 @@ fn run_post_asap_with_progress(
             }
         })
     };
-    let post_graphs: Vec<(String, DagGraph)> = lowered_queries
+    let post_dags: Vec<(String, ExportDAG)> = lowered_queries
         .iter()
         .map(|(name, _, qe)| {
             (
@@ -1362,21 +1362,21 @@ fn run_post_asap_with_progress(
 
     // ---- Flat per-target `replacements`, one list per query -----------
     //
-    // Independently re-export every query's own graph for matching — a
+    // Independently re-export every query's own DAG for matching — a
     // fresh `export` per query, not reused from `main`'s own already-built
-    // `NamedGraph`s, so this function stays self-contained and callable on
+    // `NamedDAG`s, so this function stays self-contained and callable on
     // its own (see this file's `#[cfg(test)]` module). Deliberately anchored
-    // to the *original* `graph` only (never `post_graph`) — `target_pre_id`
-    // is documented as an id into `NamedGraph.graph.nodes`, so a nested
+    // to the *original* `dag` only (never `post_dag`) — `target_pre_id`
+    // is documented as an id into `NamedDAG.DAG.nodes`, so a nested
     // secondary target (see above) never gets a flat entry of its own here:
     // it's already visible, in place, inside its parent's own `after`
-    // subtree and inside `post_graph` as a whole.
+    // sub-DAG and inside `post_dag` as a whole.
     let mut lookup_cache = HashCache::new();
     let mut replacements = Vec::new();
     let mut rejections = Vec::new();
     let mut matched = vec![false; winners.len()];
     // Groups with accuracy-refused candidates (issue #172): matched to a
-    // query's graph nodes the same hash-then-structural-equality way.
+    // query's DAG nodes the same hash-then-structural-equality way.
     let rejected_groups: Vec<_> = space
         .target_subdag_candidates()
         .filter(|group| !group.rejected.is_empty())
@@ -1387,8 +1387,8 @@ fn run_post_asap_with_progress(
         rejected_by_hash.entry(hash).or_default().push(i);
     }
     for (name, _, qe) in lowered_queries {
-        let graph = dag_export::export(qe);
-        for node in &graph.nodes {
+        let dag = dag_export::export(qe);
+        for node in &dag.nodes {
             let Some(source_expr) = node.source_expr.as_ref() else {
                 continue; // never true for a plain `export` — defensive only.
             };
@@ -1425,12 +1425,12 @@ fn run_post_asap_with_progress(
     // similarly `RollupStrategy`'s) can expose a brand-new `sum`/`count`
     // descendant that the *same* search pass then independently discovers
     // and ranks — a real winner, but one with no node anywhere in any
-    // query's original, pre-rewrite `graph` to attach a flat entry to
-    // (`target_pre_id` is documented as an id into `graph.nodes`
+    // query's original, pre-rewrite `dag` to attach a flat entry to
+    // (`target_pre_id` is documented as an id into `DAG.nodes`
     // specifically). This isn't a data loss: `export_post_asap` still
-    // splices that winner in, in place, inside `post_graph` — see this
-    // function's own construction of `post_graphs` above, which walks
-    // straight through a rewritten subtree and resolves every nested
+    // splices that winner in, in place, inside `post_dag` — see this
+    // function's own construction of `post_dags` above, which walks
+    // straight through a rewritten sub-DAG and resolves every nested
     // winner too, recursively. So an unmatched winner here is expected,
     // not necessarily a bug, whenever it's downstream of some other
     // winner's own `Replacement::Rewrite` — logged as an FYI rather than a
@@ -1438,15 +1438,15 @@ fn run_post_asap_with_progress(
     // reimplementing `search`'s own private descendant-discovery walk
     // (`discover_new_descendant_targets` in `asap_aware_mapping::replacement`,
     // not exposed) a second time here just to double-check something
-    // `post_graph`'s own construction already handled correctly.
+    // `post_dag`'s own construction already handled correctly.
     for (winner, matched) in winners.iter().zip(&matched) {
         if !matched {
             let strategy = winner.candidate.strategy;
             eprintln!(
                 "dag_export: post-asap replacement ({strategy}) has no node in any query's \
-                 original graph — expected for a winner exposed only inside another winner's \
+                 original DAG — expected for a winner exposed only inside another winner's \
                  own rewrite output (e.g. a sum/count descendant of an avg rewrite); still \
-                 present in that query's post_graph"
+                 present in that query's post_dag"
             );
         }
     }
@@ -1459,7 +1459,7 @@ fn run_post_asap_with_progress(
 
     PostAsapResults {
         replacements,
-        post_graphs,
+        post_dags,
         rejections,
     }
 }
@@ -1536,14 +1536,14 @@ async fn main() {
     let mut matched = vec![false; explanations.len()];
     let mut queries = Vec::new();
     for (name, source, qe) in &lowered_queries {
-        let mut graph = dag_export::export(qe);
-        annotate_with_explanations(&mut graph, &explanations, &mut matched);
-        queries.push(NamedGraph {
+        let mut dag = dag_export::export(qe);
+        annotate_with_explanations(&mut dag, &explanations, &mut matched);
+        queries.push(NamedDAG {
             name: name.clone(),
             source: Some(source.clone()),
-            graph,
+            dag,
             replacements: Vec::new(),
-            post_graph: None,
+            post_dag: None,
             workload_cost: None,
             rejections: Vec::new(),
         });
@@ -1606,9 +1606,9 @@ async fn main() {
                 named.replacements.push(replacement);
             }
         }
-        for (query_name, post_graph) in results.post_graphs {
+        for (query_name, post_dag) in results.post_dags {
             if let Some(named) = queries.iter_mut().find(|q| q.name == query_name) {
-                named.post_graph = Some(post_graph);
+                named.post_dag = Some(post_dag);
             }
         }
         for (query_name, rejection) in results.rejections {
@@ -1619,15 +1619,15 @@ async fn main() {
     }
 
     {
-        let mut pre_graphs: Vec<_> = queries.iter_mut().map(|query| &mut query.graph).collect();
-        assign_workload_node_ids(&mut pre_graphs);
+        let mut pre_dags: Vec<_> = queries.iter_mut().map(|query| &mut query.dag).collect();
+        assign_workload_node_ids(&mut pre_dags);
     }
     {
-        let mut post_graphs: Vec<_> = queries
+        let mut post_dags: Vec<_> = queries
             .iter_mut()
-            .filter_map(|query| query.post_graph.as_mut())
+            .filter_map(|query| query.post_dag.as_mut())
             .collect();
-        assign_workload_node_ids(&mut post_graphs);
+        assign_workload_node_ids(&mut post_dags);
     }
 
     // Whole selected-workload cost/benefit (issue #286) — per query, and
@@ -1641,10 +1641,10 @@ async fn main() {
     // needed.
     let mut workload_entries = Vec::new();
     for query in &mut queries {
-        let Some(post_graph) = &query.post_graph else {
+        let Some(post_dag) = &query.post_dag else {
             continue;
         };
-        let entries = decision_cost_entries(post_graph);
+        let entries = decision_cost_entries(post_dag);
         if entries.is_empty() {
             continue;
         }
@@ -1679,7 +1679,7 @@ async fn main() {
         }
     };
 
-    let workload = WorkloadGraph {
+    let workload = WorkloadDAG {
         queries,
         workload_cost,
     };
@@ -2698,7 +2698,7 @@ mod tests {
     fn missing_physical_evidence_keeps_the_export_raw_only() {
         let results = raw_only_post_asap_results();
         assert!(results.replacements.is_empty());
-        assert!(results.post_graphs.is_empty());
+        assert!(results.post_dags.is_empty());
     }
 
     fn argv(args: &[&str]) -> impl Iterator<Item = String> {
@@ -2850,12 +2850,12 @@ mod tests {
             .any(|e| { e.kind == asap_aware_mapping::ExplanationKind::CommonSubexpressionReuse }));
 
         let mut matched = vec![false; explanations.len()];
-        let mut graph_a = dag_export::export(&a);
-        let mut graph_b = dag_export::export(&b);
-        annotate_with_explanations(&mut graph_a, &explanations, &mut matched);
-        annotate_with_explanations(&mut graph_b, &explanations, &mut matched);
-        assert!(graph_a.nodes.iter().any(|n| !n.notes.is_empty()));
-        assert!(graph_b.nodes.iter().any(|n| !n.notes.is_empty()));
+        let mut dag_a = dag_export::export(&a);
+        let mut dag_b = dag_export::export(&b);
+        annotate_with_explanations(&mut dag_a, &explanations, &mut matched);
+        annotate_with_explanations(&mut dag_b, &explanations, &mut matched);
+        assert!(dag_a.nodes.iter().any(|n| !n.notes.is_empty()));
+        assert!(dag_b.nodes.iter().any(|n| !n.notes.is_empty()));
     }
 
     #[test]
@@ -2873,13 +2873,13 @@ mod tests {
 
         let unrelated =
             lower_promql("sum(rate(other_metric[5m]))", AccuracyTarget::Epsilon(0.01)).unwrap();
-        let mut graph = dag_export::export(&unrelated);
-        for node in &mut graph.nodes {
+        let mut dag = dag_export::export(&unrelated);
+        for node in &mut dag.nodes {
             node.hash = Some(explanation.node_hash);
         }
         let mut matched = vec![false; explanations.len()];
-        annotate_with_explanations(&mut graph, &explanations, &mut matched);
-        assert!(graph.nodes.iter().all(|n| n.notes.is_empty()));
+        annotate_with_explanations(&mut dag, &explanations, &mut matched);
+        assert!(dag.nodes.iter().all(|n| n.notes.is_empty()));
     }
 
     /// The `--post-asap` code path, exercised directly (not through the CLI):
@@ -2888,7 +2888,7 @@ mod tests {
     /// `after: TargetReplacementAfter::Summary(..)` (the bound sketch) and
     /// at least one with `after: TargetReplacementAfter::Rewrite(..)` (the
     /// `avg -> sum/count` rewrite) — see [`run_post_asap`]. Also checks that
-    /// a non-empty `post_graph` comes back for every query, since that's the
+    /// a non-empty `post_dag` comes back for every query, since that's the
     /// other `--post-asap` output `main` wires up.
     #[tokio::test]
     async fn post_asap_run_produces_both_summary_and_rewrite_replacements() {
@@ -2957,18 +2957,18 @@ mod tests {
             "AvgToSumOverCountStrategy" | "SemanticEquivalentRewriteStrategy"
         )));
 
-        assert_eq!(results.post_graphs.len(), 2, "one post_graph per query");
-        for (name, graph) in &results.post_graphs {
+        assert_eq!(results.post_dags.len(), 2, "one post_dag per query");
+        for (name, dag) in &results.post_dags {
             assert!(
-                !graph.nodes.is_empty(),
-                "post_graph for {name:?} must not be empty"
+                !dag.nodes.is_empty(),
+                "post_dag for {name:?} must not be empty"
             );
         }
         let avg_post = &results
-            .post_graphs
+            .post_dags
             .iter()
             .find(|(name, _)| name == "avg")
-            .expect("avg post graph")
+            .expect("avg post DAG")
             .1;
         assert_eq!(
             avg_post
@@ -2980,13 +2980,13 @@ mod tests {
             "AVG's SUM and COUNT branches must retain their shared input as one DAG node"
         );
         let decisions: Vec<_> = results
-            .post_graphs
+            .post_dags
             .iter()
-            .flat_map(|(_, graph)| graph.nodes.iter().filter_map(|node| node.decision.as_ref()))
+            .flat_map(|(_, dag)| dag.nodes.iter().filter_map(|node| node.decision.as_ref()))
             .collect();
         assert!(
             !decisions.is_empty(),
-            "post_graph nodes must carry explicit strategy metadata"
+            "post_dag nodes must carry explicit strategy metadata"
         );
         for decision in decisions {
             assert!(!decision.strategy.is_empty());
@@ -3021,21 +3021,17 @@ mod tests {
             ),
         ];
         let mut results = run_post_asap(&lowered);
-        let mut graph_refs: Vec<_> = results
-            .post_graphs
-            .iter_mut()
-            .map(|(_, graph)| graph)
-            .collect();
-        assign_workload_node_ids(&mut graph_refs);
+        let mut dag_refs: Vec<_> = results.post_dags.iter_mut().map(|(_, dag)| dag).collect();
+        assign_workload_node_ids(&mut dag_refs);
 
         let q3 = &results
-            .post_graphs
+            .post_dags
             .iter()
             .find(|(name, _)| name == "q3")
             .unwrap()
             .1;
         let q4 = &results
-            .post_graphs
+            .post_dags
             .iter()
             .find(|(name, _)| name == "q4")
             .unwrap()
@@ -3068,26 +3064,26 @@ mod tests {
         )
         .await
         .unwrap();
-        let mut q1_graph = dag_export::export(&q1);
-        let mut q6_graph = dag_export::export(&q6);
-        assign_workload_node_ids(&mut [&mut q1_graph, &mut q6_graph]);
-        let q1_scan = q1_graph
+        let mut q1_dag = dag_export::export(&q1);
+        let mut q6_dag = dag_export::export(&q6);
+        assign_workload_node_ids(&mut [&mut q1_dag, &mut q6_dag]);
+        let q1_scan = q1_dag
             .nodes
             .iter()
             .find(|node| node.label == "Scan(metrics)")
             .unwrap();
-        let q6_scan = q6_graph
+        let q6_scan = q6_dag
             .nodes
             .iter()
             .find(|node| node.label == "Scan(metrics)")
             .unwrap();
         assert_eq!(q1_scan.workload_node_id, q6_scan.workload_node_id);
-        assert!(q6_graph.nodes.iter().any(|node| node.kind == "Join"));
+        assert!(q6_dag.nodes.iter().any(|node| node.kind == "Join"));
     }
 
     /// The `--default-cost` contract, end to end on the code path `main`
     /// takes for it (`DefaultCostModel` ranking, `export_model: None`): the
-    /// structure must be real — replacements found, a merged `post_graph`
+    /// structure must be real — replacements found, a merged `post_dag`
     /// per query — while every cost stays `Unavailable` with no value, so
     /// the viewer shows "Not estimated" and the structural ranking number
     /// never escapes as if it were a measured cost.
@@ -3114,9 +3110,9 @@ mod tests {
             "the search itself must still run under --default-cost"
         );
         assert!(results
-            .post_graphs
+            .post_dags
             .iter()
-            .all(|(_, graph)| !graph.nodes.is_empty()));
+            .all(|(_, dag)| !dag.nodes.is_empty()));
 
         for (_, replacement) in &results.replacements {
             for annotation in [
@@ -3139,8 +3135,8 @@ mod tests {
 
         // Absent a value, the per-query aggregation `main` runs degrades to
         // an unavailable summary rather than a number or an error.
-        for (_, graph) in &results.post_graphs {
-            for (_, baseline, selected) in decision_cost_entries(graph) {
+        for (_, dag) in &results.post_dags {
+            for (_, baseline, selected) in decision_cost_entries(dag) {
                 assert_eq!(baseline.source, CostSource::Unavailable);
                 assert_eq!(selected.source, CostSource::Unavailable);
             }
@@ -3195,7 +3191,7 @@ mod tests {
                 .map(|(name, r)| (name.clone(), r.strategy.clone()))
                 .collect::<Vec<_>>()
         );
-        assert_eq!(results.post_graphs.len(), 1);
-        assert!(!results.post_graphs[0].1.nodes.is_empty());
+        assert_eq!(results.post_dags.len(), 1);
+        assert!(!results.post_dags[0].1.nodes.is_empty());
     }
 }

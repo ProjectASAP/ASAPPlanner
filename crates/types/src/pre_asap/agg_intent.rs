@@ -380,7 +380,7 @@ pub enum MathFunc {
 // `requires` / `is_per_series` / `output_column` never read `col`'s value —
 // only its presence via a `{ .. }` pattern — so, unlike
 // `QueryExpr::output_schema` (which genuinely cannot compile for an
-// unresolved tree — see its own doc), nothing stops these from being generic
+// unresolved DAG — see its own doc), nothing stops these from being generic
 // over every `C`. And a front end constructing `AggIntent<ColumnRef>`
 // directly (issue #179) does need `is_per_series` pre-binding — it decides
 // the `PerEntity`/`Reduce` reduction shape right at construction time (see
@@ -930,7 +930,7 @@ mod tests {
         }
     }
 
-    /// `col` is `#[serde(default)]`, so a tree serialized before issue #115 —
+    /// `col` is `#[serde(default)]`, so a DAG serialized before issue #115 —
     /// with no `col` key — still deserializes, as the sample-value convention `None`.
     #[test]
     fn agg_intent_serde_reads_pre_115_payloads() {

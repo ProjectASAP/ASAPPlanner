@@ -17,18 +17,18 @@ pub fn evaluate_batch(
     operators: Vec<Operator>,
     context: RunContext,
 ) -> Result<Vec<SharedValue<Batch>>, Error> {
-    let mut graph = PhysicalDag::default();
-    graph.add(
+    let mut dag = PhysicalDag::default();
+    dag.add(
         0,
         vec![],
         Operator::source(input.schema().clone(), vec![input])?,
     )?;
     let mut root = 0;
     for operator in operators {
-        graph.add(root + 1, vec![root], operator)?;
+        dag.add(root + 1, vec![root], operator)?;
         root += 1;
     }
-    evaluate_graph(graph, root, context)
+    evaluate_dag(dag, root, context)
 }
 
 /// Bind the ordered in-memory inputs of a native multi-input operator.
@@ -37,17 +37,17 @@ pub fn evaluate_inputs(
     operator: Operator,
     context: RunContext,
 ) -> Result<Vec<SharedValue<Batch>>, Error> {
-    let mut graph = PhysicalDag::default();
+    let mut dag = PhysicalDag::default();
     let root = inputs.len() as u64;
     for (id, input) in inputs.into_iter().enumerate() {
-        graph.add(
+        dag.add(
             id as u64,
             vec![],
             Operator::source(input.schema().clone(), vec![input])?,
         )?;
     }
-    graph.add(root, (0..root).collect(), operator)?;
-    evaluate_graph(graph, root, context)
+    dag.add(root, (0..root).collect(), operator)?;
+    evaluate_dag(dag, root, context)
 }
 
 /// Evaluate a native in-memory source, including scalar sources, in the caller's scope.
@@ -55,17 +55,17 @@ pub fn evaluate_source(
     source: Operator,
     context: RunContext,
 ) -> Result<Vec<SharedValue<Batch>>, Error> {
-    let mut graph = PhysicalDag::default();
-    graph.add(0, vec![], source)?;
-    evaluate_graph(graph, 0, context)
+    let mut dag = PhysicalDag::default();
+    dag.add(0, vec![], source)?;
+    evaluate_dag(dag, 0, context)
 }
 
-fn evaluate_graph(
-    graph: PhysicalDag<'_, Batch, crate::values::Schema>,
+fn evaluate_dag(
+    dag: PhysicalDag<'_, Batch, crate::values::Schema>,
     root: crate::plan::NodeId,
     context: RunContext,
 ) -> Result<Vec<SharedValue<Batch>>, Error> {
-    let mut output = graph.execute(&[root], context)?.remove(0);
+    let mut output = dag.execute(&[root], context)?.remove(0);
     let mut batches = Vec::new();
     loop {
         match output.next().now_or_never() {

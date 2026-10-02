@@ -2,7 +2,7 @@
 
 The goal of the post-ASAP IR is to represent operations using ASAP primitives
 such as sketches, exact summaries, samples and wavelets. Post-ASAP IR also
-retains exact Pre-ASAP subtrees and supports operations over summary readouts,
+retains exact Pre-ASAP sub-DAGs and supports operations over summary readouts,
 since only some query operations can be satisfied using summaries.
 
 The lists below cover every current variant of
@@ -36,7 +36,7 @@ summary family supports incremental maintenance.
 
 ## Exact work and composition nodes
 
-- `KeepPreAsap`: retain an exact Pre-ASAP subtree when it is not rewritten.
+- `KeepPreAsap`: retain an exact Pre-ASAP sub-DAG when it is not rewritten.
 - `BinaryOp`: combine independently planned operands with the specified binary
   semantics and execution timing.
 - `ValueOperation`: apply aggregate, exact-function, population, projection,
@@ -55,12 +55,12 @@ approximate readouts still require composed accuracy guarantees. See the
 and [physical-plan integration](../architecture/physical-plan-integration.md)
 for the corresponding correctness and realization requirements.
 
-## Tree and exported DAG forms
+## In-memory and exported DAG forms
 
 The Pre-ASAP DAG and the Post-ASAP DAG are both logical: they describe what is
 computed, not which physical operators execute it. The Post-ASAP DAG has two
-forms of the same content. Planning builds and shares `SummaryNode` trees.
-`compile_post_asap_dag` converts a selected tree into a
+forms of the same content. Planning builds and shares `SummaryNode` DAGs.
+`compile_post_asap_dag` converts a selected DAG into a
 [`PostAsapDag`](../../../crates/types/src/post_asap/post_asap_dag.rs) with
 stable node IDs and typed edges; `PostAsapDagDocument` is its versioned wire
 envelope. Physical compilation consumes `PostAsapDag` and produces a separate

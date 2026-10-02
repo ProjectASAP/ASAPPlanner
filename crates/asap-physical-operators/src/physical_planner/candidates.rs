@@ -1,4 +1,4 @@
-//! Compile maintenance-selected frontiers without deployment-specific graph rewrites.
+//! Compile maintenance-selected frontiers without deployment-specific DAG rewrites.
 use super::*;
 
 /// One computation realization; lifecycle/window/revision requirements accompany

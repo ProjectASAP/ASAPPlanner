@@ -30,8 +30,8 @@ associated with the logical DAG, not a separate computation IR.
 
 The Logical Post-ASAP DAG is preceded by the Pre-ASAP DAG (`QueryExpr`), the
 language-independent query semantics before summary selection. Both are
-logical. Planning builds Post-ASAP `SummaryNode` trees; `compile_post_asap_dag`
-exports the selected tree as a `PostAsapDag`, which is the Physical Plan
+logical. Planning builds Post-ASAP `SummaryNode` DAGs; `compile_post_asap_dag`
+exports the selected DAG as a `PostAsapDag`, which is the Physical Plan
 Compiler's input. Its per-node execution phase (ingestion or query time) is
 decided by the selected summary maintenance lifecycle, as the layer contract
 below states.

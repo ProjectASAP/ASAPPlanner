@@ -1,4 +1,4 @@
-//! A retained PromQL subtree (`Fallback`) compiles from its typed expression.
+//! A retained PromQL sub-DAG (`Fallback`) compiles from its typed expression.
 //! The deployment supplies only its selector's raw series; expected values are
 //! hand-computed with Prometheus semantics.
 use asap_physical_operators::{
@@ -168,7 +168,7 @@ fn evaluate_dag_with_range(
             Box::new(Operator::source(schema, vec![batch]).unwrap()) as _,
         );
     }
-    let graph = program.instantiate(sources).map_err(|e| e.to_string())?;
+    let physical_dag = program.instantiate(sources).map_err(|e| e.to_string())?;
     let context = RunContext::new(
         Scope::Query {
             evaluation_time_ms: at * 1000,
@@ -184,7 +184,7 @@ fn evaluate_dag_with_range(
         None => context,
     };
     block_on(async {
-        let mut stream = graph
+        let mut stream = physical_dag
             .execute(program.roots(), context)
             .map_err(|e| e.to_string())?
             .remove(0);

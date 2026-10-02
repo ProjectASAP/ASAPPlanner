@@ -1,7 +1,7 @@
 //! The **SchemaResolver** — name resolution as an explicit pass.
 //!
 //! [`SchemaResolver::resolve_schema`] produces the complete, self-contained [`Schema`] every
-//! `ColumnId` in the canonical tree indexes into. [`resolve`](super::resolve)
+//! `ColumnId` in the canonical DAG indexes into. [`resolve`](super::resolve)
 //! then becomes purely structural: it threads the SchemaResolver's schema and
 //! positional resolution downstream is **total**.
 //!
@@ -66,27 +66,27 @@ impl<C: SchemaCatalog> SchemaResolver<C> {
         Self { catalog }
     }
 
-    /// Resolve the complete [`Schema`] in scope for a query rooted at `tree`.
+    /// Resolve the complete [`Schema`] in scope for a query rooted at `dag`.
     ///
     /// Contains the time axis, the synthetic `value` column, and one column
-    /// per distinct name referenced anywhere in the tree — so positional
+    /// per distinct name referenced anywhere in the DAG — so positional
     /// `ColumnId` resolution downstream is total.
-    pub fn resolve_schema(&self, tree: &UnresolvedQueryExpr) -> Schema {
-        self.resolve_schema_with_inherited(tree, &[])
+    pub fn resolve_schema(&self, dag: &UnresolvedQueryExpr) -> Schema {
+        self.resolve_schema_with_inherited(dag, &[])
     }
 
     /// Like [`resolve_schema`](Self::resolve_schema), but also seeds `inherited` label names that are
-    /// referenced by an **enclosing** scope rather than by `tree` itself. This is
+    /// referenced by an **enclosing** scope rather than by `dag` itself. This is
     /// how an independently-bound `BinaryOp` side (each side re-binds against its
-    /// own sub-tree) still sees an outer aggregate's group keys — e.g. the
+    /// own sub-DAG) still sees an outer aggregate's group keys — e.g. the
     /// `__name__` / `job` in `sum by (__name__)(a or b)`, which appear in neither
     /// side's own matchers (issue #52).
     pub fn resolve_schema_with_inherited(
         &self,
-        tree: &UnresolvedQueryExpr,
+        dag: &UnresolvedQueryExpr,
         inherited: &[String],
     ) -> Schema {
-        let mut columns: Vec<Column> = leftmost_scan_name(tree)
+        let mut columns: Vec<Column> = leftmost_scan_name(dag)
             .and_then(|name| self.catalog.columns_for(name))
             .unwrap_or_else(default_leaf_columns);
 
@@ -99,7 +99,7 @@ impl<C: SchemaCatalog> SchemaResolver<C> {
 
         // Append one column per referenced-but-unknown name (group keys etc.),
         // plus any inherited-from-enclosing-scope names.
-        let referenced = collect_referenced_columns(tree);
+        let referenced = collect_referenced_columns(dag);
         for name in referenced.iter().chain(inherited) {
             if !columns.iter().any(|c| c.name == *name) {
                 columns.push(Column::new(name.clone(), DataType::Utf8, true));
@@ -136,13 +136,13 @@ fn push_ref_name(c: &ColumnRef, out: &mut Vec<String>) {
     }
 }
 
-/// The leftmost `Scan`'s source name in a canonical (`UnresolvedQueryExpr`) tree —
+/// The leftmost `Scan`'s source name in a canonical (`UnresolvedQueryExpr`) DAG —
 /// the [`collect_referenced_columns`] counterpart to what a dedicated
-/// `Source` leaf type would carry as a method; the canonical tree's `Scan`
+/// `Source` leaf type would carry as a method; the canonical DAG's `Scan`
 /// leaf needs this walk written out instead.
-fn leftmost_scan_name(tree: &UnresolvedQueryExpr) -> Option<&str> {
+fn leftmost_scan_name(dag: &UnresolvedQueryExpr) -> Option<&str> {
     use UnresolvedQueryExpr as QE;
-    match tree {
+    match dag {
         QE::Scan { source, .. } => Some(match source {
             super::query_expr::Source::TimeSeries { metric } => metric.as_str(),
             super::query_expr::Source::Table { table_ref } => table_ref.as_str(),
@@ -191,7 +191,7 @@ fn leftmost_scan_name(tree: &UnresolvedQueryExpr) -> Option<&str> {
     }
 }
 
-/// Collect every distinct column name referenced anywhere in `tree` that
+/// Collect every distinct column name referenced anywhere in `dag` that
 /// resolves positionally — every place a front end constructing
 /// [`QueryExpr<ColumnRef>`](super::query_expr::QueryExpr) directly (issue
 /// #179) puts a name-based reference: `Scan.predicates`, `Aggregate`'s
@@ -200,7 +200,7 @@ fn leftmost_scan_name(tree: &UnresolvedQueryExpr) -> Option<&str> {
 /// `SQLWindowFunc.args`/`partition_by`/`order_by`, `Join.pred`, `PromqlRelabel.value`.
 /// The SchemaResolver seeds these into the usage-derived leaf so positional
 /// resolution downstream is total.
-pub(crate) fn collect_referenced_columns(tree: &UnresolvedQueryExpr) -> Vec<String> {
+pub(crate) fn collect_referenced_columns(dag: &UnresolvedQueryExpr) -> Vec<String> {
     use UnresolvedQueryExpr as QE;
     fn named(expr: &UnresolvedQueryExpr, out: &mut Vec<String>) {
         for c in expr.columns_referenced() {
@@ -322,7 +322,7 @@ pub(crate) fn collect_referenced_columns(tree: &UnresolvedQueryExpr) -> Vec<Stri
                 // Same treatment as `Dedup.cols` above: an own-field
                 // `ColumnRef` must be seeded here too, or a discriminator
                 // column that isn't otherwise referenced anywhere else in
-                // the tree (plausible — a raw usage-derived label, not one a
+                // the DAG (plausible — a raw usage-derived label, not one a
                 // `Project`/relabel freshly created) is absent from the
                 // SchemaResolver's usage-derived fallback schema, and
                 // `resolve.rs`'s later `resolve_column_ref` call fails with
@@ -363,7 +363,7 @@ pub(crate) fn collect_referenced_columns(tree: &UnresolvedQueryExpr) -> Vec<Stri
         }
     }
     let mut out: Vec<String> = Vec::new();
-    walk(tree, &mut out);
+    walk(dag, &mut out);
     out.sort();
     out.dedup();
     out
@@ -390,7 +390,7 @@ mod tests {
     #[test]
     fn pearson_corr_inputs_seed_usage_derived_schema() {
         use crate::pre_asap::{AggIntent, Reduction};
-        let tree = UnresolvedQueryExpr::Aggregate {
+        let dag = UnresolvedQueryExpr::Aggregate {
             reduction: Reduction::by(vec![]),
             measures: vec![AggIntent::PearsonCorr {
                 left: ColumnRef::Named("x".into()),
@@ -401,8 +401,8 @@ mod tests {
             having: None,
             child: Rc::new(src("m")),
         };
-        assert_eq!(collect_referenced_columns(&tree), vec!["x", "y"]);
-        let schema = SchemaResolver::new().resolve_schema(&tree);
+        assert_eq!(collect_referenced_columns(&dag), vec!["x", "y"]);
+        let schema = SchemaResolver::new().resolve_schema(&dag);
         assert!(schema.column_id("x").is_some());
         assert!(schema.column_id("y").is_some());
     }
@@ -420,7 +420,7 @@ mod tests {
     fn sort_partition_keys_land_in_schema() {
         // Per-group ranking keys (`topk by (host)` → `Sort.partition_by`) must be
         // seeded into the usage-derived leaf so they resolve positionally.
-        let tree = UnresolvedQueryExpr::Sort {
+        let dag = UnresolvedQueryExpr::Sort {
             keys: vec![super::super::query_expr::SortKey {
                 expr: UnresolvedQueryExpr::Column(ColumnRef::SampleValue),
                 ascending: false,
@@ -429,23 +429,23 @@ mod tests {
             partition_by: GroupKeys::by(vec![ColumnRef::Named("host".into())]),
             child: Rc::new(src("hits")),
         };
-        let schema = SchemaResolver::new().resolve_schema(&tree);
+        let schema = SchemaResolver::new().resolve_schema(&dag);
         assert!(schema.column_id("host").is_some());
     }
 
     /// Issue #228 review: a `Concat`'s `discriminator_unique_key` columns —
-    /// even one referenced nowhere else in the tree — must be seeded into
+    /// even one referenced nowhere else in the DAG — must be seeded into
     /// the usage-derived fallback schema, exactly like `Dedup.cols`, or
     /// `resolve.rs`'s later `resolve_column_ref` fails `NotFound` for a
     /// column the caller correctly named.
     #[test]
     fn concat_discriminator_key_is_seeded_into_the_resolver_schema() {
-        let tree = UnresolvedQueryExpr::concat_with_discriminator(
+        let dag = UnresolvedQueryExpr::concat_with_discriminator(
             vec![src("m")],
             ColumnRef::Named("phi".into()),
             vec![ColumnRef::Named("host".into())],
         );
-        let schema = SchemaResolver::new().resolve_schema(&tree);
+        let schema = SchemaResolver::new().resolve_schema(&dag);
         assert!(
             schema.column_id("phi").is_some(),
             "discriminator column must be seeded"
@@ -458,7 +458,7 @@ mod tests {
 
     #[test]
     fn inherited_names_are_seeded_alongside_referenced() {
-        // A `BinaryOp` side re-binds against its own sub-tree, but must still see
+        // A `BinaryOp` side re-binds against its own sub-DAG, but must still see
         // an enclosing aggregate's group key (`__name__` / `job`) that appears in
         // neither side's own matchers (issue #52). `resolve_schema_with_inherited` seeds it.
         let schema =

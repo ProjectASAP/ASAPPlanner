@@ -114,7 +114,7 @@ thread_local! {
 }
 
 /// Helper operators are numbered from their Planner node alone, above the u32
-/// Planner ID range, so every boundary choice yields a subgraph of the same
+/// Planner ID range, so every boundary choice yields a sub-DAG of the same
 /// lowering and candidate cuts need not renumber operators. A node lowering to
 /// several helpers takes consecutive indices below its base.
 fn helper_id(node: NodeId, index: u64) -> NodeId {
@@ -210,7 +210,7 @@ fn compile_internal(
             }
         }
     }
-    let mut graph = CompiledPhysicalDag::new(roots.to_vec());
+    let mut physical_dag = CompiledPhysicalDag::new(roots.to_vec());
     for id in ordered {
         let node = nodes[&id];
         let mut auxiliary = helper_id(id, 0);
@@ -220,7 +220,7 @@ fn compile_internal(
             if source.schema != output {
                 return Err(invalid("frontier does not have the declared schema"));
             }
-            graph.add_input(id, source)?;
+            physical_dag.add_input(id, source)?;
         } else {
             #[cfg(test)]
             LOWERED_NODES.with(|count| count.set(count.get() + 1));
@@ -233,7 +233,7 @@ fn compile_internal(
                 if schemas.iter().any(|s| s != &schemas[0]) {
                     return Err(invalid("summary merge inputs have different schemas"));
                 }
-                graph.add(
+                physical_dag.add(
                     auxiliary,
                     inputs,
                     Operator::union(schemas[0].clone(), schemas.len())?,
@@ -260,7 +260,7 @@ fn compile_internal(
                     let slot = promql_fallback::raw_series_input(id, i);
                     match sources.remove(&slot) {
                         Some(contract) if &contract.schema == schema => {
-                            graph.add_input(slot, contract)?
+                            physical_dag.add_input(slot, contract)?
                         }
                         Some(_) => {
                             return Err(invalid(format!(
@@ -289,11 +289,11 @@ fn compile_internal(
                         .collect::<Vec<_>>()
                 };
                 for (operator, inputs) in steps {
-                    graph.add(auxiliary, resolve(inputs, &ids), operator)?;
+                    physical_dag.add(auxiliary, resolve(inputs, &ids), operator)?;
                     ids.push(auxiliary);
                     auxiliary -= 1;
                 }
-                graph.add(
+                physical_dag.add(
                     id,
                     resolve(last_inputs, &ids),
                     last.with_output_schema(output)?,
@@ -328,7 +328,7 @@ fn compile_internal(
                 let value = named_column(input, &ColumnRef::SampleValue)?;
                 let lookback = i64::try_from(spec.lookback_ms)
                     .map_err(|_| invalid("current-series lookback overflows"))?;
-                graph.add(
+                physical_dag.add(
                     id,
                     inputs,
                     Operator::current_series(input.clone(), identity, coordinate, value, lookback)?
@@ -369,11 +369,11 @@ fn compile_internal(
                     let last = chain.pop().expect("nonempty chain");
                     let mut inputs = inputs;
                     for operator in chain {
-                        graph.add(auxiliary, inputs, operator)?;
+                        physical_dag.add(auxiliary, inputs, operator)?;
                         inputs = vec![auxiliary];
                         auxiliary -= 1;
                     }
-                    graph.add(id, inputs, last.with_output_schema(output)?)?;
+                    physical_dag.add(id, inputs, last.with_output_schema(output)?)?;
                     continue;
                 };
                 let groups = spec
@@ -382,7 +382,7 @@ fn compile_internal(
                     .map(|name| named_column(&input, &ColumnRef::Named(name.clone())))
                     .collect::<Result<Vec<_>, _>>()?;
                 let value = named_column(&input, &ColumnRef::SampleValue)?;
-                graph.add(
+                physical_dag.add(
                     auxiliary,
                     inputs,
                     Operator::sort(
@@ -395,7 +395,7 @@ fn compile_internal(
                         groups.clone(),
                     )?,
                 )?;
-                graph.add(
+                physical_dag.add(
                     id,
                     vec![auxiliary],
                     Operator::limit(input, *k as u64, 0, groups)?.with_output_schema(output)?,
@@ -454,8 +454,8 @@ fn compile_internal(
                     groups,
                 )?;
                 let compact = build.schema();
-                graph.add(auxiliary, inputs, build)?;
-                graph.add(
+                physical_dag.add(auxiliary, inputs, build)?;
+                physical_dag.add(
                     id,
                     vec![auxiliary],
                     Operator::scope_timestamp(compact, output)?,
@@ -490,8 +490,8 @@ fn compile_internal(
                     let [l, r] = sides;
                     let binary = Operator::series_binary(l, r, operator.clone(), scalars)
                         .map_err(|error| invalid(format!("node {id}: {error}")))?;
-                    graph.add(auxiliary, vec![], scalar)?;
-                    graph.add(id, operands, binary.with_output_schema(output)?)?;
+                    physical_dag.add(auxiliary, vec![], scalar)?;
+                    physical_dag.add(id, operands, binary.with_output_schema(output)?)?;
                     auxiliary -= 1;
                     continue;
                 }
@@ -520,7 +520,7 @@ fn compile_internal(
                             [scalar(&inputs[0]), scalar(&inputs[1])],
                         )
                         .map_err(|error| invalid(format!("node {id}: {error}")))?;
-                        graph.add(id, inputs, binary.with_output_schema(output)?)?;
+                        physical_dag.add(id, inputs, binary.with_output_schema(output)?)?;
                         continue;
                     }
                 }
@@ -555,16 +555,16 @@ fn compile_internal(
                         .collect();
                     let project =
                         Operator::project(actual, columns)?.with_output_schema(output.clone())?;
-                    graph.add(auxiliary, inputs, readout)?;
+                    physical_dag.add(auxiliary, inputs, readout)?;
                     if temporal_readout_drops_name(node) {
-                        graph.add(auxiliary - 1, vec![auxiliary], project)?;
-                        graph.add(
+                        physical_dag.add(auxiliary - 1, vec![auxiliary], project)?;
+                        physical_dag.add(
                             id,
                             vec![auxiliary - 1],
                             Operator::series_without_name(output)?,
                         )?;
                     } else {
-                        graph.add(id, vec![auxiliary], project)?;
+                        physical_dag.add(id, vec![auxiliary], project)?;
                     }
                     auxiliary -= 1;
                     continue;
@@ -600,15 +600,15 @@ fn compile_internal(
                 }
             }
             if temporal_readout_drops_name(node) {
-                graph.add(auxiliary, inputs, operator)?;
-                graph.add(id, vec![auxiliary], Operator::series_without_name(output)?)?;
+                physical_dag.add(auxiliary, inputs, operator)?;
+                physical_dag.add(id, vec![auxiliary], Operator::series_without_name(output)?)?;
             } else {
-                graph.add(id, inputs, operator)?;
+                physical_dag.add(id, inputs, operator)?;
             }
         }
     }
-    graph.validate()?;
-    Ok(graph)
+    physical_dag.validate()?;
+    Ok(physical_dag)
 }
 
 // Temporal summary readouts produce PromQL vectors, whose range functions drop

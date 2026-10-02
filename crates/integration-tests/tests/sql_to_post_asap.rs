@@ -11,9 +11,9 @@
 //!
 //! `lower_promql` returns a *bare* `QueryExpr::Aggregate` for a top-level
 //! aggregation (`sum by (job) (m)`, `quantile(0.99, …)`), so [`realize`] can
-//! bind it directly at the tree root. `lower_sql` never does: DataFusion's
+//! bind it directly at the DAG root. `lower_sql` never does: DataFusion's
 //! planner always wraps even a single, unaliased aggregate in an identity
-//! `Project` (confirmed below), so a SQL tree's *root* is normally `Project {
+//! `Project` (confirmed below), so a SQL DAG's *root* is normally `Project {
 //! child: Aggregate { .. } }`. Final materialization retains that projection
 //! as a query-time value operation and independently plans its child, keeping
 //! both SELECT-list semantics and the summary-bound aggregate visible.
@@ -37,7 +37,7 @@ use asap_types::pre_asap::schema::{Column, DataType, Schema};
 use asap_types::types::AccuracyTarget;
 use asap_types::workload::SqlDialect;
 
-/// This crate has no "bind me one tree" public API any more —
+/// This crate has no "bind me one DAG" public API any more —
 /// `SketchAlgorithmStrategy::replacements` always returns every candidate, and
 /// a caller decides what to keep. This test-only helper reproduces the
 /// take-the-first-(`cost_model`-preferred)-candidate pattern so the
@@ -752,7 +752,7 @@ async fn sql_count_distinct_with_epsilon_binds_hll_rse_over_named_column() {
 
 /// An exact workload binds zero sketches: `SUM(bytes) GROUP BY service` at
 /// `AccuracyTarget::Exact` still gets its mergeable exact accumulator, and
-/// `AVG(bytes)` (non-mergeable) stays a whole logical subtree untouched. SQL
+/// `AVG(bytes)` (non-mergeable) stays a whole logical sub-DAG untouched. SQL
 /// counterpart of `promql_to_post_asap.rs`'s
 /// `promql_exact_workload_binds_accumulators_not_sketches`.
 #[tokio::test]

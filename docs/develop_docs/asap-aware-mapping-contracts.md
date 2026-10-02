@@ -28,7 +28,7 @@ For example, consider two top-level queries:
 - `sum by (service) (rate(m[5m]))`
 - `avg by (service) (rate(m[5m]))`
 
-After `share_common_subtrees` merges their identical `rate(m[5m])` subtrees, both query trees point to the same `Rc`. That node's `consumer_count` is `2`, regardless of how often either query executes.
+After `share_common_sub_dags` merges their identical `rate(m[5m])` sub-DAGs, both query DAGs point to the same `Rc`. That node's `consumer_count` is `2`, regardless of how often either query executes.
 
 Use:
 
@@ -85,7 +85,7 @@ is a `Summary`; KLL (Karnin–Lang–Liberty) is a quantile-sketch algorithm.
 ```text
 compute independently
     vs.
-reuse an already shared logical subtree
+reuse an already shared logical sub-DAG
 ```
 
 is represented as a `Rewrite`.
@@ -253,7 +253,7 @@ bounds, but does not execute workloads or own deployment measurements. Most hook
   fn readout_extension(&self, ext_kind: &str, payload: &serde_json::Value, col: &ColumnRef) -> SketchQuery;
   ```
 
-- **`cse_recompute_cost`** — estimate the one-time cost of recomputing a CSE candidate's subtree independently at a single consumer. Default: `default_cse_recompute_cost`, a structural-size proxy.
+- **`cse_recompute_cost`** — estimate the one-time cost of recomputing a CSE candidate's sub-DAG independently at a single consumer. Default: `default_cse_recompute_cost`, a structural-size proxy.
 
   ```rust
   fn cse_recompute_cost(&self, candidate: &CseCandidate) -> Cost;
@@ -311,9 +311,9 @@ pub struct RankedTargetSubDAGCandidates<'a> {
 }
 ```
 
-`search_workload(roots)` runs the shared-subtree pass once, discovers every target across every root's whole DAG (not just root-level sharing — a `SharedSubtreeStrategy` candidate three levels under an unshared `Filter` is exactly as real a site as a shared whole root), and asks every registered strategy to a fixpoint. Two logically different candidates at two different targets are never copied into two separate plans — they're two entries in two different `TargetSubDAGCandidates`s, sharing every other node in the workload by construction.
+`search_workload(roots)` runs the shared-sub-DAG pass once, discovers every target across every root's whole DAG (not just root-level sharing — a `SharedSubDAGStrategy` candidate three levels under an unshared `Filter` is exactly as real a site as a shared whole root), and asks every registered strategy to a fixpoint. Two logically different candidates at two different targets are never copied into two separate plans — they're two entries in two different `TargetSubDAGCandidates`s, sharing every other node in the workload by construction.
 
-`CandidateLogicalASAPDAGs::cost_sorted(cost_model)` is the one ranking step: for each candidate set, it dispatches by candidate shape — a same-shape `Rewrite` pair (a `SharedSubtreeStrategy` share/recompute choice) goes through `CostModel::cse_share_decision`; a same-shape run of `Summary` candidates realizing sketches (a `SketchAlgorithmStrategy` choice) goes through `CostModel::rank_candidates`; and a mixed candidate set is ordered by each candidate's `CostModel::estimate_cost`. Every candidate gets a numeric cost aligned index-for-index in `costs`. Count in, count out—nothing is dropped to produce a ranking. Legality checks
+`CandidateLogicalASAPDAGs::cost_sorted(cost_model)` is the one ranking step: for each candidate set, it dispatches by candidate shape — a same-shape `Rewrite` pair (a `SharedSubDAGStrategy` share/recompute choice) goes through `CostModel::cse_share_decision`; a same-shape run of `Summary` candidates realizing sketches (a `SketchAlgorithmStrategy` choice) goes through `CostModel::rank_candidates`; and a mixed candidate set is ordered by each candidate's `CostModel::estimate_cost`. Every candidate gets a numeric cost aligned index-for-index in `costs`. Count in, count out—nothing is dropped to produce a ranking. Legality checks
 may already have removed proposals before this boundary. In particular,
 `search_workload_with_targets` checks explicit per-root targets, while retaining
 direct DDSketch ratios with missing domain evidence and no root guarantee for
@@ -379,7 +379,7 @@ The crate provides no default `Matcher` implementation because the answer depend
 Concretely, `explanation.rs` reports three candidate kinds from each `TargetSubDAGCandidates`:
 
 - `ExplanationKind::SketchApproximation` — the set contains a `Replacement::Summary` that realizes `SummaryFamilyType::Sketch(..)`, not just an exact/pass-through candidate.
-- `ExplanationKind::CommonSubexpressionReuse` — `consumer_count >= 2` and the set contains `SharedSubtreeStrategy`'s "build once and share" candidate (the `Replacement::Rewrite` whose `Rc` is the set's `target`).
+- `ExplanationKind::CommonSubexpressionReuse` — `consumer_count >= 2` and the set contains `SharedSubDAGStrategy`'s "build once and share" candidate (the `Replacement::Rewrite` whose `Rc` is the set's `target`).
 
 - `ExplanationKind::ExactComposition` — the candidate set contains an exact operation
   composed with a child target whose realization remains a coordinated choice.

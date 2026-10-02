@@ -171,7 +171,7 @@ fn same_node(left: &SummaryNode, right: &SummaryNode) -> bool {
     expression_equal && left.schema == right.schema && same_value(&left.guarantee, &right.guarantee)
 }
 
-/// Intern equal selected subtrees across roots while preserving every root ID.
+/// Intern equal selected sub-DAGs across roots while preserving every root ID.
 ///
 /// Only structural equality is used: no grouping, parameter, accuracy or source
 /// coercions are performed. All roots must belong to the same data snapshot or
@@ -184,7 +184,7 @@ fn same_node(left: &SummaryNode, right: &SummaryNode) -> bool {
 /// distinct count, entropy and L2. Candidate generation sizes a variant for
 /// the strictest sibling consumer so differing accuracy targets can reach
 /// identical states here.
-pub fn share_common_summary_subtrees<Id>(
+pub fn share_common_summary_sub_dags<Id>(
     roots: Vec<(Id, Rc<SummaryNode>)>,
 ) -> Vec<(Id, Rc<SummaryNode>)> {
     fn visit(
@@ -269,7 +269,7 @@ mod tests {
     // Equal separately constructed roots preserve both IDs but share identity.
     #[test]
     fn shares_equal_roots_and_preserves_ids() {
-        let roots = share_common_summary_subtrees(vec![("a", leaf(1.0)), ("b", leaf(1.0))]);
+        let roots = share_common_summary_sub_dags(vec![("a", leaf(1.0)), ("b", leaf(1.0))]);
         assert_eq!(roots[0].0, "a");
         assert_eq!(roots[1].0, "b");
         assert!(Rc::ptr_eq(&roots[0].1, &roots[1].1));
@@ -289,7 +289,7 @@ mod tests {
             },
             guarantee: None,
         });
-        let roots = share_common_summary_subtrees(vec![(0, leaf(1.0)), (1, merge)]);
+        let roots = share_common_summary_sub_dags(vec![(0, leaf(1.0)), (1, merge)]);
         let SummaryExpr::SummaryMerge { children, .. } = &roots[1].1.expr else {
             panic!()
         };
@@ -302,7 +302,7 @@ mod tests {
     fn distinct_guarantees_and_values_are_not_shared() {
         let mut unknown = leaf(1.0).as_ref().clone();
         unknown.guarantee = None;
-        let roots = share_common_summary_subtrees(vec![
+        let roots = share_common_summary_sub_dags(vec![
             (0, leaf(1.0)),
             (1, Rc::new(unknown)),
             (2, leaf(2.0)),
@@ -317,7 +317,7 @@ mod tests {
     fn signed_zero_is_not_coalesced() {
         for values in [[0.0, -0.0], [-0.0, 0.0]] {
             let roots =
-                share_common_summary_subtrees(vec![(0, leaf(values[0])), (1, leaf(values[1]))]);
+                share_common_summary_sub_dags(vec![(0, leaf(values[0])), (1, leaf(values[1]))]);
             assert!(!Rc::ptr_eq(&roots[0].1, &roots[1].1));
             for ((_, root), expected) in roots.iter().zip(values) {
                 let SummaryExpr::KeepPreAsap(expr) = &root.expr else {
@@ -347,10 +347,10 @@ mod tests {
             (f64::INFINITY, f64::NEG_INFINITY),
             (f64::NAN, f64::NAN),
         ] {
-            let roots = share_common_summary_subtrees(vec![(0, wrapped(a)), (1, wrapped(b))]);
+            let roots = share_common_summary_sub_dags(vec![(0, wrapped(a)), (1, wrapped(b))]);
             assert!(!Rc::ptr_eq(&roots[0].1, &roots[1].1));
         }
-        let roots = share_common_summary_subtrees(vec![
+        let roots = share_common_summary_sub_dags(vec![
             (0, wrapped(f64::INFINITY)),
             (1, wrapped(f64::INFINITY)),
         ]);
@@ -399,7 +399,7 @@ mod tests {
                 guarantee: None,
             })
         }
-        let roots = share_common_summary_subtrees(vec![
+        let roots = share_common_summary_sub_dags(vec![
             ("p95", readout(0.95, 0.01)),
             ("p99", readout(0.99, 0.01)),
             ("strict", readout(0.95, 0.001)),
@@ -413,7 +413,7 @@ mod tests {
         assert!(!Rc::ptr_eq(&producer(&roots[0].1), &producer(&roots[2].1)));
     }
 
-    // Fifty unique input nodes must not require walking an expanded 2^24 tree.
+    // Fifty unique input nodes must not require walking an expanded 2^24 DAG.
     // The timeout is a coarse runaway guard, not a performance SLA.
     #[test]
     fn shared_diamond_does_not_expand_during_comparison() {
@@ -445,7 +445,7 @@ mod tests {
                 }
                 current
             }
-            let roots = share_common_summary_subtrees(vec![(0, diamond()), (1, diamond())]);
+            let roots = share_common_summary_sub_dags(vec![(0, diamond()), (1, diamond())]);
             assert!(Rc::ptr_eq(&roots[0].1, &roots[1].1));
             done.send(()).unwrap();
         });

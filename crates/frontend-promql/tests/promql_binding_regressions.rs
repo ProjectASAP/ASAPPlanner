@@ -34,8 +34,8 @@ fn irate_and_rate_have_distinct_canonical_intents() {
 #[test]
 fn count_is_row_count_not_distinct_sample_value_count() {
     use asap_types::pre_asap::{AggIntent, QueryExpr};
-    let tree = lower_promql("count(smoke_gauge)", AccuracyTarget::Exact).unwrap();
-    let QueryExpr::Aggregate { measures, .. } = tree else {
+    let dag = lower_promql("count(smoke_gauge)", AccuracyTarget::Exact).unwrap();
+    let QueryExpr::Aggregate { measures, .. } = dag else {
         panic!("expected aggregate")
     };
     assert!(matches!(measures.as_slice(), [AggIntent::Count { .. }]));

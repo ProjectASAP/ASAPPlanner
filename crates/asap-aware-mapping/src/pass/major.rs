@@ -8,7 +8,7 @@
 
 use std::rc::Rc;
 
-use asap_types::post_asap::{share_common_summary_subtrees, SummaryNode};
+use asap_types::post_asap::{share_common_summary_sub_dags, SummaryNode};
 use asap_types::pre_asap::query_expr::QueryExpr;
 use asap_types::types::AccuracyTarget;
 
@@ -95,7 +95,7 @@ impl OptimizationPass for MajorPass {
             assembled.push(dag);
         }
         let interned =
-            share_common_summary_subtrees(assembled.iter().cloned().enumerate().collect());
+            share_common_summary_sub_dags(assembled.iter().cloned().enumerate().collect());
         let states: Vec<_> = interned
             .iter()
             .map(|(_, dag)| summary_states(dag))

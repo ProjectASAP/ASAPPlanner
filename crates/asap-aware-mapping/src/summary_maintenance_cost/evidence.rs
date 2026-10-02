@@ -229,7 +229,7 @@ impl SummaryOperatorEvidence {
     }
 }
 
-/// Non-aggregation work for a retained pre-ASAP subtree over the comparison
+/// Non-aggregation work for a retained pre-ASAP sub-DAG over the comparison
 /// horizon. Bootstrap/source I/O belongs exclusively to the owning aggregate,
 /// and summary insertion belongs exclusively to its insert evidence.
 #[derive(Debug, Clone, PartialEq)]

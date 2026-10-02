@@ -18,7 +18,7 @@ SQL ORDER BY COUNT(*) DESC LIMIT 10
 
 ## Canonicalize
 
-`canonicalize` normalizes semantically equivalent intent trees so that equivalent queries
+`canonicalize` normalizes semantically equivalent intent DAGs so that equivalent queries
 from different languages, or differently phrased queries within one language, converge on
 the same canonical shape.
 

@@ -489,7 +489,7 @@ a candidate was rejected.
   provenance, allocations, and rejection reasons. The observable proxy is that
   a rejected candidate can be diagnosed from exported data without replaying
   cost ranking.
-- **Performance and scalability:** expressions are small trees evaluated during
+- **Performance and scalability:** expressions are small DAGs evaluated during
   candidate construction. No numerical performance claim is made; candidate
   count and planning latency should be measured before adding richer allocation
   enumeration.

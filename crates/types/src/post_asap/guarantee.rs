@@ -17,7 +17,7 @@
 //!
 //! [`ResultGuarantee`] is attached to a finalized, caller-visible value —
 //! [`super::SummaryNode::guarantee`] on a `SummaryEstimate` readout, an
-//! exact accumulator, or a kept pre-ASAP subtree — never to raw summary
+//! exact accumulator, or a kept pre-ASAP sub-DAG — never to raw summary
 //! state (a `SummaryAgg` sketch node carries `None`; its readout carries the
 //! guarantee). Its statement is:
 //!
@@ -33,7 +33,7 @@
 //!
 //! ## Why expressions, not numbers
 //!
-//! [`BoundExpr`]/[`ProbabilityExpr`] are tiny serializable expression trees
+//! [`BoundExpr`]/[`ProbabilityExpr`] are tiny serializable expression DAGs
 //! rather than bare `f64`s so a planning-time guarantee can reference a
 //! statistic it does not have (a group count, a stream's L1 norm) and stay
 //! honestly *unknown* until something instantiates it — a deployment's own

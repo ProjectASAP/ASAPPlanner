@@ -1,7 +1,7 @@
 // cargo run -p asap-lower --bin variant_coverage
 //
 // Lowers every query in every corpus we have (PromQL + SQL), walks the
-// resulting QueryExpr trees, and reports which enum variants show up — per
+// resulting QueryExpr DAGs, and reports which enum variants show up — per
 // corpus, then rolled up globally. Used to find the minimal QueryExpr node set.
 
 use asap_devtools::lower_promql_with_data_ingestion_interval;

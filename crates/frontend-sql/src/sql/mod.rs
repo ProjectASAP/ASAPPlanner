@@ -4,7 +4,7 @@
 //!
 //! Parses SQL via DataFusion (over the catalog's registered tables), then
 //! walks the unoptimized `LogicalPlan` and emits `UnresolvedQueryExpr` nodes with
-//! unresolved `ColumnRef`s directly (issue #179) — the same tree shape
+//! unresolved `ColumnRef`s directly (issue #179) — the same DAG shape
 //! [`resolve_root`](asap_types::pre_asap::resolve_root) binds to canonical,
 //! positional `QueryExpr<ColumnId>`. Unlike PromQL's front end, SQL's
 //! Ordinary SQL `Aggregate` nodes are `Reduction::Reduce`. The explicit
@@ -114,7 +114,7 @@ fn current_accuracy() -> AccuracyTarget {
 /// Lowers SQL strings to the canonical [`UnresolvedQueryExpr`](asap_types::pre_asap::UnresolvedQueryExpr)
 /// over a table [`SqlCatalog`]. Call
 /// [`resolve_root`](asap_types::pre_asap::resolve_root) on the result for
-/// the canonical, resolved tree.
+/// the canonical, resolved DAG.
 pub struct SqlLowerer<'a> {
     catalog: &'a SqlCatalog,
     dialect: SqlDialect,
@@ -2116,7 +2116,7 @@ fn expand_grouping_set(gs: &logical_expr::GroupingSet) -> Vec<Vec<Expr>> {
 struct DerivedCols {
     cols: Vec<ProjectItem<ColumnRef>>,
     /// Whether any column is genuinely derived. Without one the aggregate keeps
-    /// its original child, so trees that lower today keep their exact shape.
+    /// its original child, so DAGs that lower today keep their exact shape.
     any: bool,
     /// First same-name-different-value collision, reported only if the
     /// projection is actually inserted (see [`Self::wrap`]).
@@ -2215,7 +2215,7 @@ impl DerivedCols {
 
     /// Wrap `input` in the materializing `Project`, or return it untouched when
     /// nothing needed deriving — so a query that lowers today keeps its exact
-    /// tree, and a name collision that the projection would have flattened only
+    /// DAG, and a name collision that the projection would have flattened only
     /// matters once the projection exists.
     fn wrap(self, input: Unresolved) -> Result<Unresolved, LoweringError> {
         if !self.any {

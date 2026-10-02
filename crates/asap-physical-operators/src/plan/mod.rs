@@ -1,4 +1,4 @@
-//! Immutable physical graph, operator contracts and pre-execution validation.
+//! Immutable physical DAG, operator contracts and pre-execution validation.
 use crate::{
     runtime::{Input, OutputStream, RunContext},
     Error,

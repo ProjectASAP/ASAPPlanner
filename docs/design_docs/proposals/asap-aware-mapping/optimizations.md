@@ -232,7 +232,7 @@ The two operators are not identical, but their grouping keys are related.
 
 If the aggregation is mergeable, Query B may be derived by rolling up Query A.
 
-This creates reuse opportunities across **hierarchically related groupings**, not just identical subtrees.
+This creates reuse opportunities across **hierarchically related groupings**, not just identical sub-DAGs.
 
 The legality and cost of this transformation depend on:
 

@@ -1,4 +1,4 @@
-//! Planner-selected summaries over raw samples compile as precompute graphs
+//! Planner-selected summaries over raw samples compile as precompute DAGs
 //! and produce the same estimates as feeding their kernel sample by sample.
 use std::{collections::BTreeMap, collections::BTreeSet, rc::Rc, sync::Arc};
 
@@ -143,7 +143,7 @@ fn execute(
         source,
         Box::new(Operator::source(schema, vec![batch]).unwrap()) as Source<'_>,
     )]);
-    let graph = program.instantiate(sources).unwrap();
+    let physical_dag = program.instantiate(sources).unwrap();
     let context = RunContext::new(
         Scope::Ingestion {
             window_start_ms: 0,
@@ -154,7 +154,10 @@ fn execute(
     )
     .unwrap();
     block_on(async {
-        let mut stream = graph.execute(program.roots(), context).unwrap().remove(0);
+        let mut stream = physical_dag
+            .execute(program.roots(), context)
+            .unwrap()
+            .remove(0);
         let mut result = Vec::new();
         while let Some(batch) = stream.next().await {
             for row in batch.unwrap().rows() {

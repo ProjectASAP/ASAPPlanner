@@ -24,7 +24,7 @@ pub(super) fn split_conjuncts(expr: &Expr) -> Vec<&Expr> {
     }
 }
 
-/// Translate a DataFusion `Expr` to the canonical, unresolved tree.
+/// Translate a DataFusion `Expr` to the canonical, unresolved DAG.
 /// Returns `UnsupportedFeature` for anything not needed in v1.
 pub(super) fn df_expr_to_unresolved(expr: &Expr) -> Result<Unresolved, LoweringError> {
     match expr {

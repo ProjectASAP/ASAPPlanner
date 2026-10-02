@@ -412,7 +412,7 @@ impl<'a> ExactCompositionStrategy<'a> {
                     rationale: format!(
                         "{} is an exact fold whose input is the readout of {} — a maintained \
                          accumulator cannot consume query-time values, so instead of collapsing \
-                         the whole tree into KeepPreAsap this applies the fold as an \
+                         the whole DAG into KeepPreAsap this applies the fold as an \
                          ExactRead over whichever summary readout global_selection \
                          commits for the child target (asap_aware_mapping::exact_composition)",
                         describe_intent(&intent),

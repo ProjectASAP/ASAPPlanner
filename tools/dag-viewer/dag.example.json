@@ -3,7 +3,7 @@
     {
       "name": "q1",
       "source": "SELECT service, COUNT(*) FROM metrics GROUP BY service",
-      "graph": {
+      "dag": {
         "nodes": [
           {
             "id": 0,
@@ -361,14 +361,14 @@
           },
           "after": {
             "kind": "Summary",
-            "graph": {
+            "dag": {
               "nodes": [
                 {
                   "id": 0,
                   "kind": "KeepPreAsap",
                   "label": "KeepPreAsap(Scan)",
                   "detail": {
-                    "pre_asap_subgraph": {
+                    "pre_asap_sub_dag": {
                       "nodes": [
                         {
                           "children": [],
@@ -564,7 +564,7 @@
           }
         }
       ],
-      "post_graph": {
+      "post_dag": {
         "nodes": [
           {
             "id": 0,

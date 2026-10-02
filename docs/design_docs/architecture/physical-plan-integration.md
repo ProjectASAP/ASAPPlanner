@@ -425,7 +425,7 @@ requires a normal result; setting both guards or attaching a guard to a non-divi
 operator is invalid. Compilers must preserve this typed condition rather than
 recovering average semantics from query text.
 
-### Candidate pruning is a subgraph
+### Candidate pruning is a sub-DAG
 
 Candidate-based TopK uses a summary key readout, a general semi-join over
 explicit matching key columns, grouped Sort by the authoritative score, and

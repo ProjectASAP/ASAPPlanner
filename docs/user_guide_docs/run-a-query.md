@@ -1,6 +1,6 @@
 # ASAPPlanner CLI user guide
 
-Use the `asap-devtools` commands to inspect query IR, export graphs, and inspect
+Use the `asap-devtools` commands to inspect query IR, export DAGs, and inspect
 corpus coverage. These commands do not deploy or execute a physical plan.
 
 To develop an application using the Rust library, start with
@@ -17,8 +17,8 @@ tool on first use.
 | --- | --- | --- |
 | `show_pre_asap_ir --data-ingestion-interval-ms 1000 queries.txt` | File path, or stdin when omitted | Prints canonical Pre-ASAP IR |
 | `show_post_asap_ir --data-ingestion-interval-ms 1000 queries.txt` | Same query file format | Prints all sketch-strategy Post-ASAP candidates using a fixed approximate target, in cost-model order |
-| `dag_export --data-ingestion-interval-ms 1000 --promql "<query>"` | One PromQL expression | Exports a query graph for inspection |
-| `dag_export --sql "<query>"` | One SQL expression using the tool's catalog | Exports a query graph for inspection |
+| `dag_export --data-ingestion-interval-ms 1000 --promql "<query>"` | One PromQL expression | Exports a query DAG for inspection |
+| `dag_export --sql "<query>"` | One SQL expression using the tool's catalog | Exports a query DAG for inspection |
 | `analyze_corpora --corpora --data-ingestion-interval-ms 1000 --out-dir <dir>` | Repository PromQL corpora, output directory | Writes successful/error IR dumps and summary reports |
 | `analyze_corpora --sql-corpora --out-dir <dir>` | Repository SQL corpora, output directory | Writes SQL corpus reports |
 | `variant_coverage --data-ingestion-interval-ms 1000` | Repository corpora | Reports Pre-ASAP IR variant coverage |

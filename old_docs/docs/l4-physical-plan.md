@@ -94,7 +94,7 @@ pub trait TopologyDescriptor {
     // A `StageEdge` names a pair of stages data is allowed to flow
     // between (e.g. "edge → backend" if that deployment's edge tier
     // ships summaries up to a backend tier) — the topology's connectivity
-    // graph, distinct from which stages merely *exist* (`stages()` above).
+    // DAG, distinct from which stages merely *exist* (`stages()` above).
     // `StageAllocator::allocate` only assigns a piece of the plan to move
     // from one stage to another along an edge this list actually
     // contains; a `TopologyDescriptor` with no edge between two stages is
@@ -119,7 +119,7 @@ pub struct Executor {
     pub address: ExecutorAddr,        // OpAMP agent / HTTP endpoint / in-process handle — deployment-defined
 }
 
-// Stage-level allocation: given an L3 tree + a topology, decide which
+// Stage-level allocation: given an L3 DAG + a topology, decide which
 // nodes land on which stage, subject to deployment constraints.
 // Per-executor fan-out is the deployment model's own PhysicalPlanner,
 // using the executor list from DeploymentConstraints::executors().

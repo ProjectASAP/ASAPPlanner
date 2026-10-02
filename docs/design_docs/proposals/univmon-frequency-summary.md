@@ -30,11 +30,11 @@ The parameter contract records heap size, sketch rows, sketch columns and
 number of layers. Default dimensions define a candidate configuration, not
 an epsilon guarantee. A deployment accuracy model must supply calibrated
 evidence before an approximate readout can satisfy an accuracy target. Without
-that evidence, the Planner keeps the exact subtree. HLL/Theta/KMV remain
+that evidence, the Planner keeps the exact sub-DAG. HLL/Theta/KMV remain
 cardinality alternatives, and exact count remains the cheaper first count
 candidate.
 
-All four readouts have the same unit-weight update, input subtree, grouping,
+All four readouts have the same unit-weight update, input sub-DAG, grouping,
 window, parameter identity and state schema. Existing post-ASAP structural
 sharing can therefore intern their state producer while preserving distinct
 readout nodes. Sharing is only legal within the same execution/data scope.

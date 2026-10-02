@@ -65,7 +65,7 @@ fn matches(&self, target: &TargetSubDAG<'_>) -> bool {
 }
 ```
 
-is enough for the current shared-subtree strategy.
+is enough for the current shared-sub-DAG strategy.
 
 #### Guideline
 
@@ -293,9 +293,9 @@ aggregate choices remain independent.
 
 ---
 
-### Example: current `SharedSubtreeStrategy`
+### Example: current `SharedSubDAGStrategy`
 
-`SharedSubtreeStrategy` is the reference implementation for a logical rewrite strategy.
+`SharedSubDAGStrategy` is the reference implementation for a logical rewrite strategy.
 
 It applies when:
 
@@ -331,9 +331,9 @@ That preference belongs to the cost model.
 share-versus-recompute candidate pair. The strategy still returns both
 alternatives because enumeration and ranking are separate steps:
 
-- `consumer_count >= 2` means `share_common_subtrees` has already merged the expression into one shared `Rc`. The shared alternative is therefore an `Rc::clone`; the independent alternative requires a deep clone.
+- `consumer_count >= 2` means `share_common_sub_dags` has already merged the expression into one shared `Rc`. The shared alternative is therefore an `Rc::clone`; the independent alternative requires a deep clone.
 - `cse_share_decision` is used by the ranking path, not by
-  `SharedSubtreeStrategy`.
+  `SharedSubDAGStrategy`.
 - The strategy must return both valid alternatives even if the current cost model strongly prefers one. A future whole-plan search may choose differently from today's local comparison.
 
 This example is useful when implementing transformations such as:
@@ -462,7 +462,7 @@ assert!(
 
 For a strategy whose explanation includes important context, also test that context.
 
-For example, the shared-subtree tests verify that the consumer count appears in the rationale.
+For example, the shared-sub-DAG tests verify that the consumer count appears in the rationale.
 
 ---
 
@@ -470,7 +470,7 @@ For example, the shared-subtree tests verify that the consumer count appears in 
 
 For logical rewrites, test the structural property that distinguishes the alternatives.
 
-For example, the current shared-subtree tests verify:
+For example, the current shared-sub-DAG tests verify:
 
 ```rust
 Rc::ptr_eq(shared, &q)
@@ -660,7 +660,7 @@ This complements `realize_extension`: realization defines what gets maintained; 
 
 #### `cse_recompute_cost`
 
-Use to estimate the cost of computing a common subtree independently at each consumer.
+Use to estimate the cost of computing a common sub-DAG independently at each consumer.
 
 ```rust
 fn cse_recompute_cost(
@@ -673,7 +673,7 @@ fn cse_recompute_cost(
 
 #### `cse_shared_maintenance_cost`
 
-Use to estimate the cost of computing and maintaining a shared subtree.
+Use to estimate the cost of computing and maintaining a shared sub-DAG.
 
 ```rust
 fn cse_shared_maintenance_cost(

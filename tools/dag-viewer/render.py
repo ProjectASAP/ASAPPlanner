@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Bake WorkloadGraph JSON into a single, portable Pre/Post-ASAP HTML page,
+"""Bake WorkloadDAG JSON into a single, portable Pre/Post-ASAP HTML page,
 with the same query selection, workload-union, and node details as index.html,
 but with
 the vendored JS libraries and the query data all inlined into one file.
@@ -19,13 +19,13 @@ viewer.js and node-style.js with it verbatim (see viewer.js's header
 comment) and only differs in packaging: one query's worth of exported
 `QueryExpr` detail *is* its plan (see the side panel on node click), and
 shared-hash highlighting *is* what this repo has for CSE today — both a
-hash-based proxy, not real CSE output; see README.md's "Shared-subtree
+hash-based proxy, not real CSE output; see README.md's "Shared-sub-DAG
 highlighting is a proxy" section. Structured cost/benefit annotations
 (issue #286, `CostAnnotation` in crates/types/src/cost.rs) pass through
 this deep-copy untouched, same as everything else `prepare_workload` below
 doesn't explicitly rewrite — viewer.js reads `decision.baseline_cost` /
-`.selected_cost` / `.benefit`, `NamedGraph.workload_cost`, and
-`DagGraph.edge_annotations` directly, with no help needed from this file.
+`.selected_cost` / `.benefit`, `NamedDAG.workload_cost`, and
+`ExportDAG.edge_annotations` directly, with no help needed from this file.
 
 Usage:
   cargo run -p asap-devtools --bin dag_export -- --sql "..." --name q1 \\
@@ -113,7 +113,7 @@ def _measure(value: object, input_schema: object = None) -> str:
 
 
 def _bounded_lines(lines: list[str], maximum: int = 4, width: int = 64) -> str:
-    """Keep graph boxes scannable; the sidebar owns the lossless detail."""
+    """Keep DAG boxes scannable; the sidebar owns the lossless detail."""
     shortened = [line if len(line) <= width else line[: width - 1] + "…" for line in lines]
     if len(shortened) > maximum:
         shortened = shortened[: maximum - 1] + [f"… +{len(shortened) - maximum + 1} more"]
@@ -213,30 +213,30 @@ def _semantic_label(node: dict, input_schema: object = None) -> str:
     elif kind == "SummaryDelete":
         lines.append(f"key: {_compact(detail.get('key'))}")
     elif kind == "KeepPreAsap":
-        nested = detail.get("pre_asap_subgraph")
+        nested = detail.get("pre_asap_sub_dag")
         nested_nodes = nested.get("nodes", []) if isinstance(nested, dict) else []
         nested_root = nested.get("root") if isinstance(nested, dict) else None
         root = next((item for item in nested_nodes if item.get("id") == nested_root), None)
-        lines.append(f"unchanged: {root.get('kind', 'pre-ASAP subtree') if root else 'pre-ASAP subtree'}")
+        lines.append(f"unchanged: {root.get('kind', 'pre-ASAP sub-DAG') if root else 'pre-ASAP sub-DAG'}")
     else:
         # Less common variants still show their own scalar IR fields. Avoid
-        # schema/subgraph blobs, which belong in the click-to-inspect panel.
+        # schema/sub-DAG blobs, which belong in the click-to-inspect panel.
         for key, value in detail.items():
-            if key not in {"schema", "pre_asap_subgraph"} and value not in (None, [], {}):
+            if key not in {"schema", "pre_asap_sub_dag"} and value not in (None, [], {}):
                 lines.append(f"{key}: {_compact(value)}")
 
     return _bounded_lines(lines)
 
 
 def prepare_workload(workload: dict) -> dict:
-    """Copy a workload and replace every graph label with readable IR text."""
+    """Copy a workload and replace every DAG label with readable IR text."""
     prepared = copy.deepcopy(workload)
 
-    def prepare_graph(graph: object) -> None:
-        if not isinstance(graph, dict):
+    def prepare_dag(dag: object) -> None:
+        if not isinstance(dag, dict):
             return
-        by_id = {node.get("id"): node for node in graph.get("nodes", [])}
-        for node in graph.get("nodes", []):
+        by_id = {node.get("id"): node for node in dag.get("nodes", [])}
+        for node in dag.get("nodes", []):
             child = by_id.get((node.get("children") or [None])[0])
             input_schema = (
                 child.get("schema") or (child.get("detail") or {}).get("schema")
@@ -244,17 +244,17 @@ def prepare_workload(workload: dict) -> dict:
                 else None
             )
             node["label"] = _semantic_label(node, input_schema)
-            nested = (node.get("detail") or {}).get("pre_asap_subgraph")
-            prepare_graph(nested)
+            nested = (node.get("detail") or {}).get("pre_asap_sub_dag")
+            prepare_dag(nested)
 
     for query in prepared.get("queries", []):
-        prepare_graph(query.get("graph"))
-        prepare_graph(query.get("post_graph"))
+        prepare_dag(query.get("dag"))
+        prepare_dag(query.get("post_dag"))
     return prepared
 
 
 def load_workload(paths: list[Path]) -> dict:
-    """Merge one or more WorkloadGraph JSON files into one, matching
+    """Merge one or more WorkloadDAG JSON files into one, matching
     viewer.js's loadFiles(): a query name colliding with an earlier one is
     disambiguated by suffixing the source filename."""
     queries = []
@@ -262,11 +262,11 @@ def load_workload(paths: list[Path]) -> dict:
     for path in paths:
         data = json.loads(path.read_text())
         incoming = data.get("queries", [])
-        if not incoming and isinstance(data.get("graph"), dict) and isinstance(data.get("deployments"), list):
+        if not incoming and isinstance(data.get("dag"), dict) and isinstance(data.get("deployments"), list):
             incoming = [{
                 "name": path.stem or "Summary maintenance plan",
-                "graph": data["graph"],
-                "post_graph": data["graph"],
+                "dag": data["dag"],
+                "post_dag": data["dag"],
                 "lifecycle_plan": True,
                 "lifecycle_summary": {
                     "selected_raw_recompute": data.get("selected_raw_recompute", False),
@@ -291,7 +291,7 @@ def load_workload(paths: list[Path]) -> dict:
 def _json_script(obj: object) -> str:
     """JSON-serialize `obj` for embedding inside an HTML <script> tag. Plain
     json.dumps output can legally contain a literal `</script` substring
-    (e.g. inside a SQL/PromQL query string on NamedGraph.source) that would
+    (e.g. inside a SQL/PromQL query string on NamedDAG.source) that would
     close the tag early when parsed as HTML, so `<` is escaped wherever it
     could start such a sequence."""
     return json.dumps(obj).replace("<", "\\u003c")
@@ -328,7 +328,7 @@ def main() -> None:
         "files",
         nargs="*",
         type=Path,
-        help="dag_export WorkloadGraph JSON file(s); reads stdin if none are given",
+        help="dag_export WorkloadDAG JSON file(s); reads stdin if none are given",
     )
     parser.add_argument("-o", "--output", type=Path, required=True, help="output HTML file path")
     args = parser.parse_args()
