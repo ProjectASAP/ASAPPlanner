@@ -534,7 +534,7 @@ fn resolve_expr_in(
             branches,
             else_expr,
         } => ScalarExpr::Case {
-            operand: operand.as_deref().map(&bx).transpose()?,
+            operand: operand.as_deref().map(bx).transpose()?,
             branches: branches
                 .iter()
                 .map(|(w, t)| {
@@ -544,7 +544,7 @@ fn resolve_expr_in(
                     ))
                 })
                 .collect::<Result<Vec<_>, ResolveTreeError>>()?,
-            else_expr: else_expr.as_deref().map(&bx).transpose()?,
+            else_expr: else_expr.as_deref().map(bx).transpose()?,
         },
         S::PromqlScalarFromVector(o) => ScalarExpr::PromqlScalarFromVector(op(o)?),
         S::ScalarSubquery(o) => ScalarExpr::ScalarSubquery(op(o)?),

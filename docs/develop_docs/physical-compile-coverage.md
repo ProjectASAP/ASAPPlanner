@@ -188,7 +188,7 @@ Totals after this change: 20 Supported, 5 Partial, 4 Missing, 2 Backend.
 An argument whose output provably lacks `le`, such as
 `sum by (job) (rate(x_bucket[5m]))`, is rejected at lowering. Prometheus
 returns an empty vector for it. Candidate search keeps the classic form as one
-exact `KeepPreAsap` subtree for every accuracy target; it has no sketch
+retained exact ordinary subtree for every accuracy target; it has no sketch
 candidate. `histogram_quantiles` lowers each branch the same way; the
 Fallback compiler accepts its `Concat` of relabeled branches and rejects
 duplicate output label sets. Nested aggregation, such as

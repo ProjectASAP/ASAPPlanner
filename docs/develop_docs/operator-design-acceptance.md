@@ -91,7 +91,7 @@ execution. Review and implementation were performed by the same agent.
 
 Validation commands: workspace tests, fmt, clippy with warnings denied, the external
 MetricsQL consumer, and DAG viewer Python tests (24 passed; 6 requiring Node.js
-skipped because Node.js is unavailable in this environment). The vendored MetricsQL baseline
-has its pre-existing 21 library and 3 doctest failures; on this toolchain one
-recorded doctest diagnostic fingerprint differs even though the failed-test set
-is unchanged. No baseline hashes or vendored sources were changed to hide it.
+skipped because Node.js is unavailable in this environment). The vendored MetricsQL baseline also passes on Rust 1.99 (the CI toolchain),
+verifying its existing 21 library and 3 doctest failures. Rust 1.98 changes one
+compiler-diagnostic fingerprint; no baseline hashes or vendored sources were
+changed to accommodate that older toolchain. Formatting and clippy pass on 1.99.
