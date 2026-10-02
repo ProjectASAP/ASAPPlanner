@@ -1,6 +1,5 @@
 //! Unified operator and scalar representation from #511.
-//! Graph algorithms are added in the next stack layer; legacy consumers
-//! remain on their existing representation until the planner cutover.
+//! Legacy consumers remain on their existing representation until the planner cutover.
 pub mod aggregate_schema;
 pub mod asap;
 pub mod error;
@@ -22,3 +21,5 @@ pub mod export;
 /// Semantic observation coverage, separate from field layout and physical timing.
 pub mod summary_coverage;
 mod wire;
+
+pub mod schema_support;
