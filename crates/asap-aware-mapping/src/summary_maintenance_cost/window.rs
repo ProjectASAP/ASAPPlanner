@@ -2,7 +2,7 @@ use super::*;
 
 /// One per-state window choice within a complete Planner candidate.
 #[derive(Debug, Clone)]
-pub struct StreamingWindowFrameworkAssignment {
+pub struct SummaryWindowFrameworkAssignment {
     pub summary: Rc<SummaryNode>,
     /// `None` explicitly means that this state is not window-organized.
     pub framework: Option<SummaryWindowFramework>,
@@ -16,17 +16,17 @@ pub struct StreamingWindowFrameworkAssignment {
 /// provenance for the chosen implementation, while deployment placement and
 /// runtime configuration remain downstream concerns.
 #[derive(Debug, Clone)]
-pub struct StreamingWindowFrameworkCandidate {
+pub struct SummaryWindowFrameworkCandidate {
     /// Stable identity of the complete provider implementation whose evidence
     /// is bound to this planner-visible framework assignment.
     pub physical_plan_id: String,
     /// Exactly one assignment for every summary deployment in the DAG.
-    pub assignments: Vec<StreamingWindowFrameworkAssignment>,
+    pub assignments: Vec<SummaryWindowFrameworkAssignment>,
     /// Registered end-to-end accuracy composition for this complete window
     /// assignment. EH combinations must use one of the specialized proofs;
     /// unknown combinations fail closed.
-    pub accuracy: StreamingWindowAccuracyEvidence,
-    pub node_evidence: StreamingNodeEvidence,
+    pub accuracy: SummaryWindowAccuracyEvidence,
+    pub node_evidence: SummaryNodeEvidence,
 }
 
 pub(super) fn summary_aggregation_identities(root: &SummaryNode) -> HashSet<*const SummaryNode> {
@@ -105,7 +105,7 @@ pub enum ExponentialHistogramAccuracyEvidence {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub enum StreamingWindowAccuracyEvidence {
+pub enum SummaryWindowAccuracyEvidence {
     /// The window implementation preserves exact query-time coverage and adds
     /// no error. Used for exact tumbling/sliding realizations.
     Exact,
@@ -127,10 +127,10 @@ impl ExponentialHistogramQueryRange {
     }
 }
 
-impl StreamingWindowAccuracyEvidence {
+impl SummaryWindowAccuracyEvidence {
     pub(super) fn matches_assignments(
         &self,
-        assignments: &[StreamingWindowFrameworkAssignment],
+        assignments: &[SummaryWindowFrameworkAssignment],
     ) -> bool {
         let eh_summaries: Vec<_> = assignments
             .iter()
