@@ -107,9 +107,14 @@ The planner receives three groups of inputs:
 Stages 0 to 2 each output a candidate set holding every semantically equivalent
 and legal candidate DAG of that stage; stage 3 is the only step that chooses
 one candidate DAG as output. Candidate sets are internal to ASAPPlanner and may
-be shared or enumerated lazily. A stage may prune a candidate early only when
-it is provably invalid (for example, a summary family that cannot meet the
-query's accuracy target), and every rejected candidate carries a reason.
+be shared or enumerated lazily. Two kinds of removal are kept apart:
+
+* **Pruning** removes an **invalid** candidate. Any stage may prune, but only
+  when the candidate is provably invalid (for example, a summary family that
+  cannot meet the query's accuracy target), and every pruned candidate carries
+  a reason.
+* **Selection** discards **valid** candidates. Only stage 3 does this, when it
+  picks the cheapest one.
 
 A candidate is a DAG for the **whole workload**, not for one query. Each stage
 combines its choices for every sub-DAG with the candidates it receives (the ×
@@ -224,6 +229,15 @@ window summary that answers it:
       short EH buckets and older data in longer ones. Adjacent EH buckets are
       merged into a longer one as they age.
 
+  TODO: evaluate other sliding-window frameworks for sketches as further
+  window summaries, for example:
+  * [Smooth Histograms for Sliding Windows](https://web.cs.ucla.edu/~rafail/PUBLIC/82.pdf)
+    (Braverman and Ostrovsky, FOCS 2007), an alternative to EH.
+  * [MicroscopeSketch: Accurate Sliding Estimation Using Adaptive Zooming](https://yangtonghome.github.io/uploads/MicroscopeSketch_SIGKDD_23_final_paper.pdf)
+    (Wu et al., KDD 2023).
+  * [Sliding Sketches: A Framework using Time Zones for Data Stream Processing in Sliding Windows](https://dl.acm.org/doi/10.1145/3394486.3403144)
+    (Gou et al., KDD 2020).
+
 | ASAP-aware CSE rule | Sharing condition | Shared computation |
 |---|---|---|
 | Identical-expression rule | The input and computation semantics are identical. | One common computation node serving multiple consumers. |
@@ -270,10 +284,18 @@ and resource management are TODO.
 
 #### Materialization
 
-Materialization decides, for each sub-DAG, whether its output is kept (persistent to disk or kept in memory) across
-(batch) query executions, and if so, when it is computed and how long it is
-stored. Materialization does not imply ingestion time; a sub-DAG has three
-options:
+Materialization decides, for each sub-DAG, whether its output is kept across
+(batch) query executions. Stage 2 makes this decision in three steps:
+
+1. **Materialize or not.** A sub-DAG that is not materialized always runs at
+   query time and keeps nothing.
+2. **If materialized, ingestion time or query time.** This is when the output
+   is computed. A sub-DAG that runs at ingestion time is therefore always
+   materialized, because its output must be kept until a query reads it.
+3. **Where and how long to store it:** on disk or in memory, and for how long.
+   The deployment's cost model prices each choice.
+
+This gives each sub-DAG three options:
 
 * **Materialized at ingestion time:** the sub-DAG runs as data arrives, and its
   output is stored before any query asks for it. For example, the 1-min
@@ -315,7 +337,8 @@ merge and quantile estimation operators.
 Selection rejects every candidate that misses an accuracy target or a latency
 bound, or that needs a capability the deployment lacks, and then picks the
 cheapest remaining plan. It is the only stage that uses the deployment's cost
-and accuracy models, and the only stage that discards valid candidates. Accuracy is
+and accuracy models, and the only stage that discards valid candidates;
+earlier stages only prune provably invalid ones. Accuracy is
 estimated by the deployment's accuracy model, not assumed from a summary's
 nominal bound. Cost is evaluated for the whole workload rather than per query,
 which is what lets one shared summary beat several cheaper independent ones:
@@ -382,7 +405,7 @@ candidate covers both queries.
 `LogicalDAG` with no summaries:
 
 ```mermaid
-flowchart LR
+flowchart TB
   subgraph Q1["Q1 · sum by (job) (rate(http_requests_total[1m]))"]
     direction LR
     x1[("http_requests_total")]:::data --> x2["range 1m"]:::exact --> x3["rate"]:::exact --> x4["sum by (job)"]:::exact
@@ -391,6 +414,7 @@ flowchart LR
     direction LR
     y1[("http_requests_total")]:::data --> y2["range 1m"]:::exact --> y3["sum_over_time"]:::exact --> y4["topk by (job) (10)"]:::exact
   end
+  Q1 ~~~ Q2
   classDef data fill:#f1f3f4,stroke:#5f6368,color:#000;
   classDef exact fill:#fff,stroke:#5f6368,color:#000;
   classDef summary fill:#e8f0fe,stroke:#1a73e8,stroke-width:2px,color:#000;
@@ -417,11 +441,14 @@ flowchart LR
     end
     subgraph CM["Count-Min + heap per job"]
       direction LR
-      c1[("input")]:::data --> c2["Count-Min Sketch +<br/>top-10 heap, one per job"]:::summary --> c3(["top 10<br/>per job"]):::estimate
+      c1[("input")]:::data --> cg["group by job"]:::exact
+      cg --> ca["Count-Min + heap<br/>job A"]:::summary --> ra(["top 10<br/>job A"]):::estimate
+      cg --> cb["Count-Min + heap<br/>job B"]:::summary --> rb(["top 10<br/>job B"]):::estimate
+      cg --> cn["… one instance<br/>per job"]:::summary --> rn(["top 10<br/>per job"]):::estimate
     end
     subgraph H["Hydra"]
       direction LR
-      h1[("input")]:::data --> h2["Hydra over<br/>(job, series)"]:::summary --> h3(["top 10<br/>for each job"]):::estimate
+      h1[("input")]:::data --> h2["one Hydra over all<br/>(job, series) keys"]:::summary --> h3(["top 10<br/>for each job"]):::estimate
     end
   end
   classDef data fill:#f1f3f4,stroke:#5f6368,color:#000;
