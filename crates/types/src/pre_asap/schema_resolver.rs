@@ -1,7 +1,7 @@
 //! The **SchemaResolver** — name resolution as an explicit pass.
 //!
 //! [`SchemaResolver::resolve_schema`] produces the complete, self-contained [`Schema`] every
-//! `ColumnId` in the canonical DAG indexes into. [`resolve`](super::resolve)
+//! `FieldId` in the canonical tree indexes into. [`resolve`](super::resolve)
 //! then becomes purely structural: it threads the SchemaResolver's schema and
 //! positional resolution downstream is **total**.
 //!
@@ -69,10 +69,10 @@ impl<C: SchemaCatalog> SchemaResolver<C> {
     /// Resolve the complete [`Schema`] in scope for a query rooted at `dag`.
     ///
     /// Contains the time axis, the synthetic `value` column, and one column
-    /// per distinct name referenced anywhere in the DAG — so positional
-    /// `ColumnId` resolution downstream is total.
-    pub fn resolve_schema(&self, dag: &UnresolvedQueryExpr) -> Schema {
-        self.resolve_schema_with_inherited(dag, &[])
+    /// per distinct name referenced anywhere in the tree — so positional
+    /// `FieldId` resolution downstream is total.
+    pub fn resolve_schema(&self, tree: &UnresolvedQueryExpr) -> Schema {
+        self.resolve_schema_with_inherited(tree, &[])
     }
 
     /// Like [`resolve_schema`](Self::resolve_schema), but also seeds `inherited` label names that are

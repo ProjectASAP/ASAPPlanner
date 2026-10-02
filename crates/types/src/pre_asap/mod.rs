@@ -3,7 +3,7 @@
 //! - [`query_expr`] — the canonical, language- and deployment-independent
 //!   intent algebra: one recursive [`QueryExpr`] DAG (relational operators
 //!   *and* scalar expression shapes both, since issue #205) + [`AggIntent`],
-//!   generic over the column-reference state (positional [`ColumnId`] once
+//!   generic over the column-reference state (positional [`FieldId`] once
 //!   bound, name-based [`ColumnRef`] before).
 //! - [`agg_intent`] — the aggregation-intent vocabulary.
 //! - [`expr_ir`] — the [`ColumnRef`] column-reference type and the scalar
@@ -11,8 +11,8 @@
 //!   [`QueryExpr`]'s scalar variants are built from.
 //! - [`schema`] — the per-edge [`Schema`] every node carries.
 //! - [`schema_resolver`] / [`column_resolution`] — name resolution: turn a `ColumnRef`
-//!   into a positional `ColumnId` against an in-scope [`Schema`].
-//! - [`resolve`] — binds a whole front-end-emitted [`UnresolvedQueryExpr`] DAG to
+//!   into a positional `FieldId` against an in-scope [`Schema`].
+//! - [`resolve`] — binds a whole front-end-emitted [`UnresolvedQueryExpr`] tree to
 //!   canonical [`ResolvedQueryExpr`] (issue #179): both front ends
 //!   (`asap-frontend-promql`, `asap-frontend-sql`) construct `UnresolvedQueryExpr`
 //!   directly during their own `interpret` step and call
@@ -60,5 +60,5 @@ pub use query_expr::{
     WindowFrame, WindowFrameBound, WindowFrameOffset, WindowFrameUnits, WindowFuncKind,
 };
 pub use resolve::{resolve_root, ResolveDAGError};
-pub use schema::{ColumnId, DataType, Field, FieldDataType, Schema};
+pub use schema::{DataType, Field, FieldDataType, FieldId, Schema};
 pub use schema_resolver::{SchemaCatalog, SchemaResolver, UsageDerivedCatalog};

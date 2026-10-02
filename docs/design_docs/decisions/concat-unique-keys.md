@@ -123,7 +123,7 @@ for why it's fine to ship unused.
   adds `(discriminator, inner_key)` as the sole unique key, trusting the
   caller's claim without checking it.
 - `resolve.rs`'s `Concat` arm resolves a pre-bind (`ColumnRef`) discriminator
-  key into its post-bind (`ColumnId`) equivalent against the first resolved
+  key into its post-bind (`FieldId`) equivalent against the first resolved
   branch's own output schema — the same schema `output_schema()` derives the
   merged shape from — so the feature works correctly end-to-end for a future
   caller upstream of `resolve_root`, even though no such caller exists yet.
@@ -243,9 +243,9 @@ accuracy issue. All three are fixed on the same PR:
    the `Concat` arm now pushes `key.discriminator()` and every
    `key.inner_key()` column into the walk, mirroring `Dedup.cols` exactly.
 
-2. **Resolved `ColumnId`s in `discriminator_unique_key` could go stale after
+2. **Resolved `FieldId`s in `discriminator_unique_key` could go stale after
    `canonicalize()` runs.** `resolve_root_with_inherited` calls `resolve()`
-   first — which resolves the key's `ColumnRef`s into `ColumnId`s against
+   first — which resolves the key's `ColumnRef`s into `FieldId`s against
    `children.first()`'s output schema *as it stood at that point* — then
    `canonicalize()` runs afterward and can restructure that same first
    branch: `try_promote_heavy_hitter` and `try_rewrite_rownumber_topk` both
@@ -253,7 +253,7 @@ accuracy issue. All three are fixed on the same PR:
    differently-shaped `Aggregate`, anywhere within the branch (not only at
    its own top level — the walk is recursive), potentially changing its
    column count/order. `output_schema()` read the previously-resolved
-   `ColumnId`s with no consistency check, so a future branch matching one of
+   `FieldId`s with no consistency check, so a future branch matching one of
    these rewrite triggers could silently produce a wrong `unique_keys` claim
    — a wrong query answer, not a missed optimization (per `cse.rs`'s own
    module doc). Fixed in `canon()` (`canonicalize.rs`): before recursing
@@ -264,7 +264,7 @@ accuracy issue. All three are fixed on the same PR:
    (`Schema` is `PartialEq`/`Eq`); any difference at all — not just a
    column-count/type change, since a same-shaped-but-different schema is
    just as unsafe to trust positionally — drops the key (`None`) rather
-   than risk keeping a `ColumnId` that now points at the wrong column or is
+   than risk keeping a `FieldId` that now points at the wrong column or is
    out of bounds. The key is never *re-derived* by guessing at name or
    position: the two rewrites don't preserve column identity in a way
    that's safe to infer, so dropping is the only sound outcome once the

@@ -58,7 +58,7 @@ operator inputs and scalar query-result references use `Rc<OperatorNode>`.
 `NonASAPOp` is the payload of an ordinary operator, not a second DAG-node type.
 `BinaryOp` likewise uses the single `BinaryOperator` payload specified there.
 
-Names are resolved to `ColumnId` before constructing these nodes. Parsing and
+Names are resolved to `FieldId` before constructing these nodes. Parsing and
 unresolved `ColumnRef` handling remain frontend concerns; no alternative generic
 operator definition is proposed here. These wrappers belong to operator fields
 and use the `ScalarExpr` defined in §2.2:
@@ -100,12 +100,12 @@ time of that whole input. Existing signed offsets and `AtModifier` anchors remai
 Scalar recursion uses owned `Box` and `Vec` children. The only plan references are
 explicit operations that consume a query result to compute a value. Those edges
 remain visible to plan traversal and costing; they cannot hide a separate plan.
-The definitions below use resolved `ColumnId`s and the common `OperatorNode`;
+The definitions below use resolved `FieldId`s and the common `OperatorNode`;
 there is no separate pre-ASAP scalar representation.
 
 ```rust
 enum ScalarExpr {
-    Column(ColumnId),
+    Column(FieldId),
     Literal(ScalarValue),
     Negative { expr: Box<ScalarExpr>, semantics: ExprSemantics },
     Compare {

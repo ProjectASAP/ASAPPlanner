@@ -366,7 +366,7 @@ use asap_types::pre_asap::query_expr::any_measure_filtered;
 use asap_types::pre_asap::query_expr::{
     BinaryOpKind, Predicate, QueryExpr, QueryExprError, Reduction,
 };
-use asap_types::pre_asap::schema::ColumnId;
+use asap_types::pre_asap::schema::FieldId;
 use asap_types::types::AccuracyTarget;
 use asap_types::workload::{DataWorkload, QueryRecurrence, QueryWorkload, RepeatedDemand};
 use std::rc::Rc;
@@ -3050,7 +3050,7 @@ fn construct_summary_agg(
     }
 
     // `reduction` is carried onto `SummaryAgg` verbatim — not flattened to a
-    // bare `Vec<ColumnId>` — so `SummaryExecutor::find_candidates` can tell
+    // bare `Vec<FieldId>` — so `SummaryExecutor::find_candidates` can tell
     // a genuine empty-`by` reduction apart from a per-entity shape with no
     // grouping concept at all (issue #163). `construct_summary_agg` is the
     // single place that decides this; nothing downstream re-derives it.
@@ -5112,8 +5112,8 @@ fn normalize_cross_input_equi_predicate(
     else {
         return None;
     };
-    let is_left = |id: ColumnId| id < left_width;
-    let is_right = |id: ColumnId| left_width <= id && id < total_width;
+    let is_left = |id: FieldId| id < left_width;
+    let is_right = |id: FieldId| left_width <= id && id < total_width;
     let (left_id, right_id) = if is_left(*left_id) && is_right(*right_id) {
         (*left_id, *right_id)
     } else if is_right(*left_id) && is_left(*right_id) {
@@ -7185,7 +7185,7 @@ mod tests {
         assert!(space.enumerate_candidate_dags(0).is_err());
     }
 
-    fn equi_pred(left: ColumnId, right: ColumnId) -> Predicate {
+    fn equi_pred(left: FieldId, right: FieldId) -> Predicate {
         Predicate(Rc::new(QueryExpr::Compare {
             left: Rc::new(QueryExpr::Column(left)),
             op: asap_types::pre_asap::CompareOpKind::Eq,
@@ -10108,7 +10108,7 @@ mod tests {
     /// `quantile_over_time(...)`) realizes to `SummaryAgg { reduction:
     /// PerEntity, .. }` — proving the pre-ASAP `Reduction` this crate
     /// already computes (issue #165) is carried onto the post-ASAP node
-    /// verbatim, not flattened back into an ambiguous bare `Vec<ColumnId>`.
+    /// verbatim, not flattened back into an ambiguous bare `Vec<FieldId>`.
     #[test]
     fn bare_per_series_aggregate_realizes_summary_agg_with_per_entity_reduction() {
         use std::time::Duration;
@@ -10132,7 +10132,7 @@ mod tests {
     /// Issue #163, case 2: an aggregation operator explicitly invoked with
     /// no grouping keys realizes to `SummaryAgg {
     /// reduction: Reduce(vec![]), .. }` — byte-identical `by: []` to the
-    /// previous test at the old `Vec<ColumnId>` shape; `reduction` is what
+    /// previous test at the old `Vec<FieldId>` shape; `reduction` is what
     /// tells them apart now.
     #[test]
     fn explicit_empty_by_aggregate_realizes_summary_agg_with_reduce_reduction() {

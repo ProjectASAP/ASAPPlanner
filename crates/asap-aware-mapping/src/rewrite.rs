@@ -64,7 +64,7 @@ use asap_types::pre_asap::expr_ir::ArithmeticOpKind;
 use asap_types::pre_asap::query_expr::{
     any_measure_filtered, BinaryOpKind, ProjectItem, QueryExpr, Reduction,
 };
-use asap_types::pre_asap::schema::{ColumnId, DataType};
+use asap_types::pre_asap::schema::{DataType, FieldId};
 use asap_types::types::AccuracyTarget;
 
 use crate::replacement::{Replacement, ReplacementStrategy, ReplacementSubDAG, TargetSubDAG};
@@ -74,7 +74,7 @@ use crate::replacement::{Replacement, ReplacementStrategy, ReplacementSubDAG, Ta
 /// the module docs' "Scope" for why `without(...)`/`PerEntity` are
 /// excluded). Returns the grouping key count and the summed column so
 /// [`build_rewrite`] doesn't have to re-match.
-fn avg_rewrite_target(node: &QueryExpr) -> Option<(usize, Option<ColumnId>)> {
+fn avg_rewrite_target(node: &QueryExpr) -> Option<(usize, Option<FieldId>)> {
     let QueryExpr::Aggregate {
         reduction,
         measures,
@@ -431,7 +431,7 @@ mod tests {
         }
     }
 
-    fn avg_agg(by: Vec<ColumnId>, col: Option<ColumnId>, child: QueryExpr) -> QueryExpr {
+    fn avg_agg(by: Vec<FieldId>, col: Option<FieldId>, child: QueryExpr) -> QueryExpr {
         QueryExpr::Aggregate {
             reduction: Reduction::by(by),
             measures: vec![AggIntent::Avg { col }],

@@ -4,7 +4,7 @@
 //!
 //! Cross-series aggregates lower to a single `Aggregate` node with no
 //! `TimeRange` child (range functions use `TimeRange` — see `time_range.rs`).
-//! Group keys land on `Aggregate.by` as positional `ColumnId`s.
+//! Group keys land on `Aggregate.by` as positional `FieldId`s.
 //! Single-stat PromQL aggregates always get `output_names: [""]` (no alias)
 //! and `having: None`.
 

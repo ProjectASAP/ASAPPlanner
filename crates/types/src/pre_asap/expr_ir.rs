@@ -8,7 +8,7 @@
 //! DAG, not two type families joined by wrappers — generic over the same
 //! column-reference state `C` the rest of `QueryExpr` already carries
 //! (issue #179): [`ColumnRef`] (name-based, front-end-emitted) or
-//! [`ColumnId`](super::schema::ColumnId) (positional, once bound).
+//! [`FieldId`](super::schema::FieldId) (positional, once bound).
 //!
 //! What's left here is the vocabulary those scalar variants are built from —
 //! [`ScalarValue`], [`CompareOpKind`], [`ArithmeticOpKind`] — the **union** of what the two
@@ -21,7 +21,7 @@ use serde::{Deserialize, Serialize};
 /// A name-based column reference — the front-end-emitted, unresolved state of
 /// [`QueryExpr::Column`](super::query_expr::QueryExpr::Column) (`C =
 /// ColumnRef`); the [`SchemaResolver`](super::schema_resolver::SchemaResolver) resolves it to a
-/// positional [`ColumnId`](super::schema::ColumnId). Includes the two
+/// positional [`FieldId`](super::schema::FieldId). Includes the two
 /// PromQL-conventional synthetic columns.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ColumnRef {

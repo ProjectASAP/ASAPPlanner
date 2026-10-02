@@ -89,7 +89,7 @@ introduce state construction and readout.
 
 `CurrentTimestamp`, `EvalTimestamp` and `PromqlScalarFromVector` belong to
 `ScalarExpr`, defined in the [companion proposal](decoupling_op_and_expr.md#22-scalar-expressions).
-A constant needs no bridge operator. The sketches use resolved `ColumnId`s and
+A constant needs no bridge operator. The sketches use resolved `FieldId`s and
 `Schema`; name resolution precedes construction of these nodes.
 
 `NonASAPOp` retains the query semantics needed before and after optimization:
@@ -113,7 +113,7 @@ enum NonASAPOp {
     Concat {
         children: Vec<Rc<OperatorNode>>, discriminator_unique_key: Option<ConcatDiscriminatorKey>,
     },
-    Dedup { child: Rc<OperatorNode>, cols: Vec<ColumnId> },
+    Dedup { child: Rc<OperatorNode>, cols: Vec<FieldId> },
     Sort { child: Rc<OperatorNode>, keys: Vec<SortKey>, partition_by: GroupKeys },
     Limit { child: Rc<OperatorNode>, n: Option<usize>, offset: usize, partition_by: GroupKeys },
     BinaryOp {
@@ -168,9 +168,9 @@ enum ASAPOp {
     // Reserved operations; semantics and support require further design.
     SummaryMerge { children: Vec<Rc<OperatorNode>> },
     SummarySubtract { left: Rc<OperatorNode>, right: Rc<OperatorNode> },
-    SummaryDelete { summary_input: Rc<OperatorNode>, key: ColumnId },
+    SummaryDelete { summary_input: Rc<OperatorNode>, key: FieldId },
     SummaryJoin {
-        outer: Rc<OperatorNode>, inner: Rc<OperatorNode>, key: ColumnId, family: FieldDataType,
+        outer: Rc<OperatorNode>, inner: Rc<OperatorNode>, key: FieldId, family: FieldDataType,
     },
     Extension { child: Rc<OperatorNode>, name: String },
 }
@@ -255,7 +255,7 @@ Scan node: OperatorNode
 ```
 
 This is abbreviated structural notation: `Column` and `Literal` above are
-`ScalarExpr` variants; column names stand for resolved `ColumnId`s. The arithmetic
+`ScalarExpr` variants; column names stand for resolved `FieldId`s. The arithmetic
 and comparison use `ExprSemantics::Sql`. The aggregate has no grouping keys and
 names its output `sum_bytes`; the projection names its output `total_bytes`.
 
@@ -351,7 +351,7 @@ enum ExecutionTiming {
 `ResultGuarantee` retains its existing definition. `Operator`, `OperatorNode`,
 `OperatorResultKind` and the common node layout are proposed; `Schema` is unified
 as specified below. This is a resolved-plan interface: name resolution must finish
-before producing these concrete `ColumnId`/`Schema` nodes.
+before producing these concrete `FieldId`/`Schema` nodes.
 
 | Plan stage | Required property state |
 |---|---|
@@ -381,8 +381,8 @@ struct Field {
 
 struct Schema {
     fields: Vec<Field>,
-    time_index: Option<ColumnId>,
-    unique_keys: Vec<Vec<ColumnId>>,
+    time_index: Option<FieldId>,
+    unique_keys: Vec<Vec<FieldId>>,
     closed: bool,
 }
 

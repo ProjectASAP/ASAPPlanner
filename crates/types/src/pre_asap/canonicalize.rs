@@ -38,13 +38,13 @@ pub fn canonicalize(mut expr: QueryExpr) -> QueryExpr {
 
 fn canon(expr: &mut QueryExpr) {
     // A `Concat` asserting a caller-proven `discriminator_unique_key` (issue
-    // #228) had that key's `ColumnId`s resolved, in `resolve.rs`, against
+    // #228) had that key's `FieldId`s resolved, in `resolve.rs`, against
     // exactly the first branch's output schema *as it stood before this
     // pass ran*. `try_promote_additive_top_ranking`/`try_rewrite_rownumber_topk`
     // below can restructure that branch (anywhere within it — not only at
     // its own top level, since the same recursive walk can rewrite a node
     // nested under a pass-through wrapper too) into a shape with a
-    // different output schema, which would leave those `ColumnId`s
+    // different output schema, which would leave those `FieldId`s
     // pointing at the wrong column, or out of bounds, of the
     // post-canonicalize schema. Snapshot the schema the discriminator key
     // was actually resolved against, right here, before recursing into the
@@ -475,10 +475,10 @@ mod tests {
 
     // ── Concat's discriminator_unique_key vs. canonicalize (issue #228 review) ──
     //
-    // `resolve.rs` resolves `discriminator_unique_key`'s `ColumnId`s against
+    // `resolve.rs` resolves `discriminator_unique_key`'s `FieldId`s against
     // the first branch's *pre-canonicalize* output schema. If canonicalize
     // then restructures that branch (heavy-hitter promotion, the
-    // `ROW_NUMBER()` top-k rewrite), those `ColumnId`s can end up pointing at
+    // `ROW_NUMBER()` top-k rewrite), those `FieldId`s can end up pointing at
     // the wrong column — or out of bounds — of the new schema. The two tests
     // below pin the fix: the key is dropped whenever the branch's schema
     // actually changed, and survives untouched otherwise. Never guessed at.

@@ -21,10 +21,10 @@ use thiserror::Error;
 
 use super::agg_intent::AggIntent;
 use super::expr_ir::{ArithmeticOpKind, ColumnRef, CompareOpKind, ScalarValue};
-use super::schema::{ColumnId, DataType, Field, FieldDataType, Schema};
+use super::schema::{DataType, Field, FieldDataType, FieldId, Schema};
 
-/// The column-reference resolution state a [`QueryExpr<C>`] DAG carries —
-/// [`ColumnId`] (the default, and what the bare `QueryExpr` name has always
+/// The column-reference resolution state a [`QueryExpr<C>`] tree carries —
+/// [`FieldId`] (the default, and what the bare `QueryExpr` name has always
 /// meant) once the [`SchemaResolver`](super::schema_resolver::SchemaResolver) has resolved every
 /// reference positionally, or the front-end-emitted, name-based [`ColumnRef`]
 /// before binding. The only place the two states differ in *shape* rather
@@ -41,7 +41,7 @@ pub trait ColState:
     type ScanSchema: Clone + std::fmt::Debug + PartialEq + Serialize + for<'de> Deserialize<'de>;
 }
 
-impl ColState for ColumnId {
+impl ColState for FieldId {
     type ScanSchema = Schema;
 }
 
@@ -55,7 +55,7 @@ pub enum QueryExprError {
     #[error("invalid scalar function signature: {0}")]
     InvalidScalarSignature(String),
     #[error("by-column id {0} out of range (input has {1} columns)")]
-    InvalidGroupByColumn(ColumnId, usize),
+    InvalidGroupByColumn(FieldId, usize),
     #[error("Concat requires at least one child")]
     EmptyConcat,
     /// [`QueryExpr::output_schema`] called on (or reached, while recursing, a
@@ -92,10 +92,10 @@ pub enum QueryExprError {
 /// `PromqlSeriesSample` groupings are always `by`.
 ///
 /// Serialises as a bare array for the (overwhelmingly common) `by` case —
-/// wire-compatible with the `Vec<ColumnId>` this field held before — and as
+/// wire-compatible with the `Vec<FieldId>` this field held before — and as
 /// `{"without": [...]}` for the exclusion case.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct GroupKeys<C = ColumnId> {
+pub struct GroupKeys<C = FieldId> {
     keys: Vec<C>,
     without: bool,
 }
@@ -430,7 +430,7 @@ pub enum SampleKind {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(bound(serialize = "C: ColState", deserialize = "C: ColState"))]
-pub struct SortKey<C: ColState = ColumnId> {
+pub struct SortKey<C: ColState = FieldId> {
     pub expr: QueryExpr<C>,
     pub ascending: bool,
     pub nulls_first: bool,
@@ -505,7 +505,7 @@ pub enum GroupSide {
 /// part of it — the box is what makes the recursive type's size finite there.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(bound(serialize = "C: ColState", deserialize = "C: ColState"))]
-pub struct Predicate<C: ColState = ColumnId>(pub Rc<QueryExpr<C>>);
+pub struct Predicate<C: ColState = FieldId>(pub Rc<QueryExpr<C>>);
 
 /// Whether any entry of an `Aggregate.filters` vector is set — the shape
 /// no binding rule accepts yet (issue #466): a filtered measure stays
@@ -517,7 +517,7 @@ pub fn any_measure_filtered<C: ColState>(filters: &[Option<Predicate<C>>]) -> bo
 /// One item in a SELECT projection list.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(bound(serialize = "C: ColState", deserialize = "C: ColState"))]
-pub struct ProjectItem<C: ColState = ColumnId> {
+pub struct ProjectItem<C: ColState = FieldId> {
     pub alias: Option<String>,
     pub expr: QueryExpr<C>,
 }
@@ -531,7 +531,7 @@ pub struct ProjectItem<C: ColState = ColumnId> {
 /// whether a grouping-key list happens to be empty or from a neighboring
 /// node's shape. See design proposal #165.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub enum Reduction<C = ColumnId> {
+pub enum Reduction<C = FieldId> {
     /// Collapses input rows via `by` — `by`/`without` semantics are exactly
     /// [`GroupKeys`]'s. May still collapse every row into one (an empty,
     /// non-`without` `by`) — that's a genuine reduction with zero grouping
@@ -623,7 +623,7 @@ impl<C> Reduction<C> {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 #[serde(bound(serialize = "C: ColState", deserialize = "C: ColState"))]
-pub struct ConcatDiscriminatorKey<C: ColState = ColumnId> {
+pub struct ConcatDiscriminatorKey<C: ColState = FieldId> {
     discriminator: C,
     inner_key: Vec<C>,
 }
@@ -650,9 +650,9 @@ impl<C: ColState> ConcatDiscriminatorKey<C> {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(bound(serialize = "C: ColState", deserialize = "C: ColState"))]
-pub enum QueryExpr<C: ColState = ColumnId> {
+pub enum QueryExpr<C: ColState = FieldId> {
     /// Outermost leaf. `schema` is the **binding schema** — the resolved column
-    /// set every positional `ColumnId` in the DAG indexes into, *not* a full
+    /// set every positional `FieldId` in the tree indexes into, *not* a full
     /// description of the runtime row — once bound (`schema: Schema`, always
     /// present: the [`SchemaResolver`](super::schema_resolver) is total). Before binding, a
     /// front-end-emitted `Scan` (`C = ColumnRef`) knows it only when the front
@@ -959,7 +959,7 @@ pub enum QueryExpr<C: ColState = ColumnId> {
     // has to get right structurally anyway (a `Filter` is never built with an
     // operator sub-DAG as its `pred`).
     /// A column reference — unresolved [`ColumnRef`] (front-end-emitted, `C =
-    /// ColumnRef`) or positional [`ColumnId`] (once bound, `C = ColumnId`).
+    /// ColumnRef`) or positional [`FieldId`] (once bound, `C = FieldId`).
     Column(C),
     /// A constant literal value.
     Literal(ScalarValue),
@@ -1146,12 +1146,12 @@ impl<C: ColState> QueryExpr<C> {
     }
 }
 
-/// The canonical, positional, resolved DAG — what the bare `QueryExpr` name
-/// has always meant (the default `C = ColumnId`). Every existing consumer
+/// The canonical, positional, resolved tree — what the bare `QueryExpr` name
+/// has always meant (the default `C = FieldId`). Every existing consumer
 /// keeps using `QueryExpr` unparameterized; this alias exists only to name
 /// the resolved state explicitly at a use site that also wants to name
 /// [`UnresolvedQueryExpr`] nearby.
-pub type ResolvedQueryExpr = QueryExpr<ColumnId>;
+pub type ResolvedQueryExpr = QueryExpr<FieldId>;
 
 /// The front-end-emitted, name-based, unresolved DAG —
 /// `QueryExpr<ColumnRef>`: front ends construct this directly during their
@@ -1164,7 +1164,7 @@ pub type UnresolvedQueryExpr = QueryExpr<ColumnRef>;
 // only on the resolved instantiation, not `impl<C: ColState> QueryExpr<C>`.
 // Same reasoning as `AggIntent`'s `output_column`/`requires`/`is_per_series`
 // (#205): a schema-shaped property that is only meaningful post-binding.
-impl QueryExpr<ColumnId> {
+impl QueryExpr<FieldId> {
     /// Infer a scalar expression against its input relation using the same
     /// canonical rules as projection schema derivation.
     pub fn scalar_type(&self, input: &Schema) -> Result<(DataType, bool), QueryExprError> {
@@ -1668,7 +1668,7 @@ pub fn aggregate_output_schema(
 /// so the schema can't freeze to closed and claims no unique key (issue #39).
 fn without_output_schema(
     in_schema: &Schema,
-    excluded: &[ColumnId],
+    excluded: &[FieldId],
     measures: &[AggIntent],
     output_names: &[String],
 ) -> Result<Schema, QueryExprError> {
@@ -1734,7 +1734,7 @@ fn without_output_schema(
 /// must be one of the scalar variants (issue #205) — an operator variant here
 /// is a construction bug, not a shape this needs to handle silently.
 fn infer_expr_type(
-    expr: &QueryExpr<ColumnId>,
+    expr: &QueryExpr<FieldId>,
     schema: &Schema,
 ) -> Result<(DataType, bool), QueryExprError> {
     Ok(match expr {
@@ -1852,7 +1852,7 @@ fn infer_expr_type(
 
 /// Default output-column name for a projection item with no explicit alias:
 /// a bare column keeps its (schema) name; anything else gets `col_{i}`.
-fn default_proj_name(expr: &QueryExpr<ColumnId>, idx: usize, schema: &Schema) -> String {
+fn default_proj_name(expr: &QueryExpr<FieldId>, idx: usize, schema: &Schema) -> String {
     match expr {
         QueryExpr::Column(id) => schema
             .fields
@@ -1922,11 +1922,7 @@ mod tests {
         );
     }
 
-    fn scan(
-        columns: Vec<Field>,
-        time_index: Option<ColumnId>,
-        uk: Vec<Vec<ColumnId>>,
-    ) -> QueryExpr {
+    fn scan(columns: Vec<Field>, time_index: Option<FieldId>, uk: Vec<Vec<FieldId>>) -> QueryExpr {
         QueryExpr::Scan {
             source: Source::Table {
                 table_ref: "t".into(),
@@ -2638,7 +2634,7 @@ mod tests {
     /// different DAG position. `as_promql_scalar` is the round-trip inverse.
     #[test]
     fn promql_scalar_bridges_a_literal_float_at_an_operator_position() {
-        let bridge = QueryExpr::<ColumnId>::promql_scalar(2.5);
+        let bridge = QueryExpr::<FieldId>::promql_scalar(2.5);
         assert_eq!(
             bridge,
             QueryExpr::PromqlScalarBridge(Rc::new(QueryExpr::Literal(ScalarValue::Float64(2.5))))
@@ -2649,7 +2645,7 @@ mod tests {
         // its native (unwrapped, no row schema) scalar-sub-language position —
         // no longer a different variant, just not bridged to this DAG
         // position.
-        let sql_literal = QueryExpr::<ColumnId>::Literal(ScalarValue::Float64(2.5));
+        let sql_literal = QueryExpr::<FieldId>::Literal(ScalarValue::Float64(2.5));
         assert_eq!(bridge.as_promql_scalar(), Some(2.5));
         assert_ne!(
             bridge, sql_literal,
@@ -2670,7 +2666,7 @@ mod tests {
     /// duplicate variants was used, only by whether the wrapper is present.
     #[test]
     fn row_schema_rides_on_the_bridge_wrapper_not_the_literal_variant() {
-        let bridged = QueryExpr::<ColumnId>::promql_scalar(42.0);
+        let bridged = QueryExpr::<FieldId>::promql_scalar(42.0);
         let schema = bridged.output_schema().expect("bridge has a row schema");
         assert_eq!(schema.fields.len(), 1);
         assert_eq!(schema.fields[0].name, "value");
@@ -2681,7 +2677,7 @@ mod tests {
         // `Compare`/`Arithmetic` operand would occupy) has no row schema of
         // its own — it's a construction bug to call `output_schema` on it
         // directly, caught as `ScalarHasNoRowSchema` rather than panicking.
-        let bare = QueryExpr::<ColumnId>::Literal(ScalarValue::Float64(42.0));
+        let bare = QueryExpr::<FieldId>::Literal(ScalarValue::Float64(42.0));
         assert!(matches!(
             bare.output_schema(),
             Err(QueryExprError::ScalarHasNoRowSchema)

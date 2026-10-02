@@ -25,7 +25,7 @@ use crate::post_asap::sketch::{
 ///
 /// Kept as a named type so downstream code can pattern on the intent ("this
 /// is a column position, not just any number").
-pub type ColumnId = usize;
+pub type FieldId = usize;
 
 /// One field of a [`Schema`]: `name + dtype + nullable`, plus an optional
 /// table qualifier. The struct describes a column and holds none of its data.
@@ -212,7 +212,7 @@ pub enum DataType {
 /// Per-edge schema. Flowing between any two operators, on every node's
 /// input and output.
 ///
-/// `unique_keys` is metadata for reuse-aware planning: each inner `Vec<ColumnId>`
+/// `unique_keys` is metadata for reuse-aware planning: each inner `Vec<FieldId>`
 /// is a set of column indices that together uniquely identify rows. The
 /// outer `Vec` allows multiple unique-key sets (primary key + another
 /// unique constraint). Populated by per-node input/output spec —
@@ -226,12 +226,12 @@ pub struct Schema {
     /// Index into `fields` for the time axis, if any. PromQL leaves
     /// always carry one; SQL leaves may or may not.
     #[serde(default)]
-    pub time_index: Option<ColumnId>,
+    pub time_index: Option<FieldId>,
     /// Unique-key sets — each inner vec is a tuple of column indices
     /// that together uniquely identifies a row. Empty `Vec` means
     /// "no provable unique constraint" (the conservative default).
     #[serde(default)]
-    pub unique_keys: Vec<Vec<ColumnId>>,
+    pub unique_keys: Vec<Vec<FieldId>>,
     /// Whether this schema **completely enumerates** the columns at this point.
     ///
     /// - `true` (**closed**): there are no columns beyond these — a catalog-backed
@@ -265,9 +265,9 @@ struct SchemaWire {
     fields: Option<Vec<FieldWire>>,
     columns: Option<Vec<FieldWire>>,
     #[serde(default)]
-    time_index: Option<ColumnId>,
+    time_index: Option<FieldId>,
     #[serde(default)]
-    unique_keys: Vec<Vec<ColumnId>>,
+    unique_keys: Vec<Vec<FieldId>>,
     closed: Option<bool>,
 }
 
@@ -426,8 +426,8 @@ impl Schema {
     /// inferred unique keys (e.g. PromQL leaves: `[time_index, label_set]`).
     pub fn with_time_index(
         fields: Vec<Field>,
-        time_index: ColumnId,
-        unique_keys: Vec<Vec<ColumnId>>,
+        time_index: FieldId,
+        unique_keys: Vec<Vec<FieldId>>,
     ) -> Self {
         Self {
             fields,
@@ -440,7 +440,7 @@ impl Schema {
     /// The schema of a summary-planning node: `fields` and a time axis, no
     /// unique-key claim, closed. The shape every post-ASAP operator output
     /// carried before pre- and post-ASAP schemas were one type.
-    pub fn lifted(fields: Vec<Field>, time_index: Option<ColumnId>) -> Self {
+    pub fn lifted(fields: Vec<Field>, time_index: Option<FieldId>) -> Self {
         Self {
             fields,
             time_index,
@@ -455,14 +455,14 @@ impl Schema {
     }
 
     /// Look up a field by name (first match). `None` if not present.
-    pub fn column_id(&self, name: &str) -> Option<ColumnId> {
+    pub fn column_id(&self, name: &str) -> Option<FieldId> {
         self.fields.iter().position(|c| c.name == name)
     }
 
     /// Look up a field by `(table, name)` qualifier — disambiguates columns
     /// that share a `name` across a join (`a.k` vs `b.k`). `None` if no field
     /// has both that qualifier and name.
-    pub fn column_id_qualified(&self, table: &str, name: &str) -> Option<ColumnId> {
+    pub fn column_id_qualified(&self, table: &str, name: &str) -> Option<FieldId> {
         self.fields
             .iter()
             .position(|c| c.name == name && c.table.as_deref() == Some(table))
@@ -478,7 +478,7 @@ impl Schema {
     /// Append `cols` as an additional unique-key set if not already present.
     /// Used by `Dedup { cols }`: "the input schema with `unique_keys`
     /// tightened to include `cols`".
-    pub fn add_unique_key(&mut self, cols: Vec<ColumnId>) {
+    pub fn add_unique_key(&mut self, cols: Vec<FieldId>) {
         if !self.unique_keys.contains(&cols) {
             self.unique_keys.push(cols);
         }

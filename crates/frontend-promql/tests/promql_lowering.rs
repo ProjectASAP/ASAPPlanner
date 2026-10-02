@@ -605,7 +605,7 @@ fn topk_over_count_is_heavy_hitter_topk() {
     else {
         panic!("expected Aggregate with TopK, got {qe:?}");
     };
-    // `service` is the only group key → resolved to a positional ColumnId.
+    // `service` is the only group key → resolved to a positional FieldId.
     assert_eq!(reduction.expect_reduce().len(), 1);
     assert!(matches!(
         measures.as_slice(),

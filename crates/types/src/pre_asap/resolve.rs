@@ -1,5 +1,5 @@
 //! Resolve a front-end-emitted, unresolved [`UnresolvedQueryExpr`] (`QueryExpr<ColumnRef>`)
-//! into the canonical, positional [`ResolvedQueryExpr`] (`QueryExpr<ColumnId>`).
+//! into the canonical, positional [`ResolvedQueryExpr`] (`QueryExpr<FieldId>`).
 //!
 //! Both front ends (`asap-frontend-promql`, `asap-frontend-sql`) construct
 //! canonical `QueryExpr` shapes directly during their own `interpret` step
@@ -10,9 +10,9 @@
 //! "mechanical, schema-dependent substitution" #179 describes: a single
 //! generic, shape-preserving walk — every [`UnresolvedQueryExpr`] variant maps to the
 //! identical [`ResolvedQueryExpr`] variant — that resolves every [`ColumnRef`] to
-//! the [`SchemaResolver`](super::schema_resolver::SchemaResolver)-computed positional [`ColumnId`].
+//! the [`SchemaResolver`](super::schema_resolver::SchemaResolver)-computed positional [`FieldId`].
 //!
-//! ## Why positional `ColumnId`, not just carrying names all the way through (issue #216)
+//! ## Why positional `FieldId`, not just carrying names all the way through (issue #216)
 //!
 //! A mature query engine can legitimately choose either design — DataFusion's
 //! own logical plan (what `asap-frontend-sql` walks to build its `QueryExpr`)
@@ -28,7 +28,7 @@
 //!    (`crates/frontend-sql/tests/sql_lowering.rs`) exists specifically because
 //!    `metrics.service` and `hosts.service` are both just `"service"` once their
 //!    schemas are concatenated. A bare name is ambiguous the moment two sources
-//!    share one; `ColumnId` is what makes "the second `service`, position 4, not
+//!    share one; `FieldId` is what makes "the second `service`, position 4, not
 //!    the first" a fact recorded once, instead of a lookup redone at every use site.
 //! 2. **A name's meaning changes going up the DAG.** `Project` renames/aliases,
 //!    `Aggregate` collapses columns and introduces synthetic ones, `Join`
@@ -38,7 +38,7 @@
 //!    pins each reference to "this exact column of this exact node's
 //!    already-derived output schema," so nothing downstream re-derives that scope.
 //! 3. **It concentrates scoping logic in one place instead of ~6.** Every
-//!    downstream pass just compares/indexes `ColumnId`s — O(1), unambiguous. If
+//!    downstream pass just compares/indexes `FieldId`s — O(1), unambiguous. If
 //!    they worked on names instead, each would need its own qualifier-aware,
 //!    join-collision-aware name resolver, or risk silently binding to the wrong
 //!    `"service"`.
@@ -61,7 +61,7 @@ use super::query_expr::{
     aggregate_output_schema, any_measure_filtered, ConcatDiscriminatorKey, GroupKeys, Predicate,
     ProjectItem, QueryExprError, Reduction, ResolvedQueryExpr, SortKey, UnresolvedQueryExpr,
 };
-use super::schema::{ColumnId, Schema};
+use super::schema::{FieldId, Schema};
 use super::schema_resolver::SchemaResolver;
 
 /// Errors from resolving a canonical, unresolved [`UnresolvedQueryExpr`] DAG.
@@ -76,8 +76,8 @@ pub enum ResolveDAGError {
     Schema(#[from] QueryExprError),
 }
 
-/// Resolve a whole [`UnresolvedQueryExpr`] DAG rooted at `dag` into canonical
-/// [`ResolvedQueryExpr`]: binds every `ColumnRef` to a `ColumnId` via the
+/// Resolve a whole [`UnresolvedQueryExpr`] tree rooted at `tree` into canonical
+/// [`ResolvedQueryExpr`]: binds every `ColumnRef` to a `FieldId` via the
 /// [`SchemaResolver`], then [`canonicalize`](super::canonicalize::canonicalize)s the
 /// result.
 pub fn resolve_root(dag: &UnresolvedQueryExpr) -> Result<ResolvedQueryExpr, ResolveDAGError> {
@@ -474,11 +474,11 @@ fn inherited_names(schema: &Schema) -> Vec<String> {
 }
 
 /// Resolve a name-based [`GroupKeys<ColumnRef>`] into positional
-/// [`GroupKeys<ColumnId>`], preserving its `by`/`without` mode.
+/// [`GroupKeys<FieldId>`], preserving its `by`/`without` mode.
 fn resolve_group_keys(
     keys: &GroupKeys<ColumnRef>,
     schema: &Schema,
-) -> Result<GroupKeys<ColumnId>, ResolveError> {
+) -> Result<GroupKeys<FieldId>, ResolveError> {
     let ids = resolve_column_refs(keys.keys(), schema)?;
     Ok(if keys.is_without() {
         GroupKeys::without(ids)
@@ -488,7 +488,7 @@ fn resolve_group_keys(
 }
 
 /// Resolve a name-based [`Reduction<ColumnRef>`] into positional
-/// [`Reduction<ColumnId>`].
+/// [`Reduction<FieldId>`].
 ///
 /// Uses [`resolve_group_keys_promql`] rather than the strict
 /// [`resolve_group_keys`], unlike every other group-key site in `resolve`
@@ -506,7 +506,7 @@ fn resolve_group_keys(
 fn resolve_reduction(
     reduction: &Reduction<ColumnRef>,
     schema: &Schema,
-) -> Result<Reduction<ColumnId>, ResolveError> {
+) -> Result<Reduction<FieldId>, ResolveError> {
     Ok(match reduction {
         Reduction::Reduce(by) => {
             let ids = resolve_group_keys_promql(by.keys(), schema)?;
@@ -521,14 +521,14 @@ fn resolve_reduction(
 }
 
 /// Resolve a name-based [`AggIntent<ColumnRef>`] into positional
-/// [`AggIntent<ColumnId>`] — every `col: Option<ColumnRef>` resolves to
-/// `Option<ColumnId>` (`None` stays `None`, the sample-value convention);
+/// [`AggIntent<FieldId>`] — every `col: Option<ColumnRef>` resolves to
+/// `Option<FieldId>` (`None` stays `None`, the sample-value convention);
 /// every other field carries straight through unchanged.
 fn resolve_agg_intent(
     intent: &AggIntent<ColumnRef>,
     schema: &Schema,
-) -> Result<AggIntent<ColumnId>, ResolveError> {
-    let col = |c: &Option<ColumnRef>| -> Result<Option<ColumnId>, ResolveError> {
+) -> Result<AggIntent<FieldId>, ResolveError> {
+    let col = |c: &Option<ColumnRef>| -> Result<Option<FieldId>, ResolveError> {
         c.as_ref()
             .map(|r| resolve_column_ref(r, schema))
             .transpose()
@@ -821,7 +821,7 @@ mod tests {
     /// SchemaResolver's fallback schema wouldn't contain `phi` at all, and this
     /// `resolve_column_ref` call would fail `NotFound` for a column the
     /// caller correctly named. It must resolve cleanly, and the resolved
-    /// `ConcatDiscriminatorKey` must carry the *positional* `ColumnId`s of
+    /// `ConcatDiscriminatorKey` must carry the *positional* `FieldId`s of
     /// the branch's own (usage-derived) schema.
     #[test]
     fn resolve_root_seeds_and_resolves_an_otherwise_unreferenced_discriminator_column() {

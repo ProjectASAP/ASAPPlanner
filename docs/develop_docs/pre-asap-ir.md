@@ -65,7 +65,7 @@ list of aggregate intents (`measures`).
 
 - **`Reduce(GroupKeys)`** — a cross-row reduction: group by some columns, or group
   by every column *except* some listed ones. `GroupKeys` holds positional column references
-  (`ColumnId`s — indexes into the input schema, not column names) and carries a `by`/`without`
+  (`FieldId`s — indexes into the input schema, not column names) and carries a `by`/`without`
   flag, not just a plain list:
   - `by(keys)` — group by exactly these columns (SQL `GROUP BY`, PromQL `by(...)`).
   - `without(keys)` — group by every column *except* these (PromQL `without(...)`); the

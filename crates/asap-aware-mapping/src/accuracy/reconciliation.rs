@@ -394,7 +394,7 @@ mod tests {
     use asap_types::post_asap::SketchAlgorithm;
     use asap_types::pre_asap::cse::share_common_sub_dags;
     use asap_types::pre_asap::query_expr::{GroupKeys, Source};
-    use asap_types::pre_asap::schema::{ColumnId, DataType, Field, Schema};
+    use asap_types::pre_asap::schema::{DataType, Field, FieldId, Schema};
 
     /// `[ts(0), value(1), job(2)]`.
     /// A unique-keyed scan (`[ts]`) so `share_common_sub_dags` is actually
@@ -417,7 +417,7 @@ mod tests {
         })
     }
 
-    fn agg(by: Vec<ColumnId>, intent: AggIntent, child: &Rc<QueryExpr>) -> Rc<QueryExpr> {
+    fn agg(by: Vec<FieldId>, intent: AggIntent, child: &Rc<QueryExpr>) -> Rc<QueryExpr> {
         Rc::new(QueryExpr::Aggregate {
             reduction: Reduction::by(by),
             measures: vec![intent],
@@ -462,7 +462,7 @@ mod tests {
     fn without_quantile(
         q: f64,
         accuracy: AccuracyTarget,
-        excluded: Vec<ColumnId>,
+        excluded: Vec<FieldId>,
         child: &Rc<QueryExpr>,
     ) -> Rc<QueryExpr> {
         Rc::new(QueryExpr::Aggregate {

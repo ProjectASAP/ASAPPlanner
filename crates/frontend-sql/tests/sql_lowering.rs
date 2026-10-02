@@ -424,7 +424,7 @@ async fn count_distinct_is_cardinality() {
 async fn select_distinct_lowers_to_distinct_with_positional_cols() {
     // SELECT DISTINCT → a `Dedup` node whose `cols` are positional ColumnIds
     // (not name-based ColumnRefs). DataFusion's `Distinct::All` dedups on every
-    // column, so `cols` is empty here — but the field type is now `Vec<ColumnId>`.
+    // column, so `cols` is empty here — but the field type is now `Vec<FieldId>`.
     let qe = lower("SELECT DISTINCT service FROM metrics").await;
     let QueryExpr::Dedup { cols, .. } = &qe else {
         panic!("expected a Dedup at the root, got {qe:?}");
@@ -453,7 +453,7 @@ async fn inner_join_lowers_to_join_over_two_scans() {
     assert!(matches!(right.as_ref(), QueryExpr::Scan { .. }));
 }
 
-/// The two `ColumnId`s an equijoin predicate `Column(l) = Column(r)` binds to,
+/// The two `FieldId`s an equijoin predicate `Column(l) = Column(r)` binds to,
 /// returned sorted so the assertion is independent of left/right ordering.
 fn join_eq_columns(join: &QueryExpr) -> [usize; 2] {
     let QueryExpr::Join { pred, .. } = join else {
@@ -1955,7 +1955,7 @@ async fn arg_min_lowers_to_its_own_extension_kind() {
 async fn arg_max_payload_preserves_both_column_names() {
     // Core never resolves an `Extension`'s payload, so both columns are kept
     // as validated bare-column `ColumnRef`s in `payload`, not run through
-    // positional `ColumnId` binding -- see `lower_arg_selector`'s doc.
+    // positional `FieldId` binding -- see `lower_arg_selector`'s doc.
     let qe = lower_clickhouse("SELECT argMax(service, latency) AS m FROM metrics").await;
     let (_, measures) = find_aggregate(&qe).expect("expected an Aggregate");
     let AggIntent::Extension { payload, .. } = &measures[0] else {
