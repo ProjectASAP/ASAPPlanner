@@ -1073,7 +1073,7 @@ ASAPPlanner then does automatically, and what does not change.
 or batch), predictability, time selection and accuracy and latency
 requirements. No code changes.
 
-**Automatic:** the frontend converts the query (stage 0). Pass 1 generates its
+**Automatic:** the language-specific frontend converts the query. Pass 1 generates its
 exact and summary candidates from the existing rules and capabilities. Pass 2
 checks whether it can share a summary with the queries already in the workload.
 Physical planning and selection re-plan the whole workload, so adding a query can
@@ -1087,7 +1087,7 @@ For a function, operator or aggregate a frontend does not support yet.
 
 **Given:**
 
-1. The frontend conversion to the common IR (stage 0), or an explicit
+1. The language-specific frontend conversion to the common IR, or an explicit
    rejection.
 2. If it is a new computation, its semantics in the IR (an `AggIntent`), and
    whether it is exact-only, mergeable, or approximable.
@@ -1124,8 +1124,9 @@ Selection compares it with every other candidate using the deployment's models.
 **Given:** a cost model or accuracy model supplied by the deployment, for
 example one fitted to its own measurements.
 
-**Automatic:** only selection changes (stage 3). The candidate sets of stages
-0–2 stay the same, except where a model also changes sizing or admits a
+**Automatic:** only plan selection changes. The candidate sets of the
+language-specific frontends, logical ASAP-aware optimization and physical
+ASAP-aware optimization stay the same, except where a model also changes sizing or admits a
 summary that has no built-in guarantee. The model is used for every
 query in the workload, and a shared summary is costed once.
 
