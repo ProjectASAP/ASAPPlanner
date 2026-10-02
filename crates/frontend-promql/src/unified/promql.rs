@@ -1,0 +1,2236 @@
+//! PromQL string → the name-based
+//! [`UnresolvedOp`](asap_frontend_common::UnresolvedOp) tree.
+//!
+//! - **Parsing** is delegated to `promql-parser` 0.8.
+//! - **Lowering** builds *directly in canonical shape* here (issue #179): the
+//!   walk interprets PromQL semantics (range vectors, aggregate operators,
+//!   label matchers) and emits `UnresolvedOp` / `UnresolvedScalar` nodes with
+//!   unresolved `ColumnRef`s — the same tree shape
+//!   [`resolve_root`](asap_frontend_common::resolve_root) later binds to the
+//!   positional [`OperatorNode`](asap_types::ir::OperatorNode) DAG. The structural decisions a
+//!   separate converter stage would otherwise have to make (heavy-hitter
+//!   `topk` recognition, the `PerEntity`/`Reduce` reduction choice,
+//!   `without(...)` grouping) are made right here, since a front end
+//!   building this shape already knows the answer at parse time — see
+//!   `reduction_for` and `mark_without`. `resolve_root` is left with exactly
+//!   the schema-*dependent* work: binding every `ColumnRef` to its
+//!   positional `ColumnId`.
+//!
+//! # PromQL → canonical unresolved-tree mapping (summary)
+//!
+//! | PromQL | Canonical shape |
+//! |---|---|
+//! | `quantile_over_time(φ, m{f}[w])` | `Aggregate{[Quantile(φ)], TimeRange{w, Scan{predicates}}}` |
+//! | `histogram_quantile(φ, <classic buckets>)` | `Aggregate{without(le), [HistogramQuantile(φ, le)]}` — cumulative-bucket interpolation (classic form recognised by `by (le)` / a `_bucket` metric / an `le` matcher) |
+//! | `histogram_quantile(φ, <native hist / raw>)` | `Aggregate{[Quantile(φ)]}` over the fully-lowered arg (generic, sketch-able with an accuracy target) |
+//! | `histogram_quantiles(v, "l", φ…)` | `Concat{PromqlRelabel{l=φᵢ, <the histogram_quantile(φᵢ, v) branch>}…}` — one branch per φ (issue #109) |
+//! | `histogram_count/sum/avg/stddev/stdvar(v)`, `histogram_fraction(l,u,v)` | `Aggregate{[Histogram*]}` — per-series native-histogram accessors (issue #43) |
+//! | `OUTER_op(inner_func(m[w]))` (e.g. `sum(rate(m[w]))`) | `Aggregate{[OUTER_op]}` over `Aggregate{[inner_func]}` — two levels |
+//! | `OUTER_op(<any expr>)` (e.g. `max(sum by (job) (rate(m[w])))`, `sum(rate(a[w]) + rate(b[w]))`) | `Aggregate{[OUTER_op]}` over the fully-lowered `<any expr>` — arbitrary function nesting (issue #27) |
+//! | `topk(k, <non-count expr>)` / `bottomk(k, <any expr>)` | `Sort{value} → Limit{k}` over the fully-lowered argument |
+//! | `avg/min/max/sum_over_time(m[w])` | `Aggregate{[Avg/Min/Max/Sum], TimeRange{w}}` |
+//! | `stddev/stdvar_over_time(m[w])` | `Aggregate{[StdDev/Variance], TimeRange{w}}` |
+//! | `count_over_time(m[w])` | `Aggregate{[Count], TimeRange{w}}` |
+//! | `last/first/mad/ts_of_min/ts_of_max/ts_of_first/ts_of_last_over_time(m[w])` | `Aggregate{[Last/First/Mad/TsOf…OverTime], TimeRange{w}}` — per-series range reducers (issue #51) |
+//! | `sort`/`sort_desc(v)`, `sort_by_label[_desc](v,"l"…)` | `Sort{value \| label…}` (no `Limit`) — row-preserving reorder (issue #51); `min_of`/`max_of` scalar reducers → #89 |
+//! | `rate(m[w])` / `irate(m[w])` | `Aggregate{[Rate/IRate], TimeRange{w}}` — distinct function identities; shared physical machinery is a later realization choice |
+//! | `increase(m[w])` | `Aggregate{[Increase], TimeRange{w}}` |
+//! | `changes`/`delta`/`idelta`/`deriv`/`resets`/`predict_linear`/`double_exponential_smoothing`(`m[w]`, …) | `Aggregate{[Changes/Delta/…], TimeRange{w}}` — per-series counter-derivative intents (issue #44) |
+//! | `absent(v)` / `absent_over_time(m[w])` / `present_over_time(m[w])` | `Aggregate{[Absent/AbsentOverTime/PresentOverTime]}` — presence intents; the empty→synthesized-sample logic is a post-ASAP concern (issue #47) |
+//! | `abs`/`ceil`/`sqrt`/`ln`/`clamp*`/`round`/trig(`v`), `pi()` | typed scalar `Project` (issue #45); `pi()` → a `ScalarExpr::Literal` root |
+//! | `time()` / `timestamp`/`hour`/`day_of_week`/… (`v`) | `ScalarExpr::EvalTimestamp` root / `Aggregate{[TimeFn(f)]}` (issue #46) |
+//! | `vector(s)` / `scalar(v)` | `PromqlVectorFromScalar(s)` / `ScalarExpr::PromqlScalarFromVector(v)` — the scalar⇄vector bridges (issue #48) |
+//! | `<scalar> op <scalar>` (`time() - 1`, `1 < bool 2`, `-time()`) | `ScalarExpr::{Arithmetic, Case, Negative}` — a scalar expression, never an operator |
+//! | `v op <scalar>`, `a op bool b`, `v > bool 0` | `Project`/`Filter` with owned scalar expressions; vector/vector uses `BinaryOp{return_bool}` |
+//! | `label_replace(v,…)` / `label_join(v,…)` | `PromqlRelabel{dst, value}` — per-series label rewrite; value unchanged (issue #50) |
+//! | `info(v, [selector])` | `PromqlInfoEnrich{selector}` — label-enrichment join against the info metric(s); join keys resolved during post-ASAP binding (issue #84) |
+//! | `group` / `offset` / `@` / `info` | **rejected** — distinct semantics with no intent-algebra representation yet (`info` label-join → #84) |
+//! | `OUTER by (dims) (…)` | `Aggregate.reduction = Reduce(by = dims)` (generic `topk by`/`bottomk` grouping → `Sort.partition_by`) |
+//! | `count by (d) (…)` | `Aggregate{[Count], …}` |
+//! | `group(v)` / `count_values("l", v)` | `Aggregate{[Group]}` (constant 1) / `Aggregate{[CountValues{l}]}` (group-by-value + count, new label `l`) — issue #49 |
+//! | `limitk(k, v)` / `limit_ratio(r, v)` | `PromqlSeriesSample{LimitK(k) \| LimitRatio(r)}` — series-sampling selection, whole series kept unchanged (issue #86) |
+//! | `topk(k, count_over_time(…))` / `topk(k, sum_over_time(…))` | `Aggregate{[TopK{k}]}` (heavy-hitter intent) over the explicit inner `Aggregate{[Count/Sum]}` |
+//! | `topk(k, <other>)` / `bottomk(k, …)` | `Sort{value} → Limit{k}` |
+//! | `m{f}` / `m{f}[w]` | `TimeRange{ingestion, Instant, Scan{predicates}}` / `TimeRange{w, Range, Scan}` |
+//! | `a OP b` | `BinaryOp{vector_match}` |
+//! | `expr[r:res]` | `PromqlSubquery{r, res}` |
+//! | `<selector> offset <d>` / `<selector> @ <ts>`/`start()`/`end()` | `TimeShift{shift}` over the selector's `Scan` — pass-through schema; a ranged selector shifts under its `TimeRange` (issue #40) |
+
+use std::rc::Rc;
+use std::time::{Duration, SystemTime};
+
+use promql_parser::label::{MatchOp, Matcher};
+use promql_parser::parser::value::ValueType;
+use promql_parser::parser::{
+    self, token, AggregateExpr, AtModifier as ParserAtModifier, BinaryExpr, Call, Expr,
+    LabelModifier, Offset, VectorMatchCardinality, VectorSelector,
+};
+
+use asap_frontend_common::{
+    UnresolvedOp as Unresolved, UnresolvedPredicate, UnresolvedScalar as Scalar, UnresolvedSortKey,
+};
+use asap_types::ir::operator_properties::{
+    AtModifier, BinaryOpKind, GroupKeys, GroupSide, PromQLVectorSetOpKind, Reduction, Source,
+    TimeShift, VectorGrouping, VectorMatch, VectorMatchKind,
+};
+use asap_types::ir::{BinaryOperator, ExprSemantics, TimeRangeKind};
+use asap_types::pre_asap::agg_intent::{topk, AggIntent, TimeFunc};
+
+use asap_types::pre_asap::{
+    ArithmeticOpKind, ColumnRef, CompareOpKind, InfoMatcher, SampleKind, ScalarValue,
+};
+use asap_types::types::AccuracyTarget;
+
+/// Every scalar expression this front end builds follows PromQL's numeric rules.
+const PROMQL: ExprSemantics = ExprSemantics::Promql;
+
+use crate::unified::error::PromqlError as LoweringError;
+
+type Result<T> = std::result::Result<T, LoweringError>;
+
+/// Parses and lowers (→ the canonical, unresolved tree) a PromQL query string.
+pub(crate) struct PromqlLowerer;
+
+#[derive(Debug, Clone)]
+enum Outer {
+    None,
+    Plain(OuterIntent),
+    Count,
+    /// `count_values("l", v)` — group by value + count, emitting the value as a
+    /// new label `l` (issue #49).
+    CountValues {
+        label: String,
+    },
+    TopK {
+        k: u64,
+        descending: bool,
+    },
+    /// `limitk`/`limit_ratio` — series-sampling selection (issue #86).
+    Sample {
+        kind: SampleKind,
+    },
+}
+
+#[derive(Debug, Clone)]
+enum OuterIntent {
+    Sum,
+    Avg,
+    Min,
+    Max,
+    StdDev,
+    Variance,
+    Quantile(f64),
+    /// `group(v)` — constant 1 per group (issue #49).
+    Group,
+}
+
+#[derive(Debug, Clone)]
+enum InnerFunc {
+    FrequencyL2,
+    FrequencyEntropy,
+    Cardinality,
+    Quantile(f64),
+    Avg,
+    Min,
+    Max,
+    Sum,
+    StdDev,
+    Variance,
+    Count,
+    // `Rate`/`Increase` carry no window of their own — unlike the old Unresolved
+    // `AggFunc::Rate{window}`, canonical `AggIntent::Rate`/`Increase` have no
+    // window field either; `windowed_aggregate` reads `Inner.window`
+    // uniformly for every intent, so it would be a redundant duplicate here.
+    Rate,
+    IRate,
+    Increase,
+    // Counter-derivative range functions (issue #44). The window rides on the
+    // enclosing `TimeRange` node (like `*_over_time`), so these carry only
+    // their non-window scalar params.
+    Changes,
+    Delta,
+    IDelta,
+    Deriv,
+    Resets,
+    PredictLinear(f64),
+    DoubleExp { smoothing: f64, trend: f64 },
+    // Additional range-vector reducers (issue #51). Per-series over the window
+    // (like `*_over_time`); the window rides on the enclosing Unresolved `Window`.
+    LastOverTime,
+    FirstOverTime,
+    MadOverTime,
+    TsOfMinOverTime,
+    TsOfMaxOverTime,
+    TsOfFirstOverTime,
+    TsOfLastOverTime,
+}
+
+struct Inner {
+    metric: String,
+    matchers: Vec<Scalar>,
+    window: Option<Duration>,
+    func: Option<InnerFunc>,
+    /// `offset` / `@` on the selector, carried to the `Source` (issue #40).
+    shift: TimeShift,
+}
+
+/// Maximum PromQL expression nesting depth the walker accepts. Real queries
+/// nest only a handful deep; this bounds the recursive descent (`walk` and the
+/// mutually-recursive helpers) so a pathologically nested query is rejected
+/// rather than overflowing the stack.
+const MAX_DEPTH: usize = 256;
+
+impl PromqlLowerer {
+    pub(crate) fn lower_query_with_ingestion_interval(
+        query: &str,
+        accuracy: &AccuracyTarget,
+        interval: Duration,
+    ) -> Result<asap_types::ir::QueryRoot> {
+        let _guard = AccuracyGuard::install(accuracy.clone());
+        let _interval = IngestionIntervalGuard::install(interval);
+        let ast = parser::parse(query).map_err(LoweringError::Parse)?;
+        check_depth(&ast, MAX_DEPTH)?;
+        let mut metrics = Vec::new();
+        collect_metric_names(&ast, &mut metrics);
+        if metrics.iter().any(|metric| {
+            crate::unified::histogram::current_kind_of(metric)
+                == Some(crate::unified::histogram::HistogramKind::Native)
+        }) {
+            return Err(LoweringError::UnsupportedFeature(
+                "native histogram samples have no IR representation".into(),
+            ));
+        }
+
+        if ast.value_type() == ValueType::Scalar {
+            Ok(asap_types::ir::QueryRoot::Scalar(
+                asap_frontend_common::resolve_scalar_root(&lower_scalar(&ast)?)?,
+            ))
+        } else {
+            Ok(asap_types::ir::QueryRoot::Operator(
+                asap_frontend_common::resolve_root(&walk(&ast)?)?,
+            ))
+        }
+    }
+}
+
+std::thread_local! {
+    static ACCURACY: std::cell::RefCell<AccuracyTarget> =
+        const { std::cell::RefCell::new(AccuracyTarget::Exact) };
+    static INGESTION_INTERVAL: std::cell::RefCell<Option<Duration>> = const { std::cell::RefCell::new(None) };
+}
+
+/// RAII guard installing `accuracy` as the ambient accuracy target for the
+/// current thread's lowering, restoring the prior value on drop — same shape
+/// as `histogram::CatalogGuard`.
+struct AccuracyGuard(AccuracyTarget);
+
+impl AccuracyGuard {
+    fn install(accuracy: AccuracyTarget) -> Self {
+        let prev = ACCURACY.with(|a| a.replace(accuracy));
+        AccuracyGuard(prev)
+    }
+}
+
+impl Drop for AccuracyGuard {
+    fn drop(&mut self) {
+        ACCURACY.with(|a| *a.borrow_mut() = std::mem::replace(&mut self.0, AccuracyTarget::Exact));
+    }
+}
+
+/// The ambient accuracy target installed by the current [`PromqlLowerer::lower`] call.
+fn current_accuracy() -> AccuracyTarget {
+    ACCURACY.with(|a| a.borrow().clone())
+}
+
+struct IngestionIntervalGuard(Option<Duration>);
+
+impl IngestionIntervalGuard {
+    fn install(interval: Duration) -> Self {
+        Self(INGESTION_INTERVAL.with(|current| current.replace(Some(interval))))
+    }
+}
+
+impl Drop for IngestionIntervalGuard {
+    fn drop(&mut self) {
+        INGESTION_INTERVAL.with(|current| *current.borrow_mut() = self.0.take());
+    }
+}
+
+fn current_ingestion_interval() -> Duration {
+    INGESTION_INTERVAL.with(|current| {
+        current
+            .borrow()
+            .expect("ingestion interval is installed for workload lowering")
+    })
+}
+
+/// Bounded depth check over the parser AST: errors once nesting would exceed
+/// `budget` frames, descending into every child expression.
+fn check_depth(expr: &Expr, budget: usize) -> Result<()> {
+    let Some(budget) = budget.checked_sub(1) else {
+        return Err(LoweringError::UnsupportedFeature(format!(
+            "query nesting exceeds the {MAX_DEPTH}-level limit"
+        )));
+    };
+    match expr {
+        Expr::Aggregate(a) => {
+            check_depth(&a.expr, budget)?;
+            if let Some(p) = &a.param {
+                check_depth(p, budget)?;
+            }
+        }
+        Expr::Unary(u) => check_depth(&u.expr, budget)?,
+        Expr::Binary(b) => {
+            check_depth(&b.lhs, budget)?;
+            check_depth(&b.rhs, budget)?;
+        }
+        Expr::Paren(p) => check_depth(&p.expr, budget)?,
+        Expr::Subquery(s) => check_depth(&s.expr, budget)?,
+        Expr::Call(c) => {
+            for arg in &c.args.args {
+                check_depth(arg, budget)?;
+            }
+        }
+        Expr::MatrixSelector(_)
+        | Expr::VectorSelector(_)
+        | Expr::NumberLiteral(_)
+        | Expr::StringLiteral(_)
+        | Expr::Extension(_) => {}
+    }
+    Ok(())
+}
+
+fn walk(expr: &Expr) -> Result<Unresolved> {
+    // A scalar-typed expression (`5`, `time() - 1`, `scalar(v)`, `1 < bool 2`)
+    // is a scalar expression at an operator position, never an operator tree.
+    if expr.value_type() == ValueType::Scalar {
+        return Err(LoweringError::UnsupportedFeature(
+            "scalar root requires query-root lowering".into(),
+        ));
+    }
+    match expr {
+        Expr::Aggregate(agg) => walk_aggregate(agg),
+        Expr::Call(call) if call.func.name.starts_with("histogram_") => walk_histogram(call),
+        Expr::Call(call) if is_math_fn(call.func.name) => walk_math(call),
+        Expr::Call(call) if is_presence_fn(call.func.name) => walk_presence(call),
+        Expr::Call(call) if is_time_fn(call.func.name) => walk_time(call),
+        Expr::Call(call) if is_typeconv_fn(call.func.name) => walk_typeconv(call),
+        Expr::Call(call) if is_label_fn(call.func.name) => walk_label(call),
+        Expr::Call(call) if is_sort_fn(call.func.name) => walk_sort(call),
+        Expr::Call(call) if call.func.name == "info" => walk_info(call),
+        Expr::Call(call) => walk_call(call),
+        Expr::Binary(bin) => walk_binary(bin),
+        Expr::Paren(p) => walk(&p.expr),
+        // `UnaryExpr` is built only by negation (`Neg`); unary `+` is folded to
+        // identity and `-<literal>` to a negated `NumberLiteral`. A scalar
+        // operand was dispatched to `lower_scalar` above (→ `Negative`), so this
+        // is a vector projection. Unary negation retains the metric name.
+        Expr::Unary(u) => Ok(Unresolved::PromqlMap {
+            child: Rc::new(walk(&u.expr)?),
+            sample: Scalar::Negative {
+                expr: Box::new(Scalar::Column(ColumnRef::SampleValue)),
+                semantics: ExprSemantics::Promql,
+            },
+            drop_metric_name: false,
+        }),
+        Expr::Subquery(sq) => {
+            let subquery = Unresolved::PromqlSubquery {
+                range: sq.range,
+                resolution: sq.step,
+                child: Rc::new(walk(&sq.expr)?),
+            };
+            // `offset`/`@` move the whole subquery, including its step grid.
+            let shift = time_shift(sq.offset.as_ref(), sq.at.as_ref())?;
+            Ok(if shift.is_identity() {
+                subquery
+            } else {
+                Unresolved::TimeShift {
+                    shift,
+                    child: Rc::new(subquery),
+                }
+            })
+        }
+        Expr::VectorSelector(vs) => {
+            let (metric, matchers, shift) = vs_parts(vs)?;
+            Ok(instant_source(metric, matchers, shift))
+        }
+        Expr::MatrixSelector(ms) => {
+            let (metric, matchers, shift) = vs_parts(&ms.vs)?;
+            Ok(Unresolved::TimeRange {
+                range: ms.range,
+                kind: TimeRangeKind::Range,
+                child: Rc::new(filtered_source(metric, matchers, shift)),
+            })
+        }
+        // Scalar-typed, dispatched above; kept for exhaustiveness. String
+        // literals only appear as function args (`label_replace`, …), so a
+        // bare one is rejected (issue #35).
+        Expr::NumberLiteral(_) => unreachable!("scalar handled above"),
+        Expr::StringLiteral(_) => Err(LoweringError::UnsupportedFeature(
+            "bare string literal".into(),
+        )),
+        Expr::Extension(_) => Err(LoweringError::UnsupportedFeature(
+            "extension expression".into(),
+        )),
+    }
+}
+
+/// Lower a scalar-typed PromQL expression to a scalar expression. A constant
+/// sub-expression folds to one `Literal` (as `num_expr` always did); anything
+/// else keeps its structure: `-time()` → `Negative`, `time() - 1` →
+/// `Arithmetic`, `scalar(v)` → `PromqlScalarFromVector`, and a `bool`
+/// comparison → `Case(Compare → 1, else 0)` (PromQL yields `0`/`1`).
+fn lower_scalar(expr: &Expr) -> Result<Scalar> {
+    if let Ok(v) = num_expr(expr) {
+        return Ok(Scalar::Literal(ScalarValue::Float64(v)));
+    }
+    match expr {
+        Expr::Paren(p) => lower_scalar(&p.expr),
+        Expr::Unary(u) => Ok(Scalar::Negative {
+            expr: Box::new(lower_scalar(&u.expr)?),
+            semantics: PROMQL,
+        }),
+        Expr::Binary(bin) => lower_scalar_binary(bin),
+        Expr::Call(call) => match call.func.name {
+            "time" => Ok(Scalar::EvalTimestamp),
+            "pi" => Ok(Scalar::Literal(ScalarValue::Float64(std::f64::consts::PI))),
+            "scalar" => Ok(Scalar::PromqlScalarFromVector(Rc::new(walk(arg(
+                call, 0,
+            )?)?))),
+            // `min_of`/`max_of` fold only over constants (#89); the fold above
+            // failed, so surface its error for the non-constant argument.
+            name if is_scalar_reducer_fn(name) => Err(num_expr(expr).unwrap_err()),
+            other => Err(LoweringError::UnsupportedFunction(other.to_string())),
+        },
+        other => Err(LoweringError::UnsupportedFeature(format!(
+            "scalar expression `{other}`"
+        ))),
+    }
+}
+
+/// `<scalar> op <scalar>`: arithmetic is an `Arithmetic` expression; a
+/// comparison needs the `bool` modifier (PromQL has no scalar filter) and
+/// becomes `Case(Compare → 1.0, else 0.0)`. The parser already rejects both a
+/// bool-less scalar comparison and a scalar set op; both are re-checked here.
+fn lower_scalar_binary(bin: &BinaryExpr) -> Result<Scalar> {
+    let left = Box::new(lower_scalar(&bin.lhs)?);
+    let right = Box::new(lower_scalar(&bin.rhs)?);
+    match binop(bin.op.id())? {
+        BinaryOpKind::Arithmetic(op) => Ok(Scalar::Arithmetic {
+            op,
+            left,
+            right,
+            semantics: PROMQL,
+        }),
+        BinaryOpKind::Compare(op) | BinaryOpKind::CompareBool(op) => {
+            if !bin.return_bool() {
+                return Err(LoweringError::InvalidParameter(
+                    "a comparison between two scalars requires the `bool` modifier".into(),
+                ));
+            }
+            let compare = Scalar::Compare {
+                left,
+                op,
+                right,
+                semantics: PROMQL,
+            };
+            Ok(Scalar::Case {
+                operand: None,
+                branches: vec![(compare, Scalar::Literal(ScalarValue::Float64(1.0)))],
+                else_expr: Some(Box::new(Scalar::Literal(ScalarValue::Float64(0.0)))),
+            })
+        }
+        BinaryOpKind::Set(_) => Err(LoweringError::UnsupportedFeature(
+            "set operator between two scalars".into(),
+        )),
+    }
+}
+
+/// A binary operation over two vectors.
+fn vector_binary(
+    kind: BinaryOpKind,
+    vector_match: Option<VectorMatch>,
+    return_bool: bool,
+    lhs: Unresolved,
+    rhs: Unresolved,
+) -> Unresolved {
+    Unresolved::BinaryOp {
+        operator: BinaryOperator {
+            kind,
+            vector_match,
+            checked_relative_division: false,
+            checked_finite_division: false,
+        },
+        return_bool,
+        lhs: Rc::new(lhs),
+        rhs: Rc::new(rhs),
+    }
+}
+
+/// Lower a bare function call (`rate(m[5m])`, `max_over_time(m[5m])`, …).
+///
+/// The common case routes through the flat `lower_inner_call` template. The one
+/// exception is a `*_over_time`/`quantile_over_time` function applied to a
+/// **sub-query** (`max_over_time(rate(m[5m])[1h:])`): its argument is a
+/// `PromQLSubquery`, not a matrix selector, so the flat template's
+/// `extract_matrix` can't accept it. Lower the sub-query recursively and reduce
+/// it per series (issue #27).
+fn walk_call(call: &Call) -> Result<Unresolved> {
+    if let Some(tree) = range_fn_over_subquery(call)? {
+        return Ok(tree);
+    }
+    build(lower_inner_call(call)?, vec![], Outer::None)
+}
+
+/// A range-vector function applied to a **sub-query** — `f(<inst>[range:res])`.
+///
+/// Covers the whole range-vector family: the `*_over_time` reducers,
+/// `rate`/`irate`/`increase`, and the counter-derivatives
+/// (`changes`/`delta`/`idelta`/`deriv`/`resets`/`predict_linear`/
+/// `double_exponential_smoothing`). Each lowers to a per-series `Aggregate{[f]}`
+/// directly over the `PromqlSubquery` — the sub-query is the range context, so
+/// there is no separate `Window`/`TimeRange` (this walk treats the `PromqlSubquery`
+/// node itself as the range marker). Returns `None` when `call` isn't a range
+/// function or its argument isn't a sub-query, so the flat matrix-selector
+/// template still handles `f(m[w])` (issues #42, #55).
+fn range_fn_over_subquery(call: &Call) -> Result<Option<Unresolved>> {
+    // `rate`/`increase`/`irate` carry their window in the `AggFunc`; over a
+    // sub-query that window is the sub-query's own range.
+    if let "rate" | "irate" | "increase" = call.func.name {
+        let arg_expr = arg(call, 0)?;
+        if subquery_range(arg_expr).is_none() {
+            return Ok(None);
+        }
+        let inner = match call.func.name {
+            "rate" => InnerFunc::Rate,
+            "irate" => InnerFunc::IRate,
+            "increase" => InnerFunc::Increase,
+            _ => unreachable!(),
+        };
+        return Ok(Some(per_series_aggregate(
+            vec![],
+            inner_intent(&inner),
+            walk(arg_expr)?,
+        )));
+    }
+
+    // `*_over_time` reducers + counter-derivatives: the func-kind, and the index
+    // of the matrix/sub-query argument (`quantile_over_time` reads φ from arg 0,
+    // so its matrix is arg 1; the rest take arg 0 + trailing scalar params).
+    let (inner, matrix_idx): (InnerFunc, usize) = match call.func.name {
+        "avg_over_time" => (InnerFunc::Avg, 0),
+        "min_over_time" => (InnerFunc::Min, 0),
+        "max_over_time" => (InnerFunc::Max, 0),
+        "sum_over_time" => (InnerFunc::Sum, 0),
+        "stddev_over_time" => (InnerFunc::StdDev, 0),
+        "stdvar_over_time" => (InnerFunc::Variance, 0),
+        "count_over_time" => (InnerFunc::Count, 0),
+        "distinct_over_time" => (InnerFunc::Cardinality, 0),
+        "entropy_over_time" => (InnerFunc::FrequencyEntropy, 0),
+        "l2_over_time" => (InnerFunc::FrequencyL2, 0),
+        "quantile_over_time" => (InnerFunc::Quantile(quantile_param(num_arg(call, 0)?)?), 1),
+        "changes" => (InnerFunc::Changes, 0),
+        "delta" => (InnerFunc::Delta, 0),
+        "idelta" => (InnerFunc::IDelta, 0),
+        "deriv" => (InnerFunc::Deriv, 0),
+        "resets" => (InnerFunc::Resets, 0),
+        "last_over_time" => (InnerFunc::LastOverTime, 0),
+        "first_over_time" => (InnerFunc::FirstOverTime, 0),
+        "mad_over_time" => (InnerFunc::MadOverTime, 0),
+        "ts_of_min_over_time" => (InnerFunc::TsOfMinOverTime, 0),
+        "ts_of_max_over_time" => (InnerFunc::TsOfMaxOverTime, 0),
+        "ts_of_first_over_time" => (InnerFunc::TsOfFirstOverTime, 0),
+        "ts_of_last_over_time" => (InnerFunc::TsOfLastOverTime, 0),
+        "predict_linear" => (InnerFunc::PredictLinear(num_arg(call, 1)?), 0),
+        "double_exponential_smoothing" => (
+            InnerFunc::DoubleExp {
+                smoothing: num_arg(call, 1)?,
+                trend: num_arg(call, 2)?,
+            },
+            0,
+        ),
+        _ => return Ok(None),
+    };
+    let arg_expr = arg(call, matrix_idx)?;
+    if !is_subquery(arg_expr) {
+        return Ok(None);
+    }
+    Ok(Some(per_series_aggregate(
+        vec![],
+        inner_intent(&inner),
+        walk(arg_expr)?,
+    )))
+}
+
+/// A (parenthesised) PromQL sub-query — `<inst>[range:res]`.
+fn is_subquery(expr: &Expr) -> bool {
+    subquery_range(expr).is_some()
+}
+
+/// The `range` of a (parenthesised) sub-query argument, if it is one.
+fn subquery_range(expr: &Expr) -> Option<Duration> {
+    match expr {
+        Expr::Subquery(sq) => Some(sq.range),
+        Expr::Paren(p) => subquery_range(&p.expr),
+        _ => None,
+    }
+}
+
+fn walk_aggregate(agg: &AggregateExpr) -> Result<Unresolved> {
+    let (keys, without) = resolve_group(agg)?;
+    let outer = outer_kind(agg)?;
+
+    // `without(...)` grouping is modelled only for the reducing aggregations
+    // (sum/avg/count/…), whose grouping lives on an `Aggregate` node. `topk`/
+    // `bottomk` (→ `Sort.partition_by`) and `limitk`/`limit_ratio` (→ `PromqlSeriesSample`)
+    // would need without-partitioning too; reject rather than silently lower
+    // them as a `by` grouping (issue #39).
+    if without && matches!(outer, Outer::TopK { .. } | Outer::Sample { .. }) {
+        return Err(LoweringError::UnsupportedFeature(
+            "`without(...)` is only supported on reducing aggregations, not \
+             topk/bottomk/limitk"
+                .into(),
+        ));
+    }
+
+    // Fast path — the argument is a bare selector or a single range-vector
+    // function (`rate`/`increase`/`*_over_time`). `lower_inner` lowers it via the
+    // flat selector/call template, which also recognises the heavy-hitter
+    // `topk(k, count_over_time(...))` shape. This is the common two-level case
+    // (`sum by (job) (rate(m[5m]))`).
+    //
+    // General nesting — the argument is itself a composite expression: another
+    // aggregate (`max(sum by (job) (rate(m[5m])))`), a binary op, a sub-query, or
+    // a function lowered elsewhere. Lower it recursively with the same `walk`
+    // used at the top level, then wrap it in the outer aggregation (issue #27; a
+    // negated argument `sum(-m)` lowers here too, #36). A genuinely unsupported
+    // inner expression surfaces its own error rather than being mislowered.
+    //
+    // Either way, `mark_without` flips the resulting outer `Aggregate` to the
+    // exclusion form when the modifier was `without(...)`.
+    let built = match lower_inner(&agg.expr) {
+        Ok(inner) => build(inner, keys, outer)?,
+        Err(_) => build_over_sub_dag(outer, keys, walk(&agg.expr)?)?,
+    };
+    Ok(mark_without(built, without))
+}
+
+/// Map an `AggregateExpr`'s operator (`sum`/`avg`/`topk`/…) to the [`Outer`]
+/// shape, independent of what the argument is — so both the flat fast path and
+/// the general recursive path share one operator-dispatch.
+fn outer_kind(agg: &AggregateExpr) -> Result<Outer> {
+    let op = agg.op.id();
+
+    Ok(if op == token::T_TOPK {
+        Outer::TopK {
+            k: count_param(agg)?,
+            descending: true,
+        }
+    } else if op == token::T_BOTTOMK {
+        Outer::TopK {
+            k: count_param(agg)?,
+            descending: false,
+        }
+    } else if op == token::T_COUNT {
+        Outer::Count
+    } else if op == token::T_SUM {
+        Outer::Plain(OuterIntent::Sum)
+    } else if op == token::T_GROUP {
+        // `group(v)` yields a constant 1 per group (presence), not a sum of
+        // values — a distinct intent, never folded onto `Sum` (issue #49).
+        Outer::Plain(OuterIntent::Group)
+    } else if op == token::T_COUNT_VALUES {
+        // `count_values("l", v)` groups by sample value and counts, emitting the
+        // value as a new label `l` (the string parameter) — issue #49.
+        Outer::CountValues {
+            label: str_param(agg)?,
+        }
+    } else if op == token::T_LIMITK {
+        // `limitk(k, v)` — up to k series per group (issue #86).
+        Outer::Sample {
+            kind: SampleKind::LimitK(count_param(agg)? as usize),
+        }
+    } else if op == token::T_LIMIT_RATIO {
+        // `limit_ratio(r, v)` — an r-fraction of series per group (issue #86).
+        Outer::Sample {
+            kind: SampleKind::LimitRatio(ratio_param(agg)?),
+        }
+    } else if op == token::T_AVG {
+        Outer::Plain(OuterIntent::Avg)
+    } else if op == token::T_MIN {
+        Outer::Plain(OuterIntent::Min)
+    } else if op == token::T_MAX {
+        Outer::Plain(OuterIntent::Max)
+    } else if op == token::T_STDDEV {
+        Outer::Plain(OuterIntent::StdDev)
+    } else if op == token::T_STDVAR {
+        Outer::Plain(OuterIntent::Variance)
+    } else if op == token::T_QUANTILE {
+        Outer::Plain(OuterIntent::Quantile(quantile_param(num_param(agg)?)?))
+    } else {
+        return Err(LoweringError::UnsupportedAggregateOp(format!(
+            "aggregate token {op}"
+        )));
+    })
+}
+
+/// Wrap an already-lowered Unresolved sub-DAG in the outer aggregation. This is the
+/// general-nesting counterpart to [`build`]: where `build` assembles the
+/// two-level shape from a flat [`Inner`], this composes the outer operator over
+/// an arbitrary child (`max(sum by (job) (…))`, `sum(a + b)`, …).
+///
+/// A heavy-hitter `TopK` is only recognised on the flat `count_over_time` shape
+/// (handled in `build`); over a general sub-DAG, `topk`/`bottomk` is a generic
+/// order-by-value + limit — the same `Sort{partition_by} → Limit` pair `build`
+/// emits for any non-heavy-hitter ranking.
+/// Flip the outer `Aggregate` produced for a `without(...)` grouping into the
+/// exclusion form. The reducing-aggregation `build` paths place that aggregate
+/// at the root; `walk_aggregate` has already rejected the non-aggregate outers
+/// (topk/limitk), so a `without` grouping always has an `Aggregate` here (issue
+/// #39). A no-op when the modifier was `by`.
+/// Flip the outer `Aggregate` produced for a `without(...)` grouping into the
+/// exclusion form. A no-op when the modifier was `by`.
+///
+/// `reduction_for` (used by [`windowed_aggregate`]/[`outer_aggregate`] to
+/// build this node) decides `PerEntity` vs `Reduce(by)` *without* knowing
+/// about `without` yet — it only ever sees `by`-mode keys, since `without`'s
+/// excluded-labels list is applied here, after the fact, exactly like the
+/// pre-#179 legacy relational tree's own `mark_without` did (its
+/// converter read `without` only after this front-end step had already set
+/// it). Whether
+/// `reduction_for` picked `PerEntity` (only possible when `keys` was empty)
+/// or `Reduce(by)`, the correct answer under `without(...)` is always
+/// `Reduce(without(keys))`: a `without` grouping is never label-preserving —
+/// per-entity requires `!by.is_without()` — so this both re-tags an existing
+/// `Reduce` and upgrades a wrongly-early `PerEntity` guess, uniformly.
+fn mark_without(tree: Unresolved, without: bool) -> Unresolved {
+    if !without {
+        return tree;
+    }
+    match tree {
+        Unresolved::Aggregate {
+            reduction,
+            measures,
+            output_names,
+            filters,
+            having,
+            child,
+        } => {
+            let keys = match reduction {
+                Reduction::Reduce(by) => by.keys().to_vec(),
+                Reduction::PerEntity => vec![],
+            };
+            Unresolved::Aggregate {
+                reduction: Reduction::Reduce(GroupKeys::without(keys)),
+                measures,
+                output_names,
+                filters,
+                having,
+                child,
+            }
+        }
+        other => other,
+    }
+}
+
+fn build_over_sub_dag(outer: Outer, keys: Vec<ColumnRef>, child: Unresolved) -> Result<Unresolved> {
+    Ok(match outer {
+        // `walk_aggregate` always passes a real aggregator; `None` can't occur.
+        Outer::None => child,
+        Outer::Plain(intent) => outer_aggregate(keys, outer_intent(&intent), child),
+        Outer::Count => outer_aggregate(keys, count(), child),
+        Outer::CountValues { label } => {
+            outer_aggregate(keys, AggIntent::CountValues { label }, child)
+        }
+        Outer::Sample { kind } => Unresolved::PromqlSeriesSample {
+            by: keys.into(),
+            kind,
+            child: Rc::new(child),
+        },
+        Outer::TopK { k, descending } => {
+            let weighted_counter_ranking = matches!(
+                &child,
+                Unresolved::Aggregate {
+                    measures,
+                    child: sum_child,
+                    ..
+                } if matches!(measures.as_slice(), [AggIntent::Sum { .. }])
+                    && matches!(sum_child.as_ref(), Unresolved::Aggregate { measures, .. }
+                        if matches!(measures.as_slice(), [AggIntent::Rate | AggIntent::Increase]))
+            );
+            let direct_counter_ranking = matches!(&child, Unresolved::Aggregate {
+                measures, reduction: Reduction::PerEntity, ..
+            } if matches!(measures.as_slice(), [AggIntent::Rate | AggIntent::Increase]));
+            if descending && (weighted_counter_ranking || direct_counter_ranking) {
+                return Ok(outer_aggregate(
+                    keys,
+                    AggIntent::TopK {
+                        k: k as usize,
+                        accuracy: current_accuracy(),
+                    },
+                    child,
+                ));
+            }
+            ranked_by_value(keys, k, descending, child)
+        }
+    })
+}
+
+/// Generic `topk`/`bottomk`: `Limit{k} → Sort{value, partition_by: keys}` over
+/// `child` — an order-by-value ranking, not a heavy-hitter intent.
+fn ranked_by_value(
+    keys: Vec<ColumnRef>,
+    k: u64,
+    descending: bool,
+    child: Unresolved,
+) -> Unresolved {
+    let sorted = Unresolved::Sort {
+        keys: vec![UnresolvedSortKey {
+            expr: Scalar::Column(ColumnRef::SampleValue),
+            ascending: !descending,
+            nulls_first: false,
+        }],
+        partition_by: keys.into(),
+        child: Rc::new(child),
+    };
+    Unresolved::Limit {
+        n: Some(k as usize),
+        offset: 0,
+        partition_by: GroupKeys::none(),
+        child: Rc::new(sorted),
+    }
+}
+
+/// The `histogram_*` function family (issues #43, histogram_quantile).
+///
+/// `histogram_quantile(φ, <expr>)` lowers `<expr>` in full — preserving any
+/// `sum by (le)` / `rate` structure inside it. The classic `le`-bucket form
+/// becomes [`classic_histogram_quantile`]; a native histogram or raw samples
+/// become a `Quantile` over the whole argument.
+/// The native-histogram accessors (`histogram_count`/`sum`/`avg`/`stddev`/
+/// `stdvar`/`fraction`) each extract one float per series, lowering to a
+/// per-series `Aggregate{[accessor]}` directly over the (instant) argument.
+/// `histogram_fraction(lower, upper, v)` reads its bounds from args 0/1 and the
+/// vector from arg 2; the rest take the vector at arg 0.
+fn walk_histogram(call: &Call) -> Result<Unresolved> {
+    if call.func.name == "histogram_quantiles" {
+        return walk_histogram_quantiles(call);
+    }
+    if call.func.name == "histogram_quantile" {
+        let phi = quantile_param(num_arg(call, 0)?)?;
+        let arg_expr = arg(call, 1)?;
+        // Two lowerings of `histogram_quantile(φ, …)`:
+        //  - classic `le`-bucket form → `HistogramQuantile`, exact interpolation
+        //    over cumulative buckets (not sketch-able).
+        //  - native-histogram / raw-samples form → the generic `Quantile` intent
+        //    (sketch-able).
+        // The true signal is the argument's sample type: a declared
+        // `HistogramKind` (issue #79) drives the choice when available, else we
+        // fall back to the structural `by (le)`/`_bucket` heuristic (issue #43).
+        if !histogram_arg_is_sketchable(arg_expr)? {
+            return Ok(classic_histogram_quantile(phi, "", walk(arg_expr)?));
+        }
+        let func = AggIntent::Quantile {
+            col: None,
+            q: phi,
+            accuracy: current_accuracy(),
+        };
+        return Ok(outer_aggregate(vec![], func, walk(arg_expr)?));
+    }
+    Err(LoweringError::UnsupportedFeature(
+        "native histogram samples have no IR representation".into(),
+    ))
+}
+
+/// Classic-bucket `histogram_quantile(φ, child)`. One histogram is the set of
+/// series that differ only in `le`, so the aggregate groups `without (le)`.
+/// That grouping also seeds `le` into a usage-derived source schema, even
+/// when no matcher names it. An empty `output_name` keeps the intent-keyed name.
+fn classic_histogram_quantile(q: f64, output_name: &str, child: Unresolved) -> Unresolved {
+    let le = ColumnRef::Named("le".into());
+    Unresolved::Aggregate {
+        reduction: Reduction::Reduce(GroupKeys::without(vec![le.clone()])),
+        measures: vec![AggIntent::HistogramQuantile { q, le }],
+        output_names: vec![output_name.into()],
+        filters: vec![],
+        having: None,
+        child: Rc::new(child),
+    }
+}
+
+/// `histogram_quantiles(v, "label", φ₀, φ₁, …)` — the experimental multi-quantile
+/// form (issue #109). It is `histogram_quantile(φᵢ, v)` fanned out over the
+/// quantiles, each branch's output series tagged with `label = φᵢ`.
+///
+/// Lowers to a `Concat` of one `PromqlRelabel`-wrapped quantile branch per φ, reusing
+/// the single-quantile decision — classic `le`-buckets interpolate
+/// (`HistogramQuantile`), native histograms / raw samples take the sketch-able
+/// `Quantile` (issues #43 / #79) — so the two functions cannot diverge.
+///
+/// The vector argument is lowered once per branch, duplicating the sub-DAG —
+/// a future workload-level reuse pass could hoist it back into a single
+/// producer.
+///
+/// Each branch aliases its value column to `value` rather than taking the
+/// intent-keyed name (`quantile_0_5`, `quantile_0_9`, …). `Concat` derives its
+/// schema from the first child, so branches that disagree on a column *name*
+/// would make the merged schema silently misdescribe every branch but one. The
+/// quantile is carried by the `label` column, which is exactly where Prometheus
+/// puts it.
+fn walk_histogram_quantiles(call: &Call) -> Result<Unresolved> {
+    let vec_expr = arg(call, 0)?;
+    let label = str_arg(call, 1)?;
+    if call.args.args.len() < 3 {
+        return Err(LoweringError::MissingArgument(
+            "histogram_quantiles(v, label, φ…) needs at least one quantile".into(),
+        ));
+    }
+    // The bucket-vs-native choice is a property of the argument, not of φ.
+    let sketchable = histogram_arg_is_sketchable(vec_expr)?;
+    let branches = (2..call.args.args.len())
+        .map(|i| {
+            let phi = bounded_quantile_param(num_arg(call, i)?)?;
+            let child = walk(vec_expr)?;
+            // Each branch aliases its value column to "value" (not the
+            // intent-keyed default) so `Concat` — which derives its schema
+            // from the first branch — doesn't silently misdescribe the rest.
+            let quantile = if sketchable {
+                let intent = AggIntent::Quantile {
+                    col: None,
+                    q: phi,
+                    accuracy: current_accuracy(),
+                };
+                Unresolved::Aggregate {
+                    reduction: reduction_for(&[], intent.is_per_series()),
+                    measures: vec![intent],
+                    output_names: vec!["value".into()],
+                    filters: vec![],
+                    having: None,
+                    child: Rc::new(child),
+                }
+            } else {
+                classic_histogram_quantile(phi, "value", child)
+            };
+            Ok(Unresolved::PromqlRelabel {
+                dst: label.clone(),
+                value: Scalar::Literal(ScalarValue::Utf8(open_metrics_float(phi))),
+                child: Rc::new(quantile),
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    // No discriminator asserted here today (issue #228): the φ value each
+    // branch carries via `PromqlRelabel` *is* structurally a distinct
+    // per-branch discriminator, but nothing downstream currently needs the
+    // resulting compound unique key — see
+    // `docs/design_docs/concat-unique-keys-decision.md`. `Unresolved::concat`
+    // keeps `output_schema`'s default (drop `unique_keys` entirely).
+    Ok(Unresolved::concat(branches))
+}
+
+/// Prometheus's `labels.FormatOpenMetricsFloat` — how `histogram_quantiles`
+/// renders each φ into its label value. Go's `%g` shortest round-trip, switching
+/// to exponent form outside `[1e-4, 1e21)`, with `.0` appended when the result
+/// would otherwise look like an integer.
+fn open_metrics_float(v: f64) -> String {
+    // The cases upstream hardcodes.
+    if v == 1.0 {
+        return "1.0".into();
+    }
+    if v == 0.0 {
+        return "0.0".into();
+    }
+    if v == -1.0 {
+        return "-1.0".into();
+    }
+    if v.is_nan() {
+        return "NaN".into();
+    }
+    if v.is_infinite() {
+        return if v.is_sign_positive() { "+Inf" } else { "-Inf" }.into();
+    }
+    let sci = format!("{v:e}");
+    let exp: i32 = sci
+        .split_once('e')
+        .and_then(|(_, e)| e.parse().ok())
+        .unwrap_or(0);
+    if !(-4..21).contains(&exp) {
+        // Go writes a signed, zero-padded two-digit exponent: `1e-05`.
+        let (mantissa, _) = sci.split_once('e').unwrap_or((sci.as_str(), "0"));
+        let sign = if exp < 0 { '-' } else { '+' };
+        return format!("{mantissa}e{sign}{:02}", exp.abs());
+    }
+    let s = format!("{v}");
+    if s.contains(['e', '.']) {
+        s
+    } else {
+        format!("{s}.0")
+    }
+}
+
+/// The calendar functions (issue #46); `time()` is scalar-typed and lowers in
+/// `lower_scalar`.
+fn is_time_fn(name: &str) -> bool {
+    matches!(
+        name,
+        "timestamp"
+            | "minute"
+            | "hour"
+            | "day_of_week"
+            | "day_of_month"
+            | "day_of_year"
+            | "month"
+            | "year"
+            | "days_in_month"
+    )
+}
+
+/// `timestamp(v)` and the calendar accessors → `Aggregate{[TimeFn(f)]}` over
+/// the argument vector, or over `PromqlVectorFromScalar(EvalTimestamp)` for the
+/// no-argument calendar forms (`hour()`, `day_of_week()`, …). Issue #46.
+fn walk_time(call: &Call) -> Result<Unresolved> {
+    // timestamp() reads the selected sample's timestamp, not its value.
+    if call.func.name == "timestamp" {
+        return Ok(outer_aggregate(
+            vec![],
+            AggIntent::TimeFn(TimeFunc::Timestamp),
+            walk(arg(call, 0)?)?,
+        ));
+    }
+    let child = if call.args.args.is_empty() {
+        Unresolved::PromqlVectorFromScalar(Scalar::EvalTimestamp)
+    } else {
+        walk(arg(call, 0)?)?
+    };
+    Ok(Unresolved::PromqlMap {
+        child: Rc::new(child),
+        sample: Scalar::FunctionCall {
+            name: format!("promql_{}", call.func.name),
+            args: vec![Scalar::Column(ColumnRef::SampleValue)],
+        },
+        drop_metric_name: true,
+    })
+}
+
+/// The presence functions (issue #47).
+fn is_presence_fn(name: &str) -> bool {
+    matches!(name, "absent" | "absent_over_time" | "present_over_time")
+}
+
+/// `absent(v)` / `absent_over_time(m[w])` / `present_over_time(m[w])` — lowered
+/// to an `Aggregate{[Absent/…]}` over the (instant or range) argument. The
+/// empty-result → synthesized-1-sample logic is a post-ASAP/runtime concern;
+/// the canonical tree only marks the operation (issue #47).
+fn walk_presence(call: &Call) -> Result<Unresolved> {
+    let func = match call.func.name {
+        "absent" => AggIntent::Absent,
+        "absent_over_time" => AggIntent::AbsentOverTime,
+        "present_over_time" => AggIntent::PresentOverTime,
+        other => return Err(LoweringError::UnsupportedFunction(other.to_string())),
+    };
+    // arg 0 is the instant vector (`absent`) or range vector (`*_over_time`);
+    // `walk` produces a `Window` for the matrix-selector forms.
+    Ok(outer_aggregate(vec![], func, walk(arg(call, 0)?)?))
+}
+
+/// The scalar→vector conversion (issue #48); `scalar(v)` is scalar-typed and
+/// lowers in `lower_scalar`. `info` is *not* here: it is a label-enrichment
+/// join, not a type conversion (#84).
+fn is_typeconv_fn(name: &str) -> bool {
+    name == "vector"
+}
+
+/// `vector(s)` — promote a scalar to a label-less instant vector carrying the
+/// scalar expression `s` (issue #48).
+fn walk_typeconv(call: &Call) -> Result<Unresolved> {
+    Ok(Unresolved::PromqlVectorFromScalar(lower_scalar(arg(
+        call, 0,
+    )?)?))
+}
+
+/// The instant-vector reordering functions (issue #51).
+fn is_sort_fn(name: &str) -> bool {
+    matches!(
+        name,
+        "sort" | "sort_desc" | "sort_by_label" | "sort_by_label_desc"
+    )
+}
+
+/// `sort`/`sort_desc(v)` reorder an instant vector by sample value;
+/// `sort_by_label`/`sort_by_label_desc(v, "l"…)` reorder by label values. All
+/// lower to a bare `Sort` (no `Limit`) over the vector argument — a faithful,
+/// row-preserving reordering (issue #51).
+fn walk_sort(call: &Call) -> Result<Unresolved> {
+    let child = Rc::new(walk(arg(call, 0)?)?);
+    let (by_value, ascending) = match call.func.name {
+        "sort" => (true, true),
+        "sort_desc" => (true, false),
+        "sort_by_label" => (false, true),
+        "sort_by_label_desc" => (false, false),
+        other => return Err(LoweringError::UnsupportedFunction(other.to_string())),
+    };
+    let sort_key = |expr| UnresolvedSortKey {
+        expr,
+        ascending,
+        nulls_first: false,
+    };
+    let keys = if by_value {
+        vec![sort_key(Scalar::Column(ColumnRef::SampleValue))]
+    } else {
+        // `sort_by_label(v, "l1", "l2", …)` — one key per label arg, in order.
+        if call.args.args.len() < 2 {
+            return Err(LoweringError::MissingArgument(
+                "sort_by_label needs at least one label".into(),
+            ));
+        }
+        (1..call.args.args.len())
+            .map(|i| {
+                Ok(sort_key(Scalar::Column(ColumnRef::Named(str_arg(
+                    call, i,
+                )?))))
+            })
+            .collect::<Result<Vec<_>>>()?
+    };
+    Ok(Unresolved::Sort {
+        keys,
+        partition_by: GroupKeys::none(),
+        child,
+    })
+}
+
+/// `info(v, [selector])` — a label-enrichment join. Lowers the input vector and
+/// wraps it in an `PromqlInfoEnrich` carrying the (optional) data-label selector's
+/// matchers; the actual join against the info metric — on shared identifying
+/// labels — is resolved during post-ASAP binding (issue #84).
+fn walk_info(call: &Call) -> Result<Unresolved> {
+    let child = Rc::new(walk(arg(call, 0)?)?);
+    let selector = match call.args.args.get(1) {
+        Some(sel) => info_selector(sel)?,
+        None => Vec::new(), // default: enrich from `target_info`
+    };
+    Ok(Unresolved::PromqlInfoEnrich { selector, child })
+}
+
+/// Extract the `info` data-label selector's matchers. Unlike an ordinary
+/// selector these are **info-metric-side** and may carry regex / multiple
+/// `__name__` matchers (which pick the info metric(s)), so they bypass the
+/// single-metric `vs_parts` restriction and are kept symbolic.
+fn info_selector(expr: &Expr) -> Result<Vec<InfoMatcher>> {
+    match expr {
+        Expr::VectorSelector(vs) => Ok(vs
+            .matchers
+            .matchers
+            .iter()
+            .map(|m| InfoMatcher {
+                label: m.name.clone(),
+                op: match &m.op {
+                    MatchOp::Equal => CompareOpKind::Eq,
+                    MatchOp::NotEqual => CompareOpKind::Ne,
+                    MatchOp::Re(_) => CompareOpKind::Regex,
+                    MatchOp::NotRe(_) => CompareOpKind::NotRegex,
+                },
+                value: m.value.clone(),
+            })
+            .collect()),
+        Expr::Paren(p) => info_selector(&p.expr),
+        other => Err(LoweringError::UnsupportedFeature(format!(
+            "`info` data-label selector must be a label-matcher set, got `{other}`"
+        ))),
+    }
+}
+
+/// The label-rewrite functions (issue #50).
+fn is_label_fn(name: &str) -> bool {
+    matches!(name, "label_replace" | "label_join")
+}
+
+/// `label_replace(v, dst, replacement, src, regex)` /
+/// `label_join(v, dst, sep, src…)` — per-series label rewrites. Both lower to a
+/// `PromqlRelabel` over the fully-lowered vector argument, differing only in the
+/// expression that computes the destination label: `label_replace` a regex
+/// capture-expansion, `label_join` a separator-joined concatenation. Sample
+/// values are untouched; the regex-match-or-passthrough and capture-expansion
+/// are post-ASAP/runtime concerns (issue #50).
+fn walk_label(call: &Call) -> Result<Unresolved> {
+    let child = Rc::new(walk(arg(call, 0)?)?);
+    match call.func.name {
+        "label_replace" => {
+            let dst = str_arg(call, 1)?;
+            let replacement = str_arg(call, 2)?;
+            let src = str_arg(call, 3)?;
+            let regex = str_arg(call, 4)?;
+            let value = Scalar::FunctionCall {
+                name: "label_replace".into(),
+                args: vec![
+                    Scalar::Column(ColumnRef::Named(src)),
+                    Scalar::Literal(ScalarValue::Utf8(regex)),
+                    Scalar::Literal(ScalarValue::Utf8(replacement)),
+                ],
+            };
+            Ok(Unresolved::PromqlRelabel { dst, value, child })
+        }
+        "label_join" => {
+            // label_join(v, dst, sep, src_1, …, src_n) — needs ≥1 source label.
+            if call.args.args.len() < 4 {
+                return Err(LoweringError::MissingArgument(
+                    "label_join(v, dst, sep, src…) needs at least one source label".into(),
+                ));
+            }
+            let dst = str_arg(call, 1)?;
+            let sep = str_arg(call, 2)?;
+            let mut args = vec![Scalar::Literal(ScalarValue::Utf8(sep))];
+            for i in 3..call.args.args.len() {
+                args.push(Scalar::Column(ColumnRef::Named(str_arg(call, i)?)));
+            }
+            let value = Scalar::FunctionCall {
+                name: "label_join".into(),
+                args,
+            };
+            Ok(Unresolved::PromqlRelabel { dst, value, child })
+        }
+        other => Err(LoweringError::UnsupportedFunction(other.to_string())),
+    }
+}
+
+/// The element-wise math / trig functions (issue #45).
+fn is_math_fn(name: &str) -> bool {
+    matches!(
+        name,
+        "abs"
+            | "ceil"
+            | "floor"
+            | "exp"
+            | "ln"
+            | "log2"
+            | "log10"
+            | "sqrt"
+            | "sgn"
+            | "sin"
+            | "cos"
+            | "tan"
+            | "asin"
+            | "acos"
+            | "atan"
+            | "sinh"
+            | "cosh"
+            | "tanh"
+            | "asinh"
+            | "acosh"
+            | "atanh"
+            | "deg"
+            | "rad"
+            | "round"
+            | "clamp"
+            | "clamp_min"
+            | "clamp_max"
+    )
+}
+
+/// A math / trig function — a per-series element-wise value transform, lowered
+/// to a typed scalar projection over the instant-vector argument.
+/// `pi()` is scalar-typed and lowers in `lower_scalar` (issue #45).
+fn walk_math(call: &Call) -> Result<Unresolved> {
+    let mut args = vec![Scalar::Column(ColumnRef::SampleValue)];
+    for index in 1..call.args.args.len() {
+        args.push(lower_scalar(arg(call, index)?)?);
+    }
+    if call.func.name == "round" && args.len() == 1 {
+        args.push(Scalar::Literal(ScalarValue::Float64(1.0)));
+    }
+    Ok(Unresolved::PromqlMap {
+        child: Rc::new(walk(arg(call, 0)?)?),
+        sample: Scalar::FunctionCall {
+            name: format!("promql_{}", call.func.name),
+            args,
+        },
+        drop_metric_name: true,
+    })
+}
+
+/// Whether `expr` is a **classic cumulative-bucket** `histogram_quantile`
+/// argument — as opposed to a native histogram or raw samples. Recognised
+/// structurally, by any of:
+///  - a `by (le)` grouping (`sum by (le) (…)`),
+///  - a selector on a classic `_bucket` metric (`http_request_…_bucket`),
+///  - a selector with an `le` label matcher (`{le="…"}`).
+///
+/// The bucket form must be *interpolated* (`HistogramQuantile`); everything
+/// else is a sketch-able generic `Quantile`. This is a heuristic proxy for the
+/// real signal — the argument's sample type — which isn't visible at lowering;
+/// see the follow-up issue on the discrimination criteria (issue #43).
+/// Whether `histogram_quantile(φ, arg)` lowers to the sketch-able generic
+/// `Quantile` (`true`) or exact classic-bucket interpolation (`false`).
+///
+/// Metadata wins: if any metric referenced in `arg` has a declared
+/// [`HistogramKind`](crate::unified::histogram::HistogramKind), that decides it (issue
+/// #79) — this fixes both the false-positive (a `…_bucket`-named non-histogram
+/// declared `RawSamples`) and the false-negative (a suffix-less classic
+/// histogram declared `ClassicBucket`) of the structural heuristic. With no
+/// declaration, fall back to the structural `by (le)`/`_bucket` heuristic.
+fn histogram_arg_is_sketchable(arg: &Expr) -> Result<bool> {
+    let mut metrics = Vec::new();
+    collect_metric_names(arg, &mut metrics);
+    let kinds = metrics
+        .iter()
+        .filter_map(|metric| crate::unified::histogram::current_kind_of(metric))
+        .collect::<Vec<_>>();
+    if kinds.contains(&crate::unified::histogram::HistogramKind::Native) {
+        return Err(LoweringError::UnsupportedFeature(
+            "native histogram samples have no IR representation".into(),
+        ));
+    }
+    if let Some(kind) = kinds.first() {
+        if kinds.iter().any(|other| other != kind) {
+            return Err(LoweringError::UnsupportedFeature(
+                "mixed histogram sample contracts".into(),
+            ));
+        }
+        return Ok(kind.is_sketchable());
+    }
+    if is_classic_bucket_arg(arg) {
+        Ok(false)
+    } else {
+        Err(LoweringError::UnsupportedFeature("histogram_quantile requires classic buckets; use quantile for float samples or explicitly declare the RawSamples extension".into()))
+    }
+}
+
+/// Collect the metric names of every vector/matrix selector reachable in `expr`
+/// (for the metadata lookup in [`histogram_arg_is_sketchable`]). Skips
+/// name-less selectors like `{le="…"}`.
+fn collect_metric_names(expr: &Expr, out: &mut Vec<String>) {
+    match expr {
+        Expr::VectorSelector(vs) => {
+            if let Ok((metric, ..)) = vs_parts(vs) {
+                if !metric.is_empty() {
+                    out.push(metric);
+                }
+            }
+        }
+        Expr::MatrixSelector(ms) => {
+            if let Ok((metric, ..)) = vs_parts(&ms.vs) {
+                if !metric.is_empty() {
+                    out.push(metric);
+                }
+            }
+        }
+        Expr::Paren(p) => collect_metric_names(&p.expr, out),
+        Expr::Unary(u) => collect_metric_names(&u.expr, out),
+        Expr::Subquery(s) => collect_metric_names(&s.expr, out),
+        Expr::Aggregate(a) => collect_metric_names(&a.expr, out),
+        Expr::Binary(b) => {
+            collect_metric_names(&b.lhs, out);
+            collect_metric_names(&b.rhs, out);
+        }
+        Expr::Call(c) => c
+            .args
+            .args
+            .iter()
+            .for_each(|a| collect_metric_names(a, out)),
+        _ => {}
+    }
+}
+
+fn is_classic_bucket_arg(expr: &Expr) -> bool {
+    match expr {
+        Expr::Paren(p) => is_classic_bucket_arg(&p.expr),
+        Expr::Unary(u) => is_classic_bucket_arg(&u.expr),
+        Expr::Subquery(s) => is_classic_bucket_arg(&s.expr),
+        Expr::Aggregate(agg) => {
+            matches!(
+                &agg.modifier,
+                Some(LabelModifier::Include(ls)) if ls.labels.iter().any(|l| l == "le")
+            ) || is_classic_bucket_arg(&agg.expr)
+        }
+        Expr::Binary(b) => is_classic_bucket_arg(&b.lhs) || is_classic_bucket_arg(&b.rhs),
+        Expr::Call(c) => c.args.args.iter().any(|a| is_classic_bucket_arg(a)),
+        Expr::VectorSelector(vs) => selector_is_bucket(vs),
+        Expr::MatrixSelector(ms) => selector_is_bucket(&ms.vs),
+        _ => false,
+    }
+}
+
+/// A classic histogram bucket selector — a `_bucket`-named metric (via bare name
+/// or `__name__` matcher) or an explicit `le` label matcher.
+fn selector_is_bucket(vs: &VectorSelector) -> bool {
+    let name = vs.name.as_deref().or_else(|| {
+        vs.matchers
+            .matchers
+            .iter()
+            .find(|m| m.name == "__name__")
+            .map(|m| m.value.as_str())
+    });
+    name.is_some_and(|n| n.ends_with("_bucket"))
+        || vs.matchers.matchers.iter().any(|m| m.name == "le")
+}
+
+/// A binary op with at least one vector operand (a scalar/scalar op is
+/// scalar-typed and never reaches here). A scalar side lowers to a
+/// scalar expression; mixed operations resolve to Project or Filter.
+fn walk_binary(bin: &BinaryExpr) -> Result<Unresolved> {
+    let op = binop(bin.op.id())?;
+    let scalar_left = bin.lhs.value_type() == ValueType::Scalar;
+    if scalar_left || bin.rhs.value_type() == ValueType::Scalar {
+        let (scalar, vector) = if scalar_left {
+            (&bin.lhs, &bin.rhs)
+        } else {
+            (&bin.rhs, &bin.lhs)
+        };
+        return Ok(Unresolved::PromqlScalarOp {
+            child: Rc::new(walk(vector)?),
+            scalar: lower_scalar(scalar)?,
+            op,
+            scalar_left,
+            return_bool: bin.return_bool(),
+        });
+    }
+    let lhs = walk(&bin.lhs)?;
+    let rhs = walk(&bin.rhs)?;
+    // `VectorMatch` has no fill field; dropping fill would change which series
+    // are emitted and their values, so the query must fall back to exact
+    // execution instead.
+    if let Some(m) = &bin.modifier {
+        if m.fill_values.lhs.is_some() || m.fill_values.rhs.is_some() {
+            return Err(LoweringError::UnsupportedFeature(format!(
+                "`fill` vector-matching modifier: `{bin}`"
+            )));
+        }
+    }
+    let vector_match = bin.modifier.as_ref().map(|m| {
+        let (kind, labels) = match &m.matching {
+            Some(LabelModifier::Include(ls)) => (VectorMatchKind::On, ls.labels.clone()),
+            Some(LabelModifier::Exclude(ls)) => (VectorMatchKind::Ignoring, ls.labels.clone()),
+            // No explicit `on(…)`/`ignoring(…)` — the parser attaches a default
+            // modifier to every set op (`and`/`or`/`unless`). The default is
+            // "match on all shared labels", which is exactly `ignoring([])`
+            // (ignore no labels). Representing it as `Ignoring([])` — not
+            // `On([])` — keeps it distinct from an explicit `on()` (match on the
+            // empty label set) while making it correctly equal to an explicit
+            // `ignoring()` (issue #68).
+            None => (VectorMatchKind::Ignoring, vec![]),
+        };
+        let grouping = match &m.card {
+            VectorMatchCardinality::ManyToOne(ls) => Some(VectorGrouping {
+                side: GroupSide::Left,
+                labels: ls.labels.clone(),
+            }),
+            VectorMatchCardinality::OneToMany(ls) => Some(VectorGrouping {
+                side: GroupSide::Right,
+                labels: ls.labels.clone(),
+            }),
+            _ => None,
+        };
+        VectorMatch {
+            kind,
+            labels,
+            grouping,
+        }
+    });
+    Ok(vector_binary(op, vector_match, bin.return_bool(), lhs, rhs))
+}
+
+fn lower_inner(expr: &Expr) -> Result<Inner> {
+    match expr {
+        Expr::VectorSelector(vs) => {
+            let (metric, matchers, shift) = vs_parts(vs)?;
+            Ok(Inner {
+                metric,
+                matchers,
+                window: None,
+                func: None,
+                shift,
+            })
+        }
+        Expr::MatrixSelector(ms) => {
+            let (metric, matchers, shift) = vs_parts(&ms.vs)?;
+            Ok(Inner {
+                metric,
+                matchers,
+                window: Some(ms.range),
+                func: None,
+                shift,
+            })
+        }
+        Expr::Paren(p) => lower_inner(&p.expr),
+        Expr::Call(call) => lower_inner_call(call),
+        other => Err(LoweringError::UnsupportedFeature(format!(
+            "aggregate argument: `{other}`"
+        ))),
+    }
+}
+
+fn lower_inner_call(call: &Call) -> Result<Inner> {
+    let name = call.func.name;
+    let at0 = |func: InnerFunc| -> Result<Inner> {
+        let (metric, matchers, window, shift) = extract_matrix(arg(call, 0)?)?;
+        Ok(Inner {
+            metric,
+            matchers,
+            window: Some(window),
+            func: Some(func),
+            shift,
+        })
+    };
+    match name {
+        "rate" | "irate" => {
+            let (metric, matchers, window, shift) = extract_matrix(arg(call, 0)?)?;
+            Ok(Inner {
+                metric,
+                matchers,
+                window: Some(window),
+                func: Some(if name == "irate" {
+                    InnerFunc::IRate
+                } else {
+                    InnerFunc::Rate
+                }),
+                shift,
+            })
+        }
+        "increase" => {
+            let (metric, matchers, window, shift) = extract_matrix(arg(call, 0)?)?;
+            Ok(Inner {
+                metric,
+                matchers,
+                window: Some(window),
+                func: Some(InnerFunc::Increase),
+                shift,
+            })
+        }
+        "quantile_over_time" => {
+            let phi = quantile_param(num_arg(call, 0)?)?;
+            let (metric, matchers, window, shift) = extract_matrix(arg(call, 1)?)?;
+            Ok(Inner {
+                metric,
+                matchers,
+                window: Some(window),
+                func: Some(InnerFunc::Quantile(phi)),
+                shift,
+            })
+        }
+        "avg_over_time" => at0(InnerFunc::Avg),
+        "min_over_time" => at0(InnerFunc::Min),
+        "max_over_time" => at0(InnerFunc::Max),
+        "sum_over_time" => at0(InnerFunc::Sum),
+        "stddev_over_time" => at0(InnerFunc::StdDev),
+        "stdvar_over_time" => at0(InnerFunc::Variance),
+        "count_over_time" => at0(InnerFunc::Count),
+        "distinct_over_time" => at0(InnerFunc::Cardinality),
+        "entropy_over_time" => at0(InnerFunc::FrequencyEntropy),
+        "l2_over_time" => at0(InnerFunc::FrequencyL2),
+        // Counter-derivative range functions (issue #44). Each has its own
+        // intent — `changes` (value-change count) and `resets` (counter-reset
+        // count) are NOT sample counts, so they are not aliased to
+        // `count_over_time`. The window is arg 0's matrix; scalar params follow.
+        "changes" => at0(InnerFunc::Changes),
+        "delta" => at0(InnerFunc::Delta),
+        "idelta" => at0(InnerFunc::IDelta),
+        "deriv" => at0(InnerFunc::Deriv),
+        "resets" => at0(InnerFunc::Resets),
+        // Additional range-vector reducers (issue #51) — same windowed
+        // per-series shape as the `*_over_time` family above.
+        "last_over_time" => at0(InnerFunc::LastOverTime),
+        "first_over_time" => at0(InnerFunc::FirstOverTime),
+        "mad_over_time" => at0(InnerFunc::MadOverTime),
+        "ts_of_min_over_time" => at0(InnerFunc::TsOfMinOverTime),
+        "ts_of_max_over_time" => at0(InnerFunc::TsOfMaxOverTime),
+        "ts_of_first_over_time" => at0(InnerFunc::TsOfFirstOverTime),
+        "ts_of_last_over_time" => at0(InnerFunc::TsOfLastOverTime),
+        "predict_linear" => {
+            let (metric, matchers, window, shift) = extract_matrix(arg(call, 0)?)?;
+            let seconds = num_arg(call, 1)?;
+            Ok(Inner {
+                metric,
+                matchers,
+                window: Some(window),
+                func: Some(InnerFunc::PredictLinear(seconds)),
+                shift,
+            })
+        }
+        "double_exponential_smoothing" => {
+            let (metric, matchers, window, shift) = extract_matrix(arg(call, 0)?)?;
+            let smoothing = num_arg(call, 1)?;
+            let trend = num_arg(call, 2)?;
+            Ok(Inner {
+                metric,
+                matchers,
+                window: Some(window),
+                func: Some(InnerFunc::DoubleExp { smoothing, trend }),
+                shift,
+            })
+        }
+        other => Err(LoweringError::UnsupportedFunction(other.to_string())),
+    }
+}
+
+/// Assemble the Layer-2 tree from a lowered inner vector, the resolved group
+/// keys, and the enclosing aggregator shape.
+fn build(inner: Inner, keys: Vec<ColumnRef>, outer: Outer) -> Result<Unresolved> {
+    match outer {
+        Outer::None => match &inner.func {
+            None => Ok(instant_source(inner.metric, inner.matchers, inner.shift)),
+            Some(f) => {
+                let intent = inner_intent(f);
+                Ok(windowed_aggregate(inner, keys, intent))
+            }
+        },
+        // An OUTER aggregation operator (`sum`/`avg`/…/`count`) over an inner
+        // range-vector function (`rate`/`increase`/`*_over_time`) is a
+        // two-level reduction: the inner func runs per series, the outer op
+        // then aggregates across series. Collapsing them into one aggregate
+        // silently drops a level — e.g. `sum(rate(m[w]))` must keep the `sum`.
+        Outer::Plain(intent) => Ok(match &inner.func {
+            None => windowed_aggregate(inner, keys, outer_intent(&intent)),
+            Some(f) => {
+                let inner_i = inner_intent(f);
+                let inner_agg = windowed_aggregate(inner, vec![], inner_i);
+                outer_aggregate(keys, outer_intent(&intent), inner_agg)
+            }
+        }),
+        Outer::Count => Ok(match &inner.func {
+            None => windowed_aggregate(inner, keys, count()),
+            Some(f) => {
+                let inner_i = inner_intent(f);
+                let inner_agg = windowed_aggregate(inner, vec![], inner_i);
+                outer_aggregate(keys, count(), inner_agg)
+            }
+        }),
+        Outer::CountValues { label } => Ok(match &inner.func {
+            None => windowed_aggregate(inner, keys, AggIntent::CountValues { label }),
+            Some(f) => {
+                let inner_i = inner_intent(f);
+                let inner_agg = windowed_aggregate(inner, vec![], inner_i);
+                outer_aggregate(keys, AggIntent::CountValues { label }, inner_agg)
+            }
+        }),
+        Outer::Sample { kind } => {
+            // Series sampling selects whole series unchanged — like generic
+            // `topk`, a range-vector argument reduces per series first (label-
+            // preserving), a bare selector is sampled directly; neither is
+            // wrapped in a reducing aggregate (issue #86).
+            let base = match inner.func.as_ref().map(inner_intent) {
+                Some(intent) => windowed_aggregate(inner, vec![], intent),
+                None => instant_source(inner.metric, inner.matchers, inner.shift),
+            };
+            Ok(Unresolved::PromqlSeriesSample {
+                by: keys.into(),
+                kind,
+                child: Rc::new(base),
+            })
+        }
+        Outer::TopK { k, descending } => {
+            // Preserve the counter-value ranking intent. Physical candidates
+            // may rebuild a heap over finalized rates or use exact Sort/Limit;
+            // neither is allowed to sum raw counter samples as ranking weights.
+            if descending && matches!(inner.func, Some(InnerFunc::Rate | InnerFunc::Increase)) {
+                let intent = inner_intent(inner.func.as_ref().expect("counter function"));
+                let ranked = windowed_aggregate(inner, vec![], intent);
+                return Ok(Unresolved::Aggregate {
+                    reduction: Reduction::Reduce(keys.into()),
+                    measures: vec![AggIntent::TopK {
+                        k: k as usize,
+                        accuracy: current_accuracy(),
+                    }],
+                    output_names: vec![],
+                    filters: vec![],
+                    having: None,
+                    child: Rc::new(ranked),
+                });
+            }
+            // Heavy-hitter only when ranking by an additive measure (`count`
+            // or `sum`): that is a
+            // first-class aggregate intent → `TopK`. Any other ranking (topk
+            // over avg/quantile, a bare selector's raw value, all bottomk)
+            // is a generic order-by-value + limit and stays as the `Sort + Limit`
+            // operator pair. The descending-plus-measure rule is shared with the
+            // canonicalize-pass promotion so the two cannot drift (issue #38).
+            let measure = match inner.func {
+                Some(InnerFunc::Count) => topk::Ranking::Frequency,
+                Some(InnerFunc::Sum) => topk::Ranking::WeightedSum,
+                _ => topk::Ranking::NonAdditive,
+            };
+            let additive_ranking = measure.is_supported(descending);
+            if additive_ranking {
+                // Preserve the ranked aggregate intent in the canonical tree so the
+                // intent algebra is explicit about what is being computed.
+                // Post-ASAP binding may fuse the Count and TopK into a
+                // single-pass heavy-hitter sketch (SpaceSaving /
+                // CMS-with-heap), but that is a cost-model decision, not a
+                // canonical-IR concern.
+                let ranked = match measure {
+                    topk::Ranking::Frequency => InnerFunc::Count,
+                    topk::Ranking::WeightedSum => InnerFunc::Sum,
+                    topk::Ranking::NonAdditive => {
+                        unreachable!("heavy-hitter gate rejected non-additive ranking")
+                    }
+                };
+                let ranked_agg = windowed_aggregate(inner, vec![], inner_intent(&ranked));
+                Ok(Unresolved::Aggregate {
+                    // A ranking always reduces (a `by`-empty TopK ranks the
+                    // whole input into one ordering, never per-entity).
+                    reduction: Reduction::Reduce(keys.into()),
+                    measures: vec![AggIntent::TopK {
+                        k: k as usize,
+                        accuracy: current_accuracy(),
+                    }],
+                    output_names: vec![],
+                    filters: vec![],
+                    having: None,
+                    child: Rc::new(ranked_agg),
+                })
+            } else {
+                // The base over which we rank. A range-vector-function argument
+                // (`topk(k, rate(m[5m]))`) reduces *per series* first — that is
+                // label-preserving, so the `by (host)` partition labels survive.
+                // A **bare instant selector** (`topk(k, m)`) ranks its own
+                // samples directly: it must NOT be wrapped in a reducing
+                // aggregate. Defaulting it to `Sum` was both semantically wrong
+                // (PromQL `topk` ranks the raw samples, it does not sum them) and
+                // destructive — the cross-series `Sum` collapses every label,
+                // including the `by (…)` partition keys, so they no longer
+                // resolve (issue #30). Keep the selector label-preserving so
+                // `Sort.partition_by` can rank within each group (issue #12).
+                let base = match inner.func.as_ref().map(inner_intent) {
+                    Some(intent) => windowed_aggregate(inner, vec![], intent),
+                    None => instant_source(inner.metric, inner.matchers, inner.shift),
+                };
+                Ok(ranked_by_value(keys, k, descending, base))
+            }
+        }
+    }
+}
+
+/// Decide `PerEntity` vs `Reduce(by)` for a canonical `Aggregate`, entirely
+/// from local PromQL semantics: the keys and whether this operation preserves
+/// each input series. It never infers entity reduction from the child tree's
+/// temporal shape. `without()` is applied
+/// separately, post-hoc, by `mark_without` — see its doc for why that's still
+/// correct here.
+fn reduction_for(keys: &[ColumnRef], per_entity: bool) -> Reduction<ColumnRef> {
+    if keys.is_empty() && per_entity {
+        Reduction::PerEntity
+    } else {
+        Reduction::Reduce(GroupKeys::by(keys.to_vec()))
+    }
+}
+
+/// `Aggregate{reduction, [intent]}` over `[TimeRange{w}] → Scan`. Always wraps
+/// in `TimeRange` when there's a window — including for `Rate`/`Increase`,
+/// whose window rides on `inner.window` too (set redundantly alongside the
+/// intent itself): canonical `AggIntent::Rate`/`Increase` carry no window
+/// field of their own, unlike the old Unresolved `AggFunc::Rate{window}` — "the range
+/// is on the enclosing `TimeRange` node" is now true unconditionally, so
+/// there's no more `skip_window` special case.
+fn windowed_aggregate(
+    inner: Inner,
+    keys: Vec<ColumnRef>,
+    intent: AggIntent<ColumnRef>,
+) -> Unresolved {
+    let base = filtered_source(inner.metric, inner.matchers, inner.shift);
+    let child = match inner.window {
+        Some(w) => Unresolved::TimeRange {
+            range: w,
+            kind: TimeRangeKind::Range,
+            child: Rc::new(base),
+        },
+        None => ingestion_lookback(base),
+    };
+    let reduction = reduction_for(&keys, inner.window.is_some() || intent.is_per_series());
+    Unresolved::Aggregate {
+        reduction,
+        measures: vec![intent],
+        // A single empty entry — never an override — so the resolver keeps
+        // PromQL's intent-keyed output names ("sum", "quantile_0_99", …)
+        // instead.
+        output_names: vec![String::new()],
+        filters: vec![],
+        having: None,
+        child: Rc::new(child),
+    }
+}
+
+/// `Aggregate{reduction, [intent]}` directly over an existing Unresolved sub-DAG — the
+/// OUTER level of a two-level aggregation such as `sum(rate(…))` or the
+/// `Aggregate{[Quantile]}` that wraps a `histogram_quantile` argument.
+fn outer_aggregate(
+    keys: Vec<ColumnRef>,
+    intent: AggIntent<ColumnRef>,
+    child: Unresolved,
+) -> Unresolved {
+    let reduction = reduction_for(&keys, intent.is_per_series());
+    Unresolved::Aggregate {
+        reduction,
+        measures: vec![intent],
+        output_names: vec![String::new()],
+        filters: vec![],
+        having: None,
+        child: Rc::new(child),
+    }
+}
+
+/// A temporal range function over a subquery consumes each series' subquery
+/// samples independently. Unlike an ordinary outer aggregate, this cannot be
+/// inferred from the intent: `max` is cross-series in `max(v)`, but per-series
+/// in `max_over_time(v[...])`.
+fn per_series_aggregate(
+    keys: Vec<ColumnRef>,
+    intent: AggIntent<ColumnRef>,
+    child: Unresolved,
+) -> Unresolved {
+    let reduction = reduction_for(&keys, true);
+    Unresolved::Aggregate {
+        reduction,
+        measures: vec![intent],
+        output_names: vec![String::new()],
+        filters: vec![],
+        having: None,
+        child: Rc::new(child),
+    }
+}
+
+fn filtered_source(metric: String, matchers: Vec<Scalar>, shift: TimeShift) -> Unresolved {
+    let scan = Unresolved::Scan {
+        source: Source::TimeSeries { metric },
+        predicates: matchers.into_iter().map(UnresolvedPredicate).collect(),
+        // Usage-derived (PromQL is schemaless) — the SchemaResolver fills this in.
+        schema: None,
+    };
+    if shift.is_identity() {
+        scan
+    } else {
+        Unresolved::TimeShift {
+            shift,
+            child: Rc::new(scan),
+        }
+    }
+}
+
+/// An instant selector: the latest sample per series within the workload's
+/// ingestion interval, so the lookback is an `Instant` `TimeRange`.
+fn instant_source(metric: String, matchers: Vec<Scalar>, shift: TimeShift) -> Unresolved {
+    ingestion_lookback(filtered_source(metric, matchers, shift))
+}
+
+fn ingestion_lookback(child: Unresolved) -> Unresolved {
+    Unresolved::TimeRange {
+        range: current_ingestion_interval(),
+        kind: TimeRangeKind::Instant,
+        child: Rc::new(child),
+    }
+}
+
+/// Count vector elements regardless of their sample values.
+fn count() -> AggIntent<ColumnRef> {
+    AggIntent::Count {
+        accuracy: current_accuracy(),
+    }
+}
+
+fn inner_intent(f: &InnerFunc) -> AggIntent<ColumnRef> {
+    match f {
+        InnerFunc::FrequencyL2 => AggIntent::FrequencyL2 {
+            col: None,
+            accuracy: current_accuracy(),
+        },
+        InnerFunc::FrequencyEntropy => AggIntent::FrequencyEntropy {
+            col: None,
+            accuracy: current_accuracy(),
+        },
+        InnerFunc::Cardinality => AggIntent::Cardinality {
+            cols: vec![],
+            accuracy: current_accuracy(),
+        },
+        InnerFunc::Quantile(q) => AggIntent::Quantile {
+            col: None,
+            q: *q,
+            accuracy: current_accuracy(),
+        },
+        InnerFunc::Avg => AggIntent::Avg { col: None },
+        InnerFunc::Min => AggIntent::Min { col: None },
+        InnerFunc::Max => AggIntent::Max { col: None },
+        InnerFunc::Sum => AggIntent::Sum { col: None },
+        InnerFunc::StdDev => AggIntent::StdDev {
+            col: None,
+            population: true,
+        },
+        InnerFunc::Variance => AggIntent::Variance {
+            col: None,
+            population: true,
+        },
+        InnerFunc::Count => AggIntent::Count {
+            accuracy: current_accuracy(),
+        },
+        InnerFunc::Rate => AggIntent::Rate,
+        InnerFunc::IRate => AggIntent::IRate,
+        InnerFunc::Increase => AggIntent::Increase,
+        InnerFunc::Changes => AggIntent::Changes,
+        InnerFunc::Delta => AggIntent::Delta,
+        InnerFunc::IDelta => AggIntent::IDelta,
+        InnerFunc::Deriv => AggIntent::Deriv,
+        InnerFunc::Resets => AggIntent::Resets,
+        InnerFunc::PredictLinear(s) => AggIntent::PredictLinear { seconds: *s },
+        InnerFunc::DoubleExp { smoothing, trend } => AggIntent::DoubleExpSmoothing {
+            smoothing: *smoothing,
+            trend: *trend,
+        },
+        InnerFunc::LastOverTime => AggIntent::LastOverTime,
+        InnerFunc::FirstOverTime => AggIntent::FirstOverTime,
+        InnerFunc::MadOverTime => AggIntent::MadOverTime,
+        InnerFunc::TsOfMinOverTime => AggIntent::TsOfMinOverTime,
+        InnerFunc::TsOfMaxOverTime => AggIntent::TsOfMaxOverTime,
+        InnerFunc::TsOfFirstOverTime => AggIntent::TsOfFirstOverTime,
+        InnerFunc::TsOfLastOverTime => AggIntent::TsOfLastOverTime,
+    }
+}
+
+fn outer_intent(o: &OuterIntent) -> AggIntent<ColumnRef> {
+    match o {
+        OuterIntent::Sum => AggIntent::Sum { col: None },
+        OuterIntent::Avg => AggIntent::Avg { col: None },
+        OuterIntent::Min => AggIntent::Min { col: None },
+        OuterIntent::Max => AggIntent::Max { col: None },
+        OuterIntent::StdDev => AggIntent::StdDev {
+            col: None,
+            population: true,
+        },
+        OuterIntent::Variance => AggIntent::Variance {
+            col: None,
+            population: true,
+        },
+        OuterIntent::Quantile(q) => AggIntent::Quantile {
+            col: None,
+            q: *q,
+            accuracy: current_accuracy(),
+        },
+        OuterIntent::Group => AggIntent::Group,
+    }
+}
+
+/// Unwrap a (possibly parenthesised) string literal — `count_values` labels and
+/// `label_replace`/`label_join` arguments are all string literals, sometimes
+/// wrapped in parens (`count_values((("v")), …)`).
+fn expr_str(expr: &Expr) -> Result<String> {
+    match expr {
+        Expr::StringLiteral(s) => Ok(s.val.clone()),
+        Expr::Paren(p) => expr_str(&p.expr),
+        other => Err(LoweringError::InvalidParameter(format!(
+            "expected a string literal, got `{other}`"
+        ))),
+    }
+}
+
+/// A `count_values` string parameter (the synthesized label name).
+fn str_param(agg: &AggregateExpr) -> Result<String> {
+    match &agg.param {
+        Some(e) => expr_str(e),
+        None => Err(LoweringError::MissingArgument(
+            "`count_values` label parameter".into(),
+        )),
+    }
+}
+
+/// A call's `idx`-th argument as a string literal (`label_replace`/`label_join`).
+fn str_arg(call: &Call, idx: usize) -> Result<String> {
+    expr_str(arg(call, idx)?)
+}
+
+/// Resolve an aggregation's grouping modifier into a `(keys, without)` pair.
+///
+/// `by(labels)` → the kept labels, `without = false`. `without(labels)` → the
+/// **excluded** labels, `without = true`: the kept set (the complement) can't be
+/// enumerated under an open usage-derived schema, so it is deferred to the
+/// runtime and only the excluded positions are carried (issue #39). Both forms
+/// canonicalise their label set (sort + dedup) so equivalent groupings lower
+/// identically. PromQL labels have no table qualifier → `ColumnRef::Named`.
+fn resolve_group(agg: &AggregateExpr) -> Result<(Vec<ColumnRef>, bool)> {
+    let canon = |labels: &[String]| -> Vec<ColumnRef> {
+        let mut keys = labels.to_vec();
+        keys.sort();
+        keys.dedup();
+        keys.into_iter().map(ColumnRef::Named).collect()
+    };
+    match &agg.modifier {
+        None => Ok((vec![], false)),
+        Some(LabelModifier::Include(ls)) => Ok((canon(&ls.labels), false)),
+        Some(LabelModifier::Exclude(ls)) => Ok((canon(&ls.labels), true)),
+    }
+}
+
+// ── Free helpers ──────────────────────────────────────────────────────────────
+
+fn vs_parts(vs: &VectorSelector) -> Result<(String, Vec<Scalar>, TimeShift)> {
+    // A non-equality `__name__` matcher (`=~` / `!~` / `!=`) selects *across*
+    // metric names. `Source::TimeSeries { metric }` carries a single concrete
+    // metric name, so there is no representation for a regex/negated name
+    // match — reject rather than mislower it to a literal metric named after
+    // the pattern (issue #67). An equality `__name__` (`{__name__="up"}`)
+    // still names the metric below.
+    if let Some(m) = vs
+        .matchers
+        .matchers
+        .iter()
+        .find(|m| m.name == "__name__" && !matches!(m.op, MatchOp::Equal))
+    {
+        return Err(LoweringError::UnsupportedFeature(format!(
+            "non-equality `__name__` matcher ({}{:?}) selects across metric names, \
+             which has no single-metric canonical representation",
+            m.name, m.op
+        )));
+    }
+    let metric = vs.name.clone().unwrap_or_else(|| {
+        vs.matchers
+            .matchers
+            .iter()
+            .find(|m| m.name == "__name__")
+            .map(|m| m.value.clone())
+            .unwrap_or_default()
+    });
+    // Label matchers are an unordered set: `{a="1",b="2"}` and `{b="2",a="1"}`
+    // select the same series. Canonicalise by (name, value) so equivalent
+    // selectors lower to identical predicates.
+    let mut ms: Vec<&Matcher> = vs
+        .matchers
+        .matchers
+        .iter()
+        .filter(|m| m.name != "__name__")
+        .collect();
+    ms.sort_by(|a, b| a.name.cmp(&b.name).then_with(|| a.value.cmp(&b.value)));
+    let matchers = ms.into_iter().map(matcher_to_compare).collect();
+    let shift = time_shift(vs.offset.as_ref(), vs.at.as_ref())?;
+    Ok((metric, matchers, shift))
+}
+
+/// Convert the parser's `offset` / `@` modifiers into a [`TimeShift`] (issue
+/// #40). Offset is signed milliseconds; `@ <ts>` (parser seconds → ms) becomes
+/// an absolute anchor, `@ start()`/`@ end()` the range bounds.
+fn time_shift(offset: Option<&Offset>, at: Option<&ParserAtModifier>) -> Result<TimeShift> {
+    let offset_ms = match offset {
+        None => 0,
+        Some(Offset::Pos(d)) => duration_ms(*d)?,
+        Some(Offset::Neg(d)) => -duration_ms(*d)?,
+    };
+    let at = match at {
+        None => None,
+        Some(ParserAtModifier::Start) => Some(AtModifier::Start),
+        Some(ParserAtModifier::End) => Some(AtModifier::End),
+        Some(ParserAtModifier::At(t)) => Some(AtModifier::Timestamp(system_time_ms(*t)?)),
+    };
+    Ok(TimeShift { offset_ms, at })
+}
+
+/// A `Duration` as `i64` milliseconds, rejecting an overflow rather than
+/// silently truncating a pathologically large `offset`.
+fn duration_ms(d: Duration) -> Result<i64> {
+    i64::try_from(d.as_millis()).map_err(|_| {
+        LoweringError::InvalidParameter("offset duration overflows i64 milliseconds".into())
+    })
+}
+
+/// A `SystemTime` (`@ <ts>`) as `i64` milliseconds since the Unix epoch, signed
+/// so pre-epoch anchors (the parser permits them) are preserved.
+fn system_time_ms(t: SystemTime) -> Result<i64> {
+    let ms = match t.duration_since(std::time::UNIX_EPOCH) {
+        Ok(d) => i64::try_from(d.as_millis()),
+        Err(e) => i64::try_from(e.duration().as_millis()).map(|ms| -ms),
+    };
+    ms.map_err(|_| {
+        LoweringError::InvalidParameter("`@` timestamp overflows i64 milliseconds".into())
+    })
+}
+
+fn matcher_to_compare(m: &Matcher) -> Scalar {
+    let op = match &m.op {
+        MatchOp::Equal => CompareOpKind::Eq,
+        MatchOp::NotEqual => CompareOpKind::Ne,
+        MatchOp::Re(_) => CompareOpKind::Regex,
+        MatchOp::NotRe(_) => CompareOpKind::NotRegex,
+    };
+    Scalar::Compare {
+        left: Box::new(Scalar::Column(ColumnRef::Named(m.name.clone()))),
+        op,
+        right: Box::new(Scalar::Literal(ScalarValue::Utf8(m.value.clone()))),
+        semantics: PROMQL,
+    }
+}
+
+fn extract_matrix(expr: &Expr) -> Result<(String, Vec<Scalar>, Duration, TimeShift)> {
+    match expr {
+        Expr::MatrixSelector(ms) => {
+            let (metric, matchers, shift) = vs_parts(&ms.vs)?;
+            Ok((metric, matchers, ms.range, shift))
+        }
+        Expr::Paren(p) => extract_matrix(&p.expr),
+        // A range-vector function argument must be a (parenthesised) matrix
+        // selector. Do NOT descend through an arbitrary `Call` — that would
+        // silently strip an unsupported wrapper (`rate(deriv(m[5m]))` lowering
+        // as `rate(m[5m])`). Reject instead.
+        other => Err(LoweringError::UnsupportedFeature(format!(
+            "expected a range-vector (matrix) argument, got `{other}`"
+        ))),
+    }
+}
+
+fn arg(call: &Call, idx: usize) -> Result<&Expr> {
+    call.args
+        .args
+        .get(idx)
+        .map(|b| b.as_ref())
+        .ok_or_else(|| LoweringError::MissingArgument(format!("{} arg #{idx}", call.func.name)))
+}
+
+fn num_arg(call: &Call, idx: usize) -> Result<f64> {
+    num_expr(arg(call, idx)?)
+}
+
+fn num_param(agg: &AggregateExpr) -> Result<f64> {
+    match &agg.param {
+        Some(e) => num_expr(e),
+        None => Err(LoweringError::MissingArgument(
+            "aggregate parameter (k / φ)".into(),
+        )),
+    }
+}
+
+fn num_expr(expr: &Expr) -> Result<f64> {
+    match expr {
+        Expr::NumberLiteral(n) => Ok(n.val),
+        Expr::Paren(p) => num_expr(&p.expr),
+        Expr::Unary(u) => Ok(-num_expr(&u.expr)?),
+        // Constant-fold a pure scalar arithmetic expression — the parser does
+        // not fold `10*1024*1024` / `24 * 3600`. A `modifier` (vector matching)
+        // or a non-arithmetic operator means it is not a pure scalar.
+        Expr::Binary(b) if b.modifier.is_none() => {
+            let (l, r) = (num_expr(&b.lhs)?, num_expr(&b.rhs)?);
+            let id = b.op.id();
+            if id == token::T_ADD {
+                Ok(l + r)
+            } else if id == token::T_SUB {
+                Ok(l - r)
+            } else if id == token::T_MUL {
+                Ok(l * r)
+            } else if id == token::T_DIV {
+                Ok(l / r)
+            } else if id == token::T_MOD {
+                Ok(l % r)
+            } else if id == token::T_POW {
+                Ok(l.powf(r))
+            } else {
+                Err(LoweringError::InvalidParameter(
+                    "non-arithmetic operator in scalar expression".into(),
+                ))
+            }
+        }
+        // `min_of`/`max_of` are n-ary *scalar* reducers (issue #89). Fold them
+        // when every argument is itself a constant scalar — this is the only
+        // form the intent algebra can hold (there is no scalar min/max node). A
+        // non-constant argument (`min_of(step(), 1s)`) fails the recursive fold
+        // and propagates the error, so it stays rejected. `f64::min`/`max`
+        // ignore NaN, matching PromQL's `min`/`max` NaN semantics.
+        Expr::Call(c) if is_scalar_reducer_fn(c.func.name) => {
+            let reduce = if c.func.name == "min_of" {
+                f64::min
+            } else {
+                f64::max
+            };
+            c.args
+                .args
+                .iter()
+                .map(|a| num_expr(a))
+                .reduce(|acc, v| Ok(reduce(acc?, v?)))
+                .ok_or_else(|| {
+                    LoweringError::MissingArgument(format!("{} needs an argument", c.func.name))
+                })?
+        }
+        other => Err(LoweringError::InvalidParameter(format!(
+            "expected a numeric scalar, got `{other}`"
+        ))),
+    }
+}
+
+/// The n-ary scalar min/max reducers, foldable when all arguments are constant
+/// scalars (issue #89).
+fn is_scalar_reducer_fn(name: &str) -> bool {
+    matches!(name, "min_of" | "max_of")
+}
+
+/// `topk`/`bottomk` count parameter — a non-negative integer. Rejects
+/// fractional / negative / non-finite values rather than silently truncating
+/// or saturating them via `as u64` (`topk(2.7, …)` ≠ `topk(2, …)`).
+fn count_param(agg: &AggregateExpr) -> Result<u64> {
+    let v = num_param(agg)?;
+    if v.is_finite() && v >= 0.0 && v.fract() == 0.0 && v <= u64::MAX as f64 {
+        Ok(v as u64)
+    } else {
+        Err(LoweringError::InvalidParameter(format!(
+            "topk/bottomk k must be a non-negative integer, got {v}"
+        )))
+    }
+}
+
+/// `limit_ratio` ratio parameter — a finite value; Prometheus clamps it to
+/// `[-1, 1]` (a negative ratio selects the complementary fraction). A non-finite
+/// ratio (`limit_ratio(NaN, …)`) or a dynamic one (`time() % 17/17`, which
+/// `num_param` can't fold) is rejected (issue #86).
+fn ratio_param(agg: &AggregateExpr) -> Result<f64> {
+    let r = num_param(agg)?;
+    if !r.is_finite() {
+        return Err(LoweringError::InvalidParameter(format!(
+            "limit_ratio ratio must be finite, got {r}"
+        )));
+    }
+    Ok(r.clamp(-1.0, 1.0))
+}
+
+/// Preserve the full Prometheus quantile parameter domain, including special values.
+fn quantile_param(q: f64) -> Result<f64> {
+    // Prometheus returns NaN/-Inf/+Inf for these parameters at execution time.
+    Ok(q)
+}
+
+// The non-standard histogram_quantiles extension keeps its bounded label contract.
+fn bounded_quantile_param(q: f64) -> Result<f64> {
+    if q.is_finite() && (0.0..=1.0).contains(&q) {
+        Ok(q)
+    } else {
+        Err(LoweringError::InvalidParameter(format!(
+            "quantile φ must be in [0, 1], got {q}"
+        )))
+    }
+}
+
+fn binop(id: token::TokenId) -> Result<BinaryOpKind> {
+    Ok(if id == token::T_ADD {
+        BinaryOpKind::Arithmetic(ArithmeticOpKind::Add)
+    } else if id == token::T_SUB {
+        BinaryOpKind::Arithmetic(ArithmeticOpKind::Sub)
+    } else if id == token::T_MUL {
+        BinaryOpKind::Arithmetic(ArithmeticOpKind::Mul)
+    } else if id == token::T_DIV {
+        BinaryOpKind::Arithmetic(ArithmeticOpKind::Div)
+    } else if id == token::T_MOD {
+        BinaryOpKind::Arithmetic(ArithmeticOpKind::Mod)
+    } else if id == token::T_POW {
+        BinaryOpKind::Arithmetic(ArithmeticOpKind::Pow)
+    } else if id == token::T_ATAN2 {
+        BinaryOpKind::Arithmetic(ArithmeticOpKind::Atan2)
+    } else if id == token::T_EQLC {
+        BinaryOpKind::Compare(CompareOpKind::Eq)
+    } else if id == token::T_NEQ {
+        BinaryOpKind::Compare(CompareOpKind::Ne)
+    } else if id == token::T_LSS {
+        BinaryOpKind::Compare(CompareOpKind::Lt)
+    } else if id == token::T_LTE {
+        BinaryOpKind::Compare(CompareOpKind::Le)
+    } else if id == token::T_GTR {
+        BinaryOpKind::Compare(CompareOpKind::Gt)
+    } else if id == token::T_GTE {
+        BinaryOpKind::Compare(CompareOpKind::Ge)
+    } else if id == token::T_LAND {
+        BinaryOpKind::Set(PromQLVectorSetOpKind::And)
+    } else if id == token::T_LOR {
+        BinaryOpKind::Set(PromQLVectorSetOpKind::Or)
+    } else if id == token::T_LUNLESS {
+        BinaryOpKind::Set(PromQLVectorSetOpKind::Unless)
+    } else {
+        return Err(LoweringError::UnsupportedFeature(format!(
+            "binary operator token {id}"
+        )));
+    })
+}

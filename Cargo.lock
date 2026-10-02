@@ -342,6 +342,7 @@ dependencies = [
 name = "asap-frontend-metricsql"
 version = "0.1.0"
 dependencies = [
+ "asap-frontend-common",
  "asap-types",
  "metricsql_parser",
  "thiserror 2.0.18",
@@ -352,6 +353,7 @@ name = "asap-frontend-promql"
 version = "0.1.0"
 dependencies = [
  "asap-aware-mapping",
+ "asap-frontend-common",
  "asap-types",
  "promql-parser",
 ]
