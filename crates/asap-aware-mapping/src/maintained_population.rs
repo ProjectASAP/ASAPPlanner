@@ -21,9 +21,9 @@ fn strip_projection(mut root: &OperatorNode) -> &OperatorNode {
 
 fn recognize(
     root: &OperatorNode,
-) -> Option<(MaintainedPopulation, PopulationReadout, Rc<OperatorNode>)> {
+) -> Option<(MaintainedPopulation, PopulationStatistic, Rc<OperatorNode>)> {
     let root = strip_projection(root);
-    let (source, grouping, readout, value_column) = match root.non_asap()? {
+    let (source, grouping, evaluation, value_column) = match root.non_asap()? {
         NonASAPOp::Aggregate {
             child,
             reduction: Reduction::Reduce(grouping),
@@ -38,21 +38,21 @@ fn recognize(
             if any_measure_filtered(filters) {
                 return None;
             }
-            let (col, readout) = match intent {
+            let (col, evaluation) = match intent {
                 AggIntent::Quantile { q, col, .. } if q.is_finite() => {
-                    (*col, PopulationReadout::Quantile { q: *q })
+                    (*col, PopulationStatistic::Quantile { q: *q })
                 }
-                AggIntent::TopK { k, .. } => (None, PopulationReadout::TopK { k: *k }),
-                AggIntent::Sum { col } => (*col, PopulationReadout::Sum),
-                AggIntent::Count { .. } => (None, PopulationReadout::Count),
-                AggIntent::Avg { col } => (*col, PopulationReadout::Average),
+                AggIntent::TopK { k, .. } => (None, PopulationStatistic::TopK { k: *k }),
+                AggIntent::Sum { col } => (*col, PopulationStatistic::Sum),
+                AggIntent::Count { .. } => (None, PopulationStatistic::Count),
+                AggIntent::Avg { col } => (*col, PopulationStatistic::Average),
                 _ => return None,
             };
             let schema = &child.schema;
             if col.is_some_and(|c| schema.fields.get(c).is_none()) {
                 return None;
             }
-            (child, grouping, readout, col)
+            (child, grouping, evaluation, col)
         }
         NonASAPOp::Limit {
             n: Some(n),
@@ -80,7 +80,7 @@ fn recognize(
             (
                 child,
                 partition_by,
-                PopulationReadout::TopK { k: *n },
+                PopulationStatistic::TopK { k: *n },
                 Some(*col),
             )
         }
@@ -110,7 +110,7 @@ fn recognize(
         if !schema.closed || !population.matches_node(source) {
             return None;
         }
-        return Some((population, readout, Rc::clone(source)));
+        return Some((population, evaluation, Rc::clone(source)));
     }
     // A bare PromQL selector carries the declared ingestion interval as a
     // temporal input scope. Membership must expire at that horizon; retain
@@ -194,15 +194,15 @@ fn recognize(
             max_k: 0,
             quantiles: false,
         },
-        readout,
+        evaluation,
         Rc::clone(source),
     ))
 }
 
-/// Workload-aware rule: compatible readouts share one retractable population.
+/// Workload-aware rule: compatible evaluations share one retractable population.
 /// Deployments opt in by registering this strategy when they can maintain complete
-/// population updates and price the maintenance/readout boundary.
-/// The population is exact; max_k bounds the shared readout cache, not its members.
+/// population updates and price the maintenance/evaluation boundary.
+/// The population is exact; max_k bounds the shared evaluation cache, not its members.
 pub struct MaintainedPopulationStrategy {
     roots: Vec<Rc<OperatorNode>>,
 }
@@ -233,17 +233,19 @@ impl MaintainedPopulationStrategy {
                 .with_guarantee(guarantee),
             ));
         }
-        let (mut population, readout, source) = recognize(root)?;
+        let (mut population, evaluation, source) = recognize(root)?;
         let identity = population.clone();
         for other in self.roots.iter().chain(std::iter::once(root)) {
             if let Some((p, r, _)) = recognize(other) {
                 if p == identity {
                     match r {
-                        PopulationReadout::Quantile { .. } => population.quantiles = true,
-                        PopulationReadout::TopK { k } => population.max_k = population.max_k.max(k),
-                        PopulationReadout::Sum
-                        | PopulationReadout::Count
-                        | PopulationReadout::Average => {}
+                        PopulationStatistic::Quantile { .. } => population.quantiles = true,
+                        PopulationStatistic::TopK { k } => {
+                            population.max_k = population.max_k.max(k)
+                        }
+                        PopulationStatistic::Sum
+                        | PopulationStatistic::Count
+                        | PopulationStatistic::Average => {}
                     }
                 }
             }
@@ -268,12 +270,14 @@ impl MaintainedPopulationStrategy {
             )),
         );
         Some(OperatorNode::asap_node(
-            ASAPOp::ReadPopulation {
+            ASAPOp::EvaluatePopulation {
                 child: maintained,
-                readout,
+                evaluation,
             },
             plain(root.schema.clone()),
-            Some(ResultGuarantee::exact("exact current-population readout")),
+            Some(ResultGuarantee::exact(
+                "exact current-population evaluation",
+            )),
         ))
     }
 }
@@ -285,10 +289,10 @@ impl ReplacementStrategy for MaintainedPopulationStrategy {
         self.candidate(target.root)
             .map(|node| ReplacementSubDAG {
                 strategy: "MaintainedPopulationStrategy",
-                replacement: Replacement::Subtree(node),
+                replacement: Replacement::SubDag(node),
                 provenance: ReplacementProvenance::SummaryRealization,
                 rationale:
-                    "share an exact maintained population across compatible aggregate readouts"
+                    "share an exact maintained population across compatible aggregate evaluations"
                         .into(),
             })
             .into_iter()
@@ -300,7 +304,7 @@ impl ReplacementStrategy for MaintainedPopulationStrategy {
 mod tests {
     use super::*;
     use crate::test_support::lower_promql;
-    use asap_types::ir::cse::share_common_subtrees;
+    use asap_types::ir::cse::share_common_subdags;
     use asap_types::ir::export::compile_post_asap_dag as export_timed;
     use asap_types::ir::timing::{apply_lifecycle_timings, LifecycleAssignment, TimingMemo};
 
@@ -344,7 +348,7 @@ mod tests {
         }
     }
 
-    // Different readout parameters retain one shared maintenance producer in the DAG.
+    // Different evaluation parameters retain one shared maintenance producer in the DAG.
     #[test]
     fn quantiles_and_topk_share_a_planner_population() {
         let roots: Vec<_> = [
@@ -368,7 +372,7 @@ mod tests {
             .target_subdag_candidates()
             .flat_map(|g| &g.candidates)
             .any(|c| c.strategy == "MaintainedPopulationStrategy"));
-        let plans = share_common_subtrees(
+        let plans = share_common_subdags(
             roots
                 .iter()
                 .enumerate()
@@ -378,8 +382,8 @@ mod tests {
         let mut producers = Vec::new();
         for (_, plan) in &plans {
             compile_post_asap_dag(plan).unwrap();
-            let Operator::ASAP(ASAPOp::ReadPopulation { child, .. }) = &plan.operator else {
-                panic!("missing typed readout")
+            let Operator::ASAP(ASAPOp::EvaluatePopulation { child, .. }) = &plan.operator else {
+                panic!("missing typed evaluation")
             };
             let Operator::ASAP(ASAPOp::MaintainPopulation { population, .. }) = &child.operator
             else {
@@ -407,7 +411,7 @@ mod tests {
         let (p, _, _) = recognize(&roots[0]).unwrap();
         assert!(matches!(p.input, PopulationInput::CurrentSeries(ref s) if s.grouping.is_empty()));
         let candidate = strategy.candidate(&roots[0]).unwrap();
-        let Operator::ASAP(ASAPOp::ReadPopulation { child, .. }) = &candidate.operator else {
+        let Operator::ASAP(ASAPOp::EvaluatePopulation { child, .. }) = &candidate.operator else {
             unreachable!()
         };
         let Operator::ASAP(ASAPOp::MaintainPopulation { population, .. }) = &child.operator else {
@@ -437,7 +441,7 @@ mod tests {
         assert_eq!(p.matchers[0].operation, CurrentSeriesMatch::Regex);
     }
     // Population timing is a lifecycle choice: a retained or rebuilt
-    // population both validate, while its readout must stay at query time.
+    // population both validate, while its evaluation must stay at query time.
     #[test]
     fn population_timing_is_not_structural() {
         let root = lower("topk(5,a)");
@@ -445,10 +449,11 @@ mod tests {
             .candidate(&root)
             .unwrap();
         use asap_types::post_asap::ExecutionTiming;
-        let with_timings = |population: ExecutionTiming, readout: ExecutionTiming| {
+        let with_timings = |population: ExecutionTiming, evaluation: ExecutionTiming| {
             let mut node = (*candidate).clone();
-            node.timing = Some(readout);
-            let Operator::ASAP(ASAPOp::ReadPopulation { child, .. }) = &mut node.operator else {
+            node.timing = Some(evaluation);
+            let Operator::ASAP(ASAPOp::EvaluatePopulation { child, .. }) = &mut node.operator
+            else {
                 unreachable!()
             };
             Rc::make_mut(child).timing = Some(population);
@@ -459,7 +464,7 @@ mod tests {
         assert!(with_timings(QueryTime, QueryTime).is_ok());
         assert!(with_timings(IngestionTime, IngestionTime).is_err());
     }
-    // A readout cannot reinterpret arbitrary rows as maintained state or exceed its producer's contract.
+    // A evaluation cannot reinterpret arbitrary rows as maintained state or exceed its producer's contract.
     #[test]
     fn malformed_population_dags_fail_closed() {
         let root = lower("topk(5,a)");
@@ -467,15 +472,17 @@ mod tests {
         let candidate = strategy.candidate(&root).unwrap();
         compile_post_asap_dag(&candidate).expect("the unmodified candidate is legal");
         let mut bad = (*candidate).clone();
-        let Operator::ASAP(ASAPOp::ReadPopulation { readout, .. }) = &mut bad.operator else {
+        let Operator::ASAP(ASAPOp::EvaluatePopulation { evaluation, .. }) = &mut bad.operator
+        else {
             unreachable!()
         };
-        *readout = PopulationReadout::TopK { k: 6 };
+        *evaluation = PopulationStatistic::TopK { k: 6 };
         assert!(compile_post_asap_dag(&Rc::new(bad.clone())).is_err());
-        let Operator::ASAP(ASAPOp::ReadPopulation { child, readout }) = &mut bad.operator else {
+        let Operator::ASAP(ASAPOp::EvaluatePopulation { child, evaluation }) = &mut bad.operator
+        else {
             unreachable!()
         };
-        *readout = PopulationReadout::TopK { k: 5 };
+        *evaluation = PopulationStatistic::TopK { k: 5 };
         let producer = Rc::make_mut(child);
         let Operator::ASAP(ASAPOp::MaintainPopulation { population, .. }) = &mut producer.operator
         else {

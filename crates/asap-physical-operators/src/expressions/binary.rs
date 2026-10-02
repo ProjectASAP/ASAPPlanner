@@ -1,4 +1,4 @@
-//! Execution configuration for a binary kernel, including comparison readout mode.
+//! Execution configuration for a binary kernel, including comparison evaluation mode.
 use planner_types::pre_asap::{
     ArithmeticOpKind, CompareOpKind, PromQLVectorSetOpKind, VectorMatch,
 };

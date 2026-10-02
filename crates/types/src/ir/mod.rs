@@ -4,7 +4,7 @@
 //! - [`node`] — [`OperatorNode`] / [`Operator`]: the DAG node and its two
 //!   operator categories, with the common planning properties.
 //! - [`non_asap`] — [`NonASAPOp`]: ordinary query operators.
-//! - [`asap`] — [`ASAPOp`]: summary-state construction, operations and readouts.
+//! - [`asap`] — [`ASAPOp`]: summary-state construction, operations and evaluations.
 //! - [`scalar`] — [`ScalarExpr`]: value computation owned by operator fields.
 
 pub mod asap;
@@ -27,3 +27,8 @@ pub use timing::{
     apply_lifecycle_timings, data_state, planned_data_state, split_shared_by_phase,
     validate_default, LifecycleAssignment, TimingMemo,
 };
+
+pub mod aggregate_schema;
+pub mod error;
+pub mod operator_properties;
+pub use error::QueryExprError;

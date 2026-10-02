@@ -120,12 +120,12 @@ fn blocking_inputs_require_an_explicit_finite_source() {
     }
 }
 
-// Kernel support must not be mistaken for executable native state/readout support.
+// Kernel support must not be mistaken for executable native state/evaluation support.
 #[test]
 fn summary_capability_levels_are_distinct() {
     use asap_physical_operators::{
-        capability::{validate_native_family, validate_sketch_readout, validate_summary_kernel},
-        planner::post_asap::SketchQuery,
+        capability::{validate_native_family, validate_sketch_evaluation, validate_summary_kernel},
+        planner::post_asap::SketchStatistic,
     };
     use planner_types::{
         post_asap::{GroupingStrategy, SketchAlgorithm, SketchKind, SketchParams, SummaryUpdate},
@@ -152,14 +152,14 @@ fn summary_capability_levels_are_distinct() {
     assert!(validate_summary_kernel(&cms, &update, &grouping).is_ok());
     // Stored Count-Min state reads only its bare count natively.
     assert!(validate_native_family(&cms).is_ok());
-    let bare_count = SketchQuery::PointCount {
+    let bare_count = SketchStatistic::PointCount {
         key: ColumnRef::SampleValue,
         value: None,
     };
-    assert!(validate_sketch_readout(&cms, &bare_count).is_ok());
-    assert!(validate_sketch_readout(
+    assert!(validate_sketch_evaluation(&cms, &bare_count).is_ok());
+    assert!(validate_sketch_evaluation(
         &cms,
-        &SketchQuery::PointCount {
+        &SketchStatistic::PointCount {
             key: ColumnRef::Named("host".into()),
             value: Some("a".into()),
         }
@@ -170,7 +170,7 @@ fn summary_capability_levels_are_distinct() {
         grouping,
     );
     assert!(validate_native_family(&kll).is_ok());
-    assert!(validate_sketch_readout(&kll, &SketchQuery::Quantile { q: 1.5 }).is_err());
-    assert!(validate_sketch_readout(&kll, &SketchQuery::Cardinality).is_err());
-    assert!(validate_sketch_readout(&kll, &SketchQuery::Quantile { q: 0.5 }).is_ok());
+    assert!(validate_sketch_evaluation(&kll, &SketchStatistic::Quantile { q: 1.5 }).is_err());
+    assert!(validate_sketch_evaluation(&kll, &SketchStatistic::Cardinality).is_err());
+    assert!(validate_sketch_evaluation(&kll, &SketchStatistic::Quantile { q: 0.5 }).is_ok());
 }

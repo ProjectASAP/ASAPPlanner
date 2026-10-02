@@ -124,7 +124,7 @@ fn grouped_sort_limit_across_batches() {
 
 // The same computation runs in either engine scope with fresh per-run state.
 #[test]
-fn summary_construction_merge_and_readout_at_both_phases() {
+fn summary_construction_merge_and_evaluation_at_both_phases() {
     let schema = schema(&[("v", DataType::Float64, false)]);
     let batches = (1..=20)
         .map(|v| Batch::try_new(schema.clone(), vec![vec![Value::Float64(v as f64)]]).unwrap())
@@ -147,11 +147,11 @@ fn summary_construction_merge_and_readout_at_both_phases() {
     dag.add(
         4,
         vec![3],
-        Operator::readout(
+        Operator::evaluation(
             state,
             0,
-            asap_physical_operators::operators::ReadoutQuery::Exact(
-                asap_physical_operators::summary_kernels::exact::ExactReadout {
+            asap_physical_operators::operators::SummaryEvaluation::Exact(
+                asap_physical_operators::summary_kernels::exact::ExactEvaluation {
                     statistic: Statistic::Sum,
                     lookback_ms: None,
                 },
@@ -302,11 +302,11 @@ fn binding_rejects_unsupported_operations() {
         vec![],
     )
     .unwrap();
-    assert!(Operator::readout(
+    assert!(Operator::evaluation(
         sum.schema(),
         0,
-        asap_physical_operators::operators::ReadoutQuery::Sketch(
-            planner_types::post_asap::SketchQuery::Quantile { q: 0.5 }
+        asap_physical_operators::operators::SummaryEvaluation::Sketch(
+            planner_types::post_asap::SketchStatistic::Quantile { q: 0.5 }
         )
     )
     .is_err());
@@ -404,11 +404,11 @@ fn kll_raw_partial_and_precomputed_are_native_dags() {
         dag.add(
             5,
             vec![4],
-            Operator::readout(
+            Operator::evaluation(
                 state.clone(),
                 0,
-                asap_physical_operators::operators::ReadoutQuery::Sketch(
-                    planner_types::post_asap::SketchQuery::Quantile { q: 0.5 },
+                asap_physical_operators::operators::SummaryEvaluation::Sketch(
+                    planner_types::post_asap::SketchStatistic::Quantile { q: 0.5 },
                 ),
             )
             .unwrap(),
@@ -460,11 +460,11 @@ fn exact_state_and_family_validation() {
     dag.add(
         1,
         vec![0],
-        Operator::readout(
+        Operator::evaluation(
             schema.clone(),
             0,
-            asap_physical_operators::operators::ReadoutQuery::Exact(
-                asap_physical_operators::summary_kernels::exact::ExactReadout {
+            asap_physical_operators::operators::SummaryEvaluation::Exact(
+                asap_physical_operators::summary_kernels::exact::ExactEvaluation {
                     statistic: Statistic::Sum,
                     lookback_ms: None,
                 },
@@ -579,7 +579,7 @@ fn bind_post_asap_before_execution() {
 
 // A completed empty population has an exact zero count, with integer output.
 #[test]
-fn empty_exact_count_is_an_integer_state_readout() {
+fn empty_exact_count_is_an_integer_state_evaluation() {
     let input = schema(&[("value", DataType::Float64, false)]);
     let build = Operator::summary_build(
         input.clone(),
@@ -589,11 +589,11 @@ fn empty_exact_count_is_an_integer_state_readout() {
         vec![],
     )
     .unwrap();
-    let read = Operator::readout(
+    let read = Operator::evaluation(
         build.schema(),
         0,
-        asap_physical_operators::operators::ReadoutQuery::Exact(
-            asap_physical_operators::summary_kernels::exact::ExactReadout {
+        asap_physical_operators::operators::SummaryEvaluation::Exact(
+            asap_physical_operators::summary_kernels::exact::ExactEvaluation {
                 statistic: Statistic::Count,
                 lookback_ms: None,
             },
@@ -1119,7 +1119,7 @@ fn assert_weighted_rate_topk(count_sketch: bool) {
         ("service", DataType::Utf8, false),
         ("score", DataType::Float64, false),
     ]);
-    let readout = Operator::keyed_readout(build.schema(), 1, 8, output.clone()).unwrap();
+    let evaluation = Operator::keyed_evaluation(build.schema(), 1, 8, output.clone()).unwrap();
     let mut dag = PhysicalDag::default();
     dag.add(
         0,
@@ -1129,7 +1129,7 @@ fn assert_weighted_rate_topk(count_sketch: bool) {
     .unwrap();
     dag.add(1, vec![0], rates).unwrap();
     dag.add(2, vec![1], build).unwrap();
-    dag.add(3, vec![2], readout).unwrap();
+    dag.add(3, vec![2], evaluation).unwrap();
     dag.add(
         4,
         vec![3],

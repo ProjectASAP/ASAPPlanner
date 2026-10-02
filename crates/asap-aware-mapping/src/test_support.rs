@@ -50,11 +50,11 @@ pub(crate) fn lower_promql(query: &str, accuracy: AccuracyTarget) -> Rc<Operator
 
 use std::time::Duration;
 
+use asap_types::ir::operator_properties::{GroupKeys, Reduction, Source};
 use asap_types::ir::timing::{apply_lifecycle_timings, LifecycleAssignment, TimingMemo};
 use asap_types::ir::{NonASAPOp, Predicate, ScalarExpr, TimeRangeKind};
 use asap_types::pre_asap::agg_intent::AggIntent;
 use asap_types::pre_asap::schema::{ColumnId, DataType, Field, Schema};
-use asap_types::pre_asap::vocabulary::{GroupKeys, Reduction, Source};
 
 /// A `TimeSeries("m")` scan over `[ts(0), value(1), labels...]`, time index 0,
 /// no unique key.

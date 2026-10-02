@@ -1,4 +1,4 @@
-//! A retained PromQL subtree (`Fallback`) compiles from its typed expression.
+//! A retained PromQL sub-DAG (`Fallback`) compiles from its typed expression.
 //! The deployment supplies only its selector's raw series; expected values are
 //! hand-computed with Prometheus semantics.
 mod common;
@@ -1245,7 +1245,7 @@ fn histogram_quantile_selection_keeps_the_exact_fallback() {
             let candidates = &space.candidates_for_target(planned).unwrap().candidates;
             assert!(
                 candidates.iter().all(|c| matches!(&c.replacement,
-                    Replacement::Subtree(node) if !node.contains_asap() && node.operator == root.operator)),
+                    Replacement::SubDag(node) if !node.contains_asap() && node.operator == root.operator)),
                 "{query}: {candidates:?}"
             );
             let selected = space

@@ -173,7 +173,7 @@ pub struct QueryLifecyclePlan {
     pub plan: SummaryMaintenanceLifecyclePlan,
 }
 
-/// One plan per workload entry, in `QueryWorkload::entries()` order;
+/// One multi-root workload DAG with query/lifecycle bindings in entry order;
 /// [`check_contract`] enforces that.
 ///
 /// Plans are not deduplicated across entries: a summary state that several
@@ -232,8 +232,31 @@ impl PlanOutput {
     }
 
     /// The selected operator roots. Use `roots()` to include scalar queries.
-    pub fn dags(&self) -> Vec<Rc<OperatorNode>> {
+    pub fn operator_roots(&self) -> Vec<Rc<OperatorNode>> {
         self.plans.iter().map(|p| Rc::clone(&p.plan.root)).collect()
+    }
+
+    /// Unique operators in the entire workload DAG, including scalar-plan dependencies.
+    /// Several query roots can reach the same operator; it is returned once.
+    pub fn operators(&self) -> Vec<Rc<OperatorNode>> {
+        let mut seen = std::collections::HashSet::new();
+        let mut nodes = Vec::new();
+        for root in self.roots() {
+            let inputs = match root {
+                asap_types::ir::QueryRoot::Operator(node) => vec![node],
+                asap_types::ir::QueryRoot::Scalar(expr) => {
+                    expr.operator_refs().into_iter().cloned().collect()
+                }
+            };
+            for input in inputs {
+                for node in OperatorNode::reachable(&input) {
+                    if seen.insert(Rc::as_ptr(&node)) {
+                        nodes.push(node);
+                    }
+                }
+            }
+        }
+        nodes
     }
 
     pub fn len(&self) -> usize {

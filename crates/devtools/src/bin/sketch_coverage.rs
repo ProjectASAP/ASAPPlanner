@@ -9,7 +9,7 @@
 //   - a `SketchApproximation` candidate (a genuine sketch alternative was
 //     found for at least one aggregate in the query — the KLL-vs-DDSketch
 //     kind of degree of freedom), and/or
-//   - a `CommonSubexpressionReuse` candidate (the query shares a subtree,
+//   - a `CommonSubexpressionReuse` candidate (the query shares a sub-DAG,
 //     inside itself or with another query in the same corpus, that a
 //     build-once-and-share candidate was found for).
 //

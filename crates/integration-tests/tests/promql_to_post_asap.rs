@@ -21,15 +21,15 @@ use asap_aware_mapping::{
 use asap_integration_tests::fixtures::lower_promql;
 use asap_integration_tests::post_asap::{post_asap_dag, timed};
 use asap_types::ir::export::{NonASAPOpKind, PostAsapOperatorPayload};
+use asap_types::ir::operator_properties::Reduction;
 use asap_types::ir::{ASAPOp, NonASAPOp, Operator, OperatorNode, ScalarExpr};
 use asap_types::post_asap::{
     CompositionOperator, EntityIdentity, ExactKind, ExactParams, FieldDataType, GroupingStrategy,
-    Schema, SketchAlgorithm, SketchKind, SketchParams, SketchQuery, SummaryInputExpr,
+    Schema, SketchAlgorithm, SketchKind, SketchParams, SketchStatistic, SummaryInputExpr,
     SummaryUpdate,
 };
 use asap_types::pre_asap::expr_ir::ColumnRef;
 use asap_types::pre_asap::schema::DataType;
-use asap_types::pre_asap::vocabulary::Reduction;
 use asap_types::types::AccuracyTarget;
 
 /// This crate has no "bind me one tree" public API any more —
@@ -44,10 +44,10 @@ fn realize(root: &Rc<OperatorNode>) -> Result<Rc<OperatorNode>, RealizationError
         .into_iter()
         .next()
     {
-        // A bound decision (summary DAG or kept subtree); a logical rewrite
+        // A bound decision (summary DAG or kept sub-DAG); a logical rewrite
         // is not a binding, so it falls back to keeping the target.
         Some(ReplacementSubDAG {
-            replacement: Replacement::Subtree(node),
+            replacement: Replacement::SubDag(node),
             ..
         }) if !is_logical_rewrite(&node) => Ok(node),
         _ => retain_exact(root),
@@ -59,7 +59,7 @@ fn realize(root: &Rc<OperatorNode>) -> Result<Rc<OperatorNode>, RealizationError
 }
 
 #[test]
-fn distinct_over_time_offers_hll_cardinality_readout() {
+fn distinct_over_time_offers_hll_cardinality_evaluation() {
     // The real frontend must reach an existing HLL candidate without a
     // function-specific post-ASAP node or a sample-count rewrite.
     let root = lower_promql(
@@ -70,14 +70,14 @@ fn distinct_over_time_offers_hll_cardinality_readout() {
     let candidates =
         SketchAlgorithmStrategy::default_cost_model().replacements(&TargetSubDAG::new(&root));
     for candidate in &candidates {
-        if let Replacement::Subtree(node) = &candidate.replacement {
+        if let Replacement::SubDag(node) = &candidate.replacement {
             node.validate_structure().unwrap();
         }
     }
     assert!(candidates.iter().any(|candidate| {
-        let Replacement::Subtree(node) = &candidate.replacement else { return false };
+        let Replacement::SubDag(node) = &candidate.replacement else { return false };
         let Some(ASAPOp::SummaryEstimate { summary_input, query, .. }) = node.asap() else { return false };
-        matches!(query, SketchQuery::Cardinality)
+        matches!(query, SketchStatistic::Cardinality)
             && matches!(summary_input.asap(), Some(ASAPOp::SummaryAgg { family: FieldDataType::Sketch(kind, _), .. })
                 if kind.algorithm() == &SketchAlgorithm::Hll)
     }), "no HLL cardinality candidate: {candidates:?}");
@@ -196,7 +196,7 @@ fn promql_binary_arithmetic_retains_two_summary_leaves() {
         for operand in [lhs, rhs] {
             let Some(ASAPOp::FinalizeExactAccumulator { child }) = operand.asap() else {
                 panic!(
-                    "expected an explicit exact readout, got {:?}",
+                    "expected an explicit exact evaluation, got {:?}",
                     operand.operator
                 );
             };
@@ -246,7 +246,7 @@ impl AccuracyEvidenceProvider for SeparatedTopK {
         &self,
         op: &CompositionOperator,
         _family: &FieldDataType,
-        _query: Option<&SketchQuery>,
+        _query: Option<&SketchStatistic>,
     ) -> PropagationStats {
         matches!(op, CompositionOperator::TopKSelection)
             .then_some(PropagationStats {
@@ -277,7 +277,7 @@ fn grouped_rate_topk_consumes_finalized_rate_values() {
         .replacements(&TargetSubDAG::new(&root))
         .into_iter()
         .find_map(|candidate| match candidate.replacement {
-            Replacement::Subtree(node) if candidate.rationale.contains("CmsWithHeap") => Some(node),
+            Replacement::SubDag(node) if candidate.rationale.contains("CmsWithHeap") => Some(node),
             _ => None,
         })
         .expect("rate-weighted CMS plan");
@@ -323,7 +323,7 @@ fn weighted_topk_keeps_candidates_with_missing_population_evidence() {
             &self,
             op: &CompositionOperator,
             family: &FieldDataType,
-            query: Option<&SketchQuery>,
+            query: Option<&SketchStatistic>,
         ) -> PropagationStats {
             SeparatedTopK.propagation_stats(op, family, query)
         }
@@ -364,7 +364,7 @@ fn weighted_topk_exports_symbolic_evidence_requirements() {
         .find(|candidate| candidate.rationale.contains("CmsWithHeap"))
         .unwrap();
     assert!(candidate.has_missing_accuracy_evidence());
-    let Replacement::Subtree(node) = &candidate.replacement else {
+    let Replacement::SubDag(node) = &candidate.replacement else {
         panic!("summary candidate")
     };
     let dag = post_asap_dag(node);
@@ -423,7 +423,7 @@ fn rate_and_increase_topk_use_summary_scores_and_grouped_limits() {
             .replacements(&TargetSubDAG::new(&root))
             .into_iter()
             .find_map(|candidate| match candidate.replacement {
-                Replacement::Subtree(node) if candidate.rationale.contains("CmsWithHeap") => {
+                Replacement::SubDag(node) if candidate.rationale.contains("CmsWithHeap") => {
                     Some(node)
                 }
                 _ => None,
@@ -448,15 +448,18 @@ fn rate_and_increase_topk_use_summary_scores_and_grouped_limits() {
         };
         assert_eq!(partition_by, sort_groups);
         assert_eq!(partition_by.len(), usize::from(query.contains("topk by")));
-        let Some(NonASAPOp::Project { child: readout, .. }) = projected.non_asap() else {
+        let Some(NonASAPOp::Project {
+            child: evaluation, ..
+        }) = projected.non_asap()
+        else {
             panic!("logical output projection")
         };
         let Some(ASAPOp::SummaryEstimate {
             summary_input,
-            query: SketchQuery::TopK { k },
-        }) = readout.asap()
+            query: SketchStatistic::TopK { k },
+        }) = evaluation.asap()
         else {
-            panic!("heap readout")
+            panic!("heap evaluation")
         };
         assert!(*k > 2, "candidate capacity is independent of output count");
         let Some(ASAPOp::SummaryAgg {
@@ -586,7 +589,7 @@ fn ddsketch_quantile_ratio_meets_the_shared_relative_error_target() {
         .for_target(root)
         .and_then(|selection| selection.chosen.as_ref())
         .expect("the certified DDSketch ratio should be selectable");
-    let Replacement::Subtree(node) = &chosen.replacement else {
+    let Replacement::SubDag(node) = &chosen.replacement else {
         panic!("expected a summary candidate")
     };
     let guarantee = node.guarantee.as_ref().expect("ratio guarantee");
@@ -596,22 +599,22 @@ fn ddsketch_quantile_ratio_meets_the_shared_relative_error_target() {
         "ratio guarantee should satisfy the requested target: {guarantee:?}"
     );
 
-    let shared = asap_types::ir::cse::share_common_subtrees(vec![("ratio", node.clone())]);
+    let shared = asap_types::ir::cse::share_common_subdags(vec![("ratio", node.clone())]);
     let Some(NonASAPOp::BinaryOp { lhs, rhs, .. }) = shared[0].1.non_asap() else {
         panic!("expected binary ratio")
     };
-    let producer = |readout: &Rc<OperatorNode>| match &readout.operator {
+    let producer = |evaluation: &Rc<OperatorNode>| match &evaluation.operator {
         Operator::ASAP(ASAPOp::SummaryEstimate { summary_input, .. }) => Rc::clone(summary_input),
-        other => panic!("expected DDSketch readout, got {other:?}"),
+        other => panic!("expected DDSketch evaluation, got {other:?}"),
     };
     assert!(
         Rc::ptr_eq(&producer(lhs), &producer(rhs)),
-        "the two quantile readouts should share one DDSketch producer"
+        "the two quantile evaluations should share one DDSketch producer"
     );
 }
 
 #[test]
-fn planner_only_e2e_temporal_topk_preserves_query_update_and_readout_contract() {
+fn planner_only_e2e_temporal_topk_preserves_query_update_and_evaluation_contract() {
     // Self-contained Planner E2E: each case starts from PromQL text and ends
     // at the post-ASAP summary DAG. No controller/backend types,
     // fixtures, configuration, or runtime are involved.
@@ -648,7 +651,7 @@ fn planner_only_e2e_temporal_topk_preserves_query_update_and_readout_contract() 
             .replacements(&TargetSubDAG::new(&pre))
             .into_iter()
             .find_map(|candidate| match candidate.replacement {
-                Replacement::Subtree(node) if candidate.rationale.contains(expected_family) => {
+                Replacement::SubDag(node) if candidate.rationale.contains(expected_family) => {
                     Some(node)
                 }
                 _ => None,
@@ -656,7 +659,7 @@ fn planner_only_e2e_temporal_topk_preserves_query_update_and_readout_contract() 
             .expect("heap-backed temporal Top-K candidate");
         let Some(ASAPOp::SummaryEstimate {
             summary_input,
-            query: SketchQuery::TopK { k, .. },
+            query: SketchStatistic::TopK { k, .. },
         }) = candidate.asap()
         else {
             panic!("expected Top-K estimate, got {:?}", candidate.operator)
@@ -703,10 +706,10 @@ fn execute_topk_reference(plan: &OperatorNode) -> Vec<(String, f64)> {
     use std::collections::BTreeMap;
     let Some(ASAPOp::SummaryEstimate {
         summary_input,
-        query: SketchQuery::TopK { k },
+        query: SketchStatistic::TopK { k },
     }) = plan.asap()
     else {
-        panic!("expected TopK readout")
+        panic!("expected TopK evaluation")
     };
     let Some(ASAPOp::SummaryAgg {
         input,
@@ -718,7 +721,7 @@ fn execute_topk_reference(plan: &OperatorNode) -> Vec<(String, f64)> {
         panic!("expected summary updates")
     };
     assert_eq!(reduction, &Reduction::by(vec![]));
-    // The fused raw input is the kept non-ASAP subtree itself.
+    // The fused raw input is the kept non-ASAP sub-DAG itself.
     assert!(!child.contains_asap(), "expected fused raw input");
     let Some(NonASAPOp::TimeRange { range, child, .. }) = child.non_asap() else {
         panic!("expected temporal input")
@@ -816,10 +819,10 @@ fn planner_heap_topk_reference_execution_matches_ground_truth() {
         // This reference executor consumes keyed heap updates. The inventory
         // also contains maintained exact values followed by sort/limit; those
         // have a different execution contract and must not enter this fixture.
-        let candidates: Vec<_> = strategy.replacements(&TargetSubDAG::new(&pre)).into_iter().filter(|candidate| matches!(&candidate.replacement, Replacement::Subtree(plan) if matches!(plan.asap(), Some(ASAPOp::SummaryEstimate { query: SketchQuery::TopK { .. }, .. })))).collect();
+        let candidates: Vec<_> = strategy.replacements(&TargetSubDAG::new(&pre)).into_iter().filter(|candidate| matches!(&candidate.replacement, Replacement::SubDag(plan) if matches!(plan.asap(), Some(ASAPOp::SummaryEstimate { query: SketchStatistic::TopK { .. }, .. })))).collect();
         assert!(!candidates.is_empty(), "no heap candidate for {query}");
         for candidate in candidates {
-            let Replacement::Subtree(plan) = candidate.replacement else {
+            let Replacement::SubDag(plan) = candidate.replacement else {
                 panic!("expected summary plan for {query}")
             };
             let expected: Vec<_> = expected
@@ -841,7 +844,7 @@ fn planner_heap_topk_reference_execution_matches_ground_truth() {
 /// ```
 ///
 /// The nested tree exercises both realizations: the approximate quantile
-/// binds a KLL sketch + readout; the per-series `rate` binds the exact
+/// binds a KLL sketch + evaluation; the per-series `rate` binds the exact
 /// counter-reset-aware accumulator (no estimate — its state is the value).
 #[test]
 fn promql_quantile_of_rate_binds_kll_over_rate_accumulator() {
@@ -852,7 +855,7 @@ fn promql_quantile_of_rate_binds_kll_over_rate_accumulator() {
     .expect("lowering failed");
     let root = realize(&pre_asap).expect("binding failed");
 
-    // Root: the sketch readout, back to a plain row shape.
+    // Root: the sketch evaluation, back to a plain row shape.
     let Some(ASAPOp::SummaryEstimate {
         summary_input,
         query,
@@ -860,7 +863,7 @@ fn promql_quantile_of_rate_binds_kll_over_rate_accumulator() {
     else {
         panic!("expected SummaryEstimate root, got {:?}", root.operator);
     };
-    assert!(matches!(query, SketchQuery::Quantile { q } if *q == 0.99));
+    assert!(matches!(query, SketchStatistic::Quantile { q } if *q == 0.99));
     assert_eq!(
         dtype(&root.schema, "quantile_0_99"),
         &FieldDataType::Plain(DataType::Float64),
@@ -904,7 +907,7 @@ fn promql_quantile_of_rate_binds_kll_over_rate_accumulator() {
     );
 
     let Some(ASAPOp::FinalizeExactAccumulator { child }) = child.asap() else {
-        panic!("rate needs a maintenance readout");
+        panic!("rate needs a maintenance evaluation");
     };
 
     // The rate: exact counter-reset-aware accumulator, per-series (labels
@@ -938,7 +941,7 @@ fn promql_quantile_of_rate_binds_kll_over_rate_accumulator() {
     );
 
     // The leaf: unrewritten pass-through — TimeRange marker over the Scan.
-    // The kept leaf is the non-ASAP subtree itself.
+    // The kept leaf is the non-ASAP sub-DAG itself.
     assert!(
         !leaf.contains_asap(),
         "expected kept leaf, got {:?}",
@@ -963,7 +966,7 @@ fn promql_quantile_of_rate_binds_kll_over_rate_accumulator() {
 
 /// An exact workload binds zero sketches: `sum by (job) (m)` at
 /// `AccuracyTarget::Exact` still gets its mergeable exact accumulator, and
-/// `avg(m)` (non-mergeable) passes through as a whole logical subtree.
+/// `avg(m)` (non-mergeable) passes through as a whole logical sub-DAG.
 #[test]
 fn promql_exact_workload_binds_accumulators_not_sketches() {
     let pre_asap = lower_promql("sum by (job) (http_requests_total)", AccuracyTarget::Exact)
@@ -1015,7 +1018,7 @@ fn promql_sum_of_count_over_time_is_composed_by_default_search() {
         .iter()
         .find(|candidate| candidate.strategy == "SemanticEquivalentRewriteStrategy")
         .expect("default search should compose the lowered PromQL query");
-    let Replacement::Subtree(rewritten) = &candidate.replacement else {
+    let Replacement::SubDag(rewritten) = &candidate.replacement else {
         panic!("expected logical rewrite")
     };
     assert!(is_logical_rewrite(rewritten), "expected logical rewrite");
@@ -1170,7 +1173,7 @@ fn ddsketch_ratio_without_domain_proof_is_uncertified() {
         root_group.candidates.iter().any(|candidate| {
             matches!(
                 &candidate.replacement,
-                Replacement::Subtree(node)
+                Replacement::SubDag(node)
                     if matches!(node.non_asap(), Some(NonASAPOp::BinaryOp { .. }))
                         && node.guarantee.is_none()
             )
@@ -1279,7 +1282,7 @@ fn ddsketch_ratio_rejects_one_invalid_domain_when_the_other_is_missing() {
 
 /// The committed planner alpha is exercised against the pinned sketch implementation.
 #[test]
-fn ddsketch_ratio_bound_holds_for_signed_pinned_sketch_readouts() {
+fn ddsketch_ratio_bound_holds_for_signed_pinned_sketch_evaluations() {
     for sign in [-1., 1.] {
         let evidence = FixtureQuantileDomain {
             lower: if sign < 0. { -100. } else { 1. },
@@ -1297,7 +1300,7 @@ fn ddsketch_ratio_bound_holds_for_signed_pinned_sketch_readouts() {
             &evidence,
         );
         let candidates = strategy.replacements(&TargetSubDAG::new(&pre));
-        let Replacement::Subtree(node) = &candidates[0].replacement else {
+        let Replacement::SubDag(node) = &candidates[0].replacement else {
             panic!("summary")
         };
         let Some(NonASAPOp::BinaryOp { lhs, rhs, .. }) = node.non_asap() else {
@@ -1305,7 +1308,7 @@ fn ddsketch_ratio_bound_holds_for_signed_pinned_sketch_readouts() {
         };
         let alpha = |node: &OperatorNode| {
             let Some(ASAPOp::SummaryEstimate { summary_input, .. }) = node.asap() else {
-                panic!("readout")
+                panic!("evaluation")
             };
             let Some(ASAPOp::SummaryAgg {
                 family: FieldDataType::Sketch(kind, _),
@@ -1345,7 +1348,7 @@ fn ddsketch_ratio_bound_holds_for_signed_pinned_sketch_readouts() {
     }
 }
 
-/// Empty or overlarge population contracts cannot promise a supported readout.
+/// Empty or overlarge population contracts cannot promise a supported evaluation.
 #[test]
 fn ddsketch_ratio_requires_a_supported_population_size() {
     struct PopulationEvidence(u64);
@@ -1377,7 +1380,7 @@ fn ddsketch_ratio_requires_a_supported_population_size() {
 }
 
 // Every `without` aggregation candidate exports a valid DAG: its summary state
-// column carries the family instead of the readout's Float64 value.
+// column carries the family instead of the evaluation's Float64 value.
 #[test]
 fn without_aggregation_candidates_export_valid_dags() {
     for accuracy in [

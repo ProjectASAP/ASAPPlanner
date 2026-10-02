@@ -4,7 +4,7 @@
 //! `construct_summary_agg` already nests accumulator realizations, such as
 //! KLL over exact `Sum` state or a quantile over `Rate` state. This strategy
 //! covers the more general cases where an exact function must consume a
-//! summary readout, or where a maintained summary consumes the values of an
+//! summary evaluation, or where a maintained summary consumes the values of an
 //! exact function that has no accumulator realization.
 //!
 //! Both cases use an ordinary `NonASAPOp::Aggregate` node over the child
@@ -16,7 +16,7 @@
 //! ## Reference, don't select
 //!
 //! A composed candidate needs a child plan to compose *with* — the inner
-//! quantile's own summary readout, say. This strategy deliberately does
+//! quantile's own summary evaluation, say. This strategy deliberately does
 //! **not** pick that child itself (the way `construct_summary_agg`'s
 //! `realize_child` takes the head of the child's own ranking): a
 //! [`Replacement::ExactComposition`] carries only the child *target*
@@ -36,7 +36,7 @@
 //!
 //! - the target is a single-measure, `HAVING`-free exact aggregate;
 //! - read-time operation: the child is a bindable aggregate that has at least one
-//!   readout-producing summary implementation (a sketch/sample/wavelet/
+//!   evaluation-producing summary implementation (a sketch/sample/wavelet/
 //!   model — the shapes a maintained accumulator can't sit above), and the
 //!   target's grouping keys resolve in the child's output schema;
 //!   transform: the target is a per-entity exact function with no
@@ -60,11 +60,13 @@
 //! - Decide whether a composition is *worth it*: that is
 //!   `global_selection`'s job, using the issue's cost-units-per-second
 //!   formulas (see `crate::cost_model::read_operation_plan_cost_rate` and
-//!   siblings). Missing statistics keep the conservative kept subtree.
+//!   siblings). Missing statistics keep the conservative kept sub-DAG.
 
 use asap_types::ir::non_asap::any_measure_filtered;
 use std::rc::Rc;
 
+use asap_types::ir::aggregate_schema::aggregate_output_schema;
+use asap_types::ir::operator_properties::Reduction;
 use asap_types::ir::timing::{planned_data_state, validate_default};
 use asap_types::ir::{NonASAPOp, Operator, OperatorNode, Predicate};
 use asap_types::post_asap::execution_data_state::lift_plain;
@@ -73,7 +75,6 @@ use asap_types::post_asap::{
     ResultGuarantee, Schema,
 };
 use asap_types::pre_asap::agg_intent::AggIntent;
-use asap_types::pre_asap::vocabulary::{aggregate_output_schema, Reduction};
 use asap_types::types::AccuracyTarget;
 
 use crate::cost_model::CostModel;
@@ -142,7 +143,7 @@ impl ExactOperation {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum OperationPlacement {
-    /// After the child's summary readout.
+    /// After the child's summary evaluation.
     Read,
     /// On the maintenance path, feeding
     /// maintained state above.
@@ -191,7 +192,7 @@ impl ExactComposition {
     }
 
     /// Can `child` legally be this composition's input? Phase legality
-    /// (the child's produced data_state — a kept pre-ASAP subtree takes the
+    /// (the child's produced data_state — a kept pre-ASAP sub-DAG takes the
     /// phase this edge assigns) plus the plain-operand rule, checked
     /// through the same schema derivation [`Self::compose`] uses.
     pub fn accepts_child(&self, child: &Rc<OperatorNode>) -> bool {
@@ -273,7 +274,7 @@ impl ExactComposition {
     }
 }
 
-/// Which exact reducers may run as a query-time fold over readout rows.
+/// Which exact reducers may run as a query-time fold over evaluation rows.
 /// `Count` only at `Exact` accuracy (an approximate count is a sketch
 /// target, not an exact fold).
 fn is_query_time_reducer(intent: &AggIntent) -> bool {
@@ -291,9 +292,9 @@ fn is_query_time_reducer(intent: &AggIntent) -> bool {
     )
 }
 
-/// Does `implementation` need a `SummaryEstimate` readout to yield a value
+/// Does `implementation` need a `SummaryEstimate` evaluation to yield a value
 /// — i.e. is it a shape a maintained accumulator can't legally sit above?
-fn needs_readout(implementation: &Realization) -> bool {
+fn needs_evaluation(implementation: &Realization) -> bool {
     matches!(
         implementation,
         Realization::Sketch(_)
@@ -337,7 +338,7 @@ fn query_time_shape(
     let child_intent = bindable_intent(child)?;
     if !realizations_for_intent(child_intent, cost_model)
         .iter()
-        .any(needs_readout)
+        .any(needs_evaluation)
     {
         return None;
     }
@@ -451,10 +452,10 @@ impl<'a> ExactCompositionStrategy<'a> {
                     }),
                     provenance: ReplacementProvenance::ValueOperationAtQueryTime,
                     rationale: format!(
-                        "{} is an exact fold whose input is the readout of {} — a maintained \
+                        "{} is an exact fold whose input is the evaluation of {} — a maintained \
                          accumulator cannot consume query-time values, so instead of keeping \
                          the whole tree pre-ASAP this applies the fold as an \
-                         ExactRead over whichever summary readout global_selection \
+                         ExactRead over whichever summary evaluation global_selection \
                          commits for the child target (asap_aware_mapping::exact_composition)",
                         describe_intent(&intent),
                         child_desc
@@ -581,7 +582,7 @@ mod tests {
 
     #[test]
     fn does_not_propose_for_shapes_already_covered_by_accumulators() {
-        // sum by (zone) over an exact Sum child: the child has no readout,
+        // sum by (zone) over an exact Sum child: the child has no evaluation,
         // so SummaryAgg(Sum) over SummaryAgg(Sum) is already legal.
         let inner = agg(
             vec![2, 3],
@@ -632,13 +633,13 @@ mod tests {
         let Replacement::ExactComposition(comp) = &candidates[0].replacement else {
             unreachable!()
         };
-        // A bare SummaryAgg (state, no readout) is not a legal read-time operation
+        // A bare SummaryAgg (state, no evaluation) is not a legal read-time operation
         // input — the operator would be consuming sketch state.
         let state_child =
             crate::replacement::realize_child(&comp.child_target, &DefaultCostModel).unwrap();
         let Operator::ASAP(ASAPOp::SummaryEstimate { summary_input, .. }) = &state_child.operator
         else {
-            panic!("expected the child to realize to a readout");
+            panic!("expected the child to realize to a evaluation");
         };
         assert!(!comp.accepts_child(summary_input));
         assert!(matches!(
@@ -647,7 +648,7 @@ mod tests {
                 ExecutionDataStateError::IllegalChildDataState { .. }
             ))
         ));
-        // The readout itself is accepted and composes to a plain schema.
+        // The evaluation itself is accepted and composes to a plain schema.
         assert!(comp.accepts_child(&state_child));
         let composed = comp.compose(state_child).unwrap();
         assert!(
@@ -670,7 +671,7 @@ mod tests {
     }
 
     #[test]
-    fn compose_rejects_a_readout_child_for_a_ingestion_time_operation() {
+    fn compose_rejects_a_evaluation_child_for_a_ingestion_time_operation() {
         let inner = agg(vec![2], default_quantile(0.99), metric_scan(&["zone"]));
         let root = per_entity(AggIntent::Deriv, inner);
         let candidates =
@@ -678,11 +679,11 @@ mod tests {
         let Replacement::ExactComposition(comp) = &candidates[0].replacement else {
             unreachable!()
         };
-        let readout =
+        let evaluation =
             crate::replacement::realize_child(&comp.child_target, &DefaultCostModel).unwrap();
-        assert!(!comp.accepts_child(&readout));
+        assert!(!comp.accepts_child(&evaluation));
         assert!(matches!(
-            comp.compose(readout),
+            comp.compose(evaluation),
             Err(RealizationError::ExecutionDataState(
                 ExecutionDataStateError::IllegalChildDataState { .. }
             ))

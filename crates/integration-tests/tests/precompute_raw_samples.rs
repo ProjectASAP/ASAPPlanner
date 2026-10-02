@@ -22,7 +22,7 @@ use asap_physical_operators::{
     AggregateCore, KeyByLabelValues, Statistic,
 };
 use asap_types::post_asap::{
-    EntityIdentity, ExactKind, FieldDataType, SketchAlgorithm, SketchQuery, SummaryInputExpr,
+    EntityIdentity, ExactKind, FieldDataType, SketchAlgorithm, SketchStatistic, SummaryInputExpr,
     SummaryUpdate,
 };
 use asap_types::pre_asap::{expr_ir::ColumnRef, Reduction};
@@ -61,7 +61,7 @@ fn candidates(query: &str, accuracy: AccuracyTarget) -> Vec<Rc<OperatorNode>> {
         .into_iter()
         .filter_map(|candidate| match candidate {
             ReplacementSubDAG {
-                replacement: Replacement::Subtree(node),
+                replacement: Replacement::SubDag(node),
                 ..
             } => Some(node),
             _ => None,
@@ -245,7 +245,7 @@ fn weight(update: &SummaryUpdate, value: f64) -> f64 {
 }
 
 /// Estimates that identify a state's content for comparison.
-fn readouts(state: &dyn AggregateCore, family: &FieldDataType) -> Vec<f64> {
+fn evaluations(state: &dyn AggregateCore, family: &FieldDataType) -> Vec<f64> {
     if let Some(exact) = state.as_any().downcast_ref::<ExactAccumulator>() {
         let FieldDataType::ExactAggregate(kind, _) = family else {
             unreachable!()
@@ -260,7 +260,7 @@ fn readouts(state: &dyn AggregateCore, family: &FieldDataType) -> Vec<f64> {
             other => panic!("unexpected exact kind {other:?}"),
         };
         return vec![exact
-            .readout(statistic, None, None::<&KeyByLabelValues>)
+            .evaluation(statistic, None, None::<&KeyByLabelValues>)
             .unwrap()
             .unwrap()];
     }
@@ -270,9 +270,9 @@ fn readouts(state: &dyn AggregateCore, family: &FieldDataType) -> Vec<f64> {
     match kind.algorithm() {
         SketchAlgorithm::Kll | SketchAlgorithm::DDSketch => [0.1, 0.5, 0.9]
             .into_iter()
-            .map(|q| state.estimate(&SketchQuery::Quantile { q }).unwrap())
+            .map(|q| state.estimate(&SketchStatistic::Quantile { q }).unwrap())
             .collect(),
-        SketchAlgorithm::Hll => vec![state.estimate(&SketchQuery::Cardinality).unwrap()],
+        SketchAlgorithm::Hll => vec![state.estimate(&SketchStatistic::Cardinality).unwrap()],
         other => panic!("unexpected unkeyed sketch {other:?}"),
     }
 }
@@ -375,8 +375,8 @@ fn check(
     for (labels, state) in actual {
         let reference = expected[&labels].snapshot_accumulator();
         assert_eq!(
-            readouts(state.as_ref(), family),
-            readouts(reference.as_ref(), family),
+            evaluations(state.as_ref(), family),
+            evaluations(reference.as_ref(), family),
             "{query}: {labels:?}"
         );
     }

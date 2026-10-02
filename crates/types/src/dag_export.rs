@@ -7,20 +7,20 @@
 //! tree (`Rc` children nested inside each variant's own field, repeated once
 //! per reference). This module flattens that into an explicit node list +
 //! child-id edges — one entry per unique node, deduplicated by `Rc` pointer
-//! identity, so a shared subtree stays one node with several parents — and
+//! identity, so a shared sub-DAG stays one node with several parents — and
 //! additionally tags each node with
 //! [`structural_hash`](crate::ir::cse::structural_hash), so a caller with
-//! several exported queries can spot identical subtrees (a shared `Scan`, a
+//! several exported queries can spot identical sub-DAGs (a shared `Scan`, a
 //! repeated `Aggregate` shape, …) by comparing hashes rather than
 //! re-implementing structural comparison client-side.
 //!
 //! This is literally the same hashing
-//! [`share_common_subtrees`](crate::ir::cse::share_common_subtrees) uses to
+//! [`share_common_subdags`](crate::ir::cse::share_common_subdags) uses to
 //! bucket candidates in its `InternTable` (issue #223 stage 3) — not a
-//! parallel reimplementation. `tools/dag-viewer`'s "shared subtree"
+//! parallel reimplementation. `tools/dag-viewer`'s "shared sub-DAG"
 //! highlighting is still a *proxy* for real CSE, though: a hash match here
 //! only means two nodes are legal `InternTable` bucket-mates (same coarse
-//! hash) — it does not mean `share_common_subtrees` actually ran on this
+//! hash) — it does not mean `share_common_subdags` actually ran on this
 //! data and merged them onto one `Rc` (that also requires the structural
 //! equality check `InternTable::intern` performs, and the
 //! `Schema::has_unique_key` legality gate, neither of which this export
@@ -62,10 +62,10 @@ use serde::Serialize;
 
 use crate::cost::CostAnnotation;
 use crate::ir::cse::{structural_hash, HashCache};
+use crate::ir::operator_properties::Source;
 use crate::ir::{ASAPOp, NonASAPOp, Operator, OperatorNode, ScalarExpr};
 use crate::post_asap::{AccuracyError, ResultGuarantee};
 use crate::pre_asap::schema::FieldDataType;
-use crate::pre_asap::vocabulary::Source;
 
 /// One flattened IR node. `detail` holds this node's own scalar fields
 /// (predicates, aggregate funcs, schema, sort keys, …) — everything except
@@ -93,7 +93,7 @@ pub struct DagNode {
     /// structural signature client-side.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub workload_node_id: Option<u32>,
-    /// [`structural_hash`](crate::ir::cse::structural_hash) of the subtree
+    /// [`structural_hash`](crate::ir::cse::structural_hash) of the sub-DAG
     /// rooted at this node — the exact same function `cse`'s `InternTable`
     /// uses to bucket CSE candidates, so two nodes hash equally here iff they
     /// would land in the same `InternTable` bucket. See the module doc for
@@ -172,10 +172,10 @@ pub struct DagDecision {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub selected_cost: Option<CostAnnotation>,
     /// `baseline_cost.value - selected_cost.value` under `baseline_cost`'s
-    /// own baseline — for a winning `SharedSubtreeStrategy`/`CseShare`
+    /// own baseline — for a winning `SharedSubDagStrategy`/`CseShare`
     /// decision this *is* "avoided recomputation for a shared sub-DAG" (one
     /// of `dag_export`'s issue #286 granularity items): the baseline is
-    /// exactly the cost of recomputing this subtree independently at every
+    /// exactly the cost of recomputing this sub-DAG independently at every
     /// consumer, so the benefit is exactly what sharing avoided.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub benefit: Option<CostAnnotation>,
@@ -237,7 +237,7 @@ pub struct NamedGraph {
     /// site), this is a single flattened [`DagGraph`] spanning the whole
     /// query: every node that has no winning replacement renders as it does
     /// in [`export`], and every node that does splices in its winning
-    /// candidate's subtree instead, in the very same node list. `None`
+    /// candidate's sub-DAG instead, in the very same node list. `None`
     /// unless a higher layer explicitly built one (e.g. the `dag_export`
     /// devtools binary's `--post-asap` flag); omitted from the JSON entirely
     /// when absent, so every existing producer/consumer of `NamedGraph` is
@@ -271,7 +271,7 @@ pub struct NamedGraph {
 }
 
 /// A batch of named queries — the shape the viewer's multi-query / compare
-/// mode reads (each query starts its own `DagGraph`; shared-subtree
+/// mode reads (each query starts its own `DagGraph`; shared-sub-DAG
 /// highlighting is done by the viewer, matching `DagNode::hash` across
 /// queries).
 #[derive(Debug, Clone, Serialize)]
@@ -376,7 +376,7 @@ pub struct TargetReplacement {
     pub decision_id: u32,
     /// Id of the [`DagNode`] (in this query's own `graph.nodes`, i.e. the
     /// [`NamedGraph`] this `TargetReplacement` is attached to) this
-    /// replacement's `before` subtree is rooted at.
+    /// replacement's `before` sub-DAG is rooted at.
     pub target_pre_id: u32,
     /// Human label for which strategy proposed the winning candidate —
     /// e.g. `"Sketch"` / `"HydraGrouping"` / `"SharedSubtree"` /
@@ -398,7 +398,7 @@ pub struct TargetReplacement {
     /// doesn't estimate a numeric cost for this candidate shape (see that
     /// field's own doc upstream).
     pub cost: f64,
-    /// The target's own subtree, before replacement — literally
+    /// The target's own sub-DAG, before replacement — literally
     /// `export(target)` for the `TargetSubDAGCandidates`'s own `target`, reused as-is.
     pub before: DagGraph,
     pub after: TargetReplacementAfter,
@@ -420,8 +420,8 @@ pub struct TargetReplacement {
 /// What a [`TargetReplacement`] became — either a genuine post-ASAP binding
 /// or a still-relational structural rewrite, mirroring
 /// `asap_aware_mapping::replacement::Replacement`'s own two variants. Both
-/// carry an ordinary [`DagGraph`]: the unified IR renders a summary subtree
-/// and a rewritten relational subtree through the same [`export`].
+/// carry an ordinary [`DagGraph`]: the unified IR renders a summary sub-DAG
+/// and a rewritten relational sub-DAG through the same [`export`].
 ///
 /// Serializes as `{"kind": "Summary"|"Rewrite", "graph": {...}}` (serde's
 /// adjacently-tagged representation for a `#[serde(tag = "kind", content =
@@ -456,7 +456,7 @@ pub enum PostAsapSubstitution {
         decision: DagDecision,
     },
     /// This exact node has a winning `Replacement::Summary` — keep building
-    /// from `replacement` (a summary-bound subtree) instead of the original
+    /// from `replacement` (a summary-bound sub-DAG) instead of the original
     /// node.
     Summary {
         replacement: Rc<OperatorNode>,
@@ -506,7 +506,7 @@ pub fn export_summary(node: &Rc<OperatorNode>) -> SummaryDagGraph {
 /// Build one merged "whole query, but post-ASAP" [`DagGraph`] by walking
 /// `root` and, at every node, asking `find_winner` whether *that exact
 /// node* has a winning replacement — if so, splicing the replacement's own
-/// subtree in at that position instead, in the very same flattened node
+/// sub-DAG in at that position instead, in the very same flattened node
 /// list (not a nested sub-graph the way [`TargetReplacement::before`]/
 /// `::after` — small, independent, per-site before/after pairs — do).
 ///
@@ -524,7 +524,7 @@ pub fn export_summary(node: &Rc<OperatorNode>) -> SummaryDagGraph {
 /// substitution's own immediate top level (only on that substitution's
 /// *descendants*, which get an ordinary fresh call same as any other node).
 /// This matters for correctness, not just efficiency:
-/// `SharedSubtreeStrategy`'s own "build once and share" candidate is
+/// `SharedSubDagStrategy`'s own "build once and share" candidate is
 /// `Replacement::Rewrite(Rc::clone(target))` — literally the *same* value
 /// as the target it's a candidate for. Re-querying `find_winner` on that
 /// candidate's own top level would find the identical group and its
@@ -583,7 +583,7 @@ impl<'a> Builder<'a> {
     }
 
     /// Export `node` (or, when `find_winner` has a substitution for it, the
-    /// substitution's subtree in its place) and return its id.
+    /// substitution's sub-DAG in its place) and return its id.
     fn build(&mut self, node: &Rc<OperatorNode>) -> u32 {
         let ptr = Rc::as_ptr(node);
         if let Some(&id) = self.ids.get(&ptr) {
@@ -614,7 +614,7 @@ impl<'a> Builder<'a> {
             }
         }
         // The original node now resolves to the substitution: another
-        // parent of the same `Rc` reuses the spliced-in subtree.
+        // parent of the same `Rc` reuses the spliced-in sub-DAG.
         self.ids.insert(ptr, root);
         root
     }
@@ -692,7 +692,7 @@ fn snake_case_kind(operator: &Operator) -> &'static str {
             ASAPOp::SummaryEstimate { .. } => "summary_estimate",
             ASAPOp::FinalizeExactAccumulator { .. } => "finalize_exact_accumulator",
             ASAPOp::MaintainPopulation { .. } => "maintain_population",
-            ASAPOp::ReadPopulation { .. } => "read_population",
+            ASAPOp::EvaluatePopulation { .. } => "read_population",
             ASAPOp::SummaryMerge { .. } => "summary_merge",
             ASAPOp::SummarySubtract { .. } => "summary_subtract",
             ASAPOp::SummaryDelete { .. } => "summary_delete",
@@ -927,9 +927,9 @@ fn shape(
                 format!("MaintainPopulation(max_k={})", population.max_k),
                 serde_json::json!({ "population": population }),
             ),
-            ASAPOp::ReadPopulation { readout, .. } => (
-                format!("ReadPopulation({readout:?})"),
-                serde_json::json!({ "readout": readout }),
+            ASAPOp::EvaluatePopulation { evaluation, .. } => (
+                format!("EvaluatePopulation({evaluation:?})"),
+                serde_json::json!({ "evaluation": evaluation }),
             ),
             ASAPOp::SummaryMerge { children } => (
                 format!("SummaryMerge({} children)", children.len()),
@@ -963,7 +963,7 @@ fn scalar_ref(
 
 /// `expr` as JSON in `ScalarExpr`'s own serde shape (externally tagged
 /// variants), except that every operator reference is rendered via
-/// [`scalar_ref`] instead of inlining the referenced subtree. Exhaustive so
+/// [`scalar_ref`] instead of inlining the referenced sub-DAG. Exhaustive so
 /// a new variant fails to compile here until it is rendered.
 fn scalar_json(expr: &ScalarExpr, ids: &HashMap<*const OperatorNode, u32>) -> serde_json::Value {
     let sub = |e: &ScalarExpr| scalar_json(e, ids);
@@ -1062,15 +1062,16 @@ mod tests {
     use std::rc::Rc;
 
     use super::*;
+    use crate::ir::operator_properties::{GroupKeys, JoinKind, Reduction};
     use crate::ir::Predicate;
     use crate::post_asap::{
         BoundExpr, CompositionOperator, ErrorMetric, GroupingStrategy, GuaranteeSource,
-        ProbabilityExpr, SketchAlgorithm, SketchKind, SketchParams, SketchQuery, SummaryUpdate,
+        ProbabilityExpr, SketchAlgorithm, SketchKind, SketchParams, SketchStatistic, SummaryUpdate,
     };
     use crate::pre_asap::agg_intent::AggIntent;
     use crate::pre_asap::expr_ir::{ColumnRef, ScalarValue};
     use crate::pre_asap::schema::{DataType, Field, Schema};
-    use crate::pre_asap::vocabulary::{GroupKeys, JoinKind, Reduction};
+
     use crate::types::AccuracyTarget;
 
     fn scan(table: &str, columns: Vec<Field>) -> Rc<OperatorNode> {
@@ -1122,7 +1123,7 @@ mod tests {
     }
 
     /// A KLL `SummaryAgg` over `leaf`'s `v` column, read out as a quantile.
-    fn quantile_readout(
+    fn quantile_evaluation(
         leaf: Rc<OperatorNode>,
         guarantee: Option<ResultGuarantee>,
     ) -> (Rc<OperatorNode>, Rc<OperatorNode>) {
@@ -1142,10 +1143,10 @@ mod tests {
             Schema::lifted(vec![Field::new("state", family, false)], None),
             None,
         );
-        let readout = OperatorNode::asap_node(
+        let evaluation = OperatorNode::asap_node(
             ASAPOp::SummaryEstimate {
                 summary_input: Rc::clone(&agg),
-                query: SketchQuery::Quantile { q: 0.99 },
+                query: SketchStatistic::Quantile { q: 0.99 },
             },
             Schema::lifted(
                 vec![Field::plain("quantile", DataType::Float64, false)],
@@ -1153,7 +1154,7 @@ mod tests {
             ),
             guarantee,
         );
-        (agg, readout)
+        (agg, evaluation)
     }
 
     #[test]
@@ -1474,7 +1475,7 @@ mod tests {
         );
     }
 
-    /// Issue #172: a readout's guarantee is exported structurally — metric,
+    /// Issue #172: a evaluation's guarantee is exported structurally — metric,
     /// symbolic bound, failure probability, provenance (allocation
     /// included) — and a rejection carries its typed reason. A relational
     /// node below a summary is its own node, in the same graph.
@@ -1516,7 +1517,7 @@ mod tests {
                 },
             ],
         };
-        let (_, root) = quantile_readout(Rc::clone(&leaf), Some(guarantee));
+        let (_, root) = quantile_evaluation(Rc::clone(&leaf), Some(guarantee));
         let graph = export_summary(&root);
         assert_eq!(
             graph.nodes.iter().map(|n| n.kind).collect::<Vec<_>>(),
@@ -1599,7 +1600,7 @@ mod tests {
         // `leaf` is exported through the Join's left side before the target
         // (its right side) is reached and substituted.
         let root = join(Rc::clone(&leaf), Rc::clone(&target));
-        let (_, readout) = quantile_readout(Rc::clone(&leaf), None);
+        let (_, evaluation) = quantile_evaluation(Rc::clone(&leaf), None);
         let decision = DagDecision {
             id: 7,
             strategy: "Sketch".into(),
@@ -1615,7 +1616,7 @@ mod tests {
         let graph = export_post_asap(&root, &mut |node| {
             calls.push(node.operator.kind_name());
             Rc::ptr_eq(node, &target).then(|| PostAsapSubstitution::Summary {
-                replacement: Rc::clone(&readout),
+                replacement: Rc::clone(&evaluation),
                 decision: decision.clone(),
             })
         });
@@ -1654,7 +1655,7 @@ mod tests {
         );
     }
 
-    /// A `SharedSubtreeStrategy`-shaped substitution returns the target
+    /// A `SharedSubDagStrategy`-shaped substitution returns the target
     /// itself as its replacement; the walk must still terminate and render
     /// the target once.
     #[test]
@@ -1711,14 +1712,14 @@ mod tests {
             out
         }
         let leaf = scan("t", vec![Field::plain("v", DataType::Float64, false)]);
-        let (_, readout) = quantile_readout(Rc::clone(&leaf), None);
+        let (_, evaluation) = quantile_evaluation(Rc::clone(&leaf), None);
         let finalize = OperatorNode::asap_node(
-            ASAPOp::FinalizeExactAccumulator { child: readout },
+            ASAPOp::FinalizeExactAccumulator { child: evaluation },
             Schema::lifted(vec![], None),
             None,
         );
         let root = OperatorNode::non_asap_node(NonASAPOp::SQLWindowFunc {
-            func: crate::pre_asap::vocabulary::WindowFuncKind::RowNumber,
+            func: crate::ir::operator_properties::WindowFuncKind::RowNumber,
             args: vec![],
             partition_by: GroupKeys::none(),
             order_by: vec![],

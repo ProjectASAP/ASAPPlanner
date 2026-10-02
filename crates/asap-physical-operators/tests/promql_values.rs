@@ -395,10 +395,10 @@ fn scalar_broadcast_rejects_colliding_result_labels_after_recovery() {
     );
 }
 
-// Persisted exact readout graphs, rather than the storage adapter, merge panes,
+// Persisted exact evaluation graphs, rather than the storage adapter, merge panes,
 // finalize each population, and preserve the requested metric-name semantics.
 #[test]
-fn exact_state_readouts_recover_and_finalize_panes() {
+fn exact_state_evaluations_recover_and_finalize_panes() {
     use asap_physical_operators::factory::create_planner_accumulator;
     use planner_types::post_asap::*;
     use std::sync::Arc;
@@ -433,7 +433,7 @@ fn exact_state_readouts_recover_and_finalize_panes() {
                 })
                 .collect();
             let output = run_inputs(
-                compile_exact_readout(family.clone(), 60_000, preserve).unwrap(),
+                compile_exact_evaluation(family.clone(), 60_000, preserve).unwrap(),
                 vec![Batch::try_new(exact_state_schema(family.clone()).unwrap(), rows).unwrap()],
             )
             .unwrap();
@@ -480,7 +480,7 @@ fn recovered_exact_counter_uses_window_and_omits_insufficient_samples() {
             })
             .collect();
         let output = run_inputs(
-            compile_exact_readout(family.clone(), 60_000, false).unwrap(),
+            compile_exact_evaluation(family.clone(), 60_000, false).unwrap(),
             vec![Batch::try_new(exact_state_schema(family).unwrap(), rows).unwrap()],
         )
         .unwrap();

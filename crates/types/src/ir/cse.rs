@@ -3,16 +3,16 @@
 //!
 //! CSE only runs on already-bound, already-canonicalized plans — structural
 //! matching is meaningless before canonicalization has converged
-//! semantically-equivalent queries onto one shape. [`share_common_subtrees`]
+//! semantically-equivalent queries onto one shape. [`share_common_subdags`]
 //! is the single entry point, run once per workload batch (a batch of one
-//! still deduplicates a query's own repeated subtrees, see below).
+//! still deduplicates a query's own repeated sub-DAGs, see below).
 //!
 //! ## Algorithm: classic hash-consing / value-numbering
 //!
 //! Bottom-up: every child is interned before its parent, so two parents whose
 //! children were independently deduplicated down to the same `Rc`s are
 //! structurally identical iff their own fields also match, without re-walking
-//! the subtrees. "Child" means everything [`OperatorNode::children`] returns:
+//! the sub-DAGs. "Child" means everything [`OperatorNode::children`] returns:
 //! the operator inputs *and* the operator nodes a scalar expression reads
 //! (`PromqlScalarFromVector`, `ScalarSubquery`, `Exists`, `InSubquery`), so a
 //! vector read by `scalar(v)` in two queries is shared like any other input.
@@ -21,7 +21,7 @@
 //! ## Correctness: hash is a filter, `PartialEq` is the decision
 //!
 //! This is the one non-negotiable rule. A **false positive** here — two
-//! subtrees wrongly judged shareable — is a wrong query answer, not a missed
+//! sub-DAGs wrongly judged shareable — is a wrong query answer, not a missed
 //! optimization: two different queries would read each other's data.
 //! [`structural_hash`] (SipHash over a canonical serialization, no
 //! collision-freedom guarantee) may only narrow the candidate set within one
@@ -41,7 +41,7 @@
 //! an ungrouped aggregate, a `without(..)` grouping, a `Concat`/`SetOp` that
 //! drops its keys, … is always inserted fresh even when it is structurally
 //! identical to something already interned. An ASAP node (summary state and
-//! its readouts) has no such gate: equal operator, schema and guarantee make
+//! its evaluations) has no such gate: equal operator, schema and guarantee make
 //! it shareable, exactly as post-ASAP sharing decided before this IR.
 //!
 //! ## Single-query CSE falls out for free
@@ -98,15 +98,15 @@ fn own_fields(node: &OperatorNode) -> Operator {
 ///    `guarantee` and `timing` — every field `PartialEq` compares except the
 ///    children. A scalar expression is serialized as data with each operator
 ///    node it reads replaced by a constant placeholder, so a reference to an
-///    interned subtree contributes nothing of its own here;
+///    interned sub-DAG contributes nothing of its own here;
 /// 2. for every child in [`OperatorNode::children`] order (operator inputs,
 ///    then scalar-referenced nodes), the child's own `structural_hash`,
 ///    memoized in `cache` by `Rc` pointer identity.
 ///
-/// Part 2 is what makes equal subtrees hash equal whether they are reached
+/// Part 2 is what makes equal sub-DAGs hash equal whether they are reached
 /// through an operator input or through a `scalar(v)`, and what keeps the
 /// pass linear: a node is generally a DAG, and re-serializing a shared
-/// descendant once per parent would cost `O(subtree)` per node instead of
+/// descendant once per parent would cost `O(sub-DAG)` per node instead of
 /// `O(1)` beyond the children's already-known hashes. A non-finite `f64`
 /// serializes as `null`, merely widening one (still equality-checked) bucket.
 pub fn structural_hash(node: &OperatorNode, cache: &mut HashCache) -> u64 {
@@ -275,16 +275,14 @@ fn intern_bottom_up(
     interned
 }
 
-/// Share structurally-identical, sharing-legal subtrees across a workload's
+/// Share structurally-identical, sharing-legal sub-DAGs across a workload's
 /// roots (or within one root). Every root's *value* is unchanged
 /// (`PartialEq`-equal to its input) — only its internal `Rc` structure may
 /// now alias another root's, or another part of its own DAG. A node already
 /// reached through two paths is visited once.
 ///
 /// `Id` is caller-chosen — a workload entry's key, an index, a query name.
-pub fn share_common_subtrees<Id>(
-    roots: Vec<(Id, Rc<OperatorNode>)>,
-) -> Vec<(Id, Rc<OperatorNode>)> {
+pub fn share_common_subdags<Id>(roots: Vec<(Id, Rc<OperatorNode>)>) -> Vec<(Id, Rc<OperatorNode>)> {
     let mut table = InternTable::new();
     let mut visited = Visited::new();
     roots
@@ -297,6 +295,7 @@ pub fn share_common_subtrees<Id>(
 mod tests {
     use super::*;
     use crate::ir::asap::ASAPOp;
+    use crate::ir::operator_properties::{BinaryOpKind, GroupKeys, Reduction, Source};
     use crate::ir::BinaryOperator;
     use crate::ir::ScalarExpr;
     use crate::post_asap::guarantee::ResultGuarantee;
@@ -306,7 +305,7 @@ mod tests {
     use crate::pre_asap::agg_intent::AggIntent;
     use crate::pre_asap::expr_ir::{ColumnRef, CompareOpKind};
     use crate::pre_asap::schema::{DataType, Field, FieldDataType, Schema};
-    use crate::pre_asap::vocabulary::{BinaryOpKind, GroupKeys, Reduction, Source};
+
     use crate::types::AccuracyTarget;
 
     fn node(op: NonASAPOp) -> Rc<OperatorNode> {
@@ -361,7 +360,7 @@ mod tests {
     }
 
     fn two_roots(a: Rc<OperatorNode>, b: Rc<OperatorNode>) -> (Rc<OperatorNode>, Rc<OperatorNode>) {
-        let shared = share_common_subtrees(vec![("a", a), ("b", b)]);
+        let shared = share_common_subdags(vec![("a", a), ("b", b)]);
         let [(_, ra), (_, rb)] = shared.as_slice() else {
             panic!("expected 2 roots");
         };
@@ -408,12 +407,12 @@ mod tests {
     #[test]
     fn single_query_shares_its_own_repeated_subtree() {
         // One root with the same grouped aggregate on both branches, built as
-        // two separately-allocated subtrees (no sharing yet).
+        // two separately-allocated sub-DAGs (no sharing yet).
         let root = compare(
             quantile_agg(vec![1], Some(2), 0.5),
             quantile_agg(vec![1], Some(2), 0.5),
         );
-        let shared = share_common_subtrees(vec![("q", root)]);
+        let shared = share_common_subdags(vec![("q", root)]);
         let [(_, root)] = shared.as_slice() else {
             panic!("expected 1 root");
         };
@@ -438,7 +437,7 @@ mod tests {
         );
     }
 
-    // ── scalar-referenced subtrees ──────────────────────────────────────
+    // ── scalar-referenced sub-DAGs ──────────────────────────────────────
 
     /// `vector(scalar(sum by (service) (up)))`.
     fn scalar_of_vector() -> Rc<OperatorNode> {
@@ -549,13 +548,13 @@ mod tests {
     }
 
     #[test]
-    fn readouts_share_their_producer_but_not_each_other() {
-        use crate::post_asap::sketch::SketchQuery;
-        let readout = |q: f64| {
+    fn evaluations_share_their_producer_but_not_each_other() {
+        use crate::post_asap::sketch::SketchStatistic;
+        let evaluation = |q: f64| {
             Rc::new(OperatorNode::with_schema(
                 Operator::ASAP(ASAPOp::SummaryEstimate {
                     summary_input: summary_agg(0.01, None),
-                    query: SketchQuery::Quantile { q },
+                    query: SketchStatistic::Quantile { q },
                 }),
                 Schema::lifted(
                     vec![Field::plain("quantile", DataType::Float64, false)],
@@ -563,7 +562,7 @@ mod tests {
                 ),
             ))
         };
-        let (p95, p99) = two_roots(readout(0.95), readout(0.99));
+        let (p95, p99) = two_roots(evaluation(0.95), evaluation(0.99));
         let producer = |n: &Rc<OperatorNode>| Rc::clone(n.children()[0]);
         assert!(!Rc::ptr_eq(&p95, &p99));
         assert!(Rc::ptr_eq(&producer(&p95), &producer(&p99)));
@@ -635,7 +634,7 @@ mod tests {
             5,
             "fixture sanity: nothing shared yet"
         );
-        let shared = share_common_subtrees(vec![("q", root)]);
+        let shared = share_common_subdags(vec![("q", root)]);
         let [(_, root)] = shared.as_slice() else {
             panic!("expected 1 root");
         };
@@ -697,7 +696,7 @@ mod tests {
         // re-interned per path.
         let agg = quantile_agg(vec![1], Some(2), 0.5);
         let root = compare(Rc::clone(&agg), Rc::clone(&agg));
-        let shared = share_common_subtrees(vec![("q", root)]);
+        let shared = share_common_subdags(vec![("q", root)]);
         let Some(NonASAPOp::BinaryOp { lhs, rhs, .. }) = shared[0].1.non_asap() else {
             panic!("expected BinaryOp root");
         };

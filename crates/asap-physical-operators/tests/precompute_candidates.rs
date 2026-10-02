@@ -80,7 +80,7 @@ fn run(plan: &CompiledPhysicalDag, inputs: BTreeMap<u64, Batch>, scope: Scope) -
     })
 }
 
-/// Rate readouts and grouped Sum can run together during bounded precompute;
+/// Rate evaluations and grouped Sum can run together during bounded precompute;
 /// storing per-series rates instead leaves the same Sum in the query DAG.
 #[test]
 fn grouped_rate_can_be_materialized_before_or_after_grouped_sum() {
@@ -98,7 +98,7 @@ fn grouped_rate_can_be_materialized_before_or_after_grouped_sum() {
             )
         })
         .unwrap();
-    let readout = dag
+    let evaluation = dag
         .nodes
         .iter()
         .find(|node| {
@@ -136,7 +136,7 @@ fn grouped_rate_can_be_materialized_before_or_after_grouped_sum() {
                 .as_any()
                 .downcast_ref::<asap_physical_operators::summary_kernels::exact::ExactAccumulator>()
                 .unwrap()
-                .readout(asap_physical_operators::Statistic::Rate, range_ms, None)
+                .evaluation(asap_physical_operators::Statistic::Rate, range_ms, None)
                 .unwrap()
                 .unwrap();
             let summary = Value::Summary {
@@ -168,7 +168,7 @@ fn grouped_rate_can_be_materialized_before_or_after_grouped_sum() {
     let batch = Batch::try_new(input_schema.clone(), rows).unwrap();
     let root = u64::from(dag.root.0);
     let state_id = u64::from(state.id.0);
-    let rate_id = u64::from(readout.id.0);
+    let rate_id = u64::from(evaluation.id.0);
     let frontiers = asap_physical_operators::physical_planner::enumerate_frontiers(
         &dag,
         &BTreeMap::from([(state_id, InputContract::bounded(input_schema.clone()))]),
@@ -364,7 +364,7 @@ fn grouped_rate_can_be_materialized_before_or_after_grouped_sum() {
         .as_any()
         .downcast_ref::<asap_physical_operators::summary_kernels::exact::ExactAccumulator>()
         .unwrap()
-        .readout(asap_physical_operators::Statistic::Rate, range_ms, None)
+        .evaluation(asap_physical_operators::Statistic::Rate, range_ms, None)
         .unwrap()
         .unwrap();
     assert_ne!(
@@ -373,7 +373,7 @@ fn grouped_rate_can_be_materialized_before_or_after_grouped_sum() {
     );
 }
 
-/// Enumerated frontiers include both grouped-result and per-series readout
+/// Enumerated frontiers include both grouped-result and per-series evaluation
 /// persistence; an explicit Rate-state input retains its original semantics.
 #[test]
 fn bounded_inventory_exposes_grouped_rate_physical_frontiers() {
@@ -699,7 +699,7 @@ fn cut_candidate_rejects_invalid_frontiers() {
         .iter()
         .find(|node| matches!(node.payload, PostAsapOperatorPayload::SummaryAgg { .. }))
         .unwrap();
-    let readout = dag
+    let evaluation = dag
         .nodes
         .iter()
         .find(|node| {
@@ -711,7 +711,7 @@ fn cut_candidate_rejects_invalid_frontiers() {
         .unwrap();
     let (state_id, rate_id, root) = (
         u64::from(state.id.0),
-        u64::from(readout.id.0),
+        u64::from(evaluation.id.0),
         u64::from(dag.root.0),
     );
     let inputs = BTreeMap::from([(

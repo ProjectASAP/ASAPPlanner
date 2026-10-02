@@ -71,7 +71,7 @@ fn post_asap_candidate(root: &Rc<OperatorNode>) -> Result<Rc<OperatorNode>, Real
         .next()
     {
         Some(ReplacementSubDAG {
-            replacement: Replacement::Subtree(node),
+            replacement: Replacement::SubDag(node),
             ..
         }) => Ok(node),
         _ => retain_exact(root),

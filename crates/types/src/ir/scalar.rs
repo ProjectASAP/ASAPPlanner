@@ -13,10 +13,10 @@ use std::rc::Rc;
 use serde::{Deserialize, Serialize};
 
 use super::node::OperatorNode;
+use crate::ir::QueryExprError;
 use crate::pre_asap::expr_ir::{ArithmeticOpKind, CompareOpKind, ScalarValue};
 use crate::pre_asap::scalar_signature::MapScalarFunction;
 use crate::pre_asap::schema::{ColumnId, DataType, Schema};
-use crate::pre_asap::vocabulary::QueryExprError;
 
 /// Which language's numeric and comparison rules an expression follows.
 /// Both languages use `Float64`, so a result type alone does not preserve
@@ -745,9 +745,9 @@ pub fn element_access_type(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ir::operator_properties::Source;
     use crate::ir::{NonASAPOp, OperatorNode};
     use crate::pre_asap::schema::{Field, FieldDataType};
-    use crate::pre_asap::vocabulary::Source;
 
     fn call(name: &str, args: Vec<ScalarExpr>) -> ScalarExpr {
         ScalarExpr::FunctionCall {

@@ -1,9 +1,7 @@
 //! Shared vocabulary of the operator IR. The operators themselves live in
 //! [`crate::ir`]; this module holds the field types they are built from.
 //!
-//! - [`vocabulary`] — operator field types (grouping keys, reductions,
-//!   sources, join / set-op / window kinds, PromQL modifiers) and
-//!   [`aggregate_output_schema`].
+//! Operator parameters and schema derivation live in [`crate::ir`].
 //! - [`agg_intent`] — the aggregation-intent vocabulary ([`AggIntent`]).
 //! - [`expr_ir`] — [`ColumnRef`] and the scalar literal / operator kinds
 //!   ([`ScalarValue`], [`CompareOpKind`], [`ArithmeticOpKind`]).
@@ -17,8 +15,13 @@ pub mod column_resolution;
 pub mod expr_ir;
 pub mod scalar_signature;
 pub mod schema;
-pub mod vocabulary;
 
+pub use crate::ir::operator_properties::{
+    AtModifier, BinaryOpKind, ColState, ConcatDiscriminatorKey, DataModel, GroupKeys, GroupSide,
+    InfoMatcher, JoinKind, PromQLVectorSetOpKind, Reduction, RelationalSetOpKind, SampleKind,
+    Source, TimeShift, VectorGrouping, VectorMatch, VectorMatchKind, WindowFrame, WindowFrameBound,
+    WindowFrameOffset, WindowFrameUnits, WindowFuncKind,
+};
 pub use agg_intent::{
     agg_accuracy, agg_is_exact, agg_is_mergeable, default_cardinality, default_quantile, AggIntent,
     MathFunc, TimeFunc,
@@ -26,10 +29,6 @@ pub use agg_intent::{
 pub use column_resolution::{resolve_column_ref, resolve_column_refs, ResolveError};
 pub use expr_ir::{ArithmeticOpKind, ColumnRef, CompareOpKind, ScalarValue};
 pub use schema::{ColumnId, DataType, Field, FieldDataType, Schema};
-pub use vocabulary::{
-    aggregate_output_schema, AtModifier, BinaryOpKind, ColState, ConcatDiscriminatorKey, DataModel,
-    GroupKeys, GroupSide, InfoMatcher, JoinKind, PromQLVectorSetOpKind, QueryExprError, Reduction,
-    RelationalSetOpKind, SampleKind, Source, TimeShift, VectorGrouping, VectorMatch,
-    VectorMatchKind, WindowFrame, WindowFrameBound, WindowFrameOffset, WindowFrameUnits,
-    WindowFuncKind,
-};
+
+pub use crate::ir::aggregate_schema::aggregate_output_schema;
+pub use crate::ir::QueryExprError;

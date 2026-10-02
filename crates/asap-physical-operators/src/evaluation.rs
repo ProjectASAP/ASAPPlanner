@@ -1,4 +1,4 @@
-//! Readouts over merged exact summary states.
+//! Evaluations over merged exact summary states.
 use crate::summary_kernels::exact::ExactAccumulator;
 use crate::{AggregateCore, KeyByLabelValues, Statistic};
 use std::sync::Arc;
@@ -12,7 +12,7 @@ fn merge_exact_states(
             .as_any()
             .downcast_ref::<ExactAccumulator>()
             .cloned()
-            .ok_or_else(|| "readout requires Planner exact state".to_string())
+            .ok_or_else(|| "evaluation requires Planner exact state".to_string())
     };
     let mut merged = exact(&states.next().ok_or("empty exact state input")?)?;
     for state in states {
@@ -23,7 +23,7 @@ fn merge_exact_states(
     Ok(merged)
 }
 
-/// PromQL counter readouts omit a series with fewer than two samples. Other
+/// PromQL counter evaluations omit a series with fewer than two samples. Other
 /// state/type/range failures remain errors rather than empty results.
 pub fn insufficient_counter_samples(state: &dyn AggregateCore, statistic: Statistic) -> bool {
     matches!(statistic, Statistic::Rate | Statistic::Increase)
@@ -36,7 +36,7 @@ pub fn insufficient_counter_samples(state: &dyn AggregateCore, statistic: Statis
 /// Merge already selected exact panes and read one population. `None` means
 /// the population is absent from the result: a counter with too few samples,
 /// or an empty MIN/MAX.
-pub fn exact_readout(
+pub fn exact_evaluation(
     states: impl IntoIterator<Item = Arc<dyn AggregateCore>>,
     statistic: Statistic,
     range_ms: Option<(i64, i64)>,
@@ -47,7 +47,7 @@ pub fn exact_readout(
         return Ok(None);
     }
     merged
-        .readout(statistic, range_ms, key)
+        .evaluation(statistic, range_ms, key)
         .map_err(|error| error.to_string())
 }
 
@@ -76,7 +76,7 @@ mod counter_tests {
                 let key = keyed.then(|| KeyByLabelValues::new_with_labels(vec!["checkout".into()]));
                 state.update(key.as_ref(), 10., 10_000);
                 assert_eq!(
-                    exact_readout(
+                    exact_evaluation(
                         [Arc::new(state) as Arc<dyn AggregateCore>],
                         statistic,
                         None,
@@ -97,15 +97,15 @@ mod counter_tests {
         let rate = Statistic::Rate;
         let one = [Arc::new(state.clone()) as Arc<dyn AggregateCore>];
         assert_eq!(
-            exact_readout(one, rate, Some((0, 60_000)), None).unwrap(),
+            exact_evaluation(one, rate, Some((0, 60_000)), None).unwrap(),
             None
         );
         state.update(None, 20., 20_000);
         let two = || [Arc::new(state.clone()) as Arc<dyn AggregateCore>];
-        assert!(exact_readout(two(), rate, Some((0, 60_000)), None)
+        assert!(exact_evaluation(two(), rate, Some((0, 60_000)), None)
             .unwrap()
             .is_some());
-        assert!(exact_readout(two(), rate, Some((60_000, 0)), None).is_err());
-        assert!(exact_readout([], rate, Some((0, 60_000)), None).is_err());
+        assert!(exact_evaluation(two(), rate, Some((60_000, 0)), None).is_err());
+        assert!(exact_evaluation([], rate, Some((0, 60_000)), None).is_err());
     }
 }

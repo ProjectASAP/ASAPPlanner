@@ -15,8 +15,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::ir::operator_properties::DataModel;
 use crate::pre_asap::schema::{ColumnId, DataType, Field, FieldDataType};
-use crate::pre_asap::vocabulary::DataModel;
 use crate::types::AccuracyTarget;
 
 /// "What to compute" — the vocabulary the planner pivots on.

@@ -1,5 +1,5 @@
 //! Issue #171 — composing exact operators with summary plans across
-//! explicit update/readout boundaries, end to end through
+//! explicit update/evaluation boundaries, end to end through
 //! `search_workload_with` → `CandidateLogicalASAPDAGs::global_selection` →
 //! `GlobalSelection::assemble_selected_dag` → `dag_export`.
 //!
@@ -28,6 +28,7 @@ use asap_integration_tests::fixtures::lower_promql;
 use asap_integration_tests::post_asap::{post_asap_dag, timed};
 use asap_types::dag_export;
 use asap_types::ir::export::{NonASAPOpKind, PostAsapOperatorPayload};
+use asap_types::ir::operator_properties::{Reduction, Source};
 use asap_types::ir::timing::data_state;
 use asap_types::ir::{ASAPOp, NonASAPOp, Operator, OperatorNode, TimeRangeKind};
 use asap_types::post_asap::{
@@ -35,7 +36,7 @@ use asap_types::post_asap::{
 };
 use asap_types::pre_asap::agg_intent::{default_quantile, AggIntent};
 use asap_types::pre_asap::schema::{DataType, Field, Schema};
-use asap_types::pre_asap::vocabulary::{Reduction, Source};
+
 use asap_types::types::AccuracyTarget;
 
 // ── fixtures ────────────────────────────────────────────────────────────
@@ -103,7 +104,9 @@ struct StatsModel;
 #[test]
 fn custom_accuracy_rule_survives_root_target_and_materialization() {
     use asap_aware_mapping::{AccuracyModel, DefaultAccuracyModel, PropagationStats};
-    use asap_types::post_asap::{AccuracyError, CompositionOperator, ResultGuarantee, SketchQuery};
+    use asap_types::post_asap::{
+        AccuracyError, CompositionOperator, ResultGuarantee, SketchStatistic,
+    };
     struct Model;
     impl AccuracyModel for Model {
         fn exact_operation_rule(&self, _: &ExactOperation) -> Option<CompositionOperator> {
@@ -112,7 +115,7 @@ fn custom_accuracy_rule_survives_root_target_and_materialization() {
         fn local_guarantee(
             &self,
             family: &FieldDataType,
-            query: &SketchQuery,
+            query: &SketchStatistic,
         ) -> Option<ResultGuarantee> {
             DefaultAccuracyModel.local_guarantee(family, query)
         }
@@ -302,7 +305,7 @@ fn names(node: &OperatorNode) -> Vec<&str> {
 }
 
 /// The composed query-time shape: an exact `Aggregate` directly over a
-/// summary readout, at query time.
+/// summary evaluation, at query time.
 fn is_query_time_fold(node: &OperatorNode) -> bool {
     matches!(
         node.non_asap(),
@@ -378,14 +381,14 @@ fn every_exact_accumulator_is_finalized_before_an_outer_sketch() {
         let outer = agg(vec![], default_quantile(0.9), inner);
         let target = TargetSubDAG::new(&outer);
         let candidates = SketchAlgorithmStrategy::default_cost_model().replacements(&target);
-        let Replacement::Subtree(root) = &candidates[0].replacement else {
+        let Replacement::SubDag(root) = &candidates[0].replacement else {
             unreachable!()
         };
         // Timing is not stored on the plan: time it (default lifecycle,
         // which also validates every edge) and inspect the timed copy.
         let root = timed(root);
         let Operator::ASAP(ASAPOp::SummaryEstimate { summary_input, .. }) = &root.operator else {
-            panic!("expected KLL readout, got {:?}", root.operator);
+            panic!("expected KLL evaluation, got {:?}", root.operator);
         };
         let Operator::ASAP(ASAPOp::SummaryAgg { child, .. }) = &summary_input.operator else {
             panic!("expected outer SummaryAgg");
@@ -410,10 +413,10 @@ fn every_exact_accumulator_is_finalized_before_an_outer_sketch() {
     }
 }
 
-// ── direction 1: outer exact fold over an inner summary readout ────────
+// ── direction 1: outer exact fold over an inner summary evaluation ────────
 
 /// `max`/`avg` over a quantile does not collapse into one opaque kept
-/// subtree: the outer group holds an `ValueOperationAtQueryTime`
+/// sub-DAG: the outer group holds an `ValueOperationAtQueryTime`
 /// candidate referencing the inner target, the inner group keeps its own
 /// sketch candidates, and with statistics the pair is committed and
 /// materializes as `ValueOperationAtQueryTime → SummaryEstimate → SummaryAgg`.
@@ -440,9 +443,9 @@ fn max_and_avg_over_quantile_compose_at_query_time_with_statistics() {
             inner_group
                 .candidates
                 .iter()
-                .any(|c| matches!(&c.replacement, Replacement::Subtree(n)
+                .any(|c| matches!(&c.replacement, Replacement::SubDag(n)
                     if matches!(n.operator, Operator::ASAP(ASAPOp::SummaryEstimate { .. })))),
-            "{intent:?}: the inner quantile keeps its own readout candidates"
+            "{intent:?}: the inner quantile keeps its own evaluation candidates"
         );
 
         let selection = space.global_selection(&StatsModel);
@@ -667,7 +670,7 @@ fn outer_summary_over_an_exact_function_composes_at_ingestion_time() {
     // Walk the timed copy: timing is written by the lifecycle assignment.
     let composed = timed(&composed);
     let Operator::ASAP(ASAPOp::SummaryEstimate { summary_input, .. }) = &composed.operator else {
-        panic!("expected readout root, got {:?}", composed.operator);
+        panic!("expected evaluation root, got {:?}", composed.operator);
     };
     let Operator::ASAP(ASAPOp::SummaryAgg { child, .. }) = &summary_input.operator else {
         panic!("expected SummaryAgg");
@@ -714,7 +717,7 @@ fn summary_construction_follows_its_value_input_phase() {
         None,
     );
     // Even under an ingestion-time consumer the state is built at query
-    // time, because a readout sits below it.
+    // time, because a evaluation sits below it.
     let state = asap_types::ir::planned_data_state(&illegal, ExecutionTiming::IngestionTime);
     assert_eq!(state.timing, ExecutionTiming::QueryTime);
     asap_types::ir::validate_default(&illegal, state.timing).unwrap();

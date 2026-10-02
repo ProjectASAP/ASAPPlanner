@@ -1,4 +1,4 @@
-//! ASAP operators: summary-state construction, state operations and readouts.
+//! ASAP operators: summary-state construction, state operations and evaluations.
 //! The summary family, kind/algorithm and parameters are committed here.
 
 use std::rc::Rc;
@@ -6,10 +6,11 @@ use std::rc::Rc;
 use serde::{Deserialize, Serialize};
 
 use super::node::{OperatorNode, OperatorResultKind};
-use crate::post_asap::maintained_population::{MaintainedPopulation, PopulationReadout};
-use crate::post_asap::sketch::{GroupingStrategy, SketchQuery, SummaryUpdate};
+use crate::ir::operator_properties::Reduction;
+use crate::ir::QueryExprError;
+use crate::post_asap::maintained_population::{MaintainedPopulation, PopulationStatistic};
+use crate::post_asap::sketch::{GroupingStrategy, SketchStatistic, SummaryUpdate};
 use crate::pre_asap::schema::{ColumnId, DataType, Field, FieldDataType, Schema};
-use crate::pre_asap::vocabulary::{QueryExprError, Reduction};
 
 /// Why an ASAP operator cannot be used yet.
 pub const UNIMPLEMENTED_ASAP_OP: &str =
@@ -34,7 +35,7 @@ pub enum ASAPOp {
     /// row-shaped schema.
     SummaryEstimate {
         summary_input: Rc<OperatorNode>,
-        query: SketchQuery,
+        query: SketchStatistic,
     },
     /// Read an exact accumulator's state as its finalized value: the
     /// maintenance-to-read boundary before query-time operators.
@@ -47,9 +48,9 @@ pub enum ASAPOp {
         population: MaintainedPopulation,
     },
     /// Read an aggregate or TopK prefix from the maintained population.
-    ReadPopulation {
+    EvaluatePopulation {
         child: Rc<OperatorNode>,
-        readout: PopulationReadout,
+        evaluation: PopulationStatistic,
     },
     // ── Reserved: migrated but unimplemented (§1.3 of the proposal) ──
     SummaryMerge {
@@ -88,7 +89,7 @@ impl ASAPOp {
             }
             FinalizeExactAccumulator { child }
             | MaintainPopulation { child, .. }
-            | ReadPopulation { child, .. }
+            | EvaluatePopulation { child, .. }
             | Extension { child, .. } => vec![child],
             SummaryEstimate { summary_input, .. } | SummaryDelete { summary_input, .. } => {
                 vec![summary_input]
@@ -131,9 +132,9 @@ impl ASAPOp {
                 child: f(child),
                 population: population.clone(),
             },
-            ReadPopulation { child, readout } => ReadPopulation {
+            EvaluatePopulation { child, evaluation } => EvaluatePopulation {
                 child: f(child),
-                readout: readout.clone(),
+                evaluation: evaluation.clone(),
             },
             SummaryMerge { children } => SummaryMerge {
                 children: children.iter().map(&mut f).collect(),
@@ -171,7 +172,7 @@ impl ASAPOp {
             SummaryEstimate { .. } => "SummaryEstimate",
             FinalizeExactAccumulator { .. } => "FinalizeExactAccumulator",
             MaintainPopulation { .. } => "MaintainPopulation",
-            ReadPopulation { .. } => "ReadPopulation",
+            EvaluatePopulation { .. } => "EvaluatePopulation",
             SummaryMerge { .. } => "SummaryMerge",
             SummarySubtract { .. } => "SummarySubtract",
             SummaryDelete { .. } => "SummaryDelete",
@@ -206,7 +207,7 @@ impl ASAPOp {
     }
 
     /// Output schema derived from the operator and its children. Summary
-    /// planning may retain a more specific schema (readout column naming)
+    /// planning may retain a more specific schema (evaluation column naming)
     /// through [`OperatorNode::with_schema`]; the derived shape agrees with it
     /// in field types.
     pub fn output_schema(&self) -> Result<Schema, QueryExprError> {
@@ -241,12 +242,12 @@ impl ASAPOp {
             } => {
                 let input = &summary_input.schema;
                 let (name, mut dtype) = match query {
-                    SketchQuery::Quantile { .. } => ("quantile", DataType::Float64),
-                    SketchQuery::Cardinality => ("cardinality", DataType::Int64),
-                    SketchQuery::PointCount { .. } => ("count", DataType::Int64),
-                    SketchQuery::FrequencyL2 => ("frequency_l2", DataType::Float64),
-                    SketchQuery::FrequencyEntropy => ("frequency_entropy", DataType::Float64),
-                    SketchQuery::TopK { .. } => ("topk", DataType::Utf8),
+                    SketchStatistic::Quantile { .. } => ("quantile", DataType::Float64),
+                    SketchStatistic::Cardinality => ("cardinality", DataType::Int64),
+                    SketchStatistic::PointCount { .. } => ("count", DataType::Int64),
+                    SketchStatistic::FrequencyL2 => ("frequency_l2", DataType::Float64),
+                    SketchStatistic::FrequencyEntropy => ("frequency_entropy", DataType::Float64),
+                    SketchStatistic::TopK { .. } => ("topk", DataType::Utf8),
                 };
                 if matches!(
                     summary_input.asap(),
@@ -340,7 +341,7 @@ impl ASAPOp {
             MaintainPopulation { child, .. } => {
                 Schema::lifted(child.schema.fields.clone(), child.schema.time_index)
             }
-            ReadPopulation { child, readout } => {
+            EvaluatePopulation { child, evaluation } => {
                 use crate::post_asap::maintained_population::PopulationInput;
                 use crate::pre_asap::{AggIntent, GroupKeys};
                 let Some(MaintainPopulation {
@@ -349,10 +350,10 @@ impl ASAPOp {
                 }) = child.asap()
                 else {
                     return Err(QueryExprError::InvalidScalarSignature(
-                        "population readout requires maintained membership".into(),
+                        "population evaluation requires maintained membership".into(),
                     ));
                 };
-                if matches!(readout, PopulationReadout::TopK { .. }) {
+                if matches!(evaluation, PopulationStatistic::TopK { .. }) {
                     source.schema.clone()
                 } else {
                     let (keys, column) = match &population.input {
@@ -384,16 +385,16 @@ impl ASAPOp {
                         }
                     };
                     let accuracy = crate::types::AccuracyTarget::Exact;
-                    let measure = match readout {
-                        PopulationReadout::Quantile { q } => AggIntent::Quantile {
+                    let measure = match evaluation {
+                        PopulationStatistic::Quantile { q } => AggIntent::Quantile {
                             q: *q,
                             col: column,
                             accuracy,
                         },
-                        PopulationReadout::Sum => AggIntent::Sum { col: column },
-                        PopulationReadout::Count => AggIntent::Count { accuracy },
-                        PopulationReadout::Average => AggIntent::Avg { col: column },
-                        PopulationReadout::TopK { .. } => unreachable!(),
+                        PopulationStatistic::Sum => AggIntent::Sum { col: column },
+                        PopulationStatistic::Count => AggIntent::Count { accuracy },
+                        PopulationStatistic::Average => AggIntent::Avg { col: column },
+                        PopulationStatistic::TopK { .. } => unreachable!(),
                     };
                     super::NonASAPOp::Aggregate {
                         child: source.clone(),
@@ -425,7 +426,9 @@ impl ASAPOp {
             | SummaryJoin { .. }
             | Extension { .. } => OperatorResultKind::State,
             SummaryEstimate { summary_input, .. } => source_kind(summary_input),
-            FinalizeExactAccumulator { child } | ReadPopulation { child, .. } => source_kind(child),
+            FinalizeExactAccumulator { child } | EvaluatePopulation { child, .. } => {
+                source_kind(child)
+            }
         }
     }
 
@@ -459,14 +462,18 @@ impl ASAPOp {
                     [field] => match &field.dtype {
                         FieldDataType::Sketch(kind, _) => matches!(
                             (kind.category(), query),
-                            (C::Quantile, SketchQuery::Quantile { .. })
-                                | (C::Cardinality | C::Universal, SketchQuery::Cardinality)
-                                | (C::Frequency | C::Universal, SketchQuery::PointCount { .. })
+                            (C::Quantile, SketchStatistic::Quantile { .. })
+                                | (C::Cardinality | C::Universal, SketchStatistic::Cardinality)
+                                | (
+                                    C::Frequency | C::Universal,
+                                    SketchStatistic::PointCount { .. }
+                                )
                                 | (
                                     C::Universal,
-                                    SketchQuery::FrequencyL2 | SketchQuery::FrequencyEntropy
+                                    SketchStatistic::FrequencyL2
+                                        | SketchStatistic::FrequencyEntropy
                                 )
-                                | (C::TopK | C::Universal, SketchQuery::TopK { .. })
+                                | (C::TopK | C::Universal, SketchStatistic::TopK { .. })
                         ),
                         _ => false,
                     },
@@ -474,7 +481,7 @@ impl ASAPOp {
                 };
                 if !valid {
                     return Err(QueryExprError::InvalidScalarSignature(
-                        "readout does not match its summary family".into(),
+                        "evaluation does not match its summary family".into(),
                     ));
                 }
                 Ok(())
@@ -493,12 +500,12 @@ impl ASAPOp {
                 }
                 Ok(())
             }
-            ReadPopulation { child, readout } => {
-                needs_state(child, "ReadPopulation")?;
-                if !matches!(child.asap(), Some(MaintainPopulation { population, .. }) if population.supports(readout))
+            EvaluatePopulation { child, evaluation } => {
+                needs_state(child, "EvaluatePopulation")?;
+                if !matches!(child.asap(), Some(MaintainPopulation { population, .. }) if population.supports(evaluation))
                 {
                     return Err(QueryExprError::InvalidScalarSignature(
-                        "population readout requires compatible maintained membership".into(),
+                        "population evaluation requires compatible maintained membership".into(),
                     ));
                 }
                 Ok(())
@@ -570,7 +577,7 @@ fn finalized_data_type(kind: &crate::post_asap::sketch::ExactKind) -> DataType {
     }
 }
 
-/// The category of the values a readout of `state` produces: the category
+/// The category of the values a evaluation of `state` produces: the category
 /// of the relational input the state was built from.
 fn source_kind(node: &OperatorNode) -> OperatorResultKind {
     match &node.operator {

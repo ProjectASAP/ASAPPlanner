@@ -3,7 +3,7 @@ use asap_aware_mapping::maintained_population::MaintainedPopulationStrategy;
 use asap_frontend_sql::{lower_sql, SqlCatalog};
 use asap_types::{
     ir::{
-        apply_lifecycle_timings, cse::share_common_subtrees, export::compile_post_asap_dag, ASAPOp,
+        apply_lifecycle_timings, cse::share_common_subdags, export::compile_post_asap_dag, ASAPOp,
         LifecycleAssignment, NonASAPOp, Operator, OperatorNode, TimingMemo,
     },
     post_asap::maintained_population::{MaintainedPopulation, PopulationInput},
@@ -23,13 +23,13 @@ async fn aggregate(q: &str) -> Rc<OperatorNode> {
     lower_sql(q, &catalog, AccuracyTarget::Exact).await.unwrap()
 }
 
-/// The `MaintainPopulation` node a candidate's readout reads, and its spec.
+/// The `MaintainPopulation` node a candidate's evaluation reads, and its spec.
 fn population(mut node: &OperatorNode) -> (&Rc<OperatorNode>, &MaintainedPopulation) {
     while let Operator::NonASAP(NonASAPOp::Project { child, .. }) = &node.operator {
         node = child;
     }
-    let Operator::ASAP(ASAPOp::ReadPopulation { child, .. }) = &node.operator else {
-        panic!("readout")
+    let Operator::ASAP(ASAPOp::EvaluatePopulation { child, .. }) = &node.operator else {
+        panic!("evaluation")
     };
     let Operator::ASAP(ASAPOp::MaintainPopulation { population, .. }) = &child.operator else {
         panic!("state")
@@ -51,7 +51,7 @@ fn compile(plan: &Rc<OperatorNode>) -> Result<(), String> {
         .map_err(|e| e.to_string())
 }
 
-// Quantile parameters are readout identity, while source, value column and grouping are state identity.
+// Quantile parameters are evaluation identity, while source, value column and grouping are state identity.
 #[tokio::test]
 async fn sql_quantiles_share_rows_without_promql_lookback() {
     let roots = vec![
@@ -59,7 +59,7 @@ async fn sql_quantiles_share_rows_without_promql_lookback() {
         aggregate("SELECT approx_percentile_cont(latency, 0.99) FROM samples").await,
     ];
     let rule = MaintainedPopulationStrategy::new(&roots);
-    let plans = share_common_subtrees(
+    let plans = share_common_subdags(
         roots
             .iter()
             .enumerate()
@@ -107,9 +107,9 @@ async fn sql_filters_separate_populations() {
     assert_ne!(population(&a).1.input, population(&b).1.input);
 }
 
-// All four scalar readouts can share the same non-null numeric SQL population.
+// All four scalar evaluations can share the same non-null numeric SQL population.
 #[tokio::test]
-async fn sql_scalar_readouts_share_membership() {
+async fn sql_scalar_evaluations_share_membership() {
     let mut roots = Vec::new();
     for function in [
         "median(latency)",
@@ -120,7 +120,7 @@ async fn sql_scalar_readouts_share_membership() {
         roots.push(aggregate(&format!("SELECT {function} FROM samples")).await);
     }
     let rule = MaintainedPopulationStrategy::new(&roots);
-    let plans = share_common_subtrees(
+    let plans = share_common_subdags(
         roots
             .iter()
             .enumerate()
@@ -133,7 +133,7 @@ async fn sql_scalar_readouts_share_membership() {
     }
 }
 
-// A readout cannot reinterpret a label column as its numeric population.
+// A evaluation cannot reinterpret a label column as its numeric population.
 #[tokio::test]
 async fn malformed_table_population_fails_validation() {
     let root = aggregate("SELECT median(latency) FROM samples").await;
@@ -144,7 +144,8 @@ async fn malformed_table_population_fails_validation() {
     else {
         unreachable!()
     };
-    let Operator::ASAP(ASAPOp::ReadPopulation { child, .. }) = &mut Rc::make_mut(child).operator
+    let Operator::ASAP(ASAPOp::EvaluatePopulation { child, .. }) =
+        &mut Rc::make_mut(child).operator
     else {
         unreachable!()
     };
@@ -168,7 +169,7 @@ async fn sql_topk_limits_share_maximum_k() {
         aggregate("SELECT * FROM samples ORDER BY latency DESC LIMIT 5").await,
     ];
     let rule = MaintainedPopulationStrategy::new(&roots);
-    let plans = share_common_subtrees(
+    let plans = share_common_subdags(
         roots
             .iter()
             .enumerate()

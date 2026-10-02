@@ -28,7 +28,7 @@ For example, consider two top-level queries:
 - `sum by (service) (rate(m[5m]))`
 - `avg by (service) (rate(m[5m]))`
 
-After `share_common_subtrees` merges their identical `rate(m[5m])` subtrees, both query trees point to the same `Rc`. That node's `consumer_count` is `2`, regardless of how often either query executes.
+After `share_common_subdags` merges their identical `rate(m[5m])` sub-DAGs, both query trees point to the same `Rc`. That node's `consumer_count` is `2`, regardless of how often either query executes.
 
 Use:
 
@@ -58,18 +58,18 @@ There are currently two forms:
 
 ```rust
 pub enum Replacement {
-    Subtree(Rc<OperatorNode>),
+    SubDag(Rc<OperatorNode>),
     ExactComposition(ExactComposition),
 }
 ```
 
-Use `Replacement::Subtree` for a replacement subtree. It is one of:
+Use `Replacement::SubDag` for a replacement sub-DAG. It is one of:
 
-- a constructed post-ASAP summary plan: the subtree contains an `ASAPOp`
+- a constructed post-ASAP summary plan: the sub-DAG contains an `ASAPOp`
   (`SummaryAgg`, `SummaryEstimate`, ...);
 - a logical rewrite: only `NonASAPOp` nodes and no guarantee yet.
 
-`is_logical_rewrite(&node)` tells the two apart. A kept pre-ASAP subtree
+`is_logical_rewrite(&node)` tells the two apart. A kept pre-ASAP sub-DAG
 (`retain_exact`) has no ASAP operator but carries an exact guarantee, so it
 counts as a bound decision, not a rewrite.
 
@@ -90,7 +90,7 @@ is a summary `Subtree`; KLL (Karnin–Lang–Liberty) is a quantile-sketch algor
 ```text
 compute independently
     vs.
-reuse an already shared logical subtree
+reuse an already shared logical sub-DAG
 ```
 
 is represented as two logical-rewrite `Subtree`s.
@@ -176,7 +176,7 @@ This guide uses the Cascades/Volcano terminology:
   `Realization` values.
 - A **transformation rule** maps a logical operation to another logical
   operation. In this crate, that kind of candidate is a logical-rewrite
-  `Replacement::Subtree`.
+  `Replacement::SubDag`.
 - A **replacement candidate** packages either kind of result as a
   `ReplacementSubDAG` for search. `CandidateLogicalASAPDAGs` stores and ranks these candidates.
 - **Physical commitment and placement** happen downstream. An `Realization`
@@ -211,7 +211,7 @@ bounds, but does not execute workloads or own deployment measurements. Most hook
 | `rank_candidates` | Order valid sketch algorithms | No |
 | `size_params` | Convert an accuracy target into sketch parameters | Yes |
 | `realize_extension` | Map a custom intent to a realization | Yes |
-| `readout_extension` | Query a custom extension summary | Panics until paired with a custom realization |
+| `evaluation_extension` | Query a custom extension summary | Panics until paired with a custom realization |
 | `cse_recompute_cost` | Estimate independent recomputation | Yes |
 | `cse_shared_maintenance_cost` | Estimate shared maintenance | Yes |
 | `cse_share_decision` | Choose sharing or recomputation | Yes |
@@ -252,13 +252,13 @@ bounds, but does not execute workloads or own deployment measurements. Most hook
   fn realize_extension(&self, ext_kind: &str, payload: &serde_json::Value) -> Realization;
   ```
 
-- **`readout_extension`** — define how queries read an extension summary that `realize_extension` mapped to a `Sketch`. The two hooks are a pair: realization defines what is maintained; readout defines how it is queried. Override both for the same `ext_kind`. The default readout panics to prevent a silent wrong answer.
+- **`evaluation_extension`** — define how queries read an extension summary that `realize_extension` mapped to a `Sketch`. The two hooks are a pair: realization defines what is maintained; evaluation defines how it is queried. Override both for the same `ext_kind`. The default evaluation panics to prevent a silent wrong answer.
 
   ```rust
-  fn readout_extension(&self, ext_kind: &str, payload: &serde_json::Value, col: &ColumnRef) -> SketchQuery;
+  fn evaluation_extension(&self, ext_kind: &str, payload: &serde_json::Value, col: &ColumnRef) -> SketchStatistic;
   ```
 
-- **`cse_recompute_cost`** — estimate the one-time cost of recomputing a CSE candidate's subtree independently at a single consumer. Default: `default_cse_recompute_cost`, a structural-size proxy.
+- **`cse_recompute_cost`** — estimate the one-time cost of recomputing a CSE candidate's sub-DAG independently at a single consumer. Default: `default_cse_recompute_cost`, a structural-size proxy.
 
   ```rust
   fn cse_recompute_cost(&self, candidate: &CseCandidate) -> Cost;
@@ -316,9 +316,9 @@ pub struct RankedTargetSubDAGCandidates<'a> {
 }
 ```
 
-`search_workload(roots)` runs the shared-subtree pass once, discovers every target across every root's whole DAG (not just root-level sharing — a `SharedSubtreeStrategy` candidate three levels under an unshared `Filter` is exactly as real a site as a shared whole root), and asks every registered strategy to a fixpoint. Two logically different candidates at two different targets are never copied into two separate plans — they're two entries in two different `TargetSubDAGCandidates`s, sharing every other node in the workload by construction.
+`search_workload(roots)` runs the shared-sub-DAG pass once, discovers every target across every root's whole DAG (not just root-level sharing — a `SharedSubDagStrategy` candidate three levels under an unshared `Filter` is exactly as real a site as a shared whole root), and asks every registered strategy to a fixpoint. Two logically different candidates at two different targets are never copied into two separate plans — they're two entries in two different `TargetSubDAGCandidates`s, sharing every other node in the workload by construction.
 
-`CandidateLogicalASAPDAGs::cost_sorted(cost_model)` is the one ranking step: for each candidate set, it dispatches by candidate shape — the `SharedSubtreeStrategy` share/recompute pair (recognized by `ReplacementProvenance::CseShare`/`CseRecompute`) goes through `CostModel::cse_share_decision`; a set with a Hydra shared-grid alternative goes through `CostModel::grouping_state_cost`; a set whose candidates all realize sketches (a `SketchAlgorithmStrategy` choice) goes through `CostModel::rank_candidates`; and any other mixed set is ordered by `CostModel::candidate_cost`. Every candidate gets a numeric cost aligned index-for-index in `costs`. Count in, count out—nothing is dropped to produce a ranking. Legality checks
+`CandidateLogicalASAPDAGs::cost_sorted(cost_model)` is the one ranking step: for each candidate set, it dispatches by candidate shape — the `SharedSubDagStrategy` share/recompute pair (recognized by `ReplacementProvenance::CseShare`/`CseRecompute`) goes through `CostModel::cse_share_decision`; a set with a Hydra shared-grid alternative goes through `CostModel::grouping_state_cost`; a set whose candidates all realize sketches (a `SketchAlgorithmStrategy` choice) goes through `CostModel::rank_candidates`; and any other mixed set is ordered by `CostModel::candidate_cost`. Every candidate gets a numeric cost aligned index-for-index in `costs`. Count in, count out—nothing is dropped to produce a ranking. Legality checks
 may already have removed proposals before this boundary. In particular,
 `search_workload_with_targets` checks explicit per-root targets, while retaining
 direct DDSketch ratios with missing domain evidence and no root guarantee for
@@ -383,8 +383,8 @@ The crate provides no default `Matcher` implementation because the answer depend
 
 Concretely, `explanation.rs` reports three candidate kinds from each `TargetSubDAGCandidates`:
 
-- `ExplanationKind::SketchApproximation` — the set contains a summary `Replacement::Subtree` that realizes `FieldDataType::Sketch(..)`, not just an exact/pass-through candidate.
-- `ExplanationKind::CommonSubexpressionReuse` — `consumer_count >= 2` and the set contains `SharedSubtreeStrategy`'s "build once and share" candidate (the `Replacement::Subtree` whose `Rc` is the set's `target`).
+- `ExplanationKind::SketchApproximation` — the set contains a summary `Replacement::SubDag` that realizes `FieldDataType::Sketch(..)`, not just an exact/pass-through candidate.
+- `ExplanationKind::CommonSubexpressionReuse` — `consumer_count >= 2` and the set contains `SharedSubDagStrategy`'s "build once and share" candidate (the `Replacement::SubDag` whose `Rc` is the set's `target`).
 
 - `ExplanationKind::ExactComposition` — the candidate set contains an exact operation
   composed with a child target whose realization remains a coordinated choice.

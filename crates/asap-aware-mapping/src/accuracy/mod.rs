@@ -23,7 +23,7 @@ pub use evidence::{
 use asap_types::ir::OperatorNode;
 use asap_types::post_asap::{
     AccuracyError, BoundExpr, CompositionOperator, ErrorMetric, FieldDataType, GuaranteeSource,
-    ProbabilityExpr, ResultGuarantee, SketchAlgorithm, SketchParams, SketchQuery,
+    ProbabilityExpr, ResultGuarantee, SketchAlgorithm, SketchParams, SketchStatistic,
 };
 use asap_types::types::AccuracyTarget;
 
@@ -51,7 +51,7 @@ pub trait AccuracyModel {
     fn local_guarantee(
         &self,
         family: &FieldDataType,
-        query: &SketchQuery,
+        query: &SketchStatistic,
     ) -> Option<ResultGuarantee>;
 
     /// Compose `inputs`' guarantees (in the parent's child order) with the
@@ -80,11 +80,11 @@ pub struct DefaultAccuracyModel;
 const SATISFACTION_TOLERANCE: f64 = 1e-9;
 
 impl DefaultAccuracyModel {
-    /// Derive the guarantee for the committed estimator parameters and readout.
+    /// Derive the guarantee for the committed estimator parameters and evaluation.
     pub fn sketch_guarantee(
         algorithm: &SketchAlgorithm,
         params: &SketchParams,
-        query: &SketchQuery,
+        query: &SketchStatistic,
     ) -> Option<ResultGuarantee> {
         estimators::sketch_guarantee(algorithm, params, query)
     }
@@ -97,7 +97,7 @@ impl AccuracyModel for DefaultAccuracyModel {
     fn local_guarantee(
         &self,
         family: &FieldDataType,
-        query: &SketchQuery,
+        query: &SketchStatistic,
     ) -> Option<ResultGuarantee> {
         estimators::local_guarantee(family, query)
     }

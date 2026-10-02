@@ -30,7 +30,7 @@ Each representation is authoritative for a different concern:
 | Representation | Authoritative concern |
 |---|---|
 | `NonASAPOp` nodes | Exact query semantics: sources, predicates, relational and PromQL operations, and output shape. |
-| `ASAPOp` nodes | Logical summary semantics: selected family, grouping strategy, summary composition, and summary readout. |
+| `ASAPOp` nodes | Logical summary semantics: selected family, grouping strategy, summary composition, and summary evaluation. |
 | `PhysicalOperator` DAG | Selected executable algorithms, their configuration, physical identity, edges, and execution multiplicity. |
 | `OperatorStatistics` | Workload-dependent evidence required by each selected physical operator's resource formula. |
 | `ResourceEstimate` | Estimated CPU operations, peak live memory, and physical source/disk reads over one comparison scope. |
@@ -60,7 +60,7 @@ Examples include:
   supported join algorithm.
 - `SummaryAgg` may lower to an exact accumulator build, CMS build, KLL build,
   or another physical summary algorithm selected by the candidate.
-- `SummaryEstimate` must lower to a readout operator compatible with the
+- `SummaryEstimate` must lower to a evaluation operator compatible with the
   concrete summary state it consumes.
 - shared logical sub-DAGs become shared physical nodes only when they refer to
   the same physical identity and compatible evidence.
@@ -108,12 +108,12 @@ explicit physical realization:
 | `SummaryMerge` | merge operator over compatible concrete summary states |
 | `SummarySubtract` | subtract operator supported by the selected state representation |
 | `SummaryDelete` | physical deletion/update operator supported by the selected representation |
-| `SummaryEstimate` | family- and query-specific readout operator |
+| `SummaryEstimate` | family- and query-specific evaluation operator |
 | `FinalizeExactAccumulator` | exact-state finalization before value consumers |
-| `MaintainPopulation` / `ReadPopulation` | maintained-population update and its aggregate or TopK-prefix readout |
-| retained `NonASAPOp` subtree | recursive lowering of the exact operators (see above) |
+| `MaintainPopulation` / `EvaluatePopulation` | maintained-population update and its aggregate or TopK-prefix evaluation |
+| retained `NonASAPOp` sub-DAG | recursive lowering of the exact operators (see above) |
 | `BinaryOp` | binary evaluation preserving operand order, the node's execution timing and any typed finite/relative-division guard |
-| `Project` / `Filter` / `Sort` / `Limit` / `Aggregate` over a readout | concrete realization at the node's execution timing and data state |
+| `Project` / `Filter` / `Sort` / `Limit` / `Aggregate` over a evaluation | concrete realization at the node's execution timing and data state |
 | `Join` | concrete row-join algorithm preserving join kind and predicate |
 | `Join` with `JoinKind::Semi` | retain left rows matching explicit right-side keys; candidate pruning carries completeness evidence and ordinary TopK ranks the result |
 
@@ -125,7 +125,7 @@ a candidate containing it is unavailable.
 The streaming integration can consume a complete binding through
 `StreamingNodeEvidence`. That binding is keyed to exact `OperatorNode`
 identities and uses structured evidence for aggregate state, join, merge,
-subtract, delete, readout, and retained pre-ASAP work. It is a physical
+subtract, delete, evaluation, and retained pre-ASAP work. It is a physical
 evidence boundary, not automatic physical lowering: a deployment must still
 select each concrete implementation and provide all edges, resource facts,
 multiplicities, source ownership, and stable physical identities. The planner
@@ -140,7 +140,7 @@ summary-family semantics.
 
 Lifecycle choice affects the physical DAG but does not replace it. Ephemeral,
 prepared, shared, and continuously maintained alternatives determine when
-build, update, readout, merge, subtract, or delete nodes execute. The physical
+build, update, evaluation, merge, subtract, or delete nodes execute. The physical
 operators still determine how each execution consumes CPU, memory, and I/O.
 
 ## Statistics contract
@@ -430,7 +430,7 @@ recovering average semantics from query text.
 
 ### Candidate pruning is a subgraph
 
-Candidate-based TopK uses a summary key readout, a general semi-join over
+Candidate-based TopK uses a summary key evaluation, a general semi-join over
 explicit matching key columns, grouped Sort by the authoritative score, and
 grouped Limit. Sort and Limit carry the same partition keys.
 The join preserves authoritative left-side values and does not rank or limit
@@ -446,9 +446,9 @@ storage readiness, schemas and approximation guarantees remain separate checks.
 Post-ASAP DAG wire version 4 removed the special membership operator, its edge
 roles and the duplicate operator phase fields without compatibility aliases.
 Version 6 (current) exports one node per operator: retained exact operators are
-`Relational` nodes, not embedded subtrees.
+`Relational` nodes, not embedded sub-DAGs.
 
-Post-ASAP DAG wire version 6 adds a per-measure row predicate to the aggregate
+Post-ASAP DAG wire version 7 adds a per-measure row predicate to the aggregate
 operators (#466): `filters` on the exact aggregate value operation, parallel to
 its measures, and `filter` on `SummaryAgg`, gating which rows update the
 summary state. The version bump makes an older reader fail loudly instead of

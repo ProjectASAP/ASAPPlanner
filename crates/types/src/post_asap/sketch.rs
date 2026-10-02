@@ -6,7 +6,7 @@ use crate::pre_asap::ColumnRef;
 
 /// An exact, mergeable accumulator family — zero approximation error. The
 /// partial state built for one of these *is* the answer; no
-/// `SummaryEstimate` readout is needed to get a value out of it.
+/// `SummaryEstimate` evaluation is needed to get a value out of it.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum ExactKind {
     /// Exact sum accumulator (mergeable by addition).
@@ -48,7 +48,7 @@ pub enum ExactParams {
 /// [`SketchKind::new`] is where that classification is made.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum SketchAlgorithm {
-    /// Universal frequency-vector summary with shared statistic readouts.
+    /// Universal frequency-vector summary with shared statistic evaluations.
     UnivMon,
     /// KLL quantile sketch (mergeable, ε-accurate rank queries).
     Kll,
@@ -345,7 +345,7 @@ pub enum StatModelParams {
 /// really the universal-sketch composition (L layers of Count-Sketch plus a
 /// heavy-hitter heap, Theorems 1+2 combined) estimating entropy/L1-norm/
 /// L2-norm/cardinality/frequency-moments as one instance. Standalone UnivMon
-/// and its frequency readouts are represented here, but sharing a Hydra
+/// and its frequency evaluations are represented here, but sharing a Hydra
 /// grid across populations still needs its own collision/error contract;
 /// standalone support does not establish that contract.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
@@ -590,9 +590,10 @@ pub enum SummaryInputExpr {
     EntityIdentity(EntityIdentity),
 }
 
-/// What to extract from a built summary. Carried by `SummaryEstimate`.
+/// The statistic computed from summary state by `SummaryEstimate`, for example
+/// `Quantile { q: 0.99 }`. This is a result operation, not a workload query.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub enum SketchQuery {
+pub enum SketchStatistic {
     /// sqrt(sum_v frequency(v)^2), not the norm of numeric input values.
     FrequencyL2,
     /// Shannon entropy of the value-frequency distribution, in bits.
@@ -605,8 +606,8 @@ pub enum SketchQuery {
     /// `value: Some(v)` is a per-item point lookup (e.g.
     /// `count(cms_metric{item="checkout"})` — `key` is `item`, `value` is
     /// `"checkout"`). `value` is carried here rather than resolved by the
-    /// `SummaryExecutor` from a `Filter` predicate because `readout`'s
-    /// trait signature has no tree access — see `CostModel::readout_extension`.
+    /// `SummaryExecutor` from a `Filter` predicate because `evaluation`'s
+    /// trait signature has no graph access — see `CostModel::evaluation_extension`.
     PointCount {
         key: ColumnRef,
         value: Option<String>,
@@ -622,7 +623,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn keyed_summary_input_and_topk_readout_round_trip() {
+    fn keyed_summary_input_and_topk_evaluation_round_trip() {
         for input in [
             SummaryUpdate {
                 item: Some(SummaryInputExpr::EntityIdentity(
@@ -646,9 +647,12 @@ mod tests {
                 serde_json::from_str::<SummaryUpdate>(&input_json).unwrap(),
                 input
             );
-            let query = SketchQuery::TopK { k: 10 };
+            let query = SketchStatistic::TopK { k: 10 };
             let json = serde_json::to_string(&query).unwrap();
-            assert_eq!(serde_json::from_str::<SketchQuery>(&json).unwrap(), query);
+            assert_eq!(
+                serde_json::from_str::<SketchStatistic>(&json).unwrap(),
+                query
+            );
         }
     }
 

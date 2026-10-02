@@ -285,7 +285,7 @@ answers an instant-vector TopK with current-series heap realizations over rows
 carrying the complete series identity (`$promql_series_identity`). They are
 finalized, deduplicated, and marked `ReplacementProvenance::RootPhysicalRealization`.
 Callers do not apply `with_series_identity` themselves. Compile each with
-`promql_rows::compile_current_series_readout`; other queries keep their previous
+`promql_rows::compile_current_series_evaluation`; other queries keep their previous
 inventory. `global_selection` never commits these candidates; the backend
 compiles and prices them. CandidateLogicalASAPDAGs lists no placement variants: node timing
 comes from the summary maintenance lifecycle.
@@ -303,9 +303,9 @@ pass. An omitted strategy contributes no proposals of its own.
 | --- | --- | --- |
 | `SketchAlgorithmStrategy::new(&model)` | Enumerates supported exact/sketch implementations and parameter choices for aggregate targets | Yes |
 | `HydraGroupingStrategy::new(&model)` | Considers a shared multi-subpopulation structure for supported grouped sketch families, subject to accuracy evidence | Yes |
-| `SharedSubtreeStrategy` | Proposes sharing versus independent recomputation at reused subtrees | Yes |
+| `SharedSubDagStrategy` | Proposes sharing versus independent recomputation at reused sub-DAGs | Yes |
 | `SemanticEquivalentRewriteStrategy` | Proposes supported equivalent aggregate rewrites, including decomposing average into sum/count | Yes |
-| `ExactCompositionStrategy::new(&model)` | Proposes supported exact operations around summary readouts or in maintenance | Yes |
+| `ExactCompositionStrategy::new(&model)` | Proposes supported exact operations around summary evaluations or in maintenance | Yes |
 | Your `ReplacementStrategy` implementation | Adds domain-specific legal replacement proposals | No |
 
 `AvgToSumOverCountStrategy` is an alias for `SemanticEquivalentRewriteStrategy`
@@ -353,7 +353,7 @@ use asap_types::workload::{
 };
 use asap_aware_mapping::{
     search_workload_with_targets, DefaultAccuracyModel, DefaultCostModel,
-    ReplacementStrategy, SketchAlgorithmStrategy, SharedSubtreeStrategy,
+    ReplacementStrategy, SketchAlgorithmStrategy, SharedSubDagStrategy,
 };
 use asap_types::types::AccuracyTarget;
 
@@ -387,7 +387,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let model = DefaultCostModel;
     let strategies: Vec<Box<dyn ReplacementStrategy + '_>> = vec![
         Box::new(SketchAlgorithmStrategy::new(&model)),
-        Box::new(SharedSubtreeStrategy),
+        Box::new(SharedSubDagStrategy),
     ];
     let space = search_workload_with_targets(
         vec![("q1", root, Some(accuracy))], &strategies, &DefaultAccuracyModel,
@@ -808,7 +808,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 | `asap_types::dag_export::export(&query)` | Pre-ASAP inspection graph |
 | `asap_types::dag_export::export_summary(&summary)` | Post-ASAP inspection graph |
 | `asap_types::ir::apply_lifecycle_timings(&root, &assignment, &mut TimingMemo::new())` | Write execution timing into every node from a `LifecycleAssignment` and validate the data-state edges; a lifecycle plan's `root` is already timed |
-| `asap_types::ir::export::compile_post_asap_dag(&timed_root)` | Export a timed DAG as a `PostAsapDag` (wire version 6); rejects an untimed node; not a physical plan |
+| `asap_types::ir::export::compile_post_asap_dag(&timed_root)` | Export a timed DAG as a `PostAsapDag` (wire version 7); rejects an untimed node; not a physical plan |
 | `PostAsapDagDocument::new(dag)` and `.validate()` | Versioned semantic envelope and explicit validation; constructing it alone does not validate |
 | `asap_aware_mapping::export_summary_maintenance_plan(&plan)` | Graph plus lifecycle deployments, alternatives and available cost/guarantee information |
 | `explain_replacements` / `explain_replacements_with` | Findings from default/custom-strategy search; not a complete physical feasibility report |

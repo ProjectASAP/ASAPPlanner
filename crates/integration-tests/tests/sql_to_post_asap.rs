@@ -29,14 +29,14 @@ use asap_integration_tests::post_asap::post_asap_dag;
 use asap_types::ir::export::{
     EdgeRole, NonASAPOpKind, PostAsapNodeId, PostAsapOperatorPayload, WirePredicate, WireScalarExpr,
 };
+use asap_types::ir::operator_properties::Reduction;
 use asap_types::ir::{ASAPOp, NonASAPOp, Operator, OperatorNode, Predicate, ScalarExpr};
 use asap_types::post_asap::{
     ExactKind, ExactParams, FieldDataType, GroupingStrategy, SketchAlgorithm, SketchKind,
-    SketchParams, SketchQuery, SummaryUpdate,
+    SketchParams, SketchStatistic, SummaryUpdate,
 };
 use asap_types::pre_asap::expr_ir::ColumnRef;
 use asap_types::pre_asap::schema::{DataType, Field, Schema};
-use asap_types::pre_asap::vocabulary::Reduction;
 use asap_types::types::AccuracyTarget;
 use asap_types::workload::SqlDialect;
 
@@ -53,7 +53,7 @@ fn realize(target: &Rc<OperatorNode>) -> Result<Rc<OperatorNode>, RealizationErr
         .next()
     {
         Some(ReplacementSubDAG {
-            replacement: Replacement::Subtree(node),
+            replacement: Replacement::SubDag(node),
             ..
         }) if node.contains_asap() => Ok(node),
         _ => retain_exact(target),
@@ -77,7 +77,7 @@ fn unary_child(node: &OperatorNode) -> Option<&Rc<OperatorNode>> {
     }
 }
 
-/// A subtree kept as plain (non-ASAP) work: no ASAP operator anywhere below.
+/// A sub-DAG kept as plain (non-ASAP) work: no ASAP operator anywhere below.
 fn is_kept_non_asap(node: &OperatorNode) -> bool {
     node.non_asap().is_some() && !node.contains_asap()
 }
@@ -663,7 +663,7 @@ async fn sql_quantile_binds_kll_sketch_over_named_column() {
     else {
         panic!("expected SummaryEstimate root, got {:?}", root.operator);
     };
-    assert!(matches!(query, SketchQuery::Quantile { q } if *q == 0.99));
+    assert!(matches!(query, SketchStatistic::Quantile { q } if *q == 0.99));
     assert_eq!(
         root.schema.fields.len(),
         1,
@@ -752,7 +752,7 @@ async fn sql_count_distinct_with_epsilon_binds_hll_rse_over_named_column() {
     else {
         panic!("expected SummaryEstimate root, got {:?}", root.operator);
     };
-    assert!(matches!(query, SketchQuery::Cardinality));
+    assert!(matches!(query, SketchStatistic::Cardinality));
     assert_eq!(
         root.schema.fields[0].dtype,
         FieldDataType::Plain(DataType::Int64),
@@ -787,7 +787,7 @@ async fn sql_count_distinct_with_epsilon_binds_hll_rse_over_named_column() {
 
 /// An exact workload binds zero sketches: `SUM(bytes) GROUP BY service` at
 /// `AccuracyTarget::Exact` still gets its mergeable exact accumulator, and
-/// `AVG(bytes)` (non-mergeable) stays a whole logical subtree untouched. SQL
+/// `AVG(bytes)` (non-mergeable) stays a whole logical sub-DAG untouched. SQL
 /// counterpart of `promql_to_post_asap.rs`'s
 /// `promql_exact_workload_binds_accumulators_not_sketches`.
 #[tokio::test]

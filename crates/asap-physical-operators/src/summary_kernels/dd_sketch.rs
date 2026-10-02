@@ -1,7 +1,7 @@
 //! DDSketch quantile summary over `asap_sketchlib::DdSketch`.
 use crate::{AggregateCore, KernelError};
 use asap_sketchlib::DdSketch;
-use planner_types::post_asap::SketchQuery;
+use planner_types::post_asap::SketchStatistic;
 
 #[derive(Debug, Clone)]
 pub struct DDSketchAccumulator {
@@ -39,14 +39,14 @@ impl AggregateCore for DDSketchAccumulator {
     }
 
     /// Quantiles, and the total sample count as a bare `PointCount`.
-    fn estimate(&self, query: &SketchQuery) -> Result<f64, KernelError> {
+    fn estimate(&self, query: &SketchStatistic) -> Result<f64, KernelError> {
         match query {
-            SketchQuery::Quantile { q } if (0.0..=1.0).contains(q) => self
+            SketchStatistic::Quantile { q } if (0.0..=1.0).contains(q) => self
                 .inner
                 .quantile(*q)
                 .ok_or_else(|| "DDSketch quantile of an empty population".into()),
-            SketchQuery::Quantile { .. } => Err("quantile must be in [0, 1]".into()),
-            SketchQuery::PointCount { value: None, .. } => Ok(self.inner.total_count() as f64),
+            SketchStatistic::Quantile { .. } => Err("quantile must be in [0, 1]".into()),
+            SketchStatistic::PointCount { value: None, .. } => Ok(self.inner.total_count() as f64),
             other => Err(format!("DDSketch does not answer {other:?}").into()),
         }
     }
@@ -57,8 +57,8 @@ mod tests {
     use super::*;
     use planner_types::pre_asap::ColumnRef;
 
-    fn bare_count() -> SketchQuery {
-        SketchQuery::PointCount {
+    fn bare_count() -> SketchStatistic {
+        SketchStatistic::PointCount {
             key: ColumnRef::SampleValue,
             value: None,
         }
@@ -77,7 +77,9 @@ mod tests {
         }
         let merged = a.merge_with(&b).unwrap();
         assert_eq!(merged.estimate(&bare_count()).unwrap(), 100.0);
-        let median = merged.estimate(&SketchQuery::Quantile { q: 0.5 }).unwrap();
+        let median = merged
+            .estimate(&SketchStatistic::Quantile { q: 0.5 })
+            .unwrap();
         assert!((median - 50.0).abs() <= 1.0, "{median}");
     }
 
@@ -85,7 +87,7 @@ mod tests {
     #[test]
     fn empty_quantile_and_unsupported_queries_fail() {
         let dd = DDSketchAccumulator::new(0.01);
-        assert!(dd.estimate(&SketchQuery::Quantile { q: 0.5 }).is_err());
-        assert!(dd.estimate(&SketchQuery::Cardinality).is_err());
+        assert!(dd.estimate(&SketchStatistic::Quantile { q: 0.5 }).is_err());
+        assert!(dd.estimate(&SketchStatistic::Cardinality).is_err());
     }
 }

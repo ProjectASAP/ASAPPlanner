@@ -27,7 +27,7 @@ impl AccuracyEvidenceProvider for Evidence {
         &self,
         op: &CompositionOperator,
         _: &FieldDataType,
-        _: Option<&SketchQuery>,
+        _: Option<&SketchStatistic>,
     ) -> PropagationStats {
         if matches!(op, CompositionOperator::TopKSelection) {
             PropagationStats {
@@ -77,7 +77,7 @@ fn assert_weighted_binding(evidence: &dyn AccuracyEvidenceProvider, algorithm: S
         .replacements(&TargetSubDAG::new(&root))
         .into_iter()
         .find_map(|candidate| match candidate.replacement {
-            Replacement::Subtree(node)
+            Replacement::SubDag(node)
                 if candidate.rationale.contains(&format!("{algorithm:?}")) =>
             {
                 Some(node)
@@ -269,7 +269,7 @@ fn direct_rate_topk_exposes_heap_candidates_with_complete_series_identity() {
     check_direct_rate_topk(false);
 }
 
-// Unreferenced labels still distinguish series throughout Rate and heap readout.
+// Unreferenced labels still distinguish series throughout Rate and heap evaluation.
 #[test]
 fn direct_rate_topk_preserves_dynamic_unreferenced_labels() {
     check_direct_rate_topk(true);
@@ -324,7 +324,7 @@ fn check_direct_rate_topk(dynamic: bool) {
         let candidate = candidates
             .iter()
             .find_map(|candidate| match &candidate.replacement {
-                Replacement::Subtree(node)
+                Replacement::SubDag(node)
                     if candidate.rationale.contains(&format!("{algorithm:?}")) =>
                 {
                     Some(node)
@@ -347,10 +347,10 @@ fn check_direct_rate_topk(dynamic: bool) {
             assert_eq!(ranked.input_contracts().count(), 1);
             let encoded = String::from_utf8(serde_json::to_vec(&ranked).unwrap()).unwrap();
             assert!(encoded.contains("KeyedSummaryBuild"));
-            assert!(encoded.contains("KeyedReadout"));
+            assert!(encoded.contains("KeyedEvaluation"));
             assert!(
                 !encoded.contains("\"Rate\""),
-                "Rate must be supplied by its exact stored-state readout"
+                "Rate must be supplied by its exact stored-state evaluation"
             );
         }
         let dag = compile_post_asap_dag(candidate).unwrap();
@@ -650,7 +650,7 @@ fn spatial_topk_exposes_signed_heap_candidate_over_complete_snapshot() {
     let selected = candidates
         .iter()
         .find_map(|candidate| match &candidate.replacement {
-            Replacement::Subtree(node) if candidate.rationale.contains("CountSketchWithHeap") => {
+            Replacement::SubDag(node) if candidate.rationale.contains("CountSketchWithHeap") => {
                 Some(node)
             }
             _ => None,
@@ -677,7 +677,7 @@ fn spatial_topk_exposes_signed_heap_candidate_over_complete_snapshot() {
     )
     .unwrap();
     let snapshot_program =
-        asap_physical_operators::physical_planner::promql_rows::compile_current_series_readout(
+        asap_physical_operators::physical_planner::promql_rows::compile_current_series_evaluation(
             selected,
         )
         .unwrap();
@@ -685,7 +685,7 @@ fn spatial_topk_exposes_signed_heap_candidate_over_complete_snapshot() {
         serde_json::from_slice(&serde_json::to_vec(&snapshot_program).unwrap()).unwrap();
     assert!(!encoded.to_string().contains("CurrentSeries"));
     assert!(encoded.to_string().contains("KeyedSummaryBuild"));
-    assert!(encoded.to_string().contains("KeyedReadout"));
+    assert!(encoded.to_string().contains("KeyedEvaluation"));
     for (values, expected, score) in [
         ([100., 20.], "a", 100.),
         ([1., 20.], "b", 20.),
@@ -872,7 +872,7 @@ fn maintained_rate_heap_lifecycle_compiles_fixed_window_precompute() {
         .replacements(&TargetSubDAG::new(&root))
         .into_iter()
         .filter_map(|candidate| match candidate.replacement {
-            Replacement::Subtree(root) if candidate.rationale.contains("WithHeap") => Some(root),
+            Replacement::SubDag(root) if candidate.rationale.contains("WithHeap") => Some(root),
             _ => None,
         })
         .collect::<Vec<_>>();

@@ -344,10 +344,10 @@ pub(super) fn restore(dag: &PostAsapDag) -> Result<BTreeMap<NodeId, Rc<OperatorN
                         population: population.clone(),
                     })
                 }
-                Payload::ReadPopulation { readout } => {
-                    LogicalOperator::ASAP(ASAPOp::ReadPopulation {
+                Payload::EvaluatePopulation { evaluation } => {
+                    LogicalOperator::ASAP(ASAPOp::EvaluatePopulation {
                         child: input(0)?,
-                        readout: readout.clone(),
+                        evaluation: evaluation.clone(),
                     })
                 }
                 Payload::SummaryMerge => LogicalOperator::ASAP(ASAPOp::SummaryMerge {

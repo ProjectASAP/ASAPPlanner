@@ -11,8 +11,8 @@ fn population_preserves_selector_horizon() {
     let candidate = MaintainedPopulationStrategy::new(std::slice::from_ref(&root))
         .candidate(&root)
         .unwrap();
-    // The readout sits over the maintained population.
-    let Operator::ASAP(ASAPOp::ReadPopulation { child, .. }) = &candidate.operator else {
+    // The evaluation sits over the maintained population.
+    let Operator::ASAP(ASAPOp::EvaluatePopulation { child, .. }) = &candidate.operator else {
         panic!()
     };
     let Operator::ASAP(ASAPOp::MaintainPopulation { population, .. }) = &child.operator else {

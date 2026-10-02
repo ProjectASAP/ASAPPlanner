@@ -37,7 +37,7 @@ pub(crate) mod vector_window;
 pub use aggregate::Reduction;
 pub use series_window::SubquerySteps;
 pub use sort::SortKey;
-pub use summary::ReadoutQuery;
+pub use summary::SummaryEvaluation;
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 enum Kind {
     #[serde(skip)]
@@ -147,7 +147,7 @@ enum Kind {
         items: Vec<usize>,
         groups: Vec<usize>,
     },
-    KeyedReadout {
+    KeyedEvaluation {
         state: usize,
         k: usize,
     },
@@ -155,9 +155,9 @@ enum Kind {
         state: usize,
         groups: Vec<usize>,
     },
-    Readout {
+    Evaluation {
         state: usize,
-        query: ReadoutQuery,
+        query: SummaryEvaluation,
     },
 }
 /// A bound operation has a fully checked input/output contract before execution.
@@ -178,11 +178,11 @@ impl Operator {
         }
     }
 
-    pub(crate) fn is_counter_readout(&self) -> bool {
+    pub(crate) fn is_counter_evaluation(&self) -> bool {
         matches!(
             self.kind,
-            Kind::Readout {
-                query: ReadoutQuery::Exact(crate::summary_kernels::exact::ExactReadout {
+            Kind::Evaluation {
+                query: SummaryEvaluation::Exact(crate::summary_kernels::exact::ExactEvaluation {
                     statistic: crate::Statistic::Rate | crate::Statistic::Increase,
                     ..
                 }),
@@ -195,21 +195,24 @@ impl Operator {
         if lookback <= 0 {
             return Err(invalid("counter lookback must be positive"));
         }
-        if let Kind::Readout {
-            query: ReadoutQuery::Exact(readout),
+        if let Kind::Evaluation {
+            query: SummaryEvaluation::Exact(evaluation),
             ..
         } = &mut self.kind
         {
-            readout.lookback_ms = Some(lookback);
+            evaluation.lookback_ms = Some(lookback);
         }
         Ok(self)
     }
 
-    /// Resolve a counter readout's logical lookback to this run's evaluation range.
-    pub(super) fn readout_range(&self, context: &RunContext) -> Result<Option<(i64, i64)>, Error> {
-        let Kind::Readout {
+    /// Resolve a counter evaluation's logical lookback to this run's evaluation range.
+    pub(super) fn evaluation_range(
+        &self,
+        context: &RunContext,
+    ) -> Result<Option<(i64, i64)>, Error> {
+        let Kind::Evaluation {
             query:
-                ReadoutQuery::Exact(crate::summary_kernels::exact::ExactReadout {
+                SummaryEvaluation::Exact(crate::summary_kernels::exact::ExactEvaluation {
                     lookback_ms: Some(lookback),
                     ..
                 }),
@@ -338,15 +341,15 @@ impl PhysicalOperator<Batch, Schema> for Operator {
             Kind::SemiJoin { .. } => "SemiJoin",
             Kind::Join { .. } => "RelationalJoin",
             Kind::SummaryBuild { .. } | Kind::KeyedSummaryBuild { .. } => "SummaryAgg",
-            Kind::KeyedReadout { .. } => "SummaryEstimate",
+            Kind::KeyedEvaluation { .. } => "SummaryEstimate",
             Kind::SummaryMerge { .. } => "SummaryMerge",
-            Kind::Readout { .. } => "SummaryReadout",
+            Kind::Evaluation { .. } => "SummaryEvaluation",
         }
     }
     fn validate_context(&self, context: &RunContext) -> Result<(), Error> {
         current_series::validate_context(self, context)?;
         series_window::validate_context(self, context)?;
-        self.readout_range(context).map(|_| ())
+        self.evaluation_range(context).map(|_| ())
     }
     fn input_schemas(&self) -> Vec<Schema> {
         self.inputs.clone()
@@ -390,9 +393,9 @@ impl PhysicalOperator<Batch, Schema> for Operator {
             Kind::Join { .. } | Kind::SemiJoin { .. } => joins::execute(self, inputs, context),
             Kind::SummaryMerge { .. } => summary::execute_merge(self, inputs, context),
             Kind::SummaryBuild { .. }
-            | Kind::Readout { .. }
+            | Kind::Evaluation { .. }
             | Kind::KeyedSummaryBuild { .. }
-            | Kind::KeyedReadout { .. } => summary::execute(self, inputs, context),
+            | Kind::KeyedEvaluation { .. } => summary::execute(self, inputs, context),
         }
     }
 }

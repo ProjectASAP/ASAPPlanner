@@ -32,7 +32,7 @@ const KIND_CATEGORY_JSON = `{
   "SummaryMerge": "summary",
   "FinalizeExactAccumulator": "summary",
   "MaintainPopulation": "summary",
-  "ReadPopulation": "summary",
+  "EvaluatePopulation": "summary",
   "Extension": "summary"
 }`;
 const KIND_CATEGORY = Object.freeze(JSON.parse(KIND_CATEGORY_JSON));
@@ -102,7 +102,7 @@ const CATEGORIES = {
   // ASAP operators use a neutral palette.
   summary: {
     label: 'Summary',
-    description: 'SummaryAgg, SummaryEstimate, FinalizeExactAccumulator, MaintainPopulation, ReadPopulation, SummaryJoin, SummarySubtract, SummaryDelete, SummaryMerge, Extension — summary state and its readouts',
+    description: 'SummaryAgg, SummaryEstimate, FinalizeExactAccumulator, MaintainPopulation, EvaluatePopulation, SummaryJoin, SummarySubtract, SummaryDelete, SummaryMerge, Extension — summary state and its evaluations',
     light: { bg: '#f1f2f4', border: '#4b5563' },
     dark: { bg: '#20242b', border: '#9ca3af' },
   },

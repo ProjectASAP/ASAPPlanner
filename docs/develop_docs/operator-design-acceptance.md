@@ -13,9 +13,9 @@ Both use `Rc<OperatorNode>` with `Operator::NonASAP(NonASAPOp)` or
 operator edges, including producers referenced by scalar expressions.
 `QueryRoot::Scalar` owns a scalar expression without fabricating an operator.
 There is no `KeepPreAsap` or `ScalarBridge` operator. `retain_exact` annotates an
-unchanged ordinary subtree; it does not wrap it. The viewer uses ordinary node
+unchanged ordinary sub-DAG; it does not wrap it. The viewer uses ordinary node
 kinds in both stages. Historical `PostAsapDag` names denote the flat executable
-wire document (version 6), not another logical IR.
+wire document (version 7), not another logical IR.
 
 `validate_structure` permits unassigned timing, checks scalar scopes, predicates,
 result kinds, leaf declarations, state families, and retained field types.
@@ -25,10 +25,20 @@ allows pointwise arithmetic at ingestion time. Existing lifecycle/deployment
 policy remains separate work in [#520](https://github.com/ProjectASAP/ASAPPlanner/issues/520)
 and [#530](https://github.com/ProjectASAP/ASAPPlanner/issues/530).
 
+`PlanOutput` is one multi-root workload DAG: `operator_roots()` exposes operator
+roots, and `operators()` inventories shared nodes once across operator and scalar
+roots. Replacement regions and CSE use `SubDag` and `share_common_subdags`.
+Supporting operator parameters live in `ir::operator_properties`; schema derivation
+and errors have dedicated modules. Summary operations use “evaluation”;
+`SketchStatistic` specifies the statistic to compute, rather than another query.
+Wire version 7 reflects these renamed serialized variants and fields. Regenerate
+older exported graphs and native programs; no legacy-name aliases are provided.
+
 ## Document examples
 
 | Example | Evidence |
 |---|---|
+| Batch `SUM(bytes) + 1`, `SUM(bytes) * 2` | `batch_planning_replaces_and_shares_summary_operators`: invokes the actual planner, selects one shared summary state across two roots, validates and natively executes both results (31 and 60 for inputs 10 and 20). |
 | `SELECT l_quantity * 2 AS q2 FROM lineitem WHERE l_quantity > 10` | `integration-tests/tests/operator_design_examples.rs`: parse, resolve, validate and flat export; Int64 projection and Boolean predicate. |
 | `SELECT SUM(bytes) + 1 AS total_bytes FROM requests WHERE status = 200` | Same suite: explicit summary build/finalize rewrite, identical nullable Int64 result schema, one exported node per operator. Native execution of the ordinary SQL plan covers filtered rows, empty input and all-NULL input. The logical rewrite does not imply native Int64 summary-kernel support. |
 | `2`, `time()`, `up * 2`, `vector(time())`, `scalar(sum(up)) + 1` | `asap-physical-operators/tests/promql_fallback.rs::scalar_design_document_examples_execute`: parse through native compilation and execution with hand-computed values. `frontend-promql/tests/scalar_design.rs` checks scalar roots, expression ownership and producer sharing. |

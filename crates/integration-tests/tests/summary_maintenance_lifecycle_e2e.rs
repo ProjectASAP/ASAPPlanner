@@ -1133,7 +1133,7 @@ fn maintained_arithmetic_over_different_selectors_matches_prometheus() {
 }
 
 /// Arithmetic over one selector keeps its maintained layout and adds each
-/// series' two readouts before the quantile.
+/// series' two evaluations before the quantile.
 #[test]
 fn maintained_arithmetic_over_one_selector_executes() {
     let (dag, ingestion_binary) =

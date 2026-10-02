@@ -80,11 +80,11 @@ pub fn series_row(
 /// Compile the selected TopK computation above an existing maintained-population
 /// source. The boundary supplies the complete eligible vector, not a truncated
 /// TopK result; ranking remains a native physical operator.
-pub fn compile_current_series_readout(
+pub fn compile_current_series_evaluation(
     selected: &Rc<OperatorNode>,
 ) -> Result<CompiledPhysicalDag, Error> {
     use planner_types::post_asap::{
-        maintained_population::PopulationReadout, Field as SummaryField,
+        maintained_population::PopulationStatistic, Field as SummaryField,
     };
     let selected = planner_types::ir::apply_lifecycle_timings(
         selected,
@@ -94,7 +94,7 @@ pub fn compile_current_series_readout(
     .map_err(|e| invalid(e.to_string()))?;
     let mut dag = compile_post_asap_dag(&selected).map_err(|error| invalid(error.to_string()))?;
     // Typed snapshot candidates already carry full identity throughout the DAG.
-    // Cut at the population output, preserving all selected heap/readout nodes.
+    // Cut at the population output, preserving all selected heap/evaluation nodes.
     let populations = dag.nodes.iter().filter(|node| matches!(&node.payload,
         Payload::MaintainPopulation { population }
             if matches!(population.input, planner_types::post_asap::maintained_population::PopulationInput::CurrentSeries(_))
@@ -132,10 +132,10 @@ pub fn compile_current_series_readout(
             Payload::MaintainPopulation { .. } => {
                 frontier = Some(u64::from(node.id.0));
             }
-            Payload::ReadPopulation {
-                readout: PopulationReadout::TopK { .. },
+            Payload::EvaluatePopulation {
+                evaluation: PopulationStatistic::TopK { .. },
             } => {}
-            _ => return Err(invalid("unsupported current-series readout dependency")),
+            _ => return Err(invalid("unsupported current-series evaluation dependency")),
         }
         if node
             .output_schema
@@ -180,7 +180,7 @@ pub fn compile_current_series_readout(
 }
 
 /// Compile selected ranking or aggregation above an exact per-series Rate
-/// readout. Deployments bind complete window readouts at this boundary;
+/// evaluation. Deployments bind complete window evaluations at this boundary;
 /// the heap is rebuilt independently for each evaluation. This does not move
 /// that frontier to ingestion time or authorize combining finalized rates.
 pub fn compile_rate_ranking(
@@ -232,7 +232,7 @@ pub fn compile_rate_ranking(
 }
 
 /// Compile a lifecycle-timed DAG whose heap or grouped Sum over per-series
-/// Rate readouts runs at ingestion time: fresh aggregate state per closed
+/// Rate evaluations runs at ingestion time: fresh aggregate state per closed
 /// window. The input is the complete collection of per-series counter states.
 pub fn compile_fixed_window_rate_aggregation(
     dag: &planner_types::ir::export::PostAsapDag,

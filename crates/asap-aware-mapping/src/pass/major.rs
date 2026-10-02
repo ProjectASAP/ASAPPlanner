@@ -6,7 +6,7 @@
 //! it *one* pass rather than *the* algorithm. `ReplacementStrategy` is
 //! therefore a concept of this pass, not of the optimization interface.
 
-use asap_types::ir::cse::share_common_subtrees;
+use asap_types::ir::cse::share_common_subdags;
 use std::rc::Rc;
 
 use asap_types::ir::OperatorNode;
@@ -94,7 +94,7 @@ impl OptimizationPass for MajorPass {
                 .ok_or_else(|| self.missing_group(*entry_index))?;
             assembled.push(dag);
         }
-        let interned = share_common_subtrees(assembled.iter().cloned().enumerate().collect());
+        let interned = share_common_subdags(assembled.iter().cloned().enumerate().collect());
         let states: Vec<_> = interned
             .iter()
             .map(|(_, dag)| summary_states(dag))

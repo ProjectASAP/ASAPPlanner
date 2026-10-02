@@ -254,7 +254,7 @@ fn population_aggregates_match_current_series_reference() {
     }
 }
 
-// A global readout of an empty population is an empty vector, as in PromQL.
+// A global evaluation of an empty population is an empty vector, as in PromQL.
 #[test]
 fn global_population_aggregate_of_no_members_is_empty() {
     // Latest values are [1, 2, 5, 7] at 60s; every member has expired by 1000s.
@@ -368,7 +368,7 @@ fn grouped_comparisons_filter_or_return_bool() {
     }
 }
 
-// A `bool` comparison Binary over per-series readouts matches one-to-one and
+// A `bool` comparison Binary over per-series evaluations matches one-to-one and
 // drops the metric name; a filter keeps the surviving left value.
 #[test]
 fn per_series_comparisons_filter_or_return_bool() {
@@ -497,13 +497,13 @@ fn per_series_rate_ratio_matches_prometheus() {
 // A literal operand applies to every stored per-series value, on either side,
 // and drops the metric name.
 #[test]
-fn per_series_scalar_arithmetic_applies_to_stored_readouts() {
+fn per_series_scalar_arithmetic_applies_to_stored_evaluations() {
     let samples = counter("m", "api", 10., 10.).collect::<Vec<_>>();
     // rate = 40 * 1.25 / 300 = 1/6.
     for (query, expected) in [
         ("rate(m[5m]) * 2", 50. / 300. * 2.),
         ("1 - rate(m[5m])", 1. - 50. / 300.),
-        // The stored sum readout keeps `__name__`; the arithmetic drops it.
+        // The stored sum evaluation keeps `__name__`; the arithmetic drops it.
         ("sum_over_time(m[5m]) * 2", 150. * 2.),
     ] {
         assert_eq!(
@@ -616,10 +616,10 @@ fn population_sums_and_averages_are_compensated() {
     }
 }
 
-// A bare count over stored Count-Min state compiles to a Planner readout that
+// A bare count over stored Count-Min state compiles to a Planner evaluation that
 // returns the sketch's total update weight, including colliding items.
 #[test]
-fn stored_count_min_bare_count_compiles_to_a_readout() {
+fn stored_count_min_bare_count_compiles_to_a_evaluation() {
     use asap_aware_mapping::{Replacement, ReplacementStrategy, TargetSubDAG};
     use asap_physical_operators::summary_kernels::CountMinSketchAccumulator;
     let root = lower_with("count(up)", AccuracyTarget::Epsilon(0.02));
@@ -628,13 +628,13 @@ fn stored_count_min_bare_count_compiles_to_a_readout() {
             .replacements(&TargetSubDAG::new(&root))
             .into_iter()
             .find_map(|candidate| match candidate.replacement {
-                Replacement::Subtree(node) => {
+                Replacement::SubDag(node) => {
                     let dag = compile_post_asap_dag(&node).ok()?;
                     let bare_count = dag.nodes.iter().any(|n| {
                         matches!(
                             &n.payload,
                             PostAsapOperatorPayload::SummaryEstimate {
-                                query: SketchQuery::PointCount { value: None, .. }
+                                query: SketchStatistic::PointCount { value: None, .. }
                             }
                         )
                     });

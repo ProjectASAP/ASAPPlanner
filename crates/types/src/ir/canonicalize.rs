@@ -33,15 +33,16 @@ use std::rc::Rc;
 use super::node::{Operator, OperatorNode};
 use super::non_asap::NonASAPOp;
 use super::scalar::{ExprSemantics, Predicate, ProjectItem, ScalarExpr, SortKey};
+use crate::ir::operator_properties::{JoinKind, Reduction};
+use crate::ir::QueryExprError;
 use crate::pre_asap::agg_intent::{topk, AggIntent};
 use crate::pre_asap::expr_ir::{CompareOpKind, ScalarValue};
-use crate::pre_asap::vocabulary::{JoinKind, QueryExprError, Reduction};
 use crate::types::AccuracyTarget;
 
 /// Rewrite the DAG under `root` into its canonical form (bottom-up).
 /// Idempotent: an already-canonical DAG comes back as the same `Rc`. Only
 /// nodes that change (or whose inputs change) are rebuilt; every untouched
-/// subtree keeps its pointer identity, and a shared subtree that is rewritten
+/// sub-DAG keeps its pointer identity, and a shared sub-DAG that is rewritten
 /// stays shared.
 pub fn canonicalize(root: Rc<OperatorNode>) -> Result<Rc<OperatorNode>, QueryExprError> {
     canon(&root, &mut HashMap::new())
@@ -401,12 +402,12 @@ fn find_scalar_subquery(expr: &ScalarExpr) -> Option<&Rc<OperatorNode>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pre_asap::schema::{DataType, Field, Schema};
-    use crate::pre_asap::vocabulary::WindowFuncKind;
-    use crate::pre_asap::vocabulary::{
+    use crate::ir::operator_properties::WindowFuncKind;
+    use crate::ir::operator_properties::{
         ConcatDiscriminatorKey, GroupKeys, Source, WindowFrame, WindowFrameBound,
         WindowFrameOffset, WindowFrameUnits,
     };
+    use crate::pre_asap::schema::{DataType, Field, Schema};
 
     fn node(op: NonASAPOp) -> Rc<OperatorNode> {
         Rc::new(OperatorNode::new(Operator::NonASAP(op)).expect("fixture derives a schema"))
@@ -581,7 +582,7 @@ mod tests {
 
     #[test]
     fn rewritten_shared_subtree_stays_shared() {
-        // One promotable subtree referenced twice is rewritten once.
+        // One promotable sub-DAG referenced twice is rewritten once.
         let branch = limit(5, 0, sort(desc(1), count_by_service()));
         let q = concat(vec![Rc::clone(&branch), Rc::clone(&branch)], None);
         let out = canonicalize(q).unwrap();

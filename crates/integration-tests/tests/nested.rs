@@ -138,7 +138,7 @@ fn q23_sum_by_job_over_filtered_scan() {
     );
 }
 
-// #25 — binary op over two complex subtrees
+// #25 — binary op over two complex sub-DAGs
 //   LHS: sum by (job) over rate over filtered scan
 //     schema [ts, value, job, status]; outer by=[2] (job)
 //   RHS: sum by (job) over rate over bare scan

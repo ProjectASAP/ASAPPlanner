@@ -1,4 +1,4 @@
-//! Numeric regression fixtures: actual PromQL lowering plus numeric update/readout checks.
+//! Numeric regression fixtures: actual PromQL lowering plus numeric update/evaluation checks.
 //! The count/sum interpreter below verifies planner update semantics, not a deployed backend.
 use asap_aware_mapping::replacement::is_logical_rewrite;
 use asap_aware_mapping::{Replacement, ReplacementStrategy, SketchAlgorithmStrategy, TargetSubDAG};
@@ -16,8 +16,8 @@ fn plan(query: &str, accuracy: AccuracyTarget) -> Rc<OperatorNode> {
         .replacements(&TargetSubDAG::new(&pre))
         .into_iter()
         .find_map(|r| match r.replacement {
-            // A bound decision: a summary DAG or a kept (exact) subtree.
-            Replacement::Subtree(n) if !is_logical_rewrite(&n) => Some(n),
+            // A bound decision: a summary DAG or a kept (exact) sub-DAG.
+            Replacement::SubDag(n) if !is_logical_rewrite(&n) => Some(n),
             _ => None,
         })
         .unwrap_or_else(|| asap_aware_mapping::replacement::retain_exact(&pre).unwrap())
@@ -158,7 +158,7 @@ fn quantile_over_temporal_average_keeps_a_legal_candidate() {
             "outer sketch candidate must survive: {query}"
         );
         let Operator::ASAP(ASAPOp::SummaryEstimate { summary_input, .. }) = &node.operator else {
-            panic!("outer sketch readout")
+            panic!("outer sketch evaluation")
         };
         let Operator::ASAP(ASAPOp::SummaryAgg { child, .. }) = &summary_input.operator else {
             panic!("outer sketch state")
@@ -177,7 +177,7 @@ impl asap_aware_mapping::accuracy::AccuracyEvidenceProvider for OneKeyTopKEviden
         &self,
         op: &asap_types::post_asap::CompositionOperator,
         _family: &FieldDataType,
-        _query: Option<&asap_types::post_asap::SketchQuery>,
+        _query: Option<&asap_types::post_asap::SketchStatistic>,
     ) -> asap_aware_mapping::accuracy::PropagationStats {
         // Single-key fixture: no excluded keys; bounds cover every value below.
         if matches!(
@@ -223,7 +223,7 @@ fn sketch_counts_use_unit_weights_and_signed_sums_keep_value_weights() {
         let node = candidates
             .iter()
             .find_map(|c| {
-                let Replacement::Subtree(node) = &c.replacement else {
+                let Replacement::SubDag(node) = &c.replacement else {
                     return None;
                 };
                 let (family, _, _) = aggregate(node);
@@ -246,7 +246,7 @@ fn sketch_counts_use_unit_weights_and_signed_sums_keep_value_weights() {
                 SummaryInputExpr::Column(ColumnRef::SampleValue)
             );
             for c in &candidates {
-                if let Replacement::Subtree(n) = &c.replacement {
+                if let Replacement::SubDag(n) = &c.replacement {
                     assert!(
                         !matches!(aggregate(n).0, FieldDataType::Sketch(kind, _) if kind.algorithm() == &SketchAlgorithm::CmsWithHeap)
                     );

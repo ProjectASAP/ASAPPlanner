@@ -1,7 +1,7 @@
 //! Structurally identical summary producers chosen by different queries are
 //! shared after Pass 1: one `Rc<OperatorNode>` across their plans, costed once.
 
-use asap_types::ir::cse::share_common_subtrees;
+use asap_types::ir::cse::share_common_subdags;
 use asap_types::ir::{ASAPOp, OperatorNode};
 use std::rc::Rc;
 
@@ -24,7 +24,7 @@ use asap_frontend_sql::SqlCatalog;
 use asap_planner::{e2e_plan, FrontendInput, UserInput};
 use asap_types::post_asap::{
     AccuracyError, BoundExpr, CompositionOperator, ErrorMetric, ProbabilityExpr, ResultGuarantee,
-    SketchQuery,
+    SketchStatistic,
 };
 use asap_types::post_asap::{FieldDataType, SketchAlgorithm, SketchParams};
 use asap_types::pre_asap::agg_intent::default_quantile;
@@ -382,7 +382,7 @@ async fn identical_sql_percentiles_share_one_producer() {
     assert_eq!(unique_deployments(&output), 1);
 }
 
-/// The quantile is a readout parameter: SQL p50 and p99 over one filtered
+/// The quantile is a evaluation parameter: SQL p50 and p99 over one filtered
 /// column build one KLL, named after its input, while each query keeps its
 /// own output column.
 #[tokio::test]
@@ -451,7 +451,7 @@ async fn shared_amortization_alone_can_beat_raw_recompute() {
     assert_eq!(unique_deployments(&output), 1);
 }
 
-/// Synthetic evidence certifying UnivMon readouts; it exercises sharing, never
+/// Synthetic evidence certifying UnivMon evaluations; it exercises sharing, never
 /// runtime accuracy.
 struct UnivMonEvidence;
 
@@ -459,7 +459,7 @@ impl AccuracyModel for UnivMonEvidence {
     fn local_guarantee(
         &self,
         family: &FieldDataType,
-        query: &SketchQuery,
+        query: &SketchStatistic,
     ) -> Option<ResultGuarantee> {
         if matches!(family, FieldDataType::Sketch(kind, _) if kind.algorithm() == &SketchAlgorithm::UnivMon)
         {
@@ -493,7 +493,7 @@ impl AccuracyModel for UnivMonEvidence {
 /// when the states are identical. `MajorPass` builds candidates with the
 /// built-in accuracy model, so this runs its pipeline with the test model.
 #[test]
-fn certified_frequency_readouts_share_one_univmon_state() {
+fn certified_frequency_evaluations_share_one_univmon_state() {
     let queries = [
         ("distinct_over_time(m[5m])", 0.02),
         ("entropy_over_time(m[5m])", 0.02),
@@ -540,12 +540,12 @@ fn certified_frequency_readouts_share_one_univmon_state() {
         })
         .collect();
     let mut states: Vec<Rc<OperatorNode>> = Vec::new();
-    for (_, root) in share_common_subtrees(assembled) {
+    for (_, root) in share_common_subdags(assembled) {
         assert!(root.guarantee.is_some(), "{:?}", root.operator);
         let asap_types::ir::Operator::ASAP(ASAPOp::SummaryEstimate { summary_input, .. }) =
             &root.operator
         else {
-            panic!("summary readout: {:?}", root.operator);
+            panic!("summary evaluation: {:?}", root.operator);
         };
         assert!(matches!(
             &summary_input.operator,

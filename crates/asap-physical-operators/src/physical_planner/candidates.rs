@@ -14,7 +14,7 @@ pub struct PhysicalASAPDAG {
 
 /// Compile an explicit materialization frontier selected by Planner maintenance
 /// search. Operators upstream of that frontier run in precompute, including
-/// readouts/reductions; query execution receives their typed output values.
+/// evaluations/reductions; query execution receives their typed output values.
 /// Empty frontiers retain the full computation in the query DAG.
 ///
 /// Repeated windows must be instantiated with the same evaluation/population

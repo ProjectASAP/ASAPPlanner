@@ -83,11 +83,11 @@ fn scalar_signatures_fail_closed() {
 
 /// A state family is not interchangeable with another sketch or a scalar field.
 #[test]
-fn state_readouts_and_passthrough_keep_their_contracts() {
+fn state_evaluations_and_passthrough_keep_their_contracts() {
     use asap_types::ir::{ASAPOp, Operator, ProjectItem};
     use asap_types::post_asap::{
-        FieldDataType, GroupingStrategy, SketchAlgorithm, SketchKind, SketchParams, SketchQuery,
-        SummaryUpdate,
+        FieldDataType, GroupingStrategy, SketchAlgorithm, SketchKind, SketchParams,
+        SketchStatistic, SummaryUpdate,
     };
     use asap_types::pre_asap::{ColumnRef, Reduction};
     let family = FieldDataType::Sketch(
@@ -120,13 +120,13 @@ fn state_readouts_and_passthrough_keep_their_contracts() {
     assert!(ScalarExpr::Column(0).scalar_type(&pass.schema).is_err());
     assert!(ASAPOp::SummaryEstimate {
         summary_input: state.clone(),
-        query: SketchQuery::Cardinality
+        query: SketchStatistic::Cardinality
     }
     .validate_inputs()
     .is_err());
     assert!(ASAPOp::SummaryEstimate {
         summary_input: state.clone(),
-        query: SketchQuery::Quantile { q: 0.99 }
+        query: SketchStatistic::Quantile { q: 0.99 }
     }
     .validate_inputs()
     .is_ok());

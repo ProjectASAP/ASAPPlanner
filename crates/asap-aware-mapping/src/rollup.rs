@@ -20,7 +20,7 @@
 //! "Rolling up aggregations on a fine-grained group by to get a
 //! coarse-grained group by (like AHA)," alongside "CSE across aggregations,
 //! and group by key management" — this strategy is the *cross-aggregate*
-//! sibling of `pre_asap::cse::share_common_subtrees`'s *identical*-subtree
+//! sibling of `pre_asap::cse::share_common_subdags`'s *identical*-sub-DAG
 //! sharing: CSE shares two structurally-*equal* aggregates onto one `Rc`;
 //! this strategy relates two structurally-*different* (differently grouped)
 //! aggregates over the same shared source.
@@ -77,7 +77,7 @@
 //! this module never reconciles `ColumnId`s across distinct schemas.
 //!
 //! ## Non-goals (tracked separately, not attempted here — same split
-//! `replacement.rs`'s own module docs draw for `SharedSubtreeStrategy`'s
+//! `replacement.rs`'s own module docs draw for `SharedSubDagStrategy`'s
 //! `consumer_count`)
 //!
 //! - **No sibling discovery inside this strategy.** Finding every aggregate
@@ -101,10 +101,11 @@ use asap_types::ir::non_asap::any_measure_filtered;
 use std::collections::HashSet;
 use std::rc::Rc;
 
+use asap_types::ir::operator_properties::{GroupKeys, Reduction};
 use asap_types::ir::{NonASAPOp, OperatorNode};
 use asap_types::pre_asap::agg_intent::AggIntent;
 use asap_types::pre_asap::schema::{ColumnId, Schema};
-use asap_types::pre_asap::vocabulary::{GroupKeys, Reduction};
+
 use asap_types::types::AccuracyTarget;
 
 use crate::replacement::{Replacement, ReplacementStrategy, ReplacementSubDAG, TargetSubDAG};
@@ -206,16 +207,16 @@ fn rollup_combinator(intent: &AggIntent, finer_measure_col: ColumnId) -> Option<
 /// 4. `finer_output_schema` (the finer aggregate's own *output* schema, not
 ///    the shared child's) carries a provable unique key
 ///    ([`Schema::has_unique_key`]) — **the exact legality gate
-///    `pre_asap::cse::share_common_subtrees` already applies to its own
+///    `pre_asap::cse::share_common_subdags` already applies to its own
 ///    sharing decisions**, reused verbatim here rather than re-invented:
-///    `share_common_subtrees`'s own doc ("Legality: gated by
+///    `share_common_subdags`'s own doc ("Legality: gated by
 ///    `Schema::unique_keys`") states a producer's output is only safely
 ///    reusable across consumers when its row identity is provably stable —
 ///    exactly the property re-aggregating over `finer` as if it were a
 ///    fresh source requires.
 /// 5. `coarser_by` is a **strict, proper** subset of `finer_by` (same
 ///    `ColumnId`s, finer strictly more of them) — an *equal* `by` is
-///    `SharedSubtreeStrategy`'s CSE-sharing question, not a roll-up, so
+///    `SharedSubDagStrategy`'s CSE-sharing question, not a roll-up, so
 ///    equality is deliberately excluded here, not treated as a degenerate
 ///    roll-up.
 pub fn is_legal_rollup_source(
@@ -378,7 +379,7 @@ fn build_rollup(
 
     Some(ReplacementSubDAG {
         strategy: "RollupStrategy",
-        replacement: Replacement::Subtree(rewritten),
+        replacement: Replacement::SubDag(rewritten),
         provenance: crate::replacement::ReplacementProvenance::LogicalRewrite,
         rationale: format!(
             "rolls up from the finer Aggregate grouped by {:?} (a strict superset of this \
@@ -394,8 +395,8 @@ fn build_rollup(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use asap_types::ir::operator_properties::Source;
     use asap_types::pre_asap::schema::{DataType, Field};
-    use asap_types::pre_asap::vocabulary::Source;
     use asap_types::types::AccuracyTarget;
 
     /// `[ts(0), value(1), job(2), region(3)]`.
@@ -514,7 +515,7 @@ mod tests {
 
     #[test]
     fn predicate_rejects_equal_by_sets() {
-        // Equality is `SharedSubtreeStrategy`'s question, not a roll-up.
+        // Equality is `SharedSubDagStrategy`'s question, not a roll-up.
         let finer_schema = Schema::with_time_index(vec![], 0, vec![vec![0]]);
         assert!(!is_legal_rollup_source(
             &GroupKeys::by(vec![2]),
@@ -584,7 +585,7 @@ mod tests {
         let replacements = strategy.replacements(&target);
         assert_eq!(replacements.len(), 1, "{replacements:?}");
 
-        let Replacement::Subtree(rewritten) = &replacements[0].replacement else {
+        let Replacement::SubDag(rewritten) = &replacements[0].replacement else {
             panic!("expected a Rewrite replacement");
         };
         let Some(NonASAPOp::Aggregate {
@@ -645,7 +646,7 @@ mod tests {
 
         let replacements = strategy.replacements(&target);
         assert_eq!(replacements.len(), 1, "{replacements:?}");
-        let Replacement::Subtree(rewritten) = &replacements[0].replacement else {
+        let Replacement::SubDag(rewritten) = &replacements[0].replacement else {
             panic!("expected a Rewrite replacement");
         };
         let Some(NonASAPOp::Aggregate { measures, .. }) = rewritten.non_asap() else {
@@ -698,9 +699,9 @@ mod tests {
             .candidates
             .iter()
             .find_map(|candidate| match &candidate.replacement {
-                // Old `Replacement::Rewrite`: a pure pre-ASAP subtree.
-                Replacement::Subtree(rewrite) if !rewrite.contains_asap() => Some(rewrite),
-                Replacement::Subtree(_) | Replacement::ExactComposition(_) => None,
+                // Old `Replacement::Rewrite`: a pure pre-ASAP sub-DAG.
+                Replacement::SubDag(rewrite) if !rewrite.contains_asap() => Some(rewrite),
+                Replacement::SubDag(_) | Replacement::ExactComposition(_) => None,
             })
             .expect("default search must include the roll-up rewrite");
         let Some(NonASAPOp::Aggregate { child, .. }) = rewrite.non_asap() else {
@@ -738,7 +739,7 @@ mod tests {
             .candidates
             .iter()
             .all(|candidate| !matches!(&candidate.replacement,
-                Replacement::Subtree(rewrite) if !rewrite.contains_asap())));
+                Replacement::SubDag(rewrite) if !rewrite.contains_asap())));
     }
 
     #[test]
@@ -759,7 +760,7 @@ mod tests {
         let siblings = vec![Rc::clone(&fine), Rc::clone(&coarse)];
         let strategy = RollupStrategy::new(&siblings);
         let replacements = strategy.replacements(&TargetSubDAG::new(&coarse));
-        let Replacement::Subtree(rewritten) = &replacements[0].replacement else {
+        let Replacement::SubDag(rewritten) = &replacements[0].replacement else {
             panic!("expected a Rewrite replacement");
         };
 
@@ -830,7 +831,7 @@ mod tests {
 
     #[test]
     fn equal_by_sets_do_not_roll_up() {
-        // Equal groupings are `SharedSubtreeStrategy`'s CSE-sharing
+        // Equal groupings are `SharedSubDagStrategy`'s CSE-sharing
         // question (build once and share, or build independently) — a
         // roll-up requires a *strict* superset, not equality.
         let scan = metric_scan();

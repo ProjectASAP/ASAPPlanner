@@ -83,7 +83,7 @@
 //!   re-deriving it from an already-computed, strictly finer sibling
 //!   `Aggregate` over identical child IR instead of an independent pass
 //!   over the raw source — the cross-aggregate sibling of
-//!   `pre_asap::cse::share_common_subtrees`'s identical-subtree sharing.
+//!   `pre_asap::cse::share_common_subdags`'s identical-sub-DAG sharing.
 //!   [`rollup::is_legal_rollup_source`] is the standalone legality predicate
 //!   other axes (e.g. issue #256's `GroupingStrategy`) are expected to
 //!   consult directly, so it and this module's `RollupStrategy` can never
@@ -101,7 +101,7 @@
 //!   is a [`replacement::ReplacementStrategy`] that reshapes a bare `avg`
 //!   node — which [`replacement::realizations_for_intent`] can only
 //!   dispatch to `Realization::PassThrough`, so it can never be a
-//!   [`replacement::SharedSubtreeStrategy`] target — into a `sum`/`count`
+//!   [`replacement::SharedSubDagStrategy`] target — into a `sum`/`count`
 //!   pair under the same grouping, re-divided back by a wrapping `Project`,
 //!   so those *are* ordinary mergeable accumulators sharing/sketching can
 //!   reach. It only reshapes; [`replacement::search_workload`]'s cost-based
@@ -212,7 +212,7 @@ pub use replacement::{
     CandidateLogicalASAPDAGs, CompositionDecision, GlobalSelection, Matcher, Proposals,
     RankedTargetSubDAGCandidates, Realization, RealizationError, RecurrenceProfileMap,
     RejectedCandidate, Replacement, ReplacementProvenance, ReplacementStrategy, ReplacementSubDAG,
-    SharedSubtreeStrategy, SketchAlgorithmStrategy, TargetSubDAG, TargetSubDAGCandidates,
+    SharedSubDagStrategy, SketchAlgorithmStrategy, TargetSubDAG, TargetSubDAGCandidates,
     TargetSubDAGSelection, MAX_SEARCH_ITERATIONS,
 };
 pub use rewrite::{AvgToSumOverCountStrategy, SemanticEquivalentRewriteStrategy};

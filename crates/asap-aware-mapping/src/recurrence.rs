@@ -6,7 +6,7 @@
 //! neither reached [`CostModel`]'s CSE share-vs-recompute decision
 //! ([`CostModel::cse_share_decision`]): that decision only ever compared a
 //! *structural* consumer count (how many workload locations reference a
-//! shared subtree) against a flat per-family maintenance weight — it had no
+//! shared sub-DAG) against a flat per-family maintenance weight — it had no
 //! notion of how *often* those consumers actually run.
 //!
 //! This module adds that notion as a generic cost context, not a scheduler:
@@ -394,7 +394,7 @@ pub enum RootRecurrence {
 
 // ── Explanation ──────────────────────────────────────────────────────────
 
-/// The full readout [`CostModel::cse_share_decision_with_recurrence`]
+/// The full evaluation [`CostModel::cse_share_decision_with_recurrence`]
 /// returns: which alternative was selected, both compared cost rates
 /// (and, when a [`Horizon`] was supplied, both compared totals), every
 /// input that went into them, their units, and provenance — meant to be
@@ -779,6 +779,7 @@ mod tests {
     // ── decide (structural fallback) ─────────────────────────────────────
 
     use crate::cost_model::CseCandidate;
+    use asap_types::ir::operator_properties::{Reduction, Source};
     use asap_types::ir::{
         ASAPOp, BinaryOperator, ExprSemantics, NonASAPOp, OperatorNode, Predicate, ScalarExpr,
     };
@@ -787,7 +788,7 @@ mod tests {
     };
     use asap_types::pre_asap::expr_ir::ColumnRef;
     use asap_types::pre_asap::schema::DataType;
-    use asap_types::pre_asap::vocabulary::{Reduction, Source};
+
     use std::rc::Rc;
 
     fn scan() -> Rc<OperatorNode> {
@@ -1126,9 +1127,9 @@ mod tests {
     // ── multiple roots sharing a sub-DAG, via CandidateLogicalASAPDAGs ──────────────────
 
     use crate::replacement::search_workload;
+    use asap_types::ir::operator_properties::Reduction as QueryReduction;
     use asap_types::pre_asap::agg_intent::AggIntent;
     use asap_types::pre_asap::expr_ir::{CompareOpKind, ScalarValue};
-    use asap_types::pre_asap::vocabulary::Reduction as QueryReduction;
 
     /// Like `scan()`, plus a "job" label column to group by — CSE's
     /// sharing legality gate requires a provable unique key
@@ -1173,7 +1174,7 @@ mod tests {
     /// themselves structurally distinct (so they don't collapse into one
     /// root the way whole-root-identical fixtures do — see
     /// `shared_aggregate_across_two_roots_gets_both_strategies_candidates`'s
-    /// own doc) while letting `share_common_subtrees` unify their
+    /// own doc) while letting `share_common_subdags` unify their
     /// identical `sum_agg()` children onto one shared `Rc`.
     fn filtered_root(distinguishing_literal: i64) -> Rc<OperatorNode> {
         OperatorNode::non_asap_node(NonASAPOp::Filter {
@@ -1444,7 +1445,7 @@ mod tests {
             operator: BinaryOperator {
                 checked_relative_division: false,
                 checked_finite_division: false,
-                kind: asap_types::pre_asap::vocabulary::BinaryOpKind::Compare(CompareOpKind::Eq),
+                kind: asap_types::ir::operator_properties::BinaryOpKind::Compare(CompareOpKind::Eq),
                 vector_match: None,
             },
             return_bool: false,

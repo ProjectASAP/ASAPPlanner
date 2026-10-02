@@ -1,7 +1,7 @@
 //! Compile logical computation to native operators with typed external inputs.
 //! Compilation needs no readers; deployment resolves inputs after selection.
-use crate::operators::ReadoutQuery;
-use crate::summary_kernels::exact::ExactReadout;
+use crate::operators::SummaryEvaluation;
+use crate::summary_kernels::exact::ExactEvaluation;
 use crate::{
     operators::{Expression, Operator, Reduction, SortKey},
     plan::{Boundedness, Emission, NodeId, PhysicalDag, PhysicalOperator, PlanProperties},
@@ -13,7 +13,7 @@ use planner_types::ir::export::{
 };
 use planner_types::ir::{ASAPOp, NonASAPOp, Operator as LogicalOperator, OperatorNode, ScalarExpr};
 use planner_types::{
-    post_asap::{FieldDataType, SketchQuery, SummaryInputExpr},
+    post_asap::{FieldDataType, SketchStatistic, SummaryInputExpr},
     pre_asap::{
         AggIntent, ColumnRef, CompareOpKind, DataType, GroupKeys, Reduction as PlannerReduction,
     },
@@ -321,16 +321,16 @@ fn compile_internal(
                 )?;
                 continue;
             }
-            if let Payload::ReadPopulation { readout } = &node.payload {
+            if let Payload::EvaluatePopulation { evaluation } = &node.payload {
                 use planner_types::post_asap::maintained_population::{
-                    PopulationInput, PopulationReadout,
+                    PopulationInput, PopulationStatistic,
                 };
                 let [producer] = inputs.as_slice() else {
-                    return Err(invalid("population readout requires one input"));
+                    return Err(invalid("population evaluation requires one input"));
                 };
                 let Payload::MaintainPopulation { population } = &nodes[producer].payload else {
                     return Err(invalid(
-                        "population readout requires its declared population",
+                        "population evaluation requires its declared population",
                     ));
                 };
                 let PopulationInput::CurrentSeries(spec) = &population.input else {
@@ -342,9 +342,9 @@ fn compile_internal(
                     ));
                 }
                 let input = schemas[0].clone();
-                let PopulationReadout::TopK { k } = readout else {
+                let PopulationStatistic::TopK { k } = evaluation else {
                     let mut chain =
-                        row_values::population_aggregate(&input, &spec.grouping, readout)?;
+                        row_values::population_aggregate(&input, &spec.grouping, evaluation)?;
                     let last = chain.pop().expect("nonempty chain");
                     let mut inputs = inputs;
                     for operator in chain {
@@ -506,9 +506,9 @@ fn compile_internal(
             }
             if let Payload::FinalizeExactAccumulator = &node.payload {
                 // Exact counts read out as Int64; PromQL declares a Float64 sample.
-                let readout = bind_operation(node, &schemas)
+                let evaluation = bind_operation(node, &schemas)
                     .map_err(|error| invalid(format!("node {id}: {error}")))?;
-                let actual = readout.schema();
+                let actual = evaluation.schema();
                 let converted = actual.fields.iter().zip(&output.fields).position(|(a, d)| {
                     a.dtype == FieldDataType::Plain(DataType::Int64)
                         && d.dtype == FieldDataType::Plain(DataType::Float64)
@@ -531,8 +531,8 @@ fn compile_internal(
                         .collect();
                     let project =
                         Operator::project(actual, columns)?.with_output_schema(output.clone())?;
-                    graph.add(auxiliary, inputs, readout)?;
-                    if temporal_readout_drops_name(node) {
+                    graph.add(auxiliary, inputs, evaluation)?;
+                    if temporal_evaluation_drops_name(node) {
                         graph.add(auxiliary - 1, vec![auxiliary], project)?;
                         graph.add(
                             id,
@@ -548,7 +548,7 @@ fn compile_internal(
             }
             let mut operator = compile_node(node, &schemas)
                 .map_err(|error| invalid(format!("node {id}: {error}")))?;
-            if operator.is_counter_readout() {
+            if operator.is_counter_evaluation() {
                 let mut pending = vec![id];
                 let mut visited = BTreeSet::new();
                 let mut ranges = BTreeSet::new();
@@ -569,13 +569,13 @@ fn compile_internal(
                     pending.extend(dependencies.get(&ancestor).into_iter().flatten().copied());
                 }
                 if ranges.len() > 1 {
-                    return Err(invalid("counter readout has ambiguous logical windows"));
+                    return Err(invalid("counter evaluation has ambiguous logical windows"));
                 }
                 if let Some(lookback) = ranges.into_iter().next() {
                     operator = operator.with_counter_lookback(lookback)?;
                 }
             }
-            if temporal_readout_drops_name(node) {
+            if temporal_evaluation_drops_name(node) {
                 graph.add(auxiliary, inputs, operator)?;
                 graph.add(id, vec![auxiliary], Operator::series_without_name(output)?)?;
             } else {
@@ -587,9 +587,9 @@ fn compile_internal(
     Ok(graph)
 }
 
-// Temporal summary readouts produce PromQL vectors, whose range functions drop
+// Temporal summary evaluations produce PromQL vectors, whose range functions drop
 // the metric name before matching/filtering. Stored state retains its full identity.
-fn temporal_readout_drops_name(node: &PostAsapDagNode) -> bool {
+fn temporal_evaluation_drops_name(node: &PostAsapDagNode) -> bool {
     node.output_schema
         .fields
         .iter()
@@ -598,11 +598,11 @@ fn temporal_readout_drops_name(node: &PostAsapDagNode) -> bool {
             &node.payload,
             Payload::FinalizeExactAccumulator
                 | Payload::SummaryEstimate {
-                    query: SketchQuery::Quantile { .. }
-                        | SketchQuery::Cardinality
-                        | SketchQuery::PointCount { .. }
-                        | SketchQuery::FrequencyL2
-                        | SketchQuery::FrequencyEntropy
+                    query: SketchStatistic::Quantile { .. }
+                        | SketchStatistic::Cardinality
+                        | SketchStatistic::PointCount { .. }
+                        | SketchStatistic::FrequencyL2
+                        | SketchStatistic::FrequencyEntropy
                 }
         )
 }
@@ -732,14 +732,14 @@ fn bind_operation(node: &PostAsapDagNode, inputs: &[Schema]) -> Result<Operator,
                     E::Max => S::Max,
                     E::Rate => S::Rate,
                     E::Increase => S::Increase,
-                    _ => return Err(invalid("exact family readout is unsupported")),
+                    _ => return Err(invalid("exact family evaluation is unsupported")),
                 },
                 _ => return Err(invalid("exact finalization requires exact state")),
             };
-            Operator::readout(
+            Operator::evaluation(
                 input.clone(),
                 state,
-                ReadoutQuery::Exact(ExactReadout {
+                SummaryEvaluation::Exact(ExactEvaluation {
                     statistic,
                     lookback_ms: None,
                 }),
@@ -931,18 +931,18 @@ fn bind_operation(node: &PostAsapDagNode, inputs: &[Schema]) -> Result<Operator,
             )
         }
         Payload::SummaryEstimate { query } => {
-            if let SketchQuery::TopK { k } = query {
-                return Operator::keyed_readout(
+            if let SketchStatistic::TopK { k } = query {
+                return Operator::keyed_evaluation(
                     input.clone(),
                     summary_column(input)?,
                     *k,
                     Arc::new(node.output_schema.clone()),
                 );
             }
-            Operator::readout(
+            Operator::evaluation(
                 input.clone(),
                 summary_column(input)?,
-                ReadoutQuery::Sketch(query.clone()),
+                SummaryEvaluation::Sketch(query.clone()),
             )
         }
         _ => Err(invalid(

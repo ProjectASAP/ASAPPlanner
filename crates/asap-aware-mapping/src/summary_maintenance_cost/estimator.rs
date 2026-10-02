@@ -54,7 +54,7 @@ pub(super) fn estimate_heterogeneous_summary(
                         .ok_or(AnalyticalCostError::MissingComparisonScope(
                             "summary source coverage",
                         ))?;
-                if !is_retained_query(child, evidence)
+                if !has_retained_subdag_evidence(child, evidence)
                     || inputs.initial_input_rows != raw.planning_time_input_rows
                     || inputs.initial_input_bytes != raw.planning_time_input_bytes
                     || inputs.initial_source_scan_bytes != raw.planning_time_source_scan_bytes
@@ -79,7 +79,7 @@ pub(super) fn estimate_heterogeneous_summary(
                 }
             }
             None => {
-                if is_retained_query(child, evidence)
+                if has_retained_subdag_evidence(child, evidence)
                     || inputs.initial_source_scan_bytes != 0
                     || !node_evidence.bootstrap_read_identity.is_empty()
                 {
@@ -225,7 +225,7 @@ pub(super) fn estimate_heterogeneous_summary(
         if !seen.insert(physical_id) {
             return Ok(());
         }
-        if is_retained_query(node, evidence) {
+        if has_retained_subdag_evidence(node, evidence) {
             let retained = evidence
                 .retained_queries
                 .get(&(node as *const _))
@@ -279,7 +279,7 @@ pub(super) fn estimate_heterogeneous_summary(
             | Operator::ASAP(
                 ASAPOp::FinalizeExactAccumulator { .. }
                 | ASAPOp::MaintainPopulation { .. }
-                | ASAPOp::ReadPopulation { .. },
+                | ASAPOp::EvaluatePopulation { .. },
             ) => {
                 let operation = summary_operation_evidence(node, evidence)?.resource();
                 *cpu_ops += evaluation_count as f64
@@ -435,8 +435,8 @@ pub(super) fn estimate_heterogeneous_summary(
             Operator::ASAP(ASAPOp::SummaryEstimate { summary_input, .. }) => {
                 let operation = summary_operation_evidence(node, evidence)?.resource();
                 *cpu_ops += evaluation_count as f64
-                    * validated_operator_executions("summary_readout", operation)? as f64
-                    * validated_operator_cpu("summary_readout", operation.cpu_ops)?;
+                    * validated_operator_executions("summary_evaluation", operation)? as f64
+                    * validated_operator_cpu("summary_evaluation", operation.cpu_ops)?;
                 add_operator_io(io_bytes, operation, evaluation_count)?;
                 visit_ops(
                     summary_input,
@@ -623,7 +623,7 @@ fn validate_summary_edges_and_physical_ids(
             .map(|child| summary_physical_id(child, evidence))
             .collect::<Result<Vec<_>, _>>()?;
         let (id, inputs, output) = metadata(node, evidence)?;
-        let local_fingerprint = if is_retained_query(node, evidence) {
+        let local_fingerprint = if has_retained_subdag_evidence(node, evidence) {
             format!("{:?}", evidence.retained_queries.get(&(node as *const _)))
         } else {
             match &node.operator {
@@ -678,20 +678,20 @@ fn validate_summary_edges_and_physical_ids(
     .map(|_| ())
 }
 
-/// Whether `node` is a retained non-ASAP subtree costed as one unit: the
+/// Whether `node` is a retained non-ASAP sub-DAG costed as one unit: the
 /// provider bound retained-query evidence to it instead of per-operator
 /// evidence. Its children are then not visited.
-fn is_retained_query(node: &OperatorNode, evidence: &StreamingNodeEvidence) -> bool {
+fn has_retained_subdag_evidence(node: &OperatorNode, evidence: &StreamingNodeEvidence) -> bool {
     !node.is_asap() && evidence.retained_queries.contains_key(&(node as *const _))
 }
 
 /// The inputs the estimator visits below `node`: none for a retained
-/// subtree, every direct input otherwise.
+/// sub-DAG, every direct input otherwise.
 fn summary_children<'a>(
     node: &'a OperatorNode,
     evidence: &StreamingNodeEvidence,
 ) -> Vec<&'a OperatorNode> {
-    if is_retained_query(node, evidence) {
+    if has_retained_subdag_evidence(node, evidence) {
         vec![]
     } else {
         node.children()
@@ -705,7 +705,7 @@ fn summary_physical_id(
     node: &OperatorNode,
     evidence: &StreamingNodeEvidence,
 ) -> Result<String, AnalyticalCostError> {
-    if is_retained_query(node, evidence) {
+    if has_retained_subdag_evidence(node, evidence) {
         return evidence
             .retained_queries
             .get(&(node as *const _))
@@ -768,7 +768,7 @@ pub(super) fn estimate_transient_liveness(
         node: &OperatorNode,
         evidence: &StreamingNodeEvidence,
     ) -> Result<(u64, u64), AnalyticalCostError> {
-        if is_retained_query(node, evidence) {
+        if has_retained_subdag_evidence(node, evidence) {
             return evidence
                 .retained_queries
                 .get(&(node as *const _))
@@ -861,7 +861,7 @@ struct SummaryOperationCounts {
     merges_per_read: u64,
     subtracts_per_read: u64,
     deletes_per_update: u64,
-    readouts_per_read: u64,
+    evaluations_per_read: u64,
     joins_per_read: u64,
 }
 
@@ -930,10 +930,10 @@ pub(super) fn estimate_incremental_summary_maintenance_with_join(
             .checked_mul(fanout)
             .ok_or(AnalyticalCostError::Overflow)?
     };
-    let readout = required_cpu_when(
-        counts.readouts_per_read,
-        "readout_cpu_ops",
-        cpu.readout_cpu_ops,
+    let evaluation = required_cpu_when(
+        counts.evaluations_per_read,
+        "evaluation_cpu_ops",
+        cpu.evaluation_cpu_ops,
     )?;
     let join_cpu = match (counts.joins_per_read, join.as_ref()) {
         (0, _) => 0.0,
@@ -971,7 +971,7 @@ pub(super) fn estimate_incremental_summary_maintenance_with_join(
         + evaluations * counts.merges_per_read as f64 * instances * merge
         + evaluations * counts.subtracts_per_read as f64 * instances * subtract
         + delete_events as f64 * counts.deletes_per_update as f64 * delete
-        + evaluations * counts.readouts_per_read as f64 * instances * readout
+        + evaluations * counts.evaluations_per_read as f64 * instances * evaluation
         + evaluations * counts.joins_per_read as f64 * join_cpu;
     if !cpu_ops.is_finite() {
         return Err(AnalyticalCostError::Overflow);
@@ -1176,9 +1176,11 @@ fn count_operations(root: &OperatorNode) -> Result<SummaryOperationCounts, Analy
                     .checked_add(1)
                     .ok_or(AnalyticalCostError::Overflow)?;
             }
-            Operator::ASAP(ASAPOp::SummaryEstimate { .. }) => {
-                counts.readouts_per_read = counts
-                    .readouts_per_read
+            Operator::ASAP(
+                ASAPOp::SummaryEstimate { .. } | ASAPOp::FinalizeExactAccumulator { .. },
+            ) => {
+                counts.evaluations_per_read = counts
+                    .evaluations_per_read
                     .checked_add(1)
                     .ok_or(AnalyticalCostError::Overflow)?;
             }
@@ -1192,9 +1194,8 @@ fn count_operations(root: &OperatorNode) -> Result<SummaryOperationCounts, Analy
             // exact query-time operators add no summary operation.
             Operator::NonASAP(_)
             | Operator::ASAP(
-                ASAPOp::FinalizeExactAccumulator { .. }
-                | ASAPOp::MaintainPopulation { .. }
-                | ASAPOp::ReadPopulation { .. }
+                ASAPOp::MaintainPopulation { .. }
+                | ASAPOp::EvaluatePopulation { .. }
                 | ASAPOp::Extension { .. },
             ) => {}
         }

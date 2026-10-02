@@ -13,7 +13,7 @@ use asap_aware_mapping::{
     search_workload_with_targets, Proposals, ReplacementStrategy, ReplacementSubDAG, TargetSubDAG,
 };
 use asap_physical_operators::physical_planner::promql_rows::{
-    compile_current_series_readout, SERIES_IDENTITY_COLUMN,
+    compile_current_series_evaluation, SERIES_IDENTITY_COLUMN,
 };
 use planner_types::{
     post_asap::*,
@@ -35,7 +35,7 @@ impl AccuracyEvidenceProvider for Evidence {
         &self,
         op: &CompositionOperator,
         _: &FieldDataType,
-        _: Option<&SketchQuery>,
+        _: Option<&SketchStatistic>,
     ) -> PropagationStats {
         if matches!(op, CompositionOperator::TopKSelection) {
             PropagationStats {
@@ -163,9 +163,9 @@ fn added_alternatives(
 
 const CURRENT_SERIES_TOPK: &str = "topk by(job)(1, m)";
 
-// Instant-vector TopK lists finalized current-series heap readouts.
+// Instant-vector TopK lists finalized current-series heap evaluations.
 #[test]
-fn current_series_topk_lists_heap_readouts() {
+fn current_series_topk_lists_heap_evaluations() {
     let added = added_alternatives(CURRENT_SERIES_TOPK, AccuracyTarget::Epsilon(0.1));
     assert!(!added.is_empty());
     for root in added {
@@ -174,7 +174,7 @@ fn current_series_topk_lists_heap_readouts() {
             planner_types::ir::Operator::ASAP(planner_types::ir::ASAPOp::SummaryAgg { .. })
         ));
         assert!(
-            compile_current_series_readout(&root).is_ok(),
+            compile_current_series_evaluation(&root).is_ok(),
             "unbindable alternative {root:?}"
         );
     }

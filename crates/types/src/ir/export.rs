@@ -1,7 +1,7 @@
-//! Post-ASAP DAG export (wire version 6) over the unified operator IR.
+//! Post-ASAP DAG export (wire version 7) over the unified operator IR.
 //!
 //! One exported node per operator — relational operators included — with
-//! children as edges and no embedded subtrees. The input must already be
+//! children as edges and no embedded sub-DAGs. The input must already be
 //! timed ([`super::timing::apply_lifecycle_timings`]); export reads each
 //! node's timing and does not re-run data-state validation.
 
@@ -17,21 +17,21 @@ use super::node::{Operator, OperatorNode};
 use super::non_asap::{BinaryOperator, NonASAPOp, TimeRangeKind};
 use super::scalar::{ExprSemantics, Predicate, ProjectItem, ScalarExpr, SortKey};
 use super::timing::data_state;
+use crate::ir::operator_properties::{
+    ConcatDiscriminatorKey, GroupKeys, InfoMatcher, JoinKind, Reduction, RelationalSetOpKind,
+    SampleKind, Source, TimeShift, WindowFrame, WindowFuncKind,
+};
 use crate::post_asap::execution_data_state::{
     ExecutionDataState, ExecutionDataStateError, ExecutionTiming,
 };
 use crate::post_asap::guarantee::ResultGuarantee;
-use crate::post_asap::maintained_population::{MaintainedPopulation, PopulationReadout};
-use crate::post_asap::sketch::{GroupingStrategy, SketchQuery, SummaryUpdate};
+use crate::post_asap::maintained_population::{MaintainedPopulation, PopulationStatistic};
+use crate::post_asap::sketch::{GroupingStrategy, SketchStatistic, SummaryUpdate};
 use crate::pre_asap::agg_intent::AggIntent;
 use crate::pre_asap::expr_ir::{ArithmeticOpKind, CompareOpKind, ScalarValue};
 use crate::pre_asap::schema::{ColumnId, DataType, FieldDataType, Schema};
-use crate::pre_asap::vocabulary::{
-    ConcatDiscriminatorKey, GroupKeys, InfoMatcher, JoinKind, Reduction, RelationalSetOpKind,
-    SampleKind, Source, TimeShift, WindowFrame, WindowFuncKind,
-};
 
-pub const POST_ASAP_DAG_WIRE_VERSION: u32 = 6;
+pub const POST_ASAP_DAG_WIRE_VERSION: u32 = 7;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum EdgeRole {
@@ -550,14 +550,14 @@ pub enum PostAsapOperatorPayload {
         filter: Option<WirePredicate>,
     },
     SummaryEstimate {
-        query: SketchQuery,
+        query: SketchStatistic,
     },
     FinalizeExactAccumulator,
     MaintainPopulation {
         population: MaintainedPopulation,
     },
-    ReadPopulation {
-        readout: PopulationReadout,
+    EvaluatePopulation {
+        evaluation: PopulationStatistic,
     },
     SummaryMerge,
     SummarySubtract,
@@ -999,7 +999,7 @@ fn input_edges(operator: &Operator) -> Vec<(&Rc<OperatorNode>, EdgeRole)> {
             ASAPOp::SummaryAgg { child, .. }
             | ASAPOp::FinalizeExactAccumulator { child }
             | ASAPOp::MaintainPopulation { child, .. }
-            | ASAPOp::ReadPopulation { child, .. }
+            | ASAPOp::EvaluatePopulation { child, .. }
             | ASAPOp::Extension { child, .. } => vec![(child, EdgeRole::Input)],
             ASAPOp::SummaryEstimate { summary_input, .. }
             | ASAPOp::SummaryDelete { summary_input, .. } => {
@@ -1043,9 +1043,11 @@ fn payload_of(
                     population: population.clone(),
                 }
             }
-            ASAPOp::ReadPopulation { readout, .. } => PostAsapOperatorPayload::ReadPopulation {
-                readout: readout.clone(),
-            },
+            ASAPOp::EvaluatePopulation { evaluation, .. } => {
+                PostAsapOperatorPayload::EvaluatePopulation {
+                    evaluation: evaluation.clone(),
+                }
+            }
             ASAPOp::SummaryMerge { .. } => PostAsapOperatorPayload::SummaryMerge,
             ASAPOp::SummarySubtract { .. } => PostAsapOperatorPayload::SummarySubtract,
             ASAPOp::SummaryDelete { key, .. } => {
@@ -1175,7 +1177,7 @@ mod tests {
                 filter: None,
             },
             PostAsapOperatorPayload::SummaryEstimate {
-                query: SketchQuery::Cardinality,
+                query: SketchStatistic::Cardinality,
             },
             PostAsapOperatorPayload::FinalizeExactAccumulator,
             PostAsapOperatorPayload::MaintainPopulation {
@@ -1191,8 +1193,8 @@ mod tests {
                     quantiles: false,
                 },
             },
-            PostAsapOperatorPayload::ReadPopulation {
-                readout: PopulationReadout::Count,
+            PostAsapOperatorPayload::EvaluatePopulation {
+                evaluation: PopulationStatistic::Count,
             },
             PostAsapOperatorPayload::SummaryMerge,
             PostAsapOperatorPayload::SummarySubtract,
@@ -1209,7 +1211,7 @@ mod tests {
                 PostAsapOperatorPayload::Relational { .. }
                 | PostAsapOperatorPayload::SummaryEstimate { .. }
                 | PostAsapOperatorPayload::FinalizeExactAccumulator
-                | PostAsapOperatorPayload::ReadPopulation { .. }
+                | PostAsapOperatorPayload::EvaluatePopulation { .. }
                 | PostAsapOperatorPayload::Extension { .. } => DataPrimitive::Raw,
                 PostAsapOperatorPayload::SummaryAgg { .. }
                 | PostAsapOperatorPayload::MaintainPopulation { .. }
@@ -1535,7 +1537,7 @@ mod tests {
     fn wire_5_document_is_rejected() {
         let root = timed(&finalize(sum_agg(value_scan())));
         let document = PostAsapDagDocument::new(compile_post_asap_dag(&root).unwrap());
-        assert_eq!(document.schema_version, 6);
+        assert_eq!(document.schema_version, 7);
         let mut wire = serde_json::to_value(&document).unwrap();
         wire["schema_version"] = serde_json::json!(5);
         let old: PostAsapDagDocument = serde_json::from_value(wire).unwrap();

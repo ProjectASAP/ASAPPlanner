@@ -2,14 +2,14 @@
 //! #223).
 //!
 //! Drives the full staged pipeline this issue lands: two independently
-//! lowered `OperatorNode` DAGs → `share_common_subtrees` (stage 1,
+//! lowered `OperatorNode` DAGs → `share_common_subdags` (stage 1,
 //! `asap-types::ir::cse`, run internally by `search_workload`) →
 //! `search_workload` (stage 2, `asap-aware-mapping`) — and asserts the
 //! sharing that stage 1 decides survives into stage 2's discovered
 //! `CandidateLogicalASAPDAGs` as one genuinely shared `TargetSubDAGCandidates`, not just one shared
 //! `Rc<OperatorNode>`. This is the "real caller" the issue's landing plan
-//! requires before `share_common_subtrees` is allowed to exist at all (its
-//! predecessor, `asap-plan::cse::dedupe_subtrees`, was deleted in #192 for
+//! requires before `share_common_subdags` is allowed to exist at all (its
+//! predecessor, `asap-plan::cse::dedupe_sub-DAGs`, was deleted in #192 for
 //! being unwired dead code).
 //!
 //! Committing to one final, physically-materialized answer for a whole
@@ -32,7 +32,7 @@ use asap_types::types::AccuracyTarget;
 /// Two workload entries that happen to submit the exact same query (a
 /// realistic case — two dashboards, or a query fired both standalone and as
 /// part of a larger batch) collapse onto one shared `Rc<OperatorNode>` after
-/// `search_workload`'s internal `share_common_subtrees` pass, and onto one
+/// `search_workload`'s internal `share_common_subdags` pass, and onto one
 /// genuinely-shared [`TargetSubDAGCandidates`](asap_aware_mapping::TargetSubDAGCandidates) — carrying
 /// every candidate discovered for it exactly once, not once per root — no
 /// second structural-equality pass at the post-ASAP layer needed for this
@@ -40,7 +40,7 @@ use asap_types::types::AccuracyTarget;
 #[test]
 fn duplicate_workload_queries_collapse_onto_one_memo_group() {
     // Grouped (`by (job)`), so the shared `Aggregate`'s output schema carries
-    // a provable unique key — the legality gate `share_common_subtrees`
+    // a provable unique key — the legality gate `share_common_subdags`
     // enforces (see `asap-types::ir::cse`'s module doc) — and its
     // `ExactAggregate(Sum)` realization is deterministic regardless of the
     // accuracy target, so this pins the sharing mechanism itself rather than
@@ -60,7 +60,7 @@ fn duplicate_workload_queries_collapse_onto_one_memo_group() {
     let space = search_workload(vec![("a", a), ("b", b)]);
 
     // roots[0] and roots[1] must have merged onto the same Rc — the
-    // `share_common_subtrees` pass `search_workload` runs internally.
+    // `share_common_subdags` pass `search_workload` runs internally.
     assert!(
         Rc::ptr_eq(&space.roots[0].1, &space.roots[1].1),
         "search_workload must collapse the two identical roots onto one Rc<OperatorNode>"
@@ -68,7 +68,7 @@ fn duplicate_workload_queries_collapse_onto_one_memo_group() {
 
     // The single shared root is one discovered TargetSubDAG, holding one
     // TargetSubDAGCandidates with consumer_count 2 — SketchAlgorithmStrategy's one
-    // ExactAggregate candidate *and* SharedSubtreeStrategy's share-vs-
+    // ExactAggregate candidate *and* SharedSubDagStrategy's share-vs-
     // recompute pair, exactly as `shared_aggregate_across_two_roots_gets_both_strategies_candidates`
     // (asap-aware-mapping::replacement's own equivalent, internal test)
     // pins for the same fixture shape.
@@ -88,12 +88,12 @@ fn duplicate_workload_queries_collapse_onto_one_memo_group() {
     let summary_count = group
         .candidates
         .iter()
-        .filter(|c| matches!(&c.replacement, Replacement::Subtree(n) if n.contains_asap()))
+        .filter(|c| matches!(&c.replacement, Replacement::SubDag(n) if n.contains_asap()))
         .count();
     let rewrite_count = group
         .candidates
         .iter()
-        .filter(|c| matches!(&c.replacement, Replacement::Subtree(n) if is_logical_rewrite(n)))
+        .filter(|c| matches!(&c.replacement, Replacement::SubDag(n) if is_logical_rewrite(n)))
         .count();
     assert_eq!(summary_count, 1);
     assert_eq!(rewrite_count, 2);
@@ -103,11 +103,11 @@ fn duplicate_workload_queries_collapse_onto_one_memo_group() {
     // prevent): one shares the group's own target `Rc`, the other is a
     // structurally-identical but independently-built `Rc`.
     let one_is_the_target = group.candidates.iter().any(|c| {
-        matches!(&c.replacement, Replacement::Subtree(rc)
+        matches!(&c.replacement, Replacement::SubDag(rc)
             if is_logical_rewrite(rc) && Rc::ptr_eq(rc, &group.target))
     });
     let one_is_not = group.candidates.iter().any(|c| {
-        matches!(&c.replacement, Replacement::Subtree(rc)
+        matches!(&c.replacement, Replacement::SubDag(rc)
             if is_logical_rewrite(rc) && !Rc::ptr_eq(rc, &group.target))
     });
     assert!(one_is_the_target && one_is_not);
@@ -145,7 +145,7 @@ fn distinct_workload_queries_get_independent_memo_groups() {
 /// Single-query CSE (a repeated sub-expression within one query) also
 /// survives through `search_workload`: the two grouped-`Aggregate` branches
 /// of a `BinaryOp` collapse to one shared `Rc<OperatorNode>` in the internal
-/// `share_common_subtrees` pass, and to one shared `TargetSubDAGCandidates` (with
+/// `share_common_subdags` pass, and to one shared `TargetSubDAGCandidates` (with
 /// `consumer_count == 2`, one per branch) here.
 #[test]
 fn single_query_repeated_subexpression_shares_one_memo_group() {

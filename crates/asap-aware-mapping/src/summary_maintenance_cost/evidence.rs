@@ -122,7 +122,7 @@ pub struct SummaryOperationCpuEvidence {
     pub delete_events_per_second: Option<f64>,
     /// Concrete state instances touched by one delete event.
     pub delete_routing_fanout: Option<u64>,
-    pub readout_cpu_ops: Option<f64>,
+    pub evaluation_cpu_ops: Option<f64>,
 }
 
 /// Physical evidence for one `SummaryJoin` implementation. Total work,
@@ -173,7 +173,7 @@ pub struct SummaryOperatorResourceEvidence {
 }
 
 /// Evidence is structured by logical summary operation so delete-only facts
-/// cannot be attached to merge, subtract, or readout nodes.
+/// cannot be attached to merge, subtract, or evaluation nodes.
 #[derive(Debug, Clone, PartialEq)]
 pub enum StreamingSummaryOperatorEvidence {
     /// Exact query-time arithmetic over two independently realized operands.
@@ -189,7 +189,7 @@ pub enum StreamingSummaryOperatorEvidence {
         events_per_second: f64,
         routing_fanout: u64,
     },
-    Readout(SummaryOperatorResourceEvidence),
+    Evaluation(SummaryOperatorResourceEvidence),
 }
 
 impl StreamingSummaryOperatorEvidence {
@@ -200,7 +200,7 @@ impl StreamingSummaryOperatorEvidence {
             | Self::Merge(resource)
             | Self::Subtract(resource)
             | Self::Delete { resource, .. }
-            | Self::Readout(resource) => resource,
+            | Self::Evaluation(resource) => resource,
         }
     }
 
@@ -212,12 +212,12 @@ impl StreamingSummaryOperatorEvidence {
             | Self::Merge(resource)
             | Self::Subtract(resource)
             | Self::Delete { resource, .. }
-            | Self::Readout(resource) => resource,
+            | Self::Evaluation(resource) => resource,
         }
     }
 }
 
-/// Non-aggregation work for a retained pre-ASAP subtree over the comparison
+/// Non-aggregation work for a retained pre-ASAP sub-DAG over the comparison
 /// horizon. Bootstrap/source I/O belongs exclusively to the owning aggregate,
 /// and summary insertion belongs exclusively to its insert evidence.
 #[derive(Debug, Clone, PartialEq)]
@@ -311,7 +311,7 @@ pub(super) fn summary_operation_evidence<'a>(
             | Operator::ASAP(
                 ASAPOp::FinalizeExactAccumulator { .. }
                 | ASAPOp::MaintainPopulation { .. }
-                | ASAPOp::ReadPopulation { .. },
+                | ASAPOp::EvaluatePopulation { .. },
             ),
             StreamingSummaryOperatorEvidence::ValueOperation(_),
         ) => true,
@@ -329,7 +329,7 @@ pub(super) fn summary_operation_evidence<'a>(
         )
         | (
             Operator::ASAP(ASAPOp::SummaryEstimate { .. }),
-            StreamingSummaryOperatorEvidence::Readout(_),
+            StreamingSummaryOperatorEvidence::Evaluation(_),
         ) => true,
         _ => false,
     };

@@ -17,7 +17,7 @@
 //! incrementally. Unknown evidence stays unknown and therefore cannot make a
 //! long-lived alternative win.
 
-use asap_types::ir::cse::share_common_subtrees;
+use asap_types::ir::cse::share_common_subdags;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
@@ -239,7 +239,7 @@ impl SummaryMaintenanceLifecyclePlan {
     ///
     /// A retained (non-`Ephemeral`) state outlives one query, so it and every
     /// input it consumes run at ingestion time. Every other node runs at query
-    /// time: readouts and consumers of retained state, and each `Ephemeral`
+    /// time: evaluations and consumers of retained state, and each `Ephemeral`
     /// state not consumed by retained state together with its inputs, whose
     /// raw data the deployment must supply as a query source. This applies to
     /// maintained populations as to `SummaryAgg` states; a population feeding
@@ -792,7 +792,7 @@ pub fn global_selection_with_summary_maintenance_lifecycles<'a, Id>(
         for candidate in &group.candidates {
             // Only summary realizations carry a maintenance lifecycle; a
             // logical rewrite or CSE share/recompute candidate does not.
-            let Replacement::Subtree(summary) = &candidate.replacement else {
+            let Replacement::SubDag(summary) = &candidate.replacement else {
                 continue;
             };
             if candidate.provenance != ReplacementProvenance::SummaryRealization {
@@ -834,7 +834,7 @@ pub fn global_selection_with_summary_maintenance_lifecycles<'a, Id>(
     // Intern every member once; members whose outermost state (the
     // `SummaryAgg` every other state of the candidate feeds) interns to the
     // same node share it. Classes are kept in first-member order.
-    let interned = share_common_subtrees(
+    let interned = share_common_subdags(
         members
             .iter()
             .enumerate()
@@ -1506,7 +1506,7 @@ fn collect_states(
 
 /// Maintained populations that are not an input of any `SummaryAgg`. A
 /// population feeding summary state is on that state's maintenance path, so
-/// that state's lifecycle times it, even when a readout also reads it directly.
+/// that state's lifecycle times it, even when a evaluation also reads it directly.
 fn standalone_populations(root: &Rc<OperatorNode>) -> Vec<Rc<OperatorNode>> {
     let mut summaries = Vec::new();
     collect_states(
@@ -2071,7 +2071,7 @@ mod tests {
     }
 
     /// The sketch algorithm of the first `SummaryAgg` reachable from `node`
-    /// (through a readout or any relational operator kept above it).
+    /// (through a evaluation or any relational operator kept above it).
     fn sketch_algorithm(node: &OperatorNode) -> Option<SketchAlgorithm> {
         if let Operator::ASAP(ASAPOp::SummaryAgg {
             family: FieldDataType::Sketch(kind, _),
@@ -3265,8 +3265,8 @@ mod tests {
     fn enumeration_lists_each_unique_summary_state_once() {
         let shared = summary();
         let root = test_binary(
-            test_binary(readout(&shared), readout(&shared)),
-            readout(&summary()),
+            test_binary(evaluation(&shared), evaluation(&shared)),
+            evaluation(&summary()),
         );
         let workload = workload(vec![batch(Predictability::AdHoc)], vec![], at_rest());
         let candidates = enumerate_summary_maintenance_lifecycles(
@@ -3291,7 +3291,7 @@ mod tests {
             .any(|deployment| Rc::ptr_eq(&deployment.summary, &shared)));
     }
 
-    fn readout(state: &Rc<OperatorNode>) -> Rc<OperatorNode> {
+    fn evaluation(state: &Rc<OperatorNode>) -> Rc<OperatorNode> {
         OperatorNode::asap_node(
             ASAPOp::FinalizeExactAccumulator {
                 child: Rc::clone(state),
@@ -3382,7 +3382,7 @@ mod tests {
                     PostAsapOperatorPayload::Relational { .. } => "raw",
                     PostAsapOperatorPayload::SummaryAgg { .. } => "state",
                     PostAsapOperatorPayload::FinalizeExactAccumulator
-                    | PostAsapOperatorPayload::ReadPopulation { .. } => "readout",
+                    | PostAsapOperatorPayload::EvaluatePopulation { .. } => "evaluation",
 
                     _ => "other",
                 };
@@ -3395,7 +3395,7 @@ mod tests {
     const QUERY: ExecutionTiming = ExecutionTiming::QueryTime;
 
     // Every retained lifecycle kind runs its state and inputs at ingestion
-    // time and its readout at query time.
+    // time and its evaluation at query time.
     #[test]
     fn retained_lifecycles_time_state_and_inputs_at_ingestion() {
         let mut scheduled = batch(Predictability::Predictable {
@@ -3435,7 +3435,7 @@ mod tests {
         ];
         for (workload, data, horizon, kind) in cases {
             let dag = timed_dag(
-                readout(&summary()),
+                evaluation(&summary()),
                 &workload,
                 &data,
                 horizon,
@@ -3443,21 +3443,21 @@ mod tests {
             );
             assert_eq!(
                 timings(&dag),
-                [("raw", INGEST), ("state", INGEST), ("readout", QUERY)]
+                [("raw", INGEST), ("state", INGEST), ("evaluation", QUERY)]
             );
         }
     }
 
-    // An Ephemeral state, its raw input, and its readout all run at query time.
+    // An Ephemeral state, its raw input, and its evaluation all run at query time.
     #[test]
     fn ephemeral_lifecycle_times_state_and_downstream_at_query() {
         let workload = workload(vec![batch(Predictability::AdHoc)], vec![], at_rest());
-        let dag = timed_dag(readout(&summary()), &workload, &at_rest(), None, |_| {
+        let dag = timed_dag(evaluation(&summary()), &workload, &at_rest(), None, |_| {
             SummaryMaintenanceLifecycle::Ephemeral
         });
         assert_eq!(
             timings(&dag),
-            [("raw", QUERY), ("state", QUERY), ("readout", QUERY)]
+            [("raw", QUERY), ("state", QUERY), ("evaluation", QUERY)]
         );
     }
 
@@ -3466,7 +3466,7 @@ mod tests {
     #[test]
     fn shared_state_is_timed_once_for_all_consumers() {
         let state = summary();
-        let lhs = readout(&state);
+        let lhs = evaluation(&state);
         let rhs = Rc::new(lhs.as_ref().clone());
         let root = test_binary(lhs, rhs);
         let data = continuous(1_000, 60_000);
@@ -3480,8 +3480,8 @@ mod tests {
             [
                 ("raw", INGEST),
                 ("state", INGEST),
-                ("readout", QUERY),
-                ("readout", QUERY),
+                ("evaluation", QUERY),
+                ("evaluation", QUERY),
                 ("binary", QUERY),
             ]
         );
@@ -3526,7 +3526,7 @@ mod tests {
         let data = at_rest();
         let demand = WorkloadDemand::new_with_data(&workload, &data, &[0]);
         let plan = plan_summary_maintenance_lifecycles(
-            readout(&summary()),
+            evaluation(&summary()),
             demand,
             1_000,
             None,
@@ -3556,7 +3556,7 @@ mod tests {
     }
 
     /// A strategy-built `sum(a)` over one maintained current-series population.
-    fn population_readout() -> Rc<OperatorNode> {
+    fn population_evaluation() -> Rc<OperatorNode> {
         let target = crate::test_support::lower_promql("sum(a)", AccuracyTarget::Exact);
         crate::maintained_population::MaintainedPopulationStrategy::new(std::slice::from_ref(
             &target,
@@ -3590,7 +3590,7 @@ mod tests {
         let data = continuous(1_000, 60_000);
         let workload = workload(vec![], vec![repeating()], data.clone());
         let candidates = enumerate_summary_maintenance_lifecycles(
-            population_readout(),
+            population_evaluation(),
             WorkloadDemand::new_with_data(&workload, &data, &[0]),
             1_000,
             Some(Horizon(10.0)),
@@ -3628,7 +3628,7 @@ mod tests {
         let data = continuous(1_000, 60_000);
         let workload = workload(vec![], vec![repeating()], data.clone());
         let plan = plan_summary_maintenance_lifecycles(
-            population_readout(),
+            population_evaluation(),
             WorkloadDemand::new_with_data(&workload, &data, &[0]),
             1_000,
             Some(Horizon(10.0)),
@@ -3658,7 +3658,7 @@ mod tests {
         let workload = workload(vec![], vec![repeating()], data.clone());
         let timed = |lifecycle: SummaryMaintenanceLifecycle| {
             population_timings(&timed_dag(
-                population_readout(),
+                population_evaluation(),
                 &workload,
                 &data,
                 Some(Horizon(10.0)),
@@ -3671,7 +3671,7 @@ mod tests {
                 ("raw", INGEST),
                 ("raw", INGEST),
                 ("population", INGEST),
-                ("readout", QUERY)
+                ("evaluation", QUERY)
             ]
         );
         assert_eq!(
@@ -3680,7 +3680,7 @@ mod tests {
                 ("raw", QUERY),
                 ("raw", QUERY),
                 ("population", QUERY),
-                ("readout", QUERY)
+                ("evaluation", QUERY)
             ]
         );
     }
@@ -3693,7 +3693,7 @@ mod tests {
         let data = continuous(1_000, 60_000);
         let workload = workload(vec![], vec![repeating()], data.clone());
         let plan = plan_summary_maintenance_lifecycles(
-            population_readout(),
+            population_evaluation(),
             WorkloadDemand::new_with_data(&workload, &data, &[0]),
             1_000,
             Some(Horizon(10.0)),
@@ -3712,7 +3712,7 @@ mod tests {
                 ("raw", INGEST),
                 ("raw", INGEST),
                 ("population", INGEST),
-                ("readout", QUERY)
+                ("evaluation", QUERY)
             ]
         );
     }
@@ -3721,9 +3721,9 @@ mod tests {
     // deployment: the state's lifecycle times it.
     #[test]
     fn population_feeding_summary_state_follows_that_state() {
-        let Operator::ASAP(ASAPOp::ReadPopulation {
+        let Operator::ASAP(ASAPOp::EvaluatePopulation {
             child: population, ..
-        }) = &population_readout().operator
+        }) = &population_evaluation().operator
         else {
             unreachable!()
         };
@@ -3753,7 +3753,7 @@ mod tests {
         let workload = workload(vec![], vec![repeating()], data.clone());
         let timed = |lifecycle: SummaryMaintenanceLifecycle| {
             population_timings(&timed_dag(
-                readout(&state),
+                evaluation(&state),
                 &workload,
                 &data,
                 Some(Horizon(10.0)),
@@ -3770,7 +3770,7 @@ mod tests {
                 ("raw", INGEST),
                 ("population", INGEST),
                 ("state", INGEST),
-                ("readout", QUERY)
+                ("evaluation", QUERY)
             ]
         );
         assert_eq!(
@@ -3780,7 +3780,7 @@ mod tests {
                 ("raw", QUERY),
                 ("population", QUERY),
                 ("state", QUERY),
-                ("readout", QUERY)
+                ("evaluation", QUERY)
             ]
         );
     }
@@ -3790,8 +3790,8 @@ mod tests {
     // timed by the state's lifecycle.
     #[test]
     fn shared_population_follows_its_summary_consumer() {
-        let direct = population_readout();
-        let Operator::ASAP(ASAPOp::ReadPopulation {
+        let direct = population_evaluation();
+        let Operator::ASAP(ASAPOp::EvaluatePopulation {
             child: population, ..
         }) = &direct.operator
         else {
@@ -3823,8 +3823,8 @@ mod tests {
         let data = continuous(1_000, 60_000);
         let workload = workload(vec![], vec![repeating()], data.clone());
         for root in [
-            binary(Rc::clone(&direct), readout(&state)),
-            binary(readout(&state), Rc::clone(&direct)),
+            binary(Rc::clone(&direct), evaluation(&state)),
+            binary(evaluation(&state), Rc::clone(&direct)),
         ] {
             for lifecycle in [
                 SummaryMaintenanceLifecycle::ContinuouslyMaintained,
@@ -3863,7 +3863,7 @@ mod tests {
         let data = continuous(1_000, 60_000);
         let workload = workload(vec![], vec![repeating()], data.clone());
         let mut plan = plan_summary_maintenance_lifecycles(
-            population_readout(),
+            population_evaluation(),
             WorkloadDemand::new_with_data(&workload, &data, &[0]),
             1_000,
             Some(Horizon(10.0)),

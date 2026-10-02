@@ -19,7 +19,7 @@
 //! 2. **Build**: for each candidate in that list, [`construct_summary`]
 //!    mechanically turns the already-decided `(kind, params)` into a real
 //!    [`OperatorNode`] — derives the child schema, resolves the summarized
-//!    column, builds the readout query, recurses into the child (via
+//!    column, builds the evaluation query, recurses into the child (via
 //!    [`realize_child`], so a nested aggregate gets its own
 //!    independent enumeration, never the outer target's forced choice), and
 //!    assembles the `SummaryAgg`/`SummaryEstimate` node.
@@ -34,10 +34,10 @@
 //! - [`TargetSubDAG`] — a reference to a pre-ASAP [`OperatorNode`] that is a
 //!   candidate for replacement, plus how many places in the workload already
 //!   reference it (its `consumer_count`) — the one piece of cross-node
-//!   context [`SharedSubtreeStrategy`] needs that a bare node reference alone
+//!   context [`SharedSubDagStrategy`] needs that a bare node reference alone
 //!   doesn't carry.
 //! - [`ReplacementSubDAG`] — one candidate replacement for a `TargetSubDAG`:
-//!   either a fully bound summary subtree or a pre-ASAP logical rewrite
+//!   either a fully bound summary sub-DAG or a pre-ASAP logical rewrite
 //!   (still logical, structurally different from the target but semantically
 //!   equivalent) — see [`Replacement`] — plus a human-readable `rationale`.
 //! - [`ReplacementStrategy`] — `matches` + `replacements`, the same
@@ -76,16 +76,16 @@
 //!   ranked list directly: for the same bindable-`Aggregate` shape this crate
 //!   binds (single intent, no `HAVING`), every entry becomes its own bound
 //!   candidate.
-//! - [`SharedSubtreeStrategy`] wraps
-//!   `asap_types::pre_asap::cse::share_common_subtrees`'s sharing decision.
+//! - [`SharedSubDagStrategy`] wraps
+//!   `asap_types::pre_asap::cse::share_common_subdags`'s sharing decision.
 //!   Wherever a [`TargetSubDAG`] already has two or more consumers (i.e.
-//!   `share_common_subtrees` already collapsed two or more workload
+//!   `share_common_subdags` already collapsed two or more workload
 //!   locations onto the same `Rc<OperatorNode>` — [`discover_targets`] below
 //!   does the identical workload-wide discovery for [`search_workload_with`];
 //!   this module's own tests reuse the same dedup logic to build realistic
 //!   fixtures), it reports the two-way candidate CSE's own detection pass
 //!   deliberately declines to pick between on its own: build once and share
-//!   the already-interned subtree, or build it independently at each
+//!   the already-interned sub-DAG, or build it independently at each
 //!   consumer. [`crate::cost_model::CostModel::cse_share_decision`] is where
 //!   that choice actually gets made *today* (a fixed comparison, not a
 //!   search) — this strategy exposes the same two-way choice as an explicit,
@@ -136,15 +136,15 @@
 //! ```
 //!
 //! Read literally, this enumerates whole *plans* — full copies of the
-//! workload's tree, one per combination of per-target choices. A workload
+//! workload's DAG, one per combination of per-target choices. A workload
 //! with `N` independently-choosable targets would produce up to `2^N` flat
-//! plans, each one duplicating every untouched sibling subtree. This module
+//! plans, each one duplicating every untouched sibling sub-DAG. This module
 //! does not do that:
 //!
 //! 1. **Per-target candidates, not flat plans.** [`TargetSubDAGCandidates`]
 //!    stores the alternatives for one distinct [`TargetSubDAG`] (identified by
 //!    its own `Rc<OperatorNode>` pointer identity — the same currency
-//!    [`asap_types::pre_asap::cse::share_common_subtrees`] already
+//!    [`asap_types::pre_asap::cse::share_common_subdags`] already
 //!    established across the workload) holding every
 //!    [`ReplacementSubDAG`] alternative discovered for it. [`CandidateLogicalASAPDAGs`] is
 //!    a collection of these groups, keyed by `TargetSubDAG` — a candidate
@@ -175,12 +175,12 @@
 //! line above stands for: every `TargetSubDAG` this pass discovers is one
 //! iteration of that loop. It walks every workload root's whole DAG (the
 //! same **relational-skeleton** operator-child scope
-//! `asap_types::pre_asap::cse::share_common_subtrees` itself uses — see
+//! `asap_types::pre_asap::cse::share_common_subdags` itself uses — see
 //! that module's "Algorithm" section), discovering one `TargetSubDAG` per
 //! distinct `Rc` and a *real* `consumer_count`: how many operator-child
 //! positions anywhere in the workload reference that exact `Rc`, not just
 //! how many of the workload's own top-level roots happen to be it — a
-//! `SharedSubtreeStrategy` candidate three levels under an unshared
+//! `SharedSubDagStrategy` candidate three levels under an unshared
 //! `Filter` is exactly as real a target as a shared whole root, so this
 //! module's discovery can't stop at the top level.
 //!
@@ -213,9 +213,9 @@
 //! own; see [`discover_new_descendant_targets`]) are scanned for pointers
 //! not already known, and any found become next round's frontier. Both shipped
 //! strategies are idempotent in exactly this sense: [`SketchAlgorithmStrategy`]
-//! produces terminal bound-summary [`Replacement::Subtree`] candidates (no
-//! logical-rewrite children to scan at all), and [`SharedSubtreeStrategy`]'s
-//! two logical-rewrite [`Replacement::Subtree`] candidates both reuse the target's own
+//! produces terminal bound-summary [`Replacement::SubDag`] candidates (no
+//! logical-rewrite children to scan at all), and [`SharedSubDagStrategy`]'s
+//! two logical-rewrite [`Replacement::SubDag`] candidates both reuse the target's own
 //! already-known child `Rc`s verbatim (`Rc::clone`/a shallow top-level
 //! `.clone()` — see that strategy's own doc). So for both, the frontier is
 //! always empty after round one: real workloads converge in exactly one
@@ -244,7 +244,7 @@
 //! being the whole story; it isn't a contradiction of #237, it's the scope
 //! change #237 itself named). Concretely, per [`TargetSubDAGCandidates`]:
 //!
-//! - A group whose candidates are the [`SharedSubtreeStrategy`]
+//! - A group whose candidates are the [`SharedSubDagStrategy`]
 //!   share-vs-recompute pair is ranked by calling
 //!   [`CostModel::cse_share_decision`] via this module's own
 //!   [`cse_preference`] — rather than re-deriving a competing comparison.
@@ -265,9 +265,9 @@
 //! interact — which both shipped strategies' one-round convergence (see
 //! "Termination" above) makes the common case — but it's the wrong answer
 //! whenever they do. Concretely: [`CostModel::cse_share_decision`] costs a
-//! [`SharedSubtreeStrategy`] group by comparing a `consumer_count`-scaled
+//! [`SharedSubDagStrategy`] group by comparing a `consumer_count`-scaled
 //! recompute cost against a fixed maintenance cost — but a **nested**
-//! `SharedSubtreeStrategy` group's *true* recompute burden isn't its own
+//! `SharedSubDagStrategy` group's *true* recompute burden isn't its own
 //! raw [`TargetSubDAGCandidates::consumer_count`] (how many operator-child positions
 //! directly reference it) whenever an ancestor on the path to it is
 //! *itself* being recomputed independently rather than shared: recomputing
@@ -285,7 +285,7 @@
 //! from *already-decided* ancestors). For every site it computes the
 //! **effective consumer count** — how many times that site actually runs
 //! once every ancestor's own selected candidate is accounted for — and, for
-//! every [`SharedSubtreeStrategy`]-shaped group, re-decides
+//! every [`SharedSubDagStrategy`]-shaped group, re-decides
 //! [`CostModel::cse_share_decision`] against *that* corrected count instead
 //! of the group's raw structural one. When that group also contains a
 //! non-CSE alternative such as a semantic rewrite, the chosen CSE candidate
@@ -296,7 +296,7 @@
 //! multiplicity to exactly `1` for everything beneath it (one shared
 //! execution backs every use of it); a group that chooses
 //! `RecomputeIndependently` — or has no Share/Recompute decision of its own
-//! at all, i.e. isn't itself a `SharedSubtreeStrategy` shape — passes its
+//! at all, i.e. isn't itself a `SharedSubDagStrategy` shape — passes its
 //! *own* effective count straight through to whatever it references,
 //! transitively composing contributions from every ancestor on the path,
 //! not just the immediate parent.
@@ -330,10 +330,10 @@
 //!   groups included.
 //! - This is not an exhaustive search over combinations of choices for a
 //!   provably-global optimum in every case. [`CostModel::cse_share_decision`]
-//!   is still a *local*, pairwise comparison at each `SharedSubtreeStrategy`
+//!   is still a *local*, pairwise comparison at each `SharedSubDagStrategy`
 //!   site (recompute-total vs. one fixed maintenance cost) — this module
 //!   just now feeds it a *correct* input instead of an *incorrect* one. Two
-//!   sibling `SharedSubtreeStrategy` groups that could trade off against
+//!   sibling `SharedSubDagStrategy` groups that could trade off against
 //!   each other under some shared resource budget (memory, say) still
 //!   aren't jointly optimized here — this crate has no
 //!   cardinality/statistics estimation to bound a combinatorial search like
@@ -350,8 +350,10 @@ use asap_types::pre_asap::resolve_column_ref;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet, VecDeque};
 
-use asap_types::ir::cse::{share_common_subtrees, structural_hash, HashCache};
+use asap_types::ir::cse::{share_common_subdags, structural_hash, HashCache};
+use asap_types::ir::operator_properties::{BinaryOpKind, JoinKind, Reduction};
 use asap_types::ir::timing::validate_default;
+use asap_types::ir::QueryExprError;
 use asap_types::ir::{
     ASAPOp, BinaryOperator, NonASAPOp, Operator, OperatorNode, Predicate, ProjectItem, ScalarExpr,
     SortKey,
@@ -361,13 +363,12 @@ use asap_types::post_asap::{
     EntityIdentity, ExactKind, ExactOperationSchemaError, ExactParams, ExecutionDataStateError,
     ExecutionTiming, Field, FieldDataType, GroupingStrategy, NonNegativeWeightProof, SamplingKind,
     SamplingParams, Schema, SketchAlgorithm, SketchKind, SketchParams,
-    SketchQuery as PostAsapSketchQuery, StatModelKind, StatModelParams, SummaryInputExpr,
+    SketchStatistic as PostAsapSketchStatistic, StatModelKind, StatModelParams, SummaryInputExpr,
     SummaryUpdate, WaveletKind, WaveletParams, WeightDomain,
 };
 use asap_types::pre_asap::agg_intent::{agg_is_mergeable, AggIntent};
 use asap_types::pre_asap::expr_ir::{ArithmeticOpKind, ColumnRef};
 use asap_types::pre_asap::schema::ColumnId;
-use asap_types::pre_asap::vocabulary::{BinaryOpKind, JoinKind, QueryExprError, Reduction};
 use asap_types::types::AccuracyTarget;
 use asap_types::workload::{DataWorkload, QueryRecurrence, QueryWorkload, RepeatedDemand};
 use std::rc::{Rc, Weak};
@@ -395,7 +396,7 @@ use crate::topk_reuse::TopKLimitReuseStrategy;
 /// ([`realize_child`] and [`retain_exact`]). Moved here from the former
 /// `bind.rs` (issue #251): this is what a [`ReplacementStrategy`]
 /// implementor's own construction path can realistically fail with —
-/// schema derivation over a pre-ASAP [`OperatorNode`] subtree — not
+/// schema derivation over a pre-ASAP [`OperatorNode`] sub-DAG — not
 /// something specific to workload-wide orchestration.
 #[derive(Debug, Error)]
 pub enum RealizationError {
@@ -415,8 +416,8 @@ pub enum RealizationError {
     /// would change its semantics.
     #[error("unsupported physical summary realization: {0}")]
     PhysicalRealization(&'static str),
-    /// A constructed plan violates the update/readout phase contract
-    /// (issue #171) — e.g. a summary readout placed beneath a maintained
+    /// A constructed plan violates the update/evaluation phase contract
+    /// (issue #171) — e.g. a summary evaluation placed beneath a maintained
     /// `SummaryAgg`. Detected at construction, never at runtime.
     #[error("execution-data_state violation in post-ASAP plan: {0}")]
     ExecutionDataState(#[from] ExecutionDataStateError),
@@ -428,20 +429,20 @@ pub enum RealizationError {
 
 /// A pre-ASAP sub-DAG a [`ReplacementStrategy`] knows how to replace.
 ///
-/// `root` is a reference into the workload's own [`OperatorNode`] tree (an
+/// `root` is a reference into the workload's own [`OperatorNode`] DAG (an
 /// `Rc<OperatorNode>`, the same currency [`search_workload`] and
-/// `asap_types::ir::cse::share_common_subtrees` already thread through
+/// `asap_types::ir::cse::share_common_subdags` already thread through
 /// this crate's public API — not a bare `&OperatorNode` — so a strategy that
 /// needs the node's own `Rc` identity, not just its shape, has it available
 /// without the caller re-deriving it).
 ///
 /// `consumer_count` is how many locations across the workload reference this
-/// exact `Rc` — 1 for an ordinary single-use node and 2+ for a shared subtree.
+/// exact `Rc` — 1 for an ordinary single-use node and 2+ for a shared sub-DAG.
 /// [`search_workload_with`] computes the workload-wide value during target
 /// discovery. [`TargetSubDAG::new`] defaults it to `1` for callers invoking a
 /// strategy against one node in isolation. A strategy that only cares about
 /// `root`'s shape (for example, [`SketchAlgorithmStrategy`]) can ignore the
-/// count; [`SharedSubtreeStrategy`] consults it directly.
+/// count; [`SharedSubDagStrategy`] consults it directly.
 ///
 /// `strictest_sibling_accuracy` is the strictest accuracy among workload
 /// siblings that read the same summary input as `root`, when stricter than
@@ -485,16 +486,16 @@ impl<'a> TargetSubDAG<'a> {
 #[derive(Debug, Clone)]
 #[allow(clippy::large_enum_variant)] // Keep the public strategy API value-based.
 pub enum Replacement {
-    /// A subtree that replaces the target: either a bound summary decision
+    /// A sub-DAG that replaces the target: either a bound summary decision
     /// (a DAG containing ASAP operators, for one particular candidate
-    /// realization of the target) or a pre-ASAP rewrite (a logical subtree
+    /// realization of the target) or a pre-ASAP rewrite (a logical sub-DAG
     /// with no ASAP operator, structurally different from the target's own
-    /// `root` — e.g. sharing vs. not sharing a subtree — but semantically
+    /// `root` — e.g. sharing vs. not sharing a sub-DAG — but semantically
     /// equivalent to it). [`is_logical_rewrite`] tells the two apart.
-    Subtree(Rc<OperatorNode>),
+    SubDag(Rc<OperatorNode>),
     /// An exact operator composed over another target's *own* selected
-    /// decision across an explicit update/readout boundary (issue #171):
-    /// `ValueOperationAtQueryTime` over a child's summary readout, or
+    /// decision across an explicit update/evaluation boundary (issue #171):
+    /// `ValueOperationAtQueryTime` over a child's summary evaluation, or
     /// `ValueOperationAtIngestionTime` feeding a maintained summary above. Carries only a
     /// reference to the child target — [`CandidateLogicalASAPDAGs::global_selection`]
     /// commits the compatible parent/child pair and
@@ -503,10 +504,10 @@ pub enum Replacement {
     ExactComposition(ExactComposition),
 }
 
-/// Whether a [`Replacement::Subtree`] is a pure logical rewrite: a subtree
+/// Whether a [`Replacement::SubDag`] is a pure logical rewrite: a sub-DAG
 /// with no ASAP operator and no guarantee established yet (the shape every
 /// front end emits and every rewrite strategy builds). A bound summary
-/// decision contains an ASAP operator, or is a kept pre-ASAP subtree that
+/// decision contains an ASAP operator, or is a kept pre-ASAP sub-DAG that
 /// already carries its exact guarantee.
 pub fn is_logical_rewrite(node: &OperatorNode) -> bool {
     node.guarantee.is_none() && !node.contains_asap()
@@ -534,12 +535,12 @@ pub struct ReplacementSubDAG {
 impl ReplacementSubDAG {
     /// Whether this summary still needs accuracy/domain evidence before it can
     /// be treated as certified. A missing guarantee on any summary candidate
-    /// (a subtree whose root is an ASAP operator) is unknown; a kept
-    /// pre-ASAP subtree carries an explicit exact guarantee.
+    /// (a sub-DAG whose root is an ASAP operator) is unknown; a kept
+    /// pre-ASAP sub-DAG carries an explicit exact guarantee.
     pub fn has_missing_accuracy_evidence(&self) -> bool {
         matches!(
             &self.replacement,
-            Replacement::Subtree(node) if !is_logical_rewrite(node) && has_missing_accuracy_evidence(node)
+            Replacement::SubDag(node) if !is_logical_rewrite(node) && has_missing_accuracy_evidence(node)
         )
     }
 
@@ -552,11 +553,11 @@ impl ReplacementSubDAG {
                 cost_model.value_operation_support_evidence(&composition.op, composition.placement)
             }
             // Any summary decision, including one rooted in a relational
-            // operator above its readouts, asks the deployment for support.
-            Replacement::Subtree(node) if !is_logical_rewrite(node) => {
+            // operator above its evaluations, asks the deployment for support.
+            Replacement::SubDag(node) if !is_logical_rewrite(node) => {
                 cost_model.summary_support_evidence(node)
             }
-            Replacement::Subtree(_) => Some(true),
+            Replacement::SubDag(_) => Some(true),
         }
     }
 }
@@ -590,7 +591,7 @@ pub enum ReplacementProvenance {
     /// A finalized whole-query result over rows carrying the PromQL series
     /// identity, which the logical root does not expose (see
     /// [`ReplacementStrategy::propose_for_root`]). Default selection never
-    /// commits it, because its readout must be validated and priced by
+    /// commits it, because its evaluation must be validated and priced by
     /// deployment; otherwise it would silently replace the logical plan.
     RootPhysicalRealization,
 }
@@ -631,7 +632,7 @@ pub struct Proposals {
 /// of this trait or any existing strategy required.
 ///
 /// `replacements` is only meaningful when `matches` would return `true` for
-/// the same target; both [`SketchAlgorithmStrategy`] and [`SharedSubtreeStrategy`]
+/// the same target; both [`SketchAlgorithmStrategy`] and [`SharedSubDagStrategy`]
 /// return an empty `Vec` rather than panicking when called on a target they
 /// don't match, so a caller that skips the `matches` check first still gets a
 /// safe (merely uninformative) answer instead of a crash.
@@ -698,33 +699,33 @@ pub trait ReplacementStrategy {
 pub enum Realization {
     /// An exact **mergeable** accumulator (partial state ≡ the value
     /// itself: `Sum` / `Count` / `Min` / `Max` / `Rate` / `Increase`). The
-    /// built state *is* the answer already — no `SummaryEstimate` readout
+    /// built state *is* the answer already — no `SummaryEstimate` evaluation
     /// step.
     ExactAggregate {
         kind: ExactKind,
         params: ExactParams,
     },
     /// An approximate sketch sized to the intent's [`AccuracyTarget`].
-    /// Needs a `SummaryEstimate` readout to recover a value. Already
+    /// Needs a `SummaryEstimate` evaluation to recover a value. Already
     /// classified into its [`SketchKind`] category (`SketchKind::new`
     /// having been called) — construction always goes through that
     /// classifier, never this variant directly.
     Sketch(SketchKind),
     /// A sampling-based summary (a retained row subset). Needs a
-    /// `SummaryEstimate` readout. Not chosen by any core `AggIntent`
+    /// `SummaryEstimate` evaluation. Not chosen by any core `AggIntent`
     /// dispatch today — see the module docs.
     Sample {
         kind: SamplingKind,
         params: SamplingParams,
     },
-    /// A wavelet-transform summary. Needs a `SummaryEstimate` readout. Not
+    /// A wavelet-transform summary. Needs a `SummaryEstimate` evaluation. Not
     /// chosen by any core `AggIntent` dispatch today — see the module docs.
     Wavelet {
         kind: WaveletKind,
         params: WaveletParams,
     },
     /// A fitted statistical/parametric-model summary. Needs a
-    /// `SummaryEstimate` readout. Not chosen by any core `AggIntent`
+    /// `SummaryEstimate` evaluation. Not chosen by any core `AggIntent`
     /// dispatch today — see the module docs.
     StatModel {
         kind: StatModelKind,
@@ -1250,7 +1251,7 @@ impl<'a> CandidatePlanningInputs<'a> {
 /// Ranked (only to *order the enumeration*, never to drop a candidate) via a
 /// [`CostModel`] — [`DefaultCostModel`] unless constructed with
 /// [`SketchAlgorithmStrategy::new`] — so a deployment-specific cost model's
-/// other hooks (`size_params`, `realize_extension`, `readout_extension`) are
+/// other hooks (`size_params`, `realize_extension`, `evaluation_extension`) are
 /// still consulted while binding each candidate.
 ///
 /// The one thing that *does* drop a candidate is accuracy legality (issue
@@ -1405,7 +1406,7 @@ impl<'a> SketchAlgorithmStrategy<'a> {
         };
         let mut proposals = self.propose_with(root, None, None);
         proposals.candidates.retain_mut(|candidate| {
-            let Replacement::Subtree(node) = &candidate.replacement else {
+            let Replacement::SubDag(node) = &candidate.replacement else {
                 return false;
             };
             let Some(dag) = timed(node) else {
@@ -1436,7 +1437,7 @@ impl<'a> SketchAlgorithmStrategy<'a> {
             let Ok(placed) = finalize_query_candidate(placed, root) else {
                 return false;
             };
-            candidate.replacement = Replacement::Subtree(placed);
+            candidate.replacement = Replacement::SubDag(placed);
             candidate
                 .rationale
                 .push_str("; fixed-window precompute over complete per-series counter states");
@@ -1445,18 +1446,18 @@ impl<'a> SketchAlgorithmStrategy<'a> {
         proposals
     }
 
-    /// Retain grouped Sum after a per-series Rate readout as a query-time
+    /// Retain grouped Sum after a per-series Rate evaluation as a query-time
     /// candidate alongside its complete-window maintenance placement.
     ///
     pub fn query_time_rate_aggregation_candidates(&self, root: &Rc<OperatorNode>) -> Proposals {
         let mut proposals = self.fixed_window_rate_candidates(root);
         proposals.candidates.retain_mut(|candidate| {
-            let Replacement::Subtree(node) = &candidate.replacement else { return false };
+            let Replacement::SubDag(node) = &candidate.replacement else { return false };
             if !matches!(&node.operator, Operator::ASAP(ASAPOp::FinalizeExactAccumulator { child })
                 if matches!(&child.operator, Operator::ASAP(ASAPOp::SummaryAgg { family: FieldDataType::ExactAggregate(ExactKind::Sum, _), .. }))) { return false; }
             let Some(query_time) = retime_rate_finalize(node, ExecutionTiming::QueryTime, false) else { return false };
-            candidate.replacement = Replacement::Subtree(query_time);
-            candidate.rationale = "query-time grouped Sum over complete per-series Rate readouts".into();
+            candidate.replacement = Replacement::SubDag(query_time);
+            candidate.rationale = "query-time grouped Sum over complete per-series Rate evaluations".into();
             true
         });
         proposals
@@ -1479,7 +1480,7 @@ impl<'a> SketchAlgorithmStrategy<'a> {
         strictest_sibling: Option<&AccuracyTarget>,
     ) -> Proposals {
         let mut proposals = Proposals::default();
-        // A selected logical rewrite otherwise stays a kept pre-ASAP subtree
+        // A selected logical rewrite otherwise stays a kept pre-ASAP sub-DAG
         // during DAG assembly. Also expose its concrete summary realization
         // for selection.
         if intent_override.is_none() {
@@ -1487,7 +1488,7 @@ impl<'a> SketchAlgorithmStrategy<'a> {
                 if let Ok(node) = realize_child_with(&rewritten, self.planning_inputs, None) {
                     if node.contains_asap() {
                         proposals.candidates.push(ReplacementSubDAG {
-                            replacement: Replacement::Subtree(node),
+                            replacement: Replacement::SubDag(node),
                             strategy: "SketchAlgorithmStrategy",
                             provenance: ReplacementProvenance::SummaryRealization,
                             rationale: "realize a schema-preserving composition of temporal and grouped accumulators".into(),
@@ -1498,7 +1499,7 @@ impl<'a> SketchAlgorithmStrategy<'a> {
         }
         if let Ok(Some(node)) = exact_topk_over_temporal_values(root, self.planning_inputs) {
             proposals.candidates.push(ReplacementSubDAG {
-                replacement: Replacement::Subtree(node),
+                replacement: Replacement::SubDag(node),
                 strategy: "SketchAlgorithmStrategy",
                 provenance: ReplacementProvenance::SummaryRealization,
                 rationale: "select exact Top-K from independently maintained temporal values"
@@ -1508,7 +1509,7 @@ impl<'a> SketchAlgorithmStrategy<'a> {
         if intent_override.is_none() {
             if let Ok(Some(node)) = realize_temporal_average(root, self.planning_inputs, None) {
                 proposals.candidates.push(ReplacementSubDAG {
-                    replacement: Replacement::Subtree(node),
+                    replacement: Replacement::SubDag(node),
                     strategy: "SketchAlgorithmStrategy",
                     provenance: ReplacementProvenance::SummaryRealization,
                     rationale: "read temporal average from sum/count only within the finite arithmetic domain; otherwise execute the original average".into(),
@@ -1523,7 +1524,7 @@ impl<'a> SketchAlgorithmStrategy<'a> {
                     "preserve exact PromQL arithmetic over independently realized summary operands"
                 };
                 proposals.candidates.push(ReplacementSubDAG {
-                    replacement: Replacement::Subtree(node),
+                    replacement: Replacement::SubDag(node),
                     strategy: "SketchAlgorithmStrategy",
                     provenance: ReplacementProvenance::SummaryRealization,
                     rationale: rationale.into(),
@@ -1618,10 +1619,10 @@ impl<'a> SketchAlgorithmStrategy<'a> {
             else {
                 continue;
             };
-            let readout_query = readout(intent, &input.input, planning_inputs.cost);
+            let evaluation_query = evaluation(intent, &input.input, planning_inputs.cost);
             let Some(local) = planning_inputs
                 .accuracy
-                .local_guarantee(&family, &readout_query)
+                .local_guarantee(&family, &evaluation_query)
             else {
                 continue;
             };
@@ -1689,7 +1690,7 @@ impl<'a> SketchAlgorithmStrategy<'a> {
                 if let Ok(node) = retain_exact(root) {
                     proposals.candidates.push(ReplacementSubDAG {
                         strategy: "SketchAlgorithmStrategy",
-                        replacement: Replacement::Subtree(node),
+                        replacement: Replacement::SubDag(node),
                         provenance: ReplacementProvenance::SummaryRealization,
                         rationale: format!(
                             "{} stays pre-ASAP because summary construction crosses an illegal \
@@ -1712,7 +1713,7 @@ impl Proposals {
         match built {
             Ok(node) => self.candidates.push(ReplacementSubDAG {
                 strategy: "SketchAlgorithmStrategy",
-                replacement: Replacement::Subtree(node),
+                replacement: Replacement::SubDag(node),
                 provenance: ReplacementProvenance::SummaryRealization,
                 rationale,
             }),
@@ -1767,17 +1768,17 @@ impl ReplacementStrategy for SketchAlgorithmStrategy<'_> {
 
         let mut proposals = self.current_series_topk_candidates(&typed, target);
         for mut candidate in std::mem::take(&mut proposals.candidates) {
-            let Replacement::Subtree(node) = candidate.replacement else {
+            let Replacement::SubDag(node) = candidate.replacement else {
                 continue;
             };
             let Ok(node) = finalize_query_candidate(node, &typed) else {
                 continue;
             };
             let duplicate = proposals.candidates.iter().any(|existing| {
-                matches!(&existing.replacement, Replacement::Subtree(other) if *other == node)
+                matches!(&existing.replacement, Replacement::SubDag(other) if *other == node)
             });
             if !duplicate {
-                candidate.replacement = Replacement::Subtree(node);
+                candidate.replacement = Replacement::SubDag(node);
                 candidate.provenance = ReplacementProvenance::RootPhysicalRealization;
                 proposals.candidates.push(candidate);
             }
@@ -2017,7 +2018,7 @@ pub(crate) fn realize_child_with(
         .next()
     {
         Some(ReplacementSubDAG {
-            replacement: Replacement::Subtree(node),
+            replacement: Replacement::SubDag(node),
             ..
         }) => Ok(node),
         Some(ReplacementSubDAG {
@@ -2031,7 +2032,7 @@ pub(crate) fn realize_child_with(
         // produce — never happens, that match is exhaustive), or every
         // candidate was accuracy-illegal — either way the same conservative
         // fallback `SketchAlgorithmStrategy::matches` uses: keep the
-        // pre-ASAP subtree, executed exactly.
+        // pre-ASAP sub-DAG, executed exactly.
         None => retain_exact(root),
     }
 }
@@ -2404,7 +2405,7 @@ fn ddsketch_ratio_operand_target(target: &AccuracyTarget) -> Option<AccuracyTarg
 fn ddsketch_quantile_alpha(node: &OperatorNode) -> Option<f64> {
     let Operator::ASAP(ASAPOp::SummaryEstimate {
         summary_input,
-        query: PostAsapSketchQuery::Quantile { .. },
+        query: PostAsapSketchStatistic::Quantile { .. },
     }) = &node.operator
     else {
         return None;
@@ -2474,11 +2475,11 @@ fn override_accuracy(intent: &AggIntent, target: &AccuracyTarget) -> AggIntent {
     out
 }
 
-/// Keep an unrewritten pre-ASAP subtree as it is. There is no wrapper node:
-/// the subtree itself is the plan, carrying an exact guarantee. The same
+/// Keep an unrewritten pre-ASAP sub-DAG as it is. There is no wrapper node:
+/// the sub-DAG itself is the plan, carrying an exact guarantee. The same
 /// `Rc` is returned when the node already has a guarantee; otherwise a copy
-/// with `guarantee = exact("RetainedExact")` — only for a subtree with no
-/// ASAP operator (a subtree containing one keeps whatever its construction
+/// with `guarantee = exact("RetainedExact")` — only for a sub-DAG with no
+/// ASAP operator (a sub-DAG containing one keeps whatever its construction
 /// established). `pub` so a caller can fall back to this explicitly — e.g.
 /// when `SketchAlgorithmStrategy::replacements()` returns no candidate for a
 /// target, or a deployment wants to force a node its own runtime can't
@@ -2492,7 +2493,7 @@ fn retain_exact_rc(expr: Rc<OperatorNode>) -> Result<Rc<OperatorNode>, Realizati
     if expr.guarantee.is_some() || expr.contains_asap() {
         return Ok(expr);
     }
-    // Keeping the same subtree twice (e.g. one `Scan` read by an exact
+    // Keeping the same sub-DAG twice (e.g. one `Scan` read by an exact
     // aggregate and by a sketch, or by two candidates) must yield one node:
     // sharing is pointer identity. Memoize the kept copy per input node while
     // both are alive; weak references keep the memo from extending lifetimes
@@ -2515,7 +2516,7 @@ fn retain_exact_rc(expr: Rc<OperatorNode>) -> Result<Rc<OperatorNode>, Realizati
     let kept = Rc::new(
         expr.as_ref()
             .clone()
-            // A kept pre-ASAP subtree is executed exactly by the runtime
+            // A kept pre-ASAP sub-DAG is executed exactly by the runtime
             // (`Realization::PassThrough`'s contract) — zero error.
             .with_guarantee(Some(ResultGuarantee::exact("RetainedExact"))),
     );
@@ -2535,7 +2536,7 @@ fn retain_exact_rc(expr: Rc<OperatorNode>) -> Result<Rc<OperatorNode>, Realizati
 /// `HAVING`. A multi-intent node (SQL `SELECT SUM(a), AVG(b)`), or one with a
 /// `HAVING` predicate (the filter would need the estimate first), stays
 /// logical. Unsupported logical parents are conservatively kept as pre-ASAP
-/// subtrees ([`retain_exact`]). Relational operators are retained during
+/// sub-DAGs ([`retain_exact`]). Relational operators are retained during
 /// final DAG assembly so their independently planned children remain
 /// visible.
 pub fn bindable_intent(node: &OperatorNode) -> Option<&AggIntent> {
@@ -2567,12 +2568,12 @@ pub fn bindable_intent(node: &OperatorNode) -> Option<&AggIntent> {
 /// one-candidate-at-a-time primitive [`SketchAlgorithmStrategy`] itself
 /// calls once per candidate, reused rather than duplicated so a Hydra
 /// candidate gets exactly the same schema derivation/column
-/// resolution/readout construction as every other candidate, patching only
+/// resolution/evaluation construction as every other candidate, patching only
 /// the `grouping` field this axis owns.
 /// Construct a summary with every model explicit (issue #172). `intent`
 /// is `expr`'s own [`bindable_intent`], or a copy of it with an allocated
 /// `AccuracyTarget` substituted (see [`realize_child_with`]).
-/// `child_target`, when set, is the end-to-end budget the child subtree is
+/// `child_target`, when set, is the end-to-end budget the child sub-DAG is
 /// re-enumerated under; `allocation` is the provenance note recording the
 /// split that produced both. `Err(RealizationError::Accuracy)` is the
 /// fail-closed answer for a composition with no sound rule or one that
@@ -2747,10 +2748,10 @@ fn is_snapshot_weighted_topk(intent: &AggIntent, child: &OperatorNode) -> bool {
 }
 
 /// Translate an [`Realization`] into the `(family, needs a
-/// SummaryEstimate readout)` pair [`construct_summary_agg`] needs, or `None`
+/// SummaryEstimate evaluation)` pair [`construct_summary_agg`] needs, or `None`
 /// for `PassThrough` (the caller falls back to [`retain_exact`]).
 ///
-/// Every family's partial state needs a readout to recover a value, except
+/// Every family's partial state needs a evaluation to recover a value, except
 /// `ExactAggregate` — its partial state *is* the value already, so no
 /// estimate step follows it.
 fn summary_family(realization: Realization) -> Option<(FieldDataType, bool)> {
@@ -2867,7 +2868,7 @@ fn realize_physical_summary_input(
 }
 
 /// Emit `SummaryAgg` (recursively binding the child), plus the
-/// `SummaryEstimate` readout when `estimate` is set.
+/// `SummaryEstimate` evaluation when `estimate` is set.
 // Retain the exact expression and schema while placing its value production
 // on the update path (a node runs when its consumer runs, so beneath a
 // maintained summary this value production is ingestion-time work).
@@ -3018,10 +3019,10 @@ fn construct_summary_agg(
     };
     let state_idx = summary_col_index(out_schema, reduction, measures);
 
-    let readout_schema = if keyed_heap
+    let evaluation_schema = if keyed_heap
         && matches!(node.non_asap(), Some(NonASAPOp::Aggregate { child, .. }) if is_snapshot_weighted_topk(intent, child))
     {
-        keyed_heap_readout_schema(&input, node)?
+        keyed_heap_evaluation_schema(&input, node)?
     } else {
         lift(out_schema)
     };
@@ -3035,12 +3036,12 @@ fn construct_summary_agg(
                     | SketchParams::CountSketchWithHeap { heap_size, .. } => *heap_size,
                     _ => unreachable!(),
                 };
-                return PostAsapSketchQuery::TopK {
+                return PostAsapSketchStatistic::TopK {
                     k: capacity as usize,
                 };
             }
         }
-        readout(intent, &summary_input, planning_inputs.cost)
+        evaluation(intent, &summary_input, planning_inputs.cost)
     });
 
     let mut state_schema = lift(out_schema);
@@ -3048,7 +3049,7 @@ fn construct_summary_agg(
         let mut state = state_schema.fields[state_idx].clone();
         state.dtype = family.clone();
         let mut fields = if snapshot_weighted {
-            readout_schema.fields[..reduction.group_keys().map_or(0, |keys| keys.len())].to_vec()
+            evaluation_schema.fields[..reduction.group_keys().map_or(0, |keys| keys.len())].to_vec()
         } else {
             Vec::new()
         };
@@ -3064,7 +3065,7 @@ fn construct_summary_agg(
         } else if let (AggIntent::Quantile { .. }, SummaryInputExpr::Column(col)) =
             (intent, &summary_input.weight)
         {
-            // The quantile is a readout parameter: name the state after the
+            // The quantile is a evaluation parameter: name the state after the
             // column it summarizes, not after the query's output column.
             let child_schema = input.child.schema.clone();
             if let Ok(i) = resolve_column_ref(col, &child_schema) {
@@ -3093,9 +3094,9 @@ fn construct_summary_agg(
         .ok_or(RealizationError::PhysicalRealization(
             "snapshot ranking requires a supported current-series population",
         ))?;
-        let Operator::ASAP(ASAPOp::ReadPopulation { child, .. }) = &population.operator else {
+        let Operator::ASAP(ASAPOp::EvaluatePopulation { child, .. }) = &population.operator else {
             return Err(RealizationError::PhysicalRealization(
-                "missing population readout",
+                "missing population evaluation",
             ));
         };
         Rc::clone(child)
@@ -3112,7 +3113,7 @@ fn construct_summary_agg(
 
     // ── Guarantee (issue #172) ──────────────────────────────────────────
     // Derived *before* the node exists, so an illegal composition is never
-    // materialized: the local guarantee of this family's readout (or exact
+    // materialized: the local guarantee of this family's evaluation (or exact
     // accumulator) composed over the child's, under the operator this
     // family applies to the child's values.
     let local_target = match allocation.as_ref() {
@@ -3125,7 +3126,7 @@ fn construct_summary_agg(
         local_target,
     );
     let membership_query = if snapshot_weighted {
-        Some(readout(intent, &summary_input, planning_inputs.cost))
+        Some(evaluation(intent, &summary_input, planning_inputs.cost))
     } else {
         query.clone()
     };
@@ -3218,7 +3219,7 @@ fn construct_summary_agg(
         if estimate { None } else { guarantee.clone() },
     );
     match query {
-        // The readout: downstream of the estimate the schema is the plain
+        // The evaluation: downstream of the estimate the schema is the plain
         // pre-ASAP row shape again (the summary-state type does not
         // propagate).
         Some(query) => Ok(OperatorNode::asap_node(
@@ -3226,16 +3227,16 @@ fn construct_summary_agg(
                 summary_input: agg,
                 query,
             },
-            readout_schema,
+            evaluation_schema,
             guarantee,
         )),
         None => Ok(agg),
     }
 }
 
-// Heap readout rows contain the encoded item identity, subpopulation keys,
+// Heap evaluation rows contain the encoded item identity, subpopulation keys,
 // and an estimated score. They never inherit the exact-value producer's schema.
-fn keyed_heap_readout_schema(
+fn keyed_heap_evaluation_schema(
     input: &PhysicalSummaryInput,
     node: &OperatorNode,
 ) -> Result<Schema, RealizationError> {
@@ -3246,13 +3247,13 @@ fn keyed_heap_readout_schema(
     }) = node.non_asap()
     else {
         return Err(RealizationError::PhysicalRealization(
-            "heap readout requires an aggregate",
+            "heap evaluation requires an aggregate",
         ));
     };
     if let Reduction::Reduce(groups) = reduction {
         if groups.is_without() {
             return Err(RealizationError::PhysicalRealization(
-                "heap readout requires explicit grouping",
+                "heap evaluation requires explicit grouping",
             ));
         }
         for index in groups.iter() {
@@ -3346,7 +3347,7 @@ fn keyed_heap_readout_schema(
     }
     if fields.is_empty() {
         return Err(RealizationError::PhysicalRealization(
-            "heap readout has no identity columns",
+            "heap evaluation has no identity columns",
         ));
     }
     fields.push(Field::new(
@@ -3674,7 +3675,7 @@ fn schema_column_ref(child: &OperatorNode, index: usize) -> Option<ColumnRef> {
 /// exact child) — unknown, never exact.
 fn compose_guarantee(
     family: &FieldDataType,
-    query: Option<&PostAsapSketchQuery>,
+    query: Option<&PostAsapSketchStatistic>,
     child: &OperatorNode,
     intent: &AggIntent,
     accuracy: &dyn AccuracyModel,
@@ -3706,7 +3707,7 @@ fn compose_guarantee(
             )
         }
         (_, Some(query)) => (
-            if matches!(query, PostAsapSketchQuery::TopK { .. }) {
+            if matches!(query, PostAsapSketchStatistic::TopK { .. }) {
                 CompositionOperator::TopKSelection
             } else {
                 CompositionOperator::ApproximateAggregate
@@ -3825,19 +3826,19 @@ fn summarised_input(
     ))
 }
 
-/// The `SummaryEstimate` readout for a summary-bound intent.
-fn readout(
+/// The `SummaryEstimate` evaluation for a summary-bound intent.
+fn evaluation(
     intent: &AggIntent,
     input: &SummaryUpdate,
     cost_model: &dyn CostModel,
-) -> PostAsapSketchQuery {
+) -> PostAsapSketchStatistic {
     match intent {
-        AggIntent::Quantile { q, .. } => PostAsapSketchQuery::Quantile { q: *q },
-        AggIntent::Cardinality { .. } => PostAsapSketchQuery::Cardinality,
-        AggIntent::FrequencyL2 { .. } => PostAsapSketchQuery::FrequencyL2,
-        AggIntent::FrequencyEntropy { .. } => PostAsapSketchQuery::FrequencyEntropy,
-        AggIntent::TopK { k, .. } => PostAsapSketchQuery::TopK { k: *k },
-        AggIntent::Count { .. } => PostAsapSketchQuery::PointCount {
+        AggIntent::Quantile { q, .. } => PostAsapSketchStatistic::Quantile { q: *q },
+        AggIntent::Cardinality { .. } => PostAsapSketchStatistic::Cardinality,
+        AggIntent::FrequencyL2 { .. } => PostAsapSketchStatistic::FrequencyL2,
+        AggIntent::FrequencyEntropy { .. } => PostAsapSketchStatistic::FrequencyEntropy,
+        AggIntent::TopK { k, .. } => PostAsapSketchStatistic::TopK { k: *k },
+        AggIntent::Count { .. } => PostAsapSketchStatistic::PointCount {
             key: match &input.weight {
                 SummaryInputExpr::Column(col) => col.clone(),
                 SummaryInputExpr::Constant(1.0) => ColumnRef::SampleValue,
@@ -3846,13 +3847,15 @@ fn readout(
             value: None,
         },
         // Core doesn't know the shape of a deployment-specific `Extension`
-        // intent, so it can't build its readout either — delegate to the
+        // intent, so it can't build its evaluation either — delegate to the
         // same `CostModel` that decided (via `realize_extension`) this
-        // intent gets a summary realization at all. See `readout_extension`'s
+        // intent gets a summary realization at all. See `evaluation_extension`'s
         // doc for the invariant this depends on.
         AggIntent::Extension { ext_kind, payload } => match &input.weight {
-            SummaryInputExpr::Column(col) => cost_model.readout_extension(ext_kind, payload, col),
-            _ => unreachable!("extension readout requires one column"),
+            SummaryInputExpr::Column(col) => {
+                cost_model.evaluation_extension(ext_kind, payload, col)
+            }
+            _ => unreachable!("extension evaluation requires one column"),
         },
         other => {
             unreachable!("no summary realization for {other:?} (realizations_for_intent)")
@@ -3867,15 +3870,15 @@ fn lift(schema: &Schema) -> Schema {
     Schema::lifted(schema.fields.clone(), schema.time_index)
 }
 
-// ── SharedSubtreeStrategy ────────────────────────────────────────────────
+// ── SharedSubDagStrategy ────────────────────────────────────────────────
 
-/// Wraps `asap_types::ir::cse::share_common_subtrees`'s sharing
+/// Wraps `asap_types::ir::cse::share_common_subdags`'s sharing
 /// decision as an explicit candidate pair, wherever a [`TargetSubDAG`]
 /// already has two or more consumers.
 ///
 /// This strategy does not decide sharing itself, nor does it discover which
 /// nodes are shared — by the time a caller builds a `TargetSubDAG` with
-/// `consumer_count >= 2`, `share_common_subtrees` has already made that
+/// `consumer_count >= 2`, `share_common_subdags` has already made that
 /// (legality-gated, `PartialEq`-checked) call; [`discover_targets`] below
 /// discovers real consumer counts across a workload the same way for
 /// [`search_workload_with`] (this module's own tests reuse the identical
@@ -3885,9 +3888,9 @@ fn lift(schema: &Schema) -> Schema {
 /// `Rc`" as the two-way choice a downstream cost model (today,
 /// [`CostModel::cse_share_decision`]) picks between: build once and share, or
 /// build independently at each consumer.
-pub struct SharedSubtreeStrategy;
+pub struct SharedSubDagStrategy;
 
-impl ReplacementStrategy for SharedSubtreeStrategy {
+impl ReplacementStrategy for SharedSubDagStrategy {
     fn matches(&self, target: &TargetSubDAG<'_>) -> bool {
         target.consumer_count >= 2
     }
@@ -3899,26 +3902,26 @@ impl ReplacementStrategy for SharedSubtreeStrategy {
         let count = target.consumer_count;
         vec![
             ReplacementSubDAG {
-                strategy: "SharedSubtreeStrategy",
+                strategy: "SharedSubDagStrategy",
                 // The already-interned `Rc` itself: reusing it verbatim *is*
                 // "build once and share" — no new node to construct.
-                replacement: Replacement::Subtree(Rc::clone(target.root)),
+                replacement: Replacement::SubDag(Rc::clone(target.root)),
                 provenance: ReplacementProvenance::CseShare,
                 rationale: format!(
-                    "build once and share: share_common_subtrees already interned this \
+                    "build once and share: share_common_subdags already interned this \
                      subtree once and reused it across {count} consumers — one build can \
                      answer all of them instead of computing it {count} times"
                 ),
             },
             ReplacementSubDAG {
-                strategy: "SharedSubtreeStrategy",
+                strategy: "SharedSubDagStrategy",
                 // A structurally-identical but freshly-allocated `Rc`: same
                 // value (`PartialEq`), deliberately *not* the same pointer,
                 // representing "undo the sharing and recompute independently".
-                replacement: Replacement::Subtree(Rc::new((**target.root).clone())),
+                replacement: Replacement::SubDag(Rc::new((**target.root).clone())),
                 provenance: ReplacementProvenance::CseRecompute,
                 rationale: format!(
-                    "build independently: undo the sharing share_common_subtrees found and \
+                    "build independently: undo the sharing share_common_subdags found and \
                      recompute this subtree separately at each of its {count} consumers — \
                      worth it only when independence outweighs the shared-maintenance cost, \
                      a CostModel's call (e.g. CostModel::cse_share_decision) and not this \
@@ -3938,7 +3941,7 @@ impl ReplacementStrategy for SharedSubtreeStrategy {
 /// A generous, documented backstop against a hypothetically ill-behaved
 /// future [`ReplacementStrategy`] (see the module docs' "Termination"
 /// section) — not a bound either shipped strategy could ever approach.
-/// [`SketchAlgorithmStrategy`] and [`SharedSubtreeStrategy`] both converge in
+/// [`SketchAlgorithmStrategy`] and [`SharedSubDagStrategy`] both converge in
 /// exactly 2 passes over a fixed target set, regardless of workload size.
 pub const MAX_SEARCH_ITERATIONS: usize = 1_000;
 
@@ -3992,12 +3995,12 @@ impl TargetSubDAGCandidates {
     fn add_candidate(&mut self, candidate: ReplacementSubDAG) -> bool {
         let is_duplicate = self.candidates.iter().any(|existing| {
             match (&existing.replacement, &candidate.replacement) {
-                (Replacement::Subtree(existing_rc), Replacement::Subtree(rc))
+                (Replacement::SubDag(existing_rc), Replacement::SubDag(rc))
                     if is_logical_rewrite(existing_rc) && is_logical_rewrite(rc) =>
                 {
                     is_duplicate_rewrite(existing_rc, rc, &self.target)
                 }
-                (Replacement::Subtree(existing_node), Replacement::Subtree(node)) => {
+                (Replacement::SubDag(existing_node), Replacement::SubDag(node)) => {
                     is_duplicate_summary(existing_node, node)
                 }
                 (
@@ -4019,11 +4022,11 @@ impl TargetSubDAGCandidates {
 }
 
 /// Are `existing` and `candidate` the same logical-rewrite
-/// [`Replacement::Subtree`] candidate for a group targeting `target`?
+/// [`Replacement::SubDag`] candidate for a group targeting `target`?
 ///
 /// Structural (`OperatorNode`) value equality alone is *not* enough here:
 /// this module's one shipped multi-candidate logical-rewrite source,
-/// [`SharedSubtreeStrategy`], deliberately returns **two** candidates that
+/// [`SharedSubDagStrategy`], deliberately returns **two** candidates that
 /// are value-equal to each other (`build once and share` vs. `build
 /// independently` — see that strategy's own doc) but represent genuinely
 /// different physical choices, distinguished *only* by whether the
@@ -4064,7 +4067,7 @@ fn is_duplicate_rewrite(
 }
 
 /// Are `existing` and `candidate` the same bound-summary
-/// [`Replacement::Subtree`] candidate?
+/// [`Replacement::SubDag`] candidate?
 ///
 /// A bound summary embeds `SketchParams`/`f64`-bearing accuracy targets and
 /// guarantees, so value equality is not a dedup decision this module is
@@ -4093,7 +4096,7 @@ fn is_duplicate_summary(_existing: &Rc<OperatorNode>, _candidate: &Rc<OperatorNo
 /// caller can still map a `Root`'s `Id` back to the `Rc<OperatorNode>` whose
 /// group holds its alternatives. Memos are keyed by `*const OperatorNode`.
 pub struct CandidateLogicalASAPDAGs<Id> {
-    /// The workload's roots, after the one `share_common_subtrees` pass
+    /// The workload's roots, after the one `share_common_subdags` pass
     /// [`search_workload_with`] runs up front — the same post-CSE roots
     /// every `TargetSubDAG` in `groups` was discovered from.
     pub roots: Vec<(Id, Rc<OperatorNode>)>,
@@ -4132,7 +4135,7 @@ impl<Id> CandidateLogicalASAPDAGs<Id> {
                         .into_iter()
                         .flat_map(|g| &g.candidates)
                         .filter_map(|c| match &c.replacement {
-                            Replacement::Subtree(child)
+                            Replacement::SubDag(child)
                                 if !is_logical_rewrite(child) && operation.accepts_child(child) =>
                             {
                                 Some(Rc::clone(child))
@@ -4234,7 +4237,7 @@ impl<Id: Clone + PartialEq> CandidateLogicalASAPDAGs<Id> {
             cursor += 1;
             if let Some(group) = self.groups.get(&ptr) {
                 for candidate in &group.candidates {
-                    if let Replacement::Subtree(rewritten) = &candidate.replacement {
+                    if let Replacement::SubDag(rewritten) = &candidate.replacement {
                         if is_logical_rewrite(rewritten) {
                             walk(rewritten, &mut reachable, &mut nodes, &mut counts);
                         }
@@ -4331,7 +4334,7 @@ impl<Id: Clone + PartialEq> CandidateLogicalASAPDAGs<Id> {
                 .collect::<Result<Vec<_>, _>>();
             match roots {
                 Ok(roots) => {
-                    let roots = share_common_subtrees(roots);
+                    let roots = share_common_subdags(roots);
                     use std::hash::{Hash, Hasher};
                     let mut hash = std::collections::hash_map::DefaultHasher::new();
                     let mut cache = HashCache::new();
@@ -4588,7 +4591,7 @@ impl<Id> CandidateLogicalASAPDAGs<Id> {
     /// `self.roots[i]` — the same order [`search_workload`]/
     /// [`search_workload_with`] were originally called with (post-CSE
     /// dedup preserves both root count and order — see
-    /// `asap_types::ir::cse::share_common_subtrees`'s own
+    /// `asap_types::ir::cse::share_common_subdags`'s own
     /// `.map(...).collect()` body). This keeps `Id` fully opaque (no `Eq`/
     /// `Hash`/`Clone` bound needed on it at all — issue #287's "keep
     /// caller/query identifiers opaque" requirement) at the cost of the
@@ -4928,7 +4931,7 @@ fn rank_group<'a>(
         return ranked;
     }
 
-    // Shape 1: the exact `SharedSubtreeStrategy` share-vs-recompute pair —
+    // Shape 1: the exact `SharedSubDagStrategy` share-vs-recompute pair —
     // rank via `CostModel::cse_share_decision`, the same comparison
     // the local CSE ranking path already uses.
     if cse_candidate_pair(group).is_some() {
@@ -4948,7 +4951,7 @@ fn rank_group<'a>(
     // estimate, compare N independent states with the shared grid directly.
     let target = TargetSubDAG::with_consumer_count(&group.target, group.consumer_count);
     let has_hydra = ranked.iter().any(|candidate| {
-        let Replacement::Subtree(node) = &candidate.replacement else {
+        let Replacement::SubDag(node) = &candidate.replacement else {
             return false;
         };
         summary_grouping(node).is_some_and(|grouping| {
@@ -4988,7 +4991,7 @@ fn rank_group<'a>(
         let kinds: Option<Vec<SketchAlgorithm>> = ranked
             .iter()
             .map(|c| match &c.replacement {
-                Replacement::Subtree(node) => sketch_kind_of(node),
+                Replacement::SubDag(node) => sketch_kind_of(node),
                 Replacement::ExactComposition(_) => None,
             })
             .collect();
@@ -4996,7 +4999,7 @@ fn rank_group<'a>(
             let order = crate::cost_model::validated_candidate_ranking(cost_model, intent, &kinds);
             ranked.sort_by_key(|c| {
                 let kind = match &c.replacement {
-                    Replacement::Subtree(node) => sketch_kind_of(node),
+                    Replacement::SubDag(node) => sketch_kind_of(node),
                     Replacement::ExactComposition(_) => None,
                 };
                 kind.and_then(|k| order.iter().position(|o| *o == k))
@@ -5029,11 +5032,11 @@ fn rank_group<'a>(
 }
 
 /// For a group whose candidates are all [`Replacement::Rewrite`] (the
-/// [`SharedSubtreeStrategy`] shape): does [`CostModel::cse_share_decision`]
+/// [`SharedSubDagStrategy`] shape): does [`CostModel::cse_share_decision`]
 /// prefer the candidate that shares `group.target`'s own `Rc` (`true`), or
 /// the one that recomputes independently (`false`)? `None` when there's no
 /// real comparison to make — fewer than 2 consumers (mirrors
-/// [`SharedSubtreeStrategy::matches`]'s own gate), or `group.target` can't
+/// [`SharedSubDagStrategy::matches`]'s own gate), or `group.target` can't
 /// actually be bound at all (no candidate and no logical fallback — never
 /// expected in practice for a target that's already part of a legitimate
 /// workload tree, but this degrades to "keep discovery order" rather than
@@ -5066,9 +5069,9 @@ fn realize_one(target: &Rc<OperatorNode>, cost_model: &dyn CostModel) -> Option<
     realize_child(target, cost_model).ok()
 }
 
-/// The `SketchAlgorithm` a bound [`Replacement::Subtree`] candidate ultimately
+/// The `SketchAlgorithm` a bound [`Replacement::SubDag`] candidate ultimately
 /// realizes, if any (`None` for an `ExactAggregate`/pass-through
-/// subtree — nothing to rank against another `SketchAlgorithm`).
+/// sub-DAG — nothing to rank against another `SketchAlgorithm`).
 ///
 /// Mirrors this module's own `#[cfg(test)]`-only `summary_family_algorithm`
 /// helper (in the test module below), which does the identical
@@ -5091,7 +5094,7 @@ fn sketch_kind_of(node: &OperatorNode) -> Option<SketchAlgorithm> {
 }
 
 /// The grouping strategy used by a bound summary candidate, unwrapping its
-/// readout node when necessary.
+/// evaluation node when necessary.
 fn summary_grouping(node: &OperatorNode) -> Option<&GroupingStrategy> {
     match &node.operator {
         Operator::ASAP(ASAPOp::SummaryEstimate { summary_input, .. }) => {
@@ -5106,7 +5109,7 @@ fn summary_grouping(node: &OperatorNode) -> Option<&GroupingStrategy> {
 
 /// One target sub-DAG's selected choice and usage information — the answer
 /// [`CandidateLogicalASAPDAGs::global_selection`] commits to for one site, after folding in
-/// every ancestor [`SharedSubtreeStrategy`] decision on the path from a
+/// every ancestor [`SharedSubDagStrategy`] decision on the path from a
 /// workload root to this site. See the module docs' "Whole-plan
 /// (cross-group) selection" section for the full recurrence.
 ///
@@ -5130,7 +5133,7 @@ pub struct TargetSubDAGSelection<'a> {
     /// ancestor's own selected candidate is accounted for — see
     /// [`multiplier`]'s doc for the exact recurrence. Equal to
     /// `consumer_count` unless some ancestor on a path from a root to this
-    /// site has a [`SharedSubtreeStrategy`] alternative that chose
+    /// site has a [`SharedSubDagStrategy`] alternative that chose
     /// [`ShareDecision::RecomputeIndependently`].
     pub effective_consumer_count: usize,
     /// The candidate chosen for this target, or `None` when no replacement
@@ -5157,14 +5160,14 @@ pub struct CompositionDecision<'a> {
     /// The child target the composed operator consumes.
     pub child_target: &'a Rc<OperatorNode>,
     /// For a read-time operation: the child's own candidate committed alongside
-    /// (the summary readout the operator folds). `None` for an update-path
+    /// (the summary evaluation the operator folds). `None` for an update-path
     /// transform, whose input is raw update data — its cost is charged to
     /// the maintained summary *above* it instead.
     pub child_candidate: Option<&'a ReplacementSubDAG>,
     /// The composed plan's recurring rate — `read_operation_plan_cost_rate`
     /// or `maintenance_operation_plan_cost_rate`.
     pub cost_rate: CostRate,
-    /// `raw_recompute_cost_rate` — the kept-subtree baseline it beat.
+    /// `raw_recompute_cost_rate` — the kept-sub-DAG baseline it beat.
     pub baseline_rate: CostRate,
     /// The statistics (and their provenance) both rates were computed from.
     pub inputs: ExactCompositionCostInputs,
@@ -5179,7 +5182,7 @@ pub struct GlobalSelection<'a> {
     groups: HashMap<*const OperatorNode, TargetSubDAGSelection<'a>>,
     /// [`Self::assemble_selected_dag`]'s memo — one bound node per target for the
     /// life of this selection, so two parents composing over one shared
-    /// child get the *same* `Rc<OperatorNode>` (a kept pre-ASAP subtree
+    /// child get the *same* `Rc<OperatorNode>` (a kept pre-ASAP sub-DAG
     /// shared by two parents stays one `Rc` the same way).
     assembled_nodes: RefCell<HashMap<*const OperatorNode, Rc<OperatorNode>>>,
 }
@@ -5240,11 +5243,11 @@ impl<'a> GlobalSelection<'a> {
     ///
     /// Per site: a [`Replacement::ExactComposition`] uses its validated
     /// operation/child plan, retaining the search model's guarantee;
-    /// a bound-summary [`Replacement::Subtree`] is
+    /// a bound-summary [`Replacement::SubDag`] is
     /// re-linked so its `SummaryAgg` child is the child target's own
     /// DAG assembly whenever that is phase-legal beneath maintenance
     /// (so a child that chose an `ValueOperationAtIngestionTime` actually ends up under
-    /// the summary); a logical-rewrite [`Replacement::Subtree`] is kept
+    /// the summary); a logical-rewrite [`Replacement::SubDag`] is kept
     /// as it is (exact); an unmatched site keeps its own operator with each
     /// child assembled independently ([`Self::assemble_residual`]).
     /// Memoized by target identity, so a shared inner summary is one `Rc`
@@ -5259,7 +5262,7 @@ impl<'a> GlobalSelection<'a> {
         self.assemble_target(target).map(Some)
     }
 
-    /// Assemble a complete query result, including an exact-state readout when
+    /// Assemble a complete query result, including an exact-state evaluation when
     /// needed. `assemble_selected_dag` also serves internal state frontiers;
     /// callers exposing query results must use this boundary instead.
     pub fn assemble_selected_query(
@@ -5288,7 +5291,7 @@ impl<'a> GlobalSelection<'a> {
             .and_then(|sel| sel.chosen)
             .is_some_and(|candidate| {
                 matches!(&candidate.replacement,
-                Replacement::Subtree(node) if matches!(&node.operator,
+                Replacement::SubDag(node) if matches!(&node.operator,
                     Operator::ASAP(ASAPOp::SummaryAgg { child, .. })
                     if child.contains_asap() || !contains_aggregate(child)))
             });
@@ -5302,10 +5305,10 @@ impl<'a> GlobalSelection<'a> {
                 .map(|c| &c.replacement)
             {
                 None => self.assemble_residual(target)?,
-                Some(Replacement::Subtree(node)) if node.contains_asap() => {
+                Some(Replacement::SubDag(node)) if node.contains_asap() => {
                     self.relink_summary(node, target)?
                 }
-                Some(Replacement::Subtree(kept)) => retain_exact(kept)?,
+                Some(Replacement::SubDag(kept)) => retain_exact(kept)?,
                 Some(Replacement::ExactComposition(_)) => Rc::clone(
                     &self.groups[&ptr]
                         .composition
@@ -5324,7 +5327,7 @@ impl<'a> GlobalSelection<'a> {
     /// Keep `target`'s own operator and assemble each child independently,
     /// so a selected summary remains visible beneath a relational operator
     /// that has no summary realization of its own instead of being
-    /// swallowed by one opaque kept subtree. Every child that is a
+    /// swallowed by one opaque kept sub-DAG. Every child that is a
     /// discovered target is assembled (and finalized to query-time values);
     /// any other child is kept as it is. The guarantee is composed from the
     /// assembled children: all exact → exact; exactly one child → that
@@ -5384,8 +5387,8 @@ impl<'a> GlobalSelection<'a> {
         }
         // An operator that computes new values from its input rows has no
         // sound accuracy composition over an approximate input (e.g. `max`
-        // over a quantile readout's rank error). Without a selected
-        // composition such a node stays an exact pre-ASAP subtree; only the
+        // over a quantile evaluation's rank error). Without a selected
+        // composition such a node stays an exact pre-ASAP sub-DAG; only the
         // read-time nested SUM keeps its assembled children.
         let computes_values = matches!(
             target.non_asap(),
@@ -5463,7 +5466,7 @@ impl<'a> GlobalSelection<'a> {
 
 /// A mergeable outer SUM over a relationally wrapped aggregate is a read-time
 /// reduction of the inner summary values. Maintaining the outer SUM directly
-/// would hide that inner temporal aggregate inside one kept subtree and lose
+/// would hide that inner temporal aggregate inside one kept sub-DAG and lose
 /// its independently selected summary.
 fn query_time_nested_sum(target: &OperatorNode) -> bool {
     let Some(NonASAPOp::Aggregate {
@@ -5549,7 +5552,7 @@ fn relink_agg_child(node: &Rc<OperatorNode>, new_child: &Rc<OperatorNode>) -> Rc
 }
 
 /// The maintained `SummaryAgg` a bound summary candidate builds (under
-/// its `SummaryEstimate` readout, if any) — the summary an `ValueOperationAtIngestionTime`
+/// its `SummaryEstimate` evaluation, if any) — the summary an `ValueOperationAtIngestionTime`
 /// beneath it feeds, for `maintenance_operation_plan_cost_rate`.
 fn maintained_summary(node: &Rc<OperatorNode>) -> Option<&Rc<OperatorNode>> {
     match &node.operator {
@@ -5589,7 +5592,7 @@ struct CompositionOption<'a> {
 /// composed-plan rate is *known* and beats the raw-recompute baseline —
 /// costed against each compatible child candidate already in `CandidateLogicalASAPDAGs`
 /// (or the one an earlier parent committed). Unknown statistics yield no
-/// option at all: the conservative kept-subtree path stays.
+/// option at all: the conservative kept-sub-DAG path stays.
 fn composition_options<'a>(
     group: &'a TargetSubDAGCandidates,
     groups: &'a HashMap<*const OperatorNode, TargetSubDAGCandidates>,
@@ -5647,7 +5650,7 @@ fn composition_options<'a>(
                     if !is_automatically_selectable(child_candidate, cost_model) {
                         continue;
                     }
-                    let Replacement::Subtree(summary) = &child_candidate.replacement else {
+                    let Replacement::SubDag(summary) = &child_candidate.replacement else {
                         continue;
                     };
                     if is_logical_rewrite(summary) || !composition.accepts_child(summary) {
@@ -5715,7 +5718,7 @@ impl<Id> CandidateLogicalASAPDAGs<Id> {
     /// "Whole-plan (cross-group) selection" section describes: one
     /// [`TargetSubDAGSelection`] per discovered site, each ranked against an
     /// `effective_consumer_count` that accounts for every ancestor
-    /// [`SharedSubtreeStrategy`] decision on the path to it — unlike
+    /// [`SharedSubDagStrategy`] decision on the path to it — unlike
     /// [`Self::cost_sorted`], whose per-group ranking only ever sees a
     /// group's own raw [`TargetSubDAGCandidates::consumer_count`].
     /// Uncertified DDSketch ratios remain in [`CandidateLogicalASAPDAGs`] for downstream
@@ -5987,7 +5990,7 @@ impl<Id> CandidateLogicalASAPDAGs<Id> {
             // Record the maintained summary this site's bound candidate
             // builds, for a child that may compose an `ValueOperationAtIngestionTime`
             // beneath it.
-            if let (Some(Replacement::Subtree(node)), Some(NonASAPOp::Aggregate { child, .. })) =
+            if let (Some(Replacement::SubDag(node)), Some(NonASAPOp::Aggregate { child, .. })) =
                 (chosen.map(|c| &c.replacement), group.target.non_asap())
             {
                 if let Some(summary) = maintained_summary(node) {
@@ -6000,7 +6003,7 @@ impl<Id> CandidateLogicalASAPDAGs<Id> {
             let outgoing_multiplier = multiplier(*ptr, &effective_uses, &chosen_share);
             match chosen {
                 Some(ReplacementSubDAG {
-                    replacement: Replacement::Subtree(source),
+                    replacement: Replacement::SubDag(source),
                     provenance: ReplacementProvenance::AccuracyReconciliation,
                     ..
                 }) => {
@@ -6013,10 +6016,10 @@ impl<Id> CandidateLogicalASAPDAGs<Id> {
                 }
                 _ => {
                     let selected_rewrite = match chosen.map(|candidate| &candidate.replacement) {
-                        Some(Replacement::Subtree(rewrite)) if is_logical_rewrite(rewrite) => {
+                        Some(Replacement::SubDag(rewrite)) if is_logical_rewrite(rewrite) => {
                             rewrite
                         }
-                        Some(Replacement::Subtree(_) | Replacement::ExactComposition(_)) | None => {
+                        Some(Replacement::SubDag(_) | Replacement::ExactComposition(_)) | None => {
                             &group.target
                         }
                     };
@@ -6071,7 +6074,7 @@ fn is_automatically_selectable(candidate: &ReplacementSubDAG, cost_model: &dyn C
 ///   chose [`ShareDecision::RecomputeIndependently`] (each of its own uses
 ///   gets its own independent execution, so referencing it costs as much as
 ///   its *own* full multiplicity), or it has no Share/Recompute decision at
-///   all (not a [`SharedSubtreeStrategy`] shape — nothing here collapses
+///   all (not a [`SharedSubDagStrategy`] shape — nothing here collapses
 ///   its multiplicity to one, so whatever multiplicity *its* ancestors
 ///   established simply passes through).
 ///
@@ -6108,7 +6111,7 @@ fn cse_candidate_pair(
     for candidate in &group.candidates {
         match candidate.provenance {
             ReplacementProvenance::CseShare => {
-                let Replacement::Subtree(rc) = &candidate.replacement else {
+                let Replacement::SubDag(rc) = &candidate.replacement else {
                     return None;
                 };
                 if !Rc::ptr_eq(rc, &group.target) || share.replace(candidate).is_some() {
@@ -6116,7 +6119,7 @@ fn cse_candidate_pair(
                 }
             }
             ReplacementProvenance::CseRecompute => {
-                let Replacement::Subtree(rc) = &candidate.replacement else {
+                let Replacement::SubDag(rc) = &candidate.replacement else {
                     return None;
                 };
                 if Rc::ptr_eq(rc, &group.target)
@@ -6173,7 +6176,7 @@ fn decide_group_with_recurrence(
     ))
 }
 
-/// The [`SharedSubtreeStrategy`] candidate matching `decision`: the one
+/// The [`SharedSubDagStrategy`] candidate matching `decision`: the one
 /// that shares `group.target`'s own `Rc` for [`ShareDecision::Share`], the
 /// freshly-allocated one for [`ShareDecision::RecomputeIndependently`] —
 /// the same `Rc`-identity distinction [`is_duplicate_rewrite`]'s own doc
@@ -6196,7 +6199,7 @@ fn pick_shared_subtree_candidate(
 /// maps (which only track *aggregate* reference counts, not per-parent
 /// breakdown or direction) rather than extending that already-reviewed,
 /// already-tested pass. Same "small duplicated traversal over reshaping
-/// proven code" call as [`is_shared_subtree_group`].
+/// proven code" call as [`is_shared_sub-DAG_group`].
 struct ReferenceGraph {
     /// child ptr -> `(parent ptr, edge count from that one parent)`, for
     /// every direct operator-child edge in the relational-skeleton scope
@@ -6239,7 +6242,7 @@ fn reference_graph<Id>(space: &CandidateLogicalASAPDAGs<Id>) -> ReferenceGraph {
         let group = &space.groups[ptr];
         record_possible_edges(*ptr, &group.target, &mut graph);
         for candidate in &group.candidates {
-            if let Replacement::Subtree(rewrite) = &candidate.replacement {
+            if let Replacement::SubDag(rewrite) = &candidate.replacement {
                 if !is_logical_rewrite(rewrite) {
                     continue;
                 }
@@ -6382,10 +6385,10 @@ fn topological_order(
 /// included here (issue #253) even though it's a
 /// [`Replacement::Rewrite`]-only strategy with no [`CostModel`] of its own to
 /// plug in — it's context-free (`matches`/`replacements` need nothing beyond
-/// the target itself) exactly like [`SharedSubtreeStrategy`], so it belongs
+/// the target itself) exactly like [`SharedSubDagStrategy`], so it belongs
 /// in this list rather than being derived per-workload the way
 /// [`RollupStrategy`] is. Rewriting `avg` into `sum`/`count` upfront is what
-/// lets [`SketchAlgorithmStrategy`] and [`SharedSubtreeStrategy`] see a
+/// lets [`SketchAlgorithmStrategy`] and [`SharedSubDagStrategy`] see a
 /// mergeable accumulator to sketch or share at all — see that module's own
 /// doc comment for why a bare `avg` node otherwise never becomes a
 /// [`ReplacementStrategy`] target for anything.
@@ -6393,7 +6396,7 @@ pub fn default_strategies() -> Vec<Box<dyn ReplacementStrategy>> {
     vec![
         Box::new(SketchAlgorithmStrategy::default_cost_model()),
         Box::new(HydraGroupingStrategy::default_cost_model()),
-        Box::new(SharedSubtreeStrategy),
+        Box::new(SharedSubDagStrategy),
         Box::new(crate::rewrite::AvgToSumOverCountStrategy),
         Box::new(ExactCompositionStrategy::default_cost_model()),
     ]
@@ -6408,7 +6411,7 @@ pub fn default_strategies_with<'a>(
     vec![
         Box::new(SketchAlgorithmStrategy::new(cost_model)),
         Box::new(HydraGroupingStrategy::new(cost_model)),
-        Box::new(SharedSubtreeStrategy),
+        Box::new(SharedSubDagStrategy),
         Box::new(crate::rewrite::SemanticEquivalentRewriteStrategy),
         Box::new(ExactCompositionStrategy::new(cost_model)),
     ]
@@ -6439,7 +6442,7 @@ pub fn default_strategies_with_evidence<'a>(
                 evidence,
             ),
         ),
-        Box::new(SharedSubtreeStrategy),
+        Box::new(SharedSubDagStrategy),
         Box::new(crate::rewrite::AvgToSumOverCountStrategy),
         Box::new(ExactCompositionStrategy::new(cost_model)),
     ]
@@ -6465,7 +6468,7 @@ pub fn search_workload<Id>(roots: Vec<(Id, Rc<OperatorNode>)>) -> CandidateLogic
 /// [`RollupStrategy`] is derived and added automatically after CSE for both
 /// entry points, because only this function owns the post-CSE sibling set.
 ///
-/// Runs [`share_common_subtrees`] once over `roots` first — so every
+/// Runs [`share_common_subdags`] once over `roots` first — so every
 /// strategy (and, transitively, every
 /// [`crate::explanation::ReplacementExplanation`] a caller reads off the
 /// result) sees the same already-deduplicated tree — then discovers every
@@ -6489,7 +6492,7 @@ pub fn search_workload_with<'s, Id>(
 /// [`search_workload_with`] plus a per-root end-to-end `AccuracyTarget`
 /// (issue #172) — the workload's `QueryRequirements.accuracy`, threaded
 /// alongside each root. After the search, every root that carries a target
-/// has its group's bound-summary [`Replacement::Subtree`] candidates checked with
+/// has its group's bound-summary [`Replacement::SubDag`] candidates checked with
 /// `accuracy_model`'s [`AccuracyModel::satisfies`]: a candidate whose
 /// guarantee is fully known and misses the target is moved from
 /// [`TargetSubDAGCandidates::candidates`] to [`TargetSubDAGCandidates::rejected`] *before*
@@ -6499,7 +6502,7 @@ pub fn search_workload_with<'s, Id>(
 /// selection does not commit it. An exact target cannot accept an unknown
 /// approximate summary. A kept pre-ASAP candidate is
 /// exact and always survives — the raw/pre-ASAP alternative is what an
-/// unsatisfiable root keeps. Logical-rewrite [`Replacement::Subtree`]
+/// unsatisfiable root keeps. Logical-rewrite [`Replacement::SubDag`]
 /// candidates are not bound values and are left alone; the targets *inside*
 /// a rewrite are their own groups.
 ///
@@ -6562,8 +6565,8 @@ pub fn search_workload_with_targets<'s, Id>(
                 .candidates
                 .drain(..)
                 .partition(|candidate| match &candidate.replacement {
-                    Replacement::Subtree(node) if is_logical_rewrite(node) => true,
-                    Replacement::Subtree(node) => node.guarantee.as_ref().map_or_else(
+                    Replacement::SubDag(node) if is_logical_rewrite(node) => true,
+                    Replacement::SubDag(node) => node.guarantee.as_ref().map_or_else(
                         || !matches!(target, AccuracyTarget::Exact),
                         |g| accuracy_model.satisfies(&g.optimistic_floor(), &target),
                     ),
@@ -6574,7 +6577,7 @@ pub fn search_workload_with_targets<'s, Id>(
         group.candidates = legal;
         group.rejected.extend(illegal.into_iter().map(|candidate| {
             let (metric, bound, failure_probability) = match &candidate.replacement {
-                Replacement::Subtree(node) => node
+                Replacement::SubDag(node) => node
                     .guarantee
                     .as_ref()
                     .map(|g| {
@@ -6613,7 +6616,7 @@ pub fn search_workload_with_targets<'s, Id>(
 
 /// The strictest accuracy among `siblings` that read the same summary input
 /// as `root` — same child, grouping and filters, and the same intent apart
-/// from its accuracy (and a quantile's rank, a readout parameter) — when
+/// from its accuracy (and a quantile's rank, a evaluation parameter) — when
 /// stricter than `root`'s own. One summary sized for the strictest consumer
 /// serves every sibling: #509's summary-capability rule.
 fn strictest_sibling_accuracy(
@@ -6680,7 +6683,7 @@ fn strictest_sibling_accuracy(
 }
 
 fn cse_workload<Id>(roots: Vec<(Id, Rc<OperatorNode>)>) -> Vec<(Id, Rc<OperatorNode>)> {
-    share_common_subtrees(roots)
+    share_common_subdags(roots)
 }
 
 fn search_cse_workload_with<'s, Id>(
@@ -6740,7 +6743,7 @@ fn search_cse_workload_with<'s, Id>(
             "search_workload: fixpoint search did not converge within {MAX_SEARCH_ITERATIONS} \
              rounds — a registered ReplacementStrategy's Replacement::Rewrite candidates keep \
              exposing new, never-before-seen descendant structure every round. \
-             SketchAlgorithmStrategy/SharedSubtreeStrategy never do this (see replacement.rs's \
+             SketchAlgorithmStrategy/SharedSubDagStrategy never do this (see replacement.rs's \
              module docs' \"Termination\" section); check any custom strategies passed to \
              search_workload_with.",
         );
@@ -6803,7 +6806,7 @@ fn search_cse_workload_with<'s, Id>(
             }
 
             for candidate in &proposed {
-                if let Replacement::Subtree(rc) = &candidate.replacement {
+                if let Replacement::SubDag(rc) = &candidate.replacement {
                     if is_logical_rewrite(rc) {
                         discover_new_descendant_targets(rc, &mut order, &mut nodes, &mut counts);
                     }
@@ -6844,7 +6847,7 @@ fn search_cse_workload_with<'s, Id>(
 /// Materialize share/recompute alternatives for descendants whose raw edge
 /// count is one but whose effective count can exceed one when a repeated
 /// ancestor is recomputed. We only do this when an ordinary repeated group
-/// proves that `SharedSubtreeStrategy` is part of this search's strategy set.
+/// proves that `SharedSubDagStrategy` is part of this search's strategy set.
 fn add_effective_count_cse_candidates(
     order: &[*const OperatorNode],
     groups: &mut HashMap<*const OperatorNode, TargetSubDAGCandidates>,
@@ -6860,7 +6863,7 @@ fn add_effective_count_cse_candidates(
             }
         }
         for candidate in &group.candidates {
-            if let Replacement::Subtree(rewrite) = &candidate.replacement {
+            if let Replacement::SubDag(rewrite) = &candidate.replacement {
                 if !is_logical_rewrite(rewrite) {
                     continue;
                 }
@@ -6899,14 +6902,14 @@ fn add_effective_count_cse_candidates(
         if potentially_repeated.contains(ptr) && cse_candidate_pair(group).is_none() {
             let target = Rc::clone(&group.target);
             let site = TargetSubDAG::with_consumer_count(&target, 2);
-            for mut candidate in SharedSubtreeStrategy.replacements(&site) {
+            for mut candidate in SharedSubDagStrategy.replacements(&site) {
                 candidate.rationale = format!(
                     "{}: this subtree can become repeated when a repeated ancestor is recomputed; \
                      global_selection decides using its effective consumer count",
                     match candidate.provenance {
                         ReplacementProvenance::CseShare => "build once and share",
                         ReplacementProvenance::CseRecompute => "recompute independently",
-                        _ => unreachable!("SharedSubtreeStrategy only emits CSE candidates"),
+                        _ => unreachable!("SharedSubDagStrategy only emits CSE candidates"),
                     }
                 );
                 group.add_candidate(candidate);
@@ -6968,7 +6971,7 @@ fn walk(
 
 /// `node`'s own operator children ([`OperatorNode::children`]: operator
 /// inputs plus the operator nodes its scalar expressions read), the same
-/// scope `asap_types::ir::cse::share_common_subtrees` itself uses and
+/// scope `asap_types::ir::cse::share_common_subdags` itself uses and
 /// `tests::count_consumers` mirrors for its own fixtures. `Concat` is
 /// transparent: its branches are walked in place of it.
 fn walk_children(
@@ -6994,12 +6997,13 @@ mod tests {
     use crate::accuracy::PropagationStats;
     use crate::cost_model::Cost;
     use crate::test_support::{agg, agg_per_entity, lower_promql, metric_scan, timed};
+    use asap_types::ir::operator_properties::{Reduction as ReductionTy, Source};
     use asap_types::ir::TimeRangeKind;
     use asap_types::pre_asap::agg_intent::{
         agg_is_exact, default_cardinality, default_quantile, MathFunc, TimeFunc,
     };
     use asap_types::pre_asap::schema::{DataType, Field, Schema as SchemaTy};
-    use asap_types::pre_asap::vocabulary::{Reduction as ReductionTy, Source};
+
     use asap_types::types::AccuracyTarget;
     use std::collections::HashMap;
 
@@ -7045,7 +7049,7 @@ mod tests {
         }
     }
 
-    // Grouped Sum over Rate readouts stays a summary state in the inventory,
+    // Grouped Sum over Rate evaluations stays a summary state in the inventory,
     // so lifecycle assignment can place it in precompute or at query time.
     #[test]
     fn grouped_rate_sum_inventory_keeps_sum_state_for_lifecycle_placement() {
@@ -7070,7 +7074,7 @@ mod tests {
         }));
     }
 
-    // Every exposed query result has a readout; internal accumulator frontiers stay states.
+    // Every exposed query result has a evaluation; internal accumulator frontiers stay states.
     #[test]
     fn query_candidate_roots_do_not_leak_exact_accumulator_state() {
         for query in [
@@ -7084,7 +7088,7 @@ mod tests {
             assert!(!inventory.candidates.is_empty());
             let strategy = SketchAlgorithmStrategy::new(&DefaultCostModel);
             for candidate in strategy.propose(&TargetSubDAG::new(&root)).candidates {
-                if let Replacement::Subtree(node) = candidate.replacement {
+                if let Replacement::SubDag(node) = candidate.replacement {
                     let output = finalize_query_candidate(node, &root).unwrap();
                     assert!(
                         output
@@ -7232,7 +7236,7 @@ mod tests {
         let operator = candidates
             .iter()
             .find_map(|c| match &c.replacement {
-                Replacement::Subtree(node) => match &node.operator {
+                Replacement::SubDag(node) => match &node.operator {
                     Operator::NonASAP(NonASAPOp::BinaryOp { operator, .. }) => Some(operator),
                     _ => None,
                 },
@@ -7400,7 +7404,7 @@ mod tests {
                 crate::test_support::scan("n", metric_scan(&["job"]).schema.clone()),
             );
             OperatorNode::non_asap_node(NonASAPOp::Join {
-                kind: asap_types::pre_asap::vocabulary::JoinKind::Inner,
+                kind: asap_types::ir::operator_properties::JoinKind::Inner,
                 pred: equi_pred(0, 2),
                 left,
                 right,
@@ -7997,7 +8001,7 @@ mod tests {
         );
     }
 
-    // ── SketchAlgorithmStrategy / SharedSubtreeStrategy fixtures ───────────
+    // ── SketchAlgorithmStrategy / SharedSubDagStrategy fixtures ───────────
 
     // ── SketchAlgorithmStrategy ─────────────────────────────────────────────
 
@@ -8066,7 +8070,7 @@ mod tests {
         let kinds: Vec<SketchAlgorithm> = replacements
             .iter()
             .map(|r| match &r.replacement {
-                Replacement::Subtree(node) => summary_family_algorithm(node),
+                Replacement::SubDag(node) => summary_family_algorithm(node),
                 Replacement::ExactComposition(_) => {
                     panic!("expected a Summary replacement")
                 }
@@ -8088,7 +8092,7 @@ mod tests {
         let kinds: Vec<SketchAlgorithm> = replacements
             .iter()
             .map(|r| match &r.replacement {
-                Replacement::Subtree(node) => summary_family_algorithm(node),
+                Replacement::SubDag(node) => summary_family_algorithm(node),
                 Replacement::ExactComposition(_) => {
                     panic!("expected a Summary replacement")
                 }
@@ -8119,7 +8123,7 @@ mod tests {
             .replacements(&TargetSubDAG::new(&q))
             .iter()
             .map(|r| match &r.replacement {
-                Replacement::Subtree(node) => summary_family_algorithm(node),
+                Replacement::SubDag(node) => summary_family_algorithm(node),
                 Replacement::ExactComposition(_) => {
                     panic!("expected a Summary replacement")
                 }
@@ -8151,7 +8155,7 @@ mod tests {
         assert_eq!(replacements.len(), 1, "{replacements:?}");
         assert!(matches!(
             &replacements[0].replacement,
-            Replacement::Subtree(node) if !node.contains_asap()
+            Replacement::SubDag(node) if !node.contains_asap()
         ));
         assert!(replacements[0].rationale.contains("only realization"));
     }
@@ -8164,7 +8168,7 @@ mod tests {
         assert_eq!(replacements.len(), 1, "{replacements:?}");
         assert!(matches!(
             &replacements[0].replacement,
-            Replacement::Subtree(node) if matches!(
+            Replacement::SubDag(node) if matches!(
                 node.operator,
                 Operator::ASAP(ASAPOp::SummaryAgg { .. })
             )
@@ -8200,7 +8204,7 @@ mod tests {
         let kinds: Vec<SketchAlgorithm> = replacements
             .iter()
             .map(|r| match &r.replacement {
-                Replacement::Subtree(node) => summary_family_algorithm(node),
+                Replacement::SubDag(node) => summary_family_algorithm(node),
                 Replacement::ExactComposition(_) => {
                     panic!("expected a Summary replacement")
                 }
@@ -8236,7 +8240,7 @@ mod tests {
 
         assert_eq!(replacements.len(), 2, "{replacements:?}");
         assert!(replacements.iter().all(|candidate| {
-            matches!(&candidate.replacement, Replacement::Subtree(n) if n.contains_asap())
+            matches!(&candidate.replacement, Replacement::SubDag(n) if n.contains_asap())
         }));
         // The inner target is still independently enumerated and ranked —
         // a custom cost model that prefers DDSketch for it is honored, and
@@ -8255,7 +8259,7 @@ mod tests {
             .candidates
             .iter()
             .filter_map(|c| match &c.replacement {
-                Replacement::Subtree(node) => sketch_kind_of(node),
+                Replacement::SubDag(node) => sketch_kind_of(node),
                 _ => None,
             })
             .collect();
@@ -8282,28 +8286,28 @@ mod tests {
         }
     }
 
-    // ── SharedSubtreeStrategy ────────────────────────────────────────────
+    // ── SharedSubDagStrategy ────────────────────────────────────────────
 
     #[test]
     fn does_not_match_a_single_consumer_target() {
         let q = agg(vec![2], AggIntent::Sum { col: None }, metric_scan(&["job"]));
         let target = TargetSubDAG::new(&q);
         assert_eq!(target.consumer_count, 1);
-        assert!(!SharedSubtreeStrategy.matches(&target));
-        assert!(SharedSubtreeStrategy.replacements(&target).is_empty());
+        assert!(!SharedSubDagStrategy.matches(&target));
+        assert!(SharedSubDagStrategy.replacements(&target).is_empty());
     }
 
     #[test]
     fn two_or_more_consumers_yields_the_share_vs_independent_pair() {
         let q = agg(vec![2], AggIntent::Sum { col: None }, metric_scan(&["job"]));
         let target = TargetSubDAG::with_consumer_count(&q, 2);
-        assert!(SharedSubtreeStrategy.matches(&target));
+        assert!(SharedSubDagStrategy.matches(&target));
 
-        let replacements = SharedSubtreeStrategy.replacements(&target);
+        let replacements = SharedSubDagStrategy.replacements(&target);
         assert_eq!(replacements.len(), 2, "{replacements:?}");
 
         let shared = match &replacements[0].replacement {
-            Replacement::Subtree(rc) => rc,
+            Replacement::SubDag(rc) => rc,
             other => panic!("expected a Rewrite replacement, got {other:?}"),
         };
         assert!(
@@ -8313,7 +8317,7 @@ mod tests {
         assert!(replacements[0].rationale.contains("build once and share"));
 
         let independent = match &replacements[1].replacement {
-            Replacement::Subtree(rc) => rc,
+            Replacement::SubDag(rc) => rc,
             other => panic!("expected a Rewrite replacement, got {other:?}"),
         };
         assert!(
@@ -8331,7 +8335,7 @@ mod tests {
     fn three_consumers_are_reported_verbatim_in_both_rationales() {
         let q = agg(vec![2], AggIntent::Sum { col: None }, metric_scan(&["job"]));
         let target = TargetSubDAG::with_consumer_count(&q, 3);
-        let replacements = SharedSubtreeStrategy.replacements(&target);
+        let replacements = SharedSubDagStrategy.replacements(&target);
         assert!(replacements[0].rationale.contains('3'));
         assert!(replacements[1].rationale.contains('3'));
     }
@@ -8339,7 +8343,7 @@ mod tests {
     /// Builds realistic multi-consumer `TargetSubDAG`s the same way this
     /// module's own [`discover_targets`]/`walk` does: dedup by `Rc::as_ptr`,
     /// walking only the relational-skeleton operator children
-    /// `asap_types::ir::cse::share_common_subtrees` itself scopes to,
+    /// `asap_types::ir::cse::share_common_subdags` itself scopes to,
     /// so a shared node nested below another shared node is only ever
     /// counted at the highest (maximal) point sharing starts. Test-only:
     /// this module deliberately does not ship a workload-wide discovery
@@ -8374,12 +8378,12 @@ mod tests {
 
     #[test]
     fn realistic_cse_output_produces_a_two_consumer_target() {
-        // Two workload roots that `share_common_subtrees` collapses onto one
+        // Two workload roots that `share_common_subdags` collapses onto one
         // Rc (mirrors `explanation`'s and `cse`'s own fixtures): a grouped
         // Sum aggregate over the same scan, built independently at each root.
         let a = agg(vec![2], AggIntent::Sum { col: None }, metric_scan(&["job"]));
         let b = agg(vec![2], AggIntent::Sum { col: None }, metric_scan(&["job"]));
-        let shared = asap_types::ir::cse::share_common_subtrees(vec![("a", a), ("b", b)]);
+        let shared = asap_types::ir::cse::share_common_subdags(vec![("a", a), ("b", b)]);
         let [(_, ra), (_, rb)] = shared.as_slice() else {
             panic!("expected 2 roots");
         };
@@ -8391,8 +8395,8 @@ mod tests {
         assert_eq!(count, 2);
 
         let target = TargetSubDAG::with_consumer_count(&roots[0], count);
-        assert!(SharedSubtreeStrategy.matches(&target));
-        assert_eq!(SharedSubtreeStrategy.replacements(&target).len(), 2);
+        assert!(SharedSubDagStrategy.matches(&target));
+        assert_eq!(SharedSubDagStrategy.replacements(&target).len(), 2);
     }
 
     // ── search_workload / CandidateLogicalASAPDAGs / TargetSubDAGCandidates (merged from search.rs) ──
@@ -8433,13 +8437,13 @@ mod tests {
         assert!(agg_group
             .candidates
             .iter()
-            .all(|c| matches!(&c.replacement, Replacement::Subtree(n) if n.contains_asap())));
+            .all(|c| matches!(&c.replacement, Replacement::SubDag(n) if n.contains_asap())));
         assert_eq!(
             agg_group
                 .candidates
                 .iter()
                 .filter(|candidate| {
-                    let Replacement::Subtree(node) = &candidate.replacement else {
+                    let Replacement::SubDag(node) = &candidate.replacement else {
                         return false;
                     };
                     let Operator::ASAP(ASAPOp::SummaryEstimate { summary_input, .. }) =
@@ -8496,7 +8500,7 @@ mod tests {
         assert_eq!(agg_group.candidates.len(), 4);
         assert!(agg_group.candidates.iter().any(|candidate| matches!(
             &candidate.replacement,
-            Replacement::Subtree(node) if node.guarantee.is_none()
+            Replacement::SubDag(node) if node.guarantee.is_none()
                 && candidate.has_missing_accuracy_evidence()
         )));
 
@@ -8521,7 +8525,7 @@ mod tests {
             .iter()
             .any(|candidate| matches!(
                 &candidate.replacement,
-                Replacement::Subtree(node) if node.guarantee.is_none()
+                Replacement::SubDag(node) if node.guarantee.is_none()
                     && candidate.has_missing_accuracy_evidence()
             )));
         assert!(!targeted
@@ -8551,10 +8555,10 @@ mod tests {
     #[test]
     fn shared_aggregate_across_two_roots_gets_both_strategies_candidates() {
         // Two independently-built, structurally identical Sum aggregates:
-        // share_common_subtrees (run inside search_workload) collapses them
+        // share_common_subdags (run inside search_workload) collapses them
         // onto one Rc with consumer_count 2, so this single group should
         // carry SketchAlgorithmStrategy's one ExactAggregate candidate *and*
-        // SharedSubtreeStrategy's share-vs-recompute pair.
+        // SharedSubDagStrategy's share-vs-recompute pair.
         let a = agg(vec![2], AggIntent::Sum { col: None }, metric_scan(&["job"]));
         let b = agg(vec![2], AggIntent::Sum { col: None }, metric_scan(&["job"]));
         let space = search_workload(vec![("a", a), ("b", b)]);
@@ -8576,12 +8580,12 @@ mod tests {
         let summary_count = group
             .candidates
             .iter()
-            .filter(|c| matches!(&c.replacement, Replacement::Subtree(n) if n.contains_asap()))
+            .filter(|c| matches!(&c.replacement, Replacement::SubDag(n) if n.contains_asap()))
             .count();
         let rewrite_count = group
             .candidates
             .iter()
-            .filter(|c| matches!(&c.replacement, Replacement::Subtree(n) if !n.contains_asap()))
+            .filter(|c| matches!(&c.replacement, Replacement::SubDag(n) if !n.contains_asap()))
             .count();
         assert_eq!(summary_count, 1);
         assert_eq!(rewrite_count, 2);
@@ -8590,11 +8594,11 @@ mod tests {
         // (the "false-positive dedup" failure mode `is_duplicate_rewrite`
         // exists to prevent).
         let one_is_the_target = group.candidates.iter().any(
-            |c| matches!(&c.replacement, Replacement::Subtree(rc) if Rc::ptr_eq(rc, &group.target)),
+            |c| matches!(&c.replacement, Replacement::SubDag(rc) if Rc::ptr_eq(rc, &group.target)),
         );
-        let one_is_not = group.candidates.iter().any(|c| {
-            matches!(&c.replacement, Replacement::Subtree(rc) if !Rc::ptr_eq(rc, &group.target))
-        });
+        let one_is_not = group.candidates.iter().any(
+            |c| matches!(&c.replacement, Replacement::SubDag(rc) if !Rc::ptr_eq(rc, &group.target)),
+        );
         assert!(one_is_the_target && one_is_not);
     }
 
@@ -8630,7 +8634,7 @@ mod tests {
             "2 distinct Filters + 1 shared Aggregate + 1 shared Scan"
         );
 
-        // `share_common_subtrees` re-clones+re-interns anything that already
+        // `share_common_subdags` re-clones+re-interns anything that already
         // had more than one owner going in (see `cse.rs`'s own doc on
         // `intern_child`'s clone-fallback path) — so the post-CSE shared
         // node is a *fresh* Rc, structurally equal to (but not the same
@@ -8661,7 +8665,7 @@ mod tests {
             .expect("shared node must be a discovered target");
         assert_eq!(group.consumer_count, 2);
         assert!(
-            SharedSubtreeStrategy.matches(&TargetSubDAG::with_consumer_count(
+            SharedSubDagStrategy.matches(&TargetSubDAG::with_consumer_count(
                 post_cse_shared,
                 group.consumer_count
             ))
@@ -8672,7 +8676,7 @@ mod tests {
 
     #[test]
     fn add_candidate_rejects_a_true_rewrite_duplicate() {
-        // SharedSubtreeStrategy's `Replacement::Rewrite` candidates are
+        // SharedSubDagStrategy's `Replacement::Rewrite` candidates are
         // real `OperatorNode` values with `PartialEq`, so `add_candidate` can
         // (and must) actually reject a genuine repeat — unlike the
         // `Replacement::Summary` case (see the test below).
@@ -8680,7 +8684,7 @@ mod tests {
         let mut group = TargetSubDAGCandidates::new(Rc::clone(&root), 2);
         let target = TargetSubDAG::with_consumer_count(&root, 2);
         let mut inserted = 0;
-        for candidate in SharedSubtreeStrategy.replacements(&target) {
+        for candidate in SharedSubDagStrategy.replacements(&target) {
             if group.add_candidate(candidate) {
                 inserted += 1;
             }
@@ -8693,7 +8697,7 @@ mod tests {
         // structurally identical value, both already covered by
         // `is_duplicate_rewrite`.
         let mut re_inserted = 0;
-        for candidate in SharedSubtreeStrategy.replacements(&target) {
+        for candidate in SharedSubDagStrategy.replacements(&target) {
             if group.add_candidate(candidate) {
                 re_inserted += 1;
             }
@@ -8785,17 +8789,17 @@ mod tests {
             .unwrap();
         assert!(matches!(
             &ranked_group.candidates[0].replacement,
-            Replacement::Subtree(rc) if Rc::ptr_eq(rc, &group.target)
+            Replacement::SubDag(rc) if Rc::ptr_eq(rc, &group.target)
         ));
         let rewrites: Vec<&ReplacementSubDAG> = ranked_group
             .candidates
             .iter()
-            .filter(|c| matches!(&c.replacement, Replacement::Subtree(n) if !n.contains_asap()))
+            .filter(|c| matches!(&c.replacement, Replacement::SubDag(n) if !n.contains_asap()))
             .copied()
             .collect();
         assert_eq!(rewrites.len(), 2);
         let first_shares_target = match &rewrites[0].replacement {
-            Replacement::Subtree(rc) => Rc::ptr_eq(rc, &group.target),
+            Replacement::SubDag(rc) => Rc::ptr_eq(rc, &group.target),
             Replacement::ExactComposition(_) => false,
         };
         assert!(
@@ -8831,7 +8835,7 @@ mod tests {
             .unwrap();
         assert_eq!(agg_group.candidates.len(), 2);
         let first_kind = match &agg_group.candidates[0].replacement {
-            Replacement::Subtree(node) => sketch_kind_of(node),
+            Replacement::SubDag(node) => sketch_kind_of(node),
             Replacement::ExactComposition(_) => None,
         };
         assert_eq!(first_kind, Some(SketchAlgorithm::DDSketch));
@@ -8871,7 +8875,7 @@ mod tests {
                 .iter()
                 .find(|group| matches!(group.target.non_asap(), Some(NonASAPOp::Aggregate { .. })))
                 .expect("aggregate group");
-            let Replacement::Subtree(node) = &aggregate.candidates[0].replacement else {
+            let Replacement::SubDag(node) = &aggregate.candidates[0].replacement else {
                 panic!("grouping candidate must be a summary")
             };
             summary_grouping(node)
@@ -8922,9 +8926,9 @@ mod tests {
 
     // ── global_selection (issue #271) ───────────────────────────────────
 
-    /// A `CostModel` with a constant, `subtree`-independent recompute cost
+    /// A `CostModel` with a constant, `sub-DAG`-independent recompute cost
     /// and shared-maintenance cost, chosen (40 recompute-per-use, 100
-    /// maintenance) so that a `SharedSubtreeStrategy` group's
+    /// maintenance) so that a `SharedSubDagStrategy` group's
     /// `cse_share_decision` flips exactly between a consumer count of 2
     /// (recompute total 80, below maintenance: `RecomputeIndependently`)
     /// and a consumer count of 3 (recompute total 120, above
@@ -9067,7 +9071,7 @@ mod tests {
             .find(|g| matches!(g.target.non_asap(), Some(NonASAPOp::Aggregate { .. })))
             .unwrap();
         let kind = match &agg_group.chosen.unwrap().replacement {
-            Replacement::Subtree(node) => sketch_kind_of(node),
+            Replacement::SubDag(node) => sketch_kind_of(node),
             Replacement::ExactComposition(_) => None,
         };
         assert_eq!(kind, Some(SketchAlgorithm::DDSketch));
@@ -9097,19 +9101,19 @@ mod tests {
         group.candidates = vec![
             ReplacementSubDAG {
                 strategy: "TestStrategy",
-                replacement: Replacement::Subtree(Rc::clone(&target)),
+                replacement: Replacement::SubDag(Rc::clone(&target)),
                 provenance: ReplacementProvenance::CseShare,
                 rationale: "share".into(),
             },
             ReplacementSubDAG {
                 strategy: "TestStrategy",
-                replacement: Replacement::Subtree(Rc::new(target.as_ref().clone())),
+                replacement: Replacement::SubDag(Rc::new(target.as_ref().clone())),
                 provenance: ReplacementProvenance::CseRecompute,
                 rationale: "recompute".into(),
             },
             ReplacementSubDAG {
                 strategy: "TestStrategy",
-                replacement: Replacement::Subtree(
+                replacement: Replacement::SubDag(
                     OperatorNode::non_asap_node(NonASAPOp::PromqlVectorFromScalar(
                         ScalarExpr::EvalTimestamp,
                     ))
@@ -9140,9 +9144,9 @@ mod tests {
 
     #[test]
     fn effective_consumer_count_corrects_a_nested_groups_share_decision() {
-        // The interaction issue #271 describes: an outer shared subtree `a`
+        // The interaction issue #271 describes: an outer shared sub-DAG `a`
         // (referenced by 2 roots, so consumer_count == 2) wraps an inner
-        // shared subtree `c` (referenced once through `a`'s own child edge,
+        // shared sub-DAG `c` (referenced once through `a`'s own child edge,
         // plus once more directly by a third, separate root — so `c`'s own
         // *raw* structural consumer_count is also 2, independent of `a`).
         //
@@ -9153,11 +9157,11 @@ mod tests {
         //
         // `a` and `c` are both non-`Aggregate` nodes (`Filter`/`Dedup`) so
         // neither is bindable — each group is a *clean* two-candidate
-        // SharedSubtreeStrategy share-vs-recompute pair, with no
+        // SharedSubDagStrategy share-vs-recompute pair, with no
         // SketchAlgorithmStrategy `Summary` candidate mixed in to complicate
         // ranking (see `shared_aggregate_across_two_roots_gets_both_strategies_candidates`
         // for what a *mixed*-shape group looks like — deliberately avoided
-        // here to isolate the SharedSubtreeStrategy-only interaction).
+        // here to isolate the SharedSubDagStrategy-only interaction).
         //
         // Under ConstantCseCost, consumer_count == 2 loses to maintenance
         // (2 * 40 = 80 < 100 ⇒ RecomputeIndependently); consumer_count == 3 wins
@@ -9193,7 +9197,7 @@ mod tests {
         // Fixture sanity: root1/root2 merged onto one shared `a`, and `c`
         // (root1/root2's shared child, and root3 itself) merged onto one
         // shared `c` with raw consumer_count 2, and both groups are clean
-        // (non-mixed) two-candidate SharedSubtreeStrategy pairs.
+        // (non-mixed) two-candidate SharedSubDagStrategy pairs.
         assert!(Rc::ptr_eq(&space.roots[0].1, &space.roots[1].1));
         let a_rc = &space.roots[0].1;
         let Some(NonASAPOp::Filter { child: c_via_a, .. }) = a_rc.non_asap() else {
@@ -9230,7 +9234,7 @@ mod tests {
             .unwrap();
         let c_top_shares = matches!(
             &c_ranked.candidates[0].replacement,
-            Replacement::Subtree(rc) if Rc::ptr_eq(rc, c_via_a)
+            Replacement::SubDag(rc) if Rc::ptr_eq(rc, c_via_a)
         );
         assert!(
             !c_top_shares,
@@ -9251,7 +9255,7 @@ mod tests {
         );
         let a_shares = matches!(
             &a_selected.chosen.unwrap().replacement,
-            Replacement::Subtree(rc) if Rc::ptr_eq(rc, a_rc)
+            Replacement::SubDag(rc) if Rc::ptr_eq(rc, a_rc)
         );
         assert!(
             !a_shares,
@@ -9264,7 +9268,7 @@ mod tests {
         );
         let c_shares = matches!(
             &c_selected.chosen.unwrap().replacement,
-            Replacement::Subtree(rc) if Rc::ptr_eq(rc, c_via_a)
+            Replacement::SubDag(rc) if Rc::ptr_eq(rc, c_via_a)
         );
         assert!(
             c_shares,
@@ -9429,7 +9433,7 @@ mod tests {
             fn replacements(&self, _target: &TargetSubDAG<'_>) -> Vec<ReplacementSubDAG> {
                 vec![ReplacementSubDAG {
                     strategy: "ReplaceFilterChild",
-                    replacement: Replacement::Subtree(
+                    replacement: Replacement::SubDag(
                         OperatorNode::non_asap_node(NonASAPOp::Dedup {
                             cols: vec![0],
                             child: metric_scan(&["replacement"]),
@@ -9452,7 +9456,7 @@ mod tests {
         let space = search_workload_with(vec![("q", root)], &strategies);
         let root = &space.roots[0].1;
         let selected = space.global_selection(&DefaultCostModel);
-        let Replacement::Subtree(rewrite) = &selected
+        let Replacement::SubDag(rewrite) = &selected
             .for_target(root)
             .unwrap()
             .chosen
@@ -9530,7 +9534,7 @@ mod tests {
         assert!(candidates
             .iter()
             .any(|candidate| matches!(&candidate.replacement,
-            Replacement::Subtree(node) if matches!(&node.operator,
+            Replacement::SubDag(node) if matches!(&node.operator,
                 Operator::ASAP(ASAPOp::SummaryAgg { reduction: Reduction::Reduce(_), child, .. })
                     if !child.contains_asap()))));
         struct PreferComposed;
@@ -9549,7 +9553,7 @@ mod tests {
             ) -> Option<Cost> {
                 Some(Cost(
                     if matches!(&candidate.replacement,
-                    Replacement::Subtree(node) if matches!(&node.operator,
+                    Replacement::SubDag(node) if matches!(&node.operator,
                         Operator::ASAP(ASAPOp::SummaryAgg { reduction: Reduction::Reduce(_), child, .. })
                             if !child.contains_asap()))
                     {
@@ -9647,7 +9651,7 @@ mod tests {
 
     #[test]
     fn topological_order_puts_a_later_discovered_parent_before_its_child() {
-        // Mirrors nested_shared_subtree_below_an_unshared_parent_is_still_discovered's
+        // Mirrors nested_shared_sub-DAG_below_an_unshared_parent_is_still_discovered's
         // diamond fixture: discover_targets's own `order` visits root_b (a
         // parent of `shared`) *after* `shared` itself, because `shared` was
         // already fully walked via root_a first. A naive "process
@@ -9770,7 +9774,7 @@ mod tests {
             .unwrap();
             vec![ReplacementSubDAG {
                 strategy: "AlwaysGrowingStrategy",
-                replacement: Replacement::Subtree(outer_wrapper),
+                replacement: Replacement::SubDag(outer_wrapper),
                 provenance: ReplacementProvenance::LogicalRewrite,
                 rationale: format!("pathological candidate #{n}"),
             }]
@@ -9832,7 +9836,7 @@ mod tests {
         else {
             panic!("expected SummaryEstimate root, got {:?}", root.operator);
         };
-        assert!(matches!(query, PostAsapSketchQuery::Quantile { q } if *q == 0.99));
+        assert!(matches!(query, PostAsapSketchStatistic::Quantile { q } if *q == 0.99));
         // Estimate edge: plain row shape — group key + Float64 answer.
         assert_eq!(
             field(&root.schema, "quantile_0_99").dtype,
@@ -9945,8 +9949,8 @@ mod tests {
     /// A deployment-supplied `CostModel` can realize an `AggIntent::Extension`
     /// intent as a real sketch instead of the default `PassThrough` (issue
     /// #150) — `realizations_for_intent` must consult `realize_extension`
-    /// for the `Extension` arm, and `readout` must consult
-    /// `readout_extension` to build its `SketchQuery` without panicking.
+    /// for the `Extension` arm, and `evaluation` must consult
+    /// `evaluation_extension` to build its `SketchStatistic` without panicking.
     struct FrequencyCostModel;
 
     impl CostModel for FrequencyCostModel {
@@ -9972,15 +9976,15 @@ mod tests {
             }
         }
 
-        fn readout_extension(
+        fn evaluation_extension(
             &self,
             ext_kind: &str,
             payload: &serde_json::Value,
             _col: &ColumnRef,
-        ) -> PostAsapSketchQuery {
+        ) -> PostAsapSketchStatistic {
             assert_eq!(ext_kind, "frequency");
             let value = payload["item"].as_str().map(str::to_string);
-            PostAsapSketchQuery::PointCount {
+            PostAsapSketchStatistic::PointCount {
                 key: ColumnRef::Named("item".into()),
                 value,
             }
@@ -10019,7 +10023,7 @@ mod tests {
         };
         assert!(matches!(
             query,
-            PostAsapSketchQuery::PointCount { key: ColumnRef::Named(k), value: Some(v) }
+            PostAsapSketchStatistic::PointCount { key: ColumnRef::Named(k), value: Some(v) }
                 if k == "item" && v == "checkout"
         ));
 
@@ -10174,7 +10178,7 @@ mod tests {
         ));
         assert_eq!(child.timing, Some(ExecutionTiming::IngestionTime));
         let Operator::ASAP(ASAPOp::FinalizeExactAccumulator { child }) = &child.operator else {
-            panic!("expected explicit maintenance readout");
+            panic!("expected explicit maintenance evaluation");
         };
         let Operator::ASAP(ASAPOp::SummaryAgg {
             family: inner_family,
@@ -10240,7 +10244,7 @@ mod tests {
     fn pass_through_intents_stay_logical() {
         // avg is exact but non-mergeable; histogram_quantile (classic
         // buckets, #79) is never sketchable; exact quantile is exact by
-        // decree. All three stay whole logical subtrees.
+        // decree. All three stay whole logical sub-DAGs.
         for intent in [
             AggIntent::Avg { col: None },
             AggIntent::HistogramQuantile { q: 0.99, le: 0 },
@@ -10262,8 +10266,8 @@ mod tests {
 
     #[test]
     fn logical_parent_subsumes_bindable_child() {
-        // Filter over a bindable quantile: a kept non-ASAP subtree has no
-        // summary children, so the conservative fallback keeps the whole subtree
+        // Filter over a bindable quantile: a kept non-ASAP sub-DAG has no
+        // summary children, so the conservative fallback keeps the whole sub-DAG
         // logical.
         use asap_types::ir::Predicate;
         use asap_types::pre_asap::expr_ir::{CompareOpKind, ScalarValue};
@@ -10362,7 +10366,7 @@ mod tests {
         assert!(!proposals.is_empty());
         assert!(proposals.iter().any(|candidate| matches!(
             &candidate.replacement,
-            Replacement::Subtree(node) if node.guarantee.as_ref().is_some_and(|g|
+            Replacement::SubDag(node) if node.guarantee.as_ref().is_some_and(|g|
                 g.bound.evaluate().is_none()
                     && g.failure_probability.evaluate().is_none())
         )));
@@ -10375,7 +10379,7 @@ mod tests {
             &self,
             op: &CompositionOperator,
             _family: &FieldDataType,
-            _query: Option<&PostAsapSketchQuery>,
+            _query: Option<&PostAsapSketchStatistic>,
         ) -> PropagationStats {
             if matches!(op, CompositionOperator::TopKSelection) {
                 PropagationStats {
@@ -10423,7 +10427,7 @@ mod tests {
         assert!(!replacements.is_empty());
         assert!(replacements.iter().all(|candidate| matches!(
             &candidate.replacement,
-            Replacement::Subtree(node)
+            Replacement::SubDag(node)
                 if node.guarantee.as_ref().is_some_and(|g|
                     g.metric == ErrorMetric::TopKMembership
                         && g.failure_probability.evaluate() == Some(0.005))
@@ -10457,7 +10461,7 @@ mod tests {
         let node = candidates
             .iter()
             .find_map(|candidate| match &candidate.replacement {
-                Replacement::Subtree(node) if candidate.rationale.contains("CmsWithHeap") => {
+                Replacement::SubDag(node) if candidate.rationale.contains("CmsWithHeap") => {
                     Some(node)
                 }
                 _ => None,
@@ -10468,9 +10472,9 @@ mod tests {
             query,
         }) = &node.operator
         else {
-            panic!("expected Top-K readout")
+            panic!("expected Top-K evaluation")
         };
-        assert!(matches!(query, PostAsapSketchQuery::TopK { k: 10 }));
+        assert!(matches!(query, PostAsapSketchStatistic::TopK { k: 10 }));
         let Operator::ASAP(ASAPOp::SummaryAgg {
             child,
             family,
@@ -10531,7 +10535,7 @@ mod tests {
         let node = candidates
             .iter()
             .find_map(|candidate| match &candidate.replacement {
-                Replacement::Subtree(node)
+                Replacement::SubDag(node)
                     if candidate.rationale.contains("CountSketchWithHeap") =>
                 {
                     Some(node)
@@ -10544,9 +10548,9 @@ mod tests {
             query,
         }) = &node.operator
         else {
-            panic!("expected Top-K readout")
+            panic!("expected Top-K evaluation")
         };
-        assert!(matches!(query, PostAsapSketchQuery::TopK { k: 5 }));
+        assert!(matches!(query, PostAsapSketchStatistic::TopK { k: 5 }));
         let Operator::ASAP(ASAPOp::SummaryAgg { child, input, .. }) = &summary_input.operator
         else {
             panic!("expected fused summary aggregation")
@@ -10594,7 +10598,7 @@ mod tests {
         );
         let candidates = strategy.replacements(&TargetSubDAG::new(&outer));
         let input = candidates.iter().find_map(|candidate| {
-            let Replacement::Subtree(node) = &candidate.replacement else {
+            let Replacement::SubDag(node) = &candidate.replacement else {
                 return None;
             };
             let Operator::ASAP(ASAPOp::SummaryEstimate { summary_input, .. }) = &node.operator
@@ -10649,7 +10653,7 @@ mod tests {
             .replacements(&TargetSubDAG::new(&outer))
             .into_iter()
             .find_map(|candidate| match candidate.replacement {
-                Replacement::Subtree(node) => match &node.operator {
+                Replacement::SubDag(node) => match &node.operator {
                     Operator::ASAP(ASAPOp::SummaryEstimate { summary_input, .. }) => {
                         match &summary_input.operator {
                             Operator::ASAP(ASAPOp::SummaryAgg { input, .. }) => Some(input.clone()),
@@ -10701,7 +10705,7 @@ mod tests {
             .replacements(&TargetSubDAG::new(&outer))
             .into_iter()
             .find_map(|candidate| match candidate.replacement {
-                Replacement::Subtree(node) => match &node.operator {
+                Replacement::SubDag(node) => match &node.operator {
                     Operator::ASAP(ASAPOp::SummaryEstimate { summary_input, .. }) => {
                         match &summary_input.operator {
                             Operator::ASAP(ASAPOp::SummaryAgg {
@@ -10773,7 +10777,7 @@ mod tests {
         fn local_guarantee(
             &self,
             family: &FieldDataType,
-            query: &PostAsapSketchQuery,
+            query: &PostAsapSketchStatistic,
         ) -> Option<ResultGuarantee> {
             DefaultAccuracyModel.local_guarantee(family, query)
         }
@@ -10854,7 +10858,7 @@ mod tests {
                 rejection.error
             );
         }
-        // Fallback keeps the whole subtree pre-ASAP — executed exactly.
+        // Fallback keeps the whole sub-DAG pre-ASAP — executed exactly.
         let realized = realize_child(&outer, &DefaultCostModel).unwrap();
         assert!(!realized.contains_asap());
         assert!(realized
@@ -10878,14 +10882,14 @@ mod tests {
     #[test]
     fn exact_child_contributes_zero_error() {
         // quantile(0.9, sum by (job) (m)): KLL over an exact Sum accumulator
-        // — the readout's guarantee is exactly KLL's own local guarantee.
+        // — the evaluation's guarantee is exactly KLL's own local guarantee.
         let inner = agg(vec![2], AggIntent::Sum { col: None }, metric_scan(&["job"]));
         let outer = agg(vec![], default_quantile(0.9), inner);
         let root = realize(&outer).unwrap();
         let guarantee = root
             .guarantee
             .as_ref()
-            .expect("a readout carries a guarantee");
+            .expect("a evaluation carries a guarantee");
         assert_eq!(guarantee.metric, ErrorMetric::Rank);
         assert_eq!(
             guarantee.bound.evaluate(),
@@ -10913,9 +10917,9 @@ mod tests {
     }
 
     #[test]
-    fn exact_sum_can_consume_an_approximate_readout() {
+    fn exact_sum_can_consume_an_approximate_evaluation() {
         // sum(count_distinct by (job) (m)) is an outer exact summary over
-        // the inner HLL readout. Both summary levels remain explicit.
+        // the inner HLL evaluation. Both summary levels remain explicit.
         let inner = agg(vec![2], default_cardinality(), metric_scan(&["job"]));
         let outer = agg(vec![], AggIntent::Sum { col: None }, inner);
         let root = realize(&outer).unwrap();
@@ -10946,7 +10950,7 @@ mod tests {
     }
 
     #[test]
-    fn equal_split_allocation_supports_nested_summary_readouts() {
+    fn equal_split_allocation_supports_nested_summary_evaluations() {
         // A registered rank-additive rule and valid budget split make both
         // summary levels explicit while preserving the composed guarantee.
         let inner = agg(vec![2], quantile_eps(0.5, 0.1), metric_scan(&["job"]));
@@ -10960,7 +10964,7 @@ mod tests {
 
         assert!(!proposals.candidates.is_empty());
         assert!(proposals.candidates.iter().all(|candidate| {
-            let Replacement::Subtree(node) = &candidate.replacement else {
+            let Replacement::SubDag(node) = &candidate.replacement else {
                 return false;
             };
             matches!(
@@ -10991,12 +10995,12 @@ mod tests {
         assert!(group.candidates.iter().all(|c| match &c.replacement {
             // A summary candidate (old `Replacement::Summary`) contains an
             // ASAP node; a logical rewrite (old `Replacement::Rewrite`) does not.
-            Replacement::Subtree(node) if node.contains_asap() => {
+            Replacement::SubDag(node) if node.contains_asap() => {
                 node.guarantee.as_ref().is_some_and(|g| {
                     DefaultAccuracyModel.satisfies(g, &AccuracyTarget::Epsilon(0.1))
                 })
             }
-            Replacement::Subtree(_) => false,
+            Replacement::SubDag(_) => false,
             Replacement::ExactComposition(_) => false,
         }));
         let ranked = space.cost_sorted(&DefaultCostModel);
@@ -11009,7 +11013,7 @@ mod tests {
             .unwrap()
             .chosen
             .expect("a nested summary candidate wins");
-        let Replacement::Subtree(node) = &chosen.replacement else {
+        let Replacement::SubDag(node) = &chosen.replacement else {
             panic!()
         };
         assert!(matches!(
@@ -11034,7 +11038,7 @@ mod tests {
         assert!(group
             .candidates
             .iter()
-            .all(|c| matches!(&c.replacement, Replacement::Subtree(n) if !n.contains_asap())));
+            .all(|c| matches!(&c.replacement, Replacement::SubDag(n) if !n.contains_asap())));
         assert!(group.rejected.iter().all(|r| matches!(
             r.error,
             AccuracyError::TargetNotSatisfied { target: AccuracyTarget::Epsilon(e), .. } if e == 0.001
@@ -11053,7 +11057,7 @@ mod tests {
         assert!(group
             .candidates
             .iter()
-            .any(|c| matches!(&c.replacement, Replacement::Subtree(n) if n.contains_asap())));
+            .any(|c| matches!(&c.replacement, Replacement::SubDag(n) if n.contains_asap())));
 
         // An `Exact` root target admits only exact candidates.
         let space = search_workload_with_targets(
@@ -11063,11 +11067,11 @@ mod tests {
         );
         let group = space.candidates_for_target(&space.roots[0].1).unwrap();
         assert!(group.candidates.iter().all(|c| match &c.replacement {
-            Replacement::Subtree(node) if node.contains_asap() => node
+            Replacement::SubDag(node) if node.contains_asap() => node
                 .guarantee
                 .as_ref()
                 .is_some_and(ResultGuarantee::is_exact),
-            Replacement::Subtree(_) => true,
+            Replacement::SubDag(_) => true,
             Replacement::ExactComposition(_) => false,
         }));
     }
@@ -11098,14 +11102,14 @@ mod tests {
 
         assert!(group.candidates.iter().any(|candidate| matches!(
             &candidate.replacement,
-            Replacement::Subtree(node) if node.guarantee.as_ref().is_some_and(ResultGuarantee::has_unknown)
+            Replacement::SubDag(node) if node.guarantee.as_ref().is_some_and(ResultGuarantee::has_unknown)
         )));
         let candidate = group
             .candidates
             .iter()
             .find(|candidate| candidate.has_missing_accuracy_evidence())
             .unwrap();
-        let Replacement::Subtree(node) = &candidate.replacement else {
+        let Replacement::SubDag(node) = &candidate.replacement else {
             unreachable!()
         };
         let exported = asap_types::dag_export::export_summary(node);
@@ -11135,7 +11139,7 @@ mod tests {
         impl AccuracyEvidenceProvider for SourceEvidence {
             fn estimator_contract(&self, expression: &OperatorNode) -> Option<EstimatorContract> {
                 (expression == &self.expression).then_some(EstimatorContract::ClassicHll {
-                    max_distinct_per_readout: self.max_distinct,
+                    max_distinct_per_evaluation: self.max_distinct,
                 })
             }
         }
@@ -11165,7 +11169,7 @@ mod tests {
         let hll = candidates
             .iter()
             .find_map(|candidate| match &candidate.replacement {
-                Replacement::Subtree(node)
+                Replacement::SubDag(node)
                     if summary_family_algorithm(node) == SketchAlgorithm::Hll =>
                 {
                     Some(node)
@@ -11176,7 +11180,7 @@ mod tests {
         assert!(DefaultAccuracyModel
             .satisfies(hll.guarantee.as_ref().expect("HLL confidence"), &target));
         let Operator::ASAP(ASAPOp::SummaryEstimate { summary_input, .. }) = &hll.operator else {
-            panic!("readout")
+            panic!("evaluation")
         };
         let Operator::ASAP(ASAPOp::SummaryAgg {
             family: FieldDataType::Sketch(kind, _),
@@ -11197,7 +11201,7 @@ mod tests {
         );
         let absent =
             SketchAlgorithmStrategy::default_cost_model().replacements(&TargetSubDAG::new(&root));
-        assert!(!absent.iter().any(|candidate| matches!(&candidate.replacement, Replacement::Subtree(node)
+        assert!(!absent.iter().any(|candidate| matches!(&candidate.replacement, Replacement::SubDag(node)
             if summary_family_algorithm(node) == SketchAlgorithm::Hll && node.guarantee.as_ref().is_some_and(|g| DefaultAccuracyModel.satisfies(g, &target)))));
         // Invalid contracts, infeasible targets and evidence for another source
         // must never authorize a confidence-bearing HLL candidate.
@@ -11234,7 +11238,7 @@ mod tests {
                 &evidence,
             );
             assert!(!strategy.replacements(&TargetSubDAG::new(&query)).iter().any(|candidate|
-                matches!(&candidate.replacement, Replacement::Subtree(node)
+                matches!(&candidate.replacement, Replacement::SubDag(node)
                 if summary_family_algorithm(node) == SketchAlgorithm::Hll && node.guarantee.as_ref().is_some_and(|g| DefaultAccuracyModel.satisfies(g, &target)))));
         }
     }
@@ -11294,7 +11298,7 @@ mod tests {
     }
     // A heap's key schema is derived from its encoded item, not all label columns.
     #[test]
-    fn heap_readout_preserves_numeric_item_identity() {
+    fn heap_evaluation_preserves_numeric_item_identity() {
         let mut schema = metric_scan(&["id", "description"]).schema.clone();
         schema.fields[2].dtype = FieldDataType::Plain(DataType::Int64);
         let raw = crate::test_support::scan("m", schema);
@@ -11316,7 +11320,7 @@ mod tests {
                 },
             },
         };
-        let schema = keyed_heap_readout_schema(&input, &node).unwrap();
+        let schema = keyed_heap_evaluation_schema(&input, &node).unwrap();
         assert_eq!(
             schema
                 .fields

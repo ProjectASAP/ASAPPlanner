@@ -45,7 +45,7 @@ const OPERATOR_VARIANTS: &[&str] = &[
     "SummaryEstimate",
     "FinalizeExactAccumulator",
     "MaintainPopulation",
-    "ReadPopulation",
+    "EvaluatePopulation",
     "SummaryMerge",
     "SummarySubtract",
     "SummaryDelete",

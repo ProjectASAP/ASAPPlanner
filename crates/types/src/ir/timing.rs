@@ -7,16 +7,16 @@
 //! and [`apply_lifecycle_timings`] expands it into a timing on every node:
 //!
 //! - a node of fixed kind takes its kind's timing (`SummaryEstimate` and
-//!   `ReadPopulation` run at query time, `MaintainPopulation` at ingestion
+//!   `EvaluatePopulation` run at query time, `MaintainPopulation` at ingestion
 //!   time);
 //! - a `SummaryAgg` takes the assignment's timing (default: ingestion time),
 //!   unless something below it can only exist at query time;
 //! - every other node runs when its consumer runs: everything that feeds a
-//!   maintained state runs at ingestion time, everything above a readout at
+//!   maintained state runs at ingestion time, everything above a evaluation at
 //!   query time.
 //!
 //! A node reached from two consumers that need different timings cannot be
-//! executed once for both; [`split_shared_by_phase`] copies such a subtree
+//! executed once for both; [`split_shared_by_phase`] copies such a sub-DAG
 //! for one side before the assignment is applied, and the pass itself
 //! rejects a conflict it still finds.
 //!
@@ -27,7 +27,7 @@
 //! | `SummaryAgg.child` | Rows, or exact-accumulator state, never a query-time value when the state is maintained |
 //! | `SummaryEstimate.summary_input` | Summary state at either phase |
 //! | `FinalizeExactAccumulator.child` | Exact-accumulator state |
-//! | `ReadPopulation.child` | A `MaintainPopulation` at ingestion time |
+//! | `EvaluatePopulation.child` | A `MaintainPopulation` at ingestion time |
 //! | `MaintainPopulation.child` | Ingestion-time rows matching the population's input |
 //! | any `NonASAP` consumer | Rows (or exact-accumulator state for a projection-like operator) at the consumer's own timing; ingestion work never reads a query-time value |
 
@@ -37,11 +37,11 @@ use std::rc::Rc;
 use super::asap::ASAPOp;
 use super::node::{Operator, OperatorNode};
 use super::non_asap::NonASAPOp;
+use crate::ir::operator_properties::BinaryOpKind;
 use crate::post_asap::execution_data_state::{
     DataPrimitive, ExecutionDataState, ExecutionDataStateError, ExecutionTiming,
 };
 use crate::pre_asap::schema::{DataType, FieldDataType, Schema};
-use crate::pre_asap::vocabulary::BinaryOpKind;
 
 /// The per-state lifecycle choice summary materialization made: for each
 /// `SummaryAgg` node (by identity), whether its state is maintained at
@@ -103,8 +103,8 @@ pub fn data_state(node: &OperatorNode) -> Option<ExecutionDataState> {
     })
 }
 
-/// Whether the subtree below `node` contains a node that can only run at
-/// query time (a readout), which forces every consumer above it to query
+/// Whether the sub-DAG below `node` contains a node that can only run at
+/// query time (a evaluation), which forces every consumer above it to query
 /// time as well.
 fn forces_query_time(node: &OperatorNode, seen: &mut HashMap<*const OperatorNode, bool>) -> bool {
     let key = node as *const OperatorNode;
@@ -114,7 +114,7 @@ fn forces_query_time(node: &OperatorNode, seen: &mut HashMap<*const OperatorNode
     let forced = match &node.operator {
         _ if node.timing == Some(ExecutionTiming::QueryTime) => true,
         Operator::ASAP(ASAPOp::SummaryEstimate { .. })
-        | Operator::ASAP(ASAPOp::ReadPopulation { .. }) => true,
+        | Operator::ASAP(ASAPOp::EvaluatePopulation { .. }) => true,
         Operator::NonASAP(NonASAPOp::BinaryOp { lhs, rhs, .. })
             if node
                 .schema
@@ -159,7 +159,7 @@ pub fn apply_lifecycle_timings(
     Ok(timed)
 }
 
-/// Validate the subtree below `root` under the default (every summary
+/// Validate the sub-DAG below `root` under the default (every summary
 /// maintained) assignment, with `root` consumed at `root_timing`. For
 /// planning-time legality checks of a candidate before it is assembled into
 /// a workload DAG; nothing is kept.
@@ -213,7 +213,7 @@ fn own_timing(
     }
     match &node.operator {
         Operator::ASAP(ASAPOp::SummaryEstimate { .. })
-        | Operator::ASAP(ASAPOp::ReadPopulation { .. }) => ExecutionTiming::QueryTime,
+        | Operator::ASAP(ASAPOp::EvaluatePopulation { .. }) => ExecutionTiming::QueryTime,
         Operator::ASAP(ASAPOp::MaintainPopulation { .. }) => ExecutionTiming::IngestionTime,
         Operator::ASAP(ASAPOp::SummaryAgg { child, .. }) => {
             if forces_query_time(child, forced) {
@@ -326,7 +326,7 @@ fn validate_asap(
                     is_exact_accumulator_state(&child.schema)?
                 }
                 other => {
-                    return Err(ExecutionDataStateError::ReadoutUnderMaintenance {
+                    return Err(ExecutionDataStateError::EvaluationUnderMaintenance {
                         edge: "SummaryAgg.child",
                         child: other,
                     })
@@ -335,7 +335,7 @@ fn validate_asap(
             if timing == ExecutionTiming::IngestionTime
                 && avail.timing == ExecutionTiming::QueryTime
             {
-                return Err(ExecutionDataStateError::ReadoutUnderMaintenance {
+                return Err(ExecutionDataStateError::EvaluationUnderMaintenance {
                     edge: "SummaryAgg.child",
                     child: avail,
                 });
@@ -383,12 +383,12 @@ fn validate_asap(
             }
             Ok(())
         }
-        ASAPOp::ReadPopulation { child, readout } => {
+        ASAPOp::EvaluatePopulation { child, evaluation } => {
             let valid = timing == ExecutionTiming::QueryTime
                 && matches!(
                     &child.operator,
                     Operator::ASAP(ASAPOp::MaintainPopulation { population, .. })
-                        if population.supports(readout)
+                        if population.supports(evaluation)
                             && child.timing.is_some()
                 );
             if !valid {
@@ -551,10 +551,10 @@ fn validate_non_asap(
     Ok(())
 }
 
-/// Copy, for one consumer, every subtree that `assignment` would reach with
+/// Copy, for one consumer, every sub-DAG that `assignment` would reach with
 /// two different timings, so that a workload whose CSE shared a `Scan`
 /// between an ingestion-time summary and a query-time computation can still
-/// be timed. Only the conflicting subtrees are copied; a subtree reached with
+/// be timed. Only the conflicting sub-DAGs are copied; a sub-DAG reached with
 /// one timing stays one `Rc`. Returns the (possibly rewritten) root.
 pub fn split_shared_by_phase(
     root: &Rc<OperatorNode>,
@@ -665,14 +665,14 @@ fn per_series_rows(node: &OperatorNode) -> Option<&OperatorNode> {
 mod tests {
     use super::*;
     use crate::ir::non_asap::NonASAPOp;
+    use crate::ir::operator_properties::{Reduction, Source};
     use crate::post_asap::sketch::{
         ExactKind, ExactParams, GroupingStrategy, SketchAlgorithm, SketchKind, SketchParams,
-        SketchQuery, SummaryUpdate,
+        SketchStatistic, SummaryUpdate,
     };
     use crate::pre_asap::agg_intent::AggIntent;
     use crate::pre_asap::expr_ir::ColumnRef;
     use crate::pre_asap::schema::Field;
-    use crate::pre_asap::vocabulary::{Reduction, Source};
 
     fn scan_with(fields: Vec<Field>) -> Rc<OperatorNode> {
         OperatorNode::non_asap_node(NonASAPOp::Scan {
@@ -721,7 +721,7 @@ mod tests {
         OperatorNode::asap_node(
             ASAPOp::SummaryEstimate {
                 summary_input: child,
-                query: SketchQuery::Quantile { q: 0.99 },
+                query: SketchStatistic::Quantile { q: 0.99 },
             },
             Schema::lifted(
                 vec![Field::plain("quantile_0_99", DataType::Float64, false)],
@@ -789,23 +789,23 @@ mod tests {
     }
 
     #[test]
-    fn readout_can_feed_summary_construction_at_query_time() {
+    fn evaluation_can_feed_summary_construction_at_query_time() {
         let inner = estimate(agg(scan(), kll()));
         let root = apply(&estimate(agg(inner, kll()))).unwrap();
         assert_eq!(child(&root).timing, Some(ExecutionTiming::QueryTime));
     }
 
-    /// Any non-ASAP operator over a readout runs at query time.
+    /// Any non-ASAP operator over a evaluation runs at query time.
     #[test]
-    fn query_time_operation_over_readout_is_legal_and_root_is_readout() {
-        let readout = || estimate(agg(scan(), kll()));
+    fn query_time_operation_over_evaluation_is_legal_and_root_is_evaluation() {
+        let evaluation = || estimate(agg(scan(), kll()));
         let sorted = OperatorNode::non_asap_node(NonASAPOp::Sort {
             keys: vec![],
             partition_by: Default::default(),
-            child: readout(),
+            child: evaluation(),
         })
         .unwrap();
-        for root in [max(readout()), sorted] {
+        for root in [max(evaluation()), sorted] {
             let root = apply(&root).unwrap();
             assert_eq!(data_state(&root), Some(ExecutionDataState::QUERY_ROWS));
         }
@@ -834,7 +834,7 @@ mod tests {
     }
 
     #[test]
-    fn function_over_readout_is_rejected() {
+    fn function_over_evaluation_is_rejected() {
         let operation = placed_at_ingestion(max(estimate(agg(scan(), kll()))));
         assert!(matches!(
             apply(&estimate(agg(operation, kll()))),
@@ -845,7 +845,7 @@ mod tests {
         ));
     }
 
-    /// One shared subtree reached as maintenance input and as query-time
+    /// One shared sub-DAG reached as maintenance input and as query-time
     /// input cannot be executed once for both; splitting it by phase first
     /// makes the plan timeable.
     #[test]

@@ -359,10 +359,10 @@ fn fragment(
                     ))
                 }
             };
-            let read = Operator::readout(
+            let read = Operator::evaluation(
                 input.clone(),
                 2,
-                ReadoutQuery::Exact(ExactReadout {
+                SummaryEvaluation::Exact(ExactEvaluation {
                     statistic,
                     lookback_ms: None,
                 }),
@@ -401,7 +401,7 @@ fn fragment(
                 return Err(invalid("summary update requires one input"));
             };
             // Item identities resolve against the complete label set of raw
-            // samples; finalized readouts carry no such identity.
+            // samples; finalized evaluations carry no such identity.
             let raw = *input == raw_sample_schema();
             // A unit-frequency summary (HLL) observes each raw sample value.
             let unit_frequency = raw

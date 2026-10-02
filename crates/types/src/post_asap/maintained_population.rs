@@ -1,4 +1,4 @@
-//! Language-independent maintained populations and their readouts.
+//! Language-independent maintained populations and their evaluations.
 //! Resource limits, ingestion placement and data structures belong to the executor.
 use serde::{Deserialize, Serialize};
 
@@ -27,7 +27,7 @@ pub enum CurrentSeriesMatch {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub enum PopulationReadout {
+pub enum PopulationStatistic {
     Quantile { q: f64 },
     TopK { k: usize },
     Sum,
@@ -170,11 +170,13 @@ impl MaintainedPopulation {
         }
     }
 
-    pub fn supports(&self, readout: &PopulationReadout) -> bool {
-        match readout {
-            PopulationReadout::Quantile { q } => self.quantiles && q.is_finite(),
-            PopulationReadout::TopK { k } => *k <= self.max_k,
-            PopulationReadout::Sum | PopulationReadout::Count | PopulationReadout::Average => true,
+    pub fn supports(&self, evaluation: &PopulationStatistic) -> bool {
+        match evaluation {
+            PopulationStatistic::Quantile { q } => self.quantiles && q.is_finite(),
+            PopulationStatistic::TopK { k } => *k <= self.max_k,
+            PopulationStatistic::Sum
+            | PopulationStatistic::Count
+            | PopulationStatistic::Average => true,
         }
     }
 }

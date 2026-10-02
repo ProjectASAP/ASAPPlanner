@@ -65,7 +65,7 @@ fn matches(&self, target: &TargetSubDAG<'_>) -> bool {
 }
 ```
 
-is enough for the current shared-subtree strategy.
+is enough for the current shared-sub-DAG strategy.
 
 #### Guideline
 
@@ -112,12 +112,12 @@ and let costing decide later.
 
 ---
 
-### Summary subtree vs. logical rewrite
+### Summary sub-DAG vs. logical rewrite
 
 Both are returned as:
 
 ```rust
-Replacement::Subtree(node)
+Replacement::SubDag(node)
 ```
 
 - A fully constructed post-ASAP summary: `node` contains an `ASAPOp`.
@@ -125,7 +125,7 @@ Replacement::Subtree(node)
   guarantee. `is_logical_rewrite(&node)` checks this.
 
 Set `provenance` to say which one it is (`ReplacementProvenance::SummaryRealization`,
-`LogicalRewrite`, ...); selection reads provenance, not the subtree's shape.
+`LogicalRewrite`, ...); selection reads provenance, not the sub-DAG's shape.
 
 Use `Replacement::ExactComposition` when a candidate depends on a child target
 whose implementation must be selected compatibly later. Do not bind it to the
@@ -254,7 +254,7 @@ flowchart LR
   A["Input TargetSubDAG<br/>root is a supported Aggregate"] --> B["SketchAlgorithmStrategy::matches<br/>check whether the target shape can produce summaries"]
   B -->|"true"| C["SketchAlgorithmStrategy::replacements<br/>use CostModel preferences and sizing while preserving<br/>every semantically valid realization"]
   B -->|"false"| NONE["Empty candidate list"]
-  C --> F["Output Vec&lt;ReplacementSubDAG&gt;<br/>each entry contains a constructed summary subtree and rationale;<br/>all candidates retained in preferred order"]
+  C --> F["Output Vec&lt;ReplacementSubDAG&gt;<br/>each entry contains a constructed summary sub-DAG and rationale;<br/>all candidates retained in preferred order"]
 ```
 
 For an approximate quantile, both KLL and DDSketch remain candidates when
@@ -273,12 +273,12 @@ let candidates = strategy.replacements(&target);
 
 for candidate in candidates {
     match candidate.replacement {
-        Replacement::Subtree(node) => {
-            // A constructed summary subtree (`node.is_asap()`), or a kept
-            // pre-ASAP subtree with an exact guarantee for pass-through.
+        Replacement::SubDag(node) => {
+            // A constructed summary sub-DAG (`node.is_asap()`), or a kept
+            // pre-ASAP sub-DAG with an exact guarantee for pass-through.
         }
         Replacement::ExactComposition(_) => unreachable!(
-            "SketchAlgorithmStrategy produces subtree candidates"
+            "SketchAlgorithmStrategy produces sub-DAG candidates"
         ),
     }
 }
@@ -291,9 +291,9 @@ aggregate choices remain independent.
 
 ---
 
-### Example: current `SharedSubtreeStrategy`
+### Example: current `SharedSubDagStrategy`
 
-`SharedSubtreeStrategy` is the reference implementation for a logical rewrite strategy.
+`SharedSubDagStrategy` is the reference implementation for a logical rewrite strategy.
 
 It applies when:
 
@@ -311,13 +311,13 @@ and returns two alternatives:
 The shared candidate reuses the same `Rc<OperatorNode>`:
 
 ```rust
-Replacement::Subtree(Rc::clone(target.root))
+Replacement::SubDag(Rc::clone(target.root))
 ```
 
 The independent candidate creates a structurally equal but separately allocated node:
 
 ```rust
-Replacement::Subtree(
+Replacement::SubDag(
     Rc::new((**target.root).clone())
 )
 ```
@@ -329,9 +329,9 @@ That preference belongs to the cost model.
 share-versus-recompute candidate pair. The strategy still returns both
 alternatives because enumeration and ranking are separate steps:
 
-- `consumer_count >= 2` means `share_common_subtrees` has already merged the expression into one shared `Rc`. The shared alternative is therefore an `Rc::clone`; the independent alternative requires a deep clone.
+- `consumer_count >= 2` means `share_common_subdags` has already merged the expression into one shared `Rc`. The shared alternative is therefore an `Rc::clone`; the independent alternative requires a deep clone.
 - `cse_share_decision` is used by the ranking path, not by
-  `SharedSubtreeStrategy`.
+  `SharedSubDagStrategy`.
 - The strategy must return both valid alternatives even if the current cost model strongly prefers one. A future whole-plan search may choose differently from today's local comparison.
 
 This example is useful when implementing transformations such as:
@@ -460,7 +460,7 @@ assert!(
 
 For a strategy whose explanation includes important context, also test that context.
 
-For example, the shared-subtree tests verify that the consumer count appears in the rationale.
+For example, the shared-sub-DAG tests verify that the consumer count appears in the rationale.
 
 ---
 
@@ -468,7 +468,7 @@ For example, the shared-subtree tests verify that the consumer count appears in 
 
 For logical rewrites, test the structural property that distinguishes the alternatives.
 
-For example, the current shared-subtree tests verify:
+For example, the current shared-sub-DAG tests verify:
 
 ```rust
 Rc::ptr_eq(shared, &q)
@@ -639,26 +639,26 @@ Use it for implementation families that are intentionally outside the built-in e
 
 ---
 
-#### `readout_extension`
+#### `evaluation_extension`
 
-Use when an extension-defined summary also needs custom query/readout behavior.
+Use when an extension-defined summary also needs custom query/evaluation behavior.
 
 ```rust
-fn readout_extension(
+fn evaluation_extension(
     &self,
     ext_kind: &str,
     payload: &serde_json::Value,
     col: &ColumnRef,
-) -> SketchQuery;
+) -> SketchStatistic;
 ```
 
-This complements `realize_extension`: realization defines what gets maintained; readout defines how it is queried (see the [CostModel reference](asap-aware-mapping-contracts.md#costmodel)).
+This complements `realize_extension`: realization defines what gets maintained; evaluation defines how it is queried (see the [CostModel reference](asap-aware-mapping-contracts.md#costmodel)).
 
 ---
 
 #### `cse_recompute_cost`
 
-Use to estimate the cost of computing a common subtree independently at each consumer.
+Use to estimate the cost of computing a common sub-DAG independently at each consumer.
 
 ```rust
 fn cse_recompute_cost(
@@ -671,7 +671,7 @@ fn cse_recompute_cost(
 
 #### `cse_shared_maintenance_cost`
 
-Use to estimate the cost of computing and maintaining a shared subtree.
+Use to estimate the cost of computing and maintaining a shared sub-DAG.
 
 ```rust
 fn cse_shared_maintenance_cost(
@@ -776,7 +776,7 @@ Therefore, when adding a new built-in sketch algorithm, the intended flow is:
 flowchart LR
   MAP["1. Declare legality<br/>add the algorithm to summary_candidates<br/>for each AggIntent it can answer"]
   MAP --> MODEL["2. Define costing<br/>rank it, derive its SketchParams,<br/>and provide a comparable numeric cost"]
-  MODEL --> BUILD["3. Define realization behavior<br/>ensure the public strategy output contains a valid summary subtree<br/>with the correct maintained state and readout"]
+  MODEL --> BUILD["3. Define realization behavior<br/>ensure the public strategy output contains a valid summary sub-DAG<br/>with the correct maintained state and evaluation"]
   BUILD --> ACC["4. Certify accuracy<br/>derive from committed parameters;<br/>propagate and check the final target"]
   ACC --> ENUM["5. Verify integration<br/>SketchAlgorithmStrategy includes it automatically;<br/>tests confirm enumeration, ordering, sizing, and cost"]
 ```
@@ -791,7 +791,7 @@ ranking; preserve exact fallback and structured rejection information.
 
 See the [accuracy implementation companion](end-to-end-accuracy-guarantees.md)
 for formulas and evidence requirements. For a new algorithm, also update its
-parameter, readout, schema and serialization definitions in `asap-types`.
+parameter, evaluation, schema and serialization definitions in `asap-types`.
 
 Do not special-case the new sketch inside `SketchAlgorithmStrategy` unless the strategy itself needs fundamentally new behavior.
 
@@ -893,11 +893,11 @@ silently disagree.
 
 ### Mistake: reimplementing summary construction inside a strategy
 
-If the candidate should produce a normal summary subtree (`SummaryAgg` /
+If the candidate should produce a normal summary sub-DAG (`SummaryAgg` /
 `SummaryEstimate`), use the existing
 summary-construction path.
 
-A strategy should steer or wrap that path when necessary, not recreate schema derivation, column resolution, readout construction, or parameter sizing.
+A strategy should steer or wrap that path when necessary, not recreate schema derivation, column resolution, evaluation construction, or parameter sizing.
 
 ---
 
@@ -936,7 +936,7 @@ When adding a new strategy:
 - [ ] Implement `ReplacementStrategy::replacements`.
 - [ ] Return every semantically valid replacement.
 - [ ] Return an empty vector for non-matching targets.
-- [ ] Return `Replacement::Subtree` for both constructed post-ASAP output and
+- [ ] Return `Replacement::SubDag` for both constructed post-ASAP output and
       logical pre-ASAP alternatives, with the matching `provenance`.
 - [ ] Add a useful rationale to every candidate.
 - [ ] Reuse existing legality and implementation logic instead of duplicating it.
@@ -952,7 +952,7 @@ When adding a new cost model:
 - [ ] Keep semantic applicability outside the cost model.
 - [ ] Use `rank_candidates` for algorithm preference; return every input candidate exactly once.
 - [ ] Use `size_params` for accuracy-to-parameter mapping.
-- [ ] Use extension hooks for extension-defined implementations/readouts.
+- [ ] Use extension hooks for extension-defined implementations/evaluations.
 - [ ] Use CSE hooks for recompute-vs.-sharing costs.
 - [ ] Override `estimate_cost` if consumers require numeric costs instead of `NaN`.
 - [ ] Test the hook directly.
@@ -974,7 +974,7 @@ Use this table to find the right place for a change.
 | Prefer one sketch algorithm over another | `CostModel::rank_candidates` |
 | Change sketch sizing for an accuracy target | `CostModel::size_params` |
 | Add extension-defined implementation behavior | `CostModel::realize_extension` |
-| Add extension-defined readout behavior | `CostModel::readout_extension` |
+| Add extension-defined evaluation behavior | `CostModel::evaluation_extension` |
 | Change CSE recomputation cost | `CostModel::cse_recompute_cost` |
 | Change shared-maintenance cost | `CostModel::cse_shared_maintenance_cost` |
 | Change current share/recompute choice | `CostModel::cse_share_decision` |

@@ -554,7 +554,7 @@ fn boolean_truth_tables_agree_between_expression_paths() {
 
 // Partial/final execution must agree with one build for an uncompacted KLL population.
 #[test]
-fn kll_partial_merge_and_multiple_readouts_preserve_population() {
+fn kll_partial_merge_and_multiple_evaluations_preserve_population() {
     use planner_types::post_asap::{SketchAlgorithm, SketchKind, SketchParams};
 
     let input = schema(&[("v", DataType::Float64, false)]);
@@ -600,11 +600,11 @@ fn kll_partial_merge_and_multiple_readouts_preserve_population() {
             dag.add(
                 id,
                 vec![build],
-                Operator::readout(
+                Operator::evaluation(
                     state.clone(),
                     0,
-                    asap_physical_operators::operators::ReadoutQuery::Sketch(
-                        planner_types::post_asap::SketchQuery::Quantile { q },
+                    asap_physical_operators::operators::SummaryEvaluation::Sketch(
+                        planner_types::post_asap::SketchStatistic::Quantile { q },
                     ),
                 )
                 .unwrap(),
@@ -696,11 +696,11 @@ fn empty_exact_summary_extrema_agree_with_ordinary_aggregation() {
         dag.add(
             2,
             vec![1],
-            Operator::readout(
+            Operator::evaluation(
                 state,
                 0,
-                asap_physical_operators::operators::ReadoutQuery::Exact(
-                    asap_physical_operators::summary_kernels::exact::ExactReadout {
+                asap_physical_operators::operators::SummaryEvaluation::Exact(
+                    asap_physical_operators::summary_kernels::exact::ExactEvaluation {
                         statistic,
                         lookback_ms: None,
                     },

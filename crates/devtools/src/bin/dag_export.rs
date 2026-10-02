@@ -42,7 +42,7 @@
 //
 // Together these surface every one of the four concrete replacement kinds:
 // the sketch family `SketchAlgorithmStrategy`/`HydraGroupingStrategy` bound,
-// the CSE share/recompute choice `SharedSubtreeStrategy` found, the
+// the CSE share/recompute choice `SharedSubDagStrategy` found, the
 // workload-aware roll-up `RollupStrategy` derived, and the `avg ->
 // sum/count` rewrite `AvgToSumOverCountStrategy` proposes. Without
 // `--post-asap`, every existing invocation of this binary produces
@@ -99,7 +99,7 @@ use asap_types::dag_export::{
 };
 use asap_types::ir::cse::{structural_hash, HashCache};
 use asap_types::ir::OperatorNode;
-use asap_types::post_asap::{CompositionOperator, FieldDataType, SketchQuery};
+use asap_types::post_asap::{CompositionOperator, FieldDataType, SketchStatistic};
 use asap_types::pre_asap::schema::{DataType, Field, Schema};
 use asap_types::resources::CacheProfile;
 use asap_types::types::AccuracyTarget;
@@ -226,10 +226,10 @@ impl CandidatePhysicalEvidence {
 
     fn matches(&self, candidate: &ReplacementSubDAG) -> bool {
         let actual = match (self, &candidate.replacement) {
-            (Self::Summary { .. }, Replacement::Subtree(node)) if !is_logical_rewrite(node) => {
+            (Self::Summary { .. }, Replacement::SubDag(node)) if !is_logical_rewrite(node) => {
                 serde_json::to_value(dag_export::export(node))
             }
-            (Self::Rewrite { .. }, Replacement::Subtree(node)) if is_logical_rewrite(node) => {
+            (Self::Rewrite { .. }, Replacement::SubDag(node)) if is_logical_rewrite(node) => {
                 serde_json::to_value(dag_export::export(node))
             }
             _ => return false,
@@ -824,7 +824,7 @@ impl AccuracyEvidenceProvider for TopKMarginEvidence {
         &self,
         op: &CompositionOperator,
         _family: &FieldDataType,
-        _query: Option<&SketchQuery>,
+        _query: Option<&SketchStatistic>,
     ) -> PropagationStats {
         if matches!(op, CompositionOperator::TopKSelection) {
             PropagationStats {
@@ -1009,7 +1009,7 @@ fn decision_rationale(winner: &Winner<'_>) -> String {
             "Composes compatible nested aggregates using their declared algebraic intent while preserving the output schema."
                 .to_string()
         }
-        "SharedSubtreeStrategy" => match winner.candidate.provenance {
+        "SharedSubDagStrategy" => match winner.candidate.provenance {
             asap_aware_mapping::replacement::ReplacementProvenance::CseShare => {
                 "Builds the repeated subtree once and shares it across consumers.".to_string()
             }
@@ -1099,10 +1099,10 @@ fn target_replacement(
     let strategy = winner.candidate.strategy.to_string();
     let before = dag_export::export(winner.target);
     let after = match &winner.candidate.replacement {
-        Replacement::Subtree(node) if is_logical_rewrite(node) => {
+        Replacement::SubDag(node) if is_logical_rewrite(node) => {
             TargetReplacementAfter::Rewrite(dag_export::export(node))
         }
-        Replacement::Subtree(node) => TargetReplacementAfter::Summary(dag_export::export(node)),
+        Replacement::SubDag(node) => TargetReplacementAfter::Summary(dag_export::export(node)),
         Replacement::ExactComposition(_) => {
             unreachable!("composition candidates are materialized by GlobalSelection")
         }
@@ -1131,12 +1131,12 @@ fn target_replacement(
 /// `SketchAlgorithmStrategy` emits it for an intent with no summary
 /// realization at all (`STDDEV_POP`, `AVG`, ... dispatch to
 /// `Realization::PassThrough`). It is "nothing to bind here", not a
-/// replacement decision. A logical rewrite (no guarantee yet) and any subtree
+/// replacement decision. A logical rewrite (no guarantee yet) and any sub-DAG
 /// with an ASAP operator are real candidates.
 fn is_trivial_retain_exact(replacement: &Replacement) -> bool {
     matches!(
         replacement,
-        Replacement::Subtree(node) if node.guarantee.is_some() && !node.contains_asap()
+        Replacement::SubDag(node) if node.guarantee.is_some() && !node.contains_asap()
     )
 }
 
@@ -1146,7 +1146,7 @@ struct PostAsapResults {
     /// One `(query_name, TargetReplacement)` pair per discovered replacement
     /// site whose target node is found in that query's own exported graph. A
     /// target can in principle be reachable from more than one query's root
-    /// after CSE (a shared subtree), in which case it yields one pair per
+    /// after CSE (a shared sub-DAG), in which case it yields one pair per
     /// matching query, each with that query's own `target_pre_id`.
     replacements: Vec<(String, TargetReplacement)>,
     /// One merged, whole-query [`DagGraph`] per query, built via
@@ -1168,7 +1168,7 @@ fn raw_only_post_asap_results() -> PostAsapResults {
 }
 
 /// Assign collision-free, explicit identities to structurally equal nodes
-/// across a set of exported query graphs. The full canonical subtree string
+/// across a set of exported query graphs. The full canonical sub-DAG string
 /// is the equality key; the compact integer is what JSON consumers receive.
 /// Consequently the viewer never needs to guess identity from labels,
 /// hashes, or a client-side node signature.
@@ -1257,7 +1257,7 @@ fn run_post_asap_with_progress(
     // realization... isn't an opportunity, it's just the target's existing
     // shape reflected back"). Treating this candidate as "no winner" (same
     // as an empty candidate list) also keeps `post_graph` honest: splicing
-    // the target in for itself would tag every node of an unchanged subtree
+    // the target in for itself would tag every node of an unchanged sub-DAG
     // with a "replacement" decision.
     let winners: Vec<Winner<'_>> = selection
         .target_selections()
@@ -1310,7 +1310,7 @@ fn run_post_asap_with_progress(
     // *original*, pre-rewrite `graph` — there's nothing wrong with that
     // winner, it's just nested. `post_graph` is where it's expected to
     // surface instead (`export_post_asap`'s recursive `find_winner`
-    // threading walks straight through a rewritten subtree and re-checks
+    // threading walks straight through a rewritten sub-DAG and re-checks
     // every node inside it too), so the flat-`replacements` pass below
     // checks there before deciding a miss is a real anomaly worth a
     // warning.
@@ -1338,11 +1338,11 @@ fn run_post_asap_with_progress(
             benefit: Some(benefit),
         };
         Some(match &winners[i].candidate.replacement {
-            Replacement::Subtree(rc) if is_logical_rewrite(rc) => PostAsapSubstitution::Rewrite {
+            Replacement::SubDag(rc) if is_logical_rewrite(rc) => PostAsapSubstitution::Rewrite {
                 replacement: Rc::clone(rc),
                 decision,
             },
-            Replacement::Subtree(rc) => PostAsapSubstitution::Summary {
+            Replacement::SubDag(rc) => PostAsapSubstitution::Summary {
                 replacement: Rc::clone(rc),
                 decision,
             },
@@ -1371,7 +1371,7 @@ fn run_post_asap_with_progress(
     // is documented as an id into `NamedGraph.graph.nodes`, so a nested
     // secondary target (see above) never gets a flat entry of its own here:
     // it's already visible, in place, inside its parent's own `after`
-    // subtree and inside `post_graph` as a whole.
+    // sub-DAG and inside `post_graph` as a whole.
     let mut lookup_cache = HashCache::new();
     let mut replacements = Vec::new();
     let mut rejections = Vec::new();
@@ -1431,7 +1431,7 @@ fn run_post_asap_with_progress(
     // specifically). This isn't a data loss: `export_post_asap` still
     // splices that winner in, in place, inside `post_graph` — see this
     // function's own construction of `post_graphs` above, which walks
-    // straight through a rewritten subtree and resolves every nested
+    // straight through a rewritten sub-DAG and resolves every nested
     // winner too, recursively. So an unmatched winner here is expected,
     // not necessarily a bug, whenever it's downstream of some other
     // winner's own `Replacement::Rewrite` — logged as an FYI rather than a
@@ -2290,7 +2290,7 @@ mod tests {
 
     fn candidate_plan(candidate: &ReplacementSubDAG) -> serde_json::Value {
         match &candidate.replacement {
-            Replacement::Subtree(node) => serde_json::to_value(dag_export::export(node)).unwrap(),
+            Replacement::SubDag(node) => serde_json::to_value(dag_export::export(node)).unwrap(),
             Replacement::ExactComposition(_) => {
                 unreachable!("cost fixtures select directly materialized candidates")
             }
@@ -2326,14 +2326,14 @@ mod tests {
                 target: query.clone(),
                 scope: test_scope(),
                 candidates: vec![match &candidate.replacement {
-                    Replacement::Subtree(node) if !is_logical_rewrite(node) => {
+                    Replacement::SubDag(node) if !is_logical_rewrite(node) => {
                         CandidatePhysicalEvidence::Summary {
                             plan,
                             query_nodes: query_evidence(&query),
                             physical_dag: cheap_candidate_dag(),
                         }
                     }
-                    Replacement::Subtree(_) => CandidatePhysicalEvidence::Rewrite {
+                    Replacement::SubDag(_) => CandidatePhysicalEvidence::Rewrite {
                         plan,
                         query_nodes: query_evidence(&query),
                     },
@@ -2607,7 +2607,7 @@ mod tests {
             .candidates
             .iter()
             .filter(|candidate| {
-                matches!(&candidate.replacement, Replacement::Subtree(node) if node.contains_asap())
+                matches!(&candidate.replacement, Replacement::SubDag(node) if node.contains_asap())
             })
             .take(2)
             .collect();
@@ -2767,13 +2767,13 @@ mod tests {
         let selected_query = lower_promql("up", AccuracyTarget::Exact).unwrap();
         let other_query = lower_promql("process_cpu_seconds_total", AccuracyTarget::Exact).unwrap();
         let selected = ReplacementSubDAG {
-            replacement: Replacement::Subtree(Rc::clone(&selected_query)),
+            replacement: Replacement::SubDag(Rc::clone(&selected_query)),
             strategy: "same-strategy",
             provenance: asap_aware_mapping::replacement::ReplacementProvenance::LogicalRewrite,
             rationale: String::new(),
         };
         let other = ReplacementSubDAG {
-            replacement: Replacement::Subtree(other_query),
+            replacement: Replacement::SubDag(other_query),
             strategy: "same-strategy",
             provenance: asap_aware_mapping::replacement::ReplacementProvenance::LogicalRewrite,
             rationale: String::new(),

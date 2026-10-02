@@ -181,7 +181,7 @@ fn spatial_heap_ranks_latest_values_in_independent_runs() {
             ],
             time_index: None,
         });
-        let read = Operator::keyed_readout(build.schema(), 1, 1, output).unwrap();
+        let read = Operator::keyed_evaluation(build.schema(), 1, 1, output).unwrap();
         let plan = CompiledPhysicalDag::from_operators(
             BTreeMap::from([(0, InputContract::bounded(schema()))]),
             BTreeMap::from([
@@ -333,7 +333,7 @@ fn planner_current_series_candidate_compiles_with_dynamic_identity() {
         .candidate(&open_root)
         .unwrap();
     let snapshot_program =
-        asap_physical_operators::physical_planner::promql_rows::compile_current_series_readout(
+        asap_physical_operators::physical_planner::promql_rows::compile_current_series_evaluation(
             &open_selected,
         )
         .unwrap();

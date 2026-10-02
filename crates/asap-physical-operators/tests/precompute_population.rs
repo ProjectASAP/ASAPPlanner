@@ -213,7 +213,7 @@ fn finalized_shared_panes_rebuild_one_global_summary_after_recovery() {
                     .as_any()
                     .downcast_ref::<asap_physical_operators::summary_kernels::exact::ExactAccumulator>()
                     .unwrap()
-                    .readout(Statistic::Sum, None, None)
+                    .evaluation(Statistic::Sum, None, None)
                     .unwrap()
                     .unwrap(),
                 expected
@@ -374,7 +374,7 @@ fn explicit_merge_changes_pane_cardinality() {
             .iter()
             .map(|row| match row[2] {
                 Value::Float64(v) => v,
-                _ => panic!("numeric readout expected"),
+                _ => panic!("numeric evaluation expected"),
             })
             .collect::<Vec<_>>();
         assert_eq!(values, expected);

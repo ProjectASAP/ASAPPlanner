@@ -52,7 +52,7 @@ post-ASAP candidates, unchanged queries, and post-ASAP errors. `Pre-ASAP` means
 that parsing and lowering produced an `OperatorNode` DAG. `Post-ASAP candidate`
 means the isolated `SketchAlgorithmStrategy` produced a candidate that contains
 an ASAP operator (`contains_asap()`). `Unchanged` is a successful pre-ASAP query
-for which that strategy returned only the kept pre-ASAP subtree (`retain_exact`).
+for which that strategy returned only the kept pre-ASAP sub-DAG (`retain_exact`).
 
 ## Strategies
 
@@ -62,7 +62,7 @@ query root. It does not measure workload-wide search or the other default
 strategies.
 
 The default workload search currently registers `SketchAlgorithmStrategy`,
-`HydraGroupingStrategy`, `SharedSubtreeStrategy`, and
+`HydraGroupingStrategy`, `SharedSubDagStrategy`, and
 `AvgToSumOverCountStrategy`. Workload context can additionally contribute
 `RollupStrategy` and `AccuracyReconciliationStrategy`. This baseline is
 therefore a sketch-only comparison point.

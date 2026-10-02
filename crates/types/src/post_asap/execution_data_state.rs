@@ -8,8 +8,8 @@
 
 use thiserror::Error;
 
+use crate::ir::QueryExprError;
 use crate::pre_asap::schema::Schema;
-use crate::pre_asap::vocabulary::QueryExprError;
 
 /// When a post-ASAP value is produced.
 #[derive(
@@ -37,7 +37,7 @@ impl ExecutionTiming {
 /// The primitive representation carried by a post-ASAP edge.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum DataPrimitive {
-    /// Directly usable values, including approximate summary readouts.
+    /// Directly usable values, including approximate summary evaluations.
     /// This does not imply original input data or an exact guarantee.
     Raw,
     SummaryState,
@@ -86,16 +86,16 @@ impl std::fmt::Display for ExecutionDataState {
 /// it expects, and so tests can assert the *reason* a plan was rejected.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum ExecutionDataStateError {
-    #[error("invalid maintained-population maintenance/readout contract")]
+    #[error("invalid maintained-population maintenance/evaluation contract")]
     InvalidMaintainedPopulation,
     /// A query-time value (a `SummaryEstimate` or query-time operator output)
     /// placed beneath a maintained summary — the one shape issue #171's
     /// data_state split exists to make unrepresentable.
     #[error(
-        "readout value under maintenance: {edge} received a {child} input, but a maintained \
+        "evaluation value under maintenance: {edge} received a {child} input, but a maintained \
          summary can only consume update-path values (or exact accumulator state)"
     )]
-    ReadoutUnderMaintenance {
+    EvaluationUnderMaintenance {
         edge: &'static str,
         child: ExecutionDataState,
     },

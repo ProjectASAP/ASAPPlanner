@@ -15,9 +15,9 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
+use asap_types::ir::operator_properties::ConcatDiscriminatorKey;
 use asap_types::ir::BinaryOperator;
 use asap_types::ir::{ExprSemantics, TimeRangeKind};
-use asap_types::pre_asap::vocabulary::ConcatDiscriminatorKey;
 use asap_types::pre_asap::{
     AggIntent, ArithmeticOpKind, ColumnRef, CompareOpKind, DataType, GroupKeys, InfoMatcher,
     JoinKind, Reduction, RelationalSetOpKind, SampleKind, ScalarValue, Schema, Source, TimeShift,

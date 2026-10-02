@@ -10,7 +10,7 @@
 //!   grouping strategy), accuracy guarantees, and the execution-timing
 //!   vocabulary. No execution logic lives in this workspace (issue #190).
 //!   [`post_asap::query_time`] holds pure posterior error-bound math
-//!   (issue #239) a future sketch runtime's readout path can call; see its
+//!   (issue #239) a future sketch runtime's evaluation path can call; see its
 //!   docs for why it is unwired today.
 //! - [`types`] / [`workload`] / [`parsed_workload`] / [`dag_export`] /
 //!   [`cost`] / [`resources`] — workload, batch, export and cost types.

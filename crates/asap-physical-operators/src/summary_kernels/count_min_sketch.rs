@@ -1,7 +1,7 @@
 //! Count-Min Sketch frequency summary over `asap_sketchlib::CountMinSketch`.
 use crate::{AggregateCore, KernelError, KeyByLabelValues};
 use asap_sketchlib::CountMinSketch;
-use planner_types::post_asap::SketchQuery;
+use planner_types::post_asap::SketchStatistic;
 
 #[derive(Debug, Clone)]
 pub struct CountMinSketchAccumulator {
@@ -45,9 +45,9 @@ impl AggregateCore for CountMinSketchAccumulator {
 
     /// A bare point count reads the total update weight: every Count-Min row
     /// receives each update exactly once, so one row's mass survives collisions.
-    fn estimate(&self, query: &SketchQuery) -> Result<f64, KernelError> {
+    fn estimate(&self, query: &SketchStatistic) -> Result<f64, KernelError> {
         match query {
-            SketchQuery::PointCount { value: None, .. } => Ok(row_mass(&self.inner.sketch())),
+            SketchStatistic::PointCount { value: None, .. } => Ok(row_mass(&self.inner.sketch())),
             _ => Err(format!("{query:?} is not supported by Count-Min Sketch").into()),
         }
     }
@@ -86,7 +86,7 @@ mod tests {
     // The bare count keeps colliding items' weight, adds across merges, and is 0 when empty.
     #[test]
     fn bare_count_reads_total_weight() {
-        let bare_count = SketchQuery::PointCount {
+        let bare_count = SketchStatistic::PointCount {
             key: planner_types::pre_asap::ColumnRef::SampleValue,
             value: None,
         };
@@ -98,7 +98,7 @@ mod tests {
         assert_eq!(merged.estimate(&bare_count).unwrap(), 20.0);
         let empty = CountMinSketchAccumulator::new(2, 1);
         assert_eq!(empty.estimate(&bare_count).unwrap(), 0.0);
-        assert!(state.estimate(&SketchQuery::Cardinality).is_err());
+        assert!(state.estimate(&SketchStatistic::Cardinality).is_err());
     }
 
     // Merge rejects a different summary family.

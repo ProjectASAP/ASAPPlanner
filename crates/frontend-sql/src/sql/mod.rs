@@ -56,13 +56,14 @@ use asap_frontend_common::{
     UnresolvedProjectItem as ProjectItem, UnresolvedScalar as Scalar, UnresolvedSortKey as SortKey,
 };
 use asap_sql_function_catalog::{AggSemantic, Arity, RewriteKind};
-use asap_types::ir::TimeRangeKind;
-use asap_types::pre_asap::agg_intent::AggIntent;
-use asap_types::pre_asap::schema::{DataType, FieldDataType, Schema};
-use asap_types::pre_asap::vocabulary::{
+use asap_types::ir::operator_properties::{
     GroupKeys, Reduction, Source, WindowFrame, WindowFrameBound, WindowFrameOffset,
     WindowFrameUnits,
 };
+use asap_types::ir::TimeRangeKind;
+use asap_types::pre_asap::agg_intent::AggIntent;
+use asap_types::pre_asap::schema::{DataType, FieldDataType, Schema};
+
 use asap_types::pre_asap::{
     resolve_column_ref, ColumnRef, CompareOpKind, JoinKind, RelationalSetOpKind, ScalarValue,
     WindowFuncKind,

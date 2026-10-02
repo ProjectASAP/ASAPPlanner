@@ -3,7 +3,7 @@
 The goal of the post-ASAP IR is to represent operations using ASAP primitives
 such as sketches, exact summaries, samples and wavelets, while retaining the
 exact query operators that no summary replaces, and supporting operations over
-summary readouts.
+summary evaluations.
 
 ASAPPlanner has one operator IR before and after ASAP optimization
 ([`crates/types/src/ir/`](../../../crates/types/src/ir/)). A post-ASAP plan is
@@ -35,14 +35,14 @@ Implemented:
   reduction and grouping layout. Output: the grouping columns plus one `state`
   field typed `family`; result kind `State`.
 - `SummaryEstimate { summary_input, query }`: read the requested statistic
-  (`SketchQuery`) from summary state and return query values in a row-shaped
+  (`SketchStatistic`) from summary state and return query values in a row-shaped
   schema.
 - `FinalizeExactAccumulator { child }`: read an exact accumulator's state as
   its finalized value — the maintenance-to-read boundary before query-time
   operators consume it.
 - `MaintainPopulation { child, population }`: maintain the full declared
   population, including membership changes.
-- `ReadPopulation { child, readout }`: read an aggregate or TopK prefix from a
+- `EvaluatePopulation { child, evaluation }`: read an aggregate or TopK prefix from a
   maintained population.
 
 Reserved (migrated but unimplemented; schema derivation, timing and export
@@ -69,16 +69,16 @@ operations. Not every summary family supports incremental maintenance.
 
 Exact work is represented by the ordinary operators, unchanged:
 
-- A subtree the planner does not rewrite keeps its `NonASAPOp` nodes. Plan
-  assembly marks such a subtree with an exact `ResultGuarantee`
-  (`asap_aware_mapping::replacement::retain_exact`); a subtree with no ASAP
+- A sub-DAG the planner does not rewrite keeps its `NonASAPOp` nodes. Plan
+  assembly marks such a sub-DAG with an exact `ResultGuarantee`
+  (`asap_aware_mapping::replacement::retain_exact`); a sub-DAG with no ASAP
   operator and no guarantee is a logical rewrite candidate that has not been
   assessed yet (`is_logical_rewrite`).
 - `BinaryOp` combines independently planned operands. Summary planning may set
   its typed division guards (`checked_finite_division`,
   `checked_relative_division`); the operator's timing comes from the lifecycle
   assignment, not from the operator.
-- Aggregate, projection, filter, sort and limit over a readout are the ordinary
+- Aggregate, projection, filter, sort and limit over a evaluation are the ordinary
   `Aggregate`, `Project`, `Filter`, `Sort` and `Limit` operators reading an ASAP
   node. Exact-accumulator state may pass through the projection-like
   operators unchanged; a value consumer needs a `FinalizeExactAccumulator`
@@ -91,7 +91,7 @@ Exact work is represented by the ordinary operators, unchanged:
 
 Every `OperatorNode` carries its schema and an optional `ResultGuarantee`.
 State and query values have different contracts. Exact operations over
-approximate readouts still require composed accuracy guarantees. See the
+approximate evaluations still require composed accuracy guarantees. See the
 [accuracy implementation companion](../../develop_docs/end-to-end-accuracy-guarantees.md)
 and [physical-plan integration](../architecture/physical-plan-integration.md)
 for the corresponding correctness and realization requirements.
@@ -113,18 +113,18 @@ the assignment defaults to ingestion-time maintenance).
 timing into every node, top-down:
 
 - a node of fixed kind takes its kind's timing — `SummaryEstimate` and
-  `ReadPopulation` run at query time, `MaintainPopulation` at ingestion time;
+  `EvaluatePopulation` run at query time, `MaintainPopulation` at ingestion time;
 - a `SummaryAgg` takes the assignment's timing, unless something below it can
-  only exist at query time (a readout);
+  only exist at query time (a evaluation);
 - every other node runs when its consumer runs: everything that feeds a
-  maintained state runs at ingestion time, everything above a readout at
+  maintained state runs at ingestion time, everything above a evaluation at
   query time.
 
 The pass then validates every edge (rows or exact-accumulator state into a
-`SummaryAgg`, state into a readout, an ingestion-time `MaintainPopulation` under
-a `ReadPopulation`, no ingestion work reading a query-time value) and rejects a
+`SummaryAgg`, state into a evaluation, an ingestion-time `MaintainPopulation` under
+a `EvaluatePopulation`, no ingestion work reading a query-time value) and rejects a
 node reached from two consumers that need different timings;
-`split_shared_by_phase` copies such a subtree for one side before the
+`split_shared_by_phase` copies such a sub-DAG for one side before the
 assignment is applied. `validate_default` and `planned_data_state` answer the
 same questions for a candidate at planning time without keeping anything.
 
@@ -139,14 +139,14 @@ typed edges, and `PostAsapDagDocument` is its versioned wire envelope
 (`schema_version` = `POST_ASAP_DAG_WIRE_VERSION`, currently 6). Physical
 compilation consumes `PostAsapDag` and produces a separate physical DAG.
 
-Wire version 6 emits **one node per operator** — relational operators
-included — with children as edges and no embedded subtrees:
+Wire version 7 emits **one node per operator** — relational operators
+included — with children as edges and no embedded sub-DAGs:
 
 - A non-ASAP node is a `Relational { operator: NonASAPOpKind }` payload:
   the operator's own fields with scalar expressions mirrored as
   `WireScalarExpr`, children removed. An ASAP node's payload is its variant
   (`SummaryAgg`, `SummaryEstimate`, `FinalizeExactAccumulator`,
-  `MaintainPopulation`, `ReadPopulation`, …).
+  `MaintainPopulation`, `EvaluatePopulation`, …).
 - Edges carry a role: `Input`, `Left`/`Right` for the two sides of a `Join`,
   `SetOp`, `BinaryOp`, `SummarySubtract` or `SummaryJoin`, and `ScalarRef`
   when the consumer reads the producer from inside one of its scalar
@@ -173,19 +173,19 @@ the update weight is the series rate. Summing updates for one item implements
 the logical grouped sum without first constructing all exact grouped sums.
 
 The DAG is per-series rate → finalized values → partitioned summary construction
-→ typed candidate/score readout → output projection → grouped Sort → grouped
+→ typed candidate/score evaluation → output projection → grouped Sort → grouped
 Limit. The output count is two per job. The candidate capacity is a separate
 parameter, provisionally `max(k, ceil(1 / epsilon))`; this sizing choice is not a
 membership theorem. Missing evidence retains a logical candidate with symbolic unknown guarantees;
 default selection does not certify or choose it.
-The row readout restores job and service identities and returns estimated sums.
+The row evaluation restores job and service identities and returns estimated sums.
 There is no mandatory exact scoring branch or candidate semi-join in this path.
 The old raw counter-delta update expression is removed rather than retained as a
 compatibility option: counter increments are not complete windowed rate results.
 
-The direct readout represents both score error and membership. A source provider
+The direct evaluation represents both score error and membership. A source provider
 supplies an enforced upper bound on distinct partition/item identities for the
-complete readout. Planner uses this bound to size confidence and union-bound
+complete evaluation. Planner uses this bound to size confidence and union-bound
 score errors over adaptively selected items. Membership evidence is evaluated
 for the query's output count, not the candidate capacity. Score and membership
 failure probabilities are combined, and the score guarantee remains in the

@@ -98,7 +98,7 @@ impl ReplacementStrategy for TopKLimitReuseStrategy {
                 .ok()?;
                 Some(ReplacementSubDAG {
                     strategy: "TopKLimitReuseStrategy",
-                    replacement: Replacement::Subtree(rewritten),
+                    replacement: Replacement::SubDag(rewritten),
                     provenance: ReplacementProvenance::LogicalRewrite,
                     rationale: format!(
                         "derives top-{target_n} from the compatible shared top-{source_n} result; both rank the identical input with the same ordering"
@@ -113,7 +113,7 @@ impl ReplacementStrategy for TopKLimitReuseStrategy {
 mod tests {
     use super::*;
     use crate::test_support::scan;
-    use asap_types::pre_asap::vocabulary::GroupKeys;
+    use asap_types::ir::operator_properties::GroupKeys;
     use asap_types::pre_asap::Schema;
 
     fn scan_named(metric: &str) -> Rc<OperatorNode> {
@@ -138,7 +138,7 @@ mod tests {
         let strategy = TopKLimitReuseStrategy::new(&[Rc::clone(&small), Rc::clone(&large)]);
         let replacements = strategy.replacements(&TargetSubDAG::new(&small));
         assert_eq!(replacements.len(), 1);
-        let Replacement::Subtree(rewrite) = &replacements[0].replacement else {
+        let Replacement::SubDag(rewrite) = &replacements[0].replacement else {
             panic!()
         };
         let Some(NonASAPOp::Limit {

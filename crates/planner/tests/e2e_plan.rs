@@ -389,7 +389,7 @@ async fn lifecycle_decisions_ride_inside_each_plan() {
     assert_eq!(output.plans.len(), 1);
     assert_eq!(output.plans[0].entry_index, 0);
     let _: &Rc<_> = &output.plans[0].plan.root;
-    assert_eq!(output.dags().len(), 1);
+    assert_eq!(output.operator_roots().len(), 1);
 }
 
 /// Each root's lifecycle is planned against the entries that read it: a

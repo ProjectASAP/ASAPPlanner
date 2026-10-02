@@ -1,7 +1,7 @@
 //! Estimator-specific confidence for classic HLL's linear-counting branch.
 //!
 //! This is conditional on independent uniform bucket hashes and an enforced
-//! upper bound on distinct items in the complete readout population (including
+//! upper bound on distinct items in the complete evaluation population (including
 //! all merged panes). It is not an RSE-to-normal conversion or an ERP fit.
 
 use super::*;
@@ -9,7 +9,7 @@ use super::*;
 pub(super) fn generic_guarantee(
     algorithm: &SketchAlgorithm,
     params: &SketchParams,
-    query: &SketchQuery,
+    query: &SketchStatistic,
 ) -> Option<ResultGuarantee> {
     let SketchParams::Hll { precision } = params else {
         return None;
@@ -56,13 +56,13 @@ impl ClassicHllConfidence {
                 value: self.relative_error,
             },
             failure_probability: ProbabilityExpr::Constant { value: delta },
-            provenance: vec![GuaranteeSource::SketchReadout {
+            provenance: vec![GuaranteeSource::SketchEvaluation {
                 algorithm: "Hll".into(),
                 contract: "classic_hll_linear_counting_collision_bound_v1".into(),
                 params: serde_json::json!({"precision": precision,
                     "max_distinct": self.max_distinct, "relative_error": self.relative_error,
                     "hash_assumption": "independent_uniform_buckets",
-                    "population_scope": "complete_readout_including_merged_panes"}),
+                    "population_scope": "complete_evaluation_including_merged_panes"}),
                 query: "Cardinality".into(),
             }],
         })
@@ -187,7 +187,7 @@ mod tests {
             }
         }
     }
-    /// The model's readout formula matches the actual classic estimator after merge.
+    /// The model's evaluation formula matches the actual classic estimator after merge.
     #[test]
     fn native_classic_estimator_and_merged_registers_use_the_same_contract() {
         use asap_sketchlib::sketches::hll::{Classic, HyperLogLogP16};
@@ -241,7 +241,7 @@ mod tests {
                     SketchKind::new(SketchAlgorithm::Hll, params),
                     GroupingStrategy::default(),
                 ),
-                &SketchQuery::Cardinality,
+                &SketchStatistic::Cardinality,
             )
             .unwrap();
         assert_eq!(g.metric, ErrorMetric::Cardinality);

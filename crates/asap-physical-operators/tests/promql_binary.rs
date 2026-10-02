@@ -323,9 +323,9 @@ fn label_map_bool_comparison_drops_the_name() {
     assert!(matches!(row[1], Value::Float64(v) if v == 1.));
 }
 
-// Stored temporal readouts drop metric names before filter comparisons and set matching.
+// Stored temporal evaluations drop metric names before filter comparisons and set matching.
 #[test]
-fn stored_series_readouts_support_filters_and_sets() {
+fn stored_series_evaluations_support_filters_and_sets() {
     use asap_physical_operators::{
         physical_planner::compile, summary_kernels::exact::ExactAccumulator,
     };

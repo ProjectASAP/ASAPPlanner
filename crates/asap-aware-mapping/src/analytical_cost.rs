@@ -2969,7 +2969,7 @@ mod tests {
     }
 
     fn comparison_scope() -> ComparisonScope {
-        use asap_types::pre_asap::vocabulary::Source;
+        use asap_types::ir::operator_properties::Source;
         use asap_types::workload::{
             DurationMs, QueryRecurrence, QueryTimeScope, RepeatedDemand, RepetitionInterval,
             TimeSelection, TimestampMs,
@@ -3244,7 +3244,7 @@ mod tests {
             operator: PhysicalOperator::Scan,
             children: vec![],
             source_coverage: Some(SourceCoverage {
-                source: asap_types::pre_asap::vocabulary::Source::Table {
+                source: asap_types::ir::operator_properties::Source::Table {
                     table_ref: "other_metrics".into(),
                 },
                 source_snapshot_id: "catalog-version-42".into(),
@@ -3311,7 +3311,7 @@ mod tests {
         let mut scope = comparison_scope();
         let coverage = scope.sources[0].clone();
         scope.sources.push(SourceCoverage {
-            source: asap_types::pre_asap::vocabulary::Source::Table {
+            source: asap_types::ir::operator_properties::Source::Table {
                 table_ref: "auxiliary".into(),
             },
             source_snapshot_id: "catalog-version-42".into(),

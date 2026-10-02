@@ -6,7 +6,7 @@
 // resulting **post-ASAP IR** (the sketch-bound IR: an `OperatorNode` DAG in
 // which `ASAPOp` operators — the concrete summary family/params committed per
 // aggregate — replace the bound aggregates, while whatever the pass left
-// untouched stays a plain `NonASAPOp` subtree carrying an exact guarantee).
+// untouched stays a plain `NonASAPOp` sub-DAG carrying an exact guarantee).
 // See `show_pre_asap_ir` for the sketch-agnostic IR one layer upstream.
 //
 // File format: one query per line, prefixed with "sql>" or "promql>".
@@ -44,7 +44,7 @@ fn bind_all(root: &Rc<OperatorNode>) -> Result<Vec<Rc<OperatorNode>>, String> {
         .into_iter()
         .filter_map(|candidate| match candidate {
             ReplacementSubDAG {
-                replacement: Replacement::Subtree(node),
+                replacement: Replacement::SubDag(node),
                 ..
             } => Some(node),
             _ => None,

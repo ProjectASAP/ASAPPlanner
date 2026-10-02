@@ -71,7 +71,7 @@ flowchart TD
     P["CandidateLogicalASAPDAGs: logical choices for this root"]
     I["cost_sorted: inspect choices"]
     G["global_selection + assemble_selected_dag(root)"]
-    L["One selected Post-ASAP DAG; the exact pre-ASAP subtree if no optimization is selected"]
+    L["One selected Post-ASAP DAG; the exact pre-ASAP sub-DAG if no optimization is selected"]
     X["Extra lifecycle inputs: horizon; update rate; capabilities; comparable summary/raw costs"]
     H["Summary-maintenance-lifecycle-aware selection"]
     HM["Assemble one selected DAG and decide summary maintenance"]

@@ -220,8 +220,8 @@ pub fn exact_state_schema(family: SummaryFamilyType) -> Result<Schema, Error> {
     Ok(Arc::new(schema))
 }
 
-/// Retain exact readout semantics before any deployment state is opened.
-pub fn compile_exact_readout(
+/// Retain exact evaluation semantics before any deployment state is opened.
+pub fn compile_exact_evaluation(
     family: SummaryFamilyType,
     lookback_ms: u64,
     preserve_metric_name: bool,
@@ -235,16 +235,18 @@ pub fn compile_exact_readout(
             ExactKind::Max => crate::Statistic::Max,
             ExactKind::Rate => crate::Statistic::Rate,
             ExactKind::Increase => crate::Statistic::Increase,
-            ExactKind::IRate => return Err(invalid("instant-rate state readout is not supported")),
+            ExactKind::IRate => {
+                return Err(invalid("instant-rate state evaluation is not supported"))
+            }
         },
-        _ => return Err(invalid("exact readout requires an exact family")),
+        _ => return Err(invalid("exact evaluation requires an exact family")),
     };
     let input = exact_state_schema(family)?;
     let merge = Operator::summary_merge(input.clone(), 1, vec![0])?;
-    let mut readout = Operator::readout(
+    let mut evaluation = Operator::evaluation(
         merge.schema(),
         1,
-        ReadoutQuery::Exact(ExactReadout {
+        SummaryEvaluation::Exact(ExactEvaluation {
             statistic,
             lookback_ms: None,
         }),
@@ -253,12 +255,12 @@ pub fn compile_exact_readout(
         statistic,
         crate::Statistic::Rate | crate::Statistic::Increase
     ) {
-        readout = readout.with_counter_lookback(
+        evaluation = evaluation.with_counter_lookback(
             i64::try_from(lookback_ms).map_err(|_| invalid("counter lookback exceeds Int64"))?,
         )?;
     }
     let project = Operator::project(
-        readout.schema(),
+        evaluation.schema(),
         vec![
             (
                 "labels".into(),
@@ -275,5 +277,5 @@ pub fn compile_exact_readout(
             ("value".into(), Expression::ExactFloat64(1)),
         ],
     )?;
-    unary(vec![merge, readout, project], input)
+    unary(vec![merge, evaluation, project], input)
 }

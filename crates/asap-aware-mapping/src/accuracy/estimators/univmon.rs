@@ -1,8 +1,8 @@
-//! UnivMon currently certifies only its exact unit-update total readout.
+//! UnivMon currently certifies only its exact unit-update total evaluation.
 use super::*;
 
-pub(super) fn guarantee(query: &SketchQuery) -> Option<ResultGuarantee> {
-    matches!(query, SketchQuery::PointCount { value: None, .. })
+pub(super) fn guarantee(query: &SketchStatistic) -> Option<ResultGuarantee> {
+    matches!(query, SketchStatistic::PointCount { value: None, .. })
         .then(|| ResultGuarantee::exact("univmon_unit_update_total"))
 }
 

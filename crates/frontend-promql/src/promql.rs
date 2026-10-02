@@ -69,12 +69,13 @@ use promql_parser::parser::{
 use asap_frontend_common::{
     UnresolvedOp as Unresolved, UnresolvedPredicate, UnresolvedScalar as Scalar, UnresolvedSortKey,
 };
-use asap_types::ir::{BinaryOperator, ExprSemantics, TimeRangeKind};
-use asap_types::pre_asap::agg_intent::{topk, AggIntent, TimeFunc};
-use asap_types::pre_asap::vocabulary::{
+use asap_types::ir::operator_properties::{
     AtModifier, BinaryOpKind, GroupKeys, GroupSide, PromQLVectorSetOpKind, Reduction, Source,
     TimeShift, VectorGrouping, VectorMatch, VectorMatchKind,
 };
+use asap_types::ir::{BinaryOperator, ExprSemantics, TimeRangeKind};
+use asap_types::pre_asap::agg_intent::{topk, AggIntent, TimeFunc};
+
 use asap_types::pre_asap::{
     ArithmeticOpKind, ColumnRef, CompareOpKind, InfoMatcher, SampleKind, ScalarValue,
 };
@@ -673,13 +674,13 @@ fn outer_kind(agg: &AggregateExpr) -> Result<Outer> {
     })
 }
 
-/// Wrap an already-lowered Unresolved subtree in the outer aggregation. This is the
+/// Wrap an already-lowered Unresolved sub-DAG in the outer aggregation. This is the
 /// general-nesting counterpart to [`build`]: where `build` assembles the
 /// two-level shape from a flat [`Inner`], this composes the outer operator over
 /// an arbitrary child (`max(sum by (job) (…))`, `sum(a + b)`, …).
 ///
 /// A heavy-hitter `TopK` is only recognised on the flat `count_over_time` shape
-/// (handled in `build`); over a general subtree, `topk`/`bottomk` is a generic
+/// (handled in `build`); over a general sub-DAG, `topk`/`bottomk` is a generic
 /// order-by-value + limit — the same `Sort{partition_by} → Limit` pair `build`
 /// emits for any non-heavy-hitter ranking.
 /// Flip the outer `Aggregate` produced for a `without(...)` grouping into the
@@ -866,7 +867,7 @@ fn classic_histogram_quantile(q: f64, output_name: &str, child: Unresolved) -> U
 /// (`HistogramQuantile`), native histograms / raw samples take the sketch-able
 /// `Quantile` (issues #43 / #79) — so the two functions cannot diverge.
 ///
-/// The vector argument is lowered once per branch, duplicating the subtree —
+/// The vector argument is lowered once per branch, duplicating the sub-DAG —
 /// a future workload-level reuse pass could hoist it back into a single
 /// producer.
 ///
@@ -1745,7 +1746,7 @@ fn windowed_aggregate(
     }
 }
 
-/// `Aggregate{reduction, [intent]}` directly over an existing Unresolved subtree — the
+/// `Aggregate{reduction, [intent]}` directly over an existing Unresolved sub-DAG — the
 /// OUTER level of a two-level aggregation such as `sum(rate(…))` or the
 /// `Aggregate{[Quantile]}` that wraps a `histogram_quantile` argument.
 fn outer_aggregate(

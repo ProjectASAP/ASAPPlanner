@@ -7,11 +7,11 @@ use asap_aware_mapping::cost_model::DefaultCostModel;
 use asap_aware_mapping::replacement::{default_strategies, search_workload_with_targets};
 use asap_aware_mapping::{Replacement, ReplacementStrategy, SketchAlgorithmStrategy, TargetSubDAG};
 mod support;
-use asap_types::ir::cse::share_common_subtrees;
+use asap_types::ir::cse::share_common_subdags;
 use asap_types::ir::{ASAPOp, Operator, OperatorNode};
 use asap_types::post_asap::{
     AccuracyError, BoundExpr, CompositionOperator, ErrorMetric, FieldDataType, ProbabilityExpr,
-    ResultGuarantee, SketchAlgorithm, SketchQuery, SummaryInputExpr,
+    ResultGuarantee, SketchAlgorithm, SketchStatistic, SummaryInputExpr,
 };
 use asap_types::types::AccuracyTarget;
 use support::{lower_promql, post_asap_dag};
@@ -22,10 +22,10 @@ impl AccuracyModel for TestEvidence {
     fn local_guarantee(
         &self,
         family: &FieldDataType,
-        query: &SketchQuery,
+        query: &SketchStatistic,
     ) -> Option<ResultGuarantee> {
         if matches!(family, FieldDataType::Sketch(kind, _) if kind.algorithm() == &SketchAlgorithm::UnivMon)
-            && !matches!(query, SketchQuery::PointCount { .. })
+            && !matches!(query, SketchStatistic::PointCount { .. })
         {
             let mut guarantee = ResultGuarantee::exact("SYNTHETIC test evidence; not measured");
             guarantee.metric = ErrorMetric::RelativeValue;
@@ -56,7 +56,7 @@ fn candidate(query: &str, accuracy: AccuracyTarget) -> Rc<OperatorNode> {
         .replacements(&TargetSubDAG::new(&root))
         .into_iter()
         .find_map(|candidate| {
-            let Replacement::Subtree(node) = candidate.replacement else { return None };
+            let Replacement::SubDag(node) = candidate.replacement else { return None };
             let Operator::ASAP(ASAPOp::SummaryEstimate { summary_input, .. }) = &node.operator else { return None };
             matches!(&summary_input.operator, Operator::ASAP(ASAPOp::SummaryAgg { family: FieldDataType::Sketch(kind, _), .. })
                 if kind.algorithm() == &SketchAlgorithm::UnivMon).then_some(node)
@@ -64,8 +64,8 @@ fn candidate(query: &str, accuracy: AccuracyTarget) -> Rc<OperatorNode> {
 }
 
 #[test]
-fn four_readouts_share_one_value_frequency_state_and_keep_honest_guarantees() {
-    // Equal data, grouping and window produce one state independently of readout.
+fn four_evaluations_share_one_value_frequency_state_and_keep_honest_guarantees() {
+    // Equal data, grouping and window produce one state independently of evaluation.
     let accuracy = AccuracyTarget::Epsilon(0.02);
     let roots: Vec<_> = [
         ("distinct_over_time(m[5m])", accuracy.clone()),
@@ -77,7 +77,7 @@ fn four_readouts_share_one_value_frequency_state_and_keep_honest_guarantees() {
     .enumerate()
     .map(|(id, (query, accuracy))| (id, candidate(query, accuracy)))
     .collect();
-    let roots = share_common_subtrees(roots);
+    let roots = share_common_subdags(roots);
     let mut first_state = None;
     for (index, root) in &roots {
         let Operator::ASAP(ASAPOp::SummaryEstimate {
@@ -90,7 +90,7 @@ fn four_readouts_share_one_value_frequency_state_and_keep_honest_guarantees() {
         if let Some(first) = &first_state {
             assert!(
                 Rc::ptr_eq(first, summary_input),
-                "state must be shared across readouts"
+                "state must be shared across evaluations"
             );
         } else {
             first_state = Some(Rc::clone(summary_input));
@@ -101,7 +101,10 @@ fn four_readouts_share_one_value_frequency_state_and_keep_honest_guarantees() {
         assert!(matches!(input.item, Some(SummaryInputExpr::Column(_))));
         assert_eq!(input.weight, SummaryInputExpr::Constant(1.0));
         if *index == 1 {
-            assert!(matches!(query, SketchQuery::PointCount { value: None, .. }));
+            assert!(matches!(
+                query,
+                SketchStatistic::PointCount { value: None, .. }
+            ));
             assert!(root.guarantee.as_ref().is_some_and(|g| g.is_exact()));
         } else {
             assert!(!root.guarantee.as_ref().unwrap().is_exact());
@@ -120,7 +123,7 @@ fn four_readouts_share_one_value_frequency_state_and_keep_honest_guarantees() {
 }
 
 #[test]
-fn uncalibrated_frequency_readouts_do_not_bypass_accuracy_targets() {
+fn uncalibrated_frequency_evaluations_do_not_bypass_accuracy_targets() {
     // An unmeasured heuristic remains inspectable but is never certified or
     // automatically selected for a caller-visible bounded-error result.
     for query in ["entropy_over_time(m[5m])", "l2_over_time(m[5m])"] {
@@ -140,7 +143,7 @@ fn uncalibrated_frequency_readouts_do_not_bypass_accuracy_targets() {
                 .filter(|candidate| {
                     matches!(
                         &candidate.replacement,
-                        Replacement::Subtree(node)
+                        Replacement::SubDag(node)
                             if matches!(&node.operator, Operator::ASAP(ASAPOp::SummaryEstimate { .. }))
                                 && node.guarantee.is_none()
                                 && candidate.has_missing_accuracy_evidence()

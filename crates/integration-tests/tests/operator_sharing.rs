@@ -71,13 +71,13 @@ fn find_all(
         .collect()
 }
 
-fn is_summary_readout(node: &OperatorNode) -> bool {
+fn is_summary_evaluation(node: &OperatorNode) -> bool {
     matches!(
         node.operator,
         Operator::ASAP(
             ASAPOp::SummaryEstimate { .. }
                 | ASAPOp::FinalizeExactAccumulator { .. }
-                | ASAPOp::ReadPopulation { .. }
+                | ASAPOp::EvaluatePopulation { .. }
         )
     )
 }
@@ -96,7 +96,7 @@ fn through_unary_non_asap(node: &Rc<OperatorNode>) -> &Rc<OperatorNode> {
     }
 }
 
-// #468 problem 1: the Project above the summary readout and the Scan below
+// #468 problem 1: the Project above the summary evaluation and the Scan below
 // it are both plain NonASAP nodes (no post-ASAP-only wrapper variant).
 #[ignore = "planner chooses no summary here: Avg has no summary realization, so the Aggregate stays a logical pass-through"]
 #[tokio::test]
@@ -113,15 +113,15 @@ async fn project_above_and_scan_below_a_summary_are_both_non_asap_nodes() {
         "root must be the outer Project, got {:?}",
         root.operator
     );
-    // A summary readout sits below the Project chain.
-    let readout = through_unary_non_asap(&root);
+    // A summary evaluation sits below the Project chain.
+    let evaluation = through_unary_non_asap(&root);
     assert!(
-        is_summary_readout(readout),
+        is_summary_evaluation(evaluation),
         "the Project chain must read a summary, got {:?}",
-        readout.operator
+        evaluation.operator
     );
     // Below the summary the Scan is the same NonASAP operator a front end emits.
-    let scans = find_all(readout, is_scan);
+    let scans = find_all(evaluation, is_scan);
     assert_eq!(scans.len(), 1, "one lineitem Scan below the summary");
     assert!(!scans[0].is_asap());
     // The flat plan exports (time first, wire 6).

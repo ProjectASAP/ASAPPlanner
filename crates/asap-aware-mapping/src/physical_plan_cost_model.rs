@@ -189,12 +189,12 @@ impl<'a> PhysicalPlanCostModel<'a> {
             Replacement::ExactComposition(_) => {
                 return Err(AnalyticalCostError::UnsupportedCandidate)
             }
-            // A subtree without summary state is the planner's own query
+            // A sub-DAG without summary state is the planner's own query
             // lowering; anything with summary state is deployment-provided.
-            Replacement::Subtree(subtree) if !subtree.contains_asap() => {
+            Replacement::SubDag(subtree) if !subtree.contains_asap() => {
                 lower_query_physical_dag(subtree, scope, &evidence)?
             }
-            Replacement::Subtree(summary) => self
+            Replacement::SubDag(summary) => self
                 .provider
                 .summary_physical_dag(&snapshot, summary, target)?,
         };

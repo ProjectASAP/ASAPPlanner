@@ -10,10 +10,10 @@ use serde::{Deserialize, Serialize};
 
 use super::asap::ASAPOp;
 use super::non_asap::NonASAPOp;
+use crate::ir::QueryExprError;
 use crate::post_asap::execution_data_state::ExecutionTiming;
 use crate::post_asap::guarantee::ResultGuarantee;
 use crate::pre_asap::schema::Schema;
-use crate::pre_asap::vocabulary::QueryExprError;
 
 /// The output category of an operator, derived from the operation and its
 /// inputs. Matching column schemas do not make categories interchangeable.
@@ -80,7 +80,7 @@ impl Operator {
 }
 
 /// A node of the logical DAG. Nodes are immutable and shared through `Rc`;
-/// a structurally identical subtree referenced from several parents is one
+/// a structurally identical sub-DAG referenced from several parents is one
 /// node.
 ///
 /// `schema` and `result_kind` are derived from `operator` and its children
@@ -107,7 +107,7 @@ impl OperatorNode {
     }
 
     /// Build a node with a caller-supplied output schema. Summary planning
-    /// uses this where its readout naming is more specific than the derived
+    /// uses this where its evaluation naming is more specific than the derived
     /// shape; the output category is still derived.
     pub fn with_schema(operator: Operator, schema: Schema) -> Self {
         let result_kind = operator.output_kind();

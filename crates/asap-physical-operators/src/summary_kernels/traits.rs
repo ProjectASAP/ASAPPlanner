@@ -1,11 +1,11 @@
-use planner_types::post_asap::SketchQuery;
+use planner_types::post_asap::SketchStatistic;
 
 pub type KernelError = Box<dyn std::error::Error + Send + Sync>;
 
 /// In-memory state of one population's summary.
 ///
 /// Kernels adapt `asap_sketchlib` structures (or exact Planner state) to the
-/// operations physical operators need: merge, typed readout and memory
+/// operations physical operators need: merge, typed evaluation and memory
 /// accounting. Grouping belongs to operators; byte encodings belong to
 /// `asap_sketchlib` and deployments.
 pub trait AggregateCore: Send + Sync {
@@ -20,9 +20,9 @@ pub trait AggregateCore: Send + Sync {
     /// Merge with a state of the same family and shape, leaving both inputs unchanged.
     fn merge_with(&self, other: &dyn AggregateCore) -> Result<Box<dyn AggregateCore>, KernelError>;
 
-    /// Answer a sketch readout. Exact states are read through
-    /// [`ExactAccumulator::readout`](super::exact::ExactAccumulator::readout).
-    fn estimate(&self, query: &SketchQuery) -> Result<f64, KernelError> {
+    /// Answer a sketch evaluation. Exact states are read through
+    /// [`ExactAccumulator::evaluation`](super::exact::ExactAccumulator::evaluation).
+    fn estimate(&self, query: &SketchStatistic) -> Result<f64, KernelError> {
         Err(format!("{query:?} is not supported by this summary").into())
     }
 
@@ -52,7 +52,7 @@ mod tests {
             .downcast_mut::<DDSketchAccumulator>()
             .unwrap();
         dd.inner.update(3.0);
-        let count = SketchQuery::PointCount {
+        let count = SketchStatistic::PointCount {
             key: planner_types::pre_asap::ColumnRef::SampleValue,
             value: None,
         };

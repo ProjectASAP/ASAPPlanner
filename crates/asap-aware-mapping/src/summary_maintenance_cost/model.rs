@@ -623,8 +623,8 @@ impl SummaryMaintenanceCostModel {
         Some(SummaryMaintenanceLifecycleCostInputs {
             build_cost: Some(build),
             maintenance_cost_per_update: Some(maintenance),
-            // Readout is a separate physical operator in the complete DAG.
-            // A state-only candidate therefore does not fabricate readout
+            // Evaluation is a separate physical operator in the complete DAG.
+            // A state-only candidate therefore does not fabricate evaluation
             // evidence merely to keep a lifecycle alternative selectable.
             summary_read_cost: Some(Cost::ZERO),
             retention_cost_rate: Some(CostRate(retention_total.0 / horizon_seconds)),
@@ -647,7 +647,7 @@ impl CostModel for SummaryMaintenanceCostModel {
             // Lifecycle selection supplies a complete override. If it cannot,
             // the candidate remains unavailable rather than receiving this
             // trait's structural fallback.
-            Replacement::Subtree(_) => None,
+            Replacement::SubDag(_) => None,
         }
     }
 
@@ -848,12 +848,11 @@ mod tests {
     use asap_types::ir::{ASAPOp, BinaryOperator, NonASAPOp, Operator, OperatorNode};
     use asap_types::post_asap::{
         EvaluationSchedule, ExactKind, ExactParams, Field, FieldDataType, GroupingStrategy,
-        OutputRepresentation, Schema, SketchQuery, SummaryMaintenanceLifecycle,
+        OutputRepresentation, Schema, SummaryMaintenanceLifecycle,
         SummaryMaintenanceLifecycleGuarantee, SummaryMaintenanceMode, SummaryUpdate,
     };
     use asap_types::pre_asap::{
-        agg_intent::AggIntent, ArithmeticOpKind, BinaryOpKind, ColumnRef, DataType, Reduction,
-        Source,
+        agg_intent::AggIntent, ArithmeticOpKind, BinaryOpKind, DataType, Reduction, Source,
     };
     use asap_types::workload::{
         DataWorkload, Evidence, EvidenceSource, Predictability, Query, QueryLanguage,
@@ -1015,7 +1014,7 @@ mod tests {
             inputs,
             SummaryOperationCpuEvidence {
                 insert_cpu_ops: Some(2.0),
-                readout_cpu_ops: Some(1.0),
+                evaluation_cpu_ops: Some(1.0),
                 ..SummaryOperationCpuEvidence::default()
             },
         )
@@ -1068,7 +1067,7 @@ mod tests {
             inputs,
             SummaryOperationCpuEvidence {
                 insert_cpu_ops: Some(2.0),
-                readout_cpu_ops: Some(1.0),
+                evaluation_cpu_ops: Some(1.0),
                 ..SummaryOperationCpuEvidence::default()
             },
         )
@@ -1257,7 +1256,7 @@ mod tests {
         let mut model = streaming_model();
         for group in space.target_subdag_candidates() {
             for candidate in &group.candidates {
-                if let Replacement::Subtree(root) = &candidate.replacement {
+                if let Replacement::SubDag(root) = &candidate.replacement {
                     if !root.contains_asap() {
                         continue;
                     }
@@ -1571,17 +1570,17 @@ mod tests {
         model.capabilities.delete = true;
         bind_aggregations(&mut model, &target, &root, streaming_inputs(), cpu);
 
-        // Under a readout, the reserved delete surfaces as an illegal child.
+        // Under a evaluation, the reserved delete surfaces as an illegal child.
         assert!(matches!(
             streaming_planning_error(Rc::clone(&root), &model),
             asap_types::post_asap::ExecutionDataStateError::IllegalChildDataState {
-                edge: "SummaryEstimate.summary_input",
+                edge: "FinalizeExactAccumulator.child",
                 child: asap_types::post_asap::ExecutionDataState::QUERY_ROWS,
             }
         ));
         // As the root, it is reported as the unimplemented operator itself.
         assert!(matches!(
-            streaming_planning_error(readout_state(&root), &model),
+            streaming_planning_error(evaluation_state(&root), &model),
             asap_types::post_asap::ExecutionDataStateError::UnimplementedOperator {
                 operator: "SummaryDelete"
             }
@@ -1595,7 +1594,7 @@ mod tests {
         // evidence on the root, leaves the whole-DAG cost unset.
         let workload = streaming_workload();
         let target = streaming_sum_query();
-        let root = two_summary_binary();
+        let root = add_independent_summary_results();
         let mut model = streaming_model();
         bind_aggregations(
             &mut model,
@@ -1671,7 +1670,7 @@ mod tests {
         // node still fails closed.
         let workload = streaming_workload();
         let target = streaming_sum_query();
-        let root = two_summary_binary();
+        let root = add_independent_summary_results();
         let mut model = streaming_model();
         bind_aggregations(
             &mut model,
@@ -1778,7 +1777,7 @@ mod tests {
         // one physical id but carry different evidence leave the cost unset.
         let workload = streaming_workload();
         let target = streaming_sum_query();
-        let root = two_summary_binary();
+        let root = add_independent_summary_results();
         let mut model = streaming_model();
         bind_aggregations(
             &mut model,
@@ -1862,10 +1861,10 @@ mod tests {
         // evidence for each Rc-bound state, charges peak transient memory, and
         // de-duplicates bootstrap scans only on a shared provider read id.
         let workload = streaming_workload();
-        let root = two_summary_binary();
+        let root = add_independent_summary_results();
         let (left, right) = binary_operands(&root);
         let target = streaming_sum_query();
-        let aggregations = [readout_state(&left), readout_state(&right)];
+        let aggregations = [evaluation_state(&left), evaluation_state(&right)];
         let mut model = streaming_model();
         bind_comparison(&mut model, &target, &root);
         model.node_evidence.insert_aggregation(
@@ -1907,12 +1906,12 @@ mod tests {
                 insert_cpu_ops: second_cpu.insert_cpu_ops.unwrap(),
             },
         );
-        // The left readout plays the old join's role: a 64-byte workspace and a
+        // The left evaluation plays the old join's role: a 64-byte workspace and a
         // 64-byte output that stays live until the root BinaryOp consumes it.
         model.node_evidence.insert_operation(
             &left,
-            StreamingSummaryOperatorEvidence::Readout(test_resource(
-                "left-readout",
+            StreamingSummaryOperatorEvidence::ValueOperation(test_resource(
+                "left-evaluation",
                 vec![test_edge()],
                 6.0,
                 64,
@@ -1921,8 +1920,8 @@ mod tests {
         );
         model.node_evidence.insert_operation(
             &right,
-            StreamingSummaryOperatorEvidence::Readout(test_resource(
-                "right-readout",
+            StreamingSummaryOperatorEvidence::ValueOperation(test_resource(
+                "right-evaluation",
                 vec![test_edge()],
                 3.0,
                 0,
@@ -1966,8 +1965,8 @@ mod tests {
             &model,
         )
         .unwrap();
-        // The left readout's 64-byte output remains live while the binary's
-        // workspace is active (64 + 128 = 192); the readout's own workspace is
+        // The left evaluation's 64-byte output remains live while the binary's
+        // workspace is active (64 + 128 = 192); the evaluation's own workspace is
         // released first, so the old peak was 64 + 64 = 128.
         assert_eq!(
             larger_workspace.summary_total_cost.unwrap().0 - complete.summary_total_cost.unwrap().0,
@@ -2008,7 +2007,10 @@ mod tests {
             });
         let target = streaming_sum_query();
         let root = summary_with_operations(false, false, false);
-        let Operator::ASAP(ASAPOp::SummaryEstimate { summary_input, .. }) = &root.operator else {
+        let Operator::ASAP(ASAPOp::FinalizeExactAccumulator {
+            child: summary_input,
+        }) = &root.operator
+        else {
             unreachable!();
         };
         let windowed_summary = Rc::clone(summary_input);
@@ -2150,7 +2152,10 @@ mod tests {
     fn window_framework_candidates_require_unique_nonempty_planner_primitives() {
         let target = streaming_sum_query();
         let root = summary_with_operations(false, false, false);
-        let Operator::ASAP(ASAPOp::SummaryEstimate { summary_input, .. }) = &root.operator else {
+        let Operator::ASAP(ASAPOp::FinalizeExactAccumulator {
+            child: summary_input,
+        }) = &root.operator
+        else {
             unreachable!();
         };
         let windowed_summary = Rc::clone(summary_input);
@@ -2194,7 +2199,7 @@ mod tests {
         // the cost unset.
         let workload = streaming_workload();
         let target = streaming_sum_query();
-        let root = two_summary_binary();
+        let root = add_independent_summary_results();
         let mut model = streaming_model();
         bind_aggregations(
             &mut model,
@@ -2204,7 +2209,7 @@ mod tests {
             streaming_cpu(),
         );
         let (left, right) = binary_operands(&root);
-        let aggregation_nodes = [readout_state(&left), readout_state(&right)];
+        let aggregation_nodes = [evaluation_state(&left), evaluation_state(&right)];
 
         let mut shared_aggregation =
             model.node_evidence.aggregations[&Rc::as_ptr(&aggregation_nodes[0])].clone();
@@ -2349,7 +2354,10 @@ mod tests {
             asap_types::workload::AccuracyRequirement::Explicit(AccuracyTarget::Epsilon(1.0));
         let target = streaming_sum_query();
         let root = summary_with_operations(false, false, false);
-        let Operator::ASAP(ASAPOp::SummaryEstimate { summary_input, .. }) = &root.operator else {
+        let Operator::ASAP(ASAPOp::FinalizeExactAccumulator {
+            child: summary_input,
+        }) = &root.operator
+        else {
             unreachable!();
         };
         let mut model = streaming_model();
@@ -2436,22 +2444,22 @@ mod tests {
     }
 
     #[test]
-    fn state_only_needs_no_readout_and_summary_merge_child_fails_closed() {
-        // A state-only root is costable without readout evidence; a
+    fn state_only_needs_no_evaluation_and_summary_merge_child_fails_closed() {
+        // A state-only root is costable without evaluation evidence; a
         // SummaryAgg over a reserved SummaryMerge is rejected at planning.
         let workload = streaming_workload();
         let target = streaming_sum_query();
         let estimated = summary_with_operations(false, false, false);
-        let state_only = readout_state(&estimated);
-        let mut no_readout_cpu = streaming_cpu();
-        no_readout_cpu.readout_cpu_ops = None;
+        let state_only = evaluation_state(&estimated);
+        let mut no_evaluation_cpu = streaming_cpu();
+        no_evaluation_cpu.evaluation_cpu_ops = None;
         let mut state_model = streaming_model();
         bind_aggregations(
             &mut state_model,
             &target,
             &state_only,
             streaming_inputs(),
-            no_readout_cpu,
+            no_evaluation_cpu,
         );
         let state_plan = plan_summary_maintenance_lifecycles(
             state_only,
@@ -2466,9 +2474,13 @@ mod tests {
 
         let nested = OperatorNode::asap_node(
             ASAPOp::SummaryAgg {
-                child: readout_state(&summary_with_operations(true, false, false)),
+                child: evaluation_state(&summary_with_operations(true, false, false)),
                 family: FieldDataType::ExactAggregate(ExactKind::Count, ExactParams::Count),
-                input: SummaryUpdate::column(ColumnRef::Wildcard),
+                input: SummaryUpdate {
+                    item: None,
+                    weight: asap_types::post_asap::SummaryInputExpr::Constant(1.0),
+                    weight_domain: Default::default(),
+                },
                 reduction: Reduction::by(vec![]),
                 grouping: GroupingStrategy::PerSubpopulationInstance,
                 filter: None,
@@ -2528,7 +2540,7 @@ mod tests {
             },
             SummaryOperationCpuEvidence {
                 insert_cpu_ops: Some(2.0),
-                readout_cpu_ops: Some(3.0),
+                evaluation_cpu_ops: Some(3.0),
                 ..SummaryOperationCpuEvidence::default()
             },
         )
@@ -2562,7 +2574,7 @@ mod tests {
                 delete_cpu_ops: Some(5.0),
                 delete_events_per_second: Some(4.0),
                 delete_routing_fanout: Some(2),
-                readout_cpu_ops: Some(7.0),
+                evaluation_cpu_ops: Some(7.0),
             },
         )
         .unwrap();
@@ -2592,7 +2604,7 @@ mod tests {
                 },
                 SummaryOperationCpuEvidence {
                     insert_cpu_ops: Some(1.0),
-                    readout_cpu_ops: Some(1.0),
+                    evaluation_cpu_ops: Some(1.0),
                     ..SummaryOperationCpuEvidence::default()
                 },
             ),
@@ -2619,7 +2631,7 @@ mod tests {
                 },
                 SummaryOperationCpuEvidence {
                     insert_cpu_ops: Some(1.0),
-                    readout_cpu_ops: Some(1.0),
+                    evaluation_cpu_ops: Some(1.0),
                     ..SummaryOperationCpuEvidence::default()
                 },
             ),
@@ -2650,7 +2662,7 @@ mod tests {
                 },
                 SummaryOperationCpuEvidence {
                     insert_cpu_ops: Some(1.0),
-                    readout_cpu_ops: Some(1.0),
+                    evaluation_cpu_ops: Some(1.0),
                     ..SummaryOperationCpuEvidence::default()
                 },
             ),
@@ -2685,7 +2697,7 @@ mod tests {
             },
             SummaryOperationCpuEvidence {
                 insert_cpu_ops: Some(1.0),
-                readout_cpu_ops: Some(1.0),
+                evaluation_cpu_ops: Some(1.0),
                 ..SummaryOperationCpuEvidence::default()
             },
         )
@@ -2721,7 +2733,7 @@ mod tests {
             },
             SummaryOperationCpuEvidence {
                 insert_cpu_ops: Some(1.0),
-                readout_cpu_ops: Some(1.0),
+                evaluation_cpu_ops: Some(1.0),
                 ..SummaryOperationCpuEvidence::default()
             },
         )
@@ -2765,7 +2777,7 @@ mod tests {
         };
         let cpu = SummaryOperationCpuEvidence {
             insert_cpu_ops: Some(1.0),
-            readout_cpu_ops: Some(1.0),
+            evaluation_cpu_ops: Some(1.0),
             ..SummaryOperationCpuEvidence::default()
         };
         assert_eq!(
@@ -2804,7 +2816,7 @@ mod tests {
         )
     }
 
-    fn count_readout_schema() -> Schema {
+    fn count_evaluation_schema() -> Schema {
         Schema::lifted(vec![Field::plain("count", DataType::Int64, false)], None)
     }
 
@@ -2835,7 +2847,11 @@ mod tests {
             ASAPOp::SummaryAgg {
                 child: metrics_scan(),
                 family: state_type,
-                input: SummaryUpdate::column(ColumnRef::Wildcard),
+                input: SummaryUpdate {
+                    item: None,
+                    weight: asap_types::post_asap::SummaryInputExpr::Constant(1.0),
+                    weight_domain: Default::default(),
+                },
                 reduction: Reduction::by(vec![]),
                 grouping: GroupingStrategy::PerSubpopulationInstance,
                 filter: None,
@@ -2874,32 +2890,20 @@ mod tests {
             );
         }
         OperatorNode::asap_node(
-            ASAPOp::SummaryEstimate {
-                summary_input: root,
-                query: SketchQuery::PointCount {
-                    key: ColumnRef::Wildcard,
-                    value: None,
-                },
-            },
-            count_readout_schema(),
-            Some(ResultGuarantee::exact("exact count readout")),
+            ASAPOp::FinalizeExactAccumulator { child: root },
+            count_evaluation_schema(),
+            Some(ResultGuarantee::exact("exact count evaluation")),
         )
     }
 
     fn summary_join() -> Rc<OperatorNode> {
         let left = summary_with_operations(false, false, false);
         let right = summary_with_operations(false, false, false);
-        let Operator::ASAP(ASAPOp::SummaryEstimate {
-            summary_input: left,
-            ..
-        }) = &left.operator
+        let Operator::ASAP(ASAPOp::FinalizeExactAccumulator { child: left }) = &left.operator
         else {
             unreachable!()
         };
-        let Operator::ASAP(ASAPOp::SummaryEstimate {
-            summary_input: right,
-            ..
-        }) = &right.operator
+        let Operator::ASAP(ASAPOp::FinalizeExactAccumulator { child: right }) = &right.operator
         else {
             unreachable!()
         };
@@ -2914,62 +2918,59 @@ mod tests {
             None,
         );
         OperatorNode::asap_node(
-            ASAPOp::SummaryEstimate {
-                summary_input: join,
-                query: SketchQuery::PointCount {
-                    key: ColumnRef::Wildcard,
-                    value: None,
-                },
-            },
-            count_readout_schema(),
+            ASAPOp::FinalizeExactAccumulator { child: join },
+            count_evaluation_schema(),
             None,
         )
     }
 
-    fn summary_binary() -> Rc<OperatorNode> {
+    fn add_shared_summary_result() -> Rc<OperatorNode> {
         let operand = summary_with_operations(false, false, false);
         Rc::new(
-            OperatorNode::with_schema(
-                Operator::NonASAP(NonASAPOp::BinaryOp {
-                    operator: BinaryOperator {
-                        checked_relative_division: false,
-                        checked_finite_division: false,
-                        kind: BinaryOpKind::Arithmetic(ArithmeticOpKind::Add),
-                        vector_match: None,
-                    },
-                    return_bool: false,
-                    lhs: Rc::clone(&operand),
-                    rhs: operand,
-                }),
-                Schema::lifted(vec![Field::plain("value", DataType::Float64, false)], None),
-            )
+            OperatorNode::new(Operator::NonASAP(NonASAPOp::BinaryOp {
+                operator: BinaryOperator {
+                    checked_relative_division: false,
+                    checked_finite_division: false,
+                    kind: BinaryOpKind::Arithmetic(ArithmeticOpKind::Add),
+                    vector_match: None,
+                },
+                return_bool: false,
+                lhs: Rc::clone(&operand),
+                rhs: operand,
+            }))
+            .unwrap()
             .with_guarantee(Some(ResultGuarantee::exact("test binary"))),
         )
     }
 
     /// Two independent summary states, each read out, combined by an ordinary
     /// `BinaryOp`: the non-reserved replacement for a `SummaryJoin` fixture.
-    fn two_summary_binary() -> Rc<OperatorNode> {
+    #[test]
+    fn independent_summary_results_form_a_valid_dag() {
+        add_independent_summary_results()
+            .validate_structure()
+            .unwrap();
+    }
+
+    fn add_independent_summary_results() -> Rc<OperatorNode> {
         Rc::new(
-            OperatorNode::with_schema(
-                Operator::NonASAP(NonASAPOp::BinaryOp {
-                    operator: BinaryOperator {
-                        checked_relative_division: false,
-                        checked_finite_division: false,
-                        kind: BinaryOpKind::Arithmetic(ArithmeticOpKind::Add),
-                        vector_match: None,
-                    },
-                    return_bool: false,
-                    lhs: summary_with_operations(false, false, false),
-                    rhs: summary_with_operations(false, false, false),
-                }),
-                Schema::lifted(vec![Field::plain("value", DataType::Float64, false)], None),
-            )
+            OperatorNode::new(Operator::NonASAP(NonASAPOp::BinaryOp {
+                operator: BinaryOperator {
+                    checked_relative_division: false,
+                    checked_finite_division: false,
+                    kind: BinaryOpKind::Arithmetic(ArithmeticOpKind::Add),
+                    vector_match: None,
+                },
+                return_bool: false,
+                lhs: summary_with_operations(false, false, false),
+                rhs: summary_with_operations(false, false, false),
+            }))
+            .unwrap()
             .with_guarantee(Some(ResultGuarantee::exact("test binary"))),
         )
     }
 
-    /// The `(lhs, rhs)` readouts of [`two_summary_binary`].
+    /// The `(lhs, rhs)` evaluations of [`add_independent_summary_results`].
     fn binary_operands(root: &OperatorNode) -> (Rc<OperatorNode>, Rc<OperatorNode>) {
         let Operator::NonASAP(NonASAPOp::BinaryOp { lhs, rhs, .. }) = &root.operator else {
             unreachable!();
@@ -2977,9 +2978,11 @@ mod tests {
         (Rc::clone(lhs), Rc::clone(rhs))
     }
 
-    /// The `SummaryAgg` under one `SummaryEstimate` readout.
-    fn readout_state(readout: &OperatorNode) -> Rc<OperatorNode> {
-        let Operator::ASAP(ASAPOp::SummaryEstimate { summary_input, .. }) = &readout.operator
+    /// The `SummaryAgg` under one `SummaryEstimate` evaluation.
+    fn evaluation_state(evaluation: &OperatorNode) -> Rc<OperatorNode> {
+        let Operator::ASAP(ASAPOp::FinalizeExactAccumulator {
+            child: summary_input,
+        }) = &evaluation.operator
         else {
             unreachable!();
         };
@@ -3034,7 +3037,7 @@ mod tests {
     fn exact_binary_is_costable_with_explicit_physical_evidence() {
         let workload = streaming_workload();
         let target = streaming_sum_query();
-        let root = summary_binary();
+        let root = add_shared_summary_result();
         let mut model = streaming_model();
         bind_aggregations(
             &mut model,
@@ -3165,7 +3168,7 @@ mod tests {
         }
     }
 
-    /// A retained relational subtree: a non-ASAP node with no summary below
+    /// A retained relational sub-DAG: a non-ASAP node with no summary below
     /// it, costed as one unit through retained-query evidence.
     fn is_retained(node: &OperatorNode) -> bool {
         !node.contains_asap()
@@ -3228,7 +3231,7 @@ mod tests {
     fn streaming_cpu() -> SummaryOperationCpuEvidence {
         SummaryOperationCpuEvidence {
             insert_cpu_ops: Some(2.0),
-            readout_cpu_ops: Some(3.0),
+            evaluation_cpu_ops: Some(3.0),
             ..SummaryOperationCpuEvidence::default()
         }
     }
@@ -3301,7 +3304,7 @@ mod tests {
             }
             let operation = match &node.operator {
                 Operator::NonASAP(NonASAPOp::BinaryOp { .. }) => {
-                    cpu.readout_cpu_ops.map(|cpu_ops| {
+                    cpu.evaluation_cpu_ops.map(|cpu_ops| {
                         StreamingSummaryOperatorEvidence::Binary(resource(
                             format!("binary-{node:p}"),
                             vec![test_edge(), test_edge()],
@@ -3315,8 +3318,8 @@ mod tests {
                 | Operator::ASAP(
                     ASAPOp::FinalizeExactAccumulator { .. }
                     | ASAPOp::MaintainPopulation { .. }
-                    | ASAPOp::ReadPopulation { .. },
-                ) => cpu.readout_cpu_ops.map(|cpu_ops| {
+                    | ASAPOp::EvaluatePopulation { .. },
+                ) => cpu.evaluation_cpu_ops.map(|cpu_ops| {
                     StreamingSummaryOperatorEvidence::ValueOperation(resource(
                         format!("value-operation-{node:p}"),
                         vec![test_edge()],
@@ -3359,9 +3362,9 @@ mod tests {
                     })
                 }
                 Operator::ASAP(ASAPOp::SummaryEstimate { .. }) => {
-                    cpu.readout_cpu_ops.map(|cpu_ops| {
-                        StreamingSummaryOperatorEvidence::Readout(resource(
-                            format!("readout-{node:p}"),
+                    cpu.evaluation_cpu_ops.map(|cpu_ops| {
+                        StreamingSummaryOperatorEvidence::Evaluation(resource(
+                            format!("evaluation-{node:p}"),
                             vec![test_edge()],
                             cpu_ops,
                             0,

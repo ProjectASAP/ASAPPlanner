@@ -71,6 +71,7 @@
 
 use std::rc::Rc;
 
+use asap_types::ir::operator_properties::Reduction;
 use asap_types::ir::{ASAPOp, NonASAPOp, Operator, OperatorNode};
 use asap_types::post_asap::{
     default_hydra_params, hydra_kind_for, AccuracyError, BoundExpr, CompositionOperator,
@@ -78,7 +79,6 @@ use asap_types::post_asap::{
     SketchAlgorithm, SketchParams,
 };
 use asap_types::pre_asap::agg_intent::AggIntent;
-use asap_types::pre_asap::vocabulary::Reduction;
 
 use crate::accuracy::{
     AccuracyBudgetAllocator, AccuracyEvidenceProvider, AccuracyModel, PropagationStats,
@@ -209,7 +209,7 @@ impl<'a> HydraGroupingStrategy<'a> {
     /// `PerSubpopulationInstance` to
     /// `SharedMultiSubpopulation { kind: hydra_kind, .. }` — reusing the
     /// entire bind decision procedure (schema derivation, column resolution,
-    /// readout construction) unchanged, patching only the one field this
+    /// evaluation construction) unchanged, patching only the one field this
     /// axis owns.
     fn build_candidate(
         &self,
@@ -296,7 +296,7 @@ impl<'a> HydraGroupingStrategy<'a> {
         }
         Some(ReplacementSubDAG {
             strategy: "HydraGroupingStrategy",
-            replacement: Replacement::Subtree(patched),
+            replacement: Replacement::SubDag(patched),
             provenance: crate::replacement::ReplacementProvenance::SummaryRealization,
             rationale: format!(
                 "{} realizes as a shared {hydra_kind:?} structure over {sketch_kind:?} \
@@ -374,7 +374,7 @@ fn per_subpopulation_sketch_params(node: &OperatorNode) -> Option<SketchParams> 
 /// Rebuild `node`, replacing its `SummaryAgg`'s `grouping` field with
 /// `grouping` — patching the one field this axis owns onto an
 /// already-correctly-bound node rather than re-deriving the rest of it.
-/// Recurses through a `SummaryEstimate` readout wrapper (the shape every
+/// Recurses through a `SummaryEstimate` evaluation wrapper (the shape every
 /// sketch candidate this module builds actually has) to reach the
 /// `SummaryAgg` underneath.
 fn with_grouping(
@@ -517,7 +517,7 @@ mod tests {
 
     #[test]
     fn without_grouping_has_a_subpopulation_concept_even_when_empty() {
-        use asap_types::pre_asap::vocabulary::GroupKeys;
+        use asap_types::ir::operator_properties::GroupKeys;
         // `without([])` groups by every remaining label — a real
         // subpopulation concept, unlike `by([])`'s genuine full reduction.
         assert!(has_subpopulations(&Reduction::Reduce(GroupKeys::without(
@@ -617,7 +617,7 @@ mod tests {
         assert_eq!(replacements.len(), 2, "{replacements:?}");
         assert!(replacements.iter().all(|candidate| matches!(
             &candidate.replacement,
-            Replacement::Subtree(node)
+            Replacement::SubDag(node)
                 if node.guarantee.as_ref().is_some_and(|guarantee|
                     guarantee.bound.evaluate().is_none()
                         && guarantee.failure_probability.evaluate().is_none())
@@ -631,7 +631,7 @@ mod tests {
             &self,
             _op: &CompositionOperator,
             _family: &FieldDataType,
-            _query: Option<&asap_types::post_asap::SketchQuery>,
+            _query: Option<&asap_types::post_asap::SketchStatistic>,
         ) -> PropagationStats {
             PropagationStats {
                 hydra_shared_grid_collision_bound: Some(0.0),
@@ -660,7 +660,7 @@ mod tests {
         assert_eq!(replacements.len(), 2, "{replacements:?}");
         assert!(replacements.iter().all(|candidate| matches!(
             &candidate.replacement,
-            Replacement::Subtree(node)
+            Replacement::SubDag(node)
                 if node.guarantee.as_ref().is_some_and(|g|
                     g.bound.evaluate().is_some()
                         && g.failure_probability.evaluate().is_some())
@@ -675,7 +675,7 @@ mod tests {
                 &self,
                 _op: &CompositionOperator,
                 _family: &FieldDataType,
-                _query: Option<&asap_types::post_asap::SketchQuery>,
+                _query: Option<&asap_types::post_asap::SketchStatistic>,
             ) -> PropagationStats {
                 PropagationStats {
                     hydra_shared_grid_failure_probability: Some(1.5),
@@ -721,7 +721,7 @@ mod tests {
                 &self,
                 _op: &CompositionOperator,
                 _family: &FieldDataType,
-                _query: Option<&asap_types::post_asap::SketchQuery>,
+                _query: Option<&asap_types::post_asap::SketchStatistic>,
             ) -> PropagationStats {
                 PropagationStats {
                     hydra_shared_grid_collision_bound: Some(0.1),

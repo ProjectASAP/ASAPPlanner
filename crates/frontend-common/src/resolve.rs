@@ -19,9 +19,9 @@ use std::rc::Rc;
 
 use thiserror::Error;
 
+use asap_types::ir::operator_properties::ConcatDiscriminatorKey;
 use asap_types::ir::{NonASAPOp, OperatorNode, Predicate, ProjectItem, ScalarExpr, SortKey};
 use asap_types::pre_asap::column_resolution::resolve_group_keys_promql;
-use asap_types::pre_asap::vocabulary::ConcatDiscriminatorKey;
 use asap_types::pre_asap::{
     aggregate_output_schema, resolve_column_ref, resolve_column_refs, AggIntent, ColumnId,
     ColumnRef, GroupKeys, QueryExprError, Reduction, ResolveError, Schema,

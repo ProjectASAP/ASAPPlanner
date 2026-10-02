@@ -40,7 +40,7 @@ fn bind(root: &Rc<OperatorNode>) -> Result<Rc<OperatorNode>, RealizationError> {
         .next()
     {
         Some(ReplacementSubDAG {
-            replacement: Replacement::Subtree(node),
+            replacement: Replacement::SubDag(node),
             ..
         }) => Ok(node),
         _ => retain_exact(root),

@@ -56,7 +56,7 @@ fn exact_counts_select_count_accumulators() {
             SketchAlgorithmStrategy::default_cost_model().replacements(&TargetSubDAG::new(&root));
         assert!(
             candidates.iter().any(|candidate| {
-                matches!(&candidate.replacement, Replacement::Subtree(node)
+                matches!(&candidate.replacement, Replacement::SubDag(node)
                 if matches!(&node.operator, Operator::ASAP(ASAPOp::SummaryAgg {
                     family: FieldDataType::ExactAggregate(ExactKind::Count, _), .. })))
             }),
@@ -74,7 +74,7 @@ fn frequency_count_candidates_use_unit_weights() {
             SketchAlgorithmStrategy::default_cost_model().replacements(&TargetSubDAG::new(&root));
         let mut algorithms = Vec::new();
         for candidate in &candidates {
-            let Replacement::Subtree(node) = &candidate.replacement else {
+            let Replacement::SubDag(node) = &candidate.replacement else {
                 continue;
             };
             let Operator::ASAP(ASAPOp::SummaryEstimate { summary_input, .. }) = &node.operator
@@ -233,7 +233,7 @@ fn cms_count_updates_total_ten_for_zero_positive_and_negative_samples() {
     let dag = candidates
         .iter()
         .find_map(|candidate| {
-            let Replacement::Subtree(node) = &candidate.replacement else {
+            let Replacement::SubDag(node) = &candidate.replacement else {
                 return None;
             };
             let dag = post_asap_dag(node);

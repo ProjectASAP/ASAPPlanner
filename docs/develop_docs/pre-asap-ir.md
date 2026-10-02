@@ -24,7 +24,7 @@ Only operations that are semantically relevant to answering the query and select
 ## The node
 
 A plan is a DAG of `Rc<OperatorNode>` (`crates/types/src/ir/node.rs`). Nodes are immutable
-and shared through `Rc`: a structurally identical subtree referenced from several parents is
+and shared through `Rc`: a structurally identical sub-DAG referenced from several parents is
 one node, and that pointer identity is what CSE, target discovery and plan assembly key on.
 
 ```rust
@@ -141,12 +141,12 @@ yet — and calls `asap_frontend_common::resolve_root`, which does three things 
    `Limit { Sort { Aggregate } }` ranking to the `AggIntent::TopK` heavy-hitter shape, and
    lowers `EXISTS` / `NOT EXISTS` / `IN (subquery)` predicates to `Join { Semi | Anti }` and a
    scalar subquery to a `Join { Cross }` plus column reference. The pass is idempotent and
-   keeps the pointer identity of every untouched subtree.
+   keeps the pointer identity of every untouched sub-DAG.
 
 The result is `Rc<OperatorNode>`. `lower_promql_workload`, `lower_sql` / `lower_sql_dialect` /
 `lower_sql_batch` and `lower_metricsql` all return it.
 
-Workload search then runs structural CSE (`asap_types::ir::cse::share_common_subtrees`) once
+Workload search then runs structural CSE (`asap_types::ir::cse::share_common_subdags`) once
 across every root: bottom-up hash-consing where the structural hash is only a filter and the
 typed `PartialEq` decides sharing, following scalar references like any other input, and
 gated by `Schema::has_unique_key()` for non-ASAP producers.
@@ -341,7 +341,7 @@ Example for `filters`:
   `count(CASE WHEN p THEN x END)` (`p`, plus `x IS NOT NULL` when `x` is nullable), and from
   `count(expr)` over any other nullable `expr` (`expr IS NOT NULL`), because canonical `Count`
   counts rows and never consults its argument. A filtered measure has no summary binding yet:
-  `asap-aware-mapping` retains such an `Aggregate` as an ordinary exact subtree, and canonicalization does
+  `asap-aware-mapping` retains such an `Aggregate` as an ordinary exact sub-DAG, and canonicalization does
   not promote a filtered count ranking to a heavy-hitter `TopK`.
 
 Example for `having`:

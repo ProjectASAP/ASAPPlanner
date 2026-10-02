@@ -36,22 +36,22 @@
 //! candidate isn't an *opportunity*, it's just the target's existing shape
 //! reflected back. A `TargetSubDAG` with more than one candidate (several
 //! sketch families to choose between), or one candidate that is itself a
-//! genuine alternative to the status quo (share this already-shared subtree
+//! genuine alternative to the status quo (share this already-shared sub-DAG
 //! instead of recomputing it at every consumer), *is* an applicability
 //! finding — [`explain_replacements`] and
 //! [`explain_replacements_with`] just translate [`CandidateLogicalASAPDAGs`]'s
 //! [`TargetSubDAGCandidates`]s into that shape:
 //!
 //! - [`ExplanationKind::SketchApproximation`] — the `TargetSubDAG`'s
-//!   candidate list contains at least one summary-realization [`Replacement::Subtree`] that
+//!   candidate list contains at least one summary-realization [`Replacement::SubDag`] that
 //!   actually realizes a sketch family (`FieldDataType::Sketch`), i.e.
 //!   [`SketchAlgorithmStrategy`] found something to offer beyond whatever
 //!   exact/pass-through candidate [`crate::replacement`]'s own
 //!   `realizations_for_intent` would have committed to on its own.
 //! - [`ExplanationKind::CommonSubexpressionReuse`] — the `TargetSubDAG`
 //!   has two or more consumers *and* its candidate list contains the
-//!   [`SharedSubtreeStrategy`] "build once and share" candidate (the one
-//!   whose `Rc` is the group's own `target`) — i.e. sharing this subtree
+//!   [`SharedSubDagStrategy`] "build once and share" candidate (the one
+//!   whose `Rc` is the group's own `target`) — i.e. sharing this sub-DAG
 //!   instead of recomputing it independently is a real, reported choice, not
 //!   just an accident of how the workload happened to be built.
 //!
@@ -161,8 +161,8 @@
 //!
 //! | Catalog entry | Status | Where a future `ExplanationKind` would come from |
 //! |---|---|---|
-//! | Semantic-equivalent rewriting (e.g. `avg` → `sum`/`count`) | [`AvgToSumOverCountStrategy`](crate::rewrite::AvgToSumOverCountStrategy) exists and is wired into `default_strategies()` (issue #253) — but still no `ExplanationKind` of its own below, since this table is about *direct* findings for a catalog entry, and this strategy's whole point is indirect: its `Replacement::Subtree` rewrite candidate exposes `sum`/`count` as independently bindable discovered targets, which can then earn `CommonSubexpressionReuse` findings when the workload actually reuses them | A dedicated variant would need `findings_from_candidate_logical_asap_dags` to recognize a `LogicalRewrite`-provenance candidate as a finding in its own right, not just rely on what it exposes downstream |
-//! | Roll-ups (fine-to-coarse group-by reuse) | [`RollupStrategy`](crate::rollup::RollupStrategy), derived from workload siblings after CSE/target discovery (issue #254) | Any `Replacement::Subtree` rewrite candidate that rolls a coarse aggregate up from a compatible finer aggregate |
+//! | Semantic-equivalent rewriting (e.g. `avg` → `sum`/`count`) | [`AvgToSumOverCountStrategy`](crate::rewrite::AvgToSumOverCountStrategy) exists and is wired into `default_strategies()` (issue #253) — but still no `ExplanationKind` of its own below, since this table is about *direct* findings for a catalog entry, and this strategy's whole point is indirect: its `Replacement::SubDag` rewrite candidate exposes `sum`/`count` as independently bindable discovered targets, which can then earn `CommonSubexpressionReuse` findings when the workload actually reuses them | A dedicated variant would need `findings_from_candidate_logical_asap_dags` to recognize a `LogicalRewrite`-provenance candidate as a finding in its own right, not just rely on what it exposes downstream |
+//! | Roll-ups (fine-to-coarse group-by reuse) | [`RollupStrategy`](crate::rollup::RollupStrategy), derived from workload siblings after CSE/target discovery (issue #254) | Any `Replacement::SubDag` rewrite candidate that rolls a coarse aggregate up from a compatible finer aggregate |
 //! | Wavelets/OMP | Params type exists (`WaveletKind`/`WaveletParams`), reachable only via a deployment `CostModel::realize_extension` (no core `AggIntent` dispatch picks it) | A `ReplacementStrategy` that inspects a deployment's own `CostModel`, once some intent shape actually maps to `Realization::Wavelet` |
 //! | Sampling | Same story as Wavelets: `SamplingKind`/`SamplingParams` exist, unreachable from core dispatch | Same hook as Wavelets, for `Realization::Sample` |
 //! | Deep generative compression | No representation at all — no `Realization`/`FieldDataType` variant | Needs a new summary family added to `asap_types::post_asap` first |
@@ -175,9 +175,9 @@
 //! [`ReplacementStrategy`]: crate::replacement::ReplacementStrategy
 //! [`ReplacementSubDAG`]: crate::replacement::ReplacementSubDAG
 //! [`Replacement`]: crate::replacement::Replacement
-//! [`Replacement::Subtree`]: crate::replacement::Replacement::Subtree
+//! [`Replacement::SubDag`]: crate::replacement::Replacement::SubDag
 //! [`SketchAlgorithmStrategy`]: crate::replacement::SketchAlgorithmStrategy
-//! [`SharedSubtreeStrategy`]: crate::replacement::SharedSubtreeStrategy
+//! [`SharedSubDagStrategy`]: crate::replacement::SharedSubDagStrategy
 //! [`CandidateLogicalASAPDAGs`]: crate::replacement::CandidateLogicalASAPDAGs
 //! [`TargetSubDAGCandidates`]: crate::replacement::TargetSubDAGCandidates
 
@@ -205,14 +205,14 @@ use crate::replacement::{
 #[non_exhaustive]
 pub enum ExplanationKind {
     /// A `TargetSubDAG`'s candidate list contains at least one
-    /// [`Replacement::Subtree`] that realizes a sketch family —
+    /// [`Replacement::SubDag`] that realizes a sketch family —
     /// [`crate::replacement::SketchAlgorithmStrategy`] found a genuine sketch
     /// alternative for this `Aggregate`, beyond whatever exact/pass-through
     /// candidate `crate::replacement`'s own `realizations_for_intent` would
     /// have committed to on its own.
     SketchApproximation,
     /// A `TargetSubDAG` has two or more consumers *and* its candidate list
-    /// contains [`crate::replacement::SharedSubtreeStrategy`]'s "build once
+    /// contains [`crate::replacement::SharedSubDagStrategy`]'s "build once
     /// and share" candidate — the catalog's cross-statistic / cross-metrics /
     /// cross-subpopulation reuse entries, all the same underlying structural
     /// fact.
@@ -221,7 +221,7 @@ pub enum ExplanationKind {
     /// [`Replacement::ExactComposition`] —
     /// [`crate::exact_composition::ExactCompositionStrategy`] found an exact
     /// operator that can be composed with a summary plan across an explicit
-    /// update/readout boundary instead of keeping the whole tree as it is
+    /// update/evaluation boundary instead of keeping the whole tree as it is
     /// (issue #171).
     ExactComposition,
 }
@@ -233,7 +233,7 @@ pub enum ExplanationKind {
 /// [`crate::replacement::ReplacementSubDAG::rationale`]).
 ///
 /// `node_hash` is [`structural_hash`](asap_types::ir::cse::structural_hash)
-/// of the `TargetSubDAG`'s own `target` subtree — the same function, on the
+/// of the `TargetSubDAG`'s own `target` sub-DAG — the same function, on the
 /// same `Rc<OperatorNode>` shape, that [`asap_types::dag_export::DagNode::hash`]
 /// is computed with. A downstream consumer that independently exported the
 /// same node (e.g. via `asap_types::dag_export::export`) can match
@@ -374,7 +374,7 @@ fn sketch_finding_reason(group: &TargetSubDAGCandidates) -> Option<String> {
         .candidates
         .iter()
         .filter(
-            |c| matches!(&c.replacement, Replacement::Subtree(node) if is_sketch_realization(node)),
+            |c| matches!(&c.replacement, Replacement::SubDag(node) if is_sketch_realization(node)),
         )
         .map(|c| c.rationale.as_str())
         .collect();
@@ -386,7 +386,7 @@ fn sketch_finding_reason(group: &TargetSubDAGCandidates) -> Option<String> {
 }
 
 /// Does `group` have two or more consumers *and* a "build once and share"
-/// candidate (the [`Replacement::Subtree`] whose `Rc` is the group's own
+/// candidate (the [`Replacement::SubDag`] whose `Rc` is the group's own
 /// `target`) in its candidate list? If so, the finding's `reason` is that
 /// candidate's own `rationale`.
 fn shared_subexpr_finding_reason(group: &TargetSubDAGCandidates) -> Option<String> {
@@ -397,7 +397,7 @@ fn shared_subexpr_finding_reason(group: &TargetSubDAGCandidates) -> Option<Strin
         .candidates
         .iter()
         .find(
-            |c| matches!(&c.replacement, Replacement::Subtree(rc) if Rc::ptr_eq(rc, &group.target)),
+            |c| matches!(&c.replacement, Replacement::SubDag(rc) if Rc::ptr_eq(rc, &group.target)),
         )
         .map(|c| c.rationale.clone())
 }
@@ -460,7 +460,7 @@ fn visit(
 
 /// `node`'s own **relational-skeleton** operator children — the same scope
 /// `crate::replacement`'s own target-discovery `walk_children` (and
-/// `asap_types::ir::cse::share_common_subtrees`) use. Exhaustive over every
+/// `asap_types::ir::cse::share_common_subdags`) use. Exhaustive over every
 /// `NonASAPOp` variant: a new variant fails to compile here until this match
 /// is extended too. An ASAP node never occurs in a workload root.
 fn visit_children(
@@ -510,10 +510,11 @@ fn visit_children(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use asap_types::ir::operator_properties::{BinaryOpKind, Reduction, Source};
     use asap_types::ir::{BinaryOperator, NonASAPOp, OperatorNode, Predicate, ScalarExpr};
     use asap_types::pre_asap::agg_intent::{default_quantile, AggIntent};
     use asap_types::pre_asap::schema::{DataType, Field, Schema};
-    use asap_types::pre_asap::vocabulary::{BinaryOpKind, Reduction, Source};
+
     use asap_types::types::AccuracyTarget;
 
     fn metric_scan(labels: &[&str]) -> Rc<OperatorNode> {
@@ -585,7 +586,7 @@ mod tests {
     }
 
     /// `node_hash` must be the literal `structural_hash` a downstream
-    /// consumer would compute over the *same* `OperatorNode` subtree via
+    /// consumer would compute over the *same* `OperatorNode` sub-DAG via
     /// `asap_types::dag_export::export` — the whole point of carrying it is
     /// that two independent exports of the same tree agree, with no
     /// string-matching against `location` required.
@@ -659,7 +660,7 @@ mod tests {
 
     /// A sketch-applicable `Aggregate` reachable via two paths that CSE
     /// collapses onto one `Rc` — the same `median(x) == median(x)` shape
-    /// `pre_asap::cse`'s own `single_query_shares_its_own_repeated_subtree`
+    /// `pre_asap::cse`'s own `single_query_shares_its_own_repeated_sub-DAG`
     /// test uses — must be reported once, not once per path: it is exactly
     /// one [`crate::replacement::TargetSubDAGCandidates`], keyed by `Rc` pointer identity,
     /// not one per path that reaches it.
@@ -689,7 +690,7 @@ mod tests {
     #[test]
     fn two_roots_with_the_same_grouped_aggregate_share_a_reuse_finding() {
         // Grouped (`by (job)`), so the shared `Aggregate`'s output schema
-        // carries a provable unique key — share_common_subtrees's legality
+        // carries a provable unique key — share_common_subdags's legality
         // gate — and identical across both roots, so it is shareable.
         let a = agg(vec![2], AggIntent::Sum { col: None }, metric_scan(&["job"]));
         let b = agg(vec![2], AggIntent::Sum { col: None }, metric_scan(&["job"]));
@@ -741,7 +742,7 @@ mod tests {
 
     #[test]
     fn ungrouped_identical_aggregates_are_not_shareable_so_no_finding() {
-        // Empty `by`: no provable unique key — share_common_subtrees never
+        // Empty `by`: no provable unique key — share_common_subdags never
         // hoists these, so consumer_count stays 1 for each and this module
         // must not report a finding either.
         let a = agg(vec![], AggIntent::Sum { col: None }, metric_scan(&["job"]));
@@ -778,7 +779,7 @@ mod tests {
 
     /// A shared node nested three levels under two *different*, unshared
     /// `Filter` parents (mirrors `crate::replacement::tests::
-    /// nested_shared_subtree_below_an_unshared_parent_is_still_discovered`)
+    /// nested_shared_sub-DAG_below_an_unshared_parent_is_still_discovered`)
     /// must still be exactly one finding — the maximal-`TargetSubDAG`
     /// guarantee the module docs describe, now provided by
     /// `crate::replacement`'s own target discovery rather than this module's

@@ -8,13 +8,14 @@ use serde::{Deserialize, Serialize};
 
 use super::node::{OperatorNode, OperatorResultKind};
 use super::scalar::{Predicate, ProjectItem, ScalarExpr, SortKey};
+use crate::ir::aggregate_schema::aggregate_output_schema;
+use crate::ir::operator_properties::{
+    BinaryOpKind, ConcatDiscriminatorKey, GroupKeys, InfoMatcher, JoinKind, Reduction,
+    RelationalSetOpKind, SampleKind, Source, TimeShift, VectorMatch, WindowFrame, WindowFuncKind,
+};
+use crate::ir::QueryExprError;
 use crate::pre_asap::agg_intent::AggIntent;
 use crate::pre_asap::schema::{ColumnId, DataType, Field, FieldDataType, Schema};
-use crate::pre_asap::vocabulary::{
-    aggregate_output_schema, BinaryOpKind, ConcatDiscriminatorKey, GroupKeys, InfoMatcher,
-    JoinKind, QueryExprError, Reduction, RelationalSetOpKind, SampleKind, Source, TimeShift,
-    VectorMatch, WindowFrame, WindowFuncKind,
-};
 
 /// All semantics owned by a binary operator.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -48,8 +49,8 @@ pub enum TimeRangeKind {
 }
 
 /// The non-ASAP operator vocabulary. Children are [`Rc<OperatorNode>`], so an
-/// ordinary operator can read a summary readout and a summary can read any
-/// relational subtree.
+/// ordinary operator can read a summary evaluation and a summary can read any
+/// relational sub-DAG.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum NonASAPOp {
     /// Leaf. `schema` is the binding schema every positional `ColumnId` in
@@ -1056,7 +1057,7 @@ impl NonASAPOp {
     }
 }
 
-/// A readout-shaped category for a value-level operator over `kind`: state
+/// A evaluation-shaped category for a value-level operator over `kind`: state
 /// never flows through an ordinary operator unchanged in category.
 fn readable(kind: OperatorResultKind) -> OperatorResultKind {
     match kind {
@@ -1086,11 +1087,11 @@ pub fn any_measure_filtered(filters: &[Option<Predicate>]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ir::scalar::ExprSemantics;
-    use crate::pre_asap::expr_ir::{ArithmeticOpKind, CompareOpKind, ScalarValue};
-    use crate::pre_asap::vocabulary::{
+    use crate::ir::operator_properties::{
         AtModifier, VectorMatchKind, WindowFrameBound, WindowFrameOffset, WindowFrameUnits,
     };
+    use crate::ir::scalar::ExprSemantics;
+    use crate::pre_asap::expr_ir::{ArithmeticOpKind, CompareOpKind, ScalarValue};
 
     fn col(name: &str, dtype: DataType, nullable: bool) -> Field {
         Field::plain(name, dtype, nullable)

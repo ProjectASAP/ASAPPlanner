@@ -12,12 +12,12 @@
 //! comment on why: `Avg`/`StdDev`/`Variance` "need richer partial state"
 //! than a bare sketch/exact accumulator gives, so there is no summary
 //! realization for a bare `avg` node to bind to at all. A logical `avg`
-//! node therefore can never be a [`SharedSubtreeStrategy`] target either:
+//! node therefore can never be a [`SharedSubDagStrategy`] target either:
 //! CSE-style sharing needs *some* mergeable accumulator underneath, and
 //! `PassThrough` has none.
 //!
 //! `Sum` and `Count` are both ordinary mergeable accumulators
-//! (`agg_is_mergeable`) — exactly the shape [`SharedSubtreeStrategy`] and a
+//! (`agg_is_mergeable`) — exactly the shape [`SharedSubDagStrategy`] and a
 //! future sketch-family search already know how to reuse across a
 //! workload. Rewriting `Aggregate{ measures: [Avg{col}], .. }` into two
 //! independent single-measure `Sum` and `Count` aggregates, divided with a
@@ -43,7 +43,7 @@
 //! Both are follow-ups (issue #253 itself scopes to "the concrete case in
 //! Peilin's comment"), not correctness bugs in what ships here — a node
 //! outside this scope simply doesn't `match`, the same "safe but
-//! uninformative" fallback [`SketchAlgorithmStrategy`]/[`SharedSubtreeStrategy`]
+//! uninformative" fallback [`SketchAlgorithmStrategy`]/[`SharedSubDagStrategy`]
 //! already use for shapes they don't have an opinion on.
 //!
 //! ## Non-goals (mirrors [`replacement`]'s own discipline)
@@ -60,11 +60,12 @@
 use asap_types::ir::non_asap::any_measure_filtered;
 use std::rc::Rc;
 
+use asap_types::ir::operator_properties::{BinaryOpKind, Reduction};
 use asap_types::ir::{BinaryOperator, NonASAPOp, OperatorNode, ProjectItem, ScalarExpr};
 use asap_types::pre_asap::agg_intent::AggIntent;
 use asap_types::pre_asap::expr_ir::ArithmeticOpKind;
 use asap_types::pre_asap::schema::{ColumnId, DataType};
-use asap_types::pre_asap::vocabulary::{BinaryOpKind, Reduction};
+
 use asap_types::types::AccuracyTarget;
 
 use crate::replacement::{Replacement, ReplacementStrategy, ReplacementSubDAG, TargetSubDAG};
@@ -382,7 +383,7 @@ pub(crate) fn composed_aggregate_rewrite(root: &Rc<OperatorNode>) -> Option<Rc<O
 /// bind anything (its one [`Replacement`] is always [`Replacement::Rewrite`],
 /// never [`Replacement::Summary`]) and so has no [`CostModel`](crate::CostModel)
 /// to hold a reference to — the same "no state needed" shape
-/// [`SharedSubtreeStrategy`] already has.
+/// [`SharedSubDagStrategy`] already has.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct SemanticEquivalentRewriteStrategy;
 
@@ -400,7 +401,7 @@ impl ReplacementStrategy for SemanticEquivalentRewriteStrategy {
         if let Some(rewritten) = composed_aggregate_rewrite(target.root) {
             return vec![ReplacementSubDAG {
                 strategy: "SemanticEquivalentRewriteStrategy",
-                replacement: Replacement::Subtree(rewritten),
+                replacement: Replacement::SubDag(rewritten),
                 provenance: crate::replacement::ReplacementProvenance::LogicalRewrite,
                 rationale: "compose compatible per-entity and cross-entity accumulators using their algebraic intent while preserving the original output schema".into(),
             }];
@@ -410,14 +411,14 @@ impl ReplacementStrategy for SemanticEquivalentRewriteStrategy {
         };
         vec![ReplacementSubDAG {
             strategy: "AvgToSumOverCountStrategy",
-            replacement: Replacement::Subtree(rewritten),
+            replacement: Replacement::SubDag(rewritten),
             provenance: crate::replacement::ReplacementProvenance::LogicalRewrite,
             rationale:
                 "avg has no summary realization at all (replacement::realizations_for_intent \
                         dispatches it to PassThrough) and so can never share or sketch; \
                         rewriting it into sum/count under the same grouping — re-divided back \
                         into the original avg column by a wrapping Project — computes the same \
-                        result from two ordinary mergeable accumulators SharedSubtreeStrategy \
+                        result from two ordinary mergeable accumulators SharedSubDagStrategy \
                         (and a future sketch-family search) can actually reuse across the \
                         workload"
                     .to_string(),
@@ -429,8 +430,8 @@ impl ReplacementStrategy for SemanticEquivalentRewriteStrategy {
 mod tests {
     use super::*;
     use crate::test_support::lower_promql;
+    use asap_types::ir::operator_properties::Source;
     use asap_types::pre_asap::schema::{Field, Schema};
-    use asap_types::pre_asap::vocabulary::Source;
     use asap_types::types::AccuracyTarget;
     use std::time::Duration;
 
@@ -557,7 +558,7 @@ mod tests {
     #[test]
     fn does_not_match_a_without_grouped_avg_aggregate() {
         let q = OperatorNode::non_asap_node(NonASAPOp::Aggregate {
-            reduction: Reduction::Reduce(asap_types::pre_asap::vocabulary::GroupKeys::without(
+            reduction: Reduction::Reduce(asap_types::ir::operator_properties::GroupKeys::without(
                 vec![2],
             )),
             measures: vec![AggIntent::Avg { col: None }],
@@ -611,7 +612,7 @@ mod tests {
         assert!(!replacements[0].rationale.is_empty());
 
         let rewritten = match &replacements[0].replacement {
-            Replacement::Subtree(rc) => rc,
+            Replacement::SubDag(rc) => rc,
             other => panic!("expected a Rewrite replacement, got {other:?}"),
         };
         let Some(NonASAPOp::BinaryOp { lhs, rhs, .. }) = rewritten.non_asap() else {
@@ -654,7 +655,7 @@ mod tests {
 
         let replacements = AvgToSumOverCountStrategy.replacements(&target);
         let rewritten = match &replacements[0].replacement {
-            Replacement::Subtree(rc) => rc,
+            Replacement::SubDag(rc) => rc,
             other => panic!("expected a Rewrite replacement, got {other:?}"),
         };
         let rewritten_schema = rewritten.schema.clone();
@@ -673,7 +674,7 @@ mod tests {
 
         let replacements = AvgToSumOverCountStrategy.replacements(&target);
         let rewritten = match &replacements[0].replacement {
-            Replacement::Subtree(rc) => rc,
+            Replacement::SubDag(rc) => rc,
             other => panic!("expected a Rewrite replacement, got {other:?}"),
         };
         let rewritten_schema = rewritten.schema.clone();
@@ -714,7 +715,7 @@ mod tests {
                     .candidates
                     .iter()
                     .any(|candidate| matches!(&candidate.replacement,
-                        Replacement::Subtree(node) if node.contains_asap())),
+                        Replacement::SubDag(node) if node.contains_asap())),
                 "rewritten accumulator must be independently bindable: {measures:?}"
             );
             found_sum |= matches!(measures.as_slice(), [AggIntent::Sum { .. }]);
@@ -751,7 +752,7 @@ mod tests {
 
         let replacements = AvgToSumOverCountStrategy.replacements(&target);
         let rewritten = match &replacements[0].replacement {
-            Replacement::Subtree(rc) => rc,
+            Replacement::SubDag(rc) => rc,
             other => panic!("expected a Rewrite replacement, got {other:?}"),
         };
         let rewritten_schema = rewritten.schema.clone();
@@ -851,7 +852,7 @@ mod tests {
             let [candidate] = candidates.as_slice() else {
                 panic!("supported pair should produce exactly one rewrite")
             };
-            let Replacement::Subtree(rewritten) = &candidate.replacement else {
+            let Replacement::SubDag(rewritten) = &candidate.replacement else {
                 panic!("expected a logical rewrite")
             };
             assert_eq!(original.schema.clone(), rewritten.schema.clone());
@@ -907,7 +908,7 @@ mod tests {
             .iter()
             .find(|candidate| candidate.strategy == "SemanticEquivalentRewriteStrategy")
             .expect("default search should run semantic rewrites");
-        let Replacement::Subtree(rewritten) = &candidate.replacement else {
+        let Replacement::SubDag(rewritten) = &candidate.replacement else {
             panic!("expected logical rewrite")
         };
         assert_eq!(rewritten.schema.clone().fields[1].name, "sum");

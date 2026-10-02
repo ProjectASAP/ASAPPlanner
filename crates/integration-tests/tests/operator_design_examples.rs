@@ -47,7 +47,7 @@ async fn sql_filter_projection_example() {
     assert_eq!(wire.nodes.len(), OperatorNode::reachable(&root).len());
 }
 
-/// SUM's readout preserves integer type and SQL NULL behavior across the rewrite.
+/// SUM's evaluation preserves integer type and SQL NULL behavior across the rewrite.
 #[tokio::test]
 async fn sql_sum_projection_before_and_after_summary_rewrite() {
     let root = lower_sql(
@@ -247,5 +247,151 @@ async fn sql_window_and_filtered_aggregate_types() {
         let root = lower_sql(query, &catalog(), AccuracyTarget::Exact).await.unwrap();
         root.validate_structure().unwrap();
         assert_eq!(root.schema.fields[0], Field::plain("s", DataType::Int64, true), "{query}");
+    }
+}
+
+/// A real query batch selects one shared SUM producer, retains two result roots,
+/// and executes both selected plans. No replacement graph is constructed by the test.
+#[tokio::test]
+async fn batch_planning_replaces_and_shares_summary_operators() {
+    use asap_aware_mapping::cost_model::{Cost, DefaultCostModel};
+    use asap_aware_mapping::pass::PlanningModels;
+    use asap_aware_mapping::{
+        CostModel, CostRate, LifecycleInput, SummaryMaintenanceLifecycleCapabilities,
+        SummaryMaintenanceLifecycleCostInputs,
+    };
+    use asap_physical_operators::{
+        physical_planner::{compile, InputContract},
+        runtime::Scope,
+        values::{Batch, Value},
+    };
+    use asap_planner::{e2e_plan, FrontendInput, UserInput};
+    use asap_types::post_asap::SketchAlgorithm;
+    use asap_types::workload::*;
+    use std::{collections::BTreeMap, sync::Arc};
+    struct Costs;
+    impl CostModel for Costs {
+        fn rank_candidates(
+            &self,
+            intent: &AggIntent,
+            candidates: &[SketchAlgorithm],
+        ) -> Vec<SketchAlgorithm> {
+            DefaultCostModel.rank_candidates(intent, candidates)
+        }
+        fn summary_maintenance_lifecycle_cost_inputs(
+            &self,
+            _: &OperatorNode,
+        ) -> SummaryMaintenanceLifecycleCostInputs {
+            SummaryMaintenanceLifecycleCostInputs {
+                build_cost: Some(Cost(1.0)),
+                maintenance_cost_per_update: Some(Cost::ZERO),
+                summary_read_cost: Some(Cost::ZERO),
+                retention_cost_rate: Some(CostRate(0.0)),
+                retirement_cost: Some(Cost::ZERO),
+            }
+        }
+        fn raw_query_recompute_cost(&self, _: &OperatorNode) -> Option<Cost> {
+            Some(Cost(1000.0))
+        }
+    }
+    let queries = [
+        "SELECT SUM(bytes) + 1 AS result FROM requests",
+        "SELECT SUM(bytes) * 2 AS result FROM requests",
+    ];
+    let workload = PlanningWorkload {
+        query_workload: QueryWorkload {
+            language: QueryLanguage::SQL(SqlDialect::DataFusionSQL),
+            query_batch: Some(
+                queries
+                    .iter()
+                    .map(|query| BatchEntry {
+                        query: Query((*query).into()),
+                        requirements: QueryRequirements {
+                            accuracy: AccuracyRequirement::Explicit(AccuracyTarget::Exact),
+                            ..Default::default()
+                        },
+                        predictability: Predictability::Unknown,
+                        invocations: 2,
+                        execute_at: None,
+                        time_selection: TimeSelection::default(),
+                    })
+                    .collect(),
+            ),
+            repeating_queries: None,
+        },
+        data_workload: Some(DataWorkload {
+            arrival: DataArrival::AtRest,
+            ..Default::default()
+        }),
+    };
+    let catalog = SqlCatalog::new().with_table(
+        "requests",
+        Schema::new(vec![Field::plain("bytes", DataType::Float64, false)]),
+    );
+    let output = e2e_plan(UserInput::new(
+        &workload,
+        FrontendInput::Sql { catalog: &catalog },
+        PlanningModels::builtin().with_cost(&Costs),
+        LifecycleInput::new(0, SummaryMaintenanceLifecycleCapabilities::default()),
+    ))
+    .await
+    .unwrap();
+    assert_eq!(output.entry_indices(), [0, 1]);
+    assert_eq!(output.roots().len(), 2);
+    let states: Vec<_> = output
+        .operators()
+        .into_iter()
+        .filter(|n| matches!(n.asap(), Some(ASAPOp::SummaryAgg { .. })))
+        .collect();
+    assert_eq!(states.len(), 1, "the batch owns one shared SUM state");
+    for (plan, expected) in output.plans.iter().zip([31.0, 60.0]) {
+        assert!(!plan.plan.selected_raw_recompute);
+        let root = &plan.plan.root;
+        root.validate_structure().unwrap();
+        assert!(OperatorNode::reachable(root)
+            .iter()
+            .any(|n| Rc::ptr_eq(n, &states[0])));
+        let wire = physical_common::compile_post_asap_dag(root).unwrap();
+        let scan = wire
+            .nodes
+            .iter()
+            .find(|n| {
+                matches!(
+                    n.payload,
+                    asap_types::ir::export::PostAsapOperatorPayload::Relational {
+                        operator: asap_types::ir::export::NonASAPOpKind::Scan { .. }
+                    }
+                )
+            })
+            .unwrap();
+        let schema = Arc::new(scan.output_schema.clone());
+        let program = compile(
+            &wire,
+            BTreeMap::from([(u64::from(scan.id.0), InputContract::bounded(schema.clone()))]),
+            &[u64::from(wire.root.0)],
+        )
+        .unwrap();
+        let result = physical_common::execute(
+            &program,
+            BTreeMap::from([(
+                u64::from(scan.id.0),
+                Batch::try_new(
+                    schema,
+                    vec![vec![Value::Float64(10.0)], vec![Value::Float64(20.0)]],
+                )
+                .unwrap(),
+            )]),
+            Scope::Query {
+                evaluation_time_ms: 0,
+                revision: 1,
+            },
+        );
+        let rows: Vec<_> = result[0].iter().flat_map(|batch| batch.rows()).collect();
+        assert_eq!(rows.len(), 1);
+        assert!(
+            matches!(rows[0][0], Value::Float64(v) if v == expected),
+            "{:?}",
+            rows
+        );
     }
 }

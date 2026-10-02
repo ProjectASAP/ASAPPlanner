@@ -14,7 +14,7 @@ pub mod univmon;
 pub(super) fn sketch_guarantee(
     algorithm: &SketchAlgorithm,
     params: &SketchParams,
-    query: &SketchQuery,
+    query: &SketchStatistic,
 ) -> Option<ResultGuarantee> {
     match params {
         SketchParams::Kll { .. } => kll::guarantee(algorithm, params, query),
@@ -36,7 +36,7 @@ pub(super) fn sketch_guarantee(
 fn bounded_guarantee(
     algorithm: &SketchAlgorithm,
     params: &SketchParams,
-    query: &SketchQuery,
+    query: &SketchStatistic,
     metric: ErrorMetric,
     bound: f64,
     delta: ProbabilityExpr,
@@ -46,7 +46,7 @@ fn bounded_guarantee(
         metric,
         bound: BoundExpr::Constant { value: bound },
         failure_probability: delta,
-        provenance: vec![GuaranteeSource::SketchReadout {
+        provenance: vec![GuaranteeSource::SketchEvaluation {
             algorithm: format!("{algorithm:?}"),
             contract: contract.into(),
             params: serde_json::to_value(params).unwrap_or(serde_json::Value::Null),
@@ -57,7 +57,7 @@ fn bounded_guarantee(
 
 pub(super) fn local_guarantee(
     family: &FieldDataType,
-    query: &SketchQuery,
+    query: &SketchStatistic,
 ) -> Option<ResultGuarantee> {
     match family {
         FieldDataType::Plain(_) => Some(ResultGuarantee::exact("Plain value")),
@@ -169,9 +169,9 @@ impl<'a> EstimatorAccuracy<'a> {
 
     fn hll(&self) -> Option<hll::ClassicHllConfidence> {
         let EstimatorContract::ClassicHll {
-            max_distinct_per_readout,
+            max_distinct_per_evaluation,
         } = self.contract?;
-        hll::ClassicHllConfidence::new(max_distinct_per_readout, self.epsilon)
+        hll::ClassicHllConfidence::new(max_distinct_per_evaluation, self.epsilon)
     }
 
     pub(crate) fn size_params(&self, algorithm: &SketchAlgorithm) -> Option<SketchParams> {
@@ -196,9 +196,9 @@ impl AccuracyModel for EstimatorAccuracy<'_> {
     fn local_guarantee(
         &self,
         family: &FieldDataType,
-        query: &SketchQuery,
+        query: &SketchStatistic,
     ) -> Option<ResultGuarantee> {
-        if let (Some(_), FieldDataType::Sketch(kind, grouping), SketchQuery::Cardinality) =
+        if let (Some(_), FieldDataType::Sketch(kind, grouping), SketchStatistic::Cardinality) =
             (self.contract, family, query)
         {
             if let (SketchAlgorithm::Hll, SketchParams::Hll { precision }) =
