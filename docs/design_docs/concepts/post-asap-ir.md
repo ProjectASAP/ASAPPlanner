@@ -71,7 +71,7 @@ Exact work is represented by the ordinary operators, unchanged:
 
 - A subtree the planner does not rewrite keeps its `NonASAPOp` nodes. Plan
   assembly marks such a subtree with an exact `ResultGuarantee`
-  (`asap_aware_mapping::replacement::keep_pre_asap`); a subtree with no ASAP
+  (`asap_aware_mapping::replacement::retain_exact`); a subtree with no ASAP
   operator and no guarantee is a logical rewrite candidate that has not been
   assessed yet (`is_logical_rewrite`).
 - `BinaryOp` combines independently planned operands. Summary planning may set

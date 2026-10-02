@@ -291,22 +291,6 @@ function buildCyStyle() {
       style: { 'border-style': 'dashed', 'border-width': 3 },
     },
     {
-      // KeepPreAsap (post-ASAP lane only) is post-ASAP-only
-      // as a *kind*, but represents literally unchanged pre-ASAP content —
-      // override the 'summary' category's color/icon with the same neutral
-      // panel/muted/dashed treatment the rest of the chrome uses for "nothing
-      // to see here", so a glance at the After lane separates "the planner
-      // did something" (solid, colored) from "left alone" (dashed, muted).
-      // See node-style.js's CATEGORIES.summary comment for the category-level
-      // color choice this overrides.
-      selector: 'node[kind = "KeepPreAsap"]',
-      style: {
-        'background-color': panelColor,
-        'border-color': borderColor,
-        'border-style': 'dashed',
-      },
-    },
-    {
       selector: 'node.root',
       style: { 'border-width': 2.5 },
     },
@@ -663,10 +647,7 @@ function laneElements(laneId, laneLabel, graph, query, stage, laneCost) {
         // exactly the plain IR label.
         label: node.label + nodeCostBadgeSuffix(node),
         node,
-        // Flat (not nested under `node`) so buildCyStyle's
-        // `node[kind = "KeepPreAsap"]` selector can actually match it —
-        // cytoscape selectors can't reach into a data field that's itself an
-        // object.
+        // Cytoscape selectors read flat data fields.
         kind: node.kind,
         category: categoryOf(node.kind),
         root: node.id === graph.root,
@@ -1171,10 +1152,6 @@ function renderLegend() {
     <span><span class="swatchLabel">Shared workload node</span><span class="swatchDesc">Explicitly identified by the exporter as shared across selected queries</span></span></div>`);
   rows.push(`<div class="leg"><span class="swatch ring" style="border-color:${rootColor}"></span>
     <span><span class="swatchLabel">Query root</span><span class="swatchDesc">${escapeHtml(ROOT_BADGE.description)}</span></span></div>`);
-  const panelBg = getComputedStyle(document.documentElement).getPropertyValue('--panel2').trim() || '#f0f2f5';
-  const mutedColor = getComputedStyle(document.documentElement).getPropertyValue('--muted').trim() || '#6b7280';
-  rows.push(`<div class="leg"><span class="swatch" style="background:${panelBg}; border-color:${mutedColor}; border-style:dashed"></span>
-    <span><span class="swatchLabel">Pass-through (KeepPreAsap)</span><span class="swatchDesc">Unchanged pre-ASAP subtree carried into the Summary graph as-is</span></span></div>`);
   legendList.innerHTML = rows.join('');
 }
 

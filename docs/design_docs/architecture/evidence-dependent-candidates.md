@@ -15,7 +15,7 @@ target)` returns `true`. **Uncertified** means Planner cannot make that claim:
 the guarantee is absent, contains unknown terms, or is known not to meet the
 target. An uncertified summary may still be a well-formed logical candidate;
 this label says nothing about whether the backend can physically execute it.
-The exact path (the pre-ASAP subtree kept by `keep_pre_asap`) has an exact guarantee.
+The exact path (the pre-ASAP subtree kept by `retain_exact`) has an exact guarantee.
 
 | State | Planner representation | Consequence / next step |
 |---|---|---|

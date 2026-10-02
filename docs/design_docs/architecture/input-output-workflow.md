@@ -457,7 +457,7 @@ there is no need to run the ordinary selection/assembly workflow first:
    `Result<Option<SummaryMaintenanceLifecyclePlan>, SummaryMaintenanceLifecycleAssemblyError>`.
    When a summary does not beat a
    known raw cost, or a required comparable cost is unavailable, the result
-   retains the exact pre-ASAP root (`keep_pre_asap`) and no summary deployments.
+   retains the exact pre-ASAP root (`retain_exact`) and no summary deployments.
 
 As in ordinary selection, one selection call serves the workload and assembly
 is per root. The second helper calls `assemble_selected_dag` internally; callers

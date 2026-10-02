@@ -37,7 +37,7 @@ or `Operator::ASAP(ASAPOp)`. Old public names are not kept as aliases.
 |---|---|
 | `Rc<QueryExpr>` (pre-ASAP) | `Rc<OperatorNode>` holding `Operator::NonASAP(NonASAPOp)` |
 | `Rc<SummaryNode>` / `SummaryExpr` (post-ASAP) | The same `Rc<OperatorNode>`; summary steps are `Operator::ASAP(ASAPOp)` |
-| `SummaryExpr::KeepPreAsap(q)` | The non-ASAP subtree itself; `keep_pre_asap` only adds an exact `guarantee` |
+| `SummaryExpr::KeepPreAsap(q)` | The non-ASAP subtree itself; `retain_exact` only adds an exact `guarantee` |
 | `SummaryExpr::ValueOperation { .. }` over a readout | An ordinary `NonASAPOp` (`Project`, `Filter`, `Sort`, `Limit`, `Aggregate`) reading an ASAP node; `FinalizeExactAccumulator`, `MaintainPopulation`, `ReadPopulation` are `ASAPOp` variants |
 | `Replacement::Summary(..)` / `Replacement::Rewrite(..)` | `Replacement::Subtree(Rc<OperatorNode>)`; `is_logical_rewrite` tells them apart |
 | `SummaryFamilyType` | `FieldDataType` (its non-`Plain` variants) |

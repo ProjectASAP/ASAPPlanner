@@ -70,7 +70,7 @@ Use `Replacement::Subtree` for a replacement subtree. It is one of:
 - a logical rewrite: only `NonASAPOp` nodes and no guarantee yet.
 
 `is_logical_rewrite(&node)` tells the two apart. A kept pre-ASAP subtree
-(`keep_pre_asap`) has no ASAP operator but carries an exact guarantee, so it
+(`retain_exact`) has no ASAP operator but carries an exact guarantee, so it
 counts as a bound decision, not a rewrite.
 
 Use `Replacement::ExactComposition` when an exact operation refers to a child

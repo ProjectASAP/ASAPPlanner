@@ -52,7 +52,7 @@ post-ASAP candidates, unchanged queries, and post-ASAP errors. `Pre-ASAP` means
 that parsing and lowering produced an `OperatorNode` DAG. `Post-ASAP candidate`
 means the isolated `SketchAlgorithmStrategy` produced a candidate that contains
 an ASAP operator (`contains_asap()`). `Unchanged` is a successful pre-ASAP query
-for which that strategy returned only the kept pre-ASAP subtree (`keep_pre_asap`).
+for which that strategy returned only the kept pre-ASAP subtree (`retain_exact`).
 
 ## Strategies
 

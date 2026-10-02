@@ -216,12 +216,6 @@ def _semantic_label(node: dict, input_schema: object = None) -> str:
         lines.append(f"query: {_compact(detail.get('query'))}")
     elif kind == "SummaryDelete":
         lines.append(f"key: {_compact(detail.get('key'))}")
-    elif kind == "KeepPreAsap":
-        nested = detail.get("pre_asap_subgraph")
-        nested_nodes = nested.get("nodes", []) if isinstance(nested, dict) else []
-        nested_root = nested.get("root") if isinstance(nested, dict) else None
-        root = next((item for item in nested_nodes if item.get("id") == nested_root), None)
-        lines.append(f"unchanged: {root.get('kind', 'pre-ASAP subtree') if root else 'pre-ASAP subtree'}")
     else:
         # Less common variants still show their own scalar IR fields. Avoid
         # schema/subgraph blobs, which belong in the click-to-inspect panel.
