@@ -9,13 +9,13 @@
 //   - a `SketchApproximation` candidate (a genuine sketch alternative was
 //     found for at least one aggregate in the query — the KLL-vs-DDSketch
 //     kind of degree of freedom), and/or
-//   - a `CommonSubexpressionReuse` candidate (the query shares a subtree,
+//   - a `CommonSubexpressionReuse` candidate (the query shares a sub-DAG,
 //     inside itself or with another query in the same corpus, that a
 //     build-once-and-share candidate was found for).
 //
 // `--epsilon <f64>` (default 0.01) sets the `AccuracyTarget` every query in
 // every corpus lowers with. Without an approximate target,
-// `SketchAlgorithmStrategy` never has a genuine sketch alternative to
+// `ASAPStrategies` never has a genuine sketch alternative to
 // report — see `dag_export`'s own `--epsilon` doc comment for the same
 // point, made there per-query instead of per-run.
 //
@@ -28,11 +28,12 @@
 use asap_aware_mapping::{explain_replacements, ExplanationKind};
 use asap_devtools::lower_promql_with_data_ingestion_interval;
 use asap_frontend_sql::{lower_sql_dialect, SqlCatalog};
-use asap_types::pre_asap::schema::{Column, DataType, Schema};
-use asap_types::pre_asap::QueryExpr;
+use asap_types::ir::OperatorNode;
+use asap_types::pre_asap::schema::{DataType, Field, Schema};
 use asap_types::types::AccuracyTarget;
 use asap_types::workload::SqlDialect;
 use std::collections::BTreeSet;
+use std::rc::Rc;
 
 /// Line-based `#`/`--` comment stripping, then split on `;` — the shape every
 /// SQL corpus test in this repo already uses (copied from `variant_coverage`
@@ -57,8 +58,8 @@ fn promql_lines(corpus: &str) -> impl Iterator<Item = &str> {
         .filter(|l| !l.is_empty() && !l.starts_with('#'))
 }
 
-fn col(name: &str, dtype: DataType) -> Column {
-    Column::new(name, dtype, false)
+fn col(name: &str, dtype: DataType) -> Field {
+    Field::plain(name, dtype, false)
 }
 
 fn dqc_catalog() -> SqlCatalog {
@@ -157,7 +158,7 @@ fn root_label(id: &str) -> String {
 /// reachable from.
 fn analyze_corpus(
     name: &'static str,
-    roots: Vec<(String, QueryExpr)>,
+    roots: Vec<(String, Rc<OperatorNode>)>,
     failed: usize,
 ) -> CorpusCoverage {
     let lowered = roots.len();

@@ -14,7 +14,7 @@ pub mod univmon;
 pub(super) fn sketch_guarantee(
     algorithm: &SketchAlgorithm,
     params: &SketchParams,
-    query: &SketchQuery,
+    query: &SketchStatistic,
 ) -> Option<ResultGuarantee> {
     match params {
         SketchParams::Kll { .. } => kll::guarantee(algorithm, params, query),
@@ -36,7 +36,7 @@ pub(super) fn sketch_guarantee(
 fn bounded_guarantee(
     algorithm: &SketchAlgorithm,
     params: &SketchParams,
-    query: &SketchQuery,
+    query: &SketchStatistic,
     metric: ErrorMetric,
     bound: f64,
     delta: ProbabilityExpr,
@@ -46,7 +46,7 @@ fn bounded_guarantee(
         metric,
         bound: BoundExpr::Constant { value: bound },
         failure_probability: delta,
-        provenance: vec![GuaranteeSource::SketchReadout {
+        provenance: vec![GuaranteeSource::SketchEvaluation {
             algorithm: format!("{algorithm:?}"),
             contract: contract.into(),
             params: serde_json::to_value(params).unwrap_or(serde_json::Value::Null),
@@ -56,21 +56,19 @@ fn bounded_guarantee(
 }
 
 pub(super) fn local_guarantee(
-    family: &SummaryFamilyType,
-    query: &SketchQuery,
+    family: &FieldDataType,
+    query: &SketchStatistic,
 ) -> Option<ResultGuarantee> {
     match family {
-        SummaryFamilyType::Plain(_) => Some(ResultGuarantee::exact("Plain value")),
-        SummaryFamilyType::ExactAggregate(kind, _) => {
+        FieldDataType::Plain(_) => Some(ResultGuarantee::exact("Plain value")),
+        FieldDataType::ExactAggregate(kind, _) => {
             Some(ResultGuarantee::exact(format!("ExactAggregate({kind:?})")))
         }
-        SummaryFamilyType::Sketch(kind, _) => {
-            sketch_guarantee(kind.algorithm(), kind.params(), query)
-        }
+        FieldDataType::Sketch(kind, _) => sketch_guarantee(kind.algorithm(), kind.params(), query),
         // No error model is registered for these families.
-        SummaryFamilyType::Sample(..)
-        | SummaryFamilyType::Wavelet(..)
-        | SummaryFamilyType::StatModel(..) => None,
+        FieldDataType::Sample(..) | FieldDataType::Wavelet(..) | FieldDataType::StatModel(..) => {
+            None
+        }
     }
 }
 pub(crate) fn size_params(
@@ -171,9 +169,9 @@ impl<'a> EstimatorAccuracy<'a> {
 
     fn hll(&self) -> Option<hll::ClassicHllConfidence> {
         let EstimatorContract::ClassicHll {
-            max_distinct_per_readout,
+            max_distinct_per_evaluation,
         } = self.contract?;
-        hll::ClassicHllConfidence::new(max_distinct_per_readout, self.epsilon)
+        hll::ClassicHllConfidence::new(max_distinct_per_evaluation, self.epsilon)
     }
 
     pub(crate) fn size_params(&self, algorithm: &SketchAlgorithm) -> Option<SketchParams> {
@@ -197,10 +195,10 @@ impl AccuracyModel for EstimatorAccuracy<'_> {
     }
     fn local_guarantee(
         &self,
-        family: &SummaryFamilyType,
-        query: &SketchQuery,
+        family: &FieldDataType,
+        query: &SketchStatistic,
     ) -> Option<ResultGuarantee> {
-        if let (Some(_), SummaryFamilyType::Sketch(kind, grouping), SketchQuery::Cardinality) =
+        if let (Some(_), FieldDataType::Sketch(kind, grouping), SketchStatistic::Cardinality) =
             (self.contract, family, query)
         {
             if let (SketchAlgorithm::Hll, SketchParams::Hll { precision }) =

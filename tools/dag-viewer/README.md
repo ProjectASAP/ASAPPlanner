@@ -69,7 +69,8 @@ cargo run -p asap-devtools --bin dag_export -- \
 
 Load the JSON with the page's file picker. `--planner-cost-json` is a complete
 physical-evidence document: an immutable `evidence_version`, calibration, and
-target records containing the exact target `QueryExpr` and comparison scope.
+target records containing the exact target node (a serialized pre-ASAP
+`OperatorNode`) and comparison scope.
 Each exact replacement candidate owns its complete logical-node
 `PhysicalNodeEvidence`; summary candidates additionally own their bound
 `PhysicalDag`. Candidate-local evidence prevents statistics for one physical
@@ -129,7 +130,7 @@ a selected replacement directly contains:
 {
   "decision": {
     "id": 7,
-    "strategy": "SketchAlgorithmStrategy",
+    "strategy": "ASAPStrategies",
     "rationale": "count realizes as a Cms sketch",
     "rank": 0,
     "cost": 1.14001088,
@@ -147,8 +148,13 @@ The exporter assigns `workload_node_id`; union rendering reads that mapping
 directly.
 
 Node boxes use concrete IR fields: aggregate measures/grouping, sort keys,
-filter predicates, projections, sources, summary families, and readout
-queries. Category icons are deliberately omitted so they cannot be confused
+filter predicates, projections, sources, summary families, and evaluation
+queries. A node's `kind` is the operator variant name (`Operator::kind_name`):
+a `NonASAPOp` such as `Aggregate` or `Values`, or an `ASAPOp` such as
+`SummaryAgg` or `EvaluatePopulation`. `node-style.js` maps each kind to a color
+category. Scalar expressions are not nodes; an operator a scalar expression
+reads (`scalar(v)`, `EXISTS (subquery)`) is a child node, shown in `detail`
+as `{"scalar_ref": <node id>}`. Schemas list their entries under `fields`. Category icons are deliberately omitted so they cannot be confused
 with IR text.
 
 ### Cost/benefit annotations (issue #286)

@@ -55,18 +55,20 @@ The diagram below follows a workload of one or more query roots through target d
 Terminology used in the diagram:
 
 - A **workload** is the set of named queries planned together. A **query root**
-  is the top-level `QueryExpr` (the logical query-expression type) for one of
-  those queries. **Pre-ASAP** means this logical input form, before the planner
-  realizes an operation as a concrete ASAP realization; **post-ASAP** means
-  the resulting realization form.
-- A **DAG** (directed acyclic graph) represents query operators whose subtrees
+  is the top-level `Rc<OperatorNode>` (the unified operator IR) for one of
+  those queries. **Pre-ASAP** means a DAG that contains only ordinary
+  `NonASAPOp` operators, before the planner realizes an operation with ASAP
+  primitives; **post-ASAP** means the same IR after some nodes became `ASAPOp`
+  summary operators.
+- A **DAG** (directed acyclic graph) represents query operators whose sub-DAGs
   may be shared. **CSE** (common subexpression elimination) finds equivalent
-  subtrees and represents legal reuse by making them the same shared node.
+  sub-DAGs and represents legal reuse by making them the same shared node.
   Rust's `Rc<T>` (reference-counted pointer) records that shared node identity.
 - A **target** is one replaceable site. A **candidate** is one valid alternative
-  for it. `Replacement::Summary` is a constructed post-ASAP summary—maintained state
-  such as an exact accumulator or an approximate sketch—while
-  `Replacement::Rewrite` is another pre-ASAP logical expression.
+  for it. `Replacement::SubDag` is a replacement sub-DAG: either a constructed
+  post-ASAP summary (it contains an `ASAPOp`, e.g. an exact accumulator or an
+  approximate sketch) or a logical rewrite with no ASAP operator
+  (`is_logical_rewrite` tells them apart).
   `Replacement::ExactComposition` refers to a child target whose realization
   must remain undecided until compatible selection. A **sketch**
   is a compact data structure that trades exactness for bounded error. A
@@ -86,15 +88,15 @@ flowchart TB
   classDef report fill:#f2eafe,stroke:#7950b3,color:#34204f
 
   subgraph DISCOVERY[1. Discover every replaceable site]
-    WL["Input workload<br/>one or more named pre-ASAP QueryExpr roots"]:::input
+    WL["Input workload<br/>one or more named pre-ASAP OperatorNode roots"]:::input
     SEARCH["search_workload_with<br/>run CSE once, then visit every node in every root DAG"]:::generate
-    TARGET["TargetSubDAG<br/>one candidate site plus the number of workload locations<br/>that reference the same Rc&lt;QueryExpr&gt;"]:::generate
+    TARGET["TargetSubDAG<br/>one candidate site plus the number of workload locations<br/>that reference the same Rc&lt;OperatorNode&gt;"]:::generate
     WL -->|"roots"| SEARCH -->|"one target per distinct node"| TARGET
   end
 
   subgraph GENERATION[2. Generate all legal alternatives at each site]
     STRATEGY["ReplacementStrategy<br/>when a target matches, enumerate every legal replacement;<br/>implementations generate but do not choose"]:::generate
-    CAND["ReplacementSubDAG candidates<br/>each contains a Summary, Rewrite or ExactComposition<br/>plus typed provenance and rationale;<br/>no alternative is removed solely on cost"]:::store
+    CAND["ReplacementSubDAG candidates<br/>each contains a Subtree (summary or logical rewrite) or ExactComposition<br/>plus typed provenance and rationale;<br/>no alternative is removed solely on cost"]:::store
     TARGET -->|"try every registered strategy"| STRATEGY --> CAND
     CM(["CostModel<br/>orders candidates and supplies<br/>deployment-specific parameters"]):::choose
     CM -. "rank and parameterize; accuracy checks remain required" .-> STRATEGY
@@ -120,7 +122,7 @@ flowchart TB
 ```
 
 The generic `ReplacementStrategy` box is the extension point. The default
-registry supplies summary realization, Hydra grouping, shared-subtree,
+registry supplies summary realization, Hydra grouping, shared-sub-DAG,
 average-rewrite and exact-composition strategies. Section 3.3 describes the
 registries and the workload-derived roll-up rule.
 
@@ -138,7 +140,7 @@ complete alternative set has been built.
 Use `search_workload` or `search_workload_with` for normal planner search. The
 search performs these steps:
 
-1. Run CSE once to merge structurally identical subtrees that may legally be
+1. Run CSE once to merge structurally identical sub-DAGs that may legally be
    shared.
 2. Walk the complete DAG beneath every query root, including nodes below
    unshared parents.
@@ -157,10 +159,10 @@ flowchart LR
   classDef workload fill:#e7f7ef,stroke:#31835e,color:#173f2d
   classDef common fill:#fff6dd,stroke:#b78922,color:#513d0c
 
-  ROOTS["Input<br/>one or more named QueryExpr roots"]:::workload
-  ROOTS --> CSE["Canonicalize sharing<br/>merge structurally identical, legally shareable subtrees"]:::workload
+  ROOTS["Input<br/>one or more named OperatorNode roots"]:::workload
+  ROOTS --> CSE["Canonicalize sharing<br/>merge structurally identical, legally shareable sub-DAGs"]:::workload
   CSE --> WALK["Discover sites<br/>walk the complete DAG, including nodes below unshared parents"]:::workload
-  WALK --> T["Build TargetSubDAG<br/>retain the subtree's Rc identity and measured consumer_count"]:::workload
+  WALK --> T["Build TargetSubDAG<br/>retain the sub-DAG's Rc identity and measured consumer_count"]:::workload
   T --> MATCH
   MATCH["matches(target)<br/>cheaply decide whether this strategy has alternatives"]:::common
   MATCH -->|"true"| REPLACE["propose(target)<br/>construct supported legal alternatives;<br/>retain structured accuracy rejections"]:::common
@@ -169,7 +171,7 @@ flowchart LR
 ```
 
 `consumer_count` is workload information, not an estimate of runtime
-executions. It matters to strategies such as `SharedSubtreeStrategy`, which
+executions. It matters to strategies such as `SharedSubDagStrategy`, which
 only has a share-versus-recompute choice when a target has multiple consumers.
 
 ### 3.2 Generate candidates through `ReplacementStrategy`
@@ -199,13 +201,13 @@ cost.
 
 The default context-free registry contains five `ReplacementStrategy` implementations:
 
-- `SketchAlgorithmStrategy` matches supported aggregate and binary shapes. Its
-  `replacements(target)` method constructs every legal post-ASAP `SummaryNode`,
+- `ASAPStrategies` matches supported aggregate and binary shapes. Its
+  `replacements(target)` method constructs every legal post-ASAP summary sub-DAG,
   including applicable sketch, exact-accumulator, and pass-through
   realizations. Candidates are sized and ordered for the target's accuracy
   requirement; candidates without a sufficient guarantee are rejected before
   costing.
-- `SharedSubtreeStrategy` uses `consumer_count` to identify shared targets. It
+- `SharedSubDagStrategy` uses `consumer_count` to identify shared targets. It
   emits both build-once-and-share and recompute-independently rewrites when a
   target has multiple consumers.
 - `HydraGroupingStrategy` proposes eligible shared multi-subpopulation layouts.

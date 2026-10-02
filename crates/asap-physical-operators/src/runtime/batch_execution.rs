@@ -88,7 +88,9 @@ mod tests {
         values::Value,
     };
     use planner_types::{
-        post_asap::{SummaryFamilyType, SummaryField, SummarySchema},
+        post_asap::{
+            Field as SummaryField, FieldDataType as SummaryFamilyType, Schema as SummarySchema,
+        },
         pre_asap::DataType,
     };
     use std::sync::Arc;
@@ -101,8 +103,11 @@ mod tests {
                 name: "value".into(),
                 dtype: SummaryFamilyType::Plain(DataType::Float64),
                 nullable: false,
+                table: None,
             }],
             time_index: None,
+            unique_keys: vec![],
+            closed: false,
         });
         for scope in [
             Scope::Query {
@@ -142,6 +147,8 @@ mod tests {
         let schema = Arc::new(SummarySchema {
             fields: vec![],
             time_index: None,
+            unique_keys: vec![],
+            closed: false,
         });
         let batch = Batch::try_new(schema.clone(), vec![vec![]]).unwrap();
         let source = Operator::source(schema, vec![batch; 65]).unwrap();
@@ -162,6 +169,8 @@ mod tests {
         let schema = Arc::new(SummarySchema {
             fields: vec![],
             time_index: None,
+            unique_keys: vec![],
+            closed: false,
         });
         let batch = Batch::try_new(schema.clone(), vec![vec![]]).unwrap();
         let bytes = batch.bytes();
@@ -191,6 +200,8 @@ mod tests {
         let schema = Arc::new(SummarySchema {
             fields: vec![],
             time_index: None,
+            unique_keys: vec![],
+            closed: false,
         });
         let batch = Batch::try_new(schema, vec![vec![]]).unwrap();
         let context = RunContext::new(

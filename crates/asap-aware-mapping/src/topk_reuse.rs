@@ -7,7 +7,7 @@
 
 use std::rc::Rc;
 
-use asap_types::pre_asap::QueryExpr;
+use asap_types::ir::{NonASAPOp, OperatorNode};
 
 use crate::replacement::{
     Replacement, ReplacementProvenance, ReplacementStrategy, ReplacementSubDAG, TargetSubDAG,
@@ -15,22 +15,23 @@ use crate::replacement::{
 
 /// Derives a smaller top-k result from a compatible larger top-k sibling.
 pub struct TopKLimitReuseStrategy {
-    limits: Vec<Rc<QueryExpr>>,
+    limits: Vec<Rc<OperatorNode>>,
 }
 
 impl TopKLimitReuseStrategy {
-    pub fn new(limits: &[Rc<QueryExpr>]) -> Self {
+    pub fn new(limits: &[Rc<OperatorNode>]) -> Self {
         Self {
             limits: limits.to_vec(),
         }
     }
 
-    fn larger_sources<'a>(&'a self, target: &TargetSubDAG<'_>) -> Vec<&'a Rc<QueryExpr>> {
-        let QueryExpr::Limit {
-            n: target_n,
+    fn larger_sources<'a>(&'a self, target: &TargetSubDAG<'_>) -> Vec<&'a Rc<OperatorNode>> {
+        let Some(NonASAPOp::Limit {
+            n: Some(target_n),
             offset: 0,
             child: target_child,
-        } = target.root.as_ref()
+            ..
+        }) = target.root.non_asap()
         else {
             return Vec::new();
         };
@@ -42,11 +43,12 @@ impl TopKLimitReuseStrategy {
                 if Rc::ptr_eq(candidate, target.root) {
                     return false;
                 }
-                let QueryExpr::Limit {
-                    n,
+                let Some(NonASAPOp::Limit {
+                    n: Some(n),
                     offset: 0,
                     child,
-                } = candidate.as_ref()
+                    ..
+                }) = candidate.non_asap()
                 else {
                     return false;
                 };
@@ -56,8 +58,8 @@ impl TopKLimitReuseStrategy {
             .collect();
         // Prefer the smallest sufficient materialized top-k when several
         // larger siblings are available.
-        sources.sort_by_key(|source| match source.as_ref() {
-            QueryExpr::Limit { n, .. } => *n,
+        sources.sort_by_key(|source| match source.non_asap() {
+            Some(NonASAPOp::Limit { n: Some(n), .. }) => *n,
             _ => unreachable!(),
         });
         sources
@@ -70,34 +72,38 @@ impl ReplacementStrategy for TopKLimitReuseStrategy {
     }
 
     fn replacements(&self, target: &TargetSubDAG<'_>) -> Vec<ReplacementSubDAG> {
-        let QueryExpr::Limit {
-            n: target_n,
+        let Some(NonASAPOp::Limit {
+            n: Some(target_n),
             offset: 0,
+            partition_by,
             ..
-        } = target.root.as_ref()
+        }) = target.root.non_asap()
         else {
             return Vec::new();
         };
 
         self.larger_sources(target)
             .into_iter()
-            .map(|source| {
-                let source_n = match source.as_ref() {
-                    QueryExpr::Limit { n, .. } => *n,
+            .filter_map(|source| {
+                let source_n = match source.non_asap() {
+                    Some(NonASAPOp::Limit { n: Some(n), .. }) => *n,
                     _ => unreachable!(),
                 };
-                ReplacementSubDAG {
+                let rewritten = OperatorNode::non_asap_node(NonASAPOp::Limit {
+                    n: Some(*target_n),
+                    offset: 0,
+                    partition_by: partition_by.clone(),
+                    child: Rc::clone(source),
+                })
+                .ok()?;
+                Some(ReplacementSubDAG {
                     strategy: "TopKLimitReuseStrategy",
-                    replacement: Replacement::Rewrite(Rc::new(QueryExpr::Limit {
-                        n: *target_n,
-                        offset: 0,
-                        child: Rc::clone(source),
-                    })),
+                    replacement: Replacement::SubDag(rewritten),
                     provenance: ReplacementProvenance::LogicalRewrite,
                     rationale: format!(
                         "derives top-{target_n} from the compatible shared top-{source_n} result; both rank the identical input with the same ordering"
                     ),
-                }
+                })
             })
             .collect()
     }
@@ -106,38 +112,39 @@ impl ReplacementStrategy for TopKLimitReuseStrategy {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use asap_types::pre_asap::{Schema, Source};
+    use crate::test_support::scan;
+    use asap_types::ir::operator_properties::GroupKeys;
+    use asap_types::pre_asap::Schema;
 
-    fn scan_named(metric: &str) -> Rc<QueryExpr> {
-        Rc::new(QueryExpr::Scan {
-            source: Source::TimeSeries {
-                metric: metric.into(),
-            },
-            predicates: vec![],
-            schema: Schema::with_time_index(vec![], 0, vec![]),
+    fn scan_named(metric: &str) -> Rc<OperatorNode> {
+        scan(metric, Schema::with_time_index(vec![], 0, vec![]))
+    }
+
+    fn limit(n: usize, offset: usize, child: Rc<OperatorNode>) -> Rc<OperatorNode> {
+        OperatorNode::non_asap_node(NonASAPOp::Limit {
+            n: Some(n),
+            offset,
+            partition_by: GroupKeys::none(),
+            child,
         })
+        .unwrap()
     }
 
     #[test]
     fn smaller_limit_reuses_larger_compatible_limit() {
         let child = scan_named("m");
-        let small = Rc::new(QueryExpr::Limit {
-            n: 5,
-            offset: 0,
-            child: Rc::clone(&child),
-        });
-        let large = Rc::new(QueryExpr::Limit {
-            n: 10,
-            offset: 0,
-            child,
-        });
+        let small = limit(5, 0, Rc::clone(&child));
+        let large = limit(10, 0, child);
         let strategy = TopKLimitReuseStrategy::new(&[Rc::clone(&small), Rc::clone(&large)]);
         let replacements = strategy.replacements(&TargetSubDAG::new(&small));
         assert_eq!(replacements.len(), 1);
-        let Replacement::Rewrite(rewrite) = &replacements[0].replacement else {
+        let Replacement::SubDag(rewrite) = &replacements[0].replacement else {
             panic!()
         };
-        let QueryExpr::Limit { n: 5, child, .. } = rewrite.as_ref() else {
+        let Some(NonASAPOp::Limit {
+            n: Some(5), child, ..
+        }) = rewrite.non_asap()
+        else {
             panic!()
         };
         assert!(Rc::ptr_eq(child, &large));
@@ -147,21 +154,9 @@ mod tests {
     fn offset_or_different_input_is_not_reused() {
         let a = scan_named("a");
         let b = scan_named("b");
-        let small = Rc::new(QueryExpr::Limit {
-            n: 5,
-            offset: 0,
-            child: a,
-        });
-        let large = Rc::new(QueryExpr::Limit {
-            n: 10,
-            offset: 0,
-            child: b,
-        });
-        let offset = Rc::new(QueryExpr::Limit {
-            n: 20,
-            offset: 1,
-            child: scan_named("a"),
-        });
+        let small = limit(5, 0, a);
+        let large = limit(10, 0, b);
+        let offset = limit(20, 1, scan_named("a"));
         let strategy = TopKLimitReuseStrategy::new(&[Rc::clone(&small), large, offset]);
         assert!(!strategy.matches(&TargetSubDAG::new(&small)));
     }

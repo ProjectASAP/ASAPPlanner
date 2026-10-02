@@ -2,12 +2,12 @@
 use super::*;
 
 /// A trusted source assertion scoped by `AccuracyEvidenceProvider` to one
-/// complete readout. Choosing this variant asserts the estimator and hash
+/// complete evaluation. Choosing this variant asserts the estimator and hash
 /// assumptions; it must not be inferred from sampled population statistics.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EstimatorContract {
     /// Classic HLL with independent uniform bucket hashing, including merged panes.
-    ClassicHll { max_distinct_per_readout: u32 },
+    ClassicHll { max_distinct_per_evaluation: u32 },
 }
 
 /// An enforced domain for every sample of a direct quantile operand, in every
@@ -18,7 +18,7 @@ pub enum EstimatorContract {
 pub struct QuantileInputDomain {
     pub lower: f64,
     pub upper: f64,
-    /// Upper bound on samples per evaluation, matching the pinned readout's
+    /// Upper bound on samples per evaluation, matching the pinned evaluation's
     /// exact Float64 rank limit. The population must also be nonempty.
     pub max_samples: u64,
     pub contract: String,
@@ -87,39 +87,30 @@ pub struct PropagationStats {
 /// Supplies typed planning-time evidence required by propagation rules.
 pub trait AccuracyEvidenceProvider {
     /// Trusted estimator contract for this complete aggregate expression,
-    /// including source, filters, grouping and all panes in each readout.
+    /// including source, filters, grouping and all panes in each evaluation.
     /// An observed cardinality is not an enforced population bound.
-    fn estimator_contract(
-        &self,
-        _expression: &asap_types::pre_asap::QueryExpr,
-    ) -> Option<EstimatorContract> {
+    fn estimator_contract(&self, _expression: &OperatorNode) -> Option<EstimatorContract> {
         None
     }
 
     /// Enforced upper bound on distinct (partition, item) identities across a
-    /// complete TopK readout. Used to union-bound score errors for adaptively
+    /// complete TopK evaluation. Used to union-bound score errors for adaptively
     /// selected candidates. Observed cardinality is not sufficient evidence.
-    fn topk_max_distinct_items(
-        &self,
-        _expression: &asap_types::pre_asap::QueryExpr,
-    ) -> Option<u64> {
+    fn topk_max_distinct_items(&self, _expression: &OperatorNode) -> Option<u64> {
         None
     }
 
     /// Proof scoped to this complete quantile expression, including its source,
     /// filters, grouping and window. `None` means unknown, including emptiness.
-    fn quantile_input_domain(
-        &self,
-        _operand: &asap_types::pre_asap::query_expr::QueryExpr,
-    ) -> Option<QuantileInputDomain> {
+    fn quantile_input_domain(&self, _operand: &OperatorNode) -> Option<QuantileInputDomain> {
         None
     }
 
     fn propagation_stats(
         &self,
         _op: &CompositionOperator,
-        _family: &SummaryFamilyType,
-        _query: Option<&SketchQuery>,
+        _family: &FieldDataType,
+        _query: Option<&SketchStatistic>,
     ) -> PropagationStats {
         PropagationStats::default()
     }
@@ -142,8 +133,8 @@ impl AccuracyEvidenceProvider for WorkloadAccuracyEvidence<'_> {
     fn propagation_stats(
         &self,
         _op: &CompositionOperator,
-        _family: &SummaryFamilyType,
-        _query: Option<&SketchQuery>,
+        _family: &FieldDataType,
+        _query: Option<&SketchStatistic>,
     ) -> PropagationStats {
         PropagationStats {
             input_row_count: self.data.input_cardinality.value_at(self.now_ms).copied(),
@@ -180,7 +171,7 @@ mod tests {
         };
         let fresh = provider.propagation_stats(
             &CompositionOperator::ExactSum,
-            &SummaryFamilyType::ExactAggregate(
+            &FieldDataType::ExactAggregate(
                 asap_types::post_asap::ExactKind::Sum,
                 asap_types::post_asap::ExactParams::Sum,
             ),
@@ -195,7 +186,7 @@ mod tests {
         }
         .propagation_stats(
             &CompositionOperator::ExactSum,
-            &SummaryFamilyType::ExactAggregate(
+            &FieldDataType::ExactAggregate(
                 asap_types::post_asap::ExactKind::Sum,
                 asap_types::post_asap::ExactParams::Sum,
             ),

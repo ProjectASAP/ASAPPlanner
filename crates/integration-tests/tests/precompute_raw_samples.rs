@@ -1,10 +1,14 @@
 //! Planner-selected summaries over raw samples compile as precompute graphs
 //! and produce the same estimates as feeding their kernel sample by sample.
+mod physical_common;
+use asap_types::ir::export::{PostAsapDag, PostAsapOperatorPayload};
+use asap_types::ir::OperatorNode;
+use physical_common::compile_post_asap_dag;
 use std::{collections::BTreeMap, collections::BTreeSet, rc::Rc, sync::Arc};
 
 use asap_aware_mapping::cost_model::DefaultCostModel;
 use asap_aware_mapping::{
-    search_workload, Replacement, ReplacementStrategy, ReplacementSubDAG, SketchAlgorithmStrategy,
+    search_workload, ASAPStrategies, Replacement, ReplacementStrategy, ReplacementSubDAG,
     TargetSubDAG,
 };
 use asap_integration_tests::fixtures::lower_promql;
@@ -18,10 +22,10 @@ use asap_physical_operators::{
     AggregateCore, KeyByLabelValues, Statistic,
 };
 use asap_types::post_asap::{
-    compile_post_asap_dag, EntityIdentity, ExactKind, PostAsapDag, PostAsapOperatorPayload,
-    SketchAlgorithm, SketchQuery, SummaryFamilyType, SummaryInputExpr, SummaryNode, SummaryUpdate,
+    EntityIdentity, ExactKind, FieldDataType, SketchAlgorithm, SketchStatistic, SummaryInputExpr,
+    SummaryUpdate,
 };
-use asap_types::pre_asap::{expr_ir::ColumnRef, query_expr::Reduction};
+use asap_types::pre_asap::{expr_ir::ColumnRef, Reduction};
 use asap_types::types::AccuracyTarget;
 use futures::{executor::block_on, StreamExt};
 
@@ -50,14 +54,14 @@ fn canonical(labels: &Series) -> Series {
 
 /// Every Planner candidate for `query`: the searched selection plus each
 /// summary replacement of the root.
-fn candidates(query: &str, accuracy: AccuracyTarget) -> Vec<Rc<SummaryNode>> {
-    let root = Rc::new(lower_promql(query, accuracy).expect("lowering failed"));
-    let mut result = SketchAlgorithmStrategy::default_cost_model()
+fn candidates(query: &str, accuracy: AccuracyTarget) -> Vec<Rc<OperatorNode>> {
+    let root = lower_promql(query, accuracy).expect("lowering failed");
+    let mut result = ASAPStrategies::default_cost_model()
         .replacements(&TargetSubDAG::new(&root))
         .into_iter()
         .filter_map(|candidate| match candidate {
             ReplacementSubDAG {
-                replacement: Replacement::Summary(node),
+                replacement: Replacement::SubDag(node),
                 ..
             } => Some(node),
             _ => None,
@@ -88,8 +92,13 @@ fn raw_summaries(dag: &PostAsapDag) -> Vec<(u64, u64)> {
                 return None;
             };
             let source = dag.nodes.iter().find(|n| n.id == edge.producer)?;
-            matches!(source.payload, PostAsapOperatorPayload::Fallback { .. })
-                .then_some((u64::from(source.id.0), u64::from(node.id.0)))
+            matches!(
+                source.payload,
+                PostAsapOperatorPayload::Relational {
+                    operator: asap_types::ir::export::NonASAPOpKind::TimeRange { .. }
+                }
+            )
+            .then_some((u64::from(source.id.0), u64::from(node.id.0)))
         })
         .collect()
 }
@@ -236,9 +245,9 @@ fn weight(update: &SummaryUpdate, value: f64) -> f64 {
 }
 
 /// Estimates that identify a state's content for comparison.
-fn readouts(state: &dyn AggregateCore, family: &SummaryFamilyType) -> Vec<f64> {
+fn evaluations(state: &dyn AggregateCore, family: &FieldDataType) -> Vec<f64> {
     if let Some(exact) = state.as_any().downcast_ref::<ExactAccumulator>() {
-        let SummaryFamilyType::ExactAggregate(kind, _) = family else {
+        let FieldDataType::ExactAggregate(kind, _) = family else {
             unreachable!()
         };
         let statistic = match kind {
@@ -251,19 +260,19 @@ fn readouts(state: &dyn AggregateCore, family: &SummaryFamilyType) -> Vec<f64> {
             other => panic!("unexpected exact kind {other:?}"),
         };
         return vec![exact
-            .readout(statistic, None, None::<&KeyByLabelValues>)
+            .evaluation(statistic, None, None::<&KeyByLabelValues>)
             .unwrap()
             .unwrap()];
     }
-    let SummaryFamilyType::Sketch(kind, _) = family else {
+    let FieldDataType::Sketch(kind, _) = family else {
         panic!("sketch state for exact family")
     };
     match kind.algorithm() {
         SketchAlgorithm::Kll | SketchAlgorithm::DDSketch => [0.1, 0.5, 0.9]
             .into_iter()
-            .map(|q| state.estimate(&SketchQuery::Quantile { q }).unwrap())
+            .map(|q| state.estimate(&SketchStatistic::Quantile { q }).unwrap())
             .collect(),
-        SketchAlgorithm::Hll => vec![state.estimate(&SketchQuery::Cardinality).unwrap()],
+        SketchAlgorithm::Hll => vec![state.estimate(&SketchStatistic::Cardinality).unwrap()],
         other => panic!("unexpected unkeyed sketch {other:?}"),
     }
 }
@@ -306,7 +315,7 @@ fn check(
             .collect(),
         Reduction::PerEntity => vec![],
     };
-    let stored_only = matches!(family, SummaryFamilyType::Sketch(kind, _)
+    let stored_only = matches!(family, FieldDataType::Sketch(kind, _)
         if kind.algorithm() == &asap_types::post_asap::SketchAlgorithm::Cms);
     if stored_only || asap_physical_operators::capability::validate_native_family(family).is_err() {
         // Families without a native state (e.g. UnivMon), or with native
@@ -317,11 +326,11 @@ fn check(
     }
     let actual = execute(dag, source, root, rows);
     let label = match family {
-        SummaryFamilyType::ExactAggregate(kind, _) => format!("{kind:?}"),
-        SummaryFamilyType::Sketch(kind, _) => format!("{:?}", kind.algorithm()),
+        FieldDataType::ExactAggregate(kind, _) => format!("{kind:?}"),
+        FieldDataType::Sketch(kind, _) => format!("{:?}", kind.algorithm()),
         other => format!("{other:?}"),
     };
-    if let SummaryFamilyType::Sketch(kind, _) = family {
+    if let FieldDataType::Sketch(kind, _) = family {
         if let (Some(keyed), false) = (&input.item, kind.algorithm() == &SketchAlgorithm::Hll) {
             // Keyed heaps: every item's estimated weight is its exact
             // total at this scale (no collisions in the fixture).
@@ -366,8 +375,8 @@ fn check(
     for (labels, state) in actual {
         let reference = expected[&labels].snapshot_accumulator();
         assert_eq!(
-            readouts(state.as_ref(), family),
-            readouts(reference.as_ref(), family),
+            evaluations(state.as_ref(), family),
+            evaluations(reference.as_ref(), family),
             "{query}: {labels:?}"
         );
     }
@@ -455,7 +464,7 @@ fn raw_sample_summaries_compile_and_match_their_kernels() {
 
 /// Replace the raw summary of `sum by (service) (sum_over_time(m[5m]))` with
 /// another update, keeping its raw input and reduction.
-fn grouped_raw_summary(family: SummaryFamilyType, input: SummaryUpdate) -> (PostAsapDag, u64, u64) {
+fn grouped_raw_summary(family: FieldDataType, input: SummaryUpdate) -> (PostAsapDag, u64, u64) {
     let candidate = candidates(
         "sum by (service) (sum_over_time(m[5m]))",
         AccuracyTarget::Exact,
@@ -504,7 +513,7 @@ fn raw_sample_heaps_resolve_items_from_labels() {
         SketchParams, WeightDomain,
     };
     let heap = |algorithm, params| {
-        SummaryFamilyType::Sketch(SketchKind::new(algorithm, params), PerSubpopulationInstance)
+        FieldDataType::Sketch(SketchKind::new(algorithm, params), PerSubpopulationInstance)
     };
     let cms = heap(
         SketchAlgorithm::CmsWithHeap,
@@ -583,9 +592,9 @@ fn raw_sample_heaps_resolve_items_from_labels() {
 // `without` grouping over raw samples drops the listed labels and `__name__`.
 #[test]
 fn raw_sample_without_grouping_drops_labels_and_name() {
-    use asap_types::pre_asap::query_expr::GroupKeys;
+    use asap_types::pre_asap::GroupKeys;
     let family =
-        SummaryFamilyType::ExactAggregate(ExactKind::Sum, asap_types::post_asap::ExactParams::Sum);
+        FieldDataType::ExactAggregate(ExactKind::Sum, asap_types::post_asap::ExactParams::Sum);
     let (mut dag, source, root) =
         grouped_raw_summary(family, SummaryUpdate::column(ColumnRef::SampleValue));
     let service = dag

@@ -1,16 +1,16 @@
 // cargo run -p asap-lower --example canonical_examples
 //
-// One-off: pretty-print the QueryExpr for one canonical query per variant,
+// One-off: pretty-print the `OperatorNode` DAG for one canonical query per variant,
 // plus custom Join/SetOp/Dedup/CTE probes, to eyeball the actual shape.
 
 use asap_devtools::lower_promql_with_data_ingestion_interval;
 use asap_frontend_sql::{lower_sql_dialect, SqlCatalog};
-use asap_types::pre_asap::schema::{Column, DataType, Schema};
+use asap_types::pre_asap::schema::{DataType, Field, Schema};
 use asap_types::types::AccuracyTarget;
 use asap_types::workload::SqlDialect;
 
-fn col(name: &str, dtype: DataType) -> Column {
-    Column::new(name, dtype, false)
+fn col(name: &str, dtype: DataType) -> Field {
+    Field::plain(name, dtype, false)
 }
 
 fn packets_catalog() -> SqlCatalog {
@@ -48,7 +48,7 @@ fn bgp_catalog() -> SqlCatalog {
 async fn main() {
     let promql_examples: &[(&str, &str)] = &[
         ("Scan", "up"),
-        ("BinaryOp + PromqlScalarBridge", "up > 1"),
+        ("Filter + scalar predicate", "up > 1"),
         ("EvalTimestamp", "time()"),
         ("Aggregate", "sum(up)"),
         (

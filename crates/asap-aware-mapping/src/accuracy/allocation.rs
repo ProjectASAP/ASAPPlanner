@@ -23,7 +23,7 @@ pub struct AccuracyAllocation {
 
 impl AccuracyAllocation {
     /// The end-to-end budget left for everything below `layers[0]` — what
-    /// the inner subtree must satisfy as a whole (it re-splits internally).
+    /// the inner sub-DAG must satisfy as a whole (it re-splits internally).
     /// `None` for a single-layer allocation.
     pub fn inner_target(&self, shape: &CompositionShape) -> Option<AccuracyTarget> {
         let inner = &self.layers[1..];

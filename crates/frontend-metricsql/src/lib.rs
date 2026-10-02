@@ -1,11 +1,14 @@
-//! MetricsQL AST to canonical `QueryExpr` frontend.
+//! MetricsQL AST → the name-based `UnresolvedOp` tree → the unified operator DAG.
 
 use std::{rc::Rc, time::Duration};
 
+use asap_frontend_common::{
+    resolve_root, UnresolvedOp as U, UnresolvedPredicate, UnresolvedScalar,
+};
+use asap_types::ir::{BinaryOperator, ExprSemantics, OperatorNode, TimeRangeKind};
 use asap_types::pre_asap::{
-    resolve_root, AggIntent, ArithmeticOpKind, BinaryOpKind, ColumnRef, CompareOpKind, GroupKeys,
-    Predicate, PromQLVectorSetOpKind, QueryExpr, Reduction, ScalarValue, Source,
-    UnresolvedQueryExpr as U,
+    AggIntent, ArithmeticOpKind, BinaryOpKind, ColumnRef, CompareOpKind, GroupKeys,
+    PromQLVectorSetOpKind, Reduction, ScalarValue, Source,
 };
 use asap_types::types::AccuracyTarget;
 use metricsql_parser::ast::{AggregateModifier, DurationExpr, Expr, MetricExpr, RollupExpr};
@@ -33,10 +36,31 @@ pub fn canonical_metricsql(query: &str) -> Result<String, MetricsqlError> {
     Ok(parse_metricsql(query)?.to_string())
 }
 
-pub fn lower_metricsql(query: &str, accuracy: AccuracyTarget) -> Result<QueryExpr, MetricsqlError> {
+pub fn lower_metricsql(
+    query: &str,
+    accuracy: AccuracyTarget,
+) -> Result<Rc<OperatorNode>, MetricsqlError> {
+    match lower_metricsql_query(query, accuracy)? {
+        asap_types::ir::QueryRoot::Operator(node) => Ok(node),
+        _ => Err(unsupported("scalar root: use lower_metricsql_query")),
+    }
+}
+
+/// Lower scalar constants without fabricating a relational operator.
+pub fn lower_metricsql_query(
+    query: &str,
+    accuracy: AccuracyTarget,
+) -> Result<asap_types::ir::QueryRoot, MetricsqlError> {
     let ast = parse_metricsql(query)?;
+    if let Expr::NumberLiteral(number) = &ast {
+        return Ok(asap_types::ir::QueryRoot::Scalar(
+            asap_types::ir::ScalarExpr::literal_f64(number.value),
+        ));
+    }
     let unresolved = Lowerer { accuracy }.lower(&ast)?;
-    resolve_root(&unresolved).map_err(|e| MetricsqlError::Resolve(e.to_string()))
+    resolve_root(&unresolved)
+        .map(asap_types::ir::QueryRoot::Operator)
+        .map_err(|e| MetricsqlError::Resolve(e.to_string()))
 }
 
 struct Lowerer {
@@ -50,12 +74,16 @@ impl Lowerer {
             Expr::Rollup(e) => self.rollup(e),
             Expr::Function(e) => self.function(e),
             Expr::Aggregation(e) => self.aggregate(e),
-            Expr::NumberLiteral(e) => Ok(U::promql_scalar(e.value)),
-            Expr::UnaryOperator(e) => Ok(U::BinaryOp {
+            Expr::NumberLiteral(_) => {
+                Err(unsupported("scalar root requires lower_metricsql_query"))
+            }
+            // Vector negation is `x * -1` (as in the PromQL front end).
+            Expr::UnaryOperator(e) => Ok(U::PromqlScalarOp {
+                child: Rc::new(self.lower(&e.expr)?),
+                scalar: UnresolvedScalar::Literal(ScalarValue::Float64(-1.0)),
                 op: BinaryOpKind::Arithmetic(ArithmeticOpKind::Mul),
-                lhs: Rc::new(self.lower(&e.expr)?),
-                rhs: Rc::new(U::promql_scalar(-1.0)),
-                vector_match: None,
+                scalar_left: false,
+                return_bool: false,
             }),
             Expr::BinaryOperator(e) => self.binary(e),
             Expr::Parens(e) if e.expressions.len() == 1 => self.lower(&e.expressions[0]),
@@ -83,7 +111,7 @@ impl Lowerer {
             },
             predicates: filters
                 .into_iter()
-                .map(|f| Predicate(Rc::new(matcher(f))))
+                .map(|f| UnresolvedPredicate(matcher(f)))
                 .collect(),
             schema: None,
         })
@@ -101,6 +129,7 @@ impl Lowerer {
             None => Ok(child),
             Some(window) => Ok(U::TimeRange {
                 range: duration(window)?,
+                kind: TimeRangeKind::Range,
                 child: Rc::new(child),
             }),
         }
@@ -258,12 +287,41 @@ impl Lowerer {
                 return Err(unsupported(format!("MetricsQL operator `{}`", expr.op)))
             }
         };
-        Ok(U::BinaryOp {
+        for (scalar, vector, scalar_left) in [
+            (&expr.left, &expr.right, true),
+            (&expr.right, &expr.left, false),
+        ] {
+            if let Expr::NumberLiteral(n) = scalar.as_ref() {
+                return Ok(U::PromqlScalarOp {
+                    child: Rc::new(self.lower(vector)?),
+                    scalar: UnresolvedScalar::Literal(ScalarValue::Float64(n.value)),
+                    op,
+                    scalar_left,
+                    return_bool: false,
+                });
+            }
+        }
+        Ok(binary_op(
             op,
-            lhs: Rc::new(self.lower(&expr.left)?),
-            rhs: Rc::new(self.lower(&expr.right)?),
+            self.lower(&expr.left)?,
+            self.lower(&expr.right)?,
+        ))
+    }
+}
+
+/// A `BinaryOp` with default matching; MetricsQL modifiers (including `bool`)
+/// are rejected before reaching here.
+fn binary_op(kind: BinaryOpKind, lhs: U, rhs: U) -> U {
+    U::BinaryOp {
+        operator: BinaryOperator {
+            kind,
             vector_match: None,
-        })
+            checked_relative_division: false,
+            checked_finite_division: false,
+        },
+        return_bool: false,
+        lhs: Rc::new(lhs),
+        rhs: Rc::new(rhs),
     }
 }
 
@@ -282,17 +340,22 @@ fn aggregate(reduction: Reduction<ColumnRef>, intent: AggIntent<ColumnRef>, chil
     }
 }
 
-fn matcher(filter: &LabelFilter) -> U {
+fn matcher(filter: &LabelFilter) -> UnresolvedScalar {
     let op = match filter.op {
         LabelFilterOp::Equal => CompareOpKind::Eq,
         LabelFilterOp::NotEqual => CompareOpKind::Ne,
         LabelFilterOp::RegexEqual => CompareOpKind::Regex,
         LabelFilterOp::RegexNotEqual => CompareOpKind::NotRegex,
     };
-    U::Compare {
-        left: Rc::new(U::Column(ColumnRef::Named(filter.label.clone()))),
+    UnresolvedScalar::Compare {
+        left: Box::new(UnresolvedScalar::Column(ColumnRef::Named(
+            filter.label.clone(),
+        ))),
         op,
-        right: Rc::new(U::Literal(ScalarValue::Utf8(filter.value.clone()))),
+        right: Box::new(UnresolvedScalar::Literal(ScalarValue::Utf8(
+            filter.value.clone(),
+        ))),
+        semantics: ExprSemantics::Promql,
     }
 }
 

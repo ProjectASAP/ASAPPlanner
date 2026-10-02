@@ -1,7 +1,7 @@
 //! HyperLogLog distinct-count summary over `asap_sketchlib::HllSketch`.
 use crate::{AggregateCore, KernelError};
 use asap_sketchlib::{HllSketch, HllVariant};
-use planner_types::post_asap::SketchQuery;
+use planner_types::post_asap::SketchStatistic;
 
 #[derive(Debug, Clone)]
 pub struct HllSketchAccumulator {
@@ -39,9 +39,9 @@ impl AggregateCore for HllSketchAccumulator {
     }
 
     /// Distinct count. A bare `PointCount` over an HLL also reads the distinct count.
-    fn estimate(&self, query: &SketchQuery) -> Result<f64, KernelError> {
+    fn estimate(&self, query: &SketchStatistic) -> Result<f64, KernelError> {
         match query {
-            SketchQuery::Cardinality | SketchQuery::PointCount { value: None, .. } => {
+            SketchStatistic::Cardinality | SketchStatistic::PointCount { value: None, .. } => {
                 Ok(self.inner.estimate())
             }
             other => Err(format!("HLL does not answer {other:?}").into()),
@@ -69,7 +69,7 @@ mod tests {
             b.inner.update(&(v + 500).to_le_bytes());
         }
         let merged = a.merge_with(&b).unwrap();
-        let estimate = merged.estimate(&SketchQuery::Cardinality).unwrap();
+        let estimate = merged.estimate(&SketchStatistic::Cardinality).unwrap();
         assert!((estimate - 1500.0).abs() / 1500.0 < 0.05, "{estimate}");
     }
 
@@ -77,6 +77,6 @@ mod tests {
     #[test]
     fn rejects_quantile() {
         let hll = HllSketchAccumulator::new(HllVariant::Regular, 12);
-        assert!(hll.estimate(&SketchQuery::Quantile { q: 0.5 }).is_err());
+        assert!(hll.estimate(&SketchStatistic::Quantile { q: 0.5 }).is_err());
     }
 }

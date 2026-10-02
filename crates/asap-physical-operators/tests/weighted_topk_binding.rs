@@ -1,10 +1,11 @@
 //! Planner output binds directly to the shared runtime at a declared rate-value frontier.
+mod common;
 use asap_aware_mapping::{
     accuracy::{
         AccuracyEvidenceProvider, DefaultAccuracyModel, EqualSplitAllocator, PropagationStats,
     },
     cost_model::DefaultCostModel,
-    Replacement, ReplacementStrategy, SketchAlgorithmStrategy, TargetSubDAG,
+    ASAPStrategies, Replacement, ReplacementStrategy, TargetSubDAG,
 };
 use asap_physical_operators::dag::{
     operators::Operator,
@@ -12,23 +13,21 @@ use asap_physical_operators::dag::{
     values::{Batch, Value},
     Limits, RunContext, Scope,
 };
+use common::compile_post_asap_dag;
 use futures::{executor::block_on, StreamExt};
-use planner_types::{
-    post_asap::*,
-    pre_asap::{DataType, QueryExpr},
-    types::AccuracyTarget,
-};
+use planner_types::ir::export::{PostAsapDag, PostAsapOperatorPayload};
+use planner_types::{post_asap::*, pre_asap::DataType, types::AccuracyTarget};
 use std::{collections::BTreeMap, rc::Rc, sync::Arc};
 struct Evidence;
 impl AccuracyEvidenceProvider for Evidence {
-    fn topk_max_distinct_items(&self, _: &QueryExpr) -> Option<u64> {
+    fn topk_max_distinct_items(&self, _: &planner_types::ir::OperatorNode) -> Option<u64> {
         Some(1000)
     }
     fn propagation_stats(
         &self,
         op: &CompositionOperator,
-        _: &SummaryFamilyType,
-        _: Option<&SketchQuery>,
+        _: &FieldDataType,
+        _: Option<&SketchStatistic>,
     ) -> PropagationStats {
         if matches!(op, CompositionOperator::TopKSelection) {
             PropagationStats {
@@ -63,14 +62,12 @@ fn physical_binding_does_not_impose_an_accuracy_acceptance_policy() {
 }
 
 fn assert_weighted_binding(evidence: &dyn AccuracyEvidenceProvider, algorithm: SketchAlgorithm) {
-    let root = Rc::new(
-        lower_promql(
-            "topk by(job)(2, sum by(service, job)(rate(m[1m])))",
-            AccuracyTarget::Epsilon(0.1),
-        )
-        .unwrap(),
-    );
-    let strategy = SketchAlgorithmStrategy::new_with_planning_inputs_and_evidence(
+    let root = lower_promql(
+        "topk by(job)(2, sum by(service, job)(rate(m[1m])))",
+        AccuracyTarget::Epsilon(0.1),
+    )
+    .unwrap();
+    let strategy = ASAPStrategies::new_with_planning_inputs_and_evidence(
         &DefaultCostModel,
         &DefaultAccuracyModel,
         &EqualSplitAllocator,
@@ -80,7 +77,7 @@ fn assert_weighted_binding(evidence: &dyn AccuracyEvidenceProvider, algorithm: S
         .replacements(&TargetSubDAG::new(&root))
         .into_iter()
         .find_map(|candidate| match candidate.replacement {
-            Replacement::Summary(node)
+            Replacement::SubDag(node)
                 if candidate.rationale.contains(&format!("{algorithm:?}")) =>
             {
                 Some(node)
@@ -89,7 +86,7 @@ fn assert_weighted_binding(evidence: &dyn AccuracyEvidenceProvider, algorithm: S
         })
         .unwrap();
     let dag = compile_post_asap_dag(&plan).unwrap();
-    let build=dag.nodes.iter().find(|node|matches!(&node.payload,PostAsapOperatorPayload::SummaryAgg{family:SummaryFamilyType::Sketch(kind,_),..}if kind.algorithm()==&algorithm)).unwrap();
+    let build=dag.nodes.iter().find(|node|matches!(&node.payload,PostAsapOperatorPayload::SummaryAgg{family:FieldDataType::Sketch(kind,_),..}if kind.algorithm()==&algorithm)).unwrap();
     let rate_id = dag
         .edges
         .iter()
@@ -123,7 +120,7 @@ fn assert_weighted_binding(evidence: &dyn AccuracyEvidenceProvider, algorithm: S
                 "job" => Value::Utf8(job.into()),
                 "value" => Value::Float64(value),
                 _ => match field.dtype {
-                    SummaryFamilyType::Plain(DataType::Timestamp) => Value::Timestamp(60_000),
+                    FieldDataType::Plain(DataType::Timestamp) => Value::Timestamp(60_000),
                     _ => panic!("unexpected rate column {field:?}"),
                 },
             })
@@ -203,7 +200,7 @@ use planner_types::workload::{
 pub fn lower_promql(
     query: &str,
     accuracy: AccuracyTarget,
-) -> Result<QueryExpr, asap_frontend_promql::PromqlError> {
+) -> Result<Rc<planner_types::ir::OperatorNode>, asap_frontend_promql::PromqlError> {
     let workload = PlanningWorkload {
         query_workload: QueryWorkload {
             language: QueryLanguage::PromQL,
@@ -235,7 +232,7 @@ pub fn lower_promql(
 // The old untyped heap updater must not silently round a Planner rate update.
 #[test]
 fn rate_updates_cannot_enter_integer_heap_factory() {
-    let family = SummaryFamilyType::Sketch(
+    let family = FieldDataType::Sketch(
         SketchKind::new(
             SketchAlgorithm::CmsWithHeap,
             SketchParams::CmsWithHeap {
@@ -272,7 +269,7 @@ fn direct_rate_topk_exposes_heap_candidates_with_complete_series_identity() {
     check_direct_rate_topk(false);
 }
 
-// Unreferenced labels still distinguish series throughout Rate and heap readout.
+// Unreferenced labels still distinguish series throughout Rate and heap evaluation.
 #[test]
 fn direct_rate_topk_preserves_dynamic_unreferenced_labels() {
     check_direct_rate_topk(true);
@@ -284,16 +281,20 @@ fn check_direct_rate_topk(dynamic: bool) {
     };
     let mut logical =
         lower_promql("topk by(job)(2, rate(m[1m]))", AccuracyTarget::Epsilon(0.1)).unwrap();
-    fn resolve_catalog(node: &mut QueryExpr) {
-        match node {
-            QueryExpr::Aggregate { child, .. } | QueryExpr::TimeRange { child, .. } => {
-                resolve_catalog(Rc::make_mut(child))
-            }
-            QueryExpr::Scan { schema, .. } => {
+    fn resolve_catalog(node: &mut planner_types::ir::OperatorNode) {
+        match &mut node.operator {
+            planner_types::ir::Operator::NonASAP(
+                planner_types::ir::NonASAPOp::Aggregate { child, .. }
+                | planner_types::ir::NonASAPOp::TimeRange { child, .. },
+            ) => resolve_catalog(Rc::make_mut(child)),
+            planner_types::ir::Operator::NonASAP(planner_types::ir::NonASAPOp::Scan {
+                schema,
+                ..
+            }) => {
                 schema.closed = true;
                 schema
-                    .columns
-                    .push(planner_types::pre_asap::schema::Column::new(
+                    .fields
+                    .push(planner_types::pre_asap::schema::Field::plain(
                         "service",
                         DataType::Utf8,
                         false,
@@ -301,14 +302,15 @@ fn check_direct_rate_topk(dynamic: bool) {
             }
             _ => panic!("unexpected input shape: {node:?}"),
         }
+        node.schema = node.operator.output_schema().unwrap();
     }
     if dynamic {
         logical = with_series_identity(&logical).unwrap();
     } else {
-        resolve_catalog(&mut logical);
+        resolve_catalog(Rc::make_mut(&mut logical));
     }
-    let root = Rc::new(logical);
-    let strategy = SketchAlgorithmStrategy::new_with_planning_inputs_and_evidence(
+    let root = logical;
+    let strategy = ASAPStrategies::new_with_planning_inputs_and_evidence(
         &DefaultCostModel,
         &DefaultAccuracyModel,
         &EqualSplitAllocator,
@@ -322,7 +324,7 @@ fn check_direct_rate_topk(dynamic: bool) {
         let candidate = candidates
             .iter()
             .find_map(|candidate| match &candidate.replacement {
-                Replacement::Summary(node)
+                Replacement::SubDag(node)
                     if candidate.rationale.contains(&format!("{algorithm:?}")) =>
                 {
                     Some(node)
@@ -337,26 +339,25 @@ fn check_direct_rate_topk(dynamic: bool) {
                 )
                 .unwrap();
             assert!(matches!(
-                source.expr,
-                SummaryExpr::ValueOperation {
-                    operation: ValueOperation::FinalizeExactAccumulator,
-                    ..
-                }
+                source.operator,
+                planner_types::ir::Operator::ASAP(
+                    planner_types::ir::ASAPOp::FinalizeExactAccumulator { .. }
+                )
             ));
             assert_eq!(ranked.input_contracts().count(), 1);
             let encoded = String::from_utf8(serde_json::to_vec(&ranked).unwrap()).unwrap();
             assert!(encoded.contains("KeyedSummaryBuild"));
-            assert!(encoded.contains("KeyedReadout"));
+            assert!(encoded.contains("KeyedEvaluation"));
             assert!(
                 !encoded.contains("\"Rate\""),
-                "Rate must be supplied by its exact stored-state readout"
+                "Rate must be supplied by its exact stored-state evaluation"
             );
         }
         let dag = compile_post_asap_dag(candidate).unwrap();
         assert!(dag.nodes.iter().any(|node| matches!(&node.payload,
-            PostAsapOperatorPayload::SummaryAgg { family: SummaryFamilyType::Sketch(kind, _), .. } if kind.algorithm() == &algorithm)));
+            PostAsapOperatorPayload::SummaryAgg { family: FieldDataType::Sketch(kind, _), .. } if kind.algorithm() == &algorithm)));
         let build = dag.nodes.iter().find(|node| matches!(&node.payload,
-            PostAsapOperatorPayload::SummaryAgg { family: SummaryFamilyType::Sketch(kind, _), .. } if kind.algorithm() == &algorithm)).unwrap();
+            PostAsapOperatorPayload::SummaryAgg { family: FieldDataType::Sketch(kind, _), .. } if kind.algorithm() == &algorithm)).unwrap();
         let input_id = dag
             .edges
             .iter()
@@ -377,8 +378,8 @@ fn check_direct_rate_topk(dynamic: bool) {
             .find(|node| {
                 matches!(
                     &node.payload,
-                    PostAsapOperatorPayload::Fallback {
-                        expression: QueryExpr::TimeRange { .. }
+                    PostAsapOperatorPayload::Relational {
+                        operator: planner_types::ir::export::NonASAPOpKind::TimeRange { .. }
                     }
                 )
             })
@@ -634,7 +635,7 @@ fn spatial_topk_exposes_signed_heap_candidate_over_complete_snapshot() {
     };
     let logical = lower_promql("topk by(job)(1, m)", AccuracyTarget::Epsilon(0.1)).unwrap();
     let root = Rc::new(with_series_identity(&logical).unwrap());
-    let strategy = SketchAlgorithmStrategy::new_with_planning_inputs_and_evidence(
+    let strategy = ASAPStrategies::new_with_planning_inputs_and_evidence(
         &DefaultCostModel,
         &DefaultAccuracyModel,
         &EqualSplitAllocator,
@@ -649,7 +650,7 @@ fn spatial_topk_exposes_signed_heap_candidate_over_complete_snapshot() {
     let selected = candidates
         .iter()
         .find_map(|candidate| match &candidate.replacement {
-            Replacement::Summary(node) if candidate.rationale.contains("CountSketchWithHeap") => {
+            Replacement::SubDag(node) if candidate.rationale.contains("CountSketchWithHeap") => {
                 Some(node)
             }
             _ => None,
@@ -662,8 +663,8 @@ fn spatial_topk_exposes_signed_heap_candidate_over_complete_snapshot() {
         .find(|node| {
             matches!(
                 &node.payload,
-                PostAsapOperatorPayload::Fallback {
-                    expression: QueryExpr::TimeRange { .. }
+                PostAsapOperatorPayload::Relational {
+                    operator: planner_types::ir::export::NonASAPOpKind::TimeRange { .. }
                 }
             )
         })
@@ -676,7 +677,7 @@ fn spatial_topk_exposes_signed_heap_candidate_over_complete_snapshot() {
     )
     .unwrap();
     let snapshot_program =
-        asap_physical_operators::physical_planner::promql_rows::compile_current_series_readout(
+        asap_physical_operators::physical_planner::promql_rows::compile_current_series_evaluation(
             selected,
         )
         .unwrap();
@@ -684,7 +685,7 @@ fn spatial_topk_exposes_signed_heap_candidate_over_complete_snapshot() {
         serde_json::from_slice(&serde_json::to_vec(&snapshot_program).unwrap()).unwrap();
     assert!(!encoded.to_string().contains("CurrentSeries"));
     assert!(encoded.to_string().contains("KeyedSummaryBuild"));
-    assert!(encoded.to_string().contains("KeyedReadout"));
+    assert!(encoded.to_string().contains("KeyedEvaluation"));
     for (values, expected, score) in [
         ([100., 20.], "a", 100.),
         ([1., 20.], "b", 20.),
@@ -758,7 +759,7 @@ fn spatial_topk_exposes_signed_heap_candidate_over_complete_snapshot() {
 
 /// Deployment-side lifecycle choice: every summary state of `candidate` is
 /// continuously maintained, and the chosen lifecycles set execution timing.
-fn continuously_maintained_dag(candidate: &Rc<SummaryNode>) -> PostAsapDag {
+fn continuously_maintained_dag(candidate: &Rc<planner_types::ir::OperatorNode>) -> PostAsapDag {
     use asap_aware_mapping::{
         cost_model::{Cost, CostModel},
         enumerate_summary_maintenance_lifecycles, CostRate, Horizon,
@@ -779,7 +780,7 @@ fn continuously_maintained_dag(candidate: &Rc<SummaryNode>) -> PostAsapDag {
         }
         fn summary_maintenance_lifecycle_cost_inputs(
             &self,
-            _: &SummaryNode,
+            _: &planner_types::ir::OperatorNode,
         ) -> SummaryMaintenanceLifecycleCostInputs {
             SummaryMaintenanceLifecycleCostInputs {
                 build_cost: Some(Cost(10.)),
@@ -791,7 +792,7 @@ fn continuously_maintained_dag(candidate: &Rc<SummaryNode>) -> PostAsapDag {
         }
         fn summary_maintenance_capabilities(
             &self,
-            _: &SummaryNode,
+            _: &planner_types::ir::OperatorNode,
         ) -> SummaryMaintenanceCapabilities {
             SummaryMaintenanceCapabilities {
                 incremental_update: true,
@@ -861,7 +862,7 @@ fn maintained_rate_heap_lifecycle_compiles_fixed_window_precompute() {
         )
         .unwrap(),
     );
-    let strategy = SketchAlgorithmStrategy::new_with_planning_inputs_and_evidence(
+    let strategy = ASAPStrategies::new_with_planning_inputs_and_evidence(
         &DefaultCostModel,
         &DefaultAccuracyModel,
         &EqualSplitAllocator,
@@ -871,7 +872,7 @@ fn maintained_rate_heap_lifecycle_compiles_fixed_window_precompute() {
         .replacements(&TargetSubDAG::new(&root))
         .into_iter()
         .filter_map(|candidate| match candidate.replacement {
-            Replacement::Summary(root) if candidate.rationale.contains("WithHeap") => Some(root),
+            Replacement::SubDag(root) if candidate.rationale.contains("WithHeap") => Some(root),
             _ => None,
         })
         .collect::<Vec<_>>();
@@ -885,7 +886,7 @@ fn maintained_rate_heap_lifecycle_compiles_fixed_window_precompute() {
                 matches!(
                     &node.payload,
                     PostAsapOperatorPayload::SummaryAgg {
-                        family: SummaryFamilyType::ExactAggregate(ExactKind::Rate, _),
+                        family: FieldDataType::ExactAggregate(ExactKind::Rate, _),
                         ..
                     }
                 )
@@ -898,7 +899,7 @@ fn maintained_rate_heap_lifecycle_compiles_fixed_window_precompute() {
                 matches!(
                     &node.payload,
                     PostAsapOperatorPayload::SummaryAgg {
-                        family: SummaryFamilyType::Sketch(..),
+                        family: FieldDataType::Sketch(..),
                         ..
                     }
                 )
@@ -987,9 +988,9 @@ fn maintained_rate_heap_lifecycle_compiles_fixed_window_precompute() {
                         .fields
                         .iter()
                         .map(|field| match &field.dtype {
-                            SummaryFamilyType::ExactAggregate(..) => summary.clone(),
-                            SummaryFamilyType::Plain(DataType::Timestamp) => Value::Timestamp(end),
-                            SummaryFamilyType::Plain(DataType::Utf8)
+                            FieldDataType::ExactAggregate(..) => summary.clone(),
+                            FieldDataType::Plain(DataType::Timestamp) => Value::Timestamp(end),
+                            FieldDataType::Plain(DataType::Utf8)
                                 if field.name == "$promql_series_identity" =>
                             {
                                 Value::Utf8(
@@ -1001,7 +1002,7 @@ fn maintained_rate_heap_lifecycle_compiles_fixed_window_precompute() {
                                     .into(),
                                 )
                             }
-                            SummaryFamilyType::Plain(DataType::Utf8) => Value::Utf8("api".into()),
+                            FieldDataType::Plain(DataType::Utf8) => Value::Utf8("api".into()),
                             _ => panic!("unexpected state field {field:?}"),
                         })
                         .collect()

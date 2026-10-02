@@ -1,6 +1,7 @@
 //! Label matching and scalar broadcasting are physical computation, not source binding.
 use super::*;
-use planner_types::{post_asap::BinaryOperator, pre_asap::BinaryOpKind};
+use crate::expressions::binary::BinaryOpKind;
+use crate::expressions::binary::BinaryOperator;
 
 pub(crate) fn value_schema(scalar: bool) -> Schema {
     let mut fields = Vec::new();

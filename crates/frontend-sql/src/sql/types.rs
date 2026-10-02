@@ -5,11 +5,11 @@
 use std::collections::HashMap;
 
 use datafusion::arrow::datatypes::{
-    DataType as ArrowDataType, Field, Fields, Schema as ArrowSchema,
+    DataType as ArrowDataType, Field as ArrowField, Fields, Schema as ArrowSchema,
 };
 use datafusion::common::ScalarValue as DfScalarValue;
 
-use asap_types::pre_asap::schema::{Column, DataType, Schema};
+use asap_types::pre_asap::schema::{DataType, Field, Schema};
 use asap_types::pre_asap::ScalarValue;
 
 use crate::error::SqlError as LoweringError;
@@ -93,7 +93,7 @@ pub(super) fn arrow_to_dtype(dt: &ArrowDataType) -> Result<DataType, LoweringErr
         ArrowDataType::Date32 | ArrowDataType::Date64 => Ok(DataType::Date),
         ArrowDataType::Interval(_) => Ok(DataType::Interval),
         ArrowDataType::List(element) => Ok(DataType::List {
-            element: Box::new(Column::new(
+            element: Box::new(Field::new(
                 element.name(),
                 arrow_to_dtype(element.data_type())?,
                 element.is_nullable(),
@@ -103,7 +103,7 @@ pub(super) fn arrow_to_dtype(dt: &ArrowDataType) -> Result<DataType, LoweringErr
             fields: fields
                 .iter()
                 .map(|field| {
-                    Ok(Column::new(
+                    Ok(Field::new(
                         field.name(),
                         arrow_to_dtype(field.data_type())?,
                         field.is_nullable(),
@@ -142,7 +142,7 @@ pub(super) fn dtype_to_arrow(dt: &DataType) -> ArrowDataType {
         DataType::Float64 => ArrowDataType::Float64,
         DataType::Utf8 => ArrowDataType::Utf8,
         DataType::Bool => ArrowDataType::Boolean,
-        DataType::List { element } => ArrowDataType::List(std::sync::Arc::new(Field::new(
+        DataType::List { element } => ArrowDataType::List(std::sync::Arc::new(ArrowField::new(
             &element.name,
             dtype_to_arrow(&element.dtype),
             element.nullable,
@@ -150,7 +150,9 @@ pub(super) fn dtype_to_arrow(dt: &DataType) -> ArrowDataType {
         DataType::Struct { fields } => ArrowDataType::Struct(
             fields
                 .iter()
-                .map(|field| Field::new(&field.name, dtype_to_arrow(&field.dtype), field.nullable))
+                .map(|field| {
+                    ArrowField::new(&field.name, dtype_to_arrow(&field.dtype), field.nullable)
+                })
                 .collect::<Vec<_>>()
                 .into(),
         ),
@@ -159,12 +161,12 @@ pub(super) fn dtype_to_arrow(dt: &DataType) -> ArrowDataType {
             value,
             value_nullable,
         } => ArrowDataType::Map(
-            std::sync::Arc::new(Field::new(
+            std::sync::Arc::new(ArrowField::new(
                 "entries",
                 ArrowDataType::Struct(
                     vec![
-                        Field::new("key", dtype_to_arrow(key), false),
-                        Field::new("value", dtype_to_arrow(value), *value_nullable),
+                        ArrowField::new("key", dtype_to_arrow(key), false),
+                        ArrowField::new("value", dtype_to_arrow(value), *value_nullable),
                     ]
                     .into(),
                 ),
@@ -193,9 +195,11 @@ pub(super) fn dtype_to_arrow(dt: &DataType) -> ArrowDataType {
 /// Build an Arrow schema from a canonical [`Schema`] (column name + type + nullability).
 pub(super) fn schema_to_arrow(schema: &Schema) -> ArrowSchema {
     let fields: Fields = schema
-        .columns
+        .fields
         .iter()
-        .map(|c: &Column| Field::new(&c.name, dtype_to_arrow(&c.dtype), c.nullable))
+        .map(|c: &Field| {
+            ArrowField::new(&c.name, dtype_to_arrow(c.expect_plain_dtype()), c.nullable)
+        })
         .collect();
     ArrowSchema::new(fields)
 }
@@ -302,21 +306,21 @@ mod collection_tests {
     fn nested_collections_preserve_field_names_order_and_nullability() {
         let dtype = DataType::Struct {
             fields: vec![
-                Column::new(
+                Field::new(
                     "samples",
                     DataType::List {
-                        element: Box::new(Column::new(
+                        element: Box::new(Field::new(
                             "sample",
                             DataType::Struct {
                                 fields: vec![
-                                    Column::new("timestamp", DataType::Timestamp, false),
-                                    Column::new("value", DataType::Float64, true),
-                                    Column::new(
+                                    Field::new("timestamp", DataType::Timestamp, false),
+                                    Field::new("value", DataType::Float64, true),
+                                    Field::new(
                                         "labels",
                                         DataType::Map {
                                             key: Box::new(DataType::Utf8),
                                             value: Box::new(DataType::List {
-                                                element: Box::new(Column::new(
+                                                element: Box::new(Field::new(
                                                     "label_value",
                                                     DataType::Utf8,
                                                     false,
@@ -333,7 +337,7 @@ mod collection_tests {
                     },
                     false,
                 ),
-                Column::new("optional", DataType::Int64, true),
+                Field::new("optional", DataType::Int64, true),
             ],
         };
         let arrow = dtype_to_arrow(&dtype);
@@ -345,7 +349,7 @@ mod collection_tests {
     #[test]
     fn empty_struct_and_nonnullable_list_element_roundtrip() {
         let dtype = DataType::List {
-            element: Box::new(Column::new(
+            element: Box::new(Field::new(
                 "empty",
                 DataType::Struct { fields: vec![] },
                 false,

@@ -5,6 +5,8 @@ pub(super) fn invalid(message: &str) -> Error {
 pub(super) fn schema(fields: Vec<SummaryField>) -> Schema {
     Arc::new(SummarySchema {
         fields,
+        unique_keys: vec![],
+        closed: false,
         time_index: None,
     })
 }
@@ -13,6 +15,7 @@ pub(super) fn result_field(name: &str, dtype: DataType, nullable: bool) -> Summa
         name: name.into(),
         dtype: SummaryFamilyType::Plain(dtype),
         nullable,
+        table: None,
     }
 }
 

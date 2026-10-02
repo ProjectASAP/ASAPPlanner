@@ -23,13 +23,13 @@
 //! which is the same narrowing sidra's own catalog file makes.
 
 use asap_frontend_sql::{lower_sql, SqlCatalog, SqlError as LoweringError};
-use asap_types::pre_asap::schema::{Column, DataType, Schema};
+use asap_types::pre_asap::schema::{DataType, Field, Schema};
 use asap_types::types::AccuracyTarget;
 
 const CORPUS: &str = include_str!("data/tpch_deequ_queries.sql");
 
-fn col(name: &str, dtype: DataType) -> Column {
-    Column::new(name, dtype, false)
+fn col(name: &str, dtype: DataType) -> Field {
+    Field::plain(name, dtype, false)
 }
 
 /// No `time_index` and no `unique_keys`: the checks do not slice by time, and

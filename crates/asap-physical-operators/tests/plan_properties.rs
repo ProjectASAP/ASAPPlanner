@@ -8,8 +8,8 @@ use asap_physical_operators::{
     Error,
 };
 use planner_types::{
-    post_asap::{SummaryFamilyType, SummaryField, SummarySchema},
-    pre_asap::{Column, DataType, QueryExpr, Schema as LogicalSchema, Source},
+    post_asap::{Field, FieldDataType},
+    pre_asap::{DataType, Schema as LogicalSchema, Source},
 };
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
@@ -35,10 +35,13 @@ impl RawSource for DeclaredSource {
 // A blocking parent must reject unknown and unbounded Scan inputs without opening a reader.
 #[test]
 fn blocking_inputs_require_an_explicit_finite_source() {
-    let schema = Arc::new(SummarySchema {
-        fields: vec![SummaryField {
+    let schema = Arc::new(planner_types::pre_asap::Schema {
+        unique_keys: vec![],
+        closed: false,
+        fields: vec![Field {
+            table: None,
             name: "v".into(),
-            dtype: SummaryFamilyType::Plain(DataType::Int64),
+            dtype: FieldDataType::Plain(DataType::Int64),
             nullable: false,
         }],
         time_index: None,
@@ -63,13 +66,21 @@ fn blocking_inputs_require_an_explicit_finite_source() {
                 }),
             )
             .unwrap();
-        let scan = registry
-            .bind(&QueryExpr::Scan {
-                source: identity,
-                schema: LogicalSchema::new(vec![Column::new("v", DataType::Int64, false)]),
-                predicates: vec![],
-            })
-            .unwrap();
+        let scan =
+            registry
+                .bind(
+                    &planner_types::ir::OperatorNode::non_asap_node(
+                        planner_types::ir::NonASAPOp::Scan {
+                            source: identity,
+                            schema: LogicalSchema::new(vec![
+                                planner_types::pre_asap::Field::plain("v", DataType::Int64, false),
+                            ]),
+                            predicates: vec![],
+                        },
+                    )
+                    .unwrap(),
+                )
+                .unwrap();
         let mut dag = PhysicalDag::default();
         dag.add(0, vec![], scan).unwrap();
         dag.add(
@@ -109,19 +120,19 @@ fn blocking_inputs_require_an_explicit_finite_source() {
     }
 }
 
-// Kernel support must not be mistaken for executable native state/readout support.
+// Kernel support must not be mistaken for executable native state/evaluation support.
 #[test]
 fn summary_capability_levels_are_distinct() {
     use asap_physical_operators::{
-        capability::{validate_native_family, validate_sketch_readout, validate_summary_kernel},
-        planner::post_asap::SketchQuery,
+        capability::{validate_native_family, validate_sketch_evaluation, validate_summary_kernel},
+        planner::post_asap::SketchStatistic,
     };
     use planner_types::{
         post_asap::{GroupingStrategy, SketchAlgorithm, SketchKind, SketchParams, SummaryUpdate},
         pre_asap::ColumnRef,
     };
     let grouping = GroupingStrategy::default();
-    let cms = SummaryFamilyType::Sketch(
+    let cms = FieldDataType::Sketch(
         SketchKind::new(
             SketchAlgorithm::Cms,
             SketchParams::Cms {
@@ -141,25 +152,25 @@ fn summary_capability_levels_are_distinct() {
     assert!(validate_summary_kernel(&cms, &update, &grouping).is_ok());
     // Stored Count-Min state reads only its bare count natively.
     assert!(validate_native_family(&cms).is_ok());
-    let bare_count = SketchQuery::PointCount {
+    let bare_count = SketchStatistic::PointCount {
         key: ColumnRef::SampleValue,
         value: None,
     };
-    assert!(validate_sketch_readout(&cms, &bare_count).is_ok());
-    assert!(validate_sketch_readout(
+    assert!(validate_sketch_evaluation(&cms, &bare_count).is_ok());
+    assert!(validate_sketch_evaluation(
         &cms,
-        &SketchQuery::PointCount {
+        &SketchStatistic::PointCount {
             key: ColumnRef::Named("host".into()),
             value: Some("a".into()),
         }
     )
     .is_err());
-    let kll = SummaryFamilyType::Sketch(
+    let kll = FieldDataType::Sketch(
         SketchKind::new(SketchAlgorithm::Kll, SketchParams::Kll { k: 128 }),
         grouping,
     );
     assert!(validate_native_family(&kll).is_ok());
-    assert!(validate_sketch_readout(&kll, &SketchQuery::Quantile { q: 1.5 }).is_err());
-    assert!(validate_sketch_readout(&kll, &SketchQuery::Cardinality).is_err());
-    assert!(validate_sketch_readout(&kll, &SketchQuery::Quantile { q: 0.5 }).is_ok());
+    assert!(validate_sketch_evaluation(&kll, &SketchStatistic::Quantile { q: 1.5 }).is_err());
+    assert!(validate_sketch_evaluation(&kll, &SketchStatistic::Cardinality).is_err());
+    assert!(validate_sketch_evaluation(&kll, &SketchStatistic::Quantile { q: 0.5 }).is_ok());
 }

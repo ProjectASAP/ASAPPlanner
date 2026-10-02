@@ -4,7 +4,7 @@ use super::*;
 pub(super) fn guarantee(
     algorithm: &SketchAlgorithm,
     params: &SketchParams,
-    query: &SketchQuery,
+    query: &SketchStatistic,
 ) -> Option<ResultGuarantee> {
     let SketchParams::DDSketch { alpha } = params else {
         return None;

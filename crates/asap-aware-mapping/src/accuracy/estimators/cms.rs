@@ -4,7 +4,7 @@ use super::*;
 pub(super) fn guarantee(
     algorithm: &SketchAlgorithm,
     params: &SketchParams,
-    query: &SketchQuery,
+    query: &SketchStatistic,
 ) -> Option<ResultGuarantee> {
     let (SketchParams::Cms { width, depth } | SketchParams::CmsWithHeap { width, depth, .. }) =
         params
@@ -47,11 +47,11 @@ mod tests {
         let params = default_size_params(SketchAlgorithm::Cms, &c, 0.01, 0.001);
         let g = DefaultAccuracyModel
             .local_guarantee(
-                &SummaryFamilyType::Sketch(
+                &FieldDataType::Sketch(
                     SketchKind::new(SketchAlgorithm::Cms, params),
                     GroupingStrategy::default(),
                 ),
-                &SketchQuery::Cardinality,
+                &SketchStatistic::Cardinality,
             )
             .unwrap();
         assert_eq!(g.metric, ErrorMetric::Frequency);
@@ -65,7 +65,7 @@ mod tests {
     }
 
     #[test]
-    fn heap_readout_retains_frequency_metric() {
+    fn heap_evaluation_retains_frequency_metric() {
         use asap_types::post_asap::{GroupingStrategy, SketchKind};
         let cms_heap = SketchParams::CmsWithHeap {
             width: 272,
@@ -74,11 +74,11 @@ mod tests {
         };
         let topk_frequency = DefaultAccuracyModel
             .local_guarantee(
-                &SummaryFamilyType::Sketch(
+                &FieldDataType::Sketch(
                     SketchKind::new(SketchAlgorithm::CmsWithHeap, cms_heap),
                     GroupingStrategy::default(),
                 ),
-                &SketchQuery::TopK { k: 10 },
+                &SketchStatistic::TopK { k: 10 },
             )
             .expect("heap sketch still provides per-key frequency intervals");
         assert_eq!(topk_frequency.metric, ErrorMetric::Frequency);

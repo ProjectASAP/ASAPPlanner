@@ -7,9 +7,9 @@
 //!
 //! ## Placement: planning metadata and edge-state type
 //!
-//! `SummaryExpr::SummaryAgg` carries the grouping choice next to the
+//! `ASAPOp::SummaryAgg` carries the grouping choice next to the
 //! `Reduction` whose `by` keys determine legality. The same choice is also
-//! committed to `SummaryFamilyType::Sketch` on the aggregate's output edge.
+//! committed to `FieldDataType::Sketch` on the aggregate's output edge.
 //! That duplication is intentional: the node field makes the choice easy to
 //! inspect during planning, while the edge type ensures an independent KLL/
 //! CMS state and a Hydra-backed state cannot be accepted as compatible inputs
@@ -41,7 +41,7 @@
 //! An earlier draft of this module (written against the very first draft of
 //! #251) reused a `CostModel`-wrapping adapter that "steered" a
 //! whole-recursive-bind decision procedure toward a specific `SketchKind`,
-//! the same pattern [`crate::replacement::SketchAlgorithmStrategy`]'s own module
+//! the same pattern [`crate::replacement::ASAPStrategies`]'s own module
 //! docs explain was deliberately deleted from this crate as an anti-pattern:
 //! forcing a choice via a whole-tree `CostModel` adapter had a real bug where
 //! the forced choice could leak into a target's own nested aggregates. This
@@ -53,7 +53,7 @@
 //! passes that exact,
 //! already-decided `Realization` to
 //! [`crate::replacement::construct_summary`] — the same first-class,
-//! one-candidate-at-a-time primitive [`crate::replacement::SketchAlgorithmStrategy`]
+//! one-candidate-at-a-time primitive [`crate::replacement::ASAPStrategies`]
 //! itself calls once per candidate. No adapter, no steering, no risk of a
 //! forced choice leaking into nested aggregates.
 //!
@@ -71,13 +71,14 @@
 
 use std::rc::Rc;
 
+use asap_types::ir::operator_properties::Reduction;
+use asap_types::ir::{ASAPOp, NonASAPOp, Operator, OperatorNode};
 use asap_types::post_asap::{
     default_hydra_params, hydra_kind_for, AccuracyError, BoundExpr, CompositionOperator,
-    GroupingStrategy, GuaranteeSource, HydraKind, ProbabilityExpr, ResultGuarantee,
-    SketchAlgorithm, SketchParams, SummaryExpr, SummaryFamilyType, SummaryNode,
+    FieldDataType, GroupingStrategy, GuaranteeSource, HydraKind, ProbabilityExpr, ResultGuarantee,
+    SketchAlgorithm, SketchParams,
 };
 use asap_types::pre_asap::agg_intent::AggIntent;
-use asap_types::pre_asap::query_expr::{QueryExpr, Reduction};
 
 use crate::accuracy::{
     AccuracyBudgetAllocator, AccuracyEvidenceProvider, AccuracyModel, PropagationStats,
@@ -110,15 +111,15 @@ pub fn has_subpopulations(reduction: &Reduction) -> bool {
 
 /// A single static instance so [`HydraGroupingStrategy::default_cost_model`]
 /// can hand out a `&'static dyn CostModel` without heap-allocating one — same
-/// pattern [`crate::replacement::SketchAlgorithmStrategy`] uses.
+/// pattern [`crate::replacement::ASAPStrategies`] uses.
 static DEFAULT_COST_MODEL: DefaultCostModel = DefaultCostModel;
 
 /// Wraps the `GroupingStrategy` axis (issue #256) as a
-/// [`ReplacementStrategy`]: for a target [`SketchAlgorithmStrategy`](crate::replacement::SketchAlgorithmStrategy)
+/// [`ReplacementStrategy`]: for a target [`ASAPStrategies`](crate::replacement::ASAPStrategies)
 /// already has an opinion on, offers an additional
 /// `GroupingStrategy::SharedMultiSubpopulation` candidate wherever the
 /// legality conditions in the module docs above hold — alongside, not
-/// instead of, the per-subpopulation candidates `SketchAlgorithmStrategy`
+/// instead of, the per-subpopulation candidates `ASAPStrategies`
 /// itself enumerates. The workload search composes both strategies over the
 /// same target, so it sees every summary-family alternative *and* the Hydra
 /// alternative; the built-in workload search registers both strategies, and
@@ -132,7 +133,7 @@ pub struct HydraGroupingStrategy<'a> {
 impl HydraGroupingStrategy<'static> {
     /// A strategy that ranks/binds via the built-in [`DefaultCostModel`] —
     /// what a deployment gets with no custom cost model plugged in, the same
-    /// default [`crate::replacement::SketchAlgorithmStrategy::default_cost_model`]
+    /// default [`crate::replacement::ASAPStrategies::default_cost_model`]
     /// offers.
     pub fn default_cost_model() -> Self {
         Self {
@@ -144,7 +145,7 @@ impl HydraGroupingStrategy<'static> {
 impl<'a> HydraGroupingStrategy<'a> {
     /// A strategy that ranks/binds via `cost_model` instead of the built-in
     /// static preference order — the same customization point
-    /// [`crate::replacement::SketchAlgorithmStrategy::new`] already offers.
+    /// [`crate::replacement::ASAPStrategies::new`] already offers.
     pub fn new(cost_model: &'a dyn CostModel) -> Self {
         Self {
             planning_inputs: CandidatePlanningInputs::with_default_accuracy(cost_model),
@@ -173,7 +174,7 @@ impl<'a> HydraGroupingStrategy<'a> {
     /// variant modeled.
     fn hydra_proposals(&self, target: &TargetSubDAG<'_>) -> Proposals {
         let mut proposals = Proposals::default();
-        let QueryExpr::Aggregate { reduction, .. } = target.root.as_ref() else {
+        let Some(NonASAPOp::Aggregate { reduction, .. }) = target.root.non_asap() else {
             return proposals;
         };
         if !has_subpopulations(reduction) {
@@ -208,11 +209,11 @@ impl<'a> HydraGroupingStrategy<'a> {
     /// `PerSubpopulationInstance` to
     /// `SharedMultiSubpopulation { kind: hydra_kind, .. }` — reusing the
     /// entire bind decision procedure (schema derivation, column resolution,
-    /// readout construction) unchanged, patching only the one field this
+    /// evaluation construction) unchanged, patching only the one field this
     /// axis owns.
     fn build_candidate(
         &self,
-        root: &Rc<QueryExpr>,
+        root: &Rc<OperatorNode>,
         intent: &AggIntent,
         sketch_kind: SketchAlgorithm,
         hydra_kind: HydraKind,
@@ -233,12 +234,12 @@ impl<'a> HydraGroupingStrategy<'a> {
             params,
         };
 
-        let (family, query) = match &node.expr {
-            SummaryExpr::SummaryEstimate {
+        let (family, query) = match &node.operator {
+            Operator::ASAP(ASAPOp::SummaryEstimate {
                 summary_input,
                 query,
-            } => match &summary_input.expr {
-                SummaryExpr::SummaryAgg { family, .. } => (family, Some(query)),
+            }) => match &summary_input.operator {
+                Operator::ASAP(ASAPOp::SummaryAgg { family, .. }) => (family, Some(query)),
                 _ => return None,
             },
             _ => return None,
@@ -295,7 +296,7 @@ impl<'a> HydraGroupingStrategy<'a> {
         }
         Some(ReplacementSubDAG {
             strategy: "HydraGroupingStrategy",
-            replacement: Replacement::Summary(patched),
+            replacement: Replacement::SubDag(patched),
             provenance: crate::replacement::ReplacementProvenance::SummaryRealization,
             rationale: format!(
                 "{} realizes as a shared {hydra_kind:?} structure over {sketch_kind:?} \
@@ -313,7 +314,7 @@ impl<'a> HydraGroupingStrategy<'a> {
 
 impl ReplacementStrategy for HydraGroupingStrategy<'_> {
     fn matches(&self, target: &TargetSubDAG<'_>) -> bool {
-        let QueryExpr::Aggregate { reduction, .. } = target.root.as_ref() else {
+        let Some(NonASAPOp::Aggregate { reduction, .. }) = target.root.non_asap() else {
             return false;
         };
         if !has_subpopulations(reduction) {
@@ -357,15 +358,15 @@ impl ReplacementStrategy for HydraGroupingStrategy<'_> {
 /// destructures the right variant for `kind`; this function's only job is
 /// to find whatever `SketchParams` the bind decision already committed to
 /// and hand the whole thing over unchanged.
-fn per_subpopulation_sketch_params(node: &SummaryNode) -> Option<SketchParams> {
-    match &node.expr {
-        SummaryExpr::SummaryEstimate { summary_input, .. } => {
+fn per_subpopulation_sketch_params(node: &OperatorNode) -> Option<SketchParams> {
+    match &node.operator {
+        Operator::ASAP(ASAPOp::SummaryEstimate { summary_input, .. }) => {
             per_subpopulation_sketch_params(summary_input)
         }
-        SummaryExpr::SummaryAgg {
-            family: SummaryFamilyType::Sketch(kind, _),
+        Operator::ASAP(ASAPOp::SummaryAgg {
+            family: FieldDataType::Sketch(kind, _),
             ..
-        } => Some(kind.params().clone()),
+        }) => Some(kind.params().clone()),
         _ => None,
     }
 }
@@ -373,47 +374,47 @@ fn per_subpopulation_sketch_params(node: &SummaryNode) -> Option<SketchParams> {
 /// Rebuild `node`, replacing its `SummaryAgg`'s `grouping` field with
 /// `grouping` — patching the one field this axis owns onto an
 /// already-correctly-bound node rather than re-deriving the rest of it.
-/// Recurses through a `SummaryEstimate` readout wrapper (the shape every
+/// Recurses through a `SummaryEstimate` evaluation wrapper (the shape every
 /// sketch candidate this module builds actually has) to reach the
 /// `SummaryAgg` underneath.
 fn with_grouping(
-    node: Rc<SummaryNode>,
+    node: Rc<OperatorNode>,
     grouping: GroupingStrategy,
     stats: &PropagationStats,
-) -> Rc<SummaryNode> {
-    match &node.expr {
-        SummaryExpr::SummaryEstimate {
+) -> Rc<OperatorNode> {
+    match &node.operator {
+        Operator::ASAP(ASAPOp::SummaryEstimate {
             summary_input,
             query,
-        } => Rc::new(SummaryNode {
-            expr: SummaryExpr::SummaryEstimate {
+        }) => OperatorNode::asap_node(
+            ASAPOp::SummaryEstimate {
                 summary_input: with_grouping(Rc::clone(summary_input), grouping, stats),
                 query: query.clone(),
             },
-            schema: node.schema.clone(),
-            guarantee: node.guarantee.as_ref().map(|g| hydra_guarantee(g, stats)),
-        }),
-        SummaryExpr::SummaryAgg {
+            node.schema.clone(),
+            node.guarantee.as_ref().map(|g| hydra_guarantee(g, stats)),
+        ),
+        Operator::ASAP(ASAPOp::SummaryAgg {
             child,
             family,
             input,
             reduction,
             ..
-        } => {
+        }) => {
             let grouped_family = match family {
-                SummaryFamilyType::Sketch(kind, _) => {
-                    SummaryFamilyType::Sketch(kind.clone(), grouping.clone())
+                FieldDataType::Sketch(kind, _) => {
+                    FieldDataType::Sketch(kind.clone(), grouping.clone())
                 }
                 _ => family.clone(),
             };
             let mut grouped_schema = node.schema.clone();
             for field in &mut grouped_schema.fields {
-                if let SummaryFamilyType::Sketch(kind, _) = &field.dtype {
-                    field.dtype = SummaryFamilyType::Sketch(kind.clone(), grouping.clone());
+                if let FieldDataType::Sketch(kind, _) = &field.dtype {
+                    field.dtype = FieldDataType::Sketch(kind.clone(), grouping.clone());
                 }
             }
-            Rc::new(SummaryNode {
-                expr: SummaryExpr::SummaryAgg {
+            OperatorNode::asap_node(
+                ASAPOp::SummaryAgg {
                     child: Rc::clone(child),
                     family: grouped_family,
                     input: input.clone(),
@@ -421,9 +422,9 @@ fn with_grouping(
                     grouping,
                     filter: None,
                 },
-                schema: grouped_schema,
-                guarantee: None,
-            })
+                grouped_schema,
+                None,
+            )
         }
         // Never reached by this module's own callers (they only ever pass a
         // node `construct_summary_with` just bound for a `Sketch`
@@ -492,46 +493,10 @@ fn hydra_guarantee(inner: &ResultGuarantee, stats: &PropagationStats) -> ResultG
 mod tests {
     use super::*;
     use crate::accuracy::{DefaultAccuracyModel, EqualSplitAllocator};
+    use crate::test_support::{agg, agg_per_entity, metric_scan};
     use asap_types::post_asap::ErrorMetric;
     use asap_types::pre_asap::agg_intent::{default_cardinality, default_quantile};
-    use asap_types::pre_asap::query_expr::Source;
-    use asap_types::pre_asap::schema::{Column, DataType, Schema};
     use asap_types::types::AccuracyTarget;
-
-    fn metric_scan(labels: &[&str]) -> QueryExpr {
-        let mut columns = vec![
-            Column::new("ts", DataType::Timestamp, false),
-            Column::new("value", DataType::Float64, false),
-        ];
-        columns.extend(labels.iter().map(|n| Column::new(*n, DataType::Utf8, true)));
-        QueryExpr::Scan {
-            source: Source::TimeSeries { metric: "m".into() },
-            predicates: vec![],
-            schema: Schema::with_time_index(columns, 0, vec![]),
-        }
-    }
-
-    fn agg(by: Vec<usize>, intent: AggIntent, child: QueryExpr) -> QueryExpr {
-        QueryExpr::Aggregate {
-            reduction: Reduction::by(by),
-            measures: vec![intent],
-            output_names: vec![],
-            filters: vec![],
-            having: None,
-            child: Rc::new(child),
-        }
-    }
-
-    fn agg_per_entity(intent: AggIntent, child: QueryExpr) -> QueryExpr {
-        QueryExpr::Aggregate {
-            reduction: Reduction::PerEntity,
-            measures: vec![intent],
-            output_names: vec![],
-            filters: vec![],
-            having: None,
-            child: Rc::new(child),
-        }
-    }
 
     // ── has_subpopulations ────────────────────────────────────────────────
 
@@ -552,7 +517,7 @@ mod tests {
 
     #[test]
     fn without_grouping_has_a_subpopulation_concept_even_when_empty() {
-        use asap_types::pre_asap::query_expr::GroupKeys;
+        use asap_types::ir::operator_properties::GroupKeys;
         // `without([])` groups by every remaining label — a real
         // subpopulation concept, unlike `by([])`'s genuine full reduction.
         assert!(has_subpopulations(&Reduction::Reduce(GroupKeys::without(
@@ -599,7 +564,7 @@ mod tests {
                 delta: 0.01,
             },
         };
-        let q = Rc::new(agg(vec![2], intent, metric_scan(&["job"])));
+        let q = agg(vec![2], intent, metric_scan(&["job"]));
         let target = TargetSubDAG::new(&q);
         assert!(HydraGroupingStrategy::default_cost_model().matches(&target));
     }
@@ -607,7 +572,7 @@ mod tests {
     #[test]
     fn does_not_match_an_empty_by_aggregate() {
         // Global reduction — no subpopulation concept, no Hydra alternative.
-        let q = Rc::new(agg(vec![], default_quantile(0.99), metric_scan(&["job"])));
+        let q = agg(vec![], default_quantile(0.99), metric_scan(&["job"]));
         let target = TargetSubDAG::new(&q);
         let strategy = HydraGroupingStrategy::default_cost_model();
         assert!(!strategy.matches(&target));
@@ -616,10 +581,7 @@ mod tests {
 
     #[test]
     fn does_not_match_a_per_entity_aggregate() {
-        let q = Rc::new(agg_per_entity(
-            default_quantile(0.99),
-            metric_scan(&["job"]),
-        ));
+        let q = agg_per_entity(default_quantile(0.99), metric_scan(&["job"]));
         let target = TargetSubDAG::new(&q);
         let strategy = HydraGroupingStrategy::default_cost_model();
         assert!(!strategy.matches(&target));
@@ -628,14 +590,14 @@ mod tests {
 
     #[test]
     fn does_not_match_a_non_aggregate_node() {
-        let scan = Rc::new(metric_scan(&["job"]));
+        let scan = metric_scan(&["job"]);
         let target = TargetSubDAG::new(&scan);
         assert!(!HydraGroupingStrategy::default_cost_model().matches(&target));
     }
 
     #[test]
     fn quantile_has_no_hydra_candidate_without_a_modeled_error_bound() {
-        let q = Rc::new(agg(vec![2], default_quantile(0.99), metric_scan(&["job"])));
+        let q = agg(vec![2], default_quantile(0.99), metric_scan(&["job"]));
         let target = TargetSubDAG::new(&q);
         let replacements = HydraGroupingStrategy::default_cost_model().replacements(&target);
         assert!(replacements.is_empty(), "{replacements:?}");
@@ -649,13 +611,13 @@ mod tests {
                 delta: 0.01,
             },
         };
-        let q = Rc::new(agg(vec![2], intent, metric_scan(&["job"])));
+        let q = agg(vec![2], intent, metric_scan(&["job"]));
         let target = TargetSubDAG::new(&q);
         let replacements = HydraGroupingStrategy::default_cost_model().replacements(&target);
         assert_eq!(replacements.len(), 2, "{replacements:?}");
         assert!(replacements.iter().all(|candidate| matches!(
             &candidate.replacement,
-            Replacement::Summary(node)
+            Replacement::SubDag(node)
                 if node.guarantee.as_ref().is_some_and(|guarantee|
                     guarantee.bound.evaluate().is_none()
                         && guarantee.failure_probability.evaluate().is_none())
@@ -668,8 +630,8 @@ mod tests {
         fn propagation_stats(
             &self,
             _op: &CompositionOperator,
-            _family: &SummaryFamilyType,
-            _query: Option<&asap_types::post_asap::SketchQuery>,
+            _family: &FieldDataType,
+            _query: Option<&asap_types::post_asap::SketchStatistic>,
         ) -> PropagationStats {
             PropagationStats {
                 hydra_shared_grid_collision_bound: Some(0.0),
@@ -687,7 +649,7 @@ mod tests {
                 delta: 0.01,
             },
         };
-        let q = Rc::new(agg(vec![2], intent, metric_scan(&["job"])));
+        let q = agg(vec![2], intent, metric_scan(&["job"]));
         let strategy = HydraGroupingStrategy::new_with_planning_inputs_and_evidence(
             &DefaultCostModel,
             &DefaultAccuracyModel,
@@ -698,7 +660,7 @@ mod tests {
         assert_eq!(replacements.len(), 2, "{replacements:?}");
         assert!(replacements.iter().all(|candidate| matches!(
             &candidate.replacement,
-            Replacement::Summary(node)
+            Replacement::SubDag(node)
                 if node.guarantee.as_ref().is_some_and(|g|
                     g.bound.evaluate().is_some()
                         && g.failure_probability.evaluate().is_some())
@@ -712,8 +674,8 @@ mod tests {
             fn propagation_stats(
                 &self,
                 _op: &CompositionOperator,
-                _family: &SummaryFamilyType,
-                _query: Option<&asap_types::post_asap::SketchQuery>,
+                _family: &FieldDataType,
+                _query: Option<&asap_types::post_asap::SketchStatistic>,
             ) -> PropagationStats {
                 PropagationStats {
                     hydra_shared_grid_failure_probability: Some(1.5),
@@ -727,7 +689,7 @@ mod tests {
                 delta: 0.01,
             },
         };
-        let q = Rc::new(agg(vec![2], intent, metric_scan(&["job"])));
+        let q = agg(vec![2], intent, metric_scan(&["job"]));
         let strategy = HydraGroupingStrategy::new_with_planning_inputs_and_evidence(
             &DefaultCostModel,
             &DefaultAccuracyModel,
@@ -758,8 +720,8 @@ mod tests {
             fn propagation_stats(
                 &self,
                 _op: &CompositionOperator,
-                _family: &SummaryFamilyType,
-                _query: Option<&asap_types::post_asap::SketchQuery>,
+                _family: &FieldDataType,
+                _query: Option<&asap_types::post_asap::SketchStatistic>,
             ) -> PropagationStats {
                 PropagationStats {
                     hydra_shared_grid_collision_bound: Some(0.1),
@@ -767,7 +729,7 @@ mod tests {
                 }
             }
         }
-        let q = Rc::new(agg(
+        let q = agg(
             vec![2],
             AggIntent::Count {
                 accuracy: AccuracyTarget::EpsilonDelta {
@@ -776,7 +738,7 @@ mod tests {
                 },
             },
             metric_scan(&["job"]),
-        ));
+        );
         let strategy = HydraGroupingStrategy::new_with_planning_inputs_and_evidence(
             &DefaultCostModel,
             &DefaultAccuracyModel,
@@ -797,7 +759,7 @@ mod tests {
         // summary_candidates(Cardinality) = [Hll, Theta, Kmv] — none have a
         // modeled Hydra variant, so no candidate at all (not an error, just
         // an empty result, same conservatism as every other strategy here).
-        let q = Rc::new(agg(vec![2], default_cardinality(), metric_scan(&["job"])));
+        let q = agg(vec![2], default_cardinality(), metric_scan(&["job"]));
         let target = TargetSubDAG::new(&q);
         let strategy = HydraGroupingStrategy::default_cost_model();
         assert!(!strategy.matches(&target));
@@ -813,7 +775,7 @@ mod tests {
             q: 0.99,
             accuracy: AccuracyTarget::Exact,
         };
-        let q = Rc::new(agg(vec![2], intent, metric_scan(&["job"])));
+        let q = agg(vec![2], intent, metric_scan(&["job"]));
         let target = TargetSubDAG::new(&q);
         let strategy = HydraGroupingStrategy::default_cost_model();
         assert!(!strategy.matches(&target));
@@ -824,11 +786,7 @@ mod tests {
     fn exact_mergeable_intent_has_no_hydra_candidate() {
         // Sum's exact accumulator has no candidate summary families at all
         // (summary_candidates only covers approximate-capable intents).
-        let q = Rc::new(agg(
-            vec![2],
-            AggIntent::Sum { col: None },
-            metric_scan(&["job"]),
-        ));
+        let q = agg(vec![2], AggIntent::Sum { col: None }, metric_scan(&["job"]));
         let target = TargetSubDAG::new(&q);
         let strategy = HydraGroupingStrategy::default_cost_model();
         assert!(!strategy.matches(&target));
@@ -839,14 +797,15 @@ mod tests {
     fn does_not_match_a_multi_intent_or_having_aggregate() {
         let strategy = HydraGroupingStrategy::default_cost_model();
 
-        let multi = Rc::new(QueryExpr::Aggregate {
+        let multi = OperatorNode::non_asap_node(NonASAPOp::Aggregate {
             reduction: Reduction::by(vec![2]),
             measures: vec![AggIntent::Sum { col: None }, AggIntent::Avg { col: None }],
             output_names: vec![],
             filters: vec![],
             having: None,
-            child: Rc::new(metric_scan(&["job"])),
-        });
+            child: metric_scan(&["job"]),
+        })
+        .unwrap();
         let target = TargetSubDAG::new(&multi);
         assert!(!strategy.matches(&target));
         assert!(strategy.replacements(&target).is_empty());
@@ -855,7 +814,7 @@ mod tests {
     /// A custom `CostModel` doesn't change *which* candidate is offered —
     /// only which sketch candidate `realizations_for_intent` itself would
     /// have ranked first, and how that candidate's own params are sized —
-    /// same guarantee `SketchAlgorithmStrategy` makes for its own candidates.
+    /// same guarantee `ASAPStrategies` makes for its own candidates.
     struct PreferDDSketch;
     impl CostModel for PreferDDSketch {
         fn rank_candidates(
@@ -874,7 +833,7 @@ mod tests {
 
     #[test]
     fn custom_cost_model_cannot_enable_unproven_hydra_kll() {
-        let q = Rc::new(agg(vec![2], default_quantile(0.99), metric_scan(&["job"])));
+        let q = agg(vec![2], default_quantile(0.99), metric_scan(&["job"]));
         let target = TargetSubDAG::new(&q);
         let custom = PreferDDSketch;
         let replacements = HydraGroupingStrategy::new(&custom).replacements(&target);

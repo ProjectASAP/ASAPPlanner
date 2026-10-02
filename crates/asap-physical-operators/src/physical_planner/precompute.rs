@@ -1,8 +1,9 @@
 //! Compile immutable summary-input computation with explicit population and pane identity.
 use super::promql_rows::SERIES_IDENTITY_COLUMN as SERIES_IDENTITY;
 use super::*;
+use planner_types::post_asap::FieldDataType as SummaryFamilyType;
 use planner_types::{
-    post_asap::{ExecutionTiming, GroupingStrategy, SummarySchema},
+    post_asap::{ExecutionTiming, GroupingStrategy, Schema as SummarySchema},
     pre_asap::DataType,
 };
 
@@ -11,7 +12,7 @@ use planner_types::{
 pub fn population_schema(family: SummaryFamilyType) -> Schema {
     Arc::new(SummarySchema {
         fields: vec![
-            planner_types::post_asap::SummaryField {
+            planner_types::post_asap::Field {
                 name: "$population".into(),
                 dtype: SummaryFamilyType::Plain(DataType::Map {
                     key: Box::new(DataType::Utf8),
@@ -19,19 +20,24 @@ pub fn population_schema(family: SummaryFamilyType) -> Schema {
                     value_nullable: false,
                 }),
                 nullable: false,
+                table: None,
             },
-            planner_types::post_asap::SummaryField {
+            planner_types::post_asap::Field {
                 name: "$window_end".into(),
                 dtype: SummaryFamilyType::Plain(DataType::Timestamp),
                 nullable: false,
+                table: None,
             },
-            planner_types::post_asap::SummaryField {
+            planner_types::post_asap::Field {
                 name: "value".into(),
                 dtype: family,
                 nullable: false,
+                table: None,
             },
         ],
         time_index: Some(1),
+        unique_keys: vec![],
+        closed: false,
     })
 }
 
@@ -78,18 +84,13 @@ pub fn raw_sample_row(
 /// Input contract of a precompute boundary: raw sample rows for a raw time
 /// series scan, otherwise the stored population of its summary state.
 pub fn boundary_schema(node: &PostAsapDagNode) -> Result<Schema, Error> {
-    let Payload::Fallback { expression } = &node.payload else {
-        return source_schema(&node.output_schema);
-    };
-    let scan = match expression {
-        planner_types::pre_asap::QueryExpr::TimeRange { child, .. } => child.as_ref(),
-        expression => expression,
-    };
     if !matches!(
-        scan,
-        planner_types::pre_asap::QueryExpr::Scan {
-            source: planner_types::pre_asap::Source::TimeSeries { .. },
-            ..
+        &node.payload,
+        Payload::Relational {
+            operator: NonASAPOpKind::Scan {
+                source: planner_types::pre_asap::Source::TimeSeries { .. },
+                ..
+            } | NonASAPOpKind::TimeRange { .. }
         }
     ) {
         return source_schema(&node.output_schema);
@@ -177,9 +178,10 @@ pub fn compile(
         (
             edge.consumer.0,
             match edge.role {
-                planner_types::post_asap::EdgeRole::Left => 0,
-                planner_types::post_asap::EdgeRole::Input => 1,
-                planner_types::post_asap::EdgeRole::Right => 2,
+                planner_types::ir::export::EdgeRole::Left => 0,
+                planner_types::ir::export::EdgeRole::Input => 1,
+                planner_types::ir::export::EdgeRole::Right => 2,
+                planner_types::ir::export::EdgeRole::ScalarRef => 3,
             },
         )
     });
@@ -307,7 +309,15 @@ fn fragment(
         Ok(id)
     };
     let root = match &node.payload {
-        Payload::Binary { operator } => {
+        Payload::Relational {
+            operator:
+                NonASAPOpKind::BinaryOp {
+                    operator,
+                    return_bool,
+                },
+        } => {
+            let operator =
+                crate::expressions::binary::BinaryOperator::from_logical(operator, *return_bool);
             validate_value_output(node)?;
             if node.output_schema.time_index.is_none()
                 || parents.iter().any(|p| p.output_schema.time_index.is_none())
@@ -330,9 +340,7 @@ fn fragment(
                 )?,
             )?
         }
-        Payload::Value {
-            operation: ValueOperation::FinalizeExactAccumulator,
-        } => {
+        Payload::FinalizeExactAccumulator => {
             let [input] = schemas else {
                 return Err(invalid("finalize requires one state input"));
             };
@@ -351,10 +359,10 @@ fn fragment(
                     ))
                 }
             };
-            let read = Operator::readout(
+            let read = Operator::evaluation(
                 input.clone(),
                 2,
-                ReadoutQuery::Exact(ExactReadout {
+                SummaryEvaluation::Exact(ExactEvaluation {
                     statistic,
                     lookback_ms: None,
                 }),
@@ -393,7 +401,7 @@ fn fragment(
                 return Err(invalid("summary update requires one input"));
             };
             // Item identities resolve against the complete label set of raw
-            // samples; finalized readouts carry no such identity.
+            // samples; finalized evaluations carry no such identity.
             let raw = *input == raw_sample_schema();
             // A unit-frequency summary (HLL) observes each raw sample value.
             let unit_frequency = raw
@@ -499,10 +507,11 @@ fn fragment(
                 )?;
                 for (index, (expression, dtype)) in items.into_iter().enumerate() {
                     let name = format!("$item{index}");
-                    fields.push(planner_types::post_asap::SummaryField {
+                    fields.push(planner_types::post_asap::Field {
                         name: name.clone(),
                         dtype: SummaryFamilyType::Plain(dtype),
                         nullable: false,
+                        table: None,
                     });
                     columns.push((name, expression));
                 }
@@ -511,6 +520,8 @@ fn fragment(
             let project = Operator::project(input.clone(), columns)?.with_output_schema(
                 Arc::new(SummarySchema {
                     fields,
+                    unique_keys: vec![],
+                    closed: false,
                     time_index: Some(1),
                 }),
             )?;

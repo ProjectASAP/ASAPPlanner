@@ -1,56 +1,60 @@
-//! Pre-ASAP IR schema flow — every edge carries a typed `Schema`.
+//! Per-edge schema of the operator IR — every edge carries a typed `Schema`.
 //!
-//! Per `control_plane/docs/design.md` §6 "Schema flow — every L3 edge carries
-//! a typed schema" (that doc's own layer numbering; this crate no longer uses
-//! it). The DAG is type-checked: a node's output schema is a function of its
-//! inputs and parameters and is verifiable independently of the surrounding
-//! context.
+//! One `Schema` type serves every operator, before and after ASAP
+//! optimization: a field's [`FieldDataType`] is either a plain readable
+//! [`DataType`] or the summary / exact-accumulator state a `SummaryAgg`
+//! produces. The DAG is type-checked: a node's output schema is a function of
+//! its inputs and parameters and is verifiable independently of the
+//! surrounding context.
 //!
 //! `Schema::unique_keys` is metadata for reuse-aware planning: a producer's
 //! output can only be safely shared across consumers when its row identity
 //! is provably stable across reads, which is what this field records.
-//!
-//! Single-query plans don't read this field; it lives here so the metadata
-//! is available the moment workload-aware planning lands without requiring
-//! a pre-ASAP-IR-wide schema change.
 
 #![allow(dead_code)]
 
 use serde::{Deserialize, Serialize};
 
-/// Index into [`Schema::columns`] used everywhere a column position is
+use crate::post_asap::sketch::{
+    ExactKind, ExactParams, GroupingStrategy, SamplingKind, SamplingParams, SketchKind,
+    StatModelKind, StatModelParams, WaveletKind, WaveletParams,
+};
+
+/// Index into [`Schema::fields`] used everywhere a column position is
 /// referenced (group-by keys, unique-key sets, the time axis index).
 ///
-/// Aliased to `usize` to match `design.md`'s `Vec<Vec<usize>>` for
-/// `unique_keys`. Kept as a named type so downstream code can pattern on
-/// the intent ("this is a column position, not just any number").
+/// Kept as a named type so downstream code can pattern on the intent ("this
+/// is a column position, not just any number").
 pub type ColumnId = usize;
 
-/// One column in a [`Schema`]. Mirrors `design.md` §6 `Field` —
-/// `name + dtype + nullable`.
+/// One field of a [`Schema`]: `name + dtype + nullable`, plus an optional
+/// table qualifier. The struct describes a column and holds none of its data.
+///
+/// `T` is the type vocabulary: [`FieldDataType`] on an operator edge (the
+/// default, and what [`Schema::fields`] holds), plain [`DataType`] for the
+/// nested element fields of [`DataType::List`] / [`DataType::Struct`], which
+/// can never carry summary state.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct Column {
-    /// Column name as it appears in the producer's output. PromQL leaves
+pub struct Field<T = FieldDataType> {
+    /// Field name as it appears in the producer's output. PromQL leaves
     /// produce label-name + the synthetic `value` / `timestamp` columns;
     /// SQL leaves carry their `information_schema` names.
     pub name: String,
-    /// Logical scalar or collection type. Sketch state remains a post-ASAP
-    /// concern and is intentionally absent here.
-    pub dtype: DataType,
-    /// Whether NULL values are allowed in this column. PromQL value
+    pub dtype: T,
+    /// Whether NULL values are allowed in this field. PromQL value
     /// columns are non-nullable; SQL columns inherit their DDL nullability.
     pub nullable: bool,
     /// Optional table/alias qualifier (SQL `t.col` / `t AS a` → `a`). Travels
-    /// with the column through joins so a `ColumnRef::Qualified` can pick the
+    /// with the field through joins so a `ColumnRef::Qualified` can pick the
     /// right side when both carry the same `name`. `None` for PromQL labels and
     /// unqualified columns.
     #[serde(default)]
     pub table: Option<String>,
 }
 
-impl Column {
-    /// An unqualified column (`table = None`).
-    pub fn new(name: impl Into<String>, dtype: DataType, nullable: bool) -> Self {
+impl<T> Field<T> {
+    /// An unqualified field (`table = None`).
+    pub fn new(name: impl Into<String>, dtype: T, nullable: bool) -> Self {
         Self {
             name: name.into(),
             dtype,
@@ -59,16 +63,113 @@ impl Column {
         }
     }
 
-    /// This column re-qualified under `table` (e.g. by a `SubqueryAlias`).
+    /// This field re-qualified under `table` (e.g. by a `SubqueryAlias`).
     pub fn with_table(mut self, table: impl Into<String>) -> Self {
         self.table = Some(table.into());
         self
     }
 }
 
-/// Pre-ASAP IR column data types. Deliberately narrow: no sketch state at
-/// this layer (see `design.md` §6.4 for the post-ASAP `DataType::Sketch(...)`
-/// extension).
+impl Field<FieldDataType> {
+    /// An unqualified field carrying an ordinary readable value.
+    pub fn plain(name: impl Into<String>, dtype: DataType, nullable: bool) -> Self {
+        Self::new(name, FieldDataType::Plain(dtype), nullable)
+    }
+
+    /// The value type of a plain field; `None` for summary / accumulator state.
+    pub fn plain_dtype(&self) -> Option<&DataType> {
+        match &self.dtype {
+            FieldDataType::Plain(dtype) => Some(dtype),
+            _ => None,
+        }
+    }
+
+    /// Whether this field carries an ordinary readable value.
+    pub fn is_plain(&self) -> bool {
+        matches!(self.dtype, FieldDataType::Plain(_))
+    }
+
+    /// The value type of a plain field; panics on summary / accumulator
+    /// state. For code that has already established the field is plain
+    /// (front ends, scalar type inference over value columns).
+    pub fn expect_plain_dtype(&self) -> &DataType {
+        self.plain_dtype().unwrap_or_else(|| {
+            panic!(
+                "field `{}` carries summary state ({:?}), not a plain value",
+                self.name, self.dtype
+            )
+        })
+    }
+}
+
+impl From<Field<DataType>> for Field<FieldDataType> {
+    fn from(field: Field<DataType>) -> Self {
+        Self {
+            name: field.name,
+            dtype: FieldDataType::Plain(field.dtype),
+            nullable: field.nullable,
+            table: field.table,
+        }
+    }
+}
+
+/// What a schema field carries: an ordinary readable value, or the summary /
+/// exact-accumulator state produced by a `SummaryAgg`.
+///
+/// Every non-`Plain` variant carries the physical state identity required by
+/// that family (`Sketch` additionally carries its grouping layout), so the
+/// type system can reject merges of incompatible summaries at plan
+/// construction time — a `SummaryMerge` over `Sketch(Kll, …)` and
+/// `Sketch(Cms, …)` inputs is a plan-time error, and a `Sketch(…)` can never
+/// be confused for a `Sample(…)` even though both are "opaque summary state"
+/// at a glance.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum FieldDataType {
+    /// An ordinary, readable value — the closed vocabulary of [`DataType`].
+    Plain(DataType),
+    /// Exact, mergeable accumulator state (`Sum`/`Count`/`Min`/`Max`/`Rate`/
+    /// `Increase`). Value consumers require an explicit finalization boundary.
+    ExactAggregate(ExactKind, ExactParams),
+    /// Approximate sketch state (KLL/CMS/HLL/…), read out via a
+    /// `SummaryEstimate`. A [`SketchKind`] already carries the concrete
+    /// algorithm, params, and grouping layout committed to, not just its
+    /// category — a bound node needs to know it's specifically independent
+    /// KLL or shared Hydra-backed CMS, not merely "some sketch".
+    Sketch(SketchKind, GroupingStrategy),
+    /// Sampling-based summary state (a retained row subset).
+    Sample(SamplingKind, SamplingParams),
+    /// Wavelet-transform summary state (a coefficient vector).
+    Wavelet(WaveletKind, WaveletParams),
+    /// Fitted statistical/parametric-model summary state.
+    StatModel(StatModelKind, StatModelParams),
+}
+
+impl FieldDataType {
+    pub fn is_plain(&self) -> bool {
+        matches!(self, FieldDataType::Plain(_))
+    }
+
+    pub fn plain(&self) -> Option<&DataType> {
+        match self {
+            FieldDataType::Plain(dtype) => Some(dtype),
+            _ => None,
+        }
+    }
+}
+
+impl From<DataType> for FieldDataType {
+    fn from(dtype: DataType) -> Self {
+        FieldDataType::Plain(dtype)
+    }
+}
+
+impl PartialEq<DataType> for FieldDataType {
+    fn eq(&self, other: &DataType) -> bool {
+        matches!(self, FieldDataType::Plain(dtype) if dtype == other)
+    }
+}
+
+/// Plain value types. Summary state is a [`FieldDataType`] concern.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DataType {
@@ -97,9 +198,9 @@ pub enum DataType {
     Date,
     /// Variable-length sequence. The existing column contract preserves the
     /// element field name, type, and nullability. Nested fields are unqualified.
-    List { element: Box<Column> },
+    List { element: Box<Field<DataType>> },
     /// Ordered named fields, including each field's independent nullability.
-    Struct { fields: Vec<Column> },
+    Struct { fields: Vec<Field<DataType>> },
     /// SQL map entries with non-null keys and explicitly nullable values.
     Map {
         key: Box<DataType>,
@@ -108,8 +209,8 @@ pub enum DataType {
     },
 }
 
-/// Per-edge pre-ASAP IR schema. Flowing between any two operators, on every
-/// node's input and output.
+/// Per-edge schema. Flowing between any two operators, on every node's
+/// input and output.
 ///
 /// `unique_keys` is metadata for reuse-aware planning: each inner `Vec<ColumnId>`
 /// is a set of column indices that together uniquely identify rows. The
@@ -117,15 +218,11 @@ pub enum DataType {
 /// unique constraint). Populated by per-node input/output spec —
 /// `Aggregate { by, .. }` emits `unique_keys = [by]`; `Dedup { cols }`
 /// adds `cols`; most other nodes pass through.
-///
-/// **Consumed by**: a future workload-level reuse pass (not yet shipped).
-/// The single-query path, the `Bind*` rules, push-down, and a deployment's
-/// own physical emitters do not read this field.
-#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct Schema {
-    /// Columns flowing on this edge, in positional order.
-    pub columns: Vec<Column>,
-    /// Index into `columns` for the time axis, if any. PromQL leaves
+    /// Fields flowing on this edge, in positional order.
+    pub fields: Vec<Field>,
+    /// Index into `fields` for the time axis, if any. PromQL leaves
     /// always carry one; SQL leaves may or may not.
     #[serde(default)]
     pub time_index: Option<ColumnId>,
@@ -167,90 +264,107 @@ pub const PROMQL_SERIES_IDENTITY: &str = "$promql_series_identity";
 /// Operators that rewrite or implicitly match dynamic label sets require their
 /// own realization; they must not accidentally treat the opaque identity as a
 /// user label or silently discard it.
-pub fn with_promql_series_identity(root: &super::QueryExpr) -> Result<super::QueryExpr, String> {
-    use super::{QueryExpr, Source};
-    use std::rc::Rc;
-    let mut root = root.clone();
-    fn visit(node: &mut QueryExpr) -> Result<(), String> {
-        match node {
-            QueryExpr::Scan {
+pub fn with_promql_series_identity(
+    root: &std::rc::Rc<crate::ir::OperatorNode>,
+) -> Result<std::rc::Rc<crate::ir::OperatorNode>, String> {
+    use super::Source;
+    use crate::ir::{NonASAPOp, Operator, OperatorNode};
+    use std::{collections::HashMap, rc::Rc};
+    fn visit(
+        node: &Rc<OperatorNode>,
+        memo: &mut HashMap<*const OperatorNode, Rc<OperatorNode>>,
+    ) -> Result<Rc<OperatorNode>, String> {
+        if let Some(found) = memo.get(&Rc::as_ptr(node)) {
+            return Ok(Rc::clone(found));
+        }
+        let mut error = None;
+        let mut operator = node
+            .operator
+            .map_children(|child| match visit(child, memo) {
+                Ok(child) => child,
+                Err(e) => {
+                    error = Some(e);
+                    Rc::clone(child)
+                }
+            });
+        if let Some(error) = error {
+            return Err(error);
+        }
+        match &mut operator {
+            Operator::NonASAP(NonASAPOp::Scan {
                 source: Source::TimeSeries { .. },
                 schema,
                 ..
-            } => {
+            }) => {
                 if schema
-                    .columns
+                    .fields
                     .iter()
-                    .any(|column| column.name == PROMQL_SERIES_IDENTITY)
+                    .any(|field| field.name == PROMQL_SERIES_IDENTITY)
                 {
-                    return Err("source already contains a physical series identity".into());
+                    if !schema.has_promql_series_identity() {
+                        return Err("invalid physical series identity".into());
+                    }
+                    memo.insert(Rc::as_ptr(node), Rc::clone(node));
+                    return Ok(Rc::clone(node));
                 }
                 if schema.closed {
                     return Err("dynamic series identity requires an open PromQL source".into());
                 }
-                schema
-                    .columns
-                    .push(Column::new(PROMQL_SERIES_IDENTITY, DataType::Utf8, false));
+                schema.fields.push(Field::new(
+                    PROMQL_SERIES_IDENTITY,
+                    FieldDataType::Plain(DataType::Utf8),
+                    false,
+                ));
                 schema.closed = true;
-                Ok(())
             }
-            QueryExpr::TimeRange { child, .. }
-            | QueryExpr::Limit { child, .. }
-            | QueryExpr::TimeShift { child, .. }
-            | QueryExpr::PromqlSubquery { child, .. }
-            | QueryExpr::PromqlScalarFromVector(child)
-            | QueryExpr::PromqlRelabel { child, .. } => visit(Rc::make_mut(child)),
-            // Constants read no series.
-            QueryExpr::PromqlScalarBridge(_)
-            | QueryExpr::EvalTimestamp
-            | QueryExpr::Literal(super::ScalarValue::Float64(_)) => Ok(()),
-            QueryExpr::PromqlVectorFromScalar(child) => visit(Rc::make_mut(child)),
-            QueryExpr::BinaryOp { lhs, rhs, .. } => {
-                visit(Rc::make_mut(lhs))?;
-                visit(Rc::make_mut(rhs))
+            Operator::NonASAP(NonASAPOp::Sort { partition_by, .. })
+                if partition_by.is_without() =>
+            {
+                return Err("dynamic without ranking requires label-set projection".into());
             }
-            QueryExpr::Concat { children, .. } => {
-                for child in children {
-                    visit(child)?;
-                }
-                Ok(())
-            }
-            QueryExpr::Aggregate { child, .. } => visit(Rc::make_mut(child)),
-            QueryExpr::Sort {
-                child,
-                partition_by,
-                ..
-            } => {
-                if partition_by.is_without() {
-                    return Err("dynamic without ranking requires label-set projection".into());
-                }
-                visit(Rc::make_mut(child))
-            }
-            _ => Err("operator has no dynamic series-identity realization".into()),
+            Operator::NonASAP(
+                NonASAPOp::TimeRange { .. }
+                | NonASAPOp::Limit { .. }
+                | NonASAPOp::Project { .. }
+                | NonASAPOp::Filter { .. }
+                | NonASAPOp::TimeShift { .. }
+                | NonASAPOp::PromqlSubquery { .. }
+                | NonASAPOp::PromqlRelabel { .. }
+                | NonASAPOp::PromqlVectorFromScalar(_)
+                | NonASAPOp::BinaryOp { .. }
+                | NonASAPOp::Concat { .. }
+                | NonASAPOp::Aggregate { .. }
+                | NonASAPOp::Sort { .. },
+            ) => {}
+            _ => return Err("operator has no dynamic series-identity realization".into()),
         }
+        let mut rebuilt = OperatorNode::new(operator).map_err(|e| e.to_string())?;
+        rebuilt.guarantee = node.guarantee.clone();
+        rebuilt.timing = node.timing;
+        let rebuilt = Rc::new(rebuilt);
+        memo.insert(Rc::as_ptr(node), Rc::clone(&rebuilt));
+        Ok(rebuilt)
     }
-    visit(&mut root)?;
-    root.output_schema().map_err(|error| error.to_string())?;
-    Ok(root)
+    visit(root, &mut HashMap::new())
 }
 
 impl Schema {
     pub fn has_promql_series_identity(&self) -> bool {
         self.closed
-            && self.columns.iter().any(|column| {
-                column.name == PROMQL_SERIES_IDENTITY
-                    && column.dtype == DataType::Utf8
-                    && !column.nullable
-                    && column.table.is_none()
+            && self.fields.iter().any(|field| {
+                field.name == PROMQL_SERIES_IDENTITY
+                    && field.dtype == DataType::Utf8
+                    && !field.nullable
+                    && field.table.is_none()
             })
     }
 
-    /// Construct a `Schema` from columns alone — no time index, no
+    /// Construct a `Schema` from fields alone — no time index, no
     /// unique-key constraint. Used by `Scan` over a tabular source
     /// when the catalog supplies no primary-key metadata.
-    pub fn new(columns: Vec<Column>) -> Self {
+    pub fn new(fields: Vec<Field>) -> Self {
         Self {
-            columns,
+            fields,
             time_index: None,
             unique_keys: Vec::new(),
             closed: false,
@@ -260,42 +374,59 @@ impl Schema {
     /// Construct a `Scan`-style schema with explicit `time_index` +
     /// inferred unique keys (e.g. PromQL leaves: `[time_index, label_set]`).
     pub fn with_time_index(
-        columns: Vec<Column>,
+        fields: Vec<Field>,
         time_index: ColumnId,
         unique_keys: Vec<Vec<ColumnId>>,
     ) -> Self {
         Self {
-            columns,
+            fields,
             time_index: Some(time_index),
             unique_keys,
             closed: false,
         }
     }
 
-    /// Look up a column by name (first match). `None` if not present.
-    pub fn column_id(&self, name: &str) -> Option<ColumnId> {
-        self.columns.iter().position(|c| c.name == name)
+    /// The schema of a summary-planning node: `fields` and a time axis, no
+    /// unique-key claim, closed. The shape every post-ASAP operator output
+    /// carried before pre- and post-ASAP schemas were one type.
+    pub fn lifted(fields: Vec<Field>, time_index: Option<ColumnId>) -> Self {
+        Self {
+            fields,
+            time_index,
+            unique_keys: Vec::new(),
+            closed: true,
+        }
     }
 
-    /// Look up a column by `(table, name)` qualifier — disambiguates columns
-    /// that share a `name` across a join (`a.k` vs `b.k`). `None` if no column
+    /// Whether every field carries an ordinary readable value.
+    pub fn is_all_plain(&self) -> bool {
+        self.fields.iter().all(Field::is_plain)
+    }
+
+    /// Look up a field by name (first match). `None` if not present.
+    pub fn column_id(&self, name: &str) -> Option<ColumnId> {
+        self.fields.iter().position(|c| c.name == name)
+    }
+
+    /// Look up a field by `(table, name)` qualifier — disambiguates columns
+    /// that share a `name` across a join (`a.k` vs `b.k`). `None` if no field
     /// has both that qualifier and name.
     pub fn column_id_qualified(&self, table: &str, name: &str) -> Option<ColumnId> {
-        self.columns
+        self.fields
             .iter()
             .position(|c| c.name == name && c.table.as_deref() == Some(table))
     }
 
     /// Whether this schema has *any* provable unique key — the signal a
-    /// future reuse-aware planning pass would need to decide whether a
-    /// producer's output can be safely shared across consumers.
+    /// reuse-aware planning pass needs to decide whether a producer's output
+    /// can be safely shared across consumers.
     pub fn has_unique_key(&self) -> bool {
         !self.unique_keys.is_empty()
     }
 
     /// Append `cols` as an additional unique-key set if not already present.
-    /// Used by `Dedup { cols }` per design.md §6 schema-flow table:
-    /// "the input schema with `unique_keys` tightened to include `cols`".
+    /// Used by `Dedup { cols }`: "the input schema with `unique_keys`
+    /// tightened to include `cols`".
     pub fn add_unique_key(&mut self, cols: Vec<ColumnId>) {
         if !self.unique_keys.contains(&cols) {
             self.unique_keys.push(cols);
@@ -309,8 +440,8 @@ impl Schema {
 mod tests {
     use super::*;
 
-    fn col(name: &str, dtype: DataType) -> Column {
-        Column::new(name, dtype, false)
+    fn col(name: &str, dtype: DataType) -> Field {
+        Field::plain(name, dtype, false)
     }
 
     #[test]
@@ -375,30 +506,33 @@ mod tests {
     }
 
     #[test]
-    fn column_table_defaults_to_none_when_absent() {
-        // `Column.table` is `#[serde(default)]` so schemas serialized before the
+    fn field_table_defaults_to_none_when_absent() {
+        // `Field.table` is `#[serde(default)]` so schemas serialized before the
         // qualifier field existed still deserialize (to `table: None`) instead
-        // of erroring. Drop the key from a serialized column to simulate that.
+        // of erroring. Drop the key from a serialized field to simulate that.
         let mut v = serde_json::to_value(col("svc", DataType::Utf8)).unwrap();
         assert!(v.as_object_mut().unwrap().remove("table").is_some());
-        let back: Column = serde_json::from_value(v).unwrap();
+        let back: Field = serde_json::from_value(v).unwrap();
         assert_eq!(back, col("svc", DataType::Utf8));
         assert!(back.table.is_none());
     }
 
     #[test]
-    fn qualified_column_serde_roundtrip() {
+    fn qualified_field_serde_roundtrip() {
         let c = col("service", DataType::Utf8).with_table("hosts");
-        let back: Column = serde_json::from_str(&serde_json::to_string(&c).unwrap()).unwrap();
+        let back: Field = serde_json::from_str(&serde_json::to_string(&c).unwrap()).unwrap();
         assert_eq!(back, c);
         assert_eq!(back.table.as_deref(), Some("hosts"));
     }
-    // Direct scalar literals remain valid vector inputs when series typing runs.
+
+    /// A plain field compares equal to its value type; state never does.
     #[test]
-    fn series_identity_accepts_direct_vector_literal() {
-        let root = super::super::QueryExpr::PromqlVectorFromScalar(std::rc::Rc::new(
-            super::super::QueryExpr::Literal(super::super::ScalarValue::Float64(1.0)),
-        ));
-        assert!(with_promql_series_identity(&root).is_ok());
+    fn plain_field_type_compares_with_data_type() {
+        assert!(FieldDataType::Plain(DataType::Utf8) == DataType::Utf8);
+        assert!(FieldDataType::Plain(DataType::Utf8) != DataType::Int64);
+        assert_eq!(
+            col("a", DataType::Int64).plain_dtype(),
+            Some(&DataType::Int64)
+        );
     }
 }

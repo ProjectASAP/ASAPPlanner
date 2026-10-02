@@ -1,27 +1,17 @@
-//! Column-reference and scalar-operator vocabulary shared by the whole
-//! canonical [`QueryExpr`](super::query_expr::QueryExpr) tree.
-//!
-//! Issue #205: the scalar expression shapes (`Column`/`Literal`/`Compare`/…)
-//! used to live in a separate, self-recursive `Expr<C>` tree here, reachable
-//! from `QueryExpr` only through wrapper fields (`Predicate`, `ProjectItem`,
-//! `SortKey`). They're variants of `QueryExpr<C>` itself now — one recursive
-//! tree, not two type families joined by wrappers — generic over the same
-//! column-reference state `C` the rest of `QueryExpr` already carries
-//! (issue #179): [`ColumnRef`] (name-based, front-end-emitted) or
-//! [`ColumnId`](super::schema::ColumnId) (positional, once bound).
-//!
-//! What's left here is the vocabulary those scalar variants are built from —
-//! [`ScalarValue`], [`CompareOpKind`], [`ArithmeticOpKind`] — the **union** of what the two
+//! Field-reference and scalar-operator vocabulary shared by the IR's scalar
+//! expressions ([`crate::ir::ScalarExpr`]) and the front ends' unresolved
+//! form: [`ColumnRef`] (name-based, front-end-emitted; positional
+//! [`ColumnId`](super::schema::ColumnId) once bound), and [`ScalarValue`],
+//! [`CompareOpKind`], [`ArithmeticOpKind`] — the **union** of what the two
 //! front ends need: PromQL contributes `Regex` / `NotRegex` (`=~` / `!~`); SQL
 //! contributes arithmetic, `CASE`, `IN`, `CAST`, `IS [NOT] NULL`, scalar
 //! function calls, and the `LIKE` / `ILIKE` comparison family.
 
 use serde::{Deserialize, Serialize};
 
-/// A name-based column reference — the front-end-emitted, unresolved state of
-/// [`QueryExpr::Column`](super::query_expr::QueryExpr::Column) (`C =
-/// ColumnRef`); the [`SchemaResolver`](super::schema_resolver::SchemaResolver) resolves it to a
-/// positional [`ColumnId`](super::schema::ColumnId). Includes the two
+/// A name-based column reference — the front-end-emitted, unresolved form of
+/// [`ScalarExpr::Column`](crate::ir::ScalarExpr::Column); front-end name
+/// resolution turns it into a positional [`ColumnId`](super::schema::ColumnId). Includes the two
 /// PromQL-conventional synthetic columns.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ColumnRef {

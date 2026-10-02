@@ -1,12 +1,12 @@
-//! SQL → the canonical, unresolved
-//! [`UnresolvedQueryExpr`](asap_types::pre_asap::query_expr::UnresolvedQueryExpr)
-//! (`QueryExpr<ColumnRef>`).
+//! SQL → the name-based front-end tree
+//! ([`UnresolvedOp`](asap_frontend_common::UnresolvedOp) /
+//! [`UnresolvedScalar`](asap_frontend_common::UnresolvedScalar)).
 //!
 //! Parses SQL via DataFusion (over the catalog's registered tables), then
-//! walks the unoptimized `LogicalPlan` and emits `UnresolvedQueryExpr` nodes with
+//! walks the unoptimized `LogicalPlan` and emits `UnresolvedOp` nodes with
 //! unresolved `ColumnRef`s directly (issue #179) — the same tree shape
-//! [`resolve_root`](asap_types::pre_asap::resolve_root) binds to canonical,
-//! positional `QueryExpr<ColumnId>`. Unlike PromQL's front end, SQL's
+//! [`resolve_root`](asap_frontend_common::resolve_root) binds into the
+//! positional, unified `OperatorNode` IR. Unlike PromQL's front end, SQL's
 //! Ordinary SQL `Aggregate` nodes are `Reduction::Reduce`. The explicit
 //! `asap_rate`/`asap_increase` bridge is the narrow exception: it
 //! spells a time-series range reducer with an explicit value, time-index, and
@@ -51,17 +51,22 @@ use datafusion::optimizer::{AnalyzerRule, OptimizerConfig};
 use datafusion::prelude::{SessionConfig, SessionContext};
 use datafusion::sql::parser::DFParser;
 
+use asap_frontend_common::{
+    resolve_root, UnresolvedOp as Unresolved, UnresolvedPredicate as Predicate,
+    UnresolvedProjectItem as ProjectItem, UnresolvedScalar as Scalar, UnresolvedSortKey as SortKey,
+};
 use asap_sql_function_catalog::{AggSemantic, Arity, RewriteKind};
-use asap_types::pre_asap::agg_intent::AggIntent;
-use asap_types::pre_asap::query_expr::{
-    GroupKeys, Predicate, ProjectItem, Reduction, SortKey, Source,
-    UnresolvedQueryExpr as Unresolved, WindowFrame, WindowFrameBound, WindowFrameOffset,
+use asap_types::ir::operator_properties::{
+    GroupKeys, Reduction, Source, WindowFrame, WindowFrameBound, WindowFrameOffset,
     WindowFrameUnits,
 };
-use asap_types::pre_asap::schema::{DataType, Schema};
+use asap_types::ir::TimeRangeKind;
+use asap_types::pre_asap::agg_intent::AggIntent;
+use asap_types::pre_asap::schema::{DataType, FieldDataType, Schema};
+
 use asap_types::pre_asap::{
-    resolve_column_ref, resolve_root, ColumnRef, CompareOpKind, JoinKind, RelationalSetOpKind,
-    ScalarValue, WindowFuncKind,
+    resolve_column_ref, ColumnRef, CompareOpKind, JoinKind, RelationalSetOpKind, ScalarValue,
+    WindowFuncKind,
 };
 use asap_types::types::AccuracyTarget;
 use asap_types::workload::SqlDialect;
@@ -77,7 +82,6 @@ mod types;
 pub use types::SqlCatalog;
 
 use self::dialect::GenericWithAggregateFilter;
-use self::expr::df_expr_to_unresolved;
 use self::types::{arrow_to_dtype, scalar_value_to_asap, schema_to_arrow};
 
 std::thread_local! {
@@ -111,10 +115,10 @@ fn current_accuracy() -> AccuracyTarget {
     ACCURACY.with(|a| a.borrow().clone())
 }
 
-/// Lowers SQL strings to the canonical [`UnresolvedQueryExpr`](asap_types::pre_asap::UnresolvedQueryExpr)
-/// over a table [`SqlCatalog`]. Call
-/// [`resolve_root`](asap_types::pre_asap::resolve_root) on the result for
-/// the canonical, resolved tree.
+/// Lowers SQL strings to the name-based [`UnresolvedOp`](asap_frontend_common::UnresolvedOp)
+/// tree over a table [`SqlCatalog`]. Call
+/// [`resolve_root`](asap_frontend_common::resolve_root) on the result for
+/// the resolved operator DAG.
 pub struct SqlLowerer<'a> {
     catalog: &'a SqlCatalog,
     dialect: SqlDialect,
@@ -140,7 +144,7 @@ impl<'a> SqlLowerer<'a> {
         Self { catalog, dialect }
     }
 
-    /// Parse + lower a SQL query to the canonical, unresolved shape, threading
+    /// Parse + lower a SQL query to the name-based tree, threading
     /// `accuracy` onto every approximate intent (`Count`, `Quantile`,
     /// `Cardinality`) as it is built.
     ///
@@ -167,8 +171,8 @@ impl<'a> SqlLowerer<'a> {
     /// a rule) that isn't wanted here — e.g. it independently rejects a
     /// multi-column `IN (subquery)` before `lower_in_subquery`'s own arity
     /// check would. Going straight to `ApplyFunctionRewrites` avoids that
-    /// entirely: zero behavior change for every query that doesn't call a
-    /// catalog-listed ClickHouse builtin.
+    /// entirely. TypeCoercion then records implicit conversions explicitly,
+    /// including timestamp literals in predicates, before IR validation.
     pub async fn lower(
         &self,
         sql: &str,
@@ -197,6 +201,8 @@ impl<'a> SqlLowerer<'a> {
         let plan = state.statement_to_plan(statement).await?;
         let rewriter = ApplyFunctionRewrites::new(vec![Arc::new(ClickHouseBuiltinRewrite)]);
         let plan = rewriter.analyze(plan, ctx.state().options())?;
+        let plan = datafusion::optimizer::analyzer::type_coercion::TypeCoercion::new()
+            .analyze(plan, ctx.state().options())?;
         // Output schemas omit predicate and nested-expression types. Check the
         // typed SQL plan before lowering erases fixed-duration units.
         plan.apply_with_subqueries(|node| {
@@ -269,8 +275,8 @@ impl<'a> SqlLowerer<'a> {
         // *scalar* builtin — same reason as the `AggregateUDF` loop above
         // (DataFusion otherwise rejects the call as an unknown function
         // during `SqlToRel` conversion), but with no rewrite step to follow:
-        // `df_expr_to_unresolved`'s `Expr::ScalarFunction` arm already lowers
-        // any scalar call generically to `Unresolved::FunctionCall { name,
+        // `lower_expr`'s `Expr::ScalarFunction` arm already lowers any
+        // scalar call generically to `UnresolvedScalar::FunctionCall { name,
         // args }`, so registering the stub is the entire fix (issue #230).
         for builtin in asap_sql_function_catalog::CLICKHOUSE_SCALAR_BUILTINS {
             ctx.register_udf(clickhouse_scalar_builtin_stub_udf(
@@ -302,9 +308,24 @@ impl<'a> SqlLowerer<'a> {
         Ok(ctx)
     }
 
-    fn lower_plan(&self, plan: &LogicalPlan) -> Result<Unresolved, LoweringError> {
+    pub(super) fn lower_plan(&self, plan: &LogicalPlan) -> Result<Unresolved, LoweringError> {
         match plan {
             LogicalPlan::TableScan(scan) => self.lower_table_scan(scan),
+            // The one empty input row of a `SELECT` without `FROM`.
+            LogicalPlan::EmptyRelation(empty) => Ok(Unresolved::Values {
+                rows: if empty.produce_one_row {
+                    vec![vec![]]
+                } else {
+                    vec![]
+                },
+                schema: Schema {
+                    fields: vec![],
+                    time_index: None,
+                    unique_keys: vec![],
+                    closed: true,
+                },
+            }),
+            LogicalPlan::Values(values) => self.lower_values(values),
             LogicalPlan::Filter(filter) => self.lower_filter(filter),
             LogicalPlan::Projection(proj) => self.lower_projection(proj),
             LogicalPlan::Aggregate(agg) => self.lower_aggregate(agg),
@@ -373,9 +394,7 @@ impl<'a> SqlLowerer<'a> {
                                     .iter()
                                     .map(|f| ProjectItem {
                                         alias: Some(f.name().clone()),
-                                        expr: Unresolved::Column(ColumnRef::Named(
-                                            f.name().clone(),
-                                        )),
+                                        expr: Scalar::Column(ColumnRef::Named(f.name().clone())),
                                     })
                                     .collect();
                                 Ok(Unresolved::Project {
@@ -398,108 +417,48 @@ impl<'a> SqlLowerer<'a> {
     /// `WHERE` — a conjunction of ordinary predicates plus, possibly, subquery
     /// predicates (issue #111).
     ///
-    /// `c IN (SELECT …)` and `EXISTS (…)` are not expressions over rows; they are
-    /// *joins*. Each such conjunct peels off into a semi- / anti-join above the
-    /// filter's input, and the remaining conjuncts stay as an ordinary `Filter`.
+    /// The ordinary conjuncts stay one predicate, folded onto a bare `Scan`
+    /// (`filter_or_fold`). A subquery conjunct — `c IN (SELECT …)`, `EXISTS
+    /// (…)`, `x > (SELECT …)` — is a row filter whose predicate reads another
+    /// operator (`UnresolvedScalar::InSubquery` / `Exists` /
+    /// `ScalarSubquery`); each one becomes its own `Filter` **above** the
+    /// ordinary predicate, so the shared `canonicalize` pass can turn it into
+    /// the join it is without having to peel it out of a conjunction or off
+    /// a `Scan` (it only lifts subqueries out of `Filter` / `Project`). A
+    /// semi-join only ever drops left rows, so the two orders agree.
     ///
-    /// The residual filter is applied **below** the joins, which is where it sat
-    /// before: a semi-join only ever drops left rows, so the two orders agree —
-    /// and keeping the fold-onto-`Scan` (`filter_or_fold`) below the joins
-    /// matches where the old converter folded it too.
+    /// The one subquery shape still lowered to a join here is a *correlated*
+    /// `EXISTS`: its correlation references both sides, which only a join
+    /// predicate can bind (a subquery referenced from a scalar position is
+    /// resolved as a root in its own scope).
     fn lower_filter(&self, filter: &logical_expr::Filter) -> Result<Unresolved, LoweringError> {
         let mut conjuncts = Vec::new();
         split_conjunction(&filter.predicate, &mut conjuncts);
-        let (subqueries, residual): (Vec<_>, Vec<_>) = conjuncts
-            .into_iter()
-            .partition(|e| matches!(e, Expr::InSubquery(_) | Expr::Exists(_)));
+        let (subqueries, residual): (Vec<_>, Vec<_>) =
+            conjuncts.into_iter().partition(|e| reads_subquery(e));
 
         let input = self.lower_plan(&filter.input)?;
         let mut node = match rebuild_conjunction(&residual) {
-            Some(pred) => filter_or_fold(df_expr_to_unresolved(&pred)?, input),
+            Some(pred) => filter_or_fold(self.lower_expr(&pred)?, input),
             None => input,
         };
         for sq in subqueries {
             node = match sq {
-                Expr::InSubquery(is) => self.lower_in_subquery(is, node)?,
-                Expr::Exists(ex) => self.lower_exists(ex, node)?,
-                _ => unreachable!("partitioned above"),
+                Expr::Exists(ex) if !ex.subquery.outer_ref_columns.is_empty() => {
+                    self.lower_correlated_exists(ex, node)?
+                }
+                other => Unresolved::Filter {
+                    pred: Predicate(self.lower_expr(other)?),
+                    child: Rc::new(node),
+                },
             };
         }
         Ok(node)
     }
 
-    /// `c IN (SELECT k FROM …)` → a semi-join on `c = k` (issue #111).
-    fn lower_in_subquery(
-        &self,
-        is: &logical_expr::expr::InSubquery,
-        left: Unresolved,
-    ) -> Result<Unresolved, LoweringError> {
-        if is.negated {
-            // `NOT IN` is not an anti-join. Under three-valued logic a single
-            // NULL among the subquery's rows makes `c NOT IN (…)` UNKNOWN for
-            // every `c`, so the query returns nothing — while an anti-join
-            // returns every unmatched left row. Reject rather than mislower.
-            return Err(LoweringError::UnsupportedFeature(
-                "NOT IN (subquery): its NULL semantics are not an anti-join".into(),
-            ));
-        }
-        if !is.subquery.outer_ref_columns.is_empty() {
-            return Err(LoweringError::UnsupportedFeature(
-                "correlated IN (subquery)".into(),
-            ));
-        }
-        let inner = is.subquery.subquery.as_ref();
-        let fields = inner.schema().fields();
-        if fields.len() != 1 {
-            return Err(LoweringError::InvalidExpression(format!(
-                "IN (subquery) must select exactly one column, got {}",
-                fields.len()
-            )));
-        }
-        let key = &fields[0];
-        // Project the key under a name the outer relation cannot also carry. The
-        // join predicate resolves against the concatenated `left ++ right`
-        // schema, and a bare `hosts.service` over an unqualified subquery output
-        // falls back to a name lookup that finds the *left's* `service` first —
-        // silently making the predicate `service = service`, i.e. always true.
-        let right = match inner {
-            // Rebuild the subquery's projection with the synthetic alias, so a
-            // computed key (`SELECT bytes + 1 …`) is named rather than becoming
-            // the anonymous `col_0` that nothing can reference.
-            LogicalPlan::Projection(p) if p.expr.len() == 1 => Unresolved::Project {
-                cols: vec![ProjectItem {
-                    alias: Some(IN_SUBQUERY_KEY.to_string()),
-                    expr: df_expr_to_unresolved(unalias(&p.expr[0]))?,
-                }],
-                qualifier: None,
-                child: Rc::new(self.lower_plan(&p.input)?),
-            },
-            other => Unresolved::Project {
-                cols: vec![ProjectItem {
-                    alias: Some(IN_SUBQUERY_KEY.to_string()),
-                    expr: Unresolved::Column(ColumnRef::Named(key.name().clone())),
-                }],
-                qualifier: None,
-                child: Rc::new(self.lower_plan(other)?),
-            },
-        };
-        Ok(Unresolved::Join {
-            kind: JoinKind::Semi,
-            pred: Predicate(Rc::new(Unresolved::Compare {
-                left: Rc::new(df_expr_to_unresolved(&is.expr)?),
-                op: CompareOpKind::Eq,
-                right: Rc::new(Unresolved::Column(ColumnRef::Named(
-                    IN_SUBQUERY_KEY.to_string(),
-                ))),
-            })),
-            left: Rc::new(left),
-            right: Rc::new(right),
-        })
-    }
-
     /// `[NOT] EXISTS (SELECT … WHERE inner.k = outer.k)` → a semi- / anti-join
     /// on the correlation predicate (issue #111).
-    fn lower_exists(
+    fn lower_correlated_exists(
         &self,
         ex: &logical_expr::expr::Exists,
         left: Unresolved,
@@ -520,18 +479,46 @@ impl<'a> SqlLowerer<'a> {
         // the join predicate. Whatever is left stays an ordinary inner filter.
         let (inner, correlation) = split_correlation(inner)?;
         let right = self.lower_plan(&inner)?;
-        // No correlation conjunct (a genuinely uncorrelated `EXISTS`) means
-        // the join condition is unconditionally true — same convention as an
-        // unconditional `JOIN` (`lower_join`, below).
         let pred = match correlation {
-            Some(e) => Predicate(Rc::new(df_expr_to_unresolved(&e)?)),
-            None => Predicate(Rc::new(Unresolved::Literal(ScalarValue::Boolean(true)))),
+            Some(e) => Predicate(self.lower_expr(&e)?),
+            None => Predicate(Scalar::Literal(ScalarValue::Boolean(true))),
         };
         Ok(Unresolved::Join {
             kind,
             pred,
             left: Rc::new(left),
             right: Rc::new(right),
+        })
+    }
+
+    /// `VALUES (…), (…)` — one row per values row, typed by DataFusion's
+    /// declared schema. Row expressions have no input-column scope.
+    fn lower_values(&self, values: &logical_expr::Values) -> Result<Unresolved, LoweringError> {
+        let rows = values
+            .values
+            .iter()
+            .map(|row| row.iter().map(|e| self.lower_expr(e)).collect())
+            .collect::<Result<Vec<Vec<_>>, LoweringError>>()?;
+        let fields = values
+            .schema
+            .fields()
+            .iter()
+            .map(|f| {
+                Ok(asap_types::pre_asap::Field::plain(
+                    f.name().clone(),
+                    arrow_to_dtype(f.data_type())?,
+                    f.is_nullable(),
+                ))
+            })
+            .collect::<Result<Vec<_>, LoweringError>>()?;
+        Ok(Unresolved::Values {
+            rows,
+            schema: Schema {
+                fields,
+                time_index: None,
+                unique_keys: vec![],
+                closed: true,
+            },
         })
     }
 
@@ -558,8 +545,8 @@ impl<'a> SqlLowerer<'a> {
             .get(table)
             .ok_or_else(|| LoweringError::TableNotFound(table.to_string()))?;
         let qualified = Schema {
-            columns: schema
-                .columns
+            fields: schema
+                .fields
                 .iter()
                 .cloned()
                 .map(|c| c.with_table(qualifier))
@@ -598,23 +585,17 @@ impl<'a> SqlLowerer<'a> {
         let mut conjuncts = join
             .on
             .iter()
-            .map(|(l, r)| {
-                Ok(Unresolved::Compare {
-                    left: Rc::new(df_expr_to_unresolved(l)?),
-                    op: CompareOpKind::Eq,
-                    right: Rc::new(df_expr_to_unresolved(r)?),
-                })
-            })
+            .map(|(l, r)| self.compare(l, CompareOpKind::Eq, r))
             .collect::<Result<Vec<_>, LoweringError>>()?;
         if let Some(filter) = &join.filter {
-            conjuncts.push(df_expr_to_unresolved(filter)?);
+            conjuncts.push(self.lower_expr(filter)?);
         }
-        let pred = Predicate(Rc::new(match conjuncts.len() {
+        let pred = Predicate(match conjuncts.len() {
             // No condition (a CROSS JOIN) is unconditionally true.
-            0 => Unresolved::Literal(ScalarValue::Boolean(true)),
+            0 => Scalar::Literal(ScalarValue::Boolean(true)),
             1 => conjuncts.pop().unwrap(),
-            _ => Unresolved::BoolAnd(conjuncts),
-        }));
+            _ => Scalar::BoolAnd(conjuncts),
+        });
         Ok(Unresolved::Join {
             kind,
             pred,
@@ -637,6 +618,10 @@ impl<'a> SqlLowerer<'a> {
             .window_expr
             .first()
             .ok_or_else(|| LoweringError::InvalidExpression("empty window expression".into()))?;
+        let first = match first {
+            Expr::Alias(alias) => alias.expr.as_ref(),
+            other => other,
+        };
         let Expr::WindowFunction(wf) = first else {
             return Err(LoweringError::InvalidExpression(
                 "expected a window function in Window plan node".into(),
@@ -646,12 +631,12 @@ impl<'a> SqlLowerer<'a> {
         let mut args = wf
             .args
             .iter()
-            .map(df_expr_to_unresolved)
+            .map(|e| self.lower_expr(e))
             .collect::<Result<Vec<_>, _>>()?;
         // Nth_value: lift N from the (literal) 2nd arg, keep only the column.
         let func = if matches!(func, WindowFuncKind::NthValue(None)) {
             let n = match args.get(1) {
-                Some(Unresolved::Literal(ScalarValue::Int64(n))) if *n > 0 => *n as u64,
+                Some(Scalar::Literal(ScalarValue::Int64(n))) if *n > 0 => *n as u64,
                 other => {
                     return Err(LoweringError::InvalidExpression(format!(
                         "NTH_VALUE requires a positive integer literal 2nd arg, got {other:?}"
@@ -672,7 +657,7 @@ impl<'a> SqlLowerer<'a> {
             .order_by
             .iter()
             .map(|s| {
-                df_expr_to_unresolved(&s.expr).map(|expr| SortKey {
+                self.lower_expr(&s.expr).map(|expr| SortKey {
                     expr,
                     ascending: s.asc,
                     nulls_first: s.nulls_first,
@@ -707,7 +692,7 @@ impl<'a> SqlLowerer<'a> {
             let input = self.lower_plan(&proj.input)?;
             return Ok(match bridge {
                 PlanningBridge::PromqlSubquery { range, resolution } => {
-                    let child = Rc::new(temporal_bridge_projection(proj, input)?);
+                    let child = Rc::new(self.temporal_bridge_projection(proj, input)?);
                     Unresolved::PromqlSubquery {
                         range,
                         resolution: Some(resolution),
@@ -740,22 +725,22 @@ impl<'a> SqlLowerer<'a> {
             .map(|e| match e {
                 Expr::Alias(a) => {
                     let expr = if temporal_input && is_temporal_output_column(&a.expr) {
-                        Unresolved::Column(ColumnRef::Named("value".into()))
+                        Scalar::Column(ColumnRef::Named("value".into()))
                     } else {
-                        df_expr_to_unresolved(&a.expr)?
+                        self.lower_expr(&a.expr)?
                     };
-                    Ok::<ProjectItem<ColumnRef>, LoweringError>(ProjectItem {
+                    Ok::<ProjectItem, LoweringError>(ProjectItem {
                         expr,
                         alias: Some(a.name.clone()),
                     })
                 }
                 _ => {
                     let expr = if temporal_input && is_temporal_output_column(e) {
-                        Unresolved::Column(ColumnRef::Named("value".into()))
+                        Scalar::Column(ColumnRef::Named("value".into()))
                     } else {
-                        df_expr_to_unresolved(e)?
+                        self.lower_expr(e)?
                     };
-                    Ok::<ProjectItem<ColumnRef>, LoweringError>(ProjectItem { expr, alias: None })
+                    Ok::<ProjectItem, LoweringError>(ProjectItem { expr, alias: None })
                 }
             })
             .collect::<Result<Vec<_>, _>>()?;
@@ -802,7 +787,7 @@ impl<'a> SqlLowerer<'a> {
         // reducer expression (`GROUP BY date_trunc(…)`, `SUM(a * 8)`) has no
         // slot. Materialize each one as a derived column in a `Project` beneath
         // the aggregate, then group/reduce over that column (issue #110).
-        let mut derived = DerivedCols::default();
+        let mut derived = DerivedCols::new(self);
 
         // DataFusion strips `AS m` from a grouping expression, so the aggregate
         // schema's field name is what the enclosing Projection references —
@@ -827,7 +812,7 @@ impl<'a> SqlLowerer<'a> {
                         .get(i)
                         .cloned()
                         .unwrap_or_else(|| other.to_string());
-                    derived.materialize(name.clone(), df_expr_to_unresolved(other)?)?;
+                    derived.materialize(name.clone(), self.lower_expr(other)?)?;
                     keys.push(ColumnRef::Named(name));
                 }
             }
@@ -869,7 +854,7 @@ impl<'a> SqlLowerer<'a> {
                 .iter()
                 .map(|f| {
                     f.as_ref()
-                        .map(|f| Ok(Predicate(Rc::new(df_expr_to_unresolved(f)?))))
+                        .map(|f| Ok(Predicate(self.lower_expr(f)?)))
                         .transpose()
                 })
                 .collect::<Result<Vec<_>, LoweringError>>()?
@@ -922,12 +907,7 @@ impl<'a> SqlLowerer<'a> {
             ))
         })?;
 
-        let resolved_input = resolve_root(&input)?;
-        let input_schema = resolved_input.output_schema().map_err(|error| {
-            LoweringError::InvalidExpression(format!(
-                "cannot derive temporal aggregate input schema: {error}"
-            ))
-        })?;
+        let input_schema = resolve_root(&input)?.schema.clone();
         let timestamp_id = resolve_column_ref(&timestamp_ref, &input_schema).map_err(|error| {
             LoweringError::InvalidExpression(format!("{name} timestamp argument: {error}"))
         })?;
@@ -941,8 +921,8 @@ impl<'a> SqlLowerer<'a> {
         })?;
         if value_id == timestamp_id
             || !matches!(
-                input_schema.columns[value_id].dtype,
-                DataType::Int64 | DataType::Float64
+                input_schema.fields[value_id].dtype,
+                FieldDataType::Plain(DataType::Int64 | DataType::Float64)
             )
         {
             return Err(LoweringError::InvalidExpression(format!(
@@ -1000,18 +980,18 @@ impl<'a> SqlLowerer<'a> {
         let mut cols = vec![
             ProjectItem {
                 alias: Some("ts".into()),
-                expr: Unresolved::Column(timestamp_ref.clone()),
+                expr: Scalar::Column(timestamp_ref.clone()),
             },
             ProjectItem {
                 alias: Some("value".into()),
-                expr: Unresolved::Column(value_ref.clone()),
+                expr: Scalar::Column(value_ref.clone()),
             },
         ];
         for group_ref in group_refs {
             let group_name = named_ref(&group_ref).to_string();
             cols.push(ProjectItem {
                 alias: Some(group_name),
-                expr: Unresolved::Column(group_ref),
+                expr: Scalar::Column(group_ref),
             });
         }
         let child = Unresolved::Project {
@@ -1019,8 +999,11 @@ impl<'a> SqlLowerer<'a> {
             qualifier: None,
             child: Rc::new(input),
         };
+        // The explicit window is a range selector over the series, the same
+        // shape PromQL's `rate(m[5m])` lowers to.
         let child = Unresolved::TimeRange {
             range: Duration::from_millis(window_ms),
+            kind: TimeRangeKind::Range,
             child: Rc::new(child),
         };
         let intent = match name.as_str() {
@@ -1099,7 +1082,7 @@ impl<'a> SqlLowerer<'a> {
 
         // Reducer arguments still materialize as derived columns (#110); the
         // grouping keys are plain columns, so they only need carrying through.
-        let mut derived = DerivedCols::default();
+        let mut derived = DerivedCols::new(self);
         for e in &distinct {
             derived.passthrough(e)?;
         }
@@ -1137,10 +1120,10 @@ impl<'a> SqlLowerer<'a> {
                     .map(|((name, dtype), e)| ProjectItem {
                         alias: Some(name.clone()),
                         expr: if level.contains(e) {
-                            Unresolved::Column(ColumnRef::Named(name.clone()))
+                            Scalar::Column(ColumnRef::Named(name.clone()))
                         } else {
-                            Unresolved::Cast {
-                                expr: Rc::new(Unresolved::Literal(ScalarValue::Null)),
+                            Scalar::Cast {
+                                expr: Box::new(Scalar::Literal(ScalarValue::Null)),
                                 to: dtype.clone(),
                                 try_cast: false,
                             }
@@ -1148,7 +1131,7 @@ impl<'a> SqlLowerer<'a> {
                     })
                     .chain(output_names.iter().map(|n| ProjectItem {
                         alias: Some(n.clone()),
-                        expr: Unresolved::Column(ColumnRef::Named(n.clone())),
+                        expr: Scalar::Column(ColumnRef::Named(n.clone())),
                     }))
                     .collect();
                 Ok(Unresolved::Project {
@@ -1180,7 +1163,7 @@ impl<'a> SqlLowerer<'a> {
             .expr
             .iter()
             .map(|s| {
-                df_expr_to_unresolved(&s.expr).map(|expr| SortKey {
+                self.lower_expr(&s.expr).map(|expr| SortKey {
                     expr,
                     ascending: s.asc,
                     nulls_first: s.nulls_first,
@@ -1200,8 +1183,10 @@ impl<'a> SqlLowerer<'a> {
         // Count-ranked `LIMIT k` over a `Sort` is promoted to the heavy-hitter
         // `TopK` by the shared `canonicalize` pass (issue #34), not here.
         Ok(Unresolved::Limit {
-            n: eval_fetch(&limit.fetch).unwrap_or(usize::MAX),
+            // No (literal) fetch is offset-only.
+            n: eval_fetch(&limit.fetch),
             offset: eval_fetch(&limit.skip).unwrap_or(0),
+            partition_by: GroupKeys::none(),
             child: Rc::new(self.lower_plan(&limit.input)?),
         })
     }
@@ -1281,49 +1266,52 @@ fn planning_bridge(
 /// its output slot (`... asap_promql_subquery(...) AS value ...`). This makes
 /// the bridge schema-preserving without silently retaining columns that SQL
 /// projected away.
-fn temporal_bridge_projection(
-    projection: &logical_expr::Projection,
-    child: Unresolved,
-) -> Result<Unresolved, LoweringError> {
-    let cols = projection
-        .expr
-        .iter()
-        .map(|expr| {
-            if let Expr::ScalarFunction(call) = unalias(expr) {
-                if call
-                    .func
-                    .name()
-                    .eq_ignore_ascii_case("asap_promql_subquery")
-                {
-                    let Expr::Alias(alias) = expr else {
-                        return Err(LoweringError::InvalidExpression(
-                            "asap_promql_subquery must have an alias naming its child value column"
-                                .into(),
-                        ));
-                    };
-                    return Ok(ProjectItem {
-                        expr: Unresolved::Column(ColumnRef::Named(alias.name.clone())),
-                        alias: Some(alias.name.clone()),
-                    });
+impl SqlLowerer<'_> {
+    fn temporal_bridge_projection(
+        &self,
+        projection: &logical_expr::Projection,
+        child: Unresolved,
+    ) -> Result<Unresolved, LoweringError> {
+        let cols = projection
+            .expr
+            .iter()
+            .map(|expr| {
+                if let Expr::ScalarFunction(call) = unalias(expr) {
+                    if call
+                        .func
+                        .name()
+                        .eq_ignore_ascii_case("asap_promql_subquery")
+                    {
+                        let Expr::Alias(alias) = expr else {
+                            return Err(LoweringError::InvalidExpression(
+                                "asap_promql_subquery must have an alias naming its child value column"
+                                    .into(),
+                            ));
+                        };
+                        return Ok(ProjectItem {
+                            expr: Scalar::Column(ColumnRef::Named(alias.name.clone())),
+                            alias: Some(alias.name.clone()),
+                        });
+                    }
                 }
-            }
-            match expr {
-                Expr::Alias(alias) => Ok(ProjectItem {
-                    expr: df_expr_to_unresolved(&alias.expr)?,
-                    alias: Some(alias.name.clone()),
-                }),
-                other => Ok(ProjectItem {
-                    expr: df_expr_to_unresolved(other)?,
-                    alias: None,
-                }),
-            }
+                match expr {
+                    Expr::Alias(alias) => Ok(ProjectItem {
+                        expr: self.lower_expr(&alias.expr)?,
+                        alias: Some(alias.name.clone()),
+                    }),
+                    other => Ok(ProjectItem {
+                        expr: self.lower_expr(other)?,
+                        alias: None,
+                    }),
+                }
+            })
+            .collect::<Result<Vec<_>, LoweringError>>()?;
+        Ok(Unresolved::Project {
+            cols,
+            qualifier: None,
+            child: Rc::new(child),
         })
-        .collect::<Result<Vec<_>, LoweringError>>()?;
-    Ok(Unresolved::Project {
-        cols,
-        qualifier: None,
-        child: Rc::new(child),
-    })
+    }
 }
 
 fn positive_millis_literal(expr: &Expr, argument: &str) -> Result<Duration, LoweringError> {
@@ -1408,8 +1396,8 @@ fn arity_to_signature(arity: Arity) -> Signature {
 // (which must become a real `AggIntent`, hence the rewrite to a native
 // DataFusion aggregate shape `lower_agg_intent` can classify), a scalar
 // function call in this IR is already deliberately opaque —
-// `expr::df_expr_to_unresolved`'s `Expr::ScalarFunction` arm lowers *any*
-// scalar call generically to `Unresolved::FunctionCall { name, args }`, with
+// `SqlLowerer::lower_expr`'s `Expr::ScalarFunction` arm lowers *any*
+// scalar call generically to `UnresolvedScalar::FunctionCall { name, args }`, with
 // zero name-specific logic. So teaching DataFusion's planner to accept a
 // ClickHouse scalar builtin's name — a stub `ScalarUDF`, registered below —
 // is the entire fix; the existing generic lowering already does the rest.
@@ -1923,23 +1911,19 @@ fn lower_arg_selector(
     }))
 }
 
-/// The name an `IN (subquery)`'s key column is projected under, so the join
-/// predicate cannot bind it to a same-named column of the outer relation.
-const IN_SUBQUERY_KEY: &str = "__asap_in_key";
-
 /// Fold `pred` directly onto `child.predicates` when `child` is a bare `Scan`
 /// (a `WHERE` directly over a table), otherwise wrap it in an ordinary
 /// `Filter` — canonical's invariant that a `Filter` never sits directly over a
 /// `Scan`. A front end emitting the canonical shape directly is responsible
 /// for maintaining that invariant itself (issue #179).
-fn filter_or_fold(pred: Unresolved, child: Unresolved) -> Unresolved {
+fn filter_or_fold(pred: Scalar, child: Unresolved) -> Unresolved {
     match child {
         Unresolved::Scan {
             source,
             mut predicates,
             schema,
         } => {
-            predicates.push(Predicate(Rc::new(pred)));
+            predicates.push(Predicate(pred));
             Unresolved::Scan {
                 source,
                 predicates,
@@ -1947,7 +1931,7 @@ fn filter_or_fold(pred: Unresolved, child: Unresolved) -> Unresolved {
             }
         }
         other => Unresolved::Filter {
-            pred: Predicate(Rc::new(pred)),
+            pred: Predicate(pred),
             child: Rc::new(other),
         },
     }
@@ -1962,6 +1946,18 @@ fn split_conjunction<'a>(expr: &'a Expr, out: &mut Vec<&'a Expr>) {
         }
         other => out.push(other),
     }
+}
+
+/// Whether `expr` reads another operator anywhere inside it (`EXISTS`,
+/// `IN (…)`, a scalar subquery).
+fn reads_subquery(expr: &Expr) -> bool {
+    expr.exists(|e| {
+        Ok(matches!(
+            e,
+            Expr::ScalarSubquery(_) | Expr::InSubquery(_) | Expr::Exists(_)
+        ))
+    })
+    .expect("the predicate never fails")
 }
 
 /// Re-`AND` the conjuncts, or `None` when there are none left.
@@ -2112,9 +2108,9 @@ fn expand_grouping_set(gs: &logical_expr::GroupingSet) -> Vec<Vec<Expr>> {
 /// The projection also has to carry through the plain columns the aggregate
 /// still references, since a `Project` replaces its child's schema rather than
 /// extending it.
-#[derive(Default)]
-struct DerivedCols {
-    cols: Vec<ProjectItem<ColumnRef>>,
+struct DerivedCols<'l> {
+    lowerer: &'l SqlLowerer<'l>,
+    cols: Vec<ProjectItem>,
     /// Whether any column is genuinely derived. Without one the aggregate keeps
     /// its original child, so trees that lower today keep their exact shape.
     any: bool,
@@ -2123,12 +2119,21 @@ struct DerivedCols {
     collision: Option<String>,
 }
 
-impl DerivedCols {
+impl<'l> DerivedCols<'l> {
+    fn new(lowerer: &'l SqlLowerer<'l>) -> Self {
+        Self {
+            lowerer,
+            cols: Vec::new(),
+            any: false,
+            collision: None,
+        }
+    }
+
     /// Add `alias := expr`, or note a collision if `alias` already means
     /// something else. `Project` carries one relation qualifier for all its
     /// columns, so `a.k` and `b.k` cannot both survive it — but that only
     /// matters when a projection gets inserted at all.
-    fn push(&mut self, alias: String, expr: Unresolved) {
+    fn push(&mut self, alias: String, expr: Scalar) {
         let existing = self
             .cols
             .iter()
@@ -2151,12 +2156,12 @@ impl DerivedCols {
         let Expr::Column(c) = unalias(expr) else {
             return Ok(());
         };
-        self.push(c.name.clone(), df_expr_to_unresolved(expr)?);
+        self.push(c.name.clone(), self.lowerer.lower_expr(expr)?);
         Ok(())
     }
 
     /// A genuinely derived column: `alias` now names `expr`'s value.
-    fn materialize(&mut self, alias: String, expr: Unresolved) -> Result<(), LoweringError> {
+    fn materialize(&mut self, alias: String, expr: Scalar) -> Result<(), LoweringError> {
         self.any = true;
         self.push(alias, expr);
         Ok(())
@@ -2178,7 +2183,7 @@ impl DerivedCols {
             let mut rewritten = agg_fn.clone();
             for arg in &mut rewritten.args {
                 let alias = unalias(arg).to_string();
-                self.materialize(alias.clone(), df_expr_to_unresolved(arg)?)?;
+                self.materialize(alias.clone(), self.lowerer.lower_expr(arg)?)?;
                 *arg = Expr::Column(DfColumn::new_unqualified(alias));
             }
             return Ok(Expr::AggregateFunction(rewritten));
@@ -2200,12 +2205,12 @@ impl DerivedCols {
         }
         match agg_col_name(&agg_fn.args) {
             Some(name) => {
-                self.push(name, df_expr_to_unresolved(arg)?);
+                self.push(name, self.lowerer.lower_expr(arg)?);
                 Ok(expr.clone())
             }
             None => {
                 let alias = unalias(arg).to_string();
-                self.materialize(alias.clone(), df_expr_to_unresolved(arg)?)?;
+                self.materialize(alias.clone(), self.lowerer.lower_expr(arg)?)?;
                 let mut agg_fn = agg_fn.clone();
                 agg_fn.args[0] = Expr::Column(DfColumn::new_unqualified(alias));
                 Ok(Expr::AggregateFunction(agg_fn))
@@ -2276,7 +2281,7 @@ fn expr_to_group_ref(expr: &Expr) -> Result<ColumnRef, LoweringError> {
     match expr {
         // Preserve the relation qualifier so a GROUP BY / PARTITION BY key over a
         // join (`b.k` vs `a.k`) resolves to the correct side — the same rule the
-        // scalar predicate path uses (`df_expr_to_unresolved`).
+        // scalar predicate path uses (`lower_expr`).
         Expr::Column(col) => Ok(match &col.relation {
             Some(rel) => ColumnRef::Qualified {
                 table: rel.to_string(),

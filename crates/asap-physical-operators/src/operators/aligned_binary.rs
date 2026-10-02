@@ -1,6 +1,8 @@
 //! Arithmetic on complete, aligned population/window rows used by precomputation.
 use super::*;
-use planner_types::{post_asap::BinaryOperator, pre_asap::BinaryOpKind};
+use crate::expressions::binary::BinaryOpKind;
+use crate::expressions::binary::BinaryOperator;
+
 use std::collections::BTreeSet;
 
 impl Operator {

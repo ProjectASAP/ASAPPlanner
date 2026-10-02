@@ -1,7 +1,7 @@
 use super::*;
 
 pub(super) fn estimate_heterogeneous_summary(
-    root: &SummaryNode,
+    root: &OperatorNode,
     deployments: &[CostedSummaryDeployment<'_>],
     evidence: &SummaryNodeEvidence,
     scope: &ComparisonScope,
@@ -19,46 +19,6 @@ pub(super) fn estimate_heterogeneous_summary(
         .map(|(deployment, framework)| (deployment.summary as *const _, framework))
         .collect();
     validate_summary_edges_and_physical_ids(root, evidence, &frameworks_by_node)?;
-    fn summary_source_selections(
-        node: &SummaryNode,
-        seen: &mut HashSet<*const SummaryNode>,
-        out: &mut Vec<LogicalSourceSelection>,
-    ) -> Result<(), AnalyticalCostError> {
-        if !seen.insert(node as *const _) {
-            return Ok(());
-        }
-        match &node.expr {
-            SummaryExpr::KeepPreAsap(query) => query_source_selections(query, out)?,
-            SummaryExpr::SummaryAgg { child, .. } | SummaryExpr::ValueOperation { child, .. } => {
-                summary_source_selections(child, seen, out)?
-            }
-            SummaryExpr::SummaryMerge { children, .. } => {
-                for child in children {
-                    summary_source_selections(child, seen, out)?;
-                }
-            }
-            SummaryExpr::SummarySubtract { left, right }
-            | SummaryExpr::RelationalJoin { left, right, .. }
-            | SummaryExpr::BinaryOp {
-                lhs: left,
-                rhs: right,
-                ..
-            }
-            | SummaryExpr::SummaryJoin {
-                outer: left,
-                inner: right,
-                ..
-            } => {
-                summary_source_selections(left, seen, out)?;
-                summary_source_selections(right, seen, out)?;
-            }
-            SummaryExpr::SummaryDelete { summary_input, .. }
-            | SummaryExpr::SummaryEstimate { summary_input, .. } => {
-                summary_source_selections(summary_input, seen, out)?
-            }
-        }
-        Ok(())
-    }
     let evaluation_count = scope.validate()?;
     let by_node: HashMap<_, _> = deployments
         .iter()
@@ -81,7 +41,7 @@ pub(super) fn estimate_heterogeneous_summary(
         let node_evidence = evidence
             .aggregation(deployment.summary)
             .ok_or(AnalyticalCostError::MissingOrStale("summary_agg"))?;
-        let SummaryExpr::SummaryAgg { child, .. } = &deployment.summary.expr else {
+        let Operator::ASAP(ASAPOp::SummaryAgg { child, .. }) = &deployment.summary.operator else {
             return Err(AnalyticalCostError::UnsupportedCandidate);
         };
         let inputs = node_evidence.inputs.validate()?;
@@ -95,7 +55,7 @@ pub(super) fn estimate_heterogeneous_summary(
                         .ok_or(AnalyticalCostError::MissingComparisonScope(
                             "summary source coverage",
                         ))?;
-                if !matches!(&child.expr, SummaryExpr::KeepPreAsap(_))
+                if !has_retained_subdag_evidence(child, evidence)
                     || inputs.initial_input_rows != raw.planning_time_input_rows
                     || inputs.initial_input_bytes != raw.planning_time_input_bytes
                     || inputs.initial_source_scan_bytes != raw.planning_time_source_scan_bytes
@@ -106,7 +66,7 @@ pub(super) fn estimate_heterogeneous_summary(
                     ));
                 }
                 let mut actual_selections = Vec::new();
-                summary_source_selections(child, &mut HashSet::new(), &mut actual_selections)?;
+                query_source_selections(child, &mut HashSet::new(), &mut actual_selections)?;
                 let actual_selections = deduplicate_source_selections(actual_selections);
                 let expected = (
                     declared.source.clone(),
@@ -120,7 +80,7 @@ pub(super) fn estimate_heterogeneous_summary(
                 }
             }
             None => {
-                if matches!(&child.expr, SummaryExpr::KeepPreAsap(_))
+                if has_retained_subdag_evidence(child, evidence)
                     || inputs.initial_source_scan_bytes != 0
                     || !node_evidence.bootstrap_read_identity.is_empty()
                 {
@@ -131,7 +91,7 @@ pub(super) fn estimate_heterogeneous_summary(
             }
         }
         validate_guarantee(deployment.guarantee, scope.data_arrival)?;
-        let logical_state = format!("{:?}", deployment.summary.expr);
+        let logical_state = format!("{:?}", deployment.summary.operator);
         let window_framework = (*frameworks_by_node
             .get(&(deployment.summary as *const _))
             .ok_or(AnalyticalCostError::MissingOrStale(
@@ -253,9 +213,9 @@ pub(super) fn estimate_heterogeneous_summary(
 
     #[expect(clippy::too_many_arguments, reason = "CPU and I/O traversal state")]
     fn visit_ops(
-        node: &SummaryNode,
+        node: &OperatorNode,
         seen: &mut HashSet<String>,
-        by_node: &HashMap<*const SummaryNode, &CostedSummaryDeployment<'_>>,
+        by_node: &HashMap<*const OperatorNode, &CostedSummaryDeployment<'_>>,
         evidence: &SummaryNodeEvidence,
         scope: &ComparisonScope,
         evaluation_count: u64,
@@ -266,13 +226,29 @@ pub(super) fn estimate_heterogeneous_summary(
         if !seen.insert(physical_id) {
             return Ok(());
         }
-        match &node.expr {
-            SummaryExpr::BinaryOp { lhs, rhs, .. }
-            | SummaryExpr::RelationalJoin {
+        if has_retained_subdag_evidence(node, evidence) {
+            let retained = evidence
+                .retained_queries
+                .get(&(node as *const _))
+                .ok_or(AnalyticalCostError::MissingOrStale("retain_exact"))?;
+            if !retained.preprocessing_cpu_ops_over_horizon.is_finite()
+                || retained.preprocessing_cpu_ops_over_horizon < 0.0
+            {
+                return Err(AnalyticalCostError::InvalidOperationCost(
+                    "retain_exact",
+                    retained.preprocessing_cpu_ops_over_horizon,
+                ));
+            }
+            *cpu_ops += retained.preprocessing_cpu_ops_over_horizon;
+            return Ok(());
+        }
+        match &node.operator {
+            Operator::NonASAP(NonASAPOp::BinaryOp { lhs, rhs, .. })
+            | Operator::NonASAP(NonASAPOp::Join {
                 left: lhs,
                 right: rhs,
                 ..
-            } => {
+            }) => {
                 let operation = summary_operation_evidence(node, evidence)?.resource();
                 *cpu_ops += evaluation_count as f64
                     * validated_operator_executions("exact_binary", operation)? as f64
@@ -300,39 +276,31 @@ pub(super) fn estimate_heterogeneous_summary(
                 )?;
             }
 
-            SummaryExpr::ValueOperation { child, .. } => {
+            Operator::NonASAP(_)
+            | Operator::ASAP(
+                ASAPOp::FinalizeExactAccumulator { .. }
+                | ASAPOp::MaintainPopulation { .. }
+                | ASAPOp::EvaluatePopulation { .. },
+            ) => {
                 let operation = summary_operation_evidence(node, evidence)?.resource();
                 *cpu_ops += evaluation_count as f64
                     * validated_operator_executions("value_operation", operation)? as f64
                     * validated_operator_cpu("value_operation", operation.cpu_ops)?;
                 add_operator_io(io_bytes, operation, evaluation_count)?;
-                visit_ops(
-                    child,
-                    seen,
-                    by_node,
-                    evidence,
-                    scope,
-                    evaluation_count,
-                    cpu_ops,
-                    io_bytes,
-                )?;
-            }
-            SummaryExpr::KeepPreAsap(_) => {
-                let retained = evidence
-                    .retained_queries
-                    .get(&(node as *const _))
-                    .ok_or(AnalyticalCostError::MissingOrStale("keep_pre_asap"))?;
-                if !retained.preprocessing_cpu_ops_over_horizon.is_finite()
-                    || retained.preprocessing_cpu_ops_over_horizon < 0.0
-                {
-                    return Err(AnalyticalCostError::InvalidOperationCost(
-                        "keep_pre_asap",
-                        retained.preprocessing_cpu_ops_over_horizon,
-                    ));
+                for child in node.children() {
+                    visit_ops(
+                        child,
+                        seen,
+                        by_node,
+                        evidence,
+                        scope,
+                        evaluation_count,
+                        cpu_ops,
+                        io_bytes,
+                    )?;
                 }
-                *cpu_ops += retained.preprocessing_cpu_ops_over_horizon;
             }
-            SummaryExpr::SummaryAgg { child, .. } => {
+            Operator::ASAP(ASAPOp::SummaryAgg { child, .. }) => {
                 visit_ops(
                     child,
                     seen,
@@ -344,7 +312,7 @@ pub(super) fn estimate_heterogeneous_summary(
                     io_bytes,
                 )?;
             }
-            SummaryExpr::SummaryMerge { children, .. } => {
+            Operator::ASAP(ASAPOp::SummaryMerge { children }) => {
                 let operation = summary_operation_evidence(node, evidence)?.resource();
                 let merge = validated_operator_cpu("summary_merge", operation.cpu_ops)?;
                 *cpu_ops += evaluation_count as f64
@@ -364,7 +332,7 @@ pub(super) fn estimate_heterogeneous_summary(
                     )?;
                 }
             }
-            SummaryExpr::SummarySubtract { left, right } => {
+            Operator::ASAP(ASAPOp::SummarySubtract { left, right }) => {
                 let operation = summary_operation_evidence(node, evidence)?.resource();
                 *cpu_ops += evaluation_count as f64
                     * validated_operator_executions("summary_subtract", operation)? as f64
@@ -391,7 +359,7 @@ pub(super) fn estimate_heterogeneous_summary(
                     io_bytes,
                 )?;
             }
-            SummaryExpr::SummaryDelete { summary_input, .. } => {
+            Operator::ASAP(ASAPOp::SummaryDelete { summary_input, .. }) => {
                 let delete = summary_operation_evidence(node, evidence)?;
                 let SummaryOperatorEvidence::Delete {
                     resource: operation,
@@ -406,44 +374,18 @@ pub(super) fn estimate_heterogeneous_summary(
                     .get(&(node as *const _))
                     .ok_or(AnalyticalCostError::MissingOrStale("summary_delete_owner"))?;
                 fn collect_aggs(
-                    node: &SummaryNode,
-                    seen: &mut HashSet<*const SummaryNode>,
-                    out: &mut Vec<*const SummaryNode>,
+                    node: &OperatorNode,
+                    seen: &mut HashSet<*const OperatorNode>,
+                    out: &mut Vec<*const OperatorNode>,
                 ) {
                     if !seen.insert(node as *const _) {
                         return;
                     }
-                    match &node.expr {
-                        SummaryExpr::SummaryAgg { child, .. } => {
-                            out.push(node as *const _);
-                            collect_aggs(child, seen, out);
-                        }
-                        SummaryExpr::ValueOperation { child, .. } => collect_aggs(child, seen, out),
-                        SummaryExpr::SummaryMerge { children, .. } => {
-                            children
-                                .iter()
-                                .for_each(|child| collect_aggs(child, seen, out));
-                        }
-                        SummaryExpr::SummarySubtract { left, right }
-                        | SummaryExpr::RelationalJoin { left, right, .. }
-                        | SummaryExpr::BinaryOp {
-                            lhs: left,
-                            rhs: right,
-                            ..
-                        }
-                        | SummaryExpr::SummaryJoin {
-                            outer: left,
-                            inner: right,
-                            ..
-                        } => {
-                            collect_aggs(left, seen, out);
-                            collect_aggs(right, seen, out);
-                        }
-                        SummaryExpr::SummaryDelete { summary_input, .. }
-                        | SummaryExpr::SummaryEstimate { summary_input, .. } => {
-                            collect_aggs(summary_input, seen, out)
-                        }
-                        SummaryExpr::KeepPreAsap(_) => {}
+                    if matches!(node.operator, Operator::ASAP(ASAPOp::SummaryAgg { .. })) {
+                        out.push(node as *const _);
+                    }
+                    for child in node.children() {
+                        collect_aggs(child, seen, out);
                     }
                 }
                 let mut reachable = Vec::new();
@@ -491,11 +433,11 @@ pub(super) fn estimate_heterogeneous_summary(
                     io_bytes,
                 )?;
             }
-            SummaryExpr::SummaryEstimate { summary_input, .. } => {
+            Operator::ASAP(ASAPOp::SummaryEstimate { summary_input, .. }) => {
                 let operation = summary_operation_evidence(node, evidence)?.resource();
                 *cpu_ops += evaluation_count as f64
-                    * validated_operator_executions("summary_readout", operation)? as f64
-                    * validated_operator_cpu("summary_readout", operation.cpu_ops)?;
+                    * validated_operator_executions("summary_evaluation", operation)? as f64
+                    * validated_operator_cpu("summary_evaluation", operation.cpu_ops)?;
                 add_operator_io(io_bytes, operation, evaluation_count)?;
                 visit_ops(
                     summary_input,
@@ -508,7 +450,7 @@ pub(super) fn estimate_heterogeneous_summary(
                     io_bytes,
                 )?;
             }
-            SummaryExpr::SummaryJoin { outer, inner, .. } => {
+            Operator::ASAP(ASAPOp::SummaryJoin { outer, inner, .. }) => {
                 let join = evidence
                     .joins
                     .get(&(node as *const _))
@@ -554,6 +496,9 @@ pub(super) fn estimate_heterogeneous_summary(
                     cpu_ops,
                     io_bytes,
                 )?;
+            }
+            Operator::ASAP(ASAPOp::Extension { .. }) => {
+                return Err(AnalyticalCostError::UnsupportedCandidate);
             }
         }
         Ok(())
@@ -613,55 +558,37 @@ fn add_operator_io(
 }
 
 fn validate_summary_edges_and_physical_ids(
-    root: &SummaryNode,
+    root: &OperatorNode,
     evidence: &SummaryNodeEvidence,
-    frameworks_by_node: &HashMap<*const SummaryNode, &Option<SummaryWindowFramework>>,
+    frameworks_by_node: &HashMap<*const OperatorNode, &Option<SummaryWindowFramework>>,
 ) -> Result<(), AnalyticalCostError> {
-    fn children(node: &SummaryNode) -> Vec<&SummaryNode> {
-        match &node.expr {
-            SummaryExpr::KeepPreAsap(_) => vec![],
-            SummaryExpr::SummaryAgg { child, .. } | SummaryExpr::ValueOperation { child, .. } => {
-                vec![child]
-            }
-            SummaryExpr::SummaryMerge { children, .. } => {
-                children.iter().map(|child| child.as_ref()).collect()
-            }
-            SummaryExpr::SummarySubtract { left, right }
-            | SummaryExpr::RelationalJoin { left, right, .. }
-            | SummaryExpr::BinaryOp {
-                lhs: left,
-                rhs: right,
-                ..
-            }
-            | SummaryExpr::SummaryJoin {
-                outer: left,
-                inner: right,
-                ..
-            } => vec![left, right],
-            SummaryExpr::SummaryDelete { summary_input, .. }
-            | SummaryExpr::SummaryEstimate { summary_input, .. } => vec![summary_input],
-        }
+    fn children<'a>(
+        node: &'a OperatorNode,
+        evidence: &SummaryNodeEvidence,
+    ) -> Vec<&'a OperatorNode> {
+        summary_children(node, evidence)
     }
     fn metadata(
-        node: &SummaryNode,
+        node: &OperatorNode,
         evidence: &SummaryNodeEvidence,
     ) -> Result<(String, Vec<EdgeStatistics>, EdgeStatistics), AnalyticalCostError> {
-        match &node.expr {
-            SummaryExpr::KeepPreAsap(_) => {
-                let retained = evidence
-                    .retained_queries
-                    .get(&(node as *const _))
-                    .ok_or(AnalyticalCostError::MissingOrStale("keep_pre_asap"))?;
-                Ok((retained.physical_id.clone(), vec![], retained.output))
+        if let Some(retained) = evidence.retained_queries.get(&(node as *const _)) {
+            if node.contains_asap() {
+                return Err(AnalyticalCostError::InvalidPhysicalDag(
+                    "retained sub-DAG evidence covers summary operators",
+                ));
             }
-            SummaryExpr::SummaryAgg { .. } => {
+            return Ok((retained.physical_id.clone(), vec![], retained.output));
+        }
+        match &node.operator {
+            Operator::ASAP(ASAPOp::SummaryAgg { .. }) => {
                 let value = evidence
                     .aggregations
                     .get(&(node as *const _))
                     .ok_or(AnalyticalCostError::MissingOrStale("summary_agg"))?;
                 Ok((value.physical_id.clone(), vec![value.input], value.output))
             }
-            SummaryExpr::SummaryJoin { .. } => {
+            Operator::ASAP(ASAPOp::SummaryJoin { .. }) => {
                 let value = evidence
                     .joins
                     .get(&(node as *const _))
@@ -683,16 +610,16 @@ fn validate_summary_edges_and_physical_ids(
         }
     }
     fn visit(
-        node: &SummaryNode,
+        node: &OperatorNode,
         evidence: &SummaryNodeEvidence,
-        frameworks_by_node: &HashMap<*const SummaryNode, &Option<SummaryWindowFramework>>,
-        seen: &mut HashSet<*const SummaryNode>,
+        frameworks_by_node: &HashMap<*const OperatorNode, &Option<SummaryWindowFramework>>,
+        seen: &mut HashSet<*const OperatorNode>,
         physical: &mut HashMap<String, (Vec<EdgeStatistics>, EdgeStatistics, String)>,
     ) -> Result<EdgeStatistics, AnalyticalCostError> {
         if !seen.insert(node as *const _) {
             return metadata(node, evidence).map(|(_, _, output)| output);
         }
-        let child_nodes = children(node);
+        let child_nodes = children(node, evidence);
         let child_outputs = child_nodes
             .iter()
             .map(|child| visit(child, evidence, frameworks_by_node, seen, physical))
@@ -702,17 +629,18 @@ fn validate_summary_edges_and_physical_ids(
             .map(|child| summary_physical_id(child, evidence))
             .collect::<Result<Vec<_>, _>>()?;
         let (id, inputs, output) = metadata(node, evidence)?;
-        let local_fingerprint = match &node.expr {
-            SummaryExpr::KeepPreAsap(_) => {
-                format!("{:?}", evidence.retained_queries.get(&(node as *const _)))
+        let local_fingerprint = if has_retained_subdag_evidence(node, evidence) {
+            format!("{:?}", evidence.retained_queries.get(&(node as *const _)))
+        } else {
+            match &node.operator {
+                Operator::ASAP(ASAPOp::SummaryAgg { .. }) => {
+                    format!("{:?}", evidence.aggregations.get(&(node as *const _)))
+                }
+                Operator::ASAP(ASAPOp::SummaryJoin { .. }) => {
+                    format!("{:?}", evidence.joins.get(&(node as *const _)))
+                }
+                _ => format!("{:?}", evidence.operations.get(&(node as *const _))),
             }
-            SummaryExpr::SummaryAgg { .. } => {
-                format!("{:?}", evidence.aggregations.get(&(node as *const _)))
-            }
-            SummaryExpr::SummaryJoin { .. } => {
-                format!("{:?}", evidence.joins.get(&(node as *const _)))
-            }
-            _ => format!("{:?}", evidence.operations.get(&(node as *const _))),
         };
         // A provider identity names the complete physical operator, including
         // its inputs. Equal local widths/costs do not make operators consuming
@@ -720,7 +648,7 @@ fn validate_summary_edges_and_physical_ids(
         let framework = frameworks_by_node.get(&(node as *const _));
         let fingerprint = format!(
             "logical={:?}|framework={framework:?}|{local_fingerprint}|children={child_physical_ids:?}",
-            node.expr
+            node.operator
         );
         if id.is_empty()
             || inputs != child_outputs
@@ -756,20 +684,49 @@ fn validate_summary_edges_and_physical_ids(
     .map(|_| ())
 }
 
+/// Whether `node` is a retained non-ASAP sub-DAG costed as one unit: the
+/// provider bound retained-query evidence to it instead of per-operator
+/// evidence. Its children are then not visited. No ASAP descendant may be
+/// hidden by this boundary; graph validation rejects such evidence.
+fn has_retained_subdag_evidence(node: &OperatorNode, evidence: &SummaryNodeEvidence) -> bool {
+    evidence.retained_queries.contains_key(&(node as *const _)) && !node.contains_asap()
+}
+
+/// The inputs the estimator visits below `node`: none for a retained
+/// sub-DAG, every direct input otherwise.
+fn summary_children<'a>(
+    node: &'a OperatorNode,
+    evidence: &SummaryNodeEvidence,
+) -> Vec<&'a OperatorNode> {
+    if has_retained_subdag_evidence(node, evidence) {
+        vec![]
+    } else {
+        node.children()
+            .into_iter()
+            .map(|child| child.as_ref())
+            .collect()
+    }
+}
+
 fn summary_physical_id(
-    node: &SummaryNode,
+    node: &OperatorNode,
     evidence: &SummaryNodeEvidence,
 ) -> Result<String, AnalyticalCostError> {
-    match &node.expr {
-        SummaryExpr::KeepPreAsap(_) => evidence
+    if has_retained_subdag_evidence(node, evidence) {
+        return evidence
             .retained_queries
             .get(&(node as *const _))
-            .map(|value| value.physical_id.clone()),
-        SummaryExpr::SummaryAgg { .. } => evidence
+            .map(|value| value.physical_id.clone())
+            .ok_or(AnalyticalCostError::MissingOrStale(
+                "summary physical identity",
+            ));
+    }
+    match &node.operator {
+        Operator::ASAP(ASAPOp::SummaryAgg { .. }) => evidence
             .aggregations
             .get(&(node as *const _))
             .map(|value| value.physical_id.clone()),
-        SummaryExpr::SummaryJoin { .. } => evidence
+        Operator::ASAP(ASAPOp::SummaryJoin { .. }) => evidence
             .joins
             .get(&(node as *const _))
             .map(|value| value.physical_id.clone()),
@@ -786,45 +743,26 @@ fn summary_physical_id(
 /// child output buffers remain live until their final consumer executes;
 /// operator workspace and its output buffer coexist during that execution.
 pub(super) fn estimate_transient_liveness(
-    root: &SummaryNode,
+    root: &OperatorNode,
     evidence: &SummaryNodeEvidence,
 ) -> Result<u64, AnalyticalCostError> {
-    fn children(node: &SummaryNode) -> Vec<&SummaryNode> {
-        match &node.expr {
-            SummaryExpr::KeepPreAsap(_) => vec![],
-            SummaryExpr::SummaryAgg { child, .. } | SummaryExpr::ValueOperation { child, .. } => {
-                vec![child]
-            }
-            SummaryExpr::SummaryMerge { children, .. } => {
-                children.iter().map(|child| child.as_ref()).collect()
-            }
-            SummaryExpr::SummarySubtract { left, right }
-            | SummaryExpr::RelationalJoin { left, right, .. }
-            | SummaryExpr::BinaryOp {
-                lhs: left,
-                rhs: right,
-                ..
-            }
-            | SummaryExpr::SummaryJoin {
-                outer: left,
-                inner: right,
-                ..
-            } => vec![left, right],
-            SummaryExpr::SummaryDelete { summary_input, .. }
-            | SummaryExpr::SummaryEstimate { summary_input, .. } => vec![summary_input],
-        }
+    fn children<'a>(
+        node: &'a OperatorNode,
+        evidence: &SummaryNodeEvidence,
+    ) -> Vec<&'a OperatorNode> {
+        summary_children(node, evidence)
     }
     fn visit<'a>(
-        node: &'a SummaryNode,
+        node: &'a OperatorNode,
         evidence: &SummaryNodeEvidence,
         seen: &mut HashSet<String>,
         uses: &mut HashMap<String, usize>,
-        order: &mut Vec<&'a SummaryNode>,
+        order: &mut Vec<&'a OperatorNode>,
     ) -> Result<(), AnalyticalCostError> {
         if !seen.insert(summary_physical_id(node, evidence)?) {
             return Ok(());
         }
-        for child in children(node) {
+        for child in children(node, evidence) {
             *uses
                 .entry(summary_physical_id(child, evidence)?)
                 .or_default() += 1;
@@ -834,28 +772,24 @@ pub(super) fn estimate_transient_liveness(
         Ok(())
     }
     fn memory(
-        node: &SummaryNode,
+        node: &OperatorNode,
         evidence: &SummaryNodeEvidence,
     ) -> Result<(u64, u64), AnalyticalCostError> {
-        match &node.expr {
-            SummaryExpr::KeepPreAsap(_) => evidence
+        if has_retained_subdag_evidence(node, evidence) {
+            return evidence
                 .retained_queries
                 .get(&(node as *const _))
                 .map(|value| (value.working_memory_bytes, value.output_buffer_bytes))
-                .ok_or(AnalyticalCostError::MissingOrStale("keep_pre_asap")),
-            SummaryExpr::SummaryAgg { .. } => Ok((0, 0)),
-            SummaryExpr::SummaryJoin { .. } => evidence
+                .ok_or(AnalyticalCostError::MissingOrStale("retain_exact"));
+        }
+        match &node.operator {
+            Operator::ASAP(ASAPOp::SummaryAgg { .. }) => Ok((0, 0)),
+            Operator::ASAP(ASAPOp::SummaryJoin { .. }) => evidence
                 .joins
                 .get(&(node as *const _))
                 .map(|value| (value.working_memory_bytes, value.output_buffer_bytes))
                 .ok_or(AnalyticalCostError::MissingOrStale("summary_join")),
-            SummaryExpr::SummaryMerge { .. }
-            | SummaryExpr::BinaryOp { .. }
-            | SummaryExpr::RelationalJoin { .. }
-            | SummaryExpr::ValueOperation { .. }
-            | SummaryExpr::SummarySubtract { .. }
-            | SummaryExpr::SummaryDelete { .. }
-            | SummaryExpr::SummaryEstimate { .. } => {
+            _ => {
                 let value = summary_operation_evidence(node, evidence)?.resource();
                 Ok((value.working_memory_bytes, value.output_buffer_bytes))
             }
@@ -884,7 +818,7 @@ pub(super) fn estimate_transient_liveness(
         live = live
             .checked_add(output)
             .ok_or(AnalyticalCostError::Overflow)?;
-        for child in children(node) {
+        for child in children(node, evidence) {
             let child_id = summary_physical_id(child, evidence)?;
             let remaining =
                 uses.get_mut(&child_id)
@@ -902,50 +836,23 @@ pub(super) fn estimate_transient_liveness(
     Ok(peak)
 }
 #[cfg(test)]
-pub(super) fn evidence_nodes(root: &SummaryNode) -> (Vec<&SummaryNode>, Vec<&SummaryNode>) {
+pub(super) fn evidence_nodes(root: &OperatorNode) -> (Vec<&OperatorNode>, Vec<&OperatorNode>) {
     fn visit<'a>(
-        node: &'a SummaryNode,
-        seen: &mut HashSet<*const SummaryNode>,
-        aggregations: &mut Vec<&'a SummaryNode>,
-        joins: &mut Vec<&'a SummaryNode>,
+        node: &'a OperatorNode,
+        seen: &mut HashSet<*const OperatorNode>,
+        aggregations: &mut Vec<&'a OperatorNode>,
+        joins: &mut Vec<&'a OperatorNode>,
     ) {
         if !seen.insert(node as *const _) {
             return;
         }
-        match &node.expr {
-            SummaryExpr::SummaryAgg { child, .. } => {
-                aggregations.push(node);
-                visit(child, seen, aggregations, joins);
-            }
-            SummaryExpr::ValueOperation { child, .. } => visit(child, seen, aggregations, joins),
-            SummaryExpr::SummaryMerge { children, .. } => {
-                for child in children {
-                    visit(child, seen, aggregations, joins);
-                }
-            }
-            SummaryExpr::SummarySubtract { left, right }
-            | SummaryExpr::RelationalJoin { left, right, .. }
-            | SummaryExpr::BinaryOp {
-                lhs: left,
-                rhs: right,
-                ..
-            }
-            | SummaryExpr::SummaryJoin {
-                outer: left,
-                inner: right,
-                ..
-            } => {
-                if matches!(&node.expr, SummaryExpr::SummaryJoin { .. }) {
-                    joins.push(node);
-                }
-                visit(left, seen, aggregations, joins);
-                visit(right, seen, aggregations, joins);
-            }
-            SummaryExpr::SummaryDelete { summary_input, .. }
-            | SummaryExpr::SummaryEstimate { summary_input, .. } => {
-                visit(summary_input, seen, aggregations, joins);
-            }
-            SummaryExpr::KeepPreAsap(_) => {}
+        match &node.operator {
+            Operator::ASAP(ASAPOp::SummaryAgg { .. }) => aggregations.push(node),
+            Operator::ASAP(ASAPOp::SummaryJoin { .. }) => joins.push(node),
+            _ => {}
+        }
+        for child in node.children() {
+            visit(child, seen, aggregations, joins);
         }
     }
     let mut aggregations = Vec::new();
@@ -961,7 +868,7 @@ struct SummaryOperationCounts {
     merges_per_read: u64,
     subtracts_per_read: u64,
     deletes_per_update: u64,
-    readouts_per_read: u64,
+    evaluations_per_read: u64,
     joins_per_read: u64,
 }
 
@@ -970,7 +877,7 @@ struct SummaryOperationCounts {
 /// once; explicit delete frequency comes from deletion evidence.
 #[cfg(test)]
 pub(super) fn estimate_incremental_summary_maintenance(
-    root: &SummaryNode,
+    root: &OperatorNode,
     guarantee: &SummaryMaintenanceLifecycleGuarantee,
     inputs: SummaryMaintenanceInputs,
     cpu: SummaryOperationCpuEvidence,
@@ -980,7 +887,7 @@ pub(super) fn estimate_incremental_summary_maintenance(
 }
 #[cfg(test)]
 pub(super) fn estimate_incremental_summary_maintenance_with_join(
-    root: &SummaryNode,
+    root: &OperatorNode,
     guarantee: &SummaryMaintenanceLifecycleGuarantee,
     inputs: SummaryMaintenanceInputs,
     cpu: SummaryOperationCpuEvidence,
@@ -1030,10 +937,10 @@ pub(super) fn estimate_incremental_summary_maintenance_with_join(
             .checked_mul(fanout)
             .ok_or(AnalyticalCostError::Overflow)?
     };
-    let readout = required_cpu_when(
-        counts.readouts_per_read,
-        "readout_cpu_ops",
-        cpu.readout_cpu_ops,
+    let evaluation = required_cpu_when(
+        counts.evaluations_per_read,
+        "evaluation_cpu_ops",
+        cpu.evaluation_cpu_ops,
     )?;
     let join_cpu = match (counts.joins_per_read, join.as_ref()) {
         (0, _) => 0.0,
@@ -1071,7 +978,7 @@ pub(super) fn estimate_incremental_summary_maintenance_with_join(
         + evaluations * counts.merges_per_read as f64 * instances * merge
         + evaluations * counts.subtracts_per_read as f64 * instances * subtract
         + delete_events as f64 * counts.deletes_per_update as f64 * delete
-        + evaluations * counts.readouts_per_read as f64 * instances * readout
+        + evaluations * counts.evaluations_per_read as f64 * instances * evaluation
         + evaluations * counts.joins_per_read as f64 * join_cpu;
     if !cpu_ops.is_finite() {
         return Err(AnalyticalCostError::Overflow);
@@ -1238,25 +1145,23 @@ fn required_cpu_when(
 }
 
 #[cfg(test)]
-fn count_operations(root: &SummaryNode) -> Result<SummaryOperationCounts, AnalyticalCostError> {
+fn count_operations(root: &OperatorNode) -> Result<SummaryOperationCounts, AnalyticalCostError> {
     fn visit(
-        node: &SummaryNode,
-        seen: &mut HashSet<*const SummaryNode>,
+        node: &OperatorNode,
+        seen: &mut HashSet<*const OperatorNode>,
         counts: &mut SummaryOperationCounts,
     ) -> Result<(), AnalyticalCostError> {
-        if !seen.insert(node as *const SummaryNode) {
+        if !seen.insert(node as *const OperatorNode) {
             return Ok(());
         }
-        match &node.expr {
-            SummaryExpr::KeepPreAsap(_) => {}
-            SummaryExpr::SummaryAgg { child, .. } => {
+        match &node.operator {
+            Operator::ASAP(ASAPOp::SummaryAgg { .. }) => {
                 counts.state_builds = counts
                     .state_builds
                     .checked_add(1)
                     .ok_or(AnalyticalCostError::Overflow)?;
-                visit(child, seen, counts)?;
             }
-            SummaryExpr::SummaryMerge { children, .. } => {
+            Operator::ASAP(ASAPOp::SummaryMerge { children }) => {
                 if children.is_empty() {
                     return Err(AnalyticalCostError::InvalidPhysicalDag(
                         "summary merge has no children",
@@ -1266,50 +1171,44 @@ fn count_operations(root: &SummaryNode) -> Result<SummaryOperationCounts, Analyt
                     .merges_per_read
                     .checked_add(children.len().saturating_sub(1) as u64)
                     .ok_or(AnalyticalCostError::Overflow)?;
-                for child in children {
-                    visit(child, seen, counts)?;
-                }
             }
-            SummaryExpr::SummarySubtract { left, right } => {
+            Operator::ASAP(ASAPOp::SummarySubtract { .. }) => {
                 counts.subtracts_per_read = counts
                     .subtracts_per_read
                     .checked_add(1)
                     .ok_or(AnalyticalCostError::Overflow)?;
-                visit(left, seen, counts)?;
-                visit(right, seen, counts)?;
             }
-            SummaryExpr::BinaryOp { lhs, rhs, .. } => {
-                visit(lhs, seen, counts)?;
-                visit(rhs, seen, counts)?;
-            }
-            SummaryExpr::RelationalJoin { left, right, .. } => {
-                visit(left, seen, counts)?;
-                visit(right, seen, counts)?;
-            }
-
-            SummaryExpr::ValueOperation { child, .. } => visit(child, seen, counts)?,
-            SummaryExpr::SummaryDelete { summary_input, .. } => {
+            Operator::ASAP(ASAPOp::SummaryDelete { .. }) => {
                 counts.deletes_per_update = counts
                     .deletes_per_update
                     .checked_add(1)
                     .ok_or(AnalyticalCostError::Overflow)?;
-                visit(summary_input, seen, counts)?;
             }
-            SummaryExpr::SummaryEstimate { summary_input, .. } => {
-                counts.readouts_per_read = counts
-                    .readouts_per_read
+            Operator::ASAP(
+                ASAPOp::SummaryEstimate { .. } | ASAPOp::FinalizeExactAccumulator { .. },
+            ) => {
+                counts.evaluations_per_read = counts
+                    .evaluations_per_read
                     .checked_add(1)
                     .ok_or(AnalyticalCostError::Overflow)?;
-                visit(summary_input, seen, counts)?;
             }
-            SummaryExpr::SummaryJoin { outer, inner, .. } => {
+            Operator::ASAP(ASAPOp::SummaryJoin { .. }) => {
                 counts.joins_per_read = counts
                     .joins_per_read
                     .checked_add(1)
                     .ok_or(AnalyticalCostError::Overflow)?;
-                visit(outer, seen, counts)?;
-                visit(inner, seen, counts)?;
             }
+            // Retained relational work, accumulator/population boundaries and
+            // exact query-time operators add no summary operation.
+            Operator::NonASAP(_)
+            | Operator::ASAP(
+                ASAPOp::MaintainPopulation { .. }
+                | ASAPOp::EvaluatePopulation { .. }
+                | ASAPOp::Extension { .. },
+            ) => {}
+        }
+        for child in node.children() {
+            visit(child, seen, counts)?;
         }
         Ok(())
     }

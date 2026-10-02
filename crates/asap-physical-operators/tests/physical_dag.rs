@@ -8,18 +8,28 @@ use asap_physical_operators::{
     Statistic,
 };
 use futures::{executor::block_on, StreamExt};
+use planner_types::ir::export::NonASAPOpKind as ValueOperation;
+use planner_types::ir::export::{
+    EdgeRole, GroupingEdgeCompatibility, PostAsapDag, PostAsapDagEdge, PostAsapDagNode,
+    PostAsapNodeId, PostAsapOperatorPayload, WindowEdgeCompatibility,
+};
+use planner_types::ir::BinaryOperator;
+use planner_types::ir::ScalarExpr as QueryExpr;
 use planner_types::{
-    post_asap::{ExactKind, ExactParams, SummaryFamilyType, SummaryField, SummarySchema},
+    post_asap::{ExactKind, ExactParams, Field, FieldDataType},
     pre_asap::DataType,
 };
 use std::sync::Arc;
 fn schema(fields: &[(&str, DataType, bool)]) -> Schema {
-    Arc::new(SummarySchema {
+    Arc::new(planner_types::pre_asap::Schema {
+        unique_keys: vec![],
+        closed: false,
         fields: fields
             .iter()
-            .map(|(name, dtype, nullable)| SummaryField {
+            .map(|(name, dtype, nullable)| Field {
+                table: None,
                 name: (*name).into(),
-                dtype: SummaryFamilyType::Plain(dtype.clone()),
+                dtype: FieldDataType::Plain(dtype.clone()),
                 nullable: *nullable,
             })
             .collect(),
@@ -114,12 +124,12 @@ fn grouped_sort_limit_across_batches() {
 
 // The same computation runs in either engine scope with fresh per-run state.
 #[test]
-fn summary_construction_merge_and_readout_at_both_phases() {
+fn summary_construction_merge_and_evaluation_at_both_phases() {
     let schema = schema(&[("v", DataType::Float64, false)]);
     let batches = (1..=20)
         .map(|v| Batch::try_new(schema.clone(), vec![vec![Value::Float64(v as f64)]]).unwrap())
         .collect();
-    let family = SummaryFamilyType::ExactAggregate(ExactKind::Sum, ExactParams::Sum);
+    let family = FieldDataType::ExactAggregate(ExactKind::Sum, ExactParams::Sum);
     let build = Operator::summary_build(schema.clone(), family, 0, None, vec![]).unwrap();
     let state = build.schema();
     let mut dag = PhysicalDag::default();
@@ -137,11 +147,11 @@ fn summary_construction_merge_and_readout_at_both_phases() {
     dag.add(
         4,
         vec![3],
-        Operator::readout(
+        Operator::evaluation(
             state,
             0,
-            asap_physical_operators::operators::ReadoutQuery::Exact(
-                asap_physical_operators::summary_kernels::exact::ExactReadout {
+            asap_physical_operators::operators::SummaryEvaluation::Exact(
+                asap_physical_operators::summary_kernels::exact::ExactEvaluation {
                     statistic: Statistic::Sum,
                     lookback_ms: None,
                 },
@@ -278,7 +288,7 @@ fn binding_rejects_unsupported_operations() {
     let schema = schema(&[("v", DataType::Float64, false)]);
     assert!(Operator::summary_build(
         schema.clone(),
-        SummaryFamilyType::ExactAggregate(ExactKind::Rate, ExactParams::Rate),
+        FieldDataType::ExactAggregate(ExactKind::Rate, ExactParams::Rate),
         0,
         None,
         vec![]
@@ -286,17 +296,17 @@ fn binding_rejects_unsupported_operations() {
     .is_err());
     let sum = Operator::summary_build(
         schema.clone(),
-        SummaryFamilyType::ExactAggregate(ExactKind::Sum, ExactParams::Sum),
+        FieldDataType::ExactAggregate(ExactKind::Sum, ExactParams::Sum),
         0,
         None,
         vec![],
     )
     .unwrap();
-    assert!(Operator::readout(
+    assert!(Operator::evaluation(
         sum.schema(),
         0,
-        asap_physical_operators::operators::ReadoutQuery::Sketch(
-            planner_types::post_asap::SketchQuery::Quantile { q: 0.5 }
+        asap_physical_operators::operators::SummaryEvaluation::Sketch(
+            planner_types::post_asap::SketchStatistic::Quantile { q: 0.5 }
         )
     )
     .is_err());
@@ -307,8 +317,9 @@ fn binding_rejects_unsupported_operations() {
 #[test]
 fn kll_raw_partial_and_precomputed_are_native_dags() {
     use planner_types::post_asap::{GroupingStrategy, SketchAlgorithm, SketchKind, SketchParams};
+
     let input = schema(&[("value", DataType::Float64, false)]);
-    let family = SummaryFamilyType::Sketch(
+    let family = FieldDataType::Sketch(
         SketchKind::new(SketchAlgorithm::Kll, SketchParams::Kll { k: 512 }),
         GroupingStrategy::PerSubpopulationInstance,
     );
@@ -393,11 +404,11 @@ fn kll_raw_partial_and_precomputed_are_native_dags() {
         dag.add(
             5,
             vec![4],
-            Operator::readout(
+            Operator::evaluation(
                 state.clone(),
                 0,
-                asap_physical_operators::operators::ReadoutQuery::Sketch(
-                    planner_types::post_asap::SketchQuery::Quantile { q: 0.5 },
+                asap_physical_operators::operators::SummaryEvaluation::Sketch(
+                    planner_types::post_asap::SketchStatistic::Quantile { q: 0.5 },
                 ),
             )
             .unwrap(),
@@ -417,11 +428,14 @@ fn kll_raw_partial_and_precomputed_are_native_dags() {
 #[test]
 fn exact_state_and_family_validation() {
     use asap_physical_operators::summary_kernels::exact::ExactAccumulator;
-    let family = SummaryFamilyType::ExactAggregate(ExactKind::Sum, ExactParams::Sum);
+    let family = FieldDataType::ExactAggregate(ExactKind::Sum, ExactParams::Sum);
     let mut acc = ExactAccumulator::new(family.clone(), false).unwrap();
     acc.update(None, 7., 0);
-    let schema = Arc::new(SummarySchema {
-        fields: vec![SummaryField {
+    let schema = Arc::new(planner_types::pre_asap::Schema {
+        unique_keys: vec![],
+        closed: false,
+        fields: vec![Field {
+            table: None,
             name: "state".into(),
             dtype: family.clone(),
             nullable: false,
@@ -446,11 +460,11 @@ fn exact_state_and_family_validation() {
     dag.add(
         1,
         vec![0],
-        Operator::readout(
+        Operator::evaluation(
             schema.clone(),
             0,
-            asap_physical_operators::operators::ReadoutQuery::Exact(
-                asap_physical_operators::summary_kernels::exact::ExactReadout {
+            asap_physical_operators::operators::SummaryEvaluation::Exact(
+                asap_physical_operators::summary_kernels::exact::ExactEvaluation {
                     statistic: Statistic::Sum,
                     lookback_ms: None,
                 },
@@ -461,7 +475,7 @@ fn exact_state_and_family_validation() {
     .unwrap();
     assert_eq!(floats(&run(&dag, 1, query()), 0), vec![7.]);
     let wrong = ExactAccumulator::new(
-        SummaryFamilyType::ExactAggregate(ExactKind::Max, ExactParams::Max),
+        FieldDataType::ExactAggregate(ExactKind::Max, ExactParams::Max),
         false,
     )
     .unwrap();
@@ -480,14 +494,10 @@ fn exact_state_and_family_validation() {
 fn bind_post_asap_before_execution() {
     use asap_physical_operators::dag::planner::bind;
     use planner_types::{
-        post_asap::{
-            EdgeRole, ExecutionDataState, GroupingEdgeCompatibility, PostAsapDag, PostAsapDagEdge,
-            PostAsapDagNode, PostAsapNodeId, PostAsapOperatorPayload, ValueOperation,
-            WindowEdgeCompatibility,
-        },
-        pre_asap::{ArithmeticOpKind, ProjectItem, QueryExpr, ScalarValue},
+        post_asap::ExecutionDataState,
+        pre_asap::{ArithmeticOpKind, ScalarValue},
     };
-    use std::{collections::BTreeMap, rc::Rc};
+    use std::collections::BTreeMap;
     let schema = schema(&[("value", DataType::Float64, false)]);
     let node = |id, payload| PostAsapDagNode {
         id: PostAsapNodeId(id),
@@ -500,20 +510,32 @@ fn bind_post_asap_before_execution() {
         nodes: vec![
             node(
                 0,
-                PostAsapOperatorPayload::Fallback {
-                    expression: QueryExpr::promql_scalar(1.),
+                PostAsapOperatorPayload::Relational {
+                    operator: ValueOperation::Values {
+                        rows: vec![vec![planner_types::ir::export::WireScalarExpr::Literal(
+                            planner_types::pre_asap::ScalarValue::Float64(1.),
+                        )]],
+                        schema: (*schema).clone(),
+                    },
                 },
             ),
             node(
                 1,
-                PostAsapOperatorPayload::Value {
-                    operation: ValueOperation::Project {
-                        cols: vec![ProjectItem {
+                PostAsapOperatorPayload::Relational {
+                    operator: ValueOperation::Project {
+                        cols: vec![planner_types::ir::export::WireProjectItem {
                             alias: None,
-                            expr: QueryExpr::Arithmetic {
+                            expr: planner_types::ir::export::WireScalarExpr::Arithmetic {
+                                semantics: planner_types::ir::ExprSemantics::Sql,
                                 op: ArithmeticOpKind::Add,
-                                left: Rc::new(QueryExpr::Column(0)),
-                                right: Rc::new(QueryExpr::Literal(ScalarValue::Float64(2.))),
+                                left: Box::new(planner_types::ir::export::WireScalarExpr::Column(
+                                    0,
+                                )),
+                                right: Box::new(
+                                    planner_types::ir::export::WireScalarExpr::Literal(
+                                        ScalarValue::Float64(2.),
+                                    ),
+                                ),
                             },
                         }],
                         qualifier: None,
@@ -549,31 +571,29 @@ fn bind_post_asap_before_execution() {
     // A literal Fallback needs no deployment input.
     let literal = bind(&dag, BTreeMap::new(), &[1]).unwrap();
     assert_eq!(floats(&run(&literal, 1, query()), 0), vec![3.]);
-    dag.nodes[1].payload = PostAsapOperatorPayload::Value {
-        operation: ValueOperation::Extension {
-            name: "unknown".into(),
-        },
+    dag.nodes[1].payload = PostAsapOperatorPayload::Extension {
+        name: "unsupported".into(),
     };
     assert!(bind(&dag, sources(), &[1]).is_err());
 }
 
 // A completed empty population has an exact zero count, with integer output.
 #[test]
-fn empty_exact_count_is_an_integer_state_readout() {
+fn empty_exact_count_is_an_integer_state_evaluation() {
     let input = schema(&[("value", DataType::Float64, false)]);
     let build = Operator::summary_build(
         input.clone(),
-        SummaryFamilyType::ExactAggregate(ExactKind::Count, ExactParams::Count),
+        FieldDataType::ExactAggregate(ExactKind::Count, ExactParams::Count),
         0,
         None,
         vec![],
     )
     .unwrap();
-    let read = Operator::readout(
+    let read = Operator::evaluation(
         build.schema(),
         0,
-        asap_physical_operators::operators::ReadoutQuery::Exact(
-            asap_physical_operators::summary_kernels::exact::ExactReadout {
+        asap_physical_operators::operators::SummaryEvaluation::Exact(
+            asap_physical_operators::summary_kernels::exact::ExactEvaluation {
                 statistic: Statistic::Count,
                 lookback_ms: None,
             },
@@ -592,13 +612,7 @@ fn empty_exact_count_is_an_integer_state_readout() {
 #[test]
 fn source_batches_must_match_the_bound_schema() {
     use asap_physical_operators::dag::{self, PhysicalOperator};
-    use planner_types::{
-        post_asap::{
-            ExecutionDataState, PostAsapDag, PostAsapDagNode, PostAsapNodeId,
-            PostAsapOperatorPayload,
-        },
-        pre_asap::QueryExpr,
-    };
+    use planner_types::post_asap::ExecutionDataState;
     use std::{cell::Cell, collections::BTreeMap, rc::Rc};
     struct WrongSource {
         schema: Schema,
@@ -634,8 +648,13 @@ fn source_batches_must_match_the_bound_schema() {
     let plan = PostAsapDag {
         nodes: vec![PostAsapDagNode {
             id: PostAsapNodeId(0),
-            payload: PostAsapOperatorPayload::Fallback {
-                expression: QueryExpr::promql_scalar(1.),
+            payload: PostAsapOperatorPayload::Relational {
+                operator: ValueOperation::Values {
+                    rows: vec![vec![planner_types::ir::export::WireScalarExpr::Literal(
+                        planner_types::pre_asap::ScalarValue::Float64(1.),
+                    )]],
+                    schema: (*expected).clone(),
+                },
             },
             output_state: ExecutionDataState::QUERY_ROWS,
             output_schema: (*expected).clone(),
@@ -703,67 +722,87 @@ fn planner_semijoin_sort_limit_contract_at_both_phases() {
     use asap_physical_operators::dag::planner::{bind, Source};
     use planner_types::{
         post_asap::*,
-        pre_asap::{CompareOpKind, GroupKeys, JoinKind, Predicate, QueryExpr, SortKey},
+        pre_asap::{CompareOpKind, GroupKeys, JoinKind},
     };
-    use std::{collections::BTreeMap, rc::Rc};
+    use std::collections::BTreeMap;
     let rows_schema = schema(&[
         ("group", DataType::Utf8, false),
         ("key", DataType::Utf8, false),
         ("score", DataType::Float64, false),
     ]);
     let keys_schema = schema(&[("key", DataType::Utf8, false)]);
-    let node = |id, payload, schema: &Schema| PostAsapDagNode {
+    let node = |id, payload, schema: &asap_physical_operators::values::Schema| PostAsapDagNode {
         id: PostAsapNodeId(id),
         payload,
         output_schema: (**schema).clone(),
         output_state: ExecutionDataState::QUERY_ROWS,
         guarantee: None,
     };
-    let edge = |producer, consumer, role, schema: &Schema| PostAsapDagEdge {
-        producer: PostAsapNodeId(producer),
-        consumer: PostAsapNodeId(consumer),
-        role,
-        intermediate_schema: (**schema).clone(),
-        data_state: ExecutionDataState::QUERY_ROWS,
-        grouping: GroupingEdgeCompatibility::NotApplicable,
-        window: WindowEdgeCompatibility::NotApplicable,
+    let edge = |producer, consumer, role, schema: &asap_physical_operators::values::Schema| {
+        PostAsapDagEdge {
+            producer: PostAsapNodeId(producer),
+            consumer: PostAsapNodeId(consumer),
+            role,
+            intermediate_schema: (**schema).clone(),
+            data_state: ExecutionDataState::QUERY_ROWS,
+            grouping: GroupingEdgeCompatibility::NotApplicable,
+            window: WindowEdgeCompatibility::NotApplicable,
+        }
     };
     let groups = GroupKeys::by(vec![0]);
     let dag = PostAsapDag {
         nodes: vec![
             node(
                 0,
-                PostAsapOperatorPayload::Fallback {
-                    expression: QueryExpr::promql_scalar(0.),
+                PostAsapOperatorPayload::Relational {
+                    operator: ValueOperation::Values {
+                        rows: vec![vec![planner_types::ir::export::WireScalarExpr::Literal(
+                            planner_types::pre_asap::ScalarValue::Float64(0.),
+                        )]],
+                        schema: (*rows_schema).clone(),
+                    },
                 },
                 &rows_schema,
             ),
             node(
                 1,
-                PostAsapOperatorPayload::Fallback {
-                    expression: QueryExpr::promql_scalar(0.),
+                PostAsapOperatorPayload::Relational {
+                    operator: ValueOperation::Values {
+                        rows: vec![vec![planner_types::ir::export::WireScalarExpr::Literal(
+                            planner_types::pre_asap::ScalarValue::Float64(0.),
+                        )]],
+                        schema: (*keys_schema).clone(),
+                    },
                 },
                 &keys_schema,
             ),
             node(
                 2,
-                PostAsapOperatorPayload::RelationalJoin {
-                    join_kind: JoinKind::Semi,
-                    pruning: None,
-                    pred: Predicate(Rc::new(QueryExpr::Compare {
-                        left: Rc::new(QueryExpr::Column(1)),
-                        op: CompareOpKind::Eq,
-                        right: Rc::new(QueryExpr::Column(3)),
-                    })),
+                PostAsapOperatorPayload::Relational {
+                    operator: planner_types::ir::export::NonASAPOpKind::Join {
+                        join_kind: JoinKind::Semi,
+                        pred: planner_types::ir::export::WirePredicate(
+                            planner_types::ir::export::WireScalarExpr::Compare {
+                                left: Box::new(planner_types::ir::export::WireScalarExpr::Column(
+                                    1,
+                                )),
+                                op: CompareOpKind::Eq,
+                                right: Box::new(planner_types::ir::export::WireScalarExpr::Column(
+                                    3,
+                                )),
+                                semantics: planner_types::ir::ExprSemantics::Sql,
+                            },
+                        ),
+                    },
                 },
                 &rows_schema,
             ),
             node(
                 3,
-                PostAsapOperatorPayload::Value {
-                    operation: ValueOperation::Sort {
-                        keys: vec![SortKey {
-                            expr: QueryExpr::Column(2),
+                PostAsapOperatorPayload::Relational {
+                    operator: ValueOperation::Sort {
+                        keys: vec![planner_types::ir::export::WireSortKey {
+                            expr: planner_types::ir::export::WireScalarExpr::Column(2),
                             ascending: false,
                             nulls_first: false,
                         }],
@@ -774,9 +813,9 @@ fn planner_semijoin_sort_limit_contract_at_both_phases() {
             ),
             node(
                 4,
-                PostAsapOperatorPayload::Value {
-                    operation: ValueOperation::Limit {
-                        n: 1,
+                PostAsapOperatorPayload::Relational {
+                    operator: ValueOperation::Limit {
+                        n: Some(1),
                         offset: 0,
                         partition_by: groups,
                     },
@@ -854,8 +893,8 @@ fn planner_semijoin_sort_limit_contract_at_both_phases() {
 #[test]
 fn planner_expressions_preserve_collection_and_nullable_types() {
     use asap_physical_operators::dag::expressions::CompiledExpression;
-    use planner_types::pre_asap::{CompareOpKind, QueryExpr, ScalarValue};
-    use std::rc::Rc;
+    use planner_types::pre_asap::{CompareOpKind, ScalarValue};
+
     let input_schema = schema(&[(
         "items",
         DataType::Map {
@@ -903,9 +942,10 @@ fn planner_expressions_preserve_collection_and_nullable_types() {
     let projected = project.schema();
     dag.add(1, vec![0], project).unwrap();
     let predicate = QueryExpr::Compare {
-        left: Rc::new(QueryExpr::Column(0)),
+        semantics: planner_types::ir::ExprSemantics::Sql,
+        left: Box::new(QueryExpr::Column(0)),
         op: CompareOpKind::Ge,
-        right: Rc::new(QueryExpr::Literal(ScalarValue::Int64(1))),
+        right: Box::new(QueryExpr::Literal(ScalarValue::Int64(1))),
     };
     dag.add(
         2,
@@ -929,14 +969,16 @@ fn planner_expressions_preserve_collection_and_nullable_types() {
 // Outer, semi and anti joins share Planner predicates and preserve SQL null behavior.
 #[test]
 fn native_relational_join_kinds_preserve_unmatched_rows() {
-    use planner_types::pre_asap::{CompareOpKind, JoinKind, Predicate, QueryExpr};
-    use std::rc::Rc;
+    use planner_types::ir::Predicate;
+    use planner_types::pre_asap::{CompareOpKind, JoinKind};
+
     let input = schema(&[("key", DataType::Int64, true)]);
-    let predicate = Predicate(Rc::new(QueryExpr::Compare {
-        left: Rc::new(QueryExpr::Column(0)),
+    let predicate = Predicate(QueryExpr::Compare {
+        semantics: planner_types::ir::ExprSemantics::Sql,
+        left: Box::new(QueryExpr::Column(0)),
         op: CompareOpKind::Eq,
-        right: Rc::new(QueryExpr::Column(1)),
-    }));
+        right: Box::new(QueryExpr::Column(1)),
+    });
     for (kind, count) in [
         (JoinKind::Inner, 1),
         (JoinKind::Left, 3),
@@ -1010,6 +1052,7 @@ fn weighted_rate_topk_preserves_partitions_fractional_scores_and_evaluation_scop
 }
 fn assert_weighted_rate_topk(count_sketch: bool) {
     use planner_types::post_asap::{SketchAlgorithm, SketchKind, SketchParams};
+
     let raw = schema(&[
         ("service", DataType::Utf8, false),
         ("job", DataType::Utf8, false),
@@ -1047,7 +1090,7 @@ fn assert_weighted_rate_topk(count_sketch: bool) {
         Some((0, 60_000)),
     )
     .unwrap();
-    let family = SummaryFamilyType::Sketch(
+    let family = FieldDataType::Sketch(
         SketchKind::new(
             if count_sketch {
                 SketchAlgorithm::CountSketchWithHeap
@@ -1076,7 +1119,7 @@ fn assert_weighted_rate_topk(count_sketch: bool) {
         ("service", DataType::Utf8, false),
         ("score", DataType::Float64, false),
     ]);
-    let readout = Operator::keyed_readout(build.schema(), 1, 8, output.clone()).unwrap();
+    let evaluation = Operator::keyed_evaluation(build.schema(), 1, 8, output.clone()).unwrap();
     let mut dag = PhysicalDag::default();
     dag.add(
         0,
@@ -1086,7 +1129,7 @@ fn assert_weighted_rate_topk(count_sketch: bool) {
     .unwrap();
     dag.add(1, vec![0], rates).unwrap();
     dag.add(2, vec![1], build).unwrap();
-    dag.add(3, vec![2], readout).unwrap();
+    dag.add(3, vec![2], evaluation).unwrap();
     dag.add(
         4,
         vec![3],
@@ -1133,17 +1176,16 @@ fn grouped_temporal_schema_compiles_and_executes_topk() {
     use asap_physical_operators::physical_planner::{
         compile_node, CompiledPhysicalDag, InputContract, Source,
     };
-    use planner_types::post_asap::{
-        ExecutionDataState, PostAsapDagNode, PostAsapNodeId, PostAsapOperatorPayload,
-        ValueOperation,
-    };
+    use planner_types::ir::export::{PostAsapDagNode, PostAsapNodeId, PostAsapOperatorPayload};
+    use planner_types::post_asap::ExecutionDataState;
+
     use planner_types::pre_asap::{
-        aggregate_output_schema, AggIntent, Column, GroupKeys, QueryExpr, Reduction as IrReduction,
-        Schema as IrSchema,
+        aggregate_output_schema, AggIntent, GroupKeys, Reduction as IrReduction, Schema as IrSchema,
     };
+
     let grouped = IrSchema::new(vec![
-        Column::new("job", DataType::Utf8, false),
-        Column::new("sum", DataType::Float64, false),
+        planner_types::pre_asap::Field::plain("job", DataType::Utf8, false),
+        planner_types::pre_asap::Field::plain("sum", DataType::Float64, false),
     ]);
     let output = aggregate_output_schema(
         &grouped,
@@ -1154,14 +1196,22 @@ fn grouped_temporal_schema_compiles_and_executes_topk() {
     .unwrap();
     let input = schema(
         &output
-            .columns
+            .fields
             .iter()
-            .map(|c| (c.name.as_str(), c.dtype.clone(), c.nullable))
+            .map(|c| {
+                (
+                    c.name.as_str(),
+                    c.plain_dtype().unwrap().clone(),
+                    c.nullable,
+                )
+            })
             .collect::<Vec<_>>(),
     );
     let node = |id, operation| PostAsapDagNode {
         id: PostAsapNodeId(id),
-        payload: PostAsapOperatorPayload::Value { operation },
+        payload: PostAsapOperatorPayload::Relational {
+            operator: operation,
+        },
         output_state: ExecutionDataState::QUERY_ROWS,
         output_schema: (*input).clone(),
         guarantee: None,
@@ -1170,8 +1220,8 @@ fn grouped_temporal_schema_compiles_and_executes_topk() {
         &node(
             1,
             ValueOperation::Sort {
-                keys: vec![planner_types::pre_asap::SortKey {
-                    expr: QueryExpr::Column(1),
+                keys: vec![planner_types::ir::export::WireSortKey {
+                    expr: planner_types::ir::export::WireScalarExpr::Column(1),
                     ascending: false,
                     nulls_first: false,
                 }],
@@ -1185,7 +1235,7 @@ fn grouped_temporal_schema_compiles_and_executes_topk() {
         &node(
             2,
             ValueOperation::Limit {
-                n: 1,
+                n: Some(1),
                 offset: 0,
                 partition_by: GroupKeys::none(),
             },
@@ -1239,9 +1289,9 @@ fn certified_pruning_rejects_missing_authoritative_values_after_recovery() {
     };
     use planner_types::{
         post_asap::*,
-        pre_asap::{CompareOpKind, JoinKind, Predicate, QueryExpr},
+        pre_asap::{CompareOpKind, JoinKind},
     };
-    use std::{collections::BTreeMap, rc::Rc};
+    use std::collections::BTreeMap;
     let schema = schema(&[("key", DataType::Utf8, false)]);
     for certified in [false, true] {
         let node = PostAsapDagNode {
@@ -1249,21 +1299,18 @@ fn certified_pruning_rejects_missing_authoritative_values_after_recovery() {
             output_schema: (*schema).clone(),
             output_state: ExecutionDataState::QUERY_ROWS,
             guarantee: None,
-            payload: PostAsapOperatorPayload::RelationalJoin {
-                join_kind: JoinKind::Semi,
-                pred: Predicate(Rc::new(QueryExpr::Compare {
-                    left: Rc::new(QueryExpr::Column(0)),
-                    op: CompareOpKind::Eq,
-                    right: Rc::new(QueryExpr::Column(1)),
-                })),
-                pruning: certified.then_some(CandidateCompleteness::Certified {
-                    guarantee: ResultGuarantee {
-                        metric: ErrorMetric::TopKMembership,
-                        bound: BoundExpr::Zero,
-                        failure_probability: ProbabilityExpr::Constant { value: 0.01 },
-                        provenance: vec![],
-                    },
-                }),
+            payload: PostAsapOperatorPayload::Relational {
+                operator: planner_types::ir::export::NonASAPOpKind::Join {
+                    join_kind: JoinKind::Semi,
+                    pred: planner_types::ir::export::WirePredicate(
+                        planner_types::ir::export::WireScalarExpr::Compare {
+                            semantics: planner_types::ir::ExprSemantics::Sql,
+                            left: Box::new(planner_types::ir::export::WireScalarExpr::Column(0)),
+                            op: CompareOpKind::Eq,
+                            right: Box::new(planner_types::ir::export::WireScalarExpr::Column(1)),
+                        },
+                    ),
+                },
             },
         };
         let graph = CompiledPhysicalDag::from_operators(
@@ -1276,7 +1323,12 @@ fn certified_pruning_rejects_missing_authoritative_values_after_recovery() {
                 2,
                 (
                     vec![0, 1],
-                    compile_node(&node, &[schema.clone(), schema.clone()]).unwrap(),
+                    if certified {
+                        Operator::certified_semi_join(schema.clone(), schema.clone(), vec![(0, 0)])
+                            .unwrap()
+                    } else {
+                        compile_node(&node, &[schema.clone(), schema.clone()]).unwrap()
+                    },
                 ),
             )]
             .into(),
@@ -1365,12 +1417,15 @@ fn compiled_ingestion_binary_preserves_alignment_and_rejects_missing_updates() {
         output_schema: (*input).clone(),
         output_state: ExecutionDataState::INGESTION_ROWS,
         guarantee: None,
-        payload: PostAsapOperatorPayload::Binary {
-            operator: BinaryOperator {
-                kind: BinaryOpKind::Arithmetic(ArithmeticOpKind::Sub),
-                vector_match: None,
-                checked_relative_division: false,
-                checked_finite_division: false,
+        payload: PostAsapOperatorPayload::Relational {
+            operator: planner_types::ir::export::NonASAPOpKind::BinaryOp {
+                operator: BinaryOperator {
+                    kind: BinaryOpKind::Arithmetic(ArithmeticOpKind::Sub),
+                    vector_match: None,
+                    checked_relative_division: false,
+                    checked_finite_division: false,
+                },
+                return_bool: false,
             },
         },
     };

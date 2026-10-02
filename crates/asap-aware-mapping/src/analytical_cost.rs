@@ -2969,7 +2969,7 @@ mod tests {
     }
 
     fn comparison_scope() -> ComparisonScope {
-        use asap_types::pre_asap::query_expr::Source;
+        use asap_types::ir::operator_properties::Source;
         use asap_types::workload::{
             DurationMs, QueryRecurrence, QueryTimeScope, RepeatedDemand, RepetitionInterval,
             TimeSelection, TimestampMs,
@@ -3008,9 +3008,7 @@ mod tests {
 
     #[test]
     fn comparison_rejects_different_snapshot_predicate_time_or_horizon() {
-        use std::rc::Rc;
-
-        use asap_types::pre_asap::query_expr::{Predicate, QueryExpr};
+        use asap_types::ir::{Predicate, ScalarExpr};
         use asap_types::workload::{DurationMs, TimestampMs};
 
         let raw = comparison_scope();
@@ -3026,7 +3024,7 @@ mod tests {
         candidate = raw.clone();
         candidate.sources[0]
             .predicates
-            .push(Predicate(Rc::new(QueryExpr::promql_scalar(1.0))));
+            .push(Predicate(ScalarExpr::literal_f64(1.0)));
         assert_eq!(
             validate_comparison_scopes(&raw, &candidate),
             Err(AnalyticalCostError::ComparisonScopeMismatch("sources"))
@@ -3246,7 +3244,7 @@ mod tests {
             operator: PhysicalOperator::Scan,
             children: vec![],
             source_coverage: Some(SourceCoverage {
-                source: asap_types::pre_asap::query_expr::Source::Table {
+                source: asap_types::ir::operator_properties::Source::Table {
                     table_ref: "other_metrics".into(),
                 },
                 source_snapshot_id: "catalog-version-42".into(),
@@ -3313,7 +3311,7 @@ mod tests {
         let mut scope = comparison_scope();
         let coverage = scope.sources[0].clone();
         scope.sources.push(SourceCoverage {
-            source: asap_types::pre_asap::query_expr::Source::Table {
+            source: asap_types::ir::operator_properties::Source::Table {
                 table_ref: "auxiliary".into(),
             },
             source_snapshot_id: "catalog-version-42".into(),

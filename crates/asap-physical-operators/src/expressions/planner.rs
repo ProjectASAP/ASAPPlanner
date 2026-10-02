@@ -3,20 +3,22 @@ use crate::{
     values::{Schema, Value},
     Error,
 };
-use planner_types::pre_asap::{ArithmeticOpKind, CompareOpKind, DataType, QueryExpr, ScalarValue};
+use planner_types::pre_asap::{ArithmeticOpKind, CompareOpKind, DataType, ScalarValue};
+
+use planner_types::ir::ScalarExpr;
 use std::{cmp::Ordering, sync::Arc};
 
 pub(super) fn evaluate(
-    expr: &QueryExpr,
+    expr: &ScalarExpr,
     row: &[Value],
     schema: &planner_types::pre_asap::Schema,
 ) -> Result<Value, Error> {
     match expr {
-        QueryExpr::Column(index) => row.get(*index).cloned().ok_or(Error::Invalid(format!(
+        ScalarExpr::Column(index) => row.get(*index).cloned().ok_or(Error::Invalid(format!(
             "column {index} outside row width {}",
             row.len()
         ))),
-        QueryExpr::Literal(value) => Ok(match value {
+        ScalarExpr::Literal(value) => Ok(match value {
             ScalarValue::Interval {
                 months,
                 days,
@@ -32,18 +34,62 @@ pub(super) fn evaluate(
             ScalarValue::Boolean(value) => Value::Bool(*value),
             ScalarValue::Null => Value::Null,
         }),
-        QueryExpr::Compare { left, op, right } => {
+        ScalarExpr::Cast { expr, to, .. } => {
+            let value = evaluate(expr, row, schema)?;
+            match (value, to) {
+                (Value::Null, _) => Ok(Value::Null),
+                (Value::Int64(value), DataType::Float64) => Ok(Value::Float64(value as f64)),
+                (value, _)
+                    if expr
+                        .scalar_type(schema)
+                        .map_err(|e| Error::Invalid(e.to_string()))?
+                        .0
+                        == *to =>
+                {
+                    Ok(value)
+                }
+                _ => Err(Error::Invalid("unsupported cast".into())),
+            }
+        }
+        ScalarExpr::Negative { expr, .. } => match evaluate(expr, row, schema)? {
+            Value::Float64(v) => Ok(Value::Float64(-v)),
+            Value::Int64(v) => v
+                .checked_neg()
+                .map(Value::Int64)
+                .ok_or_else(|| Error::Invalid("integer negation overflow".into())),
+            Value::Null => Ok(Value::Null),
+            _ => Err(Error::Invalid("invalid negation input".into())),
+        },
+        ScalarExpr::Compare {
+            left, op, right, ..
+        } => {
             let left = evaluate(left, row, schema)?;
             let right = evaluate(right, row, schema)?;
             compare(op, left, right)
         }
-        QueryExpr::Arithmetic { op, left, right } => arithmetic(
+        ScalarExpr::Arithmetic {
+            op, left, right, ..
+        } => arithmetic(
             op,
             evaluate(left, row, schema)?,
             evaluate(right, row, schema)?,
         ),
-        QueryExpr::BoolAnd(parts) | QueryExpr::BoolOr(parts) => {
-            let and = matches!(expr, QueryExpr::BoolAnd(_));
+        ScalarExpr::Case {
+            operand: None,
+            branches,
+            else_expr,
+        } => {
+            for (condition, value) in branches {
+                if matches!(evaluate(condition, row, schema)?, Value::Bool(true)) {
+                    return evaluate(value, row, schema);
+                }
+            }
+            else_expr
+                .as_ref()
+                .map_or(Ok(Value::Null), |e| evaluate(e, row, schema))
+        }
+        ScalarExpr::BoolAnd(parts) | ScalarExpr::BoolOr(parts) => {
+            let and = matches!(expr, ScalarExpr::BoolAnd(_));
             let mut null = false;
             for part in parts {
                 match evaluate(part, row, schema)? {
@@ -55,21 +101,44 @@ pub(super) fn evaluate(
             }
             Ok(if null { Value::Null } else { Value::Bool(and) })
         }
-        QueryExpr::Not(value) => match evaluate(value, row, schema)? {
+        ScalarExpr::Not(value) => match evaluate(value, row, schema)? {
             Value::Bool(value) => Ok(Value::Bool(!value)),
             Value::Null => Ok(Value::Null),
             _ => Err(Error::Invalid("boolean predicate required".into())),
         },
-        QueryExpr::IsNull(value) => Ok(Value::Bool(matches!(
+        ScalarExpr::IsNull(value) => Ok(Value::Bool(matches!(
             evaluate(value, row, schema)?,
             Value::Null
         ))),
-        QueryExpr::IsNotNull(value) => Ok(Value::Bool(!matches!(
+        ScalarExpr::IsNotNull(value) => Ok(Value::Bool(!matches!(
             evaluate(value, row, schema)?,
             Value::Null
         ))),
-        QueryExpr::FunctionCall { name, args } => {
+        ScalarExpr::FunctionCall { name, args } => {
             use planner_types::pre_asap::scalar_signature::MapScalarFunction;
+            if planner_types::pre_asap::scalar_signature::promql_function_arity(name).is_some() {
+                let values = args
+                    .iter()
+                    .map(|arg| match evaluate(arg, row, schema)? {
+                        Value::Float64(v) => Ok(v),
+                        _ => Err(Error::Invalid("PromQL function requires floats".into())),
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                return Ok(Value::Float64(promql_function(name, &values)?));
+            }
+            if name == "promql_drop_metric_name" {
+                let Value::Utf8(encoded) = evaluate(&args[0], row, schema)? else {
+                    return Err(Error::Invalid("series identity must be Utf8".into()));
+                };
+                let mut labels: std::collections::BTreeMap<String, String> =
+                    serde_json::from_str(&encoded).map_err(|e| Error::Invalid(e.to_string()))?;
+                labels.remove("__name__");
+                return Ok(Value::Utf8(
+                    serde_json::to_string(&labels)
+                        .map_err(|e| Error::Invalid(e.to_string()))?
+                        .into(),
+                ));
+            }
             if name.eq_ignore_ascii_case("asap_struct_field") {
                 expr.scalar_type(schema)
                     .map_err(|error| Error::Invalid(error.to_string()))?;
@@ -81,10 +150,10 @@ pub(super) fn evaluate(
                     unreachable!()
                 };
                 let offset = match &args[1] {
-                    QueryExpr::Literal(ScalarValue::Int64(index)) => {
+                    ScalarExpr::Literal(ScalarValue::Int64(index)) => {
                         usize::try_from(index - 1).ok()
                     }
-                    QueryExpr::Literal(ScalarValue::Utf8(name)) => {
+                    ScalarExpr::Literal(ScalarValue::Utf8(name)) => {
                         fields.iter().position(|field| &field.name == name)
                     }
                     _ => None,
@@ -329,35 +398,120 @@ fn cell_cmp(left: &Value, right: &Value) -> Option<Ordering> {
     }
 }
 
+fn promql_function(name: &str, args: &[f64]) -> Result<f64, Error> {
+    let x = args[0];
+    Ok(match &name[7..] {
+        "abs" => x.abs(),
+        "ceil" => x.ceil(),
+        "floor" => x.floor(),
+        "exp" => x.exp(),
+        "ln" => x.ln(),
+        "log2" => x.log2(),
+        "log10" => x.log10(),
+        "sqrt" => x.sqrt(),
+        "sgn" => {
+            if x.is_nan() {
+                f64::NAN
+            } else if x == 0.0 {
+                0.0
+            } else {
+                x.signum()
+            }
+        }
+        "sin" => x.sin(),
+        "cos" => x.cos(),
+        "tan" => x.tan(),
+        "asin" => x.asin(),
+        "acos" => x.acos(),
+        "atan" => x.atan(),
+        "sinh" => x.sinh(),
+        "cosh" => x.cosh(),
+        "tanh" => x.tanh(),
+        "asinh" => x.asinh(),
+        "acosh" => x.acosh(),
+        "atanh" => x.atanh(),
+        "deg" => x.to_degrees(),
+        "rad" => x.to_radians(),
+        "round" => {
+            let inverse = 1.0 / args[1];
+            (x * inverse + 0.5).floor() / inverse
+        }
+        "clamp_min" => {
+            if x.is_nan() || args[1].is_nan() {
+                f64::NAN
+            } else {
+                x.max(args[1])
+            }
+        }
+        "clamp_max" => {
+            if x.is_nan() || args[1].is_nan() {
+                f64::NAN
+            } else {
+                x.min(args[1])
+            }
+        }
+        "clamp" => {
+            if args.iter().any(|x| x.is_nan()) {
+                f64::NAN
+            } else {
+                x.max(args[1]).min(args[2])
+            }
+        }
+        part => {
+            use chrono::{Datelike, Timelike};
+            if !x.is_finite() || x < i64::MIN as f64 || x >= i64::MAX as f64 {
+                return Ok(f64::NAN);
+            }
+            let Some(date) = chrono::DateTime::from_timestamp(x as i64, 0) else {
+                return Ok(f64::NAN);
+            };
+            match part {
+                "minute" => date.minute() as f64,
+                "hour" => date.hour() as f64,
+                "day_of_week" => date.weekday().num_days_from_sunday() as f64,
+                "day_of_month" => date.day() as f64,
+                "day_of_year" => date.ordinal() as f64,
+                "month" => date.month() as f64,
+                "year" => date.year() as f64,
+                "days_in_month" => {
+                    let year = date.year();
+                    let leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
+                    match date.month() {
+                        2 => {
+                            if leap {
+                                29.0
+                            } else {
+                                28.0
+                            }
+                        }
+                        4 | 6 | 9 | 11 => 30.0,
+                        _ => 31.0,
+                    }
+                }
+                _ => return Err(Error::Invalid("unregistered PromQL function".into())),
+            }
+        }
+    })
+}
+
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
 pub struct CompiledExpression {
-    expression: QueryExpr,
+    expression: ScalarExpr,
     schema: planner_types::pre_asap::Schema,
     output: (DataType, bool),
 }
 impl CompiledExpression {
-    pub(crate) fn expression(&self) -> &QueryExpr {
+    pub(crate) fn expression(&self) -> &ScalarExpr {
         &self.expression
     }
 
-    pub fn compile(expression: &QueryExpr, input: &Schema) -> Result<Self, Error> {
-        let schema = input
-            .fields
-            .iter()
-            .map(|field| {
-                let planner_types::post_asap::SummaryFamilyType::Plain(dtype) = &field.dtype else {
-                    return Err(Error::Invalid(
-                        "scalar expression cannot consume opaque summary state".into(),
-                    ));
-                };
-                Ok(planner_types::pre_asap::Column::new(
-                    field.name.clone(),
-                    dtype.clone(),
-                    field.nullable,
-                ))
-            })
-            .collect::<Result<Vec<_>, Error>>()?;
-        let schema = planner_types::pre_asap::Schema::new(schema);
+    pub fn compile(expression: &ScalarExpr, input: &Schema) -> Result<Self, Error> {
+        if !input.is_all_plain() {
+            return Err(Error::Invalid(
+                "scalar expression cannot consume summary state".into(),
+            ));
+        }
+        let schema = input.as_ref().clone();
         validate(expression, &schema)?;
         let output = expression
             .scalar_type(&schema)
@@ -378,15 +532,13 @@ impl CompiledExpression {
                 "persisted expression type differs from its semantics".into(),
             ));
         }
-        if input.fields.len() != self.schema.columns.len()
+        if input.fields.len() != self.schema.fields.len()
             || input
                 .fields
                 .iter()
-                .zip(&self.schema.columns)
+                .zip(&self.schema.fields)
                 .any(|(field, column)| {
-                    field.dtype
-                        != planner_types::post_asap::SummaryFamilyType::Plain(column.dtype.clone())
-                        || field.nullable != column.nullable
+                    field.dtype != column.dtype.clone() || field.nullable != column.nullable
                 })
         {
             return Err(Error::Invalid(
@@ -397,11 +549,12 @@ impl CompiledExpression {
     }
     /// Evaluate a row under the same typed schema used when binding the expression.
     pub fn evaluate(&self, row: &[Value]) -> Result<Value, Error> {
-        if row.len() != self.schema.columns.len()
-            || row
-                .iter()
-                .zip(&self.schema.columns)
-                .any(|(value, column)| !value.matches(&column.dtype, column.nullable))
+        if row.len() != self.schema.fields.len()
+            || row.iter().zip(&self.schema.fields).any(|(value, column)| {
+                !column
+                    .plain_dtype()
+                    .is_some_and(|dtype| value.matches(dtype, column.nullable))
+            })
         {
             return Err(Error::Invalid(
                 "expression input differs from its bound schema".into(),
@@ -410,13 +563,27 @@ impl CompiledExpression {
         evaluate(&self.expression, row, &self.schema)
     }
 }
-fn validate(expr: &QueryExpr, schema: &planner_types::pre_asap::Schema) -> Result<(), Error> {
+fn validate(expr: &ScalarExpr, schema: &planner_types::pre_asap::Schema) -> Result<(), Error> {
     let invalid = || Error::Invalid(format!("unsupported scalar expression: {expr:?}"));
     expr.scalar_type(schema)
         .map_err(|e| Error::Invalid(e.to_string()))?;
     match expr {
-        QueryExpr::Column(_) | QueryExpr::Literal(_) => Ok(()),
-        QueryExpr::Arithmetic { left, right, .. } => {
+        ScalarExpr::Column(_) | ScalarExpr::Literal(_) => Ok(()),
+        ScalarExpr::Cast { expr, to, .. } => {
+            let source = expr
+                .scalar_type(schema)
+                .map_err(|e| Error::Invalid(e.to_string()))?
+                .0;
+            if source != *to
+                && source != DataType::Null
+                && !(source == DataType::Int64 && *to == DataType::Float64)
+            {
+                return Err(invalid());
+            }
+            validate(expr, schema)
+        }
+        ScalarExpr::Negative { expr, .. } => validate(expr, schema),
+        ScalarExpr::Arithmetic { left, right, .. } => {
             for value in [left, right] {
                 validate(value, schema)?;
                 if !matches!(
@@ -431,7 +598,9 @@ fn validate(expr: &QueryExpr, schema: &planner_types::pre_asap::Schema) -> Resul
             }
             Ok(())
         }
-        QueryExpr::Compare { left, right, op } => {
+        ScalarExpr::Compare {
+            left, right, op, ..
+        } => {
             if !matches!(
                 op,
                 CompareOpKind::Eq
@@ -475,8 +644,10 @@ fn validate(expr: &QueryExpr, schema: &planner_types::pre_asap::Schema) -> Resul
             }
             Ok(())
         }
-        QueryExpr::FunctionCall { name, args } => {
-            if name != "asap_struct_field"
+        ScalarExpr::FunctionCall { name, args } => {
+            if name != "promql_drop_metric_name"
+                && planner_types::pre_asap::scalar_signature::promql_function_arity(name).is_none()
+                && name != "asap_struct_field"
                 && name != "asap_element_access"
                 && planner_types::pre_asap::scalar_signature::MapScalarFunction::from_name(name)
                     .is_none()
@@ -488,7 +659,29 @@ fn validate(expr: &QueryExpr, schema: &planner_types::pre_asap::Schema) -> Resul
             }
             Ok(())
         }
-        QueryExpr::BoolAnd(parts) | QueryExpr::BoolOr(parts) => {
+        ScalarExpr::Case {
+            operand: None,
+            branches,
+            else_expr,
+        } => {
+            for (condition, value) in branches {
+                validate(condition, schema)?;
+                if condition
+                    .scalar_type(schema)
+                    .map_err(|e| Error::Invalid(e.to_string()))?
+                    .0
+                    != DataType::Bool
+                {
+                    return Err(invalid());
+                }
+                validate(value, schema)?;
+            }
+            if let Some(value) = else_expr {
+                validate(value, schema)?;
+            }
+            Ok(())
+        }
+        ScalarExpr::BoolAnd(parts) | ScalarExpr::BoolOr(parts) => {
             for part in parts {
                 validate(part, schema)?;
                 if !matches!(
@@ -502,7 +695,7 @@ fn validate(expr: &QueryExpr, schema: &planner_types::pre_asap::Schema) -> Resul
             }
             Ok(())
         }
-        QueryExpr::Not(value) => {
+        ScalarExpr::Not(value) => {
             validate(value, schema)?;
             if !matches!(
                 value
@@ -515,7 +708,7 @@ fn validate(expr: &QueryExpr, schema: &planner_types::pre_asap::Schema) -> Resul
             }
             Ok(())
         }
-        QueryExpr::IsNull(value) | QueryExpr::IsNotNull(value) => validate(value, schema),
+        ScalarExpr::IsNull(value) | ScalarExpr::IsNotNull(value) => validate(value, schema),
         _ => Err(invalid()),
     }
 }

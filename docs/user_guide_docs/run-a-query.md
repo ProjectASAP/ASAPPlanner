@@ -109,8 +109,10 @@ whether to select them using its own evidence. Planner's automatic
 `global_selection` skips them; their presence alone does not show that they
 meet the requested target.
 
-Each input line is followed by its debug IR or an `ERR:` message. Post-ASAP
-output may contain summary state, readouts or exact `KeepPreAsap` work. An
+Each input line is followed by its debug IR or an `ERR:` message. Pre-ASAP and
+Post-ASAP output use the same node format: Post-ASAP output adds summary nodes
+(state, readouts) and keeps the original exact operators wherever no summary
+replaces them. An
 approximate target permits approximation; it does not guarantee a legal or
 certified sketch. The tool prints plans, not query results.
 

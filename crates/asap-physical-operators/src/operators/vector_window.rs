@@ -9,6 +9,8 @@ pub(crate) fn matrix_schema() -> Schema {
     fields.push(result_field("window_end", DataType::Timestamp, false));
     Arc::new(SummarySchema {
         fields,
+        unique_keys: vec![],
+        closed: false,
         time_index: Some(1),
     })
 }

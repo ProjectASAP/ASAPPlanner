@@ -8,7 +8,7 @@ Audience: developers moving computation from ASAPQuery-backend into
 Logical selection decides what to compute. The maintenance lifecycle sets node
 timing. `physical_planner::compile` turns a timed `PostAsapDag` into physical
 operator DAGs. The backend owns ingestion, panes, storage, stored-state
-readout, external exact engines, pricing/selection, and execution scheduling.
+evaluation, external exact engines, pricing/selection, and execution scheduling.
 
 A backend lowering is *covered* when `compile` accepts the corresponding
 `PostAsapDag` node and produces operators with the same result. The backend
@@ -29,7 +29,7 @@ Status values:
 
 | # | Backend site | Computation | Planner node | Status at #475 | Notes |
 |---|---|---|---|---|---|
-| 1 | `query_time.rs` `Lower::lower`, `compile_logical` | PromQL AST → `QueryTimeOperator` graph for a native query | `Fallback { QueryExpr }` subtrees plus value payloads | Missing | `compile` lowers `Fallback` only as a raw `Scan` source. |
+| 1 | `query_time.rs` `Lower::lower`, `compile_logical` | PromQL AST → `QueryTimeOperator` graph for a native query | `Fallback { QueryExpr }` sub-DAGs plus value payloads | Missing | `compile` lowers `Fallback` only as a raw `Scan` source. |
 | 2 | `QueryTimeOperator::Aggregate` (sum/min/max/avg/count) | Grouped value aggregation | `Value::Exact(Aggregate)`; `SummaryAgg{ExactAggregate, Reduce}` over finalized values | Supported | Also `promql_values::compile_aggregate`. |
 | 3 | `QueryTimeOperator::Sort`, `Limit` (topk, sort, sort_desc) | Ordering and per-group limits | `Value::Sort`, `Value::Limit` | Supported | |
 | 4 | `QueryTimeOperator::Binary`, `QueryPlanNode::Binary` (vector ⊗ scalar) | Arithmetic with a scalar operand | `Binary` whose operand is `Fallback{PromqlScalarBridge(Literal)}` | Missing | Query-time `Binary` accepts only label-map vector schemas. The literal node has no native binding. |
@@ -43,15 +43,15 @@ Status values:
 | 12 | `logical_dag.rs` `Subquery`, `subquery_grid`, `expanded_inputs` | Re-evaluate the child on a step grid and assemble a matrix | `Fallback{PromqlSubquery}` | Missing | No Planner operator. |
 | 13 | `QueryPlanNode::Scalar`, `DagCompiler::lower` scalar literal | Scalar constant | `Fallback{PromqlScalarBridge(Literal)}` | Missing | Only `promql_values::compile_scalar`. |
 | 14 | `DagCompiler::lower` `ReduceSum`; `physical_values.rs` PerEntity projection | Sum over finalized values; per-entity identity | `SummaryAgg{ExactAggregate(Sum)}` | Supported | The backend builds an identity `Operator::project` itself for PerEntity. |
-| 15 | `DagCompiler::lower` `ExactReadout`; `post_asap_readout.rs` ExactReadout | Finalize exact state (sum/count/min/max/rate/increase) | `Value::FinalizeExactAccumulator` | Partial | Count yields Int64 against a declared Float64 PromQL value. `compile` rejects it. |
-| 16 | `post_asap_readout.rs` SummaryEstimate (`readout_bound`, `expand_item_rows`) | Sketch estimate per group; TopK item expansion | `SummaryEstimate` | Partial | The backend's label-map state layout and MetricsQL `__name__` rules have no Planner equivalent. `compile_exact_readout` has no sketch counterpart. |
-| 17 | `post_asap_readout.rs` SummaryMerge (`merge_bound_states`) | Merge states by group | `SummaryMerge` | Supported | Union plus `summary_merge`. |
-| 18 | `post_asap_readout.rs` counter range parameters | Counter lookback for rate/increase | `TimeRange` ancestor of finalization | Supported | Applied through `with_counter_lookback`. |
-| 19 | `post_asap_readout.rs` `execute_value_fragment` | Per-timestamp binding of a value fragment | n/a | Backend | Evaluation scheduling. |
+| 15 | `DagCompiler::lower` `ExactEvaluation`; `post_asap_evaluation.rs` ExactEvaluation | Finalize exact state (sum/count/min/max/rate/increase) | `Value::FinalizeExactAccumulator` | Partial | Count yields Int64 against a declared Float64 PromQL value. `compile` rejects it. |
+| 16 | `post_asap_evaluation.rs` SummaryEstimate (`evaluation_bound`, `expand_item_rows`) | Sketch estimate per group; TopK item expansion | `SummaryEstimate` | Partial | The backend's label-map state layout and MetricsQL `__name__` rules have no Planner equivalent. `compile_exact_evaluation` has no sketch counterpart. |
+| 17 | `post_asap_evaluation.rs` SummaryMerge (`merge_bound_states`) | Merge states by group | `SummaryMerge` | Supported | Union plus `summary_merge`. |
+| 18 | `post_asap_evaluation.rs` counter range parameters | Counter lookback for rate/increase | `TimeRange` ancestor of finalization | Supported | Applied through `with_counter_lookback`. |
+| 19 | `post_asap_evaluation.rs` `execute_value_fragment` | Per-timestamp binding of a value fragment | n/a | Backend | Evaluation scheduling. |
 | 20 | `DagCompiler::lower` SummaryJoin / Subtract / Delete | Summary algebra | `SummaryJoin`, `SummarySubtract`, `SummaryDelete` | Missing | The backend also rejects these (`ExactFallback`). |
-| 21 | `current_series.rs` Snapshot + TopK | Current-series ranking | `ReadPopulation{TopK}` | Supported | |
-| 22 | `current_series.rs` Sum / Count / Average | Current-series aggregates | `ReadPopulation{Sum,Count,Average}` | Missing | `compile` accepts only TopK. |
-| 23 | `current_series.rs` Quantile | Current-series quantile | `ReadPopulation{Quantile}` | Missing | No exact quantile reduction. |
+| 21 | `current_series.rs` Snapshot + TopK | Current-series ranking | `EvaluatePopulation{TopK}` | Supported | |
+| 22 | `current_series.rs` Sum / Count / Average | Current-series aggregates | `EvaluatePopulation{Sum,Count,Average}` | Missing | `compile` accepts only TopK. |
+| 23 | `current_series.rs` Quantile | Current-series quantile | `EvaluatePopulation{Quantile}` | Missing | No exact quantile reduction. |
 | 24 | `raw_dag.rs` weight `Column` | Summary update from a sample/projected value | `SummaryAgg` | Supported | |
 | 25 | `raw_dag.rs` weight `Constant` | Unit/constant-weight update | `SummaryAgg` | Missing | `compile_node` requires a column weight. |
 | 26 | `raw_dag.rs` item `Column` / `Tuple` | Keyed update item | `SummaryAgg{item}` | Supported | `keyed_summary_build`. |
@@ -70,7 +70,7 @@ Totals at #475: 11 Supported, 4 Partial, 14 Missing, 2 Backend.
 | 4, 8, 13 | Query-time `Binary` folds a scalar-literal operand into a projection over grouped value rows. |
 | 5 | Query-time `Binary` over grouped value rows performs an inner equi-join on equal label columns, then applies the operator. Per-series rows remain Partial. |
 | 15 | Count finalization converts exactly to the declared Float64 value. |
-| 22, 23 | `ReadPopulation` Sum/Count/Average/Quantile compile to grouped aggregation. `Reduction::Quantile` implements PromQL interpolation. |
+| 22, 23 | `EvaluatePopulation` Sum/Count/Average/Quantile compile to grouped aggregation. `Reduction::Quantile` implements PromQL interpolation. |
 
 Totals after this change: 17 Supported, 4 Partial, 8 Missing, 2 Backend.
 
@@ -124,10 +124,10 @@ Totals are unchanged: 19 Supported, 5 Partial, 5 Missing, 2 Backend.
 
 | Row | Change |
 |---|---|
-| 5 | Query-time `Binary` over rows with a series identity, such as per-series readouts of stored state, uses the Fallback's `series_labels` and `series_binary`. Examples: `avg_over_time` as stored sum/count, and `rate(a) / rate(b)`. Matching drops `__name__` and honors `on`/`ignoring` when the payload carries them. Only one-to-one arithmetic is covered; `group_left`/`group_right` stay rejected and comparisons are row 7. Now Supported. |
+| 5 | Query-time `Binary` over rows with a series identity, such as per-series evaluations of stored state, uses the Fallback's `series_labels` and `series_binary`. Examples: `avg_over_time` as stored sum/count, and `rate(a) / rate(b)`. Matching drops `__name__` and honors `on`/`ignoring` when the payload carries them. Only one-to-one arithmetic is covered; `group_left`/`group_right` stay rejected and comparisons are row 7. Now Supported. |
 | 4, 8 | A literal operand also applies to per-series rows and drops `__name__`, in the Fallback too. Series whose label sets become equal are an error, as in Prometheus. |
 
-Grouped `sum`/`avg`, current-series `Sum`/`Average` readouts, and
+Grouped `sum`/`avg`, current-series `Sum`/`Average` evaluations, and
 `sum_over_time`/`avg_over_time` use Prometheus' Kahan-Neumaier summation. An
 average switches to an incremental mean once the running sum would overflow.
 The grouped path also serves SQL `SUM`/`AVG` over Float64, which are now
@@ -175,7 +175,7 @@ and `group_left`, including a right-side series identity when needed. Thus
 |---|---|
 | 1 | Comparisons, `bool`, set operators, `group_left`/`group_right`, `scalar()` operands, and literals over aggregates whose value has another name, such as `sum by (job) (a) * 2`. Still Partial. |
 | 5 | Grouped `Binary` rows use the same operator instead of a relational join. A duplicate match group is now an error instead of a cross product. |
-| 7 | Fallback, grouped `Binary`, and per-series comparisons and sets. Temporal stored readouts drop `__name__` before matching, including exact Count conversion, and reject duplicate output identities. |
+| 7 | Fallback, grouped `Binary`, and per-series comparisons and sets. Temporal stored evaluations drop `__name__` before matching, including exact Count conversion, and reject duplicate output identities. |
 
 Totals after this change: 20 Supported, 5 Partial, 4 Missing, 2 Backend.
 
@@ -188,7 +188,7 @@ Totals after this change: 20 Supported, 5 Partial, 4 Missing, 2 Backend.
 An argument whose output provably lacks `le`, such as
 `sum by (job) (rate(x_bucket[5m]))`, is rejected at lowering. Prometheus
 returns an empty vector for it. Candidate search keeps the classic form as one
-exact `KeepPreAsap` subtree for every accuracy target; it has no sketch
+retained exact ordinary sub-DAG for every accuracy target; it has no sketch
 candidate. `histogram_quantiles` lowers each branch the same way; the
 Fallback compiler accepts its `Concat` of relabeled branches and rejects
 duplicate output label sets. Nested aggregation, such as
@@ -208,8 +208,8 @@ In order of backend usage:
    After these shapes are covered, the backend can delete rows 28 and 30.
 2. Rows 25 and 27: constant weights and `EntityIdentity` items for precompute
    `SummaryAgg`.
-3. Row 16: a label-map sketch-state readout, the counterpart of
-   `compile_exact_readout`, and MetricsQL `__name__` retention rules.
+3. Row 16: a label-map sketch-state evaluation, the counterpart of
+   `compile_exact_evaluation`, and MetricsQL `__name__` retention rules.
 4. Row 20: summary join, subtract, and delete.
 
 `fill`, `fill_left`, and `fill_right` matching modifiers are rejected by the

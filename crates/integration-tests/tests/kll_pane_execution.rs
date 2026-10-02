@@ -1,7 +1,7 @@
 //! Maintenance -> stored pane state -> independently bound query execution.
 mod physical_common;
 use asap_physical_operators::{
-    operators::{Operator, ReadoutQuery},
+    operators::{Operator, SummaryEvaluation},
     physical_planner::{CompiledPhysicalDag, InputContract, Source},
     plan::{PhysicalDag, PhysicalOperator, PlanProperties},
     runtime::{Input, Limits, OutputStream, RunContext, Scope},
@@ -11,8 +11,8 @@ use asap_physical_operators::{
 };
 use asap_types::{
     post_asap::{
-        SketchAlgorithm, SketchKind, SketchParams, SketchQuery, SummaryFamilyType, SummaryField,
-        SummarySchema,
+        Field, FieldDataType, Schema as LogicalSchema, SketchAlgorithm, SketchKind, SketchParams,
+        SketchStatistic,
     },
     pre_asap::DataType,
 };
@@ -25,17 +25,20 @@ use std::{
     },
 };
 
-fn family(k: u32) -> SummaryFamilyType {
-    SummaryFamilyType::Sketch(
+fn family(k: u32) -> FieldDataType {
+    FieldDataType::Sketch(
         SketchKind::new(SketchAlgorithm::Kll, SketchParams::Kll { k }),
         Default::default(),
     )
 }
 fn raw_schema() -> Schema {
-    Arc::new(SummarySchema {
-        fields: vec![SummaryField {
+    Arc::new(LogicalSchema {
+        unique_keys: vec![],
+        closed: false,
+        fields: vec![Field {
+            table: None,
             name: "value".into(),
-            dtype: SummaryFamilyType::Plain(DataType::Float64),
+            dtype: FieldDataType::Plain(DataType::Float64),
             nullable: false,
         }],
         time_index: None,
@@ -96,8 +99,13 @@ fn restore(schema: Schema, states: &[Arc<dyn AggregateCore>]) -> Batch {
     )
     .unwrap()
 }
-fn readout(schema: Schema, q: f64) -> Operator {
-    Operator::readout(schema, 0, ReadoutQuery::Sketch(SketchQuery::Quantile { q })).unwrap()
+fn evaluation(schema: Schema, q: f64) -> Operator {
+    Operator::evaluation(
+        schema,
+        0,
+        SummaryEvaluation::Sketch(SketchStatistic::Quantile { q }),
+    )
+    .unwrap()
 }
 struct CountStarts {
     operator: Operator,
@@ -152,8 +160,8 @@ fn five_panes_roundtrip_and_shared_merge_runs_once() {
                 ),
             ),
             (6, (vec![5], merge.clone())),
-            (7, (vec![6], readout(schema.clone(), 0.5))),
-            (8, (vec![6], readout(schema.clone(), 0.99))),
+            (7, (vec![6], evaluation(schema.clone(), 0.5))),
+            (8, (vec![6], evaluation(schema.clone(), 0.99))),
         ]),
         vec![6, 7, 8],
     )
@@ -240,8 +248,10 @@ fn five_panes_roundtrip_and_shared_merge_runs_once() {
             },
         )
         .unwrap();
-        dag.add(2, vec![1], readout(schema.clone(), 0.5)).unwrap();
-        dag.add(3, vec![1], readout(schema.clone(), 0.99)).unwrap();
+        dag.add(2, vec![1], evaluation(schema.clone(), 0.5))
+            .unwrap();
+        dag.add(3, vec![1], evaluation(schema.clone(), 0.99))
+            .unwrap();
         let outputs = block_on(futures::future::join_all(
             dag.execute(
                 &[2, 3],

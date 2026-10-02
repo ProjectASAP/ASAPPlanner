@@ -20,7 +20,7 @@ pub use planner_types as planner;
 
 pub mod dag;
 
-pub mod readout;
+pub mod evaluation;
 
 mod error;
 pub use error::Error;

@@ -1,47 +1,53 @@
-//! `QueryExpr::Aggregate` — cross-series aggregation tests.
+//! `NonASAPOp::Aggregate` — cross-series aggregation tests.
 //!
 //! topk/bottomk are omitted — dispatch is deferred.
 //!
-//! Cross-series aggregates lower to a single `Aggregate` node with no
-//! `TimeRange` child (range functions use `TimeRange` — see `time_range.rs`).
-//! Group keys land on `Aggregate.by` as positional `ColumnId`s.
-//! Single-stat PromQL aggregates always get `output_names: [""]` (no alias)
-//! and `having: None`.
+//! Cross-series aggregates lower to a single `Aggregate` node over the
+//! instant-selector `TimeRange` (range functions use a `Range` selector —
+//! see `time_range.rs`). Group keys land on `Aggregate.reduction` as
+//! positional `ColumnId`s. Single-stat PromQL aggregates always get
+//! `output_names: [""]` (no alias) and `having: None`.
 
 use std::rc::Rc;
 use std::time::Duration;
 
 use asap_integration_tests::fixtures::lower_promql;
 use asap_integration_tests::fixtures::metric_schema;
-use asap_types::pre_asap::{AggIntent, QueryExpr, Reduction, Source};
+use asap_types::ir::{NonASAPOp, OperatorNode, TimeRangeKind};
+use asap_types::pre_asap::{AggIntent, Reduction, Source};
 use asap_types::types::AccuracyTarget;
 
-fn lower(q: &str) -> QueryExpr {
+fn lower(q: &str) -> Rc<OperatorNode> {
     lower_promql(q, AccuracyTarget::Exact).unwrap_or_else(|e| panic!("lower failed for {q:?}: {e}"))
 }
 
-fn scan(metric: &str, labels: &[&str]) -> QueryExpr {
-    QueryExpr::Scan {
+fn node(op: NonASAPOp) -> Rc<OperatorNode> {
+    OperatorNode::non_asap_node(op).expect("fixture node derives its schema")
+}
+
+fn scan(metric: &str, labels: &[&str]) -> Rc<OperatorNode> {
+    node(NonASAPOp::Scan {
         source: Source::TimeSeries {
             metric: metric.into(),
         },
         predicates: vec![],
         schema: metric_schema(labels),
-    }
+    })
 }
 
-fn agg(by: Vec<usize>, intent: AggIntent, child: QueryExpr) -> QueryExpr {
-    QueryExpr::Aggregate {
+fn agg(by: Vec<usize>, intent: AggIntent, child: Rc<OperatorNode>) -> Rc<OperatorNode> {
+    node(NonASAPOp::Aggregate {
         reduction: Reduction::by(by),
         measures: vec![intent],
         output_names: vec!["".into()],
         filters: vec![],
         having: None,
-        child: Rc::new(QueryExpr::TimeRange {
+        child: node(NonASAPOp::TimeRange {
             range: Duration::from_secs(1),
-            child: Rc::new(child),
+            kind: TimeRangeKind::Instant,
+            child,
         }),
-    }
+    })
 }
 
 // #5 — sum with no group keys
@@ -169,7 +175,7 @@ fn q_stdvar_no_group() {
     );
 }
 
-// #10 — cross-series quantile; no TimeRange node (no range window)
+// #10 — cross-series quantile; instant selector, no range window
 #[test]
 fn q10_quantile_cross_series() {
     assert_eq!(

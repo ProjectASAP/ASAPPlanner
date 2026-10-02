@@ -308,7 +308,9 @@ mod tests {
         values::Batch,
     };
     use planner_types::{
-        post_asap::{SummaryFamilyType, SummaryField, SummarySchema},
+        post_asap::{
+            Field as SummaryField, FieldDataType as SummaryFamilyType, Schema as SummarySchema,
+        },
         pre_asap::DataType,
         types::AccuracyTarget,
     };
@@ -323,14 +325,18 @@ mod tests {
                     name: "time".into(),
                     dtype: SummaryFamilyType::Plain(DataType::Timestamp),
                     nullable: false,
+                    table: None,
                 },
                 SummaryField {
                     name: "value".into(),
                     dtype: SummaryFamilyType::Plain(DataType::Float64),
                     nullable: false,
+                    table: None,
                 },
             ],
             time_index: Some(0),
+            unique_keys: vec![],
+            closed: false,
         });
         for scope in [
             Scope::Query {

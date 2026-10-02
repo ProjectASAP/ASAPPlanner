@@ -1,4 +1,5 @@
 //! Materialized frontiers are compiled by Planner, never rewritten by deployment.
+mod common;
 use asap_aware_mapping::{cost_model::DefaultCostModel, search_workload};
 use asap_physical_operators::{
     factory::create_planner_accumulator,
@@ -11,9 +12,11 @@ use asap_physical_operators::{
     runtime::{Limits, RunContext, Scope},
     values::{Batch, Value},
 };
+use common::compile_post_asap_dag;
 use futures::{executor::block_on, StreamExt};
+use planner_types::ir::export::{PostAsapDag, PostAsapOperatorPayload};
 use planner_types::{post_asap::*, pre_asap::DataType, types::AccuracyTarget, workload::*};
-use std::{collections::BTreeMap, rc::Rc, sync::Arc};
+use std::{collections::BTreeMap, sync::Arc};
 
 fn grouped_rate_space() -> asap_aware_mapping::CandidateLogicalASAPDAGs<&'static str> {
     let workload = PlanningWorkload {
@@ -40,15 +43,11 @@ fn grouped_rate_space() -> asap_aware_mapping::CandidateLogicalASAPDAGs<&'static
             ..Default::default()
         }),
     };
-    let root = Rc::new(
-        asap_frontend_promql::lower_promql_workload(&workload, 0)
-            .unwrap()
-            .remove(0),
-    );
-    let root = Rc::new(
-        asap_physical_operators::physical_planner::promql_rows::with_series_identity(&root)
-            .unwrap(),
-    );
+    let root = asap_frontend_promql::lower_promql_workload(&workload, 0)
+        .unwrap()
+        .remove(0);
+    let root = asap_physical_operators::physical_planner::promql_rows::with_series_identity(&root)
+        .unwrap();
     search_workload(vec![("grouped-rate", root)])
 }
 
@@ -81,7 +80,7 @@ fn run(plan: &CompiledPhysicalDag, inputs: BTreeMap<u64, Batch>, scope: Scope) -
     })
 }
 
-/// Rate readouts and grouped Sum can run together during bounded precompute;
+/// Rate evaluations and grouped Sum can run together during bounded precompute;
 /// storing per-series rates instead leaves the same Sum in the query DAG.
 #[test]
 fn grouped_rate_can_be_materialized_before_or_after_grouped_sum() {
@@ -93,21 +92,19 @@ fn grouped_rate_can_be_materialized_before_or_after_grouped_sum() {
             matches!(
                 node.payload,
                 PostAsapOperatorPayload::SummaryAgg {
-                    family: SummaryFamilyType::ExactAggregate(ExactKind::Rate, _),
+                    family: FieldDataType::ExactAggregate(ExactKind::Rate, _),
                     ..
                 }
             )
         })
         .unwrap();
-    let readout = dag
+    let evaluation = dag
         .nodes
         .iter()
         .find(|node| {
             matches!(
                 node.payload,
-                PostAsapOperatorPayload::Value {
-                    operation: ValueOperation::FinalizeExactAccumulator
-                }
+                PostAsapOperatorPayload::FinalizeExactAccumulator
             ) && dag
                 .edges
                 .iter()
@@ -139,7 +136,7 @@ fn grouped_rate_can_be_materialized_before_or_after_grouped_sum() {
                 .as_any()
                 .downcast_ref::<asap_physical_operators::summary_kernels::exact::ExactAccumulator>()
                 .unwrap()
-                .readout(asap_physical_operators::Statistic::Rate, range_ms, None)
+                .evaluation(asap_physical_operators::Statistic::Rate, range_ms, None)
                 .unwrap()
                 .unwrap();
             let summary = Value::Summary {
@@ -150,21 +147,19 @@ fn grouped_rate_can_be_materialized_before_or_after_grouped_sum() {
                 .fields
                 .iter()
                 .map(|field| match &field.dtype {
-                    SummaryFamilyType::ExactAggregate(..) => summary.clone(),
-                    SummaryFamilyType::Plain(DataType::Timestamp) => Value::Timestamp(2000),
-                    SummaryFamilyType::Plain(DataType::Utf8) => {
-                        Value::Utf8(if field.name == "job" {
-                            "api".into()
-                        } else {
-                            serde_json::to_string(&BTreeMap::from([
-                                ("__name__", "m".to_string()),
-                                ("job", "api".to_string()),
-                                ("instance", format!("series-{index}")),
-                            ]))
-                            .unwrap()
-                            .into()
-                        })
-                    }
+                    FieldDataType::ExactAggregate(..) => summary.clone(),
+                    FieldDataType::Plain(DataType::Timestamp) => Value::Timestamp(2000),
+                    FieldDataType::Plain(DataType::Utf8) => Value::Utf8(if field.name == "job" {
+                        "api".into()
+                    } else {
+                        serde_json::to_string(&BTreeMap::from([
+                            ("__name__", "m".to_string()),
+                            ("job", "api".to_string()),
+                            ("instance", format!("series-{index}")),
+                        ]))
+                        .unwrap()
+                        .into()
+                    }),
                     _ => panic!("unexpected input field {field:?}"),
                 })
                 .collect()
@@ -173,7 +168,7 @@ fn grouped_rate_can_be_materialized_before_or_after_grouped_sum() {
     let batch = Batch::try_new(input_schema.clone(), rows).unwrap();
     let root = u64::from(dag.root.0);
     let state_id = u64::from(state.id.0);
-    let rate_id = u64::from(readout.id.0);
+    let rate_id = u64::from(evaluation.id.0);
     let frontiers = asap_physical_operators::physical_planner::enumerate_frontiers(
         &dag,
         &BTreeMap::from([(state_id, InputContract::bounded(input_schema.clone()))]),
@@ -369,7 +364,7 @@ fn grouped_rate_can_be_materialized_before_or_after_grouped_sum() {
         .as_any()
         .downcast_ref::<asap_physical_operators::summary_kernels::exact::ExactAccumulator>()
         .unwrap()
-        .readout(asap_physical_operators::Statistic::Rate, range_ms, None)
+        .evaluation(asap_physical_operators::Statistic::Rate, range_ms, None)
         .unwrap()
         .unwrap();
     assert_ne!(
@@ -378,7 +373,7 @@ fn grouped_rate_can_be_materialized_before_or_after_grouped_sum() {
     );
 }
 
-/// Enumerated frontiers include both grouped-result and per-series readout
+/// Enumerated frontiers include both grouped-result and per-series evaluation
 /// persistence; an explicit Rate-state input retains its original semantics.
 #[test]
 fn bounded_inventory_exposes_grouped_rate_physical_frontiers() {
@@ -391,7 +386,7 @@ fn bounded_inventory_exposes_grouped_rate_physical_frontiers() {
             matches!(
                 &node.payload,
                 PostAsapOperatorPayload::SummaryAgg {
-                    family: SummaryFamilyType::ExactAggregate(ExactKind::Rate, _),
+                    family: FieldDataType::ExactAggregate(ExactKind::Rate, _),
                     ..
                 }
             )
@@ -429,7 +424,7 @@ fn enumerated_grouped_rate_candidates_execute_numeric_query_outputs() {
             matches!(
                 node.payload,
                 PostAsapOperatorPayload::SummaryAgg {
-                    family: SummaryFamilyType::ExactAggregate(ExactKind::Rate, _),
+                    family: FieldDataType::ExactAggregate(ExactKind::Rate, _),
                     ..
                 }
             )
@@ -443,7 +438,7 @@ fn enumerated_grouped_rate_candidates_execute_numeric_query_outputs() {
                 matches!(
                     node.payload,
                     PostAsapOperatorPayload::SummaryAgg {
-                        family: SummaryFamilyType::ExactAggregate(ExactKind::Sum, _),
+                        family: FieldDataType::ExactAggregate(ExactKind::Sum, _),
                         ..
                     }
                 )
@@ -484,9 +479,9 @@ fn enumerated_grouped_rate_candidates_execute_numeric_query_outputs() {
                     .fields
                     .iter()
                     .map(|field| match &field.dtype {
-                        SummaryFamilyType::ExactAggregate(..) => summary.clone(),
-                        SummaryFamilyType::Plain(DataType::Timestamp) => Value::Timestamp(60_000),
-                        SummaryFamilyType::Plain(DataType::Utf8)
+                        FieldDataType::ExactAggregate(..) => summary.clone(),
+                        FieldDataType::Plain(DataType::Timestamp) => Value::Timestamp(60_000),
+                        FieldDataType::Plain(DataType::Utf8)
                             if field.name == "$promql_series_identity" =>
                         {
                             Value::Utf8(
@@ -498,7 +493,7 @@ fn enumerated_grouped_rate_candidates_execute_numeric_query_outputs() {
                                 .into(),
                             )
                         }
-                        SummaryFamilyType::Plain(DataType::Utf8) => Value::Utf8("api".into()),
+                        FieldDataType::Plain(DataType::Utf8) => Value::Utf8("api".into()),
                         _ => panic!("unexpected input field {field:?}"),
                     })
                     .collect()
@@ -540,7 +535,7 @@ fn enumerated_grouped_rate_candidates_execute_numeric_query_outputs() {
                 .schema()
                 .fields
                 .iter()
-                .all(|field| matches!(field.dtype, SummaryFamilyType::Plain(_))));
+                .all(|field| matches!(field.dtype, FieldDataType::Plain(_))));
             assert!(
                 output[0].rows()[0]
                     .iter()
@@ -657,10 +652,9 @@ fn population_topk_cuts_equal_per_frontier_compilation() {
     let original = asap_frontend_promql::lower_promql_workload(&workload, 0)
         .unwrap()
         .remove(0);
-    let root = Rc::new(
+    let root =
         asap_physical_operators::physical_planner::promql_rows::with_series_identity(&original)
-            .unwrap(),
-    );
+            .unwrap();
     let selected = asap_aware_mapping::maintained_population::MaintainedPopulationStrategy::new(
         std::slice::from_ref(&root),
     )
@@ -670,7 +664,14 @@ fn population_topk_cuts_equal_per_frontier_compilation() {
     let raw = dag
         .nodes
         .iter()
-        .find(|node| matches!(node.payload, PostAsapOperatorPayload::Fallback { .. }))
+        .find(|node| {
+            matches!(
+                node.payload,
+                PostAsapOperatorPayload::Relational {
+                    operator: planner_types::ir::export::NonASAPOpKind::TimeRange { .. }
+                }
+            )
+        })
         .unwrap();
     let inputs = BTreeMap::from([(
         u64::from(raw.id.0),
@@ -698,21 +699,19 @@ fn cut_candidate_rejects_invalid_frontiers() {
         .iter()
         .find(|node| matches!(node.payload, PostAsapOperatorPayload::SummaryAgg { .. }))
         .unwrap();
-    let readout = dag
+    let evaluation = dag
         .nodes
         .iter()
         .find(|node| {
             matches!(
                 node.payload,
-                PostAsapOperatorPayload::Value {
-                    operation: ValueOperation::FinalizeExactAccumulator
-                }
+                PostAsapOperatorPayload::FinalizeExactAccumulator
             )
         })
         .unwrap();
     let (state_id, rate_id, root) = (
         u64::from(state.id.0),
-        u64::from(readout.id.0),
+        u64::from(evaluation.id.0),
         u64::from(dag.root.0),
     );
     let inputs = BTreeMap::from([(

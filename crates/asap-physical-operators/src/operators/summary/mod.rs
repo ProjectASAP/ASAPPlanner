@@ -1,9 +1,9 @@
 use super::*;
-/// A summary readout: a sketch query, or an exact readout with typed parameters.
+/// A summary evaluation: a sketch query, or an exact evaluation with typed parameters.
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
-pub enum ReadoutQuery {
-    Sketch(planner_types::post_asap::SketchQuery),
-    Exact(crate::summary_kernels::exact::ExactReadout),
+pub enum SummaryEvaluation {
+    Sketch(planner_types::post_asap::SketchStatistic),
+    Exact(crate::summary_kernels::exact::ExactEvaluation),
 }
 
 impl Operator {
@@ -47,6 +47,7 @@ impl Operator {
             name: "state".into(),
             dtype: family.clone(),
             nullable: false,
+            table: None,
         });
         Ok(Self {
             kind: Kind::KeyedSummaryBuild {
@@ -59,7 +60,7 @@ impl Operator {
             output: schema(fields),
         })
     }
-    pub fn keyed_readout(
+    pub fn keyed_evaluation(
         input: Schema,
         state: usize,
         k: usize,
@@ -68,23 +69,23 @@ impl Operator {
         use crate::summary_kernels::weighted_frequency::WeightedFrequency;
         crate::values::validate_family(&field(&input, state)?.dtype)?;
         let SummaryFamilyType::Sketch(kind, _) = &field(&input, state)?.dtype else {
-            return Err(invalid("keyed readout requires summary state"));
+            return Err(invalid("keyed evaluation requires summary state"));
         };
         let (_, _, _, capacity) = WeightedFrequency::configuration(kind)?;
         if k > capacity || output.fields.len() <= input.fields.len() {
-            return Err(invalid("invalid keyed readout shape or capacity"));
+            return Err(invalid("invalid keyed evaluation shape or capacity"));
         }
         if state + 1 != input.fields.len()
             || output.fields[..state] != input.fields[..state]
             || output.fields.last().unwrap().dtype != SummaryFamilyType::Plain(DataType::Float64)
         {
             return Err(invalid(
-                "keyed readout must preserve partitions and return a Float64 score",
+                "keyed evaluation must preserve partitions and return a Float64 score",
             ));
         }
         crate::values::validate_schema(&output)?;
         Ok(Self {
-            kind: Kind::KeyedReadout { state, k },
+            kind: Kind::KeyedEvaluation { state, k },
             inputs: vec![input],
             output,
         })
@@ -132,6 +133,7 @@ impl Operator {
             name: "state".into(),
             dtype: family.clone(),
             nullable: false,
+            table: None,
         });
         Ok(Self {
             kind: Kind::SummaryBuild {
@@ -161,15 +163,19 @@ impl Operator {
             output: schema(fields),
         })
     }
-    pub fn readout(input: Schema, state: usize, query: ReadoutQuery) -> Result<Self, Error> {
+    pub fn evaluation(
+        input: Schema,
+        state: usize,
+        query: SummaryEvaluation,
+    ) -> Result<Self, Error> {
         let family = &field(&input, state)?.dtype;
         crate::values::validate_family(family)?;
         match &query {
-            ReadoutQuery::Sketch(query) => {
-                crate::capability::validate_sketch_readout(family, query)?
+            SummaryEvaluation::Sketch(query) => {
+                crate::capability::validate_sketch_evaluation(family, query)?
             }
-            ReadoutQuery::Exact(readout) => {
-                crate::capability::validate_exact_readout(family, readout)?
+            SummaryEvaluation::Exact(evaluation) => {
+                crate::capability::validate_exact_evaluation(family, evaluation)?
             }
         }
         let mut fields = input.fields.clone();
@@ -195,7 +201,7 @@ impl Operator {
             );
         fields[state] = result_field("value", result_type, nullable);
         Ok(Self {
-            kind: Kind::Readout { state, query },
+            kind: Kind::Evaluation { state, query },
             inputs: vec![input],
             output: schema(fields),
         })
@@ -204,12 +210,12 @@ impl Operator {
 /// The Planner reads a Count-Min bare count only for count intents, whose
 /// output is Int64 and whose updates have unit weight; execution rejects a
 /// non-integral total rather than rounding it.
-fn integral_count(family: &SummaryFamilyType, query: &ReadoutQuery) -> bool {
+fn integral_count(family: &SummaryFamilyType, query: &SummaryEvaluation) -> bool {
     matches!(family, SummaryFamilyType::Sketch(kind, _)
         if kind.algorithm() == &planner_types::post_asap::SketchAlgorithm::Cms)
         && matches!(
             query,
-            ReadoutQuery::Sketch(planner_types::post_asap::SketchQuery::PointCount {
+            SummaryEvaluation::Sketch(planner_types::post_asap::SketchStatistic::PointCount {
                 value: None,
                 ..
             })
@@ -220,7 +226,7 @@ pub(super) fn execute<'a>(
     mut inputs: Vec<Input<'a, Batch>>,
     context: RunContext,
 ) -> Result<OutputStream<'a, Batch>, Error> {
-    let range_ms = operator.readout_range(&context)?;
+    let range_ms = operator.evaluation_range(&context)?;
     let output = operator.output.clone();
     let input = inputs.pop().ok_or_else(|| invalid("input missing"))?;
     match &operator.kind {
@@ -232,7 +238,7 @@ pub(super) fn execute<'a>(
         } => Ok(futures::stream::once(async move {
             Batch::try_new(
                 output,
-                build_summary(input, family, *value, *time, groups, &context).await?,
+                build_summary(input, family, *value, *time, groups, !operator.inputs[0].has_promql_series_identity(), &context).await?,
             )
         })
         .boxed_local()),
@@ -248,7 +254,7 @@ pub(super) fn execute<'a>(
             )
         })
         .boxed_local()),
-        Kind::KeyedReadout { state, k } => Ok(input
+        Kind::KeyedEvaluation { state, k } => Ok(input
             .map(move |batch| {
                 let batch = batch?;
                 let mut rows = Vec::new();
@@ -278,20 +284,20 @@ pub(super) fn execute<'a>(
                 Batch::try_new(output.clone(), rows)
             })
             .boxed_local()),
-        Kind::Readout { state, query } => Ok(input
+        Kind::Evaluation { state, query } => Ok(input
             .map(move |batch| {
                 let batch = batch?;
                 let mut rows = batch.rows().to_vec();
-                if let ReadoutQuery::Exact(readout) = query {
+                if let SummaryEvaluation::Exact(evaluation) = query {
                     rows.retain(|row| !matches!(&row[*state], Value::Summary { state: summary, .. }
-                        if crate::readout::insufficient_counter_samples(summary.as_ref(), readout.statistic)));
+                        if crate::evaluation::insufficient_counter_samples(summary.as_ref(), evaluation.statistic)));
                 }
                 for row in &mut rows {
                     let Value::Summary { state: summary, .. } = &row[*state] else {
                         return Err(invalid("summary value required"));
                     };
                     row[*state] = match query {
-                        ReadoutQuery::Sketch(query) => {
+                        SummaryEvaluation::Sketch(query) => {
                             let value = summary
                                 .estimate(query)
                                 .map_err(|e| Error::Operator(e.to_string()))?;
@@ -309,12 +315,13 @@ pub(super) fn execute<'a>(
                                 Value::Float64(value)
                             }
                         }
-                        ReadoutQuery::Exact(readout) => {
+                        SummaryEvaluation::Exact(evaluation) => {
                             let exact = summary
                                 .as_any()
                                 .downcast_ref::<crate::summary_kernels::exact::ExactAccumulator>()
-                                .ok_or_else(|| invalid("exact readout requires exact state"))?;
-                            if output.fields[*state].dtype == SummaryFamilyType::Plain(DataType::Int64) {
+                                .ok_or_else(|| invalid("exact evaluation requires exact state"))?;
+                            if output.fields[*state].nullable && exact.is_empty_sum() { Value::Null }
+                            else if output.fields[*state].dtype == SummaryFamilyType::Plain(DataType::Int64) {
                                 let count = exact.count().ok_or_else(|| {
                                     Error::Operator("exact count state lacks an integer count".into())
                                 })?;
@@ -323,7 +330,7 @@ pub(super) fn execute<'a>(
                                 })?)
                             } else {
                                 match exact
-                                    .readout(readout.statistic, range_ms, None)
+                                    .evaluation(evaluation.statistic, range_ms, None)
                                     .map_err(|e| Error::Operator(e.to_string()))?
                                 {
                                     Some(value) => Value::Float64(value),
@@ -370,6 +377,7 @@ async fn build_summary(
     value: usize,
     time: Option<usize>,
     groups: &[usize],
+    emit_empty_global: bool,
     context: &RunContext,
 ) -> Result<Vec<Vec<Value>>, Error> {
     type State = (
@@ -392,7 +400,8 @@ async fn build_summary(
     };
     let mut work = Cooperative::new(context);
     let mut states = BTreeMap::<Vec<Vec<u8>>, State>::new();
-    if groups.is_empty() {
+    // PromQL aggregation of an empty vector produces no sample.
+    if groups.is_empty() && emit_empty_global {
         states.insert(vec![], create(vec![], 0)?);
     }
     let ordered_time = matches!(

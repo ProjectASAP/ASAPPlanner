@@ -4,7 +4,7 @@ use super::*;
 pub(super) fn guarantee(
     algorithm: &SketchAlgorithm,
     params: &SketchParams,
-    query: &SketchQuery,
+    query: &SketchStatistic,
 ) -> Option<ResultGuarantee> {
     let (SketchParams::CountSketch { width, depth }
     | SketchParams::CountSketchWithHeap { width, depth, .. }) = params
@@ -62,11 +62,11 @@ mod tests {
         let count_sketch = default_size_params(SketchAlgorithm::CountSketch, &intent, 0.01, 0.01);
         let guarantee = DefaultAccuracyModel
             .local_guarantee(
-                &SummaryFamilyType::Sketch(
+                &FieldDataType::Sketch(
                     SketchKind::new(SketchAlgorithm::CountSketch, count_sketch),
                     GroupingStrategy::default(),
                 ),
-                &SketchQuery::PointCount {
+                &SketchStatistic::PointCount {
                     key: asap_types::pre_asap::expr_ir::ColumnRef::SampleValue,
                     value: None,
                 },

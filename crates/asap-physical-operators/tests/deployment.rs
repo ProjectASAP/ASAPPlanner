@@ -1,15 +1,14 @@
 //! Exercise the public library without a backend server, store, or scheduler.
 use asap_physical_operators::planner::{
     post_asap::{
-        GroupingStrategy, SketchAlgorithm, SketchKind, SketchParams, SummaryFamilyType,
-        SummaryUpdate,
+        FieldDataType, GroupingStrategy, SketchAlgorithm, SketchKind, SketchParams, SummaryUpdate,
     },
     pre_asap::ColumnRef,
 };
 use asap_physical_operators::{factory::create_planner_accumulator, AggregateCore};
 
-fn family(k: u32) -> SummaryFamilyType {
-    SummaryFamilyType::Sketch(
+fn family(k: u32) -> FieldDataType {
+    FieldDataType::Sketch(
         SketchKind::new(SketchAlgorithm::Kll, SketchParams::Kll { k }),
         GroupingStrategy::PerSubpopulationInstance,
     )
@@ -29,12 +28,14 @@ fn build(values: &[f64]) -> Box<dyn AggregateCore> {
 }
 fn read(state: &dyn AggregateCore) -> f64 {
     state
-        .estimate(&asap_physical_operators::planner::post_asap::SketchQuery::Quantile { q: 0.5 })
+        .estimate(
+            &asap_physical_operators::planner::post_asap::SketchStatistic::Quantile { q: 0.5 },
+        )
         .unwrap()
 }
 
 // The same kernels work when every build is query-time, when only a prefix
-// was precomputed, and when all state was precomputed before the readout.
+// was precomputed, and when all state was precomputed before the evaluation.
 #[test]
 fn raw_partial_and_fully_precomputed_use_the_same_kernels() {
     let raw: Vec<f64> = (0..128).map(f64::from).collect();
@@ -65,7 +66,7 @@ fn invalid_kll_parameters_are_rejected_at_binding() {
 fn native_count_sketch_dimensions_are_not_packed_wire_dimensions() {
     use asap_physical_operators::planner::post_asap::SummaryInputExpr;
     use asap_physical_operators::KeyByLabelValues;
-    let family = SummaryFamilyType::Sketch(
+    let family = FieldDataType::Sketch(
         SketchKind::new(
             SketchAlgorithm::CountSketchWithHeap,
             SketchParams::CountSketchWithHeap {

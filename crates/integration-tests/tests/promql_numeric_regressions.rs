@@ -1,44 +1,46 @@
-//! Numeric regression fixtures: actual PromQL lowering plus numeric update/readout checks.
+//! Numeric regression fixtures: actual PromQL lowering plus numeric update/evaluation checks.
 //! The count/sum interpreter below verifies planner update semantics, not a deployed backend.
-use asap_aware_mapping::{Replacement, ReplacementStrategy, SketchAlgorithmStrategy, TargetSubDAG};
+use asap_aware_mapping::replacement::is_logical_rewrite;
+use asap_aware_mapping::{ASAPStrategies, Replacement, ReplacementStrategy, TargetSubDAG};
 use asap_integration_tests::fixtures::lower_promql;
-use asap_types::post_asap::{
-    compile_post_asap_dag, ExactKind, SummaryExpr, SummaryFamilyType, SummaryInputExpr,
-    SummaryNode, SummaryUpdate,
-};
+use asap_integration_tests::post_asap::post_asap_dag;
+use asap_types::ir::{ASAPOp, NonASAPOp, Operator, OperatorNode};
+use asap_types::post_asap::{ExactKind, FieldDataType, SummaryInputExpr, SummaryUpdate};
 use asap_types::pre_asap::{ColumnRef, Reduction};
 use asap_types::types::AccuracyTarget;
 use std::rc::Rc;
 
-fn plan(query: &str, accuracy: AccuracyTarget) -> Rc<SummaryNode> {
-    let pre = Rc::new(lower_promql(query, accuracy).unwrap());
-    SketchAlgorithmStrategy::default_cost_model()
+fn plan(query: &str, accuracy: AccuracyTarget) -> Rc<OperatorNode> {
+    let pre = lower_promql(query, accuracy).unwrap();
+    ASAPStrategies::default_cost_model()
         .replacements(&TargetSubDAG::new(&pre))
         .into_iter()
         .find_map(|r| match r.replacement {
-            Replacement::Summary(n) => Some(n),
+            // A bound decision: a summary DAG or a kept (exact) sub-DAG.
+            Replacement::SubDag(n) if !is_logical_rewrite(&n) => Some(n),
             _ => None,
         })
-        .unwrap_or_else(|| asap_aware_mapping::replacement::keep_pre_asap(&pre).unwrap())
+        .unwrap_or_else(|| asap_aware_mapping::replacement::retain_exact(&pre).unwrap())
 }
-fn aggregate(node: &SummaryNode) -> (&SummaryFamilyType, &SummaryUpdate, &Reduction) {
-    match &node.expr {
-        SummaryExpr::SummaryAgg {
+fn aggregate(node: &OperatorNode) -> (&FieldDataType, &SummaryUpdate, &Reduction) {
+    match &node.operator {
+        Operator::ASAP(ASAPOp::SummaryAgg {
             family,
             input,
             reduction,
             ..
-        } => (family, input, reduction),
-        SummaryExpr::SummaryEstimate { summary_input, .. } => aggregate(summary_input),
-        SummaryExpr::ValueOperation { child, .. } => aggregate(child),
+        }) => (family, input, reduction),
+        Operator::ASAP(ASAPOp::SummaryEstimate { summary_input, .. }) => aggregate(summary_input),
+        Operator::ASAP(ASAPOp::FinalizeExactAccumulator { child }) => aggregate(child),
+        // A value operation (Project/Filter/Sort/Limit/...) over the state.
+        Operator::NonASAP(op) if op.children().len() == 1 && node.contains_asap() => {
+            aggregate(op.children()[0])
+        }
         other => panic!("not a maintained accumulator: {other:?}"),
     }
 }
-fn contribution(family: &SummaryFamilyType, update: &SummaryUpdate, value: f64) -> f64 {
-    if matches!(
-        family,
-        SummaryFamilyType::ExactAggregate(ExactKind::Count, _)
-    ) {
+fn contribution(family: &FieldDataType, update: &SummaryUpdate, value: f64) -> f64 {
+    if matches!(family, FieldDataType::ExactAggregate(ExactKind::Count, _)) {
         return 1.;
     }
     match update.weight {
@@ -55,7 +57,7 @@ fn count_up_counts_targets_even_when_values_repeat_or_change_sign() {
     let (family, update, _) = aggregate(&node);
     assert!(matches!(
         family,
-        SummaryFamilyType::ExactAggregate(ExactKind::Count, _)
+        FieldDataType::ExactAggregate(ExactKind::Count, _)
     ));
     for values in [[1., 1., 1.], [1., 1., 0.], [0., 0., 0.], [-1., -1., -1.]] {
         assert_eq!(
@@ -66,7 +68,7 @@ fn count_up_counts_targets_even_when_values_repeat_or_change_sign() {
             3.
         );
     }
-    compile_post_asap_dag(&node).unwrap();
+    post_asap_dag(&node);
 }
 
 /// Ten samples give count ten, whereas sum retains the signed sample values.
@@ -78,13 +80,13 @@ fn window_counts_and_sums_distinguish_one_zero_three_and_negative_values() {
     ] {
         let node = plan(query, AccuracyTarget::Exact);
         let (family, update, reduction) = aggregate(&node);
-        assert!(matches!(family, SummaryFamilyType::ExactAggregate(k, _) if *k == kind));
+        assert!(matches!(family, FieldDataType::ExactAggregate(k, _) if *k == kind));
         assert_eq!(*reduction, Reduction::PerEntity);
         for value in [1., 0., 3., -3.] {
             let got: f64 = (0..10).map(|_| contribution(family, update, value)).sum();
             assert_eq!(got, if is_count { 10. } else { value * 10. });
         }
-        compile_post_asap_dag(&node).unwrap();
+        post_asap_dag(&node);
     }
 }
 
@@ -98,9 +100,9 @@ fn sum_rate_and_increase_have_real_exact_accumulator_nodes() {
     ] {
         let node = plan(query, AccuracyTarget::Exact);
         let (family, _, _) = aggregate(&node);
-        assert!(matches!(family, SummaryFamilyType::ExactAggregate(k, _) if *k == kind));
+        assert!(matches!(family, FieldDataType::ExactAggregate(k, _) if *k == kind));
         assert!(node.guarantee.as_ref().unwrap().is_exact());
-        compile_post_asap_dag(&node).unwrap();
+        post_asap_dag(&node);
     }
 }
 
@@ -112,11 +114,12 @@ fn checked_ratio_must_not_certify_cross_zero_interpolation() {
         AccuracyTarget::Epsilon(0.01),
     );
     assert!(
-        matches!(node.expr, SummaryExpr::BinaryOp { .. }),
+        matches!(node.operator, Operator::NonASAP(NonASAPOp::BinaryOp { .. }))
+            && node.contains_asap(),
         "direct quantile ratio should remain an available candidate"
     );
     assert!(node.guarantee.is_none());
-    compile_post_asap_dag(&node).unwrap();
+    post_asap_dag(&node);
     // Keep the actual signed-sketch counterexample: division guards alone pass
     // even though the quantile interpolation does not preserve relative error.
     let alpha = (0.01 - 8.0 * f64::EPSILON) / 2.01;
@@ -151,20 +154,20 @@ fn quantile_over_temporal_average_keeps_a_legal_candidate() {
     ] {
         let node = plan(query, AccuracyTarget::Epsilon(0.01));
         assert!(
-            !matches!(node.expr, SummaryExpr::KeepPreAsap(_)),
+            node.contains_asap(),
             "outer sketch candidate must survive: {query}"
         );
-        let SummaryExpr::SummaryEstimate { summary_input, .. } = &node.expr else {
-            panic!("outer sketch readout")
+        let Operator::ASAP(ASAPOp::SummaryEstimate { summary_input, .. }) = &node.operator else {
+            panic!("outer sketch evaluation")
         };
-        let SummaryExpr::SummaryAgg { child, .. } = &summary_input.expr else {
+        let Operator::ASAP(ASAPOp::SummaryAgg { child, .. }) = &summary_input.operator else {
             panic!("outer sketch state")
         };
         assert!(
-            matches!(child.expr, SummaryExpr::KeepPreAsap(_)),
+            !child.contains_asap(),
             "guarded expression must retain native maintenance input"
         );
-        compile_post_asap_dag(&node).unwrap();
+        post_asap_dag(&node);
     }
 }
 
@@ -173,8 +176,8 @@ impl asap_aware_mapping::accuracy::AccuracyEvidenceProvider for OneKeyTopKEviden
     fn propagation_stats(
         &self,
         op: &asap_types::post_asap::CompositionOperator,
-        _family: &SummaryFamilyType,
-        _query: Option<&asap_types::post_asap::SketchQuery>,
+        _family: &FieldDataType,
+        _query: Option<&asap_types::post_asap::SketchStatistic>,
     ) -> asap_aware_mapping::accuracy::PropagationStats {
         // Single-key fixture: no excluded keys; bounds cover every value below.
         if matches!(
@@ -198,7 +201,7 @@ fn sketch_counts_use_unit_weights_and_signed_sums_keep_value_weights() {
     use asap_aware_mapping::accuracy::{DefaultAccuracyModel, EqualSplitAllocator};
     use asap_aware_mapping::cost_model::DefaultCostModel;
     use asap_types::post_asap::{NonNegativeWeightProof, SketchAlgorithm, WeightDomain};
-    let strategy = SketchAlgorithmStrategy::new_with_planning_inputs_and_evidence(
+    let strategy = ASAPStrategies::new_with_planning_inputs_and_evidence(
         &DefaultCostModel,
         &DefaultAccuracyModel,
         &EqualSplitAllocator,
@@ -210,7 +213,7 @@ fn sketch_counts_use_unit_weights_and_signed_sums_keep_value_weights() {
         } else {
             "topk(1, sum_over_time(up[5m]))"
         };
-        let pre = Rc::new(lower_promql(query, AccuracyTarget::Epsilon(0.01)).unwrap());
+        let pre = lower_promql(query, AccuracyTarget::Epsilon(0.01)).unwrap();
         let candidates = strategy.replacements(&TargetSubDAG::new(&pre));
         let wanted = if is_count {
             SketchAlgorithm::CmsWithHeap
@@ -220,11 +223,11 @@ fn sketch_counts_use_unit_weights_and_signed_sums_keep_value_weights() {
         let node = candidates
             .iter()
             .find_map(|c| {
-                let Replacement::Summary(node) = &c.replacement else {
+                let Replacement::SubDag(node) = &c.replacement else {
                     return None;
                 };
                 let (family, _, _) = aggregate(node);
-                matches!(family, SummaryFamilyType::Sketch(kind, _) if kind.algorithm() == &wanted)
+                matches!(family, FieldDataType::Sketch(kind, _) if kind.algorithm() == &wanted)
                     .then_some(node)
             })
             .expect("weighted sketch candidate");
@@ -243,9 +246,9 @@ fn sketch_counts_use_unit_weights_and_signed_sums_keep_value_weights() {
                 SummaryInputExpr::Column(ColumnRef::SampleValue)
             );
             for c in &candidates {
-                if let Replacement::Summary(n) = &c.replacement {
+                if let Replacement::SubDag(n) = &c.replacement {
                     assert!(
-                        !matches!(aggregate(n).0, SummaryFamilyType::Sketch(kind, _) if kind.algorithm() == &SketchAlgorithm::CmsWithHeap)
+                        !matches!(aggregate(n).0, FieldDataType::Sketch(kind, _) if kind.algorithm() == &SketchAlgorithm::CmsWithHeap)
                     );
                 }
             }
@@ -274,6 +277,6 @@ fn sketch_counts_use_unit_weights_and_signed_sums_keep_value_weights() {
             };
             assert_eq!(got, if is_count { 10. } else { 10. * value });
         }
-        compile_post_asap_dag(node).unwrap();
+        post_asap_dag(node);
     }
 }

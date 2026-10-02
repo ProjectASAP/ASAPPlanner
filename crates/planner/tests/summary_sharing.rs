@@ -1,6 +1,8 @@
 //! Structurally identical summary producers chosen by different queries are
-//! shared after Pass 1: one `Rc<SummaryNode>` across their plans, costed once.
+//! shared after Pass 1: one `Rc<OperatorNode>` across their plans, costed once.
 
+use asap_types::ir::cse::share_common_subdags;
+use asap_types::ir::{ASAPOp, OperatorNode};
 use std::rc::Rc;
 
 use asap_aware_mapping::accuracy::{
@@ -11,7 +13,7 @@ use asap_aware_mapping::pass::{PlanOutput, PlanningModels};
 use asap_aware_mapping::replacement::{default_size_params, DEFAULT_DELTA};
 use asap_aware_mapping::{
     global_selection_with_summary_maintenance_lifecycles, search_workload_with_targets,
-    ReplacementStrategy, SketchAlgorithmStrategy, WorkloadDemand,
+    ASAPStrategies, ReplacementStrategy, WorkloadDemand,
 };
 use asap_aware_mapping::{
     CostModel, CostRate, DefaultCostModel, Horizon, LifecycleInput, SummaryMaintenanceCapabilities,
@@ -21,15 +23,13 @@ use asap_frontend_promql::lower_promql_workload;
 use asap_frontend_sql::SqlCatalog;
 use asap_planner::{e2e_plan, FrontendInput, UserInput};
 use asap_types::post_asap::{
-    share_common_summary_subtrees, AccuracyError, BoundExpr, CompositionOperator, ErrorMetric,
-    ProbabilityExpr, ResultGuarantee, SketchQuery,
+    AccuracyError, BoundExpr, CompositionOperator, ErrorMetric, ProbabilityExpr, ResultGuarantee,
+    SketchStatistic,
 };
-use asap_types::post_asap::{
-    SketchAlgorithm, SketchParams, SummaryExpr, SummaryFamilyType, SummaryNode,
-};
+use asap_types::post_asap::{FieldDataType, SketchAlgorithm, SketchParams};
 use asap_types::pre_asap::agg_intent::default_quantile;
-use asap_types::pre_asap::schema::{Column, DataType, Schema};
-use asap_types::pre_asap::{AggIntent, QueryExpr};
+use asap_types::pre_asap::schema::{DataType, Field, Schema};
+use asap_types::pre_asap::AggIntent;
 use asap_types::types::AccuracyTarget;
 use asap_types::workload::{
     AccuracyRequirement, DataArrival, DataWorkload, DurationMs, Evidence, LatencyRequirement,
@@ -58,7 +58,7 @@ impl CostModel for FixedCosts {
 
     fn summary_maintenance_lifecycle_cost_inputs(
         &self,
-        _summary: &SummaryNode,
+        _summary: &OperatorNode,
     ) -> SummaryMaintenanceLifecycleCostInputs {
         SummaryMaintenanceLifecycleCostInputs {
             build_cost: Some(Cost(self.build)),
@@ -71,7 +71,7 @@ impl CostModel for FixedCosts {
 
     fn summary_maintenance_capabilities(
         &self,
-        _summary: &SummaryNode,
+        _summary: &OperatorNode,
     ) -> SummaryMaintenanceCapabilities {
         SummaryMaintenanceCapabilities {
             incremental_update: true,
@@ -80,7 +80,7 @@ impl CostModel for FixedCosts {
         }
     }
 
-    fn raw_query_recompute_cost(&self, _target: &QueryExpr) -> Option<Cost> {
+    fn raw_query_recompute_cost(&self, _target: &OperatorNode) -> Option<Cost> {
         Some(Cost(self.raw_per_read))
     }
 }
@@ -171,8 +171,8 @@ async fn plan_sql(queries: &[&str], costs: &FixedCosts) -> PlanOutput {
     let catalog = SqlCatalog::new().with_table(
         "lineitem",
         Schema::new(vec![
-            Column::new("l_orderkey", DataType::Int64, false),
-            Column::new("l_extendedprice", DataType::Float64, false),
+            Field::plain("l_orderkey", DataType::Int64, false),
+            Field::plain("l_extendedprice", DataType::Float64, false),
         ]),
     );
     let input = UserInput::new(
@@ -185,7 +185,7 @@ async fn plan_sql(queries: &[&str], costs: &FixedCosts) -> PlanOutput {
 }
 
 /// Every summary state each plan deploys.
-fn states(output: &PlanOutput) -> Vec<Vec<Rc<SummaryNode>>> {
+fn states(output: &PlanOutput) -> Vec<Vec<Rc<OperatorNode>>> {
     output
         .plans
         .iter()
@@ -202,7 +202,7 @@ fn states(output: &PlanOutput) -> Vec<Vec<Rc<SummaryNode>>> {
 }
 
 /// Whether the two plans deploy exactly the same states, by pointer.
-fn same_states(states: &[Vec<Rc<SummaryNode>>]) -> bool {
+fn same_states(states: &[Vec<Rc<OperatorNode>>]) -> bool {
     states[0].len() == states[1].len()
         && states[0]
             .iter()
@@ -212,7 +212,7 @@ fn same_states(states: &[Vec<Rc<SummaryNode>>]) -> bool {
 
 /// The deployments a consumer would run, deduplicated by pointer.
 fn unique_deployments(output: &PlanOutput) -> usize {
-    let mut seen: Vec<*const SummaryNode> = Vec::new();
+    let mut seen: Vec<*const OperatorNode> = Vec::new();
     for plan in &output.plans {
         for deployment in &plan.plan.deployments {
             let ptr = Rc::as_ptr(&deployment.summary);
@@ -297,12 +297,12 @@ fn kll_k(plan: &asap_aware_mapping::pass::QueryLifecyclePlan) -> u32 {
     let [deployment] = plan.plan.deployments.as_slice() else {
         panic!("one state: {:?}", plan.plan.deployments.len());
     };
-    let SummaryExpr::SummaryAgg {
-        family: SummaryFamilyType::Sketch(kind, _),
+    let asap_types::ir::Operator::ASAP(ASAPOp::SummaryAgg {
+        family: FieldDataType::Sketch(kind, _),
         ..
-    } = &deployment.summary.expr
+    }) = &deployment.summary.operator
     else {
-        panic!("sketch state: {:?}", deployment.summary.expr);
+        panic!("sketch state: {:?}", deployment.summary.operator);
     };
     let SketchParams::Kll { k } = kind.params() else {
         panic!("KLL state: {kind:?}");
@@ -382,7 +382,7 @@ async fn identical_sql_percentiles_share_one_producer() {
     assert_eq!(unique_deployments(&output), 1);
 }
 
-/// The quantile is a readout parameter: SQL p50 and p99 over one filtered
+/// The quantile is a evaluation parameter: SQL p50 and p99 over one filtered
 /// column build one KLL, named after its input, while each query keeps its
 /// own output column.
 #[tokio::test]
@@ -451,17 +451,17 @@ async fn shared_amortization_alone_can_beat_raw_recompute() {
     assert_eq!(unique_deployments(&output), 1);
 }
 
-/// Synthetic evidence certifying UnivMon readouts; it exercises sharing, never
+/// Synthetic evidence certifying UnivMon evaluations; it exercises sharing, never
 /// runtime accuracy.
 struct UnivMonEvidence;
 
 impl AccuracyModel for UnivMonEvidence {
     fn local_guarantee(
         &self,
-        family: &SummaryFamilyType,
-        query: &SketchQuery,
+        family: &FieldDataType,
+        query: &SketchStatistic,
     ) -> Option<ResultGuarantee> {
-        if matches!(family, SummaryFamilyType::Sketch(kind, _) if kind.algorithm() == &SketchAlgorithm::UnivMon)
+        if matches!(family, FieldDataType::Sketch(kind, _) if kind.algorithm() == &SketchAlgorithm::UnivMon)
         {
             let mut guarantee = ResultGuarantee::exact("SYNTHETIC test evidence; not measured");
             guarantee.metric = ErrorMetric::RelativeValue;
@@ -493,7 +493,7 @@ impl AccuracyModel for UnivMonEvidence {
 /// when the states are identical. `MajorPass` builds candidates with the
 /// built-in accuracy model, so this runs its pipeline with the test model.
 #[test]
-fn certified_frequency_readouts_share_one_univmon_state() {
+fn certified_frequency_evaluations_share_one_univmon_state() {
     let queries = [
         ("distinct_over_time(m[5m])", 0.02),
         ("entropy_over_time(m[5m])", 0.02),
@@ -505,12 +505,10 @@ fn certified_frequency_readouts_share_one_univmon_state() {
         .into_iter()
         .zip(queries)
         .enumerate()
-        .map(|(index, (expr, (_, epsilon)))| {
-            (index, Rc::new(expr), Some(AccuracyTarget::Epsilon(epsilon)))
-        })
+        .map(|(index, (expr, (_, epsilon)))| (index, expr, Some(AccuracyTarget::Epsilon(epsilon))))
         .collect();
     let strategies: Vec<Box<dyn ReplacementStrategy>> =
-        vec![Box::new(SketchAlgorithmStrategy::new_with_planning_inputs(
+        vec![Box::new(ASAPStrategies::new_with_planning_inputs(
             &CHEAP_SUMMARY,
             &UnivMonEvidence,
             &EqualSplitAllocator,
@@ -541,15 +539,17 @@ fn certified_frequency_readouts_share_one_univmon_state() {
             (*index, dag)
         })
         .collect();
-    let mut states: Vec<Rc<SummaryNode>> = Vec::new();
-    for (_, root) in share_common_summary_subtrees(assembled) {
-        assert!(root.guarantee.is_some(), "{:?}", root.expr);
-        let SummaryExpr::SummaryEstimate { summary_input, .. } = &root.expr else {
-            panic!("summary readout: {:?}", root.expr);
+    let mut states: Vec<Rc<OperatorNode>> = Vec::new();
+    for (_, root) in share_common_subdags(assembled) {
+        assert!(root.guarantee.is_some(), "{:?}", root.operator);
+        let asap_types::ir::Operator::ASAP(ASAPOp::SummaryEstimate { summary_input, .. }) =
+            &root.operator
+        else {
+            panic!("summary evaluation: {:?}", root.operator);
         };
         assert!(matches!(
-            &summary_input.expr,
-            SummaryExpr::SummaryAgg { family: SummaryFamilyType::Sketch(kind, _), .. }
+            &summary_input.operator,
+            asap_types::ir::Operator::ASAP(ASAPOp::SummaryAgg { family: FieldDataType::Sketch(kind, _), .. })
                 if kind.algorithm() == &SketchAlgorithm::UnivMon
         ));
         states.push(Rc::clone(summary_input));

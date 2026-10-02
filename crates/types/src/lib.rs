@@ -1,26 +1,22 @@
 //! `asap-types` — shared vocabulary for the whole workspace.
 //!
-//! Merges the former `asap-ir` crate (the pre-ASAP intent algebra,
-//! workload/batch types, and DAG export) with the data-type-only modules of
-//! the former `asap-sketch` crate (the post-ASAP sketch-bound IR types,
-//! under [`post_asap`]).
-//!
-//! - [`pre_asap`] / [`types`] / [`workload`] / [`dag_export`] — the
-//!   pre-ASAP IR: language-agnostic query intent, independent of any
-//!   sketch decision.
-//! - [`post_asap`] — the post-ASAP IR: sketch-bound types
-//!   ([`post_asap::sketch`], [`post_asap::expr`], [`post_asap::schema`])
-//!   that commit to a concrete `SummaryKind`/`SummaryParams` realization.
-//!   No execution logic lives in this workspace (see issue #190) — a
-//!   downstream deployment crate is expected to supply that.
-//!   [`post_asap::query_time`] is the one exception, folder-separated from
-//!   the rest of `post_asap` on purpose: pure, sketch-object-agnostic
-//!   posterior error-bound math (issue #239) that a future real sketch
-//!   runtime's readout path can call directly — see that module's docs
-//!   for the planning-time/execution-time boundary and why it's unwired
-//!   today.
+//! - [`ir`] — the unified operator IR: one operator language before and
+//!   after ASAP optimization ([`ir::OperatorNode`]), plus its passes
+//!   (canonicalize, CSE, timing) and the wire export ([`ir::export`]).
+//! - [`pre_asap`] — the shared field vocabulary the IR's operators are
+//!   built from (grouping keys, reductions, sources, aggregation intents,
+//!   scalar literal / operator kinds, [`pre_asap::Schema`]).
+//! - [`post_asap`] — summary-state types (families, kinds, parameters,
+//!   grouping strategy), accuracy guarantees, and the execution-timing
+//!   vocabulary. No execution logic lives in this workspace (issue #190).
+//!   [`post_asap::query_time`] holds pure posterior error-bound math
+//!   (issue #239) a future sketch runtime's evaluation path can call; see its
+//!   docs for why it is unwired today.
+//! - [`types`] / [`workload`] / [`parsed_workload`] / [`dag_export`] /
+//!   [`cost`] / [`resources`] — workload, batch, export and cost types.
 pub mod cost;
 pub mod dag_export;
+pub mod ir;
 pub mod parsed_workload;
 pub mod post_asap;
 pub mod pre_asap;

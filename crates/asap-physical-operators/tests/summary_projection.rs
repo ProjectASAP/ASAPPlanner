@@ -8,9 +8,14 @@ use asap_physical_operators::{
     values::{Batch, Value},
 };
 use futures::{executor::block_on, StreamExt};
+use planner_types::ir::export::NonASAPOpKind as ValueOperation;
+use planner_types::ir::export::{
+    EdgeRole, GroupingEdgeCompatibility, PostAsapDag, PostAsapDagEdge, PostAsapDagNode,
+    PostAsapNodeId, PostAsapOperatorPayload, WindowEdgeCompatibility,
+};
 use planner_types::{
     post_asap::*,
-    pre_asap::{ColumnRef, DataType, ProjectItem, QueryExpr},
+    pre_asap::{ColumnRef, DataType},
 };
 use std::{collections::BTreeMap, sync::Arc};
 
@@ -18,26 +23,32 @@ use std::{collections::BTreeMap, sync::Arc};
 // the family and pass through the same immutable state, without decoding the payload.
 #[test]
 fn post_asap_summary_projection_survives_recovery() {
-    let family = SummaryFamilyType::ExactAggregate(ExactKind::Sum, ExactParams::Sum);
-    let schema = Arc::new(SummarySchema {
+    let family = FieldDataType::ExactAggregate(ExactKind::Sum, ExactParams::Sum);
+    let schema = Arc::new(planner_types::pre_asap::Schema {
+        unique_keys: vec![],
+        closed: false,
         fields: vec![
-            SummaryField {
+            Field {
+                table: None,
                 name: "state".into(),
                 dtype: family.clone(),
                 nullable: false,
             },
-            SummaryField {
+            Field {
+                table: None,
                 name: "service".into(),
-                dtype: SummaryFamilyType::Plain(DataType::Utf8),
+                dtype: FieldDataType::Plain(DataType::Utf8),
                 nullable: false,
             },
         ],
         time_index: None,
     });
-    let output = SummarySchema {
+    let output = planner_types::pre_asap::Schema {
+        unique_keys: vec![],
+        closed: false,
         fields: vec![
             schema.fields[1].clone(),
-            SummaryField {
+            Field {
                 name: "renamed".into(),
                 ..schema.fields[0].clone()
             },
@@ -55,13 +66,13 @@ fn post_asap_summary_projection_survives_recovery() {
             },
             PostAsapDagNode {
                 id: PostAsapNodeId(1),
-                payload: PostAsapOperatorPayload::Value {
-                    operation: ValueOperation::Project {
+                payload: PostAsapOperatorPayload::Relational {
+                    operator: ValueOperation::Project {
                         cols: vec![1, 0]
                             .into_iter()
-                            .map(|index| ProjectItem {
+                            .map(|index| planner_types::ir::export::WireProjectItem {
                                 alias: None,
-                                expr: QueryExpr::Column(index),
+                                expr: planner_types::ir::export::WireScalarExpr::Column(index),
                             })
                             .collect(),
                         qualifier: None,

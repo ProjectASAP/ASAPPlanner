@@ -2,42 +2,29 @@
 use crate::replacement::{
     Replacement, ReplacementProvenance, ReplacementStrategy, ReplacementSubDAG, TargetSubDAG,
 };
-use asap_types::post_asap::{
-    maintained_population::*, ExecutionTiming, ResultGuarantee, SummaryExpr, SummaryFamilyType,
-    SummaryField, SummaryNode, SummarySchema, ValueOperation,
-};
-use asap_types::pre_asap::{
-    any_measure_filtered, AggIntent, CompareOpKind, DataType, QueryExpr, Reduction, ScalarValue,
-    Schema, Source,
-};
+use asap_types::ir::non_asap::any_measure_filtered;
+use asap_types::ir::{ASAPOp, NonASAPOp, Operator, OperatorNode, ScalarExpr};
+use asap_types::post_asap::{maintained_population::*, ResultGuarantee, Schema};
+use asap_types::pre_asap::{AggIntent, CompareOpKind, DataType, Reduction, ScalarValue, Source};
 use std::rc::Rc;
 
-fn plain(schema: Schema) -> SummarySchema {
-    SummarySchema {
-        time_index: schema.time_index,
-        fields: schema
-            .columns
-            .into_iter()
-            .map(|c| SummaryField {
-                name: c.name,
-                dtype: SummaryFamilyType::Plain(c.dtype),
-                nullable: c.nullable,
-            })
-            .collect(),
-    }
+fn plain(schema: Schema) -> Schema {
+    Schema::lifted(schema.fields, schema.time_index)
 }
 
-fn strip_projection(mut root: &QueryExpr) -> &QueryExpr {
-    while let QueryExpr::Project { child, .. } = root {
+fn strip_projection(mut root: &OperatorNode) -> &OperatorNode {
+    while let Some(NonASAPOp::Project { child, .. }) = root.non_asap() {
         root = child;
     }
     root
 }
 
-fn recognize(root: &QueryExpr) -> Option<(MaintainedPopulation, PopulationReadout, Rc<QueryExpr>)> {
+fn recognize(
+    root: &OperatorNode,
+) -> Option<(MaintainedPopulation, PopulationStatistic, Rc<OperatorNode>)> {
     let root = strip_projection(root);
-    let (source, grouping, readout, value_column) = match root {
-        QueryExpr::Aggregate {
+    let (source, grouping, evaluation, value_column) = match root.non_asap()? {
+        NonASAPOp::Aggregate {
             child,
             reduction: Reduction::Reduce(grouping),
             measures,
@@ -51,39 +38,40 @@ fn recognize(root: &QueryExpr) -> Option<(MaintainedPopulation, PopulationReadou
             if any_measure_filtered(filters) {
                 return None;
             }
-            let (col, readout) = match intent {
+            let (col, evaluation) = match intent {
                 AggIntent::Quantile { q, col, .. } if q.is_finite() => {
-                    (*col, PopulationReadout::Quantile { q: *q })
+                    (*col, PopulationStatistic::Quantile { q: *q })
                 }
-                AggIntent::TopK { k, .. } => (None, PopulationReadout::TopK { k: *k }),
-                AggIntent::Sum { col } => (*col, PopulationReadout::Sum),
-                AggIntent::Count { .. } => (None, PopulationReadout::Count),
-                AggIntent::Avg { col } => (*col, PopulationReadout::Average),
+                AggIntent::TopK { k, .. } => (None, PopulationStatistic::TopK { k: *k }),
+                AggIntent::Sum { col } => (*col, PopulationStatistic::Sum),
+                AggIntent::Count { .. } => (None, PopulationStatistic::Count),
+                AggIntent::Avg { col } => (*col, PopulationStatistic::Average),
                 _ => return None,
             };
-            let schema = child.output_schema().ok()?;
-            if col.is_some_and(|c| schema.columns.get(c).is_none()) {
+            let schema = &child.schema;
+            if col.is_some_and(|c| schema.fields.get(c).is_none()) {
                 return None;
             }
-            (child, grouping, readout, col)
+            (child, grouping, evaluation, col)
         }
-        QueryExpr::Limit {
-            n,
+        NonASAPOp::Limit {
+            n: Some(n),
             offset: 0,
             child,
+            ..
         } => {
-            let QueryExpr::Sort {
+            let Some(NonASAPOp::Sort {
                 child,
                 keys,
                 partition_by,
-            } = child.as_ref()
+            }) = child.non_asap()
             else {
                 return None;
             };
             let [key] = keys.as_slice() else {
                 return None;
             };
-            let QueryExpr::Column(col) = &key.expr else {
+            let ScalarExpr::Column(col) = &key.expr else {
                 return None;
             };
             if key.ascending {
@@ -92,21 +80,21 @@ fn recognize(root: &QueryExpr) -> Option<(MaintainedPopulation, PopulationReadou
             (
                 child,
                 partition_by,
-                PopulationReadout::TopK { k: *n },
+                PopulationStatistic::TopK { k: *n },
                 Some(*col),
             )
         }
         _ => return None,
     };
-    if let QueryExpr::Scan {
+    if let Some(NonASAPOp::Scan {
         source: Source::Table { .. },
         schema,
         ..
-    } = source.as_ref()
+    }) = source.non_asap()
     {
         let value_column = value_column.or_else(|| {
             schema
-                .columns
+                .fields
                 .iter()
                 .position(|c| c.dtype == DataType::Float64 && !c.nullable)
         })?;
@@ -119,33 +107,33 @@ fn recognize(root: &QueryExpr) -> Option<(MaintainedPopulation, PopulationReadou
             max_k: 0,
             quantiles: false,
         };
-        if !schema.closed || !population.matches_input(source) {
+        if !schema.closed || !population.matches_node(source) {
             return None;
         }
-        return Some((population, readout, Rc::clone(source)));
+        return Some((population, evaluation, Rc::clone(source)));
     }
     // A bare PromQL selector carries the declared ingestion interval as a
     // temporal input scope. Membership must expire at that horizon; retain
     // the wrapper as the maintained input so validation can check agreement.
-    let (series_source, lookback_ms) = match source.as_ref() {
-        QueryExpr::TimeRange { range, child } => {
+    let (series_source, lookback_ms) = match source.non_asap() {
+        Some(NonASAPOp::TimeRange { range, child, .. }) => {
             let ms = u64::try_from(range.as_millis()).ok()?;
             if ms == 0 || std::time::Duration::from_millis(ms) != *range {
                 return None;
             }
             (child.as_ref(), ms)
         }
-        other => (other, 300_000),
+        _ => (source.as_ref(), 300_000),
     };
-    let QueryExpr::Scan {
+    let Some(NonASAPOp::Scan {
         source: Source::TimeSeries { metric },
         predicates,
         schema,
-    } = series_source
+    }) = series_source.non_asap()
     else {
         return None;
     };
-    if value_column.is_some_and(|c| schema.columns.get(c).is_none_or(|c| c.name != "value")) {
+    if value_column.is_some_and(|c| schema.fields.get(c).is_none_or(|c| c.name != "value")) {
         return None;
     }
     // PromQL can retain open labels or resolve them into a complete identity column.
@@ -156,15 +144,18 @@ fn recognize(root: &QueryExpr) -> Option<(MaintainedPopulation, PopulationReadou
         return None;
     }
     let label = |col: usize| -> Option<String> {
-        let c = schema.columns.get(col)?;
+        let c = schema.fields.get(col)?;
         (c.dtype == DataType::Utf8).then(|| c.name.clone())
     };
     let mut matchers = Vec::new();
     for predicate in predicates {
-        let QueryExpr::Compare { left, op, right } = predicate.0.as_ref() else {
+        let ScalarExpr::Compare {
+            left, op, right, ..
+        } = &predicate.0
+        else {
             return None;
         };
-        let (QueryExpr::Column(col), QueryExpr::Literal(ScalarValue::Utf8(value))) =
+        let (ScalarExpr::Column(col), ScalarExpr::Literal(ScalarValue::Utf8(value))) =
             (left.as_ref(), right.as_ref())
         else {
             return None;
@@ -203,90 +194,91 @@ fn recognize(root: &QueryExpr) -> Option<(MaintainedPopulation, PopulationReadou
             max_k: 0,
             quantiles: false,
         },
-        readout,
+        evaluation,
         Rc::clone(source),
     ))
 }
 
-/// Workload-aware rule: compatible readouts share one retractable population.
+/// Workload-aware rule: compatible evaluations share one retractable population.
 /// Deployments opt in by registering this strategy when they can maintain complete
-/// population updates and price the maintenance/readout boundary.
-/// The population is exact; max_k bounds the shared readout cache, not its members.
+/// population updates and price the maintenance/evaluation boundary.
+/// The population is exact; max_k bounds the shared evaluation cache, not its members.
 pub struct MaintainedPopulationStrategy {
-    roots: Vec<Rc<QueryExpr>>,
+    roots: Vec<Rc<OperatorNode>>,
 }
 impl MaintainedPopulationStrategy {
-    pub fn new(roots: &[Rc<QueryExpr>]) -> Self {
+    pub fn new(roots: &[Rc<OperatorNode>]) -> Self {
         Self {
             roots: roots.to_vec(),
         }
     }
-    pub fn candidate(&self, root: &Rc<QueryExpr>) -> Option<Rc<SummaryNode>> {
-        if let QueryExpr::Project {
+    pub fn candidate(&self, root: &Rc<OperatorNode>) -> Option<Rc<OperatorNode>> {
+        if let Some(NonASAPOp::Project {
             cols,
             qualifier,
             child,
-        } = root.as_ref()
+        }) = root.non_asap()
         {
             let child = self.candidate(child)?;
-            return Some(Rc::new(SummaryNode {
-                guarantee: child.guarantee.clone(),
-                schema: plain(root.output_schema().ok()?),
-                expr: SummaryExpr::ValueOperation {
-                    child,
-                    operation: ValueOperation::Project {
+            let guarantee = child.guarantee.clone();
+            return Some(Rc::new(
+                OperatorNode::with_schema(
+                    Operator::NonASAP(NonASAPOp::Project {
                         cols: cols.clone(),
                         qualifier: qualifier.clone(),
-                    },
-                    timing: ExecutionTiming::QueryTime,
-                },
-            }));
+                        child,
+                    }),
+                    plain(root.schema.clone()),
+                )
+                .with_guarantee(guarantee),
+            ));
         }
-        let (mut population, readout, source) = recognize(root)?;
+        let (mut population, evaluation, source) = recognize(root)?;
         let identity = population.clone();
         for other in self.roots.iter().chain(std::iter::once(root)) {
             if let Some((p, r, _)) = recognize(other) {
                 if p == identity {
                     match r {
-                        PopulationReadout::Quantile { .. } => population.quantiles = true,
-                        PopulationReadout::TopK { k } => population.max_k = population.max_k.max(k),
-                        PopulationReadout::Sum
-                        | PopulationReadout::Count
-                        | PopulationReadout::Average => {}
+                        PopulationStatistic::Quantile { .. } => population.quantiles = true,
+                        PopulationStatistic::TopK { k } => {
+                            population.max_k = population.max_k.max(k)
+                        }
+                        PopulationStatistic::Sum
+                        | PopulationStatistic::Count
+                        | PopulationStatistic::Average => {}
                     }
                 }
             }
         }
-        let input_schema = plain(source.output_schema().ok()?);
-        let scan = Rc::new(SummaryNode {
-            expr: SummaryExpr::KeepPreAsap(source),
-            schema: input_schema.clone(),
-            guarantee: Some(ResultGuarantee::exact("source samples")),
-        });
-        // Query time is only the initial layout: whether the population is
-        // retained at ingestion or rebuilt per query is its lifecycle choice
-        // (`SummaryMaintenanceLifecyclePlan::execution_timed_dag`). The readout
-        // and projection above it are query-time by construction.
-        let maintained = Rc::new(SummaryNode {
-            expr: SummaryExpr::ValueOperation {
+        let input_schema = plain(source.schema.clone());
+        // The source node itself is the maintained input (a non-ASAP node
+        // keeps its derived schema), kept with its exact guarantee.
+        let scan = Rc::new(
+            source
+                .as_ref()
+                .clone()
+                .with_guarantee(Some(ResultGuarantee::exact("source samples"))),
+        );
+        let maintained = OperatorNode::asap_node(
+            ASAPOp::MaintainPopulation {
                 child: scan,
-                operation: ValueOperation::MaintainPopulation { population },
-                timing: ExecutionTiming::QueryTime,
+                population,
             },
-            schema: input_schema,
-            guarantee: Some(ResultGuarantee::exact(
+            input_schema,
+            Some(ResultGuarantee::exact(
                 "exact members under the declared population semantics",
             )),
-        });
-        Some(Rc::new(SummaryNode {
-            expr: SummaryExpr::ValueOperation {
+        );
+        Some(OperatorNode::asap_node(
+            ASAPOp::EvaluatePopulation {
                 child: maintained,
-                operation: ValueOperation::ReadPopulation { readout },
-                timing: ExecutionTiming::QueryTime,
+                evaluation,
             },
-            schema: plain(root.output_schema().ok()?),
-            guarantee: Some(ResultGuarantee::exact("exact current-population readout")),
-        }))
+            plain(root.schema.clone()),
+            Some(ResultGuarantee::exact(
+                "exact current-population evaluation",
+            )),
+        ))
     }
 }
 impl ReplacementStrategy for MaintainedPopulationStrategy {
@@ -297,10 +289,10 @@ impl ReplacementStrategy for MaintainedPopulationStrategy {
         self.candidate(target.root)
             .map(|node| ReplacementSubDAG {
                 strategy: "MaintainedPopulationStrategy",
-                replacement: Replacement::Summary(node),
+                replacement: Replacement::SubDag(node),
                 provenance: ReplacementProvenance::SummaryRealization,
                 rationale:
-                    "share an exact maintained population across compatible aggregate readouts"
+                    "share an exact maintained population across compatible aggregate evaluations"
                         .into(),
             })
             .into_iter()
@@ -312,10 +304,26 @@ impl ReplacementStrategy for MaintainedPopulationStrategy {
 mod tests {
     use super::*;
     use crate::test_support::lower_promql;
-    use asap_types::post_asap::{compile_post_asap_dag, share_common_summary_subtrees};
+    use asap_types::ir::cse::share_common_subdags;
+    use asap_types::ir::export::compile_post_asap_dag as export_timed;
+    use asap_types::ir::timing::{apply_lifecycle_timings, LifecycleAssignment, TimingMemo};
 
-    fn lower(q: &str) -> Rc<QueryExpr> {
-        Rc::new(lower_promql(q, asap_types::types::AccuracyTarget::Exact))
+    /// Time `root` under the default lifecycle assignment (which runs the
+    /// data-state / population-contract validation) and export it.
+    fn compile_post_asap_dag(root: &Rc<OperatorNode>) -> Result<(), String> {
+        root.validate_structure().map_err(|e| e.to_string())?;
+        let timed = apply_lifecycle_timings(
+            root,
+            &LifecycleAssignment::default_maintained(),
+            &mut TimingMemo::new(),
+        )
+        .map_err(|e| format!("{e:?}"))?;
+        export_timed(&timed).map_err(|e| format!("{e:?}"))?;
+        Ok(())
+    }
+
+    fn lower(q: &str) -> Rc<OperatorNode> {
+        lower_promql(q, asap_types::types::AccuracyTarget::Exact)
     }
 
     // Instant scalar aggregations share the same retractable series population.
@@ -340,7 +348,7 @@ mod tests {
         }
     }
 
-    // Different readout parameters retain one shared maintenance producer in the DAG.
+    // Different evaluation parameters retain one shared maintenance producer in the DAG.
     #[test]
     fn quantiles_and_topk_share_a_planner_population() {
         let roots: Vec<_> = [
@@ -364,7 +372,7 @@ mod tests {
             .target_subdag_candidates()
             .flat_map(|g| &g.candidates)
             .any(|c| c.strategy == "MaintainedPopulationStrategy"));
-        let plans = share_common_summary_subtrees(
+        let plans = share_common_subdags(
             roots
                 .iter()
                 .enumerate()
@@ -374,18 +382,10 @@ mod tests {
         let mut producers = Vec::new();
         for (_, plan) in &plans {
             compile_post_asap_dag(plan).unwrap();
-            let SummaryExpr::ValueOperation {
-                child,
-                operation: ValueOperation::ReadPopulation { .. },
-                ..
-            } = &plan.expr
-            else {
-                panic!("missing typed readout")
+            let Operator::ASAP(ASAPOp::EvaluatePopulation { child, .. }) = &plan.operator else {
+                panic!("missing typed evaluation")
             };
-            let SummaryExpr::ValueOperation {
-                operation: ValueOperation::MaintainPopulation { population },
-                ..
-            } = &child.expr
+            let Operator::ASAP(ASAPOp::MaintainPopulation { population, .. }) = &child.operator
             else {
                 panic!("missing maintained population")
             };
@@ -411,14 +411,10 @@ mod tests {
         let (p, _, _) = recognize(&roots[0]).unwrap();
         assert!(matches!(p.input, PopulationInput::CurrentSeries(ref s) if s.grouping.is_empty()));
         let candidate = strategy.candidate(&roots[0]).unwrap();
-        let SummaryExpr::ValueOperation { child, .. } = &candidate.expr else {
+        let Operator::ASAP(ASAPOp::EvaluatePopulation { child, .. }) = &candidate.operator else {
             unreachable!()
         };
-        let SummaryExpr::ValueOperation {
-            operation: ValueOperation::MaintainPopulation { population },
-            ..
-        } = &child.expr
-        else {
+        let Operator::ASAP(ASAPOp::MaintainPopulation { population, .. }) = &child.operator else {
             unreachable!()
         };
         assert_eq!(population.max_k, 5);
@@ -445,23 +441,22 @@ mod tests {
         assert_eq!(p.matchers[0].operation, CurrentSeriesMatch::Regex);
     }
     // Population timing is a lifecycle choice: a retained or rebuilt
-    // population both validate, while its readout must stay at query time.
+    // population both validate, while its evaluation must stay at query time.
     #[test]
     fn population_timing_is_not_structural() {
         let root = lower("topk(5,a)");
         let candidate = MaintainedPopulationStrategy::new(std::slice::from_ref(&root))
             .candidate(&root)
             .unwrap();
-        let with_timings = |population: ExecutionTiming, readout: ExecutionTiming| {
+        use asap_types::post_asap::ExecutionTiming;
+        let with_timings = |population: ExecutionTiming, evaluation: ExecutionTiming| {
             let mut node = (*candidate).clone();
-            let SummaryExpr::ValueOperation { child, timing, .. } = &mut node.expr else {
+            node.timing = Some(evaluation);
+            let Operator::ASAP(ASAPOp::EvaluatePopulation { child, .. }) = &mut node.operator
+            else {
                 unreachable!()
             };
-            *timing = readout;
-            let SummaryExpr::ValueOperation { timing, .. } = &mut Rc::make_mut(child).expr else {
-                unreachable!()
-            };
-            *timing = population;
+            Rc::make_mut(child).timing = Some(population);
             compile_post_asap_dag(&Rc::new(node))
         };
         use ExecutionTiming::{IngestionTime, QueryTime};
@@ -469,34 +464,27 @@ mod tests {
         assert!(with_timings(QueryTime, QueryTime).is_ok());
         assert!(with_timings(IngestionTime, IngestionTime).is_err());
     }
-    // A readout cannot reinterpret arbitrary rows as maintained state or exceed its producer's contract.
+    // A evaluation cannot reinterpret arbitrary rows as maintained state or exceed its producer's contract.
     #[test]
     fn malformed_population_dags_fail_closed() {
         let root = lower("topk(5,a)");
         let strategy = MaintainedPopulationStrategy::new(std::slice::from_ref(&root));
         let candidate = strategy.candidate(&root).unwrap();
+        compile_post_asap_dag(&candidate).expect("the unmodified candidate is legal");
         let mut bad = (*candidate).clone();
-        let SummaryExpr::ValueOperation { operation, .. } = &mut bad.expr else {
-            unreachable!()
-        };
-        *operation = ValueOperation::ReadPopulation {
-            readout: PopulationReadout::TopK { k: 6 },
-        };
-        assert!(compile_post_asap_dag(&Rc::new(bad.clone())).is_err());
-        let SummaryExpr::ValueOperation {
-            child, operation, ..
-        } = &mut bad.expr
+        let Operator::ASAP(ASAPOp::EvaluatePopulation { evaluation, .. }) = &mut bad.operator
         else {
             unreachable!()
         };
-        *operation = ValueOperation::ReadPopulation {
-            readout: PopulationReadout::TopK { k: 5 },
+        *evaluation = PopulationStatistic::TopK { k: 6 };
+        assert!(compile_post_asap_dag(&Rc::new(bad.clone())).is_err());
+        let Operator::ASAP(ASAPOp::EvaluatePopulation { child, evaluation }) = &mut bad.operator
+        else {
+            unreachable!()
         };
+        *evaluation = PopulationStatistic::TopK { k: 5 };
         let producer = Rc::make_mut(child);
-        let SummaryExpr::ValueOperation {
-            operation: ValueOperation::MaintainPopulation { population },
-            ..
-        } = &mut producer.expr
+        let Operator::ASAP(ASAPOp::MaintainPopulation { population, .. }) = &mut producer.operator
         else {
             unreachable!()
         };

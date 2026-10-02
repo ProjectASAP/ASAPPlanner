@@ -6,7 +6,7 @@ use crate::summary_kernels::{
     HydraKllSketchAccumulator,
 };
 use crate::{AggregateCore, KeyByLabelValues};
-use planner_types::post_asap::{SketchAlgorithm, SketchParams, SummaryFamilyType};
+use planner_types::post_asap::{FieldDataType as SummaryFamilyType, SketchAlgorithm, SketchParams};
 
 /// Generate the clone-based `AccumulatorUpdater` methods for updaters whose
 /// inner `acc` field implements `Clone + AggregateCore`.

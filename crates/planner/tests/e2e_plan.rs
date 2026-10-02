@@ -12,8 +12,7 @@ use asap_aware_mapping::{
 };
 use asap_frontend_sql::{lower_sql_dialect, SqlCatalog};
 use asap_planner::{e2e_plan, FrontendInput, PlanError, UserInput, UserInputError};
-use asap_types::post_asap::SummaryExpr;
-use asap_types::pre_asap::schema::{Column, DataType, Schema};
+use asap_types::pre_asap::schema::{DataType, Field, Schema};
 use asap_types::types::AccuracyTarget;
 use asap_types::workload::{
     AccuracyRequirement, BatchEntry, DataArrival, DataWorkload, DurationMs, Evidence,
@@ -51,8 +50,8 @@ fn lineitem_catalog() -> SqlCatalog {
     SqlCatalog::new().with_table(
         "lineitem",
         Schema::new(vec![
-            Column::new("l_orderkey", DataType::Int64, false),
-            Column::new("l_extendedprice", DataType::Float64, false),
+            Field::plain("l_orderkey", DataType::Int64, false),
+            Field::plain("l_extendedprice", DataType::Float64, false),
         ]),
     )
 }
@@ -137,7 +136,7 @@ async fn builtin_cost_model_cannot_price_lifecycles_and_falls_back_to_raw_recomp
         )
         .await
         .expect("lowers");
-        roots.push((index, Rc::new(expr), Some(accuracy)));
+        roots.push((index, expr, Some(accuracy)));
     }
     let strategies = default_strategies_with_evidence(models.cost, models.evidence);
     let space = search_workload_with_targets(roots, &strategies, models.accuracy);
@@ -150,12 +149,12 @@ async fn builtin_cost_model_cannot_price_lifecycles_and_falls_back_to_raw_recomp
             .expect("assembles")
             .expect("root has a group");
         assert!(
-            !matches!(cost_only.expr, SummaryExpr::KeepPreAsap(_)),
+            cost_only.contains_asap(),
             "entry {}: cost-only selection was expected to pick a summary",
             plan.entry_index
         );
         assert!(
-            matches!(plan.plan.root.expr, SummaryExpr::KeepPreAsap(_))
+            !plan.plan.root.contains_asap()
                 && plan.plan.selected_raw_recompute
                 && plan.plan.deployments.is_empty()
                 && plan.plan.summary_total_cost.is_none()
@@ -390,7 +389,7 @@ async fn lifecycle_decisions_ride_inside_each_plan() {
     assert_eq!(output.plans.len(), 1);
     assert_eq!(output.plans[0].entry_index, 0);
     let _: &Rc<_> = &output.plans[0].plan.root;
-    assert_eq!(output.dags().len(), 1);
+    assert_eq!(output.operator_roots().len(), 1);
 }
 
 /// Each root's lifecycle is planned against the entries that read it: a
@@ -436,4 +435,55 @@ async fn each_plan_counts_only_its_own_entries_reads() {
     let output = e2e_plan(input).await.expect("workload plans");
     let reads: Vec<_> = output.plans.iter().map(|p| p.plan.expected_reads).collect();
     assert_eq!(reads, vec![Some(60.0), Some(6.0)]);
+}
+
+/// Scalar-only and mixed workloads preserve entry bindings without wrapper nodes.
+#[tokio::test]
+async fn scalar_roots_survive_planning_in_workload_order() {
+    for queries in [
+        vec!["2", "time()"],
+        vec!["2", "up * 2", "scalar(sum(up)) + 1"],
+    ] {
+        let workload = PlanningWorkload {
+            query_workload: QueryWorkload {
+                language: QueryLanguage::PromQL,
+                query_batch: Some(queries.iter().map(|q| batch(q)).collect()),
+                repeating_queries: None,
+            },
+            data_workload: Some(DataWorkload {
+                data_ingestion_interval: Evidence {
+                    value: Some(DurationMs(1000)),
+                    ..Default::default()
+                },
+                ..Default::default()
+            }),
+        };
+        let output = e2e_plan(UserInput::new(
+            &workload,
+            FrontendInput::Promql {
+                now_ms: NOW_MS,
+                histograms: None,
+            },
+            PlanningModels::builtin(),
+            lifecycle(),
+        ))
+        .await
+        .unwrap();
+        assert_eq!(
+            output.entry_indices(),
+            (0..queries.len()).collect::<Vec<_>>()
+        );
+        assert!(matches!(
+            output.roots()[0],
+            asap_types::ir::QueryRoot::Scalar(_)
+        ));
+        assert_eq!(output.roots().len(), queries.len());
+        if queries.len() == 3 {
+            assert_eq!(output.plans[0].entry_index, 1);
+            let asap_types::ir::QueryRoot::Scalar(expr) = &output.roots()[2] else {
+                panic!()
+            };
+            assert_eq!(expr.operator_refs().len(), 1);
+        }
+    }
 }

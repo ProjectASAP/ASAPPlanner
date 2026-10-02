@@ -13,7 +13,7 @@ are unchanged. #453 separately defines the integration API surface.
 | `MaterializeSummaryMaintenanceLifecycleError` | `SummaryMaintenanceLifecycleAssemblyError` | Failure assembling a DAG or deriving maintenance decisions |
 | Error variant `Materialize` | `AssembleDag` | Wrap an underlying `RealizationError` from DAG assembly |
 | Internal `materialize_inner` / `materialize_residual` | `assemble_target` / `assemble_residual` | Assemble selected nodes, not runtime materialized views |
-| Internal assembly cache `materialized` | `assembled_nodes` | Preserve shared `Rc<SummaryNode>` identity |
+| Internal assembly cache `materialized` | `assembled_nodes` | Preserve shared node identity (now `Rc<OperatorNode>`, see below) |
 
 Update imports and calls together; old public names are not retained as aliases.
 Downstream Rust integrations using these symbols must migrate. No serialized
@@ -26,3 +26,26 @@ counterpart) are prerequisites, not additional changes here.
 The workflow remains one selection call per workload followed by one assembly
 call per query root. `SummaryMaintenanceLifecyclePlan` contains the assembled
 Post-ASAP DAG root plus maintenance decisions; it is not an executable plan.
+
+## Later: unified operator IR (operator flattening)
+
+The pre-ASAP and post-ASAP trees became one IR in `asap_types::ir`. Every
+node is an `Rc<OperatorNode>` whose `operator` is `Operator::NonASAP(NonASAPOp)`
+or `Operator::ASAP(ASAPOp)`. Old public names are not kept as aliases.
+
+| Old | New |
+|---|---|
+| `Rc<QueryExpr>` (pre-ASAP) | `Rc<OperatorNode>` holding `Operator::NonASAP(NonASAPOp)` |
+| `Rc<SummaryNode>` / `SummaryExpr` (post-ASAP) | The same `Rc<OperatorNode>`; summary steps are `Operator::ASAP(ASAPOp)` |
+| `SummaryExpr::KeepPreAsap(q)` | The non-ASAP sub-DAG itself; `retain_exact` only adds an exact `guarantee` |
+| `SummaryExpr::ValueOperation { .. }` over a evaluation | An ordinary `NonASAPOp` (`Project`, `Filter`, `Sort`, `Limit`, `Aggregate`) reading an ASAP node; `FinalizeExactAccumulator`, `MaintainPopulation`, `EvaluatePopulation` are `ASAPOp` variants |
+| `Replacement::Summary(..)` / `Replacement::Rewrite(..)` | `Replacement::SubDag(Rc<OperatorNode>)`; `is_logical_rewrite` tells them apart |
+| `SummaryFamilyType` | `FieldDataType` (its non-`Plain` variants) |
+| Timing stored on post-ASAP nodes | `OperatorNode::timing`, `None` until `ir::timing::apply_lifecycle_timings` writes it from a `LifecycleAssignment` |
+| `UnresolvedQueryExpr` + `asap_types::pre_asap::resolve_root` | `UnresolvedOp` / `UnresolvedScalar` + `asap_frontend_common::resolve_root` |
+| `pre_asap::canonicalize`, `pre_asap::cse::share_common_subdags` | `ir::canonicalize::canonicalize`, `ir::cse::share_common_subdags` |
+| `asap_types::post_asap::compile_post_asap_dag` (wire version 5, `Fallback`/`Binary`/`Value` payloads) | `asap_types::ir::export::compile_post_asap_dag` (wire version 7: one node per operator, `Relational` payloads, `ScalarRef` edges); input must be timed |
+| Exported schema JSON `columns` | `fields` |
+
+Field and schema details: [Pre-ASAP IR](pre-asap-ir.md) and
+[Post-ASAP IR](../design_docs/concepts/post-asap-ir.md).

@@ -4,7 +4,7 @@ use super::*;
 pub(super) fn guarantee(
     algorithm: &SketchAlgorithm,
     params: &SketchParams,
-    query: &SketchQuery,
+    query: &SketchStatistic,
 ) -> Option<ResultGuarantee> {
     let SketchParams::Kll { k } = params else {
         return None;
@@ -49,11 +49,11 @@ mod tests {
         let params = default_size_params(SketchAlgorithm::Kll, &q, 0.01, 0.01);
         let g = DefaultAccuracyModel
             .local_guarantee(
-                &SummaryFamilyType::Sketch(
+                &FieldDataType::Sketch(
                     SketchKind::new(SketchAlgorithm::Kll, params),
                     GroupingStrategy::default(),
                 ),
-                &SketchQuery::Quantile { q: 0.99 },
+                &SketchStatistic::Quantile { q: 0.99 },
             )
             .unwrap();
         assert_eq!(g.metric, ErrorMetric::Rank);
@@ -69,7 +69,7 @@ mod tests {
         assert_eq!(g.approximate_layer_count(), 1);
         assert!(g.provenance.iter().any(|source| matches!(
             source,
-            GuaranteeSource::SketchReadout { contract, .. }
+            GuaranteeSource::SketchEvaluation { contract, .. }
                 if contract == "apache_datasketches_kll_empirical_99_a9b42755072b"
         )));
     }

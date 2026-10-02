@@ -1,4 +1,4 @@
-//! Language-independent maintained populations and their readouts.
+//! Language-independent maintained populations and their evaluations.
 //! Resource limits, ingestion placement and data structures belong to the executor.
 use serde::{Deserialize, Serialize};
 
@@ -27,7 +27,7 @@ pub enum CurrentSeriesMatch {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub enum PopulationReadout {
+pub enum PopulationStatistic {
     Quantile { q: f64 },
     TopK { k: usize },
     Sum,
@@ -37,27 +37,28 @@ pub enum PopulationReadout {
 
 impl CurrentSeriesInput {
     /// Verify the named contract against the canonical maintenance input.
-    pub fn matches_input(&self, input: &crate::pre_asap::QueryExpr) -> bool {
-        use crate::pre_asap::{CompareOpKind, DataType, QueryExpr, ScalarValue, Source};
-        // PromQL instant selectors carry an ingestion-interval `TimeRange` as
-        // their input scope. The population must use the same expiry horizon;
-        // shifted and otherwise transformed inputs still fail below.
-        let input = match input {
-            QueryExpr::TimeRange { range, child }
-                if self.lookback_ms > 0
-                    && *range == std::time::Duration::from_millis(self.lookback_ms) =>
+    pub fn matches_node(&self, input: &crate::ir::OperatorNode) -> bool {
+        use crate::ir::{NonASAPOp, Operator, ScalarExpr, TimeRangeKind};
+        use crate::pre_asap::{CompareOpKind, DataType, ScalarValue, Source};
+        let input = match &input.operator {
+            Operator::NonASAP(NonASAPOp::TimeRange {
+                range,
+                kind: TimeRangeKind::Instant,
+                child,
+            }) if self.lookback_ms > 0
+                && *range == std::time::Duration::from_millis(self.lookback_ms) =>
             {
                 child.as_ref()
             }
-            QueryExpr::TimeRange { .. } => return false,
-            other if self.lookback_ms == 300_000 => other,
+            Operator::NonASAP(NonASAPOp::TimeRange { .. }) => return false,
+            _ if self.lookback_ms == 300_000 => input,
             _ => return false,
         };
-        let QueryExpr::Scan {
+        let Operator::NonASAP(NonASAPOp::Scan {
             source: Source::TimeSeries { metric },
             predicates,
             schema,
-        } = input
+        }) = &input.operator
         else {
             return false;
         };
@@ -70,7 +71,7 @@ impl CurrentSeriesInput {
         }
         if self.grouping.iter().any(|label| {
             !schema
-                .columns
+                .fields
                 .iter()
                 .any(|c| c.name == *label && c.dtype == DataType::Utf8)
         }) {
@@ -78,15 +79,18 @@ impl CurrentSeriesInput {
         }
         let mut matchers = Vec::new();
         for predicate in predicates {
-            let QueryExpr::Compare { left, op, right } = predicate.0.as_ref() else {
+            let ScalarExpr::Compare {
+                left, op, right, ..
+            } = &predicate.0
+            else {
                 return false;
             };
-            let (QueryExpr::Column(col), QueryExpr::Literal(ScalarValue::Utf8(value))) =
+            let (ScalarExpr::Column(col), ScalarExpr::Literal(ScalarValue::Utf8(value))) =
                 (left.as_ref(), right.as_ref())
             else {
                 return false;
             };
-            let Some(column) = schema.columns.get(*col) else {
+            let Some(column) = schema.fields.get(*col) else {
                 return false;
             };
             if column.dtype != DataType::Utf8 {
@@ -117,7 +121,7 @@ impl CurrentSeriesInput {
 pub enum PopulationInput {
     CurrentSeries(CurrentSeriesInput),
     Rows {
-        input: std::rc::Rc<crate::pre_asap::QueryExpr>,
+        input: std::rc::Rc<crate::ir::OperatorNode>,
         value_column: usize,
         grouping: crate::pre_asap::GroupKeys,
     },
@@ -131,28 +135,48 @@ pub struct MaintainedPopulation {
 }
 
 impl MaintainedPopulation {
-    pub fn matches_input(&self, input: &crate::pre_asap::QueryExpr) -> bool {
+    /// Whether `input` is the maintenance input this population declares.
+    pub fn matches_node(&self, input: &crate::ir::OperatorNode) -> bool {
+        use crate::ir::{NonASAPOp, Operator};
+        use crate::pre_asap::{DataType, Source};
         match &self.input {
-            PopulationInput::CurrentSeries(spec) => spec.matches_input(input),
+            PopulationInput::CurrentSeries(spec) => spec.matches_node(input),
             PopulationInput::Rows {
                 input: expected,
                 value_column,
                 grouping,
             } => {
-                use crate::pre_asap::{DataType, QueryExpr, Source};
-                expected.as_ref() == input
-                    && matches!(input, QueryExpr::Scan { source: Source::Table { .. }, schema, .. }
-                        if schema.closed && schema.columns.get(*value_column).is_some_and(|c| c.dtype == DataType::Float64 && !c.nullable)
-                            && !grouping.is_without() && grouping.keys().iter().all(|k| *k < schema.columns.len()))
+                let Operator::NonASAP(NonASAPOp::Scan {
+                    source: Source::Table { .. },
+                    schema,
+                    ..
+                }) = &input.operator
+                else {
+                    return false;
+                };
+                // The same computation, whatever accuracy or timing has
+                // been attached to the node since.
+                let same_source =
+                    expected.operator == input.operator && expected.schema == input.schema;
+                same_source
+                    && schema.closed
+                    && schema
+                        .fields
+                        .get(*value_column)
+                        .is_some_and(|c| c.dtype == DataType::Float64 && !c.nullable)
+                    && !grouping.is_without()
+                    && grouping.keys().iter().all(|k| *k < schema.fields.len())
             }
         }
     }
 
-    pub fn supports(&self, readout: &PopulationReadout) -> bool {
-        match readout {
-            PopulationReadout::Quantile { q } => self.quantiles && q.is_finite(),
-            PopulationReadout::TopK { k } => *k <= self.max_k,
-            PopulationReadout::Sum | PopulationReadout::Count | PopulationReadout::Average => true,
+    pub fn supports(&self, evaluation: &PopulationStatistic) -> bool {
+        match evaluation {
+            PopulationStatistic::Quantile { q } => self.quantiles && q.is_finite(),
+            PopulationStatistic::TopK { k } => *k <= self.max_k,
+            PopulationStatistic::Sum
+            | PopulationStatistic::Count
+            | PopulationStatistic::Average => true,
         }
     }
 }

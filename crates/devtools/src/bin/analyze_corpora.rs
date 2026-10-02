@@ -6,7 +6,7 @@
 
 use asap_devtools::{lower_promql_with_data_ingestion_interval, SqlCatalog};
 use asap_frontend_sql::lower_sql_dialect;
-use asap_types::pre_asap::schema::{Column, DataType, Schema};
+use asap_types::pre_asap::schema::{DataType, Field, Schema};
 use asap_types::types::AccuracyTarget;
 use asap_types::workload::SqlDialect;
 use serde::Serialize;
@@ -29,8 +29,8 @@ const NETFLOW: &str = include_str!("../../../frontend-sql/tests/netflow/data/net
 const BGP: &str = include_str!("../../../frontend-sql/tests/bgp_analytics/data/bgp_analytics.sql");
 const BGP_WORKLOAD: &str = include_str!("../../../frontend-sql/tests/bgp_jan2024_workload/data/bgp_jan2024_rrc00_200_query_workload.yaml");
 
-fn col(name: &str, dtype: DataType) -> Column {
-    Column::new(name, dtype, false)
+fn col(name: &str, dtype: DataType) -> Field {
+    Field::plain(name, dtype, false)
 }
 
 fn dqc_catalog() -> SqlCatalog {
@@ -218,7 +218,7 @@ fn run_corpus(name: &str, source: &str, interval_ms: u64) -> CorpusResult {
                 normalized_expression,
                 structural_shape,
                 lowered: true,
-                ir: Some(serde_json::to_value(&ir).expect("QueryExpr must serialize")),
+                ir: Some(serde_json::to_value(&ir).expect("OperatorNode must serialize")),
                 ir_debug: Some(format!("{ir:#?}")),
                 error: None,
             }),
@@ -493,7 +493,7 @@ async fn run_sql_corpora(out_dir: PathBuf) {
                     normalized_expression,
                     structural_shape,
                     lowered: true,
-                    ir: Some(serde_json::to_value(&ir).expect("QueryExpr must serialize")),
+                    ir: Some(serde_json::to_value(&ir).expect("OperatorNode must serialize")),
                     ir_debug: Some(format!("{ir:#?}")),
                     error: None,
                 }),

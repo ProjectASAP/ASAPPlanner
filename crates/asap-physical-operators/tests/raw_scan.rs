@@ -6,37 +6,48 @@ use asap_physical_operators::dag::{
     Error, Limits, OutputStream, RunContext, Scope,
 };
 use futures::{executor::block_on, stream, StreamExt};
+use planner_types::ir::export::NonASAPOpKind as ValueOperation;
+use planner_types::ir::export::{
+    EdgeRole, GroupingEdgeCompatibility, PostAsapDag, PostAsapDagEdge, PostAsapDagNode,
+    PostAsapNodeId, PostAsapOperatorPayload, WindowEdgeCompatibility,
+};
+use planner_types::ir::Predicate;
 use planner_types::{
     post_asap::*,
-    pre_asap::{Column, DataType, GroupKeys, Predicate, QueryExpr, Source},
+    pre_asap::{DataType, Field, GroupKeys, Source},
 };
 use std::{
     collections::BTreeMap,
-    rc::Rc,
     sync::{
         atomic::{AtomicUsize, Ordering},
         Arc,
     },
 };
 
-fn fixture() -> (QueryExpr, Schema, Vec<Batch>) {
-    let schema =
-        planner_types::pre_asap::Schema::new(vec![Column::new("value", DataType::Int64, true)]);
-    let output = Arc::new(SummarySchema {
-        fields: vec![SummaryField {
+fn fixture() -> (planner_types::ir::NonASAPOp, Schema, Vec<Batch>) {
+    let schema = planner_types::pre_asap::Schema::new(vec![planner_types::pre_asap::Field::plain(
+        "value",
+        DataType::Int64,
+        true,
+    )]);
+    let output = Arc::new(planner_types::pre_asap::Schema {
+        unique_keys: vec![],
+        closed: false,
+        fields: vec![Field {
+            table: None,
             name: "value".into(),
-            dtype: SummaryFamilyType::Plain(DataType::Int64),
+            dtype: FieldDataType::Plain(DataType::Int64),
             nullable: true,
         }],
         time_index: None,
     });
-    let scan = QueryExpr::Scan {
+    let scan = planner_types::ir::NonASAPOp::Scan {
         source: Source::Table {
             table_ref: "numbers".into(),
         },
-        predicates: vec![Predicate(Rc::new(QueryExpr::IsNotNull(Rc::new(
-            QueryExpr::Column(0),
-        ))))],
+        predicates: vec![Predicate(planner_types::ir::ScalarExpr::IsNotNull(
+            Box::new(planner_types::ir::ScalarExpr::Column(0)),
+        ))],
         schema,
     };
     let batches = vec![
@@ -53,7 +64,11 @@ fn fixture() -> (QueryExpr, Schema, Vec<Batch>) {
     ];
     (scan, output, batches)
 }
-fn plan(scan: QueryExpr, schema: &Schema, state: ExecutionDataState) -> PostAsapDag {
+fn plan(
+    scan: planner_types::ir::NonASAPOp,
+    schema: &Schema,
+    state: ExecutionDataState,
+) -> PostAsapDag {
     let node = |id, payload| PostAsapDagNode {
         id: PostAsapNodeId(id),
         payload,
@@ -72,13 +87,20 @@ fn plan(scan: QueryExpr, schema: &Schema, state: ExecutionDataState) -> PostAsap
     };
     PostAsapDag {
         nodes: vec![
-            node(0, PostAsapOperatorPayload::Fallback { expression: scan }),
+            node(
+                0,
+                PostAsapOperatorPayload::Relational {
+                    operator: planner_types::ir::export::NonASAPOpKind::from_op(&scan, &mut |_| {
+                        panic!("no plan refs")
+                    }),
+                },
+            ),
             node(
                 1,
-                PostAsapOperatorPayload::Value {
-                    operation: ValueOperation::Sort {
-                        keys: vec![planner_types::pre_asap::SortKey {
-                            expr: QueryExpr::Column(0),
+                PostAsapOperatorPayload::Relational {
+                    operator: ValueOperation::Sort {
+                        keys: vec![planner_types::ir::export::WireSortKey {
+                            expr: planner_types::ir::export::WireScalarExpr::Column(0),
                             ascending: false,
                             nulls_first: false,
                         }],
@@ -88,9 +110,9 @@ fn plan(scan: QueryExpr, schema: &Schema, state: ExecutionDataState) -> PostAsap
             ),
             node(
                 2,
-                PostAsapOperatorPayload::Value {
-                    operation: ValueOperation::Limit {
-                        n: 2,
+                PostAsapOperatorPayload::Relational {
+                    operator: ValueOperation::Limit {
+                        n: Some(2),
                         offset: 0,
                         partition_by: GroupKeys::by(vec![]),
                     },
@@ -219,17 +241,27 @@ fn lazy_open_shared_producer_and_cancellation() {
 #[test]
 fn binding_errors_and_reader_errors_are_not_empty_results() {
     let (mut scan, schema, _) = fixture();
-    assert!(DataSources::default().bind(&scan).is_err());
+    assert!(DataSources::default()
+        .bind(&planner_types::ir::OperatorNode::with_schema(
+            planner_types::ir::Operator::NonASAP(scan.clone()),
+            scan.output_schema().unwrap()
+        ))
+        .is_err());
     let opened = Arc::new(AtomicUsize::new(0));
     let sources = registry(Arc::new(CountingSource {
         schema: schema.clone(),
         opened: opened.clone(),
         fail: true,
     }));
-    if let QueryExpr::Scan { predicates, .. } = &mut scan {
-        predicates.push(Predicate(Rc::new(QueryExpr::Column(0))));
+    if let planner_types::ir::NonASAPOp::Scan { predicates, .. } = &mut scan {
+        predicates.push(Predicate(planner_types::ir::ScalarExpr::Column(0)));
     }
-    assert!(sources.bind(&scan).is_err());
+    assert!(sources
+        .bind(&planner_types::ir::OperatorNode::with_schema(
+            planner_types::ir::Operator::NonASAP(scan.clone()),
+            scan.output_schema().unwrap()
+        ))
+        .is_err());
     assert_eq!(opened.load(Ordering::SeqCst), 0);
     let (scan, _, _) = fixture();
     let plan = plan(scan, &schema, ExecutionDataState::QUERY_ROWS);
@@ -293,19 +325,23 @@ fn schema_drift_and_memory_limits_fail_the_scan() {
 #[test]
 fn empty_sources_and_three_valued_predicates() {
     use planner_types::pre_asap::{CompareOpKind, ScalarValue};
+
     let (mut scan, schema, batches) = fixture();
-    if let QueryExpr::Scan {
+    if let planner_types::ir::NonASAPOp::Scan {
         predicates, source, ..
     } = &mut scan
     {
         *source = Source::TimeSeries {
             metric: "samples".into(),
         };
-        *predicates = vec![Predicate(Rc::new(QueryExpr::Compare {
-            left: Rc::new(QueryExpr::Column(0)),
+        *predicates = vec![Predicate(planner_types::ir::ScalarExpr::Compare {
+            semantics: planner_types::ir::ExprSemantics::Sql,
+            left: Box::new(planner_types::ir::ScalarExpr::Column(0)),
             op: CompareOpKind::Gt,
-            right: Rc::new(QueryExpr::Literal(ScalarValue::Int64(2))),
-        }))];
+            right: Box::new(planner_types::ir::ScalarExpr::Literal(ScalarValue::Int64(
+                2,
+            ))),
+        })];
     }
     for (batches, expected) in [(vec![], 0), (batches, 2)] {
         let mut sources = DataSources::default();

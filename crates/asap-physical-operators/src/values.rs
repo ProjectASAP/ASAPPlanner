@@ -2,7 +2,9 @@
 use crate::AggregateCore;
 use crate::Error;
 use planner_types::{
-    post_asap::{SummaryFamilyType, SummaryField, SummarySchema},
+    post_asap::{
+        Field as SummaryField, FieldDataType as SummaryFamilyType, Schema as SummarySchema,
+    },
     pre_asap::DataType,
 };
 use std::{cmp::Ordering, sync::Arc};

@@ -1,4 +1,4 @@
-//! Compile a retained PromQL subtree (`Fallback`) from its typed expression.
+//! Compile a retained PromQL sub-DAG (`Fallback`) from its typed expression.
 //! The deployment supplies the raw series of each selector; the Planner
 //! computes selection, range functions, subqueries, matching and aggregation.
 use super::*;
@@ -19,14 +19,14 @@ pub(super) fn raw_series_owner(slot: NodeId) -> Option<NodeId> {
 }
 
 /// A selector expression and its raw-series row schema.
-pub type Selector = (QueryExpr, Schema);
+pub type Selector = (OperatorNode, Schema);
 
 /// The selectors a Fallback expression reads, left to right, and the row
 /// schema of the raw series the deployment supplies for each at
 /// [`raw_series_input`]. The rows must cover the selector's window at every
 /// evaluation instant `T`, or at its `@` time: `(T - offset - range, T - offset]`;
 /// under a subquery `[R:S] offset O` that is `(T - O - R - offset - range, T - O - offset]`.
-pub fn raw_series(expression: &QueryExpr) -> Result<Vec<Selector>, Error> {
+pub fn raw_series(expression: &OperatorNode) -> Result<Vec<Selector>, Error> {
     Ok(lower(expression)?.selectors)
 }
 
@@ -43,16 +43,47 @@ pub(super) struct Lowering {
     pub steps: Vec<(Operator, Vec<Input>)>,
 }
 
-pub(super) fn lower(expression: &QueryExpr) -> Result<Lowering, Error> {
+pub(super) fn lower(expression: &OperatorNode) -> Result<Lowering, Error> {
     let mut lowering = Lowering::default();
     lowering.value(expression)?;
     Ok(lowering)
 }
 
-fn declared(expression: &QueryExpr) -> Result<Schema, Error> {
-    let schema = expression
-        .output_schema()
-        .map_err(|error| invalid(error.to_string()))?;
+/// Compile a standalone scalar expression and expose its real series dependencies.
+/// Input slots use root 0; no logical wrapper node is introduced.
+pub fn compile_scalar_root(
+    expr: &ScalarExpr,
+) -> Result<(CompiledPhysicalDag, Vec<Selector>), Error> {
+    let mut lowering = Lowering::default();
+    lowering.scalar_value(expr)?;
+    let mut inputs = BTreeMap::new();
+    for (i, (_, schema)) in lowering.selectors.iter().enumerate() {
+        inputs.insert(
+            raw_series_input(0, i),
+            InputContract::bounded(schema.clone()),
+        );
+    }
+    let last = lowering.steps.len() - 1;
+    let mut operators = BTreeMap::new();
+    for (i, (operator, dependencies)) in lowering.steps.into_iter().enumerate() {
+        let id = if i == last { 0 } else { i as u64 + 1 };
+        let dependencies = dependencies
+            .into_iter()
+            .map(|input| match input {
+                Input::Raw(i) => raw_series_input(0, i),
+                Input::Step(i) => i as u64 + 1,
+            })
+            .collect();
+        operators.insert(id, (dependencies, operator));
+    }
+    Ok((
+        CompiledPhysicalDag::from_operators(inputs, operators, vec![0])?,
+        lowering.selectors,
+    ))
+}
+
+fn declared(expression: &OperatorNode) -> Result<Schema, Error> {
+    let schema = expression.schema.clone();
     Ok(Arc::new(lift_plain(&schema)))
 }
 
@@ -69,10 +100,10 @@ fn at(shift: &planner_types::pre_asap::TimeShift) -> Result<Option<i64>, Error> 
     }
 }
 
-fn range_anchor(expression: &QueryExpr) -> Option<AtModifier> {
-    match expression {
-        QueryExpr::TimeRange { child, .. } => range_anchor(child),
-        QueryExpr::TimeShift { shift, .. } => shift
+fn range_anchor(expression: &OperatorNode) -> Option<AtModifier> {
+    match expression.expect_non_asap() {
+        NonASAPOp::TimeRange { child, .. } => range_anchor(child),
+        NonASAPOp::TimeShift { shift, .. } => shift
             .at
             .filter(|at| matches!(at, AtModifier::Start | AtModifier::End)),
         _ => None,
@@ -80,30 +111,20 @@ fn range_anchor(expression: &QueryExpr) -> Option<AtModifier> {
 }
 
 /// `TimeRange { range, [TimeShift { offset, @ }], Scan }`: range, offset, `@`.
-fn selector(expression: &QueryExpr) -> Result<(i64, i64, Option<i64>), Error> {
-    let QueryExpr::TimeRange { range, child } = expression else {
+fn selector(expression: &OperatorNode) -> Result<(i64, i64, Option<i64>), Error> {
+    let NonASAPOp::TimeRange { range, child, .. } = expression.expect_non_asap() else {
         return Err(invalid("PromQL operand must be a series selector"));
     };
-    let (offset, at, scan) = match child.as_ref() {
-        QueryExpr::TimeShift { shift, child } => (shift.offset_ms, at(shift)?, child.as_ref()),
+    let (offset, at, scan) = match child.expect_non_asap() {
+        NonASAPOp::TimeShift { shift, child } => {
+            (shift.offset_ms, at(shift)?, child.expect_non_asap())
+        }
         scan => (0, None, scan),
     };
-    if !matches!(scan, QueryExpr::Scan { .. }) {
+    if !matches!(scan, NonASAPOp::Scan { .. }) {
         return Err(invalid("PromQL selector must read one scan"));
     }
     Ok((millis(range)?, offset, at))
-}
-
-/// PromQL scalar-valued expressions have no labels to match. A binary
-/// operator is scalar-valued when both operands are.
-pub(super) fn scalar(expression: &QueryExpr) -> bool {
-    match expression {
-        QueryExpr::PromqlScalarBridge(_)
-        | QueryExpr::PromqlScalarFromVector(_)
-        | QueryExpr::EvalTimestamp => true,
-        QueryExpr::BinaryOp { lhs, rhs, .. } => scalar(lhs) && scalar(rhs),
-        _ => false,
-    }
 }
 
 impl Lowering {
@@ -124,12 +145,12 @@ impl Lowering {
         &mut self,
         operator: Operator,
         inputs: Vec<Input>,
-        logical: &QueryExpr,
+        logical: &OperatorNode,
     ) -> Result<Input, Error> {
         Ok(self.add(operator.with_output_schema(declared(logical)?)?, inputs))
     }
 
-    fn read(&mut self, selector: &QueryExpr) -> Result<Input, Error> {
+    fn read(&mut self, selector: &OperatorNode) -> Result<Input, Error> {
         let schema = declared(selector)?;
         if !schema
             .fields
@@ -145,12 +166,12 @@ impl Lowering {
     }
 
     /// An instant vector, or a scalar for scalar-valued expressions.
-    fn value(&mut self, expression: &QueryExpr) -> Result<Input, Error> {
-        match expression {
-            QueryExpr::Concat { children, .. } => {
-                if !children.iter().all(|branch| matches!(branch,
-                    QueryExpr::PromqlRelabel { child, .. } if matches!(child.as_ref(),
-                        QueryExpr::Aggregate { measures, .. } if matches!(measures.as_slice(), [AggIntent::HistogramQuantile { .. }])))) {
+    fn value(&mut self, expression: &OperatorNode) -> Result<Input, Error> {
+        match expression.expect_non_asap() {
+            NonASAPOp::Concat { children, .. } => {
+                if !children.iter().all(|branch| matches!(branch.expect_non_asap(),
+                    NonASAPOp::PromqlRelabel { child, .. } if matches!(child.expect_non_asap(),
+                        NonASAPOp::Aggregate { measures, .. } if matches!(measures.as_slice(), [AggIntent::HistogramQuantile { .. }])))) {
                     return Err(invalid("PromQL concatenation requires classic histogram quantile branches"));
                 }
                 let inputs = children
@@ -171,15 +192,17 @@ impl Lowering {
                     expression,
                 )
             }
-            QueryExpr::PromqlRelabel { dst, value, child } => {
+            NonASAPOp::PromqlRelabel { dst, value, child } => {
                 let step = self.value(child)?;
                 let input = self.schema(&step);
-                let (replacement, source_regex) = match value.as_ref() {
-                    QueryExpr::Literal(planner_types::pre_asap::ScalarValue::Utf8(value)) => {
+                let (replacement, source_regex) = match value {
+                    ScalarExpr::Literal(planner_types::pre_asap::ScalarValue::Utf8(value)) => {
                         (value.clone(), None)
                     }
-                    QueryExpr::FunctionCall { name, args } if name == "label_replace" => {
-                        let [QueryExpr::Column(source), QueryExpr::Literal(planner_types::pre_asap::ScalarValue::Utf8(pattern)), QueryExpr::Literal(planner_types::pre_asap::ScalarValue::Utf8(
+                    ScalarExpr::FunctionCall { name, args } if name == "label_replace" => {
+                        let [ScalarExpr::Column(source), ScalarExpr::Literal(planner_types::pre_asap::ScalarValue::Utf8(
+                            pattern,
+                        )), ScalarExpr::Literal(planner_types::pre_asap::ScalarValue::Utf8(
                             replacement,
                         ))] = args.as_slice()
                         else {
@@ -204,7 +227,7 @@ impl Lowering {
                 )?;
                 self.push(operator, vec![step], expression)
             }
-            QueryExpr::TimeRange { .. } => {
+            NonASAPOp::TimeRange { .. } => {
                 let (range, offset, at) = selector(expression)?;
                 let input = self.read(expression)?;
                 let schema = self.schema(&input);
@@ -215,7 +238,7 @@ impl Lowering {
                     expression,
                 )
             }
-            QueryExpr::Aggregate {
+            NonASAPOp::Aggregate {
                 reduction: planner_types::pre_asap::Reduction::PerEntity,
                 measures,
                 having: None,
@@ -234,7 +257,7 @@ impl Lowering {
                 let input = self.schema(&step);
                 Ok(self.add(Operator::series_without_name(input)?, vec![step]))
             }
-            QueryExpr::Aggregate {
+            NonASAPOp::Aggregate {
                 reduction: planner_types::pre_asap::Reduction::Reduce(keys),
                 measures,
                 having: None,
@@ -248,7 +271,74 @@ impl Lowering {
                 let input = self.value(child)?;
                 self.aggregate(input, measure, keys, expression)
             }
-            QueryExpr::Sort {
+            NonASAPOp::Project {
+                cols,
+                child,
+                qualifier,
+            } => {
+                let value = planner_types::pre_asap::column_resolution::resolve_column_ref(
+                    &ColumnRef::SampleValue,
+                    &child.schema,
+                )
+                .map_err(|e| invalid(e.to_string()))?;
+                let sample = cols
+                    .iter()
+                    .find(|col| {
+                        col.alias.as_deref() == Some(child.schema.fields[value].name.as_str())
+                    })
+                    .ok_or_else(|| invalid("missing sample projection"))?;
+                let keep_name = matches!(sample.expr, ScalarExpr::Negative { .. });
+                let fields: Vec<_> = child
+                    .schema
+                    .fields
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, field)| keep_name || field.name != "__name__")
+                    .collect();
+                if qualifier.is_some() || cols.len() != fields.len() {
+                    return Err(invalid("unsupported temporal projection shape"));
+                }
+                let mut computed = None;
+                for (col, (index, field)) in cols.iter().zip(fields) {
+                    if col.alias.as_deref() != Some(field.name.as_str()) {
+                        return Err(invalid("unsupported temporal projection alias"));
+                    }
+                    if index == value {
+                        computed = Some(col);
+                    } else {
+                        let expected = if !keep_name
+                            && field.name == planner_types::pre_asap::schema::PROMQL_SERIES_IDENTITY
+                        {
+                            ScalarExpr::FunctionCall {
+                                name: "promql_drop_metric_name".into(),
+                                args: vec![ScalarExpr::Column(index)],
+                            }
+                        } else {
+                            ScalarExpr::Column(index)
+                        };
+                        if col.expr != expected {
+                            return Err(invalid("unsupported temporal projection expression"));
+                        }
+                    }
+                }
+                let computed = computed.ok_or_else(|| invalid("no computed sample"))?;
+                if matches!(
+                    computed.expr,
+                    ScalarExpr::Negative { .. } | ScalarExpr::FunctionCall { .. }
+                ) {
+                    return self.pointwise_projection(cols, child, value, expression, keep_name);
+                }
+                self.sample_scalar_operation(&computed.expr, child, value, expression)
+            }
+            NonASAPOp::Filter { pred, child } => {
+                let value = planner_types::pre_asap::column_resolution::resolve_column_ref(
+                    &ColumnRef::SampleValue,
+                    &child.schema,
+                )
+                .map_err(|e| invalid(e.to_string()))?;
+                self.sample_scalar_operation(&pred.0, child, value, expression)
+            }
+            NonASAPOp::Sort {
                 keys,
                 partition_by,
                 child,
@@ -258,7 +348,7 @@ impl Lowering {
                 let keys = keys
                     .iter()
                     .map(|key| match key.expr {
-                        QueryExpr::Column(column) => Ok(SortKey {
+                        ScalarExpr::Column(column) => Ok(SortKey {
                             column,
                             descending: !key.ascending,
                             nulls_first: key.nulls_first,
@@ -269,70 +359,223 @@ impl Lowering {
                 let groups = groups(&input, partition_by)?;
                 self.push(Operator::sort(input, keys, groups)?, vec![step], expression)
             }
-            QueryExpr::Limit { n, offset, child } => {
+            NonASAPOp::Limit {
+                n, offset, child, ..
+            } => {
                 let step = self.value(child)?;
                 let input = self.schema(&step);
                 // `topk by (...)` partitions through the Sort it limits.
-                let groups = match child.as_ref() {
-                    QueryExpr::Sort { partition_by, .. } => groups(&input, partition_by)?,
+                let groups = match child.expect_non_asap() {
+                    NonASAPOp::Sort { partition_by, .. } => groups(&input, partition_by)?,
                     _ => vec![],
                 };
                 self.push(
-                    Operator::limit(input, *n as u64, *offset as u64, groups)?,
+                    Operator::limit(
+                        input,
+                        n.unwrap_or(usize::MAX) as u64,
+                        *offset as u64,
+                        groups,
+                    )?,
                     vec![step],
                     expression,
                 )
             }
-            QueryExpr::BinaryOp {
-                op,
+            NonASAPOp::BinaryOp {
+                operator,
                 lhs,
                 rhs,
-                vector_match,
+                return_bool,
             } => {
                 let sides = vec![self.value(lhs)?, self.value(rhs)?];
-                let operator = planner_types::post_asap::BinaryOperator {
-                    kind: op.clone(),
-                    vector_match: vector_match.clone(),
-                    checked_relative_division: false,
-                    checked_finite_division: false,
-                };
+                let operator = crate::expressions::binary::BinaryOperator::from_logical(
+                    operator,
+                    *return_bool,
+                );
                 let binary = Operator::series_binary(
                     self.schema(&sides[0]),
                     self.schema(&sides[1]),
                     operator,
-                    [scalar(lhs), scalar(rhs)],
+                    [false, false],
                 )?;
                 self.push(binary, sides, expression)
             }
-            QueryExpr::PromqlScalarFromVector(child) => {
-                let step = self.value(child)?;
-                let input = self.schema(&step);
-                let value = named_column(&input, &ColumnRef::SampleValue)?;
-                self.push(
-                    Operator::vector_to_scalar(input, value)?,
-                    vec![step],
-                    expression,
-                )
-            }
-            QueryExpr::PromqlVectorFromScalar(child) => {
-                let step = self.value(child)?;
+            NonASAPOp::PromqlVectorFromScalar(expr) => {
+                let step = self.scalar_value(expr)?;
                 let input = self.schema(&step);
                 Ok(self.add(
                     Operator::scope_timestamp(input, declared(expression)?)?,
                     vec![step],
                 ))
             }
-            QueryExpr::EvalTimestamp => self.push(Operator::evaluation_time(), vec![], expression),
-            QueryExpr::PromqlScalarBridge(_) => {
-                let value = row_values::scalar_literal(expression)
-                    .ok_or_else(|| invalid("PromQL scalar must be a literal"))?;
-                self.push(
-                    Operator::scalar(crate::values::Value::Float64(value), DataType::Float64)?,
-                    vec![],
-                    expression,
-                )
-            }
             _ => Err(invalid("PromQL expression has no native fallback lowering")),
+        }
+    }
+
+    fn pointwise_projection(
+        &mut self,
+        cols: &[planner_types::ir::ProjectItem],
+        child: &OperatorNode,
+        value: usize,
+        output: &OperatorNode,
+        keep_name: bool,
+    ) -> Result<Input, Error> {
+        let mut input = self.value(child)?;
+        let mut projected = cols.to_vec();
+        for col in &mut projected {
+            if col.alias.as_deref() != Some(child.schema.fields[value].name.as_str()) {
+                continue;
+            }
+            if let ScalarExpr::FunctionCall { name, args } = &mut col.expr {
+                if planner_types::pre_asap::scalar_signature::promql_function_arity(name).is_none()
+                    || args.first() != Some(&ScalarExpr::Column(value))
+                {
+                    return Err(invalid("unsupported pointwise function"));
+                }
+                for arg in args.iter_mut().skip(1) {
+                    let scalar = self.scalar_value(arg)?;
+                    let left = self.schema(&input);
+                    let right = self.schema(&scalar);
+                    let index = left.fields.len();
+                    let mut schema = (*left).clone();
+                    schema.fields.extend(right.fields.clone());
+                    let join = Operator::relational_join(
+                        left,
+                        right,
+                        planner_types::pre_asap::JoinKind::Inner,
+                        &planner_types::ir::Predicate(ScalarExpr::Literal(
+                            planner_types::pre_asap::ScalarValue::Boolean(true),
+                        )),
+                        Arc::new(schema),
+                    )?;
+                    input = self.add(join, vec![input, scalar]);
+                    *arg = ScalarExpr::Column(index);
+                }
+                if name == "promql_clamp" {
+                    let predicate = ScalarExpr::Not(Box::new(ScalarExpr::Compare {
+                        left: Box::new(args[1].clone()),
+                        right: Box::new(args[2].clone()),
+                        op: planner_types::pre_asap::CompareOpKind::Gt,
+                        semantics: planner_types::ir::ExprSemantics::Promql,
+                    }));
+                    let schema = self.schema(&input);
+                    let predicate =
+                        crate::expressions::CompiledExpression::compile(&predicate, &schema)?;
+                    input = self.add(
+                        Operator::filter(
+                            schema,
+                            crate::expressions::Expression::planner(predicate),
+                        )?,
+                        vec![input],
+                    );
+                }
+            }
+        }
+        let schema = self.schema(&input);
+        let columns = projected
+            .iter()
+            .map(|col| {
+                Ok((
+                    col.alias.clone().unwrap(),
+                    crate::expressions::Expression::planner(
+                        crate::expressions::CompiledExpression::compile(&col.expr, &schema)?,
+                    ),
+                ))
+            })
+            .collect::<Result<Vec<_>, Error>>()?;
+        let project = Operator::project(schema, columns)?;
+        let result = self.push(project, vec![input], output)?;
+        if keep_name {
+            Ok(result)
+        } else {
+            self.push(
+                Operator::series_without_name(self.schema(&result))?,
+                vec![result],
+                output,
+            )
+        }
+    }
+
+    fn sample_scalar_operation(
+        &mut self,
+        expr: &ScalarExpr,
+        child: &OperatorNode,
+        value: usize,
+        output: &OperatorNode,
+    ) -> Result<Input, Error> {
+        let (left, right, kind) = scalar_binary(expr)?;
+        let (scalar, scalar_left) = match (left, right) {
+            (ScalarExpr::Column(i), scalar) if *i == value => (scalar, false),
+            (scalar, ScalarExpr::Column(i)) if *i == value => (scalar, true),
+            _ => {
+                return Err(invalid(
+                    "sample projection requires one vector sample and one scalar",
+                ))
+            }
+        };
+        let vector = self.value(child)?;
+        let scalar = self.scalar_value(scalar)?;
+        let sides = if scalar_left {
+            vec![scalar, vector]
+        } else {
+            vec![vector, scalar]
+        };
+        let operator = Operator::series_binary(
+            self.schema(&sides[0]),
+            self.schema(&sides[1]),
+            kernel(kind),
+            [scalar_left, !scalar_left],
+        )?;
+        self.push(operator, sides, output)
+    }
+
+    fn scalar_value(&mut self, expr: &ScalarExpr) -> Result<Input, Error> {
+        match expr {
+            ScalarExpr::Literal(planner_types::pre_asap::ScalarValue::Float64(value)) => Ok(self
+                .add(
+                    Operator::scalar(crate::values::Value::Float64(*value), DataType::Float64)?,
+                    vec![],
+                )),
+            ScalarExpr::EvalTimestamp => Ok(self.add(Operator::evaluation_time(), vec![])),
+            ScalarExpr::PromqlScalarFromVector(child) => {
+                let step = self.value(child)?;
+                let input = self.schema(&step);
+                let values: Vec<_> = input
+                    .fields
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, f)| f.dtype == FieldDataType::Plain(DataType::Float64))
+                    .map(|(i, _)| i)
+                    .collect();
+                let [value] = values.as_slice() else {
+                    return Err(invalid("scalar() requires one float sample column"));
+                };
+                let value = *value;
+                Ok(self.add(Operator::vector_to_scalar(input, value)?, vec![step]))
+            }
+            ScalarExpr::Negative { expr, .. } => {
+                let value = self.scalar_value(expr)?;
+                let minus = self.scalar_value(&ScalarExpr::literal_f64(-1.0))?;
+                let op = Operator::series_binary(
+                    self.schema(&value),
+                    self.schema(&minus),
+                    kernel(crate::expressions::binary::BinaryOpKind::Arithmetic(
+                        planner_types::pre_asap::ArithmeticOpKind::Mul,
+                    )),
+                    [true, true],
+                )?;
+                Ok(self.add(op, vec![value, minus]))
+            }
+            _ => {
+                let (left, right, kind) = scalar_binary(expr)?;
+                let sides = vec![self.scalar_value(left)?, self.scalar_value(right)?];
+                let op = Operator::series_binary(
+                    self.schema(&sides[0]),
+                    self.schema(&sides[1]),
+                    kernel(kind),
+                    [true, true],
+                )?;
+                Ok(self.add(op, sides))
+            }
         }
     }
 
@@ -340,19 +583,19 @@ impl Lowering {
     fn range_function(
         &mut self,
         function: &AggIntent,
-        matrix: &QueryExpr,
-        logical: &QueryExpr,
+        matrix: &OperatorNode,
+        logical: &OperatorNode,
     ) -> Result<Input, Error> {
         let function = unbound(function)?;
-        let (subquery, offset, at_ms) = match matrix {
-            QueryExpr::TimeShift { shift, child } => (child.as_ref(), shift.offset_ms, at(shift)?),
-            other => (other, 0, None),
+        let (subquery, offset, at_ms) = match matrix.expect_non_asap() {
+            NonASAPOp::TimeShift { shift, child } => (child.as_ref(), shift.offset_ms, at(shift)?),
+            _ => (matrix, 0, None),
         };
-        let QueryExpr::PromqlSubquery {
+        let NonASAPOp::PromqlSubquery {
             range: outer,
             resolution,
             child,
-        } = subquery
+        } = subquery.expect_non_asap()
         else {
             let (range, offset, at) = selector(matrix)?;
             let input = self.read(matrix)?;
@@ -374,8 +617,8 @@ impl Lowering {
             at_ms,
         };
         // Each step evaluates a per-series selection or range function.
-        let (inner, selected) = match child.as_ref() {
-            QueryExpr::Aggregate {
+        let (inner, selected) = match child.expect_non_asap() {
+            NonASAPOp::Aggregate {
                 reduction: planner_types::pre_asap::Reduction::PerEntity,
                 measures,
                 having: None,
@@ -385,7 +628,7 @@ impl Lowering {
                 [inner] => (Some(unbound(inner)?), selected.as_ref()),
                 _ => return Err(invalid("range function requires one measure")),
             },
-            selected => (None, selected),
+            _ => (None, child.as_ref()),
         };
         let (range, inner_offset, inner_at) = selector(selected)?;
         let raw = self.read(selected)?;
@@ -425,7 +668,7 @@ impl Lowering {
         mut step: Input,
         measure: &AggIntent,
         keys: &GroupKeys,
-        logical: &QueryExpr,
+        logical: &OperatorNode,
     ) -> Result<Input, Error> {
         let mut input = self.schema(&step);
         if let AggIntent::HistogramQuantile { q, le } = measure {
@@ -439,7 +682,7 @@ impl Lowering {
             .fields
             .iter()
             .enumerate()
-            .filter(|(_, f)| f.dtype == SummaryFamilyType::Plain(DataType::Float64))
+            .filter(|(_, f)| f.dtype == FieldDataType::Plain(DataType::Float64))
             .map(|(i, _)| i)
             .collect::<Vec<_>>();
         let [value] = value.as_slice() else {
@@ -447,10 +690,10 @@ impl Lowering {
         };
         let value = *value;
         let reduction = match measure {
-            AggIntent::Sum { col: None } => Reduction::Sum(value),
-            AggIntent::Avg { col: None } => Reduction::Avg(value),
-            AggIntent::Min { col: None } => Reduction::Min(value),
-            AggIntent::Max { col: None } => Reduction::Max(value),
+            AggIntent::Sum { .. } => Reduction::Sum(value),
+            AggIntent::Avg { .. } => Reduction::Avg(value),
+            AggIntent::Min { .. } => Reduction::Min(value),
+            AggIntent::Max { .. } => Reduction::Max(value),
             AggIntent::Count { .. } => Reduction::Count,
             _ => return Err(invalid("vector aggregate has no native lowering")),
         };
@@ -527,10 +770,10 @@ fn unbound(intent: &AggIntent) -> Result<AggIntent<ColumnRef>, Error> {
         AggIntent::Count { accuracy } => AggIntent::Count {
             accuracy: accuracy.clone(),
         },
-        AggIntent::Sum { col: None } => AggIntent::Sum { col: None },
-        AggIntent::Avg { col: None } => AggIntent::Avg { col: None },
-        AggIntent::Min { col: None } => AggIntent::Min { col: None },
-        AggIntent::Max { col: None } => AggIntent::Max { col: None },
+        AggIntent::Sum { .. } => AggIntent::Sum { col: None },
+        AggIntent::Avg { .. } => AggIntent::Avg { col: None },
+        AggIntent::Min { .. } => AggIntent::Min { col: None },
+        AggIntent::Max { .. } => AggIntent::Max { col: None },
         AggIntent::IRate => AggIntent::IRate,
         AggIntent::IDelta => AggIntent::IDelta,
         AggIntent::Changes => AggIntent::Changes,
@@ -547,4 +790,66 @@ fn unbound(intent: &AggIntent) -> Result<AggIntent<ColumnRef>, Error> {
         },
         _ => return Err(invalid("unsupported PromQL range function")),
     })
+}
+
+fn kernel(
+    kind: crate::expressions::binary::BinaryOpKind,
+) -> crate::expressions::binary::BinaryOperator {
+    crate::expressions::binary::BinaryOperator {
+        kind,
+        vector_match: None,
+        checked_relative_division: false,
+        checked_finite_division: false,
+    }
+}
+
+fn scalar_binary(
+    expr: &ScalarExpr,
+) -> Result<
+    (
+        &ScalarExpr,
+        &ScalarExpr,
+        crate::expressions::binary::BinaryOpKind,
+    ),
+    Error,
+> {
+    use crate::expressions::binary::BinaryOpKind as K;
+    match expr {
+        ScalarExpr::Arithmetic {
+            left,
+            right,
+            op,
+            semantics: planner_types::ir::ExprSemantics::Promql,
+        } => Ok((left, right, K::Arithmetic(op.clone()))),
+        ScalarExpr::Compare {
+            left,
+            right,
+            op,
+            semantics: planner_types::ir::ExprSemantics::Promql,
+        } => Ok((left, right, K::Compare(op.clone()))),
+        ScalarExpr::Case {
+            operand: None,
+            branches,
+            else_expr,
+        } if matches!(else_expr.as_deref(), Some(ScalarExpr::Literal(planner_types::pre_asap::ScalarValue::Float64(v))) if *v == 0.0) =>
+        {
+            let [(
+                ScalarExpr::Compare {
+                    left,
+                    right,
+                    op,
+                    semantics: planner_types::ir::ExprSemantics::Promql,
+                },
+                ScalarExpr::Literal(planner_types::pre_asap::ScalarValue::Float64(v)),
+            )] = branches.as_slice()
+            else {
+                return Err(invalid("unsupported scalar case"));
+            };
+            if *v != 1.0 {
+                return Err(invalid("unsupported scalar case result"));
+            }
+            Ok((left, right, K::CompareBool(op.clone())))
+        }
+        _ => Err(invalid("scalar expression has no native temporal lowering")),
+    }
 }

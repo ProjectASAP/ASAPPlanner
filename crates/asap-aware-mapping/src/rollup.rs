@@ -20,7 +20,7 @@
 //! "Rolling up aggregations on a fine-grained group by to get a
 //! coarse-grained group by (like AHA)," alongside "CSE across aggregations,
 //! and group by key management" — this strategy is the *cross-aggregate*
-//! sibling of `pre_asap::cse::share_common_subtrees`'s *identical*-subtree
+//! sibling of `pre_asap::cse::share_common_subdags`'s *identical*-sub-DAG
 //! sharing: CSE shares two structurally-*equal* aggregates onto one `Rc`;
 //! this strategy relates two structurally-*different* (differently grouped)
 //! aggregates over the same shared source.
@@ -77,7 +77,7 @@
 //! this module never reconciles `ColumnId`s across distinct schemas.
 //!
 //! ## Non-goals (tracked separately, not attempted here — same split
-//! `replacement.rs`'s own module docs draw for `SharedSubtreeStrategy`'s
+//! `replacement.rs`'s own module docs draw for `SharedSubDagStrategy`'s
 //! `consumer_count`)
 //!
 //! - **No sibling discovery inside this strategy.** Finding every aggregate
@@ -88,7 +88,7 @@
 //! - **No materialized roll-up operator.** Actually building a pre-aggregated
 //!   summary/scan leaf at execution time is separate, larger work outside
 //!   `asap-aware-mapping`'s scope (see issue #254's own "Non-goal" section)
-//!   — this module only constructs the pre-ASAP [`QueryExpr::Aggregate`]
+//!   — this module only constructs the pre-ASAP `NonASAPOp::Aggregate`
 //!   rewrite; a `CostModel`/search engine decides whether to prefer it.
 //! - **No cross-schema reconciliation** (see "`ColumnId` comparability"
 //!   above) and **no `without(...)` grouping support** — `without`'s kept
@@ -97,34 +97,37 @@
 //!   against a superset/subset relationship at all; [`is_legal_rollup_source`]
 //!   declines both directions.
 
+use asap_types::ir::non_asap::any_measure_filtered;
 use std::collections::HashSet;
 use std::rc::Rc;
 
+use asap_types::ir::operator_properties::{GroupKeys, Reduction};
+use asap_types::ir::{NonASAPOp, OperatorNode};
 use asap_types::pre_asap::agg_intent::AggIntent;
-use asap_types::pre_asap::query_expr::{any_measure_filtered, GroupKeys, QueryExpr, Reduction};
 use asap_types::pre_asap::schema::{ColumnId, Schema};
+
 use asap_types::types::AccuracyTarget;
 
 use crate::replacement::{Replacement, ReplacementStrategy, ReplacementSubDAG, TargetSubDAG};
 
 /// The `(by, intent, child)` shape this strategy operates on: a single
 /// measure, no `HAVING` — the same bindable shape
-/// [`crate::replacement::SketchAlgorithmStrategy`] requires (see that module's
+/// [`crate::replacement::ASAPStrategies`] requires (see that module's
 /// private `bindable_intent`) — **plus** a genuine [`Reduction::Reduce`]
 /// grouping to compare (not [`Reduction::PerEntity`], which has no `by` set
 /// at all). `None` for anything else, including a multi-measure or `HAVING`
 /// aggregate, a non-`Aggregate` node, or a `PerEntity` reduction.
 fn bindable_grouped_aggregate(
-    node: &QueryExpr,
-) -> Option<(&GroupKeys, &AggIntent, &Rc<QueryExpr>)> {
-    let QueryExpr::Aggregate {
+    node: &OperatorNode,
+) -> Option<(&GroupKeys, &AggIntent, &Rc<OperatorNode>)> {
+    let Some(NonASAPOp::Aggregate {
         reduction,
         measures,
         filters,
         having,
         child,
         ..
-    } = node
+    }) = node.non_asap()
     else {
         return None;
     };
@@ -204,16 +207,16 @@ fn rollup_combinator(intent: &AggIntent, finer_measure_col: ColumnId) -> Option<
 /// 4. `finer_output_schema` (the finer aggregate's own *output* schema, not
 ///    the shared child's) carries a provable unique key
 ///    ([`Schema::has_unique_key`]) — **the exact legality gate
-///    `pre_asap::cse::share_common_subtrees` already applies to its own
+///    `pre_asap::cse::share_common_subdags` already applies to its own
 ///    sharing decisions**, reused verbatim here rather than re-invented:
-///    `share_common_subtrees`'s own doc ("Legality: gated by
+///    `share_common_subdags`'s own doc ("Legality: gated by
 ///    `Schema::unique_keys`") states a producer's output is only safely
 ///    reusable across consumers when its row identity is provably stable —
 ///    exactly the property re-aggregating over `finer` as if it were a
 ///    fresh source requires.
 /// 5. `coarser_by` is a **strict, proper** subset of `finer_by` (same
 ///    `ColumnId`s, finer strictly more of them) — an *equal* `by` is
-///    `SharedSubtreeStrategy`'s CSE-sharing question, not a roll-up, so
+///    `SharedSubDagStrategy`'s CSE-sharing question, not a roll-up, so
 ///    equality is deliberately excluded here, not treated as a degenerate
 ///    roll-up.
 pub fn is_legal_rollup_source(
@@ -263,7 +266,7 @@ fn is_strict_column_superset(finer: &[ColumnId], coarser: &[ColumnId]) -> bool {
 /// docs' "Non-goals" on why finding the full sibling set across a workload
 /// is a workload-wide traversal this strategy does not own.
 pub struct RollupStrategy {
-    siblings: Vec<Rc<QueryExpr>>,
+    siblings: Vec<Rc<OperatorNode>>,
 }
 
 impl RollupStrategy {
@@ -271,7 +274,7 @@ impl RollupStrategy {
     /// each as a candidate roll-up source (or target) — typically the full set of `Aggregate`
     /// nodes a workload-wide discovery pass (issue #252) already found
     /// sharing at least one child `Rc` with something else.
-    pub fn new(siblings: &[Rc<QueryExpr>]) -> Self {
+    pub fn new(siblings: &[Rc<OperatorNode>]) -> Self {
         Self {
             siblings: siblings.to_vec(),
         }
@@ -280,7 +283,7 @@ impl RollupStrategy {
     /// Every sibling that is a legal, strictly finer roll-up source for
     /// `target` — shared between `matches` and `replacements` so the two
     /// can never disagree about which siblings qualify.
-    fn finer_sources(&self, target: &TargetSubDAG<'_>) -> Vec<&Rc<QueryExpr>> {
+    fn finer_sources(&self, target: &TargetSubDAG<'_>) -> Vec<&Rc<OperatorNode>> {
         let Some((coarser_by, coarser_intent, coarser_child)) =
             bindable_grouped_aggregate(target.root)
         else {
@@ -301,12 +304,9 @@ impl RollupStrategy {
                 if !Rc::ptr_eq(finer_child, coarser_child) && finer_child != coarser_child {
                     return false;
                 }
-                let Ok(finer_schema) = candidate.output_schema() else {
-                    return false;
-                };
                 is_legal_rollup_source(
                     finer_by,
-                    &finer_schema,
+                    &candidate.schema,
                     finer_intent,
                     coarser_by,
                     coarser_intent,
@@ -325,7 +325,7 @@ impl ReplacementStrategy for RollupStrategy {
         let Some((coarser_by, coarser_intent, _)) = bindable_grouped_aggregate(target.root) else {
             return Vec::new();
         };
-        let QueryExpr::Aggregate { output_names, .. } = target.root.as_ref() else {
+        let Some(NonASAPOp::Aggregate { output_names, .. }) = target.root.non_asap() else {
             unreachable!("bindable_grouped_aggregate already confirmed Aggregate");
         };
         self.finer_sources(target)
@@ -335,7 +335,7 @@ impl ReplacementStrategy for RollupStrategy {
     }
 }
 
-/// Build the coarser replacement: a new `QueryExpr::Aggregate` grouped by
+/// Build the coarser replacement: a new `NonASAPOp::Aggregate` grouped by
 /// `coarser_by`'s columns (repositioned into `finer`'s own output schema —
 /// see below), computing `rollup_combinator(intent, ..)` over `finer`'s own
 /// measure column, with `child = finer` instead of the original shared
@@ -350,7 +350,7 @@ impl ReplacementStrategy for RollupStrategy {
 /// position in the shared child to its position in `finer`'s output: the
 /// index its `ColumnId` occupies within `finer_by`'s own ordered list.
 fn build_rollup(
-    finer: &Rc<QueryExpr>,
+    finer: &Rc<OperatorNode>,
     coarser_by: &GroupKeys,
     intent: &AggIntent,
     output_names: &[String],
@@ -367,18 +367,19 @@ fn build_rollup(
         .map(|id| finer_by.keys().iter().position(|f| f == id))
         .collect::<Option<Vec<_>>>()?;
 
-    let rewritten = QueryExpr::Aggregate {
+    let rewritten = OperatorNode::non_asap_node(NonASAPOp::Aggregate {
         reduction: Reduction::by(remapped_by),
         measures: vec![combinator],
         output_names: output_names.to_vec(),
         filters: vec![],
         having: None,
         child: Rc::clone(finer),
-    };
+    })
+    .ok()?;
 
     Some(ReplacementSubDAG {
         strategy: "RollupStrategy",
-        replacement: Replacement::Rewrite(Rc::new(rewritten)),
+        replacement: Replacement::SubDag(rewritten),
         provenance: crate::replacement::ReplacementProvenance::LogicalRewrite,
         rationale: format!(
             "rolls up from the finer Aggregate grouped by {:?} (a strict superset of this \
@@ -394,30 +395,31 @@ fn build_rollup(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use asap_types::pre_asap::query_expr::Source;
-    use asap_types::pre_asap::schema::{Column, DataType};
+    use asap_types::ir::operator_properties::Source;
+    use asap_types::pre_asap::schema::{DataType, Field};
     use asap_types::types::AccuracyTarget;
 
     /// `[ts(0), value(1), job(2), region(3)]`.
-    fn metric_scan() -> QueryExpr {
-        QueryExpr::Scan {
+    fn metric_scan() -> Rc<OperatorNode> {
+        OperatorNode::non_asap_node(NonASAPOp::Scan {
             source: Source::TimeSeries { metric: "m".into() },
             predicates: vec![],
             schema: Schema::with_time_index(
                 vec![
-                    Column::new("ts", DataType::Timestamp, false),
-                    Column::new("value", DataType::Float64, false),
-                    Column::new("job", DataType::Utf8, true),
-                    Column::new("region", DataType::Utf8, true),
+                    Field::plain("ts", DataType::Timestamp, false),
+                    Field::plain("value", DataType::Float64, false),
+                    Field::plain("job", DataType::Utf8, true),
+                    Field::plain("region", DataType::Utf8, true),
                 ],
                 0,
                 vec![],
             ),
-        }
+        })
+        .unwrap()
     }
 
-    fn agg(by: Vec<ColumnId>, intent: AggIntent, child: &Rc<QueryExpr>) -> Rc<QueryExpr> {
-        Rc::new(QueryExpr::Aggregate {
+    fn agg(by: Vec<ColumnId>, intent: AggIntent, child: &Rc<OperatorNode>) -> Rc<OperatorNode> {
+        OperatorNode::non_asap_node(NonASAPOp::Aggregate {
             reduction: Reduction::by(by),
             measures: vec![intent],
             output_names: vec![],
@@ -425,14 +427,15 @@ mod tests {
             having: None,
             child: Rc::clone(child),
         })
+        .unwrap()
     }
 
     fn without_agg(
         excluded: Vec<ColumnId>,
         intent: AggIntent,
-        child: &Rc<QueryExpr>,
-    ) -> Rc<QueryExpr> {
-        Rc::new(QueryExpr::Aggregate {
+        child: &Rc<OperatorNode>,
+    ) -> Rc<OperatorNode> {
+        OperatorNode::non_asap_node(NonASAPOp::Aggregate {
             reduction: Reduction::Reduce(GroupKeys::without(excluded)),
             measures: vec![intent],
             output_names: vec![],
@@ -440,6 +443,7 @@ mod tests {
             having: None,
             child: Rc::clone(child),
         })
+        .unwrap()
     }
 
     // ── is_legal_rollup_source (the standalone predicate) ───────────────
@@ -511,7 +515,7 @@ mod tests {
 
     #[test]
     fn predicate_rejects_equal_by_sets() {
-        // Equality is `SharedSubtreeStrategy`'s question, not a roll-up.
+        // Equality is `SharedSubDagStrategy`'s question, not a roll-up.
         let finer_schema = Schema::with_time_index(vec![], 0, vec![vec![0]]);
         assert!(!is_legal_rollup_source(
             &GroupKeys::by(vec![2]),
@@ -569,7 +573,7 @@ mod tests {
 
     #[test]
     fn superset_by_over_identical_mergeable_intent_and_shared_child_rolls_up() {
-        let scan = Rc::new(metric_scan());
+        let scan = metric_scan();
         let fine = agg(vec![2, 3], AggIntent::Sum { col: Some(1) }, &scan);
         let coarse = agg(vec![2], AggIntent::Sum { col: Some(1) }, &scan);
 
@@ -581,16 +585,16 @@ mod tests {
         let replacements = strategy.replacements(&target);
         assert_eq!(replacements.len(), 1, "{replacements:?}");
 
-        let Replacement::Rewrite(rewritten) = &replacements[0].replacement else {
+        let Replacement::SubDag(rewritten) = &replacements[0].replacement else {
             panic!("expected a Rewrite replacement");
         };
-        let QueryExpr::Aggregate {
+        let Some(NonASAPOp::Aggregate {
             reduction,
             measures,
             child,
             having,
             ..
-        } = rewritten.as_ref()
+        }) = rewritten.non_asap()
         else {
             panic!("expected an Aggregate rewrite, got {rewritten:?}");
         };
@@ -620,7 +624,7 @@ mod tests {
         // Count is not self-combining (see the module docs) — the rewritten
         // measure must be Sum over the finer Count's own output column, not
         // Count reapplied.
-        let scan = Rc::new(metric_scan());
+        let scan = metric_scan();
         let fine = agg(
             vec![2, 3],
             AggIntent::Count {
@@ -642,10 +646,10 @@ mod tests {
 
         let replacements = strategy.replacements(&target);
         assert_eq!(replacements.len(), 1, "{replacements:?}");
-        let Replacement::Rewrite(rewritten) = &replacements[0].replacement else {
+        let Replacement::SubDag(rewritten) = &replacements[0].replacement else {
             panic!("expected a Rewrite replacement");
         };
-        let QueryExpr::Aggregate { measures, .. } = rewritten.as_ref() else {
+        let Some(NonASAPOp::Aggregate { measures, .. }) = rewritten.non_asap() else {
             panic!("expected an Aggregate rewrite");
         };
         assert_eq!(
@@ -657,7 +661,7 @@ mod tests {
 
     #[test]
     fn approximate_count_does_not_roll_up_via_sum() {
-        let scan = Rc::new(metric_scan());
+        let scan = metric_scan();
         let intent = AggIntent::Count {
             accuracy: AccuracyTarget::Epsilon(0.01),
         };
@@ -673,8 +677,8 @@ mod tests {
 
     #[test]
     fn default_workload_search_adds_rollup_for_two_query_workload() {
-        let fine_scan = Rc::new(metric_scan());
-        let coarse_scan = Rc::new(metric_scan());
+        let fine_scan = metric_scan();
+        let coarse_scan = metric_scan();
         let fine = agg(vec![2, 3], AggIntent::Sum { col: Some(1) }, &fine_scan);
         let coarse = agg(vec![2], AggIntent::Sum { col: Some(1) }, &coarse_scan);
 
@@ -682,12 +686,11 @@ mod tests {
         let coarse_group = space
             .target_subdag_candidates()
             .find(|group| {
-                matches!(
-                    group.target.as_ref(),
-                    QueryExpr::Aggregate {
+                matches!(group.target.non_asap(),
+                    Some(NonASAPOp::Aggregate {
                         reduction: Reduction::Reduce(by),
                         ..
-                    } if by.keys() == [2]
+                    }) if by.keys() == [2]
                 )
             })
             .expect("coarser aggregate group");
@@ -696,19 +699,19 @@ mod tests {
             .candidates
             .iter()
             .find_map(|candidate| match &candidate.replacement {
-                Replacement::Rewrite(rewrite) => Some(rewrite),
-                Replacement::Summary(_) | Replacement::ExactComposition(_) => None,
+                // Old `Replacement::Rewrite`: a pure pre-ASAP sub-DAG.
+                Replacement::SubDag(rewrite) if !rewrite.contains_asap() => Some(rewrite),
+                Replacement::SubDag(_) | Replacement::ExactComposition(_) => None,
             })
             .expect("default search must include the roll-up rewrite");
-        let QueryExpr::Aggregate { child, .. } = rewrite.as_ref() else {
+        let Some(NonASAPOp::Aggregate { child, .. }) = rewrite.non_asap() else {
             panic!("expected aggregate rewrite, got {rewrite:?}");
         };
-        assert!(matches!(
-            child.as_ref(),
-            QueryExpr::Aggregate {
+        assert!(matches!(child.non_asap(),
+            Some(NonASAPOp::Aggregate {
                 reduction: Reduction::Reduce(by),
                 ..
-            } if by.keys() == [2, 3]
+            }) if by.keys() == [2, 3]
         ));
     }
 
@@ -717,18 +720,17 @@ mod tests {
         let intent = AggIntent::Count {
             accuracy: AccuracyTarget::Epsilon(0.01),
         };
-        let fine = agg(vec![2, 3], intent.clone(), &Rc::new(metric_scan()));
-        let coarse = agg(vec![2], intent, &Rc::new(metric_scan()));
+        let fine = agg(vec![2, 3], intent.clone(), &metric_scan());
+        let coarse = agg(vec![2], intent, &metric_scan());
         let space = crate::replacement::search_workload(vec![("fine", fine), ("coarse", coarse)]);
         let coarse_group = space
             .target_subdag_candidates()
             .find(|group| {
-                matches!(
-                    group.target.as_ref(),
-                    QueryExpr::Aggregate {
+                matches!(group.target.non_asap(),
+                    Some(NonASAPOp::Aggregate {
                         reduction: Reduction::Reduce(by),
                         ..
-                    } if by.keys() == [2]
+                    }) if by.keys() == [2]
                 )
             })
             .expect("coarser aggregate group");
@@ -736,32 +738,34 @@ mod tests {
         assert!(coarse_group
             .candidates
             .iter()
-            .all(|candidate| !matches!(candidate.replacement, Replacement::Rewrite(_))));
+            .all(|candidate| !matches!(&candidate.replacement,
+                Replacement::SubDag(rewrite) if !rewrite.contains_asap())));
     }
 
     #[test]
     fn rollup_preserves_the_coarser_output_name() {
-        let scan = Rc::new(metric_scan());
+        let scan = metric_scan();
         let fine = agg(vec![2, 3], AggIntent::Sum { col: Some(1) }, &scan);
-        let coarse = Rc::new(QueryExpr::Aggregate {
+        let coarse = OperatorNode::non_asap_node(NonASAPOp::Aggregate {
             reduction: Reduction::by(vec![2]),
             measures: vec![AggIntent::Sum { col: Some(1) }],
             output_names: vec!["total_requests".into()],
             filters: vec![],
             having: None,
             child: Rc::clone(&scan),
-        });
-        let original_schema = coarse.output_schema().unwrap();
+        })
+        .unwrap();
+        let original_schema = coarse.schema.clone();
 
         let siblings = vec![Rc::clone(&fine), Rc::clone(&coarse)];
         let strategy = RollupStrategy::new(&siblings);
         let replacements = strategy.replacements(&TargetSubDAG::new(&coarse));
-        let Replacement::Rewrite(rewritten) = &replacements[0].replacement else {
+        let Replacement::SubDag(rewritten) = &replacements[0].replacement else {
             panic!("expected a Rewrite replacement");
         };
 
-        assert_eq!(rewritten.output_schema().unwrap(), original_schema);
-        let QueryExpr::Aggregate { output_names, .. } = rewritten.as_ref() else {
+        assert_eq!(rewritten.schema.clone(), original_schema);
+        let Some(NonASAPOp::Aggregate { output_names, .. }) = rewritten.non_asap() else {
             unreachable!();
         };
         assert_eq!(output_names, &vec!["total_requests".to_string()]);
@@ -769,7 +773,7 @@ mod tests {
 
     #[test]
     fn non_mergeable_intent_does_not_roll_up() {
-        let scan = Rc::new(metric_scan());
+        let scan = metric_scan();
         let fine = agg(vec![2, 3], AggIntent::Avg { col: Some(1) }, &scan);
         let coarse = agg(vec![2], AggIntent::Avg { col: Some(1) }, &scan);
 
@@ -789,12 +793,12 @@ mod tests {
         // numerically a superset of the coarser side's *kept* positions —
         // `is_legal_rollup_source` rejects any `without` grouping outright,
         // and would reject on the missing unique key regardless.
-        let scan = Rc::new(metric_scan());
+        let scan = metric_scan();
         let fine = without_agg(vec![2, 3], AggIntent::Sum { col: Some(1) }, &scan);
         let coarse = agg(vec![2], AggIntent::Sum { col: Some(1) }, &scan);
 
         assert!(
-            !fine.output_schema().unwrap().has_unique_key(),
+            !fine.schema.clone().has_unique_key(),
             "fixture sanity: a without(...) aggregate has no provable unique key"
         );
 
@@ -809,7 +813,7 @@ mod tests {
     #[test]
     fn unrelated_by_sets_do_not_roll_up() {
         // Neither `[job]` nor `[region]` is a superset of the other.
-        let scan = Rc::new(metric_scan());
+        let scan = metric_scan();
         let a = agg(vec![2], AggIntent::Sum { col: Some(1) }, &scan);
         let b = agg(vec![3], AggIntent::Sum { col: Some(1) }, &scan);
 
@@ -827,10 +831,10 @@ mod tests {
 
     #[test]
     fn equal_by_sets_do_not_roll_up() {
-        // Equal groupings are `SharedSubtreeStrategy`'s CSE-sharing
+        // Equal groupings are `SharedSubDagStrategy`'s CSE-sharing
         // question (build once and share, or build independently) — a
         // roll-up requires a *strict* superset, not equality.
-        let scan = Rc::new(metric_scan());
+        let scan = metric_scan();
         let a = agg(vec![2], AggIntent::Sum { col: Some(1) }, &scan);
         let b = agg(vec![2], AggIntent::Sum { col: Some(1) }, &scan);
 
@@ -845,16 +849,8 @@ mod tests {
         // Scans without unique keys are deliberately not pointer-aliased by
         // CSE. Structural equality still proves identical schemas and makes
         // the two aggregates' positional ColumnIds comparable.
-        let fine = agg(
-            vec![2, 3],
-            AggIntent::Sum { col: Some(1) },
-            &Rc::new(metric_scan()),
-        );
-        let coarse = agg(
-            vec![2],
-            AggIntent::Sum { col: Some(1) },
-            &Rc::new(metric_scan()),
-        );
+        let fine = agg(vec![2, 3], AggIntent::Sum { col: Some(1) }, &metric_scan());
+        let coarse = agg(vec![2], AggIntent::Sum { col: Some(1) }, &metric_scan());
 
         let siblings = vec![Rc::clone(&fine), Rc::clone(&coarse)];
         let strategy = RollupStrategy::new(&siblings);
@@ -865,9 +861,9 @@ mod tests {
 
     #[test]
     fn does_not_match_a_multi_measure_or_having_aggregate() {
-        let scan = Rc::new(metric_scan());
+        let scan = metric_scan();
         let fine = agg(vec![2, 3], AggIntent::Sum { col: Some(1) }, &scan);
-        let multi = Rc::new(QueryExpr::Aggregate {
+        let multi = OperatorNode::non_asap_node(NonASAPOp::Aggregate {
             reduction: Reduction::by(vec![2]),
             measures: vec![
                 AggIntent::Sum { col: Some(1) },
@@ -879,7 +875,8 @@ mod tests {
             filters: vec![],
             having: None,
             child: Rc::clone(&scan),
-        });
+        })
+        .unwrap();
 
         let siblings = vec![Rc::clone(&fine), Rc::clone(&multi)];
         let strategy = RollupStrategy::new(&siblings);

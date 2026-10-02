@@ -9,6 +9,7 @@ edition = "2021"
 # #225) it consults when lowering an aggregate call — never promql-parser.
 [dependencies]
 asap-types = { path = "../types" }
+asap-frontend-common = { path = "../frontend-common" }
 asap-sql-function-catalog = { path = "../sql-function-catalog" }
 datafusion = "43"
 # `AggIntent::Extension.payload` for ClickHouse's argMax/argMin (issue #232)

@@ -4,7 +4,7 @@ use super::*;
 pub(super) fn guarantee(
     algorithm: &SketchAlgorithm,
     params: &SketchParams,
-    query: &SketchQuery,
+    query: &SketchStatistic,
 ) -> Option<ResultGuarantee> {
     let (SketchParams::Kmv { k } | SketchParams::Theta { k }) = params else {
         return None;

@@ -1,25 +1,27 @@
-//! SQL front end: parse + plan (via DataFusion) → the canonical, unresolved
-//! shape, built directly (issue #179) → [`resolve_root`].
+//! SQL front end: parse + plan (via DataFusion) → the name-based
+//! [`UnresolvedOp`](asap_frontend_common::UnresolvedOp) tree, built directly
+//! (issue #179) → [`resolve_root`].
 //!
-//! Emits [`UnresolvedQueryExpr`](asap_types::pre_asap::UnresolvedQueryExpr) itself — the
-//! canonical `QueryExpr`, generic over an unresolved
-//! [`ColumnRef`](asap_types::pre_asap::ColumnRef) — directly, rather than a
-//! separate per-language relational tree; `resolve_root` runs the
-//! [`SchemaResolver`](asap_types::pre_asap::SchemaResolver) for positional name resolution.
+//! Emits the shared front-end tree (`UnresolvedOp` / `UnresolvedScalar`,
+//! name-based [`ColumnRef`](asap_types::pre_asap::ColumnRef)s) directly, rather
+//! than a separate per-language relational tree; `resolve_root` binds it into
+//! the unified [`OperatorNode`] IR, deriving every schema on the way.
 //! Depends on DataFusion only — never on the PromQL parser.
 
 pub mod error;
 pub mod sql;
 
-use asap_types::pre_asap::resolve_root;
-use asap_types::pre_asap::QueryExpr;
+use std::rc::Rc;
+
+use asap_frontend_common::resolve_root;
+use asap_types::ir::OperatorNode;
 use asap_types::types::AccuracyTarget;
 use asap_types::workload::{QueryLanguage, QueryWorkload, SqlDialect};
 
 pub use error::SqlError;
 pub use sql::{SqlCatalog, SqlLowerer};
 
-/// Lower a single SQL query string to the canonical, resolved `QueryExpr`,
+/// Lower a single SQL query string to the resolved, canonical operator DAG,
 /// parsed as `SqlDialect::DataFusionSQL`.
 ///
 /// The `catalog` supplies table schemas (used both to plan the SQL with
@@ -29,7 +31,7 @@ pub async fn lower_sql(
     query: &str,
     catalog: &SqlCatalog,
     accuracy: AccuracyTarget,
-) -> Result<QueryExpr, SqlError> {
+) -> Result<Rc<OperatorNode>, SqlError> {
     lower_sql_dialect(query, catalog, SqlDialect::DataFusionSQL, accuracy).await
 }
 
@@ -46,20 +48,17 @@ pub async fn lower_sql_dialect(
     catalog: &SqlCatalog,
     dialect: SqlDialect,
     accuracy: AccuracyTarget,
-) -> Result<QueryExpr, SqlError> {
+) -> Result<Rc<OperatorNode>, SqlError> {
     let unresolved = SqlLowerer::with_dialect(catalog, dialect)
         .lower(query, &accuracy)
         .await?;
-    let resolved = resolve_root(&unresolved)?;
-    // Binding resolves names; schema inference also checks result types such
-    // as temporal subtraction, whose duration unit the IR cannot represent.
-    resolved
-        .output_schema()
-        .map_err(|error| SqlError::InvalidExpression(error.to_string()))?;
-    Ok(resolved)
+    // Binding resolves names and derives every node's schema; result-type
+    // checks (such as temporal subtraction, whose duration unit the IR cannot
+    // represent) surface here as `ResolveTreeError::Schema`.
+    Ok(resolve_root(&unresolved)?)
 }
 
-/// Lower every SQL batch entry in `workload` to a `QueryExpr`.
+/// Lower every SQL batch entry in `workload` to an operator DAG.
 ///
 /// One `Result` per entry — errors are per-query, not fatal for the batch.
 /// Returns `WrongLanguage` for every entry if the workload is not SQL, and
@@ -67,7 +66,7 @@ pub async fn lower_sql_dialect(
 pub async fn lower_sql_batch(
     workload: &QueryWorkload,
     catalog: &SqlCatalog,
-) -> Vec<Result<QueryExpr, SqlError>> {
+) -> Vec<Result<Rc<OperatorNode>, SqlError>> {
     let entries = match &workload.query_batch {
         Some(e) if !e.is_empty() => e,
         _ => return vec![],
