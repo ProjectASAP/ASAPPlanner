@@ -2,11 +2,13 @@
 use crate::AggregateCore;
 use crate::Error;
 use planner_types::{
-    post_asap::{Field, FieldDataType, Schema as LogicalSchema},
+    post_asap::{Field, FieldDataType, Schema as PlannerSchema},
     pre_asap::DataType,
 };
 use std::{cmp::Ordering, sync::Arc};
-pub type Schema = Arc<LogicalSchema>;
+/// Shared runtime handle to the same schema metadata used by the planner.
+/// This alias changes ownership, not the schema model or its field types.
+pub type Schema = Arc<PlannerSchema>;
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub enum Value {
     Null,

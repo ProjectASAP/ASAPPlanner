@@ -7,7 +7,7 @@ use asap_physical_operators::{
     values::{Batch, Value},
 };
 use futures::{executor::block_on, StreamExt};
-use planner_types::pre_asap::Schema as LogicalSchema;
+use planner_types::pre_asap::Schema as PlannerSchema;
 use planner_types::{post_asap::*, pre_asap::QueryExpr, types::AccuracyTarget, workload::*};
 use std::{collections::BTreeMap, rc::Rc, sync::Arc};
 
@@ -77,7 +77,7 @@ fn population_dag(query: &str) -> PostAsapDAG {
 }
 
 /// Raw scan nodes are the frontier; everything above them is compiled.
-fn raw_inputs(dag: &PostAsapDAG) -> Vec<(u64, Arc<LogicalSchema>, String)> {
+fn raw_inputs(dag: &PostAsapDAG) -> Vec<(u64, Arc<PlannerSchema>, String)> {
     dag.nodes
         .iter()
         .filter_map(|node| match &node.payload {

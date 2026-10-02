@@ -3,7 +3,7 @@ pub(super) fn invalid(message: &str) -> Error {
     Error::Invalid(message.into())
 }
 pub(super) fn schema(fields: Vec<Field>) -> Schema {
-    Arc::new(LogicalSchema {
+    Arc::new(PlannerSchema {
         closed: true,
         unique_keys: vec![],
         fields,
@@ -76,4 +76,4 @@ pub(super) fn key_bytes(key: &[Vec<u8>]) -> usize {
         .map(|part| std::mem::size_of::<Vec<u8>>() + part.len())
         .sum::<usize>()
 }
-use planner_types::pre_asap::Schema as LogicalSchema;
+use planner_types::pre_asap::Schema as PlannerSchema;

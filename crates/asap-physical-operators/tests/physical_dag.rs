@@ -9,12 +9,12 @@ use asap_physical_operators::{
 };
 use futures::{executor::block_on, StreamExt};
 use planner_types::{
-    post_asap::{ExactKind, ExactParams, Field, FieldDataType, Schema as LogicalSchema},
+    post_asap::{ExactKind, ExactParams, Field, FieldDataType, Schema as PlannerSchema},
     pre_asap::DataType,
 };
 use std::sync::Arc;
 fn schema(fields: &[(&str, DataType, bool)]) -> Schema {
-    Arc::new(LogicalSchema {
+    Arc::new(PlannerSchema {
         closed: true,
         unique_keys: vec![],
         fields: fields
@@ -423,7 +423,7 @@ fn exact_state_and_family_validation() {
     let family = FieldDataType::ExactAggregate(ExactKind::Sum, ExactParams::Sum);
     let mut acc = ExactAccumulator::new(family.clone(), false).unwrap();
     acc.update(None, 7., 0);
-    let schema = Arc::new(LogicalSchema {
+    let schema = Arc::new(PlannerSchema {
         closed: true,
         unique_keys: vec![],
         fields: vec![Field {

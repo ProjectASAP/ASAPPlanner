@@ -9,14 +9,14 @@ use futures::{executor::block_on, StreamExt};
 use planner_types::{
     post_asap::{
         BinaryOperator, ExecutionDataState, Field, FieldDataType, PostAsapDAGNode, PostAsapNodeId,
-        PostAsapOperatorPayload, Schema as LogicalSchema,
+        PostAsapOperatorPayload, Schema as PlannerSchema,
     },
     pre_asap::{ArithmeticOpKind, BinaryOpKind, DataType},
 };
 use std::{collections::BTreeMap, sync::Arc};
 
 fn schema() -> Schema {
-    Arc::new(LogicalSchema {
+    Arc::new(PlannerSchema {
         closed: true,
         unique_keys: vec![],
         fields: vec![
@@ -324,7 +324,7 @@ fn stored_series_readouts_support_filters_and_sets() {
         (ExactKind::Count, ExactParams::Count),
     ] {
         let family = FieldDataType::ExactAggregate(exact_kind.clone(), params);
-        let state_schema = Arc::new(LogicalSchema {
+        let state_schema = Arc::new(PlannerSchema {
             closed: true,
             unique_keys: vec![],
             fields: vec![

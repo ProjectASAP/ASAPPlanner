@@ -978,9 +978,8 @@ fn summary_column(input: &Schema) -> Result<usize, Error> {
 }
 fn named_column(input: &Schema, column: &ColumnRef) -> Result<usize, Error> {
     let name = match column {
-        // Executable Schema as LogicalSchema retains column names, not table qualifiers.
-        // Frontend binding has resolved the qualifier; still reject ambiguous
-        // names here rather than guessing a join side.
+        // This summary-update lookup matches column names without qualifiers.
+        // Reject ambiguous names rather than guessing a join side.
         ColumnRef::Named(name) | ColumnRef::Qualified { name, .. } => name.as_str(),
         ColumnRef::SampleValue => "value",
         _ => {

@@ -2,14 +2,14 @@
 use super::promql_rows::SERIES_IDENTITY_COLUMN as SERIES_IDENTITY;
 use super::*;
 use planner_types::{
-    post_asap::{ExecutionTiming, GroupingStrategy, Schema as LogicalSchema},
+    post_asap::{ExecutionTiming, GroupingStrategy, Schema as PlannerSchema},
     pre_asap::DataType,
 };
 
 /// Physical rows carry the population and pane coordinate alongside the logical value.
 /// These fields preserve identities which are implicit in a stored summary instance.
 pub fn population_schema(family: FieldDataType) -> Schema {
-    Arc::new(LogicalSchema {
+    Arc::new(PlannerSchema {
         closed: true,
         unique_keys: vec![],
         fields: vec![
@@ -128,7 +128,9 @@ pub fn boundary_schema(node: &PostAsapDAGNode) -> Result<Schema, Error> {
 }
 
 /// Validate the adapter layout during installed-plan recovery without lowering operators.
-pub fn source_schema(logical: &LogicalSchema) -> Result<Schema, Error> {
+/// `PlannerSchema` is an import alias for the shared planner `Schema`; the return
+/// type is the runtime `Arc<PlannerSchema>` handle for the population adapter layout.
+pub fn source_schema(logical: &PlannerSchema) -> Result<Schema, Error> {
     let states = logical
         .fields
         .iter()
@@ -518,7 +520,7 @@ fn fragment(
             }
             let item_columns = (3..fields.len()).collect::<Vec<_>>();
             let project = Operator::project(input.clone(), columns)?.with_output_schema(
-                Arc::new(LogicalSchema {
+                Arc::new(PlannerSchema {
                     closed: true,
                     unique_keys: vec![],
                     fields,
@@ -572,7 +574,7 @@ fn fragment(
 /// of the label set less excluded labels.
 fn raw_items(
     expr: &SummaryInputExpr,
-    scan: &LogicalSchema,
+    scan: &PlannerSchema,
     items: &mut Vec<(Expression, DataType)>,
 ) -> Result<(), Error> {
     // Open PromQL scans need not list every label, so any name that is not

@@ -12,7 +12,7 @@
 //! - [`schema`] — the per-edge [`Schema`] every node carries.
 //! - [`schema_resolver`] / [`column_resolution`] — name resolution: turn a `ColumnRef`
 //!   into a positional `ColumnId` against an in-scope [`Schema`].
-//! - [`resolve`] — binds a whole front-end-emitted [`UnresolvedQueryExpr`] tree to
+//! - [`resolve`] — binds a whole front-end-emitted [`UnresolvedQueryExpr`] DAG to
 //!   canonical [`ResolvedQueryExpr`] (issue #179): both front ends
 //!   (`asap-frontend-promql`, `asap-frontend-sql`) construct `UnresolvedQueryExpr`
 //!   directly during their own `interpret` step and call

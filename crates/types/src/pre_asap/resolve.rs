@@ -76,7 +76,7 @@ pub enum ResolveDAGError {
     Schema(#[from] QueryExprError),
 }
 
-/// Resolve a whole [`UnresolvedQueryExpr`] tree rooted at `tree` into canonical
+/// Resolve a whole [`UnresolvedQueryExpr`] DAG rooted at `dag` into canonical
 /// [`ResolvedQueryExpr`]: binds every `ColumnRef` to a `ColumnId` via the
 /// [`SchemaResolver`], then [`canonicalize`](super::canonicalize::canonicalize)s the
 /// result.

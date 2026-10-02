@@ -11,7 +11,7 @@ use asap_physical_operators::{
 };
 use asap_types::{
     post_asap::{
-        Field, FieldDataType, Schema as LogicalSchema, SketchAlgorithm, SketchKind, SketchParams,
+        Field, FieldDataType, Schema as PlannerSchema, SketchAlgorithm, SketchKind, SketchParams,
         SketchQuery,
     },
     pre_asap::DataType,
@@ -32,7 +32,7 @@ fn family(k: u32) -> FieldDataType {
     )
 }
 fn raw_schema() -> Schema {
-    Arc::new(LogicalSchema {
+    Arc::new(PlannerSchema {
         closed: true,
         unique_keys: vec![],
         fields: vec![Field {

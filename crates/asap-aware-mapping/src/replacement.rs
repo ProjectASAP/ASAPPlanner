@@ -2334,7 +2334,7 @@ fn override_accuracy(intent: &AggIntent, target: &AccuracyTarget) -> AggIntent {
     out
 }
 
-/// Wrap an unrewritten pre-ASAP sub_dag, lifting its schema with every column
+/// Wrap an unrewritten pre-ASAP sub-DAG, lifting its schema with every column
 /// `FieldDataType::Plain`. `pub` so a caller can fall back to this
 /// explicitly — e.g. when `SketchAlgorithmStrategy::replacements()` returns no
 /// candidate for a target, or a deployment wants to force a node its own

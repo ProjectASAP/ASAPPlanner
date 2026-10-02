@@ -10,13 +10,13 @@ use asap_physical_operators::{
 };
 use futures::{executor::block_on, StreamExt};
 use planner_types::{
-    post_asap::{Field, FieldDataType, Schema as LogicalSchema},
+    post_asap::{Field, FieldDataType, Schema as PlannerSchema},
     pre_asap::{CompareOpKind, DataType, JoinKind, Predicate, QueryExpr},
 };
 use std::{rc::Rc, sync::Arc};
 
 fn schema(fields: &[(&str, DataType, bool)]) -> Schema {
-    Arc::new(LogicalSchema {
+    Arc::new(PlannerSchema {
         closed: true,
         unique_keys: vec![],
         fields: fields

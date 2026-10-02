@@ -8,13 +8,13 @@ use asap_physical_operators::{
 };
 use futures::{executor::block_on, FutureExt, StreamExt};
 use planner_types::{
-    post_asap::{Field, FieldDataType, Schema as LogicalSchema},
+    post_asap::{Field, FieldDataType, Schema as PlannerSchema},
     pre_asap::{DataType, JoinKind, Predicate, QueryExpr, ScalarValue},
 };
 use std::sync::Arc;
 
 fn schema(width: usize) -> Schema {
-    Arc::new(LogicalSchema {
+    Arc::new(PlannerSchema {
         closed: true,
         unique_keys: vec![],
         fields: (0..width)
@@ -189,7 +189,7 @@ fn cooperative_sort_preserves_ties_across_chunks() {
 #[test]
 fn weighted_summary_build_yields_within_a_batch() {
     use planner_types::post_asap::{SketchAlgorithm, SketchKind, SketchParams};
-    let input = Arc::new(LogicalSchema {
+    let input = Arc::new(PlannerSchema {
         closed: true,
         unique_keys: vec![],
         fields: vec![

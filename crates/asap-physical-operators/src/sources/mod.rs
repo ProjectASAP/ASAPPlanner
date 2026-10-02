@@ -8,7 +8,7 @@ use crate::{
 };
 use futures::{stream, StreamExt};
 use planner_types::{
-    post_asap::{FieldDataType, Schema as LogicalSchema},
+    post_asap::{FieldDataType, Schema as PlannerSchema},
     pre_asap::{DataType, QueryExpr, Source},
 };
 use std::sync::Arc;
@@ -51,7 +51,7 @@ impl DataSources {
                 "raw Scan requires a Planner Scan leaf".into(),
             ));
         };
-        let output = Arc::new(LogicalSchema::lifted(
+        let output = Arc::new(PlannerSchema::lifted(
             schema.fields.clone(),
             schema.time_index,
         ));

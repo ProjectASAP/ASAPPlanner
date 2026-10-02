@@ -8,7 +8,7 @@ use asap_physical_operators::{
     Error,
 };
 use planner_types::{
-    post_asap::{Field, FieldDataType, Schema as LogicalSchema},
+    post_asap::{Field, FieldDataType, Schema as PlannerSchema},
     pre_asap::{DataType, QueryExpr, Source},
 };
 use std::sync::{
@@ -35,7 +35,7 @@ impl RawSource for DeclaredSource {
 // A blocking parent must reject unknown and unbounded Scan inputs without opening a reader.
 #[test]
 fn blocking_inputs_require_an_explicit_finite_source() {
-    let schema = Arc::new(LogicalSchema {
+    let schema = Arc::new(PlannerSchema {
         closed: true,
         unique_keys: vec![],
         fields: vec![Field {
@@ -69,7 +69,7 @@ fn blocking_inputs_require_an_explicit_finite_source() {
         let scan = registry
             .bind(&QueryExpr::Scan {
                 source: identity,
-                schema: LogicalSchema::new(vec![Field::plain("v", DataType::Int64, false)]),
+                schema: PlannerSchema::new(vec![Field::plain("v", DataType::Int64, false)]),
                 predicates: vec![],
             })
             .unwrap();

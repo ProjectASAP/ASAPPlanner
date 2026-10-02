@@ -275,9 +275,9 @@ fn finite_rate(units_per_second: f64) -> Option<CostRate> {
 /// onto one `Rc` for two or more workload roots. See
 /// `docs/design_docs/cse-cost-model-decision.md`.
 pub struct CseCandidate<'a> {
-    /// The shared pre-ASAP sub_dag itself.
+    /// The shared pre-ASAP sub-DAG itself.
     pub sub_dag: &'a QueryExpr,
-    /// The `SummaryNode` this sub_dag bound to — gives the cost model the
+    /// The `SummaryNode` this sub-DAG bound to — gives the cost model the
     /// concrete `FieldDataType`/`(kind, params)` actually at stake, not
     /// just the pre-ASAP shape.
     pub bound_summary: &'a SummaryNode,

@@ -6,8 +6,8 @@
 //! one parent, within one query or across a `QueryWorkload` batch, instead of
 //! being duplicated. Nothing in this module produces that sharing on its
 //! own — construction still allocates a fresh `Rc` per node, the same shape
-//! as the old `Box` tree — a separate CSE pass is what turns two
-//! independently constructed, structurally-equal subtrees into two
+//! as the old `Box` DAG — a separate CSE pass is what turns two
+//! independently constructed, structurally-equal sub-DAGs into two
 //! references to one `Rc` (issue #212, #222). Field identity is
 //! **positional** (`Aggregate.reduction: Reduction`, wrapping `GroupKeys`
 //! for the grouped case), resolved by the [`SchemaResolver`](super::schema_resolver) against
@@ -23,7 +23,7 @@ use super::agg_intent::AggIntent;
 use super::expr_ir::{ArithmeticOpKind, ColumnRef, CompareOpKind, ScalarValue};
 use super::schema::{ColumnId, DataType, Field, FieldDataType, Schema};
 
-/// The column-reference resolution state a [`QueryExpr<C>`] tree carries —
+/// The column-reference resolution state a [`QueryExpr<C>`] DAG carries —
 /// [`ColumnId`] (the default, and what the bare `QueryExpr` name has always
 /// meant) once the [`SchemaResolver`](super::schema_resolver::SchemaResolver) has resolved every
 /// reference positionally, or the front-end-emitted, name-based [`ColumnRef`]
@@ -652,7 +652,7 @@ impl<C: ColState> ConcatDiscriminatorKey<C> {
 #[serde(bound(serialize = "C: ColState", deserialize = "C: ColState"))]
 pub enum QueryExpr<C: ColState = ColumnId> {
     /// Outermost leaf. `schema` is the **binding schema** — the resolved column
-    /// set every positional `ColumnId` in the tree indexes into, *not* a full
+    /// set every positional `ColumnId` in the DAG indexes into, *not* a full
     /// description of the runtime row — once bound (`schema: Schema`, always
     /// present: the [`SchemaResolver`](super::schema_resolver) is total). Before binding, a
     /// front-end-emitted `Scan` (`C = ColumnRef`) knows it only when the front
@@ -1146,7 +1146,7 @@ impl<C: ColState> QueryExpr<C> {
     }
 }
 
-/// The canonical, positional, resolved tree — what the bare `QueryExpr` name
+/// The canonical, positional, resolved DAG — what the bare `QueryExpr` name
 /// has always meant (the default `C = ColumnId`). Every existing consumer
 /// keeps using `QueryExpr` unparameterized; this alias exists only to name
 /// the resolved state explicitly at a use site that also wants to name
