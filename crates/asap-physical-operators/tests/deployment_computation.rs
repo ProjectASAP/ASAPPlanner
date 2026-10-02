@@ -2,7 +2,7 @@
 //! the deployment supplies only raw rows at the ingestion frontier.
 use asap_physical_operators::{
     operators::Operator,
-    physical_planner::{compile, promql_rows, CompiledPhysicalDag, InputContract, Source},
+    physical_planner::{compile, promql_rows, CompiledPhysicalDAG, InputContract, Source},
     runtime::{Limits, RunContext, Scope},
     values::{Batch, Value},
 };
@@ -45,7 +45,7 @@ fn lower_with(query: &str, accuracy: AccuracyTarget) -> QueryExpr {
 }
 
 /// The first exact summary candidate, as Planner selection would hand it over.
-fn exact_dag(query: &str) -> PostAsapDag {
+fn exact_dag(query: &str) -> PostAsapDAG {
     use asap_aware_mapping::{Replacement, ReplacementStrategy, TargetSubDAG};
     let expression = lower(query);
     let root = Rc::new(promql_rows::with_series_identity(&expression).unwrap_or(expression));
@@ -65,7 +65,7 @@ fn exact_dag(query: &str) -> PostAsapDag {
         .unwrap()
 }
 
-fn population_dag(query: &str) -> PostAsapDag {
+fn population_dag(query: &str) -> PostAsapDAG {
     let root = Rc::new(promql_rows::with_series_identity(&lower(query)).unwrap());
     let selected = asap_aware_mapping::maintained_population::MaintainedPopulationStrategy::new(
         std::slice::from_ref(&root),
@@ -76,7 +76,7 @@ fn population_dag(query: &str) -> PostAsapDag {
 }
 
 /// Raw scan nodes are the frontier; everything above them is compiled.
-fn raw_inputs(dag: &PostAsapDag) -> Vec<(u64, Arc<SummarySchema>, String)> {
+fn raw_inputs(dag: &PostAsapDAG) -> Vec<(u64, Arc<SummarySchema>, String)> {
     dag.nodes
         .iter()
         .filter_map(|node| match &node.payload {
@@ -103,7 +103,7 @@ type Sample = (&'static str, &'static str, &'static str, i64, f64);
 /// Compile, round-trip, bind raw `(metric, job, instance, ts, value)` samples,
 /// and return the root's batches.
 fn execute(
-    dag: &PostAsapDag,
+    dag: &PostAsapDAG,
     samples: &[Sample],
     end: i64,
 ) -> Result<Vec<asap_physical_operators::runtime::SharedValue<Batch>>, String> {
@@ -113,7 +113,7 @@ fn execute(
 /// [`execute`], supplying samples of each instance in `relabel` under its
 /// `(__name__, instance)` instead.
 fn execute_relabeled(
-    dag: &PostAsapDag,
+    dag: &PostAsapDAG,
     samples: &[Sample],
     end: i64,
     relabel: &BTreeMap<&str, (&str, &str)>,
@@ -128,7 +128,7 @@ fn execute_relabeled(
         &[u64::from(dag.root.0)],
     )
     .map_err(|e| e.to_string())?;
-    let program: CompiledPhysicalDag =
+    let program: CompiledPhysicalDAG =
         serde_json::from_slice(&serde_json::to_vec(&program).unwrap()).unwrap();
     let sources = inputs
         .iter()
@@ -194,7 +194,7 @@ fn execute_relabeled(
 }
 
 /// [`execute`], returning `(job, value)` rows of the root.
-fn run(dag: &PostAsapDag, samples: &[Sample], end: i64) -> Result<BTreeMap<String, f64>, String> {
+fn run(dag: &PostAsapDAG, samples: &[Sample], end: i64) -> Result<BTreeMap<String, f64>, String> {
     let mut rows = BTreeMap::new();
     for batch in execute(dag, samples, end)? {
         let job = batch.schema().fields.iter().position(|f| f.name == "job");
@@ -353,7 +353,7 @@ fn exact_count_finalizes_to_declared_float_value() {
 }
 
 /// `dag` with its Binary operator replaced by `kind`.
-fn with_kind(mut dag: PostAsapDag, kind: planner_types::pre_asap::BinaryOpKind) -> PostAsapDag {
+fn with_kind(mut dag: PostAsapDAG, kind: planner_types::pre_asap::BinaryOpKind) -> PostAsapDAG {
     for node in &mut dag.nodes {
         if let PostAsapOperatorPayload::Binary { operator } = &mut node.payload {
             operator.kind = kind.clone();
@@ -409,7 +409,7 @@ fn per_series_comparisons_filter_or_return_bool() {
 
 /// [`execute`], returning per-series `(identity, value)` rows of the root,
 /// with NaN-aware formatting for comparison.
-fn run_series(dag: &PostAsapDag, samples: &[Sample], end: i64) -> Result<String, String> {
+fn run_series(dag: &PostAsapDAG, samples: &[Sample], end: i64) -> Result<String, String> {
     let mut rows = BTreeMap::new();
     for batch in execute(dag, samples, end)? {
         let schema = batch.schema();
@@ -544,10 +544,10 @@ fn per_series_scalar_arithmetic_rejects_label_sets_equal_without_the_name() {
 }
 
 fn with_vector_match(
-    mut dag: PostAsapDag,
+    mut dag: PostAsapDAG,
     kind: planner_types::pre_asap::VectorMatchKind,
     labels: &[&str],
-) -> PostAsapDag {
+) -> PostAsapDAG {
     for node in &mut dag.nodes {
         if let PostAsapOperatorPayload::Binary { operator } = &mut node.payload {
             operator.vector_match = Some(planner_types::pre_asap::VectorMatch {
@@ -677,7 +677,7 @@ fn stored_count_min_bare_count_compiles_to_a_readout() {
         &[u64::from(dag.root.0)],
     )
     .unwrap();
-    let program: CompiledPhysicalDag =
+    let program: CompiledPhysicalDAG =
         serde_json::from_slice(&serde_json::to_vec(&program).unwrap()).unwrap();
     let mut sketch = CountMinSketchAccumulator::new(*depth as usize, *width as usize);
     sketch.inner.update("a", 3.0);

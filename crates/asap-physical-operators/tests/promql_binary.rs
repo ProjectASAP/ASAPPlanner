@@ -1,14 +1,14 @@
 //! Binary computation must be fully compiled before deployment binds values.
 use asap_physical_operators::{
     operators::Operator,
-    physical_planner::{compile_node, CompiledPhysicalDag, InputContract, Source},
+    physical_planner::{compile_node, CompiledPhysicalDAG, InputContract, Source},
     runtime::{Limits, RunContext, Scope},
     values::{Batch, Schema, Value},
 };
 use futures::{executor::block_on, StreamExt};
 use planner_types::{
     post_asap::{
-        BinaryOperator, ExecutionDataState, PostAsapDagNode, PostAsapNodeId,
+        BinaryOperator, ExecutionDataState, PostAsapDAGNode, PostAsapNodeId,
         PostAsapOperatorPayload, SummaryFamilyType, SummaryField, SummarySchema,
     },
     pre_asap::{ArithmeticOpKind, BinaryOpKind, DataType},
@@ -48,7 +48,7 @@ fn row(name: &str, job: &str, value: f64) -> Vec<Value> {
         Value::Float64(value),
     ]
 }
-fn program() -> CompiledPhysicalDag {
+fn program() -> CompiledPhysicalDAG {
     program_for(BinaryOperator {
         kind: BinaryOpKind::Arithmetic(ArithmeticOpKind::Div),
         vector_match: None,
@@ -56,9 +56,9 @@ fn program() -> CompiledPhysicalDag {
         checked_finite_division: false,
     })
 }
-fn program_for(operator: BinaryOperator) -> CompiledPhysicalDag {
+fn program_for(operator: BinaryOperator) -> CompiledPhysicalDAG {
     let schema = schema();
-    let node = PostAsapDagNode {
+    let node = PostAsapDAGNode {
         id: PostAsapNodeId(2),
         payload: PostAsapOperatorPayload::Binary { operator },
         output_state: ExecutionDataState::QUERY_ROWS,
@@ -66,7 +66,7 @@ fn program_for(operator: BinaryOperator) -> CompiledPhysicalDag {
         guarantee: None,
     };
     let operator = compile_node(&node, &[schema.clone(), schema.clone()]).unwrap();
-    let physical_dag = CompiledPhysicalDag::from_operators(
+    let physical_dag = CompiledPhysicalDAG::from_operators(
         BTreeMap::from([
             (0, InputContract::bounded(schema.clone())),
             (1, InputContract::bounded(schema)),
@@ -75,7 +75,7 @@ fn program_for(operator: BinaryOperator) -> CompiledPhysicalDag {
         vec![2],
     )
     .unwrap();
-    serde_json::from_slice::<CompiledPhysicalDag>(&serde_json::to_vec(&physical_dag).unwrap())
+    serde_json::from_slice::<CompiledPhysicalDAG>(&serde_json::to_vec(&physical_dag).unwrap())
         .unwrap()
 }
 fn evaluate(
@@ -85,7 +85,7 @@ fn evaluate(
     evaluate_with(program(), left, right)
 }
 fn evaluate_with(
-    physical_dag: CompiledPhysicalDag,
+    physical_dag: CompiledPhysicalDAG,
     left: Vec<Vec<Value>>,
     right: Vec<Vec<Value>>,
 ) -> Result<Vec<Vec<Value>>, asap_physical_operators::Error> {
@@ -163,7 +163,7 @@ fn scalar_broadcast_and_bool_comparison_are_distinct() {
             false,
         )
         .unwrap();
-        let physical_dag = serde_json::from_slice::<CompiledPhysicalDag>(
+        let physical_dag = serde_json::from_slice::<CompiledPhysicalDAG>(
             &serde_json::to_vec(&physical_dag).unwrap(),
         )
         .unwrap();
@@ -343,7 +343,7 @@ fn stored_series_readouts_support_filters_and_sets() {
             BinaryOpKind::Set(PromQLVectorSetOpKind::Or),
         ] {
             let nodes = (0..5)
-                .map(|id| PostAsapDagNode {
+                .map(|id| PostAsapDAGNode {
                     id: PostAsapNodeId(id),
                     payload: match id {
                         0 | 1 => PostAsapOperatorPayload::SummaryMerge,
@@ -379,7 +379,7 @@ fn stored_series_readouts_support_filters_and_sets() {
                 (3, 4, EdgeRole::Right),
             ]
             .into_iter()
-            .map(|(producer, consumer, role)| PostAsapDagEdge {
+            .map(|(producer, consumer, role)| PostAsapDAGEdge {
                 producer: PostAsapNodeId(producer),
                 consumer: PostAsapNodeId(consumer),
                 role,
@@ -389,7 +389,7 @@ fn stored_series_readouts_support_filters_and_sets() {
                 window: WindowEdgeCompatibility::NotApplicable,
             })
             .collect();
-            let dag = PostAsapDag {
+            let dag = PostAsapDAG {
                 nodes,
                 edges,
                 root: PostAsapNodeId(4),
@@ -403,7 +403,7 @@ fn stored_series_readouts_support_filters_and_sets() {
                 &[4],
             )
             .unwrap();
-            let physical_dag: CompiledPhysicalDag =
+            let physical_dag: CompiledPhysicalDAG =
                 serde_json::from_slice(&serde_json::to_vec(&physical_dag).unwrap()).unwrap();
             let sources = [(0, "a", 6.), (1, "b", 2.)]
                 .into_iter()

@@ -233,7 +233,7 @@ impl SummaryOperatorEvidence {
 /// horizon. Bootstrap/source I/O belongs exclusively to the owning aggregate,
 /// and summary insertion belongs exclusively to its insert evidence.
 #[derive(Debug, Clone, PartialEq)]
-pub struct RetainedSubDagEvidence {
+pub struct RetainedSubDAGEvidence {
     pub physical_id: String,
     /// Logical output edge consumed by the parent summary operator.
     pub output: EdgeStatistics,
@@ -251,7 +251,7 @@ pub struct SummaryNodeEvidence {
     pub(super) joins: HashMap<*const SummaryNode, SummaryJoinEvidence>,
     pub(super) operations: HashMap<*const SummaryNode, SummaryOperatorEvidence>,
     pub(super) operation_state_owners: HashMap<*const SummaryNode, *const SummaryNode>,
-    pub(super) retained_queries: HashMap<*const SummaryNode, RetainedSubDagEvidence>,
+    pub(super) retained_queries: HashMap<*const SummaryNode, RetainedSubDAGEvidence>,
 }
 
 impl SummaryNodeEvidence {
@@ -287,7 +287,7 @@ impl SummaryNodeEvidence {
     pub fn insert_retained_query(
         &mut self,
         node: &Rc<SummaryNode>,
-        evidence: RetainedSubDagEvidence,
+        evidence: RetainedSubDAGEvidence,
     ) {
         self.retained_queries.insert(Rc::as_ptr(node), evidence);
     }
@@ -351,7 +351,7 @@ pub struct RawInputEvidence {
     /// logical width so compression and encoding are not silently conflated.
     pub arriving_source_row_bytes: u64,
     pub ingestion_rate_per_second: f64,
-    pub physical_dag: EvidenceBackedPhysicalDag,
+    pub physical_dag: EvidenceBackedPhysicalDAG,
 }
 
 /// One complete provider-enumerated physical implementation of the selected

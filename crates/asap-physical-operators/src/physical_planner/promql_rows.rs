@@ -80,7 +80,7 @@ pub fn series_row(
 /// TopK result; ranking remains a native physical operator.
 pub fn compile_current_series_readout(
     selected: &Rc<planner_types::post_asap::SummaryNode>,
-) -> Result<CompiledPhysicalDag, Error> {
+) -> Result<CompiledPhysicalDAG, Error> {
     use planner_types::post_asap::{
         compile_post_asap_dag, maintained_population::PopulationReadout, SummaryField,
     };
@@ -194,7 +194,7 @@ pub fn compile_rate_ranking(
 ) -> Result<
     (
         Rc<planner_types::post_asap::SummaryNode>,
-        CompiledPhysicalDag,
+        CompiledPhysicalDAG,
     ),
     Error,
 > {
@@ -253,7 +253,7 @@ pub fn compile_rate_ranking(
 /// Rate readouts runs at ingestion time: fresh aggregate state per closed
 /// window. The input is the complete collection of per-series counter states.
 pub fn compile_fixed_window_rate_aggregation(
-    dag: &planner_types::post_asap::PostAsapDag,
+    dag: &planner_types::post_asap::PostAsapDAG,
 ) -> Result<PhysicalASAPDAG, Error> {
     use planner_types::post_asap::{ExactKind, ExecutionTiming, SketchAlgorithm};
     let sources = dag

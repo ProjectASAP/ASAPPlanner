@@ -2,7 +2,7 @@
 use asap_physical_operators::{
     factory::create_planner_accumulator,
     operators::Operator,
-    physical_planner::{precompute, CompiledPhysicalDag, Source},
+    physical_planner::{precompute, CompiledPhysicalDAG, Source},
     runtime::{Limits, RunContext, Scope},
     values::{Batch, Value},
     Statistic,
@@ -44,14 +44,14 @@ fn finalized_shared_panes_rebuild_one_global_summary_after_recovery() {
         (SummaryInputExpr::Constant(1.), 4.),
     ] {
         let nodes = vec![
-            PostAsapDagNode {
+            PostAsapDAGNode {
                 id: PostAsapNodeId(0),
                 payload: PostAsapOperatorPayload::SummaryMerge,
                 output_state: ExecutionDataState::INGESTION_SUMMARY,
                 output_schema: state_schema.clone(),
                 guarantee: None,
             },
-            PostAsapDagNode {
+            PostAsapDAGNode {
                 id: PostAsapNodeId(1),
                 payload: PostAsapOperatorPayload::Value {
                     operation: ValueOperation::FinalizeExactAccumulator,
@@ -60,7 +60,7 @@ fn finalized_shared_panes_rebuild_one_global_summary_after_recovery() {
                 output_schema: value_schema.clone(),
                 guarantee: None,
             },
-            PostAsapDagNode {
+            PostAsapDAGNode {
                 id: PostAsapNodeId(2),
                 payload: PostAsapOperatorPayload::Binary {
                     operator: BinaryOperator {
@@ -74,7 +74,7 @@ fn finalized_shared_panes_rebuild_one_global_summary_after_recovery() {
                 output_schema: value_schema.clone(),
                 guarantee: None,
             },
-            PostAsapDagNode {
+            PostAsapDAGNode {
                 id: PostAsapNodeId(3),
                 payload: PostAsapOperatorPayload::SummaryAgg {
                     family: family.clone(),
@@ -98,7 +98,7 @@ fn finalized_shared_panes_rebuild_one_global_summary_after_recovery() {
             (2, 3, EdgeRole::Input),
         ]
         .into_iter()
-        .map(|(producer, consumer, role)| PostAsapDagEdge {
+        .map(|(producer, consumer, role)| PostAsapDAGEdge {
             producer: PostAsapNodeId(producer),
             consumer: PostAsapNodeId(consumer),
             role,
@@ -108,7 +108,7 @@ fn finalized_shared_panes_rebuild_one_global_summary_after_recovery() {
             window: WindowEdgeCompatibility::NotApplicable,
         })
         .collect();
-        let dag = PostAsapDag {
+        let dag = PostAsapDAG {
             nodes,
             edges,
             root: PostAsapNodeId(3),
@@ -137,7 +137,7 @@ fn finalized_shared_panes_rebuild_one_global_summary_after_recovery() {
         );
         let program = precompute::compile(&dag, &[0], &[3]).unwrap();
         let program =
-            serde_json::from_slice::<CompiledPhysicalDag>(&serde_json::to_vec(&program).unwrap())
+            serde_json::from_slice::<CompiledPhysicalDAG>(&serde_json::to_vec(&program).unwrap())
                 .unwrap();
         assert_eq!(program.input_contracts().count(), 1);
         for revision in [1, 2] {
@@ -228,8 +228,8 @@ fn state_dag(
     family: SummaryFamilyType,
     target: Option<SummaryFamilyType>,
     merge: bool,
-) -> CompiledPhysicalDag {
-    let mut nodes = vec![PostAsapDagNode {
+) -> CompiledPhysicalDAG {
+    let mut nodes = vec![PostAsapDAGNode {
         id: PostAsapNodeId(0),
         payload: PostAsapOperatorPayload::SummaryMerge,
         output_state: ExecutionDataState::INGESTION_SUMMARY,
@@ -237,14 +237,14 @@ fn state_dag(
         guarantee: None,
     }];
     if merge {
-        nodes.push(PostAsapDagNode {
+        nodes.push(PostAsapDAGNode {
             id: PostAsapNodeId(1),
             payload: PostAsapOperatorPayload::SummaryMerge,
             ..nodes[0].clone()
         });
     }
     let read_id = nodes.len() as u32;
-    nodes.push(PostAsapDagNode {
+    nodes.push(PostAsapDAGNode {
         id: PostAsapNodeId(read_id),
         payload: PostAsapOperatorPayload::Value {
             operation: ValueOperation::FinalizeExactAccumulator,
@@ -254,7 +254,7 @@ fn state_dag(
         guarantee: None,
     });
     if let Some(target) = target {
-        nodes.push(PostAsapDagNode {
+        nodes.push(PostAsapDAGNode {
             id: PostAsapNodeId(nodes.len() as u32),
             payload: PostAsapOperatorPayload::SummaryAgg {
                 family: target.clone(),
@@ -269,7 +269,7 @@ fn state_dag(
         });
     }
     let edges = (1..nodes.len())
-        .map(|i| PostAsapDagEdge {
+        .map(|i| PostAsapDAGEdge {
             producer: nodes[i - 1].id,
             consumer: nodes[i].id,
             role: EdgeRole::Input,
@@ -281,20 +281,20 @@ fn state_dag(
         .collect();
     let root = nodes.last().unwrap().id;
     precompute::compile(
-        &PostAsapDag { nodes, edges, root },
+        &PostAsapDAG { nodes, edges, root },
         &[0],
         &[u64::from(root.0)],
     )
     .unwrap()
 }
 fn native_run(
-    program: &CompiledPhysicalDag,
+    program: &CompiledPhysicalDAG,
     family: SummaryFamilyType,
     states: Vec<Arc<dyn asap_physical_operators::AggregateCore>>,
     context: RunContext,
 ) -> Result<Vec<Vec<Value>>, asap_physical_operators::Error> {
     let program =
-        serde_json::from_slice::<CompiledPhysicalDag>(&serde_json::to_vec(&program).unwrap())
+        serde_json::from_slice::<CompiledPhysicalDAG>(&serde_json::to_vec(&program).unwrap())
             .unwrap();
     let rows = states
         .into_iter()

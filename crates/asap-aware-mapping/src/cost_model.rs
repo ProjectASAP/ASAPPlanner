@@ -740,14 +740,14 @@ pub trait CostModel {
     /// already belongs to [`rank_candidates`](Self::rank_candidates) (for a
     /// [`SketchAlgorithmStrategy`](crate::replacement::SketchAlgorithmStrategy)
     /// group) and [`cse_share_decision`](Self::cse_share_decision) (for a
-    /// [`SharedSubDagStrategy`](crate::replacement::SharedSubDagStrategy)
+    /// [`SharedSubDAGStrategy`](crate::replacement::SharedSubDAGStrategy)
     /// group).
     ///
     /// One method covers both candidate shapes this crate ships:
     /// `candidate.replacement`'s [`Replacement::Summary`] arm (a
     /// `SketchAlgorithmStrategy` candidate — the bound `SummaryNode` is right
     /// there, nothing to reconstruct) and its [`Replacement::Rewrite`] arm
-    /// (a `SharedSubDagStrategy` share-vs-recompute candidate — no bound
+    /// (a `SharedSubDAGStrategy` share-vs-recompute candidate — no bound
     /// `SummaryNode` of its own, since sharing is a decision about a target
     /// already bound some other way; a representative binding is recovered
     /// from `target` itself). `target` is threaded through explicitly
@@ -1626,7 +1626,7 @@ mod tests {
     }
 
     /// `DefaultCostModel::estimate_cost` for a [`Replacement::Rewrite`] pair
-    /// (the `SharedSubDagStrategy` share-vs-recompute shape) agrees with
+    /// (the `SharedSubDAGStrategy` share-vs-recompute shape) agrees with
     /// what `cse_share_decision` would already pick for the same target: with
     /// many consumers of a cheap-to-recompute leaf, the "share" candidate
     /// (the target's own `Rc`) must cost less than the "recompute

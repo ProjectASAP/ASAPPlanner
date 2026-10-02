@@ -36,7 +36,7 @@ let zoom = 1;
 let participants = new Set();
 // Every query pushed from the *same* loaded JSON document (one `dag_export`
 // process invocation) shares one `sourceBatch` id, assigned here. Needed
-// because `DagDecision.id` is only unique *within* one dag_export run, not
+// because `DAGDecision.id` is only unique *within* one dag_export run, not
 // across independently-generated files — computeSelectionWorkloadCost below
 // dedups by `${sourceBatch}:${decision.id}`, never `decision.id` alone, so
 // two files that happen to reuse the same small integer id never collide.
@@ -636,10 +636,10 @@ function unionStageLaneElements(stage, chosen, laneCost) {
 
 // Builds one Pre/Post-ASAP lane (a dashed compound parent plus its
 // nodes/edges). `nodes` is either a plain pre-ASAP
-// DagNode list (the `before` sub-DAG, or an `after.kind === "Rewrite"`
-// DAG) or a SummaryDagNode list (an `after.kind === "Summary"` DAG) —
+// DAGNode list (the `before` sub-DAG, or an `after.kind === "Rewrite"`
+// DAG) or a SummaryDAGNode list (an `after.kind === "Summary"` DAG) —
 // both shapes carry id/kind/label/detail/children, which is all a lane
-// needs; SummaryDagNode's missing `hash`/`notes` fields are simply never
+// needs; SummaryDAGNode's missing `hash`/`notes` fields are simply never
 // read by this function or by showPrePostDetail below.
 function laneElements(laneId, laneLabel, dag, query, stage, laneCost) {
   const nodes = dag.nodes;
@@ -789,7 +789,7 @@ function renderCostAnnotation(title, annotation) {
 }
 
 // Baseline/selected/benefit trio for one replacement decision, matching
-// `DagDecision.baseline_cost/selected_cost/benefit` (crates/types/src/dag_export.rs).
+// `DAGDecision.baseline_cost/selected_cost/benefit` (crates/types/src/dag_export.rs).
 function renderDecisionCostBlock(entry) {
   if (!entry.baseline_cost && !entry.selected_cost && !entry.benefit) return '';
   return `<div class="costBlock">

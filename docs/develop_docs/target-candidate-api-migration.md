@@ -11,7 +11,7 @@ are unchanged. #453 separately defines the integration API surface.
 | `SelectedGroup` | `TargetSubDAGSelection` | Selected choice and usage information for one target; the choice may be absent |
 | `GlobalSelection::groups()` | `GlobalSelection::target_selections()` | Iterate decisions, not alternative sets |
 | `MaterializeSummaryMaintenanceLifecycleError` | `SummaryMaintenanceLifecycleAssemblyError` | Failure assembling a DAG or deriving maintenance decisions |
-| Error variant `Materialize` | `AssembleDag` | Wrap an underlying `RealizationError` from DAG assembly |
+| Error variant `Materialize` | `AssembleDAG` | Wrap an underlying `RealizationError` from DAG assembly |
 | Internal `materialize_inner` / `materialize_residual` | `assemble_target` / `assemble_residual` | Assemble selected nodes, not runtime materialized views |
 | Internal assembly cache `materialized` | `assembled_nodes` | Preserve shared `Rc<SummaryNode>` identity |
 

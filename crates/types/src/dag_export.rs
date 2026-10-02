@@ -26,9 +26,9 @@
 //! step evaluates). See `tools/dag-viewer/README.md` for the up-to-date
 //! caveat.
 //!
-//! ## `DagNode::notes` — a layering seam, not a feature this module implements
+//! ## `DAGNode::notes` — a layering seam, not a feature this module implements
 //!
-//! [`DagNode`] also carries `notes: Vec<`[`DagNote`]`>`, always empty coming
+//! [`DAGNode`] also carries `notes: Vec<`[`DAGNote`]`>`, always empty coming
 //! out of [`export`]. It exists so a *higher* layer — one that depends on
 //! `asap_types`, never the reverse — can annotate an already-exported DAG
 //! after the fact without this module needing to know anything about that
@@ -36,9 +36,9 @@
 //! (issue #257) computes `structural_hash` over the same `QueryExpr`
 //! sub-DAGs this module does (via the identical function). The devtools
 //! exporter uses that hash to narrow candidates, then compares
-//! `ReplacementExplanation::target` with [`DagNode::source_expr`] for a
-//! collision-safe match before pushing a [`DagNote`] onto the node.
-//! `asap_types` itself never constructs a `DagNote` — see [`DagNode::notes`]
+//! `ReplacementExplanation::target` with [`DAGNode::source_expr`] for a
+//! collision-safe match before pushing a [`DAGNote`] onto the node.
+//! `asap_types` itself never constructs a `DAGNote` — see [`DAGNode::notes`]
 //! for the layering rule this keeps.
 
 use std::collections::HashMap;
@@ -55,7 +55,7 @@ use crate::pre_asap::query_expr::{QueryExpr, Source};
 /// (predicates, aggregate funcs, schema, sort keys, …) — everything except
 /// its children, which live in `children` instead.
 #[derive(Debug, Clone, Serialize)]
-pub struct DagNode {
+pub struct DAGNode {
     pub id: u32,
     /// The `QueryExpr` variant name (e.g. `"Aggregate"`).
     pub kind: &'static str,
@@ -112,26 +112,26 @@ pub struct DagNode {
     /// (it has no notion of a "replacement" at all — see the module doc's
     /// layering note); a higher layer that does (`asap-aware-mapping`, via
     /// the `dag_export` devtools binary) fills it in after the fact by
-    /// matching [`DagNode::hash`] and confirming structural equality. Empty
+    /// matching [`DAGNode::hash`] and confirming structural equality. Empty
     /// by default, so every existing [`export`] caller and test is unaffected.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub notes: Vec<DagNote>,
+    pub notes: Vec<DAGNote>,
     /// Explicit workload-level decision that produced or carried this node.
     /// Present only in `post_dag`; consumers must read this rather than
     /// infer strategy provenance from labels, hashes, or DAG similarity.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub decision: Option<DagDecision>,
+    pub decision: Option<DAGDecision>,
 }
 
-/// One reporting-layer annotation attached to a [`DagNode`] by a higher
-/// layer than `asap_types` — see [`DagNode::notes`]. `asap_types` defines
+/// One reporting-layer annotation attached to a [`DAGNode`] by a higher
+/// layer than `asap_types` — see [`DAGNode::notes`]. `asap_types` defines
 /// this shape (so the field has a concrete, serializable type) but never
 /// constructs one: `asap_types` is a lower crate that `asap-aware-mapping`
 /// depends on, never the reverse, so this type is deliberately generic and
 /// crate-agnostic rather than naming anything from that higher layer (e.g.
 /// its `ExplanationKind`/`ReplacementExplanation`).
 #[derive(Debug, Clone, Serialize)]
-pub struct DagNote {
+pub struct DAGNote {
     /// A short tag for the kind of annotation this is (e.g. a
     /// `Debug`-formatted `asap_aware_mapping::ExplanationKind`) — opaque to
     /// `asap_types`, meant for a renderer to group or color by.
@@ -144,7 +144,7 @@ pub struct DagNote {
 /// Self-contained explanation of a winning workload-level post-ASAP
 /// decision, serialized directly on every node it produced or carried.
 #[derive(Debug, Clone, Serialize)]
-pub struct DagDecision {
+pub struct DAGDecision {
     pub id: u32,
     pub strategy: String,
     pub rationale: String,
@@ -164,7 +164,7 @@ pub struct DagDecision {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub selected_cost: Option<CostAnnotation>,
     /// `baseline_cost.value - selected_cost.value` under `baseline_cost`'s
-    /// own baseline — for a winning `SharedSubDagStrategy`/`CseShare`
+    /// own baseline — for a winning `SharedSubDAGStrategy`/`CseShare`
     /// decision this *is* "avoided recomputation for a shared sub-DAG" (one
     /// of `dag_export`'s issue #286 granularity items): the baseline is
     /// exactly the cost of recomputing this sub-DAG independently at every
@@ -174,7 +174,7 @@ pub struct DagDecision {
 }
 
 /// A cost/benefit annotation attributed to one specific DAG edge (`from`
-/// -> `to`, in [`DagNode::children`]'s direction) rather than to a node —
+/// -> `to`, in [`DAGNode::children`]'s direction) rather than to a node —
 /// issue #286's "edge cost only when genuinely attributable to the edge"
 /// granularity item. DAG structure alone cannot determine transfer,
 /// materialization, or read cost. A higher layer may attach this annotation
@@ -190,10 +190,10 @@ pub struct EdgeCostAnnotation {
 /// One query's exported DAG. `nodes[root as usize]` is the DAG's root.
 #[derive(Debug, Clone, Serialize)]
 pub struct ExportDAG {
-    pub nodes: Vec<DagNode>,
+    pub nodes: Vec<DAGNode>,
     pub root: u32,
     /// See [`EdgeCostAnnotation`]. Always empty unless a higher layer
-    /// explicitly populated it (same layering rule as [`DagNode::notes`]);
+    /// explicitly populated it (same layering rule as [`DAGNode::notes`]);
     /// omitted from JSON entirely when empty, so every existing producer of
     /// [`ExportDAG`] (every call to [`export`]/[`export_summary`]) is
     /// unaffected.
@@ -214,7 +214,7 @@ pub struct NamedDAG {
     pub dag: ExportDAG,
     /// Concrete post-ASAP replacement sites discovered for this query — see
     /// [`TargetReplacement`]. Always empty coming out of anything in this
-    /// module (same layering rule as [`DagNode::notes`]: `asap_types` never
+    /// module (same layering rule as [`DAGNode::notes`]: `asap_types` never
     /// runs `asap-aware-mapping`'s search itself); a higher layer populates
     /// this after the fact, e.g. the `dag_export` devtools binary's
     /// `--post-asap` flag. Omitted from the JSON entirely when empty, so
@@ -229,7 +229,7 @@ pub struct NamedDAG {
     /// before/after pairs, one per independently-discovered replacement
     /// site), this is a single flattened [`ExportDAG`] spanning the whole
     /// query: every node that has no winning replacement renders as an
-    /// ordinary pre-ASAP [`DagNode`] (same shape [`export`] itself
+    /// ordinary pre-ASAP [`DAGNode`] (same shape [`export`] itself
     /// produces), and every node that does splices in its winning
     /// candidate's shape instead — a rewritten [`QueryExpr`] sub-DAG, or a
     /// bound `SummaryNode` sub-DAG, rendered inline in the very same node
@@ -267,7 +267,7 @@ pub struct NamedDAG {
 
 /// A batch of named queries — the shape the viewer's multi-query / compare
 /// mode reads (each query starts its own `ExportDAG`; shared-sub-DAG
-/// highlighting is done by the viewer, matching `DagNode::hash` across
+/// highlighting is done by the viewer, matching `DAGNode::hash` across
 /// queries).
 #[derive(Debug, Clone, Serialize)]
 pub struct WorkloadDAG {
@@ -290,7 +290,7 @@ pub struct WorkloadDAG {
 // generic, crate-agnostic "one replacement site, before and after" shape a
 // higher layer (`asap-aware-mapping`, via the `dag_export` devtools binary's
 // `--post-asap` flag) populates after running its own search — the exact
-// same layering rule [`DagNode::notes`]'s doc above already states: this
+// same layering rule [`DAGNode::notes`]'s doc above already states: this
 // module never runs `asap_aware_mapping::replacement::search_workload_with`
 // itself, never picks a "winning" candidate, and has no opinion on what a
 // `ReplacementProvenance` or a cost model even is. It only defines shapes
@@ -313,14 +313,14 @@ pub struct WorkloadDAG {
 // today via [`export`]/[`export_summary`] as-is.
 
 /// One flattened post-ASAP node — the [`SummaryExpr`] analogue of
-/// [`DagNode`]. `detail` holds this node's own scalar fields (the summarized
+/// [`DAGNode`]. `detail` holds this node's own scalar fields (the summarized
 /// column, the summary family, grouping strategy, sketch-query kind, …) —
 /// everything except its `SummaryNode` children, which live in `children`
 /// instead.
 ///
-/// Unlike [`DagNode`], this carries no `hash`/`source_expr` pair: nothing in
-/// this module ever needs to re-identify a particular `SummaryDagNode` the
-/// way `DagNode::hash` lets a higher layer re-identify a pre-ASAP node (a
+/// Unlike [`DAGNode`], this carries no `hash`/`source_expr` pair: nothing in
+/// this module ever needs to re-identify a particular `SummaryDAGNode` the
+/// way `DAGNode::hash` lets a higher layer re-identify a pre-ASAP node (a
 /// `SummaryNode` is always freshly exported for exactly one
 /// [`TargetReplacementAfter::Summary`] site, never matched back against a
 /// separately-exported DAG the way pre-ASAP notes are).
@@ -335,11 +335,11 @@ pub struct WorkloadDAG {
 /// reporting concern), this module renders those particular fields into
 /// `detail` via their `Debug` formatting instead — human-readable, and
 /// sufficient for the display purpose `detail` exists for on every other
-/// node in this file (see [`DagNode::detail`]'s own doc), at the cost of
+/// node in this file (see [`DAGNode::detail`]'s own doc), at the cost of
 /// those particular fields being opaque strings rather than structured JSON
-/// on the `SummaryDagNode` side of the export.
+/// on the `SummaryDAGNode` side of the export.
 #[derive(Debug, Clone, Serialize)]
-pub struct SummaryDagNode {
+pub struct SummaryDAGNode {
     pub id: u32,
     /// The `SummaryExpr` variant name (e.g. `"SummaryAgg"`).
     pub kind: &'static str,
@@ -367,7 +367,7 @@ pub struct SummaryDagNode {
 /// its raw/pre-ASAP form, not only what won elsewhere.
 #[derive(Debug, Clone, Serialize)]
 pub struct TargetRejection {
-    /// Id of the [`DagNode`] in this query's own `DAG.nodes` the refused
+    /// Id of the [`DAGNode`] in this query's own `DAG.nodes` the refused
     /// candidate targeted.
     pub target_pre_id: u32,
     /// Which strategy considered the candidate.
@@ -382,12 +382,12 @@ pub struct TargetRejection {
 /// flattens a pre-ASAP `QueryExpr` DAG.
 #[derive(Debug, Clone, Serialize)]
 pub struct SummaryDAG {
-    pub nodes: Vec<SummaryDagNode>,
+    pub nodes: Vec<SummaryDAGNode>,
     pub root: u32,
 }
 
 /// Flatten a [`SummaryNode`] the same way [`export`] flattens a `QueryExpr`
-/// — post-order, one [`SummaryDagNode`] per [`SummaryExpr`] variant, no
+/// — post-order, one [`SummaryDAGNode`] per [`SummaryExpr`] variant, no
 /// memoization of repeated `Rc<SummaryNode>` references (a shared
 /// sub-expression reachable through two parents is flattened twice, into two
 /// separate node entries — the same "this is a flattened DAG view, not a
@@ -397,11 +397,11 @@ pub struct SummaryDAG {
 /// A `KeepPreAsap(inner)` leaf embeds the *whole* pre-ASAP sub-DAG beneath it
 /// as a nested [`ExportDAG`] (via [`export(inner)`](export)) inside its own
 /// `detail` field (`{"pre_asap_sub_dag": <ExportDAG>}`) rather than trying to
-/// flatten it into this same node list — [`DagNode`] and [`SummaryDagNode`]
+/// flatten it into this same node list — [`DAGNode`] and [`SummaryDAGNode`]
 /// are different types with different id spaces, so mixing them into one
 /// `Vec` isn't type-safe; nesting is. `label` for a `KeepPreAsap` node is
 /// `format!("KeepPreAsap({kind})")`, where `kind` is the inner sub-DAG's own
-/// top-level `DagNode::kind`.
+/// top-level `DAGNode::kind`.
 pub fn export_summary(node: &SummaryNode) -> SummaryDAG {
     let mut nodes = Vec::new();
     let root = build_summary(node, &mut nodes);
@@ -409,7 +409,7 @@ pub fn export_summary(node: &SummaryNode) -> SummaryDAG {
 }
 
 fn push_summary_node(
-    nodes: &mut Vec<SummaryDagNode>,
+    nodes: &mut Vec<SummaryDAGNode>,
     kind: &'static str,
     label: String,
     detail: serde_json::Value,
@@ -417,7 +417,7 @@ fn push_summary_node(
     guarantee: Option<ResultGuarantee>,
 ) -> u32 {
     let id = nodes.len() as u32;
-    nodes.push(SummaryDagNode {
+    nodes.push(SummaryDAGNode {
         id,
         kind,
         label,
@@ -430,7 +430,7 @@ fn push_summary_node(
 
 /// A short, human-readable label for a [`crate::post_asap::SummaryFamilyType`]
 /// (e.g. `"Sketch(Kll)"`, `"ExactAggregate(Sum)"`) — for
-/// [`SummaryDagNode::label`] text on a `SummaryAgg`/`SummaryJoin` node. Not
+/// [`SummaryDAGNode::label`] text on a `SummaryAgg`/`SummaryJoin` node. Not
 /// exhaustive prose (mirrors `asap_aware_mapping::replacement::describe_intent`'s
 /// own "this is a label, not a decision" stance) — every variant is covered,
 /// but via `Debug` for the inner kind rather than hand-written prose per
@@ -448,8 +448,8 @@ fn family_label(family: &crate::post_asap::SummaryFamilyType) -> String {
 }
 
 /// `(kind, label, detail)` for every [`SummaryExpr`] variant *except*
-/// [`SummaryExpr::KeepPreAsap`] — that variant has no `SummaryDagNode`/
-/// `DagNode` of its own (see [`build_summary`]/[`build_summary_hybrid`], its
+/// [`SummaryExpr::KeepPreAsap`] — that variant has no `SummaryDAGNode`/
+/// `DAGNode` of its own (see [`build_summary`]/[`build_summary_hybrid`], its
 /// only two callers, both of which special-case it before ever reaching
 /// this function). Factored out so [`build_summary`] (nests a `KeepPreAsap`
 /// leaf's pre-ASAP sub-DAG as its own [`SummaryDAG`]) and
@@ -584,11 +584,11 @@ fn summary_children(expr: &SummaryExpr) -> Vec<&Rc<SummaryNode>> {
     }
 }
 
-/// Recursively flatten `node`, appending [`SummaryDagNode`]s to `nodes` in
+/// Recursively flatten `node`, appending [`SummaryDAGNode`]s to `nodes` in
 /// post-order (children pushed before their parent), and return the pushed
 /// root's id. Exhaustive over every [`SummaryExpr`] variant, matching this
 /// file's own exhaustive style for `QueryExpr` in [`build`].
-fn build_summary(node: &SummaryNode, nodes: &mut Vec<SummaryDagNode>) -> u32 {
+fn build_summary(node: &SummaryNode, nodes: &mut Vec<SummaryDAGNode>) -> u32 {
     if let SummaryExpr::KeepPreAsap(inner) = &node.expr {
         let pre_asap_sub_dag = export(inner);
         let inner_kind = pre_asap_sub_dag.nodes[pre_asap_sub_dag.root as usize].kind;
@@ -615,7 +615,7 @@ fn build_summary(node: &SummaryNode, nodes: &mut Vec<SummaryDagNode>) -> u32 {
 /// running `asap_aware_mapping::replacement::search_workload_with` +
 /// `CandidateLogicalASAPDAGs::cost_sorted` and picking the best-ranked candidate for one
 /// `TargetSubDAGCandidates` — `asap_types` never runs that search itself (same layering
-/// rule as [`DagNote`]: this crate defines the shape, a higher crate
+/// rule as [`DAGNote`]: this crate defines the shape, a higher crate
 /// populates it).
 #[derive(Debug, Clone, Serialize)]
 pub struct TargetReplacement {
@@ -624,7 +624,7 @@ pub struct TargetReplacement {
     /// so renderers can explain a clicked post-ASAP node without guessing by
     /// label, hash, or DAG shape.
     pub decision_id: u32,
-    /// Id of the [`DagNode`] (in this query's own `DAG.nodes`, i.e. the
+    /// Id of the [`DAGNode`] (in this query's own `DAG.nodes`, i.e. the
     /// [`NamedDAG`] this `TargetReplacement` is attached to) this
     /// replacement's `before` sub-DAG is rooted at.
     pub target_pre_id: u32,
@@ -713,25 +713,25 @@ pub fn export(expr: &QueryExpr) -> ExportDAG {
 /// doc for the full design. `asap_types` has no opinion on *how* this is
 /// decided (that's `asap_aware_mapping::replacement::search_workload_with` +
 /// `CandidateLogicalASAPDAGs::cost_sorted`'s job, a higher layer, exactly the layering rule
-/// [`DagNode::notes`] already states); it only defines the shape a decision
+/// [`DAGNode::notes`] already states); it only defines the shape a decision
 /// comes back in.
 #[derive(Debug, Clone)]
 pub enum PostAsapSubstitution {
     /// This exact node has a winning `Replacement::Rewrite` — keep building
     /// from `.0` instead of the original node. Still pre-ASAP shaped, so
-    /// [`build`] renders it via the same ordinary `DagNode` path — see
+    /// [`build`] renders it via the same ordinary `DAGNode` path — see
     /// [`build`]'s own doc for why `.0`'s own top level is rendered without
     /// re-querying `find_winner` on it (its descendants still are).
     Rewrite {
         replacement: Rc<QueryExpr>,
-        decision: DagDecision,
+        decision: DAGDecision,
     },
     /// This exact node has a winning `Replacement::Summary` — switch to
     /// rendering `.0`'s bound `SummaryNode` shape from here down, via
     /// [`build_summary_hybrid`].
     Summary {
         replacement: Rc<SummaryNode>,
-        decision: DagDecision,
+        decision: DAGDecision,
     },
 }
 
@@ -762,7 +762,7 @@ pub enum PostAsapSubstitution {
 /// substitution's own immediate top level (only on that substitution's
 /// *descendants*, which get an ordinary fresh call same as any other node).
 /// This matters for correctness, not just efficiency:
-/// `SharedSubDagStrategy`'s own "build once and share" candidate is
+/// `SharedSubDAGStrategy`'s own "build once and share" candidate is
 /// `Replacement::Rewrite(Rc::clone(target))` — literally the *same* value
 /// as the target it's a candidate for. Re-querying `find_winner` on that
 /// candidate's own top level would find the identical group and its
@@ -780,7 +780,7 @@ pub fn export_post_asap(
     deduplicate_pointer_shared_nodes(nodes, root_id)
 }
 
-fn deduplicate_pointer_shared_nodes(nodes: Vec<DagNode>, root: u32) -> ExportDAG {
+fn deduplicate_pointer_shared_nodes(nodes: Vec<DAGNode>, root: u32) -> ExportDAG {
     let mut by_source_ptr = HashMap::<usize, u32>::new();
     let mut old_to_new = vec![0_u32; nodes.len()];
     let mut deduplicated = Vec::with_capacity(nodes.len());
@@ -876,7 +876,7 @@ define_query_kind_tags! {
 /// would bucket it under. `kind` is [`kind_tag(expr)`](kind_tag), not a
 /// caller-supplied argument — see that function's doc for why.
 fn push_node(
-    nodes: &mut Vec<DagNode>,
+    nodes: &mut Vec<DAGNode>,
     expr: &QueryExpr,
     cache: &mut HashCache,
     label: String,
@@ -885,7 +885,7 @@ fn push_node(
 ) -> u32 {
     let id = nodes.len() as u32;
     let hash = Some(structural_hash(expr, cache));
-    nodes.push(DagNode {
+    nodes.push(DAGNode {
         id,
         kind: kind_tag(expr),
         label,
@@ -908,22 +908,22 @@ fn push_node(
 /// Push one flattened node with no corresponding pre-ASAP `QueryExpr` at
 /// all — a post-ASAP-originated node inside [`export_post_asap`]'s merged
 /// DAG (a `SummaryAgg`/`SummaryJoin`/… node, via [`build_summary_hybrid`]).
-/// `hash`/`source_expr`-based re-identification (see [`DagNode::hash`]'s own
+/// `hash`/`source_expr`-based re-identification (see [`DAGNode::hash`]'s own
 /// doc) has no meaning for a node with no `QueryExpr` behind it, so this
 /// pushes a fixed placeholder hash (`0`) and `source_expr: None` rather than
 /// inventing a hash over `SummaryExpr` (which, unlike `QueryExpr`, has no
-/// [`structural_hash`]-equivalent function at all — see [`SummaryDagNode`]'s
+/// [`structural_hash`]-equivalent function at all — see [`SummaryDAGNode`]'s
 /// own doc on why `SummaryExpr`'s fields don't even derive `Hash`/`PartialEq`
 /// consistently enough to build one).
 fn push_summary_originated_node(
-    nodes: &mut Vec<DagNode>,
+    nodes: &mut Vec<DAGNode>,
     kind: &'static str,
     label: String,
     detail: serde_json::Value,
     children: Vec<u32>,
 ) -> u32 {
     let id = nodes.len() as u32;
-    nodes.push(DagNode {
+    nodes.push(DAGNode {
         id,
         kind,
         label,
@@ -943,7 +943,7 @@ fn push_summary_originated_node(
 /// The [`build_summary`]/[`build_summary_hybrid`] counterpart of [`build`]
 /// for a bound [`SummaryNode`] reached while building
 /// [`export_post_asap`]'s merged DAG: appends into the *same* `nodes:
-/// Vec<DagNode>` list `build` itself is filling, instead of a separate
+/// Vec<DAGNode>` list `build` itself is filling, instead of a separate
 /// [`SummaryDAG`]. A `KeepPreAsap(inner)` leaf recurses back into
 /// [`build`] on `inner` (the general pre-ASAP entry, `find_winner` included)
 /// rather than nesting a `{"pre_asap_sub_dag": ...}` blob the way
@@ -953,7 +953,7 @@ fn push_summary_originated_node(
 /// replacement for, say) still gets spliced in correctly.
 fn build_summary_hybrid(
     node: &SummaryNode,
-    nodes: &mut Vec<DagNode>,
+    nodes: &mut Vec<DAGNode>,
     cache: &mut HashCache,
     find_winner: &mut dyn FnMut(&QueryExpr) -> Option<PostAsapSubstitution>,
 ) -> u32 {
@@ -965,9 +965,9 @@ fn build_summary_hybrid(
         .map(|child| build_summary_hybrid(child, nodes, cache, find_winner))
         .collect();
     let (kind, label, mut detail) = summary_shape(&node.expr);
-    // The merged DAG's `DagNode` has no dedicated guarantee field (it is
+    // The merged DAG's `DAGNode` has no dedicated guarantee field (it is
     // the pre-ASAP node shape); the guarantee rides in `detail` under the
-    // same key/shape `SummaryDagNode::guarantee` uses, additively.
+    // same key/shape `SummaryDAGNode::guarantee` uses, additively.
     if let Some(guarantee) = &node.guarantee {
         if let (serde_json::Value::Object(map), Ok(value)) =
             (&mut detail, serde_json::to_value(guarantee))
@@ -1021,7 +1021,7 @@ fn source_label(source: &Source) -> String {
 /// rather than by looping back through this check a second time.
 fn build(
     expr: &QueryExpr,
-    nodes: &mut Vec<DagNode>,
+    nodes: &mut Vec<DAGNode>,
     cache: &mut HashCache,
     find_winner: &mut dyn FnMut(&QueryExpr) -> Option<PostAsapSubstitution>,
 ) -> u32 {
@@ -1077,7 +1077,7 @@ fn build(
 /// `find_winner` query.
 fn build_no_recheck(
     expr: &QueryExpr,
-    nodes: &mut Vec<DagNode>,
+    nodes: &mut Vec<DAGNode>,
     cache: &mut HashCache,
     find_winner: &mut dyn FnMut(&QueryExpr) -> Option<PostAsapSubstitution>,
 ) -> u32 {
@@ -1662,7 +1662,7 @@ mod tests {
     #[test]
     fn every_node_hash_matches_cse_structural_hash_on_its_own_sub_dag() {
         // A multi-level DAG: check the parity holds at every depth, not
-        // just the root — each `DagNode::hash` must equal
+        // just the root — each `DAGNode::hash` must equal
         // `structural_hash` applied to the actual `QueryExpr` sub-DAG that
         // node represents.
         let agg = QueryExpr::Aggregate {

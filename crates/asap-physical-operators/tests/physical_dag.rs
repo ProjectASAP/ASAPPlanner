@@ -3,7 +3,7 @@ use asap_physical_operators::{
     dag::{
         operators::{Expression, Operator, Reduction, SortKey},
         values::{Batch, Schema, Value},
-        Limits, PhysicalDag, RunContext, Scope,
+        Limits, PhysicalDAG, RunContext, Scope,
     },
     Statistic,
 };
@@ -26,7 +26,7 @@ fn schema(fields: &[(&str, DataType, bool)]) -> Schema {
         time_index: None,
     })
 }
-fn run(dag: &PhysicalDag<'_, Batch, Schema>, root: u64, scope: Scope) -> Vec<Vec<Value>> {
+fn run(dag: &PhysicalDAG<'_, Batch, Schema>, root: u64, scope: Scope) -> Vec<Vec<Value>> {
     let context = RunContext::new(
         scope,
         Limits {
@@ -85,7 +85,7 @@ fn grouped_sort_limit_across_batches() {
         .unwrap()
     })
     .collect();
-    let mut dag = PhysicalDag::default();
+    let mut dag = PhysicalDAG::default();
     dag.add(
         0,
         vec![],
@@ -122,7 +122,7 @@ fn summary_construction_merge_and_readout_at_both_phases() {
     let family = SummaryFamilyType::ExactAggregate(ExactKind::Sum, ExactParams::Sum);
     let build = Operator::summary_build(schema.clone(), family, 0, None, vec![]).unwrap();
     let state = build.schema();
-    let mut dag = PhysicalDag::default();
+    let mut dag = PhysicalDAG::default();
     dag.add(0, vec![], Operator::source(schema, batches).unwrap())
         .unwrap();
     dag.add(1, vec![0], build).unwrap();
@@ -181,7 +181,7 @@ fn diamond_semijoin_preserves_left_values_and_multiplicity() {
         ),
     )
     .unwrap();
-    let mut dag = PhysicalDag::default();
+    let mut dag = PhysicalDAG::default();
     dag.add(
         0,
         vec![],
@@ -210,7 +210,7 @@ fn exact_integer_and_empty_extrema() {
         vec![("sum".into(), Reduction::Sum(0))],
     )
     .unwrap();
-    let mut dag = PhysicalDag::default();
+    let mut dag = PhysicalDAG::default();
     let value = 9_007_199_254_740_993;
     dag.add(
         0,
@@ -228,7 +228,7 @@ fn exact_integer_and_empty_extrema() {
     .unwrap();
     dag.add(1, vec![0], aggregate).unwrap();
     assert!(matches!(run(&dag,1,query())[0][0],Value::Int64(v) if v==value+2));
-    let mut empty = PhysicalDag::default();
+    let mut empty = PhysicalDAG::default();
     empty
         .add(0, vec![], Operator::source(schema.clone(), vec![]).unwrap())
         .unwrap();
@@ -255,7 +255,7 @@ fn scalar_negation_and_vector_conversion() {
     )
     .unwrap();
     let convert = Operator::vector_to_scalar(project.schema(), 0).unwrap();
-    let mut dag = PhysicalDag::default();
+    let mut dag = PhysicalDAG::default();
     dag.add(0, vec![], scalar).unwrap();
     dag.add(1, vec![0], project).unwrap();
     dag.add(2, vec![1], convert).unwrap();
@@ -266,7 +266,7 @@ fn scalar_negation_and_vector_conversion() {
         Box::new(Expression::Column(0)),
     );
     let filter = Operator::filter(scalar.schema(), predicate).unwrap();
-    let mut dag = PhysicalDag::default();
+    let mut dag = PhysicalDAG::default();
     dag.add(0, vec![], scalar).unwrap();
     dag.add(1, vec![0], filter).unwrap();
     assert!(run(&dag, 1, query()).is_empty());
@@ -315,7 +315,7 @@ fn kll_raw_partial_and_precomputed_are_native_dags() {
     let build = Operator::summary_build(input.clone(), family, 0, None, vec![]).unwrap();
     let state = build.schema();
     let build_range = |start: u32, end: u32| {
-        let mut dag = PhysicalDag::default();
+        let mut dag = PhysicalDAG::default();
         let batch = Batch::try_new(
             input.clone(),
             (start..end)
@@ -343,7 +343,7 @@ fn kll_raw_partial_and_precomputed_are_native_dags() {
     let prefix = build_range(0, 64);
     let complete = build_range(0, 128);
     let query_plan = |stored: Option<Vec<Vec<Value>>>, raw_start: Option<u32>| {
-        let mut dag = PhysicalDag::default();
+        let mut dag = PhysicalDAG::default();
         let mut states = vec![];
         if let Some(rows) = stored {
             dag.add(
@@ -432,7 +432,7 @@ fn exact_state_and_family_validation() {
         family: family.clone(),
         state: Arc::new(acc),
     };
-    let mut dag = PhysicalDag::default();
+    let mut dag = PhysicalDAG::default();
     dag.add(
         0,
         vec![],
@@ -481,22 +481,22 @@ fn bind_post_asap_before_execution() {
     use asap_physical_operators::dag::planner::bind;
     use planner_types::{
         post_asap::{
-            EdgeRole, ExecutionDataState, GroupingEdgeCompatibility, PostAsapDag, PostAsapDagEdge,
-            PostAsapDagNode, PostAsapNodeId, PostAsapOperatorPayload, ValueOperation,
+            EdgeRole, ExecutionDataState, GroupingEdgeCompatibility, PostAsapDAG, PostAsapDAGEdge,
+            PostAsapDAGNode, PostAsapNodeId, PostAsapOperatorPayload, ValueOperation,
             WindowEdgeCompatibility,
         },
         pre_asap::{ArithmeticOpKind, ProjectItem, QueryExpr, ScalarValue},
     };
     use std::{collections::BTreeMap, rc::Rc};
     let schema = schema(&[("value", DataType::Float64, false)]);
-    let node = |id, payload| PostAsapDagNode {
+    let node = |id, payload| PostAsapDAGNode {
         id: PostAsapNodeId(id),
         payload,
         output_state: ExecutionDataState::QUERY_ROWS,
         output_schema: (*schema).clone(),
         guarantee: None,
     };
-    let mut dag = PostAsapDag {
+    let mut dag = PostAsapDAG {
         nodes: vec![
             node(
                 0,
@@ -521,7 +521,7 @@ fn bind_post_asap_before_execution() {
                 },
             ),
         ],
-        edges: vec![PostAsapDagEdge {
+        edges: vec![PostAsapDAGEdge {
             producer: PostAsapNodeId(0),
             consumer: PostAsapNodeId(1),
             role: EdgeRole::Input,
@@ -580,7 +580,7 @@ fn empty_exact_count_is_an_integer_state_readout() {
         ),
     )
     .unwrap();
-    let mut dag = PhysicalDag::default();
+    let mut dag = PhysicalDAG::default();
     dag.add(0, vec![], Operator::source(input, vec![]).unwrap())
         .unwrap();
     dag.add(1, vec![0], build).unwrap();
@@ -594,7 +594,7 @@ fn source_batches_must_match_the_bound_schema() {
     use asap_physical_operators::dag::{self, PhysicalOperator};
     use planner_types::{
         post_asap::{
-            ExecutionDataState, PostAsapDag, PostAsapDagNode, PostAsapNodeId,
+            ExecutionDataState, PostAsapDAG, PostAsapDAGNode, PostAsapNodeId,
             PostAsapOperatorPayload,
         },
         pre_asap::QueryExpr,
@@ -631,8 +631,8 @@ fn source_batches_must_match_the_bound_schema() {
     }
     let expected = schema(&[("value", DataType::Float64, false)]);
     let starts = Rc::new(Cell::new(0));
-    let plan = PostAsapDag {
-        nodes: vec![PostAsapDagNode {
+    let plan = PostAsapDAG {
+        nodes: vec![PostAsapDAGNode {
             id: PostAsapNodeId(0),
             payload: PostAsapOperatorPayload::Fallback {
                 expression: QueryExpr::promql_scalar(1.),
@@ -663,7 +663,7 @@ fn source_batches_must_match_the_bound_schema() {
 #[test]
 fn extrema_preserve_numeric_values_in_the_presence_of_nan() {
     let input = schema(&[("v", DataType::Float64, false)]);
-    let mut dag = PhysicalDag::default();
+    let mut dag = PhysicalDAG::default();
     dag.add(
         0,
         vec![],
@@ -712,14 +712,14 @@ fn planner_semijoin_sort_limit_contract_at_both_phases() {
         ("score", DataType::Float64, false),
     ]);
     let keys_schema = schema(&[("key", DataType::Utf8, false)]);
-    let node = |id, payload, schema: &Schema| PostAsapDagNode {
+    let node = |id, payload, schema: &Schema| PostAsapDAGNode {
         id: PostAsapNodeId(id),
         payload,
         output_schema: (**schema).clone(),
         output_state: ExecutionDataState::QUERY_ROWS,
         guarantee: None,
     };
-    let edge = |producer, consumer, role, schema: &Schema| PostAsapDagEdge {
+    let edge = |producer, consumer, role, schema: &Schema| PostAsapDAGEdge {
         producer: PostAsapNodeId(producer),
         consumer: PostAsapNodeId(consumer),
         role,
@@ -729,7 +729,7 @@ fn planner_semijoin_sort_limit_contract_at_both_phases() {
         window: WindowEdgeCompatibility::NotApplicable,
     };
     let groups = GroupKeys::by(vec![0]);
-    let dag = PostAsapDag {
+    let dag = PostAsapDAG {
         nodes: vec![
             node(
                 0,
@@ -880,7 +880,7 @@ fn planner_expressions_preserve_collection_and_nullable_types() {
         )],
     )
     .unwrap();
-    let mut dag = PhysicalDag::default();
+    let mut dag = PhysicalDAG::default();
     dag.add(
         0,
         vec![],
@@ -954,7 +954,7 @@ fn native_relational_join_kinds_preserve_unmatched_rows() {
                 ("right", DataType::Int64, true),
             ])
         };
-        let mut dag = PhysicalDag::default();
+        let mut dag = PhysicalDAG::default();
         for (id, rows) in [
             (
                 0,
@@ -1077,7 +1077,7 @@ fn assert_weighted_rate_topk(count_sketch: bool) {
         ("score", DataType::Float64, false),
     ]);
     let readout = Operator::keyed_readout(build.schema(), 1, 8, output.clone()).unwrap();
-    let mut dag = PhysicalDag::default();
+    let mut dag = PhysicalDAG::default();
     dag.add(
         0,
         vec![],
@@ -1131,10 +1131,10 @@ fn assert_weighted_rate_topk(count_sketch: bool) {
 #[test]
 fn grouped_temporal_schema_compiles_and_executes_topk() {
     use asap_physical_operators::physical_planner::{
-        compile_node, CompiledPhysicalDag, InputContract, Source,
+        compile_node, CompiledPhysicalDAG, InputContract, Source,
     };
     use planner_types::post_asap::{
-        ExecutionDataState, PostAsapDagNode, PostAsapNodeId, PostAsapOperatorPayload,
+        ExecutionDataState, PostAsapDAGNode, PostAsapNodeId, PostAsapOperatorPayload,
         ValueOperation,
     };
     use planner_types::pre_asap::{
@@ -1159,7 +1159,7 @@ fn grouped_temporal_schema_compiles_and_executes_topk() {
             .map(|c| (c.name.as_str(), c.dtype.clone(), c.nullable))
             .collect::<Vec<_>>(),
     );
-    let node = |id, operation| PostAsapDagNode {
+    let node = |id, operation| PostAsapDAGNode {
         id: PostAsapNodeId(id),
         payload: PostAsapOperatorPayload::Value { operation },
         output_state: ExecutionDataState::QUERY_ROWS,
@@ -1193,14 +1193,14 @@ fn grouped_temporal_schema_compiles_and_executes_topk() {
         std::slice::from_ref(&input),
     )
     .unwrap();
-    let compiled = CompiledPhysicalDag::from_operators(
+    let compiled = CompiledPhysicalDAG::from_operators(
         [(0, InputContract::bounded(input.clone()))].into(),
         [(1, (vec![0], sort)), (2, (vec![1], limit))].into(),
         vec![2],
     )
     .unwrap();
     let recovered =
-        serde_json::from_slice::<CompiledPhysicalDag>(&serde_json::to_vec(&compiled).unwrap())
+        serde_json::from_slice::<CompiledPhysicalDAG>(&serde_json::to_vec(&compiled).unwrap())
             .unwrap();
     assert_eq!(recovered.row_source(2), Some(0));
     assert_eq!(recovered.operator_name(2), Some("Limit"));
@@ -1235,7 +1235,7 @@ fn grouped_temporal_schema_compiles_and_executes_topk() {
 #[test]
 fn certified_pruning_rejects_missing_authoritative_values_after_recovery() {
     use asap_physical_operators::physical_planner::{
-        compile_node, CompiledPhysicalDag, InputContract, Source,
+        compile_node, CompiledPhysicalDAG, InputContract, Source,
     };
     use planner_types::{
         post_asap::*,
@@ -1244,7 +1244,7 @@ fn certified_pruning_rejects_missing_authoritative_values_after_recovery() {
     use std::{collections::BTreeMap, rc::Rc};
     let schema = schema(&[("key", DataType::Utf8, false)]);
     for certified in [false, true] {
-        let node = PostAsapDagNode {
+        let node = PostAsapDAGNode {
             id: PostAsapNodeId(2),
             output_schema: (*schema).clone(),
             output_state: ExecutionDataState::QUERY_ROWS,
@@ -1266,7 +1266,7 @@ fn certified_pruning_rejects_missing_authoritative_values_after_recovery() {
                 }),
             },
         };
-        let dag = CompiledPhysicalDag::from_operators(
+        let dag = CompiledPhysicalDAG::from_operators(
             [
                 (0, InputContract::bounded(schema.clone())),
                 (1, InputContract::bounded(schema.clone())),
@@ -1283,7 +1283,7 @@ fn certified_pruning_rejects_missing_authoritative_values_after_recovery() {
             vec![2],
         )
         .unwrap();
-        let dag = serde_json::from_slice::<CompiledPhysicalDag>(&serde_json::to_vec(&dag).unwrap())
+        let dag = serde_json::from_slice::<CompiledPhysicalDAG>(&serde_json::to_vec(&dag).unwrap())
             .unwrap();
         assert_eq!(
             dag.certified_pruning_keys(2),
@@ -1347,7 +1347,7 @@ fn certified_pruning_rejects_missing_authoritative_values_after_recovery() {
 #[test]
 fn compiled_ingestion_binary_preserves_alignment_and_rejects_missing_updates() {
     use asap_physical_operators::physical_planner::{
-        compile_node, CompiledPhysicalDag, InputContract, Source,
+        compile_node, CompiledPhysicalDAG, InputContract, Source,
     };
     use planner_types::{
         post_asap::*,
@@ -1359,7 +1359,7 @@ fn compiled_ingestion_binary_preserves_alignment_and_rejects_missing_updates() {
         ("time", DataType::Timestamp, false),
         ("value", DataType::Float64, false),
     ]);
-    let node = PostAsapDagNode {
+    let node = PostAsapDAGNode {
         id: PostAsapNodeId(2),
         output_schema: (*input).clone(),
         output_state: ExecutionDataState::INGESTION_ROWS,
@@ -1373,7 +1373,7 @@ fn compiled_ingestion_binary_preserves_alignment_and_rejects_missing_updates() {
             },
         },
     };
-    let program = CompiledPhysicalDag::from_operators(
+    let program = CompiledPhysicalDAG::from_operators(
         [
             (0, InputContract::bounded(input.clone())),
             (1, InputContract::bounded(input.clone())),
@@ -1391,7 +1391,7 @@ fn compiled_ingestion_binary_preserves_alignment_and_rejects_missing_updates() {
     )
     .unwrap();
     let program =
-        serde_json::from_slice::<CompiledPhysicalDag>(&serde_json::to_vec(&program).unwrap())
+        serde_json::from_slice::<CompiledPhysicalDAG>(&serde_json::to_vec(&program).unwrap())
             .unwrap();
     for (right, expected) in [
         (vec![("b", 2, 3.), ("a", 1, 2.)], Some(vec![8., 17.])),

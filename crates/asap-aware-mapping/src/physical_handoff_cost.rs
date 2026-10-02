@@ -1,8 +1,8 @@
 //! Byte estimates at deployment-declared physical handoffs.
 
 use crate::analytical_cost::{
-    estimate_physical_dag, AnalyticalCostError, EvidenceBackedPhysicalDag, ExecutionMultiplicity,
-    PhysicalDagNode,
+    estimate_physical_dag, AnalyticalCostError, EvidenceBackedPhysicalDAG, ExecutionMultiplicity,
+    PhysicalDAGNode,
 };
 use crate::physical_operator_statistics::{ComparisonScope, OperatorStatistics};
 pub use asap_types::resources::{PhysicalHandoffBytes, PhysicalHandoffKind};
@@ -30,7 +30,7 @@ pub struct PhysicalHandoff {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PhysicalHandoffNodeEvidence {
-    pub node: PhysicalDagNode,
+    pub node: PhysicalDAGNode,
     pub statistics: OperatorStatistics,
     #[serde(rename = "boundaries")]
     pub handoffs: Vec<PhysicalHandoff>,
@@ -99,11 +99,11 @@ pub struct PhysicalHandoffEstimate {
 }
 
 fn invalid(reason: &'static str) -> AnalyticalCostError {
-    AnalyticalCostError::InvalidPhysicalDag(reason)
+    AnalyticalCostError::InvalidPhysicalDAG(reason)
 }
 
 pub fn estimate_physical_handoffs(
-    dag: &EvidenceBackedPhysicalDag,
+    dag: &EvidenceBackedPhysicalDAG,
     scope: &ComparisonScope,
     profile: &PhysicalHandoffProfile,
     evidence_version: &str,

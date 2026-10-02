@@ -12,12 +12,12 @@
 //! comment on why: `Avg`/`StdDev`/`Variance` "need richer partial state"
 //! than a bare sketch/exact accumulator gives, so there is no summary
 //! realization for a bare `avg` node to bind to at all. A logical `avg`
-//! node therefore can never be a [`SharedSubDagStrategy`] target either:
+//! node therefore can never be a [`SharedSubDAGStrategy`] target either:
 //! CSE-style sharing needs *some* mergeable accumulator underneath, and
 //! `PassThrough` has none.
 //!
 //! `Sum` and `Count` are both ordinary mergeable accumulators
-//! (`agg_is_mergeable`) — exactly the shape [`SharedSubDagStrategy`] and a
+//! (`agg_is_mergeable`) — exactly the shape [`SharedSubDAGStrategy`] and a
 //! future sketch-family search already know how to reuse across a
 //! workload. Rewriting `Aggregate{ measures: [Avg{col}], .. }` into two
 //! independent single-measure `Sum` and `Count` aggregates, divided with a
@@ -43,7 +43,7 @@
 //! Both are follow-ups (issue #253 itself scopes to "the concrete case in
 //! Peilin's comment"), not correctness bugs in what ships here — a node
 //! outside this scope simply doesn't `match`, the same "safe but
-//! uninformative" fallback [`SketchAlgorithmStrategy`]/[`SharedSubDagStrategy`]
+//! uninformative" fallback [`SketchAlgorithmStrategy`]/[`SharedSubDAGStrategy`]
 //! already use for shapes they don't have an opinion on.
 //!
 //! ## Non-goals (mirrors [`replacement`]'s own discipline)
@@ -362,7 +362,7 @@ pub(crate) fn composed_aggregate_rewrite(root: &Rc<QueryExpr>) -> Option<Rc<Quer
 /// bind anything (its one [`Replacement`] is always [`Replacement::Rewrite`],
 /// never [`Replacement::Summary`]) and so has no [`CostModel`](crate::CostModel)
 /// to hold a reference to — the same "no state needed" shape
-/// [`SharedSubDagStrategy`] already has.
+/// [`SharedSubDAGStrategy`] already has.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct SemanticEquivalentRewriteStrategy;
 

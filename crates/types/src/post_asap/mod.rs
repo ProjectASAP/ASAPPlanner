@@ -56,8 +56,8 @@ pub use guarantee::{
 };
 pub use post_asap_dag::{
     compile_post_asap_dag, compile_post_asap_dag_with_node_ids, EdgeRole,
-    GroupingEdgeCompatibility, PostAsapDag, PostAsapDagCompilation, PostAsapDagDocument,
-    PostAsapDagEdge, PostAsapDagNode, PostAsapDagValidationError, PostAsapNodeId,
+    GroupingEdgeCompatibility, PostAsapDAG, PostAsapDAGCompilation, PostAsapDAGDocument,
+    PostAsapDAGEdge, PostAsapDAGNode, PostAsapDAGValidationError, PostAsapNodeId,
     PostAsapNodeIdentityMap, PostAsapOperatorPayload, WindowEdgeCompatibility,
     POST_ASAP_DAG_WIRE_VERSION,
 };

@@ -3,7 +3,7 @@ use asap_physical_operators::{
     operators::Operator,
     physical_planner::{
         promql_rows::{decode_series_identity, series_row, SERIES_IDENTITY_COLUMN},
-        CompiledPhysicalDag, InputContract, Source,
+        CompiledPhysicalDAG, InputContract, Source,
     },
     runtime::{Limits, RunContext, Scope},
     values::{Batch, Value},
@@ -30,8 +30,8 @@ fn schema() -> Arc<SummarySchema> {
         time_index: Some(0),
     })
 }
-fn run(program: &CompiledPhysicalDag, data: Batch, end: i64) -> Result<Vec<Batch>, String> {
-    let recovered = serde_json::from_slice::<CompiledPhysicalDag>(
+fn run(program: &CompiledPhysicalDAG, data: Batch, end: i64) -> Result<Vec<Batch>, String> {
+    let recovered = serde_json::from_slice::<CompiledPhysicalDAG>(
         &serde_json::to_vec(&program).map_err(|e| e.to_string())?,
     )
     .map_err(|e| e.to_string())?;
@@ -78,8 +78,8 @@ fn input(samples: &[(&str, i64, f64)]) -> Batch {
         .collect();
     Batch::try_new(schema, rows).unwrap()
 }
-fn snapshot_plan() -> CompiledPhysicalDag {
-    CompiledPhysicalDag::from_operators(
+fn snapshot_plan() -> CompiledPhysicalDAG {
+    CompiledPhysicalDAG::from_operators(
         BTreeMap::from([(0, InputContract::bounded(schema()))]),
         BTreeMap::from([(
             1,
@@ -175,7 +175,7 @@ fn spatial_heap_ranks_latest_values_in_independent_runs() {
             time_index: None,
         });
         let read = Operator::keyed_readout(build.schema(), 1, 1, output).unwrap();
-        let plan = CompiledPhysicalDag::from_operators(
+        let plan = CompiledPhysicalDAG::from_operators(
             BTreeMap::from([(0, InputContract::bounded(schema()))]),
             BTreeMap::from([
                 (

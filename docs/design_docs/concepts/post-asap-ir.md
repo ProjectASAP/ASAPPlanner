@@ -61,9 +61,9 @@ The Pre-ASAP DAG and the Post-ASAP DAG are both logical: they describe what is
 computed, not which physical operators execute it. The Post-ASAP DAG has two
 forms of the same content. Planning builds and shares `SummaryNode` DAGs.
 `compile_post_asap_dag` converts a selected DAG into a
-[`PostAsapDag`](../../../crates/types/src/post_asap/post_asap_dag.rs) with
-stable node IDs and typed edges; `PostAsapDagDocument` is its versioned wire
-envelope. Physical compilation consumes `PostAsapDag` and produces a separate
+[`PostAsapDAG`](../../../crates/types/src/post_asap/post_asap_dag.rs) with
+stable node IDs and typed edges; `PostAsapDAGDocument` is its versioned wire
+envelope. Physical compilation consumes `PostAsapDAG` and produces a separate
 physical DAG.
 
 ## Execution phase
@@ -74,8 +74,8 @@ one of these phases. Backend capability restrictions are implementation gaps,
 not definitions of the operator.
 
 Every post-ASAP operator payload supports both phase assignments. Phase is
-stored on the `PostAsapDag` node, independently of its operator payload.
-`PostAsapDag::with_execution_phases` assigns a phase to every node and updates
+stored on the `PostAsapDAG` node, independently of its operator payload.
+`PostAsapDAG::with_execution_phases` assigns a phase to every node and updates
 its edges. Ingestion work cannot depend on a future query result. Default
 semantic realization still proposes an initial layout; it does not restrict
 which phase an operator may use. Deployments must separately check that

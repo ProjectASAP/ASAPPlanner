@@ -1,7 +1,7 @@
 //! Compile, persist and rebind dynamic-label computation without deployment lowering.
 use asap_physical_operators::{
     operators::Operator,
-    physical_planner::{promql_values::*, CompiledPhysicalDag, Source},
+    physical_planner::{promql_values::*, CompiledPhysicalDAG, Source},
     runtime::{Limits, RunContext, Scope},
     values::{Batch, Value},
 };
@@ -21,15 +21,15 @@ fn row(labels: &[(&str, &str)], value: f64) -> Vec<Value> {
         Value::Float64(value),
     ]
 }
-fn run(dag: CompiledPhysicalDag, rows: Vec<Vec<Value>>) -> Vec<Vec<Value>> {
+fn run(dag: CompiledPhysicalDAG, rows: Vec<Vec<Value>>) -> Vec<Vec<Value>> {
     run_inputs(dag, vec![Batch::try_new(vector_schema(), rows).unwrap()]).unwrap()
 }
 fn run_inputs(
-    dag: CompiledPhysicalDag,
+    dag: CompiledPhysicalDAG,
     batches: Vec<Batch>,
 ) -> Result<Vec<Vec<Value>>, asap_physical_operators::Error> {
     let dag =
-        serde_json::from_slice::<CompiledPhysicalDag>(&serde_json::to_vec(&dag).unwrap()).unwrap();
+        serde_json::from_slice::<CompiledPhysicalDAG>(&serde_json::to_vec(&dag).unwrap()).unwrap();
     let sources = batches
         .into_iter()
         .enumerate()
@@ -263,7 +263,7 @@ fn composed_ensemble_shares_a_producer_across_roots() {
         false,
     )
     .unwrap();
-    let dag = CompiledPhysicalDag::compose(
+    let dag = CompiledPhysicalDAG::compose(
         BTreeMap::from([(0, InputContract::bounded(vector_schema()))]),
         BTreeMap::from([
             (10, (vec![0], aggregate)),
@@ -274,7 +274,7 @@ fn composed_ensemble_shares_a_producer_across_roots() {
     )
     .unwrap();
     let dag =
-        serde_json::from_slice::<CompiledPhysicalDag>(&serde_json::to_vec(&dag).unwrap()).unwrap();
+        serde_json::from_slice::<CompiledPhysicalDAG>(&serde_json::to_vec(&dag).unwrap()).unwrap();
     assert_eq!(dag.input_contracts().count(), 1);
     let starts = std::rc::Rc::new(std::cell::Cell::new(0));
     for _ in 0..2 {

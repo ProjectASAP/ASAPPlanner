@@ -888,7 +888,7 @@ pub(super) fn estimate_transient_liveness(
             let child_id = summary_physical_id(child, evidence)?;
             let remaining =
                 uses.get_mut(&child_id)
-                    .ok_or(AnalyticalCostError::InvalidPhysicalDag(
+                    .ok_or(AnalyticalCostError::InvalidPhysicalDAG(
                         "missing summary consumer count",
                     ))?;
             *remaining -= 1;
@@ -1258,7 +1258,7 @@ fn count_operations(root: &SummaryNode) -> Result<SummaryOperationCounts, Analyt
             }
             SummaryExpr::SummaryMerge { children, .. } => {
                 if children.is_empty() {
-                    return Err(AnalyticalCostError::InvalidPhysicalDag(
+                    return Err(AnalyticalCostError::InvalidPhysicalDAG(
                         "summary merge has no children",
                     ));
                 }

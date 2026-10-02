@@ -21,7 +21,7 @@ use crate::summary_maintenance_lifecycle::{
 };
 
 #[derive(Debug, Clone, Serialize)]
-pub struct SummaryMaintenanceDagExport {
+pub struct SummaryMaintenanceDAGExport {
     pub dag: SummaryDAG,
     pub deployments: Vec<SummaryMaintenanceDeploymentExport>,
     pub horizon_seconds: Option<f64>,
@@ -63,7 +63,7 @@ pub type SummaryMaintenanceLifecycleGuaranteeExport = SummaryMaintenanceLifecycl
 
 pub fn export_summary_maintenance_plan(
     plan: &SummaryMaintenanceLifecyclePlan,
-) -> SummaryMaintenanceDagExport {
+) -> SummaryMaintenanceDAGExport {
     let deployments: Vec<_> = plan
         .deployments
         .iter()
@@ -101,7 +101,7 @@ pub fn export_summary_maintenance_plan(
         &mut next_node_id,
     );
 
-    SummaryMaintenanceDagExport {
+    SummaryMaintenanceDAGExport {
         dag,
         deployments,
         horizon_seconds: plan.horizon.map(|horizon| horizon.0),

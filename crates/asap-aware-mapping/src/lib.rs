@@ -101,7 +101,7 @@
 //!   is a [`replacement::ReplacementStrategy`] that reshapes a bare `avg`
 //!   node — which [`replacement::realizations_for_intent`] can only
 //!   dispatch to `Realization::PassThrough`, so it can never be a
-//!   [`replacement::SharedSubDagStrategy`] target — into a `sum`/`count`
+//!   [`replacement::SharedSubDAGStrategy`] target — into a `sum`/`count`
 //!   pair under the same grouping, re-divided back by a wrapping `Project`,
 //!   so those *are* ordinary mergeable accumulators sharing/sketching can
 //!   reach. It only reshapes; [`replacement::search_workload`]'s cost-based
@@ -217,7 +217,7 @@ pub use replacement::{
 };
 pub use rewrite::{AvgToSumOverCountStrategy, SemanticEquivalentRewriteStrategy};
 pub use summary_maintenance_dag_export::{
-    export_summary_maintenance_plan, SummaryMaintenanceDagExport,
+    export_summary_maintenance_plan, SummaryMaintenanceDAGExport,
     SummaryMaintenanceDeploymentExport, SummaryMaintenanceLifecycleAlternativeExport,
 };
 pub use summary_maintenance_lifecycle::{

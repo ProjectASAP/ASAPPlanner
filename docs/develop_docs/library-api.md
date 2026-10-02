@@ -271,7 +271,7 @@ before physical selection; do not treat their presence as deployment permission.
 
 ```text
 CandidateLogicalASAPDAGs::enumerate_candidate_dags_for_root(&self, id: &Id, expansion_limit: usize)
-    -> Result<CandidateDagInventory<Id>, RealizationError>
+    -> Result<CandidateDAGInventory<Id>, RealizationError>
 ```
 
 Returns every distinct finalized DAG for one root, unranked; other roots'
@@ -655,7 +655,7 @@ from that hook, as in Planner selection.
 
 A lifecycle choice then fixes each physical placement through timing: a
 continuously maintained state and its inputs run at ingestion time, while an
-ephemeral one stays at query time. Compile each query's `PostAsapDag` once and
+ephemeral one stays at query time. Compile each query's `PostAsapDAG` once and
 cut every chosen assignment from that result:
 
 ```rust
@@ -809,7 +809,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 | `asap_types::dag_export::export(&query)` | Pre-ASAP inspection DAG |
 | `asap_types::dag_export::export_summary(&summary)` | Post-ASAP inspection DAG |
 | `asap_types::post_asap::compile_post_asap_dag(&root)` | Compile a semantic DAG with execution-data-state validation; not a physical plan |
-| `PostAsapDagDocument::new(dag)` and `.validate()` | Versioned semantic envelope and explicit validation; constructing it alone does not validate |
+| `PostAsapDAGDocument::new(dag)` and `.validate()` | Versioned semantic envelope and explicit validation; constructing it alone does not validate |
 | `asap_aware_mapping::export_summary_maintenance_plan(&plan)` | DAG plus lifecycle deployments, alternatives and available cost/guarantee information |
 | `explain_replacements` / `explain_replacements_with` | Findings from default/custom-strategy search; not a complete physical feasibility report |
 

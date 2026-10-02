@@ -2,7 +2,7 @@
 //! bridge for deployments whose boundary values are not yet streaming batches.
 use crate::{
     operators::Operator,
-    plan::PhysicalDag,
+    plan::PhysicalDAG,
     runtime::{RunContext, SharedValue},
     values::Batch,
     Error,
@@ -17,7 +17,7 @@ pub fn evaluate_batch(
     operators: Vec<Operator>,
     context: RunContext,
 ) -> Result<Vec<SharedValue<Batch>>, Error> {
-    let mut dag = PhysicalDag::default();
+    let mut dag = PhysicalDAG::default();
     dag.add(
         0,
         vec![],
@@ -37,7 +37,7 @@ pub fn evaluate_inputs(
     operator: Operator,
     context: RunContext,
 ) -> Result<Vec<SharedValue<Batch>>, Error> {
-    let mut dag = PhysicalDag::default();
+    let mut dag = PhysicalDAG::default();
     let root = inputs.len() as u64;
     for (id, input) in inputs.into_iter().enumerate() {
         dag.add(
@@ -55,13 +55,13 @@ pub fn evaluate_source(
     source: Operator,
     context: RunContext,
 ) -> Result<Vec<SharedValue<Batch>>, Error> {
-    let mut dag = PhysicalDag::default();
+    let mut dag = PhysicalDAG::default();
     dag.add(0, vec![], source)?;
     evaluate_dag(dag, 0, context)
 }
 
 fn evaluate_dag(
-    dag: PhysicalDag<'_, Batch, crate::values::Schema>,
+    dag: PhysicalDAG<'_, Batch, crate::values::Schema>,
     root: crate::plan::NodeId,
     context: RunContext,
 ) -> Result<Vec<SharedValue<Batch>>, Error> {

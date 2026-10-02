@@ -3,7 +3,7 @@
 //! hand-computed with Prometheus semantics.
 use asap_physical_operators::{
     operators::Operator,
-    physical_planner::{compile, promql_fallback, promql_rows, CompiledPhysicalDag, InputContract},
+    physical_planner::{compile, promql_fallback, promql_rows, CompiledPhysicalDAG, InputContract},
     runtime::{Limits, RunContext, Scope},
     values::{Batch, Value},
 };
@@ -56,7 +56,7 @@ fn lower(query: &str) -> QueryExpr {
 }
 
 /// The whole query retained as one pre-ASAP node.
-fn fallback_dag(expression: QueryExpr) -> PostAsapDag {
+fn fallback_dag(expression: QueryExpr) -> PostAsapDAG {
     let schema = lift_plain(&expression.output_schema().unwrap());
     compile_post_asap_dag(&Rc::new(SummaryNode {
         expr: SummaryExpr::KeepPreAsap(Rc::new(expression)),
@@ -93,13 +93,13 @@ fn metric(selector: &QueryExpr) -> String {
     }
 }
 
-fn compile_query(query: &str) -> Result<CompiledPhysicalDag, String> {
+fn compile_query(query: &str) -> Result<CompiledPhysicalDAG, String> {
     let expression = lower(query);
     compile_dag(&expression, &fallback_dag(expression.clone()))
 }
 
 /// Compile a DAG whose root is the Fallback computing `expression`.
-fn compile_dag(expression: &QueryExpr, dag: &PostAsapDag) -> Result<CompiledPhysicalDag, String> {
+fn compile_dag(expression: &QueryExpr, dag: &PostAsapDAG) -> Result<CompiledPhysicalDAG, String> {
     let root = u64::from(dag.root.0);
     let inputs = promql_fallback::raw_series(expression)
         .map_err(|e| e.to_string())?
@@ -131,7 +131,7 @@ fn evaluate(
 #[allow(clippy::type_complexity)]
 fn evaluate_dag(
     expression: &QueryExpr,
-    dag: &PostAsapDag,
+    dag: &PostAsapDAG,
     metrics: &[(&str, &[Sample])],
     at: i64,
 ) -> Result<Vec<(BTreeMap<String, String>, i64, f64)>, String> {
@@ -141,7 +141,7 @@ fn evaluate_dag(
 #[allow(clippy::type_complexity)]
 fn evaluate_dag_with_range(
     expression: &QueryExpr,
-    dag: &PostAsapDag,
+    dag: &PostAsapDAG,
     metrics: &[(&str, &[Sample])],
     at: i64,
     bounds: Option<(i64, i64)>,
@@ -446,14 +446,14 @@ fn raw_series_contract_is_explicit() {
     // turned into instant selection.
     let selector = lower("m");
     let schema = lift_plain(&selector.output_schema().unwrap());
-    let node = |id, payload| PostAsapDagNode {
+    let node = |id, payload| PostAsapDAGNode {
         id: PostAsapNodeId(id),
         payload,
         output_state: ExecutionDataState::QUERY_ROWS,
         output_schema: schema.clone(),
         guarantee: None,
     };
-    let consumed = PostAsapDag {
+    let consumed = PostAsapDAG {
         nodes: vec![
             node(
                 0,
@@ -472,7 +472,7 @@ fn raw_series_contract_is_explicit() {
                 },
             ),
         ],
-        edges: vec![PostAsapDagEdge {
+        edges: vec![PostAsapDAGEdge {
             producer: PostAsapNodeId(0),
             consumer: PostAsapNodeId(1),
             role: EdgeRole::Input,

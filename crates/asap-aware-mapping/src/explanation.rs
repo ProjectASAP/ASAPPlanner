@@ -50,7 +50,7 @@
 //!   `realizations_for_intent` would have committed to on its own.
 //! - [`ExplanationKind::CommonSubexpressionReuse`] — the `TargetSubDAG`
 //!   has two or more consumers *and* its candidate list contains the
-//!   [`SharedSubDagStrategy`] "build once and share" candidate (the one
+//!   [`SharedSubDAGStrategy`] "build once and share" candidate (the one
 //!   whose `Rc` is the group's own `target`) — i.e. sharing this sub-DAG
 //!   instead of recomputing it independently is a real, reported choice, not
 //!   just an accident of how the workload happened to be built.
@@ -178,7 +178,7 @@
 //! [`Replacement::Summary`]: crate::replacement::Replacement::Summary
 //! [`Replacement::Rewrite`]: crate::replacement::Replacement::Rewrite
 //! [`SketchAlgorithmStrategy`]: crate::replacement::SketchAlgorithmStrategy
-//! [`SharedSubDagStrategy`]: crate::replacement::SharedSubDagStrategy
+//! [`SharedSubDAGStrategy`]: crate::replacement::SharedSubDAGStrategy
 //! [`CandidateLogicalASAPDAGs`]: crate::replacement::CandidateLogicalASAPDAGs
 //! [`TargetSubDAGCandidates`]: crate::replacement::TargetSubDAGCandidates
 
@@ -213,7 +213,7 @@ pub enum ExplanationKind {
     /// have committed to on its own.
     SketchApproximation,
     /// A `TargetSubDAG` has two or more consumers *and* its candidate list
-    /// contains [`crate::replacement::SharedSubDagStrategy`]'s "build once
+    /// contains [`crate::replacement::SharedSubDAGStrategy`]'s "build once
     /// and share" candidate — the catalog's cross-statistic / cross-metrics /
     /// cross-subpopulation reuse entries, all the same underlying structural
     /// fact.
@@ -235,10 +235,10 @@ pub enum ExplanationKind {
 ///
 /// `node_hash` is [`structural_hash`](asap_types::pre_asap::cse::structural_hash)
 /// of the `TargetSubDAG`'s own `target` sub-DAG — the same function, on the
-/// same `Rc<QueryExpr>` shape, that [`asap_types::dag_export::DagNode::hash`]
+/// same `Rc<QueryExpr>` shape, that [`asap_types::dag_export::DAGNode::hash`]
 /// is computed with. A downstream consumer that independently exported the
 /// same `QueryExpr` (e.g. via `asap_types::dag_export::export`) can match
-/// this explanation to a `DagNode` by first comparing hashes and then
+/// this explanation to a `DAGNode` by first comparing hashes and then
 /// confirming structural equality with [`ReplacementExplanation::target`].
 #[derive(Debug, Clone, PartialEq)]
 pub struct ReplacementExplanation {
@@ -581,7 +581,7 @@ mod tests {
         assert_eq!(
             Some(sketch.node_hash),
             expected_hash,
-            "ReplacementExplanation::node_hash must match dag_export's DagNode::hash \
+            "ReplacementExplanation::node_hash must match dag_export's DAGNode::hash \
              for the same QueryExpr sub-DAG"
         );
     }

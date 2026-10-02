@@ -37,20 +37,20 @@ enum Node {
 /// Serde is format-agnostic; deployments choose the encoding and its versioning.
 /// Deserialization validates the DAG before it is usable.
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
-#[serde(try_from = "UncheckedDag")]
-pub struct CompiledPhysicalDag {
+#[serde(try_from = "UncheckedDAG")]
+pub struct CompiledPhysicalDAG {
     nodes: BTreeMap<NodeId, Node>,
     roots: Vec<NodeId>,
 }
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
-struct UncheckedDag {
+struct UncheckedDAG {
     nodes: BTreeMap<NodeId, Node>,
     roots: Vec<NodeId>,
 }
-impl TryFrom<UncheckedDag> for CompiledPhysicalDag {
+impl TryFrom<UncheckedDAG> for CompiledPhysicalDAG {
     type Error = Error;
-    fn try_from(dag: UncheckedDag) -> Result<Self, Error> {
+    fn try_from(dag: UncheckedDAG) -> Result<Self, Error> {
         let result = Self {
             nodes: dag.nodes,
             roots: dag.roots,
@@ -60,7 +60,7 @@ impl TryFrom<UncheckedDag> for CompiledPhysicalDag {
     }
 }
 
-impl CompiledPhysicalDag {
+impl CompiledPhysicalDAG {
     /// Link already-selected physical fragments without lowering operators again.
     /// Fragment keys and source keys share a namespace; repeated dependency IDs
     /// therefore remain one producer in the composed DAG.
@@ -285,8 +285,8 @@ impl CompiledPhysicalDag {
     pub fn instantiate<'a>(
         &self,
         mut sources: BTreeMap<NodeId, Source<'a>>,
-    ) -> Result<PhysicalDag<'a, Batch, Schema>, Error> {
-        let mut dag = PhysicalDag::default();
+    ) -> Result<PhysicalDAG<'a, Batch, Schema>, Error> {
+        let mut dag = PhysicalDAG::default();
         for (&id, node) in &self.nodes {
             match node {
                 Node::Input(contract) => {

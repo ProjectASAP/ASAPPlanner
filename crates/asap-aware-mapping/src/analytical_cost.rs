@@ -378,7 +378,7 @@ pub enum HashJoinBuildSide {
 /// transient edge buffering, and state retained across the horizon are
 /// separate values.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct PhysicalDagNode {
+pub struct PhysicalDAGNode {
     pub id: String,
     pub operator: PhysicalOperator,
     pub children: Vec<String>,
@@ -410,8 +410,8 @@ pub struct PhysicalNodeEvidence {
 /// lowering. Keeping the root and evidence beside the nodes prevents callers
 /// from estimating a valid node list with a different entry point or snapshot.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct EvidenceBackedPhysicalDag {
-    pub nodes: Vec<PhysicalDagNode>,
+pub struct EvidenceBackedPhysicalDAG {
+    pub nodes: Vec<PhysicalDAGNode>,
     pub root: String,
     pub evidence: HashMap<String, PhysicalNodeEvidence>,
 }
@@ -422,7 +422,7 @@ impl OperatorStatisticsProvider for HashMap<String, PhysicalNodeEvidence> {
             .get(node_id)
             .ok_or_else(|| AnalyticalCostError::MissingOperatorStatistics(node_id.into()))?;
         if evidence.physical_id != node_id {
-            return Err(AnalyticalCostError::InvalidPhysicalDag(
+            return Err(AnalyticalCostError::InvalidPhysicalDAG(
                 "evidence map key differs from embedded physical identity",
             ));
         }
@@ -430,22 +430,22 @@ impl OperatorStatisticsProvider for HashMap<String, PhysicalNodeEvidence> {
     }
 }
 
-impl OperatorStatisticsProvider for EvidenceBackedPhysicalDag {
+impl OperatorStatisticsProvider for EvidenceBackedPhysicalDAG {
     fn statistics(&self, node_id: &str) -> Result<OperatorStatistics, AnalyticalCostError> {
         let evidence = self
             .evidence
             .get(node_id)
             .ok_or_else(|| AnalyticalCostError::MissingOperatorStatistics(node_id.into()))?;
         let node = self.nodes.iter().find(|node| node.id == node_id).ok_or(
-            AnalyticalCostError::InvalidPhysicalDag("evidence has no matching physical node"),
+            AnalyticalCostError::InvalidPhysicalDAG("evidence has no matching physical node"),
         )?;
         if evidence.physical_id != node_id {
-            return Err(AnalyticalCostError::InvalidPhysicalDag(
+            return Err(AnalyticalCostError::InvalidPhysicalDAG(
                 "evidence map key differs from embedded physical identity",
             ));
         }
         if node.output_buffer_bytes != evidence.output_buffer_bytes {
-            return Err(AnalyticalCostError::InvalidPhysicalDag(
+            return Err(AnalyticalCostError::InvalidPhysicalDAG(
                 "physical node buffer differs from evidence snapshot",
             ));
         }
@@ -462,8 +462,8 @@ pub enum ExecutionMultiplicity {
 /// Borrowed inputs for one physical-DAG estimate. This remains available
 /// independently for diagnostics; plan selection should use
 /// [`estimate_physical_dag_comparison`] so scope equality is mandatory.
-pub struct PhysicalDagEstimateRequest<'a> {
-    pub nodes: &'a [PhysicalDagNode],
+pub struct PhysicalDAGEstimateRequest<'a> {
+    pub nodes: &'a [PhysicalDAGNode],
     pub root: &'a str,
     pub scope: &'a ComparisonScope,
     pub statistics: &'a dyn OperatorStatisticsProvider,
@@ -471,7 +471,7 @@ pub struct PhysicalDagEstimateRequest<'a> {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-pub struct PhysicalDagComparisonEstimate {
+pub struct PhysicalDAGComparisonEstimate {
     pub raw: ResourceEstimate,
     pub candidate: ResourceEstimate,
 }
@@ -479,16 +479,16 @@ pub struct PhysicalDagComparisonEstimate {
 /// Estimate two plans only after proving that their source, snapshot,
 /// predicate, event-time, recurrence, and horizon scopes are identical.
 pub fn estimate_physical_dag_comparison(
-    raw: PhysicalDagEstimateRequest<'_>,
-    candidate: PhysicalDagEstimateRequest<'_>,
-) -> Result<PhysicalDagComparisonEstimate, AnalyticalCostError> {
+    raw: PhysicalDAGEstimateRequest<'_>,
+    candidate: PhysicalDAGEstimateRequest<'_>,
+) -> Result<PhysicalDAGComparisonEstimate, AnalyticalCostError> {
     validate_comparison_scopes(raw.scope, candidate.scope)?;
     if raw.cache_profile != candidate.cache_profile {
         return Err(AnalyticalCostError::ComparisonScopeMismatch(
             "cache profile",
         ));
     }
-    Ok(PhysicalDagComparisonEstimate {
+    Ok(PhysicalDAGComparisonEstimate {
         raw: estimate_physical_dag_with_cache(
             raw.nodes,
             raw.root,
@@ -510,7 +510,7 @@ pub fn estimate_physical_dag_comparison(
 /// are additive; peak memory is simulated over a child-before-parent schedule
 /// and releases transient child outputs after their last consumer.
 pub fn estimate_physical_dag(
-    nodes: &[PhysicalDagNode],
+    nodes: &[PhysicalDAGNode],
     root: &str,
     scope: &ComparisonScope,
     statistics: &(impl OperatorStatisticsProvider + ?Sized),
@@ -519,7 +519,7 @@ pub fn estimate_physical_dag(
 }
 
 pub fn estimate_physical_dag_with_cache(
-    nodes: &[PhysicalDagNode],
+    nodes: &[PhysicalDAGNode],
     root: &str,
     scope: &ComparisonScope,
     statistics: &(impl OperatorStatisticsProvider + ?Sized),
@@ -527,16 +527,16 @@ pub fn estimate_physical_dag_with_cache(
 ) -> Result<ResourceEstimate, AnalyticalCostError> {
     let evaluation_count = scope.validate()?;
     let cache = resolve_cache_profile(cache_profile, evaluation_count, scope.data_arrival)?;
-    let by_id: HashMap<&str, &PhysicalDagNode> = nodes.iter().map(|n| (n.id.as_str(), n)).collect();
+    let by_id: HashMap<&str, &PhysicalDAGNode> = nodes.iter().map(|n| (n.id.as_str(), n)).collect();
     if by_id.len() != nodes.len() {
-        return Err(AnalyticalCostError::InvalidPhysicalDag("duplicate node id"));
+        return Err(AnalyticalCostError::InvalidPhysicalDAG("duplicate node id"));
     }
     let mut visiting = HashSet::new();
     let mut visited = HashSet::new();
     let mut order = Vec::new();
     fn visit<'a>(
         id: &'a str,
-        nodes: &HashMap<&'a str, &'a PhysicalDagNode>,
+        nodes: &HashMap<&'a str, &'a PhysicalDAGNode>,
         visiting: &mut HashSet<&'a str>,
         visited: &mut HashSet<&'a str>,
         order: &mut Vec<&'a str>,
@@ -545,11 +545,11 @@ pub fn estimate_physical_dag_with_cache(
             return Ok(());
         }
         if !visiting.insert(id) {
-            return Err(AnalyticalCostError::InvalidPhysicalDag("cycle"));
+            return Err(AnalyticalCostError::InvalidPhysicalDAG("cycle"));
         }
         let node = nodes
             .get(id)
-            .ok_or(AnalyticalCostError::InvalidPhysicalDag("missing node"))?;
+            .ok_or(AnalyticalCostError::InvalidPhysicalDAG("missing node"))?;
         for child in &node.children {
             visit(child, nodes, visiting, visited, order)?;
         }
@@ -586,7 +586,7 @@ pub fn estimate_physical_dag_with_cache(
                 }
             }
             _ if node.source_coverage.is_some() => {
-                return Err(AnalyticalCostError::InvalidPhysicalDag(
+                return Err(AnalyticalCostError::InvalidPhysicalDAG(
                     "only scan nodes may declare source coverage",
                 ));
             }
@@ -595,7 +595,7 @@ pub fn estimate_physical_dag_with_cache(
         validate_operator_statistics(node, node_statistics, &by_id, &resolved_statistics)?;
         if node.retained_bytes > 0 && matches!(node.execution, ExecutionMultiplicity::PerEvaluation)
         {
-            return Err(AnalyticalCostError::InvalidPhysicalDag(
+            return Err(AnalyticalCostError::InvalidPhysicalDAG(
                 "per-evaluation node cannot retain state across the horizon",
             ));
         }
@@ -604,7 +604,7 @@ pub fn estimate_physical_dag_with_cache(
             if matches!(node.execution, ExecutionMultiplicity::Once)
                 && matches!(child.execution, ExecutionMultiplicity::PerEvaluation)
             {
-                return Err(AnalyticalCostError::InvalidPhysicalDag(
+                return Err(AnalyticalCostError::InvalidPhysicalDAG(
                     "build-once node cannot consume a per-evaluation child",
                 ));
             }
@@ -612,7 +612,7 @@ pub fn estimate_physical_dag_with_cache(
                 && matches!(child.execution, ExecutionMultiplicity::Once)
                 && child.retained_bytes == 0
             {
-                return Err(AnalyticalCostError::InvalidPhysicalDag(
+                return Err(AnalyticalCostError::InvalidPhysicalDAG(
                     "per-evaluation node reads a non-retained build-once child",
                 ));
             }
@@ -623,7 +623,7 @@ pub fn estimate_physical_dag_with_cache(
         .iter()
         .any(|expected| !consumed_sources.contains(&expected))
     {
-        return Err(AnalyticalCostError::InvalidPhysicalDag(
+        return Err(AnalyticalCostError::InvalidPhysicalDAG(
             "physical scans omit a comparison-scope source",
         ));
     }
@@ -699,7 +699,7 @@ pub fn estimate_physical_dag_with_cache(
         }
         for child in &node.children {
             let remaining = remaining_consumers.get_mut(child.as_str()).ok_or(
-                AnalyticalCostError::InvalidPhysicalDag("invalid consumer count"),
+                AnalyticalCostError::InvalidPhysicalDAG("invalid consumer count"),
             )?;
             *remaining -= 1;
             if *remaining == 0 {
@@ -722,9 +722,9 @@ pub fn estimate_physical_dag_with_cache(
 }
 
 fn validate_operator_statistics(
-    node: &PhysicalDagNode,
+    node: &PhysicalDAGNode,
     node_statistics: &OperatorStatistics,
-    nodes: &HashMap<&str, &PhysicalDagNode>,
+    nodes: &HashMap<&str, &PhysicalDAGNode>,
     statistics: &HashMap<&str, OperatorStatistics>,
 ) -> Result<(), AnalyticalCostError> {
     let arity = expected_input_arity(node.operator, node.children.len());
@@ -735,7 +735,7 @@ fn validate_operator_statistics(
         });
     }
     if node.children.len() != arity.dag_children {
-        return Err(AnalyticalCostError::InvalidPhysicalDag(
+        return Err(AnalyticalCostError::InvalidPhysicalDAG(
             "operator child count does not match physical arity",
         ));
     }
@@ -759,7 +759,7 @@ fn validate_operator_statistics(
     for (input_index, child_id) in node.children.iter().enumerate() {
         let child = nodes
             .get(child_id.as_str())
-            .ok_or(AnalyticalCostError::InvalidPhysicalDag("missing node"))?;
+            .ok_or(AnalyticalCostError::InvalidPhysicalDAG("missing node"))?;
         let child_statistics = &statistics[child.id.as_str()];
         if node_statistics.input(input_index) != Some(child_statistics.output()) {
             return Err(AnalyticalCostError::ConflictingEdgeStatistics {
@@ -775,7 +775,7 @@ fn validate_operator_statistics(
 }
 
 fn validate_promql_child_edges(
-    node: &PhysicalDagNode,
+    node: &PhysicalDAGNode,
     node_statistics: &OperatorStatistics,
     statistics: &HashMap<&str, OperatorStatistics>,
 ) -> Result<(), AnalyticalCostError> {
@@ -2218,7 +2218,7 @@ pub enum AnalyticalCostError {
         input_index: usize,
     },
     #[error("invalid physical DAG: {0}")]
-    InvalidPhysicalDag(&'static str),
+    InvalidPhysicalDAG(&'static str),
 }
 
 fn checked_bytes(parts: &[u64]) -> Result<u64, AnalyticalCostError> {
@@ -2471,7 +2471,7 @@ mod tests {
         };
         let promql = promql_edge(1, 10, PromqlValueKind::Vector);
         let nodes = vec![
-            PhysicalDagNode {
+            PhysicalDAGNode {
                 id: "scan".into(),
                 operator: PhysicalOperator::Scan,
                 children: vec![],
@@ -2480,7 +2480,7 @@ mod tests {
                 retained_bytes: 0,
                 execution: ExecutionMultiplicity::PerEvaluation,
             },
-            PhysicalDagNode {
+            PhysicalDAGNode {
                 id: "filter".into(),
                 operator: filter_operator(),
                 children: vec!["scan".into()],
@@ -2810,7 +2810,7 @@ mod tests {
     fn physical_dag_counts_shared_scan_once_and_uses_live_memory() {
         let coverage = comparison_scope().sources[0].clone();
         let nodes = vec![
-            PhysicalDagNode {
+            PhysicalDAGNode {
                 id: "scan".into(),
                 operator: PhysicalOperator::Scan,
                 children: vec![],
@@ -2819,7 +2819,7 @@ mod tests {
                 retained_bytes: 0,
                 execution: ExecutionMultiplicity::PerEvaluation,
             },
-            PhysicalDagNode {
+            PhysicalDAGNode {
                 id: "left".into(),
                 operator: filter_operator(),
                 children: vec!["scan".into()],
@@ -2828,7 +2828,7 @@ mod tests {
                 retained_bytes: 0,
                 execution: ExecutionMultiplicity::PerEvaluation,
             },
-            PhysicalDagNode {
+            PhysicalDAGNode {
                 id: "right".into(),
                 operator: filter_operator(),
                 children: vec!["scan".into()],
@@ -2837,7 +2837,7 @@ mod tests {
                 retained_bytes: 0,
                 execution: ExecutionMultiplicity::PerEvaluation,
             },
-            PhysicalDagNode {
+            PhysicalDAGNode {
                 id: "root".into(),
                 operator: PhysicalOperator::Concat,
                 children: vec!["left".into(), "right".into()],
@@ -2901,7 +2901,7 @@ mod tests {
     fn physical_dag_separates_build_once_from_per_evaluation_work() {
         let coverage = comparison_scope().sources[0].clone();
         let nodes = vec![
-            PhysicalDagNode {
+            PhysicalDAGNode {
                 id: "scan".into(),
                 operator: PhysicalOperator::Scan,
                 children: vec![],
@@ -2910,7 +2910,7 @@ mod tests {
                 retained_bytes: 0,
                 execution: ExecutionMultiplicity::Once,
             },
-            PhysicalDagNode {
+            PhysicalDAGNode {
                 id: "state".into(),
                 operator: aggregate_operator(),
                 children: vec!["scan".into()],
@@ -2919,7 +2919,7 @@ mod tests {
                 retained_bytes: 32,
                 execution: ExecutionMultiplicity::Once,
             },
-            PhysicalDagNode {
+            PhysicalDAGNode {
                 id: "read".into(),
                 operator: PhysicalOperator::Limit {
                     limit: 1,
@@ -3055,7 +3055,7 @@ mod tests {
 
         let coverage = comparison_scope().sources[0].clone();
         let nodes = vec![
-            PhysicalDagNode {
+            PhysicalDAGNode {
                 id: "scan".into(),
                 operator: PhysicalOperator::Scan,
                 children: vec![],
@@ -3064,7 +3064,7 @@ mod tests {
                 retained_bytes: 0,
                 execution: ExecutionMultiplicity::PerEvaluation,
             },
-            PhysicalDagNode {
+            PhysicalDAGNode {
                 id: "filter".into(),
                 operator: filter_operator(),
                 children: vec!["scan".into()],
@@ -3130,7 +3130,7 @@ mod tests {
 
         let coverage = comparison_scope().sources[0].clone();
         let nodes = vec![
-            PhysicalDagNode {
+            PhysicalDAGNode {
                 id: "scan".into(),
                 operator: PhysicalOperator::Scan,
                 children: vec![],
@@ -3139,7 +3139,7 @@ mod tests {
                 retained_bytes: 0,
                 execution: ExecutionMultiplicity::PerEvaluation,
             },
-            PhysicalDagNode {
+            PhysicalDAGNode {
                 id: "filter".into(),
                 operator: filter_operator(),
                 children: vec!["scan".into()],
@@ -3193,7 +3193,7 @@ mod tests {
     fn physical_dag_accepts_an_empty_operator_output() {
         let coverage = comparison_scope().sources[0].clone();
         let nodes = vec![
-            PhysicalDagNode {
+            PhysicalDAGNode {
                 id: "scan".into(),
                 operator: PhysicalOperator::Scan,
                 children: vec![],
@@ -3202,7 +3202,7 @@ mod tests {
                 retained_bytes: 0,
                 execution: ExecutionMultiplicity::PerEvaluation,
             },
-            PhysicalDagNode {
+            PhysicalDAGNode {
                 id: "filter".into(),
                 operator: filter_operator(),
                 children: vec!["scan".into()],
@@ -3241,7 +3241,7 @@ mod tests {
 
     #[test]
     fn physical_dag_rejects_a_scan_not_covered_by_its_scope() {
-        let nodes = vec![PhysicalDagNode {
+        let nodes = vec![PhysicalDAGNode {
             id: "scan".into(),
             operator: PhysicalOperator::Scan,
             children: vec![],
@@ -3279,7 +3279,7 @@ mod tests {
 
     #[test]
     fn physical_dag_rejects_a_scan_without_explicit_coverage() {
-        let nodes = vec![PhysicalDagNode {
+        let nodes = vec![PhysicalDAGNode {
             id: "scan".into(),
             operator: PhysicalOperator::Scan,
             children: vec![],
@@ -3320,7 +3320,7 @@ mod tests {
             predicates: vec![],
             info_matchers: vec![],
         });
-        let nodes = vec![PhysicalDagNode {
+        let nodes = vec![PhysicalDAGNode {
             id: "scan".into(),
             operator: PhysicalOperator::Scan,
             children: vec![],
@@ -3343,7 +3343,7 @@ mod tests {
 
         assert_eq!(
             estimate_physical_dag(&nodes, "scan", &scope, &provided),
-            Err(AnalyticalCostError::InvalidPhysicalDag(
+            Err(AnalyticalCostError::InvalidPhysicalDAG(
                 "physical scans omit a comparison-scope source"
             ))
         );
@@ -3353,7 +3353,7 @@ mod tests {
     fn build_once_parent_cannot_consume_a_per_evaluation_child() {
         let coverage = comparison_scope().sources[0].clone();
         let nodes = vec![
-            PhysicalDagNode {
+            PhysicalDAGNode {
                 id: "scan".into(),
                 operator: PhysicalOperator::Scan,
                 children: vec![],
@@ -3362,7 +3362,7 @@ mod tests {
                 retained_bytes: 0,
                 execution: ExecutionMultiplicity::PerEvaluation,
             },
-            PhysicalDagNode {
+            PhysicalDAGNode {
                 id: "aggregate".into(),
                 operator: aggregate_operator(),
                 children: vec!["scan".into()],
@@ -3398,7 +3398,7 @@ mod tests {
 
         assert_eq!(
             estimate_physical_dag(&nodes, "aggregate", &comparison_scope(), &provided),
-            Err(AnalyticalCostError::InvalidPhysicalDag(
+            Err(AnalyticalCostError::InvalidPhysicalDAG(
                 "build-once node cannot consume a per-evaluation child"
             ))
         );
@@ -3407,7 +3407,7 @@ mod tests {
     #[test]
     fn scoped_comparison_rejects_different_source_snapshots() {
         let coverage = comparison_scope().sources[0].clone();
-        let nodes = vec![PhysicalDagNode {
+        let nodes = vec![PhysicalDAGNode {
             id: "scan".into(),
             operator: PhysicalOperator::Scan,
             children: vec![],
@@ -3434,14 +3434,14 @@ mod tests {
 
         assert_eq!(
             estimate_physical_dag_comparison(
-                PhysicalDagEstimateRequest {
+                PhysicalDAGEstimateRequest {
                     nodes: &nodes,
                     root: "scan",
                     scope: &raw_scope,
                     statistics: &provided,
                     cache_profile: &no_cache,
                 },
-                PhysicalDagEstimateRequest {
+                PhysicalDAGEstimateRequest {
                     nodes: &nodes,
                     root: "scan",
                     scope: &candidate_scope,
@@ -3632,13 +3632,13 @@ mod tests {
         );
     }
 
-    fn cache_test_scan() -> (Vec<PhysicalDagNode>, HashMap<String, OperatorStatistics>) {
+    fn cache_test_scan() -> (Vec<PhysicalDAGNode>, HashMap<String, OperatorStatistics>) {
         let edge = EdgeStatistics {
             rows: 100,
             bytes: 1_000,
         };
         (
-            vec![PhysicalDagNode {
+            vec![PhysicalDAGNode {
                 id: "scan".into(),
                 operator: PhysicalOperator::Scan,
                 children: vec![],

@@ -386,7 +386,7 @@ Concretely, `explanation.rs` reports three candidate kinds from each `TargetSubD
 
 Each `ReplacementExplanation::reason` is copied verbatim from the matching candidate's own `ReplacementSubDAG::rationale`. Nothing in `explanation.rs` re-explains why a candidate is valid; that explanation already exists exactly once, on the candidate itself.
 
-`ReplacementExplanation` carries both `node_hash` and `target`. A downstream consumer first compares `node_hash` with an exported `DagNode::hash` to narrow the search, then compares the exact target expression with the node's in-process source expression. This preserves the hash's role as a fast filter while making the final association collision-safe; `location` remains human-readable presentation text rather than a machine identifier.
+`ReplacementExplanation` carries both `node_hash` and `target`. A downstream consumer first compares `node_hash` with an exported `DAGNode::hash` to narrow the search, then compares the exact target expression with the node's in-process source expression. This preserves the hash's role as a fast filter while making the final association collision-safe; `location` remains human-readable presentation text rather than a machine identifier.
 
 ### Why there is no `ExplanationRule` trait
 

@@ -77,7 +77,7 @@ pub fn raw_sample_row(
 
 /// Input contract of a precompute boundary: raw sample rows for a raw time
 /// series scan, otherwise the stored population of its summary state.
-pub fn boundary_schema(node: &PostAsapDagNode) -> Result<Schema, Error> {
+pub fn boundary_schema(node: &PostAsapDAGNode) -> Result<Schema, Error> {
     let Payload::Fallback { expression } = &node.payload else {
         return source_schema(&node.output_schema);
     };
@@ -154,10 +154,10 @@ pub fn is_population_schema(schema: &Schema) -> bool {
 /// Compile a complete selected precompute sub-DAG. Inputs are already-computed
 /// state boundaries; the deployment supplies groups, panes and states, never operations.
 pub fn compile(
-    dag: &PostAsapDag,
+    dag: &PostAsapDAG,
     frontiers: &[NodeId],
     roots: &[NodeId],
-) -> Result<CompiledPhysicalDag, Error> {
+) -> Result<CompiledPhysicalDAG, Error> {
     preflight_depth(dag)?;
     dag.validate().map_err(|e| invalid(e.to_string()))?;
     let nodes = dag
@@ -251,10 +251,10 @@ pub fn compile(
         );
         fragments.insert(id, (inputs, physical_dag));
     }
-    CompiledPhysicalDag::compose(sources, fragments, roots.to_vec())
+    CompiledPhysicalDAG::compose(sources, fragments, roots.to_vec())
 }
 
-fn validate_value_output(node: &PostAsapDagNode) -> Result<(), Error> {
+fn validate_value_output(node: &PostAsapDAGNode) -> Result<(), Error> {
     let schema = &node.output_schema;
     // Physical population rows already carry the complete identity in `$population`.
     // Typed logical plans may expose its opaque series-identity column as metadata.
@@ -294,10 +294,10 @@ fn validate_value_output(node: &PostAsapDagNode) -> Result<(), Error> {
 }
 
 fn fragment(
-    node: &PostAsapDagNode,
+    node: &PostAsapDAGNode,
     schemas: &[Schema],
-    parents: &[&PostAsapDagNode],
-) -> Result<CompiledPhysicalDag, Error> {
+    parents: &[&PostAsapDAGNode],
+) -> Result<CompiledPhysicalDAG, Error> {
     let sources = schemas
         .iter()
         .enumerate()
@@ -558,7 +558,7 @@ fn fragment(
             ))
         }
     };
-    CompiledPhysicalDag::from_operators(sources, operators, vec![root])
+    CompiledPhysicalDAG::from_operators(sources, operators, vec![root])
 }
 
 /// Resolve keyed item identities over raw sample rows: labels (absent labels

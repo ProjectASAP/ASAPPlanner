@@ -3,8 +3,8 @@
 use std::rc::Rc;
 
 use crate::analytical_cost::{
-    validate_operator_semantics, AnalyticalCostError, EvidenceBackedPhysicalDag,
-    ExecutionMultiplicity, HashJoinBuildSide, PhysicalDagNode, PhysicalNodeEvidence,
+    validate_operator_semantics, AnalyticalCostError, EvidenceBackedPhysicalDAG,
+    ExecutionMultiplicity, HashJoinBuildSide, PhysicalDAGNode, PhysicalNodeEvidence,
     PhysicalOperator, PromqlBinaryOperandMode, PromqlBinaryOperation, PromqlPresenceKind,
     PromqlSeriesSampleKind, PromqlVectorCardinality,
 };
@@ -49,7 +49,7 @@ pub fn lower_query_physical_dag(
     root: &Rc<asap_types::pre_asap::QueryExpr>,
     scope: &ComparisonScope,
     evidence: &dyn PhysicalNodeEvidenceProvider,
-) -> Result<EvidenceBackedPhysicalDag, AnalyticalCostError> {
+) -> Result<EvidenceBackedPhysicalDAG, AnalyticalCostError> {
     use std::collections::HashMap;
 
     use asap_types::pre_asap::{GroupKeys, QueryExpr, RelationalSetOpKind};
@@ -61,7 +61,7 @@ pub fn lower_query_physical_dag(
         provider: &'a dyn PhysicalNodeEvidenceProvider,
         evidence: HashMap<String, PhysicalNodeEvidence>,
         next_id: usize,
-        nodes: Vec<PhysicalDagNode>,
+        nodes: Vec<PhysicalDAGNode>,
     }
 
     impl Lowerer<'_> {
@@ -89,7 +89,7 @@ pub fn lower_query_physical_dag(
                 source_coverage,
             })?;
             if evidence.physical_id.is_empty() {
-                return Err(AnalyticalCostError::InvalidPhysicalDag(
+                return Err(AnalyticalCostError::InvalidPhysicalDAG(
                     "provider returned an empty physical identity",
                 ));
             }
@@ -104,7 +104,7 @@ pub fn lower_query_physical_dag(
             source_coverage: Option<SourceCoverage>,
         ) -> Result<String, AnalyticalCostError> {
             let id = evidence.physical_id.clone();
-            let node = PhysicalDagNode {
+            let node = PhysicalDAGNode {
                 id: id.clone(),
                 operator,
                 children,
@@ -115,7 +115,7 @@ pub fn lower_query_physical_dag(
             };
             if let Some(existing) = self.nodes.iter().find(|existing| existing.id == id) {
                 if existing != &node || self.evidence.get(&id) != Some(&evidence) {
-                    return Err(AnalyticalCostError::InvalidPhysicalDag(
+                    return Err(AnalyticalCostError::InvalidPhysicalDAG(
                         "provider reused a physical identity for conflicting evidence",
                     ));
                 }
@@ -175,7 +175,7 @@ pub fn lower_query_physical_dag(
             self.evidence
                 .get(id)
                 .map(|evidence| &evidence.statistics)
-                .ok_or(AnalyticalCostError::InvalidPhysicalDag(
+                .ok_or(AnalyticalCostError::InvalidPhysicalDAG(
                     "lowered child statistics are missing",
                 ))
         }
@@ -769,7 +769,7 @@ pub fn lower_query_physical_dag(
             child_ids: Vec<String>,
         ) -> Result<String, AnalyticalCostError> {
             if child_ids.is_empty() {
-                return Err(AnalyticalCostError::InvalidPhysicalDag(
+                return Err(AnalyticalCostError::InvalidPhysicalDAG(
                     "concat has no children",
                 ));
             }
@@ -823,7 +823,7 @@ pub fn lower_query_physical_dag(
     };
     let root = lowerer.lower(root)?;
     validate_source_consumption(&lowerer.nodes, scope)?;
-    Ok(EvidenceBackedPhysicalDag {
+    Ok(EvidenceBackedPhysicalDAG {
         nodes: lowerer.nodes,
         root,
         evidence: lowerer.evidence,
@@ -831,7 +831,7 @@ pub fn lower_query_physical_dag(
 }
 
 fn validate_source_consumption(
-    nodes: &[PhysicalDagNode],
+    nodes: &[PhysicalDAGNode],
     scope: &ComparisonScope,
 ) -> Result<(), AnalyticalCostError> {
     let consumed = nodes
@@ -841,7 +841,7 @@ fn validate_source_consumption(
         .collect::<Vec<_>>();
     for coverage in &consumed {
         if !scope.sources.contains(coverage) {
-            return Err(AnalyticalCostError::InvalidPhysicalDag(
+            return Err(AnalyticalCostError::InvalidPhysicalDAG(
                 "physical scan consumes a source outside the comparison scope",
             ));
         }
@@ -851,7 +851,7 @@ fn validate_source_consumption(
         .iter()
         .any(|expected| !consumed.contains(&expected))
     {
-        return Err(AnalyticalCostError::InvalidPhysicalDag(
+        return Err(AnalyticalCostError::InvalidPhysicalDAG(
             "physical scans omit a comparison-scope source",
         ));
     }
@@ -970,7 +970,7 @@ fn bind_scan_coverage(
         .cloned()
         .ok_or_else(|| AnalyticalCostError::ScanOutsideComparisonScope(node_id.into()))?;
     if matches.any(|candidate| candidate != &coverage) {
-        return Err(AnalyticalCostError::InvalidPhysicalDag(
+        return Err(AnalyticalCostError::InvalidPhysicalDAG(
             "scan source coverage is ambiguous",
         ));
     }
@@ -1008,7 +1008,7 @@ fn bind_info_coverage(
         .cloned()
         .ok_or_else(|| AnalyticalCostError::ScanOutsideComparisonScope(node_id.into()))?;
     if matches.next().is_some() {
-        return Err(AnalyticalCostError::InvalidPhysicalDag(
+        return Err(AnalyticalCostError::InvalidPhysicalDAG(
             "info source coverage is ambiguous",
         ));
     }
@@ -1260,7 +1260,7 @@ fn is_promql_scalar(query: &asap_types::pre_asap::QueryExpr) -> bool {
 mod tests {
     use super::*;
     use crate::analytical_cost::{
-        estimate_physical_dag, estimate_physical_dag_comparison, PhysicalDagEstimateRequest,
+        estimate_physical_dag, estimate_physical_dag_comparison, PhysicalDAGEstimateRequest,
     };
     use crate::physical_operator_statistics::{
         validate_comparison_scopes, BinaryEdgeStatistics, PartitionStatistics,
@@ -1712,14 +1712,14 @@ mod tests {
             vec!["shared-scan".to_owned(); 2]
         );
         let comparison = estimate_physical_dag_comparison(
-            PhysicalDagEstimateRequest {
+            PhysicalDAGEstimateRequest {
                 nodes: &dag.nodes,
                 root: &dag.root,
                 scope: &independent_scope,
                 statistics: &dag,
                 cache_profile: &no_cache,
             },
-            PhysicalDagEstimateRequest {
+            PhysicalDAGEstimateRequest {
                 nodes: &shared_dag.nodes,
                 root: &shared_dag.root,
                 scope: &shared_scope,
@@ -1740,7 +1740,7 @@ mod tests {
                 &shared_scope,
                 &drifted_buffer,
             ),
-            Err(AnalyticalCostError::InvalidPhysicalDag(
+            Err(AnalyticalCostError::InvalidPhysicalDAG(
                 "physical node buffer differs from evidence snapshot"
             ))
         );
@@ -1757,7 +1757,7 @@ mod tests {
                 &shared_scope,
                 &drifted_identity,
             ),
-            Err(AnalyticalCostError::InvalidPhysicalDag(
+            Err(AnalyticalCostError::InvalidPhysicalDAG(
                 "evidence map key differs from embedded physical identity"
             ))
         );
@@ -1779,7 +1779,7 @@ mod tests {
         };
         assert_eq!(
             lower_query_physical_dag(&root, &shared_scope, &conflicting_identity),
-            Err(AnalyticalCostError::InvalidPhysicalDag(
+            Err(AnalyticalCostError::InvalidPhysicalDAG(
                 "provider reused a physical identity for conflicting evidence"
             ))
         );
@@ -2141,7 +2141,7 @@ mod tests {
         let ambiguous_scope = scope(vec![comparison_scope.sources[0].clone(), second_snapshot]);
         assert_eq!(
             lower_query_physical_dag(&root, &ambiguous_scope, &scripted(&conflicting)),
-            Err(AnalyticalCostError::InvalidPhysicalDag(
+            Err(AnalyticalCostError::InvalidPhysicalDAG(
                 "scan source coverage is ambiguous"
             ))
         );
@@ -2165,7 +2165,7 @@ mod tests {
         ]);
         assert_eq!(
             lower_query_physical_dag(&root, &extra_scope, &scripted(&complete)),
-            Err(AnalyticalCostError::InvalidPhysicalDag(
+            Err(AnalyticalCostError::InvalidPhysicalDAG(
                 "physical scans omit a comparison-scope source"
             ))
         );
@@ -2619,19 +2619,19 @@ mod tests {
         assert!(matches!(
             dag.nodes.as_slice(),
             [
-                PhysicalDagNode {
+                PhysicalDAGNode {
                     operator: PhysicalOperator::Scan,
                     ..
                 },
-                PhysicalDagNode {
+                PhysicalDAGNode {
                     operator: PhysicalOperator::PromqlRelabel { .. },
                     ..
                 },
-                PhysicalDagNode {
+                PhysicalDAGNode {
                     operator: PhysicalOperator::PromqlSeriesSample { .. },
                     ..
                 },
-                PhysicalDagNode {
+                PhysicalDAGNode {
                     operator: PhysicalOperator::PromqlPerSeries { .. },
                     ..
                 }

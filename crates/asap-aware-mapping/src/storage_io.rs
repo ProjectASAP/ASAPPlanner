@@ -8,8 +8,8 @@ use serde::{Deserialize, Serialize};
 pub use asap_types::resources::StorageResources;
 
 use crate::analytical_cost::{
-    estimate_physical_dag, AnalyticalCostError, EvidenceBackedPhysicalDag, ExecutionMultiplicity,
-    PhysicalDagNode, PhysicalOperator,
+    estimate_physical_dag, AnalyticalCostError, EvidenceBackedPhysicalDAG, ExecutionMultiplicity,
+    PhysicalDAGNode, PhysicalOperator,
 };
 use crate::physical_operator_statistics::{ComparisonScope, OperatorStatistics};
 
@@ -83,7 +83,7 @@ pub struct StorageIoProfile {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct StorageNodeEvidence {
-    pub node: PhysicalDagNode,
+    pub node: PhysicalDAGNode,
     pub statistics: OperatorStatistics,
     pub accesses: Vec<StorageAccess>,
 }
@@ -99,7 +99,7 @@ pub struct StorageEstimate {
 }
 
 fn invalid(reason: &'static str) -> AnalyticalCostError {
-    AnalyticalCostError::InvalidPhysicalDag(reason)
+    AnalyticalCostError::InvalidPhysicalDAG(reason)
 }
 
 /// ceil(bytes/request_size), rounded independently per extent and execution.
@@ -116,7 +116,7 @@ pub fn request_count(access: &StorageAccess) -> Result<u64, AnalyticalCostError>
 }
 
 pub fn estimate_storage_io(
-    dag: &EvidenceBackedPhysicalDag,
+    dag: &EvidenceBackedPhysicalDAG,
     scope: &ComparisonScope,
     profile: &StorageIoProfile,
     evidence_version: &str,

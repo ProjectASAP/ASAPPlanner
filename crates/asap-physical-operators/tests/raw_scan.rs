@@ -53,15 +53,15 @@ fn fixture() -> (QueryExpr, Schema, Vec<Batch>) {
     ];
     (scan, output, batches)
 }
-fn plan(scan: QueryExpr, schema: &Schema, state: ExecutionDataState) -> PostAsapDag {
-    let node = |id, payload| PostAsapDagNode {
+fn plan(scan: QueryExpr, schema: &Schema, state: ExecutionDataState) -> PostAsapDAG {
+    let node = |id, payload| PostAsapDAGNode {
         id: PostAsapNodeId(id),
         payload,
         output_state: state,
         output_schema: (**schema).clone(),
         guarantee: None,
     };
-    let edge = |producer, consumer| PostAsapDagEdge {
+    let edge = |producer, consumer| PostAsapDAGEdge {
         producer: PostAsapNodeId(producer),
         consumer: PostAsapNodeId(consumer),
         role: EdgeRole::Input,
@@ -70,7 +70,7 @@ fn plan(scan: QueryExpr, schema: &Schema, state: ExecutionDataState) -> PostAsap
         grouping: GroupingEdgeCompatibility::NotApplicable,
         window: WindowEdgeCompatibility::NotApplicable,
     };
-    PostAsapDag {
+    PostAsapDAG {
         nodes: vec![
             node(0, PostAsapOperatorPayload::Fallback { expression: scan }),
             node(

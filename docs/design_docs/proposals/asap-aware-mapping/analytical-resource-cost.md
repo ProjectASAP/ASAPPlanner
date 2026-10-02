@@ -58,7 +58,7 @@ The source modules follow those responsibilities rather than treating
 "analytical" and "streaming" as competing cost systems:
 
 ```text
-query_physical_lowering.rs ──► EvidenceBackedPhysicalDag
+query_physical_lowering.rs ──► EvidenceBackedPhysicalDAG
                                       │
 physical_operator_statistics.rs ──────┤ physical evidence contract
                                       ▼
@@ -75,7 +75,7 @@ analytical_cost.rs ─────────── operator formulas and CPU/m
 ```
 
 Raw query plans and incrementally maintained summary plans share
-`EvidenceBackedPhysicalDag`; there is no streaming-only duplicate of the
+`EvidenceBackedPhysicalDAG`; there is no streaming-only duplicate of the
 physical DAG or operator-statistics contract. Summary-maintenance modules add
 only the evidence and scheduling semantics that do not exist for an ordinary
 query plan.
@@ -280,7 +280,7 @@ Neither logical IR is the statistics schema:
 
 ```text
 pre-ASAP QueryExpr  ─┐
-                     ├─ physical lowering ─> PhysicalDagNode/PhysicalOperator
+                     ├─ physical lowering ─> PhysicalDAGNode/PhysicalOperator
 post-ASAP SummaryExpr┘                              │
                                                     v
                                            OperatorStatistics
@@ -486,7 +486,7 @@ observed or estimated facts about that operator in this workload.
 The provider owns provenance, freshness, and derivation. The estimator resolves
 each reachable node once, so one estimate cannot mix values across a live
 catalog refresh. A scan has one external source input; every other input is in
-the same order as `PhysicalDagNode.children`. Every parent input must equal the
+the same order as `PhysicalDAGNode.children`. Every parent input must equal the
 corresponding child's output in both rows and bytes. Missing node evidence,
 invalid arity, inconsistent edge dimensions, or a parent/child conflict makes
 the entire DAG unavailable. `{ rows: 0, bytes: 0 }` is a valid empty logical
@@ -495,7 +495,7 @@ positive logical bytes so width-dependent formulas do not invent a row width.
 A parent therefore cannot silently substitute the original source cardinality
 for an intermediate edge.
 
-The statistics inputs and `PhysicalDagNode.children` therefore have
+The statistics inputs and `PhysicalDAGNode.children` therefore have
 different arity only for a source leaf:
 
 | Operator shape | Statistics inputs | DAG children |
@@ -543,7 +543,7 @@ For a selected DAG:
 7. Retained summaries remain live across reads. Streaming buffers may be
    released after their last consumer.
 
-`estimate_physical_dag` implements these rules for `PhysicalDagNode` values,
+`estimate_physical_dag` implements these rules for `PhysicalDAGNode` values,
 one `ComparisonScope`, and an `OperatorStatisticsProvider`. It is a
 single-plan diagnostic API. Code that ranks a raw and candidate plan must use
 `estimate_physical_dag_comparison`, which validates exact scope equality before
@@ -591,7 +591,7 @@ deduplicated by physical identity.
 ### Query-DAG lowering and statistics contract
 
 `lower_query_physical_dag` recursively lowers a resolved `Rc<QueryExpr>` and
-returns an `EvidenceBackedPhysicalDag` containing both its nodes and root ID.
+returns an `EvidenceBackedPhysicalDAG` containing both its nodes and root ID.
 It consumes the existing query and physical-operator enums; it does not
 introduce a parallel logical operator vocabulary. For every occurrence, the lowerer sends a
 `PhysicalNodeRequest` containing the logical node, selected existing
@@ -601,7 +601,7 @@ child physical IDs, and any source coverage to a
 `physical_id`, the authoritative `OperatorStatistics`, and explicit
 `output_buffer_bytes`; logical edge bytes are never substituted for an
 allocation. Missing evidence makes the entire query unavailable. The returned
-`EvidenceBackedPhysicalDag` snapshots this evidence so costing does not re-read a live
+`EvidenceBackedPhysicalDAG` snapshots this evidence so costing does not re-read a live
 catalog after lowering.
 
 Each lowered Scan is bound to exactly one `SourceCoverage` in the comparison
@@ -961,7 +961,7 @@ actual raw target, and then lowers a logical rewrite or requests the fully
 bound physical DAG for a `SummaryExpr` candidate. The deployment implements
 `PlannerPhysicalPlanProvider`: query-node evidence is consumed atomically by
 the generic query lowerer, while summary binding returns a complete
-`EvidenceBackedPhysicalDag`, including embedded raw work, build/read operators, retained
+`EvidenceBackedPhysicalDAG`, including embedded raw work, build/read operators, retained
 state, execution multiplicity, and source coverage. The adapter calls
 `estimate_physical_dag_comparison`; it never calls `DefaultCostModel` or a
 structural-node-count fallback for final cost.

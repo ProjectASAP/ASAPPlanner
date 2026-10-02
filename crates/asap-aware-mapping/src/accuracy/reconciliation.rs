@@ -10,7 +10,7 @@
 //! accuracy bound they ask for — `quantile(0.99, x)` at `epsilon=0.01` for
 //! one consumer, the same `quantile(0.99, x)` at `epsilon=0.05` for
 //! another — are therefore never the same `Rc`, never collapse into one
-//! [`crate::replacement::TargetSubDAGCandidates`], and [`crate::replacement::SharedSubDagStrategy`]
+//! [`crate::replacement::TargetSubDAGCandidates`], and [`crate::replacement::SharedSubDAGStrategy`]
 //! never even gets a `TargetSubDAG` with `consumer_count >= 2` to propose
 //! sharing for. This crate would build two entirely independent sketches
 //! for what is conceptually one computation, even though a single sketch
@@ -120,7 +120,7 @@
 //! tag), because it needs its own cost treatment in
 //! [`crate::cost_model::DefaultCostModel::estimate_cost`], not just its own
 //! label. Every other `Replacement::Rewrite` shape that reaches
-//! `estimate_cost` (`SharedSubDagStrategy`'s `CseRecompute`, `Rollup`'s and
+//! `estimate_cost` (`SharedSubDAGStrategy`'s `CseRecompute`, `Rollup`'s and
 //! `TopKLimitReuse`'s `LogicalRewrite`) really does rebuild `target` from a
 //! different source, so pricing it as "one `cse_recompute_cost` of `target`
 //! itself, per consumer" is the right shape of cost. This strategy's
@@ -137,7 +137,7 @@
 //! pin against. `estimate_cost` instead prices this shape as a
 //! [`crate::cost_model::CostModel::cse_shared_maintenance_cost`] read
 //! against `rc`'s **own** bound summary — the same order-of-magnitude,
-//! per-family cost `SharedSubDagStrategy`'s own `CseShare` candidate is
+//! per-family cost `SharedSubDAGStrategy`'s own `CseShare` candidate is
 //! priced with, reflecting "one more reference into a structure that's
 //! already being maintained" rather than "build a whole new one."
 //!
@@ -848,7 +848,7 @@ mod tests {
         // independently-built but structurally identical loose queries
         // merge onto one Rc via ordinary CSE), *and* a separate,
         // single-consumer tight sibling exists over the same input — the
-        // scenario the issue itself targets: `SharedSubDagStrategy`'s own
+        // scenario the issue itself targets: `SharedSubDAGStrategy`'s own
         // CseShare/CseRecompute pair is on the table for the loose target's
         // own 2 consumers at the same time as this strategy's "read the
         // tight sibling instead" candidate.

@@ -32,7 +32,7 @@
 //
 //   - one `asap_types::dag_export::TargetReplacement` per group on whichever
 //     query's `NamedDAG.replacements` contains that target node (matched
-//     by `DagNode::hash` + structural equality, the same collision-safe
+//     by `DAGNode::hash` + structural equality, the same collision-safe
 //     pattern `annotate_with_explanations` below already uses for notes) —
 //     a small, self-contained "before -> after" pair per replacement site;
 //   - one merged `NamedDAG.post_dag`: a single flattened DAG per
@@ -42,7 +42,7 @@
 //
 // Together these surface every one of the four concrete replacement kinds:
 // the sketch family `SketchAlgorithmStrategy`/`HydraGroupingStrategy` bound,
-// the CSE share/recompute choice `SharedSubDagStrategy` found, the
+// the CSE share/recompute choice `SharedSubDAGStrategy` found, the
 // workload-aware roll-up `RollupStrategy` derived, and the `avg ->
 // sum/count` rewrite `AvgToSumOverCountStrategy` proposes. Without
 // `--post-asap`, every existing invocation of this binary produces
@@ -77,7 +77,7 @@ use std::rc::Rc;
 use std::time::Instant;
 
 use asap_aware_mapping::analytical_cost::{
-    cache_hit_ratios, AnalyticalCostError, EvidenceBackedPhysicalDag as PhysicalDag,
+    cache_hit_ratios, AnalyticalCostError, EvidenceBackedPhysicalDAG as PhysicalDAG,
     PhysicalNodeEvidence, ResourceCalibration, ANALYTICAL_COST_MODEL_VERSION,
 };
 use asap_aware_mapping::cost_model::DefaultCostModel;
@@ -94,7 +94,7 @@ use asap_aware_mapping::replacement::{
 use asap_aware_mapping::{AccuracyEvidenceProvider, PropagationStats};
 use asap_types::cost::{BaselineRef, CostAnnotation, CostInput, CostSource, CostUnit};
 use asap_types::dag_export::{
-    self, DagDecision, DagNote, ExportDAG, NamedDAG, PostAsapSubstitution, TargetRejection,
+    self, DAGDecision, DAGNote, ExportDAG, NamedDAG, PostAsapSubstitution, TargetRejection,
     TargetReplacement, TargetReplacementAfter, WorkloadDAG,
 };
 use asap_types::post_asap::SummaryExpr;
@@ -209,7 +209,7 @@ enum CandidatePhysicalEvidence {
     Summary {
         plan: serde_json::Value,
         query_nodes: Vec<QueryNodePhysicalEvidence>,
-        physical_dag: PhysicalDag,
+        physical_dag: PhysicalDAG,
     },
 }
 
@@ -239,7 +239,7 @@ impl CandidatePhysicalEvidence {
         actual.is_ok_and(|actual| plan_values_match(&actual, self.plan()))
     }
 
-    fn summary_dag(&self) -> Option<&PhysicalDag> {
+    fn summary_dag(&self) -> Option<&PhysicalDAG> {
         match self {
             Self::Summary { physical_dag, .. } => Some(physical_dag),
             Self::Rewrite { .. } => None,
@@ -358,7 +358,7 @@ impl PlannerPhysicalPlanProvider for ExportPhysicalProvider<'_> {
             ))
         })?;
         if matches.next().is_some() {
-            return Err(AnalyticalCostError::InvalidPhysicalDag(
+            return Err(AnalyticalCostError::InvalidPhysicalDAG(
                 "duplicate query-node evidence key",
             ));
         }
@@ -371,7 +371,7 @@ impl PlannerPhysicalPlanProvider for ExportPhysicalProvider<'_> {
         snapshot: &PhysicalEvidenceSnapshot,
         _summary: &Rc<SummaryNode>,
         _target: &asap_aware_mapping::replacement::TargetSubDAG<'_>,
-    ) -> Result<PhysicalDag, AnalyticalCostError> {
+    ) -> Result<PhysicalDAG, AnalyticalCostError> {
         if snapshot.scope != self.target.scope.resolve()? {
             return Err(AnalyticalCostError::ComparisonScopeMismatch(
                 "planner evidence snapshot",
@@ -380,7 +380,7 @@ impl PlannerPhysicalPlanProvider for ExportPhysicalProvider<'_> {
         self.candidate
             .summary_dag()
             .cloned()
-            .ok_or(AnalyticalCostError::InvalidPhysicalDag(
+            .ok_or(AnalyticalCostError::InvalidPhysicalDAG(
                 "summary candidate is missing its physical DAG",
             ))
     }
@@ -682,7 +682,7 @@ impl CostModel for ExportPlannerCostModel<'_> {
 /// Baseline/selected/benefit [`CostAnnotation`]s for one [`Winner`] — issue
 /// #286's "replacement-region baseline cost, selected cost, and benefit"
 /// granularity item, reused verbatim for [`TargetReplacement`] and for the
-/// [`DagDecision`] carried by every node the winning candidate produced or
+/// [`DAGDecision`] carried by every node the winning candidate produced or
 /// carried.
 ///
 /// `dag_export` has no deployment-owned physical evidence provider. It must
@@ -976,7 +976,7 @@ fn annotate_with_explanations(
             if node.hash == Some(explanation.node_hash)
                 && node.source_expr.as_ref() == Some(explanation.target.as_ref())
             {
-                node.notes.push(DagNote {
+                node.notes.push(DAGNote {
                     kind: format!("{:?}", explanation.kind),
                     reason: explanation.reason.clone(),
                 });
@@ -1067,7 +1067,7 @@ fn lookup_winner(
 }
 
 /// One `(decision.id, baseline_cost, selected_cost)` triple per *distinct*
-/// [`DagDecision`] carried anywhere in `dag` — collapsing every node that
+/// [`DAGDecision`] carried anywhere in `dag` — collapsing every node that
 /// shares one `decision.id` (a replacement region can span many nodes, all
 /// carrying an identical clone of the same decision) down to a single
 /// entry, so a caller summing these never counts one decision's cost once
@@ -1325,7 +1325,7 @@ fn run_post_asap_with_progress(
         // Derived from `selected_cost`; see `target_replacement`'s identical
         // derivation.
         let cost = selected_cost.value.unwrap_or(f64::NAN);
-        let decision = DagDecision {
+        let decision = DAGDecision {
             id: i as u32,
             strategy: winner.candidate.strategy.to_string(),
             rationale: decision_rationale(winner),
@@ -1551,7 +1551,7 @@ async fn main() {
     for (explanation, matched) in explanations.iter().zip(matched) {
         if !matched {
             eprintln!(
-                "dag_export: explanation at {} ({:?}, node_hash={}) matched no DagNode",
+                "dag_export: explanation at {} ({:?}, node_hash={}) matched no DAGNode",
                 explanation.location, explanation.kind, explanation.node_hash
             );
         }
@@ -1697,7 +1697,7 @@ mod tests {
     use super::*;
 
     use asap_aware_mapping::analytical_cost::{
-        ExecutionMultiplicity, PhysicalDagNode, PhysicalOperator,
+        ExecutionMultiplicity, PhysicalDAGNode, PhysicalOperator,
     };
     use asap_aware_mapping::physical_operator_statistics::{
         EdgeStatistics, OperatorStatistics, SourceCoverage, UnaryEdgeStatistics,
@@ -1733,7 +1733,7 @@ mod tests {
         query: &QueryExpr,
         candidate: &ReplacementSubDAG,
         document: &PlannerCostDocument,
-    ) -> PhysicalDag {
+    ) -> PhysicalDAG {
         let model = ExportPlannerCostModel { document };
         let root = Rc::new(query.clone());
         let target = asap_aware_mapping::replacement::TargetSubDAG::new(&root);
@@ -2246,7 +2246,7 @@ mod tests {
         entries.into_inner()
     }
 
-    fn cheap_candidate_dag() -> PhysicalDag {
+    fn cheap_candidate_dag() -> PhysicalDAG {
         let coverage = test_scope().sources[0].clone();
         let statistics = OperatorStatistics::Scan {
             edges: UnaryEdgeStatistics {
@@ -2256,8 +2256,8 @@ mod tests {
             },
             source_read_bytes: 64,
         };
-        PhysicalDag {
-            nodes: vec![PhysicalDagNode {
+        PhysicalDAG {
+            nodes: vec![PhysicalDAGNode {
                 id: "summary-read".into(),
                 operator: PhysicalOperator::Scan,
                 children: vec![],

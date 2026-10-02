@@ -7,8 +7,8 @@ use super::*;
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 #[serde(try_from = "UncheckedPhysicalASAPDAG")]
 pub struct PhysicalASAPDAG {
-    pub precompute: Option<CompiledPhysicalDag>,
-    pub query: CompiledPhysicalDag,
+    pub precompute: Option<CompiledPhysicalDAG>,
+    pub query: CompiledPhysicalDAG,
     pub materialized_outputs: BTreeMap<NodeId, InputContract>,
 }
 
@@ -21,7 +21,7 @@ pub struct PhysicalASAPDAG {
 /// contract used to build each output. This API never treats a result from a
 /// different window or revision as interchangeable merely because types match.
 pub fn compile_candidate(
-    dag: &PostAsapDag,
+    dag: &PostAsapDAG,
     inputs: BTreeMap<NodeId, InputContract>,
     roots: &[NodeId],
     frontier: &[NodeId],
@@ -34,7 +34,7 @@ pub fn compile_candidate(
 /// each query DAG once and derives every placement choice from that result.
 /// The candidate is identical to [`compile_candidate`] for the same frontier.
 pub fn cut_candidate(
-    compiled: &CompiledPhysicalDag,
+    compiled: &CompiledPhysicalDAG,
     frontier: &[NodeId],
 ) -> Result<PhysicalASAPDAG, Error> {
     if frontier.is_empty() {
@@ -93,7 +93,7 @@ pub fn cut_candidate(
 /// That holds while timing-dependent lowering (an ingestion-time `Binary`
 /// aligns by value column) has the same timing at compile time as here.
 /// A query-time node feeding an ingestion-time node has no valid placement.
-pub fn frontier_from_timing(dag: &PostAsapDag) -> Result<Vec<NodeId>, Error> {
+pub fn frontier_from_timing(dag: &PostAsapDAG) -> Result<Vec<NodeId>, Error> {
     use planner_types::post_asap::ExecutionTiming::IngestionTime;
     let timing = dag
         .nodes
@@ -127,7 +127,7 @@ pub fn frontier_from_timing(dag: &PostAsapDag) -> Result<Vec<NodeId>, Error> {
 /// and deployment feasibility are evaluated separately before cost selection.
 /// Exceeding the search budget returns an error, never a partial inventory.
 pub fn enumerate_frontiers(
-    dag: &PostAsapDag,
+    dag: &PostAsapDAG,
     inputs: &BTreeMap<NodeId, InputContract>,
     roots: &[NodeId],
     max_candidates: usize,
@@ -136,7 +136,7 @@ pub fn enumerate_frontiers(
 }
 
 fn enumerate_compiled_frontiers(
-    compiled: &CompiledPhysicalDag,
+    compiled: &CompiledPhysicalDAG,
     max_candidates: usize,
 ) -> Result<Vec<Vec<NodeId>>, Error> {
     if max_candidates == 0 {
@@ -192,7 +192,7 @@ fn enumerate_compiled_frontiers(
 /// individual failures visible; do not substitute another computation on error.
 /// The DAG is lowered once; each frontier is a [`cut_candidate`] of it.
 pub fn compile_candidates(
-    dag: &PostAsapDag,
+    dag: &PostAsapDAG,
     inputs: BTreeMap<NodeId, InputContract>,
     roots: &[NodeId],
     frontiers: &[Vec<NodeId>],
@@ -272,8 +272,8 @@ pub fn select_candidate<T>(
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct UncheckedPhysicalASAPDAG {
-    precompute: Option<CompiledPhysicalDag>,
-    query: CompiledPhysicalDag,
+    precompute: Option<CompiledPhysicalDAG>,
+    query: CompiledPhysicalDAG,
     materialized_outputs: BTreeMap<NodeId, InputContract>,
 }
 impl TryFrom<UncheckedPhysicalASAPDAG> for PhysicalASAPDAG {
@@ -331,7 +331,7 @@ mod tests {
     use super::*;
     use planner_types::workload::*;
 
-    fn grouped_rate() -> (PostAsapDag, BTreeMap<NodeId, InputContract>, NodeId) {
+    fn grouped_rate() -> (PostAsapDAG, BTreeMap<NodeId, InputContract>, NodeId) {
         let workload = PlanningWorkload {
             query_workload: QueryWorkload {
                 language: QueryLanguage::PromQL,
@@ -399,9 +399,9 @@ mod tests {
     }
 
     fn with_timing(
-        dag: &PostAsapDag,
-        timing: impl Fn(&PostAsapDagNode) -> planner_types::post_asap::ExecutionTiming,
-    ) -> PostAsapDag {
+        dag: &PostAsapDAG,
+        timing: impl Fn(&PostAsapDAGNode) -> planner_types::post_asap::ExecutionTiming,
+    ) -> PostAsapDAG {
         let mut timed = dag.clone();
         for node in &mut timed.nodes {
             node.output_state.timing = timing(node);
@@ -413,7 +413,7 @@ mod tests {
         timed
     }
 
-    fn raw_input(dag: &PostAsapDag) -> BTreeMap<NodeId, InputContract> {
+    fn raw_input(dag: &PostAsapDAG) -> BTreeMap<NodeId, InputContract> {
         let raw = dag
             .nodes
             .iter()
