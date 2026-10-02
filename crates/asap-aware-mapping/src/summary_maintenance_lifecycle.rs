@@ -2874,6 +2874,103 @@ mod tests {
         ));
     }
 
+    /// A state costs 10 however often it is read. Recomputing p50 raw costs
+    /// 1 and p99 costs 8.
+    struct P50PrefersRaw;
+
+    impl CostModel for P50PrefersRaw {
+        fn rank_candidates(
+            &self,
+            _intent: &AggIntent,
+            candidates: &[SketchAlgorithm],
+        ) -> Vec<SketchAlgorithm> {
+            candidates.to_vec()
+        }
+
+        fn summary_maintenance_lifecycle_cost_inputs(
+            &self,
+            _summary: &SummaryNode,
+        ) -> SummaryMaintenanceLifecycleCostInputs {
+            SummaryMaintenanceLifecycleCostInputs {
+                build_cost: Some(Cost(10.0)),
+                maintenance_cost_per_update: Some(Cost::ZERO),
+                summary_read_cost: Some(Cost::ZERO),
+                retention_cost_rate: Some(CostRate(0.0)),
+                retirement_cost: Some(Cost::ZERO),
+            }
+        }
+
+        fn summary_maintenance_capabilities(
+            &self,
+            summary: &SummaryNode,
+        ) -> SummaryMaintenanceCapabilities {
+            UnitCosts.summary_maintenance_capabilities(summary)
+        }
+
+        fn raw_query_recompute_total_cost(
+            &self,
+            target: &QueryExpr,
+            _expected_reads: f64,
+        ) -> Option<Cost> {
+            match target {
+                QueryExpr::Aggregate { measures, .. } => match measures[..] {
+                    [AggIntent::Quantile { q: 0.5, .. }] => Some(Cost(1.0)),
+                    _ => Some(Cost(8.0)),
+                },
+                _ => None,
+            }
+        }
+    }
+
+    /// p50 and p99 form a sharing class over one state (5 each), but p50's
+    /// raw recompute (1) still wins. The class reverts, so p99 is reselected
+    /// at its independent cost (10) and recomputes raw (8), as it does alone.
+    /// Checked at selection: the assembled plan's own raw comparison would
+    /// recompute p99 raw either way.
+    #[test]
+    fn sharing_class_reverts_when_a_member_selects_elsewhere() {
+        let quantile = |q| {
+            Rc::new(QueryExpr::Aggregate {
+                reduction: Reduction::by(vec![]),
+                measures: vec![AggIntent::Quantile {
+                    col: None,
+                    q,
+                    accuracy: AccuracyTarget::Epsilon(0.1),
+                }],
+                // A shared output name keeps p50 and p99 on one state.
+                output_names: vec!["value".into()],
+                having: None,
+                child: query_root(),
+            })
+        };
+        let workload = workload(vec![], vec![repeating(), repeating()], at_rest());
+        // Whether each root selected a summary rather than raw recompute.
+        let summaries = |space: &PlanSpace<&str>, entries: &[usize]| {
+            let selection = global_selection_with_summary_maintenance_lifecycles(
+                space,
+                WorkloadDemand::new_with_data(&workload, &at_rest(), entries),
+                1_000,
+                Some(Horizon(10.0)),
+                SummaryMaintenanceLifecycleCapabilities::ALL,
+                &P50PrefersRaw,
+            )
+            .unwrap();
+            space
+                .roots
+                .iter()
+                .map(|(_, target)| selection.for_target(target).unwrap().chosen.is_some())
+                .collect::<Vec<_>>()
+        };
+
+        let space = crate::replacement::search_workload(vec![
+            ("p50", quantile(0.5)),
+            ("p99", quantile(0.99)),
+        ]);
+        let alone = crate::replacement::search_workload(vec![("p99", quantile(0.99))]);
+        assert_eq!(summaries(&space, &[0, 1]), vec![false, false]);
+        assert_eq!(summaries(&alone, &[1]), vec![false]);
+    }
+
     #[test]
     fn normalized_workload_drives_plan_space_recurrence_profiles() {
         let root = query_root();
