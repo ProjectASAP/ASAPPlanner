@@ -774,7 +774,7 @@ mod tests {
     use crate::pre_asap::agg_intent::AggIntent;
     use crate::pre_asap::expr_ir::{CompareOpKind, ScalarValue};
     use crate::pre_asap::query_expr::{BinaryOpKind, GroupKeys, Predicate, Reduction, Source};
-    use crate::pre_asap::schema::{Column, DataType, Schema};
+    use crate::pre_asap::schema::{DataType, Field, Schema};
     use crate::types::AccuracyTarget;
 
     /// `[ts, service, value, latency]`.
@@ -784,10 +784,10 @@ mod tests {
             predicates: vec![],
             schema: Schema::with_time_index(
                 vec![
-                    Column::new("ts", DataType::Timestamp, false),
-                    Column::new("service", DataType::Utf8, false),
-                    Column::new("value", DataType::Float64, false),
-                    Column::new("latency", DataType::Float64, false),
+                    Field::plain("ts", DataType::Timestamp, false),
+                    Field::plain("service", DataType::Utf8, false),
+                    Field::plain("value", DataType::Float64, false),
+                    Field::plain("latency", DataType::Float64, false),
                 ],
                 0,
                 vec![],

@@ -8,8 +8,8 @@ use asap_physical_operators::{
     values::{Batch, Value},
 };
 use asap_types::{
-    post_asap::{compile_post_asap_dag, PostAsapOperatorPayload, SummaryFamilyType},
-    pre_asap::{Column, DataType, QueryExpr, Schema},
+    post_asap::{compile_post_asap_dag, FieldDataType, PostAsapOperatorPayload},
+    pre_asap::{DataType, Field, QueryExpr, Schema},
     types::AccuracyTarget,
 };
 use futures::StreamExt;
@@ -22,8 +22,8 @@ async fn sql_filter_grouped_sum_executes_and_rebinds() {
     let catalog = SqlCatalog::new().with_table(
         "metrics",
         Schema::new(vec![
-            Column::new("service", DataType::Utf8, false),
-            Column::new("value", DataType::Float64, true),
+            Field::plain("service", DataType::Utf8, false),
+            Field::plain("value", DataType::Float64, true),
         ]),
     );
     for query in [
@@ -58,7 +58,7 @@ async fn sql_filter_grouped_sum_executes_and_rebinds() {
         assert!(schema
             .fields
             .iter()
-            .all(|field| matches!(field.dtype, SummaryFamilyType::Plain(_))));
+            .all(|field| matches!(field.dtype, FieldDataType::Plain(_))));
         let plan = compile(
             &dag,
             BTreeMap::from([(u64::from(scan.id.0), InputContract::bounded(schema.clone()))]),

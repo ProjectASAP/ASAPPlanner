@@ -11,7 +11,7 @@ impl MemorySource {
         if schema
             .fields
             .iter()
-            .any(|f| !matches!(f.dtype, SummaryFamilyType::Plain(_)))
+            .any(|f| !matches!(f.dtype, FieldDataType::Plain(_)))
         {
             return Err(Error::Invalid(
                 "raw source cannot contain summary states".into(),

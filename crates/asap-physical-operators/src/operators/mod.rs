@@ -8,7 +8,7 @@ use crate::{
 };
 use futures::StreamExt;
 use planner_types::{
-    post_asap::{SummaryFamilyType, SummaryField, SummarySchema, SummaryUpdate},
+    post_asap::{Field, FieldDataType, SummaryUpdate},
     pre_asap::{ColumnRef, DataType},
 };
 use std::{collections::BTreeMap, sync::Arc};
@@ -133,13 +133,13 @@ enum Kind {
         predicate: Box<crate::expressions::CompiledExpression>,
     },
     SummaryBuild {
-        family: SummaryFamilyType,
+        family: FieldDataType,
         value: usize,
         time: Option<usize>,
         groups: Vec<usize>,
     },
     KeyedSummaryBuild {
-        family: SummaryFamilyType,
+        family: FieldDataType,
         value: usize,
         items: Vec<usize>,
         groups: Vec<usize>,
@@ -252,7 +252,7 @@ impl Operator {
         }
         if output.time_index.is_some_and(|i| {
             i >= output.fields.len()
-                || output.fields[i].dtype != SummaryFamilyType::Plain(DataType::Timestamp)
+                || output.fields[i].dtype != FieldDataType::Plain(DataType::Timestamp)
         }) {
             return Err(invalid("invalid output time column"));
         }

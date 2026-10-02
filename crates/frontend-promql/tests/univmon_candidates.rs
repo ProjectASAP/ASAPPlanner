@@ -9,8 +9,8 @@ use asap_aware_mapping::{Replacement, ReplacementStrategy, SketchAlgorithmStrate
 mod support;
 use asap_types::post_asap::{
     compile_post_asap_dag, cse::share_common_summary_sub_dags, AccuracyError, BoundExpr,
-    CompositionOperator, ErrorMetric, ProbabilityExpr, ResultGuarantee, SketchAlgorithm,
-    SketchQuery, SummaryExpr, SummaryFamilyType, SummaryInputExpr, SummaryNode,
+    CompositionOperator, ErrorMetric, FieldDataType, ProbabilityExpr, ResultGuarantee,
+    SketchAlgorithm, SketchQuery, SummaryExpr, SummaryInputExpr, SummaryNode,
 };
 use asap_types::types::AccuracyTarget;
 use support::lower_promql;
@@ -20,10 +20,10 @@ struct TestEvidence;
 impl AccuracyModel for TestEvidence {
     fn local_guarantee(
         &self,
-        family: &SummaryFamilyType,
+        family: &FieldDataType,
         query: &SketchQuery,
     ) -> Option<ResultGuarantee> {
-        if matches!(family, SummaryFamilyType::Sketch(kind, _) if kind.algorithm() == &SketchAlgorithm::UnivMon)
+        if matches!(family, FieldDataType::Sketch(kind, _) if kind.algorithm() == &SketchAlgorithm::UnivMon)
             && !matches!(query, SketchQuery::PointCount { .. })
         {
             let mut guarantee = ResultGuarantee::exact("SYNTHETIC test evidence; not measured");
@@ -57,7 +57,7 @@ fn candidate(query: &str, accuracy: AccuracyTarget) -> Rc<SummaryNode> {
         .find_map(|candidate| {
             let Replacement::Summary(node) = candidate.replacement else { return None };
             let SummaryExpr::SummaryEstimate { summary_input, .. } = &node.expr else { return None };
-            matches!(&summary_input.expr, SummaryExpr::SummaryAgg { family: SummaryFamilyType::Sketch(kind, _), .. }
+            matches!(&summary_input.expr, SummaryExpr::SummaryAgg { family: FieldDataType::Sketch(kind, _), .. }
                 if kind.algorithm() == &SketchAlgorithm::UnivMon).then_some(node)
         }).expect("UnivMon candidate")
 }

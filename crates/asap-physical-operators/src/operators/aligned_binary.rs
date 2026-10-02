@@ -22,9 +22,11 @@ impl Operator {
             ));
         }
         for (input, value) in [(&left, values.0), (&right, values.1)] {
-            if input.fields.get(value).is_none_or(|f| {
-                f.nullable || f.dtype != SummaryFamilyType::Plain(DataType::Float64)
-            }) {
+            if input
+                .fields
+                .get(value)
+                .is_none_or(|f| f.nullable || f.dtype != FieldDataType::Plain(DataType::Float64))
+            {
                 return Err(invalid(
                     "aligned arithmetic requires non-null Float64 values",
                 ));

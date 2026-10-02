@@ -105,8 +105,8 @@ fn avg_rewrite_target(node: &QueryExpr) -> Option<(usize, Option<ColumnId>)> {
     let input_schema = child.output_schema().ok()?;
     let value_col = col
         .or_else(|| input_schema.column_id("value"))
-        .or_else(|| (0..input_schema.columns.len()).find(|i| !by.contains(i)))?;
-    if input_schema.columns.get(value_col)?.nullable {
+        .or_else(|| (0..input_schema.fields.len()).find(|i| !by.contains(i)))?;
+    if input_schema.fields.get(value_col)?.nullable {
         return None;
     }
     Some((by.keys().len(), *col))
@@ -158,7 +158,7 @@ pub(crate) fn temporal_average_components(root: &Rc<QueryExpr>) -> Option<Rc<Que
     }
     let schema = child.output_schema().ok()?;
     let value = schema
-        .columns
+        .fields
         .get(col.or_else(|| schema.column_id("value"))?)?;
     if value.nullable || value.dtype != DataType::Float64 {
         return None;
@@ -329,7 +329,7 @@ pub(crate) fn composed_aggregate_rewrite(root: &Rc<QueryExpr>) -> Option<Rc<Quer
             // the already-derived caller-visible name instead of allowing
             // Project to invent `col_N` and then failing schema equality.
             alias: original_schema
-                .columns
+                .fields
                 .last()
                 .map(|column| column.name.clone()),
             expr: QueryExpr::Cast {
@@ -410,16 +410,20 @@ mod tests {
     use super::*;
     use crate::test_support::lower_promql;
     use asap_types::pre_asap::query_expr::Source;
-    use asap_types::pre_asap::schema::{Column, Schema};
+    use asap_types::pre_asap::schema::{Field, Schema};
     use asap_types::types::AccuracyTarget;
     use std::time::Duration;
 
     fn metric_scan(labels: &[&str]) -> QueryExpr {
         let mut columns = vec![
-            Column::new("ts", DataType::Timestamp, false),
-            Column::new("value", DataType::Float64, false),
+            Field::plain("ts", DataType::Timestamp, false),
+            Field::plain("value", DataType::Float64, false),
         ];
-        columns.extend(labels.iter().map(|n| Column::new(*n, DataType::Utf8, true)));
+        columns.extend(
+            labels
+                .iter()
+                .map(|n| Field::plain(*n, DataType::Utf8, true)),
+        );
         QueryExpr::Scan {
             source: Source::TimeSeries { metric: "m".into() },
             predicates: vec![],
@@ -631,7 +635,7 @@ mod tests {
         };
         let rewritten_schema = rewritten.output_schema().unwrap();
         assert_eq!(original_schema, rewritten_schema);
-        assert_eq!(rewritten_schema.columns[0].name, "avg_latency");
+        assert_eq!(rewritten_schema.fields[0].name, "avg_latency");
     }
 
     /// A grouped rewrite must preserve the aggregate's grouping-key metadata;
@@ -702,9 +706,9 @@ mod tests {
     #[test]
     fn works_with_a_bound_column_not_just_the_sample_value() {
         let mut schema_cols = vec![
-            Column::new("ts", DataType::Timestamp, false),
-            Column::new("job", DataType::Utf8, true),
-            Column::new("bytes", DataType::Int64, false),
+            Field::plain("ts", DataType::Timestamp, false),
+            Field::plain("job", DataType::Utf8, true),
+            Field::plain("bytes", DataType::Int64, false),
         ];
         let child = QueryExpr::Scan {
             source: Source::TimeSeries { metric: "m".into() },
@@ -731,9 +735,9 @@ mod tests {
         // too, and a bare (uncast) `Int64 / Int64` would type the avg
         // column `Int64` — this assertion is what would catch that
         // regression.
-        assert_eq!(rewritten_schema.columns, original_schema.columns);
+        assert_eq!(rewritten_schema.fields, original_schema.fields);
         assert_eq!(
-            rewritten_schema.columns.last().unwrap().dtype,
+            rewritten_schema.fields.last().unwrap().dtype,
             DataType::Float64
         );
 
@@ -759,9 +763,9 @@ mod tests {
             predicates: vec![],
             schema: Schema::with_time_index(
                 vec![
-                    Column::new("ts", DataType::Timestamp, false),
-                    Column::new("value", DataType::Float64, false),
-                    Column::new("latency", DataType::Float64, true),
+                    Field::plain("ts", DataType::Timestamp, false),
+                    Field::plain("value", DataType::Float64, false),
+                    Field::plain("latency", DataType::Float64, true),
                 ],
                 0,
                 vec![],
@@ -879,6 +883,6 @@ mod tests {
         let Replacement::Rewrite(rewritten) = &candidate.replacement else {
             panic!("expected logical rewrite")
         };
-        assert_eq!(rewritten.output_schema().unwrap().columns[1].name, "sum");
+        assert_eq!(rewritten.output_schema().unwrap().fields[1].name, "sum");
     }
 }

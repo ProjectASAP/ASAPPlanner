@@ -2,30 +2,35 @@
 use super::promql_rows::SERIES_IDENTITY_COLUMN as SERIES_IDENTITY;
 use super::*;
 use planner_types::{
-    post_asap::{ExecutionTiming, GroupingStrategy, SummarySchema},
+    post_asap::{ExecutionTiming, GroupingStrategy, Schema as LogicalSchema},
     pre_asap::DataType,
 };
 
 /// Physical rows carry the population and pane coordinate alongside the logical value.
 /// These fields preserve identities which are implicit in a stored summary instance.
-pub fn population_schema(family: SummaryFamilyType) -> Schema {
-    Arc::new(SummarySchema {
+pub fn population_schema(family: FieldDataType) -> Schema {
+    Arc::new(LogicalSchema {
+        closed: true,
+        unique_keys: vec![],
         fields: vec![
-            planner_types::post_asap::SummaryField {
+            planner_types::post_asap::Field {
+                table: None,
                 name: "$population".into(),
-                dtype: SummaryFamilyType::Plain(DataType::Map {
+                dtype: FieldDataType::Plain(DataType::Map {
                     key: Box::new(DataType::Utf8),
                     value: Box::new(DataType::Utf8),
                     value_nullable: false,
                 }),
                 nullable: false,
             },
-            planner_types::post_asap::SummaryField {
+            planner_types::post_asap::Field {
+                table: None,
                 name: "$window_end".into(),
-                dtype: SummaryFamilyType::Plain(DataType::Timestamp),
+                dtype: FieldDataType::Plain(DataType::Timestamp),
                 nullable: false,
             },
-            planner_types::post_asap::SummaryField {
+            planner_types::post_asap::Field {
+                table: None,
                 name: "value".into(),
                 dtype: family,
                 nullable: false,
@@ -43,7 +48,7 @@ pub fn population_schema(family: SummaryFamilyType) -> Schema {
 /// must be canonical (sorted, unique, no empty values), since they are the
 /// population identity: build rows with [`raw_sample_row`].
 pub fn raw_sample_schema() -> Schema {
-    let mut schema = (*population_schema(SummaryFamilyType::Plain(DataType::Float64))).clone();
+    let mut schema = (*population_schema(FieldDataType::Plain(DataType::Float64))).clone();
     schema.fields[1].name = "$timestamp".into();
     Arc::new(schema)
 }
@@ -101,11 +106,11 @@ pub fn boundary_schema(node: &PostAsapDAGNode) -> Result<Schema, Error> {
         .iter()
         .enumerate()
         .all(|(i, field)| match &field.dtype {
-            SummaryFamilyType::Plain(DataType::Timestamp) => {
+            FieldDataType::Plain(DataType::Timestamp) => {
                 Some(i) == logical.time_index && !field.nullable
             }
-            SummaryFamilyType::Plain(DataType::Float64) => field.name == "value" && !field.nullable,
-            SummaryFamilyType::Plain(DataType::Utf8) => true,
+            FieldDataType::Plain(DataType::Float64) => field.name == "value" && !field.nullable,
+            FieldDataType::Plain(DataType::Utf8) => true,
             _ => false,
         })
         && !logical
@@ -123,18 +128,18 @@ pub fn boundary_schema(node: &PostAsapDAGNode) -> Result<Schema, Error> {
 }
 
 /// Validate the adapter layout during installed-plan recovery without lowering operators.
-pub fn source_schema(logical: &SummarySchema) -> Result<Schema, Error> {
+pub fn source_schema(logical: &LogicalSchema) -> Result<Schema, Error> {
     let states = logical
         .fields
         .iter()
-        .filter(|f| !matches!(f.dtype, SummaryFamilyType::Plain(_)))
+        .filter(|f| !matches!(f.dtype, FieldDataType::Plain(_)))
         .collect::<Vec<_>>();
     let [state] = states.as_slice() else {
         return Err(invalid(
             "stored population requires one typed summary state",
         ));
     };
-    if logical.fields.iter().enumerate().any(|(i, field)| matches!(&field.dtype, SummaryFamilyType::Plain(dtype)
+    if logical.fields.iter().enumerate().any(|(i, field)| matches!(&field.dtype, FieldDataType::Plain(dtype)
         if field.nullable || !matches!(dtype, DataType::Utf8) && !(Some(i) == logical.time_index && *dtype == DataType::Timestamp))) {
         return Err(invalid("stored population metadata cannot reconstruct extra value columns"));
     }
@@ -267,7 +272,7 @@ fn validate_value_output(node: &PostAsapDAGNode) -> Result<(), Error> {
     if identities.len() > 1
         || identities
             .iter()
-            .any(|field| field.nullable || field.dtype != SummaryFamilyType::Plain(DataType::Utf8))
+            .any(|field| field.nullable || field.dtype != FieldDataType::Plain(DataType::Utf8))
     {
         return Err(invalid(
             "precompute series identity requires one non-null Utf8 column",
@@ -279,11 +284,12 @@ fn validate_value_output(node: &PostAsapDAGNode) -> Result<(), Error> {
         .enumerate()
         .filter(|(i, field)| Some(*i) != schema.time_index && field.name != identity)
         .collect::<Vec<_>>();
-    if !matches!(values.as_slice(), [(_, field)] if !field.nullable && field.dtype == SummaryFamilyType::Plain(DataType::Float64))
+    if !matches!(values.as_slice(), [(_, field)] if !field.nullable && field.dtype == FieldDataType::Plain(DataType::Float64))
         || schema.time_index.is_some_and(|i| {
-            schema.fields.get(i).is_none_or(|f| {
-                f.nullable || f.dtype != SummaryFamilyType::Plain(DataType::Timestamp)
-            })
+            schema
+                .fields
+                .get(i)
+                .is_none_or(|f| f.nullable || f.dtype != FieldDataType::Plain(DataType::Timestamp))
         })
     {
         return Err(invalid(
@@ -343,13 +349,12 @@ fn fragment(
             };
             validate_value_output(node)?;
             let statistic = match &input.fields[2].dtype {
-                SummaryFamilyType::ExactAggregate(planner_types::post_asap::ExactKind::Sum, _) => {
+                FieldDataType::ExactAggregate(planner_types::post_asap::ExactKind::Sum, _) => {
                     crate::Statistic::Sum
                 }
-                SummaryFamilyType::ExactAggregate(
-                    planner_types::post_asap::ExactKind::Count,
-                    _,
-                ) => crate::Statistic::Count,
+                FieldDataType::ExactAggregate(planner_types::post_asap::ExactKind::Count, _) => {
+                    crate::Statistic::Count
+                }
                 _ => {
                     return Err(invalid(
                         "precompute finalization requires explicit Sum or Count semantics",
@@ -377,9 +382,7 @@ fn fragment(
                     ),
                 ],
             )?
-            .with_output_schema(population_schema(SummaryFamilyType::Plain(
-                DataType::Float64,
-            )))?;
+            .with_output_schema(population_schema(FieldDataType::Plain(DataType::Float64)))?;
             add(vec![read], project)?
         }
         Payload::SummaryAgg {
@@ -403,7 +406,7 @@ fn fragment(
             // A unit-frequency summary (HLL) observes each raw sample value.
             let unit_frequency = raw
                 && crate::capability::is_unit_sample_frequency(update)
-                && matches!(family, SummaryFamilyType::Sketch(kind, _) if !matches!(
+                && matches!(family, FieldDataType::Sketch(kind, _) if !matches!(
                     kind.algorithm(),
                     planner_types::post_asap::SketchAlgorithm::Cms
                         | planner_types::post_asap::SketchAlgorithm::CountSketch
@@ -431,7 +434,7 @@ fn fragment(
                 ));
             }
             if keyed
-                && matches!(family, SummaryFamilyType::Sketch(kind, _) if kind.algorithm() == &planner_types::post_asap::SketchAlgorithm::CmsWithHeap)
+                && matches!(family, FieldDataType::Sketch(kind, _) if kind.algorithm() == &planner_types::post_asap::SketchAlgorithm::CmsWithHeap)
                 && !matches!(
                     update.weight_domain,
                     planner_types::post_asap::WeightDomain::NonNegative { .. }
@@ -456,7 +459,7 @@ fn fragment(
                                 .filter(|field| {
                                     (raw || !field.nullable)
                                         && field.name != SERIES_IDENTITY
-                                        && field.dtype == SummaryFamilyType::Plain(DataType::Utf8)
+                                        && field.dtype == FieldDataType::Plain(DataType::Utf8)
                                 })
                                 .map(|f| f.name.clone())
                                 .ok_or_else(|| {
@@ -476,7 +479,7 @@ fn fragment(
                 SummaryInputExpr::Column(ColumnRef::SampleValue) => Expression::Column(2),
                 SummaryInputExpr::Column(ColumnRef::Named(name))
                     if parents[0].output_schema.fields.iter().any(|f| {
-                        f.name == *name && f.dtype == SummaryFamilyType::Plain(DataType::Float64)
+                        f.name == *name && f.dtype == FieldDataType::Plain(DataType::Float64)
                     }) =>
                 {
                     Expression::Column(2)
@@ -492,7 +495,7 @@ fn fragment(
                 ("$window_end".into(), Expression::Column(1)),
                 ("value".into(), Expression::FiniteFloat64(Box::new(weight))),
             ];
-            let mut fields = population_schema(SummaryFamilyType::Plain(DataType::Float64))
+            let mut fields = population_schema(FieldDataType::Plain(DataType::Float64))
                 .fields
                 .clone();
             if keyed {
@@ -504,9 +507,10 @@ fn fragment(
                 )?;
                 for (index, (expression, dtype)) in items.into_iter().enumerate() {
                     let name = format!("$item{index}");
-                    fields.push(planner_types::post_asap::SummaryField {
+                    fields.push(planner_types::post_asap::Field {
+                        table: None,
                         name: name.clone(),
-                        dtype: SummaryFamilyType::Plain(dtype),
+                        dtype: FieldDataType::Plain(dtype),
                         nullable: false,
                     });
                     columns.push((name, expression));
@@ -514,7 +518,9 @@ fn fragment(
             }
             let item_columns = (3..fields.len()).collect::<Vec<_>>();
             let project = Operator::project(input.clone(), columns)?.with_output_schema(
-                Arc::new(SummarySchema {
+                Arc::new(LogicalSchema {
+                    closed: true,
+                    unique_keys: vec![],
                     fields,
                     time_index: Some(1),
                 }),
@@ -566,7 +572,7 @@ fn fragment(
 /// of the label set less excluded labels.
 fn raw_items(
     expr: &SummaryInputExpr,
-    scan: &SummarySchema,
+    scan: &LogicalSchema,
     items: &mut Vec<(Expression, DataType)>,
 ) -> Result<(), Error> {
     // Open PromQL scans need not list every label, so any name that is not
@@ -575,7 +581,7 @@ fn raw_items(
         ColumnRef::Named(name) | ColumnRef::Qualified { name, .. }
             if !name.starts_with('$')
                 && scan.fields.iter().all(|f| {
-                    &f.name != name || f.dtype == SummaryFamilyType::Plain(DataType::Utf8)
+                    &f.name != name || f.dtype == FieldDataType::Plain(DataType::Utf8)
                 }) =>
         {
             Some(name.clone())

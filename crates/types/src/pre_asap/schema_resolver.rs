@@ -13,7 +13,7 @@
 
 use super::expr_ir::ColumnRef;
 use super::query_expr::UnresolvedQueryExpr;
-use super::schema::{Column, DataType, Schema};
+use super::schema::{DataType, Field, Schema};
 
 /// The DB / source-schema metadata source — resolves a source (metric /
 /// table) name to its known columns.
@@ -29,7 +29,7 @@ use super::schema::{Column, DataType, Schema};
 pub trait SchemaCatalog {
     /// Columns known for `source`. `None` when unknown — the [`SchemaResolver`] then
     /// falls back to a usage-derived column set.
-    fn columns_for(&self, source: &str) -> Option<Vec<Column>>;
+    fn columns_for(&self, source: &str) -> Option<Vec<Field>>;
 }
 
 /// The default catalog: knows nothing. Every schema the [`SchemaResolver`] produces
@@ -37,7 +37,7 @@ pub trait SchemaCatalog {
 pub struct UsageDerivedCatalog;
 
 impl SchemaCatalog for UsageDerivedCatalog {
-    fn columns_for(&self, _source: &str) -> Option<Vec<Column>> {
+    fn columns_for(&self, _source: &str) -> Option<Vec<Field>> {
         None
     }
 }
@@ -86,7 +86,7 @@ impl<C: SchemaCatalog> SchemaResolver<C> {
         dag: &UnresolvedQueryExpr,
         inherited: &[String],
     ) -> Schema {
-        let mut columns: Vec<Column> = leftmost_scan_name(dag)
+        let mut columns: Vec<Field> = leftmost_scan_name(tree)
             .and_then(|name| self.catalog.columns_for(name))
             .unwrap_or_else(default_leaf_columns);
 
@@ -102,13 +102,13 @@ impl<C: SchemaCatalog> SchemaResolver<C> {
         let referenced = collect_referenced_columns(dag);
         for name in referenced.iter().chain(inherited) {
             if !columns.iter().any(|c| c.name == *name) {
-                columns.push(Column::new(name.clone(), DataType::Utf8, true));
+                columns.push(Field::plain(name.clone(), DataType::Utf8, true));
             }
         }
 
         let time_index = columns.iter().position(|c| c.name == "ts");
         Schema {
-            columns,
+            fields: columns,
             time_index,
             unique_keys: Vec::new(),
             // Usage-derived (schemaless PromQL): the metric's full label set is
@@ -119,10 +119,10 @@ impl<C: SchemaCatalog> SchemaResolver<C> {
 }
 
 /// The conventional PromQL leaf shape: `(ts: Timestamp, value: Float64)`.
-fn default_leaf_columns() -> Vec<Column> {
+fn default_leaf_columns() -> Vec<Field> {
     vec![
-        Column::new("ts", DataType::Timestamp, false),
-        Column::new("value", DataType::Float64, false),
+        Field::plain("ts", DataType::Timestamp, false),
+        Field::plain("value", DataType::Float64, false),
     ]
 }
 
@@ -410,9 +410,9 @@ mod tests {
     #[test]
     fn bare_source_yields_ts_value_floor() {
         let schema = SchemaResolver::new().resolve_schema(&src("m"));
-        assert_eq!(schema.columns.len(), 2);
-        assert_eq!(schema.columns[0].name, "ts");
-        assert_eq!(schema.columns[1].name, "value");
+        assert_eq!(schema.fields.len(), 2);
+        assert_eq!(schema.fields[0].name, "ts");
+        assert_eq!(schema.fields[1].name, "value");
         assert_eq!(schema.time_index, Some(0));
     }
 
@@ -473,12 +473,12 @@ mod tests {
     fn custom_catalog_supplies_base_columns() {
         struct FixedCatalog;
         impl SchemaCatalog for FixedCatalog {
-            fn columns_for(&self, source: &str) -> Option<Vec<Column>> {
+            fn columns_for(&self, source: &str) -> Option<Vec<Field>> {
                 (source == "known").then(|| {
                     vec![
-                        Column::new("ts", DataType::Timestamp, false),
-                        Column::new("value", DataType::Float64, false),
-                        Column::new("datacenter", DataType::Utf8, false),
+                        Field::plain("ts", DataType::Timestamp, false),
+                        Field::plain("value", DataType::Float64, false),
+                        Field::plain("datacenter", DataType::Utf8, false),
                     ]
                 })
             }
@@ -486,7 +486,7 @@ mod tests {
         let schema = SchemaResolver::with_catalog(FixedCatalog).resolve_schema(&src("known"));
         let dc = schema
             .column_id("datacenter")
-            .and_then(|id| schema.columns.get(id));
+            .and_then(|id| schema.fields.get(id));
         assert!(matches!(dc, Some(c) if !c.nullable));
     }
 }

@@ -274,7 +274,7 @@ fn continuous_lifecycle_compiles_and_executes_spatial_kll() {
         values::{Batch, Value},
     };
     use asap_types::{
-        post_asap::{compile_post_asap_dag, PostAsapOperatorPayload, SummaryFamilyType},
+        post_asap::{compile_post_asap_dag, FieldDataType, PostAsapOperatorPayload},
         pre_asap::DataType,
     };
     use std::{collections::BTreeMap, sync::Arc};
@@ -365,10 +365,8 @@ fn continuous_lifecycle_compiles_and_executes_spatial_kll() {
                     .fields
                     .iter()
                     .map(|field| match field.dtype {
-                        SummaryFamilyType::Plain(DataType::Float64) => {
-                            Value::Float64(f64::from(value))
-                        }
-                        SummaryFamilyType::Plain(DataType::Timestamp) => Value::Timestamp(300_000),
+                        FieldDataType::Plain(DataType::Float64) => Value::Float64(f64::from(value)),
+                        FieldDataType::Plain(DataType::Timestamp) => Value::Timestamp(300_000),
                         _ => panic!("unexpected field {field:?}"),
                     })
                     .collect()
@@ -544,7 +542,7 @@ fn chosen_lifecycle_timing_decides_precompute_contents() {
         runtime::Scope,
         values::{Batch, Value},
     };
-    use asap_types::{post_asap::SummaryFamilyType, pre_asap::DataType};
+    use asap_types::{post_asap::FieldDataType, pre_asap::DataType};
     use std::collections::BTreeMap;
 
     let mut answers = Vec::new();
@@ -568,10 +566,8 @@ fn chosen_lifecycle_timing_decides_precompute_contents() {
                     .fields
                     .iter()
                     .map(|field| match field.dtype {
-                        SummaryFamilyType::Plain(DataType::Float64) => {
-                            Value::Float64(f64::from(value))
-                        }
-                        SummaryFamilyType::Plain(DataType::Timestamp) => Value::Timestamp(300_000),
+                        FieldDataType::Plain(DataType::Float64) => Value::Float64(f64::from(value)),
+                        FieldDataType::Plain(DataType::Timestamp) => Value::Timestamp(300_000),
                         _ => panic!("unexpected field {field:?}"),
                     })
                     .collect()
@@ -840,9 +836,7 @@ fn chosen_population_lifecycle_decides_precompute_contents() {
 fn grouped_rate_sum_placement_is_a_lifecycle_choice() {
     use asap_aware_mapping::enumerate_summary_maintenance_lifecycles;
     use asap_physical_operators::physical_planner::{compile_candidate, InputContract};
-    use asap_types::post_asap::{
-        ExactKind, PostAsapOperatorPayload, SummaryExpr, SummaryFamilyType,
-    };
+    use asap_types::post_asap::{ExactKind, FieldDataType, PostAsapOperatorPayload, SummaryExpr};
     use std::{collections::BTreeMap, sync::Arc};
 
     let workload = quantile_workload("sum by(job)(rate(m[1m]))");
@@ -854,7 +848,7 @@ fn grouped_rate_sum_placement_is_a_lifecycle_choice() {
     );
     let is_exact = |node: &SummaryNode, kind: ExactKind| {
         matches!(&node.expr, SummaryExpr::SummaryAgg {
-            family: SummaryFamilyType::ExactAggregate(k, _), ..
+            family: FieldDataType::ExactAggregate(k, _), ..
         } if *k == kind)
     };
     let inventory = asap_aware_mapping::search_workload(vec![("q", root)])
@@ -952,7 +946,7 @@ fn grouped_rate_sum_placement_is_a_lifecycle_choice() {
     };
     let state = |payload: &PostAsapOperatorPayload, kind: ExactKind| {
         matches!(payload, PostAsapOperatorPayload::SummaryAgg {
-            family: SummaryFamilyType::ExactAggregate(k, _), ..
+            family: FieldDataType::ExactAggregate(k, _), ..
         } if *k == kind)
     };
     assert!(state(retained, ExactKind::Sum));

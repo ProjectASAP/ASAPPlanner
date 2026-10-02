@@ -10,8 +10,8 @@ use crate::{
 };
 use planner_types::{
     post_asap::{
-        ExactOperation, PostAsapDAG, PostAsapDAGNode, PostAsapOperatorPayload as Payload,
-        SketchQuery, SummaryFamilyType, SummaryInputExpr, ValueOperation,
+        ExactOperation, FieldDataType, PostAsapDAG, PostAsapDAGNode,
+        PostAsapOperatorPayload as Payload, SketchQuery, SummaryInputExpr, ValueOperation,
     },
     pre_asap::{
         AggIntent, ColumnRef, CompareOpKind, DataType, GroupKeys, QueryExpr,
@@ -499,7 +499,7 @@ fn compile_internal(
                     schema
                         .fields
                         .iter()
-                        .any(|f| matches!(f.dtype, SummaryFamilyType::Plain(DataType::Map { .. })))
+                        .any(|f| matches!(f.dtype, FieldDataType::Plain(DataType::Map { .. })))
                 };
                 // Grouped rows carry their labels as columns; per-series rows
                 // carry the series identity.
@@ -534,8 +534,8 @@ fn compile_internal(
                     .map_err(|error| invalid(format!("node {id}: {error}")))?;
                 let actual = readout.schema();
                 let converted = actual.fields.iter().zip(&output.fields).position(|(a, d)| {
-                    a.dtype == SummaryFamilyType::Plain(DataType::Int64)
-                        && d.dtype == SummaryFamilyType::Plain(DataType::Float64)
+                    a.dtype == FieldDataType::Plain(DataType::Int64)
+                        && d.dtype == FieldDataType::Plain(DataType::Float64)
                 });
                 if let Some(column) = converted {
                     let columns = actual
@@ -654,7 +654,7 @@ fn bind_operation(node: &PostAsapDAGNode, inputs: &[Schema]) -> Result<Operator,
                     .enumerate()
                     .filter(|(_, field)| {
                         field.dtype
-                            == SummaryFamilyType::Plain(planner_types::pre_asap::DataType::Float64)
+                            == FieldDataType::Plain(planner_types::pre_asap::DataType::Float64)
                     })
                     .map(|(i, _)| i)
                     .collect::<Vec<_>>();
@@ -834,7 +834,7 @@ fn bind_operation(node: &PostAsapDAGNode, inputs: &[Schema]) -> Result<Operator,
                 use crate::Statistic as S;
                 use planner_types::post_asap::ExactKind as E;
                 let statistic = match &input.fields[state].dtype {
-                    SummaryFamilyType::ExactAggregate(kind, _) => match kind {
+                    FieldDataType::ExactAggregate(kind, _) => match kind {
                         E::Sum => S::Sum,
                         E::Count => S::Count,
                         E::Min => S::Min,
@@ -877,7 +877,7 @@ fn bind_operation(node: &PostAsapDAGNode, inputs: &[Schema]) -> Result<Operator,
                         "keyed summary weight must be a finalized value column",
                     ));
                 };
-                if matches!(family, SummaryFamilyType::Sketch(kind, _) if kind.algorithm() == &planner_types::post_asap::SketchAlgorithm::CmsWithHeap)
+                if matches!(family, FieldDataType::Sketch(kind, _) if kind.algorithm() == &planner_types::post_asap::SketchAlgorithm::CmsWithHeap)
                     && !matches!(
                         update.weight_domain,
                         planner_types::post_asap::WeightDomain::NonNegative { .. }
@@ -968,7 +968,7 @@ fn summary_column(input: &Schema) -> Result<usize, Error> {
         .fields
         .iter()
         .enumerate()
-        .filter(|(_, f)| !matches!(f.dtype, SummaryFamilyType::Plain(_)))
+        .filter(|(_, f)| !matches!(f.dtype, FieldDataType::Plain(_)))
         .map(|(i, _)| i)
         .collect::<Vec<_>>();
     match columns.as_slice() {
@@ -978,7 +978,7 @@ fn summary_column(input: &Schema) -> Result<usize, Error> {
 }
 fn named_column(input: &Schema, column: &ColumnRef) -> Result<usize, Error> {
     let name = match column {
-        // Executable SummarySchema retains column names, not table qualifiers.
+        // Executable Schema as LogicalSchema retains column names, not table qualifiers.
         // Frontend binding has resolved the qualifier; still reject ambiguous
         // names here rather than guessing a join side.
         ColumnRef::Named(name) | ColumnRef::Qualified { name, .. } => name.as_str(),
@@ -1145,8 +1145,8 @@ fn semi_join_keys(
 /// Deployments may use these positions to bind their source columns.
 pub fn equijoin_keys(
     pred: &planner_types::pre_asap::Predicate,
-    left: &planner_types::post_asap::SummarySchema,
-    right: &planner_types::post_asap::SummarySchema,
+    left: &planner_types::post_asap::Schema,
+    right: &planner_types::post_asap::Schema,
 ) -> Result<Vec<(usize, usize)>, Error> {
     let mut keys = Vec::new();
     semi_join_keys(&pred.0, left.fields.len(), right.fields.len(), &mut keys)?;

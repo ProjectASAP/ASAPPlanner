@@ -8,17 +8,20 @@ use asap_physical_operators::{
 };
 use futures::{executor::block_on, FutureExt, StreamExt};
 use planner_types::{
-    post_asap::{SummaryFamilyType, SummaryField, SummarySchema},
+    post_asap::{Field, FieldDataType, Schema as LogicalSchema},
     pre_asap::{DataType, JoinKind, Predicate, QueryExpr, ScalarValue},
 };
 use std::sync::Arc;
 
 fn schema(width: usize) -> Schema {
-    Arc::new(SummarySchema {
+    Arc::new(LogicalSchema {
+        closed: true,
+        unique_keys: vec![],
         fields: (0..width)
-            .map(|i| SummaryField {
+            .map(|i| Field {
+                table: None,
                 name: format!("v{i}"),
-                dtype: SummaryFamilyType::Plain(DataType::Int64),
+                dtype: FieldDataType::Plain(DataType::Int64),
                 nullable: false,
             })
             .collect(),
@@ -186,16 +189,20 @@ fn cooperative_sort_preserves_ties_across_chunks() {
 #[test]
 fn weighted_summary_build_yields_within_a_batch() {
     use planner_types::post_asap::{SketchAlgorithm, SketchKind, SketchParams};
-    let input = Arc::new(SummarySchema {
+    let input = Arc::new(LogicalSchema {
+        closed: true,
+        unique_keys: vec![],
         fields: vec![
-            SummaryField {
+            Field {
+                table: None,
                 name: "item".into(),
-                dtype: SummaryFamilyType::Plain(DataType::Int64),
+                dtype: FieldDataType::Plain(DataType::Int64),
                 nullable: false,
             },
-            SummaryField {
+            Field {
+                table: None,
                 name: "weight".into(),
-                dtype: SummaryFamilyType::Plain(DataType::Float64),
+                dtype: FieldDataType::Plain(DataType::Float64),
                 nullable: false,
             },
         ],
@@ -216,7 +223,7 @@ fn weighted_summary_build_yields_within_a_batch() {
             Operator::source(input.clone(), vec![batch]).unwrap(),
         )
         .unwrap();
-    let family = SummaryFamilyType::Sketch(
+    let family = FieldDataType::Sketch(
         SketchKind::new(
             SketchAlgorithm::CmsWithHeap,
             SketchParams::CmsWithHeap {

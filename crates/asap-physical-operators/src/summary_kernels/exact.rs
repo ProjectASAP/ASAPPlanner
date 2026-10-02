@@ -2,7 +2,7 @@
 use super::increase::IncreaseAccumulator;
 use crate::Statistic;
 use crate::{AggregateCore, KeyByLabelValues, Measurement};
-use planner_types::post_asap::{ExactKind, ExactParams, SummaryFamilyType};
+use planner_types::post_asap::{ExactKind, ExactParams, FieldDataType};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -26,14 +26,14 @@ enum ScalarState {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(try_from = "ExactPayload")]
 pub struct ExactAccumulator {
-    family: SummaryFamilyType,
+    family: FieldDataType,
     scalar: ScalarState,
     keyed: Option<HashMap<KeyByLabelValues, ScalarState>>,
 }
 
 #[derive(Deserialize)]
 struct ExactPayload {
-    family: SummaryFamilyType,
+    family: FieldDataType,
     scalar: ScalarState,
     keyed: Option<HashMap<KeyByLabelValues, ScalarState>>,
 }
@@ -128,21 +128,19 @@ impl ExactAccumulator {
         Ok(())
     }
 
-    pub fn new(family: SummaryFamilyType, keyed: bool) -> Result<Self, String> {
+    pub fn new(family: FieldDataType, keyed: bool) -> Result<Self, String> {
         use ExactKind as K;
         use ExactParams as P;
         let scalar = match &family {
-            SummaryFamilyType::ExactAggregate(K::Sum, P::Sum) => ScalarState::Sum {
+            FieldDataType::ExactAggregate(K::Sum, P::Sum) => ScalarState::Sum {
                 sum: 0.0,
                 compensation: 0.0,
             },
-            SummaryFamilyType::ExactAggregate(K::Count, P::Count) => ScalarState::Count(0),
-            SummaryFamilyType::ExactAggregate(K::Min, P::Min) => ScalarState::Min(None),
-            SummaryFamilyType::ExactAggregate(K::Max, P::Max) => ScalarState::Max(None),
-            SummaryFamilyType::ExactAggregate(K::Rate, P::Rate)
-            | SummaryFamilyType::ExactAggregate(K::Increase, P::Increase) => {
-                ScalarState::Counter(None)
-            }
+            FieldDataType::ExactAggregate(K::Count, P::Count) => ScalarState::Count(0),
+            FieldDataType::ExactAggregate(K::Min, P::Min) => ScalarState::Min(None),
+            FieldDataType::ExactAggregate(K::Max, P::Max) => ScalarState::Max(None),
+            FieldDataType::ExactAggregate(K::Rate, P::Rate)
+            | FieldDataType::ExactAggregate(K::Increase, P::Increase) => ScalarState::Counter(None),
             _ => return Err(format!("unsupported exact Planner family: {family:?}")),
         };
         Ok(Self {
@@ -152,7 +150,7 @@ impl ExactAccumulator {
         })
     }
 
-    pub fn family(&self) -> &SummaryFamilyType {
+    pub fn family(&self) -> &FieldDataType {
         &self.family
     }
     pub(crate) fn insufficient_counter_samples(
@@ -216,12 +214,12 @@ impl ExactAccumulator {
 
     fn statistic(&self) -> Statistic {
         match self.family {
-            SummaryFamilyType::ExactAggregate(ExactKind::Sum, _) => Statistic::Sum,
-            SummaryFamilyType::ExactAggregate(ExactKind::Count, _) => Statistic::Count,
-            SummaryFamilyType::ExactAggregate(ExactKind::Min, _) => Statistic::Min,
-            SummaryFamilyType::ExactAggregate(ExactKind::Max, _) => Statistic::Max,
-            SummaryFamilyType::ExactAggregate(ExactKind::Rate, _) => Statistic::Rate,
-            SummaryFamilyType::ExactAggregate(ExactKind::Increase, _) => Statistic::Increase,
+            FieldDataType::ExactAggregate(ExactKind::Sum, _) => Statistic::Sum,
+            FieldDataType::ExactAggregate(ExactKind::Count, _) => Statistic::Count,
+            FieldDataType::ExactAggregate(ExactKind::Min, _) => Statistic::Min,
+            FieldDataType::ExactAggregate(ExactKind::Max, _) => Statistic::Max,
+            FieldDataType::ExactAggregate(ExactKind::Rate, _) => Statistic::Rate,
+            FieldDataType::ExactAggregate(ExactKind::Increase, _) => Statistic::Increase,
             _ => unreachable!("validated exact family"),
         }
     }
@@ -313,7 +311,7 @@ mod tests {
 
     #[derive(Serialize)]
     struct Payload {
-        family: SummaryFamilyType,
+        family: FieldDataType,
         scalar: ScalarState,
         keyed: Option<HashMap<KeyByLabelValues, ScalarState>>,
     }
@@ -322,8 +320,8 @@ mod tests {
         rmp_serde::from_slice(&rmp_serde::to_vec_named(payload).unwrap())
     }
 
-    fn sum() -> SummaryFamilyType {
-        SummaryFamilyType::ExactAggregate(ExactKind::Sum, ExactParams::Sum)
+    fn sum() -> FieldDataType {
+        FieldDataType::ExactAggregate(ExactKind::Sum, ExactParams::Sum)
     }
 
     // Stored Sum preserves low-order increments across updates, persistence and pane merge.
@@ -402,7 +400,7 @@ mod tests {
     #[test]
     fn decode_rejects_unsupported_family() {
         let payload = Payload {
-            family: SummaryFamilyType::ExactAggregate(ExactKind::Sum, ExactParams::Count),
+            family: FieldDataType::ExactAggregate(ExactKind::Sum, ExactParams::Count),
             scalar: ScalarState::Sum {
                 sum: 0.0,
                 compensation: 0.0,

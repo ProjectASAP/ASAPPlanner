@@ -9,11 +9,14 @@ use asap_physical_operators::{
     values::{Batch, Value},
 };
 use futures::{executor::block_on, StreamExt};
+use planner_types::pre_asap::Schema as LogicalSchema;
 use planner_types::{post_asap::*, pre_asap::DataType};
 use std::{collections::BTreeMap, sync::Arc};
 
-fn schema() -> Arc<SummarySchema> {
-    Arc::new(SummarySchema {
+fn schema() -> Arc<LogicalSchema> {
+    Arc::new(LogicalSchema {
+        closed: true,
+        unique_keys: vec![],
         fields: [
             ("ts", DataType::Timestamp),
             ("value", DataType::Float64),
@@ -21,9 +24,10 @@ fn schema() -> Arc<SummarySchema> {
             (SERIES_IDENTITY_COLUMN, DataType::Utf8),
         ]
         .into_iter()
-        .map(|(name, dtype)| SummaryField {
+        .map(|(name, dtype)| Field {
+            table: None,
             name: name.into(),
-            dtype: SummaryFamilyType::Plain(dtype),
+            dtype: FieldDataType::Plain(dtype),
             nullable: false,
         })
         .collect(),
@@ -163,10 +167,11 @@ fn spatial_heap_ranks_latest_values_in_independent_runs() {
                 heap_size: 100,
             },
         };
-        let family =
-            SummaryFamilyType::Sketch(SketchKind::new(algorithm, params), Default::default());
+        let family = FieldDataType::Sketch(SketchKind::new(algorithm, params), Default::default());
         let build = Operator::keyed_summary_build(schema(), family, 1, vec![3], vec![2]).unwrap();
-        let output = Arc::new(SummarySchema {
+        let output = Arc::new(LogicalSchema {
+            closed: true,
+            unique_keys: vec![],
             fields: vec![
                 schema().fields[2].clone(),
                 schema().fields[3].clone(),

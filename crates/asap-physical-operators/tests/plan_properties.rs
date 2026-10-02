@@ -8,8 +8,8 @@ use asap_physical_operators::{
     Error,
 };
 use planner_types::{
-    post_asap::{SummaryFamilyType, SummaryField, SummarySchema},
-    pre_asap::{Column, DataType, QueryExpr, Schema as LogicalSchema, Source},
+    post_asap::{Field, FieldDataType, Schema as LogicalSchema},
+    pre_asap::{DataType, QueryExpr, Source},
 };
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
@@ -35,10 +35,13 @@ impl RawSource for DeclaredSource {
 // A blocking parent must reject unknown and unbounded Scan inputs without opening a reader.
 #[test]
 fn blocking_inputs_require_an_explicit_finite_source() {
-    let schema = Arc::new(SummarySchema {
-        fields: vec![SummaryField {
+    let schema = Arc::new(LogicalSchema {
+        closed: true,
+        unique_keys: vec![],
+        fields: vec![Field {
+            table: None,
             name: "v".into(),
-            dtype: SummaryFamilyType::Plain(DataType::Int64),
+            dtype: FieldDataType::Plain(DataType::Int64),
             nullable: false,
         }],
         time_index: None,
@@ -66,7 +69,7 @@ fn blocking_inputs_require_an_explicit_finite_source() {
         let scan = registry
             .bind(&QueryExpr::Scan {
                 source: identity,
-                schema: LogicalSchema::new(vec![Column::new("v", DataType::Int64, false)]),
+                schema: LogicalSchema::new(vec![Field::plain("v", DataType::Int64, false)]),
                 predicates: vec![],
             })
             .unwrap();
@@ -121,7 +124,7 @@ fn summary_capability_levels_are_distinct() {
         pre_asap::ColumnRef,
     };
     let grouping = GroupingStrategy::default();
-    let cms = SummaryFamilyType::Sketch(
+    let cms = FieldDataType::Sketch(
         SketchKind::new(
             SketchAlgorithm::Cms,
             SketchParams::Cms {
@@ -154,7 +157,7 @@ fn summary_capability_levels_are_distinct() {
         }
     )
     .is_err());
-    let kll = SummaryFamilyType::Sketch(
+    let kll = FieldDataType::Sketch(
         SketchKind::new(SketchAlgorithm::Kll, SketchParams::Kll { k: 128 }),
         grouping,
     );

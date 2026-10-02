@@ -250,7 +250,7 @@ pub fn share_common_summary_sub_dags<Id>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::post_asap::{ResultGuarantee, SummarySchema};
+    use crate::post_asap::{ResultGuarantee, Schema};
     use crate::pre_asap::{QueryExpr, ScalarValue};
 
     fn leaf(value: f64) -> Rc<SummaryNode> {
@@ -258,10 +258,7 @@ mod tests {
             expr: SummaryExpr::KeepPreAsap(Rc::new(QueryExpr::Literal(ScalarValue::Float64(
                 value,
             )))),
-            schema: SummarySchema {
-                fields: vec![],
-                time_index: None,
-            },
+            schema: Schema::lifted(vec![], None),
             guarantee: Some(ResultGuarantee::exact("fixture")),
         })
     }
@@ -283,10 +280,7 @@ mod tests {
                 timing: crate::post_asap::ExecutionTiming::IngestionTime,
                 children: vec![leaf(1.0), leaf(2.0)],
             },
-            schema: SummarySchema {
-                fields: vec![],
-                time_index: None,
-            },
+            schema: Schema::lifted(vec![], None),
             guarantee: None,
         });
         let roots = share_common_summary_sub_dags(vec![(0, leaf(1.0)), (1, merge)]);
@@ -361,15 +355,15 @@ mod tests {
     #[test]
     fn quantile_roots_share_producer_but_not_readout_or_parameters() {
         use crate::post_asap::{
-            GroupingStrategy, SketchAlgorithm, SketchKind, SketchParams, SketchQuery,
-            SummaryFamilyType, SummaryUpdate,
+            FieldDataType, GroupingStrategy, SketchAlgorithm, SketchKind, SketchParams,
+            SketchQuery, SummaryUpdate,
         };
         use crate::pre_asap::{ColumnRef, Reduction};
         fn readout(q: f64, alpha: f64) -> Rc<SummaryNode> {
             let producer = Rc::new(SummaryNode {
                 expr: SummaryExpr::SummaryAgg {
                     child: leaf(1.0),
-                    family: SummaryFamilyType::Sketch(
+                    family: FieldDataType::Sketch(
                         SketchKind::new(
                             SketchAlgorithm::DDSketch,
                             SketchParams::DDSketch { alpha },
@@ -381,10 +375,7 @@ mod tests {
                     grouping: GroupingStrategy::default(),
                     filter: None,
                 },
-                schema: SummarySchema {
-                    fields: vec![],
-                    time_index: None,
-                },
+                schema: Schema::lifted(vec![], None),
                 guarantee: None,
             });
             Rc::new(SummaryNode {
@@ -392,10 +383,7 @@ mod tests {
                     summary_input: producer,
                     query: SketchQuery::Quantile { q },
                 },
-                schema: SummarySchema {
-                    fields: vec![],
-                    time_index: None,
-                },
+                schema: Schema::lifted(vec![], None),
                 guarantee: None,
             })
         }
@@ -436,10 +424,7 @@ mod tests {
                                 vector_match: None,
                             },
                         },
-                        schema: super::super::SummarySchema {
-                            fields: vec![],
-                            time_index: None,
-                        },
+                        schema: super::super::Schema::lifted(vec![], None),
                         guarantee: None,
                     });
                 }

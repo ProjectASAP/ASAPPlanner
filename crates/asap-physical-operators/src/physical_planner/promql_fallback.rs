@@ -439,7 +439,7 @@ impl Lowering {
             .fields
             .iter()
             .enumerate()
-            .filter(|(_, f)| f.dtype == SummaryFamilyType::Plain(DataType::Float64))
+            .filter(|(_, f)| f.dtype == FieldDataType::Plain(DataType::Float64))
             .map(|(i, _)| i)
             .collect::<Vec<_>>();
         let [value] = value.as_slice() else {

@@ -44,7 +44,7 @@
 //!
 //! - [`ExplanationKind::SketchApproximation`] — the `TargetSubDAG`'s
 //!   candidate list contains at least one [`Replacement::Summary`] that
-//!   actually realizes a sketch family (`SummaryFamilyType::Sketch`), i.e.
+//!   actually realizes a sketch family (`FieldDataType::Sketch`), i.e.
 //!   [`SketchAlgorithmStrategy`] found something to offer beyond whatever
 //!   exact/pass-through candidate [`crate::replacement`]'s own
 //!   `realizations_for_intent` would have committed to on its own.
@@ -165,7 +165,7 @@
 //! | Roll-ups (fine-to-coarse group-by reuse) | [`RollupStrategy`](crate::rollup::RollupStrategy), derived from workload siblings after CSE/target discovery (issue #254) | Any `Replacement::Rewrite` candidate that rolls a coarse aggregate up from a compatible finer aggregate |
 //! | Wavelets/OMP | Params type exists (`WaveletKind`/`WaveletParams`), reachable only via a deployment `CostModel::realize_extension` (no core `AggIntent` dispatch picks it) | A `ReplacementStrategy` that inspects a deployment's own `CostModel`, once some intent shape actually maps to `Realization::Wavelet` |
 //! | Sampling | Same story as Wavelets: `SamplingKind`/`SamplingParams` exist, unreachable from core dispatch | Same hook as Wavelets, for `Realization::Sample` |
-//! | Deep generative compression | No representation at all — no `Realization`/`SummaryFamilyType` variant | Needs a new summary family added to `asap_types::post_asap` first |
+//! | Deep generative compression | No representation at all — no `Realization`/`FieldDataType` variant | Needs a new summary family added to `asap_types::post_asap` first |
 //! | Approximation frameworks for windows | No representation — `TimeRange`/`PromqlSubquery` windows are always evaluated exactly | Would key off those node types once an approximate-window operator exists |
 //! | Function decomposition | No representation anywhere | No hook point identified yet |
 //! | Continuous distributed monitoring | No representation — `RepeatingEntry`/`RepetitionInterval` in `asap_types::workload` describe *that* a query repeats, not any monitoring-specific decomposition | Would likely key off `RepeatingEntry` once such logic exists |
@@ -186,7 +186,7 @@ use std::collections::HashMap;
 use std::fmt::Display;
 use std::rc::Rc;
 
-use asap_types::post_asap::{SummaryExpr, SummaryFamilyType, SummaryNode};
+use asap_types::post_asap::{FieldDataType, SummaryExpr, SummaryNode};
 use asap_types::pre_asap::cse::{structural_hash, HashCache};
 use asap_types::pre_asap::query_expr::QueryExpr;
 
@@ -405,7 +405,7 @@ fn shared_subexpr_finding_reason(group: &TargetSubDAGCandidates) -> Option<Strin
 
 /// Does `node` (unwrapping any `SummaryEstimate` layer, the same shape
 /// [`crate::replacement`]'s own private `sketch_kind_of` unwraps) ultimately
-/// realize a [`SummaryFamilyType::Sketch`] family? This module only needs the
+/// realize a [`FieldDataType::Sketch`] family? This module only needs the
 /// yes/no fact (a candidate's own `rationale` already names the specific
 /// `SketchKind`/`SketchAlgorithm` for a finding's `reason` text), so unlike
 /// `replacement.rs`'s counterpart this returns `bool`, not the kind itself.
@@ -419,7 +419,7 @@ fn is_sketch_realization(node: &SummaryNode) -> bool {
     }
     match &node.expr {
         SummaryExpr::SummaryEstimate { summary_input, .. } => is_sketch_realization(summary_input),
-        SummaryExpr::SummaryAgg { family, .. } => matches!(family, SummaryFamilyType::Sketch(..)),
+        SummaryExpr::SummaryAgg { family, .. } => matches!(family, FieldDataType::Sketch(..)),
         _ => false,
     }
 }
@@ -516,15 +516,19 @@ mod tests {
     use super::*;
     use asap_types::pre_asap::agg_intent::{default_quantile, AggIntent};
     use asap_types::pre_asap::query_expr::{Reduction, Source};
-    use asap_types::pre_asap::schema::{Column, DataType, Schema};
+    use asap_types::pre_asap::schema::{DataType, Field, Schema};
     use asap_types::types::AccuracyTarget;
 
     fn metric_scan(labels: &[&str]) -> QueryExpr {
         let mut columns = vec![
-            Column::new("ts", DataType::Timestamp, false),
-            Column::new("value", DataType::Float64, false),
+            Field::plain("ts", DataType::Timestamp, false),
+            Field::plain("value", DataType::Float64, false),
         ];
-        columns.extend(labels.iter().map(|n| Column::new(*n, DataType::Utf8, true)));
+        columns.extend(
+            labels
+                .iter()
+                .map(|n| Field::plain(*n, DataType::Utf8, true)),
+        );
         QueryExpr::Scan {
             source: Source::TimeSeries { metric: "m".into() },
             predicates: vec![],

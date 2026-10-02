@@ -7,6 +7,7 @@ use asap_physical_operators::{
     values::{Batch, Value},
 };
 use futures::{executor::block_on, StreamExt};
+use planner_types::pre_asap::Schema as LogicalSchema;
 use planner_types::{post_asap::*, pre_asap::QueryExpr, types::AccuracyTarget, workload::*};
 use std::{collections::BTreeMap, rc::Rc, sync::Arc};
 
@@ -57,7 +58,7 @@ fn exact_dag(query: &str) -> PostAsapDAG {
                 let dag = compile_post_asap_dag(&node).ok()?;
                 dag.nodes
                     .iter()
-                    .all(|n| !matches!(&n.payload, PostAsapOperatorPayload::SummaryAgg { family, .. } if !matches!(family, SummaryFamilyType::ExactAggregate(..))))
+                    .all(|n| !matches!(&n.payload, PostAsapOperatorPayload::SummaryAgg { family, .. } if !matches!(family, FieldDataType::ExactAggregate(..))))
                     .then_some(dag)
             }
             _ => None,
@@ -76,7 +77,7 @@ fn population_dag(query: &str) -> PostAsapDAG {
 }
 
 /// Raw scan nodes are the frontier; everything above them is compiled.
-fn raw_inputs(dag: &PostAsapDAG) -> Vec<(u64, Arc<SummarySchema>, String)> {
+fn raw_inputs(dag: &PostAsapDAG) -> Vec<(u64, Arc<LogicalSchema>, String)> {
     dag.nodes
         .iter()
         .filter_map(|node| match &node.payload {
@@ -338,7 +339,7 @@ fn exact_count_finalizes_to_declared_float_value() {
     read.id = PostAsapNodeId(root.id.0 + 1);
     read.output_schema = root.output_schema.clone();
     read.output_schema.fields.last_mut().unwrap().dtype =
-        SummaryFamilyType::Plain(planner_types::pre_asap::DataType::Float64);
+        FieldDataType::Plain(planner_types::pre_asap::DataType::Float64);
     edge.producer = root.id;
     edge.consumer = read.id;
     edge.intermediate_schema = root.output_schema.clone();
@@ -644,7 +645,7 @@ fn stored_count_min_bare_count_compiles_to_a_readout() {
                     });
                     let count_min = dag.nodes.iter().any(|n| {
                         matches!(&n.payload, PostAsapOperatorPayload::SummaryAgg {
-                        family: SummaryFamilyType::Sketch(kind, _), ..
+                        family: FieldDataType::Sketch(kind, _), ..
                     } if kind.algorithm() == &SketchAlgorithm::Cms)
                     });
                     (bare_count && count_min).then_some(dag)
@@ -658,7 +659,7 @@ fn stored_count_min_bare_count_compiles_to_a_readout() {
         .find(|n| matches!(n.payload, PostAsapOperatorPayload::SummaryAgg { .. }))
         .unwrap();
     let PostAsapOperatorPayload::SummaryAgg {
-        family: SummaryFamilyType::Sketch(kind, _),
+        family: FieldDataType::Sketch(kind, _),
         ..
     } = &state.payload
     else {
@@ -686,7 +687,7 @@ fn stored_count_min_bare_count_compiles_to_a_readout() {
         .fields
         .iter()
         .map(|field| match &field.dtype {
-            SummaryFamilyType::Plain(_) => panic!("unexpected stored column {field:?}"),
+            FieldDataType::Plain(_) => panic!("unexpected stored column {field:?}"),
             family => Value::Summary {
                 family: family.clone(),
                 state: Arc::new(sketch.clone()),

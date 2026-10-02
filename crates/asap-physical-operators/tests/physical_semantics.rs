@@ -10,18 +10,21 @@ use asap_physical_operators::{
 };
 use futures::{executor::block_on, StreamExt};
 use planner_types::{
-    post_asap::{SummaryFamilyType, SummaryField, SummarySchema},
+    post_asap::{Field, FieldDataType, Schema as LogicalSchema},
     pre_asap::{CompareOpKind, DataType, JoinKind, Predicate, QueryExpr},
 };
 use std::{rc::Rc, sync::Arc};
 
 fn schema(fields: &[(&str, DataType, bool)]) -> Schema {
-    Arc::new(SummarySchema {
+    Arc::new(LogicalSchema {
+        closed: true,
+        unique_keys: vec![],
         fields: fields
             .iter()
-            .map(|(name, dtype, nullable)| SummaryField {
+            .map(|(name, dtype, nullable)| Field {
+                table: None,
                 name: (*name).into(),
-                dtype: SummaryFamilyType::Plain(dtype.clone()),
+                dtype: FieldDataType::Plain(dtype.clone()),
                 nullable: *nullable,
             })
             .collect(),
@@ -342,7 +345,7 @@ fn global_extrema_bind_with_planner_derived_schema() {
     use asap_physical_operators::physical_planner::compile_node;
     use planner_types::{
         post_asap::*,
-        pre_asap::{AggIntent, Column, GroupKeys, Reduction as PlanReduction},
+        pre_asap::{AggIntent, Field, GroupKeys, Reduction as PlanReduction},
     };
     let input = schema(&[("v", DataType::Int64, false)]);
     for measure in [
@@ -350,7 +353,7 @@ fn global_extrema_bind_with_planner_derived_schema() {
         AggIntent::Max { col: Some(0) },
     ] {
         let planner_input =
-            planner_types::pre_asap::Schema::new(vec![Column::new("v", DataType::Int64, false)]);
+            planner_types::pre_asap::Schema::new(vec![Field::plain("v", DataType::Int64, false)]);
         let derived = planner_types::pre_asap::query_expr::aggregate_output_schema(
             &planner_input,
             &PlanReduction::Reduce(GroupKeys::by(vec![])),
@@ -358,8 +361,12 @@ fn global_extrema_bind_with_planner_derived_schema() {
             &[],
         )
         .unwrap();
-        let result = derived.columns[0].clone();
-        let output = schema(&[(&result.name, result.dtype, result.nullable)]);
+        let result = derived.fields[0].clone();
+        let output = schema(&[(
+            &result.name,
+            result.dtype.plain().unwrap().clone(),
+            result.nullable,
+        )]);
         let node = PostAsapDAGNode {
             id: PostAsapNodeId(1),
             payload: PostAsapOperatorPayload::Value {
@@ -539,7 +546,7 @@ fn boolean_truth_tables_agree_between_expression_paths() {
 fn kll_partial_merge_and_multiple_readouts_preserve_population() {
     use planner_types::post_asap::{SketchAlgorithm, SketchKind, SketchParams};
     let input = schema(&[("v", DataType::Float64, false)]);
-    let family = SummaryFamilyType::Sketch(
+    let family = FieldDataType::Sketch(
         SketchKind::new(SketchAlgorithm::Kll, SketchParams::Kll { k: 512 }),
         Default::default(),
     );
@@ -662,7 +669,7 @@ fn empty_exact_summary_extrema_agree_with_ordinary_aggregation() {
     ] {
         let build = Operator::summary_build(
             input.clone(),
-            SummaryFamilyType::ExactAggregate(kind, params),
+            FieldDataType::ExactAggregate(kind, params),
             0,
             None,
             vec![],

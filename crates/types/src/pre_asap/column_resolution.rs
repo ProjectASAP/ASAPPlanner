@@ -17,7 +17,7 @@ use super::query_expr::{
     aggregate_output_schema, GroupKeys, QueryExpr, QueryExprError, Reduction, ResolvedQueryExpr,
     UnresolvedQueryExpr,
 };
-use super::schema::{ColumnId, DataType, Schema};
+use super::schema::{ColumnId, DataType, FieldDataType, Schema};
 
 /// Errors returned by the resolution helpers.
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -40,7 +40,7 @@ pub fn resolve_column_ref(col: &ColumnRef, schema: &Schema) -> Result<ColumnId, 
             .column_id(name)
             .ok_or_else(|| ResolveError::NotFound {
                 name: name.clone(),
-                available: schema.columns.iter().map(|c| c.name.clone()).collect(),
+                available: schema.fields.iter().map(|c| c.name.clone()).collect(),
             }),
         // Prefer the (table, name) match; fall back to the bare name for
         // schemas whose columns carry no qualifier.
@@ -49,7 +49,7 @@ pub fn resolve_column_ref(col: &ColumnRef, schema: &Schema) -> Result<ColumnId, 
             .or_else(|| schema.column_id(name))
             .ok_or_else(|| ResolveError::NotFound {
                 name: format!("{table}.{name}"),
-                available: schema.columns.iter().map(|c| c.name.clone()).collect(),
+                available: schema.fields.iter().map(|c| c.name.clone()).collect(),
             }),
         ColumnRef::SampleValue => schema
             .column_id("value")
@@ -62,16 +62,19 @@ pub fn resolve_column_ref(col: &ColumnRef, schema: &Schema) -> Result<ColumnId, 
                 // of any type") avoids binding `SampleValue` to a label column in
                 // a `[ts, host:Utf8]`-shaped schema (#70), and still resolves an
                 // outer ranking's sort key (`topk(k, sum by (job) (…))`).
-                let numeric: Vec<ColumnId> = (0..schema.columns.len())
+                let numeric: Vec<ColumnId> = (0..schema.fields.len())
                     .filter(|&i| Some(i) != schema.time_index)
                     .filter(|&i| {
-                        matches!(schema.columns[i].dtype, DataType::Float64 | DataType::Int64)
+                        matches!(
+                            schema.fields[i].dtype,
+                            FieldDataType::Plain(DataType::Float64 | DataType::Int64)
+                        )
                     })
                     .collect();
                 (numeric.len() == 1).then(|| numeric[0])
             })
             .ok_or_else(|| ResolveError::NoSampleValue {
-                available: schema.columns.iter().map(|c| c.name.clone()).collect(),
+                available: schema.fields.iter().map(|c| c.name.clone()).collect(),
             }),
         ColumnRef::Wildcard => Err(ResolveError::WildcardNotPositional),
     }
@@ -211,14 +214,14 @@ pub fn output_schema_for_aggregate(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pre_asap::schema::Column;
+    use crate::pre_asap::schema::Field;
 
     /// The conventional PromQL leaf shape: `(ts: Timestamp, value: Float64)`.
     fn ts_value_schema() -> Schema {
         Schema::with_time_index(
             vec![
-                Column::new("ts", DataType::Timestamp, false),
-                Column::new("value", DataType::Float64, false),
+                Field::plain("ts", DataType::Timestamp, false),
+                Field::plain("value", DataType::Float64, false),
             ],
             0,
             Vec::new(),
@@ -237,8 +240,8 @@ mod tests {
         // column and two non-ts columns (ambiguous), but exactly one numeric
         // column — the sample value an outer `topk` ranks by.
         let s = Schema::new(vec![
-            Column::new("job", DataType::Utf8, true),
-            Column::new("sum", DataType::Float64, false),
+            Field::plain("job", DataType::Utf8, true),
+            Field::plain("sum", DataType::Float64, false),
         ]);
         assert_eq!(resolve_column_ref(&ColumnRef::SampleValue, &s), Ok(1));
     }
@@ -250,8 +253,8 @@ mod tests {
         // bind to it (#70) — resolution fails cleanly instead of picking a label.
         let s = Schema::with_time_index(
             vec![
-                Column::new("ts", DataType::Timestamp, false),
-                Column::new("host", DataType::Utf8, true),
+                Field::plain("ts", DataType::Timestamp, false),
+                Field::plain("host", DataType::Utf8, true),
             ],
             0,
             vec![],
@@ -266,8 +269,8 @@ mod tests {
     fn sample_value_ambiguous_when_two_numeric_columns() {
         // Two numeric non-ts columns → genuinely ambiguous → NoSampleValue.
         let s = Schema::new(vec![
-            Column::new("a", DataType::Float64, false),
-            Column::new("b", DataType::Int64, false),
+            Field::plain("a", DataType::Float64, false),
+            Field::plain("b", DataType::Int64, false),
         ]);
         assert!(matches!(
             resolve_column_ref(&ColumnRef::SampleValue, &s),
@@ -287,9 +290,9 @@ mod tests {
         // The output of a nested cross-series aggregate: closed `[group, sum]`.
         // `by (job)` — `job` is provably absent → dropped, not rejected (#53).
         let s = Schema {
-            columns: vec![
-                Column::new("group", DataType::Utf8, true),
-                Column::new("sum", DataType::Float64, false),
+            fields: vec![
+                Field::plain("group", DataType::Utf8, true),
+                Field::plain("sum", DataType::Float64, false),
             ],
             time_index: None,
             unique_keys: vec![],
@@ -328,8 +331,8 @@ mod tests {
     fn aggregate_strips_time_and_keeps_unique_keys() {
         let mut input = ts_value_schema();
         input
-            .columns
-            .push(Column::new("host", DataType::Utf8, false));
+            .fields
+            .push(Field::plain("host", DataType::Utf8, false));
         let out = output_schema_for_aggregate(
             &input,
             &GroupKeys::by(vec![2]),
@@ -337,9 +340,9 @@ mod tests {
             &[],
         )
         .expect("valid group-by column");
-        assert_eq!(out.columns.len(), 2); // host, sum
-        assert_eq!(out.columns[0].name, "host");
-        assert_eq!(out.columns[1].name, "sum");
+        assert_eq!(out.fields.len(), 2); // host, sum
+        assert_eq!(out.fields[0].name, "host");
+        assert_eq!(out.fields[1].name, "sum");
         assert!(out.time_index.is_none());
         assert_eq!(out.unique_keys, vec![vec![0]]);
     }
@@ -356,8 +359,8 @@ mod tests {
 
         let leaf_schema = Schema::with_time_index(
             vec![
-                Column::new("ts", DataType::Timestamp, false),
-                Column::new("value", DataType::Float64, false),
+                Field::plain("ts", DataType::Timestamp, false),
+                Field::plain("value", DataType::Float64, false),
             ],
             0,
             vec![],
@@ -393,7 +396,7 @@ mod tests {
             "the two aggregate-schema derivations must agree (issue #41)"
         );
         // Sanity: it really is the label-preserving per-series shape, not `[rate]`.
-        assert!(having_side.columns.iter().any(|c| c.name == "value"));
+        assert!(having_side.fields.iter().any(|c| c.name == "value"));
         assert!(having_side.time_index.is_some());
     }
 }

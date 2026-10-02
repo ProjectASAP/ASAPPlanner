@@ -27,7 +27,7 @@ impl AccuracyEvidenceProvider for Evidence {
     fn propagation_stats(
         &self,
         op: &CompositionOperator,
-        _: &SummaryFamilyType,
+        _: &FieldDataType,
         _: Option<&SketchQuery>,
     ) -> PropagationStats {
         if matches!(op, CompositionOperator::TopKSelection) {
@@ -89,7 +89,7 @@ fn assert_weighted_binding(evidence: &dyn AccuracyEvidenceProvider, algorithm: S
         })
         .unwrap();
     let dag = compile_post_asap_dag(&plan).unwrap();
-    let build=dag.nodes.iter().find(|node|matches!(&node.payload,PostAsapOperatorPayload::SummaryAgg{family:SummaryFamilyType::Sketch(kind,_),..}if kind.algorithm()==&algorithm)).unwrap();
+    let build=dag.nodes.iter().find(|node|matches!(&node.payload,PostAsapOperatorPayload::SummaryAgg{family:FieldDataType::Sketch(kind,_),..}if kind.algorithm()==&algorithm)).unwrap();
     let rate_id = dag
         .edges
         .iter()
@@ -123,7 +123,7 @@ fn assert_weighted_binding(evidence: &dyn AccuracyEvidenceProvider, algorithm: S
                 "job" => Value::Utf8(job.into()),
                 "value" => Value::Float64(value),
                 _ => match field.dtype {
-                    SummaryFamilyType::Plain(DataType::Timestamp) => Value::Timestamp(60_000),
+                    FieldDataType::Plain(DataType::Timestamp) => Value::Timestamp(60_000),
                     _ => panic!("unexpected rate column {field:?}"),
                 },
             })
@@ -235,7 +235,7 @@ pub fn lower_promql(
 // The old untyped heap updater must not silently round a Planner rate update.
 #[test]
 fn rate_updates_cannot_enter_integer_heap_factory() {
-    let family = SummaryFamilyType::Sketch(
+    let family = FieldDataType::Sketch(
         SketchKind::new(
             SketchAlgorithm::CmsWithHeap,
             SketchParams::CmsWithHeap {
@@ -292,8 +292,8 @@ fn check_direct_rate_topk(dynamic: bool) {
             QueryExpr::Scan { schema, .. } => {
                 schema.closed = true;
                 schema
-                    .columns
-                    .push(planner_types::pre_asap::schema::Column::new(
+                    .fields
+                    .push(planner_types::pre_asap::schema::Field::plain(
                         "service",
                         DataType::Utf8,
                         false,
@@ -354,9 +354,9 @@ fn check_direct_rate_topk(dynamic: bool) {
         }
         let dag = compile_post_asap_dag(candidate).unwrap();
         assert!(dag.nodes.iter().any(|node| matches!(&node.payload,
-            PostAsapOperatorPayload::SummaryAgg { family: SummaryFamilyType::Sketch(kind, _), .. } if kind.algorithm() == &algorithm)));
+            PostAsapOperatorPayload::SummaryAgg { family: FieldDataType::Sketch(kind, _), .. } if kind.algorithm() == &algorithm)));
         let build = dag.nodes.iter().find(|node| matches!(&node.payload,
-            PostAsapOperatorPayload::SummaryAgg { family: SummaryFamilyType::Sketch(kind, _), .. } if kind.algorithm() == &algorithm)).unwrap();
+            PostAsapOperatorPayload::SummaryAgg { family: FieldDataType::Sketch(kind, _), .. } if kind.algorithm() == &algorithm)).unwrap();
         let input_id = dag
             .edges
             .iter()
@@ -888,7 +888,7 @@ fn maintained_rate_heap_lifecycle_compiles_fixed_window_precompute() {
                 matches!(
                     &node.payload,
                     PostAsapOperatorPayload::SummaryAgg {
-                        family: SummaryFamilyType::ExactAggregate(ExactKind::Rate, _),
+                        family: FieldDataType::ExactAggregate(ExactKind::Rate, _),
                         ..
                     }
                 )
@@ -901,7 +901,7 @@ fn maintained_rate_heap_lifecycle_compiles_fixed_window_precompute() {
                 matches!(
                     &node.payload,
                     PostAsapOperatorPayload::SummaryAgg {
-                        family: SummaryFamilyType::Sketch(..),
+                        family: FieldDataType::Sketch(..),
                         ..
                     }
                 )
@@ -990,9 +990,9 @@ fn maintained_rate_heap_lifecycle_compiles_fixed_window_precompute() {
                         .fields
                         .iter()
                         .map(|field| match &field.dtype {
-                            SummaryFamilyType::ExactAggregate(..) => summary.clone(),
-                            SummaryFamilyType::Plain(DataType::Timestamp) => Value::Timestamp(end),
-                            SummaryFamilyType::Plain(DataType::Utf8)
+                            FieldDataType::ExactAggregate(..) => summary.clone(),
+                            FieldDataType::Plain(DataType::Timestamp) => Value::Timestamp(end),
+                            FieldDataType::Plain(DataType::Utf8)
                                 if field.name == "$promql_series_identity" =>
                             {
                                 Value::Utf8(
@@ -1004,7 +1004,7 @@ fn maintained_rate_heap_lifecycle_compiles_fixed_window_precompute() {
                                     .into(),
                                 )
                             }
-                            SummaryFamilyType::Plain(DataType::Utf8) => Value::Utf8("api".into()),
+                            FieldDataType::Plain(DataType::Utf8) => Value::Utf8("api".into()),
                             _ => panic!("unexpected state field {field:?}"),
                         })
                         .collect()

@@ -411,7 +411,7 @@ fn exact_state_readouts_recover_and_finalize_panes() {
         (ExactKind::Min, ExactParams::Min, 1.),
         (ExactKind::Max, ExactParams::Max, 5.),
     ] {
-        let family = SummaryFamilyType::ExactAggregate(kind, params);
+        let family = FieldDataType::ExactAggregate(kind, params);
         for preserve in [false, true] {
             let rows = [[1., 2.], [4., 5.]]
                 .into_iter()
@@ -459,7 +459,7 @@ fn recovered_exact_counter_uses_window_and_omits_insufficient_samples() {
         (ExactKind::Rate, ExactParams::Rate, 1.),
         (ExactKind::Increase, ExactParams::Increase, 60.),
     ] {
-        let family = SummaryFamilyType::ExactAggregate(kind, params);
+        let family = FieldDataType::ExactAggregate(kind, params);
         let rows = [1, 2]
             .into_iter()
             .map(|count| {

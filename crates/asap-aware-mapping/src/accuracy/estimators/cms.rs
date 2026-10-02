@@ -47,7 +47,7 @@ mod tests {
         let params = default_size_params(SketchAlgorithm::Cms, &c, 0.01, 0.001);
         let g = DefaultAccuracyModel
             .local_guarantee(
-                &SummaryFamilyType::Sketch(
+                &FieldDataType::Sketch(
                     SketchKind::new(SketchAlgorithm::Cms, params),
                     GroupingStrategy::default(),
                 ),
@@ -74,7 +74,7 @@ mod tests {
         };
         let topk_frequency = DefaultAccuracyModel
             .local_guarantee(
-                &SummaryFamilyType::Sketch(
+                &FieldDataType::Sketch(
                     SketchKind::new(SketchAlgorithm::CmsWithHeap, cms_heap),
                     GroupingStrategy::default(),
                 ),

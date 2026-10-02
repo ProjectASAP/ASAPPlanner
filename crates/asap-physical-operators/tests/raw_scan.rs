@@ -6,9 +6,10 @@ use asap_physical_operators::dag::{
     Error, Limits, OutputStream, RunContext, Scope,
 };
 use futures::{executor::block_on, stream, StreamExt};
+use planner_types::pre_asap::Schema as LogicalSchema;
 use planner_types::{
     post_asap::*,
-    pre_asap::{Column, DataType, GroupKeys, Predicate, QueryExpr, Source},
+    pre_asap::{DataType, Field, GroupKeys, Predicate, QueryExpr, Source},
 };
 use std::{
     collections::BTreeMap,
@@ -21,11 +22,14 @@ use std::{
 
 fn fixture() -> (QueryExpr, Schema, Vec<Batch>) {
     let schema =
-        planner_types::pre_asap::Schema::new(vec![Column::new("value", DataType::Int64, true)]);
-    let output = Arc::new(SummarySchema {
-        fields: vec![SummaryField {
+        planner_types::pre_asap::Schema::new(vec![Field::plain("value", DataType::Int64, true)]);
+    let output = Arc::new(LogicalSchema {
+        closed: true,
+        unique_keys: vec![],
+        fields: vec![Field {
+            table: None,
             name: "value".into(),
-            dtype: SummaryFamilyType::Plain(DataType::Int64),
+            dtype: FieldDataType::Plain(DataType::Int64),
             nullable: true,
         }],
         time_index: None,

@@ -11,8 +11,8 @@ use asap_physical_operators::{
 };
 use asap_types::{
     post_asap::{
-        SketchAlgorithm, SketchKind, SketchParams, SketchQuery, SummaryFamilyType, SummaryField,
-        SummarySchema,
+        Field, FieldDataType, Schema as LogicalSchema, SketchAlgorithm, SketchKind, SketchParams,
+        SketchQuery,
     },
     pre_asap::DataType,
 };
@@ -25,17 +25,20 @@ use std::{
     },
 };
 
-fn family(k: u32) -> SummaryFamilyType {
-    SummaryFamilyType::Sketch(
+fn family(k: u32) -> FieldDataType {
+    FieldDataType::Sketch(
         SketchKind::new(SketchAlgorithm::Kll, SketchParams::Kll { k }),
         Default::default(),
     )
 }
 fn raw_schema() -> Schema {
-    Arc::new(SummarySchema {
-        fields: vec![SummaryField {
+    Arc::new(LogicalSchema {
+        closed: true,
+        unique_keys: vec![],
+        fields: vec![Field {
+            table: None,
             name: "value".into(),
-            dtype: SummaryFamilyType::Plain(DataType::Float64),
+            dtype: FieldDataType::Plain(DataType::Float64),
             nullable: false,
         }],
         time_index: None,

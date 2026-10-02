@@ -60,5 +60,5 @@ pub use query_expr::{
     WindowFrame, WindowFrameBound, WindowFrameOffset, WindowFrameUnits, WindowFuncKind,
 };
 pub use resolve::{resolve_root, ResolveDAGError};
-pub use schema::{Column, ColumnId, DataType, Schema};
+pub use schema::{ColumnId, DataType, Field, FieldDataType, Schema};
 pub use schema_resolver::{SchemaCatalog, SchemaResolver, UsageDerivedCatalog};

@@ -13,7 +13,7 @@ use asap_aware_mapping::{
 use asap_frontend_sql::{lower_sql_dialect, SqlCatalog};
 use asap_planner::{e2e_plan, FrontendInput, PlanError, UserInput, UserInputError};
 use asap_types::post_asap::SummaryExpr;
-use asap_types::pre_asap::schema::{Column, DataType, Schema};
+use asap_types::pre_asap::schema::{DataType, Field, Schema};
 use asap_types::types::AccuracyTarget;
 use asap_types::workload::{
     AccuracyRequirement, BatchEntry, DataArrival, DataWorkload, DurationMs, Evidence,
@@ -51,8 +51,8 @@ fn lineitem_catalog() -> SqlCatalog {
     SqlCatalog::new().with_table(
         "lineitem",
         Schema::new(vec![
-            Column::new("l_orderkey", DataType::Int64, false),
-            Column::new("l_extendedprice", DataType::Float64, false),
+            Field::plain("l_orderkey", DataType::Int64, false),
+            Field::plain("l_extendedprice", DataType::Float64, false),
         ]),
     )
 }

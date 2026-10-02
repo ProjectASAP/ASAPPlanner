@@ -8,8 +8,8 @@ use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use asap_types::post_asap::{
-    BoundExpr, ErrorMetric, ExactKind, GuaranteeSource, ProbabilityExpr, ResultGuarantee,
-    SketchAlgorithm, SummaryExpr, SummaryFamilyType, SummaryMaintenanceLifecycle,
+    BoundExpr, ErrorMetric, ExactKind, FieldDataType, GuaranteeSource, ProbabilityExpr,
+    ResultGuarantee, SketchAlgorithm, SummaryExpr, SummaryMaintenanceLifecycle,
     SummaryMaintenanceLifecycleGuarantee, SummaryNode, SummaryWindowFramework,
 };
 use asap_types::pre_asap::{

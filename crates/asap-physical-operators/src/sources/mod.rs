@@ -8,7 +8,7 @@ use crate::{
 };
 use futures::{stream, StreamExt};
 use planner_types::{
-    post_asap::{SummaryFamilyType, SummaryField, SummarySchema},
+    post_asap::{FieldDataType, Schema as LogicalSchema},
     pre_asap::{DataType, QueryExpr, Source},
 };
 use std::sync::Arc;
@@ -51,18 +51,10 @@ impl DataSources {
                 "raw Scan requires a Planner Scan leaf".into(),
             ));
         };
-        let output = Arc::new(SummarySchema {
-            fields: schema
-                .columns
-                .iter()
-                .map(|column| SummaryField {
-                    name: column.name.clone(),
-                    dtype: SummaryFamilyType::Plain(column.dtype.clone()),
-                    nullable: column.nullable,
-                })
-                .collect(),
-            time_index: schema.time_index,
-        });
+        let output = Arc::new(LogicalSchema::lifted(
+            schema.fields.clone(),
+            schema.time_index,
+        ));
         crate::values::validate_schema(&output)?;
         let reader = self
             .sources

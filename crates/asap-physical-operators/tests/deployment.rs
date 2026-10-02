@@ -1,15 +1,14 @@
 //! Exercise the public library without a backend server, store, or scheduler.
 use asap_physical_operators::planner::{
     post_asap::{
-        GroupingStrategy, SketchAlgorithm, SketchKind, SketchParams, SummaryFamilyType,
-        SummaryUpdate,
+        FieldDataType, GroupingStrategy, SketchAlgorithm, SketchKind, SketchParams, SummaryUpdate,
     },
     pre_asap::ColumnRef,
 };
 use asap_physical_operators::{factory::create_planner_accumulator, AggregateCore};
 
-fn family(k: u32) -> SummaryFamilyType {
-    SummaryFamilyType::Sketch(
+fn family(k: u32) -> FieldDataType {
+    FieldDataType::Sketch(
         SketchKind::new(SketchAlgorithm::Kll, SketchParams::Kll { k }),
         GroupingStrategy::PerSubpopulationInstance,
     )
@@ -65,7 +64,7 @@ fn invalid_kll_parameters_are_rejected_at_binding() {
 fn native_count_sketch_dimensions_are_not_packed_wire_dimensions() {
     use asap_physical_operators::planner::post_asap::SummaryInputExpr;
     use asap_physical_operators::KeyByLabelValues;
-    let family = SummaryFamilyType::Sketch(
+    let family = FieldDataType::Sketch(
         SketchKind::new(
             SketchAlgorithm::CountSketchWithHeap,
             SketchParams::CountSketchWithHeap {

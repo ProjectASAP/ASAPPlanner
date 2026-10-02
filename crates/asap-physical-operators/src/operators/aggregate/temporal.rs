@@ -308,7 +308,7 @@ mod tests {
         values::Batch,
     };
     use planner_types::{
-        post_asap::{SummaryFamilyType, SummaryField, SummarySchema},
+        post_asap::{Field, FieldDataType, Schema as LogicalSchema},
         pre_asap::DataType,
         types::AccuracyTarget,
     };
@@ -317,16 +317,20 @@ mod tests {
     // The same window operator must give the same answer in either engine phase.
     #[test]
     fn temporal_windows_execute_in_both_phases_and_count_is_integer() {
-        let schema = Arc::new(SummarySchema {
+        let schema = Arc::new(LogicalSchema {
+            closed: true,
+            unique_keys: vec![],
             fields: vec![
-                SummaryField {
+                Field {
+                    table: None,
                     name: "time".into(),
-                    dtype: SummaryFamilyType::Plain(DataType::Timestamp),
+                    dtype: FieldDataType::Plain(DataType::Timestamp),
                     nullable: false,
                 },
-                SummaryField {
+                Field {
+                    table: None,
                     name: "value".into(),
-                    dtype: SummaryFamilyType::Plain(DataType::Float64),
+                    dtype: FieldDataType::Plain(DataType::Float64),
                     nullable: false,
                 },
             ],

@@ -13,7 +13,7 @@
 
 pub mod fixtures {
     use asap_frontend_promql::lower_promql_workload;
-    use asap_types::pre_asap::schema::{Column, DataType, Schema};
+    use asap_types::pre_asap::schema::{DataType, Field, Schema};
     use asap_types::pre_asap::QueryExpr;
     use asap_types::types::AccuracyTarget;
     use asap_types::workload::{
@@ -55,16 +55,16 @@ pub mod fixtures {
         Ok(lowered.remove(0))
     }
 
-    pub fn ts_col() -> Column {
-        Column::new("ts", DataType::Timestamp, false)
+    pub fn ts_col() -> Field {
+        Field::plain("ts", DataType::Timestamp, false)
     }
 
-    pub fn value_col() -> Column {
-        Column::new("value", DataType::Float64, false)
+    pub fn value_col() -> Field {
+        Field::plain("value", DataType::Float64, false)
     }
 
-    pub fn label_col(name: &str) -> Column {
-        Column::new(name, DataType::Utf8, true)
+    pub fn label_col(name: &str) -> Field {
+        Field::plain(name, DataType::Utf8, true)
     }
 
     /// Canonical PromQL leaf schema: `(ts: Timestamp, value: Float64)` plus
@@ -74,7 +74,7 @@ pub mod fixtures {
         let mut cols = vec![ts_col(), value_col()];
         cols.extend(labels.iter().map(|n| label_col(n)));
         Schema {
-            columns: cols,
+            fields: cols,
             time_index: Some(0),
             unique_keys: vec![],
             // Schemaless PromQL leaf: open (the metric's full label set is

@@ -209,8 +209,8 @@ pub fn compile_vector_to_scalar() -> Result<CompiledPhysicalDAG, Error> {
 
 /// A stored exact-state input retains the complete population identity. The
 /// deployment supplies eligible panes; merging and finalization are computation.
-pub fn exact_state_schema(family: SummaryFamilyType) -> Result<Schema, Error> {
-    if !matches!(family, SummaryFamilyType::ExactAggregate(..)) {
+pub fn exact_state_schema(family: FieldDataType) -> Result<Schema, Error> {
+    if !matches!(family, FieldDataType::ExactAggregate(..)) {
         return Err(invalid("exact-state input requires an exact family"));
     }
     crate::values::validate_family(&family)?;
@@ -221,13 +221,13 @@ pub fn exact_state_schema(family: SummaryFamilyType) -> Result<Schema, Error> {
 
 /// Retain exact readout semantics before any deployment state is opened.
 pub fn compile_exact_readout(
-    family: SummaryFamilyType,
+    family: FieldDataType,
     lookback_ms: u64,
     preserve_metric_name: bool,
 ) -> Result<CompiledPhysicalDAG, Error> {
     use planner_types::post_asap::ExactKind;
     let statistic = match &family {
-        SummaryFamilyType::ExactAggregate(kind, _) => match kind {
+        FieldDataType::ExactAggregate(kind, _) => match kind {
             ExactKind::Sum => crate::Statistic::Sum,
             ExactKind::Count => crate::Statistic::Count,
             ExactKind::Min => crate::Statistic::Min,

@@ -6,7 +6,7 @@
 
 use asap_devtools::lower_promql_with_data_ingestion_interval;
 use asap_frontend_sql::{lower_sql_dialect, SqlCatalog};
-use asap_types::pre_asap::schema::{Column, DataType, Schema};
+use asap_types::pre_asap::schema::{DataType, Field, Schema};
 use asap_types::pre_asap::QueryExpr;
 use asap_types::types::AccuracyTarget;
 use asap_types::workload::SqlDialect;
@@ -171,8 +171,8 @@ fn promql_lines(corpus: &str) -> impl Iterator<Item = &str> {
         .filter(|l| !l.is_empty() && !l.starts_with('#'))
 }
 
-fn col(name: &str, dtype: DataType) -> Column {
-    Column::new(name, dtype, false)
+fn col(name: &str, dtype: DataType) -> Field {
+    Field::plain(name, dtype, false)
 }
 
 fn dqc_catalog() -> SqlCatalog {

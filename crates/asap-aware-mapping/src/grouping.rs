@@ -9,7 +9,7 @@
 //!
 //! `SummaryExpr::SummaryAgg` carries the grouping choice next to the
 //! `Reduction` whose `by` keys determine legality. The same choice is also
-//! committed to `SummaryFamilyType::Sketch` on the aggregate's output edge.
+//! committed to `FieldDataType::Sketch` on the aggregate's output edge.
 //! That duplication is intentional: the node field makes the choice easy to
 //! inspect during planning, while the edge type ensures an independent KLL/
 //! CMS state and a Hydra-backed state cannot be accepted as compatible inputs
@@ -73,8 +73,8 @@ use std::rc::Rc;
 
 use asap_types::post_asap::{
     default_hydra_params, hydra_kind_for, AccuracyError, BoundExpr, CompositionOperator,
-    GroupingStrategy, GuaranteeSource, HydraKind, ProbabilityExpr, ResultGuarantee,
-    SketchAlgorithm, SketchParams, SummaryExpr, SummaryFamilyType, SummaryNode,
+    FieldDataType, GroupingStrategy, GuaranteeSource, HydraKind, ProbabilityExpr, ResultGuarantee,
+    SketchAlgorithm, SketchParams, SummaryExpr, SummaryNode,
 };
 use asap_types::pre_asap::agg_intent::AggIntent;
 use asap_types::pre_asap::query_expr::{QueryExpr, Reduction};
@@ -363,7 +363,7 @@ fn per_subpopulation_sketch_params(node: &SummaryNode) -> Option<SketchParams> {
             per_subpopulation_sketch_params(summary_input)
         }
         SummaryExpr::SummaryAgg {
-            family: SummaryFamilyType::Sketch(kind, _),
+            family: FieldDataType::Sketch(kind, _),
             ..
         } => Some(kind.params().clone()),
         _ => None,
@@ -401,15 +401,15 @@ fn with_grouping(
             ..
         } => {
             let grouped_family = match family {
-                SummaryFamilyType::Sketch(kind, _) => {
-                    SummaryFamilyType::Sketch(kind.clone(), grouping.clone())
+                FieldDataType::Sketch(kind, _) => {
+                    FieldDataType::Sketch(kind.clone(), grouping.clone())
                 }
                 _ => family.clone(),
             };
             let mut grouped_schema = node.schema.clone();
             for field in &mut grouped_schema.fields {
-                if let SummaryFamilyType::Sketch(kind, _) = &field.dtype {
-                    field.dtype = SummaryFamilyType::Sketch(kind.clone(), grouping.clone());
+                if let FieldDataType::Sketch(kind, _) = &field.dtype {
+                    field.dtype = FieldDataType::Sketch(kind.clone(), grouping.clone());
                 }
             }
             Rc::new(SummaryNode {
@@ -495,15 +495,19 @@ mod tests {
     use asap_types::post_asap::ErrorMetric;
     use asap_types::pre_asap::agg_intent::{default_cardinality, default_quantile};
     use asap_types::pre_asap::query_expr::Source;
-    use asap_types::pre_asap::schema::{Column, DataType, Schema};
+    use asap_types::pre_asap::schema::{DataType, Field, Schema};
     use asap_types::types::AccuracyTarget;
 
     fn metric_scan(labels: &[&str]) -> QueryExpr {
         let mut columns = vec![
-            Column::new("ts", DataType::Timestamp, false),
-            Column::new("value", DataType::Float64, false),
+            Field::plain("ts", DataType::Timestamp, false),
+            Field::plain("value", DataType::Float64, false),
         ];
-        columns.extend(labels.iter().map(|n| Column::new(*n, DataType::Utf8, true)));
+        columns.extend(
+            labels
+                .iter()
+                .map(|n| Field::plain(*n, DataType::Utf8, true)),
+        );
         QueryExpr::Scan {
             source: Source::TimeSeries { metric: "m".into() },
             predicates: vec![],
@@ -668,7 +672,7 @@ mod tests {
         fn propagation_stats(
             &self,
             _op: &CompositionOperator,
-            _family: &SummaryFamilyType,
+            _family: &FieldDataType,
             _query: Option<&asap_types::post_asap::SketchQuery>,
         ) -> PropagationStats {
             PropagationStats {
@@ -712,7 +716,7 @@ mod tests {
             fn propagation_stats(
                 &self,
                 _op: &CompositionOperator,
-                _family: &SummaryFamilyType,
+                _family: &FieldDataType,
                 _query: Option<&asap_types::post_asap::SketchQuery>,
             ) -> PropagationStats {
                 PropagationStats {
@@ -758,7 +762,7 @@ mod tests {
             fn propagation_stats(
                 &self,
                 _op: &CompositionOperator,
-                _family: &SummaryFamilyType,
+                _family: &FieldDataType,
                 _query: Option<&asap_types::post_asap::SketchQuery>,
             ) -> PropagationStats {
                 PropagationStats {
