@@ -208,8 +208,8 @@ impl ASAPOp {
 
     /// Output schema derived from the operator and its children. Summary
     /// planning may retain a more specific schema (evaluation column naming)
-    /// through [`OperatorNode::with_schema`]; the derived shape agrees with it
-    /// in field types.
+    /// through [`OperatorNode::with_schema`]; all structural metadata must
+    /// still agree with this derivation.
     pub fn output_schema(&self) -> Result<Schema, SchemaDerivationError> {
         use ASAPOp::*;
         Ok(match self {
@@ -325,7 +325,7 @@ impl ASAPOp {
                 } else {
                     None
                 };
-                let mut out = Schema::lifted(child.schema.fields.clone(), child.schema.time_index);
+                let mut out = child.schema.clone();
                 for f in &mut out.fields {
                     if let FieldDataType::ExactAggregate(kind, _) = &f.dtype {
                         if let Some(result) = &value_result {
@@ -338,9 +338,7 @@ impl ASAPOp {
                 }
                 out
             }
-            MaintainPopulation { child, .. } => {
-                Schema::lifted(child.schema.fields.clone(), child.schema.time_index)
-            }
+            MaintainPopulation { child, .. } => child.schema.clone(),
             EvaluatePopulation { child, evaluation } => {
                 use crate::post_asap::maintained_population::PopulationInput;
                 use crate::pre_asap::{AggIntent, GroupKeys};

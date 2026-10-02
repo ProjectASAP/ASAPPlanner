@@ -106,9 +106,9 @@ impl OperatorNode {
         Ok(Self::with_schema(operator, schema))
     }
 
-    /// Build a node with a caller-supplied output schema. Summary planning
-    /// uses this where its evaluation naming is more specific than the derived
-    /// shape; the output category is still derived.
+    /// Build a node with caller-supplied output names and qualifiers. For
+    /// either operator category, `validate_structure` requires all other
+    /// schema metadata to agree with derivation; output kind is derived here.
     pub fn with_schema(operator: Operator, schema: Schema) -> Self {
         let result_kind = operator.output_kind();
         Self {
@@ -172,19 +172,37 @@ impl OperatorNode {
         self.operator.children()
     }
 
-    /// Rebuild this node with `f` applied to every direct input. The schema
-    /// is re-derived for a non-ASAP operator (its shape follows its inputs);
-    /// an ASAP node keeps its retained schema. `guarantee` and `timing` are
-    /// cleared: both depend on the inputs and must be re-established.
+    /// Rebuild with new inputs, re-deriving all structural schema metadata.
+    /// Only names and qualifiers that override the old derived schema are
+    /// retained, for either operator category. A change in output arity with
+    /// such overrides needs an explicit new naming assignment.
+    /// `guarantee` and `timing` depend on the inputs and are cleared.
     pub fn map_children(
         &self,
         f: impl FnMut(&Rc<OperatorNode>) -> Rc<OperatorNode>,
     ) -> Result<Self, SchemaDerivationError> {
-        let operator = self.operator.map_children(f);
-        match &operator {
-            Operator::NonASAP(_) => Self::new(operator),
-            Operator::ASAP(_) => Ok(Self::with_schema(operator, self.schema.clone())),
+        let previous = self.operator.output_schema()?;
+        let mut rebuilt = Self::new(self.operator.map_children(f))?;
+        for (i, (derived, retained)) in previous.fields.iter().zip(&self.schema.fields).enumerate()
+        {
+            let renamed = retained.name != derived.name;
+            let requalified = retained.table != derived.table;
+            if !renamed && !requalified {
+                continue;
+            }
+            if rebuilt.schema.fields.len() != previous.fields.len() {
+                return Err(SchemaDerivationError::InvalidScalarSignature(
+                    "output arity changed; reassign explicit output names and qualifiers".into(),
+                ));
+            }
+            if renamed {
+                rebuilt.schema.fields[i].name = retained.name.clone();
+            }
+            if requalified {
+                rebuilt.schema.fields[i].table = retained.table.clone();
+            }
         }
+        Ok(rebuilt)
     }
 
     /// Whether any node reachable from this one (including itself) is an
@@ -247,8 +265,8 @@ impl OperatorNode {
     /// Validate the whole DAG reachable from this node: every operator's
     /// input contract, scalar typing against the owning operator's input
     /// schema, and agreement between each retained schema and the one
-    /// derived from the operator. For an ASAP node the planner may retain
-    /// more specific column names, so only the field types must agree.
+    /// derived from the operator. Both operator categories may override field
+    /// names and qualifiers; all structural metadata must match derivation.
     /// `timing` may be `None`.
     pub fn validate_structure(self: &Rc<Self>) -> Result<(), SchemaDerivationError> {
         for node in Self::reachable(self) {
@@ -274,18 +292,14 @@ impl OperatorNode {
                     "retained result kind disagrees with operation".into(),
                 ));
             }
-            let derived = node.operator.output_schema()?;
-            let agree = match &node.operator {
-                Operator::NonASAP(_) => derived == node.schema,
-                Operator::ASAP(_) => {
-                    derived.fields.len() == node.schema.fields.len()
-                        && derived
-                            .fields
-                            .iter()
-                            .zip(&node.schema.fields)
-                            .all(|(d, r)| d.dtype == r.dtype && d.nullable == r.nullable)
-                }
-            };
+            let mut derived = node.operator.output_schema()?;
+            // Normalize only naming overrides, then compare the whole schema
+            // so new structural metadata cannot accidentally escape validation.
+            for (field, retained) in derived.fields.iter_mut().zip(&node.schema.fields) {
+                field.name = retained.name.clone();
+                field.table = retained.table.clone();
+            }
+            let agree = derived == node.schema;
             if !agree {
                 return Err(SchemaDerivationError::InvalidScalarSignature(format!(
                     "retained schema of {} disagrees with its derived schema",
