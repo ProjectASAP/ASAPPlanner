@@ -673,7 +673,7 @@ mod tests {
             &self,
             _op: &CompositionOperator,
             _family: &FieldDataType,
-            _query: Option<&asap_types::post_asap::SketchQuery>,
+            _query: Option<&asap_types::post_asap::SketchStatistic>,
         ) -> PropagationStats {
             PropagationStats {
                 hydra_shared_grid_collision_bound: Some(0.0),
@@ -717,7 +717,7 @@ mod tests {
                 &self,
                 _op: &CompositionOperator,
                 _family: &FieldDataType,
-                _query: Option<&asap_types::post_asap::SketchQuery>,
+                _query: Option<&asap_types::post_asap::SketchStatistic>,
             ) -> PropagationStats {
                 PropagationStats {
                     hydra_shared_grid_failure_probability: Some(1.5),
@@ -763,7 +763,7 @@ mod tests {
                 &self,
                 _op: &CompositionOperator,
                 _family: &FieldDataType,
-                _query: Option<&asap_types::post_asap::SketchQuery>,
+                _query: Option<&asap_types::post_asap::SketchStatistic>,
             ) -> PropagationStats {
                 PropagationStats {
                     hydra_shared_grid_collision_bound: Some(0.1),

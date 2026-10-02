@@ -2,7 +2,7 @@ use super::ExecutionTiming;
 use std::rc::Rc;
 
 use super::guarantee::ResultGuarantee;
-use super::sketch::{GroupingStrategy, SketchQuery, SummaryUpdate};
+use super::sketch::{GroupingStrategy, SketchStatistic, SummaryUpdate};
 use crate::pre_asap::agg_intent::AggIntent;
 use crate::pre_asap::query_expr::Predicate;
 use crate::pre_asap::schema::{FieldDataType, Schema};
@@ -37,7 +37,7 @@ pub enum ValueOperation {
     },
     /// Read an aggregate or TopK prefix from the maintained population.
     ReadPopulation {
-        readout: super::maintained_population::PopulationReadout,
+        readout: super::maintained_population::PopulationStatistic,
     },
     Exact(ExactOperation),
     /// Read an exact accumulator's state as its finalized scalar value.
@@ -249,7 +249,7 @@ pub enum SummaryExpr {
     /// for count/cardinality, `[(key, count)]` for top-k).
     SummaryEstimate {
         summary_input: Rc<SummaryNode>,
-        query: SketchQuery,
+        query: SketchStatistic,
     },
 
     /// ⊕ — union of summaries across stages / shards. Distinct from the

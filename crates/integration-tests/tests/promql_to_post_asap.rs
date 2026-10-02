@@ -22,7 +22,7 @@ use asap_integration_tests::fixtures::lower_promql;
 use asap_types::post_asap::{
     compile_post_asap_dag, CompositionOperator, EntityIdentity, ExactKind, ExactParams,
     FieldDataType, GroupingStrategy, Schema, SketchAlgorithm, SketchKind, SketchParams,
-    SketchQuery, SummaryExpr, SummaryInputExpr, SummaryNode, SummaryUpdate, ValueOperation,
+    SketchStatistic, SummaryExpr, SummaryInputExpr, SummaryNode, SummaryUpdate, ValueOperation,
 };
 use asap_types::pre_asap::expr_ir::ColumnRef;
 use asap_types::pre_asap::query_expr::{QueryExpr, Reduction};
@@ -66,7 +66,7 @@ fn distinct_over_time_offers_hll_cardinality_readout() {
     assert!(candidates.iter().any(|candidate| {
         let Replacement::Summary(node) = &candidate.replacement else { return false };
         let SummaryExpr::SummaryEstimate { summary_input, query, .. } = &node.expr else { return false };
-        matches!(query, SketchQuery::Cardinality)
+        matches!(query, SketchStatistic::Cardinality)
             && matches!(&summary_input.expr, SummaryExpr::SummaryAgg { family: FieldDataType::Sketch(kind, _), .. }
                 if kind.algorithm() == &SketchAlgorithm::Hll)
     }), "no HLL cardinality candidate: {candidates:?}");
@@ -255,7 +255,7 @@ impl AccuracyEvidenceProvider for SeparatedTopK {
         &self,
         op: &CompositionOperator,
         _family: &FieldDataType,
-        _query: Option<&SketchQuery>,
+        _query: Option<&SketchStatistic>,
     ) -> PropagationStats {
         matches!(op, CompositionOperator::TopKSelection)
             .then_some(PropagationStats {
@@ -327,7 +327,7 @@ fn weighted_topk_keeps_candidates_with_missing_population_evidence() {
             &self,
             op: &CompositionOperator,
             family: &FieldDataType,
-            query: Option<&SketchQuery>,
+            query: Option<&SketchStatistic>,
         ) -> PropagationStats {
             SeparatedTopK.propagation_stats(op, family, query)
         }
@@ -478,7 +478,7 @@ fn rate_and_increase_topk_use_summary_scores_and_grouped_limits() {
         };
         let SummaryExpr::SummaryEstimate {
             summary_input,
-            query: SketchQuery::TopK { k },
+            query: SketchStatistic::TopK { k },
         } = &readout.expr
         else {
             panic!("heap readout")
@@ -705,7 +705,7 @@ fn planner_only_e2e_temporal_topk_preserves_query_update_and_readout_contract() 
             .expect("heap-backed temporal Top-K candidate");
         let SummaryExpr::SummaryEstimate {
             summary_input,
-            query: SketchQuery::TopK { k, .. },
+            query: SketchStatistic::TopK { k, .. },
         } = &candidate.expr
         else {
             panic!("expected Top-K estimate, got {:?}", candidate.expr)
@@ -752,7 +752,7 @@ fn execute_topk_reference(plan: &SummaryNode) -> Vec<(String, f64)> {
     use std::collections::BTreeMap;
     let SummaryExpr::SummaryEstimate {
         summary_input,
-        query: SketchQuery::TopK { k },
+        query: SketchStatistic::TopK { k },
     } = &plan.expr
     else {
         panic!("expected TopK readout")
@@ -868,7 +868,7 @@ fn planner_heap_topk_reference_execution_matches_ground_truth() {
         // This reference executor consumes keyed heap updates. The inventory
         // also contains maintained exact values followed by sort/limit; those
         // have a different execution contract and must not enter this fixture.
-        let candidates: Vec<_> = strategy.replacements(&TargetSubDAG::new(&pre)).into_iter().filter(|candidate| matches!(&candidate.replacement, Replacement::Summary(plan) if matches!(plan.expr, SummaryExpr::SummaryEstimate { query: SketchQuery::TopK { .. }, .. }))).collect();
+        let candidates: Vec<_> = strategy.replacements(&TargetSubDAG::new(&pre)).into_iter().filter(|candidate| matches!(&candidate.replacement, Replacement::Summary(plan) if matches!(plan.expr, SummaryExpr::SummaryEstimate { query: SketchStatistic::TopK { .. }, .. }))).collect();
         assert!(!candidates.is_empty(), "no heap candidate for {query}");
         for candidate in candidates {
             let Replacement::Summary(plan) = candidate.replacement else {
@@ -912,7 +912,7 @@ fn promql_quantile_of_rate_binds_kll_over_rate_accumulator() {
     else {
         panic!("expected SummaryEstimate root, got {:?}", root.expr);
     };
-    assert!(matches!(query, SketchQuery::Quantile { q } if *q == 0.99));
+    assert!(matches!(query, SketchStatistic::Quantile { q } if *q == 0.99));
     assert_eq!(
         dtype(&root.schema, "quantile_0_99"),
         &FieldDataType::Plain(DataType::Float64),

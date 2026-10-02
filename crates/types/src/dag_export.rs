@@ -326,7 +326,7 @@ pub struct WorkloadDAG {
 /// separately-exported DAG the way pre-ASAP notes are).
 ///
 /// Several of `SummaryExpr`'s own fields (`FieldDataType`,
-/// `GroupingStrategy`, `SketchQuery`) derive neither `Serialize` nor
+/// `GroupingStrategy`, `SketchStatistic`) derive neither `Serialize` nor
 /// `Deserialize` in `asap_types::post_asap` — they carry no reporting
 /// obligation there, since nothing before this module ever needed to
 /// serialize a post-ASAP node. Rather than adding `Serialize` impls to
@@ -1705,7 +1705,7 @@ mod tests {
         use crate::post_asap::{
             BoundExpr, CompositionOperator, ErrorMetric, FieldDataType, GroupingStrategy,
             GuaranteeSource, ProbabilityExpr, Schema, SketchAlgorithm, SketchKind, SketchParams,
-            SketchQuery,
+            SketchStatistic,
         };
         let leaf = Rc::new(scan("t", vec![Field::plain("v", DataType::Float64, false)]));
         let kept = Rc::new(SummaryNode {
@@ -1758,7 +1758,7 @@ mod tests {
         let root = SummaryNode {
             expr: SummaryExpr::SummaryEstimate {
                 summary_input: agg,
-                query: SketchQuery::Quantile { q: 0.99 },
+                query: SketchStatistic::Quantile { q: 0.99 },
             },
             schema: Schema::lifted(vec![], None),
             guarantee: Some(guarantee),

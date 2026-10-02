@@ -10,7 +10,7 @@ mod support;
 use asap_types::post_asap::{
     compile_post_asap_dag, cse::share_common_summary_sub_dags, AccuracyError, BoundExpr,
     CompositionOperator, ErrorMetric, FieldDataType, ProbabilityExpr, ResultGuarantee,
-    SketchAlgorithm, SketchQuery, SummaryExpr, SummaryInputExpr, SummaryNode,
+    SketchAlgorithm, SketchStatistic, SummaryExpr, SummaryInputExpr, SummaryNode,
 };
 use asap_types::types::AccuracyTarget;
 use support::lower_promql;
@@ -21,10 +21,10 @@ impl AccuracyModel for TestEvidence {
     fn local_guarantee(
         &self,
         family: &FieldDataType,
-        query: &SketchQuery,
+        query: &SketchStatistic,
     ) -> Option<ResultGuarantee> {
         if matches!(family, FieldDataType::Sketch(kind, _) if kind.algorithm() == &SketchAlgorithm::UnivMon)
-            && !matches!(query, SketchQuery::PointCount { .. })
+            && !matches!(query, SketchStatistic::PointCount { .. })
         {
             let mut guarantee = ResultGuarantee::exact("SYNTHETIC test evidence; not measured");
             guarantee.metric = ErrorMetric::RelativeValue;
@@ -101,7 +101,10 @@ fn four_readouts_share_one_value_frequency_state_and_keep_honest_guarantees() {
         assert!(matches!(input.item, Some(SummaryInputExpr::Column(_))));
         assert_eq!(input.weight, SummaryInputExpr::Constant(1.0));
         if *index == 1 {
-            assert!(matches!(query, SketchQuery::PointCount { value: None, .. }));
+            assert!(matches!(
+                query,
+                SketchStatistic::PointCount { value: None, .. }
+            ));
             assert!(root.guarantee.as_ref().is_some_and(|g| g.is_exact()));
         } else {
             assert!(!root.guarantee.as_ref().unwrap().is_exact());

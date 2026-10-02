@@ -9,7 +9,7 @@ use super::{
 };
 use super::{
     BinaryOperator, CandidateCompleteness, ExecutionTiming, FieldDataType, GroupingStrategy,
-    SketchQuery, SummaryUpdate, ValueOperation,
+    SketchStatistic, SummaryUpdate, ValueOperation,
 };
 use crate::pre_asap::{ColumnRef, JoinKind, Predicate, QueryExpr, Reduction};
 use thiserror::Error;
@@ -83,7 +83,7 @@ pub enum PostAsapOperatorPayload {
         key: ColumnRef,
     },
     SummaryEstimate {
-        query: SketchQuery,
+        query: SketchStatistic,
     },
     SummaryMerge,
 }
@@ -625,7 +625,7 @@ mod tests {
                 key: ColumnRef::SampleValue,
             },
             PostAsapOperatorPayload::SummaryEstimate {
-                query: SketchQuery::Cardinality,
+                query: SketchStatistic::Cardinality,
             },
             PostAsapOperatorPayload::SummaryMerge,
         ];

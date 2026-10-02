@@ -99,7 +99,7 @@ use asap_types::dag_export::{
 };
 use asap_types::post_asap::SummaryExpr;
 use asap_types::post_asap::SummaryNode;
-use asap_types::post_asap::{CompositionOperator, FieldDataType, SketchQuery};
+use asap_types::post_asap::{CompositionOperator, FieldDataType, SketchStatistic};
 use asap_types::pre_asap::cse::{structural_hash, HashCache};
 use asap_types::pre_asap::query_expr::QueryExpr;
 use asap_types::pre_asap::schema::{DataType, Field, Schema};
@@ -826,7 +826,7 @@ impl AccuracyEvidenceProvider for TopKMarginEvidence {
         &self,
         op: &CompositionOperator,
         _family: &FieldDataType,
-        _query: Option<&SketchQuery>,
+        _query: Option<&SketchStatistic>,
     ) -> PropagationStats {
         if matches!(op, CompositionOperator::TopKSelection) {
             PropagationStats {

@@ -159,11 +159,11 @@ enum ASAPOp {
         reduction: Reduction, grouping: GroupingStrategy,
     },
     SummaryEstimate {
-        summary_input: Rc<OperatorNode>, query: SketchQuery,
+        summary_input: Rc<OperatorNode>, query: SketchStatistic,
     },
     FinalizeExactAccumulator { child: Rc<OperatorNode> },
     MaintainPopulation { child: Rc<OperatorNode>, population: MaintainedPopulation },
-    ReadPopulation { child: Rc<OperatorNode>, readout: PopulationReadout },
+    ReadPopulation { child: Rc<OperatorNode>, readout: PopulationStatistic },
 
     // Reserved operations; semantics and support require further design.
     SummaryMerge { children: Vec<Rc<OperatorNode>> },

@@ -1,4 +1,4 @@
-use planner_types::post_asap::SketchQuery;
+use planner_types::post_asap::SketchStatistic;
 
 pub type KernelError = Box<dyn std::error::Error + Send + Sync>;
 
@@ -22,7 +22,7 @@ pub trait AggregateCore: Send + Sync {
 
     /// Answer a sketch readout. Exact states are read through
     /// [`ExactAccumulator::readout`](super::exact::ExactAccumulator::readout).
-    fn estimate(&self, query: &SketchQuery) -> Result<f64, KernelError> {
+    fn estimate(&self, query: &SketchStatistic) -> Result<f64, KernelError> {
         Err(format!("{query:?} is not supported by this summary").into())
     }
 
@@ -52,7 +52,7 @@ mod tests {
             .downcast_mut::<DDSketchAccumulator>()
             .unwrap();
         dd.inner.update(3.0);
-        let count = SketchQuery::PointCount {
+        let count = SketchStatistic::PointCount {
             key: planner_types::pre_asap::ColumnRef::SampleValue,
             value: None,
         };

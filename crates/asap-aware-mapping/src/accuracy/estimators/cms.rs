@@ -4,7 +4,7 @@ use super::*;
 pub(super) fn guarantee(
     algorithm: &SketchAlgorithm,
     params: &SketchParams,
-    query: &SketchQuery,
+    query: &SketchStatistic,
 ) -> Option<ResultGuarantee> {
     let (SketchParams::Cms { width, depth } | SketchParams::CmsWithHeap { width, depth, .. }) =
         params
@@ -51,7 +51,7 @@ mod tests {
                     SketchKind::new(SketchAlgorithm::Cms, params),
                     GroupingStrategy::default(),
                 ),
-                &SketchQuery::Cardinality,
+                &SketchStatistic::Cardinality,
             )
             .unwrap();
         assert_eq!(g.metric, ErrorMetric::Frequency);
@@ -78,7 +78,7 @@ mod tests {
                     SketchKind::new(SketchAlgorithm::CmsWithHeap, cms_heap),
                     GroupingStrategy::default(),
                 ),
-                &SketchQuery::TopK { k: 10 },
+                &SketchStatistic::TopK { k: 10 },
             )
             .expect("heap sketch still provides per-key frequency intervals");
         assert_eq!(topk_frequency.metric, ErrorMetric::Frequency);

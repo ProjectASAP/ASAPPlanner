@@ -356,7 +356,7 @@ mod tests {
     fn quantile_roots_share_producer_but_not_readout_or_parameters() {
         use crate::post_asap::{
             FieldDataType, GroupingStrategy, SketchAlgorithm, SketchKind, SketchParams,
-            SketchQuery, SummaryUpdate,
+            SketchStatistic, SummaryUpdate,
         };
         use crate::pre_asap::{ColumnRef, Reduction};
         fn readout(q: f64, alpha: f64) -> Rc<SummaryNode> {
@@ -381,7 +381,7 @@ mod tests {
             Rc::new(SummaryNode {
                 expr: SummaryExpr::SummaryEstimate {
                     summary_input: producer,
-                    query: SketchQuery::Quantile { q },
+                    query: SketchStatistic::Quantile { q },
                 },
                 schema: Schema::lifted(vec![], None),
                 guarantee: None,

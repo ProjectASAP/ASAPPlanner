@@ -1,7 +1,7 @@
 //! KLL quantile summary over `asap_sketchlib::KllSketch`.
 use crate::{AggregateCore, KernelError};
 use asap_sketchlib::KllSketch;
-use planner_types::post_asap::SketchQuery;
+use planner_types::post_asap::SketchStatistic;
 
 #[derive(Clone)]
 pub struct DatasketchesKLLAccumulator {
@@ -60,10 +60,10 @@ impl AggregateCore for DatasketchesKLLAccumulator {
         }))
     }
 
-    fn estimate(&self, query: &SketchQuery) -> Result<f64, KernelError> {
+    fn estimate(&self, query: &SketchStatistic) -> Result<f64, KernelError> {
         match query {
-            SketchQuery::Quantile { q } if (0.0..=1.0).contains(q) => Ok(self.get_quantile(*q)),
-            SketchQuery::Quantile { .. } => Err("quantile must be in [0, 1]".into()),
+            SketchStatistic::Quantile { q } if (0.0..=1.0).contains(q) => Ok(self.get_quantile(*q)),
+            SketchStatistic::Quantile { .. } => Err("quantile must be in [0, 1]".into()),
             other => Err(format!("KLL does not answer {other:?}").into()),
         }
     }
@@ -95,7 +95,7 @@ mod tests {
             all.update(f64::from(v));
         }
         let merged = a.merge_with(&b).unwrap();
-        let q = SketchQuery::Quantile { q: 0.5 };
+        let q = SketchStatistic::Quantile { q: 0.5 };
         assert_eq!(merged.estimate(&q).unwrap(), all.estimate(&q).unwrap());
     }
 
@@ -103,7 +103,7 @@ mod tests {
     #[test]
     fn rejects_unsupported_or_out_of_range_queries() {
         let kll = DatasketchesKLLAccumulator::new(200);
-        assert!(kll.estimate(&SketchQuery::Quantile { q: 1.5 }).is_err());
-        assert!(kll.estimate(&SketchQuery::Cardinality).is_err());
+        assert!(kll.estimate(&SketchStatistic::Quantile { q: 1.5 }).is_err());
+        assert!(kll.estimate(&SketchStatistic::Cardinality).is_err());
     }
 }

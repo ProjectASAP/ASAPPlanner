@@ -353,7 +353,7 @@ use asap_types::post_asap::{
     ExactOperationSchemaError, ExactParams, ExecutionDataState, ExecutionDataStateError,
     ExecutionTiming, Field, FieldDataType, GroupingStrategy, NonNegativeWeightProof, SamplingKind,
     SamplingParams, Schema, SketchAlgorithm, SketchKind, SketchParams,
-    SketchQuery as PostAsapSketchQuery, StatModelKind, StatModelParams, SummaryExpr,
+    SketchStatistic as PostAsapSketchQuery, StatModelKind, StatModelParams, SummaryExpr,
     SummaryInputExpr, SummaryNode, SummaryUpdate, ValueOperation, WaveletKind, WaveletParams,
     WeightDomain,
 };
@@ -9954,7 +9954,7 @@ mod tests {
     /// intent as a real sketch instead of the default `PassThrough` (issue
     /// #150) — `realizations_for_intent` must consult `realize_extension`
     /// for the `Extension` arm, and `readout` must consult
-    /// `readout_extension` to build its `SketchQuery` without panicking.
+    /// `readout_extension` to build its `SketchStatistic` without panicking.
     struct FrequencyCostModel;
 
     impl CostModel for FrequencyCostModel {

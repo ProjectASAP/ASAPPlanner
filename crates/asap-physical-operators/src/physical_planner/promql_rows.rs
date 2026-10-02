@@ -79,7 +79,7 @@ pub fn compile_current_series_readout(
     selected: &Rc<planner_types::post_asap::SummaryNode>,
 ) -> Result<CompiledPhysicalDAG, Error> {
     use planner_types::post_asap::{
-        compile_post_asap_dag, maintained_population::PopulationReadout, Field,
+        compile_post_asap_dag, maintained_population::PopulationStatistic, Field,
     };
     let mut dag = compile_post_asap_dag(selected).map_err(|error| invalid(error.to_string()))?;
     // Typed snapshot candidates already carry full identity throughout the DAG.
@@ -112,7 +112,7 @@ pub fn compile_current_series_readout(
                     node.payload,
                     Payload::Value {
                         operation: ValueOperation::ReadPopulation {
-                            readout: PopulationReadout::TopK { .. }
+                            readout: PopulationStatistic::TopK { .. }
                         }
                     }
                 )
@@ -136,7 +136,7 @@ pub fn compile_current_series_readout(
             Payload::Value {
                 operation:
                     ValueOperation::ReadPopulation {
-                        readout: PopulationReadout::TopK { .. },
+                        readout: PopulationStatistic::TopK { .. },
                     },
             } => {}
             _ => return Err(invalid("unsupported current-series readout dependency")),

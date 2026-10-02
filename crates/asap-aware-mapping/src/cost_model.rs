@@ -50,7 +50,7 @@ use std::rc::Rc;
 
 use asap_types::post_asap::{
     ExactOperation, FieldDataType, GroupingStrategy, HydraParams, ResultGuarantee, SketchAlgorithm,
-    SketchParams, SketchQuery, SummaryExpr, SummaryMaintenanceLifecycleGuarantee, SummaryNode,
+    SketchParams, SketchStatistic, SummaryExpr, SummaryMaintenanceLifecycleGuarantee, SummaryNode,
     SummaryWindowFramework,
 };
 use asap_types::pre_asap::agg_intent::AggIntent;
@@ -550,7 +550,7 @@ pub trait CostModel {
     /// [`realize_extension`](Self::realize_extension). Only ever called
     /// when `realize_extension` returned `Sketch` for the same
     /// `(ext_kind, payload)` — `replacement::readout` has no other way to build a
-    /// `SketchQuery` for a shape core doesn't know. A deployment that
+    /// `SketchStatistic` for a shape core doesn't know. A deployment that
     /// overrides `realize_extension` to return `Sketch` for some
     /// `ext_kind` MUST also override this for that same `ext_kind`, or
     /// this default panics loudly (rather than silently misinterpreting
@@ -560,7 +560,7 @@ pub trait CostModel {
         ext_kind: &str,
         _payload: &serde_json::Value,
         _col: &ColumnRef,
-    ) -> SketchQuery {
+    ) -> SketchStatistic {
         unimplemented!(
             "CostModel::realize_extension returned Sketch for ext_kind={ext_kind:?} but \
              readout_extension wasn't overridden to match"

@@ -22,7 +22,7 @@ use asap_frontend_sql::SqlCatalog;
 use asap_planner::{e2e_plan, FrontendInput, UserInput};
 use asap_types::post_asap::{
     share_common_summary_sub_dags, AccuracyError, BoundExpr, CompositionOperator, ErrorMetric,
-    ProbabilityExpr, ResultGuarantee, SketchQuery,
+    ProbabilityExpr, ResultGuarantee, SketchStatistic,
 };
 use asap_types::post_asap::{
     FieldDataType, SketchAlgorithm, SketchParams, SummaryExpr, SummaryNode,
@@ -459,7 +459,7 @@ impl AccuracyModel for UnivMonEvidence {
     fn local_guarantee(
         &self,
         family: &FieldDataType,
-        query: &SketchQuery,
+        query: &SketchStatistic,
     ) -> Option<ResultGuarantee> {
         if matches!(family, FieldDataType::Sketch(kind, _) if kind.algorithm() == &SketchAlgorithm::UnivMon)
         {

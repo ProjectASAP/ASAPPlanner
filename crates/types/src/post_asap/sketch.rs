@@ -592,7 +592,7 @@ pub enum SummaryInputExpr {
 
 /// What to extract from a built summary. Carried by `SummaryEstimate`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub enum SketchQuery {
+pub enum SketchStatistic {
     /// sqrt(sum_v frequency(v)^2), not the norm of numeric input values.
     FrequencyL2,
     /// Shannon entropy of the value-frequency distribution, in bits.
@@ -646,9 +646,12 @@ mod tests {
                 serde_json::from_str::<SummaryUpdate>(&input_json).unwrap(),
                 input
             );
-            let query = SketchQuery::TopK { k: 10 };
+            let query = SketchStatistic::TopK { k: 10 };
             let json = serde_json::to_string(&query).unwrap();
-            assert_eq!(serde_json::from_str::<SketchQuery>(&json).unwrap(), query);
+            assert_eq!(
+                serde_json::from_str::<SketchStatistic>(&json).unwrap(),
+                query
+            );
         }
     }
 

@@ -32,7 +32,7 @@ impl AccuracyEvidenceProvider for Evidence {
         &self,
         op: &CompositionOperator,
         _: &FieldDataType,
-        _: Option<&SketchQuery>,
+        _: Option<&SketchStatistic>,
     ) -> PropagationStats {
         if matches!(op, CompositionOperator::TopKSelection) {
             PropagationStats {

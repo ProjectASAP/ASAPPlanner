@@ -11,7 +11,7 @@ use crate::{
 use planner_types::{
     post_asap::{
         ExactOperation, FieldDataType, PostAsapDAG, PostAsapDAGNode,
-        PostAsapOperatorPayload as Payload, SketchQuery, SummaryInputExpr, ValueOperation,
+        PostAsapOperatorPayload as Payload, SketchStatistic, SummaryInputExpr, ValueOperation,
     },
     pre_asap::{
         AggIntent, ColumnRef, CompareOpKind, DataType, GroupKeys, QueryExpr,
@@ -341,7 +341,7 @@ fn compile_internal(
             } = &node.payload
             {
                 use planner_types::post_asap::maintained_population::{
-                    PopulationInput, PopulationReadout,
+                    PopulationInput, PopulationStatistic,
                 };
                 let [producer] = inputs.as_slice() else {
                     return Err(invalid("population readout requires one input"));
@@ -363,7 +363,7 @@ fn compile_internal(
                     ));
                 }
                 let input = schemas[0].clone();
-                let PopulationReadout::TopK { k } = readout else {
+                let PopulationStatistic::TopK { k } = readout else {
                     let mut chain =
                         row_values::population_aggregate(&input, &spec.grouping, readout)?;
                     let last = chain.pop().expect("nonempty chain");
@@ -623,11 +623,11 @@ fn temporal_readout_drops_name(node: &PostAsapDAGNode) -> bool {
             Payload::Value {
                 operation: ValueOperation::FinalizeExactAccumulator
             } | Payload::SummaryEstimate {
-                query: SketchQuery::Quantile { .. }
-                    | SketchQuery::Cardinality
-                    | SketchQuery::PointCount { .. }
-                    | SketchQuery::FrequencyL2
-                    | SketchQuery::FrequencyEntropy
+                query: SketchStatistic::Quantile { .. }
+                    | SketchStatistic::Cardinality
+                    | SketchStatistic::PointCount { .. }
+                    | SketchStatistic::FrequencyL2
+                    | SketchStatistic::FrequencyEntropy
             }
         )
 }
@@ -944,7 +944,7 @@ fn bind_operation(node: &PostAsapDAGNode, inputs: &[SchemaRef]) -> Result<Operat
             )
         }
         Payload::SummaryEstimate { query } => {
-            if let SketchQuery::TopK { k } = query {
+            if let SketchStatistic::TopK { k } = query {
                 return Operator::keyed_readout(
                     input.clone(),
                     summary_column(input)?,

@@ -4,7 +4,7 @@ use super::*;
 pub(super) fn guarantee(
     algorithm: &SketchAlgorithm,
     params: &SketchParams,
-    query: &SketchQuery,
+    query: &SketchStatistic,
 ) -> Option<ResultGuarantee> {
     let SketchParams::Kll { k } = params else {
         return None;
@@ -53,7 +53,7 @@ mod tests {
                     SketchKind::new(SketchAlgorithm::Kll, params),
                     GroupingStrategy::default(),
                 ),
-                &SketchQuery::Quantile { q: 0.99 },
+                &SketchStatistic::Quantile { q: 0.99 },
             )
             .unwrap();
         assert_eq!(g.metric, ErrorMetric::Rank);

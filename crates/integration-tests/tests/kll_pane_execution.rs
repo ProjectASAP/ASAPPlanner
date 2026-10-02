@@ -11,7 +11,7 @@ use asap_physical_operators::{
 };
 use asap_types::{
     post_asap::{
-        Field, FieldDataType, Schema, SketchAlgorithm, SketchKind, SketchParams, SketchQuery,
+        Field, FieldDataType, Schema, SketchAlgorithm, SketchKind, SketchParams, SketchStatistic,
     },
     pre_asap::DataType,
 };
@@ -99,7 +99,12 @@ fn restore(schema: SchemaRef, states: &[Arc<dyn AggregateCore>]) -> Batch {
     .unwrap()
 }
 fn readout(schema: SchemaRef, q: f64) -> Operator {
-    Operator::readout(schema, 0, ReadoutQuery::Sketch(SketchQuery::Quantile { q })).unwrap()
+    Operator::readout(
+        schema,
+        0,
+        ReadoutQuery::Sketch(SketchStatistic::Quantile { q }),
+    )
+    .unwrap()
 }
 struct CountStarts {
     operator: Operator,

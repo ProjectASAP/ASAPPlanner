@@ -1,6 +1,6 @@
 //! Query-time PromQL value computation over logical row schemas.
 use super::*;
-use planner_types::post_asap::maintained_population::PopulationReadout;
+use planner_types::post_asap::maintained_population::PopulationStatistic;
 use planner_types::pre_asap::{DataType, ScalarValue};
 
 /// A PromQL number literal has no row schema; its consumer folds it in.
@@ -16,7 +16,7 @@ pub(super) fn scalar_literal(expression: &QueryExpr) -> Option<f64> {
 pub(super) fn population_aggregate(
     input: &SchemaRef,
     grouping: &[String],
-    readout: &PopulationReadout,
+    readout: &PopulationStatistic,
 ) -> Result<Vec<Operator>, Error> {
     let groups = grouping
         .iter()
@@ -24,14 +24,14 @@ pub(super) fn population_aggregate(
         .collect::<Result<Vec<_>, _>>()?;
     let value = named_column(input, &ColumnRef::SampleValue)?;
     let reduction = match readout {
-        PopulationReadout::Sum => Reduction::Sum(value),
-        PopulationReadout::Count => Reduction::Count,
-        PopulationReadout::Average => Reduction::Avg(value),
-        PopulationReadout::Quantile { q } => Reduction::Quantile {
+        PopulationStatistic::Sum => Reduction::Sum(value),
+        PopulationStatistic::Count => Reduction::Count,
+        PopulationStatistic::Average => Reduction::Avg(value),
+        PopulationStatistic::Quantile { q } => Reduction::Quantile {
             column: value,
             q: *q,
         },
-        PopulationReadout::TopK { .. } => {
+        PopulationStatistic::TopK { .. } => {
             return Err(invalid(
                 "TopK population readout ranks; it does not aggregate",
             ))
