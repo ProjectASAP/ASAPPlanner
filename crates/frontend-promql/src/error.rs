@@ -1,12 +1,12 @@
 use std::fmt;
 
-use asap_types::pre_asap::ResolveTreeError;
+use asap_types::pre_asap::ResolveDAGError;
 use asap_types::workload::WorkloadError;
 
 /// Errors from lowering a PromQL query (parse → the canonical, unresolved
-/// tree, built directly →
+/// DAG, built directly →
 /// [`resolve_root`](asap_types::pre_asap::resolve_root) binds it to the
-/// resolved tree, issue #179).
+/// resolved DAG, issue #179).
 ///
 /// Carries no DataFusion type — the PromQL front end never depends on the SQL
 /// stack. The language-neutral variants (`UnsupportedFeature` / `WrongLanguage`
@@ -31,9 +31,9 @@ pub enum PromqlError {
     InvalidParameter(String),
     /// The workload's query language is not PromQL.
     WrongLanguage(String),
-    /// Resolving the canonical unresolved tree failed (name resolution
+    /// Resolving the canonical unresolved DAG failed (name resolution
     /// against the bound schema).
-    Convert(ResolveTreeError),
+    Convert(ResolveDAGError),
 }
 
 impl fmt::Display for PromqlError {
@@ -54,8 +54,8 @@ impl fmt::Display for PromqlError {
 
 impl std::error::Error for PromqlError {}
 
-impl From<ResolveTreeError> for PromqlError {
-    fn from(e: ResolveTreeError) -> Self {
+impl From<ResolveDAGError> for PromqlError {
+    fn from(e: ResolveDAGError) -> Self {
         Self::Convert(e)
     }
 }

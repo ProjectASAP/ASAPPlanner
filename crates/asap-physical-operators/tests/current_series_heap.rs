@@ -3,7 +3,7 @@ use asap_physical_operators::{
     operators::Operator,
     physical_planner::{
         promql_rows::{decode_series_identity, series_row, SERIES_IDENTITY_COLUMN},
-        CompiledPhysicalDag, InputContract, Source,
+        CompiledPhysicalDAG, InputContract, Source,
     },
     runtime::{Limits, RunContext, Scope},
     values::{Batch, Value},
@@ -30,13 +30,13 @@ fn schema() -> Arc<SummarySchema> {
         time_index: Some(0),
     })
 }
-fn run(program: &CompiledPhysicalDag, data: Batch, end: i64) -> Result<Vec<Batch>, String> {
-    let recovered = serde_json::from_slice::<CompiledPhysicalDag>(
+fn run(program: &CompiledPhysicalDAG, data: Batch, end: i64) -> Result<Vec<Batch>, String> {
+    let recovered = serde_json::from_slice::<CompiledPhysicalDAG>(
         &serde_json::to_vec(&program).map_err(|e| e.to_string())?,
     )
     .map_err(|e| e.to_string())?;
     let input_id = recovered.input_contracts().next().unwrap().0;
-    let graph = recovered
+    let dag = recovered
         .instantiate(BTreeMap::from([(
             input_id,
             Box::new(Operator::source(data.schema().clone(), vec![data]).unwrap()) as Source<'_>,
@@ -51,7 +51,7 @@ fn run(program: &CompiledPhysicalDag, data: Batch, end: i64) -> Result<Vec<Batch
     )
     .unwrap();
     block_on(async {
-        let mut stream = graph.execute(recovered.roots(), context).unwrap().remove(0);
+        let mut stream = dag.execute(recovered.roots(), context).unwrap().remove(0);
         let mut batches = Vec::new();
         while let Some(batch) = stream.next().await {
             batches.push((*batch.map_err(|e| e.to_string())?).clone());
@@ -78,8 +78,8 @@ fn input(samples: &[(&str, i64, f64)]) -> Batch {
         .collect();
     Batch::try_new(schema, rows).unwrap()
 }
-fn snapshot_plan() -> CompiledPhysicalDag {
-    CompiledPhysicalDag::from_operators(
+fn snapshot_plan() -> CompiledPhysicalDAG {
+    CompiledPhysicalDAG::from_operators(
         BTreeMap::from([(0, InputContract::bounded(schema()))]),
         BTreeMap::from([(
             1,
@@ -175,7 +175,7 @@ fn spatial_heap_ranks_latest_values_in_independent_runs() {
             time_index: None,
         });
         let read = Operator::keyed_readout(build.schema(), 1, 1, output).unwrap();
-        let plan = CompiledPhysicalDag::from_operators(
+        let plan = CompiledPhysicalDAG::from_operators(
             BTreeMap::from([(0, InputContract::bounded(schema()))]),
             BTreeMap::from([
                 (
@@ -230,7 +230,7 @@ fn current_series_observes_resource_limits() {
     let plan = snapshot_plan();
     for cancelled in [false, true] {
         let data = input(&[("one", 50_000, 1.)]);
-        let graph = plan
+        let dag = plan
             .instantiate(BTreeMap::from([(
                 0,
                 Box::new(Operator::source(data.schema().clone(), vec![data]).unwrap())
@@ -251,7 +251,7 @@ fn current_series_observes_resource_limits() {
         if cancelled {
             context.cancel();
         }
-        let result = match graph.execute(&[1], context.clone()) {
+        let result = match dag.execute(&[1], context.clone()) {
             Err(error) => Err(error),
             Ok(mut streams) => block_on(streams.remove(0).next()).unwrap().map(|_| ()),
         };

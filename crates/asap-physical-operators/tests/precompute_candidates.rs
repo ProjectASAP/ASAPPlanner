@@ -5,7 +5,7 @@ use asap_physical_operators::{
     operators::Operator,
     physical_planner::{
         compile, compile_candidate, compile_candidates, cut_candidate, enumerate_frontiers,
-        select_candidate, CandidateCost, CompiledPhysicalDag, InputContract, PhysicalASAPDAG,
+        select_candidate, CandidateCost, CompiledPhysicalDAG, InputContract, PhysicalASAPDAG,
         Source,
     },
     runtime::{Limits, RunContext, Scope},
@@ -52,7 +52,7 @@ fn grouped_rate_space() -> asap_aware_mapping::CandidateLogicalASAPDAGs<&'static
     search_workload(vec![("grouped-rate", root)])
 }
 
-fn grouped_rate() -> PostAsapDag {
+fn grouped_rate() -> PostAsapDAG {
     let space = grouped_rate_space();
     let selected = space
         .global_selection(&DefaultCostModel)
@@ -61,7 +61,7 @@ fn grouped_rate() -> PostAsapDag {
         .unwrap();
     compile_post_asap_dag(&selected).unwrap()
 }
-fn run(plan: &CompiledPhysicalDag, inputs: BTreeMap<u64, Batch>, scope: Scope) -> Vec<Batch> {
+fn run(plan: &CompiledPhysicalDAG, inputs: BTreeMap<u64, Batch>, scope: Scope) -> Vec<Batch> {
     let sources = inputs
         .into_iter()
         .map(|(id, batch)| {
@@ -560,7 +560,7 @@ fn enumerated_grouped_rate_candidates_execute_numeric_query_outputs() {
 /// The per-frontier lowering used before compile-once cuts: each boundary
 /// choice lowers the precompute and query DAGs from the logical DAG again.
 fn recompiled_candidate(
-    dag: &PostAsapDag,
+    dag: &PostAsapDAG,
     inputs: &BTreeMap<u64, InputContract>,
     roots: &[u64],
     frontier: &[u64],
@@ -590,7 +590,7 @@ fn recompiled_candidate(
 }
 
 fn assert_cuts_match_recompilation(
-    dag: &PostAsapDag,
+    dag: &PostAsapDAG,
     inputs: BTreeMap<u64, InputContract>,
     roots: &[u64],
     min_frontiers: usize,

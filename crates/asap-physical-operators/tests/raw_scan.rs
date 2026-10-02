@@ -53,15 +53,15 @@ fn fixture() -> (QueryExpr, Schema, Vec<Batch>) {
     ];
     (scan, output, batches)
 }
-fn plan(scan: QueryExpr, schema: &Schema, state: ExecutionDataState) -> PostAsapDag {
-    let node = |id, payload| PostAsapDagNode {
+fn plan(scan: QueryExpr, schema: &Schema, state: ExecutionDataState) -> PostAsapDAG {
+    let node = |id, payload| PostAsapDAGNode {
         id: PostAsapNodeId(id),
         payload,
         output_state: state,
         output_schema: (**schema).clone(),
         guarantee: None,
     };
-    let edge = |producer, consumer| PostAsapDagEdge {
+    let edge = |producer, consumer| PostAsapDAGEdge {
         producer: PostAsapNodeId(producer),
         consumer: PostAsapNodeId(consumer),
         role: EdgeRole::Input,
@@ -70,7 +70,7 @@ fn plan(scan: QueryExpr, schema: &Schema, state: ExecutionDataState) -> PostAsap
         grouping: GroupingEdgeCompatibility::NotApplicable,
         window: WindowEdgeCompatibility::NotApplicable,
     };
-    PostAsapDag {
+    PostAsapDAG {
         nodes: vec![
             node(0, PostAsapOperatorPayload::Fallback { expression: scan }),
             node(
@@ -264,13 +264,13 @@ fn schema_drift_and_memory_limits_fail_the_scan() {
         batch: bad,
     }));
     let plan = plan(scan, &schema, ExecutionDataState::QUERY_ROWS);
-    let graph = bind_with_data_sources(&plan, BTreeMap::new(), &[0], &sources).unwrap();
+    let physical_dag = bind_with_data_sources(&plan, BTreeMap::new(), &[0], &sources).unwrap();
     block_on(async {
-        let mut s = graph.execute(&[0], context()).unwrap().remove(0);
+        let mut s = physical_dag.execute(&[0], context()).unwrap().remove(0);
         assert!(s.next().await.unwrap().is_err());
     });
     let sources = registry(Arc::new(MemorySource::new(schema, batches).unwrap()));
-    let graph = bind_with_data_sources(&plan, BTreeMap::new(), &[0], &sources).unwrap();
+    let physical_dag = bind_with_data_sources(&plan, BTreeMap::new(), &[0], &sources).unwrap();
     let ctx = RunContext::new(
         Scope::Query {
             evaluation_time_ms: 0,
@@ -283,7 +283,7 @@ fn schema_drift_and_memory_limits_fail_the_scan() {
     )
     .unwrap();
     block_on(async {
-        let mut s = graph.execute(&[0], ctx.clone()).unwrap().remove(0);
+        let mut s = physical_dag.execute(&[0], ctx.clone()).unwrap().remove(0);
         assert!(s.next().await.unwrap().is_err());
     });
     assert_eq!(ctx.retained_bytes(), 0);
@@ -318,9 +318,9 @@ fn empty_sources_and_three_valued_predicates() {
             )
             .unwrap();
         let plan = plan(scan.clone(), &schema, ExecutionDataState::QUERY_ROWS);
-        let graph = bind_with_data_sources(&plan, BTreeMap::new(), &[0], &sources).unwrap();
+        let physical_dag = bind_with_data_sources(&plan, BTreeMap::new(), &[0], &sources).unwrap();
         block_on(async {
-            let mut s = graph.execute(&[0], context()).unwrap().remove(0);
+            let mut s = physical_dag.execute(&[0], context()).unwrap().remove(0);
             let mut count = 0;
             while let Some(b) = s.next().await {
                 count += b.unwrap().rows().len();
@@ -351,8 +351,8 @@ fn compile_without_readers_and_rebind_inputs() {
             0,
             Box::new(Operator::source(schema.clone(), batches.clone()).unwrap()) as Source<'_>,
         )]);
-        let graph = compiled.instantiate(sources).unwrap();
-        let mut outputs = graph.execute(compiled.roots(), context()).unwrap();
+        let physical_dag = compiled.instantiate(sources).unwrap();
+        let mut outputs = physical_dag.execute(compiled.roots(), context()).unwrap();
         let result = block_on(outputs.remove(0).collect::<Vec<_>>());
         assert!(result.iter().all(Result::is_ok));
         assert_eq!(

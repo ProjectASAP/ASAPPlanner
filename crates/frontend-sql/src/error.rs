@@ -1,11 +1,11 @@
 use std::fmt;
 
-use asap_types::pre_asap::ResolveTreeError;
+use asap_types::pre_asap::ResolveDAGError;
 
 /// Errors from lowering a SQL query (parse + plan via DataFusion → the
-/// canonical, unresolved tree, built directly →
+/// canonical, unresolved DAG, built directly →
 /// [`resolve_root`](asap_types::pre_asap::resolve_root) binds it to the
-/// resolved tree, issue #179).
+/// resolved DAG, issue #179).
 ///
 /// Carries no PromQL type — the SQL front end never depends on the PromQL
 /// parser. The language-neutral variants (`UnsupportedFeature` / `WrongLanguage`
@@ -28,9 +28,9 @@ pub enum SqlError {
     UnsupportedFeature(String),
     /// The workload's query language is not SQL.
     WrongLanguage(String),
-    /// Resolving the canonical unresolved tree failed (name resolution
+    /// Resolving the canonical unresolved DAG failed (name resolution
     /// against the bound schema).
-    Convert(ResolveTreeError),
+    Convert(ResolveDAGError),
 }
 
 impl fmt::Display for SqlError {
@@ -50,8 +50,8 @@ impl fmt::Display for SqlError {
 
 impl std::error::Error for SqlError {}
 
-impl From<ResolveTreeError> for SqlError {
-    fn from(e: ResolveTreeError) -> Self {
+impl From<ResolveDAGError> for SqlError {
+    fn from(e: ResolveDAGError) -> Self {
         Self::Convert(e)
     }
 }

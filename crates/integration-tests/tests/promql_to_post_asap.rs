@@ -29,7 +29,7 @@ use asap_types::pre_asap::query_expr::{QueryExpr, Reduction};
 use asap_types::pre_asap::schema::DataType;
 use asap_types::types::AccuracyTarget;
 
-/// This crate has no "bind me one tree" public API any more —
+/// This crate has no "bind me one DAG" public API any more —
 /// `SketchAlgorithmStrategy::replacements` always returns every candidate, and
 /// a caller decides what to keep. This test-only helper reproduces the
 /// take-the-first-(`cost_model`-preferred)-candidate pattern so the
@@ -643,7 +643,7 @@ fn ddsketch_quantile_ratio_meets_the_shared_relative_error_target() {
     );
 
     let shared =
-        asap_types::post_asap::share_common_summary_subtrees(vec![("ratio", node.clone())]);
+        asap_types::post_asap::share_common_summary_sub_dags(vec![("ratio", node.clone())]);
     let SummaryExpr::BinaryOp { lhs, rhs, .. } = &shared[0].1.expr else {
         panic!("expected binary ratio")
     };
@@ -892,7 +892,7 @@ fn planner_heap_topk_reference_execution_matches_ground_truth() {
 ///       └─ KeepPreAsap(TimeRange{5m} → Scan)         → {ts, value}
 /// ```
 ///
-/// The nested tree exercises both realizations: the approximate quantile
+/// The nested DAG exercises both realizations: the approximate quantile
 /// binds a KLL sketch + readout; the per-series `rate` binds the exact
 /// counter-reset-aware accumulator (no estimate — its state is the value).
 #[test]
@@ -1011,7 +1011,7 @@ fn promql_quantile_of_rate_binds_kll_over_rate_accumulator() {
 
 /// An exact workload binds zero sketches: `sum by (job) (m)` at
 /// `AccuracyTarget::Exact` still gets its mergeable exact accumulator, and
-/// `avg(m)` (non-mergeable) passes through as a whole logical subtree.
+/// `avg(m)` (non-mergeable) passes through as a whole logical sub-DAG.
 #[test]
 fn promql_exact_workload_binds_accumulators_not_sketches() {
     let pre_asap = lower_promql("sum by (job) (http_requests_total)", AccuracyTarget::Exact)

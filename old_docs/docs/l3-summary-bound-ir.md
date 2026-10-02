@@ -23,7 +23,7 @@ answer it — with no reference to what's actually stored anywhere yet.
 
 ### The shape of a summary-bound plan
 
-A summary-bound plan mirrors the canonical intent tree but replaces
+A summary-bound plan mirrors the canonical intent DAG but replaces
 each summarizable node with a decision:
 
 - **Unbound / logical** — nothing rewrote this node (e.g. a filter or a
@@ -43,11 +43,11 @@ each summarizable node with a decision:
 - **Summary merge** — combining multiple built summaries into one; only
   valid when every input agrees on family and parameters.
 
-A summary-bound plan is a DAG, not just a tree — a shared
+A summary-bound plan is a DAG with sharing — a shared
 sub-computation can appear as more than one reference to the same bound
 node, mirroring the sharing already present in the canonical form (see
 [`l2-intent-algebra.md`](./l2-intent-algebra.md)). Binding only fires
-where an intent is recognizable in the tree; anything underneath an
+where an intent is recognizable in the DAG; anything underneath an
 unrewritten (logical) parent stays logical too — extending `implement`
 to rewrite through a logical parent is a known open design question,
 left to a deployment that has a real need for it.
@@ -79,17 +79,17 @@ a deployment supplies: how to find candidate materialized instances for
 a bound node, how to fetch one instance's state, how to merge several
 instances' states, how to read a value out of a state, and how to
 evaluate an unrewritten logical node directly. A shared execution
-routine walks the bound tree and calls into these deployment-supplied
+routine walks the bound DAG and calls into these deployment-supplied
 operations, so every deployment gets the same walk and merge logic for
 free.
 
 Finding candidates for a summary-aggregation node requires seeing that
-node's entire input sub-tree, not just a bare name — a summary
+node's entire input sub-DAG, not just a bare name — a summary
 aggregation node carries no source identity of its own; that identity
 lives further down, inside a scan. Walking down to find it is
 deployment-specific knowledge (how a real store names and indexes
 summarized data); the shared execution routine doesn't need to
-interpret it, only pass the sub-tree along.
+interpret it, only pass the sub-DAG along.
 
 ### Nested composition
 
@@ -186,7 +186,7 @@ reaches serving-time execution:
 
 | Node | `summary` field | Constraint |
 |---|---|---|
-| `Logical` | — | none — wraps an arbitrary unrewritten `QueryExpr` subtree |
+| `Logical` | — | none — wraps an arbitrary unrewritten `QueryExpr` sub-DAG |
 | `SummaryAgg` | own | none beyond `col`'s intent already requiring an accuracy target compatible with `summary`; this is the leaf every other row's constraints are checked *against* |
 | `SummaryJoin` | own | only emitted by a join-specific `Bind*OnJoin` rule — none exist yet in the base design, so this variant has no live producer |
 | `SummarySubtract` | read from `left`/`right` | `left`/`right` agree on `(kind, params)`; that kind's catalog entry sets `subtractable` |
@@ -218,11 +218,11 @@ flowchart LR
     LG -. "✗ already a value" .-> SM
 ```
 
-`implement` — turning a canonical `QueryExpr` into an `L3Node` tree:
+`implement` — turning a canonical `QueryExpr` into an `L3Node` DAG:
 
 ```rust
-pub fn implement_tree(expr: &QueryExpr) -> Result<Rc<L3Node>, ImplementError>;
-pub fn implement_tree_with(expr: &QueryExpr, cost_model: &dyn CostModel) -> Result<Rc<L3Node>, ImplementError>;
+pub fn implement_dag(expr: &QueryExpr) -> Result<Rc<L3Node>, ImplementError>;
+pub fn implement_dag_with(expr: &QueryExpr, cost_model: &dyn CostModel) -> Result<Rc<L3Node>, ImplementError>;
 ```
 
 **"Implementation" is the answer to one question: how is this one
@@ -277,7 +277,7 @@ pub trait CostModel {
 ```
 
 Serving-time — the interface a deployment implements to actually answer
-a query against an already-bound `L3Node` tree:
+a query against an already-bound `L3Node` DAG:
 
 ```rust
 pub trait SummaryExecutor {

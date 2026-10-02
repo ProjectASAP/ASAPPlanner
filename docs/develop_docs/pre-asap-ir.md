@@ -41,7 +41,7 @@ to one source language.
 - [`Concat`](#concat) — exact, untyped `UNION ALL` of union-compatible branches.
 
 **[PromQL-specific nodes](#promql-specific-nodes)**
-- [`PromqlScalarBridge`](#promqlscalarbridge) — a scalar sub-expression at an operator-tree position.
+- [`PromqlScalarBridge`](#promqlscalarbridge) — a scalar sub-expression at an operator-DAG position.
 - [`EvalTimestamp`](#evaltimestamp) — the query evaluation time as a scalar (PromQL `time()`).
 - [`PromqlVectorFromScalar`](#promqlvectorfromscalar) — promotes a scalar to a label-less instant vector.
 - [`PromqlScalarFromVector`](#promqlscalarfromvector) — collapses a single-series vector to a scalar.
@@ -174,7 +174,7 @@ meaningful summary implementation.
   `measures[i]`; groups are still formed from every row. It is positional against
   `child`'s output (like `Filter.pred`), not against the aggregate's output like `having`.
   Empty means no measure is filtered; that is the only spelling of "unfiltered" a resolved
-  tree carries, so `[None, None]` is normalized to `[]`.
+  DAG carries, so `[None, None]` is normalized to `[]`.
 - `having` — an optional post-aggregation filter predicate (SQL `HAVING`).
 - `child` — the input being aggregated.
 
@@ -241,7 +241,7 @@ Example for `having`:
    )
    ```
 
-   but the tree can still carry the same condition as a wrapping `Filter` near the root:
+   but the DAG can still carry the same condition as a wrapping `Filter` near the root:
 
    ```text
    Filter(
@@ -329,7 +329,7 @@ the same logical data domain.
 - `predicates` — row-level filters pushed all the way down to this scan (Rules/Invariants
   rule 1); enforced structurally at lowering time — a `Filter` directly over a `Scan` never
   survives.
-- `schema` — the binding schema every positional column reference in the tree resolves against.
+- `schema` — the binding schema every positional column reference in the DAG resolves against.
 
 ### Filter
 
@@ -487,7 +487,7 @@ histogram_quantiles(rate(http_request_duration_seconds_bucket[5m]), "le", 0.5, 0
 ### PromqlScalarBridge
 
 A scalar sub-expression (issue #220: in practice always `Literal(ScalarValue::Float64(_))` —
-a PromQL number literal, or a folded constant scalar expression) sitting at an **operator-tree
+a PromQL number literal, or a folded constant scalar expression) sitting at an **operator-DAG
 position** — a `BinaryOp` operand for `<vector> op <scalar>` thresholds and unit conversions,
 a `PromqlVectorFromScalar` child, or a whole query's root. This wrapper is what marks the
 position; it no longer duplicates `Literal`'s value the way the old `PromqlScalar(f64)` variant

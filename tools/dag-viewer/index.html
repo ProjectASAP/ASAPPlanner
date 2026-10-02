@@ -447,7 +447,7 @@
 
 <header>
   <h1>ASAP query DAG viewer</h1>
-  <div id="dropzone">Drop WorkloadGraph JSON here, or click to choose file(s)</div>
+  <div id="dropzone">Drop WorkloadDAG JSON here, or click to choose file(s)</div>
   <input id="fileInput" type="file" accept="application/json" multiple />
   <div class="modeToggle" id="modeToggle">
     <button class="btn active" type="button" disabled>Pre/Post-ASAP</button>
@@ -456,7 +456,7 @@
   <button class="btn" id="clearBtn">Clear all</button>
   <label class="toggle">
     <input id="highlightToggle" type="checkbox" checked />
-    Highlight shared subtrees
+    Highlight shared sub-DAGs
   </label>
   <span class="proxyNote">Click an edge to inspect its schema</span>
 </header>

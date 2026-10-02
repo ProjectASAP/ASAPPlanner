@@ -1,5 +1,5 @@
 use asap_aware_mapping::analytical_cost::{
-    EvidenceBackedPhysicalDag, ExecutionMultiplicity, PhysicalDagNode, PhysicalNodeEvidence,
+    EvidenceBackedPhysicalDAG, ExecutionMultiplicity, PhysicalDAGNode, PhysicalNodeEvidence,
     PhysicalOperator,
 };
 use asap_aware_mapping::physical_operator_statistics::{
@@ -11,7 +11,7 @@ use asap_types::workload::{
 };
 use std::collections::HashMap;
 
-fn fixture() -> (EvidenceBackedPhysicalDag, ComparisonScope) {
+fn fixture() -> (EvidenceBackedPhysicalDAG, ComparisonScope) {
     let coverage = SourceCoverage {
         source: Source::Table {
             table_ref: "events".into(),
@@ -45,7 +45,7 @@ fn fixture() -> (EvidenceBackedPhysicalDag, ComparisonScope) {
         promql: None,
     };
     let nodes = vec![
-        PhysicalDagNode {
+        PhysicalDAGNode {
             id: "scan".into(),
             operator: PhysicalOperator::Scan,
             children: vec![],
@@ -54,7 +54,7 @@ fn fixture() -> (EvidenceBackedPhysicalDag, ComparisonScope) {
             retained_bytes: 0,
             execution: ExecutionMultiplicity::PerEvaluation,
         },
-        PhysicalDagNode {
+        PhysicalDAGNode {
             id: "left".into(),
             operator: PhysicalOperator::PassThrough,
             children: vec!["scan".into()],
@@ -63,7 +63,7 @@ fn fixture() -> (EvidenceBackedPhysicalDag, ComparisonScope) {
             retained_bytes: 0,
             execution: ExecutionMultiplicity::PerEvaluation,
         },
-        PhysicalDagNode {
+        PhysicalDAGNode {
             id: "right".into(),
             operator: PhysicalOperator::PassThrough,
             children: vec!["scan".into()],
@@ -72,7 +72,7 @@ fn fixture() -> (EvidenceBackedPhysicalDag, ComparisonScope) {
             retained_bytes: 0,
             execution: ExecutionMultiplicity::PerEvaluation,
         },
-        PhysicalDagNode {
+        PhysicalDAGNode {
             id: "root".into(),
             operator: PhysicalOperator::Concat,
             children: vec!["left".into(), "right".into()],
@@ -127,7 +127,7 @@ fn fixture() -> (EvidenceBackedPhysicalDag, ComparisonScope) {
         ),
     ]);
     (
-        EvidenceBackedPhysicalDag {
+        EvidenceBackedPhysicalDAG {
             nodes,
             root: "root".into(),
             evidence,
@@ -161,7 +161,7 @@ fn mapping_resource_reexports_are_wire_compatible_shared_types() {
     );
 }
 
-fn profile(dag: &EvidenceBackedPhysicalDag) -> PhysicalHandoffProfile {
+fn profile(dag: &EvidenceBackedPhysicalDAG) -> PhysicalHandoffProfile {
     PhysicalHandoffProfile {
         evidence_version: "evidence-v1".into(),
         observed_at_ms: 90,
@@ -205,7 +205,7 @@ fn transfer(id: &str, consumer: Option<&str>) -> PhysicalHandoff {
     }
 }
 
-fn profiles_for_alternatives(dags: &[&EvidenceBackedPhysicalDag]) -> PhysicalHandoffProfile {
+fn profiles_for_alternatives(dags: &[&EvidenceBackedPhysicalDAG]) -> PhysicalHandoffProfile {
     let mut combined = profile(dags[0]);
     combined.plans.clear();
     for dag in dags {

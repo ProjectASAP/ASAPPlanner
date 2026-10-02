@@ -8,7 +8,7 @@ operation counts are unestimated, not inferred to be zero.
 
 A supplied profile must cover every reachable physical node, with an explicit
 empty `accesses` list for nodes doing no storage I/O. Entries bind the complete
-`PhysicalDagNode` and `OperatorStatistics`, so a reused ID cannot silently
+`PhysicalDAGNode` and `OperatorStatistics`, so a reused ID cannot silently
 borrow evidence from a different plan. Profiles may contain additional nodes
 for other alternatives. Their evidence generation must equal the planner
 snapshot version, and `observed_at_ms <= planning_time < valid_until_ms`.

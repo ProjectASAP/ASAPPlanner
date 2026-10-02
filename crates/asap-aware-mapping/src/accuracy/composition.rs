@@ -25,7 +25,7 @@ impl DefaultAccuracyModel {
 
     /// `(1 + ε_total) = Π (1 + ε_i)` ⇒ for two factors
     /// `ε_in + ε_out + ε_in·ε_out`; written out as the sum of all
-    /// cross-products so the expression tree is exact for any input count.
+    /// cross-products so the expression DAG is exact for any input count.
     fn multiplicative(
         op: &CompositionOperator,
         inputs: &[ResultGuarantee],

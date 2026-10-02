@@ -1,14 +1,14 @@
 //! Binary computation must be fully compiled before deployment binds values.
 use asap_physical_operators::{
     operators::Operator,
-    physical_planner::{compile_node, CompiledPhysicalDag, InputContract, Source},
+    physical_planner::{compile_node, CompiledPhysicalDAG, InputContract, Source},
     runtime::{Limits, RunContext, Scope},
     values::{Batch, Schema, Value},
 };
 use futures::{executor::block_on, StreamExt};
 use planner_types::{
     post_asap::{
-        BinaryOperator, ExecutionDataState, PostAsapDagNode, PostAsapNodeId,
+        BinaryOperator, ExecutionDataState, PostAsapDAGNode, PostAsapNodeId,
         PostAsapOperatorPayload, SummaryFamilyType, SummaryField, SummarySchema,
     },
     pre_asap::{ArithmeticOpKind, BinaryOpKind, DataType},
@@ -48,7 +48,7 @@ fn row(name: &str, job: &str, value: f64) -> Vec<Value> {
         Value::Float64(value),
     ]
 }
-fn program() -> CompiledPhysicalDag {
+fn program() -> CompiledPhysicalDAG {
     program_for(BinaryOperator {
         kind: BinaryOpKind::Arithmetic(ArithmeticOpKind::Div),
         vector_match: None,
@@ -56,9 +56,9 @@ fn program() -> CompiledPhysicalDag {
         checked_finite_division: false,
     })
 }
-fn program_for(operator: BinaryOperator) -> CompiledPhysicalDag {
+fn program_for(operator: BinaryOperator) -> CompiledPhysicalDAG {
     let schema = schema();
-    let node = PostAsapDagNode {
+    let node = PostAsapDAGNode {
         id: PostAsapNodeId(2),
         payload: PostAsapOperatorPayload::Binary { operator },
         output_state: ExecutionDataState::QUERY_ROWS,
@@ -66,7 +66,7 @@ fn program_for(operator: BinaryOperator) -> CompiledPhysicalDag {
         guarantee: None,
     };
     let operator = compile_node(&node, &[schema.clone(), schema.clone()]).unwrap();
-    let graph = CompiledPhysicalDag::from_operators(
+    let physical_dag = CompiledPhysicalDAG::from_operators(
         BTreeMap::from([
             (0, InputContract::bounded(schema.clone())),
             (1, InputContract::bounded(schema)),
@@ -75,7 +75,8 @@ fn program_for(operator: BinaryOperator) -> CompiledPhysicalDag {
         vec![2],
     )
     .unwrap();
-    serde_json::from_slice::<CompiledPhysicalDag>(&serde_json::to_vec(&graph).unwrap()).unwrap()
+    serde_json::from_slice::<CompiledPhysicalDAG>(&serde_json::to_vec(&physical_dag).unwrap())
+        .unwrap()
 }
 fn evaluate(
     left: Vec<Vec<Value>>,
@@ -84,7 +85,7 @@ fn evaluate(
     evaluate_with(program(), left, right)
 }
 fn evaluate_with(
-    graph: CompiledPhysicalDag,
+    physical_dag: CompiledPhysicalDAG,
     left: Vec<Vec<Value>>,
     right: Vec<Vec<Value>>,
 ) -> Result<Vec<Vec<Value>>, asap_physical_operators::Error> {
@@ -99,7 +100,7 @@ fn evaluate_with(
             )
         })
         .collect();
-    let bound = graph.instantiate(sources)?;
+    let bound = physical_dag.instantiate(sources)?;
     let ctx = RunContext::new(
         Scope::Query {
             evaluation_time_ms: 1,
@@ -150,7 +151,7 @@ fn scalar_broadcast_and_bool_comparison_are_distinct() {
     use asap_physical_operators::physical_planner::promql_values;
     use planner_types::pre_asap::CompareOpKind;
     for return_bool in [false, true] {
-        let graph = promql_values::compile_binary(
+        let physical_dag = promql_values::compile_binary(
             &BinaryOperator {
                 kind: BinaryOpKind::Compare(CompareOpKind::Lt),
                 vector_match: None,
@@ -162,9 +163,10 @@ fn scalar_broadcast_and_bool_comparison_are_distinct() {
             false,
         )
         .unwrap();
-        let graph =
-            serde_json::from_slice::<CompiledPhysicalDag>(&serde_json::to_vec(&graph).unwrap())
-                .unwrap();
+        let physical_dag = serde_json::from_slice::<CompiledPhysicalDAG>(
+            &serde_json::to_vec(&physical_dag).unwrap(),
+        )
+        .unwrap();
         let scalar = promql_values::scalar_schema();
         let vector = promql_values::vector_schema();
         let sources = BTreeMap::from([
@@ -193,7 +195,7 @@ fn scalar_broadcast_and_bool_comparison_are_distinct() {
                 ) as Source<'_>,
             ),
         ]);
-        let bound = graph.instantiate(sources).unwrap();
+        let bound = physical_dag.instantiate(sources).unwrap();
         let context = RunContext::new(
             Scope::Query {
                 evaluation_time_ms: 1,
@@ -232,7 +234,7 @@ fn scalar_broadcast_and_bool_comparison_are_distinct() {
 #[test]
 fn binary_obeys_memory_and_cancellation() {
     for cancel in [false, true] {
-        let graph = program();
+        let physical_dag = program();
         let sources = (0..2)
             .map(|id| {
                 (
@@ -247,7 +249,7 @@ fn binary_obeys_memory_and_cancellation() {
                 )
             })
             .collect();
-        let bound = graph.instantiate(sources).unwrap();
+        let bound = physical_dag.instantiate(sources).unwrap();
         let context = RunContext::new(
             Scope::Query {
                 evaluation_time_ms: 1,
@@ -341,7 +343,7 @@ fn stored_series_readouts_support_filters_and_sets() {
             BinaryOpKind::Set(PromQLVectorSetOpKind::Or),
         ] {
             let nodes = (0..5)
-                .map(|id| PostAsapDagNode {
+                .map(|id| PostAsapDAGNode {
                     id: PostAsapNodeId(id),
                     payload: match id {
                         0 | 1 => PostAsapOperatorPayload::SummaryMerge,
@@ -377,7 +379,7 @@ fn stored_series_readouts_support_filters_and_sets() {
                 (3, 4, EdgeRole::Right),
             ]
             .into_iter()
-            .map(|(producer, consumer, role)| PostAsapDagEdge {
+            .map(|(producer, consumer, role)| PostAsapDAGEdge {
                 producer: PostAsapNodeId(producer),
                 consumer: PostAsapNodeId(consumer),
                 role,
@@ -387,12 +389,12 @@ fn stored_series_readouts_support_filters_and_sets() {
                 window: WindowEdgeCompatibility::NotApplicable,
             })
             .collect();
-            let dag = PostAsapDag {
+            let dag = PostAsapDAG {
                 nodes,
                 edges,
                 root: PostAsapNodeId(4),
             };
-            let graph = compile(
+            let physical_dag = compile(
                 &dag,
                 BTreeMap::from([
                     (0, InputContract::bounded(state_schema.clone())),
@@ -401,8 +403,8 @@ fn stored_series_readouts_support_filters_and_sets() {
                 &[4],
             )
             .unwrap();
-            let graph: CompiledPhysicalDag =
-                serde_json::from_slice(&serde_json::to_vec(&graph).unwrap()).unwrap();
+            let physical_dag: CompiledPhysicalDAG =
+                serde_json::from_slice(&serde_json::to_vec(&physical_dag).unwrap()).unwrap();
             let sources = [(0, "a", 6.), (1, "b", 2.)]
                 .into_iter()
                 .map(|(id, name, value)| {
@@ -437,7 +439,7 @@ fn stored_series_readouts_support_filters_and_sets() {
                     )
                 })
                 .collect();
-            let bound = graph.instantiate(sources).unwrap();
+            let bound = physical_dag.instantiate(sources).unwrap();
             let context = RunContext::new(
                 Scope::Query {
                     evaluation_time_ms: 1,

@@ -1,6 +1,6 @@
 //! Type bridges between DataFusion's Arrow types and the canonical `DataType`, plus
 //! the SQL table catalog used to register tables with DataFusion and to carry
-//! resolved leaf schemas into the canonical, unresolved tree.
+//! resolved leaf schemas into the canonical, unresolved DAG.
 
 use std::collections::HashMap;
 

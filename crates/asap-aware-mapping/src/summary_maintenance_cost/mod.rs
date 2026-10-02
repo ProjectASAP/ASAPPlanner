@@ -24,7 +24,7 @@ use crate::analytical_cost::ExecutionMultiplicity;
 #[cfg(test)]
 use crate::analytical_cost::PhysicalNodeEvidence;
 use crate::analytical_cost::{
-    estimate_physical_dag, AnalyticalCostError, EvidenceBackedPhysicalDag, PhysicalDagNode,
+    estimate_physical_dag, AnalyticalCostError, EvidenceBackedPhysicalDAG, PhysicalDAGNode,
     PhysicalOperator, ResourceCalibration, ResourceEstimate,
 };
 use crate::cost_model::{

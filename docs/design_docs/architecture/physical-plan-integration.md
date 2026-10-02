@@ -128,7 +128,7 @@ select each concrete implementation and provide all edges, resource facts,
 multiplicities, source ownership, and stable physical identities. The planner
 fails closed when any reachable `SummaryExpr` node lacks that binding.
 
-The raw/query portion of a streaming comparison remains a `PhysicalDag` using
+The raw/query portion of a streaming comparison remains a `PhysicalDAG` using
 the canonical `PhysicalOperator` and `OperatorStatistics` pairing. Summary
 evidence is kept separate only where lifecycle-driven update, retention, and
 expiration multiplicities require facts beyond the query-DAG
@@ -425,7 +425,7 @@ requires a normal result; setting both guards or attaching a guard to a non-divi
 operator is invalid. Compilers must preserve this typed condition rather than
 recovering average semantics from query text.
 
-### Candidate pruning is a subgraph
+### Candidate pruning is a sub-DAG
 
 Candidate-based TopK uses a summary key readout, a general semi-join over
 explicit matching key columns, grouped Sort by the authoritative score, and
@@ -493,7 +493,7 @@ workload schema cannot identify separate backlog and arrival populations. The
 adapter fails explicitly rather than guessing a split. The estimator version is
 `summary-maintenance-resource-v2`; evidence type names drop the `Streaming` prefix
 (`SummaryMaintenanceInputs`, `SummaryPhysicalInputEvidence`, `SummaryAggregateEvidence`,
-`RetainedSubDagEvidence`, `RawInputEvidence`, and the summary window/alternative
+`RetainedSubDAGEvidence`, `RawInputEvidence`, and the summary window/alternative
 types). Update source imports; no legacy-name aliases are provided.
 
 Regressions cover a fixed snapshot with no rate evidence, contradictory arrival

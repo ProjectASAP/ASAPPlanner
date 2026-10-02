@@ -2,8 +2,8 @@
 mod physical_common;
 use asap_physical_operators::{
     operators::{Operator, ReadoutQuery},
-    physical_planner::{CompiledPhysicalDag, InputContract, Source},
-    plan::{PhysicalDag, PhysicalOperator, PlanProperties},
+    physical_planner::{CompiledPhysicalDAG, InputContract, Source},
+    plan::{PhysicalDAG, PhysicalOperator, PlanProperties},
     runtime::{Input, Limits, OutputStream, RunContext, Scope},
     summary_kernels::datasketches_kll::DatasketchesKLLAccumulator,
     values::{Batch, Schema, Value},
@@ -47,11 +47,11 @@ fn query_scope() -> Scope {
         revision: 1,
     }
 }
-fn fixture() -> (CompiledPhysicalDag, Operator, Schema) {
+fn fixture() -> (CompiledPhysicalDAG, Operator, Schema) {
     let raw = raw_schema();
     let build = Operator::summary_build(raw.clone(), family(200), 0, None, vec![]).unwrap();
     let state = build.schema();
-    let maintenance = CompiledPhysicalDag::from_operators(
+    let maintenance = CompiledPhysicalDAG::from_operators(
         BTreeMap::from([(0, InputContract::bounded(raw))]),
         BTreeMap::from([(1, (vec![0], build))]),
         vec![1],
@@ -60,7 +60,7 @@ fn fixture() -> (CompiledPhysicalDag, Operator, Schema) {
     let merge = Operator::summary_merge(state.clone(), 0, vec![]).unwrap();
     (maintenance, merge, state)
 }
-fn pane_state(maintenance: &CompiledPhysicalDag, pane: i64) -> Arc<dyn AggregateCore> {
+fn pane_state(maintenance: &CompiledPhysicalDAG, pane: i64) -> Arc<dyn AggregateCore> {
     // Twenty samples in each (start,end] one-minute pane; k=200 avoids
     // compaction so quantiles and sample counts have deterministic oracles.
     let raw = raw_schema();
@@ -139,7 +139,7 @@ fn five_panes_roundtrip_and_shared_merge_runs_once() {
     let (maintenance, merge, schema) = fixture();
     let panes: Vec<_> = (0..6).map(|pane| pane_state(&maintenance, pane)).collect();
     drop(maintenance);
-    let compiled = CompiledPhysicalDag::from_operators(
+    let compiled = CompiledPhysicalDAG::from_operators(
         (0..5)
             .map(|id| (id, InputContract::bounded(schema.clone())))
             .collect(),
@@ -224,7 +224,7 @@ fn five_panes_roundtrip_and_shared_merge_runs_once() {
         assert!((value(1) - (50 + offset * 20) as f64).abs() <= 1.);
         assert!((value(2) - (99 + offset * 20) as f64).abs() <= 1.);
         let starts = Arc::new(AtomicUsize::new(0));
-        let mut dag = PhysicalDag::default();
+        let mut dag = PhysicalDAG::default();
         dag.add(
             0,
             vec![],
@@ -267,7 +267,7 @@ fn panes_reject_parameters_schema_and_missing_binding() {
         state: Arc::new(DatasketchesKLLAccumulator::new(128)),
     };
     assert!(Batch::try_new(schema.clone(), vec![vec![wrong]]).is_err());
-    let compiled = CompiledPhysicalDag::from_operators(
+    let compiled = CompiledPhysicalDAG::from_operators(
         BTreeMap::from([(0, InputContract::bounded(schema))]),
         BTreeMap::from([(1, (vec![0], merge))]),
         vec![1],

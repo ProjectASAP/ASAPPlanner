@@ -23,7 +23,7 @@ cost, and selection rules under `optimizer/`. The reviewed source is
 | Collapsible temporal + spatial aggregates | Semantic-equivalent rewriting | The existing rewrite strategy uses accumulator algebra: sum∘sum, sum∘count, min∘min, and max∘max. It rejects all other pairs and requires identical output schemas. |
 | Sketch alternatives and exact fallback | Covered more generally | `SketchAlgorithmStrategy` enumerates legal summary realizations. The enclosing memo group always retains the original raw expression as the exact fallback; the strategy does not falsely label an approximate sketch as exact. |
 | Subpopulation label placement | Covered more generally | `HydraGroupingStrategy` and `GroupingStrategy` express per-subpopulation and shared multi-subpopulation realizations. |
-| Shared computation | Covered more generally | workload-wide CSE and `SharedSubtreeStrategy` operate on physical DAG identity rather than AQE names. |
+| Shared computation | Covered more generally | workload-wide CSE and `SharedSubDAGStrategy` operate on physical DAG identity rather than AQE names. |
 | Average decomposition | Semantic-equivalent rewriting | The same rewrite strategy exposes independently optimizable sum/count accumulators when null semantics and schema permit it. |
 | Merge/delete legality | Covered | Summary-family capabilities and lifecycle validation determine which maintenance operations are legal. |
 | Window-framework selection | Separate physical-planning work | Window selection must compare an extensible set of implementations, including tumbling, sliding, PromSketch-style exponential-histogram windows, and other window frameworks. This audit does not introduce a closed window enum or choose among them. |
@@ -41,7 +41,7 @@ does not create a new strategy category.
 | Which summary algorithm can implement one aggregate intent | `SketchAlgorithmStrategy` |
 | How grouping/subpopulation state is laid out | `HydraGroupingStrategy` |
 | Whether an equivalent logical expression exposes better accumulators | `SemanticEquivalentRewriteStrategy` (the broadened existing avg rewrite; `AvgToSumOverCountStrategy` remains a compatibility name) |
-| Whether identical physical work is shared | `SharedSubtreeStrategy` |
+| Whether identical physical work is shared | `SharedSubDAGStrategy` |
 | Whether a finer grouping can answer a coarser grouping | `RollupStrategy` |
 | Whether tighter accuracy can answer a looser request | `AccuracyReconciliationStrategy` |
 | Whether a larger Top-K result can answer a smaller limit | `TopKLimitReuseStrategy` |

@@ -34,7 +34,7 @@
 //! - [`TargetSubDAG`] — a reference to a pre-ASAP [`QueryExpr`] node that is a
 //!   candidate for replacement, plus how many places in the workload already
 //!   reference it (its `consumer_count`) — the one piece of cross-node
-//!   context [`SharedSubtreeStrategy`] needs that a bare node reference alone
+//!   context [`SharedSubDAGStrategy`] needs that a bare node reference alone
 //!   doesn't carry.
 //! - [`ReplacementSubDAG`] — one candidate replacement for a `TargetSubDAG`:
 //!   either a fully bound [`SummaryNode`] or a pre-ASAP [`QueryExpr`] rewrite
@@ -76,16 +76,16 @@
 //!   ranked list directly: for the same bindable-`Aggregate` shape this crate
 //!   binds (single intent, no `HAVING`), every entry becomes its own bound
 //!   candidate.
-//! - [`SharedSubtreeStrategy`] wraps
-//!   `asap_types::pre_asap::cse::share_common_subtrees`'s sharing decision.
+//! - [`SharedSubDAGStrategy`] wraps
+//!   `asap_types::pre_asap::cse::share_common_sub_dags`'s sharing decision.
 //!   Wherever a [`TargetSubDAG`] already has two or more consumers (i.e.
-//!   `share_common_subtrees` already collapsed two or more workload
+//!   `share_common_sub_dags` already collapsed two or more workload
 //!   locations onto the same `Rc<QueryExpr>` — [`discover_targets`] below
 //!   does the identical workload-wide discovery for [`search_workload_with`];
 //!   this module's own tests reuse the same dedup logic to build realistic
 //!   fixtures), it reports the two-way candidate CSE's own detection pass
 //!   deliberately declines to pick between on its own: build once and share
-//!   the already-interned subtree, or build it independently at each
+//!   the already-interned sub-DAG, or build it independently at each
 //!   consumer. [`crate::cost_model::CostModel::cse_share_decision`] is where
 //!   that choice actually gets made *today* (a fixed comparison, not a
 //!   search) — this strategy exposes the same two-way choice as an explicit,
@@ -136,15 +136,15 @@
 //! ```
 //!
 //! Read literally, this enumerates whole *plans* — full copies of the
-//! workload's tree, one per combination of per-target choices. A workload
+//! workload's DAG, one per combination of per-target choices. A workload
 //! with `N` independently-choosable targets would produce up to `2^N` flat
-//! plans, each one duplicating every untouched sibling subtree. This module
+//! plans, each one duplicating every untouched sibling sub-DAG. This module
 //! does not do that:
 //!
 //! 1. **Per-target candidates, not flat plans.** [`TargetSubDAGCandidates`]
 //!    stores the alternatives for one distinct [`TargetSubDAG`] (identified by
 //!    its own `Rc<QueryExpr>` pointer identity — the same currency
-//!    [`asap_types::pre_asap::cse::share_common_subtrees`] already
+//!    [`asap_types::pre_asap::cse::share_common_sub_dags`] already
 //!    established across the workload) holding every
 //!    [`ReplacementSubDAG`] alternative discovered for it. [`CandidateLogicalASAPDAGs`] is
 //!    a collection of these groups, keyed by `TargetSubDAG` — a candidate
@@ -175,12 +175,12 @@
 //! line above stands for: every `TargetSubDAG` this pass discovers is one
 //! iteration of that loop. It walks every workload root's whole DAG (the
 //! same **relational-skeleton** operator-child scope
-//! `asap_types::pre_asap::cse::share_common_subtrees` itself uses — see
+//! `asap_types::pre_asap::cse::share_common_sub_dags` itself uses — see
 //! that module's "Algorithm" section), discovering one `TargetSubDAG` per
 //! distinct `Rc` and a *real* `consumer_count`: how many operator-child
 //! positions anywhere in the workload reference that exact `Rc`, not just
 //! how many of the workload's own top-level roots happen to be it — a
-//! `SharedSubtreeStrategy` candidate three levels under an unshared
+//! `SharedSubDAGStrategy` candidate three levels under an unshared
 //! `Filter` is exactly as real a target as a shared whole root, so this
 //! module's discovery can't stop at the top level.
 //!
@@ -214,7 +214,7 @@
 //! not already known, and any found become next round's frontier. Both shipped
 //! strategies are idempotent in exactly this sense: [`SketchAlgorithmStrategy`]
 //! produces terminal [`Replacement::Summary`] candidates (no `QueryExpr`
-//! children to scan at all), and [`SharedSubtreeStrategy`]'s two
+//! children to scan at all), and [`SharedSubDAGStrategy`]'s two
 //! [`Replacement::Rewrite`] candidates both reuse the target's own
 //! already-known child `Rc`s verbatim (`Rc::clone`/a shallow top-level
 //! `.clone()` — see that strategy's own doc). So for both, the frontier is
@@ -244,7 +244,7 @@
 //! being the whole story; it isn't a contradiction of #237, it's the scope
 //! change #237 itself named). Concretely, per [`TargetSubDAGCandidates`]:
 //!
-//! - A group whose candidates are the [`SharedSubtreeStrategy`]
+//! - A group whose candidates are the [`SharedSubDAGStrategy`]
 //!   share-vs-recompute pair is ranked by calling
 //!   [`CostModel::cse_share_decision`] via this module's own
 //!   [`cse_preference`] — rather than re-deriving a competing comparison.
@@ -265,9 +265,9 @@
 //! interact — which both shipped strategies' one-round convergence (see
 //! "Termination" above) makes the common case — but it's the wrong answer
 //! whenever they do. Concretely: [`CostModel::cse_share_decision`] costs a
-//! [`SharedSubtreeStrategy`] group by comparing a `consumer_count`-scaled
+//! [`SharedSubDAGStrategy`] group by comparing a `consumer_count`-scaled
 //! recompute cost against a fixed maintenance cost — but a **nested**
-//! `SharedSubtreeStrategy` group's *true* recompute burden isn't its own
+//! `SharedSubDAGStrategy` group's *true* recompute burden isn't its own
 //! raw [`TargetSubDAGCandidates::consumer_count`] (how many operator-child positions
 //! directly reference it) whenever an ancestor on the path to it is
 //! *itself* being recomputed independently rather than shared: recomputing
@@ -280,12 +280,12 @@
 //! [`CandidateLogicalASAPDAGs::global_selection`] is that missing step: a single
 //! **top-down dynamic-programming pass** over the discovered sites,
 //! processed in the topological order [`topological_order`] computes over a
-//! small [`ReferenceGraph`] built for exactly this purpose (parent before
+//! small [`ReferenceDAG`] built for exactly this purpose (parent before
 //! every child, so a site's `effective_consumer_count` is always computed
 //! from *already-decided* ancestors). For every site it computes the
 //! **effective consumer count** — how many times that site actually runs
 //! once every ancestor's own selected candidate is accounted for — and, for
-//! every [`SharedSubtreeStrategy`]-shaped group, re-decides
+//! every [`SharedSubDAGStrategy`]-shaped group, re-decides
 //! [`CostModel::cse_share_decision`] against *that* corrected count instead
 //! of the group's raw structural one. When that group also contains a
 //! non-CSE alternative such as a semantic rewrite, the chosen CSE candidate
@@ -296,7 +296,7 @@
 //! multiplicity to exactly `1` for everything beneath it (one shared
 //! execution backs every use of it); a group that chooses
 //! `RecomputeIndependently` — or has no Share/Recompute decision of its own
-//! at all, i.e. isn't itself a `SharedSubtreeStrategy` shape — passes its
+//! at all, i.e. isn't itself a `SharedSubDAGStrategy` shape — passes its
 //! *own* effective count straight through to whatever it references,
 //! transitively composing contributions from every ancestor on the path,
 //! not just the immediate parent.
@@ -330,10 +330,10 @@
 //!   groups included.
 //! - This is not an exhaustive search over combinations of choices for a
 //!   provably-global optimum in every case. [`CostModel::cse_share_decision`]
-//!   is still a *local*, pairwise comparison at each `SharedSubtreeStrategy`
+//!   is still a *local*, pairwise comparison at each `SharedSubDAGStrategy`
 //!   site (recompute-total vs. one fixed maintenance cost) — this module
 //!   just now feeds it a *correct* input instead of an *incorrect* one. Two
-//!   sibling `SharedSubtreeStrategy` groups that could trade off against
+//!   sibling `SharedSubDAGStrategy` groups that could trade off against
 //!   each other under some shared resource budget (memory, say) still
 //!   aren't jointly optimized here — this crate has no
 //!   cardinality/statistics estimation to bound a combinatorial search like
@@ -359,7 +359,7 @@ use asap_types::post_asap::{
 use asap_types::post_asap::{AccuracyError, CompositionOperator, GuaranteeSource, ResultGuarantee};
 use asap_types::pre_asap::agg_intent::{agg_is_mergeable, AggIntent};
 use asap_types::pre_asap::column_resolution::resolve_column_ref;
-use asap_types::pre_asap::cse::{share_common_subtrees, structural_hash, HashCache};
+use asap_types::pre_asap::cse::{share_common_sub_dags, structural_hash, HashCache};
 use asap_types::pre_asap::expr_ir::{ArithmeticOpKind, ColumnRef};
 use asap_types::pre_asap::query_expr::any_measure_filtered;
 use asap_types::pre_asap::query_expr::{
@@ -426,20 +426,20 @@ pub enum RealizationError {
 
 /// A pre-ASAP sub-DAG a [`ReplacementStrategy`] knows how to replace.
 ///
-/// `root` is a reference into the workload's own [`QueryExpr`] tree (an
+/// `root` is a reference into the workload's own [`QueryExpr`] DAG (an
 /// `Rc<QueryExpr>`, the same currency [`search_workload`] and
-/// `asap_types::pre_asap::cse::share_common_subtrees` already thread through
+/// `asap_types::pre_asap::cse::share_common_sub_dags` already thread through
 /// this crate's public API — not a bare `&QueryExpr` — so a strategy that
 /// needs the node's own `Rc` identity, not just its shape, has it available
 /// without the caller re-deriving it).
 ///
 /// `consumer_count` is how many locations across the workload reference this
-/// exact `Rc` — 1 for an ordinary single-use node and 2+ for a shared subtree.
+/// exact `Rc` — 1 for an ordinary single-use node and 2+ for a shared sub-DAG.
 /// [`search_workload_with`] computes the workload-wide value during target
 /// discovery. [`TargetSubDAG::new`] defaults it to `1` for callers invoking a
 /// strategy against one node in isolation. A strategy that only cares about
 /// `root`'s shape (for example, [`SketchAlgorithmStrategy`]) can ignore the
-/// count; [`SharedSubtreeStrategy`] consults it directly.
+/// count; [`SharedSubDAGStrategy`] consults it directly.
 ///
 /// `strictest_sibling_accuracy` is the strictest accuracy among workload
 /// siblings that read the same summary input as `root`, when stricter than
@@ -487,7 +487,7 @@ pub enum Replacement {
     Summary(Rc<SummaryNode>),
     /// A pre-ASAP rewrite: still a logical [`QueryExpr`], structurally
     /// different from the target's own `root` (e.g. sharing vs. not sharing
-    /// a subtree) but semantically equivalent to it.
+    /// a sub-DAG) but semantically equivalent to it.
     Rewrite(Rc<QueryExpr>),
     /// An exact operator composed over another target's *own* selected
     /// decision across an explicit update/readout boundary (issue #171):
@@ -614,7 +614,7 @@ pub struct Proposals {
 /// of this trait or any existing strategy required.
 ///
 /// `replacements` is only meaningful when `matches` would return `true` for
-/// the same target; both [`SketchAlgorithmStrategy`] and [`SharedSubtreeStrategy`]
+/// the same target; both [`SketchAlgorithmStrategy`] and [`SharedSubDAGStrategy`]
 /// return an empty `Vec` rather than panicking when called on a target they
 /// don't match, so a caller that skips the `matches` check first still gets a
 /// safe (merely uninformative) answer instead of a crash.
@@ -1573,7 +1573,7 @@ impl<'a> SketchAlgorithmStrategy<'a> {
                 proposals.record(
                     format!(
                         "{rationale}; sized under {} budget split of {target:?} across \
-                         {} approximate layers (this layer {outer_target:?}, child subtree \
+                         {} approximate layers (this layer {outer_target:?}, child sub-DAG \
                          {inner_target:?})",
                         allocation.allocator, shape.approximate_layer_count
                     ),
@@ -1933,7 +1933,7 @@ pub(crate) fn realize_child_with(
         // produce — never happens, that match is exhaustive), or every
         // candidate was accuracy-illegal — either way the same conservative
         // fallback `SketchAlgorithmStrategy::matches` uses: keep the
-        // pre-ASAP subtree, executed exactly.
+        // pre-ASAP sub-DAG, executed exactly.
         None => keep_pre_asap(root),
     }
 }
@@ -2336,7 +2336,7 @@ fn override_accuracy(intent: &AggIntent, target: &AccuracyTarget) -> AggIntent {
     out
 }
 
-/// Wrap an unrewritten pre-ASAP subtree, lifting its schema with every column
+/// Wrap an unrewritten pre-ASAP sub-DAG, lifting its schema with every column
 /// `SummaryFamilyType::Plain`. `pub` so a caller can fall back to this
 /// explicitly — e.g. when `SketchAlgorithmStrategy::replacements()` returns no
 /// candidate for a target, or a deployment wants to force a node its own
@@ -2351,7 +2351,7 @@ fn keep_pre_asap_rc(expr: Rc<QueryExpr>) -> Result<Rc<SummaryNode>, RealizationE
     Ok(Rc::new(SummaryNode {
         expr: SummaryExpr::KeepPreAsap(expr),
         schema: lift(&schema),
-        // A kept pre-ASAP subtree is executed exactly by the runtime
+        // A kept pre-ASAP sub-DAG is executed exactly by the runtime
         // (`Realization::PassThrough`'s contract) — zero error.
         guarantee: Some(ResultGuarantee::exact("KeepPreAsap")),
     }))
@@ -2363,7 +2363,7 @@ fn keep_pre_asap_rc(expr: Rc<QueryExpr>) -> Result<Rc<SummaryNode>, RealizationE
 /// `HAVING`. A multi-intent node (SQL `SELECT SUM(a), AVG(b)`), or one with a
 /// `HAVING` predicate (the filter would need the estimate first), stays
 /// logical. Unsupported logical parents still conservatively become one
-/// [`SummaryExpr::KeepPreAsap`] subtree. Composable query-time value
+/// [`SummaryExpr::KeepPreAsap`] sub-DAG. Composable query-time value
 /// operators (`Project`, `Filter`, `Sort`, and `Limit`) are retained during final
 /// DAG assembly so their independently planned children remain visible.
 pub fn bindable_intent(node: &QueryExpr) -> Option<&AggIntent> {
@@ -2400,7 +2400,7 @@ pub fn bindable_intent(node: &QueryExpr) -> Option<&AggIntent> {
 /// Construct a summary with every model explicit (issue #172). `intent`
 /// is `expr`'s own [`bindable_intent`], or a copy of it with an allocated
 /// `AccuracyTarget` substituted (see [`realize_child_with`]).
-/// `child_target`, when set, is the end-to-end budget the child subtree is
+/// `child_target`, when set, is the end-to-end budget the child sub-DAG is
 /// re-enumerated under; `allocation` is the provenance note recording the
 /// split that produced both. `Err(RealizationError::Accuracy)` is the
 /// fail-closed answer for a composition with no sound rule or one that
@@ -3756,15 +3756,15 @@ fn lift(schema: &Schema) -> SummarySchema {
     }
 }
 
-// ── SharedSubtreeStrategy ────────────────────────────────────────────────
+// ── SharedSubDAGStrategy ────────────────────────────────────────────────
 
-/// Wraps `asap_types::pre_asap::cse::share_common_subtrees`'s sharing
+/// Wraps `asap_types::pre_asap::cse::share_common_sub_dags`'s sharing
 /// decision as an explicit candidate pair, wherever a [`TargetSubDAG`]
 /// already has two or more consumers.
 ///
 /// This strategy does not decide sharing itself, nor does it discover which
 /// nodes are shared — by the time a caller builds a `TargetSubDAG` with
-/// `consumer_count >= 2`, `share_common_subtrees` has already made that
+/// `consumer_count >= 2`, `share_common_sub_dags` has already made that
 /// (legality-gated, `PartialEq`-checked) call; [`discover_targets`] below
 /// discovers real consumer counts across a workload the same way for
 /// [`search_workload_with`] (this module's own tests reuse the identical
@@ -3774,9 +3774,9 @@ fn lift(schema: &Schema) -> SummarySchema {
 /// `Rc`" as the two-way choice a downstream cost model (today,
 /// [`CostModel::cse_share_decision`]) picks between: build once and share, or
 /// build independently at each consumer.
-pub struct SharedSubtreeStrategy;
+pub struct SharedSubDAGStrategy;
 
-impl ReplacementStrategy for SharedSubtreeStrategy {
+impl ReplacementStrategy for SharedSubDAGStrategy {
     fn matches(&self, target: &TargetSubDAG<'_>) -> bool {
         target.consumer_count >= 2
     }
@@ -3788,27 +3788,27 @@ impl ReplacementStrategy for SharedSubtreeStrategy {
         let count = target.consumer_count;
         vec![
             ReplacementSubDAG {
-                strategy: "SharedSubtreeStrategy",
+                strategy: "SharedSubDAGStrategy",
                 // The already-interned `Rc` itself: reusing it verbatim *is*
                 // "build once and share" — no new node to construct.
                 replacement: Replacement::Rewrite(Rc::clone(target.root)),
                 provenance: ReplacementProvenance::CseShare,
                 rationale: format!(
-                    "build once and share: share_common_subtrees already interned this \
-                     subtree once and reused it across {count} consumers — one build can \
+                    "build once and share: share_common_sub_dags already interned this \
+                     sub-DAG once and reused it across {count} consumers — one build can \
                      answer all of them instead of computing it {count} times"
                 ),
             },
             ReplacementSubDAG {
-                strategy: "SharedSubtreeStrategy",
+                strategy: "SharedSubDAGStrategy",
                 // A structurally-identical but freshly-allocated `Rc`: same
                 // value (`PartialEq`), deliberately *not* the same pointer,
                 // representing "undo the sharing and recompute independently".
                 replacement: Replacement::Rewrite(Rc::new((**target.root).clone())),
                 provenance: ReplacementProvenance::CseRecompute,
                 rationale: format!(
-                    "build independently: undo the sharing share_common_subtrees found and \
-                     recompute this subtree separately at each of its {count} consumers — \
+                    "build independently: undo the sharing share_common_sub_dags found and \
+                     recompute this sub-DAG separately at each of its {count} consumers — \
                      worth it only when independence outweighs the shared-maintenance cost, \
                      a CostModel's call (e.g. CostModel::cse_share_decision) and not this \
                      strategy's"
@@ -3827,7 +3827,7 @@ impl ReplacementStrategy for SharedSubtreeStrategy {
 /// A generous, documented backstop against a hypothetically ill-behaved
 /// future [`ReplacementStrategy`] (see the module docs' "Termination"
 /// section) — not a bound either shipped strategy could ever approach.
-/// [`SketchAlgorithmStrategy`] and [`SharedSubtreeStrategy`] both converge in
+/// [`SketchAlgorithmStrategy`] and [`SharedSubDAGStrategy`] both converge in
 /// exactly 2 passes over a fixed target set, regardless of workload size.
 pub const MAX_SEARCH_ITERATIONS: usize = 1_000;
 
@@ -3910,7 +3910,7 @@ impl TargetSubDAGCandidates {
 ///
 /// Structural (`QueryExpr`) value equality alone is *not* enough here: this
 /// module's one shipped multi-candidate `Replacement::Rewrite` source,
-/// [`SharedSubtreeStrategy`], deliberately returns **two** candidates that
+/// [`SharedSubDAGStrategy`], deliberately returns **two** candidates that
 /// are value-equal to each other (`build once and share` vs. `build
 /// independently` — see that strategy's own doc) but represent genuinely
 /// different physical choices, distinguished *only* by whether the
@@ -3932,7 +3932,7 @@ impl TargetSubDAGCandidates {
 /// (currently hypothetical, since neither shipped strategy causes it)
 /// case of the exact same alternative being proposed twice. A fresh
 /// [`HashCache`] per call: this is a pairwise check between two candidates
-/// for one group, not a bottom-up pass over a whole tree, so there is no
+/// for one group, not a bottom-up pass over a whole DAG, so there is no
 /// wider traversal to amortize the cache across the way `InternTable`'s own
 /// use of `structural_hash` does.
 fn is_duplicate_rewrite(
@@ -3980,7 +3980,7 @@ fn is_duplicate_summary(_existing: &Rc<SummaryNode>, _candidate: &Rc<SummaryNode
 /// caller can still map a `Root`'s `Id` back to the `Rc<QueryExpr>` whose
 /// group holds its alternatives.
 pub struct CandidateLogicalASAPDAGs<Id> {
-    /// The workload's roots, after the one `share_common_subtrees` pass
+    /// The workload's roots, after the one `share_common_sub_dags` pass
     /// [`search_workload_with`] runs up front — the same post-CSE roots
     /// every `TargetSubDAG` in `groups` was discovered from.
     pub roots: Vec<(Id, Rc<QueryExpr>)>,
@@ -4063,18 +4063,18 @@ impl<Id> CandidateLogicalASAPDAGs<Id> {
 /// The caller supplies a finite expansion budget; exceeding it is an error,
 /// never a silently truncated inventory presented as exhaustive.
 #[derive(Debug)]
-pub struct CandidateDagInventory<Id> {
+pub struct CandidateDAGInventory<Id> {
     pub candidates: Vec<Vec<(Id, Rc<SummaryNode>)>>,
     pub rejected_assemblies: Vec<String>,
 }
 
-type CandidateDagChoice<'a> = (Option<&'a ReplacementSubDAG>, Option<Rc<SummaryNode>>);
+type CandidateDAGChoice<'a> = (Option<&'a ReplacementSubDAG>, Option<Rc<SummaryNode>>);
 
 impl<Id: Clone + PartialEq> CandidateLogicalASAPDAGs<Id> {
     pub fn enumerate_candidate_dags(
         &self,
         expansion_limit: usize,
-    ) -> Result<CandidateDagInventory<Id>, RealizationError> {
+    ) -> Result<CandidateDAGInventory<Id>, RealizationError> {
         self.enumerate_candidate_roots(&self.roots, expansion_limit)
     }
 
@@ -4086,7 +4086,7 @@ impl<Id: Clone + PartialEq> CandidateLogicalASAPDAGs<Id> {
         &self,
         id: &Id,
         expansion_limit: usize,
-    ) -> Result<CandidateDagInventory<Id>, RealizationError> {
+    ) -> Result<CandidateDAGInventory<Id>, RealizationError> {
         let roots = self
             .roots
             .iter()
@@ -4105,7 +4105,7 @@ impl<Id: Clone + PartialEq> CandidateLogicalASAPDAGs<Id> {
         &self,
         roots: &[(Id, Rc<QueryExpr>)],
         expansion_limit: usize,
-    ) -> Result<CandidateDagInventory<Id>, RealizationError> {
+    ) -> Result<CandidateDAGInventory<Id>, RealizationError> {
         let mut reachable = Vec::new();
         let mut nodes = HashMap::new();
         let mut counts = HashMap::new();
@@ -4133,7 +4133,7 @@ impl<Id: Clone + PartialEq> CandidateLogicalASAPDAGs<Id> {
             .collect::<Vec<_>>();
         // Composition plans carry the proofs established during discovery.
         // No cost ranking is consulted while expanding these choices.
-        let options: Vec<Vec<CandidateDagChoice<'_>>> = order
+        let options: Vec<Vec<CandidateDAGChoice<'_>>> = order
             .iter()
             .map(|ptr| {
                 let group = &self.groups[ptr];
@@ -4168,7 +4168,7 @@ impl<Id: Clone + PartialEq> CandidateLogicalASAPDAGs<Id> {
             .ok_or(RealizationError::PhysicalRealization(
                 "candidate expansion budget exceeded; no partial inventory returned",
             ))?;
-        let mut inventory = CandidateDagInventory {
+        let mut inventory = CandidateDAGInventory {
             candidates: Vec::new(),
             rejected_assemblies: Vec::new(),
         };
@@ -4214,7 +4214,7 @@ impl<Id: Clone + PartialEq> CandidateLogicalASAPDAGs<Id> {
                 .collect::<Result<Vec<_>, _>>();
             match roots {
                 Ok(roots) => {
-                    let roots = asap_types::post_asap::share_common_summary_subtrees(roots);
+                    let roots = asap_types::post_asap::share_common_summary_sub_dags(roots);
                     use std::hash::{Hash, Hasher};
                     let mut hash = std::collections::hash_map::DefaultHasher::new();
                     let mut pending = roots
@@ -4533,7 +4533,7 @@ impl<Id> CandidateLogicalASAPDAGs<Id> {
     /// `self.roots[i]` — the same order [`search_workload`]/
     /// [`search_workload_with`] were originally called with (post-CSE
     /// dedup preserves both root count and order — see
-    /// `asap_types::pre_asap::cse::share_common_subtrees`'s own
+    /// `asap_types::pre_asap::cse::share_common_sub_dags`'s own
     /// `.map(...).collect()` body). This keeps `Id` fully opaque (no `Eq`/
     /// `Hash`/`Clone` bound needed on it at all — issue #287's "keep
     /// caller/query identifiers opaque" requirement) at the cost of the
@@ -4568,7 +4568,7 @@ impl<Id> CandidateLogicalASAPDAGs<Id> {
     /// effective structural execution rate rather than mere reachability.
     ///
     /// **Unreachable sites**: [`CandidateLogicalASAPDAGs`] can contain a site no root's own
-    /// structural tree actually reaches — e.g. one only ever produced by a
+    /// structural DAG actually reaches — e.g. one only ever produced by a
     /// [`Replacement::Rewrite`] candidate a [`ReplacementStrategy`] invented
     /// (this walk only follows [`TargetSubDAGCandidates::target`]'s own structural
     /// children, the same scope [`discover_targets`] uses for the original
@@ -4873,7 +4873,7 @@ fn rank_group<'a>(
         return ranked;
     }
 
-    // Shape 1: the exact `SharedSubtreeStrategy` share-vs-recompute pair —
+    // Shape 1: the exact `SharedSubDAGStrategy` share-vs-recompute pair —
     // rank via `CostModel::cse_share_decision`, the same comparison
     // the local CSE ranking path already uses.
     if cse_candidate_pair(group).is_some() {
@@ -4974,14 +4974,14 @@ fn rank_group<'a>(
 }
 
 /// For a group whose candidates are all [`Replacement::Rewrite`] (the
-/// [`SharedSubtreeStrategy`] shape): does [`CostModel::cse_share_decision`]
+/// [`SharedSubDAGStrategy`] shape): does [`CostModel::cse_share_decision`]
 /// prefer the candidate that shares `group.target`'s own `Rc` (`true`), or
 /// the one that recomputes independently (`false`)? `None` when there's no
 /// real comparison to make — fewer than 2 consumers (mirrors
-/// [`SharedSubtreeStrategy::matches`]'s own gate), or `group.target` can't
+/// [`SharedSubDAGStrategy::matches`]'s own gate), or `group.target` can't
 /// actually be bound at all (no candidate and no logical fallback — never
 /// expected in practice for a target that's already part of a legitimate
-/// workload tree, but this degrades to "keep discovery order" rather than
+/// workload DAG, but this degrades to "keep discovery order" rather than
 /// panicking).
 fn cse_preference(group: &TargetSubDAGCandidates, cost_model: &dyn CostModel) -> Option<bool> {
     if group.consumer_count < 2 {
@@ -4989,7 +4989,7 @@ fn cse_preference(group: &TargetSubDAGCandidates, cost_model: &dyn CostModel) ->
     }
     let bound = realize_one(&group.target, cost_model)?;
     let candidate = CseCandidate {
-        subtree: &group.target,
+        sub_dag: &group.target,
         bound_summary: &bound,
         consumer_count: group.consumer_count,
     };
@@ -5047,7 +5047,7 @@ fn summary_grouping(node: &SummaryNode) -> Option<&GroupingStrategy> {
 
 /// One target sub-DAG's selected choice and usage information — the answer
 /// [`CandidateLogicalASAPDAGs::global_selection`] commits to for one site, after folding in
-/// every ancestor [`SharedSubtreeStrategy`] decision on the path from a
+/// every ancestor [`SharedSubDAGStrategy`] decision on the path from a
 /// workload root to this site. See the module docs' "Whole-plan
 /// (cross-group) selection" section for the full recurrence.
 ///
@@ -5071,7 +5071,7 @@ pub struct TargetSubDAGSelection<'a> {
     /// ancestor's own selected candidate is accounted for — see
     /// [`multiplier`]'s doc for the exact recurrence. Equal to
     /// `consumer_count` unless some ancestor on a path from a root to this
-    /// site has a [`SharedSubtreeStrategy`] alternative that chose
+    /// site has a [`SharedSubDAGStrategy`] alternative that chose
     /// [`ShareDecision::RecomputeIndependently`].
     pub effective_consumer_count: usize,
     /// The candidate chosen for this target, or `None` when no replacement
@@ -5262,7 +5262,7 @@ impl<'a> GlobalSelection<'a> {
     /// when the operator itself has no summary realization. Its child is
     /// assembled independently, so a selected summary remains visible
     /// beneath `Project`/`Filter`/`Sort`/`Limit` instead of being swallowed by
-    /// one opaque `KeepPreAsap` subtree.
+    /// one opaque `KeepPreAsap` sub-DAG.
     fn assemble_residual(
         &self,
         target: &Rc<QueryExpr>,
@@ -5655,7 +5655,7 @@ impl<Id> CandidateLogicalASAPDAGs<Id> {
     /// "Whole-plan (cross-group) selection" section describes: one
     /// [`TargetSubDAGSelection`] per discovered site, each ranked against an
     /// `effective_consumer_count` that accounts for every ancestor
-    /// [`SharedSubtreeStrategy`] decision on the path to it — unlike
+    /// [`SharedSubDAGStrategy`] decision on the path to it — unlike
     /// [`Self::cost_sorted`], whose per-group ranking only ever sees a
     /// group's own raw [`TargetSubDAGCandidates::consumer_count`].
     /// Uncertified DDSketch ratios remain in [`CandidateLogicalASAPDAGs`] for downstream
@@ -5695,10 +5695,10 @@ impl<Id> CandidateLogicalASAPDAGs<Id> {
         horizon: Option<Horizon>,
         candidate_costs: Option<&CandidateCostOverrides>,
     ) -> Result<GlobalSelection<'_>, RecurrenceError> {
-        let graph = reference_graph(self);
-        let topo = topological_order(&self.order, &graph);
+        let dag = reference_dag(self);
+        let topo = topological_order(&self.order, &dag);
 
-        let mut effective_uses = graph.external_root_uses.clone();
+        let mut effective_uses = dag.external_root_uses.clone();
         let mut chosen_share: HashMap<*const QueryExpr, ShareDecision> = HashMap::new();
         let mut groups: HashMap<*const QueryExpr, TargetSubDAGSelection<'_>> = HashMap::new();
         let mut context = CompositionContext::default();
@@ -5801,7 +5801,7 @@ impl<Id> CandidateLogicalASAPDAGs<Id> {
                         .then(|| {
                             decide_with_effective_count(group, effective, cost_model).and_then(
                                 |decision| {
-                                    let candidate = pick_shared_subtree_candidate(group, decision)?;
+                                    let candidate = pick_shared_sub_dag_candidate(group, decision)?;
                                     chosen_share.insert(*ptr, decision);
                                     Some(candidate)
                                 },
@@ -5835,7 +5835,7 @@ impl<Id> CandidateLogicalASAPDAGs<Id> {
                 };
                 match decision {
                     Some(decision) => {
-                        let cse = pick_shared_subtree_candidate(group, decision);
+                        let cse = pick_shared_sub_dag_candidate(group, decision);
                         let effective_target =
                             TargetSubDAG::with_consumer_count(&group.target, effective);
                         let logical = group
@@ -5881,7 +5881,7 @@ impl<Id> CandidateLogicalASAPDAGs<Id> {
                     }
                     // `realize_child` couldn't produce even a logical fallback —
                     // not expected in practice for a target that's already
-                    // part of a legitimate workload tree (mirrors
+                    // part of a legitimate workload DAG (mirrors
                     // `cse_preference`'s own doc on this same degrade).
                     // Falling back to ordinary local ranking is still a
                     // valid answer, just not a cross-group-aware one; this
@@ -6009,7 +6009,7 @@ fn is_automatically_selectable(candidate: &ReplacementSubDAG, cost_model: &dyn C
 ///   chose [`ShareDecision::RecomputeIndependently`] (each of its own uses
 ///   gets its own independent execution, so referencing it costs as much as
 ///   its *own* full multiplicity), or it has no Share/Recompute decision at
-///   all (not a [`SharedSubtreeStrategy`] shape — nothing here collapses
+///   all (not a [`SharedSubDAGStrategy`] shape — nothing here collapses
 ///   its multiplicity to one, so whatever multiplicity *its* ancestors
 ///   established simply passes through).
 ///
@@ -6082,7 +6082,7 @@ fn decide_with_effective_count(
 ) -> Option<ShareDecision> {
     let bound = realize_child(&group.target, cost_model).ok()?;
     let candidate = CseCandidate {
-        subtree: &group.target,
+        sub_dag: &group.target,
         bound_summary: &bound,
         consumer_count: effective_consumer_count,
     };
@@ -6100,7 +6100,7 @@ fn decide_group_with_recurrence(
         return Ok(None);
     };
     let candidate = CseCandidate {
-        subtree: &group.target,
+        sub_dag: &group.target,
         bound_summary: &bound,
         consumer_count: effective_consumer_count,
     };
@@ -6111,12 +6111,12 @@ fn decide_group_with_recurrence(
     ))
 }
 
-/// The [`SharedSubtreeStrategy`] candidate matching `decision`: the one
+/// The [`SharedSubDAGStrategy`] candidate matching `decision`: the one
 /// that shares `group.target`'s own `Rc` for [`ShareDecision::Share`], the
 /// freshly-allocated one for [`ShareDecision::RecomputeIndependently`] —
 /// the same `Rc`-identity distinction [`is_duplicate_rewrite`]'s own doc
 /// explains is the *only* signal this IR carries for that choice.
-fn pick_shared_subtree_candidate(
+fn pick_shared_sub_dag_candidate(
     group: &TargetSubDAGCandidates,
     decision: ShareDecision,
 ) -> Option<&ReplacementSubDAG> {
@@ -6127,7 +6127,7 @@ fn pick_shared_subtree_candidate(
     })
 }
 
-// ── reference graph + topological order ─────────────────────────────────
+// ── reference DAG + topological order ─────────────────────────────────
 
 /// The parent/child structure [`CandidateLogicalASAPDAGs::global_selection`]'s DP walks —
 /// built separately from [`discover_targets`]'s own `order`/`nodes`/`counts`
@@ -6135,7 +6135,7 @@ fn pick_shared_subtree_candidate(
 /// breakdown or direction) rather than extending that already-reviewed,
 /// already-tested pass. Same "small duplicated traversal over reshaping
 /// proven code" call as [`is_shared_subtree_group`].
-struct ReferenceGraph {
+struct ReferenceDAG {
     /// child ptr -> `(parent ptr, edge count from that one parent)`, for
     /// every direct operator-child edge in the relational-skeleton scope
     /// [`walk_children`] itself uses (an edge count above 1 happens when
@@ -6147,75 +6147,68 @@ struct ReferenceGraph {
     /// traversal.
     children_of: HashMap<*const QueryExpr, Vec<*const QueryExpr>>,
     /// How many of the workload's own `roots` point directly at each node —
-    /// a node's "external" use. Nothing inside the tree decides this (it
+    /// a node's "external" use. Nothing inside the DAG decides this (it
     /// isn't a reference from another discovered site), so it's never
     /// subject to any ancestor's Share/Recompute choice — it's the base
     /// case [`CandidateLogicalASAPDAGs::global_selection`]'s recurrence starts from.
     external_root_uses: HashMap<*const QueryExpr, usize>,
 }
 
-/// Build an ordering graph containing every edge that could be selected:
+/// Build an ordering DAG containing every edge that could be selected:
 /// the original target's edges plus every rewrite candidate's edges. An
 /// accuracy-reconciliation rewrite points at another discovered memo group,
 /// so it contributes an edge to that group itself; other rewrites contribute
 /// their relational children as before. The
-/// graph is deliberately only used for topological ordering; effective-use
+/// DAG is deliberately only used for topological ordering; effective-use
 /// counts are propagated through the one candidate actually selected.
-fn reference_graph<Id>(space: &CandidateLogicalASAPDAGs<Id>) -> ReferenceGraph {
-    let mut graph = ReferenceGraph {
+fn reference_dag<Id>(space: &CandidateLogicalASAPDAGs<Id>) -> ReferenceDAG {
+    let mut dag = ReferenceDAG {
         parents_of: HashMap::new(),
         children_of: HashMap::new(),
         external_root_uses: HashMap::new(),
     };
     for (_, root) in &space.roots {
-        *graph
-            .external_root_uses
-            .entry(Rc::as_ptr(root))
-            .or_insert(0) += 1;
+        *dag.external_root_uses.entry(Rc::as_ptr(root)).or_insert(0) += 1;
     }
     for ptr in &space.order {
         let group = &space.groups[ptr];
-        record_possible_edges(*ptr, &group.target, &mut graph);
+        record_possible_edges(*ptr, &group.target, &mut dag);
         for candidate in &group.candidates {
             if let Replacement::Rewrite(rewrite) = &candidate.replacement {
                 if candidate.provenance == ReplacementProvenance::AccuracyReconciliation {
-                    add_edge(*ptr, Rc::as_ptr(rewrite), 1, &mut graph);
+                    add_edge(*ptr, Rc::as_ptr(rewrite), 1, &mut dag);
                 } else {
-                    record_possible_edges(*ptr, rewrite, &mut graph);
+                    record_possible_edges(*ptr, rewrite, &mut dag);
                 }
             }
         }
     }
-    graph
+    dag
 }
 
 /// Record one `parent_ptr -> child` edge (both directions — see
-/// [`ReferenceGraph`]'s fields), retaining the greatest multiplicity seen
+/// [`ReferenceDAG`]'s fields), retaining the greatest multiplicity seen
 /// when the target and alternative rewrites expose the same edge.
 fn add_edge(
     parent_ptr: *const QueryExpr,
     child_ptr: *const QueryExpr,
     edge_count: usize,
-    graph: &mut ReferenceGraph,
+    dag: &mut ReferenceDAG,
 ) {
-    let siblings = graph.parents_of.entry(child_ptr).or_default();
+    let siblings = dag.parents_of.entry(child_ptr).or_default();
     match siblings.iter_mut().find(|(p, _)| *p == parent_ptr) {
         Some((_, count)) => *count = (*count).max(edge_count),
         None => siblings.push((parent_ptr, edge_count)),
     }
-    let kids = graph.children_of.entry(parent_ptr).or_default();
+    let kids = dag.children_of.entry(parent_ptr).or_default();
     if !kids.contains(&child_ptr) {
         kids.push(child_ptr);
     }
 }
 
-fn record_possible_edges(
-    parent_ptr: *const QueryExpr,
-    node: &QueryExpr,
-    graph: &mut ReferenceGraph,
-) {
+fn record_possible_edges(parent_ptr: *const QueryExpr, node: &QueryExpr, dag: &mut ReferenceDAG) {
     for (child_ptr, edge_count) in direct_child_counts(node) {
-        add_edge(parent_ptr, child_ptr, edge_count, graph);
+        add_edge(parent_ptr, child_ptr, edge_count, dag);
     }
 }
 
@@ -6290,16 +6283,16 @@ fn direct_child_counts(node: &QueryExpr) -> Vec<(*const QueryExpr, usize)> {
 }
 
 /// A topological order over `order` (parent before every child) via Kahn's
-/// algorithm on `graph`'s reverse adjacency — needed because
+/// algorithm on `dag`'s reverse adjacency — needed because
 /// [`discover_targets`]'s own `order` is only a valid *discovery* order
 /// (first-seen-first), not a valid topological one: a node reached via two
 /// different root paths can have a parent that's discovered *after* it (see
 /// this function's own test for a worked diamond example), which is exactly
 /// backwards for [`CandidateLogicalASAPDAGs::global_selection`]'s recurrence.
-fn topological_order(order: &[*const QueryExpr], graph: &ReferenceGraph) -> Vec<*const QueryExpr> {
+fn topological_order(order: &[*const QueryExpr], dag: &ReferenceDAG) -> Vec<*const QueryExpr> {
     let mut in_degree: HashMap<*const QueryExpr, usize> = HashMap::new();
     for ptr in order {
-        let degree = graph.parents_of.get(ptr).map(Vec::len).unwrap_or(0);
+        let degree = dag.parents_of.get(ptr).map(Vec::len).unwrap_or(0);
         in_degree.insert(*ptr, degree);
     }
 
@@ -6312,7 +6305,7 @@ fn topological_order(order: &[*const QueryExpr], graph: &ReferenceGraph) -> Vec<
     let mut topo = Vec::with_capacity(order.len());
     while let Some(ptr) = queue.pop_front() {
         topo.push(ptr);
-        if let Some(children) = graph.children_of.get(&ptr) {
+        if let Some(children) = dag.children_of.get(&ptr) {
             for child in children {
                 if let Some(degree) = in_degree.get_mut(child) {
                     *degree -= 1;
@@ -6327,9 +6320,9 @@ fn topological_order(order: &[*const QueryExpr], graph: &ReferenceGraph) -> Vec<
     assert_eq!(
         topo.len(),
         order.len(),
-        "topological_order: the discovered-site reference graph has a cycle — every QueryExpr \
+        "topological_order: the discovered-site reference DAG has a cycle — every QueryExpr \
          node is built from Rc children, which can't form one, so this indicates a bug in \
-         reference_graph rather than a real cyclic workload",
+         reference_dag rather than a real cyclic workload",
     );
     topo
 }
@@ -6352,10 +6345,10 @@ fn topological_order(order: &[*const QueryExpr], graph: &ReferenceGraph) -> Vec<
 /// included here (issue #253) even though it's a
 /// [`Replacement::Rewrite`]-only strategy with no [`CostModel`] of its own to
 /// plug in — it's context-free (`matches`/`replacements` need nothing beyond
-/// the target itself) exactly like [`SharedSubtreeStrategy`], so it belongs
+/// the target itself) exactly like [`SharedSubDAGStrategy`], so it belongs
 /// in this list rather than being derived per-workload the way
 /// [`RollupStrategy`] is. Rewriting `avg` into `sum`/`count` upfront is what
-/// lets [`SketchAlgorithmStrategy`] and [`SharedSubtreeStrategy`] see a
+/// lets [`SketchAlgorithmStrategy`] and [`SharedSubDAGStrategy`] see a
 /// mergeable accumulator to sketch or share at all — see that module's own
 /// doc comment for why a bare `avg` node otherwise never becomes a
 /// [`ReplacementStrategy`] target for anything.
@@ -6363,7 +6356,7 @@ pub fn default_strategies() -> Vec<Box<dyn ReplacementStrategy>> {
     vec![
         Box::new(SketchAlgorithmStrategy::default_cost_model()),
         Box::new(HydraGroupingStrategy::default_cost_model()),
-        Box::new(SharedSubtreeStrategy),
+        Box::new(SharedSubDAGStrategy),
         Box::new(crate::rewrite::AvgToSumOverCountStrategy),
         Box::new(ExactCompositionStrategy::default_cost_model()),
     ]
@@ -6378,7 +6371,7 @@ pub fn default_strategies_with<'a>(
     vec![
         Box::new(SketchAlgorithmStrategy::new(cost_model)),
         Box::new(HydraGroupingStrategy::new(cost_model)),
-        Box::new(SharedSubtreeStrategy),
+        Box::new(SharedSubDAGStrategy),
         Box::new(crate::rewrite::SemanticEquivalentRewriteStrategy),
         Box::new(ExactCompositionStrategy::new(cost_model)),
     ]
@@ -6409,7 +6402,7 @@ pub fn default_strategies_with_evidence<'a>(
                 evidence,
             ),
         ),
-        Box::new(SharedSubtreeStrategy),
+        Box::new(SharedSubDAGStrategy),
         Box::new(crate::rewrite::AvgToSumOverCountStrategy),
         Box::new(ExactCompositionStrategy::new(cost_model)),
     ]
@@ -6435,10 +6428,10 @@ pub fn search_workload<Id>(roots: Vec<(Id, Rc<QueryExpr>)>) -> CandidateLogicalA
 /// [`RollupStrategy`] is derived and added automatically after CSE for both
 /// entry points, because only this function owns the post-CSE sibling set.
 ///
-/// Runs [`share_common_subtrees`] once over `roots` first — so every
+/// Runs [`share_common_sub_dags`] once over `roots` first — so every
 /// strategy (and, transitively, every
 /// [`crate::explanation::ReplacementExplanation`] a caller reads off the
-/// result) sees the same already-deduplicated tree — then discovers every
+/// result) sees the same already-deduplicated DAG — then discovers every
 /// `TargetSubDAG` (see [`discover_targets`]) and runs the
 /// fixpoint loop the module docs describe, capped at
 /// [`MAX_SEARCH_ITERATIONS`] passes (see the module docs' "Termination"
@@ -6651,7 +6644,7 @@ fn strictest_sibling_accuracy(
 }
 
 fn cse_workload<Id>(roots: Vec<(Id, Rc<QueryExpr>)>) -> Vec<(Id, Rc<QueryExpr>)> {
-    // `share_common_subtrees` wants owned `QueryExpr`s, not already-`Rc`
+    // `share_common_sub_dags` wants owned `QueryExpr`s, not already-`Rc`
     // roots — the same `Rc::try_unwrap`-with-clone-fallback pattern
     // `asap_types::pre_asap::cse::intern_child` itself uses to recover an
     // owned node without cloning in the common (uniquely-owned) case.
@@ -6662,7 +6655,7 @@ fn cse_workload<Id>(roots: Vec<(Id, Rc<QueryExpr>)>) -> Vec<(Id, Rc<QueryExpr>)>
             (id, expr)
         })
         .collect();
-    share_common_subtrees(owned_roots)
+    share_common_sub_dags(owned_roots)
 }
 
 fn search_cse_workload_with<'s, Id>(
@@ -6714,7 +6707,7 @@ fn search_cse_workload_with<'s, Id>(
             "search_workload: fixpoint search did not converge within {MAX_SEARCH_ITERATIONS} \
              rounds — a registered ReplacementStrategy's Replacement::Rewrite candidates keep \
              exposing new, never-before-seen descendant structure every round. \
-             SketchAlgorithmStrategy/SharedSubtreeStrategy never do this (see replacement.rs's \
+             SketchAlgorithmStrategy/SharedSubDAGStrategy never do this (see replacement.rs's \
              module docs' \"Termination\" section); check any custom strategies passed to \
              search_workload_with.",
         );
@@ -6816,7 +6809,7 @@ fn search_cse_workload_with<'s, Id>(
 /// Materialize share/recompute alternatives for descendants whose raw edge
 /// count is one but whose effective count can exceed one when a repeated
 /// ancestor is recomputed. We only do this when an ordinary repeated group
-/// proves that `SharedSubtreeStrategy` is part of this search's strategy set.
+/// proves that `SharedSubDAGStrategy` is part of this search's strategy set.
 fn add_effective_count_cse_candidates(
     order: &[*const QueryExpr],
     groups: &mut HashMap<*const QueryExpr, TargetSubDAGCandidates>,
@@ -6867,14 +6860,14 @@ fn add_effective_count_cse_candidates(
         if potentially_repeated.contains(ptr) && cse_candidate_pair(group).is_none() {
             let target = Rc::clone(&group.target);
             let site = TargetSubDAG::with_consumer_count(&target, 2);
-            for mut candidate in SharedSubtreeStrategy.replacements(&site) {
+            for mut candidate in SharedSubDAGStrategy.replacements(&site) {
                 candidate.rationale = format!(
-                    "{}: this subtree can become repeated when a repeated ancestor is recomputed; \
+                    "{}: this sub-DAG can become repeated when a repeated ancestor is recomputed; \
                      global_selection decides using its effective consumer count",
                     match candidate.provenance {
                         ReplacementProvenance::CseShare => "build once and share",
                         ReplacementProvenance::CseRecompute => "recompute independently",
-                        _ => unreachable!("SharedSubtreeStrategy only emits CSE candidates"),
+                        _ => unreachable!("SharedSubDAGStrategy only emits CSE candidates"),
                     }
                 );
                 group.add_candidate(candidate);
@@ -6935,7 +6928,7 @@ fn walk(
 }
 
 /// `node`'s own **relational-skeleton** operator children — the same scope
-/// `asap_types::pre_asap::cse::share_common_subtrees`/`rebuild_children`
+/// `asap_types::pre_asap::cse::share_common_sub_dags`/`rebuild_children`
 /// itself uses (see that module's "Algorithm" section) and
 /// `tests::count_consumers` mirrors for its own fixtures. Exhaustive over
 /// every `QueryExpr` variant: a new variant fails to compile here until this
@@ -7957,7 +7950,7 @@ mod tests {
         );
     }
 
-    // ── SketchAlgorithmStrategy / SharedSubtreeStrategy fixtures ───────────
+    // ── SketchAlgorithmStrategy / SharedSubDAGStrategy fixtures ───────────
 
     fn metric_scan(labels: &[&str]) -> QueryExpr {
         let mut columns = vec![
@@ -8272,7 +8265,7 @@ mod tests {
         }
     }
 
-    // ── SharedSubtreeStrategy ────────────────────────────────────────────
+    // ── SharedSubDAGStrategy ────────────────────────────────────────────
 
     #[test]
     fn does_not_match_a_single_consumer_target() {
@@ -8283,8 +8276,8 @@ mod tests {
         ));
         let target = TargetSubDAG::new(&q);
         assert_eq!(target.consumer_count, 1);
-        assert!(!SharedSubtreeStrategy.matches(&target));
-        assert!(SharedSubtreeStrategy.replacements(&target).is_empty());
+        assert!(!SharedSubDAGStrategy.matches(&target));
+        assert!(SharedSubDAGStrategy.replacements(&target).is_empty());
     }
 
     #[test]
@@ -8295,9 +8288,9 @@ mod tests {
             metric_scan(&["job"]),
         ));
         let target = TargetSubDAG::with_consumer_count(&q, 2);
-        assert!(SharedSubtreeStrategy.matches(&target));
+        assert!(SharedSubDAGStrategy.matches(&target));
 
-        let replacements = SharedSubtreeStrategy.replacements(&target);
+        let replacements = SharedSubDAGStrategy.replacements(&target);
         assert_eq!(replacements.len(), 2, "{replacements:?}");
 
         let shared = match &replacements[0].replacement {
@@ -8333,7 +8326,7 @@ mod tests {
             metric_scan(&["job"]),
         ));
         let target = TargetSubDAG::with_consumer_count(&q, 3);
-        let replacements = SharedSubtreeStrategy.replacements(&target);
+        let replacements = SharedSubDAGStrategy.replacements(&target);
         assert!(replacements[0].rationale.contains('3'));
         assert!(replacements[1].rationale.contains('3'));
     }
@@ -8341,7 +8334,7 @@ mod tests {
     /// Builds realistic multi-consumer `TargetSubDAG`s the same way this
     /// module's own [`discover_targets`]/`walk` does: dedup by `Rc::as_ptr`,
     /// walking only the relational-skeleton operator children
-    /// `asap_types::pre_asap::cse::share_common_subtrees` itself scopes to,
+    /// `asap_types::pre_asap::cse::share_common_sub_dags` itself scopes to,
     /// so a shared node nested below another shared node is only ever
     /// counted at the highest (maximal) point sharing starts. Test-only:
     /// this module deliberately does not ship a workload-wide discovery
@@ -8411,12 +8404,12 @@ mod tests {
 
     #[test]
     fn realistic_cse_output_produces_a_two_consumer_target() {
-        // Two workload roots that `share_common_subtrees` collapses onto one
+        // Two workload roots that `share_common_sub_dags` collapses onto one
         // Rc (mirrors `explanation`'s and `cse`'s own fixtures): a grouped
         // Sum aggregate over the same scan, built independently at each root.
         let a = agg(vec![2], AggIntent::Sum { col: None }, metric_scan(&["job"]));
         let b = agg(vec![2], AggIntent::Sum { col: None }, metric_scan(&["job"]));
-        let shared = asap_types::pre_asap::cse::share_common_subtrees(vec![("a", a), ("b", b)]);
+        let shared = asap_types::pre_asap::cse::share_common_sub_dags(vec![("a", a), ("b", b)]);
         let [(_, ra), (_, rb)] = shared.as_slice() else {
             panic!("expected 2 roots");
         };
@@ -8428,8 +8421,8 @@ mod tests {
         assert_eq!(count, 2);
 
         let target = TargetSubDAG::with_consumer_count(&roots[0], count);
-        assert!(SharedSubtreeStrategy.matches(&target));
-        assert_eq!(SharedSubtreeStrategy.replacements(&target).len(), 2);
+        assert!(SharedSubDAGStrategy.matches(&target));
+        assert_eq!(SharedSubDAGStrategy.replacements(&target).len(), 2);
     }
 
     // ── search_workload / CandidateLogicalASAPDAGs / TargetSubDAGCandidates (merged from search.rs) ──
@@ -8586,10 +8579,10 @@ mod tests {
     #[test]
     fn shared_aggregate_across_two_roots_gets_both_strategies_candidates() {
         // Two independently-built, structurally identical Sum aggregates:
-        // share_common_subtrees (run inside search_workload) collapses them
+        // share_common_sub_dags (run inside search_workload) collapses them
         // onto one Rc with consumer_count 2, so this single group should
         // carry SketchAlgorithmStrategy's one ExactAggregate candidate *and*
-        // SharedSubtreeStrategy's share-vs-recompute pair.
+        // SharedSubDAGStrategy's share-vs-recompute pair.
         let a = agg(vec![2], AggIntent::Sum { col: None }, metric_scan(&["job"]));
         let b = agg(vec![2], AggIntent::Sum { col: None }, metric_scan(&["job"]));
         let space = search_workload(vec![("a", Rc::new(a)), ("b", Rc::new(b))]);
@@ -8632,7 +8625,7 @@ mod tests {
     }
 
     #[test]
-    fn nested_shared_subtree_below_an_unshared_parent_is_still_discovered() {
+    fn nested_shared_sub_dag_below_an_unshared_parent_is_still_discovered() {
         // A shared grouped Aggregate nested under two *different*,
         // unshared Filter parents — real consumer_count must come from
         // walking the whole DAG, not just root-level pointer identity
@@ -8665,7 +8658,7 @@ mod tests {
             "2 distinct Filters + 1 shared Aggregate + 1 shared Scan"
         );
 
-        // `share_common_subtrees` re-clones+re-interns anything that already
+        // `share_common_sub_dags` re-clones+re-interns anything that already
         // had more than one owner going in (see `cse.rs`'s own doc on
         // `intern_child`'s clone-fallback path) — so the post-CSE shared
         // node is a *fresh* Rc, structurally equal to (but not the same
@@ -8696,7 +8689,7 @@ mod tests {
             .expect("shared node must be a discovered target");
         assert_eq!(group.consumer_count, 2);
         assert!(
-            SharedSubtreeStrategy.matches(&TargetSubDAG::with_consumer_count(
+            SharedSubDAGStrategy.matches(&TargetSubDAG::with_consumer_count(
                 post_cse_shared,
                 group.consumer_count
             ))
@@ -8707,7 +8700,7 @@ mod tests {
 
     #[test]
     fn add_candidate_rejects_a_true_rewrite_duplicate() {
-        // SharedSubtreeStrategy's `Replacement::Rewrite` candidates are
+        // SharedSubDAGStrategy's `Replacement::Rewrite` candidates are
         // real `QueryExpr` values with `PartialEq`, so `add_candidate` can
         // (and must) actually reject a genuine repeat — unlike the
         // `Replacement::Summary` case (see the test below).
@@ -8719,7 +8712,7 @@ mod tests {
         let mut group = TargetSubDAGCandidates::new(Rc::clone(&root), 2);
         let target = TargetSubDAG::with_consumer_count(&root, 2);
         let mut inserted = 0;
-        for candidate in SharedSubtreeStrategy.replacements(&target) {
+        for candidate in SharedSubDAGStrategy.replacements(&target) {
             if group.add_candidate(candidate) {
                 inserted += 1;
             }
@@ -8732,7 +8725,7 @@ mod tests {
         // structurally identical value, both already covered by
         // `is_duplicate_rewrite`.
         let mut re_inserted = 0;
-        for candidate in SharedSubtreeStrategy.replacements(&target) {
+        for candidate in SharedSubDAGStrategy.replacements(&target) {
             if group.add_candidate(candidate) {
                 re_inserted += 1;
             }
@@ -8812,7 +8805,7 @@ mod tests {
     // ── cost-based ranking ───────────────────────────────────────────────
 
     #[test]
-    fn cost_sorted_orders_shared_subtree_candidates_by_cse_share_decision() {
+    fn cost_sorted_orders_shared_sub_dag_candidates_by_cse_share_decision() {
         // Many consumers of a cheap-to-recompute, cheap-to-maintain exact
         // accumulator: cse_share_decision should prefer Share (see
         // cost_model.rs's own `cse_share_decision_shares_when_recompute_dominates_maintenance`).
@@ -8973,9 +8966,9 @@ mod tests {
 
     // ── global_selection (issue #271) ───────────────────────────────────
 
-    /// A `CostModel` with a constant, `subtree`-independent recompute cost
+    /// A `CostModel` with a constant, `sub_dag`-independent recompute cost
     /// and shared-maintenance cost, chosen (40 recompute-per-use, 100
-    /// maintenance) so that a `SharedSubtreeStrategy` group's
+    /// maintenance) so that a `SharedSubDAGStrategy` group's
     /// `cse_share_decision` flips exactly between a consumer count of 2
     /// (recompute total 80, below maintenance: `RecomputeIndependently`)
     /// and a consumer count of 3 (recompute total 120, above
@@ -9176,7 +9169,7 @@ mod tests {
             vec!["recompute", "different rewrite strategy", "share"],
             "the preferred CSE choice must be ranked without losing the unrelated rewrite"
         );
-        let chosen = pick_shared_subtree_candidate(
+        let chosen = pick_shared_sub_dag_candidate(
             &group,
             decide_with_effective_count(&group, 2, &ConstantCseCost).unwrap(),
         )
@@ -9186,9 +9179,9 @@ mod tests {
 
     #[test]
     fn effective_consumer_count_corrects_a_nested_groups_share_decision() {
-        // The interaction issue #271 describes: an outer shared subtree `a`
+        // The interaction issue #271 describes: an outer shared sub-DAG `a`
         // (referenced by 2 roots, so consumer_count == 2) wraps an inner
-        // shared subtree `c` (referenced once through `a`'s own child edge,
+        // shared sub-DAG `c` (referenced once through `a`'s own child edge,
         // plus once more directly by a third, separate root — so `c`'s own
         // *raw* structural consumer_count is also 2, independent of `a`).
         //
@@ -9199,11 +9192,11 @@ mod tests {
         //
         // `a` and `c` are both non-`Aggregate` nodes (`Filter`/`Dedup`) so
         // neither is bindable — each group is a *clean* two-candidate
-        // SharedSubtreeStrategy share-vs-recompute pair, with no
+        // SharedSubDAGStrategy share-vs-recompute pair, with no
         // SketchAlgorithmStrategy `Summary` candidate mixed in to complicate
         // ranking (see `shared_aggregate_across_two_roots_gets_both_strategies_candidates`
         // for what a *mixed*-shape group looks like — deliberately avoided
-        // here to isolate the SharedSubtreeStrategy-only interaction).
+        // here to isolate the SharedSubDAGStrategy-only interaction).
         //
         // Under ConstantCseCost, consumer_count == 2 loses to maintenance
         // (2 * 40 = 80 < 100 ⇒ RecomputeIndependently); consumer_count == 3 wins
@@ -9237,7 +9230,7 @@ mod tests {
         // Fixture sanity: root1/root2 merged onto one shared `a`, and `c`
         // (root1/root2's shared child, and root3 itself) merged onto one
         // shared `c` with raw consumer_count 2, and both groups are clean
-        // (non-mixed) two-candidate SharedSubtreeStrategy pairs.
+        // (non-mixed) two-candidate SharedSubDAGStrategy pairs.
         assert!(Rc::ptr_eq(&space.roots[0].1, &space.roots[1].1));
         let a_rc = &space.roots[0].1;
         let QueryExpr::Filter { child: c_via_a, .. } = a_rc.as_ref() else {
@@ -9691,7 +9684,7 @@ mod tests {
 
     #[test]
     fn topological_order_puts_a_later_discovered_parent_before_its_child() {
-        // Mirrors nested_shared_subtree_below_an_unshared_parent_is_still_discovered's
+        // Mirrors nested_shared_sub_dag_below_an_unshared_parent_is_still_discovered's
         // diamond fixture: discover_targets's own `order` visits root_b (a
         // parent of `shared`) *after* `shared` itself, because `shared` was
         // already fully walked via root_a first. A naive "process
@@ -9731,7 +9724,7 @@ mod tests {
             order: order.clone(),
             composition_plans: Vec::new(),
         };
-        let graph = reference_graph(&space);
+        let dag = reference_dag(&space);
 
         // Discovery-order sanity: root_b comes after the shared child in
         // discover_targets's own order (the exact non-topological case this
@@ -9752,7 +9745,7 @@ mod tests {
             "fixture sanity: discover_targets's own order must NOT already be topological here"
         );
 
-        let topo = topological_order(&order, &graph);
+        let topo = topological_order(&order, &dag);
         let shared_topo_pos = topo.iter().position(|p| *p == shared_ptr).unwrap();
         let root_b_topo_pos = topo.iter().position(|p| *p == root_b_ptr).unwrap();
         assert!(
@@ -10188,7 +10181,7 @@ mod tests {
     #[test]
     fn nested_aggregates_realize_per_node() {
         // quantile(0.9, sum by (job) (m)) — the realization decision
-        // fires per node over the nested tree: KLL over an exact Sum
+        // fires per node over the nested DAG: KLL over an exact Sum
         // accumulator.
         let inner = agg(vec![2], AggIntent::Sum { col: None }, metric_scan(&["job"]));
         let outer = agg(vec![], default_quantile(0.9), inner);
@@ -10259,7 +10252,7 @@ mod tests {
         }
     }
 
-    /// The update expression of the first `SummaryAgg` in the tree.
+    /// The update expression of the first `SummaryAgg` in the DAG.
     fn find_summary_input(node: &SummaryNode) -> Option<SummaryInputExpr> {
         match &node.expr {
             SummaryExpr::SummaryAgg { input, .. } if input.item.is_none() => {
@@ -10274,7 +10267,7 @@ mod tests {
     fn pass_through_intents_stay_logical() {
         // avg is exact but non-mergeable; histogram_quantile (classic
         // buckets, #79) is never sketchable; exact quantile is exact by
-        // decree. All three stay whole logical subtrees.
+        // decree. All three stay whole logical sub-DAGs.
         for intent in [
             AggIntent::Avg { col: None },
             AggIntent::HistogramQuantile { q: 0.99, le: 0 },
@@ -10296,7 +10289,7 @@ mod tests {
     #[test]
     fn logical_parent_subsumes_bindable_child() {
         // Filter over a bindable quantile: `KeepPreAsap` has no post-ASAP
-        // children, so the conservative fallback keeps the whole subtree
+        // children, so the conservative fallback keeps the whole sub-DAG
         // logical.
         use asap_types::pre_asap::expr_ir::{CompareOpKind, ScalarValue};
         use asap_types::pre_asap::query_expr::Predicate;
@@ -10880,7 +10873,7 @@ mod tests {
                 rejection.error
             );
         }
-        // Fallback keeps the whole subtree pre-ASAP — executed exactly.
+        // Fallback keeps the whole sub-DAG pre-ASAP — executed exactly.
         let realized = realize_child(&outer, &DefaultCostModel).unwrap();
         assert!(matches!(realized.expr, SummaryExpr::KeepPreAsap(_)));
         assert!(realized

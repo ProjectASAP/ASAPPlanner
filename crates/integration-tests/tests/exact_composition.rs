@@ -768,8 +768,8 @@ fn dag_export_carries_explicit_stage_and_plain_schema_for_a_composed_plan() {
         .assemble_selected_dag(root)
         .unwrap()
         .unwrap();
-    let graph = dag_export::export_summary(&composed);
-    let node = &graph.nodes[graph.root as usize];
+    let dag = dag_export::export_summary(&composed);
+    let node = &dag.nodes[dag.root as usize];
     assert_eq!(node.kind, "ValueOperation");
     assert_eq!(node.detail["timing"], "query_time");
     assert!(node.detail["operation"]

@@ -72,7 +72,7 @@ physical-evidence document: an immutable `evidence_version`, calibration, and
 target records containing the exact target `QueryExpr` and comparison scope.
 Each exact replacement candidate owns its complete logical-node
 `PhysicalNodeEvidence`; summary candidates additionally own their bound
-`PhysicalDag`. Candidate-local evidence prevents statistics for one physical
+`PhysicalDAG`. Candidate-local evidence prevents statistics for one physical
 alternative from satisfying another. Candidate matching includes the complete
 exported plan, including accuracy guarantees, and never uses a hash or strategy
 name; derived floating constants allow only a one-ULP JSON round-trip tolerance.
@@ -93,13 +93,13 @@ cargo run -p asap-devtools --bin dag_export -- \
 
 It ranks candidates with the planner's structural `DefaultCostModel`, so the
 structure of the export is real — which replacements the search found, which
-one won per group, and the merged post-ASAP graph — while no cost is exported
+one won per group, and the merged post-ASAP DAG — while no cost is exported
 at all. Every `CostAnnotation` stays `Unavailable` with no `value` and renders
 as **Not estimated**; the structural ranking number is never serialized. Use
 it to see what ASAPPlanner does with a workload before there is a deployment
 to calibrate against, and `--planner-cost-json` once there is.
 
-Without either flag, `--post-asap` exports the raw graph only.
+Without either flag, `--post-asap` exports the raw DAG only.
 
 The viewer also accepts the JSON produced by
 `export_summary_maintenance_plan`. It renders the materialized summary DAG as
@@ -121,7 +121,7 @@ always opens in Pre/Post-ASAP mode; there is no `--mode` option.
 
 ## JSON contract
 
-`NamedGraph.graph` is the original pre-ASAP DAG. `NamedGraph.post_graph`
+`NamedDAG.dag` is the original pre-ASAP DAG. `NamedDAG.post_dag`
 is the complete translated DAG. Every post-ASAP node produced or carried by
 a selected replacement directly contains:
 
@@ -184,14 +184,14 @@ operation, `1e-10` per scan byte, and `1e-9` per peak-memory byte, the displayed
 not statistics inferred by the viewer.
 
 The same three fields also appear on `TargetReplacement`
-(replacement-region baseline/selected/benefit), `NamedGraph.workload_cost` /
-`WorkloadGraph.workload_cost` (whole selected-workload cost/benefit, shared
-decisions counted once via `decision.id` dedup). `DagGraph.edge_annotations`
+(replacement-region baseline/selected/benefit), `NamedDAG.workload_cost` /
+`WorkloadDAG.workload_cost` (whole selected-workload cost/benefit, shared
+decisions counted once via `decision.id` dedup). `ExportDAG.edge_annotations`
 is reserved for a higher layer that has physical evidence for a particular
-edge; graph sharing alone never creates an edge cost. The sidebar shows the full breakdown
+edge; DAG sharing alone never creates an edge cost. The sidebar shows the full breakdown
 (value, unit, provenance, baseline, ratio, inputs) on node/edge click and in
 the workload-scope summary; a post-ASAP node with a costed decision also
-gets a concise on-graph `▼NN%`/`▲NN%` badge next to its label.
+gets a concise on-DAG `▼NN%`/`▲NN%` badge next to its label.
 
 All of this is additive and optional: an export with none of these fields
 (anything produced before issue #286) renders exactly as before.

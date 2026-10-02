@@ -1,6 +1,6 @@
 //! Serializable DAG export for a materialized summary-maintenance plan.
 //!
-//! `asap-types::dag_export` owns the crate-neutral post-ASAP graph shape. This
+//! `asap-types::dag_export` owns the crate-neutral post-ASAP DAG shape. This
 //! adapter lives in the mapping layer, where summary-maintenance lifecycle
 //! alternatives and their typed rejection reasons are available, and emits
 //! both views together.
@@ -10,7 +10,7 @@ use std::rc::Rc;
 
 use serde::Serialize;
 
-use asap_types::dag_export::{self, SummaryDagGraph};
+use asap_types::dag_export::{self, SummaryDAG};
 use asap_types::post_asap::{
     PostAsapNodeId, ResultGuarantee, SummaryExpr, SummaryMaintenanceLifecycle,
     SummaryMaintenanceLifecycleGuarantee, SummaryNode, SummaryWindowFramework,
@@ -21,8 +21,8 @@ use crate::summary_maintenance_lifecycle::{
 };
 
 #[derive(Debug, Clone, Serialize)]
-pub struct SummaryMaintenanceDagExport {
-    pub graph: SummaryDagGraph,
+pub struct SummaryMaintenanceDAGExport {
+    pub dag: SummaryDAG,
     pub deployments: Vec<SummaryMaintenanceDeploymentExport>,
     pub horizon_seconds: Option<f64>,
     pub evaluation_rate_per_second: Option<f64>,
@@ -63,7 +63,7 @@ pub type SummaryMaintenanceLifecycleGuaranteeExport = SummaryMaintenanceLifecycl
 
 pub fn export_summary_maintenance_plan(
     plan: &SummaryMaintenanceLifecyclePlan,
-) -> SummaryMaintenanceDagExport {
+) -> SummaryMaintenanceDAGExport {
     let deployments: Vec<_> = plan
         .deployments
         .iter()
@@ -86,7 +86,7 @@ pub fn export_summary_maintenance_plan(
                 .collect(),
         })
         .collect();
-    let mut graph = dag_export::export_summary(&plan.root);
+    let mut dag = dag_export::export_summary(&plan.root);
     let deployment_by_summary: HashMap<_, _> = plan
         .deployments
         .iter()
@@ -96,13 +96,13 @@ pub fn export_summary_maintenance_plan(
     let mut next_node_id = 0;
     annotate_lifecycle_deployments(
         &plan.root,
-        &mut graph,
+        &mut dag,
         &deployment_by_summary,
         &mut next_node_id,
     );
 
-    SummaryMaintenanceDagExport {
-        graph,
+    SummaryMaintenanceDAGExport {
+        dag,
         deployments,
         horizon_seconds: plan.horizon.map(|horizon| horizon.0),
         evaluation_rate_per_second: plan.evaluation_rate.map(|rate| rate.0),
@@ -118,22 +118,22 @@ pub fn export_summary_maintenance_plan(
 
 /// Walk in the same post-order as `dag_export::export_summary` and attach a
 /// deployment directly to every flattened occurrence of its state node.
-/// This makes the decision visible to graph consumers without asking them to
-/// reconstruct pointer identity from graph position.
+/// This makes the decision visible to DAG consumers without asking them to
+/// reconstruct pointer identity from DAG position.
 fn annotate_lifecycle_deployments(
     node: &SummaryNode,
-    graph: &mut SummaryDagGraph,
+    dag: &mut SummaryDAG,
     deployments: &HashMap<*const SummaryNode, &SummaryMaintenanceDeploymentExport>,
     next_node_id: &mut usize,
 ) {
     if !matches!(node.expr, SummaryExpr::KeepPreAsap(_)) {
         for child in summary_children(&node.expr) {
-            annotate_lifecycle_deployments(child, graph, deployments, next_node_id);
+            annotate_lifecycle_deployments(child, dag, deployments, next_node_id);
         }
     }
-    let graph_node = &mut graph.nodes[*next_node_id];
+    let dag_node = &mut dag.nodes[*next_node_id];
     if let Some(deployment) = deployments.get(&(node as *const SummaryNode)) {
-        graph_node.detail["summary_maintenance"] =
+        dag_node.detail["summary_maintenance"] =
             serde_json::to_value(deployment).expect("lifecycle export is serializable");
     }
     *next_node_id += 1;

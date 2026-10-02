@@ -5,7 +5,7 @@ use asap_types::{
     post_asap::{
         compile_post_asap_dag,
         maintained_population::{MaintainedPopulation, PopulationInput},
-        share_common_summary_subtrees, SummaryExpr, ValueOperation,
+        share_common_summary_sub_dags, SummaryExpr, ValueOperation,
     },
     pre_asap::{Column, DataType, QueryExpr, Schema},
     types::AccuracyTarget,
@@ -59,7 +59,7 @@ async fn sql_quantiles_share_rows_without_promql_lookback() {
         aggregate("SELECT approx_percentile_cont(latency, 0.99) FROM samples").await,
     ];
     let rule = MaintainedPopulationStrategy::new(&roots);
-    let plans = share_common_summary_subtrees(
+    let plans = share_common_summary_sub_dags(
         roots
             .iter()
             .enumerate()
@@ -120,7 +120,7 @@ async fn sql_scalar_readouts_share_membership() {
         roots.push(aggregate(&format!("SELECT {function} FROM samples")).await);
     }
     let rule = MaintainedPopulationStrategy::new(&roots);
-    let plans = share_common_summary_subtrees(
+    let plans = share_common_summary_sub_dags(
         roots
             .iter()
             .enumerate()
@@ -167,7 +167,7 @@ async fn sql_topk_limits_share_maximum_k() {
         aggregate("SELECT * FROM samples ORDER BY latency DESC LIMIT 5").await,
     ];
     let rule = MaintainedPopulationStrategy::new(&roots);
-    let plans = share_common_summary_subtrees(
+    let plans = share_common_summary_sub_dags(
         roots
             .iter()
             .enumerate()

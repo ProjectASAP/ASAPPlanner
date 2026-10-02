@@ -1,14 +1,14 @@
 //! Pre-ASAP structural common-subexpression elimination: bottom-up
-//! hash-consing over an already-`resolve_root`'d [`QueryExpr`] tree (issue
+//! hash-consing over an already-`resolve_root`'d [`QueryExpr`] DAG (issue
 //! #212, #222, #223).
 //!
-//! CSE only runs on an already-bound, already-canonicalized tree —
+//! CSE only runs on an already-bound, already-canonicalized DAG —
 //! structural matching is meaningless before canonicalization has converged
 //! semantically-equivalent queries onto one shape (`docs/develop_docs/pre-asap-ir.md`
 //! design principle 3; `median(latency)` and `approx_percentile_cont(latency,
 //! 0.5)` already lower to an identical `AggIntent::Quantile` today, per
 //! `sql_lowering.rs`'s `median_is_the_same_intent_as_an_explicit_half_percentile`
-//! test). [`share_common_subtrees`] is the single entry point, run once per
+//! test). [`share_common_sub_dags`] is the single entry point, run once per
 //! workload batch (or once per query — see "Single-query CSE" below) *after*
 //! `resolve_root`, *before* the pre-ASAP → post-ASAP replacement/search pass
 //! (`asap_aware_mapping::replacement`).
@@ -19,7 +19,7 @@
 //! candidacy for sharing naturally incorporates whether its own children were
 //! themselves shared — two parents whose children were independently
 //! deduplicated down to the same `Rc`s are structurally identical iff their
-//! own fields also match, without re-walking the subtrees.
+//! own fields also match, without re-walking the sub-DAGs.
 //!
 //! Only the **relational skeleton** participates — the same set of "operator"
 //! children [`canonicalize`](super::canonicalize)'s `children_mut` walks
@@ -30,13 +30,13 @@
 //! `QueryExpr`'s derived `PartialEq` along with the rest of that node's
 //! fields, rather than separately hash-consed — the same scope
 //! `canonicalize.rs` settled on ("none of the rewrite rules touch a scalar
-//! subtree, so there's nothing to gain by recursing into one"). Widening this
+//! sub-DAG, so there's nothing to gain by recursing into one"). Widening this
 //! to scalar positions is future work, not attempted here.
 //!
 //! ## Correctness: hash is a filter, `PartialEq` is the decision
 //!
 //! This is the one non-negotiable rule. A **false positive** here — two
-//! subtrees wrongly judged shareable — is a wrong query answer, not a missed
+//! sub-DAGs wrongly judged shareable — is a wrong query answer, not a missed
 //! optimization: two different queries would read each other's data.
 //! [`structural_hash`] (`DefaultHasher`/SipHash over a canonical
 //! serialization, no collision-freedom guarantee) may only narrow the
@@ -75,23 +75,23 @@
 //! A repeated sub-expression within *one* query (e.g. the same grouped
 //! `Aggregate` referenced twice on two `BinaryOp` branches) is deduplicated
 //! by the exact same bottom-up interning — a workload of size one still
-//! interns bottom-up within that one tree. No separate mechanism is needed;
-//! see the `single_query_shares_its_own_repeated_subtree` test below.
+//! interns bottom-up within that one DAG. No separate mechanism is needed;
+//! see the `single_query_shares_its_own_repeated_sub_dag` test below.
 //!
 //! ## Landing plan (issue #223)
 //!
 //! This module is stage 1 of a 4-stage plan. Stage 2
 //! (`asap_aware_mapping::replacement::search_workload_with`, which runs
-//! [`share_common_subtrees`] itself before searching) is a real caller,
+//! [`share_common_sub_dags`] itself before searching) is a real caller,
 //! wired at the same time so this never becomes unwired dead code again
 //! (the original `asap-plan::cse::dedupe_subtrees` was deleted in #192 for
 //! exactly that). Stage 3 — [`dag_export`](crate::dag_export) computing its
 //! per-node `hash` by calling this module's [`structural_hash`] directly,
 //! instead of a parallel reimplementation — is also done, so
-//! `tools/dag-viewer`'s "shared subtree" highlighting now flags exactly the
+//! `tools/dag-viewer`'s "shared sub-DAG" highlighting now flags exactly the
 //! candidate pairs this module's own `InternTable` would bucket together
 //! (still only a hash match, not a guarantee of
-//! `share_common_subtrees`-actual sharing — see `dag_export`'s module doc).
+//! `share_common_sub_dags`-actual sharing — see `dag_export`'s module doc).
 //! Stage 4 (issue #237) is implemented in
 //! `asap_aware_mapping::cost_model::CostModel::cse_share_decision`, called
 //! from `asap_aware_mapping::replacement::CandidateLogicalASAPDAGs::cost_sorted` (via that
@@ -187,27 +187,27 @@ pub type HashCache = HashMap<*const QueryExpr, u64>;
 /// up in `cache` if already computed there (memoized by `Rc` pointer
 /// identity) rather than recursed into again.
 ///
-/// This is the DAG-aware fix a naive "just serialize the whole subtree"
-/// hash would get wrong: after [`share_common_subtrees`] (or even before
+/// This is the DAG-aware fix a naive "just serialize the whole sub-DAG"
+/// hash would get wrong: after [`share_common_sub_dags`] (or even before
 /// it — a front end can emit internal `Rc` sharing directly, e.g. a
-/// repeated subexpression within one query), `node` is generally a DAG,
-/// not a tree. A full-subtree serialization re-serializes — re-walks —
+/// repeated subexpression within one query), `node` generally has internal
+/// sharing. A full-sub-DAG serialization re-serializes — re-walks —
 /// any descendant `node` already shares internally once per parent that
 /// references it; called once per node in a bottom-up pass (as
 /// [`InternTable::intern`] and [`dag_export`](crate::dag_export) both do),
-/// that costs `O(subtree size)` *per node* instead of `O(1)` amortized —
+/// that costs `O(sub-DAG size)` *per node* instead of `O(1)` amortized —
 /// quadratic-or-worse for a deep chain, compounding further with any real
 /// internal sharing. Memoizing each child's hash by pointer identity in
 /// `cache` (persisted across the whole pass by the caller, not reset per
 /// node) makes each node's own contribution `O(1)` beyond its children's
 /// already-known hashes, giving `O(N)` total for `N` nodes — matching
-/// [`dag_node_count`]'s own DAG-vs-tree fix (issue #212/#223/#237's stage
+/// [`dag_node_count`]'s own shared-node counting fix (issue #212/#223/#237's stage
 /// 4) in spirit, applied to hashing instead of counting.
 ///
 /// `pub` (not private) so [`dag_export`](crate::dag_export) can call
 /// this exact function for its exported nodes' `hash` field instead of
 /// maintaining its own parallel reimplementation — issue #223 stage 3. That
-/// makes `tools/dag-viewer`'s "shared subtree" highlighting reflect this
+/// makes `tools/dag-viewer`'s "shared sub-DAG" highlighting reflect this
 /// module's real hashing, not a lookalike computed a different way; see the
 /// module doc's "Landing plan" section. A NaN/infinite `f64` makes JSON
 /// serialization fail; falling back to a fixed hash just puts every such
@@ -236,9 +236,9 @@ pub fn structural_hash(node: &QueryExpr, cache: &mut HashCache) -> u64 {
 
     /// Hash `own_fields` (this node's own tag and non-child scalar
     /// fields — anything JSON-serializable and small, i.e. never a
-    /// `QueryExpr` subtree) via the same canonical-JSON-string trick the
-    /// whole-subtree version used, just applied to `O(1)` fields instead
-    /// of `O(subtree size)`.
+    /// `QueryExpr` sub-DAG) via the same canonical-JSON-string trick the
+    /// whole-sub-DAG version used, just applied to `O(1)` fields instead
+    /// of `O(sub-DAG size)`.
     fn hash_own_fields(hasher: &mut impl Hasher, own_fields: &impl serde::Serialize) {
         serde_json::to_string(own_fields)
             .unwrap_or_default()
@@ -408,7 +408,7 @@ pub fn structural_hash(node: &QueryExpr, cache: &mut HashCache) -> u64 {
         // (issue #205) are all leaves for this traversal's purposes — none
         // has an operator child to look up in `cache` — so hashing the
         // whole node via `serde_json` in one shot is already `O(node
-        // size)`, not `O(subtree size)`: exactly the same cost the
+        // size)`, not `O(sub-DAG size)`: exactly the same cost the
         // per-variant `hash_own_fields` calls above pay, just without
         // needing to spell out each field individually. Matches
         // `rebuild_children`'s and `dag_node_count`'s identical scope
@@ -435,13 +435,13 @@ pub fn structural_hash(node: &QueryExpr, cache: &mut HashCache) -> u64 {
 
 /// Count of *unique* nodes reachable from `root`, deduplicated by `Rc`
 /// pointer identity (`Rc::as_ptr`) — the real size of the DAG rooted at
-/// `root`, not a tree-walk count.
+/// `root`, not a per-path walk count.
 ///
-/// After [`share_common_subtrees`] runs (or even before it, for a tree a
+/// After [`share_common_sub_dags`] runs (or even before it, for a DAG a
 /// front end already built with internal `Rc` sharing — e.g. re-running
 /// CSE, or a single-query repeated subexpression), `root` is generally a
-/// **DAG**, not a tree — that is this whole module's premise. Anything that
-/// walks `root` as if every reference were a fresh subtree (a naive
+/// **DAG** with internal sharing — that is this whole module's premise. Anything that
+/// walks `root` as if every reference were a fresh sub-DAG (a naive
 /// recursive walk with no identity tracking, or a naive full
 /// `serde_json` serialization — `Rc`'s `Serialize` impl serializes the
 /// pointee's *value* at every occurrence, it does not dedupe by identity)
@@ -454,9 +454,9 @@ pub fn structural_hash(node: &QueryExpr, cache: &mut HashCache) -> u64 {
 /// `pub` so cost-aware callers outside this crate (e.g.
 /// `asap_aware_mapping::CostModel::cse_recompute_cost`'s default) have a
 /// DAG-correct structural-size proxy available, instead of reaching for
-/// something tree-shaped like a raw serialization length.
+/// something per-path like a raw serialization length.
 ///
-/// Same operator-child traversal scope as [`share_common_subtrees`] itself
+/// Same operator-child traversal scope as [`share_common_sub_dags`] itself
 /// (see the module doc's "Algorithm" section, and this module's private
 /// `rebuild_children`) — a scalar subexpression embedded in a wrapper
 /// position (`Predicate`, `ProjectItem.expr`, `Aggregate.having`, …) is not
@@ -542,11 +542,11 @@ fn count_unique(node: &QueryExpr, seen: &mut std::collections::HashSet<*const Qu
 
 /// Recurse into `child`, then intern the result. `Rc::try_unwrap` recovers
 /// the owned node without cloning in the overwhelmingly common case — a
-/// tree freshly built by a front end / `resolve_root`, not yet shared by any
+/// DAG freshly built by a front end / `resolve_root`, not yet shared by any
 /// prior CSE pass, where every `Rc` is uniquely owned. Falls back to cloning
 /// this node's own fields (its children stay `Rc`s, not deep-copied) only
-/// when `child` is already shared — e.g. re-running CSE over a tree that
-/// went through a previous `share_common_subtrees` pass; a structural
+/// when `child` is already shared — e.g. re-running CSE over a DAG that
+/// went through a previous `share_common_sub_dags` pass; a structural
 /// duplicate collapses right back onto `child` itself via `PartialEq`, an
 /// already-optimal no-op.
 fn intern_child(table: &mut InternTable, child: Rc<QueryExpr>) -> Rc<QueryExpr> {
@@ -750,17 +750,17 @@ fn rebuild_children(table: &mut InternTable, expr: QueryExpr) -> QueryExpr {
     }
 }
 
-/// Share structurally-identical, sharing-legal subtrees across a workload's
+/// Share structurally-identical, sharing-legal sub-DAGs across a workload's
 /// query roots (or within one query, for `roots.len() == 1` — see the
 /// module doc's "Single-query CSE" section). Every root's *value* is
 /// unchanged (`PartialEq`-equal to its input) — only its internal `Rc`
-/// structure may now alias another root's, or another part of its own tree.
+/// structure may now alias another root's, or another part of its own DAG.
 ///
 /// `roots` must already be bound + canonicalized (post-`resolve_root`).
 /// `Id` is caller-chosen — a `QueryWorkload` entry's own key, an index, a
 /// query name, whatever identifies one root through the pipeline; this
 /// module has no opinion on its shape.
-pub fn share_common_subtrees<Id>(roots: Vec<(Id, QueryExpr)>) -> Vec<(Id, Rc<QueryExpr>)> {
+pub fn share_common_sub_dags<Id>(roots: Vec<(Id, QueryExpr)>) -> Vec<(Id, Rc<QueryExpr>)> {
     let mut table = InternTable::new();
     roots
         .into_iter()
@@ -816,7 +816,7 @@ mod tests {
         // blocking the merge — only the differing `col` is.
         let a = quantile_agg(vec![1], Some(2), 0.5);
         let b = quantile_agg(vec![1], Some(3), 0.5);
-        let shared = share_common_subtrees(vec![("a", a), ("b", b)]);
+        let shared = share_common_sub_dags(vec![("a", a), ("b", b)]);
         let [(_, ra), (_, rb)] = shared.as_slice() else {
             panic!("expected 2 roots");
         };
@@ -841,7 +841,7 @@ mod tests {
             op: CompareOpKind::Gt,
             right: Rc::new(QueryExpr::Literal(ScalarValue::Float64(1.0))),
         })))];
-        let shared = share_common_subtrees(vec![("a", a), ("b", b)]);
+        let shared = share_common_sub_dags(vec![("a", a), ("b", b)]);
         let [(_, ra), (_, rb)] = shared.as_slice() else {
             panic!("expected 2 roots");
         };
@@ -856,12 +856,12 @@ mod tests {
         // hoistable even though `a` and `b` are structurally identical.
         let a = quantile_agg(vec![], Some(2), 0.9);
         let b = quantile_agg(vec![], Some(2), 0.9);
-        assert_eq!(a, b, "fixture sanity: the two trees are structurally equal");
+        assert_eq!(a, b, "fixture sanity: the two DAGs are structurally equal");
         assert!(
             !a.output_schema().unwrap().has_unique_key(),
             "fixture sanity: an ungrouped aggregate has no provable unique key"
         );
-        let shared = share_common_subtrees(vec![("a", a), ("b", b)]);
+        let shared = share_common_sub_dags(vec![("a", a), ("b", b)]);
         let [(_, ra), (_, rb)] = shared.as_slice() else {
             panic!("expected 2 roots");
         };
@@ -878,11 +878,11 @@ mod tests {
         // 0.5, .. }` today (see `sql_lowering.rs`'s
         // `median_is_the_same_intent_as_an_explicit_half_percentile`) — here
         // built directly (grouped, so a unique key is provable) as two
-        // independently-constructed but structurally identical trees, the
+        // independently-constructed but structurally identical DAGs, the
         // way two different call sites in a workload would produce them.
         let median = quantile_agg(vec![1], Some(2), 0.5);
         let approx_percentile_cont_half = quantile_agg(vec![1], Some(2), 0.5);
-        let shared = share_common_subtrees(vec![
+        let shared = share_common_sub_dags(vec![
             ("median", median),
             ("percentile", approx_percentile_cont_half),
         ]);
@@ -896,13 +896,13 @@ mod tests {
     }
 
     #[test]
-    fn single_query_shares_its_own_repeated_subtree() {
+    fn single_query_shares_its_own_repeated_sub_dag() {
         // One query root referencing the same grouped Aggregate on both
         // BinaryOp branches — built as two separately-allocated but
-        // structurally identical subtrees (`.clone()` into two distinct
+        // structurally identical sub-DAGs (`.clone()` into two distinct
         // `Rc::new` calls), the shape a front end emitting a repeated
         // sub-expression would actually produce (no sharing yet). A
-        // workload of size 1 still interns bottom-up within this one tree —
+        // workload of size 1 still interns bottom-up within this one DAG —
         // no separate single-query mechanism needed.
         let agg = quantile_agg(vec![1], Some(2), 0.5);
         let root = QueryExpr::BinaryOp {
@@ -911,7 +911,7 @@ mod tests {
             rhs: Rc::new(agg),
             vector_match: None,
         };
-        let shared = share_common_subtrees(vec![("q", root)]);
+        let shared = share_common_sub_dags(vec![("q", root)]);
         let [(_, root)] = shared.as_slice() else {
             panic!("expected 1 root");
         };
@@ -945,12 +945,12 @@ mod tests {
     }
 
     #[test]
-    fn structural_hash_of_an_internally_shared_tree_matches_the_unshared_equivalent() {
+    fn structural_hash_of_an_internally_shared_dag_matches_the_unshared_equivalent() {
         // The same BinaryOp-with-shared-branches shape as
-        // `dag_node_count_deduplicates_an_internally_shared_subtree` below:
+        // `dag_node_count_deduplicates_an_internally_shared_sub_dag` below:
         // hashing it (however the memoization internally short-circuits the
         // second branch) must produce the exact same value as hashing a
-        // structurally-identical tree built with *no* sharing at all — the
+        // structurally-identical DAG built with *no* sharing at all — the
         // whole point of memoization is not changing the answer, only the
         // work needed to reach it.
         let agg = quantile_agg(vec![1], Some(2), 0.5);
@@ -1012,12 +1012,12 @@ mod tests {
     }
 
     #[test]
-    fn dag_node_count_deduplicates_an_internally_shared_subtree() {
-        // Same shape as `single_query_shares_its_own_repeated_subtree`: a
+    fn dag_node_count_deduplicates_an_internally_shared_sub_dag() {
+        // Same shape as `single_query_shares_its_own_repeated_sub_dag`: a
         // BinaryOp whose two branches are the *same* Rc after
-        // `share_common_subtrees` (2 nodes: Scan + Aggregate) — the root
+        // `share_common_sub_dags` (2 nodes: Scan + Aggregate) — the root
         // itself makes 3 unique nodes total (BinaryOp, Aggregate, Scan),
-        // not 5 (which a tree-walk / naive serialization, counting the
+        // not 5 (which a per-path walk / naive serialization, counting the
         // shared branch's 2 nodes twice, would report).
         let agg = quantile_agg(vec![1], Some(2), 0.5);
         let root = QueryExpr::BinaryOp {
@@ -1026,7 +1026,7 @@ mod tests {
             rhs: Rc::new(agg),
             vector_match: None,
         };
-        let shared = share_common_subtrees(vec![("q", root)]);
+        let shared = share_common_sub_dags(vec![("q", root)]);
         let [(_, root)] = shared.as_slice() else {
             panic!("expected 1 root");
         };
@@ -1042,18 +1042,18 @@ mod tests {
     #[test]
     fn dag_node_count_deduplicates_across_two_workload_roots() {
         // Two workload roots sharing one Aggregate after
-        // `share_common_subtrees` (the `duplicate_workload_queries_...`
+        // `share_common_sub_dags` (the `duplicate_workload_queries_...`
         // shape from `crates/integration-tests/tests/cse.rs`, built
         // directly here): each root's own `dag_node_count` must report the
-        // shared subtree's real size once, not double-count anything —
+        // shared sub-DAG's real size once, not double-count anything —
         // there's nothing *to* double-count from a single root's own count
         // in this case (no root references the shared node twice), so this
         // pins the simpler, more common case that a per-candidate cost
-        // proxy (`CseCandidate::subtree` in `asap-aware-mapping`) actually
+        // proxy (`CseCandidate::sub-DAG` in `asap-aware-mapping`) actually
         // exercises: counting one occurrence's own reachable DAG size.
         let a = quantile_agg(vec![1], Some(2), 0.5);
         let b = quantile_agg(vec![1], Some(2), 0.5);
-        let shared = share_common_subtrees(vec![("a", a), ("b", b)]);
+        let shared = share_common_sub_dags(vec![("a", a), ("b", b)]);
         let [(_, ra), (_, rb)] = shared.as_slice() else {
             panic!("expected 2 roots");
         };
@@ -1065,7 +1065,7 @@ mod tests {
     #[test]
     fn dedup_gates_sharing_the_same_as_aggregate() {
         // `Dedup { cols }` adds `cols` as a unique key — so two identical
-        // `Dedup` subtrees over a keyed column *do* merge, exercising the
+        // `Dedup` sub-DAGs over a keyed column *do* merge, exercising the
         // legality gate on a non-`Aggregate` node.
         let dedup = |cols: Vec<usize>| QueryExpr::Dedup {
             cols,
@@ -1073,7 +1073,7 @@ mod tests {
         };
         let a = dedup(vec![1]);
         let b = dedup(vec![1]);
-        let shared = share_common_subtrees(vec![("a", a), ("b", b)]);
+        let shared = share_common_sub_dags(vec![("a", a), ("b", b)]);
         let [(_, ra), (_, rb)] = shared.as_slice() else {
             panic!("expected 2 roots");
         };
@@ -1102,7 +1102,7 @@ mod tests {
         let a = without_agg();
         let b = without_agg();
         assert!(!a.output_schema().unwrap().has_unique_key());
-        let shared = share_common_subtrees(vec![("a", a), ("b", b)]);
+        let shared = share_common_sub_dags(vec![("a", a), ("b", b)]);
         let [(_, ra), (_, rb)] = shared.as_slice() else {
             panic!("expected 2 roots");
         };

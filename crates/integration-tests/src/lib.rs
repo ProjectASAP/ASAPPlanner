@@ -8,7 +8,7 @@
 //! are in scope.
 //!
 //! `fixtures` provides column/schema constructors used across test files.
-//! Expected IR trees are always hand-constructed inside each test — nothing
+//! Expected IR DAGs are always hand-constructed inside each test — nothing
 //! here derives or computes expected outputs.
 
 pub mod fixtures {

@@ -1,7 +1,7 @@
 //! Shared post-lowering canonicalization of the resolved [`QueryExpr`].
 //!
 //! Both language front ends funnel through [`resolve_root`](super::resolve::resolve_root),
-//! which runs this pass over the resolved tree. Its job is to erase
+//! which runs this pass over the resolved DAG. Its job is to erase
 //! *structural* differences between semantically identical queries so a
 //! post-ASAP binding rule matching on the intent algebra sees one canonical
 //! spelling regardless of source language (issue #34).
@@ -29,7 +29,7 @@ use super::expr_ir::{CompareOpKind, ScalarValue};
 use super::query_expr::{Predicate, QueryExpr, Reduction, SortKey, WindowFuncKind};
 use crate::types::AccuracyTarget;
 
-/// Rewrite `expr` into its canonical form (bottom-up). Idempotent: a tree that
+/// Rewrite `expr` into its canonical form (bottom-up). Idempotent: a DAG that
 /// is already canonical is returned unchanged.
 pub fn canonicalize(mut expr: QueryExpr) -> QueryExpr {
     canon(&mut expr);
@@ -48,7 +48,7 @@ fn canon(expr: &mut QueryExpr) {
     // pointing at the wrong column, or out of bounds, of the
     // post-canonicalize schema. Snapshot the schema the discriminator key
     // was actually resolved against, right here, before recursing into the
-    // children — this is the exact tree state `resolve.rs` saw.
+    // children — this is the exact DAG state `resolve.rs` saw.
     let discriminator_branch_schema_before = match expr {
         QueryExpr::Concat {
             children,
@@ -96,7 +96,7 @@ fn canon(expr: &mut QueryExpr) {
 
 /// A `&mut QueryExpr` out of a child `Rc<QueryExpr>` — clone-on-write via
 /// [`Rc::make_mut`]: free (no clone) while `r` is uniquely owned, which is
-/// the overwhelmingly common case (a tree `canonicalize` was just handed by
+/// the overwhelmingly common case (a DAG `canonicalize` was just handed by
 /// value); falls back to cloning just *this* node (its own fields — the
 /// grandchildren stay shared `Rc`s, not deep-copied) only when some other
 /// owner still holds the same `Rc`, e.g. a caller that kept its own clone
@@ -106,7 +106,7 @@ fn canon(expr: &mut QueryExpr) {
 /// panic on exactly that case; `make_mut` degrades to a shallow copy instead
 /// of requiring sole ownership as a precondition. Once a workload-level CSE
 /// pass runs (issue #212, #222) and canonicalize sees an already-shared
-/// subtree from a *different* query, this is also the mechanism that keeps
+/// sub-DAG from a *different* query, this is also the mechanism that keeps
 /// canonicalizing one query from silently corrupting another's view of the
 /// same shared node.
 fn rc_mut(r: &mut Rc<QueryExpr>) -> &mut QueryExpr {
@@ -117,7 +117,7 @@ fn rc_mut(r: &mut Rc<QueryExpr>) -> &mut QueryExpr {
 /// node — `canon`'s own top-down/bottom-up walk only ever visits the
 /// relational skeleton, never descending into a scalar position (`Filter.pred`,
 /// `ProjectItem.expr`, …): none of the three rewrite rules rewrite anything
-/// inside a scalar subtree, so there's nothing to gain by recursing into one,
+/// inside a scalar sub-DAG, so there's nothing to gain by recursing into one,
 /// and every scalar variant (issue #205) hits the catch-all below.
 fn children_mut(expr: &mut QueryExpr) -> Vec<&mut QueryExpr> {
     use QueryExpr::*;

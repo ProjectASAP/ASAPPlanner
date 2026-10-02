@@ -4,7 +4,7 @@
 //! Emits [`UnresolvedQueryExpr`](asap_types::pre_asap::UnresolvedQueryExpr) itself — the
 //! canonical `QueryExpr`, generic over an unresolved
 //! [`ColumnRef`](asap_types::pre_asap::ColumnRef) — directly, rather than a
-//! separate per-language relational tree; `resolve_root` runs the
+//! separate per-language relational DAG; `resolve_root` runs the
 //! [`SchemaResolver`](asap_types::pre_asap::SchemaResolver) for positional name resolution.
 //! Depends on DataFusion only — never on the PromQL parser.
 
@@ -24,7 +24,7 @@ pub use sql::{SqlCatalog, SqlLowerer};
 ///
 /// The `catalog` supplies table schemas (used both to plan the SQL with
 /// DataFusion and to carry positional column identity into the resolved
-/// tree). `accuracy` is threaded onto every approximate intent as it's built.
+/// DAG). `accuracy` is threaded onto every approximate intent as it's built.
 pub async fn lower_sql(
     query: &str,
     catalog: &SqlCatalog,

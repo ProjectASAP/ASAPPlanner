@@ -11,7 +11,7 @@ use asap_types::pre_asap::{AggIntent, QueryExpr};
 use asap_types::types::AccuracyTarget;
 use support::{lower_promql, lower_promql_with_histograms};
 
-/// The histogram/quantile intent kind in the lowered tree: `"HQ"` for the
+/// The histogram/quantile intent kind in the lowered DAG: `"HQ"` for the
 /// classic-bucket `HistogramQuantile`, `"Q"` for the sketch-able `Quantile`.
 fn quantile_kind(qe: &QueryExpr) -> &'static str {
     fn walk(e: &QueryExpr) -> Option<&'static str> {

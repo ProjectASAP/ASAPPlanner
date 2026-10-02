@@ -8,8 +8,8 @@ use asap_types::resources::CacheProfile;
 
 use crate::analytical_cost::{
     estimate_physical_dag_comparison, AnalyticalCostError,
-    EvidenceBackedPhysicalDag as PhysicalDag, PhysicalDagComparisonEstimate,
-    PhysicalDagEstimateRequest, PhysicalNodeEvidence, ResourceCalibration,
+    EvidenceBackedPhysicalDAG as PhysicalDAG, PhysicalDAGComparisonEstimate,
+    PhysicalDAGEstimateRequest, PhysicalNodeEvidence, ResourceCalibration,
 };
 use crate::cost_model::{Cost, CostModel, DefaultCostModel};
 use crate::physical_operator_statistics::ComparisonScope;
@@ -59,13 +59,13 @@ pub trait PlannerPhysicalPlanProvider {
         snapshot: &PhysicalEvidenceSnapshot,
         summary: &Rc<SummaryNode>,
         target: &TargetSubDAG<'_>,
-    ) -> Result<PhysicalDag, AnalyticalCostError>;
+    ) -> Result<PhysicalDAG, AnalyticalCostError>;
 }
 
 /// Dimensional comparison retained for explanations and verification.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PhysicalPlanComparison {
-    pub resources: PhysicalDagComparisonEstimate,
+    pub resources: PhysicalDAGComparisonEstimate,
     pub raw_cost: Cost,
     pub candidate_cost: Cost,
     pub storage_io: Option<(
@@ -94,7 +94,7 @@ struct CachedTargetEvidence {
     root: Rc<QueryExpr>,
     consumer_count: usize,
     snapshot: PhysicalEvidenceSnapshot,
-    raw: PhysicalDag,
+    raw: PhysicalDAG,
 }
 
 impl<'a> PhysicalPlanCostModel<'a> {
@@ -124,7 +124,7 @@ impl<'a> PhysicalPlanCostModel<'a> {
     fn target_evidence(
         &self,
         target: &TargetSubDAG<'_>,
-    ) -> Result<(PhysicalEvidenceSnapshot, PhysicalDag), AnalyticalCostError> {
+    ) -> Result<(PhysicalEvidenceSnapshot, PhysicalDAG), AnalyticalCostError> {
         if let Some(cached) = self.target_evidence.borrow().iter().find(|cached| {
             Rc::ptr_eq(&cached.root, target.root) && cached.consumer_count == target.consumer_count
         }) {
@@ -199,14 +199,14 @@ impl<'a> PhysicalPlanCostModel<'a> {
             },
         };
         let resources = estimate_physical_dag_comparison(
-            PhysicalDagEstimateRequest {
+            PhysicalDAGEstimateRequest {
                 nodes: &raw.nodes,
                 root: &raw.root,
                 scope,
                 statistics: &raw,
                 cache_profile: &snapshot.cache_profile,
             },
-            PhysicalDagEstimateRequest {
+            PhysicalDAGEstimateRequest {
                 nodes: &replacement.nodes,
                 root: &replacement.root,
                 scope,
@@ -365,7 +365,7 @@ mod tests {
         DataArrival, DurationMs, QueryRecurrence, QueryTimeScope, TimeSelection, TimestampMs,
     };
 
-    use crate::analytical_cost::{ExecutionMultiplicity, PhysicalDagNode, PhysicalOperator};
+    use crate::analytical_cost::{ExecutionMultiplicity, PhysicalDAGNode, PhysicalOperator};
     use crate::physical_operator_statistics::{
         EdgeStatistics, OperatorStatistics, SourceCoverage, UnaryEdgeStatistics,
     };
@@ -470,7 +470,7 @@ mod tests {
             }
         }
 
-        fn summary_dag(&self, scope: &ComparisonScope) -> PhysicalDag {
+        fn summary_dag(&self, scope: &ComparisonScope) -> PhysicalDAG {
             let scan_statistics = scan_statistics(self.candidate_scan_bytes, edge(100, 800));
             let aggregate_statistics = aggregate_statistics(edge(100, 800), edge(1, 8));
             let read_statistics = pass_through_statistics(edge(1, 8));
@@ -500,9 +500,9 @@ mod tests {
                     },
                 ),
             ]);
-            PhysicalDag {
+            PhysicalDAG {
                 nodes: vec![
-                    PhysicalDagNode {
+                    PhysicalDAGNode {
                         id: "candidate-scan".into(),
                         operator: PhysicalOperator::Scan,
                         children: vec![],
@@ -511,7 +511,7 @@ mod tests {
                         retained_bytes: 0,
                         execution: ExecutionMultiplicity::Once,
                     },
-                    PhysicalDagNode {
+                    PhysicalDAGNode {
                         id: "candidate-state".into(),
                         operator: PhysicalOperator::HashAggregate {
                             grouping_key_count: 0,
@@ -523,7 +523,7 @@ mod tests {
                         retained_bytes: 8,
                         execution: ExecutionMultiplicity::Once,
                     },
-                    PhysicalDagNode {
+                    PhysicalDAGNode {
                         id: "candidate-read".into(),
                         operator: PhysicalOperator::PassThrough,
                         children: vec!["candidate-state".into()],
@@ -585,7 +585,7 @@ mod tests {
             snapshot: &PhysicalEvidenceSnapshot,
             _summary: &Rc<SummaryNode>,
             _target: &TargetSubDAG<'_>,
-        ) -> Result<PhysicalDag, AnalyticalCostError> {
+        ) -> Result<PhysicalDAG, AnalyticalCostError> {
             assert_eq!(snapshot.version, "test-snapshot-1");
             self.summary_available
                 .then(|| self.summary_dag(&snapshot.scope))
@@ -915,7 +915,7 @@ mod tests {
                 snapshot: &PhysicalEvidenceSnapshot,
                 summary: &Rc<SummaryNode>,
                 target: &TargetSubDAG<'_>,
-            ) -> Result<PhysicalDag, AnalyticalCostError> {
+            ) -> Result<PhysicalDAG, AnalyticalCostError> {
                 self.0.summary_physical_dag(snapshot, summary, target)
             }
         }
@@ -1003,7 +1003,7 @@ mod tests {
                 snapshot: &PhysicalEvidenceSnapshot,
                 summary: &Rc<SummaryNode>,
                 target: &TargetSubDAG<'_>,
-            ) -> Result<PhysicalDag, AnalyticalCostError> {
+            ) -> Result<PhysicalDAG, AnalyticalCostError> {
                 let mut dag = self.0.summary_physical_dag(snapshot, summary, target)?;
                 dag.nodes[0]
                     .source_coverage
@@ -1055,7 +1055,7 @@ mod tests {
                 _snapshot: &PhysicalEvidenceSnapshot,
                 _summary: &Rc<SummaryNode>,
                 _target: &TargetSubDAG<'_>,
-            ) -> Result<PhysicalDag, AnalyticalCostError> {
+            ) -> Result<PhysicalDAG, AnalyticalCostError> {
                 panic!("blank snapshot versions must fail before summary binding")
             }
         }

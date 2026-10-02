@@ -101,13 +101,13 @@ fn q23_sum_by_job_over_filtered_scan() {
     );
 }
 
-// #25 — binary op over two complex subtrees
+// #25 — binary op over two complex sub-DAGs
 //   LHS: sum by (job) over rate over filtered scan
 //     schema [ts, value, job, status]; outer by=[2] (job)
 //   RHS: sum by (job) over rate over bare scan
 //     schema [ts, value, job]; outer by=[2] (job)
 #[test]
-fn q25_div_over_complex_subtrees() {
+fn q25_div_over_complex_sub_dags() {
     let lhs_scan = QueryExpr::Scan {
         source: Source::TimeSeries {
             metric: "http_requests_total".into(),
@@ -229,7 +229,7 @@ fn q53_outer_group_key_absent_from_nested_aggregate() {
 
 // #52 — an outer group key referenced by neither binary-op side (`__name__`)
 //   still resolves. Each `or` side is bound independently against its own
-//   sub-tree, so `__name__` is seeded as an inherited column on both. Each side
+//   sub-DAG, so `__name__` is seeded as an inherited column on both. Each side
 //   references only `env` (its matcher), so its schema is [ts, value, env,
 //   __name__] (referenced `env` first, inherited `__name__` appended) → the
 //   outer `by (__name__)` resolves to col 3 on both sides. The `or` carries the

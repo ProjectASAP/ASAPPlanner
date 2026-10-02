@@ -112,7 +112,7 @@ const CATEGORIES = {
   // Loud fallback for malformed or version-skewed exports.
   unknown: {
     label: 'Unknown kind',
-    description: 'A DagNode.kind with no KIND_CATEGORY entry — update node-style.js',
+    description: 'A DAGNode.kind with no KIND_CATEGORY entry — update node-style.js',
     light: { bg: '#fef2f2', border: '#b91c1c' },
     dark: { bg: '#2a1212', border: '#f87171' },
   },
@@ -120,7 +120,7 @@ const CATEGORIES = {
 
 for (const [kind, category] of Object.entries(KIND_CATEGORY)) {
   if (!Object.prototype.hasOwnProperty.call(CATEGORIES, category)) {
-    throw new Error(`DagNode kind ${kind} uses undeclared category ${category}`);
+    throw new Error(`DAGNode kind ${kind} uses undeclared category ${category}`);
   }
 }
 
@@ -139,7 +139,7 @@ function categoryOf(kind) {
   const category = KIND_CATEGORY[kind];
   if (category) return category;
   console.warn(
-    `node-style.js: DagNode.kind ${JSON.stringify(kind)} has no KIND_CATEGORY entry — ` +
+    `node-style.js: DAGNode.kind ${JSON.stringify(kind)} has no KIND_CATEGORY entry — ` +
     'rendering as "Unknown kind" instead of silently guessing. Add an entry to KIND_CATEGORY.'
   );
   return 'unknown';

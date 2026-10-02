@@ -62,7 +62,7 @@ query root. It does not measure workload-wide search or the other default
 strategies.
 
 The default workload search currently registers `SketchAlgorithmStrategy`,
-`HydraGroupingStrategy`, `SharedSubtreeStrategy`, and
+`HydraGroupingStrategy`, `SharedSubDAGStrategy`, and
 `AvgToSumOverCountStrategy`. Workload context can additionally contribute
 `RollupStrategy` and `AccuracyReconciliationStrategy`. This baseline is
 therefore a sketch-only comparison point.

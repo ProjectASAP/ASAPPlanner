@@ -27,7 +27,7 @@ value is replaced. This distinction requires an explicit rule and state contract
 an append-only quantile sketch cannot by itself implement current-series updates.
 
 The current rule retains an exact population. It does not prescribe a particular
-tree, heap or sketch implementation, and it does not imply a deletable DDSketch.
+DAG, heap or sketch implementation, and it does not imply a deletable DDSketch.
 
 ## Membership semantics
 

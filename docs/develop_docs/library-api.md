@@ -271,7 +271,7 @@ before physical selection; do not treat their presence as deployment permission.
 
 ```text
 CandidateLogicalASAPDAGs::enumerate_candidate_dags_for_root(&self, id: &Id, expansion_limit: usize)
-    -> Result<CandidateDagInventory<Id>, RealizationError>
+    -> Result<CandidateDAGInventory<Id>, RealizationError>
 ```
 
 Returns every distinct finalized DAG for one root, unranked; other roots'
@@ -302,7 +302,7 @@ pass. An omitted strategy contributes no proposals of its own.
 | --- | --- | --- |
 | `SketchAlgorithmStrategy::new(&model)` | Enumerates supported exact/sketch implementations and parameter choices for aggregate targets | Yes |
 | `HydraGroupingStrategy::new(&model)` | Considers a shared multi-subpopulation structure for supported grouped sketch families, subject to accuracy evidence | Yes |
-| `SharedSubtreeStrategy` | Proposes sharing versus independent recomputation at reused subtrees | Yes |
+| `SharedSubDAGStrategy` | Proposes sharing versus independent recomputation at reused sub-DAGs | Yes |
 | `SemanticEquivalentRewriteStrategy` | Proposes supported equivalent aggregate rewrites, including decomposing average into sum/count | Yes |
 | `ExactCompositionStrategy::new(&model)` | Proposes supported exact operations around summary readouts or in maintenance | Yes |
 | Your `ReplacementStrategy` implementation | Adds domain-specific legal replacement proposals | No |
@@ -353,7 +353,7 @@ use asap_types::workload::{
 };
 use asap_aware_mapping::{
     search_workload_with_targets, DefaultAccuracyModel, DefaultCostModel,
-    ReplacementStrategy, SketchAlgorithmStrategy, SharedSubtreeStrategy,
+    ReplacementStrategy, SketchAlgorithmStrategy, SharedSubDAGStrategy,
 };
 use asap_types::types::AccuracyTarget;
 
@@ -387,7 +387,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let model = DefaultCostModel;
     let strategies: Vec<Box<dyn ReplacementStrategy + '_>> = vec![
         Box::new(SketchAlgorithmStrategy::new(&model)),
-        Box::new(SharedSubtreeStrategy),
+        Box::new(SharedSubDAGStrategy),
     ];
     let space = search_workload_with_targets(
         vec![("q1", root, Some(accuracy))], &strategies, &DefaultAccuracyModel,
@@ -655,7 +655,7 @@ from that hook, as in Planner selection.
 
 A lifecycle choice then fixes each physical placement through timing: a
 continuously maintained state and its inputs run at ingestion time, while an
-ephemeral one stays at query time. Compile each query's `PostAsapDag` once and
+ephemeral one stays at query time. Compile each query's `PostAsapDAG` once and
 cut every chosen assignment from that result:
 
 ```rust
@@ -701,7 +701,7 @@ in the workload**. Here, “global” describes that cross-target scope. It does
 mean a proven globally optimal solution over every possible physical plan, nor
 selection across every machine in a deployment.
 
-Consider this conceptual dependency graph:
+Consider this conceptual dependency DAG:
 
 ```text
 Q1 --+
@@ -752,7 +752,7 @@ GlobalSelection::assemble_selected_dag(&self, target: &Rc<QueryExpr>)
 ```
 
 For structural inspection only, this complete example selects a semantic root
-and exports its inspection graph. It performs no lifecycle or deployment planning.
+and exports its inspection DAG. It performs no lifecycle or deployment planning.
 Use lifecycle-aware selection above when the comparison needs those decisions.
 
 ```rust
@@ -795,8 +795,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let selection = space.global_selection(&DefaultCostModel);
     // Search may canonicalize roots; use the root returned by CandidateLogicalASAPDAGs.
     if let Some(summary) = selection.assemble_selected_dag(&space.roots[0].1)? {
-        let graph = asap_types::dag_export::export_summary(&summary);
-        println!("{graph:#?}");
+        let dag = asap_types::dag_export::export_summary(&summary);
+        println!("{dag:#?}");
     }
     Ok(())
 }
@@ -806,14 +806,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 | Function/type | Purpose |
 | --- | --- |
-| `asap_types::dag_export::export(&query)` | Pre-ASAP inspection graph |
-| `asap_types::dag_export::export_summary(&summary)` | Post-ASAP inspection graph |
+| `asap_types::dag_export::export(&query)` | Pre-ASAP inspection DAG |
+| `asap_types::dag_export::export_summary(&summary)` | Post-ASAP inspection DAG |
 | `asap_types::post_asap::compile_post_asap_dag(&root)` | Compile a semantic DAG with execution-data-state validation; not a physical plan |
-| `PostAsapDagDocument::new(dag)` and `.validate()` | Versioned semantic envelope and explicit validation; constructing it alone does not validate |
-| `asap_aware_mapping::export_summary_maintenance_plan(&plan)` | Graph plus lifecycle deployments, alternatives and available cost/guarantee information |
+| `PostAsapDAGDocument::new(dag)` and `.validate()` | Versioned semantic envelope and explicit validation; constructing it alone does not validate |
+| `asap_aware_mapping::export_summary_maintenance_plan(&plan)` | DAG plus lifecycle deployments, alternatives and available cost/guarantee information |
 | `explain_replacements` / `explain_replacements_with` | Findings from default/custom-strategy search; not a complete physical feasibility report |
 
-Choose the export matching your intended handoff: an inspection graph is not
+Choose the export matching your intended handoff: an inspection DAG is not
 interchangeable with a versioned execution contract. Preserve lifecycle and
 cost/guarantee evidence needed downstream instead of exporting only a bare DAG.
 For public symbol details, build local API documentation with:

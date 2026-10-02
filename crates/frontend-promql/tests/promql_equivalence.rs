@@ -1,10 +1,10 @@
-//! PromQL **semantic-equivalence proving** for the parse-to-canonical-tree lowering.
+//! PromQL **semantic-equivalence proving** for the parse-to-canonical-DAG lowering.
 //!
 //! The lowering is a *normalizer*: it should map a whole class of
-//! semantically-equivalent PromQL strings to **one** canonical tree, and
+//! semantically-equivalent PromQL strings to **one** canonical DAG, and
 //! must keep semantically-*distinct* queries distinct. This suite proves:
 //!
-//!   1. Equivalence classes collapse to an identical canonical tree  (`assert_equiv`).
+//!   1. Equivalence classes collapse to an identical canonical DAG  (`assert_equiv`).
 //!   2. Distinct meanings stay distinct                (`assert_distinct`).
 //!   3. The lowering never *wrongly* equates distinct semantics — the cases it
 //!      cannot faithfully distinguish are **rejected**, not silently merged.
@@ -26,25 +26,25 @@ fn lo(q: &str) -> QueryExpr {
     lower_promql(q, AccuracyTarget::Exact).unwrap_or_else(|e| panic!("{q:?} should lower: {e}"))
 }
 
-/// Every member of an equivalence class must lower to the *same* canonical tree.
+/// Every member of an equivalence class must lower to the *same* canonical DAG.
 fn assert_equiv(class: &[&str]) {
     let first = lo(class[0]);
     for q in &class[1..] {
         assert_eq!(
             lo(q),
             first,
-            "expected {q:?} ≡ {:?}, but they lowered to different trees",
+            "expected {q:?} ≡ {:?}, but they lowered to different DAGs",
             class[0]
         );
     }
 }
 
-/// Two semantically-distinct queries must lower to *different* canonical trees.
+/// Two semantically-distinct queries must lower to *different* canonical DAGs.
 fn assert_distinct(a: &str, b: &str) {
     assert_ne!(
         lo(a),
         lo(b),
-        "{a:?} and {b:?} must not collapse to the same tree"
+        "{a:?} and {b:?} must not collapse to the same DAG"
     );
 }
 
@@ -79,7 +79,7 @@ fn whitespace_is_irrelevant() {
 
 #[test]
 fn label_matcher_order_is_equivalent() {
-    // A matcher set is unordered: same series, so same canonical tree (FIX:
+    // A matcher set is unordered: same series, so same canonical DAG (FIX:
     // predicates are now canonicalised by (name, value) at lowering time).
     assert_equiv(&[r#"up{job="a",env="prod"}"#, r#"up{env="prod",job="a"}"#]);
 }
@@ -153,7 +153,7 @@ fn changes_and_resets_are_not_count_over_time() {
     // PromQL: count_over_time = #samples, changes = #value-changes,
     // resets = #counter-resets. They previously all collapsed to `Count`; now
     // each lowers to its own intent (issue #44), so all three are pairwise
-    // distinct canonical trees rather than being rejected or merged.
+    // distinct canonical DAGs rather than being rejected or merged.
     assert_distinct("changes(m[5m])", "count_over_time(m[5m])");
     assert_distinct("resets(m[5m])", "count_over_time(m[5m])");
     assert_distinct("changes(m[5m])", "resets(m[5m])");
@@ -163,7 +163,7 @@ fn changes_and_resets_are_not_count_over_time() {
 fn group_is_not_sum() {
     // PromQL `group` returns a constant 1 per group; it previously collapsed
     // onto `sum` (sum of values). It now lowers to its own `Group` intent
-    // (issue #49) — a distinct canonical tree from `sum`, not merged.
+    // (issue #49) — a distinct canonical DAG from `sum`, not merged.
     assert_distinct("group(up)", "sum(up)");
     assert_distinct("group by (job) (up)", "sum by (job) (up)");
 }

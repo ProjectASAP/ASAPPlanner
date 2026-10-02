@@ -35,8 +35,8 @@
 //! ## CSE sharing (issue #237, #223 stage 4)
 //!
 //! [`CseCandidate`]/[`ShareDecision`]/[`CostModel::cse_share_decision`] below
-//! decide whether a CSE-detected shared subtree
-//! ([`asap_types::pre_asap::cse::share_common_subtrees`], issue #223 stages
+//! decide whether a CSE-detected shared sub-DAG
+//! ([`asap_types::pre_asap::cse::share_common_sub_dags`], issue #223 stages
 //! 1-2, PR #235) is actually worth sharing, via a real Volcano/Cascades-style
 //! cost comparison rather than a fixed rule. See
 //! `docs/design_docs/cse-cost-model-decision.md` for the full design discussion (why
@@ -266,24 +266,24 @@ fn finite_rate(units_per_second: f64) -> Option<CostRate> {
         .then_some(CostRate(units_per_second))
 }
 
-/// A CSE-detected, legality-gated shared subtree with two or more consumers
+/// A CSE-detected, legality-gated shared sub-DAG with two or more consumers
 /// — the unit [`CostModel::cse_share_decision`] decides over. Built by
 /// [`CandidateLogicalASAPDAGs::cost_sorted`](crate::replacement::CandidateLogicalASAPDAGs::cost_sorted)
 /// (via [`crate::replacement`]'s own `cse_preference`) the first time it
-/// needs a representative bound node for a subtree that
-/// [`asap_types::pre_asap::cse::share_common_subtrees`] already collapsed
+/// needs a representative bound node for a sub-DAG that
+/// [`asap_types::pre_asap::cse::share_common_sub_dags`] already collapsed
 /// onto one `Rc` for two or more workload roots. See
 /// `docs/design_docs/cse-cost-model-decision.md`.
 pub struct CseCandidate<'a> {
-    /// The shared pre-ASAP subtree itself.
-    pub subtree: &'a QueryExpr,
-    /// The `SummaryNode` this subtree bound to — gives the cost model the
+    /// The shared pre-ASAP sub-DAG itself.
+    pub sub_dag: &'a QueryExpr,
+    /// The `SummaryNode` this sub-DAG bound to — gives the cost model the
     /// concrete `SummaryFamilyType`/`(kind, params)` actually at stake, not
     /// just the pre-ASAP shape.
     pub bound_summary: &'a SummaryNode,
-    /// How many workload roots reference this exact shared subtree, counted
+    /// How many workload roots reference this exact shared sub-DAG, counted
     /// once up front over the whole workload (always >= 2 — a candidate is
-    /// only ever constructed for an actually-shared subtree).
+    /// only ever constructed for an actually-shared sub-DAG).
     pub consumer_count: usize,
 }
 
@@ -367,23 +367,23 @@ pub enum ShareDecision {
 }
 
 /// Default [`CostModel::cse_recompute_cost`]: a structural-size proxy — the
-/// number of *unique* nodes in `subtree`'s DAG
+/// number of *unique* nodes in `sub_dag`'s DAG
 /// ([`asap_types::pre_asap::cse::dag_node_count`], the same module this
 /// candidate's sharing was detected in). Deliberately **not** a raw
-/// `serde_json` serialization length: after CSE, `subtree` is generally a
-/// DAG, not a tree (a `CseCandidate` only exists because something got
+/// `serde_json` serialization length: after CSE, `sub_dag` generally has
+/// internal sharing (a `CseCandidate` only exists because something got
 /// shared), and a naive full serialization re-serializes — over-counts —
-/// any descendant `subtree` already shares internally, once per parent
+/// any descendant `sub_dag` already shares internally, once per parent
 /// that references it, instead of once for the whole DAG. `dag_node_count`
 /// dedupes by `Rc` pointer identity, so it charges each unique node's
 /// contribution exactly once regardless of how many places within
-/// `subtree` reference it. Cheap to compute (one pass, no serialization),
+/// `sub_dag` reference it. Cheap to compute (one pass, no serialization),
 /// and still scales with real structural complexity — a genuinely tiny
-/// leaf costs little to recompute, a deep multi-join subtree costs a lot.
+/// leaf costs little to recompute, a deep multi-join sub-DAG costs a lot.
 /// A deployment with real per-row/per-update cost knowledge should
 /// override [`CostModel::cse_recompute_cost`] instead of relying on this.
-pub fn default_cse_recompute_cost(subtree: &QueryExpr) -> Cost {
-    Cost(asap_types::pre_asap::cse::dag_node_count(subtree) as f64)
+pub fn default_cse_recompute_cost(sub_dag: &QueryExpr) -> Cost {
+    Cost(asap_types::pre_asap::cse::dag_node_count(sub_dag) as f64)
 }
 
 /// Default [`CostModel::cse_shared_maintenance_cost`]: a small
@@ -567,12 +567,12 @@ pub trait CostModel {
         )
     }
 
-    /// Estimate the one-time cost of recomputing `candidate.subtree`
+    /// Estimate the one-time cost of recomputing `candidate.sub_dag`
     /// independently at a single use site. Default:
     /// [`default_cse_recompute_cost`] (a structural-size proxy). See
     /// `docs/design_docs/cse-cost-model-decision.md`.
     fn cse_recompute_cost(&self, candidate: &CseCandidate) -> Cost {
-        default_cse_recompute_cost(candidate.subtree)
+        default_cse_recompute_cost(candidate.sub_dag)
     }
 
     /// Estimate the cost of maintaining `candidate.bound_summary` as one
@@ -666,7 +666,7 @@ pub trait CostModel {
         Cost(1.0)
     }
 
-    /// Cost of recomputing `candidate.subtree` once, from the pre-ASAP/raw
+    /// Cost of recomputing `candidate.sub_dag` once, from the pre-ASAP/raw
     /// path. Units: cost units per recomputation — the `raw_recompute_cost`
     /// term of `recompute_cost_rate`. Default: delegates to
     /// [`cse_recompute_cost`](Self::cse_recompute_cost) (the same
@@ -740,14 +740,14 @@ pub trait CostModel {
     /// already belongs to [`rank_candidates`](Self::rank_candidates) (for a
     /// [`SketchAlgorithmStrategy`](crate::replacement::SketchAlgorithmStrategy)
     /// group) and [`cse_share_decision`](Self::cse_share_decision) (for a
-    /// [`SharedSubtreeStrategy`](crate::replacement::SharedSubtreeStrategy)
+    /// [`SharedSubDAGStrategy`](crate::replacement::SharedSubDAGStrategy)
     /// group).
     ///
     /// One method covers both candidate shapes this crate ships:
     /// `candidate.replacement`'s [`Replacement::Summary`] arm (a
     /// `SketchAlgorithmStrategy` candidate — the bound `SummaryNode` is right
     /// there, nothing to reconstruct) and its [`Replacement::Rewrite`] arm
-    /// (a `SharedSubtreeStrategy` share-vs-recompute candidate — no bound
+    /// (a `SharedSubDAGStrategy` share-vs-recompute candidate — no bound
     /// `SummaryNode` of its own, since sharing is a decision about a target
     /// already bound some other way; a representative binding is recovered
     /// from `target` itself). `target` is threaded through explicitly
@@ -1044,7 +1044,7 @@ impl CostModel for DefaultCostModel {
     ///   `cse_share_decision` already compares against each other. `NaN`
     ///   only if `target` itself can't be bound at all (schema derivation
     ///   failed) — never expected for a target that's already part of a
-    ///   legitimate workload tree.
+    ///   legitimate workload DAG.
     ///
     ///   **Exception**: a [`ReplacementProvenance::AccuracyReconciliation`]
     ///   candidate (issue #273) never rebuilds `target` — it reads a
@@ -1062,7 +1062,7 @@ impl CostModel for DefaultCostModel {
         match &candidate.replacement {
             Replacement::Summary(node) => {
                 let cse = CseCandidate {
-                    subtree: target.root,
+                    sub_dag: target.root,
                     bound_summary: node,
                     consumer_count,
                 };
@@ -1075,7 +1075,7 @@ impl CostModel for DefaultCostModel {
                     return f64::NAN;
                 };
                 let cse = CseCandidate {
-                    subtree: rc,
+                    sub_dag: rc,
                     bound_summary: &sibling_bound,
                     // One additional reference into `rc`'s own (already
                     // necessary) build, from this one consumer's
@@ -1092,7 +1092,7 @@ impl CostModel for DefaultCostModel {
                     return f64::NAN;
                 };
                 let cse = CseCandidate {
-                    subtree: target.root,
+                    sub_dag: target.root,
                     bound_summary: &bound,
                     consumer_count,
                 };
@@ -1410,11 +1410,11 @@ mod tests {
         assert!(default_cse_recompute_cost(&nested) > default_cse_recompute_cost(&leaf));
     }
 
-    /// The DAG-awareness this proxy exists for: a subtree that internally
+    /// The DAG-awareness this proxy exists for: a sub-DAG that internally
     /// re-references one shared descendant (e.g. after single-query CSE,
     /// `x op x` collapsing both branches onto one `Rc`) must cost the same
     /// as if that descendant only appeared once — not double, the way a
-    /// naive tree-shaped size measure (a full serialization, or an
+    /// naive per-path size measure (a full serialization, or an
     /// identity-blind recursive walk) would count it.
     #[test]
     fn default_recompute_cost_does_not_double_count_an_internally_shared_descendant() {
@@ -1448,7 +1448,7 @@ mod tests {
             default_cse_recompute_cost(&with_sharing),
             Cost(2.0),
             "internal sharing: Join + 1 shared Scan (referenced twice) = \
-             2 unique nodes, not 3 — a tree-shaped size measure would \
+             2 unique nodes, not 3 — a per-path size measure would \
              wrongly charge for the shared Scan twice"
         );
     }
@@ -1473,7 +1473,7 @@ mod tests {
     #[test]
     fn cse_share_decision_shares_when_recompute_dominates_maintenance() {
         let candidate = CseCandidate {
-            subtree: &scan(),
+            sub_dag: &scan(),
             bound_summary: &summary_node(SummaryFamilyType::ExactAggregate(
                 ExactKind::Sum,
                 ExactParams::Sum,
@@ -1491,7 +1491,7 @@ mod tests {
     #[test]
     fn cse_share_decision_recomputes_when_maintenance_dominates_recompute() {
         let candidate = CseCandidate {
-            subtree: &scan(),
+            sub_dag: &scan(),
             bound_summary: &summary_node(SummaryFamilyType::StatModel(
                 asap_types::post_asap::StatModelKind::Parametric,
                 asap_types::post_asap::StatModelParams::Parametric {
@@ -1531,7 +1531,7 @@ mod tests {
         // actually calls through to the overridable hooks rather than
         // hardcoding a comparison against its own defaults.
         let candidate = CseCandidate {
-            subtree: &scan(),
+            sub_dag: &scan(),
             bound_summary: &summary_node(SummaryFamilyType::StatModel(
                 asap_types::post_asap::StatModelKind::Parametric,
                 asap_types::post_asap::StatModelParams::Parametric {
@@ -1626,7 +1626,7 @@ mod tests {
     }
 
     /// `DefaultCostModel::estimate_cost` for a [`Replacement::Rewrite`] pair
-    /// (the `SharedSubtreeStrategy` share-vs-recompute shape) agrees with
+    /// (the `SharedSubDAGStrategy` share-vs-recompute shape) agrees with
     /// what `cse_share_decision` would already pick for the same target: with
     /// many consumers of a cheap-to-recompute leaf, the "share" candidate
     /// (the target's own `Rc`) must cost less than the "recompute

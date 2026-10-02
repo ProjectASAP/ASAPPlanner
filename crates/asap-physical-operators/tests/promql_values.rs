@@ -1,7 +1,7 @@
 //! Compile, persist and rebind dynamic-label computation without deployment lowering.
 use asap_physical_operators::{
     operators::Operator,
-    physical_planner::{promql_values::*, CompiledPhysicalDag, Source},
+    physical_planner::{promql_values::*, CompiledPhysicalDAG, Source},
     runtime::{Limits, RunContext, Scope},
     values::{Batch, Value},
 };
@@ -21,15 +21,15 @@ fn row(labels: &[(&str, &str)], value: f64) -> Vec<Value> {
         Value::Float64(value),
     ]
 }
-fn run(graph: CompiledPhysicalDag, rows: Vec<Vec<Value>>) -> Vec<Vec<Value>> {
-    run_inputs(graph, vec![Batch::try_new(vector_schema(), rows).unwrap()]).unwrap()
+fn run(dag: CompiledPhysicalDAG, rows: Vec<Vec<Value>>) -> Vec<Vec<Value>> {
+    run_inputs(dag, vec![Batch::try_new(vector_schema(), rows).unwrap()]).unwrap()
 }
 fn run_inputs(
-    graph: CompiledPhysicalDag,
+    dag: CompiledPhysicalDAG,
     batches: Vec<Batch>,
 ) -> Result<Vec<Vec<Value>>, asap_physical_operators::Error> {
-    let graph = serde_json::from_slice::<CompiledPhysicalDag>(&serde_json::to_vec(&graph).unwrap())
-        .unwrap();
+    let dag =
+        serde_json::from_slice::<CompiledPhysicalDAG>(&serde_json::to_vec(&dag).unwrap()).unwrap();
     let sources = batches
         .into_iter()
         .enumerate()
@@ -41,7 +41,7 @@ fn run_inputs(
             )
         })
         .collect::<BTreeMap<_, _>>();
-    let bound = graph.instantiate(sources).unwrap();
+    let bound = dag.instantiate(sources).unwrap();
     let context = RunContext::new(
         Scope::Query {
             evaluation_time_ms: 0,
@@ -51,7 +51,7 @@ fn run_inputs(
     )
     .unwrap();
     block_on(async {
-        let mut stream = bound.execute(graph.roots(), context).unwrap().remove(0);
+        let mut stream = bound.execute(dag.roots(), context).unwrap().remove(0);
         let mut rows = Vec::new();
         while let Some(batch) = stream.next().await {
             rows.extend(batch?.rows().iter().cloned());
@@ -138,10 +138,10 @@ fn empty_vector_aggregation_stays_empty() {
     assert!(matches!(scalar[0][0],Value::Float64(v) if v.is_nan()));
 }
 
-// One persisted temporal graph accepts different request windows and detects resets.
+// One persisted temporal DAG accepts different request windows and detects resets.
 #[test]
-fn temporal_graph_uses_bound_window_without_recompilation() {
-    let graph = compile_temporal(&AggIntent::Rate, false).unwrap();
+fn temporal_dag_uses_bound_window_without_recompilation() {
+    let dag = compile_temporal(&AggIntent::Rate, false).unwrap();
     for start in [0, 60_000] {
         let labels = row(&[("__name__", "counter"), ("job", "api")], 0.)[0].clone();
         let samples = [(0, 5.), (30_000, 1.), (60_000, 7.)];
@@ -158,7 +158,7 @@ fn temporal_graph_uses_bound_window_without_recompilation() {
             })
             .collect();
         let output = run_inputs(
-            graph.clone(),
+            dag.clone(),
             vec![Batch::try_new(matrix_schema(), rows).unwrap()],
         )
         .unwrap();
@@ -181,20 +181,20 @@ fn temporal_graph_uses_bound_window_without_recompilation() {
             Value::Timestamp(2000),
         ],
     ];
-    assert!(run_inputs(graph, vec![Batch::try_new(matrix_schema(), rows).unwrap()]).is_err());
+    assert!(run_inputs(dag, vec![Batch::try_new(matrix_schema(), rows).unwrap()]).is_err());
 }
 
 // The quantile is an ordinary scalar input, and bucket labels are native computation.
 #[test]
 fn histogram_quantile_keeps_each_label_group() {
-    let graph = compile_histogram_quantile().unwrap();
+    let dag = compile_histogram_quantile().unwrap();
     let buckets = vec![
         row(&[("job", "api"), ("le", "1")], 2.),
         row(&[("job", "api"), ("le", "2")], 4.),
         row(&[("job", "api"), ("le", "+Inf")], 4.),
     ];
     let output = run_inputs(
-        graph,
+        dag,
         vec![
             Batch::try_new(scalar_schema(), vec![vec![Value::Float64(0.75)]]).unwrap(),
             Batch::try_new(vector_schema(), buckets).unwrap(),
@@ -263,7 +263,7 @@ fn composed_ensemble_shares_a_producer_across_roots() {
         false,
     )
     .unwrap();
-    let graph = CompiledPhysicalDag::compose(
+    let dag = CompiledPhysicalDAG::compose(
         BTreeMap::from([(0, InputContract::bounded(vector_schema()))]),
         BTreeMap::from([
             (10, (vec![0], aggregate)),
@@ -273,9 +273,9 @@ fn composed_ensemble_shares_a_producer_across_roots() {
         vec![20, 30],
     )
     .unwrap();
-    let graph = serde_json::from_slice::<CompiledPhysicalDag>(&serde_json::to_vec(&graph).unwrap())
-        .unwrap();
-    assert_eq!(graph.input_contracts().count(), 1);
+    let dag =
+        serde_json::from_slice::<CompiledPhysicalDAG>(&serde_json::to_vec(&dag).unwrap()).unwrap();
+    assert_eq!(dag.input_contracts().count(), 1);
     let starts = std::rc::Rc::new(std::cell::Cell::new(0));
     for _ in 0..2 {
         let input = Batch::try_new(vector_schema(), vec![row(&[("job", "api")], 3.)]).unwrap();
@@ -283,7 +283,7 @@ fn composed_ensemble_shares_a_producer_across_roots() {
             source: Operator::source(vector_schema(), vec![input]).unwrap(),
             starts: starts.clone(),
         };
-        let bound = graph
+        let bound = dag
             .instantiate(BTreeMap::from([(0, Box::new(source) as Source<'_>)]))
             .unwrap();
         let context = RunContext::new(
@@ -300,7 +300,7 @@ fn composed_ensemble_shares_a_producer_across_roots() {
         let results =
             block_on(futures::future::join_all(
                 bound
-                    .execute(graph.roots(), context)
+                    .execute(dag.roots(), context)
                     .unwrap()
                     .into_iter()
                     .map(|mut stream| async move {
@@ -315,9 +315,9 @@ fn composed_ensemble_shares_a_producer_across_roots() {
 
 #[test]
 fn compiled_constant_needs_no_deployment_source() {
-    let graph = compile_scalar(3.).unwrap();
-    assert_eq!(graph.input_contracts().count(), 0);
-    let result = run_inputs(graph, vec![]).unwrap();
+    let dag = compile_scalar(3.).unwrap();
+    assert_eq!(dag.input_contracts().count(), 0);
+    let result = run_inputs(dag, vec![]).unwrap();
     assert!(matches!(result[0][0], Value::Float64(3.)));
 }
 
@@ -335,7 +335,7 @@ fn scalar_broadcast_rejects_colliding_result_labels_after_recovery() {
                 (BinaryOpKind::Arithmetic(ArithmeticOpKind::Add), false),
                 (BinaryOpKind::Compare(CompareOpKind::Gt), true),
             ] {
-                let graph = compile_binary(
+                let dag = compile_binary(
                     &BinaryOperator {
                         kind,
                         vector_match: None,
@@ -358,7 +358,7 @@ fn scalar_broadcast_rejects_colliding_result_labels_after_recovery() {
                 let scalar =
                     Batch::try_new(scalar_schema(), vec![vec![Value::Float64(1.)]]).unwrap();
                 let result = run_inputs(
-                    graph,
+                    dag,
                     if left_scalar {
                         vec![scalar, vector]
                     } else {
@@ -369,7 +369,7 @@ fn scalar_broadcast_rejects_colliding_result_labels_after_recovery() {
             }
         }
     }
-    let graph = compile_binary(
+    let dag = compile_binary(
         &BinaryOperator {
             kind: BinaryOpKind::Compare(CompareOpKind::Gt),
             vector_match: None,
@@ -387,7 +387,7 @@ fn scalar_broadcast_rejects_colliding_result_labels_after_recovery() {
     ];
     equal_rows(
         run_inputs(
-            graph,
+            dag,
             vec![
                 Batch::try_new(vector_schema(), rows.clone()).unwrap(),
                 Batch::try_new(scalar_schema(), vec![vec![Value::Float64(1.)]]).unwrap(),
@@ -398,7 +398,7 @@ fn scalar_broadcast_rejects_colliding_result_labels_after_recovery() {
     );
 }
 
-// Persisted exact readout graphs, rather than the storage adapter, merge panes,
+// Persisted exact readout DAGs, rather than the storage adapter, merge panes,
 // finalize each population, and preserve the requested metric-name semantics.
 #[test]
 fn exact_state_readouts_recover_and_finalize_panes() {

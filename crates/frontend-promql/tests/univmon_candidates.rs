@@ -8,7 +8,7 @@ use asap_aware_mapping::replacement::{default_strategies, search_workload_with_t
 use asap_aware_mapping::{Replacement, ReplacementStrategy, SketchAlgorithmStrategy, TargetSubDAG};
 mod support;
 use asap_types::post_asap::{
-    compile_post_asap_dag, cse::share_common_summary_subtrees, AccuracyError, BoundExpr,
+    compile_post_asap_dag, cse::share_common_summary_sub_dags, AccuracyError, BoundExpr,
     CompositionOperator, ErrorMetric, ProbabilityExpr, ResultGuarantee, SketchAlgorithm,
     SketchQuery, SummaryExpr, SummaryFamilyType, SummaryInputExpr, SummaryNode,
 };
@@ -76,7 +76,7 @@ fn four_readouts_share_one_value_frequency_state_and_keep_honest_guarantees() {
     .enumerate()
     .map(|(id, (query, accuracy))| (id, candidate(query, accuracy)))
     .collect();
-    let roots = share_common_summary_subtrees(roots);
+    let roots = share_common_summary_sub_dags(roots);
     let mut first_state = None;
     for (index, root) in &roots {
         let SummaryExpr::SummaryEstimate {

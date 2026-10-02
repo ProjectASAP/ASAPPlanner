@@ -529,7 +529,7 @@ async fn run_sql_corpora(out_dir: PathBuf) {
         serde_json::to_vec_pretty(&summary).unwrap(),
     )
     .expect("failed to write summary.json");
-    let notes = "- **Manual review result:** the reviewed SQL trees preserve `COUNT(*)` versus `COUNT(column)`, `COUNT(DISTINCT)`/`uniqExact`, `HAVING`, CTE-derived projections, `LAG`/`lagInFrame`, grouping keys, and explicit window frames. No concrete semantic collapse was found in this pass.\n- **Apparently intentional omission:** ClickHouse `FORMAT Null` is absent from the IR; it is an output/transport directive rather than query semantics.\n- **Failure boundaries:** unsupported ClickHouse functions and unsupported grammar are retained in the per-query error files rather than being converted into partial IR.\n";
+    let notes = "- **Manual review result:** the reviewed SQL DAGs preserve `COUNT(*)` versus `COUNT(column)`, `COUNT(DISTINCT)`/`uniqExact`, `HAVING`, CTE-derived projections, `LAG`/`lagInFrame`, grouping keys, and explicit window frames. No concrete semantic collapse was found in this pass.\n- **Apparently intentional omission:** ClickHouse `FORMAT Null` is absent from the IR; it is an output/transport directive rather than query semantics.\n- **Failure boundaries:** unsupported ClickHouse functions and unsupported grammar are retained in the per-query error files rather than being converted into partial IR.\n";
     std::fs::write(
         out_dir.join("anomalies.md"),
         anomaly_report(&all, "SQL", notes),

@@ -36,7 +36,7 @@ that a discriminator-based unique key would let it drop?
 ## What was checked
 
 Both current `Concat`-constructing call sites, and every consumer of
-`Schema::unique_keys` in the tree:
+`Schema::unique_keys` in the DAG:
 
 - **PromQL `histogram_quantiles`** —
   [`walk_histogram_quantiles`](../../../crates/frontend-promql/src/promql.rs).
@@ -66,8 +66,8 @@ Both current `Concat`-constructing call sites, and every consumer of
   `sql_lowering.rs`, `dag_export.rs`, `variant_coverage.rs`, netflow/synthetic
   test fixtures) — none of them builds a fresh `Concat` with a `Dedup` on top
   that this feature could remove.
-- **Every consumer of `Schema::unique_keys`** in the tree, to check for a
-  cost beyond "a literal `Dedup` node": `pre_asap::cse::share_common_subtrees`
+- **Every consumer of `Schema::unique_keys`** in the DAG, to check for a
+  cost beyond "a literal `Dedup` node": `pre_asap::cse::share_common_sub_dags`
   (gates CSE producer-sharing on `Schema::has_unique_key()`) and
   `asap_aware_mapping::rollup::is_legal_rollup_source` (gates rollup-source
   legality the same way, on an *`Aggregate`'s* own output schema). Neither
@@ -88,7 +88,7 @@ Both current `Concat`-constructing call sites, and every consumer of
 The investigation's conclusion stands: neither `histogram_quantiles` nor
 `ROLLUP`/`CUBE`/`GROUPING SETS` lowering emits a `Dedup` (or anything playing
 that role) after its `Concat` today, so there is nothing redundant in the
-tree for a discriminator-based override to remove *right now*. On review,
+DAG for a discriminator-based override to remove *right now*. On review,
 the decision was made to build the extension point anyway, ahead of a proven
 call-site win, rather than wait for one. That is a legitimate call to make
 differently from the investigation's own recommendation — "no current
@@ -114,7 +114,7 @@ for why it's fine to ship unused.
   overclaimed.
 - `QueryExpr::concat(children)` — the ordinary constructor (`discriminator_unique_key: None`),
   meant to replace the bare `QueryExpr::Concat { children }` struct literal
-  everywhere in the tree so a future field addition doesn't force every call
+  everywhere in the DAG so a future field addition doesn't force every call
   site to re-litigate this choice.
 - `QueryExpr::concat_with_discriminator(children, discriminator, inner_key)` —
   the override constructor.
@@ -127,7 +127,7 @@ for why it's fine to ship unused.
   branch's own output schema — the same schema `output_schema()` derives the
   merged shape from — so the feature works correctly end-to-end for a future
   caller upstream of `resolve_root`, even though no such caller exists yet.
-- Every other match/construction site touching `Concat` across the tree
+- Every other match/construction site touching `Concat` across the DAG
   (`canonicalize.rs`, `cse.rs`, `schema_resolver.rs`, `dag_export.rs`,
   `asap-aware-mapping`'s `replacement.rs`/`explanation.rs`, and every
   test/tooling AST walker) was mechanically updated to bind or ignore the new
@@ -156,9 +156,9 @@ Three independent things hold `discriminator_unique_key: None` as the
 observable behavior for every caller that doesn't ask for the override:
 
 1. **Every real construction path defaults to `None`.** `QueryExpr::concat`
-   hardcodes it; every call site in the tree (including both real lowering
+   hardcodes it; every call site in the DAG (including both real lowering
    call sites) uses `concat`, not `concat_with_discriminator`, so nothing in
-   the current tree can produce `Some` at all.
+   the current DAG can produce `Some` at all.
 2. **`output_schema()`'s branch on the field is additive.** The `None` arm is
    textually the same clear-and-return the code already did — `s.unique_keys.clear(); ... Ok(s)`
    — with the `Some` branch reached only when the field is populated. This is
@@ -236,7 +236,7 @@ accuracy issue. All three are fixed on the same PR:
    (which *is* walked, `push_ref_name`-style). Concretely: a future
    `concat_with_discriminator(branches, discriminator_col, inner_key)` call
    over an open query, where the discriminator column isn't otherwise
-   referenced anywhere else in the tree, with a schema-less leaf `Scan` in
+   referenced anywhere else in the DAG, with a schema-less leaf `Scan` in
    the first branch — the SchemaResolver's fallback schema wouldn't contain the
    discriminator name, and `resolve.rs`'s later `resolve_column_ref` call
    would fail `NotFound` for a column the caller correctly named. Fixed:
@@ -294,4 +294,4 @@ accuracy issue. All three are fixed on the same PR:
 - Reopening SQL's rejection of `GROUPING()` so `lower_grouping_sets` has a
   real discriminator (`__grouping_id`) to assert — a separate design decision.
 - Any canonicalization rule or CSE/rollup scenario that would actually *read*
-  a `Concat`'s asserted `unique_keys` for the first time in the current tree.
+  a `Concat`'s asserted `unique_keys` for the first time in the current DAG.

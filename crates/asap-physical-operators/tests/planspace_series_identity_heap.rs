@@ -96,11 +96,11 @@ fn lower(query: &str, accuracy: &AccuracyTarget) -> Rc<QueryExpr> {
     )
 }
 
-type Dag = Vec<(usize, Rc<SummaryNode>)>;
+type InventoryDAG = Vec<(usize, Rc<SummaryNode>)>;
 
 /// Candidate DAGs for query 1 of a two-query workload, with and without
 /// whole-root proposals. Query 0 is a bystander that must not multiply them.
-fn inventories(query: &str, accuracy: AccuracyTarget) -> (Vec<Dag>, Vec<Dag>) {
+fn inventories(query: &str, accuracy: AccuracyTarget) -> (Vec<InventoryDAG>, Vec<InventoryDAG>) {
     let roots = vec![
         (
             0,
@@ -124,7 +124,7 @@ fn inventories(query: &str, accuracy: AccuracyTarget) -> (Vec<Dag>, Vec<Dag>) {
     (enumerate(&full), enumerate(&logical))
 }
 
-fn carries_identity(dag: &Dag) -> bool {
+fn carries_identity(dag: &InventoryDAG) -> bool {
     dag.iter().any(|(_, root)| {
         compile_post_asap_dag(root)
             .unwrap()

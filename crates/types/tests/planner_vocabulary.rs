@@ -33,14 +33,14 @@ fn window_edge_names_preserve_wire_values() {
 // External consumers can use the new resolver and resource names without changing behavior.
 #[test]
 fn renamed_schema_and_handoff_apis_are_public() {
-    let tree = UnresolvedQueryExpr::Scan {
+    let dag = UnresolvedQueryExpr::Scan {
         source: Source::TimeSeries {
             metric: "requests".into(),
         },
         predicates: vec![],
         schema: None,
     };
-    let schema = SchemaResolver::new().resolve_schema(&tree);
+    let schema = SchemaResolver::new().resolve_schema(&dag);
     assert!(schema.column_id("value").is_some());
     let bytes = PhysicalHandoffBytes {
         network_bytes: 12,

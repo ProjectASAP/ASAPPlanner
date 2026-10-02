@@ -2,7 +2,7 @@
 
 - Work in a dedicated Git worktree unless the user explicitly says otherwise.
 - Create new worktrees from `origin/main` unless another base is specified.
-  Fetch the base first, and never disturb an existing dirty working tree.
+  Fetch the base first, and never disturb an existing dirty working DAG.
 - Keep communication and generated prose concise.
 - Prefer the minimally complex implementation that satisfies the requirement.
 - Do not introduce a conceptual layer, abstraction, or public interface without

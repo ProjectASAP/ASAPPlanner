@@ -4,7 +4,7 @@
 //! Emits [`UnresolvedQueryExpr`](asap_types::pre_asap::UnresolvedQueryExpr) itself — the
 //! canonical `QueryExpr`, generic over an unresolved
 //! [`ColumnRef`](asap_types::pre_asap::ColumnRef) — directly, rather than a
-//! separate per-language relational tree; `resolve_root` runs the
+//! separate per-language relational DAG; `resolve_root` runs the
 //! [`SchemaResolver`](asap_types::pre_asap::SchemaResolver) for positional name resolution.
 //! Depends on the PromQL parser only — never on the SQL / DataFusion stack.
 

@@ -155,7 +155,7 @@ fn validate_query_scope(
 }
 
 fn validate_physical_scope_coverage(
-    physical: &EvidenceBackedPhysicalDag,
+    physical: &EvidenceBackedPhysicalDAG,
     scope: &ComparisonScope,
 ) -> Result<(), AnalyticalCostError> {
     let nodes = reachable_physical_nodes(physical)?;
@@ -184,33 +184,33 @@ fn validate_physical_scope_coverage(
 }
 
 fn reachable_physical_nodes(
-    physical: &EvidenceBackedPhysicalDag,
-) -> Result<Vec<&PhysicalDagNode>, AnalyticalCostError> {
+    physical: &EvidenceBackedPhysicalDAG,
+) -> Result<Vec<&PhysicalDAGNode>, AnalyticalCostError> {
     let by_id: HashMap<_, _> = physical
         .nodes
         .iter()
         .map(|node| (node.id.as_str(), node))
         .collect();
     if by_id.len() != physical.nodes.len() {
-        return Err(AnalyticalCostError::InvalidPhysicalDag("duplicate node id"));
+        return Err(AnalyticalCostError::InvalidPhysicalDAG("duplicate node id"));
     }
     fn visit<'a>(
         id: &'a str,
-        by_id: &HashMap<&'a str, &'a PhysicalDagNode>,
+        by_id: &HashMap<&'a str, &'a PhysicalDAGNode>,
         visiting: &mut HashSet<&'a str>,
         visited: &mut HashSet<&'a str>,
-        nodes: &mut Vec<&'a PhysicalDagNode>,
+        nodes: &mut Vec<&'a PhysicalDAGNode>,
     ) -> Result<(), AnalyticalCostError> {
         if visited.contains(id) {
             return Ok(());
         }
         if !visiting.insert(id) {
-            return Err(AnalyticalCostError::InvalidPhysicalDag("cycle"));
+            return Err(AnalyticalCostError::InvalidPhysicalDAG("cycle"));
         }
         let node = by_id
             .get(id)
             .copied()
-            .ok_or(AnalyticalCostError::InvalidPhysicalDag("missing node"))?;
+            .ok_or(AnalyticalCostError::InvalidPhysicalDAG("missing node"))?;
         for child in &node.children {
             visit(child, by_id, visiting, visited, nodes)?;
         }
@@ -291,7 +291,7 @@ fn validate_raw_snapshot_dimensions(
         .iter()
         .any(|node| node.execution != ExecutionMultiplicity::Once)
     {
-        return Err(AnalyticalCostError::InvalidPhysicalDag(
+        return Err(AnalyticalCostError::InvalidPhysicalDAG(
             "streaming raw horizon evidence must use once-counted aggregate statistics",
         ));
     }
@@ -1607,7 +1607,7 @@ mod tests {
             first_scan,
             second_scan,
             unreachable,
-            PhysicalDagNode {
+            PhysicalDAGNode {
                 id: "raw-concat".into(),
                 operator: PhysicalOperator::Concat,
                 children: vec!["raw-scan".into(), "raw-scan-2".into()],
@@ -3267,7 +3267,7 @@ mod tests {
 
     fn streaming_raw() -> RawInputEvidence {
         let scope = streaming_scope();
-        let node = PhysicalDagNode {
+        let node = PhysicalDAGNode {
             id: "raw-scan".into(),
             operator: PhysicalOperator::Scan,
             children: vec![],
@@ -3295,7 +3295,7 @@ mod tests {
             arriving_logical_row_bytes: 64,
             arriving_source_row_bytes: 64,
             ingestion_rate_per_second: 2.0,
-            physical_dag: EvidenceBackedPhysicalDag {
+            physical_dag: EvidenceBackedPhysicalDAG {
                 nodes: vec![node],
                 root: "raw-scan".into(),
                 evidence: HashMap::from([(
@@ -3330,7 +3330,7 @@ mod tests {
                 SummaryExpr::KeepPreAsap(_) => {
                     model.node_evidence.insert_retained_query(
                         node,
-                        RetainedSubDagEvidence {
+                        RetainedSubDAGEvidence {
                             physical_id: format!("retained-{node:p}"),
                             output: test_edge(),
                             preprocessing_cpu_ops_over_horizon: 1.0,

@@ -5,7 +5,7 @@ query time execution. The library requires neither backend engine, a server,
 a storage implementation, Arrow nor DataFusion. DataFusion informed the design;
 it is not the execution framework.
 
-`plan::PhysicalDag` binds typed operator inputs to node IDs. Each execution starts
+`plan::PhysicalDAG` binds typed operator inputs to node IDs. Each execution starts
 one producer per reachable node, shares output batches among its consumers, and
 bounds buffering. Dropping one consumer does not cancel other consumers. A
 `RunContext` carries query or ingestion scope, cancellation and byte accounting.
@@ -24,7 +24,7 @@ use asap_physical_operators::{
     expressions::Expression,
     operators::Operator,
     values::Value,
-    plan::PhysicalDag,
+    plan::PhysicalDAG,
     runtime::{Limits, RunContext, Scope},
 };
 use asap_physical_operators::planner::pre_asap::DataType;
@@ -34,7 +34,7 @@ let source = Operator::scalar(Value::Int64(7), DataType::Int64)?;
 let negate = Operator::project(source.schema(), vec![
     ("value".into(), Expression::Negate(Box::new(Expression::Column(0)))),
 ])?;
-let mut plan = PhysicalDag::default();
+let mut plan = PhysicalDAG::default();
 plan.add(0, vec![], source)?;
 plan.add(1, vec![0], negate)?;
 let run = RunContext::new(
@@ -47,7 +47,7 @@ assert!(matches!(batch.rows()[0][0], Value::Int64(-7)));
 # Ok::<(), asap_physical_operators::dag::Error>(())
 ```
 
-`physical_planner::compile` accepts a logical Post-ASAP DAG (`PostAsapDag`) and typed input contracts.
+`physical_planner::compile` accepts a logical Post-ASAP DAG (`PostAsapDAG`) and typed input contracts.
 The resulting candidate is instantiated with deployment readers after selection. It rejects unsupported operations and
 schema mismatches before starting a source. Implement `PhysicalOperator` for a
 deployment source, including asynchronous I/O; computation operators remain in
@@ -72,7 +72,7 @@ See [the design](../../docs/design_docs/physical-planning-and-deployment.md).
 
 ## Module boundaries
 
-- `plan`: immutable graph, operator interface, schemas and execution properties.
+- `plan`: immutable DAG, operator interface, schemas and execution properties.
 - `runtime`: per-run streams, shared producers, memory reservations and cancellation.
 - `expressions`: scalar evaluation; typed builders and the Planner expression adapter.
 - `operators`: projection, filter, joins, aggregate/window, sort, limit and summary implementations.
@@ -91,7 +91,7 @@ state; operators own grouping.
 
 A source must declare `Boundedness::Bounded` to feed a blocking operator.
 The default for a custom raw source is `Unknown`; query or ingestion scope alone
-does not promise that its cursor ends. `PhysicalDag::properties` validates these
+does not promise that its cursor ends. `PhysicalDAG::properties` validates these
 requirements before any source starts and returns boundedness and emission mode
 for every reachable node. The memory connector declares finite input. Custom
 physical sources expose the same facts through `PhysicalOperator::properties`.
@@ -104,14 +104,14 @@ There is no spill or partitioned parallel execution in this implementation.
 
 ## Physical compilation and deployment inputs
 
-`physical_planner::compile` accepts a Planner `PostAsapDag`, typed
-`InputContract`s and output roots. It returns a reusable `CompiledPhysicalDag`
+`physical_planner::compile` accepts a Planner `PostAsapDAG`, typed
+`InputContract`s and output roots. It returns a reusable `CompiledPhysicalDAG`
 containing selected native operators and no live readers. Compilation validates
 schemas, input ordering, sharing and boundedness before deployment source access.
 
-A deployment calls `CompiledPhysicalDag::instantiate` with exactly the declared
+A deployment calls `CompiledPhysicalDAG::instantiate` with exactly the declared
 inputs. This checks source schemas and execution properties and constructs the
-runnable graph without repeating logical lowering. The graph executes through
+runnable DAG without repeating logical lowering. The DAG executes through
 the shared runtime with independent per-run state. Window coverage, revision and
 maintenance-policy admission remain deployment/planning contracts; this compiler
 does not discover storage or silently change a selected maintenance strategy.

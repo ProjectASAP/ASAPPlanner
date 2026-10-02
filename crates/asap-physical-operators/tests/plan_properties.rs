@@ -1,7 +1,7 @@
 //! Finite-input contracts are validated before source execution.
 use asap_physical_operators::{
     operators::{Operator, SortKey},
-    plan::{Boundedness, Emission, PhysicalDag},
+    plan::{Boundedness, Emission, PhysicalDAG},
     runtime::{Limits, OutputStream, RunContext, Scope},
     sources::{DataSources, RawSource},
     values::{Batch, Schema},
@@ -70,7 +70,7 @@ fn blocking_inputs_require_an_explicit_finite_source() {
                 predicates: vec![],
             })
             .unwrap();
-        let mut dag = PhysicalDag::default();
+        let mut dag = PhysicalDAG::default();
         dag.add(0, vec![], scan).unwrap();
         dag.add(
             1,

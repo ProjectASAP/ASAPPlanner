@@ -1,4 +1,4 @@
-//! End-to-end tests for PromQL → unresolved → canonical tree lowering.
+//! End-to-end tests for PromQL → unresolved → canonical DAG lowering.
 
 use std::time::Duration;
 
@@ -56,14 +56,14 @@ fn distinct_over_time_preserves_cardinality_accuracy_and_nested_windows() {
         "sum by(job)(distinct_over_time(cpu_usage[5m]))",
     ] {
         for accuracy in [AccuracyTarget::Exact, AccuracyTarget::Epsilon(0.02)] {
-            let tree = lower_promql(query, accuracy.clone()).unwrap();
+            let dag = lower_promql(query, accuracy.clone()).unwrap();
             let mut intents = Vec::new();
-            collect_intents(&tree, &mut intents);
+            collect_intents(&dag, &mut intents);
             assert!(
                 intents.iter().any(|intent| matches!(
                     intent, AggIntent::Cardinality { accuracy: actual, .. } if actual == &accuracy
                 )),
-                "{query}: {tree:?}"
+                "{query}: {dag:?}"
             );
             assert!(!intents
                 .iter()
@@ -264,7 +264,7 @@ fn histogram_quantile_over_sum_by_le_preserves_grouping() {
     // The canonical Prometheus histogram pattern. Previously returned
     // UnsupportedFeature because `extract_matrix` couldn't see through the
     // `sum by (le)` aggregate; now the `le` grouping survives into the
-    // canonical tree.
+    // canonical DAG.
     let qe = lower(r#"histogram_quantile(0.99, sum by (le) (rate(http_requests_bucket[5m])))"#);
     let QueryExpr::Aggregate {
         measures, child, ..
@@ -486,19 +486,19 @@ fn count_over_distinct_over_time_preserves_both_aggregates() {
             Reduction::by(vec![2]),
         ),
     ] {
-        let tree = lower(query);
+        let dag = lower(query);
         let QueryExpr::Aggregate {
             measures,
             reduction: actual,
             child,
             ..
-        } = &tree
+        } = &dag
         else {
-            panic!("expected outer Count: {tree:?}");
+            panic!("expected outer Count: {dag:?}");
         };
         assert!(
             matches!(measures.as_slice(), [AggIntent::Count { .. }]),
-            "{query}: {tree:?}"
+            "{query}: {dag:?}"
         );
         assert_eq!(actual, &reduction, "{query}");
         let QueryExpr::Aggregate {
@@ -508,11 +508,11 @@ fn count_over_distinct_over_time_preserves_both_aggregates() {
             ..
         } = child.as_ref()
         else {
-            panic!("expected inner per-series Cardinality: {tree:?}");
+            panic!("expected inner per-series Cardinality: {dag:?}");
         };
         assert!(
             matches!(measures.as_slice(), [AggIntent::Cardinality { .. }]),
-            "{query}: {tree:?}"
+            "{query}: {dag:?}"
         );
         assert_eq!(reduction, &Reduction::PerEntity, "{query}");
         assert!(
@@ -534,17 +534,17 @@ fn count_never_lowers_to_distinct_sample_values() {
         "count(count_over_time(up[5m]))",
         "count_over_time(up[5m])",
     ] {
-        let tree = lower(query);
-        let intents = all_intents(&tree);
+        let dag = lower(query);
+        let intents = all_intents(&dag);
         assert!(
             intents.iter().any(|i| matches!(i, AggIntent::Count { .. })),
-            "{query}: {tree:?}"
+            "{query}: {dag:?}"
         );
         assert!(
             !intents
                 .iter()
                 .any(|i| matches!(i, AggIntent::Cardinality { .. })),
-            "{query}: {tree:?}"
+            "{query}: {dag:?}"
         );
     }
 }
@@ -829,7 +829,7 @@ fn binary_op_binds_each_branch_against_its_own_schema() {
     );
 }
 
-/// Collect every `AggIntent` in the tree, root-to-leaf.
+/// Collect every `AggIntent` in the DAG, root-to-leaf.
 fn all_intents(e: &QueryExpr) -> Vec<AggIntent> {
     let mut out = Vec::new();
     collect_intents(e, &mut out);
@@ -856,7 +856,7 @@ fn collect_intents(e: &QueryExpr, out: &mut Vec<AggIntent>) {
     }
 }
 
-/// True if any `AggIntent` anywhere in the tree satisfies `pred`.
+/// True if any `AggIntent` anywhere in the DAG satisfies `pred`.
 fn has_intent<F: Fn(&AggIntent) -> bool>(e: &QueryExpr, pred: F) -> bool {
     all_intents(e).iter().any(pred)
 }
@@ -1328,7 +1328,7 @@ fn histogram_quantiles_rejects_an_out_of_range_quantile() {
     }
 }
 
-// A subquery's `offset`/`@` shift the whole subquery, so the tree keeps them.
+// A subquery's `offset`/`@` shift the whole subquery, so the DAG keeps them.
 #[test]
 fn subquery_time_shift_is_retained() {
     let QueryExpr::Aggregate { child, .. } = lower("max_over_time(m[5m:1m] offset 1m)") else {

@@ -20,7 +20,7 @@
 //! through logical optimization, only going positional once they lower to a
 //! physical plan. Resolving once, immediately after each front end's own
 //! `interpret` step, is the better trade for *this* codebase's shape — one
-//! front-end-facing tree feeding several independent downstream passes
+//! front-end-facing DAG feeding several independent downstream passes
 //! (`canonicalize`, the cost model, `dag_export`, schema/type inference,
 //! `asap-aware-mapping`'s summary binding) — for three concrete reasons:
 //!
@@ -30,7 +30,7 @@
 //!    schemas are concatenated. A bare name is ambiguous the moment two sources
 //!    share one; `ColumnId` is what makes "the second `service`, position 4, not
 //!    the first" a fact recorded once, instead of a lookup redone at every use site.
-//! 2. **A name's meaning changes going up the tree.** `Project` renames/aliases,
+//! 2. **A name's meaning changes going up the DAG.** `Project` renames/aliases,
 //!    `Aggregate` collapses columns and introduces synthetic ones, `Join`
 //!    concatenates two schemas — a name valid at a `Scan` leaf isn't
 //!    automatically the right binding three nodes up; it has to be reinterpreted
@@ -64,9 +64,9 @@ use super::query_expr::{
 use super::schema::{ColumnId, Schema};
 use super::schema_resolver::SchemaResolver;
 
-/// Errors from resolving a canonical, unresolved [`UnresolvedQueryExpr`] tree.
+/// Errors from resolving a canonical, unresolved [`UnresolvedQueryExpr`] DAG.
 #[derive(Debug, Error)]
-pub enum ResolveTreeError {
+pub enum ResolveDAGError {
     /// A column reference did not resolve against its in-scope schema.
     #[error("column resolution failed: {0}")]
     Resolve(#[from] ResolveError),
@@ -76,22 +76,22 @@ pub enum ResolveTreeError {
     Schema(#[from] QueryExprError),
 }
 
-/// Resolve a whole [`UnresolvedQueryExpr`] tree rooted at `tree` into canonical
+/// Resolve a whole [`UnresolvedQueryExpr`] DAG rooted at `dag` into canonical
 /// [`ResolvedQueryExpr`]: binds every `ColumnRef` to a `ColumnId` via the
 /// [`SchemaResolver`], then [`canonicalize`](super::canonicalize::canonicalize)s the
 /// result.
-pub fn resolve_root(tree: &UnresolvedQueryExpr) -> Result<ResolvedQueryExpr, ResolveTreeError> {
-    resolve_root_with_inherited(tree, &[])
+pub fn resolve_root(dag: &UnresolvedQueryExpr) -> Result<ResolvedQueryExpr, ResolveDAGError> {
+    resolve_root_with_inherited(dag, &[])
 }
 
 /// [`resolve_root`] with label names inherited from an enclosing scope seeded
 /// into the leaf schema, used when re-binding a `BinaryOp` side (issue #52).
 fn resolve_root_with_inherited(
-    tree: &UnresolvedQueryExpr,
+    dag: &UnresolvedQueryExpr,
     inherited: &[String],
-) -> Result<ResolvedQueryExpr, ResolveTreeError> {
-    let fallback = SchemaResolver::new().resolve_schema_with_inherited(tree, inherited);
-    let l3 = resolve(tree, &fallback)?;
+) -> Result<ResolvedQueryExpr, ResolveDAGError> {
+    let fallback = SchemaResolver::new().resolve_schema_with_inherited(dag, inherited);
+    let l3 = resolve(dag, &fallback)?;
     Ok(super::canonicalize::canonicalize(l3))
 }
 
@@ -100,11 +100,11 @@ fn resolve_root_with_inherited(
 /// derived output schema — so a `JOIN`'s concatenated schema and a cross-
 /// series aggregate's frozen-closed output bind to the right positions.
 fn resolve(
-    tree: &UnresolvedQueryExpr,
+    dag: &UnresolvedQueryExpr,
     fallback: &Schema,
-) -> Result<ResolvedQueryExpr, ResolveTreeError> {
+) -> Result<ResolvedQueryExpr, ResolveDAGError> {
     use super::query_expr::QueryExpr as QE;
-    Ok(match tree {
+    Ok(match dag {
         QE::Scan {
             source,
             predicates,
@@ -123,7 +123,7 @@ fn resolve(
         }
 
         // `PromqlScalarBridge`'s child is a scalar-sub-language node (issue
-        // #220) sitting at this operator-tree position — resolved through
+        // #220) sitting at this operator-DAG position — resolved through
         // `resolve_expr`, same as every other scalar position (`Predicate`,
         // `ProjectItem.expr`, …), not the operator walk. In practice it's
         // always a `Literal`, which has no `ColumnRef` to resolve, so
@@ -232,7 +232,7 @@ fn resolve(
             };
             let having = having
                 .as_ref()
-                .map(|Predicate(h)| -> Result<Predicate, ResolveTreeError> {
+                .map(|Predicate(h)| -> Result<Predicate, ResolveDAGError> {
                     let out_schema = aggregate_output_schema(
                         &child_schema,
                         &reduction,
@@ -279,7 +279,7 @@ fn resolve(
             // other side.
             let discriminator_unique_key = discriminator_unique_key
                 .as_ref()
-                .map(|key| -> Result<_, ResolveTreeError> {
+                .map(|key| -> Result<_, ResolveDAGError> {
                     let schema = children
                         .first()
                         .ok_or(QueryExprError::EmptyConcat)?
@@ -427,7 +427,7 @@ fn resolve(
             // different label sets, so each branch resolves against its OWN
             // bound schema; but an independently-bound side still has to see
             // label names an *enclosing* node references (issue #52).
-            let own = super::schema_resolver::collect_referenced_columns(tree);
+            let own = super::schema_resolver::collect_referenced_columns(dag);
             let inherited: Vec<String> = inherited_names(fallback)
                 .into_iter()
                 .filter(|n| !own.contains(n))
@@ -501,7 +501,7 @@ fn resolve_group_keys(
 /// uniformly to every `Aggregate`, not just PromQL's: SQL's `GROUP BY` keys
 /// are always genuinely present (DataFusion validates the plan), so the
 /// "drop instead of reject" branch is simply never exercised there — the
-/// lenient resolver is a no-op difference for a SQL tree, not a behavior
+/// lenient resolver is a no-op difference for a SQL DAG, not a behavior
 /// change.
 fn resolve_reduction(
     reduction: &Reduction<ColumnRef>,
@@ -815,7 +815,7 @@ mod tests {
     }
 
     /// Issue #228 review, end-to-end: `resolve_root` over a `Concat` whose
-    /// discriminator column is referenced *nowhere else* in the tree, with a
+    /// discriminator column is referenced *nowhere else* in the DAG, with a
     /// schema-less (usage-derived) leaf `Scan` in the first branch — exactly
     /// the scenario the review flagged. Before the `schema_resolver.rs` fix, the
     /// SchemaResolver's fallback schema wouldn't contain `phi` at all, and this

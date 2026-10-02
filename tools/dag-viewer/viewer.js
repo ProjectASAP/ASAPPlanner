@@ -8,20 +8,20 @@
 cytoscape.use(window.cytoscapeDagre);
 
 // ── State ────────────────────────────────────────────────────────────────
-// queries: [{ name, graph: { nodes, root }, replacements?, post_graph? }],
+// queries: [{ name, dag: { nodes, root }, replacements?, post_dag? }],
 // flattened across every loaded file (a later file whose query name
 // collides with an earlier one is kept distinct by suffixing the file
 // index). `replacements` is the optional --post-asap array of
 // ReplacementSite entries for that query (each with its own `before`/`after`
-// subtree) — defaulted to `[]` when the loaded JSON omits the field, so
-// callers never need an extra existence check. `post_graph` is the optional
-// --post-asap whole-query merged post-ASAP graph (same flattened
-// `{nodes, root}` shape as `graph`, but nodes may be post-ASAP-only kinds
+// sub-DAG) — defaulted to `[]` when the loaded JSON omits the field, so
+// callers never need an extra existence check. `post_dag` is the optional
+// --post-asap whole-query merged post-ASAP DAG (same flattened
+// `{nodes, root}` shape as `dag`, but nodes may be post-ASAP-only kinds
 // like "SummaryAgg" mixed in, and any such node has no `hash` — there's no
 // corresponding QueryExpr to hash) — left `undefined` when absent (omitted
 // whenever --post-asap wasn't set, or this query had zero replacements),
 // unlike `replacements` which always defaults to an array. `workload_cost`
-// is the optional per-query `NamedGraph.workload_cost` (issue #286), also
+// is the optional per-query `NamedDAG.workload_cost` (issue #286), also
 // left `undefined` when absent. `sourceBatch` is a viewer-assigned integer
 // (never present in the JSON itself) shared by every query loaded from the
 // same document — see computeSelectionWorkloadCost's own doc for why it
@@ -36,7 +36,7 @@ let zoom = 1;
 let participants = new Set();
 // Every query pushed from the *same* loaded JSON document (one `dag_export`
 // process invocation) shares one `sourceBatch` id, assigned here. Needed
-// because `DagDecision.id` is only unique *within* one dag_export run, not
+// because `DAGDecision.id` is only unique *within* one dag_export run, not
 // across independently-generated files — computeSelectionWorkloadCost below
 // dedups by `${sourceBatch}:${decision.id}`, never `decision.id` alone, so
 // two files that happen to reuse the same small integer id never collide.
@@ -122,10 +122,10 @@ function loadFiles(fileList) {
     reader.onload = () => {
       try {
         const parsed = JSON.parse(reader.result);
-        const incoming = parsed.queries || (parsed.graph && parsed.deployments ? [{
+        const incoming = parsed.queries || (parsed.dag && parsed.deployments ? [{
           name: file.name.replace(/\.json$/i, '') || 'Summary maintenance plan',
-          graph: parsed.graph,
-          post_graph: parsed.graph,
+          dag: parsed.dag,
+          post_dag: parsed.dag,
           lifecycle_plan: true,
           lifecycle_summary: lifecyclePlanSummary(parsed),
         }] : []);
@@ -137,7 +137,7 @@ function loadFiles(fileList) {
           let name = q.name;
           if (existingNames.has(name)) name = `${q.name} (${file.name})`;
           existingNames.add(name);
-          queries.push({ name, graph: q.graph, source: q.source, replacements: q.replacements || [], post_graph: q.post_graph, workload_cost: q.workload_cost, lifecycle_plan: q.lifecycle_plan, lifecycle_summary: q.lifecycle_summary, sourceBatch });
+          queries.push({ name, dag: q.dag, source: q.source, replacements: q.replacements || [], post_dag: q.post_dag, workload_cost: q.workload_cost, lifecycle_plan: q.lifecycle_plan, lifecycle_summary: q.lifecycle_summary, sourceBatch });
         });
       } catch (err) {
         alert(`Failed to parse ${file.name}: ${err.message}`);
@@ -417,7 +417,7 @@ function buildCyStyle() {
 // Default layout animates dagre's computed positions in rather than snapping
 // to them — every mode switch, checkbox toggle, and file load rebuilds `cy`
 // from scratch (see the `cy.destroy()` below), so this animation is what
-// makes the graph read as "assembling" instead of flickering to a new
+// makes the DAG read as "assembling" instead of flickering to a new
 // static image each time. `elements` also start at opacity 0 and fade in
 // (paired with the 'node'/'edge' transition-property set in buildCyStyle)
 // so a freshly-added element doesn't just pop in mid-layout-animation.
@@ -442,7 +442,7 @@ function buildCy(elements, layout) {
 }
 
 // Root borders and click/tap wiring for the Pre/Post-ASAP lanes.
-function finalizeGraphInteractions() {
+function finalizeDAGInteractions() {
   // Use borders rather than pictograms so IR text owns the whole node box.
   cy.nodes('[?root]').addClass('root');
 
@@ -487,13 +487,13 @@ function renderPrePostAsap() {
     showModeHint('Select one query for a complete pre/post DAG, or several queries for a batch workload view.');
     return;
   }
-  const missing = selected.filter((q) => !q.post_graph);
+  const missing = selected.filter((q) => !q.post_dag);
   if (missing.length > 0) {
     viewTitleEl.textContent = selected.length === 1 ? `Pre/Post-ASAP: ${selected[0].name}` : `Pre/Post-ASAP workload: ${selected.length} queries`;
     const action = document.getElementById('plannerRun')
       ? 'Open Query planner and click “Plan selected workload”, or re-export with dag_export --post-asap.'
       : 'Re-export with dag_export --post-asap.';
-    showModeHint(`No post-ASAP graph for: ${missing.map((q) => q.name).join(', ')}. ${action}`);
+    showModeHint(`No post-ASAP DAG for: ${missing.map((q) => q.name).join(', ')}. ${action}`);
     return;
   }
   hideModeHint();
@@ -502,12 +502,12 @@ function renderPrePostAsap() {
     const elements = laneElements(
       'summary-maintenance',
       `${selected[0].name} · lifecycle plan`,
-      selected[0].post_graph,
+      selected[0].post_dag,
       selected[0],
       'post',
     );
     buildCy(elements);
-    finalizeGraphInteractions();
+    finalizeDAGInteractions();
     applyHighlighting();
     const initial = cy.nodes().filter((node) => !node.data('isLane') && node.data('root')).first();
     if (initial && initial.length) {
@@ -526,8 +526,8 @@ function renderPrePostAsap() {
   const costSummary = selected.length === 1 ? selected[0].workload_cost : computeSelectionWorkloadCost(selected);
   const elements = selected.length === 1
     ? [
-        ...laneElements('pre-asap', `${selected[0].name} · pre-ASAP`, selected[0].graph, selected[0], 'pre', costSummary && costSummary.baseline_cost),
-        ...laneElements('post-asap', `${selected[0].name} · post-ASAP`, selected[0].post_graph, selected[0], 'post', costSummary && costSummary.selected_cost),
+        ...laneElements('pre-asap', `${selected[0].name} · pre-ASAP`, selected[0].dag, selected[0], 'pre', costSummary && costSummary.baseline_cost),
+        ...laneElements('post-asap', `${selected[0].name} · post-ASAP`, selected[0].post_dag, selected[0], 'post', costSummary && costSummary.selected_cost),
       ]
     : [
         ...unionStageLaneElements('pre', chosen, costSummary && costSummary.baseline_cost),
@@ -535,7 +535,7 @@ function renderPrePostAsap() {
       ];
 
   buildCy(elements);
-  finalizeGraphInteractions();
+  finalizeDAGInteractions();
   applyHighlighting();
   const initial = cy.nodes().filter((node) =>
     !node.data('isLane') && node.data('stage') === 'pre' && node.data('root')
@@ -553,13 +553,13 @@ function unionStageLaneElements(stage, chosen, laneCost) {
   // Workload merging is an exporter decision. `workload_node_id` is the
   // explicit JSON mapping; do not reconstruct identity from node content.
   const laneId = `${stage}-asap-union`;
-  const graphFor = (query) => (stage === 'pre' ? query.graph : query.post_graph);
+  const dagFor = (query) => (stage === 'pre' ? query.dag : query.post_dag);
   const owners = new Map();
 
   chosen.forEach((qIdx) => {
     const query = queries[qIdx];
-    const graph = graphFor(query);
-    graph.nodes.forEach((node) => {
+    const dag = dagFor(query);
+    dag.nodes.forEach((node) => {
       if (node.workload_node_id === undefined) return;
       if (!owners.has(node.workload_node_id)) owners.set(node.workload_node_id, new Set());
       owners.get(node.workload_node_id).add(query.name);
@@ -579,16 +579,16 @@ function unionStageLaneElements(stage, chosen, laneCost) {
     // viewport. `grabbable: false` alone made it a dead zone — cytoscape
     // begins a pan only when the element under the pointer is `pannable()`,
     // which defaults to false for nodes, and the lane covers most of the
-    // canvas once the graph is zoomed past the viewport. Still not grabbable:
+    // canvas once the DAG is zoomed past the viewport. Still not grabbable:
     // cytoscape overrides `grabbable` for a pannable node.
     { data: { id: laneId, label: laneCostLabel(`${stage === 'pre' ? 'pre-ASAP' : 'post-ASAP'} · workload union`, laneCost, stage), isLane: true }, classes: 'laneParent', selectable: false, grabbable: false, pannable: true },
   ];
 
   chosen.forEach((qIdx) => {
     const query = queries[qIdx];
-    const graph = graphFor(query);
-    const byId = new Map(graph.nodes.map((node) => [node.id, node]));
-    graph.nodes.forEach((node) => {
+    const dag = dagFor(query);
+    const byId = new Map(dag.nodes.map((node) => [node.id, node]));
+    dag.nodes.forEach((node) => {
       const key = keyFor(qIdx, node);
       let entry = entries.get(key);
       if (!entry) {
@@ -599,7 +599,7 @@ function unionStageLaneElements(stage, chosen, laneCost) {
       for (const decision of translationsForNode(query, node, stage)) {
         entry.decisions.set(decision.id, decision);
       }
-      if (node.id === graph.root) entry.rootFor.add(query.name);
+      if (node.id === dag.root) entry.rootFor.add(query.name);
       node.children.forEach((childId) => {
         const childKey = keyFor(qIdx, byId.get(childId));
         const child = byId.get(childId);
@@ -636,18 +636,18 @@ function unionStageLaneElements(stage, chosen, laneCost) {
 
 // Builds one Pre/Post-ASAP lane (a dashed compound parent plus its
 // nodes/edges). `nodes` is either a plain pre-ASAP
-// DagNode list (the `before` subtree, or an `after.kind === "Rewrite"`
-// graph) or a SummaryDagNode list (an `after.kind === "Summary"` graph) —
+// DAGNode list (the `before` sub-DAG, or an `after.kind === "Rewrite"`
+// DAG) or a SummaryDAGNode list (an `after.kind === "Summary"` DAG) —
 // both shapes carry id/kind/label/detail/children, which is all a lane
-// needs; SummaryDagNode's missing `hash`/`notes` fields are simply never
+// needs; SummaryDAGNode's missing `hash`/`notes` fields are simply never
 // read by this function or by showPrePostDetail below.
-function laneElements(laneId, laneLabel, graph, query, stage, laneCost) {
-  const nodes = graph.nodes;
+function laneElements(laneId, laneLabel, dag, query, stage, laneCost) {
+  const nodes = dag.nodes;
   const byId = new Map(nodes.map((node) => [node.id, node]));
   // Keep the delimiter escaped in source. A literal NUL is replaced by the
   // HTML tokenizer when viewer.js is embedded by render.py, which otherwise
   // makes these keys differ from the lookup below.
-  const edgeCostByPair = new Map((graph.edge_annotations || []).map((edge) => [`${edge.from}\u0000${edge.to}`, edge.cost]));
+  const edgeCostByPair = new Map((dag.edge_annotations || []).map((edge) => [`${edge.from}\u0000${edge.to}`, edge.cost]));
   const elements = [
     // Pannable for the same reason as the union lane above.
     { data: { id: laneId, label: laneCostLabel(laneLabel, laneCost, stage), isLane: true }, classes: 'laneParent', selectable: false, grabbable: false, pannable: true },
@@ -657,7 +657,7 @@ function laneElements(laneId, laneLabel, graph, query, stage, laneCost) {
       data: {
         id: `${laneId}-${node.id}`,
         parent: laneId,
-        // On-graph label carries a concise cost/benefit badge (issue #286)
+        // On-DAG label carries a concise cost/benefit badge (issue #286)
         // when this node's decision has one; `node.label` itself (nested,
         // used everywhere else — the sidebar, schema derivation, …) stays
         // exactly the plain IR label.
@@ -669,7 +669,7 @@ function laneElements(laneId, laneLabel, graph, query, stage, laneCost) {
         // object.
         kind: node.kind,
         category: categoryOf(node.kind),
-        root: node.id === graph.root,
+        root: node.id === dag.root,
         isPrePost: true,
         laneId,
         stage,
@@ -687,7 +687,7 @@ function laneElements(laneId, laneLabel, graph, query, stage, laneCost) {
       elements.push({
         data: {
           // Arrow points from input to consumer (data-flow direction), the
-          // reverse of the tree's parent->child structure.
+          // reverse of the DAG's parent->child structure.
           id: `e-${laneId}-${node.id}-${childId}`,
           source: `${laneId}-${childId}`,
           target: `${laneId}-${node.id}`,
@@ -789,7 +789,7 @@ function renderCostAnnotation(title, annotation) {
 }
 
 // Baseline/selected/benefit trio for one replacement decision, matching
-// `DagDecision.baseline_cost/selected_cost/benefit` (crates/types/src/dag_export.rs).
+// `DAGDecision.baseline_cost/selected_cost/benefit` (crates/types/src/dag_export.rs).
 function renderDecisionCostBlock(entry) {
   if (!entry.baseline_cost && !entry.selected_cost && !entry.benefit) return '';
   return `<div class="costBlock">
@@ -800,8 +800,8 @@ function renderDecisionCostBlock(entry) {
   </div>`;
 }
 
-// Short, on-graph badge text for a post-ASAP node's own winning decision —
-// "concise on-graph benefit/cost badges" per issue #286; the full
+// Short, on-DAG badge text for a post-ASAP node's own winning decision —
+// "concise on-DAG benefit/cost badges" per issue #286; the full
 // breakdown only ever appears in the sidebar (`renderDecisionCostBlock`).
 // Empty string whenever there's nothing to show (no decision, or its
 // benefit is `Unavailable`) so an un-costed node's label is untouched.
@@ -842,7 +842,7 @@ function computeSelectionWorkloadCost(selected) {
   let cacheProfile = null;
   let hasCacheProfile = false;
   for (const query of selected) {
-    const nodes = (query.post_graph && query.post_graph.nodes) || [];
+    const nodes = (query.post_dag && query.post_dag.nodes) || [];
     for (const node of nodes) {
       const decision = node.decision;
       if (!decision) continue;
@@ -967,12 +967,12 @@ function showEdgeDetail(edge) {
 function renderScopeSummary(selected) {
   scopePickerEl.classList.add('visible');
   const strategies = new Set();
-  selected.forEach((query) => (query.post_graph?.nodes || []).forEach((node) => {
+  selected.forEach((query) => (query.post_dag?.nodes || []).forEach((node) => {
     if (node.decision && node.decision.rank === 0) strategies.add(node.decision.strategy);
   }));
   const scope = selected.length === 1 ? 'Single query' : `Batch workload · ${selected.length} queries`;
   const strategyText = strategies.size ? `Winning strategies: ${Array.from(strategies).join(', ')}` : 'No selected replacements';
-  // Single query: use the exporter's own precomputed `NamedGraph.workload_cost`
+  // Single query: use the exporter's own precomputed `NamedDAG.workload_cost`
   // directly. Multiple queries: no single precomputed field covers exactly
   // this subset, so aggregate the explicit per-decision annotations already
   // in the export (dedup by `decision.id`) — see
@@ -980,7 +980,7 @@ function renderScopeSummary(selected) {
   // client-side cost estimation.
   const costSummary = selected.length === 1 ? selected[0].workload_cost : computeSelectionWorkloadCost(selected);
   const benefitValue = costSummary && costSummary.benefit && costSummary.benefit.value;
-  const hasEdgeCosts = selected.some((query) => (query.post_graph?.edge_annotations || []).length > 0);
+  const hasEdgeCosts = selected.some((query) => (query.post_dag?.edge_annotations || []).length > 0);
   const outcomeLabel = typeof benefitValue !== 'number'
     ? 'difference'
     : benefitValue > 0 ? 'saved' : benefitValue < 0 ? 'additional cost' : 'no change';
@@ -1113,7 +1113,7 @@ function renderTableSchemas(qs) {
   const box = document.getElementById('tableSchemaBox');
   const schemas = new Map();
   qs.forEach((query) => {
-    (query.graph?.nodes || []).filter((node) => node.kind === 'Scan').forEach((node) => {
+    (query.dag?.nodes || []).filter((node) => node.kind === 'Scan').forEach((node) => {
       const key = JSON.stringify([node.detail, node.schema]);
       if (!schemas.has(key)) schemas.set(key, { node, owners: [] });
       schemas.get(key).owners.push(query.name);
@@ -1128,12 +1128,12 @@ function renderTableSchemas(qs) {
 function applyHighlighting() {
   if (!cy) return;
   const selected = getParticipants().map((i) => queries[i]);
-  const ownersFor = (graphOf) => {
+  const ownersFor = (dagOf) => {
     const owners = new Map();
     selected.forEach((query) => {
       const seen = new Set();
-      const graph = graphOf(query);
-      (graph ? graph.nodes : []).forEach((node) => {
+      const dag = dagOf(query);
+      (dag ? dag.nodes : []).forEach((node) => {
         const id = node.workload_node_id;
         if (id === undefined || seen.has(id)) return;
         seen.add(id);
@@ -1143,8 +1143,8 @@ function applyHighlighting() {
     });
     return owners;
   };
-  const preOwners = ownersFor((query) => query.graph);
-  const postOwners = ownersFor((query) => query.post_graph);
+  const preOwners = ownersFor((query) => query.dag);
+  const postOwners = ownersFor((query) => query.post_dag);
   cy.nodes().forEach((element) => {
     if (element.data('isLane')) return;
     const node = element.data('node');
@@ -1174,7 +1174,7 @@ function renderLegend() {
   const panelBg = getComputedStyle(document.documentElement).getPropertyValue('--panel2').trim() || '#f0f2f5';
   const mutedColor = getComputedStyle(document.documentElement).getPropertyValue('--muted').trim() || '#6b7280';
   rows.push(`<div class="leg"><span class="swatch" style="background:${panelBg}; border-color:${mutedColor}; border-style:dashed"></span>
-    <span><span class="swatchLabel">Pass-through (KeepPreAsap)</span><span class="swatchDesc">Unchanged pre-ASAP subtree carried into the Summary graph as-is</span></span></div>`);
+    <span><span class="swatchLabel">Pass-through (KeepPreAsap)</span><span class="swatchDesc">Unchanged pre-ASAP sub-DAG carried into the Summary DAG as-is</span></span></div>`);
   legendList.innerHTML = rows.join('');
 }
 
@@ -1203,13 +1203,13 @@ function loadWorkload(parsed) {
   const incoming = (parsed && parsed.queries) || [];
   // One batch id for this whole document — see `sourceBatch`'s own doc above.
   const sourceBatch = nextSourceBatch++;
-  incoming.forEach((q) => queries.push({ name: q.name, graph: q.graph, source: q.source, replacements: q.replacements || [], post_graph: q.post_graph, workload_cost: q.workload_cost, lifecycle_plan: q.lifecycle_plan, lifecycle_summary: q.lifecycle_summary, sourceBatch }));
+  incoming.forEach((q) => queries.push({ name: q.name, dag: q.dag, source: q.source, replacements: q.replacements || [], post_dag: q.post_dag, workload_cost: q.workload_cost, lifecycle_plan: q.lifecycle_plan, lifecycle_summary: q.lifecycle_summary, sourceBatch }));
   if (activeIndex === -1 && queries.length > 0) activeIndex = 0;
   if (participants.size === 0 && activeIndex >= 0) participants.add(activeIndex);
 }
 
 // Entry point used by planner-ui.js after the local HTTP backend returns a
-// freshly generated WorkloadGraph. Replace (rather than append to) the
+// freshly generated WorkloadDAG. Replace (rather than append to) the
 // current data and open the complete workload pre/post view.
 window.renderPlannerWorkload = function renderPlannerWorkload(parsed) {
   queries = [];
@@ -1220,7 +1220,7 @@ window.renderPlannerWorkload = function renderPlannerWorkload(parsed) {
   render();
 };
 
-// render.py's standalone output bakes the WorkloadGraph JSON directly into
+// render.py's standalone output bakes the WorkloadDAG JSON directly into
 // the page as a <script type="application/json"> tag instead of relying on
 // fetch('dag.json') — a `file://` page can't fetch a sibling file in most
 // browsers (blocked as cross-origin), which is exactly the "no browser
@@ -1239,7 +1239,7 @@ if (embeddedEl) {
 } else {
   // Plain index.html starts with the committed, post-ASAP-generated example.
   // Do not silently prefer a leftover scratch dag.json: it may predate
-  // post_graph and make Pre/Post-ASAP appear broken. Users can load scratch
+  // post_dag and make Pre/Post-ASAP appear broken. Users can load scratch
   // exports explicitly with the picker or run them through Query planner.
   fetch('/api/example', { cache: 'no-store' })
     .then((r) => (r.ok ? r.json() : fetch('dag.example.json', { cache: 'no-store' }).then((fallback) => fallback.json())))

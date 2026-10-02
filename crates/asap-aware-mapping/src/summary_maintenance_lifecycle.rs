@@ -21,9 +21,9 @@ use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use asap_types::post_asap::{
-    compile_post_asap_dag_with_node_ids, share_common_summary_subtrees, EvaluationSchedule,
-    ExecutionDataStateError, ExecutionTiming, OutputRepresentation, PostAsapDag,
-    PostAsapDagValidationError, PostAsapNodeId, ResultGuarantee, SummaryExpr,
+    compile_post_asap_dag_with_node_ids, share_common_summary_sub_dags, EvaluationSchedule,
+    ExecutionDataStateError, ExecutionTiming, OutputRepresentation, PostAsapDAG,
+    PostAsapDAGValidationError, PostAsapNodeId, ResultGuarantee, SummaryExpr,
     SummaryMaintenanceLifecycle, SummaryMaintenanceLifecycleGuarantee, SummaryMaintenanceMode,
     SummaryNode, SummaryWindowFramework, ValueOperation,
 };
@@ -221,7 +221,7 @@ pub struct SummaryMaintenanceLifecyclePlan {
 #[derive(Debug, thiserror::Error, PartialEq)]
 pub enum SummaryMaintenanceTimingError {
     #[error(transparent)]
-    InvalidPostAsapDag(#[from] ExecutionDataStateError),
+    InvalidPostAsapDAG(#[from] ExecutionDataStateError),
     #[error("summary {0:?} has no selected lifecycle")]
     UnselectedLifecycle(PostAsapNodeId),
     /// A maintained population outside any `SummaryAgg`'s inputs has no
@@ -230,7 +230,7 @@ pub enum SummaryMaintenanceTimingError {
     #[error("node {0:?} maintains state that has no summary-maintenance lifecycle")]
     UnplannedMaintainedState(PostAsapNodeId),
     #[error(transparent)]
-    InvalidPhases(#[from] PostAsapDagValidationError),
+    InvalidPhases(#[from] PostAsapDAGValidationError),
 }
 
 impl SummaryMaintenanceLifecyclePlan {
@@ -245,7 +245,7 @@ impl SummaryMaintenanceLifecyclePlan {
     /// maintained populations as to `SummaryAgg` states; a population feeding
     /// a `SummaryAgg` is one of its inputs. Timings already on the root are
     /// ignored.
-    pub fn execution_timed_dag(&self) -> Result<PostAsapDag, SummaryMaintenanceTimingError> {
+    pub fn execution_timed_dag(&self) -> Result<PostAsapDAG, SummaryMaintenanceTimingError> {
         let compiled = compile_post_asap_dag_with_node_ids(&self.root)?;
         let dag = compiled.dag;
         for population in &standalone_populations(&self.root) {
@@ -355,13 +355,13 @@ pub enum SummaryMaintenanceLifecyclePlanError {
     #[error("workload entry index {index} appears more than once in one demand binding")]
     DuplicateWorkloadEntry { index: usize },
     #[error(transparent)]
-    InvalidPostAsapDag(#[from] ExecutionDataStateError),
+    InvalidPostAsapDAG(#[from] ExecutionDataStateError),
 }
 
 #[derive(Debug, thiserror::Error)]
 pub enum SummaryMaintenanceLifecycleAssemblyError {
     #[error(transparent)]
-    AssembleDag(#[from] RealizationError),
+    AssembleDAG(#[from] RealizationError),
     #[error(transparent)]
     SummaryMaintenance(#[from] SummaryMaintenanceLifecyclePlanError),
 }
@@ -800,7 +800,7 @@ pub fn global_selection_with_summary_maintenance_lifecycles<'a, Id>(
     // Intern every member once; members whose outermost state (the
     // `SummaryAgg` every other state of the candidate feeds) interns to the
     // same node share it. Classes are kept in first-member order.
-    let interned = share_common_summary_subtrees(
+    let interned = share_common_summary_sub_dags(
         members
             .iter()
             .enumerate()
@@ -3306,7 +3306,7 @@ mod tests {
         data: &DataWorkload,
         horizon: Option<Horizon>,
         choose: impl Fn(&SummaryMaintenanceDeployment) -> SummaryMaintenanceLifecycle,
-    ) -> PostAsapDag {
+    ) -> PostAsapDAG {
         let candidates = enumerate_summary_maintenance_lifecycles(
             root,
             WorkloadDemand::new_with_data(workload, data, &[0]),
@@ -3331,7 +3331,7 @@ mod tests {
     }
 
     /// Operator kinds in node-id order, each paired with its timing.
-    fn timings(dag: &PostAsapDag) -> Vec<(&'static str, ExecutionTiming)> {
+    fn timings(dag: &PostAsapDAG) -> Vec<(&'static str, ExecutionTiming)> {
         dag.nodes
             .iter()
             .map(|node| {
@@ -3550,7 +3550,7 @@ mod tests {
         )
     }
 
-    fn population_timings(dag: &PostAsapDag) -> Vec<(&'static str, ExecutionTiming)> {
+    fn population_timings(dag: &PostAsapDAG) -> Vec<(&'static str, ExecutionTiming)> {
         dag.nodes
             .iter()
             .zip(timings(dag))

@@ -1,4 +1,4 @@
-//! Planner-selected summaries over raw samples compile as precompute graphs
+//! Planner-selected summaries over raw samples compile as precompute DAGs
 //! and produce the same estimates as feeding their kernel sample by sample.
 use std::{collections::BTreeMap, collections::BTreeSet, rc::Rc, sync::Arc};
 
@@ -18,7 +18,7 @@ use asap_physical_operators::{
     AggregateCore, KeyByLabelValues, Statistic,
 };
 use asap_types::post_asap::{
-    compile_post_asap_dag, EntityIdentity, ExactKind, PostAsapDag, PostAsapOperatorPayload,
+    compile_post_asap_dag, EntityIdentity, ExactKind, PostAsapDAG, PostAsapOperatorPayload,
     SketchAlgorithm, SketchQuery, SummaryFamilyType, SummaryInputExpr, SummaryNode, SummaryUpdate,
 };
 use asap_types::pre_asap::{expr_ir::ColumnRef, query_expr::Reduction};
@@ -74,7 +74,7 @@ fn candidates(query: &str, accuracy: AccuracyTarget) -> Vec<Rc<SummaryNode>> {
 }
 
 /// Raw-input summary nodes: `(dag, raw source id, summary id)`.
-fn raw_summaries(dag: &PostAsapDag) -> Vec<(u64, u64)> {
+fn raw_summaries(dag: &PostAsapDAG) -> Vec<(u64, u64)> {
     dag.nodes
         .iter()
         .filter(|node| matches!(node.payload, PostAsapOperatorPayload::SummaryAgg { .. }))
@@ -113,7 +113,7 @@ fn samples() -> Vec<(Series, i64, f64)> {
 }
 
 fn execute(
-    dag: &PostAsapDag,
+    dag: &PostAsapDAG,
     source: u64,
     root: u64,
     rows: &[(Series, i64, f64)],
@@ -128,7 +128,7 @@ fn execute(
         );
     });
     let program = serde_json::from_slice::<
-        asap_physical_operators::physical_planner::CompiledPhysicalDag,
+        asap_physical_operators::physical_planner::CompiledPhysicalDAG,
     >(&serde_json::to_vec(&program).unwrap())
     .unwrap();
     let schema = precompute::raw_sample_schema();
@@ -143,7 +143,7 @@ fn execute(
         source,
         Box::new(Operator::source(schema, vec![batch]).unwrap()) as Source<'_>,
     )]);
-    let graph = program.instantiate(sources).unwrap();
+    let physical_dag = program.instantiate(sources).unwrap();
     let context = RunContext::new(
         Scope::Ingestion {
             window_start_ms: 0,
@@ -154,7 +154,10 @@ fn execute(
     )
     .unwrap();
     block_on(async {
-        let mut stream = graph.execute(program.roots(), context).unwrap().remove(0);
+        let mut stream = physical_dag
+            .execute(program.roots(), context)
+            .unwrap()
+            .remove(0);
         let mut result = Vec::new();
         while let Some(batch) = stream.next().await {
             for row in batch.unwrap().rows() {
@@ -273,7 +276,7 @@ fn readouts(state: &dyn AggregateCore, family: &SummaryFamilyType) -> Vec<f64> {
 /// or the family when it has no native state.
 fn check(
     query: &str,
-    dag: &PostAsapDag,
+    dag: &PostAsapDAG,
     source: u64,
     root: u64,
     rows: &[(Series, i64, f64)],
@@ -455,7 +458,7 @@ fn raw_sample_summaries_compile_and_match_their_kernels() {
 
 /// Replace the raw summary of `sum by (service) (sum_over_time(m[5m]))` with
 /// another update, keeping its raw input and reduction.
-fn grouped_raw_summary(family: SummaryFamilyType, input: SummaryUpdate) -> (PostAsapDag, u64, u64) {
+fn grouped_raw_summary(family: SummaryFamilyType, input: SummaryUpdate) -> (PostAsapDAG, u64, u64) {
     let candidate = candidates(
         "sum by (service) (sum_over_time(m[5m]))",
         AccuracyTarget::Exact,

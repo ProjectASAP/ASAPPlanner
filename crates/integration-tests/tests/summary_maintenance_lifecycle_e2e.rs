@@ -174,8 +174,8 @@ fn promql_dashboard_materializes_continuous_summary_with_explained_rejections() 
         alternative["lifecycle"]["kind"] == "shared"
             && alternative["rejection"] == "unsupported_by_runtime"
     }));
-    assert!(exported["graph"]["nodes"].as_array().is_some());
-    let summary_node = exported["graph"]["nodes"]
+    assert!(exported["dag"]["nodes"].as_array().is_some());
+    let summary_node = exported["dag"]["nodes"]
         .as_array()
         .unwrap()
         .iter()
@@ -448,7 +448,7 @@ fn quantile_workload(query: &str) -> PlanningWorkload {
 fn lifecycle_timed_dag(
     query: &str,
     lifecycle: &SummaryMaintenanceLifecycle,
-) -> (asap_types::post_asap::PostAsapDag, Vec<u64>) {
+) -> (asap_types::post_asap::PostAsapDAG, Vec<u64>) {
     use asap_aware_mapping::enumerate_summary_maintenance_lifecycles;
     let workload = quantile_workload(query);
     let mut lowered = lower_promql_workload(&workload, 0).unwrap().remove(0);
@@ -489,7 +489,7 @@ fn lifecycle_timed_dag(
 
 /// Compile inputs for a timed DAG: its raw source, available at either phase.
 fn raw_inputs(
-    dag: &asap_types::post_asap::PostAsapDag,
+    dag: &asap_types::post_asap::PostAsapDAG,
 ) -> std::collections::BTreeMap<u64, asap_physical_operators::physical_planner::InputContract> {
     let raw = dag
         .nodes
@@ -965,7 +965,7 @@ fn grouped_rate_sum_placement_is_a_lifecycle_choice() {
 
 /// The lifecycle-timed DAG Planner selects for `query` with upfront series
 /// typing, and whether it keeps an ingestion-time Binary.
-fn typed_selection(query: &str) -> (asap_types::post_asap::PostAsapDag, bool) {
+fn typed_selection(query: &str) -> (asap_types::post_asap::PostAsapDAG, bool) {
     use asap_types::post_asap::{ExecutionTiming, PostAsapOperatorPayload};
     let workload = quantile_workload(query);
     let lowered = asap_types::pre_asap::schema::with_promql_series_identity(
@@ -982,10 +982,10 @@ fn typed_selection(query: &str) -> (asap_types::post_asap::PostAsapDag, bool) {
     (dag, ingestion_binary)
 }
 
-/// Execute a timed DAG's precompute and query graphs over `samples`
+/// Execute a timed DAG's precompute and query DAGs over `samples`
 /// (`(metric, job, seconds, value)`) at 300s; returns the root's values.
 fn execute_timed(
-    dag: &asap_types::post_asap::PostAsapDag,
+    dag: &asap_types::post_asap::PostAsapDAG,
     samples: &[(&str, &str, i64, f64)],
 ) -> Vec<f64> {
     use asap_physical_operators::{
@@ -1063,7 +1063,7 @@ fn execute_timed(
         &frontier,
     )
     .unwrap();
-    let raw_sources = |plan: &asap_physical_operators::physical_planner::CompiledPhysicalDag| {
+    let raw_sources = |plan: &asap_physical_operators::physical_planner::CompiledPhysicalDAG| {
         plan.input_contracts()
             .filter_map(|(id, _)| raw.get(&id).map(|(schema, name)| (id, batch(schema, name))))
             .collect::<BTreeMap<_, _>>()

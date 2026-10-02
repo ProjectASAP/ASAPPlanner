@@ -5,9 +5,9 @@ this layer — expressing what to compute; summary type, summary
 parameters, and physical operator choice are committed later, entirely
 at L3's discretion (see
 [`l3-summary-bound-ir.md`](./l3-summary-bound-ir.md)). Data-model
-agnostic by design: the same tree shape covers both time-series-style
+agnostic by design: the same DAG shape covers both time-series-style
 sources and tabular sources, through a source's data model living on
-its scan node rather than forking the tree type.
+its scan node rather than forking the DAG type.
 
 ## Design rules
 
@@ -31,13 +31,13 @@ its scan node rather than forking the tree type.
 3. **Intent at L2, summary at L3.** An intent like "a quantile to this
    accuracy" says what to compute; it never says which summary computes
    it.
-4. **A DAG, not a tree.** A producer can have more than one consumer
+4. **A DAG with sharing.** A producer can have more than one consumer
    sharing its computed result — from explicit naming in the source
    query (e.g. a named sub-query), from a later layer's decision to
    reuse a shared computation across two different queries, or from
    physical structure (a pre-aggregate feeding several downstream
    consumers). The canonical form supports this by construction, via a
-   binding/reference pair of node kinds — a tree-only representation
+   binding/reference pair of node kinds — a representation without sharing
    would have to duplicate the producer per consumer and lose the
    sharing.
 
@@ -60,10 +60,10 @@ aggregate" as syntactic shapes — see design rule 1; both fold into
 composition of the generic operators instead, except for the one
 strategy-driven exception noted there.
 
-**Why a scan's source is a variant, not a separate tree type per data
+**Why a scan's source is a variant, not a separate DAG type per data
 model.** Most operators (filter, aggregate, …) have identical semantics
 regardless of whether the input is a time-series window or a table scan
-— only the leaf differs. One tree with a polymorphic leaf lets
+— only the leaf differs. One DAG with a polymorphic leaf lets
 data-model-agnostic rules apply uniformly across every data model;
 rules that do care about data-model specifics gate on that leaf's
 declared kind. Summaries themselves are meant to be data-model-agnostic
@@ -104,8 +104,8 @@ unique key, a designated time column — it is a position into a schema,
 not a string. A pre-bind string name means nothing without knowing
 which schema it resolves against and at what offset; a position is settled
 once, at bind time, and by construction can't fail to resolve for any
-later pass. This also makes the canonical tree self-describing: every
-scan carries its own schema, so any sub-tree's output schema is
+later pass. This also makes the canonical DAG self-describing: every
+scan carries its own schema, so any sub-DAG's output schema is
 computable purely from its inputs, without external context. A named
 alias for the column-identity type (rather than a bare integer) is
 still kept, so code that touches it can express "this is a column
@@ -113,15 +113,15 @@ position" as a distinct kind of value, not just any number.
 
 ## Schema flow
 
-Every edge in the canonical tree carries a schema: its columns, which
+Every edge in the canonical DAG carries a schema: its columns, which
 column (if any) is the designated time index, its unique keys, and
 whether it's closed (a complete enumeration) or open (a runtime row may
-carry more). The tree is locally type-checked: a node's output schema
+carry more). The DAG is locally type-checked: a node's output schema
 is a pure function of its inputs' schemas and its own parameters,
-verifiable without consulting the rest of the tree.
+verifiable without consulting the rest of the DAG.
 
 Three distinct kinds of schema-shaped information are easy to conflate
-and shouldn't be: the schema flowing along the canonical tree's own
+and shouldn't be: the schema flowing along the canonical DAG's own
 edges; the schema of the underlying data source itself (what tables or
 metrics actually exist, consulted only during L1's internal name
 resolution); and a catalog of what summaries exist and what they can
@@ -218,7 +218,7 @@ pub enum QueryExpr {
 ```
 
 `reduction` is a field *on* the `Aggregate` variant itself — not a
-separate node in the tree, and not something any other variant carries.
+separate node in the DAG, and not something any other variant carries.
 It answers a question only `Aggregate` ever needs to ask: is this node
 collapsing rows at all, and if so, by which (possibly empty) key set —
 or does it have no grouping concept to begin with. Making that an
@@ -230,7 +230,7 @@ handling downstream — see [`l3-summary-bound-ir.md`](./l3-summary-bound-ir.md#
 actually load-bearing.
 
 The two small types that field's shape turns on, in full — neither is a
-tree node either; both are plain data reachable only through
+DAG node either; both are plain data reachable only through
 `Aggregate.reduction`, and `GroupKeys` only exists at all when
 `reduction` is `Reduce` (it's meaningless for `PerEntity`, which is
 exactly why it isn't a sibling field instead):
@@ -378,7 +378,7 @@ for its particular statistic, which is exactly the design rule 1 exception
 (a genuinely different computational access pattern, not an ordinary
 composition of existing operators).
 
-And the schema every edge in the tree carries:
+And the schema every edge in the DAG carries:
 
 ```rust
 pub struct Schema {
