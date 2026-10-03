@@ -122,7 +122,9 @@ Unknown recurrence keeps the original; budget exhaustion returns an error.
 producer/reader frontier, including rebuilding all panes at query time. It
 retains individual failures and never returns a truncated inventory.
 `integration-tests/tests/automatic_window_composition.rs` verifies generated
-panes execute identically with and without retained outputs. The deployment
+panes execute identically with and without retained outputs. Per-series native
+merges ignore individual pane build timestamps and attach the query evaluation
+timestamp; the regression covers differently timestamped retained panes. The deployment
 still supplies each selector's exact raw window and binds retained outputs to
 that window/revision. This does not introduce a rotating pane cache or claim
 that cadence alone certifies compatibility with a catalog's pane origin.
