@@ -14,9 +14,9 @@
       },
       "post_dag": {
         "nodes": [
-          { "id": 0, "kind": "KeepPreAsap", "label": "KeepPreAsap(Scan)", "detail": {"pre_asap_sub_dag": {"nodes": [{"id": 0, "kind": "Scan", "label": "Scan(netflow_table)", "detail": {}, "children": []}], "root": 0}}, "children": [] },
+          {"id": 0, "kind": "Scan", "label": "Scan(netflow_table)", "detail": {}, "children": []},
           { "id": 1, "kind": "SummaryAgg", "label": "SummaryAgg(Kll)", "detail": {"family": {"Sketch": ["Kll", {"k": 200}]}, "col": {"Column": 6}, "reduction": {"Reduce": [1]}, "grouping": "PerSubpopulationInstance"}, "children": [0], "origin_pre_id": 1 },
-          { "id": 2, "kind": "KeepPreAsap", "label": "KeepPreAsap(Project)", "detail": {"pre_asap_sub_dag": {"nodes": [{"id": 0, "kind": "Project", "label": "Project(2 cols)", "detail": {}, "children": []}], "root": 0}}, "children": [1] }
+          {"id": 2, "kind": "Project", "label": "Project(2 cols)", "detail": {}, "children": [1]}
         ],
         "root": 2
       },
@@ -39,7 +39,7 @@
             "kind": "Summary",
             "dag": {
               "nodes": [
-                { "id": 0, "kind": "KeepPreAsap", "label": "KeepPreAsap(Scan)", "detail": {"pre_asap_sub_dag": {"nodes": [{"id": 0, "kind": "Scan", "label": "Scan(netflow_table)", "detail": {}, "children": [], "hash": 111}], "root": 0}}, "children": [] },
+                {"id": 0, "kind": "Scan", "label": "Scan(netflow_table)", "detail": {}, "children": []},
                 { "id": 1, "kind": "SummaryAgg", "label": "SummaryAgg(Kll)", "detail": {"family": {"Sketch": ["Kll", {"k": 200}]}, "col": {"Column": 6}, "reduction": {"Reduce": [1]}, "grouping": "PerSubpopulationInstance"}, "children": [0], "origin_pre_id": 1 }
               ],
               "root": 1
@@ -64,7 +64,7 @@
             "kind": "Summary",
             "dag": {
               "nodes": [
-                { "id": 0, "kind": "KeepPreAsap", "label": "KeepPreAsap(Scan)", "detail": {}, "children": [] },
+                {"id": 0, "kind": "Scan", "label": "Scan", "detail": {}, "children": []},
                 { "id": 1, "kind": "SummaryAgg", "label": "SummaryAgg(HydraKll)", "detail": {"family": {"Sketch": ["Kll", {"k": 200}]}, "grouping": {"SharedMultiSubpopulation": {"params": {}}}}, "children": [0], "origin_pre_id": 1 }
               ],
               "root": 1
