@@ -6,7 +6,7 @@ use std::process::Command;
 use asap_types::ir::export::{LogicalASAPDAG, LogicalASAPDAGDocument};
 use serde_json::Value;
 
-const COMMITTED: &str = "../../tools/dag-viewer/examples/planner-layering-example1.stage01.json";
+const COMMITTED: &str = "../../tools/dag-viewer/examples/planner-layering-example1.json";
 
 fn generate(extra: &[&str]) -> Value {
     let out = std::env::temp_dir().join(format!(
