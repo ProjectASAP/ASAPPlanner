@@ -159,6 +159,7 @@ pub mod empirical_resources;
 pub mod erp;
 pub mod exact_composition;
 pub mod explanation;
+mod frequency_rewrite;
 mod function_rules;
 pub mod grouping;
 pub mod pane_sharing;
