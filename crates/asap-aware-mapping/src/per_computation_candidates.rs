@@ -28,13 +28,21 @@ use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use asap_types::ir::operator_properties::Reduction;
-use asap_types::ir::{NonASAPOp, OperatorNode, Predicate, QueryRoot, SchemaDerivationError};
-use asap_types::post_asap::{ExactKind, ExactParams, Materialization, SketchAlgorithm};
-use asap_types::pre_asap::{resolve_column_ref, AggIntent, ColumnRef};
+use asap_types::ir::{
+    ASAPOp, NonASAPOp, Operator, OperatorNode, Predicate, QueryRoot, SchemaDerivationError,
+};
+use asap_types::post_asap::{
+    EntityIdentity, ExactKind, ExactParams, FieldDataType, GroupingStrategy, Materialization,
+    NonNegativeWeightProof, SketchAlgorithm, SketchKind, SketchStatistic, SummaryInputExpr,
+    SummaryUpdate, WeightDomain,
+};
+use asap_types::pre_asap::{resolve_column_ref, AggIntent, ColumnRef, Schema};
 use asap_types::types::AccuracyTarget;
 use thiserror::Error;
 
-use crate::replacement::{accuracy_budget, accuracy_target, summary_candidates};
+use crate::replacement::{
+    accuracy_budget, accuracy_target, default_size_params, summary_candidates,
+};
 
 /// One Pass 1 candidate for a computation (one measure of an aggregate).
 ///
@@ -170,6 +178,10 @@ pub enum PerComputationCandidateError {
         root: Option<String>,
         measure: Option<usize>,
     },
+    #[error("choice must name one listed candidate per target")]
+    InvalidChoice,
+    #[error("unsupported substitution in logical ASAP-aware optimization: {0}")]
+    Unsupported(&'static str),
 }
 
 /// Enumerate exact, rewrite and summary choices of one measure in stable catalog
@@ -384,6 +396,245 @@ pub fn generate_per_computation_candidates<Id: std::fmt::Debug>(
         }
     }
     Ok(PerComputationCandidates { roots, targets })
+}
+
+/// Build one whole-workload candidate (end of Pass 1): `choice[i]` indexes
+/// `inventory.targets[i].choices.candidates`. A target whose chosen
+/// candidate is not `Exact` is replaced by `SummaryAgg` followed by
+/// `SummaryEstimate` (summary) or `FinalizeExactAccumulator` (exact
+/// accumulator). A summary is sized here for its measure's accuracy
+/// requirement; Pass 1 leaves it unsized. Untouched sub-DAGs keep their
+/// identity, so sharing between roots is preserved.
+pub fn compose_logical_candidate<Id: Clone>(
+    inventory: &PerComputationCandidates<Id>,
+    choice: &[usize],
+) -> Result<Vec<(Id, QueryRoot)>, PerComputationCandidateError> {
+    if choice.len() != inventory.targets.len() {
+        return Err(PerComputationCandidateError::InvalidChoice);
+    }
+    let mut chosen: Chosen = HashMap::new();
+    for (target, &index) in inventory.targets.iter().zip(choice) {
+        let candidate = target
+            .choices
+            .candidates
+            .get(index)
+            .ok_or(PerComputationCandidateError::InvalidChoice)?;
+        chosen
+            .entry(Rc::as_ptr(&target.target))
+            .or_default()
+            .push((target, candidate));
+    }
+    let mut memo = HashMap::new();
+    inventory
+        .roots
+        .iter()
+        .map(|(id, root)| {
+            let root = match root {
+                QueryRoot::Operator(node) => {
+                    QueryRoot::Operator(rewrite(node, &chosen, &mut memo)?)
+                }
+                QueryRoot::Scalar(expr) => {
+                    for node in expr.operator_refs() {
+                        rewrite(node, &chosen, &mut memo)?;
+                    }
+                    QueryRoot::Scalar(
+                        expr.map_operator_refs(&mut |node| memo[&Rc::as_ptr(node)].clone()),
+                    )
+                }
+            };
+            Ok((id.clone(), root))
+        })
+        .collect()
+}
+
+/// Each aggregate's targets with their chosen candidates.
+type Chosen<'a> =
+    HashMap<*const OperatorNode, Vec<(&'a ComputationTarget, &'a ComputationCandidate)>>;
+type Memo = HashMap<*const OperatorNode, Rc<OperatorNode>>;
+
+fn rewrite(
+    node: &Rc<OperatorNode>,
+    chosen: &Chosen<'_>,
+    memo: &mut Memo,
+) -> Result<Rc<OperatorNode>, PerComputationCandidateError> {
+    if let Some(done) = memo.get(&Rc::as_ptr(node)) {
+        return Ok(done.clone());
+    }
+    for child in node.children() {
+        rewrite(child, chosen, memo)?;
+    }
+    let changed = node
+        .children()
+        .iter()
+        .any(|child| !Rc::ptr_eq(child, &memo[&Rc::as_ptr(child)]));
+    let rebuilt = match chosen.get(&Rc::as_ptr(node)) {
+        Some(targets)
+            if targets
+                .iter()
+                .any(|(_, candidate)| **candidate != ComputationCandidate::Exact) =>
+        {
+            realize(node, targets, memo)?
+        }
+        _ if changed => Rc::new(node.with_new_children(|child| memo[&Rc::as_ptr(child)].clone())?),
+        _ => node.clone(),
+    };
+    memo.insert(Rc::as_ptr(node), rebuilt.clone());
+    Ok(rebuilt)
+}
+
+fn realize(
+    target: &OperatorNode,
+    targets: &[(&ComputationTarget, &ComputationCandidate)],
+    memo: &Memo,
+) -> Result<Rc<OperatorNode>, PerComputationCandidateError> {
+    let Some(NonASAPOp::Aggregate {
+        child,
+        reduction,
+        measures,
+        filters,
+        having,
+        ..
+    }) = target.non_asap()
+    else {
+        return Err(PerComputationCandidateError::Unsupported(
+            "target is not an aggregate",
+        ));
+    };
+    let ([intent], [(_, candidate)]) = (measures.as_slice(), targets) else {
+        return Err(PerComputationCandidateError::Unsupported(
+            "multi-measure aggregate",
+        ));
+    };
+    if filters.iter().any(Option::is_some) || having.is_some() {
+        return Err(PerComputationCandidateError::Unsupported(
+            "filtered or HAVING aggregate",
+        ));
+    }
+    let child = memo[&Rc::as_ptr(child)].clone();
+    let (family, query) = match candidate {
+        ComputationCandidate::ExactAccumulator { kind, params } => (
+            FieldDataType::ExactAggregate(kind.clone(), params.clone()),
+            None,
+        ),
+        ComputationCandidate::Summary(algorithm) => (
+            FieldDataType::Sketch(sized(algorithm, intent), GroupingStrategy::default()),
+            Some(statistic(intent)?),
+        ),
+        _ => {
+            return Err(PerComputationCandidateError::Unsupported(
+                "Pass 1 candidate",
+            ))
+        }
+    };
+    let input = summary_update(intent, &family, reduction, &child.schema)?;
+    let state = OperatorNode::new_shared(Operator::ASAP(ASAPOp::SummaryAgg {
+        child: child.clone(),
+        family,
+        input,
+        reduction: reduction.clone(),
+        grouping: GroupingStrategy::default(),
+        filter: None,
+    }))?;
+    let evaluation = match query {
+        Some(query) => ASAPOp::SummaryEstimate {
+            summary_input: state,
+            query,
+        },
+        None => ASAPOp::FinalizeExactAccumulator { child: state },
+    };
+    Ok(OperatorNode::new_shared(Operator::ASAP(evaluation))?)
+}
+
+/// `algorithm` sized for `intent`'s accuracy requirement.
+fn sized(algorithm: &SketchAlgorithm, intent: &AggIntent) -> SketchKind {
+    let (epsilon, delta) =
+        accuracy_budget(accuracy_target(intent).unwrap_or(&AccuracyTarget::Exact));
+    SketchKind::new(
+        algorithm.clone(),
+        default_size_params(algorithm.clone(), intent, epsilon, delta),
+    )
+}
+
+/// What each input row contributes, following the legacy realization rules:
+/// heap sketches rank series identities, frequency sketches count values, and
+/// every other family reads the measure's input column.
+fn summary_update(
+    intent: &AggIntent,
+    family: &FieldDataType,
+    reduction: &Reduction,
+    child: &Schema,
+) -> Result<SummaryUpdate, PerComputationCandidateError> {
+    let algorithm = match family {
+        FieldDataType::Sketch(kind, _) => Some(kind.algorithm()),
+        _ => None,
+    };
+    let weight = crate::replacement::summarised_input(intent, child).map_err(|_| {
+        PerComputationCandidateError::Unsupported("input column outside child schema")
+    })?;
+    Ok(match (intent, algorithm) {
+        (AggIntent::TopK { .. }, Some(_)) => {
+            // SQL rows carry no implicit series identity to rank.
+            if child.closed {
+                return Err(PerComputationCandidateError::Unsupported(
+                    "Top-K item identity for closed schemas",
+                ));
+            }
+            if reduction.group_keys().is_some_and(|keys| keys.is_without()) {
+                return Err(PerComputationCandidateError::Unsupported(
+                    "Top-K partitions given by `without`",
+                ));
+            }
+            let excluding = reduction
+                .group_keys()
+                .into_iter()
+                .flat_map(|keys| keys.iter())
+                .filter_map(|&index| child.fields.get(index))
+                .map(crate::replacement::column_ref)
+                .collect();
+            SummaryUpdate {
+                item: Some(SummaryInputExpr::EntityIdentity(
+                    EntityIdentity::PromqlLabelSet { excluding },
+                )),
+                weight: SummaryInputExpr::Column(ColumnRef::SampleValue),
+                // Not proven non-negative; selection decides whether CMS is admissible.
+                weight_domain: WeightDomain::UnknownOrSigned,
+            }
+        }
+        (_, Some(SketchAlgorithm::UnivMon))
+        | (AggIntent::Count { .. }, Some(SketchAlgorithm::Cms | SketchAlgorithm::CountSketch)) => {
+            SummaryUpdate {
+                item: Some(weight),
+                weight: SummaryInputExpr::Constant(1.0),
+                weight_domain: WeightDomain::NonNegative {
+                    proof: NonNegativeWeightProof::UnitCount,
+                },
+            }
+        }
+        _ => SummaryUpdate {
+            item: None,
+            weight,
+            weight_domain: WeightDomain::UnknownOrSigned,
+        },
+    })
+}
+
+fn statistic(intent: &AggIntent) -> Result<SketchStatistic, PerComputationCandidateError> {
+    Ok(match intent {
+        AggIntent::Quantile { q, .. } => SketchStatistic::Quantile { q: *q },
+        AggIntent::Cardinality { .. } => SketchStatistic::Cardinality,
+        AggIntent::FrequencyL2 { .. } => SketchStatistic::FrequencyL2,
+        AggIntent::FrequencyEntropy { .. } => SketchStatistic::FrequencyEntropy,
+        AggIntent::TopK { k, .. } => SketchStatistic::TopK { k: *k },
+        AggIntent::Count { .. } => SketchStatistic::PointCount {
+            key: ColumnRef::SampleValue,
+            value: None,
+        },
+        _ => {
+            return Err(PerComputationCandidateError::Unsupported(
+                "sketch evaluation",
+            ))
+        }
+    })
 }
 
 #[cfg(test)]
