@@ -100,7 +100,7 @@ pub struct OperatorNode {
     pub guarantee: Option<ResultGuarantee>,
     pub timing: Option<ExecutionTiming>,
     #[serde(default)]
-    pub summary_coverage: Option<super::summary_coverage::SummaryCoverage>,
+    pub observation_extent: Option<super::observation_extent::ObservationExtent>,
 }
 
 impl OperatorNode {
@@ -123,7 +123,7 @@ impl OperatorNode {
             schema,
             guarantee: None,
             timing: None,
-            summary_coverage: None,
+            observation_extent: None,
         }
     }
 
@@ -145,9 +145,9 @@ impl OperatorNode {
     }
 
     /// Attach caller-established observation coverage; unknown coverage remains None.
-    pub fn with_summary_coverage(
+    pub fn with_observation_extent(
         mut self,
-        coverage: super::summary_coverage::SummaryCoverage,
+        coverage: super::observation_extent::ObservationExtent,
     ) -> Result<Self, SchemaDerivationError> {
         coverage
             .validate()
@@ -167,7 +167,7 @@ impl OperatorNode {
                 ));
             }
         }
-        self.summary_coverage = Some(coverage);
+        self.observation_extent = Some(coverage);
         Ok(self)
     }
 
@@ -320,10 +320,10 @@ impl OperatorNode {
                     "invalid time or identity column in schema".into(),
                 ));
             }
-            if let Some(coverage) = &node.summary_coverage {
+            if let Some(coverage) = &node.observation_extent {
                 (*node.as_ref())
                     .clone()
-                    .with_summary_coverage(coverage.clone())?;
+                    .with_observation_extent(coverage.clone())?;
             }
             node.operator.validate_inputs()?;
             if node.result_kind != node.operator.output_kind() {
